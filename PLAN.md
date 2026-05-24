@@ -26,7 +26,7 @@ ZeroProxy is a client-held virtual browsing engine composed of a static client, 
 Highest-priority security invariants:
 
 1. Target sites never receive a direct connection from the user's real IP.
-2. All target HTTP/TLS/WebSocket traffic exits only through `Service Worker → Go WASM → WebSocket binary pipe → Tor SOCKS5 DOMAINNAME CONNECT → uTLS → HTTP/1.1`.
+2. All target HTTP/TLS/WebSocket traffic exits only through `Service Worker → Go WASM → single WebSocket binary pipe with yamux streams → Tor SOCKS5 DOMAINNAME CONNECT per stream → uTLS → HTTP/1.1`.
 3. The server stores no session, cookie, history, or target URL state.
 4. Target URLs, cookie jars, storage namespaces, and history entries live only in client memory or client-side encrypted state.
 5. Every request the Service Worker cannot classify is blocked with `Response.error()` or a safe error response.
@@ -52,7 +52,8 @@ Browser tab
   │   ├─ virtual tab state registry
   │   ├─ response constructor policy
   │   └─ Go WASM kernel (__go_jshttp, __zp_stream)
-  │       ├─ wsconn: WebSocket binary net.Conn adapter
+  │       ├─ wsconn: single WebSocket binary net.Conn adapter
+  │       ├─ yamux: multiplexed target streams over the wsconn session
   │       ├─ socks5: DOMAINNAME CONNECT + SOCKS auth isolation
   │       ├─ utls: target TLS client in WASM
   │       ├─ http1: net/http + net/textproto based HTTP/1.1 engine
@@ -73,12 +74,13 @@ Browser tab
 
 Proxy origin server
   ├─ serves /, /sw.js, /__zp/*, wasm assets
-  └─ /__zp/ws-pipe WebSocket byte relay only
-       └─ Tor daemon SOCKS5 port with IsolateSOCKSAuth
-            └─ Tor circuit → target host
+  └─ /__zp/ws-pipe WebSocket endpoint
+       └─ yamux server session
+            └─ per-stream byte bridge to Tor daemon SOCKS5 port with IsolateSOCKSAuth
+                 └─ Tor circuit → target host
 ```
 
-The server-side WebSocket relay is a stateless byte pipe into the Tor SOCKS5 daemon. Target TLS is not terminated on the server. TLS connections and HTTP parsing run inside the Go WASM kernel. Relay logging is forbidden by server operating policy. Technically, SOCKS5 CONNECT domains and TLS SNI are observable at the relay/Tor boundary, so “server statelessness” in this design means the server does not store target URL state or browsing state.
+The server-side WebSocket endpoint terminates only the WebSocket and yamux session needed to multiplex streams between the browser Service Worker and the SOCKS5 bridge. Each accepted yamux stream is byte-bridged to the Tor SOCKS5 daemon; the server does not parse HTTP, terminate target TLS, or store per-target state. Target TLS connections and HTTP parsing run inside the Go WASM kernel. Relay logging is forbidden by server operating policy. Technically, SOCKS5 CONNECT domains and TLS SNI are observable at the relay/Tor boundary, so “server statelessness” in this design means the server does not store target URL state or browsing state.
 
 ## 3. URL and Encryption Specification
 
@@ -267,7 +269,8 @@ Non-origin request handling:
 ```text
 Service Worker
   → Go WASM stream adapter
-  → WebSocket binary pipe to proxy origin
+  → single WebSocket binary pipe to proxy origin
+  → yamux stream per target connection
   → Tor SOCKS5 CONNECT with DOMAINNAME ATYP
   → uTLS handshake in WASM
   → HTTP/1.1 request/response parser
@@ -280,12 +283,15 @@ Constraints:
 - Do not use browser-native fetch for target egress.
 - Do not use Go `net.Dial`.
 - Do not use the default network path of Go `http.Client`/`http.Transport` for targets.
-- Implement all network I/O as a custom `net.Conn` over WebSocket binary frames.
+- Maintain one long-lived WebSocket `net.Conn` per Service Worker/kernel session and run yamux over it.
+- Represent each target TCP connection as a yamux stream; run SOCKS5 CONNECT inside that stream.
 - SOCKS5 CONNECT must use DOMAINNAME ATYP, not IPv4/IPv6 ATYP.
 - The browser must not resolve target hostnames.
 - uTLS handshake runs inside WASM.
 - Phase 0 ALPN advertises only `http/1.1`.
 - HTTP/2, HTTP/3, and QUIC are excluded from Phase 0.
+
+The kernel opens `wsconn.Dial` once during transport initialization, wraps it with a yamux client session, and reuses that session until the Service Worker is restarted or the relay fails. Concurrent fetch, XHR, WebSocket, and EventSource transports open independent yamux streams. Closing or aborting one browser request closes only its yamux stream, not the shared WebSocket session.
 
 ### 7.2 Go Module Layout
 
@@ -296,14 +302,17 @@ internal/swhttp/
   bridge.go                  // JS Request ↔ http.Request, http.Response ↔ JS Response
   response_writer.go         // streaming ResponseWriter
 internal/wsconn/
-  conn.go                    // WebSocket binary net.Conn
+  conn.go                    // single WebSocket binary net.Conn
   relay.go                   // open/close/backpressure/abort
+internal/yamuxconn/
+  session.go                 // yamux client session over wsconn
+  stream.go                  // per-target net.Conn streams
 internal/socks5/
-  client.go                  // SOCKS5 handshake, auth, DOMAINNAME CONNECT
+  client.go                  // SOCKS5 handshake, auth, DOMAINNAME CONNECT over yamux stream
 internal/zpiso/
   token.go                   // stream isolation token derivation
 internal/utlskernel/
-  dial.go                    // uTLS UClient over wsconn+socks5
+  dial.go                    // uTLS UClient over yamux+socks5
 internal/http1/
   roundtrip.go               // net/http Request + net/textproto response parse
   redirect.go                // internal redirect engine
@@ -330,23 +339,23 @@ func (k *Kernel) RoundTrip(ctx context.Context, req *http.Request, target *url.U
 
     token := zpiso.Token(tab.StreamIsolationKey, host)
 
-    raw, err := wsconn.Dial(ctx, k.RelayURL)
+    stream, err := k.Mux.OpenStream(ctx)
     if err != nil { return nil, err }
 
-    if err := socks5.ConnectDomain(ctx, raw, socks5.Options{
+    if err := socks5.ConnectDomain(ctx, stream, socks5.Options{
         Host: host,
         Port: port,
         Username: token,
         Password: "zp",
-    }); err != nil { raw.Close(); return nil, err }
+    }); err != nil { stream.Close(); return nil, err }
 
-    var rw io.ReadWriteCloser = raw
+    var rw io.ReadWriteCloser = stream
     if target.Scheme == "https" {
-        tlsConn := utls.UClient(raw, &utls.Config{
+        tlsConn := utls.UClient(stream, &utls.Config{
             ServerName: host,
             NextProtos: []string{"http/1.1"},
         }, utls.HelloChrome_Auto)
-        if err := tlsConn.HandshakeContext(ctx); err != nil { raw.Close(); return nil, err }
+        if err := tlsConn.HandshakeContext(ctx); err != nil { stream.Close(); return nil, err }
         rw = tlsConn
     }
 
