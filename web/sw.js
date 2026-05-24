@@ -1,0 +1,213 @@
+/* ZeroProxy Service Worker: every controlled request is classified; unknowns are blocked. */
+importScripts('/__zp/zp-core.js');
+
+const nativeFetch = self.fetch.bind(self);
+const ORIGIN = self.location.origin;
+const tabs = new Map();
+const clientContext = new Map();
+const streams = new Map();
+let readiness = 'UNINITIALIZED';
+let kernelPromise = null;
+
+self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
+self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initKernel().catch(() => {}); })()));
+self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
+self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
+
+async function initKernel() {
+  if (readiness === 'READY') return;
+  if (kernelPromise) return kernelPromise;
+  kernelPromise = (async () => {
+    readiness = 'WASM_LOADING';
+    if (typeof Go === 'undefined') importScripts('/__zp/wasm_exec.js');
+    const go = new Go();
+    const resp = await nativeFetch('/__zp/kernel.wasm', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('SW_NOT_READY');
+    const result = await WebAssembly.instantiateStreaming(resp, go.importObject);
+    readiness = 'WASM_LOADED';
+    go.run(result.instance);
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function')) await new Promise(r => setTimeout(r, 20));
+    if (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function') throw new Error('SW_NOT_READY');
+    await self.__zp_kernel_init();
+    readiness = 'READY';
+  })().catch(err => { readiness = 'UNINITIALIZED'; kernelPromise = null; throw err; });
+  return kernelPromise;
+}
+
+async function handleFetch(event) {
+  const req = event.request;
+  const url = new URL(req.url);
+  try {
+    const cls = classify(req, url, event.clientId);
+    switch (cls.kind) {
+      case 'INTERNAL_ASSET': return internalAsset(req, url);
+      case 'SHARE_LINK': return internalAsset(new Request('/'), new URL('/', ORIGIN));
+      case 'RUNTIME_API': return runtimeAPI(req, url, event.clientId);
+      case 'VIRTUAL_NAVIGATION': return virtualNavigation(req, cls);
+      case 'VIRTUAL_ENTRY': return virtualEntry(req, cls, event.clientId);
+      case 'VIRTUAL_SUBRESOURCE': return virtualSubresource(req, cls, event.clientId);
+      default: return req.mode === 'navigate' ? safeError('POLICY_BLOCKED', 403) : Response.error();
+    }
+  } catch (e) {
+    return safeError(e && e.code || e && e.message || 'POLICY_BLOCKED', 400);
+  }
+}
+
+function classify(req, url, clientId) {
+  if (url.origin === ORIGIN) {
+    if (url.pathname.startsWith('/__zp/api/')) return { kind: 'RUNTIME_API' };
+    if (url.pathname.startsWith('/__zp/error/')) return { kind: 'INTERNAL_ASSET' };
+    if (url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/sw.js' || internalPath(url.pathname)) return { kind: 'INTERNAL_ASSET' };
+    if (url.pathname.startsWith('/p/')) return { kind: 'SHARE_LINK' };
+    const v = parseVirtualPath(url.pathname);
+    if (v) return v.mode === 'n' ? { kind: 'VIRTUAL_NAVIGATION', ...v } : { kind: 'VIRTUAL_ENTRY', ...v };
+    const ctx = contextFor(req, clientId);
+    if (ctx) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
+    return { kind: 'UNKNOWN' };
+  }
+  const ctx = contextFor(req, clientId);
+  if (ctx) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, crossOriginURL: url };
+  return { kind: 'UNKNOWN' };
+}
+
+function internalPath(path) {
+  return path === '/__zp/zp-core.js' || path === '/__zp/runtime-prelude.js' || path === '/__zp/worker-prelude.js' || path === '/__zp/wasm_exec.js' || path === '/__zp/kernel.wasm' || path === '/__zp/worker-bootstrap.js' || path === '/favicon.ico' || path === '/manifest.webmanifest';
+}
+
+async function internalAsset(req, url) {
+  if (url.pathname.startsWith('/__zp/error/')) return safeError(decodeURIComponent(url.pathname.split('/').pop() || 'POLICY_BLOCKED'), 400);
+  if (url.pathname === '/__zp/worker-bootstrap.js') return workerBootstrap(url);
+  if (url.pathname === '/' || url.pathname === '/index.html') return addCSP(await nativeFetch('/index.html', { cache: 'no-store' }));
+  if (!internalPath(url.pathname) && url.pathname !== '/sw.js') return safeError('POLICY_BLOCKED', 403);
+  return addCSP(await nativeFetch(req, { cache: 'no-store' }));
+}
+
+function parseVirtualPath(path) {
+  const m = /^\/v\/([^/]+)\/(e|n)\/([^/]+)$/.exec(path);
+  if (!m) return null;
+  return { tabId: decodeURIComponent(m[1]), mode: m[2], value: m[3] };
+}
+
+async function virtualNavigation(req, route) {
+  let targetUrl;
+  try { targetUrl = ZP.decodeTargetURL(route.value); } catch { return safeError('MALFORMED_ROUTE', 400); }
+  let tab = tabs.get(route.tabId);
+  if (!tab) return safeError('SW_NOT_READY', 503);
+  const entryId = randomEntryId();
+  const pending = await pendingFromRequest(req);
+  const entry = { entryId, targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), pendingNavigation: pending };
+  tab.entries.set(entryId, entry); tab.activeEntryId = entryId;
+  return Response.redirect('/v/' + encodeURIComponent(route.tabId) + '/e/' + encodeURIComponent(entryId), 303);
+}
+
+async function virtualEntry(req, route, clientId) {
+  const tab = tabs.get(route.tabId);
+  if (!tab) return safeError('SW_NOT_READY', 503);
+  const entry = tab.entries.get(route.value);
+  if (!entry) return safeError('SW_NOT_READY', 503);
+  tab.activeEntryId = entry.entryId;
+  if (clientId) clientContext.set(clientId, { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl });
+  let method = 'GET', headers = [], body;
+  const pending = entry.pendingNavigation;
+  if (pending && !pending.consumed) { pending.consumed = true; method = pending.method; headers = pending.headers; body = pending.body; }
+  return transportFetch(entry.targetUrl, { method, headers, body, document: true, tab, entryId: entry.entryId });
+}
+
+async function virtualSubresource(req, cls, clientId) {
+  const ctx = cls.ctx;
+  const tab = tabs.get(ctx.tabId);
+  if (!tab) return Response.error();
+  const targetUrl = cls.crossOriginURL ? cls.crossOriginURL.href : new URL(cls.sameOriginURL.pathname + cls.sameOriginURL.search, ctx.targetUrl).href;
+  return transportFetch(targetUrl, { request: req, tab, entryId: ctx.entryId });
+}
+
+async function runtimeAPI(req, url, clientId) {
+  if (url.pathname === '/__zp/api/fetch') {
+    if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
+    const payload = await req.json();
+    const ctx = contextFor(req, clientId);
+    const tab = ctx && tabs.get(ctx.tabId) || firstTab();
+    if (!tab) return safeError('SW_NOT_READY', 503);
+    let body;
+    if (payload.init && payload.init.body) body = ZP.base64UrlToBytes(payload.init.body);
+    return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab: payload.tabId && tabs.get(payload.tabId) || tab, entryId: ctx && ctx.entryId || (payload.tabId && tabs.get(payload.tabId) && tabs.get(payload.tabId).activeEntryId) || tab.activeEntryId });
+  }
+  if (url.pathname === '/__zp/api/worker-script') {
+    const target = url.searchParams.get('u');
+    const tab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab')) || firstTab();
+    if (!target || !tab) return safeError('SW_NOT_READY', 503);
+    return transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId });
+  }
+  return safeError('POLICY_BLOCKED', 404);
+}
+
+async function transportFetch(targetUrl, opt) {
+  let u;
+  try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
+  if (readiness !== 'READY') { try { await initKernel(); } catch { return safeError('SW_NOT_READY', 503); } }
+  const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
+  headers.set('X-ZP-Tab-Id', opt.tab.tabId);
+  headers.set('X-ZP-Entry-Id', opt.entryId || opt.tab.activeEntryId || '');
+  headers.set('X-ZP-Stream-Isolation-Key', opt.tab.streamIsolationKey);
+  if (opt.document) headers.set('X-ZP-Document-Request', '1');
+  const init = { method: opt.method || (opt.request && opt.request.method) || 'GET', headers };
+  if (init.method !== 'GET' && init.method !== 'HEAD') init.body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
+  const resp = await self.__go_jshttp(new Request(u, init));
+  return addCSP(resp);
+}
+
+async function pendingFromRequest(req) {
+  const headers = [];
+  req.headers.forEach((v, k) => { if (!k.toLowerCase().startsWith('x-zp-')) headers.push([k, v]); });
+  let body;
+  if (req.method !== 'GET' && req.method !== 'HEAD') body = new Uint8Array(await req.clone().arrayBuffer());
+  return { method: req.method, headers, body, referrer: req.referrer || '', referrerPolicy: req.referrerPolicy || '', consumed: false };
+}
+
+async function handleMessage(event) {
+  const msg = event.data || {};
+  const reply = event.ports && event.ports[0];
+  const ok = data => reply && reply.postMessage(Object.assign({ ok: true }, data || {}));
+  const fail = code => reply && reply.postMessage({ ok: false, error: code });
+  try {
+    if (msg.type === 'ZP_OPEN_TARGET') { const tab = createTab(msg.targetUrl); ok({ path: '/v/' + encodeURIComponent(tab.tabId) + '/e/' + encodeURIComponent(tab.activeEntryId) }); return; }
+    if (msg.type === 'ZP_HISTORY_UPDATE') { const tab = tabs.get(msg.tabId); if (!tab) { fail('SW_NOT_READY'); return; } const entry = { entryId: msg.entryId, targetUrl: ZP.canonicalTargetURL(msg.targetUrl).href, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() }; tab.entries.set(entry.entryId, entry); tab.activeEntryId = entry.entryId; ok(); return; }
+    if (msg.type === 'ZP_RESOLVE_ENTRY') { const r = parseVirtualPath(new URL(msg.path, ORIGIN).pathname); const tab = r && tabs.get(r.tabId); const entry = tab && tab.entries.get(r.value); if (!entry) { fail('SW_NOT_READY'); return; } ok({ tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, scrollX: entry.scrollX || 0, scrollY: entry.scrollY || 0 }); return; }
+    if (msg.type === 'ZP_SCROLL_UPDATE') { const tab = tabs.get(msg.tabId); const entry = tab && tab.entries.get(msg.entryId); if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; } ok(); return; }
+    if (msg.type === 'ZP_COOKIE_SET') { const tab = tabs.get(msg.tabId); if (tab) tab.documentCookie = mergeCookie(tab.documentCookie || '', msg.cookie); if (typeof self.__zp_cookie_set === 'function' && tab) self.__zp_cookie_set({ tabId: tab.tabId, targetUrl: msg.targetUrl, cookie: msg.cookie, streamIsolationKey: tab.streamIsolationKey }); ok(); return; }
+    if (msg.type === 'ZP_WS_OPEN') { await openRuntimeStream(event, msg, ok, fail); return; }
+    fail('POLICY_BLOCKED');
+  } catch (e) { fail(e && e.code || e && e.message || 'POLICY_BLOCKED'); }
+}
+
+async function openRuntimeStream(event, msg, ok, fail) {
+  if (readiness !== 'READY') { try { await initKernel(); } catch { fail('SW_NOT_READY'); return; } }
+  const tab = tabs.get(msg.tabId) || firstTab();
+  if (!tab || typeof self.__zp_stream !== 'function') { fail('SW_NOT_READY'); return; }
+  const stream = await self.__zp_stream({ url: msg.url, protocols: msg.protocols || [], tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey });
+  const channel = new MessageChannel();
+  const id = ZP.randomId('s');
+  streams.set(id, stream);
+  channel.port1.onmessage = ev => { const m = ev.data || {}; if (m.type === 'send') stream.send(m.data); if (m.type === 'close') { stream.close(); streams.delete(id); } };
+  stream.setHandlers({ message: data => channel.port1.postMessage({ type: 'message', data }), close: () => { channel.port1.postMessage({ type: 'close' }); streams.delete(id); }, error: () => channel.port1.postMessage({ type: 'error' }) });
+  event.ports[0].postMessage({ ok: true, id, port: channel.port2 }, [channel.port2]);
+}
+
+function createTab(targetUrl) {
+  const target = ZP.canonicalTargetURL(targetUrl).href;
+  const tabId = ZP.randomId('t');
+  const entryId = randomEntryId();
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), documentCookie: '' };
+  tab.entries.set(entryId, { entryId, targetUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+  tabs.set(tabId, tab);
+  return tab;
+}
+function randomEntryId() { return ZP.randomId('e'); }
+function contextFor(req, clientId) { if (clientId && clientContext.has(clientId)) return clientContext.get(clientId); const ref = req.headers.get('Referer'); if (ref) { const r = parseVirtualPath(new URL(ref).pathname); if (r && tabs.has(r.tabId)) { const e = tabs.get(r.tabId).entries.get(r.value); if (e) return { tabId: r.tabId, entryId: r.value, targetUrl: e.targetUrl }; } } return null; }
+function firstTab() { for (const t of tabs.values()) return t; return null; }
+function mergeCookie(current, line) { const first = String(line).split(';',1)[0]; const eq = first.indexOf('='); if (eq <= 0) return current; const name = first.slice(0, eq); const kept = current ? current.split(/;\s*/).filter(p => p.split('=')[0] !== name) : []; kept.push(first); return kept.join('; '); }
+function addCSP(resp) { const h = new Headers(resp.headers); h.set('Content-Security-Policy', ZP.fixedCSP()); h.set('Cache-Control', h.get('Cache-Control') || 'no-store'); return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h }); }
+function safeError(code, status = 400, targetUrl = '') { if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED'; let host = ''; try { host = targetUrl ? new URL(targetUrl).host : ''; } catch {} const hostHTML = host ? '<p>Target host: '+escapeHTML(host)+'</p>' : ''; const body = '<!doctype html><meta charset="utf-8"><title>ZeroProxy '+code+'</title><main><h1>ZeroProxy</h1><p>'+code+'</p>'+hostHTML+'<button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>'; return new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP() } }); }
+function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
+function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';importScripts('/__zp/worker-prelude.js');importScripts('/__zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP() } }); }

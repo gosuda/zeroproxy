@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; navigate-to 'self'; base-uri 'none'; object-src 'none'">
+<title>ZeroProxy</title>
+<style>
+  body{font:16px system-ui,sans-serif;margin:2rem;max-width:52rem} form{display:flex;gap:.5rem} input{flex:1;padding:.6rem} button{padding:.6rem .9rem}.err{color:#991b1b}
+</style>
+<h1>ZeroProxy</h1>
+<p>Enter an HTTP or HTTPS URL. Target pages render as top-level documents under <code>/v/&lt;tab&gt;/e/&lt;entry&gt;</code>.</p>
+<form id="open"><input id="url" autocomplete="url" spellcheck="false" placeholder="https://example.com" required><button>Open</button></form>
+<p id="status" role="status"></p>
+<script src="/__zp/zp-core.js"></script>
+<script>
+(() => {
+  'use strict';
+  const status = document.getElementById('status');
+  const setStatus = (text, err=false) => { status.textContent = text; status.className = err ? 'err' : ''; };
+  async function registerSW() {
+    if (!('serviceWorker' in navigator)) throw new Error('Service Worker unavailable');
+    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    if (!navigator.serviceWorker.controller) {
+      await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
+      location.reload();
+      await new Promise(() => {});
+    }
+    await navigator.serviceWorker.ready;
+    return reg;
+  }
+  function swRequest(message) {
+    return new Promise((resolve, reject) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = e => e.data && e.data.ok ? resolve(e.data) : reject(new Error(e.data && e.data.error || 'SW_NOT_READY'));
+      navigator.serviceWorker.controller.postMessage(message, [channel.port2]);
+    });
+  }
+  async function openTarget(targetUrl) {
+    const canonical = ZP.canonicalTargetURL(targetUrl).href;
+    const result = await swRequest({ type: 'ZP_OPEN_TARGET', targetUrl: canonical });
+    location.assign(result.path);
+  }
+  async function handleShare() {
+    if (!location.pathname.startsWith('/p/')) return false;
+    const encrypted = location.pathname.slice(3);
+    const key = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash).get('k');
+    if (!key) { location.replace('/__zp/error/INVALID_SHARE_LINK'); return true; }
+    try {
+      const targetUrl = await ZP.decryptShareURL(encrypted, key);
+      history.replaceState(null, '', location.pathname);
+      const result = await swRequest({ type: 'ZP_OPEN_TARGET', targetUrl });
+      location.replace(result.path);
+    } catch (e) {
+      const code = e && e.code || e && e.message || 'INVALID_SHARE_LINK';
+      location.replace('/__zp/error/' + encodeURIComponent(code));
+    }
+    return true;
+  }
+  document.getElementById('open').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    try { setStatus('Opening through ZeroProxy…'); await openTarget(document.getElementById('url').value); }
+    catch (e) { setStatus(e.message || 'Unable to open target', true); }
+  });
+  (async () => { try { setStatus('Preparing isolated transport…'); await registerSW(); if (!(await handleShare())) setStatus('Ready.'); } catch (e) { setStatus(e.message || 'Startup failed', true); } })();
+})();
+</script>

@@ -1,0 +1,32 @@
+(() => {
+  'use strict';
+  if (self.__ZP_WORKER_PRELUDE) return;
+  Object.defineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
+  importScripts('/__zp/zp-core.js');
+  const nativeFetch = self.fetch.bind(self);
+  const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
+  const tabId = String(self.__ZP_WORKER_TAB_ID || '');
+  function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
+  async function bodyToBase64(body) {
+    if (body == null) return null;
+    let ab;
+    if (typeof body === 'string') ab = new TextEncoder().encode(body).buffer;
+    else if (body instanceof ArrayBuffer) ab = body;
+    else if (ArrayBuffer.isView(body)) ab = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
+    else if (body instanceof Blob) ab = await body.arrayBuffer();
+    else if (body instanceof URLSearchParams) ab = new TextEncoder().encode(body.toString()).buffer;
+    else ab = new TextEncoder().encode(String(body)).buffer;
+    return ZP.bytesToBase64Url(new Uint8Array(ab));
+  }
+  self.fetch = async (input, init={}) => {
+    const headers = new Headers(init.headers || input.headers || {});
+    const body = init.body != null ? init.body : (input instanceof Request && input.method !== 'GET' && input.method !== 'HEAD' ? await input.clone().arrayBuffer() : null);
+    return nativeFetch('/__zp/api/fetch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tabId, url: ZP.canonicalTargetURL(input.url || input, base.href).href, init:{ method:init.method || input.method || 'GET', headers: Array.from(headers.entries()), body: await bodyToBase64(body), credentials: init.credentials, mode: init.mode, referrer: init.referrer, redirect: init.redirect, cache: init.cache, integrity: init.integrity } }) });
+  };
+  self.XMLHttpRequest = undefined;
+  self.WebSocket = function(){ blocked(); };
+  self.EventSource = function(){ blocked(); };
+  self.RTCPeerConnection = self.webkitRTCPeerConnection = self.WebTransport = self.WebSocketStream = function(){ blocked(); };
+  const nativeImportScripts = self.importScripts.bind(self);
+  self.importScripts = (...urls) => nativeImportScripts(...urls.map(u => '/__zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(u, base.href).href)));
+})();

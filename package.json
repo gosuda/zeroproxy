@@ -1,0 +1,10 @@
+{
+  "name": "zeroproxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "npm run test:js",
+    "test:js": "node --test test/js/*.test.js"
+  }
+}
