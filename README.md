@@ -20,15 +20,15 @@ Implemented core spine:
 - Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
 - A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling.
 - Tokenizer-based HTML transform that injects the runtime prelude, launders document navigation URLs through encrypted `/p` routes, drops dangerous tags and headers, and handles `srcdoc`.
-- Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`.
+- Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
 - Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
 - Go and JavaScript share URL implementations that use the same envelope format.
 
 Not complete enough for production or high-assurance acceptance:
 
-- Browser E2E tests do not yet prove dynamic iframe, worker, direct navigation, native WebSocket, WebRTC/WebTransport, device API, form, and unclassified subresource non-escape.
-- Dynamic iframe clean-realm containment is still weaker than the synchronous hardening required for acceptance.
-- Main-window runtime API compatibility is prototype-level for fetch, XHR, EventSource, WebSocket, uploads, and descriptor edge cases.
+- Browser E2E tests cover the current iframe clean-realm and basic fingerprint-masking checks, but do not yet prove every worker, direct navigation, form, device API, and unclassified subresource non-escape path.
+- Dynamic iframe containment is synchronous for `contentWindow`/`contentDocument` reads and common insertion APIs, but remains prototype-level and should keep gaining adversarial browser coverage.
+- Main-window runtime API compatibility is prototype-level for fetch, XHR, EventSource, WebSocket, uploads, descriptor edge cases, and fingerprinting surface fidelity.
 - Response bodies are streamed into JavaScript `Response` objects, but request/upload body handling and browser backpressure/cancellation behavior are still prototype-level.
 - Encrypted IndexedDB persistence is not implemented.
 - Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.

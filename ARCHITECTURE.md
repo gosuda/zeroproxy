@@ -20,6 +20,7 @@ Browser top-level target document
   │   ├─ navigation, form, history, location, and getter masking hooks
   │   ├─ storage namespace facades
   │   ├─ worker and iframe containment hooks
+  │   ├─ basic self-fingerprint masking hooks
   │   └─ WebRTC/WebTransport/device API blocking stubs
   └─ transformed target HTML as the top-level document
 
@@ -41,7 +42,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 - Target TCP connections are opened through WebSocket -> yamux -> Tor SOCKS5 DOMAINNAME. The kernel does not call `http.Transport` for target egress.
 - HTTPS uses uTLS over the Tor stream with ALPN selecting HTTP/2 when available and HTTP/1.1 fallback; target WebSocket upgrade pins HTTP/1.1.
 - Target response headers are passed through a constructor policy before the browser receives a `Response`.
-- Runtime code does not install anti-bot deception hooks such as `Function.prototype.toString` masking.
+- Anti-bot spoofing is not a project goal. The runtime applies limited self-fingerprint masking only to reduce trivial detection of its own hooks and host-resource leaks (`Function.prototype.toString`, Canvas/Audio extraction jitter, and speech voice lists).
 
 ## Main components
 
@@ -50,7 +51,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 | Static shell | `web/index.html`, `web/zp-core.js` | Service Worker registration, target URL canonicalization, share URL encryption/decryption, initial target open. |
 | Share URL envelope | `web/zp-core.js`, `internal/shareurl/*` | Compatible JavaScript and Go implementations of `/p/<encrypted>#k=<key>` using AES-256-CBC, HMAC-SHA256, HKDF, and raw base64url. |
 | Service Worker | `web/sw.js` | Classifies every controlled request, blocks unknowns, manages in-memory tab/entry state, calls the WASM kernel, exposes runtime bridge APIs. |
-| Runtime prelude | `web/runtime-prelude.js`, `web/worker-prelude.js` | Installs target-realm containment hooks before target scripts run. Main-window WebSocket/navigation/form/history/location/storage/worker/iframe/device APIs are hooked; main-window fetch/XHR/EventSource are not runtime-polyfilled today. Worker `fetch` is bridged through `/__zp/api/fetch`. |
+| Runtime prelude | `web/runtime-prelude.js`, `web/worker-prelude.js` | Installs target-realm containment hooks before target scripts run. Main-window WebSocket/navigation/form/history/location/storage/worker/iframe/device APIs are hooked; main-window fetch/XHR/EventSource are not runtime-polyfilled today. Worker `fetch` is bridged through `/__zp/api/fetch`. Patched function source strings, Canvas/Audio extraction, and speech voices receive basic masking to reduce runtime self-fingerprinting, not to provide full anti-bot spoofing. |
 | WASM kernel | `cmd/wasm-kernel/main.go`, `internal/swhttp/*` | Converts JS `Request`/`Response`, initializes transport, owns target HTTP and WebSocket execution. |
 | Transport | `internal/wsconn/*`, `internal/yamuxconn/*`, `internal/socks5/*`, `internal/utlskernel/*`, `internal/http1/*`, `internal/wsproto/*` | Browser WebSocket `net.Conn`, yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/2 and HTTP/1.1 target fetch, target WebSocket upgrade/framing. |
 | HTML/header/cookie policy | `internal/htmltx/*`, `internal/headers/*`, `internal/cookiejar/*`, `internal/zpiso/*` | HTML transformation, safe response header constructor policy, target cookie jar, Tor isolation token derivation. |
@@ -107,11 +108,11 @@ The Go WASM kernel exposes `__zp_kernel_init`, `__go_jshttp`, `__zp_stream`, and
 
 `internal/headers.ConstructorPolicy` strips target-controlled policy, storage, network-control, hop-by-hop, redirect, and transformed-body headers before constructing a browser `Response`. It defaults cache behavior to `Cache-Control: no-store`.
 
-`web/runtime-prelude.js` installs hooks for high-risk browser APIs from inside the target realm. Main-window WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, Worker/SharedWorker constructors, service worker registration blocking, high-risk device/network API blockers, and iframe containment attempts are present. Click navigation handles normal anchors plus script-created elements that carry a URL-valued `href` property, which covers sites that navigate from button click handlers. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker fetch interception instead of dedicated runtime wrappers; worker `fetch` is wrapped by `web/worker-prelude.js` through `/__zp/api/fetch`.
+`web/runtime-prelude.js` installs hooks for high-risk browser APIs from inside the target realm. Main-window WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, Worker/SharedWorker constructors, service worker registration blocking, high-risk device/network API blockers, and synchronous iframe containment are present. Click navigation handles normal anchors plus script-created elements that carry a URL-valued `href` property, which covers sites that navigate from button click handlers. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker fetch interception instead of dedicated runtime wrappers; worker `fetch` is wrapped by `web/worker-prelude.js` through `/__zp/api/fetch`. The runtime also masks patched function source strings, jitters Canvas/Audio readout APIs, and fixes `speechSynthesis.getVoices()` to a Windows Chrome-shaped list as a basic self-fingerprint defense.
 
 Browser `window.location` cannot be made indistinguishable from the target origin from ordinary page JavaScript in a same-origin proxy document: many `Location` properties are browser-owned/unforgeable and the real address bar origin remains the proxy origin. ZeroProxy therefore uses best-effort getter masking plus navigation traps, and treats Service Worker/CSP classification as the security boundary.
 
-Current limitation: dynamic iframe hardening is not yet the synchronous clean-realm containment required for acceptance. Some paths instrument iframes after creation or insertion, which leaves a high-risk gap that must be closed or proven blocked by browser E2E tests.
+Current limitation: spoofing is deliberately narrow. These masking hooks reduce obvious proxy/runtime fingerprints and host-resource contradictions, but they are not a complete CreepJS/FingerprintJS anti-detection system and should not be treated as an anonymity proof.
 
 ## Plan implementation assessment
 
@@ -119,7 +120,7 @@ Overall status: **Phase 0 prototype / partial implementation**. The repository i
 
 | PLAN.md section | Current status | Evidence / gap |
 |---|---|---|
-| 0. Correction directives | Partial | Top-level target document, encrypted `/p` route shape, AES-CBC+HMAC share envelope, and no anti-bot spoofing hooks are present. Strict `connect-src` is not fully implemented by `web/zp-core.js`; browser direct-egress prevention still needs E2E proof. |
+| 0. Correction directives | Partial | Top-level target document, encrypted `/p` route shape, AES-CBC+HMAC share envelope, limited runtime self-fingerprint masking, and synchronous iframe clean-realm containment are present. Strict `connect-src` is not fully implemented by `web/zp-core.js`; browser direct-egress prevention still needs broader E2E proof. |
 | 1. System goals | Partial | Client memory state, unknown-request blocking, Tor/yamux/uTLS path, and safe errors exist. Encrypted IndexedDB persistence and full escape-vector coverage are absent. |
 | 2. Overall architecture | Mostly implemented | Static shell, Service Worker, Go WASM kernel, relay WebSocket pipe, yamux, SOCKS5, uTLS, HTTP/2 and HTTP/1.1 fetch, HTML transform, cookie jar, and runtime prelude exist. |
 | 3. URL and encryption | Implemented | `web/zp-core.js` and `internal/shareurl` implement HKDF, AES-256-CBC, HMAC verification-before-decrypt, raw base64url, and protocol allowlists. Tests cover JS tamper rejection and Go envelope construction. |
@@ -131,13 +132,13 @@ Overall status: **Phase 0 prototype / partial implementation**. The repository i
 | 9. Tor stream isolation | Implemented at code level | `zpiso.Token` derives site-granular HMAC tokens; SOCKS5 rejects IP literals and sends DOMAINNAME ATYP. Deployment still requires correctly configured Tor. |
 | 10. Response header policy | Implemented | `internal/headers` strips target CSP, cookies, reporting, Alt-Svc, Link, Refresh, Location, hop-by-hop headers, transformed lengths/encoding, and defaults to `Cache-Control: no-store`. |
 | 11. Phase 0 CSP | Partial | The shell and server apply Phase 0-style CSP headers. The server's `zeroCSP` restricts `connect-src` to `'self'` and the proxy WebSocket origin, but `web/zp-core.js` currently generates `connect-src * blob: data: <ws-origin>` for Service Worker-constructed target responses, so the strict PLAN `connect-src` invariant is not met. |
-| 12. Runtime prelude | Partial | WebSocket, `sendBeacon`, navigation/form/history/location, storage, worker, iframe, and device blockers exist. Main-window fetch/XHR/EventSource runtime wrappers are absent; those requests rely on Service Worker fetch interception. XHR/EventSource/WebSocket fidelity is prototype-level, and direct `location.href` defense relies on layered CSP/SW enforcement where descriptors cannot be replaced. |
+| 12. Runtime prelude | Partial | WebSocket, `sendBeacon`, navigation/form/history/location, storage, worker, iframe, device blockers, basic patched-function/Canvas/Audio/speech masking, and synchronous iframe containment exist. Main-window fetch/XHR/EventSource runtime wrappers are absent; those requests rely on Service Worker fetch interception. XHR/EventSource/WebSocket and fingerprinting-surface fidelity are prototype-level, and direct `location.href` defense relies on layered CSP/SW enforcement where descriptors cannot be replaced. |
 | 13. Worker containment | Partial | Worker/SharedWorker constructors, data/blob workers, service worker registration blocking, worklet addModule wrapping, and worker prelude exist. Worker APIs are not all routed with browser-native fidelity; several are blocked. |
-| 14. Dynamic iframe containment | Partial / high risk | Iframe creation/insertion/src/srcdoc hooks and about:blank containment exist, but clean about:blank realm hardening is not yet synchronous enough for acceptance. |
+| 14. Dynamic iframe containment | Partial | Iframe creation/insertion/src/srcdoc hooks and synchronous `contentWindow`/`contentDocument` containment exist for clean about:blank realms. Broader browser coverage is still needed for adversarial descriptor and navigation edge cases. |
 | 15. History/location | Partial | `pushState`, `replaceState`, `popstate`, scroll restore, bound `location.assign`/`replace` navigation helpers, click-time navigation capture, and best-effort getter masking are present. Native `window.location` cannot be fully spoofed to another origin in a standard same-origin proxy document, so browser descriptor edge cases need E2E coverage. |
 | 16. Cookie jar | Mostly implemented | Go jar stores `Set-Cookie`, excludes HttpOnly from `document.cookie`, enforces path/domain/secure, and projects cookies onto target requests. Runtime document.cookie has a lightweight parallel model and should be reconciled with the Go jar behavior. |
 | 17. Safe error pages | Mostly implemented | Required error class names and safe HTML pages exist in core, Service Worker, kernel, and server. Error mapping is coarse and should be made more precise. |
-| 18. Mandatory successor review | Not complete | Source/unit tests cover selected invariants, but required browser E2E bypass tests for dynamic iframes, workers, direct navigation, and native escape vectors have not been implemented. |
+| 18. Mandatory successor review | Not complete | Source/unit tests cover selected invariants, and browser E2E covers the current dynamic iframe and basic fingerprint-masking paths. Required browser E2E coverage for workers, direct navigation, native escape vectors, forms, and unclassified subresources remains incomplete. |
 
 ### Notable current deltas from PLAN.md
 
@@ -146,7 +147,7 @@ Overall status: **Phase 0 prototype / partial implementation**. The repository i
 - The PLAN topbar/virtual address bar injection was intentionally removed; `internal/htmltx/topbar.go` documents that target pages stay on `/p` routes while runtime getters mask target location values.
 - Main-window fetch/XHR/EventSource runtime wrappers from PLAN §12 are not implemented. Controlled network requests are expected to be caught by the Service Worker fetch handler; worker `fetch` is bridged separately by `worker-prelude.js`.
 - PLAN's strict `connect-src 'self' <proxy-websocket-origin>` is not fully met for target responses because `web/zp-core.js` emits `connect-src * blob: data: <ws-origin>`.
-- Target response bodies stream into JavaScript `Response` objects, but request/upload body handling, dynamic iframe clean-realm containment, encrypted IndexedDB persistence, and required browser E2E escape tests are not acceptance-grade.
+- Target response bodies stream into JavaScript `Response` objects, but request/upload body handling, broader dynamic iframe edge cases, encrypted IndexedDB persistence, and required browser E2E escape tests are not acceptance-grade.
 
 ## Verification surface
 
@@ -169,7 +170,7 @@ CI environment and gates:
 - `GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel`.
 - `go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server`.
 
-The Puppeteer E2E test does not require Tor. It builds temporary ZeroProxy binaries, starts a local target HTTP server, starts an in-process SOCKS5 server that accepts the kernel's SOCKS5 username/password handshake, launches Chrome against `proxy.localhost`, and verifies that proxied navigation stays on `/p` routes while target HTTP requests carry the configured Windows Chrome User-Agent.
+The Puppeteer E2E test does not require Tor. It builds temporary ZeroProxy binaries, starts a local target HTTP server, starts an in-process SOCKS5 server that accepts the kernel's SOCKS5 username/password handshake, launches Chrome against `proxy.localhost`, and verifies that proxied navigation stays on `/p` routes while target HTTP requests carry the configured Windows Chrome User-Agent. It also covers the current synchronous dynamic-iframe containment path and basic runtime fingerprint-masking invariants.
 
 Equivalent local commands:
 
@@ -188,7 +189,7 @@ These checks prove unit/source policy coverage, buildability, and one local brow
 Treat the implementation as a working Phase 0 prototype until all of these are satisfied:
 
 1. Browser E2E tests prove that target pages cannot escape through dynamic iframes, workers, direct navigation, native WebSocket, WebRTC, WebTransport, device APIs, forms, or unclassified subresources.
-2. Iframe instrumentation is made synchronous for clean about:blank realms or those iframes are blocked before target script regains control.
+2. Broader adversarial iframe descriptor, navigation, and nested-realm edge cases are browser-tested beyond the current clean about:blank coverage.
 3. Runtime wrapper behavior is hardened for expected browser API fidelity, especially XHR, WebSocket close/error semantics, EventSource streaming, FormData/file uploads, and descriptor edge cases.
 4. Request/upload body streaming, cancellation, and backpressure semantics are hardened where required.
 5. Cookie, storage, and history semantics are reconciled across runtime state, Service Worker state, and Go kernel state.

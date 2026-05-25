@@ -11,6 +11,9 @@
   const TARGET_PLATFORM = 'Win32';
   try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
   const Native = captureNative(root);
+  const toStringMap = new WeakMap();
+  const toStringMaskedPrototypes = new WeakSet();
+  const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
   const proxyOrigin = new URL(root.location.href).origin;
   const routeKey = new URL(root.location.href).pathname.startsWith('/p/') ? new URL(root.location.href).pathname.slice(3) : '';
   let virtualURL = new URL(boot.targetUrl);
@@ -24,6 +27,8 @@
   const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
   const listenersKey = Symbol('zp.listeners');
   const workerBlobURLs = new Set();
+  const canvasHookedWindows = new WeakSet();
+  const audioHookedWindows = new WeakSet();
 
   function captureNative(w) {
     const d = w.document;
@@ -67,8 +72,44 @@
   function normalizedError(name = 'NotSupportedError') {
     try { return new Native.DOMException('Blocked by ZeroProxy policy', name); } catch { const e = new Error('Blocked by ZeroProxy policy'); e.name = name; return e; }
   }
-  function define(obj, key, value) { try { Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true }); return true; } catch { return false; } }
-  function defineAccessor(obj, key, get, set) { try { Object.defineProperty(obj, key, { get, set, enumerable: false, configurable: false }); return true; } catch { return false; } }
+  function nativeFunctionSource(key) {
+    const name = typeof key === 'symbol' ? '' : String(key);
+    return 'function ' + name + '() { [native code] }';
+  }
+  function nativeAccessorSource(kind, key) {
+    const name = typeof key === 'symbol' ? '' : String(key);
+    return 'function ' + kind + ' ' + name + '() { [native code] }';
+  }
+  function define(obj, key, value) {
+    try {
+      Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
+      if (typeof value === 'function') toStringMap.set(value, nativeFunctionSource(key));
+      return true;
+    } catch { return false; }
+  }
+  function defineAccessor(obj, key, get, set) {
+    try {
+      Object.defineProperty(obj, key, { get, set, enumerable: false, configurable: false });
+      if (typeof get === 'function') toStringMap.set(get, nativeAccessorSource('get', key));
+      if (typeof set === 'function') toStringMap.set(set, nativeAccessorSource('set', key));
+      return true;
+    } catch { return false; }
+  }
+  function installToStringMasking(w) {
+    const proto = w && w.Function && w.Function.prototype;
+    if (!proto || toStringMaskedPrototypes.has(proto)) return;
+    const orig = w === root ? origToString : proto.toString;
+    if (typeof orig !== 'function') return;
+    const maskedToString = function toString() {
+      if (typeof this === 'function' && toStringMap.has(this)) return toStringMap.get(this);
+      return orig.call(this);
+    };
+    toStringMap.set(maskedToString, 'function toString() { [native code] }');
+    try {
+      Object.defineProperty(proto, 'toString', { value: maskedToString, enumerable: false, configurable: false, writable: true });
+      toStringMaskedPrototypes.add(proto);
+    } catch {}
+  }
   function installEventMethods(proto) {
     define(proto, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = new Map(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
     define(proto, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
@@ -118,6 +159,7 @@
       return baseURL;
     }
   }
+  installToStringMasking(root);
   define(root, '__ZP_SET_BASE', updateVirtualBase);
 
   installWebSocket();
@@ -131,6 +173,8 @@
   installWorkerHooks();
   installIframeHooks(root);
   installBlockers(root);
+  installCanvasAntiFingerprinting(root);
+  installAudioAntiFingerprinting(root);
 
 
   function installWebSocket() {
@@ -545,26 +589,104 @@
   function installNetworkContainment(w) {
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
+    installToStringMasking(w);
     // Native fetch is intentionally left intact; the Service Worker owns request capture.
     installNavigatorIdentity(w);
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
     installIframeHooks(w);
     installBlockers(w, true);
+    installCanvasAntiFingerprinting(w);
+    installAudioAntiFingerprinting(w);
     try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
   }
 
   function installBlockers(w, strict = false) {
-    const blockCtor = function(){ throw normalizedError('NotSupportedError'); };
     for (const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport','WebSocketStream']) {
+      const blockCtor = function(){ throw normalizedError('NotSupportedError'); };
       const ok = define(w, name, blockCtor);
       if (strict && name in w && !ok) throw normalizedError('SecurityError');
     }
     const nav = w.navigator;
     if (nav) {
-      for (const name of ['serial','hid','usb','bluetooth','requestMIDIAccess','credentials','geolocation','clipboard','wakeLock']) { try { Object.defineProperty(nav, name, { get(){ throw normalizedError('NotSupportedError'); }, configurable: false }); } catch {} }
+      for (const name of ['serial','hid','usb','bluetooth','requestMIDIAccess','credentials','geolocation','clipboard','wakeLock']) {
+        const deny = function(){ throw normalizedError('NotSupportedError'); };
+        toStringMap.set(deny, nativeAccessorSource('get', name));
+        try { Object.defineProperty(nav, name, { get: deny, configurable: false }); } catch {}
+      }
       if (nav.mediaDevices) for (const name of ['getUserMedia','getDisplayMedia','enumerateDevices']) define(nav.mediaDevices, name, function(){ return Promise.reject(normalizedError('NotSupportedError')); });
     }
+    if (w.speechSynthesis) {
+      const voices = Object.freeze([
+        Object.freeze({ name: 'Google US English', lang: 'en-US', default: true, localService: false, voiceURI: 'Google US English' }),
+        Object.freeze({ name: 'Microsoft David - English (United States)', lang: 'en-US', default: false, localService: true, voiceURI: 'Microsoft David' })
+      ]);
+      const getVoices = function() { return voices.slice(); };
+      if (!define(w.speechSynthesis, 'getVoices', getVoices)) {
+        try { define(Object.getPrototypeOf(w.speechSynthesis), 'getVoices', getVoices); } catch {}
+      }
+    }
+  }
+
+  function installCanvasAntiFingerprinting(w) {
+    if (!w || canvasHookedWindows.has(w) || !w.CanvasRenderingContext2D || !w.HTMLCanvasElement) return;
+    canvasHookedWindows.add(w);
+    const ctxProto = w.CanvasRenderingContext2D.prototype;
+    const canvasProto = w.HTMLCanvasElement.prototype;
+    const origGetImageData = ctxProto && ctxProto.getImageData;
+    if (typeof origGetImageData === 'function') {
+      define(ctxProto, 'getImageData', function(...args) {
+        const imageData = origGetImageData.apply(this, args);
+        const data = imageData && imageData.data;
+        if (data && data.length > 1) {
+          data[0] = data[0] ^ 1;
+          data[data.length - 2] = data[data.length - 2] ^ 1;
+        }
+        return imageData;
+      });
+    }
+    const origToDataURL = canvasProto && canvasProto.toDataURL;
+    if (typeof origToDataURL === 'function') {
+      define(canvasProto, 'toDataURL', function(...args) {
+        const width = this.width >>> 0;
+        const height = this.height >>> 0;
+        if (width && height) {
+          const ctx = this.getContext && this.getContext('2d');
+          if (ctx) {
+            const fillStyle = ctx.fillStyle;
+            const globalAlpha = ctx.globalAlpha;
+            try {
+              ctx.globalAlpha = 1;
+              ctx.fillStyle = 'rgba(' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',0.01)';
+              ctx.fillRect((Math.random() * Math.min(width, 8)) | 0, (Math.random() * Math.min(height, 8)) | 0, 1, 1);
+            } finally {
+              try { ctx.fillStyle = fillStyle; } catch {}
+              try { ctx.globalAlpha = globalAlpha; } catch {}
+            }
+          }
+        }
+        return origToDataURL.apply(this, args);
+      });
+    }
+  }
+
+  function installAudioAntiFingerprinting(w) {
+    if (!w || audioHookedWindows.has(w) || !w.AudioBuffer) return;
+    audioHookedWindows.add(w);
+    const proto = w.AudioBuffer.prototype;
+    const origGetChannelData = proto && proto.getChannelData;
+    if (typeof origGetChannelData !== 'function') return;
+    define(proto, 'getChannelData', function(channel) {
+      const f32 = origGetChannelData.call(this, channel);
+      const limit = Math.min(f32.length, 100);
+      for (let i = 0; i < limit; i++) {
+        if (f32[i] !== 0) {
+          f32[i] += (Math.random() - 0.5) * 1e-7;
+          break;
+        }
+      }
+      return f32;
+    });
   }
   try { const current = document.currentScript; if (current && /\/__zp\/runtime-prelude\.js(?:$|\?)/.test(current.src || '')) current.remove(); } catch {}
 })();

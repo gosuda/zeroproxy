@@ -8,12 +8,13 @@ test('service worker has no unclassified native fetch fallback', () => {
   assert.match(sw, /event\.respondWith\(handleFetch\(event\)\)/);
 });
 
-test('runtime avoids forbidden global deception hooks', () => {
+test('runtime avoids stale escape gaps and forbidden harness markers', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.equal(rt.includes('Function.prototype.toString'), false);
+  assert.ok(rt.includes('installToStringMasking'));
   assert.equal(rt.includes('Object.getOwnPropertyDescriptor ='), false);
   assert.equal(rt.includes('window.__zp'), false);
   assert.equal(rt.includes('queueMicrotask'), false);
+  assert.ok(rt.includes('Function.prototype.toString'));
 });
 
 test('runtime installs required escape-vector hooks', () => {
@@ -43,6 +44,15 @@ test('runtime installs required escape-vector hooks', () => {
     'new WeakSet',
     "attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction']",
     'enforceObservedAttribute',
+    'installToStringMasking',
+    'toStringMap',
+    'installCanvasAntiFingerprinting',
+    'getImageData',
+    'toDataURL',
+    'installAudioAntiFingerprinting',
+    'getChannelData',
+    'speechSynthesis',
+    'getVoices',
     'installStorageFacades',
     'localStorage',
     'indexedDB',

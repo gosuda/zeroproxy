@@ -248,6 +248,7 @@ test('browser traffic uses test SOCKS5, proxied /p navigation, and Chrome UA', {
     const websocketShared = modern.contentWindow.WebSocket === window.WebSocket;
     const ws = new modern.contentWindow.WebSocket('ws://evil.example/socket');
     const websocketURL = ws.url;
+    const childCanvasMask = modern.contentWindow.HTMLCanvasElement.prototype.toDataURL.toString();
     try { ws.close(); } catch {}
 
     const observed = document.createElement('iframe');
@@ -268,7 +269,7 @@ test('browser traffic uses test SOCKS5, proxied /p navigation, and Chrome UA', {
     sync.remove();
     modern.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, rewrittenSrc };
+    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, rewrittenSrc };
   }, `http://e2e.test:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
@@ -276,6 +277,63 @@ test('browser traffic uses test SOCKS5, proxied /p navigation, and Chrome UA', {
   assert.equal(iframeIsolation.websocketShared, true);
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
   assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
+  assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
+
+  const fingerprintMasking = await page.evaluate(() => {
+    const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
+    const voicesMask = speechSynthesis.getVoices.toString();
+
+    const canvasA = document.createElement('canvas');
+    canvasA.width = 16;
+    canvasA.height = 16;
+    const ctxA = canvasA.getContext('2d');
+    ctxA.fillStyle = '#123456';
+    ctxA.fillRect(0, 0, 16, 16);
+    const urlA = canvasA.toDataURL();
+
+    const canvasB = document.createElement('canvas');
+    canvasB.width = 16;
+    canvasB.height = 16;
+    const ctxB = canvasB.getContext('2d');
+    ctxB.fillStyle = '#123456';
+    ctxB.fillRect(0, 0, 16, 16);
+    const urlB = canvasB.toDataURL();
+
+    const pixelCanvas = document.createElement('canvas');
+    pixelCanvas.width = 1;
+    pixelCanvas.height = 1;
+    const pixelCtx = pixelCanvas.getContext('2d');
+    pixelCtx.fillStyle = 'rgba(0,0,0,1)';
+    pixelCtx.fillRect(0, 0, 1, 1);
+    const pixel = Array.from(pixelCtx.getImageData(0, 0, 1, 1).data);
+
+    let audioDelta = null;
+    if (window.AudioBuffer) {
+      const buffer = new AudioBuffer({ length: 128, numberOfChannels: 1, sampleRate: 44100 });
+      const channel = buffer.getChannelData(0);
+      channel[0] = 0.01;
+      for (let i = 0; i < 5; i++) buffer.getChannelData(0);
+      audioDelta = buffer.getChannelData(0)[0] - 0.01;
+    }
+
+    const voices = speechSynthesis.getVoices();
+    return {
+      canvasMask,
+      voicesMask,
+      canvasVaries: urlA !== urlB,
+      pixel,
+      audioDelta,
+      voiceCount: voices.length,
+      voiceNames: voices.map(v => v.name),
+    };
+  });
+  assert.equal(fingerprintMasking.canvasMask, 'function toDataURL() { [native code] }');
+  assert.equal(fingerprintMasking.voicesMask, 'function getVoices() { [native code] }');
+  assert.equal(fingerprintMasking.canvasVaries, true);
+  assert.deepEqual(fingerprintMasking.pixel.slice(0, 4), [1, 0, 1, 255]);
+  assert.ok(fingerprintMasking.audioDelta === null || Math.abs(fingerprintMasking.audioDelta) > 0);
+  assert.equal(fingerprintMasking.voiceCount, 2);
+  assert.deepEqual(fingerprintMasking.voiceNames, ['Google US English', 'Microsoft David - English (United States)']);
 
   await page.click('#next');
   await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
