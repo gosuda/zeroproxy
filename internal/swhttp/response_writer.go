@@ -31,3 +31,12 @@ func (w *ResponseRecorder) Response() *http.Response {
 type ioNopCloser struct{ *bytes.Reader }
 
 func (c ioNopCloser) Close() error { return nil }
+
+func responseMayHaveBody(status int) bool {
+	switch status {
+	case http.StatusNoContent, http.StatusResetContent, http.StatusNotModified:
+		return false
+	default:
+		return true
+	}
+}

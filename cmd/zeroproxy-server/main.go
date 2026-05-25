@@ -50,6 +50,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveFile(w, r, s.kernelWASM, "application/wasm")
 	case r.URL.Path == "/" || r.URL.Path == "/index.html":
 		s.serveWeb(w, r, "index.html")
+	case strings.HasPrefix(r.URL.Path, "/p/"):
+		s.serveWeb(w, r, "index.html")
 	case r.URL.Path == "/sw.js":
 		s.serveWeb(w, r, "sw.js")
 	case strings.HasPrefix(r.URL.Path, "/__zp/error/"):

@@ -53,10 +53,14 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 	if resp == nil {
 		return js.Null(), fmt.Errorf("nil response")
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return js.Null(), err
+	var body []byte
+	if resp.Body != nil {
+		defer resp.Body.Close()
+		var err error
+		body, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return js.Null(), err
+		}
 	}
 	safe := headers.ConstructorPolicy(resp.Header, bodyTransformed, bodyDecoded)
 	jsHeaders := js.Global().Get("Headers").New()
@@ -65,10 +69,14 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 			jsHeaders.Call("append", name, v)
 		}
 	}
-	arr := js.Global().Get("Uint8Array").New(len(body))
-	js.CopyBytesToJS(arr, body)
-	init := map[string]any{"status": resp.StatusCode, "statusText": resp.Status, "headers": jsHeaders}
-	return js.Global().Get("Response").New(arr, init), nil
+	var bodyArg any = js.Null()
+	if responseMayHaveBody(resp.StatusCode) {
+		arr := js.Global().Get("Uint8Array").New(len(body))
+		js.CopyBytesToJS(arr, body)
+		bodyArg = arr
+	}
+	init := map[string]any{"status": resp.StatusCode, "statusText": http.StatusText(resp.StatusCode), "headers": jsHeaders}
+	return js.Global().Get("Response").New(bodyArg, init), nil
 }
 
 func await(ctx context.Context, p js.Value) (js.Value, error) {

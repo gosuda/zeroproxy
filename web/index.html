@@ -7,7 +7,7 @@
   body{font:16px system-ui,sans-serif;margin:2rem;max-width:52rem} form{display:flex;gap:.5rem} input{flex:1;padding:.6rem} button{padding:.6rem .9rem}.err{color:#991b1b}
 </style>
 <h1>ZeroProxy</h1>
-<p>Enter an HTTP or HTTPS URL. Target pages render as top-level documents under <code>/v/&lt;tab&gt;/e/&lt;entry&gt;</code>.</p>
+<p>Enter an HTTP or HTTPS URL. Target pages render through <code>/p/&lt;encrypted&gt;#k=&lt;key&gt;</code> on the proxy origin.</p>
 <form id="open"><input id="url" autocomplete="url" spellcheck="false" placeholder="https://example.com" required><button>Open</button></form>
 <p id="status" role="status"></p>
 <script src="/__zp/zp-core.js"></script>
@@ -18,13 +18,16 @@
   const setStatus = (text, err=false) => { status.textContent = text; status.className = err ? 'err' : ''; };
   async function registerSW() {
     if (!('serviceWorker' in navigator)) throw new Error('Service Worker unavailable');
-    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' });
+    await navigator.serviceWorker.ready;
     if (!navigator.serviceWorker.controller) {
-      await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
+      await Promise.race([
+        new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })),
+        new Promise(resolve => setTimeout(resolve, 500))
+      ]);
       location.reload();
       await new Promise(() => {});
     }
-    await navigator.serviceWorker.ready;
     return reg;
   }
   function swRequest(message) {
@@ -34,10 +37,18 @@
       navigator.serviceWorker.controller.postMessage(message, [channel.port2]);
     });
   }
+  function proxyOrigin() {
+    const u = new URL(location.href);
+    if (u.hostname === 'proxy.localhost') return u.origin;
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1') {
+      u.hostname = 'proxy.localhost';
+      return u.origin;
+    }
+    return u.origin;
+  }
   async function openTarget(targetUrl) {
-    const canonical = ZP.canonicalTargetURL(targetUrl).href;
-    const result = await swRequest({ type: 'ZP_OPEN_TARGET', targetUrl: canonical });
-    location.assign(result.path);
+    const share = await ZP.makeShareURL(ZP.canonicalTargetURL(targetUrl).href, proxyOrigin());
+    location.assign(share);
   }
   async function handleShare() {
     if (!location.pathname.startsWith('/p/')) return false;
@@ -47,7 +58,7 @@
     try {
       const targetUrl = await ZP.decryptShareURL(encrypted, key);
       history.replaceState(null, '', location.pathname);
-      const result = await swRequest({ type: 'ZP_OPEN_TARGET', targetUrl });
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl });
       location.replace(result.path);
     } catch (e) {
       const code = e && e.code || e && e.message || 'INVALID_SHARE_LINK';

@@ -2,7 +2,6 @@ package htmltx
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,8 @@ import (
 	"io"
 	"net/url"
 	"strings"
+
+	"github.com/gosuda/zeroproxy/internal/shareurl"
 
 	xhtml "golang.org/x/net/html"
 )
@@ -33,9 +34,7 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 	z := xhtml.NewTokenizer(r)
 	var out bytes.Buffer
 	prelude := runtimePrelude(opt)
-	topbar := topbarHTML(opt)
 	preludeInjected := false
-	topbarInjected := false
 	blockedDepth := 0
 	blockedTag := ""
 	for {
@@ -87,10 +86,6 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 				}
 				tok = rewriteToken(tok, opt)
 				out.WriteString(tok.String())
-				if !topbarInjected {
-					out.WriteString(topbar)
-					topbarInjected = true
-				}
 				continue
 			}
 			if shouldDropToken(tok) {
@@ -121,12 +116,6 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 		out2.Write(out.Bytes())
 		out = out2
 	}
-	if !topbarInjected {
-		out2 := bytes.Buffer{}
-		out2.WriteString(topbar)
-		out2.Write(out.Bytes())
-		out = out2
-	}
 	return out.Bytes(), nil
 }
 
@@ -137,12 +126,6 @@ func runtimePrelude(opt Options) string {
 	}
 	b, _ := json.Marshal(boot)
 	return `<script nonce="zp" src="/__zp/zp-core.js"></script><script nonce="zp">Object.defineProperty(window,"__ZP_BOOT",{value:` + string(b) + `,configurable:true});</script><script nonce="zp" src="/__zp/runtime-prelude.js"></script>`
-}
-
-func topbarHTML(opt Options) string {
-	host := html.EscapeString(opt.TargetURL.Host)
-	href := html.EscapeString(opt.TargetURL.String())
-	return `<div id="zp-topbar" role="banner" style="position:sticky;top:0;z-index:2147483647;display:flex;gap:.75rem;align-items:center;padding:.45rem .75rem;background:#111827;color:#f9fafb;font:13px system-ui,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25)"><strong>ZeroProxy</strong><span style="opacity:.8">` + host + `</span><input aria-label="Virtual address" value="` + href + `" readonly style="flex:1;min-width:0;color:#111827;background:#f9fafb;border:0;border-radius:4px;padding:.25rem .4rem"><button type="button" onclick="history.back()">Back</button><button type="button" onclick="location.reload()">Retry</button></div>`
 }
 
 func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
@@ -219,8 +202,11 @@ func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok 
 	if abs.Scheme != "http" && abs.Scheme != "https" {
 		return "#", "", false
 	}
-	enc := base64.RawURLEncoding.EncodeToString([]byte(abs.String()))
-	return "/v/" + pathEscape(opt.TabID) + "/n/" + enc, abs.String(), true
+	sharePath, err := shareurl.New(abs.String())
+	if err != nil {
+		return "#", "", false
+	}
+	return sharePath, abs.String(), true
 }
 
 func injectSrcdoc(src string, opt Options) string {
