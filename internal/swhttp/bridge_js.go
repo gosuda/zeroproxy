@@ -86,7 +86,10 @@ func await(ctx context.Context, p js.Value) (js.Value, error) {
 	}
 	ch := make(chan result, 1)
 	then := js.FuncOf(func(this js.Value, args []js.Value) any { ch <- result{v: args[0]}; return nil })
-	catch := js.FuncOf(func(this js.Value, args []js.Value) any { ch <- result{err: fmt.Errorf(args[0].String())}; return nil })
+	catch := js.FuncOf(func(this js.Value, args []js.Value) any {
+		ch <- result{err: fmt.Errorf("%s", args[0].String())}
+		return nil
+	})
 	p.Call("then", then).Call("catch", catch)
 	defer then.Release()
 	defer catch.Release()
