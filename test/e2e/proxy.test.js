@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
+const crypto = require('node:crypto');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -94,9 +95,10 @@ class SocketReader {
 }
 
 function createTargetServer(requests) {
-  return http.createServer((req, res) => {
-    requests.push({ url: req.url, userAgent: req.headers['user-agent'] || '' });
-    if (req.url === '/') {
+  const server = http.createServer((req, res) => {
+    requests.push({ url: req.url, method: req.method, userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '' });
+    const url = new URL(req.url, 'http://target.local');
+    if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Home</title></head><body>
         <main><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
@@ -104,7 +106,7 @@ function createTargetServer(requests) {
       </body></html>`);
       return;
     }
-    if (req.url === '/next') {
+    if (url.pathname === '/next') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Next</title></head><body>
         <main><h1>E2E Next</h1><p id="ua"></p></main>
@@ -112,9 +114,110 @@ function createTargetServer(requests) {
       </body></html>`);
       return;
     }
+    if (url.pathname === '/set-cookie') {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Set-Cookie': 'target_server=from-target; Path=/; SameSite=Lax',
+      });
+      res.end('set-cookie-ok');
+      return;
+    }
+    if (url.pathname === '/cookie-echo') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(req.headers.cookie || '');
+      return;
+    }
+    if (url.pathname === '/stream') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.write('chunk-one\n');
+      setTimeout(() => res.end('chunk-two\n'), 600);
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('not found');
   });
+  server.on('upgrade', (req, socket) => handleWebSocketUpgrade(req, socket, requests));
+  return server;
+}
+
+function handleWebSocketUpgrade(req, socket, requests) {
+  requests.push({ url: req.url, method: req.method, userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', upgrade: true });
+  if (new URL(req.url, 'http://target.local').pathname !== '/ws') {
+    socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    return;
+  }
+  const key = req.headers['sec-websocket-key'];
+  if (!key) {
+    socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    return;
+  }
+  const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+  let buffered = Buffer.alloc(0);
+  socket.on('data', chunk => {
+    buffered = Buffer.concat([buffered, chunk]);
+    while (buffered.length >= 2) {
+      const frame = readWebSocketFrame(buffered);
+      if (!frame) break;
+      buffered = buffered.subarray(frame.consumed);
+      if (frame.opcode === 0x8) {
+        writeWebSocketFrame(socket, 0x8);
+        socket.end();
+        return;
+      }
+      if (frame.opcode === 0x9) {
+        writeWebSocketFrame(socket, 0xA, frame.payload);
+        continue;
+      }
+      if (frame.opcode === 0x1) writeWebSocketFrame(socket, 0x1, Buffer.from('echo:' + frame.payload.toString('utf8')));
+    }
+  });
+}
+
+function readWebSocketFrame(buffer) {
+  const b0 = buffer[0];
+  const b1 = buffer[1];
+  const masked = (b1 & 0x80) !== 0;
+  let length = b1 & 0x7f;
+  let offset = 2;
+  if (length === 126) {
+    if (buffer.length < offset + 2) return null;
+    length = buffer.readUInt16BE(offset);
+    offset += 2;
+  } else if (length === 127) {
+    if (buffer.length < offset + 8) return null;
+    length = Number(buffer.readBigUInt64BE(offset));
+    offset += 8;
+  }
+  const maskOffset = offset;
+  if (masked) offset += 4;
+  if (buffer.length < offset + length) return null;
+  const payload = Buffer.from(buffer.subarray(offset, offset + length));
+  if (masked) {
+    const mask = buffer.subarray(maskOffset, maskOffset + 4);
+    for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+  }
+  return { opcode: b0 & 0x0f, payload, consumed: offset + length };
+}
+
+function writeWebSocketFrame(socket, opcode, data = Buffer.alloc(0)) {
+  const payload = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  let header;
+  if (payload.length < 126) {
+    header = Buffer.from([0x80 | opcode, payload.length]);
+  } else if (payload.length <= 0xffff) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  socket.write(Buffer.concat([header, payload]));
 }
 
 function createSocks5Server(resolveHost) {
@@ -161,7 +264,7 @@ async function handleSocks(socket, resolveHost) {
   upstream.pipe(socket);
 }
 
-test('browser traffic uses test SOCKS5, proxied /p navigation, and Chrome UA', { timeout: 120000 }, async t => {
+test('browser traffic uses test SOCKS5 and covers proxied runtime integrations', { timeout: 120000 }, async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
   const kernelPath = path.join(temp, 'kernel.wasm');
   const serverPath = path.join(temp, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
@@ -334,6 +437,83 @@ test('browser traffic uses test SOCKS5, proxied /p navigation, and Chrome UA', {
   assert.ok(fingerprintMasking.audioDelta === null || Math.abs(fingerprintMasking.audioDelta) > 0);
   assert.equal(fingerprintMasking.voiceCount, 2);
   assert.deepEqual(fingerprintMasking.voiceNames, ['Google US English', 'Microsoft David - English (United States)']);
+
+  const runtimeIntegration = await page.evaluate(async targetPort => {
+    async function readText(path) {
+      const resp = await fetch(path, { cache: 'no-store' });
+      return resp.text();
+    }
+    async function waitForCookieHeader(needle) {
+      let last = '';
+      for (let i = 0; i < 30; i++) {
+        last = await readText('/cookie-echo?needle=' + encodeURIComponent(needle) + '&i=' + i);
+        if (last.includes(needle)) return last;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      throw new Error('cookie header never contained ' + needle + ': ' + last);
+    }
+    async function readStream() {
+      const started = performance.now();
+      const resp = await fetch('/stream?ts=' + Date.now(), { cache: 'no-store' });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      const first = await reader.read();
+      const firstMs = performance.now() - started;
+      let body = first.value ? decoder.decode(first.value, { stream: true }) : '';
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        body += decoder.decode(next.value, { stream: true });
+      }
+      body += decoder.decode();
+      return { status: resp.status, contentType: resp.headers.get('content-type') || '', firstText: first.value ? decoder.decode(first.value) : '', firstMs, body };
+    }
+    function websocketEcho() {
+      return new Promise((resolve, reject) => {
+        const ws = new WebSocket('ws://e2e.test:' + targetPort + '/ws');
+        let settled = false;
+        const finish = fn => value => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          fn(value);
+        };
+        const timer = setTimeout(() => finish(reject)(new Error('websocket echo timed out')), 10000);
+        ws.onerror = () => finish(reject)(new Error('websocket error'));
+        ws.onopen = () => ws.send('hello through proxy');
+        ws.onmessage = ev => {
+          const result = { url: ws.url, data: String(ev.data), readyState: ws.readyState };
+          try { ws.close(1000, 'done'); } catch {}
+          finish(resolve)(result);
+        };
+      });
+    }
+
+    const setCookieBody = await readText('/set-cookie?ts=' + Date.now());
+    const serverCookie = await waitForCookieHeader('target_server=from-target');
+    document.cookie = 'client_runtime=from-runtime; Path=/';
+    const visibleCookie = document.cookie;
+    const clientCookie = await waitForCookieHeader('client_runtime=from-runtime');
+    const stream = await readStream();
+    const ws = await websocketEcho();
+    return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws };
+  }, targetPort);
+  assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok');
+  assert.match(runtimeIntegration.serverCookie, /target_server=from-target/);
+  assert.match(runtimeIntegration.visibleCookie, /client_runtime=from-runtime/);
+  assert.match(runtimeIntegration.clientCookie, /target_server=from-target/);
+  assert.match(runtimeIntegration.clientCookie, /client_runtime=from-runtime/);
+  assert.equal(runtimeIntegration.stream.status, 200);
+  assert.match(runtimeIntegration.stream.contentType, /^text\/plain/);
+  assert.equal(runtimeIntegration.stream.firstText, 'chunk-one\n');
+  assert.equal(runtimeIntegration.stream.body, 'chunk-one\nchunk-two\n');
+  assert.ok(runtimeIntegration.stream.firstMs < 500, `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`);
+  assert.equal(runtimeIntegration.ws.url, `ws://e2e.test:${targetPort}/ws`);
+  assert.equal(runtimeIntegration.ws.data, 'echo:hello through proxy');
+  assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
 
   await page.click('#next');
   await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
