@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"mime"
@@ -107,12 +108,12 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {
-	code = sanitizeCode(code)
+	escapedCode := html.EscapeString(sanitizeCode(code))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", zeroCSP(r))
 	w.WriteHeader(status)
-	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>ZeroProxy %s</title><main><h1>ZeroProxy</h1><p>%s</p><button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>`, code, code)
+	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>ZeroProxy %s</title><main><h1>ZeroProxy</h1><p>%s</p><button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>`, escapedCode, escapedCode)
 }
 
 func sanitizeCode(code string) string {
