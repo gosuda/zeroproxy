@@ -13,10 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
-	"nhooyr.io/websocket"
 )
 
 type server struct {
@@ -128,20 +129,97 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled, InsecureSkipVerify: false})
+	c, err := pipeUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	ctx := r.Context()
-	conn := websocket.NetConn(ctx, c, websocket.MessageBinary)
+	conn := newWebSocketNetConn(c)
 	defer conn.Close()
 	sess, err := yamuxconn.Server(conn)
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
-	s.acceptStreams(ctx, sess)
+	s.acceptStreams(r.Context(), sess)
 }
+
+var pipeUpgrader = websocket.Upgrader{
+	EnableCompression: false,
+}
+
+type webSocketNetConn struct {
+	ws       *websocket.Conn
+	readMu   sync.Mutex
+	writeMu  sync.Mutex
+	reader   io.Reader
+	local    net.Addr
+	remote   net.Addr
+	closeMux sync.Once
+}
+
+func newWebSocketNetConn(ws *websocket.Conn) *webSocketNetConn {
+	var local, remote net.Addr = addr("websocket-local"), addr("websocket-remote")
+	if c := ws.UnderlyingConn(); c != nil {
+		local = c.LocalAddr()
+		remote = c.RemoteAddr()
+	}
+	return &webSocketNetConn{ws: ws, local: local, remote: remote}
+}
+
+func (c *webSocketNetConn) Read(p []byte) (int, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	for {
+		if c.reader != nil {
+			n, err := c.reader.Read(p)
+			if n > 0 || (err != nil && err != io.EOF) {
+				return n, err
+			}
+			c.reader = nil
+		}
+		messageType, r, err := c.ws.NextReader()
+		if err != nil {
+			return 0, err
+		}
+		if messageType != websocket.BinaryMessage {
+			continue
+		}
+		c.reader = r
+	}
+}
+
+func (c *webSocketNetConn) Write(p []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.ws.WriteMessage(websocket.BinaryMessage, p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *webSocketNetConn) Close() error {
+	var err error
+	c.closeMux.Do(func() {
+		err = c.ws.Close()
+	})
+	return err
+}
+
+func (c *webSocketNetConn) LocalAddr() net.Addr  { return c.local }
+func (c *webSocketNetConn) RemoteAddr() net.Addr { return c.remote }
+func (c *webSocketNetConn) SetDeadline(t time.Time) error {
+	if err := c.ws.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return c.ws.SetWriteDeadline(t)
+}
+func (c *webSocketNetConn) SetReadDeadline(t time.Time) error  { return c.ws.SetReadDeadline(t) }
+func (c *webSocketNetConn) SetWriteDeadline(t time.Time) error { return c.ws.SetWriteDeadline(t) }
+
+type addr string
+
+func (a addr) Network() string { return "websocket" }
+func (a addr) String() string  { return string(a) }
 
 func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 	defer sess.Close()

@@ -31,7 +31,7 @@ Proxy origin server
               └─ Tor circuit -> target host
 ```
 
-The relay server terminates only the browser WebSocket and yamux session. It dials only the configured Tor SOCKS5 listener and does not parse target HTTP, TLS, redirects, cookies, or HTML. Those responsibilities live in the Go WASM kernel and browser runtime.
+The relay server terminates only the browser WebSocket and yamux session. It uses `github.com/gorilla/websocket` for `/__zp/ws-pipe`, disables WebSocket compression, wraps binary WebSocket messages as a stream-oriented `net.Conn`, and dials only the configured Tor SOCKS5 listener. It does not parse target HTTP, TLS, redirects, cookies, or HTML. Those responsibilities live in the Go WASM kernel and browser runtime.
 
 ## Core invariants
 
@@ -54,7 +54,7 @@ The relay server terminates only the browser WebSocket and yamux session. It dia
 | WASM kernel | `cmd/wasm-kernel/main.go`, `internal/swhttp/*` | Converts JS `Request`/`Response`, initializes transport, owns target HTTP and WebSocket execution. |
 | Transport | `internal/wsconn/*`, `internal/yamuxconn/*`, `internal/socks5/*`, `internal/utlskernel/*`, `internal/http1/*`, `internal/wsproto/*` | Browser WebSocket `net.Conn`, yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/1.1, target WebSocket upgrade/framing. |
 | HTML/header/cookie policy | `internal/htmltx/*`, `internal/headers/*`, `internal/cookiejar/*`, `internal/zpiso/*` | HTML transformation, safe response header constructor policy, target cookie jar, Tor isolation token derivation. |
-| Relay server | `cmd/zeroproxy-server/main.go` | Serves assets and bridges yamux streams to the configured Tor SOCKS5 address. |
+| Relay server | `cmd/zeroproxy-server/main.go` | Serves assets, accepts `/__zp/ws-pipe` with Gorilla WebSocket, and bridges yamux streams to the configured Tor SOCKS5 address. |
 
 ## Request flow
 
@@ -95,7 +95,7 @@ The Service Worker keeps tab, entry, client-context, route, and stream maps in m
 
 ## Transport and HTTP behavior
 
-The Go WASM kernel exposes `__zp_kernel_init`, `__go_jshttp`, `__zp_stream`, and `__zp_cookie_set` to the Service Worker. Initialization creates a WebSocket to `/__zp/ws-pipe` and a yamux client session. Per-target connections open yamux streams that the relay server bridges to Tor SOCKS5.
+The Go WASM kernel exposes `__zp_kernel_init`, `__go_jshttp`, `__zp_stream`, and `__zp_cookie_set` to the Service Worker. Initialization creates a browser WebSocket to `/__zp/ws-pipe`; the relay accepts it with Gorilla WebSocket and adapts binary messages to a stream-oriented `net.Conn`. A yamux client/server session runs over that connection, and per-target yamux streams are bridged by the relay to Tor SOCKS5.
 
 `internal/http1` builds target HTTP/1.1 requests directly, applies the cookie jar, follows redirects up to `MaxRedirects`, and closes target connections through response body closure. HTTPS uses `internal/utlskernel`; target WebSocket support is implemented through `internal/wsproto` and the runtime `WebSocket` wrapper.
 
