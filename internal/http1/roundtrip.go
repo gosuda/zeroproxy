@@ -34,12 +34,16 @@ type Engine struct {
 	Mux StreamMux
 
 	mu sync.Mutex
+	h1 map[h2Key][]*h1Conn
 	h2 map[h2Key]*h2Conn
 }
 
 const TargetUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
-const h2IdleConnTimeout = 90 * time.Second
+const (
+	browserIdleConnTimeout = 90 * time.Second
+	maxH1IdleConnsPerKey   = 6
+)
 
 var fetchTLSProtocols = [...]string{utlskernel.ALPNHTTP2, utlskernel.ALPNHTTP1}
 var http1TLSProtocols = [...]string{utlskernel.ALPNHTTP1}
@@ -56,6 +60,12 @@ func (e *Engine) RoundTrip(ctx context.Context, req *http.Request, target *url.U
 	if target.Scheme == "https" {
 		if hc := e.reserveH2(key); hc != nil {
 			return e.roundTripHTTP2(ctx, hc, wireReq)
+		}
+	}
+	if pc := e.reserveH1(key); pc != nil {
+		resp, err := e.roundTripHTTP1(pc, wireReq)
+		if err == nil || !canRetryHTTP1(wireReq) {
+			return resp, err
 		}
 	}
 	tc, err := e.dialTarget(ctx, target, tab, fetchTLSProtocols[:])
@@ -75,26 +85,39 @@ func (e *Engine) roundTripConn(ctx context.Context, tc *targetConn, wireReq *htt
 		hc = e.adoptH2(key, hc)
 		return e.roundTripHTTP2(ctx, hc, wireReq)
 	}
-	return roundTripHTTP1(tc.conn, wireReq)
+	return e.roundTripHTTP1(&h1Conn{key: key, conn: tc.conn, br: bufio.NewReader(tc.conn)}, wireReq)
 }
 
-func roundTripHTTP1(rw net.Conn, wireReq *http.Request) (*http.Response, error) {
-	if err := wireReq.Write(rw); err != nil {
-		_ = rw.Close()
+func (e *Engine) roundTripHTTP1(pc *h1Conn, wireReq *http.Request) (*http.Response, error) {
+	if err := wireReq.Write(pc.conn); err != nil {
+		e.closeH1(pc)
 		return nil, err
 	}
-	br := bufio.NewReader(rw)
-	resp, err := http.ReadResponse(br, wireReq)
+	resp, err := http.ReadResponse(pc.br, wireReq)
 	if err != nil {
-		_ = rw.Close()
+		e.closeH1(pc)
 		return nil, err
 	}
-	resp.Body = bodyWithConnClose{ReadCloser: resp.Body, conn: rw}
+	if resp.Body == nil {
+		if shouldReuseHTTP1(wireReq, resp) {
+			e.releaseH1(pc)
+		} else {
+			e.closeH1(pc)
+		}
+		return resp, nil
+	}
+	resp.Body = &bodyWithH1Reuse{
+		ReadCloser: resp.Body,
+		engine:     e,
+		conn:       pc,
+		reusable:   shouldReuseHTTP1(wireReq, resp),
+		sawEOF:     responseBodyAlreadyEOF(wireReq, resp),
+	}
 	return resp, nil
 }
 
 func newH2Conn(conn net.Conn) (*h2Conn, error) {
-	tr := &http2.Transport{DisableCompression: true, IdleConnTimeout: h2IdleConnTimeout}
+	tr := &http2.Transport{DisableCompression: true, IdleConnTimeout: browserIdleConnTimeout}
 	cc, err := tr.NewClientConn(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -250,6 +273,119 @@ func h2PoolKey(target *url.URL, tab *TabState) h2Key {
 	return h2Key{authority: canonicalAuthority(target), isolation: zpiso.Token(key, host), tabID: tabID}
 }
 
+func (e *Engine) reserveH1(key h2Key) *h1Conn {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for {
+		if e.h1 == nil || len(e.h1[key]) == 0 {
+			return nil
+		}
+		pool := e.h1[key]
+		last := len(pool) - 1
+		pc := pool[last]
+		pool[last] = nil
+		if last == 0 {
+			delete(e.h1, key)
+		} else {
+			e.h1[key] = pool[:last]
+		}
+		if pc.closed {
+			continue
+		}
+		if pc.idleTimer != nil {
+			pc.idleTimer.Stop()
+			pc.idleTimer = nil
+		}
+		pc.idle = false
+		return pc
+	}
+}
+
+func (e *Engine) releaseH1(pc *h1Conn) {
+	e.mu.Lock()
+	if pc.closed {
+		e.mu.Unlock()
+		return
+	}
+	if e.h1 == nil {
+		e.h1 = make(map[h2Key][]*h1Conn)
+	}
+	pool := e.h1[pc.key]
+	if len(pool) >= maxH1IdleConnsPerKey {
+		pc.closed = true
+		pc.idle = false
+		e.mu.Unlock()
+		_ = pc.conn.Close()
+		return
+	}
+	pc.idle = true
+	pc.idleTimer = time.AfterFunc(browserIdleConnTimeout, func() { e.closeIdleH1(pc) })
+	e.h1[pc.key] = append(pool, pc)
+	e.mu.Unlock()
+}
+
+func (e *Engine) closeH1(pc *h1Conn) {
+	e.mu.Lock()
+	if pc.closed {
+		e.mu.Unlock()
+		return
+	}
+	pc.closed = true
+	pc.idle = false
+	if pc.idleTimer != nil {
+		pc.idleTimer.Stop()
+		pc.idleTimer = nil
+	}
+	if e.h1 != nil {
+		pool := e.h1[pc.key]
+		for i, idle := range pool {
+			if idle == pc {
+				copy(pool[i:], pool[i+1:])
+				pool[len(pool)-1] = nil
+				if len(pool) == 1 {
+					delete(e.h1, pc.key)
+				} else {
+					e.h1[pc.key] = pool[:len(pool)-1]
+				}
+				break
+			}
+		}
+	}
+	e.mu.Unlock()
+	_ = pc.conn.Close()
+}
+
+func (e *Engine) closeIdleH1(pc *h1Conn) {
+	e.mu.Lock()
+	if pc.closed || !pc.idle {
+		e.mu.Unlock()
+		return
+	}
+	pc.closed = true
+	pc.idle = false
+	if pc.idleTimer != nil {
+		pc.idleTimer.Stop()
+		pc.idleTimer = nil
+	}
+	if e.h1 != nil {
+		pool := e.h1[pc.key]
+		for i, idle := range pool {
+			if idle == pc {
+				copy(pool[i:], pool[i+1:])
+				pool[len(pool)-1] = nil
+				if len(pool) == 1 {
+					delete(e.h1, pc.key)
+				} else {
+					e.h1[pc.key] = pool[:len(pool)-1]
+				}
+				break
+			}
+		}
+	}
+	e.mu.Unlock()
+	_ = pc.conn.Close()
+}
+
 func (e *Engine) reserveH2(key h2Key) *h2Conn {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -318,6 +454,47 @@ func (e *Engine) forgetH2IfClosing(hc *h2Conn) {
 	}
 }
 
+func shouldReuseHTTP1(req *http.Request, resp *http.Response) bool {
+	return req != nil && resp != nil && !req.Close && !resp.Close && responseBodyFramed(req, resp)
+}
+
+func canRetryHTTP1(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if req.Body != nil && req.Body != http.NoBody {
+		return false
+	}
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+func responseBodyAlreadyEOF(req *http.Request, resp *http.Response) bool {
+	if req != nil && req.Method == http.MethodHead {
+		return true
+	}
+	if resp == nil {
+		return false
+	}
+	return resp.ContentLength == 0 || (resp.StatusCode >= 100 && resp.StatusCode < 200) || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified
+}
+
+func responseBodyFramed(req *http.Request, resp *http.Response) bool {
+	if responseBodyAlreadyEOF(req, resp) || resp.ContentLength >= 0 {
+		return true
+	}
+	for _, te := range resp.TransferEncoding {
+		if strings.EqualFold(te, "chunked") {
+			return true
+		}
+	}
+	return false
+}
+
 func canonicalHost(u *url.URL) string { return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") }
 func canonicalAuthority(u *url.URL) string {
 	h := canonicalHost(u)
@@ -342,6 +519,15 @@ type targetConn struct {
 	protocol string
 }
 
+type h1Conn struct {
+	key       h2Key
+	conn      net.Conn
+	br        *bufio.Reader
+	idleTimer *time.Timer
+	closed    bool
+	idle      bool
+}
+
 type h2Key struct {
 	authority string
 	isolation string
@@ -360,18 +546,34 @@ func (hc *h2Conn) close() {
 	_ = hc.conn.Close()
 }
 
-type bodyWithConnClose struct {
+type bodyWithH1Reuse struct {
 	io.ReadCloser
-	conn io.Closer
+	engine   *Engine
+	conn     *h1Conn
+	reusable bool
+	sawEOF   bool
+	once     sync.Once
+	closeErr error
 }
 
-func (b bodyWithConnClose) Close() error {
-	err := b.ReadCloser.Close()
-	cerr := b.conn.Close()
-	if err != nil {
-		return err
+func (b *bodyWithH1Reuse) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.sawEOF = true
 	}
-	return cerr
+	return n, err
+}
+
+func (b *bodyWithH1Reuse) Close() error {
+	b.once.Do(func() {
+		b.closeErr = b.ReadCloser.Close()
+		if b.reusable && b.sawEOF && b.conn.br.Buffered() == 0 {
+			b.engine.releaseH1(b.conn)
+			return
+		}
+		b.engine.closeH1(b.conn)
+	})
+	return b.closeErr
 }
 
 type bodyWithH2Close struct {
