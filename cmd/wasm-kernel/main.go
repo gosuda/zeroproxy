@@ -357,6 +357,7 @@ func safeResponse(code string, status int, host ...string) js.Value {
 	h := js.Global().Get("Headers").New()
 	h.Call("set", "Content-Type", "text/html; charset=utf-8")
 	h.Call("set", "Cache-Control", "no-store")
+	h.Call("set", "X-Content-Type-Options", "nosniff")
 	h.Call("set", "Access-Control-Allow-Origin", "*")
 	h.Call("set", "Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
 	h.Call("set", "Access-Control-Allow-Headers", "*")

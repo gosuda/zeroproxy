@@ -43,6 +43,7 @@ func ConstructorPolicy(src http.Header, bodyTransformed, bodyDecoded bool) http.
 		}
 	}
 	dst.Set("Cache-Control", "no-store")
+	dst.Set("X-Content-Type-Options", "nosniff")
 	dst.Set("Access-Control-Allow-Origin", "*")
 	dst.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
 	dst.Set("Access-Control-Allow-Headers", "*")

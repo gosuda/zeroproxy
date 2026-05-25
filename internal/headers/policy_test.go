@@ -13,7 +13,7 @@ func TestConstructorPolicyStripsForbiddenHeaders(t *testing.T) {
 			t.Fatalf("%s leaked: %#v", name, out)
 		}
 	}
-	if out.Get("Content-Type") != "text/html" || out.Get("Cache-Control") != "no-store" {
+	if out.Get("Content-Type") != "text/html" || out.Get("Cache-Control") != "no-store" || out.Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("safe headers missing: %#v", out)
 	}
 	if out.Get("Access-Control-Allow-Origin") != "*" || out.Get("Access-Control-Allow-Headers") != "*" {

@@ -61,6 +61,12 @@ test('service worker waits for initialized WASM transport and cookie bridge', ()
   assert.ok(sw.includes('Target host:'), 'service worker error page does not expose target host');
 });
 
+test('service worker response wrappers force nosniff', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /h\.set\('X-Content-Type-Options', 'nosniff'\)/);
+  assert.match(sw, /'X-Content-Type-Options': 'nosniff'/);
+});
+
 test('service worker names every required safe error class', () => {
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
   for (const code of ['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','POLICY_BLOCKED']) {
