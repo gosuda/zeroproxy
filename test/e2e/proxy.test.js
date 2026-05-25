@@ -515,6 +515,23 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
 
+  const forgedMessage = await page.evaluate(() => new Promise(resolve => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => resolve({ timeout: true }), 3000);
+    channel.port1.onmessage = ev => {
+      clearTimeout(timer);
+      resolve(ev.data || null);
+    };
+    navigator.serviceWorker.controller.postMessage({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }, [channel.port2]);
+  }));
+  assert.deepEqual(forgedMessage, { ok: false, error: 'POLICY_BLOCKED' });
+  const bootLeak = await page.evaluate(() => ({
+    bootType: typeof window.__ZP_BOOT,
+    scriptContainsRuntimeToken: Array.from(document.scripts).some(s => s.textContent.includes('runtimeToken')),
+  }));
+  assert.equal(bootLeak.bootType, 'undefined');
+  assert.equal(bootLeak.scriptContainsRuntimeToken, false);
+
   await page.click('#next');
   await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
   const next = await page.evaluate(() => ({

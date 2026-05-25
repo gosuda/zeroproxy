@@ -154,6 +154,7 @@ async function transportFetch(targetUrl, opt) {
   headers.set('X-ZP-Tab-Id', opt.tab.tabId);
   headers.set('X-ZP-Entry-Id', opt.entryId || opt.tab.activeEntryId || '');
   headers.set('X-ZP-Stream-Isolation-Key', opt.tab.streamIsolationKey);
+  headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
   if (opt.document) headers.set('X-ZP-Document-Request', '1');
   const init = { method: opt.method || (opt.request && opt.request.method) || 'GET', headers };
   if (init.method !== 'GET' && init.method !== 'HEAD') init.body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
@@ -177,8 +178,8 @@ async function handleMessage(event) {
       return;
     }
     if (msg.type === 'ZP_HISTORY_UPDATE') {
-      const tab = tabs.get(msg.tabId);
-      if (!tab) { fail('SW_NOT_READY'); return; }
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
       const entry = { entryId: msg.entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
@@ -189,8 +190,9 @@ async function handleMessage(event) {
       return;
     }
     if (msg.type === 'ZP_BASE_UPDATE') {
-      const tab = tabs.get(msg.tabId);
-      const entry = tab && tab.entries.get(msg.entryId || tab.activeEntryId);
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
       if (!entry) { fail('SW_NOT_READY'); return; }
       entry.baseUrl = ZP.canonicalTargetURL(msg.baseUrl, entry.targetUrl).href;
       const sourceId = event.source && event.source.id;
@@ -203,11 +205,26 @@ async function handleMessage(event) {
       const tab = ctx && tabs.get(ctx.tabId);
       const entry = tab && tab.entries.get(ctx.entryId);
       if (!entry) { fail('SW_NOT_READY'); return; }
+      if (!runtimeMessageAuthorized(event, tab, msg, fail)) return;
       ok({ tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl, scrollX: entry.scrollX || 0, scrollY: entry.scrollY || 0 });
       return;
     }
-    if (msg.type === 'ZP_SCROLL_UPDATE') { const tab = tabs.get(msg.tabId); const entry = tab && tab.entries.get(msg.entryId); if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; } ok(); return; }
-    if (msg.type === 'ZP_COOKIE_SET') { const tab = tabs.get(msg.tabId); if (tab) tab.documentCookie = mergeCookie(tab.documentCookie || '', msg.cookie); if (typeof self.__zp_cookie_set === 'function' && tab) self.__zp_cookie_set({ tabId: tab.tabId, targetUrl: msg.targetUrl, cookie: msg.cookie, streamIsolationKey: tab.streamIsolationKey }); ok(); return; }
+    if (msg.type === 'ZP_SCROLL_UPDATE') {
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      const entry = tab.entries.get(msg.entryId);
+      if (entry) { entry.scrollX = Number(msg.scrollX) || 0; entry.scrollY = Number(msg.scrollY) || 0; }
+      ok();
+      return;
+    }
+    if (msg.type === 'ZP_COOKIE_SET') {
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      tab.documentCookie = mergeCookie(tab.documentCookie || '', msg.cookie);
+      if (typeof self.__zp_cookie_set === 'function') self.__zp_cookie_set({ tabId: tab.tabId, targetUrl: msg.targetUrl, cookie: msg.cookie, streamIsolationKey: tab.streamIsolationKey });
+      ok();
+      return;
+    }
     if (msg.type === 'ZP_WS_OPEN') { await openRuntimeStream(event, msg, ok, fail); return; }
     fail('POLICY_BLOCKED');
   } catch (e) { fail(e && e.code || e && e.message || 'POLICY_BLOCKED'); }
@@ -215,8 +232,9 @@ async function handleMessage(event) {
 
 async function openRuntimeStream(event, msg, ok, fail) {
   if (readiness !== 'READY') { try { await initKernel(); } catch { fail('SW_NOT_READY'); return; } }
-  const tab = tabs.get(msg.tabId) || firstTab();
-  if (!tab || typeof self.__zp_stream !== 'function') { fail('SW_NOT_READY'); return; }
+  const tab = runtimeTabForMessage(event, msg, fail);
+  if (!tab) return;
+  if (typeof self.__zp_stream !== 'function') { fail('SW_NOT_READY'); return; }
   const stream = await self.__zp_stream({ url: msg.url, protocols: msg.protocols || [], tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey });
   const channel = new MessageChannel();
   const id = ZP.randomId('s');
@@ -226,11 +244,24 @@ async function openRuntimeStream(event, msg, ok, fail) {
   event.ports[0].postMessage({ ok: true, id, port: channel.port2 }, [channel.port2]);
 }
 
+function runtimeTabForMessage(event, msg, fail) {
+  const tab = tabs.get(String(msg.tabId || ''));
+  if (!tab) { fail('SW_NOT_READY'); return null; }
+  return runtimeMessageAuthorized(event, tab, msg, fail) ? tab : null;
+}
+function runtimeMessageAuthorized(event, tab, msg, fail) {
+  if (!tab.runtimeToken || msg.runtimeToken !== tab.runtimeToken) { fail('POLICY_BLOCKED'); return false; }
+  const sourceId = event.source && event.source.id;
+  const ctx = sourceId && clientContext.get(sourceId);
+  if (ctx && ctx.tabId !== tab.tabId) { fail('POLICY_BLOCKED'); return false; }
+  return true;
+}
+
 function createTab(targetUrl) {
   const target = ZP.canonicalTargetURL(targetUrl).href;
   const tabId = ZP.randomId('t');
   const entryId = randomEntryId();
-  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), documentCookie: '' };
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '' };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;

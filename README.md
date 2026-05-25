@@ -16,11 +16,11 @@ Implemented core spine:
 
 - Encrypted active/share route format: `/p/<encrypted>#k=<key>`.
 - AES-256-CBC + HMAC-SHA256 URL envelope with HKDF-separated encryption/MAC keys and HMAC verification before decryption.
-- Service Worker request classifier that handles every controlled request and blocks unknown requests instead of falling back to native `fetch(event.request)`.
+- Service Worker request classifier that handles every controlled request, blocks unknown requests instead of falling back to native `fetch(event.request)`, and requires a per-tab runtime capability token on privileged runtime bridge messages.
 - Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
 - A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling.
 - Tokenizer-based HTML transform that injects the runtime prelude, launders document navigation URLs through encrypted `/p` routes, drops dangerous tags and headers, and handles `srcdoc`.
-- Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
+- Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`. Runtime-to-Service-Worker control messages carry a closure-held per-tab capability token. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
 - Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
 - Go and JavaScript share URL implementations that use the same envelope format.
 

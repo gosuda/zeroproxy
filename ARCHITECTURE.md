@@ -39,6 +39,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 - Target document navigations use encrypted `/p/<encrypted>#k=<key>` routes on the proxy origin.
 - The `#k` fragment is decrypted in the browser shell, removed with `history.replaceState`, and not sent to the server.
 - Every Service Worker-controlled request is classified. Unknown requests are blocked; there is no native `fetch(event.request)` fallback.
+- Privileged runtime-to-Service-Worker control messages require a per-tab capability token injected into the runtime prelude and removed from target-visible DOM before target code runs.
 - Target TCP connections are opened through WebSocket -> yamux -> Tor SOCKS5 DOMAINNAME. The kernel does not call `http.Transport` for target egress.
 - HTTPS uses uTLS over the Tor stream with ALPN selecting HTTP/2 when available and HTTP/1.1 fallback; target WebSocket upgrade pins HTTP/1.1.
 - Target response headers are passed through a constructor policy before the browser receives a `Response`.
@@ -50,7 +51,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 |---|---|---|
 | Static shell | `web/index.html`, `web/zp-core.js` | Service Worker registration, target URL canonicalization, share URL encryption/decryption, initial target open. |
 | Share URL envelope | `web/zp-core.js`, `internal/shareurl/*` | Compatible JavaScript and Go implementations of `/p/<encrypted>#k=<key>` using AES-256-CBC, HMAC-SHA256, HKDF, and raw base64url. |
-| Service Worker | `web/sw.js` | Classifies every controlled request, blocks unknowns, manages in-memory tab/entry state, calls the WASM kernel, exposes runtime bridge APIs. |
+| Service Worker | `web/sw.js` | Classifies every controlled request, blocks unknowns, manages in-memory tab/entry state, requires per-tab capability tokens on privileged runtime bridge messages, calls the WASM kernel, exposes runtime bridge APIs. |
 | Runtime prelude | `web/runtime-prelude.js`, `web/worker-prelude.js` | Installs target-realm containment hooks before target scripts run. Main-window WebSocket/navigation/form/history/location/storage/worker/iframe/device APIs are hooked; main-window fetch/XHR/EventSource are not runtime-polyfilled today. Worker `fetch` is bridged through `/__zp/api/fetch`. Patched function source strings, Canvas/Audio extraction, and speech voices receive basic masking to reduce runtime self-fingerprinting, not to provide full anti-bot spoofing. |
 | WASM kernel | `cmd/wasm-kernel/main.go`, `internal/swhttp/*` | Converts JS `Request`/`Response`, initializes transport, owns target HTTP and WebSocket execution. |
 | Transport | `internal/wsconn/*`, `internal/yamuxconn/*`, `internal/socks5/*`, `internal/utlskernel/*`, `internal/http1/*`, `internal/wsproto/*` | Browser WebSocket `net.Conn`, yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/2 and HTTP/1.1 target fetch, target WebSocket upgrade/framing. |
@@ -104,7 +105,7 @@ The Go WASM kernel exposes `__zp_kernel_init`, `__go_jshttp`, `__zp_stream`, and
 
 ## HTML, header, and runtime policy
 
-`internal/htmltx` uses `golang.org/x/net/html` tokenization. It injects `zp-core.js`, a `__ZP_BOOT` object, and `runtime-prelude.js`; removes base/meta refresh/ping/preload-style escape vectors; rewrites document navigation attributes; injects prelude code into `srcdoc`; and replaces blocked embed/object content with inert placeholders.
+`internal/htmltx` uses `golang.org/x/net/html` tokenization. It injects `zp-core.js`, a short self-removing `__ZP_BOOT` handoff object, and `runtime-prelude.js`; removes base/meta refresh/ping/preload-style escape vectors; rewrites document navigation attributes; injects prelude code into `srcdoc`; and replaces blocked embed/object content with inert placeholders.
 
 `internal/headers.ConstructorPolicy` strips target-controlled policy, storage, network-control, hop-by-hop, redirect, and transformed-body headers before constructing a browser `Response`. It defaults cache behavior to `Cache-Control: no-store`.
 
@@ -126,7 +127,7 @@ Overall status: **Phase 0 prototype / partial implementation**. The repository i
 | 3. URL and encryption | Implemented | `web/zp-core.js` and `internal/shareurl` implement HKDF, AES-256-CBC, HMAC verification-before-decrypt, raw base64url, and protocol allowlists. Tests cover JS tamper rejection and Go envelope construction. |
 | 4. Active URL and tab state | Partial / PLAN-divergent | Active browsing uses encrypted `/p` routes and static tests reject legacy `/v` route generation. PLAN's `/v/<tab-id>/n/...` and `/v/<tab-id>/e/...` active-route model is not implemented. Tab/entry maps are in memory; title/state clone/origin map/storage namespace behavior is minimal; persistence is absent. |
 | 5. Service Worker boot | Mostly implemented | The shell waits for Service Worker control; `sw.js` tracks readiness and waits for `__go_jshttp`, `__zp_stream`, and `__zp_kernel_init`. |
-| 6. Fetch handler policy | Mostly implemented | `sw.js` classifies internal/share/runtime/subresource/unknown requests and has no `return fetch(event.request)` fallback. It does not implement the PLAN's distinct VIRTUAL_NAVIGATION and VIRTUAL_ENTRY `/v` classifiers. Subresource base recovery is simple and should be browser-tested. |
+| 6. Fetch handler policy | Mostly implemented | `sw.js` classifies internal/share/runtime/subresource/unknown requests and has no `return fetch(event.request)` fallback. Privileged runtime `postMessage` operations require a per-tab capability token. It does not implement the PLAN's distinct VIRTUAL_NAVIGATION and VIRTUAL_ENTRY `/v` classifiers. Subresource base recovery is simple and should be browser-tested. |
 | 7. Go WASM transport kernel | Mostly implemented | The kernel opens `/__zp/ws-pipe`, uses yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback. Target WebSocket upgrade/framing exists and remains HTTP/1.1-only. Target response bodies are exposed to JavaScript through `ReadableStream`; request/upload body conversion is still prototype-level. |
 | 8. HTML transform | Partial / PLAN-divergent | Tokenizer-based transform injects the runtime prelude, removes base/meta refresh/ping/preload hints, rewrites document navigation attrs to encrypted `/p` routes, handles `srcdoc`, and blocks object/embed. PLAN's `/v/<tab-id>/n/<base64url_target_url>` laundering and direct topbar injection are not implemented. Malformed-markup recovery still needs stronger proof. |
 | 9. Tor stream isolation | Implemented at code level | `zpiso.Token` derives site-granular HMAC tokens; SOCKS5 rejects IP literals and sends DOMAINNAME ATYP. Deployment still requires correctly configured Tor. |

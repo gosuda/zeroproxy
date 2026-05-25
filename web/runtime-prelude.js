@@ -6,6 +6,7 @@
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
   const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, root.__ZP_BOOT || {});
+  const runtimeToken = String(boot.runtimeToken || '');
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
@@ -141,11 +142,12 @@
     }).catch(()=>{}));
   }
   function postMessageToSW(message, transfer) {
-    if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return Promise.reject(normalizedError('NetworkError'));
+    if (!navigator.serviceWorker || !navigator.serviceWorker.controller || !runtimeToken) return Promise.reject(normalizedError('NetworkError'));
     return new Promise((resolve, reject) => {
       const channel = new MessageChannel();
+      const sealed = Object.assign({}, message, { runtimeToken });
       channel.port1.onmessage = ev => ev.data && ev.data.ok ? resolve(ev.data) : reject(normalizedError('NetworkError'));
-      navigator.serviceWorker.controller.postMessage(message, transfer ? [channel.port2, ...transfer] : [channel.port2]);
+      navigator.serviceWorker.controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
     });
   }
   function updateVirtualBase(raw) {
@@ -396,7 +398,7 @@
   }
   function isURLBearing(el, key) { const tag = el.localName; return key === 'href' && (tag === 'a' || tag === 'area') || key === 'action' && tag === 'form' || key === 'formaction' && (tag === 'input' || tag === 'button') || key === 'src' && (tag === 'iframe' || tag === 'frame'); }
   function transformHTML(s) { return s.replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
-  function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script>Object.defineProperty(window,"__ZP_BOOT",{value:' + JSON.stringify(boot).replace(/</g,'\\u003c') + ',configurable:true});<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
+  function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script>Object.defineProperty(window,"__ZP_BOOT",{value:' + JSON.stringify(boot).replace(/</g,'\\u003c') + ',configurable:true});try{document.currentScript.remove()}catch{}<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
   function baseSyncScript(raw) { return '<script>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(String(raw)).replace(/</g,'\\u003c') + ');<\/script>'; }
   function syncBaseElement(node) {
     if (!node) return;

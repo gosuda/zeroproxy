@@ -21,6 +21,7 @@ type Options struct {
 	EntryID        string
 	TargetURL      *url.URL
 	DocumentCookie string
+	RuntimeToken   string
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -150,9 +151,10 @@ func runtimePrelude(opt Options) string {
 	boot := map[string]string{
 		"tabId": opt.TabID, "entryId": opt.EntryID,
 		"targetUrl": opt.TargetURL.String(), "documentCookie": opt.DocumentCookie,
+		"runtimeToken": opt.RuntimeToken,
 	}
 	b, _ := json.Marshal(boot)
-	return `<script nonce="zp" src="/__zp/zp-core.js"></script><script nonce="zp">Object.defineProperty(window,"__ZP_BOOT",{value:` + string(b) + `,configurable:true});</script><script nonce="zp" src="/__zp/runtime-prelude.js"></script>`
+	return `<script nonce="zp" src="/__zp/zp-core.js"></script><script nonce="zp">Object.defineProperty(window,"__ZP_BOOT",{value:` + string(b) + `,configurable:true});try{document.currentScript.remove()}catch{}</script><script nonce="zp" src="/__zp/runtime-prelude.js"></script>`
 }
 
 func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {

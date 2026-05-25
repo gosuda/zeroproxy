@@ -26,6 +26,7 @@ test('runtime installs required escape-vector hooks', () => {
     'popstate',
     'ZP_RESOLVE_ENTRY',
     'ZP_SCROLL_UPDATE',
+    'runtimeToken',
     "define(w.document, 'createElement'",
     "define(w, 'open'",
     "'appendChild'",
@@ -76,6 +77,10 @@ test('service worker waits for initialized WASM transport and cookie bridge', ()
   assert.ok(sw.includes('__zp_kernel_init'), 'service worker does not require transport init');
   assert.match(sw, /^importScripts\('\/__zp\/wasm_exec\.js'\);/m, 'wasm_exec must be imported during service worker installation');
   assert.ok(sw.includes('__zp_cookie_set'), 'service worker does not bridge document.cookie to kernel jar');
+  assert.ok(sw.includes('runtimeTabForMessage'), 'service worker does not gate runtime messages by tab');
+  assert.ok(sw.includes('runtimeMessageAuthorized'), 'service worker does not validate runtime capability tokens');
+  assert.ok(sw.includes('runtimeToken: ZP.randomId'), 'service worker does not generate runtime capability tokens');
+  assert.ok(sw.includes('X-ZP-Runtime-Token'), 'service worker does not pass runtime capability to documents');
   assert.ok(kernel.includes('js.Global().Set("__zp_kernel_init"'), 'kernel init export missing');
   assert.ok(kernel.includes('js.Global().Set("__zp_cookie_set"'), 'kernel cookie export missing');
   assert.ok(kernel.includes('Target host:'), 'kernel error page does not expose target host');

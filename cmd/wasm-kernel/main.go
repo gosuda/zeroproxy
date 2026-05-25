@@ -155,7 +155,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			}
 			pr, pw := io.Pipe()
 			go func() {
-				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL)})
+				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL), RuntimeToken: req.Header.Get("X-Zp-Runtime-Token")})
 				closeErr := source.Close()
 				if err != nil {
 					_ = pw.CloseWithError(err)
