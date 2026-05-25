@@ -33,7 +33,7 @@ Not complete enough for production or high-assurance acceptance:
 - Encrypted IndexedDB persistence is not implemented.
 - Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE2_PLAN.md`](./PHASE2_PLAN.md) for the proposed Service Worker/SWC JavaScript rewriting phase.
 
 ## Requirements
 
