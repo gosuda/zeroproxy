@@ -132,12 +132,13 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	conn := websocket.NetConn(ctx, c, websocket.MessageBinary)
+	defer conn.Close()
 	sess, err := yamuxconn.Server(conn)
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
-	go s.acceptStreams(ctx, sess)
+	s.acceptStreams(ctx, sess)
 }
 
 func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {

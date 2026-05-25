@@ -1,5 +1,6 @@
 /* ZeroProxy Service Worker: every controlled request is classified; unknowns are blocked. */
 importScripts('/__zp/zp-core.js');
+importScripts('/__zp/wasm_exec.js');
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
@@ -19,7 +20,6 @@ async function initKernel() {
   if (kernelPromise) return kernelPromise;
   kernelPromise = (async () => {
     readiness = 'WASM_LOADING';
-    if (typeof Go === 'undefined') importScripts('/__zp/wasm_exec.js');
     const go = new Go();
     const resp = await nativeFetch('/__zp/kernel.wasm', { cache: 'no-store' });
     if (!resp.ok) throw new Error('SW_NOT_READY');

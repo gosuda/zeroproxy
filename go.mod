@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/hashicorp/yamux v0.1.2
 	github.com/refraction-networking/utls v1.8.1
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20260522023950-e5306b2f3e96
 	golang.org/x/net v0.48.0
 	nhooyr.io/websocket v1.8.17
 )

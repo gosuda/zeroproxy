@@ -53,6 +53,7 @@ test('service worker waits for initialized WASM transport and cookie bridge', ()
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   assert.ok(sw.includes('__zp_kernel_init'), 'service worker does not require transport init');
+  assert.match(sw, /^importScripts\('\/__zp\/wasm_exec\.js'\);/m, 'wasm_exec must be imported during service worker installation');
   assert.ok(sw.includes('__zp_cookie_set'), 'service worker does not bridge document.cookie to kernel jar');
   assert.ok(kernel.includes('js.Global().Set("__zp_kernel_init"'), 'kernel init export missing');
   assert.ok(kernel.includes('js.Global().Set("__zp_cookie_set"'), 'kernel cookie export missing');
