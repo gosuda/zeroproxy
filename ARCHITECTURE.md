@@ -150,16 +150,38 @@ Overall status: **Phase 0 prototype / partial implementation**. The repository i
 
 ## Verification surface
 
-Current repository checks:
+The repository's automated CI is `.github/workflows/ci.yml`.
+
+CI triggers:
+
+- push to `main`;
+- pull request;
+- manual `workflow_dispatch`.
+
+CI environment and gates:
+
+- Ubuntu 24.04 LTS GitHub-hosted runner.
+- Go installed from `go.mod` through `actions/setup-go`.
+- Current Node.js LTS through `actions/setup-node`.
+- `npm ci`, including Puppeteer's pinned Chrome for Testing.
+- `go test ./...`.
+- `npm test`, which runs `test/js/*.test.js` and `test/e2e/*.test.js`.
+- `GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel`.
+- `go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server`.
+
+The Puppeteer E2E test does not require Tor. It builds temporary ZeroProxy binaries, starts a local target HTTP server, starts an in-process SOCKS5 server that accepts the kernel's SOCKS5 username/password handshake, launches Chrome against `proxy.localhost`, and verifies that proxied navigation stays on `/p` routes while target HTTP requests carry the configured Windows Chrome User-Agent.
+
+Equivalent local commands:
 
 ```sh
+npm ci
 go test ./...
 npm test
 GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel
 go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server
 ```
 
-These checks prove unit/source policy coverage and buildability when they pass. They do not prove browser E2E non-escape, Tor deployment behavior, or production traffic compatibility.
+These checks prove unit/source policy coverage, buildability, and one local browser path through the WebSocket/yamux/SOCKS5 transport when they pass. They do not start Tor, validate real Tor deployment behavior, prove production traffic compatibility, or satisfy the high-assurance browser E2E non-escape matrix listed below.
 
 ## Current acceptance boundary
 

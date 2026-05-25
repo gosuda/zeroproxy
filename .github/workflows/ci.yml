@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Go, JavaScript, Puppeteer, and build checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Print toolchain versions
+        run: |
+          go version
+          node --version
+          npm --version
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run JavaScript and Puppeteer tests
+        run: npm test
+
+      - name: Build WASM kernel
+        run: GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel
+
+      - name: Build relay server
+        run: go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server

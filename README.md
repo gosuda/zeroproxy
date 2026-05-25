@@ -38,9 +38,9 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and accept
 ## Requirements
 
 - Go 1.26 or the Go toolchain version required by `go.mod`.
-- Node.js for the JavaScript tests.
-- A browser with Service Worker and WebAssembly support.
-- A Tor SOCKS5 listener configured with stream isolation.
+- Node.js LTS and npm for the JavaScript and Puppeteer E2E tests.
+- A browser with Service Worker and WebAssembly support. CI uses Puppeteer's pinned Chrome for Testing.
+- A Tor SOCKS5 listener configured with stream isolation for manual target browsing. CI uses an in-process test SOCKS5 proxy instead of Tor.
 
 Example Tor setting:
 
@@ -96,14 +96,21 @@ Use `proxy.localhost` from the start so the shell, Service Worker, and encrypted
 
 ## Verification commands
 
+The local verification surface matches the GitHub Actions CI workflow:
+
 ```sh
+npm ci
 go test ./...
 npm test
 GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel
 go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server
 ```
 
-These checks cover source/unit policy invariants and buildability. They do not prove browser E2E non-escape, Tor deployment behavior, or production traffic compatibility.
+`npm test` runs both JavaScript source-policy tests and the Puppeteer E2E suite. The E2E test builds temporary ZeroProxy binaries, starts a local target HTTP server, starts an in-process SOCKS5 proxy, launches Puppeteer's Chrome, and verifies browser traffic through the ZeroProxy server without requiring Tor.
+
+CI is defined in `.github/workflows/ci.yml` and runs on pushes to `main`, pull requests, and manual dispatch. It uses an Ubuntu 24.04 LTS runner, installs Go from `go.mod`, installs the current Node.js LTS release, runs `npm ci`, runs the Go and full JavaScript/Puppeteer test suites, and builds both deployable binaries.
+
+These checks cover source/unit policy invariants, buildability, and a local-browser E2E path through a test SOCKS5 proxy. They do not start Tor, validate real Tor deployment behavior, or prove production traffic compatibility.
 
 ## Repository map
 
@@ -116,4 +123,5 @@ These checks cover source/unit policy invariants and buildability. They do not p
 | `cmd/zeroproxy-server` | Static asset server and WebSocket/yamux-to-Tor relay. |
 | `internal/http1`, `internal/socks5`, `internal/utlskernel`, `internal/wsproto`, `internal/yamuxconn`, `internal/wsconn` | Target transport path. |
 | `internal/htmltx`, `internal/headers`, `internal/cookiejar`, `internal/shareurl`, `internal/zpiso` | HTML rewriting, response header policy, cookie handling, share URL envelope, Tor isolation tokens. |
-| `test/js`, `internal/*/*_test.go` | JavaScript source-policy tests and Go unit tests. |
+| `test/js`, `test/e2e`, `internal/*/*_test.go` | JavaScript source-policy tests, Puppeteer browser E2E tests, and Go unit tests. |
+| `.github/workflows/ci.yml` | GitHub Actions CI for Go tests, JavaScript/Puppeteer tests, WASM build, and relay server build. |
