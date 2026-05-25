@@ -13,6 +13,7 @@ test('runtime avoids forbidden global deception hooks', () => {
   assert.equal(rt.includes('Function.prototype.toString'), false);
   assert.equal(rt.includes('Object.getOwnPropertyDescriptor ='), false);
   assert.equal(rt.includes('window.__zp'), false);
+  assert.equal(rt.includes('queueMicrotask'), false);
 });
 
 test('runtime installs required escape-vector hooks', () => {
@@ -29,9 +30,19 @@ test('runtime installs required escape-vector hooks', () => {
     "'appendChild'",
     "'insertBefore'",
     "'replaceChild'",
+    "'append'",
+    "'prepend'",
+    "'before'",
+    "'after'",
+    "'replaceWith'",
     "'insertAdjacentHTML'",
     "'getAttribute'",
     'installNetworkContainment',
+    "'contentWindow'",
+    "'contentDocument'",
+    'new WeakSet',
+    "attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction']",
+    'enforceObservedAttribute',
     'installStorageFacades',
     'localStorage',
     'indexedDB',

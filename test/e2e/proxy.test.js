@@ -231,6 +231,52 @@ test('browser traffic uses test SOCKS5, proxied /p navigation, and Chrome UA', {
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
+  const iframeIsolation = await page.evaluate(async target => {
+    const blockedByPolicy = fn => {
+      try { fn(); return ''; }
+      catch (err) { return err && err.message || String(err); }
+    };
+
+    const sync = document.createElement('iframe');
+    document.body.appendChild(sync);
+    const syncRTC = blockedByPolicy(() => new sync.contentWindow.RTCPeerConnection());
+    const docRTC = blockedByPolicy(() => new sync.contentDocument.defaultView.RTCPeerConnection());
+
+    const modern = document.createElement('iframe');
+    document.body.append(modern);
+    const modernRTC = blockedByPolicy(() => new modern.contentWindow.RTCPeerConnection());
+    const websocketShared = modern.contentWindow.WebSocket === window.WebSocket;
+    const ws = new modern.contentWindow.WebSocket('ws://evil.example/socket');
+    const websocketURL = ws.url;
+    try { ws.close(); } catch {}
+
+    const observed = document.createElement('iframe');
+    document.body.appendChild(observed);
+    const attr = document.createAttribute('src');
+    attr.value = target;
+    observed.attributes.setNamedItem(attr);
+    const rewrittenSrc = await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 5000;
+      (function poll() {
+        const current = observed.attributes.getNamedItem('src')?.value || '';
+        if (current.startsWith(location.origin + '/p/')) { resolve(current); return; }
+        if (Date.now() > deadline) { reject(new Error(`src not rewritten: ${current}`)); return; }
+        setTimeout(poll, 25);
+      })();
+    });
+
+    sync.remove();
+    modern.remove();
+    observed.remove();
+    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, rewrittenSrc };
+  }, `http://e2e.test:${targetPort}/next`);
+  assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
+  assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
+  assert.equal(iframeIsolation.modernRTC, 'Blocked by ZeroProxy policy');
+  assert.equal(iframeIsolation.websocketShared, true);
+  assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
+  assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
+
   await page.click('#next');
   await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
   const next = await page.evaluate(() => ({

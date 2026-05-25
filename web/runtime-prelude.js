@@ -20,7 +20,8 @@
   const documentCookieRecords = [];
   initDocumentCookieRecords(documentCookie);
   const urlMeta = new WeakMap();
-  const iframeMeta = new WeakSet();
+  const networkContainmentMarker = Symbol.for('zeroproxy.network.contained');
+  const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
   const listenersKey = Symbol('zp.listeners');
   const workerBlobURLs = new Set();
 
@@ -365,11 +366,38 @@
     try {
       new MO(records => {
         for (const r of records) {
-          if (r.type === 'attributes') syncBaseElement(r.target);
-          else for (const n of r.addedNodes || []) syncBaseElement(n);
+          if (r.type === 'attributes') enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase());
+          else for (const n of r.addedNodes || []) { syncBaseElement(n); instrumentDescendantIframes(n); }
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction'] });
     } catch {}
+  }
+  function enforceObservedAttribute(el, key) {
+    if (!el || !key) return;
+    const tag = el.localName;
+    if (tag === 'base' && key === 'href') { syncBaseElement(el); return; }
+    if ((tag === 'iframe' || tag === 'frame') && key === 'srcdoc') {
+      const raw = Native.getAttribute.call(el, 'srcdoc');
+      if (raw && !raw.startsWith(injectSrcdoc(''))) Native.setAttribute.call(el, 'srcdoc', injectSrcdoc(String(raw)));
+      instrumentIframe(el);
+      return;
+    }
+    if (!isURLBearing(el, key)) return;
+    const raw = Native.getAttribute.call(el, key);
+    if (!raw || !isHTTPURL(raw) || String(raw).startsWith(proxyOrigin)) return;
+    let target;
+    try { target = targetURL(raw); } catch { return; }
+    const alreadyMapped = urlMeta.get(el) === target && Native.getAttribute.call(el, 'data-zp-target-url') === target;
+    urlMeta.set(el, target);
+    Native.setAttribute.call(el, 'data-zp-target-url', target);
+    if ((tag === 'iframe' || tag === 'frame') && key === 'src') {
+      Native.setAttribute.call(el, key, 'about:blank');
+      shareNavURL(target).then(u => Native.setAttribute.call(el, key, u)).catch(()=>{});
+      instrumentIframe(el);
+      return;
+    }
+    if (alreadyMapped) return;
+    Native.setAttribute.call(el, key, target);
   }
 
   function installWorkerHooks() {
@@ -402,26 +430,136 @@
   }
 
   function installIframeHooks(w) {
-    define(w.document, 'createElement', function(name, opts) { const el = Native.createElement(String(name), opts); if (/^i?frame$/i.test(String(name))) queueMicrotask(() => instrumentIframe(el)); return el; });
-    for (const [proto, name, nativeFn] of [[w.Node.prototype,'appendChild',Native.appendChild],[w.Node.prototype,'insertBefore',Native.insertBefore],[w.Node.prototype,'replaceChild',Native.replaceChild]]) {
-      define(proto, name, function(...args) { const ret = nativeFn.apply(this, args); for (const a of args) instrumentDescendantIframes(a); return ret; });
-    }
+    if (!w || !w.document || !w.Node || !w.Element) return;
+    try {
+      if (w[iframeHooksMarker]) return;
+      Object.defineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
+    } catch {}
+    const instrumentedWindows = new WeakSet();
+    const nativeCreateElement = w === root ? Native.createElement : w.document.createElement.bind(w.document);
+
+    installFrameAccessors(w.HTMLIFrameElement && w.HTMLIFrameElement.prototype);
+    installFrameAccessors(w.HTMLFrameElement && w.HTMLFrameElement.prototype);
+
+    define(w.document, 'createElement', function(name, opts) {
+      const el = nativeCreateElement(String(name), opts);
+      if (/^i?frame$/i.test(String(name))) instrumentDescendantIframes(el);
+      return el;
+    });
+
+    patchInsertion(w.Node.prototype, 'appendChild', w.Node.prototype.appendChild);
+    patchInsertion(w.Node.prototype, 'insertBefore', w.Node.prototype.insertBefore);
+    patchInsertion(w.Node.prototype, 'replaceChild', w.Node.prototype.replaceChild);
+    for (const method of ['append', 'prepend', 'before', 'after', 'replaceWith']) patchInsertion(w.Element.prototype, method, w.Element.prototype[method]);
+
     if (w.HTMLIFrameElement) { installFrameProp(w.HTMLIFrameElement.prototype, 'src'); installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc'); }
-    function installFrameProp(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get: d.get, set(v) { if (prop === 'srcdoc') d.set.call(this, injectSrcdoc(String(v))); else if (isHTTPURL(v)) { d.set.call(this, 'about:blank'); shareNavURL(v).then(u => d.set.call(this, u)).catch(()=>{}); } else d.set.call(this, v); instrumentIframe(this); }, configurable: false }); } catch {} }
+    if (w.HTMLFrameElement) installFrameProp(w.HTMLFrameElement.prototype, 'src');
+
+    function patchInsertion(proto, name, nativeFn) {
+      if (!proto || typeof nativeFn !== 'function') return;
+      define(proto, name, function(...args) {
+        const frames = collectIframesFromArgs(args);
+        const ret = nativeFn.apply(this, args);
+        instrumentFrameList(frames);
+        return ret;
+      });
+    }
+    function installFrameAccessors(proto) {
+      if (!proto) return;
+      const win = frameDescriptor(proto, 'contentWindow');
+      if (win && win.get) {
+        try { Object.defineProperty(proto, 'contentWindow', { get() { return containFrameWindow(win.get.call(this), this); }, configurable: false, enumerable: true }); } catch {}
+      }
+      const doc = frameDescriptor(proto, 'contentDocument');
+      if (doc && doc.get) {
+        try { Object.defineProperty(proto, 'contentDocument', { get() { const childDoc = doc.get.call(this); if (childDoc && childDoc.defaultView) containFrameWindow(childDoc.defaultView, this); return childDoc; }, configurable: false, enumerable: true }); } catch {}
+      }
+    }
+    function frameDescriptor(proto, prop) {
+      for (let p = proto; p; p = Object.getPrototypeOf(p)) {
+        const d = Object.getOwnPropertyDescriptor(p, prop);
+        if (d) return d;
+      }
+      return null;
+    }
+    function containFrameWindow(childWin, frame) {
+      if (!childWin) return childWin;
+      try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
+      instrumentedWindows.add(childWin);
+      try { installNetworkContainment(childWin); }
+      catch (e) {
+        instrumentedWindows.delete(childWin);
+        try { frame && frame.remove && frame.remove(); } catch {}
+        throw e;
+      }
+      return childWin;
+    }
+    function installFrameProp(proto, prop) {
+      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!d || !d.set) return;
+      try {
+        Object.defineProperty(proto, prop, {
+          get: d.get,
+          set(v) {
+            if (prop === 'srcdoc') d.set.call(this, injectSrcdoc(String(v)));
+            else if (isHTTPURL(v) && !String(v).startsWith(proxyOrigin)) {
+              d.set.call(this, 'about:blank');
+              shareNavURL(v).then(u => d.set.call(this, u)).catch(()=>{});
+            } else d.set.call(this, v);
+            instrumentIframe(this);
+          },
+          configurable: false
+        });
+      } catch {}
+    }
   }
-  function instrumentDescendantIframes(node) { if (!node || !node.querySelectorAll) { if (node && /^(IFRAME|FRAME)$/.test(node.nodeName)) instrumentIframe(node); return; } node.querySelectorAll('iframe,frame').forEach(instrumentIframe); }
-  function instrumentIframe(frame) { if (!frame || iframeMeta.has(frame)) return; iframeMeta.add(frame); try { if (!frame.getAttribute('src') && frame.contentWindow) installNetworkContainment(frame.contentWindow); } catch { try { frame.remove(); } catch {} } }
+  function collectIframesFromArgs(args) {
+    let frames = null;
+    for (const node of args) frames = collectIframes(node, frames);
+    return frames;
+  }
+  function collectIframes(node, frames) {
+    if (!node || typeof node !== 'object') return frames;
+    if (/^(IFRAME|FRAME)$/.test(node.nodeName || '')) {
+      if (!frames) frames = [];
+      frames.push(node);
+    }
+    if (node.querySelectorAll) {
+      const descendants = node.querySelectorAll('iframe,frame');
+      for (let i = 0; i < descendants.length; i++) {
+        if (!frames) frames = [];
+        frames.push(descendants[i]);
+      }
+    }
+    return frames;
+  }
+  function instrumentFrameList(frames) { if (frames) for (const frame of frames) instrumentIframe(frame); }
+  function instrumentDescendantIframes(node) { instrumentFrameList(collectIframes(node, null)); }
+  function instrumentIframe(frame) {
+    if (!frame || !/^(IFRAME|FRAME)$/.test(frame.nodeName || '')) return;
+    try {
+      const src = Native.getAttribute.call(frame, 'src');
+      if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow) installNetworkContainment(frame.contentWindow);
+    } catch { try { frame.remove(); } catch {} }
+  }
   function installNetworkContainment(w) {
+    if (!w) return;
+    try { if (w[networkContainmentMarker]) return; } catch {}
     // Native fetch is intentionally left intact; the Service Worker owns request capture.
     installNavigatorIdentity(w);
-    if (root.WebSocket) define(w, 'WebSocket', root.WebSocket);
+    if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
-    installBlockers(w);
+    installIframeHooks(w);
+    installBlockers(w, true);
+    try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
   }
 
-  function installBlockers(w) {
+  function installBlockers(w, strict = false) {
     const blockCtor = function(){ throw normalizedError('NotSupportedError'); };
-    for (const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport','WebSocketStream']) define(w, name, blockCtor);
+    for (const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport','WebSocketStream']) {
+      const ok = define(w, name, blockCtor);
+      if (strict && name in w && !ok) throw normalizedError('SecurityError');
+    }
     const nav = w.navigator;
     if (nav) {
       for (const name of ['serial','hid','usb','bluetooth','requestMIDIAccess','credentials','geolocation','clipboard','wakeLock']) { try { Object.defineProperty(nav, name, { get(){ throw normalizedError('NotSupportedError'); }, configurable: false }); } catch {} }
