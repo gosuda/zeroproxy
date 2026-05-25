@@ -147,14 +147,28 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 	return out.Flush()
 }
 
+type bootConfig struct {
+	TabID          string `json:"tabId"`
+	EntryID        string `json:"entryId"`
+	TargetURL      string `json:"targetUrl"`
+	DocumentCookie string `json:"documentCookie"`
+	RuntimeToken   string `json:"runtimeToken"`
+}
+
 func runtimePrelude(opt Options) string {
-	boot := map[string]string{
-		"tabId": opt.TabID, "entryId": opt.EntryID,
-		"targetUrl": opt.TargetURL.String(), "documentCookie": opt.DocumentCookie,
-		"runtimeToken": opt.RuntimeToken,
-	}
-	b, _ := json.Marshal(boot)
-	return `<script nonce="zp" src="/__zp/zp-core.js"></script><script nonce="zp">Object.defineProperty(window,"__ZP_BOOT",{value:` + string(b) + `,configurable:true});try{document.currentScript.remove()}catch{}</script><script nonce="zp" src="/__zp/runtime-prelude.js"></script>`
+	bootJSON, _ := json.Marshal(bootConfig{
+		TabID:          opt.TabID,
+		EntryID:        opt.EntryID,
+		TargetURL:      opt.TargetURL.String(),
+		DocumentCookie: opt.DocumentCookie,
+		RuntimeToken:   opt.RuntimeToken,
+	})
+	var b strings.Builder
+	b.Grow(len(bootJSON) + 170)
+	b.WriteString(`<script nonce=zp src=/__zp/zp-core.js></script><script nonce=zp id=__zp-boot type=application/json>`)
+	b.Write(bootJSON)
+	b.WriteString(`</script><script nonce=zp src=/__zp/runtime-prelude.js></script>`)
+	return b.String()
 }
 
 func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
@@ -163,6 +177,9 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	var dataTarget string
 	for _, a := range tok.Attr {
 		key := strings.ToLower(a.Key)
+		if key == "data-zp-target-url" || key == "data-zp-blocked-url" {
+			continue
+		}
 		if tag == "a" && key == "ping" {
 			continue
 		}
@@ -173,8 +190,7 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 		}
 		if shouldRewriteAttr(tag, key) {
 			trimmed := strings.TrimSpace(a.Val)
-			lower := strings.ToLower(trimmed)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(lower, "javascript:") {
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 				attrs = append(attrs, a)
 				continue
 			}
@@ -214,14 +230,43 @@ func isDocumentNavigationAttr(tag, key string) bool {
 	return (tag == "a" || tag == "area" || tag == "form" || tag == "input" || tag == "button" || tag == "iframe" || tag == "frame") && shouldRewriteAttr(tag, key)
 }
 
+func hasExecutableURLScheme(s string) bool {
+	scheme, ok := urlScheme(s)
+	return ok && (strings.EqualFold(scheme, "javascript") || strings.EqualFold(scheme, "data") || strings.EqualFold(scheme, "vbscript"))
+}
+
+func urlScheme(s string) (string, bool) {
+	if s == "" || !isASCIILetter(s[0]) {
+		return "", false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if c == ':' {
+			return s[:i], true
+		}
+		if isASCIILetter(c) || isASCIIDigit(c) || c == '+' || c == '-' || c == '.' {
+			continue
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func isASCIILetter(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+func isASCIIDigit(c byte) bool {
+	return '0' <= c && c <= '9'
+}
+
 func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" || strings.HasPrefix(s, "#") {
 		return raw, "", false
 	}
-	lower := strings.ToLower(s)
-	if strings.HasPrefix(lower, "javascript:") {
-		return raw, "", false
+	if hasExecutableURLScheme(s) {
+		return "#", "", false
 	}
 	u, err := url.Parse(s)
 	if err != nil {
@@ -254,8 +299,13 @@ func baseSyncScript(raw string, opt Options) string {
 	if abs.Scheme != "http" && abs.Scheme != "https" {
 		return ""
 	}
-	b, _ := json.Marshal(abs.String())
-	return `<script nonce="zp">window.__ZP_SET_BASE&&window.__ZP_SET_BASE(` + string(b) + `);</script>`
+	baseJSON, _ := json.Marshal(abs.String())
+	var b strings.Builder
+	b.Grow(len(baseJSON) + 70)
+	b.WriteString(`<script nonce=zp>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(`)
+	b.Write(baseJSON)
+	b.WriteString(`);</script>`)
+	return b.String()
 }
 
 func shouldDropToken(tok xhtml.Token) bool {

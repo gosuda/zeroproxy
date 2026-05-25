@@ -5,12 +5,12 @@
   if (root[marker]) return;
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
-  const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, root.__ZP_BOOT || {});
+  const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, readBootConfig());
   const runtimeToken = String(boot.runtimeToken || '');
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
-  try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
+  clearBootConfig();
   const Native = captureNative(root);
   const toStringMap = new WeakMap();
   const toStringMaskedPrototypes = new WeakSet();
@@ -31,6 +31,27 @@
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
 
+
+  function readBootConfig() {
+    const d = root.document;
+    const el = d && d.getElementById && d.getElementById('__zp-boot');
+    if (el) {
+      try {
+        const parsed = JSON.parse(el.textContent || '{}');
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch {}
+    }
+    return root.__ZP_BOOT || {};
+  }
+
+  function clearBootConfig() {
+    const d = root.document;
+    const el = d && d.getElementById && d.getElementById('__zp-boot');
+    if (el) {
+      try { el.remove(); } catch {}
+    }
+    try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
+  }
   function captureNative(w) {
     const d = w.document;
     return {
@@ -117,6 +138,9 @@
     define(proto, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
   }
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
+  function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
+  function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : '#'; }
+  function blockExecutableURL(el, key, raw) { urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw).trim()); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el); }
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
@@ -206,7 +230,7 @@
   function installBeacon() { if (!navigator.sendBeacon || !Native.navigatorSendBeacon) return; define(navigator, 'sendBeacon', (url, data) => Native.navigatorSendBeacon(targetURL(url), data)); }
 
   function installNavigationTraps() {
-    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); navigateToTarget(nav.href); }, true);
+    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.href) navigateToTarget(nav.href); }, true);
     document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
     if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
@@ -249,7 +273,8 @@
           if (target && target !== '_self') return null;
         }
         const raw = isAnchor ? el.getAttribute('data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
-        if (!raw || raw[0] === '#' || /^javascript:/i.test(raw)) continue;
+        if (!raw || raw[0] === '#') continue;
+        if (hasExecutableURLScheme(raw)) return { href: '', element: el };
         if (isHTTPURL(raw)) return { href: raw, element: el };
       }
       return null;
@@ -376,16 +401,19 @@
         updateVirtualBase(v);
         return Native.setAttribute.call(this, k, v);
       }
-      if (isURLBearing(this, key) && isHTTPURL(v)) {
-        const t = targetURL(v);
-        urlMeta.set(this, t);
-        Native.setAttribute.call(this, 'data-zp-target-url', t);
-        if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'src') {
-          Native.setAttribute.call(this, k, 'about:blank');
-          shareNavURL(t).then(u => Native.setAttribute.call(this, k, u)).catch(()=>{});
-          return;
+      if (isURLBearing(this, key)) {
+        if (hasExecutableURLScheme(v)) return blockExecutableURL(this, key, v);
+        if (isHTTPURL(v)) {
+          const t = targetURL(v);
+          urlMeta.set(this, t);
+          Native.setAttribute.call(this, 'data-zp-target-url', t);
+          if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'src') {
+            Native.setAttribute.call(this, k, 'about:blank');
+            shareNavURL(t).then(u => Native.setAttribute.call(this, k, u)).catch(()=>{});
+            return;
+          }
+          return Native.setAttribute.call(this, k, t);
         }
-        return Native.setAttribute.call(this, k, t);
       }
       if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
       return Native.setAttribute.call(this, k, v);
@@ -398,7 +426,8 @@
   }
   function isURLBearing(el, key) { const tag = el.localName; return key === 'href' && (tag === 'a' || tag === 'area') || key === 'action' && tag === 'form' || key === 'formaction' && (tag === 'input' || tag === 'button') || key === 'src' && (tag === 'iframe' || tag === 'frame'); }
   function transformHTML(s) { return s.replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
-  function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script>Object.defineProperty(window,"__ZP_BOOT",{value:' + JSON.stringify(boot).replace(/</g,'\\u003c') + ',configurable:true});try{document.currentScript.remove()}catch{}<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
+  function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
+  function bootJSON() { return JSON.stringify(boot).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function baseSyncScript(raw) { return '<script>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(String(raw)).replace(/</g,'\\u003c') + ');<\/script>'; }
   function syncBaseElement(node) {
     if (!node) return;
@@ -430,6 +459,7 @@
     }
     if (!isURLBearing(el, key)) return;
     const raw = Native.getAttribute.call(el, key);
+    if (hasExecutableURLScheme(raw)) { blockExecutableURL(el, key, raw); return; }
     if (!raw || !isHTTPURL(raw) || String(raw).startsWith(proxyOrigin)) return;
     let target;
     try { target = targetURL(raw); } catch { return; }

@@ -1,6 +1,7 @@
 package htmltx
 
 import (
+	"encoding/json"
 	"net/url"
 	"strings"
 	"testing"
@@ -25,15 +26,68 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 	}
 }
 
-func TestTransformLeavesJavascriptAndFragmentsUnwrapped(t *testing.T) {
+func TestTransformPreservesFragmentsAndBlocksExecutableNavigationSchemes(t *testing.T) {
 	target, _ := url.Parse("https://example.com/")
-	out, err := Transform(strings.NewReader(`<body><a href="#x">hash</a><a href="javascript:alert(1)">js</a></body>`), Options{TabID: "t", EntryID: "e", TargetURL: target})
+	out, err := Transform(strings.NewReader(`<body><a href="#x">hash</a><a href="javascript:alert(1)" data-zp-target-url="https://attacker.test/">js</a><a href="DATA:text/html,hello">data</a><form action="vbscript:msgbox(1)"></form><iframe src="data:text/html,frame"></iframe></body>`), Options{TabID: "t", EntryID: "e", TargetURL: target})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(out)
-	if !strings.Contains(s, `href="#x"`) || !strings.Contains(s, `href="javascript:alert(1)"`) {
-		t.Fatalf("expected fragment/javascript to remain inert: %s", s)
+	if !strings.Contains(s, `href="#x"`) {
+		t.Fatalf("expected fragment link to remain local: %s", s)
+	}
+	for _, forbidden := range []string{`href="javascript:`, `href="DATA:`, `action="vbscript:`, `src="data:`} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("executable navigation scheme remained in active attribute %q: %s", forbidden, s)
+		}
+	}
+	if strings.Contains(s, `https://attacker.test/`) {
+		t.Fatalf("target-supplied ZeroProxy control attribute remained: %s", s)
+	}
+	if got := strings.Count(s, `data-zp-blocked-url=`); got != 4 {
+		t.Fatalf("blocked URL marker count = %d, want 4 in %s", got, s)
+	}
+}
+
+func TestRuntimePreludeEmbedsBootAsInertJSON(t *testing.T) {
+	target, _ := url.Parse(`https://example.com/path?q="</script><script>evil()</script>&x=1`)
+	tabID := `tab"</script><script>evil()</script>`
+	out, err := Transform(strings.NewReader(`<body></body>`), Options{
+		TabID:          tabID,
+		EntryID:        "entry",
+		TargetURL:      target,
+		DocumentCookie: `a="</script>`,
+		RuntimeToken:   `tok<&>`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, `Object.defineProperty(window,"__ZP_BOOT"`) {
+		t.Fatalf("boot config was embedded in executable JavaScript: %s", s)
+	}
+	const open = `<script nonce=zp id=__zp-boot type=application/json>`
+	start := strings.Index(s, open)
+	if start < 0 {
+		t.Fatalf("missing inert boot JSON script in %s", s)
+	}
+	start += len(open)
+	end := strings.Index(s[start:], `</script>`)
+	if end < 0 {
+		t.Fatalf("unterminated boot JSON script in %s", s)
+	}
+	bootRaw := s[start : start+end]
+	for _, unsafe := range []string{"<", ">", "&"} {
+		if strings.Contains(bootRaw, unsafe) {
+			t.Fatalf("boot JSON contains raw %q in %s", unsafe, bootRaw)
+		}
+	}
+	var boot map[string]string
+	if err := json.Unmarshal([]byte(bootRaw), &boot); err != nil {
+		t.Fatalf("boot JSON did not decode: %v in %s", err, bootRaw)
+	}
+	if boot["tabId"] != tabID || boot["targetUrl"] != target.String() || boot["runtimeToken"] != `tok<&>` {
+		t.Fatalf("boot JSON mismatch: %#v", boot)
 	}
 }
 

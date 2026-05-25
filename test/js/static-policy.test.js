@@ -17,6 +17,14 @@ test('runtime avoids stale escape gaps and forbidden harness markers', () => {
   assert.ok(rt.includes('Function.prototype.toString'));
 });
 
+test('runtime reads boot config from inert JSON script', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.includes("getElementById('__zp-boot')"));
+  assert.ok(rt.includes('JSON.parse(el.textContent'));
+  assert.ok(rt.includes('type="application/json"'));
+  assert.equal(rt.includes('Object.defineProperty(window,"__ZP_BOOT"'), false);
+});
+
 test('runtime installs required escape-vector hooks', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   for (const needle of [
