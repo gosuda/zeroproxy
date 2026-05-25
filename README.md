@@ -121,7 +121,7 @@ These checks cover source/unit policy invariants, buildability, and a local-brow
 | `web/runtime-prelude.js`, `web/worker-prelude.js` | Target-realm containment hooks and worker bootstrap. |
 | `cmd/wasm-kernel` | Go WASM transport kernel exposed to the Service Worker. |
 | `cmd/zeroproxy-server` | Static asset server and Gorilla WebSocket/yamux-to-Tor relay. |
-| `internal/http1`, `internal/socks5`, `internal/utlskernel`, `internal/wsproto`, `internal/yamuxconn`, `internal/wsconn` | Target transport path. |
+| `internal/zphttp`, `internal/socks5`, `internal/utlskernel`, `internal/wsproto`, `internal/yamuxconn`, `internal/wsconn` | Target transport path. |
 | `internal/htmltx`, `internal/headers`, `internal/cookiejar`, `internal/shareurl`, `internal/zpiso` | HTML rewriting, response header policy, cookie handling, share URL envelope, Tor isolation tokens. |
 | `test/js`, `test/e2e`, `internal/*/*_test.go` | JavaScript source-policy tests, Puppeteer browser E2E tests, and Go unit tests. |
 | `.github/workflows/ci.yml` | GitHub Actions CI for Go tests, JavaScript/Puppeteer tests, WASM build, and relay server build. |

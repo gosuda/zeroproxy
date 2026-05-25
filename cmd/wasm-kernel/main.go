@@ -18,20 +18,20 @@ import (
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/headers"
 	"github.com/gosuda/zeroproxy/internal/htmltx"
-	"github.com/gosuda/zeroproxy/internal/http1"
 	"github.com/gosuda/zeroproxy/internal/swhttp"
 	"github.com/gosuda/zeroproxy/internal/wsconn"
 	"github.com/gosuda/zeroproxy/internal/wsproto"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
+	"github.com/gosuda/zeroproxy/internal/zphttp"
 )
 
 type Kernel struct {
 	mu     sync.Mutex
-	engine *http1.Engine
-	tabs   map[string]*http1.TabState
+	engine *zphttp.Engine
+	tabs   map[string]*zphttp.TabState
 }
 
-func NewKernel() *Kernel { return &Kernel{tabs: make(map[string]*http1.TabState)} }
+func NewKernel() *Kernel { return &Kernel{tabs: make(map[string]*zphttp.TabState)} }
 
 func main() {
 	k := NewKernel()
@@ -73,7 +73,7 @@ func (k *Kernel) ensure(ctx context.Context) error {
 	}
 	k.mu.Lock()
 	if k.engine == nil {
-		k.engine = &http1.Engine{Mux: sess}
+		k.engine = &zphttp.Engine{Mux: sess}
 		sess = nil
 	}
 	k.mu.Unlock()
@@ -228,11 +228,11 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 	})
 }
 
-func (k *Kernel) tabFor(req *http.Request) *http1.TabState {
+func (k *Kernel) tabFor(req *http.Request) *zphttp.TabState {
 	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"))
 }
 
-func (k *Kernel) tabFromValues(tabID, keyB64 string) *http1.TabState {
+func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 	if tabID == "" {
 		tabID = "default"
 	}
@@ -246,7 +246,7 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string) *http1.TabState {
 		key = make([]byte, 32)
 		_, _ = rand.Read(key)
 	}
-	t := &http1.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key}
+	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key}
 	k.tabs[tabID] = t
 	return t
 }

@@ -56,7 +56,7 @@ Browser tab
   │       ├─ yamux: multiplexed target streams over the wsconn session
   │       ├─ socks5: DOMAINNAME CONNECT + SOCKS auth isolation
   │       ├─ utls: target TLS client in WASM
-  │       ├─ http1: net/http + net/textproto based HTTP/1.1 engine
+  │       ├─ zphttp: target HTTP/2 and HTTP/1.1 engine
   │       ├─ htmltx: x/net/html stream transform
   │       │   ├─ runtime prelude injection
   │       │   ├─ topbar injection
@@ -313,7 +313,7 @@ internal/zpiso/
   token.go                   // stream isolation token derivation
 internal/utlskernel/
   dial.go                    // uTLS UClient over yamux+socks5
-internal/http1/
+internal/zphttp/
   roundtrip.go               // net/http Request + net/textproto response parse
   redirect.go                // internal redirect engine
 internal/htmltx/

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gosuda/zeroproxy/internal/http1"
+	"github.com/gosuda/zeroproxy/internal/zphttp"
 )
 
 const guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -34,7 +34,7 @@ type Conn struct {
 	mu sync.Mutex
 }
 
-func Dial(ctx context.Context, engine *http1.Engine, target *url.URL, protocols []string, tab *http1.TabState) (*Conn, *http.Response, error) {
+func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState) (*Conn, *http.Response, error) {
 	if target.Scheme != "ws" && target.Scheme != "wss" {
 		return nil, nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
 	}
@@ -59,7 +59,7 @@ func Dial(ctx context.Context, engine *http1.Engine, target *url.URL, protocols 
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	req.Header.Set("Sec-WebSocket-Key", key)
-	req.Header.Set("User-Agent", http1.TargetUserAgent)
+	req.Header.Set("User-Agent", zphttp.TargetUserAgent)
 	if len(protocols) > 0 {
 		req.Header.Set("Sec-WebSocket-Protocol", strings.Join(protocols, ", "))
 	}
