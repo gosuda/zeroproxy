@@ -1,35 +1,70 @@
 # ZeroProxy
 
-ZeroProxy는 설치 없이 브라우저에서 동작하는 클라이언트 보유형 가상 브라우징 엔진입니다. 목표는 대상 사이트 트래픽을 브라우저의 직접 네트워크가 아니라 `Service Worker -> Go WASM -> WebSocket/yamux -> Tor SOCKS5 -> uTLS -> HTTP/1.1` 경로로만 내보내는 것입니다.
+ZeroProxy is a client-owned virtual browsing prototype that runs target pages on the proxy origin without a browser extension. Its design goal is that target-site HTTP, TLS, and WebSocket traffic leaves only through this path:
 
-## 현재 진행상황
+```text
+Service Worker -> Go WASM kernel -> WebSocket/yamux -> Tor SOCKS5 -> uTLS -> HTTP/1.1
+```
 
-상태: **Phase 0 프로토타입 / 부분 구현**.
+The relay server terminates only the browser WebSocket/yamux pipe. Target HTTP parsing, redirects, cookies, header policy, HTML rewriting, and target WebSocket framing are owned by the Go WASM kernel and browser-side runtime.
 
-구현된 핵심 기능:
+## Status
 
-- `/p/<encrypted>#k=<key>` 공유/활성 브라우징 라우트: AES-256-CBC + HMAC-SHA256 envelope, HKDF 키 분리, HMAC 검증 후 복호화.
-- 모든 controlled request를 분류하고 unknown을 차단하는 Service Worker.
-- Go WASM 커널의 `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, `__zp_cookie_set` export.
-- 단일 WebSocket pipe 위의 yamux, Tor SOCKS5 DOMAINNAME CONNECT, uTLS, 직접 HTTP/1.1 round trip.
-- HTML tokenizer transform: runtime prelude 주입, 문서 navigation URL laundering, 위험 태그/헤더 제거.
-- Runtime prelude: fetch/XHR/WebSocket/EventSource/sendBeacon, navigation/form/history/location, storage, worker/iframe, WebRTC/device API 방어 훅.
-- 서버의 `/__zp/ws-pipe` relay 및 정적 자산 제공.
+Status: **Phase 0 prototype / partial implementation**.
 
-아직 완료로 볼 수 없는 부분:
+Implemented core spine:
 
-- 동적 iframe clean-realm, worker, 직접 navigation escape를 검증하는 브라우저 E2E 테스트가 없습니다.
-- iframe 생성 경로 일부는 `PLAN.md`가 요구하는 완전한 동기식 방어 수준까지 강화되어야 합니다.
-- XHR/WebSocket/EventSource/FormData 등 runtime API fidelity는 프로토타입 수준입니다.
-- JS `Response` 생성 전 target body를 버퍼링하므로 완전한 streaming 응답 경로는 아닙니다.
-- encrypted IndexedDB persistence는 구현되어 있지 않습니다.
-- Tor daemon 배포 구성과 실제 Tor egress E2E 검증이 필요합니다.
+- Encrypted active/share route format: `/p/<encrypted>#k=<key>`.
+- AES-256-CBC + HMAC-SHA256 URL envelope with HKDF-separated encryption/MAC keys and HMAC verification before decryption.
+- Service Worker request classifier that handles every controlled request and blocks unknown requests instead of falling back to native `fetch(event.request)`.
+- Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
+- A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, and direct HTTP/1.1 request/response handling.
+- Tokenizer-based HTML transform that injects the runtime prelude, launders document navigation URLs through encrypted `/p` routes, drops dangerous tags and headers, and handles `srcdoc`.
+- Runtime prelude hooks for `fetch`, XHR, WebSocket, EventSource, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs.
+- Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
+- Go and JavaScript share URL implementations that use the same envelope format.
 
-자세한 구조와 `PLAN.md` 대비 구현 평가는 [`ARCHITECTURE.md`](./ARCHITECTURE.md)에 정리되어 있습니다.
+Not complete enough for production or high-assurance acceptance:
 
-## 검증
+- Browser E2E tests do not yet prove dynamic iframe, worker, direct navigation, native WebSocket, WebRTC/WebTransport, device API, form, and unclassified subresource non-escape.
+- Dynamic iframe clean-realm containment is still weaker than the synchronous hardening required for acceptance.
+- Runtime API compatibility is prototype-level for XHR, WebSocket, EventSource, uploads, and descriptor edge cases.
+- JavaScript `Response` construction still buffers target bodies instead of streaming all responses end-to-end.
+- Encrypted IndexedDB persistence is not implemented.
+- Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
 
-현재 저장소에서 확인한 명령:
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary.
+
+## Requirements
+
+- Go toolchain matching `go.mod`.
+- Node.js for the JavaScript tests.
+- A Tor SOCKS5 listener configured with stream isolation.
+
+Example Tor setting:
+
+```text
+SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
+```
+
+## Run locally
+
+Build the WASM kernel and start the relay server:
+
+```sh
+GOOS=js GOARCH=wasm go build -o bin/kernel.wasm ./cmd/wasm-kernel
+go run ./cmd/zeroproxy-server -addr :8080 -kernel bin/kernel.wasm -socks 127.0.0.1:9050
+```
+
+Open the browser shell on the proxy origin:
+
+```text
+http://proxy.localhost:8080/
+```
+
+The shell accepts only `http:` and `https:` targets. It creates an encrypted `/p/<encrypted>#k=<key>` route and then removes the fragment before activating the route with the Service Worker.
+
+## Verification commands
 
 ```sh
 go test ./...
@@ -38,15 +73,17 @@ GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel
 go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server
 ```
 
-## 실행 개요
+These checks cover source/unit policy invariants and buildability. They do not prove browser E2E non-escape, Tor deployment behavior, or production traffic compatibility.
 
-```sh
-GOOS=js GOARCH=wasm go build -o bin/kernel.wasm ./cmd/wasm-kernel
-go run ./cmd/zeroproxy-server -addr :8080 -kernel bin/kernel.wasm -socks 127.0.0.1:9050
-```
+## Repository map
 
-Tor는 다음과 같이 stream isolation이 켜진 SOCKS5 포트가 필요합니다.
-
-```text
-SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
-```
+| Path | Purpose |
+|---|---|
+| `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, fixed CSP helper. |
+| `web/sw.js` | Service Worker classifier, in-memory tab state, runtime API bridge, WASM kernel calls. |
+| `web/runtime-prelude.js`, `web/worker-prelude.js` | Target-realm containment hooks and worker bootstrap. |
+| `cmd/wasm-kernel` | Go WASM transport kernel exposed to the Service Worker. |
+| `cmd/zeroproxy-server` | Static asset server and WebSocket/yamux-to-Tor relay. |
+| `internal/http1`, `internal/socks5`, `internal/utlskernel`, `internal/wsproto`, `internal/yamuxconn`, `internal/wsconn` | Target transport path. |
+| `internal/htmltx`, `internal/headers`, `internal/cookiejar`, `internal/shareurl`, `internal/zpiso` | HTML rewriting, response header policy, cookie handling, share URL envelope, Tor isolation tokens. |
+| `test/js`, `internal/*/*_test.go` | JavaScript source-policy tests and Go unit tests. |
