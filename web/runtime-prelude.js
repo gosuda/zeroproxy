@@ -9,6 +9,7 @@
   try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
   const Native = captureNative(root);
   const proxyOrigin = new URL(root.location.href).origin;
+  const routeKey = new URL(root.location.href).pathname.startsWith('/p/') ? new URL(root.location.href).pathname.slice(3) : '';
   let virtualURL = new URL(boot.targetUrl);
   let documentCookie = String(boot.documentCookie || '');
   const documentCookieRecords = [];
@@ -71,7 +72,6 @@
   function isHTTPURL(raw) { try { const u = new URL(String(raw), virtualURL.href); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function targetURL(raw, base = virtualURL.href) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = virtualURL.href) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
-  function wrappedNavURL(raw, base = virtualURL.href) { return '/v/' + encodeURIComponent(boot.tabId) + '/n/' + ZP.encodeTargetURL(targetURL(raw, base)); }
   function shareNavURL(raw, base = virtualURL.href) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
   function navigateToTarget(raw, replace = false, base = virtualURL.href) { shareNavURL(raw, base).then(u => replace ? Native.locationReplace.call(location, u) : Native.locationAssign.call(location, u)).catch(()=>{}); }
   function postMessageToSW(message, transfer) {
@@ -179,18 +179,18 @@
 
   function installNavigationTraps() {
     document.addEventListener('click', ev => { const a = ev.target && ev.target.closest && ev.target.closest('a[href],area[href]'); if (!a || ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || a.target && a.target !== '_self' || a.hasAttribute('download')) return; const href = a.getAttribute('data-zp-target-url') || a.getAttribute('href'); if (!href || href.startsWith('#') || /^javascript:/i.test(href)) return; ev.preventDefault(); navigateToTarget(href); }, true);
-    document.addEventListener('submit', ev => { const f = ev.target; if (!f || !f.action) return; rewriteFormAction(f); }, true);
-    if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { rewriteFormAction(this); return Native.formSubmit.call(this); });
-    if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { rewriteFormAction(this, submitter); return Native.formRequestSubmit.call(this, submitter); });
+    document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
+    if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
+    if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { navigateToTarget(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { navigateToTarget(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload.call(location); });
-    define(history, 'pushState', function(state, title, url) { if (url != null) virtualURL = sameOriginHistoryURL(url); const entryId = 'e' + ZP.randomId(); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, entryId, targetUrl: virtualURL.href, replace: false }).catch(()=>{}); return Native.historyPush(state, title, location.pathname); });
-    define(history, 'replaceState', function(state, title, url) { if (url != null) virtualURL = sameOriginHistoryURL(url); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, entryId: boot.entryId, targetUrl: virtualURL.href, replace: true }).catch(()=>{}); return Native.historyReplace(state, title, location.pathname); });
+    define(history, 'pushState', function(state, title, url) { if (url != null) virtualURL = sameOriginHistoryURL(url); const entryId = 'e' + ZP.randomId(); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId, targetUrl: virtualURL.href, replace: false }).catch(()=>{}); return Native.historyPush(state, title, location.pathname); });
+    define(history, 'replaceState', function(state, title, url) { if (url != null) virtualURL = sameOriginHistoryURL(url); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId: boot.entryId, targetUrl: virtualURL.href, replace: true }).catch(()=>{}); return Native.historyReplace(state, title, location.pathname); });
     window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }).then(reply => { virtualURL = new URL(reply.targetUrl); if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: boot.entryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
-    function rewriteFormAction(form, submitter) { const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href; const wrapped = wrappedNavURL(raw); urlMeta.set(form, targetURL(raw)); form.setAttribute('action', wrapped); if (submitter && submitter.setAttribute) submitter.setAttribute('formaction', wrapped); }
+    function submitForm(form, submitter) { const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href; const method = String(submitter && submitter.getAttribute && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase(); const target = new URL(targetURL(raw)); urlMeta.set(form, target.href); if (method === 'GET') { try { const data = submitter ? new Native.FormData(form, submitter) : new Native.FormData(form); const qs = new URLSearchParams(); for (const [k, v] of data) qs.append(k, String(v)); const encoded = qs.toString(); if (encoded) target.search = target.search ? target.search + '&' + encoded : encoded; } catch {} navigateToTarget(target.href); return; } internalFetch(target.href, { method, body: new Native.FormData(form) }).then(r => r.text()).then(html => { document.open(); document.write(html); document.close(); }).catch(()=>{}); }
     function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
   }
 
@@ -213,16 +213,13 @@
     const locGet = p => () => new URL(virtualURL.href)[p];
     for (const p of ['href','protocol','host','hostname','port','pathname','search','hash','origin']) defineAccessor(w.Location && w.Location.prototype, p, locGet(p), p === 'href' ? v => { navigateToTarget(v); } : undefined);
     define(w.Location && w.Location.prototype, 'toString', function(){ return virtualURL.href; });
-    defineAccessor(w.Document && w.Document.prototype, 'URL', () => virtualURL.href);
-    defineAccessor(w.Document && w.Document.prototype, 'documentURI', () => virtualURL.href);
-    defineAccessor(w.Document && w.Document.prototype, 'baseURI', () => virtualURL.href);
     defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(()=>{}); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');
     installURLProp(w.HTMLInputElement && w.HTMLInputElement.prototype, 'formAction');
     installURLProp(w.HTMLButtonElement && w.HTMLButtonElement.prototype, 'formAction');
-    function installURLProp(proto, prop) { if (!proto) return; defineAccessor(proto, prop, function(){ return urlMeta.get(this) || this.getAttribute('data-zp-target-url') || targetURL(this.getAttribute(prop === 'formAction' ? 'formaction' : prop) || virtualURL.href); }, function(v){ const t = targetURL(v); urlMeta.set(this, t); this.setAttribute('data-zp-target-url', t); this.setAttribute(prop === 'formAction' ? 'formaction' : prop, wrappedNavURL(t)); }); }
+    function installURLProp(proto, prop) { if (!proto) return; defineAccessor(proto, prop, function(){ return urlMeta.get(this) || this.getAttribute('data-zp-target-url') || targetURL(this.getAttribute(prop === 'formAction' ? 'formaction' : prop) || virtualURL.href); }, function(v){ const t = targetURL(v); urlMeta.set(this, t); this.setAttribute('data-zp-target-url', t); this.setAttribute(prop === 'formAction' ? 'formaction' : prop, t); }); }
   }
   function initDocumentCookieRecords(cookieString) {
     for (const part of String(cookieString || '').split(/;\s*/)) {
@@ -300,14 +297,14 @@
   }
 
   function installDOMHooks(w) {
-    define(w.Element.prototype, 'setAttribute', function(k, v) { const key = String(k).toLowerCase(); if (isURLBearing(this, key) && isHTTPURL(v)) { const t = targetURL(v); urlMeta.set(this, t); Native.setAttribute.call(this, 'data-zp-target-url', t); if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'src') { Native.setAttribute.call(this, k, 'about:blank'); shareNavURL(t).then(u => Native.setAttribute.call(this, k, u)).catch(()=>{}); return; } return Native.setAttribute.call(this, k, wrappedNavURL(t)); } if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v))); return Native.setAttribute.call(this, k, v); });
+    define(w.Element.prototype, 'setAttribute', function(k, v) { const key = String(k).toLowerCase(); if (isURLBearing(this, key) && isHTTPURL(v)) { const t = targetURL(v); urlMeta.set(this, t); Native.setAttribute.call(this, 'data-zp-target-url', t); if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'src') { Native.setAttribute.call(this, k, 'about:blank'); shareNavURL(t).then(u => Native.setAttribute.call(this, k, u)).catch(()=>{}); return; } return Native.setAttribute.call(this, k, t); } if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v))); return Native.setAttribute.call(this, k, v); });
     define(w.Element.prototype, 'getAttribute', function(k) { const key = String(k).toLowerCase(); if (isURLBearing(this, key)) return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k); return Native.getAttribute.call(this, k); });
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { return Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); });
     function patchHTMLSetter(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get: d.get, set(v) { d.set.call(this, transformHTML(String(v))); instrumentDescendantIframes(this); }, configurable: false }); } catch {} }
   }
   function isURLBearing(el, key) { const tag = el.localName; return key === 'href' && (tag === 'a' || tag === 'area') || key === 'action' && tag === 'form' || key === 'formaction' && (tag === 'input' || tag === 'button') || key === 'src' && (tag === 'iframe' || tag === 'frame'); }
-  function transformHTML(s) { return s.replace(/(<(?:a|area)\b[^>]*\shref=["']?)([^"'\s>]+)/ig, (_, p, u) => p + wrappedNavURL(u)).replace(/(<form\b[^>]*\saction=["']?)([^"'\s>]+)/ig, (_, p, u) => p + wrappedNavURL(u)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
+  function transformHTML(s) { return s.replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
   function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script>Object.defineProperty(window,"__ZP_BOOT",{value:' + JSON.stringify(boot).replace(/</g,'\\u003c') + ',configurable:true});<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
 
   function installWorkerHooks() {

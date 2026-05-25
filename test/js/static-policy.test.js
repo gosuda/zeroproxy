@@ -67,3 +67,12 @@ test('service worker names every required safe error class', () => {
     assert.ok(core.includes(code), `missing ${code}`);
   }
 });
+
+test('active browsing emits only encrypted p routes', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.equal(sw.includes('/v/'), false, 'service worker must not produce legacy /v routes');
+  assert.equal(rt.includes('/v/'), false, 'runtime must not produce legacy /v routes');
+  assert.ok(sw.includes('PROXY_DOCUMENT'), 'service worker must handle /p documents');
+  assert.ok(rt.includes('makeShareURL'), 'runtime navigation must use encrypted /p share URLs');
+});

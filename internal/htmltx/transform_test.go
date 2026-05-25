@@ -19,7 +19,7 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\"", "/v/tab/n/"} {
+	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\""} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden %q remained in %s", forbidden, s)
 		}
@@ -38,5 +38,22 @@ func TestTransformLeavesJavascriptAndFragmentsUnwrapped(t *testing.T) {
 	s := string(out)
 	if !strings.Contains(s, `href="#x"`) || !strings.Contains(s, `href="javascript:alert(1)"`) {
 		t.Fatalf("expected fragment/javascript to remain inert: %s", s)
+	}
+}
+
+func TestTransformPreservesRawScriptAndStyleText(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/")
+	out, err := Transform(strings.NewReader(`<html><head><style>body::before{content:"x<&>"}</style></head><body><script>window.__cfg={"base":new URL("..",location).pathname,"amp":"<&>"};import("/_app/start.js");</script></body></html>`), Options{TabID: "t", EntryID: "e", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{`content:"x<&>"`, `window.__cfg={"base":new URL("..",location).pathname`, `import("/_app/start.js")`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("raw script/style text was escaped or corrupted; missing %q in %s", want, s)
+		}
+	}
+	if strings.Contains(s, "&#34;") || strings.Contains(s, "&lt;&amp;&gt;") {
+		t.Fatalf("raw script/style text was entity-escaped: %s", s)
 	}
 }

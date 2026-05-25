@@ -37,6 +37,7 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 	preludeInjected := false
 	blockedDepth := 0
 	blockedTag := ""
+	rawTextTag := ""
 	for {
 		tt := z.Next()
 		if tt == xhtml.ErrorToken {
@@ -58,6 +59,17 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 				}
 			}
 			continue
+		}
+		if rawTextTag != "" {
+			if tok.Type == xhtml.TextToken {
+				out.WriteString(tok.Data)
+				continue
+			}
+			if tok.Type == xhtml.EndTagToken && strings.EqualFold(tok.Data, rawTextTag) {
+				out.WriteString(tok.String())
+				rawTextTag = ""
+				continue
+			}
 		}
 
 		if tok.Type == xhtml.StartTagToken || tok.Type == xhtml.SelfClosingTagToken {
@@ -105,6 +117,9 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 			if tag == "embed" {
 				out.WriteString(blockedPlaceholder("embed"))
 				continue
+			}
+			if (tag == "script" || tag == "style") && tok.Type == xhtml.StartTagToken {
+				rawTextTag = tag
 			}
 			tok = rewriteToken(tok, opt)
 		}
