@@ -22,6 +22,156 @@ This is a compatibility layer, not a claim of perfect browser-origin spoofing. N
 - Executing unparsed original target JavaScript as a compatibility fallback in strict mode.
 - Server-side session state or server-side target JavaScript storage.
 
+
+## Pre-Phase-2 hardening gates
+
+Phase 2 must not start by assuming the rewriter will close every current gap. The existing Phase 0/1 boundary must first fail closed when rewriting is absent, late, or broken. The following gates are prerequisites for the Phase 2 implementation sequence.
+
+### P0: boundary hardening required before rewriter work
+
+1. **Tighten target-response CSP**
+
+   - Current risk: `web/zp-core.js` emits `connect-src * blob: data: <proxy-ws-origin>` for Service Worker-constructed target responses.
+   - Why it matters: Phase 2 rewriting cannot be the only egress boundary. If a script source is missed, CSP must still provide defense-in-depth against direct native connections.
+   - Required change:
+     - Align `ZP.fixedCSP()` with the stricter server-side `zeroCSP`.
+     - Restrict `connect-src` to `'self'` plus the proxy WebSocket origin.
+     - Re-evaluate `script-src blob: data:` and document any temporary compatibility exception.
+   - Required tests:
+     - Static policy test rejecting `connect-src *`.
+     - Browser E2E fixture attempting direct external `fetch`, XHR, EventSource, and WebSocket egress.
+
+2. **Add Service Worker message capabilities**
+
+   - Current risk: target scripts execute on the proxy origin and can call `navigator.serviceWorker.controller.postMessage()` directly.
+   - Sensitive message types include `ZP_WS_OPEN`, `ZP_COOKIE_SET`, `ZP_HISTORY_UPDATE`, `ZP_BASE_UPDATE`, `ZP_SCROLL_UPDATE`, and `ZP_RESOLVE_ENTRY`.
+   - Required change:
+     - Generate a per-tab runtime capability token.
+     - Pass it to the runtime prelude through `__ZP_BOOT`, then keep it closure-private.
+     - Require that token on every runtime-originated `ZP_*` message.
+     - Validate `event.source.id` against `clientContext` where possible.
+     - Remove `firstTab()` fallback from privileged operations such as `openRuntimeStream`.
+   - Required tests:
+     - Forged page-level `postMessage` to the Service Worker is rejected.
+     - Runtime WebSocket and cookie bridge messages still succeed with the valid token.
+
+3. **Close blob/data script execution gaps**
+
+   - Current risk: `URL.createObjectURL` wrapping is worker-oriented and MIME-dependent; blob/data scripts can also be introduced through DOM script loaders.
+   - Required change:
+     - Before the rewriter exists, block or neutralize target-created blob/data JavaScript execution paths that cannot be routed through the rewrite pipeline.
+     - Include empty or unrecognized Blob MIME types in worker bootstrap handling, or wrap all target-created Blob URLs until Phase 2 can classify them.
+     - Revisit `script-src blob: data:` together with the CSP gate above.
+   - Required tests:
+     - `new Worker(URL.createObjectURL(new Blob(["..."], { type: "" })))` is contained or blocked.
+     - `<script src=blob:...>` and data URL script attempts do not execute unrewritten target code in strict mode.
+
+4. **Fail closed for dynamic JavaScript compilation until the foreground rewriter exists**
+
+   - Current risk: dynamic compilation paths are listed in this plan, but Phase 0 runtime does not yet block or rewrite all of them.
+   - Required change:
+     - In strict/pre-strict hardening mode, block or neutralize:
+       - `eval` and indirect eval;
+       - `Function`, `AsyncFunction`, `GeneratorFunction`, and `AsyncGeneratorFunction`;
+       - constructor-constructor escapes such as `({}).constructor.constructor(...)`;
+       - string `setTimeout` and `setInterval`;
+       - `document.write` / `document.writeln`;
+       - `outerHTML`, `template.innerHTML`, `Range.prototype.createContextualFragment`, and `DOMParser.prototype.parseFromString`;
+       - inline event handler mutation APIs including `setAttribute`, `setAttributeNS`, `NamedNodeMap.setNamedItem`, `Attr.value`, and handler IDL setters.
+   - Required tests:
+     - `Function('return location.href')()` and constructor-constructor variants are rewritten or blocked.
+     - String timers and runtime-created inline event handlers cannot execute unrewritten code.
+
+### P1: reliability and correctness hardening before broad Phase 2 compatibility work
+
+5. **Prepare inline event handler handling in the HTML transformer**
+
+   - Current state: `internal/htmltx` rewrites URL-bearing attributes and `srcdoc`, but does not identify `on*` handler attributes.
+   - Required change:
+     - Add explicit detection for inline event handler attributes.
+     - Preserve current behavior until the rewriter callback exists, but make the Phase 2 hook point explicit.
+     - In strict mode, fail closed if an event handler body cannot be rewritten before browser compilation.
+   - Required tests:
+     - HTML transform test covering `onclick`, `onload`, `onerror`, and mixed-case handler attributes.
+     - Phase 2 golden tests parsing handler bodies in event-handler grammar mode.
+
+6. **Prove or harden `srcdoc` prelude ordering**
+
+   - Current state: `srcdoc` content is protected by prefixing ZeroProxy scripts before target content.
+   - Required change:
+     - Add browser coverage proving that inline scripts and event handlers inside `srcdoc` cannot run before `runtime-prelude.js` installs containment.
+     - If ordering is not reliable, block or rewrite executable `srcdoc` content until the Phase 2 rewriter handles it.
+   - Required tests:
+     - `iframe.srcdoc` with immediate inline script and `body onload` cannot reach native WebRTC/WebSocket or native `location` before containment.
+
+7. **Cap or stream request/upload bodies**
+
+   - Current state: request bodies are buffered through Service Worker/WASM bridges.
+   - Required change:
+     - Short term: enforce an explicit maximum body size and return a safe ZeroProxy error for oversized uploads.
+     - Medium term: implement `ReadableStream` request body bridging instead of full buffering.
+   - Required tests:
+     - Oversized POST/upload returns a safe error, not OOM or process instability.
+     - Non-oversized POST body survives the Service Worker -> WASM -> target path.
+
+8. **Define redirect body replay semantics**
+
+   - Current risk: 307/308 redirects preserve method and body, but non-replayable bodies cannot be resent safely after the first attempt consumes them.
+   - Required change:
+     - For replayable small bodies, buffer once and replay across 307/308 redirects.
+     - For non-replayable or oversized bodies, fail closed with a safe error.
+     - Do not silently send an empty or partial body after redirect.
+   - Required tests:
+     - 307/308 POST redirect with a small body reaches the redirected target intact.
+     - Non-replayable body redirect fails safely.
+
+9. **Make relay cancellation immediate and bidirectional**
+
+   - Current risk: relay goroutines using `io.Copy` may stay blocked after request/context cancellation.
+   - Required change:
+     - On context cancellation or one relay direction finishing, close both stream endpoints to interrupt blocked reads/writes.
+     - Prefer a context-aware relay loop or reuse an existing relay helper with explicit close semantics.
+   - Required tests:
+     - Closing the browser page or WebSocket pipe tears down both yamux/Tor relay directions without goroutine leaks.
+
+### P2: coverage and fidelity improvements that should accompany Phase 2
+
+10. **Expand direct-egress E2E coverage**
+
+    - Required browser fixtures:
+      - Direct external `fetch`.
+      - `XMLHttpRequest`.
+      - `EventSource`.
+      - Native WebSocket attempts.
+    - Each fixture must prove the request is blocked or routed through ZeroProxy, never through an unclassified native path.
+
+11. **Improve WebSocket wrapper fidelity**
+
+    - Current minimal wrapper is enough for basic echo but not browser-compatible enough for broad sites.
+    - Required improvements:
+      - Preserve negotiated subprotocol where available.
+      - Improve close code/reason and error sequencing.
+      - Cover binary `ArrayBuffer` / `Blob` message behavior.
+      - Add conformance-lite E2E tests for open, message, binary, close, protocol, and error paths.
+
+12. **Clarify HTML tokenizer error policy**
+
+    - Current doc comments imply parser-recoverable markup is emitted, while tokenizer errors currently fail.
+    - Required change:
+      - Decide and document whether malformed HTML is strict fail-closed or recovery-oriented.
+      - Align the behavior with Phase 2 strict rewrite failure policy.
+    - Required tests:
+      - Malformed but common HTML either recovers predictably or produces a safe `MALFORMED_HTML` error document without partial unsafe execution.
+
+13. **Validate share URL schemes in the Go share-url package**
+
+    - Current risk: callers usually validate `http`/`https`, but `internal/shareurl.New()` itself only encrypts a string.
+    - Required change:
+      - Enforce `http:` and `https:` inside `shareurl.New()` / `NewWithRand()`.
+      - Reject `ws:`, `wss:`, `javascript:`, `data:`, and empty or malformed URLs.
+    - Required tests:
+      - Go unit tests proving HTTP/HTTPS are accepted and WebSocket/non-HTTP schemes are rejected.
+
 ## Design constraint: why rewriting is necessary but not sufficient
 
 `window.location` cannot be fully virtualized by descriptor patching alone:
@@ -418,6 +568,10 @@ Golden tests for:
 - A test page reading `location.href`, `window.location.href`, `document.URL`, and `document.defaultView.location.href` observes the virtual target URL from rewritten code.
 - A hostile test page using `window['loca' + 'tion']`, `Reflect.get(window, 'location')`, iframe clean realms, and `Function('return location.href')` is rewritten or blocked according to strict mode.
 - No tested path changes the top-level URL to the target origin.
+- Direct external `fetch`, XHR, EventSource, and native WebSocket attempts are blocked or routed through ZeroProxy; none use an unclassified native path.
+- Blob/data worker and script fixtures are contained, rewritten, or blocked.
+- `srcdoc` inline scripts and event handlers cannot execute before iframe containment.
+- Request/upload size limits, 307/308 redirect replay behavior, and relay cancellation semantics are covered by integration tests.
 
 ### Performance tests
 
@@ -426,6 +580,8 @@ Golden tests for:
 - Ensure non-script response streaming is not regressed.
 
 ## Implementation sequence
+
+Before starting item 1, complete the P0 hardening gates above. P1 gates should be completed before broad-site compatibility evaluation, and P2 gates should be tracked as required coverage for Phase 2 acceptance.
 
 1. Add rewriter mode configuration and diagnostics plumbing.
 2. Add Rust SWC rewriter crate and WASM build target.
@@ -439,6 +595,7 @@ Golden tests for:
 10. Add worker/importScripts/blob/data script rewriting.
 11. Add browser E2E tests and hostile escape fixtures.
 12. Tighten CSP once compatibility data is available.
+13. Re-run and update the pre-Phase-2 hardening gates; no P0 item may remain open for strict mode.
 
 ## Acceptance criteria
 
@@ -453,3 +610,4 @@ Phase 2 is accepted when:
 - `gosuda.org` click navigation and language dropdown navigation remain on proxy-origin `/p` routes.
 - Hostile tests for `window['loca' + 'tion']`, `Reflect.get`, iframe clean realms, and constructor-constructor dynamic code do not expose a native direct-egress path.
 - All strict-mode rewrite failures produce safe ZeroProxy errors instead of executing original target code.
+- P0 hardening gates are complete: strict CSP, Service Worker message capabilities, blob/data script handling, and fail-closed dynamic compilation paths.
