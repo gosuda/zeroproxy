@@ -20,7 +20,7 @@ Implemented core spine:
 - Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
 - A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, and direct HTTP/1.1 request/response handling.
 - Tokenizer-based HTML transform that injects the runtime prelude, launders document navigation URLs through encrypted `/p` routes, drops dangerous tags and headers, and handles `srcdoc`.
-- Runtime prelude hooks for `fetch`, XHR, WebSocket, EventSource, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs.
+- Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`.
 - Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
 - Go and JavaScript share URL implementations that use the same envelope format.
 
@@ -28,8 +28,8 @@ Not complete enough for production or high-assurance acceptance:
 
 - Browser E2E tests do not yet prove dynamic iframe, worker, direct navigation, native WebSocket, WebRTC/WebTransport, device API, form, and unclassified subresource non-escape.
 - Dynamic iframe clean-realm containment is still weaker than the synchronous hardening required for acceptance.
-- Runtime API compatibility is prototype-level for XHR, WebSocket, EventSource, uploads, and descriptor edge cases.
-- JavaScript `Response` construction still buffers target bodies instead of streaming all responses end-to-end.
+- Main-window runtime API compatibility is prototype-level for fetch, XHR, EventSource, WebSocket, uploads, and descriptor edge cases.
+- Response bodies are streamed into JavaScript `Response` objects, but request/upload body handling and browser backpressure/cancellation behavior are still prototype-level.
 - Encrypted IndexedDB persistence is not implemented.
 - Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
 
@@ -37,8 +37,9 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and accept
 
 ## Requirements
 
-- Go toolchain matching `go.mod`.
+- Go 1.26 or the Go toolchain version required by `go.mod`.
 - Node.js for the JavaScript tests.
+- A browser with Service Worker and WebAssembly support.
 - A Tor SOCKS5 listener configured with stream isolation.
 
 Example Tor setting:
@@ -47,14 +48,43 @@ Example Tor setting:
 SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
 ```
 
-## Run locally
-
-Build the WASM kernel and start the relay server:
+Start a local Tor listener for development:
 
 ```sh
-GOOS=js GOARCH=wasm go build -o bin/kernel.wasm ./cmd/wasm-kernel
-go run ./cmd/zeroproxy-server -addr :8080 -kernel bin/kernel.wasm -socks 127.0.0.1:9050
+mkdir -p /tmp/zeroproxy-tor
+tor --SocksPort "127.0.0.1:9050 IsolateSOCKSAuth" --DataDirectory /tmp/zeroproxy-tor
 ```
+
+Keep that process running and wait until Tor logs `Bootstrapped 100% (done)` before expecting target browsing to work. If Tor is managed by your OS service manager instead, use the same `SocksPort` setting in `torrc` and start the service before starting ZeroProxy.
+
+## Build and run locally
+
+Build the WASM kernel and relay server from the repository root:
+
+```sh
+mkdir -p bin
+GOOS=js GOARCH=wasm go build -o bin/kernel.wasm ./cmd/wasm-kernel
+go build -o bin/zeroproxy-server ./cmd/zeroproxy-server
+```
+
+Start the relay server in another terminal:
+
+```sh
+./bin/zeroproxy-server -addr :8080 -web web -kernel bin/kernel.wasm -socks 127.0.0.1:9050
+```
+
+Equivalent `go run` form:
+
+```sh
+go run ./cmd/zeroproxy-server -addr :8080 -web web -kernel bin/kernel.wasm -socks 127.0.0.1:9050
+```
+
+Server flags:
+
+- `-addr`: HTTP listen address. Default: `:8080`.
+- `-web`: static web asset directory containing `index.html`, `sw.js`, and `/__zp/*` assets. Default: `web`.
+- `-kernel`: compiled Go WASM kernel served at `/__zp/kernel.wasm`. Default: `bin/kernel.wasm`.
+- `-socks`: Tor SOCKS5 address. Default: `127.0.0.1:9050`.
 
 Open the browser shell on the proxy origin:
 
@@ -62,7 +92,7 @@ Open the browser shell on the proxy origin:
 http://proxy.localhost:8080/
 ```
 
-The shell accepts only `http:` and `https:` targets. It creates an encrypted `/p/<encrypted>#k=<key>` route and then removes the fragment before activating the route with the Service Worker.
+Use `proxy.localhost` from the start so the shell, Service Worker, and encrypted `/p/<encrypted>#k=<key>` routes share one origin. The server starts even if Tor is not reachable, but target browsing needs the configured Tor SOCKS5 listener.
 
 ## Verification commands
 
@@ -79,7 +109,7 @@ These checks cover source/unit policy invariants and buildability. They do not p
 
 | Path | Purpose |
 |---|---|
-| `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, fixed CSP helper. |
+| `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, Phase 0 CSP helper. |
 | `web/sw.js` | Service Worker classifier, in-memory tab state, runtime API bridge, WASM kernel calls. |
 | `web/runtime-prelude.js`, `web/worker-prelude.js` | Target-realm containment hooks and worker bootstrap. |
 | `cmd/wasm-kernel` | Go WASM transport kernel exposed to the Service Worker. |

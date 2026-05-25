@@ -51,9 +51,9 @@
       formRequestSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.requestSubmit,
       historyPush: w.history.pushState.bind(w.history),
       historyReplace: w.history.replaceState.bind(w.history),
-      locationAssign: w.Location && w.Location.prototype.assign,
-      locationReplace: w.Location && w.Location.prototype.replace,
-      locationReload: w.Location && w.Location.prototype.reload,
+      locationAssign: w.location && w.location.assign && w.location.assign.bind(w.location),
+      locationReplace: w.location && w.location.replace && w.location.replace.bind(w.location),
+      locationReload: w.location && w.location.reload && w.location.reload.bind(w.location),
       createObjectURL: w.URL && w.URL.createObjectURL && w.URL.createObjectURL.bind(w.URL),
       revokeObjectURL: w.URL && w.URL.revokeObjectURL && w.URL.revokeObjectURL.bind(w.URL),
       open: w.open && w.open.bind(w),
@@ -74,7 +74,7 @@
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
-  function navigateToTarget(raw, replace = false, base = baseURL) { shareNavURL(raw, base).then(u => replace ? Native.locationReplace.call(location, u) : Native.locationAssign.call(location, u)).catch(()=>{}); }
+  function navigateToTarget(raw, replace = false, base = baseURL) { shareNavURL(raw, base).then(u => { if (replace && Native.locationReplace) Native.locationReplace(u); else if (!replace && Native.locationAssign) Native.locationAssign(u); else if (replace) location.replace(u); else location.href = u; }).catch(()=>{}); }
   function postMessageToSW(message, transfer) {
     if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return Promise.reject(normalizedError('NetworkError'));
     return new Promise((resolve, reject) => {
@@ -135,13 +135,13 @@
   function installBeacon() { if (!navigator.sendBeacon || !Native.navigatorSendBeacon) return; define(navigator, 'sendBeacon', (url, data) => Native.navigatorSendBeacon(targetURL(url), data)); }
 
   function installNavigationTraps() {
-    document.addEventListener('click', ev => { const a = ev.target && ev.target.closest && ev.target.closest('a[href],area[href]'); if (!a || ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || a.target && a.target !== '_self' || a.hasAttribute('download')) return; const href = a.getAttribute('data-zp-target-url') || a.getAttribute('href'); if (!href || href.startsWith('#') || /^javascript:/i.test(href)) return; ev.preventDefault(); navigateToTarget(href); }, true);
+    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); navigateToTarget(nav.href); }, true);
     document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
     if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { navigateToTarget(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { navigateToTarget(u, true); });
-    if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload.call(location); });
+    if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload(); });
     define(history, 'pushState', function(state, title, url) { if (url != null) { virtualURL = sameOriginHistoryURL(url); if (!explicitBaseURL) baseURL = virtualURL.href; } const entryId = 'e' + ZP.randomId(); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace: false }).catch(()=>{}); return Native.historyPush(state, title, location.pathname); });
     define(history, 'replaceState', function(state, title, url) { if (url != null) { virtualURL = sameOriginHistoryURL(url); if (!explicitBaseURL) baseURL = virtualURL.href; } postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId: boot.entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace: true }).catch(()=>{}); return Native.historyReplace(state, title, location.pathname); });
     window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }).then(reply => { virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
@@ -168,6 +168,21 @@
       Native.fetch(target.href, { method, body: new Native.FormData(form), credentials: 'include', headers }).then(r => r.text()).then(html => { document.open(); document.write(html); document.close(); }).catch(()=>{});
     }
     function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
+    function clickNavigationTarget(ev) {
+      if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
+      for (let el = ev.target; el && el !== document; el = el.parentElement) {
+        const isAnchor = el.matches && el.matches('a[href],area[href]');
+        if (isAnchor) {
+          if (el.hasAttribute('download')) return null;
+          const target = el.getAttribute('target');
+          if (target && target !== '_self') return null;
+        }
+        const raw = isAnchor ? el.getAttribute('data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
+        if (!raw || raw[0] === '#' || /^javascript:/i.test(raw)) continue;
+        if (isHTTPURL(raw)) return { href: raw, element: el };
+      }
+      return null;
+    }
   }
 
   function installPopupHooks(w) {

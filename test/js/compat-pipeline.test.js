@@ -14,6 +14,16 @@ test('window fetch, XHR, and EventSource are not replaced by runtime transport s
   assert.match(rt, /Native\.fetch\(target\.href/);
 });
 
+test('runtime navigation uses bound Location methods and catches expando href clicks', () => {
+  const rt = read('web/runtime-prelude.js');
+  assert.match(rt, /w\.location\.assign && w\.location\.assign\.bind\(w\.location\)/);
+  assert.match(rt, /w\.location\.replace && w\.location\.replace\.bind\(w\.location\)/);
+  assert.match(rt, /function clickNavigationTarget\(ev\)/);
+  assert.match(rt, /typeof el\.href === 'string'/);
+  assert.match(rt, /stopImmediatePropagation/);
+  assert.doesNotMatch(rt, /Native\.locationAssign\.call\(location/);
+});
+
 test('service worker owns native request capture, CORS, and context recovery', () => {
   const sw = read('web/sw.js');
   for (const needle of [
