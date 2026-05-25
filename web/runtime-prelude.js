@@ -6,6 +6,9 @@
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
   const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, root.__ZP_BOOT || {});
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
+  const TARGET_PLATFORM = 'Win32';
   try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
   const Native = captureNative(root);
   const proxyOrigin = new URL(root.location.href).origin;
@@ -74,7 +77,27 @@
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
-  function navigateToTarget(raw, replace = false, base = baseURL) { shareNavURL(raw, base).then(u => { if (replace && Native.locationReplace) Native.locationReplace(u); else if (!replace && Native.locationAssign) Native.locationAssign(u); else if (replace) location.replace(u); else location.href = u; }).catch(()=>{}); }
+  async function activatedNavPath(raw, replace = false, base = baseURL) {
+    const target = targetURL(raw, base);
+    const share = await ZP.encryptShareURL(target);
+    const path = '/p/' + share.encrypted;
+    const entryId = replace ? boot.entryId : 'e' + ZP.randomId();
+    await postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, replace });
+    return path;
+  }
+  function navigateToTarget(raw, replace = false, base = baseURL) {
+    activatedNavPath(raw, replace, base).then(path => {
+      if (replace && Native.locationReplace) Native.locationReplace(path);
+      else if (!replace && Native.locationAssign) Native.locationAssign(path);
+      else if (replace) location.replace(path);
+      else location.href = path;
+    }).catch(() => shareNavURL(raw, base).then(u => {
+      if (replace && Native.locationReplace) Native.locationReplace(u);
+      else if (!replace && Native.locationAssign) Native.locationAssign(u);
+      else if (replace) location.replace(u);
+      else location.href = u;
+    }).catch(()=>{}));
+  }
   function postMessageToSW(message, transfer) {
     if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return Promise.reject(normalizedError('NetworkError'));
     return new Promise((resolve, reject) => {
@@ -100,6 +123,7 @@
   installBeacon();
   installNavigationTraps();
   installPopupHooks(root);
+  installNavigatorIdentity(root);
   installGetterMasking(root);
   installStorageFacades(root);
   installDOMHooks(root);
@@ -183,6 +207,17 @@
       }
       return null;
     }
+  }
+  function installNavigatorIdentity(w) {
+    const nav = w.navigator;
+    if (!nav) return;
+    const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
+    defineAccessor(proto, 'userAgent', () => TARGET_USER_AGENT);
+    defineAccessor(nav, 'userAgent', () => TARGET_USER_AGENT);
+    defineAccessor(proto, 'appVersion', () => TARGET_APP_VERSION);
+    defineAccessor(nav, 'appVersion', () => TARGET_APP_VERSION);
+    defineAccessor(proto, 'platform', () => TARGET_PLATFORM);
+    defineAccessor(nav, 'platform', () => TARGET_PLATFORM);
   }
 
   function installPopupHooks(w) {
@@ -378,6 +413,7 @@
   function instrumentIframe(frame) { if (!frame || iframeMeta.has(frame)) return; iframeMeta.add(frame); try { if (!frame.getAttribute('src') && frame.contentWindow) installNetworkContainment(frame.contentWindow); } catch { try { frame.remove(); } catch {} } }
   function installNetworkContainment(w) {
     // Native fetch is intentionally left intact; the Service Worker owns request capture.
+    installNavigatorIdentity(w);
     if (root.WebSocket) define(w, 'WebSocket', root.WebSocket);
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
     installBlockers(w);

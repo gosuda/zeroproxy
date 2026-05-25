@@ -3,6 +3,7 @@ package http1
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -34,6 +35,9 @@ func TestBuildHTTP1RequestConstructsTargetHeaders(t *testing.T) {
 	}
 	if wire.Header.Get("Cookie") != "sid=1" {
 		t.Fatalf("cookie jar not projected: %#v", wire.Header)
+	}
+	if wire.Header.Get("User-Agent") != TargetUserAgent {
+		t.Fatalf("user-agent not normalized: %#v", wire.Header)
 	}
 	if wire.Header.Get("Origin") != "https://example.com" || wire.Header.Get("Referer") != target.String() {
 		t.Fatalf("origin/referer wrong: %#v", wire.Header)
@@ -135,6 +139,10 @@ func TestRoundTripUsesSocksDomainAndHTTP1(t *testing.T) {
 		}
 		if wireReq.Host != "example.com" || wireReq.URL.RequestURI() != "/resource?q=1" {
 			done <- io.ErrUnexpectedEOF
+			return
+		}
+		if wireReq.Header.Get("User-Agent") != TargetUserAgent {
+			done <- fmt.Errorf("user-agent = %q", wireReq.Header.Get("User-Agent"))
 			return
 		}
 		_, err = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: a=b\r\n\r\nok"))

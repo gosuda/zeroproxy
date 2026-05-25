@@ -24,6 +24,17 @@ test('runtime navigation uses bound Location methods and catches expando href cl
   assert.doesNotMatch(rt, /Native\.locationAssign\.call\(location/);
 });
 
+test('runtime preactivates p routes and masks navigator identity', () => {
+  const rt = read('web/runtime-prelude.js');
+  const worker = read('web/worker-prelude.js');
+  assert.match(rt, /ZP\.encryptShareURL\(target\)/);
+  assert.match(rt, /ZP_HISTORY_UPDATE/);
+  assert.match(rt, /Native\.locationAssign\(path\)/);
+  assert.ok(rt.includes('Chrome/134.0.0.0 Safari/537.36'));
+  assert.match(rt, /installNavigatorIdentity/);
+  assert.ok(worker.includes('Chrome/134.0.0.0 Safari/537.36'));
+});
+
 test('service worker owns native request capture, CORS, and context recovery', () => {
   const sw = read('web/sw.js');
   for (const needle of [

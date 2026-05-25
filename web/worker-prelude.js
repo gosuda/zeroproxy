@@ -6,6 +6,17 @@
   const nativeFetch = self.fetch.bind(self);
   const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
+  const TARGET_PLATFORM = 'Win32';
+  const nav = self.navigator;
+  if (nav) {
+    const proto = self.WorkerNavigator && self.WorkerNavigator.prototype || Object.getPrototypeOf(nav);
+    for (const [key, value] of [['userAgent', TARGET_USER_AGENT], ['appVersion', TARGET_APP_VERSION], ['platform', TARGET_PLATFORM]]) {
+      try { Object.defineProperty(proto, key, { get: () => value, enumerable: false, configurable: false }); } catch {}
+      try { Object.defineProperty(nav, key, { get: () => value, enumerable: false, configurable: false }); } catch {}
+    }
+  }
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
   async function bodyToBase64(body) {
     if (body == null) return null;

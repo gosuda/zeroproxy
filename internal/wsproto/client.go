@@ -59,6 +59,7 @@ func Dial(ctx context.Context, engine *http1.Engine, target *url.URL, protocols 
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	req.Header.Set("Sec-WebSocket-Key", key)
+	req.Header.Set("User-Agent", http1.TargetUserAgent)
 	if len(protocols) > 0 {
 		req.Header.Set("Sec-WebSocket-Protocol", strings.Join(protocols, ", "))
 	}

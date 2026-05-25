@@ -29,6 +29,8 @@ type TabState struct {
 
 type Engine struct{ Mux StreamMux }
 
+const TargetUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+
 func (e *Engine) RoundTrip(ctx context.Context, req *http.Request, target *url.URL, tab *TabState) (*http.Response, error) {
 	rw, err := e.DialTarget(ctx, target, tab)
 	if err != nil {
@@ -118,6 +120,7 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 	}
 	wire.Header.Set("Host", canonicalAuthority(target))
 	wire.Host = canonicalAuthority(target)
+	wire.Header.Set("User-Agent", TargetUserAgent)
 	wire.Header.Set("Accept-Encoding", "identity")
 	if jar != nil {
 		if cookies := jar.Cookies(target, true); len(cookies) > 0 {
