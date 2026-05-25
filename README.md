@@ -3,7 +3,7 @@
 ZeroProxy is a client-owned virtual browsing prototype that runs target pages on the proxy origin without a browser extension. Its design goal is that target-site HTTP, TLS, and WebSocket traffic leaves only through this path:
 
 ```text
-Service Worker -> Go WASM kernel -> WebSocket/yamux -> Tor SOCKS5 -> uTLS -> HTTP/1.1
+Service Worker -> Go WASM kernel -> WebSocket/yamux -> Tor SOCKS5 -> uTLS -> HTTP/2 or HTTP/1.1
 ```
 
 The relay server terminates only the browser WebSocket/yamux pipe. Target HTTP parsing, redirects, cookies, header policy, HTML rewriting, and target WebSocket framing are owned by the Go WASM kernel and browser-side runtime.
@@ -18,7 +18,7 @@ Implemented core spine:
 - AES-256-CBC + HMAC-SHA256 URL envelope with HKDF-separated encryption/MAC keys and HMAC verification before decryption.
 - Service Worker request classifier that handles every controlled request and blocks unknown requests instead of falling back to native `fetch(event.request)`.
 - Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
-- A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, and direct HTTP/1.1 request/response handling.
+- A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling.
 - Tokenizer-based HTML transform that injects the runtime prelude, launders document navigation URLs through encrypted `/p` routes, drops dangerous tags and headers, and handles `srcdoc`.
 - Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`.
 - Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.

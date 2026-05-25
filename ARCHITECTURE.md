@@ -11,7 +11,7 @@ Browser top-level target document
   │   ├─ in-memory tab/history/context state
   │   ├─ encrypted /p route activation
   │   └─ Go WASM kernel exports
-  │       ├─ __go_jshttp(request)      -> target HTTP/1.1 fetch
+  │       ├─ __go_jshttp(request)      -> target HTTP/2 or HTTP/1.1 fetch
   │       ├─ __zp_stream(options)      -> target WebSocket stream
   │       ├─ __zp_kernel_init()        -> transport readiness
   │       └─ __zp_cookie_set(request)  -> document.cookie bridge
@@ -39,7 +39,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 - The `#k` fragment is decrypted in the browser shell, removed with `history.replaceState`, and not sent to the server.
 - Every Service Worker-controlled request is classified. Unknown requests are blocked; there is no native `fetch(event.request)` fallback.
 - Target TCP connections are opened through WebSocket -> yamux -> Tor SOCKS5 DOMAINNAME. The kernel does not call `http.Transport` for target egress.
-- HTTPS uses uTLS over the Tor stream with HTTP/1.1 selected.
+- HTTPS uses uTLS over the Tor stream with ALPN selecting HTTP/2 when available and HTTP/1.1 fallback; target WebSocket upgrade pins HTTP/1.1.
 - Target response headers are passed through a constructor policy before the browser receives a `Response`.
 - Runtime code does not install anti-bot deception hooks such as `Function.prototype.toString` masking.
 
@@ -52,7 +52,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 | Service Worker | `web/sw.js` | Classifies every controlled request, blocks unknowns, manages in-memory tab/entry state, calls the WASM kernel, exposes runtime bridge APIs. |
 | Runtime prelude | `web/runtime-prelude.js`, `web/worker-prelude.js` | Installs target-realm containment hooks before target scripts run. Main-window WebSocket/navigation/form/history/location/storage/worker/iframe/device APIs are hooked; main-window fetch/XHR/EventSource are not runtime-polyfilled today. Worker `fetch` is bridged through `/__zp/api/fetch`. |
 | WASM kernel | `cmd/wasm-kernel/main.go`, `internal/swhttp/*` | Converts JS `Request`/`Response`, initializes transport, owns target HTTP and WebSocket execution. |
-| Transport | `internal/wsconn/*`, `internal/yamuxconn/*`, `internal/socks5/*`, `internal/utlskernel/*`, `internal/http1/*`, `internal/wsproto/*` | Browser WebSocket `net.Conn`, yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/1.1, target WebSocket upgrade/framing. |
+| Transport | `internal/wsconn/*`, `internal/yamuxconn/*`, `internal/socks5/*`, `internal/utlskernel/*`, `internal/http1/*`, `internal/wsproto/*` | Browser WebSocket `net.Conn`, yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/2 and HTTP/1.1 target fetch, target WebSocket upgrade/framing. |
 | HTML/header/cookie policy | `internal/htmltx/*`, `internal/headers/*`, `internal/cookiejar/*`, `internal/zpiso/*` | HTML transformation, safe response header constructor policy, target cookie jar, Tor isolation token derivation. |
 | Relay server | `cmd/zeroproxy-server/main.go` | Serves assets, accepts `/__zp/ws-pipe` with Gorilla WebSocket, and bridges yamux streams to the configured Tor SOCKS5 address. |
 
@@ -64,8 +64,8 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 4. A `/p/<encrypted>` document request is resolved back to the target URL. The Service Worker calls `__go_jshttp` with `X-ZP-*` internal metadata.
 5. The WASM kernel ensures one long-lived WebSocket connection to `/__zp/ws-pipe`, wraps it in a yamux client, and opens one yamux stream per target TCP connection.
 6. Each target connection performs SOCKS5 `CONNECT` with DOMAINNAME ATYP and a Tor `IsolateSOCKSAuth` username derived from the tab stream-isolation key and target site.
-7. HTTPS targets run uTLS over that stream with ALPN pinned to `http/1.1`.
-8. `internal/http1` writes an HTTP/1.1 request directly and reads the target response with `http.ReadResponse`.
+7. HTTPS fetch targets advertise `h2` and `http/1.1` through uTLS ALPN; target WebSocket connections advertise only `http/1.1`.
+8. `internal/http1` dispatches negotiated `h2` connections through `golang.org/x/net/http2.ClientConn`; HTTP/1.1 fallback writes a direct request and reads the response with `http.ReadResponse`.
 9. Redirects are followed inside the kernel so raw `Location` headers are not exposed to browser code.
 10. HTML document responses are transformed: runtime prelude is injected, document navigation URLs are rewritten to encrypted `/p/<encrypted>#k=<key>` routes, risky tags and headers are removed, and the browser receives a same-origin `Response` with ZeroProxy CSP.
 
@@ -97,7 +97,7 @@ The Service Worker keeps tab, entry, client-context, route, and stream maps in m
 
 The Go WASM kernel exposes `__zp_kernel_init`, `__go_jshttp`, `__zp_stream`, and `__zp_cookie_set` to the Service Worker. Initialization creates a browser WebSocket to `/__zp/ws-pipe`; the relay accepts it with Gorilla WebSocket and adapts binary messages to a stream-oriented `net.Conn`. A yamux client/server session runs over that connection, and per-target yamux streams are bridged by the relay to Tor SOCKS5.
 
-`internal/http1` builds target HTTP/1.1 requests directly, applies the cookie jar, follows redirects up to `MaxRedirects`, and closes target connections through response body closure. HTTPS uses `internal/utlskernel`; target WebSocket support is implemented through `internal/wsproto` and the runtime `WebSocket` wrapper.
+`internal/http1` builds sanitized target requests, applies the cookie jar, follows redirects up to `MaxRedirects`, dispatches HTTPS fetches to HTTP/2 when ALPN selects `h2`, and falls back to direct HTTP/1.1 request/response handling otherwise. HTTP/2 client connections are pooled only within the same target authority, tab, and Tor isolation token; target WebSocket support stays HTTP/1.1 Upgrade through `internal/wsproto` and the runtime `WebSocket` wrapper.
 
 `internal/swhttp.ResponseToJS` constructs JavaScript `Response` objects with a `ReadableStream` backed by the Go response body. Document HTML transformation uses `htmltx.TransformTo` through an `io.Pipe`, so transformed HTML can flow to the browser without first buffering the full document. Request/upload body conversion and browser backpressure/cancellation fidelity are still prototype-level.
 
@@ -121,12 +121,12 @@ Overall status: **Phase 0 prototype / partial implementation**. The repository i
 |---|---|---|
 | 0. Correction directives | Partial | Top-level target document, encrypted `/p` route shape, AES-CBC+HMAC share envelope, and no anti-bot spoofing hooks are present. Strict `connect-src` is not fully implemented by `web/zp-core.js`; browser direct-egress prevention still needs E2E proof. |
 | 1. System goals | Partial | Client memory state, unknown-request blocking, Tor/yamux/uTLS path, and safe errors exist. Encrypted IndexedDB persistence and full escape-vector coverage are absent. |
-| 2. Overall architecture | Mostly implemented | Static shell, Service Worker, Go WASM kernel, relay WebSocket pipe, yamux, SOCKS5, uTLS, HTTP/1.1, HTML transform, cookie jar, and runtime prelude exist. |
+| 2. Overall architecture | Mostly implemented | Static shell, Service Worker, Go WASM kernel, relay WebSocket pipe, yamux, SOCKS5, uTLS, HTTP/2 and HTTP/1.1 fetch, HTML transform, cookie jar, and runtime prelude exist. |
 | 3. URL and encryption | Implemented | `web/zp-core.js` and `internal/shareurl` implement HKDF, AES-256-CBC, HMAC verification-before-decrypt, raw base64url, and protocol allowlists. Tests cover JS tamper rejection and Go envelope construction. |
 | 4. Active URL and tab state | Partial / PLAN-divergent | Active browsing uses encrypted `/p` routes and static tests reject legacy `/v` route generation. PLAN's `/v/<tab-id>/n/...` and `/v/<tab-id>/e/...` active-route model is not implemented. Tab/entry maps are in memory; title/state clone/origin map/storage namespace behavior is minimal; persistence is absent. |
 | 5. Service Worker boot | Mostly implemented | The shell waits for Service Worker control; `sw.js` tracks readiness and waits for `__go_jshttp`, `__zp_stream`, and `__zp_kernel_init`. |
 | 6. Fetch handler policy | Mostly implemented | `sw.js` classifies internal/share/runtime/subresource/unknown requests and has no `return fetch(event.request)` fallback. It does not implement the PLAN's distinct VIRTUAL_NAVIGATION and VIRTUAL_ENTRY `/v` classifiers. Subresource base recovery is simple and should be browser-tested. |
-| 7. Go WASM transport kernel | Mostly implemented | The kernel opens `/__zp/ws-pipe`, uses yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, and direct HTTP/1.1. Target WebSocket upgrade/framing exists. Target response bodies are exposed to JavaScript through `ReadableStream`; request/upload body conversion is still prototype-level. |
+| 7. Go WASM transport kernel | Mostly implemented | The kernel opens `/__zp/ws-pipe`, uses yamux streams, SOCKS5 DOMAINNAME CONNECT, uTLS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback. Target WebSocket upgrade/framing exists and remains HTTP/1.1-only. Target response bodies are exposed to JavaScript through `ReadableStream`; request/upload body conversion is still prototype-level. |
 | 8. HTML transform | Partial / PLAN-divergent | Tokenizer-based transform injects the runtime prelude, removes base/meta refresh/ping/preload hints, rewrites document navigation attrs to encrypted `/p` routes, handles `srcdoc`, and blocks object/embed. PLAN's `/v/<tab-id>/n/<base64url_target_url>` laundering and direct topbar injection are not implemented. Malformed-markup recovery still needs stronger proof. |
 | 9. Tor stream isolation | Implemented at code level | `zpiso.Token` derives site-granular HMAC tokens; SOCKS5 rejects IP literals and sends DOMAINNAME ATYP. Deployment still requires correctly configured Tor. |
 | 10. Response header policy | Implemented | `internal/headers` strips target CSP, cookies, reporting, Alt-Svc, Link, Refresh, Location, hop-by-hop headers, transformed lengths/encoding, and defaults to `Cache-Control: no-store`. |
