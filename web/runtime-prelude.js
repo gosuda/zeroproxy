@@ -11,6 +11,8 @@
   const proxyOrigin = new URL(root.location.href).origin;
   const routeKey = new URL(root.location.href).pathname.startsWith('/p/') ? new URL(root.location.href).pathname.slice(3) : '';
   let virtualURL = new URL(boot.targetUrl);
+  let baseURL = virtualURL.href;
+  let explicitBaseURL = '';
   let documentCookie = String(boot.documentCookie || '');
   const documentCookieRecords = [];
   initDocumentCookieRecords(documentCookie);
@@ -68,12 +70,11 @@
     define(proto, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
     define(proto, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
   }
-  function eventTargetObject() { const obj = {}; installEventMethods(obj); return obj; }
-  function isHTTPURL(raw) { try { const u = new URL(String(raw), virtualURL.href); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
-  function targetURL(raw, base = virtualURL.href) { return ZP.canonicalTargetURL(String(raw), base).href; }
-  function targetWSURL(raw, base = virtualURL.href) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
-  function shareNavURL(raw, base = virtualURL.href) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
-  function navigateToTarget(raw, replace = false, base = virtualURL.href) { shareNavURL(raw, base).then(u => replace ? Native.locationReplace.call(location, u) : Native.locationAssign.call(location, u)).catch(()=>{}); }
+  function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
+  function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
+  function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
+  function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
+  function navigateToTarget(raw, replace = false, base = baseURL) { shareNavURL(raw, base).then(u => replace ? Native.locationReplace.call(location, u) : Native.locationAssign.call(location, u)).catch(()=>{}); }
   function postMessageToSW(message, transfer) {
     if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return Promise.reject(normalizedError('NetworkError'));
     return new Promise((resolve, reject) => {
@@ -82,42 +83,20 @@
       navigator.serviceWorker.controller.postMessage(message, transfer ? [channel.port2, ...transfer] : [channel.port2]);
     });
   }
-  async function bodyToBase64(body) {
-    if (body == null) return null;
-    let ab;
-    if (typeof body === 'string') ab = new TextEncoder().encode(body).buffer;
-    else if (body instanceof ArrayBuffer) ab = body;
-    else if (ArrayBuffer.isView(body)) ab = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
-    else if (body instanceof Blob) ab = await body.arrayBuffer();
-    else if (body instanceof URLSearchParams) ab = new TextEncoder().encode(body.toString()).buffer;
-    else if (Native.FormData && body instanceof Native.FormData) {
-      const usp = new URLSearchParams(); for (const [k, v] of body) usp.append(k, String(v)); ab = new TextEncoder().encode(usp.toString()).buffer;
-    } else ab = new TextEncoder().encode(String(body)).buffer;
-    return ZP.bytesToBase64Url(new Uint8Array(ab));
+  function updateVirtualBase(raw) {
+    try {
+      const next = targetURL(raw, baseURL);
+      baseURL = next;
+      explicitBaseURL = next;
+      postMessageToSW({ type: 'ZP_BASE_UPDATE', tabId: boot.tabId, entryId: boot.entryId, baseUrl: next }).catch(()=>{});
+      return next;
+    } catch {
+      return baseURL;
+    }
   }
-  async function internalFetch(target, init = {}) {
-    const payload = { url: target, init: { method: init.method || 'GET', headers: [], body: await bodyToBase64(init.body), credentials: init.credentials, mode: init.mode, referrer: init.referrer, redirect: init.redirect, cache: init.cache, integrity: init.integrity } };
-    const h = new Native.Headers(init.headers || {}); h.forEach((v, k) => payload.init.headers.push([k, v]));
-    return Native.fetch('/__zp/api/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), credentials: 'same-origin', cache: 'no-store' });
-  }
+  define(root, '__ZP_SET_BASE', updateVirtualBase);
 
-  async function zpFetch(input, init = {}) {
-    let raw = input;
-    const requestHeaders = new Native.Headers(init.headers || undefined);
-    if (input instanceof Native.Request) {
-      raw = input.url;
-      if (!init.method) init = Object.assign({ method: input.method }, init);
-      input.headers.forEach((v, k) => { if (!requestHeaders.has(k)) requestHeaders.append(k, v); });
-      if (!init.body && input.method !== 'GET' && input.method !== 'HEAD') init.body = await input.clone().arrayBuffer();
-    } else if (input instanceof URL) raw = input.href;
-    const target = targetURL(raw);
-    return internalFetch(target, Object.assign({}, init, { headers: requestHeaders }));
-  }
-  define(root, 'fetch', zpFetch);
-
-  if (Native.XMLHttpRequest) installXHR();
   installWebSocket();
-  installEventSource();
   installBeacon();
   installNavigationTraps();
   installPopupHooks(root);
@@ -128,19 +107,6 @@
   installIframeHooks(root);
   installBlockers(root);
 
-  function installXHR() {
-    function ZPXMLHttpRequest() {
-      this._headers = [];
-      this.readyState = 0; this.status = 0; this.statusText = ''; this.responseURL = virtualURL.href;
-      this.responseType = ''; this.response = null; this.responseText = ''; this.timeout = 0; this.withCredentials = false;
-      this.upload = eventTargetObject();
-    }
-    ZPXMLHttpRequest.UNSENT = 0; ZPXMLHttpRequest.OPENED = 1; ZPXMLHttpRequest.HEADERS_RECEIVED = 2; ZPXMLHttpRequest.LOADING = 3; ZPXMLHttpRequest.DONE = 4;
-    ZPXMLHttpRequest.prototype = {};
-    installEventMethods(ZPXMLHttpRequest.prototype);
-    Object.assign(ZPXMLHttpRequest.prototype, { constructor: ZPXMLHttpRequest, open(method, url, async = true) { if (async === false) throw normalizedError('NotSupportedError'); this._method = method; this._url = targetURL(url); this.readyState = 1; this.dispatchEvent(new Event('readystatechange')); }, setRequestHeader(k, v) { this._headers.push([k, v]); }, overrideMimeType(v) { this._mime = v; }, abort() { this._aborted = true; this.dispatchEvent(new Event('abort')); this.dispatchEvent(new Event('loadend')); }, getResponseHeader(k) { return this._respHeaders && this._respHeaders.get(k.toLowerCase()) || null; }, getAllResponseHeaders() { if (!this._respHeaders) return ''; let s = ''; this._respHeaders.forEach((v, k) => { s += k + ': ' + v + '\r\n'; }); return s; }, async send(body) { try { const resp = await internalFetch(this._url, { method: this._method || 'GET', headers: this._headers, body }); if (this._aborted) return; this.status = resp.status; this.statusText = resp.statusText; this._respHeaders = new Native.Headers(resp.headers); this.readyState = 2; this.dispatchEvent(new Event('readystatechange')); const ab = await resp.arrayBuffer(); this.readyState = 3; this.dispatchEvent(new Event('readystatechange')); this.responseURL = this._url; if (this.responseType === 'arraybuffer') this.response = ab; else if (this.responseType === 'blob') this.response = new Blob([ab]); else if (this.responseType === 'json') { const txt = new TextDecoder().decode(ab); this.responseText = txt; try { this.response = JSON.parse(txt); } catch { this.response = null; } } else { this.responseText = new TextDecoder().decode(ab); this.response = this.responseText; } this.readyState = 4; this.dispatchEvent(new Event('readystatechange')); this.dispatchEvent(new Event('load')); this.dispatchEvent(new Event('loadend')); } catch { this.readyState = 4; this.dispatchEvent(new Event('readystatechange')); this.dispatchEvent(new Event('error')); this.dispatchEvent(new Event('loadend')); } } });
-    define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
-  }
 
   function installWebSocket() {
     function ZPWebSocket(url, protocols) {
@@ -166,16 +132,7 @@
     define(root, 'WebSocket', ZPWebSocket);
   }
 
-  function installEventSource() {
-    if (!Native.EventSource) return;
-    function ZPEventSource(url) { this.url = targetURL(url); this.readyState = 0; this.withCredentials = false; this._open(); }
-    ZPEventSource.CONNECTING = 0; ZPEventSource.OPEN = 1; ZPEventSource.CLOSED = 2;
-    ZPEventSource.prototype = {};
-    installEventMethods(ZPEventSource.prototype);
-    Object.assign(ZPEventSource.prototype, { constructor: ZPEventSource, close() { this.readyState = 2; if (this._abort) this._abort.abort(); }, async _open() { this._abort = new AbortController(); try { const resp = await internalFetch(this.url, { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: this._abort.signal }); this.readyState = 1; this.dispatchEvent(new Event('open')); const text = await resp.text(); for (const block of text.split(/\n\n+/)) { const data = block.split(/\n/).filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n'); if (data) this.dispatchEvent(new MessageEvent('message', { data })); } } catch { if (this.readyState !== 2) this.dispatchEvent(new Event('error')); } } });
-    define(root, 'EventSource', ZPEventSource);
-  }
-  function installBeacon() { if (!navigator.sendBeacon) return; define(navigator, 'sendBeacon', (url, data) => { internalFetch(targetURL(url), { method: 'POST', body: data, keepalive: true }).catch(()=>{}); return true; }); }
+  function installBeacon() { if (!navigator.sendBeacon || !Native.navigatorSendBeacon) return; define(navigator, 'sendBeacon', (url, data) => Native.navigatorSendBeacon(targetURL(url), data)); }
 
   function installNavigationTraps() {
     document.addEventListener('click', ev => { const a = ev.target && ev.target.closest && ev.target.closest('a[href],area[href]'); if (!a || ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || a.target && a.target !== '_self' || a.hasAttribute('download')) return; const href = a.getAttribute('data-zp-target-url') || a.getAttribute('href'); if (!href || href.startsWith('#') || /^javascript:/i.test(href)) return; ev.preventDefault(); navigateToTarget(href); }, true);
@@ -185,12 +142,31 @@
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { navigateToTarget(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { navigateToTarget(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload.call(location); });
-    define(history, 'pushState', function(state, title, url) { if (url != null) virtualURL = sameOriginHistoryURL(url); const entryId = 'e' + ZP.randomId(); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId, targetUrl: virtualURL.href, replace: false }).catch(()=>{}); return Native.historyPush(state, title, location.pathname); });
-    define(history, 'replaceState', function(state, title, url) { if (url != null) virtualURL = sameOriginHistoryURL(url); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId: boot.entryId, targetUrl: virtualURL.href, replace: true }).catch(()=>{}); return Native.historyReplace(state, title, location.pathname); });
-    window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }).then(reply => { virtualURL = new URL(reply.targetUrl); if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
+    define(history, 'pushState', function(state, title, url) { if (url != null) { virtualURL = sameOriginHistoryURL(url); if (!explicitBaseURL) baseURL = virtualURL.href; } const entryId = 'e' + ZP.randomId(); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace: false }).catch(()=>{}); return Native.historyPush(state, title, location.pathname); });
+    define(history, 'replaceState', function(state, title, url) { if (url != null) { virtualURL = sameOriginHistoryURL(url); if (!explicitBaseURL) baseURL = virtualURL.href; } postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId: boot.entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace: true }).catch(()=>{}); return Native.historyReplace(state, title, location.pathname); });
+    window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }).then(reply => { virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: boot.entryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
-    function submitForm(form, submitter) { const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href; const method = String(submitter && submitter.getAttribute && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase(); const target = new URL(targetURL(raw)); urlMeta.set(form, target.href); if (method === 'GET') { try { const data = submitter ? new Native.FormData(form, submitter) : new Native.FormData(form); const qs = new URLSearchParams(); for (const [k, v] of data) qs.append(k, String(v)); const encoded = qs.toString(); if (encoded) target.search = target.search ? target.search + '&' + encoded : encoded; } catch {} navigateToTarget(target.href); return; } internalFetch(target.href, { method, body: new Native.FormData(form) }).then(r => r.text()).then(html => { document.open(); document.write(html); document.close(); }).catch(()=>{}); }
+    function submitForm(form, submitter) {
+      const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href;
+      const method = String(submitter && submitter.getAttribute && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
+      const target = new URL(targetURL(raw));
+      urlMeta.set(form, target.href);
+      if (method === 'GET') {
+        try {
+          const data = submitter ? new Native.FormData(form, submitter) : new Native.FormData(form);
+          const qs = new URLSearchParams();
+          for (const [k, v] of data) qs.append(k, String(v));
+          const encoded = qs.toString();
+          if (encoded) target.search = target.search ? target.search + '&' + encoded : encoded;
+        } catch {}
+        navigateToTarget(target.href);
+        return;
+      }
+      const headers = new Native.Headers();
+      headers.set('X-ZP-Document-Request', '1');
+      Native.fetch(target.href, { method, body: new Native.FormData(form), credentials: 'include', headers }).then(r => r.text()).then(html => { document.open(); document.write(html); document.close(); }).catch(()=>{});
+    }
     function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
   }
 
@@ -297,15 +273,54 @@
   }
 
   function installDOMHooks(w) {
-    define(w.Element.prototype, 'setAttribute', function(k, v) { const key = String(k).toLowerCase(); if (isURLBearing(this, key) && isHTTPURL(v)) { const t = targetURL(v); urlMeta.set(this, t); Native.setAttribute.call(this, 'data-zp-target-url', t); if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'src') { Native.setAttribute.call(this, k, 'about:blank'); shareNavURL(t).then(u => Native.setAttribute.call(this, k, u)).catch(()=>{}); return; } return Native.setAttribute.call(this, k, t); } if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v))); return Native.setAttribute.call(this, k, v); });
+    define(w.Element.prototype, 'setAttribute', function(k, v) {
+      const key = String(k).toLowerCase();
+      if (this.localName === 'base' && key === 'href') {
+        updateVirtualBase(v);
+        return Native.setAttribute.call(this, k, v);
+      }
+      if (isURLBearing(this, key) && isHTTPURL(v)) {
+        const t = targetURL(v);
+        urlMeta.set(this, t);
+        Native.setAttribute.call(this, 'data-zp-target-url', t);
+        if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'src') {
+          Native.setAttribute.call(this, k, 'about:blank');
+          shareNavURL(t).then(u => Native.setAttribute.call(this, k, u)).catch(()=>{});
+          return;
+        }
+        return Native.setAttribute.call(this, k, t);
+      }
+      if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
+      return Native.setAttribute.call(this, k, v);
+    });
     define(w.Element.prototype, 'getAttribute', function(k) { const key = String(k).toLowerCase(); if (isURLBearing(this, key)) return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k); return Native.getAttribute.call(this, k); });
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
-    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { return Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); });
-    function patchHTMLSetter(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get: d.get, set(v) { d.set.call(this, transformHTML(String(v))); instrumentDescendantIframes(this); }, configurable: false }); } catch {} }
+    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); return ret; });
+    installBaseObserver();
+    function patchHTMLSetter(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get: d.get, set(v) { d.set.call(this, transformHTML(String(v))); syncBaseElement(this); instrumentDescendantIframes(this); }, configurable: false }); } catch {} }
   }
   function isURLBearing(el, key) { const tag = el.localName; return key === 'href' && (tag === 'a' || tag === 'area') || key === 'action' && tag === 'form' || key === 'formaction' && (tag === 'input' || tag === 'button') || key === 'src' && (tag === 'iframe' || tag === 'frame'); }
-  function transformHTML(s) { return s.replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
+  function transformHTML(s) { return s.replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
   function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script>Object.defineProperty(window,"__ZP_BOOT",{value:' + JSON.stringify(boot).replace(/</g,'\\u003c') + ',configurable:true});<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
+  function baseSyncScript(raw) { return '<script>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(String(raw)).replace(/</g,'\\u003c') + ');<\/script>'; }
+  function syncBaseElement(node) {
+    if (!node) return;
+    if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));
+    if (node.querySelectorAll) node.querySelectorAll('base[href]').forEach(el => updateVirtualBase(Native.getAttribute.call(el, 'href')));
+  }
+  function installBaseObserver() {
+    syncBaseElement(document);
+    const MO = root.MutationObserver;
+    if (!MO || !document.documentElement) return;
+    try {
+      new MO(records => {
+        for (const r of records) {
+          if (r.type === 'attributes') syncBaseElement(r.target);
+          else for (const n of r.addedNodes || []) syncBaseElement(n);
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
+    } catch {}
+  }
 
   function installWorkerHooks() {
     if (Native.Worker) define(root, 'Worker', function(url, opts) { return new Native.Worker(workerBootstrapURL(url), opts); });
@@ -347,10 +362,8 @@
   function instrumentDescendantIframes(node) { if (!node || !node.querySelectorAll) { if (node && /^(IFRAME|FRAME)$/.test(node.nodeName)) instrumentIframe(node); return; } node.querySelectorAll('iframe,frame').forEach(instrumentIframe); }
   function instrumentIframe(frame) { if (!frame || iframeMeta.has(frame)) return; iframeMeta.add(frame); try { if (!frame.getAttribute('src') && frame.contentWindow) installNetworkContainment(frame.contentWindow); } catch { try { frame.remove(); } catch {} } }
   function installNetworkContainment(w) {
-    define(w, 'fetch', zpFetch);
-    if (root.XMLHttpRequest) define(w, 'XMLHttpRequest', root.XMLHttpRequest);
+    // Native fetch is intentionally left intact; the Service Worker owns request capture.
     if (root.WebSocket) define(w, 'WebSocket', root.WebSocket);
-    if (root.EventSource) define(w, 'EventSource', root.EventSource);
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
     installBlockers(w);
   }

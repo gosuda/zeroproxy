@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"syscall/js"
 
 	"github.com/gosuda/zeroproxy/internal/headers"
@@ -53,15 +54,6 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 	if resp == nil {
 		return js.Null(), fmt.Errorf("nil response")
 	}
-	var body []byte
-	if resp.Body != nil {
-		defer resp.Body.Close()
-		var err error
-		body, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return js.Null(), err
-		}
-	}
 	safe := headers.ConstructorPolicy(resp.Header, bodyTransformed, bodyDecoded)
 	jsHeaders := js.Global().Get("Headers").New()
 	for name, vals := range safe {
@@ -70,13 +62,79 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 		}
 	}
 	var bodyArg any = js.Null()
-	if responseMayHaveBody(resp.StatusCode) {
-		arr := js.Global().Get("Uint8Array").New(len(body))
-		js.CopyBytesToJS(arr, body)
-		bodyArg = arr
+	if responseMayHaveBody(resp.StatusCode) && resp.Body != nil {
+		bodyArg = readableStreamFrom(ctx, resp.Body)
+	} else if resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 	init := map[string]any{"status": resp.StatusCode, "statusText": http.StatusText(resp.StatusCode), "headers": jsHeaders}
 	return js.Global().Get("Response").New(bodyArg, init), nil
+}
+
+func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
+	source := js.Global().Get("Object").New()
+	var start js.Func
+	var cancel js.Func
+	var closeOnce sync.Once
+	var cleanupOnce sync.Once
+	cancelled := make(chan struct{})
+	closeBody := func() {
+		closeOnce.Do(func() {
+			close(cancelled)
+			_ = body.Close()
+		})
+	}
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			start.Release()
+			cancel.Release()
+		})
+	}
+	start = js.FuncOf(func(this js.Value, args []js.Value) any {
+		controller := args[0]
+		go func() {
+			defer cleanup()
+			defer closeBody()
+			buf := make([]byte, 32*1024)
+			for {
+				select {
+				case <-ctx.Done():
+					controller.Call("error", js.Global().Get("Error").New(ctx.Err().Error()))
+					return
+				case <-cancelled:
+					return
+				default:
+				}
+				n, err := body.Read(buf)
+				if n > 0 {
+					arr := js.Global().Get("Uint8Array").New(n)
+					js.CopyBytesToJS(arr, buf[:n])
+					controller.Call("enqueue", arr)
+				}
+				if err != nil {
+					select {
+					case <-cancelled:
+						return
+					default:
+					}
+					if err == io.EOF {
+						controller.Call("close")
+					} else {
+						controller.Call("error", js.Global().Get("Error").New(err.Error()))
+					}
+					return
+				}
+			}
+		}()
+		return nil
+	})
+	cancel = js.FuncOf(func(this js.Value, args []js.Value) any {
+		closeBody()
+		return nil
+	})
+	source.Set("start", start)
+	source.Set("cancel", cancel)
+	return js.Global().Get("ReadableStream").New(source)
 }
 
 func await(ctx context.Context, p js.Value) (js.Value, error) {

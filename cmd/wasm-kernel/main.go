@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -119,7 +118,12 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	reqv := args[0]
 	return promise(func(resolve, reject js.Value) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cancel()
+		releaseOnReturn := true
+		defer func() {
+			if releaseOnReturn {
+				cancel()
+			}
+		}()
 		if err := k.ensure(ctx); err != nil {
 			resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway))
 			return
@@ -145,19 +149,26 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 		transformed := false
 		decoded := false
 		if isDocumentRequest(req) && isHTML(resp.Header.Get("Content-Type")) {
-			body, err := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if err != nil {
-				resolve.Invoke(safeResponse("MALFORMED_HTML", http.StatusBadGateway, finalURL.Host))
-				return
+			source := resp.Body
+			if source == nil {
+				source = http.NoBody
 			}
-			out, err := htmltx.Transform(bytes.NewReader(body), htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL)})
-			if err != nil {
-				resolve.Invoke(safeResponse("MALFORMED_HTML", http.StatusBadGateway, finalURL.Host))
-				return
-			}
-			resp.Body = io.NopCloser(bytes.NewReader(out))
-			resp.ContentLength = int64(len(out))
+			pr, pw := io.Pipe()
+			go func() {
+				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL)})
+				closeErr := source.Close()
+				if err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+				if closeErr != nil {
+					_ = pw.CloseWithError(closeErr)
+					return
+				}
+				_ = pw.Close()
+			}()
+			resp.Body = &closeWithSource{ReadCloser: pr, source: source}
+			resp.ContentLength = -1
 			resp.Header.Del("Content-Length")
 			resp.Header.Del("Content-Encoding")
 			resp.Header.Set("Content-Type", "text/html; charset=utf-8")
@@ -165,8 +176,16 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			decoded = true
 		}
 		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+		if resp.Body != nil {
+			resp.Body = &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+			releaseOnReturn = false
+		}
 		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
 		if err != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			releaseOnReturn = true
 			resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway, finalURL.Host))
 			return
 		}
@@ -338,6 +357,10 @@ func safeResponse(code string, status int, host ...string) js.Value {
 	h := js.Global().Get("Headers").New()
 	h.Call("set", "Content-Type", "text/html; charset=utf-8")
 	h.Call("set", "Cache-Control", "no-store")
+	h.Call("set", "Access-Control-Allow-Origin", "*")
+	h.Call("set", "Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
+	h.Call("set", "Access-Control-Allow-Headers", "*")
+	h.Call("set", "Access-Control-Expose-Headers", "*")
 	return js.Global().Get("Response").New(body, map[string]any{"status": status, "headers": h})
 }
 
@@ -372,3 +395,29 @@ func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }
 func isDocumentRequest(req *http.Request) bool { return req.Header.Get("X-Zp-Document-Request") == "1" }
+
+type closeWithSource struct {
+	io.ReadCloser
+	source io.Closer
+}
+
+func (c *closeWithSource) Close() error {
+	err := c.ReadCloser.Close()
+	cerr := c.source.Close()
+	if err != nil {
+		return err
+	}
+	return cerr
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.once.Do(c.cancel)
+	return err
+}

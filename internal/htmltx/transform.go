@@ -1,6 +1,7 @@
 package htmltx
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -25,14 +26,24 @@ type Options struct {
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
 
 // Transform rewrites a target HTML stream into a top-level ZeroProxy document.
-// It uses x/net/html's tokenizer and stops on tokenizer/read failures; malformed
-// but parser-recoverable markup is emitted after token-level recovery.
 func Transform(r io.Reader, opt Options) ([]byte, error) {
+	var out bytes.Buffer
+	if err := TransformTo(&out, r, opt); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// TransformTo rewrites a target HTML stream into w without buffering the full
+// transformed document. It uses x/net/html's tokenizer and stops on tokenizer
+// or write failures; malformed but parser-recoverable markup is emitted after
+// token-level recovery.
+func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 	if opt.TargetURL == nil || opt.TargetURL.Scheme == "" || opt.TargetURL.Host == "" {
-		return nil, fmt.Errorf("%w: missing target URL", ErrMalformedHTML)
+		return fmt.Errorf("%w: missing target URL", ErrMalformedHTML)
 	}
 	z := xhtml.NewTokenizer(r)
-	var out bytes.Buffer
+	out := bufio.NewWriter(w)
 	prelude := runtimePrelude(opt)
 	preludeInjected := false
 	blockedDepth := 0
@@ -45,7 +56,7 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("%w: %v", ErrMalformedHTML, err)
+			return fmt.Errorf("%w: %v", ErrMalformedHTML, err)
 		}
 		tok := z.Token()
 		if blockedDepth > 0 {
@@ -103,7 +114,11 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 			if shouldDropToken(tok) {
 				continue
 			}
-			if tag == "base" || isMetaRefresh(tok) {
+			if tag == "base" {
+				out.WriteString(baseSyncScript(attr(tok, "href"), opt))
+				continue
+			}
+			if isMetaRefresh(tok) {
 				continue
 			}
 			if tag == "object" {
@@ -126,12 +141,9 @@ func Transform(r io.Reader, opt Options) ([]byte, error) {
 		out.WriteString(tok.String())
 	}
 	if !preludeInjected {
-		out2 := bytes.Buffer{}
-		out2.WriteString(prelude)
-		out2.Write(out.Bytes())
-		out = out2
+		out.WriteString(prelude)
 	}
-	return out.Bytes(), nil
+	return out.Flush()
 }
 
 func runtimePrelude(opt Options) string {
@@ -226,6 +238,22 @@ func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok 
 
 func injectSrcdoc(src string, opt Options) string {
 	return runtimePrelude(opt) + src
+}
+func baseSyncScript(raw string, opt Options) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return ""
+	}
+	abs := opt.TargetURL.ResolveReference(u)
+	if abs.Scheme != "http" && abs.Scheme != "https" {
+		return ""
+	}
+	b, _ := json.Marshal(abs.String())
+	return `<script nonce="zp">window.__ZP_SET_BASE&&window.__ZP_SET_BASE(` + string(b) + `);</script>`
 }
 
 func shouldDropToken(tok xhtml.Token) bool {

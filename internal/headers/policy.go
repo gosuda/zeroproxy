@@ -19,7 +19,7 @@ var hidden = map[string]struct{}{
 // no-store default. Location is intentionally excluded unless explicitly
 // allowed by the redirect engine after final response resolution.
 func ConstructorPolicy(src http.Header, bodyTransformed, bodyDecoded bool) http.Header {
-	dst := make(http.Header, len(src)+2)
+	dst := make(http.Header, len(src)+6)
 	for name, vals := range src {
 		canon := http.CanonicalHeaderKey(name)
 		lower := strings.ToLower(canon)
@@ -43,6 +43,10 @@ func ConstructorPolicy(src http.Header, bodyTransformed, bodyDecoded bool) http.
 		}
 	}
 	dst.Set("Cache-Control", "no-store")
+	dst.Set("Access-Control-Allow-Origin", "*")
+	dst.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
+	dst.Set("Access-Control-Allow-Headers", "*")
+	dst.Set("Access-Control-Expose-Headers", "*")
 	return dst
 }
 

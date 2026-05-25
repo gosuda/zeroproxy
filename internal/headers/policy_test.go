@@ -16,4 +16,7 @@ func TestConstructorPolicyStripsForbiddenHeaders(t *testing.T) {
 	if out.Get("Content-Type") != "text/html" || out.Get("Cache-Control") != "no-store" {
 		t.Fatalf("safe headers missing: %#v", out)
 	}
+	if out.Get("Access-Control-Allow-Origin") != "*" || out.Get("Access-Control-Allow-Headers") != "*" {
+		t.Fatalf("CORS emulation headers missing: %#v", out)
+	}
 }
