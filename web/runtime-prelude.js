@@ -276,9 +276,9 @@
     }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
-      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { navigateToTarget(value); return true; }
+      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { navigateToTarget(value); return value; }
       Reflect.set(Object(base), prop, value);
-      return true;
+      return value;
     }
     function call(base, prop, args) {
       const fn = get(base, prop);
@@ -314,27 +314,89 @@
     if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
   }
   function installWebSocket() {
+    const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
+    const tokenRE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+    function protocolList(protocols) {
+      if (protocols == null) return [];
+      const list = typeof protocols === 'string' ? [protocols] : Array.isArray(protocols) ? protocols.slice() : null;
+      if (!list) throw normalizedError('SyntaxError');
+      const out = [];
+      const seen = new Set();
+      for (const p of list) {
+        const s = String(p);
+        if (!s || !tokenRE.test(s) || seen.has(s)) throw normalizedError('SyntaxError');
+        seen.add(s);
+        out.push(s);
+      }
+      return out;
+    }
+    function closeEvent(code, reason, wasClean) {
+      try { return new CloseEvent('close', { code, reason, wasClean }); }
+      catch { const ev = new Event('close'); try { Object.defineProperties(ev, { code: { value: code }, reason: { value: reason }, wasClean: { value: wasClean } }); } catch {} return ev; }
+    }
+    function finish(ws, code, reason, wasClean) {
+      if (ws._closed) return;
+      ws._closed = true;
+      ws.readyState = CLOSED;
+      ws.dispatchEvent(closeEvent(code || 1000, reason || '', wasClean !== false));
+    }
+    function fail(ws) {
+      if (ws._closed) return;
+      ws.dispatchEvent(new Event('error'));
+      finish(ws, 1006, '', false);
+    }
     function ZPWebSocket(url, protocols) {
-      this.url = targetWSURL(url); this.protocol = ''; this.extensions = ''; this.readyState = 0; this.bufferedAmount = 0; this.binaryType = 'blob';
-      const plist = Array.isArray(protocols) ? protocols : protocols ? [protocols] : [];
+      if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
+      this.url = targetWSURL(url);
+      this.protocol = '';
+      this.extensions = '';
+      this.readyState = CONNECTING;
+      this.bufferedAmount = 0;
+      this.binaryType = 'blob';
+      this._port = null;
+      this._closed = false;
+      const plist = protocolList(protocols);
       postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId }).then(reply => {
+        if (this._closed) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
         this.protocol = String(reply.protocol || '');
         this._port = reply.port;
         this._port.onmessage = ev => {
           const m = ev.data || {};
-          if (m.type === 'message') this.dispatchEvent(new MessageEvent('message', { data: m.data }));
-          else if (m.type === 'error') this.dispatchEvent(new Event('error'));
-          else if (m.type === 'close') { this.readyState = 3; this.dispatchEvent(new CloseEvent('close')); }
+          if (m.type === 'message') {
+            let data = m.data;
+            if (this.binaryType === 'blob' && data instanceof ArrayBuffer && Native.Blob) data = new Native.Blob([data]);
+            this.dispatchEvent(new MessageEvent('message', { data, origin: new URL(this.url).origin }));
+          } else if (m.type === 'error') {
+            fail(this);
+          } else if (m.type === 'close') {
+            finish(this, m.code || 1000, m.reason || '', true);
+          }
         };
         this._port.start && this._port.start();
-        this.readyState = 1;
+        this.readyState = OPEN;
         this.dispatchEvent(new Event('open'));
-      }).catch(() => { this.readyState = 3; this.dispatchEvent(new Event('error')); this.dispatchEvent(new CloseEvent('close')); });
+      }).catch(() => fail(this));
     }
-    ZPWebSocket.CONNECTING = 0; ZPWebSocket.OPEN = 1; ZPWebSocket.CLOSING = 2; ZPWebSocket.CLOSED = 3;
-    ZPWebSocket.prototype = {};
+    ZPWebSocket.CONNECTING = CONNECTING; ZPWebSocket.OPEN = OPEN; ZPWebSocket.CLOSING = CLOSING; ZPWebSocket.CLOSED = CLOSED;
+    ZPWebSocket.prototype = { CONNECTING, OPEN, CLOSING, CLOSED };
     installEventMethods(ZPWebSocket.prototype);
-    Object.assign(ZPWebSocket.prototype, { constructor: ZPWebSocket, send(data) { if (this.readyState !== 1 || !this._port) throw normalizedError('InvalidStateError'); this._port.postMessage({ type: 'send', data }); }, close(code, reason) { this.readyState = 2; if (this._port) this._port.postMessage({ type: 'close', code, reason }); this.readyState = 3; this.dispatchEvent(new CloseEvent('close', { code: code || 1000, reason: reason || '' })); } });
+    Object.assign(ZPWebSocket.prototype, {
+      constructor: ZPWebSocket,
+      send(data) {
+        if (this.readyState !== OPEN || !this._port) throw normalizedError('InvalidStateError');
+        if (Native.Blob && data instanceof Native.Blob) {
+          data.arrayBuffer().then(buf => { if (this.readyState === OPEN && this._port) this._port.postMessage({ type: 'send', data: buf }); }).catch(() => fail(this));
+          return;
+        }
+        this._port.postMessage({ type: 'send', data });
+      },
+      close(code = 1000, reason = '') {
+        if (this._closed || this.readyState === CLOSING || this.readyState === CLOSED) return;
+        this.readyState = CLOSING;
+        if (this._port) this._port.postMessage({ type: 'close', code, reason });
+        finish(this, code, reason, true);
+      }
+    });
     define(root, 'WebSocket', ZPWebSocket);
   }
 

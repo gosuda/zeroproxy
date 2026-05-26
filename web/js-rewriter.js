@@ -5,7 +5,7 @@
 
   const VERSION = 'phase2-oxc-abi-2';
   const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
-  const GLOBALS = new Set(['window', 'self', 'globalThis', 'location', 'document', 'history', 'top', 'parent', 'opener', 'frames', 'eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
+  const GLOBALS = new Set(['window', 'self', 'globalThis', 'location', 'document', 'history', 'top', 'parent', 'opener', 'frames', 'WebSocket', 'eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
   const MEMBER_HELPER_PROPS = new Set(['location', 'defaultView', 'contentWindow', 'contentDocument', 'top', 'parent', 'opener', 'frames', 'constructor']);
   const CALL_HELPER_PROPS = new Set(['assign', 'replace', 'open', 'get', 'getOwnPropertyDescriptor', 'defineProperty']);
   let parser = null;
@@ -159,6 +159,60 @@
       renderedCache.set(node, out);
       return out;
     }
+    function exprCode(node) {
+      if (!node) return '';
+      if (node.type === 'Identifier' || node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression' || node.type === 'ChainExpression') return render(node);
+      if (node.type === 'BinaryExpression' || node.type === 'LogicalExpression') return exprCode(node.left) + source.slice(node.left.end, node.right.start) + exprCode(node.right);
+      if (node.type === 'ConditionalExpression') return exprCode(node.test) + source.slice(node.test.end, node.consequent.start) + exprCode(node.consequent) + source.slice(node.consequent.end, node.alternate.start) + exprCode(node.alternate);
+      if (node.type === 'UnaryExpression' || node.type === 'UpdateExpression') {
+        if (node.prefix) return source.slice(node.start, node.argument.start) + exprCode(node.argument);
+        return exprCode(node.argument) + source.slice(node.argument.end, node.end);
+      }
+      return src(node);
+    }
+
+    function isVirtualWindowExpr(node) {
+      if (!node) return false;
+      if (node.type === 'ChainExpression') return isVirtualWindowExpr(node.expression);
+      if (node.type === 'Identifier') return isGlobalIdentifier(node) && (node.name === 'window' || node.name === 'self' || node.name === 'globalThis' || node.name === 'top' || node.name === 'parent' || node.name === 'opener' || node.name === 'frames');
+      if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return false;
+      const name = propName(node.property, node.computed);
+      if ((name === 'defaultView' || name === 'contentWindow') && MEMBER_HELPER_PROPS.has(name)) return true;
+      return (name === 'window' || name === 'self' || name === 'globalThis' || name === 'top' || name === 'parent' || name === 'opener' || name === 'frames') && isVirtualWindowExpr(node.object);
+    }
+
+    function isVirtualLocationExpr(node) {
+      if (!node) return false;
+      if (node.type === 'ChainExpression') return isVirtualLocationExpr(node.expression);
+      if (node.type === 'Identifier') return isGlobalIdentifier(node) && node.name === 'location';
+      if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return false;
+      const name = propName(node.property, node.computed);
+      return name === 'location' && isVirtualWindowExpr(node.object) || node.computed && isVirtualWindowExpr(node.object);
+    }
+
+    function assignmentSetTarget(node) {
+      if (!node) return null;
+      if (node.type === 'ChainExpression') return assignmentSetTarget(node.expression);
+      if (node.type === 'Identifier' && isGlobalIdentifier(node) && (node.name === 'location' || node.name === 'window')) return { base: 'globalThis', prop: JSON.stringify(node.name) };
+      if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return null;
+      const name = propName(node.property, node.computed);
+      if (name === 'location' && isVirtualWindowExpr(node.object)) return { base: render(node.object), prop: propCode(node.property, node.computed) };
+      if (name === 'href' && isVirtualLocationExpr(node.object)) return { base: render(node.object), prop: propCode(node.property, node.computed) };
+      if (node.computed && (isVirtualWindowExpr(node.object) || isVirtualLocationExpr(node.object))) return { base: render(node.object), prop: propCode(node.property, node.computed) };
+      return null;
+    }
+    function argList(args) {
+      return (args || []).map(exprCode).join(',');
+    }
+
+    function constructTarget(node) {
+      if (!node) return '';
+      if (node.type === 'ChainExpression') return constructTarget(node.expression);
+      if (node.type === 'Identifier' && isGlobalIdentifier(node)) return render(node);
+      if ((node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') && isVirtualWindowExpr(node.object)) return render(node);
+      return '';
+    }
+
 
     function enterNode(node, parent, key) {
       if (!node || typeof node.type !== 'string') return false;
@@ -198,9 +252,12 @@
             diagnostics.push({ level: 'warning', message: 'blocked compound assignment touching virtualized browser state', start: node.start, end: node.end });
             return true;
           }
-          if (node.left && node.left.type === 'Identifier' && isGlobalIdentifier(node.left) && (node.left.name === 'location' || node.left.name === 'window')) {
-            addReplacement(node, '__zp_set(globalThis,' + JSON.stringify(node.left.name) + ',' + src(node.right) + ')', 100);
-            return true;
+          if (node.operator === '=') {
+            const target = assignmentSetTarget(node.left);
+            if (target) {
+              addReplacement(node, '__zp_set(' + target.base + ',' + target.prop + ',' + exprCode(node.right) + ')', 100);
+              return true;
+            }
           }
           break;
         }
@@ -215,13 +272,20 @@
         case 'CallExpression':
         case 'NewExpression': {
           const callee = node.callee;
+          const args = argList(node.arguments);
           if (callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')) {
             const name = propName(callee.property, callee.computed);
             if (CALL_HELPER_PROPS.has(name) || MEMBER_HELPER_PROPS.has(name)) {
-              const args = (node.arguments || []).map(a => src(a)).join(',');
               const call = '__zp_call(' + render(callee.object) + ',' + propCode(callee.property, callee.computed) + ',[' + args + '])';
               addReplacement(node, node.type === 'NewExpression' ? BLOCK_CODE : call, 90);
               if (node.type === 'NewExpression') diagnostics.push({ level: 'warning', message: 'blocked construction through virtualized browser state', start: node.start, end: node.end });
+              return true;
+            }
+          }
+          if (node.type === 'NewExpression') {
+            const ctor = constructTarget(callee);
+            if (ctor) {
+              addReplacement(node, '__zp_construct(' + ctor + ',[' + args + '])', 90);
               return true;
             }
           }
@@ -249,8 +313,8 @@
 
     function containsDangerousLHS(node) {
       if (!node) return false;
-      if (node.type === 'Identifier') return isGlobalIdentifier(node) && (node.name === 'location' || node.name === 'window');
-      if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') return MEMBER_HELPER_PROPS.has(propName(node.property, node.computed)) || containsDangerousLHS(node.object);
+      if (assignmentSetTarget(node)) return true;
+      if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') return containsDangerousLHS(node.object);
       return false;
     }
 

@@ -46,3 +46,44 @@ test('OXC rewriter blocks constructor escape compound writes', async () => {
   assert.match(out.code, /Blocked by ZeroProxy rewrite policy/);
   assert.match(out.code, /__zp_call\(__zp_get\(\(\{\}\),\"constructor\"\),\"constructor\"/);
 });
+
+test('OXC rewriter routes location assignments and WebSocket construction through helpers', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`
+    const assigned = (window.location = "https://google.com/");
+    location.href = window.location.href + "#frag";
+    const ws = new WebSocket("ws://example.test/socket", ["chat"]);
+    const ws2 = new window.WebSocket("wss://example.test/secure");
+    window.result = { assigned, href: location.href, wsURL: ws.url, ws2URL: ws2.url };
+  `, { kind: 'classic' });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.match(out.code, /__zp_set\(__zp_get\(globalThis,"window"\),"location","https:\/\/google\.com\/"\)/);
+  assert.match(out.code, /__zp_set\(__zp_get\(globalThis,"location"\),"href",__zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href \+ "#frag"\)/);
+  assert.match(out.code, /__zp_construct\(__zp_get\(globalThis,"WebSocket"\),\["ws:\/\/example\.test\/socket",\["chat"\]\]\)/);
+  assert.match(out.code, /__zp_construct\(__zp_get\(globalThis,"window"\)\.WebSocket,\["wss:\/\/example\.test\/secure"\]\)/);
+
+  const loc = { href: 'https://origin.test/start' };
+  function FakeWebSocket(url, protocols) {
+    this.url = url;
+    this.protocols = protocols;
+  }
+  const ctx = {
+    location: loc,
+    window: { location: loc, WebSocket: FakeWebSocket },
+    WebSocket: FakeWebSocket,
+  };
+  ctx.globalThis = ctx;
+  ctx.__zp_get = (base, prop) => base[prop];
+  ctx.__zp_set = (base, prop, value) => {
+    if ((base === ctx.window && prop === 'location') || (base === loc && prop === 'href')) loc.href = String(value);
+    else base[prop] = value;
+    return value;
+  };
+  ctx.__zp_construct = (ctor, args) => new ctor(...args);
+  vm.runInNewContext(out.code, ctx);
+  assert.equal(loc.href, 'https://google.com/#frag');
+  assert.equal(ctx.window.result.assigned, 'https://google.com/');
+  assert.equal(ctx.window.result.href, 'https://google.com/#frag');
+  assert.equal(ctx.window.result.wsURL, 'ws://example.test/socket');
+  assert.equal(ctx.window.result.ws2URL, 'wss://example.test/secure');
+});

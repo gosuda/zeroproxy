@@ -259,11 +259,37 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 
 func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *wsproto.Conn) js.Value {
 	handlers := js.Value{}
+	var start sync.Once
 	obj := js.Global().Get("Object").New()
+	readLoop := func() {
+		defer cancel()
+		defer conn.Close()
+		for {
+			op, payload, err := conn.ReadFrame(ctx)
+			if err != nil {
+				if handlers.Truthy() {
+					callHandler(handlers, "error", jsError("TARGET_CONNECT_FAILED"))
+				}
+				return
+			}
+			if op == wsproto.OpClose {
+				callHandler(handlers, "close", js.Null())
+				return
+			}
+			if op == wsproto.OpText {
+				callHandler(handlers, "message", string(payload))
+				continue
+			}
+			arr := js.Global().Get("Uint8Array").New(len(payload))
+			js.CopyBytesToJS(arr, payload)
+			callHandler(handlers, "message", arr.Get("buffer"))
+		}
+	}
 	obj.Set("setHandlers", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if len(args) > 0 {
 			handlers = args[0]
 		}
+		start.Do(func() { go readLoop() })
 		return nil
 	}))
 	obj.Set("send", js.FuncOf(func(this js.Value, args []js.Value) any {
@@ -281,33 +307,6 @@ func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *
 		return nil
 	}))
 	obj.Set("close", js.FuncOf(func(this js.Value, args []js.Value) any { cancel(); _ = conn.Close(); return nil }))
-	go func() {
-		defer cancel()
-		defer conn.Close()
-		for {
-			op, payload, err := conn.ReadFrame(ctx)
-			if err != nil {
-				if handlers.Truthy() {
-					callHandler(handlers, "error", jsError("TARGET_CONNECT_FAILED"))
-				}
-				return
-			}
-			if !handlers.Truthy() {
-				continue
-			}
-			if op == wsproto.OpClose {
-				callHandler(handlers, "close", js.Null())
-				return
-			}
-			if op == wsproto.OpText {
-				callHandler(handlers, "message", string(payload))
-				continue
-			}
-			arr := js.Global().Get("Uint8Array").New(len(payload))
-			js.CopyBytesToJS(arr, payload)
-			callHandler(handlers, "message", arr.Get("buffer"))
-		}
-	}()
 	return obj
 }
 
@@ -346,7 +345,7 @@ func jsPayload(v js.Value) ([]byte, bool) {
 		return b, true
 	}
 	if v.Get("buffer").Truthy() {
-		arr := js.Global().Get("Uint8Array").New(v.Get("buffer"))
+		arr := js.Global().Get("Uint8Array").New(v.Get("buffer"), v.Get("byteOffset"), v.Get("byteLength"))
 		b := make([]byte, arr.Get("byteLength").Int())
 		js.CopyBytesToGo(b, arr)
 		return b, true

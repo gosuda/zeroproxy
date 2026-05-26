@@ -103,6 +103,7 @@ function createTargetServer(requests) {
       res.end(`<!doctype html><html><head><title>E2E Home</title></head><body>
         <main><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
         <script>window.__ua = navigator.userAgent; window.__platform = navigator.platform; window.__phase2Location = { href: location.href, windowHref: window.location.href }; try { Function('return location.href')(); window.__phase2FunctionBlocked = ''; } catch (err) { window.__phase2FunctionBlocked = err && err.message || String(err); }</script>
+        <script src="/rewrite-fixture.js"></script>
       </body></html>`);
       return;
     }
@@ -112,6 +113,24 @@ function createTargetServer(requests) {
         <main><h1>E2E Next</h1><p id="ua"></p></main>
         <script>document.getElementById('ua').textContent = navigator.userAgent;</script>
       </body></html>`);
+      return;
+    }
+    if (url.pathname === '/rewrite-fixture.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`(() => {
+        const NativeWebSocket = window.WebSocket;
+        window.__rewriteAdvanced = { initialHref: window.location.href, constructorSource: NativeWebSocket.toString() };
+        const ws = new NativeWebSocket('/ws', ['zp-rewrite']);
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => ws.send('rewrite-script');
+        ws.onmessage = ev => {
+          window.__rewriteAdvanced.wsURL = ws.url;
+          window.__rewriteAdvanced.wsProtocol = ws.protocol;
+          window.__rewriteAdvanced.wsMessage = String(ev.data);
+          ws.close(1000, 'done');
+        };
+        ws.onerror = () => { window.__rewriteAdvanced.wsError = true; };
+      })();`);
       return;
     }
     if (url.pathname === '/set-cookie') {
@@ -161,7 +180,7 @@ function createTargetServer(requests) {
 }
 
 function handleWebSocketUpgrade(req, socket, requests) {
-  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', upgrade: true });
+  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', protocol: req.headers['sec-websocket-protocol'] || '', upgrade: true });
   if (new URL(req.url, 'http://target.local').pathname !== '/ws') {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     return;
@@ -361,6 +380,14 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.deepEqual(home.phase2Location, { href: `http://e2e.test:${targetPort}/`, windowHref: `http://e2e.test:${targetPort}/` });
   assert.equal(home.phase2FunctionBlocked, 'Blocked by ZeroProxy policy');
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
+  const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
+  assert.equal(rewriteAdvanced.initialHref, `http://e2e.test:${targetPort}/`);
+  assert.equal(rewriteAdvanced.wsURL, `ws://e2e.test:${targetPort}/ws`);
+  assert.equal(rewriteAdvanced.wsProtocol, 'zp-rewrite');
+  assert.equal(rewriteAdvanced.wsMessage, 'echo:rewrite-script');
+  assert.equal(rewriteAdvanced.wsError, undefined);
+  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
     const blockedByPolicy = fn => {
