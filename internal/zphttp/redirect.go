@@ -40,7 +40,11 @@ func (e *Engine) Do(ctx context.Context, req *http.Request, target *url.URL, tab
 			return nil, cur, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
 		}
 		cur = next
-		wireReq = redirectedRequest(wireReq, resp.StatusCode, cur)
+		var redirectErr error
+		wireReq, redirectErr = redirectedRequest(wireReq, resp.StatusCode, cur)
+		if redirectErr != nil {
+			return nil, cur, redirectErr
+		}
 	}
 	return nil, cur, fmt.Errorf("TARGET_CONNECT_FAILED: redirect loop")
 }
@@ -49,21 +53,33 @@ func redirectStatus(code int) bool {
 	return code == 301 || code == 302 || code == 303 || code == 307 || code == 308
 }
 
-func redirectedRequest(req *http.Request, code int, target *url.URL) *http.Request {
+func redirectedRequest(req *http.Request, code int, target *url.URL) (*http.Request, error) {
 	method := req.Method
 	body := req.Body
 	cl := req.ContentLength
+	getBody := req.GetBody
 	if code == 303 || ((code == 301 || code == 302) && method != "GET" && method != "HEAD") {
 		method = "GET"
 		body = io.NopCloser(http.NoBody)
+		getBody = nil
 		cl = 0
+	} else if body != nil && body != http.NoBody {
+		if getBody == nil {
+			return nil, fmt.Errorf("TARGET_CONNECT_FAILED: non-replayable redirect body")
+		}
+		nextBody, err := getBody()
+		if err != nil {
+			return nil, fmt.Errorf("TARGET_CONNECT_FAILED: replay redirect body: %w", err)
+		}
+		body = nextBody
 	}
 	n := req.Clone(req.Context())
 	n.Method = method
 	n.Body = body
+	n.GetBody = getBody
 	n.ContentLength = cl
 	n.URL = cloneURL(target)
-	return n
+	return n, nil
 }
 
 func cloneURL(u *url.URL) *url.URL {

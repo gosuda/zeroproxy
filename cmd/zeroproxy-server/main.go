@@ -31,8 +31,8 @@ func main() {
 	var addr string
 	s := &server{}
 	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
-	flag.StringVar(&s.webDir, "web", "web", "static web asset directory")
-	flag.StringVar(&s.kernelWASM, "kernel", "bin/kernel.wasm", "compiled Go WASM kernel path")
+	flag.StringVar(&s.webDir, "web", "dist/web", "built static web asset directory")
+	flag.StringVar(&s.kernelWASM, "kernel", "dist/kernel.wasm", "compiled Go WASM kernel path")
 	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address configured with IsolateSOCKSAuth")
 	flag.Parse()
 	mux := http.NewServeMux()
@@ -62,6 +62,12 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveWeb(w, r, "zp-core.js")
 	case r.URL.Path == "/__zp/runtime-prelude.js":
 		s.serveWeb(w, r, "runtime-prelude.js")
+	case r.URL.Path == "/__zp/js-rewriter.js":
+		s.serveWeb(w, r, "js-rewriter.js")
+	case r.URL.Path == "/__zp/oxc-parser.js":
+		s.serveWeb(w, r, "oxc-parser.js")
+	case r.URL.Path == "/__zp/oxc_parser_wasm_bg.wasm":
+		s.serveWeb(w, r, "oxc_parser_wasm_bg.wasm")
 	case r.URL.Path == "/__zp/worker-prelude.js":
 		s.serveWeb(w, r, "worker-prelude.js")
 	case r.URL.Path == "/__zp/wasm_exec.js":
@@ -119,7 +125,7 @@ func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, 
 func sanitizeCode(code string) string {
 	code = strings.TrimSpace(code)
 	switch code {
-	case "BAD_HMAC", "INVALID_SHARE_LINK", "MALFORMED_ROUTE", "SW_NOT_READY", "TARGET_PROTOCOL_BLOCKED", "TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED", "TARGET_CONNECT_FAILED", "MALFORMED_HTML", "REALM_INJECTION_FAILURE", "POLICY_BLOCKED":
+	case "BAD_HMAC", "INVALID_SHARE_LINK", "MALFORMED_ROUTE", "SW_NOT_READY", "TARGET_PROTOCOL_BLOCKED", "TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED", "TARGET_CONNECT_FAILED", "MALFORMED_HTML", "REALM_INJECTION_FAILURE", "REQUEST_BODY_TOO_LARGE", "POLICY_BLOCKED":
 		return code
 	}
 	return "POLICY_BLOCKED"
@@ -234,18 +240,23 @@ func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 }
 
 func (s *server) bridgeToTor(ctx context.Context, stream net.Conn) {
-	defer stream.Close()
 	d := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	tor, err := d.DialContext(ctx, "tcp", s.socksAddr)
 	if err != nil {
+		_ = stream.Close()
 		return
 	}
-	defer tor.Close()
+	closeBoth := func() {
+		_ = stream.Close()
+		_ = tor.Close()
+	}
+	defer closeBoth()
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(tor, stream); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(stream, tor); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(tor, stream); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(stream, tor); closeBoth(); done <- struct{}{} }()
 	select {
 	case <-ctx.Done():
+		closeBoth()
 		return
 	case <-done:
 		return
@@ -270,5 +281,5 @@ func zeroCSP(r *http.Request) string {
 	if host == "" {
 		host = "proxy.example"
 	}
-	return "default-src 'none'; script-src * 'unsafe-inline' 'unsafe-eval' blob: data:; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; navigate-to 'self'; manifest-src 'self'"
+	return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; navigate-to 'self'; manifest-src 'self'"
 }

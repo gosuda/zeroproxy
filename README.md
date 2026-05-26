@@ -21,6 +21,7 @@ Implemented core spine:
 - A single browser WebSocket pipe carrying yamux streams to the relay server, then Tor SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling.
 - Tokenizer-based HTML transform that injects the runtime prelude, launders document navigation URLs through encrypted `/p` routes, drops dangerous tags and headers, and handles `srcdoc`.
 - Runtime containment for WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window `fetch`, XHR, and EventSource currently rely on Service Worker interception rather than runtime polyfills; worker `fetch` is bridged through `/__zp/api/fetch`. Runtime-to-Service-Worker control messages carry a closure-held per-tab capability token. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
+- Phase 2 JavaScript rewriting is wired through an OXC parser/WASM service: target-response CSP no longer permits `connect-src *`, external and inline script sources are parsed before execution, dangerous global/window/location access is rewritten to runtime membrane helpers, parse/transform failures fail closed, and dynamic compilation paths such as `Function`, constructor-constructor escapes, string timers, and blob/data worker scripts are blocked when they cannot be rewritten synchronously.
 - Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
 - Go and JavaScript share URL implementations that use the same envelope format.
 
@@ -33,7 +34,7 @@ Not complete enough for production or high-assurance acceptance:
 - Encrypted IndexedDB persistence is not implemented.
 - Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE2_PLAN.md`](./PHASE2_PLAN.md) for the proposed Service Worker/SWC JavaScript rewriting phase.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE2_PLAN.md`](./PHASE2_PLAN.md) for the Phase 2 Service Worker/OXC JavaScript rewriting plan.
 
 ## Requirements
 
@@ -59,31 +60,38 @@ Keep that process running and wait until Tor logs `Bootstrapped 100% (done)` bef
 
 ## Build and run locally
 
-Build the WASM kernel and relay server from the repository root:
+Build the browser bundle, Go WASM kernel, and relay server from the repository root:
 
 ```sh
-mkdir -p bin
-GOOS=js GOARCH=wasm go build -o bin/kernel.wasm ./cmd/wasm-kernel
-go build -o bin/zeroproxy-server ./cmd/zeroproxy-server
+npm ci
+npm run build
+```
+
+The build writes deployable artifacts under `dist/`:
+
+```text
+dist/web/                 built browser assets
+dist/kernel.wasm          Go WASM transport kernel
+dist/zeroproxy-server     relay server binary
 ```
 
 Start the relay server in another terminal:
 
 ```sh
-./bin/zeroproxy-server -addr :8080 -web web -kernel bin/kernel.wasm -socks 127.0.0.1:9050
+./dist/zeroproxy-server -addr :8080 -socks 127.0.0.1:9050
 ```
 
-Equivalent `go run` form:
+Equivalent `go run` form after `npm run build`:
 
 ```sh
-go run ./cmd/zeroproxy-server -addr :8080 -web web -kernel bin/kernel.wasm -socks 127.0.0.1:9050
+go run ./cmd/zeroproxy-server -addr :8080 -socks 127.0.0.1:9050
 ```
 
 Server flags:
 
 - `-addr`: HTTP listen address. Default: `:8080`.
-- `-web`: static web asset directory containing `index.html`, `sw.js`, and `/__zp/*` assets. Default: `web`.
-- `-kernel`: compiled Go WASM kernel served at `/__zp/kernel.wasm`. Default: `bin/kernel.wasm`.
+- `-web`: built static web asset directory containing `index.html`, `sw.js`, and `/__zp/*` assets. Default: `dist/web`.
+- `-kernel`: compiled Go WASM kernel served at `/__zp/kernel.wasm`. Default: `dist/kernel.wasm`.
 - `-socks`: Tor SOCKS5 address. Default: `127.0.0.1:9050`.
 
 Open the browser shell on the proxy origin:
@@ -102,13 +110,12 @@ The local verification surface matches the GitHub Actions CI workflow:
 npm ci
 go test ./...
 npm test
-GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel
-go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server
+npm run build
 ```
 
-`npm test` runs both JavaScript source-policy tests and the Puppeteer E2E suite. The E2E test builds temporary ZeroProxy binaries, starts a local target HTTP server, starts an in-process SOCKS5 proxy, launches Puppeteer's Chrome, and verifies browser traffic through the ZeroProxy server without requiring Tor.
+`npm test` runs both JavaScript source-policy tests and the Puppeteer E2E suite. The E2E test builds temporary ZeroProxy artifacts with `scripts/build.mjs`, starts a local target HTTP server, starts an in-process SOCKS5 proxy, launches Puppeteer's Chrome, and verifies browser traffic through the ZeroProxy server without requiring Tor.
 
-CI is defined in `.github/workflows/ci.yml` and runs on pushes to `main`, pull requests, and manual dispatch. It uses an Ubuntu 24.04 LTS runner, installs Go from `go.mod`, installs the current Node.js LTS release, runs `npm ci`, runs the Go and full JavaScript/Puppeteer test suites, and builds both deployable binaries.
+CI is defined in `.github/workflows/ci.yml` and runs on pushes to `main`, pull requests, and manual dispatch. It uses an Ubuntu 24.04 LTS runner, installs Go from `go.mod`, installs the current Node.js LTS release, runs `npm ci`, runs the Go and full JavaScript/Puppeteer test suites, and builds deployable `dist/` artifacts.
 
 These checks cover source/unit policy invariants, buildability, and a local-browser E2E path through a test SOCKS5 proxy. They do not start Tor, validate real Tor deployment behavior, or prove production traffic compatibility.
 
@@ -119,6 +126,7 @@ These checks cover source/unit policy invariants, buildability, and a local-brow
 | `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, Phase 0 CSP helper. |
 | `web/sw.js` | Service Worker classifier, in-memory tab state, runtime API bridge, WASM kernel calls. |
 | `web/runtime-prelude.js`, `web/worker-prelude.js` | Target-realm containment hooks and worker bootstrap. |
+| `scripts/build.mjs` | Full build pipeline for browser bundles, generated WASM support assets, Go WASM kernel, and relay server. |
 | `cmd/wasm-kernel` | Go WASM transport kernel exposed to the Service Worker. |
 | `cmd/zeroproxy-server` | Static asset server and Gorilla WebSocket/yamux-to-Tor relay. |
 | `internal/zphttp`, `internal/socks5`, `internal/utlskernel`, `internal/wsproto`, `internal/yamuxconn`, `internal/wsconn` | Target transport path. |

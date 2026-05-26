@@ -60,6 +60,7 @@
       WebSocket: w.WebSocket,
       EventSource: w.EventSource,
       Worker: w.Worker,
+      FunctionCtor: w.Function,
       SharedWorker: w.SharedWorker,
       FormData: w.FormData,
       URL: w.URL,
@@ -76,10 +77,17 @@
       setAttribute: w.Element.prototype.setAttribute,
       getAttribute: w.Element.prototype.getAttribute,
       insertAdjacentHTML: w.Element.prototype.insertAdjacentHTML,
+      setAttributeNS: w.Element.prototype.setAttributeNS,
+      namedSetNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItem,
+      attrValue: w.Attr && Object.getOwnPropertyDescriptor(w.Attr.prototype, 'value'),
       matches: w.Element.prototype.matches,
       closest: w.Element.prototype.closest,
       formSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.submit,
       formRequestSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.requestSubmit,
+      documentOpen: d.open && d.open.bind(d),
+      documentWrite: d.write && d.write.bind(d),
+      documentWriteln: d.writeln && d.writeln.bind(d),
+      documentClose: d.close && d.close.bind(d),
       historyPush: w.history.pushState.bind(w.history),
       historyReplace: w.history.replaceState.bind(w.history),
       locationAssign: w.location && w.location.assign && w.location.assign.bind(w.location),
@@ -88,6 +96,12 @@
       createObjectURL: w.URL && w.URL.createObjectURL && w.URL.createObjectURL.bind(w.URL),
       revokeObjectURL: w.URL && w.URL.revokeObjectURL && w.URL.revokeObjectURL.bind(w.URL),
       open: w.open && w.open.bind(w),
+      setTimeout: w.setTimeout && w.setTimeout.bind(w),
+      setInterval: w.setInterval && w.setInterval.bind(w),
+      clearTimeout: w.clearTimeout && w.clearTimeout.bind(w),
+      clearInterval: w.clearInterval && w.clearInterval.bind(w),
+      DOMParserParseFromString: w.DOMParser && w.DOMParser.prototype && w.DOMParser.prototype.parseFromString,
+      rangeCreateContextualFragment: w.Range && w.Range.prototype && w.Range.prototype.createContextualFragment,
     };
   }
 
@@ -187,6 +201,7 @@
   }
   installToStringMasking(root);
   define(root, '__ZP_SET_BASE', updateVirtualBase);
+  installPhase2Membrane();
 
   installWebSocket();
   installBeacon();
@@ -203,11 +218,107 @@
   installAudioAntiFingerprinting(root);
 
 
+  function installPhase2Membrane() {
+    const blockedDynamic = function(){ throw normalizedError('NotSupportedError'); };
+    const virtualLocation = Object.freeze({
+      get href() { return virtualURL.href; },
+      set href(v) { navigateToTarget(v); },
+      get protocol() { return virtualURL.protocol; },
+      get host() { return virtualURL.host; },
+      get hostname() { return virtualURL.hostname; },
+      get port() { return virtualURL.port; },
+      get pathname() { return virtualURL.pathname; },
+      get search() { return virtualURL.search; },
+      get hash() { return virtualURL.hash; },
+      get origin() { return virtualURL.origin; },
+      assign(v) { navigateToTarget(v); },
+      replace(v) { navigateToTarget(v, true); },
+      reload() { Native.locationReload && Native.locationReload(); },
+      toString() { return virtualURL.href; },
+      valueOf() { return virtualURL.href; },
+      [Symbol.toPrimitive]() { return virtualURL.href; }
+    });
+    const scope = new Proxy(root, {
+      has(_target, prop) { return prop !== Symbol.unscopables; },
+      get(target, prop) {
+        if (prop === Symbol.unscopables) return undefined;
+        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
+        if (prop === 'location') return virtualLocation;
+        if (prop === 'eval' || prop === 'Function' || prop === 'AsyncFunction' || prop === 'GeneratorFunction' || prop === 'AsyncGeneratorFunction') return blockedDynamic;
+        return target[prop];
+      },
+      set(target, prop, value) {
+        if (prop === 'location') { navigateToTarget(value); return true; }
+        target[prop] = value;
+        return true;
+      },
+      getOwnPropertyDescriptor(target, prop) {
+        if (prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false };
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      }
+    });
+    function isWindowLike(value) {
+      try { return value === root || value === scope || value && value.window === value; } catch { return false; }
+    }
+    function get(base, prop) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if (isWindowLike(base)) {
+        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
+        if (prop === 'location') return virtualLocation;
+        if (prop === 'eval' || prop === 'Function' || prop === 'AsyncFunction' || prop === 'GeneratorFunction' || prop === 'AsyncGeneratorFunction') return blockedDynamic;
+      }
+      if (base === document && prop === 'defaultView') return scope;
+      if (prop === 'constructor') {
+        const ctor = Reflect.get(Object(base), prop);
+        return ctor === Native.FunctionCtor || typeof ctor === 'function' ? blockedDynamic : ctor;
+      }
+      return Reflect.get(Object(base), prop);
+    }
+    function set(base, prop, value) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { navigateToTarget(value); return true; }
+      Reflect.set(Object(base), prop, value);
+      return true;
+    }
+    function call(base, prop, args) {
+      const fn = get(base, prop);
+      if (fn === blockedDynamic) return blockedDynamic();
+      return Reflect.apply(fn, base === scope ? root : base, Array.isArray(args) ? args : []);
+    }
+    function construct(ctor, args) {
+      if (ctor === Native.FunctionCtor || ctor === blockedDynamic) return blockedDynamic();
+      return Reflect.construct(ctor, Array.isArray(args) ? args : []);
+    }
+    function has(base, prop) { if (isWindowLike(base) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
+    function getOwnPropertyDescriptor(base, prop) { if (isWindowLike(base) && prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false }; return Reflect.getOwnPropertyDescriptor(Object(base), prop); }
+    function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
+    define(root, '__zp_get', get);
+    define(root, '__zp_set', set);
+    define(root, '__zp_call', call);
+    define(root, '__zp_construct', construct);
+    define(root, '__zp_has', has);
+    define(root, '__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
+    define(root, '__zp_ownKeys', ownKeys);
+    define(root, '__zp_nav_assign', v => navigateToTarget(v));
+    define(root, '__zp_nav_replace', v => navigateToTarget(v, true));
+    define(root, '__zp_runClassic', fn => fn.call(root, scope));
+    define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
+    for (const ctor of [Native.FunctionCtor, (async function(){}).constructor, (function*(){}).constructor, (async function*(){}).constructor]) {
+      try { Object.defineProperty(ctor.prototype, 'constructor', { value: blockedDynamic, enumerable: false, configurable: false, writable: false }); } catch {}
+    }
+    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { if (typeof handler === 'string') throw normalizedError('NotSupportedError'); return Native.setTimeout(handler, delay, ...args); });
+    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { if (typeof handler === 'string') throw normalizedError('NotSupportedError'); return Native.setInterval(handler, delay, ...args); });
+    if (Native.documentWrite) define(document, 'write', function(...parts) { return Native.documentWrite(parts.map(p => transformHTML(String(p))).join('')); });
+    if (Native.documentWriteln) define(document, 'writeln', function(...parts) { return Native.documentWriteln(parts.map(p => transformHTML(String(p))).join('') + '\n'); });
+    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
+    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
+  }
   function installWebSocket() {
     function ZPWebSocket(url, protocols) {
       this.url = targetWSURL(url); this.protocol = ''; this.extensions = ''; this.readyState = 0; this.bufferedAmount = 0; this.binaryType = 'blob';
       const plist = Array.isArray(protocols) ? protocols : protocols ? [protocols] : [];
       postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId }).then(reply => {
+        this.protocol = String(reply.protocol || '');
         this._port = reply.port;
         this._port.onmessage = ev => {
           const m = ev.data || {};
@@ -260,7 +371,7 @@
       }
       const headers = new Native.Headers();
       headers.set('X-ZP-Document-Request', '1');
-      Native.fetch(target.href, { method, body: new Native.FormData(form), credentials: 'include', headers }).then(r => r.text()).then(html => { document.open(); document.write(html); document.close(); }).catch(()=>{});
+      Native.fetch(target.href, { method, body: new Native.FormData(form), credentials: 'include', headers }).then(r => r.text()).then(html => { if (Native.documentOpen) Native.documentOpen(); if (Native.documentWrite) Native.documentWrite(transformHTML(html)); if (Native.documentClose) Native.documentClose(); }).catch(()=>{});
     }
     function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
     function clickNavigationTarget(ev) {
@@ -397,6 +508,7 @@
   function installDOMHooks(w) {
     define(w.Element.prototype, 'setAttribute', function(k, v) {
       const key = String(k).toLowerCase();
+      if (key.startsWith('on') && key.length > 2) return Native.setAttribute.call(this, k, rewriteEventAttribute(String(v)));
       if (this.localName === 'base' && key === 'href') {
         updateVirtualBase(v);
         return Native.setAttribute.call(this, k, v);
@@ -418,17 +530,22 @@
       if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
       return Native.setAttribute.call(this, k, v);
     });
+    if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) { const key = String(k).toLowerCase(); return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v); });
+    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { if (attr && String(attr.name || '').toLowerCase().startsWith('on')) attr.value = rewriteEventAttribute(String(attr.value || '')); return Native.namedSetNamedItem.call(this, attr); });
+    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get: Native.attrValue.get, set(v) { Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? rewriteEventAttribute(String(v)) : v); }, configurable: false }); } catch {}
     define(w.Element.prototype, 'getAttribute', function(k) { const key = String(k).toLowerCase(); if (isURLBearing(this, key)) return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k); return Native.getAttribute.call(this, k); });
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
+    patchHTMLSetter(w.Element.prototype, 'outerHTML');
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); return ret; });
     installBaseObserver();
     function patchHTMLSetter(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get: d.get, set(v) { d.set.call(this, transformHTML(String(v))); syncBaseElement(this); instrumentDescendantIframes(this); }, configurable: false }); } catch {} }
   }
   function isURLBearing(el, key) { const tag = el.localName; return key === 'href' && (tag === 'a' || tag === 'area') || key === 'action' && tag === 'form' || key === 'formaction' && (tag === 'input' || tag === 'button') || key === 'src' && (tag === 'iframe' || tag === 'frame'); }
-  function transformHTML(s) { return s.replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q); }
+  function transformHTML(s) { return String(s).replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q).replace(/<script\b/ig, '<script type="application/x-zeroproxy-blocked" data-zp-blocked-script').replace(/\s(on[a-z0-9_:-]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, name, value) => ' data-zp-blocked-' + name.toLowerCase() + '=' + value); }
   function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
   function bootJSON() { return JSON.stringify(boot).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function baseSyncScript(raw) { return '<script>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(String(raw)).replace(/</g,'\\u003c') + ');<\/script>'; }
+  function rewriteEventAttribute(source) { return 'return __zp_runEvent(this,event,function(__zp_scope){with(__zp_scope){\n' + source + '\n}})'; }
   function syncBaseElement(node) {
     if (!node) return;
     if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));
@@ -480,7 +597,7 @@
     if (Native.Worker) define(root, 'Worker', function(url, opts) { return new Native.Worker(workerBootstrapURL(url), opts); });
     if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { return new Native.SharedWorker(workerBootstrapURL(url), opts); });
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.reject(normalizedError('NotSupportedError')); });
-    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream/i.test(blob.type || '')) { blob = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/__zp/worker-prelude.js');\n", blob], { type: 'text/javascript' }); const raw = Native.createObjectURL(blob); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
+    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/__zp/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' }); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
   }
   function workerBootstrapURL(url) {
@@ -496,11 +613,8 @@
   function dataWorkerURL(raw) {
     const comma = raw.indexOf(',');
     if (comma < 0) throw normalizedError('NotSupportedError');
-    const meta = raw.slice(5, comma).toLowerCase();
-    const body = raw.slice(comma + 1);
-    const source = meta.includes(';base64') ? atob(body) : decodeURIComponent(body);
-    const blob = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/__zp/worker-prelude.js');\n", source], { type: 'text/javascript' });
-    const safe = Native.createObjectURL(blob);
+    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/__zp/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
+    const safe = Native.createObjectURL(blocked);
     workerBlobURLs.add(safe);
     return safe;
   }

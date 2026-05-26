@@ -50,8 +50,5 @@ jobs:
       - name: Run JavaScript and Puppeteer tests
         run: npm test
 
-      - name: Build WASM kernel
-        run: GOOS=js GOARCH=wasm go build -o /tmp/zeroproxy-kernel.wasm ./cmd/wasm-kernel
-
-      - name: Build relay server
-        run: go build -o /tmp/zeroproxy-server ./cmd/zeroproxy-server
+      - name: Build deployable artifacts
+        run: npm run build

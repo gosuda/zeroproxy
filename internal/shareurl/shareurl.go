@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/url"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -25,9 +26,11 @@ var (
 func New(target string) (string, error) { return NewWithRand(rand.Reader, target) }
 
 func NewWithRand(random io.Reader, target string) (string, error) {
-	if target == "" {
-		return "", fmt.Errorf("shareurl: empty target")
+	u, err := url.Parse(target)
+	if err != nil || u == nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("shareurl: unsupported target URL")
 	}
+	target = u.String()
 	var seed [64]byte
 	var iv [aes.BlockSize]byte
 	if _, err := io.ReadFull(random, seed[:]); err != nil {

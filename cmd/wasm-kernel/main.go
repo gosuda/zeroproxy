@@ -155,7 +155,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			}
 			pr, pw := io.Pipe()
 			go func() {
-				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL), RuntimeToken: req.Header.Get("X-Zp-Runtime-Token")})
+				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL), RuntimeToken: req.Header.Get("X-Zp-Runtime-Token"), RewriteScript: rewriteScript})
 				closeErr := source.Close()
 				if err != nil {
 					_ = pw.CloseWithError(err)
@@ -224,6 +224,12 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 			return
 		}
 		stream := newJSWebSocketStream(ctx, cancel, conn)
+		if resp != nil {
+			stream.Set("protocol", resp.Header.Get("Sec-Websocket-Protocol"))
+			if stream.Get("protocol").String() == "" {
+				stream.Set("protocol", resp.Header.Get("Sec-WebSocket-Protocol"))
+			}
+		}
 		resolve.Invoke(stream)
 	})
 }
@@ -396,6 +402,21 @@ func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }
 func isDocumentRequest(req *http.Request) bool { return req.Header.Get("X-Zp-Document-Request") == "1" }
+func rewriteScript(source, kind string) (string, bool) {
+	r := js.Global().Get("ZPRewriter")
+	if r.IsUndefined() || r.IsNull() || r.Get("ready").Type() != js.TypeBoolean || !r.Get("ready").Bool() {
+		return "", false
+	}
+	out := r.Call("rewriteScript", source, map[string]any{"kind": kind, "strict": true})
+	if out.IsUndefined() || out.IsNull() || !out.Get("ok").Bool() {
+		return "", false
+	}
+	code := out.Get("code")
+	if code.Type() != js.TypeString {
+		return "", false
+	}
+	return code.String(), true
+}
 
 type closeWithSource struct {
 	io.ReadCloser

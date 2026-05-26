@@ -46,6 +46,8 @@ func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 		js.CopyBytesToGo(buf, arr)
 		body = io.NopCloser(bytes.NewReader(buf))
 		contentLength = int64(len(buf))
+		bodyBytes := buf
+		return &http.Request{Method: method, URL: u, Header: h, Body: body, GetBody: func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
 	}
 	return &http.Request{Method: method, URL: u, Header: h, Body: body, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
 }

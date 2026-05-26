@@ -6,6 +6,21 @@
   const nativeFetch = self.fetch.bind(self);
   const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
+  const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
+  const scope = new Proxy(self, {
+    has(_target, prop) { return prop !== Symbol.unscopables; },
+    get(target, prop, receiver) {
+      if (prop === Symbol.unscopables) return undefined;
+      if (prop === 'self' || prop === 'globalThis') return scope;
+      if (prop === 'location') return base;
+      if (prop === 'eval' || prop === 'Function') return blockedDynamic;
+      return Reflect.get(target, prop, receiver);
+    },
+    set(target, prop, value, receiver) { return Reflect.set(target, prop, value, receiver); }
+  });
+  Object.defineProperty(self, '__zp_runClassic', { value: fn => fn(scope), enumerable: false, configurable: false });
+  try { self.eval = blockedDynamic; } catch {}
+  try { self.Function = blockedDynamic; } catch {}
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';

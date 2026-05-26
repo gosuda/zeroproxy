@@ -22,6 +22,7 @@ type Options struct {
 	TargetURL      *url.URL
 	DocumentCookie string
 	RuntimeToken   string
+	RewriteScript  func(source, kind string) (string, bool)
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -50,6 +51,8 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 	blockedDepth := 0
 	blockedTag := ""
 	rawTextTag := ""
+	rawTextKind := ""
+	var rawTextBuf strings.Builder
 	for {
 		tt := z.Next()
 		if tt == xhtml.ErrorToken {
@@ -74,12 +77,21 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 		}
 		if rawTextTag != "" {
 			if tok.Type == xhtml.TextToken {
-				out.WriteString(tok.Data)
+				if rawTextKind != "" {
+					rawTextBuf.WriteString(tok.Data)
+				} else {
+					out.WriteString(tok.Data)
+				}
 				continue
 			}
 			if tok.Type == xhtml.EndTagToken && strings.EqualFold(tok.Data, rawTextTag) {
+				if rawTextKind != "" {
+					out.WriteString(rewriteInlineScript(rawTextBuf.String(), rawTextKind, opt))
+					rawTextBuf.Reset()
+				}
 				out.WriteString(tok.String())
 				rawTextTag = ""
+				rawTextKind = ""
 				continue
 			}
 		}
@@ -134,10 +146,17 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				out.WriteString(blockedPlaceholder("embed"))
 				continue
 			}
-			if (tag == "script" || tag == "style") && tok.Type == xhtml.StartTagToken {
-				rawTextTag = tag
-			}
 			tok = rewriteToken(tok, opt)
+			if tag == "script" && tok.Type == xhtml.StartTagToken {
+				rawTextTag = tag
+				if attr(tok, "src") == "" {
+					rawTextKind = executableScriptKind(tok)
+					rawTextBuf.Reset()
+				}
+			} else if tag == "style" && tok.Type == xhtml.StartTagToken {
+				rawTextTag = tag
+				rawTextKind = ""
+			}
 		}
 		out.WriteString(tok.String())
 	}
@@ -185,6 +204,26 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 		}
 		if key == "srcdoc" && (tag == "iframe" || tag == "frame") {
 			a.Val = injectSrcdoc(a.Val, opt)
+			attrs = append(attrs, a)
+			continue
+		}
+		if strings.HasPrefix(key, "on") && len(key) > 2 {
+			a.Val = rewriteEventHandler(a.Val, opt)
+			attrs = append(attrs, a)
+			continue
+		}
+		if tag == "script" && key == "src" && executableScriptKind(tok) != "" {
+			trimmed := strings.TrimSpace(a.Val)
+			wrapped, target, ok := wrapScriptURL(a.Val, opt, executableScriptKind(tok))
+			if ok {
+				a.Val = wrapped
+				dataTarget = target
+			} else {
+				a.Val = "/__zp/error/POLICY_BLOCKED"
+				if trimmed != "" {
+					attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
+				}
+			}
 			attrs = append(attrs, a)
 			continue
 		}
@@ -281,6 +320,60 @@ func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok 
 		return "#", "", false
 	}
 	return sharePath, abs.String(), true
+}
+
+func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string, ok bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.HasPrefix(s, "#") || hasExecutableURLScheme(s) {
+		return "/__zp/error/POLICY_BLOCKED", "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "/__zp/error/POLICY_BLOCKED", "", false
+	}
+	abs := opt.TargetURL.ResolveReference(u)
+	if abs.Scheme != "http" && abs.Scheme != "https" {
+		return "/__zp/error/POLICY_BLOCKED", "", false
+	}
+	q := url.Values{}
+	q.Set("u", abs.String())
+	q.Set("kind", kind)
+	if opt.TabID != "" {
+		q.Set("tab", opt.TabID)
+	}
+	return "/__zp/api/script?" + q.Encode(), abs.String(), true
+}
+
+func executableScriptKind(tok xhtml.Token) string {
+	t := strings.TrimSpace(strings.ToLower(attr(tok, "type")))
+	if t == "module" {
+		return "module"
+	}
+	if t == "" || t == "text/javascript" || t == "application/javascript" || t == "application/ecmascript" || t == "text/ecmascript" {
+		return "classic"
+	}
+	return ""
+}
+
+func rewriteInlineScript(source, kind string, opt Options) string {
+	if opt.RewriteScript != nil {
+		if out, ok := opt.RewriteScript(source, kind); ok {
+			return out
+		}
+	}
+	if kind == "module" {
+		return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');`
+	}
+	return ";__zp_runClassic(function(__zp_scope){with(__zp_scope){\n" + source + "\n}});"
+}
+
+func rewriteEventHandler(source string, opt Options) string {
+	if opt.RewriteScript != nil {
+		if out, ok := opt.RewriteScript(source, "event-handler"); ok {
+			return out
+		}
+	}
+	return "return __zp_runEvent(this,event,function(__zp_scope){with(__zp_scope){\n" + source + "\n}})"
 }
 
 func injectSrcdoc(src string, opt Options) string {

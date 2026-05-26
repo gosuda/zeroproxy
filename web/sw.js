@@ -1,9 +1,12 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the WASM transport. */
 importScripts('/__zp/zp-core.js');
+importScripts('/__zp/oxc-parser.js');
+importScripts('/__zp/js-rewriter.js');
 importScripts('/__zp/wasm_exec.js');
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
+const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 const tabs = new Map();
 const clientContext = new Map();
 const shareRoutes = new Map();
@@ -11,6 +14,7 @@ const resourceContext = new Map();
 const streams = new Map();
 let readiness = 'UNINITIALIZED';
 let kernelPromise = null;
+let rewriterPromise = null;
 
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
 self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initKernel().catch(() => {}); })()));
@@ -21,6 +25,8 @@ async function initKernel() {
   if (readiness === 'READY') return;
   if (kernelPromise) return kernelPromise;
   kernelPromise = (async () => {
+    readiness = 'REWRITE_LOADING';
+    await initRewriter();
     readiness = 'WASM_LOADING';
     const go = new Go();
     const resp = await nativeFetch('/__zp/kernel.wasm', { cache: 'no-store' });
@@ -35,6 +41,14 @@ async function initKernel() {
     readiness = 'READY';
   })().catch(err => { readiness = 'UNINITIALIZED'; kernelPromise = null; throw err; });
   return kernelPromise;
+}
+
+async function initRewriter() {
+  if (self.ZPRewriter && self.ZPRewriter.ready) return;
+  if (rewriterPromise) return rewriterPromise;
+  if (!self.ZPRewriter || !self.OXCParser) throw new Error('REALM_INJECTION_FAILURE');
+  rewriterPromise = self.ZPRewriter.init({ parser: self.OXCParser, wasmURL: '/__zp/oxc_parser_wasm_bg.wasm', fetch: nativeFetch }).catch(err => { rewriterPromise = null; throw err; });
+  return rewriterPromise;
 }
 
 async function handleFetch(event) {
@@ -74,7 +88,7 @@ function classify(req, url, clientId) {
 }
 
 function internalPath(path) {
-  return path === '/__zp/zp-core.js' || path === '/__zp/runtime-prelude.js' || path === '/__zp/worker-prelude.js' || path === '/__zp/wasm_exec.js' || path === '/__zp/kernel.wasm' || path === '/__zp/worker-bootstrap.js' || path === '/favicon.ico' || path === '/manifest.webmanifest';
+  return path === '/__zp/zp-core.js' || path === '/__zp/js-rewriter.js' || path === '/__zp/oxc-parser.js' || path === '/__zp/oxc_parser_wasm_bg.wasm' || path === '/__zp/runtime-prelude.js' || path === '/__zp/worker-prelude.js' || path === '/__zp/wasm_exec.js' || path === '/__zp/kernel.wasm' || path === '/__zp/worker-bootstrap.js' || path === '/favicon.ico' || path === '/manifest.webmanifest';
 }
 
 async function internalAsset(req, url) {
@@ -115,7 +129,7 @@ async function virtualSubresource(req, cls, clientId) {
   const document = req.mode === 'navigate' || req.headers.get('X-ZP-Document-Request') === '1';
   const resp = await transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId });
   rememberResourceContext(cls.crossOriginURL || cls.sameOriginURL, targetUrl, ctx);
-  return resp;
+  return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req) }) : resp;
 }
 
 function sameOriginTargetURL(sameOriginURL, ctx) {
@@ -137,11 +151,21 @@ async function runtimeAPI(req, url, clientId) {
     if (payload.init && payload.init.body) body = ZP.base64UrlToBytes(payload.init.body);
     return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab: payload.tabId && tabs.get(payload.tabId) || tab, entryId: ctx && ctx.entryId || (payload.tabId && tabs.get(payload.tabId) && tabs.get(payload.tabId).activeEntryId) || tab.activeEntryId });
   }
+  if (url.pathname === '/__zp/api/script') {
+    if (req.method !== 'GET') return safeError('POLICY_BLOCKED', 405);
+    const target = url.searchParams.get('u');
+    const kind = url.searchParams.get('kind') || 'classic';
+    const scriptCtx = contextFor(req, clientId);
+    const tab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab')) || scriptCtx && tabs.get(scriptCtx.tabId) || firstTab();
+    if (!target || !tab) return safeError('SW_NOT_READY', 503);
+    const resp = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript, application/javascript, */*;q=0.8']], tab, entryId: tab.activeEntryId });
+    return rewriteScriptResponse(resp, { targetUrl: target, kind });
+  }
   if (url.pathname === '/__zp/api/worker-script') {
     const target = url.searchParams.get('u');
     const tab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab')) || firstTab();
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
-    return transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId });
+    return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId }), { targetUrl: target, kind: 'worker' });
   }
   return safeError('POLICY_BLOCKED', 404);
 }
@@ -157,9 +181,42 @@ async function transportFetch(targetUrl, opt) {
   headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
   if (opt.document) headers.set('X-ZP-Document-Request', '1');
   const init = { method: opt.method || (opt.request && opt.request.method) || 'GET', headers };
-  if (init.method !== 'GET' && init.method !== 'HEAD') init.body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
+  if (init.method !== 'GET' && init.method !== 'HEAD') {
+    const body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
+    const n = body && (body.byteLength || body.size || 0) || 0;
+    if (n > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, u);
+    init.body = body;
+  }
   const resp = await self.__go_jshttp(new Request(u, init));
   return addCSP(resp, opt.request);
+}
+
+function scriptKindFromRequest(req) {
+  if (req.destination === 'worker' || req.destination === 'sharedworker') return 'worker';
+  return 'classic';
+}
+function shouldRewriteScript(req, resp) {
+  if (req.destination === 'script' || req.destination === 'worker' || req.destination === 'sharedworker') return true;
+  const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
+  return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
+}
+async function rewriteScriptResponse(resp, opt) {
+  const h = new Headers(resp.headers);
+  h.set('Content-Type', 'text/javascript; charset=utf-8');
+  h.set('Cache-Control', 'no-store');
+  h.set('X-Content-Type-Options', 'nosniff');
+  h.set('Content-Security-Policy', ZP.fixedCSP());
+  applyCORS(h, null);
+  let code = '';
+  try {
+    await initRewriter();
+    const source = await resp.text();
+    const out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true });
+    code = out && out.ok ? out.code : (self.ZPRewriter ? self.ZPRewriter.blockSource() : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');");
+  } catch {
+    code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
+  }
+  return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 
 
@@ -241,7 +298,7 @@ async function openRuntimeStream(event, msg, ok, fail) {
   streams.set(id, stream);
   channel.port1.onmessage = ev => { const m = ev.data || {}; if (m.type === 'send') stream.send(m.data); if (m.type === 'close') { stream.close(); streams.delete(id); } };
   stream.setHandlers({ message: data => channel.port1.postMessage({ type: 'message', data }), close: () => { channel.port1.postMessage({ type: 'close' }); streams.delete(id); }, error: () => channel.port1.postMessage({ type: 'error' }) });
-  event.ports[0].postMessage({ ok: true, id, port: channel.port2 }, [channel.port2]);
+  event.ports[0].postMessage({ ok: true, id, protocol: stream.protocol || '', port: channel.port2 }, [channel.port2]);
 }
 
 function runtimeTabForMessage(event, msg, fail) {

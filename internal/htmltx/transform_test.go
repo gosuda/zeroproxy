@@ -107,3 +107,22 @@ func TestTransformPreservesRawScriptAndStyleText(t *testing.T) {
 		t.Fatalf("raw script/style text was entity-escaped: %s", s)
 	}
 }
+
+func TestTransformRewritesPhase2ScriptSourcesAndHandlers(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	out, err := Transform(strings.NewReader(`<body onLoad="location.href='/boot'"><script src="/app.js"></script><script>window.location.href='/classic'</script><script type="module">window.location.href='/module'</script><button onclick="return location.href"></button><img onerror="Function('return location.href')()"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{`/__zp/api/script?`, `u=https%3A%2F%2Fexample.com%2Fapp.js`, `kind=classic`, `__zp_runClassic`, `__zp_runEvent`, `Blocked by ZeroProxy rewrite policy`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in %s", want, s)
+		}
+	}
+	for _, forbidden := range []string{`src="/app.js"`, `onclick="return location.href"`, `onLoad="location.href='/boot'"`, `onerror="Function(`} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("unrewritten script source or handler remained: %q in %s", forbidden, s)
+		}
+	}
+}

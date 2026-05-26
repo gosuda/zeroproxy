@@ -9,7 +9,7 @@
   const SHARE_MAC_PREFIX = te.encode('ZP-CBC-URL-V1');
   const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
   const WS_PROTOCOLS = new Set(['ws:', 'wss:']);
-  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','POLICY_BLOCKED']);
+  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','POLICY_BLOCKED']);
 
   function bytesToBase64Url(bytes) {
     let s = '';
@@ -87,7 +87,7 @@
   function fixedCSP() {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
-    return "default-src 'none'; script-src * 'unsafe-inline' 'unsafe-eval' blob: data:; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src * blob: data: " + ws + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; navigate-to 'self'; manifest-src 'self'";
+    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + ws + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; navigate-to 'self'; manifest-src 'self'";
   }
   const api = Object.freeze({ bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, ERRORS });
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });

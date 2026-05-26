@@ -76,6 +76,15 @@ test('runtime installs required escape-vector hooks', () => {
     "'WebSocketStream'",
     'getUserMedia',
     'geolocation',
+    'installPhase2Membrane',
+    '__zp_runClassic',
+    '__zp_get',
+    'FunctionCtor',
+    "define(root, 'setTimeout'",
+    "define(document, 'write'",
+    'createContextualFragment',
+    'parseFromString',
+    'rewriteEventAttribute',
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
 });
 
@@ -101,9 +110,45 @@ test('service worker response wrappers force nosniff', () => {
   assert.match(sw, /'X-Content-Type-Options': 'nosniff'/);
 });
 
+test('phase 2 script rewriting pipeline is fail-closed', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rewriter = fs.readFileSync('web/js-rewriter.js', 'utf8');
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.ok(sw.includes("importScripts('/__zp/js-rewriter.js')"));
+  assert.ok(sw.includes('/__zp/api/script'));
+  assert.ok(sw.includes('rewriteScriptResponse'));
+  assert.ok(rewriter.includes('ZPRewriter'));
+  assert.ok(rewriter.includes('phase2-oxc-abi-2'));
+  assert.ok(sw.includes("importScripts('/__zp/oxc-parser.js')"));
+  assert.ok(sw.includes('/__zp/oxc_parser_wasm_bg.wasm'));
+  assert.ok(build.includes('@oxc-parser/wasm/web/oxc_parser_wasm.js'));
+  assert.ok(build.includes('@oxc-parser/wasm/web/oxc_parser_wasm_bg.wasm'));
+  assert.ok(build.includes('wasm_exec.js'));
+  assert.equal(fs.existsSync('web/oxc-parser.js'), false);
+  assert.equal(fs.existsSync('web/oxc_parser_wasm_bg.wasm'), false);
+  assert.equal(fs.existsSync('web/wasm_exec.js'), false);
+  assert.ok(rewriter.includes('blockSource'));
+  assert.match(rt, /setAttributeNS/);
+  assert.match(rt, /NamedNodeMap/);
+  assert.match(rt, /Attr\.prototype/);
+  assert.equal(/connect-src\s+\*/.test(core), false);
+  assert.match(core, /connect-src 'self'/);
+  assert.equal(/script-src \*/.test(core), false);
+  assert.equal(/script-src \*/.test(server), false);
+  assert.match(server, /connect-src 'self'/);
+  assert.ok(sw.includes('MAX_REQUEST_BODY_BYTES'));
+  assert.ok(sw.includes('REQUEST_BODY_TOO_LARGE'));
+  assert.ok(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('GetBody'));
+  assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
+  assert.ok(server.includes('closeBoth'));
+});
+
 test('service worker names every required safe error class', () => {
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
-  for (const code of ['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','POLICY_BLOCKED']) {
+  for (const code of ['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','POLICY_BLOCKED']) {
     assert.ok(core.includes(code), `missing ${code}`);
   }
 });

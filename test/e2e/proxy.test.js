@@ -96,13 +96,13 @@ class SocketReader {
 
 function createTargetServer(requests) {
   const server = http.createServer((req, res) => {
-    requests.push({ url: req.url, method: req.method, userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '' });
+    requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '' });
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Home</title></head><body>
         <main><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
-        <script>window.__ua = navigator.userAgent; window.__platform = navigator.platform;</script>
+        <script>window.__ua = navigator.userAgent; window.__platform = navigator.platform; window.__phase2Location = { href: location.href, windowHref: window.location.href }; try { Function('return location.href')(); window.__phase2FunctionBlocked = ''; } catch (err) { window.__phase2FunctionBlocked = err && err.message || String(err); }</script>
       </body></html>`);
       return;
     }
@@ -134,6 +134,25 @@ function createTargetServer(requests) {
       setTimeout(() => res.end('chunk-two\n'), 600);
       return;
     }
+    if (url.pathname === '/sse') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
+      res.end('data: sse-ok\n\n');
+      return;
+    }
+    if (url.pathname === '/post-echo') {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(Buffer.concat(chunks).toString('utf8'));
+      });
+      return;
+    }
+    if (url.pathname === '/redirect307') {
+      res.writeHead(307, { 'Location': '/post-echo', 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('not found');
   });
@@ -142,7 +161,7 @@ function createTargetServer(requests) {
 }
 
 function handleWebSocketUpgrade(req, socket, requests) {
-  requests.push({ url: req.url, method: req.method, userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', upgrade: true });
+  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', upgrade: true });
   if (new URL(req.url, 'http://target.local').pathname !== '/ws') {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     return;
@@ -153,7 +172,8 @@ function handleWebSocketUpgrade(req, socket, requests) {
     return;
   }
   const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+  const requestedProtocol = String(req.headers['sec-websocket-protocol'] || '').split(',').map(s => s.trim()).filter(Boolean)[0] || '';
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + (requestedProtocol ? '\r\nSec-WebSocket-Protocol: ' + requestedProtocol : '') + '\r\n\r\n');
   let buffered = Buffer.alloc(0);
   socket.on('data', chunk => {
     buffered = Buffer.concat([buffered, chunk]);
@@ -171,6 +191,7 @@ function handleWebSocketUpgrade(req, socket, requests) {
         continue;
       }
       if (frame.opcode === 0x1) writeWebSocketFrame(socket, 0x1, Buffer.from('echo:' + frame.payload.toString('utf8')));
+      if (frame.opcode === 0x2) writeWebSocketFrame(socket, 0x2, frame.payload);
     }
   });
 }
@@ -266,18 +287,21 @@ async function handleSocks(socket, resolveHost) {
 
 test('browser traffic uses test SOCKS5 and covers proxied runtime integrations', { timeout: 120000 }, async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
-  const kernelPath = path.join(temp, 'kernel.wasm');
-  const serverPath = path.join(temp, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
-  run('go', ['build', '-o', kernelPath, './cmd/wasm-kernel'], { env: { GOOS: 'js', GOARCH: 'wasm' } });
-  run('go', ['build', '-o', serverPath, './cmd/zeroproxy-server']);
+  const buildOut = path.join(temp, 'dist');
+  run('node', ['scripts/build.mjs', '--out', buildOut]);
+  const kernelPath = path.join(buildOut, 'kernel.wasm');
+  const serverPath = path.join(buildOut, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
+  const webPath = path.join(buildOut, 'web');
 
   const requests = [];
   const target = createTargetServer(requests);
   const targetPort = await listen(target);
   t.after(() => closeServer(target));
 
+  const socksHosts = [];
   const socks = createSocks5Server((host, port) => {
-    assert.equal(host, 'e2e.test');
+    socksHosts.push(host);
+    assert.ok(host === 'e2e.test' || host === 'direct-egress.test', `unexpected SOCKS host ${host}`);
     assert.equal(port, targetPort);
     return { host: '127.0.0.1', port: targetPort };
   });
@@ -292,7 +316,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     });
     s.once('error', reject);
   });
-  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', 'web', '-kernel', kernelPath, '-socks', `127.0.0.1:${socksPort}`], {
+  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-kernel', kernelPath, '-socks', `127.0.0.1:${socksPort}`], {
     cwd: path.resolve(__dirname, '../..'),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -324,6 +348,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     userAgent: navigator.userAgent,
     appVersion: navigator.appVersion,
     platform: navigator.platform,
+    phase2Location: window.__phase2Location,
+    phase2FunctionBlocked: window.__phase2FunctionBlocked,
   }));
   assert.equal(home.title, 'E2E Home');
   assert.equal(home.hash, '');
@@ -332,6 +358,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
   assert.equal(home.platform, 'Win32');
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
+  assert.deepEqual(home.phase2Location, { href: `http://e2e.test:${targetPort}/`, windowHref: `http://e2e.test:${targetPort}/` });
+  assert.equal(home.phase2FunctionBlocked, 'Blocked by ZeroProxy policy');
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
@@ -468,9 +496,13 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
       body += decoder.decode();
       return { status: resp.status, contentType: resp.headers.get('content-type') || '', firstText: first.value ? decoder.decode(first.value) : '', firstMs, body };
     }
+    async function postText(path, body) {
+      const resp = await fetch(path, { method: 'POST', body, cache: 'no-store' });
+      return { status: resp.status, text: await resp.text() };
+    }
     function websocketEcho() {
       return new Promise((resolve, reject) => {
-        const ws = new WebSocket('ws://e2e.test:' + targetPort + '/ws');
+        const ws = new WebSocket('ws://e2e.test:' + targetPort + '/ws', ['zp-test']);
         let settled = false;
         const finish = fn => value => {
           if (settled) return;
@@ -480,9 +512,11 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
         };
         const timer = setTimeout(() => finish(reject)(new Error('websocket echo timed out')), 10000);
         ws.onerror = () => finish(reject)(new Error('websocket error'));
-        ws.onopen = () => ws.send('hello through proxy');
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => ws.send(new Uint8Array([1, 2, 3]).buffer);
         ws.onmessage = ev => {
-          const result = { url: ws.url, data: String(ev.data), readyState: ws.readyState };
+          const data = ev.data instanceof ArrayBuffer ? Array.from(new Uint8Array(ev.data)).join(',') : String(ev.data);
+          const result = { url: ws.url, data, protocol: ws.protocol, readyState: ws.readyState };
           try { ws.close(1000, 'done'); } catch {}
           finish(resolve)(result);
         };
@@ -495,8 +529,11 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     const visibleCookie = document.cookie;
     const clientCookie = await waitForCookieHeader('client_runtime=from-runtime');
     const stream = await readStream();
+    const post = await postText('/post-echo', 'small-upload');
+    const redirectPost = await postText('/redirect307', 'redirect-body');
+    const oversized = await postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1));
     const ws = await websocketEcho();
-    return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws };
+    return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws, post, redirectPost, oversized };
   }, targetPort);
   assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok');
   assert.match(runtimeIntegration.serverCookie, /target_server=from-target/);
@@ -509,11 +546,83 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(runtimeIntegration.stream.body, 'chunk-one\nchunk-two\n');
   assert.ok(runtimeIntegration.stream.firstMs < 500, `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`);
   assert.equal(runtimeIntegration.ws.url, `ws://e2e.test:${targetPort}/ws`);
-  assert.equal(runtimeIntegration.ws.data, 'echo:hello through proxy');
+  assert.equal(runtimeIntegration.ws.data, '1,2,3');
+  assert.equal(runtimeIntegration.ws.protocol, 'zp-test');
+  assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' });
+  assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' });
+  assert.equal(runtimeIntegration.oversized.status, 413);
+  assert.match(runtimeIntegration.oversized.text, /REQUEST_BODY_TOO_LARGE/);
   assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
+
+  const escapeMatrix = await page.evaluate(async targetPort => {
+    const directBase = 'http://direct-egress.test:' + targetPort;
+    const out = {};
+    out.fetch = await fetch(directBase + '/direct-fetch', { cache: 'no-store' }).then(r => 'ok:' + r.status).catch(err => 'blocked:' + (err && err.name || 'Error'));
+    out.xhr = await new Promise(resolve => {
+      const xhr = new XMLHttpRequest();
+      xhr.onload = () => resolve('ok:' + xhr.status);
+      xhr.onerror = () => resolve('blocked:error');
+      try { xhr.open('GET', directBase + '/direct-xhr'); xhr.send(); } catch (err) { resolve('blocked:' + (err && err.name || 'Error')); }
+    });
+    out.eventSource = await new Promise(resolve => {
+      let settled = false;
+      const finish = value => { if (!settled) { settled = true; try { es.close(); } catch {} resolve(value); } };
+      let es;
+      try {
+        es = new EventSource(directBase + '/sse');
+        es.onmessage = ev => finish('ok:' + ev.data);
+        es.onerror = () => finish('blocked:error');
+        setTimeout(() => finish('blocked:timeout'), 1000);
+      } catch (err) { resolve('blocked:' + (err && err.name || 'Error')); }
+    });
+    out.websocket = await new Promise((resolve, reject) => {
+      const ws = new WebSocket('ws://direct-egress.test:' + targetPort + '/ws');
+      const timer = setTimeout(() => reject(new Error('direct-egress websocket timed out')), 10000);
+      ws.onerror = () => { clearTimeout(timer); reject(new Error('direct-egress websocket failed')); };
+      ws.onopen = () => ws.send('direct');
+      ws.onmessage = ev => { clearTimeout(timer); const value = String(ev.data); try { ws.close(); } catch {} resolve(value); };
+    });
+    out.stringTimer = (() => { try { setTimeout('window.__timerRan=1', 0); return 'scheduled'; } catch (err) { return err && err.message || String(err); } })();
+    out.blobWorker = await new Promise(resolve => {
+      let worker;
+      try {
+        const url = URL.createObjectURL(new Blob([`postMessage('ran')`], { type: '' }));
+        worker = new Worker(url);
+        const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 500);
+        worker.onmessage = ev => { clearTimeout(timer); resolve(String(ev.data)); };
+        worker.onerror = () => { clearTimeout(timer); resolve('error'); };
+      } catch (err) { resolve('throw:' + (err && err.message || String(err))); }
+    });
+    out.dataWorker = await new Promise(resolve => {
+      let worker;
+      try {
+        worker = new Worker('data:text/javascript,postMessage(%22ran%22)');
+        const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 500);
+        worker.onmessage = ev => { clearTimeout(timer); resolve(String(ev.data)); };
+        worker.onerror = () => { clearTimeout(timer); resolve('error'); };
+      } catch (err) { resolve('throw:' + (err && err.message || String(err))); }
+    });
+    const button = document.createElement('button');
+    button.setAttribute('onclick', 'window.__eventHandlerLocation = location.href');
+    document.body.appendChild(button);
+    button.click();
+    out.eventHandlerLocation = window.__eventHandlerLocation || '';
+    button.remove();
+    return out;
+  }, targetPort);
+  assert.match(escapeMatrix.fetch, /^(ok:\d+|blocked:)/);
+  assert.match(escapeMatrix.xhr, /^(ok:\d+|blocked:)/);
+  assert.match(escapeMatrix.eventSource, /^(ok:sse-ok|blocked:)/);
+  assert.equal(escapeMatrix.websocket, 'echo:direct');
+  assert.equal(escapeMatrix.stringTimer, 'Blocked by ZeroProxy policy');
+  assert.notEqual(escapeMatrix.blobWorker, 'ran');
+  assert.notEqual(escapeMatrix.dataWorker, 'ran');
+  assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://e2e.test:${targetPort}/`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
+  assert.ok(socksHosts.includes('direct-egress.test'), `SOCKS hosts: ${JSON.stringify(socksHosts)}`);
+  assert.ok(requests.some(r => r.upgrade && r.host === `direct-egress.test:${targetPort}` && r.url === '/ws'), `target requests: ${JSON.stringify(requests)}`);
 
   const forgedMessage = await page.evaluate(() => new Promise(resolve => {
     const channel = new MessageChannel();

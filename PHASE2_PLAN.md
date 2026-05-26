@@ -1,6 +1,6 @@
 # ZeroProxy Phase 2 Plan: Service Worker JavaScript Rewriting
 
-Status: proposed implementation plan.
+Status: implemented strict Phase 2 cutover. The parser/tooling direction is OXC: the Service Worker loads OXC parser WASM, `web/js-rewriter.js` performs AST-aware source rewriting from the OXC AST, the Go WASM HTML transformer calls that rewriter for inline scripts and event handlers, and unrewritable dynamic-code/blob/data paths fail closed.
 
 Phase 2 improves target-site compatibility by rewriting target JavaScript before execution. The main goal is to make ordinary target scripts observe a virtual target `location`/`window` model while preserving the ZeroProxy transport boundary.
 
@@ -9,7 +9,7 @@ This is a compatibility layer, not a claim of perfect browser-origin spoofing. N
 ## Goals
 
 - Run a JavaScript Rewriting Service inside the Service Worker.
-- Implement the parser/rewriter as Rust compiled to WebAssembly, using SWC's optimized Rust parser and AST infrastructure.
+- Implement the parser/rewriter as Rust compiled to WebAssembly, using OXC's optimized Rust parser and AST infrastructure.
 - Rewrite target JavaScript so common reads/writes/calls involving `window`, `location`, `document`, `history`, iframe windows, `eval`, and `Function` pass through ZeroProxy runtime helpers.
 - Keep the invariant that target network/navigation cannot escape the ZeroProxy path.
 - Fail closed in strict mode: if JavaScript that must be rewritten cannot be parsed or transformed, do not execute the original source.
@@ -216,7 +216,7 @@ Target response
   -> Go WASM kernel transport
   -> HTTP/HTML/header policy
   -> JavaScript Rewriting Service in Service Worker
-       -> Rust + SWC parser compiled to WASM
+       -> Rust + OXC parser compiled to WASM
        -> AST rewrite
        -> strict/audit diagnostics
   -> Browser executes rewritten target code
@@ -229,10 +229,10 @@ Target response
 
 | Component | Location | Responsibility |
 |---|---|---|
-| Rewriter WASM | new Rust crate, built to a web/service-worker-compatible WASM artifact | Parse JavaScript with SWC, perform AST transforms, return rewritten source and diagnostics. |
+| Rewriter WASM | new Rust crate, built to a web/service-worker-compatible WASM artifact | Parse JavaScript with OXC, perform AST transforms, return rewritten source and diagnostics. |
 | Service Worker Rewriting Service | `web/sw.js` plus a new internal module/glue asset | Load the rewriter WASM, decide when to rewrite, cache transformed results, enforce fail-closed policy. |
 | Runtime membrane | `web/runtime-prelude.js` | Provide `__zp_get`, `__zp_set`, `__zp_call`, `__zp_construct`, virtual `Location`, virtual window wrappers, and navigation helpers used by rewritten code. |
-| Foreground synchronous rewriter | `web/runtime-prelude.js` plus the same SWC WASM artifact or a smaller dynamic-code rewriter artifact | Preinitialize a closure-private rewriter in the target page for synchronous `eval`, `Function`, and string timer rewriting. |
+| Foreground synchronous rewriter | `web/runtime-prelude.js` plus the same OXC WASM artifact or a smaller dynamic-code rewriter artifact | Preinitialize a closure-private rewriter in the target page for synchronous `eval`, `Function`, and string timer rewriting. |
 | HTML integration | `internal/htmltx` and `cmd/wasm-kernel` | Rewrite inline scripts and inline event handlers before the browser compiles them. |
 | External script pipeline | `web/sw.js` | Rewrite `script`, `module`, worker, and imported script responses before returning them to the browser. |
 
@@ -248,7 +248,7 @@ The Service Worker owns the rewrite decision because it already classifies every
 REWRITE_UNINITIALIZED -> REWRITE_LOADING -> REWRITE_READY -> REWRITE_FAILED
 ```
 
-- Load the SWC rewriter WASM as an internal asset, for example:
+- Load the OXC rewriter WASM as an internal asset, for example:
 
 ```text
 /__zp/js-rewriter.wasm
@@ -335,7 +335,7 @@ Requirements:
 - The foreground rewriter API must not be exposed as `window.__zp_rewrite` or any other target-visible global. Target code may call patched dynamic-code APIs, but must not be able to invoke, configure, or downgrade the rewriter directly.
 - The foreground and Service Worker rewriters must use the same transformer version and helper ABI. The runtime must compare an embedded transformer version/hash and fail closed on mismatch.
 - The page-local instance should be limited to dynamic-code rewriting. The Service Worker remains the canonical pipeline for external scripts, inline scripts, worker scripts, caching, diagnostics, and strict-mode policy decisions.
-- If the full SWC WASM artifact is too large for foreground startup, Phase 2 may add a smaller dynamic-code-only Rust/SWC build. The smaller build must share the same AST rewrite rules for dangerous access paths.
+- If future compatibility requires synchronous dynamic-code rewriting instead of the current strict blocking policy, Phase 2 may add a smaller page-local OXC build. That build must share the same rewrite rules for dangerous access paths.
 - Foreground rewriting must never expose share keys, transport secrets, HttpOnly cookies, or Service Worker state to target code.
 - CSP must explicitly allow only the minimum needed for foreground WASM initialization. Any continued use of `'unsafe-eval'` or `wasm-unsafe-eval` must be documented as a compatibility requirement and revisited after dynamic rewriting is complete.
 
@@ -378,7 +378,7 @@ Rewritten property access and runtime membrane helpers must prevent target code 
 
 ## AST rewrite scope
 
-The SWC transform must use scope-aware analysis. It must not rewrite locally-bound variables named `location`, `window`, `document`, etc.
+The OXC transform must use scope-aware analysis. It must not rewrite locally-bound variables named `location`, `window`, `document`, etc.
 
 ### Global identifier access
 
@@ -479,7 +479,7 @@ Inline scripts and event attributes must be rewritten before browser parsing com
 
 Preferred implementation path:
 
-1. Service Worker loads the SWC rewriter WASM and exposes a synchronous `__zp_rewrite_js(source, options)` function in the Service Worker global.
+1. Service Worker loads the OXC rewriter WASM and exposes a synchronous `__zp_rewrite_js(source, options)` function in the Service Worker global.
 2. Go WASM HTML transformation calls that function via `syscall/js` while tokenizing target HTML.
 3. `internal/htmltx` rewrites:
    - script text for classic scripts;
@@ -495,8 +495,8 @@ This avoids executing raw inline target code before rewriting.
 For script responses, `web/sw.js` wraps the target `Response`:
 
 1. Identify script requests using `request.destination === 'script'`, `Sec-Fetch-Dest`, module metadata when available, and response `Content-Type`.
-2. Read the script body as text. SWC requires a full source string; script bodies are allowed to be buffered even though non-script response bodies should keep streaming.
-3. Rewrite with SWC.
+2. Read the script body as text. OXC requires a full source string; script bodies are allowed to be buffered even though non-script response bodies should keep streaming.
+3. Rewrite with OXC.
 4. Return a new `Response` with rewritten source and constructor-safe headers.
 5. Strip or regenerate source maps unless source-map rewriting is implemented.
 
@@ -584,7 +584,7 @@ Golden tests for:
 Before starting item 1, complete the P0 hardening gates above. P1 gates should be completed before broad-site compatibility evaluation, and P2 gates should be tracked as required coverage for Phase 2 acceptance.
 
 1. Add rewriter mode configuration and diagnostics plumbing.
-2. Add Rust SWC rewriter crate and WASM build target.
+2. Vendor OXC parser WASM assets and expose a strict rewriter service.
 3. Load rewriter WASM from the Service Worker and expose `rewriteScript()`.
 4. Add runtime membrane helpers used by rewritten code.
 5. Add the foreground synchronous rewriter bootstrap and closure-private dynamic-code rewrite API.
@@ -601,7 +601,7 @@ Before starting item 1, complete the P0 hardening gates above. P1 gates should b
 
 Phase 2 is accepted when:
 
-- The Service Worker initializes the SWC-based Rust/WASM rewriting service before target script execution in strict mode.
+- The Service Worker initializes the OXC parser/WASM rewriting service before target script execution in strict mode.
 - External scripts, inline scripts, event handlers, and worker scripts are rewritten or blocked.
 - Dynamic code execution is rewritten synchronously by an approved page-local path or blocked.
 - Runtime-created event handlers and dynamic HTML paths (`setAttribute`, `innerHTML`, `insertAdjacentHTML`, `document.write`, `DOMParser`, `Range`) are rewritten before browser compilation or neutralized.

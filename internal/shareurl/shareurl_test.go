@@ -33,6 +33,19 @@ func TestNewWithRandRoundTripsEnvelope(t *testing.T) {
 	}
 }
 
+func TestNewRejectsNonHTTPURLs(t *testing.T) {
+	for _, target := range []string{"", "://bad", "ws://example.com/socket", "wss://example.com/socket", "javascript:alert(1)", "data:text/html,hi", "/relative"} {
+		if _, err := NewWithRand(strings.NewReader(strings.Repeat("x", 80)), target); err == nil {
+			t.Fatalf("NewWithRand(%q) succeeded", target)
+		}
+	}
+	for _, target := range []string{"http://example.com/", "https://example.com/path"} {
+		if _, err := NewWithRand(strings.NewReader(strings.Repeat("x", 80)), target); err != nil {
+			t.Fatalf("NewWithRand(%q): %v", target, err)
+		}
+	}
+}
+
 func decryptForTest(t *testing.T, encrypted, key string) string {
 	t.Helper()
 	seed, err := base64.RawURLEncoding.DecodeString(key)
