@@ -1,6 +1,10 @@
 # ZeroProxy Phase 2 Plan: Service Worker JavaScript Rewriting
 
-Status: implemented strict Phase 2 cutover. The parser/tooling direction is OXC: the Service Worker loads OXC parser WASM, `web/js-rewriter.js` performs AST-aware source rewriting from the OXC AST, the Go WASM HTML transformer calls that rewriter for inline scripts and event handlers, main-window dynamic `Function`/`eval`/string timer bodies execute under the runtime's virtual global scope, and unrewritable blob/data worker paths fail closed.
+Status: implemented strict Phase 2 cutover for the default rewrite path. The parser/tooling direction is OXC: the Service Worker loads OXC parser WASM, `web/js-rewriter.js` performs AST-aware source rewriting from the OXC AST, the Go WASM HTML transformer calls that rewriter for inline scripts and event handlers, main-window dynamic `Function`/`eval`/string timer bodies execute under the runtime's virtual global scope, and unrewritable blob/data worker paths fail closed. Explicit compatibility passthrough exceptions are documented below.
+
+Current-status note: this file is both the Phase 2 design record and a historical implementation checklist. Some hardening gates below have already been implemented, while browser API fidelity and adversarial compatibility coverage remain prototype-level; `ARCHITECTURE.md` is the canonical current-behavior document.
+
+Current compatibility exception: `/__zp/api/script` still contains an explicit passthrough allowlist for selected third-party challenge/tag-manager scripts. That exception is not a strict-mode parse-failure fallback and must remain visible in documentation and tests before any high-assurance acceptance claim.
 
 Phase 2 improves target-site compatibility by rewriting target JavaScript before execution. The main goal is to make ordinary target scripts observe a virtual target `location`/`window` model while preserving the ZeroProxy transport boundary.
 
@@ -27,16 +31,19 @@ This is a compatibility layer, not a claim of perfect browser-origin spoofing. N
 
 Phase 2 must not start by assuming the rewriter will close every current gap. The existing Phase 0/1 boundary must first fail closed when rewriting is absent, late, or broken. The following gates are prerequisites for the Phase 2 implementation sequence.
 
+This section is retained to explain the cutover sequence. Items marked with current-status notes are no longer open requirements in the current code, but their compatibility and verification implications still apply.
+
 ### P0: boundary hardening required before rewriter work
 
 1. **Tighten target-response CSP**
 
-   - Current risk: `web/zp-core.js` emits `connect-src * blob: data: <proxy-ws-origin>` for Service Worker-constructed target responses.
+   - Historical risk: earlier `web/zp-core.js` emitted `connect-src * blob: data: <proxy-ws-origin>` for Service Worker-constructed target responses.
+   - Current status: `web/zp-core.js` and the server-side `zeroCSP` restrict `connect-src` to `'self'` plus the proxy WebSocket origin. Continued `script-src 'unsafe-eval'` / `wasm-unsafe-eval` is a documented Phase 2 compatibility exception for inline bootstrap and WASM/OXC initialization.
    - Why it matters: Phase 2 rewriting cannot be the only egress boundary. If a script source is missed, CSP must still provide defense-in-depth against direct native connections.
    - Required change:
-     - Align `ZP.fixedCSP()` with the stricter server-side `zeroCSP`.
-     - Restrict `connect-src` to `'self'` plus the proxy WebSocket origin.
-     - Re-evaluate `script-src blob: data:` and document any temporary compatibility exception.
+     - Keep `ZP.fixedCSP()` aligned with the stricter server-side `zeroCSP`.
+     - Keep target-response `script-src` free of `blob:` and `data:` script execution unless a future rewritten/contained path is explicitly designed and tested.
+     - Re-evaluate `'unsafe-eval'` and `wasm-unsafe-eval` before any high-assurance acceptance claim.
    - Required tests:
      - Static policy test rejecting `connect-src *`.
      - Browser E2E fixture attempting direct external `fetch`, XHR, EventSource, and WebSocket egress.
@@ -163,14 +170,12 @@ Phase 2 must not start by assuming the rewriter will close every current gap. Th
     - Required tests:
       - Malformed but common HTML either recovers predictably or produces a safe `MALFORMED_HTML` error document without partial unsafe execution.
 
-13. **Validate share URL schemes in the Go share-url package**
+13. **Validate share URL schemes in the Go share-url package** — implemented in current code
 
-    - Current risk: callers usually validate `http`/`https`, but `internal/shareurl.New()` itself only encrypts a string.
-    - Required change:
-      - Enforce `http:` and `https:` inside `shareurl.New()` / `NewWithRand()`.
-      - Reject `ws:`, `wss:`, `javascript:`, `data:`, and empty or malformed URLs.
-    - Required tests:
-      - Go unit tests proving HTTP/HTTPS are accepted and WebSocket/non-HTTP schemes are rejected.
+    - Historical risk: callers usually validated `http`/`https`, but `internal/shareurl.New()` itself only encrypted a string.
+    - Current status: `internal/shareurl.New()` / `NewWithRand()` reject empty, malformed, hostless, and non-HTTP(S) targets.
+    - Required invariant:
+      - Continue rejecting `ws:`, `wss:`, `javascript:`, `data:`, and empty or malformed URLs in the Go share-url package, not only at call sites.
 
 ## Design constraint: why rewriting is necessary but not sufficient
 

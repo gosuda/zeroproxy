@@ -1,5 +1,7 @@
 # ZeroProxy Zero-Installation Proxy Browsing Engine Design
 
+> Current-status note: this is the source design/requirements document, not the canonical map of the current repository. The implementation has intentional deltas recorded in `ARCHITECTURE.md`, including active `/p` routes instead of PLAN `/v` routes, removal of the injected topbar, HTTP/2 support for target fetches, stricter target-response `connect-src`, and prototype-level browser API fidelity. Read `ARCHITECTURE.md` first when assessing current behavior.
+
 ## 0. Source Specification and Correction Directives
 
 This document is based on the user-provided `ZeroProxy Client Kernel Implementation Spec v0.8` plus the May 2026 final correction directive. The correction directive overrides earlier text where there is a conflict.

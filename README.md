@@ -29,9 +29,11 @@ Not complete enough for production or high-assurance acceptance:
 
 - Browser E2E tests cover internal SOCKS5 relay mode, dynamic script laundering, compound location assignments, iframe postMessage delivery, iframe clean-realm containment, and basic fingerprint-masking checks, but do not yet prove every worker, direct navigation, form, device API, and unclassified subresource non-escape path.
 - Dynamic iframe containment is synchronous for `contentWindow`/`contentDocument` reads and common insertion APIs, but remains prototype-level and should keep gaining adversarial browser coverage.
-- Main-window runtime API compatibility is prototype-level for fetch, XHR, EventSource, WebSocket, uploads, descriptor edge cases, and fingerprinting surface fidelity.
-- Response bodies are streamed into JavaScript `Response` objects, but request/upload body handling and browser backpressure/cancellation behavior are still prototype-level.
-- Encrypted IndexedDB persistence is not implemented.
+- Main-window runtime API compatibility is prototype-level for `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, forms, uploads, descriptor edge cases, and fingerprinting surface fidelity. The wrappers preserve the ZeroProxy transport boundary, but they are not browser-native semantic clones for every option, event, redirect, credential, cache, progress, or close/error edge case.
+- Response bodies are streamed into JavaScript `Response` objects, but request/upload bodies are buffered through the Service Worker/WASM bridge with an explicit size cap. Streaming uploads, large multipart/file uploads, request cancellation, and browser backpressure behavior are still prototype-level.
+- Form navigation compatibility is limited: GET submissions become ZeroProxy navigations, while non-GET submissions are replayed through the runtime fetch path and write the transformed response back into the current document rather than following the browser's native navigation algorithm.
+- Worker compatibility is partial: worker `fetch` and `importScripts` are bridged, but worker XHR, WebSocket, EventSource, native device/network APIs, and unrewritable blob/data worker scripts are blocked rather than fully emulated.
+- Cookie, storage, and history semantics are not yet reconciled across runtime state, Service Worker state, and the Go kernel cookie jar. Encrypted IndexedDB persistence is not implemented.
 - Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE2_PLAN.md`](./PHASE2_PLAN.md) for the Phase 2 Service Worker/OXC JavaScript rewriting plan.
