@@ -48,6 +48,16 @@ test('OXC rewriter accepts target URLs with cache-busting query strings', async 
   assert.match(out.code, /__zp_set\(__zp_get\(globalThis,"window"\),"location","\/next"\)/);
 });
 
+test('OXC rewriter accepts extensionless target URLs', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`window._cf_chl_opt = { ray: location.href };`, {
+    kind: 'classic',
+    targetUrl: 'https://2captcha.com/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=abc123',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.match(out.code, /__zp_get\(globalThis,"location"\)\.href/);
+});
+
 test('OXC rewriter blocks constructor escape compound writes', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`location.href += '#x'; ({}).constructor.constructor('return location.href')();`, { kind: 'classic' });

@@ -194,9 +194,16 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	tag := strings.ToLower(tok.Data)
 	attrs := tok.Attr[:0]
 	var dataTarget string
+	var integrityBackup string
+	hasIntegrityBackup := false
 	for _, a := range tok.Attr {
 		key := strings.ToLower(a.Key)
-		if key == "data-zp-target-url" || key == "data-zp-blocked-url" {
+		if key == "data-zp-target-url" || key == "data-zp-blocked-url" || key == "data-zp-integrity" {
+			continue
+		}
+		if key == "integrity" && (tag == "script" || tag == "link") {
+			integrityBackup = a.Val
+			hasIntegrityBackup = true
 			continue
 		}
 		if tag == "a" && key == "ping" {
@@ -243,6 +250,9 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			}
 		}
 		attrs = append(attrs, a)
+	}
+	if hasIntegrityBackup {
+		attrs = upsertAttr(attrs, "data-zp-integrity", integrityBackup)
 	}
 	if dataTarget != "" {
 		attrs = upsertAttr(attrs, "data-zp-target-url", dataTarget)

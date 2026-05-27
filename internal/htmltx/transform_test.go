@@ -126,3 +126,21 @@ func TestTransformRewritesPhase2ScriptSourcesAndHandlers(t *testing.T) {
 		}
 	}
 }
+func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/")
+	out, err := Transform(strings.NewReader(`<body><script src="/app.js" integrity="sha384-script" data-zp-integrity="attacker"></script><link rel="stylesheet" href="/app.css" integrity="sha256-style"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/__zp/api/script?`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in %s", want, s)
+		}
+	}
+	for _, forbidden := range []string{` integrity="sha384-script"`, ` integrity="sha256-style"`, `data-zp-integrity="attacker"`} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("forbidden integrity marker %q remained in %s", forbidden, s)
+		}
+	}
+}

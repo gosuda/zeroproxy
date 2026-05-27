@@ -87,7 +87,8 @@
     if (query !== -1 && query < end) end = query;
     if (hash !== -1 && hash < end) end = hash;
     if (end !== value.length) value = value.slice(0, end);
-    return value && !value.endsWith('/') && !value.endsWith('\\') ? value : 'target.js';
+    if (!value || value.endsWith('/') || value.endsWith('\\')) return 'target.js';
+    return /\.[cm]?js$/i.test(value) ? value : value + '.js';
   }
 
   function parse(source, sourceType, filename) {

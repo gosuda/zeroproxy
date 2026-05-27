@@ -29,6 +29,7 @@
   const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
   const listenersKey = Symbol('zp.listeners');
   const windowMethodBindings = new Map();
+  const integrityBackupAttr = 'data-zp-integrity';
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const workerBlobURLs = new Set();
   const canvasHookedWindows = new WeakSet();
@@ -79,6 +80,9 @@
       replaceChild: w.Node.prototype.replaceChild,
       setAttribute: w.Element.prototype.setAttribute,
       getAttribute: w.Element.prototype.getAttribute,
+      removeAttribute: w.Element.prototype.removeAttribute,
+      hasAttribute: w.Element.prototype.hasAttribute,
+      getAttributeNames: w.Element.prototype.getAttributeNames,
       insertAdjacentHTML: w.Element.prototype.insertAdjacentHTML,
       setAttributeNS: w.Element.prototype.setAttributeNS,
       namedSetNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItem,
@@ -164,6 +168,9 @@
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : '#'; }
   function blockExecutableURL(el, key, raw) { urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw).trim()); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el); }
+  function isIntegrityBearing(el) { const tag = el && el.localName; return tag === 'script' || tag === 'link'; }
+  function backedIntegrity(el) { return isIntegrityBearing(el) ? Native.getAttribute.call(el, integrityBackupAttr) : null; }
+  function setBackedIntegrity(el, value) { Native.setAttribute.call(el, integrityBackupAttr, String(value)); if (Native.removeAttribute) Native.removeAttribute.call(el, 'integrity'); }
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
@@ -844,10 +851,10 @@
       clear() { map.clear(); }
     });
   }
-
   function installDOMHooks(w) {
     define(w.Element.prototype, 'setAttribute', function(k, v) {
       const key = String(k).toLowerCase();
+      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (key.startsWith('on') && key.length > 2) return Native.setAttribute.call(this, k, rewriteEventAttribute(String(v)));
       if (this.localName === 'base' && key === 'href') {
         updateVirtualBase(v);
@@ -870,18 +877,61 @@
       if ((this.localName === 'iframe' || this.localName === 'frame') && key === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
       return Native.setAttribute.call(this, k, v);
     });
-    if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) { const key = String(k).toLowerCase(); return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v); });
+    if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) {
+      const key = String(k).toLowerCase();
+      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+      return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v);
+    });
     if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { if (attr && String(attr.name || '').toLowerCase().startsWith('on')) attr.value = rewriteEventAttribute(String(attr.value || '')); return Native.namedSetNamedItem.call(this, attr); });
     if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get: Native.attrValue.get, set(v) { Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? rewriteEventAttribute(String(v)) : v); }, configurable: false }); } catch {}
-    define(w.Element.prototype, 'getAttribute', function(k) { const key = String(k).toLowerCase(); if (isURLBearing(this, key)) return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k); return Native.getAttribute.call(this, k); });
+    define(w.Element.prototype, 'getAttribute', function(k) {
+      const key = String(k).toLowerCase();
+      if (key === integrityBackupAttr) return null;
+      if (key === 'integrity' && isIntegrityBearing(this)) {
+        const backed = backedIntegrity(this);
+        return backed !== null ? backed : Native.getAttribute.call(this, k);
+      }
+      if (isURLBearing(this, key)) return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
+      return Native.getAttribute.call(this, k);
+    });
+    if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) {
+      const key = String(k).toLowerCase();
+      if (key === integrityBackupAttr) return false;
+      if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
+      return Native.hasAttribute.call(this, k);
+    });
+    if (Native.removeAttribute) define(w.Element.prototype, 'removeAttribute', function(k) {
+      const key = String(k).toLowerCase();
+      if (key === 'integrity' && isIntegrityBearing(this)) {
+        Native.removeAttribute.call(this, integrityBackupAttr);
+        return Native.removeAttribute.call(this, k);
+      }
+      return Native.removeAttribute.call(this, k);
+    });
+    if (Native.getAttributeNames) define(w.Element.prototype, 'getAttributeNames', function() {
+      const names = Native.getAttributeNames.call(this).filter(name => String(name).toLowerCase() !== integrityBackupAttr);
+      if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
+      return names;
+    });
+    installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
+    installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); return ret; });
     installBaseObserver();
     function patchHTMLSetter(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get: d.get, set(v) { d.set.call(this, transformHTML(String(v))); syncBaseElement(this); instrumentDescendantIframes(this); }, configurable: false }); } catch {} }
   }
+  function installIntegrityProp(proto) {
+    if (!proto) return;
+    defineAccessor(proto, 'integrity', function() {
+      const backed = backedIntegrity(this);
+      return backed !== null ? backed : Native.getAttribute.call(this, 'integrity') || '';
+    }, function(v) {
+      setBackedIntegrity(this, v);
+    });
+  }
   function isURLBearing(el, key) { const tag = el.localName; return key === 'href' && (tag === 'a' || tag === 'area') || key === 'action' && tag === 'form' || key === 'formaction' && (tag === 'input' || tag === 'button') || key === 'src' && (tag === 'iframe' || tag === 'frame'); }
-  function transformHTML(s) { return String(s).replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q).replace(/<script\b/ig, '<script type="application/x-zeroproxy-blocked" data-zp-blocked-script').replace(/\s(on[a-z0-9_:-]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, name, value) => ' data-zp-blocked-' + name.toLowerCase() + '=' + value); }
+  function transformHTML(s) { return String(s).replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q).replace(/<script\b/ig, '<script type="application/x-zeroproxy-blocked" data-zp-blocked-script').replace(/\sintegrity\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, value) => ' ' + integrityBackupAttr + '=' + value).replace(/\s(on[a-z0-9_:-]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, name, value) => ' data-zp-blocked-' + name.toLowerCase() + '=' + value); }
   function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + s; }
   function bootJSON() { return JSON.stringify(boot).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function baseSyncScript(raw) { return '<script>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(String(raw)).replace(/</g,'\\u003c') + ');<\/script>'; }
@@ -901,13 +951,18 @@
           if (r.type === 'attributes') enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase());
           else for (const n of r.addedNodes || []) { syncBaseElement(n); instrumentDescendantIframes(n); }
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction'] });
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction', 'integrity'] });
     } catch {}
   }
   function enforceObservedAttribute(el, key) {
     if (!el || !key) return;
     const tag = el.localName;
     if (tag === 'base' && key === 'href') { syncBaseElement(el); return; }
+    if (key === 'integrity' && isIntegrityBearing(el)) {
+      const raw = Native.getAttribute.call(el, 'integrity');
+      if (raw !== null) setBackedIntegrity(el, raw);
+      return;
+    }
     if ((tag === 'iframe' || tag === 'frame') && key === 'srcdoc') {
       const raw = Native.getAttribute.call(el, 'srcdoc');
       if (raw && !raw.startsWith(injectSrcdoc(''))) Native.setAttribute.call(el, 'srcdoc', injectSrcdoc(String(raw)));
