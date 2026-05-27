@@ -131,8 +131,28 @@ function createTargetServer(requests) {
           dynamicScript.id = 'dynamic-script-probe';
           dynamicScript.src = '/dynamic-script.js?from=createElement';
           document.head.appendChild(dynamicScript);
+          try {
+            const template = document.createElement('template');
+            template.innerHTML = '<link rel="preconnect" href="https://preconnect.invalid">';
+            const first = template.content.firstChild;
+            const clone = first && first.cloneNode(true);
+            if (clone) document.head.appendChild(clone);
+            window.__templateLinkFixture = {
+              childCount: template.content.childNodes.length,
+              firstNode: first && first.localName,
+              rel: first && first.getAttribute('rel'),
+              href: first && first.getAttribute('href'),
+              blockedRel: first && first.getAttribute('data-zp-blocked-rel'),
+              blockedURL: first && first.getAttribute('data-zp-blocked-url'),
+              cloneRel: clone && clone.getAttribute('rel'),
+              cloneHref: clone && clone.getAttribute('href')
+            };
+          } catch (err) {
+            window.__templateLinkFixture = { error: err && err.message || String(err) };
+          }
         </script>
         <script src="/rewrite-fixture.js"></script>
+        <script type="module" src="/module-worker.js"></script>
       </body></html>`);
       return;
     }
@@ -163,6 +183,18 @@ function createTargetServer(requests) {
         currentSrc: document.currentScript && document.currentScript.src,
         currentAttr: document.currentScript && document.currentScript.attributes.getNamedItem('src') && document.currentScript.attributes.getNamedItem('src').value
       };`);
+      return;
+    }
+    if (url.pathname === '/module-worker.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`const worker = new Worker(new URL('/worker-fixture.js', import.meta.url).href, { name: 'module-worker-fixture' });
+        worker.onmessage = ev => { window.__moduleWorkerFixture = ev.data; worker.terminate(); };
+        worker.onerror = ev => { window.__moduleWorkerFixture = { error: ev && ev.message || 'worker-error' }; };`);
+      return;
+    }
+    if (url.pathname === '/worker-fixture.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`postMessage({ loaded: true, href: location.href, userAgent: navigator.userAgent, platform: navigator.platform });`);
       return;
     }
     if (url.pathname === '/frame-child') {
@@ -452,6 +484,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     userAgent: navigator.userAgent,
     appVersion: navigator.appVersion,
     platform: navigator.platform,
+    templateLink: window.__templateLinkFixture,
     phase2Location: window.__phase2Location,
     phase2DynamicFunction: window.__phase2DynamicFunction,
     phase2EvalLocation: window.__phase2EvalLocation,
@@ -461,6 +494,16 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(home.shellVisible, false);
   assert.equal(home.userAgent, TARGET_UA);
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
+  assert.deepEqual(home.templateLink, {
+    childCount: 1,
+    firstNode: 'link',
+    rel: null,
+    href: null,
+    blockedRel: 'preconnect',
+    blockedURL: 'https://preconnect.invalid',
+    cloneRel: null,
+    cloneHref: null,
+  });
   assert.equal(home.platform, 'Win32');
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
   assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
@@ -480,11 +523,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(rewriteAdvanced.compoundHref, `http://${targetHost}:${targetPort}/#compound-tail`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   try {
-    await page.waitForFunction(() => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded, { timeout: 30000 });
+    await page.waitForFunction(() => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded && window.__moduleWorkerFixture && window.__moduleWorkerFixture.loaded, { timeout: 30000 });
   } catch (err) {
     const state = await page.evaluate(() => ({
       gtm: window.__gtmFixture || null,
       dynamic: window.__dynamicScriptLoaded || null,
+      moduleWorker: window.__moduleWorkerFixture || null,
       scripts: Array.from(document.scripts).map(s => ({ id: s.id, src: s.attributes.getNamedItem('src')?.value || '', type: s.type || '', blocked: s.hasAttribute('data-zp-blocked-script') })),
       messages: window.__messageEvents || [],
     }));
@@ -493,6 +537,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const dynamicScripts = await page.evaluate(() => ({
     gtm: window.__gtmFixture,
     dynamic: window.__dynamicScriptLoaded,
+    moduleWorker: window.__moduleWorkerFixture,
     gtmAttr: document.getElementById('gtm-fixture')?.attributes.getNamedItem('src')?.value || '',
     dynamicAttr: document.getElementById('dynamic-script-probe')?.attributes.getNamedItem('src')?.value || '',
     messages: window.__messageEvents || [],
@@ -500,12 +545,17 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(dynamicScripts.gtm.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.gtm.href);
   assert.ok(dynamicScripts.dynamic.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.dynamic.href);
   assert.match(dynamicScripts.gtm.currentAttr, /^\/__zp\/api\/script\?/);
+  assert.equal(dynamicScripts.moduleWorker.href, `http://${targetHost}:${targetPort}/worker-fixture.js`);
+  assert.equal(dynamicScripts.moduleWorker.userAgent, TARGET_UA);
+  assert.equal(dynamicScripts.moduleWorker.platform, 'Win32');
   assert.match(dynamicScripts.dynamic.currentAttr, /^\/__zp\/api\/script\?/);
   assert.match(dynamicScripts.gtmAttr, /^\/__zp\/api\/script\?/);
   assert.match(dynamicScripts.dynamicAttr, /^\/__zp\/api\/script\?/);
   assert.ok(dynamicScripts.messages.some(m => m.type === 'gtm-loaded'), `messages: ${JSON.stringify(dynamicScripts.messages)}`);
   assert.ok(requests.some(r => r.url.startsWith('/gtm.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/dynamic-script.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/module-worker.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/worker-fixture.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
     const blockedByPolicy = fn => {

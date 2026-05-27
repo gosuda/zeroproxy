@@ -1226,15 +1226,26 @@
     return false;
   }
   function isBlockedLink(el) { return el && el.localName === 'link' && isBlockedLinkRelValue(Native.getAttribute.call(el, 'rel') || ''); }
+  function hasSuppressedBlockedLinkRel(el) { return el && el.localName === 'link' && isBlockedLinkRelValue(Native.getAttribute.call(el, 'data-zp-blocked-rel') || ''); }
+  function suppressBlockedLinkRel(el, rawRel) {
+    Native.setAttribute.call(el, 'data-zp-blocked-rel', String(rawRel));
+    if (Native.removeAttribute) Native.removeAttribute.call(el, 'rel');
+    blockLinkURL(el, Native.getAttribute.call(el, 'href') || '');
+  }
   function blockLinkURL(el, raw) {
     if (raw != null && String(raw) !== '') Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw));
     urlMeta.delete(el);
     if (Native.removeAttribute) Native.removeAttribute.call(el, 'href');
   }
   function enforceLinkPolicy(el) {
-    if (!isBlockedLink(el)) return;
-    blockLinkURL(el, Native.getAttribute.call(el, 'href') || '');
-    Native.setAttribute.call(el, 'data-zp-blocked-rel', Native.getAttribute.call(el, 'rel') || '');
+    if (!el || el.localName !== 'link') return;
+    const rel = Native.getAttribute.call(el, 'rel') || '';
+    if (isBlockedLinkRelValue(rel)) {
+      suppressBlockedLinkRel(el, rel);
+      return;
+    }
+    if (rel && Native.removeAttribute) Native.removeAttribute.call(el, 'data-zp-blocked-rel');
+    if (hasSuppressedBlockedLinkRel(el)) blockLinkURL(el, Native.getAttribute.call(el, 'href') || '');
   }
   function isNavigationTargetElement(el) {
     const tag = el && el.localName;
@@ -1251,8 +1262,13 @@
       const localKey = attrLocalName(key);
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
-      if (this.localName === 'link' && localKey === 'rel') { const ret = Native.setAttribute.call(this, k, v); enforceLinkPolicy(this); return ret; }
-      if (this.localName === 'link' && localKey === 'href' && isBlockedLink(this)) return blockLinkURL(this, v);
+      if (this.localName === 'link' && localKey === 'rel') {
+        const value = String(v);
+        if (isBlockedLinkRelValue(value)) return suppressBlockedLinkRel(this, value);
+        if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-blocked-rel');
+        return Native.setAttribute.call(this, k, v);
+      }
+      if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
       if (key.startsWith('on') && key.length > 2) return Native.setAttribute.call(this, k, rewriteEventAttribute(String(v)));
       if (this.localName === 'base' && localKey === 'href') {
         updateVirtualBase(v);
@@ -1392,13 +1408,12 @@
   }
   function installLinkProp(proto) {
     if (!proto) return;
-    const d = propertyDescriptor(proto, 'href');
-    if (!d || !d.get) return;
-    try {
+    const hrefDescriptor = propertyDescriptor(proto, 'href');
+    if (hrefDescriptor && hrefDescriptor.get) try {
       Object.defineProperty(proto, 'href', {
-        get() { return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || d.get.call(this); },
+        get() { return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || hrefDescriptor.get.call(this); },
         set(v) {
-          if (isBlockedLink(this)) return blockLinkURL(this, v);
+          if (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this)) return blockLinkURL(this, v);
           const value = String(v);
           if (hasExecutableURLScheme(value)) return blockExecutableURL(this, 'href', value);
           if (isHTTPURL(value)) {
@@ -1406,7 +1421,20 @@
             urlMeta.set(this, t);
             Native.setAttribute.call(this, 'data-zp-target-url', t);
           }
-          return d.set.call(this, value);
+          return hrefDescriptor.set ? hrefDescriptor.set.call(this, value) : Native.setAttribute.call(this, 'href', value);
+        },
+        configurable: false
+      });
+    } catch {}
+    const relDescriptor = propertyDescriptor(proto, 'rel');
+    if (relDescriptor && relDescriptor.get) try {
+      Object.defineProperty(proto, 'rel', {
+        get() { return relDescriptor.get.call(this); },
+        set(v) {
+          const value = String(v);
+          if (isBlockedLinkRelValue(value)) return suppressBlockedLinkRel(this, value);
+          if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-blocked-rel');
+          return relDescriptor.set ? relDescriptor.set.call(this, value) : Native.setAttribute.call(this, 'rel', value);
         },
         configurable: false
       });
@@ -1419,7 +1447,32 @@
   }
   function isSVGURLBearing(el, key) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && attrLocalName(key) === 'href' && /^(a|image|use|script)$/.test(el.localName || ''); }
   function isURLBearing(el, key) { const tag = el.localName; const localKey = attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || isSVGURLBearing(el, key)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script'); }
-  function transformHTML(s) { return String(s).replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href)).replace(/<link\b(?=[^>]*\brel\s*=\s*(?:"[^"]*(?:modulepreload|preload|prefetch|preconnect|dns-prefetch|prerender|manifest)[^"]*"|'[^']*(?:modulepreload|preload|prefetch|preconnect|dns-prefetch|prerender|manifest)[^']*'|[^\s>]*(?:modulepreload|preload|prefetch|preconnect|dns-prefetch|prerender|manifest)[^\s>]*))[^>]*>/ig, '').replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q).replace(/<script\b/ig, '<script type="application/x-zeroproxy-blocked" data-zp-blocked-script').replace(/\sintegrity\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, value) => ' ' + integrityBackupAttr + '=' + value).replace(/\s(on[a-z0-9_:-]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, name, value) => ' data-zp-blocked-' + name.toLowerCase() + '=' + value); }
+  const blockedLinkTagRE = /<link\b(?=[^>]*\brel\s*=\s*(?:"[^"]*(?:modulepreload|preload|prefetch|preconnect|dns-prefetch|prerender|manifest)[^"]*"|'[^']*(?:modulepreload|preload|prefetch|preconnect|dns-prefetch|prerender|manifest)[^']*'|[^\s>]*(?:modulepreload|preload|prefetch|preconnect|dns-prefetch|prerender|manifest)[^\s>]*))[^>]*>/ig;
+  function escapeHTMLAttrValue(value) {
+    return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function tagAttrValue(tag, name) {
+    const m = new RegExp("(?:^|\\s)" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'>`=]+))", 'i').exec(tag);
+    return m ? m[1] ?? m[2] ?? m[3] ?? '' : '';
+  }
+  function rewriteBlockedLinkTag(tag) {
+    const href = tagAttrValue(tag, 'href');
+    const rel = tagAttrValue(tag, 'rel');
+    let out = tag.replace(/\s(?:href|rel|data-zp-blocked-url|data-zp-blocked-rel)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>`=]+)/ig, '');
+    out = out.replace(/\s*\/?>$/, '');
+    if (href) out += ' data-zp-blocked-url="' + escapeHTMLAttrValue(href) + '"';
+    if (rel) out += ' data-zp-blocked-rel="' + escapeHTMLAttrValue(rel) + '"';
+    return out + '>';
+  }
+  function transformHTML(s) {
+    return String(s)
+      .replace(/<base\b[^>]*\shref=(["'])([\s\S]*?)\1[^>]*>/ig, (_, q, href) => baseSyncScript(href))
+      .replace(blockedLinkTagRE, rewriteBlockedLinkTag)
+      .replace(/(<iframe\b[^>]*\ssrcdoc=["'])([\s\S]*?)(["'])/ig, (_, p, h, q) => p + injectSrcdoc(h).replace(/"/g,'&quot;') + q)
+      .replace(/<script\b/ig, '<script type="application/x-zeroproxy-blocked" data-zp-blocked-script')
+      .replace(/\sintegrity\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, value) => ' ' + integrityBackupAttr + '=' + value)
+      .replace(/\s(on[a-z0-9_:-]+)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)/ig, (_, name, value) => ' data-zp-blocked-' + name.toLowerCase() + '=' + value);
+  }
   function injectSrcdoc(s) { return '<script src="/__zp/zp-core.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/__zp/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(boot).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function baseSyncScript(raw) { return '<script>window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(String(raw)).replace(/</g,'\\u003c') + ');<\/script>'; }
@@ -1549,7 +1602,7 @@
       return parsed.href;
     }
     if (parsed.protocol === 'data:') return dataWorkerURL(parsed.href);
-    return '/__zp/worker-bootstrap.js#u=' + encodeURIComponent(targetURL(raw)) + '&tab=' + encodeURIComponent(boot.tabId);
+    return '/__zp/worker-bootstrap.js#u=' + encodeURIComponent(requestTargetURL(raw)) + '&tab=' + encodeURIComponent(boot.tabId);
   }
   function dataWorkerURL(raw) {
     const comma = raw.indexOf(',');

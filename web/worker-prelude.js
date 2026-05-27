@@ -9,16 +9,78 @@
   const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
   const scope = new Proxy(self, {
     has(_target, prop) { return prop !== Symbol.unscopables; },
-    get(target, prop, receiver) {
+    get(target, prop) {
       if (prop === Symbol.unscopables) return undefined;
-      if (prop === 'self' || prop === 'globalThis') return scope;
+      if (prop === 'self' || prop === 'globalThis' || prop === 'window' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
       if (prop === 'location') return base;
       if (prop === 'eval' || prop === 'Function') return blockedDynamic;
-      return Reflect.get(target, prop, receiver);
+      return Reflect.get(target, prop);
     },
-    set(target, prop, value, receiver) { return Reflect.set(target, prop, value, receiver); }
+    set(target, prop, value) { return Reflect.set(target, prop, value); }
   });
   Object.defineProperty(self, '__zp_runClassic', { value: fn => fn(scope), enumerable: false, configurable: false });
+  function expose(name, value) { Object.defineProperty(self, name, { value, enumerable: false, configurable: false }); }
+  function isWorkerGlobal(value) { return value === self || value === scope; }
+  function workerTarget(value) { return value === scope ? self : value; }
+  function get(target, prop) {
+    if (typeof prop !== 'symbol') prop = String(prop);
+    if (isWorkerGlobal(target)) {
+      if (prop === 'self' || prop === 'globalThis' || prop === 'window' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
+      if (prop === 'location') return base;
+      if (prop === 'eval' || prop === 'Function') return blockedDynamic;
+    }
+    const actual = workerTarget(target);
+    const value = Reflect.get(Object(actual), prop);
+    return prop === 'postMessage' && typeof value === 'function' ? value.bind(actual) : value;
+  }
+  function set(target, prop, value) {
+    if (typeof prop !== 'symbol') prop = String(prop);
+    if ((isWorkerGlobal(target) && prop === 'location') || target === base) blockedDynamic();
+    Reflect.set(Object(workerTarget(target)), prop, value);
+    return value;
+  }
+  function assign(target, prop, operator, value) {
+    const current = get(target, prop);
+    let next;
+    switch (operator) {
+      case '+=': next = current + value; break;
+      case '-=': next = current - value; break;
+      case '*=': next = current * value; break;
+      case '/=': next = current / value; break;
+      case '%=': next = current % value; break;
+      case '**=': next = current ** value; break;
+      case '<<=': next = current << value; break;
+      case '>>=': next = current >> value; break;
+      case '>>>=': next = current >>> value; break;
+      case '&=': next = current & value; break;
+      case '^=': next = current ^ value; break;
+      case '|=': next = current | value; break;
+      case '&&=': if (!current) return current; next = value(); break;
+      case '||=': if (current) return current; next = value(); break;
+      case '??=': if (current !== null && current !== undefined) return current; next = value(); break;
+      default: blockedDynamic();
+    }
+    return set(target, prop, next);
+  }
+  function call(target, prop, args) {
+    const actual = workerTarget(target);
+    return Reflect.apply(get(target, prop), actual, Array.isArray(args) ? args : []);
+  }
+  function construct(ctor, args) { return Reflect.construct(ctor, Array.isArray(args) ? args : []); }
+  function has(target, prop) { return isWorkerGlobal(target) && prop === 'location' || Reflect.has(Object(workerTarget(target)), prop); }
+  function getOwnPropertyDescriptor(target, prop) {
+    if (isWorkerGlobal(target) && prop === 'location') return { value: base, configurable: true, enumerable: true, writable: false };
+    return Reflect.getOwnPropertyDescriptor(Object(workerTarget(target)), prop);
+  }
+  function ownKeys(target) { return Reflect.ownKeys(Object(workerTarget(target))); }
+  expose('__zp_get', get);
+  expose('__zp_set', set);
+  expose('__zp_assign', assign);
+  expose('__zp_call', call);
+  expose('__zp_construct', construct);
+  expose('__zp_has', has);
+  expose('__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
+  expose('__zp_ownKeys', ownKeys);
   try { self.eval = blockedDynamic; } catch {}
   try { self.Function = blockedDynamic; } catch {}
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
@@ -54,5 +116,12 @@
   self.EventSource = function(){ blocked(); };
   self.RTCPeerConnection = self.webkitRTCPeerConnection = self.WebTransport = self.WebSocketStream = function(){ blocked(); };
   const nativeImportScripts = self.importScripts.bind(self);
-  self.importScripts = (...urls) => nativeImportScripts(...urls.map(u => '/__zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(u, base.href).href)));
+  function importScriptURL(raw) {
+    const value = String(raw);
+    const internal = new URL(value, self.location.href);
+    if (internal.origin === self.location.origin && internal.pathname === '/__zp/api/worker-script') return internal.pathname + internal.search + internal.hash;
+    const parsed = new URL(value, base.href);
+    return '/__zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
+  }
+  self.importScripts = (...urls) => nativeImportScripts(...urls.map(importScriptURL));
 })();
