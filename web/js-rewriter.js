@@ -5,6 +5,7 @@
 
   const VERSION = 'phase2-oxc-abi-2';
   const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
+  const BLOCK_EXPR = "(()=>{" + BLOCK_CODE + "})()";
   const GLOBALS = new Set(['window', 'self', 'globalThis', 'location', 'document', 'history', 'top', 'parent', 'opener', 'frames', 'WebSocket', 'eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
   const MEMBER_HELPER_PROPS = new Set(['location', 'defaultView', 'contentWindow', 'contentDocument', 'top', 'parent', 'opener', 'frames', 'constructor']);
   const CALL_HELPER_PROPS = new Set(['assign', 'replace', 'open', 'get', 'getOwnPropertyDescriptor', 'defineProperty']);
@@ -111,18 +112,27 @@
       return '';
     }
     function isGlobalIdentifier(node) { return node && node.type === 'Identifier' && GLOBALS.has(node.name) && !declared(node.name); }
+    function isPattern(node) { return node && (node.type === 'ObjectPattern' || node.type === 'ArrayPattern' || node.type === 'AssignmentPattern' || node.type === 'RestElement'); }
     function isWindowLikeGlobal(node) { return node && node.type === 'Identifier' && !declared(node.name) && (node.name === 'window' || node.name === 'self' || node.name === 'globalThis' || node.name === 'top' || node.name === 'parent' || node.name === 'frames' || node.name === 'document'); }
     function isReferenceIdentifier(node, parent, key) {
       if (!node || node.type !== 'Identifier') return false;
       if (!parent) return true;
       if ((parent.type === 'VariableDeclarator' && key === 'id') || (parent.type === 'FunctionDeclaration' && key === 'id') || (parent.type === 'FunctionExpression' && key === 'id') || (parent.type === 'ClassDeclaration' && key === 'id') || (parent.type === 'ClassExpression' && key === 'id')) return false;
       if ((parent.type === 'MemberExpression' || parent.type === 'OptionalMemberExpression') && key === 'property' && !parent.computed) return false;
-      if ((parent.type === 'Property' || parent.type === 'ObjectProperty' || parent.type === 'MethodDefinition') && key === 'key' && !parent.computed) return false;
+      if ((parent.type === 'Property' || parent.type === 'ObjectProperty' || parent.type === 'MethodDefinition' || parent.type === 'PropertyDefinition' || parent.type === 'AccessorProperty') && key === 'key' && !parent.computed) return false;
       if (parent.type === 'LabeledStatement' || parent.type === 'BreakStatement' || parent.type === 'ContinueStatement') return false;
       if (parent.type && parent.type.startsWith('Import')) return false;
       return true;
     }
 
+    function memberNeedsHelper(node) {
+      if (!node) return false;
+      if (node.type === 'ChainExpression') return memberNeedsHelper(node.expression);
+      if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return false;
+      if (node.object && node.object.type === 'Super') return false;
+      const name = propName(node.property, node.computed);
+      return MEMBER_HELPER_PROPS.has(name) || (node.computed && isWindowLikeGlobal(node.object));
+    }
     function collectPattern(node, names) {
       if (!node) return;
       if (node.type === 'Identifier') { names.add(node.name); return; }
@@ -150,9 +160,7 @@
       let out = src(node);
       if (node.type === 'Identifier' && (globalIds.has(node) || isGlobalIdentifier(node))) out = '__zp_get(globalThis,' + JSON.stringify(node.name) + ')';
       else if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
-        const name = propName(node.property, node.computed);
-        const helper = MEMBER_HELPER_PROPS.has(name) || (node.computed && isWindowLikeGlobal(node.object));
-        if (helper) out = '__zp_get(' + render(node.object) + ',' + propCode(node.property, node.computed) + ')';
+        if (memberNeedsHelper(node)) out = '__zp_get(' + render(node.object) + ',' + propCode(node.property, node.computed) + ')';
         else if (node.computed) out = render(node.object) + '[' + render(node.property) + ']';
         else out = render(node.object) + source.slice(node.object.end, node.property.start) + src(node.property);
       } else if (node.type === 'ChainExpression') out = render(node.expression);
@@ -235,6 +243,7 @@
           if (node.type !== 'ArrowFunctionExpression' && node.id) declare(node.id.name);
           pushScope(collectParams(node, new Set()));
           if (node.id && node.type === 'FunctionExpression') declare(node.id.name);
+          for (const param of node.params || []) walkPattern(param);
           if (node.body) walk(node.body, node, 'body');
           popScope();
           return true;
@@ -248,26 +257,29 @@
         }
         case 'AssignmentExpression': {
           if (node.operator !== '=' && containsDangerousLHS(node.left)) {
-            addReplacement(node, BLOCK_CODE, 100);
+            addReplacement(node, BLOCK_EXPR, 100);
             diagnostics.push({ level: 'warning', message: 'blocked compound assignment touching virtualized browser state', start: node.start, end: node.end });
             return true;
           }
           if (node.operator === '=') {
-            const target = assignmentSetTarget(node.left);
+            const target = assignmentSetTarget(node.left) || helperSetTarget(node.left);
             if (target) {
               addReplacement(node, '__zp_set(' + target.base + ',' + target.prop + ',' + exprCode(node.right) + ')', 100);
               return true;
             }
           }
-          break;
+          walkAssignmentTarget(node.left);
+          if (node.right) walk(node.right, node, 'right');
+          return true;
         }
         case 'UpdateExpression': {
           if (containsDangerousLHS(node.argument)) {
-            addReplacement(node, BLOCK_CODE, 100);
+            addReplacement(node, BLOCK_EXPR, 100);
             diagnostics.push({ level: 'warning', message: 'blocked update touching virtualized browser state', start: node.start, end: node.end });
             return true;
           }
-          break;
+          walkAssignmentTarget(node.argument);
+          return true;
         }
         case 'CallExpression':
         case 'NewExpression': {
@@ -275,9 +287,9 @@
           const args = argList(node.arguments);
           if (callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')) {
             const name = propName(callee.property, callee.computed);
-            if (CALL_HELPER_PROPS.has(name) || MEMBER_HELPER_PROPS.has(name)) {
+            if (callee.object && callee.object.type !== 'Super' && (CALL_HELPER_PROPS.has(name) || memberNeedsHelper(callee))) {
               const call = '__zp_call(' + render(callee.object) + ',' + propCode(callee.property, callee.computed) + ',[' + args + '])';
-              addReplacement(node, node.type === 'NewExpression' ? BLOCK_CODE : call, 90);
+              addReplacement(node, node.type === 'NewExpression' ? BLOCK_EXPR : call, 90);
               if (node.type === 'NewExpression') diagnostics.push({ level: 'warning', message: 'blocked construction through virtualized browser state', start: node.start, end: node.end });
               return true;
             }
@@ -291,10 +303,62 @@
           }
           break;
         }
+        case 'VariableDeclaration': {
+          for (const declaration of node.declarations || []) collectPattern(declaration.id, scopeStack[scopeStack.length - 1]);
+          for (const declaration of node.declarations || []) walk(declaration, node, 'declarations');
+          return true;
+        }
+        case 'ForStatement': {
+          const scoped = node.init && node.init.type === 'VariableDeclaration' && node.init.kind !== 'var';
+          if (scoped) pushScope(new Set());
+          if (node.init) walk(node.init, node, 'init');
+          if (node.test) walk(node.test, node, 'test');
+          if (node.update) walk(node.update, node, 'update');
+          if (node.body) walk(node.body, node, 'body');
+          if (scoped) popScope();
+          return true;
+        }
+        case 'ForInStatement':
+        case 'ForOfStatement': {
+          const scoped = node.left && node.left.type === 'VariableDeclaration' && node.left.kind !== 'var';
+          if (scoped) pushScope(new Set());
+          if (node.left) {
+            if (node.left.type === 'VariableDeclaration') walk(node.left, node, 'left');
+            else walkAssignmentTarget(node.left);
+          }
+          if (node.right) walk(node.right, node, 'right');
+          if (node.body) walk(node.body, node, 'body');
+          if (scoped) popScope();
+          return true;
+        }
+        case 'VariableDeclarator': {
+          walkPattern(node.id);
+          if (node.init) walk(node.init, node, 'init');
+          return true;
+        }
+        case 'PropertyDefinition':
+        case 'AccessorProperty': {
+          if (node.computed && node.key) walk(node.key, node, 'key');
+          if (node.value) walk(node.value, node, 'value');
+          return true;
+        }
+        case 'Property': {
+          if (parent && parent.type === 'ObjectPattern') {
+            walkPattern(node);
+            return true;
+          }
+          if (node.computed && node.key) walk(node.key, node, 'key');
+          if (node.shorthand && node.value && node.value.type === 'Identifier' && isGlobalIdentifier(node.value)) {
+            globalIds.add(node.value);
+            addReplacement(node, src(node.key) + ': ' + render(node.value), 90);
+            return true;
+          }
+          if (node.value) walk(node.value, node, 'value');
+          return true;
+        }
         case 'MemberExpression':
         case 'OptionalMemberExpression': {
-          const name = propName(node.property, node.computed);
-          if (MEMBER_HELPER_PROPS.has(name) || (node.computed && isWindowLikeGlobal(node.object))) {
+          if (memberNeedsHelper(node)) {
             addReplacement(node, render(node), 80);
             return true;
           }
@@ -313,9 +377,58 @@
 
     function containsDangerousLHS(node) {
       if (!node) return false;
-      if (assignmentSetTarget(node)) return true;
-      if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') return containsDangerousLHS(node.object);
-      return false;
+      if (node.type === 'ChainExpression') return containsDangerousLHS(node.expression);
+      return !!assignmentSetTarget(node);
+    }
+
+    function helperSetTarget(node) {
+      if (!node) return null;
+      if (node.type === 'ParenthesizedExpression' || node.type === 'ChainExpression') return helperSetTarget(node.expression);
+      if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return null;
+      if (!memberNeedsHelper(node)) return null;
+      return { base: render(node.object), prop: propCode(node.property, node.computed) };
+    }
+
+    function walkPattern(node) {
+      if (!node) return;
+      if (node.type === 'ObjectPattern') {
+        for (const prop of node.properties || []) walkPattern(prop);
+        return;
+      }
+      if (node.type === 'ArrayPattern') {
+        for (const elem of node.elements || []) walkPattern(elem);
+        return;
+      }
+      if (node.type === 'RestElement') {
+        walkPattern(node.argument);
+        return;
+      }
+      if (node.type === 'AssignmentPattern') {
+        walkPattern(node.left);
+        if (node.right) walk(node.right, node, 'right');
+        return;
+      }
+      if (node.type === 'Property') {
+        if (node.computed && node.key) walk(node.key, node, 'key');
+        walkPattern(node.value);
+        return;
+      }
+    }
+
+    function walkAssignmentTarget(node) {
+      if (!node) return;
+      if (isPattern(node)) {
+        walkPattern(node);
+        return;
+      }
+      if (node.type === 'ParenthesizedExpression' || node.type === 'ChainExpression') {
+        walkAssignmentTarget(node.expression);
+        return;
+      }
+      if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+        if (node.object) walk(node.object, node, 'object');
+        if (node.computed && node.property) walk(node.property, node, 'property');
+      }
     }
 
     function walk(node, parent, key) {

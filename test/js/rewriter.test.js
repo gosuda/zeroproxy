@@ -47,6 +47,56 @@ test('OXC rewriter blocks constructor escape compound writes', async () => {
   assert.match(out.code, /__zp_call\(__zp_get\(\(\{\}\),\"constructor\"\),\"constructor\"/);
 });
 
+test('OXC rewriter preserves valid syntax for assignment targets and property keys', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`
+    class Boundary {
+      static parent;
+      parent;
+      parent = window.parent;
+      constructor(source) {
+        this.parent = window.parent;
+        ({ parent: this.parent, location } = source);
+        for (location in source) {}
+      }
+      method({ x = location.href }, y = window.location) {
+        for (let window = 0; window < 1; window++) { window; }
+        for (const parent in { parent: true }) { parent; }
+        return { location, window, parent, x, y, current: this.parent };
+      }
+    }
+    window.__svelte ??= {};
+    (window.__svelte ??= {}).uid ??= 1;
+  `, { kind: 'classic' });
+
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.doesNotThrow(() => new Function(out.code));
+  assert.match(out.code, /static parent;/);
+  assert.match(out.code, /parent;/);
+  assert.match(out.code, /location: __zp_get\(globalThis,"location"\)/);
+  assert.match(out.code, /window: __zp_get\(globalThis,"window"\)/);
+  assert.match(out.code, /parent: __zp_get\(globalThis,"parent"\)/);
+  assert.match(out.code, /__zp_get\(globalThis,"window"\)\.__svelte \?\?= \{\}/);
+  assert.doesNotMatch(out.code, /__zp_get\(globalThis,"parent"\);/);
+  assert.doesNotMatch(out.code, /__zp_get\(this,"parent"\)\s*=/);
+  assert.doesNotMatch(out.code, /throw new DOMException\('Blocked by ZeroProxy rewrite policy'/);
+});
+
+test('OXC rewriter emits expression-safe blocks for forbidden expression contexts', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`
+    function updateHref() {
+      return location.href += '#x';
+    }
+    const ctor = new ({}).constructor.constructor('return location.href');
+  `, { kind: 'classic' });
+
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.doesNotThrow(() => new Function(out.code));
+  assert.match(out.code, /return \(\(\)=>\{throw new DOMException/);
+  assert.match(out.code, /const ctor = \(\(\)=>\{throw new DOMException/);
+});
+
 test('OXC rewriter routes location assignments and WebSocket construction through helpers', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`
