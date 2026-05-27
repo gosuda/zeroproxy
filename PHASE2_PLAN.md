@@ -1,6 +1,6 @@
 # ZeroProxy Phase 2 Plan: Service Worker JavaScript Rewriting
 
-Status: implemented strict Phase 2 cutover. The parser/tooling direction is OXC: the Service Worker loads OXC parser WASM, `web/js-rewriter.js` performs AST-aware source rewriting from the OXC AST, the Go WASM HTML transformer calls that rewriter for inline scripts and event handlers, and unrewritable dynamic-code/blob/data paths fail closed.
+Status: implemented strict Phase 2 cutover. The parser/tooling direction is OXC: the Service Worker loads OXC parser WASM, `web/js-rewriter.js` performs AST-aware source rewriting from the OXC AST, the Go WASM HTML transformer calls that rewriter for inline scripts and event handlers, main-window dynamic `Function`/`eval`/string timer bodies execute under the runtime's virtual global scope, and unrewritable blob/data worker paths fail closed.
 
 Phase 2 improves target-site compatibility by rewriting target JavaScript before execution. The main goal is to make ordinary target scripts observe a virtual target `location`/`window` model while preserving the ZeroProxy transport boundary.
 
@@ -66,11 +66,11 @@ Phase 2 must not start by assuming the rewriter will close every current gap. Th
      - `new Worker(URL.createObjectURL(new Blob(["..."], { type: "" })))` is contained or blocked.
      - `<script src=blob:...>` and data URL script attempts do not execute unrewritten target code in strict mode.
 
-4. **Fail closed for dynamic JavaScript compilation until the foreground rewriter exists**
+4. **Contain dynamic JavaScript compilation in the foreground runtime**
 
    - Current risk: dynamic compilation paths are listed in this plan, but Phase 0 runtime does not yet block or rewrite all of them.
    - Required change:
-     - In strict/pre-strict hardening mode, block or neutralize:
+     - In strict/pre-strict hardening mode, block, rewrite, or scope:
        - `eval` and indirect eval;
        - `Function`, `AsyncFunction`, `GeneratorFunction`, and `AsyncGeneratorFunction`;
        - constructor-constructor escapes such as `({}).constructor.constructor(...)`;
@@ -79,8 +79,8 @@ Phase 2 must not start by assuming the rewriter will close every current gap. Th
        - `outerHTML`, `template.innerHTML`, `Range.prototype.createContextualFragment`, and `DOMParser.prototype.parseFromString`;
        - inline event handler mutation APIs including `setAttribute`, `setAttributeNS`, `NamedNodeMap.setNamedItem`, `Attr.value`, and handler IDL setters.
    - Required tests:
-     - `Function('return location.href')()` and constructor-constructor variants are rewritten or blocked.
-     - String timers and runtime-created inline event handlers cannot execute unrewritten code.
+     - `Function('return location.href')()` and constructor-constructor variants are rewritten or scoped.
+     - String timers and runtime-created inline event handlers cannot execute against the native global scope.
 
 ### P1: reliability and correctness hardening before broad Phase 2 compatibility work
 
@@ -312,32 +312,30 @@ A Service Worker API is asynchronous from the page's point of view. Direct `eval
 
 Phase 2 strict policy:
 
-- `eval`, indirect eval, and `new Function` are blocked unless a synchronous page-local rewrite path is present.
-- `setTimeout(string)` and `setInterval(string)` may asynchronously rewrite before scheduling, but strict mode may also block them for simpler semantics.
-- `({}).constructor.constructor(...)` and similar access to `Function` must be rewritten to the same policy.
-- Phase 2 includes a foreground synchronous rewriter for dynamic-code compatibility. Strict mode still blocks dynamic code when that foreground path is unavailable, uninitialized, version-mismatched, or unable to rewrite safely.
+- `eval`, indirect eval, `new Function`, and constructor-constructor access to `Function` must execute under the same virtual global policy as rewritten scripts.
+- `setTimeout(string)` and `setInterval(string)` must compile the string handler under that virtual global policy before scheduling.
+- Dynamic code still fails closed when the foreground runtime cannot contain it synchronously; blob/data worker scripts remain blocked unless a safe worker rewrite path is available.
 
-## Foreground synchronous rewriter
+## Foreground synchronous dynamic containment
 
-Dynamic code APIs are synchronous. A Service Worker rewriter cannot serve them without changing browser-visible semantics, so Phase 2 instantiates a foreground rewriter in the controlled page before target scripts run.
+Dynamic code APIs are synchronous. A Service Worker rewriter cannot serve them without changing browser-visible semantics, so the controlled page must contain those APIs before target scripts run. The current main-window runtime compiles `eval`, `Function`, constructor-constructor, and string-timer bodies with a closure-private virtual global scope; a future parser-backed foreground rewriter can replace that path where exact static-rewrite parity is required.
 
 ```text
 runtime-prelude.js
-  -> instantiate /__zp/js-rewriter.wasm or /__zp/js-dynamic-rewriter.wasm
-  -> keep the instance in closure-private state
+  -> create closure-private virtual global scope
   -> patch eval / Function / timers / dynamic HTML compilation APIs
-  -> rewritten dynamic code calls the same runtime membrane helpers
+  -> compile dynamic bodies under that virtual scope
+  -> dynamic code observes virtual location/window and patched transport APIs
 ```
 
 Requirements:
 
-- The foreground rewriter must initialize before any target-controlled script can execute. If it is required by the selected mode and initialization fails, target script execution fails closed with `REALM_INJECTION_FAILURE`.
-- The foreground rewriter API must not be exposed as `window.__zp_rewrite` or any other target-visible global. Target code may call patched dynamic-code APIs, but must not be able to invoke, configure, or downgrade the rewriter directly.
-- The foreground and Service Worker rewriters must use the same transformer version and helper ABI. The runtime must compare an embedded transformer version/hash and fail closed on mismatch.
-- The page-local instance should be limited to dynamic-code rewriting. The Service Worker remains the canonical pipeline for external scripts, inline scripts, worker scripts, caching, diagnostics, and strict-mode policy decisions.
-- If future compatibility requires synchronous dynamic-code rewriting instead of the current strict blocking policy, Phase 2 may add a smaller page-local OXC build. That build must share the same rewrite rules for dangerous access paths.
-- Foreground rewriting must never expose share keys, transport secrets, HttpOnly cookies, or Service Worker state to target code.
-- CSP must explicitly allow only the minimum needed for foreground WASM initialization. Any continued use of `'unsafe-eval'` or `wasm-unsafe-eval` must be documented as a compatibility requirement and revisited after dynamic rewriting is complete.
+- Dynamic containment hooks must initialize before any target-controlled script can execute. If a selected mode requires a parser-backed foreground rewriter and initialization fails, target script execution fails closed with `REALM_INJECTION_FAILURE`.
+- The foreground containment machinery must not be exposed as `window.__zp_rewrite` or any other target-visible global. Target code may call patched dynamic-code APIs, but must not be able to invoke, configure, or downgrade the containment path directly.
+- A future foreground and Service Worker rewriter must use the same transformer version and helper ABI. The runtime must compare an embedded transformer version/hash and fail closed on mismatch.
+- The page-local path should be limited to dynamic-code execution. The Service Worker remains the canonical pipeline for external scripts, inline scripts, worker scripts, caching, diagnostics, and strict-mode policy decisions.
+- Foreground dynamic containment must never expose share keys, transport secrets, HttpOnly cookies, or Service Worker state to target code.
+- CSP must explicitly allow only the minimum needed for foreground dynamic execution. Any continued use of `'unsafe-eval'` or `wasm-unsafe-eval` must be documented as a compatibility requirement and revisited after dynamic containment is complete.
 
 Dynamic execution hooks required in the foreground runtime:
 
@@ -350,7 +348,7 @@ Dynamic execution hooks required in the foreground runtime:
 - Blob/data script creation paths: `URL.createObjectURL(new Blob([...], { type: 'text/javascript' }))`, worker blob URLs, and data URL workers.
 - Worker and worklet dynamic loaders: `Worker`, `SharedWorker`, `importScripts`, and `addModule`.
 
-String replacement is explicitly forbidden for this layer. A patch like `code.replace(/location/g, ...)` corrupts string literals, object keys, comments, locally-bound identifiers, and unrelated words. Every executable string must be parsed in the correct grammar mode: full script, module, function body, event handler body, or timer/eval program. Rewrite failure in strict mode means block, not execute original source.
+String replacement is explicitly forbidden for this layer. A patch like `code.replace(/location/g, ...)` corrupts string literals, object keys, comments, locally-bound identifiers, and unrelated words. Current runtime containment compiles the original body under a virtual scope instead of text-replacing it. If parser-backed dynamic rewriting is used, every executable string must be parsed in the correct grammar mode: full script, module, function body, event handler body, or timer/eval program. Rewrite failure in strict mode means block, not execute original source outside containment.
 
 Direct eval preservation rule:
 

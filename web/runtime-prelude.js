@@ -275,9 +275,103 @@
       return bound;
     }
 
-    const blockedDynamic = function(){ throw normalizedError('NotSupportedError'); };
-    const dynamicConstructors = new Set([Native.FunctionCtor, (async function(){}).constructor, (function*(){}).constructor, (async function*(){}).constructor]);
-    function isBlockedDynamicConstructor(value) { return value === blockedDynamic || dynamicConstructors.has(value); }
+    const NativeAsyncFunction = (async function(){}).constructor;
+    const NativeGeneratorFunction = (function*(){}).constructor;
+    const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
+    function stringArgs(args) {
+      const out = new Array(args.length);
+      for (let i = 0; i < args.length; i++) out[i] = String(args[i]);
+      return out;
+    }
+    function scopedBody(body) { return 'with(__zp_scope){\n' + body + '\n}'; }
+    function compileScoped(ctor, params, body) {
+      const argv = new Array(params.length + 2);
+      argv[0] = '__zp_scope';
+      for (let i = 0; i < params.length; i++) argv[i + 1] = params[i];
+      argv[argv.length - 1] = scopedBody(body);
+      return Reflect.construct(ctor, argv);
+    }
+    function scopedCallArgs(args) {
+      const argv = new Array(args.length + 1);
+      argv[0] = scope;
+      for (let i = 0; i < args.length; i++) argv[i + 1] = args[i];
+      return argv;
+    }
+    function dynamicSource(kind, params, body) {
+      const prefix = kind === 'async' ? 'async function' : kind === 'generator' ? 'function*' : kind === 'asyncGenerator' ? 'async function*' : 'function';
+      return prefix + ' anonymous(' + params.join(',') + '\n) {\n' + body + '\n}';
+    }
+    function compileDynamic(ctor, args, kind) {
+      const parts = stringArgs(args);
+      const body = parts.length ? parts[parts.length - 1] : '';
+      const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
+      for (let i = 0; i < params.length; i++) params[i] = parts[i];
+      const compiled = compileScoped(ctor, params, body);
+      let fn;
+      if (kind === 'async') {
+        fn = async function anonymous(...callArgs) { return Reflect.apply(compiled, this, scopedCallArgs(callArgs)); };
+      } else if (kind === 'generator') {
+        fn = function* anonymous(...callArgs) { return yield* Reflect.apply(compiled, this, scopedCallArgs(callArgs)); };
+      } else if (kind === 'asyncGenerator') {
+        fn = async function* anonymous(...callArgs) { return yield* Reflect.apply(compiled, this, scopedCallArgs(callArgs)); };
+      } else {
+        fn = function anonymous(...callArgs) {
+          const argv = scopedCallArgs(callArgs);
+          return new.target ? Reflect.construct(compiled, argv, new.target) : Reflect.apply(compiled, this, argv);
+        };
+      }
+      toStringMap.set(fn, dynamicSource(kind, params, body));
+      return fn;
+    }
+    function isEvalExpressionCandidate(text) {
+      return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
+    }
+    function dynamicEval(source) {
+      if (arguments.length === 0) return undefined;
+      const text = String(source);
+      let expr = null;
+      if (isEvalExpressionCandidate(text)) {
+        try { expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + text + '\n);}']); } catch {}
+      }
+      if (expr) return Reflect.apply(expr, root, [scope]);
+      return Reflect.apply(compileScoped(Native.FunctionCtor, [], text), root, [scope]);
+    }
+    const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
+    const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
+    const dynamicGeneratorFunction = function GeneratorFunction(...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); };
+    const dynamicAsyncGeneratorFunction = function AsyncGeneratorFunction(...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); };
+    function setDynamicConstructorIdentity(fn, name, proto) {
+      try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
+      try { Object.defineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}
+      if (proto) try { Object.defineProperty(fn, 'prototype', { value: proto, enumerable: false, configurable: false, writable: false }); } catch {}
+      maskNativeFunction(fn, name);
+    }
+    setDynamicConstructorIdentity(dynamicFunction, 'Function', Native.FunctionCtor && Native.FunctionCtor.prototype);
+    setDynamicConstructorIdentity(dynamicAsyncFunction, 'AsyncFunction', NativeAsyncFunction && NativeAsyncFunction.prototype);
+    setDynamicConstructorIdentity(dynamicGeneratorFunction, 'GeneratorFunction', NativeGeneratorFunction && NativeGeneratorFunction.prototype);
+    setDynamicConstructorIdentity(dynamicAsyncGeneratorFunction, 'AsyncGeneratorFunction', NativeAsyncGeneratorFunction && NativeAsyncGeneratorFunction.prototype);
+    try { Object.defineProperty(dynamicEval, 'name', { value: 'eval', configurable: true }); } catch {}
+    try { Object.defineProperty(dynamicEval, 'length', { value: 1, configurable: true }); } catch {}
+    maskNativeFunction(dynamicEval, 'eval');
+    const dynamicConstructorWrappers = new Map([
+      [Native.FunctionCtor, dynamicFunction],
+      [dynamicFunction, dynamicFunction],
+      [NativeAsyncFunction, dynamicAsyncFunction],
+      [dynamicAsyncFunction, dynamicAsyncFunction],
+      [NativeGeneratorFunction, dynamicGeneratorFunction],
+      [dynamicGeneratorFunction, dynamicGeneratorFunction],
+      [NativeAsyncGeneratorFunction, dynamicAsyncGeneratorFunction],
+      [dynamicAsyncGeneratorFunction, dynamicAsyncGeneratorFunction]
+    ]);
+    function dynamicWrapperFor(value) { return dynamicConstructorWrappers.get(value) || null; }
+    function dynamicGlobal(name) {
+      if (name === 'eval') return dynamicEval;
+      if (name === 'Function') return dynamicFunction;
+      if (name === 'AsyncFunction') return dynamicAsyncFunction;
+      if (name === 'GeneratorFunction') return dynamicGeneratorFunction;
+      if (name === 'AsyncGeneratorFunction') return dynamicAsyncGeneratorFunction;
+      return null;
+    }
     const virtualLocation = Object.freeze({
       get href() { return virtualURL.href; },
       set href(v) { setVirtualLocation(v); },
@@ -305,7 +399,8 @@
         if (prop === Symbol.unscopables) return undefined;
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
         if (prop === 'location') return virtualLocation;
-        if (prop === 'eval' || prop === 'Function' || prop === 'AsyncFunction' || prop === 'GeneratorFunction' || prop === 'AsyncGeneratorFunction') return blockedDynamic;
+        const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
+        if (dynamic) return dynamic;
         if (WINDOW_BOUND_METHODS.has(prop)) return boundWindowMethod(target, prop);
         return target[prop];
       },
@@ -327,12 +422,13 @@
       if (isWindowLike(base)) {
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
         if (prop === 'location') return virtualLocation;
-        if (prop === 'eval' || prop === 'Function' || prop === 'AsyncFunction' || prop === 'GeneratorFunction' || prop === 'AsyncGeneratorFunction') return blockedDynamic;
+        const dynamic = dynamicGlobal(prop);
+        if (dynamic) return dynamic;
       }
       if (base === document && prop === 'defaultView') return scope;
       if (prop === 'constructor') {
         const ctor = Reflect.get(Object(base), prop);
-        return isBlockedDynamicConstructor(ctor) ? blockedDynamic : ctor;
+        return dynamicWrapperFor(ctor) || ctor;
       }
       return Reflect.get(Object(base), prop);
     }
@@ -345,12 +441,11 @@
     }
     function call(base, prop, args) {
       const fn = get(base, prop);
-      if (fn === blockedDynamic) return blockedDynamic();
       return Reflect.apply(fn, base === scope ? root : base, Array.isArray(args) ? args : []);
     }
     function construct(ctor, args) {
-      if (isBlockedDynamicConstructor(ctor)) return blockedDynamic();
-      return Reflect.construct(ctor, Array.isArray(args) ? args : []);
+      const dynamic = dynamicWrapperFor(ctor);
+      return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
     }
     function has(base, prop) { if (isWindowLike(base) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
     function getOwnPropertyDescriptor(base, prop) { if (isWindowLike(base) && prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false }; return Reflect.getOwnPropertyDescriptor(Object(base), prop); }
@@ -366,11 +461,13 @@
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
-    for (const ctor of dynamicConstructors) {
-      try { Object.defineProperty(ctor.prototype, 'constructor', { value: blockedDynamic, enumerable: false, configurable: false, writable: false }); } catch {}
+    define(root, 'eval', dynamicEval);
+    define(root, 'Function', dynamicFunction);
+    for (const [ctor, wrapper] of dynamicConstructorWrappers) {
+      if (ctor && ctor.prototype) try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: false }); } catch {}
     }
-    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { if (typeof handler === 'string') throw normalizedError('NotSupportedError'); return Native.setTimeout(handler, delay, ...args); });
-    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { if (typeof handler === 'string') throw normalizedError('NotSupportedError'); return Native.setInterval(handler, delay, ...args); });
+    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
+    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
     if (Native.documentWrite) define(document, 'write', function(...parts) { return Native.documentWrite(parts.map(p => transformHTML(String(p))).join('')); });
     if (Native.documentWriteln) define(document, 'writeln', function(...parts) { return Native.documentWriteln(parts.map(p => transformHTML(String(p))).join('') + '\n'); });
     if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
@@ -1131,6 +1228,10 @@
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     installToStringMasking(w);
+    const childFunction = w.Function;
+    if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
+    if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
+    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }); } catch {}
     if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
     installNavigatorIdentity(w);
     if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');

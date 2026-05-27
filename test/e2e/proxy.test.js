@@ -102,7 +102,7 @@ function createTargetServer(requests) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Home</title></head><body>
         <main><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
-        <script>window.__ua = navigator.userAgent; window.__platform = navigator.platform; window.__phase2Location = { href: location.href, windowHref: window.location.href }; try { Function('return location.href')(); window.__phase2FunctionBlocked = ''; } catch (err) { window.__phase2FunctionBlocked = err && err.message || String(err); }</script>
+        <script>window.__ua = navigator.userAgent; window.__platform = navigator.platform; window.__phase2Location = { href: location.href, windowHref: window.location.href }; window.__phase2DynamicFunction = Function('return location.href')(); window.__phase2EvalLocation = eval('location.href');</script>
         <script src="/rewrite-fixture.js"></script>
       </body></html>`);
       return;
@@ -137,10 +137,9 @@ function createTargetServer(requests) {
         };
         window.__rewriteAdvanced.jqueryConstructorLength = Object.create(JQueryLike.prototype).pushStack().length;
         try {
-          ({}).constructor.constructor('return location.href')();
-          window.__rewriteAdvanced.constructorEscapeBlocked = '';
+          window.__rewriteAdvanced.constructorEscapeHref = ({}).constructor.constructor('return location.href')();
         } catch (err) {
-          window.__rewriteAdvanced.constructorEscapeBlocked = err && err.message || String(err);
+          window.__rewriteAdvanced.constructorEscapeHref = 'error:' + (err && err.message || String(err));
         }
       })();`);
       return;
@@ -380,7 +379,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     appVersion: navigator.appVersion,
     platform: navigator.platform,
     phase2Location: window.__phase2Location,
-    phase2FunctionBlocked: window.__phase2FunctionBlocked,
+    phase2DynamicFunction: window.__phase2DynamicFunction,
+    phase2EvalLocation: window.__phase2EvalLocation,
   }));
   assert.equal(home.title, 'E2E Home');
   assert.equal(home.hash, '');
@@ -390,7 +390,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(home.platform, 'Win32');
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
   assert.deepEqual(home.phase2Location, { href: `http://e2e.test:${targetPort}/`, windowHref: `http://e2e.test:${targetPort}/` });
-  assert.equal(home.phase2FunctionBlocked, 'Blocked by ZeroProxy policy');
+  assert.equal(home.phase2DynamicFunction, `http://e2e.test:${targetPort}/`);
+  assert.equal(home.phase2EvalLocation, `http://e2e.test:${targetPort}/`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
@@ -400,7 +401,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(rewriteAdvanced.wsMessage, 'echo:rewrite-script');
   assert.equal(rewriteAdvanced.wsError, undefined);
   assert.equal(rewriteAdvanced.jqueryConstructorLength, 0);
-  assert.equal(rewriteAdvanced.constructorEscapeBlocked, 'Blocked by ZeroProxy policy');
+  assert.equal(rewriteAdvanced.constructorEscapeHref, `http://e2e.test:${targetPort}/`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
@@ -421,6 +422,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     const ws = new modern.contentWindow.WebSocket('ws://evil.example/socket');
     const websocketURL = ws.url;
     const childCanvasMask = modern.contentWindow.HTMLCanvasElement.prototype.toDataURL.toString();
+    const childFunctionShared = modern.contentWindow.Function === window.Function;
+    const childFunctionHref = modern.contentWindow.Function('return location.href')();
     try { ws.close(); } catch {}
 
     const observed = document.createElement('iframe');
@@ -441,7 +444,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     sync.remove();
     modern.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, rewrittenSrc };
+    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, rewrittenSrc };
   }, `http://e2e.test:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
@@ -450,6 +453,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
   assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
+  assert.equal(iframeIsolation.childFunctionShared, true);
+  assert.equal(iframeIsolation.childFunctionHref, `http://e2e.test:${targetPort}/`);
 
   const fingerprintMasking = await page.evaluate(() => {
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
@@ -626,7 +631,15 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
       ws.onopen = () => ws.send('direct');
       ws.onmessage = ev => { clearTimeout(timer); const value = String(ev.data); try { ws.close(); } catch {} resolve(value); };
     });
-    out.stringTimer = (() => { try { setTimeout('window.__timerRan=1', 0); return 'scheduled'; } catch (err) { return err && err.message || String(err); } })();
+    out.stringTimer = await new Promise(resolve => {
+      try {
+        window.__timerRan = 0;
+        setTimeout('window.__timerRan=1', 0);
+        setTimeout(() => resolve(window.__timerRan === 1 ? 'ran' : 'not-ran'), 25);
+      } catch (err) {
+        resolve(err && err.message || String(err));
+      }
+    });
     out.blobWorker = await new Promise(resolve => {
       let worker;
       try {
@@ -666,7 +679,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(escapeMatrix.locationReplaceSource, 'function replace() { [native code] }');
   assert.equal(escapeMatrix.virtualHash, '#zp-fragment');
   assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
-  assert.equal(escapeMatrix.stringTimer, 'Blocked by ZeroProxy policy');
+  assert.equal(escapeMatrix.stringTimer, 'ran');
   assert.notEqual(escapeMatrix.blobWorker, 'ran');
   assert.notEqual(escapeMatrix.dataWorker, 'ran');
   assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://e2e.test:${targetPort}/`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
