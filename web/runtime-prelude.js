@@ -269,6 +269,8 @@
     }
 
     const blockedDynamic = function(){ throw normalizedError('NotSupportedError'); };
+    const dynamicConstructors = new Set([Native.FunctionCtor, (async function(){}).constructor, (function*(){}).constructor, (async function*(){}).constructor]);
+    function isBlockedDynamicConstructor(value) { return value === blockedDynamic || dynamicConstructors.has(value); }
     const virtualLocation = Object.freeze({
       get href() { return virtualURL.href; },
       set href(v) { setVirtualLocation(v); },
@@ -323,7 +325,7 @@
       if (base === document && prop === 'defaultView') return scope;
       if (prop === 'constructor') {
         const ctor = Reflect.get(Object(base), prop);
-        return ctor === Native.FunctionCtor || typeof ctor === 'function' ? blockedDynamic : ctor;
+        return isBlockedDynamicConstructor(ctor) ? blockedDynamic : ctor;
       }
       return Reflect.get(Object(base), prop);
     }
@@ -340,7 +342,7 @@
       return Reflect.apply(fn, base === scope ? root : base, Array.isArray(args) ? args : []);
     }
     function construct(ctor, args) {
-      if (ctor === Native.FunctionCtor || ctor === blockedDynamic) return blockedDynamic();
+      if (isBlockedDynamicConstructor(ctor)) return blockedDynamic();
       return Reflect.construct(ctor, Array.isArray(args) ? args : []);
     }
     function has(base, prop) { if (isWindowLike(base) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
@@ -357,7 +359,7 @@
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
-    for (const ctor of [Native.FunctionCtor, (async function(){}).constructor, (function*(){}).constructor, (async function*(){}).constructor]) {
+    for (const ctor of dynamicConstructors) {
       try { Object.defineProperty(ctor.prototype, 'constructor', { value: blockedDynamic, enumerable: false, configurable: false, writable: false }); } catch {}
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { if (typeof handler === 'string') throw normalizedError('NotSupportedError'); return Native.setTimeout(handler, delay, ...args); });

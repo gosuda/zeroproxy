@@ -130,6 +130,18 @@ function createTargetServer(requests) {
           ws.close(1000, 'done');
         };
         ws.onerror = () => { window.__rewriteAdvanced.wsError = true; };
+        function JQueryLike() { return { length: 0 }; }
+        JQueryLike.prototype = {
+          constructor: JQueryLike,
+          pushStack() { return this.constructor(); }
+        };
+        window.__rewriteAdvanced.jqueryConstructorLength = Object.create(JQueryLike.prototype).pushStack().length;
+        try {
+          ({}).constructor.constructor('return location.href')();
+          window.__rewriteAdvanced.constructorEscapeBlocked = '';
+        } catch (err) {
+          window.__rewriteAdvanced.constructorEscapeBlocked = err && err.message || String(err);
+        }
       })();`);
       return;
     }
@@ -387,6 +399,8 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(rewriteAdvanced.wsProtocol, 'zp-rewrite');
   assert.equal(rewriteAdvanced.wsMessage, 'echo:rewrite-script');
   assert.equal(rewriteAdvanced.wsError, undefined);
+  assert.equal(rewriteAdvanced.jqueryConstructorLength, 0);
+  assert.equal(rewriteAdvanced.constructorEscapeBlocked, 'Blocked by ZeroProxy policy');
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
