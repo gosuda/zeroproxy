@@ -38,6 +38,15 @@ test('OXC rewriter supports modules and fails closed on parse errors', async () 
   assert.equal(bad.errorCode, 'PARSE_FAILED');
   assert.match(rewriter.blockSource(), /Blocked by ZeroProxy rewrite policy/);
 });
+test('OXC rewriter accepts target URLs with cache-busting query strings', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`window.location = "/next";`, {
+    kind: 'classic',
+    targetUrl: 'https://ipleak.net/static/js/index.js?ts=20220812#frag',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.match(out.code, /__zp_set\(__zp_get\(globalThis,"window"\),"location","\/next"\)/);
+});
 
 test('OXC rewriter blocks constructor escape compound writes', async () => {
   const rewriter = await loadRewriter();

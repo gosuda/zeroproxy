@@ -79,9 +79,20 @@
     return ok(rewritten.code.slice(prefix.length, rewritten.code.length - suffix.length), parsed.diagnostics.concat(rewritten.diagnostics));
   }
 
+  function parserFilename(filename) {
+    let value = String(filename || 'target.js');
+    let end = value.length;
+    const query = value.indexOf('?');
+    const hash = value.indexOf('#');
+    if (query !== -1 && query < end) end = query;
+    if (hash !== -1 && hash < end) end = hash;
+    if (end !== value.length) value = value.slice(0, end);
+    return value && !value.endsWith('/') && !value.endsWith('\\') ? value : 'target.js';
+  }
+
   function parse(source, sourceType, filename) {
     let result;
-    try { result = parser.parseSync(source, { sourceType, sourceFilename: filename || 'target.js' }); }
+    try { result = parser.parseSync(source, { sourceType, sourceFilename: parserFilename(filename) }); }
     catch (err) { return blocked('PARSE_FAILED', [{ level: 'error', message: err && err.message || 'PARSE_FAILED' }]); }
     const errors = result.errors || [];
     if (errors.length) return blocked('PARSE_FAILED', errors.map(e => ({ level: e.severity || 'error', message: e.message || 'PARSE_FAILED', start: e.start, end: e.end })));
