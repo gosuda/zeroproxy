@@ -9,9 +9,9 @@
     "build:kernel": "node scripts/build.mjs --kernel-only",
     "build:server": "node scripts/build.mjs --server-only",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "test": "npm run test:js && npm run test:e2e",
-    "test:js": "node --test test/js/*.test.js",
-    "test:e2e": "node --test test/e2e/*.test.js"
+    "test": "node scripts/test.mjs",
+    "test:js": "node scripts/test.mjs js",
+    "test:e2e": "node scripts/test.mjs e2e"
   },
   "devDependencies": {
     "@oxc-parser/wasm": "^0.60.0",

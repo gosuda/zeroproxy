@@ -51,10 +51,11 @@ test('runtime installs required escape-vector hooks', () => {
     "'contentWindow'",
     "'contentDocument'",
     'new WeakSet',
-    "attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction', 'integrity']",
+    "attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction', 'integrity', 'type']",
     'enforceObservedAttribute',
     'data-zp-integrity',
     'installIntegrityProp',
+    'installScriptProp',
     'installToStringMasking',
     'toStringMap',
     'installCanvasAntiFingerprinting',
@@ -81,12 +82,14 @@ test('runtime installs required escape-vector hooks', () => {
     'installPhase2Membrane',
     '__zp_runClassic',
     '__zp_get',
+    '__zp_assign',
     'FunctionCtor',
     "define(root, 'setTimeout'",
     "define(document, 'write'",
     'createContextualFragment',
     'parseFromString',
     'rewriteEventAttribute',
+    'postMessageWrapperFor',
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
 });
 

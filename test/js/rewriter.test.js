@@ -38,6 +38,17 @@ test('OXC rewriter supports modules and fails closed on parse errors', async () 
   assert.equal(bad.errorCode, 'PARSE_FAILED');
   assert.match(rewriter.blockSource(), /Blocked by ZeroProxy rewrite policy/);
 });
+
+test('OXC rewriter launders module import specifiers through same-origin script API', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`import "./dep.js"; export async function load() { return import("./chunk.js"); }`, {
+    kind: 'module',
+    targetUrl: 'https://example.com/assets/main.js',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.match(out.code, /import "\/__zp\/api\/script\?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js"/);
+  assert.match(out.code, /import\("\/__zp\/api\/script\?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fchunk.js"\)/);
+});
 test('OXC rewriter accepts target URLs with cache-busting query strings', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`window.location = "/next";`, {
@@ -58,11 +69,12 @@ test('OXC rewriter accepts extensionless target URLs', async () => {
   assert.match(out.code, /__zp_get\(globalThis,"location"\)\.href/);
 });
 
-test('OXC rewriter blocks constructor escape compound writes', async () => {
+test('OXC rewriter preserves compound writes through virtual location helpers', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`location.href += '#x'; ({}).constructor.constructor('return location.href')();`, { kind: 'classic' });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.match(out.code, /Blocked by ZeroProxy rewrite policy/);
+  assert.doesNotMatch(out.code, /Blocked by ZeroProxy rewrite policy/);
+  assert.ok(out.code.includes('__zp_assign(__zp_get(globalThis,"location"),"href","+=",' + "'#x'" + ')'));
   assert.match(out.code, /__zp_call\(__zp_get\(\(\{\}\),\"constructor\"\),\"constructor\"/);
 });
 
@@ -112,7 +124,7 @@ test('OXC rewriter emits expression-safe blocks for forbidden expression context
 
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.doesNotThrow(() => new Function(out.code));
-  assert.match(out.code, /return \(\(\)=>\{throw new DOMException/);
+  assert.ok(out.code.includes('return (__zp_assign(__zp_get(globalThis,"location"),"href","+=",' + "'#x'" + '))'));
   assert.match(out.code, /const ctor = \(\(\)=>\{throw new DOMException/);
 });
 

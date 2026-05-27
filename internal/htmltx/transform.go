@@ -242,8 +242,10 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			}
 			wrapped, target, ok := wrapAttrURL(a.Val, opt, isDocumentNavigationAttr(tag, key))
 			if ok {
-				a.Val = wrapped
-				dataTarget = target
+				if tag == "iframe" || tag == "frame" {
+					a.Val = wrapped
+					dataTarget = target
+				}
 			} else if isDocumentNavigationAttr(tag, key) {
 				a.Val = "#"
 				attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
@@ -348,9 +350,6 @@ func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string
 	q := url.Values{}
 	q.Set("u", abs.String())
 	q.Set("kind", kind)
-	if opt.TabID != "" {
-		q.Set("tab", opt.TabID)
-	}
 	return "/__zp/api/script?" + q.Encode(), abs.String(), true
 }
 

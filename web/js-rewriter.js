@@ -7,8 +7,9 @@
   const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   const BLOCK_EXPR = "(()=>{" + BLOCK_CODE + "})()";
   const GLOBALS = new Set(['window', 'self', 'globalThis', 'location', 'document', 'history', 'top', 'parent', 'opener', 'frames', 'WebSocket', 'eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
-  const MEMBER_HELPER_PROPS = new Set(['location', 'defaultView', 'contentWindow', 'contentDocument', 'top', 'parent', 'opener', 'frames', 'constructor']);
+  const MEMBER_HELPER_PROPS = new Set(['location', 'defaultView', 'contentWindow', 'contentDocument', 'top', 'parent', 'opener', 'frames', 'constructor', 'postMessage']);
   const CALL_HELPER_PROPS = new Set(['assign', 'replace', 'open', 'get', 'getOwnPropertyDescriptor', 'defineProperty']);
+  const COMPOUND_ASSIGNMENT_OPERATORS = new Set(['+=','-=','*=','/=','%=','**=','<<=','>>=','>>>=','&=','^=','|=','&&=','||=','??=']);
   let parser = null;
   let ready = false;
 
@@ -52,7 +53,7 @@
     if (kind === 'function') return rewriteFunctionBody(source, options);
     const parsed = parse(source, kind === 'module' ? 'module' : 'script', options.url || options.targetUrl || 'target.js');
     if (!parsed.ok) return parsed;
-    const rewritten = rewriteProgram(source, parsed.program, { module: kind === 'module' });
+    const rewritten = rewriteProgram(source, parsed.program, { module: kind === 'module', targetUrl: options.url || options.targetUrl || '' });
     return ok(rewritten.code, parsed.diagnostics.concat(rewritten.diagnostics));
   }
 
@@ -100,12 +101,13 @@
     return { ok: true, program: result.program, diagnostics: [] };
   }
 
-  function rewriteProgram(source, program) {
+  function rewriteProgram(source, program, options = {}) {
     const replacements = [];
     const diagnostics = [];
     const scopeStack = [];
     const globalIds = new WeakSet();
     const renderedCache = new WeakMap();
+    const moduleTargetURL = options.module ? String(options.targetUrl || '') : '';
 
     function pushScope(names) { scopeStack.push(names || new Set()); }
     function popScope() { scopeStack.pop(); }
@@ -122,6 +124,22 @@
       if (node.type === 'Literal' && typeof node.value === 'string') return node.value;
       if (node.type === 'StringLiteral') return node.value;
       return '';
+    }
+    function stringNodeValue(node) {
+      if (!node) return '';
+      if (node.type === 'Literal' && typeof node.value === 'string') return node.value;
+      if (node.type === 'StringLiteral') return node.value;
+      return '';
+    }
+    function moduleSpecifier(raw) {
+      if (!moduleTargetURL) return raw;
+      try {
+        const abs = new URL(String(raw), moduleTargetURL);
+        if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return raw;
+        return '/__zp/api/script?kind=module&u=' + encodeURIComponent(abs.href);
+      } catch {
+        return raw;
+      }
     }
     function isGlobalIdentifier(node) { return node && node.type === 'Identifier' && GLOBALS.has(node.name) && !declared(node.name); }
     function isPattern(node) { return node && (node.type === 'ObjectPattern' || node.type === 'ArrayPattern' || node.type === 'AssignmentPattern' || node.type === 'RestElement'); }
@@ -144,6 +162,17 @@
       if (node.object && node.object.type === 'Super') return false;
       const name = propName(node.property, node.computed);
       return MEMBER_HELPER_PROPS.has(name) || (node.computed && isWindowLikeGlobal(node.object));
+    }
+    function isConstructorEscapeMember(node) {
+      if (!node) return false;
+      if (node.type === 'ChainExpression') return isConstructorEscapeMember(node.expression);
+      if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return false;
+      if (propName(node.property, node.computed) !== 'constructor') return false;
+      let base = node.object;
+      if (base && base.type === 'ChainExpression') base = base.expression;
+      if (!base) return false;
+      if (base.type === 'Identifier') return isGlobalIdentifier(base) && (base.name === 'Function' || base.name === 'AsyncFunction' || base.name === 'GeneratorFunction' || base.name === 'AsyncGeneratorFunction');
+      return (base.type === 'MemberExpression' || base.type === 'OptionalMemberExpression') && propName(base.property, base.computed) === 'constructor';
     }
     function collectPattern(node, names) {
       if (!node) return;
@@ -184,6 +213,25 @@
       if (node.type === 'Identifier' || node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression' || node.type === 'ChainExpression') return render(node);
       if (node.type === 'BinaryExpression' || node.type === 'LogicalExpression') return exprCode(node.left) + source.slice(node.left.end, node.right.start) + exprCode(node.right);
       if (node.type === 'ConditionalExpression') return exprCode(node.test) + source.slice(node.test.end, node.consequent.start) + exprCode(node.consequent) + source.slice(node.consequent.end, node.alternate.start) + exprCode(node.alternate);
+      if (node.type === 'ObjectExpression') {
+        const parts = [];
+        for (const p of node.properties || []) {
+          if (!p) continue;
+          if (p.type === 'SpreadElement') { parts.push('...' + exprCode(p.argument)); continue; }
+          if ((p.type === 'Property' || p.type === 'ObjectProperty') && p.key && p.value) {
+            if (p.method || p.kind === 'get' || p.kind === 'set') { parts.push(src(p)); continue; }
+            if (p.shorthand && p.key.type === 'Identifier' && p.value.type === 'Identifier') parts.push(src(p.key) + ': ' + exprCode(p.value));
+            else {
+              const keyText = p.computed ? source.slice(p.start, p.key.start) + exprCode(p.key) + source.slice(p.key.end, p.value.start) : src(p.key) + source.slice(p.key.end, p.value.start);
+              parts.push(keyText + exprCode(p.value));
+            }
+            continue;
+          }
+          parts.push(src(p));
+        }
+        return '{' + parts.join(',') + '}';
+      }
+      if (node.type === 'ArrayExpression') return '[' + (node.elements || []).map(e => e ? exprCode(e) : '').join(',') + ']';
       if (node.type === 'UnaryExpression' || node.type === 'UpdateExpression') {
         if (node.prefix) return source.slice(node.start, node.argument.start) + exprCode(node.argument);
         return exprCode(node.argument) + source.slice(node.argument.end, node.end);
@@ -268,17 +316,22 @@
           return true;
         }
         case 'AssignmentExpression': {
-          if (node.operator !== '=' && containsDangerousLHS(node.left)) {
-            addReplacement(node, BLOCK_EXPR, 100);
-            diagnostics.push({ level: 'warning', message: 'blocked compound assignment touching virtualized browser state', start: node.start, end: node.end });
-            return true;
-          }
-          if (node.operator === '=') {
-            const target = assignmentSetTarget(node.left) || helperSetTarget(node.left);
-            if (target) {
-              addReplacement(node, '__zp_set(' + target.base + ',' + target.prop + ',' + exprCode(node.right) + ')', 100);
+          const target = assignmentSetTarget(node.left) || helperSetTarget(node.left);
+          if (node.operator !== '=') {
+            if (target && COMPOUND_ASSIGNMENT_OPERATORS.has(node.operator)) {
+              const rhs = node.operator === '&&=' || node.operator === '||=' || node.operator === '??=' ? '()=>(' + exprCode(node.right) + ')' : exprCode(node.right);
+              addReplacement(node, '(__zp_assign(' + target.base + ',' + target.prop + ',' + JSON.stringify(node.operator) + ',' + rhs + '))', 100);
               return true;
             }
+            if (containsDangerousLHS(node.left)) {
+              addReplacement(node, BLOCK_EXPR, 100);
+              diagnostics.push({ level: 'warning', message: 'blocked compound assignment touching virtualized browser state', start: node.start, end: node.end });
+              return true;
+            }
+          }
+          if (node.operator === '=' && target) {
+            addReplacement(node, '(__zp_set(' + target.base + ',' + target.prop + ',' + exprCode(node.right) + '))', 100);
+            return true;
           }
           walkAssignmentTarget(node.left);
           if (node.right) walk(node.right, node, 'right');
@@ -293,6 +346,21 @@
           walkAssignmentTarget(node.argument);
           return true;
         }
+        case 'ImportDeclaration':
+        case 'ExportAllDeclaration':
+        case 'ExportNamedDeclaration': {
+          const spec = stringNodeValue(node.source);
+          if (spec) addReplacement(node.source, JSON.stringify(moduleSpecifier(spec)), 95);
+          break;
+        }
+        case 'ImportExpression': {
+          const spec = stringNodeValue(node.source);
+          if (spec) {
+            addReplacement(node.source, JSON.stringify(moduleSpecifier(spec)), 95);
+            return true;
+          }
+          break;
+        }
         case 'CallExpression':
         case 'NewExpression': {
           const callee = node.callee;
@@ -300,7 +368,8 @@
           if (callee && (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression')) {
             const name = propName(callee.property, callee.computed);
             if (callee.object && callee.object.type !== 'Super' && (CALL_HELPER_PROPS.has(name) || memberNeedsHelper(callee))) {
-              const call = '__zp_call(' + render(callee.object) + ',' + propCode(callee.property, callee.computed) + ',[' + args + '])';
+              if (node.type === 'NewExpression' && name === 'constructor' && !isConstructorEscapeMember(callee)) break;
+              const call = '(__zp_call(' + render(callee.object) + ',' + propCode(callee.property, callee.computed) + ',[' + args + ']))';
               addReplacement(node, node.type === 'NewExpression' ? BLOCK_EXPR : call, 90);
               if (node.type === 'NewExpression') diagnostics.push({ level: 'warning', message: 'blocked construction through virtualized browser state', start: node.start, end: node.end });
               return true;
@@ -309,7 +378,7 @@
           if (node.type === 'NewExpression') {
             const ctor = constructTarget(callee);
             if (ctor) {
-              addReplacement(node, '__zp_construct(' + ctor + ',[' + args + '])', 90);
+              addReplacement(node, '(__zp_construct(' + ctor + ',[' + args + ']))', 90);
               return true;
             }
           }

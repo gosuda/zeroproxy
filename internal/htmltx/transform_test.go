@@ -14,12 +14,12 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{"/__zp/zp-core.js", "/__zp/runtime-prelude.js", "/p/", "#k=", "__ZP_SET_BASE", "https://evil.test/", "data-zp-target-url=\"https://example.com/next\"", "data-zp-target-url=\"https://example.com/child\"", "ZeroProxy blocked object"} {
+	for _, want := range []string{"/__zp/zp-core.js", "/__zp/runtime-prelude.js", "/p/", "#k=", "__ZP_SET_BASE", "https://evil.test/", `href="/next"`, `action="submit"`, `formaction="/alt"`, `data-zp-target-url="https://example.com/child"`, "ZeroProxy blocked object"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\""} {
+	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\"", `data-zp-target-url="https://example.com/next"`} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden %q remained in %s", forbidden, s)
 		}

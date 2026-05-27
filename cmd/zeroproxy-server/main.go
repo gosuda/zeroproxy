@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,13 +28,15 @@ type server struct {
 	socksAddr  string
 }
 
+const internalSOCKSMode = "internal"
+
 func main() {
 	var addr string
 	s := &server{}
 	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&s.webDir, "web", "dist/web", "built static web asset directory")
 	flag.StringVar(&s.kernelWASM, "kernel", "dist/kernel.wasm", "compiled Go WASM kernel path")
-	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address configured with IsolateSOCKSAuth")
+	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address with IsolateSOCKSAuth, or 'internal' for the built-in test SOCKS5 parser/direct dialer")
 	flag.Parse()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
@@ -235,8 +238,167 @@ func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
 		if err != nil {
 			return
 		}
-		go s.bridgeToTor(ctx, stream)
+		go s.bridgeTargetStream(ctx, stream)
 	}
+}
+
+func (s *server) bridgeTargetStream(ctx context.Context, stream net.Conn) {
+	if strings.EqualFold(strings.TrimSpace(s.socksAddr), internalSOCKSMode) {
+		s.bridgeInternalSOCKS(ctx, stream)
+		return
+	}
+	s.bridgeToTor(ctx, stream)
+}
+
+func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
+	defer stream.Close()
+	stopDeadline := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stream.SetDeadline(time.Now())
+		case <-stopDeadline:
+		}
+	}()
+	host, port, err := readSOCKS5Connect(ctx, stream)
+	close(stopDeadline)
+	if err != nil {
+		return
+	}
+	d := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	target, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		_, _ = stream.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	if _, err := stream.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+		_ = target.Close()
+		return
+	}
+	bridgeConns(ctx, stream, target)
+}
+
+func readSOCKS5Connect(ctx context.Context, rw net.Conn) (string, string, error) {
+	var head [2]byte
+	if err := readFull(ctx, rw, head[:]); err != nil {
+		return "", "", err
+	}
+	if head[0] != 0x05 || head[1] == 0 {
+		return "", "", fmt.Errorf("invalid SOCKS5 greeting")
+	}
+	methods := make([]byte, int(head[1]))
+	if err := readFull(ctx, rw, methods); err != nil {
+		return "", "", err
+	}
+	method := byte(0xff)
+	for _, m := range methods {
+		if m == 0x02 {
+			method = 0x02
+			break
+		}
+		if m == 0x00 {
+			method = 0x00
+		}
+	}
+	if _, err := rw.Write([]byte{0x05, method}); err != nil {
+		return "", "", err
+	}
+	if method == 0xff {
+		return "", "", fmt.Errorf("no acceptable SOCKS5 auth method")
+	}
+	if method == 0x02 {
+		if err := acceptSOCKS5UserPass(ctx, rw); err != nil {
+			return "", "", err
+		}
+	}
+	var req [4]byte
+	if err := readFull(ctx, rw, req[:]); err != nil {
+		return "", "", err
+	}
+	if req[0] != 0x05 || req[1] != 0x01 || req[2] != 0x00 {
+		return "", "", fmt.Errorf("unsupported SOCKS5 request")
+	}
+	host, err := readSOCKS5Address(ctx, rw, req[3])
+	if err != nil {
+		return "", "", err
+	}
+	var portBuf [2]byte
+	if err := readFull(ctx, rw, portBuf[:]); err != nil {
+		return "", "", err
+	}
+	port := binary.BigEndian.Uint16(portBuf[:])
+	if port == 0 {
+		return "", "", fmt.Errorf("invalid SOCKS5 port")
+	}
+	return host, fmt.Sprint(port), nil
+}
+
+func acceptSOCKS5UserPass(ctx context.Context, rw net.Conn) error {
+	var head [2]byte
+	if err := readFull(ctx, rw, head[:]); err != nil {
+		return err
+	}
+	if head[0] != 0x01 {
+		_, _ = rw.Write([]byte{0x01, 0x01})
+		return fmt.Errorf("invalid SOCKS5 auth version")
+	}
+	user := make([]byte, int(head[1]))
+	if err := readFull(ctx, rw, user); err != nil {
+		return err
+	}
+	var passLen [1]byte
+	if err := readFull(ctx, rw, passLen[:]); err != nil {
+		return err
+	}
+	pass := make([]byte, int(passLen[0]))
+	if err := readFull(ctx, rw, pass); err != nil {
+		return err
+	}
+	_, err := rw.Write([]byte{0x01, 0x00})
+	return err
+}
+
+func readSOCKS5Address(ctx context.Context, rw net.Conn, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01:
+		var ip [4]byte
+		if err := readFull(ctx, rw, ip[:]); err != nil {
+			return "", err
+		}
+		return net.IP(ip[:]).String(), nil
+	case 0x03:
+		var n [1]byte
+		if err := readFull(ctx, rw, n[:]); err != nil {
+			return "", err
+		}
+		if n[0] == 0 {
+			return "", fmt.Errorf("empty SOCKS5 domain")
+		}
+		host := make([]byte, int(n[0]))
+		if err := readFull(ctx, rw, host); err != nil {
+			return "", err
+		}
+		return string(host), nil
+	case 0x04:
+		var ip [16]byte
+		if err := readFull(ctx, rw, ip[:]); err != nil {
+			return "", err
+		}
+		return net.IP(ip[:]).String(), nil
+	default:
+		return "", fmt.Errorf("unsupported SOCKS5 address type")
+	}
+}
+
+func readFull(ctx context.Context, r io.Reader, p []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := io.ReadFull(r, p)
+	if err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (s *server) bridgeToTor(ctx context.Context, stream net.Conn) {
@@ -246,14 +408,18 @@ func (s *server) bridgeToTor(ctx context.Context, stream net.Conn) {
 		_ = stream.Close()
 		return
 	}
+	bridgeConns(ctx, stream, tor)
+}
+
+func bridgeConns(ctx context.Context, a, b net.Conn) {
 	closeBoth := func() {
-		_ = stream.Close()
-		_ = tor.Close()
+		_ = a.Close()
+		_ = b.Close()
 	}
 	defer closeBoth()
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(tor, stream); closeBoth(); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(stream, tor); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(b, a); closeBoth(); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(a, b); closeBoth(); done <- struct{}{} }()
 	select {
 	case <-ctx.Done():
 		closeBoth()

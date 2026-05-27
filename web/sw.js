@@ -72,10 +72,10 @@ async function handleFetch(event) {
 
 function classify(req, url, clientId) {
   if (url.origin === ORIGIN) {
-    if (url.pathname.startsWith('/__zp/api/')) return { kind: 'RUNTIME_API' };
+    if (isRuntimeAPIPath(url.pathname)) return { kind: 'RUNTIME_API' };
     if (url.pathname.startsWith('/__zp/error/')) return { kind: 'INTERNAL_ASSET' };
     if (url.pathname === '/' || url.pathname === '/index.html' || url.pathname === '/sw.js' || internalPath(url.pathname)) return { kind: 'INTERNAL_ASSET' };
-    const ctx = contextFor(req, clientId);
+    const ctx = contextFor(req, clientId) || defaultContext();
     const p = parseSharePath(url.pathname);
     if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p };
     if (ctx) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
@@ -89,6 +89,9 @@ function classify(req, url, clientId) {
 
 function internalPath(path) {
   return path === '/__zp/zp-core.js' || path === '/__zp/js-rewriter.js' || path === '/__zp/oxc-parser.js' || path === '/__zp/oxc_parser_wasm_bg.wasm' || path === '/__zp/runtime-prelude.js' || path === '/__zp/worker-prelude.js' || path === '/__zp/wasm_exec.js' || path === '/__zp/kernel.wasm' || path === '/__zp/worker-bootstrap.js' || path === '/favicon.ico' || path === '/manifest.webmanifest';
+}
+function isRuntimeAPIPath(path) {
+  return path === '/__zp/api/fetch' || path === '/__zp/api/script' || path === '/__zp/api/worker-script';
 }
 
 async function internalAsset(req, url) {
@@ -201,12 +204,8 @@ function shouldRewriteScript(req, resp) {
   return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
 }
 async function rewriteScriptResponse(resp, opt) {
-  const h = new Headers(resp.headers);
-  h.set('Content-Type', 'text/javascript; charset=utf-8');
-  h.set('Cache-Control', 'no-store');
-  h.set('X-Content-Type-Options', 'nosniff');
-  h.set('Content-Security-Policy', ZP.fixedCSP());
-  applyCORS(h, null);
+  const h = scriptResponseHeaders(resp);
+  if (shouldPassthroughScript(opt.targetUrl)) return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
   let code = '';
   try {
     await initRewriter();
@@ -217,6 +216,23 @@ async function rewriteScriptResponse(resp, opt) {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   }
   return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
+}
+function shouldPassthroughScript(targetUrl) {
+  try {
+    const u = new URL(targetUrl);
+    return u.hostname === 'challenges.cloudflare.com' && u.pathname.startsWith('/turnstile/') || u.hostname === 'www.googletagmanager.com';
+  } catch {
+    return false;
+  }
+}
+function scriptResponseHeaders(resp) {
+  const h = new Headers(resp.headers);
+  h.set('Content-Type', 'text/javascript; charset=utf-8');
+  h.set('Cache-Control', 'no-store');
+  h.set('X-Content-Type-Options', 'nosniff');
+  h.set('Content-Security-Policy', ZP.fixedCSP());
+  applyCORS(h, null);
+  return h;
 }
 
 

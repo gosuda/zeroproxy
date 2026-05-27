@@ -102,7 +102,30 @@ function createTargetServer(requests) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Home</title></head><body>
         <main><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
-        <script>window.__ua = navigator.userAgent; window.__platform = navigator.platform; window.__phase2Location = { href: location.href, windowHref: window.location.href }; window.__phase2DynamicFunction = Function('return location.href')(); window.__phase2EvalLocation = eval('location.href');</script>
+        <script>
+          window.__ua = navigator.userAgent;
+          window.__platform = navigator.platform;
+          window.__phase2Location = { href: location.href, windowHref: window.location.href };
+          window.__phase2DynamicFunction = Function('return location.href')();
+          window.__phase2EvalLocation = eval('location.href');
+          window.__messageEvents = [];
+          window.addEventListener('message', ev => {
+            if (ev.data && ev.data.type) window.__messageEvents.push({ type: ev.data.type, origin: ev.origin, href: ev.data.href || '' });
+          });
+          (function(w,d,s,l,i){
+            w[l]=w[l]||[];
+            w[l].push({'gtm.start': Date.now(), event:'gtm.js'});
+            var f=d.getElementsByTagName(s)[0], j=d.createElement(s), dl=l!='dataLayer'?'&l='+l:'';
+            j.async=true;
+            j.id='gtm-fixture';
+            j.src='/gtm.js?id='+i+dl;
+            f.parentNode.insertBefore(j,f || d.head.firstChild);
+          })(window,document,'script','dataLayer','GTM-ZP');
+          const dynamicScript = document.createElement('script');
+          dynamicScript.id = 'dynamic-script-probe';
+          dynamicScript.src = '/dynamic-script.js?from=createElement';
+          document.head.appendChild(dynamicScript);
+        </script>
         <script src="/rewrite-fixture.js"></script>
       </body></html>`);
       return;
@@ -115,11 +138,43 @@ function createTargetServer(requests) {
       </body></html>`);
       return;
     }
+    if (url.pathname === '/gtm.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`window.__gtmFixture = {
+        loaded: true,
+        href: location.href,
+        currentSrc: document.currentScript && document.currentScript.src,
+        currentAttr: document.currentScript && document.currentScript.attributes.getNamedItem('src') && document.currentScript.attributes.getNamedItem('src').value
+      };
+      window.postMessage({ type: 'gtm-loaded', href: location.href }, location.origin);`);
+      return;
+    }
+    if (url.pathname === '/dynamic-script.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`window.__dynamicScriptLoaded = {
+        loaded: true,
+        href: location.href,
+        currentSrc: document.currentScript && document.currentScript.src,
+        currentAttr: document.currentScript && document.currentScript.attributes.getNamedItem('src') && document.currentScript.attributes.getNamedItem('src').value
+      };`);
+      return;
+    }
+    if (url.pathname === '/frame-child') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><html><body><p>frame child</p><script>
+        parent.postMessage({ type: 'frame-child-ready', href: location.href, topOrigin: top.location.origin }, location.origin);
+      </script></body></html>`);
+      return;
+    }
     if (url.pathname === '/rewrite-fixture.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`(() => {
         const NativeWebSocket = window.WebSocket;
         window.__rewriteAdvanced = { initialHref: window.location.href, constructorSource: NativeWebSocket.toString() };
+        location.href += '#compound';
+        window.location.hash += '-tail';
+        window.__rewriteAdvanced.compoundHref = location.href;
+        window.__rewriteAdvanced.compoundHash = location.hash;
         const ws = new NativeWebSocket('/ws', ['zp-rewrite']);
         ws.binaryType = 'arraybuffer';
         ws.onopen = () => ws.send('rewrite-script');
@@ -315,7 +370,7 @@ async function handleSocks(socket, resolveHost) {
   upstream.pipe(socket);
 }
 
-test('browser traffic uses test SOCKS5 and covers proxied runtime integrations', { timeout: 120000 }, async t => {
+test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integrations', { timeout: 120000 }, async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
   const buildOut = path.join(temp, 'dist');
   run('node', ['scripts/build.mjs', '--out', buildOut]);
@@ -327,16 +382,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   const target = createTargetServer(requests);
   const targetPort = await listen(target);
   t.after(() => closeServer(target));
-
-  const socksHosts = [];
-  const socks = createSocks5Server((host, port) => {
-    socksHosts.push(host);
-    assert.ok(host === 'e2e.test' || host === 'direct-egress.test', `unexpected SOCKS host ${host}`);
-    assert.equal(port, targetPort);
-    return { host: '127.0.0.1', port: targetPort };
-  });
-  const socksPort = await listen(socks);
-  t.after(() => closeServer(socks));
+  const targetHost = 'localhost';
 
   const proxyPort = await new Promise((resolve, reject) => {
     const s = net.createServer();
@@ -346,7 +392,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     });
     s.once('error', reject);
   });
-  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-kernel', kernelPath, '-socks', `127.0.0.1:${socksPort}`], {
+  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-kernel', kernelPath, '-socks', 'internal'], {
     cwd: path.resolve(__dirname, '../..'),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -366,9 +412,14 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   const page = await browser.newPage();
   await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller && document.querySelector('#status')?.textContent === 'Ready.', { timeout: 30000 });
-  await page.type('#url', `http://e2e.test:${targetPort}/`);
+  await page.type('#url', `http://${targetHost}:${targetPort}/`);
   await page.click('button');
-  await page.waitForFunction(() => document.title === 'E2E Home', { timeout: 30000 });
+  try {
+    await page.waitForFunction(() => document.title === 'E2E Home', { timeout: 30000 });
+  } catch (err) {
+    const state = await page.evaluate(() => ({ title: document.title, url: location.href, body: document.body && document.body.innerText, status: document.querySelector('#status')?.textContent || '' }));
+    throw new Error(`${err.message}; nav state=${JSON.stringify(state)}; requests=${JSON.stringify(requests)}; proxy=${proxyLog}`);
+  }
 
   const home = await page.evaluate(() => ({
     href: location.href,
@@ -389,20 +440,49 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
   assert.equal(home.platform, 'Win32');
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
-  assert.deepEqual(home.phase2Location, { href: `http://e2e.test:${targetPort}/`, windowHref: `http://e2e.test:${targetPort}/` });
-  assert.equal(home.phase2DynamicFunction, `http://e2e.test:${targetPort}/`);
-  assert.equal(home.phase2EvalLocation, `http://e2e.test:${targetPort}/`);
+  assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
+  assert.equal(home.phase2DynamicFunction, `http://${targetHost}:${targetPort}/`);
+  assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
-  assert.equal(rewriteAdvanced.initialHref, `http://e2e.test:${targetPort}/`);
-  assert.equal(rewriteAdvanced.wsURL, `ws://e2e.test:${targetPort}/ws`);
+  assert.equal(rewriteAdvanced.initialHref, `http://${targetHost}:${targetPort}/`);
+  assert.equal(rewriteAdvanced.wsURL, `ws://${targetHost}:${targetPort}/ws`);
   assert.equal(rewriteAdvanced.wsProtocol, 'zp-rewrite');
   assert.equal(rewriteAdvanced.wsMessage, 'echo:rewrite-script');
   assert.equal(rewriteAdvanced.wsError, undefined);
   assert.equal(rewriteAdvanced.jqueryConstructorLength, 0);
-  assert.equal(rewriteAdvanced.constructorEscapeHref, `http://e2e.test:${targetPort}/`);
+  assert.equal(rewriteAdvanced.constructorEscapeHref, `http://${targetHost}:${targetPort}/#compound-tail`);
+  assert.equal(rewriteAdvanced.compoundHash, '#compound-tail');
+  assert.equal(rewriteAdvanced.compoundHref, `http://${targetHost}:${targetPort}/#compound-tail`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  try {
+    await page.waitForFunction(() => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded, { timeout: 30000 });
+  } catch (err) {
+    const state = await page.evaluate(() => ({
+      gtm: window.__gtmFixture || null,
+      dynamic: window.__dynamicScriptLoaded || null,
+      scripts: Array.from(document.scripts).map(s => ({ id: s.id, src: s.attributes.getNamedItem('src')?.value || '', type: s.type || '', blocked: s.hasAttribute('data-zp-blocked-script') })),
+      messages: window.__messageEvents || [],
+    }));
+    throw new Error(`${err.message}; dynamic state=${JSON.stringify(state)}; requests=${JSON.stringify(requests)}`);
+  }
+  const dynamicScripts = await page.evaluate(() => ({
+    gtm: window.__gtmFixture,
+    dynamic: window.__dynamicScriptLoaded,
+    gtmAttr: document.getElementById('gtm-fixture')?.attributes.getNamedItem('src')?.value || '',
+    dynamicAttr: document.getElementById('dynamic-script-probe')?.attributes.getNamedItem('src')?.value || '',
+    messages: window.__messageEvents || [],
+  }));
+  assert.ok(dynamicScripts.gtm.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.gtm.href);
+  assert.ok(dynamicScripts.dynamic.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.dynamic.href);
+  assert.match(dynamicScripts.gtm.currentAttr, /^\/__zp\/api\/script\?/);
+  assert.match(dynamicScripts.dynamic.currentAttr, /^\/__zp\/api\/script\?/);
+  assert.match(dynamicScripts.gtmAttr, /^\/__zp\/api\/script\?/);
+  assert.match(dynamicScripts.dynamicAttr, /^\/__zp\/api\/script\?/);
+  assert.ok(dynamicScripts.messages.some(m => m.type === 'gtm-loaded'), `messages: ${JSON.stringify(dynamicScripts.messages)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/gtm.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/dynamic-script.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
     const blockedByPolicy = fn => {
@@ -445,7 +525,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     modern.remove();
     observed.remove();
     return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, rewrittenSrc };
-  }, `http://e2e.test:${targetPort}/next`);
+  }, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.modernRTC, 'Blocked by ZeroProxy policy');
@@ -454,7 +534,30 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionShared, true);
-  assert.equal(iframeIsolation.childFunctionHref, `http://e2e.test:${targetPort}/`);
+  assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
+
+  const frameMessage = await page.evaluate(async target => {
+    const before = location.href;
+    const got = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('frame postMessage timed out')), 10000);
+      window.addEventListener('message', function onMessage(ev) {
+        if (!ev.data || ev.data.type !== 'frame-child-ready') return;
+        window.removeEventListener('message', onMessage);
+        clearTimeout(timer);
+        resolve({ origin: ev.origin, href: ev.data.href, topOrigin: ev.data.topOrigin });
+      });
+    });
+    const frame = document.createElement('iframe');
+    frame.src = target;
+    document.body.appendChild(frame);
+    const message = await got;
+    frame.remove();
+    return { before, after: location.href, message };
+  }, `http://${targetHost}:${targetPort}/frame-child`);
+  assert.equal(frameMessage.before, frameMessage.after);
+  assert.equal(frameMessage.message.origin, `http://${targetHost}:${targetPort}`);
+  assert.equal(frameMessage.message.href, `http://${targetHost}:${targetPort}/frame-child`);
+  assert.equal(frameMessage.message.topOrigin, `http://${targetHost}:${targetPort}`);
 
   const fingerprintMasking = await page.evaluate(() => {
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
@@ -548,7 +651,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     }
     function websocketEcho() {
       return new Promise((resolve, reject) => {
-        const ws = new WebSocket('ws://e2e.test:' + targetPort + '/ws', ['zp-test']);
+        const ws = new WebSocket('ws://localhost:' + targetPort + '/ws', ['zp-test']);
         let settled = false;
         const finish = fn => value => {
           if (settled) return;
@@ -591,7 +694,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(runtimeIntegration.stream.firstText, 'chunk-one\n');
   assert.equal(runtimeIntegration.stream.body, 'chunk-one\nchunk-two\n');
   assert.ok(runtimeIntegration.stream.firstMs < 500, `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`);
-  assert.equal(runtimeIntegration.ws.url, `ws://e2e.test:${targetPort}/ws`);
+  assert.equal(runtimeIntegration.ws.url, `ws://${targetHost}:${targetPort}/ws`);
   assert.equal(runtimeIntegration.ws.data, '1,2,3');
   assert.equal(runtimeIntegration.ws.protocol, 'zp-test');
   assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' });
@@ -604,7 +707,7 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
 
   const escapeMatrix = await page.evaluate(async targetPort => {
-    const directBase = 'http://direct-egress.test:' + targetPort;
+    const directBase = 'http://localhost:' + targetPort;
     const out = {};
     out.fetch = await fetch(directBase + '/direct-fetch', { cache: 'no-store' }).then(r => 'ok:' + r.status).catch(err => 'blocked:' + (err && err.name || 'Error'));
     out.xhr = await new Promise(resolve => {
@@ -625,9 +728,9 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
       } catch (err) { resolve('blocked:' + (err && err.name || 'Error')); }
     });
     out.websocket = await new Promise((resolve, reject) => {
-      const ws = new WebSocket('ws://direct-egress.test:' + targetPort + '/ws');
-      const timer = setTimeout(() => reject(new Error('direct-egress websocket timed out')), 10000);
-      ws.onerror = () => { clearTimeout(timer); reject(new Error('direct-egress websocket failed')); };
+      const ws = new WebSocket('ws://localhost:' + targetPort + '/ws');
+      const timer = setTimeout(() => reject(new Error('internal-mode websocket timed out')), 10000);
+      ws.onerror = () => { clearTimeout(timer); reject(new Error('internal-mode websocket failed')); };
       ws.onopen = () => ws.send('direct');
       ws.onmessage = ev => { clearTimeout(timer); const value = String(ev.data); try { ws.close(); } catch {} resolve(value); };
     });
@@ -670,6 +773,15 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
     loc.hash = '#zp-fragment';
     out.virtualHash = loc.hash;
     out.virtualHref = loc.href;
+    const beforeSrcdoc = location.href;
+    const evil = document.createElement('iframe');
+    evil.srcdoc = `<script>top.location.href='https://evil.example/'; parent.postMessage({type:'evil-srcdoc'}, '*')<\/script>`;
+    document.body.appendChild(evil);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    out.afterSrcdocHref = location.href;
+    out.topOrigin = __zp_get(globalThis, 'top').location.origin;
+    out.beforeSrcdoc = beforeSrcdoc;
+    evil.remove();
     return out;
   }, targetPort);
   assert.equal(escapeMatrix.fetch, 'ok:404');
@@ -679,12 +791,15 @@ test('browser traffic uses test SOCKS5 and covers proxied runtime integrations',
   assert.equal(escapeMatrix.locationReplaceSource, 'function replace() { [native code] }');
   assert.equal(escapeMatrix.virtualHash, '#zp-fragment');
   assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
+  assert.equal(escapeMatrix.afterSrcdocHref, escapeMatrix.beforeSrcdoc);
+  assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
+  assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
   assert.equal(escapeMatrix.stringTimer, 'ran');
   assert.notEqual(escapeMatrix.blobWorker, 'ran');
   assert.notEqual(escapeMatrix.dataWorker, 'ran');
-  assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://e2e.test:${targetPort}/`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
-  assert.ok(socksHosts.includes('direct-egress.test'), `SOCKS hosts: ${JSON.stringify(socksHosts)}`);
-  assert.ok(requests.some(r => r.upgrade && r.host === `direct-egress.test:${targetPort}` && r.url === '/ws'), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
+  assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const forgedMessage = await page.evaluate(() => new Promise(resolve => {
     const channel = new MessageChannel();
