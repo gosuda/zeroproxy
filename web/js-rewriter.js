@@ -197,7 +197,7 @@
       if (node.type !== 'MemberExpression' && node.type !== 'OptionalMemberExpression') return null;
       const name = propName(node.property, node.computed);
       if (name === 'location' && isVirtualWindowExpr(node.object)) return { base: render(node.object), prop: propCode(node.property, node.computed) };
-      if (name === 'href' && isVirtualLocationExpr(node.object)) return { base: render(node.object), prop: propCode(node.property, node.computed) };
+      if ((name === 'href' || name === 'hash') && isVirtualLocationExpr(node.object)) return { base: render(node.object), prop: propCode(node.property, node.computed) };
       if (node.computed && (isVirtualWindowExpr(node.object) || isVirtualLocationExpr(node.object))) return { base: render(node.object), prop: propCode(node.property, node.computed) };
       return null;
     }

@@ -4,14 +4,15 @@ const fs = require('node:fs');
 
 const read = path => fs.readFileSync(path, 'utf8');
 
-test('window fetch, XHR, and EventSource are not replaced by runtime transport shims', () => {
+test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
   const rt = read('web/runtime-prelude.js');
-  assert.equal(rt.includes("define(root, 'fetch'"), false);
-  assert.equal(rt.includes("define(root, 'XMLHttpRequest'"), false);
-  assert.equal(rt.includes("define(root, 'EventSource'"), false);
-  assert.equal(rt.includes('ZPXMLHttpRequest'), false);
-  assert.equal(rt.includes('/__zp/api/fetch'), false);
-  assert.match(rt, /Native\.fetch\(target\.href/);
+  assert.match(rt, /define\(root, 'fetch'/);
+  assert.match(rt, /define\(root, 'XMLHttpRequest'/);
+  assert.match(rt, /define\(root, 'EventSource'/);
+  assert.ok(rt.includes('ZPXMLHttpRequest'));
+  assert.ok(rt.includes('ZPEventSource'));
+  assert.ok(rt.includes('/__zp/api/fetch'));
+  assert.match(rt, /fetchThroughRuntime\(target\.href/);
 });
 
 test('runtime navigation uses bound Location methods and catches expando href clicks', () => {

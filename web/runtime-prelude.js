@@ -18,6 +18,7 @@
   const proxyOrigin = new URL(root.location.href).origin;
   const routeKey = new URL(root.location.href).pathname.startsWith('/p/') ? new URL(root.location.href).pathname.slice(3) : '';
   let virtualURL = new URL(boot.targetUrl);
+  let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
   let explicitBaseURL = '';
   let documentCookie = String(boot.documentCookie || '');
@@ -27,6 +28,8 @@
   const networkContainmentMarker = Symbol.for('zeroproxy.network.contained');
   const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
   const listenersKey = Symbol('zp.listeners');
+  const windowMethodBindings = new Map();
+  const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const workerBlobURLs = new Set();
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
@@ -116,10 +119,16 @@
     const name = typeof key === 'symbol' ? '' : String(key);
     return 'function ' + kind + ' ' + name + '() { [native code] }';
   }
+  function maskNativeFunction(fn, key) {
+    if (typeof fn === 'function') toStringMap.set(fn, nativeFunctionSource(key));
+  }
+  function maskMethods(obj, keys) {
+    for (const key of keys) maskNativeFunction(obj && obj[key], key);
+  }
   function define(obj, key, value) {
     try {
       Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
-      if (typeof value === 'function') toStringMap.set(value, nativeFunctionSource(key));
+      maskNativeFunction(value, key);
       return true;
     } catch { return false; }
   }
@@ -158,11 +167,40 @@
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin); }
+  function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
+  function commitVirtualHistory(state, title, url, replace = false) {
+    const next = url != null ? sameOriginHistoryURL(url) : new URL(virtualURL.href);
+    virtualURL = next;
+    if (!explicitBaseURL) baseURL = virtualURL.href;
+    const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();
+    activeEntryId = entryId;
+    postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
+    return (replace ? Native.historyReplace : Native.historyPush)(state, title, location.pathname);
+  }
+  function updateVirtualHash(raw, replace = false) {
+    const oldURL = virtualURL.href;
+    const next = new URL(virtualURL.href);
+    let hash = String(raw);
+    if (hash && hash[0] !== '#') hash = '#' + hash;
+    next.hash = hash;
+    if (next.href === virtualURL.href) return;
+    const out = commitVirtualHistory(null, '', next.href, replace);
+    try { window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: virtualURL.href })); } catch { try { window.dispatchEvent(new Event('hashchange')); } catch {} }
+    return out;
+  }
+  function setVirtualLocation(raw, replace = false) {
+    const next = new URL(targetURL(raw));
+    if (next.origin === virtualURL.origin && next.pathname === virtualURL.pathname && next.search === virtualURL.search) {
+      updateVirtualHash(next.hash, replace);
+      return;
+    }
+    navigateToTarget(next.href, replace);
+  }
   async function activatedNavPath(raw, replace = false, base = baseURL) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     const path = '/p/' + share.encrypted;
-    const entryId = replace ? boot.entryId : 'e' + ZP.randomId();
+    const entryId = replace ? activeEntryId : 'e' + ZP.randomId();
     await postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, replace });
     return path;
   }
@@ -193,7 +231,7 @@
       const next = targetURL(raw, baseURL);
       baseURL = next;
       explicitBaseURL = next;
-      postMessageToSW({ type: 'ZP_BASE_UPDATE', tabId: boot.tabId, entryId: boot.entryId, baseUrl: next }).catch(()=>{});
+      postMessageToSW({ type: 'ZP_BASE_UPDATE', tabId: boot.tabId, entryId: activeEntryId, baseUrl: next }).catch(()=>{});
       return next;
     } catch {
       return baseURL;
@@ -204,6 +242,7 @@
   installPhase2Membrane();
 
   installWebSocket();
+  installHTTPAPIs();
   installBeacon();
   installNavigationTraps();
   installPopupHooks(root);
@@ -219,10 +258,20 @@
 
 
   function installPhase2Membrane() {
+    function boundWindowMethod(target, prop) {
+      const fn = target[prop];
+      if (typeof fn !== 'function') return fn;
+      if (windowMethodBindings.has(prop)) return windowMethodBindings.get(prop);
+      const bound = fn.bind(target);
+      maskNativeFunction(bound, prop);
+      windowMethodBindings.set(prop, bound);
+      return bound;
+    }
+
     const blockedDynamic = function(){ throw normalizedError('NotSupportedError'); };
     const virtualLocation = Object.freeze({
       get href() { return virtualURL.href; },
-      set href(v) { navigateToTarget(v); },
+      set href(v) { setVirtualLocation(v); },
       get protocol() { return virtualURL.protocol; },
       get host() { return virtualURL.host; },
       get hostname() { return virtualURL.hostname; },
@@ -230,14 +279,17 @@
       get pathname() { return virtualURL.pathname; },
       get search() { return virtualURL.search; },
       get hash() { return virtualURL.hash; },
+      set hash(v) { updateVirtualHash(v); },
       get origin() { return virtualURL.origin; },
-      assign(v) { navigateToTarget(v); },
-      replace(v) { navigateToTarget(v, true); },
+      assign(v) { setVirtualLocation(v); },
+      replace(v) { setVirtualLocation(v, true); },
       reload() { Native.locationReload && Native.locationReload(); },
       toString() { return virtualURL.href; },
       valueOf() { return virtualURL.href; },
       [Symbol.toPrimitive]() { return virtualURL.href; }
     });
+    maskMethods(virtualLocation, ['assign','replace','reload','toString','valueOf']);
+    maskNativeFunction(virtualLocation[Symbol.toPrimitive], Symbol.toPrimitive);
     const scope = new Proxy(root, {
       has(_target, prop) { return prop !== Symbol.unscopables; },
       get(target, prop) {
@@ -245,10 +297,11 @@
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
         if (prop === 'location') return virtualLocation;
         if (prop === 'eval' || prop === 'Function' || prop === 'AsyncFunction' || prop === 'GeneratorFunction' || prop === 'AsyncGeneratorFunction') return blockedDynamic;
+        if (WINDOW_BOUND_METHODS.has(prop)) return boundWindowMethod(target, prop);
         return target[prop];
       },
       set(target, prop, value) {
-        if (prop === 'location') { navigateToTarget(value); return true; }
+        if (prop === 'location') { setVirtualLocation(value); return true; }
         target[prop] = value;
         return true;
       },
@@ -276,7 +329,8 @@
     }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
-      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { navigateToTarget(value); return value; }
+      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
+      if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
       Reflect.set(Object(base), prop, value);
       return value;
     }
@@ -299,8 +353,8 @@
     define(root, '__zp_has', has);
     define(root, '__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
     define(root, '__zp_ownKeys', ownKeys);
-    define(root, '__zp_nav_assign', v => navigateToTarget(v));
-    define(root, '__zp_nav_replace', v => navigateToTarget(v, true));
+    define(root, '__zp_nav_assign', v => setVirtualLocation(v));
+    define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
     for (const ctor of [Native.FunctionCtor, (async function(){}).constructor, (function*(){}).constructor, (async function*(){}).constructor]) {
@@ -312,6 +366,228 @@
     if (Native.documentWriteln) define(document, 'writeln', function(...parts) { return Native.documentWriteln(parts.map(p => transformHTML(String(p))).join('') + '\n'); });
     if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
     if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
+  }
+  function requestTargetURL(input) {
+    const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
+    const parsed = new URL(raw, baseURL);
+    if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + parsed.search + parsed.hash, baseURL).href;
+    return ZP.canonicalTargetURL(parsed.href, baseURL).href;
+  }
+  async function requestBodyBase64(req) {
+    if (req.method === 'GET' || req.method === 'HEAD') return null;
+    const ab = await req.clone().arrayBuffer();
+    return ZP.bytesToBase64Url(new Uint8Array(ab));
+  }
+  async function fetchThroughRuntime(input, init = {}) {
+    if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
+    const target = requestTargetURL(input);
+    const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
+    const payload = {
+      tabId: boot.tabId,
+      url: target,
+      init: {
+        method: req.method,
+        headers: Array.from(req.headers.entries()),
+        body: await requestBodyBase64(req),
+        credentials: req.credentials,
+        mode: req.mode,
+        referrer: req.referrer,
+        redirect: req.redirect,
+        cache: req.cache,
+        integrity: req.integrity
+      }
+    };
+    const apiInit = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) };
+    if (req.signal) apiInit.signal = req.signal;
+    return Native.fetch('/__zp/api/fetch', apiInit);
+  }
+  function fireEvent(target, type) {
+    let ev;
+    try { ev = new Event(type); } catch { ev = { type }; }
+    return target.dispatchEvent(ev);
+  }
+  function installHTTPAPIs() {
+    if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
+    if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
+      const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
+      function ZPXMLHttpRequest() {
+        this.readyState = UNSENT;
+        this.response = this.responseText = '';
+        this.responseType = '';
+        this.responseURL = '';
+        this.status = 0;
+        this.statusText = '';
+        this.timeout = 0;
+        this.withCredentials = false;
+        this.upload = {};
+        this._headers = [];
+        this._responseHeaders = null;
+        this._method = 'GET';
+        this._url = '';
+        this._sent = false;
+        this._controller = null;
+        this._timer = 0;
+      }
+      function xhrReady(xhr, state) {
+        xhr.readyState = state;
+        fireEvent(xhr, 'readystatechange');
+      }
+      function xhrDone(xhr, type) {
+        clearTimeout(xhr._timer);
+        xhr._timer = 0;
+        xhrReady(xhr, DONE);
+        fireEvent(xhr, type);
+        fireEvent(xhr, 'loadend');
+      }
+      installEventMethods(ZPXMLHttpRequest.prototype);
+      Object.assign(ZPXMLHttpRequest.prototype, {
+        constructor: ZPXMLHttpRequest,
+        UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
+        open(method, url, async = true, user, password) {
+          if (async === false) throw normalizedError('NotSupportedError');
+          this.abort();
+          this._method = String(method || 'GET').toUpperCase();
+          const target = new URL(requestTargetURL(url));
+          if (user != null) target.username = String(user);
+          if (password != null) target.password = String(password);
+          this._url = target.href;
+          this.responseURL = this._url;
+          this._headers = [];
+          this._responseHeaders = null;
+          this.status = 0;
+          this.statusText = '';
+          this.response = this.responseText = '';
+          xhrReady(this, OPENED);
+        },
+        setRequestHeader(name, value) {
+          if (this.readyState !== OPENED || this._sent) throw normalizedError('InvalidStateError');
+          this._headers.push([String(name), String(value)]);
+        },
+        send(body = null) {
+          if (this.readyState !== OPENED || this._sent) throw normalizedError('InvalidStateError');
+          this._sent = true;
+          this._controller = new AbortController();
+          const init = { method: this._method, headers: this._headers, credentials: this.withCredentials ? 'include' : 'same-origin', signal: this._controller.signal };
+          if (body != null && this._method !== 'GET' && this._method !== 'HEAD') init.body = body;
+          if (this.timeout > 0) this._timer = setTimeout(() => { try { this._controller.abort(); } catch {} this._sent = false; xhrDone(this, 'timeout'); }, this.timeout);
+          fetchThroughRuntime(this._url, init).then(async resp => {
+            if (!this._sent) return;
+            this.status = resp.status;
+            this.statusText = resp.statusText;
+            this._responseHeaders = resp.headers;
+            xhrReady(this, HEADERS_RECEIVED);
+            xhrReady(this, LOADING);
+            if (this.responseType === 'arraybuffer') this.response = await resp.arrayBuffer();
+            else if (this.responseType === 'blob') this.response = await resp.blob();
+            else if (this.responseType === 'json') { const text = await resp.text(); try { this.response = text ? JSON.parse(text) : null; } catch { this.response = null; } }
+            else { this.responseText = await resp.text(); this.response = this.responseText; }
+            this._sent = false;
+            xhrDone(this, 'load');
+          }).catch(() => {
+            if (!this._sent) return;
+            this._sent = false;
+            this.status = 0;
+            this.statusText = '';
+            xhrDone(this, 'error');
+          });
+        },
+        abort() {
+          if (this._controller) { try { this._controller.abort(); } catch {} }
+          clearTimeout(this._timer);
+          this._timer = 0;
+          const active = this._sent;
+          this._sent = false;
+          this._controller = null;
+          if (active) xhrDone(this, 'abort');
+        },
+        getResponseHeader(name) { return this._responseHeaders ? this._responseHeaders.get(String(name)) : null; },
+        getAllResponseHeaders() { if (!this._responseHeaders) return ''; let out = ''; this._responseHeaders.forEach((v, k) => { out += k + ': ' + v + '\r\n'; }); return out; },
+        overrideMimeType() {}
+      });
+      maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
+      define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
+    }
+    if (Native.EventSource && Native.fetch && Native.Request && Native.Headers) {
+      const CONNECTING = 0, OPEN = 1, CLOSED = 2;
+      function ZPEventSource(url, init = {}) {
+        this.url = requestTargetURL(url);
+        this.withCredentials = !!(init && init.withCredentials);
+        this.readyState = CONNECTING;
+        this._closed = false;
+        this._controller = new AbortController();
+        runEventSource(this, url, init || {});
+      }
+      installEventMethods(ZPEventSource.prototype);
+      Object.assign(ZPEventSource.prototype, {
+        constructor: ZPEventSource,
+        CONNECTING, OPEN, CLOSED,
+        close() {
+          this._closed = true;
+          this.readyState = CLOSED;
+          try { this._controller.abort(); } catch {}
+        }
+      });
+      maskMethods(ZPEventSource.prototype, ['close']);
+      define(root, 'EventSource', ZPEventSource);
+      function runEventSource(es, url, init) {
+        fetchThroughRuntime(url, { method: 'GET', headers: [['Accept', 'text/event-stream']], credentials: init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }).then(async resp => {
+          if (!resp.ok) throw normalizedError('NetworkError');
+          if (es._closed) return;
+          es.readyState = OPEN;
+          fireEvent(es, 'open');
+          if (!resp.body || !resp.body.getReader) {
+            consumeSSE(es, await resp.text(), true);
+            return;
+          }
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const part = await reader.read();
+            if (part.done) break;
+            buf = consumeSSE(es, buf + decoder.decode(part.value, { stream: true }), false);
+          }
+          consumeSSE(es, buf + decoder.decode(), true);
+        }).catch(() => {
+          if (es._closed) return;
+          es.readyState = CLOSED;
+          fireEvent(es, 'error');
+        });
+      }
+      function consumeSSE(es, text, final) {
+        let buf = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          dispatchSSE(es, buf.slice(0, idx));
+          buf = buf.slice(idx + 2);
+        }
+        if (final && buf) {
+          dispatchSSE(es, buf);
+          return '';
+        }
+        return buf;
+      }
+      function dispatchSSE(es, block) {
+        if (es._closed) return;
+        let data = '', eventType = 'message', lastEventId = '';
+        for (const line of String(block).split('\n')) {
+          if (!line || line[0] === ':') continue;
+          const colon = line.indexOf(':');
+          const field = colon < 0 ? line : line.slice(0, colon);
+          let value = colon < 0 ? '' : line.slice(colon + 1);
+          if (value[0] === ' ') value = value.slice(1);
+          if (field === 'data') data += value + '\n';
+          else if (field === 'event') eventType = value || 'message';
+          else if (field === 'id') lastEventId = value;
+        }
+        if (!data) return;
+        data = data.slice(0, -1);
+        let ev;
+        try { ev = new MessageEvent(eventType, { data, origin: new URL(es.url).origin, lastEventId }); }
+        catch { ev = new Event(eventType); try { Object.defineProperties(ev, { data: { value: data }, origin: { value: new URL(es.url).origin }, lastEventId: { value: lastEventId } }); } catch {} }
+        es.dispatchEvent(ev);
+      }
+    }
   }
   function installWebSocket() {
     const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
@@ -400,21 +676,21 @@
     define(root, 'WebSocket', ZPWebSocket);
   }
 
-  function installBeacon() { if (!navigator.sendBeacon || !Native.navigatorSendBeacon) return; define(navigator, 'sendBeacon', (url, data) => Native.navigatorSendBeacon(targetURL(url), data)); }
+  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; define(navigator, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
 
   function installNavigationTraps() {
-    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.href) navigateToTarget(nav.href); }, true);
+    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href) setVirtualLocation(nav.href); }, true);
     document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
     if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
-    if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { navigateToTarget(u); });
-    if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { navigateToTarget(u, true); });
+    if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { setVirtualLocation(u); });
+    if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { setVirtualLocation(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload(); });
-    define(history, 'pushState', function(state, title, url) { if (url != null) { virtualURL = sameOriginHistoryURL(url); if (!explicitBaseURL) baseURL = virtualURL.href; } const entryId = 'e' + ZP.randomId(); postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace: false }).catch(()=>{}); return Native.historyPush(state, title, location.pathname); });
-    define(history, 'replaceState', function(state, title, url) { if (url != null) { virtualURL = sameOriginHistoryURL(url); if (!explicitBaseURL) baseURL = virtualURL.href; } postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey, entryId: boot.entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace: true }).catch(()=>{}); return Native.historyReplace(state, title, location.pathname); });
-    window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }).then(reply => { virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
+    define(history, 'pushState', function(state, title, url) { return commitVirtualHistory(state, title, url, false); });
+    define(history, 'replaceState', function(state, title, url) { return commitVirtualHistory(state, title, url, true); });
+    window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }).then(reply => { activeEntryId = reply.entryId || activeEntryId; virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
     let scrollTimer = 0;
-    window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: boot.entryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
+    window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: activeEntryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
     function submitForm(form, submitter) {
       const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href;
       const method = String(submitter && submitter.getAttribute && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
@@ -433,9 +709,8 @@
       }
       const headers = new Native.Headers();
       headers.set('X-ZP-Document-Request', '1');
-      Native.fetch(target.href, { method, body: new Native.FormData(form), credentials: 'include', headers }).then(r => r.text()).then(html => { if (Native.documentOpen) Native.documentOpen(); if (Native.documentWrite) Native.documentWrite(transformHTML(html)); if (Native.documentClose) Native.documentClose(); }).catch(()=>{});
+      fetchThroughRuntime(target.href, { method, body: new Native.FormData(form), credentials: 'include', headers }).then(r => r.text()).then(html => { if (Native.documentOpen) Native.documentOpen(); if (Native.documentWrite) Native.documentWrite(transformHTML(html)); if (Native.documentClose) Native.documentClose(); }).catch(()=>{});
     }
-    function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
     function clickNavigationTarget(ev) {
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
@@ -446,7 +721,8 @@
           if (target && target !== '_self') return null;
         }
         const raw = isAnchor ? el.getAttribute('data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
-        if (!raw || raw[0] === '#') continue;
+        if (!raw) continue;
+        if (raw[0] === '#') return { hash: raw, element: el };
         if (hasExecutableURLScheme(raw)) return { href: '', element: el };
         if (isHTTPURL(raw)) return { href: raw, element: el };
       }
@@ -482,7 +758,7 @@
 
   function installGetterMasking(w) {
     const locGet = p => () => new URL(virtualURL.href)[p];
-    for (const p of ['href','protocol','host','hostname','port','pathname','search','hash','origin']) defineAccessor(w.Location && w.Location.prototype, p, locGet(p), p === 'href' ? v => { navigateToTarget(v); } : undefined);
+    for (const p of ['href','protocol','host','hostname','port','pathname','search','hash','origin']) defineAccessor(w.Location && w.Location.prototype, p, locGet(p), p === 'href' ? v => { setVirtualLocation(v); } : p === 'hash' ? v => { updateVirtualHash(v); } : undefined);
     define(w.Location && w.Location.prototype, 'toString', function(){ return virtualURL.href; });
     defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(()=>{}); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
@@ -798,8 +1074,10 @@
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     installToStringMasking(w);
-    // Native fetch is intentionally left intact; the Service Worker owns request capture.
+    if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
     installNavigatorIdentity(w);
+    if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
+    if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
     installIframeHooks(w);

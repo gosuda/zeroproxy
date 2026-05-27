@@ -139,6 +139,8 @@ test('phase 2 script rewriting pipeline is fail-closed', () => {
   assert.equal(/script-src \*/.test(core), false);
   assert.equal(/script-src \*/.test(server), false);
   assert.match(server, /connect-src 'self'/);
+  assert.equal(core.includes('navigate-to'), false);
+  assert.equal(server.includes('navigate-to'), false);
   assert.ok(sw.includes('MAX_REQUEST_BODY_BYTES'));
   assert.ok(sw.includes('REQUEST_BODY_TOO_LARGE'));
   assert.ok(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('GetBody'));
