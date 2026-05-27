@@ -11,7 +11,9 @@ const tabs = new Map();
 const clientContext = new Map();
 const shareRoutes = new Map();
 const resourceContext = new Map();
+const pendingSubmissions = new Map();
 const streams = new Map();
+const SUBMISSION_TTL_MS = 5 * 60 * 1000;
 let readiness = 'UNINITIALIZED';
 let kernelPromise = null;
 let rewriterPromise = null;
@@ -111,6 +113,7 @@ function parseSharePath(path) {
 
 
 async function proxyDocument(req, route, clientId) {
+  cleanupPendingSubmissions();
   const state = shareRoutes.get(route.routeKey);
   if (!state) return internalAsset(new Request('/'), new URL('/', ORIGIN));
   const tab = tabs.get(state.tabId);
@@ -121,8 +124,20 @@ async function proxyDocument(req, route, clientId) {
   }
   tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
+  const submitId = new URL(req.url).searchParams.get('zp_submit');
+  if (submitId) return submittedDocument(req, route.routeKey, submitId, tab, entry, clientId);
   return transportFetch(entry.targetUrl, { request: req, document: true, tab, entryId: entry.entryId });
 }
+async function submittedDocument(req, routeKey, submitId, tab, entry, clientId) {
+  const pending = pendingSubmissions.get(submitId);
+  pendingSubmissions.delete(submitId);
+  if (!pending || pending.expiresAt <= Date.now()) return safeError('SUBMISSION_EXPIRED', 410, entry.targetUrl);
+  if (pending.routeKey !== routeKey || pending.tabId !== tab.tabId || pending.entryId !== entry.entryId) return safeError('POLICY_BLOCKED', 403, entry.targetUrl);
+  tab.activeEntryId = entry.entryId;
+  bindClientContext(clientId, tab, entry);
+  return transportFetch(pending.targetUrl, { request: req, document: true, method: pending.method, headers: pending.headers, body: pending.body, tab, entryId: entry.entryId });
+}
+
 
 async function virtualSubresource(req, cls, clientId) {
   const ctx = cls.ctx;
@@ -250,6 +265,19 @@ async function handleMessage(event) {
       ok({ path: '/p/' + routeKey });
       return;
     }
+    if (msg.type === 'ZP_FRAME_ROUTE') {
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      const routeKey = String(msg.routeKey || '');
+      if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
+      const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
+      const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
+      const entryId = String(msg.entryId || randomEntryId());
+      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+      ok({ path: '/p/' + routeKey });
+      return;
+    }
     if (msg.type === 'ZP_HISTORY_UPDATE') {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
@@ -298,6 +326,27 @@ async function handleMessage(event) {
       ok();
       return;
     }
+    if (msg.type === 'ZP_SUBMIT_PREPARE') {
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      cleanupPendingSubmissions();
+      const routeKey = String(msg.routeKey || '');
+      if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
+      const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
+      const body = msg.body ? ZP.base64UrlToBytes(String(msg.body)) : new Uint8Array();
+      if (body.byteLength > MAX_REQUEST_BODY_BYTES) { fail('REQUEST_BODY_TOO_LARGE'); return; }
+      const method = String(msg.method || 'POST').toUpperCase();
+      if (method === 'GET' || method === 'HEAD') { fail('POLICY_BLOCKED'); return; }
+      const entryId = String(msg.entryId || randomEntryId());
+      const entry = { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
+      tab.entries.set(entryId, entry);
+      tab.activeEntryId = entryId;
+      shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+      const submitId = ZP.randomId('sub');
+      pendingSubmissions.set(submitId, { submitId, routeKey, tabId: tab.tabId, entryId, targetUrl, method, headers: Array.isArray(msg.headers) ? msg.headers : [], body, expiresAt: Date.now() + SUBMISSION_TTL_MS });
+      ok({ submitId });
+      return;
+    }
     if (msg.type === 'ZP_WS_OPEN') { await openRuntimeStream(event, msg, ok, fail); return; }
     fail('POLICY_BLOCKED');
   } catch (e) { fail(e && e.code || e && e.message || 'POLICY_BLOCKED'); }
@@ -338,6 +387,12 @@ function createTab(targetUrl) {
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;
+}
+function cleanupPendingSubmissions() {
+  const now = Date.now();
+  for (const [id, rec] of pendingSubmissions) {
+    if (!rec || rec.expiresAt <= now) pendingSubmissions.delete(id);
+  }
 }
 function randomEntryId() { return ZP.randomId('e'); }
 function bindClientContext(clientId, tab, entry) { if (clientId) clientContext.set(clientId, { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }); }

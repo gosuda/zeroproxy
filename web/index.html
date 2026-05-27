@@ -47,19 +47,26 @@
     return u.origin;
   }
   async function openTarget(targetUrl) {
-    const share = await ZP.makeShareURL(ZP.canonicalTargetURL(targetUrl).href, proxyOrigin());
-    location.assign(share);
+    const target = ZP.canonicalTargetURL(targetUrl).href;
+    const share = await ZP.encryptShareURL(target);
+    try { await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl }); } catch {}
+    location.assign(proxyOrigin() + '/p/' + share.encrypted + '#k=' + encodeURIComponent(share.key));
+  }
+  function shareFragmentPolicy(params) {
+    return params.get('zp_frag') === 'erase' || params.get('zp_erase_fragment') === '1' ? 'erase' : 'compat';
   }
   async function handleShare() {
     if (!location.pathname.startsWith('/p/')) return false;
     const encrypted = location.pathname.slice(3);
-    const key = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash).get('k');
+    const params = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
+    const key = params.get('k');
+    const fragmentPolicy = shareFragmentPolicy(params);
     if (!key) { location.replace('/__zp/error/INVALID_SHARE_LINK'); return true; }
     try {
       const targetUrl = await ZP.decryptShareURL(encrypted, key);
-      history.replaceState(null, '', location.pathname);
-      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl });
-      location.replace(result.path);
+      if (fragmentPolicy === 'erase') history.replaceState(null, '', location.pathname);
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl, fragmentPolicy });
+      location.replace(result.path + (fragmentPolicy === 'compat' ? '#k=' + encodeURIComponent(key) : ''));
     } catch (e) {
       const code = e && e.code || e && e.message || 'INVALID_SHARE_LINK';
       location.replace('/__zp/error/' + encodeURIComponent(code));

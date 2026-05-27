@@ -34,7 +34,13 @@ function listen(server, host = '127.0.0.1') {
 }
 
 function closeServer(server) {
-  return new Promise(resolve => server.close(() => resolve()));
+  return new Promise(resolve => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    server.close(done);
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+    setTimeout(done, 1000);
+  });
 }
 
 async function waitForHTTP(url, timeoutMs = 15000) {
@@ -96,7 +102,7 @@ class SocketReader {
 
 function createTargetServer(requests) {
   const server = http.createServer((req, res) => {
-    requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '' });
+    requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', contentType: req.headers['content-type'] || '' });
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -222,6 +228,23 @@ function createTargetServer(requests) {
     if (url.pathname === '/sse') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
       res.end('data: sse-ok\n\n');
+      return;
+    }
+    if (url.pathname === '/form-echo') {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        const kind = url.searchParams.get('kind') || '';
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(`<!doctype html><html><head><title>Form Echo ${kind}</title></head><body>
+          <main id="form-result" data-method="${req.method}" data-kind="${kind}" data-content-type="${req.headers['content-type'] || ''}">
+            <pre id="form-body">${body.replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))}</pre>
+            <a id="next" href="/next">Next page</a>
+          </main>
+          <script>window.__formEcho=${JSON.stringify({ kind, method: req.method, contentType: req.headers['content-type'] || '', body })};</script>
+        </body></html>`);
+      });
       return;
     }
     if (url.pathname === '/post-echo') {
@@ -434,7 +457,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     phase2EvalLocation: window.__phase2EvalLocation,
   }));
   assert.equal(home.title, 'E2E Home');
-  assert.equal(home.hash, '');
+  assert.match(home.hash, /^#k=/);
   assert.equal(home.shellVisible, false);
   assert.equal(home.userAgent, TARGET_UA);
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
@@ -801,16 +824,22 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
-  const forgedMessage = await page.evaluate(() => new Promise(resolve => {
-    const channel = new MessageChannel();
-    const timer = setTimeout(() => resolve({ timeout: true }), 3000);
-    channel.port1.onmessage = ev => {
-      clearTimeout(timer);
-      resolve(ev.data || null);
+  const serviceWorkerPolicy = await page.evaluate(async () => {
+    const out = {
+      exposed: 'serviceWorker' in navigator,
+      controller: navigator.serviceWorker && navigator.serviceWorker.controller,
+      registrationCount: null,
+      registerError: '',
     };
-    navigator.serviceWorker.controller.postMessage({ type: 'ZP_RESOLVE_ENTRY', path: location.pathname }, [channel.port2]);
-  }));
-  assert.deepEqual(forgedMessage, { ok: false, error: 'POLICY_BLOCKED' });
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) out.registrationCount = (await navigator.serviceWorker.getRegistrations()).length;
+    try { await navigator.serviceWorker.register('/target-sw.js'); }
+    catch (err) { out.registerError = err && err.name || String(err); }
+    return out;
+  });
+  assert.equal(serviceWorkerPolicy.exposed, true);
+  assert.equal(serviceWorkerPolicy.controller, null);
+  assert.equal(serviceWorkerPolicy.registrationCount, 0);
+  assert.equal(serviceWorkerPolicy.registerError, 'NotSupportedError');
   const bootLeak = await page.evaluate(() => ({
     bootType: typeof window.__ZP_BOOT,
     scriptContainsRuntimeToken: Array.from(document.scripts).some(s => s.textContent.includes('runtimeToken')),
@@ -818,6 +847,61 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(bootLeak.bootType, 'undefined');
   assert.equal(bootLeak.scriptContainsRuntimeToken, false);
 
+
+  async function submitFormFixture(kind) {
+    await page.evaluate(kind => {
+      const f = document.createElement('form');
+      f.method = 'POST';
+      f.enctype = kind === 'multipart' ? 'multipart/form-data' : kind === 'plain' ? 'text/plain' : 'application/x-www-form-urlencoded';
+      f.action = '/form-echo?kind=wrong';
+      const input = document.createElement('input');
+      input.name = 'alpha';
+      input.value = 'one';
+      f.appendChild(input);
+      if (kind === 'multipart') {
+        const file = document.createElement('input');
+        file.type = 'file';
+        file.name = 'upload';
+        const dt = new DataTransfer();
+        dt.items.add(new File(['file-body'], 'hello.txt', { type: 'text/plain' }));
+        file.files = dt.files;
+        f.appendChild(file);
+      }
+      const button = document.createElement('button');
+      button.type = 'submit';
+      button.name = 'submitter';
+      button.value = kind;
+      button.setAttribute('formaction', '/form-echo?kind=' + kind);
+      f.appendChild(button);
+      document.body.appendChild(f);
+      f.requestSubmit(button);
+    }, kind);
+    await page.waitForFunction(k => window.__formEcho && window.__formEcho.kind === k, { timeout: 30000 }, kind);
+    return page.evaluate(() => { const loc = __zp_get(globalThis, 'location'); return { echo: window.__formEcho, virtualHref: loc.href, virtualHash: loc.hash, documentURL: __zp_get(document, 'URL'), baseURI: __zp_get(document, 'baseURI') }; });
+  }
+  const urlencodedForm = await submitFormFixture('urlencoded');
+  assert.equal(urlencodedForm.echo.method, 'POST');
+  assert.match(urlencodedForm.echo.contentType, /^application\/x-www-form-urlencoded/);
+  assert.equal(urlencodedForm.echo.body, 'alpha=one&submitter=urlencoded');
+  const plainForm = await submitFormFixture('plain');
+  assert.match(plainForm.echo.contentType, /^text\/plain/);
+  assert.match(plainForm.echo.body, /alpha=one/);
+  assert.match(plainForm.echo.body, /submitter=plain/);
+  const multipartForm = await submitFormFixture('multipart');
+  assert.match(multipartForm.echo.contentType, /^multipart\/form-data; boundary=/);
+  assert.match(multipartForm.echo.body, /name="upload"; filename="hello.txt"/);
+  assert.match(multipartForm.echo.body, /file-body/);
+  const rawAfterSubmit = page.url();
+  const rawKey = new URL(rawAfterSubmit).hash ? new URLSearchParams(new URL(rawAfterSubmit).hash.slice(1)).get('k') : '';
+  assert.match(rawAfterSubmit, /#k=/);
+  assert.match(rawAfterSubmit, /\?zp_submit=/);
+  for (const surface of [multipartForm.virtualHref, multipartForm.virtualHash, multipartForm.documentURL, multipartForm.baseURI]) {
+    assert.equal(surface.includes('zp_submit='), false, surface);
+    if (rawKey) assert.equal(surface.includes(rawKey), false, surface);
+  }
+  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=urlencoded') && r.contentType.startsWith('application/x-www-form-urlencoded')), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=plain') && r.contentType.startsWith('text/plain')), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=multipart') && r.contentType.startsWith('multipart/form-data')), `target requests: ${JSON.stringify(requests)}`);
   await page.click('#next');
   await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
   const next = await page.evaluate(() => ({
@@ -828,7 +912,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     userAgent: navigator.userAgent,
   }));
   assert.equal(next.title, 'E2E Next');
-  assert.equal(next.hash, '');
+  assert.match(next.hash, /^#k=/);
   assert.equal(next.shellVisible, false);
   assert.equal(next.userAgent, TARGET_UA);
   assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));

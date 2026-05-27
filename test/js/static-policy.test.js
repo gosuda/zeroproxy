@@ -51,11 +51,12 @@ test('runtime installs required escape-vector hooks', () => {
     "'contentWindow'",
     "'contentDocument'",
     'new WeakSet',
-    "attributeFilter: ['href', 'src', 'srcdoc', 'action', 'formaction', 'integrity', 'type']",
+    "attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'integrity', 'type', 'rel', 'target']",
     'enforceObservedAttribute',
     'data-zp-integrity',
     'installIntegrityProp',
     'installScriptProp',
+    'installLinkProp',
     'installToStringMasking',
     'toStringMap',
     'installCanvasAntiFingerprinting',
@@ -89,6 +90,10 @@ test('runtime installs required escape-vector hooks', () => {
     'createContextualFragment',
     'parseFromString',
     'rewriteEventAttribute',
+    'enforceSubtreePolicies',
+    'installTargetServiceWorkerBlocker',
+    'serializeFormSubmission',
+    'shareFragmentForKey',
     'postMessageWrapperFor',
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
 });
@@ -147,6 +152,9 @@ test('phase 2 script rewriting pipeline is fail-closed', () => {
   assert.equal(core.includes('navigate-to'), false);
   assert.equal(server.includes('navigate-to'), false);
   assert.ok(sw.includes('MAX_REQUEST_BODY_BYTES'));
+  assert.ok(sw.includes('pendingSubmissions'));
+  assert.ok(sw.includes('ZP_SUBMIT_PREPARE'));
+  assert.ok(sw.includes('zp_submit'));
   assert.ok(sw.includes('REQUEST_BODY_TOO_LARGE'));
   assert.ok(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('GetBody'));
   assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
@@ -155,7 +163,7 @@ test('phase 2 script rewriting pipeline is fail-closed', () => {
 
 test('service worker names every required safe error class', () => {
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
-  for (const code of ['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','POLICY_BLOCKED']) {
+  for (const code of ['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED']) {
     assert.ok(core.includes(code), `missing ${code}`);
   }
 });
