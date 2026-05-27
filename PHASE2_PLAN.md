@@ -17,7 +17,9 @@ This is a compatibility layer, not a claim of perfect browser-origin spoofing. N
 - Rewrite target JavaScript so common reads/writes/calls involving `window`, `location`, `document`, `history`, iframe windows, `eval`, and `Function` pass through ZeroProxy runtime helpers.
 - Keep the invariant that target network/navigation cannot escape the ZeroProxy path.
 - Fail closed in strict mode: if JavaScript that must be rewritten cannot be parsed or transformed, do not execute the original source.
-- Keep `#k=<key>` out of target-visible state; rewriting must never replace immediate key removal from the real URL.
+- Compatibility mode may keep `#k=<key>` in the real URL for share/link persistence, but every target-visible URL surface (`location`, `document.URL`, referrer, history state, message origins, storage keys, rewritten code helpers) must expose only the virtual target URL or a non-secret proxy route. This is a deliberate tradeoff from the earlier erase-key invariant and requires dedicated leak tests before it can be treated as high-assurance.
+- Recursively apply storage, iframe, dynamic-rewrite, and DOM URL policies to every same-origin clean realm created by target code.
+- Treat target Service Worker registration as unsupported and fully blocked. Do not add a virtual Service Worker compatibility layer in this plan.
 
 ## Non-goals
 
@@ -240,6 +242,116 @@ Target response
 | Foreground synchronous rewriter | `web/runtime-prelude.js` plus the same OXC WASM artifact or a smaller dynamic-code rewriter artifact | Preinitialize a closure-private rewriter in the target page for synchronous `eval`, `Function`, and string timer rewriting. |
 | HTML integration | `internal/htmltx` and `cmd/wasm-kernel` | Rewrite inline scripts and inline event handlers before the browser compiles them. |
 | External script pipeline | `web/sw.js` | Rewrite `script`, `module`, worker, and imported script responses before returning them to the browser. |
+| Recursive storage/iframe policy | `web/runtime-prelude.js`, `web/worker-prelude.js` | Install storage facades and containment hooks into every accessible same-origin window, iframe, `srcdoc`, popup, and worker realm before target code can use native storage or network APIs. |
+| Upload navigation bridge | `web/runtime-prelude.js`, `web/sw.js`, Go WASM kernel | Store form submission bodies in client-owned transient storage, activate a submit/navigation route, dispatch the target request when the submitted page loads, and return the transformed response through the Service Worker document pipeline. |
+| Foreground in-place rewriter | `web/runtime-prelude.js`, OXC foreground bundle | Synchronously rewrite dynamic code and DOM mutations in the target realm before browser compilation or immediately replace inert placeholders with rewritten code. |
+
+## Compatibility uplift plan
+
+This plan replaces selected explicit blockers with compatibility layers only when the replacement still preserves the ZeroProxy transport and rewriting boundary. Native target network, raw target JavaScript fallback, native target Service Workers, and unclassified Service Worker request fallback remain forbidden.
+
+### Recursive storage and iframe containment
+
+Storage and realm hooks must be installed recursively, not only on the initial top-level document:
+
+1. Maintain a realm registry keyed by `Window`/`WorkerGlobalScope` object identity. Installing hooks must be idempotent and must not allocate duplicate facades for the same realm.
+2. On every accessible iframe, frame, popup, `srcdoc`, `about:blank`, and dynamically inserted clean realm, synchronously install:
+   - virtual `location`/`history` helpers;
+   - `fetch`, XHR, EventSource, WebSocket, and `sendBeacon` wrappers where the realm supports them;
+   - `localStorage`, `sessionStorage`, IndexedDB, CacheStorage, cookie, and BroadcastChannel namespace facades;
+   - Worker/SharedWorker/importScripts/worklet loaders;
+   - high-risk device/network blockers or denied shims.
+3. Storage namespace keys must include tab id, top-level route key, virtual origin, storage type, and realm role. Child frames with the same virtual origin may share origin-scoped `localStorage`/IndexedDB/CacheStorage, while `sessionStorage` remains top-level browsing-context scoped unless browser semantics require a cloned opener snapshot.
+4. `storage` events must be synthesized only to compatible same-virtual-origin realms in the same tab namespace. Events must never cross tabs, target origins, or route keys.
+5. `iframe.contentWindow`, `contentDocument`, `document.defaultView`, popup `opener`, `parent`, `top`, and `frames[]` access must always return wrapped objects or synchronously install containment before returning the native object.
+6. `srcdoc` and initial `about:blank` frames must receive the runtime prelude and storage hooks before any inline script, event handler, or dynamic HTML sink can execute.
+
+Acceptance tests:
+
+- nested iframe, `srcdoc`, `about:blank`, and popup fixtures cannot access native storage or native network constructors before containment;
+- same-virtual-origin frames observe shared `localStorage` updates and storage events, while cross-virtual-origin frames do not;
+- `sessionStorage` clone/isolation behavior matches the documented top-level browsing-context policy;
+- IndexedDB and CacheStorage names are prefixed or encrypted consistently across nested realms.
+
+### Form body upload and document navigation bridge
+
+Non-GET form submissions must stop using `document.write` as the primary compatibility path. Use a client-owned pending-submission record and let the Service Worker answer the submitted document navigation:
+
+1. On submit, the runtime serializes the form body according to the browser-selected encoding:
+   - `application/x-www-form-urlencoded`;
+   - `multipart/form-data`, including file metadata and Blob/File body references;
+   - `text/plain`.
+2. Store the body in transient client-side storage under a random pending submission id. Small bodies may live in memory; larger bodies use IndexedDB/OPFS-style chunk storage with an explicit total size cap and per-chunk integrity metadata.
+3. Activate a submit route such as `/p/<route>#k=<key>&zp_submit=<id>` or the future active route equivalent. The real URL may keep `#k=<key>` in compatibility mode, but target-visible runtime URL surfaces must mask both key and submission id.
+4. On the submitted page load, the Service Worker consumes the pending submission exactly once, reconstructs the target request with original method, headers, body, referrer policy, and virtual origin metadata, then calls the WASM kernel.
+5. The target response returns through the normal document pipeline: redirect handling, cookie jar update, header policy, HTML transform, script rewrite, runtime prelude injection, and CSP.
+6. Pending submission records must be deleted after success, safe error, cancellation, expiry, or tab close. A reload may replay only if the body is explicitly marked replayable and still within the pending record lifetime.
+
+Acceptance tests:
+
+- GET, urlencoded POST, multipart file POST, and text/plain POST navigate through the Service Worker document path and receive transformed HTML;
+- 307/308 redirects preserve replayable bodies exactly once and fail safely for expired/non-replayable bodies;
+- oversized uploads return `REQUEST_BODY_TOO_LARGE` or a documented safe upload error without partial target requests;
+- pending submission ids and `#k` fragments are not observable through virtual `location`, `document.URL`, form action getters, history state, or message events.
+
+### Target Service Worker policy
+
+Target-controlled Service Workers remain fully blocked:
+
+- `navigator.serviceWorker.register`, `getRegistration`, `getRegistrations`, `ready`, and controller mutation surfaces must expose a stable unsupported/empty state rather than reaching the browser's real Service Worker registry.
+- No virtual target Service Worker event loop is added in this plan. CacheStorage compatibility comes from the recursive storage facade, not from executing target Service Worker scripts.
+- Registration attempts should reject with a browser-shaped `SecurityError` or `NotSupportedError` and emit a ZeroProxy diagnostic.
+
+Acceptance tests:
+
+- target registration scripts cannot install, activate, claim clients, intercept requests, or persist target-controlled Service Worker state;
+- feature detection sees a stable blocked state and does not gain access to `navigator.serviceWorker.controller` for the proxy origin.
+
+### Foreground synchronous in-place rewriter
+
+The foreground runtime must include a synchronous parser-backed rewriter for every dynamic JavaScript source that cannot wait for an asynchronous Service Worker round trip:
+
+1. Preinitialize a closure-private OXC foreground bundle, or a smaller ABI-compatible parser/rewriter, before any target script executes.
+2. Expose no public `window.__zp_rewrite` downgrade switch. Target code may only reach rewritten behavior through patched browser APIs.
+3. For `eval`, indirect eval, `Function`, constructor-constructor escapes, string timers, and inline event handler setters, parse and rewrite synchronously in the correct grammar mode, then execute the rewritten code in the virtual global membrane.
+4. For dynamic DOM compilation sinks (`innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `template.innerHTML`, `DOMParser.parseFromString`, `Range.createContextualFragment`, and `iframe.srcdoc`), parse to an inert fragment, rewrite or launder URL/script/event-bearing nodes in place, then insert only the rewritten fragment.
+5. For already-created nodes observed by mutation hooks, immediately make executable nodes inert (`type="application/x-zeroproxy-pending"` or `about:blank` placeholder), synchronously rewrite/launder, then restore executable state only after the replacement source is safe.
+6. If synchronous rewriting fails, strict mode blocks the source; compat mode may keep the node inert and report a diagnostic, but must never execute original target JavaScript outside the membrane.
+
+Acceptance tests:
+
+- dynamic event handlers, `javascript:` click handlers selected for compatibility, string timers, `Function`, and constructor-constructor code observe virtual `location` and routed network APIs;
+- dynamic script/data/blob insertion either rewrites through the in-place rewriter or remains inert;
+- no target-visible global can invoke or disable the rewriter directly.
+
+### Persistent `#k=<key>` compatibility mode
+
+Compatibility mode keeps `#k=<key>` in the browser URL to preserve shareability and reload behavior. This is weaker than the previous erase-fragment invariant and is accepted only with the following containment rules:
+
+1. Native fragments are never sent to HTTP servers, but target scripts must still be prevented from reading the raw key through virtualized browser APIs.
+2. The runtime and rewriter must mask `location.href`, `location.hash`, `document.URL`, `document.documentURI`, anchor/form URL getters, history entries, referrers, message origins, storage keys, and error pages so they expose the virtual target URL or a non-secret proxy route.
+3. The Service Worker may use the real fragment only during activation and pending form-submission recovery. It must not copy the raw key into logs, CacheStorage, IndexedDB records visible to target facades, diagnostics, or message payloads.
+4. Strict/high-assurance mode may still choose the older erase-fragment policy. If compatibility mode becomes the default, leak tests become a release gate.
+
+Acceptance tests:
+
+- target code using direct globals, rewritten globals, `Reflect.get`, descriptors, dynamic code, iframes, popups, postMessage, and DOM URL getters cannot observe the raw `#k=<key>`;
+- copy/paste/share/reload of the real URL remains functional when the user intentionally keeps the fragment.
+
+### DOM URL observer hardening
+
+Runtime DOM observation must continuously enforce URL policy for both parser-created and script-created elements:
+
+1. Observe `href`, `src`, `srcdoc`, `action`, `formaction`, `integrity`, `type`, `rel`, `target`, and relevant namespace attributes across the whole document and every contained iframe realm.
+2. For `<a>` and `<area>`, preserve author-visible `href` when possible, but store the canonical target URL in hidden runtime metadata and ensure click-time navigation resolves through ZeroProxy.
+3. For script, iframe, frame, worker/worklet module, preload-like link, manifest, form, and submitter URL attributes, synchronously launder, rewrite, or block according to the same policy as the tokenizer transform.
+4. If target code mutates an already-laundered attribute back to a native URL, the observer must detect and reapply policy before the browser can fetch or navigate. Where the browser may fetch immediately, setter hooks must perform synchronous enforcement before the mutation reaches the DOM.
+5. Mutation handling must be reentrant-safe and must not create infinite observer loops.
+
+Acceptance tests:
+
+- GTM-style detached script insertion, anchor `href` mutation after insertion, nested iframe DOM mutation, SVG/xlink URL attributes, and submitter `formaction` changes all remain routed through ZeroProxy;
+- preload/prefetch/preconnect/dns-prefetch/prerender/manifest links are removed or converted before native network access.
 
 ## Service Worker Rewriting Service
 
@@ -323,7 +435,7 @@ Phase 2 strict policy:
 
 ## Foreground synchronous dynamic containment
 
-Dynamic code APIs are synchronous. A Service Worker rewriter cannot serve them without changing browser-visible semantics, so the controlled page must contain those APIs before target scripts run. The current main-window runtime compiles `eval`, `Function`, constructor-constructor, and string-timer bodies with a closure-private virtual global scope; a future parser-backed foreground rewriter can replace that path where exact static-rewrite parity is required.
+Dynamic code APIs are synchronous. A Service Worker API is asynchronous from the page's point of view, so the controlled page must contain and rewrite these APIs before target scripts run. The foreground runtime therefore owns a parser-backed synchronous in-place rewriter for `eval`, `Function`, constructor-constructor escapes, string timers, inline event handlers, and dynamic DOM compilation sinks. It rewrites executable sources before browser compilation; if a node is already present, it first makes that node inert, rewrites or launders it, then restores only the safe replacement.
 
 ```text
 runtime-prelude.js
@@ -337,8 +449,8 @@ Requirements:
 
 - Dynamic containment hooks must initialize before any target-controlled script can execute. If a selected mode requires a parser-backed foreground rewriter and initialization fails, target script execution fails closed with `REALM_INJECTION_FAILURE`.
 - The foreground containment machinery must not be exposed as `window.__zp_rewrite` or any other target-visible global. Target code may call patched dynamic-code APIs, but must not be able to invoke, configure, or downgrade the containment path directly.
-- A future foreground and Service Worker rewriter must use the same transformer version and helper ABI. The runtime must compare an embedded transformer version/hash and fail closed on mismatch.
-- The page-local path should be limited to dynamic-code execution. The Service Worker remains the canonical pipeline for external scripts, inline scripts, worker scripts, caching, diagnostics, and strict-mode policy decisions.
+- The foreground and Service Worker rewriters must use the same transformer version and helper ABI. The runtime must compare an embedded transformer version/hash and fail closed on mismatch.
+- The page-local path owns synchronous dynamic-code and DOM in-place rewriting. The Service Worker remains the canonical pipeline for target network requests, external script responses, form-submission document responses, caching, diagnostics, and strict-mode policy decisions.
 - Foreground dynamic containment must never expose share keys, transport secrets, HttpOnly cookies, or Service Worker state to target code.
 - CSP must explicitly allow only the minimum needed for foreground dynamic execution. Any continued use of `'unsafe-eval'` or `wasm-unsafe-eval` must be documented as a compatibility requirement and revisited after dynamic containment is complete.
 
@@ -529,11 +641,13 @@ Phase 2 acceptance targets `strict` for security tests and `compat` for broad-si
 ## Security invariants
 
 - No rewrite failure may cause a native target network fallback.
-- No target script may observe `#k=<key>` after share activation.
+- In compatibility mode the real browser URL may retain `#k=<key>`, but no target-visible virtual URL surface may expose the raw key or pending submission ids. Strict/high-assurance deployments may keep the older erase-fragment policy.
 - No target script may receive the Go kernel transport secrets, stream isolation key material, or HttpOnly cookie state.
 - Rewritten navigation must remain on proxy-origin `/p` routes unless a later phase intentionally reintroduces `/v` active routes.
 - CSP remains defense-in-depth; Service Worker classification and the transport kernel remain the egress boundary.
 - Original source is never executed in strict mode when rewriting is required.
+- Target-controlled Service Workers remain fully blocked; no compatibility layer may execute target Service Worker scripts or let them claim proxy-origin clients.
+- Storage, iframe, popup, worker, and dynamic DOM policies must apply recursively to every accessible same-origin realm before target code can use native storage, network, or executable-code compilation paths.
 
 ## Test plan
 
@@ -563,6 +677,10 @@ Golden tests for:
 - `setAttribute('onclick', ...)`, `innerHTML`, `insertAdjacentHTML`, `document.write`, `DOMParser.parseFromString`, and `Range.createContextualFragment` rewrite or neutralize executable handler bodies before they compile.
 - Foreground dynamic-code rewriter is closure-private, preinitialized before target scripts, and version-matched with the Service Worker rewriter.
 - Patched `eval`, indirect eval, `Function`, `setTimeout(string)`, and `setInterval(string)` either rewrite synchronously or block in strict mode.
+- Recursive storage facades install into nested iframes, `srcdoc`, `about:blank`, popups, and workers without leaking native storage or crossing virtual origins.
+- Foreground in-place rewriting makes observed executable DOM nodes inert before rewriting and never executes original dynamic source after a rewrite failure.
+- DOM URL observers reapply policy to `href`, `src`, `srcdoc`, `action`, `formaction`, namespace URL attributes, `rel`, `target`, `integrity`, and `type` mutations without infinite observer loops.
+- Target Service Worker APIs expose a stable blocked/empty state and never reach the browser's real proxy-origin Service Worker registry.
 
 ### Browser E2E tests
 
@@ -575,6 +693,10 @@ Golden tests for:
 - Blob/data worker and script fixtures are contained, rewritten, or blocked.
 - `srcdoc` inline scripts and event handlers cannot execute before iframe containment.
 - Request/upload size limits, 307/308 redirect replay behavior, and relay cancellation semantics are covered by integration tests.
+- Non-GET form submissions persist pending bodies in client-owned transient storage, activate a submitted document route, consume the pending body exactly once in the Service Worker, and return the transformed target response through the normal document pipeline.
+- Multipart file uploads, urlencoded POST, text/plain POST, oversized upload failure, expiry/cancellation cleanup, and 307/308 replay behavior are covered.
+- Persistent `#k=<key>` compatibility mode keeps reload/share behavior while hostile code in nested frames, popups, dynamic code, descriptors, and DOM URL getters cannot observe the raw key.
+- DOM URL observer fixtures cover anchor `href` mutation after insertion, SVG/xlink URL attributes, submitter `formaction` mutation, nested iframe mutation, and preload-like link insertion.
 
 ### Performance tests
 
@@ -587,18 +709,22 @@ Golden tests for:
 Before starting item 1, complete the P0 hardening gates above. P1 gates should be completed before broad-site compatibility evaluation, and P2 gates should be tracked as required coverage for Phase 2 acceptance.
 
 1. Add rewriter mode configuration and diagnostics plumbing.
-2. Vendor OXC parser WASM assets and expose a strict rewriter service.
-3. Load rewriter WASM from the Service Worker and expose `rewriteScript()`.
+2. Vendor OXC parser WASM assets and expose a strict Service Worker rewriter service.
+3. Add the ABI-compatible foreground synchronous in-place rewriter bundle and verify version/hash parity with the Service Worker rewriter.
 4. Add runtime membrane helpers used by rewritten code.
-5. Add the foreground synchronous rewriter bootstrap and closure-private dynamic-code rewrite API.
-6. Patch `eval`, indirect eval, `Function`, string timers, constructor-constructor escapes, and dynamic HTML compilation APIs to use the foreground rewriter or block.
-7. Rewrite external classic scripts in the Service Worker.
-8. Add module script support.
-9. Add Go HTML transform callback for inline scripts and inline event handlers.
-10. Add worker/importScripts/blob/data script rewriting.
-11. Add browser E2E tests and hostile escape fixtures.
-12. Tighten CSP once compatibility data is available.
-13. Re-run and update the pre-Phase-2 hardening gates; no P0 item may remain open for strict mode.
+5. Patch `eval`, indirect eval, `Function`, string timers, constructor-constructor escapes, inline event handler setters, and dynamic HTML compilation APIs to use the foreground in-place rewriter or remain inert.
+6. Replace regex-only dynamic HTML handling with inert-fragment DOM walking that rewrites/launders scripts, event handlers, URL attributes, and `srcdoc` before insertion.
+7. Extend recursive containment to iframes, `srcdoc`, `about:blank`, popups, workers, and worklets; install storage facades and network wrappers idempotently in every accessible realm.
+8. Harden DOM URL observers and synchronous setters for `href`, `src`, `srcdoc`, `action`, `formaction`, namespace URL attributes, `rel`, `target`, `integrity`, and `type`.
+9. Implement the form-submission pending-body store, submitted-document route activation, one-shot Service Worker body consumption, and transformed response return path.
+10. Keep target Service Worker registration and controller APIs fully blocked with browser-shaped unsupported/empty results.
+11. Rewrite external classic scripts in the Service Worker.
+12. Add module script support.
+13. Add Go HTML transform callback for inline scripts and inline event handlers.
+14. Add worker/importScripts/blob/data script rewriting where synchronous or bootstrap-contained rewriting is available; otherwise keep sources inert/blocked.
+15. Add browser E2E tests and hostile escape fixtures for recursive storage/iframe containment, pending form uploads, persistent-fragment masking, and DOM observer hardening.
+16. Tighten CSP once compatibility data is available.
+17. Re-run and update the pre-Phase-2 hardening gates; no P0 item may remain open for strict mode.
 
 ## Acceptance criteria
 
@@ -614,3 +740,8 @@ Phase 2 is accepted when:
 - Hostile tests for `window['loca' + 'tion']`, `Reflect.get`, iframe clean realms, and constructor-constructor dynamic code do not expose a native direct-egress path.
 - All strict-mode rewrite failures produce safe ZeroProxy errors instead of executing original target code.
 - P0 hardening gates are complete: strict CSP, Service Worker message capabilities, blob/data script handling, and fail-closed dynamic compilation paths.
+- Recursive storage and iframe containment are installed before target code can observe native clean-realm storage, network, or executable-code APIs.
+- Non-GET form submissions use the pending-body Service Worker document navigation bridge and no longer depend on `document.write` for the primary response path.
+- Target Service Worker registration, controller, and registration lookup APIs are fully blocked and cannot install or execute target Service Worker scripts.
+- Persistent `#k=<key>` compatibility mode passes leak tests for target-visible URL surfaces, or strict/high-assurance mode keeps the erase-fragment policy enabled.
+- DOM URL observers and synchronous setters keep parser-created and script-created anchors, forms, iframes, scripts, and preload-like links routed through ZeroProxy after mutation.
