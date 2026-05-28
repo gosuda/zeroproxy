@@ -499,13 +499,13 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     firstNode: 'link',
     rel: null,
     href: null,
-    blockedRel: 'preconnect',
-    blockedURL: 'https://preconnect.invalid',
+    blockedRel: null,
+    blockedURL: null,
     cloneRel: null,
     cloneHref: null,
   });
   assert.equal(home.platform, 'Win32');
-  assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
+  assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
   assert.equal(home.phase2DynamicFunction, `http://${targetHost}:${targetPort}/`);
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
@@ -544,13 +544,13 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   }));
   assert.ok(dynamicScripts.gtm.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.gtm.href);
   assert.ok(dynamicScripts.dynamic.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.dynamic.href);
-  assert.match(dynamicScripts.gtm.currentAttr, /^\/__zp\/api\/script\?/);
+  assert.match(dynamicScripts.gtm.currentAttr, /^\/zp\/api\/script\?/);
   assert.equal(dynamicScripts.moduleWorker.href, `http://${targetHost}:${targetPort}/worker-fixture.js`);
   assert.equal(dynamicScripts.moduleWorker.userAgent, TARGET_UA);
   assert.equal(dynamicScripts.moduleWorker.platform, 'Win32');
-  assert.match(dynamicScripts.dynamic.currentAttr, /^\/__zp\/api\/script\?/);
-  assert.match(dynamicScripts.gtmAttr, /^\/__zp\/api\/script\?/);
-  assert.match(dynamicScripts.dynamicAttr, /^\/__zp\/api\/script\?/);
+  assert.match(dynamicScripts.dynamic.currentAttr, /^\/zp\/api\/script\?/);
+  assert.match(dynamicScripts.gtmAttr, /^\/zp\/api\/script\?/);
+  assert.match(dynamicScripts.dynamicAttr, /^\/zp\/api\/script\?/);
   assert.ok(dynamicScripts.messages.some(m => m.type === 'gtm-loaded'), `messages: ${JSON.stringify(dynamicScripts.messages)}`);
   assert.ok(requests.some(r => r.url.startsWith('/gtm.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/dynamic-script.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
@@ -588,7 +588,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       const deadline = Date.now() + 5000;
       (function poll() {
         const current = observed.attributes.getNamedItem('src')?.value || '';
-        if (current.startsWith(location.origin + '/p/')) { resolve(current); return; }
+        if (current.startsWith(location.origin + '/zp/p/')) { resolve(current); return; }
         if (Date.now() > deadline) { reject(new Error(`src not rewritten: ${current}`)); return; }
         setTimeout(poll, 25);
       })();
@@ -604,7 +604,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(iframeIsolation.modernRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.websocketShared, true);
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
-  assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
+  assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionShared, true);
   assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
@@ -744,6 +744,18 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         };
       });
     }
+    async function websocketStreamEcho() {
+      const stream = new WebSocketStream('ws://localhost:' + targetPort + '/ws', { protocols: ['zp-stream'] });
+      const opened = await stream.opened;
+      const writer = opened.writable.getWriter();
+      await writer.write('stream');
+      const reader = opened.readable.getReader();
+      const first = await reader.read();
+      await writer.close();
+      const closed = await stream.closed;
+      return { protocol: opened.protocol, data: String(first.value), closeCode: closed.closeCode };
+    }
+
 
     const setCookieBody = await readText('/set-cookie?ts=' + Date.now());
     const serverCookie = await waitForCookieHeader('target_server=from-target');
@@ -755,7 +767,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const redirectPost = await postText('/redirect307', 'redirect-body');
     const oversized = await postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1));
     const ws = await websocketEcho();
-    return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws, post, redirectPost, oversized };
+    const wsStream = await websocketStreamEcho();
+    return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws, wsStream, post, redirectPost, oversized };
   }, targetPort);
   assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok');
   assert.match(runtimeIntegration.serverCookie, /target_server=from-target/);
@@ -770,6 +783,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(runtimeIntegration.ws.url, `ws://${targetHost}:${targetPort}/ws`);
   assert.equal(runtimeIntegration.ws.data, '1,2,3');
   assert.equal(runtimeIntegration.ws.protocol, 'zp-test');
+  assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000 });
   assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' });
   assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' });
   assert.equal(runtimeIntegration.oversized.status, 413);
@@ -777,6 +791,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
 
   const escapeMatrix = await page.evaluate(async targetPort => {
@@ -965,6 +980,6 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(next.hash, /^#k=/);
   assert.equal(next.shellVisible, false);
   assert.equal(next.userAgent, TARGET_UA);
-  assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/p/`));
+  assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.ok(requests.some(r => r.url === '/next' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 });

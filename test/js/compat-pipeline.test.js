@@ -11,8 +11,8 @@ test('window fetch, XHR, and EventSource route through runtime transport shims',
   assert.match(rt, /define\(root, 'EventSource'/);
   assert.ok(rt.includes('ZPXMLHttpRequest'));
   assert.ok(rt.includes('ZPEventSource'));
-  assert.ok(rt.includes('/__zp/api/fetch'));
-  assert.match(rt, /Native\.fetch\('\/__zp\/api\/fetch'/);
+  assert.ok(rt.includes("ZP.apiPath('fetch')"));
+  assert.match(rt, /Native\.fetch\(ZP\.apiPath\('fetch'\)/);
 });
 
 test('runtime navigation uses bound Location methods and catches expando href clicks', () => {

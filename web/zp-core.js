@@ -9,6 +9,10 @@
   const SHARE_MAC_PREFIX = te.encode('ZP-CBC-URL-V1');
   const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
   const WS_PROTOCOLS = new Set(['ws:', 'wss:']);
+  const CONTROL_PREFIX = '/zp/';
+  const ASSET_PREFIX = CONTROL_PREFIX + 'assets/';
+  const MAX_RELAY_SERVERS = 8;
+  const MAX_RELAY_SERVER_BYTES = 2048;
   const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED']);
 
   function bytesToBase64Url(bytes) {
@@ -63,11 +67,26 @@
     catch { throw safeError('INVALID_SHARE_LINK'); }
     return canonicalTargetURL(td.decode(plain)).href;
   }
-  function makeSharePath(encrypted) { return '/p/' + encrypted; }
-  async function makeShareURL(targetUrl, origin = globalThis.location && globalThis.location.origin || '') {
-    const s = await encryptShareURL(targetUrl);
-    return origin + makeSharePath(s.encrypted) + '#k=' + s.key;
+  function controlPath(path) {
+    const raw = String(path || '');
+    return CONTROL_PREFIX + raw.replace(/^\/+/, '');
   }
+  function assetPath(name) { return ASSET_PREFIX + String(name || '').replace(/^\/+/, ''); }
+  function apiPath(name) { return controlPath('api/' + String(name || '').replace(/^\/+/, '')); }
+  function errorPath(code) { return controlPath('error/' + encodeURIComponent(String(code || 'POLICY_BLOCKED'))); }
+  function makeSharePath(encrypted) { return controlPath('p/' + encrypted); }
+  async function makeShareURL(targetUrl, origin = globalThis.location && globalThis.location.origin || '', servers) {
+    const s = await encryptShareURL(targetUrl);
+    return origin + makeSharePath(s.encrypted) + makeShareFragment(s.key, servers);
+  }
+  function makeShareFragment(key, servers) {
+    const params = new URLSearchParams();
+    params.set('k', String(key));
+    for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) params.append('server', server);
+    return '#' + params.toString();
+  }
+  function isSharePath(path) { return String(path || '').startsWith(controlPath('p/')); }
+  function shareRouteKey(path) { return isSharePath(path) ? String(path).slice(controlPath('p/').length) : ''; }
   function safeError(code) { const e = new Error(code); e.code = ERRORS.includes(code) ? code : 'POLICY_BLOCKED'; return e; }
   function canonicalTargetURL(input, base) {
     const u = new URL(String(input), base || undefined);
@@ -84,11 +103,55 @@
   function encodeTargetURL(url) { return bytesToBase64Url(te.encode(canonicalTargetURL(url).href)); }
   function decodeTargetURL(encoded) { return canonicalTargetURL(td.decode(base64UrlToBytes(encoded))).href; }
   function randomId(prefix = '') { const b = crypto.getRandomValues(new Uint8Array(12)); return prefix + bytesToBase64Url(b); }
-  function fixedCSP() {
+  function fixedCSP(servers) {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
-    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + ws + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    const connect = new Set(["'self'", ws]);
+    for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
+      try { const u = new URL(server); connect.add(u.origin); } catch {}
+    }
+    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
   }
-  const api = Object.freeze({ bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, ERRORS });
+  function parseRelayServersFromFragment(fragment, options) {
+    const raw = String(fragment || '');
+    const params = new URLSearchParams(raw && raw[0] === '#' ? raw.slice(1) : raw);
+    return normalizeRelayServers(params.getAll('server'), options);
+  }
+  function normalizeRelayServers(values, options = {}) {
+    if (!values) return [];
+    const list = Array.isArray(values) ? values : [values];
+    const out = [];
+    const seen = new Set();
+    let total = 0;
+    for (const raw of list) {
+      if (out.length >= MAX_RELAY_SERVERS) throw safeError('MALFORMED_ROUTE');
+      const value = String(raw || '').trim();
+      if (!value) continue;
+      let u;
+      try { u = new URL(value); } catch { throw safeError('MALFORMED_ROUTE'); }
+      if (u.username || u.password || u.hash) throw safeError('MALFORMED_ROUTE');
+      if (u.protocol === 'ws:') {
+        if (!options.allowLoopbackWS || !isLoopbackHost(u.hostname)) throw safeError('TARGET_PROTOCOL_BLOCKED');
+      } else if (u.protocol !== 'wss:') {
+        throw safeError('TARGET_PROTOCOL_BLOCKED');
+      }
+      u.username = '';
+      u.password = '';
+      u.hash = '';
+      const normalized = u.href;
+      total += normalized.length;
+      if (total > MAX_RELAY_SERVER_BYTES) throw safeError('MALFORMED_ROUTE');
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        out.push(normalized);
+      }
+    }
+    return out;
+  }
+  function isLoopbackHost(host) {
+    const h = String(host || '').toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
+  }
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, ERRORS });
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
 })();

@@ -21,7 +21,9 @@ var (
 	base64RawURL   = base64.RawURLEncoding
 )
 
-// New returns a /p/<encrypted>#k=<key> path for target using the same
+const ControlPrefix = "/zp/"
+
+// New returns a /zp/p/<encrypted>#k=<key> path for target using the same
 // AES-256-CBC + HMAC-SHA256 envelope as web/zp-core.js.
 func New(target string) (string, error) { return NewWithRand(rand.Reader, target) }
 
@@ -65,7 +67,7 @@ func NewWithRand(random io.Reader, target string) (string, error) {
 	blob = append(blob, iv[:]...)
 	blob = append(blob, ciphertext...)
 	blob = append(blob, tag...)
-	return "/p/" + base64RawURL.EncodeToString(blob) + "#k=" + base64RawURL.EncodeToString(seed[:]), nil
+	return ControlPrefix + "p/" + base64RawURL.EncodeToString(blob) + "#k=" + base64RawURL.EncodeToString(seed[:]), nil
 }
 
 func derive(seed, info []byte) ([]byte, error) {

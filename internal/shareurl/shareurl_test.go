@@ -20,10 +20,10 @@ func TestNewWithRandRoundTripsEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(path, "/p/") || !strings.Contains(path, "#k=") {
+	if !strings.HasPrefix(path, ControlPrefix+"p/") || !strings.Contains(path, "#k=") {
 		t.Fatalf("unexpected share path %q", path)
 	}
-	parts := strings.Split(strings.TrimPrefix(path, "/p/"), "#k=")
+	parts := strings.Split(strings.TrimPrefix(path, ControlPrefix+"p/"), "#k=")
 	if len(parts) != 2 {
 		t.Fatalf("malformed share path %q", path)
 	}

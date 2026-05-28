@@ -6,3 +6,5 @@ web/wasm_exec.js
 web/oxc_parser_wasm_bg.wasm
 node_modules/
 coverage/
+rewriter-rs/target/
+wasm-kernel

@@ -30,6 +30,11 @@ type server struct {
 
 const internalSOCKSMode = "internal"
 
+const (
+	controlPrefix = "/zp/"
+	assetPrefix   = controlPrefix + "assets/"
+)
+
 func main() {
 	var addr string
 	s := &server{}
@@ -48,42 +53,79 @@ func main() {
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
 	switch {
-	case r.URL.Path == "/__zp/ws-pipe":
-		s.handlePipe(w, r)
-	case r.URL.Path == "/__zp/kernel.wasm":
-		s.serveFile(w, r, s.kernelWASM, "application/wasm")
-	case r.URL.Path == "/" || r.URL.Path == "/index.html":
+	case path == "/":
+		http.Redirect(w, r, controlPrefix, http.StatusFound)
+	case path == "/index.html":
+		http.Redirect(w, r, controlPrefix, http.StatusFound)
+	case path == controlPrefix || path == controlPrefix+"index.html":
 		s.serveWeb(w, r, "index.html")
-	case strings.HasPrefix(r.URL.Path, "/p/"):
-		s.serveWeb(w, r, "index.html")
-	case r.URL.Path == "/sw.js":
+	case path == controlPrefix+"sw.js":
 		s.serveWeb(w, r, "sw.js")
-	case strings.HasPrefix(r.URL.Path, "/__zp/error/"):
-		s.safeError(w, r, strings.TrimPrefix(r.URL.Path, "/__zp/error/"), http.StatusBadRequest)
-	case r.URL.Path == "/__zp/zp-core.js":
-		s.serveWeb(w, r, "zp-core.js")
-	case r.URL.Path == "/__zp/runtime-prelude.js":
-		s.serveWeb(w, r, "runtime-prelude.js")
-	case r.URL.Path == "/__zp/js-rewriter.js":
-		s.serveWeb(w, r, "js-rewriter.js")
-	case r.URL.Path == "/__zp/oxc-parser.js":
-		s.serveWeb(w, r, "oxc-parser.js")
-	case r.URL.Path == "/__zp/oxc_parser_wasm_bg.wasm":
-		s.serveWeb(w, r, "oxc_parser_wasm_bg.wasm")
-	case r.URL.Path == "/__zp/worker-prelude.js":
-		s.serveWeb(w, r, "worker-prelude.js")
-	case r.URL.Path == "/__zp/wasm_exec.js":
-		s.serveWeb(w, r, "wasm_exec.js")
-	case r.URL.Path == "/__zp/worker-bootstrap.js":
+	case path == controlPrefix+"ws-pipe":
+		s.handlePipe(w, r)
+	case path == controlPrefix+"kernel.wasm":
+		s.serveFile(w, r, s.kernelWASM, "application/wasm")
+	case strings.HasPrefix(path, controlPrefix+"p/"):
+		s.serveWeb(w, r, "index.html")
+	case strings.HasPrefix(path, controlPrefix+"error/"):
+		s.safeError(w, r, strings.TrimPrefix(path, controlPrefix+"error/"), http.StatusBadRequest)
+	case strings.HasPrefix(path, assetPrefix):
+		s.serveAsset(w, r, strings.TrimPrefix(path, assetPrefix))
+	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
+	case strings.HasPrefix(path, "/p/"):
+		redirectLegacy(w, r, controlPrefix+"p/"+strings.TrimPrefix(path, "/p/"))
+	case strings.HasPrefix(path, "/__zp/"):
+		s.legacyZP(w, r)
+	case path == "/sw.js":
+		redirectLegacy(w, r, controlPrefix+"sw.js")
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
 	}
 }
 
+func redirectLegacy(w http.ResponseWriter, r *http.Request, nextPath string) {
+	u := *r.URL
+	u.Path = nextPath
+	http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
+}
+
+func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/__zp/ws-pipe":
+		redirectLegacy(w, r, controlPrefix+"ws-pipe")
+	case "/__zp/kernel.wasm":
+		redirectLegacy(w, r, controlPrefix+"kernel.wasm")
+	case "/__zp/worker-bootstrap.js":
+		redirectLegacy(w, r, controlPrefix+"worker-bootstrap.js")
+	default:
+		if strings.HasPrefix(r.URL.Path, "/__zp/error/") {
+			redirectLegacy(w, r, controlPrefix+"error/"+strings.TrimPrefix(r.URL.Path, "/__zp/error/"))
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/__zp/")
+		switch name {
+		case "zp-core.js", "runtime-prelude.js", "js-rewriter.js", "rust-rewriter.js", "oxc-parser.js", "oxc_parser_wasm_bg.wasm", "wasm_exec.js", "worker-prelude.js":
+			redirectLegacy(w, r, assetPrefix+name)
+		default:
+			s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
+		}
+	}
+}
+
 func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 	s.serveFile(w, r, filepath.Join(s.webDir, name), mime.TypeByExtension(filepath.Ext(name)))
+}
+
+func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
+	switch name {
+	case "zp-core.js", "runtime-prelude.js", "js-rewriter.js", "rust-rewriter.js", "oxc-parser.js", "oxc_parser_wasm_bg.wasm", "wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
+		s.serveWeb(w, r, name)
+	default:
+		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
+	}
 }
 
 func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, contentType string) {
@@ -110,7 +152,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 }
 
 func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
-	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';importScripts('/__zp/worker-prelude.js');importScripts('/__zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
+	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, body)

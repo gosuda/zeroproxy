@@ -14,12 +14,12 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{"/__zp/zp-core.js", "/__zp/runtime-prelude.js", "/p/", "#k=", "__ZP_SET_BASE", "https://evil.test/", `href="/next"`, `action="submit"`, `formaction="/alt"`, `data-zp-target-url="https://example.com/child"`, "ZeroProxy blocked object"} {
+	for _, want := range []string{"/zp/assets/zp-core.js", "/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, "ZeroProxy blocked object"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\"", `data-zp-target-url="https://example.com/next"`} {
+	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\"", `href="/next"`, `action="submit"`, `formaction="/alt"`} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden %q remained in %s", forbidden, s)
 		}
@@ -98,7 +98,7 @@ func TestTransformPreservesRawScriptAndStyleText(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`content:"x<&>"`, `window.__cfg={"base":new URL("..",location).pathname`, `import("/_app/start.js")`} {
+	for _, want := range []string{`content:"x<&>"`, `__ZP_EXEC_INLINE_SCRIPT(`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("raw script/style text was escaped or corrupted; missing %q in %s", want, s)
 		}
@@ -115,7 +115,7 @@ func TestTransformRewritesPhase2ScriptSourcesAndHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`/__zp/api/script?`, `u=https%3A%2F%2Fexample.com%2Fapp.js`, `kind=classic`, `__zp_runClassic`, `__zp_runEvent`, `Blocked by ZeroProxy rewrite policy`} {
+	for _, want := range []string{`/zp/api/script?`, `u=https%3A%2F%2Fexample.com%2Fapp.js`, `kind=classic`, `__ZP_EXEC_INLINE_SCRIPT(`, `__ZP_EXEC_INLINE_MODULE(`, `__ZP_EXEC_EVENT(`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
@@ -133,7 +133,7 @@ func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/__zp/api/script?`} {
+	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/zp/api/script?`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}

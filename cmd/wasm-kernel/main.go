@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,9 +27,10 @@ import (
 )
 
 type Kernel struct {
-	mu     sync.Mutex
-	engine *zphttp.Engine
-	tabs   map[string]*zphttp.TabState
+	mu           sync.Mutex
+	engine       *zphttp.Engine
+	engineServer string
+	tabs         map[string]*zphttp.TabState
 }
 
 func NewKernel() *Kernel { return &Kernel{tabs: make(map[string]*zphttp.TabState)} }
@@ -43,9 +45,10 @@ func main() {
 	select {}
 }
 
-func (k *Kernel) ensure(ctx context.Context) error {
+func (k *Kernel) ensure(ctx context.Context, servers []string) error {
+	server := selectedRelayServer(servers)
 	k.mu.Lock()
-	ready := k.engine != nil
+	ready := k.engine != nil && k.engineServer == server
 	if ready {
 		if closable, ok := k.engine.Mux.(interface{ IsClosed() bool }); ok && closable.IsClosed() {
 			k.engine = nil
@@ -56,13 +59,7 @@ func (k *Kernel) ensure(ctx context.Context) error {
 	if ready {
 		return nil
 	}
-	loc := js.Global().Get("self").Get("location")
-	proto := "ws:"
-	if loc.Get("protocol").String() == "https:" {
-		proto = "wss:"
-	}
-	raw := proto + "//" + loc.Get("host").String() + "/__zp/ws-pipe"
-	conn, err := wsconn.Dial(ctx, raw)
+	conn, err := wsconn.Dial(ctx, server)
 	if err != nil {
 		return err
 	}
@@ -72,8 +69,9 @@ func (k *Kernel) ensure(ctx context.Context) error {
 		return err
 	}
 	k.mu.Lock()
-	if k.engine == nil {
+	if k.engine == nil || k.engineServer != server {
 		k.engine = &zphttp.Engine{Mux: sess}
+		k.engineServer = server
 		sess = nil
 	}
 	k.mu.Unlock()
@@ -87,7 +85,7 @@ func (k *Kernel) jsInit(this js.Value, args []js.Value) any {
 	return promise(func(resolve, reject js.Value) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := k.ensure(ctx); err != nil {
+		if err := k.ensure(ctx, jsServers(args)); err != nil {
 			reject.Invoke(jsError("TARGET_CONNECT_FAILED"))
 			return
 		}
@@ -124,7 +122,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 				cancel()
 			}
 		}()
-		if err := k.ensure(ctx); err != nil {
+		if err := k.ensure(ctx, requestServers(reqv)); err != nil {
 			resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway))
 			return
 		}
@@ -155,7 +153,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			}
 			pr, pw := io.Pipe()
 			go func() {
-				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL), RuntimeToken: req.Header.Get("X-Zp-Runtime-Token"), RewriteScript: rewriteScript})
+				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL), RuntimeToken: req.Header.Get("X-Zp-Runtime-Token"), Servers: headerServers(req.Header.Get("X-Zp-Relay-Servers")), RewriteScript: rewriteScript})
 				closeErr := source.Close()
 				if err != nil {
 					_ = pw.CloseWithError(err)
@@ -200,7 +198,7 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 	opts := args[0]
 	return promise(func(resolve, reject js.Value) {
 		ctx, cancel := context.WithCancel(context.Background())
-		if err := k.ensure(ctx); err != nil {
+		if err := k.ensure(ctx, jsServers(args)); err != nil {
 			cancel()
 			reject.Invoke(jsError("TARGET_CONNECT_FAILED"))
 			return
@@ -232,6 +230,58 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 		}
 		resolve.Invoke(stream)
 	})
+}
+
+func selectedRelayServer(servers []string) string {
+	if len(servers) > 0 && servers[0] != "" {
+		return servers[0]
+	}
+	loc := js.Global().Get("self").Get("location")
+	proto := "ws:"
+	if loc.Get("protocol").String() == "https:" {
+		proto = "wss:"
+	}
+	return proto + "//" + loc.Get("host").String() + "/zp/ws-pipe"
+}
+
+func jsServers(args []js.Value) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	v := args[0]
+	if v.IsUndefined() || v.IsNull() {
+		return nil
+	}
+	return jsStringArray(v.Get("servers"))
+}
+
+func requestServers(v js.Value) []string {
+	if v.IsUndefined() || v.IsNull() {
+		return nil
+	}
+	headers := v.Get("headers")
+	if headers.IsUndefined() || headers.IsNull() || headers.Get("get").Type() != js.TypeFunction {
+		return nil
+	}
+	raw := headers.Call("get", "X-ZP-Relay-Servers")
+	if raw.IsUndefined() || raw.IsNull() {
+		raw = headers.Call("get", "X-Zp-Relay-Servers")
+	}
+	if raw.IsUndefined() || raw.IsNull() {
+		return nil
+	}
+	return headerServers(raw.String())
+}
+
+func headerServers(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func (k *Kernel) tabFor(req *http.Request) *zphttp.TabState {
@@ -370,6 +420,18 @@ func safeResponse(code string, status int, host ...string) js.Value {
 	return js.Global().Get("Response").New(body, map[string]any{"status": status, "headers": h})
 }
 
+func rewriteScript(source, kind string) (string, bool) {
+	r := js.Global().Get("__zp_rewrite_script")
+	if r.IsUndefined() || r.IsNull() || r.Type() != js.TypeFunction {
+		return "", false
+	}
+	code := r.Invoke(source, kind, "").String()
+	if code == "" {
+		return "", false
+	}
+	return code, true
+}
+
 func htmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;").Replace(s)
 }
@@ -401,21 +463,6 @@ func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }
 func isDocumentRequest(req *http.Request) bool { return req.Header.Get("X-Zp-Document-Request") == "1" }
-func rewriteScript(source, kind string) (string, bool) {
-	r := js.Global().Get("ZPRewriter")
-	if r.IsUndefined() || r.IsNull() || r.Get("ready").Type() != js.TypeBoolean || !r.Get("ready").Bool() {
-		return "", false
-	}
-	out := r.Call("rewriteScript", source, map[string]any{"kind": kind, "strict": true})
-	if out.IsUndefined() || out.IsNull() || !out.Get("ok").Bool() {
-		return "", false
-	}
-	code := out.Get("code")
-	if code.Type() != js.TypeString {
-		return "", false
-	}
-	return code.String(), true
-}
 
 type closeWithSource struct {
 	io.ReadCloser

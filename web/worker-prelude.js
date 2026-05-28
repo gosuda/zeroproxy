@@ -2,7 +2,7 @@
   'use strict';
   if (self.__ZP_WORKER_PRELUDE) return;
   Object.defineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
-  importScripts('/__zp/zp-core.js');
+  importScripts('/zp/assets/zp-core.js');
   const nativeFetch = self.fetch.bind(self);
   const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
@@ -81,6 +81,13 @@
   expose('__zp_has', has);
   expose('__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
   expose('__zp_ownKeys', ownKeys);
+  expose('__zp_module_url', (specifier, referrer) => {
+    const spec = String(specifier);
+    if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
+    const u = new URL(spec, referrer || base.href);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
+    return '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href);
+  });
   try { self.eval = blockedDynamic; } catch {}
   try { self.Function = blockedDynamic; } catch {}
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
@@ -109,7 +116,7 @@
   self.fetch = async (input, init={}) => {
     const headers = new Headers(init.headers || input.headers || {});
     const body = init.body != null ? init.body : (input instanceof Request && input.method !== 'GET' && input.method !== 'HEAD' ? await input.clone().arrayBuffer() : null);
-    return nativeFetch('/__zp/api/fetch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tabId, url: ZP.canonicalTargetURL(input.url || input, base.href).href, init:{ method:init.method || input.method || 'GET', headers: Array.from(headers.entries()), body: await bodyToBase64(body), credentials: init.credentials, mode: init.mode, referrer: init.referrer, redirect: init.redirect, cache: init.cache, integrity: init.integrity } }) });
+    return nativeFetch('/zp/api/fetch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tabId, url: ZP.canonicalTargetURL(input.url || input, base.href).href, init:{ method:init.method || input.method || 'GET', headers: Array.from(headers.entries()), body: await bodyToBase64(body), credentials: init.credentials, mode: init.mode, referrer: init.referrer, redirect: init.redirect, cache: init.cache, integrity: init.integrity } }) });
   };
   self.XMLHttpRequest = undefined;
   self.WebSocket = function(){ blocked(); };
@@ -119,9 +126,9 @@
   function importScriptURL(raw) {
     const value = String(raw);
     const internal = new URL(value, self.location.href);
-    if (internal.origin === self.location.origin && internal.pathname === '/__zp/api/worker-script') return internal.pathname + internal.search + internal.hash;
+    if (internal.origin === self.location.origin && internal.pathname === '/zp/api/worker-script') return internal.pathname + internal.search + internal.hash;
     const parsed = new URL(value, base.href);
-    return '/__zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
+    return '/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
   }
   self.importScripts = (...urls) => nativeImportScripts(...urls.map(importScriptURL));
 })();

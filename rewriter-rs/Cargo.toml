@@ -1,0 +1,16 @@
+[package]
+name = "zp-rewriter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oxc_allocator = "0.60"
+oxc_ast = "0.60"
+oxc_parser = "0.60"
+oxc_span = "0.60"
+oxc_syntax = "0.60"
+wasm-bindgen = "0.2"

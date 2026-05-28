@@ -1,9 +1,9 @@
-/* ZeroProxy Phase 2 JavaScript rewrite policy. Classic script for Service Worker and target-runtime use. */
+/* ZeroProxy Phase 3 JavaScript rewrite policy. Rust-WASM contract with strict JS fallback for local tests. */
 (() => {
   'use strict';
   if (globalThis.ZPRewriter) return;
 
-  const VERSION = 'phase2-oxc-abi-2';
+  const VERSION = 'phase3-rust-wasm-ast-1';
   const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   const BLOCK_EXPR = "(()=>{" + BLOCK_CODE + "})()";
   const GLOBALS = new Set(['window', 'self', 'globalThis', 'location', 'document', 'history', 'top', 'parent', 'opener', 'frames', 'WebSocket', 'eval', 'Function', 'AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction']);
@@ -31,6 +31,14 @@
     ready = true;
     return true;
   }
+  function initSync(options = {}) {
+    if (ready) return true;
+    const p = options.parser || globalThis.OXCParser;
+    if (!p || typeof p.parseSync !== 'function') throw new Error('REALM_INJECTION_FAILURE');
+    parser = p;
+    ready = true;
+    return true;
+  }
 
   function normalizeKind(kind) {
     kind = String(kind || 'classic').toLowerCase();
@@ -48,6 +56,14 @@
   function rewriteScript(source, options = {}) {
     source = String(source || '');
     const kind = normalizeKind(options.scriptKind || options.kind);
+    const rust = globalThis.ZPRustRewriter;
+    if (rust && typeof rust.rewriteScript === 'function') {
+      try {
+        const out = rust.rewriteScript(source, kind, options.url || options.targetUrl || '', options.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/');
+        if (out && out.ok && typeof out.code === 'string') return ok(out.code, []);
+        if (out && out.error === 'PARSE_FAILED') return blocked('PARSE_FAILED');
+      } catch {}
+    }
     if (!ready || !parser) return blocked('REWRITE_FAILED');
     if (kind === 'event-handler') return rewriteEventHandler(source, options);
     if (kind === 'function') return rewriteFunctionBody(source, options);
@@ -108,6 +124,7 @@
     const globalIds = new WeakSet();
     const renderedCache = new WeakMap();
     const moduleTargetURL = options.module ? String(options.targetUrl || '') : '';
+    const controlPrefix = String(options.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/');
 
     function pushScope(names) { scopeStack.push(names || new Set()); }
     function popScope() { scopeStack.pop(); }
@@ -132,14 +149,29 @@
       return '';
     }
     function moduleSpecifier(raw) {
-      if (!moduleTargetURL) return raw;
+      const spec = String(raw);
+      if (!moduleTargetURL) return spec;
+      if (isBareSpecifier(spec)) return resolveImportMap(spec) || spec;
+      if (hasScheme(spec) && !/^https?:/i.test(spec)) return controlPrefix + 'error/POLICY_BLOCKED';
       try {
-        const abs = new URL(String(raw), moduleTargetURL);
-        if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return raw;
-        return '/__zp/api/script?kind=module&u=' + encodeURIComponent(abs.href);
+        const abs = new URL(spec, moduleTargetURL);
+        if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return controlPrefix + 'error/POLICY_BLOCKED';
+        return controlPrefix + 'api/script?kind=module&u=' + encodeURIComponent(abs.href);
       } catch {
-        return raw;
+        return controlPrefix + 'error/POLICY_BLOCKED';
       }
+    }
+    function isBareSpecifier(spec) { return !spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !hasScheme(spec); }
+    function hasScheme(spec) { return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec); }
+    function resolveImportMap(spec) {
+      const map = options.importMap;
+      if (!map || typeof map !== 'object') return '';
+      const imports = map.imports && typeof map.imports === 'object' ? map.imports : null;
+      if (!imports) return '';
+      if (typeof imports[spec] === 'string') return moduleSpecifier(imports[spec]);
+      let best = '';
+      for (const key of Object.keys(imports)) if (key.endsWith('/') && spec.startsWith(key) && key.length > best.length && typeof imports[key] === 'string') best = key;
+      return best ? moduleSpecifier(imports[best] + spec.slice(best.length)) : '';
     }
     function isGlobalIdentifier(node) { return node && node.type === 'Identifier' && GLOBALS.has(node.name) && !declared(node.name); }
     function isPattern(node) { return node && (node.type === 'ObjectPattern' || node.type === 'ArrayPattern' || node.type === 'AssignmentPattern' || node.type === 'RestElement'); }
@@ -184,14 +216,28 @@
         for (const p of node.properties || []) collectPattern(p.value || p.argument || p, names);
       }
     }
-    function collectBodyBindings(body, names) {
-      for (const stmt of body || []) {
-        if (!stmt) continue;
-        if (stmt.type === 'FunctionDeclaration' || stmt.type === 'ClassDeclaration') collectPattern(stmt.id, names);
-        if (stmt.type === 'VariableDeclaration') for (const d of stmt.declarations || []) collectPattern(d.id, names);
-        if (stmt.type === 'ImportDeclaration') for (const s of stmt.specifiers || []) collectPattern(s.local, names);
-      }
+    function collectBodyBindings(body, names, mode) {
+      for (const stmt of body || []) collectStatementBindings(stmt, names, mode || 'block');
       return names;
+    }
+    function collectStatementBindings(stmt, names, mode) {
+      if (!stmt) return;
+      if (stmt.type === 'ImportDeclaration') { for (const s of stmt.specifiers || []) collectPattern(s.local, names); return; }
+      if (stmt.type === 'FunctionDeclaration') { collectPattern(stmt.id, names); return; }
+      if (stmt.type === 'ClassDeclaration') { collectPattern(stmt.id, names); return; }
+      if (stmt.type === 'VariableDeclaration') {
+        if (mode === 'function' ? stmt.kind === 'var' : (mode === 'function-root' || stmt.kind !== 'var')) for (const d of stmt.declarations || []) collectPattern(d.id, names);
+        return;
+      }
+      if (mode !== 'function' && mode !== 'function-root') return;
+      const childMode = mode === 'function-root' ? 'function' : mode;
+      if (stmt.type === 'BlockStatement') { for (const child of stmt.body || []) collectStatementBindings(child, names, childMode); return; }
+      if (stmt.type === 'IfStatement') { collectStatementBindings(stmt.consequent, names, childMode); collectStatementBindings(stmt.alternate, names, childMode); return; }
+      if (stmt.type === 'ForStatement') { collectStatementBindings(stmt.init, names, childMode); collectStatementBindings(stmt.body, names, childMode); return; }
+      if (stmt.type === 'ForInStatement' || stmt.type === 'ForOfStatement') { collectStatementBindings(stmt.left, names, childMode); collectStatementBindings(stmt.body, names, childMode); return; }
+      if (stmt.type === 'WhileStatement' || stmt.type === 'DoWhileStatement' || stmt.type === 'WithStatement' || stmt.type === 'LabeledStatement') { collectStatementBindings(stmt.body, names, childMode); return; }
+      if (stmt.type === 'SwitchStatement') for (const c of stmt.cases || []) for (const child of c.consequent || []) collectStatementBindings(child, names, childMode);
+      if (stmt.type === 'TryStatement') { collectStatementBindings(stmt.block, names, childMode); collectStatementBindings(stmt.handler && stmt.handler.body, names, childMode); collectStatementBindings(stmt.finalizer, names, childMode); }
     }
     function collectParams(node, names) { for (const p of node.params || []) collectPattern(p, names); return names; }
 
@@ -286,13 +332,13 @@
       if (!node || typeof node.type !== 'string') return false;
       switch (node.type) {
         case 'Program': {
-          pushScope(collectBodyBindings(node.body, new Set()));
+          pushScope(collectBodyBindings(node.body, new Set(), 'function-root'));
           for (const child of node.body || []) walk(child, node, 'body');
           popScope();
           return true;
         }
         case 'BlockStatement': {
-          pushScope(collectBodyBindings(node.body, new Set()));
+          pushScope(collectBodyBindings(node.body, new Set(), 'block'));
           for (const child of node.body || []) walk(child, node, 'body');
           popScope();
           return true;
@@ -301,7 +347,7 @@
         case 'FunctionExpression':
         case 'ArrowFunctionExpression': {
           if (node.type !== 'ArrowFunctionExpression' && node.id) declare(node.id.name);
-          pushScope(collectParams(node, new Set()));
+          pushScope(collectBodyBindings(node.body && node.body.body || [], collectParams(node, new Set()), 'function-root'));
           if (node.id && node.type === 'FunctionExpression') declare(node.id.name);
           for (const param of node.params || []) walkPattern(param);
           if (node.body) walk(node.body, node, 'body');
@@ -359,7 +405,11 @@
             addReplacement(node.source, JSON.stringify(moduleSpecifier(spec)), 95);
             return true;
           }
-          break;
+          addReplacement(node.source, '__zp_module_url(' + exprCode(node.source) + ',' + JSON.stringify(moduleTargetURL) + ')', 95);
+          return true;
+        }
+        case 'MetaProperty': {
+          return false;
         }
         case 'CallExpression':
         case 'NewExpression': {
@@ -439,6 +489,10 @@
         }
         case 'MemberExpression':
         case 'OptionalMemberExpression': {
+          if (node.object && node.object.type === 'MetaProperty' && src(node.object) === 'import.meta' && propName(node.property, node.computed) === 'url' && moduleTargetURL) {
+            addReplacement(node, JSON.stringify(moduleTargetURL), 90);
+            return true;
+          }
           if (memberNeedsHelper(node)) {
             addReplacement(node, render(node), 80);
             return true;
@@ -542,6 +596,6 @@
     return { code, diagnostics };
   }
 
-  const api = { VERSION, init, rewriteScript, blockSource, get ready() { return ready; } };
+  const api = { VERSION, init, initSync, rewriteScript, blockSource, get ready() { return ready; } };
   Object.defineProperty(globalThis, 'ZPRewriter', { value: Object.freeze(api), enumerable: false, configurable: false, writable: false });
 })();

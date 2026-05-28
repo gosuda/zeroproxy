@@ -12,6 +12,9 @@ const webSrc = path.join(repoRoot, 'web');
 const webOut = path.join(outRoot, 'web');
 const kernelOut = path.join(outRoot, 'kernel.wasm');
 const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
+const cargoHome = process.env.CARGO_HOME || path.join(process.env.HOME || '', '.cargo');
+const cargoBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
+const wasmBindgenBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen');
 const minify = args.minify === true;
 
 if (args.help) {
@@ -94,6 +97,7 @@ async function buildWeb() {
 
   const goWasmExec = await readGoWasmExec();
   const oxcParser = await makeOXCParserClassic();
+  const rustRewriter = await makeRustRewriterClassic();
   const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
 
@@ -104,10 +108,11 @@ async function buildWeb() {
   await writeBundled('zp-core.js', [await readSource('zp-core.js')]);
   await writeBundled('runtime-prelude.js', [await readSource('runtime-prelude.js')]);
   await writeBundled('js-rewriter.js', [await readSource('js-rewriter.js')]);
+  await writeBundled('rust-rewriter.js', [rustRewriter]);
   await writeBundled('oxc-parser.js', [oxcParser]);
   await writeBundled('wasm_exec.js', [goWasmExec]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
-  await writeBundled('sw.js', [await readSource('zp-core.js'), oxcParser, await readSource('js-rewriter.js'), goWasmExec, serviceWorker]);
+  await writeBundled('sw.js', [await readSource('zp-core.js'), rustRewriter, oxcParser, await readSource('js-rewriter.js'), goWasmExec, serviceWorker]);
 
   await copyFile(resolveNodeModule('@oxc-parser/wasm/web/oxc_parser_wasm_bg.wasm'), path.join(webOut, 'oxc_parser_wasm_bg.wasm'));
 }
@@ -137,28 +142,41 @@ async function writeBundled(fileName, parts) {
 }
 
 function stripServiceWorkerImports(source) {
-  return source.replace(/^importScripts\('\/__zp\/(?:zp-core|oxc-parser|js-rewriter|wasm_exec)\.js'\);\n/gm, '');
+  return source.replace(/^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|oxc-parser|js-rewriter|wasm_exec)\.js'\);\n/gm, '');
 }
 
 function stripWorkerPreludeImports(source) {
-  return source.replace(/^\s*importScripts\('\/__zp\/zp-core\.js'\);\n/m, '');
+  return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\n/m, '');
 }
 
 async function makeOXCParserClassic() {
   const sourcePath = resolveNodeModule('@oxc-parser/wasm/web/oxc_parser_wasm.js');
+  const wasmPath = resolveNodeModule('@oxc-parser/wasm/web/oxc_parser_wasm_bg.wasm');
   let source = await readFile(sourcePath, 'utf8');
+  const wasmBase64 = (await readFile(wasmPath)).toString('base64');
   source = source.replace(
     "module_or_path = new URL('oxc_parser_wasm_bg.wasm', import.meta.url);",
-    "module_or_path = '/__zp/oxc_parser_wasm_bg.wasm';",
+    "module_or_path = '/zp/assets/oxc_parser_wasm_bg.wasm';",
   );
   source = source.replace(/^export\s+(function|class)\s+/gm, '$1 ');
   source = source.replace(/\nexport \{ initSync \};\nexport default __wbg_init;\n?$/, '');
   if (/\bexport\b|import\.meta/.test(source)) {
     throw new Error('unsupported @oxc-parser/wasm glue shape');
   }
-  return `/* Generated from @oxc-parser/wasm web glue; classic-script wrapper for ZeroProxy. */\n(() => {\n${source}\nObject.defineProperty(globalThis, 'OXCParser', { value: Object.freeze({ init: __wbg_init, initSync, parseSync }), enumerable: false, configurable: false, writable: false });\n})();\n`;
+  return `/* Generated from @oxc-parser/wasm web glue; classic-script wrapper for ZeroProxy. */\n(() => {\n${source}\nconst __zp_wasm_base64 = ${JSON.stringify(wasmBase64)};\nconst __zp_wasm_bytes = Uint8Array.from(atob(__zp_wasm_base64), ch => ch.charCodeAt(0));\ninitSync({ module: __zp_wasm_bytes });\nObject.defineProperty(globalThis, 'OXCParser', { value: Object.freeze({ initSync, parseSync }), enumerable: false, configurable: false, writable: false });\n})();\n`;
 }
-
+async function makeRustRewriterClassic() {
+  const crateDir = path.join(repoRoot, 'rewriter-rs');
+  const targetDir = path.join(crateDir, 'target');
+  run(cargoBinPath, ['build', '--manifest-path', path.join(crateDir, 'Cargo.toml'), '--target', 'wasm32-unknown-unknown', '--release']);
+  const bindgenOut = path.join(targetDir, 'wasm-bindgen');
+  await rm(bindgenOut, { recursive: true, force: true });
+  await mkdir(bindgenOut, { recursive: true });
+  run(wasmBindgenBinPath, ['--target', 'no-modules', '--out-dir', bindgenOut, path.join(targetDir, 'wasm32-unknown-unknown', 'release', 'zp_rewriter.wasm')]);
+  const js = await readFile(path.join(bindgenOut, 'zp_rewriter.js'), 'utf8');
+  const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString('base64');
+  return `/* Generated from Rust WASM ZeroProxy rewriter. */\n${js}\n(() => {\nconst __zp_rust_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));\nwasm_bindgen.initSync({ module: __zp_rust_bytes });\nObject.defineProperty(globalThis, 'ZPRustRewriter', { value: Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_script(String(source || ''), String(kind || 'classic'), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error }; } finally { out.free && out.free(); } } }), enumerable: false, configurable: false, writable: false });\n})();\n`;
+}
 async function readGoWasmExec() {
   const goroot = goEnv('GOROOT');
   const candidates = [

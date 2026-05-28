@@ -22,6 +22,7 @@ type Options struct {
 	TargetURL      *url.URL
 	DocumentCookie string
 	RuntimeToken   string
+	Servers        []string
 	RewriteScript  func(source, kind string) (string, bool)
 }
 
@@ -85,10 +86,12 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				continue
 			}
 			if tok.Type == xhtml.EndTagToken && strings.EqualFold(tok.Data, rawTextTag) {
-				if rawTextKind != "" {
+				if rawTextKind == "importmap" {
+					out.WriteString(rewriteImportMap(rawTextBuf.String(), opt))
+				} else if rawTextKind != "" {
 					out.WriteString(rewriteInlineScript(rawTextBuf.String(), rawTextKind, opt))
-					rawTextBuf.Reset()
 				}
+				rawTextBuf.Reset()
 				out.WriteString(tok.String())
 				rawTextTag = ""
 				rawTextKind = ""
@@ -150,7 +153,11 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 			if tag == "script" && tok.Type == xhtml.StartTagToken {
 				rawTextTag = tag
 				if attr(tok, "src") == "" {
-					rawTextKind = executableScriptKind(tok)
+					if hasAttrValue(tok, "type", "importmap") {
+						rawTextKind = "importmap"
+					} else {
+						rawTextKind = executableScriptKind(tok)
+					}
 					rawTextBuf.Reset()
 				}
 			} else if tag == "style" && tok.Type == xhtml.StartTagToken {
@@ -167,11 +174,12 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 }
 
 type bootConfig struct {
-	TabID          string `json:"tabId"`
-	EntryID        string `json:"entryId"`
-	TargetURL      string `json:"targetUrl"`
-	DocumentCookie string `json:"documentCookie"`
-	RuntimeToken   string `json:"runtimeToken"`
+	TabID          string   `json:"tabId"`
+	EntryID        string   `json:"entryId"`
+	TargetURL      string   `json:"targetUrl"`
+	DocumentCookie string   `json:"documentCookie"`
+	RuntimeToken   string   `json:"runtimeToken"`
+	Servers        []string `json:"servers,omitempty"`
 }
 
 func runtimePrelude(opt Options) string {
@@ -181,12 +189,13 @@ func runtimePrelude(opt Options) string {
 		TargetURL:      opt.TargetURL.String(),
 		DocumentCookie: opt.DocumentCookie,
 		RuntimeToken:   opt.RuntimeToken,
+		Servers:        opt.Servers,
 	})
 	var b strings.Builder
-	b.Grow(len(bootJSON) + 170)
-	b.WriteString(`<script nonce=zp src=/__zp/zp-core.js></script><script nonce=zp id=__zp-boot type=application/json>`)
+	b.Grow(len(bootJSON) + 262)
+	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp src=/zp/assets/oxc-parser.js></script><script nonce=zp src=/zp/assets/js-rewriter.js></script><script nonce=zp id=__zp-boot type=application/json>`)
 	b.Write(bootJSON)
-	b.WriteString(`</script><script nonce=zp src=/__zp/runtime-prelude.js></script>`)
+	b.WriteString(`</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()
 }
 
@@ -226,7 +235,7 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 				a.Val = wrapped
 				dataTarget = target
 			} else {
-				a.Val = "/__zp/error/POLICY_BLOCKED"
+				a.Val = shareurl.ControlPrefix + "error/POLICY_BLOCKED"
 				if trimmed != "" {
 					attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
 				}
@@ -242,10 +251,8 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			}
 			wrapped, target, ok := wrapAttrURL(a.Val, opt, isDocumentNavigationAttr(tag, key))
 			if ok {
-				if tag == "iframe" || tag == "frame" {
-					a.Val = wrapped
-					dataTarget = target
-				}
+				a.Val = wrapped
+				dataTarget = target
 			} else if isDocumentNavigationAttr(tag, key) {
 				a.Val = "#"
 				attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
@@ -336,21 +343,22 @@ func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok 
 
 func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string, ok bool) {
 	s := strings.TrimSpace(raw)
+	blocked := shareurl.ControlPrefix + "error/POLICY_BLOCKED"
 	if s == "" || strings.HasPrefix(s, "#") || hasExecutableURLScheme(s) {
-		return "/__zp/error/POLICY_BLOCKED", "", false
+		return blocked, "", false
 	}
 	u, err := url.Parse(s)
 	if err != nil {
-		return "/__zp/error/POLICY_BLOCKED", "", false
+		return blocked, "", false
 	}
 	abs := opt.TargetURL.ResolveReference(u)
 	if abs.Scheme != "http" && abs.Scheme != "https" {
-		return "/__zp/error/POLICY_BLOCKED", "", false
+		return blocked, "", false
 	}
 	q := url.Values{}
 	q.Set("u", abs.String())
 	q.Set("kind", kind)
-	return "/__zp/api/script?" + q.Encode(), abs.String(), true
+	return shareurl.ControlPrefix + "api/script?" + q.Encode(), abs.String(), true
 }
 
 func executableScriptKind(tok xhtml.Token) string {
@@ -365,24 +373,64 @@ func executableScriptKind(tok xhtml.Token) string {
 }
 
 func rewriteInlineScript(source, kind string, opt Options) string {
-	if opt.RewriteScript != nil {
-		if out, ok := opt.RewriteScript(source, kind); ok {
-			return out
-		}
-	}
 	if kind == "module" {
-		return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');`
+		payload, _ := json.Marshal(source)
+		return `__ZP_EXEC_INLINE_MODULE(` + string(payload) + `);`
 	}
-	return ";__zp_runClassic(function(__zp_scope){with(__zp_scope){\n" + source + "\n}});"
+	payload, _ := json.Marshal(source)
+	return `__ZP_EXEC_INLINE_SCRIPT(` + string(payload) + `);`
 }
 
 func rewriteEventHandler(source string, opt Options) string {
-	if opt.RewriteScript != nil {
-		if out, ok := opt.RewriteScript(source, "event-handler"); ok {
-			return out
+	payload, _ := json.Marshal(source)
+	return `return __ZP_EXEC_EVENT(this,event,` + string(payload) + `)`
+}
+func rewriteImportMap(source string, opt Options) string {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(source), &doc); err != nil {
+		return `{}`
+	}
+	rewriteAddress := func(raw string) string {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			return shareurl.ControlPrefix + "error/POLICY_BLOCKED"
+		}
+		abs := opt.TargetURL.ResolveReference(u)
+		if abs.Scheme != "http" && abs.Scheme != "https" {
+			return shareurl.ControlPrefix + "error/POLICY_BLOCKED"
+		}
+		q := url.Values{}
+		q.Set("kind", "module")
+		q.Set("u", abs.String())
+		return shareurl.ControlPrefix + "api/script?" + q.Encode()
+	}
+	if imports, ok := doc["imports"].(map[string]any); ok {
+		for k, v := range imports {
+			if s, ok := v.(string); ok {
+				imports[k] = rewriteAddress(s)
+			}
 		}
 	}
-	return "return __zp_runEvent(this,event,function(__zp_scope){with(__zp_scope){\n" + source + "\n}})"
+	if scopes, ok := doc["scopes"].(map[string]any); ok {
+		next := make(map[string]any, len(scopes))
+		for scope, rawEntries := range scopes {
+			scopeKey := rewriteAddress(scope)
+			entries, _ := rawEntries.(map[string]any)
+			out := make(map[string]any, len(entries))
+			for k, v := range entries {
+				if s, ok := v.(string); ok {
+					out[k] = rewriteAddress(s)
+				}
+			}
+			next[scopeKey] = out
+		}
+		doc["scopes"] = next
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return `{}`
+	}
+	return string(b)
 }
 
 func injectSrcdoc(src string, opt Options) string {
