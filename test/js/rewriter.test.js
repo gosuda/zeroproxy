@@ -7,10 +7,33 @@ const path = require('node:path');
 const vm = require('node:vm');
 const oxc = require('@oxc-parser/wasm');
 
+let builtRustAssetPromise = null;
+
 async function loadRewriter() {
   if (!globalThis.ZPRewriter) vm.runInThisContext(fs.readFileSync('web/js-rewriter.js', 'utf8'), { filename: 'web/js-rewriter.js' });
   await globalThis.ZPRewriter.init({ parser: oxc });
   return globalThis.ZPRewriter;
+}
+
+function loadBuiltRustContext() {
+  if (!builtRustAssetPromise) {
+    builtRustAssetPromise = (async () => {
+      const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zp-rust-unit-'));
+      const result = childProcess.spawnSync('node', ['scripts/build.mjs', '--web-only', '--out', outDir], {
+        cwd: path.resolve(__dirname, '../..'),
+        encoding: 'utf8',
+      });
+      if (result.status !== 0) {
+        throw new Error(`node scripts/build.mjs --web-only --out ${outDir} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+      }
+      const ctx = { console, atob, btoa, TextEncoder, TextDecoder, Uint8Array, WebAssembly, FinalizationRegistry, URL, globalThis: null };
+      ctx.globalThis = ctx;
+      vm.createContext(ctx);
+      vm.runInContext(fs.readFileSync(path.join(outDir, 'web', 'rust-rewriter.js'), 'utf8'), ctx, { filename: 'rust-rewriter.js' });
+      return ctx;
+    })();
+  }
+  return builtRustAssetPromise;
 }
 test('rewriter prefers Rust engine when available', async () => {
   vm.runInThisContext(fs.readFileSync('web/js-rewriter.js', 'utf8'), { filename: 'web/js-rewriter.js' });
@@ -20,19 +43,46 @@ test('rewriter prefers Rust engine when available', async () => {
   assert.equal(out.ok, true);
   assert.equal(out.code, '/*rust:classic:https://example.com/app.js:/zp/*/');
 });
-test('built Rust rewriter asset rewrites live code paths', () => {
-  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zp-rust-unit-'));
-  childProcess.execFileSync('node', ['scripts/build.mjs', '--web-only', '--out', outDir], { cwd: path.resolve(__dirname, '../..'), stdio: 'ignore' });
-  const ctx = { console, atob, btoa, TextEncoder, TextDecoder, Uint8Array, WebAssembly, FinalizationRegistry, URL, globalThis: null };
-  ctx.globalThis = ctx;
-  vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(path.join(outDir, 'web', 'rust-rewriter.js'), 'utf8'), ctx, { filename: 'rust-rewriter.js' });
-  const assign = ctx.ZPRustRewriter.rewriteScript('window.location.hash += \"-tail\";', 'classic', 'https://example.com/app.js', '/zp/');
-  const meta = ctx.ZPRustRewriter.rewriteScript('new URL(\"/worker-fixture.js\", import.meta.url).href;', 'module', 'https://example.com/module-worker.js', '/zp/');
+test('built Rust rewriter asset rewrites live code paths', async () => {
+  const ctx = await loadBuiltRustContext();
+  const assign = ctx.ZPRustRewriter.rewriteScript('window.location.hash += "-tail"; document.defaultView.location.href;', 'classic', 'https://example.com/app.js', '/zp/');
+  const meta = ctx.ZPRustRewriter.rewriteScript('new URL("/worker-fixture.js", import.meta.url).href;', 'module', 'https://example.com/module-worker.js', '/zp/');
+  const dynamic = ctx.ZPRustRewriter.rewriteScript('export async function load(name) { return import("./chunks/" + name + ".js"); }', 'module', 'https://example.com/assets/main.js', '/zp/');
   assert.equal(assign.ok, true);
-  assert.ok(assign.code.includes('__zp_assign(__zp_get(__zp_get(globalThis,\"window\"),\"location\"),\"hash\"'));
+  assert.ok(assign.code.includes('__zp_assign(__zp_get(__zp_get(globalThis,"window"),"location"),"hash"'));
+  assert.ok(assign.code.includes('__zp_get(__zp_get(globalThis,"document"),"defaultView")'));
   assert.equal(meta.ok, true);
-  assert.ok(meta.code.includes('\"https://example.com/module-worker.js\"'));
+  assert.ok(meta.code.includes('https://example.com/module-worker.js'));
+  assert.equal(dynamic.ok, true);
+  assert.ok(dynamic.code.includes('__zp_module_url('));
+  assert.ok(dynamic.code.includes('https://example.com/assets/main.js'));
+});
+
+test('built Rust rewriter asset reports parse failures', async () => {
+  const ctx = await loadBuiltRustContext();
+  const out = ctx.ZPRustRewriter.rewriteScript('if (', 'classic', 'https://example.com/app.js', '/zp/');
+  assert.equal(out.ok, false);
+  assert.equal(out.error, 'PARSE_FAILED');
+});
+
+test('JS wrapper falls back to JS engine for import-map and event-handler paths', async () => {
+  const ctx = await loadBuiltRustContext();
+  globalThis.ZPRustRewriter = ctx.ZPRustRewriter;
+  const rewriter = await loadRewriter();
+  const handler = rewriter.rewriteScript('return location.href', { kind: 'event-handler', targetUrl: 'https://example.com/' });
+  assert.equal(handler.ok, true);
+  assert.match(handler.code, /__zp_runEvent/);
+  const fnBody = rewriter.rewriteScript('return location.href;', { kind: 'function', targetUrl: 'https://example.com/' });
+  assert.equal(fnBody.ok, true);
+  assert.ok(fnBody.code.includes('__zp_get(globalThis,"location")'));
+  const importMap = rewriter.rewriteScript('import React from \"react\";', {
+    kind: 'module',
+    targetUrl: 'https://example.com/app.js',
+    importMap: { imports: { react: 'https://cdn.example/react.js' } },
+  });
+  delete globalThis.ZPRustRewriter;
+  assert.equal(importMap.ok, true);
+  assert.ok(importMap.code.includes('https%3A%2F%2Fcdn.example%2Freact.js'));
 });
 
 test('OXC rewriter virtualizes dangerous globals without rewriting local bindings', async () => {

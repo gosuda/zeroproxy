@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    name: Go, JavaScript, Puppeteer, and build checks
+    name: Go, Rust, JavaScript, Puppeteer, and build checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -28,21 +28,33 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
           cache: npm
-
       - name: Print toolchain versions
         run: |
           go version
+          rustc --version
+          cargo --version
           node --version
           npm --version
 
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
       - name: Install Node dependencies
         run: npm ci
+
+      - name: Run Rust rewriter tests
+        run: cargo test --manifest-path rewriter-rs/Cargo.toml
 
       - name: Run Go tests
         run: go test ./...

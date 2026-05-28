@@ -59,7 +59,6 @@ struct Replacement {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScopeMode {
     FunctionRoot,
-    Function,
     Block,
 }
 
@@ -216,12 +215,41 @@ impl<'a> Rewriter<'a> {
             Statement::ImportDeclaration(decl) => self.add_replacement(decl.source.span, format!("{:?}", self.module_specifier(decl.source.value.as_str())), 95),
             Statement::ExportNamedDeclaration(decl) => {
                 if let Some(source) = &decl.source { self.add_replacement(source.span, format!("{:?}", self.module_specifier(source.value.as_str())), 95); }
+                if let Some(inner) = &decl.declaration { self.walk_declaration(inner); }
             }
             Statement::ExportAllDeclaration(decl) => self.add_replacement(decl.source.span, format!("{:?}", self.module_specifier(decl.source.value.as_str())), 95),
+            Statement::ExportDefaultDeclaration(decl) => self.walk_export_default(decl),
             _ => {}
         }
     }
-
+    fn walk_declaration(&mut self, decl: &Declaration<'a>) {
+        match decl {
+            Declaration::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
+            Declaration::FunctionDeclaration(func) => self.walk_function(func),
+            Declaration::ClassDeclaration(class) => {
+                if let Some(id) = &class.id { self.declare(id.name.as_str()); }
+                for elem in &class.body.body {
+                    match elem {
+                        ClassElement::PropertyDefinition(prop) => if let Some(value) = &prop.value { self.walk_expression(value); },
+                        ClassElement::AccessorProperty(prop) => if let Some(value) = &prop.value { self.walk_expression(value); },
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk_export_default(&mut self, decl: &ExportDefaultDeclaration<'a>) {
+        match &decl.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => self.walk_function(func),
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id { self.declare(id.name.as_str()); }
+            }
+            other => {
+                if let Some(expr) = other.as_expression() { self.walk_expression(expr); }
+            }
+        }
+    }
     fn walk_function(&mut self, func: &Function<'a>) {
         if let Some(id) = &func.id { self.declare(id.name.as_str()); }
         let mut scope = HashSet::new();
@@ -614,34 +642,34 @@ impl<'a> Rewriter<'a> {
             Statement::FunctionDeclaration(func) => { if let Some(id) = &func.id { names.insert(id.name.to_string()); } }
             Statement::ClassDeclaration(class) => { if let Some(id) = &class.id { names.insert(id.name.to_string()); } }
             Statement::VariableDeclaration(decl) => {
-                if mode == ScopeMode::FunctionRoot {
-                    if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } }
-                } else if decl.kind != VariableDeclarationKind::Var {
+                if mode == ScopeMode::Block {
+                    if decl.kind != VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } }
+                } else if decl.kind == VariableDeclarationKind::Var {
                     for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); }
                 }
             }
-            Statement::BlockStatement(block) if mode == ScopeMode::FunctionRoot => for stmt in &block.body { self.collect_statement_bindings(stmt, ScopeMode::Function, names); },
-            Statement::IfStatement(stmt) if mode == ScopeMode::FunctionRoot => { self.collect_statement_bindings(&stmt.consequent, ScopeMode::Function, names); if let Some(alt) = &stmt.alternate { self.collect_statement_bindings(alt, ScopeMode::Function, names); } }
-            Statement::ForStatement(stmt) if mode == ScopeMode::FunctionRoot => {
+            Statement::BlockStatement(block) if mode != ScopeMode::Block => for stmt in &block.body { self.collect_statement_bindings(stmt, mode, names); },
+            Statement::IfStatement(stmt) if mode != ScopeMode::Block => { self.collect_statement_bindings(&stmt.consequent, mode, names); if let Some(alt) = &stmt.alternate { self.collect_statement_bindings(alt, mode, names); } }
+            Statement::ForStatement(stmt) if mode != ScopeMode::Block => {
                 if let Some(ForStatementInit::VariableDeclaration(decl)) = &stmt.init { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } }
-                self.collect_statement_bindings(&stmt.body, ScopeMode::Function, names);
+                self.collect_statement_bindings(&stmt.body, mode, names);
             }
-            Statement::ForInStatement(stmt) if mode == ScopeMode::FunctionRoot => { if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } } self.collect_statement_bindings(&stmt.body, ScopeMode::Function, names); }
-            Statement::ForOfStatement(stmt) if mode == ScopeMode::FunctionRoot => { if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } } self.collect_statement_bindings(&stmt.body, ScopeMode::Function, names); }
-            Statement::WhileStatement(stmt) if mode == ScopeMode::FunctionRoot => self.collect_statement_bindings(&stmt.body, ScopeMode::Function, names),
-            Statement::DoWhileStatement(stmt) if mode == ScopeMode::FunctionRoot => self.collect_statement_bindings(&stmt.body, ScopeMode::Function, names),
-            Statement::LabeledStatement(stmt) if mode == ScopeMode::FunctionRoot => self.collect_statement_bindings(&stmt.body, ScopeMode::Function, names),
-            Statement::SwitchStatement(stmt) if mode == ScopeMode::FunctionRoot => for case in &stmt.cases { for child in &case.consequent { self.collect_statement_bindings(child, ScopeMode::Function, names); } },
-            Statement::TryStatement(stmt) if mode == ScopeMode::FunctionRoot => {
-                self.collect_block_bindings(&stmt.block, names);
-                if let Some(handler) = &stmt.handler { self.collect_block_bindings(&handler.body, names); }
-                if let Some(finalizer) = &stmt.finalizer { self.collect_block_bindings(finalizer, names); }
+            Statement::ForInStatement(stmt) if mode != ScopeMode::Block => { if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } } self.collect_statement_bindings(&stmt.body, mode, names); }
+            Statement::ForOfStatement(stmt) if mode != ScopeMode::Block => { if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } } self.collect_statement_bindings(&stmt.body, mode, names); }
+            Statement::WhileStatement(stmt) if mode != ScopeMode::Block => self.collect_statement_bindings(&stmt.body, mode, names),
+            Statement::DoWhileStatement(stmt) if mode != ScopeMode::Block => self.collect_statement_bindings(&stmt.body, mode, names),
+            Statement::LabeledStatement(stmt) if mode != ScopeMode::Block => self.collect_statement_bindings(&stmt.body, mode, names),
+            Statement::SwitchStatement(stmt) if mode != ScopeMode::Block => for case in &stmt.cases { for child in &case.consequent { self.collect_statement_bindings(child, mode, names); } },
+            Statement::TryStatement(stmt) if mode != ScopeMode::Block => {
+                self.collect_block_bindings(&stmt.block, names, mode);
+                if let Some(handler) = &stmt.handler { self.collect_block_bindings(&handler.body, names, mode); }
+                if let Some(finalizer) = &stmt.finalizer { self.collect_block_bindings(finalizer, names, mode); }
             }
             _ => {}
         }
     }
-    fn collect_block_bindings(&self, block: &BlockStatement<'a>, names: &mut HashSet<String>) {
-        for stmt in &block.body { self.collect_statement_bindings(stmt, ScopeMode::Function, names); }
+    fn collect_block_bindings(&self, block: &BlockStatement<'a>, names: &mut HashSet<String>, mode: ScopeMode) {
+        for stmt in &block.body { self.collect_statement_bindings(stmt, mode, names); }
     }
 
     fn collect_binding_pattern(&self, pattern: &BindingPattern<'a>, names: &mut HashSet<String>) {
@@ -801,6 +829,9 @@ fn join_url(base: &str, raw: &str) -> String {
     }
     let prefix = match base.rfind('/') { Some(i) => &base[..=i], None => base };
     let mut parts: Vec<&str> = prefix.split('/').collect();
+    if parts.last() == Some(&"") {
+        parts.pop();
+    }
     for part in raw.split('/') {
         match part {
             "." => {}
@@ -830,5 +861,60 @@ fn hex(v: u8) -> char {
     match v {
         0..=9 => (b'0' + v) as char,
         _ => (b'A' + (v - 10)) as char,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rewrite_ok(source: &str, kind: &str, target_url: &str) -> String {
+        let out = rewrite_script(source, kind, target_url, "/zp/");
+        assert!(out.ok, "rewrite failed: {}", out.error);
+        out.code
+    }
+
+    #[test]
+    fn rewrites_virtualized_globals_and_shadowing() {
+        let code = rewrite_ok(
+            "function f(x) { if (x) { var location = { href: 'local' }; } return location.href; }\nwindow.location.hash += '-tail';\ndocument.defaultView.location.href;",
+            "classic",
+            "https://example.com/app.js",
+        );
+        assert!(code.contains("return location.href;"));
+        assert!(code.contains("__zp_assign(__zp_get(__zp_get(globalThis,\"window\"),\"location\"),\"hash\""));
+        assert!(code.contains("__zp_get(__zp_get(globalThis,\"document\"),\"defaultView\")"));
+        assert!(!code.contains("return __zp_get(globalThis,\"location\")"));
+    }
+
+    #[test]
+    fn rewrites_module_urls_and_dynamic_imports() {
+        let code = rewrite_ok(
+            "import './dep.js'; export async function load(name) { await import('./chunks/' + name + '.js'); return new URL('/worker-fixture.js', import.meta.url).href; }",
+            "module",
+            "https://example.com/assets/main.js",
+        );
+        assert!(code.contains("import \"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js\";"));
+        assert!(code.contains("__zp_module_url('./chunks/' + name + '.js',\"https://example.com/assets/main.js\")"));
+        assert!(code.contains("\"https://example.com/assets/main.js\""));
+    }
+
+    #[test]
+    fn rewrites_calls_and_constructors() {
+        let code = rewrite_ok(
+            "window.location = '/next'; const ws = new WebSocket('/ws', ['chat']); Object.getOwnPropertyDescriptor(window, 'location');",
+            "classic",
+            "https://example.com/app.js",
+        );
+        assert!(code.contains("__zp_set(__zp_get(globalThis,\"window\"),\"location\",'/next')"));
+        assert!(code.contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),['/ws',['chat']])"));
+        assert!(code.contains("__zp_call(Object,\"getOwnPropertyDescriptor\",[__zp_get(globalThis,\"window\"),'location'])"));
+    }
+
+    #[test]
+    fn parse_failures_return_error() {
+        let out = rewrite_script("if (", "classic", "https://example.com/app.js", "/zp/");
+        assert!(!out.ok);
+        assert_eq!(out.error, "PARSE_FAILED");
     }
 }

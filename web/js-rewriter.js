@@ -57,7 +57,8 @@
     source = String(source || '');
     const kind = normalizeKind(options.scriptKind || options.kind);
     const rust = globalThis.ZPRustRewriter;
-    if (rust && typeof rust.rewriteScript === 'function') {
+    const rustEligible = kind !== 'event-handler' && kind !== 'function' && !options.importMap;
+    if (rustEligible && rust && typeof rust.rewriteScript === 'function') {
       try {
         const out = rust.rewriteScript(source, kind, options.url || options.targetUrl || '', options.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/');
         if (out && out.ok && typeof out.code === 'string') return ok(out.code, []);
@@ -69,7 +70,7 @@
     if (kind === 'function') return rewriteFunctionBody(source, options);
     const parsed = parse(source, kind === 'module' ? 'module' : 'script', options.url || options.targetUrl || 'target.js');
     if (!parsed.ok) return parsed;
-    const rewritten = rewriteProgram(source, parsed.program, { module: kind === 'module', targetUrl: options.url || options.targetUrl || '' });
+    const rewritten = rewriteProgram(source, parsed.program, { module: kind === 'module', targetUrl: options.url || options.targetUrl || '', importMap: options.importMap, controlPrefix: options.controlPrefix });
     return ok(rewritten.code, parsed.diagnostics.concat(rewritten.diagnostics));
   }
 
