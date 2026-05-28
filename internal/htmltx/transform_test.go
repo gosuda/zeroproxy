@@ -14,15 +14,40 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{"/zp/assets/zp-core.js", "/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, "ZeroProxy blocked object"} {
+	for _, want := range []string{"/zp/assets/zp-core.js", "/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, `data-zp-blocked-rel="preconnect"`, `ZeroProxy blocked object`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", "rel=\"preconnect\"", "id=\"zp-topbar\"", `href="/next"`, `action="submit"`, `formaction="/alt"`} {
+	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", " rel=\"preconnect\"", "id=\"zp-topbar\"", `href="/next"`, `action="submit"`, `formaction="/alt"`} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden %q remained in %s", forbidden, s)
 		}
+	}
+}
+
+func TestTransformPreservesBlockedHeadLinkForHydration(t *testing.T) {
+	target, _ := url.Parse("https://example.com/check")
+	out, err := Transform(strings.NewReader(`<html><head><!--m67kuz--><link rel="preconnect" href="https://am.i.mullvad.net"/><!----></head><body></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{`<!--m67kuz-->`, `<link`, `data-zp-blocked-rel="preconnect"`, `data-zp-blocked-url="https://am.i.mullvad.net"`, `<!---->`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in %s", want, s)
+		}
+	}
+	for _, forbidden := range []string{` rel="preconnect"`, ` href="https://am.i.mullvad.net"`} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("active blocked link attribute %q remained in %s", forbidden, s)
+		}
+	}
+	marker := strings.Index(s, `<!--m67kuz-->`)
+	link := strings.Index(s[marker:], `<link`)
+	closingMarker := strings.Index(s[marker:], `<!---->`)
+	if marker < 0 || link < 0 || closingMarker < 0 || link > closingMarker {
+		t.Fatalf("blocked head link no longer occupies the Svelte hydration slot: %s", s)
 	}
 }
 

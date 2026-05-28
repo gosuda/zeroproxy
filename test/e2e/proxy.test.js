@@ -150,6 +150,9 @@ function createTargetServer(requests) {
             const first = template.content.firstChild;
             const clone = first && first.cloneNode(true);
             if (clone) document.head.appendChild(clone);
+            const rowTemplate = document.createElement('template');
+            rowTemplate.innerHTML = '<tr><td>cell</td></tr>';
+            const row = rowTemplate.content.firstChild;
             window.__templateLinkFixture = {
               childCount: template.content.childNodes.length,
               firstNode: first && first.localName,
@@ -158,7 +161,9 @@ function createTargetServer(requests) {
               blockedRel: first && first.getAttribute('data-zp-blocked-rel'),
               blockedURL: first && first.getAttribute('data-zp-blocked-url'),
               cloneRel: clone && clone.getAttribute('rel'),
-              cloneHref: clone && clone.getAttribute('href')
+              cloneHref: clone && clone.getAttribute('href'),
+              tableRowNode: row && row.nodeName,
+              tableRowText: row && row.textContent
             };
           } catch (err) {
             window.__templateLinkFixture = { error: err && err.message || String(err) };
@@ -608,6 +613,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     blockedURL: null,
     cloneRel: null,
     cloneHref: null,
+    tableRowNode: 'TR',
+    tableRowText: 'cell',
   });
   assert.equal(home.platform, 'Win32');
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));

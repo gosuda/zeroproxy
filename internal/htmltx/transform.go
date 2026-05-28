@@ -126,9 +126,6 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				out.WriteString(tok.String())
 				continue
 			}
-			if shouldDropToken(tok) {
-				continue
-			}
 			if tag == "base" {
 				out.WriteString(baseSyncScript(attr(tok, "href"), opt))
 				continue
@@ -200,13 +197,23 @@ func runtimePrelude(opt Options) string {
 
 func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	tag := strings.ToLower(tok.Data)
+	blockedLinkRel := ""
+	if tag == "link" {
+		for _, a := range tok.Attr {
+			if strings.EqualFold(a.Key, "rel") && containsBlockedLinkRel(a.Val) {
+				blockedLinkRel = a.Val
+				break
+			}
+		}
+	}
 	attrs := tok.Attr[:0]
 	var dataTarget string
+	var blockedLinkHref string
 	var integrityBackup string
 	hasIntegrityBackup := false
 	for _, a := range tok.Attr {
 		key := strings.ToLower(a.Key)
-		if key == "data-zp-target-url" || key == "data-zp-blocked-url" || key == "data-zp-integrity" {
+		if key == "data-zp-target-url" || key == "data-zp-blocked-url" || key == "data-zp-blocked-rel" || key == "data-zp-integrity" {
 			continue
 		}
 		if key == "integrity" && (tag == "script" || tag == "link") {
@@ -221,6 +228,17 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			a.Val = injectSrcdoc(a.Val, opt)
 			attrs = append(attrs, a)
 			continue
+		}
+		if blockedLinkRel != "" {
+			if key == "rel" {
+				continue
+			}
+			if key == "href" {
+				if trimmed := strings.TrimSpace(a.Val); trimmed != "" {
+					blockedLinkHref = trimmed
+				}
+				continue
+			}
 		}
 		if shouldRewritePassiveAttr(tag, key) {
 			trimmed := strings.TrimSpace(a.Val)
@@ -273,6 +291,12 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	}
 	if hasIntegrityBackup {
 		attrs = upsertAttr(attrs, "data-zp-integrity", integrityBackup)
+	}
+	if blockedLinkRel != "" {
+		attrs = upsertAttr(attrs, "data-zp-blocked-rel", blockedLinkRel)
+	}
+	if blockedLinkHref != "" {
+		attrs = upsertAttr(attrs, "data-zp-blocked-url", blockedLinkHref)
 	}
 	if dataTarget != "" {
 		attrs = upsertAttr(attrs, "data-zp-target-url", dataTarget)
@@ -502,14 +526,11 @@ func baseSyncScript(raw string, opt Options) string {
 	return b.String()
 }
 
-func shouldDropToken(tok xhtml.Token) bool {
-	tag := strings.ToLower(tok.Data)
-	if tag == "link" {
-		rel := strings.ToLower(attr(tok, "rel"))
-		for _, blocked := range []string{"modulepreload", "preload", "prefetch", "preconnect", "dns-prefetch", "prerender", "manifest"} {
-			if containsToken(rel, blocked) {
-				return true
-			}
+func containsBlockedLinkRel(rel string) bool {
+	rel = strings.ToLower(rel)
+	for _, blocked := range []string{"modulepreload", "preload", "prefetch", "preconnect", "dns-prefetch", "prerender", "manifest"} {
+		if containsToken(rel, blocked) {
+			return true
 		}
 	}
 	return false

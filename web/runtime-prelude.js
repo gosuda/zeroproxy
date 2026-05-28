@@ -1635,7 +1635,28 @@
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
     installBaseObserver();
-    function patchHTMLSetter(proto, prop) { const d = Object.getOwnPropertyDescriptor(proto, prop); if (!d || !d.set) return; try { Object.defineProperty(proto, prop, { get() { return d.get ? sanitizeSerializedHTML(d.get.call(this)) : ''; }, set(v) { d.set.call(this, transformHTML(String(v))); syncBaseElement(this); instrumentDescendantIframes(this); enforceSubtreePolicies(this); }, configurable: false }); } catch {} }
+    function patchHTMLSetter(proto, prop) {
+      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!d || !d.set) return;
+      try {
+        Object.defineProperty(proto, prop, {
+          get() { return d.get ? sanitizeSerializedHTML(d.get.call(this)) : ''; },
+          set(v) {
+            if (this && this.localName === 'template' && prop === 'innerHTML') {
+              d.set.call(this, String(v));
+              enforceSubtreePolicies(this.content);
+              instrumentDescendantIframes(this.content);
+              return;
+            }
+            d.set.call(this, transformHTML(String(v)));
+            syncBaseElement(this);
+            instrumentDescendantIframes(this);
+            enforceSubtreePolicies(this);
+          },
+          configurable: false
+        });
+      } catch {}
+    }
   }
   function installIntegrityProp(proto) {
     if (!proto) return;
@@ -1835,12 +1856,13 @@
     const html = String(value);
     if (!html) return html;
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
-    const container = parserDoc.createElement('div');
+    const container = parserDoc.createElement('template');
     if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, html);
     else container.innerHTML = html;
-    const walker = parserDoc.createTreeWalker(container, NodeFilter.SHOW_ELEMENT);
+    const root = container.content || container;
+    const walker = parserDoc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     const nodes = [];
-    for (let node = walker.currentNode; node; node = walker.nextNode()) nodes.push(node);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
     for (const node of nodes) {
       const tag = node.localName;
       if (tag === 'base' && Native.getAttribute.call(node, 'href')) {
@@ -1941,10 +1963,8 @@
   }
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
-    if (node.nodeType === 1) {
-      enforceElementPolicy(node);
-      if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,svg a,svg image,svg use').forEach(enforceElementPolicy);
-    }
+    if (node.nodeType === 1) enforceElementPolicy(node);
+    if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,svg a,svg image,svg use').forEach(enforceElementPolicy);
   }
   function enforceElementPolicy(el) {
     if (!el || !el.localName) return;
