@@ -1,10 +1,10 @@
-# ZeroProxy Phase 3 Plan: Strict Script Compatibility, Navigation Integrity, and Stealth Membrane
+# ZeroProxy Phase 3 Plan: Strict Script Compatibility, Route Containment, Navigation Integrity, and Stealth Membrane
 
-Status: proposed. This plan is based on the current Phase 2 implementation, the compatibility investigation performed after Phase 2, and the subsequent anti-bot fingerprinting review. Existing unit, Go, and Puppeteer E2E tests pass, but they do not cover several script paths, document-navigation rewrites, dynamic HTML parser paths, stealth-membrane observability surfaces, or `WebSocketStream` compatibility.
+Status: proposed. This plan is based on the current Phase 2 implementation, the compatibility investigation performed after Phase 2, and the subsequent anti-bot fingerprinting review. Existing unit, Go, and Puppeteer E2E tests pass, but they do not cover several script paths, document-navigation rewrites, controlled-route scoping, relay-server inheritance, dynamic HTML parser paths, stealth-membrane observability surfaces, or `WebSocketStream` compatibility.
 
-Phase 3 is a clean cutover plan for strict script correctness plus local script-observable membrane consistency. The goal is not to widen the network boundary. The goal is to make script execution and navigation predictable: every executable target script is either rewritten under the ZeroProxy membrane, resolved through the same-origin script API, or blocked with an explicit ZeroProxy error; every document navigation target is routed through the same ZeroProxy navigation path; every ZeroProxy control artifact that must exist in the real DOM is hidden from target-page observability APIs covered by this plan.
+Phase 3 is a clean cutover plan for strict script correctness plus route containment and local script-observable membrane consistency. The goal is not to widen the network boundary. The goal is to make script execution and navigation predictable: every executable target script is either rewritten under the ZeroProxy membrane, resolved through the same-origin script API, or blocked with an explicit ZeroProxy error; every document navigation target is routed through the same ZeroProxy navigation path; every controlled browser-visible ZeroProxy route lives under one Service Worker scope prefix; every ZeroProxy control artifact that must exist in the real DOM is hidden from target-page observability APIs covered by this plan.
 
-The canonical internal URL prefix remains `/__zp/...`. Any implementation sketch or external proposal spelling `/_zp/...` must be normalized to `/__zp/...`; introducing a second internal prefix is prohibited.
+Phase 3 route namespace target: all controlled browser-visible surfaces move under one configurable control prefix, recommended `/zp/`. Existing `/p/...` and `/__zp/...` paths are legacy spellings to be migrated or compatibility-redirected during the cutover; new code must be written against `controlPrefix` rather than hard-coded split prefixes. Any implementation sketch or external proposal spelling `/_zp/...` must be normalized to the selected control prefix; introducing a second internal prefix is prohibited.
 
 ## Goals
 
@@ -12,11 +12,13 @@ The canonical internal URL prefix remains `/__zp/...`. Any implementation sketch
 - Make module resolution compatible with relative imports, absolute imports, bare specifiers, import maps, dynamic `import()`, and `import.meta.url`.
 - Fix rewriter lexical-scope correctness so local bindings are never mistaken for globals and globals are never missed.
 - Make strict-mode rewrite failures fail closed consistently across external scripts, inline scripts, event handlers, workers, and dynamic compilation paths.
+- Collapse every controlled browser-visible surface under one Service Worker scope prefix so navigation and fetch classification are both fail-closed.
 - Repair Go HTML-transform navigation rewriting for document-navigation attributes, especially `<a href>`, `<area href>`, `<form action>`, `<input formaction>`, and `<button formaction>`, not only `<iframe src>` and `<frame src>`.
 - Replace the runtime dynamic-HTML regular-expression rewrite path with an inert DOM tree traversal path for `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `DOMParser.parseFromString('text/html')`, and `Range.createContextualFragment`.
 - Add a stealth membrane for ZeroProxy framework artifacts: in-page scripts must not observe `data-zp-*` control attributes or injected ZeroProxy boot/script assets through the DOM APIs enumerated below.
 - Add a `WebSocketStream` polyfill that maps the Streams API shape onto the existing proxied `WebSocket` transport path, without exposing native networking.
-- Keep the transport invariant unchanged: target network, navigation, worker, WebSocket, and `WebSocketStream` traffic must stay inside `Service Worker -> Go WASM -> WebSocket/yamux -> SOCKS5 -> uTLS/HTTP`.
+- Keep the transport invariant unchanged: target network, navigation, worker, WebSocket, and `WebSocketStream` traffic must stay inside `Service Worker -> Go WASM -> selected relay WebSocket/yamux -> SOCKS5 -> uTLS/HTTP`.
+- Carry relay server selection in the encrypted share URL fragment, e.g. `#k=<key>&server=wss://relay.example/ws`, and inherit the selected server list into child navigations, iframes, workers, module loads, runtime APIs, and WebSocket transports.
 - Add browser E2E coverage for the exact compatibility and fingerprinting breakages listed below.
 
 ## Non-goals
@@ -27,8 +29,65 @@ The canonical internal URL prefix remains `/__zp/...`. Any implementation sketch
 - Raw blob/data script execution without a rewritten or contained execution path.
 - Reintroducing native `fetch(event.request)` or native cross-origin script fallbacks.
 - Exposing native worker, WebSocket, `WebSocketStream`, WebRTC, or WebTransport networking outside the existing ZeroProxy transport boundary.
+- Keeping `/`, `/p`, and `/__zp` as independent long-term controlled route surfaces. Legacy paths may exist only as migration redirects or explicit compatibility aliases that fail closed when they cannot be safely classified.
 
 ## Current compatibility failures and strict-boundary gaps
+
+### 0. Controlled surfaces are split across root, `/p`, and `/__zp`
+
+Current behavior:
+
+- The shell registers `/sw.js` with `scope: '/'`.
+- Share/document routes live at `/p/<encrypted>#k=<key>`.
+- Internal assets and runtime APIs live under `/__zp/...`.
+- The relay WebSocket endpoint is currently same-origin and deployment-fixed, for example `/__zp/ws-pipe`.
+
+This is safe only because the Service Worker currently controls the whole origin and blocks unknown requests. Narrowing scope to only `/p/` or only `/__zp/` without changing the route layout would create blind spots: top-level navigations to same-origin paths outside the selected scope may bypass classification, while splitting `/p` and `/__zp` into separate registrations would split in-memory tab/entry state.
+
+Required Phase 3 behavior:
+
+- Introduce one `controlPrefix`, recommended `/zp/`, and move every controlled browser-visible surface under it:
+
+```text
+/zp/                         shell
+/zp/sw.js                    Service Worker script
+/zp/p/<encrypted>            encrypted target document/share route
+/zp/api/fetch                runtime fetch/XHR/EventSource/sendBeacon bridge
+/zp/api/script               rewritten classic/module script API
+/zp/api/worker-script        rewritten worker script API
+/zp/assets/...               runtime, rewriter, WASM, worker bootstrap assets
+/zp/error/<code>             safe ZeroProxy error documents
+/zp/ws-pipe                  optional same-origin default relay endpoint
+```
+
+- Register the Service Worker with `scope: controlPrefix`, not `/`, after the shell itself is served from inside `controlPrefix`.
+- Server routes outside `controlPrefix` must not serve target documents, runtime APIs, rewritten scripts, worker bootstrap assets, or relay APIs. They may only redirect to the shell or return safe static errors.
+- The Service Worker classifier must remain strict inside the scope: every controlled request is classified; unknown navigations return a safe error document; unknown subresources/fetches return `Response.error()`.
+- Legacy `/p/...` and `/__zp/...` routes may exist during migration only to redirect into `controlPrefix` or to return explicit errors. They are not accepted Phase 3 steady-state surfaces.
+- All generated URLs must be built through one URL builder in `web/zp-core.js` or an equivalent shared contract. Hard-coded `/p`, `/__zp`, and `/sw.js` strings must be removed from runtime, Service Worker, HTML transform, worker bootstrap, tests, and docs.
+
+Relay server selection and inheritance:
+
+- Share URLs carry the target-decryption key and the ordered relay server list in the fragment:
+
+```text
+/zp/p/<encrypted>#k=<base64url-key>&server=wss%3A%2F%2Frelay-a.example%2Fws&server=wss%3A%2F%2Frelay-b.example%2Fws
+```
+
+- A single unencoded `server=wss://relay.example/ws` example is acceptable in docs, but canonical URL writers must percent-encode server values through `URLSearchParams`.
+- `server` may appear more than once. The order is significant and represents preference/failover order. Duplicate normalized URLs are removed while preserving first occurrence.
+- Accepted server URLs:
+  - `wss:` in normal secure mode;
+  - `ws:` only for loopback/local development when an explicit non-production flag is active;
+  - no username/password;
+  - no fragment;
+  - normalized host, port, path, and query;
+  - bounded count and total serialized length.
+- The fragment is parsed by the shell before target code runs, then removed with `history.replaceState`. The fragment is never sent to the origin server or target server.
+- The shell sends `{ targetUrl, routeKey, servers }` to the Service Worker in `ZP_OPEN_SHARE`. The Service Worker stores `servers` in tab/entry context and passes them to the WASM kernel transport initialization and WebSocket stream path.
+- Runtime-generated document navigations, forms, iframe navigations, worker bootstrap, module/script API calls, runtime fetch APIs, WebSocket, and `WebSocketStream` inherit `servers` from the active context. Target-authored URLs cannot override the relay server list.
+- New share URLs created by ZeroProxy UI or runtime helpers include the current inherited `server` parameters unless the user explicitly chooses a different relay set through ZeroProxy-controlled UI.
+- Cold restore without Service Worker memory must fail safely unless the URL fragment supplies both a valid `k` and a valid server list, or the deployment has an explicit default relay policy.
 
 ### 1. Static document-navigation attributes are not rewritten
 
@@ -120,7 +179,7 @@ Affected code:
 Required Phase 3 behavior:
 
 - Before a script element can execute, classify it as one of:
-  - external executable script with `src` -> launder through `/__zp/api/script`;
+  - external executable script with `src` -> launder through `${controlPrefix}/api/script`;
   - inline classic script -> rewrite synchronously or block;
   - inline module script -> rewrite synchronously or block;
   - non-executable script data type -> leave inert;
@@ -233,9 +292,11 @@ function transformHTML(htmlString) {
 }
 
 function runtimePreludeBootMarkup() {
-  return `<script nonce=zp src=/__zp/zp-core.js></script>` +
+  const coreSrc = controlAssetURL('zp-core.js');
+  const runtimeSrc = controlAssetURL('runtime-prelude.js');
+  return `<script nonce=zp src="${coreSrc}"></script>` +
     `<script nonce=zp id=__zp-boot type=application/json>${bootJSON()}</script>` +
-    `<script nonce=zp src=/__zp/runtime-prelude.js></script>`;
+    `<script nonce=zp src="${runtimeSrc}"></script>`;
 }
 ```
 
@@ -271,7 +332,7 @@ Required Phase 3 behavior:
 - Preserve or resolve bare specifiers according to a parsed import map. Do not treat them as URL paths.
 - Transform import maps before module execution:
   - parse JSON safely;
-  - rewrite mapped HTTP(S)/relative addresses to `/__zp/api/script?kind=module&u=...`;
+  - rewrite mapped HTTP(S)/relative addresses to `${controlPrefix}/api/script?kind=module&u=...`;
   - preserve invalid import-map behavior as close to the browser as practical;
   - block import-map entries with executable or unsupported schemes.
 - Add tests for bare specifier with import map, bare specifier without import map, scoped import-map entries, and absolute/relative module imports.
@@ -315,7 +376,7 @@ import(__zp_module_url(expr, originalModuleURL))
 - The helper must:
   - resolve relative-like and HTTP(S) absolute specifiers against the original target module URL;
   - consult the transformed import-map registry for bare specifiers;
-  - return a same-origin `/__zp/api/script?kind=module&u=...` URL;
+  - return a same-origin `${controlPrefix}/api/script?kind=module&u=...` URL;
   - fail closed for unsupported schemes.
 - Service Worker classification must preserve module kind for module subresource fetches instead of falling back to classic script rewriting.
 
@@ -399,7 +460,7 @@ Required Phase 3 behavior:
 
 - Keep blocked APIs explicit and test-covered.
 - Add compatibility only where it can preserve the transport boundary:
-  - worker XHR over `/__zp/api/fetch` if needed;
+  - worker XHR over `${controlPrefix}/api/fetch` if needed;
   - worker EventSource over fetch stream if needed;
   - worker WebSocket only through the existing `ZP_WS_OPEN`/`__zp_stream` path with per-tab capability.
 - Do not silently expose native worker networking.
@@ -408,7 +469,7 @@ Required Phase 3 behavior:
 
 Observed behavior:
 
-ZeroProxy must attach internal attributes and injected boot assets to maintain routing and rewriting state, for example `data-zp-target-url`, `data-zp-blocked-url`, `data-zp-integrity`, `data-zp-blocked-script`, `#__zp-boot`, and `/__zp/zp-core.js` / `/__zp/runtime-prelude.js`. Anti-bot and integrity scripts can enumerate these artifacts through:
+ZeroProxy must attach internal attributes and injected boot assets to maintain routing and rewriting state, for example `data-zp-target-url`, `data-zp-blocked-url`, `data-zp-integrity`, `data-zp-blocked-script`, `#__zp-boot`, and injected control-prefix assets such as `/zp/assets/zp-core.js` / `/zp/assets/runtime-prelude.js` after the Gate 1 cutover. Anti-bot and integrity scripts can enumerate these artifacts through:
 
 - `element.innerHTML` and `element.outerHTML`;
 - `getAttribute`, `hasAttribute`, `getAttributeNames`, and `attributes` / `NamedNodeMap`;
@@ -440,7 +501,7 @@ Reference implementation shape for the core membrane:
   const isZPAttr = name => typeof name === 'string' && name.toLowerCase().startsWith('data-zp-');
   const isZPAsset = node => node && (
     node.id === '__zp-boot' ||
-    (node.localName === 'script' && Native.getAttribute.call(node, 'src')?.startsWith('/__zp/'))
+    (node.localName === 'script' && isZeroProxyAssetURL(Native.getAttribute.call(node, 'src')))
   );
 
   const origInnerHTMLGet = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML').get;
@@ -583,6 +644,8 @@ if (!root.WebSocketStream) {
 
 ## Phase 3 integration guidelines
 
+- Treat the route-prefix cutover as a fail-closed scoping change: narrow Service Worker scope only after every shell, document, API, asset, error, and optional relay route lives under the same prefix.
+- Treat `server` fragment parameters as control-plane state. They are parsed only by the shell, stored in Service Worker tab/entry context, inherited downward, and never accepted from target-authored document URLs or request parameters.
 - Treat the `<a>` / document-navigation rewrite bug as a kernel correctness fix, not a compatibility enhancement. It must land before any E2E fixture relies on target-page navigation.
 - Treat dynamic HTML regex removal as a clean cutover for markup transformation. Do not keep a second regex fallback path for malformed HTML; browser parser behavior is the contract.
 - Treat the stealth membrane as a consistency layer over ZeroProxy-owned artifacts. Internal code must use captured native APIs or private metadata; page code must see target-authored DOM, not ZeroProxy implementation details.
@@ -596,6 +659,13 @@ if (!root.WebSocketStream) {
 
 Add tests before changing behavior:
 
+- Route namespace and relay inheritance tests:
+  - shell served from `controlPrefix` registers the Service Worker with `scope: controlPrefix`;
+  - `/p/...`, `/__zp/...`, and root-scoped controlled URLs are absent from newly generated URLs after the cutover;
+  - unknown same-origin navigation inside `controlPrefix` fails closed;
+  - unknown same-origin paths outside `controlPrefix` cannot serve target content or runtime APIs;
+  - `#k=<key>&server=...` parsing validates, normalizes, de-duplicates, bounds, stores, and erases relay server fragments;
+  - child navigations, iframes, workers, runtime API calls, WebSocket, and `WebSocketStream` inherit the selected server list.
 - Go HTML-transform tests:
   - `<a href>`, `<area href>`, `<form action>`, `<input formaction>`, and `<button formaction>` rewrite to ZeroProxy navigation/share URLs and retain `data-zp-target-url`;
   - fragment-only navigation remains unchanged;
@@ -614,15 +684,46 @@ Add tests before changing behavior:
   - stealth membrane hides `data-zp-*` through attributes, serialized HTML, collections, traversal, and selectors;
   - `WebSocketStream` constructor exposes `opened`/`closed` promises and routes through patched `WebSocket`.
 - Browser E2E tests:
+  - Service Worker scope is `controlPrefix` and same-origin navigations outside classified controlled routes fail closed;
+  - a share URL containing repeated `server=wss://...` parameters initializes the relay list and child frames/workers/WebSockets inherit it;
   - transformed static `<a>` navigation lands on the intended target through ZeroProxy;
-  - script-created inline `textContent` cannot observe proxy `/p/...#k=...` location;
-  - module fixture using import map and `import.meta.url` loads through `/__zp/api/script` and observes target URL;
+  - script-created inline `textContent` cannot observe proxy `/zp/p/...#k=...` location;
+  - module fixture using import map and `import.meta.url` loads through `${controlPrefix}/api/script` and observes target URL;
   - expression dynamic import loads target chunk through the script API;
   - malformed inline classic/event-handler source blocks in strict mode;
-  - anti-fingerprinting fixture cannot enumerate `data-zp-*`, `#__zp-boot`, or `/__zp/` injected scripts through the enumerated DOM APIs;
+  - anti-fingerprinting fixture cannot enumerate `data-zp-*`, `#__zp-boot`, or injected control-prefix assets through the enumerated DOM APIs;
   - `WebSocketStream` echo fixture uses the existing proxied WebSocket path.
 
-### Gate 1: Runtime script element activation policy and structural dynamic HTML parser
+### Gate 1: Single controlled route prefix and relay-server inheritance
+
+Move every controlled browser-visible route under one prefix before narrowing Service Worker scope.
+
+Required changes:
+
+- Introduce a shared `controlPrefix` constant/configuration, recommended `/zp/`, available to `web/index.html`, `web/zp-core.js`, `web/sw.js`, `web/runtime-prelude.js`, `web/worker-prelude.js`, Go HTML transform boot JSON, tests, and server route registration.
+- Move or alias routes into the prefix:
+  - `/` -> `/zp/` shell redirect or static shell alias that does not register a root-scoped worker;
+  - `/sw.js` -> `/zp/sw.js`;
+  - `/p/<encrypted>` -> `/zp/p/<encrypted>`;
+  - `/__zp/api/*` -> `/zp/api/*`;
+  - `/__zp/*.js`, `/__zp/*.wasm`, worker bootstrap, and static assets -> `/zp/assets/*`;
+  - `/__zp/error/<code>` -> `/zp/error/<code>`;
+  - same-origin relay endpoint, if used, -> `/zp/ws-pipe`.
+- Register the Service Worker from `/zp/sw.js` with `{ scope: '/zp/', updateViaCache: 'none' }`.
+- Update `internal/htmltx` and runtime URL rewriting to generate only prefixed routes.
+- Update CSP builders so `script-src`, `worker-src`, `connect-src`, and `form-action` allow only the prefixed same-origin surfaces plus the selected relay WebSocket origins.
+- Add a fragment parser for repeated `server` parameters next to existing `k` parsing:
+  - validate `wss:` by default;
+  - permit `ws:` only for loopback development mode;
+  - reject credentials/fragments and oversized lists;
+  - normalize and de-duplicate;
+  - preserve order for failover.
+- Extend `ZP_OPEN_SHARE`, tab context, entry context, boot JSON, runtime prelude, worker prelude, `__zp_kernel_init`, and `__zp_stream` options to carry the inherited server list.
+- Make the kernel open the yamux pipe to the selected server URL instead of assuming a hard-coded same-origin `/__zp/ws-pipe`.
+- Ensure target-authored URLs, forms, imports, workers, and WebSockets cannot set or override `servers`; only ZeroProxy shell/UI share-link construction can.
+- Keep legacy `/p` and `/__zp` compatibility routes behind an explicit migration flag or server redirect. Strict Phase 3 acceptance uses only `controlPrefix`.
+
+### Gate 2: Runtime script element activation policy and structural dynamic HTML parser
 
 Update `web/runtime-prelude.js` so script elements are normalized immediately before activation and dynamic HTML is transformed structurally.
 
@@ -638,7 +739,7 @@ Required changes:
 - Reuse captured native DOM APIs inside the transformer; do not call patched public APIs while building the transformed fragment.
 - Recursively transform `srcdoc` without executing script or causing network fetches inside the inert document.
 
-### Gate 1.5: Go kernel legitimate navigation recovery
+### Gate 3: Go kernel legitimate navigation recovery
 
 Update `internal/htmltx/transform.go` to remove the frame-only assignment guard in `rewriteToken()`.
 
@@ -650,7 +751,7 @@ Required changes:
 - Update `internal/htmltx/transform_test.go` with the Gate 0 navigation fixtures.
 - Confirm no duplicate `data-zp-target-url`, `data-zp-blocked-url`, or `data-zp-integrity` attributes are emitted after the existing de-duplication pass.
 
-### Gate 2: Import map and module resolver design
+### Gate 4: Import map and module resolver design
 
 Add a single module-resolution contract shared by the HTML transformer, runtime prelude, and Service Worker rewriter.
 
@@ -663,7 +764,7 @@ Required changes:
 - Extend `web/js-rewriter.js` with specifier classification instead of `new URL()` on every specifier.
 - Pass the original target module URL into every module rewrite operation and expose it to rewritten code for `import.meta.url` replacement.
 
-### Gate 2.5: Anti-bot fingerprinting buffer and virtual DOM collections
+### Gate 5: Anti-bot fingerprinting buffer and virtual DOM collections
 
 Implement the stealth membrane for DOM attribute, serialization, collection, and traversal APIs.
 
@@ -672,7 +773,7 @@ Required changes:
 - Add exact ZeroProxy artifact predicates:
   - `data-zp-*` attribute namespace;
   - `#__zp-boot`;
-  - injected script assets whose `src` starts with `/__zp/` and are ZeroProxy-owned;
+  - injected script assets whose `src` starts with the selected `controlPrefix` asset path and are ZeroProxy-owned;
   - any other internal marker introduced by Phase 3 must be registered in the same predicate table.
 - Patch attribute APIs on `Element.prototype`: `getAttribute`, `hasAttribute`, `getAttributeNames`, `attributes`, and any namespace variants that can expose `data-zp-*`.
 - Patch serialization getters `innerHTML` and `outerHTML` to sanitize ZeroProxy artifacts without changing target-authored markup.
@@ -691,7 +792,7 @@ Required changes:
 - Integrate every wrapper with `maskNativeFunction()` / existing native `toString` masking.
 - Add tests for Turnstile-style probes: count scripts, list attributes, serialize DOM, traverse nodes, and query marker selectors.
 
-### Gate 3: Rewriter scope model rewrite
+### Gate 6: Rewriter scope model rewrite
 
 Refactor `web/js-rewriter.js` scope handling before expanding more syntax rewrites.
 
@@ -704,7 +805,7 @@ Required changes:
 - Avoid rewriting identifiers in declarations, property keys, labels, and type-like positions.
 - Keep replacement ordering deterministic and reject overlapping replacements that would produce invalid syntax.
 
-### Gate 4: Strict fail-closed inline policy
+### Gate 7: Strict fail-closed inline policy
 
 Update the Go HTML transform and WASM kernel integration.
 
@@ -714,18 +815,18 @@ Required changes:
 - If a compatibility mode remains, thread an explicit option from configuration to `htmltx.Options` and name it in tests.
 - Add safe ZeroProxy error diagnostics for blocked inline code without exposing source or secrets.
 
-### Gate 5: Service Worker script-kind preservation
+### Gate 8: Service Worker script-kind preservation
 
 Update `web/sw.js` script APIs.
 
 Required changes:
 
-- Preserve module/classic/worker kind across `/__zp/api/script` and subresource classification.
+- Preserve module/classic/worker kind across `${controlPrefix}/api/script` and subresource classification.
 - Ensure dynamic-import generated API URLs always carry `kind=module`.
 - Remove or policy-gate `shouldPassthroughScript()` from strict mode.
 - Keep `scriptResponseHeaders()` strict: `nosniff`, `no-store`, and ZeroProxy CSP.
 
-### Gate 6: Worker compatibility boundary
+### Gate 9: Worker compatibility boundary
 
 Document and test worker behavior after module fixes.
 
@@ -735,7 +836,7 @@ Required changes:
 - Add worker module import and dynamic import coverage.
 - Only add worker XHR/EventSource/WebSocket compatibility if implemented through existing ZeroProxy APIs.
 
-### Gate 6.5: Streams API transport facade with `WebSocketStream`
+### Gate 10: Streams API transport facade with `WebSocketStream`
 
 Implement the `WebSocketStream` polyfill over the existing proxied `WebSocket` membrane.
 
@@ -745,7 +846,7 @@ Required changes:
 - Install `root.WebSocketStream` only as a facade over `root.WebSocket`, never native networking.
 - Resolve constructor URLs against the virtual location/base semantics used by `WebSocket`.
 - Implement `opened` and `closed` promises with `ReadableStream` and `WritableStream` endpoints.
-- Preserve binary behavior as close as practical: set `ws.binaryType = 'arraybuffer'`; pass messages through without unnecessary copies.
+- Preserve binary behavior as close as practical: set `ws.binaryType = 'arraybuffer'`; pass messages through without unnecessary copies; use the inherited relay server list indirectly through the patched `WebSocket` path.
 - Mask constructor/method stringification.
 - Add browser E2E with an echo server proving stream writes/read events use the existing ZeroProxy WebSocket path.
 
@@ -761,6 +862,8 @@ npm run test:e2e
 
 Add targeted browser fixtures for:
 
+- Service Worker scope prefix cutover and legacy-route fail-closed behavior;
+- `#k=<key>&server=wss://.../ws` fragment parsing, server-list validation, fragment erasure, and inherited relay selection;
 - static `<a>`, `<form>`, and submitter navigation attributes;
 - script-created inline text;
 - dynamic document-fragment insertion containing scripts;
@@ -788,6 +891,9 @@ Verification claims must distinguish:
 
 Phase 3 is accepted when all of the following are true:
 
+- Every controlled browser-visible surface is under the single configured `controlPrefix`; strict Phase 3 acceptance does not rely on split `/p` and `/__zp` route surfaces.
+- The Service Worker scope is narrowed to `controlPrefix` only after all controlled routes move under it, and unknown controlled requests still fail closed.
+- Share URLs can carry one or more `server=wss://...` fragment parameters; the selected relay list is validated, stored, erased from the address bar, and inherited by descendant documents, workers, runtime APIs, WebSocket, and `WebSocketStream`.
 - Static document-navigation attributes for `<a>`, `<area>`, `<form>`, `<input>`, `<button>`, `<iframe>`, and `<frame>` are rewritten or fail closed according to policy.
 - A script element created with inline text cannot execute original target code outside the rewriter/membrane path.
 - All script activation paths either rewrite, launder, or block before browser execution.
@@ -795,24 +901,29 @@ Phase 3 is accepted when all of the following are true:
 - Bare module specifiers are not blindly converted to target-relative URLs.
 - Import maps are transformed or honored well enough for bare specifier E2E fixtures.
 - `import.meta.url` in rewritten modules exposes the original target module URL semantics required by relative chunk loading.
-- Literal and expression dynamic imports load module chunks through `/__zp/api/script?kind=module&u=...` or fail closed for unsupported schemes.
+- Literal and expression dynamic imports load module chunks through `${controlPrefix}/api/script?kind=module&u=...` or fail closed for unsupported schemes.
 - Rewriter scope tests prove `var` hoisting and lexical shadowing do not cause global helper rewrites for local bindings.
 - Inline classic and event-handler rewrite failures fail closed in strict mode.
 - Strict mode does not depend on unrewritten third-party passthrough scripts.
 - Worker script imports remain routed through ZeroProxy, and blocked worker APIs are explicit in tests.
-- Page scripts cannot observe ZeroProxy-owned `data-zp-*`, `#__zp-boot`, or injected `/__zp/` boot scripts through the DOM APIs enumerated in this plan.
+- Page scripts cannot observe ZeroProxy-owned `data-zp-*`, `#__zp-boot`, or injected control-prefix boot scripts through the DOM APIs enumerated in this plan.
 - Internal ZeroProxy code still has access to required target URL, blocked URL, integrity, and boot metadata through captured native APIs or private metadata.
 - `WebSocketStream` exists where required, exposes `opened`/`closed` stream semantics, and routes through the existing proxied WebSocket transport.
 - `npm run test:js`, `go test ./...`, and `npm run test:e2e` pass with the new fixtures.
 
 ## Files expected to change
 
+- `web/index.html`
+- `web/zp-core.js`
 - `web/js-rewriter.js`
 - `web/runtime-prelude.js`
 - `web/worker-prelude.js`
 - `web/sw.js`
 - `internal/htmltx/transform.go`
+- `internal/shareurl/shareurl.go`
+- `internal/shareurl/shareurl_test.go`
 - `internal/htmltx/transform_test.go`
+- `cmd/zeroproxy-server/main.go`
 - `cmd/wasm-kernel/main.go`
 - `test/js/rewriter.test.js`
 - `test/js/static-policy.test.js`
@@ -836,3 +947,7 @@ Phase 3 is accepted when all of the following are true:
    - recommended: remove regex markup rewriting entirely from `transformHTML()` and use inert DOM traversal as the only dynamic HTML policy path.
 7. `WebSocketStream` native availability:
    - recommended: prefer the ZeroProxy facade whenever native `WebSocketStream` would escape the transport boundary; if native support can be safely wrapped later, gate it behind the same policy tests.
+8. Controlled route prefix:
+   - recommended: cut over to `/zp/` as the single controlled prefix, register the Service Worker at `/zp/sw.js` with `scope: '/zp/'`, and keep `/p`/`/__zp` only as migration redirects or disabled legacy aliases.
+9. Relay server list encoding:
+   - recommended: use repeated `server` fragment parameters parsed by `URLSearchParams`, percent-encode values when generating URLs, accept `wss:` by default, and allow `ws:` only for explicit loopback development.
