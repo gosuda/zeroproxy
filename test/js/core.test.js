@@ -33,4 +33,6 @@ test('relay server fragments normalize, dedupe, and round-trip through share URL
   const url = await ZP.makeShareURL('https://example.com/', 'https://proxy.example', servers);
   assert.match(url, /^https:\/\/proxy\.example\/zp\/p\//);
   assert.match(url, /#k=[^&]+&server=wss%3A%2F%2Frelay\.example%2Fws&server=ws%3A%2F%2F127\.0\.0\.1%3A8787%2Fws$/);
+  assert.deepEqual(Array.from(ZP.parseRelayServersFromFragment('#k=seed', { origin: 'https://proxy.example' })), ['wss://proxy.example/zp/ws-pipe']);
+  assert.equal(ZP.makeShareFragment('seed', []), '#k=seed&server=wss%3A%2F%2Fproxy.example%2Fzp%2Fws-pipe');
 });

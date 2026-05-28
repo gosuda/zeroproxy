@@ -39,7 +39,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 ## Core invariants
 
 - Target document navigations use encrypted `/zp/p/<encrypted>#k=<key>&server=...` routes on the proxy origin.
-- The `#k` fragment is decrypted in the browser shell, removed with `history.replaceState`, and not sent to the server.
+- The `#k` fragment is decrypted in the browser shell, kept visible with canonical `server=` relay parameters, and never sent to the HTTP server.
 - Every Service Worker-controlled request is classified. Unknown requests are blocked; there is no native `fetch(event.request)` fallback.
 - Privileged runtime-to-Service-Worker control messages require a per-tab capability token injected into the runtime prelude and removed from target-visible DOM before target code runs.
 - Target TCP connections are opened through WebSocket -> yamux -> SOCKS5 DOMAINNAME. With a Tor `-socks` address the relay byte-bridges to Tor; with `-socks internal` the relay validates the SOCKS5 CONNECT bytes and direct-dials the target for Tor-free testing. The kernel does not call `http.Transport` for target egress.
@@ -52,7 +52,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 | Area | Files | Responsibility |
 |---|---|---|
 | Static shell | `web/index.html`, `web/zp-core.js` | Service Worker registration, target URL canonicalization, share URL encryption/decryption, initial target open. |
-| Share URL envelope | `web/zp-core.js`, `internal/shareurl/*` | Compatible JavaScript and Go implementations of `/zp/p/<encrypted>#k=<key>` using AES-256-CBC, HMAC-SHA256, HKDF, raw base64url, and inherited relay-server fragments. |
+| Share URL envelope | `web/zp-core.js`, `internal/shareurl/*` | Compatible JavaScript and Go implementations of `/zp/p/<encrypted>#k=<key>&server=...` using AES-256-CBC, HMAC-SHA256, HKDF, raw base64url, and inherited relay-server fragments. |
 | Service Worker | `web/sw.js` | Classifies every controlled request under `/zp/`, blocks unknowns, manages in-memory tab/entry state and inherited relay servers, requires per-tab capability tokens on privileged runtime bridge messages, calls the WASM kernel, exposes runtime bridge APIs. |
 | Runtime prelude | `web/runtime-prelude.js`, `web/worker-prelude.js` | Installs target-realm containment hooks before target scripts run. Main-window fetch/XHR/EventSource/WebSocket/sendBeacon, navigation/form/history/location/storage/worker/iframe/device APIs are hooked; main-window and worker `fetch` bridge through `/zp/api/fetch`. Runtime membrane helpers (`__zp_get`, `__zp_set`, `__zp_assign`, `__zp_update`, `__zp_call`, `__zp_construct`, `__zp_getOwnPropertyDescriptor`, `__zp_ownKeys`) and dynamic compilation wrappers execute `Function`/`eval`/string timer bodies under the virtual global scope. |
 | WASM kernel | `cmd/wasm-kernel/main.go`, `internal/swhttp/*` | Converts JS `Request`/`Response`, initializes transport, owns target HTTP and WebSocket execution. |
@@ -62,8 +62,8 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 
 ## Request flow
 
-1. The shell registers `/zp/sw.js` with `scope: '/zp/'`, waits for a controller, canonicalizes an `http:` or `https:` target, encrypts it, and navigates to `/zp/p/<encrypted>#k=<key>` on the proxy origin.
-2. The shell loaded on `/zp/p/<encrypted>#k=<key>` decrypts the fragment key in window context, validates the HMAC before decryption, normalizes repeated `server=` relay fragments, removes the fragment from the visible URL when policy allows, and sends `ZP_OPEN_SHARE` to the Service Worker.
+1. The shell registers `/zp/sw.js` with `scope: '/zp/'`, waits for a controller, canonicalizes an `http:` or `https:` target, encrypts it, and navigates to `/zp/p/<encrypted>#k=<key>&server=...` on the proxy origin.
+2. The shell loaded on `/zp/p/<encrypted>#k=<key>&server=...` decrypts the fragment key in window context, validates the HMAC before decryption, normalizes repeated or missing `server=` relay fragments, keeps the canonical fragment visible, and sends `ZP_OPEN_SHARE` to the Service Worker.
 3. The Service Worker stores the decrypted target plus relay-server list in in-memory tab/entry maps and activates `/zp/p/<encrypted>` as a proxy document route.
 4. A `/zp/p/<encrypted>` document request is resolved back to the target URL. The Service Worker calls `__go_jshttp` with `X-ZP-*` internal metadata plus inherited relay-server headers.
 5. The WASM kernel ensures one long-lived WebSocket connection to the selected relay server or `/zp/ws-pipe`, wraps it in a yamux client, and opens one yamux stream per target TCP connection.
@@ -71,7 +71,7 @@ The relay server terminates only the browser WebSocket and yamux session. It use
 7. HTTPS fetch targets advertise `h2` and `http/1.1` through uTLS ALPN; target WebSocket connections advertise only `http/1.1`.
 8. `internal/zphttp` dispatches negotiated `h2` connections through `golang.org/x/net/http2.ClientConn`; HTTP/1.1 fallback writes a direct request and reads the response with `http.ReadResponse`.
 9. Redirects are followed inside the kernel so raw `Location` headers are not exposed to browser code.
-10. HTML document responses are transformed: Rust rewrite asset plus runtime prelude are injected, document navigation URLs are rewritten to encrypted `/zp/p/<encrypted>#k=<key>` routes, risky tags and headers are removed, and the browser receives a same-origin `Response` with ZeroProxy CSP.
+10. HTML document responses are transformed: Rust rewrite asset plus runtime prelude are injected, document navigation URLs are rewritten to encrypted `/zp/p/<encrypted>#k=<key>&server=...` routes, risky tags and headers are removed, and the browser receives a same-origin `Response` with ZeroProxy CSP.
 
 ## Shared URL flow
 
@@ -83,7 +83,7 @@ Shared links use this envelope:
 
 `web/zp-core.js` and `internal/shareurl` derive separate HKDF-SHA256 AES-CBC and HMAC keys from the 64-byte seed. The MAC covers a fixed version prefix, IV, and ciphertext. Decryption verifies HMAC first, then decrypts and canonicalizes the target URL. Only `http:` and `https:` targets are accepted for document/fetch traffic; WebSocket wrappers accept only `ws:` and `wss:`.
 
-The Go HTML transformer uses `internal/shareurl.New` when laundering document-navigation attributes, so transformed links/forms/frames keep using encrypted `/zp/p` routes instead of legacy virtual URL paths.
+The Go HTML transformer uses `internal/shareurl.NewWithServers` when laundering document-navigation attributes, so transformed links/forms/frames keep using encrypted `/zp/p` routes with inherited relay-server fragments instead of legacy virtual URL paths.
 
 ## Service Worker classification
 

@@ -378,7 +378,7 @@ func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok 
 	if abs.Scheme != "http" && abs.Scheme != "https" {
 		return "#", "", false
 	}
-	sharePath, err := shareurl.New(abs.String())
+	sharePath, err := shareurl.NewWithServers(abs.String(), opt.Servers)
 	if err != nil {
 		return "#", "", false
 	}

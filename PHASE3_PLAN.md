@@ -83,11 +83,11 @@ Relay server selection and inheritance:
   - no fragment;
   - normalized host, port, path, and query;
   - bounded count and total serialized length.
-- The fragment is parsed by the shell before target code runs, then removed with `history.replaceState`. The fragment is never sent to the origin server or target server.
+- The fragment is parsed by the shell before target code runs, then kept visible in canonical `#k=...&server=...` form. The fragment is never sent to the origin server or target server.
 - The shell sends `{ targetUrl, routeKey, servers }` to the Service Worker in `ZP_OPEN_SHARE`. The Service Worker stores `servers` in tab/entry context and passes them to the WASM kernel transport initialization and WebSocket stream path.
 - Runtime-generated document navigations, forms, iframe navigations, worker bootstrap, module/script API calls, runtime fetch APIs, WebSocket, and `WebSocketStream` inherit `servers` from the active context. Target-authored URLs cannot override the relay server list.
 - New share URLs created by ZeroProxy UI or runtime helpers include the current inherited `server` parameters unless the user explicitly chooses a different relay set through ZeroProxy-controlled UI.
-- Cold restore without Service Worker memory must fail safely unless the URL fragment supplies both a valid `k` and a valid server list, or the deployment has an explicit default relay policy.
+- Cold restore without Service Worker memory must activate from the URL fragment when it supplies `k` and relay `server` values; missing server values are canonicalized to the deployment's current `/zp/ws-pipe` relay.
 
 ### 1. Static document-navigation attributes are not rewritten
 

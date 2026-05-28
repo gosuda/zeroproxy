@@ -621,6 +621,23 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
   assert.ok(requests.some(r => r.url === '/image-probe.png' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  const addressBarShare = page.url();
+  const relayServerParam = new RegExp(`server=ws%3A%2F%2Fproxy\\.localhost%3A${proxyPort}%2Fzp%2Fws-pipe`);
+  assert.match(addressBarShare, /#k=/);
+  assert.match(addressBarShare, relayServerParam);
+  const staticNextHref = await page.$eval('#next', el => el.getAttribute('href') || '');
+  assert.match(staticNextHref, /^\/zp\/p\//);
+  assert.match(staticNextHref, relayServerParam);
+  const externalContext = await (browser.createBrowserContext ? browser.createBrowserContext() : browser.createIncognitoBrowserContext());
+  try {
+    const externalPage = await externalContext.newPage();
+    await externalPage.goto(addressBarShare, { waitUntil: 'domcontentloaded' });
+    await externalPage.waitForFunction(() => document.title === 'E2E Home', { timeout: 30000 });
+    assert.match(externalPage.url(), /#k=/);
+    assert.match(externalPage.url(), relayServerParam);
+  } finally {
+    await externalContext.close();
+  }
   await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
   assert.equal(rewriteAdvanced.initialHref, `http://${targetHost}:${targetPort}/`);
@@ -1011,6 +1028,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     document.body.appendChild(evil);
     await new Promise(resolve => setTimeout(resolve, 100));
     out.afterSrcdocHref = location.href;
+    out.afterSrcdocVirtualHref = loc.href;
     out.topOrigin = __zp_get(globalThis, 'top').location.origin;
     out.beforeSrcdoc = beforeSrcdoc;
     evil.remove();
@@ -1023,7 +1041,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(escapeMatrix.locationReplaceSource, 'function replace() { [native code] }');
   assert.equal(escapeMatrix.virtualHash, '#zp-fragment');
   assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
-  assert.equal(escapeMatrix.afterSrcdocHref, escapeMatrix.beforeSrcdoc);
+  assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref);
   assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
   assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
   assert.equal(escapeMatrix.stringTimer, 'ran');

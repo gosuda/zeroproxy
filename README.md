@@ -14,15 +14,15 @@ Status: **Prototype / partial implementation**.
 
 Implemented core spine:
 
-- Encrypted active/share route format: `/p/<encrypted>#k=<key>`.
+- Encrypted active/share route format: `/zp/p/<encrypted>#k=<key>&server=...`.
 - AES-256-CBC + HMAC-SHA256 URL envelope with HKDF-separated encryption/MAC keys and HMAC verification before decryption.
 - Service Worker request classifier that handles every controlled request, blocks unknown requests instead of falling back to native `fetch(event.request)`, and requires a per-tab runtime capability token on privileged runtime bridge messages.
 - Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
 - A single browser WebSocket pipe carrying yamux streams to the relay server, then SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling. `-socks 127.0.0.1:9050` preserves the Tor bridge; `-socks internal` is a Tor-free development/test mode that parses SOCKS5 on the relay and dials targets directly from the relay process.
-- Tokenizer-based HTML transform that injects the runtime prelude, launders executable external scripts through `/__zp/api/script?u=...`, rewrites iframe/frame document URLs to encrypted `/p` routes, preserves author-visible anchor/form attributes for runtime navigation interception, removes or neutralizes preload/preconnect/manifest hints, drops dangerous tags and headers, routes executable event attributes through the Rust WASM rewriter, and handles `srcdoc`.
-- Runtime containment for main-window `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window and worker `fetch` paths are bridged through `/__zp/api/fetch` so strict `connect-src 'self'` does not block target API calls before the Service Worker can route them. Runtime-to-Service-Worker control messages carry a closure-held per-tab capability token. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
+- Tokenizer-based HTML transform that injects the runtime prelude, launders executable external scripts through `/zp/api/script?u=...`, rewrites iframe/frame document URLs to encrypted `/zp/p` routes with inherited `server=` relay fragments, preserves author-visible anchor/form attributes for runtime navigation interception, removes or neutralizes preload/preconnect/manifest hints, drops dangerous tags and headers, routes executable event attributes through the Rust WASM rewriter, and handles `srcdoc`.
+- Runtime containment for main-window `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window and worker `fetch` paths are bridged through `/zp/api/fetch` so strict `connect-src 'self'` does not block target API calls before the Service Worker can route them. Runtime-to-Service-Worker control messages carry a closure-held per-tab capability token. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
 - Rust WASM JavaScript rewriting is the only script rewrite engine: target-response CSP no longer permits `connect-src *`, external, module, worker, imported, inline, event-handler, and synchronous dynamic-function bodies are parsed before execution, dangerous global/window/location access is rewritten to runtime membrane helpers, parse/transform failures fail closed, constructor-constructor escapes are routed through runtime helpers instead of blocked, and blob/data worker scripts remain blocked when they cannot be rewritten synchronously.
-- Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
+- Relay server static asset service and `/zp/ws-pipe` WebSocket endpoint.
 - Go and JavaScript share URL implementations that use the same envelope format.
 
 Not complete enough for production or high-assurance acceptance:
@@ -110,7 +110,7 @@ Open the browser shell on the proxy origin:
 http://proxy.localhost:8080/
 ```
 
-Use `proxy.localhost` from the start so the shell, Service Worker, and encrypted `/p/<encrypted>#k=<key>` routes share one origin. The server starts even if Tor is not reachable. Target browsing needs either a configured Tor SOCKS5 listener or the explicit non-anonymous `-socks internal` test mode.
+Use `proxy.localhost` from the start so the shell, Service Worker, and encrypted `/zp/p/<encrypted>#k=<key>&server=...` routes share one origin. The server starts even if Tor is not reachable. Target browsing needs either a configured Tor SOCKS5 listener or the explicit non-anonymous `-socks internal` test mode.
 
 ## Verification commands
 

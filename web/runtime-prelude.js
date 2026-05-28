@@ -17,6 +17,7 @@
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
   const initialProxyURL = new URL(root.location.href);
   const proxyOrigin = initialProxyURL.origin;
+  const activeServers = ZP.relayServersForShare(Array.isArray(boot.servers) ? boot.servers : [], { allowLoopbackWS: true });
   let activeProxyPath = initialProxyURL.pathname;
   let activeProxyFragment = preservedShareFragment(initialProxyURL.hash);
   let activeRouteKey = ZP.isSharePath(activeProxyPath) ? ZP.shareRouteKey(activeProxyPath) : '';
@@ -24,7 +25,7 @@
   let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
   let explicitBaseURL = '';
-  const activeServers = Array.isArray(boot.servers) ? boot.servers.slice() : [];
+  let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');
   const documentCookieRecords = [];
   initDocumentCookieRecords(documentCookie);
@@ -132,6 +133,7 @@
       historyReplace: w.history.replaceState.bind(w.history),
       locationAssign: w.location && w.location.assign && w.location.assign.bind(w.location),
       locationReplace: w.location && w.location.replace && w.location.replace.bind(w.location),
+      locationHref: Object.getOwnPropertyDescriptor(w.Location && w.Location.prototype, 'href') || Object.getOwnPropertyDescriptor(w.location, 'href'),
       locationReload: w.location && w.location.reload && w.location.reload.bind(w.location),
       createObjectURL: w.URL && w.URL.createObjectURL && w.URL.createObjectURL.bind(w.URL),
       revokeObjectURL: w.URL && w.URL.revokeObjectURL && w.URL.revokeObjectURL.bind(w.URL),
@@ -205,12 +207,40 @@
       const raw = hash[0] === '#' ? hash.slice(1) : hash;
       const params = new URLSearchParams(raw);
       const key = params.get('k');
-      if (!key || params.get('zp_frag') === 'erase' || params.get('zp_erase_fragment') === '1') return '';
-      return '#k=' + encodeURIComponent(key);
+      return key ? ZP.makeShareFragment(key, activeServers) : '';
     } catch { return ''; }
   }
-  function shareFragmentForKey(key) { return activeProxyFragment ? ZP.makeShareFragment(String(key), activeServers) : ''; }
+  function shareFragmentForKey(key) { return ZP.makeShareFragment(String(key), activeServers); }
   function proxyHistoryURL() { return activeProxyPath + activeProxyFragment; }
+  function nativeLocationURL() {
+    try {
+      const href = Native.locationHref && Native.locationHref.get && Native.locationHref.get.call(root.location);
+      if (href) return new URL(href);
+    } catch {}
+    try { return new URL(proxyHistoryURL(), proxyOrigin); } catch { return new URL(initialProxyURL.href); }
+  }
+  function visibleProxyURL() { const u = nativeLocationURL(); return u.pathname + u.search + u.hash; }
+  function setActiveShareRoute(share) {
+    activeProxyPath = ZP.makeSharePath(share.encrypted);
+    activeRouteKey = share.encrypted;
+    activeProxyFragment = shareFragmentForKey(share.key);
+  }
+  function replaceVisibleProxyURL() {
+    const next = proxyHistoryURL();
+    if (visibleProxyURL() !== next) {
+      try { Native.historyReplace(root.history.state, '', next); } catch {}
+    }
+  }
+  function refreshVisibleShareRoute(entryId, target, base) {
+    const version = ++activeShareVersion;
+    ZP.encryptShareURL(target).then(share => {
+      return postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: base, replace: true }).then(() => share);
+    }).then(share => {
+      if (version !== activeShareVersion || entryId !== activeEntryId || target !== virtualURL.href) return;
+      setActiveShareRoute(share);
+      replaceVisibleProxyURL();
+    }).catch(()=>{});
+  }
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
   function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
@@ -236,7 +266,9 @@
     const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();
     activeEntryId = entryId;
     postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
-    return (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyHistoryURL());
+    const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyHistoryURL());
+    refreshVisibleShareRoute(entryId, virtualURL.href, baseURL);
+    return out;
   }
   function updateVirtualHash(raw, replace = false) {
     const oldURL = virtualURL.href;

@@ -21,10 +21,13 @@
     const reg = await navigator.serviceWorker.register('/zp/sw.js', { scope: ZP.CONTROL_PREFIX, updateViaCache: 'none' });
     await navigator.serviceWorker.ready;
     if (!navigator.serviceWorker.controller) {
-      await Promise.race([
-        new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })),
-        new Promise(resolve => setTimeout(resolve, 500))
-      ]);
+      await new Promise(resolve => {
+        const done = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(done, 5000);
+        navigator.serviceWorker.addEventListener('controllerchange', done, { once: true });
+      });
+    }
+    if (!navigator.serviceWorker.controller) {
       location.reload();
       await new Promise(() => {});
     }
@@ -46,30 +49,35 @@
     }
     return u.origin;
   }
+  function relayOptions() {
+    return { allowLoopbackWS: ZP.isLoopbackHost(location.hostname), origin: proxyOrigin() };
+  }
   async function openTarget(targetUrl) {
     const target = ZP.canonicalTargetURL(targetUrl).href;
     const share = await ZP.encryptShareURL(target);
-    const servers = ZP.parseRelayServersFromFragment(location.hash, { allowLoopbackWS: location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === 'proxy.localhost' });
-    try { await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers }); } catch {}
+    let servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
+    try {
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers });
+      if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
+    } catch {}
     location.assign(proxyOrigin() + ZP.makeSharePath(share.encrypted) + ZP.makeShareFragment(share.key, servers));
-  }
-  function shareFragmentPolicy(params) {
-    return params.get('zp_frag') === 'erase' || params.get('zp_erase_fragment') === '1' ? 'erase' : 'compat';
   }
   async function handleShare() {
     if (!ZP.isSharePath(location.pathname)) return false;
     const encrypted = ZP.shareRouteKey(location.pathname);
     const params = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
     const key = params.get('k');
-    const fragmentPolicy = shareFragmentPolicy(params);
-    const servers = ZP.parseRelayServersFromFragment(location.hash, { allowLoopbackWS: location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === 'proxy.localhost' });
+    let servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
     if (!key) { location.replace(ZP.errorPath('INVALID_SHARE_LINK')); return true; }
     try {
       const targetUrl = await ZP.decryptShareURL(encrypted, key);
-      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl, fragmentPolicy, servers });
-      const cleanFragment = fragmentPolicy === 'compat' ? '#k=' + encodeURIComponent(key) : '';
-      if (location.hash !== cleanFragment) history.replaceState(null, '', location.pathname + cleanFragment);
-      location.replace(result.path + cleanFragment);
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl, servers });
+      if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
+      const next = result.path + ZP.makeShareFragment(key, servers);
+      if (location.pathname === result.path) {
+        try { history.replaceState(null, '', ZP.CONTROL_PREFIX); } catch {}
+      }
+      location.replace(next);
     } catch (e) {
       const code = e && e.code || e && e.message || 'INVALID_SHARE_LINK';
       location.replace(ZP.errorPath(code));

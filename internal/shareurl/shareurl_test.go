@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"io"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -30,6 +31,36 @@ func TestNewWithRandRoundTripsEnvelope(t *testing.T) {
 	got := decryptForTest(t, parts[0], parts[1])
 	if got != target {
 		t.Fatalf("got %q want %q", got, target)
+	}
+}
+
+func TestNewWithRandAndServersCarriesRelayList(t *testing.T) {
+	const target = "https://example.com/path"
+	path, err := NewWithRandAndServers(strings.NewReader(strings.Repeat("x", 80)), target, []string{
+		"wss://relay.example:443/ws",
+		"wss://relay.example/ws",
+		"ws://proxy.localhost:8080/zp/ws-pipe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(strings.TrimPrefix(path, ControlPrefix+"p/"), "#", 2)
+	if len(parts) != 2 {
+		t.Fatalf("malformed share path %q", path)
+	}
+	params, err := url.ParseQuery(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decryptForTest(t, parts[0], params.Get("k")); got != target {
+		t.Fatalf("got %q want %q", got, target)
+	}
+	wantServers := []string{"wss://relay.example/ws", "ws://proxy.localhost:8080/zp/ws-pipe"}
+	if strings.Join(params["server"], "\n") != strings.Join(wantServers, "\n") {
+		t.Fatalf("servers = %#v, want %#v", params["server"], wantServers)
+	}
+	if !strings.Contains(path, "server=wss%3A%2F%2Frelay.example%2Fws&server=ws%3A%2F%2Fproxy.localhost%3A8080%2Fzp%2Fws-pipe") {
+		t.Fatalf("relay servers not encoded in order: %q", path)
 	}
 }
 

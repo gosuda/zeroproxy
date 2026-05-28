@@ -369,7 +369,7 @@ function createTab(targetUrl, servers) {
   const target = ZP.canonicalTargetURL(targetUrl).href;
   const tabId = ZP.randomId('t');
   const entryId = randomEntryId();
-  const relayServers = ZP.normalizeRelayServers(servers || [], { allowLoopbackWS: true });
+  const relayServers = ZP.relayServersForShare(servers || [], { allowLoopbackWS: true });
   const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);

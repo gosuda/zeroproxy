@@ -77,13 +77,23 @@
   function makeSharePath(encrypted) { return controlPath('p/' + encrypted); }
   async function makeShareURL(targetUrl, origin = globalThis.location && globalThis.location.origin || '', servers) {
     const s = await encryptShareURL(targetUrl);
-    return origin + makeSharePath(s.encrypted) + makeShareFragment(s.key, servers);
+    return origin + makeSharePath(s.encrypted) + makeShareFragment(s.key, relayServersForShare(servers, { origin, allowLoopbackWS: true }));
   }
   function makeShareFragment(key, servers) {
     const params = new URLSearchParams();
     params.set('k', String(key));
-    for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) params.append('server', server);
+    for (const server of relayServersForShare(servers, { allowLoopbackWS: true })) params.append('server', server);
     return '#' + params.toString();
+  }
+  function defaultRelayServer(origin) {
+    const loc = globalThis.location;
+    const rawOrigin = origin || loc && (loc.origin || (loc.protocol && loc.host ? loc.protocol + '//' + loc.host : '')) || 'https://proxy.example';
+    const u = new URL(rawOrigin);
+    return (u.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + u.host + controlPath('ws-pipe');
+  }
+  function relayServersForShare(values, options = {}) {
+    const normalized = normalizeRelayServers(values || [], options);
+    return normalized.length ? normalized : [defaultRelayServer(options.origin)];
   }
   function isSharePath(path) { return String(path || '').startsWith(controlPath('p/')); }
   function shareRouteKey(path) { return isSharePath(path) ? String(path).slice(controlPath('p/').length) : ''; }
@@ -115,7 +125,7 @@
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');
     const params = new URLSearchParams(raw && raw[0] === '#' ? raw.slice(1) : raw);
-    return normalizeRelayServers(params.getAll('server'), options);
+    return relayServersForShare(params.getAll('server'), options);
   }
   function normalizeRelayServers(values, options = {}) {
     if (!values) return [];
@@ -150,8 +160,8 @@
   }
   function isLoopbackHost(host) {
     const h = String(host || '').toLowerCase();
-    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
+    return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, ERRORS });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS });
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
 })();
