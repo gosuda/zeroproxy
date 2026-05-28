@@ -26,6 +26,30 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 	}
 }
 
+func TestTransformSuppressesIconLinksWithoutLosingVisibleTarget(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	out, err := Transform(strings.NewReader(`<html><head><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="touch.png"></head><body></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		`rel="icon"`,
+		`rel="apple-touch-icon"`,
+		`href="data:application/x-zeroproxy-icon,1"`,
+		`data-zp-target-url="https://example.com/favicon.ico"`,
+		`data-zp-target-url="https://example.com/app/touch.png"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in %s", want, s)
+		}
+	}
+	for _, forbidden := range []string{`href="/favicon.ico"`, `href="touch.png"`} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("raw icon href %q remained in %s", forbidden, s)
+		}
+	}
+}
 func TestTransformPreservesBlockedHeadLinkForHydration(t *testing.T) {
 	target, _ := url.Parse("https://example.com/check")
 	out, err := Transform(strings.NewReader(`<html><head><!--m67kuz--><link rel="preconnect" href="https://am.i.mullvad.net"/><!----></head><body></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})

@@ -240,6 +240,20 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 				continue
 			}
 		}
+		if tag == "link" && key == "href" && isIconLinkRel(attr(tok, "rel")) {
+			trimmed := strings.TrimSpace(a.Val)
+			if target, ok := resolveTargetURL(a.Val, opt); ok {
+				a.Val = "data:application/x-zeroproxy-icon,1"
+				dataTarget = target
+			} else {
+				a.Val = "data:application/x-zeroproxy-icon,1"
+				if trimmed != "" {
+					attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
+				}
+			}
+			attrs = append(attrs, a)
+			continue
+		}
 		if shouldRewritePassiveAttr(tag, key) {
 			trimmed := strings.TrimSpace(a.Val)
 			if target, ok := resolveTargetURL(a.Val, opt); ok {
@@ -429,6 +443,16 @@ func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string
 	return shareurl.ControlPrefix + "api/script?" + q.Encode(), abs.String(), true
 }
 
+func isIconLinkRel(rel string) bool {
+	for _, token := range strings.Fields(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(rel)), ",", " ")) {
+		switch token {
+		case "icon", "mask-icon", "apple-touch-icon", "apple-touch-icon-precomposed", "apple-touch-startup-image", "fluid-icon":
+			return true
+		}
+	}
+	return false
+}
+
 func executableScriptKind(tok xhtml.Token) string {
 	t := strings.TrimSpace(strings.ToLower(attr(tok, "type")))
 	if t == "module" {
@@ -439,7 +463,6 @@ func executableScriptKind(tok xhtml.Token) string {
 	}
 	return ""
 }
-
 func rewriteInlineScript(source, kind string, opt Options) string {
 	if kind == "module" {
 		payload, _ := json.Marshal(source)

@@ -24,6 +24,14 @@ test('runtime navigation uses bound Location methods and catches expando href cl
   assert.match(rt, /stopImmediatePropagation/);
   assert.doesNotMatch(rt, /Native\.locationAssign\.call\(location/);
 });
+test('runtime suppresses favicon loading without exposing placeholder hrefs', () => {
+  const rt = read('web/runtime-prelude.js');
+  assert.ok(rt.includes('data:application/x-zeroproxy-icon,1'));
+  assert.ok(rt.includes('isIconLinkRelValue'));
+  assert.ok(rt.includes('suppressIconLinkHref'));
+  assert.ok(rt.includes('visibleIconAttrValue'));
+  assert.ok(rt.includes('x-zeroproxy-icon'));
+});
 
 test('runtime preactivates p routes and masks navigator identity', () => {
   const rt = read('web/runtime-prelude.js');

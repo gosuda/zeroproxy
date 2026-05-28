@@ -119,7 +119,7 @@ function createTargetServer(requests) {
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<!doctype html><html><head><title>E2E Home</title><link rel="stylesheet" href="/site.css"></head><body>
+      res.end(`<!doctype html><html><head><title>E2E Home</title><link rel="stylesheet" href="/site.css"><link id="icon-link" rel="icon" href="/site-icon.png"></head><body>
         <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><img id="image-probe" src="/image-probe.png" alt=""><a id="next" href="/next">Next page</a></main>
         <script>
           window.__ua = navigator.userAgent;
@@ -182,6 +182,11 @@ function createTargetServer(requests) {
         <main><h1>E2E Next</h1><p id="ua"></p></main>
         <script>document.getElementById('ua').textContent = navigator.userAgent;</script>
       </body></html>`);
+      return;
+    }
+    if (url.pathname === '/site-icon.png') {
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'));
       return;
     }
     if (url.pathname === '/site.css') {
@@ -598,6 +603,17 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       const el = document.getElementById('image-probe');
       return el && { complete: el.complete, naturalWidth: el.naturalWidth, src: el.getAttribute('src') };
     })(),
+    faviconProbe: (() => {
+      const el = document.getElementById('icon-link');
+      const hrefAttr = el && el.attributes.getNamedItem('href');
+      return el && {
+        rel: el.getAttribute('rel'),
+        href: el.getAttribute('href'),
+        hrefProp: el.href,
+        hrefAttrValue: hrefAttr && hrefAttr.value,
+        outerHTML: el.outerHTML,
+      };
+    })(),
   }));
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
@@ -616,6 +632,18 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     tableRowNode: 'TR',
     tableRowText: 'cell',
   });
+  assert.deepEqual(home.faviconProbe && {
+    rel: home.faviconProbe.rel,
+    href: home.faviconProbe.href,
+    hrefProp: home.faviconProbe.hrefProp,
+    hrefAttrValue: home.faviconProbe.hrefAttrValue,
+  }, {
+    rel: 'icon',
+    href: `http://${targetHost}:${targetPort}/site-icon.png`,
+    hrefProp: `http://${targetHost}:${targetPort}/site-icon.png`,
+    hrefAttrValue: `http://${targetHost}:${targetPort}/site-icon.png`,
+  });
+  assert.doesNotMatch(home.faviconProbe.outerHTML, /x-zeroproxy-icon|data-zp-target-url/);
   assert.equal(home.platform, 'Win32');
   assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
@@ -623,6 +651,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
   assert.deepEqual(home.styleProbe, { borderTopWidth: '7px', borderTopColor: 'rgb(12, 34, 56)', paddingLeft: '13px' });
   assert.ok(requests.some(r => r.url === '/site.css' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.equal(requests.some(r => r.url === '/site-icon.png'), false, `favicon must not be fetched: ${JSON.stringify(requests)}`);
   assert.equal(home.imageProbe.complete, true);
   assert.equal(home.imageProbe.naturalWidth, 1);
   assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
