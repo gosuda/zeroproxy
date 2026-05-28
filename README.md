@@ -10,7 +10,7 @@ The relay server terminates only the browser WebSocket/yamux pipe. In production
 
 ## Status
 
-Status: **Phase 0 prototype / partial implementation**.
+Status: **Prototype / partial implementation**.
 
 Implemented core spine:
 
@@ -21,7 +21,7 @@ Implemented core spine:
 - A single browser WebSocket pipe carrying yamux streams to the relay server, then SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling. `-socks 127.0.0.1:9050` preserves the Tor bridge; `-socks internal` is a Tor-free development/test mode that parses SOCKS5 on the relay and dials targets directly from the relay process.
 - Tokenizer-based HTML transform that injects the runtime prelude, launders executable external scripts through `/__zp/api/script?u=...`, rewrites iframe/frame document URLs to encrypted `/p` routes, preserves author-visible anchor/form attributes for runtime navigation interception, removes or neutralizes preload/preconnect/manifest hints, drops dangerous tags and headers, strips executable event attributes through the JS rewriter, and handles `srcdoc`.
 - Runtime containment for main-window `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window and worker `fetch` paths are bridged through `/__zp/api/fetch` so strict `connect-src 'self'` does not block target API calls before the Service Worker can route them. Runtime-to-Service-Worker control messages carry a closure-held per-tab capability token. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
-- Phase 2 JavaScript rewriting is wired through an OXC parser/WASM service: target-response CSP no longer permits `connect-src *`, external, module, worker, and imported script sources are parsed before execution, dangerous global/window/location access is rewritten to runtime membrane helpers, parse/transform failures fail closed, dynamic compilation paths such as `Function`, constructor-constructor escapes, `eval`, and string timers execute under the runtime's virtual global scope, and blob/data worker scripts remain blocked when they cannot be rewritten synchronously.
+- OXC-based JavaScript rewriting is wired through a parser/WASM service: target-response CSP no longer permits `connect-src *`, external, module, worker, and imported script sources are parsed before execution, dangerous global/window/location access is rewritten to runtime membrane helpers, parse/transform failures fail closed, dynamic compilation paths such as `Function`, constructor-constructor escapes, `eval`, and string timers execute under the runtime's virtual global scope, and blob/data worker scripts remain blocked when they cannot be rewritten synchronously.
 - Relay server static asset service and `/__zp/ws-pipe` WebSocket endpoint.
 - Go and JavaScript share URL implementations that use the same envelope format.
 
@@ -32,11 +32,11 @@ Not complete enough for production or high-assurance acceptance:
 - Main-window runtime API compatibility is prototype-level for `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, forms, uploads, descriptor edge cases, and fingerprinting surface fidelity. The wrappers preserve the ZeroProxy transport boundary, but they are not browser-native semantic clones for every option, event, redirect, credential, cache, progress, or close/error edge case.
 - Response bodies are streamed into JavaScript `Response` objects, but request/upload bodies are buffered through the Service Worker/WASM bridge with an explicit size cap. Streaming uploads, large multipart/file uploads, request cancellation, and browser backpressure behavior are still prototype-level.
 - Form navigation compatibility is limited: GET submissions become ZeroProxy navigations, while non-GET submissions are replayed through the runtime fetch path and write the transformed response back into the current document rather than following the browser's native navigation algorithm.
-- Worker compatibility is partial: Worker/SharedWorker constructors bootstrap through ZeroProxy, dedicated worker `fetch` and `importScripts` are bridged, rewritten worker code receives the Phase 2 membrane helpers it may reference, and worker XHR, WebSocket, EventSource, native device/network APIs, full worklet/module-worker parity, and unrewritable blob/data worker scripts are blocked or prototype-level rather than fully emulated.
+- Worker compatibility is partial: Worker/SharedWorker constructors bootstrap through ZeroProxy, dedicated worker `fetch` and `importScripts` are bridged, rewritten worker code receives the runtime membrane helpers it may reference, and worker XHR, WebSocket, EventSource, native device/network APIs, full worklet/module-worker parity, and unrewritable blob/data worker scripts are blocked or prototype-level rather than fully emulated.
 - Cookie, storage, and history semantics are not yet reconciled across runtime state, Service Worker state, and the Go kernel cookie jar. Encrypted IndexedDB persistence is not implemented.
 - Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE2_PLAN.md`](./PHASE2_PLAN.md) for the Phase 2 Service Worker/OXC JavaScript rewriting plan.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE3_PLAN.md`](./PHASE3_PLAN.md) for the current cutover plan.
 
 ## Requirements
 
@@ -133,7 +133,7 @@ These checks cover source/unit policy invariants, buildability, and a local-brow
 
 | Path | Purpose |
 |---|---|
-| `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, Phase 0 CSP helper. |
+| `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, and ZeroProxy CSP helper. |
 | `web/sw.js` | Service Worker classifier, in-memory tab state, runtime API bridge, WASM kernel calls. |
 | `web/runtime-prelude.js`, `web/worker-prelude.js` | Target-realm containment hooks, dynamic HTML/link/script policy, and worker bootstrap/membrane helpers. |
 | `scripts/build.mjs` | Full build pipeline for browser bundles, generated WASM support assets, Go WASM kernel, and relay server. |
