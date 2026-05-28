@@ -945,7 +945,7 @@ impl<'a> Rewriter<'a> {
     fn is_global_name(&self, name: &str) -> bool { GLOBALS.iter().any(|global| *global == name) && !self.declared(name) }
 
     fn member_needs_helper_static(&self, expr: &StaticMemberExpression<'a>) -> bool {
-        MEMBER_HELPER_PROPS.iter().any(|prop| *prop == expr.property.name.as_str())
+        !matches!(&expr.object, Expression::Super(_)) && MEMBER_HELPER_PROPS.iter().any(|prop| *prop == expr.property.name.as_str())
     }
 
     fn member_needs_helper_computed(&self, expr: &ComputedMemberExpression<'a>) -> bool {
@@ -997,6 +997,9 @@ impl<'a> Rewriter<'a> {
     fn call_target(&self, callee: &Expression<'a>) -> Option<(String, String)> {
         match callee {
             Expression::StaticMemberExpression(expr) => {
+                if matches!(&expr.object, Expression::Super(_)) {
+                    return None;
+                }
                 let prop = expr.property.name.as_str();
                 if CALL_HELPER_PROPS.iter().any(|name| *name == prop) || self.member_needs_helper_static(expr) {
                     Some((self.render_expression(&expr.object), format!("{:?}", prop)))
@@ -1183,6 +1186,19 @@ mod tests {
         assert!(code.contains("__zp_set(__zp_get(globalThis,\"window\"),\"location\",'/next')"));
         assert!(code.contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),['/ws',['chat']])"));
         assert!(code.contains("__zp_call(Object,\"getOwnPropertyDescriptor\",[__zp_get(globalThis,\"window\"),'location'])"));
+    }
+
+    #[test]
+    fn preserves_super_member_syntax() {
+        let code = rewrite_ok(
+            "class Child extends Parent { method() { super.get(); return super.constructor; } }",
+            "module",
+            "https://example.com/app.js",
+        );
+        assert!(code.contains("super.get();"));
+        assert!(code.contains("return super.constructor;"));
+        assert!(!code.contains("__zp_get(super"));
+        assert!(!code.contains("__zp_call(super"));
     }
 
     #[test]

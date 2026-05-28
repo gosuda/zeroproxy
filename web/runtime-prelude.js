@@ -213,6 +213,13 @@
   function proxyHistoryURL() { return activeProxyPath + activeProxyFragment; }
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
+  function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
+  function shouldBlockURLAttribute(el, key, raw) {
+    const tag = el && el.localName;
+    const localKey = attrLocalName(key);
+    const strict = localKey === 'src' && tag === 'script' || localKey === 'src' && (tag === 'iframe' || tag === 'frame') || usesRawURLAttribute(el, key);
+    return strict ? hasExecutableURLScheme(raw) : hasDangerousURLScheme(raw);
+  }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
   function blockExecutableURL(el, key, raw) { urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw).trim()); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el); }
   function isIntegrityBearing(el) { const tag = el && el.localName; return tag === 'script' || tag === 'link'; }
@@ -1347,7 +1354,18 @@
       return;
     }
     if (rel && Native.removeAttribute) Native.removeAttribute.call(el, 'data-zp-blocked-rel');
-    if (hasSuppressedBlockedLinkRel(el)) blockLinkURL(el, Native.getAttribute.call(el, 'href') || '');
+    if (hasSuppressedBlockedLinkRel(el)) {
+      blockLinkURL(el, Native.getAttribute.call(el, 'href') || '');
+      return;
+    }
+    const href = Native.getAttribute.call(el, 'href') || '';
+    if (href && isHTTPURL(href) && !String(href).startsWith(proxyOrigin)) {
+      const target = targetURL(href);
+      const alreadyMapped = urlMeta.get(el) === target && Native.getAttribute.call(el, 'data-zp-target-url') === target && Native.getAttribute.call(el, 'href') === target;
+      urlMeta.set(el, target);
+      if (Native.getAttribute.call(el, 'data-zp-target-url') !== target) Native.setAttribute.call(el, 'data-zp-target-url', target);
+      if (!alreadyMapped && Native.getAttribute.call(el, 'href') !== target) Native.setAttribute.call(el, 'href', target);
+    }
   }
   function sanitizeSerializedHTML(html) {
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
@@ -1414,7 +1432,10 @@
           return null;
         };
         if (prop === Symbol.iterator) return function*(){ for (let i = 0; i < length(); i++) yield nth(i); };
-        if (/^(?:0|[1-9]\\d*)$/.test(String(prop))) return nth(Number(prop));
+        if (/^(?:0|[1-9]\d*)$/.test(String(prop))) {
+          const index = Number(prop);
+          return index < length() ? nth(index) : undefined;
+        }
         const value = raw && raw[prop];
         return typeof value === 'function' ? value.bind(raw) : value;
       },
@@ -1509,7 +1530,7 @@
       }
       if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
       if (isURLBearing(this, key)) {
-        if (hasExecutableURLScheme(v)) return blockExecutableURL(this, localKey, v);
+        if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
         if (isHTTPURL(v)) {
           const t = targetURL(v);
           urlMeta.set(this, t);
@@ -1531,7 +1552,7 @@
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
       if (isURLBearing(this, key)) {
-        if (hasExecutableURLScheme(v)) return blockExecutableURL(this, localKey, v);
+        if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
         if (isHTTPURL(v)) {
           const t = targetURL(v);
           urlMeta.set(this, t);
@@ -1665,11 +1686,12 @@
         set(v) {
           if (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this)) return blockLinkURL(this, v);
           const value = String(v);
-          if (hasExecutableURLScheme(value)) return blockExecutableURL(this, 'href', value);
+          if (shouldBlockURLAttribute(this, 'href', value)) return blockExecutableURL(this, 'href', value);
           if (isHTTPURL(value)) {
             const t = targetURL(value);
             urlMeta.set(this, t);
             Native.setAttribute.call(this, 'data-zp-target-url', t);
+            return hrefDescriptor.set ? hrefDescriptor.set.call(this, t) : Native.setAttribute.call(this, 'href', t);
           }
           return hrefDescriptor.set ? hrefDescriptor.set.call(this, value) : Native.setAttribute.call(this, 'href', value);
         },
@@ -1729,7 +1751,7 @@
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
   function isSVGURLBearing(el, key) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && attrLocalName(key) === 'href' && /^(a|image|use|script)$/.test(el.localName || ''); }
-  function isURLBearing(el, key) { const tag = el.localName; const localKey = attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || isSVGURLBearing(el, key)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script'); }
+  function isURLBearing(el, key) { const tag = el.localName; const localKey = attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input') || localKey === 'poster' && tag === 'video'; }
   function executableScriptDataType(el) {
     const kind = executableScriptKindForElement(el);
     if (kind) return kind;
@@ -1815,6 +1837,7 @@
             Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
             Native.setAttribute.call(node, attrName, rewriteEventAttribute(val));
           }
+          if (isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
         }
       }
     }
@@ -1838,7 +1861,7 @@
           if (r.type === 'attributes') enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase());
           else for (const n of r.addedNodes || []) { syncBaseElement(n); enforceSubtreePolicies(n); instrumentDescendantIframes(n); }
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'integrity', 'type', 'rel', 'target'] });
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target'] });
     } catch {}
   }
   function enforceObservedAttribute(el, key) {
@@ -1868,7 +1891,7 @@
     }
     if (!isURLBearing(el, key)) return;
     const raw = Native.getAttribute.call(el, key);
-    if (hasExecutableURLScheme(raw)) { blockExecutableURL(el, localKey, raw); return; }
+    if (shouldBlockURLAttribute(el, localKey, raw)) { blockExecutableURL(el, localKey, raw); return; }
     if (!raw || !isHTTPURL(raw) || String(raw).startsWith(proxyOrigin)) return;
     let target;
     try { target = targetURL(raw); } catch { return; }
@@ -1888,7 +1911,7 @@
     if (!node || typeof node !== 'object') return;
     if (node.nodeType === 1) {
       enforceElementPolicy(node);
-      if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,svg a,svg image,svg use').forEach(enforceElementPolicy);
+      if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,svg a,svg image,svg use').forEach(enforceElementPolicy);
     }
   }
   function enforceElementPolicy(el) {

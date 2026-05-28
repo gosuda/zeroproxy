@@ -120,7 +120,7 @@ function createTargetServer(requests) {
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Home</title><link rel="stylesheet" href="/site.css"></head><body>
-        <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
+        <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><img id="image-probe" src="/image-probe.png" alt=""><a id="next" href="/next">Next page</a></main>
         <script>
           window.__ua = navigator.userAgent;
           window.__platform = navigator.platform;
@@ -184,6 +184,11 @@ function createTargetServer(requests) {
       res.end(`.root-stylesheet-probe{border-top:7px solid rgb(12, 34, 56); padding-left:13px}`);
       return;
     }
+    if (url.pathname === '/image-probe.png') {
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'));
+      return;
+    }
     if (url.pathname === '/gtm.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`window.__gtmFixture = {
@@ -213,6 +218,8 @@ function createTargetServer(requests) {
         });
         root.find('.trigger').trigger('click');
         root.append($.parseHTML('<div class="parsed"><span>parsed</span></div>'));
+        const emptyHtml = $('<div id="empty-html-probe"></div>').appendTo(root);
+        emptyHtml.html('<span>filled</span>');
         const deferred = $.Deferred();
         const ajax = $.ajax({ url: '/jquery-ajax.json', dataType: 'json' });
         const script = $.getScript('/jquery-plugin.js');
@@ -230,6 +237,8 @@ function createTargetServer(requests) {
             attrClicked: root.find('.trigger').attr('data-clicked'),
             parsedText: root.find('.parsed span').text(),
             param: $.param({ a: 1, b: ['x', 'y'] }),
+            htmlProbeText: emptyHtml.find('span').text(),
+            htmlProbeChildren: emptyHtml.children().length,
             ajaxData,
             plugin: window.__jqueryPlugin || null,
             globalEvalHref: window.__jqueryGlobalEvalHref || null,
@@ -580,6 +589,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       const cs = el && getComputedStyle(el);
       return cs && { borderTopWidth: cs.borderTopWidth, borderTopColor: cs.borderTopColor, paddingLeft: cs.paddingLeft };
     })(),
+    imageProbe: (() => {
+      const el = document.getElementById('image-probe');
+      return el && { complete: el.complete, naturalWidth: el.naturalWidth, src: el.getAttribute('src') };
+    })(),
   }));
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
@@ -603,6 +616,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
   assert.deepEqual(home.styleProbe, { borderTopWidth: '7px', borderTopColor: 'rgb(12, 34, 56)', paddingLeft: '13px' });
   assert.ok(requests.some(r => r.url === '/site.css' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.equal(home.imageProbe.complete, true);
+  assert.equal(home.imageProbe.naturalWidth, 1);
+  assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
+  assert.ok(requests.some(r => r.url === '/image-probe.png' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
@@ -670,6 +687,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(jquery.dataClicked, true);
   assert.equal(jquery.attrClicked, 'yes');
   assert.equal(jquery.parsedText, 'parsed');
+  assert.equal(jquery.htmlProbeText, 'filled');
+  assert.equal(jquery.htmlProbeChildren, 1);
   assert.equal(jquery.param, 'a=1&b%5B%5D=x&b%5B%5D=y');
   assert.deepEqual(jquery.ajaxData, { ok: true, path: '/jquery-ajax.json' });
   assert.equal(jquery.plugin && jquery.plugin.loaded, true);

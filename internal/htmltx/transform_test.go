@@ -144,3 +144,22 @@ func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 		}
 	}
 }
+
+func TestTransformAbsolutizesPassiveSubresources(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	out, err := Transform(strings.NewReader(`<body><img src="/logo.png"><video poster="poster.jpg"><source src="../media.webm"></video><img src="data:image/png;base64,AAAA"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{`src="https://example.com/logo.png"`, `poster="https://example.com/app/poster.jpg"`, `src="https://example.com/media.webm"`, `src="data:image/png;base64,AAAA"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in %s", want, s)
+		}
+	}
+	for _, forbidden := range []string{`src="/logo.png"`, `poster="poster.jpg"`, `src="../media.webm"`} {
+		if strings.Contains(s, forbidden) {
+			t.Fatalf("unresolved passive subresource %q remained in %s", forbidden, s)
+		}
+	}
+}

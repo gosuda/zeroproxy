@@ -222,12 +222,12 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			attrs = append(attrs, a)
 			continue
 		}
-		if tag == "link" && key == "href" {
+		if shouldRewritePassiveAttr(tag, key) {
 			trimmed := strings.TrimSpace(a.Val)
 			if target, ok := resolveTargetURL(a.Val, opt); ok {
 				a.Val = target
 				dataTarget = target
-			} else if trimmed != "" && hasExecutableURLScheme(trimmed) {
+			} else if trimmed != "" && hasDangerousURLScheme(trimmed) {
 				a.Val = shareurl.ControlPrefix + "error/POLICY_BLOCKED"
 				attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
 			}
@@ -293,6 +293,23 @@ func shouldRewriteAttr(tag, key string) bool {
 		return tag == "iframe" || tag == "frame"
 	}
 	return false
+}
+
+func shouldRewritePassiveAttr(tag, key string) bool {
+	switch key {
+	case "href":
+		return tag == "link" || tag == "image" || tag == "use"
+	case "src":
+		return tag == "img" || tag == "source" || tag == "audio" || tag == "video" || tag == "track" || tag == "input"
+	case "poster":
+		return tag == "video"
+	}
+	return false
+}
+
+func hasDangerousURLScheme(s string) bool {
+	scheme, ok := urlScheme(s)
+	return ok && (strings.EqualFold(scheme, "javascript") || strings.EqualFold(scheme, "vbscript"))
 }
 
 func isDocumentNavigationAttr(tag, key string) bool {
