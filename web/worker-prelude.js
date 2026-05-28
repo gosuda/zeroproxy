@@ -62,6 +62,12 @@
     }
     return set(target, prop, next);
   }
+  function update(target, prop, operator, prefix) {
+    const current = get(target, prop);
+    const next = operator === '++' ? current + 1 : current - 1;
+    set(target, prop, next);
+    return prefix ? next : current;
+  }
   function call(target, prop, args) {
     const actual = workerTarget(target);
     return Reflect.apply(get(target, prop), actual, Array.isArray(args) ? args : []);
@@ -77,6 +83,7 @@
   expose('__zp_set', set);
   expose('__zp_assign', assign);
   expose('__zp_call', call);
+  expose('__zp_update', update);
   expose('__zp_construct', construct);
   expose('__zp_has', has);
   expose('__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);

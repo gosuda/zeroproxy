@@ -1,8 +1,6 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the WASM transport. */
 importScripts('/zp/assets/zp-core.js');
 importScripts('/zp/assets/rust-rewriter.js');
-importScripts('/zp/assets/oxc-parser.js');
-importScripts('/zp/assets/js-rewriter.js');
 importScripts('/zp/assets/wasm_exec.js');
 
 const nativeFetch = self.fetch.bind(self);
@@ -17,16 +15,6 @@ const streams = new Map();
 const SUBMISSION_TTL_MS = 5 * 60 * 1000;
 let readiness = 'UNINITIALIZED';
 let kernelPromise = null;
-let rewriterPromise = null;
-self.__zp_rewrite_script = function(source, kind, targetUrl) {
-  if (!self.ZPRewriter || !self.ZPRewriter.ready) return '';
-  try {
-    const out = self.ZPRewriter.rewriteScript(String(source || ''), { kind: kind || 'classic', targetUrl: targetUrl || '', strict: true });
-    return out && out.ok && typeof out.code === 'string' ? out.code : '';
-  } catch {
-    return '';
-  }
-};
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
 self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initKernel().catch(() => {}); })()));
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
@@ -55,11 +43,7 @@ async function initKernel(servers) {
 }
 
 async function initRewriter() {
-  if (self.ZPRewriter && self.ZPRewriter.ready) return;
-  if (rewriterPromise) return rewriterPromise;
-  if (!self.ZPRewriter || !self.OXCParser) throw new Error('REALM_INJECTION_FAILURE');
-  rewriterPromise = self.ZPRewriter.init({ parser: self.OXCParser, wasmURL: '/zp/assets/oxc_parser_wasm_bg.wasm', fetch: nativeFetch }).catch(err => { rewriterPromise = null; throw err; });
-  return rewriterPromise;
+  if (!self.ZPRewriter || !self.ZPRewriter.ready || typeof self.ZPRewriter.rewriteScript !== 'function') throw new Error('REALM_INJECTION_FAILURE');
 }
 
 async function handleFetch(event) {
@@ -99,7 +83,7 @@ function classify(req, url, clientId) {
 }
 
 function internalPath(path) {
-  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('js-rewriter.js') || path === ZP.assetPath('oxc-parser.js') || path === ZP.assetPath('oxc_parser_wasm_bg.wasm') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script');
@@ -235,7 +219,7 @@ async function rewriteScriptResponse(resp, opt) {
   try {
     await initRewriter();
     const source = await resp.text();
-    const out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true });
+    const out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
     code = out && out.ok ? out.code : (self.ZPRewriter ? self.ZPRewriter.blockSource() : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');");
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";

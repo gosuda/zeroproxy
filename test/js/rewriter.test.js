@@ -5,15 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
-const oxc = require('@oxc-parser/wasm');
 
 let builtRustAssetPromise = null;
-
-async function loadRewriter() {
-  if (!globalThis.ZPRewriter) vm.runInThisContext(fs.readFileSync('web/js-rewriter.js', 'utf8'), { filename: 'web/js-rewriter.js' });
-  await globalThis.ZPRewriter.init({ parser: oxc });
-  return globalThis.ZPRewriter;
-}
 
 function loadBuiltRustContext() {
   if (!builtRustAssetPromise) {
@@ -26,24 +19,38 @@ function loadBuiltRustContext() {
       if (result.status !== 0) {
         throw new Error(`node scripts/build.mjs --web-only --out ${outDir} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
       }
-      const ctx = { console, atob, btoa, TextEncoder, TextDecoder, Uint8Array, WebAssembly, FinalizationRegistry, URL, globalThis: null };
+      const ctx = { console, atob, btoa, TextEncoder, TextDecoder, Uint8Array, WebAssembly, FinalizationRegistry, URL, Promise, globalThis: null };
       ctx.globalThis = ctx;
       vm.createContext(ctx);
       vm.runInContext(fs.readFileSync(path.join(outDir, 'web', 'rust-rewriter.js'), 'utf8'), ctx, { filename: 'rust-rewriter.js' });
+      assert.equal(fs.existsSync(path.join(outDir, 'web', 'js-rewriter.js')), false);
+      assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc-parser.js')), false);
+      assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc_parser_wasm_bg.wasm')), false);
       return ctx;
     })();
   }
   return builtRustAssetPromise;
 }
-test('rewriter prefers Rust engine when available', async () => {
-  vm.runInThisContext(fs.readFileSync('web/js-rewriter.js', 'utf8'), { filename: 'web/js-rewriter.js' });
-  globalThis.ZPRustRewriter = { rewriteScript(source, kind, targetUrl, controlPrefix) { return { ok: true, code: `/*rust:${kind}:${targetUrl}:${controlPrefix}*/`, error: '' }; } };
-  const out = globalThis.ZPRewriter.rewriteScript('window.location.href', { kind: 'classic', targetUrl: 'https://example.com/app.js', controlPrefix: '/zp/' });
-  delete globalThis.ZPRustRewriter;
+
+async function loadRewriter() {
+  const ctx = await loadBuiltRustContext();
+  return ctx.ZPRewriter;
+}
+
+test('Rust rewriter asset exposes the public rewriter API without JS fallback assets', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(typeof ctx.ZPRustRewriter.rewriteScript, 'function');
+  assert.equal(typeof ctx.ZPRewriter.rewriteScript, 'function');
+  assert.equal(ctx.ZPRewriter.ready, true);
+  assert.equal(ctx.ZPRewriter.initSync(), true);
+  assert.equal(await ctx.ZPRewriter.init(), true);
+  const out = ctx.ZPRewriter.rewriteScript('window.location.href', { kind: 'classic', targetUrl: 'https://example.com/app.js', controlPrefix: '/zp/' });
   assert.equal(out.ok, true);
-  assert.equal(out.code, '/*rust:classic:https://example.com/app.js:/zp/*/');
+  assert.match(out.code, /__zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/);
+  assert.equal('OXCParser' in ctx, false);
 });
-test('built Rust rewriter asset rewrites live code paths', async () => {
+
+test('Rust rewriter asset rewrites live code paths', async () => {
   const ctx = await loadBuiltRustContext();
   const assign = ctx.ZPRustRewriter.rewriteScript('window.location.hash += "-tail"; document.defaultView.location.href;', 'classic', 'https://example.com/app.js', '/zp/');
   const meta = ctx.ZPRustRewriter.rewriteScript('new URL("/worker-fixture.js", import.meta.url).href;', 'module', 'https://example.com/module-worker.js', '/zp/');
@@ -58,34 +65,30 @@ test('built Rust rewriter asset rewrites live code paths', async () => {
   assert.ok(dynamic.code.includes('https://example.com/assets/main.js'));
 });
 
-test('built Rust rewriter asset reports parse failures', async () => {
+test('Rust rewriter asset reports parse failures', async () => {
   const ctx = await loadBuiltRustContext();
   const out = ctx.ZPRustRewriter.rewriteScript('if (', 'classic', 'https://example.com/app.js', '/zp/');
   assert.equal(out.ok, false);
   assert.equal(out.error, 'PARSE_FAILED');
+  const publicOut = ctx.ZPRewriter.rewriteScript('if (', { kind: 'classic', targetUrl: 'https://example.com/app.js' });
+  assert.equal(publicOut.ok, false);
+  assert.equal(publicOut.errorCode, 'PARSE_FAILED');
+  assert.match(ctx.ZPRewriter.blockSource(), /Blocked by ZeroProxy rewrite policy/);
 });
 
-test('JS wrapper falls back to JS engine for import-map and event-handler paths', async () => {
-  const ctx = await loadBuiltRustContext();
-  globalThis.ZPRustRewriter = ctx.ZPRustRewriter;
+test('Rust rewriter supports event-handler and dynamic function body paths', async () => {
   const rewriter = await loadRewriter();
   const handler = rewriter.rewriteScript('return location.href', { kind: 'event-handler', targetUrl: 'https://example.com/' });
   assert.equal(handler.ok, true);
   assert.match(handler.code, /__zp_runEvent/);
-  const fnBody = rewriter.rewriteScript('return location.href;', { kind: 'function', targetUrl: 'https://example.com/' });
+  assert.ok(handler.code.includes('__zp_get(globalThis,"location").href'));
+
+  const fnBody = rewriter.rewriteFunctionBody('return location.href + window.location.href;', ['location'], 'https://example.com/');
   assert.equal(fnBody.ok, true);
-  assert.ok(fnBody.code.includes('__zp_get(globalThis,"location")'));
-  const importMap = rewriter.rewriteScript('import React from \"react\";', {
-    kind: 'module',
-    targetUrl: 'https://example.com/app.js',
-    importMap: { imports: { react: 'https://cdn.example/react.js' } },
-  });
-  delete globalThis.ZPRustRewriter;
-  assert.equal(importMap.ok, true);
-  assert.ok(importMap.code.includes('https%3A%2F%2Fcdn.example%2Freact.js'));
+  assert.match(fnBody.code, /return location\.href \+ __zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/);
 });
 
-test('OXC rewriter virtualizes dangerous globals without rewriting local bindings', async () => {
+test('Rust rewriter virtualizes dangerous globals without rewriting local bindings', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`
     const location = { href: 'local' };
@@ -101,20 +104,22 @@ test('OXC rewriter virtualizes dangerous globals without rewriting local binding
   assert.match(out.code, /__zp_get\(globalThis,"Function"\)/);
 });
 
-test('OXC rewriter supports modules and fails closed on parse errors', async () => {
+test('Rust rewriter supports modules and fails closed on parse errors', async () => {
   const rewriter = await loadRewriter();
-  const mod = rewriter.rewriteScript(`import x from './x.js'; export const y = window.location.href;`, { kind: 'module' });
+  const mod = rewriter.rewriteScript(`import x from './x.js'; export const y = window.location.href;`, {
+    kind: 'module',
+    targetUrl: 'https://example.com/app.js',
+  });
   assert.equal(mod.ok, true, JSON.stringify(mod.diagnostics));
-  assert.match(mod.code, /import x from/);
+  assert.ok(mod.code.includes('import x from "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fx.js"'));
   assert.match(mod.code, /__zp_get\(__zp_get\(globalThis,"window"\),"location"\)/);
 
   const bad = rewriter.rewriteScript(`if (`, { kind: 'classic' });
   assert.equal(bad.ok, false);
   assert.equal(bad.errorCode, 'PARSE_FAILED');
-  assert.match(rewriter.blockSource(), /Blocked by ZeroProxy rewrite policy/);
 });
 
-test('OXC rewriter launders module import specifiers through same-origin script API', async () => {
+test('Rust rewriter launders module import specifiers through same-origin script API', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`import "./dep.js"; export async function load() { return import("./chunk.js"); }`, {
     kind: 'module',
@@ -124,7 +129,8 @@ test('OXC rewriter launders module import specifiers through same-origin script 
   assert.ok(out.code.includes('import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js"'));
   assert.ok(out.code.includes('import("/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fchunk.js")'));
 });
-test('OXC rewriter accepts target URLs with cache-busting query strings', async () => {
+
+test('Rust rewriter accepts target URLs with cache-busting query strings', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`window.location = "/next";`, {
     kind: 'classic',
@@ -134,7 +140,7 @@ test('OXC rewriter accepts target URLs with cache-busting query strings', async 
   assert.match(out.code, /__zp_set\(__zp_get\(globalThis,"window"\),"location","\/next"\)/);
 });
 
-test('OXC rewriter accepts extensionless target URLs', async () => {
+test('Rust rewriter accepts extensionless target URLs', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`window._cf_chl_opt = { ray: location.href };`, {
     kind: 'classic',
@@ -144,16 +150,16 @@ test('OXC rewriter accepts extensionless target URLs', async () => {
   assert.match(out.code, /__zp_get\(globalThis,"location"\)\.href/);
 });
 
-test('OXC rewriter preserves compound writes through virtual location helpers', async () => {
+test('Rust rewriter preserves compound writes and constructor escapes through helpers', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`location.href += '#x'; ({}).constructor.constructor('return location.href')();`, { kind: 'classic' });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.doesNotMatch(out.code, /Blocked by ZeroProxy rewrite policy/);
   assert.ok(out.code.includes('__zp_assign(__zp_get(globalThis,"location"),"href","+=",' + "'#x'" + ')'));
-  assert.match(out.code, /__zp_call\(__zp_get\(\(\{\}\),\"constructor\"\),\"constructor\"/);
+  assert.match(out.code, /__zp_call\(__zp_get\(\(\{\}\),"constructor"\),"constructor"/);
 });
 
-test('OXC rewriter preserves valid syntax for assignment targets and property keys', async () => {
+test('Rust rewriter preserves valid syntax for assignment targets, property keys, classes, and updates', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`
     class Boundary {
@@ -173,6 +179,8 @@ test('OXC rewriter preserves valid syntax for assignment targets and property ke
     }
     window.__svelte ??= {};
     (window.__svelte ??= {}).uid ??= 1;
+    const post = location.hash++;
+    const pre = ++window.location.hash;
   `, { kind: 'classic' });
 
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
@@ -183,12 +191,13 @@ test('OXC rewriter preserves valid syntax for assignment targets and property ke
   assert.match(out.code, /window: __zp_get\(globalThis,"window"\)/);
   assert.match(out.code, /parent: __zp_get\(globalThis,"parent"\)/);
   assert.match(out.code, /__zp_get\(globalThis,"window"\)\.__svelte \?\?= \{\}/);
+  assert.ok(out.code.includes('__zp_update(__zp_get(globalThis,"location"),"hash","++",false)'));
+  assert.ok(out.code.includes('__zp_update(__zp_get(__zp_get(globalThis,"window"),"location"),"hash","++",true)'));
   assert.doesNotMatch(out.code, /__zp_get\(globalThis,"parent"\);/);
   assert.doesNotMatch(out.code, /__zp_get\(this,"parent"\)\s*=/);
-  assert.doesNotMatch(out.code, /throw new DOMException\('Blocked by ZeroProxy rewrite policy'/);
 });
 
-test('OXC rewriter emits expression-safe blocks for forbidden expression contexts', async () => {
+test('Rust rewriter rewrites construction through virtualized expressions instead of blocking', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`
     function updateHref() {
@@ -200,10 +209,11 @@ test('OXC rewriter emits expression-safe blocks for forbidden expression context
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.doesNotThrow(() => new Function(out.code));
   assert.ok(out.code.includes('return (__zp_assign(__zp_get(globalThis,"location"),"href","+=",' + "'#x'" + '))'));
-  assert.match(out.code, /const ctor = \(\(\)=>\{throw new DOMException/);
+  assert.match(out.code, /const ctor = \(__zp_construct\(__zp_get\(__zp_get\(\(\{\}\),"constructor"\),"constructor"\),\['return location.href'\]\)\)/);
+  assert.doesNotMatch(out.code, /throw new DOMException/);
 });
 
-test('OXC rewriter routes location assignments and WebSocket construction through helpers', async () => {
+test('Rust rewriter routes location assignments and WebSocket construction through helpers', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`
     const assigned = (window.location = "https://google.com/");
@@ -218,7 +228,7 @@ test('OXC rewriter routes location assignments and WebSocket construction throug
   assert.match(out.code, /__zp_construct\(__zp_get\(globalThis,"WebSocket"\),\["ws:\/\/example\.test\/socket",\["chat"\]\]\)/);
   assert.match(out.code, /__zp_construct\(__zp_get\(globalThis,"window"\)\.WebSocket,\["wss:\/\/example\.test\/secure"\]\)/);
 
-  const loc = { href: 'https://origin.test/start' };
+  const loc = { href: 'https://origin.test/start', hash: '' };
   function FakeWebSocket(url, protocols) {
     this.url = url;
     this.protocols = protocols;
@@ -234,6 +244,13 @@ test('OXC rewriter routes location assignments and WebSocket construction throug
     if ((base === ctx.window && prop === 'location') || (base === loc && prop === 'href')) loc.href = String(value);
     else base[prop] = value;
     return value;
+  };
+  ctx.__zp_assign = (base, prop, op, value) => ctx.__zp_set(base, prop, base[prop] + value);
+  ctx.__zp_update = (base, prop, op, prefix) => {
+    const current = base[prop];
+    const next = op === '++' ? current + 1 : current - 1;
+    base[prop] = next;
+    return prefix ? next : current;
   };
   ctx.__zp_construct = (ctor, args) => new ctor(...args);
   vm.runInNewContext(out.code, ctx);

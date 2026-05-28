@@ -153,7 +153,14 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			}
 			pr, pw := io.Pipe()
 			go func() {
-				err := htmltx.TransformTo(pw, source, htmltx.Options{TabID: tab.TabID, EntryID: req.Header.Get("X-Zp-Entry-Id"), TargetURL: finalURL, DocumentCookie: tab.CookieJar.DocumentCookie(finalURL), RuntimeToken: req.Header.Get("X-Zp-Runtime-Token"), Servers: headerServers(req.Header.Get("X-Zp-Relay-Servers")), RewriteScript: rewriteScript})
+				err := htmltx.TransformTo(pw, source, htmltx.Options{
+					TabID:          tab.TabID,
+					EntryID:        req.Header.Get("X-Zp-Entry-Id"),
+					TargetURL:      finalURL,
+					DocumentCookie: tab.CookieJar.DocumentCookie(finalURL),
+					RuntimeToken:   req.Header.Get("X-Zp-Runtime-Token"),
+					Servers:        headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+				})
 				closeErr := source.Close()
 				if err != nil {
 					_ = pw.CloseWithError(err)
@@ -418,18 +425,6 @@ func safeResponse(code string, status int, host ...string) js.Value {
 	h.Call("set", "Access-Control-Allow-Headers", "*")
 	h.Call("set", "Access-Control-Expose-Headers", "*")
 	return js.Global().Get("Response").New(body, map[string]any{"status": status, "headers": h})
-}
-
-func rewriteScript(source, kind string) (string, bool) {
-	r := js.Global().Get("__zp_rewrite_script")
-	if r.IsUndefined() || r.IsNull() || r.Type() != js.TypeFunction {
-		return "", false
-	}
-	code := r.Invoke(source, kind, "").String()
-	if code == "" {
-		return "", false
-	}
-	return code, true
 }
 
 func htmlEscape(s string) string {

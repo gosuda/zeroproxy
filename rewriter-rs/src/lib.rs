@@ -4,7 +4,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
-use oxc_syntax::operator::AssignmentOperator;
+use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -26,15 +26,83 @@ impl RewriteOutput {
 
 #[wasm_bindgen]
 pub fn rewrite_script(source: &str, kind: &str, target_url: &str, control_prefix: &str) -> RewriteOutput {
+    match normalize_kind(kind) {
+        "module" => rewrite_program_source(source, true, target_url, control_prefix),
+        "event-handler" => rewrite_wrapped_source(
+            source,
+            "function __zp_event__(event){\n",
+            "\n}",
+            false,
+            target_url,
+            control_prefix,
+            true,
+        ),
+        "function" => rewrite_wrapped_source(
+            source,
+            "function __zp_dynamic__(){\n",
+            "\n}",
+            false,
+            target_url,
+            control_prefix,
+            false,
+        ),
+        _ => rewrite_program_source(source, false, target_url, control_prefix),
+    }
+}
+
+fn normalize_kind(kind: &str) -> &'static str {
+    match kind {
+        "module" => "module",
+        "event-handler" | "event" => "event-handler",
+        "function" => "function",
+        _ => "classic",
+    }
+}
+
+fn rewrite_program_source(source: &str, module: bool, target_url: &str, control_prefix: &str) -> RewriteOutput {
     let allocator = Allocator::default();
-    let source_type = if kind == "module" { SourceType::mjs() } else { SourceType::cjs() };
+    let source_type = if module { SourceType::mjs() } else { SourceType::cjs() };
     let ret = Parser::new(&allocator, source, source_type).parse();
     if !ret.errors.is_empty() {
         return RewriteOutput { ok: false, code: String::new(), error: "PARSE_FAILED".to_string() };
     }
-    let mut rewriter = Rewriter::new(source, kind == "module", target_url, control_prefix);
+    let mut rewriter = Rewriter::new(source, module, target_url, control_prefix);
     rewriter.walk_program(&ret.program);
     RewriteOutput { ok: true, code: rewriter.finish(), error: String::new() }
+}
+
+fn rewrite_wrapped_source(
+    source: &str,
+    prefix: &str,
+    suffix: &str,
+    module: bool,
+    target_url: &str,
+    control_prefix: &str,
+    event_handler: bool,
+) -> RewriteOutput {
+    let mut wrapped = String::with_capacity(prefix.len() + source.len() + suffix.len());
+    wrapped.push_str(prefix);
+    wrapped.push_str(source);
+    wrapped.push_str(suffix);
+    let out = rewrite_program_source(&wrapped, module, target_url, control_prefix);
+    if !out.ok {
+        return out;
+    }
+    if out.code.len() < prefix.len() + suffix.len() {
+        return RewriteOutput { ok: false, code: String::new(), error: "REWRITE_FAILED".to_string() };
+    }
+    let inner_end = out.code.len() - suffix.len();
+    let inner = &out.code[prefix.len()..inner_end];
+    let code = if event_handler {
+        let mut event = String::with_capacity(inner.len() + 76);
+        event.push_str("return __zp_runEvent(this,event,function(__zp_scope){with(__zp_scope){\n");
+        event.push_str(inner);
+        event.push_str("\n}})");
+        event
+    } else {
+        inner.to_string()
+    };
+    RewriteOutput { ok: true, code, error: String::new() }
 }
 
 const GLOBALS: &[&str] = &[
@@ -202,16 +270,7 @@ impl<'a> Rewriter<'a> {
             }
             Statement::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
             Statement::FunctionDeclaration(func) => self.walk_function(func),
-            Statement::ClassDeclaration(class) => {
-                if let Some(id) = &class.id { self.declare(id.name.as_str()); }
-                for elem in &class.body.body {
-                    match elem {
-                        ClassElement::PropertyDefinition(prop) => if let Some(value) = &prop.value { self.walk_expression(value); },
-                        ClassElement::AccessorProperty(prop) => if let Some(value) = &prop.value { self.walk_expression(value); },
-                        _ => {}
-                    }
-                }
-            }
+            Statement::ClassDeclaration(class) => self.walk_class(class, true),
             Statement::ImportDeclaration(decl) => self.add_replacement(decl.source.span, format!("{:?}", self.module_specifier(decl.source.value.as_str())), 95),
             Statement::ExportNamedDeclaration(decl) => {
                 if let Some(source) = &decl.source { self.add_replacement(source.span, format!("{:?}", self.module_specifier(source.value.as_str())), 95); }
@@ -226,25 +285,14 @@ impl<'a> Rewriter<'a> {
         match decl {
             Declaration::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
             Declaration::FunctionDeclaration(func) => self.walk_function(func),
-            Declaration::ClassDeclaration(class) => {
-                if let Some(id) = &class.id { self.declare(id.name.as_str()); }
-                for elem in &class.body.body {
-                    match elem {
-                        ClassElement::PropertyDefinition(prop) => if let Some(value) = &prop.value { self.walk_expression(value); },
-                        ClassElement::AccessorProperty(prop) => if let Some(value) = &prop.value { self.walk_expression(value); },
-                        _ => {}
-                    }
-                }
-            }
+            Declaration::ClassDeclaration(class) => self.walk_class(class, true),
             _ => {}
         }
     }
     fn walk_export_default(&mut self, decl: &ExportDefaultDeclaration<'a>) {
         match &decl.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => self.walk_function(func),
-            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                if let Some(id) = &class.id { self.declare(id.name.as_str()); }
-            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => self.walk_class(class, true),
             other => {
                 if let Some(expr) = other.as_expression() { self.walk_expression(expr); }
             }
@@ -263,6 +311,42 @@ impl<'a> Rewriter<'a> {
             self.pop_scope();
         }
     }
+    fn walk_class(&mut self, class: &Class<'a>, declare_id: bool) {
+        if declare_id {
+            if let Some(id) = &class.id { self.declare(id.name.as_str()); }
+        }
+        if let Some(super_class) = &class.super_class { self.walk_expression(super_class); }
+        let mut pushed_name_scope = false;
+        if let Some(id) = &class.id {
+            let mut scope = HashSet::new();
+            scope.insert(id.name.to_string());
+            self.push_scope(scope);
+            pushed_name_scope = true;
+        }
+        for elem in &class.body.body {
+            match elem {
+                ClassElement::StaticBlock(block) => {
+                    self.push_scope(self.collect_body_bindings(&block.body, ScopeMode::Block));
+                    for stmt in &block.body { self.walk_statement(stmt); }
+                    self.pop_scope();
+                }
+                ClassElement::MethodDefinition(method) => {
+                    if method.computed { self.walk_property_key(&method.key); }
+                    self.walk_function(&method.value);
+                }
+                ClassElement::PropertyDefinition(prop) => {
+                    if prop.computed { self.walk_property_key(&prop.key); }
+                    if let Some(value) = &prop.value { self.walk_expression(value); }
+                }
+                ClassElement::AccessorProperty(prop) => {
+                    if prop.computed { self.walk_property_key(&prop.key); }
+                    if let Some(value) = &prop.value { self.walk_expression(value); }
+                }
+                _ => {}
+            }
+        }
+        if pushed_name_scope { self.pop_scope(); }
+    }
     fn walk_block_statement(&mut self, block: &BlockStatement<'a>) {
         self.push_scope(self.collect_body_bindings(&block.body, ScopeMode::Block));
         for stmt in &block.body { self.walk_statement(stmt); }
@@ -271,9 +355,16 @@ impl<'a> Rewriter<'a> {
 
     fn walk_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
         for declarator in &decl.declarations {
+            self.declare_binding_pattern(&declarator.id);
             self.walk_binding_pattern(&declarator.id);
             if let Some(init) = &declarator.init { self.walk_expression(init); }
         }
+    }
+
+    fn declare_binding_pattern(&mut self, pattern: &BindingPattern<'a>) {
+        let mut names = HashSet::new();
+        self.collect_binding_pattern(pattern, &mut names);
+        for name in names { self.declare(&name); }
     }
 
     fn walk_binding_pattern(&mut self, pattern: &BindingPattern<'a>) {
@@ -401,6 +492,14 @@ impl<'a> Rewriter<'a> {
                     match prop {
                         ObjectPropertyKind::ObjectProperty(prop) => {
                             if prop.computed { self.walk_property_key(&prop.key); }
+                            if prop.shorthand {
+                                if let Expression::Identifier(id) = &prop.value {
+                                    if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
+                                        self.add_replacement(prop.span, format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)), 90);
+                                        continue;
+                                    }
+                                }
+                            }
                             self.walk_expression(&prop.value);
                         }
                         ObjectPropertyKind::SpreadProperty(prop) => self.walk_expression(&prop.argument),
@@ -417,6 +516,7 @@ impl<'a> Rewriter<'a> {
                 }
             }
             Expression::FunctionExpression(func) => self.walk_function(func),
+            Expression::ClassExpression(class) => self.walk_class(class, false),
             Expression::ArrowFunctionExpression(func) => {
                 let mut scope = HashSet::new();
                 self.collect_formal_parameters(&func.params, &mut scope);
@@ -425,6 +525,18 @@ impl<'a> Rewriter<'a> {
                 for stmt in &func.body.statements { self.walk_statement(stmt); }
                 self.pop_scope();
             }
+            Expression::TemplateLiteral(tpl) => {
+                for expr in &tpl.expressions { self.walk_expression(expr); }
+            }
+            Expression::TaggedTemplateExpression(tagged) => {
+                self.walk_expression(&tagged.tag);
+                for expr in &tagged.quasi.expressions { self.walk_expression(expr); }
+            }
+            Expression::TSAsExpression(expr) => self.walk_expression(&expr.expression),
+            Expression::TSSatisfiesExpression(expr) => self.walk_expression(&expr.expression),
+            Expression::TSNonNullExpression(expr) => self.walk_expression(&expr.expression),
+            Expression::TSTypeAssertion(expr) => self.walk_expression(&expr.expression),
+            Expression::TSInstantiationExpression(expr) => self.walk_expression(&expr.expression),
             _ => {}
         }
     }
@@ -449,6 +561,14 @@ impl<'a> Rewriter<'a> {
     }
 
     fn walk_update_expression(&mut self, expr: &UpdateExpression<'a>) {
+        if let Some((base, prop)) = self.simple_assignment_target(&expr.argument) {
+            self.add_replacement(
+                expr.span,
+                format!("(__zp_update({},{},{:?},{}))", base, prop, update_operator_text(expr.operator), expr.prefix),
+                100,
+            );
+            return;
+        }
         self.walk_simple_assignment_target(&expr.argument);
     }
 
@@ -513,109 +633,239 @@ impl<'a> Rewriter<'a> {
                     self.span_text(id.span).to_string()
                 }
             }
-            Expression::StaticMemberExpression(expr) => {
-                if self.is_import_meta_url_static(expr) { return format!("{:?}", self.target_url); }
-                if self.member_needs_helper_static(expr) {
-                    return format!("__zp_get({},{:?})", self.render_expression(&expr.object), expr.property.name.as_str());
-                }
-                format!("{}{}{}", self.render_expression(&expr.object), &self.source[expr.object.span().end as usize..expr.property.span.start as usize], self.span_text(expr.property.span))
+            Expression::StaticMemberExpression(expr) => self.render_static_member(expr),
+            Expression::ComputedMemberExpression(expr) => self.render_computed_member(expr),
+            Expression::PrivateFieldExpression(expr) => {
+                self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))])
             }
-            Expression::ComputedMemberExpression(expr) => {
-                if self.member_needs_helper_computed(expr) {
-                    return format!("__zp_get({},{})", self.render_expression(&expr.object), self.render_expression(&expr.expression));
-                }
-                format!("{}[{}]", self.render_expression(&expr.object), self.render_expression(&expr.expression))
-            }
-            Expression::PrivateFieldExpression(_) => self.span_text(expr.span()).to_string(),
-            Expression::CallExpression(expr) => {
-                if let Some((base, prop)) = self.call_target(&expr.callee) {
-                    return format!("(__zp_call({},{},[{}]))", base, prop, self.render_arguments(&expr.arguments));
-                }
-                format!("{}({})", self.render_expression(&expr.callee), self.render_arguments(&expr.arguments))
-            }
-            Expression::NewExpression(expr) => {
-                if let Some(target) = self.construct_target(&expr.callee) {
-                    let args = self.render_arguments(&expr.arguments);
-                    return format!("(__zp_construct({},[{}]))", target, args);
-                }
-                let args = self.render_arguments(&expr.arguments);
-                format!("new {}({})", self.render_expression(&expr.callee), args)
-            }
-            Expression::BinaryExpression(expr) => format!("{}{}{}", self.render_expression(&expr.left), &self.source[expr.left.span().end as usize..expr.right.span().start as usize], self.render_expression(&expr.right)),
-            Expression::LogicalExpression(expr) => format!("{}{}{}", self.render_expression(&expr.left), &self.source[expr.left.span().end as usize..expr.right.span().start as usize], self.render_expression(&expr.right)),
-            Expression::ConditionalExpression(expr) => format!("{}{}{}{}{}", self.render_expression(&expr.test), &self.source[expr.test.span().end as usize..expr.consequent.span().start as usize], self.render_expression(&expr.consequent), &self.source[expr.consequent.span().end as usize..expr.alternate.span().start as usize], self.render_expression(&expr.alternate)),
-            Expression::UnaryExpression(expr) => format!("{}{}", &self.source[expr.span.start as usize..expr.argument.span().start as usize], self.render_expression(&expr.argument)),
-            Expression::UpdateExpression(expr) => if expr.prefix { format!("{}{}", &self.source[expr.span.start as usize..expr.argument.span().start as usize], self.render_simple_assignment_target(&expr.argument)) } else { format!("{}{}", self.render_simple_assignment_target(&expr.argument), &self.source[expr.argument.span().end as usize..expr.span.end as usize]) },
-            Expression::ObjectExpression(expr) => {
-                let mut parts = Vec::new();
-                for prop in &expr.properties {
-                    match prop {
-                        ObjectPropertyKind::SpreadProperty(spread) => parts.push(format!("...{}", self.render_expression(&spread.argument))),
-                        ObjectPropertyKind::ObjectProperty(prop) => {
-                            if prop.method || prop.kind != PropertyKind::Init { parts.push(self.span_text(prop.span).to_string()); }
-                            else if prop.shorthand {
-                                parts.push(format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)));
-                            } else if prop.computed {
-                                parts.push(format!("[{}]: {}", self.render_property_key(&prop.key), self.render_expression(&prop.value)));
-                            } else {
-                                parts.push(format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)));
-                            }
-                        }
-                    }
-                }
-                format!("{{{}}}", parts.join(","))
-            }
-            Expression::ArrayExpression(expr) => {
-                let mut parts = Vec::new();
-                for elem in &expr.elements {
-                    match elem {
-                        ArrayExpressionElement::Elision(_) => parts.push(String::new()),
-                        ArrayExpressionElement::SpreadElement(spread) => parts.push(format!("...{}", self.render_expression(&spread.argument))),
-                        _ => parts.push(self.render_expression(elem.to_expression())),
-                    }
-                }
-                format!("[{}]", parts.join(","))
-            }
-            Expression::AssignmentExpression(expr) => {
-                if let Some((base, prop)) = self.assignment_target(&expr.left) {
-                    if expr.operator == AssignmentOperator::Assign {
-                        format!("(__zp_set({},{},{}))", base, prop, self.render_expression(&expr.right))
-                    } else {
-                        let rhs = if matches!(expr.operator, AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalOr | AssignmentOperator::LogicalNullish) {
-                            format!("()=>({})", self.render_expression(&expr.right))
-                        } else {
-                            self.render_expression(&expr.right)
-                        };
-                        format!("(__zp_assign({},{},{:?},{}))", base, prop, assignment_operator_text(expr.operator), rhs)
-                    }
+            Expression::CallExpression(expr) => self.render_call_expression(expr),
+            Expression::NewExpression(expr) => self.render_new_expression(expr),
+            Expression::ImportExpression(expr) => self.render_import_expression(expr),
+            Expression::BinaryExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.left.span(), self.render_expression(&expr.left)),
+                (expr.right.span(), self.render_expression(&expr.right)),
+            ]),
+            Expression::LogicalExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.left.span(), self.render_expression(&expr.left)),
+                (expr.right.span(), self.render_expression(&expr.right)),
+            ]),
+            Expression::ConditionalExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.test.span(), self.render_expression(&expr.test)),
+                (expr.consequent.span(), self.render_expression(&expr.consequent)),
+                (expr.alternate.span(), self.render_expression(&expr.alternate)),
+            ]),
+            Expression::UnaryExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.argument.span(), self.render_expression(&expr.argument)),
+            ]),
+            Expression::UpdateExpression(expr) => self.render_update_expression(expr),
+            Expression::AwaitExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.argument.span(), self.render_expression(&expr.argument)),
+            ]),
+            Expression::YieldExpression(expr) => {
+                if let Some(arg) = &expr.argument {
+                    self.render_span_with(expr.span, vec![(arg.span(), self.render_expression(arg))])
                 } else {
                     self.span_text(expr.span).to_string()
                 }
             }
-            Expression::ChainExpression(expr) => self.span_text(expr.span).to_string(),
+            Expression::SequenceExpression(expr) => self.render_span_with(
+                expr.span,
+                expr.expressions.iter().map(|e| (e.span(), self.render_expression(e))).collect(),
+            ),
+            Expression::ParenthesizedExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.expression.span(), self.render_expression(&expr.expression)),
+            ]),
+            Expression::ChainExpression(expr) => self.render_chain_element(expr.span, &expr.expression),
+            Expression::TemplateLiteral(expr) => self.render_span_with(
+                expr.span,
+                expr.expressions.iter().map(|e| (e.span(), self.render_expression(e))).collect(),
+            ),
+            Expression::TaggedTemplateExpression(expr) => {
+                let mut parts = Vec::with_capacity(expr.quasi.expressions.len() + 1);
+                parts.push((expr.tag.span(), self.render_expression(&expr.tag)));
+                parts.extend(expr.quasi.expressions.iter().map(|e| (e.span(), self.render_expression(e))));
+                self.render_span_with(expr.span, parts)
+            }
+            Expression::ObjectExpression(expr) => self.render_object_expression(expr),
+            Expression::ArrayExpression(expr) => self.render_array_expression(expr),
+            Expression::AssignmentExpression(expr) => self.render_assignment_expression(expr),
+            Expression::TSAsExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
+            Expression::TSSatisfiesExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
+            Expression::TSNonNullExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
+            Expression::TSTypeAssertion(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
+            Expression::TSInstantiationExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
             _ => self.span_text(expr.span()).to_string(),
+        }
+    }
+
+    fn render_span_with(&self, span: Span, mut parts: Vec<(Span, String)>) -> String {
+        parts.sort_by_key(|(part_span, _)| part_span.start);
+        let start = span.start as usize;
+        let end = span.end as usize;
+        let mut out = String::with_capacity(end.saturating_sub(start) + parts.iter().map(|(_, text)| text.len()).sum::<usize>());
+        let mut pos = start;
+        for (part_span, text) in parts {
+            let part_start = part_span.start as usize;
+            let part_end = part_span.end as usize;
+            if part_start < pos || part_end > end { continue; }
+            out.push_str(&self.source[pos..part_start]);
+            out.push_str(&text);
+            pos = part_end;
+        }
+        out.push_str(&self.source[pos..end]);
+        out
+    }
+
+    fn render_static_member(&self, expr: &StaticMemberExpression<'a>) -> String {
+        if self.is_import_meta_url_static(expr) { return format!("{:?}", self.target_url); }
+        if self.member_needs_helper_static(expr) {
+            return format!("__zp_get({},{:?})", self.render_expression(&expr.object), expr.property.name.as_str());
+        }
+        self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))])
+    }
+
+    fn render_computed_member(&self, expr: &ComputedMemberExpression<'a>) -> String {
+        if self.member_needs_helper_computed(expr) {
+            return format!("__zp_get({},{})", self.render_expression(&expr.object), self.render_expression(&expr.expression));
+        }
+        self.render_span_with(expr.span, vec![
+            (expr.object.span(), self.render_expression(&expr.object)),
+            (expr.expression.span(), self.render_expression(&expr.expression)),
+        ])
+    }
+
+    fn render_call_expression(&self, expr: &CallExpression<'a>) -> String {
+        if let Some((base, prop)) = self.call_target(&expr.callee) {
+            return format!("(__zp_call({},{},[{}]))", base, prop, self.render_arguments(&expr.arguments));
+        }
+        let mut parts = Vec::with_capacity(expr.arguments.len() + 1);
+        parts.push((expr.callee.span(), self.render_expression(&expr.callee)));
+        parts.extend(expr.arguments.iter().map(|arg| (arg.span(), self.render_argument(arg))));
+        self.render_span_with(expr.span, parts)
+    }
+
+    fn render_new_expression(&self, expr: &NewExpression<'a>) -> String {
+        if let Some(target) = self.construct_target(&expr.callee) {
+            return format!("(__zp_construct({},[{}]))", target, self.render_arguments(&expr.arguments));
+        }
+        let mut parts = Vec::with_capacity(expr.arguments.len() + 1);
+        parts.push((expr.callee.span(), self.render_expression(&expr.callee)));
+        parts.extend(expr.arguments.iter().map(|arg| (arg.span(), self.render_argument(arg))));
+        self.render_span_with(expr.span, parts)
+    }
+
+    fn render_import_expression(&self, expr: &ImportExpression<'a>) -> String {
+        let source = if let Expression::StringLiteral(spec) = &expr.source {
+            format!("{:?}", self.module_specifier(spec.value.as_str()))
+        } else {
+            format!("__zp_module_url({},{:?})", self.render_expression(&expr.source), self.target_url)
+        };
+        self.render_span_with(expr.span, vec![(expr.source.span(), source)])
+    }
+
+    fn render_update_expression(&self, expr: &UpdateExpression<'a>) -> String {
+        if let Some((base, prop)) = self.simple_assignment_target(&expr.argument) {
+            return format!("(__zp_update({},{},{:?},{}))", base, prop, update_operator_text(expr.operator), expr.prefix);
+        }
+        self.render_span_with(expr.span, vec![(expr.argument.span(), self.render_simple_assignment_target(&expr.argument))])
+    }
+
+    fn render_object_expression(&self, expr: &ObjectExpression<'a>) -> String {
+        let mut parts = Vec::new();
+        for prop in &expr.properties {
+            match prop {
+                ObjectPropertyKind::SpreadProperty(spread) => parts.push(format!("...{}", self.render_expression(&spread.argument))),
+                ObjectPropertyKind::ObjectProperty(prop) => {
+                    if prop.method || prop.kind != PropertyKind::Init {
+                        parts.push(self.span_text(prop.span).to_string());
+                    } else if prop.shorthand {
+                        parts.push(format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)));
+                    } else if prop.computed {
+                        parts.push(format!("[{}]: {}", self.render_property_key(&prop.key), self.render_expression(&prop.value)));
+                    } else {
+                        parts.push(format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)));
+                    }
+                }
+            }
+        }
+        format!("{{{}}}", parts.join(","))
+    }
+
+    fn render_array_expression(&self, expr: &ArrayExpression<'a>) -> String {
+        let mut parts = Vec::new();
+        for elem in &expr.elements {
+            match elem {
+                ArrayExpressionElement::Elision(_) => parts.push(String::new()),
+                ArrayExpressionElement::SpreadElement(spread) => parts.push(format!("...{}", self.render_expression(&spread.argument))),
+                _ => parts.push(self.render_expression(elem.to_expression())),
+            }
+        }
+        format!("[{}]", parts.join(","))
+    }
+
+    fn render_assignment_expression(&self, expr: &AssignmentExpression<'a>) -> String {
+        if let Some((base, prop)) = self.assignment_target(&expr.left) {
+            if expr.operator == AssignmentOperator::Assign {
+                format!("(__zp_set({},{},{}))", base, prop, self.render_expression(&expr.right))
+            } else {
+                let rhs = if matches!(expr.operator, AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalOr | AssignmentOperator::LogicalNullish) {
+                    format!("()=>({})", self.render_expression(&expr.right))
+                } else {
+                    self.render_expression(&expr.right)
+                };
+                format!("(__zp_assign({},{},{:?},{}))", base, prop, assignment_operator_text(expr.operator), rhs)
+            }
+        } else {
+            self.render_span_with(expr.span, vec![
+                (expr.left.span(), self.render_assignment_target(&expr.left)),
+                (expr.right.span(), self.render_expression(&expr.right)),
+            ])
+        }
+    }
+
+    fn render_chain_element(&self, _span: Span, elem: &ChainElement<'a>) -> String {
+        match elem {
+            ChainElement::CallExpression(call) => self.render_call_expression(call),
+            ChainElement::TSNonNullExpression(inner) => self.render_expression(&inner.expression),
+            ChainElement::ComputedMemberExpression(inner) => self.render_computed_member(inner),
+            ChainElement::StaticMemberExpression(inner) => self.render_static_member(inner),
+            ChainElement::PrivateFieldExpression(inner) => {
+                self.render_span_with(inner.span, vec![(inner.object.span(), self.render_expression(&inner.object))])
+            }
         }
     }
 
     fn render_property_key(&self, key: &PropertyKey<'a>) -> String {
         match key {
             PropertyKey::StaticIdentifier(id) => id.name.to_string(),
-            _ => self.span_text(key.span()).to_string(),
+            PropertyKey::PrivateIdentifier(id) => self.span_text(id.span).to_string(),
+            _ => self.render_expression(key.to_expression()),
+        }
+    }
+
+    fn render_argument(&self, arg: &Argument<'a>) -> String {
+        match arg {
+            Argument::SpreadElement(spread) => format!("...{}", self.render_expression(&spread.argument)),
+            _ => self.render_expression(arg.to_expression()),
+        }
+    }
+
+    fn render_assignment_target(&self, target: &AssignmentTarget<'a>) -> String {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => self.span_text(id.span).to_string(),
+            AssignmentTarget::StaticMemberExpression(expr) => self.render_static_member(expr),
+            AssignmentTarget::ComputedMemberExpression(expr) => self.render_computed_member(expr),
+            AssignmentTarget::PrivateFieldExpression(expr) => self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))]),
+            _ => self.span_text(target.span()).to_string(),
         }
     }
 
     fn render_simple_assignment_target(&self, target: &SimpleAssignmentTarget<'a>) -> String {
         match target {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
-                    format!("__zp_get(globalThis,{:?})", id.name.as_str())
-                } else {
-                    self.span_text(id.span).to_string()
-                }
-            }
-            SimpleAssignmentTarget::StaticMemberExpression(expr) => format!("{}.{}", self.render_expression(&expr.object), expr.property.name.as_str()),
-            SimpleAssignmentTarget::ComputedMemberExpression(expr) => format!("{}[{}]", self.render_expression(&expr.object), self.render_expression(&expr.expression)),
-            SimpleAssignmentTarget::PrivateFieldExpression(expr) => self.span_text(expr.span).to_string(),
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.span_text(id.span).to_string(),
+            SimpleAssignmentTarget::StaticMemberExpression(expr) => self.render_static_member(expr),
+            SimpleAssignmentTarget::ComputedMemberExpression(expr) => self.render_computed_member(expr),
+            SimpleAssignmentTarget::PrivateFieldExpression(expr) => self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))]),
             _ => self.span_text(target.span()).to_string(),
         }
     }
@@ -704,7 +954,7 @@ impl<'a> Rewriter<'a> {
 
     fn is_window_like_expression(&self, expr: &Expression<'a>) -> bool {
         match expr {
-            Expression::Identifier(id) => matches!(id.name.as_str(), "window" | "self" | "globalThis" | "top" | "parent" | "frames" | "document") && !self.declared(id.name.as_str()),
+            Expression::Identifier(id) => matches!(id.name.as_str(), "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames" | "document") && !self.declared(id.name.as_str()),
             Expression::StaticMemberExpression(member) => matches!(member.property.name.as_str(), "defaultView" | "contentWindow" | "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames") && self.is_window_like_expression(&member.object),
             Expression::ComputedMemberExpression(member) => self.is_window_like_expression(&member.object),
             _ => false,
@@ -732,6 +982,18 @@ impl<'a> Rewriter<'a> {
         }
     }
 
+
+    fn simple_assignment_target(&self, target: &SimpleAssignmentTarget<'a>) -> Option<(String, String)> {
+        match target {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) if self.is_global_name(id.name.as_str()) && matches!(id.name.as_str(), "location" | "window") => Some(("globalThis".to_string(), format!("{:?}", id.name.as_str()))),
+            SimpleAssignmentTarget::StaticMemberExpression(expr) if expr.property.name == "location" && self.is_window_like_expression(&expr.object) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
+            SimpleAssignmentTarget::StaticMemberExpression(expr) if matches!(expr.property.name.as_str(), "href" | "hash") && self.is_virtual_location_expression(&expr.object) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
+            SimpleAssignmentTarget::ComputedMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.is_virtual_location_expression(&expr.object) => Some((self.render_expression(&expr.object), self.render_expression(&expr.expression))),
+            SimpleAssignmentTarget::StaticMemberExpression(expr) if self.member_needs_helper_static(expr) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
+            SimpleAssignmentTarget::ComputedMemberExpression(expr) if self.member_needs_helper_computed(expr) => Some((self.render_expression(&expr.object), self.render_expression(&expr.expression))),
+            _ => None,
+        }
+    }
     fn call_target(&self, callee: &Expression<'a>) -> Option<(String, String)> {
         match callee {
             Expression::StaticMemberExpression(expr) => {
@@ -756,8 +1018,13 @@ impl<'a> Rewriter<'a> {
     fn construct_target(&self, callee: &Expression<'a>) -> Option<String> {
         match callee {
             Expression::Identifier(id) if self.is_global_name(id.name.as_str()) => Some(self.render_expression(callee)),
-            Expression::StaticMemberExpression(expr) if self.is_window_like_expression(&expr.object) => Some(self.render_expression(callee)),
-            Expression::ComputedMemberExpression(expr) if self.is_window_like_expression(&expr.object) => Some(self.render_expression(callee)),
+            Expression::StaticMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.member_needs_helper_static(expr) => Some(self.render_expression(callee)),
+            Expression::ComputedMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.member_needs_helper_computed(expr) => Some(self.render_expression(callee)),
+            Expression::ChainExpression(expr) => match &expr.expression {
+                ChainElement::StaticMemberExpression(inner) if self.is_window_like_expression(&inner.object) || self.member_needs_helper_static(inner) => Some(self.render_expression(callee)),
+                ChainElement::ComputedMemberExpression(inner) if self.is_window_like_expression(&inner.object) || self.member_needs_helper_computed(inner) => Some(self.render_expression(callee)),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -767,7 +1034,7 @@ impl<'a> Rewriter<'a> {
     }
 
     fn module_specifier(&self, raw: &str) -> String {
-        if !self.module { return raw.to_string(); }
+        if self.target_url.is_empty() { return raw.to_string(); }
         if is_bare_specifier(raw) { return raw.to_string(); }
         if has_scheme(raw) && !raw.starts_with("http://") && !raw.starts_with("https://") {
             return format!("{}error/POLICY_BLOCKED", self.control_prefix);
@@ -801,6 +1068,13 @@ fn assignment_operator_text(op: AssignmentOperator) -> &'static str {
     }
 }
 
+
+fn update_operator_text(op: UpdateOperator) -> &'static str {
+    match op {
+        UpdateOperator::Increment => "++",
+        UpdateOperator::Decrement => "--",
+    }
+}
 fn is_bare_specifier(spec: &str) -> bool {
     !spec.starts_with('/') && !spec.starts_with("./") && !spec.starts_with("../") && !has_scheme(spec)
 }

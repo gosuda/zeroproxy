@@ -366,9 +366,6 @@
   }
   try { Object.defineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
   installToStringMasking(root);
-  if (root.OXCParser && root.ZPRewriter && !root.ZPRewriter.ready && typeof root.ZPRewriter.initSync === 'function') {
-    try { root.ZPRewriter.initSync({ parser: root.OXCParser }); } catch {}
-  }
   define(root, '__ZP_SET_BASE', updateVirtualBase);
   installPhase2Membrane();
 
@@ -416,7 +413,7 @@
       const argv = new Array(params.length + 2);
       argv[0] = '__zp_scope';
       for (let i = 0; i < params.length; i++) argv[i + 1] = params[i];
-      argv[argv.length - 1] = scopedBody(body);
+      argv[argv.length - 1] = scopedBody(rewriteDynamicFunctionBody(params, body));
       return Reflect.construct(ctor, argv);
     }
     function scopedCallArgs(args) {
@@ -633,6 +630,13 @@
       }
       return set(base, prop, next);
     }
+    function update(base, prop, operator, prefix) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      const current = get(base, prop);
+      const next = operator === '++' ? current + 1 : current - 1;
+      set(base, prop, next);
+      return prefix ? next : current;
+    }
     function call(base, prop, args) {
       const fn = get(base, prop);
       return Reflect.apply(fn, base === scope ? root : base, Array.isArray(args) ? args : []);
@@ -655,6 +659,7 @@
     define(root, '__zp_set', set);
     define(root, '__zp_assign', assign);
     define(root, '__zp_call', call);
+    define(root, '__zp_update', update);
     define(root, '__zp_construct', construct);
     define(root, '__zp_has', has);
     define(root, '__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
@@ -664,13 +669,16 @@
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
-    function rewriteWithPageRewriter(source, kind) {
-      if (root.ZPRustRewriter && typeof root.ZPRustRewriter.rewriteScript === 'function') {
-        const out = root.ZPRustRewriter.rewriteScript(String(source || ''), kind, virtualURL.href, ZP.CONTROL_PREFIX);
+    function rewriteDynamicFunctionBody(params, body) {
+      if (root.ZPRewriter && typeof root.ZPRewriter.rewriteFunctionBody === 'function') {
+        const out = root.ZPRewriter.rewriteFunctionBody(String(body || ''), params, virtualURL.href, ZP.CONTROL_PREFIX);
         if (out && out.ok && typeof out.code === 'string') return out.code;
-        if (out && out.error === 'PARSE_FAILED') throw normalizedError('NotSupportedError');
+        throw normalizedError('NotSupportedError');
       }
-      if (!root.ZPRewriter || !root.ZPRewriter.ready) throw normalizedError('NotSupportedError');
+      return rewriteWithPageRewriter(body, 'function');
+    }
+    function rewriteWithPageRewriter(source, kind) {
+      if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');
       const out = root.ZPRewriter.rewriteScript(String(source || ''), { kind, targetUrl: virtualURL.href, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
       if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
       return out.code;
@@ -1367,7 +1375,7 @@
     if (!raw) return false;
     try {
       const u = new URL(String(raw), proxyOrigin);
-      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('js-rewriter.js') || u.pathname === ZP.assetPath('oxc-parser.js') || u.pathname === ZP.assetPath('wasm_exec.js'));
+      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js') || u.pathname === ZP.assetPath('wasm_exec.js'));
     } catch { return false; }
   }
   function isZPAssetNode(node) {
@@ -1812,7 +1820,7 @@
     }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }
-  function injectSrcdoc(s) { return '<script src="/zp/assets/zp-core.js"><\/script><script src="/zp/assets/rust-rewriter.js"><\/script><script src="/zp/assets/oxc-parser.js"><\/script><script src="/zp/assets/js-rewriter.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
+  function injectSrcdoc(s) { return '<script src="/zp/assets/zp-core.js"><\/script><script src="/zp/assets/rust-rewriter.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) { return 'return __ZP_EXEC_EVENT(this,event,' + JSON.stringify(String(source || '')).replace(/</g, '\\u003c') + ')'; }
   function syncBaseElement(node) {

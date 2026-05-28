@@ -23,7 +23,6 @@ type Options struct {
 	DocumentCookie string
 	RuntimeToken   string
 	Servers        []string
-	RewriteScript  func(source, kind string) (string, bool)
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -192,8 +191,8 @@ func runtimePrelude(opt Options) string {
 		Servers:        opt.Servers,
 	})
 	var b strings.Builder
-	b.Grow(len(bootJSON) + 262)
-	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp src=/zp/assets/oxc-parser.js></script><script nonce=zp src=/zp/assets/js-rewriter.js></script><script nonce=zp id=__zp-boot type=application/json>`)
+	b.Grow(len(bootJSON) + 170)
+	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp id=__zp-boot type=application/json>`)
 	b.Write(bootJSON)
 	b.WriteString(`</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()
