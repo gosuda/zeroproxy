@@ -119,8 +119,8 @@ function createTargetServer(requests) {
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<!doctype html><html><head><title>E2E Home</title></head><body>
-        <main><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
+      res.end(`<!doctype html><html><head><title>E2E Home</title><link rel="stylesheet" href="/site.css"></head><body>
+        <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><a id="next" href="/next">Next page</a></main>
         <script>
           window.__ua = navigator.userAgent;
           window.__platform = navigator.platform;
@@ -177,6 +177,11 @@ function createTargetServer(requests) {
         <main><h1>E2E Next</h1><p id="ua"></p></main>
         <script>document.getElementById('ua').textContent = navigator.userAgent;</script>
       </body></html>`);
+      return;
+    }
+    if (url.pathname === '/site.css') {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`.root-stylesheet-probe{border-top:7px solid rgb(12, 34, 56); padding-left:13px}`);
       return;
     }
     if (url.pathname === '/gtm.js') {
@@ -570,6 +575,11 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     phase2Location: window.__phase2Location,
     phase2DynamicFunction: window.__phase2DynamicFunction,
     phase2EvalLocation: window.__phase2EvalLocation,
+    styleProbe: (() => {
+      const el = document.getElementById('style-probe');
+      const cs = el && getComputedStyle(el);
+      return cs && { borderTopWidth: cs.borderTopWidth, borderTopColor: cs.borderTopColor, paddingLeft: cs.paddingLeft };
+    })(),
   }));
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
@@ -591,6 +601,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
   assert.equal(home.phase2DynamicFunction, `http://${targetHost}:${targetPort}/`);
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
+  assert.deepEqual(home.styleProbe, { borderTopWidth: '7px', borderTopColor: 'rgb(12, 34, 56)', paddingLeft: '13px' });
+  assert.ok(requests.some(r => r.url === '/site.css' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);

@@ -222,6 +222,18 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			attrs = append(attrs, a)
 			continue
 		}
+		if tag == "link" && key == "href" {
+			trimmed := strings.TrimSpace(a.Val)
+			if target, ok := resolveTargetURL(a.Val, opt); ok {
+				a.Val = target
+				dataTarget = target
+			} else if trimmed != "" && hasExecutableURLScheme(trimmed) {
+				a.Val = shareurl.ControlPrefix + "error/POLICY_BLOCKED"
+				attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
+			}
+			attrs = append(attrs, a)
+			continue
+		}
 		if strings.HasPrefix(key, "on") && len(key) > 2 {
 			a.Val = rewriteEventHandler(a.Val, opt)
 			attrs = append(attrs, a)
@@ -315,6 +327,22 @@ func isASCIILetter(c byte) bool {
 
 func isASCIIDigit(c byte) bool {
 	return '0' <= c && c <= '9'
+}
+
+func resolveTargetURL(raw string, opt Options) (target string, ok bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.HasPrefix(s, "#") || hasExecutableURLScheme(s) {
+		return "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", false
+	}
+	abs := opt.TargetURL.ResolveReference(u)
+	if abs.Scheme != "http" && abs.Scheme != "https" {
+		return "", false
+	}
+	return abs.String(), true
 }
 
 func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok bool) {

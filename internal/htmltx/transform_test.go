@@ -133,12 +133,12 @@ func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/zp/api/script?`} {
+	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/zp/api/script?`, `href="https://example.com/app.css"`, `data-zp-target-url="https://example.com/app.css"`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{` integrity="sha384-script"`, ` integrity="sha256-style"`, `data-zp-integrity="attacker"`} {
+	for _, forbidden := range []string{` integrity="sha384-script"`, ` integrity="sha256-style"`, `data-zp-integrity="attacker"`, `href="/app.css"`} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden integrity marker %q remained in %s", forbidden, s)
 		}
