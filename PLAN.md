@@ -1,6 +1,6 @@
 # ZeroProxy Zero-Installation Proxy Browsing Engine Design
 
-> Current-status note: this is the source design/requirements document, not the canonical map of the current repository. The implementation has intentional deltas recorded in `ARCHITECTURE.md`, including active `/p` routes instead of PLAN `/v` routes, removal of the injected topbar, HTTP/2 support for target fetches, stricter target-response `connect-src`, and prototype-level browser API fidelity. Read `ARCHITECTURE.md` first when assessing current behavior.
+> Current-status note: this is the source design/requirements document, not the canonical map of the current repository. The implementation has intentional deltas recorded in `ARCHITECTURE.md`, including active `/p` routes instead of PLAN `/v` routes, removal of the injected topbar, HTTP/2 support for target fetches, stricter target-response `connect-src`, dynamic blocked preload/preconnect links preserved as inert nodes, worker-script URL recovery/membrane helpers, and prototype-level browser API fidelity. Read `ARCHITECTURE.md` first when assessing current behavior.
 
 ## 0. Source Specification and Correction Directives
 
@@ -28,7 +28,7 @@ ZeroProxy is a client-held virtual browsing engine composed of a static client, 
 Highest-priority security invariants:
 
 1. Target sites never receive a direct connection from the user's real IP.
-2. All target HTTP/TLS/WebSocket traffic exits only through `Service Worker → Go WASM → single WebSocket binary pipe with yamux streams → Tor SOCKS5 DOMAINNAME CONNECT per stream → uTLS → HTTP/1.1`.
+2. All target HTTP/TLS/WebSocket traffic exits only through `Service Worker → Go WASM → single WebSocket binary pipe with yamux streams → Tor SOCKS5 DOMAINNAME CONNECT per stream → uTLS → HTTP/2 or HTTP/1.1`.
 3. The server stores no session, cookie, history, or target URL state.
 4. Target URLs, cookie jars, storage namespaces, and history entries live only in client memory or client-side encrypted state.
 5. Every request the Service Worker cannot classify is blocked with `Response.error()` or a safe error response.
