@@ -10,6 +10,7 @@ const path = require('node:path');
 const puppeteer = require('puppeteer');
 
 const TARGET_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
 
 function run(cmd, args, options = {}) {
   const result = childProcess.spawnSync(cmd, args, {
@@ -163,6 +164,8 @@ function createTargetServer(requests) {
             window.__templateLinkFixture = { error: err && err.message || String(err) };
           }
         </script>
+        <script src="/jquery.js"></script>
+        <script src="/jquery-fixture.js"></script>
         <script src="/rewrite-fixture.js"></script>
         <script type="module" src="/module-worker.js"></script>
       </body></html>`);
@@ -185,6 +188,62 @@ function createTargetServer(requests) {
         currentAttr: document.currentScript && document.currentScript.attributes.getNamedItem('src') && document.currentScript.attributes.getNamedItem('src').value
       };
       window.postMessage({ type: 'gtm-loaded', href: location.href }, location.origin);`);
+      return;
+    }
+    if (url.pathname === '/jquery.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JQUERY_SOURCE);
+      return;
+    }
+    if (url.pathname === '/jquery-fixture.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`(($) => {
+        const root = $('<section id="jquery-fixture-root"><button class="trigger">Go</button><ul><li class="item">one</li><li class="item">two</li></ul></section>').appendTo(document.body);
+        const found = root.find('.item');
+        const ended = found.end();
+        let delegated = 0;
+        root.on('click', '.trigger', function() {
+          delegated++;
+          $(this).data('clicked', true).attr('data-clicked', 'yes');
+        });
+        root.find('.trigger').trigger('click');
+        root.append($.parseHTML('<div class="parsed"><span>parsed</span></div>'));
+        const deferred = $.Deferred();
+        const ajax = $.ajax({ url: '/jquery-ajax.json', dataType: 'json' });
+        const script = $.getScript('/jquery-plugin.js');
+        $.globalEval('window.__jqueryGlobalEvalHref = location.href;');
+        deferred.resolve('resolved');
+        $.when(deferred, ajax, script).done(function(deferredValue, ajaxValue) {
+          const ajaxData = Array.isArray(ajaxValue) ? ajaxValue[0] : ajaxValue;
+          window.__jqueryFixture = {
+            ready: true,
+            version: $.fn.jquery,
+            selectorText: found.map(function(_, el) { return $(el).text(); }).get().join(','),
+            endMatchesRoot: ended[0] === root[0],
+            delegated,
+            dataClicked: root.find('.trigger').data('clicked') === true,
+            attrClicked: root.find('.trigger').attr('data-clicked'),
+            parsedText: root.find('.parsed span').text(),
+            param: $.param({ a: 1, b: ['x', 'y'] }),
+            ajaxData,
+            plugin: window.__jqueryPlugin || null,
+            globalEvalHref: window.__jqueryGlobalEvalHref || null,
+            locationHref: window.location.href
+          };
+        }).fail(function(xhr, status, err) {
+          window.__jqueryFixture = { ready: false, error: String(err || status || 'jquery-failed') };
+        });
+      })(jQuery);`);
+      return;
+    }
+    if (url.pathname === '/jquery-ajax.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, path: '/jquery-ajax.json' }));
+      return;
+    }
+    if (url.pathname === '/jquery-plugin.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`window.__jqueryPlugin = { loaded: true, href: location.href, jquery: !!window.jQuery };`);
       return;
     }
     if (url.pathname === '/dynamic-script.js') {
@@ -579,6 +638,37 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(requests.some(r => r.url.startsWith('/dynamic-script.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/module-worker.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/worker-fixture.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+
+  try {
+    await page.waitForFunction(() => window.__jqueryFixture && window.__jqueryFixture.ready, { timeout: 30000 });
+  } catch (err) {
+    const state = await page.evaluate(() => ({
+      jquery: window.__jqueryFixture || null,
+      plugin: window.__jqueryPlugin || null,
+      hasJQuery: Boolean(window.jQuery),
+      scripts: Array.from(document.scripts).map(s => ({ id: s.id, src: s.attributes.getNamedItem('src')?.value || '', type: s.type || '', blocked: s.hasAttribute('data-zp-blocked-script') })),
+    }));
+    throw new Error(`${err.message}; jquery state=${JSON.stringify(state)}; requests=${JSON.stringify(requests)}`);
+  }
+  const jquery = await page.evaluate(() => window.__jqueryFixture);
+  assert.match(jquery.version, /^3\./);
+  assert.equal(jquery.selectorText, 'one,two');
+  assert.equal(jquery.endMatchesRoot, true);
+  assert.equal(jquery.delegated, 1);
+  assert.equal(jquery.dataClicked, true);
+  assert.equal(jquery.attrClicked, 'yes');
+  assert.equal(jquery.parsedText, 'parsed');
+  assert.equal(jquery.param, 'a=1&b%5B%5D=x&b%5B%5D=y');
+  assert.deepEqual(jquery.ajaxData, { ok: true, path: '/jquery-ajax.json' });
+  assert.equal(jquery.plugin && jquery.plugin.loaded, true);
+  assert.equal(jquery.plugin && jquery.plugin.jquery, true);
+  assert.ok(jquery.plugin.href.startsWith(`http://${targetHost}:${targetPort}/`), jquery.plugin.href);
+  assert.ok(jquery.globalEvalHref.startsWith(`http://${targetHost}:${targetPort}/`), jquery.globalEvalHref);
+  assert.ok(jquery.locationHref.startsWith(`http://${targetHost}:${targetPort}/`), jquery.locationHref);
+  assert.ok(requests.some(r => r.url.startsWith('/jquery.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/jquery-fixture.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/jquery-ajax.json') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url.startsWith('/jquery-plugin.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
     const blockedByPolicy = fn => {
