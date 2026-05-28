@@ -23,6 +23,16 @@ function run(cmd, args, options = {}) {
   }
 }
 
+function isBenignSocketError(err) {
+  return err && (err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'ERR_STREAM_PREMATURE_CLOSE');
+}
+
+function ignoreBenignSocketErrors(stream) {
+  stream.on('error', err => {
+    if (!isBenignSocketError(err)) throw err;
+  });
+}
+
 function listen(server, host = '127.0.0.1') {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -102,6 +112,8 @@ class SocketReader {
 
 function createTargetServer(requests) {
   const server = http.createServer((req, res) => {
+    ignoreBenignSocketErrors(req);
+    ignoreBenignSocketErrors(res);
     requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', contentType: req.headers['content-type'] || '' });
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
@@ -296,6 +308,12 @@ function createTargetServer(requests) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('not found');
   });
+  server.on('clientError', (err, socket) => {
+    if (!socket.destroyed) {
+      if (isBenignSocketError(err)) socket.destroy();
+      else socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    }
+  });
   server.on('upgrade', (req, socket) => handleWebSocketUpgrade(req, socket, requests));
   return server;
 }
@@ -313,6 +331,7 @@ function handleWebSocketUpgrade(req, socket, requests) {
   }
   const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
   const requestedProtocol = String(req.headers['sec-websocket-protocol'] || '').split(',').map(s => s.trim()).filter(Boolean)[0] || '';
+  ignoreBenignSocketErrors(socket);
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + (requestedProtocol ? '\r\nSec-WebSocket-Protocol: ' + requestedProtocol : '') + '\r\n\r\n');
   let buffered = Buffer.alloc(0);
   socket.on('data', chunk => {
@@ -388,6 +407,7 @@ function createSocks5Server(resolveHost) {
 }
 
 async function handleSocks(socket, resolveHost) {
+  socket.on('error', err => { if (!isBenignSocketError(err)) socket.destroy(err); });
   const reader = new SocketReader(socket);
   const greeting = await reader.read(2);
   assert.equal(greeting[0], 0x05);
@@ -418,6 +438,9 @@ async function handleSocks(socket, resolveHost) {
   await new Promise((resolve, reject) => {
     upstream.once('connect', resolve);
     upstream.once('error', reject);
+  });
+  upstream.on('error', err => {
+    if (!isBenignSocketError(err)) socket.destroy(err);
   });
   socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
   if (reader.buf.length) upstream.write(reader.buf);
