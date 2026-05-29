@@ -3,7 +3,6 @@
 package swhttp
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -37,19 +36,73 @@ func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 	var body io.ReadCloser = http.NoBody
 	var contentLength int64 = 0
 	if method != "GET" && method != "HEAD" && !v.Get("bodyUsed").Bool() {
-		ab, err := await(ctx, v.Call("arrayBuffer"))
-		if err != nil {
-			return nil, err
+		stream := v.Get("body")
+		if stream.Truthy() && stream.Get("getReader").Type() == js.TypeFunction {
+			body = newJSReadableStreamReadCloser(ctx, stream.Call("getReader"))
+			contentLength = -1
 		}
-		arr := js.Global().Get("Uint8Array").New(ab)
-		buf := make([]byte, arr.Get("byteLength").Int())
-		js.CopyBytesToGo(buf, arr)
-		body = io.NopCloser(bytes.NewReader(buf))
-		contentLength = int64(len(buf))
-		bodyBytes := buf
-		return &http.Request{Method: method, URL: u, Header: h, Body: body, GetBody: func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(bodyBytes)), nil }, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
 	}
 	return &http.Request{Method: method, URL: u, Header: h, Body: body, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
+}
+
+type jsReadableStreamReadCloser struct {
+	ctx    context.Context
+	reader js.Value
+	buf    []byte
+	once   sync.Once
+	closed bool
+}
+
+func newJSReadableStreamReadCloser(ctx context.Context, reader js.Value) *jsReadableStreamReadCloser {
+	return &jsReadableStreamReadCloser{ctx: ctx, reader: reader}
+}
+
+func (r *jsReadableStreamReadCloser) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, io.EOF
+	}
+	for len(r.buf) == 0 {
+		chunk, err := await(r.ctx, r.reader.Call("read"))
+		if err != nil {
+			return 0, err
+		}
+		if chunk.Get("done").Bool() {
+			r.closed = true
+			return 0, io.EOF
+		}
+		value := chunk.Get("value")
+		if value.IsUndefined() || value.IsNull() {
+			continue
+		}
+		var arr js.Value
+		if value.InstanceOf(js.Global().Get("ArrayBuffer")) {
+			arr = js.Global().Get("Uint8Array").New(value)
+		} else if value.Get("buffer").Truthy() {
+			arr = js.Global().Get("Uint8Array").New(value.Get("buffer"), value.Get("byteOffset"), value.Get("byteLength"))
+		} else {
+			continue
+		}
+		r.buf = make([]byte, arr.Get("byteLength").Int())
+		js.CopyBytesToGo(r.buf, arr)
+	}
+	n := copy(p, r.buf)
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+func (r *jsReadableStreamReadCloser) Close() error {
+	r.once.Do(func() {
+		r.closed = true
+		if r.reader.Truthy() {
+			if r.reader.Get("cancel").Type() == js.TypeFunction {
+				r.reader.Call("cancel")
+			}
+			if r.reader.Get("releaseLock").Type() == js.TypeFunction {
+				r.reader.Call("releaseLock")
+			}
+		}
+	})
+	return nil
 }
 
 func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded bool) (js.Value, error) {

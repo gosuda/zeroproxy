@@ -23,6 +23,8 @@ type Options struct {
 	DocumentCookie string
 	RuntimeToken   string
 	Servers        []string
+	ScriptRewriter func(source, kind, targetURL, controlPrefix string) (string, error)
+	CSSRewriter    func(source, baseURL string) (string, error)
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -81,17 +83,25 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 					rawTextBuf.WriteString(tok.Data)
 				} else {
 					out.WriteString(tok.Data)
+					if err := out.Flush(); err != nil {
+						return err
+					}
 				}
 				continue
 			}
 			if tok.Type == xhtml.EndTagToken && strings.EqualFold(tok.Data, rawTextTag) {
 				if rawTextKind == "importmap" {
 					out.WriteString(rewriteImportMap(rawTextBuf.String(), opt))
+				} else if rawTextKind == "style" {
+					out.WriteString(rewriteInlineStyle(rawTextBuf.String(), opt))
 				} else if rawTextKind != "" {
 					out.WriteString(rewriteInlineScript(rawTextBuf.String(), rawTextKind, opt))
 				}
 				rawTextBuf.Reset()
 				out.WriteString(tok.String())
+				if err := out.Flush(); err != nil {
+					return err
+				}
 				rawTextTag = ""
 				rawTextKind = ""
 				continue
@@ -104,6 +114,9 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				out.WriteString(tok.String())
 				out.WriteString(prelude)
 				preludeInjected = true
+				if err := out.Flush(); err != nil {
+					return err
+				}
 				continue
 			}
 			if tag == "script" && hasAttrValue(tok, "type", "speculationrules") {
@@ -124,10 +137,16 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				}
 				tok = rewriteToken(tok, opt)
 				out.WriteString(tok.String())
+				if err := out.Flush(); err != nil {
+					return err
+				}
 				continue
 			}
 			if tag == "base" {
 				out.WriteString(baseSyncScript(attr(tok, "href"), opt))
+				if err := out.Flush(); err != nil {
+					return err
+				}
 				continue
 			}
 			if isMetaRefresh(tok) {
@@ -135,6 +154,9 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 			}
 			if tag == "object" {
 				out.WriteString(blockedPlaceholder("object"))
+				if err := out.Flush(); err != nil {
+					return err
+				}
 				if tok.Type == xhtml.StartTagToken {
 					blockedDepth = 1
 					blockedTag = "object"
@@ -143,6 +165,9 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 			}
 			if tag == "embed" {
 				out.WriteString(blockedPlaceholder("embed"))
+				if err := out.Flush(); err != nil {
+					return err
+				}
 				continue
 			}
 			tok = rewriteToken(tok, opt)
@@ -158,10 +183,13 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				}
 			} else if tag == "style" && tok.Type == xhtml.StartTagToken {
 				rawTextTag = tag
-				rawTextKind = ""
+				rawTextKind = "style"
 			}
 		}
 		out.WriteString(tok.String())
+		if err := out.Flush(); err != nil {
+			return err
+		}
 	}
 	if !preludeInjected {
 		out.WriteString(prelude)
@@ -188,10 +216,10 @@ func runtimePrelude(opt Options) string {
 		Servers:        opt.Servers,
 	})
 	var b strings.Builder
-	b.Grow(len(bootJSON) + 170)
-	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp id=__zp-boot type=application/json>`)
+	b.Grow(len(bootJSON) + 130)
+	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp>(function(){const boot=`)
 	b.Write(bootJSON)
-	b.WriteString(`</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
+	b.WriteString(`;Object.defineProperty(window,'__ZP_BOOT',{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()
 }
 
@@ -254,6 +282,19 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			attrs = append(attrs, a)
 			continue
 		}
+		if tag == "link" && key == "href" && isStylesheetLinkRel(attr(tok, "rel")) {
+			trimmed := strings.TrimSpace(a.Val)
+			wrapped, target, ok := wrapFetchURL(a.Val, opt)
+			if ok {
+				a.Val = wrapped
+				dataTarget = target
+			} else if trimmed != "" && hasDangerousURLScheme(trimmed) {
+				a.Val = shareurl.ControlPrefix + "error/POLICY_BLOCKED"
+				attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-url", Val: trimmed})
+			}
+			attrs = append(attrs, a)
+			continue
+		}
 		if shouldRewritePassiveAttr(tag, key) {
 			trimmed := strings.TrimSpace(a.Val)
 			if target, ok := resolveTargetURL(a.Val, opt); ok {
@@ -267,8 +308,7 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			continue
 		}
 		if strings.HasPrefix(key, "on") && len(key) > 2 {
-			a.Val = rewriteEventHandler(a.Val, opt)
-			attrs = append(attrs, a)
+			attrs = append(attrs, xhtml.Attribute{Key: "data-zp-blocked-" + key, Val: a.Val})
 			continue
 		}
 		if tag == "script" && key == "src" && executableScriptKind(tok) != "" {
@@ -314,6 +354,12 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	}
 	if dataTarget != "" {
 		attrs = upsertAttr(attrs, "data-zp-target-url", dataTarget)
+	}
+	if tag == "script" && executableScriptKind(tok) != "" {
+		attrs = upsertAttr(attrs, "nonce", "zp")
+		if attr(tok, "src") == "" {
+			attrs = upsertAttr(attrs, "data-zp-static-script", "1")
+		}
 	}
 	tok.Attr = attrs
 	return tok
@@ -440,7 +486,28 @@ func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string
 	q := url.Values{}
 	q.Set("u", abs.String())
 	q.Set("kind", kind)
+	q.Set("tab", opt.TabID)
+	q.Set("rt", opt.RuntimeToken)
 	return shareurl.ControlPrefix + "api/script?" + q.Encode(), abs.String(), true
+}
+
+func wrapFetchURL(raw string, opt Options) (wrapped, target string, ok bool) {
+	target, ok = resolveTargetURL(raw, opt)
+	if !ok {
+		return shareurl.ControlPrefix + "error/POLICY_BLOCKED", "", false
+	}
+	q := url.Values{}
+	q.Set("url", target)
+	return shareurl.ControlPrefix + "api/fetch?" + q.Encode(), target, true
+}
+
+func isStylesheetLinkRel(rel string) bool {
+	for _, token := range strings.Fields(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(rel)), ",", " ")) {
+		if token == "stylesheet" {
+			return true
+		}
+	}
+	return false
 }
 
 func isIconLinkRel(rel string) bool {
@@ -464,17 +531,38 @@ func executableScriptKind(tok xhtml.Token) string {
 	return ""
 }
 func rewriteInlineScript(source, kind string, opt Options) string {
-	if kind == "module" {
-		payload, _ := json.Marshal(source)
-		return `__ZP_EXEC_INLINE_MODULE(` + string(payload) + `);`
+	if strings.TrimSpace(source) == "" {
+		return source
 	}
-	payload, _ := json.Marshal(source)
-	return `__ZP_EXEC_INLINE_SCRIPT(` + string(payload) + `);`
+	if opt.ScriptRewriter != nil {
+		if code, err := opt.ScriptRewriter(source, kind, opt.TargetURL.String(), shareurl.ControlPrefix); err == nil {
+			return code
+		}
+	}
+	return blockScriptSource()
 }
 
 func rewriteEventHandler(source string, opt Options) string {
-	payload, _ := json.Marshal(source)
-	return `return __ZP_EXEC_EVENT(this,event,` + string(payload) + `)`
+	if strings.TrimSpace(source) == "" {
+		return source
+	}
+	if opt.ScriptRewriter != nil {
+		if code, err := opt.ScriptRewriter(source, "event-handler", opt.TargetURL.String(), shareurl.ControlPrefix); err == nil {
+			return code
+		}
+	}
+	return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError')`
+}
+func rewriteInlineStyle(source string, opt Options) string {
+	if opt.CSSRewriter != nil {
+		if code, err := opt.CSSRewriter(source, opt.TargetURL.String()); err == nil {
+			return code
+		}
+	}
+	return source
+}
+func blockScriptSource() string {
+	return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');`
 }
 func rewriteImportMap(source string, opt Options) string {
 	var doc map[string]any
@@ -493,6 +581,8 @@ func rewriteImportMap(source string, opt Options) string {
 		q := url.Values{}
 		q.Set("kind", "module")
 		q.Set("u", abs.String())
+		q.Set("tab", opt.TabID)
+		q.Set("rt", opt.RuntimeToken)
 		return shareurl.ControlPrefix + "api/script?" + q.Encode()
 	}
 	if imports, ok := doc["imports"].(map[string]any); ok {

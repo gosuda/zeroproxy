@@ -6,6 +6,7 @@
   const nativeFetch = self.fetch.bind(self);
   const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
+  const runtimeToken = String(self.__ZP_WORKER_RUNTIME_TOKEN || '');
   const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
   const scope = new Proxy(self, {
     has(_target, prop) { return prop !== Symbol.unscopables; },
@@ -93,7 +94,7 @@
     if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
     const u = new URL(spec, referrer || base.href);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
-    return '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href);
+    return '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href) + '&tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken);
   });
   try { self.eval = blockedDynamic; } catch {}
   try { self.Function = blockedDynamic; } catch {}
@@ -109,21 +110,154 @@
     }
   }
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
-  async function bodyToBase64(body) {
-    if (body == null) return null;
-    let ab;
-    if (typeof body === 'string') ab = new TextEncoder().encode(body).buffer;
-    else if (body instanceof ArrayBuffer) ab = body;
-    else if (ArrayBuffer.isView(body)) ab = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
-    else if (body instanceof Blob) ab = await body.arrayBuffer();
-    else if (body instanceof URLSearchParams) ab = new TextEncoder().encode(body.toString()).buffer;
-    else ab = new TextEncoder().encode(String(body)).buffer;
-    return ZP.bytesToBase64Url(new Uint8Array(ab));
+  function postMessageToSW(message, transfer) {
+    const controller = nav && nav.serviceWorker && nav.serviceWorker.controller;
+    if (!controller || !runtimeToken) return Promise.reject(new TypeError('NetworkError'));
+    return new Promise((resolve, reject) => {
+      const channel = new MessageChannel();
+      const sealed = Object.assign({}, message, { runtimeToken });
+      channel.port1.onmessage = ev => {
+        const data = ev.data || {};
+        if (data.ok) resolve(data);
+        else reject(new TypeError(data.error || 'NetworkError'));
+      };
+      controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
+    });
+  }
+  function workerUploadChannelName() {
+    return '__zp_worker_upload:' + tabId + ':' + runtimeToken;
+  }
+  async function openRelayedUploadStream(body) {
+    if (typeof self.BroadcastChannel !== 'function' || !body || typeof body.getReader !== 'function') return '';
+    const id = ZP.randomId('wup');
+    const bc = new BroadcastChannel(workerUploadChannelName());
+    const reader = body.getReader();
+    let closed = false;
+    let reading = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      try { reader.releaseLock && reader.releaseLock(); } catch {}
+      try { bc.close(); } catch {}
+    };
+    const streamId = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { close(); reject(new TypeError('NetworkError')); }, 5000);
+      bc.onmessage = async ev => {
+        const msg = ev && ev.data || {};
+        if (msg.role !== 'page' || msg.id !== id) return;
+        if (msg.type === 'ready') {
+          clearTimeout(timer);
+          resolve(String(msg.streamId || ''));
+          return;
+        }
+        if (msg.type === 'cancel') {
+          try { reader.cancel && reader.cancel(); } catch {}
+          close();
+          return;
+        }
+        if (msg.type === 'error') {
+          clearTimeout(timer);
+          close();
+          reject(new TypeError(msg.error || 'NetworkError'));
+          return;
+        }
+        if (msg.type !== 'pull' || closed || reading) return;
+        reading = true;
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            bc.postMessage({ role: 'worker', type: 'close', id, tabId, runtimeToken });
+            close();
+            return;
+          }
+          const value = chunk.value;
+          let bytes;
+          if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+          else if (value && value.buffer instanceof ArrayBuffer) bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength);
+          else bytes = new Uint8Array();
+          const data = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
+          bc.postMessage({ role: 'worker', type: 'chunk', id, tabId, runtimeToken, data });
+        } catch (err) {
+          bc.postMessage({ role: 'worker', type: 'error', id, tabId, runtimeToken, error: err && (err.name || err.message) || 'NetworkError' });
+          close();
+        } finally {
+          reading = false;
+        }
+      };
+      bc.postMessage({ role: 'worker', type: 'open', id, tabId, runtimeToken });
+    });
+    return streamId;
+  }
+  async function openUploadStream(body) {
+    if (!body || typeof body.getReader !== 'function') return '';
+    const controller = nav && nav.serviceWorker && nav.serviceWorker.controller;
+    if (!controller) return openRelayedUploadStream(body);
+    const id = ZP.randomId('up');
+    const channel = new MessageChannel();
+    const port = channel.port1;
+    const reader = body.getReader();
+    let closed = false;
+    let reading = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      try { reader.releaseLock && reader.releaseLock(); } catch {}
+      try { port.close(); } catch {}
+    };
+    port.onmessage = async ev => {
+      const msg = ev && ev.data || {};
+      if (msg.type === 'cancel') {
+        try { reader.cancel && reader.cancel(); } catch {}
+        close();
+        return;
+      }
+      if (msg.type !== 'pull' || closed || reading) return;
+      reading = true;
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          try { port.postMessage({ type: 'close' }); } catch {}
+          close();
+          return;
+        }
+        const value = chunk.value;
+        let bytes;
+        if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+        else if (value && value.buffer instanceof ArrayBuffer) bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength);
+        else bytes = new Uint8Array();
+        const data = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
+        port.postMessage({ type: 'chunk', data }, [data]);
+      } catch (err) {
+        try { port.postMessage({ type: 'error', error: err && (err.name || err.message) || 'NetworkError' }); } catch {}
+        close();
+      } finally {
+        reading = false;
+      }
+    };
+    try {
+      await postMessageToSW({ type: 'ZP_UPLOAD_STREAM_OPEN', tabId, id }, [channel.port2]);
+      return id;
+    } catch (err) {
+      close();
+      return openRelayedUploadStream(body);
+    }
   }
   self.fetch = async (input, init={}) => {
-    const headers = new Headers(init.headers || input.headers || {});
-    const body = init.body != null ? init.body : (input instanceof Request && input.method !== 'GET' && input.method !== 'HEAD' ? await input.clone().arrayBuffer() : null);
-    return nativeFetch('/zp/api/fetch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tabId, url: ZP.canonicalTargetURL(input.url || input, base.href).href, init:{ method:init.method || input.method || 'GET', headers: Array.from(headers.entries()), body: await bodyToBase64(body), credentials: init.credentials, mode: init.mode, referrer: init.referrer, redirect: init.redirect, cache: init.cache, integrity: init.integrity } }) });
+    const target = ZP.canonicalTargetURL(input && input.url || input, base.href).href;
+    const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Request(input, init) : new Request(String(input), init);
+    const headers = new Headers(req.headers);
+    headers.set('X-ZP-Tab-Id', tabId);
+    headers.set('X-ZP-Runtime-Token', runtimeToken);
+    const apiInit = { method: req.method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'follow' };
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const streamId = await openUploadStream(req.body).catch(() => '');
+      if (streamId) headers.set('X-ZP-Upload-Stream-Id', streamId);
+      else {
+        apiInit.body = req.body;
+        apiInit.duplex = 'half';
+      }
+    }
+    return nativeFetch('/zp/api/fetch?url=' + encodeURIComponent(target), apiInit);
   };
   self.XMLHttpRequest = undefined;
   self.WebSocket = function(){ blocked(); };
@@ -135,7 +269,7 @@
     const internal = new URL(value, self.location.href);
     if (internal.origin === self.location.origin && internal.pathname === '/zp/api/worker-script') return internal.pathname + internal.search + internal.hash;
     const parsed = new URL(value, base.href);
-    return '/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
+    return '/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
   }
   self.importScripts = (...urls) => nativeImportScripts(...urls.map(importScriptURL));
 })();

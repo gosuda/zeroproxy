@@ -76,6 +76,20 @@ async function waitForHTTP(url, timeoutMs = 15000) {
   throw last || new Error(`timed out waiting for ${url}`);
 }
 
+async function waitForPage(page, predicate, args = [], timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    try {
+      if (await page.evaluate(predicate, ...args)) return;
+    } catch (err) {
+      last = err;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw last || new Error('timed out waiting for page condition');
+}
+
 class SocketReader {
   constructor(socket) {
     this.socket = socket;
@@ -125,6 +139,7 @@ function createTargetServer(requests) {
           window.__ua = navigator.userAgent;
           window.__platform = navigator.platform;
           window.__phase2Location = { href: location.href, windowHref: window.location.href };
+          window.__storageInitial = { local: localStorage.getItem('zp-persist'), session: sessionStorage.getItem('zp-session') };
           window.__phase2DynamicFunction = Function('return location.href')();
           window.__phase2EvalLocation = eval('location.href');
           window.__messageEvents = [];
@@ -289,7 +304,17 @@ function createTargetServer(requests) {
     }
     if (url.pathname === '/worker-fixture.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(`postMessage({ loaded: true, href: location.href, userAgent: navigator.userAgent, platform: navigator.platform });`);
+      res.end(`(async () => {
+        const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('worker-upload')); controller.close(); } });
+        let upload = null;
+        try {
+          const resp = await fetch('/post-echo', { method: 'POST', body: stream, duplex: 'half', headers: { 'Content-Type': 'text/plain' } });
+          upload = { status: resp.status, text: await resp.text(), serviceWorker: !!(navigator.serviceWorker && navigator.serviceWorker.controller) };
+        } catch (err) {
+          upload = { error: err && (err.name + ':' + err.message) || String(err), serviceWorker: !!(navigator.serviceWorker && navigator.serviceWorker.controller) };
+        }
+        postMessage({ loaded: true, href: location.href, userAgent: navigator.userAgent, platform: navigator.platform, upload });
+      })();`);
       return;
     }
     if (url.pathname === '/frame-child') {
@@ -341,7 +366,26 @@ function createTargetServer(requests) {
       res.end('set-cookie-ok');
       return;
     }
+    if (url.pathname === '/account/set-cookie-scope') {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Set-Cookie': [
+          'target_root=visible-root; Path=/; SameSite=Lax',
+          'target_scoped=visible-account; Path=/account; SameSite=Lax',
+          'target_secret=hidden; Path=/; HttpOnly; SameSite=Lax',
+          'target_gone=deleted; Path=/; Max-Age=0; SameSite=Lax',
+        ],
+      });
+      res.end('set-cookie-scope-ok');
+      return;
+    }
     if (url.pathname === '/cookie-echo') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(req.headers.cookie || '');
+      return;
+    }
+    if (url.pathname === '/account/cookie-echo') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(req.headers.cookie || '');
       return;
@@ -572,11 +616,11 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller && document.querySelector('#status')?.textContent === 'Ready.', { timeout: 30000 });
+  await waitForPage(page, () => navigator.serviceWorker && navigator.serviceWorker.controller && document.querySelector('#status')?.textContent === 'Ready.');
   await page.type('#url', `http://${targetHost}:${targetPort}/`);
   await page.click('button');
   try {
-    await page.waitForFunction(() => document.title === 'E2E Home', { timeout: 30000 });
+    await waitForPage(page, () => document.title === 'E2E Home');
   } catch (err) {
     const state = await page.evaluate(() => ({ title: document.title, url: location.href, body: document.body && document.body.innerText, status: document.querySelector('#status')?.textContent || '' }));
     throw new Error(`${err.message}; nav state=${JSON.stringify(state)}; requests=${JSON.stringify(requests)}; proxy=${proxyLog}`);
@@ -668,13 +712,13 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   try {
     const externalPage = await externalContext.newPage();
     await externalPage.goto(addressBarShare, { waitUntil: 'domcontentloaded' });
-    await externalPage.waitForFunction(() => document.title === 'E2E Home', { timeout: 30000 });
+    await waitForPage(externalPage, () => document.title === 'E2E Home');
     assert.match(externalPage.url(), /#k=/);
     assert.match(externalPage.url(), relayServerParam);
   } finally {
     await externalContext.close();
   }
-  await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
+  await waitForPage(page, () => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script');
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
   assert.equal(rewriteAdvanced.initialHref, `http://${targetHost}:${targetPort}/`);
   assert.equal(rewriteAdvanced.wsURL, `ws://${targetHost}:${targetPort}/ws`);
@@ -687,7 +731,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(rewriteAdvanced.compoundHref, `http://${targetHost}:${targetPort}/#compound-tail`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   try {
-    await page.waitForFunction(() => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded && window.__moduleWorkerFixture && window.__moduleWorkerFixture.loaded, { timeout: 30000 });
+    await waitForPage(page, () => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded && window.__moduleWorkerFixture && window.__moduleWorkerFixture.loaded);
   } catch (err) {
     const state = await page.evaluate(() => ({
       gtm: window.__gtmFixture || null,
@@ -712,6 +756,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(dynamicScripts.moduleWorker.href, `http://${targetHost}:${targetPort}/worker-fixture.js`);
   assert.equal(dynamicScripts.moduleWorker.userAgent, TARGET_UA);
   assert.equal(dynamicScripts.moduleWorker.platform, 'Win32');
+  assert.deepEqual(dynamicScripts.moduleWorker.upload, { status: 200, text: 'worker-upload', serviceWorker: false });
   assert.match(dynamicScripts.dynamic.currentAttr, /^\/zp\/api\/script\?/);
   assert.match(dynamicScripts.gtmAttr, /^\/zp\/api\/script\?/);
   assert.match(dynamicScripts.dynamicAttr, /^\/zp\/api\/script\?/);
@@ -722,7 +767,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(requests.some(r => r.url.startsWith('/worker-fixture.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   try {
-    await page.waitForFunction(() => window.__jqueryFixture && window.__jqueryFixture.ready, { timeout: 30000 });
+    await waitForPage(page, () => window.__jqueryFixture && window.__jqueryFixture.ready);
   } catch (err) {
     const state = await page.evaluate(() => ({
       jquery: window.__jqueryFixture || null,
@@ -959,19 +1004,32 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     document.cookie = 'client_runtime=from-runtime; Path=/';
     const visibleCookie = document.cookie;
     const clientCookie = await waitForCookieHeader('client_runtime=from-runtime');
+    const scopedCookieBody = await readText('/account/set-cookie-scope?ts=' + Date.now());
+    const visibleAfterScopedSet = document.cookie;
+    const accountCookie = await readText('/account/cookie-echo?ts=' + Date.now());
     const stream = await readStream();
     const post = await postText('/post-echo', 'small-upload');
     const redirectPost = await postText('/redirect307', 'redirect-body');
-    const oversized = await postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1));
+    const oversizedResp = await postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1));
+    const oversized = { status: oversizedResp.status, length: oversizedResp.text.length, first: oversizedResp.text.slice(0, 1) };
     const ws = await websocketEcho();
     const wsStream = await websocketStreamEcho();
-    return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws, wsStream, post, redirectPost, oversized };
+    return { setCookieBody, serverCookie, visibleCookie, clientCookie, scopedCookieBody, visibleAfterScopedSet, accountCookie, stream, ws, wsStream, post, redirectPost, oversized };
   }, targetPort);
   assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok');
   assert.match(runtimeIntegration.serverCookie, /target_server=from-target/);
   assert.match(runtimeIntegration.visibleCookie, /client_runtime=from-runtime/);
   assert.match(runtimeIntegration.clientCookie, /target_server=from-target/);
   assert.match(runtimeIntegration.clientCookie, /client_runtime=from-runtime/);
+  assert.equal(runtimeIntegration.scopedCookieBody, 'set-cookie-scope-ok');
+  assert.match(runtimeIntegration.visibleAfterScopedSet, /target_root=visible-root/);
+  assert.doesNotMatch(runtimeIntegration.visibleAfterScopedSet, /target_scoped=visible-account/);
+  assert.doesNotMatch(runtimeIntegration.visibleAfterScopedSet, /target_secret=hidden/);
+  assert.doesNotMatch(runtimeIntegration.visibleAfterScopedSet, /target_gone=deleted/);
+  assert.match(runtimeIntegration.accountCookie, /target_root=visible-root/);
+  assert.match(runtimeIntegration.accountCookie, /target_scoped=visible-account/);
+  assert.match(runtimeIntegration.accountCookie, /target_secret=hidden/);
+  assert.doesNotMatch(runtimeIntegration.accountCookie, /target_gone=deleted/);
   assert.equal(runtimeIntegration.stream.status, 200);
   assert.match(runtimeIntegration.stream.contentType, /^text\/plain/);
   assert.equal(runtimeIntegration.stream.firstText, 'chunk-one\n');
@@ -982,14 +1040,34 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(runtimeIntegration.ws.protocol, 'zp-test');
   assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000 });
   assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' });
-  assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' });
-  assert.equal(runtimeIntegration.oversized.status, 413);
-  assert.match(runtimeIntegration.oversized.text, /REQUEST_BODY_TOO_LARGE/);
+  assert.equal(runtimeIntegration.redirectPost.status, 502);
+  assert.match(runtimeIntegration.redirectPost.text, /TARGET_CONNECT_FAILED/);
+  assert.deepEqual(runtimeIntegration.oversized, { status: 200, length: 8 * 1024 * 1024 + 1, first: 'x' });
   assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
+
+  const storageSeed = 'stored-' + Date.now();
+  const storageBeforeReload = await page.evaluate(seed => {
+    localStorage.setItem('zp-persist', seed);
+    sessionStorage.setItem('zp-session', seed + '-session');
+    return { local: localStorage.getItem('zp-persist'), session: sessionStorage.getItem('zp-session') };
+  }, storageSeed);
+  assert.deepEqual(storageBeforeReload, { local: storageSeed, session: storageSeed + '-session' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await waitForPage(page, () => document.title === 'E2E Home');
+  const storageAfterReload = await page.evaluate(() => ({
+    initial: window.__storageInitial,
+    local: localStorage.getItem('zp-persist'),
+    session: sessionStorage.getItem('zp-session'),
+  }));
+  assert.deepEqual(storageAfterReload, {
+    initial: { local: storageSeed, session: storageSeed + '-session' },
+    local: storageSeed,
+    session: storageSeed + '-session',
+  });
 
   const escapeMatrix = await page.evaluate(async targetPort => {
     const directBase = 'http://localhost:' + targetPort;
@@ -1139,7 +1217,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       document.body.appendChild(f);
       f.requestSubmit(button);
     }, kind);
-    await page.waitForFunction(k => window.__formEcho && window.__formEcho.kind === k, { timeout: 30000 }, kind);
+    await waitForPage(page, k => window.__formEcho && window.__formEcho.kind === k, [kind]);
     return page.evaluate(() => { const loc = __zp_get(globalThis, 'location'); return { echo: window.__formEcho, virtualHref: loc.href, virtualHash: loc.hash, documentURL: __zp_get(document, 'URL'), baseURI: __zp_get(document, 'baseURI') }; });
   }
   const urlencodedForm = await submitFormFixture('urlencoded');
@@ -1157,7 +1235,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const rawAfterSubmit = page.url();
   const rawKey = new URL(rawAfterSubmit).hash ? new URLSearchParams(new URL(rawAfterSubmit).hash.slice(1)).get('k') : '';
   assert.match(rawAfterSubmit, /#k=/);
-  assert.match(rawAfterSubmit, /\?zp_submit=/);
+  assert.equal(rawAfterSubmit.includes('zp_submit='), false);
   for (const surface of [multipartForm.virtualHref, multipartForm.virtualHash, multipartForm.documentURL, multipartForm.baseURI]) {
     assert.equal(surface.includes('zp_submit='), false, surface);
     if (rawKey) assert.equal(surface.includes(rawKey), false, surface);
@@ -1166,7 +1244,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=plain') && r.contentType.startsWith('text/plain')), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=multipart') && r.contentType.startsWith('multipart/form-data')), `target requests: ${JSON.stringify(requests)}`);
   await page.click('#next');
-  await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
+  await waitForPage(page, () => document.title === 'E2E Next');
   const next = await page.evaluate(() => ({
     href: location.href,
     hash: location.hash,

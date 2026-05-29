@@ -98,7 +98,7 @@ func TestTransformPreservesFragmentsAndBlocksExecutableNavigationSchemes(t *test
 	}
 }
 
-func TestRuntimePreludeEmbedsBootAsInertJSON(t *testing.T) {
+func TestRuntimePreludeEmbedsSelfRemovingBoot(t *testing.T) {
 	target, _ := url.Parse(`https://example.com/path?q="</script><script>evil()</script>&x=1`)
 	tabID := `tab"</script><script>evil()</script>`
 	out, err := Transform(strings.NewReader(`<body></body>`), Options{
@@ -112,18 +112,21 @@ func TestRuntimePreludeEmbedsBootAsInertJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	if strings.Contains(s, `Object.defineProperty(window,"__ZP_BOOT"`) {
-		t.Fatalf("boot config was embedded in executable JavaScript: %s", s)
+	if strings.Contains(s, `id=__zp-boot`) || strings.Contains(s, `type=application/json`) {
+		t.Fatalf("boot config left an observable JSON marker: %s", s)
 	}
-	const open = `<script nonce=zp id=__zp-boot type=application/json>`
+	if !strings.Contains(s, `Object.defineProperty(window,'__ZP_BOOT'`) || !strings.Contains(s, `document.currentScript.remove()`) {
+		t.Fatalf("missing self-removing boot script in %s", s)
+	}
+	const open = `<script nonce=zp>(function(){const boot=`
 	start := strings.Index(s, open)
 	if start < 0 {
-		t.Fatalf("missing inert boot JSON script in %s", s)
+		t.Fatalf("missing boot payload in %s", s)
 	}
 	start += len(open)
-	end := strings.Index(s[start:], `</script>`)
+	end := strings.Index(s[start:], `;Object.defineProperty`)
 	if end < 0 {
-		t.Fatalf("unterminated boot JSON script in %s", s)
+		t.Fatalf("unterminated boot payload in %s", s)
 	}
 	bootRaw := s[start : start+end]
 	for _, unsafe := range []string{"<", ">", "&"} {
@@ -140,14 +143,14 @@ func TestRuntimePreludeEmbedsBootAsInertJSON(t *testing.T) {
 	}
 }
 
-func TestTransformPreservesRawScriptAndStyleText(t *testing.T) {
+func TestTransformBlocksInlineScriptsWhenStaticRewriterUnavailable(t *testing.T) {
 	target, _ := url.Parse("https://example.com/app/")
 	out, err := Transform(strings.NewReader(`<html><head><style>body::before{content:"x<&>"}</style></head><body><script>window.__cfg={"base":new URL("..",location).pathname,"amp":"<&>"};import("/_app/start.js");</script></body></html>`), Options{TabID: "t", EntryID: "e", TargetURL: target})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`content:"x<&>"`, `__ZP_EXEC_INLINE_SCRIPT(`} {
+	for _, want := range []string{`content:"x<&>"`, `Blocked by ZeroProxy rewrite policy`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("raw script/style text was escaped or corrupted; missing %q in %s", want, s)
 		}
@@ -157,19 +160,22 @@ func TestTransformPreservesRawScriptAndStyleText(t *testing.T) {
 	}
 }
 
-func TestTransformRewritesPhase2ScriptSourcesAndHandlers(t *testing.T) {
+func TestTransformRewritesStaticScriptsAndHandlers(t *testing.T) {
 	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<body onLoad="location.href='/boot'"><script src="/app.js"></script><script>window.location.href='/classic'</script><script type="module">window.location.href='/module'</script><button onclick="return location.href"></button><img onerror="Function('return location.href')()"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	fake := func(source, kind, targetURL, controlPrefix string) (string, error) {
+		return "__rewritten(" + kind + "):" + source, nil
+	}
+	out, err := Transform(strings.NewReader(`<body onLoad="location.href='/boot'"><script src="/app.js"></script><script>window.location.href='/classic'</script><script type="module">window.location.href='/module'</script><button onclick="return location.href"></button><img onerror="Function('return location.href')()"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, ScriptRewriter: fake})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`/zp/api/script?`, `u=https%3A%2F%2Fexample.com%2Fapp.js`, `kind=classic`, `__ZP_EXEC_INLINE_SCRIPT(`, `__ZP_EXEC_INLINE_MODULE(`, `__ZP_EXEC_EVENT(`} {
+	for _, want := range []string{`/zp/api/script?`, `u=https%3A%2F%2Fexample.com%2Fapp.js`, `kind=classic`, `nonce="zp"`, `__rewritten(classic):window.location.href='/classic'`, `__rewritten(module):window.location.href='/module'`, `data-zp-blocked-onclick="return location.href"`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{`src="/app.js"`, `onclick="return location.href"`, `onLoad="location.href='/boot'"`, `onerror="Function(`} {
+	for _, forbidden := range []string{`src="/app.js"`, ` onclick="return location.href"`, ` onLoad="location.href='/boot'"`, ` onerror="Function(`} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("unrewritten script source or handler remained: %q in %s", forbidden, s)
 		}
@@ -182,7 +188,7 @@ func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/zp/api/script?`, `href="https://example.com/app.css"`, `data-zp-target-url="https://example.com/app.css"`} {
+	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/zp/api/script?`, `/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp.css`, `data-zp-target-url="https://example.com/app.css"`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}

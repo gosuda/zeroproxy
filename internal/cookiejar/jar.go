@@ -33,6 +33,17 @@ type CookieRecord struct {
 	LastAccessTime time.Time
 }
 
+type SnapshotRecord struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	Domain    string `json:"domain"`
+	HostOnly  bool   `json:"hostOnly"`
+	Path      string `json:"path"`
+	Secure    bool   `json:"secure"`
+	ExpiresMS *int64 `json:"expiresMs,omitempty"`
+	SameSite  string `json:"sameSite,omitempty"`
+}
+
 type Jar struct {
 	mu      sync.Mutex
 	records []CookieRecord
@@ -110,6 +121,51 @@ func (j *Jar) DocumentCookie(u *url.URL) string {
 		parts = append(parts, c.Name+"="+c.Value)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func (j *Jar) VisibleRecords(u *url.URL) []SnapshotRecord {
+	if j == nil || u == nil {
+		return nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	now := j.now().UTC()
+	host := canonicalHost(u.Hostname())
+	secure := u.Scheme == "https"
+	out := make([]CookieRecord, 0, len(j.records))
+	kept := j.records[:0]
+	for _, r := range j.records {
+		if expired(r, now) {
+			continue
+		}
+		if !r.HTTPOnly && domainMatch(host, r.Domain, r.HostOnly) && (!r.Secure || secure) {
+			out = append(out, r)
+		}
+		kept = append(kept, r)
+	}
+	j.records = kept
+	sort.SliceStable(out, func(a, b int) bool {
+		if len(out[a].Path) != len(out[b].Path) {
+			return len(out[a].Path) > len(out[b].Path)
+		}
+		return out[a].CreationTime.Before(out[b].CreationTime)
+	})
+	records := make([]SnapshotRecord, 0, len(out))
+	for _, r := range out {
+		s := SnapshotRecord{
+			Name: r.Name, Value: r.Value, Domain: r.Domain, HostOnly: r.HostOnly, Path: r.Path,
+			Secure: r.Secure, SameSite: string(r.SameSite),
+		}
+		if r.MaxAge != nil {
+			expires := r.CreationTime.Add(time.Duration(*r.MaxAge) * time.Second).UnixMilli()
+			s.ExpiresMS = &expires
+		} else if r.Expires != nil {
+			expires := r.Expires.UnixMilli()
+			s.ExpiresMS = &expires
+		}
+		records = append(records, s)
+	}
+	return records
 }
 
 func (j *Jar) SetDocumentCookie(u *url.URL, line string) {

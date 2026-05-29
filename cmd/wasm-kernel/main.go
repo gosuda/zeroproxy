@@ -143,6 +143,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 		}
 		if tab.CookieJar != nil {
 			tab.CookieJar.SetCookies(finalURL, resp.Cookies())
+			broadcastCookieSync(tab, finalURL)
 		}
 		transformed := false
 		decoded := false
@@ -160,6 +161,8 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 					DocumentCookie: tab.CookieJar.DocumentCookie(finalURL),
 					RuntimeToken:   req.Header.Get("X-Zp-Runtime-Token"),
 					Servers:        headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+					ScriptRewriter: rewriteScriptFromJS,
+					CSSRewriter:    rewriteCSSFromJS,
 				})
 				closeErr := source.Close()
 				if err != nil {
@@ -196,6 +199,74 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 		}
 		resolve.Invoke(jsResp)
 	})
+}
+
+func broadcastCookieSync(tab *zphttp.TabState, targetURL *url.URL) {
+	if tab == nil || tab.CookieJar == nil || targetURL == nil {
+		return
+	}
+	fn := js.Global().Get("__zp_cookie_sync")
+	if fn.Type() != js.TypeFunction {
+		return
+	}
+	fn.Invoke(map[string]any{
+		"tabId":         tab.TabID,
+		"targetUrl":     targetURL.String(),
+		"cookieString":  tab.CookieJar.DocumentCookie(targetURL),
+		"cookieRecords": cookieRecordsForJS(tab.CookieJar.VisibleRecords(targetURL)),
+	})
+}
+
+func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
+	out := make([]any, 0, len(records))
+	for _, r := range records {
+		rec := map[string]any{
+			"name":     r.Name,
+			"value":    r.Value,
+			"domain":   r.Domain,
+			"hostOnly": r.HostOnly,
+			"path":     r.Path,
+			"secure":   r.Secure,
+			"sameSite": r.SameSite,
+		}
+		if r.ExpiresMS != nil {
+			rec["expiresMs"] = *r.ExpiresMS
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func rewriteScriptFromJS(source, kind, targetURL, controlPrefix string) (string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteScript").Type() != js.TypeFunction {
+		return "", fmt.Errorf("REALM_INJECTION_FAILURE")
+	}
+	out := rewriter.Call("rewriteScript", source, map[string]any{
+		"kind":          kind,
+		"targetUrl":     targetURL,
+		"controlPrefix": controlPrefix,
+		"strict":        true,
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("code").String(), nil
+	}
+	return "", fmt.Errorf("REWRITE_FAILED")
+}
+
+func rewriteCSSFromJS(source, baseURL string) (string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteCSS").Type() != js.TypeFunction {
+		return source, nil
+	}
+	out := rewriter.Call("rewriteCSS", source, map[string]any{
+		"baseUrl":       baseURL,
+		"controlPrefix": "/zp/",
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("code").String(), nil
+	}
+	return "", fmt.Errorf("CSS_REWRITE_FAILED")
 }
 
 func (k *Kernel) jsStream(this js.Value, args []js.Value) any {

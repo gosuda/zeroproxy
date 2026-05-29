@@ -152,7 +152,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 }
 
 func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
-	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
+	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, body)
@@ -475,9 +475,17 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", zeroCSP(r))
+		if needsServiceWorkerWASMCSP(r.URL.Path) {
+			w.Header().Set("Content-Security-Policy", serviceWorkerCSP(r))
+		} else {
+			w.Header().Set("Content-Security-Policy", zeroCSP(r))
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func needsServiceWorkerWASMCSP(path string) bool {
+	return path == controlPrefix+"sw.js" || path == assetPrefix+"rust-rewriter.js" || path == assetPrefix+"wasm_exec.js"
 }
 
 func zeroCSP(r *http.Request) string {
@@ -489,5 +497,9 @@ func zeroCSP(r *http.Request) string {
 	if host == "" {
 		host = "proxy.example"
 	}
-	return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'"
+	return "default-src 'none'; script-src 'self' 'nonce-zp'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'"
+}
+
+func serviceWorkerCSP(r *http.Request) string {
+	return strings.Replace(zeroCSP(r), "script-src 'self' 'nonce-zp'", "script-src 'self' 'wasm-unsafe-eval'", 1)
 }

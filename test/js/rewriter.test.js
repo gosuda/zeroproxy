@@ -76,6 +76,32 @@ test('Rust rewriter asset reports parse failures', async () => {
   assert.match(ctx.ZPRewriter.blockSource(), /Blocked by ZeroProxy rewrite policy/);
 });
 
+test('Rust CSS rewriter rewrites only AST URL resources', async () => {
+  const rewriter = await loadRewriter();
+  const source = `
+    /* url("https://comment.invalid/leak.png") */
+    @import "/css/theme.css" screen;
+    .hero {
+      background-image: url(/img/hero.png);
+      cursor: url("https://cdn.example/cursor.cur"), pointer;
+      content: "url(https://string.invalid/not-a-request.png)";
+      mask-image: url(data:image/png;base64,AAAA);
+    }
+  `;
+  const out = rewriter.rewriteCSS(source, { baseUrl: 'https://example.com/app/site.css', controlPrefix: '/zp/' });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.ok(out.code.includes('@import "/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fcss%2Ftheme.css"'));
+  assert.ok(out.code.includes('url("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fhero.png")'));
+  assert.ok(out.code.includes('url("/zp/api/fetch?url=https%3A%2F%2Fcdn.example%2Fcursor.cur")'));
+  assert.ok(out.code.includes('/* url("https://comment.invalid/leak.png") */'));
+  assert.ok(out.code.includes('"url(https://string.invalid/not-a-request.png)"'));
+  assert.ok(out.code.includes('url(data:image/png;base64,AAAA)'));
+
+  const attr = rewriter.rewriteCSS(`background:url('../attr.png'); color:red`, { baseUrl: 'https://example.com/a/b/page.html', controlPrefix: '/zp/' });
+  assert.equal(attr.ok, true, JSON.stringify(attr.diagnostics));
+  assert.ok(attr.code.includes('url("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fa%2Fattr.png")'));
+});
+
 test('Rust rewriter supports event-handler and dynamic function body paths', async () => {
   const rewriter = await loadRewriter();
   const handler = rewriter.rewriteScript('return location.href', { kind: 'event-handler', targetUrl: 'https://example.com/' });

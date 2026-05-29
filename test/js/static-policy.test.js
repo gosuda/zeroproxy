@@ -17,12 +17,14 @@ test('runtime avoids stale escape gaps and forbidden harness markers', () => {
   assert.ok(rt.includes('Function.prototype.toString'));
 });
 
-test('runtime reads boot config from inert JSON script', () => {
+test('runtime reads boot config from self-removing prelude state', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.ok(rt.includes("getElementById('__zp-boot')"));
-  assert.ok(rt.includes('JSON.parse(el.textContent'));
-  assert.ok(rt.includes('type="application/json"'));
-  assert.equal(rt.includes('Object.defineProperty(window,"__ZP_BOOT"'), false);
+  const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  assert.ok(rt.includes('root.__ZP_BOOT'));
+  assert.ok(rt.includes("delete root.__ZP_BOOT"));
+  assert.ok(tx.includes("document.currentScript.remove()"));
+  assert.equal(tx.includes('id=__zp-boot'), false);
+  assert.equal(rt.includes("getElementById('__zp-boot')"), false);
 });
 
 test('runtime installs required escape-vector hooks', () => {
@@ -51,7 +53,7 @@ test('runtime installs required escape-vector hooks', () => {
     "'contentWindow'",
     "'contentDocument'",
     'new WeakSet',
-    "attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target']",
+    "attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style']",
     'enforceObservedAttribute',
     'data-zp-integrity',
     'installIntegrityProp',
@@ -72,6 +74,9 @@ test('runtime installs required escape-vector hooks', () => {
     'indexedDB',
     'caches',
     'documentCookieString',
+    'ZP_COOKIE_SYNC',
+    'X-ZP-Tab-Id',
+    'X-ZP-Runtime-Token',
     "define(root, 'Worker'",
     "define(root, 'SharedWorker'",
     'workerBlobURLs',
@@ -85,7 +90,6 @@ test('runtime installs required escape-vector hooks', () => {
     '__zp_runClassic',
     '__zp_get',
     '__zp_assign',
-    'FunctionCtor',
     "define(root, 'setTimeout'",
     "define(document, 'write'",
     'createContextualFragment',
@@ -93,9 +97,11 @@ test('runtime installs required escape-vector hooks', () => {
     'rewriteEventAttribute',
     'enforceSubtreePolicies',
     'installTargetServiceWorkerBlocker',
-    'serializeFormSubmission',
+    'formRequestBody',
     'shareFragmentForKey',
     'postMessageWrapperFor',
+    'Object, \'getPrototypeOf\'',
+    'Reflect, \'getPrototypeOf\'',
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
 });
 
@@ -124,9 +130,11 @@ test('service worker response wrappers force nosniff', () => {
 test('phase 3 script rewriting pipeline is fail-closed', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const core = fs.readFileSync('web/zp-core.js', 'utf8');
-  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
-  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+	  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+	  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+	  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+	  const index = fs.readFileSync('web/index.html', 'utf8');
+	  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
   assert.ok(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"));
   assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
   assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
@@ -136,7 +144,7 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(build.includes('wasm-bindgen'));
   assert.ok(build.includes('ZPRewriter'));
   assert.ok(build.includes('ZPRustRewriter'));
-  assert.ok(build.includes('phase3-rust-wasm-ast-2'));
+  assert.ok(build.includes('phase3-rust-wasm-ast-3-css'));
   assert.ok(build.includes('cargoBinPath'));
   assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
   assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust rewriter AST walker missing');
@@ -150,17 +158,33 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.match(rt, /Attr\.prototype/);
   assert.equal(/connect-src\s+\*/.test(core), false);
   assert.ok(core.includes("connect-src "));
-  assert.equal(/script-src \*/.test(core), false);
-  assert.equal(/script-src \*/.test(server), false);
-  assert.match(server, /connect-src 'self'/);
+	  assert.equal(/script-src \*/.test(core), false);
+	  assert.equal(/script-src \*/.test(server), false);
+	  assert.equal(core.includes("'unsafe-eval'"), false);
+	  assert.equal(server.includes("'unsafe-eval'"), false);
+	  assert.equal(core.includes("'wasm-unsafe-eval'"), false);
+	  assert.equal(index.includes("'wasm-unsafe-eval'"), false);
+	  assert.ok(core.includes("script-src 'self' 'nonce-zp'"));
+	  assert.ok(index.includes("script-src 'self' 'nonce-zp'"));
+	  assert.ok(server.includes("script-src 'self' 'nonce-zp'"));
+	  assert.ok(server.includes("script-src 'self' 'wasm-unsafe-eval'"));
+	  assert.equal(/runtimePrelude[\s\S]*rust-rewriter\.js/.test(htmltx), false);
+	  assert.equal(/injectSrcdoc[\s\S]*rust-rewriter\.js/.test(rt), false);
+	  assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
+	  assert.match(server, /connect-src 'self'/);
   assert.equal(core.includes('navigate-to'), false);
   assert.equal(server.includes('navigate-to'), false);
-  assert.ok(sw.includes('MAX_REQUEST_BODY_BYTES'));
-  assert.ok(sw.includes('pendingSubmissions'));
-  assert.ok(sw.includes('ZP_SUBMIT_PREPARE'));
-  assert.ok(sw.includes('zp_submit'));
-  assert.ok(sw.includes('REQUEST_BODY_TOO_LARGE'));
-  assert.ok(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('GetBody'));
+  assert.equal(sw.includes('MAX_REQUEST_BODY_BYTES'), false);
+  assert.equal(sw.includes('pendingSubmissions'), false);
+  assert.equal(sw.includes('ZP_SUBMIT_PREPARE'), false);
+  assert.equal(sw.includes('zp_submit'), false);
+  assert.equal(sw.includes('REQUEST_BODY_TOO_LARGE'), false);
+  assert.ok(sw.includes('runtimeFetchContext'));
+  assert.ok(sw.includes('scriptRequestContext'));
+  assert.equal(/url\.pathname === '\/zp\/api\/fetch'[\s\S]{0,240}firstTab\(\)/.test(sw), false);
+  assert.equal(sw.includes('firstTab'), false);
+  assert.equal(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('GetBody'), false);
+  assert.ok(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('getReader'));
   assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
   assert.ok(server.includes('closeBoth'));
 });

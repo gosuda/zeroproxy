@@ -53,20 +53,35 @@ test('service worker owns native request capture, CORS, and context recovery', (
     'resourceContext',
     'rememberResourceContext',
     'contextFromURL',
-    'defaultContext',
+    'scriptRequestContext',
     'ZP_BASE_UPDATE',
   ]) assert.ok(sw.includes(needle), `missing ${needle}`);
+  assert.equal(sw.includes('firstTab'), false);
+  assert.equal(sw.includes('defaultContext'), false);
   assert.match(sw, /url\.protocol === 'http:' \|\| url\.protocol === 'https:'/);
 });
 
 test('response bridge exposes a ReadableStream instead of buffering response bodies', () => {
   const bridge = read('internal/swhttp/bridge_js.go');
   const kernel = read('cmd/wasm-kernel/main.go');
+  const rt = read('web/runtime-prelude.js');
+  const sw = read('web/sw.js');
+  const worker = read('web/worker-prelude.js');
   assert.equal(/io\.ReadAll\(resp\.Body\)/.test(bridge), false);
   assert.equal(/io\.ReadAll\(resp\.Body\)/.test(kernel), false);
   assert.match(bridge, /ReadableStream/);
   assert.match(bridge, /controller\.Call\("enqueue"/);
   assert.match(kernel, /cancelReadCloser/);
+  assert.match(rt, /ZP_UPLOAD_STREAM_OPEN/);
+  assert.match(rt, /openUploadStream/);
+  assert.match(sw, /readableStreamFromUpload/);
+  assert.match(sw, /pullUploadChunk/);
+  assert.match(sw, /X-ZP-Upload-Stream-Id/);
+  assert.match(worker, /ZP_UPLOAD_STREAM_OPEN/);
+  assert.match(worker, /X-ZP-Upload-Stream-Id/);
+  assert.match(rt, /BroadcastChannel/);
+  assert.match(worker, /BroadcastChannel/);
+  assert.match(worker, /openRelayedUploadStream/);
 });
 
 test('websocket runtime path remains isolated through the service worker stream pipe', () => {
