@@ -14,7 +14,7 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{"/zp/assets/zp-core.js", "/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, `data-zp-blocked-rel="preconnect"`, `ZeroProxy blocked object`} {
+	for _, want := range []string{"/zp/assets/zp-core.js", "/zp/assets/rust-rewriter.js", "/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, `data-zp-blocked-rel="preconnect"`, `ZeroProxy blocked object`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
@@ -23,6 +23,18 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden %q remained in %s", forbidden, s)
 		}
+	}
+}
+
+func TestTransformBootConfigIncludesResponseReferrerPolicy(t *testing.T) {
+	target, _ := url.Parse("https://example.com/")
+	out, err := Transform(strings.NewReader(`<body>ok</body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, ReferrerPolicy: "no-referrer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, `"referrerPolicy":"no-referrer"`) {
+		t.Fatalf("boot referrer policy missing in %s", s)
 	}
 }
 

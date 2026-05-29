@@ -248,6 +248,18 @@
     const headers = new Headers(req.headers);
     headers.set('X-ZP-Tab-Id', tabId);
     headers.set('X-ZP-Runtime-Token', runtimeToken);
+    headers.set('X-ZP-Document-URL', self.__ZP_WORKER_TARGET || base.href);
+    headers.set('X-ZP-Fetch-Credentials', req.credentials || 'same-origin');
+    headers.set('X-ZP-Fetch-Mode', req.mode || 'cors');
+    headers.set('X-ZP-Fetch-Cache', req.cache || 'default');
+    headers.set('X-ZP-Fetch-Redirect', req.redirect || 'follow');
+    headers.set('X-ZP-Fetch-Referrer', req.referrer || self.__ZP_WORKER_TARGET || 'about:client');
+    headers.set('X-ZP-Fetch-Referrer-Policy', req.referrerPolicy || '');
+    headers.set('X-ZP-Fetch-Integrity', req.integrity || '');
+    headers.set('X-ZP-Fetch-Keepalive', req.keepalive ? '1' : '0');
+    if ('priority' in req) {
+      try { headers.set('X-ZP-Fetch-Priority', String(req.priority || '')); } catch {}
+    }
     const apiInit = { method: req.method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'follow' };
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       const streamId = await openUploadStream(req.body).catch(() => '');

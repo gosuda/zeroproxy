@@ -365,7 +365,15 @@ impl<'a> Rewriter<'a> {
                 for stmt in &block.body { self.walk_statement(stmt); }
                 self.pop_scope();
             }
-            Statement::ExpressionStatement(expr) => self.walk_expression(&expr.expression),
+            Statement::ExpressionStatement(expr) => {
+                if let Expression::AssignmentExpression(assign) = &expr.expression {
+                    if self.assignment_target(&assign.left).is_some() {
+                        self.add_replacement(stmt.span(), format!("{};", self.render_assignment_expression(assign)), 100);
+                        return;
+                    }
+                }
+                self.walk_expression(&expr.expression)
+            },
             Statement::IfStatement(stmt) => {
                 self.walk_expression(&stmt.test);
                 self.walk_statement(&stmt.consequent);

@@ -34,7 +34,7 @@ type Conn struct {
 	mu sync.Mutex
 }
 
-func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState) (*Conn, *http.Response, error) {
+func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState, origin string) (*Conn, *http.Response, error) {
 	if target.Scheme != "ws" && target.Scheme != "wss" {
 		return nil, nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
 	}
@@ -60,6 +60,9 @@ func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	req.Header.Set("Sec-WebSocket-Key", key)
 	req.Header.Set("User-Agent", zphttp.TargetUserAgent)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
 	if len(protocols) > 0 {
 		req.Header.Set("Sec-WebSocket-Protocol", strings.Join(protocols, ", "))
 	}

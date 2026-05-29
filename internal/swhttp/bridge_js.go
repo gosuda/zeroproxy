@@ -3,6 +3,7 @@
 package swhttp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,6 +14,37 @@ import (
 
 	"github.com/gosuda/zeroproxy/internal/headers"
 )
+
+func ContextWithAbortSignal(parent context.Context, v js.Value) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	signal := v.Get("signal")
+	if !signal.Truthy() || signal.Get("addEventListener").Type() != js.TypeFunction {
+		return ctx, cancel
+	}
+	var once sync.Once
+	var listener js.Func
+	cleanup := func() {
+		once.Do(func() {
+			if listener.Truthy() && signal.Get("removeEventListener").Type() == js.TypeFunction {
+				signal.Call("removeEventListener", "abort", listener)
+			}
+			if listener.Truthy() {
+				listener.Release()
+			}
+			cancel()
+		})
+	}
+	listener = js.FuncOf(func(this js.Value, args []js.Value) any {
+		cleanup()
+		return nil
+	})
+	if signal.Get("aborted").Bool() {
+		cleanup()
+		return ctx, cleanup
+	}
+	signal.Call("addEventListener", "abort", listener, map[string]any{"once": true})
+	return ctx, cleanup
+}
 
 func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 	rawURL := v.Get("url").String()
@@ -40,6 +72,20 @@ func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 		if stream.Truthy() && stream.Get("getReader").Type() == js.TypeFunction {
 			body = newJSReadableStreamReadCloser(ctx, stream.Call("getReader"))
 			contentLength = -1
+			if h.Get("X-ZP-Upload-Replayable") == "1" {
+				buf, err := io.ReadAll(io.LimitReader(body, 1024*1024+1))
+				_ = body.Close()
+				if err != nil {
+					return nil, err
+				}
+				if len(buf) > 1024*1024 {
+					return nil, fmt.Errorf("request body exceeds replay buffer")
+				}
+				body = io.NopCloser(bytes.NewReader(buf))
+				contentLength = int64(len(buf))
+				getBody := func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
+				return &http.Request{Method: method, URL: u, Header: h, Body: body, GetBody: getBody, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
+			}
 		}
 	}
 	return &http.Request{Method: method, URL: u, Header: h, Body: body, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil

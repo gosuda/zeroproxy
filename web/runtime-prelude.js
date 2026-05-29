@@ -27,6 +27,8 @@
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');
+  let documentReferrerPolicy = normalizeReferrerPolicy(boot.referrerPolicy || '');
+  const dynamicCompileAllowed = boot.dynamicCompileAllowed === true;
   const documentCookieRecords = [];
   initDocumentCookieRecords(documentCookie);
   const urlMeta = new WeakMap();
@@ -142,6 +144,8 @@
       windowRemoveEventListener: w.removeEventListener && w.removeEventListener.bind(w),
       objectGetPrototypeOf: Object.getPrototypeOf,
       reflectGetPrototypeOf: w.Reflect && w.Reflect.getPrototypeOf,
+      reflectApply: w.Reflect && w.Reflect.apply,
+      weakMapGet: w.WeakMap && w.WeakMap.prototype && w.WeakMap.prototype.get,
       indexedDB: w.indexedDB,
       localStorage: (() => { try { return w.localStorage; } catch { return null; } })(),
     };
@@ -668,6 +672,7 @@
   installGetterMasking(root);
   installStorageFacades(root);
   installWorkerUploadRelay();
+  installOwnPropertyMasking(root);
   installDOMHooks(root);
   installStealthMembrane(root);
   installPerformanceMasking(root);
@@ -677,6 +682,7 @@
   installBlockers(root);
   installCanvasAntiFingerprinting(root);
   installAudioAntiFingerprinting(root);
+  removeBootstrapArtifacts();
 
 
   function installPhase2Membrane() {
@@ -699,6 +705,7 @@
       return out;
     }
 	    function unsupportedDynamicCompile(params, body, kind) {
+	      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
 	      throw normalizedError('NotSupportedError');
 	    }
     function simpleDynamicValue(expr) {
@@ -733,7 +740,14 @@
       return simpleDynamicValue(source);
     }
     function compileTimerString(source) {
-      return function anonymous() { return evalSimpleDynamic(source); };
+      const text = String(source || '');
+      let compiled = null;
+      return function anonymous() {
+        const simple = evalSimpleDynamic(text);
+        if (simple !== undefined) return simple;
+        if (!compiled) compiled = compileEvalSource(text);
+        return compiled.call(root, scope);
+      };
     }
     function scopedCallArgs(args) {
       const argv = new Array(args.length + 1);
@@ -750,19 +764,31 @@
       const body = parts.length ? parts[parts.length - 1] : '';
       const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
       for (let i = 0; i < params.length; i++) params[i] = parts[i];
+      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
       const simple = compileSimpleDynamic(params, body, kind);
       if (simple) return simple;
-	      return unsupportedDynamicCompile(params, body, kind);
+      const rewritten = rewriteDynamicFunctionBody(params, body);
+      const fn = Reflect.construct(ctor, params.concat(rewritten));
+      toStringMap.set(fn, dynamicSource(kind, params, body));
+      return fn;
     }
     function isEvalExpressionCandidate(text) {
       return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
     function dynamicEval(source) {
       if (arguments.length === 0) return undefined;
+      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
       const text = String(source);
       const simple = evalSimpleDynamic(text);
       if (simple !== undefined) return simple;
-	      return unsupportedDynamicCompile([], text, 'eval');
+      return compileEvalSource(text).call(root, scope);
+    }
+    function compileEvalSource(text) {
+      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
+      let source = String(text || '');
+      if (isEvalExpressionCandidate(source)) source = 'return (' + source + ');';
+      const rewritten = rewriteWithPageRewriter(source, 'classic');
+      return Native.FunctionCtor('scope', rewritten);
     }
     const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
     const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
@@ -801,7 +827,14 @@
       return null;
     }
     const virtualPrototypeCache = new WeakMap();
-    function unwrapRaw(value) { return membraneRawTargets.get(value) || value; }
+    function unwrapRaw(value) {
+      try {
+        const raw = Native.reflectApply && Native.weakMapGet ? Native.reflectApply(Native.weakMapGet, membraneRawTargets, [value]) : membraneRawTargets.get(value);
+        return raw || value;
+      } catch {
+        return value;
+      }
+    }
     function virtualPrototypeFor(proto) {
       if (!proto || (typeof proto !== 'object' && typeof proto !== 'function')) return proto;
       if (virtualPrototypeCache.has(proto)) return virtualPrototypeCache.get(proto);
@@ -816,6 +849,7 @@
       if (value == null) return false;
       const t = typeof value;
       if (t !== 'object' && t !== 'function') return true;
+      if (typeof proto === 'function') return false;
       const ctor = proto && proto.constructor;
       return ctor === Native.FunctionCtor || ctor === NativeAsyncFunction || ctor === NativeGeneratorFunction || ctor === NativeAsyncGeneratorFunction || dynamicWrapperFor(ctor);
     }
@@ -972,7 +1006,7 @@
       const rawBase = unwrapRaw(base === scope ? root : base);
       const fn = get(base, prop);
       const callArgs = Array.isArray(args) ? args.map(unwrapRaw) : [];
-      return Reflect.apply(fn, rawBase, callArgs);
+      return Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs) : Reflect.apply(fn, rawBase, callArgs);
     }
     function construct(ctor, args) {
       const dynamic = dynamicWrapperFor(ctor);
@@ -1031,14 +1065,99 @@
     if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + parsed.search + parsed.hash, baseURL).href;
     return ZP.canonicalTargetURL(parsed.href, baseURL).href;
   }
+  function replayableBodySize(body) {
+    if (body == null) return 0;
+    if (typeof body === 'string') return new TextEncoder().encode(body).byteLength;
+    if (body instanceof ArrayBuffer) return body.byteLength;
+    if (ArrayBuffer.isView(body)) return body.byteLength;
+    if (Native.Blob && body instanceof Native.Blob) return body.size;
+    if (body instanceof URLSearchParams) return new TextEncoder().encode(String(body)).byteLength;
+    return null;
+  }
+  function replayableRequestBody(input, init) {
+    if (!init || !Object.prototype.hasOwnProperty.call(init, 'body')) return false;
+    const size = replayableBodySize(init.body);
+    return size != null && size <= 1024 * 1024;
+  }
+  function filteredResponseHeaders(resp) {
+    const headers = new Native.Headers();
+    try {
+      resp.headers.forEach((value, key) => {
+        if (!String(key).toLowerCase().startsWith('x-zp-response-')) headers.append(key, value);
+      });
+    } catch {}
+    return headers;
+  }
+  function sameOriginURL(a, b) {
+    try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
+  }
+  function opaqueResponseFacade(resp) {
+    if (!resp || !Native.Headers) return resp;
+    const emptyHeaders = new Native.Headers();
+    const cloneOpaque = () => opaqueResponseFacade(resp.clone());
+    return new Proxy(resp, {
+      get(target, prop, receiver) {
+        if (prop === 'type') return 'opaque';
+        if (prop === 'url') return '';
+        if (prop === 'redirected') return false;
+        if (prop === 'status') return 0;
+        if (prop === 'statusText') return '';
+        if (prop === 'ok') return false;
+        if (prop === 'headers') return emptyHeaders;
+        if (prop === 'body') return null;
+        if (prop === 'bodyUsed') return false;
+        if (prop === 'clone') return cloneOpaque;
+        if (prop === 'text') return () => Promise.resolve('');
+        if (prop === 'arrayBuffer') return () => Promise.resolve(new ArrayBuffer(0));
+        if (prop === 'blob') return () => Promise.resolve(new Blob([]));
+        if (prop === 'json') return () => Promise.reject(new SyntaxError('Unexpected end of JSON input'));
+        if (prop === 'formData') return () => Promise.reject(normalizedError('TypeError'));
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+  }
+  function responseFacade(resp, fallbackURL) {
+    if (!resp || !resp.headers || !Native.Headers) return resp;
+    const visibleURL = resp.headers.get('X-ZP-Response-URL') || fallbackURL || resp.url;
+    const visibleRedirected = resp.headers.get('X-ZP-Response-Redirected') === '1';
+    let visibleHeaders = null;
+    const cloneFacade = () => responseFacade(resp.clone(), visibleURL);
+    return new Proxy(resp, {
+      get(target, prop, receiver) {
+        if (prop === 'url') return visibleURL;
+        if (prop === 'redirected') return visibleRedirected;
+        if (prop === 'headers') return visibleHeaders || (visibleHeaders = filteredResponseHeaders(target));
+        if (prop === 'clone') return cloneFacade;
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+  }
   async function fetchThroughRuntime(input, init = {}) {
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
     const target = requestTargetURL(input);
     const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
     const apiHeaders = new Native.Headers(req.headers);
+    apiHeaders.delete('X-ZP-Upload-Replayable');
     apiHeaders.set('X-ZP-Tab-Id', boot.tabId);
     apiHeaders.set('X-ZP-Entry-Id', activeEntryId);
     apiHeaders.set('X-ZP-Runtime-Token', runtimeToken);
+    apiHeaders.set('X-ZP-Document-URL', virtualURL.href);
+    const requestId = ZP.randomId('req');
+    apiHeaders.set('X-ZP-Request-Id', requestId);
+    apiHeaders.set('X-ZP-Fetch-Credentials', req.credentials || 'same-origin');
+    apiHeaders.set('X-ZP-Fetch-Mode', req.mode || 'cors');
+    apiHeaders.set('X-ZP-Fetch-Cache', req.cache || 'default');
+    apiHeaders.set('X-ZP-Fetch-Redirect', req.redirect || 'follow');
+    apiHeaders.set('X-ZP-Fetch-Referrer', req.referrer || 'about:client');
+    apiHeaders.set('X-ZP-Fetch-Referrer-Policy', req.referrerPolicy || documentReferrerPolicy || '');
+    apiHeaders.set('X-ZP-Fetch-Integrity', req.integrity || '');
+    apiHeaders.set('X-ZP-Fetch-Keepalive', req.keepalive ? '1' : '0');
+    if ('priority' in req) {
+      try { apiHeaders.set('X-ZP-Fetch-Priority', String(req.priority || '')); } catch {}
+    }
+    if (replayableRequestBody(input, init)) apiHeaders.set('X-ZP-Upload-Replayable', '1');
     const apiInit = {
       method: req.method,
       headers: apiHeaders,
@@ -1046,8 +1165,21 @@
       cache: 'no-store',
       redirect: 'follow'
     };
+    let abortListener = null;
+    let abortPromise = null;
+    if (req.signal) {
+      abortPromise = new Promise((_, reject) => {
+        abortListener = () => {
+          postMessageToSW({ type: 'ZP_FETCH_ABORT', tabId: boot.tabId, entryId: activeEntryId, requestId }).catch(()=>{});
+          reject(normalizedError('AbortError'));
+        };
+      });
+      if (req.signal.aborted) abortListener();
+      else req.signal.addEventListener('abort', abortListener, { once: true });
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      const streamId = await openUploadStream(req.body, req.signal);
+      const opened = openUploadStream(req.body, req.signal);
+      const streamId = abortPromise ? await Promise.race([opened, abortPromise]) : await opened;
       if (streamId) apiHeaders.set('X-ZP-Upload-Stream-Id', streamId);
       else {
         apiInit.body = req.body;
@@ -1055,11 +1187,29 @@
       }
     }
     if (req.signal) apiInit.signal = req.signal;
-    return Native.fetch(ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target), apiInit);
+    try {
+      const fetchPromise = Native.fetch(ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target), apiInit);
+      const resp = abortPromise ? await Promise.race([fetchPromise, abortPromise]) : await fetchPromise;
+      if ((req.redirect || 'follow') === 'error' && resp.status === 403) {
+        const text = await resp.clone().text().catch(() => '');
+        if (/ZeroProxy\s+POLICY_BLOCKED|POLICY_BLOCKED/.test(text)) throw normalizedError('TypeError');
+      }
+      if ((req.mode || 'cors') === 'no-cors' && !sameOriginURL(virtualURL.href, target)) return opaqueResponseFacade(resp);
+      return responseFacade(resp, target);
+    } finally {
+      if (abortListener && req.signal) {
+        try { req.signal.removeEventListener('abort', abortListener); } catch {}
+      }
+    }
   }
   function fireEvent(target, type) {
     let ev;
     try { ev = new Event(type); } catch { ev = { type }; }
+    return target.dispatchEvent(ev);
+  }
+  function fireProgress(target, type, loaded = 0, total = 0, lengthComputable = false) {
+    let ev;
+    try { ev = new ProgressEvent(type, { loaded, total, lengthComputable }); } catch { ev = { type, loaded, total, lengthComputable }; }
     return target.dispatchEvent(ev);
   }
   function installHTTPAPIs() {
@@ -1069,17 +1219,20 @@
       function ZPXMLHttpRequest() {
         this.readyState = UNSENT;
         this.response = this.responseText = '';
-        this.responseType = '';
+        this.responseXML = null;
+        this._responseType = '';
         this.responseURL = '';
         this.status = 0;
         this.statusText = '';
-        this.timeout = 0;
-        this.withCredentials = false;
+        this._timeout = 0;
+        this._withCredentials = false;
         this.upload = {};
+        installEventMethods(this.upload);
         this._headers = [];
         this._responseHeaders = null;
         this._method = 'GET';
         this._url = '';
+        this._async = true;
         this._sent = false;
         this._controller = null;
         this._timer = 0;
@@ -1100,8 +1253,8 @@
         constructor: ZPXMLHttpRequest,
         UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
         open(method, url, async = true, user, password) {
-          if (async === false) throw normalizedError('NotSupportedError');
           this.abort();
+          this._async = async !== false;
           this._method = String(method || 'GET').toUpperCase();
           const target = new URL(requestTargetURL(url));
           if (user != null) target.username = String(user);
@@ -1113,6 +1266,7 @@
           this.status = 0;
           this.statusText = '';
           this.response = this.responseText = '';
+          this.responseXML = null;
           xhrReady(this, OPENED);
         },
         setRequestHeader(name, value) {
@@ -1121,11 +1275,20 @@
         },
         send(body = null) {
           if (this.readyState !== OPENED || this._sent) throw normalizedError('InvalidStateError');
+          if (!this._async) return sendSyncXHR(this, body);
           this._sent = true;
           this._controller = new AbortController();
-          const init = { method: this._method, headers: this._headers, credentials: this.withCredentials ? 'include' : 'same-origin', signal: this._controller.signal };
+          const init = { method: this._method, headers: this._headers, credentials: this._withCredentials ? 'include' : 'same-origin', signal: this._controller.signal };
           if (body != null && this._method !== 'GET' && this._method !== 'HEAD') init.body = body;
-          if (this.timeout > 0) this._timer = setTimeout(() => { try { this._controller.abort(); } catch {} this._sent = false; xhrDone(this, 'timeout'); }, this.timeout);
+          fireEvent(this, 'loadstart');
+          if (body != null && this.upload && this.upload.dispatchEvent) {
+            const total = uploadBodySize(body);
+            fireProgress(this.upload, 'loadstart', 0, total || 0, total != null);
+            fireProgress(this.upload, 'progress', total || 0, total || 0, total != null);
+            fireProgress(this.upload, 'load', total || 0, total || 0, total != null);
+            fireProgress(this.upload, 'loadend', total || 0, total || 0, total != null);
+          }
+          if (this._timeout > 0) this._timer = setTimeout(() => { try { this._controller.abort(); } catch {} this._sent = false; xhrDone(this, 'timeout'); }, this._timeout);
           fetchThroughRuntime(this._url, init).then(async resp => {
             if (!this._sent) return;
             this.status = resp.status;
@@ -1133,10 +1296,29 @@
             this._responseHeaders = resp.headers;
             xhrReady(this, HEADERS_RECEIVED);
             xhrReady(this, LOADING);
-            if (this.responseType === 'arraybuffer') this.response = await resp.arrayBuffer();
-            else if (this.responseType === 'blob') this.response = await resp.blob();
-            else if (this.responseType === 'json') { const text = await resp.text(); try { this.response = text ? JSON.parse(text) : null; } catch { this.response = null; } }
-            else { this.responseText = await resp.text(); this.response = this.responseText; }
+            if (this._responseType === 'arraybuffer') this.response = await resp.arrayBuffer();
+            else if (this._responseType === 'blob') this.response = await resp.blob();
+            else if (this._responseType === 'json') { const text = await resp.text(); try { this.response = text ? JSON.parse(text) : null; } catch { this.response = null; } }
+            else if (resp.body && resp.body.getReader) {
+              const reader = resp.body.getReader();
+              const decoder = new TextDecoder();
+              const total = Number(resp.headers.get('Content-Length') || 0);
+              let loaded = 0;
+              for (;;) {
+                const part = await reader.read();
+                if (part.done) break;
+                loaded += part.value && part.value.byteLength || 0;
+                this.responseText += decoder.decode(part.value, { stream: true });
+                this.response = this.responseText;
+                xhrReady(this, LOADING);
+                fireProgress(this, 'progress', loaded, total, total > 0);
+              }
+              this.responseText += decoder.decode();
+              this.response = this.responseText;
+              this.responseXML = parseXHRResponseXML(this, this.responseText);
+              if (this._responseType === 'document') this.response = this.responseXML;
+            }
+            else { this.responseText = await resp.text(); this.response = this.responseText; this.responseXML = parseXHRResponseXML(this, this.responseText); if (this._responseType === 'document') this.response = this.responseXML; fireProgress(this, 'progress', this.responseText.length, this.responseText.length, true); }
             this._sent = false;
             xhrDone(this, 'load');
           }).catch(() => {
@@ -1159,6 +1341,104 @@
         getResponseHeader(name) { return this._responseHeaders ? this._responseHeaders.get(String(name)) : null; },
         getAllResponseHeaders() { if (!this._responseHeaders) return ''; let out = ''; this._responseHeaders.forEach((v, k) => { out += k + ': ' + v + '\r\n'; }); return out; },
         overrideMimeType() {}
+      });
+      function syncXHRBody(body) {
+        if (body == null) return null;
+        if (typeof body === 'string' || body instanceof Native.Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body) || body instanceof FormData || body instanceof URLSearchParams) return body;
+        return String(body);
+      }
+      function uploadBodySize(body) {
+        if (body == null) return 0;
+        if (typeof body === 'string') return new TextEncoder().encode(body).byteLength;
+        if (body instanceof ArrayBuffer) return body.byteLength;
+        if (ArrayBuffer.isView(body)) return body.byteLength;
+        if (Native.Blob && body instanceof Native.Blob) return body.size;
+        if (body instanceof URLSearchParams) return new TextEncoder().encode(String(body)).byteLength;
+        return null;
+      }
+      function syncHeadersFromXHR(nativeXHR) {
+        const h = new Native.Headers();
+        const raw = nativeXHR.getAllResponseHeaders && nativeXHR.getAllResponseHeaders() || '';
+        String(raw).split(/\r?\n/).forEach(line => {
+          const idx = line.indexOf(':');
+          if (idx > 0) h.append(line.slice(0, idx).trim(), line.slice(idx + 1).trim());
+        });
+        return h;
+      }
+      function parseXHRResponseXML(xhr, text) {
+        const parser = root.DOMParser;
+        if (!parser || typeof parser !== 'function') return null;
+        const contentType = xhr._responseHeaders && xhr._responseHeaders.get('content-type') || '';
+        const wantsDocument = xhr._responseType === 'document';
+        const xmlish = /\b(?:application|text)\/(?:[\w.+-]+\+)?xml\b/i.test(contentType) || /\+xml\b/i.test(contentType);
+        const htmlish = /\btext\/html\b/i.test(contentType);
+        if (!wantsDocument && !xmlish) return null;
+        try {
+          return new parser().parseFromString(String(text || ''), htmlish ? 'text/html' : 'application/xml');
+        } catch {
+          return null;
+        }
+      }
+      function setXHRResponseType(xhr, value) {
+        const s = String(value || '');
+        const normalized = s === 'arraybuffer' || s === 'blob' || s === 'document' || s === 'json' || s === 'text' ? s : '';
+        if (xhr.readyState === LOADING || xhr.readyState === DONE) throw normalizedError('InvalidStateError');
+        if (!xhr._async && normalized && normalized !== 'text') throw normalizedError('InvalidAccessError');
+        xhr._responseType = normalized;
+      }
+      function setXHRTimeout(xhr, value) {
+        const n = Math.max(0, Number(value) || 0);
+        if (!xhr._async && n !== 0) throw normalizedError('InvalidAccessError');
+        xhr._timeout = n;
+      }
+      function setXHRWithCredentials(xhr, value) {
+        if (xhr.readyState !== UNSENT && xhr.readyState !== OPENED || xhr._sent) throw normalizedError('InvalidStateError');
+        xhr._withCredentials = !!value;
+      }
+      function sendSyncXHR(xhr, body) {
+        if (xhr._timeout) throw normalizedError('InvalidAccessError');
+        if (xhr._responseType && xhr._responseType !== 'text') throw normalizedError('InvalidAccessError');
+        xhr._sent = true;
+        fireEvent(xhr, 'loadstart');
+        const nativeXHR = new Native.XMLHttpRequest();
+        nativeXHR.open(xhr._method, ZP.apiPath('fetch') + '?url=' + encodeURIComponent(xhr._url), false);
+        nativeXHR.setRequestHeader('X-ZP-Tab-Id', boot.tabId);
+        nativeXHR.setRequestHeader('X-ZP-Entry-Id', activeEntryId);
+        nativeXHR.setRequestHeader('X-ZP-Runtime-Token', runtimeToken);
+        nativeXHR.setRequestHeader('X-ZP-Document-URL', virtualURL.href);
+        nativeXHR.setRequestHeader('X-ZP-Fetch-Credentials', xhr._withCredentials ? 'include' : 'same-origin');
+        nativeXHR.setRequestHeader('X-ZP-Fetch-Mode', 'cors');
+        nativeXHR.setRequestHeader('X-ZP-Fetch-Redirect', 'follow');
+        nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer', virtualURL.href);
+        nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer-Policy', '');
+        if (replayableBodySize(body) != null && replayableBodySize(body) <= 1024 * 1024) nativeXHR.setRequestHeader('X-ZP-Upload-Replayable', '1');
+        for (const [name, value] of xhr._headers) nativeXHR.setRequestHeader(name, value);
+        try {
+          nativeXHR.send(xhr._method === 'GET' || xhr._method === 'HEAD' ? null : syncXHRBody(body));
+          if (nativeXHR.status === 403 && /ZeroProxy POLICY_BLOCKED/.test(nativeXHR.responseText || '')) throw normalizedError('NetworkError');
+          xhr.status = nativeXHR.status;
+          xhr.statusText = nativeXHR.statusText;
+          xhr.responseURL = xhr._url;
+          xhr._responseHeaders = syncHeadersFromXHR(nativeXHR);
+          xhrReady(xhr, HEADERS_RECEIVED);
+          xhrReady(xhr, LOADING);
+          xhr.responseText = nativeXHR.responseText || '';
+          xhr.response = xhr.responseText;
+          xhr.responseXML = parseXHRResponseXML(xhr, xhr.responseText);
+          if (xhr._responseType === 'document') xhr.response = xhr.responseXML;
+          xhr._sent = false;
+          xhrDone(xhr, 'load');
+        } catch {
+          xhr.status = 0;
+          xhr.statusText = '';
+          xhr._sent = false;
+          xhrDone(xhr, 'error');
+        }
+      }
+      Object.defineProperties(ZPXMLHttpRequest.prototype, {
+        responseType: { configurable: true, enumerable: true, get() { return this._responseType || ''; }, set(value) { setXHRResponseType(this, value); } },
+        timeout: { configurable: true, enumerable: true, get() { return this._timeout || 0; }, set(value) { setXHRTimeout(this, value); } },
+        withCredentials: { configurable: true, enumerable: true, get() { return !!this._withCredentials; }, set(value) { setXHRWithCredentials(this, value); } }
       });
       maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
       define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
@@ -1288,7 +1568,7 @@
       this._port = null;
       this._closed = false;
       const plist = protocolList(protocols);
-      postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId }).then(reply => {
+      postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId, documentUrl: virtualURL.href }).then(reply => {
         if (this._closed) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
         this.protocol = String(reply.protocol || '');
         this._port = reply.port;
@@ -1583,7 +1863,7 @@
     documentCookieRecords.splice(0, documentCookieRecords.length);
     for (const part of String(cookieString || '').split(/;\s*/)) {
       const eq = part.indexOf('=');
-      if (eq > 0) documentCookieRecords.push({ name: part.slice(0, eq), value: part.slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: '/', secure: virtualURL.protocol === 'https:', expires: Infinity });
+      if (eq > 0) documentCookieRecords.push({ name: part.slice(0, eq), value: part.slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: '/', secure: virtualURL.protocol === 'https:', sameSite: 'Unspecified', expires: Infinity });
     }
     documentCookie = documentCookieString();
   }
@@ -1607,6 +1887,7 @@
         hostOnly: raw.hostOnly !== false,
         path: String(raw.path || '/').startsWith('/') ? String(raw.path || '/') : '/',
         secure: !!raw.secure,
+        sameSite: normalizeSameSite(raw.sameSite),
         expires: typeof raw.expiresMs === 'number' ? raw.expiresMs : Infinity
       };
       if (rec.expires <= now) continue;
@@ -1619,7 +1900,7 @@
     if (!parts.length) return;
     const eq = parts[0].indexOf('=');
     if (eq <= 0) return;
-    const rec = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: defaultCookiePath(), secure: false, expires: Infinity };
+    const rec = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: defaultCookiePath(), secure: false, sameSite: 'Unspecified', expires: Infinity };
     for (let i = 1; i < parts.length; i++) {
       const [rawK, ...rest] = parts[i].split('=');
       const k = rawK.toLowerCase();
@@ -1627,9 +1908,11 @@
       if (k === 'domain' && v) { const d = v.replace(/^\./, '').toLowerCase(); if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; } }
       else if (k === 'path' && v && v[0] === '/') rec.path = v;
       else if (k === 'secure') rec.secure = true;
+      else if (k === 'samesite') rec.sameSite = normalizeSameSite(v);
       else if (k === 'max-age') rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000;
       else if (k === 'expires') { const ts = Date.parse(v); if (!Number.isNaN(ts)) rec.expires = ts; }
     }
+    if (rec.sameSite === 'None' && !rec.secure) return;
     const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
     if (rec.expires <= Date.now()) { if (idx >= 0) documentCookieRecords.splice(idx, 1); }
     else if (idx >= 0) documentCookieRecords[idx] = rec;
@@ -1641,6 +1924,13 @@
     const host = virtualURL.hostname.toLowerCase();
     const path = virtualURL.pathname || '/';
     return documentCookieRecords.filter(r => r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith('.' + r.domain)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')))).sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
+  }
+  function normalizeSameSite(value) {
+    const v = String(value || '').toLowerCase();
+    if (v === 'lax') return 'Lax';
+    if (v === 'strict') return 'Strict';
+    if (v === 'none') return 'None';
+    return 'Unspecified';
   }
   function defaultCookiePath() { const p = virtualURL.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
   function installCookieSync() {
@@ -1955,17 +2245,46 @@
       }
     }
   }
+  function restoreVisibleScriptState(node) {
+    if (!node || node.nodeType !== 1 || node.localName !== 'script') return;
+    const target = Native.getAttribute.call(node, 'data-zp-target-url') || '';
+    if (target) Native.setAttribute.call(node, 'src', target);
+  }
+  function scriptTextExposesInternals(node) {
+    if (!node || node.localName !== 'script') return false;
+    let text = '';
+    try { text = node.textContent || ''; } catch { return false; }
+    return /__zp_|__ZP_|ZPRewriter|ZPRustRewriter|runtimeToken|data-zp-|\/zp\/assets\/|\/zp\/api\/script|zeroproxy/i.test(text);
+  }
+  function sanitizeSerializedNode(node) {
+    restoreVisibleLinkState(node);
+    restoreVisibleResourceState(node);
+    restoreVisibleScriptState(node);
+    if (isZPAssetNode(node)) { node.remove(); return false; }
+    if (scriptTextExposesInternals(node)) node.textContent = '';
+    if (Native.getAttributeNames) for (const name of Native.getAttributeNames.call(node)) if (isZPAttrName(name)) Native.removeAttribute.call(node, name);
+    return true;
+  }
   function sanitizeSerializedHTML(html) {
+    const source = String(html || '');
+    if (/^\s*<html[\s>]/i.test(source) && root.DOMParser && Native.DOMParserParseFromString) {
+      try {
+        const parsed = Native.DOMParserParseFromString.call(new root.DOMParser(), source, 'text/html');
+        const docEl = parsed && parsed.documentElement;
+        if (docEl) {
+          const descendants = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(docEl, '*')) : Array.from(docEl.querySelectorAll('*'));
+          for (const node of [docEl, ...descendants]) sanitizeSerializedNode(node);
+          return Native.elementOuterHTML && Native.elementOuterHTML.get ? Native.elementOuterHTML.get.call(docEl) : docEl.outerHTML;
+        }
+      } catch {}
+    }
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
     const container = parserDoc.createElement('div');
-    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, String(html || ''));
-    else container.innerHTML = String(html || '');
-    const nodes = Array.from(container.querySelectorAll('*'));
+    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, source);
+    else container.innerHTML = source;
+    const nodes = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(container, '*')) : Array.from(container.querySelectorAll('*'));
     for (const node of nodes) {
-      restoreVisibleLinkState(node);
-      restoreVisibleResourceState(node);
-      if (isZPAssetNode(node)) { node.remove(); continue; }
-      if (Native.getAttributeNames) for (const name of Native.getAttributeNames.call(node)) if (isZPAttrName(name)) Native.removeAttribute.call(node, name);
+      sanitizeSerializedNode(node);
     }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }
@@ -1983,7 +2302,7 @@
     if (!raw) return false;
     try {
       const u = new URL(String(raw), proxyOrigin);
-      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js') || u.pathname === ZP.assetPath('wasm_exec.js'));
+      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js') || u.pathname === ZP.assetPath('wasm_exec.js') || u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script'));
     } catch { return false; }
   }
   function isZPAssetNode(node) {
@@ -2033,16 +2352,25 @@
     });
   }
   function sanitizeSerializedHTML(html) {
+    const source = String(html || '');
+    if (/^\s*<html[\s>]/i.test(source) && root.DOMParser && Native.DOMParserParseFromString) {
+      try {
+        const parsed = Native.DOMParserParseFromString.call(new root.DOMParser(), source, 'text/html');
+        const docEl = parsed && parsed.documentElement;
+        if (docEl) {
+          const descendants = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(docEl, '*')) : Array.from(docEl.querySelectorAll('*'));
+          for (const node of [docEl, ...descendants]) sanitizeSerializedNode(node);
+          return Native.elementOuterHTML && Native.elementOuterHTML.get ? Native.elementOuterHTML.get.call(docEl) : docEl.outerHTML;
+        }
+      } catch {}
+    }
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
     const container = parserDoc.createElement('div');
-    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, String(html || ''));
-    else container.innerHTML = String(html || '');
-    const nodes = Array.from(container.querySelectorAll('*'));
+    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, source);
+    else container.innerHTML = source;
+    const nodes = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(container, '*')) : Array.from(container.querySelectorAll('*'));
     for (const node of nodes) {
-      restoreVisibleLinkState(node);
-      restoreVisibleResourceState(node);
-      if (isZPAssetNode(node)) { node.remove(); continue; }
-      if (Native.getAttributeNames) for (const name of Native.getAttributeNames.call(node)) if (isZPAttrName(name)) Native.removeAttribute.call(node, name);
+      sanitizeSerializedNode(node);
     }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }
@@ -2085,7 +2413,7 @@
   }
   function selectorTargetsZP(selector) {
     const s = String(selector || '').toLowerCase();
-    return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('x-zeroproxy-icon');
+    return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('/zp/api/') || s.includes('src*="zp"') || s.includes("src*='zp'") || s.includes('src*=zp') || s.includes('zeroproxy') || s.includes('x-zeroproxy-icon');
   }
   function filterSelectorOne(node) { return isZPAssetNode(node) ? null : node; }
   function filteredTraversal(raw) {
@@ -2099,6 +2427,63 @@
         const value = target[prop];
         return typeof value === 'function' ? value.bind(target) : value;
       }
+    });
+  }
+
+  function hiddenGlobalKey(key) {
+    if (typeof key === 'symbol') {
+      const desc = String(key.description || '');
+      return desc.toLowerCase().includes('zeroproxy') || desc.toLowerCase().startsWith('zp.');
+    }
+    const name = String(key || '');
+    return name === 'ZP' || name === 'ZPRewriter' || name === 'ZPRustRewriter' || name === '__ZP_BOOT' || name === '__ZP_SET_BASE' || name.startsWith('__zp_') || name.startsWith('__ZP_');
+  }
+  function isGlobalObjectForMasking(value, w) {
+    try { return value === w || value && value.window === value; } catch { return false; }
+  }
+  function visibleOwnKeysFor(value, keys, w) {
+    return isGlobalObjectForMasking(value, w) ? Array.from(keys || []).filter(key => !hiddenGlobalKey(key)) : keys;
+  }
+  function installOwnPropertyMasking(w) {
+    const Obj = w && w.Object;
+    const Refl = w && w.Reflect;
+    if (!Obj) return;
+    const defineMask = (obj, key, value) => {
+      try {
+        Object.defineProperty(obj, key, { value, enumerable: false, configurable: true, writable: true });
+        maskNativeFunction(value, key);
+      } catch {}
+    };
+    const keys = Obj.keys;
+    const getNames = Obj.getOwnPropertyNames;
+    const getSymbols = Obj.getOwnPropertySymbols;
+    const getDescriptor = Obj.getOwnPropertyDescriptor;
+    const getDescriptors = Obj.getOwnPropertyDescriptors;
+    const ownKeys = Refl && Refl.ownKeys;
+    if (typeof keys === 'function') defineMask(Obj, 'keys', function zpObjectKeys(value) {
+      return visibleOwnKeysFor(value, keys.call(Obj, value), w);
+    });
+    if (typeof getNames === 'function') defineMask(Obj, 'getOwnPropertyNames', function zpGetOwnPropertyNames(value) {
+      return visibleOwnKeysFor(value, getNames.call(Obj, value), w);
+    });
+    if (typeof getSymbols === 'function') defineMask(Obj, 'getOwnPropertySymbols', function zpGetOwnPropertySymbols(value) {
+      return visibleOwnKeysFor(value, getSymbols.call(Obj, value), w);
+    });
+    if (typeof getDescriptor === 'function') defineMask(Obj, 'getOwnPropertyDescriptor', function zpGetOwnPropertyDescriptor(value, key) {
+      if (isGlobalObjectForMasking(value, w) && hiddenGlobalKey(key)) return undefined;
+      return getDescriptor.call(Obj, value, key);
+    });
+    if (typeof getDescriptors === 'function') defineMask(Obj, 'getOwnPropertyDescriptors', function zpGetOwnPropertyDescriptors(value) {
+      const out = getDescriptors.call(Obj, value);
+      if (isGlobalObjectForMasking(value, w)) {
+        for (const key of ownKeys ? ownKeys.call(Refl, out) : getNames.call(Obj, out)) {
+          if (hiddenGlobalKey(key)) delete out[key];
+        }
+      }
+      return out;
+    });
+    if (Refl && typeof ownKeys === 'function') defineMask(Refl, 'ownKeys', function zpReflectOwnKeys(value) {
+      return visibleOwnKeysFor(value, ownKeys.call(Refl, value), w);
     });
   }
 
@@ -2280,10 +2665,15 @@
     installResourceURLProps(w);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
+    if (w.HTMLElement && w.HTMLElement.prototype) {
+      patchHTMLSetter(w.HTMLElement.prototype, 'innerHTML');
+      patchHTMLSetter(w.HTMLElement.prototype, 'outerHTML');
+    }
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
     installBaseObserver();
     function patchHTMLSetter(proto, prop) {
-      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      let d = null;
+      for (let p = proto; p && !d; p = Object.getPrototypeOf(p)) d = Object.getOwnPropertyDescriptor(p, prop);
       if (!d || !d.set) return;
       try {
         Object.defineProperty(proto, prop, {
@@ -2293,6 +2683,11 @@
               d.set.call(this, String(v));
               enforceSubtreePolicies(this.content);
               instrumentDescendantIframes(this.content);
+              return;
+            }
+            if (this && this.localName === 'script' && prop === 'innerHTML') {
+              d.set.call(this, String(v));
+              if (this.isConnected) prepareScriptElement(this);
               return;
             }
             d.set.call(this, transformHTML(String(v)));
@@ -2629,28 +3024,49 @@
     }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }
-  function injectSrcdoc(s) { return '<script nonce="zp" src="/zp/assets/zp-core.js"><\/script><script nonce="zp">(function(){const boot=' + bootJSON() + ';Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
+  function injectSrcdoc(s) { return '<script nonce="zp" src="/zp/assets/zp-core.js"><\/script><script nonce="zp" src="/zp/assets/rust-rewriter.js"><\/script><script nonce="zp">(function(){const boot=' + bootJSON() + ';Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) {
     try { return rewritePageSource(source, 'event-handler'); }
     catch { return "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError')"; }
+  }
+  function normalizeReferrerPolicy(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (v === 'never') return 'no-referrer';
+    if (v === 'default') return 'strict-origin-when-cross-origin';
+    if (v === 'always') return 'unsafe-url';
+    if (v === 'origin-when-crossorigin') return 'origin-when-cross-origin';
+    if (v === 'no-referrer' || v === 'no-referrer-when-downgrade' || v === 'origin' || v === 'origin-when-cross-origin' || v === 'same-origin' || v === 'strict-origin' || v === 'strict-origin-when-cross-origin' || v === 'unsafe-url') return v;
+    return '';
   }
   function syncBaseElement(node) {
     if (!node) return;
     if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));
     if (node.querySelectorAll) node.querySelectorAll('base[href]').forEach(el => updateVirtualBase(Native.getAttribute.call(el, 'href')));
   }
+  function syncReferrerPolicyElement(node) {
+    if (!node) return;
+    if (node.localName === 'meta' && String(Native.getAttribute.call(node, 'name') || '').toLowerCase() === 'referrer') {
+      const policy = normalizeReferrerPolicy(Native.getAttribute.call(node, 'content') || '');
+      if (policy) documentReferrerPolicy = policy;
+    }
+    if (node.querySelectorAll) {
+      const metas = node.querySelectorAll('meta[name]');
+      for (let i = 0; i < metas.length; i++) syncReferrerPolicyElement(metas[i]);
+    }
+  }
   function installBaseObserver() {
     syncBaseElement(document);
+    syncReferrerPolicyElement(document);
     const MO = root.MutationObserver;
     if (!MO || !document.documentElement) return;
     try {
       new MO(records => {
         for (const r of records) {
-        if (r.type === 'attributes') enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase());
-          else for (const n of r.addedNodes || []) { syncBaseElement(n); enforceSubtreePolicies(n); instrumentDescendantIframes(n); }
+        if (r.type === 'attributes') { syncReferrerPolicyElement(r.target); enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase()); }
+          else for (const n of r.addedNodes || []) { syncBaseElement(n); syncReferrerPolicyElement(n); enforceSubtreePolicies(n); instrumentDescendantIframes(n); }
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style'] });
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style', 'name', 'content'] });
     } catch {}
   }
   function enforceObservedAttribute(el, key) {
@@ -2658,6 +3074,7 @@
     const localKey = attrLocalName(key);
     const tag = el.localName;
 	    if (tag === 'base' && localKey === 'href') { syncBaseElement(el); return; }
+	    if (tag === 'meta' && (localKey === 'name' || localKey === 'content')) { syncReferrerPolicyElement(el); return; }
 	    if (localKey === 'style') {
 	      const raw = Native.getAttribute.call(el, key);
 	      if (raw) {
@@ -2946,6 +3363,7 @@
     if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
+    installOwnPropertyMasking(w);
     installDOMHooks(w);
     installStealthMembrane(w);
     installTargetServiceWorkerBlocker(w);
@@ -3044,5 +3462,11 @@
       return f32;
     });
   }
-  try { const current = document.currentScript; if (current && /\/__zp\/runtime-prelude\.js(?:$|\?)/.test(current.src || '')) current.remove(); } catch {}
+  function removeBootstrapArtifacts() {
+    try {
+      const nodes = document.querySelectorAll && document.querySelectorAll('script[src*="/zp/assets/zp-core.js"],script[src*="/zp/assets/rust-rewriter.js"],script[src*="/zp/assets/runtime-prelude.js"]');
+      if (nodes) nodes.forEach(node => { try { node.remove(); } catch {} });
+    } catch {}
+  }
+  try { const current = document.currentScript; if (current && /\/zp\/assets\/runtime-prelude\.js(?:$|\?)/.test(current.src || '')) current.remove(); } catch {}
 })();

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 type SameSite string
@@ -52,6 +54,13 @@ type Jar struct {
 
 func New() *Jar { return &Jar{now: time.Now} }
 
+type RequestContext struct {
+	TopLevelURL          *url.URL
+	Method               string
+	Credentials          string
+	IsTopLevelNavigation bool
+}
+
 func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	if j == nil || u == nil {
 		return
@@ -72,7 +81,18 @@ func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 }
 
 func (j *Jar) Cookies(u *url.URL, includeHTTPOnly bool) []*http.Cookie {
+	return j.cookies(u, includeHTTPOnly, nil)
+}
+
+func (j *Jar) CookiesForRequest(u *url.URL, includeHTTPOnly bool, ctx RequestContext) []*http.Cookie {
+	return j.cookies(u, includeHTTPOnly, &ctx)
+}
+
+func (j *Jar) cookies(u *url.URL, includeHTTPOnly bool, ctx *RequestContext) []*http.Cookie {
 	if j == nil || u == nil {
+		return nil
+	}
+	if ctx != nil && ctx.Credentials == "omit" {
 		return nil
 	}
 	j.mu.Lock()
@@ -91,7 +111,7 @@ func (j *Jar) Cookies(u *url.URL, includeHTTPOnly bool) []*http.Cookie {
 			kept = append(kept, r)
 			continue
 		}
-		if domainMatch(host, r.Domain, r.HostOnly) && pathMatch(path, r.Path) && (!r.Secure || secure) {
+		if domainMatch(host, r.Domain, r.HostOnly) && pathMatch(path, r.Path) && (!r.Secure || secure) && sameSiteAllows(r, u, ctx) {
 			r.LastAccessTime = now
 			out = append(out, r)
 		}
@@ -131,6 +151,7 @@ func (j *Jar) VisibleRecords(u *url.URL) []SnapshotRecord {
 	defer j.mu.Unlock()
 	now := j.now().UTC()
 	host := canonicalHost(u.Hostname())
+	path := requestPath(u)
 	secure := u.Scheme == "https"
 	out := make([]CookieRecord, 0, len(j.records))
 	kept := j.records[:0]
@@ -138,7 +159,7 @@ func (j *Jar) VisibleRecords(u *url.URL) []SnapshotRecord {
 		if expired(r, now) {
 			continue
 		}
-		if !r.HTTPOnly && domainMatch(host, r.Domain, r.HostOnly) && (!r.Secure || secure) {
+		if !r.HTTPOnly && domainMatch(host, r.Domain, r.HostOnly) && pathMatch(path, r.Path) && (!r.Secure || secure) {
 			out = append(out, r)
 		}
 		kept = append(kept, r)
@@ -189,14 +210,21 @@ func recordFromCookie(u *url.URL, c *http.Cookie, now time.Time) (CookieRecord, 
 		if !domainMatch(host, domain, false) {
 			return CookieRecord{}, false
 		}
+		if isPublicSuffix(domain) {
+			return CookieRecord{}, false
+		}
 	}
 	path := c.Path
 	if path == "" || path[0] != '/' {
 		path = defaultPath(u)
 	}
+	sameSite := convertSameSite(c.SameSite)
+	if sameSite == SameSiteNone && !c.Secure {
+		return CookieRecord{}, false
+	}
 	rec := CookieRecord{
 		Name: c.Name, Value: c.Value, Domain: domain, HostOnly: hostOnly, Path: path,
-		Secure: c.Secure, HTTPOnly: c.HttpOnly, SameSite: convertSameSite(c.SameSite),
+		Secure: c.Secure, HTTPOnly: c.HttpOnly, SameSite: sameSite,
 		CreationTime: now, LastAccessTime: now,
 	}
 	if !c.Expires.IsZero() {
@@ -236,6 +264,58 @@ func expired(r CookieRecord, now time.Time) bool {
 		return r.CreationTime.Add(time.Duration(*r.MaxAge) * time.Second).Before(now)
 	}
 	return r.Expires != nil && r.Expires.Before(now)
+}
+
+func sameSiteAllows(r CookieRecord, reqURL *url.URL, ctx *RequestContext) bool {
+	if ctx == nil {
+		return true
+	}
+	if sameSiteURL(ctx.TopLevelURL, reqURL) {
+		return true
+	}
+	switch r.SameSite {
+	case SameSiteNone:
+		return true
+	case SameSiteStrict:
+		return false
+	case SameSiteLax, SameSiteUnspecified:
+		return ctx.IsTopLevelNavigation && safeMethod(ctx.Method)
+	default:
+		return ctx.IsTopLevelNavigation && safeMethod(ctx.Method)
+	}
+}
+
+func safeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		return false
+	}
+}
+
+func sameSiteURL(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return true
+	}
+	return siteForURL(a) == siteForURL(b)
+}
+
+func siteForURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	host := canonicalHost(u.Hostname())
+	site, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		site = host
+	}
+	return u.Scheme + "://" + site
+}
+
+func isPublicSuffix(domain string) bool {
+	suffix, icann := publicsuffix.PublicSuffix(domain)
+	return icann && suffix == domain
 }
 
 func convertSameSite(s http.SameSite) SameSite {

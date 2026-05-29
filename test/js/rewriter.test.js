@@ -223,6 +223,26 @@ test('Rust rewriter preserves valid syntax for assignment targets, property keys
   assert.doesNotMatch(out.code, /__zp_get\(this,"parent"\)\s*=/);
 });
 
+test('Rust rewriter preserves ASI between rewritten assignment statements', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`
+    window["EAGER-DATA"] = window["EAGER-DATA"] || {}
+    window["EAGER-DATA"]["PC-FEED-WRAPPER"] = { ok: true }
+    window["EAGER-DATA"]["NEXT"] = { ok: true }
+  `, { kind: 'classic' });
+
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.doesNotThrow(() => new Function(out.code));
+  assert.match(out.code, /__zp_set\(__zp_get\(globalThis,"window"\),"EAGER-DATA",[\s\S]*\);/);
+  const ctx = { window: {}, globalThis: null };
+  ctx.globalThis = ctx;
+  ctx.__zp_get = (base, prop) => base[prop];
+  ctx.__zp_set = (base, prop, value) => { base[prop] = value; return value; };
+  vm.createContext(ctx);
+  assert.doesNotThrow(() => vm.runInContext(out.code, ctx));
+  assert.equal(ctx.window['EAGER-DATA'].NEXT.ok, true);
+});
+
 test('Rust rewriter rewrites construction through virtualized expressions instead of blocking', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(`

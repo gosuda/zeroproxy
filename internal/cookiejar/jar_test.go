@@ -49,3 +49,60 @@ func TestVisibleRecordsPreserveCookieMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestCookiesForRequestAppliesSameSiteAndCredentials(t *testing.T) {
+	j := New()
+	u, _ := url.Parse("https://api.example.com/account/page")
+	topSameSite, _ := url.Parse("https://www.example.com/home")
+	topCrossSite, _ := url.Parse("https://other.test/home")
+	j.SetCookies(u, []*http.Cookie{
+		{Name: "strict", Value: "1", Path: "/", SameSite: http.SameSiteStrictMode},
+		{Name: "lax", Value: "1", Path: "/", SameSite: http.SameSiteLaxMode},
+		{Name: "default_lax", Value: "1", Path: "/"},
+		{Name: "none", Value: "1", Path: "/", SameSite: http.SameSiteNoneMode, Secure: true},
+	})
+
+	sameSite := cookieNames(j.CookiesForRequest(u, true, RequestContext{TopLevelURL: topSameSite, Method: "POST", Credentials: "include"}))
+	for _, name := range []string{"strict", "lax", "default_lax", "none"} {
+		if !sameSite[name] {
+			t.Fatalf("same-site request missed %s: %#v", name, sameSite)
+		}
+	}
+
+	crossFetch := cookieNames(j.CookiesForRequest(u, true, RequestContext{TopLevelURL: topCrossSite, Method: "POST", Credentials: "include"}))
+	if crossFetch["strict"] || crossFetch["lax"] || crossFetch["default_lax"] || !crossFetch["none"] {
+		t.Fatalf("cross-site subresource SameSite filtering wrong: %#v", crossFetch)
+	}
+
+	crossTopGET := cookieNames(j.CookiesForRequest(u, true, RequestContext{TopLevelURL: topCrossSite, Method: "GET", Credentials: "include", IsTopLevelNavigation: true}))
+	if crossTopGET["strict"] || !crossTopGET["lax"] || !crossTopGET["default_lax"] || !crossTopGET["none"] {
+		t.Fatalf("cross-site top-level GET SameSite filtering wrong: %#v", crossTopGET)
+	}
+
+	omit := j.CookiesForRequest(u, true, RequestContext{TopLevelURL: topSameSite, Method: "GET", Credentials: "omit"})
+	if len(omit) != 0 {
+		t.Fatalf("credentials omit sent cookies: %#v", omit)
+	}
+}
+
+func TestSetCookiesRejectsPublicSuffixAndInsecureSameSiteNone(t *testing.T) {
+	j := New()
+	u, _ := url.Parse("https://www.example.com/")
+	j.SetCookies(u, []*http.Cookie{
+		{Name: "public_suffix", Value: "1", Domain: "com", Path: "/"},
+		{Name: "none_insecure", Value: "1", Path: "/", SameSite: http.SameSiteNoneMode},
+		{Name: "ok", Value: "1", Domain: "example.com", Path: "/", SameSite: http.SameSiteNoneMode, Secure: true},
+	})
+	names := cookieNames(j.Cookies(u, true))
+	if names["public_suffix"] || names["none_insecure"] || !names["ok"] {
+		t.Fatalf("cookie rejection mismatch: %#v", names)
+	}
+}
+
+func cookieNames(cookies []*http.Cookie) map[string]bool {
+	out := make(map[string]bool, len(cookies))
+	for _, c := range cookies {
+		out[c.Name] = true
+	}
+	return out
+}

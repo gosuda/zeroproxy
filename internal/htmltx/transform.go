@@ -17,14 +17,16 @@ import (
 )
 
 type Options struct {
-	TabID          string
-	EntryID        string
-	TargetURL      *url.URL
-	DocumentCookie string
-	RuntimeToken   string
-	Servers        []string
-	ScriptRewriter func(source, kind, targetURL, controlPrefix string) (string, error)
-	CSSRewriter    func(source, baseURL string) (string, error)
+	TabID                 string
+	EntryID               string
+	TargetURL             *url.URL
+	DocumentCookie        string
+	RuntimeToken          string
+	Servers               []string
+	DynamicCompileAllowed bool
+	ReferrerPolicy        string
+	ScriptRewriter        func(source, kind, targetURL, controlPrefix string) (string, error)
+	CSSRewriter           func(source, baseURL string) (string, error)
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -198,26 +200,30 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 }
 
 type bootConfig struct {
-	TabID          string   `json:"tabId"`
-	EntryID        string   `json:"entryId"`
-	TargetURL      string   `json:"targetUrl"`
-	DocumentCookie string   `json:"documentCookie"`
-	RuntimeToken   string   `json:"runtimeToken"`
-	Servers        []string `json:"servers,omitempty"`
+	TabID                 string   `json:"tabId"`
+	EntryID               string   `json:"entryId"`
+	TargetURL             string   `json:"targetUrl"`
+	DocumentCookie        string   `json:"documentCookie"`
+	RuntimeToken          string   `json:"runtimeToken"`
+	Servers               []string `json:"servers,omitempty"`
+	DynamicCompileAllowed bool     `json:"dynamicCompileAllowed,omitempty"`
+	ReferrerPolicy        string   `json:"referrerPolicy,omitempty"`
 }
 
 func runtimePrelude(opt Options) string {
 	bootJSON, _ := json.Marshal(bootConfig{
-		TabID:          opt.TabID,
-		EntryID:        opt.EntryID,
-		TargetURL:      opt.TargetURL.String(),
-		DocumentCookie: opt.DocumentCookie,
-		RuntimeToken:   opt.RuntimeToken,
-		Servers:        opt.Servers,
+		TabID:                 opt.TabID,
+		EntryID:               opt.EntryID,
+		TargetURL:             opt.TargetURL.String(),
+		DocumentCookie:        opt.DocumentCookie,
+		RuntimeToken:          opt.RuntimeToken,
+		Servers:               opt.Servers,
+		DynamicCompileAllowed: opt.DynamicCompileAllowed,
+		ReferrerPolicy:        opt.ReferrerPolicy,
 	})
 	var b strings.Builder
 	b.Grow(len(bootJSON) + 130)
-	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp>(function(){const boot=`)
+	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp>(function(){const boot=`)
 	b.Write(bootJSON)
 	b.WriteString(`;Object.defineProperty(window,'__ZP_BOOT',{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()

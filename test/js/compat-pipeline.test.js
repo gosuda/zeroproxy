@@ -13,6 +13,12 @@ test('window fetch, XHR, and EventSource route through runtime transport shims',
   assert.ok(rt.includes('ZPEventSource'));
   assert.ok(rt.includes("ZP.apiPath('fetch')"));
   assert.match(rt, /Native\.fetch\(ZP\.apiPath\('fetch'\)/);
+  for (const needle of ['X-ZP-Fetch-Credentials', 'X-ZP-Fetch-Redirect', 'X-ZP-Fetch-Referrer', 'sendSyncXHR', 'ProgressEvent']) {
+    assert.ok(rt.includes(needle), `missing ${needle}`);
+  }
+  for (const needle of ['X-ZP-Response-URL', 'X-ZP-Response-Redirected', 'responseFacade', 'filteredResponseHeaders', 'opaqueResponseFacade']) {
+    assert.ok(rt.includes(needle), `missing ${needle}`);
+  }
 });
 
 test('runtime navigation uses bound Location methods and catches expando href clicks', () => {

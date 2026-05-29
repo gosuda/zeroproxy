@@ -17,6 +17,13 @@ test('runtime avoids stale escape gaps and forbidden harness markers', () => {
   assert.ok(rt.includes('Function.prototype.toString'));
 });
 
+test('runtime membrane uses captured native WeakMap lookup for raw unwrapping', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.includes('weakMapGet: w.WeakMap && w.WeakMap.prototype && w.WeakMap.prototype.get'));
+  assert.ok(rt.includes('Native.reflectApply(Native.weakMapGet, membraneRawTargets, [value])'));
+  assert.ok(rt.includes('Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs)'));
+});
+
 test('runtime reads boot config from self-removing prelude state', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
@@ -53,7 +60,7 @@ test('runtime installs required escape-vector hooks', () => {
     "'contentWindow'",
     "'contentDocument'",
     'new WeakSet',
-    "attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style']",
+    "attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style', 'name', 'content']",
     'enforceObservedAttribute',
     'data-zp-integrity',
     'installIntegrityProp',
@@ -75,9 +82,13 @@ test('runtime installs required escape-vector hooks', () => {
     'indexedDB',
     'caches',
     'documentCookieString',
+    'normalizeSameSite',
     'ZP_COOKIE_SYNC',
     'X-ZP-Tab-Id',
     'X-ZP-Runtime-Token',
+    'syncReferrerPolicyElement',
+    'documentReferrerPolicy',
+    'src*="zp"',
     "define(root, 'Worker'",
     "define(root, 'SharedWorker'",
     'workerBlobURLs',
@@ -161,16 +172,17 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(core.includes("connect-src "));
 	  assert.equal(/script-src \*/.test(core), false);
 	  assert.equal(/script-src \*/.test(server), false);
-	  assert.equal(core.includes("'unsafe-eval'"), false);
+	  assert.ok(core.includes("'unsafe-eval'"));
 	  assert.equal(server.includes("'unsafe-eval'"), false);
-	  assert.equal(core.includes("'wasm-unsafe-eval'"), false);
+	  assert.ok(core.includes("'wasm-unsafe-eval'"));
 	  assert.equal(index.includes("'wasm-unsafe-eval'"), false);
 	  assert.ok(core.includes("script-src 'self' 'nonce-zp'"));
+	  assert.ok(core.includes("allowDynamicCompile"));
 	  assert.ok(index.includes("script-src 'self' 'nonce-zp'"));
 	  assert.ok(server.includes("script-src 'self' 'nonce-zp'"));
 	  assert.ok(server.includes("script-src 'self' 'wasm-unsafe-eval'"));
-	  assert.equal(/runtimePrelude[\s\S]*rust-rewriter\.js/.test(htmltx), false);
-	  assert.equal(/injectSrcdoc[\s\S]*rust-rewriter\.js/.test(rt), false);
+	  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js/);
+	  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js/);
 	  assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
 	  assert.match(server, /connect-src 'self'/);
   assert.equal(core.includes('navigate-to'), false);
@@ -184,8 +196,9 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(sw.includes('scriptRequestContext'));
   assert.equal(/url\.pathname === '\/zp\/api\/fetch'[\s\S]{0,240}firstTab\(\)/.test(sw), false);
   assert.equal(sw.includes('firstTab'), false);
-  assert.equal(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('GetBody'), false);
-  assert.ok(fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8').includes('getReader'));
+  const bridge = fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8');
+  assert.ok(bridge.includes('getReader'));
+  assert.ok(bridge.includes('X-ZP-Upload-Replayable'));
   assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
   assert.ok(server.includes('closeBoth'));
 });

@@ -48,6 +48,16 @@ const (
 var fetchTLSProtocols = [...]string{utlskernel.ALPNHTTP2, utlskernel.ALPNHTTP1}
 var http1TLSProtocols = [...]string{utlskernel.ALPNHTTP1}
 
+type RequestPolicy struct {
+	Credentials     string
+	Mode            string
+	Redirect        string
+	Referrer        string
+	ReferrerPolicy  string
+	DocumentURL     *url.URL
+	DocumentRequest bool
+}
+
 func (e *Engine) RoundTrip(ctx context.Context, req *http.Request, target *url.URL, tab *TabState) (*http.Response, error) {
 	if target == nil || target.Hostname() == "" {
 		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: missing target host")
@@ -210,6 +220,7 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 	if target.Scheme != "http" && target.Scheme != "https" {
 		return nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
 	}
+	policy := policyFromRequest(src)
 	method := "GET"
 	var body io.ReadCloser
 	var contentLength int64
@@ -238,8 +249,14 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 	wire.Host = canonicalAuthority(target)
 	wire.Header.Set("User-Agent", TargetUserAgent)
 	wire.Header.Set("Accept-Encoding", "identity")
-	if jar != nil {
-		if cookies := jar.Cookies(target, true); len(cookies) > 0 {
+	if jar != nil && policyAllowsCookies(policy, target) {
+		cookieCtx := cookiejar.RequestContext{
+			TopLevelURL:          policy.DocumentURL,
+			Method:               method,
+			Credentials:          policy.Credentials,
+			IsTopLevelNavigation: policy.DocumentRequest || policy.Mode == "navigate",
+		}
+		if cookies := jar.CookiesForRequest(target, true, cookieCtx); len(cookies) > 0 {
 			parts := make([]string, 0, len(cookies))
 			for _, c := range cookies {
 				parts = append(parts, c.Name+"="+c.Value)
@@ -247,12 +264,127 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 			wire.Header.Set("Cookie", strings.Join(parts, "; "))
 		}
 	}
-	origin := target.Scheme + "://" + canonicalAuthority(target)
-	if method != "GET" && method != "HEAD" {
+	if origin := originHeader(method, target, policy); origin != "" {
 		wire.Header.Set("Origin", origin)
 	}
-	wire.Header.Set("Referer", target.String())
+	if ref := refererHeader(target, policy); ref != "" {
+		wire.Header.Set("Referer", ref)
+	}
 	return wire, nil
+}
+
+func policyFromRequest(req *http.Request) RequestPolicy {
+	p := RequestPolicy{Credentials: "include", Mode: "navigate", Redirect: "follow", Referrer: "about:client", ReferrerPolicy: "strict-origin-when-cross-origin"}
+	if req == nil {
+		return p
+	}
+	if v := strings.ToLower(strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Credentials"))); v != "" {
+		p.Credentials = v
+	}
+	if v := strings.ToLower(strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Mode"))); v != "" {
+		p.Mode = v
+	}
+	if v := strings.ToLower(strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Redirect"))); v != "" {
+		p.Redirect = v
+	}
+	if v := strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Referrer")); v != "" {
+		p.Referrer = v
+	}
+	if v := strings.ToLower(strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Referrer-Policy"))); v != "" {
+		p.ReferrerPolicy = v
+	}
+	if raw := strings.TrimSpace(req.Header.Get("X-Zp-Document-Url")); raw != "" {
+		if u, err := url.Parse(raw); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+			p.DocumentURL = u
+		}
+	}
+	p.DocumentRequest = req.Header.Get("X-Zp-Document-Request") == "1"
+	return p
+}
+
+func policyAllowsCookies(p RequestPolicy, target *url.URL) bool {
+	switch p.Credentials {
+	case "omit":
+		return false
+	case "same-origin":
+		source := p.DocumentURL
+		if source == nil {
+			return true
+		}
+		return sameOrigin(source, target)
+	default:
+		return true
+	}
+}
+
+func originHeader(method string, target *url.URL, p RequestPolicy) string {
+	source := p.DocumentURL
+	if source == nil {
+		source = target
+	}
+	origin := source.Scheme + "://" + canonicalAuthority(source)
+	if method != "GET" && method != "HEAD" {
+		return origin
+	}
+	if !sameOrigin(source, target) && (p.Mode == "cors" || p.Mode == "no-cors") {
+		return origin
+	}
+	return ""
+}
+
+func refererHeader(target *url.URL, p RequestPolicy) string {
+	source := p.DocumentURL
+	if ref := strings.TrimSpace(p.Referrer); ref != "" && ref != "about:client" {
+		if ref == "no-referrer" {
+			return ""
+		}
+		if u, err := url.Parse(ref); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+			source = u
+		}
+	}
+	if source == nil {
+		return ""
+	}
+	if source.Scheme == "https" && target.Scheme == "http" && (p.ReferrerPolicy == "" || p.ReferrerPolicy == "strict-origin-when-cross-origin" || p.ReferrerPolicy == "no-referrer-when-downgrade") {
+		return ""
+	}
+	switch p.ReferrerPolicy {
+	case "no-referrer":
+		return ""
+	case "origin":
+		return source.Scheme + "://" + canonicalAuthority(source) + "/"
+	case "same-origin":
+		if !sameOrigin(source, target) {
+			return ""
+		}
+		return referrerURLString(source)
+	case "strict-origin", "origin-when-cross-origin", "strict-origin-when-cross-origin":
+		if sameOrigin(source, target) && p.ReferrerPolicy != "strict-origin" {
+			return referrerURLString(source)
+		}
+		return source.Scheme + "://" + canonicalAuthority(source) + "/"
+	case "unsafe-url", "no-referrer-when-downgrade", "":
+		return referrerURLString(source)
+	default:
+		if sameOrigin(source, target) {
+			return referrerURLString(source)
+		}
+		return source.Scheme + "://" + canonicalAuthority(source) + "/"
+	}
+}
+
+func referrerURLString(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	v := *u
+	v.User = nil
+	v.Fragment = ""
+	return v.String()
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil && a.Scheme == b.Scheme && canonicalAuthority(a) == canonicalAuthority(b)
 }
 
 func jar(tab *TabState) *cookiejar.Jar {

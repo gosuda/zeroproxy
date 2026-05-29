@@ -15,16 +15,24 @@ const MaxRedirects = 10
 func (e *Engine) Do(ctx context.Context, req *http.Request, target *url.URL, tab *TabState) (*http.Response, *url.URL, error) {
 	cur := cloneURL(target)
 	wireReq := req
+	policy := policyFromRequest(req)
 	for redirects := 0; redirects <= MaxRedirects; redirects++ {
 		resp, err := e.RoundTrip(ctx, wireReq, cur, tab)
 		if err != nil {
 			return nil, cur, err
 		}
-		if tab != nil && tab.CookieJar != nil {
+		if tab != nil && tab.CookieJar != nil && policyAllowsCookies(policy, cur) {
 			tab.CookieJar.SetCookies(cur, resp.Cookies())
 		}
 		loc := resp.Header.Get("Location")
 		if loc == "" || !redirectStatus(resp.StatusCode) {
+			return resp, cur, nil
+		}
+		if policy.Redirect == "error" {
+			_ = resp.Body.Close()
+			return nil, cur, fmt.Errorf("POLICY_BLOCKED: redirect disallowed")
+		}
+		if policy.Redirect == "manual" {
 			return resp, cur, nil
 		}
 		if redirects == MaxRedirects {

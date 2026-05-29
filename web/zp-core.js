@@ -113,14 +113,15 @@
   function encodeTargetURL(url) { return bytesToBase64Url(te.encode(canonicalTargetURL(url).href)); }
   function decodeTargetURL(encoded) { return canonicalTargetURL(td.decode(base64UrlToBytes(encoded))).href; }
   function randomId(prefix = '') { const b = crypto.getRandomValues(new Uint8Array(12)); return prefix + bytesToBase64Url(b); }
-  function fixedCSP(servers) {
+  function fixedCSP(servers, options = {}) {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
     const connect = new Set(["'self'", ws]);
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
-    return "default-src 'none'; script-src 'self' 'nonce-zp'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    const script = options && options.allowDynamicCompile ? "script-src 'self' 'nonce-zp' 'unsafe-eval' 'wasm-unsafe-eval'" : "script-src 'self' 'nonce-zp'";
+    return "default-src 'none'; " + script + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
   }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');

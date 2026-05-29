@@ -129,7 +129,7 @@ function createTargetServer(requests) {
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
     ignoreBenignSocketErrors(res);
-    requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', contentType: req.headers['content-type'] || '' });
+    requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', contentType: req.headers['content-type'] || '', origin: req.headers.origin || '', referer: req.headers.referer || '' });
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -163,6 +163,9 @@ function createTargetServer(requests) {
           dynamicImage.id = 'dynamic-image-probe';
           dynamicImage.src = '/image-probe.png?dynamic=1';
           document.body.appendChild(dynamicImage);
+          const innerHTMLScript = document.createElement('script');
+          innerHTMLScript.innerHTML = "window.__innerHTMLScriptFixture = ((row) => row.startsWith('x'))('x') && location.href;";
+          document.body.appendChild(innerHTMLScript);
           try {
             const template = document.createElement('template');
             template.innerHTML = '<link rel="preconnect" href="https://preconnect.invalid">';
@@ -200,6 +203,50 @@ function createTargetServer(requests) {
       res.end(`<!doctype html><html><head><title>E2E Next</title></head><body>
         <main><h1>E2E Next</h1><p id="ua"></p></main>
         <script>document.getElementById('ua').textContent = navigator.userAgent;</script>
+      </body></html>`);
+      return;
+    }
+    if (url.pathname === '/differential-fixture') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><html><head><title>Differential Fixture</title></head><body>
+        <main><h1>Differential Fixture</h1></main>
+        <script>
+          (async () => {
+            const out = {
+              locationHref: location.href,
+              locationOrigin: location.origin,
+              functionHref: Function('return location.href')(),
+              evalOrigin: eval('location.origin')
+            };
+            out.stringTimerOrigin = await new Promise(resolve => {
+              window.__diffTimerOrigin = '';
+              setTimeout('window.__diffTimerOrigin = location.origin', 0);
+              setTimeout(() => resolve(window.__diffTimerOrigin), 25);
+            });
+            const redirected = await fetch('/redirect302?diff=1', { cache: 'no-store' });
+            out.redirect = { status: redirected.status, text: await redirected.text(), url: redirected.url, redirected: redirected.redirected, type: redirected.type };
+            const post = await fetch('/request-echo?diff=post', { method: 'POST', body: 'diff-body', headers: { 'Content-Type': 'text/plain' }, cache: 'no-store' });
+            out.post = await post.json();
+            out.xhr = await new Promise(resolve => {
+              const xhr = new XMLHttpRequest();
+              const events = [];
+              xhr.onreadystatechange = () => events.push('rs:' + xhr.readyState + ':' + xhr.status + ':' + (xhr.responseText || '').length);
+              xhr.onprogress = ev => events.push('progress:' + xhr.readyState + ':' + ev.loaded + ':' + ev.lengthComputable);
+              xhr.onload = () => events.push('load:' + xhr.readyState + ':' + xhr.status + ':' + xhr.responseText.length);
+              xhr.onloadend = () => { events.push('loadend:' + xhr.readyState + ':' + xhr.status + ':' + xhr.responseText.length); resolve({ status: xhr.status, text: xhr.responseText, hasLoading: events.some(e => e.startsWith('rs:3:200:')), hasProgress: events.some(e => e.startsWith('progress:3:')), last: events.slice(-2) }); };
+              xhr.open('GET', '/stream?diff=xhr');
+              xhr.send();
+            });
+            out.ws = await new Promise((resolve, reject) => {
+              const ws = new WebSocket('ws://' + location.host + '/ws', ['diff']);
+              const timer = setTimeout(() => reject(new Error('ws-timeout')), 5000);
+              ws.onerror = () => { clearTimeout(timer); reject(new Error('ws-error')); };
+              ws.onopen = () => ws.send('differential');
+              ws.onmessage = ev => { clearTimeout(timer); const value = String(ev.data); const result = { url: ws.url, protocol: ws.protocol, data: value }; try { ws.close(); } catch {} resolve(result); };
+            });
+            window.__differential = out;
+          })().catch(err => { window.__differential = { error: err && (err.name + ':' + err.message) || String(err) }; });
+        </script>
       </body></html>`);
       return;
     }
@@ -389,6 +436,22 @@ function createTargetServer(requests) {
       res.end(req.headers.cookie || '');
       return;
     }
+    if (url.pathname === '/request-echo') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        method: req.method,
+        cookie: req.headers.cookie || '',
+        origin: req.headers.origin || '',
+        referer: req.headers.referer || '',
+        contentType: req.headers['content-type'] || '',
+      }));
+      return;
+    }
+    if (url.pathname === '/xml') {
+      res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<?xml version="1.0"?><root><item>ok</item></root>');
+      return;
+    }
     if (url.pathname === '/account/cookie-echo') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(req.headers.cookie || '');
@@ -398,6 +461,36 @@ function createTargetServer(requests) {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
       res.write('chunk-one\n');
       setTimeout(() => res.end('chunk-two\n'), 600);
+      return;
+    }
+    if (url.pathname === '/slow-headers') {
+      setTimeout(() => {
+        if (res.destroyed) return;
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('late-headers');
+      }, 1000);
+      return;
+    }
+    if (url.pathname === '/slow-body') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.write('body-one\n');
+      setTimeout(() => {
+        if (!res.destroyed) res.end('body-two\n');
+      }, 1000);
+      return;
+    }
+    if (url.pathname === '/slow-upload') {
+      let bytes = 0;
+      req.on('data', chunk => {
+        bytes += chunk.length;
+        req.pause();
+        setTimeout(() => req.resume(), 50);
+      });
+      req.on('end', () => {
+        if (res.destroyed) return;
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(String(bytes));
+      });
       return;
     }
     if (url.pathname === '/sse') {
@@ -436,6 +529,21 @@ function createTargetServer(requests) {
       res.end();
       return;
     }
+    if (url.pathname === '/redirect302') {
+      res.writeHead(302, { 'Location': '/redirect-final', 'Cache-Control': 'no-store' });
+      res.end('redirecting');
+      return;
+    }
+    if (url.pathname === '/redirect-cookie') {
+      res.writeHead(302, { 'Location': '/cookie-echo?after-redirect=1', 'Cache-Control': 'no-store', 'Set-Cookie': 'redirect_hop=stored; Path=/; SameSite=Lax' });
+      res.end('redirecting-cookie');
+      return;
+    }
+    if (url.pathname === '/redirect-final') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('redirect-final-ok');
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('not found');
   });
@@ -450,7 +558,7 @@ function createTargetServer(requests) {
 }
 
 function handleWebSocketUpgrade(req, socket, requests) {
-  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', protocol: req.headers['sec-websocket-protocol'] || '', upgrade: true });
+  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', origin: req.headers.origin || '', protocol: req.headers['sec-websocket-protocol'] || '', upgrade: true });
   if (new URL(req.url, 'http://target.local').pathname !== '/ws') {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     return;
@@ -591,6 +699,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const target = createTargetServer(requests);
   const targetPort = await listen(target);
   t.after(() => closeServer(target));
+  const crossRequests = [];
+  const crossTarget = createTargetServer(crossRequests);
+  const crossPort = await listen(crossTarget);
+  t.after(() => closeServer(crossTarget));
   const targetHost = 'localhost';
 
   const proxyPort = await new Promise((resolve, reject) => {
@@ -643,6 +755,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     phase2Location: window.__phase2Location,
     phase2DynamicFunction: window.__phase2DynamicFunction,
     phase2EvalLocation: window.__phase2EvalLocation,
+    innerHTMLScriptFixture: window.__innerHTMLScriptFixture,
     styleProbe: (() => {
       const el = document.getElementById('style-probe');
       const cs = el && getComputedStyle(el);
@@ -712,6 +825,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
   assert.equal(home.phase2DynamicFunction, `http://${targetHost}:${targetPort}/`);
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
+  assert.equal(home.innerHTMLScriptFixture, `http://${targetHost}:${targetPort}/`);
   assert.deepEqual(home.styleProbe, { borderTopWidth: '7px', borderTopColor: 'rgb(12, 34, 56)', paddingLeft: '13px' });
   assert.ok(requests.some(r => r.url === '/site.css' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.equal(requests.some(r => r.url === '/site-icon.png'), false, `favicon must not be fetched: ${JSON.stringify(requests)}`);
@@ -759,7 +873,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(rewriteAdvanced.constructorEscapeHref, `http://${targetHost}:${targetPort}/#compound-tail`);
   assert.equal(rewriteAdvanced.compoundHash, '#compound-tail');
   assert.equal(rewriteAdvanced.compoundHref, `http://${targetHost}:${targetPort}/#compound-tail`);
-  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA && r.origin === `http://${targetHost}:${targetPort}`), `target requests: ${JSON.stringify(requests)}`);
   try {
     await waitForPage(page, () => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded && window.__moduleWorkerFixture && window.__moduleWorkerFixture.loaded);
   } catch (err) {
@@ -960,7 +1074,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(fingerprintMasking.voiceCount, 2);
   assert.deepEqual(fingerprintMasking.voiceNames, ['Google US English', 'Microsoft David - English (United States)']);
 
-  const runtimeIntegration = await page.evaluate(async targetPort => {
+  const runtimeIntegration = await page.evaluate(async (targetPort, crossPort) => {
     async function readText(path) {
       const resp = await fetch(path, { cache: 'no-store' });
       return resp.text();
@@ -990,9 +1104,115 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       body += decoder.decode();
       return { status: resp.status, contentType: resp.headers.get('content-type') || '', firstText: first.value ? decoder.decode(first.value) : '', firstMs, body };
     }
+    function withDeadline(promise, label, ms = 5000) {
+      return Promise.race([
+        promise,
+        new Promise(resolve => setTimeout(() => resolve({ timeout: label }), ms)),
+      ]);
+    }
+    function xhrEventProbe(path, configure) {
+      return new Promise(resolve => {
+        const xhr = new XMLHttpRequest();
+        const events = [];
+        const mark = name => events.push(name + ':' + xhr.readyState + ':' + xhr.status + ':' + (xhr.responseText || '').length);
+        xhr.onreadystatechange = () => mark('readystatechange');
+        xhr.onloadstart = () => mark('loadstart');
+        xhr.onprogress = ev => events.push('progress:' + xhr.readyState + ':' + ev.loaded + ':' + ev.lengthComputable);
+        xhr.onload = () => mark('load');
+        xhr.onerror = () => mark('error');
+        xhr.ontimeout = () => mark('timeout');
+        xhr.onabort = () => mark('abort');
+        xhr.onloadend = () => {
+          mark('loadend');
+          resolve({ status: xhr.status, readyState: xhr.readyState, text: xhr.responseText || '', events });
+        };
+        xhr.open('GET', path);
+        if (configure) configure(xhr);
+        xhr.send();
+      });
+    }
+    function xhrUploadProbe(body, contentType) {
+      return new Promise(resolve => {
+        const xhr = new XMLHttpRequest();
+        const uploadEvents = [];
+        xhr.upload.onloadstart = ev => uploadEvents.push('loadstart:' + ev.loaded + ':' + ev.lengthComputable);
+        xhr.upload.onprogress = ev => uploadEvents.push('progress:' + ev.loaded + ':' + ev.lengthComputable);
+        xhr.upload.onload = ev => uploadEvents.push('load:' + ev.loaded + ':' + ev.lengthComputable);
+        xhr.upload.onloadend = ev => uploadEvents.push('loadend:' + ev.loaded + ':' + ev.lengthComputable);
+        xhr.onloadend = () => resolve({ status: xhr.status, uploadEvents, textStart: String(xhr.responseText || '').slice(0, 40) });
+        xhr.open('POST', '/post-echo?xhr=upload');
+        if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+        xhr.send(body);
+      });
+    }
+    function xhrRestrictionProbe() {
+      const out = {};
+      const sync = new XMLHttpRequest();
+      sync.open('GET', '/post-echo', false);
+      try { sync.responseType = 'arraybuffer'; out.syncResponseType = 'allowed'; } catch (err) { out.syncResponseType = err && err.name || 'Error'; }
+      try { sync.timeout = 10; out.syncTimeout = 'allowed'; } catch (err) { out.syncTimeout = err && err.name || 'Error'; }
+      const async = new XMLHttpRequest();
+      async.open('GET', '/stream?xhr=restriction');
+      async.send();
+      return new Promise(resolve => {
+        async.onreadystatechange = () => {
+          if (async.readyState === 3 && !out.loadingResponseType) {
+            try { async.responseType = 'json'; out.loadingResponseType = 'allowed'; } catch (err) { out.loadingResponseType = err && err.name || 'Error'; }
+            try { async.withCredentials = true; out.sentWithCredentials = 'allowed'; } catch (err) { out.sentWithCredentials = err && err.name || 'Error'; }
+          }
+        };
+        async.onloadend = () => resolve(out);
+      });
+    }
+    function xhrXMLProbe(asyncMode) {
+      return new Promise(resolve => {
+        const xhr = new XMLHttpRequest();
+        xhr.onloadend = () => resolve({
+          status: xhr.status,
+          readyState: xhr.readyState,
+          responseText: xhr.responseText,
+          xmlText: xhr.responseXML && xhr.responseXML.getElementsByTagName('item')[0] && xhr.responseXML.getElementsByTagName('item')[0].textContent || '',
+        });
+        xhr.open('GET', '/xml?async=' + asyncMode, asyncMode);
+        xhr.send();
+        if (!asyncMode) xhr.onloadend();
+      });
+    }
     async function postText(path, body) {
       const resp = await fetch(path, { method: 'POST', body, cache: 'no-store' });
       return { status: resp.status, text: await resp.text() };
+    }
+    async function readJSON(path, init) {
+      const resp = await fetch(path, Object.assign({ cache: 'no-store' }, init || {}));
+      return { status: resp.status, json: await resp.json() };
+    }
+    async function responseShape(path, init) {
+      const resp = await fetch(path, Object.assign({ cache: 'no-store' }, init || {}));
+      const clone = resp.clone();
+      return {
+        status: resp.status,
+        url: resp.url,
+        redirected: resp.redirected,
+        type: resp.type,
+        internalURLHeader: resp.headers.get('X-ZP-Response-URL'),
+        cloneText: await clone.text(),
+      };
+    }
+    async function noCORSShape() {
+      const resp = await fetch('http://localhost:' + crossPort + '/request-echo?mode=no-cors', { mode: 'no-cors', cache: 'no-store' });
+      const clone = resp.clone();
+      return {
+        status: resp.status,
+        statusText: resp.statusText,
+        ok: resp.ok,
+        url: resp.url,
+        redirected: resp.redirected,
+        type: resp.type,
+        body: resp.body === null,
+        bodyUsed: resp.bodyUsed,
+        contentType: resp.headers.get('content-type'),
+        text: await clone.text(),
+      };
     }
     function websocketEcho() {
       return new Promise((resolve, reject) => {
@@ -1028,29 +1248,102 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       return { protocol: opened.protocol, data: String(first.value), closeCode: closed.closeCode };
     }
 
-
     const setCookieBody = await readText('/set-cookie?ts=' + Date.now());
     const serverCookie = await waitForCookieHeader('target_server=from-target');
     document.cookie = 'client_runtime=from-runtime; Path=/';
     const visibleCookie = document.cookie;
     const clientCookie = await waitForCookieHeader('client_runtime=from-runtime');
+    const credentialsOmitCookie = await fetch('/cookie-echo?credentials=omit', { credentials: 'omit', cache: 'no-store' }).then(resp => resp.text());
+    const credentialsSameOriginCookie = await fetch('/cookie-echo?credentials=same-origin', { credentials: 'same-origin', cache: 'no-store' }).then(resp => resp.text());
+    const noReferrerEcho = await readJSON('/request-echo?referrer=no', { referrerPolicy: 'no-referrer' });
+    const originReferrerEcho = await readJSON('/request-echo?referrer=origin', { referrerPolicy: 'origin' });
+    const postHeaderEcho = await readJSON('/request-echo?origin=post', { method: 'POST', body: 'header-body', headers: { 'Content-Type': 'text/plain' } });
+    const directResponseShape = await responseShape('/post-echo?shape=direct', { method: 'POST', body: 'shape-body' });
+    const noCORS = await noCORSShape();
+    const referrerMeta = document.createElement('meta');
+    referrerMeta.setAttribute('name', 'referrer');
+    referrerMeta.setAttribute('content', 'no-referrer');
+    document.head.appendChild(referrerMeta);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const metaNoReferrerEcho = await readJSON('/request-echo?referrer=meta-no-referrer');
+    referrerMeta.setAttribute('content', 'origin');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const metaOriginEcho = await readJSON('/request-echo?referrer=meta-origin');
     const scopedCookieBody = await readText('/account/set-cookie-scope?ts=' + Date.now());
     const visibleAfterScopedSet = document.cookie;
     const accountCookie = await readText('/account/cookie-echo?ts=' + Date.now());
+    const syncXHR = (() => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/post-echo', false);
+      xhr.setRequestHeader('Content-Type', 'text/plain;charset=UTF-8');
+      xhr.send('sync-upload');
+      return { status: xhr.status, text: xhr.responseText, readyState: xhr.readyState };
+    })();
     const stream = await readStream();
     const post = await postText('/post-echo', 'small-upload');
+    const redirectFollow = await fetch('/redirect302?mode=follow', { cache: 'no-store' }).then(async resp => ({ status: resp.status, text: await resp.text() }));
+    const redirectShape = await responseShape('/redirect302?shape=follow');
+    const redirectManual = await fetch('/redirect302?mode=manual', { redirect: 'manual', cache: 'no-store' }).then(async resp => ({ status: resp.status, text: await resp.text(), type: resp.type }));
+    const redirectError = await fetch('/redirect302?mode=error', { redirect: 'error', cache: 'no-store' }).then(() => 'resolved', err => err && err.name || 'Error');
+    const redirectCookie = await fetch('/redirect-cookie?mode=follow', { cache: 'no-store' }).then(resp => resp.text());
     const redirectPost = await postText('/redirect307', 'redirect-body');
     const oversizedResp = await postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1));
     const oversized = { status: oversizedResp.status, length: oversizedResp.text.length, first: oversizedResp.text.slice(0, 1) };
     const ws = await websocketEcho();
     const wsStream = await websocketStreamEcho();
-    return { setCookieBody, serverCookie, visibleCookie, clientCookie, scopedCookieBody, visibleAfterScopedSet, accountCookie, stream, ws, wsStream, post, redirectPost, oversized };
-  }, targetPort);
+    const xhrSuccess = await withDeadline(xhrEventProbe('/stream?xhr=success&ts=' + Date.now()), 'xhr-success');
+    const xhrBlobUpload = await xhrUploadProbe(new Blob(['x'.repeat(128 * 1024)], { type: 'text/plain' }), 'text/plain');
+    const form = new FormData();
+    form.append('alpha', 'one');
+    form.append('file', new Blob(['form-body'], { type: 'text/plain' }), 'probe.txt');
+    const xhrFormDataUpload = await xhrUploadProbe(form);
+    const xhrRestrictions = await xhrRestrictionProbe();
+    const xhrXMLAsync = await xhrXMLProbe(true);
+    const xhrXMLSync = await xhrXMLProbe(false);
+    const xhr404 = await withDeadline(xhrEventProbe('/missing-xhr?ts=' + Date.now()), 'xhr-404');
+    const xhrRedirect = await withDeadline(xhrEventProbe('/redirect302?xhr=redirect'), 'xhr-redirect');
+    return { setCookieBody, serverCookie, visibleCookie, clientCookie, credentialsOmitCookie, credentialsSameOriginCookie, noReferrerEcho, originReferrerEcho, postHeaderEcho, directResponseShape, noCORS, metaNoReferrerEcho, metaOriginEcho, scopedCookieBody, visibleAfterScopedSet, accountCookie, stream, xhrSuccess, xhrBlobUpload, xhrFormDataUpload, xhrRestrictions, xhrXMLAsync, xhrXMLSync, xhr404, xhrRedirect, ws, wsStream, post, syncXHR, redirectFollow, redirectShape, redirectManual, redirectError, redirectCookie, redirectPost, oversized };
+  }, targetPort, crossPort);
   assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok');
   assert.match(runtimeIntegration.serverCookie, /target_server=from-target/);
   assert.match(runtimeIntegration.visibleCookie, /client_runtime=from-runtime/);
   assert.match(runtimeIntegration.clientCookie, /target_server=from-target/);
   assert.match(runtimeIntegration.clientCookie, /client_runtime=from-runtime/);
+  assert.doesNotMatch(runtimeIntegration.credentialsOmitCookie, /target_server=from-target/);
+  assert.doesNotMatch(runtimeIntegration.credentialsOmitCookie, /client_runtime=from-runtime/);
+  assert.match(runtimeIntegration.credentialsSameOriginCookie, /target_server=from-target/);
+  assert.match(runtimeIntegration.credentialsSameOriginCookie, /client_runtime=from-runtime/);
+  assert.deepEqual(runtimeIntegration.noReferrerEcho, { status: 200, json: { method: 'GET', cookie: runtimeIntegration.credentialsSameOriginCookie, origin: '', referer: '', contentType: '' } });
+  assert.equal(runtimeIntegration.originReferrerEcho.status, 200);
+  assert.match(runtimeIntegration.originReferrerEcho.json.referer, new RegExp(`^http://${targetHost}:${targetPort}/$`));
+  assert.equal(runtimeIntegration.postHeaderEcho.status, 200);
+  assert.equal(runtimeIntegration.postHeaderEcho.json.origin, `http://${targetHost}:${targetPort}`);
+  assert.match(runtimeIntegration.postHeaderEcho.json.referer, new RegExp(`^http://${targetHost}:${targetPort}/`));
+  assert.equal(runtimeIntegration.metaNoReferrerEcho.status, 200);
+  assert.equal(runtimeIntegration.metaNoReferrerEcho.json.referer, '');
+  assert.equal(runtimeIntegration.metaOriginEcho.status, 200);
+  assert.equal(runtimeIntegration.metaOriginEcho.json.referer, `http://${targetHost}:${targetPort}/`);
+  assert.deepEqual(runtimeIntegration.directResponseShape, {
+    status: 200,
+    url: `http://${targetHost}:${targetPort}/post-echo?shape=direct`,
+    redirected: false,
+    type: 'basic',
+    internalURLHeader: null,
+    cloneText: 'shape-body',
+  });
+  assert.deepEqual(runtimeIntegration.noCORS, {
+    status: 0,
+    statusText: '',
+    ok: false,
+    url: '',
+    redirected: false,
+    type: 'opaque',
+    body: true,
+    bodyUsed: false,
+    contentType: null,
+    text: '',
+  });
+  assert.ok(crossRequests.some(r => r.url === '/request-echo?mode=no-cors' && r.userAgent === TARGET_UA), `cross requests: ${JSON.stringify(crossRequests)}`);
   assert.equal(runtimeIntegration.scopedCookieBody, 'set-cookie-scope-ok');
   assert.match(runtimeIntegration.visibleAfterScopedSet, /target_root=visible-root/);
   assert.doesNotMatch(runtimeIntegration.visibleAfterScopedSet, /target_scoped=visible-account/);
@@ -1065,18 +1358,71 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(runtimeIntegration.stream.firstText, 'chunk-one\n');
   assert.equal(runtimeIntegration.stream.body, 'chunk-one\nchunk-two\n');
   assert.ok(runtimeIntegration.stream.firstMs < 500, `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`);
+  assert.equal(runtimeIntegration.xhrSuccess.status, 200);
+  assert.equal(runtimeIntegration.xhrSuccess.readyState, 4);
+  assert.equal(runtimeIntegration.xhrSuccess.text, 'chunk-one\nchunk-two\n');
+  assert.ok(runtimeIntegration.xhrSuccess.events.some(e => e.startsWith('readystatechange:3:200:')), `XHR did not expose LOADING: ${JSON.stringify(runtimeIntegration.xhrSuccess.events)}`);
+  assert.ok(runtimeIntegration.xhrSuccess.events.some(e => /^progress:3:\d+:/.test(e)), `XHR progress missing: ${JSON.stringify(runtimeIntegration.xhrSuccess.events)}`);
+  assert.ok(runtimeIntegration.xhrSuccess.events.at(-2).startsWith('load:4:200:'), `XHR load order wrong: ${JSON.stringify(runtimeIntegration.xhrSuccess.events)}`);
+  assert.ok(runtimeIntegration.xhrSuccess.events.at(-1).startsWith('loadend:4:200:'), `XHR loadend order wrong: ${JSON.stringify(runtimeIntegration.xhrSuccess.events)}`);
+  assert.equal(runtimeIntegration.xhrBlobUpload.status, 200);
+  assert.ok(runtimeIntegration.xhrBlobUpload.uploadEvents.some(e => e.startsWith('progress:')), `XHR Blob upload progress missing: ${JSON.stringify(runtimeIntegration.xhrBlobUpload.uploadEvents)}`);
+  assert.ok(runtimeIntegration.xhrBlobUpload.uploadEvents.at(-1).startsWith('loadend:'), `XHR Blob upload loadend missing: ${JSON.stringify(runtimeIntegration.xhrBlobUpload.uploadEvents)}`);
+  assert.equal(runtimeIntegration.xhrFormDataUpload.status, 200);
+  assert.ok(runtimeIntegration.xhrFormDataUpload.uploadEvents.some(e => e.startsWith('progress:')), `XHR FormData upload progress missing: ${JSON.stringify(runtimeIntegration.xhrFormDataUpload.uploadEvents)}`);
+  assert.ok(runtimeIntegration.xhrFormDataUpload.uploadEvents.at(-1).startsWith('loadend:'), `XHR FormData upload loadend missing: ${JSON.stringify(runtimeIntegration.xhrFormDataUpload.uploadEvents)}`);
+  assert.deepEqual(runtimeIntegration.xhrRestrictions, {
+    syncResponseType: 'InvalidAccessError',
+    syncTimeout: 'InvalidAccessError',
+    loadingResponseType: 'InvalidStateError',
+    sentWithCredentials: 'InvalidStateError',
+  });
+  assert.deepEqual(runtimeIntegration.xhrXMLAsync, {
+    status: 200,
+    readyState: 4,
+    responseText: '<?xml version="1.0"?><root><item>ok</item></root>',
+    xmlText: 'ok',
+  });
+  assert.ok(
+    runtimeIntegration.xhrXMLSync.status === 200 && runtimeIntegration.xhrXMLSync.xmlText === 'ok' || runtimeIntegration.xhrXMLSync.status === 0,
+    `sync XHR XML must either parse responseXML or fail closed, got ${JSON.stringify(runtimeIntegration.xhrXMLSync)}`
+  );
+  assert.equal(runtimeIntegration.xhr404.status, 404);
+  assert.equal(runtimeIntegration.xhr404.readyState, 4);
+  assert.ok(runtimeIntegration.xhr404.events.at(-2).startsWith('load:4:404:'), `XHR 404 load order wrong: ${JSON.stringify(runtimeIntegration.xhr404.events)}`);
+  assert.ok(runtimeIntegration.xhr404.events.at(-1).startsWith('loadend:4:404:'), `XHR 404 loadend missing: ${JSON.stringify(runtimeIntegration.xhr404.events)}`);
+  assert.equal(runtimeIntegration.xhrRedirect.status, 200);
+  assert.equal(runtimeIntegration.xhrRedirect.text, 'redirect-final-ok');
+  assert.ok(runtimeIntegration.xhrRedirect.events.at(-2).startsWith('load:4:200:'), `XHR redirect load order wrong: ${JSON.stringify(runtimeIntegration.xhrRedirect.events)}`);
   assert.equal(runtimeIntegration.ws.url, `ws://${targetHost}:${targetPort}/ws`);
   assert.equal(runtimeIntegration.ws.data, '1,2,3');
   assert.equal(runtimeIntegration.ws.protocol, 'zp-test');
   assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000 });
   assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' });
-  assert.equal(runtimeIntegration.redirectPost.status, 502);
-  assert.match(runtimeIntegration.redirectPost.text, /TARGET_CONNECT_FAILED/);
+  assert.equal(runtimeIntegration.syncXHR.readyState, 4);
+  assert.ok(
+    runtimeIntegration.syncXHR.status === 200 && runtimeIntegration.syncXHR.text === 'sync-upload' || runtimeIntegration.syncXHR.status === 0,
+    `sync XHR must either pass through the active Service Worker or fail closed, got ${JSON.stringify(runtimeIntegration.syncXHR)}`
+  );
+  assert.deepEqual(runtimeIntegration.redirectFollow, { status: 200, text: 'redirect-final-ok' });
+  assert.deepEqual(runtimeIntegration.redirectShape, {
+    status: 200,
+    url: `http://${targetHost}:${targetPort}/redirect-final`,
+    redirected: true,
+    type: 'basic',
+    internalURLHeader: null,
+    cloneText: 'redirect-final-ok',
+  });
+  assert.equal(runtimeIntegration.redirectManual.status, 302);
+  assert.equal(runtimeIntegration.redirectManual.text, 'redirecting');
+  assert.equal(runtimeIntegration.redirectError, 'TypeError');
+  assert.match(runtimeIntegration.redirectCookie, /redirect_hop=stored/);
+  assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' });
   assert.deepEqual(runtimeIntegration.oversized, { status: 200, length: 8 * 1024 * 1024 + 1, first: 'x' });
   assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA && r.origin === `http://${targetHost}:${targetPort}`), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA && r.origin === `http://${targetHost}:${targetPort}`), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
 
   const storageSeed = 'stored-' + Date.now();
@@ -1214,9 +1560,56 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const bootLeak = await page.evaluate(() => ({
     bootType: typeof window.__ZP_BOOT,
     scriptContainsRuntimeToken: Array.from(document.scripts).some(s => s.textContent.includes('runtimeToken')),
+    selectorArtifacts: document.querySelectorAll('script[src*="zp"],script[src*="zeroproxy"],#__zp-boot,[data-zp-target-url],[data-zp-blocked-url]').length,
+    scriptArtifacts: Array.from(document.scripts).filter(s => /\/zp\/assets\/|\/zp\/api\/script|zeroproxy/i.test(s.src || s.getAttribute('src') || s.outerHTML || '')).map(s => s.src || s.outerHTML),
+    tagArtifacts: Array.from(document.getElementsByTagName('script')).filter(s => /\/zp\/assets\/|\/zp\/api\/script|zeroproxy/i.test(s.src || s.getAttribute('src') || s.outerHTML || '')).map(s => s.src || s.outerHTML),
+    iteratorArtifacts: (() => {
+      const out = [];
+      const it = document.createNodeIterator(document, NodeFilter.SHOW_ELEMENT);
+      let node;
+      while ((node = it.nextNode())) {
+        if (node.localName === 'script' && /\/zp\/assets\/|\/zp\/api\/script|zeroproxy/i.test(node.src || node.getAttribute('src') || node.outerHTML || '')) out.push(node.src || node.outerHTML);
+      }
+      return out;
+    })(),
+    treeWalkerArtifacts: (() => {
+      const out = [];
+      const tw = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+      let node;
+      while ((node = tw.nextNode())) {
+        if (node.localName === 'script' && /\/zp\/assets\/|\/zp\/api\/script|zeroproxy/i.test(node.src || node.getAttribute('src') || node.outerHTML || '')) out.push(node.src || node.outerHTML);
+      }
+      return out;
+    })(),
+    serializedLeaks: (() => {
+      const html = document.documentElement.outerHTML;
+      const out = [];
+      const re = /__ZP_BOOT|runtimeToken|data-zp-[\w-]*|\/zp\/assets\/|\/zp\/api\/script|zeroproxy/ig;
+      let m;
+      while ((m = re.exec(html)) && out.length < 12) out.push(html.slice(Math.max(0, m.index - 80), Math.min(html.length, m.index + 120)));
+      return out;
+    })(),
+    ownKeys: Reflect.ownKeys(window).map(k => typeof k === 'symbol' ? k.toString() : String(k)).filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|__zp_|__ZP_|zeroproxy/i.test(k)),
+    propertyNames: Object.getOwnPropertyNames(window).filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|__zp_|__ZP_/i.test(k)),
+    propertySymbols: Object.getOwnPropertySymbols(window).map(String).filter(k => /zeroproxy/i.test(k)),
+    descriptors: Reflect.ownKeys(Object.getOwnPropertyDescriptors(window)).map(k => typeof k === 'symbol' ? k.toString() : String(k)).filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|__zp_|__ZP_|zeroproxy/i.test(k)),
+    directDescriptorLeaks: ['ZP', 'ZPRewriter', 'ZPRustRewriter', '__ZP_BOOT', '__ZP_SET_BASE', '__zp_get', '__zp_set', '__zp_call', '__zp_ownKeys'].filter(k => Object.getOwnPropertyDescriptor(window, k)),
+    performanceArtifacts: performance.getEntriesByType('resource').map(e => e.name).filter(name => /\/zp\/assets\/|\/zp\/kernel\.wasm|\/zp\/api\/script|zeroproxy/i.test(name)),
   }));
   assert.equal(bootLeak.bootType, 'undefined');
   assert.equal(bootLeak.scriptContainsRuntimeToken, false);
+  assert.equal(bootLeak.selectorArtifacts, 0, JSON.stringify(bootLeak));
+  assert.deepEqual(bootLeak.scriptArtifacts, []);
+  assert.deepEqual(bootLeak.tagArtifacts, []);
+  assert.deepEqual(bootLeak.iteratorArtifacts, []);
+  assert.deepEqual(bootLeak.treeWalkerArtifacts, []);
+  assert.deepEqual(bootLeak.serializedLeaks, []);
+  assert.deepEqual(bootLeak.ownKeys, []);
+  assert.deepEqual(bootLeak.propertyNames, []);
+  assert.deepEqual(bootLeak.propertySymbols, []);
+  assert.deepEqual(bootLeak.descriptors, []);
+  assert.deepEqual(bootLeak.directDescriptorLeaks, []);
+  assert.deepEqual(bootLeak.performanceArtifacts, []);
 
 
   async function submitFormFixture(kind) {
@@ -1288,4 +1681,124 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(next.userAgent, TARGET_UA);
   assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.ok(requests.some(r => r.url === '/next' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+
+  const readDifferential = p => p.evaluate(() => window.__differential);
+  const comparableDifferential = value => ({
+    locationHref: value.locationHref,
+    locationOrigin: value.locationOrigin,
+    functionHref: value.functionHref,
+    evalOrigin: value.evalOrigin,
+    stringTimerOrigin: value.stringTimerOrigin,
+    redirect: value.redirect,
+    post: value.post,
+    xhr: value.xhr,
+    ws: value.ws,
+  });
+  await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
+  await waitForPage(page, () => navigator.serviceWorker && navigator.serviceWorker.controller && document.querySelector('#status')?.textContent === 'Ready.');
+  await page.type('#url', `http://${targetHost}:${targetPort}/differential-fixture`);
+  await page.click('button');
+  await waitForPage(page, () => document.title === 'Differential Fixture' && window.__differential);
+  const proxyDiff = comparableDifferential(await readDifferential(page));
+
+  const abortMatrix = await page.evaluate(async () => {
+    function withDeadline(promise, label, ms = 5000) {
+      return Promise.race([
+        promise,
+        new Promise(resolve => setTimeout(() => resolve({ timeout: label }), ms)),
+      ]);
+    }
+    async function fetchAbortBeforeHeaders() {
+      const controller = new AbortController();
+      const pending = fetch('/slow-headers?fetch=abort-before-headers&ts=' + Date.now(), { cache: 'no-store', signal: controller.signal }).then(
+        () => 'resolved',
+        err => err && err.name || 'Error'
+      );
+      setTimeout(() => controller.abort(), 50);
+      return pending;
+    }
+    async function fetchAbortDuringDownload() {
+      const controller = new AbortController();
+      const resp = await fetch('/slow-body?fetch=abort-download&ts=' + Date.now(), { cache: 'no-store', signal: controller.signal });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      const first = await reader.read();
+      controller.abort();
+      const second = await reader.read().then(() => 'resolved', err => err && err.name || 'Error');
+      return { status: resp.status, firstText: first.value ? decoder.decode(first.value) : '', second };
+    }
+    async function fetchAbortDuringUpload() {
+      const controller = new AbortController();
+      const encoder = new TextEncoder();
+      let produced = 0;
+      let timer = 0;
+      const stream = new ReadableStream({
+        start(ctrl) {
+          timer = setInterval(() => {
+            produced++;
+            ctrl.enqueue(encoder.encode('upload-' + produced + '\n'));
+            if (produced > 100) {
+              clearInterval(timer);
+              ctrl.close();
+            }
+          }, 25);
+        },
+        cancel() {
+          clearInterval(timer);
+        }
+      });
+      const pending = fetch('/slow-upload?fetch=abort-upload&ts=' + Date.now(), {
+        method: 'POST',
+        body: stream,
+        duplex: 'half',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'text/plain' },
+      }).then(() => 'resolved', err => err && err.name || 'Error');
+      setTimeout(() => controller.abort(), 140);
+      return { result: await pending, produced };
+    }
+    function xhrEventProbe(path, configure) {
+      return new Promise(resolve => {
+        const xhr = new XMLHttpRequest();
+        const events = [];
+        const mark = name => events.push(name + ':' + xhr.readyState + ':' + xhr.status + ':' + (xhr.responseText || '').length);
+        xhr.onreadystatechange = () => mark('readystatechange');
+        xhr.onloadstart = () => mark('loadstart');
+        xhr.onprogress = ev => events.push('progress:' + xhr.readyState + ':' + ev.loaded + ':' + ev.lengthComputable);
+        xhr.onload = () => mark('load');
+        xhr.onerror = () => mark('error');
+        xhr.ontimeout = () => mark('timeout');
+        xhr.onabort = () => mark('abort');
+        xhr.onloadend = () => {
+          mark('loadend');
+          resolve({ status: xhr.status, readyState: xhr.readyState, text: xhr.responseText || '', events });
+        };
+        xhr.open('GET', path);
+        if (configure) configure(xhr);
+        xhr.send();
+      });
+    }
+    return {
+      abortBeforeHeaders: await withDeadline(fetchAbortBeforeHeaders(), 'fetch-abort-before-headers'),
+      abortDuringDownload: await withDeadline(fetchAbortDuringDownload(), 'fetch-abort-download'),
+      xhrTimeout: await withDeadline(xhrEventProbe('/slow-headers?xhr=timeout&ts=' + Date.now(), xhr => { xhr.timeout = 50; }), 'xhr-timeout'),
+      xhrAbort: await withDeadline(xhrEventProbe('/slow-headers?xhr=abort&ts=' + Date.now(), xhr => { setTimeout(() => xhr.abort(), 50); }), 'xhr-abort'),
+      abortDuringUpload: await withDeadline(fetchAbortDuringUpload(), 'fetch-abort-upload'),
+    };
+  });
+  assert.equal(abortMatrix.abortBeforeHeaders, 'AbortError');
+  assert.deepEqual(abortMatrix.abortDuringDownload, { status: 200, firstText: 'body-one\n', second: 'AbortError' });
+  assert.equal(abortMatrix.abortDuringUpload.result, 'AbortError');
+  assert.ok(abortMatrix.abortDuringUpload.produced > 0, `upload stream did not start: ${JSON.stringify(abortMatrix.abortDuringUpload)}`);
+  assert.equal(abortMatrix.xhrTimeout.status, 0);
+  assert.ok(abortMatrix.xhrTimeout.events.some(e => e.startsWith('timeout:4:0:')), `XHR timeout missing: ${JSON.stringify(abortMatrix.xhrTimeout.events)}`);
+  assert.ok(abortMatrix.xhrTimeout.events.at(-1).startsWith('loadend:4:0:'), `XHR timeout loadend order wrong: ${JSON.stringify(abortMatrix.xhrTimeout.events)}`);
+  assert.equal(abortMatrix.xhrAbort.status, 0);
+  assert.ok(abortMatrix.xhrAbort.events.some(e => e.startsWith('abort:4:0:')), `XHR abort missing: ${JSON.stringify(abortMatrix.xhrAbort.events)}`);
+  assert.ok(abortMatrix.xhrAbort.events.at(-1).startsWith('loadend:4:0:'), `XHR abort loadend order wrong: ${JSON.stringify(abortMatrix.xhrAbort.events)}`);
+  await page.goto(`http://${targetHost}:${targetPort}/differential-fixture`, { waitUntil: 'domcontentloaded' });
+  await waitForPage(page, () => window.__differential);
+  const nativeDiff = comparableDifferential(await readDifferential(page));
+  assert.deepEqual(proxyDiff, nativeDiff);
 });

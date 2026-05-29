@@ -115,7 +115,12 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	}
 	reqv := args[0]
 	return promise(func(resolve, reject js.Value) {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, abortCancel := swhttp.ContextWithAbortSignal(timeoutCtx, reqv)
+		cancel := func() {
+			abortCancel()
+			timeoutCancel()
+		}
 		releaseOnReturn := true
 		defer func() {
 			if releaseOnReturn {
@@ -141,7 +146,9 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			resolve.Invoke(safeResponse(classifyErr(err), statusForErr(err), req.URL.Host))
 			return
 		}
-		if tab.CookieJar != nil {
+		dynamicCompileAllowed := targetDynamicCompileAllowed(resp.Header)
+		referrerPolicy := targetReferrerPolicy(resp.Header)
+		if tab.CookieJar != nil && req.Header.Get("X-Zp-Fetch-Credentials") != "omit" {
 			tab.CookieJar.SetCookies(finalURL, resp.Cookies())
 			broadcastCookieSync(tab, finalURL)
 		}
@@ -155,14 +162,16 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			pr, pw := io.Pipe()
 			go func() {
 				err := htmltx.TransformTo(pw, source, htmltx.Options{
-					TabID:          tab.TabID,
-					EntryID:        req.Header.Get("X-Zp-Entry-Id"),
-					TargetURL:      finalURL,
-					DocumentCookie: tab.CookieJar.DocumentCookie(finalURL),
-					RuntimeToken:   req.Header.Get("X-Zp-Runtime-Token"),
-					Servers:        headerServers(req.Header.Get("X-Zp-Relay-Servers")),
-					ScriptRewriter: rewriteScriptFromJS,
-					CSSRewriter:    rewriteCSSFromJS,
+					TabID:                 tab.TabID,
+					EntryID:               req.Header.Get("X-Zp-Entry-Id"),
+					TargetURL:             finalURL,
+					DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
+					RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
+					Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+					DynamicCompileAllowed: dynamicCompileAllowed,
+					ReferrerPolicy:        referrerPolicy,
+					ScriptRewriter:        rewriteScriptFromJS,
+					CSSRewriter:           rewriteCSSFromJS,
 				})
 				closeErr := source.Close()
 				if err != nil {
@@ -183,9 +192,23 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			transformed = true
 			decoded = true
 		}
+		if dynamicCompileAllowed {
+			resp.Header.Set("X-ZP-Dynamic-Compile", "1")
+		}
 		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+		resp.Header.Set("X-ZP-Response-URL", finalURL.String())
+		if finalURL.String() != req.URL.String() {
+			resp.Header.Set("X-ZP-Response-Redirected", "1")
+		} else {
+			resp.Header.Set("X-ZP-Response-Redirected", "0")
+		}
 		if resp.Body != nil {
-			resp.Body = &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+			body := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+			resp.Body = body
+			go func() {
+				<-ctx.Done()
+				_ = body.Close()
+			}()
 			releaseOnReturn = false
 		}
 		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
@@ -269,6 +292,76 @@ func rewriteCSSFromJS(source, baseURL string) (string, error) {
 	return "", fmt.Errorf("CSS_REWRITE_FAILED")
 }
 
+func targetDynamicCompileAllowed(h http.Header) bool {
+	policies := h.Values("Content-Security-Policy")
+	if len(policies) == 0 {
+		return true
+	}
+	for _, policy := range policies {
+		if !cspPolicyAllowsEval(policy) {
+			return false
+		}
+	}
+	return true
+}
+
+func targetReferrerPolicy(h http.Header) string {
+	for _, header := range h.Values("Referrer-Policy") {
+		for _, part := range strings.Split(header, ",") {
+			if policy := normalizeReferrerPolicy(part); policy != "" {
+				return policy
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeReferrerPolicy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "no-referrer", "no-referrer-when-downgrade", "origin", "origin-when-cross-origin", "same-origin", "strict-origin", "strict-origin-when-cross-origin", "unsafe-url":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
+}
+
+func cspPolicyAllowsEval(policy string) bool {
+	directives := parseCSPDirectives(policy)
+	sources, ok := directives["script-src"]
+	if !ok {
+		sources, ok = directives["default-src"]
+	}
+	if !ok {
+		return true
+	}
+	for _, source := range sources {
+		if source == "'unsafe-eval'" || source == "unsafe-eval" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCSPDirectives(policy string) map[string][]string {
+	out := make(map[string][]string)
+	for _, raw := range strings.Split(policy, ";") {
+		fields := strings.Fields(strings.TrimSpace(raw))
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.ToLower(fields[0])
+		if _, exists := out[name]; exists {
+			continue
+		}
+		values := make([]string, 0, len(fields)-1)
+		for _, field := range fields[1:] {
+			values = append(values, strings.ToLower(field))
+		}
+		out[name] = values
+	}
+	return out
+}
+
 func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return rejected("BAD_REQUEST")
@@ -290,7 +383,7 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 		}
 		protocols := jsStringArray(opts.Get("protocols"))
 		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String())
-		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab)
+		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab, websocketOrigin(opts.Get("documentUrl").String()))
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -308,6 +401,14 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 		}
 		resolve.Invoke(stream)
 	})
+}
+
+func websocketOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func selectedRelayServer(servers []string) string {
