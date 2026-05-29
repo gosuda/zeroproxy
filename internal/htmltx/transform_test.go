@@ -200,14 +200,22 @@ func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 	}
 }
 
-func TestTransformAbsolutizesPassiveSubresources(t *testing.T) {
+func TestTransformProxiesPassiveSubresources(t *testing.T) {
 	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<body><img src="/logo.png"><video poster="poster.jpg"><source src="../media.webm"></video><img src="data:image/png;base64,AAAA"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	out, err := Transform(strings.NewReader(`<body><img src="/logo.png" srcset="/small.png 1x, ../large.png 2x"><video poster="poster.jpg"><source src="../media.webm"></video><img src="data:image/png;base64,AAAA"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{`src="https://example.com/logo.png"`, `poster="https://example.com/app/poster.jpg"`, `src="https://example.com/media.webm"`, `src="data:image/png;base64,AAAA"`} {
+	for _, want := range []string{
+		`src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flogo.png"`,
+		`data-zp-target-url="https://example.com/logo.png"`,
+		`srcset="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fsmall.png 1x, /zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flarge.png 2x"`,
+		`data-zp-target-srcset="https://example.com/small.png 1x, https://example.com/large.png 2x"`,
+		`poster="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp%2Fposter.jpg"`,
+		`src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fmedia.webm"`,
+		`src="data:image/png;base64,AAAA"`,
+	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}

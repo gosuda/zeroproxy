@@ -159,6 +159,10 @@ function createTargetServer(requests) {
           dynamicScript.id = 'dynamic-script-probe';
           dynamicScript.src = '/dynamic-script.js?from=createElement';
           document.head.appendChild(dynamicScript);
+          const dynamicImage = document.createElement('img');
+          dynamicImage.id = 'dynamic-image-probe';
+          dynamicImage.src = '/image-probe.png?dynamic=1';
+          document.body.appendChild(dynamicImage);
           try {
             const template = document.createElement('template');
             template.innerHTML = '<link rel="preconnect" href="https://preconnect.invalid">';
@@ -625,6 +629,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const state = await page.evaluate(() => ({ title: document.title, url: location.href, body: document.body && document.body.innerText, status: document.querySelector('#status')?.textContent || '' }));
     throw new Error(`${err.message}; nav state=${JSON.stringify(state)}; requests=${JSON.stringify(requests)}; proxy=${proxyLog}`);
   }
+  await waitForPage(page, () => document.getElementById('image-probe')?.complete && document.getElementById('dynamic-image-probe')?.complete);
 
   const home = await page.evaluate(() => ({
     href: location.href,
@@ -645,7 +650,21 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     })(),
     imageProbe: (() => {
       const el = document.getElementById('image-probe');
-      return el && { complete: el.complete, naturalWidth: el.naturalWidth, src: el.getAttribute('src') };
+      const attr = el && el.attributes.getNamedItem('src');
+      return el && {
+        complete: el.complete,
+        naturalWidth: el.naturalWidth,
+        src: el.getAttribute('src'),
+        srcProp: el.src,
+        currentSrc: el.currentSrc,
+        attrValue: attr && attr.value,
+        outerHTML: el.outerHTML,
+      };
+    })(),
+    dynamicImageProbe: (() => {
+      const el = document.getElementById('dynamic-image-probe');
+      const attr = el && el.attributes.getNamedItem('src');
+      return el && { complete: el.complete, naturalWidth: el.naturalWidth, src: el.getAttribute('src'), srcProp: el.src, attrValue: attr && attr.value, outerHTML: el.outerHTML };
     })(),
     faviconProbe: (() => {
       const el = document.getElementById('icon-link');
@@ -699,7 +718,18 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(home.imageProbe.complete, true);
   assert.equal(home.imageProbe.naturalWidth, 1);
   assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
+  assert.equal(home.imageProbe.srcProp, `http://${targetHost}:${targetPort}/image-probe.png`);
+  assert.equal(home.imageProbe.currentSrc, `http://${targetHost}:${targetPort}/image-probe.png`);
+  assert.equal(home.imageProbe.attrValue, `http://${targetHost}:${targetPort}/image-probe.png`);
+  assert.doesNotMatch(home.imageProbe.outerHTML, /\/zp\/api\/fetch|data-zp-target/);
+  assert.equal(home.dynamicImageProbe.complete, true);
+  assert.equal(home.dynamicImageProbe.naturalWidth, 1);
+  assert.equal(home.dynamicImageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png?dynamic=1`);
+  assert.equal(home.dynamicImageProbe.srcProp, `http://${targetHost}:${targetPort}/image-probe.png?dynamic=1`);
+  assert.equal(home.dynamicImageProbe.attrValue, `http://${targetHost}:${targetPort}/image-probe.png?dynamic=1`);
+  assert.doesNotMatch(home.dynamicImageProbe.outerHTML, /\/zp\/api\/fetch|data-zp-target/);
   assert.ok(requests.some(r => r.url === '/image-probe.png' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  assert.ok(requests.some(r => r.url === '/image-probe.png?dynamic=1' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   const addressBarShare = page.url();
   const relayServerParam = new RegExp(`server=ws%3A%2F%2Fproxy\\.localhost%3A${proxyPort}%2Fzp%2Fws-pipe`);

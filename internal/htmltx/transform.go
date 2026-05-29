@@ -241,7 +241,7 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	hasIntegrityBackup := false
 	for _, a := range tok.Attr {
 		key := strings.ToLower(a.Key)
-		if key == "data-zp-target-url" || key == "data-zp-blocked-url" || key == "data-zp-blocked-rel" || key == "data-zp-integrity" {
+		if key == "data-zp-target-url" || key == "data-zp-target-srcset" || key == "data-zp-blocked-url" || key == "data-zp-blocked-rel" || key == "data-zp-integrity" {
 			continue
 		}
 		if key == "integrity" && (tag == "script" || tag == "link") {
@@ -295,10 +295,19 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 			attrs = append(attrs, a)
 			continue
 		}
+		if shouldRewriteSrcsetAttr(tag, key) {
+			rewritten, visible, changed := rewriteSrcset(a.Val, opt)
+			if changed {
+				a.Val = rewritten
+				attrs = upsertAttr(attrs, "data-zp-target-srcset", visible)
+			}
+			attrs = append(attrs, a)
+			continue
+		}
 		if shouldRewritePassiveAttr(tag, key) {
 			trimmed := strings.TrimSpace(a.Val)
-			if target, ok := resolveTargetURL(a.Val, opt); ok {
-				a.Val = target
+			if wrapped, target, ok := wrapFetchURL(a.Val, opt); ok {
+				a.Val = wrapped
 				dataTarget = target
 			} else if trimmed != "" && hasDangerousURLScheme(trimmed) {
 				a.Val = shareurl.ControlPrefix + "error/POLICY_BLOCKED"
@@ -389,6 +398,92 @@ func shouldRewritePassiveAttr(tag, key string) bool {
 		return tag == "video"
 	}
 	return false
+}
+
+func shouldRewriteSrcsetAttr(tag, key string) bool {
+	return key == "srcset" && (tag == "img" || tag == "source")
+}
+
+func rewriteSrcset(raw string, opt Options) (rewritten, visible string, changed bool) {
+	candidates := parseSrcset(raw)
+	if len(candidates) == 0 {
+		return raw, raw, false
+	}
+	out := make([]string, 0, len(candidates))
+	vis := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if c.url == "" {
+			continue
+		}
+		wrapped, target, ok := wrapFetchURL(c.url, opt)
+		if !ok {
+			out = append(out, c.raw)
+			vis = append(vis, c.raw)
+			continue
+		}
+		out = append(out, joinSrcsetCandidate(wrapped, c.descriptor))
+		vis = append(vis, joinSrcsetCandidate(target, c.descriptor))
+		changed = true
+	}
+	if !changed {
+		return raw, raw, false
+	}
+	return strings.Join(out, ", "), strings.Join(vis, ", "), true
+}
+
+type srcsetCandidate struct {
+	raw        string
+	url        string
+	descriptor string
+}
+
+func parseSrcset(raw string) []srcsetCandidate {
+	var out []srcsetCandidate
+	s := strings.TrimSpace(raw)
+	for len(s) > 0 {
+		start := 0
+		for start < len(s) && isHTMLSpace(s[start]) {
+			start++
+		}
+		s = s[start:]
+		if s == "" {
+			break
+		}
+		i := 0
+		if strings.HasPrefix(strings.ToLower(s), "data:") {
+			for i < len(s) && !isHTMLSpace(s[i]) {
+				i++
+			}
+		} else {
+			for i < len(s) && !isHTMLSpace(s[i]) && s[i] != ',' {
+				i++
+			}
+		}
+		urlPart := s[:i]
+		j := i
+		for j < len(s) && s[j] != ',' {
+			j++
+		}
+		desc := strings.TrimSpace(s[i:j])
+		rawCandidate := strings.TrimSpace(s[:j])
+		out = append(out, srcsetCandidate{raw: rawCandidate, url: urlPart, descriptor: desc})
+		if j >= len(s) {
+			break
+		}
+		s = s[j+1:]
+	}
+	return out
+}
+
+func joinSrcsetCandidate(urlPart, descriptor string) string {
+	if strings.TrimSpace(descriptor) == "" {
+		return urlPart
+	}
+	return urlPart + " " + strings.TrimSpace(descriptor)
+}
+
+func isHTMLSpace(b byte) bool {
+	return b == ' ' || b == '\n' || b == '\t' || b == '\r' || b == '\f'
 }
 
 func hasDangerousURLScheme(s string) bool {
