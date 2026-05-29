@@ -965,6 +965,26 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const childFunctionHref = modern.contentWindow.Function('return location.href')();
     try { ws.close(); } catch {}
 
+    const docwrite = document.createElement('iframe');
+    document.body.appendChild(docwrite);
+    const childDoc = docwrite.contentDocument;
+    childDoc.open();
+    childDoc.write(`<!doctype html><body>
+      <script>window.__docwriteInlineRan = true;<\/script>
+      <script src="/dynamic-script.js?from=docwrite-frame"><\/script>
+    </body>`);
+    childDoc.close();
+    await new Promise(resolve => {
+      const deadline = Date.now() + 1000;
+      (function poll() {
+        if (!docwrite.contentDocument.querySelector('[data-zp-docwrite-pending]') || Date.now() > deadline) { resolve(); return; }
+        setTimeout(poll, 25);
+      })();
+    });
+    const docwriteHTML = docwrite.contentDocument.documentElement.outerHTML;
+    const docwriteHelperType = typeof docwrite.contentWindow.__zp_runClassic;
+    const docwriteInlineRan = docwrite.contentWindow.__docwriteInlineRan === true;
+
     const observed = document.createElement('iframe');
     document.body.appendChild(observed);
     const attr = document.createAttribute('src');
@@ -982,8 +1002,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
 
     sync.remove();
     modern.remove();
+    docwrite.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, rewrittenSrc };
+    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, docwriteHTML, docwriteHelperType, docwriteInlineRan, rewrittenSrc };
   }, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
@@ -994,6 +1015,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionShared, true);
   assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
+  assert.equal(iframeIsolation.docwriteHelperType, 'function');
+  assert.doesNotMatch(iframeIsolation.docwriteHTML, /__docwriteInlineRan|\/zp\/api\/script|data-zp-|application\/x-zeroproxy-blocked.*dynamic-script/);
+  assert.equal(iframeIsolation.docwriteInlineRan, false);
 
   const frameMessage = await page.evaluate(async target => {
     const before = location.href;

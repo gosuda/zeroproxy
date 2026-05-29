@@ -46,6 +46,7 @@
   const rewrittenInlineScripts = new WeakSet();
   const rewrittenStyleNodes = new WeakSet();
   const nativeFormSubmissions = new WeakSet();
+  const documentWriteHookedWindows = new WeakSet();
   const windowMethodBindings = new Map();
   const integrityBackupAttr = 'data-zp-integrity';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
@@ -197,6 +198,61 @@
       Object.defineProperty(proto, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true });
       toStringMaskedPrototypes.add(proto);
     } catch {}
+  }
+
+  function installDocumentWriteHooks(w) {
+    const doc = w && w.document;
+    if (!doc || documentWriteHookedWindows.has(w)) return;
+    documentWriteHookedWindows.add(w);
+    const write = doc.write && doc.write.bind(doc);
+    const writeln = doc.writeln && doc.writeln.bind(doc);
+    const proto = w.Document && w.Document.prototype;
+    const protoWrite = proto && proto.write;
+    const protoWriteln = proto && proto.writeln;
+    const parser = w.DOMParser && w.DOMParser.prototype && w.DOMParser.prototype.parseFromString;
+    const rangeFragment = w.Range && w.Range.prototype && w.Range.prototype.createContextualFragment;
+    const scheduleActivation = targetDoc => {
+      if (!targetDoc || w === root) return;
+      const timer = w.setTimeout || root.setTimeout;
+      try { timer.call(w, () => activateDocumentWrittenScripts(targetDoc), 0); } catch {}
+    };
+    if (write) define(doc, 'write', function(...parts) { const ret = write(parts.map(p => transformHTML(String(p))).join('')); scheduleActivation(doc); return ret; });
+    if (writeln) define(doc, 'writeln', function(...parts) { const ret = writeln(parts.map(p => transformHTML(String(p))).join('') + '\n'); scheduleActivation(doc); return ret; });
+    if (typeof protoWrite === 'function') define(proto, 'write', function(...parts) { const ret = protoWrite.call(this, parts.map(p => transformHTML(String(p))).join('')); scheduleActivation(this); return ret; });
+    if (typeof protoWriteln === 'function') define(proto, 'writeln', function(...parts) { const ret = protoWriteln.call(this, parts.map(p => transformHTML(String(p))).join('') + '\n'); scheduleActivation(this); return ret; });
+    if (parser && w.DOMParser) define(w.DOMParser.prototype, 'parseFromString', function(markup, type) { return parser.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
+    if (rangeFragment && w.Range) define(w.Range.prototype, 'createContextualFragment', function(markup) { return rangeFragment.call(this, transformHTML(String(markup))); });
+  }
+
+  function activateDocumentWrittenScripts(doc) {
+    if (!doc) return;
+    let scripts = [];
+    try {
+      scripts = Native.documentGetElementsByTagName ? Array.from(Native.documentGetElementsByTagName.call(doc, 'script')) : Array.from(doc.getElementsByTagName('script'));
+    } catch { return; }
+    for (const oldScript of scripts) {
+      const pending = Native.getAttribute.call(oldScript, 'data-zp-docwrite-pending') === '1';
+      const src = Native.getAttribute.call(oldScript, 'data-zp-docwrite-src') || Native.getAttribute.call(oldScript, 'src') || '';
+      if (!pending || !src || !oldScript.parentNode) continue;
+      if (Native.fetch && doc.defaultView && doc.defaultView !== root) {
+        Native.fetch(src, { credentials: 'same-origin', cache: 'no-store' }).then(resp => resp.text()).then(code => {
+          if (!oldScript.parentNode) return;
+          const next = doc.createElement('script');
+          const type = Native.getAttribute.call(oldScript, 'data-zp-docwrite-type') || '';
+          if (type && type !== 'classic') Native.setAttribute.call(next, 'type', type);
+          Native.setAttribute.call(next, 'nonce', 'zp');
+          setScriptText(next, code);
+          oldScript.parentNode.replaceChild(next, oldScript);
+        }).catch(() => { try { oldScript.parentNode && oldScript.parentNode.removeChild(oldScript); } catch {} });
+      } else try {
+        const next = doc.createElement('script');
+        const type = Native.getAttribute.call(oldScript, 'type') || '';
+        if (type) Native.setAttribute.call(next, 'type', type);
+        Native.setAttribute.call(next, 'nonce', 'zp');
+        Native.setAttribute.call(next, 'src', src);
+        oldScript.parentNode.replaceChild(next, oldScript);
+      } catch {}
+    }
   }
   function installEventMethods(proto) {
     define(proto, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = new Map(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
@@ -1054,10 +1110,7 @@
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args); });
-    if (Native.documentWrite) define(document, 'write', function(...parts) { return Native.documentWrite(parts.map(p => transformHTML(String(p))).join('')); });
-    if (Native.documentWriteln) define(document, 'writeln', function(...parts) { return Native.documentWriteln(parts.map(p => transformHTML(String(p))).join('') + '\n'); });
-    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
-    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
+    installDocumentWriteHooks(root);
   }
   function requestTargetURL(input) {
     const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
@@ -2743,6 +2796,7 @@
     try { target = targetURL(value); } catch { return blockExecutableURL(el, 'src', value); }
     urlMeta.set(el, target);
     Native.setAttribute.call(el, 'data-zp-target-url', target);
+    Native.setAttribute.call(el, 'nonce', 'zp');
     return Native.setAttribute.call(el, 'src', scriptProxyPath(target, kind));
   }
   function installScriptTextProps(w) {
@@ -3001,6 +3055,14 @@
       if (tag === 'script') {
         const dtype = executableScriptDataType(node);
         if (dtype === 'importmap') setScriptText(node, rewriteImportMapText(getScriptText(node)));
+        else if (dtype && (Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'))) {
+          setScriptSource(node, Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'));
+          Native.setAttribute.call(node, 'data-zp-docwrite-src', Native.getAttribute.call(node, 'src') || '');
+          Native.setAttribute.call(node, 'data-zp-docwrite-type', dtype);
+          Native.setAttribute.call(node, 'data-zp-docwrite-pending', '1');
+          if (Native.removeAttribute) Native.removeAttribute.call(node, 'src');
+          Native.setAttribute.call(node, 'type', 'application/x-zeroproxy-docwrite-external');
+        }
         else if (dtype) blockInlineScriptElement(node);
       }
       if (tag === 'style') {
@@ -3346,6 +3408,61 @@
       if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow) installNetworkContainment(frame.contentWindow);
     } catch { try { frame.remove(); } catch {} }
   }
+  function installChildRewriteHelpers(w) {
+    if (!w) return;
+    const wrapDynamicConstructor = ctor => {
+      try { return root.__zp_get ? root.__zp_get({ constructor: ctor }, 'constructor') : ctor; } catch { return ctor; }
+    };
+    const scope = new Proxy(w, {
+      has(_target, prop) { return prop !== Symbol.unscopables; },
+      get(target, prop) {
+        if (prop === Symbol.unscopables) return undefined;
+        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
+        if (prop === 'top' || prop === 'parent' || prop === 'opener') return target[prop] === target ? scope : target[prop];
+        const value = target[prop];
+        return typeof value === 'function' && WINDOW_BOUND_METHODS.has(prop) ? value.bind(target) : value;
+      },
+      set(target, prop, value) { target[prop] = value; return true; }
+    });
+    const isWindowLike = value => {
+      try { return value === w || value === scope || value && value.window === value; } catch { return false; }
+    };
+    const get = (base, prop) => {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if (isWindowLike(base) && (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames')) return base === scope || base === w ? scope : base;
+      if (isWindowLike(base) && prop === 'postMessage') return postMessageWrapperFor(base === scope ? w : base);
+      if (prop === 'constructor') return wrapDynamicConstructor(Reflect.get(Object(base), prop));
+      const value = Reflect.get(Object(base), prop);
+      return typeof value === 'function' && prop === 'postMessage' ? value.bind(base) : value;
+    };
+    const set = (base, prop, value) => { if (typeof prop !== 'symbol') prop = String(prop); Reflect.set(Object(base), prop, value); return value; };
+    const assign = (base, prop, op, value) => {
+      const current = get(base, prop);
+      const next = op === '+=' ? current + value : op === '-=' ? current - value : op === '*=' ? current * value : op === '/=' ? current / value : op === '%=' ? current % value : value;
+      set(base, prop, next);
+      return next;
+    };
+    const update = (base, prop, op, prefix) => {
+      const current = get(base, prop);
+      const next = op === '++' ? current + 1 : current - 1;
+      set(base, prop, next);
+      return prefix ? next : current;
+    };
+    define(w, '__zp_get', get);
+    define(w, '__zp_set', set);
+    define(w, '__zp_assign', assign);
+    define(w, '__zp_call', (base, prop, args) => Reflect.apply(get(base, prop), base === scope ? w : base, Array.isArray(args) ? args : []));
+    define(w, '__zp_update', update);
+    define(w, '__zp_construct', (ctor, args) => Reflect.construct(wrapDynamicConstructor(ctor), Array.isArray(args) ? args : []));
+    define(w, '__zp_has', (base, prop) => Reflect.has(Object(base), prop));
+    define(w, '__zp_getOwnPropertyDescriptor', (base, prop) => Reflect.getOwnPropertyDescriptor(Object(base), prop));
+    define(w, '__zp_ownKeys', base => Reflect.ownKeys(Object(base)));
+    if (root.__zp_module_url) define(w, '__zp_module_url', root.__zp_module_url);
+    define(w, '__zp_nav_assign', v => setVirtualLocation(v));
+    define(w, '__zp_nav_replace', v => setVirtualLocation(v, true));
+    define(w, '__zp_runClassic', fn => fn.call(w, scope));
+    define(w, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
+  }
   function installNetworkContainment(w) {
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
@@ -3357,12 +3474,14 @@
     if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
     installNavigatorIdentity(w);
     installGetterMasking(w);
+    installChildRewriteHelpers(w);
     installStorageFacades(w);
     installPostMessageHooks(w);
     if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
     if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
+    installDocumentWriteHooks(w);
     installOwnPropertyMasking(w);
     installDOMHooks(w);
     installStealthMembrane(w);
