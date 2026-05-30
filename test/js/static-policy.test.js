@@ -142,6 +142,13 @@ test('runtime installs required escape-vector hooks', () => {
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
 });
 
+test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.includes('requestedOrigin === frameOrigin'), 'postMessage does not recognize proxied frame origins');
+  assert.ok(rt.includes('if (frameOrigin && requestedOrigin === frameOrigin) return proxyOrigin;'), 'postMessage does not map proxied frame targetOrigin to proxy origin');
+  assert.ok(!rt.includes("u.hostname === 'challenges.cloudflare.com') return u.origin"), 'Cloudflare targetOrigin must not bypass proxied iframe origin mapping');
+});
+
 test('service worker waits for initialized WASM transport and cookie bridge', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');

@@ -752,14 +752,22 @@
     return s;
   }
   function normalizePostMessageTargetOriginForTarget(target, targetOrigin) {
+    if (targetOrigin == null) return targetOrigin;
+    const s = String(targetOrigin);
+    if (s === '*' || s === '/') return s;
+    let requestedOrigin = '';
     try {
-      const u = new URL(String(targetOrigin));
-      if (u.protocol === 'https:' && u.hostname === 'challenges.cloudflare.com') return u.origin;
+      const u = new URL(s);
+      if (u.protocol === 'http:' || u.protocol === 'https:') requestedOrigin = u.origin;
     } catch {}
-    const mapped = normalizePostMessageTargetOrigin(targetOrigin);
     const directOrigin = directExternalFrameOriginForSource(target);
-    if (directOrigin && (mapped === proxyOrigin || mapped === virtualURL.origin)) return directOrigin;
-    return mapped;
+    if (directOrigin && requestedOrigin === directOrigin) return directOrigin;
+    let frameOrigin = '';
+    try {
+      frameOrigin = frameOriginForSource(target) || frameWindowOrigins.get(target) || '';
+    } catch {}
+    if (frameOrigin && requestedOrigin === frameOrigin) return proxyOrigin;
+    return normalizePostMessageTargetOrigin(s);
   }
   function postMessageWrapperFor(target) {
     target = rawPostMessageTarget(target);
