@@ -850,8 +850,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(addressBarShare, /#k=/);
   assert.match(addressBarShare, relayServerParam);
   const staticNextHref = await page.$eval('#next', el => el.getAttribute('href') || '');
-  assert.match(staticNextHref, /^\/zp\/p\//);
-  assert.match(staticNextHref, relayServerParam);
+  assert.equal(staticNextHref, `http://${targetHost}:${targetPort}/next`);
   const externalContext = await (browser.createBrowserContext ? browser.createBrowserContext() : browser.createIncognitoBrowserContext());
   try {
     const externalPage = await externalContext.newPage();

@@ -4,7 +4,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
-use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
+use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UpdateOperator};
 use swc_css_ast::{DeclarationOrAtRule, ImportHref, ListOfComponentValues, Str, Stylesheet, UrlValue};
 use swc_css_visit::{Visit, VisitWith};
 use wasm_bindgen::prelude::*;
@@ -641,7 +641,7 @@ impl<'a> Rewriter<'a> {
             Expression::ImportExpression(expr) => self.walk_import_expression(expr),
             Expression::CallExpression(expr) => self.walk_call_expression(expr),
             Expression::NewExpression(expr) => self.walk_new_expression(expr),
-            Expression::BinaryExpression(expr) => { self.walk_expression(&expr.left); self.walk_expression(&expr.right); }
+            Expression::BinaryExpression(expr) => self.walk_binary_expression(expr),
             Expression::LogicalExpression(expr) => { self.walk_expression(&expr.left); self.walk_expression(&expr.right); }
             Expression::ConditionalExpression(expr) => { self.walk_expression(&expr.test); self.walk_expression(&expr.consequent); self.walk_expression(&expr.alternate); }
             Expression::UnaryExpression(expr) => self.walk_expression(&expr.argument),
@@ -729,6 +729,15 @@ impl<'a> Rewriter<'a> {
         self.walk_expression(&expr.right);
     }
 
+    fn walk_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
+        if expr.operator == BinaryOperator::In {
+            self.add_replacement(expr.span, format!("(__zp_has({},{}))", self.render_expression(&expr.right), self.render_expression(&expr.left)), 90);
+            return;
+        }
+        self.walk_expression(&expr.left);
+        self.walk_expression(&expr.right);
+    }
+
     fn walk_update_expression(&mut self, expr: &UpdateExpression<'a>) {
         if let Some((base, prop)) = self.simple_assignment_target(&expr.argument) {
             self.add_replacement(
@@ -810,10 +819,7 @@ impl<'a> Rewriter<'a> {
             Expression::CallExpression(expr) => self.render_call_expression(expr),
             Expression::NewExpression(expr) => self.render_new_expression(expr),
             Expression::ImportExpression(expr) => self.render_import_expression(expr),
-            Expression::BinaryExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.left.span(), self.render_expression(&expr.left)),
-                (expr.right.span(), self.render_expression(&expr.right)),
-            ]),
+            Expression::BinaryExpression(expr) => self.render_binary_expression(expr),
             Expression::LogicalExpression(expr) => self.render_span_with(expr.span, vec![
                 (expr.left.span(), self.render_expression(&expr.left)),
                 (expr.right.span(), self.render_expression(&expr.right)),
@@ -865,6 +871,16 @@ impl<'a> Rewriter<'a> {
             Expression::TSInstantiationExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
             _ => self.span_text(expr.span()).to_string(),
         }
+    }
+
+    fn render_binary_expression(&self, expr: &BinaryExpression<'a>) -> String {
+        if expr.operator == BinaryOperator::In {
+            return format!("(__zp_has({},{}))", self.render_expression(&expr.right), self.render_expression(&expr.left));
+        }
+        self.render_span_with(expr.span, vec![
+            (expr.left.span(), self.render_expression(&expr.left)),
+            (expr.right.span(), self.render_expression(&expr.right)),
+        ])
     }
 
     fn render_span_with(&self, span: Span, mut parts: Vec<(Span, String)>) -> String {

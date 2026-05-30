@@ -112,6 +112,10 @@ test('Rust rewriter supports event-handler and dynamic function body paths', asy
   const fnBody = rewriter.rewriteFunctionBody('return location.href + window.location.href;', ['location'], 'https://example.com/');
   assert.equal(fnBody.ok, true);
   assert.match(fnBody.code, /return location\.href \+ __zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/);
+
+  const evalBody = rewriter.rewriteScript('return (this);', { kind: 'function', targetUrl: 'https://example.com/' });
+  assert.equal(evalBody.ok, true, JSON.stringify(evalBody.diagnostics));
+  assert.match(evalBody.code, /return \(this\);/);
 });
 
 test('Rust rewriter virtualizes dangerous globals without rewriting local bindings', async () => {
@@ -174,6 +178,17 @@ test('Rust rewriter accepts extensionless target URLs', async () => {
   });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.match(out.code, /__zp_get\(globalThis,"location"\)\.href/);
+});
+
+test('Rust rewriter routes in-operator checks on virtual windows through helper', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`if ("turnstile" in window) window.turnstile.render();`, {
+    kind: 'classic',
+    targetUrl: 'https://challenges.cloudflare.com/turnstile/v0/api.js',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.ok(out.code.includes('(__zp_has(__zp_get(globalThis,"window"),"turnstile"))'));
+  assert.equal(out.code.includes('"turnstile" in __zp_get(globalThis,"window")'), false);
 });
 
 test('Rust rewriter preserves compound writes and constructor escapes through helpers', async () => {

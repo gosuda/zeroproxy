@@ -166,6 +166,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 					EntryID:               req.Header.Get("X-Zp-Entry-Id"),
 					TargetURL:             finalURL,
 					DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
+					DocumentReferrer:      req.Header.Get("X-Zp-Document-Referrer"),
 					RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
 					Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
 					DynamicCompileAllowed: dynamicCompileAllowed,

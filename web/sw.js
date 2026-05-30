@@ -192,6 +192,10 @@ async function transportFetch(targetUrl, opt) {
     const entry = opt.tab.entries && opt.tab.entries.get(opt.entryId || opt.tab.activeEntryId);
     headers.set('X-ZP-Document-URL', entry && (entry.baseUrl || entry.targetUrl) || u);
   }
+  if (opt.document && !headers.has('X-ZP-Document-Referrer')) {
+    const entry = opt.tab.entries && opt.tab.entries.get(opt.entryId || opt.tab.activeEntryId);
+    headers.set('X-ZP-Document-Referrer', entry && entry.referrerUrl || '');
+  }
   if (!headers.has('X-ZP-Fetch-Credentials')) headers.set('X-ZP-Fetch-Credentials', opt.document ? 'include' : (opt.request && opt.request.credentials || 'same-origin'));
   if (!headers.has('X-ZP-Fetch-Mode')) headers.set('X-ZP-Fetch-Mode', opt.request && opt.request.mode || (opt.document ? 'navigate' : 'cors'));
   if (!headers.has('X-ZP-Fetch-Cache')) headers.set('X-ZP-Fetch-Cache', opt.request && opt.request.cache || 'default');
@@ -314,7 +318,7 @@ async function handleMessage(event) {
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
       const entryId = String(msg.entryId || randomEntryId());
-      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, referrerUrl: String(msg.referrerUrl || ''), title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
       ok({ path: ZP.makeSharePath(routeKey) });
       return;
@@ -324,7 +328,7 @@ async function handleMessage(event) {
       if (!tab) return;
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
-      const entry = { entryId: msg.entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
+      const entry = { entryId: msg.entryId, targetUrl, baseUrl, referrerUrl: String(msg.referrerUrl || ''), title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
       tab.entries.set(entry.entryId, entry);
       tab.activeEntryId = entry.entryId;
       if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId });
@@ -489,7 +493,7 @@ function createTab(targetUrl, servers) {
   const entryId = randomEntryId();
   const relayServers = ZP.relayServersForShare(servers || [], { allowLoopbackWS: true });
   const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers };
-  tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+  tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, referrerUrl: '', title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;
 }
@@ -566,6 +570,33 @@ function applyCORS(h, req) {
   h.set('Access-Control-Allow-Headers', req && req.headers.get('Access-Control-Request-Headers') || '*');
   h.set('Access-Control-Expose-Headers', '*');
 }
+function normalizedByteStream(body) {
+  if (!body || typeof body.getReader !== 'function') return body || null;
+  const reader = body.getReader();
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    async pull(controller) {
+      const next = await reader.read();
+      if (next.done) {
+        controller.close();
+        try { reader.releaseLock(); } catch {}
+        return;
+      }
+      const value = next.value;
+      if (value == null) return;
+      if (value instanceof Uint8Array) controller.enqueue(value);
+      else if (value instanceof ArrayBuffer) controller.enqueue(new Uint8Array(value));
+      else if (value && value.buffer instanceof ArrayBuffer) controller.enqueue(new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength));
+      else if (typeof Blob !== 'undefined' && value instanceof Blob) controller.enqueue(new Uint8Array(await value.arrayBuffer()));
+      else if (typeof value === 'string') controller.enqueue(encoder.encode(value));
+      else controller.enqueue(encoder.encode(String(value)));
+    },
+    cancel(reason) {
+      try { reader.cancel(reason); } catch {}
+      try { reader.releaseLock(); } catch {}
+    }
+  });
+}
 function addCSP(resp, req, servers) {
   const h = new Headers(resp.headers);
   const allowDynamicCompile = h.get('X-ZP-Dynamic-Compile') === '1';
@@ -574,7 +605,7 @@ function addCSP(resp, req, servers) {
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
   applyCORS(h, req);
-  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+  return new Response(normalizedByteStream(resp.body), { status: resp.status, statusText: resp.statusText, headers: h });
 }
 function safeError(code, status = 400, targetUrl = '') { if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED'; let host = ''; try { host = targetUrl ? new URL(targetUrl).host : ''; } catch {} const hostHTML = host ? '<p>Target host: '+escapeHTML(host)+'</p>' : ''; const body = '<!doctype html><meta charset="utf-8"><title>ZeroProxy '+code+'</title><main><h1>ZeroProxy</h1><p>'+code+'</p>'+hostHTML+'<button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>'; return new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Expose-Headers': '*' } }); }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }

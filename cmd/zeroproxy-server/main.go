@@ -497,9 +497,9 @@ func zeroCSP(r *http.Request) string {
 	if host == "" {
 		host = "proxy.example"
 	}
-	return "default-src 'none'; script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'"
+	return "default-src 'none'; script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' https://challenges.cloudflare.com blob: data:; child-src 'self' https://challenges.cloudflare.com blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'"
 }
 
 func serviceWorkerCSP(r *http.Request) string {
-	return strings.Replace(zeroCSP(r), "script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'", "script-src 'self' 'wasm-unsafe-eval'", 1)
+	return strings.Replace(zeroCSP(r), "script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'", "script-src 'self' blob: 'wasm-unsafe-eval'", 1)
 }

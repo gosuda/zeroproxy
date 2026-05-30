@@ -45,7 +45,8 @@ test('runtime preactivates p routes and masks navigator identity', () => {
   assert.match(rt, /ZP\.encryptShareURL\(target\)/);
   assert.match(rt, /ZP_HISTORY_UPDATE/);
   assert.match(rt, /Native\.locationAssign\(path\)/);
-  assert.ok(rt.includes('Chrome/134.0.0.0 Safari/537.36'));
+  assert.ok(rt.includes('root.navigator && root.navigator.userAgent'));
+  assert.ok(rt.includes('root.navigator && root.navigator.platform'));
   assert.match(rt, /installNavigatorIdentity/);
   assert.ok(worker.includes('Chrome/134.0.0.0 Safari/537.36'));
 });

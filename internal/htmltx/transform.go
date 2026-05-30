@@ -21,6 +21,7 @@ type Options struct {
 	EntryID               string
 	TargetURL             *url.URL
 	DocumentCookie        string
+	DocumentReferrer      string
 	RuntimeToken          string
 	Servers               []string
 	DynamicCompileAllowed bool
@@ -204,6 +205,7 @@ type bootConfig struct {
 	EntryID               string   `json:"entryId"`
 	TargetURL             string   `json:"targetUrl"`
 	DocumentCookie        string   `json:"documentCookie"`
+	DocumentReferrer      string   `json:"documentReferrer,omitempty"`
 	RuntimeToken          string   `json:"runtimeToken"`
 	Servers               []string `json:"servers,omitempty"`
 	DynamicCompileAllowed bool     `json:"dynamicCompileAllowed,omitempty"`
@@ -216,6 +218,7 @@ func runtimePrelude(opt Options) string {
 		EntryID:               opt.EntryID,
 		TargetURL:             opt.TargetURL.String(),
 		DocumentCookie:        opt.DocumentCookie,
+		DocumentReferrer:      opt.DocumentReferrer,
 		RuntimeToken:          opt.RuntimeToken,
 		Servers:               opt.Servers,
 		DynamicCompileAllowed: opt.DynamicCompileAllowed,
@@ -245,14 +248,23 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	var blockedLinkHref string
 	var integrityBackup string
 	hasIntegrityBackup := false
+	var nonceBackup string
+	hasNonceBackup := false
 	for _, a := range tok.Attr {
 		key := strings.ToLower(a.Key)
-		if key == "data-zp-target-url" || key == "data-zp-target-srcset" || key == "data-zp-blocked-url" || key == "data-zp-blocked-rel" || key == "data-zp-integrity" {
+		if key == "data-zp-target-url" || key == "data-zp-target-srcset" || key == "data-zp-blocked-url" || key == "data-zp-blocked-rel" || key == "data-zp-integrity" || key == "data-zp-target-nonce" {
 			continue
 		}
 		if key == "integrity" && (tag == "script" || tag == "link") {
 			integrityBackup = a.Val
 			hasIntegrityBackup = true
+			continue
+		}
+		if key == "nonce" && tag == "script" && executableScriptKind(tok) != "" {
+			if strings.TrimSpace(a.Val) != "" && a.Val != "zp" {
+				nonceBackup = a.Val
+				hasNonceBackup = true
+			}
 			continue
 		}
 		if tag == "a" && key == "ping" {
@@ -360,6 +372,9 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 	}
 	if hasIntegrityBackup {
 		attrs = upsertAttr(attrs, "data-zp-integrity", integrityBackup)
+	}
+	if hasNonceBackup {
+		attrs = upsertAttr(attrs, "data-zp-target-nonce", nonceBackup)
 	}
 	if blockedLinkRel != "" {
 		attrs = upsertAttr(attrs, "data-zp-blocked-rel", blockedLinkRel)

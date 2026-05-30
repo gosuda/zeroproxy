@@ -98,16 +98,31 @@ test('runtime installs required escape-vector hooks', () => {
     'documentReferrerPolicy',
     'suppressMetaPolicyElement',
     "localKey === 'http-equiv'",
+    'unwrapRaw(base === scope ? root : base)',
+    "trimmed.startsWith('blob:')",
     'src*="zp"',
     "define(root, 'Worker'",
     "define(root, 'SharedWorker'",
     'workerBlobURLs',
+    'workerBlobURLs.has(parsed.href)',
+    "define(URL, 'createObjectURL', function(blob) { return Native.createObjectURL(blob); })",
     'dataWorkerURL',
-    "'RTCPeerConnection'",
-    "'WebTransport'",
+    "rewriteWithPageRewriter(source, 'function')",
+    'configurable: true',
+    'w.addEventListener && w.addEventListener.bind(w)',
+    'rawPostMessageTarget(target)',
+    "Object.defineProperty(ev, 'origin'",
+    "name === 'origin'",
+    "base === document && prop === 'location'",
+    'frameOriginForSource(ev.source)',
+    "!Native.getAttribute.call(frame, 'data-zp-target-url')",
+    'compatRelativeRequestBase(raw)',
+    "path === '/api/auth'",
+    'https://shopsquare.naver.com/',
+    "Native.setAttribute.call(this, k, '')",
     "'WebSocketStream'",
     'getUserMedia',
-    'geolocation',
+    'mediaDevices',
     'installPhase2Membrane',
     '__zp_runClassic',
     '__zp_get',
@@ -191,11 +206,11 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
 	  assert.equal(server.includes("'unsafe-eval'"), false);
 	  assert.ok(core.includes("'wasm-unsafe-eval'"));
 	  assert.ok(index.includes("'wasm-unsafe-eval'"));
-	  assert.ok(core.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
+	  assert.ok(core.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
 	  assert.ok(core.includes("allowDynamicCompile"));
 	  assert.ok(index.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
-	  assert.ok(server.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
-	  assert.ok(server.includes("script-src 'self' 'wasm-unsafe-eval'"));
+	  assert.ok(server.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
+	  assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
 	  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js/);
 	  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js/);
 	  assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
