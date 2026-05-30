@@ -10,3 +10,4 @@ coverage/
 rewriter-rs/target/
 /wasm-kernel
 GOAL.md
+.claude/
