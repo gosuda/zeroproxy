@@ -1,0 +1,187 @@
+# golangci-lint v2 configuration (schema version "2").
+#
+# Workstream A.1: non-complexity linters land HARD (must pass green).
+# Complexity gates (cyclop / gocognit / nestif) are AUTHORED-BUT-DISABLED here,
+# to be flipped to hard error in Workstream A.2 after a complexity burn-down.
+# See the "# TODO(A.2):" block under linters.settings below.
+#
+# Several pre-existing, *intrinsic* findings are narrowly excluded with a
+# "# TODO(ratchet):" comment (e.g. SHA-1 mandated by the RFC6455 WebSocket
+# handshake, protocol byte encodings, err-shadowing). These are config-only
+# deferrals: A.1 changes config & CI only and must not edit application or
+# security-membrane logic. Each is reported as a concern for later ratchet.
+version: "2"
+
+run:
+  timeout: 5m
+  # Lint test files too. The js/wasm pass (GOOS=js GOARCH=wasm) is invoked
+  # separately and is the only pass that covers the //go:build js && wasm
+  # files: bridge_js.go / conn_js.go / cmd/wasm-kernel/main.go.
+  tests: true
+
+linters:
+  # Start from an empty set so the enabled linters are exactly the spec:
+  # this guarantees no complexity linter is silently active.
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - unparam
+    - unconvert
+    - misspell
+    - gosec
+
+  settings:
+    govet:
+      # Enable every vet analyzer except fieldalignment (too noisy / churny).
+      enable-all: true
+      disable:
+        - fieldalignment
+        # TODO(ratchet): `shadow` flags idiomatic `if _, err := ...` blocks
+        # across app and test code. Satisfying it requires renaming variables
+        # in application logic, which A.1 must not touch. Re-enable after a
+        # dedicated shadow-cleanup pass. Reported as a concern.
+        - shadow
+    misspell:
+      locale: US
+      # TODO(ratchet): "cancelled" (British spelling) appears as a local
+      # variable in security-membrane code (internal/swhttp/bridge_js.go).
+      # A.1 must not reformat/edit the membrane. Ignore the word here rather
+      # than rename the variable. Reported as a concern.
+      # (v2 schema: misspell uses `ignore-rules`, not the v1 `ignore-words`.)
+      ignore-rules:
+        - cancelled
+    # NOTE: staticcheck is intentionally left at its golangci-lint default
+    # check set (which already excludes the ST10xx stylecheck rules). Do NOT
+    # add `checks: [all, ...]` here: that switches the entire ST family on and
+    # surfaces unrelated structural findings (e.g. ST1000 package comments).
+    # QF1003 is deferred via linters.exclusions.rules below instead.
+    errcheck:
+      # TODO(ratchet): unchecked errors on best-effort write paths.
+      # `out` is a *bufio.Writer; WriteString on it can only fail if the
+      # underlying writer errors, and an immediate Flush already surfaces that.
+      # Fixing the remaining sites edits application logic (forbidden in A.1).
+      # Reported as a concern. (Deferred Close/SetDeadline are covered by the
+      # std-error-handling preset and the SetDeadline rule below.)
+      exclude-functions:
+        - (*bufio.Writer).WriteString
+    gosec:
+      # TODO(ratchet): the findings below are INTRINSIC to a TLS-intercepting
+      # proxy / SOCKS5 / WebSocket protocol implementation and cannot be
+      # "fixed" without changing security-membrane behavior (forbidden in A.1).
+      # Each excluded sub-rule is reported as a concern for the A.2 ratchet:
+      #   G101 - false positive: "zp-streamiso-v1\x00" is a protocol prefix,
+      #          not a credential.
+      #   G114 - http.ListenAndServe in the dev server (server hardening is a
+      #          separate task).
+      #   G115 - int->byte/uint16 conversions are deliberate protocol-frame
+      #          length/port encodings (SOCKS5 / WS).
+      #   G124 - cookie jar mirrors upstream Set-Cookie attributes verbatim by
+      #          design; it must not inject Secure/HttpOnly/SameSite.
+      #   G304/G703 - os.Open of an operator-supplied path (config/asset
+      #          loading); both fire on the same call site.
+      #   G401/G505 - SHA-1 is MANDATED by the RFC6455 WebSocket handshake.
+      #   G710 - http.Redirect target is policy-validated upstream.
+      #
+      # G104 is a different class: it is gosec's GENERIC unchecked-error rule,
+      # fully redundant with errcheck (which stays enabled globally as the
+      # authoritative, more configurable unchecked-error linter). Excluding
+      # G104 removes double-reporting on lines where errcheck is deliberately
+      # excluded; it does NOT reduce unchecked-error coverage.
+      excludes:
+        - G101
+        - G104
+        - G114
+        - G115
+        - G124
+        - G304
+        - G401
+        - G505
+        - G703
+        - G710
+
+    # ----------------------------------------------------------------------
+    # TODO(A.2): enable after complexity burn-down.
+    #
+    # These complexity gates are AUTHORED here but DISABLED (the linters are
+    # NOT listed under linters.enable above, and these settings are commented
+    # out so they cannot fire). The codebase currently has functions over
+    # budget; enabling now would make CI red. In Workstream A.2, after the
+    # burn-down, uncomment these settings AND add cyclop/gocognit/nestif to
+    # linters.enable to flip them to hard errors.
+    #
+    # NOTE: cyclop.package-average is intentionally omitted (fragile).
+    #
+    # cyclop:
+    #   max-complexity: 10
+    # gocognit:
+    #   min-complexity: 15
+    # nestif:
+    #   min-complexity: 4
+    # ----------------------------------------------------------------------
+
+  exclusions:
+    # Be lax on generated files (e.g. files with a generated-code header).
+    generated: lax
+    # Opt into golangci-lint's built-in "std-error-handling" preset (the old
+    # EXC0001): excludes unchecked errors from best-effort cleanup calls such
+    # as deferred Close/Flush. v2 ships NO default exclusions, so this is an
+    # explicit, narrow opt-in rather than a blanket relaxation.
+    presets:
+      - std-error-handling
+    # Skip vendored / build-output / non-Go trees entirely.
+    paths:
+      - dist
+      - bin
+      - rewriter-rs/target
+      - node_modules
+    rules:
+      # Test files: relax rules that are noisy or low-value in tests.
+      - path: _test.go
+        linters:
+          - gosec
+          - errcheck
+          - unparam
+      # TODO(ratchet): QF1003 ("use tagged switch") is a stylistic suggestion;
+      # acting on it edits application logic. Deferred. Reported as a concern.
+      - linters:
+          - staticcheck
+        text: "QF1003"
+      # TODO(ratchet): deferred SetDeadline reset on a connection (best-effort
+      # cleanup) in the SOCKS5 client. The receiver is an anonymous interface,
+      # so it is excluded by path+text here rather than via
+      # errcheck.exclude-functions. Scoped to this one call site. Reported as
+      # a concern.
+      - path: internal/socks5/client\.go
+        linters:
+          - errcheck
+        text: "c\\.SetDeadline"
+      # TODO(ratchet): in-flight scaffolding on the feature branch. These
+      # specific symbols/params are wired for the nextgen rewriter and are not
+      # safe to delete in a config-only task. Scoped by name so genuinely dead
+      # code added later is still caught. Reported as a concern; revisit in A.2.
+      - path: internal/htmltx/transform\.go
+        linters:
+          - unused
+        text: "rewriteEventHandler|pathEscape"
+      - path: internal/htmltx/transform\.go
+        linters:
+          - unparam
+        text: "wrapAttrURL - nav is unused"
+      - path: cmd/zeroproxy-server/main\.go
+        text: "workerBootstrap - r is unused"
+        linters:
+          - unparam
+
+formatters:
+  enable:
+    - gofumpt
+  exclusions:
+    paths:
+      - dist
+      - bin
+      - rewriter-rs/target
+      - node_modules

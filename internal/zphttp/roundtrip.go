@@ -47,8 +47,10 @@ const (
 	targetCHUAFullList     = `"Chromium";v="134.0.0.0", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="134.0.0.0"`
 )
 
-var fetchTLSProtocols = [...]string{utlskernel.ALPNHTTP2, utlskernel.ALPNHTTP1}
-var http1TLSProtocols = [...]string{utlskernel.ALPNHTTP1}
+var (
+	fetchTLSProtocols = [...]string{utlskernel.ALPNHTTP2, utlskernel.ALPNHTTP1}
+	http1TLSProtocols = [...]string{utlskernel.ALPNHTTP1}
+)
 
 type RequestPolicy struct {
 	Credentials     string
@@ -660,6 +662,7 @@ func canonicalAuthority(u *url.URL) string {
 	}
 	return net.JoinHostPort(h, p)
 }
+
 func canonicalPort(u *url.URL) string {
 	if p := u.Port(); p != "" {
 		return p

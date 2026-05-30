@@ -543,6 +543,7 @@ func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *
 func promise(fn func(resolve, reject js.Value)) js.Value {
 	return js.Global().Get("Promise").New(js.FuncOf(func(this js.Value, args []js.Value) any { go fn(args[0], args[1]); return nil }))
 }
+
 func rejected(msg string) js.Value {
 	return promise(func(resolve, reject js.Value) { reject.Invoke(jsError(msg)) })
 }
@@ -564,6 +565,7 @@ func jsStringArray(v js.Value) []string {
 	}
 	return out
 }
+
 func jsPayload(v js.Value) ([]byte, bool) {
 	if v.Type() == js.TypeString {
 		return []byte(v.String()), false
@@ -603,6 +605,7 @@ func safeResponse(code string, status int, host ...string) js.Value {
 func htmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;").Replace(s)
 }
+
 func classifyErr(err error) string {
 	s := err.Error()
 	switch {
@@ -620,6 +623,7 @@ func classifyErr(err error) string {
 		return "TARGET_CONNECT_FAILED"
 	}
 }
+
 func statusForErr(err error) int {
 	c := classifyErr(err)
 	if c == "TARGET_PROTOCOL_BLOCKED" || c == "POLICY_BLOCKED" {
@@ -627,6 +631,7 @@ func statusForErr(err error) int {
 	}
 	return http.StatusBadGateway
 }
+
 func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }

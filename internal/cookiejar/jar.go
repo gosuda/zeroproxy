@@ -338,6 +338,7 @@ func requestPath(u *url.URL) string {
 	}
 	return u.EscapedPath()
 }
+
 func defaultPath(u *url.URL) string {
 	p := requestPath(u)
 	i := strings.LastIndexByte(p, '/')

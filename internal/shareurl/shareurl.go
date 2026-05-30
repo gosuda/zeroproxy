@@ -178,6 +178,7 @@ func isLoopbackHost(host string) bool {
 	addr, err := netip.ParseAddr(h)
 	return err == nil && addr.IsLoopback()
 }
+
 func derive(seed, info []byte) ([]byte, error) {
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, info), key); err != nil {

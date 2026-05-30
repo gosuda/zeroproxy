@@ -666,6 +666,7 @@ func executableScriptKind(tok xhtml.Token) string {
 	}
 	return ""
 }
+
 func rewriteInlineScript(source, kind string, opt Options) string {
 	if strings.TrimSpace(source) == "" {
 		return source
@@ -689,6 +690,7 @@ func rewriteEventHandler(source string, opt Options) string {
 	}
 	return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError')`
 }
+
 func rewriteInlineStyle(source string, opt Options) string {
 	if opt.CSSRewriter != nil {
 		if code, err := opt.CSSRewriter(source, opt.TargetURL.String()); err == nil {
@@ -697,9 +699,11 @@ func rewriteInlineStyle(source string, opt Options) string {
 	}
 	return source
 }
+
 func blockScriptSource() string {
 	return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');`
 }
+
 func rewriteImportMap(source string, opt Options) string {
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(source), &doc); err != nil {
@@ -753,6 +757,7 @@ func rewriteImportMap(source string, opt Options) string {
 func injectSrcdoc(src string, opt Options) string {
 	return runtimePrelude(opt) + src
 }
+
 func baseSyncScript(raw string, opt Options) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
