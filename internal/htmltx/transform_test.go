@@ -233,6 +233,7 @@ func TestTransformRewritesStaticScriptsAndHandlers(t *testing.T) {
 		}
 	}
 }
+
 func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 	target, _ := url.Parse("https://example.com/app/")
 	out, err := Transform(strings.NewReader(`<body><script src="/app.js" integrity="sha384-script" data-zp-integrity="attacker"></script><link rel="stylesheet" href="/app.css" integrity="sha256-style"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
@@ -254,7 +255,7 @@ func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
 
 func TestTransformProxiesPassiveSubresources(t *testing.T) {
 	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<body><img src="/logo.png" srcset="/small.png 1x, ../large.png 2x"><video poster="poster.jpg"><source src="../media.webm"></video><img src="data:image/png;base64,AAAA"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	out, err := Transform(strings.NewReader(`<body><img src="/logo.png" srcset="/small.png 1x, ../large.png 2x"><video poster="poster.jpg"><source src="../media.webm"></video><svg><use href="/icons.svg#icon-a"></use></svg><img src="data:image/png;base64,AAAA"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +267,8 @@ func TestTransformProxiesPassiveSubresources(t *testing.T) {
 		`data-zp-target-srcset="https://example.com/small.png 1x, https://example.com/large.png 2x"`,
 		`poster="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp%2Fposter.jpg"`,
 		`src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fmedia.webm"`,
+		`href="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Ficons.svg#icon-a"`,
+		`data-zp-target-url="https://example.com/icons.svg#icon-a"`,
 		`src="data:image/png;base64,AAAA"`,
 	} {
 		if !strings.Contains(s, want) {

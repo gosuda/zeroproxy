@@ -75,15 +75,21 @@ fn proxied_css_url(raw: &str, base_url: &str, control_prefix: &str) -> Option<St
         return None;
     }
     let base = url::Url::parse(base_url).ok()?;
-    let abs = base.join(s).ok()?;
+    let mut abs = base.join(s).ok()?;
     if abs.scheme() != "http" && abs.scheme() != "https" {
         return None;
     }
+    let fragment = abs.fragment().map(str::to_string);
+    abs.set_fragment(None);
     let mut out = String::new();
     out.push_str(control_prefix);
     if !out.ends_with('/') { out.push('/'); }
     out.push_str("api/fetch?url=");
     out.extend(url::form_urlencoded::byte_serialize(abs.as_str().as_bytes()));
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(&fragment);
+    }
     Some(out)
 }
 
@@ -298,6 +304,7 @@ struct Rewriter<'a> {
     control_prefix: &'a str,
     replacements: Vec<Replacement>,
     scopes: Vec<HashSet<String>>,
+    window_aliases: Vec<HashSet<String>>,
 }
 
 impl<'a> Rewriter<'a> {
@@ -309,6 +316,7 @@ impl<'a> Rewriter<'a> {
             control_prefix: if control_prefix.is_empty() { "/zp/" } else { control_prefix },
             replacements: Vec::new(),
             scopes: Vec::new(),
+            window_aliases: Vec::new(),
         }
     }
 
@@ -340,12 +348,21 @@ impl<'a> Rewriter<'a> {
         self.source.get(span.start as usize..span.end as usize).unwrap_or("")
     }
 
-    fn push_scope(&mut self, scope: HashSet<String>) { self.scopes.push(scope); }
-    fn pop_scope(&mut self) { self.scopes.pop(); }
+    fn push_scope(&mut self, scope: HashSet<String>) { self.scopes.push(scope); self.window_aliases.push(HashSet::new()); }
+    fn pop_scope(&mut self) { self.scopes.pop(); self.window_aliases.pop(); }
     fn declare(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() { scope.insert(name.to_string()); }
     }
     fn declared(&self, name: &str) -> bool { self.scopes.iter().rev().any(|scope| scope.contains(name)) }
+    fn declare_window_alias(&mut self, name: &str) {
+        if let Some(scope) = self.window_aliases.last_mut() { scope.insert(name.to_string()); }
+    }
+    fn remove_window_alias(&mut self, name: &str) {
+        if let Some(scope) = self.window_aliases.last_mut() { scope.remove(name); }
+    }
+    fn is_window_alias(&self, name: &str) -> bool {
+        self.window_aliases.iter().rev().any(|scope| scope.contains(name))
+    }
     fn add_replacement(&mut self, span: Span, text: String, priority: i32) {
         let start = span.start as usize;
         let end = span.end as usize;
@@ -525,6 +542,14 @@ impl<'a> Rewriter<'a> {
     fn walk_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
         for declarator in &decl.declarations {
             self.declare_binding_pattern(&declarator.id);
+            if let BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind {
+                if let Some(init) = &declarator.init {
+                    if self.expression_is_window_alias_source(init) {
+                        self.declare_window_alias(id.name.as_str());
+                        self.add_replacement(init.span(), self.render_window_alias_source(init), 80);
+                    }
+                }
+            }
             self.walk_binding_pattern(&declarator.id);
             if let Some(init) = &declarator.init { self.walk_expression(init); }
         }
@@ -711,6 +736,17 @@ impl<'a> Rewriter<'a> {
     }
 
     fn walk_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
+        if expr.operator == AssignmentOperator::Assign {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &expr.left {
+                if self.expression_is_window_alias_source(&expr.right) {
+                    self.declare_window_alias(id.name.as_str());
+                    self.add_replacement(expr.span, format!("{} = {}", self.span_text(id.span), self.render_window_alias_source(&expr.right)), 80);
+                    return;
+                } else {
+                    self.remove_window_alias(id.name.as_str());
+                }
+            }
+        }
         if let Some((base, prop)) = self.assignment_target(&expr.left) {
             if expr.operator == AssignmentOperator::Assign {
                 self.add_replacement(expr.span, format!("(__zp_set({},{},{}))", base, prop, self.render_expression(&expr.right)), 100);
@@ -1134,15 +1170,50 @@ impl<'a> Rewriter<'a> {
     }
 
     fn member_needs_helper_computed(&self, expr: &ComputedMemberExpression<'a>) -> bool {
-        self.is_window_like_expression(&expr.object)
+        !matches!(&expr.object, Expression::Super(_)) && self.is_window_like_expression(&expr.object)
     }
 
     fn is_window_like_expression(&self, expr: &Expression<'a>) -> bool {
         match expr {
-            Expression::Identifier(id) => matches!(id.name.as_str(), "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames" | "document") && !self.declared(id.name.as_str()),
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                (matches!(name, "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames" | "document") && !self.declared(name)) || self.is_window_alias(name)
+            }
             Expression::StaticMemberExpression(member) => matches!(member.property.name.as_str(), "defaultView" | "contentWindow" | "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames") && self.is_window_like_expression(&member.object),
-            Expression::ComputedMemberExpression(member) => self.is_window_like_expression(&member.object),
+            Expression::ComputedMemberExpression(_) => false,
             _ => false,
+        }
+    }
+
+    fn expression_is_window_alias_source(&self, expr: &Expression<'a>) -> bool {
+        match expr {
+            Expression::ThisExpression(_) => false,
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                (matches!(name, "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames") && !self.declared(name)) || self.is_window_alias(name)
+            }
+            Expression::StaticMemberExpression(_) => self.is_window_like_expression(expr),
+            Expression::LogicalExpression(expr) => self.expression_is_window_alias_source(&expr.left) || self.expression_is_window_alias_source(&expr.right),
+            Expression::ConditionalExpression(expr) => self.expression_is_window_alias_source(&expr.consequent) || self.expression_is_window_alias_source(&expr.alternate),
+            Expression::ParenthesizedExpression(expr) => self.expression_is_window_alias_source(&expr.expression),
+            _ => false,
+        }
+    }
+
+    fn render_window_alias_source(&self, expr: &Expression<'a>) -> String {
+        match expr {
+            Expression::ThisExpression(_) => "__zp_get(globalThis,\"window\")".to_string(),
+            Expression::LogicalExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.left.span(), self.render_window_alias_source(&expr.left)),
+                (expr.right.span(), self.render_window_alias_source(&expr.right)),
+            ]),
+            Expression::ConditionalExpression(expr) => self.render_span_with(expr.span, vec![
+                (expr.test.span(), self.render_expression(&expr.test)),
+                (expr.consequent.span(), self.render_window_alias_source(&expr.consequent)),
+                (expr.alternate.span(), self.render_window_alias_source(&expr.alternate)),
+            ]),
+            Expression::ParenthesizedExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_window_alias_source(&expr.expression))]),
+            _ => self.render_expression(expr),
         }
     }
 

@@ -121,7 +121,7 @@
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
     const script = options && options.allowDynamicCompile ? "script-src 'self' blob: 'nonce-zp' 'unsafe-eval' 'wasm-unsafe-eval'" : "script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'";
-    return "default-src 'none'; " + script + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' https://challenges.cloudflare.com blob: data:; child-src 'self' https://challenges.cloudflare.com blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    return "default-src 'none'; " + script + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
   }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');

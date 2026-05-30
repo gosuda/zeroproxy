@@ -83,6 +83,7 @@ test('Rust CSS rewriter rewrites only AST URL resources', async () => {
     @import "/css/theme.css" screen;
     .hero {
       background-image: url(/img/hero.png);
+      list-style-image: url(/img/symbols.svg#icon-star);
       cursor: url("https://cdn.example/cursor.cur"), pointer;
       content: "url(https://string.invalid/not-a-request.png)";
       mask-image: url(data:image/png;base64,AAAA);
@@ -92,6 +93,7 @@ test('Rust CSS rewriter rewrites only AST URL resources', async () => {
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.ok(out.code.includes('@import "/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fcss%2Ftheme.css"'));
   assert.ok(out.code.includes('url("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fhero.png")'));
+  assert.ok(out.code.includes('url("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fsymbols.svg#icon-star")'));
   assert.ok(out.code.includes('url("/zp/api/fetch?url=https%3A%2F%2Fcdn.example%2Fcursor.cur")'));
   assert.ok(out.code.includes('/* url("https://comment.invalid/leak.png") */'));
   assert.ok(out.code.includes('"url(https://string.invalid/not-a-request.png)"'));
@@ -189,6 +191,20 @@ test('Rust rewriter routes in-operator checks on virtual windows through helper'
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.ok(out.code.includes('(__zp_has(__zp_get(globalThis,"window"),"turnstile"))'));
   assert.equal(out.code.includes('"turnstile" in __zp_get(globalThis,"window")'), false);
+});
+
+test('Rust rewriter routes computed global-alias member access through runtime membrane', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`let G; G = this || self; const k = decode(); const v = G[k]; G[k] = v + 1; G[k](); const local = obj[k];`, {
+    kind: 'classic',
+    targetUrl: 'https://example.com/app.js',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.ok(out.code.includes('G = __zp_get(globalThis,"window") || __zp_get(globalThis,"self")'));
+  assert.ok(out.code.includes('__zp_get(G,k)'));
+  assert.ok(out.code.includes('__zp_set(G,k,v + 1)'));
+  assert.ok(out.code.includes('__zp_call(G,k,[])'));
+  assert.ok(out.code.includes('const local = obj[k]'));
 });
 
 test('Rust rewriter preserves compound writes and constructor escapes through helpers', async () => {

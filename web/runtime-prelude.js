@@ -383,10 +383,6 @@
     return proxyOrigin + ZP.makeSharePath(share.encrypted) + shareFragmentForKey(share.key);
   }
   function directExternalFrameURL(target) {
-    try {
-      const u = new URL(target);
-      if (u.protocol === 'https:' && u.hostname === 'challenges.cloudflare.com' && u.pathname.startsWith('/cdn-cgi/challenge-platform/')) return u.href;
-    } catch {}
     return '';
   }
   function isDirectExternalFrameElement(frame) {
@@ -615,7 +611,16 @@
 	    if (!text || text[0] === '#' || /^(?:data|blob|about):/i.test(text)) return text;
 	    try { return resourceProxyPath(targetURL(text, base)); } catch { return text; }
 	  }
-	  function resourceProxyPath(target) { return ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target); }
+	  function resourceProxyPath(target) {
+	    try {
+	      const u = new URL(target);
+	      const hash = u.hash;
+	      u.hash = '';
+	      return ZP.apiPath('fetch') + '?url=' + encodeURIComponent(u.href) + hash;
+	    } catch {
+	      return ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target);
+	    }
+	  }
 	  function parseSrcset(raw) {
 	    const out = [];
 	    let s = String(raw || '').trim();
@@ -1118,7 +1123,7 @@
         return true;
       },
       getOwnPropertyDescriptor(target, prop) {
-        if (prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false };
+        if (prop === 'location') return Reflect.getOwnPropertyDescriptor(target, prop);
         return Reflect.getOwnPropertyDescriptor(target, prop);
       }
     });
@@ -1199,8 +1204,14 @@
     function call(base, prop, args) {
       const rawBase = unwrapRaw(base === scope ? root : base);
       const fn = get(base, prop);
-      const callArgs = Array.isArray(args) ? args.map(unwrapRaw) : [];
+      const callArgs = Array.isArray(args) ? (preserveMembraneCallArgs(base, prop) ? args : args.map(unwrapRaw)) : [];
+      if (typeof fn !== 'function') return undefined;
       return Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs) : Reflect.apply(fn, rawBase, callArgs);
+    }
+    function preserveMembraneCallArgs(base, prop) {
+      if (base === Object && (prop === 'getOwnPropertyDescriptor' || prop === 'getOwnPropertyDescriptors' || prop === 'getOwnPropertyNames' || prop === 'getOwnPropertySymbols' || prop === 'keys')) return true;
+      if (base === Reflect && (prop === 'getOwnPropertyDescriptor' || prop === 'ownKeys' || prop === 'has' || prop === 'get')) return true;
+      return false;
     }
     function construct(ctor, args) {
       const dynamic = dynamicWrapperFor(ctor);
@@ -1212,7 +1223,7 @@
       const raw = unwrapRaw(base === scope ? root : base);
       return Reflect.has(Object(raw), prop);
     }
-    function getOwnPropertyDescriptor(base, prop) { if (isWindowLike(base) && prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false }; return Reflect.getOwnPropertyDescriptor(Object(base), prop); }
+    function getOwnPropertyDescriptor(base, prop) { return Reflect.getOwnPropertyDescriptor(Object(unwrapRaw(base === scope ? root : base)), prop); }
     function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
     function moduleURL(specifier, referrer) {
       const spec = String(specifier);
@@ -2353,7 +2364,10 @@
 	  function proxiedFetchTarget(raw) {
 	    try {
 	      const u = new URL(String(raw || ''), proxyOrigin);
-	      if (u.pathname === ZP.apiPath('fetch')) return u.searchParams.get('url') || '';
+	      if (u.pathname === ZP.apiPath('fetch')) {
+	        const target = u.searchParams.get('url') || '';
+	        return target && u.hash ? target + u.hash : target;
+	      }
 	    } catch {}
 	    return '';
 	  }

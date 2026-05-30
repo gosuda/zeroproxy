@@ -624,9 +624,17 @@ func wrapFetchURL(raw string, opt Options) (wrapped, target string, ok bool) {
 	if !ok {
 		return shareurl.ControlPrefix + "error/POLICY_BLOCKED", "", false
 	}
+	networkTarget := target
+	fragment := ""
+	if u, err := url.Parse(target); err == nil && u.Fragment != "" {
+		fragment = "#" + u.EscapedFragment()
+		u.Fragment = ""
+		u.RawFragment = ""
+		networkTarget = u.String()
+	}
 	q := url.Values{}
-	q.Set("url", target)
-	return shareurl.ControlPrefix + "api/fetch?" + q.Encode(), target, true
+	q.Set("url", networkTarget)
+	return shareurl.ControlPrefix + "api/fetch?" + q.Encode() + fragment, target, true
 }
 
 func isStylesheetLinkRel(rel string) bool {
