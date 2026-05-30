@@ -205,124 +205,132 @@
   function workerUploadChannelName() {
     return '__zp_worker_upload:' + tabId + ':' + runtimeToken;
   }
+  function isStreamableBody(body) {
+    return !!body && typeof body.getReader === 'function';
+  }
+  function chunkToArrayBuffer(value) {
+    let bytes;
+    if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+    else if (value && value.buffer instanceof ArrayBuffer) bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength);
+    else bytes = new Uint8Array();
+    return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
+  }
+  function makeStreamCloser(reader, transport) {
+    let closed = false;
+    return {
+      isClosed: () => closed,
+      close() {
+        if (closed) return;
+        closed = true;
+        try { reader.releaseLock && reader.releaseLock(); } catch {}
+        try { transport.close(); } catch {}
+      }
+    };
+  }
+  function cancelReader(reader) {
+    try { reader.cancel && reader.cancel(); } catch {}
+  }
+  // Serializes pulls behind a single-flight guard so a re-entrant pull (arriving while
+  // a prior read() is in flight) is dropped rather than double-reading the body.
+  function makePullGate(reader, sink, closer) {
+    let reading = false;
+    return async () => {
+      if (closer.isClosed() || reading) return;
+      reading = true;
+      try { await pumpUploadChunk(reader, sink, closer); } finally { reading = false; }
+    };
+  }
+  // Routes one inbound BroadcastChannel message addressed to this relay (role 'page',
+  // matching id) to the open-stream lifecycle. `settle` carries the open-promise's
+  // resolve/reject and a cancelTimer() that clears the ready timeout.
+  function routeRelayMessage(msg, ctx) {
+    if (msg.role !== 'page' || msg.id !== ctx.id) return;
+    if (msg.type === 'ready') { ctx.settle.cancelTimer(); ctx.settle.resolve(String(msg.streamId || '')); return; }
+    if (msg.type === 'cancel') { cancelReader(ctx.reader); ctx.closer.close(); return; }
+    if (msg.type === 'error') { ctx.settle.cancelTimer(); ctx.closer.close(); ctx.settle.reject(new TypeError(msg.error || 'NetworkError')); return; }
+    if (msg.type === 'pull') ctx.pull();
+  }
+  // Pulls one chunk and forwards it via the supplied transport sink, then closes on
+  // done/error. `sink` owns the transport-specific postMessage (relay: no transfer;
+  // MessageChannel: transfers the buffer) so each path keeps its exact semantics.
+  async function pumpUploadChunk(reader, sink, closer) {
+    try {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        sink.close();
+        closer.close();
+        return;
+      }
+      sink.chunk(chunkToArrayBuffer(chunk.value));
+    } catch (err) {
+      sink.error(err && (err.name || err.message) || 'NetworkError');
+      closer.close();
+    }
+  }
   async function openRelayedUploadStream(body) {
-    if (typeof self.BroadcastChannel !== 'function' || !body || typeof body.getReader !== 'function') return '';
+    if (typeof self.BroadcastChannel !== 'function' || !isStreamableBody(body)) return '';
     const id = ZP.randomId('wup');
     const bc = new BroadcastChannel(workerUploadChannelName());
     const reader = body.getReader();
-    let closed = false;
-    let reading = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      try { reader.releaseLock && reader.releaseLock(); } catch {}
-      try { bc.close(); } catch {}
+    const closer = makeStreamCloser(reader, bc);
+    const sink = {
+      chunk: (data) => bc.postMessage({ role: 'worker', type: 'chunk', id, tabId, runtimeToken, data }),
+      close: () => bc.postMessage({ role: 'worker', type: 'close', id, tabId, runtimeToken }),
+      error: (error) => bc.postMessage({ role: 'worker', type: 'error', id, tabId, runtimeToken, error })
     };
+    const pull = makePullGate(reader, sink, closer);
     const streamId = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { close(); reject(new TypeError('NetworkError')); }, 5000);
-      bc.onmessage = async ev => {
-        const msg = ev && ev.data || {};
-        if (msg.role !== 'page' || msg.id !== id) return;
-        if (msg.type === 'ready') {
-          clearTimeout(timer);
-          resolve(String(msg.streamId || ''));
-          return;
-        }
-        if (msg.type === 'cancel') {
-          try { reader.cancel && reader.cancel(); } catch {}
-          close();
-          return;
-        }
-        if (msg.type === 'error') {
-          clearTimeout(timer);
-          close();
-          reject(new TypeError(msg.error || 'NetworkError'));
-          return;
-        }
-        if (msg.type !== 'pull' || closed || reading) return;
-        reading = true;
-        try {
-          const chunk = await reader.read();
-          if (chunk.done) {
-            bc.postMessage({ role: 'worker', type: 'close', id, tabId, runtimeToken });
-            close();
-            return;
-          }
-          const value = chunk.value;
-          let bytes;
-          if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-          else if (value && value.buffer instanceof ArrayBuffer) bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength);
-          else bytes = new Uint8Array();
-          const data = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
-          bc.postMessage({ role: 'worker', type: 'chunk', id, tabId, runtimeToken, data });
-        } catch (err) {
-          bc.postMessage({ role: 'worker', type: 'error', id, tabId, runtimeToken, error: err && (err.name || err.message) || 'NetworkError' });
-          close();
-        } finally {
-          reading = false;
-        }
-      };
+      const timer = setTimeout(() => { closer.close(); reject(new TypeError('NetworkError')); }, 5000);
+      const settle = { resolve, reject, cancelTimer: () => clearTimeout(timer) };
+      const ctx = { id, reader, closer, pull, settle };
+      bc.onmessage = ev => routeRelayMessage(ev && ev.data || {}, ctx);
       bc.postMessage({ role: 'worker', type: 'open', id, tabId, runtimeToken });
     });
     return streamId;
   }
   async function openUploadStream(body) {
-    if (!body || typeof body.getReader !== 'function') return '';
+    if (!isStreamableBody(body)) return '';
     const controller = nav && nav.serviceWorker && nav.serviceWorker.controller;
     if (!controller) return openRelayedUploadStream(body);
     const id = ZP.randomId('up');
     const channel = new MessageChannel();
     const port = channel.port1;
     const reader = body.getReader();
-    let closed = false;
-    let reading = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      try { reader.releaseLock && reader.releaseLock(); } catch {}
-      try { port.close(); } catch {}
+    const closer = makeStreamCloser(reader, port);
+    const sink = {
+      // chunk post is intentionally NOT wrapped: a throwing post (e.g. DataCloneError)
+      // must propagate to pumpUploadChunk's catch so the stream fails closed (error + close).
+      chunk: (data) => port.postMessage({ type: 'chunk', data }, [data]),
+      close: () => { try { port.postMessage({ type: 'close' }); } catch {} },
+      error: (error) => { try { port.postMessage({ type: 'error', error }); } catch {} }
     };
-    port.onmessage = async ev => {
+    const pull = makePullGate(reader, sink, closer);
+    port.onmessage = ev => {
       const msg = ev && ev.data || {};
-      if (msg.type === 'cancel') {
-        try { reader.cancel && reader.cancel(); } catch {}
-        close();
-        return;
-      }
-      if (msg.type !== 'pull' || closed || reading) return;
-      reading = true;
-      try {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          try { port.postMessage({ type: 'close' }); } catch {}
-          close();
-          return;
-        }
-        const value = chunk.value;
-        let bytes;
-        if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-        else if (value && value.buffer instanceof ArrayBuffer) bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength);
-        else bytes = new Uint8Array();
-        const data = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
-        port.postMessage({ type: 'chunk', data }, [data]);
-      } catch (err) {
-        try { port.postMessage({ type: 'error', error: err && (err.name || err.message) || 'NetworkError' }); } catch {}
-        close();
-      } finally {
-        reading = false;
-      }
+      if (msg.type === 'cancel') { cancelReader(reader); closer.close(); return; }
+      if (msg.type === 'pull') return pull();
     };
     try {
       await postMessageToSW({ type: 'ZP_UPLOAD_STREAM_OPEN', tabId, id }, [channel.port2]);
       return id;
     } catch (err) {
-      close();
+      closer.close();
       return openRelayedUploadStream(body);
     }
   }
-  self.fetch = async function fetch(input, init={}) {
-    const target = ZP.canonicalTargetURL(input && input.url || input, base.href).href;
-    const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Request(input, init) : new Request(String(input), init);
+  function buildFetchRequest(input, init) {
+    if (input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function') return new Request(input, init);
+    return new Request(String(input), init);
+  }
+  // `priority` is not universally present on Request; guard membership and tolerate a
+  // throwing getter so the header set never breaks the forward request.
+  function setFetchPriorityHeader(req, headers) {
+    if (!('priority' in req)) return;
+    try { headers.set('X-ZP-Fetch-Priority', String(req.priority || '')); } catch {}
+  }
+  // Stamps the ZP transport headers carrying tab/runtime identity and the original
+  // fetch-init semantics the server must replay. Every header is load-bearing.
+  function buildForwardHeaders(req) {
     const headers = new Headers(req.headers);
     headers.set('X-ZP-Tab-Id', tabId);
     headers.set('X-ZP-Runtime-Token', runtimeToken);
@@ -335,18 +343,24 @@
     headers.set('X-ZP-Fetch-Referrer-Policy', req.referrerPolicy || '');
     headers.set('X-ZP-Fetch-Integrity', req.integrity || '');
     headers.set('X-ZP-Fetch-Keepalive', req.keepalive ? '1' : '0');
-    if ('priority' in req) {
-      try { headers.set('X-ZP-Fetch-Priority', String(req.priority || '')); } catch {}
-    }
+    setFetchPriorityHeader(req, headers);
+    return headers;
+  }
+  // Routes the request body through the upload-stream relay when present, falling back
+  // to a half-duplex streaming body when no stream channel could be opened.
+  async function applyUploadBody(req, headers, apiInit) {
+    if (req.method === 'GET' || req.method === 'HEAD') return;
+    const streamId = await openUploadStream(req.body).catch(() => '');
+    if (streamId) { headers.set('X-ZP-Upload-Stream-Id', streamId); return; }
+    apiInit.body = req.body;
+    apiInit.duplex = 'half';
+  }
+  self.fetch = async function fetch(input, init={}) {
+    const target = ZP.canonicalTargetURL(input && input.url || input, base.href).href;
+    const req = buildFetchRequest(input, init);
+    const headers = buildForwardHeaders(req);
     const apiInit = { method: req.method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'follow' };
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      const streamId = await openUploadStream(req.body).catch(() => '');
-      if (streamId) headers.set('X-ZP-Upload-Stream-Id', streamId);
-      else {
-        apiInit.body = req.body;
-        apiInit.duplex = 'half';
-      }
-    }
+    await applyUploadBody(req, headers, apiInit);
     return nativeFetch(internalURL('/zp/api/fetch?url=' + encodeURIComponent(target)), apiInit);
   };
   maskNativeFunction(self.fetch, 'fetch');
