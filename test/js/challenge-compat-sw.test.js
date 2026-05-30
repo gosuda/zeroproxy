@@ -25,6 +25,7 @@ function loadServiceWorker() {
     Headers,
     Request,
     Response,
+    AbortController,
     ReadableStream,
     Blob,
     WebAssembly,
@@ -266,6 +267,107 @@ test('B4 scriptResponseHeaders: internal marker on a script response is stripped
     h.get('X-ZP-Challenge-Compat'),
     null,
     'marker must be deleted from script response headers',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// B5 behavioral arm tests: the kernel arm header X-Zp-Challenge-Compat-Arm is
+// set authoritatively from TRUSTED per-tab state inside transportFetch, and any
+// page-supplied (forged) value is unconditionally deleted first. Default OFF.
+//
+// Seam: readiness !== 'READY' (sw.js) only gates whether initKernel runs; on
+// success transportFetch falls through to self.__go_jshttp. So stubbing
+// initKernel to a no-op and capturing the final Request via __go_jshttp lets the
+// REAL delete+conditional-set run end-to-end against a real createTab() tab.
+function loadServiceWorkerWithBridge() {
+  const ctx = loadServiceWorker();
+  let captured = null;
+  ctx.initKernel = async () => {}; // no-op: drive transportFetch past the readiness gate
+  ctx.self.__go_jshttp = (request) => {
+    captured = request;
+    return new ctx.Response('ok', { status: 200 });
+  };
+  return { ctx, getCaptured: () => captured };
+}
+
+test('B5 transportFetch: ARMED tab sets X-Zp-Challenge-Compat-Arm:1 from trusted state', async () => {
+  const { ctx, getCaptured } = loadServiceWorkerWithBridge();
+  const tab = ctx.createTab('https://example.com/', [], true); // explicit opt-in
+  await ctx.transportFetch('https://example.com/', { method: 'GET', tab });
+  assert.equal(
+    getCaptured().headers.get('X-Zp-Challenge-Compat-Arm'),
+    '1',
+    'armed tab must set the kernel arm header from trusted per-tab state',
+  );
+});
+
+test('B5 transportFetch: UNARMED tab emits NO arm header (default OFF / byte-identical)', async () => {
+  const { ctx, getCaptured } = loadServiceWorkerWithBridge();
+  const tab = ctx.createTab('https://example.com/', []); // default OFF
+  await ctx.transportFetch('https://example.com/', { method: 'GET', tab });
+  assert.equal(
+    getCaptured().headers.get('X-Zp-Challenge-Compat-Arm'),
+    null,
+    'unarmed tab must never emit the kernel arm header',
+  );
+});
+
+test('B5 transportFetch: page-FORGED arm header on an UNARMED tab is DELETED (forgery blocked)', async () => {
+  const { ctx, getCaptured } = loadServiceWorkerWithBridge();
+  const tab = ctx.createTab('https://example.com/', []); // unarmed trusted state
+  // A proxied page can smuggle headers in via the /zp/api/fetch payload; model that
+  // as a forged inbound arm header on the request. The unconditional delete must win.
+  const forged = new ctx.Request('https://example.com/', {
+    headers: { 'X-Zp-Challenge-Compat-Arm': '1' },
+  });
+  await ctx.transportFetch('https://example.com/', { request: forged, method: 'GET', tab });
+  assert.equal(
+    getCaptured().headers.get('X-Zp-Challenge-Compat-Arm'),
+    null,
+    'page-forged arm header must be deleted; trusted unarmed state wins',
+  );
+});
+
+test('B5 transportFetch: ARMED tab overrides a page-forged arm header with trusted :1', async () => {
+  const { ctx, getCaptured } = loadServiceWorkerWithBridge();
+  const tab = ctx.createTab('https://example.com/', [], true);
+  const forged = new ctx.Request('https://example.com/', {
+    headers: { 'X-Zp-Challenge-Compat-Arm': 'evil' },
+  });
+  await ctx.transportFetch('https://example.com/', { request: forged, method: 'GET', tab });
+  assert.equal(
+    getCaptured().headers.get('X-Zp-Challenge-Compat-Arm'),
+    '1',
+    'forged value is deleted then re-set to the trusted :1 (never the page value)',
+  );
+});
+
+// B5 runtime-prelude defense-in-depth: fetchThroughRuntime must strip any inbound
+// arm header (text-level, consistent with how static-policy.test.js treats this
+// file; the full prelude is not executed here).
+test('B5 runtime-prelude: fetchThroughRuntime strips inbound X-Zp-Challenge-Compat-Arm', () => {
+  const rt = read('web/runtime-prelude.js');
+  const start = rt.indexOf('async function fetchThroughRuntime');
+  assert.notEqual(start, -1, 'fetchThroughRuntime must exist');
+  const body = rt.slice(start, start + 2000);
+  assert.match(
+    body,
+    /apiHeaders\.delete\('X-Zp-Challenge-Compat-Arm'\)/,
+    'fetchThroughRuntime must delete any page-supplied arm header',
+  );
+});
+
+// B5 trusted-hop wiring: the index.html opt-in checkbox is the ONLY user surface
+// for the arm, and it threads challengeCompat into the window->SW ZP_OPEN_SHARE
+// message. Default UNCHECKED.
+test('B5 index.html: opt-in checkbox threads challengeCompat into ZP_OPEN_SHARE (default off)', () => {
+  const html = read('web/index.html');
+  assert.match(html, /id="challenge-compat"[^>]*type="checkbox"/, 'opt-in checkbox present');
+  assert.ok(!/id="challenge-compat"[^>]*checked/.test(html), 'checkbox must default UNCHECKED');
+  assert.match(
+    html,
+    /type: 'ZP_OPEN_SHARE'[^}]*challengeCompat/,
+    'openTarget must thread challengeCompat into the ZP_OPEN_SHARE message',
   );
 });
 

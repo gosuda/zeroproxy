@@ -1366,6 +1366,11 @@
     const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
     const apiHeaders = new Native.Headers(req.headers);
     apiHeaders.delete('X-ZP-Upload-Replayable');
+    // B4 INBOUND-STRIP OBLIGATION (defense in depth): the kernel arm header is
+    // set ONLY by the trusted window->SW hop (web/sw.js transportFetch). A page
+    // can never supply it; drop any inbound X-Zp-Challenge-Compat-Arm here the
+    // SAME way the SW does, mirroring X-ZP-Tab-Id / X-ZP-Runtime-Token handling.
+    apiHeaders.delete('X-Zp-Challenge-Compat-Arm');
     apiHeaders.set('X-ZP-Tab-Id', boot.tabId);
     apiHeaders.set('X-ZP-Entry-Id', activeEntryId);
     apiHeaders.set('X-ZP-Runtime-Token', runtimeToken);
