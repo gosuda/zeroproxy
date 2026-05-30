@@ -8,5 +8,5 @@ node_modules/
 coverage/
 .cache/
 rewriter-rs/target/
-wasm-kernel
+/wasm-kernel
 GOAL.md

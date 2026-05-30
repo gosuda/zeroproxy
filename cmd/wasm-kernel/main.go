@@ -104,7 +104,7 @@ func (k *Kernel) jsCookieSet(this js.Value, args []js.Value) any {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	tab := k.tabFromValues(v.Get("tabId").String(), v.Get("streamIsolationKey").String())
+	tab := k.tabFromValues(v.Get("tabId").String(), v.Get("streamIsolationKey").String(), false)
 	tab.CookieJar.SetDocumentCookie(u, cookieLine)
 	return true
 }
@@ -197,6 +197,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			resp.Header.Set("X-ZP-Dynamic-Compile", "1")
 		}
 		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+		applyChallengeCompat(resp.Header, tab.ChallengeCompat, finalURL)
 		resp.Header.Set("X-ZP-Response-URL", finalURL.String())
 		if finalURL.String() != req.URL.String() {
 			resp.Header.Set("X-ZP-Response-Redirected", "1")
@@ -383,7 +384,7 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 			return
 		}
 		protocols := jsStringArray(opts.Get("protocols"))
-		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String())
+		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String(), false)
 		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab, websocketOrigin(opts.Get("documentUrl").String()))
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -465,16 +466,33 @@ func headerServers(raw string) []string {
 }
 
 func (k *Kernel) tabFor(req *http.Request) *zphttp.TabState {
-	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"))
+	// B4 INBOUND-STRIP OBLIGATION (mirror of the outbound B4 STRIP OBLIGATION in
+	// challenge.go applyChallengeCompat): X-Zp-Challenge-Compat-Arm is a
+	// page-influenceable request header. In B1 nothing trusted sends it, so this
+	// read is doubly inert: birth-only tab semantics (see tabFromValues) drop a
+	// forged arm on any already-born tab, and even an armed tab has no marker
+	// consumer yet. But when B4 lands the trusted arm sender, web/sw.js
+	// transportFetch and web/runtime-prelude.js fetchThroughRuntime MUST
+	// authoritatively set/delete this header the SAME way they handle
+	// X-ZP-Tab-Id / X-ZP-Runtime-Token, so a proxied page can never supply it.
+	armed := req.Header.Get("X-Zp-Challenge-Compat-Arm") == "1"
+	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"), armed)
 }
 
-func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
+func (k *Kernel) tabFromValues(tabID, keyB64 string, challengeCompat bool) *zphttp.TabState {
 	if tabID == "" {
 		tabID = "default"
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if t := k.tabs[tabID]; t != nil {
+		// SECURITY INVARIANT (birth-only arm): an existing tab is returned AS-IS
+		// without ever touching t.ChallengeCompat. ChallengeCompat must be set
+		// ONLY at tab birth (below) because X-Zp-Challenge-Compat-Arm is
+		// page-forgeable (see tabFor). This early return is what prevents a
+		// proxied page from self-arming a live tab; honoring challengeCompat on
+		// this existing-tab path would convert the forgeable inbound header into
+		// an active self-arm primitive. Do NOT re-arm here.
 		return t
 	}
 	key, _ := base64.RawURLEncoding.DecodeString(keyB64)
@@ -482,7 +500,7 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 		key = make([]byte, 32)
 		_, _ = rand.Read(key)
 	}
-	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key}
+	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key, ChallengeCompat: challengeCompat}
 	k.tabs[tabID] = t
 	return t
 }

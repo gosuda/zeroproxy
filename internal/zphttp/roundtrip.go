@@ -28,6 +28,19 @@ type TabState struct {
 	TabID              string
 	CookieJar          *cookiejar.Jar
 	StreamIsolationKey []byte
+	// ChallengeCompat is the per-tab, default-OFF arm opt-in for Cloudflare
+	// challenge compatibility mode.
+	//
+	// SECURITY INVARIANT (birth-only): this field MUST be set ONLY at tab birth
+	// and never mutated afterwards, because the arm signal arrives over the
+	// page-forgeable X-Zp-Challenge-Compat-Arm request header. Birth-only
+	// semantics (the existing-tab early return in wasm-kernel tabFromValues) are
+	// precisely what stop a proxied page from self-arming a live tab; any future
+	// re-arm of a running tab would turn that forgeable header into an active
+	// self-arm primitive. Being set-once also makes the lock-free read in jsHTTP
+	// race-free by construction, but the security property — not the race
+	// property — is the load-bearing reason it is immutable.
+	ChallengeCompat bool
 }
 
 type Engine struct {
