@@ -556,25 +556,9 @@ impl<'a> Rewriter<'a> {
 
     fn walk_statement(&mut self, stmt: &Statement<'a>) {
         match stmt {
-            Statement::BlockStatement(block) => {
-                self.push_scope(self.collect_body_bindings(&block.body, ScopeMode::Block));
-                for stmt in &block.body {
-                    self.walk_statement(stmt);
-                }
-                self.pop_scope();
-            }
+            Statement::BlockStatement(block) => self.walk_block_statement(block),
             Statement::ExpressionStatement(expr) => {
-                if let Expression::AssignmentExpression(assign) = &expr.expression {
-                    if self.assignment_target(&assign.left).is_some() {
-                        self.add_replacement(
-                            stmt.span(),
-                            format!("{};", self.render_assignment_expression(assign)),
-                            100,
-                        );
-                        return;
-                    }
-                }
-                self.walk_expression(&expr.expression)
+                self.walk_expression_statement(stmt.span(), &expr.expression)
             }
             Statement::IfStatement(stmt) => {
                 self.walk_expression(&stmt.test);
@@ -591,123 +575,142 @@ impl<'a> Rewriter<'a> {
                 self.walk_statement(&stmt.body);
                 self.walk_expression(&stmt.test);
             }
-            Statement::ForStatement(stmt) => {
-                let scoped = matches!(stmt.init.as_ref(), Some(ForStatementInit::VariableDeclaration(decl)) if decl.kind != VariableDeclarationKind::Var);
-                if scoped {
-                    self.push_scope(HashSet::new());
-                }
-                if let Some(init) = &stmt.init {
-                    match init {
-                        ForStatementInit::VariableDeclaration(decl) => {
-                            self.walk_variable_declaration(decl)
-                        }
-                        _ => self.walk_expression(init.to_expression()),
-                    }
-                }
-                if let Some(test) = &stmt.test {
-                    self.walk_expression(test);
-                }
-                if let Some(update) = &stmt.update {
-                    self.walk_expression(update);
-                }
-                self.walk_statement(&stmt.body);
-                if scoped {
-                    self.pop_scope();
-                }
-            }
-            Statement::ForInStatement(stmt) => {
-                let scoped = matches!(&stmt.left, ForStatementLeft::VariableDeclaration(decl) if decl.kind != VariableDeclarationKind::Var);
-                if scoped {
-                    self.push_scope(HashSet::new());
-                }
-                match &stmt.left {
-                    ForStatementLeft::VariableDeclaration(decl) => {
-                        self.walk_variable_declaration(decl)
-                    }
-                    _ => self.walk_assignment_target(stmt.left.to_assignment_target()),
-                }
-                self.walk_expression(&stmt.right);
-                self.walk_statement(&stmt.body);
-                if scoped {
-                    self.pop_scope();
-                }
-            }
-            Statement::ForOfStatement(stmt) => {
-                let scoped = matches!(&stmt.left, ForStatementLeft::VariableDeclaration(decl) if decl.kind != VariableDeclarationKind::Var);
-                if scoped {
-                    self.push_scope(HashSet::new());
-                }
-                match &stmt.left {
-                    ForStatementLeft::VariableDeclaration(decl) => {
-                        self.walk_variable_declaration(decl)
-                    }
-                    _ => self.walk_assignment_target(stmt.left.to_assignment_target()),
-                }
-                self.walk_expression(&stmt.right);
-                self.walk_statement(&stmt.body);
-                if scoped {
-                    self.pop_scope();
-                }
-            }
+            Statement::ForStatement(stmt) => self.walk_for_statement(stmt),
+            Statement::ForInStatement(stmt) => self.walk_for_in_statement(stmt),
+            Statement::ForOfStatement(stmt) => self.walk_for_of_statement(stmt),
             Statement::ReturnStatement(stmt) => {
                 if let Some(arg) = &stmt.argument {
                     self.walk_expression(arg);
                 }
             }
             Statement::ThrowStatement(stmt) => self.walk_expression(&stmt.argument),
-            Statement::SwitchStatement(stmt) => {
-                self.walk_expression(&stmt.discriminant);
-                for case in &stmt.cases {
-                    if let Some(test) = &case.test {
-                        self.walk_expression(test);
-                    }
-                    for stmt in &case.consequent {
-                        self.walk_statement(stmt);
-                    }
-                }
-            }
-            Statement::TryStatement(stmt) => {
-                self.walk_block_statement(&stmt.block);
-                if let Some(handler) = &stmt.handler {
-                    let mut scope = HashSet::new();
-                    if let Some(param) = &handler.param {
-                        self.collect_binding_pattern(&param.pattern, &mut scope);
-                    }
-                    self.push_scope(scope);
-                    self.walk_block_statement(&handler.body);
-                    self.pop_scope();
-                }
-                if let Some(finalizer) = &stmt.finalizer {
-                    self.walk_block_statement(finalizer);
-                }
-            }
+            Statement::SwitchStatement(stmt) => self.walk_switch_statement(stmt),
+            Statement::TryStatement(stmt) => self.walk_try_statement(stmt),
             Statement::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
             Statement::FunctionDeclaration(func) => self.walk_function(func),
             Statement::ClassDeclaration(class) => self.walk_class(class, true),
-            Statement::ImportDeclaration(decl) => self.add_replacement(
-                decl.source.span,
-                format!("{:?}", self.module_specifier(decl.source.value.as_str())),
-                95,
-            ),
+            Statement::ImportDeclaration(decl) => self.rewrite_module_source(&decl.source),
             Statement::ExportNamedDeclaration(decl) => {
                 if let Some(source) = &decl.source {
-                    self.add_replacement(
-                        source.span,
-                        format!("{:?}", self.module_specifier(source.value.as_str())),
-                        95,
-                    );
+                    self.rewrite_module_source(source);
                 }
                 if let Some(inner) = &decl.declaration {
                     self.walk_declaration(inner);
                 }
             }
-            Statement::ExportAllDeclaration(decl) => self.add_replacement(
-                decl.source.span,
-                format!("{:?}", self.module_specifier(decl.source.value.as_str())),
-                95,
-            ),
+            Statement::ExportAllDeclaration(decl) => self.rewrite_module_source(&decl.source),
             Statement::ExportDefaultDeclaration(decl) => self.walk_export_default(decl),
             _ => {}
+        }
+    }
+
+    fn rewrite_module_source(&mut self, source: &StringLiteral<'a>) {
+        self.add_replacement(
+            source.span,
+            format!("{:?}", self.module_specifier(source.value.as_str())),
+            95,
+        );
+    }
+
+    fn walk_expression_statement(&mut self, stmt_span: Span, expr: &Expression<'a>) {
+        if let Expression::AssignmentExpression(assign) = expr {
+            if self.assignment_target(&assign.left).is_some() {
+                self.add_replacement(
+                    stmt_span,
+                    format!("{};", self.render_assignment_expression(assign)),
+                    100,
+                );
+                return;
+            }
+        }
+        self.walk_expression(expr)
+    }
+
+    fn for_left_is_scoped(left: &ForStatementLeft<'a>) -> bool {
+        matches!(left, ForStatementLeft::VariableDeclaration(decl) if decl.kind != VariableDeclarationKind::Var)
+    }
+
+    fn walk_for_left(&mut self, left: &ForStatementLeft<'a>) {
+        match left {
+            ForStatementLeft::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
+            _ => self.walk_assignment_target(left.to_assignment_target()),
+        }
+    }
+
+    fn walk_for_statement(&mut self, stmt: &ForStatement<'a>) {
+        let scoped = matches!(stmt.init.as_ref(), Some(ForStatementInit::VariableDeclaration(decl)) if decl.kind != VariableDeclarationKind::Var);
+        if scoped {
+            self.push_scope(HashSet::new());
+        }
+        if let Some(init) = &stmt.init {
+            match init {
+                ForStatementInit::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
+                _ => self.walk_expression(init.to_expression()),
+            }
+        }
+        if let Some(test) = &stmt.test {
+            self.walk_expression(test);
+        }
+        if let Some(update) = &stmt.update {
+            self.walk_expression(update);
+        }
+        self.walk_statement(&stmt.body);
+        if scoped {
+            self.pop_scope();
+        }
+    }
+
+    fn walk_for_in_statement(&mut self, stmt: &ForInStatement<'a>) {
+        let scoped = Self::for_left_is_scoped(&stmt.left);
+        if scoped {
+            self.push_scope(HashSet::new());
+        }
+        self.walk_for_left(&stmt.left);
+        self.walk_expression(&stmt.right);
+        self.walk_statement(&stmt.body);
+        if scoped {
+            self.pop_scope();
+        }
+    }
+
+    fn walk_for_of_statement(&mut self, stmt: &ForOfStatement<'a>) {
+        let scoped = Self::for_left_is_scoped(&stmt.left);
+        if scoped {
+            self.push_scope(HashSet::new());
+        }
+        self.walk_for_left(&stmt.left);
+        self.walk_expression(&stmt.right);
+        self.walk_statement(&stmt.body);
+        if scoped {
+            self.pop_scope();
+        }
+    }
+
+    fn walk_switch_statement(&mut self, stmt: &SwitchStatement<'a>) {
+        self.walk_expression(&stmt.discriminant);
+        for case in &stmt.cases {
+            if let Some(test) = &case.test {
+                self.walk_expression(test);
+            }
+            for stmt in &case.consequent {
+                self.walk_statement(stmt);
+            }
+        }
+    }
+
+    fn walk_try_statement(&mut self, stmt: &TryStatement<'a>) {
+        self.walk_block_statement(&stmt.block);
+        if let Some(handler) = &stmt.handler {
+            let mut scope = HashSet::new();
+            if let Some(param) = &handler.param {
+                self.collect_binding_pattern(&param.pattern, &mut scope);
+            }
+            self.push_scope(scope);
+            self.walk_block_statement(&handler.body);
+            self.pop_scope();
+        }
+        if let Some(finalizer) = &stmt.finalizer {
+            self.walk_block_statement(finalizer);
         }
     }
     fn walk_declaration(&mut self, decl: &Declaration<'a>) {
@@ -952,52 +955,9 @@ impl<'a> Rewriter<'a> {
                     );
                 }
             }
-            Expression::StaticMemberExpression(expr) => {
-                if self.is_import_meta_url_static(expr) {
-                    self.add_replacement(expr.span, format!("{:?}", self.target_url), 90);
-                    return;
-                }
-                if self.member_needs_helper_static(expr) {
-                    let helper = if self.member_access_is_optional(expr.span) {
-                        "__zp_optionalGet"
-                    } else {
-                        "__zp_get"
-                    };
-                    self.add_replacement(
-                        expr.span,
-                        format!(
-                            "{}({},{:?})",
-                            helper,
-                            self.render_expression(&expr.object),
-                            expr.property.name.as_str()
-                        ),
-                        80,
-                    );
-                    return;
-                }
-                self.walk_expression(&expr.object);
-            }
+            Expression::StaticMemberExpression(expr) => self.walk_static_member_expression(expr),
             Expression::ComputedMemberExpression(expr) => {
-                if self.member_needs_helper_computed(expr) {
-                    let helper = if self.member_access_is_optional(expr.span) {
-                        "__zp_optionalGet"
-                    } else {
-                        "__zp_get"
-                    };
-                    self.add_replacement(
-                        expr.span,
-                        format!(
-                            "{}({},{})",
-                            helper,
-                            self.render_expression(&expr.object),
-                            self.render_expression(&expr.expression)
-                        ),
-                        80,
-                    );
-                    return;
-                }
-                self.walk_expression(&expr.object);
-                self.walk_expression(&expr.expression);
+                self.walk_computed_member_expression(expr)
             }
             Expression::PrivateFieldExpression(expr) => self.walk_expression(&expr.object),
             Expression::AssignmentExpression(expr) => self.walk_assignment_expression(expr),
@@ -1028,74 +988,12 @@ impl<'a> Rewriter<'a> {
                 }
             }
             Expression::ParenthesizedExpression(expr) => self.walk_expression(&expr.expression),
-            Expression::ChainExpression(expr) => match &expr.expression {
-                ChainElement::CallExpression(call) => self.walk_call_expression(call),
-                ChainElement::TSNonNullExpression(inner) => self.walk_expression(&inner.expression),
-                ChainElement::ComputedMemberExpression(inner) => {
-                    self.walk_expression(&inner.object);
-                    self.walk_expression(&inner.expression);
-                }
-                ChainElement::StaticMemberExpression(inner) => self.walk_expression(&inner.object),
-                ChainElement::PrivateFieldExpression(inner) => self.walk_expression(&inner.object),
-            },
-            Expression::ObjectExpression(expr) => {
-                for prop in &expr.properties {
-                    match prop {
-                        ObjectPropertyKind::ObjectProperty(prop) => {
-                            if prop.computed {
-                                self.walk_property_key(&prop.key);
-                            }
-                            if prop.shorthand {
-                                if let Expression::Identifier(id) = &prop.value {
-                                    if self.is_global_name(id.name.as_str())
-                                        && !self.declared(id.name.as_str())
-                                    {
-                                        self.add_replacement(
-                                            prop.span,
-                                            format!(
-                                                "{}: {}",
-                                                self.span_text(prop.key.span()),
-                                                self.render_expression(&prop.value)
-                                            ),
-                                            90,
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                            self.walk_expression(&prop.value);
-                        }
-                        ObjectPropertyKind::SpreadProperty(prop) => {
-                            self.walk_expression(&prop.argument)
-                        }
-                    }
-                }
-            }
-            Expression::ArrayExpression(expr) => {
-                for elem in &expr.elements {
-                    match elem {
-                        ArrayExpressionElement::SpreadElement(spread) => {
-                            self.walk_expression(&spread.argument)
-                        }
-                        ArrayExpressionElement::Elision(_) => {}
-                        _ => self.walk_expression(elem.to_expression()),
-                    }
-                }
-            }
+            Expression::ChainExpression(expr) => self.walk_chain_element(&expr.expression),
+            Expression::ObjectExpression(expr) => self.walk_object_expression(expr),
+            Expression::ArrayExpression(expr) => self.walk_array_expression(expr),
             Expression::FunctionExpression(func) => self.walk_function(func),
             Expression::ClassExpression(class) => self.walk_class(class, false),
-            Expression::ArrowFunctionExpression(func) => {
-                let mut scope = HashSet::new();
-                self.collect_formal_parameters(&func.params, &mut scope);
-                scope.extend(
-                    self.collect_body_bindings(&func.body.statements, ScopeMode::FunctionRoot),
-                );
-                self.push_scope(scope);
-                for stmt in &func.body.statements {
-                    self.walk_statement(stmt);
-                }
-                self.pop_scope();
-            }
+            Expression::ArrowFunctionExpression(func) => self.walk_arrow_function(func),
             Expression::TemplateLiteral(tpl) => {
                 for expr in &tpl.expressions {
                     self.walk_expression(expr);
@@ -1114,6 +1012,121 @@ impl<'a> Rewriter<'a> {
             Expression::TSInstantiationExpression(expr) => self.walk_expression(&expr.expression),
             _ => {}
         }
+    }
+
+    fn member_get_helper(&self, span: Span) -> &'static str {
+        if self.member_access_is_optional(span) {
+            "__zp_optionalGet"
+        } else {
+            "__zp_get"
+        }
+    }
+
+    fn walk_static_member_expression(&mut self, expr: &StaticMemberExpression<'a>) {
+        if self.is_import_meta_url_static(expr) {
+            self.add_replacement(expr.span, format!("{:?}", self.target_url), 90);
+            return;
+        }
+        if self.member_needs_helper_static(expr) {
+            self.add_replacement(
+                expr.span,
+                format!(
+                    "{}({},{:?})",
+                    self.member_get_helper(expr.span),
+                    self.render_expression(&expr.object),
+                    expr.property.name.as_str()
+                ),
+                80,
+            );
+            return;
+        }
+        self.walk_expression(&expr.object);
+    }
+
+    fn walk_computed_member_expression(&mut self, expr: &ComputedMemberExpression<'a>) {
+        if self.member_needs_helper_computed(expr) {
+            self.add_replacement(
+                expr.span,
+                format!(
+                    "{}({},{})",
+                    self.member_get_helper(expr.span),
+                    self.render_expression(&expr.object),
+                    self.render_expression(&expr.expression)
+                ),
+                80,
+            );
+            return;
+        }
+        self.walk_expression(&expr.object);
+        self.walk_expression(&expr.expression);
+    }
+
+    fn walk_chain_element(&mut self, elem: &ChainElement<'a>) {
+        match elem {
+            ChainElement::CallExpression(call) => self.walk_call_expression(call),
+            ChainElement::TSNonNullExpression(inner) => self.walk_expression(&inner.expression),
+            ChainElement::ComputedMemberExpression(inner) => {
+                self.walk_expression(&inner.object);
+                self.walk_expression(&inner.expression);
+            }
+            ChainElement::StaticMemberExpression(inner) => self.walk_expression(&inner.object),
+            ChainElement::PrivateFieldExpression(inner) => self.walk_expression(&inner.object),
+        }
+    }
+
+    fn walk_object_expression(&mut self, expr: &ObjectExpression<'a>) {
+        for prop in &expr.properties {
+            match prop {
+                ObjectPropertyKind::ObjectProperty(prop) => self.walk_object_property(prop),
+                ObjectPropertyKind::SpreadProperty(prop) => self.walk_expression(&prop.argument),
+            }
+        }
+    }
+
+    fn walk_object_property(&mut self, prop: &ObjectProperty<'a>) {
+        if prop.computed {
+            self.walk_property_key(&prop.key);
+        }
+        if prop.shorthand {
+            if let Expression::Identifier(id) = &prop.value {
+                if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
+                    self.add_replacement(
+                        prop.span,
+                        format!(
+                            "{}: {}",
+                            self.span_text(prop.key.span()),
+                            self.render_expression(&prop.value)
+                        ),
+                        90,
+                    );
+                    return;
+                }
+            }
+        }
+        self.walk_expression(&prop.value);
+    }
+
+    fn walk_array_expression(&mut self, expr: &ArrayExpression<'a>) {
+        for elem in &expr.elements {
+            match elem {
+                ArrayExpressionElement::SpreadElement(spread) => {
+                    self.walk_expression(&spread.argument)
+                }
+                ArrayExpressionElement::Elision(_) => {}
+                _ => self.walk_expression(elem.to_expression()),
+            }
+        }
+    }
+
+    fn walk_arrow_function(&mut self, func: &ArrowFunctionExpression<'a>) {
+        let mut scope = HashSet::new();
+        self.collect_formal_parameters(&func.params, &mut scope);
+        scope.extend(self.collect_body_bindings(&func.body.statements, ScopeMode::FunctionRoot));
+        self.push_scope(scope);
+        for stmt in &func.body.statements {
+            self.walk_statement(stmt);
+        }
+        self.pop_scope();
     }
 
     fn walk_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
@@ -1777,23 +1790,7 @@ impl<'a> Rewriter<'a> {
         names: &mut HashSet<String>,
     ) {
         match stmt {
-            Statement::ImportDeclaration(decl) => {
-                if let Some(specs) = &decl.specifiers {
-                    for spec in specs {
-                        match spec {
-                            ImportDeclarationSpecifier::ImportSpecifier(spec) => {
-                                names.insert(spec.local.name.to_string());
-                            }
-                            ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
-                                names.insert(spec.local.name.to_string());
-                            }
-                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(spec) => {
-                                names.insert(spec.local.name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+            Statement::ImportDeclaration(decl) => Self::collect_import_bindings(decl, names),
             Statement::FunctionDeclaration(func) => {
                 if let Some(id) = &func.id {
                     names.insert(id.name.to_string());
@@ -1805,76 +1802,116 @@ impl<'a> Rewriter<'a> {
                 }
             }
             Statement::VariableDeclaration(decl) => {
-                if mode == ScopeMode::Block {
-                    if decl.kind != VariableDeclarationKind::Var {
-                        for d in &decl.declarations {
-                            self.collect_binding_pattern(&d.id, names);
-                        }
-                    }
-                } else if decl.kind == VariableDeclarationKind::Var {
-                    for d in &decl.declarations {
-                        self.collect_binding_pattern(&d.id, names);
-                    }
-                }
+                self.collect_variable_declaration_bindings(decl, mode, names)
             }
-            Statement::BlockStatement(block) if mode != ScopeMode::Block => {
-                for stmt in &block.body {
-                    self.collect_statement_bindings(stmt, mode, names);
-                }
+            _ if mode != ScopeMode::Block => {
+                self.collect_nested_statement_bindings(stmt, mode, names)
             }
-            Statement::IfStatement(stmt) if mode != ScopeMode::Block => {
+            _ => {}
+        }
+    }
+
+    fn collect_import_bindings(decl: &ImportDeclaration<'a>, names: &mut HashSet<String>) {
+        let Some(specs) = &decl.specifiers else {
+            return;
+        };
+        for spec in specs {
+            let local = match spec {
+                ImportDeclarationSpecifier::ImportSpecifier(spec) => &spec.local.name,
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => &spec.local.name,
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(spec) => &spec.local.name,
+            };
+            names.insert(local.to_string());
+        }
+    }
+
+    fn collect_declarator_bindings(
+        &self,
+        decl: &VariableDeclaration<'a>,
+        names: &mut HashSet<String>,
+    ) {
+        for d in &decl.declarations {
+            self.collect_binding_pattern(&d.id, names);
+        }
+    }
+
+    fn collect_variable_declaration_bindings(
+        &self,
+        decl: &VariableDeclaration<'a>,
+        mode: ScopeMode,
+        names: &mut HashSet<String>,
+    ) {
+        let is_var = decl.kind == VariableDeclarationKind::Var;
+        // Block scopes hoist only lexical (let/const) bindings; function-root
+        // scopes hoist only `var` bindings.
+        if (mode == ScopeMode::Block) != is_var {
+            self.collect_declarator_bindings(decl, names);
+        }
+    }
+
+    /// Hoist `var` bindings from the head of a `for`/`for-in`/`for-of` loop.
+    fn collect_for_head_var_bindings(
+        &self,
+        decl: &VariableDeclaration<'a>,
+        names: &mut HashSet<String>,
+    ) {
+        if decl.kind == VariableDeclarationKind::Var {
+            self.collect_declarator_bindings(decl, names);
+        }
+    }
+
+    /// Recurse into the bodies of control-flow statements. Only reached for
+    /// function-root scopes (`mode != ScopeMode::Block`), where nested `var`
+    /// declarations hoist to the enclosing function.
+    fn collect_nested_statement_bindings(
+        &self,
+        stmt: &Statement<'a>,
+        mode: ScopeMode,
+        names: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::BlockStatement(block) => self.collect_block_bindings(block, names, mode),
+            Statement::IfStatement(stmt) => {
                 self.collect_statement_bindings(&stmt.consequent, mode, names);
                 if let Some(alt) = &stmt.alternate {
                     self.collect_statement_bindings(alt, mode, names);
                 }
             }
-            Statement::ForStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::ForStatement(stmt) => {
                 if let Some(ForStatementInit::VariableDeclaration(decl)) = &stmt.init {
-                    if decl.kind == VariableDeclarationKind::Var {
-                        for d in &decl.declarations {
-                            self.collect_binding_pattern(&d.id, names);
-                        }
-                    }
+                    self.collect_for_head_var_bindings(decl, names);
                 }
                 self.collect_statement_bindings(&stmt.body, mode, names);
             }
-            Statement::ForInStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::ForInStatement(stmt) => {
                 if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left {
-                    if decl.kind == VariableDeclarationKind::Var {
-                        for d in &decl.declarations {
-                            self.collect_binding_pattern(&d.id, names);
-                        }
-                    }
+                    self.collect_for_head_var_bindings(decl, names);
                 }
                 self.collect_statement_bindings(&stmt.body, mode, names);
             }
-            Statement::ForOfStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::ForOfStatement(stmt) => {
                 if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left {
-                    if decl.kind == VariableDeclarationKind::Var {
-                        for d in &decl.declarations {
-                            self.collect_binding_pattern(&d.id, names);
-                        }
-                    }
+                    self.collect_for_head_var_bindings(decl, names);
                 }
                 self.collect_statement_bindings(&stmt.body, mode, names);
             }
-            Statement::WhileStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::WhileStatement(stmt) => {
                 self.collect_statement_bindings(&stmt.body, mode, names)
             }
-            Statement::DoWhileStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::DoWhileStatement(stmt) => {
                 self.collect_statement_bindings(&stmt.body, mode, names)
             }
-            Statement::LabeledStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::LabeledStatement(stmt) => {
                 self.collect_statement_bindings(&stmt.body, mode, names)
             }
-            Statement::SwitchStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::SwitchStatement(stmt) => {
                 for case in &stmt.cases {
                     for child in &case.consequent {
                         self.collect_statement_bindings(child, mode, names);
                     }
                 }
             }
-            Statement::TryStatement(stmt) if mode != ScopeMode::Block => {
+            Statement::TryStatement(stmt) => {
                 self.collect_block_bindings(&stmt.block, names, mode);
                 if let Some(handler) = &stmt.handler {
                     self.collect_block_bindings(&handler.body, names, mode);
