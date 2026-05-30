@@ -50,8 +50,8 @@ function commandError(cmd, result) {
 if (mode === 'js') {
   run('node --test test/js/*.test.js');
 } else if (mode === 'e2e') {
-  run('node --test test/e2e/proxy.test.js', true);
+  run('node --test test/e2e/*.test.js', true);
 } else {
   run('node --test test/js/*.test.js');
-  run('node --test test/e2e/proxy.test.js', true);
+  run('node --test test/e2e/*.test.js', true);
 }
