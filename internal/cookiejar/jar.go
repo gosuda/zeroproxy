@@ -101,34 +101,61 @@ func (j *Jar) cookies(u *url.URL, includeHTTPOnly bool, ctx *RequestContext) []*
 	host := canonicalHost(u.Hostname())
 	path := requestPath(u)
 	secure := u.Scheme == "https"
-	out := make([]CookieRecord, 0, len(j.records))
-	kept := j.records[:0]
-	for _, r := range j.records {
-		if expired(r, now) {
-			continue
-		}
-		if !includeHTTPOnly && r.HTTPOnly {
-			kept = append(kept, r)
-			continue
-		}
-		if domainMatch(host, r.Domain, r.HostOnly) && pathMatch(path, r.Path) && (!r.Secure || secure) && sameSiteAllows(r, u, ctx) {
-			r.LastAccessTime = now
-			out = append(out, r)
-		}
-		kept = append(kept, r)
-	}
-	j.records = kept
-	sort.SliceStable(out, func(a, b int) bool {
-		if len(out[a].Path) != len(out[b].Path) {
-			return len(out[a].Path) > len(out[b].Path)
-		}
-		return out[a].CreationTime.Before(out[b].CreationTime)
+	out := j.collectMatching(now, true, func(r CookieRecord) bool {
+		return recordVisible(r, host, path, secure, includeHTTPOnly, u, ctx)
 	})
 	cookies := make([]*http.Cookie, 0, len(out))
 	for _, r := range out {
 		cookies = append(cookies, &http.Cookie{Name: r.Name, Value: r.Value})
 	}
 	return cookies
+}
+
+// recordVisible reports whether r should be served for a request to host/path
+// with the given scheme security. The HTTPOnly term is the first conjunct so a
+// document-view read (includeHTTPOnly=false) short-circuits before the
+// domain/path/secure/SameSite checks, matching the original skip-without-
+// evaluating behavior. A nil ctx makes sameSiteAllows return true (no SameSite
+// gating), so VisibleRecords reuses this predicate with includeHTTPOnly=false.
+func recordVisible(r CookieRecord, host, path string, secure, includeHTTPOnly bool, u *url.URL, ctx *RequestContext) bool {
+	return (includeHTTPOnly || !r.HTTPOnly) &&
+		domainMatch(host, r.Domain, r.HostOnly) &&
+		pathMatch(path, r.Path) &&
+		(!r.Secure || secure) &&
+		sameSiteAllows(r, u, ctx)
+}
+
+// collectMatching purges expired records in place, returns the live records for
+// which match reports true, and sorts them (longest path first, then oldest).
+// When touch is set, each matched record's LastAccessTime is advanced to now
+// before it is retained in the jar, mirroring the read-side access bump.
+func (j *Jar) collectMatching(now time.Time, touch bool, match func(CookieRecord) bool) []CookieRecord {
+	out := make([]CookieRecord, 0, len(j.records))
+	kept := j.records[:0]
+	for _, r := range j.records {
+		if expired(r, now) {
+			continue
+		}
+		if match(r) {
+			if touch {
+				r.LastAccessTime = now
+			}
+			out = append(out, r)
+		}
+		kept = append(kept, r)
+	}
+	j.records = kept
+	sortByPathThenCreation(out)
+	return out
+}
+
+func sortByPathThenCreation(records []CookieRecord) {
+	sort.SliceStable(records, func(a, b int) bool {
+		if len(records[a].Path) != len(records[b].Path) {
+			return len(records[a].Path) > len(records[b].Path)
+		}
+		return records[a].CreationTime.Before(records[b].CreationTime)
+	})
 }
 
 func (j *Jar) DocumentCookie(u *url.URL) string {
@@ -153,40 +180,31 @@ func (j *Jar) VisibleRecords(u *url.URL) []SnapshotRecord {
 	host := canonicalHost(u.Hostname())
 	path := requestPath(u)
 	secure := u.Scheme == "https"
-	out := make([]CookieRecord, 0, len(j.records))
-	kept := j.records[:0]
-	for _, r := range j.records {
-		if expired(r, now) {
-			continue
-		}
-		if !r.HTTPOnly && domainMatch(host, r.Domain, r.HostOnly) && pathMatch(path, r.Path) && (!r.Secure || secure) {
-			out = append(out, r)
-		}
-		kept = append(kept, r)
-	}
-	j.records = kept
-	sort.SliceStable(out, func(a, b int) bool {
-		if len(out[a].Path) != len(out[b].Path) {
-			return len(out[a].Path) > len(out[b].Path)
-		}
-		return out[a].CreationTime.Before(out[b].CreationTime)
+	// Document/JS view: HTTPOnly is excluded (includeHTTPOnly=false) and there
+	// is no request context, so SameSite gating does not apply (nil ctx).
+	out := j.collectMatching(now, false, func(r CookieRecord) bool {
+		return recordVisible(r, host, path, secure, false, u, nil)
 	})
 	records := make([]SnapshotRecord, 0, len(out))
 	for _, r := range out {
-		s := SnapshotRecord{
-			Name: r.Name, Value: r.Value, Domain: r.Domain, HostOnly: r.HostOnly, Path: r.Path,
-			Secure: r.Secure, SameSite: string(r.SameSite),
-		}
-		if r.MaxAge != nil {
-			expires := r.CreationTime.Add(time.Duration(*r.MaxAge) * time.Second).UnixMilli()
-			s.ExpiresMS = &expires
-		} else if r.Expires != nil {
-			expires := r.Expires.UnixMilli()
-			s.ExpiresMS = &expires
-		}
-		records = append(records, s)
+		records = append(records, snapshotFromRecord(r))
 	}
 	return records
+}
+
+func snapshotFromRecord(r CookieRecord) SnapshotRecord {
+	s := SnapshotRecord{
+		Name: r.Name, Value: r.Value, Domain: r.Domain, HostOnly: r.HostOnly, Path: r.Path,
+		Secure: r.Secure, SameSite: string(r.SameSite),
+	}
+	if r.MaxAge != nil {
+		expires := r.CreationTime.Add(time.Duration(*r.MaxAge) * time.Second).UnixMilli()
+		s.ExpiresMS = &expires
+	} else if r.Expires != nil {
+		expires := r.Expires.UnixMilli()
+		s.ExpiresMS = &expires
+	}
+	return s
 }
 
 func (j *Jar) SetDocumentCookie(u *url.URL, line string) {
