@@ -125,13 +125,14 @@ test('Rust rewriter virtualizes dangerous globals without rewriting local bindin
   const out = rewriter.rewriteScript(`
     const location = { href: 'local' };
     const w = window;
-    window.out = [location.href, window.location.href, window['loca' + 'tion'].href, document.defaultView.location.href, w.location.href];
+    window.out = [origin, location.href, window.location.href, window['loca' + 'tion'].href, document.defaultView.location.href, w.location.href];
     Function('return location.href')();
   `, { kind: 'classic' });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.match(out.code, /const location = \{ href: 'local' \}/);
   assert.match(out.code, /location\.href/);
   assert.match(out.code, /__zp_get\(globalThis,"window"\)/);
+  assert.match(out.code, /__zp_get\(globalThis,"origin"\)/);
   assert.match(out.code, /__zp_get\(__zp_get\(globalThis,"document"\),"defaultView"\)/);
   assert.match(out.code, /__zp_get\(globalThis,"Function"\)/);
 });
@@ -193,9 +194,27 @@ test('Rust rewriter routes in-operator checks on virtual windows through helper'
   assert.equal(out.code.includes('"turnstile" in __zp_get(globalThis,"window")'), false);
 });
 
+test('Rust rewriter preserves optional access semantics for guarded challenge probes', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`
+    const href = maybeWindow?.location?.href;
+    const desc = Object.getOwnPropertyDescriptors?.(window);
+    const keys = Reflect.ownKeys?.(window);
+    const sent = frame?.contentWindow?.postMessage?.({ ok: true }, location.origin);
+  `, {
+    kind: 'classic',
+    targetUrl: 'https://challenges.cloudflare.com/turnstile/v0/api.js',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.ok(out.code.includes('__zp_optionalGet'));
+  assert.ok(out.code.includes('__zp_optionalCall'));
+  assert.ok(out.code.includes('__zp_optionalCall(Object,"getOwnPropertyDescriptors"'));
+  assert.ok(out.code.includes('__zp_optionalCall(Reflect,"ownKeys"'));
+});
+
 test('Rust rewriter routes computed global-alias member access through runtime membrane', async () => {
   const rewriter = await loadRewriter();
-  const out = rewriter.rewriteScript(`let G; G = this || self; const k = decode(); const v = G[k]; G[k] = v + 1; G[k](); const local = obj[k];`, {
+  const out = rewriter.rewriteScript(`let G; G = this || self; const k = decode(); const v = G[k]; G[k] = v + 1; G[k](); G[k][k](); const local = obj[k];`, {
     kind: 'classic',
     targetUrl: 'https://example.com/app.js',
   });
@@ -204,7 +223,20 @@ test('Rust rewriter routes computed global-alias member access through runtime m
   assert.ok(out.code.includes('__zp_get(G,k)'));
   assert.ok(out.code.includes('__zp_set(G,k,v + 1)'));
   assert.ok(out.code.includes('__zp_call(G,k,[])'));
+  assert.ok(out.code.includes('__zp_call(__zp_get(G,k),k,[])'));
   assert.ok(out.code.includes('const local = obj[k]'));
+});
+
+test('Rust rewriter tracks computed document aliases from global aliases', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(`let G = window; let D = G[name]; const host = D[loc].hostname; D[loc].replace('/next');`, {
+    kind: 'classic',
+    targetUrl: 'https://2captcha.com/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=abc',
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.ok(out.code.includes('let D = __zp_get(G,name)'));
+  assert.ok(out.code.includes('__zp_get(D,loc).hostname'));
+  assert.ok(out.code.includes('(__zp_call(__zp_get(D,loc),"replace"'));
 });
 
 test('Rust rewriter preserves compound writes and constructor escapes through helpers', async () => {

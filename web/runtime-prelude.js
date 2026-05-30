@@ -9,9 +9,19 @@
   const runtimeToken = String(boot.runtimeToken || '');
   clearBootConfig();
   const Native = captureNative(root);
-  const TARGET_USER_AGENT = root.navigator && root.navigator.userAgent || '';
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
-  const TARGET_PLATFORM = root.navigator && root.navigator.platform || '';
+  const TARGET_PLATFORM = 'Win32';
+  const TARGET_UA_BRANDS = Object.freeze([
+    Object.freeze({ brand: 'Chromium', version: '134' }),
+    Object.freeze({ brand: 'Not:A-Brand', version: '24' }),
+    Object.freeze({ brand: 'Google Chrome', version: '134' })
+  ]);
+  const TARGET_UA_FULL_VERSION_LIST = Object.freeze([
+    Object.freeze({ brand: 'Chromium', version: '134.0.0.0' }),
+    Object.freeze({ brand: 'Not:A-Brand', version: '24.0.0.0' }),
+    Object.freeze({ brand: 'Google Chrome', version: '134.0.0.0' })
+  ]);
   const toStringMap = new WeakMap();
   const toStringMaskedPrototypes = new WeakSet();
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
@@ -54,6 +64,9 @@
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const workerBlobURLs = new Set();
+  const workerBlobURLMap = new Map();
+  const blobURLRawMap = new Map();
+  const deferredTerminateWorkers = new WeakSet();
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
   const serviceWorkerFacades = new WeakMap();
@@ -61,6 +74,7 @@
   const storageWindows = new Set();
   const storageDirtyKeys = new Map();
   let storageDBPromise = null;
+  let workerTerminateHooked = false;
 
 
   function readBootConfig() {
@@ -79,6 +93,7 @@
       EventSource: w.EventSource,
       Worker: w.Worker,
       FunctionCtor: w.Function,
+      eval: w.eval,
       SharedWorker: w.SharedWorker,
       FormData: w.FormData,
       URL: w.URL,
@@ -588,24 +603,12 @@
       return baseURL;
     }
   }
-	  function rewritePageSource(source, kind) {
-	    if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') return fallbackRewritePageSource(source, kind);
-	    const out = root.ZPRewriter.rewriteScript(String(source || ''), { kind, targetUrl: virtualURL.href, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-	    if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
-	    return out.code;
-	  }
-	  function fallbackRewritePageSource(source, kind) {
-	    if (kind && kind !== 'classic') throw normalizedError('NotSupportedError');
-	    const text = String(source || '');
-	    if (/\b(?:import|export|function|class|with)\b|=>|`/.test(text)) throw normalizedError('NotSupportedError');
-	    let out = text;
-	    out = out.replace(/\b(?:window|self|globalThis)\.location\.href\b/g, '__zp_get(globalThis,"location").href');
-	    out = out.replace(/(^|[^\w$.])location\.href\b/g, '$1__zp_get(globalThis,"location").href');
-	    out = out.replace(/\b(?:window|self|globalThis)\.location\.origin\b/g, '__zp_get(globalThis,"location").origin');
-	    out = out.replace(/(^|[^\w$.])location\.origin\b/g, '$1__zp_get(globalThis,"location").origin');
-	    if (out === text && !/^\s*(?:window|self|globalThis)\.[A-Za-z_$][\w$]*\s*=/.test(text)) throw normalizedError('NotSupportedError');
-	    return out;
-	  }
+  function rewritePageSource(source, kind) {
+    if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');
+    const out = root.ZPRewriter.rewriteScript(String(source || ''), { kind, targetUrl: virtualURL.href, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
+    if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
+    return out.code;
+  }
 	  function cssResourceURL(raw, base) {
 	    const text = String(raw || '').trim();
 	    if (!text || text[0] === '#' || /^(?:data|blob|about):/i.test(text)) return text;
@@ -828,12 +831,12 @@
     const origin = virtualOriginForMessage(ev);
     if (!origin) return ev;
     try {
-      Object.defineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
-      return ev;
-    } catch {}
-    try {
       return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: ev.source, ports: ev.ports || [] });
     } catch {
+      try {
+        Object.defineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
+        return ev;
+      } catch {}
       try {
         const clone = Object.create(ev);
         Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
@@ -929,27 +932,9 @@
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
     }
-    function evalSimpleDynamic(text) {
-      const source = String(text || '').trim();
-      const assignment = /^(?:window|self|globalThis)\.([A-Za-z_$][\w$]*)\s*=\s*([\s\S]*?);?$/.exec(source);
-      if (assignment) {
-        const value = simpleDynamicValue(assignment[2]);
-        if (value !== undefined) {
-          root[assignment[1]] = value;
-          return value;
-        }
-      }
-      return simpleDynamicValue(source);
-    }
     function compileTimerString(source) {
       const text = String(source || '');
-      let compiled = null;
-      return function anonymous() {
-        const simple = evalSimpleDynamic(text);
-        if (simple !== undefined) return simple;
-        if (!compiled) compiled = compileEvalSource(text);
-        return compiled.call(root, scope);
-      };
+      return function anonymous() { return runScopedNativeEval(text); };
     }
     function scopedCallArgs(args) {
       const argv = new Array(args.length + 1);
@@ -980,17 +965,22 @@
     function dynamicEval(source) {
       if (arguments.length === 0) return undefined;
       if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-      const text = String(source);
-      const simple = evalSimpleDynamic(text);
-      if (simple !== undefined) return simple;
-      return compileEvalSource(text).call(root, scope);
+      return runScopedNativeEval(String(source));
     }
-    function compileEvalSource(text) {
-      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-      let source = String(text || '');
-      if (isEvalExpressionCandidate(source)) source = 'return (' + source + ');';
-      const rewritten = rewriteWithPageRewriter(source, 'function');
-      return Native.FunctionCtor('scope', rewritten);
+    function runScopedNativeEval(text) {
+      if (typeof Native.eval !== 'function') throw normalizedError('NotSupportedError');
+      const previous = root.__ZP_EVAL_SCOPE;
+      const hadPrevious = Object.prototype.hasOwnProperty.call(root, '__ZP_EVAL_SCOPE');
+      Object.defineProperty(root, '__ZP_EVAL_SCOPE', { value: scope, enumerable: false, configurable: true, writable: true });
+      try {
+        const expr = isEvalExpressionCandidate(text) ? '(' + text + ')' : text;
+        return (0, Native.eval)('with(__ZP_EVAL_SCOPE){' + expr + '\n}');
+      } finally {
+        try {
+          if (hadPrevious) Object.defineProperty(root, '__ZP_EVAL_SCOPE', { value: previous, enumerable: false, configurable: true, writable: true });
+          else delete root.__ZP_EVAL_SCOPE;
+        } catch {}
+      }
     }
     const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
     const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
@@ -1131,7 +1121,6 @@
         return true;
       },
       getOwnPropertyDescriptor(target, prop) {
-        if (prop === 'location') return Reflect.getOwnPropertyDescriptor(target, prop);
         return Reflect.getOwnPropertyDescriptor(target, prop);
       }
     });
@@ -1171,9 +1160,13 @@
       }
       return Reflect.get(Object(base), prop);
     }
+    function optionalGet(base, prop) {
+      if (base === null || base === undefined) return undefined;
+      return get(base, prop);
+    }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
-      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
+      if ((isWindowLike(base) && prop === 'location') || (base === document && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
       Reflect.set(Object(base), prop, value);
       return value;
@@ -1216,6 +1209,12 @@
       if (typeof fn !== 'function') return undefined;
       return Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs) : Reflect.apply(fn, rawBase, callArgs);
     }
+    function optionalCall(base, prop, args) {
+      if (base === null || base === undefined) return undefined;
+      const fn = optionalGet(base, prop);
+      if (fn === null || fn === undefined) return undefined;
+      return call(base, prop, args);
+    }
     function preserveMembraneCallArgs(base, prop) {
       if (base === Object && (prop === 'getOwnPropertyDescriptor' || prop === 'getOwnPropertyDescriptors' || prop === 'getOwnPropertyNames' || prop === 'getOwnPropertySymbols' || prop === 'keys')) return true;
       if (base === Reflect && (prop === 'getOwnPropertyDescriptor' || prop === 'ownKeys' || prop === 'has' || prop === 'get')) return true;
@@ -1228,11 +1227,17 @@
     function has(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isWindowLike(base) && prop === 'location') return true;
+      if (base === document && prop === 'location') return true;
       const raw = unwrapRaw(base === scope ? root : base);
       return Reflect.has(Object(raw), prop);
     }
-    function getOwnPropertyDescriptor(base, prop) { return Reflect.getOwnPropertyDescriptor(Object(unwrapRaw(base === scope ? root : base)), prop); }
-    function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
+    function getOwnPropertyDescriptor(base, prop) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if (isWindowLike(base) && prop === 'location') return { get() { return virtualLocation; }, set(v) { setVirtualLocation(v); }, enumerable: true, configurable: true };
+      if (base === document && (prop === 'location' || prop === 'URL' || prop === 'documentURI' || prop === 'baseURI' || prop === 'referrer' || prop === 'origin' || prop === 'defaultView')) return { value: get(base, prop), enumerable: true, configurable: true };
+      return Reflect.getOwnPropertyDescriptor(Object(unwrapRaw(base === scope ? root : base)), prop);
+    }
+    function ownKeys(base) { return Reflect.ownKeys(Object(unwrapRaw(base === scope ? root : base))); }
     function moduleURL(specifier, referrer) {
       const spec = String(specifier);
       if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw normalizedError('TypeError');
@@ -1241,9 +1246,11 @@
       return scriptProxyPath(u.href, 'module');
     }
     define(root, '__zp_get', get);
+    define(root, '__zp_optionalGet', optionalGet);
     define(root, '__zp_set', set);
     define(root, '__zp_assign', assign);
     define(root, '__zp_call', call);
+    define(root, '__zp_optionalCall', optionalCall);
     define(root, '__zp_update', update);
     define(root, '__zp_construct', construct);
     define(root, '__zp_has', has);
@@ -1255,15 +1262,10 @@
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
     function rewriteDynamicFunctionBody(params, body) {
-      if (root.ZPRewriter && typeof root.ZPRewriter.rewriteFunctionBody === 'function') {
-        const out = root.ZPRewriter.rewriteFunctionBody(String(body || ''), params, virtualURL.href, ZP.CONTROL_PREFIX);
-        if (out && out.ok && typeof out.code === 'string') return out.code;
-        throw normalizedError('NotSupportedError');
-      }
-      return rewriteWithPageRewriter(body, 'function');
-    }
-    function rewriteWithPageRewriter(source, kind) {
-      return rewritePageSource(source, kind);
+      if (!root.ZPRewriter || typeof root.ZPRewriter.rewriteFunctionBody !== 'function') throw normalizedError('NotSupportedError');
+      const out = root.ZPRewriter.rewriteFunctionBody(String(body || ''), params, virtualURL.href, ZP.CONTROL_PREFIX);
+      if (out && out.ok && typeof out.code === 'string') return out.code;
+      throw normalizedError('NotSupportedError');
     }
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
@@ -1439,27 +1441,40 @@
     if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
-      function ZPXMLHttpRequest() {
-        this.readyState = UNSENT;
-        this.response = this.responseText = '';
-        this.responseXML = null;
-        this._responseType = '';
-        this.responseURL = '';
-        this.status = 0;
-        this.statusText = '';
-        this._timeout = 0;
-        this._withCredentials = false;
-        this.upload = {};
-        installEventMethods(this.upload);
-        this._headers = [];
-        this._responseHeaders = null;
-        this._method = 'GET';
-        this._url = '';
-        this._async = true;
-        this._sent = false;
-        this._controller = null;
-        this._timer = 0;
+      function hiddenXHRSlot(xhr, key, value) {
+        try { Object.defineProperty(xhr, key, { value, enumerable: false, configurable: true, writable: true }); }
+        catch { xhr[key] = value; }
       }
+      function ZPXMLHttpRequest() {
+        hiddenXHRSlot(this, 'readyState', UNSENT);
+        hiddenXHRSlot(this, 'response', '');
+        hiddenXHRSlot(this, 'responseText', '');
+        hiddenXHRSlot(this, 'responseXML', null);
+        hiddenXHRSlot(this, '_responseType', '');
+        hiddenXHRSlot(this, 'responseURL', '');
+        hiddenXHRSlot(this, 'status', 0);
+        hiddenXHRSlot(this, 'statusText', '');
+        hiddenXHRSlot(this, '_timeout', 0);
+        hiddenXHRSlot(this, '_withCredentials', false);
+        hiddenXHRSlot(this, 'upload', {});
+        installEventMethods(this.upload);
+        hiddenXHRSlot(this, '_headers', []);
+        hiddenXHRSlot(this, '_responseHeaders', null);
+        hiddenXHRSlot(this, '_method', 'GET');
+        hiddenXHRSlot(this, '_url', '');
+        hiddenXHRSlot(this, '_async', true);
+        hiddenXHRSlot(this, '_sent', false);
+        hiddenXHRSlot(this, '_controller', null);
+        hiddenXHRSlot(this, '_timer', 0);
+      }
+      Object.defineProperties(ZPXMLHttpRequest, {
+        UNSENT: { value: UNSENT, enumerable: true },
+        OPENED: { value: OPENED, enumerable: true },
+        HEADERS_RECEIVED: { value: HEADERS_RECEIVED, enumerable: true },
+        LOADING: { value: LOADING, enumerable: true },
+        DONE: { value: DONE, enumerable: true }
+      });
+      try { Object.defineProperty(ZPXMLHttpRequest, 'name', { value: 'XMLHttpRequest', configurable: true }); } catch {}
       function xhrReady(xhr, state) {
         xhr.readyState = state;
         fireEvent(xhr, 'readystatechange');
@@ -1563,7 +1578,7 @@
         },
         getResponseHeader(name) { return this._responseHeaders ? this._responseHeaders.get(String(name)) : null; },
         getAllResponseHeaders() { if (!this._responseHeaders) return ''; let out = ''; this._responseHeaders.forEach((v, k) => { out += k + ': ' + v + '\r\n'; }); return out; },
-        overrideMimeType() {}
+        overrideMimeType(mime) {}
       });
       function syncXHRBody(body) {
         if (body == null) return null;
@@ -1659,12 +1674,29 @@
         }
       }
       Object.defineProperties(ZPXMLHttpRequest.prototype, {
+        [Symbol.toStringTag]: { value: 'XMLHttpRequest', configurable: true },
+        constructor: { value: ZPXMLHttpRequest, enumerable: false, configurable: true, writable: true },
+        onreadystatechange: { value: null, enumerable: true, configurable: true, writable: true },
+        readyState: { value: UNSENT, enumerable: true, configurable: true, writable: true },
+        upload: { value: null, enumerable: true, configurable: true, writable: true },
+        responseURL: { value: '', enumerable: true, configurable: true, writable: true },
+        status: { value: 0, enumerable: true, configurable: true, writable: true },
+        statusText: { value: '', enumerable: true, configurable: true, writable: true },
+        response: { value: '', enumerable: true, configurable: true, writable: true },
+        responseText: { value: '', enumerable: true, configurable: true, writable: true },
+        responseXML: { value: null, enumerable: true, configurable: true, writable: true },
+        UNSENT: { value: UNSENT, enumerable: true },
+        OPENED: { value: OPENED, enumerable: true },
+        HEADERS_RECEIVED: { value: HEADERS_RECEIVED, enumerable: true },
+        LOADING: { value: LOADING, enumerable: true },
+        DONE: { value: DONE, enumerable: true },
         responseType: { configurable: true, enumerable: true, get() { return this._responseType || ''; }, set(value) { setXHRResponseType(this, value); } },
         timeout: { configurable: true, enumerable: true, get() { return this._timeout || 0; }, set(value) { setXHRTimeout(this, value); } },
         withCredentials: { configurable: true, enumerable: true, get() { return !!this._withCredentials; }, set(value) { setXHRWithCredentials(this, value); } }
       });
       maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
-      define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
+      try { Object.defineProperty(root, 'XMLHttpRequest', { value: ZPXMLHttpRequest, enumerable: false, configurable: true, writable: true }); } catch {}
+      maskNativeFunction(ZPXMLHttpRequest, 'XMLHttpRequest');
     }
     if (Native.EventSource && Native.fetch && Native.Request && Native.Headers) {
       const CONNECTING = 0, OPEN = 1, CLOSED = 2;
@@ -1972,6 +2004,39 @@
     defineAccessor(nav, 'appVersion', () => TARGET_APP_VERSION);
     defineAccessor(proto, 'platform', () => TARGET_PLATFORM);
     defineAccessor(nav, 'platform', () => TARGET_PLATFORM);
+    const userAgentData = makeUserAgentData();
+    defineAccessor(proto, 'userAgentData', () => userAgentData);
+    defineAccessor(nav, 'userAgentData', () => userAgentData);
+  }
+  function makeUserAgentData() {
+    const data = {
+      brands: TARGET_UA_BRANDS.map(b => Object.freeze({ brand: b.brand, version: b.version })),
+      mobile: false,
+      platform: 'Windows',
+      getHighEntropyValues(hints) {
+        const requested = Array.isArray(hints) ? hints.map(String) : [];
+        const values = {
+          architecture: 'x86',
+          bitness: '64',
+          brands: TARGET_UA_BRANDS.map(b => ({ brand: b.brand, version: b.version })),
+          fullVersionList: TARGET_UA_FULL_VERSION_LIST.map(b => ({ brand: b.brand, version: b.version })),
+          mobile: false,
+          model: '',
+          platform: 'Windows',
+          platformVersion: '10.0.0',
+          uaFullVersion: '134.0.0.0',
+          fullVersion: '134.0.0.0',
+          wow64: false
+        };
+        const out = { brands: values.brands, mobile: false, platform: 'Windows' };
+        for (const hint of requested) if (Object.prototype.hasOwnProperty.call(values, hint)) out[hint] = values[hint];
+        return Promise.resolve(out);
+      },
+      toJSON() { return { brands: this.brands, mobile: false, platform: 'Windows' }; }
+    };
+    maskMethods(data, ['getHighEntropyValues','toJSON']);
+    try { Object.freeze(data.brands); Object.freeze(data); } catch {}
+    return data;
   }
 
   function installPopupHooks(w) {
@@ -2837,6 +2902,7 @@
       if (u.origin !== proxyOrigin) return String(raw || '');
       if (u.pathname === ZP.apiPath('fetch')) return u.searchParams.get('url') || String(raw || '');
       if (u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script')) return u.searchParams.get('u') || String(raw || '');
+      if (u.pathname === '/favicon.ico') return new URL('/favicon.ico', virtualURL.href).href;
       if (isZeroProxyAssetURL(u.href)) return '';
     } catch {}
     return String(raw || '');
@@ -2851,7 +2917,23 @@
     return new Proxy(entry, {
       get(target, prop) {
         if (prop === 'name') return visible;
-        if (prop === 'toJSON') return () => Object.assign({}, target.toJSON ? target.toJSON() : target, { name: visible });
+        if (prop === 'transferSize') {
+          const transfer = Number(target.transferSize || 0);
+          if (transfer > 0) return transfer;
+          const encoded = Number(target.encodedBodySize || 0);
+          const decoded = Number(target.decodedBodySize || 0);
+          const size = Math.max(encoded, decoded);
+          return size > 0 ? size + 300 : 0;
+        }
+        if (prop === 'toJSON') return () => {
+          const out = Object.assign({}, target.toJSON ? target.toJSON() : target, { name: visible });
+          const transfer = Number(out.transferSize || 0);
+          if (transfer <= 0) {
+            const size = Math.max(Number(out.encodedBodySize || 0), Number(out.decodedBodySize || 0));
+            if (size > 0) out.transferSize = size + 300;
+          }
+          return out;
+        };
         const value = target[prop];
         return typeof value === 'function' ? value.bind(target) : value;
       }
@@ -2859,6 +2941,23 @@
   }
   function maskPerformanceList(list, documentURL) {
     return Array.from(list || []).map(entry => wrapPerformanceEntry(entry, documentURL)).filter(Boolean);
+  }
+  function performanceObserverListFacade(list, documentURL) {
+    return new Proxy(list, {
+      get(target, prop, receiver) {
+        if (prop === 'getEntries') return () => maskPerformanceList(target.getEntries(), documentURL);
+        if (prop === 'getEntriesByType') return type => maskPerformanceList(target.getEntriesByType(type), documentURL);
+        if (prop === 'getEntriesByName') return (name, type) => {
+          const text = String(name);
+          return maskPerformanceList(target.getEntries(), documentURL).filter(entry => {
+            if (!entry || entry.name !== text) return false;
+            return type == null || String(type) === String(entry.entryType);
+          });
+        };
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
   }
   function syntheticResourceTiming(name, initiatorType = 'script') {
     const now = (() => { try { return Math.max(0, performance.now()); } catch { return 0; } })();
@@ -2915,6 +3014,27 @@
     const perf = w && w.performance;
     if (!perf) return;
     const visibleDocumentURL = () => visibleDocumentURLFor(w);
+    if (typeof w.PerformanceObserver === 'function') {
+      const NativePerformanceObserver = w.PerformanceObserver;
+      const ZPPerformanceObserver = function PerformanceObserver(callback) {
+        if (typeof callback !== 'function') throw normalizedError('TypeError');
+        let observer;
+        let facade;
+        observer = new NativePerformanceObserver(list => callback.call(facade, performanceObserverListFacade(list, visibleDocumentURL()), facade));
+        facade = new Proxy(observer, {
+          get(target, prop, receiver) {
+            if (prop === 'takeRecords') return () => maskPerformanceList(target.takeRecords(), visibleDocumentURL());
+            const value = Reflect.get(target, prop, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+        });
+        return facade;
+      };
+      try { Object.setPrototypeOf(ZPPerformanceObserver, NativePerformanceObserver); } catch {}
+      try { ZPPerformanceObserver.prototype = NativePerformanceObserver.prototype; } catch {}
+      try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get() { return NativePerformanceObserver.supportedEntryTypes; }, enumerable: true, configurable: true }); } catch {}
+      define(w, 'PerformanceObserver', ZPPerformanceObserver);
+    }
     if (typeof perf.getEntries === 'function') {
       const native = perf.getEntries.bind(perf);
       define(perf, 'getEntries', function() {
@@ -3205,8 +3325,17 @@
     return '';
   }
   function scriptProxyPath(target, kind) {
-    const path = ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target);
-    return kind === 'module' ? path : path + '&tab=' + encodeURIComponent(boot.tabId) + '&rt=' + encodeURIComponent(runtimeToken);
+    const params = new URLSearchParams();
+    params.set('kind', kind);
+    params.set('u', target);
+    if (kind !== 'module') {
+      const ref = documentReferrerFor(target);
+      if (ref) params.set('ref', ref);
+      if (documentReferrerPolicy) params.set('rp', documentReferrerPolicy);
+      params.set('tab', boot.tabId);
+      params.set('rt', runtimeToken);
+    }
+    return ZP.apiPath('script') + '?' + params.toString();
   }
   function setScriptSource(el, raw) {
     const kind = executableScriptKindForElement(el);
@@ -3394,6 +3523,11 @@
     }
     const raw = Native.getAttribute.call(el, 'src') || Native.getAttribute.call(el, 'href');
     if (raw) {
+      const target = Native.getAttribute.call(el, 'data-zp-target-url') || '';
+      if (target && (String(raw).startsWith(ZP.CONTROL_PREFIX) || String(raw).startsWith(proxyOrigin + ZP.CONTROL_PREFIX))) {
+        setScriptSource(el, target);
+        return;
+      }
       setScriptSource(el, raw);
       return;
     }
@@ -3645,12 +3779,137 @@
     }
   }
 
+  function workerBootstrapBlobURL(sourceURL) {
+    const params = new URLSearchParams();
+    for (const server of activeServers) params.append('server', server);
+    const workerLocation = virtualBlobWorkerLocation(sourceURL);
+    const body = [
+      "const __zp_native_importScripts=importScripts.bind(self);\n",
+      "self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\n",
+      "self.__ZP_WORKER_LOCATION=", JSON.stringify(workerLocation), ";\n",
+      "self.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\n",
+      "self.__ZP_WORKER_RUNTIME_TOKEN=", JSON.stringify(runtimeToken), ";\n",
+      "self.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\n",
+      "self.__ZP_WORKER_SERVERS=new URLSearchParams(", JSON.stringify(params.toString()), ").getAll('server');\n",
+      "importScripts(", JSON.stringify(proxyOrigin + '/zp/assets/worker-prelude.js'), ");\n",
+      "__zp_native_importScripts(", JSON.stringify(sourceURL), ");\n"
+    ];
+    const wrapper = new Blob(body, { type: 'text/javascript' });
+    const wrapperURL = Native.createObjectURL(wrapper);
+    workerBlobURLs.add(wrapperURL);
+    return wrapperURL;
+  }
+  function virtualBlobWorkerLocation(sourceURL) {
+    try {
+      const parsed = new URL(String(sourceURL));
+      if (parsed.protocol === 'blob:') {
+        const pathname = parsed.pathname || '';
+        const id = pathname.slice(pathname.lastIndexOf('/') + 1);
+        if (id) return 'blob:' + virtualURL.origin + '/' + id;
+      }
+    } catch {}
+    return virtualURL.href;
+  }
+  function scriptBlobURLForPage(sourceURL, blob) {
+    const type = String(blob && blob.type || '').toLowerCase();
+    if (!type || (!/(?:^|[+/.-])(?:javascript|ecmascript)(?:$|[;])/i.test(type) && type !== 'text/javascript' && type !== 'application/javascript')) return String(sourceURL);
+    return virtualBlobWorkerLocation(sourceURL);
+  }
+  function installWorkerTerminateHook() {
+    if (workerTerminateHooked || !Native.Worker || !Native.Worker.prototype) return;
+    const nativeTerminate = Native.Worker.prototype.terminate;
+    if (typeof nativeTerminate !== 'function') return;
+    const terminate = function terminate() {
+      if (deferredTerminateWorkers.has(this)) {
+        const worker = this;
+        const callTerminate = () => Native.reflectApply ? Native.reflectApply(nativeTerminate, worker, []) : nativeTerminate.call(worker);
+        try { (Native.setTimeout || setTimeout)(callTerminate, 250); }
+        catch { callTerminate(); }
+        return undefined;
+      }
+      return Native.reflectApply ? Native.reflectApply(nativeTerminate, this, []) : nativeTerminate.call(this);
+    };
+    try { Object.defineProperty(terminate, 'name', { value: 'terminate', configurable: true }); } catch {}
+    maskNativeFunction(terminate, 'terminate');
+    try {
+      Object.defineProperty(Native.Worker.prototype, 'terminate', { value: terminate, enumerable: true, configurable: true, writable: true });
+      workerTerminateHooked = true;
+    } catch {}
+  }
   function installWorkerHooks() {
-    if (Native.Worker) define(root, 'Worker', function(url, opts) { return new Native.Worker(workerBootstrapURL(url), opts); });
-    if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { return new Native.SharedWorker(workerBootstrapURL(url), opts); });
+    if (Native.Worker) {
+      installWorkerTerminateHook();
+      const ZPWorker = function Worker(url) {
+        const blobWorker = isBlobWorkerURL(url);
+        const worker = new Native.Worker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1]));
+        if (blobWorker) {
+          try { deferredTerminateWorkers.add(worker); } catch {}
+        }
+        return worker;
+      };
+      try { Object.setPrototypeOf(ZPWorker, Native.Worker); } catch {}
+      try { Object.defineProperty(ZPWorker, 'prototype', { value: Native.Worker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
+      try { Object.defineProperty(Native.Worker.prototype, 'constructor', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+      maskNativeFunction(ZPWorker, 'Worker');
+      try { Object.defineProperty(root, 'Worker', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+    }
+    if (Native.SharedWorker) {
+      const ZPSharedWorker = function SharedWorker(url) { return new Native.SharedWorker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1])); };
+      try { Object.setPrototypeOf(ZPSharedWorker, Native.SharedWorker); } catch {}
+      try { Object.defineProperty(ZPSharedWorker, 'prototype', { value: Native.SharedWorker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
+      try { Object.defineProperty(Native.SharedWorker.prototype, 'constructor', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+      maskNativeFunction(ZPSharedWorker, 'SharedWorker');
+      try { Object.defineProperty(root, 'SharedWorker', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+    }
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.resolve(undefined); });
-    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { return Native.createObjectURL(blob); });
+    if (Native.createObjectURL) {
+      const createObjectURL = function createObjectURL(blob) {
+      const url = Native.createObjectURL(blob);
+      try {
+        if (typeof Blob !== 'undefined' && blob instanceof Blob) {
+          const virtual = scriptBlobURLForPage(url, blob);
+          const wrapper = workerBootstrapBlobURL(url);
+          workerBlobURLMap.set(url, wrapper);
+          if (virtual !== url) {
+            blobURLRawMap.set(virtual, url);
+            workerBlobURLMap.set(virtual, wrapper);
+            return virtual;
+          }
+        }
+      } catch {}
+      return url;
+      };
+      try { Object.defineProperty(createObjectURL, 'name', { value: 'createObjectURL', configurable: true }); } catch {}
+      maskNativeFunction(createObjectURL, 'createObjectURL');
+      try { Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
+    }
+    if (Native.revokeObjectURL) {
+      const revokeObjectURL = function revokeObjectURL(url) {
+      const visible = String(url);
+      const raw = blobURLRawMap.get(visible) || visible;
+      const workerURL = workerBlobURLMap.get(visible) || workerBlobURLMap.get(raw);
+      blobURLRawMap.delete(visible);
+      workerBlobURLMap.delete(visible);
+      workerBlobURLMap.delete(raw);
+      if (workerURL) {
+        const revokeWorkerURL = () => {
+          workerBlobURLs.delete(workerURL);
+          try { Native.revokeObjectURL(workerURL); } catch {}
+          try { Native.revokeObjectURL(raw); } catch {}
+        };
+        try { (Native.setTimeout || setTimeout)(revokeWorkerURL, 30000); } catch { revokeWorkerURL(); }
+        return undefined;
+      }
+      return Native.revokeObjectURL(raw);
+      };
+      try { Object.defineProperty(revokeObjectURL, 'name', { value: 'revokeObjectURL', configurable: true }); } catch {}
+      maskNativeFunction(revokeObjectURL, 'revokeObjectURL');
+      try { Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
+    }
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
+  }
+  function isBlobWorkerURL(url) {
+    try { return new URL(String(url), virtualURL.href).protocol === 'blob:'; } catch { return false; }
   }
   function installTargetServiceWorkerBlocker(w) {
     const nav = w && w.navigator;
@@ -3660,7 +3919,7 @@
     try { Object.defineProperty(facade, Symbol.toStringTag, { value: 'ServiceWorkerContainer', enumerable: false, configurable: true }); } catch {}
     const serviceWorkerReady = Promise.resolve(undefined);
     let oncontrollerchange = null;
-    define(facade, 'register', function register() { return Promise.resolve(undefined); });
+    define(facade, 'register', function register() { return Promise.reject(normalizedError('NotSupportedError')); });
     define(facade, 'getRegistration', function getRegistration() { return Promise.resolve(undefined); });
     define(facade, 'getRegistrations', function getRegistrations() { return Promise.resolve([]); });
     define(facade, 'startMessages', function startMessages() {});
@@ -3688,21 +3947,29 @@
     const raw = String(url);
     const parsed = new URL(raw, virtualURL.href);
     if (parsed.protocol === 'blob:') {
-      if (!workerBlobURLs.has(parsed.href)) throw normalizedError('NotSupportedError');
-      return parsed.href;
+      const wrapped = workerBlobURLMap.get(parsed.href) || parsed.href;
+      if (!workerBlobURLs.has(wrapped)) throw normalizedError('NotSupportedError');
+      return wrapped;
     }
     if (parsed.protocol === 'data:') return dataWorkerURL(parsed.href);
     const params = new URLSearchParams();
     params.set('u', requestTargetURL(raw));
+    params.set('loc', requestTargetURL(raw));
     params.set('tab', boot.tabId);
     params.set('rt', runtimeToken);
     for (const server of activeServers) params.append('server', server);
     return ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();
   }
+  function bootstrapWorkerOptions(opts) {
+    if (!opts || typeof opts !== 'object') return opts;
+    const out = Object.assign({}, opts);
+    delete out.type;
+    return out;
+  }
   function dataWorkerURL(raw) {
     const comma = raw.indexOf(',');
     if (comma < 0) throw normalizedError('NotSupportedError');
-    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/zp/assets/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
+    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_LOCATION=", JSON.stringify(raw), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nself.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\nimportScripts(", JSON.stringify(proxyOrigin + '/zp/assets/worker-prelude.js'), ");\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
     const safe = Native.createObjectURL(blocked);
     workerBlobURLs.add(safe);
     return safe;
@@ -3906,7 +4173,11 @@
     defineChild('__zp_get', get);
     defineChild('__zp_set', set);
     defineChild('__zp_assign', assign);
-    defineChild('__zp_call', (base, prop, args) => Reflect.apply(get(base, prop), base === scope ? w : base, Array.isArray(args) ? args : []));
+    defineChild('__zp_call', (base, prop, args) => {
+      const fn = get(base, prop);
+      if (typeof fn !== 'function') return undefined;
+      return Reflect.apply(fn, base === scope ? w : base, Array.isArray(args) ? args : []);
+    });
     defineChild('__zp_update', update);
     defineChild('__zp_construct', (ctor, args) => Reflect.construct(wrapDynamicConstructor(ctor), Array.isArray(args) ? args : []));
     defineChild('__zp_has', (base, prop) => {
@@ -3955,6 +4226,11 @@
 
   function installBlockers(w, strict = false) {
     if (root.WebSocketStream && !define(w, 'WebSocketStream', root.WebSocketStream) && strict) throw normalizedError('SecurityError');
+    const blockedNetwork = function() { throw normalizedError('NotSupportedError'); };
+    toStringMap.set(blockedNetwork, nativeFunctionSource('RTCPeerConnection'));
+    for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'WebTransport']) {
+      if (name in w && !define(w, name, blockedNetwork) && strict) throw normalizedError('SecurityError');
+    }
     const nav = w.navigator;
     if (nav) {
       if (nav.mediaDevices) maskMethods(nav.mediaDevices, ['getUserMedia','getDisplayMedia','enumerateDevices']);

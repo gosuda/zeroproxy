@@ -273,14 +273,15 @@ fn rewrite_wrapped_source(
 }
 
 const GLOBALS: &[&str] = &[
-    "window", "self", "globalThis", "location", "document", "history", "top", "parent", "opener", "frames",
+    "window", "self", "globalThis", "location", "origin", "document", "history", "top", "parent", "opener", "frames",
     "WebSocket", "eval", "Function", "AsyncFunction", "GeneratorFunction", "AsyncGeneratorFunction",
 ];
 const MEMBER_HELPER_PROPS: &[&str] = &[
     "location", "defaultView", "contentWindow", "contentDocument", "top", "parent", "opener", "frames", "constructor", "postMessage",
 ];
 const CALL_HELPER_PROPS: &[&str] = &[
-    "assign", "replace", "open", "get", "getOwnPropertyDescriptor", "defineProperty",
+    "assign", "replace", "open", "get", "has", "ownKeys", "keys", "getOwnPropertyDescriptor",
+    "getOwnPropertyDescriptors", "getOwnPropertyNames", "getOwnPropertySymbols", "defineProperty",
 ];
 
 #[derive(Clone)]
@@ -305,6 +306,7 @@ struct Rewriter<'a> {
     replacements: Vec<Replacement>,
     scopes: Vec<HashSet<String>>,
     window_aliases: Vec<HashSet<String>>,
+    document_aliases: Vec<HashSet<String>>,
 }
 
 impl<'a> Rewriter<'a> {
@@ -317,6 +319,7 @@ impl<'a> Rewriter<'a> {
             replacements: Vec::new(),
             scopes: Vec::new(),
             window_aliases: Vec::new(),
+            document_aliases: Vec::new(),
         }
     }
 
@@ -348,8 +351,8 @@ impl<'a> Rewriter<'a> {
         self.source.get(span.start as usize..span.end as usize).unwrap_or("")
     }
 
-    fn push_scope(&mut self, scope: HashSet<String>) { self.scopes.push(scope); self.window_aliases.push(HashSet::new()); }
-    fn pop_scope(&mut self) { self.scopes.pop(); self.window_aliases.pop(); }
+    fn push_scope(&mut self, scope: HashSet<String>) { self.scopes.push(scope); self.window_aliases.push(HashSet::new()); self.document_aliases.push(HashSet::new()); }
+    fn pop_scope(&mut self) { self.scopes.pop(); self.window_aliases.pop(); self.document_aliases.pop(); }
     fn declare(&mut self, name: &str) {
         if let Some(scope) = self.scopes.last_mut() { scope.insert(name.to_string()); }
     }
@@ -362,6 +365,15 @@ impl<'a> Rewriter<'a> {
     }
     fn is_window_alias(&self, name: &str) -> bool {
         self.window_aliases.iter().rev().any(|scope| scope.contains(name))
+    }
+    fn declare_document_alias(&mut self, name: &str) {
+        if let Some(scope) = self.document_aliases.last_mut() { scope.insert(name.to_string()); }
+    }
+    fn remove_document_alias(&mut self, name: &str) {
+        if let Some(scope) = self.document_aliases.last_mut() { scope.remove(name); }
+    }
+    fn is_document_alias(&self, name: &str) -> bool {
+        self.document_aliases.iter().rev().any(|scope| scope.contains(name))
     }
     fn add_replacement(&mut self, span: Span, text: String, priority: i32) {
         let start = span.start as usize;
@@ -547,6 +559,9 @@ impl<'a> Rewriter<'a> {
                     if self.expression_is_window_alias_source(init) {
                         self.declare_window_alias(id.name.as_str());
                         self.add_replacement(init.span(), self.render_window_alias_source(init), 80);
+                    } else if self.expression_is_document_alias_source(init) {
+                        self.declare_document_alias(id.name.as_str());
+                        self.add_replacement(init.span(), self.render_expression(init), 80);
                     }
                 }
             }
@@ -647,14 +662,16 @@ impl<'a> Rewriter<'a> {
                     return;
                 }
                 if self.member_needs_helper_static(expr) {
-                    self.add_replacement(expr.span, format!("__zp_get({},{:?})", self.render_expression(&expr.object), expr.property.name.as_str()), 80);
+                    let helper = if self.member_access_is_optional(expr.span) { "__zp_optionalGet" } else { "__zp_get" };
+                    self.add_replacement(expr.span, format!("{}({},{:?})", helper, self.render_expression(&expr.object), expr.property.name.as_str()), 80);
                     return;
                 }
                 self.walk_expression(&expr.object);
             }
             Expression::ComputedMemberExpression(expr) => {
                 if self.member_needs_helper_computed(expr) {
-                    self.add_replacement(expr.span, format!("__zp_get({},{})", self.render_expression(&expr.object), self.render_expression(&expr.expression)), 80);
+                    let helper = if self.member_access_is_optional(expr.span) { "__zp_optionalGet" } else { "__zp_get" };
+                    self.add_replacement(expr.span, format!("{}({},{})", helper, self.render_expression(&expr.object), self.render_expression(&expr.expression)), 80);
                     return;
                 }
                 self.walk_expression(&expr.object);
@@ -740,10 +757,17 @@ impl<'a> Rewriter<'a> {
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = &expr.left {
                 if self.expression_is_window_alias_source(&expr.right) {
                     self.declare_window_alias(id.name.as_str());
+                    self.remove_document_alias(id.name.as_str());
                     self.add_replacement(expr.span, format!("{} = {}", self.span_text(id.span), self.render_window_alias_source(&expr.right)), 80);
+                    return;
+                } else if self.expression_is_document_alias_source(&expr.right) {
+                    self.declare_document_alias(id.name.as_str());
+                    self.remove_window_alias(id.name.as_str());
+                    self.add_replacement(expr.span, format!("{} = {}", self.span_text(id.span), self.render_expression(&expr.right)), 80);
                     return;
                 } else {
                     self.remove_window_alias(id.name.as_str());
+                    self.remove_document_alias(id.name.as_str());
                 }
             }
         }
@@ -807,7 +831,8 @@ impl<'a> Rewriter<'a> {
     fn walk_call_expression(&mut self, expr: &CallExpression<'a>) {
         if let Some((base, prop)) = self.call_target(&expr.callee) {
             let args = self.render_arguments(&expr.arguments);
-            self.add_replacement(expr.span, format!("(__zp_call({},{},[{}]))", base, prop, args), 90);
+            let helper = if self.call_access_is_optional(expr.span, expr.callee.span()) { "__zp_optionalCall" } else { "__zp_call" };
+            self.add_replacement(expr.span, format!("({}({},{},[{}]))", helper, base, prop, args), 90);
             return;
         }
         self.walk_expression(&expr.callee);
@@ -940,14 +965,16 @@ impl<'a> Rewriter<'a> {
     fn render_static_member(&self, expr: &StaticMemberExpression<'a>) -> String {
         if self.is_import_meta_url_static(expr) { return format!("{:?}", self.target_url); }
         if self.member_needs_helper_static(expr) {
-            return format!("__zp_get({},{:?})", self.render_expression(&expr.object), expr.property.name.as_str());
+            let helper = if self.member_access_is_optional(expr.span) { "__zp_optionalGet" } else { "__zp_get" };
+            return format!("{}({},{:?})", helper, self.render_expression(&expr.object), expr.property.name.as_str());
         }
         self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))])
     }
 
     fn render_computed_member(&self, expr: &ComputedMemberExpression<'a>) -> String {
         if self.member_needs_helper_computed(expr) {
-            return format!("__zp_get({},{})", self.render_expression(&expr.object), self.render_expression(&expr.expression));
+            let helper = if self.member_access_is_optional(expr.span) { "__zp_optionalGet" } else { "__zp_get" };
+            return format!("{}({},{})", helper, self.render_expression(&expr.object), self.render_expression(&expr.expression));
         }
         self.render_span_with(expr.span, vec![
             (expr.object.span(), self.render_expression(&expr.object)),
@@ -957,7 +984,8 @@ impl<'a> Rewriter<'a> {
 
     fn render_call_expression(&self, expr: &CallExpression<'a>) -> String {
         if let Some((base, prop)) = self.call_target(&expr.callee) {
-            return format!("(__zp_call({},{},[{}]))", base, prop, self.render_arguments(&expr.arguments));
+            let helper = if self.call_access_is_optional(expr.span, expr.callee.span()) { "__zp_optionalCall" } else { "__zp_call" };
+            return format!("({}({},{},[{}]))", helper, base, prop, self.render_arguments(&expr.arguments));
         }
         let mut parts = Vec::with_capacity(expr.arguments.len() + 1);
         parts.push((expr.callee.span(), self.render_expression(&expr.callee)));
@@ -1177,10 +1205,10 @@ impl<'a> Rewriter<'a> {
         match expr {
             Expression::Identifier(id) => {
                 let name = id.name.as_str();
-                (matches!(name, "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames" | "document") && !self.declared(name)) || self.is_window_alias(name)
+                (matches!(name, "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames" | "document") && !self.declared(name)) || self.is_window_alias(name) || self.is_document_alias(name)
             }
             Expression::StaticMemberExpression(member) => matches!(member.property.name.as_str(), "defaultView" | "contentWindow" | "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames") && self.is_window_like_expression(&member.object),
-            Expression::ComputedMemberExpression(_) => false,
+            Expression::ComputedMemberExpression(member) => self.is_window_like_expression(&member.object),
             _ => false,
         }
     }
@@ -1196,6 +1224,23 @@ impl<'a> Rewriter<'a> {
             Expression::LogicalExpression(expr) => self.expression_is_window_alias_source(&expr.left) || self.expression_is_window_alias_source(&expr.right),
             Expression::ConditionalExpression(expr) => self.expression_is_window_alias_source(&expr.consequent) || self.expression_is_window_alias_source(&expr.alternate),
             Expression::ParenthesizedExpression(expr) => self.expression_is_window_alias_source(&expr.expression),
+            _ => false,
+        }
+    }
+
+    fn expression_is_document_alias_source(&self, expr: &Expression<'a>) -> bool {
+        match expr {
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                name == "document" && !self.declared(name) || self.is_document_alias(name)
+            }
+            Expression::StaticMemberExpression(member) => {
+                member.property.name == "document" && self.is_window_like_expression(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) => self.is_window_like_expression(&member.object),
+            Expression::LogicalExpression(expr) => self.expression_is_document_alias_source(&expr.left) || self.expression_is_document_alias_source(&expr.right),
+            Expression::ConditionalExpression(expr) => self.expression_is_document_alias_source(&expr.consequent) || self.expression_is_document_alias_source(&expr.alternate),
+            Expression::ParenthesizedExpression(expr) => self.expression_is_document_alias_source(&expr.expression),
             _ => false,
         }
     }
@@ -1272,6 +1317,19 @@ impl<'a> Rewriter<'a> {
             }
             _ => None,
         }
+    }
+
+    fn member_access_is_optional(&self, span: Span) -> bool {
+        self.span_text(span).contains("?.")
+    }
+
+    fn call_access_is_optional(&self, call_span: Span, callee_span: Span) -> bool {
+        if self.span_text(callee_span).contains("?.") {
+            return true;
+        }
+        let start = callee_span.end as usize;
+        let end = call_span.end as usize;
+        self.source.get(start..end).unwrap_or("").trim_start().starts_with("?.")
     }
 
     fn construct_target(&self, callee: &Expression<'a>) -> Option<String> {

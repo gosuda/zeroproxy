@@ -43,6 +43,8 @@ const TargetUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 const (
 	browserIdleConnTimeout = 90 * time.Second
 	maxH1IdleConnsPerKey   = 6
+	targetCHUA             = `"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"`
+	targetCHUAFullList     = `"Chromium";v="134.0.0.0", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="134.0.0.0"`
 )
 
 var fetchTLSProtocols = [...]string{utlskernel.ALPNHTTP2, utlskernel.ALPNHTTP1}
@@ -248,6 +250,7 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 	wire.Header.Set("Host", canonicalAuthority(target))
 	wire.Host = canonicalAuthority(target)
 	wire.Header.Set("User-Agent", TargetUserAgent)
+	setTargetClientHints(wire.Header)
 	wire.Header.Set("Accept-Encoding", "identity")
 	if jar != nil && policyAllowsCookies(policy, target) {
 		cookieCtx := cookiejar.RequestContext{
@@ -271,6 +274,27 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 		wire.Header.Set("Referer", ref)
 	}
 	return wire, nil
+}
+
+func setTargetClientHints(h http.Header) {
+	for _, name := range []string{
+		"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform", "Sec-CH-UA-Arch",
+		"Sec-CH-UA-Bitness", "Sec-CH-UA-Full-Version", "Sec-CH-UA-Full-Version-List",
+		"Sec-CH-UA-Model", "Sec-CH-UA-Platform-Version",
+		"UA", "UA-Mobile", "UA-Platform", "UA-Arch", "UA-Bitness", "UA-Full-Version",
+		"UA-Full-Version-List", "UA-Model", "UA-Platform-Version",
+	} {
+		h.Del(name)
+	}
+	h.Set("Sec-CH-UA", targetCHUA)
+	h.Set("Sec-CH-UA-Mobile", "?0")
+	h.Set("Sec-CH-UA-Platform", `"Windows"`)
+	h.Set("Sec-CH-UA-Arch", `"x86"`)
+	h.Set("Sec-CH-UA-Bitness", `"64"`)
+	h.Set("Sec-CH-UA-Full-Version", `"134.0.0.0"`)
+	h.Set("Sec-CH-UA-Full-Version-List", targetCHUAFullList)
+	h.Set("Sec-CH-UA-Model", `""`)
+	h.Set("Sec-CH-UA-Platform-Version", `"10.0.0"`)
 }
 
 func policyFromRequest(req *http.Request) RequestPolicy {

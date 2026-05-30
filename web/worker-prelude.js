@@ -2,9 +2,40 @@
   'use strict';
   if (self.__ZP_WORKER_PRELUDE) return;
   Object.defineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
-  importScripts('/zp/assets/zp-core.js');
+  const proxyOrigin = String(self.__ZP_WORKER_PROXY_ORIGIN || self.location && self.location.origin || '');
+  function internalURL(path) {
+    return proxyOrigin ? new URL(path, proxyOrigin).href : path;
+  }
+  importScripts(internalURL('/zp/assets/zp-core.js'));
+  const nativeFunctionToString = self.Function && self.Function.prototype && self.Function.prototype.toString;
+  const toStringMap = new WeakMap();
+  function nativeFunctionSource(name) { return 'function ' + name + '() { [native code] }'; }
+  function maskNativeFunction(fn, name) {
+    if (typeof fn === 'function') toStringMap.set(fn, nativeFunctionSource(name));
+  }
+  if (nativeFunctionToString) {
+    const maskedToString = function toString() {
+      if (toStringMap.has(this)) return toStringMap.get(this);
+      return nativeFunctionToString.call(this);
+    };
+    toStringMap.set(maskedToString, nativeFunctionSource('toString'));
+    try { Object.defineProperty(self.Function.prototype, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true }); } catch {}
+  }
   const nativeFetch = self.fetch.bind(self);
-  const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
+  const base = new URL(self.__ZP_WORKER_LOCATION || self.__ZP_WORKER_TARGET || 'https://invalid.local/');
+  function makeWorkerLocationFacade(url) {
+    const loc = {};
+    for (const prop of ['href','origin','protocol','host','hostname','port','pathname','search','hash']) {
+      Object.defineProperty(loc, prop, { get: () => url[prop], enumerable: false, configurable: true });
+    }
+    Object.defineProperty(loc, 'toString', { value: function toString() { return url.href; }, enumerable: false, configurable: true });
+    Object.defineProperty(loc, Symbol.toStringTag, { value: 'WorkerLocation', enumerable: false, configurable: true });
+    try { Object.defineProperty(loc, 'constructor', { value: self.location && self.location.constructor, enumerable: false, configurable: true }); } catch {}
+    return loc;
+  }
+  const workerLocation = makeWorkerLocationFacade(base);
+  try { Object.defineProperty(self, 'location', { value: workerLocation, enumerable: true, configurable: true }); } catch {}
+  try { Object.defineProperty(self, 'origin', { value: base.origin, enumerable: true, configurable: true }); } catch {}
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
   const runtimeToken = String(self.__ZP_WORKER_RUNTIME_TOKEN || '');
   const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
@@ -13,8 +44,7 @@
     get(target, prop) {
       if (prop === Symbol.unscopables) return undefined;
       if (prop === 'self' || prop === 'globalThis' || prop === 'window' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
-      if (prop === 'location') return base;
-      if (prop === 'eval' || prop === 'Function') return blockedDynamic;
+      if (prop === 'location') return workerLocation;
       return Reflect.get(target, prop);
     },
     set(target, prop, value) { return Reflect.set(target, prop, value); }
@@ -27,16 +57,19 @@
     if (typeof prop !== 'symbol') prop = String(prop);
     if (isWorkerGlobal(target)) {
       if (prop === 'self' || prop === 'globalThis' || prop === 'window' || prop === 'top' || prop === 'parent' || prop === 'frames') return scope;
-      if (prop === 'location') return base;
-      if (prop === 'eval' || prop === 'Function') return blockedDynamic;
+      if (prop === 'location') return workerLocation;
     }
     const actual = workerTarget(target);
     const value = Reflect.get(Object(actual), prop);
     return prop === 'postMessage' && typeof value === 'function' ? value.bind(actual) : value;
   }
+  function optionalGet(target, prop) {
+    if (target === null || target === undefined) return undefined;
+    return get(target, prop);
+  }
   function set(target, prop, value) {
     if (typeof prop !== 'symbol') prop = String(prop);
-    if ((isWorkerGlobal(target) && prop === 'location') || target === base) blockedDynamic();
+    if ((isWorkerGlobal(target) && prop === 'location') || target === workerLocation) blockedDynamic();
     Reflect.set(Object(workerTarget(target)), prop, value);
     return value;
   }
@@ -73,17 +106,25 @@
     const actual = workerTarget(target);
     return Reflect.apply(get(target, prop), actual, Array.isArray(args) ? args : []);
   }
+  function optionalCall(target, prop, args) {
+    if (target === null || target === undefined) return undefined;
+    const fn = optionalGet(target, prop);
+    if (fn === null || fn === undefined) return undefined;
+    return call(target, prop, args);
+  }
   function construct(ctor, args) { return Reflect.construct(ctor, Array.isArray(args) ? args : []); }
   function has(target, prop) { return isWorkerGlobal(target) && prop === 'location' || Reflect.has(Object(workerTarget(target)), prop); }
   function getOwnPropertyDescriptor(target, prop) {
-    if (isWorkerGlobal(target) && prop === 'location') return { value: base, configurable: true, enumerable: true, writable: false };
+    if (isWorkerGlobal(target) && prop === 'location') return { value: workerLocation, configurable: true, enumerable: true, writable: false };
     return Reflect.getOwnPropertyDescriptor(Object(workerTarget(target)), prop);
   }
   function ownKeys(target) { return Reflect.ownKeys(Object(workerTarget(target))); }
   expose('__zp_get', get);
+  expose('__zp_optionalGet', optionalGet);
   expose('__zp_set', set);
   expose('__zp_assign', assign);
   expose('__zp_call', call);
+  expose('__zp_optionalCall', optionalCall);
   expose('__zp_update', update);
   expose('__zp_construct', construct);
   expose('__zp_has', has);
@@ -94,13 +135,47 @@
     if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
     const u = new URL(spec, referrer || base.href);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
-    return '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href) + '&tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken);
+    return internalURL('/zp/api/script?kind=module&u=' + encodeURIComponent(u.href) + '&tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken));
   });
-  try { self.eval = blockedDynamic; } catch {}
-  try { self.Function = blockedDynamic; } catch {}
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
+  const TARGET_UA_BRANDS = Object.freeze([
+    Object.freeze({ brand: 'Chromium', version: '134' }),
+    Object.freeze({ brand: 'Not:A-Brand', version: '24' }),
+    Object.freeze({ brand: 'Google Chrome', version: '134' })
+  ]);
+  const TARGET_UA_FULL_VERSION_LIST = Object.freeze([
+    Object.freeze({ brand: 'Chromium', version: '134.0.0.0' }),
+    Object.freeze({ brand: 'Not:A-Brand', version: '24.0.0.0' }),
+    Object.freeze({ brand: 'Google Chrome', version: '134.0.0.0' })
+  ]);
+  function makeUserAgentData() {
+    return Object.freeze({
+      brands: Object.freeze(TARGET_UA_BRANDS.map(b => Object.freeze({ brand: b.brand, version: b.version }))),
+      mobile: false,
+      platform: 'Windows',
+      getHighEntropyValues(hints) {
+        const values = {
+          architecture: 'x86',
+          bitness: '64',
+          brands: TARGET_UA_BRANDS.map(b => ({ brand: b.brand, version: b.version })),
+          fullVersionList: TARGET_UA_FULL_VERSION_LIST.map(b => ({ brand: b.brand, version: b.version })),
+          mobile: false,
+          model: '',
+          platform: 'Windows',
+          platformVersion: '10.0.0',
+          uaFullVersion: '134.0.0.0',
+          fullVersion: '134.0.0.0',
+          wow64: false
+        };
+        const out = { brands: values.brands, mobile: false, platform: 'Windows' };
+        for (const hint of Array.isArray(hints) ? hints.map(String) : []) if (Object.prototype.hasOwnProperty.call(values, hint)) out[hint] = values[hint];
+        return Promise.resolve(out);
+      },
+      toJSON() { return { brands: this.brands, mobile: false, platform: 'Windows' }; }
+    });
+  }
   const nav = self.navigator;
   if (nav) {
     const proto = self.WorkerNavigator && self.WorkerNavigator.prototype || Object.getPrototypeOf(nav);
@@ -108,6 +183,9 @@
       try { Object.defineProperty(proto, key, { get: () => value, enumerable: false, configurable: false }); } catch {}
       try { Object.defineProperty(nav, key, { get: () => value, enumerable: false, configurable: false }); } catch {}
     }
+    const userAgentData = makeUserAgentData();
+    try { Object.defineProperty(proto, 'userAgentData', { get: () => userAgentData, enumerable: false, configurable: false }); } catch {}
+    try { Object.defineProperty(nav, 'userAgentData', { get: () => userAgentData, enumerable: false, configurable: false }); } catch {}
   }
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
   function postMessageToSW(message, transfer) {
@@ -242,7 +320,7 @@
       return openRelayedUploadStream(body);
     }
   }
-  self.fetch = async (input, init={}) => {
+  self.fetch = async function fetch(input, init={}) {
     const target = ZP.canonicalTargetURL(input && input.url || input, base.href).href;
     const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Request(input, init) : new Request(String(input), init);
     const headers = new Headers(req.headers);
@@ -269,8 +347,9 @@
         apiInit.duplex = 'half';
       }
     }
-    return nativeFetch('/zp/api/fetch?url=' + encodeURIComponent(target), apiInit);
+    return nativeFetch(internalURL('/zp/api/fetch?url=' + encodeURIComponent(target)), apiInit);
   };
+  maskNativeFunction(self.fetch, 'fetch');
   self.XMLHttpRequest = undefined;
   self.WebSocket = function(){ blocked(); };
   self.EventSource = function(){ blocked(); };
@@ -278,10 +357,11 @@
   const nativeImportScripts = self.importScripts.bind(self);
   function importScriptURL(raw) {
     const value = String(raw);
-    const internal = new URL(value, self.location.href);
-    if (internal.origin === self.location.origin && internal.pathname === '/zp/api/worker-script') return internal.pathname + internal.search + internal.hash;
+    const internal = new URL(value, proxyOrigin || self.location.href);
+    if (internal.origin === proxyOrigin && internal.pathname === '/zp/api/worker-script') return internal.href;
     const parsed = new URL(value, base.href);
-    return '/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
+    return internalURL('/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href));
   }
-  self.importScripts = (...urls) => nativeImportScripts(...urls.map(importScriptURL));
+  self.importScripts = function importScripts(...urls) { return nativeImportScripts(...urls.map(importScriptURL)); };
+  maskNativeFunction(self.importScripts, 'importScripts');
 })();

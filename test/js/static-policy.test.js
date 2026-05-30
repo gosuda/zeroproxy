@@ -32,6 +32,15 @@ test('runtime dynamic constructor descriptors stay assignable for app bundles', 
   assert.equal(rt.includes("childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }"), false);
 });
 
+test('runtime dynamic eval uses one native-scoped path without rewritten fallback', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.includes('eval: w.eval'), 'native eval capture is required for strict app-bundle compatibility');
+  assert.ok(rt.includes('return runScopedNativeEval(String(source));'), 'dynamic eval must use the single scoped eval path');
+  assert.ok(rt.includes("(0, Native.eval)('with(__ZP_EVAL_SCOPE){' + expr + '\\n}')"), 'scoped eval must preserve native eval semantics');
+  assert.equal(rt.includes('return compileEvalSource(text).call(root, scope);'), false, 'dynamic eval must not fall back to rewritten Function compilation');
+  assert.equal(rt.includes('function compileEvalSource'), false, 'dynamic eval fallback compiler must not exist');
+});
+
 test('runtime reads boot config from self-removing prelude state', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
@@ -44,6 +53,7 @@ test('runtime reads boot config from self-removing prelude state', () => {
 
 test('runtime installs required escape-vector hooks', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
   for (const needle of [
     "document.addEventListener('click'",
     "document.addEventListener('submit'",
@@ -78,6 +88,9 @@ test('runtime installs required escape-vector hooks', () => {
     'shouldBlockURLAttribute',
     'installToStringMasking',
     'toStringMap',
+    'installPerformanceMasking',
+    'PerformanceObserver',
+    'performanceObserverListFacade',
     'installCanvasAntiFingerprinting',
     'getImageData',
     'toDataURL',
@@ -101,13 +114,21 @@ test('runtime installs required escape-vector hooks', () => {
     'unwrapRaw(base === scope ? root : base)',
     "trimmed.startsWith('blob:')",
     'src*="zp"',
-    "define(root, 'Worker'",
-    "define(root, 'SharedWorker'",
+    "Object.defineProperty(root, 'Worker'",
+    "Object.defineProperty(root, 'SharedWorker'",
+    '__ZP_WORKER_LOCATION',
+    'virtualBlobWorkerLocation',
     'workerBlobURLs',
-    'workerBlobURLs.has(parsed.href)',
-    "define(URL, 'createObjectURL', function(blob) { return Native.createObjectURL(blob); })",
+    'workerBlobURLMap',
+    'blobURLRawMap',
+    'workerBootstrapBlobURL',
+    'scriptBlobURLForPage',
+    'workerBlobURLMap.get(parsed.href)',
+    "params.set('loc', requestTargetURL(raw))",
+    "Object.defineProperty(URL, 'createObjectURL'",
+    "try { Native.revokeObjectURL(raw); } catch {}",
     'dataWorkerURL',
-    "rewriteWithPageRewriter(source, 'function')",
+    'rewriteDynamicFunctionBody',
     'configurable: true',
     'w.addEventListener && w.addEventListener.bind(w)',
     'rawPostMessageTarget(target)',
@@ -140,12 +161,35 @@ test('runtime installs required escape-vector hooks', () => {
     'Object, \'getPrototypeOf\'',
     'Reflect, \'getPrototypeOf\'',
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
+  for (const needle of [
+    'makeWorkerLocationFacade',
+    "Object.defineProperty(self, 'location'",
+    "'WorkerLocation'",
+    "Object.defineProperty(self, 'origin'",
+    'maskNativeFunction',
+    "maskNativeFunction(self.fetch, 'fetch')",
+    "maskNativeFunction(self.importScripts, 'importScripts')",
+  ]) assert.ok(worker.includes(needle), `missing worker ${needle}`);
+});
+
+test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module URLs', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.equal(rt.includes('fallbackRewritePageSource'), false, 'page script rewriting must not use a regex fallback');
+  assert.ok(rt.includes("if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');"));
+  const start = rt.indexOf('function scriptProxyPath(target, kind)');
+  const end = rt.indexOf('function setScriptSource', start);
+  const body = rt.slice(start, end);
+  assert.ok(body.includes("if (kind !== 'module')"), 'module proxy URLs must stay canonical');
+  assert.ok(body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('ref'"), 'ref/rp must not be part of module identity');
+  assert.ok(body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('tab'"), 'runtime tab token must not be part of module identity');
 });
 
 test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   assert.ok(rt.includes('requestedOrigin === frameOrigin'), 'postMessage does not recognize proxied frame origins');
   assert.ok(rt.includes('if (frameOrigin && requestedOrigin === frameOrigin) return proxyOrigin;'), 'postMessage does not map proxied frame targetOrigin to proxy origin');
+  assert.ok(rt.includes('return new MessageEvent(ev.type, { data: ev.data, origin'), 'message origin virtualization must synthesize a MessageEvent before falling back to own origin override');
+  assert.ok(rt.indexOf('return new MessageEvent(ev.type') < rt.indexOf("Object.defineProperty(ev, 'origin'"), 'message origin virtualization must avoid own-origin override as the first path');
   assert.ok(!rt.includes("u.hostname === 'challenges.cloudflare.com') return u.origin"), 'Cloudflare targetOrigin must not bypass proxied iframe origin mapping');
 });
 

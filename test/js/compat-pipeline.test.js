@@ -7,13 +7,16 @@ const read = path => fs.readFileSync(path, 'utf8');
 test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
   const rt = read('web/runtime-prelude.js');
   assert.match(rt, /define\(root, 'fetch'/);
-  assert.match(rt, /define\(root, 'XMLHttpRequest'/);
+  assert.match(rt, /Object\.defineProperty\(root, 'XMLHttpRequest'/);
   assert.match(rt, /define\(root, 'EventSource'/);
   assert.ok(rt.includes('ZPXMLHttpRequest'));
   assert.ok(rt.includes('ZPEventSource'));
   assert.ok(rt.includes("ZP.apiPath('fetch')"));
   assert.match(rt, /Native\.fetch\(ZP\.apiPath\('fetch'\)/);
   for (const needle of ['X-ZP-Fetch-Credentials', 'X-ZP-Fetch-Redirect', 'X-ZP-Fetch-Referrer', 'sendSyncXHR', 'ProgressEvent']) {
+    assert.ok(rt.includes(needle), `missing ${needle}`);
+  }
+  for (const needle of ['Object.defineProperties(ZPXMLHttpRequest', 'DONE: { value: DONE', "value: 'XMLHttpRequest'"]) {
     assert.ok(rt.includes(needle), `missing ${needle}`);
   }
   for (const needle of ['X-ZP-Response-URL', 'X-ZP-Response-Redirected', 'responseFacade', 'filteredResponseHeaders', 'opaqueResponseFacade']) {
@@ -32,11 +35,15 @@ test('runtime navigation uses bound Location methods and catches expando href cl
 });
 test('runtime suppresses favicon loading without exposing placeholder hrefs', () => {
   const rt = read('web/runtime-prelude.js');
+  const server = read('cmd/zeroproxy-server/main.go');
   assert.ok(rt.includes('data:application/x-zeroproxy-icon,1'));
   assert.ok(rt.includes('isIconLinkRelValue'));
   assert.ok(rt.includes('suppressIconLinkHref'));
   assert.ok(rt.includes('visibleIconAttrValue'));
   assert.ok(rt.includes('x-zeroproxy-icon'));
+  assert.ok(rt.includes("u.pathname === '/favicon.ico'"));
+  assert.ok(server.includes('func (s *server) emptyFavicon'));
+  assert.ok(read('web/sw.js').includes("path === '/favicon.ico'"));
 });
 
 test('runtime preactivates p routes and masks navigator identity', () => {
@@ -45,10 +52,15 @@ test('runtime preactivates p routes and masks navigator identity', () => {
   assert.match(rt, /ZP\.encryptShareURL\(target\)/);
   assert.match(rt, /ZP_HISTORY_UPDATE/);
   assert.match(rt, /Native\.locationAssign\(path\)/);
-  assert.ok(rt.includes('root.navigator && root.navigator.userAgent'));
-  assert.ok(rt.includes('root.navigator && root.navigator.platform'));
+  assert.ok(rt.includes('Chrome/134.0.0.0 Safari/537.36'));
+  assert.ok(rt.includes("const TARGET_PLATFORM = 'Win32'"));
+  assert.ok(rt.includes("const TARGET_UA_BRANDS"));
+  assert.ok(rt.includes("defineAccessor(proto, 'userAgentData'"));
+  assert.ok(rt.includes("platformVersion: '10.0.0'"));
   assert.match(rt, /installNavigatorIdentity/);
   assert.ok(worker.includes('Chrome/134.0.0.0 Safari/537.36'));
+  assert.ok(worker.includes("userAgentData"));
+  assert.ok(worker.includes("fullVersionList"));
 });
 
 test('service worker owns native request capture, CORS, and context recovery', () => {

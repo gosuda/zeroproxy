@@ -35,6 +35,15 @@ const (
 	assetPrefix   = controlPrefix + "assets/"
 )
 
+var emptyFaviconPNG = []byte{
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00,
+	0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xff, 0x1f, 0x00,
+	0x03, 0x03, 0x02, 0x00, 0xef, 0xbf, 0xa7, 0xdb, 0x00, 0x00, 0x00, 0x00,
+	0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+}
+
 func main() {
 	var addr string
 	s := &server{}
@@ -61,6 +70,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, controlPrefix, http.StatusFound)
 	case path == controlPrefix || path == controlPrefix+"index.html":
 		s.serveWeb(w, r, "index.html")
+	case path == "/favicon.ico":
+		s.emptyFavicon(w, r)
 	case path == controlPrefix+"sw.js":
 		s.serveWeb(w, r, "sw.js")
 	case path == controlPrefix+"ws-pipe":
@@ -128,6 +139,16 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string)
 	}
 }
 
+func (s *server) emptyFavicon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(emptyFaviconPNG)
+}
+
 func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, contentType string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -152,7 +173,7 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 }
 
 func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
-	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
+	body := "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, body)

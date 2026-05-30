@@ -23,6 +23,8 @@ func TestBuildHTTP1RequestConstructsTargetHeaders(t *testing.T) {
 	src.Header.Set("Cookie", "browser=bad")
 	src.Header.Set("Connection", "keep-alive")
 	src.Header.Set("Accept", "text/html")
+	src.Header.Set("Sec-CH-UA-Platform", `"macOS"`)
+	src.Header.Set("Sec-CH-UA-Full-Version", `"148.0.0.0"`)
 	src.Header.Set("X-ZP-Document-URL", target.String())
 	wire, err := BuildHTTP1Request(src, target, jar)
 	if err != nil {
@@ -39,6 +41,9 @@ func TestBuildHTTP1RequestConstructsTargetHeaders(t *testing.T) {
 	}
 	if wire.Header.Get("User-Agent") != TargetUserAgent {
 		t.Fatalf("user-agent not normalized: %#v", wire.Header)
+	}
+	if wire.Header.Get("Sec-CH-UA-Platform") != `"Windows"` || wire.Header.Get("Sec-CH-UA-Full-Version") != `"134.0.0.0"` {
+		t.Fatalf("client hints not normalized: %#v", wire.Header)
 	}
 	if wire.Header.Get("Origin") != "https://example.com" || wire.Header.Get("Referer") != target.String() {
 		t.Fatalf("origin/referer wrong: %#v", wire.Header)

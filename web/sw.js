@@ -83,7 +83,7 @@ function classify(req, url, clientId) {
 }
 
 function internalPath(path) {
-  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  return path === '/favicon.ico' || path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script');
@@ -165,7 +165,12 @@ async function runtimeAPI(req, url, clientId) {
     const kind = url.searchParams.get('kind') || 'classic';
     const resolved = scriptRequestContext(req, url, clientId);
     if (!target || !resolved) return safeError('SW_NOT_READY', 503);
-    const resp = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript, application/javascript, */*;q=0.8']], tab: resolved.tab, entryId: resolved.entryId });
+    const headers = [['Accept', 'text/javascript, application/javascript, */*;q=0.8']];
+    const ref = url.searchParams.get('ref') || '';
+    const refPolicy = url.searchParams.get('rp') || '';
+    if (ref) headers.push(['X-ZP-Fetch-Referrer', ref]);
+    if (refPolicy) headers.push(['X-ZP-Fetch-Referrer-Policy', refPolicy]);
+    const resp = await transportFetch(target, { method: 'GET', headers, tab: resolved.tab, entryId: resolved.entryId });
     return rewriteScriptResponse(resp, { targetUrl: target, kind });
   }
   if (url.pathname === '/zp/api/worker-script') {
@@ -524,6 +529,12 @@ function scriptRequestContext(req, url, clientId) {
   const queryToken = url.searchParams.get('rt') || '';
   const headerTab = req.headers.get('X-ZP-Tab-Id') || '';
   const token = req.headers.get('X-ZP-Runtime-Token') || queryToken;
+  if (queryTab && token) {
+    const tab = tabs.get(queryTab);
+    if (!tab || token !== tab.runtimeToken) return null;
+    if (headerTab && headerTab !== queryTab) return null;
+    return { tab, entryId: url.searchParams.get('entry') || tab.activeEntryId };
+  }
   const ctx = contextFor(req, clientId);
   if (ctx) {
     const tab = tabs.get(ctx.tabId);
@@ -609,4 +620,4 @@ function addCSP(resp, req, servers) {
 }
 function safeError(code, status = 400, targetUrl = '') { if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED'; let host = ''; try { host = targetUrl ? new URL(targetUrl).host : ''; } catch {} const hostHTML = host ? '<p>Target host: '+escapeHTML(host)+'</p>' : ''; const body = '<!doctype html><meta charset="utf-8"><title>ZeroProxy '+code+'</title><main><h1>ZeroProxy</h1><p>'+code+'</p>'+hostHTML+'<button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>'; return new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Expose-Headers': '*' } }); }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
-function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }
+function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }

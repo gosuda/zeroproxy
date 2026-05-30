@@ -1539,7 +1539,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         worker = new Worker(url);
         const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 500);
         worker.onmessage = ev => { clearTimeout(timer); resolve(String(ev.data)); };
-        worker.onerror = () => { clearTimeout(timer); resolve('error'); };
+        worker.onerror = ev => { clearTimeout(timer); resolve('error:' + (ev && ev.message || 'worker-error')); };
       } catch (err) { resolve('throw:' + (err && err.message || String(err))); }
     });
     out.dataWorker = await new Promise(resolve => {
@@ -1585,7 +1585,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
   assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
   assert.equal(escapeMatrix.stringTimer, 'ran');
-  assert.notEqual(escapeMatrix.blobWorker, 'ran');
+  assert.equal(escapeMatrix.blobWorker, 'ran');
   assert.notEqual(escapeMatrix.dataWorker, 'ran');
   assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
   assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`);
