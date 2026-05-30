@@ -44,6 +44,7 @@
   const urlMeta = new WeakMap();
   const messageListenerWrappers = new WeakMap();
   const frameWindowOrigins = new WeakMap();
+  const frameSandboxMeta = new WeakMap();
   const directExternalFrameWindowOrigins = new WeakMap();
   const crossWindowProxyCache = new WeakMap();
   const postMessageWrappers = new WeakMap();
@@ -2617,6 +2618,32 @@
     const tag = el && el.localName;
     return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
   }
+  function isFrameElement(el) {
+    const tag = el && el.localName;
+    return tag === 'iframe' || tag === 'frame';
+  }
+  function frameSandboxAllowsEscape(raw) {
+    const tokens = new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean));
+    return tokens.has('allow-scripts') && tokens.has('allow-same-origin');
+  }
+  function setFrameSandboxAttribute(el, raw) {
+    const value = String(raw == null ? '' : raw);
+    if (frameSandboxAllowsEscape(value) && !isDirectExternalFrameElement(el)) {
+      frameSandboxMeta.set(el, value);
+      if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
+      return;
+    }
+    frameSandboxMeta.delete(el);
+    Native.setAttribute.call(el, 'sandbox', value);
+  }
+  function sanitizeFrameSandbox(el) {
+    if (!isFrameElement(el)) return;
+    const raw = Native.getAttribute.call(el, 'sandbox');
+    if (raw !== null && frameSandboxAllowsEscape(raw) && !isDirectExternalFrameElement(el)) {
+      frameSandboxMeta.set(el, raw);
+      if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
+    }
+  }
   function isMetaPolicyElement(el) {
     if (!el || el.localName !== 'meta') return false;
     const equiv = String(Native.getAttribute.call(el, 'http-equiv') || '').trim().toLowerCase();
@@ -2668,6 +2695,7 @@
   function cleanupRemovedAttribute(owner, key) {
     const local = attrLocalName(key);
     if (!owner || !local) return;
+    if (isFrameElement(owner) && local === 'sandbox') frameSandboxMeta.delete(owner);
     if (isResourceURLAttribute(owner, local) || isURLBearing(owner, local)) {
       urlMeta.delete(owner);
       try { Native.removeAttribute.call(owner, 'data-zp-target-url'); } catch {}
@@ -3080,6 +3108,7 @@
       }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'style') return Native.setAttribute.call(this, k, rewriteCSSSource(String(v)));
+      if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
       if (this.localName === 'link' && localKey === 'rel') {
         const value = String(v);
@@ -3130,6 +3159,7 @@
         return;
       }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+      if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
       if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
       if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
@@ -3198,6 +3228,7 @@
         const backed = backedScriptNonce(this);
         if (backed !== null) return backed;
       }
+      if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return frameSandboxMeta.get(this);
       if (key === 'srcset' || isSrcsetAttribute(this, key)) return visibleSrcset(this);
       if (isURLBearing(this, key)) return usesRawURLAttribute(this, key) ? visibleNavigationURL(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
       return Native.getAttribute.call(this, k);
@@ -3207,6 +3238,7 @@
       if (isZPAttrName(key)) return false;
       if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
       if (key === 'nonce' && this.localName === 'script') return backedScriptNonce(this) !== null || Native.hasAttribute.call(this, k);
+      if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return true;
       return Native.hasAttribute.call(this, k);
     });
     if (Native.removeAttribute) define(w.Element.prototype, 'removeAttribute', function(k) {
@@ -3217,6 +3249,7 @@
         return Native.removeAttribute.call(this, k);
       }
       if (key === 'nonce' && this.localName === 'script') Native.removeAttribute.call(this, nonceBackupAttr);
+      if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
       if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) {
         urlMeta.delete(this);
         if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-target-url');
@@ -3237,6 +3270,7 @@
     if (Native.getAttributeNames) define(w.Element.prototype, 'getAttributeNames', function() {
       const names = Native.getAttributeNames.call(this).filter(name => !isZPAttrName(name));
       if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
+      if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
       return names;
     });
     if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
@@ -3733,6 +3767,7 @@
       return;
     }
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'srcdoc') {
+      sanitizeFrameSandbox(el);
       const raw = Native.getAttribute.call(el, 'srcdoc');
       if (raw && !raw.startsWith(injectSrcdoc(''))) Native.setAttribute.call(el, 'srcdoc', injectSrcdoc(String(raw)));
       instrumentIframe(el);
@@ -3757,6 +3792,7 @@
     urlMeta.set(el, target);
     if (!usesRawURLAttribute(el, key)) Native.setAttribute.call(el, 'data-zp-target-url', target);
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'src') {
+      sanitizeFrameSandbox(el);
       setFrameSourceAttribute(el, key, target);
       return;
     }
@@ -3773,7 +3809,7 @@
     if (el.localName === 'meta' && suppressMetaPolicyElement(el)) return;
     if (el.localName === 'script') instrumentScriptElement(el);
     if (el.localName === 'link') enforceLinkPolicy(el);
-    if (el.localName === 'iframe' || el.localName === 'frame') instrumentIframe(el);
+    if (el.localName === 'iframe' || el.localName === 'frame') { sanitizeFrameSandbox(el); instrumentIframe(el); }
     if (Native.getAttributeNames) {
       for (const name of Native.getAttributeNames.call(el)) enforceObservedAttribute(el, String(name).toLowerCase());
     }
@@ -4085,11 +4121,14 @@
     if (!node || typeof node !== 'object') return;
     if ((node.nodeName || '').toUpperCase() === 'META') suppressMetaPolicyElement(node);
     if ((node.nodeName || '').toUpperCase() === 'SCRIPT') prepareScriptElement(node);
+    if (/^(IFRAME|FRAME)$/.test(node.nodeName || '')) sanitizeFrameSandbox(node);
     if (node.querySelectorAll) {
       const metas = node.querySelectorAll('meta');
       for (let i = 0; i < metas.length; i++) suppressMetaPolicyElement(metas[i]);
       const scripts = node.querySelectorAll('script');
       for (let i = 0; i < scripts.length; i++) prepareScriptElement(scripts[i]);
+      const frames = node.querySelectorAll('iframe,frame');
+      for (let i = 0; i < frames.length; i++) sanitizeFrameSandbox(frames[i]);
     }
   }
   function collectIframesFromArgs(args) {
@@ -4117,6 +4156,7 @@
   function instrumentIframe(frame) {
     if (!frame || !/^(IFRAME|FRAME)$/.test(frame.nodeName || '')) return;
     try {
+      sanitizeFrameSandbox(frame);
       const src = Native.getAttribute.call(frame, 'src');
       rememberFrameOrigin(frame);
       if (isDirectExternalFrameElement(frame)) return;

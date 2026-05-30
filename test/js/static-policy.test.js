@@ -158,6 +158,9 @@ test('runtime installs required escape-vector hooks', () => {
     'formRequestBody',
     'shareFragmentForKey',
     'postMessageWrapperFor',
+    'frameSandboxAllowsEscape',
+    'setFrameSandboxAttribute',
+    'sanitizeFrameSandbox',
     'Object, \'getPrototypeOf\'',
     'Reflect, \'getPrototypeOf\'',
   ]) assert.ok(rt.includes(needle), `missing ${needle}`);
