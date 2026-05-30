@@ -556,3 +556,155 @@ Use these checks for compatibility work:
 
 These checks validate browser compatibility. They do not validate CAPTCHA
 solving or Cloudflare bypass.
+
+## Implemented: Increment 1 (challenge compatibility mode)
+
+The compatibility surface described above is partially shipped as an opt-in,
+default-OFF "challenge compatibility mode". This section records exactly what was
+built, how to turn it on, the guarantees it does and does not make, and the
+commits that built it. It is COMPATIBILITY only: it stops ZeroProxy from breaking
+a legitimate human's Cloudflare challenge. It is NOT a solver, forger, bypass, or
+clearance guarantee. The non-goals at the end of "ZeroProxy Implementation
+Implications" remain in force.
+
+### What it is, in one sentence
+
+When a real human opts in, and only then, ZeroProxy stops imposing four of its
+own hardening defaults on responses it classifies (by header/URL only) as
+Cloudflare challenge traffic, so the human's browser can run the challenge it was
+already going to run. Nothing about the challenge is interpreted, answered, or
+replayed.
+
+### How to enable it (default OFF)
+
+The mode is off unless the user explicitly turns it on. There is exactly one user
+surface: the "Challenge compatibility mode (Cloudflare Turnstile)" checkbox on the
+proxy entry form (`web/index.html`, id `challenge-compat`). The opt-in is read in
+`openTarget()` and travels only on the trusted `ZP_OPEN_SHARE` window-to-service-
+worker message.
+
+Scope limit, stated honestly: arming is available ONLY on the entry-form
+(`openTarget`) path. The cold share-link recipient path (`handleShare`, for
+someone opening a shared `/zp/...` link directly) has no checkbox and stays
+unarmed by design. So the mode is something the operator of a tab chooses at tab
+creation, not a property a shared link can carry to a third party.
+
+### How the arm reaches the kernel (trusted hop only)
+
+The per-tab arm is a BIRTH-ONLY bit, set once when the tab is created and never
+again. The trusted flow is:
+
+1. `web/index.html` `openTarget()` reads the checkbox and includes
+   `challengeCompat` in the `ZP_OPEN_SHARE` message to the service worker.
+2. `web/sw.js` `createTab()` stores it as the per-tab `challengeCompat` arm bit
+   (birth-only; a live tab is never re-armed).
+3. `web/sw.js` `transportFetch()` authoritatively manages the kernel request
+   header `X-Zp-Challenge-Compat-Arm`: it unconditionally DELETEs any inbound
+   (page-supplied) value, then SETs `1` only for an armed tab. This is the exact
+   pattern used for `X-ZP-Tab-Id` / `X-ZP-Runtime-Token`.
+4. `cmd/wasm-kernel/main.go` `tabFor()` / `tabFromValues()` reads the arm at TAB
+   BIRTH ONLY. An already-born tab is returned as-is without touching
+   `ChallengeCompat`, so a forged inbound arm cannot self-arm a live tab.
+
+Defense in depth: `web/runtime-prelude.js` `fetchThroughRuntime()` also strips any
+inbound `X-Zp-Challenge-Compat-Arm` before issuing a runtime fetch, mirroring the
+service worker. The consequence is the load-bearing security property: a proxied
+target page CANNOT arm itself. The arm exists only in the trusted
+window -> service worker -> kernel hop.
+
+### The two-signal gate
+
+No relaxation ever happens on the arm alone. Every relaxation point requires BOTH:
+
+1. the trusted per-tab arm (above), AND
+2. header/URL classification of the specific response as challenge traffic.
+
+Classification is `cmd/wasm-kernel/challenge.go` `targetIsChallengeDocument()`, a
+pure predicate over response HEADERS and the FINAL URL only (it never reads or
+sniffs the body): the response header `Cf-Mitigated: challenge`, OR host
+`challenges.cloudflare.com`, OR path prefix `/cdn-cgi/challenge-platform/`. On the
+default (unarmed) path the gate is always false and behavior is byte-identical to
+today.
+
+### Exactly what is projected when both signals hold
+
+1. CSP challenge-host allowances (`web/zp-core.js` `fixedCSP({ challengeCompat })`).
+   When on, ZeroProxy ADDS only the literal host `https://challenges.cloudflare.com`
+   to `script-src`, `connect-src`, `frame-src`, and `child-src`. It adds NO
+   wildcard and NO direct-egress capability: target fetches still route through
+   the proxy transport. The document CSP is projected in `web/sw.js` `addCSP()`;
+   the script-response CSP in `scriptResponseHeaders()`.
+
+2. eval is HONORED, never MANUFACTURED. Challenge documents legitimately ship
+   `'unsafe-eval'`. ZeroProxy's challenge projection never adds `'unsafe-eval'`.
+   It rides only the pre-existing, target-authoritative `allowDynamicCompile`
+   grant (`X-ZP-Dynamic-Compile`), which is derived from the target's own CSP. If
+   the target did not grant eval, the projection does not invent it.
+
+3. no-store skip for SUBRESOURCES only (`internal/headers/policy.go`
+   `ConstructorPolicy(..., challengeCompat)`, gated by `cmd/wasm-kernel`
+   `challengeSubresourceSkip()`). ZeroProxy normally rewrites `Cache-Control` to
+   `no-store`. This overwrite is skipped ONLY for a classified challenge
+   SUBRESOURCE so Cloudflare's own cache/update semantics survive (e.g.
+   `turnstile/v0/api.js`). The skip carries a third, load-bearing term: the
+   challenge DOCUMENT (the navigation HTML, `isDoc == true`) STAYS on `no-store`.
+   The same computed boolean feeds both `ConstructorPolicy` passes so the second
+   pass cannot silently re-impose `no-store`.
+
+### Internal marker never leaks to the page
+
+The kernel emits an internal `X-ZP-Challenge-Compat` marker (only when both gate
+signals hold, via `cmd/wasm-kernel/challenge.go` `applyChallengeCompat()`) to tell
+the downstream service worker to project the challenge CSP. This marker is a
+private signal between kernel and service worker; it is consumed and DELETEd in
+`web/sw.js` (`addCSP()` and `scriptResponseHeaders()`) before the response reaches
+the proxied page. It is distinct from the trusted arm header above. Neither header
+ever reaches the target realm.
+
+### Guarantees
+
+- Default OFF. With the checkbox unchecked, no tab is armed, the gate is always
+  false, every projection is inert, and the response path is byte-identical to
+  the pre-Increment-1 behavior. The frozen membrane/policy invariants stay green.
+- No egress escape. Challenge-compat adds host allowances to CSP but no wildcard
+  and no direct-fetch capability. All target traffic still routes through the
+  proxy transport; the no-egress invariant is preserved.
+- No forgery, no synthesis. ZeroProxy does not read challenge bodies for
+  classification, does not interpret `_cf_chl_opt`, does not synthesize tokens,
+  and does not answer or replay the challenge. Classification is header/URL only.
+- Honor-not-manufacture eval. `'unsafe-eval'` is only ever passed through from the
+  target's own grant, never added by challenge-compat.
+- A page cannot self-arm. The arm is set exclusively in the trusted
+  window -> service worker -> kernel hop, deleted on every inbound page-controllable
+  path, and read birth-only by the kernel.
+
+### Honest expectations (the non-guarantee)
+
+This is COMPATIBILITY, not clearance. Enabling the mode stops ZeroProxy from
+breaking the legitimate human-solved challenge. It does NOT guarantee the human
+will be cleared, and it is NOT a solver, bypass, or token forger. Whether a real
+Cloudflare zone issues clearance is server-authoritative: it depends on Cloudflare
+risk signals, the human's interaction, cookies, client hints, and IP reputation,
+none of which ZeroProxy controls or fabricates.
+
+Because real-zone clearance is server-authoritative, it cannot be asserted in CI.
+What CI validates is the MECHANISM, not clearance: the Increment-1 end-to-end test
+(`test/e2e/turnstile-compat.test.js`, B6) drives a real browser against a LOCAL
+fixture that mimics a challenge (it emits `Cf-Mitigated: challenge` and a
+`/cdn-cgi/challenge-platform/` subresource) and NEVER contacts Cloudflare. It
+proves the armed path runs both relaxation points and that the OFF path is
+unchanged. Real-zone clearance is left to a human-run live smoke test (the
+`ZP_TURNSTILE_LIVE` convention name) that is deliberately NOT wired into CI and is
+not part of any automated gate; it is run by a person against a live zone when
+verification against the real service is desired.
+
+### Commits (Increment 1, B1-B6)
+
+| Step | Commit | Layer | What it added |
+|---|---|---|---|
+| B1 | `1142523` | `cmd/wasm-kernel` | Challenge classifier (`targetIsChallengeDocument`) + per-tab `ChallengeCompat` birth-only arm opt-in; arm read in `tabFor`/`tabFromValues`. |
+| B2 | `b347062` | `internal/headers` | `ConstructorPolicy` skips the `no-store` overwrite for armed challenge SUBRESOURCES (`challengeSubresourceSkip`; document stays `no-store`). |
+| B3 | `6081c90` | `web/zp-core.js` | `fixedCSP` projects the challenge host into script/connect/frame/child, honoring the target eval grant (never manufacturing eval). |
+| B4 | `c8d9bd5` | `web/sw.js` | Threads the internal `X-ZP-Challenge-Compat` marker into CSP projection and plumbs the trusted `X-Zp-Challenge-Compat-Arm` set/delete; inbound strip in `runtime-prelude.js`. |
+| B5 | `edae226` | `web/index.html` | Activates the mode: the opt-in checkbox and the trusted `ZP_OPEN_SHARE` arm sender (final activation of the dormant B1-B4 mechanism). |
+| B6 | `e317379` | `test/e2e` | Armed-path challenge-compat trace harness against a local fixture (mechanism validation, no Cloudflare contact). |
