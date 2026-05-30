@@ -139,3 +139,38 @@ func TestApplyChallengeCompatNilHeaderNoPanic(t *testing.T) {
 	// Armed + classified but nil header must not panic.
 	applyChallengeCompat(nil, true, mustURL(t, "https://challenges.cloudflare.com/x"))
 }
+
+// TestChallengeSubresourceSkip pins the gate that decides the no-store skip. The
+// SECURITY-LOAD-BEARING term is isDoc: a classified challenge DOCUMENT
+// (navigation) must NOT get the skip even when armed, so its HTML stays on
+// no-store; only an armed, classified SUBRESOURCE returns true. Deleting the
+// isDoc guard would make the document case return true and turn this red.
+func TestChallengeSubresourceSkip(t *testing.T) {
+	challengeURL := mustURL(t, "https://challenges.cloudflare.com/turnstile/v0/api.js")
+	plainURL := mustURL(t, "https://example.com/index.html")
+	cfHeader := http.Header{"Cf-Mitigated": {"challenge"}}
+
+	cases := []struct {
+		name   string
+		armed  bool
+		isDoc  bool
+		header http.Header
+		url    *url.URL
+		want   bool
+	}{
+		{name: "armed subresource on challenge origin -> skip", armed: true, isDoc: false, header: http.Header{}, url: challengeURL, want: true},
+		{name: "armed subresource via cf-mitigated -> skip", armed: true, isDoc: false, header: cfHeader, url: plainURL, want: true},
+		{name: "armed DOCUMENT on challenge origin -> keep (isDoc guard)", armed: true, isDoc: true, header: http.Header{}, url: challengeURL, want: false},
+		{name: "armed DOCUMENT via cf-mitigated -> keep (isDoc guard)", armed: true, isDoc: true, header: cfHeader, url: plainURL, want: false},
+		{name: "not armed subresource -> keep (default OFF)", armed: false, isDoc: false, header: http.Header{}, url: challengeURL, want: false},
+		{name: "armed subresource non-challenge -> keep (classification gate)", armed: true, isDoc: false, header: http.Header{}, url: plainURL, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := challengeSubresourceSkip(tc.armed, tc.isDoc, tc.header, tc.url)
+			if got != tc.want {
+				t.Fatalf("challengeSubresourceSkip(armed=%v,isDoc=%v) = %v, want %v", tc.armed, tc.isDoc, got, tc.want)
+			}
+		})
+	}
+}

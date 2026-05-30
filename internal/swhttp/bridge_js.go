@@ -151,11 +151,11 @@ func (r *jsReadableStreamReadCloser) Close() error {
 	return nil
 }
 
-func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded bool) (js.Value, error) {
+func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded, challengeCompat bool) (js.Value, error) {
 	if resp == nil {
 		return js.Null(), fmt.Errorf("nil response")
 	}
-	safe := headers.ConstructorPolicy(resp.Header, bodyTransformed, bodyDecoded)
+	safe := headers.ConstructorPolicy(resp.Header, bodyTransformed, bodyDecoded, challengeCompat)
 	jsHeaders := js.Global().Get("Headers").New()
 	for name, vals := range safe {
 		for _, v := range vals {

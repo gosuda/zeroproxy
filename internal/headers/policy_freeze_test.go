@@ -27,7 +27,7 @@ func TestConstructorPolicyStripsFullHiddenSet(t *testing.T) {
 	for _, name := range strip {
 		src.Set(name, "sentinel-"+name)
 	}
-	out := ConstructorPolicy(src, false, false)
+	out := ConstructorPolicy(src, false, false, false)
 	for _, name := range strip {
 		if out.Get(name) != "" {
 			t.Fatalf("hidden header %q leaked onto Response: %#v", name, out)
@@ -45,7 +45,7 @@ func TestConstructorPolicyPassesThroughCrossOriginIsolation(t *testing.T) {
 		"Cross-Origin-Embedder-Policy": {"require-corp"},
 		"Cross-Origin-Resource-Policy": {"same-site"},
 	}
-	out := ConstructorPolicy(src, true, true)
+	out := ConstructorPolicy(src, true, true, false)
 	cases := map[string]string{
 		"Cross-Origin-Opener-Policy":   "same-origin",
 		"Cross-Origin-Embedder-Policy": "require-corp",
@@ -68,7 +68,7 @@ func TestConstructorPolicyConditionalEncodingHeaders(t *testing.T) {
 	keep := ConstructorPolicy(http.Header{
 		"Content-Length":   {"123"},
 		"Content-Encoding": {"gzip"},
-	}, false, false)
+	}, false, false, false)
 	if keep.Get("Content-Length") != "123" {
 		t.Fatalf("Content-Length must survive when bodyTransformed=false: %#v", keep)
 	}
@@ -80,7 +80,7 @@ func TestConstructorPolicyConditionalEncodingHeaders(t *testing.T) {
 	transformed := ConstructorPolicy(http.Header{
 		"Content-Length":   {"123"},
 		"Content-Encoding": {"gzip"},
-	}, true, false)
+	}, true, false, false)
 	if transformed.Get("Content-Length") != "" {
 		t.Fatalf("Content-Length must be stripped when bodyTransformed=true: %#v", transformed)
 	}
@@ -92,7 +92,7 @@ func TestConstructorPolicyConditionalEncodingHeaders(t *testing.T) {
 	decoded := ConstructorPolicy(http.Header{
 		"Content-Length":   {"123"},
 		"Content-Encoding": {"gzip"},
-	}, false, true)
+	}, false, true, false)
 	if decoded.Get("Content-Encoding") != "" {
 		t.Fatalf("Content-Encoding must be stripped when bodyDecoded=true: %#v", decoded)
 	}
@@ -105,7 +105,7 @@ func TestConstructorPolicyConditionalEncodingHeaders(t *testing.T) {
 	both := ConstructorPolicy(http.Header{
 		"Content-Length":   {"123"},
 		"Content-Encoding": {"gzip"},
-	}, true, true)
+	}, true, true, false)
 	if both.Get("Content-Length") != "" || both.Get("Content-Encoding") != "" {
 		t.Fatalf("both encoding headers must be stripped when transformed+decoded: %#v", both)
 	}
@@ -122,7 +122,7 @@ func TestConstructorPolicyStripsLocationAndHopByHop(t *testing.T) {
 		"Transfer-Encoding": {"chunked"},
 		"Upgrade":           {"h2c"},
 		"Content-Type":      {"text/html"},
-	}, false, false)
+	}, false, false, false)
 	for _, name := range []string{"Location", "Connection", "Transfer-Encoding", "Upgrade"} {
 		if out.Get(name) != "" {
 			t.Fatalf("%s must be withheld from Response: %#v", name, out)

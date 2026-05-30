@@ -29,6 +29,22 @@ func targetIsChallengeDocument(header http.Header, finalURL *url.URL) bool {
 	return strings.HasPrefix(finalURL.Path, challengePlatformPrefix)
 }
 
+// challengeSubresourceSkip is the two-signal gate that decides whether
+// ConstructorPolicy should SKIP its Cache-Control: no-store overwrite for this
+// response. It returns true ONLY when ALL hold: the tab is armed, the request
+// is NOT a document navigation (isDoc==false), and the response classifies as a
+// challenge by header/URL. The isDoc==false term is load-bearing: it keeps the
+// challenge DOCUMENT (navigation HTML) on no-store and lets ONLY classified
+// SUBRESOURCES (e.g. turnstile api.js) preserve Cloudflare's cache semantics.
+// Pure predicate, header+URL only; it never reads the body, grants no egress,
+// and manufactures no eval.
+func challengeSubresourceSkip(armed, isDoc bool, header http.Header, finalURL *url.URL) bool {
+	if !armed || isDoc {
+		return false
+	}
+	return targetIsChallengeDocument(header, finalURL)
+}
+
 // applyChallengeCompat emits the internal X-ZP-Challenge-Compat marker header
 // ONLY when BOTH gate signals are present: the per-tab arm opt-in (armed) AND
 // header/URL classification as a challenge document. It is INERT otherwise, so

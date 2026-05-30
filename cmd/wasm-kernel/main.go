@@ -196,7 +196,15 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 		if dynamicCompileAllowed {
 			resp.Header.Set("X-ZP-Dynamic-Compile", "1")
 		}
-		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+		// Two-signal challenge-compat gate, computed on the RAW target header/URL
+		// before policy construction. The no-store overwrite is skipped ONLY for a
+		// classified challenge SUBRESOURCE (never the document) and ONLY when the
+		// tab is armed; the document-vs-subresource discrimination lives in the
+		// flat, natively-tested challengeSubresourceSkip helper. The SAME bool
+		// feeds both ConstructorPolicy applications (here and inside ResponseToJS)
+		// so the second pass cannot silently re-impose no-store.
+		challengeSub := challengeSubresourceSkip(tab.ChallengeCompat, isDocumentRequest(req), resp.Header, finalURL)
+		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded, challengeSub)
 		applyChallengeCompat(resp.Header, tab.ChallengeCompat, finalURL)
 		resp.Header.Set("X-ZP-Response-URL", finalURL.String())
 		if finalURL.String() != req.URL.String() {
@@ -213,7 +221,7 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			}()
 			releaseOnReturn = false
 		}
-		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
+		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded, challengeSub)
 		if err != nil {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
