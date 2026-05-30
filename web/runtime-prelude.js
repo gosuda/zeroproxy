@@ -661,72 +661,79 @@
 	    }
 	    return { changed, actual: actual.join(', '), visible: visible.join(', ') };
 	  }
+	  function cssCommentToken(css, i) {
+	    if (css[i] !== '/' || css[i + 1] !== '*') return null;
+	    const end = css.indexOf('*/', i + 2);
+	    const j = end < 0 ? css.length : end + 2;
+	    return { out: css.slice(i, j), next: j };
+	  }
+	  function cssStringToken(css, i) {
+	    const quote = css[i];
+	    if (quote !== '"' && quote !== "'") return null;
+	    let j = i + 1;
+	    while (j < css.length) {
+	      if (css[j] === '\\') { j += 2; continue; }
+	      if (css[j] === quote) { j++; break; }
+	      j++;
+	    }
+	    return { out: css.slice(i, j), next: j };
+	  }
+	  function scanCssEscapedValue(css, j, stop) {
+	    let value = '';
+	    while (j < css.length) {
+	      if (css[j] === '\\' && j + 1 < css.length) { value += css.slice(j, j + 2); j += 2; continue; }
+	      if (css[j] === stop) break;
+	      value += css[j++];
+	    }
+	    return { value, next: j };
+	  }
+	  function skipCssWhitespace(css, j) {
+	    while (/\s/.test(css[j] || '')) j++;
+	    return j;
+	  }
+	  function isCssUrlStart(css, i) {
+	    if (css[i] !== 'u' && css[i] !== 'U') return false;
+	    if (css.slice(i, i + 3).toLowerCase() !== 'url') return false;
+	    return !/[A-Za-z0-9_-]/.test(css[i - 1] || '') && !/[A-Za-z0-9_-]/.test(css[i + 3] || '');
+	  }
+	  function cssUrlToken(css, i, base) {
+	    if (!isCssUrlStart(css, i)) return null;
+	    const open = skipCssWhitespace(css, i + 3);
+	    if (css[open] !== '(') return null;
+	    let j = skipCssWhitespace(css, open + 1);
+	    const quote = css[j] === '"' || css[j] === "'" ? css[j++] : '';
+	    const scanned = scanCssEscapedValue(css, j, quote || ')');
+	    j = scanned.next;
+	    if (quote && css[j] === quote) j++;
+	    j = skipCssWhitespace(css, j);
+	    if (css[j] !== ')') return null;
+	    return { out: 'url("' + cssResourceURL(scanned.value, base) + '")', next: j + 1 };
+	  }
+	  function cssImportToken(css, i, base) {
+	    if (!(css[i] === '@' && css.slice(i, i + 7).toLowerCase() === '@import')) return null;
+	    let out = css.slice(i, i + 7);
+	    let j = i + 7;
+	    while (j < css.length && /\s/.test(css[j])) out += css[j++];
+	    const quote = css[j] === '"' || css[j] === "'" ? css[j++] : '';
+	    if (!quote) { out += '@'; return { out, next: j + 1 }; }
+	    const scanned = scanCssEscapedValue(css, j, quote);
+	    j = scanned.next;
+	    if (css[j] === quote) j++;
+	    out += '"' + cssResourceURL(scanned.value, base) + '"';
+	    return { out, next: j };
+	  }
 	  function fallbackRewriteCSS(source, base) {
 	    const css = String(source || '');
 	    let out = '';
 	    let i = 0;
 	    while (i < css.length) {
-	      const ch = css[i];
-	      const next = css[i + 1];
-	      if (ch === '/' && next === '*') {
-	        const end = css.indexOf('*/', i + 2);
-	        const j = end < 0 ? css.length : end + 2;
-	        out += css.slice(i, j);
-	        i = j;
+	      const token = cssCommentToken(css, i) || cssStringToken(css, i) || cssUrlToken(css, i, base) || cssImportToken(css, i, base);
+	      if (token) {
+	        out += token.out;
+	        i = token.next;
 	        continue;
 	      }
-	      if (ch === '"' || ch === "'") {
-	        const quote = ch;
-	        let j = i + 1;
-	        while (j < css.length) {
-	          if (css[j] === '\\') { j += 2; continue; }
-	          if (css[j] === quote) { j++; break; }
-	          j++;
-	        }
-	        out += css.slice(i, j);
-	        i = j;
-	        continue;
-	      }
-	      if ((ch === 'u' || ch === 'U') && css.slice(i, i + 3).toLowerCase() === 'url' && !/[A-Za-z0-9_-]/.test(css[i - 1] || '') && !/[A-Za-z0-9_-]/.test(css[i + 3] || '')) {
-	        let open = i + 3;
-	        while (/\s/.test(css[open] || '')) open++;
-	        if (css[open] === '(') {
-	          let j = open + 1;
-	          while (/\s/.test(css[j] || '')) j++;
-	          const quote = css[j] === '"' || css[j] === "'" ? css[j++] : '';
-	          let value = '';
-	          while (j < css.length) {
-	            if (css[j] === '\\' && j + 1 < css.length) { value += css.slice(j, j + 2); j += 2; continue; }
-	            if (quote ? css[j] === quote : css[j] === ')') break;
-	            value += css[j++];
-	          }
-	          if (quote && css[j] === quote) j++;
-	          while (/\s/.test(css[j] || '')) j++;
-	          if (css[j] === ')') {
-	            out += 'url("' + cssResourceURL(value, base) + '")';
-	            i = j + 1;
-	            continue;
-	          }
-	        }
-	      }
-	      if (ch === '@' && css.slice(i, i + 7).toLowerCase() === '@import') {
-	        out += css.slice(i, i + 7);
-	        i += 7;
-	        while (i < css.length && /\s/.test(css[i])) out += css[i++];
-	        const quote = css[i] === '"' || css[i] === "'" ? css[i++] : '';
-	        if (quote) {
-	          let value = '';
-	          while (i < css.length) {
-	            if (css[i] === '\\' && i + 1 < css.length) { value += css.slice(i, i + 2); i += 2; continue; }
-	            if (css[i] === quote) break;
-	            value += css[i++];
-	          }
-	          if (css[i] === quote) i++;
-	          out += '"' + cssResourceURL(value, base) + '"';
-	          continue;
-	        }
-	      }
-	      out += ch;
+	      out += css[i];
 	      i++;
 	    }
 	    return out;
@@ -2180,57 +2187,80 @@
     }
     documentCookie = documentCookieString();
   }
+  function pruneCookieRecordsForSource(sourceHost, sourceSecure) {
+    for (let i = documentCookieRecords.length - 1; i >= 0; i--) {
+      const r = documentCookieRecords[i];
+      if ((r.hostOnly ? r.domain === sourceHost : sourceHost === r.domain || sourceHost.endsWith('.' + r.domain)) && (!r.secure || sourceSecure)) documentCookieRecords.splice(i, 1);
+    }
+  }
+  function buildSyncedCookieRecord(raw, sourceHost) {
+    const domain = String(raw.domain || sourceHost).replace(/^\./, '').toLowerCase();
+    return {
+      name: raw.name,
+      value: String(raw.value || ''),
+      domain,
+      hostOnly: raw.hostOnly !== false,
+      path: String(raw.path || '/').startsWith('/') ? String(raw.path || '/') : '/',
+      secure: !!raw.secure,
+      sameSite: normalizeSameSite(raw.sameSite),
+      expires: typeof raw.expiresMs === 'number' ? raw.expiresMs : Infinity
+    };
+  }
   function syncDocumentCookieRecords(records, sourceUrl) {
     let source;
     try { source = new URL(sourceUrl || virtualURL.href); } catch { source = virtualURL; }
     const sourceHost = source.hostname.toLowerCase();
     const sourceSecure = source.protocol === 'https:';
-    for (let i = documentCookieRecords.length - 1; i >= 0; i--) {
-      const r = documentCookieRecords[i];
-      if ((r.hostOnly ? r.domain === sourceHost : sourceHost === r.domain || sourceHost.endsWith('.' + r.domain)) && (!r.secure || sourceSecure)) documentCookieRecords.splice(i, 1);
-    }
+    pruneCookieRecordsForSource(sourceHost, sourceSecure);
     const now = Date.now();
     for (const raw of Array.isArray(records) ? records : []) {
       if (!raw || typeof raw.name !== 'string' || raw.name === '') continue;
-      const domain = String(raw.domain || sourceHost).replace(/^\./, '').toLowerCase();
-      const rec = {
-        name: raw.name,
-        value: String(raw.value || ''),
-        domain,
-        hostOnly: raw.hostOnly !== false,
-        path: String(raw.path || '/').startsWith('/') ? String(raw.path || '/') : '/',
-        secure: !!raw.secure,
-        sameSite: normalizeSameSite(raw.sameSite),
-        expires: typeof raw.expiresMs === 'number' ? raw.expiresMs : Infinity
-      };
+      const rec = buildSyncedCookieRecord(raw, sourceHost);
       if (rec.expires <= now) continue;
       documentCookieRecords.push(rec);
     }
     documentCookie = documentCookieString();
   }
-  function setDocumentCookie(line) {
+  function applyCookieDomain(rec, v) {
+    if (!v) return;
+    const d = v.replace(/^\./, '').toLowerCase();
+    if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; }
+  }
+  function applyCookieExpiry(rec, k, v) {
+    if (k === 'max-age') { rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000; return; }
+    const ts = Date.parse(v);
+    if (!Number.isNaN(ts)) rec.expires = ts;
+  }
+  function applyCookieAttribute(rec, k, v) {
+    if (k === 'domain') return applyCookieDomain(rec, v);
+    if (k === 'max-age' || k === 'expires') return applyCookieExpiry(rec, k, v);
+    if (k === 'path' && v && v[0] === '/') rec.path = v;
+    else if (k === 'secure') rec.secure = true;
+    else if (k === 'samesite') rec.sameSite = normalizeSameSite(v);
+  }
+  function parseCookieLine(line) {
     const parts = String(line).split(';').map(p => p.trim()).filter(Boolean);
-    if (!parts.length) return;
+    if (!parts.length) return null;
     const eq = parts[0].indexOf('=');
-    if (eq <= 0) return;
+    if (eq <= 0) return null;
     const rec = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: defaultCookiePath(), secure: false, sameSite: 'Unspecified', expires: Infinity };
     for (let i = 1; i < parts.length; i++) {
       const [rawK, ...rest] = parts[i].split('=');
-      const k = rawK.toLowerCase();
-      const v = rest.join('=');
-      if (k === 'domain' && v) { const d = v.replace(/^\./, '').toLowerCase(); if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; } }
-      else if (k === 'path' && v && v[0] === '/') rec.path = v;
-      else if (k === 'secure') rec.secure = true;
-      else if (k === 'samesite') rec.sameSite = normalizeSameSite(v);
-      else if (k === 'max-age') rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000;
-      else if (k === 'expires') { const ts = Date.parse(v); if (!Number.isNaN(ts)) rec.expires = ts; }
+      applyCookieAttribute(rec, rawK.toLowerCase(), rest.join('='));
     }
-    if (rec.sameSite === 'None' && !rec.secure) return;
+    if (rec.sameSite === 'None' && !rec.secure) return null;
+    return rec;
+  }
+  function commitCookieRecord(rec) {
     const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
     if (rec.expires <= Date.now()) { if (idx >= 0) documentCookieRecords.splice(idx, 1); }
     else if (idx >= 0) documentCookieRecords[idx] = rec;
     else documentCookieRecords.push(rec);
     documentCookie = documentCookieString();
+  }
+  function setDocumentCookie(line) {
+    const rec = parseCookieLine(line);
+    if (rec) commitCookieRecord(rec);
   }
   function documentCookieString() {
     const now = Date.now();
@@ -2596,29 +2626,6 @@
     if (Native.getAttributeNames) for (const name of Native.getAttributeNames.call(node)) if (isZPAttrName(name)) Native.removeAttribute.call(node, name);
     return true;
   }
-  function sanitizeSerializedHTML(html) {
-    const source = String(html || '');
-    if (/^\s*<html[\s>]/i.test(source) && root.DOMParser && Native.DOMParserParseFromString) {
-      try {
-        const parsed = Native.DOMParserParseFromString.call(new root.DOMParser(), source, 'text/html');
-        const docEl = parsed && parsed.documentElement;
-        if (docEl) {
-          const descendants = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(docEl, '*')) : Array.from(docEl.querySelectorAll('*'));
-          for (const node of [docEl, ...descendants]) sanitizeSerializedNode(node);
-          return Native.elementOuterHTML && Native.elementOuterHTML.get ? Native.elementOuterHTML.get.call(docEl) : docEl.outerHTML;
-        }
-      } catch {}
-    }
-    const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
-    const container = parserDoc.createElement('div');
-    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, source);
-    else container.innerHTML = source;
-    const nodes = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(container, '*')) : Array.from(container.querySelectorAll('*'));
-    for (const node of nodes) {
-      sanitizeSerializedNode(node);
-    }
-    return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
-  }
   function isNavigationTargetElement(el) {
     const tag = el && el.localName;
     return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
@@ -2796,16 +2803,24 @@
   function sanitizeSerializedHTML(html) {
     const source = String(html || '');
     if (/^\s*<html[\s>]/i.test(source) && root.DOMParser && Native.DOMParserParseFromString) {
-      try {
-        const parsed = Native.DOMParserParseFromString.call(new root.DOMParser(), source, 'text/html');
-        const docEl = parsed && parsed.documentElement;
-        if (docEl) {
-          const descendants = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(docEl, '*')) : Array.from(docEl.querySelectorAll('*'));
-          for (const node of [docEl, ...descendants]) sanitizeSerializedNode(node);
-          return Native.elementOuterHTML && Native.elementOuterHTML.get ? Native.elementOuterHTML.get.call(docEl) : docEl.outerHTML;
-        }
-      } catch {}
+      const full = sanitizeFullDocumentHTML(source);
+      if (full !== null) return full;
     }
+    return sanitizeFragmentHTML(source);
+  }
+  function sanitizeFullDocumentHTML(source) {
+    try {
+      const parsed = Native.DOMParserParseFromString.call(new root.DOMParser(), source, 'text/html');
+      const docEl = parsed && parsed.documentElement;
+      if (docEl) {
+        const descendants = Native.elementQuerySelectorAll ? Array.from(Native.elementQuerySelectorAll.call(docEl, '*')) : Array.from(docEl.querySelectorAll('*'));
+        for (const node of [docEl, ...descendants]) sanitizeSerializedNode(node);
+        return Native.elementOuterHTML && Native.elementOuterHTML.get ? Native.elementOuterHTML.get.call(docEl) : docEl.outerHTML;
+      }
+    } catch {}
+    return null;
+  }
+  function sanitizeFragmentHTML(source) {
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
     const container = parserDoc.createElement('div');
     if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, source);
@@ -2820,6 +2835,11 @@
   function installStealthMembrane(w) {
     if (!w || !w.Document || !w.Element) return;
     try { if (w[stealthMarker]) return; Object.defineProperty(w, stealthMarker, { value: true, enumerable: false, configurable: false }); } catch {}
+    installTagCollectionStealthHooks(w);
+    installSelectorStealthHooks(w);
+    installTraversalStealthHooks(w);
+  }
+  function installTagCollectionStealthHooks(w) {
     const docGetTags = w.Document.prototype.getElementsByTagName;
     const elemGetTags = w.Element.prototype.getElementsByTagName;
     if (typeof docGetTags === 'function') define(w.Document.prototype, 'getElementsByTagName', function(tag) {
@@ -2832,6 +2852,8 @@
     });
     const scriptsDesc = Object.getOwnPropertyDescriptor(w.Document.prototype, 'scripts') || Native.documentScripts;
     if (scriptsDesc && scriptsDesc.get) try { Object.defineProperty(w.Document.prototype, 'scripts', { get() { return filteredCollection(scriptsDesc.get.call(this), node => !isZPAssetNode(node)); }, configurable: false }); } catch {}
+  }
+  function installSelectorStealthHooks(w) {
     const docQS = w.Document.prototype.querySelector;
     const docQSA = w.Document.prototype.querySelectorAll;
     const elemQS = w.Element.prototype.querySelector;
@@ -2844,6 +2866,8 @@
     const closest = w.Element.prototype.closest;
     if (typeof matches === 'function') define(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });
     if (typeof closest === 'function') define(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(closest.apply(this, arguments)); });
+  }
+  function installTraversalStealthHooks(w) {
     const nodeIterator = w.Document.prototype.createNodeIterator;
     if (typeof nodeIterator === 'function') define(w.Document.prototype, 'createNodeIterator', function() { return filteredTraversal(nodeIterator.apply(this, arguments)); });
     const treeWalker = w.Document.prototype.createTreeWalker;
@@ -3102,94 +3126,203 @@
   }
 
 
-  function installDOMHooks(w) {
-    define(w.Element.prototype, 'setAttribute', function(k, v) {
-      const key = String(k).toLowerCase();
-      const localKey = attrLocalName(key);
-      if (this.localName === 'meta' && localKey === 'http-equiv' && /^(?:content-security-policy|content-security-policy-report-only)$/i.test(String(v).trim())) {
-        Native.setAttribute.call(this, 'data-zp-blocked-http-equiv', String(v));
-        if (Native.removeAttribute) Native.removeAttribute.call(this, k);
-        return;
-      }
-      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
-      if (localKey === 'style') return Native.setAttribute.call(this, k, rewriteCSSSource(String(v)));
-      if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
-      if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
-      if (this.localName === 'link' && localKey === 'rel') {
-        const value = String(v);
-        if (isBlockedLinkRelValue(value)) return suppressBlockedLinkRel(this, value);
-        if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-blocked-rel');
-        const ret = Native.setAttribute.call(this, k, v);
-        enforceLinkPolicy(this);
-        return ret;
-      }
-      if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
-      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
-      if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
-      if (key.startsWith('on') && key.length > 2) {
-        Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
-        return Native.setAttribute.call(this, k, '');
-      }
-      if (this.localName === 'base' && localKey === 'href') {
-        updateVirtualBase(v);
-        return Native.setAttribute.call(this, k, v);
-      }
-      if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
-      if (isSrcsetAttribute(this, key)) return setSrcsetAttribute(this, k, v);
-      if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v);
-      if (isURLBearing(this, key)) {
-        if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
-        if (isHTTPURL(v)) {
-          const t = targetURL(v);
-          urlMeta.set(this, t);
-          if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
-          if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
-            setFrameSourceAttribute(this, k, t);
-            return;
-          }
-          if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
-          return Native.setAttribute.call(this, k, usesRawURLAttribute(this, key) ? v : t);
-        }
-      }
-      if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
+  function setAttributeHook(k, v) {
+    const key = String(k).toLowerCase();
+    const localKey = attrLocalName(key);
+    if (this.localName === 'meta' && localKey === 'http-equiv' && /^(?:content-security-policy|content-security-policy-report-only)$/i.test(String(v).trim())) {
+      Native.setAttribute.call(this, 'data-zp-blocked-http-equiv', String(v));
+      if (Native.removeAttribute) Native.removeAttribute.call(this, k);
+      return;
+    }
+    if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+    if (localKey === 'style') return Native.setAttribute.call(this, k, rewriteCSSSource(String(v)));
+    if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
+    if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
+    if (this.localName === 'link' && localKey === 'rel') {
+      const value = String(v);
+      if (isBlockedLinkRelValue(value)) return suppressBlockedLinkRel(this, value);
+      if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-blocked-rel');
+      const ret = Native.setAttribute.call(this, k, v);
+      enforceLinkPolicy(this);
+      return ret;
+    }
+    if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
+    if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+    if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
+    if (key.startsWith('on') && key.length > 2) {
+      Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
+      return Native.setAttribute.call(this, k, '');
+    }
+    if (this.localName === 'base' && localKey === 'href') {
+      updateVirtualBase(v);
       return Native.setAttribute.call(this, k, v);
-    });
-    if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) {
-      const key = String(k).toLowerCase();
-      const localKey = attrLocalName(key);
-      if (this.localName === 'meta' && localKey === 'http-equiv' && /^(?:content-security-policy|content-security-policy-report-only)$/i.test(String(v).trim())) {
-        Native.setAttribute.call(this, 'data-zp-blocked-http-equiv', String(v));
-        if (Native.removeAttributeNS) Native.removeAttributeNS.call(this, ns, k);
-        else if (Native.removeAttribute) Native.removeAttribute.call(this, k);
-        return;
+    }
+    if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
+    if (isSrcsetAttribute(this, key)) return setSrcsetAttribute(this, k, v);
+    if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v);
+    if (isURLBearing(this, key)) {
+      if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
+      if (isHTTPURL(v)) {
+        const t = targetURL(v);
+        urlMeta.set(this, t);
+        if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
+        if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
+          setFrameSourceAttribute(this, k, t);
+          return;
+        }
+        if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
+        return Native.setAttribute.call(this, k, usesRawURLAttribute(this, key) ? v : t);
       }
-      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
-      if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
-      if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
-      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
-      if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
-      if (isSrcsetAttribute(this, key)) return setSrcsetAttribute(this, k, v, ns);
-      if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v, ns);
-      if (isURLBearing(this, key)) {
-        if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
-        if (isHTTPURL(v)) {
-          const t = targetURL(v);
-          urlMeta.set(this, t);
-          if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
-          if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
-            setFrameSourceAttribute(this, k, t, ns);
+    }
+    if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
+    return Native.setAttribute.call(this, k, v);
+  }
+  function setAttributeNSHook(ns, k, v) {
+    const key = String(k).toLowerCase();
+    const localKey = attrLocalName(key);
+    if (this.localName === 'meta' && localKey === 'http-equiv' && /^(?:content-security-policy|content-security-policy-report-only)$/i.test(String(v).trim())) {
+      Native.setAttribute.call(this, 'data-zp-blocked-http-equiv', String(v));
+      if (Native.removeAttributeNS) Native.removeAttributeNS.call(this, ns, k);
+      else if (Native.removeAttribute) Native.removeAttribute.call(this, k);
+      return;
+    }
+    if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+    if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
+    if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
+    if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+    if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
+    if (isSrcsetAttribute(this, key)) return setSrcsetAttribute(this, k, v, ns);
+    if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v, ns);
+    if (isURLBearing(this, key)) {
+      if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
+      if (isHTTPURL(v)) {
+        const t = targetURL(v);
+        urlMeta.set(this, t);
+        if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
+        if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
+          setFrameSourceAttribute(this, k, t, ns);
+          return;
+        }
+        return Native.setAttributeNS.call(this, ns, k, usesRawURLAttribute(this, key) ? v : t);
+      }
+    }
+    if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));
+    if (key.startsWith('on') && key.length > 2) {
+      Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
+      return Native.setAttributeNS.call(this, ns, k, '');
+    }
+    return Native.setAttributeNS.call(this, ns, k, v);
+  }
+  function installDOMHooks(w) {
+    define(w.Element.prototype, 'setAttribute', function(k, v) { return setAttributeHook.call(this, k, v); });
+    if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) { return setAttributeNSHook.call(this, ns, k, v); });
+    installAttributeNodeHooks(w);
+    installAttributeAccessHooks(w);
+    installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
+    installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
+    installScriptNonceProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
+    installScriptProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
+    installScriptTextProps(w);
+    installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
+    installResourceURLProps(w);
+    patchHTMLSetter(w.Element.prototype, 'innerHTML');
+    patchHTMLSetter(w.Element.prototype, 'outerHTML');
+    if (w.HTMLElement && w.HTMLElement.prototype) {
+      patchHTMLSetter(w.HTMLElement.prototype, 'innerHTML');
+      patchHTMLSetter(w.HTMLElement.prototype, 'outerHTML');
+    }
+    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
+    installBaseObserver();
+  }
+  function patchHTMLSetter(proto, prop) {
+    let d = null;
+    for (let p = proto; p && !d; p = Object.getPrototypeOf(p)) d = Object.getOwnPropertyDescriptor(p, prop);
+    if (!d || !d.set) return;
+    try {
+      Object.defineProperty(proto, prop, {
+        get() { return d.get ? sanitizeSerializedHTML(d.get.call(this)) : ''; },
+        set(v) {
+          if (this && this.localName === 'template' && prop === 'innerHTML') {
+            d.set.call(this, String(v));
+            enforceSubtreePolicies(this.content);
+            instrumentDescendantIframes(this.content);
             return;
           }
-          return Native.setAttributeNS.call(this, ns, k, usesRawURLAttribute(this, key) ? v : t);
-        }
-      }
-      if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));
-	      if (key.startsWith('on') && key.length > 2) {
-	        Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
-	        return Native.setAttributeNS.call(this, ns, k, '');
-	      }
-	      return Native.setAttributeNS.call(this, ns, k, v);
-	    });
+          if (this && this.localName === 'script' && prop === 'innerHTML') {
+            d.set.call(this, String(v));
+            if (this.isConnected) prepareScriptElement(this);
+            return;
+          }
+          d.set.call(this, transformHTML(String(v)));
+          syncBaseElement(this);
+          instrumentDescendantIframes(this);
+          enforceSubtreePolicies(this);
+        },
+        configurable: false
+      });
+    } catch {}
+  }
+  function getAttributeHook(k) {
+    const key = String(k).toLowerCase();
+    if (isZPAttrName(key)) return null;
+    if (key === 'integrity' && isIntegrityBearing(this)) {
+      const backed = backedIntegrity(this);
+      return backed !== null ? backed : Native.getAttribute.call(this, k);
+    }
+    if (key === 'nonce' && this.localName === 'script') {
+      const backed = backedScriptNonce(this);
+      if (backed !== null) return backed;
+    }
+    if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return frameSandboxMeta.get(this);
+    if (key === 'srcset' || isSrcsetAttribute(this, key)) return visibleSrcset(this);
+    if (isURLBearing(this, key)) return usesRawURLAttribute(this, key) ? visibleNavigationURL(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
+    return Native.getAttribute.call(this, k);
+  }
+  function removeAttributeHook(k) {
+    const key = String(k).toLowerCase();
+    const localKey = attrLocalName(key);
+    if (key === 'integrity' && isIntegrityBearing(this)) {
+      Native.removeAttribute.call(this, integrityBackupAttr);
+      return Native.removeAttribute.call(this, k);
+    }
+    if (key === 'nonce' && this.localName === 'script') Native.removeAttribute.call(this, nonceBackupAttr);
+    if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
+    if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) {
+      urlMeta.delete(this);
+      if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-target-url');
+      return Native.removeAttribute.call(this, k);
+    }
+    if (this.localName === 'link' && localKey === 'rel') {
+      const ret = Native.removeAttribute.call(this, k);
+      enforceLinkPolicy(this);
+      return ret;
+    }
+    if (isResourceURLAttribute(this, key)) {
+      urlMeta.delete(this);
+      Native.removeAttribute.call(this, 'data-zp-target-url');
+    }
+    if (isSrcsetAttribute(this, key)) Native.removeAttribute.call(this, 'data-zp-target-srcset');
+    return Native.removeAttribute.call(this, k);
+  }
+  function hasAttributeHook(k) {
+    const key = String(k).toLowerCase();
+    if (isZPAttrName(key)) return false;
+    if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
+    if (key === 'nonce' && this.localName === 'script') return backedScriptNonce(this) !== null || Native.hasAttribute.call(this, k);
+    if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return true;
+    return Native.hasAttribute.call(this, k);
+  }
+  function getAttributeNamesHook() {
+    const names = Native.getAttributeNames.call(this).filter(name => !isZPAttrName(name));
+    if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
+    if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
+    return names;
+  }
+  function installAttributeNodeHooks(w) {
+    installAttributeNodeMutationHooks(w);
+    installAttributeNodeValueHooks(w);
+  }
+  function installAttributeNodeMutationHooks(w) {
     if (Native.setAttributeNode) define(w.Element.prototype, 'setAttributeNode', function(attr) {
       if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return blockEventAttributeNode(this, attr);
       const ret = Native.setAttributeNode.call(this, attr);
@@ -3218,110 +3351,22 @@
       if (attr) cleanupRemovedAttribute(this, attr.name);
       return ret;
     });
-	    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { const ret = Native.namedSetNamedItem.call(this, attr); if (attr && attr.ownerElement) enforceAttributeNodeOwner(attr.ownerElement, attr); return ret; });
-	    if (Native.namedSetNamedItemNS && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItemNS', function(attr) { const ret = Native.namedSetNamedItemNS.call(this, attr); if (attr && attr.ownerElement) enforceAttributeNodeOwner(attr.ownerElement, attr); return ret; });
-	    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get() { const masked = visibleMaskedAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; }, set(v) { if (this.ownerElement) return this.ownerElement.setAttribute(this.name, v); Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? '' : v); }, configurable: false }); } catch {}
-	    if (Native.attrNodeValue && Native.attrNodeValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'nodeValue', { get() { const masked = visibleMaskedAttrValue(this); return masked === null ? Native.attrNodeValue.get.call(this) : masked; }, set(v) { if (this.ownerElement) return this.ownerElement.setAttribute(this.name, v); Native.attrNodeValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? '' : v); }, configurable: false }); } catch {}
-    define(w.Element.prototype, 'getAttribute', function(k) {
-      const key = String(k).toLowerCase();
-      if (isZPAttrName(key)) return null;
-      if (key === 'integrity' && isIntegrityBearing(this)) {
-        const backed = backedIntegrity(this);
-        return backed !== null ? backed : Native.getAttribute.call(this, k);
-      }
-      if (key === 'nonce' && this.localName === 'script') {
-        const backed = backedScriptNonce(this);
-        if (backed !== null) return backed;
-      }
-      if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return frameSandboxMeta.get(this);
-      if (key === 'srcset' || isSrcsetAttribute(this, key)) return visibleSrcset(this);
-      if (isURLBearing(this, key)) return usesRawURLAttribute(this, key) ? visibleNavigationURL(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
-      return Native.getAttribute.call(this, k);
-    });
-    if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) {
-      const key = String(k).toLowerCase();
-      if (isZPAttrName(key)) return false;
-      if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
-      if (key === 'nonce' && this.localName === 'script') return backedScriptNonce(this) !== null || Native.hasAttribute.call(this, k);
-      if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return true;
-      return Native.hasAttribute.call(this, k);
-    });
-    if (Native.removeAttribute) define(w.Element.prototype, 'removeAttribute', function(k) {
-      const key = String(k).toLowerCase();
-      const localKey = attrLocalName(key);
-      if (key === 'integrity' && isIntegrityBearing(this)) {
-        Native.removeAttribute.call(this, integrityBackupAttr);
-        return Native.removeAttribute.call(this, k);
-      }
-      if (key === 'nonce' && this.localName === 'script') Native.removeAttribute.call(this, nonceBackupAttr);
-      if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
-      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) {
-        urlMeta.delete(this);
-        if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-target-url');
-        return Native.removeAttribute.call(this, k);
-      }
-      if (this.localName === 'link' && localKey === 'rel') {
-        const ret = Native.removeAttribute.call(this, k);
-        enforceLinkPolicy(this);
-        return ret;
-      }
-      if (isResourceURLAttribute(this, key)) {
-        urlMeta.delete(this);
-        Native.removeAttribute.call(this, 'data-zp-target-url');
-      }
-      if (isSrcsetAttribute(this, key)) Native.removeAttribute.call(this, 'data-zp-target-srcset');
-      return Native.removeAttribute.call(this, k);
-    });
-    if (Native.getAttributeNames) define(w.Element.prototype, 'getAttributeNames', function() {
-      const names = Native.getAttributeNames.call(this).filter(name => !isZPAttrName(name));
-      if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
-      if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
-      return names;
-    });
+  }
+  function installAttributeNodeValueHooks(w) {
+    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { const ret = Native.namedSetNamedItem.call(this, attr); if (attr && attr.ownerElement) enforceAttributeNodeOwner(attr.ownerElement, attr); return ret; });
+    if (Native.namedSetNamedItemNS && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItemNS', function(attr) { const ret = Native.namedSetNamedItemNS.call(this, attr); if (attr && attr.ownerElement) enforceAttributeNodeOwner(attr.ownerElement, attr); return ret; });
+    if (Native.attrValue && Native.attrValue.set && w.Attr) maskAttrValueAccessor(w.Attr.prototype, 'value', Native.attrValue);
+    if (Native.attrNodeValue && Native.attrNodeValue.set && w.Attr) maskAttrValueAccessor(w.Attr.prototype, 'nodeValue', Native.attrNodeValue);
+  }
+  function maskAttrValueAccessor(proto, prop, nativeDesc) {
+    try { Object.defineProperty(proto, prop, { get() { const masked = visibleMaskedAttrValue(this); return masked === null ? nativeDesc.get.call(this) : masked; }, set(v) { if (this.ownerElement) return this.ownerElement.setAttribute(this.name, v); nativeDesc.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? '' : v); }, configurable: false }); } catch {}
+  }
+  function installAttributeAccessHooks(w) {
+    define(w.Element.prototype, 'getAttribute', function(k) { return getAttributeHook.call(this, k); });
+    if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) { return hasAttributeHook.call(this, k); });
+    if (Native.removeAttribute) define(w.Element.prototype, 'removeAttribute', function(k) { return removeAttributeHook.call(this, k); });
+    if (Native.getAttributeNames) define(w.Element.prototype, 'getAttributeNames', function() { return getAttributeNamesHook.call(this); });
     if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
-    installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
-    installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
-    installScriptNonceProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
-    installScriptProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
-    installScriptTextProps(w);
-    installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
-    installResourceURLProps(w);
-    patchHTMLSetter(w.Element.prototype, 'innerHTML');
-    patchHTMLSetter(w.Element.prototype, 'outerHTML');
-    if (w.HTMLElement && w.HTMLElement.prototype) {
-      patchHTMLSetter(w.HTMLElement.prototype, 'innerHTML');
-      patchHTMLSetter(w.HTMLElement.prototype, 'outerHTML');
-    }
-    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
-    installBaseObserver();
-    function patchHTMLSetter(proto, prop) {
-      let d = null;
-      for (let p = proto; p && !d; p = Object.getPrototypeOf(p)) d = Object.getOwnPropertyDescriptor(p, prop);
-      if (!d || !d.set) return;
-      try {
-        Object.defineProperty(proto, prop, {
-          get() { return d.get ? sanitizeSerializedHTML(d.get.call(this)) : ''; },
-          set(v) {
-            if (this && this.localName === 'template' && prop === 'innerHTML') {
-              d.set.call(this, String(v));
-              enforceSubtreePolicies(this.content);
-              instrumentDescendantIframes(this.content);
-              return;
-            }
-            if (this && this.localName === 'script' && prop === 'innerHTML') {
-              d.set.call(this, String(v));
-              if (this.isConnected) prepareScriptElement(this);
-              return;
-            }
-            d.set.call(this, transformHTML(String(v)));
-            syncBaseElement(this);
-            instrumentDescendantIframes(this);
-            enforceSubtreePolicies(this);
-          },
-          configurable: false
-        });
-      } catch {}
-    }
   }
   function installIntegrityProp(proto) {
     if (!proto) return;
@@ -3548,41 +3593,44 @@
   function isPreparedInlineScript(text) {
     return /^throw new DOMException\('Blocked by ZeroProxy rewrite policy'/.test(String(text || '').trim());
   }
+	  function consumeStaticScriptMarker(el) {
+	    if (Native.getAttribute.call(el, 'data-zp-static-script') !== '1') return false;
+	    rewrittenInlineScripts.add(el);
+	    if (Native.removeAttribute) Native.removeAttribute.call(el, 'data-zp-static-script');
+	    return true;
+	  }
+	  function prepareImportMapScript(el) {
+	    if (!Native.getAttribute.call(el, 'src')) setScriptText(el, rewriteImportMapText(getScriptText(el)));
+	  }
 	  function prepareScriptElement(el) {
 	    if (!el || el.localName !== 'script') return;
-	    if (Native.getAttribute.call(el, 'data-zp-static-script') === '1') {
-	      rewrittenInlineScripts.add(el);
-	      if (Native.removeAttribute) Native.removeAttribute.call(el, 'data-zp-static-script');
-	      return;
-	    }
+	    if (consumeStaticScriptMarker(el)) return;
 	    const dataType = executableScriptDataType(el);
-    if (dataType === 'importmap') {
-      if (!Native.getAttribute.call(el, 'src')) setScriptText(el, rewriteImportMapText(getScriptText(el)));
-      return;
-    }
+    if (dataType === 'importmap') return prepareImportMapScript(el);
     const raw = Native.getAttribute.call(el, 'src') || Native.getAttribute.call(el, 'href');
-    if (raw) {
-      const target = Native.getAttribute.call(el, 'data-zp-target-url') || '';
-      if (target && (String(raw).startsWith(ZP.CONTROL_PREFIX) || String(raw).startsWith(proxyOrigin + ZP.CONTROL_PREFIX))) {
-        setScriptSource(el, target);
-        return;
-      }
-      setScriptSource(el, raw);
+    if (raw) return rewriteExternalScriptSource(el, raw);
+    if (dataType) rewriteInlineScriptElement(el, dataType);
+  }
+  function rewriteExternalScriptSource(el, raw) {
+    const target = Native.getAttribute.call(el, 'data-zp-target-url') || '';
+    if (target && (String(raw).startsWith(ZP.CONTROL_PREFIX) || String(raw).startsWith(proxyOrigin + ZP.CONTROL_PREFIX))) {
+      setScriptSource(el, target);
       return;
     }
-    if (dataType) {
-      const text = getScriptText(el);
-      if (!text) return;
-      if (rewrittenInlineScripts.has(el) || isPreparedInlineScript(text)) return;
-      try {
-        setScriptText(el, inlineScriptWrapper(text, dataType));
-        Native.setAttribute.call(el, 'nonce', 'zp');
-        rewrittenInlineScripts.add(el);
-      } catch {
-        setScriptText(el, "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');");
-        Native.setAttribute.call(el, 'nonce', 'zp');
-        rewrittenInlineScripts.add(el);
-      }
+    setScriptSource(el, raw);
+  }
+  function rewriteInlineScriptElement(el, dataType) {
+    const text = getScriptText(el);
+    if (!text) return;
+    if (rewrittenInlineScripts.has(el) || isPreparedInlineScript(text)) return;
+    try {
+      setScriptText(el, inlineScriptWrapper(text, dataType));
+      Native.setAttribute.call(el, 'nonce', 'zp');
+      rewrittenInlineScripts.add(el);
+    } catch {
+      setScriptText(el, "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');");
+      Native.setAttribute.call(el, 'nonce', 'zp');
+      rewrittenInlineScripts.add(el);
     }
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
@@ -3646,56 +3694,60 @@
     const walker = parserDoc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     const nodes = [];
     for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
-    for (const node of nodes) {
-      const tag = node.localName;
-      if (tag === 'meta' && suppressMetaPolicyElement(node)) {
-        continue;
-      }
-      if (tag === 'base' && Native.getAttribute.call(node, 'href')) {
-        const href = Native.getAttribute.call(node, 'href') || '';
-        updateVirtualBase(href);
-        const script = parserDoc.createElement('script');
-        setScriptText(script, 'window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(href).replace(/</g, '\\\\u003c') + ');');
-        node.replaceWith(script);
-        continue;
-      }
-      if (tag === 'link') enforceLinkPolicy(node);
-      if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc')) {
-        Native.setAttribute.call(node, 'srcdoc', injectSrcdoc(Native.getAttribute.call(node, 'srcdoc') || ''));
-      }
-      if (tag === 'script') {
-        const dtype = executableScriptDataType(node);
-        if (dtype === 'importmap') setScriptText(node, rewriteImportMapText(getScriptText(node)));
-        else if (dtype && (Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'))) {
-          setScriptSource(node, Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'));
-          Native.setAttribute.call(node, 'data-zp-docwrite-src', Native.getAttribute.call(node, 'src') || '');
-          Native.setAttribute.call(node, 'data-zp-docwrite-type', dtype);
-          Native.setAttribute.call(node, 'data-zp-docwrite-pending', '1');
-          if (Native.removeAttribute) Native.removeAttribute.call(node, 'src');
-          Native.setAttribute.call(node, 'type', 'application/x-zeroproxy-docwrite-external');
-        }
-        else if (dtype) blockInlineScriptElement(node);
-      }
-      if (tag === 'style') {
-        setElementText(node, rewriteCSSSource(elementText(node)));
-        rewrittenStyleNodes.add(node);
-      }
-      if (Native.getAttributeNames) {
-        for (const attrName of Native.getAttributeNames.call(node)) {
-          const lowerAttr = String(attrName).toLowerCase();
-          if (lowerAttr === 'style') Native.setAttribute.call(node, attrName, rewriteCSSSource(Native.getAttribute.call(node, attrName) || ''));
-          if (isSrcsetAttribute(node, lowerAttr)) setSrcsetAttribute(node, attrName, Native.getAttribute.call(node, attrName) || '');
-          if (lowerAttr === 'integrity' && isIntegrityBearing(node)) setBackedIntegrity(node, Native.getAttribute.call(node, attrName) || '');
-          if (lowerAttr.startsWith('on') && lowerAttr.length > 2) {
-            const val = Native.getAttribute.call(node, attrName) || '';
-            Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
-            if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
-          }
-          if (isSrcsetAttribute(node, lowerAttr) || isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
-        }
-      }
-    }
+    for (const node of nodes) transformHTMLNode(node, parserDoc);
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
+  }
+  function transformHTMLNode(node, parserDoc) {
+    const tag = node.localName;
+    if (tag === 'meta' && suppressMetaPolicyElement(node)) return;
+    if (tag === 'base' && Native.getAttribute.call(node, 'href')) return replaceSerializedBaseNode(node, parserDoc);
+    if (tag === 'link') enforceLinkPolicy(node);
+    if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc')) injectSerializedFrameSrcdoc(node);
+    if (tag === 'script') transformHTMLScriptNode(node);
+    if (tag === 'style') {
+      setElementText(node, rewriteCSSSource(elementText(node)));
+      rewrittenStyleNodes.add(node);
+    }
+    if (Native.getAttributeNames) rewriteSerializedNodeAttributes(node);
+  }
+  function replaceSerializedBaseNode(node, parserDoc) {
+    const href = Native.getAttribute.call(node, 'href') || '';
+    updateVirtualBase(href);
+    const script = parserDoc.createElement('script');
+    setScriptText(script, 'window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(href).replace(/</g, '\\\\u003c') + ');');
+    node.replaceWith(script);
+  }
+  function injectSerializedFrameSrcdoc(node) {
+    Native.setAttribute.call(node, 'srcdoc', injectSrcdoc(Native.getAttribute.call(node, 'srcdoc') || ''));
+  }
+  function transformHTMLScriptNode(node) {
+    const dtype = executableScriptDataType(node);
+    if (dtype === 'importmap') setScriptText(node, rewriteImportMapText(getScriptText(node)));
+    else if (dtype && (Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'))) {
+      setScriptSource(node, Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'));
+      Native.setAttribute.call(node, 'data-zp-docwrite-src', Native.getAttribute.call(node, 'src') || '');
+      Native.setAttribute.call(node, 'data-zp-docwrite-type', dtype);
+      Native.setAttribute.call(node, 'data-zp-docwrite-pending', '1');
+      if (Native.removeAttribute) Native.removeAttribute.call(node, 'src');
+      Native.setAttribute.call(node, 'type', 'application/x-zeroproxy-docwrite-external');
+    }
+    else if (dtype) blockInlineScriptElement(node);
+  }
+  function rewriteSerializedNodeAttributes(node) {
+    for (const attrName of Native.getAttributeNames.call(node)) rewriteSerializedAttribute(node, attrName);
+  }
+  function rewriteSerializedAttribute(node, attrName) {
+    const lowerAttr = String(attrName).toLowerCase();
+    if (lowerAttr === 'style') Native.setAttribute.call(node, attrName, rewriteCSSSource(Native.getAttribute.call(node, attrName) || ''));
+    if (isSrcsetAttribute(node, lowerAttr)) setSrcsetAttribute(node, attrName, Native.getAttribute.call(node, attrName) || '');
+    if (lowerAttr === 'integrity' && isIntegrityBearing(node)) setBackedIntegrity(node, Native.getAttribute.call(node, attrName) || '');
+    if (lowerAttr.startsWith('on') && lowerAttr.length > 2) blockSerializedEventAttribute(node, attrName, lowerAttr);
+    if (isSrcsetAttribute(node, lowerAttr) || isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
+  }
+  function blockSerializedEventAttribute(node, attrName, lowerAttr) {
+    const val = Native.getAttribute.call(node, attrName) || '';
+    Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
+    if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
   }
   function injectSrcdoc(s) { return '<script nonce="zp" src="/zp/assets/zp-core.js"><\/script><script nonce="zp" src="/zp/assets/rust-rewriter.js"><\/script><script nonce="zp">(function(){const boot=' + bootJSON() + ';Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
@@ -3878,75 +3930,82 @@
     } catch {}
   }
   function installWorkerHooks() {
-    if (Native.Worker) {
-      installWorkerTerminateHook();
-      const ZPWorker = function Worker(url) {
-        const blobWorker = isBlobWorkerURL(url);
-        const worker = new Native.Worker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1]));
-        if (blobWorker) {
-          try { deferredTerminateWorkers.add(worker); } catch {}
-        }
-        return worker;
-      };
-      try { Object.setPrototypeOf(ZPWorker, Native.Worker); } catch {}
-      try { Object.defineProperty(ZPWorker, 'prototype', { value: Native.Worker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
-      try { Object.defineProperty(Native.Worker.prototype, 'constructor', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-      maskNativeFunction(ZPWorker, 'Worker');
-      try { Object.defineProperty(root, 'Worker', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-    }
-    if (Native.SharedWorker) {
-      const ZPSharedWorker = function SharedWorker(url) { return new Native.SharedWorker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1])); };
-      try { Object.setPrototypeOf(ZPSharedWorker, Native.SharedWorker); } catch {}
-      try { Object.defineProperty(ZPSharedWorker, 'prototype', { value: Native.SharedWorker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
-      try { Object.defineProperty(Native.SharedWorker.prototype, 'constructor', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-      maskNativeFunction(ZPSharedWorker, 'SharedWorker');
-      try { Object.defineProperty(root, 'SharedWorker', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-    }
+    if (Native.Worker) installWorkerConstructor();
+    if (Native.SharedWorker) installSharedWorkerConstructor();
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.resolve(undefined); });
-    if (Native.createObjectURL) {
-      const createObjectURL = function createObjectURL(blob) {
-      const url = Native.createObjectURL(blob);
-      try {
-        if (typeof Blob !== 'undefined' && blob instanceof Blob) {
-          const virtual = scriptBlobURLForPage(url, blob);
-          const wrapper = workerBootstrapBlobURL(url);
-          workerBlobURLMap.set(url, wrapper);
-          if (virtual !== url) {
-            blobURLRawMap.set(virtual, url);
-            workerBlobURLMap.set(virtual, wrapper);
-            return virtual;
-          }
-        }
-      } catch {}
-      return url;
-      };
-      try { Object.defineProperty(createObjectURL, 'name', { value: 'createObjectURL', configurable: true }); } catch {}
-      maskNativeFunction(createObjectURL, 'createObjectURL');
-      try { Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
-    }
-    if (Native.revokeObjectURL) {
-      const revokeObjectURL = function revokeObjectURL(url) {
-      const visible = String(url);
-      const raw = blobURLRawMap.get(visible) || visible;
-      const workerURL = workerBlobURLMap.get(visible) || workerBlobURLMap.get(raw);
-      blobURLRawMap.delete(visible);
-      workerBlobURLMap.delete(visible);
-      workerBlobURLMap.delete(raw);
-      if (workerURL) {
-        const revokeWorkerURL = () => {
-          workerBlobURLs.delete(workerURL);
-          try { Native.revokeObjectURL(workerURL); } catch {}
-          try { Native.revokeObjectURL(raw); } catch {}
-        };
-        try { (Native.setTimeout || setTimeout)(revokeWorkerURL, 30000); } catch { revokeWorkerURL(); }
-        return undefined;
+    if (Native.createObjectURL) installCreateObjectURLHook();
+    if (Native.revokeObjectURL) installRevokeObjectURLHook();
+    installWorkletModuleHooks();
+  }
+  function installWorkerConstructor() {
+    installWorkerTerminateHook();
+    const ZPWorker = function Worker(url) {
+      const blobWorker = isBlobWorkerURL(url);
+      const worker = new Native.Worker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1]));
+      if (blobWorker) {
+        try { deferredTerminateWorkers.add(worker); } catch {}
       }
-      return Native.revokeObjectURL(raw);
+      return worker;
+    };
+    try { Object.setPrototypeOf(ZPWorker, Native.Worker); } catch {}
+    try { Object.defineProperty(ZPWorker, 'prototype', { value: Native.Worker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
+    try { Object.defineProperty(Native.Worker.prototype, 'constructor', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+    maskNativeFunction(ZPWorker, 'Worker');
+    try { Object.defineProperty(root, 'Worker', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+  }
+  function installSharedWorkerConstructor() {
+    const ZPSharedWorker = function SharedWorker(url) { return new Native.SharedWorker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1])); };
+    try { Object.setPrototypeOf(ZPSharedWorker, Native.SharedWorker); } catch {}
+    try { Object.defineProperty(ZPSharedWorker, 'prototype', { value: Native.SharedWorker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
+    try { Object.defineProperty(Native.SharedWorker.prototype, 'constructor', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+    maskNativeFunction(ZPSharedWorker, 'SharedWorker');
+    try { Object.defineProperty(root, 'SharedWorker', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
+  }
+  function installCreateObjectURLHook() {
+    const createObjectURL = function createObjectURL(blob) {
+    const url = Native.createObjectURL(blob);
+    try {
+      if (typeof Blob !== 'undefined' && blob instanceof Blob) {
+        const virtual = scriptBlobURLForPage(url, blob);
+        const wrapper = workerBootstrapBlobURL(url);
+        workerBlobURLMap.set(url, wrapper);
+        if (virtual !== url) {
+          blobURLRawMap.set(virtual, url);
+          workerBlobURLMap.set(virtual, wrapper);
+          return virtual;
+        }
+      }
+    } catch {}
+    return url;
+    };
+    try { Object.defineProperty(createObjectURL, 'name', { value: 'createObjectURL', configurable: true }); } catch {}
+    maskNativeFunction(createObjectURL, 'createObjectURL');
+    try { Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
+  }
+  function installRevokeObjectURLHook() {
+    const revokeObjectURL = function revokeObjectURL(url) {
+    const visible = String(url);
+    const raw = blobURLRawMap.get(visible) || visible;
+    const workerURL = workerBlobURLMap.get(visible) || workerBlobURLMap.get(raw);
+    blobURLRawMap.delete(visible);
+    workerBlobURLMap.delete(visible);
+    workerBlobURLMap.delete(raw);
+    if (workerURL) {
+      const revokeWorkerURL = () => {
+        workerBlobURLs.delete(workerURL);
+        try { Native.revokeObjectURL(workerURL); } catch {}
+        try { Native.revokeObjectURL(raw); } catch {}
       };
-      try { Object.defineProperty(revokeObjectURL, 'name', { value: 'revokeObjectURL', configurable: true }); } catch {}
-      maskNativeFunction(revokeObjectURL, 'revokeObjectURL');
-      try { Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
+      try { (Native.setTimeout || setTimeout)(revokeWorkerURL, 30000); } catch { revokeWorkerURL(); }
+      return undefined;
     }
+    return Native.revokeObjectURL(raw);
+    };
+    try { Object.defineProperty(revokeObjectURL, 'name', { value: 'revokeObjectURL', configurable: true }); } catch {}
+    maskNativeFunction(revokeObjectURL, 'revokeObjectURL');
+    try { Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
+  }
+  function installWorkletModuleHooks() {
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
   }
   function isBlobWorkerURL(url) {
@@ -4242,21 +4301,14 @@
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     installToStringMasking(w);
-    const childFunction = w.Function;
-    if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
-    if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
-    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: true, writable: true }); } catch {}
-    if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
+    installContainedExecGlobals(w);
     installNavigatorIdentity(w);
     installGetterMasking(w);
     installChildRewriteHelpers(w);
     installStorageFacades(w);
     installPostMessageHooks(w);
     installPerformanceMasking(w);
-    if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
-    if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
-    if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
-    if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
+    installContainedNetworkGlobals(w);
     installDocumentWriteHooks(w);
     installOwnPropertyMasking(w);
     installDOMHooks(w);
@@ -4267,6 +4319,19 @@
     installCanvasAntiFingerprinting(w);
     installAudioAntiFingerprinting(w);
     try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
+  }
+  function installContainedExecGlobals(w) {
+    const childFunction = w.Function;
+    if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
+    if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
+    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: true, writable: true }); } catch {}
+    if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
+  }
+  function installContainedNetworkGlobals(w) {
+    if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
+    if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
+    if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
+    if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
   }
 
   function installBlockers(w, strict = false) {
@@ -4295,42 +4360,45 @@
   function installCanvasAntiFingerprinting(w) {
     if (!w || canvasHookedWindows.has(w) || !w.CanvasRenderingContext2D || !w.HTMLCanvasElement) return;
     canvasHookedWindows.add(w);
-    const ctxProto = w.CanvasRenderingContext2D.prototype;
-    const canvasProto = w.HTMLCanvasElement.prototype;
+    installCanvasGetImageDataNoise(w.CanvasRenderingContext2D.prototype);
+    installCanvasToDataURLNoise(w.HTMLCanvasElement.prototype);
+  }
+  function installCanvasGetImageDataNoise(ctxProto) {
     const origGetImageData = ctxProto && ctxProto.getImageData;
-    if (typeof origGetImageData === 'function') {
-      define(ctxProto, 'getImageData', function(...args) {
-        const imageData = origGetImageData.apply(this, args);
-        const data = imageData && imageData.data;
-        if (data && data.length > 1) {
-          data[0] = data[0] ^ 1;
-          data[data.length - 2] = data[data.length - 2] ^ 1;
-        }
-        return imageData;
-      });
-    }
+    if (typeof origGetImageData !== 'function') return;
+    define(ctxProto, 'getImageData', function(...args) {
+      const imageData = origGetImageData.apply(this, args);
+      const data = imageData && imageData.data;
+      if (data && data.length > 1) {
+        data[0] = data[0] ^ 1;
+        data[data.length - 2] = data[data.length - 2] ^ 1;
+      }
+      return imageData;
+    });
+  }
+  function installCanvasToDataURLNoise(canvasProto) {
     const origToDataURL = canvasProto && canvasProto.toDataURL;
-    if (typeof origToDataURL === 'function') {
-      define(canvasProto, 'toDataURL', function(...args) {
-        const width = this.width >>> 0;
-        const height = this.height >>> 0;
-        if (width && height) {
-          const ctx = this.getContext && this.getContext('2d');
-          if (ctx) {
-            const fillStyle = ctx.fillStyle;
-            const globalAlpha = ctx.globalAlpha;
-            try {
-              ctx.globalAlpha = 1;
-              ctx.fillStyle = 'rgba(' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',0.01)';
-              ctx.fillRect((Math.random() * Math.min(width, 8)) | 0, (Math.random() * Math.min(height, 8)) | 0, 1, 1);
-            } finally {
-              try { ctx.fillStyle = fillStyle; } catch {}
-              try { ctx.globalAlpha = globalAlpha; } catch {}
-            }
-          }
-        }
-        return origToDataURL.apply(this, args);
-      });
+    if (typeof origToDataURL !== 'function') return;
+    define(canvasProto, 'toDataURL', function(...args) {
+      perturbCanvasForExport(this);
+      return origToDataURL.apply(this, args);
+    });
+  }
+  function perturbCanvasForExport(canvas) {
+    const width = canvas.width >>> 0;
+    const height = canvas.height >>> 0;
+    if (!width || !height) return;
+    const ctx = canvas.getContext && canvas.getContext('2d');
+    if (!ctx) return;
+    const fillStyle = ctx.fillStyle;
+    const globalAlpha = ctx.globalAlpha;
+    try {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',0.01)';
+      ctx.fillRect((Math.random() * Math.min(width, 8)) | 0, (Math.random() * Math.min(height, 8)) | 0, 1, 1);
+    } finally {
+      try { ctx.fillStyle = fillStyle; } catch {}
+      try { ctx.globalAlpha = globalAlpha; } catch {}
     }
   }
 
