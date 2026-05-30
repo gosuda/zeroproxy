@@ -120,8 +120,17 @@
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
+    // Challenge-compatibility projection (default OFF; caller-gated by the two-signal
+    // arm+classifier chain in cmd/wasm-kernel). When ON we ADD the challenge host to
+    // script/connect/frame/child so a real human's Cloudflare challenge can execute;
+    // it adds NO wildcard and NO direct-egress capability (fetches still route through
+    // the proxy transport), and it NEVER manufactures eval -- 'unsafe-eval' rides the
+    // existing allowDynamicCompile grant below, honoring the target CSP only (F3).
+    const challengeCompat = !!(options && options.challengeCompat);
+    const cf = challengeCompat ? " https://challenges.cloudflare.com" : "";
+    if (challengeCompat) connect.add("https://challenges.cloudflare.com");
     const script = options && options.allowDynamicCompile ? "script-src 'self' blob: 'nonce-zp' 'unsafe-eval' 'wasm-unsafe-eval'" : "script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'";
-    return "default-src 'none'; " + script + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    return "default-src 'none'; " + script + cf + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:" + cf + "; child-src 'self' blob: data:" + cf + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
   }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');

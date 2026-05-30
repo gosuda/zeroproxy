@@ -389,6 +389,132 @@ test('membrane: ZP.fixedCSP() is default-deny with locked-down base/object/form-
   assert.match(dynamic, /'unsafe-eval'/, 'allowDynamicCompile branch must grant unsafe-eval');
 });
 
+// ---------------------------------------------------------------------------
+// Invariant 3b: challenge-compatibility CSP projection (default OFF)
+//
+// challengeCompat is the opt-in projection that lets a REAL human's Cloudflare
+// challenge execute through the proxy. It must (a) be byte-identical to the
+// default CSP when OFF, (b) when ON add ONLY the challenge host to
+// script/connect/frame/child plus the already-present blob: worker capability,
+// (c) NEVER open a wildcard / direct-egress hole, and (d) NEVER manufacture
+// eval -- 'unsafe-eval' may appear only when allowDynamicCompile is already set
+// (honoring the target's own grant; F3).
+// ---------------------------------------------------------------------------
+
+test('membrane: challengeCompat OFF path is byte-identical to the default CSP', () => {
+  const { ctx } = loadServiceWorker();
+  const base = ctx.ZP.fixedCSP();
+  assert.equal(ctx.ZP.fixedCSP([], {}), base, 'empty options must equal the default CSP');
+  assert.equal(
+    ctx.ZP.fixedCSP([], { challengeCompat: false }),
+    base,
+    'challengeCompat:false must be byte-identical to the default CSP',
+  );
+});
+
+// Parse a CSP string into ORDERED [directive, source-token[]] entries. We do NOT
+// collapse by name: a smuggled duplicate directive must remain visible so the
+// delta proof below can reject it (duplicates would otherwise evade a Map).
+function parseCSPEntries(csp) {
+  return csp
+    .split(';')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const tokens = part.split(/\s+/);
+      return [tokens[0], tokens.slice(1)];
+    });
+}
+
+function directiveNames(entries) {
+  return entries.map(([name]) => name);
+}
+
+test('membrane: armed challengeCompat adds EXACTLY the challenge host and nothing else', () => {
+  const { ctx } = loadServiceWorker();
+  const cf = 'https://challenges.cloudflare.com';
+  const baseEntries = parseCSPEntries(ctx.ZP.fixedCSP());
+  const armedEntries = parseCSPEntries(ctx.ZP.fixedCSP([], { challengeCompat: true }));
+
+  // Directive SEQUENCE is unchanged -- no directive added, removed, reordered, or
+  // DUPLICATED (comparing the full ordered name list catches a smuggled dup).
+  assert.deepEqual(
+    directiveNames(armedEntries),
+    directiveNames(baseEntries),
+    'armed CSP must not add/remove/duplicate/reorder directives',
+  );
+  // Baseline itself must have no duplicate directive (guards the proof's premise).
+  const baseNames = directiveNames(baseEntries);
+  assert.equal(
+    new Set(baseNames).size,
+    baseNames.length,
+    'baseline CSP has no duplicate directive',
+  );
+
+  // The challenge host is the ONLY added token, and only on these four directives.
+  const projected = new Set(['script-src', 'connect-src', 'frame-src', 'child-src']);
+  for (let i = 0; i < baseEntries.length; i++) {
+    const [name, baseTokens] = baseEntries[i];
+    const armedTokens = armedEntries[i][1];
+    const added = armedTokens.filter((t) => !baseTokens.includes(t));
+    const removed = baseTokens.filter((t) => !armedTokens.includes(t));
+    assert.deepEqual(removed, [], `${name} must not drop any baseline token when armed`);
+    if (projected.has(name)) {
+      // EXACTLY the challenge host -- not https:, not a wildcard, not another host.
+      assert.deepEqual(added, [cf], `${name} armed delta must be exactly the challenge host`);
+    } else {
+      assert.deepEqual(added, [], `${name} must be byte-identical when armed`);
+    }
+  }
+
+  // Spelled-out consequences of the delta proof, for readability at the failure site.
+  const armedByName = new Map(armedEntries);
+  assert.deepEqual(
+    armedByName.get('worker-src'),
+    ["'self'", 'blob:'],
+    'worker-src keeps blob: (no cf)',
+  );
+  assert.ok(
+    armedByName.get('script-src').includes("'nonce-zp'"),
+    'armed script-src preserves the nonce',
+  );
+  // NO egress/execution escape: the directives that could leak a fetch or run code
+  // must never carry a bare wildcard. (style/img/font/media already use '*' in the
+  // unchanged baseline; the delta proof above guarantees we added nothing there.)
+  const guardedDirectives = [
+    'script-src',
+    'connect-src',
+    'frame-src',
+    'child-src',
+    'worker-src',
+    'object-src',
+  ];
+  for (const guarded of guardedDirectives) {
+    const tokens = armedByName.get(guarded) || [];
+    assert.equal(tokens.includes('*'), false, `${guarded} must not carry a bare wildcard source`);
+  }
+});
+
+test('membrane: challengeCompat honors but never manufactures the eval grant (F3)', () => {
+  const { ctx } = loadServiceWorker();
+  // Bare 'unsafe-eval' (not the distinct 'wasm-unsafe-eval') is the discriminator.
+  const hasBareEval = (csp) => /(^|[^-])'unsafe-eval'/.test(csp);
+  // Armed WITHOUT a target eval grant -> still NO eval (honor-not-manufacture).
+  const armedNoEval = ctx.ZP.fixedCSP([], { challengeCompat: true });
+  assert.equal(
+    hasBareEval(armedNoEval),
+    false,
+    'challengeCompat alone must not manufacture unsafe-eval',
+  );
+  // Armed AND the target already granted eval -> eval rides the existing grant only.
+  const armedWithEval = ctx.ZP.fixedCSP([], { challengeCompat: true, allowDynamicCompile: true });
+  assert.equal(
+    hasBareEval(armedWithEval),
+    true,
+    'challengeCompat must honor an existing allowDynamicCompile eval grant',
+  );
+});
+
 test('membrane: blocked navigation response carries the default-deny membrane CSP', async () => {
   const sw = loadServiceWorker();
   const req = fakeRequest('https://proxy.example/unknown/route', { mode: 'navigate' });
