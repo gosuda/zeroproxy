@@ -281,3 +281,39 @@ func TestTransformProxiesPassiveSubresources(t *testing.T) {
 		}
 	}
 }
+
+// TestTransformPinsStaticScriptMarkerOnBlockedFragmentSrc characterizes the
+// EXACT current data-zp-static-script marker behavior for a script whose src is a
+// bare fragment. rewriteToken aliases tok.Attr's backing array (attrs :=
+// tok.Attr[:0]); the blocked-src branch appends data-zp-blocked-url OVER the src
+// slot, so the post-loop attr(tok,"src") read returns "" and the marker is added
+// EVEN THOUGH a src attribute was present in the input. This is an aliasing
+// artifact, but it is the current behavior consumed by runtime-prelude.js
+// (data-zp-static-script handling). It is pinned here so any future refactor that
+// substitutes clean pre-loop snapshots — dropping the marker — is caught by the
+// suite, not just by the differential harness.
+func TestTransformPinsStaticScriptMarkerOnBlockedFragmentSrc(t *testing.T) {
+	target, _ := url.Parse("https://example.com/dir/page.html")
+	out, err := Transform(strings.NewReader(`<script type="" src="#frag"></script>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, RuntimeToken: "rt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	// The load-bearing facts (not the full serialization): the fragment src is
+	// blocked and backed up, AND the static-script marker is present even though a
+	// src was supplied. The marker is the value a snapshot refactor would drop.
+	for _, want := range []string{
+		`data-zp-static-script="1"`,      // marker present despite src in input
+		`src="/zp/error/POLICY_BLOCKED"`, // fragment src was blocked, not proxied
+		`data-zp-blocked-url="#frag"`,    // original fragment backed up
+		`nonce="zp"`,                     // executable script forced onto zp nonce
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("static-script marker behavior changed: missing %q in %s", want, s)
+		}
+	}
+	// The original bare src must not survive as an active fragment src.
+	if strings.Contains(s, `src="#frag"`) {
+		t.Fatalf("raw fragment src remained active in %s", s)
+	}
+}
