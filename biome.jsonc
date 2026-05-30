@@ -1,0 +1,123 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.16/schema.json",
+  // This config is .jsonc (not .json) on purpose: Biome escalates lint
+  // diagnostics to errors when a strict .json config carries comments, which
+  // would flip `biome ci` red. .jsonc is a first-class Biome config filename
+  // and lets the A.2 burn-down grep the inline TODO(ratchet) markers below.
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/bin",
+      "!rewriter-rs/target",
+      "!package-lock.json",
+      // generated wasm glue / loaders — not hand-authored source
+      "!web/oxc-parser.js",
+      "!web/wasm_exec.js",
+      "!web/oxc_parser_wasm_bg.wasm",
+      "!**/*.wasm"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "a11y": {
+        // TODO(ratchet): re-enable in A.2. 1 violation in web/index.html
+        // (membrane HTML this workstream must not edit).
+        "useButtonType": "off"
+      },
+      "complexity": {
+        // TODO(ratchet): re-enable in A.2 after the complexity burn-down.
+        // OFF by A.1 design — the cognitive-complexity gate is deferred to A.2.
+        "noExcessiveCognitiveComplexity": "off"
+      },
+      "correctness": {
+        // TODO(ratchet): re-enable in A.2. ~16 violations in
+        // web/runtime-prelude.js (membrane; widespread).
+        "noInnerDeclarations": "off"
+      },
+      "suspicious": {
+        // TODO(ratchet): re-enable in A.2. 5 violations across
+        // web/runtime-prelude.js (membrane) and test/e2e/proxy.test.js.
+        "noAssignInExpressions": "off",
+        // TODO(ratchet): re-enable in A.2. 1 violation in membrane
+        // web/runtime-prelude.js.
+        "noRedeclare": "off",
+        // TODO(ratchet): re-enable in A.2. 4 violations in membrane
+        // runtime-prelude.js / worker-prelude.js (intentional toString masking).
+        "noShadowRestrictedNames": "off",
+        // TODO(ratchet): re-enable in A.2. 1 violation in membrane
+        // web/runtime-prelude.js.
+        "useIterableCallbackReturn": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    },
+    // ZP + Go are project globals. Browser/serviceworker/webworker identifiers
+    // are NOT enumerated here: Biome 2.x has no ESLint-style env presets and
+    // noUndeclaredVariables is not in the recommended set, so they cannot fire.
+    // Known limitation — if A.2 enables noUndeclaredVariables, enumerate them.
+    "globals": ["ZP", "Go"]
+  },
+  "overrides": [
+    {
+      // Membrane JS (web/runtime-prelude.js, web/sw.js, web/worker-prelude.js
+      // et al.): formatter disabled so `biome ci` never reformats them — that
+      // collides with later refactor workstreams. Linting still applies.
+      "includes": ["web/**"],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
+      // Node build/test surface: add Node.js globals.
+      "includes": ["test/**", "scripts/**"],
+      "javascript": {
+        "globals": [
+          "ZP",
+          "Go",
+          "process",
+          "require",
+          "module",
+          "exports",
+          "__dirname",
+          "__filename",
+          "Buffer",
+          "global",
+          "console",
+          "setTimeout",
+          "clearTimeout",
+          "setInterval",
+          "clearInterval",
+          "setImmediate",
+          "clearImmediate"
+        ]
+      }
+    }
+  ]
+}

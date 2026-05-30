@@ -14,6 +14,7 @@
     "test:e2e": "node scripts/test.mjs e2e"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
     "esbuild": "^0.28.0",
     "jquery": "^3.7.1",
     "puppeteer": "^25.0.4"

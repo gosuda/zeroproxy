@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
-const read = path => fs.readFileSync(path, 'utf8');
+const read = (path) => fs.readFileSync(path, 'utf8');
 
 test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
   const rt = read('web/runtime-prelude.js');
@@ -13,13 +13,29 @@ test('window fetch, XHR, and EventSource route through runtime transport shims',
   assert.ok(rt.includes('ZPEventSource'));
   assert.ok(rt.includes("ZP.apiPath('fetch')"));
   assert.match(rt, /Native\.fetch\(ZP\.apiPath\('fetch'\)/);
-  for (const needle of ['X-ZP-Fetch-Credentials', 'X-ZP-Fetch-Redirect', 'X-ZP-Fetch-Referrer', 'sendSyncXHR', 'ProgressEvent']) {
+  for (const needle of [
+    'X-ZP-Fetch-Credentials',
+    'X-ZP-Fetch-Redirect',
+    'X-ZP-Fetch-Referrer',
+    'sendSyncXHR',
+    'ProgressEvent',
+  ]) {
     assert.ok(rt.includes(needle), `missing ${needle}`);
   }
-  for (const needle of ['Object.defineProperties(ZPXMLHttpRequest', 'DONE: { value: DONE', "value: 'XMLHttpRequest'"]) {
+  for (const needle of [
+    'Object.defineProperties(ZPXMLHttpRequest',
+    'DONE: { value: DONE',
+    "value: 'XMLHttpRequest'",
+  ]) {
     assert.ok(rt.includes(needle), `missing ${needle}`);
   }
-  for (const needle of ['X-ZP-Response-URL', 'X-ZP-Response-Redirected', 'responseFacade', 'filteredResponseHeaders', 'opaqueResponseFacade']) {
+  for (const needle of [
+    'X-ZP-Response-URL',
+    'X-ZP-Response-Redirected',
+    'responseFacade',
+    'filteredResponseHeaders',
+    'opaqueResponseFacade',
+  ]) {
     assert.ok(rt.includes(needle), `missing ${needle}`);
   }
 });
@@ -54,13 +70,13 @@ test('runtime preactivates p routes and masks navigator identity', () => {
   assert.match(rt, /Native\.locationAssign\(path\)/);
   assert.ok(rt.includes('Chrome/134.0.0.0 Safari/537.36'));
   assert.ok(rt.includes("const TARGET_PLATFORM = 'Win32'"));
-  assert.ok(rt.includes("const TARGET_UA_BRANDS"));
+  assert.ok(rt.includes('const TARGET_UA_BRANDS'));
   assert.ok(rt.includes("defineAccessor(proto, 'userAgentData'"));
   assert.ok(rt.includes("platformVersion: '10.0.0'"));
   assert.match(rt, /installNavigatorIdentity/);
   assert.ok(worker.includes('Chrome/134.0.0.0 Safari/537.36'));
-  assert.ok(worker.includes("userAgentData"));
-  assert.ok(worker.includes("fullVersionList"));
+  assert.ok(worker.includes('userAgentData'));
+  assert.ok(worker.includes('fullVersionList'));
 });
 
 test('service worker owns native request capture, CORS, and context recovery', () => {
@@ -74,7 +90,8 @@ test('service worker owns native request capture, CORS, and context recovery', (
     'contextFromURL',
     'scriptRequestContext',
     'ZP_BASE_UPDATE',
-  ]) assert.ok(sw.includes(needle), `missing ${needle}`);
+  ])
+    assert.ok(sw.includes(needle), `missing ${needle}`);
   assert.equal(sw.includes('firstTab'), false);
   assert.equal(sw.includes('defaultContext'), false);
   assert.match(sw, /url\.protocol === 'http:' \|\| url\.protocol === 'https:'/);

@@ -11,14 +11,27 @@ const outRoot = path.resolve(repoRoot, args.out || 'dist');
 const webSrc = path.join(repoRoot, 'web');
 const webOut = path.join(outRoot, 'web');
 const kernelOut = path.join(outRoot, 'kernel.wasm');
-const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
+const serverOut = path.join(
+  outRoot,
+  process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server',
+);
 const cargoHome = process.env.CARGO_HOME || path.join(process.env.HOME || '', '.cargo');
-const cargoBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
-const wasmBindgenBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen');
+const cargoBinPath = path.join(
+  cargoHome,
+  'bin',
+  process.platform === 'win32' ? 'cargo.exe' : 'cargo',
+);
+const wasmBindgenBinPath = path.join(
+  cargoHome,
+  'bin',
+  process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen',
+);
 const minify = args.minify === true;
 
 if (args.help) {
-  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --kernel-only     Build only the Go WASM kernel\n  --server-only     Build only the relay server\n  --skip-web        Do not build browser assets\n  --skip-kernel     Do not build the Go WASM kernel\n  --skip-server     Do not build the relay server\n  --minify          Minify bundled JavaScript\n  --no-clean        Keep existing output files not overwritten by this run\n`);
+  process.stdout.write(
+    `Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --kernel-only     Build only the Go WASM kernel\n  --server-only     Build only the relay server\n  --skip-web        Do not build browser assets\n  --skip-kernel     Do not build the Go WASM kernel\n  --skip-server     Do not build the relay server\n  --minify          Minify bundled JavaScript\n  --no-clean        Keep existing output files not overwritten by this run\n`,
+  );
   process.exit(0);
 }
 
@@ -102,18 +115,29 @@ async function buildWeb() {
 
   await copyFile(path.join(webSrc, 'index.html'), path.join(webOut, 'index.html'));
   await copyOptional(path.join(webSrc, 'favicon.ico'), path.join(webOut, 'favicon.ico'));
-  await copyOptional(path.join(webSrc, 'manifest.webmanifest'), path.join(webOut, 'manifest.webmanifest'));
+  await copyOptional(
+    path.join(webSrc, 'manifest.webmanifest'),
+    path.join(webOut, 'manifest.webmanifest'),
+  );
 
   await writeBundled('zp-core.js', [await readSource('zp-core.js')]);
   await writeBundled('runtime-prelude.js', [await readSource('runtime-prelude.js')]);
   await writeBundled('rust-rewriter.js', [rustRewriter]);
   await writeBundled('wasm_exec.js', [goWasmExec]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
-  await writeBundled('sw.js', [await readSource('zp-core.js'), rustRewriter, goWasmExec, serviceWorker]);
+  await writeBundled('sw.js', [
+    await readSource('zp-core.js'),
+    rustRewriter,
+    goWasmExec,
+    serviceWorker,
+  ]);
 }
 
 function buildKernel() {
-  run('go', ['build', '-trimpath', '-o', kernelOut, './cmd/wasm-kernel'], { GOOS: 'js', GOARCH: 'wasm' });
+  run('go', ['build', '-trimpath', '-o', kernelOut, './cmd/wasm-kernel'], {
+    GOOS: 'js',
+    GOARCH: 'wasm',
+  });
 }
 
 function buildServer() {
@@ -125,7 +149,7 @@ async function readSource(name) {
 }
 
 async function writeBundled(fileName, parts) {
-  const source = parts.map(part => String(part).trimEnd()).join('\n;\n') + '\n';
+  const source = parts.map((part) => String(part).trimEnd()).join('\n;\n') + '\n';
   const result = await esbuild.transform(source, {
     charset: 'utf8',
     legalComments: 'none',
@@ -137,7 +161,10 @@ async function writeBundled(fileName, parts) {
 }
 
 function stripServiceWorkerImports(source) {
-  return source.replace(/^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|wasm_exec)\.js'\);\n/gm, '');
+  return source.replace(
+    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|wasm_exec)\.js'\);\n/gm,
+    '',
+  );
 }
 
 function stripWorkerPreludeImports(source) {
@@ -147,13 +174,28 @@ function stripWorkerPreludeImports(source) {
 async function makeRustRewriterClassic() {
   const crateDir = path.join(repoRoot, 'rewriter-rs');
   const targetDir = path.join(crateDir, 'target');
-  run(cargoBinPath, ['build', '--manifest-path', path.join(crateDir, 'Cargo.toml'), '--target', 'wasm32-unknown-unknown', '--release']);
+  run(cargoBinPath, [
+    'build',
+    '--manifest-path',
+    path.join(crateDir, 'Cargo.toml'),
+    '--target',
+    'wasm32-unknown-unknown',
+    '--release',
+  ]);
   const bindgenOut = path.join(targetDir, 'wasm-bindgen');
   await rm(bindgenOut, { recursive: true, force: true });
   await mkdir(bindgenOut, { recursive: true });
-  run(wasmBindgenBinPath, ['--target', 'no-modules', '--out-dir', bindgenOut, path.join(targetDir, 'wasm32-unknown-unknown', 'release', 'zp_rewriter.wasm')]);
+  run(wasmBindgenBinPath, [
+    '--target',
+    'no-modules',
+    '--out-dir',
+    bindgenOut,
+    path.join(targetDir, 'wasm32-unknown-unknown', 'release', 'zp_rewriter.wasm'),
+  ]);
   const js = await readFile(path.join(bindgenOut, 'zp_rewriter.js'), 'utf8');
-  const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString('base64');
+  const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString(
+    'base64',
+  );
   return `/* Generated from Rust WASM ZeroProxy rewriter. */\n${js}\n(() => {\nconst VERSION = 'phase3-rust-wasm-ast-3-css';\nconst BLOCK_CODE = \"throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\";\nconst __zp_rust_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));\nwasm_bindgen.initSync({ module: __zp_rust_bytes });\nfunction normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }\nfunction lowLevel(source, kind, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_script(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction lowLevelCSS(source, baseUrl, controlPrefix) { const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction publicOk(code) { return { ok: true, code, diagnostics: [] }; }\nfunction publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }\nfunction rewriteScriptPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevel(source, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteCSSPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; const out = lowLevelCSS(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const end = out.code.length - suffix.length; if (end < prefix.length) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: out.code.slice(prefix.length, end), error: '' }; }\nfunction rewriteFunctionBodyPublic(source, params, targetUrl, controlPrefix) { const out = rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nconst rustApi = Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix) { return lowLevel(source, kind, targetUrl, controlPrefix); }, rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); }, rewriteFunctionBody: rewriteFunctionBodyRaw });\nconst rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteScript: rewriteScriptPublic, rewriteCSS: rewriteCSSPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });\nObject.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });\nObject.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });\n})();\n`;
 }
 async function readGoWasmExec() {
@@ -169,7 +211,11 @@ async function readGoWasmExec() {
 }
 
 function goEnv(name) {
-  const result = spawnSync('go', ['env', name], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = spawnSync('go', ['env', name], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   if (result.status !== 0) throw new Error(`go env ${name} failed\n${result.stderr}`);
   return result.stdout.trim();
 }
@@ -181,7 +227,8 @@ function run(cmd, argv, extraEnv = {}) {
     env: { ...process.env, ...extraEnv },
     stdio: 'inherit',
   });
-  if (result.status !== 0) throw new Error(`${cmd} ${argv.join(' ')} failed with exit code ${result.status}`);
+  if (result.status !== 0)
+    throw new Error(`${cmd} ${argv.join(' ')} failed with exit code ${result.status}`);
 }
 
 function resolveNodeModule(specifier) {

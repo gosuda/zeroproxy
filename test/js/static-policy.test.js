@@ -26,27 +26,60 @@ test('runtime membrane uses captured native WeakMap lookup for raw unwrapping', 
 
 test('runtime dynamic constructor descriptors stay assignable for app bundles', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.match(rt, /ctor\.prototype,\s*'constructor',\s*\{\s*value: wrapper,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/);
-  assert.match(rt, /childFunction\.prototype,\s*'constructor',\s*\{\s*value: root\.Function,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/);
-  assert.equal(rt.includes("ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: false }"), false);
-  assert.equal(rt.includes("childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }"), false);
+  assert.match(
+    rt,
+    /ctor\.prototype,\s*'constructor',\s*\{\s*value: wrapper,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/,
+  );
+  assert.match(
+    rt,
+    /childFunction\.prototype,\s*'constructor',\s*\{\s*value: root\.Function,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/,
+  );
+  assert.equal(
+    rt.includes(
+      "ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: false }",
+    ),
+    false,
+  );
+  assert.equal(
+    rt.includes(
+      "childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }",
+    ),
+    false,
+  );
 });
 
 test('runtime dynamic eval uses one native-scoped path without rewritten fallback', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.ok(rt.includes('eval: w.eval'), 'native eval capture is required for strict app-bundle compatibility');
-  assert.ok(rt.includes('return runScopedNativeEval(String(source));'), 'dynamic eval must use the single scoped eval path');
-  assert.ok(rt.includes("(0, Native.eval)('with(__ZP_EVAL_SCOPE){' + expr + '\\n}')"), 'scoped eval must preserve native eval semantics');
-  assert.equal(rt.includes('return compileEvalSource(text).call(root, scope);'), false, 'dynamic eval must not fall back to rewritten Function compilation');
-  assert.equal(rt.includes('function compileEvalSource'), false, 'dynamic eval fallback compiler must not exist');
+  assert.ok(
+    rt.includes('eval: w.eval'),
+    'native eval capture is required for strict app-bundle compatibility',
+  );
+  assert.ok(
+    rt.includes('return runScopedNativeEval(String(source));'),
+    'dynamic eval must use the single scoped eval path',
+  );
+  assert.ok(
+    rt.includes("(0, Native.eval)('with(__ZP_EVAL_SCOPE){' + expr + '\\n}')"),
+    'scoped eval must preserve native eval semantics',
+  );
+  assert.equal(
+    rt.includes('return compileEvalSource(text).call(root, scope);'),
+    false,
+    'dynamic eval must not fall back to rewritten Function compilation',
+  );
+  assert.equal(
+    rt.includes('function compileEvalSource'),
+    false,
+    'dynamic eval fallback compiler must not exist',
+  );
 });
 
 test('runtime reads boot config from self-removing prelude state', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   assert.ok(rt.includes('root.__ZP_BOOT'));
-  assert.ok(rt.includes("delete root.__ZP_BOOT"));
-  assert.ok(tx.includes("document.currentScript.remove()"));
+  assert.ok(rt.includes('delete root.__ZP_BOOT'));
+  assert.ok(tx.includes('document.currentScript.remove()'));
   assert.equal(tx.includes('id=__zp-boot'), false);
   assert.equal(rt.includes("getElementById('__zp-boot')"), false);
 });
@@ -126,7 +159,7 @@ test('runtime installs required escape-vector hooks', () => {
     'workerBlobURLMap.get(parsed.href)',
     "params.set('loc', requestTargetURL(raw))",
     "Object.defineProperty(URL, 'createObjectURL'",
-    "try { Native.revokeObjectURL(raw); } catch {}",
+    'try { Native.revokeObjectURL(raw); } catch {}',
     'dataWorkerURL',
     'rewriteDynamicFunctionBody',
     'configurable: true',
@@ -161,9 +194,10 @@ test('runtime installs required escape-vector hooks', () => {
     'frameSandboxAllowsEscape',
     'setFrameSandboxAttribute',
     'sanitizeFrameSandbox',
-    'Object, \'getPrototypeOf\'',
-    'Reflect, \'getPrototypeOf\'',
-  ]) assert.ok(rt.includes(needle), `missing ${needle}`);
+    "Object, 'getPrototypeOf'",
+    "Reflect, 'getPrototypeOf'",
+  ])
+    assert.ok(rt.includes(needle), `missing ${needle}`);
   for (const needle of [
     'makeWorkerLocationFacade',
     "Object.defineProperty(self, 'location'",
@@ -172,40 +206,90 @@ test('runtime installs required escape-vector hooks', () => {
     'maskNativeFunction',
     "maskNativeFunction(self.fetch, 'fetch')",
     "maskNativeFunction(self.importScripts, 'importScripts')",
-  ]) assert.ok(worker.includes(needle), `missing worker ${needle}`);
+  ])
+    assert.ok(worker.includes(needle), `missing worker ${needle}`);
 });
 
 test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module URLs', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.equal(rt.includes('fallbackRewritePageSource'), false, 'page script rewriting must not use a regex fallback');
-  assert.ok(rt.includes("if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');"));
+  assert.equal(
+    rt.includes('fallbackRewritePageSource'),
+    false,
+    'page script rewriting must not use a regex fallback',
+  );
+  assert.ok(
+    rt.includes(
+      "if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');",
+    ),
+  );
   const start = rt.indexOf('function scriptProxyPath(target, kind)');
   const end = rt.indexOf('function setScriptSource', start);
   const body = rt.slice(start, end);
   assert.ok(body.includes("if (kind !== 'module')"), 'module proxy URLs must stay canonical');
-  assert.ok(body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('ref'"), 'ref/rp must not be part of module identity');
-  assert.ok(body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('tab'"), 'runtime tab token must not be part of module identity');
+  assert.ok(
+    body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('ref'"),
+    'ref/rp must not be part of module identity',
+  );
+  assert.ok(
+    body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('tab'"),
+    'runtime tab token must not be part of module identity',
+  );
 });
 
 test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.ok(rt.includes('requestedOrigin === frameOrigin'), 'postMessage does not recognize proxied frame origins');
-  assert.ok(rt.includes('if (frameOrigin && requestedOrigin === frameOrigin) return proxyOrigin;'), 'postMessage does not map proxied frame targetOrigin to proxy origin');
-  assert.ok(rt.includes('return new MessageEvent(ev.type, { data: ev.data, origin'), 'message origin virtualization must synthesize a MessageEvent before falling back to own origin override');
-  assert.ok(rt.indexOf('return new MessageEvent(ev.type') < rt.indexOf("Object.defineProperty(ev, 'origin'"), 'message origin virtualization must avoid own-origin override as the first path');
-  assert.ok(!rt.includes("u.hostname === 'challenges.cloudflare.com') return u.origin"), 'Cloudflare targetOrigin must not bypass proxied iframe origin mapping');
+  assert.ok(
+    rt.includes('requestedOrigin === frameOrigin'),
+    'postMessage does not recognize proxied frame origins',
+  );
+  assert.ok(
+    rt.includes('if (frameOrigin && requestedOrigin === frameOrigin) return proxyOrigin;'),
+    'postMessage does not map proxied frame targetOrigin to proxy origin',
+  );
+  assert.ok(
+    rt.includes('return new MessageEvent(ev.type, { data: ev.data, origin'),
+    'message origin virtualization must synthesize a MessageEvent before falling back to own origin override',
+  );
+  assert.ok(
+    rt.indexOf('return new MessageEvent(ev.type') <
+      rt.indexOf("Object.defineProperty(ev, 'origin'"),
+    'message origin virtualization must avoid own-origin override as the first path',
+  );
+  assert.ok(
+    !rt.includes("u.hostname === 'challenges.cloudflare.com') return u.origin"),
+    'Cloudflare targetOrigin must not bypass proxied iframe origin mapping',
+  );
 });
 
 test('service worker waits for initialized WASM transport and cookie bridge', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   assert.ok(sw.includes('__zp_kernel_init'), 'service worker does not require transport init');
-  assert.match(sw, /^importScripts\('\/zp\/assets\/wasm_exec\.js'\);/m, 'wasm_exec must be imported during service worker installation');
-  assert.ok(sw.includes('__zp_cookie_set'), 'service worker does not bridge document.cookie to kernel jar');
-  assert.ok(sw.includes('runtimeTabForMessage'), 'service worker does not gate runtime messages by tab');
-  assert.ok(sw.includes('runtimeMessageAuthorized'), 'service worker does not validate runtime capability tokens');
-  assert.ok(sw.includes('runtimeToken: ZP.randomId'), 'service worker does not generate runtime capability tokens');
-  assert.ok(sw.includes('X-ZP-Runtime-Token'), 'service worker does not pass runtime capability to documents');
+  assert.match(
+    sw,
+    /^importScripts\('\/zp\/assets\/wasm_exec\.js'\);/m,
+    'wasm_exec must be imported during service worker installation',
+  );
+  assert.ok(
+    sw.includes('__zp_cookie_set'),
+    'service worker does not bridge document.cookie to kernel jar',
+  );
+  assert.ok(
+    sw.includes('runtimeTabForMessage'),
+    'service worker does not gate runtime messages by tab',
+  );
+  assert.ok(
+    sw.includes('runtimeMessageAuthorized'),
+    'service worker does not validate runtime capability tokens',
+  );
+  assert.ok(
+    sw.includes('runtimeToken: ZP.randomId'),
+    'service worker does not generate runtime capability tokens',
+  );
+  assert.ok(
+    sw.includes('X-ZP-Runtime-Token'),
+    'service worker does not pass runtime capability to documents',
+  );
   assert.ok(kernel.includes('js.Global().Set("__zp_kernel_init"'), 'kernel init export missing');
   assert.ok(kernel.includes('js.Global().Set("__zp_cookie_set"'), 'kernel cookie export missing');
   assert.ok(kernel.includes('Target host:'), 'kernel error page does not expose target host');
@@ -221,11 +305,11 @@ test('service worker response wrappers force nosniff', () => {
 test('phase 3 script rewriting pipeline is fail-closed', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-	  const core = fs.readFileSync('web/zp-core.js', 'utf8');
-	  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
-	  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
-	  const index = fs.readFileSync('web/index.html', 'utf8');
-	  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  const index = fs.readFileSync('web/index.html', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
   assert.ok(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"));
   assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
   assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
@@ -253,22 +337,22 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.match(rt, /setNamedItemNS/);
   assert.match(rt, /Attr\.prototype/);
   assert.equal(/connect-src\s+\*/.test(core), false);
-  assert.ok(core.includes("connect-src "));
-	  assert.equal(/script-src \*/.test(core), false);
-	  assert.equal(/script-src \*/.test(server), false);
-	  assert.ok(core.includes("'unsafe-eval'"));
-	  assert.equal(server.includes("'unsafe-eval'"), false);
-	  assert.ok(core.includes("'wasm-unsafe-eval'"));
-	  assert.ok(index.includes("'wasm-unsafe-eval'"));
-	  assert.ok(core.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
-	  assert.ok(core.includes("allowDynamicCompile"));
-	  assert.ok(index.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
-	  assert.ok(server.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
-	  assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
-	  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js/);
-	  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js/);
-	  assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
-	  assert.match(server, /connect-src 'self'/);
+  assert.ok(core.includes('connect-src '));
+  assert.equal(/script-src \*/.test(core), false);
+  assert.equal(/script-src \*/.test(server), false);
+  assert.ok(core.includes("'unsafe-eval'"));
+  assert.equal(server.includes("'unsafe-eval'"), false);
+  assert.ok(core.includes("'wasm-unsafe-eval'"));
+  assert.ok(index.includes("'wasm-unsafe-eval'"));
+  assert.ok(core.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
+  assert.ok(core.includes('allowDynamicCompile'));
+  assert.ok(index.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
+  assert.ok(server.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
+  assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
+  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js/);
+  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js/);
+  assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
+  assert.match(server, /connect-src 'self'/);
   assert.equal(core.includes('navigate-to'), false);
   assert.equal(server.includes('navigate-to'), false);
   assert.equal(sw.includes('MAX_REQUEST_BODY_BYTES'), false);
@@ -280,18 +364,34 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(sw.includes('scriptRequestContext'));
   assert.equal(/url\.pathname === '\/zp\/api\/fetch'[\s\S]{0,240}firstTab\(\)/.test(sw), false);
   assert.equal(sw.includes('firstTab'), false);
-  assert.ok(rt.includes("root.open(nav.href, nav.target)"));
-  assert.ok(rt.includes("data-zp-blocked-target"));
+  assert.ok(rt.includes('root.open(nav.href, nav.target)'));
+  assert.ok(rt.includes('data-zp-blocked-target'));
   const bridge = fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8');
   assert.ok(bridge.includes('getReader'));
   assert.ok(bridge.includes('X-ZP-Upload-Replayable'));
-  assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
+  assert.ok(
+    fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'),
+  );
   assert.ok(server.includes('closeBoth'));
 });
 
 test('service worker names every required safe error class', () => {
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
-  for (const code of ['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED']) {
+  for (const code of [
+    'BAD_HMAC',
+    'INVALID_SHARE_LINK',
+    'MALFORMED_ROUTE',
+    'SW_NOT_READY',
+    'TARGET_PROTOCOL_BLOCKED',
+    'TLS_CERTIFICATE_INVALID',
+    'TLS_HANDSHAKE_FAILED',
+    'TARGET_CONNECT_FAILED',
+    'MALFORMED_HTML',
+    'REALM_INJECTION_FAILURE',
+    'REQUEST_BODY_TOO_LARGE',
+    'SUBMISSION_EXPIRED',
+    'POLICY_BLOCKED',
+  ]) {
     assert.ok(core.includes(code), `missing ${code}`);
   }
 });
