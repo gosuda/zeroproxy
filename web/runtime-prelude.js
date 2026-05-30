@@ -94,8 +94,14 @@
       insertBefore: w.Node.prototype.insertBefore,
       replaceChild: w.Node.prototype.replaceChild,
       setAttribute: w.Element.prototype.setAttribute,
+      setAttributeNode: w.Element.prototype.setAttributeNode,
+      setAttributeNodeNS: w.Element.prototype.setAttributeNodeNS,
+      getAttributeNode: w.Element.prototype.getAttributeNode,
+      getAttributeNodeNS: w.Element.prototype.getAttributeNodeNS,
+      removeAttributeNode: w.Element.prototype.removeAttributeNode,
       getAttribute: w.Element.prototype.getAttribute,
       removeAttribute: w.Element.prototype.removeAttribute,
+      removeAttributeNS: w.Element.prototype.removeAttributeNS,
       hasAttribute: w.Element.prototype.hasAttribute,
       getAttributeNames: w.Element.prototype.getAttributeNames,
       insertAdjacentHTML: w.Element.prototype.insertAdjacentHTML,
@@ -104,7 +110,9 @@
       elementAttributes: Object.getOwnPropertyDescriptor(w.Element.prototype, 'attributes'),
       setAttributeNS: w.Element.prototype.setAttributeNS,
       namedSetNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItem,
+      namedSetNamedItemNS: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItemNS,
       attrValue: w.Attr && Object.getOwnPropertyDescriptor(w.Attr.prototype, 'value'),
+      attrNodeValue: w.Attr && (Object.getOwnPropertyDescriptor(w.Attr.prototype, 'nodeValue') || Object.getOwnPropertyDescriptor(w.Node.prototype, 'nodeValue')),
       matches: w.Element.prototype.matches,
       closest: w.Element.prototype.closest,
       querySelector: w.Document.prototype.querySelector,
@@ -1878,9 +1886,23 @@
     if (ns !== undefined && Native.setAttributeNS) return Native.setAttributeNS.call(el, ns, name, value);
     return Native.setAttribute.call(el, name, value);
   }
+  function svgFragmentResourceTarget(el, attrName, value) {
+    if (!el || el.namespaceURI !== 'http://www.w3.org/2000/svg' || attrLocalName(attrName) !== 'href') return '';
+    const raw = String(value || '').trim();
+    if (!raw || raw[0] !== '#') return '';
+    const previous = urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url') || '';
+    if (!previous) return '';
+    try {
+      const next = new URL(previous);
+      next.hash = raw;
+      return next.href;
+    } catch { return ''; }
+  }
   function setResourceURLAttribute(el, attrName, raw, ns) {
     const value = raw == null ? '' : String(raw);
-    let target = proxiedFetchTarget(value);
+    const svgFragmentTarget = svgFragmentResourceTarget(el, attrName, value);
+    if (!svgFragmentTarget && el && el.namespaceURI === 'http://www.w3.org/2000/svg' && attrLocalName(attrName) === 'href' && String(value).trim().startsWith('#')) return writeAttr(el, ns, attrName, value);
+    let target = svgFragmentTarget || proxiedFetchTarget(value);
     if (!target) {
       if (hasDangerousURLScheme(value)) return blockExecutableURL(el, attrLocalName(attrName), value);
       if (!isHTTPURL(value)) return writeAttr(el, ns, attrName, value);
@@ -2351,6 +2373,55 @@
     return Native.setAttribute.call(el, attrName, '_self');
   }
   function isZPAttrName(name) { return String(name || '').toLowerCase().startsWith('data-zp-'); }
+  function oldAttributeNode(owner, attr) {
+    if (!owner || !attr) return null;
+    try {
+      if (attr.namespaceURI && owner.getAttributeNodeNS) return owner.getAttributeNodeNS(attr.namespaceURI, attr.localName || attr.name);
+      if (owner.getAttributeNode) return owner.getAttributeNode(attr.name);
+    } catch {}
+    return null;
+  }
+  function blockEventAttributeNode(owner, attr) {
+    if (!owner || !attr) return null;
+    const name = String(attr.name || '').toLowerCase();
+    const old = oldAttributeNode(owner, attr);
+    Native.setAttribute.call(owner, 'data-zp-blocked-' + name, String(attr.value || ''));
+    try { if (Native.removeAttribute) Native.removeAttribute.call(owner, attr.name); } catch {}
+    return old;
+  }
+  function setNamedAttributeNode(owner, raw, attr, ns) {
+    if (!attr) return ns && Native.namedSetNamedItemNS ? Native.namedSetNamedItemNS.call(raw, attr) : Native.namedSetNamedItem.call(raw, attr);
+    const name = String(attr.name || '').toLowerCase();
+    if (owner && name.startsWith('on') && name.length > 2) return blockEventAttributeNode(owner, attr);
+    const ret = ns && Native.namedSetNamedItemNS ? Native.namedSetNamedItemNS.call(raw, attr) : Native.namedSetNamedItem.call(raw, attr);
+    if (owner) enforceAttributeNodeOwner(owner, attr);
+    return ret;
+  }
+  function removeNamedAttributeNode(owner, raw, name, ns) {
+    const local = String(name || '').toLowerCase();
+    if (isZPAttrName(local)) return null;
+    const ret = ns !== undefined && raw.removeNamedItemNS ? raw.removeNamedItemNS(ns, name) : raw.removeNamedItem(name);
+    cleanupRemovedAttribute(owner, local);
+    return ret;
+  }
+  function cleanupRemovedAttribute(owner, key) {
+    const local = attrLocalName(key);
+    if (!owner || !local) return;
+    if (isResourceURLAttribute(owner, local) || isURLBearing(owner, local)) {
+      urlMeta.delete(owner);
+      try { Native.removeAttribute.call(owner, 'data-zp-target-url'); } catch {}
+    }
+    if (isSrcsetAttribute(owner, local)) {
+      try { Native.removeAttribute.call(owner, 'data-zp-target-srcset'); } catch {}
+    }
+  }
+  function enforceAttributeNodeOwner(owner, attr) {
+    if (!owner || !attr) return;
+    const key = String(attr.name || '').toLowerCase();
+    if (!key) return;
+    if (key.startsWith('on') && key.length > 2) { blockEventAttributeNode(owner, attr); return; }
+    enforceObservedAttribute(owner, key);
+  }
   function isZeroProxyAssetURL(raw) {
     if (!raw) return false;
     try {
@@ -2363,10 +2434,35 @@
     if (node.id === '__zp-boot') return true;
     return node.localName === 'script' && isZeroProxyAssetURL(Native.getAttribute.call(node, 'src'));
   }
-  function filteredNamedNodeMap(raw) {
-    return filteredCollection(raw, attr => attr && !isZPAttrName(attr.name));
+  function filteredNamedNodeMap(raw, owner) {
+    const visible = attr => attr && !isZPAttrName(attr.name);
+    const findNamed = name => {
+      const lower = String(name || '').toLowerCase();
+      if (isZPAttrName(lower)) return null;
+      for (let i = 0; raw && i < raw.length; i++) if (raw[i] && String(raw[i].name).toLowerCase() === lower && visible(raw[i])) return raw[i];
+      return null;
+    };
+    const findNamedNS = (ns, name) => {
+      const local = String(name || '').toLowerCase();
+      if (isZPAttrName(local)) return null;
+      for (let i = 0; raw && i < raw.length; i++) {
+        const attr = raw[i];
+        if (!visible(attr)) continue;
+        if (String(attr.localName || attr.name || '').toLowerCase() === local && String(attr.namespaceURI || '') === String(ns || '')) return attr;
+      }
+      return null;
+    };
+    return filteredCollection(raw, visible, {
+      getNamedItem: name => findNamed(name),
+      getNamedItemNS: (ns, name) => findNamedNS(ns, name),
+      setNamedItem: attr => setNamedAttributeNode(owner, raw, attr, false),
+      setNamedItemNS: attr => setNamedAttributeNode(owner, raw, attr, true),
+      removeNamedItem: name => removeNamedAttributeNode(owner, raw, name, undefined),
+      removeNamedItemNS: (ns, name) => removeNamedAttributeNode(owner, raw, name, ns),
+      item: index => null,
+    });
   }
-  function filteredCollection(raw, predicate) {
+  function filteredCollection(raw, predicate, methods) {
     const nth = index => {
       let seen = 0;
       for (let i = 0; raw && i < raw.length; i++) {
@@ -2386,13 +2482,11 @@
     return new Proxy({}, {
       get(_target, prop) {
         if (prop === 'length') return length();
+        if (methods && Object.prototype.hasOwnProperty.call(methods, prop)) {
+          if (prop === 'item') return index => nth(Number(index) || 0);
+          return methods[prop];
+        }
         if (prop === 'item') return index => nth(Number(index) || 0);
-        if (prop === 'getNamedItem') return name => {
-          const lower = String(name || '').toLowerCase();
-          if (isZPAttrName(lower)) return null;
-          for (let i = 0; raw && i < raw.length; i++) if (raw[i] && String(raw[i].name).toLowerCase() === lower && predicate(raw[i])) return raw[i];
-          return null;
-        };
         if (prop === Symbol.iterator) return function*(){ for (let i = 0; i < length(); i++) yield nth(i); };
         if (/^(?:0|[1-9]\d*)$/.test(String(prop))) {
           const index = Number(prop);
@@ -2651,9 +2745,15 @@
           const t = targetURL(v);
           urlMeta.set(this, t);
           if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
+          if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
+            Native.setAttributeNS.call(this, ns, k, 'about:blank');
+            activatedFrameURL(t).then(u => { Native.setAttributeNS.call(this, ns, k, u); rememberFrameOrigin(this); }).catch(()=>{});
+            return;
+          }
           return Native.setAttributeNS.call(this, ns, k, usesRawURLAttribute(this, key) ? v : t);
         }
       }
+      if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));
 	      if (key.startsWith('on') && key.length > 2) {
 	        Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
 	        if (Native.removeAttributeNS) Native.removeAttributeNS.call(this, ns, k);
@@ -2661,8 +2761,38 @@
 	      }
 	      return Native.setAttributeNS.call(this, ns, k, v);
 	    });
-	    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return attr.ownerElement ? Native.setAttribute.call(attr.ownerElement, 'data-zp-blocked-' + String(attr.name).toLowerCase(), String(attr.value || '')) : null; return Native.namedSetNamedItem.call(this, attr); });
-	    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get() { const masked = visibleMaskedAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; }, set(v) { Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? '' : v); }, configurable: false }); } catch {}
+    if (Native.setAttributeNode) define(w.Element.prototype, 'setAttributeNode', function(attr) {
+      if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return blockEventAttributeNode(this, attr);
+      const ret = Native.setAttributeNode.call(this, attr);
+      enforceAttributeNodeOwner(this, attr);
+      return ret;
+    });
+    if (Native.setAttributeNodeNS) define(w.Element.prototype, 'setAttributeNodeNS', function(attr) {
+      if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return blockEventAttributeNode(this, attr);
+      const ret = Native.setAttributeNodeNS.call(this, attr);
+      enforceAttributeNodeOwner(this, attr);
+      return ret;
+    });
+    if (Native.getAttributeNode) define(w.Element.prototype, 'getAttributeNode', function(k) {
+      const key = String(k || '').toLowerCase();
+      if (isZPAttrName(key)) return null;
+      return Native.getAttributeNode.call(this, k);
+    });
+    if (Native.getAttributeNodeNS) define(w.Element.prototype, 'getAttributeNodeNS', function(ns, k) {
+      const key = String(k || '').toLowerCase();
+      if (isZPAttrName(key)) return null;
+      return Native.getAttributeNodeNS.call(this, ns, k);
+    });
+    if (Native.removeAttributeNode) define(w.Element.prototype, 'removeAttributeNode', function(attr) {
+      if (attr && isZPAttrName(attr.name)) return attr;
+      const ret = Native.removeAttributeNode.call(this, attr);
+      if (attr) cleanupRemovedAttribute(this, attr.name);
+      return ret;
+    });
+	    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { const ret = Native.namedSetNamedItem.call(this, attr); if (attr && attr.ownerElement) enforceAttributeNodeOwner(attr.ownerElement, attr); return ret; });
+	    if (Native.namedSetNamedItemNS && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItemNS', function(attr) { const ret = Native.namedSetNamedItemNS.call(this, attr); if (attr && attr.ownerElement) enforceAttributeNodeOwner(attr.ownerElement, attr); return ret; });
+	    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get() { const masked = visibleMaskedAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; }, set(v) { if (this.ownerElement) return this.ownerElement.setAttribute(this.name, v); Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? '' : v); }, configurable: false }); } catch {}
+	    if (Native.attrNodeValue && Native.attrNodeValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'nodeValue', { get() { const masked = visibleMaskedAttrValue(this); return masked === null ? Native.attrNodeValue.get.call(this) : masked; }, set(v) { if (this.ownerElement) return this.ownerElement.setAttribute(this.name, v); Native.attrNodeValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? '' : v); }, configurable: false }); } catch {}
     define(w.Element.prototype, 'getAttribute', function(k) {
       const key = String(k).toLowerCase();
       if (isZPAttrName(key)) return null;
@@ -2709,7 +2839,7 @@
       if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
       return names;
     });
-    if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this)); }, configurable: false }); } catch {}
+    if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
     installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
     installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     installScriptProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
@@ -2776,7 +2906,8 @@
     return '';
   }
   function scriptProxyPath(target, kind) {
-    return ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&tab=' + encodeURIComponent(boot.tabId) + '&rt=' + encodeURIComponent(runtimeToken);
+    const path = ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target);
+    return kind === 'module' ? path : path + '&tab=' + encodeURIComponent(boot.tabId) + '&rt=' + encodeURIComponent(runtimeToken);
   }
   function setScriptSource(el, raw) {
     const kind = executableScriptKindForElement(el);

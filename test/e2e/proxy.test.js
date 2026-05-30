@@ -987,24 +987,48 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
 
     const observed = document.createElement('iframe');
     document.body.appendChild(observed);
-    const attr = document.createAttribute('src');
-    attr.value = target;
-    observed.attributes.setNamedItem(attr);
-    const rewrittenSrc = await new Promise((resolve, reject) => {
+    const waitForRewrittenFrameSrc = (frame, label) => new Promise((resolve, reject) => {
       const deadline = Date.now() + 5000;
       (function poll() {
-        const current = observed.attributes.getNamedItem('src')?.value || '';
+        const current = frame.src || '';
         if (current.startsWith(location.origin + '/zp/p/')) { resolve(current); return; }
-        if (Date.now() > deadline) { reject(new Error(`src not rewritten: ${current}`)); return; }
+        if (Date.now() > deadline) { reject(new Error(`${label} src not rewritten: ${current}`)); return; }
         setTimeout(poll, 25);
       })();
     });
+    const attr = document.createAttribute('src');
+    attr.value = target;
+    observed.attributes.setNamedItem(attr);
+    const rewrittenSrc = await waitForRewrittenFrameSrc(observed, 'setNamedItem');
+
+    const nsFrame = document.createElement('iframe');
+    document.body.appendChild(nsFrame);
+    nsFrame.setAttributeNS(null, 'src', target);
+    const nsFrameSrc = await waitForRewrittenFrameSrc(nsFrame, 'setAttributeNS');
+
+    const nodeFrame = document.createElement('iframe');
+    document.body.appendChild(nodeFrame);
+    const nodeAttr = document.createAttribute('src');
+    nodeAttr.value = target;
+    nodeFrame.setAttributeNode(nodeAttr);
+    const nodeFrameSrc = await waitForRewrittenFrameSrc(nodeFrame, 'setAttributeNode');
+
+    const ownedAttrFrame = document.createElement('iframe');
+    document.body.appendChild(ownedAttrFrame);
+    const ownedAttr = document.createAttribute('src');
+    ownedAttr.value = 'about:blank';
+    ownedAttrFrame.setAttributeNode(ownedAttr);
+    ownedAttr.value = target;
+    const ownedAttrFrameSrc = await waitForRewrittenFrameSrc(ownedAttrFrame, 'owned Attr.value');
 
     sync.remove();
     modern.remove();
     docwrite.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, docwriteHTML, docwriteHelperType, docwriteInlineRan, rewrittenSrc };
+    nsFrame.remove();
+    nodeFrame.remove();
+    ownedAttrFrame.remove();
+    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, docwriteHTML, docwriteHelperType, docwriteInlineRan, rewrittenSrc, nsFrameSrc, nodeFrameSrc, ownedAttrFrameSrc };
   }, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
@@ -1012,6 +1036,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(iframeIsolation.websocketShared, true);
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
   assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
+  assert.match(iframeIsolation.nsFrameSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
+  assert.match(iframeIsolation.nodeFrameSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
+  assert.match(iframeIsolation.ownedAttrFrameSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionShared, true);
   assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);

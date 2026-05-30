@@ -381,6 +381,7 @@ func rewriteToken(tok xhtml.Token, opt Options) xhtml.Token {
 }
 
 func shouldRewriteAttr(tag, key string) bool {
+	key = attrLocalName(key)
 	switch key {
 	case "href":
 		return tag == "a" || tag == "area"
@@ -395,6 +396,7 @@ func shouldRewriteAttr(tag, key string) bool {
 }
 
 func shouldRewritePassiveAttr(tag, key string) bool {
+	key = attrLocalName(key)
 	switch key {
 	case "href":
 		return tag == "link" || tag == "image" || tag == "use"
@@ -407,7 +409,15 @@ func shouldRewritePassiveAttr(tag, key string) bool {
 }
 
 func shouldRewriteSrcsetAttr(tag, key string) bool {
+	key = attrLocalName(key)
 	return key == "srcset" && (tag == "img" || tag == "source")
+}
+
+func attrLocalName(key string) string {
+	if i := strings.IndexByte(key, ':'); i >= 0 {
+		return key[i+1:]
+	}
+	return key
 }
 
 func rewriteSrcset(raw string, opt Options) (rewritten, visible string, changed bool) {
@@ -587,8 +597,10 @@ func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string
 	q := url.Values{}
 	q.Set("u", abs.String())
 	q.Set("kind", kind)
-	q.Set("tab", opt.TabID)
-	q.Set("rt", opt.RuntimeToken)
+	if kind != "module" {
+		q.Set("tab", opt.TabID)
+		q.Set("rt", opt.RuntimeToken)
+	}
 	return shareurl.ControlPrefix + "api/script?" + q.Encode(), abs.String(), true
 }
 

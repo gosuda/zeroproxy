@@ -166,7 +166,12 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.equal(fs.existsSync('web/oxc_parser_wasm_bg.wasm'), false);
   assert.equal(fs.existsSync('web/wasm_exec.js'), false);
   assert.match(rt, /setAttributeNS/);
+  assert.match(rt, /setAttributeNode/);
+  assert.match(rt, /setAttributeNodeNS/);
+  assert.match(rt, /getAttributeNode/);
+  assert.match(rt, /removeAttributeNode/);
   assert.match(rt, /NamedNodeMap/);
+  assert.match(rt, /setNamedItemNS/);
   assert.match(rt, /Attr\.prototype/);
   assert.equal(/connect-src\s+\*/.test(core), false);
   assert.ok(core.includes("connect-src "));

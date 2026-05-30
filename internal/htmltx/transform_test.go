@@ -62,6 +62,46 @@ func TestTransformSuppressesIconLinksWithoutLosingVisibleTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestTransformRewritesSVGUseXLinkHref(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	out, err := Transform(strings.NewReader(`<html><body><svg><use xlink:href="/dist/symbols.svg#icon-a" href="/dist/symbols.svg#icon-a"></use></svg></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, `xlink:href="/dist/symbols.svg#icon-a"`) || strings.Contains(s, `href="/dist/symbols.svg#icon-a"`) {
+		t.Fatalf("raw SVG href remained in %s", s)
+	}
+	if got := strings.Count(s, `/zp/api/fetch?`); got != 2 {
+		t.Fatalf("proxied SVG href count = %d, want 2 in %s", got, s)
+	}
+	if !strings.Contains(s, `data-zp-target-url="https://example.com/dist/symbols.svg#icon-a"`) {
+		t.Fatalf("visible SVG target missing in %s", s)
+	}
+}
+
+func TestTransformKeepsModuleScriptURLStableForModuleGraph(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	out, err := Transform(strings.NewReader(`<html><body><script type="module" src="/assets/main.js"></script><script src="/assets/classic.js"></script></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, RuntimeToken: "rt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, `kind=module`) || !strings.Contains(s, `u=https%3A%2F%2Fexample.com%2Fassets%2Fmain.js`) {
+		t.Fatalf("module script was not proxied: %s", s)
+	}
+	moduleStart := strings.Index(s, `kind=module`)
+	moduleEnd := strings.Index(s[moduleStart:], `>`)
+	moduleTag := s[moduleStart : moduleStart+moduleEnd]
+	if strings.Contains(moduleTag, `tab=`) || strings.Contains(moduleTag, `rt=`) {
+		t.Fatalf("module script URL should stay stable across graph imports: %s", moduleTag)
+	}
+	if !strings.Contains(s, `kind=classic`) || !strings.Contains(s, `tab=tab`) || !strings.Contains(s, `rt=rt`) {
+		t.Fatalf("classic script lost runtime authorization query: %s", s)
+	}
+}
+
 func TestTransformPreservesBlockedHeadLinkForHydration(t *testing.T) {
 	target, _ := url.Parse("https://example.com/check")
 	out, err := Transform(strings.NewReader(`<html><head><!--m67kuz--><link rel="preconnect" href="https://am.i.mullvad.net"/><!----></head><body></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
