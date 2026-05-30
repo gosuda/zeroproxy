@@ -196,41 +196,59 @@ func (e *Engine) DialTarget(ctx context.Context, target *url.URL, tab *TabState)
 }
 
 func (e *Engine) dialTarget(ctx context.Context, target *url.URL, tab *TabState, tlsProtocols []string) (*targetConn, error) {
-	if e == nil || e.Mux == nil {
-		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: transport not initialized")
-	}
-	if target == nil || target.Hostname() == "" {
-		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: missing target host")
-	}
-	if target.Scheme != "http" && target.Scheme != "https" {
-		return nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
+	if err := e.validateDialTarget(target); err != nil {
+		return nil, err
 	}
 	host := canonicalHost(target)
-	port := canonicalPort(target)
-	var key []byte
-	if tab != nil {
-		key = tab.StreamIsolationKey
-	}
-	token := zpiso.Token(key, host)
+	token := zpiso.Token(isolationKey(tab), host)
 	stream, err := e.Mux.OpenStream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: %w", err)
 	}
-	if err := socks5.ConnectDomain(ctx, stream, socks5.Options{Host: host, Port: port, Username: token, Password: "zp"}); err != nil {
+	if err := socks5.ConnectDomain(ctx, stream, socks5.Options{Host: host, Port: canonicalPort(target), Username: token, Password: "zp"}); err != nil {
 		_ = stream.Close()
 		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: %w", err)
 	}
 	if target.Scheme == "https" {
-		tlsConn, protocol, err := utlskernel.WrapWithALPN(ctx, stream, host, tlsProtocols)
-		if err != nil {
-			return nil, fmt.Errorf("TLS_HANDSHAKE_FAILED: %w", err)
-		}
-		if protocol == "" {
-			protocol = utlskernel.ALPNHTTP1
-		}
-		return &targetConn{conn: tlsConn, protocol: protocol}, nil
+		return wrapTargetTLS(ctx, stream, host, tlsProtocols)
 	}
 	return &targetConn{conn: stream, protocol: utlskernel.ALPNHTTP1}, nil
+}
+
+// validateDialTarget runs dialTarget's fail-closed preconditions: the transport
+// must be wired, the target must carry a host, and the scheme must be http(s).
+func (e *Engine) validateDialTarget(target *url.URL) error {
+	if e == nil || e.Mux == nil {
+		return fmt.Errorf("TARGET_CONNECT_FAILED: transport not initialized")
+	}
+	if target == nil || target.Hostname() == "" {
+		return fmt.Errorf("TARGET_CONNECT_FAILED: missing target host")
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
+	}
+	return nil
+}
+
+// isolationKey returns the per-tab stream-isolation key, or nil for a nil tab.
+func isolationKey(tab *TabState) []byte {
+	if tab == nil {
+		return nil
+	}
+	return tab.StreamIsolationKey
+}
+
+// wrapTargetTLS completes the TLS handshake over an established SOCKS5 stream,
+// defaulting the negotiated ALPN to HTTP/1.1 when the peer offers none.
+func wrapTargetTLS(ctx context.Context, stream net.Conn, host string, tlsProtocols []string) (*targetConn, error) {
+	tlsConn, protocol, err := utlskernel.WrapWithALPN(ctx, stream, host, tlsProtocols)
+	if err != nil {
+		return nil, fmt.Errorf("TLS_HANDSHAKE_FAILED: %w", err)
+	}
+	if protocol == "" {
+		protocol = utlskernel.ALPNHTTP1
+	}
+	return &targetConn{conn: tlsConn, protocol: protocol}, nil
 }
 
 func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (*http.Request, error) {
@@ -238,50 +256,20 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 		return nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
 	}
 	policy := policyFromRequest(src)
-	method := "GET"
-	var body io.ReadCloser
-	var contentLength int64
-	if src != nil {
-		method = src.Method
-		body = src.Body
-		contentLength = src.ContentLength
-	}
-	if method == "" {
-		method = "GET"
-	}
+	method, body, contentLength := requestMethodAndBody(src)
 	u := *target
-	wire := &http.Request{Method: method, URL: &u, Header: make(http.Header), Body: body, ContentLength: contentLength, Host: canonicalAuthority(target), Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
-	if src != nil {
-		for name, vals := range src.Header {
-			lower := strings.ToLower(name)
-			if headers.HiddenHeader(name) || strings.HasPrefix(lower, "x-zp-") || lower == "host" || lower == "cookie" || lower == "origin" || lower == "referer" || lower == "accept-encoding" {
-				continue
-			}
-			for _, v := range vals {
-				wire.Header.Add(name, v)
-			}
-		}
-	}
-	wire.Header.Set("Host", canonicalAuthority(target))
-	wire.Host = canonicalAuthority(target)
-	wire.Header.Set("User-Agent", TargetUserAgent)
-	setTargetClientHints(wire.Header)
-	wire.Header.Set("Accept-Encoding", "identity")
-	if jar != nil && policyAllowsCookies(policy, target) {
-		cookieCtx := cookiejar.RequestContext{
-			TopLevelURL:          policy.DocumentURL,
-			Method:               method,
-			Credentials:          policy.Credentials,
-			IsTopLevelNavigation: policy.DocumentRequest || policy.Mode == "navigate",
-		}
-		if cookies := jar.CookiesForRequest(target, true, cookieCtx); len(cookies) > 0 {
-			parts := make([]string, 0, len(cookies))
-			for _, c := range cookies {
-				parts = append(parts, c.Name+"="+c.Value)
-			}
-			wire.Header.Set("Cookie", strings.Join(parts, "; "))
-		}
-	}
+	authority := canonicalAuthority(target)
+	wire := &http.Request{Method: method, URL: &u, Header: make(http.Header), Body: body, ContentLength: contentLength, Host: authority, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
+
+	// Order is load-bearing: forward the page's headers FIRST, then force-set
+	// the spoofed target identity so an attacker-supplied Host/UA/client-hint/
+	// Accept-Encoding value is always overwritten, never trusted.
+	copyForwardableHeaders(wire.Header, src)
+	wire.Header.Set("Host", authority)
+	wire.Host = authority
+	applyTargetIdentity(wire.Header)
+
+	applyCookieHeader(wire.Header, jar, policy, target, method)
 	if origin := originHeader(method, target, policy); origin != "" {
 		wire.Header.Set("Origin", origin)
 	}
@@ -289,6 +277,93 @@ func BuildHTTP1Request(src *http.Request, target *url.URL, jar *cookiejar.Jar) (
 		wire.Header.Set("Referer", ref)
 	}
 	return wire, nil
+}
+
+// requestMethodAndBody extracts the wire method, body, and content length from
+// the source request, defaulting an absent or empty method to GET.
+func requestMethodAndBody(src *http.Request) (string, io.ReadCloser, int64) {
+	if src == nil || src.Method == "" {
+		return "GET", srcBody(src), srcContentLength(src)
+	}
+	return src.Method, src.Body, src.ContentLength
+}
+
+func srcBody(src *http.Request) io.ReadCloser {
+	if src == nil {
+		return nil
+	}
+	return src.Body
+}
+
+func srcContentLength(src *http.Request) int64 {
+	if src == nil {
+		return 0
+	}
+	return src.ContentLength
+}
+
+// copyForwardableHeaders copies the page-supplied headers onto dst, stripping
+// the internal/hop and self-set headers: HiddenHeader, X-Zp-* internal headers,
+// and Host/Cookie/Origin/Referer/Accept-Encoding (all force-set later).
+func copyForwardableHeaders(dst http.Header, src *http.Request) {
+	if src == nil {
+		return
+	}
+	for name, vals := range src.Header {
+		if !forwardableHeader(name) {
+			continue
+		}
+		for _, v := range vals {
+			dst.Add(name, v)
+		}
+	}
+}
+
+func forwardableHeader(name string) bool {
+	if headers.HiddenHeader(name) {
+		return false
+	}
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "x-zp-") {
+		return false
+	}
+	switch lower {
+	case "host", "cookie", "origin", "referer", "accept-encoding":
+		return false
+	default:
+		return true
+	}
+}
+
+// applyTargetIdentity force-sets the spoofed browser identity: the target
+// User-Agent, the full Sec-CH-UA client-hint set, and Accept-Encoding:identity.
+func applyTargetIdentity(h http.Header) {
+	h.Set("User-Agent", TargetUserAgent)
+	setTargetClientHints(h)
+	h.Set("Accept-Encoding", "identity")
+}
+
+// applyCookieHeader projects the cookie jar onto the wire request when the
+// fetch credentials policy permits, preserving the credential/SameSite context.
+func applyCookieHeader(h http.Header, jar *cookiejar.Jar, policy RequestPolicy, target *url.URL, method string) {
+	if jar == nil || !policyAllowsCookies(policy, target) {
+		return
+	}
+	cookieCtx := cookiejar.RequestContext{
+		TopLevelURL:          policy.DocumentURL,
+		Method:               method,
+		Credentials:          policy.Credentials,
+		IsTopLevelNavigation: policy.DocumentRequest || policy.Mode == "navigate",
+	}
+	cookies := jar.CookiesForRequest(target, true, cookieCtx)
+	if len(cookies) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(cookies))
+	for _, c := range cookies {
+		parts = append(parts, c.Name+"="+c.Value)
+	}
+	h.Set("Cookie", strings.Join(parts, "; "))
 }
 
 func setTargetClientHints(h http.Header) {
@@ -332,13 +407,24 @@ func policyFromRequest(req *http.Request) RequestPolicy {
 	if v := strings.ToLower(strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Referrer-Policy"))); v != "" {
 		p.ReferrerPolicy = v
 	}
-	if raw := strings.TrimSpace(req.Header.Get("X-Zp-Document-Url")); raw != "" {
-		if u, err := url.Parse(raw); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-			p.DocumentURL = u
-		}
-	}
+	p.DocumentURL = parseDocumentURL(req.Header.Get("X-Zp-Document-Url"))
 	p.DocumentRequest = req.Header.Get("X-Zp-Document-Request") == "1"
 	return p
+}
+
+// parseDocumentURL parses the page-forgeable X-Zp-Document-Url header,
+// fail-closed: a blank, unparseable, or non-http(s) value yields nil so a
+// javascript:/data: source can never be trusted as the document origin.
+func parseDocumentURL(raw string) *url.URL {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil
+	}
+	return u
 }
 
 func policyAllowsCookies(p RequestPolicy, target *url.URL) bool {
@@ -372,44 +458,85 @@ func originHeader(method string, target *url.URL, p RequestPolicy) string {
 }
 
 func refererHeader(target *url.URL, p RequestPolicy) string {
-	source := p.DocumentURL
-	if ref := strings.TrimSpace(p.Referrer); ref != "" && ref != "about:client" {
-		if ref == "no-referrer" {
-			return ""
-		}
-		if u, err := url.Parse(ref); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-			source = u
-		}
-	}
+	source := resolveReferrerSource(p)
 	if source == nil {
 		return ""
 	}
-	if source.Scheme == "https" && target.Scheme == "http" && (p.ReferrerPolicy == "" || p.ReferrerPolicy == "strict-origin-when-cross-origin" || p.ReferrerPolicy == "no-referrer-when-downgrade") {
+	if downgradeSuppressed(source, target, p.ReferrerPolicy) {
 		return ""
 	}
-	switch p.ReferrerPolicy {
+	return applyReferrerPolicy(source, target, p.ReferrerPolicy)
+}
+
+// resolveReferrerSource picks the referrer source URL. It starts from the
+// document URL and lets an explicit X-Zp-Fetch-Referrer override it, fail-closed:
+// an explicit "no-referrer" (or a non-http(s) override that leaves the source
+// nil) yields no source so the caller emits no Referer.
+func resolveReferrerSource(p RequestPolicy) *url.URL {
+	source := p.DocumentURL
+	ref := strings.TrimSpace(p.Referrer)
+	if ref == "" || ref == "about:client" {
+		return source
+	}
+	if ref == "no-referrer" {
+		return nil
+	}
+	if u, err := url.Parse(ref); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+		return u
+	}
+	return source
+}
+
+// downgradeSuppressed reports the fail-closed https->http referer downgrade
+// guard: an https source navigating to an http target leaks no Referer under
+// the default and *-when-downgrade policies.
+func downgradeSuppressed(source, target *url.URL, policy string) bool {
+	if source.Scheme != "https" || target.Scheme != "http" {
+		return false
+	}
+	return policy == "" || policy == "strict-origin-when-cross-origin" || policy == "no-referrer-when-downgrade"
+}
+
+// applyReferrerPolicy maps a (resolved, non-downgraded) source through the
+// referrer-policy state machine to the emitted Referer value.
+func applyReferrerPolicy(source, target *url.URL, policy string) string {
+	switch policy {
 	case "no-referrer":
 		return ""
 	case "origin":
-		return source.Scheme + "://" + canonicalAuthority(source) + "/"
+		return referrerOrigin(source)
 	case "same-origin":
-		if !sameOrigin(source, target) {
-			return ""
-		}
-		return referrerURLString(source)
-	case "strict-origin", "origin-when-cross-origin", "strict-origin-when-cross-origin":
-		if sameOrigin(source, target) && p.ReferrerPolicy != "strict-origin" {
-			return referrerURLString(source)
-		}
-		return source.Scheme + "://" + canonicalAuthority(source) + "/"
+		return referrerIfSameOrigin(source, target)
 	case "unsafe-url", "no-referrer-when-downgrade", "":
 		return referrerURLString(source)
 	default:
-		if sameOrigin(source, target) {
-			return referrerURLString(source)
-		}
-		return source.Scheme + "://" + canonicalAuthority(source) + "/"
+		return referrerWithOriginFallback(source, target, policy)
 	}
+}
+
+// referrerIfSameOrigin emits the full referrer only for a same-origin target,
+// implementing the "same-origin" policy (empty cross-site).
+func referrerIfSameOrigin(source, target *url.URL) string {
+	if !sameOrigin(source, target) {
+		return ""
+	}
+	return referrerURLString(source)
+}
+
+// referrerWithOriginFallback handles the strict-origin family and any unknown
+// policy: full referrer same-origin (except "strict-origin", which is always
+// origin-only), bare origin cross-site.
+func referrerWithOriginFallback(source, target *url.URL, policy string) string {
+	if sameOrigin(source, target) && policy != "strict-origin" {
+		return referrerURLString(source)
+	}
+	return referrerOrigin(source)
+}
+
+// referrerOrigin renders the bare scheme://authority/ origin form used by the
+// origin-only referrer policies.
+func referrerOrigin(source *url.URL) string {
+	return source.Scheme + "://" + canonicalAuthority(source) + "/"
 }
 
 func referrerURLString(u *url.URL) string {
@@ -501,27 +628,7 @@ func (e *Engine) closeH1(pc *h1Conn) {
 		e.mu.Unlock()
 		return
 	}
-	pc.closed = true
-	pc.idle = false
-	if pc.idleTimer != nil {
-		pc.idleTimer.Stop()
-		pc.idleTimer = nil
-	}
-	if e.h1 != nil {
-		pool := e.h1[pc.key]
-		for i, idle := range pool {
-			if idle == pc {
-				copy(pool[i:], pool[i+1:])
-				pool[len(pool)-1] = nil
-				if len(pool) == 1 {
-					delete(e.h1, pc.key)
-				} else {
-					e.h1[pc.key] = pool[:len(pool)-1]
-				}
-				break
-			}
-		}
-	}
+	e.retireH1Locked(pc)
 	e.mu.Unlock()
 	_ = pc.conn.Close()
 }
@@ -532,29 +639,44 @@ func (e *Engine) closeIdleH1(pc *h1Conn) {
 		e.mu.Unlock()
 		return
 	}
+	e.retireH1Locked(pc)
+	e.mu.Unlock()
+	_ = pc.conn.Close()
+}
+
+// retireH1Locked marks pc closed, stops its idle timer, and unlinks it from the
+// idle pool. The caller MUST hold e.mu and is responsible for closing pc.conn
+// after unlocking. It does NOT close the connection itself.
+func (e *Engine) retireH1Locked(pc *h1Conn) {
 	pc.closed = true
 	pc.idle = false
 	if pc.idleTimer != nil {
 		pc.idleTimer.Stop()
 		pc.idleTimer = nil
 	}
-	if e.h1 != nil {
-		pool := e.h1[pc.key]
-		for i, idle := range pool {
-			if idle == pc {
-				copy(pool[i:], pool[i+1:])
-				pool[len(pool)-1] = nil
-				if len(pool) == 1 {
-					delete(e.h1, pc.key)
-				} else {
-					e.h1[pc.key] = pool[:len(pool)-1]
-				}
-				break
-			}
-		}
+	e.removeFromH1PoolLocked(pc)
+}
+
+// removeFromH1PoolLocked unlinks pc from its idle-pool slice, deleting the key
+// when the slice empties. The caller MUST hold e.mu.
+func (e *Engine) removeFromH1PoolLocked(pc *h1Conn) {
+	if e.h1 == nil {
+		return
 	}
-	e.mu.Unlock()
-	_ = pc.conn.Close()
+	pool := e.h1[pc.key]
+	for i, idle := range pool {
+		if idle != pc {
+			continue
+		}
+		copy(pool[i:], pool[i+1:])
+		pool[len(pool)-1] = nil
+		if len(pool) == 1 {
+			delete(e.h1, pc.key)
+		} else {
+			e.h1[pc.key] = pool[:len(pool)-1]
+		}
+		return
+	}
 }
 
 func (e *Engine) reserveH2(key h2Key) *h2Conn {
@@ -570,13 +692,7 @@ func (e *Engine) reserveH2(key h2Key) *h2Conn {
 	if hc.cc.ReserveNewRequest() {
 		return hc
 	}
-	st := hc.cc.State()
-	if st.Closed || st.Closing {
-		delete(e.h2, key)
-		if st.StreamsActive == 0 {
-			hc.close()
-		}
-	}
+	e.evictH2IfClosingLocked(key, hc)
 	return nil
 }
 
@@ -586,28 +702,37 @@ func (e *Engine) adoptH2(key h2Key, hc *h2Conn) *h2Conn {
 	if e.h2 == nil {
 		e.h2 = make(map[h2Key]*h2Conn)
 	}
-	if old := e.h2[key]; old != nil {
-		if old.cc.ReserveNewRequest() {
-			e.mu.Unlock()
-			hc.close()
-			return old
-		}
-		st := old.cc.State()
-		if st.Closed || st.Closing {
-			delete(e.h2, key)
-			if st.StreamsActive == 0 {
-				old.close()
-			}
-		} else {
-			e.mu.Unlock()
-			hc.cc.SetDoNotReuse()
-			return hc
-		}
+	old := e.h2[key]
+	if old != nil && old.cc.ReserveNewRequest() {
+		e.mu.Unlock()
+		hc.close()
+		return old
+	}
+	if old != nil && !e.evictH2IfClosingLocked(key, old) {
+		e.mu.Unlock()
+		hc.cc.SetDoNotReuse()
+		return hc
 	}
 	hc.pooled = true
 	e.h2[key] = hc
 	e.mu.Unlock()
 	return hc
+}
+
+// evictH2IfClosingLocked drops conn from the pool under key when its underlying
+// client connection is closed/closing, closing it if it has no active streams.
+// It reports whether the entry was evicted (true) or left in place because it is
+// still live (false). The caller MUST hold e.mu.
+func (e *Engine) evictH2IfClosingLocked(key h2Key, conn *h2Conn) bool {
+	st := conn.cc.State()
+	if !st.Closed && !st.Closing {
+		return false
+	}
+	delete(e.h2, key)
+	if st.StreamsActive == 0 {
+		conn.close()
+	}
+	return true
 }
 
 func (e *Engine) forgetH2IfClosing(hc *h2Conn) {
