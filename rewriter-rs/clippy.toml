@@ -1,0 +1,16 @@
+# Clippy configuration for the zp-rewriter (Rust SWC/OXC WASM rewriter).
+#
+# cognitive-complexity-threshold configures clippy::cognitive_complexity.
+# That lint is an allow-by-default nursery lint, so setting this threshold
+# does NOT enable it: it stays inert under plain `-D warnings`. This is the
+# intended state for Workstream A.1 (gate authored, but not enforced yet).
+#
+# Workstream A.2 will FLIP cognitive_complexity to a hard error and ratchet
+# the threshold down as the over-budget functions are burned down:
+#
+#   25 (now, A.1 — authored/inert)  ->  20 (A.2 step 1)  ->  15 (A.2 final)
+#
+# Do NOT lower this or enable the lint until the A.2 complexity burn-down has
+# brought the 9 currently-over-budget functions under the target threshold;
+# enabling it now would make CI red under `-D warnings`.
+cognitive-complexity-threshold = 25
