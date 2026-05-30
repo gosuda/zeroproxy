@@ -151,7 +151,7 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 				}
 				continue
 			}
-			if isMetaRefresh(tok) {
+			if isMetaPolicy(tok) {
 				continue
 			}
 			if tag == "object" {
@@ -762,11 +762,12 @@ func containsBlockedLinkRel(rel string) bool {
 	return false
 }
 
-func isMetaRefresh(tok xhtml.Token) bool {
+func isMetaPolicy(tok xhtml.Token) bool {
 	if !strings.EqualFold(tok.Data, "meta") {
 		return false
 	}
-	return strings.EqualFold(attr(tok, "http-equiv"), "refresh")
+	equiv := strings.TrimSpace(attr(tok, "http-equiv"))
+	return strings.EqualFold(equiv, "refresh") || strings.EqualFold(equiv, "content-security-policy") || strings.EqualFold(equiv, "content-security-policy-report-only")
 }
 
 func blockedPlaceholder(kind string) string {

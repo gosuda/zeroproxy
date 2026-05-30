@@ -24,6 +24,14 @@ test('runtime membrane uses captured native WeakMap lookup for raw unwrapping', 
   assert.ok(rt.includes('Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs)'));
 });
 
+test('runtime dynamic constructor descriptors stay assignable for app bundles', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /ctor\.prototype,\s*'constructor',\s*\{\s*value: wrapper,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/);
+  assert.match(rt, /childFunction\.prototype,\s*'constructor',\s*\{\s*value: root\.Function,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/);
+  assert.equal(rt.includes("ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: false }"), false);
+  assert.equal(rt.includes("childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }"), false);
+});
+
 test('runtime reads boot config from self-removing prelude state', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
@@ -60,7 +68,7 @@ test('runtime installs required escape-vector hooks', () => {
     "'contentWindow'",
     "'contentDocument'",
     'new WeakSet',
-    "attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style', 'name', 'content']",
+    "attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style', 'name', 'http-equiv', 'content']",
     'enforceObservedAttribute',
     'data-zp-integrity',
     'installIntegrityProp',
@@ -88,6 +96,8 @@ test('runtime installs required escape-vector hooks', () => {
     'X-ZP-Runtime-Token',
     'syncReferrerPolicyElement',
     'documentReferrerPolicy',
+    'suppressMetaPolicyElement',
+    "localKey === 'http-equiv'",
     'src*="zp"',
     "define(root, 'Worker'",
     "define(root, 'SharedWorker'",
@@ -201,6 +211,8 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(sw.includes('scriptRequestContext'));
   assert.equal(/url\.pathname === '\/zp\/api\/fetch'[\s\S]{0,240}firstTab\(\)/.test(sw), false);
   assert.equal(sw.includes('firstTab'), false);
+  assert.ok(rt.includes("root.open(nav.href, nav.target)"));
+  assert.ok(rt.includes("data-zp-blocked-target"));
   const bridge = fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8');
   assert.ok(bridge.includes('getReader'));
   assert.ok(bridge.includes('X-ZP-Upload-Replayable'));

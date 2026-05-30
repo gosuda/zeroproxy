@@ -1114,7 +1114,7 @@
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
-      if (ctor && ctor.prototype) try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: false }); } catch {}
+      if (ctor && ctor.prototype) try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: true, writable: true }); } catch {}
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args); });
@@ -1718,7 +1718,7 @@
   function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; define(navigator, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
 
   function installNavigationTraps() {
-    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href) setVirtualLocation(nav.href); }, true);
+    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href && nav.target && nav.target !== '_self') root.open(nav.href, nav.target); else if (nav.href) setVirtualLocation(nav.href); }, true);
     document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
     if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
@@ -1787,16 +1787,15 @@
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
         const isAnchor = el.matches && el.matches('a[href],area[href]');
+        const target = isAnchor ? Native.getAttribute.call(el, 'data-zp-blocked-target') || el.getAttribute('target') || '' : '';
         if (isAnchor) {
           if (el.hasAttribute('download')) return null;
-          const target = el.getAttribute('target');
-          if (target && target !== '_self') return null;
         }
         const raw = isAnchor ? Native.getAttribute.call(el, 'data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
         if (!raw) continue;
-        if (raw[0] === '#') return { hash: raw, element: el };
-        if (hasExecutableURLScheme(raw)) return { href: '', element: el };
-        if (isHTTPURL(raw)) return { href: raw, element: el };
+        if (raw[0] === '#') return { hash: raw, element: el, target };
+        if (hasExecutableURLScheme(raw)) return { href: '', element: el, target };
+        if (isHTTPURL(raw)) return { href: raw, element: el, target };
       }
       return null;
     }
@@ -2367,6 +2366,17 @@
     const tag = el && el.localName;
     return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
   }
+  function isMetaPolicyElement(el) {
+    if (!el || el.localName !== 'meta') return false;
+    const equiv = String(Native.getAttribute.call(el, 'http-equiv') || '').trim().toLowerCase();
+    return equiv === 'content-security-policy' || equiv === 'content-security-policy-report-only';
+  }
+  function suppressMetaPolicyElement(el) {
+    if (!isMetaPolicyElement(el)) return false;
+    try { Native.setAttribute.call(el, 'data-zp-blocked-http-equiv', Native.getAttribute.call(el, 'http-equiv') || ''); } catch {}
+    if (Native.removeAttribute) Native.removeAttribute.call(el, 'http-equiv');
+    return true;
+  }
   function setSafeNavigationTarget(el, attrName, value) {
     const raw = String(value || '');
     if (raw && raw !== '_self') Native.setAttribute.call(el, 'data-zp-blocked-target', raw);
@@ -2686,6 +2696,11 @@
     define(w.Element.prototype, 'setAttribute', function(k, v) {
       const key = String(k).toLowerCase();
       const localKey = attrLocalName(key);
+      if (this.localName === 'meta' && localKey === 'http-equiv' && /^(?:content-security-policy|content-security-policy-report-only)$/i.test(String(v).trim())) {
+        Native.setAttribute.call(this, 'data-zp-blocked-http-equiv', String(v));
+        if (Native.removeAttribute) Native.removeAttribute.call(this, k);
+        return;
+      }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'style') return Native.setAttribute.call(this, k, rewriteCSSSource(String(v)));
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
@@ -2697,14 +2712,14 @@
         enforceLinkPolicy(this);
         return ret;
       }
-	      if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
-	      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
-	      if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
-	      if (key.startsWith('on') && key.length > 2) {
-	        Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
-	        if (Native.removeAttribute) Native.removeAttribute.call(this, k);
-	        return;
-	      }
+      if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
+      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+      if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
+      if (key.startsWith('on') && key.length > 2) {
+        Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
+        if (Native.removeAttribute) Native.removeAttribute.call(this, k);
+        return;
+      }
       if (this.localName === 'base' && localKey === 'href') {
         updateVirtualBase(v);
         return Native.setAttribute.call(this, k, v);
@@ -2733,10 +2748,16 @@
     if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) {
       const key = String(k).toLowerCase();
       const localKey = attrLocalName(key);
+      if (this.localName === 'meta' && localKey === 'http-equiv' && /^(?:content-security-policy|content-security-policy-report-only)$/i.test(String(v).trim())) {
+        Native.setAttribute.call(this, 'data-zp-blocked-http-equiv', String(v));
+        if (Native.removeAttributeNS) Native.removeAttributeNS.call(this, ns, k);
+        else if (Native.removeAttribute) Native.removeAttribute.call(this, k);
+        return;
+      }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
-	      if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
-	      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
-	      if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
+      if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
+      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+      if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
       if (isSrcsetAttribute(this, key)) return setSrcsetAttribute(this, k, v, ns);
       if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v, ns);
       if (isURLBearing(this, key)) {
@@ -3171,6 +3192,9 @@
     for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
     for (const node of nodes) {
       const tag = node.localName;
+      if (tag === 'meta' && suppressMetaPolicyElement(node)) {
+        continue;
+      }
       if (tag === 'base' && Native.getAttribute.call(node, 'href')) {
         const href = Native.getAttribute.call(node, 'href') || '';
         updateVirtualBase(href);
@@ -3206,11 +3230,11 @@
           if (lowerAttr === 'style') Native.setAttribute.call(node, attrName, rewriteCSSSource(Native.getAttribute.call(node, attrName) || ''));
           if (isSrcsetAttribute(node, lowerAttr)) setSrcsetAttribute(node, attrName, Native.getAttribute.call(node, attrName) || '');
           if (lowerAttr === 'integrity' && isIntegrityBearing(node)) setBackedIntegrity(node, Native.getAttribute.call(node, attrName) || '');
-	          if (lowerAttr.startsWith('on') && lowerAttr.length > 2) {
-	            const val = Native.getAttribute.call(node, attrName) || '';
-	            Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
-	            if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
-	          }
+          if (lowerAttr.startsWith('on') && lowerAttr.length > 2) {
+            const val = Native.getAttribute.call(node, attrName) || '';
+            Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
+            if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
+          }
           if (isSrcsetAttribute(node, lowerAttr) || isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
         }
       }
@@ -3256,26 +3280,27 @@
     try {
       new MO(records => {
         for (const r of records) {
-        if (r.type === 'attributes') { syncReferrerPolicyElement(r.target); enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase()); }
+          if (r.type === 'attributes') { suppressMetaPolicyElement(r.target); syncReferrerPolicyElement(r.target); enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase()); }
           else for (const n of r.addedNodes || []) { syncBaseElement(n); syncReferrerPolicyElement(n); enforceSubtreePolicies(n); instrumentDescendantIframes(n); }
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style', 'name', 'content'] });
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'style', 'name', 'http-equiv', 'content'] });
     } catch {}
   }
   function enforceObservedAttribute(el, key) {
     if (!el || !key) return;
     const localKey = attrLocalName(key);
     const tag = el.localName;
-	    if (tag === 'base' && localKey === 'href') { syncBaseElement(el); return; }
-	    if (tag === 'meta' && (localKey === 'name' || localKey === 'content')) { syncReferrerPolicyElement(el); return; }
-	    if (localKey === 'style') {
-	      const raw = Native.getAttribute.call(el, key);
-	      if (raw) {
-	        const next = rewriteCSSSource(raw);
-	        if (next !== raw) Native.setAttribute.call(el, key, next);
-	      }
-	      return;
-	    }
+    if (tag === 'base' && localKey === 'href') { syncBaseElement(el); return; }
+    if (tag === 'meta' && (localKey === 'http-equiv' || localKey === 'content')) { suppressMetaPolicyElement(el); if (localKey === 'content') syncReferrerPolicyElement(el); return; }
+    if (tag === 'meta' && localKey === 'name') { syncReferrerPolicyElement(el); return; }
+    if (localKey === 'style') {
+      const raw = Native.getAttribute.call(el, key);
+      if (raw) {
+        const next = rewriteCSSSource(raw);
+        if (next !== raw) Native.setAttribute.call(el, key, next);
+      }
+      return;
+    }
     if (tag === 'link' && (localKey === 'rel' || localKey === 'href')) { enforceLinkPolicy(el); return; }
     if (localKey === 'target' && isNavigationTargetElement(el)) { const raw = Native.getAttribute.call(el, key); if (raw && raw !== '_self') setSafeNavigationTarget(el, key, raw); return; }
     if (tag === 'script' && (localKey === 'src' || localKey === 'href' || localKey === 'type')) {
@@ -3330,6 +3355,7 @@
   }
   function enforceElementPolicy(el) {
     if (!el || !el.localName) return;
+    if (el.localName === 'meta' && suppressMetaPolicyElement(el)) return;
     if (el.localName === 'script') instrumentScriptElement(el);
     if (el.localName === 'link') enforceLinkPolicy(el);
     if (el.localName === 'iframe' || el.localName === 'frame') instrumentIframe(el);
@@ -3503,8 +3529,11 @@
   }
   function prepareActivatingNode(node) {
     if (!node || typeof node !== 'object') return;
+    if ((node.nodeName || '').toUpperCase() === 'META') suppressMetaPolicyElement(node);
     if ((node.nodeName || '').toUpperCase() === 'SCRIPT') prepareScriptElement(node);
     if (node.querySelectorAll) {
+      const metas = node.querySelectorAll('meta');
+      for (let i = 0; i < metas.length; i++) suppressMetaPolicyElement(metas[i]);
       const scripts = node.querySelectorAll('script');
       for (let i = 0; i < scripts.length; i++) prepareScriptElement(scripts[i]);
     }
@@ -3601,7 +3630,7 @@
     const childFunction = w.Function;
     if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
     if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
-    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }); } catch {}
+    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: true, writable: true }); } catch {}
     if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
     installNavigatorIdentity(w);
     installGetterMasking(w);

@@ -9,7 +9,7 @@ import (
 
 func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 	target, _ := url.Parse("https://example.com/dir/page.html")
-	out, err := Transform(strings.NewReader(`<!doctype html><html><head><base href="https://evil.test/"><script src="/early.js"></script><link rel="preconnect" href="https://evil.test"><meta http-equiv="refresh" content="0;url=https://evil.test/"></head><body><a href="/next" ping="https://ping.test">n</a><form action="submit"><button formaction="/alt">go</button></form><iframe src="/child" srcdoc="<p>x</p>"></iframe><object data="x"></object></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, Servers: []string{"wss://relay.example/ws"}})
+	out, err := Transform(strings.NewReader(`<!doctype html><html><head><base href="https://evil.test/"><script src="/early.js"></script><link rel="preconnect" href="https://evil.test"><meta http-equiv="refresh" content="0;url=https://evil.test/"><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-target' https://challenges.cloudflare.com"></head><body><a href="/next" ping="https://ping.test">n</a><form action="submit"><button formaction="/alt">go</button></form><iframe src="/child" srcdoc="<p>x</p>"></iframe><object data="x"></object></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, Servers: []string{"wss://relay.example/ws"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +19,7 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
 	}
-	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", " ping=", " rel=\"preconnect\"", "id=\"zp-topbar\"", `href="/next"`, `action="submit"`, `formaction="/alt"`} {
+	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", "Content-Security-Policy", "challenges.cloudflare.com", " ping=", " rel=\"preconnect\"", "id=\"zp-topbar\"", `href="/next"`, `action="submit"`, `formaction="/alt"`} {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("forbidden %q remained in %s", forbidden, s)
 		}
