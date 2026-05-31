@@ -693,10 +693,17 @@ What CI validates is the MECHANISM, not clearance: the Increment-1 end-to-end te
 fixture that mimics a challenge (it emits `Cf-Mitigated: challenge` and a
 `/cdn-cgi/challenge-platform/` subresource) and NEVER contacts Cloudflare. It
 proves the armed path runs both relaxation points and that the OFF path is
-unchanged. Real-zone clearance is left to a human-run live smoke test (the
-`ZP_TURNSTILE_LIVE` convention name) that is deliberately NOT wired into CI and is
-not part of any automated gate; it is run by a person against a live zone when
-verification against the real service is desired.
+unchanged. Real-zone clearance is left to a human-run live harness,
+`scripts/turnstile-live.mjs` (`npm run turnstile:live`), deliberately NOT wired into
+CI and not part of any automated gate. It boots the real stack, opens an
+instrumented browser at the proxy UI, and prints a REDACTED trace + verdict (the
+projected CSP, the internal-marker strip, and an egress-escape count) while a person
+solves a real challenge through the proxy. It records no tokens, cookie values,
+request bodies, or raw URLs, and asserts no clearance (server-authoritative) — it
+surfaces only whether the membrane BREAKS the legitimate flow. Its egress check
+observes top-level + popup page requests; cross-origin challenge iframes (OOPIF) and
+service-worker-internal traffic are not fully captured, so the browser's own devtools
+Network tab is the authoritative cross-check.
 
 ### Known limitations (Increment 1)
 

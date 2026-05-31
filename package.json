@@ -12,6 +12,7 @@
     "test": "node scripts/test.mjs",
     "test:js": "node scripts/test.mjs js",
     "test:e2e": "node scripts/test.mjs e2e",
+    "turnstile:live": "node scripts/turnstile-live.mjs",
     "lint": "npm run lint:go && npm run lint:rust && npm run lint:js",
     "lint:go": "golangci-lint config verify && golangci-lint run --timeout=5m && GOOS=js GOARCH=wasm golangci-lint run --timeout=5m",
     "lint:rust": "cargo clippy --manifest-path rewriter-rs/Cargo.toml --all-targets -- -D warnings && cargo fmt --manifest-path rewriter-rs/Cargo.toml --all --check",
