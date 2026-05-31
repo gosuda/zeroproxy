@@ -39,6 +39,7 @@ jobs:
         with:
           node-version: lts/*
           cache: npm
+          cache-dependency-path: package-lock.json
       - name: Print toolchain versions
         run: |
           go version
@@ -91,6 +92,7 @@ jobs:
         with:
           node-version: lts/*
           cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install golangci-lint v2.12.2
         run: |
