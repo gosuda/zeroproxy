@@ -515,7 +515,43 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string, challengeCompat bool) *zpht
 	return t
 }
 
-//nolint:cyclop,gocognit // TODO(complexity): JS WebSocket stream adapter (cyclop / gocognit 24); bridges a wsproto.Conn to a JS-side duplex stream (send/recv/close demux). Protocol bridge; needs dedicated differential-harness decomposition.
+// dispatchInboundFrame delivers one frame read from the relay to the JS handlers
+// and reports whether the read loop should stop. A read error (handlers, when set,
+// receive an "error") and an OpClose both terminate; a text frame delivers a
+// string and a binary frame an ArrayBuffer, both letting the loop continue.
+func dispatchInboundFrame(handlers js.Value, op byte, payload []byte, err error) (stop bool) {
+	if err != nil {
+		if handlers.Truthy() {
+			callHandler(handlers, "error", jsError("TARGET_CONNECT_FAILED"))
+		}
+		return true
+	}
+	if op == wsproto.OpClose {
+		callHandler(handlers, "close", js.Null())
+		return true
+	}
+	if op == wsproto.OpText {
+		callHandler(handlers, "message", string(payload))
+		return false
+	}
+	arr := js.Global().Get("Uint8Array").New(len(payload))
+	js.CopyBytesToJS(arr, payload)
+	callHandler(handlers, "message", arr.Get("buffer"))
+	return false
+}
+
+// runReadLoop pumps frames from readFrame, dispatching each to the current JS
+// handlers (read live via getHandlers, since the JS side may install them after
+// the loop has started) until a frame signals stop.
+func runReadLoop(ctx context.Context, getHandlers func() js.Value, readFrame func(context.Context) (byte, []byte, error)) {
+	for {
+		op, payload, err := readFrame(ctx)
+		if dispatchInboundFrame(getHandlers(), op, payload, err) {
+			return
+		}
+	}
+}
+
 func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *wsproto.Conn) js.Value {
 	handlers := js.Value{}
 	var start sync.Once
@@ -523,26 +559,7 @@ func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *
 	readLoop := func() {
 		defer cancel()
 		defer conn.Close()
-		for {
-			op, payload, err := conn.ReadFrame(ctx)
-			if err != nil {
-				if handlers.Truthy() {
-					callHandler(handlers, "error", jsError("TARGET_CONNECT_FAILED"))
-				}
-				return
-			}
-			if op == wsproto.OpClose {
-				callHandler(handlers, "close", js.Null())
-				return
-			}
-			if op == wsproto.OpText {
-				callHandler(handlers, "message", string(payload))
-				continue
-			}
-			arr := js.Global().Get("Uint8Array").New(len(payload))
-			js.CopyBytesToJS(arr, payload)
-			callHandler(handlers, "message", arr.Get("buffer"))
-		}
+		runReadLoop(ctx, func() js.Value { return handlers }, conn.ReadFrame)
 	}
 	obj.Set("setHandlers", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if len(args) > 0 {
