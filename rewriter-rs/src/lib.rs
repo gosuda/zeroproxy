@@ -1402,7 +1402,7 @@ impl<'a> Rewriter<'a> {
                 )],
             ),
             Expression::ChainExpression(expr) => {
-                self.render_chain_element(expr.span, &expr.expression)
+                self.render_chain_element(&expr.expression)
             }
             Expression::TemplateLiteral(expr) => self.render_span_with(
                 expr.span,
@@ -1715,7 +1715,7 @@ impl<'a> Rewriter<'a> {
         }
     }
 
-    fn render_chain_element(&self, _span: Span, elem: &ChainElement<'a>) -> String {
+    fn render_chain_element(&self, elem: &ChainElement<'a>) -> String {
         match elem {
             ChainElement::CallExpression(call) => self.render_call_expression(call),
             ChainElement::TSNonNullExpression(inner) => self.render_expression(&inner.expression),
