@@ -101,41 +101,6 @@ async function waitForPage(page, predicate, args = [], timeoutMs = 30000) {
   throw last || new Error('timed out waiting for page condition');
 }
 
-class SocketReader {
-  constructor(socket) {
-    this.socket = socket;
-    this.buf = Buffer.alloc(0);
-    this.waiters = [];
-    socket.on('data', (chunk) => {
-      this.buf = Buffer.concat([this.buf, chunk]);
-      this.flush();
-    });
-    socket.on('error', (err) => this.fail(err));
-    socket.on('close', () => this.fail(new Error('socket closed')));
-  }
-  read(n) {
-    if (this.buf.length >= n) return Promise.resolve(this.take(n));
-    return new Promise((resolve, reject) => {
-      this.waiters.push({ n, resolve, reject });
-      this.flush();
-    });
-  }
-  take(n) {
-    const out = this.buf.subarray(0, n);
-    this.buf = this.buf.subarray(n);
-    return out;
-  }
-  flush() {
-    while (this.waiters.length && this.buf.length >= this.waiters[0].n) {
-      const waiter = this.waiters.shift();
-      waiter.resolve(this.take(waiter.n));
-    }
-  }
-  fail(err) {
-    while (this.waiters.length) this.waiters.shift().reject(err);
-  }
-}
-
 function createTargetServer(requests) {
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
@@ -766,56 +731,6 @@ function writeWebSocketFrame(socket, opcode, data = Buffer.alloc(0)) {
     header.writeBigUInt64BE(BigInt(payload.length), 2);
   }
   socket.write(Buffer.concat([header, payload]));
-}
-
-function createSocks5Server(resolveHost) {
-  return net.createServer((socket) => {
-    handleSocks(socket, resolveHost).catch(() => socket.destroy());
-  });
-}
-
-async function handleSocks(socket, resolveHost) {
-  socket.on('error', (err) => {
-    if (!isBenignSocketError(err)) socket.destroy(err);
-  });
-  const reader = new SocketReader(socket);
-  const greeting = await reader.read(2);
-  assert.equal(greeting[0], 0x05);
-  const methods = await reader.read(greeting[1]);
-  const method = methods.includes(0x02) ? 0x02 : 0x00;
-  socket.write(Buffer.from([0x05, method]));
-  if (method === 0x02) {
-    const authHead = await reader.read(2);
-    assert.equal(authHead[0], 0x01);
-    await reader.read(authHead[1]);
-    const passLen = await reader.read(1);
-    await reader.read(passLen[0]);
-    socket.write(Buffer.from([0x01, 0x00]));
-  }
-  const reqHead = await reader.read(4);
-  assert.equal(reqHead[0], 0x05);
-  assert.equal(reqHead[1], 0x01);
-  let host;
-  if (reqHead[3] === 0x03) {
-    const len = await reader.read(1);
-    host = (await reader.read(len[0])).toString('utf8');
-  } else {
-    throw new Error(`unsupported SOCKS address type ${reqHead[3]}`);
-  }
-  const portBuf = await reader.read(2);
-  const port = portBuf.readUInt16BE(0);
-  const upstream = net.connect(resolveHost(host, port));
-  await new Promise((resolve, reject) => {
-    upstream.once('connect', resolve);
-    upstream.once('error', reject);
-  });
-  upstream.on('error', (err) => {
-    if (!isBenignSocketError(err)) socket.destroy(err);
-  });
-  socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-  if (reader.buf.length) upstream.write(reader.buf);
-  socket.pipe(upstream);
-  upstream.pipe(socket);
 }
 
 test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integrations', {
