@@ -125,7 +125,7 @@ func sealToken(seed, iv []byte, target string) (string, error) {
 func shareFragment(key string, servers []string) (string, error) {
 	params := url.Values{}
 	params.Set("k", key)
-	normalized, err := NormalizeRelayServers(servers)
+	normalized, err := normalizeRelayServers(servers)
 	if err != nil {
 		return "", err
 	}
@@ -135,7 +135,7 @@ func shareFragment(key string, servers []string) (string, error) {
 	return "#" + params.Encode(), nil
 }
 
-// NormalizeRelayServers validates and canonicalizes the operator-supplied relay
+// normalizeRelayServers validates and canonicalizes the operator-supplied relay
 // endpoints that gate every proxied request (Go mirror of web/zp-core.js
 // normalizeRelayServers). The loop owns the cross-server invariants in this
 // exact order: skip blank entries, enforce the count limit BEFORE parsing,
@@ -143,7 +143,7 @@ func shareFragment(key string, servers []string) (string, error) {
 // included) BEFORE deduping, then dedupe. Per-server parsing/validation and
 // canonicalization are delegated to helpers; the ordering here is a security
 // invariant and must not change.
-func NormalizeRelayServers(values []string) ([]string, error) {
+func normalizeRelayServers(values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}

@@ -219,7 +219,7 @@ func TestNormalizeRelayServers_Golden(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := NormalizeRelayServers(tc.in)
+			got, err := normalizeRelayServers(tc.in)
 			if tc.wantErr != "" {
 				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("got err %v, want %q", err, tc.wantErr)
@@ -249,7 +249,7 @@ func TestNormalizeRelayServers_ByteLimitOrder(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		dup = append(dup, long)
 	}
-	got, err := NormalizeRelayServers(dup)
+	got, err := normalizeRelayServers(dup)
 	if err == nil || err.Error() != "shareurl: relay server list too large" {
 		t.Fatalf("got err %v, want relay server list too large", err)
 	}
