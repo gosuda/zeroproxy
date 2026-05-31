@@ -46,10 +46,11 @@ func ContextWithAbortSignal(parent context.Context, v js.Value) (context.Context
 	return ctx, cleanup
 }
 
-//nolint:cyclop,gocognit // TODO(complexity): JS->Go request unmarshaller (cyclop / gocognit 18); reconstructs an *http.Request from the JS fetch facade (method, headers, body, credentials). Membrane boundary parser; needs dedicated differential-harness decomposition.
+// RequestFromJS reconstructs an *http.Request from the JS fetch facade (method,
+// headers, body). It is the membrane's boundary parser: header construction and
+// body extraction are delegated to jsHeaders and extractRequestBody.
 func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
-	rawURL := v.Get("url").String()
-	u, err := url.Parse(rawURL)
+	u, err := url.Parse(v.Get("url").String())
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +58,21 @@ func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 	if method == "" {
 		method = "GET"
 	}
+	h := jsHeaders(v.Get("headers"))
+	body, contentLength, getBody, err := extractRequestBody(ctx, v, method, h)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Request{
+		Method: method, URL: u, Header: h,
+		Body: body, GetBody: getBody, ContentLength: contentLength,
+		Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+	}, nil
+}
+
+// jsHeaders reconstructs an http.Header from the JS fetch facade's Headers
+// object, whose forEach callback yields (value, key).
+func jsHeaders(headers js.Value) http.Header {
 	h := make(http.Header)
 	forEach := js.FuncOf(func(this js.Value, args []js.Value) any {
 		value := args[0].String()
@@ -64,33 +80,39 @@ func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 		h.Add(key, value)
 		return nil
 	})
-	v.Get("headers").Call("forEach", forEach)
+	headers.Call("forEach", forEach)
 	forEach.Release()
-	var body io.ReadCloser = http.NoBody
-	var contentLength int64 = 0
-	//nolint:nestif // TODO(complexity): membrane request-body extraction (nestif 9); reads the JS ReadableStream body only for methods that carry one. Boundary I/O guard; decomposed alongside RequestFromJS in the differential-harness campaign.
-	if method != "GET" && method != "HEAD" && !v.Get("bodyUsed").Bool() {
-		stream := v.Get("body")
-		if stream.Truthy() && stream.Get("getReader").Type() == js.TypeFunction {
-			body = newJSReadableStreamReadCloser(ctx, stream.Call("getReader"))
-			contentLength = -1
-			if h.Get("X-ZP-Upload-Replayable") == "1" {
-				buf, err := io.ReadAll(io.LimitReader(body, 1024*1024+1))
-				_ = body.Close()
-				if err != nil {
-					return nil, err
-				}
-				if len(buf) > 1024*1024 {
-					return nil, fmt.Errorf("request body exceeds replay buffer")
-				}
-				body = io.NopCloser(bytes.NewReader(buf))
-				contentLength = int64(len(buf))
-				getBody := func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
-				return &http.Request{Method: method, URL: u, Header: h, Body: body, GetBody: getBody, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
-			}
-		}
+	return h
+}
+
+// extractRequestBody reads the JS fetch facade's body for methods that carry one.
+// It returns http.NoBody for body-less requests, a streaming reader (ContentLength
+// -1, no GetBody) for a normal upload, or — when the client marks the upload
+// replayable — a buffered reader plus a GetBody the redirect path can replay. The
+// 1 MiB cap bounds the replay buffer, and the buffering happens here, before the
+// first RoundTrip consumes the stream (the redirect replay depends on it).
+func extractRequestBody(ctx context.Context, v js.Value, method string, h http.Header) (io.ReadCloser, int64, func() (io.ReadCloser, error), error) {
+	if method == "GET" || method == "HEAD" || v.Get("bodyUsed").Bool() {
+		return http.NoBody, 0, nil, nil
 	}
-	return &http.Request{Method: method, URL: u, Header: h, Body: body, ContentLength: contentLength, Host: u.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}, nil
+	stream := v.Get("body")
+	if !stream.Truthy() || stream.Get("getReader").Type() != js.TypeFunction {
+		return http.NoBody, 0, nil, nil
+	}
+	body := newJSReadableStreamReadCloser(ctx, stream.Call("getReader"))
+	if h.Get("X-ZP-Upload-Replayable") != "1" {
+		return body, -1, nil, nil
+	}
+	buf, err := io.ReadAll(io.LimitReader(body, 1024*1024+1))
+	_ = body.Close()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if len(buf) > 1024*1024 {
+		return nil, 0, nil, fmt.Errorf("request body exceeds replay buffer")
+	}
+	getBody := func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
+	return io.NopCloser(bytes.NewReader(buf)), int64(len(buf)), getBody, nil
 }
 
 type jsReadableStreamReadCloser struct {
