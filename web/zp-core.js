@@ -113,25 +113,34 @@
   function encodeTargetURL(url) { return bytesToBase64Url(te.encode(canonicalTargetURL(url).href)); }
   function decodeTargetURL(encoded) { return canonicalTargetURL(td.decode(base64UrlToBytes(encoded))).href; }
   function randomId(prefix = '') { const b = crypto.getRandomValues(new Uint8Array(12)); return prefix + bytesToBase64Url(b); }
-  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TODO(complexity): membrane CSP builder (cog 19); assembles the Content-Security-Policy that confines proxied content to relay origins. Security-critical directive chain; needs dedicated differential-harness decomposition.
-  function fixedCSP(servers, options = {}) {
-    const loc = globalThis.location;
-    const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
+  // buildConnectSrc gathers the connect-src origin allow-list: 'self', the proxy's
+  // own WebSocket origin, every normalized relay origin (loopback WS permitted), and
+  // -- under challenge compatibility -- the fixed Cloudflare challenge host. Returns
+  // the space-joined directive value. Adds NO wildcard and NO direct-egress capability;
+  // relay fetches still route through the proxy transport.
+  function buildConnectSrc(servers, ws, challengeCompat) {
     const connect = new Set(["'self'", ws]);
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
+    if (challengeCompat) connect.add("https://challenges.cloudflare.com");
+    return Array.from(connect).join(' ');
+  }
+  function fixedCSP(servers, options = {}) {
+    const loc = globalThis.location;
+    const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
     // Challenge-compatibility projection (default OFF; caller-gated by the two-signal
     // arm+classifier chain in cmd/wasm-kernel). When ON we ADD the challenge host to
-    // script/connect/frame/child so a real human's Cloudflare challenge can execute;
-    // it adds NO wildcard and NO direct-egress capability (fetches still route through
-    // the proxy transport), and it NEVER manufactures eval -- 'unsafe-eval' rides the
-    // existing allowDynamicCompile grant below, honoring the target CSP only (F3).
+    // script/connect/frame/child (connect via buildConnectSrc) so a real human's
+    // Cloudflare challenge can execute; it adds NO wildcard and NO direct-egress
+    // capability (fetches still route through the proxy transport), and it NEVER
+    // manufactures eval -- 'unsafe-eval' rides the existing allowDynamicCompile grant
+    // below, honoring the target CSP only (F3).
     const challengeCompat = !!(options && options.challengeCompat);
     const cf = challengeCompat ? " https://challenges.cloudflare.com" : "";
-    if (challengeCompat) connect.add("https://challenges.cloudflare.com");
+    const connectSrc = buildConnectSrc(servers, ws, challengeCompat);
     const script = options && options.allowDynamicCompile ? "script-src 'self' blob: 'nonce-zp' 'unsafe-eval' 'wasm-unsafe-eval'" : "script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'";
-    return "default-src 'none'; " + script + cf + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:" + cf + "; child-src 'self' blob: data:" + cf + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    return "default-src 'none'; " + script + cf + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + connectSrc + "; frame-src 'self' blob: data:" + cf + "; child-src 'self' blob: data:" + cf + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
   }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');

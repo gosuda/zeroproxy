@@ -495,6 +495,58 @@ test('membrane: armed challengeCompat adds EXACTLY the challenge host and nothin
   }
 });
 
+// ---------------------------------------------------------------------------
+// Invariant 3c: connect-src confines egress to self + proxy WS + relay origins
+//
+// connect-src is the egress-confinement directive -- the ONLY allow-list of
+// origins proxied content may open a connection to. buildConnectSrc gathers it
+// from 'self', the proxy's own WebSocket origin, and every normalized relay
+// origin (deduped). A regression that DROPPED a relay origin breaks the
+// transport; one that leaked a wildcard or an unnormalized host breaches the
+// no-direct-egress invariant. Every fixedCSP test above used empty servers and
+// never exercised this gathering -- pin it behaviorally here.
+// ---------------------------------------------------------------------------
+
+test('membrane: fixedCSP connect-src confines to self + proxy WS + relay origins (deduped, no wildcard)', () => {
+  const { ctx } = loadServiceWorker();
+  // Collect ALL connect-src directives (parseCSPEntries preserves duplicates) and
+  // require EXACTLY one. A smuggled `connect-src *; ...; connect-src 'self'` would
+  // have the browser honor the wildcard FIRST directive -- a Map().get() would
+  // collapse to the last and miss it. Assert single, then return its tokens.
+  const connectOf = (servers, options) => {
+    const entries = parseCSPEntries(ctx.ZP.fixedCSP(servers, options)).filter(
+      ([name]) => name === 'connect-src',
+    );
+    assert.equal(entries.length, 1, 'fixedCSP must emit exactly one connect-src directive');
+    return entries[0][1];
+  };
+
+  // Two distinct relay origins -> both present, after 'self' and the proxy WS origin.
+  const two = connectOf(['wss://relay-a.example/p', 'wss://relay-b.example:8443/q']);
+  assert.deepEqual(
+    two,
+    ["'self'", 'wss://proxy.example', 'wss://relay-a.example', 'wss://relay-b.example:8443'],
+    'connect-src = self, proxy WS, then each relay origin in order',
+  );
+
+  // Same origin via two different paths -> deduped to a SINGLE origin token.
+  assert.deepEqual(
+    connectOf(['wss://relay-a.example/p1', 'wss://relay-a.example/p2']),
+    ["'self'", 'wss://proxy.example', 'wss://relay-a.example'],
+    'duplicate relay origins collapse to a single connect-src token',
+  );
+
+  // Never a bare wildcard, regardless of relay input.
+  assert.equal(two.includes('*'), false, 'connect-src must never carry a bare wildcard');
+
+  // Armed: the challenge host is appended ALONGSIDE the relay origins (not instead).
+  assert.deepEqual(
+    connectOf(['wss://relay-a.example/p'], { challengeCompat: true }),
+    ["'self'", 'wss://proxy.example', 'wss://relay-a.example', 'https://challenges.cloudflare.com'],
+    'armed connect-src keeps relay origins and appends exactly the challenge host',
+  );
+});
+
 test('membrane: challengeCompat honors but never manufactures the eval grant (F3)', () => {
   const { ctx } = loadServiceWorker();
   // Bare 'unsafe-eval' (not the distinct 'wasm-unsafe-eval') is the discriminator.
