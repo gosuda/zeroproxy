@@ -60,6 +60,9 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
+      - name: Run Go js/wasm tests
+        run: npm run test:wasm
+
       - name: Run JavaScript and Puppeteer tests
         run: npm test
 
