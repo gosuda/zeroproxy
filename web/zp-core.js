@@ -138,37 +138,47 @@
     const params = new URLSearchParams(raw && raw[0] === '#' ? raw.slice(1) : raw);
     return relayServersForShare(params.getAll('server'), options);
   }
-  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TODO(complexity): membrane relay-server normalizer (cog 37); validates/canonicalizes operator-supplied relay endpoints (scheme, host, dedup) that gate every proxied request. Security-sensitive; needs dedicated differential-harness decomposition. Mirrors Go internal/shareurl.NormalizeRelayServers.
+  // normalizeRelayServer parses one operator-supplied relay endpoint and returns
+  // its canonical href, or throws. Admissible schemes are wss:// and — only when
+  // allowLoopbackWS — ws:// to a loopback host; embedded credentials or a fragment
+  // are rejected. Canonicalization strips userinfo and hash.
+  function normalizeRelayServer(value, options) {
+    let u;
+    try { u = new URL(value); } catch { throw safeError('MALFORMED_ROUTE'); }
+    if (u.username || u.password || u.hash) throw safeError('MALFORMED_ROUTE');
+    if (u.protocol === 'ws:') {
+      if (!options.allowLoopbackWS || !isLoopbackHost(u.hostname)) throw safeError('TARGET_PROTOCOL_BLOCKED');
+    } else if (u.protocol !== 'wss:') {
+      throw safeError('TARGET_PROTOCOL_BLOCKED');
+    }
+    u.username = '';
+    u.password = '';
+    u.hash = '';
+    return u.href;
+  }
+  // admitRelayServer folds one raw candidate into acc {out, seen, total}: it
+  // enforces the per-list count cap (before blank-skip, so an over-cap list fails
+  // even when the surplus entry is blank), canonicalizes via normalizeRelayServer,
+  // charges the aggregate byte budget (duplicates included), and appends only
+  // first-seen endpoints. Throws on any cap/budget breach or a blocked endpoint.
+  function admitRelayServer(acc, raw, options) {
+    if (acc.out.length >= MAX_RELAY_SERVERS) throw safeError('MALFORMED_ROUTE');
+    const value = String(raw || '').trim();
+    if (!value) return;
+    const normalized = normalizeRelayServer(value, options);
+    acc.total += normalized.length;
+    if (acc.total > MAX_RELAY_SERVER_BYTES) throw safeError('MALFORMED_ROUTE');
+    if (!acc.seen.has(normalized)) {
+      acc.seen.add(normalized);
+      acc.out.push(normalized);
+    }
+  }
   function normalizeRelayServers(values, options = {}) {
     if (!values) return [];
     const list = Array.isArray(values) ? values : [values];
-    const out = [];
-    const seen = new Set();
-    let total = 0;
-    for (const raw of list) {
-      if (out.length >= MAX_RELAY_SERVERS) throw safeError('MALFORMED_ROUTE');
-      const value = String(raw || '').trim();
-      if (!value) continue;
-      let u;
-      try { u = new URL(value); } catch { throw safeError('MALFORMED_ROUTE'); }
-      if (u.username || u.password || u.hash) throw safeError('MALFORMED_ROUTE');
-      if (u.protocol === 'ws:') {
-        if (!options.allowLoopbackWS || !isLoopbackHost(u.hostname)) throw safeError('TARGET_PROTOCOL_BLOCKED');
-      } else if (u.protocol !== 'wss:') {
-        throw safeError('TARGET_PROTOCOL_BLOCKED');
-      }
-      u.username = '';
-      u.password = '';
-      u.hash = '';
-      const normalized = u.href;
-      total += normalized.length;
-      if (total > MAX_RELAY_SERVER_BYTES) throw safeError('MALFORMED_ROUTE');
-      if (!seen.has(normalized)) {
-        seen.add(normalized);
-        out.push(normalized);
-      }
-    }
-    return out;
+    const acc = { out: [], seen: new Set(), total: 0 };
+    for (const raw of list) admitRelayServer(acc, raw, options);
+    return acc.out;
   }
   function isLoopbackHost(host) {
     const h = String(host || '').toLowerCase();
