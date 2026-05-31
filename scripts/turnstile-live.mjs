@@ -66,15 +66,29 @@ function endSolve() {
   resolve();
 }
 
+// shutdownAndExit runs the full teardown (browser + proxy + tmpdir) once, then exits.
+// We disabled puppeteer's own SIGINT/SIGTERM/SIGHUP handlers (they exit before our
+// verdict prints AND only close the browser, leaking the proxy + tmpdir), so EVERY
+// termination signal must route here or those resources orphan.
+function shutdownAndExit(code) {
+  if (shuttingDown) return;
+  runCleanups().finally(() => process.exit(code));
+}
+
 process.on('SIGINT', () => {
   if (shuttingDown) return; // teardown already in progress: ignore repeat Ctrl-C
   if (solveResolve) {
+    // Ctrl-C during the solve window: end it so the verdict prints, then main's
+    // finally tears down and the post-settle exit fires.
     endSolve();
     return;
   }
-  // setup-phase Ctrl-C: await async teardown before exiting, never exit mid-close.
-  runCleanups().finally(() => process.exit(130));
+  shutdownAndExit(130); // setup-phase Ctrl-C: nothing to report yet, just tear down.
 });
+// SIGTERM (kill) / SIGHUP (terminal closed) are not "show me the verdict" signals --
+// tear the stack down and exit so nothing orphans. 128 + signal number, by convention.
+process.on('SIGTERM', () => shutdownAndExit(143));
+process.on('SIGHUP', () => shutdownAndExit(129));
 
 function log(msg) {
   process.stdout.write(`[turnstile-live] ${msg}\n`);
