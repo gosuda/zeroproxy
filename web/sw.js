@@ -338,11 +338,19 @@ function shouldRewriteScript(req, resp) {
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
 }
-// B4 two-signal gate (URL half): mirror the kernel's targetIsChallengeDocument
-// URL test (cmd/wasm-kernel/challenge.go) using the FINAL URL ONLY. The script
-// path projects the challenge CSP only when the per-tab arm bit AND this
-// classification both hold, so non-challenge scripts/workers on an armed tab stay
-// byte-identical. Header/body are never read here; this grants no egress.
+// B4 two-signal gate (URL half): classify on the REQUEST target URL's host/path
+// (same host/path test as the kernel's targetIsChallengeDocument in
+// cmd/wasm-kernel/challenge.go). Project the challenge CSP only when the per-tab
+// arm bit AND this classification both hold; non-challenge scripts on an armed tab
+// stay byte-identical. Header/body are never read here; this grants no egress.
+// KNOWN INCREMENT-1 GAP (deferred to B3): request-URL-only classification — no
+// cf-mitigated header, no follow-redirect final URL. Both error directions require
+// the arm bit and stay inside the bounded projection: under-classify (header-only /
+// redirect-TO-challenge script) -> restrictive default CSP, challenge may not run;
+// over-classify (challenge-looking request URL that redirects AWAY to a
+// non-challenge script) -> the bounded projection applies, adding ONLY the fixed
+// challenges.cloudflare.com host, with 'unsafe-eval' only if the target's own CSP
+// already granted it (never manufactured). Neither direction widens egress.
 function isChallengeURL(targetUrl) {
   let u;
   try { u = new URL(targetUrl); } catch { return false; }

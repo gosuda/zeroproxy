@@ -698,6 +698,34 @@ unchanged. Real-zone clearance is left to a human-run live smoke test (the
 not part of any automated gate; it is run by a person against a live zone when
 verification against the real service is desired.
 
+### Known limitations (Increment 1)
+
+These are documented compatibility gaps, not security gaps. Each is bounded by the
+two-signal gate (the tab must be armed) and stays inside the bounded projection.
+
+- **The service-worker script path classifies on the request URL only.** The kernel
+  DOCUMENT path (`cmd/wasm-kernel/challenge.go`) classifies on the `cf-mitigated`
+  header OR the final URL. The service-worker SCRIPT path (`web/sw.js`
+  `rewriteScriptResponse` / `isChallengeURL`) classifies on the request target
+  URL's host/path ONLY — it deliberately reads no response header and does not
+  resolve a follow-redirect final URL. Two bounded mis-classifications follow, both
+  requiring the arm bit:
+  - *Under-classify*: a header-only challenge script, or a script request that
+    redirects TO a challenge URL, receives the restrictive default CSP and the
+    challenge subresource may fail to execute. Fail-safe; nothing is weakened.
+  - *Over-classify*: a challenge-looking request URL (`challenges.cloudflare.com`
+    or `/cdn-cgi/challenge-platform/`) that redirects AWAY to a non-challenge
+    script receives the challenge projection. That projection adds ONLY the fixed
+    `challenges.cloudflare.com` host to script/connect/frame/child-src, with
+    `'unsafe-eval'` present only if the target's own CSP already granted it (never
+    manufactured). It cannot widen egress or admit an arbitrary origin.
+
+  Closing this gap (consulting the header / final URL on the script path) is
+  deferred to a future increment driven by live measurement: re-deriving the
+  classification on the membrane script path without a live signal would add
+  membrane complexity for an edge that real Cloudflare challenges — served from the
+  challenge host/path — do not currently exercise.
+
 ### Commits (Increment 1, B1-B6)
 
 | Step | Commit | Layer | What it added |
