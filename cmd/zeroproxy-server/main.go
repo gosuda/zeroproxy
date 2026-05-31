@@ -79,8 +79,7 @@ func (rt route) matches(path string) bool {
 }
 
 // routes is evaluated in order; the first matching entry wins and the rest are
-// skipped, exactly mirroring the top-to-bottom switch this table replaced.
-// Unmatched paths fall through to the default-deny in handle.
+// skipped. Unmatched paths fall through to the default-deny in handle.
 var routes = []route{
 	{pat: "/", handler: redirectToControl},
 	{pat: "/index.html", handler: redirectToControl},
@@ -145,7 +144,7 @@ func redirectLegacy(w http.ResponseWriter, r *http.Request, nextPath string) {
 }
 
 // legacyControlRedirects maps legacy /__zp/ control paths to their canonical
-// /zp/ targets. The lookup replaces the outer switch's exact cases.
+// /zp/ targets.
 var legacyControlRedirects = map[string]string{
 	"/__zp/ws-pipe":             controlPrefix + "ws-pipe",
 	"/__zp/kernel.wasm":         controlPrefix + "kernel.wasm",
