@@ -1401,9 +1401,7 @@ impl<'a> Rewriter<'a> {
                     self.render_expression(&expr.expression),
                 )],
             ),
-            Expression::ChainExpression(expr) => {
-                self.render_chain_element(&expr.expression)
-            }
+            Expression::ChainExpression(expr) => self.render_chain_element(&expr.expression),
             Expression::TemplateLiteral(expr) => self.render_span_with(
                 expr.span,
                 expr.expressions
