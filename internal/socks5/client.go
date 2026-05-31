@@ -33,15 +33,16 @@ type Options struct {
 // ConnectDomain performs RFC 1928 CONNECT using DOMAINNAME ATYP. If Username
 // is non-empty, RFC 1929 username/password authentication is offered and the
 // username carries the Tor IsolateSOCKSAuth token.
+//
+// The handshake is driven as an ordered sequence of protocol phases:
+// target validation, the method-negotiation greeting (write then read,
+// dispatching to username/password auth when the relay selects it), the
+// CONNECT request emission, and reply parsing. The deadline plumbing and the
+// pre-flight cancellation check are kept inline so SetDeadline's defer fires
+// on ConnectDomain's own return and the cancellation gate keeps its exact
+// position relative to the greeting.
 func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
-	host := normalizeDomain(opt.Host)
-	if host == "" || len(host) > 255 {
-		return fmt.Errorf("socks5: invalid domain length")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return fmt.Errorf("socks5: IP literals are forbidden; DOMAINNAME required")
-	}
-	port, err := parsePort(opt.Port)
+	host, port, err := resolveTarget(opt)
 	if err != nil {
 		return err
 	}
@@ -57,6 +58,45 @@ func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	default:
 	}
 
+	if err := writeGreeting(rw, opt); err != nil {
+		return err
+	}
+	if err := readMethodChoice(ctx, rw, opt); err != nil {
+		return err
+	}
+	if err := writeConnectRequest(rw, host, port); err != nil {
+		return err
+	}
+	if err := readConnectReply(ctx, rw); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// resolveTarget validates and normalizes the CONNECT target. It runs the
+// pre-cancellation prologue only (domain normalization/length, IP-literal
+// rejection, port parsing); the cancellation gate and any auth-field checks
+// remain in ConnectDomain so their ordering is unchanged.
+func resolveTarget(opt Options) (string, int, error) {
+	host := normalizeDomain(opt.Host)
+	if host == "" || len(host) > 255 {
+		return "", 0, fmt.Errorf("socks5: invalid domain length")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return "", 0, fmt.Errorf("socks5: IP literals are forbidden; DOMAINNAME required")
+	}
+	port, err := parsePort(opt.Port)
+	if err != nil {
+		return "", 0, err
+	}
+	return host, port, nil
+}
+
+// writeGreeting emits the method-negotiation greeting. It offers NoAuth and,
+// when a username is present, prepends username/password after validating the
+// auth field lengths. This runs after the cancellation gate so the
+// "auth field too long" error never preempts ctx cancellation.
+func writeGreeting(rw io.ReadWriter, opt Options) error {
 	methods := []byte{methodNoAuth}
 	if opt.Username != "" {
 		if len(opt.Username) > 255 || len(opt.Password) > 255 {
@@ -67,6 +107,13 @@ func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	if _, err := rw.Write(append([]byte{version5, byte(len(methods))}, methods...)); err != nil {
 		return err
 	}
+	return nil
+}
+
+// readMethodChoice reads the relay's method selection, gates on the version
+// byte, rejects "no acceptable method", and runs username/password auth when
+// selected. Any other non-NoAuth selection is rejected as unsupported.
+func readMethodChoice(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	var choice [2]byte
 	if _, err := io.ReadFull(ctxReader{ctx: ctx, r: rw}, choice[:]); err != nil {
 		return err
@@ -84,7 +131,11 @@ func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	} else if choice[1] != methodNoAuth {
 		return fmt.Errorf("socks5: unsupported auth method %d", choice[1])
 	}
+	return nil
+}
 
+// writeConnectRequest emits the RFC 1928 CONNECT request with DOMAINNAME ATYP.
+func writeConnectRequest(rw io.ReadWriter, host string, port int) error {
 	req := make([]byte, 0, 7+len(host))
 	req = append(req, version5, cmdConnect, 0x00, atypDomainName, byte(len(host)))
 	req = append(req, host...)
@@ -94,6 +145,14 @@ func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	if _, err := rw.Write(req); err != nil {
 		return err
 	}
+	return nil
+}
+
+// readConnectReply parses the CONNECT reply: version byte, reply code,
+// reserved byte, then discards the bound address per its ATYP. It returns the
+// bound-address consumption error directly; ConnectDomain follows a successful
+// reply with ctx.Err() so a late cancellation still surfaces.
+func readConnectReply(ctx context.Context, rw io.ReadWriter) error {
 	var hdr [4]byte
 	if _, err := io.ReadFull(ctxReader{ctx: ctx, r: rw}, hdr[:]); err != nil {
 		return err
@@ -107,10 +166,7 @@ func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	if hdr[2] != 0x00 {
 		return errors.New("socks5: invalid reserved byte")
 	}
-	if err := discardBindAddress(ctx, rw, hdr[3]); err != nil {
-		return err
-	}
-	return ctx.Err()
+	return discardBindAddress(ctx, rw, hdr[3])
 }
 
 func authUserPass(ctx context.Context, rw io.ReadWriter, username, password string) error {

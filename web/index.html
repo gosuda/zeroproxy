@@ -1,17 +1,18 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'">
 <title>ZeroProxy</title>
 <style>
-  body{font:16px system-ui,sans-serif;margin:2rem;max-width:52rem} form{display:flex;gap:.5rem} input{flex:1;padding:.6rem} button{padding:.6rem .9rem}.err{color:#991b1b}
+  body{font:16px system-ui,sans-serif;margin:2rem;max-width:52rem} form{display:flex;gap:.5rem} #url{flex:1;padding:.6rem} button{padding:.6rem .9rem}.err{color:#991b1b}.opt{margin:.5rem 0;font-size:.9rem;color:#475569;display:flex;gap:.4rem;align-items:center}
 </style>
 <h1>ZeroProxy</h1>
 <p>Enter an HTTP or HTTPS URL. Target pages render through <code>/zp/p/&lt;encrypted&gt;#k=&lt;key&gt;</code> on the proxy origin.</p>
-<form id="open"><input id="url" autocomplete="url" spellcheck="false" placeholder="https://example.com" required><button>Open</button></form>
+<form id="open"><input id="url" type="url" autocomplete="url" spellcheck="false" placeholder="https://example.com" required><button>Open</button></form>
+<label class="opt"><input id="challenge-compat" type="checkbox"> Challenge compatibility mode (Cloudflare Turnstile)</label>
 <p id="status" role="status"></p>
 <script src="/zp/assets/zp-core.js"></script>
-<script>
+<script nonce="zp">
 (() => {
   'use strict';
   const status = document.getElementById('status');
@@ -56,8 +57,14 @@
     const target = ZP.canonicalTargetURL(targetUrl).href;
     const share = await ZP.encryptShareURL(target);
     let servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
+    // Opt-in challenge-compat arm intent (default OFF). This is the ONLY user
+    // surface for the arm: it rides the TRUSTED window->SW ZP_OPEN_SHARE hop and
+    // is consumed birth-only by createTab. The cold direct-link path (handleShare)
+    // has no checkbox and stays unarmed by design.
+    const cc = document.getElementById('challenge-compat');
+    const challengeCompat = !!(cc && cc.checked);
     try {
-      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers });
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat });
       if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
     } catch {}
     location.assign(proxyOrigin() + ZP.makeSharePath(share.encrypted) + ZP.makeShareFragment(share.key, servers));

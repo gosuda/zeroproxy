@@ -45,6 +45,7 @@ func main() {
 	select {}
 }
 
+//nolint:cyclop // TODO(complexity): kernel relay-ensure (cyclop 11); lazily establishes/validates the relay set the wasm kernel routes through. Membrane bootstrap; needs dedicated differential-harness decomposition.
 func (k *Kernel) ensure(ctx context.Context, servers []string) error {
 	server := selectedRelayServer(servers)
 	k.mu.Lock()
@@ -104,18 +105,24 @@ func (k *Kernel) jsCookieSet(this js.Value, args []js.Value) any {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	tab := k.tabFromValues(v.Get("tabId").String(), v.Get("streamIsolationKey").String())
+	tab := k.tabFromValues(v.Get("tabId").String(), v.Get("streamIsolationKey").String(), false)
 	tab.CookieJar.SetDocumentCookie(u, cookieLine)
 	return true
 }
 
+//nolint:cyclop,gocognit // TODO(complexity): JS<->Go HTTP bridge entrypoint (cyclop / gocognit 42); marshals a fetch from JS, drives the proxied request, and streams the response back across the wasm boundary. Core membrane data path; grinding risks a regression. Needs dedicated differential-harness decomposition.
 func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return rejected("BAD_REQUEST")
 	}
 	reqv := args[0]
 	return promise(func(resolve, reject js.Value) {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, abortCancel := swhttp.ContextWithAbortSignal(timeoutCtx, reqv)
+		cancel := func() {
+			abortCancel()
+			timeoutCancel()
+		}
 		releaseOnReturn := true
 		defer func() {
 			if releaseOnReturn {
@@ -141,8 +148,11 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			resolve.Invoke(safeResponse(classifyErr(err), statusForErr(err), req.URL.Host))
 			return
 		}
-		if tab.CookieJar != nil {
+		dynamicCompileAllowed := targetDynamicCompileAllowed(resp.Header)
+		referrerPolicy := targetReferrerPolicy(resp.Header)
+		if tab.CookieJar != nil && req.Header.Get("X-Zp-Fetch-Credentials") != "omit" {
 			tab.CookieJar.SetCookies(finalURL, resp.Cookies())
+			broadcastCookieSync(tab, finalURL)
 		}
 		transformed := false
 		decoded := false
@@ -154,12 +164,17 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			pr, pw := io.Pipe()
 			go func() {
 				err := htmltx.TransformTo(pw, source, htmltx.Options{
-					TabID:          tab.TabID,
-					EntryID:        req.Header.Get("X-Zp-Entry-Id"),
-					TargetURL:      finalURL,
-					DocumentCookie: tab.CookieJar.DocumentCookie(finalURL),
-					RuntimeToken:   req.Header.Get("X-Zp-Runtime-Token"),
-					Servers:        headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+					TabID:                 tab.TabID,
+					EntryID:               req.Header.Get("X-Zp-Entry-Id"),
+					TargetURL:             finalURL,
+					DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
+					DocumentReferrer:      req.Header.Get("X-Zp-Document-Referrer"),
+					RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
+					Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+					DynamicCompileAllowed: dynamicCompileAllowed,
+					ReferrerPolicy:        referrerPolicy,
+					ScriptRewriter:        rewriteScriptFromJS,
+					CSSRewriter:           rewriteCSSFromJS,
 				})
 				closeErr := source.Close()
 				if err != nil {
@@ -180,12 +195,35 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			transformed = true
 			decoded = true
 		}
-		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+		if dynamicCompileAllowed {
+			resp.Header.Set("X-ZP-Dynamic-Compile", "1")
+		}
+		// Two-signal challenge-compat gate, computed on the RAW target header/URL
+		// before policy construction. The no-store overwrite is skipped ONLY for a
+		// classified challenge SUBRESOURCE (never the document) and ONLY when the
+		// tab is armed; the document-vs-subresource discrimination lives in the
+		// flat, natively-tested challengeSubresourceSkip helper. The SAME bool
+		// feeds both ConstructorPolicy applications (here and inside ResponseToJS)
+		// so the second pass cannot silently re-impose no-store.
+		challengeSub := challengeSubresourceSkip(tab.ChallengeCompat, isDocumentRequest(req), resp.Header, finalURL)
+		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded, challengeSub)
+		applyChallengeCompat(resp.Header, tab.ChallengeCompat, finalURL)
+		resp.Header.Set("X-ZP-Response-URL", finalURL.String())
+		if finalURL.String() != req.URL.String() {
+			resp.Header.Set("X-ZP-Response-Redirected", "1")
+		} else {
+			resp.Header.Set("X-ZP-Response-Redirected", "0")
+		}
 		if resp.Body != nil {
-			resp.Body = &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+			body := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+			resp.Body = body
+			go func() {
+				<-ctx.Done()
+				_ = body.Close()
+			}()
 			releaseOnReturn = false
 		}
-		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
+		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded, challengeSub)
 		if err != nil {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
@@ -196,6 +234,144 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 		}
 		resolve.Invoke(jsResp)
 	})
+}
+
+func broadcastCookieSync(tab *zphttp.TabState, targetURL *url.URL) {
+	if tab == nil || tab.CookieJar == nil || targetURL == nil {
+		return
+	}
+	fn := js.Global().Get("__zp_cookie_sync")
+	if fn.Type() != js.TypeFunction {
+		return
+	}
+	fn.Invoke(map[string]any{
+		"tabId":         tab.TabID,
+		"targetUrl":     targetURL.String(),
+		"cookieString":  tab.CookieJar.DocumentCookie(targetURL),
+		"cookieRecords": cookieRecordsForJS(tab.CookieJar.VisibleRecords(targetURL)),
+	})
+}
+
+func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
+	out := make([]any, 0, len(records))
+	for _, r := range records {
+		rec := map[string]any{
+			"name":     r.Name,
+			"value":    r.Value,
+			"domain":   r.Domain,
+			"hostOnly": r.HostOnly,
+			"path":     r.Path,
+			"secure":   r.Secure,
+			"sameSite": r.SameSite,
+		}
+		if r.ExpiresMS != nil {
+			rec["expiresMs"] = *r.ExpiresMS
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func rewriteScriptFromJS(source, kind, targetURL, controlPrefix string) (string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteScript").Type() != js.TypeFunction {
+		return "", fmt.Errorf("REALM_INJECTION_FAILURE")
+	}
+	out := rewriter.Call("rewriteScript", source, map[string]any{
+		"kind":          kind,
+		"targetUrl":     targetURL,
+		"controlPrefix": controlPrefix,
+		"strict":        true,
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("code").String(), nil
+	}
+	return "", fmt.Errorf("REWRITE_FAILED")
+}
+
+func rewriteCSSFromJS(source, baseURL string) (string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteCSS").Type() != js.TypeFunction {
+		return source, nil
+	}
+	out := rewriter.Call("rewriteCSS", source, map[string]any{
+		"baseUrl":       baseURL,
+		"controlPrefix": "/zp/",
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("code").String(), nil
+	}
+	return "", fmt.Errorf("CSS_REWRITE_FAILED")
+}
+
+func targetDynamicCompileAllowed(h http.Header) bool {
+	policies := h.Values("Content-Security-Policy")
+	if len(policies) == 0 {
+		return true
+	}
+	for _, policy := range policies {
+		if !cspPolicyAllowsEval(policy) {
+			return false
+		}
+	}
+	return true
+}
+
+func targetReferrerPolicy(h http.Header) string {
+	for _, header := range h.Values("Referrer-Policy") {
+		for _, part := range strings.Split(header, ",") {
+			if policy := normalizeReferrerPolicy(part); policy != "" {
+				return policy
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeReferrerPolicy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "no-referrer", "no-referrer-when-downgrade", "origin", "origin-when-cross-origin", "same-origin", "strict-origin", "strict-origin-when-cross-origin", "unsafe-url":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
+}
+
+func cspPolicyAllowsEval(policy string) bool {
+	directives := parseCSPDirectives(policy)
+	sources, ok := directives["script-src"]
+	if !ok {
+		sources, ok = directives["default-src"]
+	}
+	if !ok {
+		return true
+	}
+	for _, source := range sources {
+		if source == "'unsafe-eval'" || source == "unsafe-eval" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCSPDirectives(policy string) map[string][]string {
+	out := make(map[string][]string)
+	for _, raw := range strings.Split(policy, ";") {
+		fields := strings.Fields(strings.TrimSpace(raw))
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.ToLower(fields[0])
+		if _, exists := out[name]; exists {
+			continue
+		}
+		values := make([]string, 0, len(fields)-1)
+		for _, field := range fields[1:] {
+			values = append(values, strings.ToLower(field))
+		}
+		out[name] = values
+	}
+	return out
 }
 
 func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
@@ -218,8 +394,8 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 			return
 		}
 		protocols := jsStringArray(opts.Get("protocols"))
-		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String())
-		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab)
+		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String(), false)
+		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab, websocketOrigin(opts.Get("documentUrl").String()))
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -237,6 +413,14 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 		}
 		resolve.Invoke(stream)
 	})
+}
+
+func websocketOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func selectedRelayServer(servers []string) string {
@@ -292,16 +476,33 @@ func headerServers(raw string) []string {
 }
 
 func (k *Kernel) tabFor(req *http.Request) *zphttp.TabState {
-	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"))
+	// B4 INBOUND-STRIP OBLIGATION (mirror of the outbound B4 STRIP OBLIGATION in
+	// challenge.go applyChallengeCompat): X-Zp-Challenge-Compat-Arm is a
+	// page-influenceable request header. In B1 nothing trusted sends it, so this
+	// read is doubly inert: birth-only tab semantics (see tabFromValues) drop a
+	// forged arm on any already-born tab, and even an armed tab has no marker
+	// consumer yet. But when B4 lands the trusted arm sender, web/sw.js
+	// transportFetch and web/runtime-prelude.js fetchThroughRuntime MUST
+	// authoritatively set/delete this header the SAME way they handle
+	// X-ZP-Tab-Id / X-ZP-Runtime-Token, so a proxied page can never supply it.
+	armed := req.Header.Get("X-Zp-Challenge-Compat-Arm") == "1"
+	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"), armed)
 }
 
-func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
+func (k *Kernel) tabFromValues(tabID, keyB64 string, challengeCompat bool) *zphttp.TabState {
 	if tabID == "" {
 		tabID = "default"
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if t := k.tabs[tabID]; t != nil {
+		// SECURITY INVARIANT (birth-only arm): an existing tab is returned AS-IS
+		// without ever touching t.ChallengeCompat. ChallengeCompat must be set
+		// ONLY at tab birth (below) because X-Zp-Challenge-Compat-Arm is
+		// page-forgeable (see tabFor). This early return is what prevents a
+		// proxied page from self-arming a live tab; honoring challengeCompat on
+		// this existing-tab path would convert the forgeable inbound header into
+		// an active self-arm primitive. Do NOT re-arm here.
 		return t
 	}
 	key, _ := base64.RawURLEncoding.DecodeString(keyB64)
@@ -309,11 +510,12 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 		key = make([]byte, 32)
 		_, _ = rand.Read(key)
 	}
-	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key}
+	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key, ChallengeCompat: challengeCompat}
 	k.tabs[tabID] = t
 	return t
 }
 
+//nolint:cyclop,gocognit // TODO(complexity): JS WebSocket stream adapter (cyclop / gocognit 24); bridges a wsproto.Conn to a JS-side duplex stream (send/recv/close demux). Protocol bridge; needs dedicated differential-harness decomposition.
 func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *wsproto.Conn) js.Value {
 	handlers := js.Value{}
 	var start sync.Once
@@ -370,6 +572,7 @@ func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *
 func promise(fn func(resolve, reject js.Value)) js.Value {
 	return js.Global().Get("Promise").New(js.FuncOf(func(this js.Value, args []js.Value) any { go fn(args[0], args[1]); return nil }))
 }
+
 func rejected(msg string) js.Value {
 	return promise(func(resolve, reject js.Value) { reject.Invoke(jsError(msg)) })
 }
@@ -391,6 +594,7 @@ func jsStringArray(v js.Value) []string {
 	}
 	return out
 }
+
 func jsPayload(v js.Value) ([]byte, bool) {
 	if v.Type() == js.TypeString {
 		return []byte(v.String()), false
@@ -430,6 +634,7 @@ func safeResponse(code string, status int, host ...string) js.Value {
 func htmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;").Replace(s)
 }
+
 func classifyErr(err error) string {
 	s := err.Error()
 	switch {
@@ -447,6 +652,7 @@ func classifyErr(err error) string {
 		return "TARGET_CONNECT_FAILED"
 	}
 }
+
 func statusForErr(err error) int {
 	c := classifyErr(err)
 	if c == "TARGET_PROTOCOL_BLOCKED" || c == "POLICY_BLOCKED" {
@@ -454,6 +660,7 @@ func statusForErr(err error) int {
 	}
 	return http.StatusBadGateway
 }
+
 func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }

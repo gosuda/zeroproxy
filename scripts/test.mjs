@@ -1,13 +1,17 @@
 import { spawnSync } from 'node:child_process';
 
 const mode = process.argv[2] || 'all';
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('npm_')));
+const env = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !key.startsWith('npm_')),
+);
 
 function run(cmd, allowRetry = false) {
   const first = runOnce(cmd);
   if (first.status === 0) return;
   if (allowRetry && /\bECONNRESET\b/.test(resultText(first))) {
-    process.stderr.write('\nRetrying after transient ECONNRESET from browser/relay test transport...\n');
+    process.stderr.write(
+      '\nRetrying after transient ECONNRESET from browser/relay test transport...\n',
+    );
     const second = runOnce(cmd);
     if (second.status === 0) return;
     throw commandError(cmd, second);
@@ -46,8 +50,8 @@ function commandError(cmd, result) {
 if (mode === 'js') {
   run('node --test test/js/*.test.js');
 } else if (mode === 'e2e') {
-  run('node --test test/e2e/proxy.test.js', true);
+  run('node --test test/e2e/*.test.js', true);
 } else {
   run('node --test test/js/*.test.js');
-  run('node --test test/e2e/proxy.test.js', true);
+  run('node --test test/e2e/*.test.js', true);
 }

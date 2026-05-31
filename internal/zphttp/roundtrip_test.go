@@ -23,6 +23,9 @@ func TestBuildHTTP1RequestConstructsTargetHeaders(t *testing.T) {
 	src.Header.Set("Cookie", "browser=bad")
 	src.Header.Set("Connection", "keep-alive")
 	src.Header.Set("Accept", "text/html")
+	src.Header.Set("Sec-CH-UA-Platform", `"macOS"`)
+	src.Header.Set("Sec-CH-UA-Full-Version", `"148.0.0.0"`)
+	src.Header.Set("X-ZP-Document-URL", target.String())
 	wire, err := BuildHTTP1Request(src, target, jar)
 	if err != nil {
 		t.Fatal(err)
@@ -39,8 +42,65 @@ func TestBuildHTTP1RequestConstructsTargetHeaders(t *testing.T) {
 	if wire.Header.Get("User-Agent") != TargetUserAgent {
 		t.Fatalf("user-agent not normalized: %#v", wire.Header)
 	}
+	if wire.Header.Get("Sec-CH-UA-Platform") != `"Windows"` || wire.Header.Get("Sec-CH-UA-Full-Version") != `"134.0.0.0"` {
+		t.Fatalf("client hints not normalized: %#v", wire.Header)
+	}
 	if wire.Header.Get("Origin") != "https://example.com" || wire.Header.Get("Referer") != target.String() {
 		t.Fatalf("origin/referer wrong: %#v", wire.Header)
+	}
+}
+
+func TestBuildHTTP1RequestHonorsFetchCredentialsAndReferrerPolicy(t *testing.T) {
+	target, _ := url.Parse("https://api.example.test/data")
+	source, _ := url.Parse("https://app.example.test/page?q=1#secret")
+	jar := cookiejar.New()
+	jar.SetDocumentCookie(target, "sid=1; Path=/; Secure")
+
+	src, _ := http.NewRequest("GET", target.String(), nil)
+	src.Header.Set("X-ZP-Document-URL", source.String())
+	src.Header.Set("X-ZP-Fetch-Credentials", "same-origin")
+	src.Header.Set("X-ZP-Fetch-Mode", "cors")
+	src.Header.Set("X-ZP-Fetch-Referrer-Policy", "origin")
+	wire, err := BuildHTTP1Request(src, target, jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.Header.Get("Cookie"); got != "" {
+		t.Fatalf("cross-origin same-origin credentials leaked cookies: %q", got)
+	}
+	if got := wire.Header.Get("Origin"); got != source.Scheme+"://"+source.Host {
+		t.Fatalf("origin = %q", got)
+	}
+	if got := wire.Header.Get("Referer"); got != source.Scheme+"://"+source.Host+"/" {
+		t.Fatalf("referer = %q", got)
+	}
+
+	src.Header.Set("X-ZP-Fetch-Referrer-Policy", "unsafe-url")
+	wire, err = BuildHTTP1Request(src, target, jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.Header.Get("Referer"); got != "https://app.example.test/page?q=1" {
+		t.Fatalf("full referer should strip fragment and credentials, got %q", got)
+	}
+
+	src.Header.Set("X-ZP-Fetch-Credentials", "include")
+	src.Header.Set("X-ZP-Fetch-Referrer-Policy", "origin")
+	wire, err = BuildHTTP1Request(src, target, jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.Header.Get("Cookie"); got != "sid=1" {
+		t.Fatalf("include credentials omitted cookies: %q", got)
+	}
+
+	src.Header.Set("X-ZP-Fetch-Credentials", "omit")
+	wire, err = BuildHTTP1Request(src, target, jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.Header.Get("Cookie"); got != "" {
+		t.Fatalf("omit credentials sent cookies: %q", got)
 	}
 }
 

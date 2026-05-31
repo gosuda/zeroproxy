@@ -1,0 +1,11 @@
+# Clippy configuration for the zp-rewriter (Rust SWC/OXC WASM rewriter).
+#
+# cognitive-complexity-threshold configures clippy::cognitive_complexity.
+#
+# A.2: the lint is now ENABLED as a HARD error. It is enabled via the
+# [lints.clippy] table in Cargo.toml (cognitive_complexity = "deny"), and CI
+# runs `cargo clippy --all-targets -- -D warnings`. This threshold is the final
+# A.2 target: 15. After the burn-down, the highest-scoring rewriter function
+# measures 14 by clippy's metric, so the crate is clean at 15 (verified:
+# `touch src/lib.rs && cargo clippy --all-targets -- -D warnings` exits 0).
+cognitive-complexity-threshold = 15

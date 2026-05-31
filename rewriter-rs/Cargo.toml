@@ -13,4 +13,19 @@ oxc_ast = "0.60"
 oxc_parser = "0.60"
 oxc_span = "0.60"
 oxc_syntax = "0.60"
+swc_common = "23.0.0"
+swc_css_ast = "23.0.0"
+swc_css_codegen = "23.0.0"
+swc_css_parser = "23.0.0"
+swc_css_visit = "23.0.0"
+url = "2.5"
 wasm-bindgen = "0.2"
+
+# A.2: HARD cognitive-complexity gate. cognitive_complexity is an allow-by-
+# default nursery lint; "deny" promotes it to a hard error at the threshold set
+# in clippy.toml (cognitive-complexity-threshold = 15). New rewriter functions
+# over budget fail `cargo clippy --all-targets -- -D warnings`. The crate is
+# currently clean at 15 (highest function measures 14 by clippy's metric), so
+# no inline #[allow(clippy::cognitive_complexity)] suppressions are needed.
+[lints.clippy]
+cognitive_complexity = "deny"
