@@ -119,3 +119,60 @@ func TestRequestFromJSParsesBodyForms(t *testing.T) {
 		t.Fatalf("bodyUsed POST: contentLength=%d getBody=%v, want 0/nil (body skipped)", req.ContentLength, req.GetBody != nil)
 	}
 }
+
+// readStreamBytes consumes a Go-backed ReadableStream via a Response (JS-native,
+// so the pump goroutine and the consumer do not both block in Go) and returns
+// (bytes, errored).
+func readStreamBytes(ctx context.Context, stream js.Value) ([]byte, bool) {
+	resp := js.Global().Get("Response").New(stream)
+	ab, err := await(ctx, resp.Call("arrayBuffer"))
+	if err != nil {
+		return nil, true
+	}
+	u8 := js.Global().Get("Uint8Array").New(ab)
+	out := make([]byte, u8.Get("length").Int())
+	js.CopyBytesToGo(out, u8)
+	return out, false
+}
+
+// errThenReader yields its data, then returns err on the next read.
+type errThenReader struct {
+	data []byte
+	off  int
+	err  error
+}
+
+func (r *errThenReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.data) {
+		return 0, r.err
+	}
+	n := copy(p, r.data[r.off:])
+	r.off += n
+	return n, nil
+}
+
+func (r *errThenReader) Close() error { return nil }
+
+// TestReadableStreamFromPumpsBodyForms pins the Go->JS ReadableStream pump
+// (readableStreamFrom + pumpBody/enqueueChunk/finishStream): an empty body yields
+// an empty stream, a multi-chunk body round-trips byte-exact, and a non-EOF read
+// error errors the JS stream (fail closed) rather than truncating silently.
+func TestReadableStreamFromPumpsBodyForms(t *testing.T) {
+	ctx := context.Background()
+
+	b, errored := readStreamBytes(ctx, readableStreamFrom(ctx, io.NopCloser(bytes.NewReader(nil))))
+	if errored || len(b) != 0 {
+		t.Fatalf("empty body: errored=%v len=%d, want false/0", errored, len(b))
+	}
+
+	want := bytes.Repeat([]byte("ABCD"), 40*1024) // 160 KiB across multiple 32 KiB chunks
+	b, errored = readStreamBytes(ctx, readableStreamFrom(ctx, io.NopCloser(bytes.NewReader(want))))
+	if errored || !bytes.Equal(b, want) {
+		t.Fatalf("multi-chunk body: errored=%v len=%d, want false/%d", errored, len(b), len(want))
+	}
+
+	_, errored = readStreamBytes(ctx, readableStreamFrom(ctx, &errThenReader{data: []byte("partial"), err: io.ErrUnexpectedEOF}))
+	if !errored {
+		t.Fatal("non-EOF read error must error the JS stream (fail closed), not truncate silently")
+	}
+}

@@ -196,7 +196,6 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 	return js.Global().Get("Response").New(bodyArg, init), nil
 }
 
-//nolint:gocognit // TODO(complexity): Go->JS ReadableStream adapter (gocognit 26); pumps a Go io.ReadCloser into a JS ReadableStream with backpressure/cancel. Streaming bridge; needs dedicated differential-harness decomposition.
 func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
 	source := js.Global().Get("Object").New()
 	var start js.Func
@@ -221,36 +220,7 @@ func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
 		go func() {
 			defer cleanup()
 			defer closeBody()
-			buf := make([]byte, 32*1024)
-			for {
-				select {
-				case <-ctx.Done():
-					controller.Call("error", js.Global().Get("Error").New(ctx.Err().Error()))
-					return
-				case <-cancelled:
-					return
-				default:
-				}
-				n, err := body.Read(buf)
-				if n > 0 {
-					arr := js.Global().Get("Uint8Array").New(n)
-					js.CopyBytesToJS(arr, buf[:n])
-					controller.Call("enqueue", arr)
-				}
-				if err != nil {
-					select {
-					case <-cancelled:
-						return
-					default:
-					}
-					if err == io.EOF {
-						controller.Call("close")
-					} else {
-						controller.Call("error", js.Global().Get("Error").New(err.Error()))
-					}
-					return
-				}
-			}
+			pumpBody(ctx, controller, body, cancelled)
 		}()
 		return nil
 	})
@@ -261,6 +231,55 @@ func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
 	source.Set("start", start)
 	source.Set("cancel", cancel)
 	return js.Global().Get("ReadableStream").New(source)
+}
+
+// pumpBody reads body in 32 KiB chunks and enqueues them on the JS stream
+// controller until the context is cancelled, the consumer cancels (cancelled
+// closed), or the body ends.
+func pumpBody(ctx context.Context, controller js.Value, body io.Reader, cancelled <-chan struct{}) {
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-ctx.Done():
+			controller.Call("error", js.Global().Get("Error").New(ctx.Err().Error()))
+			return
+		case <-cancelled:
+			return
+		default:
+		}
+		n, err := body.Read(buf)
+		if n > 0 {
+			enqueueChunk(controller, buf[:n])
+		}
+		if err != nil {
+			finishStream(controller, err, cancelled)
+			return
+		}
+	}
+}
+
+// enqueueChunk copies one chunk into a JS Uint8Array and enqueues it on the
+// stream controller.
+func enqueueChunk(controller js.Value, chunk []byte) {
+	arr := js.Global().Get("Uint8Array").New(len(chunk))
+	js.CopyBytesToJS(arr, chunk)
+	controller.Call("enqueue", arr)
+}
+
+// finishStream terminates the JS stream after a read error: a cancel that raced
+// the error is honored silently, EOF closes the stream, and any other error
+// errors it.
+func finishStream(controller js.Value, err error, cancelled <-chan struct{}) {
+	select {
+	case <-cancelled:
+		return
+	default:
+	}
+	if err == io.EOF {
+		controller.Call("close")
+	} else {
+		controller.Call("error", js.Global().Get("Error").New(err.Error()))
+	}
 }
 
 func await(ctx context.Context, p js.Value) (js.Value, error) {
