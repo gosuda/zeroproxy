@@ -110,7 +110,6 @@ func (k *Kernel) jsCookieSet(this js.Value, args []js.Value) any {
 	return true
 }
 
-//nolint:cyclop,gocognit // TODO(complexity): JS<->Go HTTP bridge entrypoint (cyclop / gocognit 42); marshals a fetch from JS, drives the proxied request, and streams the response back across the wasm boundary. Core membrane data path; grinding risks a regression. Needs dedicated differential-harness decomposition.
 func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return rejected("BAD_REQUEST")
@@ -148,92 +147,125 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			resolve.Invoke(safeResponse(classifyErr(err), statusForErr(err), req.URL.Host))
 			return
 		}
-		dynamicCompileAllowed := targetDynamicCompileAllowed(resp.Header)
-		referrerPolicy := targetReferrerPolicy(resp.Header)
-		if tab.CookieJar != nil && req.Header.Get("X-Zp-Fetch-Credentials") != "omit" {
-			tab.CookieJar.SetCookies(finalURL, resp.Cookies())
-			broadcastCookieSync(tab, finalURL)
-		}
-		transformed := false
-		decoded := false
-		if isDocumentRequest(req) && isHTML(resp.Header.Get("Content-Type")) {
-			source := resp.Body
-			if source == nil {
-				source = http.NoBody
-			}
-			pr, pw := io.Pipe()
-			go func() {
-				err := htmltx.TransformTo(pw, source, htmltx.Options{
-					TabID:                 tab.TabID,
-					EntryID:               req.Header.Get("X-Zp-Entry-Id"),
-					TargetURL:             finalURL,
-					DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
-					DocumentReferrer:      req.Header.Get("X-Zp-Document-Referrer"),
-					RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
-					Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
-					DynamicCompileAllowed: dynamicCompileAllowed,
-					ReferrerPolicy:        referrerPolicy,
-					ScriptRewriter:        rewriteScriptFromJS,
-					CSSRewriter:           rewriteCSSFromJS,
-				})
-				closeErr := source.Close()
-				if err != nil {
-					_ = pw.CloseWithError(err)
-					return
-				}
-				if closeErr != nil {
-					_ = pw.CloseWithError(closeErr)
-					return
-				}
-				_ = pw.Close()
-			}()
-			resp.Body = &closeWithSource{ReadCloser: pr, source: source}
-			resp.ContentLength = -1
-			resp.Header.Del("Content-Length")
-			resp.Header.Del("Content-Encoding")
-			resp.Header.Set("Content-Type", "text/html; charset=utf-8")
-			transformed = true
-			decoded = true
-		}
-		if dynamicCompileAllowed {
-			resp.Header.Set("X-ZP-Dynamic-Compile", "1")
-		}
-		// Two-signal challenge-compat gate, computed on the RAW target header/URL
-		// before policy construction. The no-store overwrite is skipped ONLY for a
-		// classified challenge SUBRESOURCE (never the document) and ONLY when the
-		// tab is armed; the document-vs-subresource discrimination lives in the
-		// flat, natively-tested challengeSubresourceSkip helper. The SAME bool
-		// feeds both ConstructorPolicy applications (here and inside ResponseToJS)
-		// so the second pass cannot silently re-impose no-store.
-		challengeSub := challengeSubresourceSkip(tab.ChallengeCompat, isDocumentRequest(req), resp.Header, finalURL)
-		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded, challengeSub)
-		applyChallengeCompat(resp.Header, tab.ChallengeCompat, finalURL)
-		resp.Header.Set("X-ZP-Response-URL", finalURL.String())
-		if finalURL.String() != req.URL.String() {
-			resp.Header.Set("X-ZP-Response-Redirected", "1")
-		} else {
-			resp.Header.Set("X-ZP-Response-Redirected", "0")
-		}
+		releaseOnReturn = deliverResponse(ctx, resolve, req, resp, finalURL, tab, cancel)
+	})
+}
+
+// deliverResponse runs the post-fetch half of the bridge on an already-fetched
+// response: cookie capture, document transform, policy/challenge-compat header
+// shaping, body-cancellation ownership, and the final ResponseToJS marshal +
+// resolve. It returns the resolved releaseOnReturn ownership flag (false once the
+// response body's cancel goroutine owns teardown, true again if ResponseToJS
+// fails and the body is closed here). Taking the response as an argument keeps it
+// drivable without the engine; it uses no Kernel state.
+func deliverResponse(ctx context.Context, resolve js.Value, req *http.Request, resp *http.Response, finalURL *url.URL, tab *zphttp.TabState, cancel func()) bool {
+	releaseOnReturn := true
+	dynamicCompileAllowed := targetDynamicCompileAllowed(resp.Header)
+	referrerPolicy := targetReferrerPolicy(resp.Header)
+	if tab.CookieJar != nil && req.Header.Get("X-Zp-Fetch-Credentials") != "omit" {
+		tab.CookieJar.SetCookies(finalURL, resp.Cookies())
+		broadcastCookieSync(tab, finalURL)
+	}
+	transformed, decoded := transformDocumentResponse(req, resp, tab, finalURL, dynamicCompileAllowed, referrerPolicy)
+	challengeSub := applyResponsePolicy(resp, req, tab, finalURL, dynamicCompileAllowed, transformed, decoded)
+	if installBodyCancellation(ctx, resp, cancel) {
+		releaseOnReturn = false
+	}
+	jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded, challengeSub)
+	if err != nil {
 		if resp.Body != nil {
-			body := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
-			resp.Body = body
-			go func() {
-				<-ctx.Done()
-				_ = body.Close()
-			}()
-			releaseOnReturn = false
+			_ = resp.Body.Close()
 		}
-		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded, challengeSub)
+		releaseOnReturn = true
+		resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway, finalURL.Host))
+		return releaseOnReturn
+	}
+	resolve.Invoke(jsResp)
+	return releaseOnReturn
+}
+
+// transformDocumentResponse rewrites an HTML document response through the htmltx
+// membrane (streamed via an io.Pipe goroutine), replacing resp.Body and the
+// content headers in place. It reports whether the body was transformed and
+// decoded; a non-document or non-HTML response is left untouched.
+func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zphttp.TabState, finalURL *url.URL, dynamicCompileAllowed bool, referrerPolicy string) (transformed, decoded bool) {
+	if !isDocumentRequest(req) || !isHTML(resp.Header.Get("Content-Type")) {
+		return false, false
+	}
+	source := resp.Body
+	if source == nil {
+		source = http.NoBody
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		err := htmltx.TransformTo(pw, source, htmltx.Options{
+			TabID:                 tab.TabID,
+			EntryID:               req.Header.Get("X-Zp-Entry-Id"),
+			TargetURL:             finalURL,
+			DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
+			DocumentReferrer:      req.Header.Get("X-Zp-Document-Referrer"),
+			RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
+			Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+			DynamicCompileAllowed: dynamicCompileAllowed,
+			ReferrerPolicy:        referrerPolicy,
+			ScriptRewriter:        rewriteScriptFromJS,
+			CSSRewriter:           rewriteCSSFromJS,
+		})
+		closeErr := source.Close()
 		if err != nil {
-			if resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			releaseOnReturn = true
-			resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway, finalURL.Host))
+			_ = pw.CloseWithError(err)
 			return
 		}
-		resolve.Invoke(jsResp)
-	})
+		if closeErr != nil {
+			_ = pw.CloseWithError(closeErr)
+			return
+		}
+		_ = pw.Close()
+	}()
+	resp.Body = &closeWithSource{ReadCloser: pr, source: source}
+	resp.ContentLength = -1
+	resp.Header.Del("Content-Length")
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	return true, true
+}
+
+// applyResponsePolicy stamps the response-shaping headers after transform: the
+// dynamic-compile signal, the ConstructorPolicy strip (no-store overwrite skipped
+// only for an armed challenge SUBRESOURCE), the challenge-compat projection, and
+// the response-URL / redirect markers. It returns the challengeSub bool computed
+// here so the caller feeds the SAME value to ResponseToJS — the second
+// ConstructorPolicy pass must not recompute it (else it could re-impose no-store).
+func applyResponsePolicy(resp *http.Response, req *http.Request, tab *zphttp.TabState, finalURL *url.URL, dynamicCompileAllowed, transformed, decoded bool) bool {
+	if dynamicCompileAllowed {
+		resp.Header.Set("X-ZP-Dynamic-Compile", "1")
+	}
+	challengeSub := challengeSubresourceSkip(tab.ChallengeCompat, isDocumentRequest(req), resp.Header, finalURL)
+	resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded, challengeSub)
+	applyChallengeCompat(resp.Header, tab.ChallengeCompat, finalURL)
+	resp.Header.Set("X-ZP-Response-URL", finalURL.String())
+	if finalURL.String() != req.URL.String() {
+		resp.Header.Set("X-ZP-Response-Redirected", "1")
+	} else {
+		resp.Header.Set("X-ZP-Response-Redirected", "0")
+	}
+	return challengeSub
+}
+
+// installBodyCancellation wraps resp.Body so a context cancellation closes it,
+// transferring teardown ownership to the body's lifetime. It reports whether the
+// wrap happened (a nil body leaves ownership with the caller's deferred cancel).
+func installBodyCancellation(ctx context.Context, resp *http.Response, cancel func()) bool {
+	if resp.Body == nil {
+		return false
+	}
+	body := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+	resp.Body = body
+	go func() {
+		<-ctx.Done()
+		_ = body.Close()
+	}()
+	return true
 }
 
 func broadcastCookieSync(tab *zphttp.TabState, targetURL *url.URL) {
