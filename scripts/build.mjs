@@ -231,10 +231,6 @@ function run(cmd, argv, extraEnv = {}) {
     throw new Error(`${cmd} ${argv.join(' ')} failed with exit code ${result.status}`);
 }
 
-function resolveNodeModule(specifier) {
-  return path.join(repoRoot, 'node_modules', ...specifier.split('/'));
-}
-
 async function copyOptional(from, to) {
   if (await exists(from)) await copyFile(from, to);
 }
