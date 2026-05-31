@@ -12,6 +12,8 @@ const MaxRedirects = 10
 
 // Do follows target redirects inside the WASM transport so raw Location headers
 // are never exposed to the browser Response constructor.
+//
+//nolint:cyclop,gocognit // TODO(complexity): redirect-following engine (cyclop 15 / gocognit 22); enforces the redirect policy (limit, scheme/host validation, method/body carry-over) on every proxied request. Security-sensitive redirect loop; needs dedicated differential-harness decomposition.
 func (e *Engine) Do(ctx context.Context, req *http.Request, target *url.URL, tab *TabState) (*http.Response, *url.URL, error) {
 	cur := cloneURL(target)
 	wireReq := req

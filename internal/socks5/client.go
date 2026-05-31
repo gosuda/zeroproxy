@@ -33,6 +33,8 @@ type Options struct {
 // ConnectDomain performs RFC 1928 CONNECT using DOMAINNAME ATYP. If Username
 // is non-empty, RFC 1929 username/password authentication is offered and the
 // username carries the Tor IsolateSOCKSAuth token.
+//
+//nolint:cyclop,gocognit // TODO(complexity): SOCKS5 CONNECT (cyclop 25 / gocognit 26); drives the SOCKS5 greeting/auth/request handshake and reply parsing. Protocol state machine; needs dedicated differential-harness decomposition.
 func ConnectDomain(ctx context.Context, rw io.ReadWriter, opt Options) error {
 	host := normalizeDomain(opt.Host)
 	if host == "" || len(host) > 255 {

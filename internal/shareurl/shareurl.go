@@ -43,6 +43,7 @@ func NewWithRand(random io.Reader, target string) (string, error) {
 	return NewWithRandAndServers(random, target, nil)
 }
 
+//nolint:cyclop // TODO(complexity): share-URL constructor (cyclop 12); validates target + relay servers and assembles the encrypted share token. Security-sensitive input validation; needs dedicated differential-harness decomposition.
 func NewWithRandAndServers(random io.Reader, target string, servers []string) (string, error) {
 	u, err := url.Parse(target)
 	if err != nil || u == nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -104,6 +105,7 @@ func shareFragment(key string, servers []string) (string, error) {
 	return "#" + params.Encode(), nil
 }
 
+//nolint:cyclop,gocognit // TODO(complexity): relay-server normalizer (cyclop 21 / gocognit 28); validates/canonicalizes operator-supplied relay endpoints that gate every proxied request (Go mirror of web/zp-core.js normalizeRelayServers). Security-sensitive; needs dedicated differential-harness decomposition.
 func NormalizeRelayServers(values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil

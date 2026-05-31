@@ -27,6 +27,8 @@ var hidden = map[string]struct{}{
 // the proxy transport are untouched, so it grants no egress and no eval. When
 // false (every existing call path) the no-store overwrite is applied exactly as
 // before, keeping the default/OFF path behaviorally identical.
+//
+//nolint:cyclop,gocognit // TODO(complexity): response-header policy builder (cyclop 11 / gocognit 16); decides which upstream headers survive into the proxied response (CSP, encoding, security). Security-sensitive header allowlist; needs dedicated differential-harness decomposition.
 func ConstructorPolicy(src http.Header, bodyTransformed, bodyDecoded, challengeCompat bool) http.Header {
 	dst := make(http.Header, len(src)+6)
 	for name, vals := range src {

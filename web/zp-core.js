@@ -113,6 +113,7 @@
   function encodeTargetURL(url) { return bytesToBase64Url(te.encode(canonicalTargetURL(url).href)); }
   function decodeTargetURL(encoded) { return canonicalTargetURL(td.decode(base64UrlToBytes(encoded))).href; }
   function randomId(prefix = '') { const b = crypto.getRandomValues(new Uint8Array(12)); return prefix + bytesToBase64Url(b); }
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TODO(complexity): membrane CSP builder (cog 19); assembles the Content-Security-Policy that confines proxied content to relay origins. Security-critical directive chain; needs dedicated differential-harness decomposition.
   function fixedCSP(servers, options = {}) {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
@@ -137,6 +138,7 @@
     const params = new URLSearchParams(raw && raw[0] === '#' ? raw.slice(1) : raw);
     return relayServersForShare(params.getAll('server'), options);
   }
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TODO(complexity): membrane relay-server normalizer (cog 37); validates/canonicalizes operator-supplied relay endpoints (scheme, host, dedup) that gate every proxied request. Security-sensitive; needs dedicated differential-harness decomposition. Mirrors Go internal/shareurl.NormalizeRelayServers.
   function normalizeRelayServers(values, options = {}) {
     if (!values) return [];
     const list = Array.isArray(values) ? values : [values];

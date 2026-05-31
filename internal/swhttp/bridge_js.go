@@ -46,6 +46,7 @@ func ContextWithAbortSignal(parent context.Context, v js.Value) (context.Context
 	return ctx, cleanup
 }
 
+//nolint:cyclop,gocognit // TODO(complexity): JS->Go request unmarshaller (cyclop / gocognit 18); reconstructs an *http.Request from the JS fetch facade (method, headers, body, credentials). Membrane boundary parser; needs dedicated differential-harness decomposition.
 func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 	rawURL := v.Get("url").String()
 	u, err := url.Parse(rawURL)
@@ -67,6 +68,7 @@ func RequestFromJS(ctx context.Context, v js.Value) (*http.Request, error) {
 	forEach.Release()
 	var body io.ReadCloser = http.NoBody
 	var contentLength int64 = 0
+	//nolint:nestif // TODO(complexity): membrane request-body extraction (nestif 9); reads the JS ReadableStream body only for methods that carry one. Boundary I/O guard; decomposed alongside RequestFromJS in the differential-harness campaign.
 	if method != "GET" && method != "HEAD" && !v.Get("bodyUsed").Bool() {
 		stream := v.Get("body")
 		if stream.Truthy() && stream.Get("getReader").Type() == js.TypeFunction {
@@ -172,6 +174,7 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 	return js.Global().Get("Response").New(bodyArg, init), nil
 }
 
+//nolint:gocognit // TODO(complexity): Go->JS ReadableStream adapter (gocognit 26); pumps a Go io.ReadCloser into a JS ReadableStream with backpressure/cancel. Streaming bridge; needs dedicated differential-harness decomposition.
 func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
 	source := js.Global().Get("Object").New()
 	var start js.Func

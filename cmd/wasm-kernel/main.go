@@ -45,6 +45,7 @@ func main() {
 	select {}
 }
 
+//nolint:cyclop // TODO(complexity): kernel relay-ensure (cyclop 11); lazily establishes/validates the relay set the wasm kernel routes through. Membrane bootstrap; needs dedicated differential-harness decomposition.
 func (k *Kernel) ensure(ctx context.Context, servers []string) error {
 	server := selectedRelayServer(servers)
 	k.mu.Lock()
@@ -109,6 +110,7 @@ func (k *Kernel) jsCookieSet(this js.Value, args []js.Value) any {
 	return true
 }
 
+//nolint:cyclop,gocognit // TODO(complexity): JS<->Go HTTP bridge entrypoint (cyclop / gocognit 42); marshals a fetch from JS, drives the proxied request, and streams the response back across the wasm boundary. Core membrane data path; grinding risks a regression. Needs dedicated differential-harness decomposition.
 func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return rejected("BAD_REQUEST")
@@ -513,6 +515,7 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string, challengeCompat bool) *zpht
 	return t
 }
 
+//nolint:cyclop,gocognit // TODO(complexity): JS WebSocket stream adapter (cyclop / gocognit 24); bridges a wsproto.Conn to a JS-side duplex stream (send/recv/close demux). Protocol bridge; needs dedicated differential-harness decomposition.
 func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *wsproto.Conn) js.Value {
 	handlers := js.Value{}
 	var start sync.Once

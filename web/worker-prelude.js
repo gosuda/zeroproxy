@@ -1,3 +1,4 @@
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TODO(complexity): web-worker membrane prelude IIFE (cog 27); Biome attributes the aggregate of the module wrapper's guard plus its nested hook declarations to this top-level arrow. No single inner function exceeds 15. Splitting the module wrapper is risky membrane surgery; needs dedicated differential-harness decomposition.
 (() => {
   'use strict';
   if (self.__ZP_WORKER_PRELUDE) return;

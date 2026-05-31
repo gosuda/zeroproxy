@@ -34,6 +34,7 @@ type Conn struct {
 	mu sync.Mutex
 }
 
+//nolint:cyclop // TODO(complexity): WebSocket dial (cyclop 13); performs the RFC6455 handshake (key gen, header construction, 101 validation). Protocol-critical; needs dedicated differential-harness decomposition.
 func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState, origin string) (*Conn, *http.Response, error) {
 	if target.Scheme != "ws" && target.Scheme != "wss" {
 		return nil, nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
@@ -156,6 +157,7 @@ func (c *Conn) WriteFrame(op byte, payload []byte) error {
 
 func (c *Conn) Close() error { _ = c.WriteFrame(OpClose, nil); return c.c.Close() }
 
+//nolint:cyclop // TODO(complexity): WebSocket frame reader (cyclop 12); decodes the RFC6455 frame header (FIN/opcode/mask/length variants). Protocol byte-parser; needs dedicated differential-harness decomposition.
 func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, err error) {
 	var h [2]byte
 	if _, err = io.ReadFull(ctxReader{ctx: ctx, r: c.c}, h[:]); err != nil {

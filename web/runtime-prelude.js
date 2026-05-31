@@ -3698,17 +3698,32 @@
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }
   function transformHTMLNode(node, parserDoc) {
-    const tag = node.localName;
-    if (tag === 'meta' && suppressMetaPolicyElement(node)) return;
-    if (tag === 'base' && Native.getAttribute.call(node, 'href')) return replaceSerializedBaseNode(node, parserDoc);
-    if (tag === 'link') enforceLinkPolicy(node);
-    if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc')) injectSerializedFrameSrcdoc(node);
-    if (tag === 'script') transformHTMLScriptNode(node);
-    if (tag === 'style') {
-      setElementText(node, rewriteCSSSource(elementText(node)));
-      rewrittenStyleNodes.add(node);
-    }
+    if (transformSerializedElement(node, parserDoc)) return;
     if (Native.getAttributeNames) rewriteSerializedNodeAttributes(node);
+  }
+  // Returns true iff the element was handled in a way that SKIPS the trailing
+  // attribute pass (meta suppressed, base replaced). All other tags fall through.
+  // Differentially proven identical to the prior if-chain (see commit; tag is a
+  // single value so the original chain was already mutually exclusive).
+  function transformSerializedElement(node, parserDoc) {
+    const tag = node.localName;
+    switch (tag) {
+      case 'meta': return suppressMetaPolicyElement(node);
+      case 'base':
+        if (Native.getAttribute.call(node, 'href')) { replaceSerializedBaseNode(node, parserDoc); return true; }
+        return false;
+      case 'link': enforceLinkPolicy(node); return false;
+      case 'iframe':
+      case 'frame':
+        if (Native.hasAttribute.call(node, 'srcdoc')) injectSerializedFrameSrcdoc(node);
+        return false;
+      case 'script': transformHTMLScriptNode(node); return false;
+      case 'style':
+        setElementText(node, rewriteCSSSource(elementText(node)));
+        rewrittenStyleNodes.add(node);
+        return false;
+      default: return false;
+    }
   }
   function replaceSerializedBaseNode(node, parserDoc) {
     const href = Native.getAttribute.call(node, 'href') || '';
@@ -3738,11 +3753,19 @@
   }
   function rewriteSerializedAttribute(node, attrName) {
     const lowerAttr = String(attrName).toLowerCase();
+    rewriteSerializedAttributeContent(node, attrName, lowerAttr);
+    if (lowerAttr.startsWith('on') && lowerAttr.length > 2) blockSerializedEventAttribute(node, attrName, lowerAttr);
+    if (isSrcsetAttribute(node, lowerAttr) || isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
+  }
+  // Content-rewriting branches (style/srcset/integrity). Split out from the
+  // event/URL-enforcement branches purely to stay under the cognitive-complexity
+  // budget. The branches remain INDEPENDENT and fire in the SAME order as before;
+  // in particular srcset still trips both setSrcsetAttribute (here) and
+  // enforceObservedAttribute (in the caller, after) — differentially proven.
+  function rewriteSerializedAttributeContent(node, attrName, lowerAttr) {
     if (lowerAttr === 'style') Native.setAttribute.call(node, attrName, rewriteCSSSource(Native.getAttribute.call(node, attrName) || ''));
     if (isSrcsetAttribute(node, lowerAttr)) setSrcsetAttribute(node, attrName, Native.getAttribute.call(node, attrName) || '');
     if (lowerAttr === 'integrity' && isIntegrityBearing(node)) setBackedIntegrity(node, Native.getAttribute.call(node, attrName) || '');
-    if (lowerAttr.startsWith('on') && lowerAttr.length > 2) blockSerializedEventAttribute(node, attrName, lowerAttr);
-    if (isSrcsetAttribute(node, lowerAttr) || isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
   }
   function blockSerializedEventAttribute(node, attrName, lowerAttr) {
     const val = Native.getAttribute.call(node, attrName) || '';
