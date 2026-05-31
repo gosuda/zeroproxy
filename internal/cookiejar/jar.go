@@ -62,6 +62,15 @@ type RequestContext struct {
 }
 
 func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.setCookies(u, cookies, true)
+}
+
+// setCookies stores cookies. httpAPI marks the trusted HTTP-response path
+// (Set-Cookie); the page's document.cookie write passes false. Per RFC 6265
+// §5.3, a non-HTTP API may neither create an HttpOnly cookie nor overwrite an
+// existing one -- this is what stops a proxied page from clobbering a server
+// session cookie and stripping its HttpOnly protection.
+func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, httpAPI bool) {
 	if j == nil || u == nil {
 		return
 	}
@@ -76,7 +85,10 @@ func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 		if !ok {
 			continue
 		}
-		j.upsertLocked(rec)
+		if !httpAPI {
+			rec.HTTPOnly = false // a non-HTTP API cannot create an HttpOnly cookie
+		}
+		j.upsertLocked(rec, httpAPI)
 	}
 }
 
@@ -213,7 +225,7 @@ func (j *Jar) SetDocumentCookie(u *url.URL, line string) {
 	}
 	h := http.Header{}
 	h.Add("Set-Cookie", line)
-	j.SetCookies(u, (&http.Response{Header: h}).Cookies())
+	j.setCookies(u, (&http.Response{Header: h}).Cookies(), false)
 }
 
 func recordFromCookie(u *url.URL, c *http.Cookie, now time.Time) (CookieRecord, bool) {
@@ -256,22 +268,39 @@ func recordFromCookie(u *url.URL, c *http.Cookie, now time.Time) (CookieRecord, 
 	return rec, true
 }
 
-func (j *Jar) upsertLocked(rec CookieRecord) {
+// sameCookieKey reports whether two records identify the same stored cookie
+// (RFC 6265 cookie identity: name + domain + path).
+func sameCookieKey(a, b CookieRecord) bool {
+	return a.Name == b.Name && a.Domain == b.Domain && a.Path == b.Path
+}
+
+// isCookieDeletion reports whether a record is a delete request (negative
+// Max-Age), which removes a matching cookie rather than storing one.
+func isCookieDeletion(rec CookieRecord) bool {
+	return rec.MaxAge != nil && *rec.MaxAge < 0
+}
+
+func (j *Jar) upsertLocked(rec CookieRecord, httpAPI bool) {
 	for i, old := range j.records {
-		if old.Name == rec.Name && old.Domain == rec.Domain && old.Path == rec.Path {
-			rec.CreationTime = old.CreationTime
-			if rec.MaxAge != nil && *rec.MaxAge < 0 {
-				j.records = append(j.records[:i], j.records[i+1:]...)
-				return
-			}
-			j.records[i] = rec
+		if !sameCookieKey(old, rec) {
+			continue
+		}
+		// RFC 6265 §5.3: a non-HTTP API (document.cookie) must not overwrite an
+		// existing HttpOnly cookie. Reject the write; keep the old cookie.
+		if old.HTTPOnly && !httpAPI {
 			return
 		}
-	}
-	if rec.MaxAge != nil && *rec.MaxAge < 0 {
+		rec.CreationTime = old.CreationTime
+		if isCookieDeletion(rec) {
+			j.records = append(j.records[:i], j.records[i+1:]...)
+		} else {
+			j.records[i] = rec
+		}
 		return
 	}
-	j.records = append(j.records, rec)
+	if !isCookieDeletion(rec) {
+		j.records = append(j.records, rec)
+	}
 }
 
 func expired(r CookieRecord, now time.Time) bool {
