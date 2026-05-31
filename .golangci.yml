@@ -1,15 +1,16 @@
 # golangci-lint v2 configuration (schema version "2").
 #
-# Workstream A.1: non-complexity linters land HARD (must pass green).
-# Complexity gates (cyclop / gocognit / nestif) are AUTHORED-BUT-DISABLED here,
-# to be flipped to hard error in Workstream A.2 after a complexity burn-down.
-# See the "# TODO(A.2):" block under linters.settings below.
+# All enabled linters land HARD (CI must be green). This INCLUDES the
+# complexity gates (cyclop / gocognit / nestif): they are ACTIVE and enforcing
+# — new code over budget fails CI. See linters.settings for the thresholds and
+# linters.exclusions for the test-file carve-out.
 #
-# Several pre-existing, *intrinsic* findings are narrowly excluded with a
+# A few pre-existing, *intrinsic* findings are narrowly excluded with a
 # "# TODO(ratchet):" comment (e.g. SHA-1 mandated by the RFC6455 WebSocket
-# handshake, protocol byte encodings, err-shadowing). These are config-only
-# deferrals: A.1 changes config & CI only and must not edit application or
-# security-membrane logic. Each is reported as a concern for later ratchet.
+# handshake, protocol byte encodings, err-shadowing). The only remaining
+# complexity suppressions are narrow inline //nolint:<linter> // TODO(complexity)
+# at the few wasm-tagged (js && wasm) protocol/membrane sites; every other
+# function is decomposed under budget.
 version: "2"
 
 run:
@@ -110,11 +111,11 @@ linters:
     # ----------------------------------------------------------------------
     # A.2: complexity gates are now HARD errors. New code over budget fails CI.
     # Pre-existing residuals are handled HONESTLY: _test.go is excluded below
-    # (test-function complexity is out of scope), and the ~12 production
-    # protocol/membrane functions still over budget after the burn-down carry a
-    # narrow inline `//nolint:<linter> // TODO(complexity): ...` at each site
-    # (see the report's residual list). cyclop.package-average is intentionally
-    # omitted (fragile).
+    # (test-function complexity is out of scope), and the remaining wasm-tagged
+    # (js && wasm) protocol/membrane functions still over budget carry a narrow
+    # inline `//nolint:<linter> // TODO(complexity): ...` at each site. Native
+    # offenders have been decomposed under budget. cyclop.package-average is
+    # intentionally omitted (fragile).
     cyclop:
       max-complexity: 10
     gocognit:
