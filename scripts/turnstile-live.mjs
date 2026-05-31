@@ -80,6 +80,10 @@ function log(msg) {
   process.stdout.write(`[turnstile-live] ${msg}\n`);
 }
 
+function delay(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 // urlPathClass/throughZeroproxy mirror the value-free vocabulary in
 // test/e2e/turnstile-compat.test.js so URLs enter the trace ONLY as classes -- never
 // query strings, share keys, runtime tokens, or opaque challenge params.
@@ -153,7 +157,7 @@ async function waitForHTTP(url, timeoutMs = 15000) {
   for (;;) {
     if (await probe(url)) return;
     if (Date.now() > deadline) throw new Error(`proxy did not answer at ${url}`);
-    await new Promise((r) => setTimeout(r, 200));
+    await delay(200);
   }
 }
 
@@ -189,6 +193,12 @@ function makeRecorder() {
 function launchBrowser() {
   return puppeteer.launch({
     headless: HEADLESS,
+    // Puppeteer's default signal handlers call process.exit(130) on SIGINT, which
+    // pre-empts our own SIGINT path (endSolve -> printVerdict -> redacted teardown)
+    // and kills the process before the verdict prints. Own the signals ourselves.
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -306,7 +316,16 @@ async function main() {
     });
 
     const browser = await launchBrowser();
-    cleanups.push(() => browser.close());
+    cleanups.push(async () => {
+      // Bound teardown: a wedged browser.close() must not hang the human's terminal.
+      // SIGKILL the chromium process ONLY if the graceful close did not win the race.
+      const closed = browser.close().then(
+        () => true,
+        () => false,
+      );
+      const graceful = await Promise.race([closed, delay(3000).then(() => false)]);
+      if (!graceful) browser.process()?.kill('SIGKILL');
+    });
     const rec = makeRecorder();
     browser.on('targetcreated', async (target) => {
       const p = await target.page().catch(() => null);
@@ -325,11 +344,18 @@ async function main() {
     await waitForSolveOrSignal();
     printVerdict(rec.verdict());
   } finally {
-    runCleanups();
+    await runCleanups();
   }
 }
 
-main().catch((err) => {
-  log(`FAILED: ${err.message}`);
-  process.exitCode = 1;
-});
+main()
+  .catch((err) => {
+    log(`FAILED: ${err.message}`);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // Spawned children (proxy, chromium) keep the event loop alive past teardown, so a
+    // natural exit hangs (empirically ~30s+). Force a prompt exit AFTER awaited teardown
+    // -- every harness line is written before teardown, so the verdict is not truncated.
+    process.exit(process.exitCode ?? 0);
+  });
