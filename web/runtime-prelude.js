@@ -917,10 +917,6 @@
       for (let i = 0; i < args.length; i++) out[i] = String(args[i]);
       return out;
     }
-	    function unsupportedDynamicCompile(params, body, kind) {
-	      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-	      throw normalizedError('NotSupportedError');
-	    }
     function simpleDynamicValue(expr) {
       const text = String(expr || '').trim().replace(/;+\s*$/, '');
       if (text === 'location.href' || text === 'window.location.href' || text === 'self.location.href' || text === 'globalThis.location.href') return virtualURL.href;
