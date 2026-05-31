@@ -12,8 +12,6 @@ const MaxRedirects = 10
 
 // Do follows target redirects inside the WASM transport so raw Location headers
 // are never exposed to the browser Response constructor.
-//
-//nolint:cyclop,gocognit // TODO(complexity): redirect-following engine (cyclop 15 / gocognit 22); enforces the redirect policy (limit, scheme/host validation, method/body carry-over) on every proxied request. Security-sensitive redirect loop; needs dedicated differential-harness decomposition.
 func (e *Engine) Do(ctx context.Context, req *http.Request, target *url.URL, tab *TabState) (*http.Response, *url.URL, error) {
 	cur := cloneURL(target)
 	wireReq := req
@@ -23,11 +21,9 @@ func (e *Engine) Do(ctx context.Context, req *http.Request, target *url.URL, tab
 		if err != nil {
 			return nil, cur, err
 		}
-		if tab != nil && tab.CookieJar != nil && policyAllowsCookies(policy, cur) {
-			tab.CookieJar.SetCookies(cur, resp.Cookies())
-		}
+		recordRedirectCookies(tab, policy, cur, resp)
 		loc := resp.Header.Get("Location")
-		if loc == "" || !redirectStatus(resp.StatusCode) {
+		if !followableRedirect(loc, resp.StatusCode) {
 			return resp, cur, nil
 		}
 		if policy.Redirect == "error" {
@@ -41,26 +37,50 @@ func (e *Engine) Do(ctx context.Context, req *http.Request, target *url.URL, tab
 			_ = resp.Body.Close()
 			return nil, cur, fmt.Errorf("TARGET_CONNECT_FAILED: too many redirects")
 		}
-		next, err := cur.Parse(loc)
+		next, err := resolveRedirectURL(cur, loc)
 		_ = resp.Body.Close()
 		if err != nil {
-			return nil, cur, fmt.Errorf("TARGET_CONNECT_FAILED: malformed redirect")
-		}
-		if next.Scheme != "http" && next.Scheme != "https" {
-			return nil, cur, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
+			return nil, cur, err
 		}
 		cur = next
-		var redirectErr error
-		wireReq, redirectErr = redirectedRequest(wireReq, resp.StatusCode, cur)
-		if redirectErr != nil {
-			return nil, cur, redirectErr
+		wireReq, err = redirectedRequest(wireReq, resp.StatusCode, cur)
+		if err != nil {
+			return nil, cur, err
 		}
 	}
 	return nil, cur, fmt.Errorf("TARGET_CONNECT_FAILED: redirect loop")
 }
 
+// recordRedirectCookies persists a hop response's Set-Cookie headers into the
+// tab jar when the request policy permits cookies for the current URL.
+func recordRedirectCookies(tab *TabState, policy RequestPolicy, cur *url.URL, resp *http.Response) {
+	if tab != nil && tab.CookieJar != nil && policyAllowsCookies(policy, cur) {
+		tab.CookieJar.SetCookies(cur, resp.Cookies())
+	}
+}
+
+// resolveRedirectURL resolves a Location value against the current URL and
+// enforces the scheme allowlist. It is the fail-closed gate that keeps the
+// transport from following a redirect to a non-http(s) scheme.
+func resolveRedirectURL(cur *url.URL, loc string) (*url.URL, error) {
+	next, err := cur.Parse(loc)
+	if err != nil {
+		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: malformed redirect")
+	}
+	if next.Scheme != "http" && next.Scheme != "https" {
+		return nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
+	}
+	return next, nil
+}
+
 func redirectStatus(code int) bool {
 	return code == 301 || code == 302 || code == 303 || code == 307 || code == 308
+}
+
+// followableRedirect reports whether a hop response is a redirect the engine
+// should follow: a non-empty Location with a redirect status code.
+func followableRedirect(loc string, code int) bool {
+	return loc != "" && redirectStatus(code)
 }
 
 func redirectedRequest(req *http.Request, code int, target *url.URL) (*http.Request, error) {
