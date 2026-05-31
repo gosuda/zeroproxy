@@ -34,7 +34,6 @@ type Conn struct {
 	mu sync.Mutex
 }
 
-//nolint:cyclop // TODO(complexity): WebSocket dial (cyclop 13); performs the RFC6455 handshake (key gen, header construction, 101 validation). Protocol-critical; needs dedicated differential-harness decomposition.
 func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState, origin string) (*Conn, *http.Response, error) {
 	if target.Scheme != "ws" && target.Scheme != "wss" {
 		return nil, nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
@@ -55,7 +54,29 @@ func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols
 		return nil, nil, err
 	}
 	key := base64.StdEncoding.EncodeToString(keyBytes)
-	req := &http.Request{Method: http.MethodGet, URL: &httpURL, Header: make(http.Header), Host: httpURL.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
+	req := buildUpgradeRequest(&httpURL, key, protocols, origin)
+	if err := req.Write(c); err != nil {
+		_ = c.Close()
+		return nil, nil, err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(c), req)
+	if err != nil {
+		_ = c.Close()
+		return nil, nil, err
+	}
+	if err := validateUpgradeResponse(resp, key); err != nil {
+		_ = c.Close()
+		_ = resp.Body.Close()
+		return nil, resp, err
+	}
+	return &Conn{c: c}, resp, nil
+}
+
+// buildUpgradeRequest constructs the RFC6455 client upgrade request: a GET with
+// the mandatory Connection/Upgrade/Version handshake headers plus the per-dial
+// Sec-WebSocket-Key, and the optional Origin / Sec-WebSocket-Protocol headers.
+func buildUpgradeRequest(httpURL *url.URL, key string, protocols []string, origin string) *http.Request {
+	req := &http.Request{Method: http.MethodGet, URL: httpURL, Header: make(http.Header), Host: httpURL.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
@@ -67,26 +88,21 @@ func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols
 	if len(protocols) > 0 {
 		req.Header.Set("Sec-WebSocket-Protocol", strings.Join(protocols, ", "))
 	}
-	if err := req.Write(c); err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(c), req)
-	if err != nil {
-		_ = c.Close()
-		return nil, nil, err
-	}
+	return req
+}
+
+// validateUpgradeResponse fails closed unless the peer completed a valid 101
+// Switching Protocols handshake: the status code, the Upgrade header, and the
+// Sec-WebSocket-Accept digest must all match. It only computes the error; the
+// caller owns connection teardown so failure-path ordering is unchanged.
+func validateUpgradeResponse(resp *http.Response, key string) error {
 	if resp.StatusCode != http.StatusSwitchingProtocols || !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
-		_ = c.Close()
-		_ = resp.Body.Close()
-		return nil, resp, fmt.Errorf("TARGET_CONNECT_FAILED: websocket upgrade failed")
+		return fmt.Errorf("TARGET_CONNECT_FAILED: websocket upgrade failed")
 	}
 	if resp.Header.Get("Sec-WebSocket-Accept") != acceptKey(key) {
-		_ = c.Close()
-		_ = resp.Body.Close()
-		return nil, resp, fmt.Errorf("TARGET_CONNECT_FAILED: websocket accept mismatch")
+		return fmt.Errorf("TARGET_CONNECT_FAILED: websocket accept mismatch")
 	}
-	return &Conn{c: c}, resp, nil
+	return nil
 }
 
 func (c *Conn) ReadFrame(ctx context.Context) (byte, []byte, error) {
@@ -157,7 +173,6 @@ func (c *Conn) WriteFrame(op byte, payload []byte) error {
 
 func (c *Conn) Close() error { _ = c.WriteFrame(OpClose, nil); return c.c.Close() }
 
-//nolint:cyclop // TODO(complexity): WebSocket frame reader (cyclop 12); decodes the RFC6455 frame header (FIN/opcode/mask/length variants). Protocol byte-parser; needs dedicated differential-harness decomposition.
 func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, err error) {
 	var h [2]byte
 	if _, err = io.ReadFull(ctxReader{ctx: ctx, r: c.c}, h[:]); err != nil {
@@ -166,23 +181,8 @@ func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, 
 	fin = h[0]&0x80 != 0
 	op = h[0] & 0x0f
 	masked := h[1]&0x80 != 0
-	l := uint64(h[1] & 0x7f)
-	if l == 126 {
-		var b [2]byte
-		if _, err = io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
-			return
-		}
-		l = uint64(binary.BigEndian.Uint16(b[:]))
-	}
-	if l == 127 {
-		var b [8]byte
-		if _, err = io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
-			return
-		}
-		l = binary.BigEndian.Uint64(b[:])
-	}
-	if l > 64<<20 {
-		err = fmt.Errorf("POLICY_BLOCKED: websocket frame too large")
+	l, err := c.readFrameLength(ctx, h[1])
+	if err != nil {
 		return
 	}
 	var mask [4]byte
@@ -201,6 +201,33 @@ func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, 
 		}
 	}
 	return
+}
+
+// readFrameLength decodes the RFC6455 payload length from the second header byte
+// (b1): the 7-bit value, or the 16-bit (126) / 64-bit (127) extended forms read
+// off the wire, and fails closed on a frame larger than the 64 MiB cap. The two
+// extended-length checks are sequential (not mutually exclusive) to preserve the
+// exact wire-read behavior of the original decoder.
+func (c *Conn) readFrameLength(ctx context.Context, b1 byte) (uint64, error) {
+	l := uint64(b1 & 0x7f)
+	if l == 126 {
+		var b [2]byte
+		if _, err := io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
+			return 0, err
+		}
+		l = uint64(binary.BigEndian.Uint16(b[:]))
+	}
+	if l == 127 {
+		var b [8]byte
+		if _, err := io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
+			return 0, err
+		}
+		l = binary.BigEndian.Uint64(b[:])
+	}
+	if l > 64<<20 {
+		return 0, fmt.Errorf("POLICY_BLOCKED: websocket frame too large")
+	}
+	return l, nil
 }
 
 func acceptKey(key string) string {
