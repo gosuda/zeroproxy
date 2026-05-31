@@ -31,6 +31,23 @@ test('share URL envelope round-trips and rejects HMAC tamper', async () => {
   await assert.rejects(() => ZP.decryptShareURL(ZP.bytesToBase64Url(raw), share.key), /BAD_HMAC/);
 });
 
+// Adversarial: the existing tamper above flips byte 20 (the CIPHERTEXT region,
+// which is always under the MAC). The IV (bytes 0-15) is a separate envelope
+// segment; if a regression dropped it from the MAC input, an IV flip would pass
+// HMAC and CBC-malleate the first plaintext block -- surfacing as a wrong target
+// or TARGET_PROTOCOL_BLOCKED, NOT as BAD_HMAC. Pin that the IV is authenticated.
+test('share URL rejects IV tampering with BAD_HMAC (IV is under the MAC)', async () => {
+  const ZP = loadCore();
+  const share = await ZP.encryptShareURL('https://example.com/a');
+  const raw = ZP.base64UrlToBytes(share.encrypted);
+  raw[3] ^= 1; // byte 3 is inside the 16-byte IV
+  await assert.rejects(
+    () => ZP.decryptShareURL(ZP.bytesToBase64Url(raw), share.key),
+    /BAD_HMAC/,
+    'an IV flip must fail authentication (BAD_HMAC), not silently CBC-malleate the plaintext',
+  );
+});
+
 test('base64url decoder is raw path-safe only', () => {
   const ZP = loadCore();
   assert.throws(() => ZP.base64UrlToBytes('abcd='), /INVALID_BASE64URL/);
