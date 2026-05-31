@@ -22,11 +22,13 @@ var routeCases = []routeCase{
 	// Redirects to the canonical control prefix.
 	{"root redirects to control", "/", http.StatusFound, controlPrefix, ""},
 	{"index.html redirects to control", "/index.html", http.StatusFound, controlPrefix, ""},
-	{"legacy sw redirects", "/sw.js", http.StatusTemporaryRedirect, controlPrefix + "sw.js", ""},
-	{"legacy page redirects", "/p/abc", http.StatusTemporaryRedirect, controlPrefix + "p/abc", ""},
-	{"legacy zp ws-pipe redirects", "/__zp/ws-pipe", http.StatusTemporaryRedirect, controlPrefix + "ws-pipe", ""},
-	{"legacy zp asset redirects", "/__zp/zp-core.js", http.StatusTemporaryRedirect, assetPrefix + "zp-core.js", ""},
-	{"legacy zp error redirects", "/__zp/error/BAD_HMAC", http.StatusTemporaryRedirect, controlPrefix + "error/BAD_HMAC", ""},
+	// Legacy /p/, /__zp/, /sw.js spellings were removed at the Phase-3 cutover;
+	// they now fail closed (default-deny) instead of redirecting to controlPrefix.
+	{"legacy root sw is denied", "/sw.js", http.StatusForbidden, "", "POLICY_BLOCKED"},
+	{"legacy page path is denied", "/p/abc", http.StatusForbidden, "", "POLICY_BLOCKED"},
+	{"legacy zp control path is denied", "/__zp/ws-pipe", http.StatusForbidden, "", "POLICY_BLOCKED"},
+	{"legacy zp asset path is denied", "/__zp/zp-core.js", http.StatusForbidden, "", "POLICY_BLOCKED"},
+	{"legacy zp error path is denied", "/__zp/error/BAD_HMAC", http.StatusForbidden, "", "POLICY_BLOCKED"},
 
 	// Serve handlers fail closed (503) because the asset tree is absent, but
 	// the key point is they routed to a serve path rather than default-deny.

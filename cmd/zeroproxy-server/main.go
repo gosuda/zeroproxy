@@ -93,9 +93,6 @@ var routes = []route{
 	{pat: controlPrefix + "error/", prefix: true, handler: serveControlError},
 	{pat: assetPrefix, prefix: true, handler: serveAssetRoute},
 	{pat: controlPrefix + "worker-bootstrap.js", handler: (*server).workerBootstrap},
-	{pat: "/p/", prefix: true, handler: redirectLegacyPage},
-	{pat: "/__zp/", prefix: true, handler: (*server).legacyZP},
-	{pat: "/sw.js", handler: redirectLegacySW},
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -127,56 +124,6 @@ func serveControlError(s *server, w http.ResponseWriter, r *http.Request) {
 
 func serveAssetRoute(s *server, w http.ResponseWriter, r *http.Request) {
 	s.serveAsset(w, r, strings.TrimPrefix(r.URL.Path, assetPrefix))
-}
-
-func redirectLegacyPage(_ *server, w http.ResponseWriter, r *http.Request) {
-	redirectLegacy(w, r, controlPrefix+"p/"+strings.TrimPrefix(r.URL.Path, "/p/"))
-}
-
-func redirectLegacySW(_ *server, w http.ResponseWriter, r *http.Request) {
-	redirectLegacy(w, r, controlPrefix+"sw.js")
-}
-
-func redirectLegacy(w http.ResponseWriter, r *http.Request, nextPath string) {
-	u := *r.URL
-	u.Path = nextPath
-	http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
-}
-
-// legacyControlRedirects maps legacy /__zp/ control paths to their canonical
-// /zp/ targets.
-var legacyControlRedirects = map[string]string{
-	"/__zp/ws-pipe":             controlPrefix + "ws-pipe",
-	"/__zp/kernel.wasm":         controlPrefix + "kernel.wasm",
-	"/__zp/worker-bootstrap.js": controlPrefix + "worker-bootstrap.js",
-}
-
-// legacyAssetNames is the allowlist of legacy /__zp/<name> asset paths that map
-// to the canonical /zp/assets/ prefix. Anything else is default-denied.
-var legacyAssetNames = map[string]struct{}{
-	"zp-core.js":         {},
-	"runtime-prelude.js": {},
-	"rust-rewriter.js":   {},
-	"wasm_exec.js":       {},
-	"worker-prelude.js":  {},
-}
-
-func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if next, ok := legacyControlRedirects[path]; ok {
-		redirectLegacy(w, r, next)
-		return
-	}
-	if strings.HasPrefix(path, "/__zp/error/") {
-		redirectLegacy(w, r, controlPrefix+"error/"+strings.TrimPrefix(path, "/__zp/error/"))
-		return
-	}
-	name := strings.TrimPrefix(path, "/__zp/")
-	if _, ok := legacyAssetNames[name]; ok {
-		redirectLegacy(w, r, assetPrefix+name)
-		return
-	}
-	s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
 }
 
 func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
