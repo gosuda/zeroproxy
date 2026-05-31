@@ -30,11 +30,9 @@ const (
 	maxRelayServerBytes = 2048
 )
 
-// New returns a /zp/p/<encrypted>#k=<key> path for target using the same
-// AES-256-CBC + HMAC-SHA256 envelope as web/zp-core.js. Use NewWithServers
-// when the share URL must carry explicit relay server parameters.
-func New(target string) (string, error) { return NewWithRand(rand.Reader, target) }
-
+// NewWithServers returns a /zp/p/<encrypted>#k=<key> path for target using the
+// same AES-256-CBC + HMAC-SHA256 envelope as web/zp-core.js, carrying explicit
+// relay server parameters.
 func NewWithServers(target string, servers []string) (string, error) {
 	return NewWithRandAndServers(rand.Reader, target, servers)
 }
