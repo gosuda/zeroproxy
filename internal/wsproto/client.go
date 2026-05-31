@@ -205,25 +205,33 @@ func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, 
 
 // readFrameLength decodes the RFC6455 payload length from the second header byte
 // (b1): the 7-bit value, or the 16-bit (126) / 64-bit (127) extended forms read
-// off the wire, and fails closed on a frame larger than the 64 MiB cap. The two
-// extended-length checks are sequential (not mutually exclusive) to preserve the
-// exact wire-read behavior of the original decoder.
+// off the wire, and fails closed on a frame larger than the 64 MiB cap. The 7-bit
+// indicator selects the form; the forms are mutually exclusive, so a decoded
+// extended length is never re-tested against another indicator (a 127-byte payload
+// is sent as indicator-126 + 16-bit-value-127, and must not be mistaken for the
+// 64-bit form).
 func (c *Conn) readFrameLength(ctx context.Context, b1 byte) (uint64, error) {
-	l := uint64(b1 & 0x7f)
-	if l == 126 {
+	switch ind := b1 & 0x7f; ind {
+	case 126:
 		var b [2]byte
 		if _, err := io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
 			return 0, err
 		}
-		l = uint64(binary.BigEndian.Uint16(b[:]))
-	}
-	if l == 127 {
+		return checkFrameLength(uint64(binary.BigEndian.Uint16(b[:])))
+	case 127:
 		var b [8]byte
 		if _, err := io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
 			return 0, err
 		}
-		l = binary.BigEndian.Uint64(b[:])
+		return checkFrameLength(binary.BigEndian.Uint64(b[:]))
+	default:
+		return uint64(ind), nil
 	}
+}
+
+// checkFrameLength fails closed on a frame larger than the 64 MiB cap, before the
+// caller allocates the payload buffer.
+func checkFrameLength(l uint64) (uint64, error) {
 	if l > 64<<20 {
 		return 0, fmt.Errorf("POLICY_BLOCKED: websocket frame too large")
 	}

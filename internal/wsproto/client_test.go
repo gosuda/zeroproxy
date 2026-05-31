@@ -137,6 +137,54 @@ func TestReadFrameRejectsOversizedFrameWithoutAllocating(t *testing.T) {
 	}
 }
 
+// TestReadFrameDecodesExtendedLengthFormsByIndicator pins RFC6455 length-form
+// dispatch: the 7-bit indicator (NOT the decoded length value) selects the form,
+// so the 126/127 extended forms are mutually exclusive. The load-bearing case is
+// a 127-byte payload — it cannot use the 7-bit form (the value 127 is itself the
+// 64-bit indicator), so a conforming sender, including our own WriteFrame, encodes
+// it as indicator-126 + 16-bit-value-127. A decoder that re-checks the *decoded*
+// value against the 127 sentinel mis-reads 8 payload bytes as a 64-bit length and
+// desyncs; here want[0]=0xff forces that mis-read length past the 64 MiB cap, so
+// the regression surfaces deterministically as POLICY_BLOCKED on a perfectly valid
+// frame rather than a hang. Every size must round-trip intact; 127 is the case the
+// sequential-if decoder failed, the others guard the fix against breaking 7-bit,
+// 16-bit, and 64-bit forms.
+func TestReadFrameDecodesExtendedLengthFormsByIndicator(t *testing.T) {
+	for _, size := range []int{125, 126, 127, 128, 65535, 65536} {
+		t.Run(fmt.Sprintf("payload_%d", size), func(t *testing.T) {
+			client, server := net.Pipe()
+			conn := &Conn{c: client}
+			deadline := time.Now().Add(2 * time.Second)
+			_ = client.SetDeadline(deadline)
+			_ = server.SetDeadline(deadline)
+
+			want := make([]byte, size)
+			for i := range want {
+				want[i] = byte(i*7 + 1)
+			}
+			if size >= 8 {
+				want[0] = 0xff // force the buggy mis-read length > 64 MiB: fast, deterministic red.
+			}
+
+			go func() {
+				defer server.Close()
+				_ = writeServerFrame(server, OpBinary, want)
+			}()
+
+			op, payload, err := conn.ReadFrame(context.Background())
+			if err != nil {
+				t.Fatalf("ReadFrame(%d-byte frame) = error %v; a valid frame must decode (length forms dispatch on the indicator, not the decoded value)", size, err)
+			}
+			if op != OpBinary {
+				t.Fatalf("op = 0x%x, want OpBinary 0x%x", op, OpBinary)
+			}
+			if !bytes.Equal(payload, want) {
+				t.Fatalf("payload mismatch at size %d: got %d bytes, want %d", size, len(payload), size)
+			}
+		})
+	}
+}
+
 // TestReadFrameRejectsUnsupportedOpcode asserts the default branch (client.go
 // ReadFrame ~:113-114) fails closed for opcodes the proxy does not understand
 // (0x3, 0x7). A silent passthrough here would let an attacker smuggle frames the
