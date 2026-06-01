@@ -29,17 +29,29 @@
 //! and exposes the negotiated value on the open connection. The HTTP layer
 //! reads it to decide between HTTP/2 (`h2`) and HTTP/1.1 (`http/1.1`).
 //!
-//! ## What this module deliberately does *not* do
+//! ## JA3 fingerprint shaping (phase 1: cipher reorder)
 //!
-//! * **No uTLS / Chrome fingerprint mimicry.** Anti-bot spoofing isn't a
-//!   project goal (see ARCHITECTURE.md). uTLS in Go talks to the same
-//!   rustls-equivalent moving parts but with a forged ClientHello to
-//!   match Chrome's JA3. If/when fingerprint mimicry becomes a hard
-//!   requirement, we'll need either a fork of rustls's ClientHello
-//!   builder or a hand-rolled handshake — both are out of scope for the
-//!   Step 14 server-TLS-regression repair.
-//! * **No session resumption / 0-RTT.** Future optimisation. Forces a
-//!   full handshake per connection until yamux pooling lands.
+//! NAVER's WAF (nid.naver.com login) imposes a ~60s "slow lane" on
+//! ClientHellos whose JA3 hash doesn't look browser-like. rustls's
+//! default ordering — pulled from `rustls_rustcrypto::ALL_CIPHER_SUITES` —
+//! puts TLS 1.2 ECDHE suites *before* TLS 1.3, which is the inverse of
+//! every real browser. Chrome 134 emits TLS 1.3 first
+//! (`0x1301, 0x1302, 0x1303`), then TLS 1.2 ECDHE in `AES128, AES256,
+//! CHACHA` order, ECDHE_ECDSA then ECDHE_RSA.
+//!
+//! Phase 1 (this module): override `cipher_suites` on the
+//! `CryptoProvider` to Chrome's order. No rustls fork — fully public API.
+//! Flips the JA3 hash; whether the new hash also bypasses NAVER's
+//! blocklist is what we're verifying.
+//!
+//! Phase 2 (pending — rustls fork): GREASE injection (RFC 8701) and the
+//! extensions Chrome sends that rustls doesn't (`record_size_limit`,
+//! `renegotiation_info`, ALPS, padding ordering). Required for an exact
+//! Chrome JA3 match if phase 1 isn't enough.
+//!
+//! ## What this module still doesn't do
+//!
+//! * **No session resumption / 0-RTT.** Future optimisation.
 //! * **No client certificates.** None of our target sites need them.
 
 use std::cell::RefCell;
@@ -79,6 +91,32 @@ thread_local! {
 /// Cached calls: an `Arc::clone`. The `Arc<ClientConfig>` shares the heavy
 /// internal state (root store, crypto provider) so a TLS handshake
 /// allocates only the per-connection `ClientConnection` itself.
+/// Build a Chrome-ordered cipher suite list from `rustls_rustcrypto`'s
+/// public constants. Order matches Chrome 134 stable's TLS ClientHello:
+/// TLS 1.3 first (`AES128, AES256, CHACHA20`), then TLS 1.2 ECDHE_ECDSA,
+/// then ECDHE_RSA, both in `AES128, AES256, CHACHA20` per-family order.
+///
+/// JA3's "Cipher" component hashes this list verbatim, so changing the
+/// order changes the hash. rustls's stock ordering is TLS 1.2 first,
+/// which is the giveaway — no browser does that today.
+fn chrome_ordered_cipher_suites() -> Vec<rustls::SupportedCipherSuite> {
+    use rustls_rustcrypto as rc;
+    vec![
+        // TLS 1.3 (Chrome: AES128 → AES256 → CHACHA20)
+        rc::TLS13_AES_128_GCM_SHA256,
+        rc::TLS13_AES_256_GCM_SHA384,
+        rc::TLS13_CHACHA20_POLY1305_SHA256,
+        // TLS 1.2 ECDHE_ECDSA (Chrome: AES128 → AES256 → CHACHA20)
+        rc::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        rc::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        rc::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        // TLS 1.2 ECDHE_RSA (Chrome: AES128 → AES256 → CHACHA20)
+        rc::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        rc::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        rc::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    ]
+}
+
 fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
     let wanted: Vec<Vec<u8>> = alpn.iter().map(|p| p.to_vec()).collect();
     CONFIG_CACHE.with(|cell| -> io::Result<Arc<ClientConfig>> {
@@ -87,7 +125,12 @@ fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
         }
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let provider = rustls_rustcrypto::provider();
+        // Phase-1 JA3 shaping: replace rustls-rustcrypto's stock
+        // `cipher_suites` (TLS 1.2 first) with Chrome's ordering (TLS 1.3
+        // first). Everything else on the provider — KX groups, signing,
+        // KeyProvider — stays as rustls-rustcrypto built it.
+        let mut provider = rustls_rustcrypto::provider();
+        provider.cipher_suites = chrome_ordered_cipher_suites();
         let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls: config: {e}")))?
