@@ -481,16 +481,37 @@ async function transformDocumentResponse(resp, opt) {
   try {
     await initBundle();
     if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.transformHtml === 'function') {
-      // NOTE: We have access to the post-redirect URL via
-      // resp.headers.get('X-ZP-Final-URL') (surfaced by the kernel), but using
-      // it as the HTML rewrite base re-exposes the NAVER-login script-completion
-      // hang — when root-relative CSS/JS resolve correctly, the login JS
-      // initialises fully and freezes (see .ai/trap-notebook/INDEX.md
-      // 2026-05-31 diagnostic entry). Keep the original requested URL until
-      // the hang root cause is fixed; pay.naver.com → nidlogin renders
-      // unstyled but readable, which is preferable to a hung tab.
+      // HTML rewrite base stays at the originally requested URL — using the
+      // post-redirect URL re-exposes a separate NAVER-login script-completion
+      // hang (see .ai/trap-notebook/INDEX.md 2026-05-31 diagnostic entry).
+      // We post-process stylesheet links below to fix the redirect-host
+      // mismatch without making scripts initialise on the "real" host.
       const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
       transformed = self.ZPBundle.transformHtml(html, targetUrl) || html;
+      // Post-process stylesheet URLs only — repoint /foo.css that 404s at
+      // the originally requested host (pay.naver.com) to the post-redirect
+      // host (nid.naver.com). Scripts intentionally stay broken on the
+      // original host so the login JS bails early and the page renders.
+      const finalUrl = (resp.headers && resp.headers.get('X-ZP-Final-URL')) || '';
+      if (finalUrl) {
+        try {
+          const origin = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
+          const oUrl = new URL(origin);
+          const fUrl = new URL(finalUrl);
+          if (oUrl.host !== fUrl.host) {
+            // zp-htmltx percent-encodes more aggressively than encodeURIComponent
+            // (dots/underscores too). Match the exact encoded host substring.
+            const aggrEnc = s => encodeURIComponent(s).replace(/[.~!*'()_-]/g,
+              c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+            const encOrigHost = aggrEnc(oUrl.host);
+            const encFinalHost = aggrEnc(fUrl.host);
+            transformed = transformed.replace(
+              /<link[^>]+rel=["']?stylesheet["']?[^>]*>/gi,
+              tag => tag.split(encOrigHost).join(encFinalHost)
+            );
+          }
+        } catch {}
+      }
     }
   } catch {
     // Fail-open on transform error: ship the original HTML rather than the
