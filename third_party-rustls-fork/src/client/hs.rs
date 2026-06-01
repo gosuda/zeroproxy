@@ -611,6 +611,36 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         // ApplicationSettings (id 17613) — Chrome sends ["h2"] only.
         exts.application_settings = Some(vec![ProtocolName::from(b"h2".to_vec())]);
     }
+    if spec_has(0x0023) && exts.session_ticket.is_none() {
+        // SessionTicket (id 35) — Chrome always emits this even on
+        // first contact, signaling "I support session tickets, here's
+        // an empty placeholder". rustls only sets it via
+        // `prepare_resumption` when a previous session exists, which is
+        // a fingerprint giveaway on first connect. Force an empty
+        // ticket ("Request" variant emits a zero-length body).
+        exts.session_ticket = Some(ClientSessionTicket::Request);
+    }
+
+    // Override signature_schemes with the captured spec's order if
+    // available. rustls sets `signature_schemes` from
+    // `verifier.supported_verify_schemes()`, which gives a list and
+    // order driven by what the crypto backend supports — for
+    // rustls-rustcrypto that includes schemes Chrome doesn't (e.g.
+    // brainpoolP384) and the order leads with ECDSA-P384-SHA384, while
+    // Chrome leads with ECDSA-P256-SHA256. Anti-bot tools (peetprint)
+    // include the sig_algs *contents* in their hash, so this matters.
+    if let Some(sig) = crate::ja3::with_current(|s| {
+        s.map(|s| s.signature_schemes.clone())
+    }) {
+        if !sig.is_empty() {
+            use crate::enums::SignatureScheme;
+            exts.signature_schemes = Some(
+                sig.into_iter()
+                    .map(SignatureScheme::from)
+                    .collect(),
+            );
+        }
+    }
 
     // (4) Extension order. Prefer the captured spec from the user's
     // real browser → ZeroProxy handshake (phase 4); fall back to a
