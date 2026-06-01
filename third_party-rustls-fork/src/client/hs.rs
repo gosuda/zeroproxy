@@ -586,7 +586,33 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         ]);
     }
 
-    // (3) Extension order. Prefer the captured spec from the user's
+    // (3) Phase 5 additions: extensions rustls didn't have struct
+    // fields for before this commit. We always populate them when the
+    // captured spec (or our hardcoded fallback) lists them, because
+    // they're the ones that visibly differ from Chrome on the wire.
+    // Without them, NAVER's WAF kept the 60s slow lane on even with
+    // a Chrome-shaped extension *order* — these three are the remaining
+    // browser-vs-rustls fingerprint diff.
+    let spec_has = |id: u16| -> bool {
+        crate::ja3::with_current(|s| {
+            s.map(|s| s.extensions.iter().any(|e| u16::from(*e) == id))
+                .unwrap_or(true) // fallback path: assume Chrome sends all three
+        })
+    };
+    if spec_has(0x0012) {
+        // SCT request (id 18) — empty body.
+        exts.signed_certificate_timestamp_request = Some(());
+    }
+    if spec_has(0x001c) {
+        // record_size_limit (id 28) — Chrome 134 sends 16385.
+        exts.record_size_limit = Some(16385);
+    }
+    if spec_has(0x44cd) {
+        // ApplicationSettings (id 17613) — Chrome sends ["h2"] only.
+        exts.application_settings = Some(vec![ProtocolName::from(b"h2".to_vec())]);
+    }
+
+    // (4) Extension order. Prefer the captured spec from the user's
     // real browser → ZeroProxy handshake (phase 4); fall back to a
     // hardcoded Chrome 134 layout if no spec was installed (phase 2
     // fallback, e.g. plain-HTTP dev without `-tls-addr`).

@@ -876,6 +876,24 @@ extension_struct! {
         ExtensionType::CompressCertificate =>
             pub(crate) certificate_compression_algorithms: Option<Vec<CertificateCompressionAlgorithm>>,
 
+        /// ZeroProxy JA3 phase 5: client requests Signed Certificate
+        /// Timestamps in the server cert chain (RFC 6962). Empty body
+        /// — its presence is the request. Chrome 134 always sends it.
+        ExtensionType::SCT =>
+            pub(crate) signed_certificate_timestamp_request: Option<()>,
+
+        /// ZeroProxy JA3 phase 5: maximum TLS record size the client is
+        /// willing to receive (RFC 8449). Chrome 134 sends `0x4001`
+        /// (16385 bytes). Single u16 body.
+        ExtensionType::RecordSizeLimit =>
+            pub(crate) record_size_limit: Option<u16>,
+
+        /// ZeroProxy JA3 phase 5: Chrome's Application-Layer Protocol
+        /// Settings extension. Wire format mirrors ALPN — a vector of
+        /// `ProtocolName`. Chrome sends `["h2"]`.
+        ExtensionType::ApplicationSettings =>
+            pub(crate) application_settings: Option<Vec<ProtocolName>>,
+
         /// Session ticket offer or request (RFC5077/RFC8446)
         ExtensionType::SessionTicket =>
             pub(crate) session_ticket: Option<ClientSessionTicket>,
@@ -949,6 +967,9 @@ impl ClientExtensions<'_> {
             server_certificate_types,
             extended_master_secret_request,
             certificate_compression_algorithms,
+            signed_certificate_timestamp_request,
+            record_size_limit,
+            application_settings,
             session_ticket,
             preshared_key_offer,
             early_data_request,
@@ -976,6 +997,9 @@ impl ClientExtensions<'_> {
             server_certificate_types,
             extended_master_secret_request,
             certificate_compression_algorithms,
+            signed_certificate_timestamp_request,
+            record_size_limit,
+            application_settings,
             session_ticket,
             preshared_key_offer,
             early_data_request,

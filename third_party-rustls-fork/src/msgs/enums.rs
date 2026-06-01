@@ -127,6 +127,14 @@ enum_builder! {
         Padding => 0x0015,
         ExtendedMasterSecret => 0x0017,
         CompressCertificate => 0x001b,
+        // ZeroProxy JA3 phase 5: Chrome 134 sends `record_size_limit`
+        // (RFC 8449) as part of its standard ClientHello. rustls's
+        // upstream client doesn't emit it; we add the field here so the
+        // captured-spec replay path (see `client::hs::apply_chrome_ja3_shape`)
+        // can include it. Server-side rustls already parses the
+        // negotiated value on response; this just lets the client
+        // advertise.
+        RecordSizeLimit => 0x001c,
         SessionTicket => 0x0023,
         PreSharedKey => 0x0029,
         EarlyData => 0x002a,
@@ -141,6 +149,13 @@ enum_builder! {
         KeyShare => 0x0033,
         TransportParameters => 0x0039,
         NextProtocolNegotiation => 0x3374,
+        // ZeroProxy JA3 phase 5: Chrome's "Application-Layer Protocol
+        // Settings" extension (draft-vvv-tls-alps). Carries an inner
+        // ALPN-style protocol list; we mirror Chrome by sending `["h2"]`.
+        // No standardised IANA assignment; 0x44cd is the value our
+        // captured WebView2 fingerprint showed. (The other Chrome-ALPS
+        // value seen in older Chrome builds is 0x4469.)
+        ApplicationSettings => 0x44cd,
         ChannelId => 0x754f,
         RenegotiationInfo => 0xff01,
         TransportParametersDraft => 0xffa5,

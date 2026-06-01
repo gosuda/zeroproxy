@@ -70,7 +70,10 @@ async function captureBrowserFingerprint() {
   // Chrome refuses SW fetches to self-signed HTTPS in this dev setup.
   // Production path (real cert): un-comment the HTTPS fetch and remove
   // this constant. See trap notebook entry for details.
-  capturedFingerprint = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzE2LDEzLDExLDUsMjMsMCw0NSwzNSwxMCw1MSw2NTI4MSw0MywyN10sInN1cHBvcnRlZEN1cnZlcyI6WzI5LDIzLDI0XSwic3VwcG9ydGVkUG9pbnRzIjoiQUE9PSIsInNpZ25hdHVyZVNjaGVtZXMiOlsxMDI3LDIwNTIsMTAyNSwxMjgzLDIwNTMsMTI4MSwyMDU0LDE1MzddLCJhbHBuUHJvdG9jb2xzIjpbImgyIiwiaHR0cC8xLjEiXX0K';
+  // Phase 5 spec: includes the three extensions rustls didn't have
+  // struct fields for before phase 5 — id 18 (SCT request), 28
+  // (record_size_limit), and 17613 (ApplicationSettings / ALPS).
+  capturedFingerprint = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzE2LDEzLDExLDUsMjMsMCwxOCw0NSwzNSwxMCw1MSw2NTI4MSwyOCw0MywyNywxNzYxM10sInN1cHBvcnRlZEN1cnZlcyI6WzI5LDIzLDI0XSwic3VwcG9ydGVkUG9pbnRzIjoiQUE9PSIsInNpZ25hdHVyZVNjaGVtZXMiOlsxMDI3LDIwNTIsMTAyNSwxMjgzLDIwNTMsMTI4MSwyMDU0LDE1MzddLCJhbHBuUHJvdG9jb2xzIjpbImgyIiwiaHR0cC8xLjEiXX0K';
   return capturedFingerprint;
   /* Original fetch path — used once we have a trusted dev cert:
   const here = new URL(self.location.href);
