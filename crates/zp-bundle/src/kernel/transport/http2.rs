@@ -63,6 +63,21 @@ impl Http2Client {
 /// the h2 handshake. Spawns the connection driver task and returns an
 /// `Http2Client` that can issue concurrent requests on the open
 /// connection.
+///
+/// The Builder configures SETTINGS to match a real Chrome/Edge
+/// ClientPreface — anti-bot WAFs (NAVER's nid.* family) profile the
+/// connection-opening frames, and our defaults landed us in a slow lane
+/// that delayed every first response by ~60s. The values below are the
+/// ones Chrome 131 sends today:
+///
+///   HEADER_TABLE_SIZE       = 65536      (was 4096)
+///   ENABLE_PUSH             = 0          (Chrome explicitly off)
+///   INITIAL_WINDOW_SIZE     = 6_291_456  (6 MiB; was 65535)
+///   MAX_HEADER_LIST_SIZE    = 262144     (was unspecified)
+///   connection window       = 15_663_105 (~15 MiB, set via Builder)
+///
+/// MAX_FRAME_SIZE stays at the 16384 default — Chrome also sends 16384
+/// so no override needed.
 pub(crate) async fn handshake<S>(tls: S) -> io::Result<Http2Client>
 where
     S: AsyncRead + AsyncWrite + Unpin + 'static,
@@ -70,7 +85,15 @@ where
     // h2 wants tokio io. Wrap once; the compat layer is a zero-cost
     // newtype that only re-implements the trait calls.
     let tokio_stream = tls.compat();
-    let (send, connection) = h2::client::handshake(tokio_stream)
+    let mut builder = h2::client::Builder::new();
+    builder
+        .header_table_size(65_536)
+        .enable_push(false)
+        .initial_window_size(6_291_456)
+        .initial_connection_window_size(15_663_105)
+        .max_header_list_size(262_144);
+    let (send, connection) = builder
+        .handshake(tokio_stream)
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("h2: handshake: {e}")))?;
     spawn_local(async move {
