@@ -63,12 +63,37 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     push_trace(&format!("kernel_fetch:captured url={} method={}", url, method));
 
     let mut headers_owned: Vec<(String, String)> = Vec::new();
-    if let Ok(h) = Reflect::get(&request_js, &JsValue::from_str("headers")) {
-        if !h.is_undefined() && !h.is_null() {
-            if let Ok(entries_fn) = Reflect::get(&h, &JsValue::from_str("entries")) {
-                if let Some(f) = entries_fn.dyn_ref::<Function>() {
-                    if let Ok(iter) = f.call0(&h) {
-                        collect_iter_pairs(&iter, &mut headers_owned);
+    // Prefer `headerEntries` — a plain `[[k,v], ...]` array the SW builds
+    // manually so it can include Sec-Fetch-*, sec-ch-ua-* and other
+    // "forbidden header names" that the Fetch-spec Request constructor
+    // would strip. NAVER's WAF (nid.naver.com / pay.naver.com) silently
+    // black-holes any request missing these client-hint signals, so the
+    // sidechannel is the only way to forward them upstream.
+    if let Ok(arr) = Reflect::get(&request_js, &JsValue::from_str("headerEntries")) {
+        if !arr.is_undefined() && !arr.is_null() {
+            if let Some(arr) = arr.dyn_ref::<Array>() {
+                for pair in arr.iter() {
+                    if let Some(pair) = pair.dyn_ref::<Array>() {
+                        let k = pair.get(0).as_string().unwrap_or_default();
+                        let v = pair.get(1).as_string().unwrap_or_default();
+                        if !k.is_empty() {
+                            headers_owned.push((k, v));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: `Request.headers` iteration (loses forbidden headers but
+    // works for any caller that didn't migrate to the sidechannel yet).
+    if headers_owned.is_empty() {
+        if let Ok(h) = Reflect::get(&request_js, &JsValue::from_str("headers")) {
+            if !h.is_undefined() && !h.is_null() {
+                if let Ok(entries_fn) = Reflect::get(&h, &JsValue::from_str("entries")) {
+                    if let Some(f) = entries_fn.dyn_ref::<Function>() {
+                        if let Ok(iter) = f.call0(&h) {
+                            collect_iter_pairs(&iter, &mut headers_owned);
+                        }
                     }
                 }
             }
@@ -92,8 +117,13 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
             // Strip all remaining x-zp-* internal sidechannel headers.
             s if s.starts_with("x-zp-") => false,
             // Strip browser-controlled or framing-controlled headers — let
-            // the transport set them from canonical sources.
-            "host" | "cookie" | "origin" | "referer" | "accept-encoding"
+            // the transport set them from canonical sources. `user-agent`
+            // is included because the SW also forwards the page-side UA
+            // (it survives `new Headers(req.headers)`) and we promote our
+            // own ZP.TARGET_USER_AGENT via X-ZP-User-Agent; without this
+            // strip we ship two `User-Agent` headers and origin servers
+            // reject the request.
+            "host" | "cookie" | "origin" | "referer" | "user-agent" | "accept-encoding"
             | "connection" | "content-length" | "transfer-encoding" => false,
             _ => true,
         }

@@ -413,16 +413,73 @@ async function transportFetch(targetUrl, opt) {
   // target sees the page-state cookies. The Rust kernel passes Cookie
   // through unchanged to the relay.
   if (opt.tab.documentCookie) headers.set('Cookie', opt.tab.documentCookie);
-  const init = { method: opt.method || (opt.request && opt.request.method) || 'GET', headers };
-  if (init.method !== 'GET' && init.method !== 'HEAD') {
+  // Build a flat [[k, v], ...] header list from BOTH our `headers` Headers
+  // object AND the page-side `req.headers`. The Fetch-spec `new Request()`
+  // we used to call strips "forbidden header names" — Sec-Fetch-*,
+  // sec-ch-ua-*, User-Agent, etc. — which is exactly what NAVER / GitHub
+  // WAFs check first; without them the upstream silently 60s-times-out.
+  // The plain-object request shape below bypasses Request's filter while
+  // still satisfying the kernel's `headerEntries` reader.
+  const headerEntries = [];
+  const seen = new Set();
+  const pushOnce = (k, v) => {
+    const kl = k.toLowerCase();
+    if (seen.has(kl)) return;
+    seen.add(kl);
+    headerEntries.push([k, v]);
+  };
+  for (const [k, v] of headers.entries()) pushOnce(k, v);
+  // Now grab anything the browser added that Headers refused to copy
+  // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,
+  // upgrade-insecure-requests). `request.headers.entries()` from the
+  // SW-intercepted request DOES include these in Chromium.
+  if (opt.request && opt.request.headers) {
+    for (const [k, v] of opt.request.headers.entries()) {
+      const kl = k.toLowerCase();
+      // Skip ones we explicitly own (Referer/UA/Cookie were promoted via
+      // X-ZP-* and would be lost here anyway). Accept-Encoding is forced
+      // to identity below.
+      if (kl === 'cookie' || kl === 'host' || kl === 'origin' || kl === 'referer'
+          || kl === 'user-agent' || kl === 'accept-encoding'
+          || kl === 'connection' || kl === 'content-length' || kl === 'transfer-encoding') {
+        continue;
+      }
+      pushOnce(k, v);
+    }
+  }
+  // Synthesize Sec-Fetch-* / Accept-Language if the browser didn't
+  // include them. WebView2 in some configurations omits them on the
+  // SW-intercepted navigation; nid.naver.com / GitHub WAFs both treat
+  // a missing Sec-Fetch-Mode as bot traffic and silently drop the
+  // request (60s TCP timeout from upstream's perspective). We pick the
+  // values a real browser would have sent for a top-level navigation
+  // to a cross-site origin.
+  if (!seen.has('sec-fetch-mode')) pushOnce('sec-fetch-mode', opt.document ? 'navigate' : 'cors');
+  if (!seen.has('sec-fetch-dest')) pushOnce('sec-fetch-dest', opt.document ? 'document' : 'empty');
+  if (!seen.has('sec-fetch-site')) pushOnce('sec-fetch-site', 'cross-site');
+  if (opt.document && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
+  if (!seen.has('accept-language')) pushOnce('accept-language', 'en-US,en;q=0.9,ko;q=0.8');
+  const method = opt.method || (opt.request && opt.request.method) || 'GET';
+  let bodyU8 = null;
+  if (method !== 'GET' && method !== 'HEAD') {
     const body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
     const n = body && (body.byteLength || body.size || 0) || 0;
     if (n > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, u);
-    init.body = body;
+    bodyU8 = body ? new Uint8Array(body instanceof ArrayBuffer ? body : await body.arrayBuffer()) : null;
   }
+  // Plain object — no Request constructor, so forbidden headers survive.
+  // The kernel reads `headerEntries` first (preferred) and `arrayBuffer`
+  // for the body (still a function so the kernel's existing extractor
+  // doesn't change shape).
+  const reqLike = {
+    url: u,
+    method,
+    headerEntries,
+    arrayBuffer: () => Promise.resolve(bodyU8 ? bodyU8.buffer : new ArrayBuffer(0)),
+  };
   let resp;
   try {
-    resp = await self.kernelFetch(new Request(u, init));
+    resp = await self.kernelFetch(reqLike);
   } catch (e) {
     return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
   }
