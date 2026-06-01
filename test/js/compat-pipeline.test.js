@@ -95,6 +95,8 @@ test('service worker owns native request capture, CORS, and context recovery', (
   assert.equal(sw.includes('firstTab'), false);
   assert.equal(sw.includes('defaultContext'), false);
   assert.match(sw, /url\.protocol === 'http:' \|\| url\.protocol === 'https:'/);
+  assert.match(sw, /apiScript[\s\S]*transportFetch\(target, \{ request: req, method: 'GET'/);
+  assert.match(sw, /apiWorkerScript[\s\S]*transportFetch\(target, \{ request: req, method: 'GET'/);
 });
 
 test('response bridge exposes a ReadableStream instead of buffering response bodies', () => {

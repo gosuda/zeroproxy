@@ -187,7 +187,7 @@ async function apiScript(req, url, clientId) {
   const refPolicy = url.searchParams.get('rp') || '';
   if (ref) headers.push(['X-ZP-Fetch-Referrer', ref]);
   if (refPolicy) headers.push(['X-ZP-Fetch-Referrer-Policy', refPolicy]);
-  const resp = await transportFetch(target, { method: 'GET', headers, tab: resolved.tab, entryId: resolved.entryId });
+  const resp = await transportFetch(target, { request: req, method: 'GET', headers, tab: resolved.tab, entryId: resolved.entryId });
   return rewriteScriptResponse(resp, { targetUrl: target, kind });
 }
 
@@ -195,7 +195,7 @@ async function apiWorkerScript(req, url, clientId) {
   const target = url.searchParams.get('u');
   const resolved = scriptRequestContext(req, url, clientId);
   if (!target || !resolved) return safeError('SW_NOT_READY', 503);
-  return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab: resolved.tab, entryId: resolved.entryId }), { targetUrl: target, kind: 'worker' });
+  return rewriteScriptResponse(await transportFetch(target, { request: req, method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab: resolved.tab, entryId: resolved.entryId }), { targetUrl: target, kind: 'worker' });
 }
 
 async function transportFetch(targetUrl, opt) {
