@@ -229,6 +229,17 @@ enum FreshConn {
     Http2(Http2Client),
 }
 
+/// Hosts where h2 is known to misbehave (GoAway after one stream, server
+/// rejects HEADERS frames with our HPACK ordering, etc). We don't even
+/// advertise the protocol in the ClientHello for these — pure h1 keeps
+/// the page rendering. Match is exact-host plus single-label suffix.
+/// Empty for now: trials of `nid.naver.com` showed the 60s timeout is a
+/// WAF rejecting the whole request (UA/Sec-Fetch-* mismatch vs a real
+/// browser), not an h2 protocol issue — disabling h2 doesn't help.
+fn host_h2_denied(_host: &str) -> bool {
+    false
+}
+
 /// Wall-clock millisecond reading via `Date.now()`. Lower resolution than
 /// `performance.now()` but doesn't need a Performance web-sys feature
 /// import. Adequate for stage-level (10ms+) timing diagnostics.
@@ -307,10 +318,22 @@ async fn open_fresh(
 
     if parsed.scheme == "https" {
         let t_tls = now_ms();
+        // Per-host h2 deny list. Some origins (NAVER's nid.* family) send
+        // GoAway after the first stream completes, which our pool can't
+        // amortise — every fetch pays a fresh TLS+h2 handshake AND
+        // the parallel-burst cold-path race intermittently loses
+        // requests inside the h2 driver. Until we land per-host fallback
+        // detection, ALPN-advertise http/1.1 only for these origins so
+        // the proven h1+yamux path runs.
+        let alpn_list: &[&[u8]] = if host_h2_denied(&parsed.host) {
+            &[b"http/1.1"]
+        } else {
+            &[b"h2", b"http/1.1"]
+        };
         // Advertise both protocols. The server picks one; we branch on
         // `tls.alpn_protocol()` after the handshake to wire either the
         // h2 multiplex client or the HTTP/1.1 per-stream client.
-        let tls = TlsStream::connect(stream, &parsed.host, &[b"h2", b"http/1.1"])
+        let tls = TlsStream::connect(stream, &parsed.host, alpn_list)
             .await
             .map_err(|e| {
                 crate::kernel::push_trace(&format!(
