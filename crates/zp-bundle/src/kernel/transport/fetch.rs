@@ -468,7 +468,18 @@ fn pick_relay_url() -> Result<String, String> {
 /// Convert the buffered HTTP response into a web_sys::Response. Headers
 /// are appended (not set) so multi-valued headers like `Set-Cookie` and
 /// repeated `Link` survive.
-fn build_js_response(resp: HttpResponse, _final_url: &str) -> Result<JsValue, JsValue> {
+fn build_js_response(resp: HttpResponse, final_url: &str) -> Result<JsValue, JsValue> {
+    crate::kernel::push_trace(&format!(
+        "tx:resp-body url={} status={} body={}B ct={}",
+        final_url,
+        resp.status,
+        resp.body.len(),
+        resp.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("(none)")
+    ));
     let headers = Headers::new()?;
     for (k, v) in &resp.headers {
         // Headers.append rejects a few wire-level header names by spec
