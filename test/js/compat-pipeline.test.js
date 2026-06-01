@@ -59,23 +59,25 @@ test('service worker owns native request capture, CORS, and context recovery', (
   assert.match(sw, /url\.protocol === 'http:' \|\| url\.protocol === 'https:'/);
 });
 
-test('response bridge exposes a ReadableStream instead of buffering response bodies', () => {
-  const bridge = read('internal/swhttp/bridge_js.go');
-  const kernel = read('cmd/wasm-kernel/main.go');
-  assert.equal(/io\.ReadAll\(resp\.Body\)/.test(bridge), false);
-  assert.equal(/io\.ReadAll\(resp\.Body\)/.test(kernel), false);
-  assert.match(bridge, /ReadableStream/);
-  assert.match(bridge, /controller\.Call\("enqueue"/);
-  assert.match(kernel, /cancelReadCloser/);
+test('Rust kernel response path uses ReadableStream (no full-body buffer)', () => {
+  // Step 13 cutover: the Go kernel + swhttp bridge are gone. The Rust kernel
+  // streams response bodies via a ReadableStream controller built in
+  // crates/zp-kernel/src/lib.rs (`build_streaming_response`).
+  const kernel = read('crates/zp-kernel/src/lib.rs');
+  assert.match(kernel, /build_streaming_response/);
+  assert.match(kernel, /ReadableStream/);
+  assert.match(kernel, /invoke_controller\(&ctrl, "enqueue"/);
 });
 
-test('websocket runtime path remains isolated through the service worker stream pipe', () => {
+test('websocket runtime path is routed through the Rust kernelStream bridge', () => {
   const rt = read('web/runtime-prelude.js');
   const sw = read('web/sw.js');
-  const kernel = read('cmd/wasm-kernel/main.go');
+  const kernel = read('crates/zp-kernel/src/lib.rs');
   assert.match(rt, /ZP_WS_OPEN/);
-  assert.match(sw, /__zp_stream/);
+  assert.match(sw, /kernelStream/);
   assert.match(sw, /streamIsolationKey/);
-  assert.match(kernel, /wsproto\.Dial/);
-  assert.match(kernel, /newJSWebSocketStream/);
+  // Server-side ws-bridge endpoint pairs with the Rust kernelStream client.
+  const server = read('cmd/zeroproxy-server/main.go');
+  assert.match(server, /controlPrefix\+"ws-bridge"/);
+  assert.match(kernel, /kernel_stream/);
 });

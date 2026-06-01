@@ -1,0 +1,29 @@
+[package]
+name = "zp-rewriter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+zp-shared = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+oxc_allocator = "0.133"
+oxc_parser = "0.133"
+oxc_ast = "0.133"
+oxc_ast_visit = "0.133"
+oxc_codegen = "0.133"
+oxc_span = "0.133"
+oxc_str = "0.133"
+oxc_syntax = "0.133"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "rewrite_perf"
+harness = false

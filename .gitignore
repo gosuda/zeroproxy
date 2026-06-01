@@ -8,3 +8,7 @@ node_modules/
 coverage/
 rewriter-rs/target/
 wasm-kernel
+target/
+Cargo.lock.bak
+.lean-ctx/
+/zeroproxy-server.exe

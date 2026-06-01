@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zp-shared",
+    "crates/zp-rewriter",
+    "crates/zp-htmltx",
+    "crates/zp-bundle",
+    "crates/zp-page-rt",
+]
+# zp-bundle absorbs the former zp-kernel / zp-membrane / zp-wtproxy-client /
+# zp-rtcgw-client crates as internal modules (they all link into the same
+# cdylib regardless). zp-shared stays separate for the Go parity boundary,
+# and zp-page-rt stays separate to avoid wasm-bindgen + raw-extern-"C"
+# dead-strip interference (see trap-notebook 2026-05-30 wasm-page-rt entry).
+# Legacy standalone crate kept as a separate build target via build.mjs's
+# makeRustRewriterClassic() — must not be pulled into the workspace.
+exclude = ["rewriter-rs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/teamlitmus/zeroproxy"
+
+[workspace.dependencies]
+zp-shared = { path = "crates/zp-shared" }
+zp-rewriter = { path = "crates/zp-rewriter" }
+zp-htmltx = { path = "crates/zp-htmltx" }
+
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

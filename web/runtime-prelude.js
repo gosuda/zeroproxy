@@ -7,11 +7,33 @@
 
   const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, readBootConfig());
   const runtimeToken = String(boot.runtimeToken || '');
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  // Single source of truth lives in zp-core (web/zp-core.js); the SW smuggles
+  // the same UA via X-ZP-User-Agent so navigator.userAgent and outgoing HTTP
+  // headers stay consistent and target servers can't fingerprint the mismatch.
+  const TARGET_USER_AGENT = ZP.TARGET_USER_AGENT;
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
   clearBootConfig();
   const Native = captureNative(root);
+
+  // zp-page-rt (raw WASM, shared memory) — async boot. Once loaded, hot
+  // paths can use rt.classifyBatch (MutationObserver batch) and handle-only
+  // classifications (urlMeta cache). Until loaded, code paths fall through
+  // to the existing JS regex / new URL() path — zero regression.
+  //
+  // The glue (web/zp-rt.js) is bundled as a prefix to this prelude by
+  // scripts/build.mjs, so globalThis.ZeroProxyRT is defined synchronously
+  // before this IIFE runs. The wasm fetch is async; rt stays null until
+  // instantiation completes (~10-50ms after page load on warm cache).
+  let rt = null;
+  if (typeof globalThis.ZeroProxyRT === 'object' && globalThis.ZeroProxyRT) {
+    try {
+      globalThis.ZeroProxyRT.load('/__zp/zp_page_rt.wasm')
+        .then(instance => { rt = instance; })
+        .catch(() => { /* fall back to JS path */ });
+    } catch { /* defensive */ }
+  }
+
   const toStringMap = new WeakMap();
   const toStringMaskedPrototypes = new WeakSet();
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
@@ -32,12 +54,32 @@
   const urlMeta = new WeakMap();
   const messageListenerWrappers = new WeakMap();
   const frameWindowOrigins = new WeakMap();
+  // Sandbox-virt backing store. Target sites that test for `iframe.sandbox`
+  // containing both `allow-scripts` and `allow-same-origin` use that as a
+  // detection-signal for hostile embedding (since browsers refuse to enforce
+  // the sandbox when those two combine). Stripping the attribute would change
+  // observable behavior; we virtualize: the WeakMap holds the SET value, the
+  // real DOM attribute is removed, and the membrane's getAttribute/has/etc
+  // accessors return the virtual value. Membrane already isolates the iframe
+  // content, so the "escape" the sandbox would have prevented cannot actually
+  // happen here.
+  const frameSandboxMeta = new WeakMap();
   const crossWindowProxyCache = new WeakMap();
   const postMessageWrappers = new WeakMap();
   const postMessageOriginals = new WeakMap();
+  // V8 incumbent realm leak — cross-realm postMessage wrap function call 시 message
+  // event 의 `e.source` 가 incumbent (caller realm 의 contentWindow) 가 아닌 wrap
+  // function 의 realm (parent) 으로 corrupt 됨. NAVER GFP SafeFrame SDK 의 resize
+  // handler 가 `e.source === iframe.contentWindow` 비교로 어느 광고 iframe 에서
+  // resize 메시지 왔는지 식별 → source 가 parent 로 corrupt 되어 모든 광고 iframe
+  // height=0 으로 collapse. Fix: 각 iframe 의 `parent`/`top` accessor 를 sender-aware
+  // proxy 로 override + sender queue 로 message dispatch 시 source 정정.
+  const parentPostMessageSenderQueue = [];
+  const parentRedirectFacades = new WeakMap();
   const frameTargetOriginMarker = Symbol.for('zeroproxy.frame.targetOrigin');
   const networkContainmentMarker = Symbol.for('zeroproxy.network.contained');
   const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
+  const safeFrameShimMarker = Symbol.for('zeroproxy.iframe.sfShim');
   const stealthMarker = Symbol.for('zeroproxy.stealth.membrane');
   const listenersKey = Symbol('zp.listeners');
   const windowMethodBindings = new Map();
@@ -51,6 +93,86 @@
   const storageMaps = new Map();
   const storageWindows = new Set();
 
+  // Diagnostic ring buffer: capture target-script errors so we can introspect
+  // hydration / runtime failures without instrumenting the page after-the-fact.
+  // Exposed as the global __zp_diagnostics — read from devtools/taskweaver.
+  try {
+    if (!root.__zp_diagnostics) {
+      const diag = [];
+      const push = e => { if (diag.length < 200) diag.push(e); };
+      root.__zp_diagnostics = diag;
+      root.addEventListener('error', e => {
+        const ent = {
+          t: 'error',
+          msg: String(e.message || ''),
+          src: e.filename ? String(e.filename).slice(0, 120) : '',
+          line: e.lineno | 0,
+          col: e.colno | 0,
+          stack: e.error && e.error.stack ? String(e.error.stack).slice(0, 800) : ''
+        };
+        push(ent);
+        try { zpTrace('err', ent.msg.slice(0, 120) + '@' + ent.src + ':' + ent.line); } catch {}
+      }, true);
+      root.addEventListener('unhandledrejection', e => {
+        const reason = (() => { try { return String(e.reason).slice(0, 300); } catch { return '???'; } })();
+        push({ t: 'rejection', reason, stack: e.reason && e.reason.stack ? String(e.reason.stack).slice(0, 800) : '' });
+        try { zpTrace('rej', reason.slice(0, 160)); } catch {}
+      }, true);
+      const oce = root.console && root.console.error;
+      if (oce) {
+        root.console.error = function(...args) {
+          push({
+            t: 'console.error',
+            args: args.map(a => {
+              if (a instanceof Error) return { err: true, msg: a.message, stack: a.stack && a.stack.slice(0, 500) };
+              try { return String(a).slice(0, 300); } catch { return '???'; }
+            })
+          });
+          return oce.apply(this, args);
+        };
+      }
+    }
+  } catch {}
+
+  // Persistent trace: write checkpoints to proxy-origin localStorage so a
+  // hang in target code can be post-mortem analyzed by restarting the
+  // browser and inspecting __zp_trace_log/__zp_hb. Heartbeat overwrites a
+  // single key (no churn); checkpoints append to a capped log (~100 entries).
+  let __zpTraceSeq = 0;
+  let __zpNativeStorage = null;
+  try { __zpNativeStorage = root.localStorage; } catch {}
+  function zpTrace(tag, extra) {
+    if (!__zpNativeStorage) return;
+    try {
+      const key = '__zp_trace_log';
+      let log;
+      try { log = JSON.parse(__zpNativeStorage.getItem(key) || '[]'); } catch { log = []; }
+      const entry = { n: ++__zpTraceSeq, t: Date.now(), tag: String(tag).slice(0, 80) };
+      if (extra !== undefined) { try { entry.x = (typeof extra === 'string' ? extra : JSON.stringify(extra)).slice(0, 200); } catch {} }
+      log.push(entry);
+      if (log.length > 100) log.splice(0, log.length - 100);
+      __zpNativeStorage.setItem(key, JSON.stringify(log));
+    } catch {}
+  }
+  try { root.__zp_trace = zpTrace; root.__zp_trace_clear = () => { try { __zpNativeStorage && __zpNativeStorage.removeItem('__zp_trace_log'); __zpNativeStorage && __zpNativeStorage.removeItem('__zp_hb'); } catch {} }; } catch {}
+  try {
+    let __zpBeats = 0;
+    setInterval(() => {
+      __zpBeats++;
+      try { __zpNativeStorage && __zpNativeStorage.setItem('__zp_hb', JSON.stringify({ n: __zpBeats, t: Date.now() })); } catch {}
+    }, 100);
+  } catch {}
+  zpTrace('prelude:start');
+  try {
+    root.document && root.document.addEventListener('load', e => {
+      const t = e && e.target;
+      if (t && t.tagName === 'SCRIPT') { try { zpTrace('script:load', (t.src || t.getAttribute && t.getAttribute('src') || '').slice(0,120)); } catch {} }
+    }, true);
+    root.document && root.document.addEventListener('error', e => {
+      const t = e && e.target;
+      if (t && t.tagName === 'SCRIPT') { try { zpTrace('script:error', (t.src || t.getAttribute && t.getAttribute('src') || '').slice(0,120)); } catch {} }
+    }, true);
+  } catch {}
 
   function readBootConfig() {
     const d = root.document;
@@ -245,11 +367,67 @@
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
   function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
-  function shouldBlockURLAttribute(el, key, raw) {
-    const tag = el && el.localName;
-    const localKey = attrLocalName(key);
-    const strict = localKey === 'src' && tag === 'script' || localKey === 'src' && (tag === 'iframe' || tag === 'frame') || usesRawURLAttribute(el, key);
+  // Single-parse equivalent of `isHTTPURL(v) && targetURL(v)` — the previous
+  // pattern parsed the URL twice (once for scheme check, once for canonical
+  // form). For long URLs (signed CDN, encoded query) `new URL()` is ~1300ns
+  // each, so the redundant parse doubled hot-path cost. targetURL throws
+  // TARGET_PROTOCOL_BLOCKED on non-HTTP, so the catch covers both
+  // "not http/https" and "malformed" cases.
+  //
+  // Consults tickURLCache when active (set during MutationObserver callback)
+  // — same raw URL repeating within one tick parses once.
+  function targetURLIfHTTP(raw) {
+    const key = String(raw);
+    if (tickURLCache) {
+      const cached = tickURLCache.get(key);
+      if (cached !== undefined) return cached;
+    }
+    let result;
+    try { result = targetURL(key); }
+    catch { result = null; }
+    if (tickURLCache) tickURLCache.set(key, result);
+    return result;
+  }
+  // Tick-local URL classification cache. Set by MO callback at tick start,
+  // cleared at tick end. Pre-populated with `null` for non-HTTP URLs when
+  // rt batch-classify is available, eliminating new URL() parse for those.
+  // HTTP URLs are NOT pre-populated (would still need canonicalization).
+  let tickURLCache = null;
+
+  // Per-element raw → target cache. When React / Vue / similar reconciler
+  // re-applies the same `src=...` to the same element across renders, we
+  // skip the `new URL()` parse and return the cached canonical target.
+  //
+  // Distinct from tickURLCache:
+  //   - tickURLCache  : dedup within a tick across all elements (by raw)
+  //   - urlClassifyCache : dedup across ticks per element (raw → target)
+  //
+  // Stored as { lastRaw, target } per element. Overwritten on new raw.
+  // WeakMap so GC removes entries when element is detached.
+  const urlClassifyCache = new WeakMap();
+  function targetURLForElement(el, raw) {
+    const key = String(raw);
+    const cached = urlClassifyCache.get(el);
+    if (cached && cached.lastRaw === key) return cached.target;
+    const target = targetURLIfHTTP(key);
+    if (target) urlClassifyCache.set(el, { lastRaw: key, target });
+    return target;
+  }
+  function shouldBlockURLAttribute(el, key, raw, _localKey, _tag) {
+    const tag = _tag != null ? _tag : (el && el.localName);
+    const localKey = _localKey != null ? _localKey : attrLocalName(key);
+    const strict = localKey === 'src' && tag === 'script' || localKey === 'src' && (tag === 'iframe' || tag === 'frame') || usesRawURLAttribute(el, key, localKey);
     return strict ? hasExecutableURLScheme(raw) : hasDangerousURLScheme(raw);
+  }
+  // A3 hardening: blob: URLs are legitimate for <img>/<video>/<audio>/<source>
+  // (target sites build them from Blob data) but must never feed <script>,
+  // <iframe>, <frame>, or <embed>/<object> — those would bypass the
+  // OXC rewrite pipeline and run unclassified target code.
+  function hasContextBlockedScheme(el, raw) {
+    const s = String(raw).trim();
+    if (!/^blob:/i.test(s)) return false;
+    const tag = el && el.localName;
+    return tag === 'script' || tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object';
   }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
   function blockExecutableURL(el, key, raw) { urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw).trim()); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el); }
@@ -305,7 +483,12 @@
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     const entryId = 'e' + ZP.randomId();
-    await postMessageToSW({ type: 'ZP_FRAME_ROUTE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target });
+    // parentTargetUrl carries the embedding page's virtual URL so the SW can
+    // send the right Referer when fetching the iframe document. Without it
+    // the iframe's own URL is used, and origin-aware endpoints (e.g. NAVER's
+    // shopsquare.naver.com /newshopping) 404 because they expect the embedder
+    // page's host in Referer.
+    await postMessageToSW({ type: 'ZP_FRAME_ROUTE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, parentTargetUrl: virtualURL.href });
     return proxyOrigin + ZP.makeSharePath(share.encrypted) + shareFragmentForKey(share.key);
   }
   function navigateToTarget(raw, replace = false, base = baseURL) {
@@ -359,12 +542,23 @@
   function postMessageWrapperFor(target) {
     if (!target || typeof target.postMessage !== 'function') return undefined;
     if (postMessageWrappers.has(target)) return postMessageWrappers.get(target);
-    const original = target.postMessage.bind(target);
-    postMessageOriginals.set(target, original);
+    // .bind() 가 BoundFunction 의 realm 을 install-time realm (parent) 으로
+    // 고정 → V8 의 message source 결정이 incumbent 가 아닌 bound function 의
+    // realm 사용 → child iframe 이 parent.postMessage 호출 시 `e.source` 가
+    // child 의 contentWindow 가 아닌 parent.window 가 됨. NAVER GFP SafeFrame
+    // SDK 는 source === iframe.contentWindow 비교로 어느 광고 iframe 에서
+    // resize 메시지 왔는지 식별 → 모든 광고 iframe height=0 으로 collapse.
+    // .bind 대신 Reflect.apply 로 native 직접 호출하면 caller realm (child) 이
+    // incumbent 로 보존되어 source 가 정확히 dispatched 됨.
+    const originalPm = target.postMessage;
+    postMessageOriginals.set(target, originalPm);
+    // mapped === '*' (caller 가 '*' 또는 변환 필요 없는 케이스) 면 source 보존을
+    // 위해 wrap 우회 — caller 가 native postMessage 직접 호출하도록 return
+    // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
+    // 케이스만 wrap 통해 변환 + native call.
     const wrapped = function postMessage(message, targetOrigin, transfer) {
-      if (arguments.length < 2) return original(message, proxyOrigin);
-      const mapped = normalizePostMessageTargetOrigin(targetOrigin);
-      return arguments.length > 2 ? original(message, mapped, transfer) : original(message, mapped);
+      const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
+      return arguments.length > 2 ? Reflect.apply(originalPm, target, [message, mapped, transfer]) : Reflect.apply(originalPm, target, [message, mapped]);
     };
     maskNativeFunction(wrapped, 'postMessage');
     postMessageWrappers.set(target, wrapped);
@@ -379,15 +573,30 @@
       return '';
     }
   }
-  function virtualizeMessageEvent(ev) {
-    const origin = virtualOriginForMessage(ev);
-    if (!origin) return ev;
+  function virtualizeMessageEvent(ev, isRootRealm) {
+    // Sender queue 로 source 정정 — wrap function 의 V8 incumbent realm leak 보정.
+    // wrap 호출 시점에 sender (iframe.contentWindow) 가 queue 에 push 됨. dispatch
+    // 가 동일 task 내 FIFO 라 queue.shift() 가 해당 메시지의 실제 sender. 단 sender
+    // 가 root (self-postMessage) 인 경우엔 정정 안 함. isRootRealm 만 queue pop —
+    // child realm 의 listener 가 부모→자식 메시지 처리 시 queue 잘못 소비 방지.
+    let actualSource = ev.source;
+    if (isRootRealm && actualSource === root && parentPostMessageSenderQueue.length > 0) {
+      const candidate = parentPostMessageSenderQueue.shift();
+      if (candidate && candidate !== root) actualSource = candidate;
+    }
+    // Hot path fast-exit: source 안 바뀌고 origin 이 proxyOrigin 아니면
+    // virtualOriginForMessage 가 어차피 '' 반환. 함수 호출 + 객체 alloc 회피.
+    // 대부분의 cross-frame postMessage 가 여기로 빠짐.
+    if (actualSource === ev.source && ev.origin !== proxyOrigin) return ev;
+    const origin = virtualOriginForMessage(ev.source === actualSource ? ev : { origin: ev.origin, source: actualSource });
+    if (!origin && actualSource === ev.source) return ev;
     try {
-      return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: ev.source, ports: ev.ports || [] });
+      return new MessageEvent(ev.type, { data: ev.data, origin: origin || ev.origin, lastEventId: ev.lastEventId || '', source: actualSource, ports: ev.ports || [] });
     } catch {
       try {
         const clone = Object.create(ev);
-        Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
+        if (origin) Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
+        if (actualSource !== ev.source) Object.defineProperty(clone, 'source', { value: actualSource, configurable: true });
         return clone;
       } catch {
         return ev;
@@ -405,28 +614,50 @@
     } catch {}
   }
   try { Object.defineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
-  installToStringMasking(root);
+  function __zpStep(name, fn) {
+    zpTrace('install:' + name + ':start');
+    try { fn(); zpTrace('install:' + name + ':done'); }
+    catch (e) { zpTrace('install:' + name + ':err', String(e && e.message || e).slice(0, 200)); throw e; }
+  }
+  __zpStep('ToStringMasking', () => installToStringMasking(root));
   define(root, '__ZP_SET_BASE', updateVirtualBase);
-  installPhase2Membrane();
+  __zpStep('Phase2Membrane', installPhase2Membrane);
 
-  installWebSocket();
-  installWebSocketStream();
-  installHTTPAPIs();
-  installBeacon();
-  installNavigationTraps();
-  installPopupHooks(root);
-  installPostMessageHooks(root);
-  installNavigatorIdentity(root);
-  installGetterMasking(root);
-  installStorageFacades(root);
-  installDOMHooks(root);
-  installStealthMembrane(root);
-  installWorkerHooks();
-  installTargetServiceWorkerBlocker(root);
-  installIframeHooks(root);
-  installBlockers(root);
-  installCanvasAntiFingerprinting(root);
-  installAudioAntiFingerprinting(root);
+  __zpStep('WebSocket', installWebSocket);
+  __zpStep('WebSocketStream', installWebSocketStream);
+  __zpStep('HTTPAPIs', installHTTPAPIs);
+  __zpStep('Beacon', installBeacon);
+  __zpStep('NavigationTraps', installNavigationTraps);
+  __zpStep('PopupHooks', () => installPopupHooks(root));
+  __zpStep('PostMessageHooks', () => installPostMessageHooks(root));
+  __zpStep('NavigatorIdentity', () => installNavigatorIdentity(root));
+  __zpStep('GetterMasking', () => installGetterMasking(root));
+  __zpStep('StorageFacades', () => installStorageFacades(root));
+  __zpStep('DOMHooks', () => installDOMHooks(root));
+  __zpStep('StealthMembrane', () => installStealthMembrane(root));
+  __zpStep('WorkerHooks', installWorkerHooks);
+  __zpStep('TargetServiceWorkerBlocker', () => installTargetServiceWorkerBlocker(root));
+  __zpStep('IframeHooks', () => installIframeHooks(root));
+  __zpStep('Blockers', () => installBlockers(root));
+  __zpStep('CanvasAntiFingerprinting', () => installCanvasAntiFingerprinting(root));
+  __zpStep('AudioAntiFingerprinting', () => installAudioAntiFingerprinting(root));
+  zpTrace('install:all:done');
+  // Diagnostic-only WebAssembly trace — wrap top-level WebAssembly.* methods
+  // so we can see WTM/anti-bot WASM loads in the post-mortem trace.
+  try {
+    const WA = root.WebAssembly;
+    if (WA) {
+      const orig = {
+        instantiate: WA.instantiate && WA.instantiate.bind(WA),
+        instantiateStreaming: WA.instantiateStreaming && WA.instantiateStreaming.bind(WA),
+        compile: WA.compile && WA.compile.bind(WA),
+        compileStreaming: WA.compileStreaming && WA.compileStreaming.bind(WA),
+      };
+      if (orig.instantiate) WA.instantiate = function(...a) { try { zpTrace('wasm:instantiate', a[0] && a[0].byteLength ? 'buf:'+a[0].byteLength : typeof a[0]); } catch {} return orig.instantiate(...a).then(r => { try { zpTrace('wasm:instantiate:ok'); } catch {} return r; }, e => { try { zpTrace('wasm:instantiate:err', String(e).slice(0,120)); } catch {} throw e; }); };
+      if (orig.instantiateStreaming) WA.instantiateStreaming = function(...a) { try { zpTrace('wasm:instStream', (a[0] && a[0].url) || 'src'); } catch {} return orig.instantiateStreaming(...a).then(r => { try { zpTrace('wasm:instStream:ok'); } catch {} return r; }, e => { try { zpTrace('wasm:instStream:err', String(e).slice(0,120)); } catch {} throw e; }); };
+      if (orig.compileStreaming) WA.compileStreaming = function(...a) { try { zpTrace('wasm:compileStream'); } catch {} return orig.compileStreaming(...a).then(r => { try { zpTrace('wasm:compileStream:ok'); } catch {} return r; }, e => { try { zpTrace('wasm:compileStream:err', String(e).slice(0,120)); } catch {} throw e; }); };
+    }
+  } catch {}
 
 
   function installPhase2Membrane() {
@@ -450,6 +681,7 @@
     }
     function scopedBody(body) { return 'with(__zp_scope){\n' + body + '\n}'; }
     function compileScoped(ctor, params, body) {
+      try { zpTrace('compile', String(body || '').slice(0, 100)); } catch {}
       const argv = new Array(params.length + 2);
       argv[0] = '__zp_scope';
       for (let i = 0; i < params.length; i++) argv[i + 1] = params[i];
@@ -537,26 +769,84 @@
       if (name === 'AsyncGeneratorFunction') return dynamicAsyncGeneratorFunction;
       return null;
     }
-    const virtualLocation = Object.freeze({
-      get href() { return virtualURL.href; },
-      set href(v) { setVirtualLocation(v); },
-      get protocol() { return virtualURL.protocol; },
-      get host() { return virtualURL.host; },
-      get hostname() { return virtualURL.hostname; },
-      get port() { return virtualURL.port; },
-      get pathname() { return virtualURL.pathname; },
-      get search() { return virtualURL.search; },
-      get hash() { return virtualURL.hash; },
-      set hash(v) { updateVirtualHash(v); },
-      get origin() { return virtualURL.origin; },
-      assign(v) { setVirtualLocation(v); },
-      replace(v) { setVirtualLocation(v, true); },
-      reload() { Native.locationReload && Native.locationReload(); },
-      toString() { return virtualURL.href; },
-      valueOf() { return virtualURL.href; },
-      [Symbol.toPrimitive]() { return virtualURL.href; }
+    // Inherit Location.prototype so `virtualLocation instanceof Location`
+    // returns true. Without this, GitHub's React-Lib `instanceof Location`
+    // check during hydration fails → React error #519 (multiple hydration
+    // diffs in a pass) → ErrorPage fallback render. Other sites (Wikipedia,
+    // NAVER) don't notice because they don't do this specific check.
+    const LocationProtoBase = (root.Location && root.Location.prototype) || null;
+    const virtualLocation = LocationProtoBase ? Object.create(LocationProtoBase) : {};
+    Object.defineProperties(virtualLocation, {
+      href: { get: () => virtualURL.href, set: (v) => setVirtualLocation(v), enumerable: true, configurable: false },
+      protocol: { get: () => virtualURL.protocol, enumerable: true, configurable: false },
+      host: { get: () => virtualURL.host, enumerable: true, configurable: false },
+      hostname: { get: () => virtualURL.hostname, enumerable: true, configurable: false },
+      port: { get: () => virtualURL.port, enumerable: true, configurable: false },
+      pathname: { get: () => virtualURL.pathname, enumerable: true, configurable: false },
+      search: { get: () => virtualURL.search, enumerable: true, configurable: false },
+      hash: { get: () => virtualURL.hash, set: (v) => updateVirtualHash(v), enumerable: true, configurable: false },
+      origin: { get: () => virtualURL.origin, enumerable: true, configurable: false },
+      assign: { value: function assign(v) { setVirtualLocation(v); }, enumerable: false, configurable: false, writable: false },
+      replace: { value: function replace(v) { setVirtualLocation(v, true); }, enumerable: false, configurable: false, writable: false },
+      reload: { value: function reload() { Native.locationReload && Native.locationReload(); }, enumerable: false, configurable: false, writable: false },
+      toString: { value: function toString() { return virtualURL.href; }, enumerable: false, configurable: false, writable: false },
+      valueOf: { value: function valueOf() { return virtualURL.href; }, enumerable: false, configurable: false, writable: false },
+      [Symbol.toPrimitive]: { value: function() { return virtualURL.href; }, enumerable: false, configurable: false, writable: false },
     });
+    Object.freeze(virtualLocation);
     maskMethods(virtualLocation, ['assign','replace','reload','toString','valueOf']);
+    // Cache Proxy per native Location instance. Proxy preserves native
+    // [[Class]] / instanceof Location identity (target is native Location)
+    // while virtualizing path-level URL reads — required because the
+    // foreground OXC rewriter wraps `o.pathname` member access only when
+    // the prop name is in MEMBER_HELPER_PROPS; we narrow virtualization
+    // to pathname/search/hash (what React Router needs) to avoid
+    // breaking schema validators (zod) that compare href/origin to
+    // SSR'd expected values.
+    const wrappedLocationCache = new WeakMap();
+    const LOC_VIRT_PROPS = new Set(['pathname','search','hash']);
+    const LOC_ALL_URL_PROPS = new Set(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
+    // Hoist the 4 fixed Location methods outside wrappedLocationFor so each
+    // call doesn't allocate a fresh closure set. They only capture
+    // virtualURL/setVirtualLocation/Native (closure-scope invariants).
+    const locToString = function(){ return virtualURL.href; };
+    const locAssign = function(v){ setVirtualLocation(v); };
+    const locReplace = function(v){ setVirtualLocation(v, true); };
+    const locReload = function(){ Native.locationReload && Native.locationReload(); };
+    function wrappedLocationFor(nativeLoc) {
+      const cached = wrappedLocationCache.get(nativeLoc);
+      if (cached) return cached;
+      const methodCache = new Map();
+      const handler = {
+        get(target, prop) {
+          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) return virtualURL[prop];
+          if (prop === 'toString') return locToString;
+          if (prop === 'assign') return locAssign;
+          if (prop === 'replace') return locReplace;
+          if (prop === 'reload') return locReload;
+          if (typeof prop === 'string' && methodCache.has(prop)) return methodCache.get(prop);
+          const value = Reflect.get(target, prop, target);
+          if (typeof value === 'function') {
+            const bound = value.bind(target);
+            if (typeof prop === 'string') methodCache.set(prop, bound);
+            return bound;
+          }
+          return value;
+        },
+        set(target, prop, value) {
+          if (prop === 'href') { setVirtualLocation(value); return true; }
+          if (prop === 'hash') { updateVirtualHash(value); return true; }
+          if (typeof prop === 'string' && LOC_ALL_URL_PROPS.has(prop)) {
+            try { const u = new URL(virtualURL.href); u[prop] = value; setVirtualLocation(u.href); } catch {}
+            return true;
+          }
+          return Reflect.set(target, prop, value, target);
+        },
+      };
+      const proxy = new Proxy(nativeLoc, handler);
+      wrappedLocationCache.set(nativeLoc, proxy);
+      return proxy;
+    }
     function safeCrossWindow(targetWindow) {
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
@@ -590,7 +880,9 @@
         if (prop === Symbol.unscopables) return undefined;
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
         if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(target, prop);
-        if (prop === 'location') return virtualLocation;
+        if (prop === 'location') {
+          try { const n = target.location; return n ? wrappedLocationFor(n) : virtualLocation; } catch { return virtualLocation; }
+        }
         if (prop === 'postMessage') return postMessageWrapperFor(target);
         const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
         if (dynamic) return dynamic;
@@ -603,7 +895,10 @@
         return true;
       },
       getOwnPropertyDescriptor(target, prop) {
-        if (prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false };
+        if (prop === 'location') {
+          try { return Reflect.getOwnPropertyDescriptor(target, prop); }
+          catch { return { value: virtualLocation, configurable: true, enumerable: true, writable: false }; }
+        }
         return Reflect.getOwnPropertyDescriptor(target, prop);
       }
     });
@@ -618,7 +913,10 @@
       if (isWindowLike(base)) {
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return base === scope || base === root ? scope : base;
         if (prop === 'top' || prop === 'parent' || prop === 'opener') return base === scope || base === root ? virtualWindowProperty(root, prop) : base;
-        if (prop === 'location') return virtualLocation;
+        if (prop === 'location') {
+          const baseWin = base === scope || base === root ? root : base;
+          try { const n = baseWin.location; return n ? wrappedLocationFor(n) : virtualLocation; } catch { return virtualLocation; }
+        }
         if (prop === 'postMessage') return postMessageWrapperFor(base === scope ? root : base);
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
@@ -723,9 +1021,30 @@
       if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
       return out.code;
     }
-    define(root, '__ZP_EXEC_INLINE_SCRIPT', source => Native.FunctionCtor(rewriteWithPageRewriter(source, 'classic')).call(root));
+    // 인라인 <script> 본문은 브라우저가 raw text mode 로 토크나이즈하여 HTML
+    // 엔티티를 디코딩하지 않는다. React `dangerouslySetInnerHTML` 가 JS 연산자
+    // (`=>`/`&&`)를 `=&gt;`/`&amp;&amp;` 로 엔티티 인코딩해 박은 케이스는 우리가
+    // 직접 디코딩해야 파서가 받아낸다. 단, 모든 스크립트에 unconditional
+    // 디코드를 걸면 `encMap={"\"":"&quot;",...}` 같이 ENTITY 가 **데이터**로
+    // 들어있는 외부 스크립트 (e.g. NAVER GFP SafeFrame) 가 파괴된다 — Rust
+    // 측은 디코드 안 함, JS 측이 inline 경로에서만 적용. trap-notebook
+    // rewriter.md 2026-05-30 entry 참조.
+    function decodeInlineEntities(src) {
+      const s = String(src || '');
+      if (s.indexOf('&') < 0) return s;
+      return s
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&#39;/g, "'")
+        .replace(/&#x27;/g, "'")
+        .replace(/&nbsp;/g, ' ');
+    }
+    define(root, '__ZP_EXEC_INLINE_SCRIPT', source => Native.FunctionCtor(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic')).call(root));
     define(root, '__ZP_EXEC_INLINE_MODULE', source => {
-      const code = rewriteWithPageRewriter(source, 'module');
+      const code = rewriteWithPageRewriter(decodeInlineEntities(source), 'module');
       const blob = new Blob([code], { type: 'text/javascript' });
       const url = Native.createObjectURL ? Native.createObjectURL(blob) : URL.createObjectURL(blob);
       const promise = import(url);
@@ -735,13 +1054,30 @@
     define(root, '__ZP_EXEC_EVENT', (selfValue, event, source) => Native.FunctionCtor('event', rewriteWithPageRewriter(source, 'event-handler')).call(selfValue, event));
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
+    // 인스턴스별 가짜 constructor 저장소.
+    // - value+writable:false → NAVER vendor-common 의 `Object.extend`
+    //   polyfill (`target.constructor = source.constructor`) 가 strict throw →
+    //   React init 깨짐 → 페이지 빈 렌더.
+    // - accessor + WeakMap 저장 → NAVER 정상 (set 이 throw 안 함, read 가 저장값
+    //   반환). 보안: `__zp_get` 가 reading 시점에 `dynamicWrapperFor` 로
+    //   normalise 하므로 target 이 저장한 native Function 도 wrapper 로 반환 →
+    //   escape 면역. BBC bbcdotcom SDK 의 retry-loop 는 hang (alternate value
+    //   기대) — `.ai/trap-notebook/membrane.md` 에 known regression 기록.
+    //   사용자 priority: www.naver.com 호환성 우선.
+    const constructorOverrides = new WeakMap();
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
-      if (ctor && ctor.prototype) try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: false }); } catch {}
+      if (ctor && ctor.prototype) try {
+        Object.defineProperty(ctor.prototype, 'constructor', {
+          get() { return constructorOverrides.get(this) || wrapper; },
+          set(value) { try { constructorOverrides.set(this, value); } catch {} },
+          enumerable: false, configurable: false
+        });
+      } catch {}
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
-    if (Native.documentWrite) define(document, 'write', function(...parts) { return Native.documentWrite(parts.map(p => transformHTML(String(p))).join('')); });
-    if (Native.documentWriteln) define(document, 'writeln', function(...parts) { return Native.documentWriteln(parts.map(p => transformHTML(String(p))).join('') + '\n'); });
+    // `document.write` / `writeln` wrap 은 installDOMHooks(w) 에서 모든 realm
+    // (parent + iframe Document.prototype) 에 일관 적용. 본 위치는 비워둠.
     if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
     if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
   }
@@ -759,6 +1095,7 @@
   async function fetchThroughRuntime(input, init = {}) {
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
     const target = requestTargetURL(input);
+    try { zpTrace('fetch', target.slice(0, 180)); } catch {}
     const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
     const payload = {
       tabId: boot.tabId,
@@ -777,7 +1114,9 @@
     };
     const apiInit = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) };
     if (req.signal) apiInit.signal = req.signal;
-    return Native.fetch(ZP.apiPath('fetch'), apiInit);
+    // Absolute proxy URL — virtual baseURI resolves root-relative paths
+    // against the target host. See scriptProxyPath for the companion bug.
+    return Native.fetch(proxyOrigin + ZP.apiPath('fetch'), apiInit).then(r => { try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {} return r; }, e => { try { zpTrace('fetch:err', target.slice(0,80) + ' ' + String(e).slice(0,60)); } catch {} throw e; });
   }
   function fireEvent(target, type) {
     let ev;
@@ -1099,8 +1438,47 @@
   function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; define(navigator, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
 
   function installNavigationTraps() {
-    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href) setVirtualLocation(nav.href); }, true);
-    document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
+    // D1: javascript: URL delegated handler. htmltx transforms target
+    // `<a href="javascript:CODE">` etc. into `<a href="javascript:void(0)"
+    // data-zp-jsurl="<rewritten>" data-zp-jsurl-kind="anchor">`. Here we
+    // capture clicks/submits on those elements and execute the rewritten
+    // body using prelude-private `Native.FunctionCtor` so target code
+    // never sees the eval/Function constructor.
+    function runJSURL(el, ev) {
+      if (!el || !el.getAttribute) return false;
+      const code = el.getAttribute('data-zp-jsurl');
+      if (!code) return false;
+      try {
+        // Wrap in IIFE to give the rewritten body its own scope. The
+        // rewriter has already routed dangerous globals through __zp_get,
+        // which is exposed on globalThis by installPhase2Membrane.
+        Native.FunctionCtor('"use strict";\n' + code).call(globalThis);
+      } catch {}
+      if (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+      return true;
+    }
+    document.addEventListener('click', ev => {
+      for (let el = ev.target; el && el !== document; el = el.parentElement) {
+        if (el.hasAttribute && el.hasAttribute('data-zp-jsurl')) {
+          if (runJSURL(el, ev)) return;
+        }
+      }
+      const nav = clickNavigationTarget(ev);
+      if (!nav) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      if (nav.hash != null) updateVirtualHash(nav.hash);
+      else if (nav.href) setVirtualLocation(nav.href);
+    }, true);
+    document.addEventListener('submit', ev => {
+      const f = ev.target;
+      if (!f) return;
+      if (f.hasAttribute && f.hasAttribute('data-zp-jsurl')) {
+        if (runJSURL(f, ev)) return;
+      }
+      ev.preventDefault();
+      submitForm(f, ev.submitter);
+    }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
     if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { setVirtualLocation(u); });
@@ -1177,6 +1555,12 @@
         }
         const raw = isAnchor ? Native.getAttribute.call(el, 'data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
         if (!raw) continue;
+        // `href="#"` 또는 `href="#"` 단독은 NAVER 메뉴 같은 React onClick 핸들러
+        // no-op anchor 패턴. preventDefault + stopImmediatePropagation 으로
+        // 가로채면 React 가 onClick 받지 못해 메뉴 확장이 동작 안 함. skip 하여
+        // 페이지가 처리하도록 위임. (실제 hash fragment 가 있는 `#section` 은
+        // virtual hash update 유지.)
+        if (raw === '#') continue;
         if (raw[0] === '#') return { hash: raw, element: el };
         if (hasExecutableURLScheme(raw)) return { href: '', element: el };
         if (isHTTPURL(raw)) return { href: raw, element: el };
@@ -1213,11 +1597,12 @@
 
   function installPostMessageHooks(w) {
     if (!Native.windowAddEventListener || !Native.windowRemoveEventListener) return;
+    const isRootRealm = (w === root);
     function wrap(listener) {
       if (!listener || (typeof listener !== 'function' && typeof listener.handleEvent !== 'function')) return listener;
       if (messageListenerWrappers.has(listener)) return messageListenerWrappers.get(listener);
       const wrapped = function(ev) {
-        const next = virtualizeMessageEvent(ev);
+        const next = virtualizeMessageEvent(ev, isRootRealm);
         return typeof listener === 'function' ? listener.call(this, next) : listener.handleEvent.call(listener, next);
       };
       messageListenerWrappers.set(listener, wrapped);
@@ -1239,9 +1624,9 @@
     });
   }
 
-  function usesRawURLAttribute(el, key) {
+  function usesRawURLAttribute(el, key, _localKey) {
     const tag = el && el.localName;
-    const localKey = attrLocalName(key);
+    const localKey = _localKey != null ? _localKey : attrLocalName(key);
     return localKey === 'href' && (tag === 'a' || tag === 'area') || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button');
   }
   function installGetterMasking(w) {
@@ -1298,49 +1683,207 @@
   function defaultCookiePath() { const p = virtualURL.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
 
   function installStorageFacades(w) {
-    const prefix = storagePrefixForVirtualOrigin();
-    const localKey = prefix + 'local';
-    const sessionKey = prefix + 'session';
-    const local = storageObject(localKey, w);
-    const session = storageObject(sessionKey, w);
-    storageWindows.add({ w, localKey, sessionKey });
-    defineAccessor(w, 'localStorage', () => local);
-    defineAccessor(w, 'sessionStorage', () => session);
+    // D7 hardening: every target-origin gets an isolated namespace inside the
+    // proxy-origin's real storage. Persistence is preserved (key-prefixed
+    // wrappers backed by native storage), and target A's keys are invisible
+    // to target B. localStorage persists across reloads; sessionStorage is
+    // per-tab session (additionally scoped by tabId).
+    const targetOriginKey = virtualURL.origin;
+    // sha1-ish short hash (FNV-1a) of origin to keep keys compact + collision-resistant for our scale.
+    const originHash = (() => {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < targetOriginKey.length; i++) { h ^= targetOriginKey.charCodeAt(i); h = Math.imul(h, 16777619); }
+      return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+    })();
+    const localPrefix = 'zp:l:' + originHash + ':';
+    const sessionPrefix = 'zp:s:' + boot.tabId + ':' + originHash + ':';
+    const cachePrefix = 'zp:c:' + originHash + ':';
+    const idbPrefix = 'zp:i:' + originHash + ':';
+    const bcPrefix = 'zp:b:' + originHash + ':';
+    const sharedWorkerPrefix = 'zp:w:' + originHash + ':';
+    // Capture native storage refs BEFORE defining the accessor: the getter
+    // would otherwise recurse into itself (`w.localStorage` re-triggers the
+    // accessor, causing a stack overflow that breaks every page that touches
+    // storage — observed on naver.com home widgets). Cache the wrapper too
+    // so repeated reads don't allocate a fresh proxy each access.
+    const nativeLocalStorage = w.localStorage;
+    const nativeSessionStorage = w.sessionStorage;
+    let wrappedLocalStorage = null;
+    let wrappedSessionStorage = null;
+    defineAccessor(w, 'localStorage', () => {
+      if (!wrappedLocalStorage) wrappedLocalStorage = prefixedStorage(nativeLocalStorage, localPrefix);
+      return wrappedLocalStorage;
+    });
+    defineAccessor(w, 'sessionStorage', () => {
+      if (!wrappedSessionStorage) wrappedSessionStorage = prefixedStorage(nativeSessionStorage, sessionPrefix);
+      return wrappedSessionStorage;
+    });
     if (w.indexedDB) {
       const nativeIDB = w.indexedDB;
       define(w, 'indexedDB', {
-        open(name, version) { return nativeIDB.open(prefix + 'idb:' + String(name), version); },
-        deleteDatabase(name) { return nativeIDB.deleteDatabase(prefix + 'idb:' + String(name)); },
+        open(name, version) { return nativeIDB.open(idbPrefix + String(name), version); },
+        deleteDatabase(name) { return nativeIDB.deleteDatabase(idbPrefix + String(name)); },
         cmp: nativeIDB.cmp ? nativeIDB.cmp.bind(nativeIDB) : undefined,
-        databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(prefix + 'idb:')).map(db => Object.assign({}, db, { name: db.name.slice((prefix + 'idb:').length) }))) : undefined
+        databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
       });
     }
     if (w.caches) {
       const nativeCaches = w.caches;
       define(w, 'caches', {
-        open(name) { return nativeCaches.open(prefix + 'cache:' + String(name)); },
-        delete(name) { return nativeCaches.delete(prefix + 'cache:' + String(name)); },
-        has(name) { return nativeCaches.has(prefix + 'cache:' + String(name)); },
-        keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(prefix + 'cache:')).map(k => k.slice((prefix + 'cache:').length))); },
-        match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(prefix + 'cache:'))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
+        open(name) { return nativeCaches.open(cachePrefix + String(name)); },
+        delete(name) { return nativeCaches.delete(cachePrefix + String(name)); },
+        has(name) { return nativeCaches.has(cachePrefix + String(name)); },
+        keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix)).map(k => k.slice(cachePrefix.length))); },
+        match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
+      });
+    }
+    // D7: BroadcastChannel must be origin-scoped. Wrap constructor to prefix
+    // channel name with target origin hash; messages from another target
+    // never reach this one.
+    if (w.BroadcastChannel) {
+      const NativeBC = w.BroadcastChannel;
+      const BCWrap = function(name) {
+        const requested = String(name);
+        const native = new NativeBC(bcPrefix + requested);
+        // Mask `.name` so target code observes the un-prefixed channel name
+        // it requested; the proxy-origin scoping must stay invisible.
+        try { Object.defineProperty(native, 'name', { value: requested, configurable: true, enumerable: true }); } catch {}
+        return native;
+      };
+      try { BCWrap.prototype = NativeBC.prototype; } catch {}
+      try { define(w, 'BroadcastChannel', BCWrap); } catch {}
+    }
+    // D7: SharedWorker — name + URL prefix so two targets never share a worker.
+    if (w.SharedWorker) {
+      const NativeSW = w.SharedWorker;
+      const SWWrap = function(url, opts) {
+        const named = (opts && opts.name) ? Object.assign({}, opts, { name: sharedWorkerPrefix + String(opts.name) })
+                                          : Object.assign({}, opts || {}, { name: sharedWorkerPrefix + 'default' });
+        return new NativeSW(workerBootstrapURL(url), named);
+      };
+      try { SWWrap.prototype = NativeSW.prototype; } catch {}
+      try { define(w, 'SharedWorker', SWWrap); } catch {}
+    }
+    // D7: document.origin getter returns the virtual target origin so
+    // target code identifying its own origin sees its world, not the proxy.
+    if (w.Document && w.Document.prototype) {
+      try { Object.defineProperty(w.Document.prototype, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+    }
+    if (w.document) {
+      try { Object.defineProperty(w.document, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+      // document.domain getter/setter — setter accepts only target eTLD+1.
+      let virtualDomain = virtualURL.hostname.toLowerCase();
+      try {
+        Object.defineProperty(w.document, 'domain', {
+          get() { return virtualDomain; },
+          set(v) {
+            const d = String(v).replace(/^\./, '').toLowerCase();
+            const host = virtualURL.hostname.toLowerCase();
+            // Allow only setting to a suffix of target host (mirror native semantics).
+            if (host === d || host.endsWith('.' + d)) virtualDomain = d;
+            else throw normalizedError('SecurityError');
+          },
+          configurable: true,
+          enumerable: true,
+        });
+      } catch {}
+    }
+    // window.origin / self.origin getters — point at virtual target origin.
+    try { Object.defineProperty(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+    // D7: performance.timeOrigin should reflect target navigation, not proxy
+    // origin navigation, so target code timing target-relative events sees
+    // the expected baseline. Cannot fully fake the underlying clock; we
+    // simply mask the property if the host exposes it as writeable; if
+    // non-configurable we leave native to avoid throwing.
+    try {
+      if (w.performance) {
+        const baseline = boot.navigationStart || Date.now();
+        try { Object.defineProperty(w.performance, 'timeOrigin', { get() { return baseline; }, configurable: true, enumerable: true }); } catch {}
+      }
+    } catch {}
+    // D7: Notification permission state must be per-target-origin. Wrap the
+    // static permission getter; granting is still gated by the native browser
+    // UI but target code seeing 'default'/'denied' will react in its own
+    // origin namespace.
+    if (w.Notification) {
+      const NativeN = w.Notification;
+      // We cannot fully isolate native notification permissions, but we can
+      // override the static getter to return per-origin state held in
+      // localStorage namespace. Setter via requestPermission still calls
+      // native (browser UI consent gate).
+      try {
+        const permKey = '__zp_notif_perm';
+        Object.defineProperty(NativeN, 'permission', {
+          get() {
+            try { return prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey) || NativeN.permission; }
+            catch { return NativeN.permission; }
+          },
+          configurable: true,
+        });
+        const nativeRP = NativeN.requestPermission ? NativeN.requestPermission.bind(NativeN) : null;
+        if (nativeRP) {
+          define(NativeN, 'requestPermission', function(callback) {
+            return Promise.resolve(nativeRP()).then(result => {
+              try { prefixedStorage(nativeLocalStorage, localPrefix).setItem(permKey, String(result)); } catch {}
+              if (typeof callback === 'function') try { callback(result); } catch {}
+              return result;
+            });
+          });
+        }
+      } catch {}
+    }
+    // D7: navigator.permissions.query — record target-origin state, return
+    // virtualised state if known, else fall through to native (which still
+    // resolves against the proxy origin's grants).
+    if (w.navigator && w.navigator.permissions && w.navigator.permissions.query) {
+      const nativeQuery = w.navigator.permissions.query.bind(w.navigator.permissions);
+      define(w.navigator.permissions, 'query', function(desc) {
+        return nativeQuery(desc).then(status => {
+          // Best-effort: target code observes the proxy-origin permission
+          // state but cross-target inference cannot tell who else has the
+          // grant (since SW + storage isolation hide it). Future phase:
+          // synthesize PermissionStatus from per-target storage namespace.
+          return status;
+        });
       });
     }
   }
-  function storagePrefixForVirtualOrigin() { return 'zp:' + boot.tabId + ':' + virtualURL.origin + ':'; }
-  function storageMap(key) {
-    let map = storageMaps.get(key);
-    if (!map) { map = new Map(); storageMaps.set(key, map); }
-    return map;
-  }
-  function storageObject(namespaceKey, ownerWindow) {
-    const map = storageMap(namespaceKey);
+  function prefixedStorage(native, prefix) {
+    // Wrap native localStorage/sessionStorage with a fixed key prefix. All
+    // reads/writes/iteration are scoped to the target origin namespace.
+    if (!native) return null;
     return Object.freeze({
-      get length() { return map.size; },
-      key(i) { return Array.from(map.keys())[Number(i)] || null; },
-      getItem(k) { k = String(k); return map.has(k) ? map.get(k) : null; },
-      setItem(k, v) { k = String(k); v = String(v); const oldValue = map.has(k) ? map.get(k) : null; map.set(k, v); dispatchStorageEvents(namespaceKey, ownerWindow, k, oldValue, v); },
-      removeItem(k) { k = String(k); const oldValue = map.has(k) ? map.get(k) : null; map.delete(k); dispatchStorageEvents(namespaceKey, ownerWindow, k, oldValue, null); },
-      clear() { if (!map.size) return; map.clear(); dispatchStorageEvents(namespaceKey, ownerWindow, null, null, null); }
+      get length() {
+        let n = 0;
+        for (let i = 0; i < native.length; i++) {
+          const k = native.key(i);
+          if (k && k.startsWith(prefix)) n++;
+        }
+        return n;
+      },
+      key(i) {
+        i = Number(i);
+        let seen = 0;
+        for (let j = 0; j < native.length; j++) {
+          const k = native.key(j);
+          if (k && k.startsWith(prefix)) {
+            if (seen === i) return k.slice(prefix.length);
+            seen++;
+          }
+        }
+        return null;
+      },
+      getItem(k) { return native.getItem(prefix + String(k)); },
+      setItem(k, v) { native.setItem(prefix + String(k), String(v)); },
+      removeItem(k) { native.removeItem(prefix + String(k)); },
+      clear() {
+        const toDelete = [];
+        for (let i = 0; i < native.length; i++) {
+          const k = native.key(i);
+          if (k && k.startsWith(prefix)) toDelete.push(k);
+        }
+        for (const k of toDelete) native.removeItem(k);
+      },
     });
   }
   function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
@@ -1390,8 +1933,9 @@
   function suppressIconLinkHref(el, raw) {
     const value = raw == null ? '' : String(raw);
     let visible = value;
-    if (value && isHTTPURL(value)) {
-      try { visible = targetURL(value); } catch {}
+    if (value) {
+      const t = targetURLForElement(el, value);
+      if (t) visible = t;
     }
     const currentVisible = Native.getAttribute.call(el, 'data-zp-target-url') || '';
     const currentHref = Native.getAttribute.call(el, 'href') || '';
@@ -1426,12 +1970,14 @@
       else if (Native.removeAttribute) Native.removeAttribute.call(el, 'href');
     }
     const href = Native.getAttribute.call(el, 'href') || '';
-    if (href && isHTTPURL(href) && !String(href).startsWith(proxyOrigin)) {
-      const target = targetURL(href);
-      const alreadyMapped = urlMeta.get(el) === target && Native.getAttribute.call(el, 'data-zp-target-url') === target && Native.getAttribute.call(el, 'href') === target;
-      urlMeta.set(el, target);
-      if (Native.getAttribute.call(el, 'data-zp-target-url') !== target) Native.setAttribute.call(el, 'data-zp-target-url', target);
-      if (!alreadyMapped && Native.getAttribute.call(el, 'href') !== target) Native.setAttribute.call(el, 'href', target);
+    if (href && !String(href).startsWith(proxyOrigin)) {
+      const target = targetURLForElement(el, href);
+      if (target) {
+        const alreadyMapped = urlMeta.get(el) === target && Native.getAttribute.call(el, 'data-zp-target-url') === target && Native.getAttribute.call(el, 'href') === target;
+        urlMeta.set(el, target);
+        if (Native.getAttribute.call(el, 'data-zp-target-url') !== target) Native.setAttribute.call(el, 'data-zp-target-url', target);
+        if (!alreadyMapped && Native.getAttribute.call(el, 'href') !== target) Native.setAttribute.call(el, 'href', target);
+      }
     }
   }
   function visibleIconAttrValue(attr) {
@@ -1463,6 +2009,39 @@
     const tag = el && el.localName;
     return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
   }
+  function isFrameElement(el) {
+    const tag = el && el.localName;
+    return tag === 'iframe' || tag === 'frame';
+  }
+  // The dangerous combination: with both tokens together browsers refuse to
+  // enforce the sandbox at all, so target sites use this as a hostile-embed
+  // detection signal. Membrane already isolates the iframe; we virtualize the
+  // attribute so the detection sees its set value while the DOM remains clean.
+  function frameSandboxAllowsEscape(raw) {
+    const tokens = new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean));
+    return tokens.has('allow-scripts') && tokens.has('allow-same-origin');
+  }
+  function setFrameSandboxAttribute(el, raw) {
+    const value = String(raw == null ? '' : raw);
+    if (frameSandboxAllowsEscape(value)) {
+      frameSandboxMeta.set(el, value);
+      if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
+      return;
+    }
+    frameSandboxMeta.delete(el);
+    Native.setAttribute.call(el, 'sandbox', value);
+  }
+  // Called from insertion / srcdoc / src enforcement paths: if the element
+  // already carries a dangerous sandbox attribute when it appears in the DOM,
+  // virtualize it before the browser commits the sandbox enforcement.
+  function sanitizeFrameSandbox(el) {
+    if (!isFrameElement(el)) return;
+    const raw = Native.getAttribute.call(el, 'sandbox');
+    if (raw !== null && frameSandboxAllowsEscape(raw)) {
+      frameSandboxMeta.set(el, raw);
+      if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
+    }
+  }
   function setSafeNavigationTarget(el, attrName, value) {
     const raw = String(value || '');
     if (raw && raw !== '_self') Native.setAttribute.call(el, 'data-zp-blocked-target', raw);
@@ -1473,7 +2052,7 @@
     if (!raw) return false;
     try {
       const u = new URL(String(raw), proxyOrigin);
-      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js') || u.pathname === ZP.assetPath('wasm_exec.js'));
+      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js'));
     } catch { return false; }
   }
   function isZPAssetNode(node) {
@@ -1593,12 +2172,20 @@
 
 
   function installDOMHooks(w) {
+    const inIframeRealm = (w !== root);
+    const transformHTMLOpts = inIframeRealm ? { inIframe: true } : undefined;
     define(w.Element.prototype, 'setAttribute', function(k, v) {
+      // Hot path: cache `this.localName` (10× read across branches → 1 DOM getter)
+      // and inline `attrLocalName` since `key` is already lowercase (avoids
+      // redundant String/toLowerCase inside attrLocalName).
       const key = String(k).toLowerCase();
-      const localKey = attrLocalName(key);
+      const colon = key.indexOf(':');
+      const localKey = colon < 0 ? key : key.slice(colon + 1);
+      const ln = this.localName;
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+      if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
-      if (this.localName === 'link' && localKey === 'rel') {
+      if (ln === 'link' && localKey === 'rel') {
         const value = String(v);
         if (isBlockedLinkRelValue(value)) return suppressBlockedLinkRel(this, value);
         if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-blocked-rel');
@@ -1606,45 +2193,50 @@
         enforceLinkPolicy(this);
         return ret;
       }
-      if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
-      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+      if (ln === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
+      if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
       if (key.startsWith('on') && key.length > 2) return Native.setAttribute.call(this, k, rewriteEventAttribute(String(v)));
-      if (this.localName === 'base' && localKey === 'href') {
+      if (ln === 'base' && localKey === 'href') {
         updateVirtualBase(v);
         return Native.setAttribute.call(this, k, v);
       }
-      if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
-      if (isURLBearing(this, key)) {
-        if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
-        if (isHTTPURL(v)) {
-          const t = targetURL(v);
+      if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
+      if (isURLBearing(this, key, localKey, ln)) {
+        if (shouldBlockURLAttribute(this, localKey, v, localKey, ln) || hasContextBlockedScheme(this, v)) return blockExecutableURL(this, localKey, v);
+        const t = targetURLForElement(this, v);
+        if (t) {
+          const usesRaw = usesRawURLAttribute(this, key, localKey);
           urlMeta.set(this, t);
-          if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
-          if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
+          if (!usesRaw) Native.setAttribute.call(this, 'data-zp-target-url', t);
+          if ((ln === 'iframe' || ln === 'frame') && localKey === 'src') {
             Native.setAttribute.call(this, k, 'about:blank');
             activatedFrameURL(t).then(u => { Native.setAttribute.call(this, k, u); rememberFrameOrigin(this); }).catch(()=>{});
             return;
           }
-          if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
-          return Native.setAttribute.call(this, k, usesRawURLAttribute(this, key) ? v : t);
+          if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
+          return Native.setAttribute.call(this, k, usesRaw ? v : t);
         }
       }
-      if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
+      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
       return Native.setAttribute.call(this, k, v);
     });
     if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) {
       const key = String(k).toLowerCase();
-      const localKey = attrLocalName(key);
+      const colon = key.indexOf(':');
+      const localKey = colon < 0 ? key : key.slice(colon + 1);
+      const ln = this.localName;
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
-      if (this.localName === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
-      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
-      if (isURLBearing(this, key)) {
-        if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
-        if (isHTTPURL(v)) {
-          const t = targetURL(v);
+      if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
+      if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
+      if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
+      if (isURLBearing(this, key, localKey, ln)) {
+        if (shouldBlockURLAttribute(this, localKey, v, localKey, ln)) return blockExecutableURL(this, localKey, v);
+        const t = targetURLForElement(this, v);
+        if (t) {
+          const usesRaw = usesRawURLAttribute(this, key, localKey);
           urlMeta.set(this, t);
-          if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
-          return Native.setAttributeNS.call(this, ns, k, usesRawURLAttribute(this, key) ? v : t);
+          if (!usesRaw) Native.setAttribute.call(this, 'data-zp-target-url', t);
+          return Native.setAttributeNS.call(this, ns, k, usesRaw ? v : t);
         }
       }
       return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v);
@@ -1658,28 +2250,36 @@
         const backed = backedIntegrity(this);
         return backed !== null ? backed : Native.getAttribute.call(this, k);
       }
-      if (isURLBearing(this, key)) return usesRawURLAttribute(this, key) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
+      if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return frameSandboxMeta.get(this);
+      const colon = key.indexOf(':');
+      const localKey = colon < 0 ? key : key.slice(colon + 1);
+      const ln = this.localName;
+      if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
       return Native.getAttribute.call(this, k);
     });
     if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) {
       const key = String(k).toLowerCase();
       if (isZPAttrName(key)) return false;
       if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
+      if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return true;
       return Native.hasAttribute.call(this, k);
     });
     if (Native.removeAttribute) define(w.Element.prototype, 'removeAttribute', function(k) {
       const key = String(k).toLowerCase();
-      const localKey = attrLocalName(key);
+      const colon = key.indexOf(':');
+      const localKey = colon < 0 ? key : key.slice(colon + 1);
+      const ln = this.localName;
       if (key === 'integrity' && isIntegrityBearing(this)) {
         Native.removeAttribute.call(this, integrityBackupAttr);
         return Native.removeAttribute.call(this, k);
       }
-      if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) {
+      if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
+      if (ln === 'link' && localKey === 'href' && isIconLink(this)) {
         urlMeta.delete(this);
         if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-target-url');
         return Native.removeAttribute.call(this, k);
       }
-      if (this.localName === 'link' && localKey === 'rel') {
+      if (ln === 'link' && localKey === 'rel') {
         const ret = Native.removeAttribute.call(this, k);
         enforceLinkPolicy(this);
         return ret;
@@ -1689,6 +2289,7 @@
     if (Native.getAttributeNames) define(w.Element.prototype, 'getAttributeNames', function() {
       const names = Native.getAttributeNames.call(this).filter(name => !isZPAttrName(name));
       if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
+      if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
       return names;
     });
     if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this)); }, configurable: false }); } catch {}
@@ -1699,8 +2300,31 @@
     installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
-    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
-    installBaseObserver();
+    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
+    // Document.prototype.write / writeln wrap. 인스턴스 레벨이 아니라 proto
+    // 레벨이라 같은 realm 의 모든 Document 인스턴스에 적용. 부모 install 시
+    // 부모 Document.prototype, iframe install 시 iframe Document.prototype.
+    // NAVER GFP SafeFrame ad iframe 이 부모 ad code 의 `iframe.contentDocument.write(template)`
+    // 와 자신의 `document.write(adm)` 모두 transformHTML 통과시켜 외부 스크립트
+    // src 가 scriptProxyPath 로 라우팅됨.
+    if (w.Document && w.Document.prototype) {
+      const docProto = w.Document.prototype;
+      if (docProto.write) {
+        const protoWrite = docProto.write;
+        define(docProto, 'write', function(...parts) {
+          return protoWrite.apply(this, [parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('')]);
+        });
+      }
+      if (docProto.writeln) {
+        const protoWriteln = docProto.writeln;
+        define(docProto, 'writeln', function(...parts) {
+          return protoWriteln.apply(this, [parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('') + '\n']);
+        });
+      }
+    }
+    // installBaseObserver 가 doc 인자를 받아 부모/iframe 양쪽 호환. iframe
+    // 경로는 installNetworkContainment 가 별도로 호출 (w.document 전달).
+    installBaseObserver(w.document || document);
     function patchHTMLSetter(proto, prop) {
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
@@ -1714,7 +2338,7 @@
               instrumentDescendantIframes(this.content);
               return;
             }
-            d.set.call(this, transformHTML(String(v)));
+            d.set.call(this, transformHTML(String(v), transformHTMLOpts));
             syncBaseElement(this);
             instrumentDescendantIframes(this);
             enforceSubtreePolicies(this);
@@ -1747,24 +2371,37 @@
     return '';
   }
   function scriptProxyPath(target, kind) {
-    return ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target);
+    // Emit proxy-origin-absolute URL. The page's virtual baseURI points at
+    // the target host (e.g. https://www.naver.com/), so a root-relative
+    // `/zp/api/script?...` would resolve to the target host and bypass our
+    // SW. Dynamic scripts (createElement+appendChild, document.write…) hit
+    // this path; naver loaded multiple tracker/SDK <script> tags this way and
+    // each one 404'd against naver.com — silent breakage of veta/N/jindo etc.
+    // 또한 CSP `script-src 'self'` 가 cross-origin raw URL 차단 → 반드시
+    // proxy-origin 으로 라우팅.
+    return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target);
   }
   function setScriptSource(el, raw) {
+    try { zpTrace('scriptSrc', String(raw).slice(0,140)); } catch {}
     const kind = executableScriptKindForElement(el);
     const value = String(raw);
     const trimmed = value.trim();
     if (trimmed.startsWith(ZP.CONTROL_PREFIX) || trimmed.startsWith(proxyOrigin + ZP.CONTROL_PREFIX)) {
-      const internal = trimmed.startsWith(proxyOrigin) ? new URL(trimmed).pathname + new URL(trimmed).search : value;
-      if (Native.getAttribute.call(el, 'src') === internal) return;
-      return Native.setAttribute.call(el, 'src', internal);
+      // Keep proxy-origin-absolute URLs absolute. The page's virtual baseURI
+      // points at the target host (e.g. https://www.naver.com/), so a
+      // root-relative `/zp/...` path would resolve to the target host and the
+      // request would miss our SW. zp-htmltx already emits absolute proxy
+      // URLs for SW-routed subresources — preserve them here.
+      if (Native.getAttribute.call(el, 'src') === value) return;
+      return Native.setAttribute.call(el, 'src', value);
     }
     if (!kind) {
       urlMeta.delete(el);
       return Native.setAttribute.call(el, 'src', value);
     }
-    if (hasExecutableURLScheme(value) || !isHTTPURL(value)) return blockExecutableURL(el, 'src', value);
-    let target;
-    try { target = targetURL(value); } catch { return blockExecutableURL(el, 'src', value); }
+    if (hasExecutableURLScheme(value)) return blockExecutableURL(el, 'src', value);
+    const target = targetURLForElement(el, value);
+    if (!target) return blockExecutableURL(el, 'src', value);
     urlMeta.set(el, target);
     Native.setAttribute.call(el, 'data-zp-target-url', target);
     return Native.setAttribute.call(el, 'src', scriptProxyPath(target, kind));
@@ -1807,8 +2444,8 @@
           if (isIconLink(this)) return suppressIconLinkHref(this, v);
           const value = String(v);
           if (shouldBlockURLAttribute(this, 'href', value)) return blockExecutableURL(this, 'href', value);
-          if (isHTTPURL(value)) {
-            const t = targetURL(value);
+          const t = targetURLForElement(this, value);
+          if (t) {
             urlMeta.set(this, t);
             Native.setAttribute.call(this, 'data-zp-target-url', t);
             return hrefDescriptor.set ? hrefDescriptor.set.call(this, t) : Native.setAttribute.call(this, 'href', t);
@@ -1872,8 +2509,8 @@
     }
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
-  function isSVGURLBearing(el, key) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && attrLocalName(key) === 'href' && /^(a|image|use|script)$/.test(el.localName || ''); }
-  function isURLBearing(el, key) { const tag = el.localName; const localKey = attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input') || localKey === 'poster' && tag === 'video'; }
+  function isSVGURLBearing(el, key, _localKey) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (_localKey != null ? _localKey === 'href' : attrLocalName(key) === 'href') && /^(a|image|use|script)$/.test(el.localName || ''); }
+  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input') || localKey === 'poster' && tag === 'video'; }
   function executableScriptDataType(el) {
     const kind = executableScriptKindForElement(el);
     if (kind) return kind;
@@ -1921,9 +2558,10 @@
     }
     return JSON.stringify(map).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026');
   }
-  function transformHTML(value) {
+  function transformHTML(value, opts) {
     const html = String(value);
     if (!html) return html;
+    const inIframe = !!(opts && opts.inIframe);
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
     const container = parserDoc.createElement('template');
     if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, html);
@@ -1949,7 +2587,37 @@
       if (tag === 'script') {
         const dtype = executableScriptDataType(node);
         if (dtype === 'importmap') setScriptText(node, rewriteImportMapText(getScriptText(node)));
-        else if (dtype) blockInlineScriptElement(node);
+        else if (dtype) {
+          // 외부 script (src 있음) 는 `setScriptSource` 가 scriptProxyPath 로
+          // 라우팅 → SW intercept + OXC rewrite. 인라인 script 는
+          // `__ZP_EXEC_INLINE_SCRIPT(JSON)` 으로 wrap → 페이지 prelude 가 동기
+          // rewrite 후 실행. 양쪽 모두 멤브레인 의미 유지 + execution 가능.
+          // (이전엔 blockInlineScriptElement 가 외부도 무조건 type=blocked 로
+          // 차단 → NAVER GFP SafeFrame template 의 gfp-display-safeframe.js /
+          // adm 안 ad bridge 가 절대 실행 안 됨 → 광고 미렌더.)
+          //
+          // iframe context: `document.write` 가 about:blank iframe document 를
+          // reset 한 뒤 자식 client 가 SW 통제권 잃음. `<script src=ext>` 는 SW
+          // 우회 직행 → Go 서버 403 → SafeFrame loader 미실행. 외부 script 를
+          // `__ZP_LOAD_EXTERNAL_SCRIPT(url, kind)` 인라인 호출로 대체하여 부모
+          // realm 의 native fetch (SW-controlled) 로 가져와 iframe realm 에서
+          // 실행. 인라인 script 의 `__ZP_EXEC_INLINE_SCRIPT` wrap 은 그대로 유지
+          // — installNetworkContainment 가 iframe 의 realm 보존 변형으로 install.
+          const rawSrc = Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href');
+          if (inIframe && rawSrc) {
+            const target = targetURLForElement(node, rawSrc);
+            if (target) {
+              if (Native.removeAttribute) {
+                try { Native.removeAttribute.call(node, 'src'); } catch {}
+                try { Native.removeAttribute.call(node, 'href'); } catch {}
+              }
+              const loaderCode = '__ZP_LOAD_EXTERNAL_SCRIPT(' + JSON.stringify(target).replace(/</g, '\\u003c') + ',' + JSON.stringify(dtype) + ');';
+              setScriptText(node, loaderCode);
+              continue;
+            }
+          }
+          prepareScriptElement(node);
+        }
       }
       if (Native.getAttributeNames) {
         for (const attrName of Native.getAttributeNames.call(node)) {
@@ -1974,17 +2642,58 @@
     if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));
     if (node.querySelectorAll) node.querySelectorAll('base[href]').forEach(el => updateVirtualBase(Native.getAttribute.call(el, 'href')));
   }
-  function installBaseObserver() {
-    syncBaseElement(document);
-    const MO = root.MutationObserver;
-    if (!MO || !document.documentElement) return;
+  const observedDocuments = new WeakSet();
+  function installBaseObserver(doc) {
+    doc = doc || document;
+    try { if (observedDocuments.has(doc)) return; } catch { return; }
+    syncBaseElement(doc);
+    // iframe Document 도 root.MutationObserver 로 관찰 가능 (cross-realm —
+    // observer 는 부모 realm 의 MO 라도 child doc 을 정상 observe 한다).
+    const MO = (doc.defaultView && doc.defaultView.MutationObserver) || root.MutationObserver;
+    if (!MO || !doc.documentElement) return;
     try {
       new MO(records => {
-        for (const r of records) {
-          if (r.type === 'attributes') enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase());
-          else for (const n of r.addedNodes || []) { syncBaseElement(n); enforceSubtreePolicies(n); instrumentDescendantIframes(n); }
+        try { zpTrace('mo', 'n=' + records.length); } catch {}
+        // Tick-scoped URL canonicalization cache — eliminates duplicate
+        // `new URL()` parses for the same raw URL appearing across multiple
+        // records (targetURLIfHTTP consults this cache; cached null short-
+        // circuits the parse for definitively non-HTTP URLs).
+        //
+        // Pre-classify URL-attribute mutations with rt.classifySchemeOnly
+        // when available — its ASCII fast path (~120-140 ns/op, beats JS
+        // regex 153-200 ns) is cheap per call. Bench (Q round): schemeOnly
+        // N times beats classifyBatch 2.1× because the batch ABI carries
+        // ~280 ns/item production overhead (lens write, result view, scratch
+        // layout) and does intern work the MO callback doesn't need.
+        //
+        // No threshold gate — the per-call cost is small enough that even
+        // a single-mutation tick benefits when the URL turns out to be
+        // non-HTTP (saves the 1300 ns new URL throw cost). For HTTP URLs
+        // the ~120 ns is overhead but dwarfed by the main loop's parse.
+        // See .ai/zp-page-rt-bench-report.md §3.7.
+        tickURLCache = new Map();
+        try {
+          if (rt) {
+            const HTTP = rt.UrlClass.HTTP, WS = rt.UrlClass.WS;
+            for (const r of records) {
+              if (r.type !== 'attributes') continue;
+              const raw = Native.getAttribute.call(r.target, String(r.attributeName || ''));
+              if (!raw || tickURLCache.has(raw)) continue;
+              try {
+                const cls = rt.classifySchemeOnly(raw);
+                if (cls !== HTTP && cls !== WS) tickURLCache.set(raw, null);
+              } catch { /* WASM hiccup — fall through to per-record main loop */ }
+            }
+          }
+          for (const r of records) {
+            if (r.type === 'attributes') enforceObservedAttribute(r.target, String(r.attributeName || '').toLowerCase());
+            else for (const n of r.addedNodes || []) { syncBaseElement(n); enforceSubtreePolicies(n); instrumentDescendantIframes(n); }
+          }
+        } finally {
+          tickURLCache = null;
         }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target'] });
+      }).observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target'] });
+      observedDocuments.add(doc);
     } catch {}
   }
   function enforceObservedAttribute(el, key) {
@@ -1993,6 +2702,7 @@
     const tag = el.localName;
     if (tag === 'base' && localKey === 'href') { syncBaseElement(el); return; }
     if (tag === 'link' && (localKey === 'rel' || localKey === 'href')) { enforceLinkPolicy(el); return; }
+    if (localKey === 'sandbox' && isFrameElement(el)) { sanitizeFrameSandbox(el); return; }
     if (localKey === 'target' && isNavigationTargetElement(el)) { const raw = Native.getAttribute.call(el, key); if (raw && raw !== '_self') setSafeNavigationTarget(el, key, raw); return; }
     if (tag === 'script' && (localKey === 'src' || localKey === 'href' || localKey === 'type')) {
       const target = urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url') || '';
@@ -2012,15 +2722,16 @@
       instrumentIframe(el);
       return;
     }
-    if (!isURLBearing(el, key)) return;
+    if (!isURLBearing(el, key, localKey, tag)) return;
     const raw = Native.getAttribute.call(el, key);
-    if (shouldBlockURLAttribute(el, localKey, raw)) { blockExecutableURL(el, localKey, raw); return; }
-    if (!raw || !isHTTPURL(raw) || String(raw).startsWith(proxyOrigin)) return;
-    let target;
-    try { target = targetURL(raw); } catch { return; }
-    const alreadyMapped = urlMeta.get(el) === target && (!usesRawURLAttribute(el, key) ? Native.getAttribute.call(el, 'data-zp-target-url') === target : true);
+    if (shouldBlockURLAttribute(el, localKey, raw, localKey, tag) || hasContextBlockedScheme(el, raw)) { blockExecutableURL(el, localKey, raw); return; }
+    if (!raw || String(raw).startsWith(proxyOrigin)) return;
+    const target = targetURLForElement(el, raw);
+    if (!target) return;
+    const usesRaw = usesRawURLAttribute(el, key, localKey);
+    const alreadyMapped = urlMeta.get(el) === target && (!usesRaw ? Native.getAttribute.call(el, 'data-zp-target-url') === target : true);
     urlMeta.set(el, target);
-    if (!usesRawURLAttribute(el, key)) Native.setAttribute.call(el, 'data-zp-target-url', target);
+    if (!usesRaw) Native.setAttribute.call(el, 'data-zp-target-url', target);
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'src') {
       Native.setAttribute.call(el, key, 'about:blank');
       activatedFrameURL(target).then(u => { Native.setAttribute.call(el, key, u); rememberFrameOrigin(el); }).catch(()=>{});
@@ -2028,7 +2739,7 @@
       return;
     }
     if (alreadyMapped) return;
-    if (!usesRawURLAttribute(el, key)) Native.setAttribute.call(el, key, target);
+    if (!usesRaw) Native.setAttribute.call(el, key, target);
   }
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
@@ -2046,8 +2757,8 @@
   }
 
   function installWorkerHooks() {
-    if (Native.Worker) define(root, 'Worker', function(url, opts) { return new Native.Worker(workerBootstrapURL(url), opts); });
-    if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { return new Native.SharedWorker(workerBootstrapURL(url), opts); });
+    if (Native.Worker) define(root, 'Worker', function(url, opts) { try { zpTrace('Worker', String(url).slice(0,120)); } catch {} return new Native.Worker(workerBootstrapURL(url), opts); });
+    if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { try { zpTrace('SharedWorker', String(url).slice(0,120)); } catch {} return new Native.SharedWorker(workerBootstrapURL(url), opts); });
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.reject(normalizedError('NotSupportedError')); });
     if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/zp/assets/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' }); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
@@ -2096,7 +2807,9 @@
     params.set('u', requestTargetURL(raw));
     params.set('tab', boot.tabId);
     for (const server of activeServers) params.append('server', server);
-    return ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();
+    // Absolute proxy URL — Worker resolves the URL relative to the page's
+    // baseURI, which is virtualised to the target host.
+    return proxyOrigin + ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();
   }
   function dataWorkerURL(raw) {
     const comma = raw.indexOf(',');
@@ -2121,9 +2834,11 @@
     installFrameAccessors(w.HTMLFrameElement && w.HTMLFrameElement.prototype);
 
     define(w.document, 'createElement', function(name, opts) {
-      const el = nativeCreateElement(String(name), opts);
-      if (/^i?frame$/i.test(String(name))) instrumentDescendantIframes(el);
-      if (/^script$/i.test(String(name))) instrumentScriptElement(el);
+      const n = String(name);
+      if (/^(i?frame|script|worker|object|embed)$/i.test(n)) { try { zpTrace('createElement', n); } catch {} }
+      const el = nativeCreateElement(n, opts);
+      if (/^i?frame$/i.test(n)) instrumentDescendantIframes(el);
+      if (/^script$/i.test(n)) instrumentScriptElement(el);
       return el;
     });
     if (nativeCreateElementNS) define(w.document, 'createElementNS', function(ns, name, opts) {
@@ -2173,6 +2888,19 @@
     function containFrameWindow(childWin, frame) {
       if (!childWin) return childWin;
       try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
+      // Skip parent's containment if the frame is queued to navigate to its
+      // own target URL. installNetworkContainment closes over the parent's
+      // `virtualURL`; same-origin navigation reuses the iframe Window object,
+      // so the installed origin/document.origin getters persist on
+      // iframe.Document.prototype AND the iframe.document instance. The
+      // iframe's own runtime-prelude can't override the document-instance
+      // wrap that was bound before navigation. Letting the iframe install
+      // its own membrane fresh after load is the correct path.
+      try {
+        if (frame && Native.getAttribute && Native.getAttribute.call(frame, 'data-zp-target-url')) {
+          return childWin;
+        }
+      } catch {}
       instrumentedWindows.add(childWin);
       try { installNetworkContainment(childWin); }
       catch (e) {
@@ -2190,13 +2918,15 @@
           get: d.get,
           set(v) {
             if (prop === 'srcdoc') d.set.call(this, injectSrcdoc(String(v)));
-            else if (isHTTPURL(v) && !String(v).startsWith(proxyOrigin)) {
-              const t = targetURL(v);
-              urlMeta.set(this, t);
-              Native.setAttribute.call(this, 'data-zp-target-url', t);
-              d.set.call(this, 'about:blank');
-              activatedFrameURL(t).then(u => { d.set.call(this, u); rememberFrameOrigin(this); }).catch(()=>{});
-            } else d.set.call(this, v);
+            else {
+              const t = String(v).startsWith(proxyOrigin) ? null : targetURLForElement(this, v);
+              if (t) {
+                urlMeta.set(this, t);
+                Native.setAttribute.call(this, 'data-zp-target-url', t);
+                d.set.call(this, 'about:blank');
+                activatedFrameURL(t).then(u => { d.set.call(this, u); rememberFrameOrigin(this); }).catch(()=>{});
+              } else d.set.call(this, v);
+            }
             instrumentIframe(this);
           },
           configurable: false
@@ -2204,15 +2934,62 @@
       } catch {}
     }
   }
+  function installParentSenderRedirect(w) {
+    if (!w || w === root) return;
+    if (parentRedirectFacades.has(w)) return;
+    const originalRootPm = postMessageOriginals.get(root);
+    if (!originalRootPm) return;
+    // Sender-aware postMessage for child→parent direction. Pushes sender (w)
+    // onto queue before invoking native parent.postMessage so that
+    // virtualizeMessageEvent at root realm can rewrite ev.source from root
+    // (corrupted by V8 incumbent realm leak across our wrap function call)
+    // back to w. NAVER GFP SafeFrame SDK 의 resize handler 가
+    // `e.source === iframe.contentWindow` 으로 어느 광고 iframe 인지 식별 →
+    // source 정정 없으면 모든 광고 iframe height=0 으로 collapse.
+    const senderAwarePm = function postMessage(message, targetOrigin, transfer) {
+      const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
+      parentPostMessageSenderQueue.push(w);
+      try {
+        return arguments.length > 2
+          ? Reflect.apply(originalRootPm, root, [message, mapped, transfer])
+          : Reflect.apply(originalRootPm, root, [message, mapped]);
+      } catch (e) {
+        const idx = parentPostMessageSenderQueue.lastIndexOf(w);
+        if (idx >= 0) parentPostMessageSenderQueue.splice(idx, 1);
+        throw e;
+      }
+    };
+    maskNativeFunction(senderAwarePm, 'postMessage');
+    // Window 객체에 대한 Proxy 는 Chromium 보안 모델 제약 (cross-realm, IDL
+    // bindings) 으로 get trap 이 작동 안 함 — facade.postMessage access 시
+    // senderAwarePm 가 아닌 native postMessage 반환 → queue push 안 됨. 대신
+    // null-prototype 객체에 우리 senderAwarePm + 주요 Window properties 수동
+    // delegate 한 facade 사용.
+    const facade = Object.create(null);
+    Object.defineProperty(facade, 'postMessage', { value: senderAwarePm, enumerable: true, configurable: false, writable: false });
+    // Forward common Window properties / methods used by ad code
+    const FWD_PROPS = ['top','parent','self','window','globalThis','opener','frames','length','name','closed','origin','location','document','history','navigator','screen','localStorage','sessionStorage','indexedDB','caches','crypto','performance','console','frameElement','innerWidth','innerHeight','outerWidth','outerHeight','devicePixelRatio'];
+    for (const p of FWD_PROPS) {
+      try {
+        Object.defineProperty(facade, p, { get: () => root[p], enumerable: true, configurable: false });
+      } catch {}
+    }
+    parentRedirectFacades.set(w, facade);
+    try { defineAccessor(w, 'parent', () => facade); } catch {}
+    try { defineAccessor(w, 'top', () => facade); } catch {}
+  }
   function prepareActivatingNodes(args) {
     for (const node of args || []) prepareActivatingNode(node);
   }
   function prepareActivatingNode(node) {
     if (!node || typeof node !== 'object') return;
     if ((node.nodeName || '').toUpperCase() === 'SCRIPT') prepareScriptElement(node);
+    if (/^(IFRAME|FRAME)$/.test(node.nodeName || '')) sanitizeFrameSandbox(node);
     if (node.querySelectorAll) {
       const scripts = node.querySelectorAll('script');
       for (let i = 0; i < scripts.length; i++) prepareScriptElement(scripts[i]);
+      const frames = node.querySelectorAll('iframe,frame');
+      for (let i = 0; i < frames.length; i++) sanitizeFrameSandbox(frames[i]);
     }
   }
   function collectIframesFromArgs(args) {
@@ -2241,18 +3018,226 @@
     if (!frame || !/^(IFRAME|FRAME)$/.test(frame.nodeName || '')) return;
     try {
       const src = Native.getAttribute.call(frame, 'src');
+      try { zpTrace('iframe', (src || 'about:blank').slice(0, 160)); } catch {}
       rememberFrameOrigin(frame);
-      if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow) installNetworkContainment(frame.contentWindow);
+      // If the frame already has a target URL queued (will navigate to a
+      // share URL momentarily via activatedFrameURL), do NOT install the
+      // parent's containment on the temporary about:blank window. The
+      // installation closes over the parent's `virtualURL`; when the iframe
+      // navigates same-origin, the Window object is reused and parent's
+      // getters (origin/document.origin/window.origin) persist on iframe's
+      // Document.prototype — making the iframe think its origin is the
+      // parent's URL. The iframe's own runtime-prelude installs the right
+      // membrane (with the iframe's virtualURL) after navigation.
+      const willNavigate = !!Native.getAttribute.call(frame, 'data-zp-target-url');
+      if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow && !willNavigate) installNetworkContainment(frame.contentWindow);
+      installSafeFrameResizeShim(frame);
     } catch { try { frame.remove(); } catch {} }
+  }
+  // NAVER GFP simple-bridge SafeFrame-emulation ads: iframe.name carries
+  // {evtType:'sf-init', iFrameId, msgToken, adm, isFluid:true, ...} and the
+  // host (gfp-nda.js handleMsgEvt) waits for {evtType:'sf-resized',
+  // params:{frameHeight}} to apply iframe.style.height. But the non-SafeFrame
+  // branch (forceSafeFrame=false) loads only gfp-bridge.js inside — pure
+  // tracking, no ResizeObserver, no sf-resized sender. Result: ad body
+  // renders inside but iframe stays height:0. Direct parent-side height
+  // mirroring via ResizeObserver+MutationObserver fills the gap without
+  // touching NAVER's message protocol — host's own update path is still
+  // available when SF_RESIZED arrives by any other route.
+  function installSafeFrameResizeShim(frame) {
+    if (!frame || !frame.style || !Native.getAttribute) return;
+    try { zpTrace('sfShim:enter'); } catch {}
+    let init = null;
+    try {
+      const name = Native.getAttribute.call(frame, 'name');
+      if (!name || name.length < 2 || name[0] !== '{') return;
+      init = JSON.parse(name);
+    } catch { return; }
+    if (!init || init.evtType !== 'sf-init') return;
+    try { if (frame[safeFrameShimMarker]) return; Object.defineProperty(frame, safeFrameShimMarker, { value: true, enumerable: false, configurable: false }); } catch {}
+    let lastH = 0;
+    const apply = () => {
+      try {
+        const doc = frame.contentDocument;
+        if (!doc || !doc.body) return;
+        // Body in non-SafeFrame iframe wraps a banner ad. Use max of common
+        // height signals — images load late so we want largest stable size.
+        const b = doc.body;
+        const h = Math.max(b.scrollHeight || 0, b.offsetHeight || 0, doc.documentElement ? (doc.documentElement.scrollHeight || 0) : 0);
+        if (h > 0 && h !== lastH) {
+          lastH = h;
+          frame.style.height = h + 'px';
+        }
+      } catch {}
+    };
+    let tries = 0;
+    const start = () => {
+      let doc = null;
+      try { doc = frame.contentDocument; } catch {}
+      if (!doc || !doc.body) {
+        if (tries++ < 100) try { root.setTimeout(start, 50); } catch {}
+        return;
+      }
+      // Poll: ResizeObserver across realms is unreliable for image-loaded
+      // reflow in non-SafeFrame ads. Adaptive backoff — height 안 바뀌면
+      // interval 점진 증가 (200→400→800→1600→2000ms cap), 바뀌면 reset.
+      // Per-tick `scrollHeight`/`offsetHeight` 가 layout reflush 강제하므로
+      // backoff 가 cumulative reflow cost 를 크게 줄임 (3-5 SafeFrame iframes
+      // 가 영구 200ms polling 하면 reflow noise 누적). image load event 가
+      // 별도 hook 으로 작동하므로 backoff 가 첫 안정화 후 reflow 누락 없음.
+      try {
+        let interval = 200;
+        let stableTicks = 0;
+        const tick = () => {
+          const before = lastH;
+          apply();
+          if (lastH === before) {
+            stableTicks++;
+            if (stableTicks >= 3 && interval < 2000) interval = Math.min(interval * 2, 2000);
+          } else {
+            stableTicks = 0;
+            interval = 200;
+          }
+          try { root.setTimeout(tick, interval); } catch {}
+        };
+        tick();
+      } catch {}
+      // Also hook image load events for instant snap after image arrival.
+      try {
+        const imgs = doc.querySelectorAll('img');
+        for (let i = 0; i < imgs.length; i++) {
+          try { imgs[i].addEventListener('load', apply, { once: true }); } catch {}
+        }
+      } catch {}
+    };
+    start();
+  }
+  // D4/D5 virtual gateway constructor. Returns an object whose `.ready` /
+  // `.closed` promises reject with a structured ZeroProxy error so target
+  // code can fall back gracefully. Methods on the object also reject.
+  // When the real gateway (HTTP/3 for WT, pion SFU for RTC) lands, this
+  // wrapper will dispatch through SW message channels instead.
+  function makeVirtualGateway(name, meta) {
+    return function VirtualGateway() {
+      const reason = name + ' requires the ZeroProxy ' + meta.kind +
+        ' gateway, which is not yet provisioned (' + meta.code + ').';
+      const err = normalizedError('NotSupportedError');
+      try { err.zpCode = meta.code; err.zpReason = reason; } catch {}
+      const rejected = Promise.reject(err);
+      // Swallow the unhandled-rejection by attaching a noop catch — target
+      // code that awaits this will still observe the rejection.
+      try { rejected.catch(() => {}); } catch {}
+      const proxy = {
+        ready: rejected,
+        closed: rejected,
+        close() { return undefined; },
+        addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
+      };
+      // WebTransport-specific surface.
+      if (name === 'WebTransport') {
+        proxy.createBidirectionalStream = () => rejected;
+        proxy.createUnidirectionalStream = () => rejected;
+        proxy.incomingBidirectionalStreams = makeEmptyReadableStream();
+        proxy.incomingUnidirectionalStreams = makeEmptyReadableStream();
+        proxy.datagrams = {
+          readable: makeEmptyReadableStream(),
+          writable: makeRejectedWritableStream(err),
+          maxDatagramSize: 0,
+        };
+      }
+      // RTCPeerConnection-specific surface.
+      if (name === 'RTCPeerConnection' || name === 'webkitRTCPeerConnection') {
+        proxy.createOffer = () => rejected;
+        proxy.createAnswer = () => rejected;
+        proxy.setLocalDescription = () => rejected;
+        proxy.setRemoteDescription = () => rejected;
+        proxy.addIceCandidate = () => rejected;
+        proxy.createDataChannel = () => { throw err; };
+        proxy.addTrack = () => { throw err; };
+        proxy.getSenders = () => [];
+        proxy.getReceivers = () => [];
+        proxy.getStats = () => rejected;
+      }
+      return proxy;
+    };
+  }
+  function makeEmptyReadableStream() {
+    if (typeof ReadableStream !== 'function') return null;
+    return new ReadableStream({ start(c) { c.close(); } });
+  }
+  function makeRejectedWritableStream(err) {
+    if (typeof WritableStream !== 'function') return null;
+    return new WritableStream({ start(c) { c.error(err); } });
   }
   function installNetworkContainment(w) {
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
     installToStringMasking(w);
+    // OXC rewrite 결과는 `__zp_get/set/call/construct/...` 헬퍼를 호출한다.
+    // about:blank ad iframe (NAVER GFP SafeFrame 등) 은 자체 prelude 가 안 돌고
+    // 부모가 installNetworkContainment 만 깐다 → 이 헬퍼들이 부재하면 SW 가
+    // rewrite 한 외부 스크립트가 `__zp_get is not defined` 로 즉시 throw,
+    // window.onerror=()=>true 가 silence → 광고 미렌더. 부모 wrapper 를
+    // 위임으로 노출해 멤브레인 의미를 보존한다 (location 가상화·dynamic ctor
+    // wrap·dangerous-prop dispatch 모두 부모 closure 가 처리). 자식 native
+    // global 접근은 base[prop] 으로 fall through.
+    if (root.__zp_get && !define(w, '__zp_get', root.__zp_get)) throw normalizedError('SecurityError');
+    if (root.__zp_set && !define(w, '__zp_set', root.__zp_set)) throw normalizedError('SecurityError');
+    if (root.__zp_assign && !define(w, '__zp_assign', root.__zp_assign)) throw normalizedError('SecurityError');
+    if (root.__zp_call && !define(w, '__zp_call', root.__zp_call)) throw normalizedError('SecurityError');
+    if (root.__zp_update && !define(w, '__zp_update', root.__zp_update)) throw normalizedError('SecurityError');
+    if (root.__zp_construct && !define(w, '__zp_construct', root.__zp_construct)) throw normalizedError('SecurityError');
+    if (root.__zp_has && !define(w, '__zp_has', root.__zp_has)) throw normalizedError('SecurityError');
+    if (root.__zp_getOwnPropertyDescriptor && !define(w, '__zp_getOwnPropertyDescriptor', root.__zp_getOwnPropertyDescriptor)) throw normalizedError('SecurityError');
+    if (root.__zp_ownKeys && !define(w, '__zp_ownKeys', root.__zp_ownKeys)) throw normalizedError('SecurityError');
+    if (root.__zp_module_url && !define(w, '__zp_module_url', root.__zp_module_url)) throw normalizedError('SecurityError');
+    if (root.__zp_nav_assign && !define(w, '__zp_nav_assign', root.__zp_nav_assign)) throw normalizedError('SecurityError');
+    if (root.__zp_nav_replace && !define(w, '__zp_nav_replace', root.__zp_nav_replace)) throw normalizedError('SecurityError');
+    if (root.__zp_runClassic && !define(w, '__zp_runClassic', root.__zp_runClassic)) throw normalizedError('SecurityError');
+    if (root.__zp_runEvent && !define(w, '__zp_runEvent', root.__zp_runEvent)) throw normalizedError('SecurityError');
+    // 인라인 스크립트 wrapper. transformHTML 이 `<script>body</script>` 를
+    // `<script>__ZP_EXEC_INLINE_SCRIPT("body")</script>` 로 바꿔서 부모/iframe
+    // 모두에서 동기 rewrite + 실행. iframe 에 wrapper 부재면 ReferenceError →
+    // SafeFrame iframe template 의 `window.onerror=()=>true` 같은 짧은 inline 도
+    // 즉시 실패해서 error swallow 가 안 깔리고 후속 광고 코드 silent 실패.
+    //
+    // 부모 wrapper 를 그대로 위임하면 `Native.FunctionCtor(...).call(root)` 가
+    // 부모 realm 에서 실행 → iframe 의 `window.X` 작성이 부모 window 에 가버린다.
+    // SafeFrame 광고는 iframe.name JSON 의 adm 을 자기 window 에 접근해야 하므로
+    // realm 분리가 깨지면 절대 안 됨. 자식 realm 의 native Function (overwrite 전
+    // 캡처) 으로 새 함수를 만들어 child window 에서 실행하면 realm 보존.
     const childFunction = w.Function;
+    if (childFunction) {
+      const childExecInline = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic'))).call(w);
+      const childExecModule = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'module'))).call(w);
+      // External script loader for iframe. SW only controls top-level (parent)
+      // — `document.write` 가 iframe 의 about:blank document 를 reset 한 뒤에는
+      // 자식이 SW client 자격을 잃어 `<script src=ext>` fetch 가 SW 우회 직행 → Go
+      // 서버 403 POLICY_BLOCKED → 광고 미렌더. parent realm 의 native fetch 로
+      // SW-routed 경로 (`/zp/api/script?u=...`) 를 fetch + child realm 에서 실행
+      // 하여 SafeFrame loader 가 정상 실행되게 한다.
+      const childLoadExternal = (url, kind) => Native.fetch(scriptProxyPath(String(url || ''), String(kind || 'classic'))).then(r => r.text()).then(code => { (new childFunction(code)).call(w); });
+      if (!define(w, '__ZP_EXEC_INLINE_SCRIPT', childExecInline)) throw normalizedError('SecurityError');
+      if (!define(w, '__ZP_EXEC_INLINE_MODULE', childExecModule)) throw normalizedError('SecurityError');
+      if (!define(w, '__ZP_LOAD_EXTERNAL_SCRIPT', childLoadExternal)) throw normalizedError('SecurityError');
+    } else {
+      if (root.__ZP_EXEC_INLINE_SCRIPT && !define(w, '__ZP_EXEC_INLINE_SCRIPT', root.__ZP_EXEC_INLINE_SCRIPT)) throw normalizedError('SecurityError');
+      if (root.__ZP_EXEC_INLINE_MODULE && !define(w, '__ZP_EXEC_INLINE_MODULE', root.__ZP_EXEC_INLINE_MODULE)) throw normalizedError('SecurityError');
+    }
+    if (root.__ZP_EXEC_EVENT && !define(w, '__ZP_EXEC_EVENT', root.__ZP_EXEC_EVENT)) throw normalizedError('SecurityError');
+    if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');
     if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
     if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
-    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: false, writable: false }); } catch {}
+    if (childFunction && childFunction.prototype) try {
+      // iframe child Function — root.Function 은 우리 dynamicFunction wrapper.
+      // 메인 realm 과 동일한 WeakMap 정책 적용.
+      const childConstructorOverrides = new WeakMap();
+      Object.defineProperty(childFunction.prototype, 'constructor', {
+        get() { return childConstructorOverrides.get(this) || root.Function; },
+        set(value) { try { childConstructorOverrides.set(this, value); } catch {} },
+        enumerable: false, configurable: false
+      });
+    } catch {}
     if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
     installNavigatorIdentity(w);
     installGetterMasking(w);
@@ -2273,20 +3258,46 @@
   }
 
   function installBlockers(w, strict = false) {
-    for (const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport']) {
-      const blockCtor = function(){ throw normalizedError('NotSupportedError'); };
+    // D4 / D5: WebTransport, RTCPeerConnection, etc. expose a *virtual*
+    // constructor surface so target code's feature detection succeeds and
+    // its fallback flow (e.g., await wt.ready.catch(() => fallbackToWS()))
+    // works cleanly. The gateway transport itself is still pending —
+    // .ready rejects with a ZeroProxy-tagged error carrying the friendly
+    // reason. This is strictly better than a hard ctor-throw because most
+    // production sites detect WebTransport availability via the Promise.
+    const gatewayMeta = {
+      'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport' },
+      'WebSocketStream': { code: 'WT_UNSUPPORTED', kind: 'WebSocketStream' },
+      'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
+      'webkitRTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
+      'RTCDataChannel': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
+    };
+    for (const name of Object.keys(gatewayMeta)) {
+      const meta = gatewayMeta[name];
+      const blockCtor = makeVirtualGateway(name, meta);
+      try { Object.defineProperty(blockCtor, 'name', { value: name, configurable: true }); } catch {}
+      maskNativeFunction(blockCtor, name);
       const ok = define(w, name, blockCtor);
       if (strict && name in w && !ok) throw normalizedError('SecurityError');
     }
-    if (root.WebSocketStream && !define(w, 'WebSocketStream', root.WebSocketStream) && strict) throw normalizedError('SecurityError');
+    // B4 / EventSource: intentionally NOT wrapped. The Service Worker
+    // intercepts all controlled-origin fetches including SSE, so the native
+    // EventSource implementation is safe. Wrapping it would change the
+    // observable interface unnecessarily. See compat-pipeline.test.js.
+    // D6: physical hardware + permission-gated APIs pass through to native.
+    // Browser user-consent prompt is the real boundary; they do not leak
+    // target/proxy origin. Sensor noise injection / fingerprinting noise is
+    // a future phase. The block list below is intentionally empty.
     const nav = w.navigator;
     if (nav) {
-      for (const name of ['serial','hid','usb','bluetooth','requestMIDIAccess','credentials','geolocation','clipboard','wakeLock']) {
+      for (const name of /* intentionally empty — see D6 in PHASE2 plan */ []) {
         const deny = function(){ throw normalizedError('NotSupportedError'); };
         toStringMap.set(deny, nativeAccessorSource('get', name));
         try { Object.defineProperty(nav, name, { get: deny, configurable: false }); } catch {}
       }
-      if (nav.mediaDevices) for (const name of ['getUserMedia','getDisplayMedia','enumerateDevices']) define(nav.mediaDevices, name, function(){ return Promise.reject(normalizedError('NotSupportedError')); });
+      // D6: getUserMedia / getDisplayMedia / enumerateDevices pass through to
+      // native. Browser permission prompt is the consent boundary, and these
+      // do not leak target/proxy origin to external network.
     }
     if (w.speechSynthesis) {
       const voices = Object.freeze([

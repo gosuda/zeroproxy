@@ -1,0 +1,100 @@
+[
+  {
+    "name": "empty/empty/empty",
+    "cf_mitigated": "",
+    "host": "",
+    "path": "",
+    "want": false
+  },
+  {
+    "name": "cf-mitigated exact challenge",
+    "cf_mitigated": "challenge",
+    "host": "example.test",
+    "path": "/",
+    "want": true
+  },
+  {
+    "name": "cf-mitigated mixed case + padding",
+    "cf_mitigated": "  Challenge  ",
+    "host": "example.test",
+    "path": "/",
+    "want": true
+  },
+  {
+    "name": "cf-mitigated managed (not challenge)",
+    "cf_mitigated": "managed",
+    "host": "example.test",
+    "path": "/",
+    "want": false
+  },
+  {
+    "name": "challenge host exact",
+    "cf_mitigated": "",
+    "host": "challenges.cloudflare.com",
+    "path": "/",
+    "want": true
+  },
+  {
+    "name": "challenge host upper",
+    "cf_mitigated": "",
+    "host": "CHALLENGES.CLOUDFLARE.COM",
+    "path": "/",
+    "want": true
+  },
+  {
+    "name": "challenge host suffix decoy",
+    "cf_mitigated": "",
+    "host": "challenges.cloudflare.com.evil.test",
+    "path": "/",
+    "want": false
+  },
+  {
+    "name": "challenge host subdomain decoy",
+    "cf_mitigated": "",
+    "host": "evil.challenges.cloudflare.com",
+    "path": "/",
+    "want": false
+  },
+  {
+    "name": "platform prefix orchestrate",
+    "cf_mitigated": "",
+    "host": "victim.test",
+    "path": "/cdn-cgi/challenge-platform/h/g/orchestrate/h/v1",
+    "want": true
+  },
+  {
+    "name": "platform prefix without trailing slash",
+    "cf_mitigated": "",
+    "host": "victim.test",
+    "path": "/cdn-cgi/challenge-platform",
+    "want": false
+  },
+  {
+    "name": "platform prefix uppercased (path is case-sensitive)",
+    "cf_mitigated": "",
+    "host": "victim.test",
+    "path": "/CDN-CGI/CHALLENGE-PLATFORM/h/g/orchestrate",
+    "want": false
+  },
+  {
+    "name": "platform prefix nested under unrelated path",
+    "cf_mitigated": "",
+    "host": "victim.test",
+    "path": "/x/cdn-cgi/challenge-platform/h/g",
+    "want": false
+  },
+  {
+    "name": "header overrides url miss",
+    "cf_mitigated": "challenge",
+    "host": "unrelated.test",
+    "path": "/login",
+    "want": true
+  },
+  {
+    "name": "ordinary page no match",
+    "cf_mitigated": "",
+    "host": "example.test",
+    "path": "/index.html",
+    "want": false
+  }
+]

@@ -32,8 +32,24 @@ func TestRedirectedRequestReplaysPreservedBody(t *testing.T) {
 func TestRedirectedRequestRejectsNonReplayablePreservedBody(t *testing.T) {
 	target, _ := url.Parse("https://example.com/next")
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com/start", io.NopCloser(strings.NewReader("payload")))
-	if _, err := redirectedRequest(req, http.StatusTemporaryRedirect, target); err == nil {
+	_, err := redirectedRequest(req, http.StatusTemporaryRedirect, target)
+	if err == nil {
 		t.Fatal("expected non-replayable body redirect to fail")
+	}
+	if !strings.Contains(err.Error(), "REDIRECT_BODY_NONREPLAYABLE") {
+		t.Fatalf("expected REDIRECT_BODY_NONREPLAYABLE in error, got: %v", err)
+	}
+}
+
+func TestRedirectedRequestRejectsNonReplayableBodyFor308(t *testing.T) {
+	target, _ := url.Parse("https://example.com/next")
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/start", io.NopCloser(strings.NewReader("payload")))
+	_, err := redirectedRequest(req, http.StatusPermanentRedirect, target)
+	if err == nil {
+		t.Fatal("expected non-replayable body 308 redirect to fail")
+	}
+	if !strings.Contains(err.Error(), "REDIRECT_BODY_NONREPLAYABLE") {
+		t.Fatalf("expected REDIRECT_BODY_NONREPLAYABLE in error, got: %v", err)
 	}
 }
 

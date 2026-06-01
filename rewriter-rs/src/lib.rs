@@ -5,6 +5,8 @@ use oxc_ast::ast::*;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
+use swc_css_ast::{DeclarationOrAtRule, ImportHref, ListOfComponentValues, Str, Stylesheet, UrlValue};
+use swc_css_visit::{Visit, VisitWith};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -24,8 +26,71 @@ impl RewriteOutput {
     pub fn error(&self) -> String { self.error.clone() }
 }
 
+/// HTML entity decode helper. NAVER (and likely other React-SSR sites) deliver
+/// inline scripts via `dangerouslySetInnerHTML` whose payload has been
+/// HTML-encoded (`&gt;` for `>`, `&amp;` for `&`, etc.). When React applies it
+/// to a script element the entities normally round-trip through the browser's
+/// HTML serializer; the OXC parser fed by our membrane sees the entity-encoded
+/// text and rejects it as SyntaxError. Decoding the common safe entities here
+/// keeps strict-mode fail-closed intact while accepting valid JS that simply
+/// took a detour through the HTML serializer.
+fn decode_common_html_entities(src: &str) -> String {
+    if !src.contains('&') { return src.to_string(); }
+    // Cheap rewrite for the handful of named entities a JS body realistically
+    // contains. Numeric (`&#NN;` / `&#xNN;`) entities for ASCII range also.
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        // Look up to 8 bytes ahead for the terminating ';'. Entities we care
+        // about are ASCII-only so byte indexing of `tail[..end]` is safe.
+        let mut end = None;
+        for (k, b) in tail.as_bytes().iter().enumerate().take(9) {
+            if k == 0 { continue; }
+            if *b == b';' { end = Some(k); break; }
+        }
+        let consumed = if let Some(off) = end {
+            let entity = &tail[..off + 1];
+            let replacement: Option<&str> = match entity {
+                "&gt;" => Some(">"),
+                "&lt;" => Some("<"),
+                "&amp;" => Some("&"),
+                "&quot;" => Some("\""),
+                "&apos;" => Some("'"),
+                "&#39;" => Some("'"),
+                "&#x27;" => Some("'"),
+                "&nbsp;" => Some("\u{00a0}"),
+                _ => None,
+            };
+            if let Some(r) = replacement {
+                out.push_str(r);
+                Some(off + 1)
+            } else { None }
+        } else { None };
+        if let Some(c) = consumed {
+            rest = &tail[c..];
+        } else {
+            // Keep the literal '&' and continue.
+            out.push('&');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[wasm_bindgen]
 pub fn rewrite_script(source: &str, kind: &str, target_url: &str, control_prefix: &str) -> RewriteOutput {
+    // NOTE: HTML entity decoding (e.g. `=&gt;` → `=>`) is the responsibility
+    // of the JS caller for the inline-script path. Applying it unconditionally
+    // here corrupts SCRIPTS THAT CONTAIN ENTITY-LIKE STRINGS AS DATA — e.g.
+    // NAVER's GFP SafeFrame `t.encMap={"\"":"&quot;",...}` decodes to
+    // `{"\"":"\""",...}` (unterminated string literal) → PARSE_FAILED → the
+    // ad iframe never renders. See .ai/trap-notebook/rewriter.md 2026-05-30
+    // entry. Inline scripts that need entity decoding (React
+    // dangerouslySetInnerHTML edge case) decode in __ZP_EXEC_INLINE_SCRIPT
+    // before calling here.
     match normalize_kind(kind) {
         "module" => rewrite_program_source(source, true, target_url, control_prefix),
         "event-handler" => rewrite_wrapped_source(
@@ -47,6 +112,165 @@ pub fn rewrite_script(source: &str, kind: &str, target_url: &str, control_prefix
             false,
         ),
         _ => rewrite_program_source(source, false, target_url, control_prefix),
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str) -> RewriteOutput {
+    let control_prefix = if control_prefix.is_empty() { "/zp/" } else { control_prefix };
+    match collect_css_replacements(source, base_url, control_prefix) {
+        Ok(replacements) => RewriteOutput {
+            ok: true,
+            code: apply_css_replacements(source, replacements),
+            error: String::new(),
+        },
+        Err(error) => RewriteOutput { ok: false, code: String::new(), error },
+    }
+}
+
+fn proxied_css_url(raw: &str, base_url: &str, control_prefix: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.starts_with('#') || s.starts_with("var(") {
+        return None;
+    }
+    let lower = s.get(..s.len().min(32)).unwrap_or("").to_ascii_lowercase();
+    if lower.starts_with("data:") || lower.starts_with("blob:") || lower.starts_with("about:") || lower.starts_with("javascript:") || lower.starts_with("vbscript:") {
+        return None;
+    }
+    let base = url::Url::parse(base_url).ok()?;
+    let abs = base.join(s).ok()?;
+    if abs.scheme() != "http" && abs.scheme() != "https" {
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str(control_prefix);
+    if !out.ends_with('/') { out.push('/'); }
+    out.push_str("api/fetch?url=");
+    out.extend(url::form_urlencoded::byte_serialize(abs.as_str().as_bytes()));
+    Some(out)
+}
+
+fn css_escape_string(s: &str, quote: u8) -> String {
+    let q = quote as char;
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == q || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[derive(Clone)]
+struct CssReplacement {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str) -> Result<Vec<CssReplacement>, String> {
+    use swc_common::{sync::Lrc, FileName, SourceMap};
+    use swc_css_parser::{parse_file, parser::ParserConfig};
+
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(FileName::Anon.into(), source.to_string());
+    let start_pos = fm.start_pos.0;
+
+    let mut stylesheet_errors = Vec::new();
+    if let Ok(stylesheet) = parse_file::<Stylesheet>(&fm, None, ParserConfig::default(), &mut stylesheet_errors) {
+        let mut collector = CssUrlCollector::new(base_url, control_prefix, start_pos, source.len());
+        stylesheet.visit_with(&mut collector);
+        if !collector.replacements.is_empty() || source.contains('{') || source.contains("@import") {
+            return Ok(collector.replacements);
+        }
+    }
+
+    let mut declaration_errors = Vec::new();
+    if let Ok(declarations) = parse_file::<Vec<DeclarationOrAtRule>>(&fm, None, ParserConfig::default(), &mut declaration_errors) {
+        let mut collector = CssUrlCollector::new(base_url, control_prefix, start_pos, source.len());
+        for declaration in &declarations {
+            declaration.visit_with(&mut collector);
+        }
+        if !collector.replacements.is_empty() {
+            return Ok(collector.replacements);
+        }
+    }
+
+    let mut value_errors = Vec::new();
+    if let Ok(values) = parse_file::<ListOfComponentValues>(&fm, None, ParserConfig::default(), &mut value_errors) {
+        let mut collector = CssUrlCollector::new(base_url, control_prefix, start_pos, source.len());
+        values.visit_with(&mut collector);
+        return Ok(collector.replacements);
+    }
+
+    Err("CSS_PARSE_FAILED".to_string())
+}
+
+fn apply_css_replacements(source: &str, mut replacements: Vec<CssReplacement>) -> String {
+    replacements.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    let mut out = String::with_capacity(source.len() + replacements.iter().map(|r| r.text.len()).sum::<usize>());
+    let mut pos = 0usize;
+    for r in replacements {
+        if r.start < pos || r.start > r.end || r.end > source.len() {
+            continue;
+        }
+        out.push_str(&source[pos..r.start]);
+        out.push_str(&r.text);
+        pos = r.end;
+    }
+    out.push_str(&source[pos..]);
+    out
+}
+
+struct CssUrlCollector<'a> {
+    base_url: &'a str,
+    control_prefix: &'a str,
+    start_pos: u32,
+    source_len: usize,
+    replacements: Vec<CssReplacement>,
+}
+
+impl<'a> CssUrlCollector<'a> {
+    fn new(base_url: &'a str, control_prefix: &'a str, start_pos: u32, source_len: usize) -> Self {
+        Self { base_url, control_prefix, start_pos, source_len, replacements: Vec::new() }
+    }
+
+    fn span_offsets(&self, span: swc_common::Span) -> Option<(usize, usize)> {
+        let start = span.lo.0.checked_sub(self.start_pos)? as usize;
+        let end = span.hi.0.checked_sub(self.start_pos)? as usize;
+        if start < end && end <= self.source_len { Some((start, end)) } else { None }
+    }
+
+    fn add_quoted_replacement(&mut self, span: swc_common::Span, raw: &str) {
+        let Some(next) = proxied_css_url(raw, self.base_url, self.control_prefix) else { return; };
+        let Some((start, end)) = self.span_offsets(span) else { return; };
+        self.replacements.push(CssReplacement {
+            start,
+            end,
+            text: format!("\"{}\"", css_escape_string(&next, b'"')),
+        });
+    }
+
+    fn add_string_replacement(&mut self, s: &Str) {
+        self.add_quoted_replacement(s.span, &s.value.to_string());
+    }
+}
+
+impl Visit for CssUrlCollector<'_> {
+    fn visit_import_href(&mut self, node: &ImportHref) {
+        match node {
+            ImportHref::Str(s) => self.add_string_replacement(s),
+            ImportHref::Url(u) => self.visit_url(u),
+        }
+    }
+
+    fn visit_url(&mut self, node: &swc_css_ast::Url) {
+        let Some(value) = node.value.as_ref() else { return; };
+        match &**value {
+            UrlValue::Str(s) => self.add_string_replacement(s),
+            UrlValue::Raw(raw) => self.add_quoted_replacement(raw.span, &raw.value.to_string()),
+        }
     }
 }
 
@@ -165,10 +389,44 @@ impl<'a> Rewriter<'a> {
             chosen.push(r);
         }
         let mut out = String::with_capacity(self.source.len() + chosen.iter().map(|r| r.text.len()).sum::<usize>());
+        let src_bytes = self.source.as_bytes();
+        let needs_paren = |start: usize| -> bool {
+            if start == 0 { return false; }
+            let prev = src_bytes[start - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$' {
+                return true;
+            }
+            let mut i = start;
+            while i > 0 {
+                let c = src_bytes[i - 1];
+                if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+                    i -= 1;
+                    continue;
+                }
+                break;
+            }
+            if i >= 3 {
+                let kw = &src_bytes[i - 3..i];
+                if kw == b"new" {
+                    if i == 3 { return true; }
+                    let before = src_bytes[i - 4];
+                    if !(before.is_ascii_alphanumeric() || before == b'_' || before == b'$') {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
         let mut pos = 0usize;
         for r in chosen {
             out.push_str(&self.source[pos..r.start]);
-            out.push_str(&r.text);
+            let text = if r.text.starts_with("(__zp_") && r.text.ends_with(")") {
+                let inner = &r.text[1..r.text.len()-1];
+                if needs_paren(r.start) { r.text.clone() } else { inner.to_string() }
+            } else {
+                r.text.clone()
+            };
+            out.push_str(&text);
             pos = r.end;
         }
         out.push_str(&self.source[pos..]);
@@ -444,7 +702,16 @@ impl<'a> Rewriter<'a> {
         match expr {
             Expression::Identifier(id) => {
                 if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
-                    self.add_replacement(id.span, format!("__zp_get(globalThis,{:?})", id.name.as_str()), 10);
+                    // 괄호 필수: `new globalThis.Request(args)` 같은 `new
+                    // MemberExpression Arguments` 문법에서 `new` 가 가장 먼저
+                    // 만나는 Arguments 와 결합한다. 괄호 없으면
+                    // `new __zp_get(globalThis,"globalThis").Request(args)` 가
+                    // `(new __zp_get(...,"globalThis")).Request(args)` 로 파싱되어
+                    // `.Request(args)` 는 일반 함수 호출 →
+                    // `Failed to construct 'Request': Please use the 'new' operator`.
+                    // 괄호로 감싸면 `(__zp_get(...))` 는 PrimaryExpression 이 되고
+                    // `new (...).Request(args)` 는 `new ((...).Request)(args)` 보존.
+                    self.add_replacement(id.span, format!("(__zp_get(globalThis,{:?}))", id.name.as_str()), 10);
                 }
             }
             Expression::StaticMemberExpression(expr) => {
@@ -1001,7 +1268,21 @@ impl<'a> Rewriter<'a> {
                     return None;
                 }
                 let prop = expr.property.name.as_str();
-                if CALL_HELPER_PROPS.iter().any(|name| *name == prop) || self.member_needs_helper_static(expr) {
+                // CALL_HELPER_PROPS are actual callable Location/Window/Document
+                // methods (assign/replace/postMessage/etc.) and must always
+                // route through membrane.
+                //
+                // MEMBER_HELPER_PROPS are mostly GET targets (location/parent/
+                // top/opener/contentWindow/etc.). For CALL syntax `obj.parent(args)`,
+                // only wrap when the base is window-like — on custom objects,
+                // `obj.parent` is just a data field (or method) and forced-routing
+                // through `__zp_call` throws "parent is not a function" when the
+                // value isn't callable, breaking widgets like NAVER's wcc-kw-owner
+                // comment widget whose internal Comment objects carry a `parent`
+                // ref to the thread parent.
+                if CALL_HELPER_PROPS.iter().any(|name| *name == prop)
+                    || (self.member_needs_helper_static(expr) && self.is_window_like_expression(&expr.object))
+                {
                     Some((self.render_expression(&expr.object), format!("{:?}", prop)))
                 } else {
                     None
@@ -1186,6 +1467,31 @@ mod tests {
         assert!(code.contains("__zp_set(__zp_get(globalThis,\"window\"),\"location\",'/next')"));
         assert!(code.contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),['/ws',['chat']])"));
         assert!(code.contains("__zp_call(Object,\"getOwnPropertyDescriptor\",[__zp_get(globalThis,\"window\"),'location'])"));
+    }
+
+    #[test]
+    fn return_followed_by_parenthesized_replace_call() {
+        // NAVER kw-owner/index.js Fu function pattern:
+        //   function Fu(e){...return(Fc(t%52)+n).replace(Fl,"$1-$2")}
+        // The `(Fc(t%52)+n).replace(Fl,"$1-$2")` CallExpression triggers
+        // `replace` in CALL_HELPER_PROPS → emits `(__zp_call(...))`. The
+        // replacement span must include the leading `(` of the parenthesised
+        // base so the result is `return(__zp_call(...))` (valid `return
+        // (expr)`), NOT `return__zp_call(...)` which the JS parser reads as a
+        // single identifier → `ReferenceError: return__zp_call is not defined`.
+        let code = rewrite_ok(
+            "function Fu(e){var t,n=\"\";for(t=Math.abs(e);t>52;t=t/52|0)n=Fc(t%52)+n;return(Fc(t%52)+n).replace(Fl,\"$1-$2\")}",
+            "classic",
+            "https://example.com/app.js",
+        );
+        assert!(
+            !code.contains("return__zp_call"),
+            "rewriter glued __zp_call to return keyword: {}",
+            code
+        );
+        // The output must be syntactically valid JS — parsable as classic script.
+        // (We can't easily call the JS parser here, so the negation check above
+        // is the primary guard.)
     }
 
     #[test]

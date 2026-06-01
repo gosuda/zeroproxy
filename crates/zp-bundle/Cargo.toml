@@ -1,0 +1,48 @@
+[package]
+name = "zp-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zp-shared = { workspace = true }
+zp-rewriter = { workspace = true }
+zp-htmltx = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# web-sys feature set carried over from the absorbed zp-kernel crate
+# (kernel mux opens WebSocket, builds Headers/Response/Request, streams via
+# ReadableStream, reads File/Blob bodies for upload). The membrane/wtproxy/
+# rtcgw stubs don't need any web-sys features yet; expand this list as
+# Phase B3/B4/D4/D5 land.
+[dependencies.web-sys]
+workspace = true
+features = [
+    "WebSocket",
+    "Headers",
+    "Response",
+    "ResponseInit",
+    "Request",
+    "RequestInit",
+    "ReadableStream",
+    "MessageEvent",
+    "Event",
+    "EventTarget",
+    "BinaryType",
+    "CloseEvent",
+    "ErrorEvent",
+    "WorkerGlobalScope",
+    "ServiceWorkerGlobalScope",
+    "Location",
+    "Blob",
+    "FileReader",
+    "ProgressEvent",
+    "console",
+]

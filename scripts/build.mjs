@@ -10,15 +10,17 @@ const args = parseArgs(process.argv.slice(2));
 const outRoot = path.resolve(repoRoot, args.out || 'dist');
 const webSrc = path.join(repoRoot, 'web');
 const webOut = path.join(outRoot, 'web');
-const kernelOut = path.join(outRoot, 'kernel.wasm');
 const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
 const cargoHome = process.env.CARGO_HOME || path.join(process.env.HOME || '', '.cargo');
 const cargoBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
 const wasmBindgenBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen');
 const minify = args.minify === true;
+const zpBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_bundle.wasm');
+const zpPageRtWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_rt.wasm');
+const zpBundleOutDir = path.join(webOut, '__zp');
 
 if (args.help) {
-  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --kernel-only     Build only the Go WASM kernel\n  --server-only     Build only the relay server\n  --skip-web        Do not build browser assets\n  --skip-kernel     Do not build the Go WASM kernel\n  --skip-server     Do not build the relay server\n  --minify          Minify bundled JavaScript\n  --no-clean        Keep existing output files not overwritten by this run\n`);
+  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --server-only     Build only the relay server\n  --rust-only       Build only the Rust WASM bundle\n  --skip-web        Do not build browser assets\n  --skip-server     Do not build the relay server\n  --skip-rust       Do not build the Rust WASM bundle\n  --minify          Minify bundled JavaScript\n  --no-clean        Keep existing output files not overwritten by this run\n`);
   process.exit(0);
 }
 
@@ -27,8 +29,8 @@ const selected = selectedTargets(args);
 if (!args.noClean) await cleanSelectedOutputs(selected);
 await mkdir(outRoot, { recursive: true });
 
+if (selected.rust) await buildRustBundle();
 if (selected.web) await buildWeb();
-if (selected.kernel) buildKernel();
 if (selected.server) buildServer();
 
 process.stdout.write(`Built ZeroProxy artifacts in ${path.relative(repoRoot, outRoot) || '.'}\n`);
@@ -45,9 +47,11 @@ function parseArgs(argv) {
       case '--web-only':
       case '--kernel-only':
       case '--server-only':
+      case '--rust-only':
       case '--skip-web':
       case '--skip-kernel':
       case '--skip-server':
+      case '--skip-rust':
       case '--minify':
       case '--no-clean':
       case '--help':
@@ -66,28 +70,27 @@ function toKey(flag) {
 
 function selectedTargets(parsed) {
   let web = true;
-  let kernel = true;
   let server = true;
-  if (parsed.webOnly || parsed.kernelOnly || parsed.serverOnly) {
+  let rust = true;
+  if (parsed.webOnly || parsed.serverOnly || parsed.rustOnly) {
     web = parsed.webOnly === true;
-    kernel = parsed.kernelOnly === true;
     server = parsed.serverOnly === true;
+    rust = parsed.rustOnly === true;
   }
   if (parsed.skipWeb) web = false;
-  if (parsed.skipKernel) kernel = false;
   if (parsed.skipServer) server = false;
-  if (!web && !kernel && !server) throw new Error('no build targets selected');
-  return { web, kernel, server };
+  if (parsed.skipRust) rust = false;
+  if (!web && !server && !rust) throw new Error('no build targets selected');
+  return { web, server, rust };
 }
 
 async function cleanSelectedOutputs(selected) {
-  if (selected.web && selected.kernel && selected.server) {
+  if (selected.web && selected.server) {
     await rm(outRoot, { recursive: true, force: true });
     return;
   }
   const removals = [];
   if (selected.web) removals.push(rm(webOut, { recursive: true, force: true }));
-  if (selected.kernel) removals.push(rm(kernelOut, { force: true }));
   if (selected.server) removals.push(rm(serverOut, { force: true }));
   await Promise.all(removals);
 }
@@ -95,7 +98,6 @@ async function cleanSelectedOutputs(selected) {
 async function buildWeb() {
   await mkdir(webOut, { recursive: true });
 
-  const goWasmExec = await readGoWasmExec();
   const rustRewriter = await makeRustRewriterClassic();
   const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
@@ -105,15 +107,85 @@ async function buildWeb() {
   await copyOptional(path.join(webSrc, 'manifest.webmanifest'), path.join(webOut, 'manifest.webmanifest'));
 
   await writeBundled('zp-core.js', [await readSource('zp-core.js')]);
-  await writeBundled('runtime-prelude.js', [await readSource('runtime-prelude.js')]);
+  await writeBundled('zp-rt.js', [await readSource('zp-rt.js')]);
+  // runtime-prelude needs ZeroProxyRT available at IIFE entry — bundle
+  // zp-rt.js (the raw-WASM glue) as a prefix so it self-registers on
+  // globalThis before runtime-prelude.js runs. The async rt.load() call
+  // inside runtime-prelude will fetch /__zp/zp_page_rt.wasm.
+  await writeBundled('runtime-prelude.js', [await readSource('zp-rt.js'), await readSource('runtime-prelude.js')]);
   await writeBundled('rust-rewriter.js', [rustRewriter]);
-  await writeBundled('wasm_exec.js', [goWasmExec]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
-  await writeBundled('sw.js', [await readSource('zp-core.js'), rustRewriter, goWasmExec, serviceWorker]);
+  await writeBundled('sw.js', [await readSource('zp-core.js'), rustRewriter, serviceWorker]);
 }
 
-function buildKernel() {
-  run('go', ['build', '-trimpath', '-o', kernelOut, './cmd/wasm-kernel'], { GOOS: 'js', GOARCH: 'wasm' });
+async function buildRustBundle() {
+  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
+  // zp-page-rt: raw extern "C" cdylib loaded by web/zp-rt.js. No wasm-bindgen
+  // glue; the .wasm is copied as-is and JS instantiates it directly.
+  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-rt']);
+  await mkdir(zpBundleOutDir, { recursive: true });
+  // Foreground / page use: ES-module flavored glue.
+  run('wasm-bindgen', [
+    '--target', 'web',
+    '--out-dir', zpBundleOutDir,
+    '--out-name', 'zp_bundle',
+    zpBundleWasm,
+  ]);
+  // Service Worker use: classic script flavored glue loadable via
+  // importScripts(). wasm-bindgen `no-modules` emits `let wasm_bindgen = ...`
+  // at top level — `let` creates a lexical binding NOT on globalThis. SWs
+  // see it from other importScripts'd scripts via the shared script realm,
+  // but `self.wasm_bindgen` is undefined. We need both forms because the
+  // SW caller code probes via `typeof self.wasm_bindgen === 'function'`.
+  run('wasm-bindgen', [
+    '--target', 'no-modules',
+    '--out-dir', zpBundleOutDir,
+    '--out-name', 'zp_bundle_sw',
+    zpBundleWasm,
+  ]);
+  // Two wasm-bindgen no-modules outputs live in the SW realm: this one
+  // (zp-bundle) AND the legacy rewriter-rs glue. Both declare top-level
+  // `let wasm_bindgen` which collides → SyntaxError on importScripts.
+  // Wrap our output in an IIFE so `let wasm_bindgen` is function-scoped,
+  // then expose under a distinct global so initBundle can find it.
+  const swJsPath = path.join(zpBundleOutDir, 'zp_bundle_sw.js');
+  const swGlue = await readFile(swJsPath, 'utf8');
+  if (!swGlue.startsWith('(function(){')) {
+    await writeFile(
+      swJsPath,
+      '(function(){\n' + swGlue + '\n;try{ self.ZPBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
+    );
+  }
+  // wasm-opt feature flags: rustc since 1.82 emits bulk-memory / sign-ext /
+  // multivalue etc. by default for wasm32, but wasm-opt rejects them unless
+  // explicitly enabled. Mirror the runtime feature set rustc assumes (which
+  // browsers have shipped for years). `npm i -D binaryen` provides wasm-opt.
+  const WASM_OPT_FLAGS = [
+    '--enable-bulk-memory',
+    '--enable-bulk-memory-opt',
+    '--enable-nontrapping-float-to-int',
+    '--enable-sign-ext',
+    '--enable-mutable-globals',
+    '--enable-multivalue',
+    '--enable-reference-types',
+  ];
+  const optimized = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, path.join(zpBundleOutDir, 'zp_bundle_bg.wasm'), '-o', path.join(zpBundleOutDir, 'zp_bundle_bg.wasm')]);
+  if (!optimized) {
+    process.stderr.write('wasm-opt not found; skipping size optimization (install binaryen to enable)\n');
+  }
+  // zp-page-rt: copy raw wasm into __zp/, optionally optimize. No glue file.
+  const pageRtDst = path.join(zpBundleOutDir, 'zp_page_rt.wasm');
+  await copyFile(zpPageRtWasm, pageRtDst);
+  tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageRtDst, '-o', pageRtDst]);
+}
+
+function tryRunOptional(cmd, argv) {
+  try {
+    const result = spawnSync(cmd, argv, { cwd: repoRoot, stdio: 'inherit' });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
 }
 
 function buildServer() {
@@ -137,11 +209,17 @@ async function writeBundled(fileName, parts) {
 }
 
 function stripServiceWorkerImports(source) {
-  return source.replace(/^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|wasm_exec)\.js'\);\n/gm, '');
+  // CRLF-tolerant: web/sw.js can be checked out with either LF or CRLF
+  // line endings depending on git autocrlf. Without \r? the regex misses
+  // CRLF lines, leaving importScripts in the bundle. The bundled sw.js
+  // would then have two top-level `let wasm_bindgen` declarations (one
+  // from inlined rust-rewriter, one from importScripts'd rust-rewriter),
+  // causing a SyntaxError during SW evaluation.
+  return source.replace(/^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter)\.js'\);\r?\n/gm, '');
 }
 
 function stripWorkerPreludeImports(source) {
-  return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\n/m, '');
+  return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/m, '');
 }
 
 async function makeRustRewriterClassic() {
@@ -154,24 +232,7 @@ async function makeRustRewriterClassic() {
   run(wasmBindgenBinPath, ['--target', 'no-modules', '--out-dir', bindgenOut, path.join(targetDir, 'wasm32-unknown-unknown', 'release', 'zp_rewriter.wasm')]);
   const js = await readFile(path.join(bindgenOut, 'zp_rewriter.js'), 'utf8');
   const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString('base64');
-  return `/* Generated from Rust WASM ZeroProxy rewriter. */\n${js}\n(() => {\nconst VERSION = 'phase3-rust-wasm-ast-2';\nconst BLOCK_CODE = \"throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\";\nconst __zp_rust_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));\nwasm_bindgen.initSync({ module: __zp_rust_bytes });\nfunction normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }\nfunction lowLevel(source, kind, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_script(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction publicOk(code) { return { ok: true, code, diagnostics: [] }; }\nfunction publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }\nfunction rewriteScriptPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevel(source, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const end = out.code.length - suffix.length; if (end < prefix.length) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: out.code.slice(prefix.length, end), error: '' }; }\nfunction rewriteFunctionBodyPublic(source, params, targetUrl, controlPrefix) { const out = rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nconst rustApi = Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix) { return lowLevel(source, kind, targetUrl, controlPrefix); }, rewriteFunctionBody: rewriteFunctionBodyRaw });\nconst rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteScript: rewriteScriptPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });\nObject.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });\nObject.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });\n})();\n`;
-}
-async function readGoWasmExec() {
-  const goroot = goEnv('GOROOT');
-  const candidates = [
-    path.join(goroot, 'lib', 'wasm', 'wasm_exec.js'),
-    path.join(goroot, 'misc', 'wasm', 'wasm_exec.js'),
-  ];
-  for (const candidate of candidates) {
-    if (await exists(candidate)) return readFile(candidate, 'utf8');
-  }
-  throw new Error(`wasm_exec.js not found under ${goroot}`);
-}
-
-function goEnv(name) {
-  const result = spawnSync('go', ['env', name], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  if (result.status !== 0) throw new Error(`go env ${name} failed\n${result.stderr}`);
-  return result.stdout.trim();
+  return `/* Generated from Rust WASM ZeroProxy rewriter. */\n${js}\n(() => {\nconst VERSION = 'phase3-rust-wasm-ast-3-css';\nconst BLOCK_CODE = \"throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\";\nconst __zp_rust_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));\nwasm_bindgen.initSync({ module: __zp_rust_bytes });\nfunction normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }\nfunction lowLevel(source, kind, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_script(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction lowLevelCSS(source, baseUrl, controlPrefix) { const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction publicOk(code) { return { ok: true, code, diagnostics: [] }; }\nfunction publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }\nfunction rewriteScriptPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevel(source, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteCSSPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; const out = lowLevelCSS(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const end = out.code.length - suffix.length; if (end < prefix.length) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: out.code.slice(prefix.length, end), error: '' }; }\nfunction rewriteFunctionBodyPublic(source, params, targetUrl, controlPrefix) { const out = rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nconst rustApi = Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix) { return lowLevel(source, kind, targetUrl, controlPrefix); }, rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); }, rewriteFunctionBody: rewriteFunctionBodyRaw });\nconst rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteScript: rewriteScriptPublic, rewriteCSS: rewriteCSSPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });\nObject.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });\nObject.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });\n})();\n`;
 }
 
 function run(cmd, argv, extraEnv = {}) {

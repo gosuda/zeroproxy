@@ -11,9 +11,38 @@
   const WS_PROTOCOLS = new Set(['ws:', 'wss:']);
   const CONTROL_PREFIX = '/zp/';
   const ASSET_PREFIX = CONTROL_PREFIX + 'assets/';
+  // Default User-Agent presented to target servers. Browsers mark User-Agent
+  // as a forbidden header for fetch(), so the SW smuggles it via
+  // X-ZP-User-Agent and the relay promotes it. Matches the value the prelude
+  // exposes via navigator.userAgent so HTTP+JS UA stay consistent.
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
-  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED']);
+  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
+  // Human-friendly title + description per error code. Parity with
+  // crates/zp-shared/src/errors.rs ErrorCode::as_str.
+  const ERROR_INFO = Object.freeze({
+    BAD_HMAC: { title: 'Tampered share link', desc: 'The share link signature does not verify. The link may have been altered.' },
+    INVALID_SHARE_LINK: { title: 'Invalid share link', desc: 'The share link or decryption key is missing or malformed.' },
+    MALFORMED_ROUTE: { title: 'Malformed route', desc: 'The requested ZeroProxy route is not well-formed.' },
+    SW_NOT_READY: { title: 'Transport not ready', desc: 'The ZeroProxy Service Worker transport is still initializing. Refresh in a moment.' },
+    TARGET_PROTOCOL_BLOCKED: { title: 'Unsupported scheme', desc: 'Only http:// and https:// targets are allowed.' },
+    TLS_CERTIFICATE_INVALID: { title: 'TLS certificate rejected', desc: 'The target presented a TLS certificate that did not pass validation.' },
+    TLS_HANDSHAKE_FAILED: { title: 'TLS handshake failed', desc: 'ZeroProxy could not establish a TLS connection with the target.' },
+    TARGET_CONNECT_FAILED: { title: 'Could not reach target', desc: 'ZeroProxy could not connect to the target server.' },
+    MALFORMED_HTML: { title: 'Malformed HTML', desc: 'The target response contained HTML that could not be safely parsed in strict mode.' },
+    REALM_INJECTION_FAILURE: { title: 'Containment failed', desc: 'ZeroProxy could not inject the page containment runtime. Target code execution was blocked.' },
+    REQUEST_BODY_TOO_LARGE: { title: 'Request body too large', desc: 'The uploaded body exceeded the ZeroProxy maximum size.' },
+    SUBMISSION_EXPIRED: { title: 'Form submission expired', desc: 'The original POST submission cache has expired. Reload the form and resubmit.' },
+    POLICY_BLOCKED: { title: 'Blocked by policy', desc: 'This operation is not allowed by ZeroProxy strict-mode policy.' },
+    REWRITE_FAILED: { title: 'JavaScript rewrite failed', desc: 'A target script could not be safely rewritten and was blocked in strict mode.' },
+    SCRIPT_SRC_BLOCKED: { title: 'Script source blocked', desc: 'A script was loaded via a scheme that bypasses the ZeroProxy rewrite pipeline (blob:/data:).' },
+    REDIRECT_BODY_NONREPLAYABLE: { title: 'Redirect body cannot be replayed', desc: 'A 307/308 redirect requires resending the request body, but the body is too large or not replayable.' },
+    WS_BLOCKED: { title: 'WebSocket blocked', desc: 'A WebSocket connection attempt did not go through the ZeroProxy bridge.' },
+    RTC_GATEWAY_UNAVAILABLE: { title: 'WebRTC gateway unavailable', desc: 'WebRTC traffic must route through the ZeroProxy gateway, which is not yet provisioned.' },
+    WT_UNSUPPORTED: { title: 'WebTransport unsupported', desc: 'WebTransport is not yet supported by this ZeroProxy server.' },
+  });
+  function errorInfo(code) { return ERROR_INFO[code] || ERROR_INFO.POLICY_BLOCKED; }
 
   function bytesToBase64Url(bytes) {
     let s = '';
@@ -113,14 +142,27 @@
   function encodeTargetURL(url) { return bytesToBase64Url(te.encode(canonicalTargetURL(url).href)); }
   function decodeTargetURL(encoded) { return canonicalTargetURL(td.decode(base64UrlToBytes(encoded))).href; }
   function randomId(prefix = '') { const b = crypto.getRandomValues(new Uint8Array(12)); return prefix + bytesToBase64Url(b); }
-  function fixedCSP(servers) {
+  // fixedCSP builds the SW-emitted CSP for proxied responses. The legacy
+  // signature fixedCSP(servers) and fixedCSP() remain byte-identical (default
+  // options); the optional second arg projects the armed Cloudflare-Turnstile
+  // compatibility branch when options.challengeCompat is truthy, mirroring the
+  // Rust+Go server side: it adds https://challenges.cloudflare.com to
+  // script-src, frame-src, child-src, connect-src and NOTHING ELSE — no
+  // wildcards, no nonce inflation, no extra eval, no leakage into
+  // style/img/font/media/worker. Callers are responsible for the per-tab
+  // two-signal gate (operator opt-in AND classifier match); this builder is
+  // a pure projection.
+  function fixedCSP(servers, options) {
     const loc = globalThis.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
     const connect = new Set(["'self'", ws]);
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
-    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    const armed = !!(options && options.challengeCompat);
+    const cf = ' https://challenges.cloudflare.com';
+    if (armed) connect.add('https://challenges.cloudflare.com');
+    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'" + (armed ? cf : '') + "; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:" + (armed ? cf : '') + "; child-src 'self' blob: data:" + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
   }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');
@@ -162,6 +204,6 @@
     const h = String(host || '').toLowerCase();
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
   Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
 })();

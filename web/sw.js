@@ -1,7 +1,11 @@
-/* ZeroProxy Service Worker: controlled network requests are routed through the WASM transport. */
+/* ZeroProxy Service Worker: controlled network requests are routed through the Rust WASM kernel. */
 importScripts('/zp/assets/zp-core.js');
 importScripts('/zp/assets/rust-rewriter.js');
-importScripts('/zp/assets/wasm_exec.js');
+// Rust zp-bundle (no-modules variant). Must be imported at top-level: SW
+// `importScripts` only succeeds during initial script evaluation; lazy
+// import from inside an event handler is blocked by the worker spec and
+// fails with "failed to load" even if the URL is served correctly.
+importScripts('/__zp/zp_bundle_sw.js');
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
@@ -13,37 +17,69 @@ const resourceContext = new Map();
 const pendingSubmissions = new Map();
 const streams = new Map();
 const SUBMISSION_TTL_MS = 5 * 60 * 1000;
-let readiness = 'UNINITIALIZED';
-let kernelPromise = null;
+let rewriterPromise = null;
+let bundlePromise = null;
+
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
-self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initKernel().catch(() => {}); })()));
+self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initBundle().catch(() => {}); })()));
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
 
-async function initKernel(servers) {
-  if (readiness === 'READY') return;
-  if (kernelPromise) return kernelPromise;
-  kernelPromise = (async () => {
-    readiness = 'REWRITE_LOADING';
-    await initRewriter();
-    readiness = 'WASM_LOADING';
-    const go = new Go();
-    const resp = await nativeFetch('/zp/kernel.wasm', { cache: 'no-store' });
-    if (!resp.ok) throw new Error('SW_NOT_READY');
-    const result = await WebAssembly.instantiateStreaming(resp, go.importObject);
-    readiness = 'WASM_LOADED';
-    go.run(result.instance);
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline && (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function')) await new Promise(r => setTimeout(r, 20));
-    if (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function') throw new Error('SW_NOT_READY');
-    await self.__zp_kernel_init({ servers: servers || [] });
-    readiness = 'READY';
-  })().catch(err => { readiness = 'UNINITIALIZED'; kernelPromise = null; throw err; });
-  return kernelPromise;
-}
-
 async function initRewriter() {
   if (!self.ZPRewriter || !self.ZPRewriter.ready || typeof self.ZPRewriter.rewriteScript !== 'function') throw new Error('REALM_INJECTION_FAILURE');
+}
+
+// Rust zp-bundle (OXC native crate). Initializes lazily and exposes
+// self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
+// The JS ZPRewriter remains the primary path during this migration window;
+// the Rust bundle is available for parity tests and gradual cut-over.
+async function initBundle() {
+  if (self.ZPBundle && self.ZPBundle.ready) return;
+  if (bundlePromise) return bundlePromise;
+  // Bundle glue is wrapped in an IIFE that exposes wasm_bindgen as
+  // self.ZPBundleWBG (avoiding `let wasm_bindgen` collision with the
+  // legacy rewriter-rs glue). The importScripts for the bundle happens at
+  // top level of this SW (worker spec only allows importScripts there).
+  const wbg = self.ZPBundleWBG;
+  if (typeof wbg !== 'function') {
+    throw new Error('REALM_INJECTION_FAILURE');
+  }
+  bundlePromise = (async () => {
+    await wbg({ module_or_path: '/__zp/zp_bundle_sw_bg.wasm' });
+    // CRITICAL: `wbg` (the wasm-bindgen factory function) carries the JS
+    // glue wrappers as own properties (Object.assign(__wbg_init, {...exports}))
+    // — those wrappers do addHeapObject/takeObject. The factory's return
+    // value is the raw `wasm.exports` table, which takes/returns ints
+    // (heap indices) directly and would mishandle JS objects. Always read
+    // through wbg.<name>, never through the awaited factory result.
+    self.ZPBundle = Object.freeze({
+      ready: true,
+      bundleVersion: wbg.bundleVersion,
+      rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(source, kind || 'classic', targetUrl || ''),
+      transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
+      buildCSP: (wsOrigin) => wbg.buildCSP(wsOrigin || ''),
+      kernelVersion: wbg.kernelVersion,
+      kernelInit: wbg.kernelInit,
+      kernelFetch: wbg.kernelFetch,
+      kernelEchoSync: wbg.kernelEchoSync,
+      kernelStream: wbg.kernelStream,
+    });
+    // Step 13: expose the Rust kernel under the same globals the SW
+    // transport path already probes (self.kernelFetch / self.kernelStream).
+    const kf = self.ZPBundle.kernelFetch;
+    if (typeof kf === 'function') {
+      // Call directly, no wrapper: ensures we don't accidentally drop or
+      // re-wrap the JsValue ABI ref between page and WASM.
+      self.kernelFetch = kf;
+    }
+    const ks = self.ZPBundle.kernelStream;
+    if (typeof ks === 'function') self.kernelStream = ks;
+    const ki = self.ZPBundle.kernelInit;
+    if (typeof ki === 'function') {
+      try { ki(); } catch {}
+    }
+  })().catch(err => { bundlePromise = null; throw err; });
+  return bundlePromise;
 }
 
 async function handleFetch(event) {
@@ -70,20 +106,34 @@ function classify(req, url, clientId) {
     if (isRuntimeAPIPath(url.pathname)) return { kind: 'RUNTIME_API' };
     if (url.pathname.startsWith(ZP.controlPath('error/'))) return { kind: 'INTERNAL_ASSET' };
     if (url.pathname === ZP.CONTROL_PREFIX || url.pathname === ZP.controlPath('index.html') || url.pathname === ZP.controlPath('sw.js') || internalPath(url.pathname)) return { kind: 'INTERNAL_ASSET' };
-    const ctx = contextFor(req, clientId) || defaultContext();
+    // A2 hardening: same-origin sub-resources must resolve a tab from an
+    // explicit signal (Referer-derived ctx or saved clientContext). No
+    // first-available-tab fallback — multi-tab leak risk.
+    const ctx = contextFor(req, clientId);
     const p = parseSharePath(url.pathname);
     if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p };
     if (ctx && url.pathname.startsWith(ZP.CONTROL_PREFIX)) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
     if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
     return { kind: 'UNKNOWN' };
   }
-  const ctx = contextFor(req, clientId) || defaultContext();
+  // A2 hardening: same policy for cross-origin — no defaultContext() fallback.
+  const ctx = contextFor(req, clientId);
   if (ctx && (url.protocol === 'http:' || url.protocol === 'https:')) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, crossOriginURL: url };
   return { kind: 'UNKNOWN' };
 }
 
 function internalPath(path) {
-  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  // `/__zp/*` is the proxy server's static asset prefix for WASM blobs
+  // (`zp_bundle_sw_bg.wasm`, `zp_bundle_sw.js`, `zp_page_rt.wasm`, etc.)
+  // that the page prelude and SW load via root-relative URLs. Without
+  // claiming them as internal, the SW falls through to VIRTUAL_SUBRESOURCE
+  // and rewrites `/__zp/zp_page_rt.wasm` against the virtual baseUrl
+  // (e.g. `https://github.com/__zp/zp_page_rt.wasm`) — upstream 404 →
+  // page-rt fails to instantiate → URL classification falls back → some
+  // sites (GitHub) hit subtle membrane bugs that surface as React
+  // hydration errors → "Looks like something went wrong" SSR fallback.
+  if (path.startsWith('/__zp/')) return true;
+  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script');
@@ -118,8 +168,10 @@ async function proxyDocument(req, route, clientId) {
   tab.activeEntryId = entry.entryId;
   bindClientContext(clientId, tab, entry);
   const submitId = new URL(req.url).searchParams.get('zp_submit');
-  if (submitId) return submittedDocument(req, route.routeKey, submitId, tab, entry, clientId);
-  return transportFetch(entry.targetUrl, { request: req, document: true, tab, entryId: entry.entryId });
+  const resp = submitId
+    ? await submittedDocument(req, route.routeKey, submitId, tab, entry, clientId)
+    : await transportFetch(entry.targetUrl, { request: req, document: true, tab, entryId: entry.entryId });
+  return transformDocumentResponse(resp, { tab, entry });
 }
 async function submittedDocument(req, routeKey, submitId, tab, entry, clientId) {
   const pending = pendingSubmissions.get(submitId);
@@ -140,7 +192,34 @@ async function virtualSubresource(req, cls, clientId) {
   const document = req.mode === 'navigate' || req.headers.get('X-ZP-Document-Request') === '1';
   const resp = await transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId });
   rememberResourceContext(cls.crossOriginURL || cls.sameOriginURL, targetUrl, ctx);
+  if (shouldRewriteCSS(req, resp)) return rewriteCSSResponse(resp, { targetUrl });
   return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req) }) : resp;
+}
+
+function shouldRewriteCSS(req, resp) {
+  if (req.destination === 'style') return true;
+  const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
+  return /\btext\/css\b/i.test(ct);
+}
+async function rewriteCSSResponse(resp, opt) {
+  // Read the body once; CSS rewrite uses swc_css and rewrites url(...) /
+  // @import to /zp/api/fetch?url=<absolute> so subresources route through
+  // the SW the same way scripts do. On parse failure, ship the original
+  // body — runtime-prelude DOM hooks still contain navigation.
+  let css = '';
+  try { css = await resp.text(); } catch { return resp; }
+  let out = css;
+  try {
+    if (self.ZPRewriter && typeof self.ZPRewriter.rewriteCSS === 'function') {
+      const r = self.ZPRewriter.rewriteCSS(css, { baseUrl: opt.targetUrl || '', controlPrefix: ZP.CONTROL_PREFIX });
+      if (r && r.ok && typeof r.code === 'string') out = r.code;
+    }
+  } catch { /* fall through with original */ }
+  const headers = new Headers(resp.headers);
+  headers.delete('Content-Length');
+  headers.set('Content-Type', 'text/css; charset=utf-8');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  return new Response(out, { status: resp.status, statusText: resp.statusText, headers });
 }
 
 function sameOriginTargetURL(sameOriginURL, ctx) {
@@ -153,29 +232,100 @@ function sameOriginTargetURL(sameOriginURL, ctx) {
 }
 
 async function runtimeAPI(req, url, clientId) {
+  // A2 hardening: privileged API endpoints must resolve a tab from an
+  // explicit signal (URL ?tab=, referer-derived context, or client context).
+  // No first-available-tab fallback — multi-tab requests must not piggy-back.
   if (url.pathname === '/zp/api/fetch') {
+    // GET ?url=<absolute> — issued by the CSS rewriter for url(...) / @import
+    // subresources. Routes the same way as the POST form below but takes the
+    // target from the query string.
+    const ctx = contextFor(req, clientId);
+    if (req.method === 'GET') {
+      const target = url.searchParams.get('url');
+      if (!target) return safeError('MALFORMED_ROUTE', 400);
+      const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
+      const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
+      if (!tab) return safeError('SW_NOT_READY', 503);
+      // Iframe / sub-frame navigation through /zp/api/fetch: rewrite of
+      // <iframe src=absolute> by zp-htmltx routes here. We need to (a) give
+      // the iframe its own entry so its virtual baseURI is the iframe's
+      // target (not the parent's), (b) bind the iframe's clientId so its
+      // subresources resolve context, and (c) inject prelude + CSP via
+      // transformDocumentResponse so the iframe is fully contained.
+      const isDocumentRequest = req.mode === 'navigate'
+        || req.destination === 'iframe'
+        || req.destination === 'document'
+        || req.destination === 'frame'
+        || req.headers.get('Sec-Fetch-Dest') === 'iframe'
+        || req.headers.get('Sec-Fetch-Dest') === 'document'
+        || req.headers.get('Sec-Fetch-Dest') === 'frame';
+      let entry;
+      let entryId;
+      if (isDocumentRequest) {
+        let canonical = target;
+        try { canonical = ZP.canonicalTargetURL(target).href; } catch {}
+        entryId = randomEntryId();
+        entry = { entryId, targetUrl: canonical, baseUrl: canonical, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
+        tab.entries.set(entryId, entry);
+        bindClientContext(clientId, tab, entry);
+      } else {
+        entryId = (ctx && ctx.entryId) || (explicitTab && explicitTab.activeEntryId) || tab.activeEntryId;
+        entry = tab.entries.get(entryId);
+      }
+      rememberResourceContext(url, target, { tabId: tab.tabId, entryId, targetUrl: target, baseUrl: target });
+      // Script destination must go through the rewriter: zp-htmltx routes
+      // <script src=ABS> here, and naked target JS would access native
+      // `window`/`location`, bypassing the membrane. Detect via Sec-Fetch-Dest
+      // / req.destination and route the response through rewriteScriptResponse
+      // exactly like /zp/api/script.
+      const isScriptRequest = !isDocumentRequest && (
+        req.destination === 'script'
+        || req.destination === 'worker'
+        || req.destination === 'sharedworker'
+        || req.headers.get('Sec-Fetch-Dest') === 'script'
+        || req.headers.get('Sec-Fetch-Dest') === 'worker'
+        || req.headers.get('Sec-Fetch-Dest') === 'sharedworker'
+      );
+      const accept = isDocumentRequest
+        ? [['Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8']]
+        : isScriptRequest
+          ? [['Accept', 'text/javascript, application/javascript, */*;q=0.8']]
+          : [['Accept', '*/*']];
+      const resp = await transportFetch(target, { request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest });
+      if (isDocumentRequest && entry) return transformDocumentResponse(resp, { tab, entry });
+      if (isScriptRequest) return rewriteScriptResponse(resp, { targetUrl: target, kind: scriptKindFromRequest(req) });
+      return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
+    }
     if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
     const payload = await req.json();
-    const ctx = contextFor(req, clientId);
-    const tab = ctx && tabs.get(ctx.tabId) || firstTab();
+    const explicitTab = payload.tabId && tabs.get(payload.tabId);
+    const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!tab) return safeError('SW_NOT_READY', 503);
     let body;
     if (payload.init && payload.init.body) body = ZP.base64UrlToBytes(payload.init.body);
-    return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab: payload.tabId && tabs.get(payload.tabId) || tab, entryId: ctx && ctx.entryId || (payload.tabId && tabs.get(payload.tabId) && tabs.get(payload.tabId).activeEntryId) || tab.activeEntryId });
+    const entryId = (ctx && ctx.entryId) || (explicitTab && explicitTab.activeEntryId) || tab.activeEntryId;
+    return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab, entryId });
   }
   if (url.pathname === '/zp/api/script') {
     if (req.method !== 'GET') return safeError('POLICY_BLOCKED', 405);
     const target = url.searchParams.get('u');
     const kind = url.searchParams.get('kind') || 'classic';
     const scriptCtx = contextFor(req, clientId);
-    const tab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab')) || scriptCtx && tabs.get(scriptCtx.tabId) || firstTab();
+    const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
+    const tab = explicitTab || (scriptCtx && tabs.get(scriptCtx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
-    const resp = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript, application/javascript, */*;q=0.8']], tab, entryId: tab.activeEntryId });
+    // request 자체를 transportFetch 에 전달 → browser-set headers (Accept,
+    // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
+    // anti-bot 회로가 404 NAVER 페이지를 반환하는 경우가 있음 → SafeFrame
+    // loader 미실행 → 광고 미렌더. virtualSubresource 경로와 동일 패턴 유지.
+    const resp = await transportFetch(target, { request: req, tab, entryId: tab.activeEntryId });
     return rewriteScriptResponse(resp, { targetUrl: target, kind });
   }
   if (url.pathname === '/zp/api/worker-script') {
     const target = url.searchParams.get('u');
-    const tab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab')) || firstTab();
+    const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
+    const ctx = contextFor(req, clientId);
+    const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
     return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId }), { targetUrl: target, kind: 'worker' });
   }
@@ -185,14 +335,72 @@ async function runtimeAPI(req, url, clientId) {
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
-  if (readiness !== 'READY') { try { await initKernel(opt.tab && opt.tab.servers); } catch { return safeError('SW_NOT_READY', 503); } }
+  // Step 13: HTTP transport is Rust-only (crates/zp-kernel via zp-bundle).
+  // Both kernelFetch and kernelStream are exposed from the same WASM bundle.
+  try { await initBundle(); } catch { return safeError('SW_NOT_READY', 503, u); }
+  if (typeof self.kernelFetch !== 'function') return safeError('SW_NOT_READY', 503, u);
   const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
+  // Origin masking: browser-added Referer/Origin point at proxy.localhost
+  // (the SW origin). Rewrite to the virtual target URL/origin so target
+  // servers never see the proxy as the requester. The entry's targetUrl is
+  // the document URL the page-level code thinks it's running on.
+  //
+  // Critical: page-side fetch() never includes Referer/Origin/User-Agent in
+  // the Request headers — the browser marks them as forbidden header names
+  // and either appends them at the network layer or refuses to send the JS
+  // value. So `headers.has('Referer')` is almost always false for
+  // page-initiated requests. We must SET these headers unconditionally (not
+  // only rewrite-if-present) so anti-CSRF / anti-bot endpoints that check
+  // them (e.g. NAVER /api/v1/collect/exlogcr, Wikipedia anti-scraping) don't
+  // reject us. The relay server promotes the X-ZP-* sidechannel to real
+  // headers before dispatching upstream.
+  const entry = opt.tab.entries && opt.tab.entries.get(opt.entryId || opt.tab.activeEntryId);
+  // For iframe document loads use the embedder's URL as Referer (mirrors
+  // browser behaviour); for subresources inside an iframe use the iframe's
+  // own virtual URL.
+  const virtualBase = (opt.document && entry && entry.parentTargetUrl)
+    ? entry.parentTargetUrl
+    : entry && (entry.baseUrl || entry.targetUrl);
+  if (virtualBase) {
+    // Referer/Origin are forbidden headers — the Request constructor strips
+    // them from `init.headers`. Smuggle them as X-ZP-Referer/X-ZP-Origin and
+    // let the relay server promote them back to real Referer/Origin before
+    // dispatching upstream. Without this, anti-CSRF endpoints 400.
+    headers.set('X-ZP-Referer', virtualBase);
+    let virtualOrigin = '';
+    try { virtualOrigin = new URL(virtualBase).origin; } catch {}
+    if (virtualOrigin) {
+      const m = (opt.method || (opt.request && opt.request.method) || 'GET').toUpperCase();
+      if (m !== 'GET' && m !== 'HEAD') headers.set('X-ZP-Origin', virtualOrigin);
+    }
+  }
+  // User-Agent is a forbidden header for fetch() — same smuggle pattern.
+  // Without a UA, sites like Wikipedia reject requests as suspicious bots.
+  headers.set('X-ZP-User-Agent', ZP.TARGET_USER_AGENT);
+  // Strip proxy.localhost from any header the page synthesised. (If they
+  // remain after our rewrite, the value is genuinely the proxy origin.)
+  for (const name of ['Referer', 'Origin']) {
+    const v = headers.get(name);
+    if (v && v.includes(ORIGIN)) headers.delete(name);
+  }
   headers.set('X-ZP-Tab-Id', opt.tab.tabId);
   headers.set('X-ZP-Entry-Id', opt.entryId || opt.tab.activeEntryId || '');
   headers.set('X-ZP-Stream-Isolation-Key', opt.tab.streamIsolationKey);
   headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
   headers.set('X-ZP-Relay-Servers', JSON.stringify(opt.tab.servers || []));
   if (opt.document) headers.set('X-ZP-Document-Request', '1');
+  // Per-tab armed challenge-compat: forwards the operator opt-in to the relay.
+  // The relay strips this header (x-zp-* range) before forwarding upstream and
+  // uses it as the FIRST of two signals. The SECOND is the response-side
+  // classifier (Cf-Mitigated / challenges.cloudflare.com host / cdn-cgi/
+  // challenge-platform path). Only when BOTH hold does the relay emit the
+  // X-ZP-Challenge-Compat: 1 response marker; SW addCSP then strips it.
+  if (opt.tab.challengeCompat) headers.set('X-ZP-Arm-Challenge-Compat', '1');
+  // Cookie jar bridge: SW maintains tab.documentCookie via ZP_COOKIE_SET
+  // messages from the page. Attach it as the outgoing Cookie header so the
+  // target sees the page-state cookies. The Rust kernel passes Cookie
+  // through unchanged to the relay.
+  if (opt.tab.documentCookie) headers.set('Cookie', opt.tab.documentCookie);
   const init = { method: opt.method || (opt.request && opt.request.method) || 'GET', headers };
   if (init.method !== 'GET' && init.method !== 'HEAD') {
     const body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
@@ -200,8 +408,20 @@ async function transportFetch(targetUrl, opt) {
     if (n > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, u);
     init.body = body;
   }
-  const resp = await self.__go_jshttp(new Request(u, init));
-  return addCSP(resp, opt.request, opt.tab && opt.tab.servers);
+  let resp;
+  try {
+    resp = await self.kernelFetch(new Request(u, init));
+  } catch (e) {
+    return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
+  }
+  // Capture Set-Cookie from the response and merge into tab.documentCookie so
+  // subsequent page reads of document.cookie observe server-set cookies.
+  try {
+    const getSetCookie = resp && resp.headers && resp.headers.getSetCookie;
+    const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
+    for (const line of setCookies) opt.tab.documentCookie = mergeCookie(opt.tab.documentCookie || '', line);
+  } catch {}
+  return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab);
 }
 
 function scriptKindFromRequest(req) {
@@ -219,13 +439,112 @@ async function rewriteScriptResponse(resp, opt) {
   try {
     await initRewriter();
     const source = await resp.text();
-    const out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-    code = out && out.ok ? out.code : (self.ZPRewriter ? self.ZPRewriter.blockSource() : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');");
+    let out = null;
+    try {
+      out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
+    } catch (jsErr) {
+      // JS rewriter threw — try Rust bundle fallback before fail-closing.
+      out = null;
+    }
+    if (!out || !out.ok) {
+      // Fallback to Rust ZPBundle if initialized. The Rust rewriter covers a
+      // subset of rules (identifier, member, call, assignment); if it succeeds
+      // its output is just as safe as the JS one — fail-closed posture intact.
+      try {
+        await initBundle();
+        if (self.ZPBundle && self.ZPBundle.ready) {
+          const rustCode = self.ZPBundle.rewriteScript(source, opt.kind || 'classic', opt.targetUrl || '');
+          if (typeof rustCode === 'string' && rustCode.length > 0) {
+            code = rustCode;
+          }
+        }
+      } catch (rustErr) { /* swallow; fall through to block */ }
+    } else {
+      code = out.code;
+    }
+    if (!code) {
+      code = (self.ZPRewriter && self.ZPRewriter.blockSource) ? self.ZPRewriter.blockSource()
+        : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
+    }
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   }
   return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
 }
+async function transformDocumentResponse(resp, opt) {
+  // Only transform HTML payloads. Anything else (302 redirect, JSON, binary)
+  // passes through unchanged — addCSP/streaming preserved.
+  if (!resp || resp.status >= 300 || !isHTMLResponse(resp)) return resp;
+  let html = '';
+  try { html = await resp.text(); } catch { return resp; }
+  let transformed = html;
+  try {
+    await initBundle();
+    if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.transformHtml === 'function') {
+      // NOTE: We have access to the post-redirect URL via
+      // resp.headers.get('X-ZP-Final-URL') (surfaced by the kernel), but using
+      // it as the HTML rewrite base re-exposes the NAVER-login script-completion
+      // hang — when root-relative CSS/JS resolve correctly, the login JS
+      // initialises fully and freezes (see .ai/trap-notebook/INDEX.md
+      // 2026-05-31 diagnostic entry). Keep the original requested URL until
+      // the hang root cause is fixed; pay.naver.com → nidlogin renders
+      // unstyled but readable, which is preferable to a hung tab.
+      const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
+      transformed = self.ZPBundle.transformHtml(html, targetUrl) || html;
+    }
+  } catch {
+    // Fail-open on transform error: ship the original HTML rather than the
+    // styled error page; the runtime-prelude still enforces containment.
+    transformed = html;
+  }
+  // Prelude virtualURL stays at the originally requested URL — using the
+  // post-redirect URL here triggers the NAVER-login script-completion hang
+  // (see .ai/trap-notebook/INDEX.md 2026-05-31 diagnostic entry). HTML rewrite
+  // already absolutized root-relative URLs against the final URL above, so
+  // static resources resolve correctly without virtualURL surgery.
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
+  const injected = injectPrelude(transformed, preludeHTML);
+  const headers = new Headers(resp.headers);
+  headers.delete('Content-Length');
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  return new Response(injected, { status: resp.status, statusText: resp.statusText, headers });
+}
+function isHTMLResponse(resp) {
+  const ct = resp.headers && resp.headers.get('Content-Type') || '';
+  return /\btext\/html\b/i.test(ct) || /\bapplication\/xhtml\+xml\b/i.test(ct);
+}
+function buildRuntimePrelude(tab, entry) {
+  const boot = {
+    tabId: tab.tabId,
+    entryId: entry.entryId,
+    targetUrl: entry.targetUrl,
+    documentCookie: tab.documentCookie || '',
+    runtimeToken: tab.runtimeToken || '',
+    servers: tab.servers || [],
+  };
+  const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
+  return '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
+    '<script nonce=zp src=' + ZP.assetPath('rust-rewriter.js') + '></script>' +
+    '<script nonce=zp id=__zp-boot type=application/json>' + bootJSON + '</script>' +
+    '<script nonce=zp src=' + ZP.assetPath('runtime-prelude.js') + '></script>';
+}
+function injectPrelude(html, prelude) {
+  // Inject before the first <script>, falling back to <head>/document start.
+  // The prelude must run before any target script that touches location,
+  // network, or storage APIs — earlier is better.
+  const headMatch = /<head[^>]*>/i.exec(html);
+  if (headMatch) {
+    const i = headMatch.index + headMatch[0].length;
+    return html.slice(0, i) + prelude + html.slice(i);
+  }
+  const htmlMatch = /<html[^>]*>/i.exec(html);
+  if (htmlMatch) {
+    const i = htmlMatch.index + htmlMatch[0].length;
+    return html.slice(0, i) + '<head>' + prelude + '</head>' + html.slice(i);
+  }
+  return prelude + html;
+}
+
 function scriptResponseHeaders(resp) {
   const h = new Headers(resp.headers);
   h.set('Content-Type', 'text/javascript; charset=utf-8');
@@ -240,13 +559,40 @@ function scriptResponseHeaders(resp) {
 async function handleMessage(event) {
   const msg = event.data || {};
   const reply = event.ports && event.ports[0];
+  if (msg && msg.type === '__zpKernelEchoTest') {
+    try { await initBundle(); } catch {}
+    let result;
+    try {
+      const echoFn = (self.ZPBundle && self.ZPBundle.kernelEchoSync) || (self.ZPBundleWBG && self.ZPBundleWBG.kernelEchoSync);
+      const echoed = echoFn ? echoFn(msg.val) : null;
+      result = { ok: true, echoedType: typeof echoed, echoed, kernelType: typeof self.kernelFetch };
+    } catch (e) {
+      result = { ok: false, error: (e && e.message) || String(e) };
+    }
+    if (reply) reply.postMessage(result);
+    return;
+  }
+  if (msg && msg.type === '__zpKernelProbe') {
+    let initErr = null;
+    try { await initBundle(); } catch (e) { initErr = (e && e.message) || String(e); }
+    if (reply) reply.postMessage({ probe: {
+      kernelFetch: typeof self.kernelFetch,
+      kernelStream: typeof self.kernelStream,
+      bundleReady: !!(self.ZPBundle && self.ZPBundle.ready),
+      hasZPBundleWBG: typeof self.ZPBundleWBG,
+      bundleVersion: self.ZPBundle && self.ZPBundle.bundleVersion ? self.ZPBundle.bundleVersion() : null,
+      rustTrace: (self.__zpRustTrace || []).slice(-40),
+      initErr,
+    }});
+    return;
+  }
   const ok = data => reply && reply.postMessage(Object.assign({ ok: true }, data || {}));
   const fail = code => reply && reply.postMessage({ ok: false, error: code });
   try {
     if (msg.type === 'ZP_OPEN_SHARE') {
       const routeKey = String(msg.routeKey || '');
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
-      const tab = createTab(msg.targetUrl, msg.servers);
+      const tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
       ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers });
       return;
@@ -258,8 +604,14 @@ async function handleMessage(event) {
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
+      // parentTargetUrl is the embedder page's virtual URL — used as Referer
+      // for the iframe document fetch so origin-aware endpoints see the
+      // embedder host (otherwise they receive Referer = iframe's own host and
+      // 404 / 403 — observed on NAVER shopsquare.naver.com).
+      let parentTargetUrl = '';
+      try { if (msg.parentTargetUrl) parentTargetUrl = ZP.canonicalTargetURL(msg.parentTargetUrl).href; } catch {}
       const entryId = String(msg.entryId || randomEntryId());
-      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
       ok({ path: ZP.makeSharePath(routeKey) });
       return;
@@ -308,7 +660,6 @@ async function handleMessage(event) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       tab.documentCookie = mergeCookie(tab.documentCookie || '', msg.cookie);
-      if (typeof self.__zp_cookie_set === 'function') self.__zp_cookie_set({ tabId: tab.tabId, targetUrl: msg.targetUrl, cookie: msg.cookie, streamIsolationKey: tab.streamIsolationKey });
       ok();
       return;
     }
@@ -341,9 +692,16 @@ async function handleMessage(event) {
 async function openRuntimeStream(event, msg, ok, fail) {
   const tab = runtimeTabForMessage(event, msg, fail);
   if (!tab) return;
-  if (readiness !== 'READY') { try { await initKernel(tab.servers); } catch { fail('SW_NOT_READY'); return; } }
-  if (typeof self.__zp_stream !== 'function') { fail('SW_NOT_READY'); return; }
-  const stream = await self.__zp_stream({ url: msg.url, protocols: msg.protocols || [], tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
+  // Step 13: Rust kernelStream (crates/zp-kernel via zp-bundle) only.
+  try { await initBundle(); } catch { fail('SW_NOT_READY'); return; }
+  if (typeof self.kernelStream !== 'function') { fail('SW_NOT_READY'); return; }
+  let stream;
+  try {
+    stream = await self.kernelStream({ url: msg.url, protocols: msg.protocols || [], tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
+  } catch (e) {
+    fail(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED');
+    return;
+  }
   const channel = new MessageChannel();
   const id = ZP.randomId('s');
   streams.set(id, stream);
@@ -358,19 +716,32 @@ function runtimeTabForMessage(event, msg, fail) {
   return runtimeMessageAuthorized(event, tab, msg, fail) ? tab : null;
 }
 function runtimeMessageAuthorized(event, tab, msg, fail) {
+  // A2 hardening: every privileged ZP_* message must (a) carry the per-tab
+  // runtime capability token AND (b) originate from a known Service Worker
+  // client. event.source missing means we cannot attribute the message —
+  // reject rather than guess.
   if (!tab.runtimeToken || msg.runtimeToken !== tab.runtimeToken) { fail('POLICY_BLOCKED'); return false; }
-  const sourceId = event.source && event.source.id;
-  const ctx = sourceId && clientContext.get(sourceId);
+  const source = event.source;
+  if (!source || !source.id) { fail('POLICY_BLOCKED'); return false; }
+  const ctx = clientContext.get(source.id);
+  // If client context exists it must match. If it doesn't exist yet (e.g.
+  // first message from a freshly opened document before BASE_UPDATE), the
+  // token is sufficient proof of capability and we accept.
   if (ctx && ctx.tabId !== tab.tabId) { fail('POLICY_BLOCKED'); return false; }
   return true;
 }
 
-function createTab(targetUrl, servers) {
+function createTab(targetUrl, servers, challengeCompat) {
   const target = ZP.canonicalTargetURL(targetUrl).href;
   const tabId = ZP.randomId('t');
   const entryId = randomEntryId();
   const relayServers = ZP.relayServersForShare(servers || [], { allowLoopbackWS: true });
-  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers };
+  // challengeCompat is the per-tab operator opt-in (B-series arm sender).
+  // Persisted on the tab so every response routed through this tab can take
+  // the armed CSP projection without re-reading the message stream. The
+  // header/URL classifier (Go side) is the second of two signals; this flag
+  // alone grants no egress, no eval, no cache skip.
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers, challengeCompat: !!challengeCompat };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;
@@ -386,8 +757,9 @@ function bindClientContext(clientId, tab, entry) { if (clientId) clientContext.s
 function contextFromPath(path) { const p = parseSharePath(path); const state = p && shareRoutes.get(p.routeKey); const tab = state && tabs.get(state.tabId); const entry = tab && tab.entries.get(state.entryId); if (entry) return { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }; return null; }
 function contextFromURL(u) { if (u.origin === ORIGIN) return resourceContext.get(u.pathname + u.search) || contextFromPath(u.pathname); return resourceContext.get(u.href) || null; }
 function contextFor(req, clientId) { const ref = req.headers.get('Referer'); if (ref) { try { const ctx = contextFromURL(new URL(ref)); if (ctx) return ctx; } catch {} } if (clientId && clientContext.has(clientId)) return clientContext.get(clientId); return null; }
-function defaultContext() { const tab = firstTab(); const entry = tab && tab.entries.get(tab.activeEntryId); if (!entry) return null; return { tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl }; }
-function firstTab() { for (const t of tabs.values()) return t; return null; }
+// A2 hardening: multi-tab "first available" fallbacks removed. Privileged
+// paths must resolve a tab explicitly (URL param, referer, capability token,
+// or client context). Silently piggy-backing on another tab leaks data.
 function rememberResourceContext(requestURL, targetUrl, ctx) {
   const next = { tabId: ctx.tabId, entryId: ctx.entryId, targetUrl: ctx.targetUrl, baseUrl: targetUrl };
   const key = requestURL.origin === ORIGIN ? requestURL.pathname + requestURL.search : requestURL.href;
@@ -407,7 +779,89 @@ function applyCORS(h, req) {
   h.set('Access-Control-Allow-Headers', req && req.headers.get('Access-Control-Request-Headers') || '*');
   h.set('Access-Control-Expose-Headers', '*');
 }
-function addCSP(resp, req, servers) { const h = new Headers(resp.headers); h.set('Content-Security-Policy', ZP.fixedCSP(servers || [])); h.set('X-Content-Type-Options', 'nosniff'); h.set('Cache-Control', h.get('Cache-Control') || 'no-store'); applyCORS(h, req); return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h }); }
-function safeError(code, status = 400, targetUrl = '') { if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED'; let host = ''; try { host = targetUrl ? new URL(targetUrl).host : ''; } catch {} const hostHTML = host ? '<p>Target host: '+escapeHTML(host)+'</p>' : ''; const body = '<!doctype html><meta charset="utf-8"><title>ZeroProxy '+code+'</title><main><h1>ZeroProxy</h1><p>'+code+'</p>'+hostHTML+'<button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>'; return new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Expose-Headers': '*' } }); }
+// addCSP wraps a kernel response with the SW-emitted policy block. The fourth
+// arg `tab` (optional) carries the per-tab arm opt-in: when armed AND the
+// kernel response carries the internal X-ZP-Challenge-Compat marker (emitted
+// by the Go server's ApplyChallengeCompat when ITS two-signal gate held), the
+// CSP gains the Cloudflare challenge-host whitelist. The marker is ALWAYS
+// stripped before the response reaches the page (B4 strip obligation):
+// leaking it would expose a proxy-internal control header and undermine the
+// fingerprint-blind contract. The Cache-Control overwrite is delegated to the
+// Go server's ConstructorPolicy — this wrapper only fills in the no-store
+// default when upstream sent nothing, which is the correct floor for both
+// armed and disarmed paths.
+function addCSP(resp, req, servers, tab) {
+  const h = new Headers(resp.headers);
+  // B4: read once, then delete unconditionally — defense in depth against a
+  // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
+  const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
+  h.delete('X-ZP-Challenge-Compat');
+  const tabArmed = !!(tab && tab.challengeCompat);
+  const armedHere = tabArmed && responseSignalled;
+  h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { challengeCompat: armedHere }));
+  h.set('X-Content-Type-Options', 'nosniff');
+  h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
+  applyCORS(h, req);
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+}
+function safeError(code, status = 400, targetUrl = '') {
+  if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED';
+  const info = ZP.errorInfo(code);
+  let host = '';
+  try { host = targetUrl ? new URL(targetUrl).host : ''; } catch {}
+  const hostHTML = host ? '<p class="zp-host">Target host: <code>' + escapeHTML(host) + '</code></p>' : '';
+  const body = [
+    '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<title>ZeroProxy &middot; ', escapeHTML(info.title), '</title>',
+    '<style>',
+    ':root{color-scheme:light dark}',
+    'html,body{height:100%;margin:0;font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e8ec}',
+    '@media (prefers-color-scheme: light){html,body{background:#f5f6fa;color:#101218}}',
+    '.zp-shell{max-width:32rem;margin:8vh auto;padding:1.5rem 1.75rem;border-radius:14px;background:rgba(255,255,255,.04);box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 12px 32px rgba(0,0,0,.25)}',
+    '@media (prefers-color-scheme: light){.zp-shell{background:#fff;box-shadow:0 1px 0 rgba(0,0,0,.04) inset, 0 12px 32px rgba(0,0,0,.06)}}',
+    '.zp-mark{font-weight:700;letter-spacing:.04em;font-size:.78rem;text-transform:uppercase;opacity:.7}',
+    '.zp-title{font-size:1.45rem;font-weight:700;margin:.35rem 0 .25rem}',
+    '.zp-code{display:inline-block;padding:.1rem .55rem;border-radius:999px;background:rgba(127,127,127,.18);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.78rem;margin-top:.25rem}',
+    '.zp-host{opacity:.85;margin:.75rem 0 .25rem}',
+    '.zp-host code{font-family:ui-monospace,Menlo,Consolas,monospace}',
+    '.zp-desc{margin:.75rem 0 1.25rem;opacity:.88}',
+    '.zp-actions{display:flex;gap:.5rem;flex-wrap:wrap}',
+    '.zp-btn{appearance:none;border:0;padding:.55rem 1rem;border-radius:8px;background:#3a82f6;color:#fff;font-weight:600;cursor:pointer;font-size:.92rem}',
+    '.zp-btn.secondary{background:rgba(127,127,127,.18);color:inherit}',
+    '.zp-btn:hover{filter:brightness(1.08)}',
+    'details{margin-top:1rem;font-size:.86rem;opacity:.78}',
+    'summary{cursor:pointer;user-select:none}',
+    'pre{overflow:auto;background:rgba(127,127,127,.1);padding:.5rem .75rem;border-radius:6px;margin-top:.5rem;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.78rem}',
+    '</style>',
+    '<main class="zp-shell">',
+    '<div class="zp-mark">ZeroProxy</div>',
+    '<h1 class="zp-title">', escapeHTML(info.title), '</h1>',
+    '<div class="zp-code">', escapeHTML(code), '</div>',
+    hostHTML,
+    '<p class="zp-desc">', escapeHTML(info.desc), '</p>',
+    '<div class="zp-actions">',
+    '<button class="zp-btn" onclick="history.back()">Back</button>',
+    '<button class="zp-btn secondary" onclick="location.reload()">Retry</button>',
+    '</div>',
+    '<details><summary>Technical details</summary>',
+    '<pre>code: ', escapeHTML(code), '\nhost: ', escapeHTML(host || '(none)'),
+    '\ntime: ', new Date().toISOString(),
+    '</pre></details>',
+    '</main>'
+  ].join('');
+  return new Response(body, {
+    status,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': ZP.fixedCSP(),
+      'X-Content-Type-Options': 'nosniff',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Expose-Headers': '*',
+    },
+  });
+}
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }

@@ -535,7 +535,6 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
   const buildOut = path.join(temp, 'dist');
   run('node', ['scripts/build.mjs', '--out', buildOut]);
-  const kernelPath = path.join(buildOut, 'kernel.wasm');
   const serverPath = path.join(buildOut, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
   const webPath = path.join(buildOut, 'web');
 
@@ -553,7 +552,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     });
     s.once('error', reject);
   });
-  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-kernel', kernelPath, '-socks', 'internal'], {
+  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-socks', 'internal'], {
     cwd: path.resolve(__dirname, '../..'),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -1068,6 +1067,118 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.topOrigin = __zp_get(globalThis, 'top').location.origin;
     out.beforeSrcdoc = beforeSrcdoc;
     evil.remove();
+    // A6 hardening: dynamic compilation paths must throw, not silently exec.
+    out.functionEscape = (() => {
+      try { const v = (new Function('return location.href'))(); return 'ran:' + String(v); }
+      catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
+    })();
+    out.constructorEscape = (() => {
+      try { const v = ({}).constructor.constructor('return location.href')(); return 'ran:' + String(v); }
+      catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
+    })();
+    out.asyncFunctionEscape = (() => {
+      try { const Async = (async function(){}).constructor; const v = new Async('return 1')(); return 'ran:' + String(v); }
+      catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
+    })();
+    // A3 hardening: <script src=blob:...> must be neutralised by setAttribute observer.
+    out.scriptBlobSrc = await new Promise(resolve => {
+      try {
+        window.__scriptBlobRan = false;
+        const blobURL = URL.createObjectURL(new Blob(['window.__scriptBlobRan = true;'], { type: 'text/javascript' }));
+        const s = document.createElement('script');
+        s.src = blobURL;
+        document.head.appendChild(s);
+        setTimeout(() => {
+          const ran = window.__scriptBlobRan === true;
+          try { document.head.removeChild(s); } catch {}
+          try { URL.revokeObjectURL(blobURL); } catch {}
+          resolve(ran ? 'ran' : 'blocked');
+        }, 200);
+      } catch (err) { resolve('throw:' + (err && err.message || err)); }
+    });
+
+    // Reflect.get(window, 'location') → must hit membrane, not native.
+    out.reflectGetLocation = (() => {
+      try {
+        const loc = Reflect.get(__zp_get(globalThis, 'window'), 'location');
+        return typeof loc?.href === 'string' && /e2e\.test/.test(loc.href) ? 'virtual' : 'native:' + (loc && loc.href);
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+
+    // top.location / parent.location / opener: all dangerous globals must
+    // route through the membrane (no clean realm access to native location).
+    out.topLocation = (() => {
+      try {
+        const href = __zp_get(globalThis, 'top').location.href;
+        return /e2e\.test/.test(href) ? 'virtual' : 'native:' + href;
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+    out.parentLocation = (() => {
+      try {
+        const href = __zp_get(globalThis, 'parent').location.href;
+        return /e2e\.test/.test(href) ? 'virtual' : 'native:' + href;
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+    out.opener = (() => {
+      try {
+        const op = __zp_get(globalThis, 'opener');
+        return op === null || op === undefined ? 'empty' : 'leaked:' + typeof op;
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+
+    // D7 storage isolation: facade returns un-prefixed keys to target code,
+    // and writes land in the underlying proxy-origin store under a hashed
+    // prefix (so other targets cannot see them). We can only probe the
+    // facade from inside the target realm; verify it reports unprefixed
+    // keys via key(i) enumeration and consistent get/set/remove semantics.
+    out.storagePrefix = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const ls = w.localStorage;
+        ls.setItem('zp-probe', 'v1');
+        const got = ls.getItem('zp-probe');
+        // Enumerate via key(i) and ensure the bare key appears, not a prefixed one.
+        const keys = [];
+        for (let i = 0; i < ls.length; i++) keys.push(ls.key(i));
+        ls.removeItem('zp-probe');
+        const removed = ls.getItem('zp-probe');
+        const leaked = keys.some(k => /^__zp:/.test(k));
+        return got === 'v1' && removed === null && !leaked ? 'isolated' : 'leak:' + JSON.stringify({got, removed, leaked, keys});
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+
+    // D7 document.domain virtualization: setter must be a no-op visible to
+    // native, but the virtual getter returns the target host.
+    out.documentDomainSetter = (() => {
+      try {
+        const d = __zp_get(globalThis, 'document');
+        const initial = d.domain;
+        try { d.domain = 'evil.example'; } catch {}
+        const after = d.domain;
+        return after === initial ? 'unchanged:' + initial : 'changed:' + after;
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+
+    // D7 document.origin must be the virtual target origin, never proxy.
+    out.documentOrigin = (() => {
+      try {
+        const d = __zp_get(globalThis, 'document');
+        return /e2e\.test/.test(d.origin || '') ? 'virtual:' + d.origin : 'native:' + d.origin;
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+
+    // D7 BroadcastChannel: target name must be prefixed at native layer.
+    out.broadcastChannelName = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const bc = new w.BroadcastChannel('zp-test');
+        const nm = bc.name;
+        try { bc.close(); } catch {}
+        // Facade reports the un-prefixed name to target code.
+        return nm === 'zp-test' ? 'unprefixed-facade' : 'leaked-prefix:' + nm;
+      } catch (err) { return 'throw:' + (err && err.message || err); }
+    })();
+
     return out;
   }, targetPort);
   assert.equal(escapeMatrix.fetch, 'ok:404');
@@ -1086,6 +1197,26 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
   assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  // A6 hardening assertions: dynamic compilation must be blocked.
+  assert.match(escapeMatrix.functionEscape, /^blocked:/, `new Function() must throw, got: ${escapeMatrix.functionEscape}`);
+  assert.match(escapeMatrix.constructorEscape, /^blocked:/, `constructor escape must throw, got: ${escapeMatrix.constructorEscape}`);
+  assert.match(escapeMatrix.asyncFunctionEscape, /^blocked:/, `AsyncFunction must throw, got: ${escapeMatrix.asyncFunctionEscape}`);
+  // A3 hardening: <script src=blob:...> must be neutralised.
+  assert.equal(escapeMatrix.scriptBlobSrc, 'blocked', `<script src=blob:...> must not execute, got: ${escapeMatrix.scriptBlobSrc}`);
+  // B-extra: Reflect.get(window,'location') routed through membrane.
+  assert.equal(escapeMatrix.reflectGetLocation, 'virtual', `Reflect.get must hit membrane, got: ${escapeMatrix.reflectGetLocation}`);
+  // top/parent must not leak the proxy realm.
+  assert.equal(escapeMatrix.topLocation, 'virtual', `top.location escape: ${escapeMatrix.topLocation}`);
+  assert.equal(escapeMatrix.parentLocation, 'virtual', `parent.location escape: ${escapeMatrix.parentLocation}`);
+  assert.equal(escapeMatrix.opener, 'empty', `opener leak: ${escapeMatrix.opener}`);
+  // D7 storage isolation must hold (no raw target key on proxy origin).
+  assert.equal(escapeMatrix.storagePrefix, 'isolated', `storage prefix leak: ${escapeMatrix.storagePrefix}`);
+  // D7 document.domain setter is virtualised (no real native change).
+  assert.match(escapeMatrix.documentDomainSetter, /^unchanged:/, `document.domain leak: ${escapeMatrix.documentDomainSetter}`);
+  // D7 document.origin reports the virtual target origin.
+  assert.match(escapeMatrix.documentOrigin, /^virtual:/, `document.origin leak: ${escapeMatrix.documentOrigin}`);
+  // D7 BroadcastChannel facade returns un-prefixed name (target-visible truth).
+  assert.equal(escapeMatrix.broadcastChannelName, 'unprefixed-facade', `BroadcastChannel: ${escapeMatrix.broadcastChannelName}`);
 
   const serviceWorkerPolicy = await page.evaluate(async () => {
     const out = {

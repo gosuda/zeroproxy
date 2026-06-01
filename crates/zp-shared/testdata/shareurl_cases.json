@@ -1,0 +1,15 @@
+[
+  {"input": "https://example.com/", "ok": true, "scheme": "https", "host": "example.com"},
+  {"input": "http://example.com", "ok": true, "scheme": "http", "host": "example.com"},
+  {"input": "HTTPS://Example.com/path?q=1", "ok": true, "scheme": "https", "host": "Example.com"},
+  {"input": "http://example.com:8080/foo", "ok": true, "scheme": "http", "host": "example.com:8080"},
+  {"input": "ws://example.com/", "ok": false, "reason": "InvalidScheme"},
+  {"input": "wss://example.com/", "ok": false, "reason": "InvalidScheme"},
+  {"input": "javascript:alert(1)", "ok": false, "reason": "InvalidScheme"},
+  {"input": "data:,a", "ok": false, "reason": "InvalidScheme"},
+  {"input": "blob:abc", "ok": false, "reason": "InvalidScheme"},
+  {"input": "file:///etc/passwd", "ok": false, "reason": "InvalidScheme"},
+  {"input": "", "ok": false, "reason": "Empty"},
+  {"input": "   ", "ok": false, "reason": "Empty"},
+  {"input": "notaurl", "ok": false, "reason": "Malformed"}
+]

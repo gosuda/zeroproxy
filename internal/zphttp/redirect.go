@@ -53,6 +53,9 @@ func redirectStatus(code int) bool {
 	return code == 301 || code == 302 || code == 303 || code == 307 || code == 308
 }
 
+// B6 hardening: 307/308 redirects preserve method+body; if the body is not
+// replayable (e.g., a stream consumed once), fail explicitly with
+// REDIRECT_BODY_NONREPLAYABLE rather than silently sending an empty body.
 func redirectedRequest(req *http.Request, code int, target *url.URL) (*http.Request, error) {
 	method := req.Method
 	body := req.Body
@@ -64,12 +67,13 @@ func redirectedRequest(req *http.Request, code int, target *url.URL) (*http.Requ
 		getBody = nil
 		cl = 0
 	} else if body != nil && body != http.NoBody {
+		// 307/308 (and other method-preserving paths) must replay the body.
 		if getBody == nil {
-			return nil, fmt.Errorf("TARGET_CONNECT_FAILED: non-replayable redirect body")
+			return nil, fmt.Errorf("REDIRECT_BODY_NONREPLAYABLE: original body cannot be replayed for %d redirect", code)
 		}
 		nextBody, err := getBody()
 		if err != nil {
-			return nil, fmt.Errorf("TARGET_CONNECT_FAILED: replay redirect body: %w", err)
+			return nil, fmt.Errorf("REDIRECT_BODY_NONREPLAYABLE: replay redirect body failed: %w", err)
 		}
 		body = nextBody
 	}

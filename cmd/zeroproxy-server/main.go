@@ -19,13 +19,37 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/gosuda/zeroproxy/internal/cookiejar"
+	"github.com/gosuda/zeroproxy/internal/headers"
+	"github.com/gosuda/zeroproxy/internal/rtcgw"
+	"github.com/gosuda/zeroproxy/internal/wtproxy"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 )
 
 type server struct {
-	webDir     string
-	kernelWASM string
-	socksAddr  string
+	webDir    string
+	socksAddr string
+	jarsMu    sync.Mutex
+	jars      map[string]*cookiejar.Jar
+}
+
+// jarFor returns the cookie jar for the given tabId, creating one on demand.
+// Empty tabId returns nil — callers should skip jar logic in that case.
+func (s *server) jarFor(tabID string) *cookiejar.Jar {
+	if tabID == "" {
+		return nil
+	}
+	s.jarsMu.Lock()
+	defer s.jarsMu.Unlock()
+	if s.jars == nil {
+		s.jars = make(map[string]*cookiejar.Jar)
+	}
+	j, ok := s.jars[tabID]
+	if !ok {
+		j = cookiejar.New()
+		s.jars[tabID] = j
+	}
+	return j
 }
 
 const internalSOCKSMode = "internal"
@@ -40,7 +64,6 @@ func main() {
 	s := &server{}
 	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&s.webDir, "web", "dist/web", "built static web asset directory")
-	flag.StringVar(&s.kernelWASM, "kernel", "dist/kernel.wasm", "compiled Go WASM kernel path")
 	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address with IsolateSOCKSAuth, or 'internal' for the built-in test SOCKS5 parser/direct dialer")
 	flag.Parse()
 	mux := http.NewServeMux()
@@ -65,8 +88,24 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveWeb(w, r, "sw.js")
 	case path == controlPrefix+"ws-pipe":
 		s.handlePipe(w, r)
-	case path == controlPrefix+"kernel.wasm":
-		s.serveFile(w, r, s.kernelWASM, "application/wasm")
+	case path == controlPrefix+"relay":
+		// Step 13: Rust kernel transport endpoint. 1 WS = 1 HTTP request.
+		// Simpler than ws-pipe (which uses yamux multiplex); intended for
+		// the Rust zp-kernel during the Go → Rust kernel cutover.
+		log.Printf("relay: WS upgrade request from %s", r.RemoteAddr)
+		s.handleRelay(w, r)
+	case path == controlPrefix+"relay-mux":
+		// Mux upgrade of /zp/relay: one persistent WS carries N concurrent
+		// HTTP requests, each tagged with a u32 stream ID. Eliminates the
+		// per-request WS upgrade cost that bottlenecks pages with 100+
+		// subresources. Wire protocol defined in relay.go (muxFrame* consts).
+		log.Printf("relay-mux: WS upgrade request from %s", r.RemoteAddr)
+		s.handleRelayMux(w, r)
+	case path == controlPrefix+"ws-bridge":
+		// Step 13: Rust kernel WebSocket stream endpoint. 1 WS = 1 target WS.
+		// Replaces the yamux-multiplexed __zp_stream path on ws-pipe.
+		log.Printf("ws-bridge: WS upgrade request from %s", r.RemoteAddr)
+		s.handleWSBridge(w, r)
 	case strings.HasPrefix(path, controlPrefix+"p/"):
 		s.serveWeb(w, r, "index.html")
 	case strings.HasPrefix(path, controlPrefix+"error/"):
@@ -75,6 +114,22 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveAsset(w, r, strings.TrimPrefix(path, assetPrefix))
 	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
+	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
+		// Defensive: in case build pipeline emits a double-prefixed path.
+		s.safeError(w, r, "MALFORMED_ROUTE", http.StatusBadRequest)
+	case r.URL.Path == "/__zp/zp_bundle.js" || r.URL.Path == "/__zp/zp_bundle_bg.wasm" ||
+		r.URL.Path == "/__zp/zp_bundle_sw.js" || r.URL.Path == "/__zp/zp_bundle_sw_bg.wasm" ||
+		r.URL.Path == "/__zp/zp_page_rt.wasm":
+		// Rust zp-bundle artifacts produced by wasm-bindgen (web/ + no-modules
+		// flavors). The build copies them under dist/web/__zp/ but the runtime
+		// fetches them from /__zp/<name>; serve from that nested path.
+		s.serveFile(w, r, filepath.Join(s.webDir, "__zp", filepath.Base(r.URL.Path)), mime.TypeByExtension(filepath.Ext(r.URL.Path)))
+	case strings.HasPrefix(r.URL.Path, "/__zp/wt"):
+		// D4: WebTransport gateway endpoint (placeholder until HTTP/3 + quic-go land).
+		wtproxy.Handler().ServeHTTP(w, r)
+	case strings.HasPrefix(r.URL.Path, "/__zp/rtc/"):
+		// D5: WebRTC signaling endpoint (placeholder until pion SFU lands).
+		rtcgw.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(path, "/p/"):
 		redirectLegacy(w, r, controlPrefix+"p/"+strings.TrimPrefix(path, "/p/"))
 	case strings.HasPrefix(path, "/__zp/"):
@@ -96,8 +151,6 @@ func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/__zp/ws-pipe":
 		redirectLegacy(w, r, controlPrefix+"ws-pipe")
-	case "/__zp/kernel.wasm":
-		redirectLegacy(w, r, controlPrefix+"kernel.wasm")
 	case "/__zp/worker-bootstrap.js":
 		redirectLegacy(w, r, controlPrefix+"worker-bootstrap.js")
 	default:
@@ -107,7 +160,7 @@ func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
 		}
 		name := strings.TrimPrefix(r.URL.Path, "/__zp/")
 		switch name {
-		case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "wasm_exec.js", "worker-prelude.js":
+		case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "worker-prelude.js":
 			redirectLegacy(w, r, assetPrefix+name)
 		default:
 			s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
@@ -121,7 +174,7 @@ func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	switch name {
-	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
+	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
 		s.serveWeb(w, r, name)
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
@@ -193,6 +246,50 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.acceptStreams(r.Context(), sess)
+}
+
+// handleRelay is the Step-13 transport endpoint consumed by the Rust kernel
+// (crates/zp-kernel). One WebSocket = one upstream HTTP request. The wire
+// protocol is intentionally simple compared to the yamux+SOCKS5 ws-pipe so
+// the Rust port can land without re-implementing yamux in the browser.
+//
+//	C → S text frame: {"url":"...","method":"GET","headers":[["Name","Value"]],"body_b64":"..."}
+//	S → C text frame: {"ok":true,"status":200,"headers":[["Name","Value"]],"finalURL":"..."}
+//	S → C binary frames: response body chunks
+//	S → C empty binary frame: end-of-body
+//
+// On error, the server replies once with {"ok":false,"code":"...","host":"..."} and closes.
+func (s *server) handleRelay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	c, err := pipeUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	bridgeRelayWS(ctx, c, s.dialTargetTCP, s.jarFor)
+}
+
+// handleRelayMux is the multiplexed sibling of handleRelay. One WebSocket
+// carries N concurrent HTTP requests, each tagged with a u32 stream ID.
+// Wire protocol: see muxFrame* constants in relay.go.
+func (s *server) handleRelayMux(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	c, err := pipeUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	bridgeMuxRelayWS(ctx, c, s.dialTargetTCP, s.jarFor)
 }
 
 var pipeUpgrader = websocket.Upgrader{
@@ -489,5 +586,5 @@ func zeroCSP(r *http.Request) string {
 	if host == "" {
 		host = "proxy.example"
 	}
-	return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src * 'unsafe-inline' blob: data:; img-src * blob: data:; font-src * blob: data:; media-src * blob: data:; connect-src 'self' " + wsScheme + host + "; frame-src 'self' blob: data:; child-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'"
+	return headers.BuildCSP(wsScheme + host)
 }
