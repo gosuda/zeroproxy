@@ -431,6 +431,10 @@ mod sync {
 mod msgs;
 mod common_state;
 pub mod compress;
+/// ZeroProxy JA3 mirror — captured browser ClientHello replay. See
+/// `ja3.rs` for the data flow; the public surface is just the spec
+/// type plus `set_captured_spec` (called once per SW boot).
+pub mod ja3;
 mod conn;
 /// Crypto provider interface.
 pub mod crypto;

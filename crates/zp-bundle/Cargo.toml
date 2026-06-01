@@ -16,6 +16,8 @@ wasm-bindgen-futures = "0.4"
 js-sys = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# base64 decode for the `/zp/api/fp` captured ClientHello spec.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 # Step 14: client-side transport stack. The kernel speaks SOCKS5+TLS+HTTP
 # itself over a WebSocket byte-pipe so the relay never sees plaintext.

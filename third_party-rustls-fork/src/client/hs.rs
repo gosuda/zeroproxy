@@ -586,13 +586,28 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         ]);
     }
 
-    // (3) Chrome 134 extension order. We list every extension we
-    // might emit; the encoder drops `None` ones, so the wire layout is
-    // exactly the subset that's present, in this order. The random-
-    // order pool is emptied (see retain clause in handshake.rs's
-    // `order_insensitive_extensions_in_random_order`), so the encoding
-    // is `contiguous_extensions ++ [ECH, PSK]` in this order.
-    exts.contiguous_extensions = vec![
+    // (3) Extension order. Prefer the captured spec from the user's
+    // real browser → ZeroProxy handshake (phase 4); fall back to a
+    // hardcoded Chrome 134 layout if no spec was installed (phase 2
+    // fallback, e.g. plain-HTTP dev without `-tls-addr`).
+    let captured_order = crate::ja3::with_current(|spec| {
+        spec.map(|s| s.extensions.clone())
+    });
+    exts.contiguous_extensions = match captured_order {
+        Some(order) if !order.is_empty() => order,
+        _ => chrome134_fallback_extension_order(),
+    };
+}
+
+/// Hardcoded Chrome 134 extension order, used when no captured spec is
+/// installed. List every extension we might emit; the encoder drops
+/// `None` ones, so the wire layout is exactly the subset that's
+/// present, in this order. The random-order pool is emptied (see
+/// retain clause in handshake.rs's
+/// `order_insensitive_extensions_in_random_order`), so the encoding
+/// is `contiguous_extensions ++ [ECH, PSK]` in this order.
+fn chrome134_fallback_extension_order() -> Vec<ExtensionType> {
+    vec![
         ExtensionType::ServerName,              // 0
         ExtensionType::ExtendedMasterSecret,    // 23
         ExtensionType::RenegotiationInfo,       // 65281 (set above)
@@ -615,7 +630,7 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         ExtensionType::EarlyData,
         ExtensionType::TransportParameters,
         ExtensionType::TransportParametersDraft,
-    ];
+    ]
 }
 
 /// Prepares `exts` and `cx` with TLS 1.2 or TLS 1.3 session

@@ -33,6 +33,61 @@ async function initRewriter() {
 // self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
 // The JS ZPRewriter remains the primary path during this migration window;
 // the Rust bundle is available for parity tests and gradual cut-over.
+// captureBrowserFingerprint asks the Go server for the browser-side
+// TLS ClientHello it observed when the SW's own fetch hit the HTTPS
+// listener. The HTTPS listener (`-tls-addr`) records every ClientHello
+// via `tls.Config.GetConfigForClient`; `/zp/api/fp` looks the caller
+// up by `r.RemoteAddr` and returns a base64 JSON Spec.
+//
+// Why a *cross-origin* HTTPS fetch from an HTTP-loaded SW: Chrome
+// refuses to register a Service Worker over HTTPS when the cert is
+// only "advanced-bypass" trusted (self-signed), so we can't host the
+// launcher on the HTTPS port directly. The launcher lives on plain
+// HTTP — no SW registration trouble — and the SW reaches out to the
+// adjacent HTTPS port purely so the browser performs a TLS handshake
+// the server can sample. The captured fingerprint *is* the browser's,
+// regardless of which port we fetched from.
+//
+// Cert error tolerance: the HTTPS endpoint is self-signed, so the
+// fetch resolves with a network error if Chrome refuses the cert
+// even for cross-origin sub-fetches. In that case we silently fall
+// back to the rustls fork's hardcoded Chrome 134 layout (phase 2,
+// commit 2f7dfd3) — the kernel still works, just with the static
+// guess instead of a live mirror.
+//
+// Production note: ZeroProxy in production should serve a properly
+// trusted cert on its HTTPS port (e.g. via a local mkcert CA or a
+// real ACME-issued cert for a custom dev domain). Self-signed is the
+// dev-loopback path.
+let capturedFingerprint = null;
+async function captureBrowserFingerprint() {
+  if (capturedFingerprint !== null) return capturedFingerprint;
+  // TEMP investigation-only hardcode: a previously-captured WebView2 /
+  // Chrome 134 spec (sans GREASE / non-rustls-emittable extensions).
+  // This verifies the end-to-end pipeline (SW → kernel_set_captured_spec
+  // → rustls::ja3::set_captured_spec → apply_chrome_ja3_shape uses the
+  // captured order) without depending on the self-signed cert dance —
+  // Chrome refuses SW fetches to self-signed HTTPS in this dev setup.
+  // Production path (real cert): un-comment the HTTPS fetch and remove
+  // this constant. See trap notebook entry for details.
+  capturedFingerprint = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzE2LDEzLDExLDUsMjMsMCw0NSwzNSwxMCw1MSw2NTI4MSw0MywyN10sInN1cHBvcnRlZEN1cnZlcyI6WzI5LDIzLDI0XSwic3VwcG9ydGVkUG9pbnRzIjoiQUE9PSIsInNpZ25hdHVyZVNjaGVtZXMiOlsxMDI3LDIwNTIsMTAyNSwxMjgzLDIwNTMsMTI4MSwyMDU0LDE1MzddLCJhbHBuUHJvdG9jb2xzIjpbImgyIiwiaHR0cC8xLjEiXX0K';
+  return capturedFingerprint;
+  /* Original fetch path — used once we have a trusted dev cert:
+  const here = new URL(self.location.href);
+  const httpsPort = (parseInt(here.port || (here.protocol === 'https:' ? '443' : '80'), 10) + 363).toString();
+  const fpURL = `https://${here.hostname}:${httpsPort}/zp/api/fp`;
+  try {
+    const resp = await self.fetch(fpURL, { cache: 'no-store', mode: 'cors', credentials: 'omit' });
+    if (!resp.ok) { capturedFingerprint = ''; return capturedFingerprint; }
+    const body = await resp.json();
+    capturedFingerprint = body && body.captured ? body.spec : '';
+  } catch {
+    capturedFingerprint = '';
+  }
+  return capturedFingerprint;
+  */
+}
+
 async function initBundle() {
   if (self.ZPBundle && self.ZPBundle.ready) return;
   if (bundlePromise) return bundlePromise;
@@ -77,6 +132,21 @@ async function initBundle() {
     const ki = self.ZPBundle.kernelInit;
     if (typeof ki === 'function') {
       try { ki(); } catch {}
+    }
+    // Hand the captured spec to the kernel before any upstream fetch.
+    // Run this in parallel with the rest of bundle init so the SW's
+    // own self.fetch round-trip doesn't gate kernel readiness; if the
+    // spec arrives after the first kernel_fetch, that fetch uses the
+    // rustls fork's hardcoded fallback (Chrome 134, phase 2) and only
+    // subsequent fetches use the captured layout. Acceptable, because
+    // the launcher's first navigation happens many seconds after SW
+    // activation in practice.
+    const setSpec = wbg.kernelSetCapturedSpec;
+    if (typeof setSpec === 'function') {
+      const spec = await captureBrowserFingerprint();
+      if (spec) {
+        try { setSpec(spec); } catch {}
+      }
     }
   })().catch(err => { bundlePromise = null; throw err; });
   return bundlePromise;

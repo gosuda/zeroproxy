@@ -48,6 +48,112 @@ pub fn kernel_init() -> String {
     format!("zp-kernel v{} (rust, ws-tcp + socks5 + tls + http1)", zp_shared::TRANSFORMER_VERSION)
 }
 
+/// Phase 4 JA3 mirror: install a captured browser TLS ClientHello so
+/// every subsequent upstream handshake replays its shape. Input is the
+/// base64-encoded JSON spec served by `/zp/api/fp` (see
+/// `internal/fpcapture` for the wire format). On parse failure the
+/// kernel silently falls through to the rustls fork's hardcoded
+/// Chrome 134 fallback, so a malformed/empty argument here just means
+/// "fingerprint capture unavailable, use the phase 2 layout instead".
+///
+/// Called once during SW boot from inside `initBundle`. Idempotent in
+/// the sense that the rustls thread_local takes last-write-wins
+/// semantics; multiple calls within a SW activation simply update.
+#[wasm_bindgen(js_name = kernelSetCapturedSpec)]
+pub fn kernel_set_captured_spec(b64_json: &str) {
+    use base64::Engine;
+    push_trace(&format!("kernel_set_captured_spec:len={}", b64_json.len()));
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64_json) {
+        Ok(b) => b,
+        Err(e) => {
+            push_trace(&format!("kernel_set_captured_spec:b64-err={}", e));
+            return;
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            push_trace(&format!("kernel_set_captured_spec:json-err={}", e));
+            return;
+        }
+    };
+    let spec = match captured_spec_from_json(&parsed) {
+        Some(s) => s,
+        None => {
+            push_trace("kernel_set_captured_spec:shape-missing-fields");
+            return;
+        }
+    };
+    push_trace(&format!(
+        "kernel_set_captured_spec:installed exts={} ciphers={} groups={}",
+        spec.extensions.len(),
+        spec.cipher_suites.len(),
+        spec.named_groups.len()
+    ));
+    rustls::ja3::set_captured_spec(spec);
+}
+
+/// Converts the JSON envelope from `/zp/api/fp` into a rustls
+/// `CapturedSpec`. We narrow to the typed enums (`CipherSuite`,
+/// `NamedGroup`, `ExtensionType`) because rustls's wire codecs operate
+/// on those; unknown values get filtered (`From<u16>` falls through
+/// to the catch-all variants which rustls treats as no-ops). Returns
+/// `None` only if the JSON is missing required arrays — partial / empty
+/// arrays still install (with the corresponding emit list being empty).
+fn captured_spec_from_json(j: &serde_json::Value) -> Option<rustls::ja3::CapturedSpec> {
+    use base64::Engine;
+    use rustls::ja3::ExtensionType;
+    use rustls::CipherSuite;
+    use rustls::NamedGroup;
+    let arr_u16 = |key: &str| -> Vec<u16> {
+        j.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64().map(|n| n as u16))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let extensions = arr_u16("extensions")
+        .into_iter()
+        .map(ExtensionType::from)
+        .collect();
+    let cipher_suites = arr_u16("cipherSuites")
+        .into_iter()
+        .map(CipherSuite::from)
+        .collect();
+    let named_groups = arr_u16("supportedCurves")
+        .into_iter()
+        .map(NamedGroup::from)
+        .collect();
+    let versions = arr_u16("supportedVersions");
+    let signature_schemes = arr_u16("signatureSchemes");
+    let ec_point_formats = j
+        .get("supportedPoints")
+        .and_then(|v| v.as_str())
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        .unwrap_or_default();
+    let alpn_protocols = j
+        .get("alpnProtocols")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.as_bytes().to_vec()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(rustls::ja3::CapturedSpec {
+        versions,
+        cipher_suites,
+        extensions,
+        named_groups,
+        ec_point_formats,
+        signature_schemes,
+        alpn_protocols,
+    })
+}
+
 /// Open a relay byte-pipe, run client-side SOCKS5 + TLS + HTTP/1.1 inside
 /// this WASM module, and return a `Response` built from the upstream
 /// reply.
