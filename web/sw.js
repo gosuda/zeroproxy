@@ -614,7 +614,7 @@ async function handleMessage(event) {
       bundleReady: !!(self.ZPBundle && self.ZPBundle.ready),
       hasZPBundleWBG: typeof self.ZPBundleWBG,
       bundleVersion: self.ZPBundle && self.ZPBundle.bundleVersion ? self.ZPBundle.bundleVersion() : null,
-      rustTrace: (self.__zpRustTrace || []).slice(-40),
+      rustTrace: (self.__zpRustTrace || []).slice(-400),
       initErr,
     }});
     return;

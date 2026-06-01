@@ -32,6 +32,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{Headers, Response, ResponseInit, Url};
 
 use super::http1::{self, HttpResponse};
+use super::http2::{self, Http2Client};
 use super::pool::{self, PoolKey, PooledConn};
 use super::socks5::{self, Auth};
 use super::tls::TlsStream;
@@ -66,21 +67,71 @@ pub(crate) async fn fetch(
         port: parsed.port,
     };
     let host_h = host_header(&parsed);
+    let t0 = now_ms();
     crate::kernel::push_trace(&format!(
-        "transport:start host={} port={} scheme={}",
+        "tx:start host={} port={} scheme={} t=0",
         parsed.host, parsed.port, parsed.scheme
     ));
 
-    // Fast path: warm conn from the per-origin pool. On stale (write or
-    // read fails on the cached conn), fall through to the fresh path.
-    // We don't retry on the same key — the next call will re-fill the pool.
+    // Fastest path: live HTTP/2 client for this origin. h2 multiplex means
+    // every concurrent fetch reuses the same TLS connection without any
+    // per-request handshake — the single biggest page-load win we have.
+    if let Some(client) = pool::get_http2(&key) {
+        let t_req = now_ms();
+        match http2::send_request(
+            &client,
+            method,
+            &parsed.scheme,
+            &host_h,
+            &parsed.path,
+            headers,
+            body,
+        )
+        .await
+        {
+            Ok(resp) => {
+                crate::kernel::push_trace(&format!(
+                    "tx:h2-reuse-ok host={} status={} http={}ms total={}ms",
+                    parsed.host,
+                    resp.status,
+                    delta_ms(t_req),
+                    delta_ms(t0)
+                ));
+                return build_js_response(resp, target_url);
+            }
+            Err(e) => {
+                crate::kernel::push_trace(&format!(
+                    "tx:h2-reuse-err host={} err={} t={}ms (reopening)",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
+                ));
+                // Fall through to the cold path; pool::get_http2 already
+                // evicted on `is_alive()=false`, but a live-looking client
+                // can still fail one specific send (server GoAway between
+                // our check and send_request).
+            }
+        }
+    }
+
+    // Fast path: warm conn from the per-origin HTTP/1.1 pool. On stale
+    // (write or read fails on the cached conn), fall through to fresh.
     if let Some(mut conn) = pool::take(&key) {
-        crate::kernel::push_trace(&format!("transport:pool-hit host={}", parsed.host));
+        crate::kernel::push_trace(&format!(
+            "tx:pool-hit host={} t={}ms",
+            parsed.host,
+            delta_ms(t0)
+        ));
+        let t_req = now_ms();
         match http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body).await {
             Ok(resp) => {
                 crate::kernel::push_trace(&format!(
-                    "transport:pool-reuse-ok host={} status={}",
-                    parsed.host, resp.status
+                    "tx:pool-reuse-ok host={} status={} http={}ms total={}ms keepalive={}",
+                    parsed.host,
+                    resp.status,
+                    delta_ms(t_req),
+                    delta_ms(t0),
+                    http1::response_is_keepalive(&resp)
                 ));
                 if http1::response_is_keepalive(&resp) {
                     pool::put(key, conn);
@@ -89,53 +140,128 @@ pub(crate) async fn fetch(
             }
             Err(e) => {
                 crate::kernel::push_trace(&format!(
-                    "transport:pool-stale host={} err={} (reopening)",
-                    parsed.host, e
+                    "tx:pool-stale host={} err={} t={}ms (reopening)",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
                 ));
-                // Drop `conn`; the yamux stream FINs and the pool entry
-                // for this key is now empty until we put a fresh one.
+                // Drop `conn`; pool entry for this key is now empty.
             }
         }
     }
 
-    // Cold path: open a fresh conn (yamux + SOCKS5 + TLS).
-    let mut conn = open_fresh(&parsed, &relay_url).await?;
-    let resp = http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body)
-        .await
-        .map_err(|e| {
+    // Cold path: open a fresh conn (yamux + SOCKS5 + TLS), branching on
+    // the negotiated ALPN protocol after the handshake.
+    let opened = open_fresh(&parsed, &relay_url, t0).await?;
+    match opened {
+        FreshConn::Http2(client) => {
+            // Cache the h2 client immediately so any concurrent fetches
+            // queued behind us hit `pool::get_http2` instead of opening
+            // their own connection. The first response timing pays the
+            // full handshake; everyone else pays nothing.
+            pool::put_http2(key.clone(), client.clone());
+            let t_req = now_ms();
+            let resp = http2::send_request(
+                &client,
+                method,
+                &parsed.scheme,
+                &host_h,
+                &parsed.path,
+                headers,
+                body,
+            )
+            .await
+            .map_err(|e| {
+                crate::kernel::push_trace(&format!(
+                    "tx:h2-err host={} err={} t={}ms",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
+                ));
+                jserr("TARGET_HTTP_FAILED", &e)
+            })?;
             crate::kernel::push_trace(&format!(
-                "transport:http-err host={} err={}",
-                parsed.host, e
+                "tx:h2-ok host={} status={} http={}ms total={}ms",
+                parsed.host,
+                resp.status,
+                delta_ms(t_req),
+                delta_ms(t0)
             ));
-            jserr("TARGET_HTTP_FAILED", &e)
-        })?;
-    crate::kernel::push_trace(&format!(
-        "transport:http-ok host={} status={}",
-        parsed.host, resp.status
-    ));
-    if http1::response_is_keepalive(&resp) {
-        pool::put(key, conn);
+            build_js_response(resp, target_url)
+        }
+        FreshConn::Http1(mut conn) => {
+            let t_req = now_ms();
+            let resp =
+                http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body)
+                    .await
+                    .map_err(|e| {
+                        crate::kernel::push_trace(&format!(
+                            "tx:http-err host={} err={} t={}ms",
+                            parsed.host,
+                            e,
+                            delta_ms(t0)
+                        ));
+                        jserr("TARGET_HTTP_FAILED", &e)
+                    })?;
+            crate::kernel::push_trace(&format!(
+                "tx:http-ok host={} status={} http={}ms total={}ms keepalive={}",
+                parsed.host,
+                resp.status,
+                delta_ms(t_req),
+                delta_ms(t0),
+                http1::response_is_keepalive(&resp)
+            ));
+            if http1::response_is_keepalive(&resp) {
+                pool::put(key, conn);
+            }
+            build_js_response(resp, target_url)
+        }
     }
-    build_js_response(resp, target_url)
+}
+
+/// Outcome of `open_fresh` — either we got an HTTP/1.1 byte stream the
+/// caller drives one request at a time, or we landed on HTTP/2 and
+/// already have a cloneable client handle that serves N concurrent
+/// streams.
+enum FreshConn {
+    Http1(PooledConn),
+    Http2(Http2Client),
+}
+
+/// Wall-clock millisecond reading via `Date.now()`. Lower resolution than
+/// `performance.now()` but doesn't need a Performance web-sys feature
+/// import. Adequate for stage-level (10ms+) timing diagnostics.
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+fn delta_ms(t0: f64) -> u32 {
+    (now_ms() - t0).max(0.0) as u32
 }
 
 /// Build a fresh `PooledConn` from scratch: yamux stream → SOCKS5 →
 /// (TLS if https). Retries once if the yamux session itself looks stale.
-async fn open_fresh(parsed: &ParsedUrl, relay_url: &str) -> Result<PooledConn, JsValue> {
+/// `t0` is the parent caller's start time; we report each stage as a
+/// delta off t0 so it's easy to spot which layer dominates total latency.
+async fn open_fresh(
+    parsed: &ParsedUrl,
+    relay_url: &str,
+    t0: f64,
+) -> Result<FreshConn, JsValue> {
+    let t_mux = now_ms();
     let session = yamux::get_or_open(relay_url).await.map_err(|e| {
-        crate::kernel::push_trace(&format!("transport:mux-session-err err={}", e));
+        crate::kernel::push_trace(&format!("tx:mux-session-err err={} t={}ms", e, delta_ms(t0)));
         jserr("TARGET_CONNECT_FAILED:mux-session", &e)
     })?;
     let mut stream = match session.open_stream().await {
         Ok(s) => s,
         Err(e) => {
             crate::kernel::push_trace(&format!(
-                "transport:mux-open-err host={} err={} (reopening)",
-                parsed.host, e
+                "tx:mux-open-err host={} err={} t={}ms (reopening)",
+                parsed.host,
+                e,
+                delta_ms(t0)
             ));
-            // Pool entries reference yamux streams whose parent session
-            // is now gone — clear them too so we don't keep handing out
-            // dead conns.
             yamux::invalidate();
             pool::clear();
             let session = yamux::get_or_open(relay_url)
@@ -143,40 +269,90 @@ async fn open_fresh(parsed: &ParsedUrl, relay_url: &str) -> Result<PooledConn, J
                 .map_err(|e| jserr("TARGET_CONNECT_FAILED:mux-reopen", &e))?;
             session.open_stream().await.map_err(|e| {
                 crate::kernel::push_trace(&format!(
-                    "transport:mux-open-err2 host={} err={}",
-                    parsed.host, e
+                    "tx:mux-open-err2 host={} err={} t={}ms",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
                 ));
                 jserr("TARGET_CONNECT_FAILED:mux-open", &e)
             })?
         }
     };
-    crate::kernel::push_trace(&format!("transport:mux-stream-ok host={}", parsed.host));
+    crate::kernel::push_trace(&format!(
+        "tx:mux-stream-ok host={} mux={}ms t={}ms",
+        parsed.host,
+        delta_ms(t_mux),
+        delta_ms(t0)
+    ));
 
+    let t_socks = now_ms();
     socks5::connect(&mut stream, &parsed.host, parsed.port, &Auth::None)
         .await
         .map_err(|e| {
             crate::kernel::push_trace(&format!(
-                "transport:socks5-err host={} err={}",
-                parsed.host, e
+                "tx:socks5-err host={} err={} t={}ms",
+                parsed.host,
+                e,
+                delta_ms(t0)
             ));
             jserr("TARGET_CONNECT_FAILED:socks5", &e)
         })?;
-    crate::kernel::push_trace(&format!("transport:socks5-ok host={}", parsed.host));
+    crate::kernel::push_trace(&format!(
+        "tx:socks5-ok host={} socks5={}ms t={}ms",
+        parsed.host,
+        delta_ms(t_socks),
+        delta_ms(t0)
+    ));
 
     if parsed.scheme == "https" {
-        let tls = TlsStream::connect(stream, &parsed.host, &[b"http/1.1"])
+        let t_tls = now_ms();
+        // Advertise both protocols. The server picks one; we branch on
+        // `tls.alpn_protocol()` after the handshake to wire either the
+        // h2 multiplex client or the HTTP/1.1 per-stream client.
+        let tls = TlsStream::connect(stream, &parsed.host, &[b"h2", b"http/1.1"])
             .await
             .map_err(|e| {
                 crate::kernel::push_trace(&format!(
-                    "transport:tls-err host={} err={}",
-                    parsed.host, e
+                    "tx:tls-err host={} err={} t={}ms",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
                 ));
                 jserr("TARGET_TLS_FAILED", &e)
             })?;
-        crate::kernel::push_trace(&format!("transport:tls-ok host={}", parsed.host));
-        Ok(PooledConn::Tls(Box::new(tls)))
+        let alpn = tls.alpn_protocol();
+        crate::kernel::push_trace(&format!(
+            "tx:tls-ok host={} tls={}ms t={}ms alpn={}",
+            parsed.host,
+            delta_ms(t_tls),
+            delta_ms(t0),
+            alpn.as_deref()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_else(|| "(none)".to_string())
+        ));
+        if alpn.as_deref() == Some(b"h2".as_slice()) {
+            let t_h2 = now_ms();
+            let client = http2::handshake(tls).await.map_err(|e| {
+                crate::kernel::push_trace(&format!(
+                    "tx:h2-hs-err host={} err={} t={}ms",
+                    parsed.host,
+                    e,
+                    delta_ms(t0)
+                ));
+                jserr("TARGET_HTTP_FAILED", &e)
+            })?;
+            crate::kernel::push_trace(&format!(
+                "tx:h2-hs-ok host={} h2={}ms t={}ms",
+                parsed.host,
+                delta_ms(t_h2),
+                delta_ms(t0)
+            ));
+            Ok(FreshConn::Http2(client))
+        } else {
+            Ok(FreshConn::Http1(PooledConn::Tls(Box::new(tls))))
+        }
     } else {
-        Ok(PooledConn::Plain(stream))
+        Ok(FreshConn::Http1(PooledConn::Plain(stream)))
     }
 }
 

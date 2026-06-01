@@ -61,6 +61,25 @@ getrandom = { version = "0.3", default-features = false, features = ["wasm_js"] 
 # wasm32 compatibility depends on whether the crate's Connection<T> bounds
 # require Send + Sync — verified by cargo check below.
 yamux = "0.13"
+# HTTP/2 client. ALPN-negotiates `h2` so a single TLS connection carries
+# every concurrent fetch to the same origin (vs HTTP/1.1 which needs one
+# TLS handshake per parallel request). Speaks tokio's AsyncRead/Write so we
+# bridge via `tokio-util::compat` from our futures-io stream.
+h2 = "0.4"
+# `tokio` core only — we want the io traits + macros + sync primitives, not
+# tokio::net (no sockets on wasm32) or the multi-threaded runtime. Default
+# features pull in `net` which fails on wasm32-unknown-unknown.
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "sync"] }
+# Bridges `futures::io::AsyncRead/Write` ↔ `tokio::io::AsyncRead/Write` so
+# h2 can drive the same yamux/TLS stream the rest of our stack uses.
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
+# `http` is h2's public-API request/response type — we build `http::Request`
+# from the SW's `(method, url, headers)` tuple and parse `http::Response`
+# back to `Vec<u8>` for the JS side. Same minor version h2 0.4 uses.
+http = "1"
+# Body envelope for h2 send_request bodies. The h2 client takes raw bytes
+# via `SendStream<Bytes>`; we just need `Bytes::from(Vec<u8>)`. Workspace
+# already has `bytes` so this is a no-op import.
 # Full `futures` crate for `Stream`/`Sink`/`SinkExt::send` used by yamux's
 # native API surface. `futures-util` alone doesn't give us yamux's
 # preferred re-exports; pull `futures` (the meta-crate) for compatibility.

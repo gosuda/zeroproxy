@@ -46,6 +46,7 @@
 
 pub(crate) mod fetch;
 pub(crate) mod http1;
+pub(crate) mod http2;
 pub(crate) mod pool;
 pub(crate) mod socks5;
 pub(crate) mod tls;

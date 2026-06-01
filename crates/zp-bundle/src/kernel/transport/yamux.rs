@@ -43,7 +43,6 @@ use std::task::{Context, Poll};
 use futures::channel::{mpsc, oneshot};
 use futures::future::poll_fn;
 use futures::stream::StreamExt;
-use futures::FutureExt;
 use futures_util::io::{AsyncRead, AsyncWrite};
 use wasm_bindgen_futures::spawn_local;
 use yamux::{Config, Connection, Mode, Stream as YStream};

@@ -32,6 +32,13 @@ webpki-roots = { workspace = true }
 getrandom = { workspace = true }
 yamux = { workspace = true }
 futures = { workspace = true }
+# HTTP/2 stack — one TLS handshake serves every parallel fetch to the same
+# origin via stream multiplex. ALPN advertises "h2","http/1.1" and we branch
+# on `tls.alpn_protocol()` after handshake.
+h2 = { workspace = true }
+http = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 # RustCrypto chains (sha2, p256, etc) still depend on getrandom 0.2 and
 # refuse to compile on wasm32-unknown-unknown without the `js` feature.
 # Cargo unifies feature flags within a single major version, so this

@@ -42,6 +42,7 @@
 //!   full handshake per connection until yamux pooling lands.
 //! * **No client certificates.** None of our target sites need them.
 
+use std::cell::RefCell;
 use std::io;
 // `Read`/`Write` are brought in unprefixed so rustls's sync `Reader`/`Writer`
 // methods resolve. The futures `Async*` traits are scoped to where the
@@ -56,26 +57,47 @@ use futures_util::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 use rustls_pki_types::ServerName;
 
-/// Build a `ClientConfig` for the target site. ALPN advertises the
-/// supplied protocol IDs; rustls picks one (or none) during handshake.
-///
-/// Wrapped in `Arc` because rustls expects shared ownership. For the
-/// per-request path the config is rebuilt every time (cheap, ~tens of µs);
-/// once we have a connection pool the config will become a kernel-wide
-/// singleton.
-fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+thread_local! {
+    /// Cached `ClientConfig`s keyed by ALPN list. Rebuilding the config
+    /// on every fetch dominates `tls:` timing — `webpki_roots::TLS_SERVER_ROOTS`
+    /// is 145 certificates that must be inserted into a fresh
+    /// `RootCertStore` and indexed for trust-anchor lookup, plus the
+    /// `rustls_rustcrypto::provider()` does its own per-call setup. That
+    /// work is 20-80ms inside WASM on a modest machine. Caching moves it
+    /// to a one-time cost per ALPN combination per browsing session.
+    ///
+    /// Today only `["http/1.1"]` is ever requested; once h2 lands a
+    /// second entry for `["h2","http/1.1"]` joins it. A `Vec<Vec<u8>>`
+    /// key fits both cases without a separate cache shape.
+    static CONFIG_CACHE: RefCell<Vec<(Vec<Vec<u8>>, Arc<ClientConfig>)>> = const {
+        RefCell::new(Vec::new())
+    };
+}
 
-    let provider = rustls_rustcrypto::provider();
-    let config = ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls: config: {e}")))?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let mut config = config;
-    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
-    Ok(Arc::new(config))
+/// Build (or reuse) a `ClientConfig` for the requested ALPN protocol list.
+/// First call per ALPN: certificate-store + crypto-provider initialisation.
+/// Cached calls: an `Arc::clone`. The `Arc<ClientConfig>` shares the heavy
+/// internal state (root store, crypto provider) so a TLS handshake
+/// allocates only the per-connection `ClientConnection` itself.
+fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
+    let wanted: Vec<Vec<u8>> = alpn.iter().map(|p| p.to_vec()).collect();
+    CONFIG_CACHE.with(|cell| -> io::Result<Arc<ClientConfig>> {
+        if let Some((_, c)) = cell.borrow().iter().find(|(k, _)| k == &wanted) {
+            return Ok(c.clone());
+        }
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let provider = rustls_rustcrypto::provider();
+        let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls: config: {e}")))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        config.alpn_protocols = wanted.clone();
+        let arc = Arc::new(config);
+        cell.borrow_mut().push((wanted, arc.clone()));
+        Ok(arc)
+    })
 }
 
 /// Async TLS stream wrapping a byte-stream inner. Implements

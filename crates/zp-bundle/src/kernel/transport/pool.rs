@@ -45,6 +45,7 @@ use std::task::{Context, Poll};
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 
+use super::http2::Http2Client;
 use super::tls::TlsStream;
 use super::yamux::MuxStream;
 
@@ -55,8 +56,8 @@ pub(crate) struct PoolKey {
     pub port: u16,
 }
 
-/// One pooled connection. Either plain HTTP/1.1 over yamux (for `http://`
-/// targets) or HTTP/1.1 over TLS over yamux (for `https://`). Both flavors
+/// One pooled HTTP/1.1 connection. Either plain over yamux (for `http://`
+/// targets) or wrapped in TLS over yamux (for `https://`). Both flavors
 /// implement `AsyncRead + AsyncWrite` so the HTTP layer is provider-blind.
 pub(crate) enum PooledConn {
     Plain(MuxStream),
@@ -111,6 +112,12 @@ const MAX_IDLE_PER_KEY: usize = 6;
 thread_local! {
     static POOL: RefCell<HashMap<PoolKey, VecDeque<PooledConn>>> =
         RefCell::new(HashMap::new());
+    /// Per-origin HTTP/2 client. Unlike HTTP/1.1 we don't take/put — one
+    /// `Http2Client` serves every concurrent fetch to the origin via h2's
+    /// own stream multiplex. The `SendRequest` clone is cheap (Arc internally)
+    /// so callers `get_http2()` to grab a handle and never return it.
+    static HTTP2_POOL: RefCell<HashMap<PoolKey, Http2Client>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Take the most-recently-used idle conn for `key`, or `None`.
@@ -146,4 +153,34 @@ pub(crate) fn put(key: PoolKey, conn: PooledConn) {
 /// holding `MuxStream`s whose parent connection is gone).
 pub(crate) fn clear() {
     POOL.with(|p| p.borrow_mut().clear());
+    HTTP2_POOL.with(|p| p.borrow_mut().clear());
+}
+
+/// Look up a live HTTP/2 client for the origin. Returns a clone of the
+/// `Http2Client` (cheap — h2 stores the actual connection state behind
+/// an `Arc`) so callers send concurrently without coordinating. Dead
+/// connections (`is_alive()` false) are evicted and treated as a miss.
+pub(crate) fn get_http2(key: &PoolKey) -> Option<Http2Client> {
+    HTTP2_POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        if let Some(client) = p.get(key) {
+            if client.is_alive() {
+                return Some(client.clone());
+            }
+            // Connection closed — drop the dead entry so the next caller
+            // opens a fresh one.
+            p.remove(key);
+        }
+        None
+    })
+}
+
+/// Register an HTTP/2 client as the per-origin singleton. If an entry
+/// already exists (race: two parallel fetches both opened a fresh
+/// connection), the new client wins — the older one's streams will
+/// drain naturally and the connection idles out.
+pub(crate) fn put_http2(key: PoolKey, client: Http2Client) {
+    HTTP2_POOL.with(|p| {
+        p.borrow_mut().insert(key, client);
+    });
 }
