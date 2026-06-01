@@ -132,7 +132,7 @@ func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	switch name {
-	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
+	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "http-rewriter.js", "wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
 		s.serveWeb(w, r, name)
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
@@ -539,7 +539,7 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 func needsServiceWorkerWASMCSP(path string) bool {
-	return path == controlPrefix+"sw.js" || path == assetPrefix+"rust-rewriter.js" || path == assetPrefix+"wasm_exec.js"
+	return path == controlPrefix+"sw.js" || path == assetPrefix+"rust-rewriter.js" || path == assetPrefix+"http-rewriter.js" || path == assetPrefix+"wasm_exec.js"
 }
 
 func zeroCSP(r *http.Request) string {

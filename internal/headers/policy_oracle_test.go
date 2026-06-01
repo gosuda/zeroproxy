@@ -43,32 +43,27 @@ type policyOracleCase struct {
 	src             http.Header
 	bodyTransformed bool
 	bodyDecoded     bool
-	challengeCompat bool
 	want            http.Header // exact, full output map
 }
 
-// forcedDefaults is the fixed block ConstructorPolicy always injects, EXCEPT
-// the Cache-Control no-store default which is conditional on !challengeCompat.
-// Spelling it once keeps the golden table readable without hiding the assertion
-// (the table still pins the full map; this is only corpus-construction sugar).
-func forcedDefaults(noStore bool) http.Header {
-	h := http.Header{
+// forcedDefaults is the fixed block ConstructorPolicy always injects. Spelling
+// it once keeps the golden table readable without hiding the assertion (the
+// table still pins the full map; this is only corpus-construction sugar).
+func forcedDefaults() http.Header {
+	return http.Header{
+		"Cache-Control":                 {"no-store"},
 		"X-Content-Type-Options":        {"nosniff"},
 		"Access-Control-Allow-Origin":   {"*"},
 		"Access-Control-Allow-Methods":  {"GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"},
 		"Access-Control-Allow-Headers":  {"*"},
 		"Access-Control-Expose-Headers": {"*"},
 	}
-	if noStore {
-		h["Cache-Control"] = []string{"no-store"}
-	}
-	return h
 }
 
 // merge builds an expected output map from the forced defaults plus the
 // surviving upstream headers. Surviving headers must use canonical keys.
-func merge(noStore bool, surviving http.Header) http.Header {
-	out := forcedDefaults(noStore)
+func merge(surviving http.Header) http.Header {
+	out := forcedDefaults()
 	for k, vs := range surviving {
 		out[k] = append([]string(nil), vs...)
 	}
@@ -99,8 +94,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"Content-Type":                 {"text/html; charset=utf-8"},
 				"Cross-Origin-Opener-Policy":   {"same-origin"},
 				"Cross-Origin-Embedder-Policy": {"require-corp"},
@@ -125,9 +119,8 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
 			// want == forced defaults only; every hostile copy overwritten.
-			want: merge(true, http.Header{}),
+			want: merge(http.Header{}),
 		},
 		{
 			// GAP 2: multi-value preservation + ORDER for a surviving header.
@@ -137,8 +130,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"Vary": {"Accept-Encoding", "Origin", "User-Agent"},
 			}),
 		},
@@ -151,8 +143,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"X-Custom-Thing": {"v1"},
 			}),
 		},
@@ -165,8 +156,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"Content-Length":   {"123"},
 				"Content-Encoding": {"gzip"},
 			}),
@@ -180,8 +170,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: true,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"Content-Encoding": {"gzip"},
 			}),
 		},
@@ -194,8 +183,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     true,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"Content-Length": {"123"},
 			}),
 		},
@@ -209,40 +197,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: true,
 			bodyDecoded:     true,
-			challengeCompat: false,
-			want:            merge(true, http.Header{}),
-		},
-		{
-			// challengeCompat=true subresource path: present upstream
-			// Cache-Control SURVIVES (no-store overwrite skipped).
-			name: "challengecompat_preserves_cache_control",
-			src: http.Header{
-				"Cache-Control": {"public, max-age=300"},
-				"Content-Type":  {"text/javascript"},
-			},
-			bodyTransformed: false,
-			bodyDecoded:     false,
-			challengeCompat: true,
-			// noStore=false: no forced Cache-Control; the surviving upstream one
-			// is carried instead.
-			want: merge(false, http.Header{
-				"Cache-Control": {"public, max-age=300"},
-				"Content-Type":  {"text/javascript"},
-			}),
-		},
-		{
-			// challengeCompat=true with NO upstream Cache-Control: stays
-			// header-less (we must not synthesize no-store back in).
-			name: "challengecompat_no_cache_control_stays_absent",
-			src: http.Header{
-				"Content-Type": {"text/javascript"},
-			},
-			bodyTransformed: false,
-			bodyDecoded:     false,
-			challengeCompat: true,
-			want: merge(false, http.Header{
-				"Content-Type": {"text/javascript"},
-			}),
+			want:            merge(http.Header{}),
 		},
 		{
 			// Full hidden-set strip with sentinels. Every member must vanish;
@@ -266,14 +221,13 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want:            merge(true, http.Header{}),
+			want:            merge(http.Header{}),
 		},
 		{
 			// Empty input: only the forced defaults appear.
 			name: "empty_input_defaults_only",
 			src:  http.Header{},
-			want: merge(true, http.Header{}),
+			want: merge(http.Header{}),
 		},
 		{
 			// Hop-by-hop full set stripped; a benign header survives alongside
@@ -292,8 +246,7 @@ func policyOracleCorpus() []policyOracleCase {
 			},
 			bodyTransformed: false,
 			bodyDecoded:     false,
-			challengeCompat: false,
-			want: merge(true, http.Header{
+			want: merge(http.Header{
 				"Content-Type": {"application/json"},
 			}),
 		},
@@ -338,7 +291,7 @@ func assertHeaderMapEqual(t *testing.T, got, want http.Header) {
 func TestConstructorPolicyCharacterizationOracle(t *testing.T) {
 	for _, tc := range policyOracleCorpus() {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ConstructorPolicy(tc.src, tc.bodyTransformed, tc.bodyDecoded, tc.challengeCompat)
+			got := ConstructorPolicy(tc.src, tc.bodyTransformed, tc.bodyDecoded)
 			assertHeaderMapEqual(t, got, tc.want)
 		})
 	}

@@ -219,7 +219,7 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
   );
   assert.ok(
     rt.includes(
-      "if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');",
+      "if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteScriptSource !== 'function') throw normalizedError('NotSupportedError');",
     ),
   );
   const start = rt.indexOf('function scriptProxyPath(target, kind)');
@@ -256,8 +256,8 @@ test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
     'message origin virtualization must avoid own-origin override as the first path',
   );
   assert.ok(
-    !rt.includes("u.hostname === 'challenges.cloudflare.com') return u.origin"),
-    'Cloudflare targetOrigin must not bypass proxied iframe origin mapping',
+    !rt.includes('return u.origin;'),
+    'targetOrigin must not bypass proxied iframe origin mapping',
   );
 });
 
@@ -311,6 +311,7 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   const index = fs.readFileSync('web/index.html', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
   assert.ok(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"));
+  assert.ok(sw.includes("importScripts('/zp/assets/http-rewriter.js')"));
   assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
   assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
   assert.ok(sw.includes('/zp/api/script'));
@@ -319,6 +320,8 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(build.includes('wasm-bindgen'));
   assert.ok(build.includes('ZPRewriter'));
   assert.ok(build.includes('ZPRustRewriter'));
+  assert.ok(build.includes('http-rewriter.js'));
+  assert.ok(fs.readFileSync('web/http-rewriter.js', 'utf8').includes('ZPHTTPRewriter'));
   assert.ok(build.includes('phase3-rust-wasm-ast-3-css'));
   assert.ok(build.includes('cargoBinPath'));
   assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
@@ -349,8 +352,8 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(index.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
   assert.ok(server.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
   assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
-  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js/);
-  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js/);
+  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js[\s\S]*http-rewriter\.js/);
+  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js[\s\S]*http-rewriter\.js/);
   assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
   assert.match(server, /connect-src 'self'/);
   assert.equal(core.includes('navigate-to'), false);

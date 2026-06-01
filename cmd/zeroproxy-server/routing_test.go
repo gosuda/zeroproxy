@@ -90,7 +90,7 @@ func TestServeAssetAllowlist(t *testing.T) {
 	s := &server{webDir: "testdata-does-not-exist"}
 
 	allowed := []string{
-		"zp-core.js", "runtime-prelude.js", "rust-rewriter.js",
+		"zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "http-rewriter.js",
 		"wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest",
 	}
 	for _, name := range allowed {

@@ -1,6 +1,4 @@
-// Shared helpers for the Puppeteer e2e suites (proxy.test.js,
-// turnstile-compat.test.js). Extracted verbatim from byte-identical copies that
-// previously lived in both files; behavior must stay identical to those originals.
+// Shared helpers for the Puppeteer e2e suite.
 const childProcess = require('node:child_process');
 const http = require('node:http');
 const path = require('node:path');

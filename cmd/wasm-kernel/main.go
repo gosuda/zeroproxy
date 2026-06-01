@@ -105,7 +105,7 @@ func (k *Kernel) jsCookieSet(this js.Value, args []js.Value) any {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	tab := k.tabFromValues(v.Get("tabId").String(), v.Get("streamIsolationKey").String(), false)
+	tab := k.tabFromValues(v.Get("tabId").String(), v.Get("streamIsolationKey").String())
 	tab.CookieJar.SetDocumentCookie(u, cookieLine)
 	return true
 }
@@ -152,8 +152,8 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 }
 
 // deliverResponse runs the post-fetch half of the bridge on an already-fetched
-// response: cookie capture, document transform, policy/challenge-compat header
-// shaping, body-cancellation ownership, and the final ResponseToJS marshal +
+// response: cookie capture, document transform, policy header shaping,
+// body-cancellation ownership, and the final ResponseToJS marshal +
 // resolve. It returns the resolved releaseOnReturn ownership flag (false once the
 // response body's cancel goroutine owns teardown, true again if ResponseToJS
 // fails and the body is closed here). Taking the response as an argument keeps it
@@ -167,11 +167,11 @@ func deliverResponse(ctx context.Context, resolve js.Value, req *http.Request, r
 		broadcastCookieSync(tab, finalURL)
 	}
 	transformed, decoded := transformDocumentResponse(req, resp, tab, finalURL, dynamicCompileAllowed, referrerPolicy)
-	challengeSub := applyResponsePolicy(resp, req, tab, finalURL, dynamicCompileAllowed, transformed, decoded)
+	applyResponsePolicy(resp, req, finalURL, dynamicCompileAllowed, transformed, decoded)
 	if installBodyCancellation(ctx, resp, cancel) {
 		releaseOnReturn = false
 	}
-	jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded, challengeSub)
+	jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
 	if err != nil {
 		if resp.Body != nil {
 			_ = resp.Body.Close()
@@ -231,25 +231,19 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 }
 
 // applyResponsePolicy stamps the response-shaping headers after transform: the
-// dynamic-compile signal, the ConstructorPolicy strip (no-store overwrite skipped
-// only for an armed challenge SUBRESOURCE), the challenge-compat projection, and
-// the response-URL / redirect markers. It returns the challengeSub bool computed
-// here so the caller feeds the SAME value to ResponseToJS — the second
-// ConstructorPolicy pass must not recompute it (else it could re-impose no-store).
-func applyResponsePolicy(resp *http.Response, req *http.Request, tab *zphttp.TabState, finalURL *url.URL, dynamicCompileAllowed, transformed, decoded bool) bool {
+// dynamic-compile signal, the ConstructorPolicy strip, and the response-URL /
+// redirect markers.
+func applyResponsePolicy(resp *http.Response, req *http.Request, finalURL *url.URL, dynamicCompileAllowed, transformed, decoded bool) {
 	if dynamicCompileAllowed {
 		resp.Header.Set("X-ZP-Dynamic-Compile", "1")
 	}
-	challengeSub := challengeSubresourceSkip(tab.ChallengeCompat, isDocumentRequest(req), resp.Header, finalURL)
-	resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded, challengeSub)
-	applyChallengeCompat(resp.Header, tab.ChallengeCompat, finalURL)
+	resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
 	resp.Header.Set("X-ZP-Response-URL", finalURL.String())
 	if finalURL.String() != req.URL.String() {
 		resp.Header.Set("X-ZP-Response-Redirected", "1")
 	} else {
 		resp.Header.Set("X-ZP-Response-Redirected", "0")
 	}
-	return challengeSub
 }
 
 // installBodyCancellation wraps resp.Body so a context cancellation closes it,
@@ -426,7 +420,7 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 			return
 		}
 		protocols := jsStringArray(opts.Get("protocols"))
-		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String(), false)
+		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String())
 		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab, websocketOrigin(opts.Get("documentUrl").String()))
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -508,33 +502,16 @@ func headerServers(raw string) []string {
 }
 
 func (k *Kernel) tabFor(req *http.Request) *zphttp.TabState {
-	// B4 INBOUND-STRIP OBLIGATION (mirror of the outbound B4 STRIP OBLIGATION in
-	// challenge.go applyChallengeCompat): X-Zp-Challenge-Compat-Arm is a
-	// page-influenceable request header. In B1 nothing trusted sends it, so this
-	// read is doubly inert: birth-only tab semantics (see tabFromValues) drop a
-	// forged arm on any already-born tab, and even an armed tab has no marker
-	// consumer yet. But when B4 lands the trusted arm sender, web/sw.js
-	// transportFetch and web/runtime-prelude.js fetchThroughRuntime MUST
-	// authoritatively set/delete this header the SAME way they handle
-	// X-ZP-Tab-Id / X-ZP-Runtime-Token, so a proxied page can never supply it.
-	armed := req.Header.Get("X-Zp-Challenge-Compat-Arm") == "1"
-	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"), armed)
+	return k.tabFromValues(req.Header.Get("X-Zp-Tab-Id"), req.Header.Get("X-Zp-Stream-Isolation-Key"))
 }
 
-func (k *Kernel) tabFromValues(tabID, keyB64 string, challengeCompat bool) *zphttp.TabState {
+func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 	if tabID == "" {
 		tabID = "default"
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if t := k.tabs[tabID]; t != nil {
-		// SECURITY INVARIANT (birth-only arm): an existing tab is returned AS-IS
-		// without ever touching t.ChallengeCompat. ChallengeCompat must be set
-		// ONLY at tab birth (below) because X-Zp-Challenge-Compat-Arm is
-		// page-forgeable (see tabFor). This early return is what prevents a
-		// proxied page from self-arming a live tab; honoring challengeCompat on
-		// this existing-tab path would convert the forgeable inbound header into
-		// an active self-arm primitive. Do NOT re-arm here.
 		return t
 	}
 	key, _ := base64.RawURLEncoding.DecodeString(keyB64)
@@ -542,7 +519,7 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string, challengeCompat bool) *zpht
 		key = make([]byte, 32)
 		_, _ = rand.Read(key)
 	}
-	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key, ChallengeCompat: challengeCompat}
+	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key}
 	k.tabs[tabID] = t
 	return t
 }

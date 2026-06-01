@@ -123,11 +123,13 @@ async function buildWeb() {
   await writeBundled('zp-core.js', [await readSource('zp-core.js')]);
   await writeBundled('runtime-prelude.js', [await readSource('runtime-prelude.js')]);
   await writeBundled('rust-rewriter.js', [rustRewriter]);
+  await writeBundled('http-rewriter.js', [await readSource('http-rewriter.js')]);
   await writeBundled('wasm_exec.js', [goWasmExec]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
   await writeBundled('sw.js', [
     await readSource('zp-core.js'),
     rustRewriter,
+    await readSource('http-rewriter.js'),
     goWasmExec,
     serviceWorker,
   ]);
@@ -149,7 +151,7 @@ async function readSource(name) {
 }
 
 async function writeBundled(fileName, parts) {
-  const source = parts.map((part) => String(part).trimEnd()).join('\n;\n') + '\n';
+  const source = `${parts.map((part) => String(part).trimEnd()).join('\n;\n')}\n`;
   const result = await esbuild.transform(source, {
     charset: 'utf8',
     legalComments: 'none',
@@ -162,7 +164,7 @@ async function writeBundled(fileName, parts) {
 
 function stripServiceWorkerImports(source) {
   return source.replace(
-    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|wasm_exec)\.js'\);\n/gm,
+    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|http-rewriter|wasm_exec)\.js'\);\n/gm,
     '',
   );
 }

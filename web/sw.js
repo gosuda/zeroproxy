@@ -1,6 +1,7 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the WASM transport. */
 importScripts('/zp/assets/zp-core.js');
 importScripts('/zp/assets/rust-rewriter.js');
+importScripts('/zp/assets/http-rewriter.js');
 importScripts('/zp/assets/wasm_exec.js');
 
 const nativeFetch = self.fetch.bind(self);
@@ -44,6 +45,7 @@ async function initKernel(servers) {
 
 async function initRewriter() {
   if (!self.ZPRewriter || !self.ZPRewriter.ready || typeof self.ZPRewriter.rewriteScript !== 'function') throw new Error('REALM_INJECTION_FAILURE');
+  if (!self.ZPHTTPRewriter || typeof self.ZPHTTPRewriter.rewriteScriptOrBlock !== 'function') throw new Error('REALM_INJECTION_FAILURE');
 }
 
 async function handleFetch(event) {
@@ -90,7 +92,7 @@ function isInternalAssetPath(pathname) {
 }
 
 function internalPath(path) {
-  return path === '/favicon.ico' || path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  return path === '/favicon.ico' || path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('http-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script');
@@ -136,7 +138,7 @@ async function virtualSubresource(req, cls, clientId) {
   const resp = await transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId });
   rememberResourceContext(cls.crossOriginURL || cls.sameOriginURL, targetUrl, ctx);
   if (shouldRewriteCSS(req, resp)) return rewriteCSSResponse(resp, { targetUrl });
-  return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req), challengeCompat: tab.challengeCompat }) : resp;
+  return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req) }) : resp;
 }
 
 function sameOriginTargetURL(sameOriginURL, ctx) {
@@ -186,14 +188,14 @@ async function apiScript(req, url, clientId) {
   if (ref) headers.push(['X-ZP-Fetch-Referrer', ref]);
   if (refPolicy) headers.push(['X-ZP-Fetch-Referrer-Policy', refPolicy]);
   const resp = await transportFetch(target, { method: 'GET', headers, tab: resolved.tab, entryId: resolved.entryId });
-  return rewriteScriptResponse(resp, { targetUrl: target, kind, challengeCompat: resolved.tab.challengeCompat });
+  return rewriteScriptResponse(resp, { targetUrl: target, kind });
 }
 
 async function apiWorkerScript(req, url, clientId) {
   const target = url.searchParams.get('u');
   const resolved = scriptRequestContext(req, url, clientId);
   if (!target || !resolved) return safeError('SW_NOT_READY', 503);
-  return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab: resolved.tab, entryId: resolved.entryId }), { targetUrl: target, kind: 'worker', challengeCompat: resolved.tab.challengeCompat });
+  return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab: resolved.tab, entryId: resolved.entryId }), { targetUrl: target, kind: 'worker' });
 }
 
 async function transportFetch(targetUrl, opt) {
@@ -244,19 +246,13 @@ function buildTransportHeaders(opt, u) {
   setFetchPolicyHeaders(headers, opt);
   return headers;
 }
-// Authoritative identity headers from TRUSTED per-tab state, plus the arm gate.
+// Authoritative identity headers from TRUSTED per-tab state.
 function setTrustedTransportHeaders(headers, opt) {
   headers.set('X-ZP-Tab-Id', opt.tab.tabId);
   headers.set('X-ZP-Entry-Id', opt.entryId || opt.tab.activeEntryId || '');
   headers.set('X-ZP-Stream-Isolation-Key', opt.tab.streamIsolationKey);
   headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
   headers.set('X-ZP-Relay-Servers', JSON.stringify(opt.tab.servers || []));
-  // B4: authoritatively set/delete the kernel arm header the SAME way as
-  // X-ZP-Tab-Id / X-ZP-Runtime-Token (per B1's INBOUND-STRIP OBLIGATION). The
-  // unconditional delete drops any page-forged value (e.g. via /zp/api/fetch
-  // payload headers); the conditional set re-adds it ONLY for an armed tab.
-  headers.delete('X-Zp-Challenge-Compat-Arm');
-  if (opt.tab.challengeCompat) headers.set('X-Zp-Challenge-Compat-Arm', '1');
 }
 function setDocumentTransportHeaders(headers, opt, u) {
   if (opt.document) headers.set('X-ZP-Document-Request', '1');
@@ -338,33 +334,13 @@ function shouldRewriteScript(req, resp) {
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
 }
-// B4 two-signal gate (URL half): classify on the REQUEST target URL's host/path
-// (same host/path test as the kernel's targetIsChallengeDocument in
-// cmd/wasm-kernel/challenge.go). Project the challenge CSP only when the per-tab
-// arm bit AND this classification both hold; non-challenge scripts on an armed tab
-// stay byte-identical. Header/body are never read here; this grants no egress.
-// KNOWN INCREMENT-1 GAP (deferred to B3): request-URL-only classification — no
-// cf-mitigated header, no follow-redirect final URL. Both error directions require
-// the arm bit and stay inside the bounded projection: under-classify (header-only /
-// redirect-TO-challenge script) -> restrictive default CSP, challenge may not run;
-// over-classify (challenge-looking request URL that redirects AWAY to a
-// non-challenge script) -> the bounded projection applies, adding ONLY the fixed
-// challenges.cloudflare.com host, with 'unsafe-eval' only if the target's own CSP
-// already granted it (never manufactured). Neither direction widens egress.
-function isChallengeURL(targetUrl) {
-  let u;
-  try { u = new URL(targetUrl); } catch { return false; }
-  return u.hostname === 'challenges.cloudflare.com' || u.pathname.startsWith('/cdn-cgi/challenge-platform/');
-}
 async function rewriteScriptResponse(resp, opt) {
-  const challengeCompat = !!(opt && opt.challengeCompat) && isChallengeURL(opt && opt.targetUrl);
-  const h = scriptResponseHeaders(resp, challengeCompat);
+  const h = scriptResponseHeaders(resp);
   let code = '';
   try {
     await initRewriter();
     const source = await resp.text();
-    const out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-    code = out && out.ok ? out.code : (self.ZPRewriter ? self.ZPRewriter.blockSource() : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');");
+    code = self.ZPHTTPRewriter.rewriteScriptOrBlock(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX });
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   }
@@ -383,27 +359,18 @@ async function rewriteCSSResponse(resp, opt) {
   try {
     await initRewriter();
     const source = await resp.text();
-    const out = self.ZPRewriter && self.ZPRewriter.rewriteCSS(source, { baseUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX });
-    return new Response(out && out.ok ? out.code : source, { status: resp.status, statusText: resp.statusText, headers: h });
+    const code = self.ZPHTTPRewriter.rewriteCSSSource(source, { baseUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX, fallback: value => String(value || '') });
+    return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
   } catch {
     return new Response(await resp.text().catch(() => ''), { status: resp.status, statusText: resp.statusText, headers: h });
   }
 }
-function scriptResponseHeaders(resp, challengeCompat) {
+function scriptResponseHeaders(resp) {
   const h = new Headers(resp.headers);
   h.set('Content-Type', 'text/javascript; charset=utf-8');
   h.set('Cache-Control', 'no-store');
   h.set('X-Content-Type-Options', 'nosniff');
-  // B4: defense-in-depth strip of the internal kernel marker so it can never reach
-  // the page on the script path even if upstream consumption changes (transportFetch
-  // -> addCSP already deletes it before any script response reaches here).
-  h.delete('X-ZP-Challenge-Compat');
-  // B4: project the challenge CSP onto rewritten challenge SCRIPTS so a real human's
-  // Cloudflare widget can execute. challengeCompat is the CALLER-COMPUTED TWO-SIGNAL
-  // result (per-tab arm bit AND isChallengeURL of the script's targetUrl). Default
-  // OFF: falsy => fixedCSP() byte-identical to before. The projection adds NO egress
-  // and NEVER manufactures eval (worker-src stays 'self' blob:).
-  h.set('Content-Security-Policy', ZP.fixedCSP([], { challengeCompat: !!challengeCompat }));
+  h.set('Content-Security-Policy', ZP.fixedCSP([]));
   applyCORS(h, null);
   return h;
 }
@@ -441,7 +408,7 @@ async function handleMessage(event) {
 function handleOpenShare(event, msg, ok, fail) {
   const routeKey = String(msg.routeKey || '');
   if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
-  const tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
+  const tab = createTab(msg.targetUrl, msg.servers);
   shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
   ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers });
 }
@@ -613,15 +580,12 @@ function runtimeMessageAuthorized(event, tab, msg, fail) {
   return true;
 }
 
-function createTab(targetUrl, servers, challengeCompat) {
+function createTab(targetUrl, servers) {
   const target = ZP.canonicalTargetURL(targetUrl).href;
   const tabId = ZP.randomId('t');
   const entryId = randomEntryId();
   const relayServers = ZP.relayServersForShare(servers || [], { allowLoopbackWS: true });
-  // B4: challengeCompat is the per-tab arm bit, set ONCE at tab birth from the
-  // explicit opt-in (default OFF). Birth-only by design: it mirrors the kernel's
-  // birth-only TabState.ChallengeCompat so a live tab can never be re-armed.
-  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers, challengeCompat: !!challengeCompat };
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, referrerUrl: '', title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;
@@ -746,13 +710,7 @@ function addCSP(resp, req, servers) {
   const h = new Headers(resp.headers);
   const allowDynamicCompile = h.get('X-ZP-Dynamic-Compile') === '1';
   h.delete('X-ZP-Dynamic-Compile');
-  // B4: consume the kernel's two-signal (armed AND header/URL-classified) challenge
-  // marker and project the challenge CSP. The internal marker is DELETED here so it
-  // never reaches the proxied page. Default OFF: absent marker => challengeCompat
-  // false => byte-identical to the prior CSP.
-  const challengeCompat = h.get('X-ZP-Challenge-Compat') === '1';
-  h.delete('X-ZP-Challenge-Compat');
-  h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { allowDynamicCompile, challengeCompat }));
+  h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { allowDynamicCompile }));
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
   applyCORS(h, req);

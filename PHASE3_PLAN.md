@@ -790,7 +790,7 @@ Required changes:
   - `querySelector`, `querySelectorAll`, `matches`, and `closest` must make selectors targeting `data-zp-*`, `#__zp-boot`, or exact internal script URLs return no ZeroProxy-owned nodes.
 - Provide virtual `NamedNodeMap` / `HTMLCollection` / `NodeList` facades that preserve `length`, numeric indexing, `item()`, iteration, and method binding.
 - Integrate every wrapper with `maskNativeFunction()` / existing native `toString` masking.
-- Add tests for Turnstile-style probes: count scripts, list attributes, serialize DOM, traverse nodes, and query marker selectors.
+- Add tests for guarded widget-style probes: count scripts, list attributes, serialize DOM, traverse nodes, and query marker selectors.
 
 ### Gate 6: Rewriter scope model rewrite
 

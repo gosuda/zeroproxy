@@ -2215,20 +2215,25 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     })(),
     ownKeys: Reflect.ownKeys(window)
       .map((k) => (typeof k === 'symbol' ? k.toString() : String(k)))
-      .filter((k) => /^ZP$|ZPRewriter|ZPRustRewriter|__zp_|__ZP_|zeroproxy/i.test(k)),
+      .filter((k) =>
+        /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_|zeroproxy/i.test(k),
+      ),
     propertyNames: Object.getOwnPropertyNames(window).filter((k) =>
-      /^ZP$|ZPRewriter|ZPRustRewriter|__zp_|__ZP_/i.test(k),
+      /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_/i.test(k),
     ),
     propertySymbols: Object.getOwnPropertySymbols(window)
       .map(String)
       .filter((k) => /zeroproxy/i.test(k)),
     descriptors: Reflect.ownKeys(Object.getOwnPropertyDescriptors(window))
       .map((k) => (typeof k === 'symbol' ? k.toString() : String(k)))
-      .filter((k) => /^ZP$|ZPRewriter|ZPRustRewriter|__zp_|__ZP_|zeroproxy/i.test(k)),
+      .filter((k) =>
+        /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_|zeroproxy/i.test(k),
+      ),
     directDescriptorLeaks: [
       'ZP',
       'ZPRewriter',
       'ZPRustRewriter',
+      'ZPHTTPRewriter',
       '__ZP_BOOT',
       '__ZP_SET_BASE',
       '__zp_get',
@@ -2383,6 +2388,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     xhr: value.xhr,
     ws: value.ws,
   });
+  // Yield after the target-page navigation before reusing the same tab for the shell.
+  // Under load Chromium can otherwise starve the next Puppeteer navigation until the
+  // test-level timeout, even though the page has reached the asserted title state.
+  await new Promise((resolve) => setTimeout(resolve, 50));
   await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
   await waitForPage(
     page,

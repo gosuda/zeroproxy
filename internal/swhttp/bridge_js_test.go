@@ -19,7 +19,7 @@ func TestResponseToJSUsesNullBodyForNullBodyStatus(t *testing.T) {
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader("must not be passed to Response constructor")),
 	}
-	v, err := ResponseToJS(context.Background(), resp, false, false, false)
+	v, err := ResponseToJS(context.Background(), resp, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,7 @@
     return proxyOrigin ? new URL(path, proxyOrigin).href : path;
   }
   importScripts(internalURL('/zp/assets/zp-core.js'));
-  const nativeFunctionToString = self.Function && self.Function.prototype && self.Function.prototype.toString;
+  const nativeFunctionToString = self.Function?.prototype?.toString;
   const toStringMap = new WeakMap();
   function nativeFunctionSource(name) { return 'function ' + name + '() { [native code] }'; }
   function maskNativeFunction(fn, name) {
@@ -357,7 +357,7 @@
     apiInit.duplex = 'half';
   }
   self.fetch = async function fetch(input, init={}) {
-    const target = ZP.canonicalTargetURL(input && input.url || input, base.href).href;
+    const target = ZP.canonicalTargetURL(input?.url || input, base.href).href;
     const req = buildFetchRequest(input, init);
     const headers = buildForwardHeaders(req);
     const apiInit = { method: req.method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'follow' };
@@ -365,10 +365,11 @@
     return nativeFetch(internalURL('/zp/api/fetch?url=' + encodeURIComponent(target)), apiInit);
   };
   maskNativeFunction(self.fetch, 'fetch');
+  function blockedConstructor() { blocked(); }
   self.XMLHttpRequest = undefined;
-  self.WebSocket = function(){ blocked(); };
-  self.EventSource = function(){ blocked(); };
-  self.RTCPeerConnection = self.webkitRTCPeerConnection = self.WebTransport = self.WebSocketStream = function(){ blocked(); };
+  self.WebSocket = blockedConstructor;
+  self.EventSource = blockedConstructor;
+  self.RTCPeerConnection = self.webkitRTCPeerConnection = self.WebTransport = self.WebSocketStream = blockedConstructor;
   const nativeImportScripts = self.importScripts.bind(self);
   function importScriptURL(raw) {
     const value = String(raw);

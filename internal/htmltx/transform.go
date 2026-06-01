@@ -302,7 +302,7 @@ func runtimePrelude(opt Options) string {
 	})
 	var b strings.Builder
 	b.Grow(len(bootJSON) + 130)
-	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp>(function(){const boot=`)
+	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp src=/zp/assets/http-rewriter.js></script><script nonce=zp>(function(){const boot=`)
 	b.Write(bootJSON)
 	b.WriteString(`;Object.defineProperty(window,'__ZP_BOOT',{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()

@@ -16,6 +16,7 @@ Browser top-level target document
   │       ├─ __zp_kernel_init()        -> transport readiness
   │       └─ __zp_cookie_set(request)  -> document.cookie bridge
   ├─ /zp/assets/rust-rewriter.js
+  ├─ /zp/assets/http-rewriter.js
   │   └─ Rust WASM AST walker returning rewritten JavaScript
   ├─ /zp/assets/runtime-prelude.js
   │   ├─ fetch/XHR/EventSource/WebSocket/sendBeacon wrappers routed through same-origin runtime APIs
@@ -107,7 +108,7 @@ The Go WASM kernel exposes `__zp_kernel_init`, `__go_jshttp`, `__zp_stream`, and
 
 ## HTML, header, and runtime policy
 
-`internal/htmltx` uses `golang.org/x/net/html` tokenization. It injects `zp-core.js`, `rust-rewriter.js`, inert JSON boot data, and `runtime-prelude.js`; removes base/meta refresh/ping/preload-style escape vectors from static documents; rewrites iframe/frame document URLs to encrypted `/zp/p` routes; preserves author-visible anchor/form attributes for runtime click/submit interception; proxies executable external script sources through `/zp/api/script?u=<absolute-target>&kind=<classic|module>`; routes inline scripts and event handlers through the Rust WASM rewriter from the target realm; injects prelude code into `srcdoc`; and replaces blocked embed/object content with inert placeholders.
+`internal/htmltx` uses `golang.org/x/net/html` tokenization. It injects `zp-core.js`, `rust-rewriter.js`, `http-rewriter.js`, inert JSON boot data, and `runtime-prelude.js`; removes base/meta refresh/ping/preload-style escape vectors from static documents; rewrites iframe/frame document URLs to encrypted `/zp/p` routes; preserves author-visible anchor/form attributes for runtime click/submit interception; proxies executable external script sources through `/zp/api/script?u=<absolute-target>&kind=<classic|module>`; routes inline scripts and event handlers through the shared browser-side HTTP rewriter facade from the target realm; injects prelude code into `srcdoc`; and replaces blocked embed/object content with inert placeholders.
 
 `internal/headers.ConstructorPolicy` strips target-controlled policy, storage, network-control, hop-by-hop, redirect, and transformed-body headers before constructing a browser `Response`. It defaults cache behavior to `Cache-Control: no-store`.
 
@@ -119,13 +120,13 @@ Service Worker:
 
 - `/zp/p/<encrypted>` document requests are resolved from in-memory route state and fetched through `__go_jshttp`; unknown navigations receive safe ZeroProxy errors and unknown subresources receive `Response.error()`.
 - `/zp/api/fetch` accepts runtime `fetch`/XHR/EventSource/sendBeacon payloads, adds `X-ZP-*` tab metadata, enforces the request-body size limit, and routes through the WASM kernel.
-- `/zp/api/script?u=...` fetches the absolute target script through the kernel and returns same-origin JavaScript with `Content-Security-Policy: ZP.fixedCSP()`. It runs the Rust WASM rewriter and fails closed to a throwing script on parse/rewrite failure.
+- `/zp/api/script?u=...` fetches the absolute target script through the kernel and returns same-origin JavaScript with `Content-Security-Policy: ZP.fixedCSP()`. It runs the shared browser-side HTTP rewriter facade and fails closed to a throwing script on parse/rewrite failure.
 - `/zp/api/worker-script?u=...` does the same for worker and imported worker scripts. Worker bootstrap URLs carry the target script URL and tab id in the hash; `worker-prelude.js` preserves internal `/zp/api/worker-script` imports without double-wrapping them.
 
 HTML transform:
 
 - `<script src>` with an executable classic/module type becomes `/zp/api/script?u=<absolute target>&kind=<kind>` and stores the original URL in `data-zp-target-url`; `integrity` is moved to `data-zp-integrity`.
-- Inline `<script>` and event attributes are sent through the Rust WASM rewriter; parse/rewrite failure produces a throwing inline script or event handler instead of executing original source.
+- Inline `<script>` and event attributes are sent through the shared browser-side HTTP rewriter facade; parse/rewrite failure produces a throwing inline script or event handler instead of executing original source.
 - `<iframe src>` and `<frame src>` become encrypted `/zp/p` routes. `<a href>`, `<area href>`, `<form action>`, and submitter `formaction` keep author-visible attributes, but runtime click/submit interception resolves them against the virtual target URL and converts the actual navigation into a `/zp/p` route. `javascript:`, `data:`, and `vbscript:` navigations are blocked.
 - `<base>` is replaced by a small `__ZP_SET_BASE` script; meta refresh, ping, object, and embed are removed or replaced with inert placeholders. Static preload/prefetch/preconnect/dns-prefetch/prerender/manifest links are removed. Dynamic HTML and attribute/property hooks preserve the link element shape when needed for framework compatibility, but suppress active `rel`/`href` and store the original values in `data-zp-blocked-rel` / `data-zp-blocked-url`.
 - `srcdoc` receives the runtime boot prelude so its clean realm is hooked before target markup executes.
@@ -142,10 +143,10 @@ Runtime prelude:
 JavaScript rewriting:
 
 - `scripts/build.mjs` builds `rewriter-rs` for `wasm32-unknown-unknown`, runs `wasm-bindgen --target no-modules`, embeds the generated WASM bytes into `rust-rewriter.js`, and does not emit `js-rewriter.js`, `oxc-parser.js`, or a separate parser WASM asset.
-- `rust-rewriter.js` installs two APIs: `ZPRustRewriter` is the low-level four-argument bridge to Rust, while `ZPRewriter` is the public compatibility API used by the Service Worker and runtime prelude. `ZPRewriter.ready` is true after the script loads because the embedded WASM is initialized synchronously.
+- `rust-rewriter.js` installs two APIs: `ZPRustRewriter` is the low-level four-argument bridge to Rust, while `ZPRewriter` is the compatibility API over the Rust bridge. `http-rewriter.js` installs `ZPHTTPRewriter`, the shared facade used by the Service Worker and runtime prelude for script, CSS, blocked-script, and dynamic function-body rewrite calls. `ZPRewriter.ready` and `ZPHTTPRewriter.ready()` are available after the embedded WASM is initialized synchronously.
 - Classic, module, worker, imported, inline, event-handler, and dynamic function-body sources all use the Rust AST walker. Parse or rewrite failures fail closed; there is no fallback that executes the original target source.
 - Expression compatibility is preferred over blocking when the runtime membrane can preserve semantics. Global/window/location reads and writes, constructor-constructor escapes, dangerous calls, `new WebSocket(...)`, compound assignments, and update expressions are rewritten to `__zp_get`, `__zp_set`, `__zp_assign`, `__zp_update`, `__zp_call`, and `__zp_construct`.
-- Synchronous rewrite paths are limited to target realms where `rust-rewriter.js` has already loaded. Dynamic `Function`/`eval`/string timers call `ZPRewriter.rewriteFunctionBody(...)` before compiling under `with(__zp_scope)`, so virtual globals are applied before any generated function body can execute.
+- Synchronous rewrite paths are limited to realms where `rust-rewriter.js` and `http-rewriter.js` have already loaded. Dynamic `Function`/`eval`/string timers call `ZPHTTPRewriter.rewriteFunctionBody(...)` before compiling under `with(__zp_scope)`, so virtual globals are applied before any generated function body can execute.
 
 Browser `window.location` cannot be made indistinguishable from the target origin from ordinary page JavaScript in a same-origin proxy document: many `Location` properties are browser-owned/unforgeable and the real address bar origin remains the proxy origin. ZeroProxy therefore uses best-effort getter masking plus navigation traps, and treats Service Worker/CSP classification as the security boundary.
 

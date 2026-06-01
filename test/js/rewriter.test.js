@@ -274,10 +274,9 @@ test('Rust rewriter accepts target URLs with cache-busting query strings', async
 
 test('Rust rewriter accepts extensionless target URLs', async () => {
   const rewriter = await loadRewriter();
-  const out = rewriter.rewriteScript(`window._cf_chl_opt = { ray: location.href };`, {
+  const out = rewriter.rewriteScript(`window.__probe_opt = { ray: location.href };`, {
     kind: 'classic',
-    targetUrl:
-      'https://2captcha.com/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=abc123',
+    targetUrl: 'https://example.com/extensionless/loader/v1?ray=abc123',
   });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.match(out.code, /__zp_get\(globalThis,"location"\)\.href/);
@@ -285,16 +284,16 @@ test('Rust rewriter accepts extensionless target URLs', async () => {
 
 test('Rust rewriter routes in-operator checks on virtual windows through helper', async () => {
   const rewriter = await loadRewriter();
-  const out = rewriter.rewriteScript(`if ("turnstile" in window) window.turnstile.render();`, {
+  const out = rewriter.rewriteScript(`if ("widget" in window) window.widget.render();`, {
     kind: 'classic',
-    targetUrl: 'https://challenges.cloudflare.com/turnstile/v0/api.js',
+    targetUrl: 'https://widgets.example/assets/api.js',
   });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.ok(out.code.includes('(__zp_has(__zp_get(globalThis,"window"),"turnstile"))'));
-  assert.equal(out.code.includes('"turnstile" in __zp_get(globalThis,"window")'), false);
+  assert.ok(out.code.includes('(__zp_has(__zp_get(globalThis,"window"),"widget"))'));
+  assert.equal(out.code.includes('"widget" in __zp_get(globalThis,"window")'), false);
 });
 
-test('Rust rewriter preserves optional access semantics for guarded challenge probes', async () => {
+test('Rust rewriter preserves optional access semantics for guarded probes', async () => {
   const rewriter = await loadRewriter();
   const out = rewriter.rewriteScript(
     `
@@ -305,7 +304,7 @@ test('Rust rewriter preserves optional access semantics for guarded challenge pr
   `,
     {
       kind: 'classic',
-      targetUrl: 'https://challenges.cloudflare.com/turnstile/v0/api.js',
+      targetUrl: 'https://widgets.example/assets/api.js',
     },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
@@ -339,8 +338,7 @@ test('Rust rewriter tracks computed document aliases from global aliases', async
     `let G = window; let D = G[name]; const host = D[loc].hostname; D[loc].replace('/next');`,
     {
       kind: 'classic',
-      targetUrl:
-        'https://2captcha.com/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=abc',
+      targetUrl: 'https://example.com/extensionless/orchestrate/v1?ray=abc',
     },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));

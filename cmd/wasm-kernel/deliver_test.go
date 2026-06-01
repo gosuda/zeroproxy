@@ -41,9 +41,9 @@ type deliverResult struct {
 // runDeliver drives deliverResponse with a constructed (already-fetched) response
 // — no engine — and returns the resolved JS Response shape, the ownership flag,
 // and the post-call cookie-jar state.
-func runDeliver(req *http.Request, resp *http.Response, finalURL *url.URL, armed bool) deliverResult {
+func runDeliver(req *http.Request, resp *http.Response, finalURL *url.URL) deliverResult {
 	jar := cookiejar.New()
-	tab := &zphttp.TabState{TabID: "t", CookieJar: jar, ChallengeCompat: armed}
+	tab := &zphttp.TabState{TabID: "t", CookieJar: jar}
 	var captured js.Value
 	var got bool
 	rf := js.FuncOf(func(_ js.Value, args []js.Value) any {
@@ -99,33 +99,13 @@ func deliverResp(status int, hdr map[string]string, setCookie, body string, hasB
 	return r
 }
 
-const challengeAPI = "https://challenges.cloudflare.com/turnstile/v0/api.js"
-
-// TestDeliverResponseChallengeSubresourceCacheSemantics pins THE security
-// invariant the decomposition must preserve: challengeSub is computed once and
-// fed to ConstructorPolicy, so an ARMED classified challenge SUBRESOURCE keeps
-// the target's cache semantics (no forced no-store) while every other response
-// is forced to no-store. A regression that recomputed challengeSub after the
-// first policy pass would re-impose no-store on the armed case and fail here.
-func TestDeliverResponseChallengeSubresourceCacheSemantics(t *testing.T) {
-	hdr := map[string]string{"Content-Type": "application/javascript", "Cf-Mitigated": "challenge", "Cache-Control": "public, max-age=600"}
-
-	armed := runDeliver(deliverReq(nil, challengeAPI), deliverResp(200, hdr, "", "api", true), mustURL(t, challengeAPI), true)
-	if armed.headers["cache-control"] != "public, max-age=600" {
-		t.Fatalf("armed challenge subresource Cache-Control = %q, want the target value preserved verbatim (public, max-age=600); a forced no-store OR a dropped header both mean the challengeSub skip was lost", armed.headers["cache-control"])
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	off := runDeliver(deliverReq(nil, challengeAPI), deliverResp(200, hdr, "", "api", true), mustURL(t, challengeAPI), false)
-	if !strings.Contains(strings.ToLower(off.headers["cache-control"]), "no-store") {
-		t.Fatalf("non-armed Cache-Control = %q, want no-store imposed", off.headers["cache-control"])
-	}
-
-	// A challenge DOCUMENT (navigation) stays on no-store even when armed — only
-	// subresources (isDoc==false) get the skip.
-	doc := runDeliver(deliverReq(map[string]string{"X-Zp-Document-Request": "1"}, challengeAPI), deliverResp(200, hdr, "", "<html></html>", true), mustURL(t, challengeAPI), true)
-	if !strings.Contains(strings.ToLower(doc.headers["cache-control"]), "no-store") {
-		t.Fatalf("armed challenge DOCUMENT Cache-Control = %q, want no-store (document is never skipped)", doc.headers["cache-control"])
-	}
+	return u
 }
 
 // TestDeliverResponseOwnershipAndDelivery pins releaseOnReturn per path (the
@@ -135,7 +115,7 @@ func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
 	plain := "https://t.test/a.js"
 
 	// Body present -> ownership transfers to the body cancel goroutine -> false.
-	withBody := runDeliver(deliverReq(nil, plain), deliverResp(200, map[string]string{"Content-Type": "application/javascript"}, "", "x=1", true), mustURL(t, plain), false)
+	withBody := runDeliver(deliverReq(nil, plain), deliverResp(200, map[string]string{"Content-Type": "application/javascript"}, "", "x=1", true), mustURL(t, plain))
 	if withBody.release {
 		t.Fatal("body-present: releaseOnReturn must be false (body goroutine owns teardown)")
 	}
@@ -144,7 +124,7 @@ func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
 	}
 
 	// Nil body -> nothing owns teardown -> the deferred cancel must still fire -> true.
-	noBody := runDeliver(deliverReq(nil, plain), deliverResp(204, map[string]string{"Content-Type": "text/plain"}, "", "", false), mustURL(t, plain), false)
+	noBody := runDeliver(deliverReq(nil, plain), deliverResp(204, map[string]string{"Content-Type": "text/plain"}, "", "", false), mustURL(t, plain))
 	if !noBody.release {
 		t.Fatal("nil-body: releaseOnReturn must stay true (caller's deferred cancel owns teardown)")
 	}
@@ -153,7 +133,7 @@ func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
 	}
 
 	// Document + HTML -> transformed to text/html; body is rewritten (not the input).
-	doc := runDeliver(deliverReq(map[string]string{"X-Zp-Document-Request": "1"}, "https://t.test/"), deliverResp(200, map[string]string{"Content-Type": "text/html"}, "", "<html><head></head><body>hi</body></html>", true), mustURL(t, "https://t.test/"), false)
+	doc := runDeliver(deliverReq(map[string]string{"X-Zp-Document-Request": "1"}, "https://t.test/"), deliverResp(200, map[string]string{"Content-Type": "text/html"}, "", "<html><head></head><body>hi</body></html>", true), mustURL(t, "https://t.test/"))
 	if !strings.Contains(strings.ToLower(doc.headers["content-type"]), "text/html") {
 		t.Fatalf("document transform Content-Type = %q, want text/html", doc.headers["content-type"])
 	}
@@ -162,11 +142,11 @@ func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
 	}
 
 	// Set-Cookie is captured into the jar; credentials=omit skips capture.
-	withCookie := runDeliver(deliverReq(nil, plain), deliverResp(200, map[string]string{"Content-Type": "text/plain"}, "sid=abc; Path=/", "c", true), mustURL(t, plain), false)
+	withCookie := runDeliver(deliverReq(nil, plain), deliverResp(200, map[string]string{"Content-Type": "text/plain"}, "sid=abc; Path=/", "c", true), mustURL(t, plain))
 	if !strings.Contains(withCookie.cookieDoc, "sid=abc") {
 		t.Fatalf("cookie not captured: DocumentCookie=%q", withCookie.cookieDoc)
 	}
-	omit := runDeliver(deliverReq(map[string]string{"X-Zp-Fetch-Credentials": "omit"}, plain), deliverResp(200, map[string]string{"Content-Type": "text/plain"}, "sid=zzz; Path=/", "o", true), mustURL(t, plain), false)
+	omit := runDeliver(deliverReq(map[string]string{"X-Zp-Fetch-Credentials": "omit"}, plain), deliverResp(200, map[string]string{"Content-Type": "text/plain"}, "sid=zzz; Path=/", "o", true), mustURL(t, plain))
 	if strings.Contains(omit.cookieDoc, "sid=zzz") {
 		t.Fatalf("credentials=omit must skip cookie capture, got DocumentCookie=%q", omit.cookieDoc)
 	}

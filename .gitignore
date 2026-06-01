@@ -11,3 +11,4 @@ rewriter-rs/target/
 /wasm-kernel
 GOAL.md
 .claude/
+.npm-cache
