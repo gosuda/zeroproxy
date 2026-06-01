@@ -87,25 +87,13 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case path == controlPrefix+"sw.js":
 		s.serveWeb(w, r, "sw.js")
 	case path == controlPrefix+"ws-pipe":
+		// Step 14 + yamux: 1 WS = N yamux streams, each = 1 TCP+SOCKS5
+		// byte-pipe to the upstream dialer. The Rust WASM kernel speaks
+		// yamux (client) + SOCKS5 + TLS + HTTP/1.1 on top, so the relay
+		// only sees yamux framing + ciphertext. `handlePipe` calls
+		// `yamuxconn.Server()` on the WS and dispatches each accepted
+		// stream through `bridgeTargetStream`.
 		s.handlePipe(w, r)
-	case path == controlPrefix+"relay":
-		// Step 13: Rust kernel transport endpoint. 1 WS = 1 HTTP request.
-		// Simpler than ws-pipe (which uses yamux multiplex); intended for
-		// the Rust zp-kernel during the Go → Rust kernel cutover.
-		log.Printf("relay: WS upgrade request from %s", r.RemoteAddr)
-		s.handleRelay(w, r)
-	case path == controlPrefix+"relay-mux":
-		// Mux upgrade of /zp/relay: one persistent WS carries N concurrent
-		// HTTP requests, each tagged with a u32 stream ID. Eliminates the
-		// per-request WS upgrade cost that bottlenecks pages with 100+
-		// subresources. Wire protocol defined in relay.go (muxFrame* consts).
-		log.Printf("relay-mux: WS upgrade request from %s", r.RemoteAddr)
-		s.handleRelayMux(w, r)
-	case path == controlPrefix+"ws-bridge":
-		// Step 13: Rust kernel WebSocket stream endpoint. 1 WS = 1 target WS.
-		// Replaces the yamux-multiplexed __zp_stream path on ws-pipe.
-		log.Printf("ws-bridge: WS upgrade request from %s", r.RemoteAddr)
-		s.handleWSBridge(w, r)
 	case strings.HasPrefix(path, controlPrefix+"p/"):
 		s.serveWeb(w, r, "index.html")
 	case strings.HasPrefix(path, controlPrefix+"error/"):
@@ -246,50 +234,6 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.acceptStreams(r.Context(), sess)
-}
-
-// handleRelay is the Step-13 transport endpoint consumed by the Rust kernel
-// (crates/zp-kernel). One WebSocket = one upstream HTTP request. The wire
-// protocol is intentionally simple compared to the yamux+SOCKS5 ws-pipe so
-// the Rust port can land without re-implementing yamux in the browser.
-//
-//	C → S text frame: {"url":"...","method":"GET","headers":[["Name","Value"]],"body_b64":"..."}
-//	S → C text frame: {"ok":true,"status":200,"headers":[["Name","Value"]],"finalURL":"..."}
-//	S → C binary frames: response body chunks
-//	S → C empty binary frame: end-of-body
-//
-// On error, the server replies once with {"ok":false,"code":"...","host":"..."} and closes.
-func (s *server) handleRelay(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	c, err := pipeUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer c.Close()
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	bridgeRelayWS(ctx, c, s.dialTargetTCP, s.jarFor)
-}
-
-// handleRelayMux is the multiplexed sibling of handleRelay. One WebSocket
-// carries N concurrent HTTP requests, each tagged with a u32 stream ID.
-// Wire protocol: see muxFrame* constants in relay.go.
-func (s *server) handleRelayMux(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	c, err := pipeUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer c.Close()
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	bridgeMuxRelayWS(ctx, c, s.dialTargetTCP, s.jarFor)
 }
 
 var pipeUpgrader = websocket.Upgrader{

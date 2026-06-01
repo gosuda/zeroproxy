@@ -17,6 +17,27 @@ js-sys = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
+# Step 14: client-side transport stack. The kernel speaks SOCKS5+TLS+HTTP
+# itself over a WebSocket byte-pipe so the relay never sees plaintext.
+# More deps (rustls, h2, yamux) land in later steps; this round is just the
+# WebSocket → futures::io::AsyncRead/AsyncWrite adapter foundation.
+futures-util = { workspace = true }
+pin-project-lite = { workspace = true }
+bytes = { workspace = true }
+httparse = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-rustcrypto = { workspace = true }
+webpki-roots = { workspace = true }
+getrandom = { workspace = true }
+yamux = { workspace = true }
+futures = { workspace = true }
+# RustCrypto chains (sha2, p256, etc) still depend on getrandom 0.2 and
+# refuse to compile on wasm32-unknown-unknown without the `js` feature.
+# Cargo unifies feature flags within a single major version, so this
+# direct-dep entry is just to *enable* `js` on the transitive 0.2 graph.
+getrandom_02 = { package = "getrandom", version = "0.2", default-features = false, features = ["js"] }
+
 # web-sys feature set carried over from the absorbed zp-kernel crate
 # (kernel mux opens WebSocket, builds Headers/Response/Request, streams via
 # ReadableStream, reads File/Blob bodies for upload). The membrane/wtproxy/
@@ -41,6 +62,7 @@ features = [
     "WorkerGlobalScope",
     "ServiceWorkerGlobalScope",
     "Location",
+    "Url",
     "Blob",
     "FileReader",
     "ProgressEvent",

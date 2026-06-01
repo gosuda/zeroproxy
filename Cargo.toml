@@ -35,6 +35,40 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+# Client-side transport stack (Step 14: server-TLS regression repair).
+# These run inside the SW WASM bundle so target HTTPS handshakes happen
+# on the client; the relay server is reduced to a byte-pipe.
+futures-util = { version = "0.3", default-features = false, features = ["std", "io"] }
+pin-project-lite = "0.2"
+bytes = "1"
+httparse = "1"
+
+# TLS: rustls without a built-in crypto provider so we can plug
+# rustls-rustcrypto (pure-Rust, WASM-friendly). `ring` and `aws-lc-rs`
+# either fail to compile on wasm32-unknown-unknown or pull in C/asm code
+# the WASM linker rejects, so they're not options.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging"] }
+# `web` feature gives UnixTime::now() via web-time on wasm32-unknown-unknown.
+# Without it rustls's default TimeProvider fails to compile against pki-types.
+rustls-pki-types = { version = "1", features = ["web"] }
+rustls-rustcrypto = "0.0.2-alpha"
+webpki-roots = "0.26"
+# getrandom backs the rustcrypto provider's RNGs. wasm_js feature wires
+# `crypto.getRandomValues` as the entropy source on wasm32-unknown-unknown.
+getrandom = { version = "0.3", default-features = false, features = ["wasm_js"] }
+
+# Yamux client: 1 WebSocket = N concurrent streams. Pure-Rust, futures-based.
+# wasm32 compatibility depends on whether the crate's Connection<T> bounds
+# require Send + Sync — verified by cargo check below.
+yamux = "0.13"
+# Full `futures` crate for `Stream`/`Sink`/`SinkExt::send` used by yamux's
+# native API surface. `futures-util` alone doesn't give us yamux's
+# preferred re-exports; pull `futures` (the meta-crate) for compatibility.
+# `async-await` feature enables the `select!` / `select_biased!` macros our
+# yamux driver task uses to fairly interleave inbound polling and outbound
+# open commands.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 [profile.release]
 opt-level = "z"
 lto = true
