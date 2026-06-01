@@ -184,3 +184,15 @@ pub(crate) fn put_http2(key: PoolKey, client: Http2Client) {
         p.borrow_mut().insert(key, client);
     });
 }
+
+/// Drop the cached HTTP/2 client for `key`. Called when a `send_request`
+/// on a pool clone fails — h2 0.4 has no synchronous "is the connection
+/// alive?" probe, so the pool can hand out dead clones whose underlying
+/// connection has GoAway'd or whose driver task has exited. Without
+/// eviction the next call reads the same dead clone and the cold-path
+/// fallback runs forever instead of replacing the pool entry.
+pub(crate) fn remove_http2(key: &PoolKey) {
+    HTTP2_POOL.with(|p| {
+        p.borrow_mut().remove(key);
+    });
+}

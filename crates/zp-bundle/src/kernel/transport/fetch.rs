@@ -106,10 +106,11 @@ pub(crate) async fn fetch(
                     e,
                     delta_ms(t0)
                 ));
-                // Fall through to the cold path; pool::get_http2 already
-                // evicted on `is_alive()=false`, but a live-looking client
-                // can still fail one specific send (server GoAway between
-                // our check and send_request).
+                // h2 0.4 can't detect a dead connection synchronously, so
+                // the pool happily kept handing out the same dead clone.
+                // Evict here so the cold path replaces the entry instead
+                // of falling through forever on every subsequent fetch.
+                pool::remove_http2(&key);
             }
         }
     }
