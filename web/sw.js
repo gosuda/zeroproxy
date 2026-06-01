@@ -314,6 +314,18 @@ async function runtimeAPI(req, url, clientId) {
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
     const tab = explicitTab || (scriptCtx && tabs.get(scriptCtx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
+    // DIAG: NAVER ships an anti-bot WASM tracker (508e018/58b3e8e539...js)
+    // from two CDNs — wtm.pstatic.net and ncpt.naver.com — both of which
+    // spin inside their WASM `$_start` when the proxy membrane is detected.
+    // Debugger pause confirms the page wedges on this exact frame. Return
+    // a noop body so the script tag resolves without executing the tracker.
+    try {
+      const tu = new URL(target);
+      if (tu.host === 'wtm.pstatic.net' || tu.host === 'ncpt.naver.com') {
+        return new Response('/* ZP_TRACKER_BLOCKED ' + tu.host + ' */',
+          { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
+      }
+    } catch {}
     // request 자체를 transportFetch 에 전달 → browser-set headers (Accept,
     // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
     // anti-bot 회로가 404 NAVER 페이지를 반환하는 경우가 있음 → SafeFrame

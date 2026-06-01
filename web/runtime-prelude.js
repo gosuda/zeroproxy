@@ -642,6 +642,26 @@
   __zpStep('CanvasAntiFingerprinting', () => installCanvasAntiFingerprinting(root));
   __zpStep('AudioAntiFingerprinting', () => installAudioAntiFingerprinting(root));
   zpTrace('install:all:done');
+  // Modal-dialog override — synchronous alert/confirm/prompt block the
+  // main thread until the browser shell dismisses them. In headless /
+  // automated contexts the shell never dismisses, so any site that fires
+  // a modal mid-init wedges CDP itself (CPU 0% but every JS evaluate
+  // times out). Log via zpTrace and return safe defaults instead of
+  // calling native. Same treatment for window.print (also synchronous).
+  try {
+    if (typeof root.alert === 'function') {
+      define(root, 'alert', function alert(msg) { try { zpTrace('alert', String(msg||'').slice(0,200)); } catch {} });
+    }
+    if (typeof root.confirm === 'function') {
+      define(root, 'confirm', function confirm(msg) { try { zpTrace('confirm', String(msg||'').slice(0,200)); } catch {} return false; });
+    }
+    if (typeof root.prompt === 'function') {
+      define(root, 'prompt', function prompt(msg, def) { try { zpTrace('prompt', String(msg||'').slice(0,200)); } catch {} return null; });
+    }
+    if (typeof root.print === 'function') {
+      define(root, 'print', function print() { try { zpTrace('print'); } catch {} });
+    }
+  } catch {}
   // Diagnostic-only WebAssembly trace — wrap top-level WebAssembly.* methods
   // so we can see WTM/anti-bot WASM loads in the post-mortem trace.
   try {
