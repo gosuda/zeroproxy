@@ -64,17 +64,30 @@ impl Http2Client {
 /// `Http2Client` that can issue concurrent requests on the open
 /// connection.
 ///
-/// The Builder configures SETTINGS to match a real Chrome/Edge
-/// ClientPreface — anti-bot WAFs (NAVER's nid.* family) profile the
-/// connection-opening frames, and our defaults landed us in a slow lane
-/// that delayed every first response by ~60s. The values below are the
-/// ones Chrome 131 sends today:
+/// The Builder configures SETTINGS to match a real Chrome ClientPreface
+/// — anti-bot WAFs (NAVER's nid.* family) profile the connection-opening
+/// frames, and our defaults landed us in a slow lane that delayed every
+/// first response by ~60s. The values below are the ones Chrome 134
+/// stable sends today (validated against tls.peet.ws/api/all Akamai H2
+/// fingerprint):
 ///
-///   HEADER_TABLE_SIZE       = 65536      (was 4096)
-///   ENABLE_PUSH             = 0          (Chrome explicitly off)
-///   INITIAL_WINDOW_SIZE     = 6_291_456  (6 MiB; was 65535)
-///   MAX_HEADER_LIST_SIZE    = 262144     (was unspecified)
-///   connection window       = 15_663_105 (~15 MiB, set via Builder)
+///   HEADER_TABLE_SIZE       = 65536       (matches Chrome)
+///   ENABLE_PUSH             = 0           (Chrome explicitly off)
+///   INITIAL_WINDOW_SIZE     = 6_291_456   (6 MiB; matches Chrome)
+///   MAX_HEADER_LIST_SIZE    = 262144      (matches Chrome)
+///   connection window       = 15_728_640  (target; produces a
+///                                          WINDOW_UPDATE increment of
+///                                          15_663_105 vs the h2 default
+///                                          65535, which is exactly the
+///                                          value Chrome 134 reports
+///                                          to Akamai-fp)
+///
+/// Akamai H2 fingerprint check: with these values the second pipe-
+/// separated field in `tls.peet.ws`'s response is `15663105`, matching
+/// Chrome 134 stable. The pseudo-header order (last field; we emit
+/// `m,s,a,p`, Chrome 134 emits `m,a,s,p`) is still a known diff —
+/// fixing that would need a patch to the `h2` crate or raw HEADERS-frame
+/// encoding.
 ///
 /// MAX_FRAME_SIZE stays at the 16384 default — Chrome also sends 16384
 /// so no override needed.
@@ -90,7 +103,10 @@ where
         .header_table_size(65_536)
         .enable_push(false)
         .initial_window_size(6_291_456)
-        .initial_connection_window_size(15_663_105)
+        // 15_728_640 = 15_663_105 + 65_535 (h2 default). h2 sends
+        // `WINDOW_UPDATE = configured_size - default` so the on-wire
+        // increment is 15_663_105 — Chrome 134's exact value.
+        .initial_connection_window_size(15_728_640)
         .max_header_list_size(262_144);
     let (send, connection) = builder
         .handshake(tokio_stream)
