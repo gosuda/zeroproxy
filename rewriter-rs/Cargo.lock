@@ -1348,6 +1348,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "oxc_syntax",
+ "serde_json",
  "swc_common",
  "swc_css_ast",
  "swc_css_codegen",

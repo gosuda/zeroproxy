@@ -1,6 +1,6 @@
 // C0 membrane invariant freeze: characterization tests that pin the CURRENT
 // observable security contract of the JS membrane (web/sw.js,
-// web/runtime-prelude.js, web/worker-prelude.js, web/zp-core.js). These tests
+// web/runtime-prelude.mjs, web/worker-prelude.js, web/zp-core.js). These tests
 // MUST stay green against the present code. Any later refactor that flips a
 // fail-closed branch or removes a masking hook is meant to turn one of these
 // red. They exercise REAL behavior (loaded into a vm / executed in isolation),
@@ -12,6 +12,17 @@ const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
 
 const read = (path) => fs.readFileSync(path, 'utf8');
+const readServiceWorker = () => [read('web/sw.js'), read('web/sw/responses.js')].join('\n');
+const readRuntime = () =>
+  [
+    read('web/runtime-prelude.mjs'),
+    read('web/runtime/abi/artifact-masking.mjs'),
+    read('web/runtime/abi/native-capture.mjs'),
+    read('web/runtime/dynamic-code/source.mjs'),
+    read('web/runtime/facades/events.mjs'),
+    read('web/runtime/facades/fingerprinting.mjs'),
+    read('web/runtime/network/websocket.mjs'),
+  ].join('\n');
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -79,7 +90,13 @@ function loadServiceWorker() {
       host: 'proxy.example',
       href: 'https://proxy.example/zp/',
     },
-    importScripts: () => {},
+    importScripts: (...urls) => {
+      for (const url of urls) {
+        if (String(url).includes('/zp/assets/sw-responses.js')) {
+          vm.runInContext(read('web/sw/responses.js'), sandbox);
+        }
+      }
+    },
     addEventListener: () => {},
     // Sentinel-returning spy: a regression that adds `return fetch(event.request)`
     // would bump this counter and surface a 200 'NATIVE' body. It returns rather
@@ -163,7 +180,7 @@ test('membrane: SW source never bridges target traffic to native fetch(event.req
   // Belt-and-suspenders against the exact passthrough escape: the only native
   // fetch the SW may use is the bound `nativeFetch` for first-party asset/kernel
   // loads. A direct `fetch(event.request)` would be a no-classification egress.
-  const sw = read('web/sw.js');
+  const sw = readServiceWorker();
   assert.equal(
     /\bfetch\s*\(\s*event\.request\s*\)/.test(sw),
     false,
@@ -193,7 +210,7 @@ test('membrane: SW source never bridges target traffic to native fetch(event.req
 // context-local, and the fake global is wired to those same context-local
 // intrinsics.
 function loadOwnPropertyMasking() {
-  const src = read('web/runtime-prelude.js');
+  const src = readRuntime();
   const code = [
     extractFunction(src, 'hiddenGlobalKey'),
     extractFunction(src, 'isGlobalObjectForMasking'),
@@ -305,7 +322,7 @@ test('membrane: hiddenGlobalKey predicate classifies ZP globals vs app globals',
 // querySelector / querySelectorAll / matches / closest refuse ZP-artifact
 // selectors. Extract and exercise it directly.
 function loadSelectorFilter() {
-  const src = read('web/runtime-prelude.js');
+  const src = readRuntime();
   const code =
     extractFunction(src, 'selectorTargetsZP') + '\nmodule.exports = { selectorTargetsZP };';
   const sandbox = { module: { exports: {} }, String };
@@ -335,7 +352,7 @@ test('membrane: selector filter rejects probes for data-zp-*, /zp/assets/, /zp/a
 });
 
 test('membrane: stealth + masking hooks are installed into the runtime global', () => {
-  const rt = read('web/runtime-prelude.js');
+  const rt = readRuntime();
   // The installers exist and are invoked during membrane setup.
   assert.match(rt, /function installStealthMembrane\(w\)/);
   assert.match(rt, /function installOwnPropertyMasking\(w\)/);

@@ -43,6 +43,7 @@ function loadBuiltRustContext() {
       vm.runInContext(fs.readFileSync(path.join(outDir, 'web', 'rust-rewriter.js'), 'utf8'), ctx, {
         filename: 'rust-rewriter.js',
       });
+      Object.defineProperty(ctx, '__buildOutDir', { value: outDir });
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'js-rewriter.js')), false);
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc-parser.js')), false);
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc_parser_wasm_bg.wasm')), false);
@@ -60,7 +61,9 @@ async function loadRewriter() {
 test('Rust rewriter asset exposes the public rewriter API without JS fallback assets', async () => {
   const ctx = await loadBuiltRustContext();
   assert.equal(typeof ctx.ZPRustRewriter.rewriteScript, 'function');
+  assert.equal(typeof ctx.ZPRustRewriter.rewriteImportMap, 'function');
   assert.equal(typeof ctx.ZPRewriter.rewriteScript, 'function');
+  assert.equal(typeof ctx.ZPRewriter.rewriteImportMap, 'function');
   assert.equal(ctx.ZPRewriter.ready, true);
   assert.equal(ctx.ZPRewriter.initSync(), true);
   assert.equal(await ctx.ZPRewriter.init(), true);
@@ -72,6 +75,132 @@ test('Rust rewriter asset exposes the public rewriter API without JS fallback as
   assert.equal(out.ok, true);
   assert.match(out.code, /__zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/);
   assert.equal('OXCParser' in ctx, false);
+});
+
+test('browser build uses Vite without a direct esbuild build step', () => {
+  const repoRoot = path.resolve(__dirname, '../..');
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
+  const buildScript = fs.readFileSync(path.join(repoRoot, 'scripts', 'build.mjs'), 'utf8');
+
+  assert.equal(packageJson.devDependencies.esbuild, undefined);
+  assert.ok(packageJson.devDependencies.vite);
+  assert.equal(lock.packages[''].devDependencies.esbuild, undefined);
+  assert.equal(Object.hasOwn(lock.packages, 'node_modules/esbuild'), false);
+  assert.equal(
+    Object.keys(lock.packages).some((key) => key.startsWith('node_modules/@esbuild/')),
+    false,
+  );
+  assert.equal(
+    /from ['"]esbuild['"]|require\(['"]esbuild['"]\)|\besbuild\./.test(buildScript),
+    false,
+  );
+  assert.match(buildScript, /await import\('vite'\)/);
+});
+
+test('Vite-built runtime prelude remains a classic bundled target asset', async () => {
+  const ctx = await loadBuiltRustContext();
+  const runtime = fs.readFileSync(
+    path.join(ctx.__buildOutDir, 'web', 'runtime-prelude.js'),
+    'utf8',
+  );
+  assert.match(runtime, /^\(function\(\) \{/);
+  assert.equal(/^\s*import\s/m.test(runtime), false);
+  assert.equal(/^\s*export\s/m.test(runtime), false);
+  assert.ok(runtime.includes('SHARE_INFO_ENC'), 'runtime bundle should include zp-core');
+  assert.ok(runtime.includes('Object.defineProperty(globalThis, "ZPRustRewriter"'));
+  assert.ok(runtime.includes('Object.defineProperty(globalThis, "ZPHTTPRewriter"'));
+  for (const asset of ['zp-core', 'rust-rewriter', 'http-rewriter']) {
+    assert.equal(runtime.includes(`<script nonce=zp src=/zp/assets/${asset}.js>`), false);
+    assert.equal(runtime.includes(`<script nonce="zp" src="/zp/assets/${asset}.js">`), false);
+  }
+});
+
+test('Vite-built worker prelude remains a classic bundled runtime asset', async () => {
+  const ctx = await loadBuiltRustContext();
+  const worker = fs.readFileSync(path.join(ctx.__buildOutDir, 'web', 'worker-prelude.js'), 'utf8');
+  assert.match(worker, /^\(function\(\) \{/);
+  assert.equal(/^\s*import\s/m.test(worker), false);
+  assert.equal(/^\s*export\s/m.test(worker), false);
+  assert.ok(worker.includes('SHARE_INFO_ENC'), 'worker bundle should include zp-core');
+  assert.ok(worker.includes('__ZP_WORKER_PRELUDE'));
+  assert.ok(worker.includes('maskNativeFunction(self.importScripts'));
+  assert.equal(worker.includes("importScripts('/zp/assets/zp-core.js')"), false);
+  assert.equal(worker.includes("importScripts(internalURL('/zp/assets/zp-core.js'))"), false);
+});
+
+test('Vite-built service worker remains a classic bundled runtime asset', async () => {
+  const ctx = await loadBuiltRustContext();
+  const sw = fs.readFileSync(path.join(ctx.__buildOutDir, 'web', 'sw.js'), 'utf8');
+  assert.match(sw, /^\(function\(\) \{/);
+  assert.equal(/^\s*import\s/m.test(sw), false);
+  assert.equal(/^\s*export\s/m.test(sw), false);
+  assert.ok(sw.includes('SHARE_INFO_ENC'), 'service worker bundle should include zp-core');
+  assert.ok(sw.includes('Object.defineProperty(globalThis, "ZPRustRewriter"'));
+  assert.ok(sw.includes('Object.defineProperty(globalThis, "ZPHTTPRewriter"'));
+  assert.ok(sw.includes('globalThis.Go = class'));
+  assert.ok(sw.includes('const go = new Go()'));
+  assert.ok(sw.includes('ZPSWResponses'));
+  assert.ok(sw.includes('self.addEventListener("fetch"'));
+  for (const asset of ['zp-core', 'rust-rewriter', 'http-rewriter', 'wasm_exec', 'sw-responses']) {
+    assert.equal(sw.includes(`importScripts('/zp/assets/${asset}.js')`), false);
+  }
+});
+
+test('Rust import-map rewriter rewrites import maps through the public API', async () => {
+  const ctx = await loadBuiltRustContext();
+  const source = JSON.stringify({
+    imports: {
+      a: '/a.js',
+      b: './rel.js',
+      bad: 'javascript:alert(1)',
+      n: 123,
+    },
+    scopes: {
+      '/s/': {
+        c: '/c.js',
+        n: 1,
+      },
+    },
+  });
+
+  const out = ctx.ZPRewriter.rewriteImportMap(source, {
+    baseUrl: 'https://example.com/app/main.js',
+    tabId: 'tab-1',
+    runtimeToken: 'rt-1',
+    controlPrefix: '/zp/',
+  });
+
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  const map = JSON.parse(out.code);
+  assert.equal(
+    map.imports.a,
+    '/zp/api/script?kind=module&rt=rt-1&tab=tab-1&u=https%3A%2F%2Fexample.com%2Fa.js',
+  );
+  assert.equal(
+    map.imports.b,
+    '/zp/api/script?kind=module&rt=rt-1&tab=tab-1&u=https%3A%2F%2Fexample.com%2Fapp%2Frel.js',
+  );
+  assert.equal(map.imports.bad, '/zp/error/POLICY_BLOCKED');
+  assert.equal(map.imports.n, 123);
+  const scopeKey =
+    '/zp/api/script?kind=module&rt=rt-1&tab=tab-1&u=https%3A%2F%2Fexample.com%2Fs%2F';
+  assert.equal(
+    map.scopes[scopeKey].c,
+    '/zp/api/script?kind=module&rt=rt-1&tab=tab-1&u=https%3A%2F%2Fexample.com%2Fc.js',
+  );
+  assert.equal(Object.hasOwn(map.scopes[scopeKey], 'n'), false);
+
+  const low = ctx.ZPRustRewriter.rewriteImportMap(
+    'not json',
+    'https://example.com/app/main.js',
+    'tab-1',
+    'rt-1',
+    '/zp/',
+  );
+  assert.equal(low.ok, true);
+  assert.equal(low.code, '{}');
+  assert.equal(low.error, '');
 });
 
 test('Rust rewriter asset rewrites live code paths', async () => {

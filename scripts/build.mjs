@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import esbuild from 'esbuild';
 import { spawnSync } from 'node:child_process';
 import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -110,8 +109,6 @@ async function buildWeb() {
 
   const goWasmExec = await readGoWasmExec();
   const rustRewriter = await makeRustRewriterClassic();
-  const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
-  const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
 
   await copyFile(path.join(webSrc, 'index.html'), path.join(webOut, 'index.html'));
   await copyOptional(path.join(webSrc, 'favicon.ico'), path.join(webOut, 'favicon.ico'));
@@ -120,19 +117,25 @@ async function buildWeb() {
     path.join(webOut, 'manifest.webmanifest'),
   );
 
-  await writeBundled('zp-core.js', [await readSource('zp-core.js')]);
-  await writeBundled('runtime-prelude.js', [await readSource('runtime-prelude.js')]);
-  await writeBundled('rust-rewriter.js', [rustRewriter]);
-  await writeBundled('http-rewriter.js', [await readSource('http-rewriter.js')]);
-  await writeBundled('wasm_exec.js', [goWasmExec]);
-  await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
-  await writeBundled('sw.js', [
-    await readSource('zp-core.js'),
-    rustRewriter,
-    await readSource('http-rewriter.js'),
-    goWasmExec,
-    serviceWorker,
-  ]);
+  await writeClassicAsset('zp-core.js', await readSource('zp-core.js'));
+  await writeViteBundle('runtime-prelude.js', {
+    inputFileName: 'runtime-prelude-entry.mjs',
+    virtualModules: {
+      'virtual:zeroproxy-rust-rewriter': rustRewriter,
+    },
+  });
+  await writeClassicAsset('rust-rewriter.js', rustRewriter);
+  await writeClassicAsset('http-rewriter.js', await readSource('http-rewriter.js'));
+  await writeClassicAsset('wasm_exec.js', goWasmExec);
+  await writeViteBundle('worker-prelude.js', { inputFileName: 'worker-prelude-entry.mjs' });
+  await writeViteBundle('sw.js', {
+    inputFileName: 'sw-entry.mjs',
+    virtualModules: {
+      'virtual:zeroproxy-rust-rewriter': rustRewriter,
+      'virtual:zeroproxy-wasm-exec': goWasmExec,
+      'virtual:zeroproxy-sw-body': stripServiceWorkerImports(await readSource('sw.js')),
+    },
+  });
 }
 
 function buildKernel() {
@@ -150,27 +153,53 @@ async function readSource(name) {
   return readFile(path.join(webSrc, name), 'utf8');
 }
 
-async function writeBundled(fileName, parts) {
-  const source = `${parts.map((part) => String(part).trimEnd()).join('\n;\n')}\n`;
-  const result = await esbuild.transform(source, {
-    charset: 'utf8',
-    legalComments: 'none',
-    loader: 'js',
-    minify,
-    target: 'es2022',
+async function writeClassicAsset(fileName, source) {
+  await writeFile(path.join(webOut, fileName), `${String(source).trimEnd()}\n`);
+}
+
+async function writeViteBundle(entryFileName, options = {}) {
+  const { build } = await import('vite');
+  const inputFileName = options.inputFileName || entryFileName;
+  await build({
+    configFile: path.join(repoRoot, 'vite.config.mjs'),
+    mode: 'production',
+    logLevel: 'warn',
+    plugins: [virtualSourcePlugin(options.virtualModules || {})],
+    build: {
+      outDir: webOut,
+      emptyOutDir: false,
+      minify,
+      rollupOptions: {
+        input: path.join(webSrc, inputFileName),
+        treeshake: false,
+        output: {
+          entryFileNames: entryFileName,
+          format: 'iife',
+        },
+      },
+    },
   });
-  await writeFile(path.join(webOut, fileName), result.code);
+}
+
+function virtualSourcePlugin(modules) {
+  const prefix = '\0';
+  return {
+    name: 'zeroproxy-virtual-source',
+    resolveId(id) {
+      return Object.hasOwn(modules, id) ? prefix + id : null;
+    },
+    load(id) {
+      const name = id.startsWith(prefix) ? id.slice(prefix.length) : id;
+      return Object.hasOwn(modules, name) ? modules[name] : null;
+    },
+  };
 }
 
 function stripServiceWorkerImports(source) {
   return source.replace(
-    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|http-rewriter|wasm_exec)\.js'\);\n/gm,
+    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|http-rewriter|wasm_exec|sw-responses)\.js'\);\n/gm,
     '',
   );
-}
-
-function stripWorkerPreludeImports(source) {
-  return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\n/m, '');
 }
 
 async function makeRustRewriterClassic() {
@@ -198,7 +227,33 @@ async function makeRustRewriterClassic() {
   const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString(
     'base64',
   );
-  return `/* Generated from Rust WASM ZeroProxy rewriter. */\n${js}\n(() => {\nconst VERSION = 'phase3-rust-wasm-ast-3-css';\nconst BLOCK_CODE = \"throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\";\nconst __zp_rust_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));\nwasm_bindgen.initSync({ module: __zp_rust_bytes });\nfunction normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }\nfunction lowLevel(source, kind, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_script(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction lowLevelCSS(source, baseUrl, controlPrefix) { const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction publicOk(code) { return { ok: true, code, diagnostics: [] }; }\nfunction publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }\nfunction rewriteScriptPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevel(source, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteCSSPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; const out = lowLevelCSS(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nfunction rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const end = out.code.length - suffix.length; if (end < prefix.length) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: out.code.slice(prefix.length, end), error: '' }; }\nfunction rewriteFunctionBodyPublic(source, params, targetUrl, controlPrefix) { const out = rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nconst rustApi = Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix) { return lowLevel(source, kind, targetUrl, controlPrefix); }, rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); }, rewriteFunctionBody: rewriteFunctionBodyRaw });\nconst rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteScript: rewriteScriptPublic, rewriteCSS: rewriteCSSPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });\nObject.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });\nObject.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });\n})();\n`;
+  return [
+    '/* Generated from Rust WASM ZeroProxy rewriter. */',
+    js,
+    '(() => {',
+    "const VERSION = 'phase3-rust-wasm-ast-4-import-map';",
+    `const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";`,
+    `const __zp_rust_b64 = ${JSON.stringify(wasmBase64)};`,
+    `const __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));`,
+    `wasm_bindgen.initSync({ module: __zp_rust_bytes });`,
+    `function normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }`,
+    `function lowLevel(source, kind, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_script(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelCSS(source, baseUrl, controlPrefix) { const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix) { return wasm_bindgen.rewrite_import_map(String(source || ''), String(baseUrl || ''), String(tabId || ''), String(runtimeToken || ''), String(controlPrefix || '/zp/')); }`,
+    `function publicOk(code) { return { ok: true, code, diagnostics: [] }; }`,
+    `function publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }`,
+    `function rewriteScriptPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevel(source, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
+    `function rewriteCSSPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; const out = lowLevelCSS(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
+    `function rewriteImportMapPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; return publicOk(lowLevelImportMap(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.tabId || opts.tab || '', opts.runtimeToken || opts.rt || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/')); }`,
+    `function rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const end = out.code.length - suffix.length; if (end < prefix.length) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: out.code.slice(prefix.length, end), error: '' }; }`,
+    `function rewriteFunctionBodyPublic(source, params, targetUrl, controlPrefix) { const out = rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
+    `const rustApi = Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix) { return lowLevel(source, kind, targetUrl, controlPrefix); }, rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); }, rewriteImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix) { return { ok: true, code: lowLevelImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix), error: '' }; }, rewriteFunctionBody: rewriteFunctionBodyRaw });`,
+    `const rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteScript: rewriteScriptPublic, rewriteCSS: rewriteCSSPublic, rewriteImportMap: rewriteImportMapPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });`,
+    `Object.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });`,
+    `Object.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });`,
+    '})();',
+    '',
+  ].join('\n');
 }
 async function readGoWasmExec() {
   const goroot = goEnv('GOROOT');

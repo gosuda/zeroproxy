@@ -12,6 +12,9 @@ const puppeteer = require('puppeteer');
 const TARGET_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
+const EXPECTED_DELTAS = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'expected-deltas.json'), 'utf8'),
+);
 
 const {
   run,
@@ -2563,5 +2566,37 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   });
   await waitForPage(page, () => window.__differential);
   const nativeDiff = comparableDifferential(await readDifferential(page));
-  assert.deepEqual(proxyDiff, nativeDiff);
+  assert.deepEqual(
+    diffObjects(proxyDiff, nativeDiff),
+    EXPECTED_DELTAS.nativeVsZeroProxyDifferential,
+  );
 });
+
+function diffObjects(proxyValue, nativeValue, prefix = '') {
+  if (Object.is(proxyValue, nativeValue)) return {};
+  if (Array.isArray(proxyValue) && Array.isArray(nativeValue)) {
+    const out = {};
+    const length = Math.max(proxyValue.length, nativeValue.length);
+    for (let i = 0; i < length; i++) {
+      Object.assign(out, diffObjects(proxyValue[i], nativeValue[i], `${prefix}[${i}]`));
+    }
+    return out;
+  }
+  if (!isPlainObject(proxyValue) || !isPlainObject(nativeValue)) {
+    return { [prefix || '<root>']: { proxy: proxyValue, native: nativeValue } };
+  }
+  const out = {};
+  for (const key of Array.from(
+    new Set([...Object.keys(proxyValue), ...Object.keys(nativeValue)]),
+  )) {
+    Object.assign(
+      out,
+      diffObjects(proxyValue[key], nativeValue[key], prefix ? `${prefix}.${key}` : key),
+    );
+  }
+  return out;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}

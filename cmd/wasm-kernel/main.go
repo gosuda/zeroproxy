@@ -210,6 +210,7 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 			ReferrerPolicy:        referrerPolicy,
 			ScriptRewriter:        rewriteScriptFromJS,
 			CSSRewriter:           rewriteCSSFromJS,
+			ImportMapRewriter:     rewriteImportMapFromJS,
 		})
 		closeErr := source.Close()
 		if err != nil {
@@ -328,6 +329,23 @@ func rewriteCSSFromJS(source, baseURL string) (string, error) {
 		return out.Get("code").String(), nil
 	}
 	return "", fmt.Errorf("CSS_REWRITE_FAILED")
+}
+
+func rewriteImportMapFromJS(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteImportMap").Type() != js.TypeFunction {
+		return "", fmt.Errorf("IMPORT_MAP_REWRITE_UNAVAILABLE")
+	}
+	out := rewriter.Call("rewriteImportMap", source, map[string]any{
+		"baseUrl":       baseURL,
+		"tabId":         tabID,
+		"runtimeToken":  runtimeToken,
+		"controlPrefix": controlPrefix,
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("code").String(), nil
+	}
+	return "", fmt.Errorf("IMPORT_MAP_REWRITE_FAILED")
 }
 
 func targetDynamicCompileAllowed(h http.Header) bool {

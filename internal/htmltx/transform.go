@@ -28,6 +28,7 @@ type Options struct {
 	ReferrerPolicy        string
 	ScriptRewriter        func(source, kind, targetURL, controlPrefix string) (string, error)
 	CSSRewriter           func(source, baseURL string) (string, error)
+	ImportMapRewriter     func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error)
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -148,7 +149,7 @@ func (st *streamTransformer) handleRawText(tok xhtml.Token) (bool, error) {
 func (st *streamTransformer) closeRawText(tok xhtml.Token) error {
 	switch {
 	case st.rawTextKind == "importmap":
-		st.out.WriteString(rewriteImportMap(st.rawTextBuf.String(), st.opt))
+		st.out.WriteString(rewriteInlineImportMap(st.rawTextBuf.String(), st.opt))
 	case st.rawTextKind == "style":
 		st.out.WriteString(rewriteInlineStyle(st.rawTextBuf.String(), st.opt))
 	case st.rawTextKind != "":
@@ -302,7 +303,7 @@ func runtimePrelude(opt Options) string {
 	})
 	var b strings.Builder
 	b.Grow(len(bootJSON) + 130)
-	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp src=/zp/assets/http-rewriter.js></script><script nonce=zp>(function(){const boot=`)
+	b.WriteString(`<script nonce=zp>(function(){const boot=`)
 	b.Write(bootJSON)
 	b.WriteString(`;Object.defineProperty(window,'__ZP_BOOT',{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()
@@ -943,6 +944,23 @@ func rewriteInlineStyle(source string, opt Options) string {
 		}
 	}
 	return source
+}
+
+func rewriteInlineImportMap(source string, opt Options) string {
+	if opt.ImportMapRewriter != nil {
+		code, err := opt.ImportMapRewriter(
+			source,
+			opt.TargetURL.String(),
+			opt.TabID,
+			opt.RuntimeToken,
+			shareurl.ControlPrefix,
+		)
+		if err != nil {
+			return `{}`
+		}
+		return code
+	}
+	return rewriteImportMap(source, opt)
 }
 
 func blockScriptSource() string {

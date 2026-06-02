@@ -1,3 +1,20 @@
+import { createArtifactMasking } from './runtime/abi/artifact-masking.mjs';
+import {
+  captureNative,
+  clearBootConfig,
+  createNormalizedError,
+  readBootConfig,
+} from './runtime/abi/native-capture.mjs';
+import {
+  dynamicSource,
+  isEvalExpressionCandidate,
+  simpleDynamicValue,
+  stringArgs,
+} from './runtime/dynamic-code/source.mjs';
+import { createEventTargetFacade } from './runtime/facades/events.mjs';
+import { createFingerprintingFacades } from './runtime/facades/fingerprinting.mjs';
+import { createWebSocketFacades } from './runtime/network/websocket.mjs';
+
 (() => {
   'use strict';
   const root = window;
@@ -5,9 +22,9 @@
   if (root[marker]) return;
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
-  const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '', documentReferrer: '' }, readBootConfig());
+  const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '', documentReferrer: '' }, readBootConfig(root));
   const runtimeToken = String(boot.runtimeToken || '');
-  clearBootConfig();
+  clearBootConfig(root);
   const Native = captureNative(root);
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
@@ -68,8 +85,6 @@
   const workerBlobURLMap = new Map();
   const blobURLRawMap = new Map();
   const deferredTerminateWorkers = new WeakSet();
-  const canvasHookedWindows = new WeakSet();
-  const audioHookedWindows = new WeakSet();
   const serviceWorkerFacades = new WeakMap();
   const storageMaps = new Map();
   const storageWindows = new Set();
@@ -77,154 +92,32 @@
   let storageDBPromise = null;
   let workerTerminateHooked = false;
 
-
-  function readBootConfig() {
-    return root.__ZP_BOOT || {};
-  }
-
-  function clearBootConfig() {
-    try { delete root.__ZP_BOOT; } catch { try { Object.defineProperty(root, '__ZP_BOOT', { value: undefined, enumerable: false }); } catch {} }
-  }
-  function captureNative(w) {
-    const d = w.document;
-    return {
-      fetch: w.fetch && w.fetch.bind(w),
-      XMLHttpRequest: w.XMLHttpRequest,
-      WebSocket: w.WebSocket,
-      EventSource: w.EventSource,
-      Worker: w.Worker,
-      FunctionCtor: w.Function,
-      eval: w.eval,
-      SharedWorker: w.SharedWorker,
-      FormData: w.FormData,
-      URL: w.URL,
-      Blob: w.Blob,
-      DOMException: w.DOMException,
-      Request: w.Request,
-      Response: w.Response,
-      serviceWorkerController: w.navigator && w.navigator.serviceWorker && w.navigator.serviceWorker.controller,
-      Headers: w.Headers,
-      navigatorSendBeacon: w.navigator && w.navigator.sendBeacon && w.navigator.sendBeacon.bind(w.navigator),
-      serviceWorker: w.navigator && w.navigator.serviceWorker,
-      createElement: d.createElement.bind(d),
-      createElementNS: d.createElementNS && d.createElementNS.bind(d),
-      appendChild: w.Node.prototype.appendChild,
-      insertBefore: w.Node.prototype.insertBefore,
-      replaceChild: w.Node.prototype.replaceChild,
-      setAttribute: w.Element.prototype.setAttribute,
-      setAttributeNode: w.Element.prototype.setAttributeNode,
-      setAttributeNodeNS: w.Element.prototype.setAttributeNodeNS,
-      getAttributeNode: w.Element.prototype.getAttributeNode,
-      getAttributeNodeNS: w.Element.prototype.getAttributeNodeNS,
-      removeAttributeNode: w.Element.prototype.removeAttributeNode,
-      getAttribute: w.Element.prototype.getAttribute,
-      removeAttribute: w.Element.prototype.removeAttribute,
-      removeAttributeNS: w.Element.prototype.removeAttributeNS,
-      hasAttribute: w.Element.prototype.hasAttribute,
-      getAttributeNames: w.Element.prototype.getAttributeNames,
-      insertAdjacentHTML: w.Element.prototype.insertAdjacentHTML,
-      elementInnerHTML: Object.getOwnPropertyDescriptor(w.Element.prototype, 'innerHTML'),
-      elementOuterHTML: Object.getOwnPropertyDescriptor(w.Element.prototype, 'outerHTML'),
-      elementAttributes: Object.getOwnPropertyDescriptor(w.Element.prototype, 'attributes'),
-      setAttributeNS: w.Element.prototype.setAttributeNS,
-      namedSetNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItem,
-      namedSetNamedItemNS: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItemNS,
-      attrValue: w.Attr && Object.getOwnPropertyDescriptor(w.Attr.prototype, 'value'),
-      attrNodeValue: w.Attr && (Object.getOwnPropertyDescriptor(w.Attr.prototype, 'nodeValue') || Object.getOwnPropertyDescriptor(w.Node.prototype, 'nodeValue')),
-      matches: w.Element.prototype.matches,
-      closest: w.Element.prototype.closest,
-      querySelector: w.Document.prototype.querySelector,
-      querySelectorAll: w.Document.prototype.querySelectorAll,
-      elementQuerySelector: w.Element.prototype.querySelector,
-      elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
-      documentGetElementsByTagName: w.Document.prototype.getElementsByTagName,
-      elementGetElementsByTagName: w.Element.prototype.getElementsByTagName,
-      documentScripts: Object.getOwnPropertyDescriptor(w.Document.prototype, 'scripts'),
-      createNodeIterator: w.Document.prototype.createNodeIterator,
-      createTreeWalker: w.Document.prototype.createTreeWalker,
-      createHTMLDocument: d.implementation && d.implementation.createHTMLDocument && d.implementation.createHTMLDocument.bind(d.implementation),
-      scriptText: w.HTMLScriptElement && Object.getOwnPropertyDescriptor(w.HTMLScriptElement.prototype, 'text'),
-      nodeTextContent: Object.getOwnPropertyDescriptor(w.Node.prototype, 'textContent'),
-      htmlInnerText: w.HTMLElement && Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, 'innerText'),
-      formSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.submit,
-      formRequestSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.requestSubmit,
-      documentOpen: d.open && d.open.bind(d),
-      documentWrite: d.write && d.write.bind(d),
-      documentWriteln: d.writeln && d.writeln.bind(d),
-      documentClose: d.close && d.close.bind(d),
-      historyPush: w.history.pushState.bind(w.history),
-      historyReplace: w.history.replaceState.bind(w.history),
-      locationAssign: w.location && w.location.assign && w.location.assign.bind(w.location),
-      locationReplace: w.location && w.location.replace && w.location.replace.bind(w.location),
-      locationHref: Object.getOwnPropertyDescriptor(w.Location && w.Location.prototype, 'href') || Object.getOwnPropertyDescriptor(w.location, 'href'),
-      locationReload: w.location && w.location.reload && w.location.reload.bind(w.location),
-      createObjectURL: w.URL && w.URL.createObjectURL && w.URL.createObjectURL.bind(w.URL),
-      revokeObjectURL: w.URL && w.URL.revokeObjectURL && w.URL.revokeObjectURL.bind(w.URL),
-      open: w.open && w.open.bind(w),
-      setTimeout: w.setTimeout && w.setTimeout.bind(w),
-      setInterval: w.setInterval && w.setInterval.bind(w),
-      clearTimeout: w.clearTimeout && w.clearTimeout.bind(w),
-      clearInterval: w.clearInterval && w.clearInterval.bind(w),
-      DOMParserParseFromString: w.DOMParser && w.DOMParser.prototype && w.DOMParser.prototype.parseFromString,
-      rangeCreateContextualFragment: w.Range && w.Range.prototype && w.Range.prototype.createContextualFragment,
-      windowAddEventListener: w.addEventListener && w.addEventListener.bind(w),
-      windowRemoveEventListener: w.removeEventListener && w.removeEventListener.bind(w),
-      objectGetPrototypeOf: Object.getPrototypeOf,
-      reflectGetPrototypeOf: w.Reflect && w.Reflect.getPrototypeOf,
-      reflectApply: w.Reflect && w.Reflect.apply,
-      weakMapGet: w.WeakMap && w.WeakMap.prototype && w.WeakMap.prototype.get,
-      indexedDB: w.indexedDB,
-      localStorage: (() => { try { return w.localStorage; } catch { return null; } })(),
-    };
-  }
-
-  function normalizedError(name = 'NotSupportedError') {
-    try { return new Native.DOMException('Blocked by ZeroProxy policy', name); } catch { const e = new Error('Blocked by ZeroProxy policy'); e.name = name; return e; }
-  }
-  function nativeFunctionSource(key) {
-    const name = typeof key === 'symbol' ? '' : String(key);
-    return 'function ' + name + '() { [native code] }';
-  }
-  function nativeAccessorSource(kind, key) {
-    const name = typeof key === 'symbol' ? '' : String(key);
-    return 'function ' + kind + ' ' + name + '() { [native code] }';
-  }
-  function maskNativeFunction(fn, key) {
-    if (typeof fn === 'function') toStringMap.set(fn, nativeFunctionSource(key));
-  }
-  function maskMethods(obj, keys) {
-    for (const key of keys) maskNativeFunction(obj && obj[key], key);
-  }
-  function define(obj, key, value) {
-    try {
-      Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
-      maskNativeFunction(value, key);
-      return true;
-    } catch { return false; }
-  }
-  function defineAccessor(obj, key, get, set) {
-    try {
-      Object.defineProperty(obj, key, { get, set, enumerable: false, configurable: false });
-      if (typeof get === 'function') toStringMap.set(get, nativeAccessorSource('get', key));
-      if (typeof set === 'function') toStringMap.set(set, nativeAccessorSource('set', key));
-      return true;
-    } catch { return false; }
-  }
-  function installToStringMasking(w) {
-    const proto = w && w.Function && w.Function.prototype;
-    if (!proto || toStringMaskedPrototypes.has(proto)) return;
-    const orig = w === root ? origToString : proto.toString;
-    if (typeof orig !== 'function') return;
-    const maskedToString = function toString() {
-      if (typeof this === 'function' && toStringMap.has(this)) return toStringMap.get(this);
-      return orig.call(this);
-    };
-    toStringMap.set(maskedToString, 'function toString() { [native code] }');
-    try {
-      Object.defineProperty(proto, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true });
-      toStringMaskedPrototypes.add(proto);
-    } catch {}
-  }
+  const normalizedError = createNormalizedError(Native);
+  const {
+    nativeFunctionSource,
+    maskNativeFunction,
+    maskMethods,
+    define,
+    defineAccessor,
+    installToStringMasking,
+  } = createArtifactMasking({ root, toStringMap, toStringMaskedPrototypes, origToString });
+  const {
+    installCanvasAntiFingerprinting,
+    installAudioAntiFingerprinting,
+  } = createFingerprintingFacades({ define });
+  const { installEventMethods } = createEventTargetFacade({ define, listenersKey });
+  const { installWebSocket, installWebSocketStream } = createWebSocketFacades({
+    root,
+    Native,
+    boot,
+    define,
+    installEventMethods,
+    maskNativeFunction,
+    normalizedError,
+    targetWSURL,
+    postMessageToSW,
+    currentDocumentURL: () => virtualURL.href,
+  });
 
   function installDocumentWriteHooks(w) {
     const doc = w && w.document;
@@ -279,11 +172,6 @@
         oldScript.parentNode.replaceChild(next, oldScript);
       } catch {}
     }
-  }
-  function installEventMethods(proto) {
-    define(proto, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = new Map(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
-    define(proto, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
-    define(proto, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
   }
   function preservedShareFragment(hash) {
     if (!hash) return '';
@@ -909,27 +797,12 @@
     const NativeAsyncFunction = (async function(){}).constructor;
     const NativeGeneratorFunction = (function*(){}).constructor;
     const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
-    function stringArgs(args) {
-      const out = new Array(args.length);
-      for (let i = 0; i < args.length; i++) out[i] = String(args[i]);
-      return out;
-    }
-    function simpleDynamicValue(expr) {
-      const text = String(expr || '').trim().replace(/;+\s*$/, '');
-      if (text === 'location.href' || text === 'window.location.href' || text === 'self.location.href' || text === 'globalThis.location.href') return virtualURL.href;
-      if (text === 'location.origin' || text === 'window.location.origin') return virtualURL.origin;
-      if (text === 'location.hash' || text === 'window.location.hash') return virtualURL.hash;
-      if (/^-?\d+(?:\.\d+)?$/.test(text)) return Number(text);
-      const quoted = /^(['"])([\s\S]*)\1$/.exec(text);
-      if (quoted) return quoted[2];
-      return undefined;
-    }
     function compileSimpleDynamic(params, body, kind) {
       if (params.length || kind !== 'function') return null;
       const text = String(body || '').trim();
       const m = /^return\s+([\s\S]*?);?$/.exec(text);
       if (!m) return null;
-      const fn = function anonymous() { return simpleDynamicValue(m[1]); };
+      const fn = function anonymous() { return simpleDynamicValue(m[1], virtualURL); };
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
     }
@@ -943,10 +816,6 @@
       for (let i = 0; i < args.length; i++) argv[i + 1] = args[i];
       return argv;
     }
-    function dynamicSource(kind, params, body) {
-      const prefix = kind === 'async' ? 'async function' : kind === 'generator' ? 'function*' : kind === 'asyncGenerator' ? 'async function*' : 'function';
-      return prefix + ' anonymous(' + params.join(',') + '\n) {\n' + body + '\n}';
-    }
     function compileDynamic(ctor, args, kind) {
       const parts = stringArgs(args);
       const body = parts.length ? parts[parts.length - 1] : '';
@@ -959,9 +828,6 @@
       const fn = Reflect.construct(ctor, params.concat(rewritten));
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
-    }
-    function isEvalExpressionCandidate(text) {
-      return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
     function dynamicEval(source) {
       if (arguments.length === 0) return undefined;
@@ -1779,135 +1645,6 @@
       }
     }
   }
-  function installWebSocket() {
-    const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
-    const tokenRE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-    function protocolList(protocols) {
-      if (protocols == null) return [];
-      const list = typeof protocols === 'string' ? [protocols] : Array.isArray(protocols) ? protocols.slice() : null;
-      if (!list) throw normalizedError('SyntaxError');
-      const out = [];
-      const seen = new Set();
-      for (const p of list) {
-        const s = String(p);
-        if (!s || !tokenRE.test(s) || seen.has(s)) throw normalizedError('SyntaxError');
-        seen.add(s);
-        out.push(s);
-      }
-      return out;
-    }
-    function closeEvent(code, reason, wasClean) {
-      try { return new CloseEvent('close', { code, reason, wasClean }); }
-      catch { const ev = new Event('close'); try { Object.defineProperties(ev, { code: { value: code }, reason: { value: reason }, wasClean: { value: wasClean } }); } catch {} return ev; }
-    }
-    function finish(ws, code, reason, wasClean) {
-      if (ws._closed) return;
-      ws._closed = true;
-      ws.readyState = CLOSED;
-      ws.dispatchEvent(closeEvent(code || 1000, reason || '', wasClean !== false));
-    }
-    function fail(ws) {
-      if (ws._closed) return;
-      ws.dispatchEvent(new Event('error'));
-      finish(ws, 1006, '', false);
-    }
-    function ZPWebSocket(url, protocols) {
-      if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
-      this.url = targetWSURL(url);
-      this.protocol = '';
-      this.extensions = '';
-      this.readyState = CONNECTING;
-      this.bufferedAmount = 0;
-      this.binaryType = 'blob';
-      this._port = null;
-      this._closed = false;
-      const plist = protocolList(protocols);
-      postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId, documentUrl: virtualURL.href }).then(reply => {
-        if (this._closed) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
-        this.protocol = String(reply.protocol || '');
-        this._port = reply.port;
-        this._port.onmessage = ev => {
-          const m = ev.data || {};
-          if (m.type === 'message') {
-            let data = m.data;
-            if (this.binaryType === 'blob' && data instanceof ArrayBuffer && Native.Blob) data = new Native.Blob([data]);
-            this.dispatchEvent(new MessageEvent('message', { data, origin: new URL(this.url).origin }));
-          } else if (m.type === 'error') {
-            fail(this);
-          } else if (m.type === 'close') {
-            finish(this, m.code || 1000, m.reason || '', true);
-          }
-        };
-        this._port.start && this._port.start();
-        this.readyState = OPEN;
-        this.dispatchEvent(new Event('open'));
-      }).catch(() => fail(this));
-    }
-    ZPWebSocket.CONNECTING = CONNECTING; ZPWebSocket.OPEN = OPEN; ZPWebSocket.CLOSING = CLOSING; ZPWebSocket.CLOSED = CLOSED;
-    ZPWebSocket.prototype = { CONNECTING, OPEN, CLOSING, CLOSED };
-    installEventMethods(ZPWebSocket.prototype);
-    Object.assign(ZPWebSocket.prototype, {
-      constructor: ZPWebSocket,
-      send(data) {
-        if (this.readyState !== OPEN || !this._port) throw normalizedError('InvalidStateError');
-        if (Native.Blob && data instanceof Native.Blob) {
-          data.arrayBuffer().then(buf => { if (this.readyState === OPEN && this._port) this._port.postMessage({ type: 'send', data: buf }); }).catch(() => fail(this));
-          return;
-        }
-        this._port.postMessage({ type: 'send', data });
-      },
-      close(code = 1000, reason = '') {
-        if (this._closed || this.readyState === CLOSING || this.readyState === CLOSED) return;
-        this.readyState = CLOSING;
-        if (this._port) this._port.postMessage({ type: 'close', code, reason });
-        finish(this, code, reason, true);
-      }
-    });
-    define(root, 'WebSocket', ZPWebSocket);
-  }
-
-  function installWebSocketStream() {
-    if (!root.WebSocket || !root.ReadableStream || !root.WritableStream) return;
-    function ZPWebSocketStream(url, options = {}) {
-      if (!(this instanceof ZPWebSocketStream)) throw new TypeError("Failed to construct 'WebSocketStream': Please use the 'new' operator.");
-      let closeResolve;
-      this.closed = new Promise(resolve => { closeResolve = resolve; });
-      this.opened = new Promise((resolve, reject) => {
-        let ws;
-        let settled = false;
-        let controllerReadable = null;
-        const failOpen = err => { if (!settled) { settled = true; reject(err); } };
-        try {
-          ws = new root.WebSocket(url, options && options.protocols);
-          ws.binaryType = 'arraybuffer';
-          const readable = new root.ReadableStream({
-            start(controller) { controllerReadable = controller; },
-            cancel() { try { ws.close(); } catch {} }
-          });
-          const writable = new root.WritableStream({
-            write(chunk) { ws.send(chunk); },
-            close() { ws.close(); },
-            abort() { ws.close(); }
-          });
-          ws.onopen = () => { settled = true; resolve({ readable, writable, protocol: ws.protocol, extensions: ws.extensions || '' }); };
-          ws.onmessage = event => { if (controllerReadable) controllerReadable.enqueue(event.data); };
-          ws.onerror = err => { if (!settled) failOpen(err); else if (controllerReadable) { try { controllerReadable.error(err); } catch {} } };
-          ws.onclose = event => {
-            if (!settled) failOpen(normalizedError('NetworkError'));
-            try { controllerReadable && controllerReadable.close(); } catch {}
-            closeResolve({ closeCode: event.code, reason: event.reason });
-          };
-        } catch (err) {
-          failOpen(err);
-        }
-      });
-    }
-    try { Object.defineProperty(ZPWebSocketStream, 'name', { value: 'WebSocketStream', configurable: true }); } catch {}
-    ZPWebSocketStream.prototype.constructor = ZPWebSocketStream;
-    maskNativeFunction(ZPWebSocketStream, 'WebSocketStream');
-    define(root, 'WebSocketStream', ZPWebSocketStream);
-  }
-
   function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; define(navigator, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
 
   function installNavigationTraps() {
@@ -3758,7 +3495,7 @@
     Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
     if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
   }
-  function injectSrcdoc(s) { return '<script nonce="zp" src="/zp/assets/zp-core.js"><\/script><script nonce="zp" src="/zp/assets/rust-rewriter.js"><\/script><script nonce="zp" src="/zp/assets/http-rewriter.js"><\/script><script nonce="zp">(function(){const boot=' + bootJSON() + ';Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
+  function injectSrcdoc(s) { return '<script nonce="zp">(function(){const boot=' + bootJSON() + ';Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) {
     try { return rewritePageSource(source, 'event-handler'); }
@@ -4366,69 +4103,6 @@
     }
   }
 
-  function installCanvasAntiFingerprinting(w) {
-    if (!w || canvasHookedWindows.has(w) || !w.CanvasRenderingContext2D || !w.HTMLCanvasElement) return;
-    canvasHookedWindows.add(w);
-    installCanvasGetImageDataNoise(w.CanvasRenderingContext2D.prototype);
-    installCanvasToDataURLNoise(w.HTMLCanvasElement.prototype);
-  }
-  function installCanvasGetImageDataNoise(ctxProto) {
-    const origGetImageData = ctxProto && ctxProto.getImageData;
-    if (typeof origGetImageData !== 'function') return;
-    define(ctxProto, 'getImageData', function(...args) {
-      const imageData = origGetImageData.apply(this, args);
-      const data = imageData && imageData.data;
-      if (data && data.length > 1) {
-        data[0] = data[0] ^ 1;
-        data[data.length - 2] = data[data.length - 2] ^ 1;
-      }
-      return imageData;
-    });
-  }
-  function installCanvasToDataURLNoise(canvasProto) {
-    const origToDataURL = canvasProto && canvasProto.toDataURL;
-    if (typeof origToDataURL !== 'function') return;
-    define(canvasProto, 'toDataURL', function(...args) {
-      perturbCanvasForExport(this);
-      return origToDataURL.apply(this, args);
-    });
-  }
-  function perturbCanvasForExport(canvas) {
-    const width = canvas.width >>> 0;
-    const height = canvas.height >>> 0;
-    if (!width || !height) return;
-    const ctx = canvas.getContext && canvas.getContext('2d');
-    if (!ctx) return;
-    const fillStyle = ctx.fillStyle;
-    const globalAlpha = ctx.globalAlpha;
-    try {
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = 'rgba(' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',' + ((Math.random() * 256) | 0) + ',0.01)';
-      ctx.fillRect((Math.random() * Math.min(width, 8)) | 0, (Math.random() * Math.min(height, 8)) | 0, 1, 1);
-    } finally {
-      try { ctx.fillStyle = fillStyle; } catch {}
-      try { ctx.globalAlpha = globalAlpha; } catch {}
-    }
-  }
-
-  function installAudioAntiFingerprinting(w) {
-    if (!w || audioHookedWindows.has(w) || !w.AudioBuffer) return;
-    audioHookedWindows.add(w);
-    const proto = w.AudioBuffer.prototype;
-    const origGetChannelData = proto && proto.getChannelData;
-    if (typeof origGetChannelData !== 'function') return;
-    define(proto, 'getChannelData', function(channel) {
-      const f32 = origGetChannelData.call(this, channel);
-      const limit = Math.min(f32.length, 100);
-      for (let i = 0; i < limit; i++) {
-        if (f32[i] !== 0) {
-          f32[i] += (Math.random() - 0.5) * 1e-7;
-          break;
-        }
-      }
-      return f32;
-    });
-  }
   function removeBootstrapArtifacts() {
     try {
       const nodes = document.querySelectorAll && document.querySelectorAll('script[src*="/zp/assets/zp-core.js"],script[src*="/zp/assets/rust-rewriter.js"],script[src*="/zp/assets/http-rewriter.js"],script[src*="/zp/assets/runtime-prelude.js"]');

@@ -1,0 +1,92 @@
+{
+  "scripts": [
+    {
+      "scope": "document/srcdoc",
+      "src": "/zp/assets/runtime-prelude.js"
+    },
+    {
+      "scope": "document/srcdoc",
+      "inline": "boot-config"
+    },
+    {
+      "scope": "document",
+      "src": "/zp/assets/runtime-prelude.js"
+    },
+    {
+      "scope": "document",
+      "inline": "base-sync"
+    },
+    {
+      "scope": "document",
+      "inline": "boot-config"
+    }
+  ],
+  "controlAttrs": [
+    {
+      "scope": "document",
+      "tag": "a",
+      "name": "data-zp-target-url",
+      "value": "https://example.com/next"
+    },
+    {
+      "scope": "document",
+      "tag": "button",
+      "name": "data-zp-target-url",
+      "value": "https://example.com/alt"
+    },
+    {
+      "scope": "document",
+      "tag": "div",
+      "name": "data-zp-blocked",
+      "value": "object"
+    },
+    {
+      "scope": "document",
+      "tag": "form",
+      "name": "data-zp-target-url",
+      "value": "https://example.com/dir/submit"
+    },
+    {
+      "scope": "document",
+      "tag": "iframe",
+      "name": "data-zp-target-url",
+      "value": "https://example.com/child"
+    },
+    {
+      "scope": "document",
+      "tag": "link",
+      "name": "data-zp-blocked-rel",
+      "value": "preconnect"
+    },
+    {
+      "scope": "document",
+      "tag": "link",
+      "name": "data-zp-blocked-url",
+      "value": "https://cdn.example/"
+    },
+    {
+      "scope": "document",
+      "tag": "link",
+      "name": "data-zp-target-url",
+      "value": "https://example.com/favicon.ico"
+    },
+    {
+      "scope": "document",
+      "tag": "script",
+      "name": "data-zp-integrity",
+      "value": "sha384-i"
+    },
+    {
+      "scope": "document",
+      "tag": "script",
+      "name": "data-zp-target-nonce",
+      "value": "targetnonce"
+    },
+    {
+      "scope": "document",
+      "tag": "script",
+      "name": "data-zp-target-url",
+      "value": "https://example.com/early.js"
+    }
+  ]
+}

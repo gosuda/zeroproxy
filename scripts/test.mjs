@@ -8,10 +8,8 @@ const env = Object.fromEntries(
 function run(cmd, allowRetry = false) {
   const first = runOnce(cmd);
   if (first.status === 0) return;
-  if (allowRetry && /\bECONNRESET\b/.test(resultText(first))) {
-    process.stderr.write(
-      '\nRetrying after transient ECONNRESET from browser/relay test transport...\n',
-    );
+  if (allowRetry && isRetryableTestFailure(first)) {
+    process.stderr.write('\nRetrying after transient browser/relay test failure...\n');
     const second = runOnce(cmd);
     if (second.status === 0) return;
     throw commandError(cmd, second);
@@ -35,6 +33,11 @@ function runOnce(cmd) {
 
 function resultText(result) {
   return `${result.stdout || ''}\n${result.stderr || ''}`;
+}
+
+function isRetryableTestFailure(result) {
+  const text = resultText(result);
+  return /\bECONNRESET\b/.test(text) || /test timed out after 120000ms/.test(text);
 }
 
 function commandError(cmd, result) {

@@ -3,6 +3,16 @@ importScripts('/zp/assets/zp-core.js');
 importScripts('/zp/assets/rust-rewriter.js');
 importScripts('/zp/assets/http-rewriter.js');
 importScripts('/zp/assets/wasm_exec.js');
+importScripts('/zp/assets/sw-responses.js');
+
+const {
+  addCSP,
+  applyCORS,
+  corsPreflight,
+  isCORSPreflight,
+  safeError,
+  scriptResponseHeaders,
+} = self.ZPSWResponses;
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
@@ -365,17 +375,6 @@ async function rewriteCSSResponse(resp, opt) {
     return new Response(await resp.text().catch(() => ''), { status: resp.status, statusText: resp.statusText, headers: h });
   }
 }
-function scriptResponseHeaders(resp) {
-  const h = new Headers(resp.headers);
-  h.set('Content-Type', 'text/javascript; charset=utf-8');
-  h.set('Cache-Control', 'no-store');
-  h.set('X-Content-Type-Options', 'nosniff');
-  h.set('Content-Security-Policy', ZP.fixedCSP([]));
-  applyCORS(h, null);
-  return h;
-}
-
-
 // Runtime message dispatch table. A Map (not a plain object) is used so a forged
 // msg.type like '__proto__' can never resolve to an inherited method — Map.get
 // returns undefined for unknown keys exactly like the prior `===` chain, keeping
@@ -665,57 +664,4 @@ async function broadcastCookieSync(payload) {
     }
   }
 }
-function isCORSPreflight(req) { return req.method === 'OPTIONS' && req.headers.has('Access-Control-Request-Method'); }
-function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set('Access-Control-Max-Age', '86400'); h.set('Cache-Control', 'no-store'); return new Response(null, { status: 204, headers: h }); }
-function applyCORS(h, req) {
-  const origin = req && req.headers.get('Origin') || '*';
-  h.set('Access-Control-Allow-Origin', origin);
-  if (origin !== '*') h.set('Vary', h.get('Vary') ? h.get('Vary') + ', Origin' : 'Origin');
-  h.set('Access-Control-Allow-Credentials', 'true');
-  h.set('Access-Control-Allow-Methods', req && req.headers.get('Access-Control-Request-Method') || 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS');
-  h.set('Access-Control-Allow-Headers', req && req.headers.get('Access-Control-Request-Headers') || '*');
-  h.set('Access-Control-Expose-Headers', '*');
-}
-function normalizedByteStream(body) {
-  if (!body || typeof body.getReader !== 'function') return body || null;
-  const reader = body.getReader();
-  const encoder = new TextEncoder();
-  return new ReadableStream({
-    async pull(controller) {
-      const next = await reader.read();
-      if (next.done) {
-        controller.close();
-        try { reader.releaseLock(); } catch {}
-        return;
-      }
-      const value = next.value;
-      if (value == null) return;
-      await enqueueNormalizedValue(controller, value, encoder);
-    },
-    cancel(reason) {
-      try { reader.cancel(reason); } catch {}
-      try { reader.releaseLock(); } catch {}
-    }
-  });
-}
-async function enqueueNormalizedValue(controller, value, encoder) {
-  if (value instanceof Uint8Array) controller.enqueue(value);
-  else if (value instanceof ArrayBuffer) controller.enqueue(new Uint8Array(value));
-  else if (value && value.buffer instanceof ArrayBuffer) controller.enqueue(new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength));
-  else if (typeof Blob !== 'undefined' && value instanceof Blob) controller.enqueue(new Uint8Array(await value.arrayBuffer()));
-  else if (typeof value === 'string') controller.enqueue(encoder.encode(value));
-  else controller.enqueue(encoder.encode(String(value)));
-}
-function addCSP(resp, req, servers) {
-  const h = new Headers(resp.headers);
-  const allowDynamicCompile = h.get('X-ZP-Dynamic-Compile') === '1';
-  h.delete('X-ZP-Dynamic-Compile');
-  h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { allowDynamicCompile }));
-  h.set('X-Content-Type-Options', 'nosniff');
-  h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
-  applyCORS(h, req);
-  return new Response(normalizedByteStream(resp.body), { status: resp.status, statusText: resp.statusText, headers: h });
-}
-function safeError(code, status = 400, targetUrl = '') { if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED'; let host = ''; try { host = targetUrl ? new URL(targetUrl).host : ''; } catch {} const hostHTML = host ? '<p>Target host: '+escapeHTML(host)+'</p>' : ''; const body = '<!doctype html><meta charset="utf-8"><title>ZeroProxy '+code+'</title><main><h1>ZeroProxy</h1><p>'+code+'</p>'+hostHTML+'<button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>'; return new Response(body, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Expose-Headers': '*' } }); }
-function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }

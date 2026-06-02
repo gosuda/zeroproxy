@@ -3,9 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 const read = (path) => fs.readFileSync(path, 'utf8');
+const readServiceWorker = () => [read('web/sw.js'), read('web/sw/responses.js')].join('\n');
+const readRuntime = () =>
+  [
+    read('web/runtime-prelude.mjs'),
+    read('web/runtime/abi/artifact-masking.mjs'),
+    read('web/runtime/abi/native-capture.mjs'),
+    read('web/runtime/dynamic-code/source.mjs'),
+    read('web/runtime/facades/events.mjs'),
+    read('web/runtime/facades/fingerprinting.mjs'),
+    read('web/runtime/network/websocket.mjs'),
+  ].join('\n');
 
 test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
-  const rt = read('web/runtime-prelude.js');
+  const rt = readRuntime();
   assert.match(rt, /define\(root, 'fetch'/);
   assert.match(rt, /Object\.defineProperty\(root, 'XMLHttpRequest'/);
   assert.match(rt, /define\(root, 'EventSource'/);
@@ -41,16 +52,17 @@ test('window fetch, XHR, and EventSource route through runtime transport shims',
 });
 
 test('runtime navigation uses bound Location methods and catches expando href clicks', () => {
-  const rt = read('web/runtime-prelude.js');
-  assert.match(rt, /w\.location\.assign && w\.location\.assign\.bind\(w\.location\)/);
-  assert.match(rt, /w\.location\.replace && w\.location\.replace\.bind\(w\.location\)/);
+  const rt = readRuntime();
+  assert.ok(rt.includes("locationAssign: bindMethod(w.location, 'assign')"));
+  assert.ok(rt.includes("locationReplace: bindMethod(w.location, 'replace')"));
+  assert.match(rt, /function bindMethod\(obj, key\)[\s\S]*return fn && fn\.bind\(obj\)/);
   assert.match(rt, /function clickNavigationTarget\(ev\)/);
   assert.match(rt, /typeof el\.href === 'string'/);
   assert.match(rt, /stopImmediatePropagation/);
   assert.doesNotMatch(rt, /Native\.locationAssign\.call\(location/);
 });
 test('runtime suppresses favicon loading without exposing placeholder hrefs', () => {
-  const rt = read('web/runtime-prelude.js');
+  const rt = readRuntime();
   const server = read('cmd/zeroproxy-server/main.go');
   assert.ok(rt.includes('data:application/x-zeroproxy-icon,1'));
   assert.ok(rt.includes('isIconLinkRelValue'));
@@ -59,11 +71,11 @@ test('runtime suppresses favicon loading without exposing placeholder hrefs', ()
   assert.ok(rt.includes('x-zeroproxy-icon'));
   assert.ok(rt.includes("u.pathname === '/favicon.ico'"));
   assert.ok(server.includes('func (s *server) emptyFavicon'));
-  assert.ok(read('web/sw.js').includes("path === '/favicon.ico'"));
+  assert.ok(readServiceWorker().includes("path === '/favicon.ico'"));
 });
 
 test('runtime preactivates p routes and masks navigator identity', () => {
-  const rt = read('web/runtime-prelude.js');
+  const rt = readRuntime();
   const worker = read('web/worker-prelude.js');
   assert.match(rt, /ZP\.encryptShareURL\(target\)/);
   assert.match(rt, /ZP_HISTORY_UPDATE/);
@@ -80,7 +92,7 @@ test('runtime preactivates p routes and masks navigator identity', () => {
 });
 
 test('service worker owns native request capture, CORS, and context recovery', () => {
-  const sw = read('web/sw.js');
+  const sw = readServiceWorker();
   for (const needle of [
     'isCORSPreflight',
     'corsPreflight',
@@ -102,8 +114,8 @@ test('service worker owns native request capture, CORS, and context recovery', (
 test('response bridge exposes a ReadableStream instead of buffering response bodies', () => {
   const bridge = read('internal/swhttp/bridge_js.go');
   const kernel = read('cmd/wasm-kernel/main.go');
-  const rt = read('web/runtime-prelude.js');
-  const sw = read('web/sw.js');
+  const rt = readRuntime();
+  const sw = readServiceWorker();
   const worker = read('web/worker-prelude.js');
   assert.equal(/io\.ReadAll\(resp\.Body\)/.test(bridge), false);
   assert.equal(/io\.ReadAll\(resp\.Body\)/.test(kernel), false);
@@ -123,8 +135,8 @@ test('response bridge exposes a ReadableStream instead of buffering response bod
 });
 
 test('websocket runtime path remains isolated through the service worker stream pipe', () => {
-  const rt = read('web/runtime-prelude.js');
-  const sw = read('web/sw.js');
+  const rt = readRuntime();
+  const sw = readServiceWorker();
   const kernel = read('cmd/wasm-kernel/main.go');
   assert.match(rt, /ZP_WS_OPEN/);
   assert.match(sw, /__zp_stream/);

@@ -141,7 +141,7 @@
       }
     },
     {
-      // TODO(complexity): web/runtime-prelude.js is the 4.4k-line security
+      // TODO(complexity): web/runtime-prelude.mjs is the 4.4k-line security
       // membrane. After the A.2 burn-down it STILL has 72 functions over the
       // cog-15 budget (measured: `biome lint` with this rule on, minus this
       // override, --max-diagnostics=1000 --reporter=summary -> 72 errors,
@@ -172,7 +172,7 @@
       // (all other complexity rules included) stays HARD on this file, and the gate
       // stays HARD on every other web/ file (worker-prelude, zp-core, sw) so new
       // over-budget code there still fails CI.
-      "includes": ["web/runtime-prelude.js"],
+      "includes": ["web/runtime-prelude.mjs"],
       "linter": {
         "rules": {
           "complexity": {

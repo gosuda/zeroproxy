@@ -2,6 +2,7 @@ package htmltx
 
 import (
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(out)
-	for _, want := range []string{"/zp/assets/zp-core.js", "/zp/assets/rust-rewriter.js", "/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, `data-zp-blocked-rel="preconnect"`, `ZeroProxy blocked object`} {
+	for _, want := range []string{"/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, `data-zp-blocked-rel="preconnect"`, `ZeroProxy blocked object`} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("missing %q in %s", want, s)
 		}
@@ -231,6 +232,97 @@ func TestTransformRewritesStaticScriptsAndHandlers(t *testing.T) {
 		if strings.Contains(s, forbidden) {
 			t.Fatalf("unrewritten script source or handler remained: %q in %s", forbidden, s)
 		}
+	}
+}
+
+func TestTransformUsesImportMapRewriterHook(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	const body = `{"imports":{"a":"/a.js"}}`
+	var called bool
+	hook := func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
+		called = true
+		if source != body {
+			t.Fatalf("source = %q, want %q", source, body)
+		}
+		if baseURL != target.String() {
+			t.Fatalf("baseURL = %q, want %q", baseURL, target.String())
+		}
+		if tabID != "tab" || runtimeToken != "rt" || controlPrefix != "/zp/" {
+			t.Fatalf("hook args = tab %q rt %q prefix %q", tabID, runtimeToken, controlPrefix)
+		}
+		return `{"imports":{"a":"/zp/from-rust"}}`, nil
+	}
+
+	out, err := Transform(
+		strings.NewReader(`<body><script type="importmap">`+body+`</script></body>`),
+		Options{
+			TabID:             "tab",
+			EntryID:           "entry",
+			TargetURL:         target,
+			RuntimeToken:      "rt",
+			ImportMapRewriter: hook,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !called {
+		t.Fatal("import-map hook was not called")
+	}
+	if !strings.Contains(s, `{"imports":{"a":"/zp/from-rust"}}`) {
+		t.Fatalf("hook output not emitted: %s", s)
+	}
+}
+
+func TestTransformImportMapRewriterFailureFailsClosed(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	called := false
+	hook := func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
+		called = true
+		return "", errors.New("boom")
+	}
+
+	out, err := Transform(
+		strings.NewReader(`<body><script type="importmap">{"imports":{"a":"/a.js"}}</script></body>`),
+		Options{
+			TabID:             "tab",
+			EntryID:           "entry",
+			TargetURL:         target,
+			RuntimeToken:      "rt",
+			ImportMapRewriter: hook,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !called {
+		t.Fatal("import-map hook was not called")
+	}
+	if !strings.Contains(s, `<script type="importmap">{}</script>`) {
+		t.Fatalf("import-map hook failure did not fail closed: %s", s)
+	}
+}
+
+func TestTransformSkipsImportMapRewriterForExternalScripts(t *testing.T) {
+	target, _ := url.Parse("https://example.com/app/page.html")
+	hook := func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
+		t.Fatal("import-map hook should not be called for external scripts")
+		return "", nil
+	}
+
+	if _, err := Transform(
+		strings.NewReader(`<body><script type="importmap" src="/map.json"></script><script src="/app.js"></script></body>`),
+		Options{
+			TabID:             "tab",
+			EntryID:           "entry",
+			TargetURL:         target,
+			RuntimeToken:      "rt",
+			ImportMapRewriter: hook,
+		},
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

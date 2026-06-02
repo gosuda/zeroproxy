@@ -2,14 +2,33 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
+function readRuntimeSource() {
+  return [
+    fs.readFileSync('web/runtime-prelude.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/abi/artifact-masking.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/abi/native-capture.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/dynamic-code/source.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/events.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/fingerprinting.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/network/websocket.mjs', 'utf8'),
+  ].join('\n');
+}
+
+function readServiceWorkerSource() {
+  return [
+    fs.readFileSync('web/sw.js', 'utf8'),
+    fs.readFileSync('web/sw/responses.js', 'utf8'),
+  ].join('\n');
+}
+
 test('service worker has no unclassified native fetch fallback', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = readServiceWorkerSource();
   assert.equal(/return\s+fetch\s*\(\s*event\.request\s*\)/.test(sw), false);
   assert.match(sw, /event\.respondWith\(handleFetch\(event\)\)/);
 });
 
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   assert.ok(rt.includes('installToStringMasking'));
   assert.equal(rt.includes('Object.getOwnPropertyDescriptor ='), false);
   assert.equal(rt.includes('window.__zp'), false);
@@ -18,14 +37,15 @@ test('runtime avoids stale escape gaps and forbidden harness markers', () => {
 });
 
 test('runtime membrane uses captured native WeakMap lookup for raw unwrapping', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.ok(rt.includes('weakMapGet: w.WeakMap && w.WeakMap.prototype && w.WeakMap.prototype.get'));
+  const rt = readRuntimeSource();
+  assert.ok(rt.includes("weakMapGet: value(proto(w, 'WeakMap'), 'get')"));
+  assert.match(rt, /function proto\(w, name\)[\s\S]*return value\(w\[name\], 'prototype'\)/);
   assert.ok(rt.includes('Native.reflectApply(Native.weakMapGet, membraneRawTargets, [value])'));
   assert.ok(rt.includes('Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs)'));
 });
 
 test('runtime dynamic constructor descriptors stay assignable for app bundles', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   assert.match(
     rt,
     /ctor\.prototype,\s*'constructor',\s*\{\s*value: wrapper,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/,
@@ -49,7 +69,7 @@ test('runtime dynamic constructor descriptors stay assignable for app bundles', 
 });
 
 test('runtime dynamic eval uses one native-scoped path without rewritten fallback', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   assert.ok(
     rt.includes('eval: w.eval'),
     'native eval capture is required for strict app-bundle compatibility',
@@ -75,7 +95,7 @@ test('runtime dynamic eval uses one native-scoped path without rewritten fallbac
 });
 
 test('runtime reads boot config from self-removing prelude state', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   assert.ok(rt.includes('root.__ZP_BOOT'));
   assert.ok(rt.includes('delete root.__ZP_BOOT'));
@@ -85,7 +105,7 @@ test('runtime reads boot config from self-removing prelude state', () => {
 });
 
 test('runtime installs required escape-vector hooks', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
   for (const needle of [
     "document.addEventListener('click'",
@@ -211,7 +231,7 @@ test('runtime installs required escape-vector hooks', () => {
 });
 
 test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module URLs', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   assert.equal(
     rt.includes('fallbackRewritePageSource'),
     false,
@@ -237,7 +257,7 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
 });
 
 test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = readRuntimeSource();
   assert.ok(
     rt.includes('requestedOrigin === frameOrigin'),
     'postMessage does not recognize proxied frame origins',
@@ -262,7 +282,7 @@ test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
 });
 
 test('service worker waits for initialized WASM transport and cookie bridge', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = readServiceWorkerSource();
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   assert.ok(sw.includes('__zp_kernel_init'), 'service worker does not require transport init');
   assert.match(
@@ -297,14 +317,14 @@ test('service worker waits for initialized WASM transport and cookie bridge', ()
 });
 
 test('service worker response wrappers force nosniff', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = readServiceWorkerSource();
   assert.match(sw, /h\.set\('X-Content-Type-Options', 'nosniff'\)/);
   assert.match(sw, /'X-Content-Type-Options': 'nosniff'/);
 });
 
 test('phase 3 script rewriting pipeline is fail-closed', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = readServiceWorkerSource();
+  const rt = readRuntimeSource();
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
   const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
@@ -322,7 +342,7 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(build.includes('ZPRustRewriter'));
   assert.ok(build.includes('http-rewriter.js'));
   assert.ok(fs.readFileSync('web/http-rewriter.js', 'utf8').includes('ZPHTTPRewriter'));
-  assert.ok(build.includes('phase3-rust-wasm-ast-3-css'));
+  assert.ok(build.includes('phase3-rust-wasm-ast-4-import-map'));
   assert.ok(build.includes('cargoBinPath'));
   assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
   assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust rewriter AST walker missing');
@@ -352,8 +372,11 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.equal(index.includes("'wasm-unsafe-eval'"), false);
   assert.ok(server.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
   assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
-  assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js[\s\S]*http-rewriter\.js/);
-  assert.match(rt, /injectSrcdoc[\s\S]*rust-rewriter\.js[\s\S]*http-rewriter\.js/);
+  assert.match(htmltx, /runtimePrelude[\s\S]*runtime-prelude\.js/);
+  assert.match(rt, /injectSrcdoc[\s\S]*runtime-prelude\.js/);
+  assert.equal(/runtimePrelude[\s\S]*zp-core\.js/.test(htmltx), false);
+  assert.equal(/runtimePrelude[\s\S]*rust-rewriter\.js/.test(htmltx), false);
+  assert.equal(/runtimePrelude[\s\S]*http-rewriter\.js/.test(htmltx), false);
   assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
   assert.match(server, /connect-src 'self'/);
   assert.equal(core.includes('navigate-to'), false);
@@ -400,8 +423,8 @@ test('service worker names every required safe error class', () => {
 });
 
 test('active browsing emits only encrypted prefixed p routes', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = readServiceWorkerSource();
+  const rt = readRuntimeSource();
   assert.equal(sw.includes('/v/'), false, 'service worker must not produce legacy /v routes');
   assert.equal(rt.includes('/v/'), false, 'runtime must not produce legacy /v routes');
   assert.ok(sw.includes('PROXY_DOCUMENT'), 'service worker must handle /zp/p documents');

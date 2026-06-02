@@ -7,7 +7,6 @@
   function internalURL(path) {
     return proxyOrigin ? new URL(path, proxyOrigin).href : path;
   }
-  importScripts(internalURL('/zp/assets/zp-core.js'));
   const nativeFunctionToString = self.Function?.prototype?.toString;
   const toStringMap = new WeakMap();
   function nativeFunctionSource(name) { return 'function ' + name + '() { [native code] }'; }
@@ -263,7 +262,7 @@
         return;
       }
       sink.chunk(chunkToArrayBuffer(chunk.value));
-    } catch (err) {
+    } catch {
       sink.error(err && (err.name || err.message) || 'NetworkError');
       closer.close();
     }
@@ -314,7 +313,7 @@
     try {
       await postMessageToSW({ type: 'ZP_UPLOAD_STREAM_OPEN', tabId, id }, [channel.port2]);
       return id;
-    } catch (err) {
+    } catch {
       closer.close();
       return openRelayedUploadStream(body);
     }
