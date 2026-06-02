@@ -674,7 +674,61 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     order.retain(|e| !crate::ja3::is_grease_value(u16::from(*e)));
     order.insert(0, crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
     order.push(crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
+
+    // Phase 5.7: ensure ExtensionType::Padding (id 21, RFC 7685) is the
+    // last contiguous extension before the trailing GREASE entry when
+    // the captured spec or fallback hasn't already placed it. Chrome
+    // 134 always emits Padding to pad the cleartext ClientHello to 512
+    // bytes (F5 BIG-IP intolerance workaround). macros.rs encode_one
+    // fast-path handles the body without a struct field.
+    if !order.iter().any(|e| u16::from(*e) == 0x0015) {
+        let pos = order.len().saturating_sub(1);
+        order.insert(pos, crate::msgs::enums::ExtensionType::Padding);
+    }
     exts.contiguous_extensions = order;
+
+    // Phase 5.7: ECH GREASE (encrypted_client_hello, id 0xfe0d).
+    // Chrome 134 always emits a synthetic outer-only ECH extension even
+    // when no ECHConfig is present — the body decodes as a valid
+    // EncryptedClientHelloOuter with a random config_id, the standard
+    // HKDF-SHA256+AES-128-GCM cipher suite Chrome ships, a 32-byte
+    // X25519-pubkey-sized enc field, and ~176 random payload bytes.
+    // Anti-bot WAFs treat "ECH absent" as a strong rustls-vs-browser
+    // tell. Skip if rustls's own ECH path (real config) populated the
+    // field. The encoded body is the entire EncryptedClientHello
+    // discriminant + outer fields; macros.rs's normal struct-field arm
+    // emits it (no catch-arm needed because we set the struct field).
+    if exts.encrypted_client_hello.is_none() {
+        use crate::msgs::base::PayloadU16;
+        use crate::msgs::enums::{HpkeAead, HpkeKdf};
+        use crate::msgs::handshake::{
+            EncryptedClientHello, EncryptedClientHelloOuter, HpkeSymmetricCipherSuite,
+        };
+        let enc_bytes = crate::ja3::random_bytes(32);
+        let payload_bytes = crate::ja3::random_bytes(176);
+        exts.encrypted_client_hello = Some(EncryptedClientHello::Outer(
+            EncryptedClientHelloOuter {
+                cipher_suite: HpkeSymmetricCipherSuite {
+                    kdf_id: HpkeKdf::HKDF_SHA256,
+                    aead_id: HpkeAead::AES_128_GCM,
+                },
+                config_id: (crate::ja3::random_grease() & 0xff) as u8,
+                enc: PayloadU16::new(enc_bytes),
+                payload: PayloadU16::new(payload_bytes),
+            },
+        ));
+        // NOTE: do NOT add EncryptedClientHello to contiguous_extensions.
+        // `used_extensions_in_encoding_order` (handshake.rs:1021) already
+        // forces ECH to be the second-to-last extension (just before
+        // pre_shared_key) by appending it after the contiguous block.
+        // Chrome 134's layout has ECH near the end — this matches.
+        // Adding it to contiguous_extensions would cause the encoder
+        // to emit the extension twice (once in contiguous, once in the
+        // hardcoded tail). Strip it from contiguous if present.
+        let ech_typ = crate::msgs::enums::ExtensionType::EncryptedClientHello;
+        exts.contiguous_extensions
+            .retain(|e| *e != ech_typ);
+    }
 
     // GREASE-inject named_groups (supported_groups extension body).
     // Chrome puts a GREASE NamedGroup at position 0. Same JA3-stripping

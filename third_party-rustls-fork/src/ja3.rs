@@ -106,6 +106,15 @@ pub fn with_current<R>(f: impl FnOnce(Option<&CapturedSpec>) -> R) -> R {
 /// modern browser emits GREASE, so a ClientHello without GREASE is
 /// almost certainly a bot. NAVER's WAF appears to weight GREASE
 /// presence into its bot-detection signal.
+/// Length of the body emitted for ExtensionType::Padding (RFC 7685, id 21).
+/// Chrome 134 emits a variable-length zero body so total cleartext
+/// ClientHello hits 512 bytes (the legacy SSLv3 / F5 BIG-IP workaround
+/// threshold). Without knowing our offset inside the outer hello buffer
+/// at encode time we just pick a fixed value that's representative of
+/// what Chrome actually emits (~100 bytes); the *presence* of id 21 with
+/// a zero body is the fingerprint signal, not the exact length.
+pub const PADDING_BODY_LEN: usize = 100;
+
 pub const GREASE_VALUES: [u16; 16] = [
     0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a,
     0x8a8a, 0x9a9a, 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
@@ -145,4 +154,31 @@ pub fn random_grease() -> u16 {
         s.set(x);
         GREASE_VALUES[(x as usize) & 0x0f]
     })
+}
+
+/// Generate `n` pseudo-random bytes from the same xorshift64 state that
+/// drives `random_grease()`. Used by Phase 5.7 ECH GREASE to fill the
+/// outer hello's `enc` and `payload` fields — anti-bot fingerprinters
+/// only check that the body decodes as a valid `EncryptedClientHelloOuter`
+/// with non-empty payload; the actual bytes are server-decrypted noise
+/// for real ECH, so any bytes look identical to the WAF observer.
+pub fn random_bytes(n: usize) -> alloc::vec::Vec<u8> {
+    use core::cell::Cell;
+    thread_local! {
+        static RNG: Cell<u64> = const { Cell::new(0xBF58476D1CE4E5B9) };
+    }
+    let mut out = alloc::vec::Vec::with_capacity(n);
+    RNG.with(|s| {
+        let mut x = s.get();
+        while out.len() < n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let bytes = x.to_le_bytes();
+            let take = core::cmp::min(8, n - out.len());
+            out.extend_from_slice(&bytes[..take]);
+        }
+        s.set(x);
+    });
+    out
 }

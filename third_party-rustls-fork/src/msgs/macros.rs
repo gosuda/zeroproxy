@@ -229,6 +229,22 @@ macro_rules! extension_struct {
                     0u16.encode(output);
                     return;
                 }
+                // ZeroProxy JA3 phase 5.7: TLS Padding extension (RFC 7685,
+                // id 21). BoringSSL/Chrome emit this with a zero-byte body
+                // sized to push the cleartext ClientHello up to 512 bytes —
+                // a legacy SSLv3 / F5 BIG-IP intolerance workaround. We don't
+                // know our buffer's offset relative to ClientHello start at
+                // this point (the LengthPrefixedBuffer wrapping us hides it),
+                // so we emit a fixed 100-byte zero body. The exact length
+                // isn't fingerprinted; the *presence* of id 21 with zero
+                // body is. Without this fast-path the matcher below has no
+                // arm for id 21 and would silently drop it.
+                if u16::from(typ) == 0x0015 {
+                    typ.encode(output);
+                    (crate::ja3::PADDING_BODY_LEN as u16).encode(output);
+                    output.extend_from_slice(&[0u8; crate::ja3::PADDING_BODY_LEN]);
+                    return;
+                }
                 match typ {
                     $(
                         $item_id => if let Some(item) = &self.$item_slot {
