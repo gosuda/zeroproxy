@@ -43,7 +43,7 @@ function createTargetServer(requests) {
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<!doctype html><html><head><title>E2E Home</title><link rel="stylesheet" href="/site.css"><link id="icon-link" rel="icon" href="/site-icon.png"></head><body>
+      res.end(`<!doctype html><html><head><title>E2E Home</title><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'"><meta http-equiv="Content-Security-Policy-Report-Only" content="default-src 'none'; connect-src 'none'"><link rel="stylesheet" href="/site.css"><link id="icon-link" rel="icon" href="/site-icon.png"></head><body>
         <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><img id="image-probe" src="/image-probe.png" alt=""><a id="next" href="/next">Next page</a></main>
         <script>
           window.__ua = navigator.userAgent;
@@ -73,6 +73,35 @@ function createTargetServer(requests) {
           dynamicImage.id = 'dynamic-image-probe';
           dynamicImage.src = '/image-probe.png?dynamic=1';
           document.body.appendChild(dynamicImage);
+          const dynamicCSP = document.createElement('meta');
+          dynamicCSP.setAttribute('http-equiv', 'Content-Security-Policy');
+          dynamicCSP.setAttribute('content', "default-src 'none'");
+          document.head.appendChild(dynamicCSP);
+          const dynamicReportOnly = document.createElement('meta');
+          dynamicReportOnly.setAttribute('http-equiv', 'Content-Security-Policy-Report-Only');
+          dynamicReportOnly.setAttribute('content', "default-src 'none'");
+          document.head.appendChild(dynamicReportOnly);
+          document.head.insertAdjacentHTML(
+            'beforeend',
+            '<meta http-equiv="Content-Security-Policy" content="script-src \\'none\\'">' +
+              '<meta http-equiv="Content-Security-Policy-Report-Only" content="connect-src \\'none\\'">'
+          );
+          const innerHTMLMetaHost = document.createElement('div');
+          innerHTMLMetaHost.innerHTML = '<meta http-equiv="Content-Security-Policy" content="img-src \\'none\\'">';
+          if (innerHTMLMetaHost.firstChild) document.head.appendChild(innerHTMLMetaHost.firstChild);
+          window.__metaPolicyParserProbe = (() => {
+            const parsed = new DOMParser().parseFromString(
+              '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src \\'none\\'"></head><body><p>ok</p></body></html>',
+              'text/html'
+            );
+            return {
+              live: Array.from(parsed.querySelectorAll('meta[http-equiv]')).map((el) => ({
+                httpEquiv: el.getAttribute('http-equiv'),
+                content: el.getAttribute('content')
+              })),
+              text: parsed.body && parsed.body.textContent
+            };
+          })();
           const innerHTMLScript = document.createElement('script');
           innerHTMLScript.innerHTML = "window.__innerHTMLScriptFixture = ((row) => row.startsWith('x'))('x') && location.href;";
           document.body.appendChild(innerHTMLScript);
@@ -289,6 +318,34 @@ function createTargetServer(requests) {
                 resolve({ error: err && (err.name + ':' + err.message) || String(err) });
               }
             });
+            const sharedWorkerObservations = () => new Promise((resolve) => {
+              if (!('SharedWorker' in window)) {
+                resolve({ supported: false });
+                return;
+              }
+              let worker;
+              try {
+                worker = new SharedWorker('/shared-worker-differential.js', { name: 'diff-shared-worker' });
+                const timer = setTimeout(() => resolve({ supported: true, timeout: true }), 5000);
+                worker.onerror = (ev) => {
+                  clearTimeout(timer);
+                  resolve({ supported: true, error: ev && ev.message || 'sharedworker-error' });
+                };
+                worker.port.onmessage = (ev) => {
+                  clearTimeout(timer);
+                  try {
+                    worker.port.close();
+                  } catch {}
+                  resolve({ supported: true, data: ev.data });
+                };
+                worker.port.start();
+              } catch (err) {
+                resolve({
+                  supported: true,
+                  error: err && (err.name + ':' + err.message) || String(err),
+                });
+              }
+            });
             const withDeadline = (promise, label, ms = 5000) =>
               Promise.race([
                 promise,
@@ -348,10 +405,19 @@ function createTargetServer(requests) {
             out.surface.frameDocument = await frameDocumentObservations();
             out.surface.frameSrcdoc = await srcdocFrameObservations();
             out.surface.workerRealm = await workerObservations();
+            out.surface.sharedWorkerRealm = await sharedWorkerObservations();
             out.stringTimerOrigin = await new Promise(resolve => {
               window.__diffTimerOrigin = '';
               setTimeout('window.__diffTimerOrigin = location.origin', 0);
               setTimeout(() => resolve(window.__diffTimerOrigin), 25);
+            });
+            out.stringIntervalOrigin = await new Promise(resolve => {
+              window.__diffIntervalOrigin = '';
+              const id = setInterval('window.__diffIntervalOrigin = location.origin', 5);
+              setTimeout(() => {
+                clearInterval(id);
+                resolve(window.__diffIntervalOrigin);
+              }, 25);
             });
             out.dynamicImport = (await import('/differential-module.js')).observation;
             out.eventSource = await new Promise(resolve => {
@@ -560,7 +626,36 @@ function createTargetServer(requests) {
       });
       res.end(`const worker = new Worker(new URL('/worker-fixture.js', import.meta.url).href, { name: 'module-worker-fixture' });
         worker.onmessage = ev => { window.__moduleWorkerFixture = ev.data; worker.terminate(); };
-        worker.onerror = ev => { window.__moduleWorkerFixture = { error: ev && ev.message || 'worker-error' }; };`);
+        worker.onerror = ev => { window.__moduleWorkerFixture = { error: ev && ev.message || 'worker-error' }; };
+        const moduleTypeWorker = new Worker('/module-type-worker-fixture.js', { type: 'module', name: 'module-type-worker-fixture' });
+        moduleTypeWorker.onmessage = ev => { window.__moduleTypeWorkerFixture = ev.data; moduleTypeWorker.terminate(); };
+        moduleTypeWorker.onerror = ev => { window.__moduleTypeWorkerFixture = { error: ev && ev.message || 'module-type-worker-error' }; };`);
+      return;
+    }
+    if (url.pathname === '/module-type-worker-fixture.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`import { moduleTypeWorkerDep } from './module-type-worker-dep.js';
+        postMessage({
+          loaded: true,
+          href: location.href,
+          origin: location.origin,
+          importMetaURL: import.meta.url,
+          dep: moduleTypeWorkerDep,
+          userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          fetchSource: Function.prototype.toString.call(fetch)
+        });`);
+      return;
+    }
+    if (url.pathname === '/module-type-worker-dep.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`export const moduleTypeWorkerDep = 'module-worker-dep-ok';`);
       return;
     }
     if (url.pathname === '/worker-fixture.js') {
@@ -587,6 +682,11 @@ function createTargetServer(requests) {
         'Cache-Control': 'no-store',
       });
       res.end(`(async () => {
+        try {
+          importScripts('/worker-imported-fixture.js');
+        } catch (err) {
+          self.__workerImportedFixture = { error: err && (err.name + ':' + err.message) || String(err) };
+        }
         const fnSource = (fn) => {
           try {
             return Function.prototype.toString.call(fn);
@@ -639,10 +739,42 @@ function createTargetServer(requests) {
           ownKeys: {
             hiddenArtifacts: hiddenArtifactKeys(),
             hasLocation: Reflect.ownKeys(self).includes('location')
-          }
+          },
+          imported: self.__workerImportedFixture || null
         };
         postMessage(out);
       })();`);
+      return;
+    }
+    if (url.pathname === '/worker-imported-fixture.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`self.__workerImportedFixture = {
+        loaded: true,
+        href: location.href,
+        origin,
+        fetchSource: Function.prototype.toString.call(fetch)
+      };`);
+      return;
+    }
+    if (url.pathname === '/shared-worker-differential.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`onconnect = ev => {
+        const port = ev.ports && ev.ports[0];
+        if (!port) return;
+        port.postMessage({
+          href: location.href,
+          origin,
+          selfIsGlobalThis: self === globalThis,
+          fetchSource: Function.prototype.toString.call(fetch),
+          locationTag: Object.prototype.toString.call(location)
+        });
+      };`);
       return;
     }
     if (url.pathname === '/differential-module.js') {
@@ -1089,7 +1221,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     ],
   });
   t.after(() => browser.close());
-  const page = await browser.newPage();
+  let page = await browser.newPage();
   await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
   await waitForPage(
     page,
@@ -1186,6 +1318,20 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         }
       );
     })(),
+    metaPolicyProbe: {
+      live: Array.from(document.querySelectorAll('meta[http-equiv]')).map((el) => ({
+        httpEquiv: el.getAttribute('http-equiv'),
+        content: el.getAttribute('content'),
+      })),
+      blocked: Array.from(document.querySelectorAll('meta[data-zp-blocked-http-equiv]')).map(
+        (el) => ({
+          blocked: el.getAttribute('data-zp-blocked-http-equiv'),
+          httpEquiv: el.getAttribute('http-equiv'),
+          content: el.getAttribute('content'),
+        }),
+      ),
+      parser: window.__metaPolicyParserProbe,
+    },
   }));
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
@@ -1242,6 +1388,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     false,
     `favicon must not be fetched: ${JSON.stringify(requests)}`,
   );
+  assert.deepEqual(home.metaPolicyProbe.live, []);
+  assert.deepEqual(home.metaPolicyProbe.blocked, []);
+  assert.deepEqual(home.metaPolicyProbe.parser, { live: [], text: 'ok' });
   assert.equal(home.imageProbe.complete, true);
   assert.equal(home.imageProbe.naturalWidth, 1);
   assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
@@ -1333,13 +1482,16 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         window.__dynamicScriptLoaded &&
         window.__dynamicScriptLoaded.loaded &&
         window.__moduleWorkerFixture &&
-        window.__moduleWorkerFixture.loaded,
+        window.__moduleWorkerFixture.loaded &&
+        window.__moduleTypeWorkerFixture &&
+        window.__moduleTypeWorkerFixture.loaded,
     );
   } catch (err) {
     const state = await page.evaluate(() => ({
       gtm: window.__gtmFixture || null,
       dynamic: window.__dynamicScriptLoaded || null,
       moduleWorker: window.__moduleWorkerFixture || null,
+      moduleTypeWorker: window.__moduleTypeWorkerFixture || null,
       scripts: Array.from(document.scripts).map((s) => ({
         id: s.id,
         src: s.attributes.getNamedItem('src')?.value || '',
@@ -1356,6 +1508,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     gtm: window.__gtmFixture,
     dynamic: window.__dynamicScriptLoaded,
     moduleWorker: window.__moduleWorkerFixture,
+    moduleTypeWorker: window.__moduleTypeWorkerFixture,
     gtmAttr: document.getElementById('gtm-fixture')?.attributes.getNamedItem('src')?.value || '',
     dynamicAttr:
       document.getElementById('dynamic-script-probe')?.attributes.getNamedItem('src')?.value || '',
@@ -1381,6 +1534,19 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     text: 'worker-upload',
     serviceWorker: false,
   });
+  assert.equal(
+    dynamicScripts.moduleTypeWorker.href,
+    `http://${targetHost}:${targetPort}/module-type-worker-fixture.js`,
+  );
+  assert.equal(dynamicScripts.moduleTypeWorker.origin, `http://${targetHost}:${targetPort}`);
+  assert.equal(
+    dynamicScripts.moduleTypeWorker.importMetaURL,
+    `http://${targetHost}:${targetPort}/module-type-worker-fixture.js`,
+  );
+  assert.equal(dynamicScripts.moduleTypeWorker.dep, 'module-worker-dep-ok');
+  assert.equal(dynamicScripts.moduleTypeWorker.userAgent, TARGET_UA);
+  assert.equal(dynamicScripts.moduleTypeWorker.platform, 'Win32');
+  assert.match(dynamicScripts.moduleTypeWorker.fetchSource, /\[native code\]/);
   assert.match(dynamicScripts.dynamic.currentAttr, /^\/zp\/api\/script\?/);
   assert.match(dynamicScripts.gtmAttr, /^\/zp\/api\/script\?/);
   assert.match(dynamicScripts.dynamicAttr, /^\/zp\/api\/script\?/);
@@ -1402,6 +1568,18 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   );
   assert.ok(
     requests.some((r) => r.url.startsWith('/worker-fixture.js') && r.userAgent === TARGET_UA),
+    `target requests: ${JSON.stringify(requests)}`,
+  );
+  assert.ok(
+    requests.some(
+      (r) => r.url.startsWith('/module-type-worker-fixture.js') && r.userAgent === TARGET_UA,
+    ),
+    `target requests: ${JSON.stringify(requests)}`,
+  );
+  assert.ok(
+    requests.some(
+      (r) => r.url.startsWith('/module-type-worker-dep.js') && r.userAgent === TARGET_UA,
+    ),
     `target requests: ${JSON.stringify(requests)}`,
   );
 
@@ -1703,7 +1881,6 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     'Google US English',
     'Microsoft David - English (United States)',
   ]);
-
   const runtimeIntegration = await page.evaluate(
     async (targetPort, crossPort) => {
       async function readText(path) {
@@ -2350,7 +2527,6 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     local: storageSeed,
     session: `${storageSeed}-session`,
   });
-
   const escapeMatrix = await page.evaluate(async (targetPort) => {
     const directBase = `http://localhost:${targetPort}`;
     const out = {};
@@ -2763,6 +2939,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     functionHref: value.functionHref,
     evalOrigin: value.evalOrigin,
     stringTimerOrigin: value.stringTimerOrigin,
+    stringIntervalOrigin: value.stringIntervalOrigin,
     dynamicImport: value.dynamicImport,
     eventSource: value.eventSource,
     policyHeaders: normalizePolicyHeaders(value.policyHeaders),
@@ -2772,11 +2949,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     ws: value.ws,
     surface: normalizeSurface(value.surface),
   });
-  // Yield after the target-page navigation before reusing the same tab for the shell.
-  // Under load Chromium can otherwise starve the next Puppeteer navigation until the
-  // test-level timeout, even though the page has reached the asserted title state.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
+  // Use in-page navigation for the second shell flow. Under load Chromium can
+  // starve Puppeteer's same-tab page.goto/page.close command until the test-level
+  // timeout, even though the page has reached the asserted title state.
+  await page.evaluate((url) => {
+    location.href = url;
+  }, `http://proxy.localhost:${proxyPort}/`);
   await waitForPage(
     page,
     () =>
@@ -2788,7 +2966,11 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   await page.click('button');
   await waitForPage(page, () => document.title === 'Differential Fixture' && window.__differential);
   const proxyDiff = comparableDifferential(await readDifferential(page));
-
+  assert.equal(proxyDiff.surface.workerRealm.imported.loaded, true);
+  assert.ok(
+    requests.some((r) => r.url === '/worker-imported-fixture.js' && r.userAgent === TARGET_UA),
+    `worker importScripts request missing: ${JSON.stringify(requests)}`,
+  );
   const abortMatrix = await page.evaluate(async () => {
     function withDeadline(promise, label, ms = 5000) {
       return Promise.race([

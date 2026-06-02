@@ -8,6 +8,7 @@ use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UpdateOperator};
 use wasm_bindgen::prelude::*;
 
 mod css;
+mod html;
 mod import_map;
 mod js;
 
@@ -16,6 +17,34 @@ pub struct RewriteOutput {
     ok: bool,
     code: String,
     error: String,
+}
+
+#[wasm_bindgen]
+pub struct URLRewriteOutput {
+    ok: bool,
+    url: String,
+    target: String,
+    error: String,
+}
+
+#[wasm_bindgen]
+impl URLRewriteOutput {
+    #[wasm_bindgen(getter)]
+    pub fn ok(&self) -> bool {
+        self.ok
+    }
+    #[wasm_bindgen(getter)]
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn target(&self) -> String {
+        self.target.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn error(&self) -> String {
+        self.error.clone()
+    }
 }
 
 #[wasm_bindgen]
@@ -41,15 +70,27 @@ pub fn rewrite_script(
     target_url: &str,
     control_prefix: &str,
 ) -> RewriteOutput {
+    rewrite_script_with_context(source, kind, target_url, control_prefix, "", "")
+}
+
+#[wasm_bindgen]
+pub fn rewrite_script_with_context(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+    control_prefix: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> RewriteOutput {
+    let ctx = RewriteContext::new(target_url, control_prefix, tab_id, runtime_token);
     match normalize_kind(kind) {
-        "module" => rewrite_program_source(source, true, target_url, control_prefix),
+        "module" => rewrite_program_source(source, true, ctx),
         "event-handler" => rewrite_wrapped_source(
             source,
             "function __zp_event__(event){\n",
             "\n}",
             false,
-            target_url,
-            control_prefix,
+            ctx.without_runtime_context(),
             true,
         ),
         "function" => rewrite_wrapped_source(
@@ -57,11 +98,10 @@ pub fn rewrite_script(
             "function __zp_dynamic__(){\n",
             "\n}",
             false,
-            target_url,
-            control_prefix,
+            ctx.without_runtime_context(),
             false,
         ),
-        _ => rewrite_program_source(source, false, target_url, control_prefix),
+        _ => rewrite_program_source(source, false, ctx.without_runtime_context()),
     }
 }
 
@@ -92,6 +132,46 @@ pub fn rewrite_import_map(
     import_map::rewrite(source, base_url, tab_id, runtime_token, control_prefix)
 }
 
+#[wasm_bindgen]
+pub fn rewrite_script_url(
+    raw: &str,
+    kind: &str,
+    target_url: &str,
+    control_prefix: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> URLRewriteOutput {
+    let out = js::module_urls::script_url(
+        raw,
+        normalize_kind(kind),
+        target_url,
+        RewriteContext::new(target_url, control_prefix, tab_id, runtime_token).control_prefix,
+        tab_id,
+        runtime_token,
+    );
+    URLRewriteOutput {
+        ok: out.ok,
+        url: out.url,
+        target: out.target,
+        error: out.error,
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_fetch_url(raw: &str, target_url: &str, control_prefix: &str) -> URLRewriteOutput {
+    let out = html::fetch_url(
+        raw,
+        target_url,
+        RewriteContext::new(target_url, control_prefix, "", "").control_prefix,
+    );
+    URLRewriteOutput {
+        ok: out.ok,
+        url: out.url,
+        target: out.target,
+        error: out.error,
+    }
+}
+
 fn normalize_kind(kind: &str) -> &'static str {
     match kind {
         "module" => "module",
@@ -101,12 +181,43 @@ fn normalize_kind(kind: &str) -> &'static str {
     }
 }
 
-fn rewrite_program_source(
-    source: &str,
-    module: bool,
-    target_url: &str,
-    control_prefix: &str,
-) -> RewriteOutput {
+#[derive(Clone, Copy)]
+struct RewriteContext<'a> {
+    target_url: &'a str,
+    control_prefix: &'a str,
+    tab_id: &'a str,
+    runtime_token: &'a str,
+}
+
+impl<'a> RewriteContext<'a> {
+    fn new(
+        target_url: &'a str,
+        control_prefix: &'a str,
+        tab_id: &'a str,
+        runtime_token: &'a str,
+    ) -> Self {
+        Self {
+            target_url,
+            control_prefix: if control_prefix.is_empty() {
+                "/zp/"
+            } else {
+                control_prefix
+            },
+            tab_id,
+            runtime_token,
+        }
+    }
+
+    fn without_runtime_context(self) -> Self {
+        Self {
+            tab_id: "",
+            runtime_token: "",
+            ..self
+        }
+    }
+}
+
+fn rewrite_program_source(source: &str, module: bool, ctx: RewriteContext<'_>) -> RewriteOutput {
     let allocator = Allocator::default();
     let source_type = if module {
         SourceType::mjs()
@@ -121,7 +232,7 @@ fn rewrite_program_source(
             error: "PARSE_FAILED".to_string(),
         };
     }
-    let mut rewriter = Rewriter::new(source, module, target_url, control_prefix);
+    let mut rewriter = Rewriter::new(source, module, ctx);
     rewriter.walk_program(&ret.program);
     RewriteOutput {
         ok: true,
@@ -135,15 +246,14 @@ fn rewrite_wrapped_source(
     prefix: &str,
     suffix: &str,
     module: bool,
-    target_url: &str,
-    control_prefix: &str,
+    ctx: RewriteContext<'_>,
     event_handler: bool,
 ) -> RewriteOutput {
     let mut wrapped = String::with_capacity(prefix.len() + source.len() + suffix.len());
     wrapped.push_str(prefix);
     wrapped.push_str(source);
     wrapped.push_str(suffix);
-    let out = rewrite_program_source(&wrapped, module, target_url, control_prefix);
+    let out = rewrite_program_source(&wrapped, module, ctx);
     if !out.ok {
         return out;
     }
@@ -235,8 +345,7 @@ enum ScopeMode {
 struct Rewriter<'a> {
     source: &'a str,
     module: bool,
-    target_url: &'a str,
-    control_prefix: &'a str,
+    ctx: RewriteContext<'a>,
     replacements: Vec<Replacement>,
     scopes: Vec<HashSet<String>>,
     window_aliases: Vec<HashSet<String>>,
@@ -244,16 +353,11 @@ struct Rewriter<'a> {
 }
 
 impl<'a> Rewriter<'a> {
-    fn new(source: &'a str, module: bool, target_url: &'a str, control_prefix: &'a str) -> Self {
+    fn new(source: &'a str, module: bool, ctx: RewriteContext<'a>) -> Self {
         Self {
             source,
             module,
-            target_url,
-            control_prefix: if control_prefix.is_empty() {
-                "/zp/"
-            } else {
-                control_prefix
-            },
+            ctx,
             replacements: Vec::new(),
             scopes: Vec::new(),
             window_aliases: Vec::new(),
@@ -424,8 +528,10 @@ impl<'a> Rewriter<'a> {
                 "{:?}",
                 js::module_urls::module_specifier(
                     source.value.as_str(),
-                    self.target_url,
-                    self.control_prefix
+                    self.ctx.target_url,
+                    self.ctx.control_prefix,
+                    self.ctx.tab_id,
+                    self.ctx.runtime_token
                 )
             ),
             95,
@@ -844,7 +950,7 @@ impl<'a> Rewriter<'a> {
 
     fn walk_static_member_expression(&mut self, expr: &StaticMemberExpression<'a>) {
         if self.is_import_meta_url_static(expr) {
-            self.add_replacement(expr.span, format!("{:?}", self.target_url), 90);
+            self.add_replacement(expr.span, format!("{:?}", self.ctx.target_url), 90);
             return;
         }
         if self.member_needs_helper_static(expr) {
@@ -1080,8 +1186,10 @@ impl<'a> Rewriter<'a> {
                     "{:?}",
                     js::module_urls::module_specifier(
                         spec.value.as_str(),
-                        self.target_url,
-                        self.control_prefix
+                        self.ctx.target_url,
+                        self.ctx.control_prefix,
+                        self.ctx.tab_id,
+                        self.ctx.runtime_token
                     )
                 ),
                 95,
@@ -1093,7 +1201,7 @@ impl<'a> Rewriter<'a> {
             format!(
                 "__zp_module_url({},{:?})",
                 self.render_expression(&expr.source),
-                self.target_url
+                self.ctx.target_url
             ),
             95,
         );
@@ -1330,7 +1438,7 @@ impl<'a> Rewriter<'a> {
 
     fn render_static_member(&self, expr: &StaticMemberExpression<'a>) -> String {
         if self.is_import_meta_url_static(expr) {
-            return format!("{:?}", self.target_url);
+            return format!("{:?}", self.ctx.target_url);
         }
         if self.member_needs_helper_static(expr) {
             let helper = if self.member_access_is_optional(expr.span) {
@@ -1426,15 +1534,17 @@ impl<'a> Rewriter<'a> {
                 "{:?}",
                 js::module_urls::module_specifier(
                     spec.value.as_str(),
-                    self.target_url,
-                    self.control_prefix
+                    self.ctx.target_url,
+                    self.ctx.control_prefix,
+                    self.ctx.tab_id,
+                    self.ctx.runtime_token
                 )
             )
         } else {
             format!(
                 "__zp_module_url({},{:?})",
                 self.render_expression(&expr.source),
-                self.target_url
+                self.ctx.target_url
             )
         };
         self.render_span_with(expr.span, vec![(expr.source.span(), source)])
@@ -2234,6 +2344,25 @@ mod tests {
             "__zp_module_url('./chunks/' + name + '.js',\"https://example.com/assets/main.js\")"
         ));
         assert!(code.contains("\"https://example.com/assets/main.js\""));
+    }
+
+    #[test]
+    fn rewrites_module_urls_with_runtime_context_when_supplied() {
+        let out = rewrite_script_with_context(
+            "import './dep.js'; export async function load() { return import('./chunk.js'); }",
+            "module",
+            "https://example.com/assets/main.js",
+            "/zp/",
+            "tab-1",
+            "rt-1",
+        );
+        assert!(out.ok, "rewrite failed: {}", out.error);
+        assert!(out.code.contains(
+            "import \"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js&tab=tab-1&rt=rt-1\";"
+        ));
+        assert!(out.code.contains(
+            "import(\"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fchunk.js&tab=tab-1&rt=rt-1\")"
+        ));
     }
 
     #[test]

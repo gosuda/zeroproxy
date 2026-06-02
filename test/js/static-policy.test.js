@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 
 function readRuntimeSource() {
   return [
@@ -19,6 +20,23 @@ function readServiceWorkerSource() {
     fs.readFileSync('web/sw.js', 'utf8'),
     fs.readFileSync('web/sw/responses.js', 'utf8'),
   ].join('\n');
+}
+
+function htmlFiles(root) {
+  const out = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const p = path.join(root, entry.name);
+    if (entry.isDirectory()) out.push(...htmlFiles(p));
+    else if (entry.isFile() && entry.name.endsWith('.html')) out.push(p);
+  }
+  return out.sort();
+}
+
+function runtimeSrcdocInjectionTemplate() {
+  const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
+  const match = rt.match(/function injectSrcdoc\(s\) \{ return `([^`]+)`; \}/);
+  assert.ok(match, 'runtime srcdoc injection template missing');
+  return match[1];
 }
 
 test('service worker has no unclassified native fetch fallback', () => {
@@ -256,6 +274,128 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
   );
 });
 
+test('script rewrite ABI carries runtime context into Rust module URL rewriting', () => {
+  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+
+  assert.match(
+    htmltx,
+    /ScriptRewriter\s+func\(source, kind, targetURL, controlPrefix, tabID, runtimeToken string\)/,
+  );
+  assert.ok(
+    htmltx.includes(
+      'opt.ScriptRewriter(source, kind, opt.TargetURL.String(), shareurl.ControlPrefix, opt.TabID, opt.RuntimeToken)',
+    ),
+  );
+  assert.ok(
+    htmltx.includes(
+      'ScriptURLRewriter     func(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string)',
+    ),
+  );
+  const scriptURLMatch = htmltx.match(
+    /func wrapScriptURL\(raw string, opt Options, kind string\) \(wrapped, target string, ok bool\) \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(scriptURLMatch, 'wrapScriptURL missing');
+  assert.equal(scriptURLMatch[1].includes('url.Values'), false);
+  assert.equal(scriptURLMatch[1].includes('q.Set('), false);
+  assert.ok(htmltx.includes('opt.ScriptURLRewriter(raw, kind, opt.TargetURL.String()'));
+  assert.ok(kernel.includes('"tabId":         tabID'));
+  assert.ok(kernel.includes('"runtimeToken":  runtimeToken'));
+  assert.ok(kernel.includes('rewriteScriptURLFromJS'));
+  assert.ok(build.includes('wasm_bindgen.rewrite_script_url'));
+  assert.ok(build.includes('rewriteScriptURL: rewriteScriptURLPublic'));
+  assert.ok(
+    sw.includes(
+      'rewriteScriptResponse(resp, { targetUrl: target, kind, tabId: resolved.tab.tabId, runtimeToken: resolved.tab.runtimeToken })',
+    ),
+  );
+});
+
+test('static fetch URL policy delegates to Rust rewriter ABI', () => {
+  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+
+  assert.ok(
+    htmltx.includes(
+      'FetchURLRewriter      func(raw, targetURL, controlPrefix string) (wrapped, target string, err error)',
+    ),
+  );
+  const fetchURLMatch = htmltx.match(
+    /func wrapFetchURL\(raw string, opt Options\) \(wrapped, target string, ok bool\) \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(fetchURLMatch, 'wrapFetchURL missing');
+  assert.equal(fetchURLMatch[1].includes('url.Values'), false);
+  assert.equal(fetchURLMatch[1].includes('ResolveReference'), false);
+  assert.ok(htmltx.includes('opt.FetchURLRewriter(raw, opt.TargetURL.String(), shareurl.ControlPrefix)'));
+  assert.ok(kernel.includes('FetchURLRewriter:      rewriteFetchURLFromJS'));
+  assert.ok(kernel.includes('rewriteFetchURLFromJS'));
+  assert.ok(build.includes('wasm_bindgen.rewrite_fetch_url'));
+  assert.ok(build.includes('rewriteFetchURL: rewriteFetchURLPublic'));
+});
+
+test('runtime import maps delegate rewrite policy to Rust rewriter ABI', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
+  const match = rt.match(/function rewriteImportMapText\(source\) \{([\s\S]*?)\n  \}/);
+  assert.ok(match, 'runtime import-map rewrite function missing');
+  const body = match[1];
+  assert.ok(body.includes('root.ZPRewriter'));
+  assert.ok(body.includes('rw.rewriteImportMap'));
+  assert.ok(body.includes('baseUrl: baseURL'));
+  assert.ok(body.includes('tabId: boot.tabId'));
+  assert.ok(body.includes('runtimeToken'));
+  assert.ok(body.includes('controlPrefix: ZP.CONTROL_PREFIX'));
+  assert.ok(body.includes("return '{}';"));
+  assert.equal(body.includes('JSON.parse'), false);
+  assert.equal(body.includes('scriptProxyPath'), false);
+  assert.equal(body.includes('new URL'), false);
+});
+
+test('html transformer import maps fail closed without Rust rewriter hook', () => {
+  const src = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  assert.equal(src.includes('func rewriteImportMap('), false);
+  assert.equal(src.includes('return rewriteImportMap(source, opt)'), false);
+  assert.match(src, /if opt\.ImportMapRewriter == nil \{\s*return `\{\}`\s*\}/);
+});
+
+test('html and wasm CSS rewriting fail closed without Rust rewriter hook', () => {
+  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const http = fs.readFileSync('web/http-rewriter.js', 'utf8');
+  const match = htmltx.match(
+    /func rewriteInlineStyle\(source string, opt Options\) string \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(match, 'rewriteInlineStyle missing');
+  assert.ok(match[1].includes('if opt.CSSRewriter != nil'));
+  assert.ok(match[1].includes('return ""'));
+  assert.equal(match[1].includes('return source'), false);
+  const kernelMatch = kernel.match(
+    /func rewriteCSSFromJS\(source, baseURL string\) \(string, error\) \{([\s\S]*?)\n\}/,
+  );
+  assert.ok(kernelMatch, 'rewriteCSSFromJS missing');
+  assert.equal(kernelMatch[1].includes('return source, nil'), false);
+  assert.ok(kernelMatch[1].includes('CSS_REWRITE_UNAVAILABLE'));
+  assert.equal(rt.includes('fallbackRewriteCSS'), false);
+  assert.equal(rt.includes('cssUrlToken'), false);
+  assert.ok(
+    rt.includes(
+      "return root.ZPHTTPRewriter.rewriteCSSSource(String(source || ''), { baseUrl: base, controlPrefix: ZP.CONTROL_PREFIX, fallback: () => '' });",
+    ),
+  );
+  assert.equal(sw.includes("fallback: value => String(value || '')"), false);
+  assert.ok(sw.includes("fallback: () => ''"));
+  assert.equal(sw.includes("new Response(await resp.text().catch(() => '')"), false);
+  assert.ok(
+    http.includes(
+      "const fallback = typeof options.fallback === 'function' ? options.fallback : () => '';",
+    ),
+  );
+});
+
 test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
   const rt = readRuntimeSource();
   assert.ok(
@@ -283,6 +423,7 @@ test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
 
 test('service worker waits for initialized WASM transport and cookie bridge', () => {
   const sw = readServiceWorkerSource();
+  const index = fs.readFileSync('web/index.html', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   assert.ok(sw.includes('__zp_kernel_init'), 'service worker does not require transport init');
   assert.match(
@@ -309,6 +450,22 @@ test('service worker waits for initialized WASM transport and cookie bridge', ()
   assert.ok(
     sw.includes('X-ZP-Runtime-Token'),
     'service worker does not pass runtime capability to documents',
+  );
+  assert.ok(sw.includes('startupPhase: readinessStartupPhase()'));
+  assert.ok(sw.includes("if (readiness === 'WASM_LOADING') return 'wasm-downloading';"));
+  assert.ok(sw.includes("if (readiness === 'WASM_LOADED') return 'wasm-starting';"));
+  assert.ok(
+    index.includes(
+      "if (!(await waitForController(5000))) await startupReload('service-worker-not-controlling');",
+    ),
+  );
+  assert.ok(index.includes('function startupProgressing(state)'));
+  assert.ok(index.includes("state.startupPhase === 'wasm-downloading'"));
+  assert.ok(index.includes("state.startupPhase === 'wasm-starting'"));
+  assert.equal(
+    index.includes('state.kernelStarting && state.readinessAgeMs'),
+    false,
+    'index must not wait just because the service worker has a kernel promise',
   );
   assert.ok(kernel.includes('js.Global().Set("__zp_kernel_init"'), 'kernel init export missing');
   assert.ok(kernel.includes('js.Global().Set("__zp_cookie_set"'), 'kernel cookie export missing');
@@ -400,6 +557,34 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
     fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'),
   );
   assert.ok(server.includes('closeBoth'));
+});
+
+test('committed HTML does not carry CSP meta policy', () => {
+  for (const file of htmlFiles('web')) {
+    const html = fs.readFileSync(file, 'utf8');
+    assert.equal(
+      /<meta\b[^>]*\bhttp-equiv\s*=\s*["']?Content-Security-Policy/i.test(html),
+      false,
+      `${file} must receive ZeroProxy CSP from headers or SW responses, not a committed meta tag`,
+    );
+  }
+});
+
+test('runtime srcdoc injection inventory stays single-runtime-asset', () => {
+  const tmpl = runtimeSrcdocInjectionTemplate();
+  assert.equal((tmpl.match(/<script\b/g) || []).length, 2);
+  assert.equal((tmpl.match(/\/zp\/assets\/runtime-prelude\.js/g) || []).length, 1);
+  for (const forbidden of [
+    '/zp/assets/zp-core.js',
+    '/zp/assets/rust-rewriter.js',
+    '/zp/assets/http-rewriter.js',
+    '/zp/api/script',
+  ]) {
+    assert.equal(tmpl.includes(forbidden), false, `${forbidden} must not be injected into srcdoc`);
+  }
+  assert.ok(tmpl.includes('__ZP_BOOT'));
+  assert.ok(tmpl.includes('document.currentScript.remove()'));
+  assert.ok(tmpl.includes('${transformHTML(String(s))}'));
 });
 
 test('service worker names every required safe error class', () => {

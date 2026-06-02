@@ -1,12 +1,12 @@
 package htmltx
 
 // transform_streamdiff_test.go extends the differential proof from the single
-// rewriteToken (transform_diff_test.go) to the streaming TransformTo loop, the
-// srcset parser, and the import-map rewriter.
+// rewriteToken (transform_diff_test.go) to the streaming TransformTo loop and
+// the srcset parser.
 //
 // PROOF FACTORING (see advisor rationale): end-to-end equivalence of the new
 // TransformTo is proved as P1 ∘ P2:
-//   P1  new rewriteToken/parseSrcset/rewriteImportMap == originals (0 mismatches).
+//   P1  new rewriteToken/parseSrcset == originals (0 mismatches).
 //   P2  origTransformTo[current helpers] == newTransformTo[current helpers] over a
 //       document corpus. Running BOTH sides on the CURRENT helpers cancels the
 //       helpers out and isolates exactly what the TransformTo decomposition
@@ -17,14 +17,10 @@ package htmltx
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"testing"
-
-	"github.com/gosuda/zeroproxy/internal/shareurl"
 
 	xhtml "golang.org/x/net/html"
 )
@@ -81,7 +77,7 @@ func origTransformTo(w io.Writer, r io.Reader, opt Options) error {
 			}
 			if tok.Type == xhtml.EndTagToken && strings.EqualFold(tok.Data, rawTextTag) {
 				if rawTextKind == "importmap" {
-					out.WriteString(rewriteImportMap(rawTextBuf.String(), opt))
+					out.WriteString(rewriteInlineImportMap(rawTextBuf.String(), opt))
 				} else if rawTextKind == "style" {
 					out.WriteString(rewriteInlineStyle(rawTextBuf.String(), opt))
 				} else if rawTextKind != "" {
@@ -275,57 +271,6 @@ func origParseSrcset(raw string) []srcsetCandidate {
 	return out
 }
 
-// origRewriteImportMap is the VERBATIM original from base 5f7fa6e. DO NOT EDIT.
-func origRewriteImportMap(source string, opt Options) string {
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(source), &doc); err != nil {
-		return `{}`
-	}
-	rewriteAddress := func(raw string) string {
-		u, err := url.Parse(strings.TrimSpace(raw))
-		if err != nil {
-			return shareurl.ControlPrefix + "error/POLICY_BLOCKED"
-		}
-		abs := opt.TargetURL.ResolveReference(u)
-		if abs.Scheme != "http" && abs.Scheme != "https" {
-			return shareurl.ControlPrefix + "error/POLICY_BLOCKED"
-		}
-		q := url.Values{}
-		q.Set("kind", "module")
-		q.Set("u", abs.String())
-		q.Set("tab", opt.TabID)
-		q.Set("rt", opt.RuntimeToken)
-		return shareurl.ControlPrefix + "api/script?" + q.Encode()
-	}
-	if imports, ok := doc["imports"].(map[string]any); ok {
-		for k, v := range imports {
-			if s, ok := v.(string); ok {
-				imports[k] = rewriteAddress(s)
-			}
-		}
-	}
-	if scopes, ok := doc["scopes"].(map[string]any); ok {
-		next := make(map[string]any, len(scopes))
-		for scope, rawEntries := range scopes {
-			scopeKey := rewriteAddress(scope)
-			entries, _ := rawEntries.(map[string]any)
-			out := make(map[string]any, len(entries))
-			for k, v := range entries {
-				if s, ok := v.(string); ok {
-					out[k] = rewriteAddress(s)
-				}
-			}
-			next[scopeKey] = out
-		}
-		doc["scopes"] = next
-	}
-	b, err := json.Marshal(doc)
-	if err != nil {
-		return `{}`
-	}
-	return string(b)
-}
-
 // transformViaOrig runs the vendored original TransformTo over doc and returns
 // its full output. Errors are returned for comparison too.
 func transformViaOrig(doc string, opt Options) (string, error) {
@@ -448,58 +393,4 @@ func TestStreamDiffParseSrcsetEquivalence(t *testing.T) {
 			}
 		}
 	}
-}
-
-// importMapDiffCorpus returns import-map JSON bodies (valid and malformed).
-func importMapDiffCorpus() []string {
-	return []string{
-		`{}`, `{"imports":{}}`, `not json`, ``, `[]`, `null`, `42`,
-		`{"imports":{"a":"/a.js"}}`,
-		`{"imports":{"a":"/a.js","b":"./rel.js","c":"https://cdn.test/x.js"}}`,
-		`{"imports":{"bad":"javascript:alert(1)","data":"data:text/js,x","frag":"#x"}}`,
-		`{"imports":{"n":123,"ok":"/ok.js"}}`,
-		`{"scopes":{"/s/":{"a":"/a.js"}}}`,
-		`{"imports":{"a":"/a.js"},"scopes":{"/s/":{"b":"./b.js"},"https://cdn/":{"c":"/c.js"}}}`,
-		`{"scopes":{"bad:scope":{"x":"/x.js"}}}`,
-		`{"imports":{"a":"  /spaces.js  "}}`,
-		`{"imports":{"empty":""}}`,
-	}
-}
-
-// TestStreamDiffRewriteImportMapEquivalence proves (P1) the decomposed
-// rewriteImportMap matches the vendored original. Output JSON key order is
-// nondeterministic across Go map iteration, so equivalence is asserted on the
-// decoded structure rather than the raw bytes (the original has the same
-// property; this is not a behavior relaxation, it normalizes map-order noise).
-func TestStreamDiffRewriteImportMapEquivalence(t *testing.T) {
-	opt := streamDiffOptions()[0]
-	for _, src := range importMapDiffCorpus() {
-		got := rewriteImportMap(src, opt)
-		want := origRewriteImportMap(src, opt)
-		if !jsonEqual(t, got, want) {
-			t.Fatalf("rewriteImportMap(%q):\n new:  %s\n orig: %s", src, got, want)
-		}
-	}
-}
-
-// jsonEqual compares two JSON strings for structural equality, tolerating map key
-// ordering differences. Non-JSON inputs are compared as raw strings.
-func jsonEqual(t *testing.T, a, b string) bool {
-	t.Helper()
-	var av, bv any
-	aErr := json.Unmarshal([]byte(a), &av)
-	bErr := json.Unmarshal([]byte(b), &bv)
-	if aErr != nil || bErr != nil {
-		return a == b
-	}
-	return fmt.Sprintf("%v", normalizeJSON(av)) == fmt.Sprintf("%v", normalizeJSON(bv))
-}
-
-// normalizeJSON produces an order-independent representation of decoded JSON.
-func normalizeJSON(v any) string {
-	b, _ := json.Marshal(v)
-	var canon any
-	_ = json.Unmarshal(b, &canon)
-	out, _ := json.Marshal(canon)
-	return string(out)
 }

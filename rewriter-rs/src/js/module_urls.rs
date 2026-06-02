@@ -1,4 +1,17 @@
-pub(crate) fn module_specifier(raw: &str, target_url: &str, control_prefix: &str) -> String {
+pub(crate) struct ScriptURL {
+    pub(crate) ok: bool,
+    pub(crate) url: String,
+    pub(crate) target: String,
+    pub(crate) error: String,
+}
+
+pub(crate) fn module_specifier(
+    raw: &str,
+    target_url: &str,
+    control_prefix: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> String {
     if target_url.is_empty() {
         return raw.to_string();
     }
@@ -12,11 +25,90 @@ pub(crate) fn module_specifier(raw: &str, target_url: &str, control_prefix: &str
     if !abs.starts_with("http://") && !abs.starts_with("https://") {
         return format!("{}error/POLICY_BLOCKED", control_prefix);
     }
-    format!(
+    let mut out = format!(
         "{}api/script?kind=module&u={}",
         control_prefix,
         percent_encode(abs)
-    )
+    );
+    append_context(&mut out, "tab", tab_id);
+    append_context(&mut out, "rt", runtime_token);
+    out
+}
+
+pub(crate) fn script_url(
+    raw: &str,
+    kind: &str,
+    target_url: &str,
+    control_prefix: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> ScriptURL {
+    let blocked = || ScriptURL {
+        ok: false,
+        url: format!("{}error/POLICY_BLOCKED", control_prefix),
+        target: String::new(),
+        error: "POLICY_BLOCKED".to_string(),
+    };
+    let text = raw.trim();
+    if text.is_empty() || text.starts_with('#') || is_executable_scheme(text) {
+        return blocked();
+    }
+    let abs = match absolute_url(target_url, text) {
+        Some(value) if is_http_url(value.as_str()) => value,
+        _ => return blocked(),
+    };
+    let normalized_kind = if kind == "module" {
+        "module"
+    } else {
+        "classic"
+    };
+    let mut out = format!(
+        "{}api/script?kind={}&u={}",
+        control_prefix,
+        normalized_kind,
+        percent_encode(abs.clone())
+    );
+    if normalized_kind != "module" {
+        append_context(&mut out, "tab", tab_id);
+        append_context(&mut out, "rt", runtime_token);
+    }
+    ScriptURL {
+        ok: true,
+        url: out,
+        target: abs,
+        error: String::new(),
+    }
+}
+
+fn append_context(out: &mut String, key: &str, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    out.push('&');
+    out.push_str(key);
+    out.push('=');
+    out.push_str(&percent_encode(value.to_string()));
+}
+
+fn is_executable_scheme(spec: &str) -> bool {
+    if !has_scheme(spec) {
+        return false;
+    }
+    let scheme = spec.split_once(':').map(|(value, _)| value).unwrap_or("");
+    scheme.eq_ignore_ascii_case("javascript")
+        || scheme.eq_ignore_ascii_case("data")
+        || scheme.eq_ignore_ascii_case("vbscript")
+}
+
+fn absolute_url(base: &str, raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw)
+        .or_else(|_| url::Url::parse(base).and_then(|base_url| base_url.join(raw)))
+        .ok()?;
+    Some(parsed.to_string())
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 fn is_bare_specifier(spec: &str) -> bool {
@@ -104,12 +196,18 @@ fn hex(v: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::module_specifier;
+    use super::{module_specifier, script_url};
 
     #[test]
     fn preserves_bare_specifiers() {
         assert_eq!(
-            module_specifier("react", "https://target.example/app/main.js", "/zp/"),
+            module_specifier(
+                "react",
+                "https://target.example/app/main.js",
+                "/zp/",
+                "",
+                ""
+            ),
             "react"
         );
     }
@@ -117,16 +215,38 @@ mod tests {
     #[test]
     fn rewrites_relative_module_specifiers() {
         assert_eq!(
-            module_specifier("./dep.js", "https://target.example/app/main.js", "/zp/"),
+            module_specifier(
+                "./dep.js",
+                "https://target.example/app/main.js",
+                "/zp/",
+                "",
+                ""
+            ),
             "/zp/api/script?kind=module&u=https%3A%2F%2Ftarget.example%2Fapp%2Fdep.js"
         );
         assert_eq!(
             module_specifier(
                 "../lib/a b.js",
                 "https://target.example/app/main.js",
-                "/zp/"
+                "/zp/",
+                "",
+                ""
             ),
             "/zp/api/script?kind=module&u=https%3A%2F%2Ftarget.example%2Flib%2Fa%20b.js"
+        );
+    }
+
+    #[test]
+    fn appends_runtime_context_when_present() {
+        assert_eq!(
+            module_specifier(
+                "./dep.js",
+                "https://target.example/app/main.js",
+                "/zp/",
+                "tab 1",
+                "rt+1"
+            ),
+            "/zp/api/script?kind=module&u=https%3A%2F%2Ftarget.example%2Fapp%2Fdep.js&tab=tab%201&rt=rt%2B1"
         );
     }
 
@@ -136,7 +256,9 @@ mod tests {
             module_specifier(
                 "data:text/javascript,0",
                 "https://target.example/app/main.js",
-                "/zp/"
+                "/zp/",
+                "",
+                ""
             ),
             "/zp/error/POLICY_BLOCKED"
         );
@@ -144,6 +266,60 @@ mod tests {
 
     #[test]
     fn leaves_empty_target_context_unchanged() {
-        assert_eq!(module_specifier("./dep.js", "", "/zp/"), "./dep.js");
+        assert_eq!(module_specifier("./dep.js", "", "/zp/", "", ""), "./dep.js");
+    }
+
+    #[test]
+    fn rewrites_external_script_urls() {
+        let classic = script_url(
+            "./app.js",
+            "classic",
+            "https://target.example/dir/page.html",
+            "/zp/",
+            "tab 1",
+            "rt+1",
+        );
+        assert!(classic.ok);
+        assert_eq!(classic.target, "https://target.example/dir/app.js");
+        assert_eq!(
+            classic.url,
+            "/zp/api/script?kind=classic&u=https%3A%2F%2Ftarget.example%2Fdir%2Fapp.js&tab=tab%201&rt=rt%2B1"
+        );
+
+        let module = script_url(
+            "/main.js",
+            "module",
+            "https://target.example/dir/page.html",
+            "/zp/",
+            "tab",
+            "rt",
+        );
+        assert!(module.ok);
+        assert_eq!(
+            module.url,
+            "/zp/api/script?kind=module&u=https%3A%2F%2Ftarget.example%2Fmain.js"
+        );
+    }
+
+    #[test]
+    fn blocks_external_script_unsafe_urls() {
+        for raw in [
+            "",
+            "#frag",
+            "javascript:alert(1)",
+            "data:text/javascript,0",
+            "file:///x.js",
+        ] {
+            let out = script_url(
+                raw,
+                "classic",
+                "https://target.example/app.js",
+                "/zp/",
+                "tab",
+                "rt",
+            );
+            assert!(!out.ok, "{raw}");
+            assert_eq!(out.url, "/zp/error/POLICY_BLOCKED");
+        }
     }
 }

@@ -59,13 +59,20 @@
       let state = null;
       try { state = await swRequest({ type: 'ZP_STATUS' }, 1500); } catch {}
       if (state && state.readiness === 'READY') return state;
-      if (state && (state.wasmLoading || state.kernelStarting && state.readinessAgeMs < 6000)) {
+      if (startupProgressing(state)) {
         await delay(500);
         continue;
       }
       await startupReload(`service-worker-${state && state.readiness || last}`);
     }
     await startupReload('service-worker-startup-timeout');
+  }
+  function startupProgressing(state) {
+    return state && (
+      state.startupPhase === 'wasm-downloading' ||
+      state.startupPhase === 'wasm-starting' ||
+      state.wasmLoading === true
+    );
   }
   function swRequest(message, timeoutMs=10000) {
     return new Promise((resolve, reject) => {

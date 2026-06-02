@@ -42,9 +42,17 @@ function readinessState() {
   return {
     readiness,
     readinessAgeMs: Date.now() - readinessSince,
+    startupPhase: readinessStartupPhase(),
     kernelStarting: !!kernelPromise,
-    wasmLoading: readiness === 'WASM_LOADING' || readiness === 'WASM_LOADED',
+    wasmLoading: readiness === 'WASM_LOADING',
   };
+}
+function readinessStartupPhase() {
+  if (readiness === 'REWRITE_LOADING') return 'rewriter-loading';
+  if (readiness === 'WASM_LOADING') return 'wasm-downloading';
+  if (readiness === 'WASM_LOADED') return 'wasm-starting';
+  if (readiness === 'READY') return 'ready';
+  return 'idle';
 }
 
 async function initKernel(servers) {
@@ -213,15 +221,18 @@ async function apiScript(req, url, clientId) {
   const refPolicy = url.searchParams.get('rp') || '';
   if (ref) headers.push(['X-ZP-Fetch-Referrer', ref]);
   if (refPolicy) headers.push(['X-ZP-Fetch-Referrer-Policy', refPolicy]);
+  rememberRuntimeScriptContext(url, target, resolved);
   const resp = await transportFetch(target, { request: req, method: 'GET', headers, tab: resolved.tab, entryId: resolved.entryId });
-  return rewriteScriptResponse(resp, { targetUrl: target, kind });
+  return rewriteScriptResponse(resp, { targetUrl: target, kind, tabId: resolved.tab.tabId, runtimeToken: resolved.tab.runtimeToken });
 }
 
 async function apiWorkerScript(req, url, clientId) {
   const target = url.searchParams.get('u');
+  const kind = url.searchParams.get('kind') === 'module' ? 'module' : 'worker';
   const resolved = scriptRequestContext(req, url, clientId);
   if (!target || !resolved) return safeError('SW_NOT_READY', 503);
-  return rewriteScriptResponse(await transportFetch(target, { request: req, method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab: resolved.tab, entryId: resolved.entryId }), { targetUrl: target, kind: 'worker' });
+  rememberRuntimeScriptContext(url, target, resolved);
+  return rewriteScriptResponse(await transportFetch(target, { request: req, method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab: resolved.tab, entryId: resolved.entryId }), { targetUrl: target, kind, tabId: resolved.tab.tabId, runtimeToken: resolved.tab.runtimeToken });
 }
 
 async function transportFetch(targetUrl, opt) {
@@ -366,7 +377,7 @@ async function rewriteScriptResponse(resp, opt) {
   try {
     await initRewriter();
     const source = await resp.text();
-    code = self.ZPHTTPRewriter.rewriteScriptOutcome(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX }).code;
+    code = self.ZPHTTPRewriter.rewriteScriptOutcome(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX, tabId: opt.tabId || '', runtimeToken: opt.runtimeToken || '' }).code;
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   }
@@ -385,10 +396,10 @@ async function rewriteCSSResponse(resp, opt) {
   try {
     await initRewriter();
     const source = await resp.text();
-    const code = self.ZPHTTPRewriter.rewriteCSSSource(source, { baseUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX, fallback: value => String(value || '') });
+    const code = self.ZPHTTPRewriter.rewriteCSSSource(source, { baseUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX, fallback: () => '' });
     return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
   } catch {
-    return new Response(await resp.text().catch(() => ''), { status: resp.status, statusText: resp.statusText, headers: h });
+    return new Response('', { status: resp.status, statusText: resp.statusText, headers: h });
   }
 }
 // Runtime message dispatch table. A Map (not a plain object) is used so a forged
@@ -676,6 +687,11 @@ function resolveScriptByContext(ctx, queryTab, headerTab, token) {
   if (token && token !== tab.runtimeToken) return null;
   return { tab, entryId: ctx.entryId || tab.activeEntryId };
 }
+function rememberRuntimeScriptContext(requestURL, targetUrl, resolved) {
+  const entryId = resolved.entryId || resolved.tab.activeEntryId;
+  const entry = resolved.tab.entries && resolved.tab.entries.get(entryId);
+  rememberResourceContext(requestURL, targetUrl, { tabId: resolved.tab.tabId, entryId, targetUrl: entry && entry.targetUrl || targetUrl });
+}
 function rememberResourceContext(requestURL, targetUrl, ctx) {
   const next = { tabId: ctx.tabId, entryId: ctx.entryId, targetUrl: ctx.targetUrl, baseUrl: targetUrl };
   const key = requestURL.origin === ORIGIN ? requestURL.pathname + requestURL.search : requestURL.href;
@@ -696,4 +712,15 @@ async function broadcastCookieSync(payload) {
     }
   }
 }
-function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }
+function workerBootstrap(url) {
+  if (url.searchParams.get('kind') === 'module') return moduleWorkerBootstrap();
+  const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));";
+  return workerBootstrapResponse(body);
+}
+function moduleWorkerBootstrap() {
+  const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');await import('/zp/assets/worker-prelude.js');await import('/zp/api/worker-script?kind=module&tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));";
+  return workerBootstrapResponse(body);
+}
+function workerBootstrapResponse(body) {
+  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } });
+}

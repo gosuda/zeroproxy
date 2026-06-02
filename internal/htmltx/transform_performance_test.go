@@ -43,9 +43,11 @@ func TestTransformLatencyStaysWithinCoarseBudgets(t *testing.T) {
 				TabID:     "tab",
 				EntryID:   "entry",
 				TargetURL: target,
-				ScriptRewriter: func(source, kind, targetURL, controlPrefix string) (string, error) {
+				ScriptRewriter: func(source, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, error) {
 					return source, nil
 				},
+				ScriptURLRewriter: scriptURLRewriterForTest,
+				FetchURLRewriter:  fetchURLRewriterForTest,
 				CSSRewriter: func(source, baseURL string) (string, error) {
 					return source, nil
 				},

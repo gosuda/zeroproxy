@@ -41,6 +41,12 @@ func TestTransformInjectionInventorySnapshot(t *testing.T) {
 		TargetURL:    target,
 		RuntimeToken: "rt",
 		Servers:      []string{"wss://relay.example/ws"},
+		ScriptURLRewriter: func(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, string, error) {
+			return scriptURLRewriterForTest(raw, kind, targetURL, controlPrefix, tabID, runtimeToken)
+		},
+		FetchURLRewriter: func(raw, targetURL, controlPrefix string) (string, string, error) {
+			return fetchURLRewriterForTest(raw, targetURL, controlPrefix)
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

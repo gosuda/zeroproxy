@@ -334,6 +334,87 @@ test('Rust rewriter asset rewrites live code paths', async () => {
   assert.ok(dynamic.code.includes('https://example.com/assets/main.js'));
 });
 
+test('Rust rewriter asset can scope module graph URLs to a runtime context', async () => {
+  const ctx = await loadBuiltRustContext();
+  const out = ctx.ZPRewriter.rewriteScript(
+    `import './dep.js'; export async function load() { return import('./chunk.js'); }`,
+    {
+      kind: 'module',
+      targetUrl: 'https://example.com/assets/main.js',
+      tabId: 'tab-1',
+      runtimeToken: 'rt-1',
+      controlPrefix: '/zp/',
+    },
+  );
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.ok(
+    out.code.includes(
+      'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js&tab=tab-1&rt=rt-1"',
+    ),
+  );
+  assert.ok(
+    out.code.includes(
+      'import("/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fchunk.js&tab=tab-1&rt=rt-1")',
+    ),
+  );
+});
+
+test('Rust rewriter asset owns external script URL rewriting', async () => {
+  const ctx = await loadBuiltRustContext();
+  const classic = ctx.ZPRewriter.rewriteScriptURL('./app.js', {
+    kind: 'classic',
+    targetUrl: 'https://example.com/dir/page.html',
+    tabId: 'tab-1',
+    runtimeToken: 'rt-1',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(classic.ok, true, JSON.stringify(classic.diagnostics));
+  assert.equal(classic.target, 'https://example.com/dir/app.js');
+  assert.equal(
+    classic.url,
+    '/zp/api/script?kind=classic&u=https%3A%2F%2Fexample.com%2Fdir%2Fapp.js&tab=tab-1&rt=rt-1',
+  );
+
+  const module = ctx.ZPRewriter.rewriteScriptURL('/main.js', {
+    kind: 'module',
+    targetUrl: 'https://example.com/dir/page.html',
+    tabId: 'tab-1',
+    runtimeToken: 'rt-1',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(module.ok, true, JSON.stringify(module.diagnostics));
+  assert.equal(module.url, '/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fmain.js');
+
+  const blocked = ctx.ZPRewriter.rewriteScriptURL('data:text/javascript,0', {
+    kind: 'classic',
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.url, '/zp/error/POLICY_BLOCKED');
+});
+
+test('Rust rewriter asset owns static fetch URL rewriting', async () => {
+  const ctx = await loadBuiltRustContext();
+  const fetched = ctx.ZPRewriter.rewriteFetchURL('/icons.svg#icon-a', {
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(fetched.ok, true, JSON.stringify(fetched.diagnostics));
+  assert.equal(fetched.target, 'https://example.com/icons.svg#icon-a');
+  assert.equal(
+    fetched.url,
+    '/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Ficons.svg#icon-a',
+  );
+
+  const blocked = ctx.ZPRewriter.rewriteFetchURL('data:image/png,0', {
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.url, '/zp/error/POLICY_BLOCKED');
+});
+
 test('Rust rewriter asset reports parse failures', async () => {
   const ctx = await loadBuiltRustContext();
   const out = ctx.ZPRustRewriter.rewriteScript(
@@ -379,6 +460,25 @@ test('HTTP script rewriter reports redacted fail-close classifications', () => {
   assert.equal(unavailableOutcome.blocked, true);
   assert.equal(unavailableOutcome.errorCode, 'REWRITER_UNAVAILABLE');
   assert.equal(JSON.stringify(unavailableOutcome).includes(secret), false);
+});
+
+test('HTTP script rewriter passes runtime context into module script rewriting', async () => {
+  const ctx = loadHTTPRewriterContext(await loadRewriter());
+  const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome(
+    `import './dep.js'; export const href = location.href;`,
+    {
+      kind: 'module',
+      targetUrl: 'https://example.com/app.js',
+      tabId: 'tab-1',
+      runtimeToken: 'rt-1',
+    },
+  );
+  assert.equal(outcome.blocked, false);
+  assert.ok(
+    outcome.code.includes(
+      'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fdep.js&tab=tab-1&rt=rt-1"',
+    ),
+  );
 });
 
 test('Rust CSS rewriter rewrites only AST URL resources', async () => {

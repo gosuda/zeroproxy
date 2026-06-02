@@ -35,6 +35,8 @@
       targetUrl: options.targetUrl || options.url || '',
       strict: options.strict !== false,
       controlPrefix: options.controlPrefix || (globalThis.ZP && globalThis.ZP.CONTROL_PREFIX) || '/zp/',
+      tabId: options.tabId || options.tab || '',
+      runtimeToken: options.runtimeToken || options.rt || '',
     });
   }
 
@@ -86,7 +88,7 @@
   }
 
   function rewriteCSSSource(source, options = {}) {
-    const fallback = typeof options.fallback === 'function' ? options.fallback : (value) => String(value || '');
+    const fallback = typeof options.fallback === 'function' ? options.fallback : () => '';
     const rw = api();
     if (!rw || typeof rw.rewriteCSS !== 'function') return fallback(source, options.baseUrl);
     const out = rw.rewriteCSS(String(source || ''), {

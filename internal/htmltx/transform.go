@@ -26,7 +26,9 @@ type Options struct {
 	Servers               []string
 	DynamicCompileAllowed bool
 	ReferrerPolicy        string
-	ScriptRewriter        func(source, kind, targetURL, controlPrefix string) (string, error)
+	ScriptRewriter        func(source, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, error)
+	ScriptURLRewriter     func(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string) (wrapped, target string, err error)
+	FetchURLRewriter      func(raw, targetURL, controlPrefix string) (wrapped, target string, err error)
 	CSSRewriter           func(source, baseURL string) (string, error)
 	ImportMapRewriter     func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error)
 }
@@ -668,7 +670,11 @@ func rewriteSrcset(raw string, opt Options) (rewritten, visible string, changed 
 			continue
 		}
 		out = append(out, joinSrcsetCandidate(wrapped, c.descriptor))
-		vis = append(vis, joinSrcsetCandidate(target, c.descriptor))
+		if target != "" {
+			vis = append(vis, joinSrcsetCandidate(target, c.descriptor))
+		} else {
+			vis = append(vis, c.raw)
+		}
 		changed = true
 	}
 	if !changed {
@@ -842,45 +848,19 @@ func wrapAttrURL(raw string, opt Options, nav bool) (wrapped, target string, ok 
 }
 
 func wrapScriptURL(raw string, opt Options, kind string) (wrapped, target string, ok bool) {
-	s := strings.TrimSpace(raw)
-	blocked := shareurl.ControlPrefix + "error/POLICY_BLOCKED"
-	if s == "" || strings.HasPrefix(s, "#") || hasExecutableURLScheme(s) {
-		return blocked, "", false
+	if opt.ScriptURLRewriter == nil {
+		return shareurl.ControlPrefix + "error/POLICY_BLOCKED", "", false
 	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return blocked, "", false
-	}
-	abs := opt.TargetURL.ResolveReference(u)
-	if abs.Scheme != "http" && abs.Scheme != "https" {
-		return blocked, "", false
-	}
-	q := url.Values{}
-	q.Set("u", abs.String())
-	q.Set("kind", kind)
-	if kind != "module" {
-		q.Set("tab", opt.TabID)
-		q.Set("rt", opt.RuntimeToken)
-	}
-	return shareurl.ControlPrefix + "api/script?" + q.Encode(), abs.String(), true
+	wrapped, target, err := opt.ScriptURLRewriter(raw, kind, opt.TargetURL.String(), shareurl.ControlPrefix, opt.TabID, opt.RuntimeToken)
+	return wrapped, target, err == nil && wrapped != "" && target != ""
 }
 
 func wrapFetchURL(raw string, opt Options) (wrapped, target string, ok bool) {
-	target, ok = resolveTargetURL(raw, opt)
-	if !ok {
-		return shareurl.ControlPrefix + "error/POLICY_BLOCKED", "", false
+	if opt.FetchURLRewriter == nil {
+		return shareurl.ControlPrefix + "error/POLICY_BLOCKED", "", true
 	}
-	networkTarget := target
-	fragment := ""
-	if u, err := url.Parse(target); err == nil && u.Fragment != "" {
-		fragment = "#" + u.EscapedFragment()
-		u.Fragment = ""
-		u.RawFragment = ""
-		networkTarget = u.String()
-	}
-	q := url.Values{}
-	q.Set("url", networkTarget)
-	return shareurl.ControlPrefix + "api/fetch?" + q.Encode() + fragment, target, true
+	wrapped, target, err := opt.FetchURLRewriter(raw, opt.TargetURL.String(), shareurl.ControlPrefix)
+	return wrapped, target, err == nil && wrapped != "" && target != ""
 }
 
 func isStylesheetLinkRel(rel string) bool {
@@ -915,10 +895,10 @@ func executableScriptKind(tok xhtml.Token) string {
 
 func rewriteInlineScript(source, kind string, opt Options) string {
 	if strings.TrimSpace(source) == "" {
-		return source
+		return ""
 	}
 	if opt.ScriptRewriter != nil {
-		if code, err := opt.ScriptRewriter(source, kind, opt.TargetURL.String(), shareurl.ControlPrefix); err == nil {
+		if code, err := opt.ScriptRewriter(source, kind, opt.TargetURL.String(), shareurl.ControlPrefix, opt.TabID, opt.RuntimeToken); err == nil {
 			return code
 		}
 	}
@@ -930,7 +910,7 @@ func rewriteEventHandler(source string, opt Options) string {
 		return source
 	}
 	if opt.ScriptRewriter != nil {
-		if code, err := opt.ScriptRewriter(source, "event-handler", opt.TargetURL.String(), shareurl.ControlPrefix); err == nil {
+		if code, err := opt.ScriptRewriter(source, "event-handler", opt.TargetURL.String(), shareurl.ControlPrefix, opt.TabID, opt.RuntimeToken); err == nil {
 			return code
 		}
 	}
@@ -938,98 +918,36 @@ func rewriteEventHandler(source string, opt Options) string {
 }
 
 func rewriteInlineStyle(source string, opt Options) string {
+	if strings.TrimSpace(source) == "" {
+		return ""
+	}
 	if opt.CSSRewriter != nil {
 		if code, err := opt.CSSRewriter(source, opt.TargetURL.String()); err == nil {
 			return code
 		}
 	}
-	return source
+	return ""
 }
 
 func rewriteInlineImportMap(source string, opt Options) string {
-	if opt.ImportMapRewriter != nil {
-		code, err := opt.ImportMapRewriter(
-			source,
-			opt.TargetURL.String(),
-			opt.TabID,
-			opt.RuntimeToken,
-			shareurl.ControlPrefix,
-		)
-		if err != nil {
-			return `{}`
-		}
-		return code
+	if opt.ImportMapRewriter == nil {
+		return `{}`
 	}
-	return rewriteImportMap(source, opt)
+	code, err := opt.ImportMapRewriter(
+		source,
+		opt.TargetURL.String(),
+		opt.TabID,
+		opt.RuntimeToken,
+		shareurl.ControlPrefix,
+	)
+	if err != nil {
+		return `{}`
+	}
+	return code
 }
 
 func blockScriptSource() string {
 	return `throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');`
-}
-
-func rewriteImportMap(source string, opt Options) string {
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(source), &doc); err != nil {
-		return `{}`
-	}
-	if imports, ok := doc["imports"].(map[string]any); ok {
-		rewriteImportMapAddresses(imports, opt)
-	}
-	if scopes, ok := doc["scopes"].(map[string]any); ok {
-		doc["scopes"] = rewriteImportMapScopes(scopes, opt)
-	}
-	b, err := json.Marshal(doc)
-	if err != nil {
-		return `{}`
-	}
-	return string(b)
-}
-
-// rewriteImportMapAddress maps a single import-map specifier address to its
-// proxied module script URL, blocking non-http(s) targets.
-func rewriteImportMapAddress(raw string, opt Options) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return shareurl.ControlPrefix + "error/POLICY_BLOCKED"
-	}
-	abs := opt.TargetURL.ResolveReference(u)
-	if abs.Scheme != "http" && abs.Scheme != "https" {
-		return shareurl.ControlPrefix + "error/POLICY_BLOCKED"
-	}
-	q := url.Values{}
-	q.Set("kind", "module")
-	q.Set("u", abs.String())
-	q.Set("tab", opt.TabID)
-	q.Set("rt", opt.RuntimeToken)
-	return shareurl.ControlPrefix + "api/script?" + q.Encode()
-}
-
-// rewriteImportMapAddresses rewrites every string-valued address in a specifier
-// map in place.
-func rewriteImportMapAddresses(addresses map[string]any, opt Options) {
-	for k, v := range addresses {
-		if s, ok := v.(string); ok {
-			addresses[k] = rewriteImportMapAddress(s, opt)
-		}
-	}
-}
-
-// rewriteImportMapScopes rewrites both the scope keys and their nested specifier
-// maps, returning a fresh map keyed by the rewritten scope addresses.
-func rewriteImportMapScopes(scopes map[string]any, opt Options) map[string]any {
-	next := make(map[string]any, len(scopes))
-	for scope, rawEntries := range scopes {
-		scopeKey := rewriteImportMapAddress(scope, opt)
-		entries, _ := rawEntries.(map[string]any)
-		out := make(map[string]any, len(entries))
-		for k, v := range entries {
-			if s, ok := v.(string); ok {
-				out[k] = rewriteImportMapAddress(s, opt)
-			}
-		}
-		next[scopeKey] = out
-	}
-	return next
 }
 
 func injectSrcdoc(src string, opt Options) string {

@@ -511,11 +511,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteScriptSource !== 'function') throw normalizedError('NotSupportedError');
     return root.ZPHTTPRewriter.rewriteScriptSource(String(source || ''), { kind, targetUrl: virtualURL.href, controlPrefix: ZP.CONTROL_PREFIX });
   }
-	  function cssResourceURL(raw, base) {
-	    const text = String(raw || '').trim();
-	    if (!text || text[0] === '#' || /^(?:data|blob|about):/i.test(text)) return text;
-	    try { return resourceProxyPath(targetURL(text, base)); } catch { return text; }
-	  }
 	  function resourceProxyPath(target) {
 	    try {
 	      const u = new URL(target);
@@ -562,86 +557,9 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 	    }
 	    return { changed, actual: actual.join(', '), visible: visible.join(', ') };
 	  }
-	  function cssCommentToken(css, i) {
-	    if (css[i] !== '/' || css[i + 1] !== '*') return null;
-	    const end = css.indexOf('*/', i + 2);
-	    const j = end < 0 ? css.length : end + 2;
-	    return { out: css.slice(i, j), next: j };
-	  }
-	  function cssStringToken(css, i) {
-	    const quote = css[i];
-	    if (quote !== '"' && quote !== "'") return null;
-	    let j = i + 1;
-	    while (j < css.length) {
-	      if (css[j] === '\\') { j += 2; continue; }
-	      if (css[j] === quote) { j++; break; }
-	      j++;
-	    }
-	    return { out: css.slice(i, j), next: j };
-	  }
-	  function scanCssEscapedValue(css, j, stop) {
-	    let value = '';
-	    while (j < css.length) {
-	      if (css[j] === '\\' && j + 1 < css.length) { value += css.slice(j, j + 2); j += 2; continue; }
-	      if (css[j] === stop) break;
-	      value += css[j++];
-	    }
-	    return { value, next: j };
-	  }
-	  function skipCssWhitespace(css, j) {
-	    while (/\s/.test(css[j] || '')) j++;
-	    return j;
-	  }
-	  function isCssUrlStart(css, i) {
-	    if (css[i] !== 'u' && css[i] !== 'U') return false;
-	    if (css.slice(i, i + 3).toLowerCase() !== 'url') return false;
-	    return !/[A-Za-z0-9_-]/.test(css[i - 1] || '') && !/[A-Za-z0-9_-]/.test(css[i + 3] || '');
-	  }
-	  function cssUrlToken(css, i, base) {
-	    if (!isCssUrlStart(css, i)) return null;
-	    const open = skipCssWhitespace(css, i + 3);
-	    if (css[open] !== '(') return null;
-	    let j = skipCssWhitespace(css, open + 1);
-	    const quote = css[j] === '"' || css[j] === "'" ? css[j++] : '';
-	    const scanned = scanCssEscapedValue(css, j, quote || ')');
-	    j = scanned.next;
-	    if (quote && css[j] === quote) j++;
-	    j = skipCssWhitespace(css, j);
-	    if (css[j] !== ')') return null;
-    return { out: `url("${cssResourceURL(scanned.value, base)}")`, next: j + 1 };
-	  }
-	  function cssImportToken(css, i, base) {
-	    if (!(css[i] === '@' && css.slice(i, i + 7).toLowerCase() === '@import')) return null;
-	    let out = css.slice(i, i + 7);
-	    let j = i + 7;
-	    while (j < css.length && /\s/.test(css[j])) out += css[j++];
-	    const quote = css[j] === '"' || css[j] === "'" ? css[j++] : '';
-	    if (!quote) { out += '@'; return { out, next: j + 1 }; }
-	    const scanned = scanCssEscapedValue(css, j, quote);
-	    j = scanned.next;
-	    if (css[j] === quote) j++;
-      out += `"${cssResourceURL(scanned.value, base)}"`;
-	    return { out, next: j };
-	  }
-	  function fallbackRewriteCSS(source, base) {
-	    const css = String(source || '');
-	    let out = '';
-	    let i = 0;
-	    while (i < css.length) {
-	      const token = cssCommentToken(css, i) || cssStringToken(css, i) || cssUrlToken(css, i, base) || cssImportToken(css, i, base);
-	      if (token) {
-	        out += token.out;
-	        i = token.next;
-	        continue;
-	      }
-	      out += css[i];
-	      i++;
-	    }
-	    return out;
-	  }
 	  function rewriteCSSSource(source, base = baseURL) {
-	    if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteCSSSource !== 'function') return fallbackRewriteCSS(source, base);
-	    return root.ZPHTTPRewriter.rewriteCSSSource(String(source || ''), { baseUrl: base, controlPrefix: ZP.CONTROL_PREFIX, fallback: fallbackRewriteCSS });
+	    if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteCSSSource !== 'function') return '';
+	    return root.ZPHTTPRewriter.rewriteCSSSource(String(source || ''), { baseUrl: base, controlPrefix: ZP.CONTROL_PREFIX, fallback: () => '' });
 	  }
   function rawPostMessageTarget(target) {
     try {
@@ -3422,40 +3340,19 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     setScriptText(el, '');
   }
   function rewriteImportMapText(source) {
-    let map;
-    try { map = JSON.parse(String(source || '{}')); } catch { return '{}'; }
-    if (!map || typeof map !== 'object' || Array.isArray(map)) return '{}';
-    const rewriteAddress = value => {
-      if (typeof value !== 'string') return value;
-      try {
-        const u = new URL(value, baseURL);
-        if (u.protocol === 'http:' || u.protocol === 'https:') return scriptProxyPath(u.href, 'module');
-        return ZP.errorPath('POLICY_BLOCKED');
-      } catch {
-        return ZP.errorPath('POLICY_BLOCKED');
-      }
-    };
-    if (map.imports && typeof map.imports === 'object' && !Array.isArray(map.imports)) {
-      for (const key of Object.keys(map.imports)) map.imports[key] = rewriteAddress(map.imports[key]);
+    const rw = root.ZPRewriter;
+    if (!rw || typeof rw.rewriteImportMap !== 'function') return '{}';
+    try {
+      const out = rw.rewriteImportMap(String(source || ''), {
+        baseUrl: baseURL,
+        tabId: boot.tabId,
+        runtimeToken,
+        controlPrefix: ZP.CONTROL_PREFIX,
+      });
+      return out && out.ok && typeof out.code === 'string' ? out.code : '{}';
+    } catch {
+      return '{}';
     }
-    if (map.scopes && typeof map.scopes === 'object' && !Array.isArray(map.scopes)) {
-      const nextScopes = {};
-      for (const scope of Object.keys(map.scopes)) {
-        let scopeKey = scope;
-        try {
-          const u = new URL(scope, baseURL);
-          if (u.protocol === 'http:' || u.protocol === 'https:') scopeKey = scriptProxyPath(u.href, 'module');
-        } catch {}
-        const entries = map.scopes[scope];
-        if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
-          const out = {};
-          for (const key of Object.keys(entries)) out[key] = rewriteAddress(entries[key]);
-          nextScopes[scopeKey] = out;
-        }
-      }
-      map.scopes = nextScopes;
-    }
-    return JSON.stringify(map).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026');
   }
   function transformHTML(value) {
     const html = String(value);
@@ -3738,7 +3635,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     installWorkerTerminateHook();
     const ZPWorker = function Worker(url) {
       const blobWorker = isBlobWorkerURL(url);
-      const worker = new Native.Worker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1]));
+      const opts = arguments[1];
+      const worker = new Native.Worker(workerBootstrapURL(url, workerKindForOptions(opts)), bootstrapWorkerOptions(opts));
       if (blobWorker) {
         try { deferredTerminateWorkers.add(worker); } catch {}
       }
@@ -3751,7 +3649,10 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     try { Object.defineProperty(root, 'Worker', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
   }
   function installSharedWorkerConstructor() {
-    const ZPSharedWorker = function SharedWorker(url) { return new Native.SharedWorker(workerBootstrapURL(url), bootstrapWorkerOptions(arguments[1])); };
+    const ZPSharedWorker = function SharedWorker(url) {
+      const opts = arguments[1];
+      return new Native.SharedWorker(workerBootstrapURL(url, workerKindForOptions(opts)), bootstrapWorkerOptions(opts));
+    };
     try { Object.setPrototypeOf(ZPSharedWorker, Native.SharedWorker); } catch {}
     try { Object.defineProperty(ZPSharedWorker, 'prototype', { value: Native.SharedWorker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
     try { Object.defineProperty(Native.SharedWorker.prototype, 'constructor', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
@@ -3840,7 +3741,10 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     defineAccessor(proto, 'serviceWorker', () => facade);
     defineAccessor(nav, 'serviceWorker', () => facade);
   }
-  function workerBootstrapURL(url) {
+  function workerKindForOptions(opts) {
+    return opts && typeof opts === 'object' && String(opts.type || '').toLowerCase() === 'module' ? 'module' : 'worker';
+  }
+  function workerBootstrapURL(url, kind) {
     const raw = String(url);
     const parsed = new URL(raw, virtualURL.href);
     if (parsed.protocol === 'blob:') {
@@ -3855,12 +3759,14 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     params.set('tab', boot.tabId);
     params.set('rt', runtimeToken);
     for (const server of activeServers) params.append('server', server);
-    return `${ZP.controlPath('worker-bootstrap.js')}#${params.toString()}`;
+    const bootstrapKind = kind === 'module' ? '?kind=module' : '';
+    return `${ZP.controlPath('worker-bootstrap.js')}${bootstrapKind}#${params.toString()}`;
   }
   function bootstrapWorkerOptions(opts) {
     if (!opts || typeof opts !== 'object') return opts;
     const out = Object.assign({}, opts);
-    delete out.type;
+    if (String(out.type || '').toLowerCase() === 'module') out.type = 'module';
+    else delete out.type;
     return out;
   }
   function dataWorkerURL(raw) {

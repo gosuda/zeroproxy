@@ -209,6 +209,8 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 			DynamicCompileAllowed: dynamicCompileAllowed,
 			ReferrerPolicy:        referrerPolicy,
 			ScriptRewriter:        rewriteScriptFromJS,
+			ScriptURLRewriter:     rewriteScriptURLFromJS,
+			FetchURLRewriter:      rewriteFetchURLFromJS,
 			CSSRewriter:           rewriteCSSFromJS,
 			ImportMapRewriter:     rewriteImportMapFromJS,
 		})
@@ -299,7 +301,7 @@ func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
 	return out
 }
 
-func rewriteScriptFromJS(source, kind, targetURL, controlPrefix string) (string, error) {
+func rewriteScriptFromJS(source, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, error) {
 	rewriter := js.Global().Get("ZPRewriter")
 	if !rewriter.Truthy() || rewriter.Get("rewriteScript").Type() != js.TypeFunction {
 		return "", fmt.Errorf("REALM_INJECTION_FAILURE")
@@ -308,6 +310,8 @@ func rewriteScriptFromJS(source, kind, targetURL, controlPrefix string) (string,
 		"kind":          kind,
 		"targetUrl":     targetURL,
 		"controlPrefix": controlPrefix,
+		"tabId":         tabID,
+		"runtimeToken":  runtimeToken,
 		"strict":        true,
 	})
 	if out.Truthy() && out.Get("ok").Bool() {
@@ -316,10 +320,43 @@ func rewriteScriptFromJS(source, kind, targetURL, controlPrefix string) (string,
 	return "", fmt.Errorf("REWRITE_FAILED")
 }
 
+func rewriteScriptURLFromJS(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteScriptURL").Type() != js.TypeFunction {
+		return "", "", fmt.Errorf("REALM_INJECTION_FAILURE")
+	}
+	out := rewriter.Call("rewriteScriptURL", raw, map[string]any{
+		"kind":          kind,
+		"targetUrl":     targetURL,
+		"controlPrefix": controlPrefix,
+		"tabId":         tabID,
+		"runtimeToken":  runtimeToken,
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("url").String(), out.Get("target").String(), nil
+	}
+	return "", "", fmt.Errorf("REWRITE_FAILED")
+}
+
+func rewriteFetchURLFromJS(raw, targetURL, controlPrefix string) (string, string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteFetchURL").Type() != js.TypeFunction {
+		return "", "", fmt.Errorf("REALM_INJECTION_FAILURE")
+	}
+	out := rewriter.Call("rewriteFetchURL", raw, map[string]any{
+		"targetUrl":     targetURL,
+		"controlPrefix": controlPrefix,
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("url").String(), out.Get("target").String(), nil
+	}
+	return "", "", fmt.Errorf("REWRITE_FAILED")
+}
+
 func rewriteCSSFromJS(source, baseURL string) (string, error) {
 	rewriter := js.Global().Get("ZPRewriter")
 	if !rewriter.Truthy() || rewriter.Get("rewriteCSS").Type() != js.TypeFunction {
-		return source, nil
+		return "", fmt.Errorf("CSS_REWRITE_UNAVAILABLE")
 	}
 	out := rewriter.Call("rewriteCSS", source, map[string]any{
 		"baseUrl":       baseURL,
