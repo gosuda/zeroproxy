@@ -1,8 +1,7 @@
 # ZeroProxy
 
-ZeroProxy is a human-in-the-loop virtual browsing prototype. A real browser
-loads target pages on the proxy origin, while target traffic is intended to
-egress only through:
+ZeroProxy is a prototype of a browser that loads target pages on the proxy
+origin, with traffic intended to egress only through:
 
 ```text
 Service Worker -> Go WASM kernel -> WebSocket/yamux -> SOCKS5 -> uTLS
