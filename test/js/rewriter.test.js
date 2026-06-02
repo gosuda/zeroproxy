@@ -402,10 +402,7 @@ test('Rust rewriter asset owns static fetch URL rewriting', async () => {
   });
   assert.equal(fetched.ok, true, JSON.stringify(fetched.diagnostics));
   assert.equal(fetched.target, 'https://example.com/icons.svg#icon-a');
-  assert.equal(
-    fetched.url,
-    '/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Ficons.svg#icon-a',
-  );
+  assert.equal(fetched.url, '/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Ficons.svg#icon-a');
 
   const blocked = ctx.ZPRewriter.rewriteFetchURL('data:image/png,0', {
     targetUrl: 'https://example.com/dir/page.html',

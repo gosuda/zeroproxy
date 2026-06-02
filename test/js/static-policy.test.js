@@ -329,7 +329,9 @@ test('static fetch URL policy delegates to Rust rewriter ABI', () => {
   assert.ok(fetchURLMatch, 'wrapFetchURL missing');
   assert.equal(fetchURLMatch[1].includes('url.Values'), false);
   assert.equal(fetchURLMatch[1].includes('ResolveReference'), false);
-  assert.ok(htmltx.includes('opt.FetchURLRewriter(raw, opt.TargetURL.String(), shareurl.ControlPrefix)'));
+  assert.ok(
+    htmltx.includes('opt.FetchURLRewriter(raw, opt.TargetURL.String(), shareurl.ControlPrefix)'),
+  );
   assert.ok(kernel.includes('FetchURLRewriter:      rewriteFetchURLFromJS'));
   assert.ok(kernel.includes('rewriteFetchURLFromJS'));
   assert.ok(build.includes('wasm_bindgen.rewrite_fetch_url'));
