@@ -174,6 +174,93 @@ function createTargetServer(requests) {
               frame.remove();
               return out;
             };
+            const frameDocumentObservations = () => new Promise((resolve) => {
+              const before = location.href;
+              const frame = document.createElement('iframe');
+              const finish = (value) => {
+                window.removeEventListener('message', onMessage);
+                clearTimeout(timer);
+                try {
+                  frame.remove();
+                } catch {}
+                resolve(value);
+              };
+              const timer = setTimeout(() => {
+                finish({
+                  timeout: true,
+                  frameSrc: frame.src || ''
+                });
+              }, 5000);
+              function onMessage(ev) {
+                if (!ev.data || ev.data.type !== 'frame-child-ready') return;
+                const child = frame.contentWindow;
+                const childDoc = frame.contentDocument;
+                finish({
+                  origin: ev.origin,
+                  href: ev.data.href,
+                  topOrigin: ev.data.topOrigin,
+                  sourceIsFrame: ev.source === frame.contentWindow,
+                  contentWindowObject: !!child,
+                  contentDocumentObject: !!childDoc,
+                  contentWindowHref: child && child.location ? child.location.href : '',
+                  contentWindowParentIsWindow: child && child.parent === window,
+                  contentWindowTopIsWindow: child && child.top === window,
+                  contentDocumentURL: childDoc && childDoc.URL || '',
+                  contentDocumentDefaultView: !!(childDoc && childDoc.defaultView === child),
+                  parentBefore: before,
+                  parentAfter: location.href,
+                  frameSrc: frame.src || ''
+                });
+              }
+              window.addEventListener('message', onMessage);
+              frame.src = '/frame-child?diff=document';
+              document.body.appendChild(frame);
+            });
+            const srcdocFrameObservations = () => new Promise((resolve) => {
+              const frame = document.createElement('iframe');
+              const finish = (value) => {
+                window.removeEventListener('message', onMessage);
+                clearTimeout(timer);
+                try {
+                  frame.remove();
+                } catch {}
+                resolve(value);
+              };
+              const timer = setTimeout(() => {
+                const child = frame.contentWindow;
+                const childDoc = frame.contentDocument;
+                finish({
+                  timeout: true,
+                  contentWindowObject: !!child,
+                  contentDocumentObject: !!childDoc,
+                  contentWindowHref: child && child.location ? child.location.href : '',
+                  contentDocumentURL: childDoc && childDoc.URL || '',
+                });
+              }, 5000);
+              function onMessage(ev) {
+                if (!ev.data || ev.data.type !== 'frame-srcdoc-ready') return;
+                const child = frame.contentWindow;
+                const childDoc = frame.contentDocument;
+                finish({
+                  origin: ev.origin,
+                  href: ev.data.href,
+                  topOrigin: ev.data.topOrigin,
+                  sourceIsFrame: ev.source === child,
+                  contentWindowObject: !!child,
+                  contentDocumentObject: !!childDoc,
+                  contentWindowHref: child && child.location ? child.location.href : '',
+                  contentWindowParentIsWindow: child && child.parent === window,
+                  contentWindowTopIsWindow: child && child.top === window,
+                  contentDocumentURL: childDoc && childDoc.URL || '',
+                  contentDocumentDefaultView: !!(childDoc && childDoc.defaultView === child),
+                });
+              }
+              window.addEventListener('message', onMessage);
+              frame.srcdoc = '<!doctype html><html><body><p>srcdoc child</p><script>' +
+                "parent.postMessage({ type: 'frame-srcdoc-ready', href: location.href, topOrigin: top.location.origin }, '*');" +
+                '<\\/script></body></html>';
+              document.body.appendChild(frame);
+            });
             const workerObservations = () => new Promise((resolve) => {
               let worker;
               try {
@@ -258,6 +345,8 @@ function createTargetServer(requests) {
                 frame: frameObservations()
               }
             };
+            out.surface.frameDocument = await frameDocumentObservations();
+            out.surface.frameSrcdoc = await srcdocFrameObservations();
             out.surface.workerRealm = await workerObservations();
             out.stringTimerOrigin = await new Promise(resolve => {
               window.__diffTimerOrigin = '';
@@ -2681,7 +2770,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     post: value.post,
     xhr: value.xhr,
     ws: value.ws,
-    surface: value.surface,
+    surface: normalizeSurface(value.surface),
   });
   // Yield after the target-page navigation before reusing the same tab for the shell.
   // Under load Chromium can otherwise starve the next Puppeteer navigation until the
@@ -2868,6 +2957,56 @@ function normalizePolicyHeaders(value) {
     ...value,
     csp: normalizePolicyHeader(value.csp),
   };
+}
+
+function normalizeSurface(value) {
+  if (!value || typeof value !== 'object') return value;
+  return {
+    ...value,
+    frameDocument: normalizeFrameDocument(value.frameDocument),
+    frameSrcdoc: normalizeFrameDocument(value.frameSrcdoc),
+  };
+}
+
+function normalizeFrameDocument(value) {
+  if (!value || typeof value !== 'object') return value;
+  return {
+    ...value,
+    origin: normalizeFrameOrigin(value.origin),
+    href: normalizeFrameURL(value.href),
+    topOrigin: normalizeFrameOrigin(value.topOrigin),
+    timeout: normalizeFrameValue(value.timeout),
+    sourceIsFrame: normalizeFrameValue(value.sourceIsFrame),
+    contentWindowParentIsWindow: normalizeFrameValue(value.contentWindowParentIsWindow),
+    contentWindowTopIsWindow: normalizeFrameValue(value.contentWindowTopIsWindow),
+    contentDocumentDefaultView: normalizeFrameValue(value.contentDocumentDefaultView),
+    frameSrc: normalizeFrameURL(value.frameSrc, value.href),
+    contentWindowHref: normalizeFrameURL(value.contentWindowHref, value.href),
+    contentDocumentURL: normalizeFrameURL(value.contentDocumentURL, value.href),
+  };
+}
+
+function normalizeFrameURL(value, targetHref) {
+  if (value === undefined) return '<missing>';
+  const href = String(value || '');
+  if (href === 'about:srcdoc') return '<srcdoc-url>';
+  if (/^http:\/\/proxy\.localhost:\d+\/zp\/p\//.test(href)) return '<zeroproxy-frame-route>';
+  if (/^http:\/\/localhost:\d+\/differential-fixture(?:[?#].*)?$/.test(href))
+    return '<target-document-url>';
+  if (targetHref && href === targetHref) return '<target-frame-url>';
+  return href;
+}
+
+function normalizeFrameOrigin(value) {
+  if (value === undefined) return '<missing>';
+  const origin = String(value || '');
+  if (/^http:\/\/localhost:\d+$/.test(origin)) return '<target-origin>';
+  if (/^http:\/\/proxy\.localhost:\d+$/.test(origin)) return '<proxy-origin>';
+  return origin;
+}
+
+function normalizeFrameValue(value) {
+  return value === undefined ? '<missing>' : value;
 }
 
 function normalizePolicyHeader(value) {

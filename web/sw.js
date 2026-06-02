@@ -24,6 +24,7 @@ const streams = new Map();
 const uploadStreams = new Map();
 const inflightFetches = new Map();
 let readiness = 'UNINITIALIZED';
+let readinessSince = Date.now();
 let kernelPromise = null;
 self.__zp_cookie_sync = payload => broadcastCookieSync(payload);
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
@@ -31,25 +32,40 @@ self.addEventListener('activate', event => event.waitUntil((async () => { await 
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
 
+function setReadiness(next) {
+  if (readiness === next) return;
+  readiness = next;
+  readinessSince = Date.now();
+}
+
+function readinessState() {
+  return {
+    readiness,
+    readinessAgeMs: Date.now() - readinessSince,
+    kernelStarting: !!kernelPromise,
+    wasmLoading: readiness === 'WASM_LOADING' || readiness === 'WASM_LOADED',
+  };
+}
+
 async function initKernel(servers) {
   if (readiness === 'READY') return;
   if (kernelPromise) return kernelPromise;
   kernelPromise = (async () => {
-    readiness = 'REWRITE_LOADING';
+    setReadiness('REWRITE_LOADING');
     await initRewriter();
-    readiness = 'WASM_LOADING';
+    setReadiness('WASM_LOADING');
     const go = new Go();
     const resp = await nativeFetch('/zp/kernel.wasm', { cache: 'no-store' });
     if (!resp.ok) throw new Error('SW_NOT_READY');
     const result = await WebAssembly.instantiateStreaming(resp, go.importObject);
-    readiness = 'WASM_LOADED';
+    setReadiness('WASM_LOADED');
     go.run(result.instance);
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline && (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function')) await new Promise(r => setTimeout(r, 20));
     if (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function') throw new Error('SW_NOT_READY');
     await self.__zp_kernel_init({ servers: servers || [] });
-    readiness = 'READY';
-  })().catch(err => { readiness = 'UNINITIALIZED'; kernelPromise = null; throw err; });
+    setReadiness('READY');
+  })().catch(err => { setReadiness('UNINITIALIZED'); kernelPromise = null; throw err; });
   return kernelPromise;
 }
 
@@ -380,6 +396,8 @@ async function rewriteCSSResponse(resp, opt) {
 // returns undefined for unknown keys exactly like the prior `===` chain, keeping
 // the unknown-type path fail-closed (POLICY_BLOCKED).
 const MESSAGE_HANDLERS = new Map([
+  ['ZP_STATUS', handleStatus],
+  ['ZP_ENSURE_READY', handleEnsureReady],
   ['ZP_OPEN_SHARE', handleOpenShare],
   ['ZP_FRAME_ROUTE', handleFrameRoute],
   ['ZP_HISTORY_UPDATE', handleHistoryUpdate],
@@ -402,6 +420,20 @@ async function handleMessage(event) {
     if (handler) await handler(event, msg, ok, fail);
     else fail('POLICY_BLOCKED');
   } catch (e) { fail(e && e.code || e && e.message || 'POLICY_BLOCKED'); }
+}
+
+function handleStatus(event, msg, ok) {
+  void event;
+  void msg;
+  ok(readinessState());
+}
+async function handleEnsureReady(event, msg, ok, fail) {
+  try {
+    await initKernel();
+    ok(readinessState());
+  } catch {
+    fail('SW_NOT_READY');
+  }
 }
 
 function handleOpenShare(event, msg, ok, fail) {

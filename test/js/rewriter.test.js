@@ -204,6 +204,17 @@ test('Vite-built runtime prelude remains a classic bundled target asset', async 
   }
 });
 
+test('Vite-built runtime prelude bootstrap surface stays within coarse budgets', async () => {
+  const ctx = await loadBuiltRustContext();
+  const runtimePath = path.join(ctx.__buildOutDir, 'web', 'runtime-prelude.js');
+  const runtime = fs.readFileSync(runtimePath, 'utf8');
+  const bytes = fs.statSync(runtimePath).size;
+  assert.ok(bytes <= 3_000_000, `runtime-prelude.js size ${bytes} exceeded 3000000 bytes`);
+
+  const measured = elapsedMs(() => new vm.Script(runtime, { filename: 'runtime-prelude.js' }));
+  assertWithinBudget('runtime-prelude vm.Script compile', measured.elapsed, 750);
+});
+
 test('Vite-built worker prelude remains a classic bundled runtime asset', async () => {
   const ctx = await loadBuiltRustContext();
   const worker = fs.readFileSync(path.join(ctx.__buildOutDir, 'web', 'worker-prelude.js'), 'utf8');
