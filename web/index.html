@@ -100,6 +100,11 @@
     }
     return u.origin;
   }
+  function enterControlledScope() {
+    if (location.pathname.startsWith(ZP.CONTROL_PREFIX)) return true;
+    location.replace(ZP.CONTROL_PREFIX + location.search + location.hash);
+    return false;
+  }
   function relayOptions() {
     return { allowLoopbackWS: ZP.isLoopbackHost(location.hostname), origin: proxyOrigin() };
   }
@@ -140,6 +145,6 @@
     try { setStatus('Opening through ZeroProxy…'); await openTarget(document.getElementById('url').value); }
     catch (e) { setStatus(e.message || 'Unable to open target', true); }
   });
-  (async () => { try { setStatus('Preparing isolated transport…'); await registerSW(); if (!(await handleShare())) setStatus('Ready.'); } catch (e) { setStatus(e.message || 'Startup failed', true); } })();
+  (async () => { try { setStatus('Preparing isolated transport…'); if (!enterControlledScope()) return; await registerSW(); if (!(await handleShare())) setStatus('Ready.'); } catch (e) { setStatus(e.message || 'Startup failed', true); } })();
 })();
 </script>

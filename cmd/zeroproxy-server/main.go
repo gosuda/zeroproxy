@@ -134,6 +134,8 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string)
 	switch name {
 	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "http-rewriter.js", "wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
 		s.serveWeb(w, r, name)
+	case "rust-rewriter.wasm":
+		s.serveFile(w, r, filepath.Join(s.webDir, name), "application/wasm")
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
 	}

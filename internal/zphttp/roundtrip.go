@@ -38,13 +38,13 @@ type Engine struct {
 	h2 map[h2Key]*h2Conn
 }
 
-const TargetUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+const TargetUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 
 const (
 	browserIdleConnTimeout = 90 * time.Second
 	maxH1IdleConnsPerKey   = 6
-	targetCHUA             = `"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"`
-	targetCHUAFullList     = `"Chromium";v="134.0.0.0", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="134.0.0.0"`
+	targetCHUA             = `"Chromium";v="148", "Not:A-Brand";v="24", "Google Chrome";v="148"`
+	targetCHUAFullList     = `"Chromium";v="148.0.7778.217", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="148.0.7778.217"`
 )
 
 var (
@@ -368,10 +368,10 @@ func setTargetClientHints(h http.Header) {
 	h.Set("Sec-CH-UA-Platform", `"Windows"`)
 	h.Set("Sec-CH-UA-Arch", `"x86"`)
 	h.Set("Sec-CH-UA-Bitness", `"64"`)
-	h.Set("Sec-CH-UA-Full-Version", `"134.0.0.0"`)
+	h.Set("Sec-CH-UA-Full-Version", `"148.0.7778.217"`)
 	h.Set("Sec-CH-UA-Full-Version-List", targetCHUAFullList)
 	h.Set("Sec-CH-UA-Model", `""`)
-	h.Set("Sec-CH-UA-Platform-Version", `"10.0.0"`)
+	h.Set("Sec-CH-UA-Platform-Version", `"15.0.0"`)
 }
 
 func policyFromRequest(req *http.Request) RequestPolicy {

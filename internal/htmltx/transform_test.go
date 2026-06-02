@@ -1,587 +1,88 @@
 package htmltx
 
 import (
-	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
 	"testing"
 )
 
-func scriptURLRewriterForTest(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, string, error) {
-	target, ok := resolveScriptTargetForTest(raw, targetURL)
-	if !ok {
-		return "", "", errors.New("blocked")
-	}
-	q := url.Values{}
-	q.Set("kind", kind)
-	q.Set("u", target)
-	if kind != "module" {
-		q.Set("tab", tabID)
-		q.Set("rt", runtimeToken)
-	}
-	return controlPrefix + "api/script?" + q.Encode(), target, nil
-}
-
-func fetchURLRewriterForTest(raw, targetURL, controlPrefix string) (string, string, error) {
-	target, ok := resolveScriptTargetForTest(raw, targetURL)
-	if !ok {
-		return "", "", errors.New("blocked")
-	}
-	networkTarget := target
-	fragment := ""
-	if u, err := url.Parse(target); err == nil && u.Fragment != "" {
-		fragment = "#" + u.EscapedFragment()
-		u.Fragment = ""
-		u.RawFragment = ""
-		networkTarget = u.String()
-	}
-	q := url.Values{}
-	q.Set("url", networkTarget)
-	return controlPrefix + "api/fetch?" + q.Encode() + fragment, target, nil
-}
-
-func resolveScriptTargetForTest(raw, targetURL string) (string, bool) {
-	s := strings.TrimSpace(raw)
-	if s == "" || strings.HasPrefix(s, "#") || hasExecutableURLScheme(s) {
-		return "", false
-	}
-	base, err := url.Parse(targetURL)
-	if err != nil {
-		return "", false
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", false
-	}
-	abs := base.ResolveReference(u)
-	if abs.Scheme != "http" && abs.Scheme != "https" {
-		return "", false
-	}
-	return abs.String(), true
-}
-
-func TestTransformInjectsAndLaundersDocumentNavigation(t *testing.T) {
-	target, _ := url.Parse("https://example.com/dir/page.html")
-	out, err := Transform(strings.NewReader(`<!doctype html><html><head><base href="https://evil.test/"><script src="/early.js"></script><link rel="preconnect" href="https://evil.test"><meta http-equiv="refresh" content="0;url=https://evil.test/"><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-target' https://policy-host.example"></head><body><a href="/next" ping="https://ping.test">n</a><form action="submit"><button formaction="/alt">go</button></form><iframe src="/child" srcdoc="<p>x</p>"></iframe><object data="x"></object></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, Servers: []string{"wss://relay.example/ws"}, ScriptURLRewriter: scriptURLRewriterForTest})
+func TestTransformDelegatesWholeDocumentToRustHook(t *testing.T) {
+	target, err := url.Parse("https://example.com/app/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(out)
-	for _, want := range []string{"/zp/assets/runtime-prelude.js", "/zp/p/", "#k=", "server=wss%3A%2F%2Frelay.example%2Fws", "__ZP_SET_BASE", "https://evil.test/", `data-zp-target-url="https://example.com/next"`, `data-zp-target-url="https://example.com/dir/submit"`, `data-zp-target-url="https://example.com/alt"`, `data-zp-target-url="https://example.com/child"`, `data-zp-blocked-rel="preconnect"`, `ZeroProxy blocked object`} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("missing %q in %s", want, s)
-		}
-	}
-	for _, forbidden := range []string{"<base", "http-equiv=\"refresh\"", "Content-Security-Policy", "policy-host.example", " ping=", " rel=\"preconnect\"", "id=\"zp-topbar\"", `href="/next"`, `action="submit"`, `formaction="/alt"`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("forbidden %q remained in %s", forbidden, s)
-		}
-	}
-}
-
-func TestTransformBootConfigIncludesResponseReferrerPolicy(t *testing.T) {
-	target, _ := url.Parse("https://example.com/")
-	out, err := Transform(strings.NewReader(`<body>ok</body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, ReferrerPolicy: "no-referrer"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !strings.Contains(s, `"referrerPolicy":"no-referrer"`) {
-		t.Fatalf("boot referrer policy missing in %s", s)
-	}
-}
-
-func TestTransformSuppressesIconLinksWithoutLosingVisibleTarget(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<html><head><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="touch.png"></head><body></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	for _, want := range []string{
-		`rel="icon"`,
-		`rel="apple-touch-icon"`,
-		`href="data:application/x-zeroproxy-icon,1"`,
-		`data-zp-target-url="https://example.com/favicon.ico"`,
-		`data-zp-target-url="https://example.com/app/touch.png"`,
-	} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("missing %q in %s", want, s)
-		}
-	}
-	for _, forbidden := range []string{`href="/favicon.ico"`, `href="touch.png"`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("raw icon href %q remained in %s", forbidden, s)
-		}
-	}
-}
-
-func TestTransformRewritesSVGUseXLinkHref(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<html><body><svg><use xlink:href="/dist/symbols.svg#icon-a" href="/dist/symbols.svg#icon-a"></use></svg></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, FetchURLRewriter: fetchURLRewriterForTest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if strings.Contains(s, `xlink:href="/dist/symbols.svg#icon-a"`) || strings.Contains(s, `href="/dist/symbols.svg#icon-a"`) {
-		t.Fatalf("raw SVG href remained in %s", s)
-	}
-	if got := strings.Count(s, `/zp/api/fetch?`); got != 2 {
-		t.Fatalf("proxied SVG href count = %d, want 2 in %s", got, s)
-	}
-	if !strings.Contains(s, `data-zp-target-url="https://example.com/dist/symbols.svg#icon-a"`) {
-		t.Fatalf("visible SVG target missing in %s", s)
-	}
-}
-
-func TestTransformKeepsModuleScriptURLStableForModuleGraph(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<html><body><script type="module" src="/assets/main.js"></script><script src="/assets/classic.js"></script></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, RuntimeToken: "rt", ScriptURLRewriter: scriptURLRewriterForTest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !strings.Contains(s, `kind=module`) || !strings.Contains(s, `u=https%3A%2F%2Fexample.com%2Fassets%2Fmain.js`) {
-		t.Fatalf("module script was not proxied: %s", s)
-	}
-	moduleStart := strings.Index(s, `kind=module`)
-	moduleEnd := strings.Index(s[moduleStart:], `>`)
-	moduleTag := s[moduleStart : moduleStart+moduleEnd]
-	if strings.Contains(moduleTag, `tab=`) || strings.Contains(moduleTag, `rt=`) {
-		t.Fatalf("module script URL should stay stable across graph imports: %s", moduleTag)
-	}
-	if !strings.Contains(s, `kind=classic`) || !strings.Contains(s, `tab=tab`) || !strings.Contains(s, `rt=rt`) {
-		t.Fatalf("classic script lost runtime authorization query: %s", s)
-	}
-}
-
-func TestTransformExternalScriptURLWithoutRewriterFailsClosed(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<body><script src="/app.js"></script></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, RuntimeToken: "rt"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !strings.Contains(s, `src="/zp/error/POLICY_BLOCKED"`) {
-		t.Fatalf("external script did not fail closed without Rust URL hook: %s", s)
-	}
-	if strings.Contains(s, `/zp/api/script?`) || strings.Contains(s, `src="/app.js"`) {
-		t.Fatalf("external script URL policy survived in Go fallback: %s", s)
-	}
-}
-
-func TestTransformPreservesBlockedHeadLinkForHydration(t *testing.T) {
-	target, _ := url.Parse("https://example.com/check")
-	out, err := Transform(strings.NewReader(`<html><head><!--m67kuz--><link rel="preconnect" href="https://am.i.mullvad.net"/><!----></head><body></body></html>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	for _, want := range []string{`<!--m67kuz-->`, `<link`, `data-zp-blocked-rel="preconnect"`, `data-zp-blocked-url="https://am.i.mullvad.net"`, `<!---->`} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("missing %q in %s", want, s)
-		}
-	}
-	for _, forbidden := range []string{` rel="preconnect"`, ` href="https://am.i.mullvad.net"`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("active blocked link attribute %q remained in %s", forbidden, s)
-		}
-	}
-	marker := strings.Index(s, `<!--m67kuz-->`)
-	link := strings.Index(s[marker:], `<link`)
-	closingMarker := strings.Index(s[marker:], `<!---->`)
-	if marker < 0 || link < 0 || closingMarker < 0 || link > closingMarker {
-		t.Fatalf("blocked head link no longer occupies the Svelte hydration slot: %s", s)
-	}
-}
-
-func TestTransformPreservesFragmentsAndBlocksExecutableNavigationSchemes(t *testing.T) {
-	target, _ := url.Parse("https://example.com/")
-	out, err := Transform(strings.NewReader(`<body><a href="#x">hash</a><a href="javascript:alert(1)" data-zp-target-url="https://attacker.test/">js</a><a href="DATA:text/html,hello">data</a><form action="vbscript:msgbox(1)"></form><iframe src="data:text/html,frame"></iframe></body>`), Options{TabID: "t", EntryID: "e", TargetURL: target})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !strings.Contains(s, `href="#x"`) {
-		t.Fatalf("expected fragment link to remain local: %s", s)
-	}
-	for _, forbidden := range []string{`href="javascript:`, `href="DATA:`, `action="vbscript:`, `src="data:`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("executable navigation scheme remained in active attribute %q: %s", forbidden, s)
-		}
-	}
-	if strings.Contains(s, `https://attacker.test/`) {
-		t.Fatalf("target-supplied ZeroProxy control attribute remained: %s", s)
-	}
-	if got := strings.Count(s, `data-zp-blocked-url=`); got != 4 {
-		t.Fatalf("blocked URL marker count = %d, want 4 in %s", got, s)
-	}
-}
-
-func TestRuntimePreludeEmbedsSelfRemovingBoot(t *testing.T) {
-	target, _ := url.Parse(`https://example.com/path?q="</script><script>evil()</script>&x=1`)
-	tabID := `tab"</script><script>evil()</script>`
-	out, err := Transform(strings.NewReader(`<body></body>`), Options{
-		TabID:          tabID,
-		EntryID:        "entry",
-		TargetURL:      target,
-		DocumentCookie: `a="</script>`,
-		RuntimeToken:   `tok<&>`,
+	called := false
+	out, err := Transform(strings.NewReader(`<html><body>raw</body></html>`), Options{
+		TabID:        "tab-1",
+		EntryID:      "entry-1",
+		TargetURL:    target,
+		RuntimeToken: "rt-1",
+		Servers:      []string{"wss://relay.example/ws"},
+		DocumentRewriter: func(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error) {
+			called = true
+			if source != `<html><body>raw</body></html>` {
+				t.Fatalf("unexpected source: %q", source)
+			}
+			if targetURL != "https://example.com/app/" {
+				t.Fatalf("unexpected target URL: %q", targetURL)
+			}
+			if controlPrefix != "/zp/" {
+				t.Fatalf("unexpected control prefix: %q", controlPrefix)
+			}
+			if !strings.Contains(runtimePrelude, "runtime-prelude.js") {
+				t.Fatalf("runtime prelude was not passed: %q", runtimePrelude)
+			}
+			if tabID != "tab-1" || runtimeToken != "rt-1" {
+				t.Fatalf("unexpected runtime context tab=%q rt=%q", tabID, runtimeToken)
+			}
+			if len(servers) != 1 || servers[0] != "wss://relay.example/ws" {
+				t.Fatalf("unexpected servers: %#v", servers)
+			}
+			return `<html><body>rust</body></html>`, nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(out)
-	if strings.Contains(s, `id=__zp-boot`) || strings.Contains(s, `type=application/json`) {
-		t.Fatalf("boot config left an observable JSON marker: %s", s)
-	}
-	if !strings.Contains(s, `Object.defineProperty(window,'__ZP_BOOT'`) || !strings.Contains(s, `document.currentScript.remove()`) {
-		t.Fatalf("missing self-removing boot script in %s", s)
-	}
-	const open = `<script nonce=zp>(function(){const boot=`
-	start := strings.Index(s, open)
-	if start < 0 {
-		t.Fatalf("missing boot payload in %s", s)
-	}
-	start += len(open)
-	end := strings.Index(s[start:], `;Object.defineProperty`)
-	if end < 0 {
-		t.Fatalf("unterminated boot payload in %s", s)
-	}
-	bootRaw := s[start : start+end]
-	for _, unsafe := range []string{"<", ">", "&"} {
-		if strings.Contains(bootRaw, unsafe) {
-			t.Fatalf("boot JSON contains raw %q in %s", unsafe, bootRaw)
-		}
-	}
-	var boot map[string]string
-	if err := json.Unmarshal([]byte(bootRaw), &boot); err != nil {
-		t.Fatalf("boot JSON did not decode: %v in %s", err, bootRaw)
-	}
-	if boot["tabId"] != tabID || boot["targetUrl"] != target.String() || boot["runtimeToken"] != `tok<&>` {
-		t.Fatalf("boot JSON mismatch: %#v", boot)
-	}
-}
-
-func TestTransformFailsClosedWhenStaticRewritersUnavailable(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/")
-	out, err := Transform(strings.NewReader(`<html><head><style>body::before{content:"x<&>"}</style></head><body><script>window.__cfg={"base":new URL("..",location).pathname,"amp":"<&>"};import("/_app/start.js");</script></body></html>`), Options{TabID: "t", EntryID: "e", TargetURL: target})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	for _, want := range []string{`<style></style>`, `Blocked by ZeroProxy rewrite policy`} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("static rewrite fallback did not fail closed; missing %q in %s", want, s)
-		}
-	}
-	if strings.Contains(s, `content:"x<&>"`) || strings.Contains(s, `url(`) {
-		t.Fatalf("raw inline CSS survived without CSS rewriter: %s", s)
-	}
-	if strings.Contains(s, "&#34;") || strings.Contains(s, "&lt;&amp;&gt;") {
-		t.Fatalf("raw text was entity-escaped instead of rewritten or blocked: %s", s)
-	}
-}
-
-func TestTransformUsesCSSRewriterHook(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	const body = `body::before{content:"x<&>"}`
-	called := false
-	hook := func(source, baseURL string) (string, error) {
-		called = true
-		if source != body {
-			t.Fatalf("source = %q, want %q", source, body)
-		}
-		if baseURL != target.String() {
-			t.Fatalf("baseURL = %q, want %q", baseURL, target.String())
-		}
-		return `body{color:rgb(1,2,3)}`, nil
-	}
-
-	out, err := Transform(
-		strings.NewReader(`<body><style>`+body+`</style></body>`),
-		Options{TabID: "tab", EntryID: "entry", TargetURL: target, CSSRewriter: hook},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
 	if !called {
-		t.Fatal("CSS hook was not called")
+		t.Fatal("document rewriter hook was not called")
 	}
-	if !strings.Contains(s, `<style>body{color:rgb(1,2,3)}</style>`) {
-		t.Fatalf("CSS hook output not emitted: %s", s)
-	}
-	if strings.Contains(s, body) {
-		t.Fatalf("raw CSS survived after hook rewrite: %s", s)
+	if string(out) != `<html><body>rust</body></html>` {
+		t.Fatalf("unexpected delegated output: %s", out)
 	}
 }
 
-func TestTransformRewritesStaticScriptsAndHandlers(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	fake := func(source, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, error) {
-		return "__rewritten(" + kind + "):" + source, nil
-	}
-	out, err := Transform(strings.NewReader(`<body onLoad="location.href='/boot'"><script src="/app.js"></script><script>window.location.href='/classic'</script><script type="module">window.location.href='/module'</script><button onclick="return location.href"></button><img onerror="Function('return location.href')()"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, ScriptRewriter: fake, ScriptURLRewriter: scriptURLRewriterForTest})
+func TestTransformRequiresRustDocumentRewriter(t *testing.T) {
+	target, err := url.Parse("https://example.com/app/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(out)
-	for _, want := range []string{`/zp/api/script?`, `u=https%3A%2F%2Fexample.com%2Fapp.js`, `kind=classic`, `nonce="zp"`, `__rewritten(classic):window.location.href='/classic'`, `__rewritten(module):window.location.href='/module'`, `data-zp-blocked-onclick="return location.href"`} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("missing %q in %s", want, s)
-		}
-	}
-	for _, forbidden := range []string{`src="/app.js"`, ` onclick="return location.href"`, ` onLoad="location.href='/boot'"`, ` onerror="Function(`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("unrewritten script source or handler remained: %q in %s", forbidden, s)
-		}
+	_, err = Transform(strings.NewReader(`<body>raw</body>`), Options{TargetURL: target})
+	if !errors.Is(err, ErrMalformedHTML) {
+		t.Fatalf("Transform error = %v, want ErrMalformedHTML", err)
 	}
 }
 
-func TestTransformPassesRuntimeContextToScriptRewriter(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	var gotKind, gotTabID, gotRuntimeToken string
-	fake := func(source, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, error) {
-		gotKind = kind
-		gotTabID = tabID
-		gotRuntimeToken = runtimeToken
-		return "__rewritten(" + kind + "):" + source, nil
-	}
-	out, err := Transform(
-		strings.NewReader(`<body><script type="module">import './dep.js'</script></body>`),
-		Options{
-			TabID:          "tab-1",
-			EntryID:        "entry",
-			TargetURL:      target,
-			RuntimeToken:   "rt-1",
-			ScriptRewriter: fake,
-		},
-	)
+func TestRuntimePreludeIsSingleRuntimeAsset(t *testing.T) {
+	target, err := url.Parse(`https://example.com/path?q="</script><script>evil()</script>&x=1`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotKind != "module" || gotTabID != "tab-1" || gotRuntimeToken != "rt-1" {
-		t.Fatalf("script rewriter context = kind %q tab %q rt %q", gotKind, gotTabID, gotRuntimeToken)
+	prelude := runtimePrelude(Options{
+		TabID:          `tab"</script><script>evil()</script>`,
+		EntryID:        "entry",
+		TargetURL:      target,
+		DocumentCookie: `a="</script>`,
+		RuntimeToken:   "rt",
+	})
+	if !strings.Contains(prelude, "runtime-prelude.js") {
+		t.Fatalf("missing runtime prelude asset: %s", prelude)
 	}
-	if !strings.Contains(string(out), `__rewritten(module):import './dep.js'`) {
-		t.Fatalf("module rewrite output missing: %s", out)
+	if strings.Contains(prelude, "zp-core.js") || strings.Contains(prelude, "http-rewriter.js") {
+		t.Fatalf("unexpected multi-asset injection: %s", prelude)
 	}
-}
-
-func TestTransformUsesImportMapRewriterHook(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	const body = `{"imports":{"a":"/a.js"}}`
-	var called bool
-	hook := func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
-		called = true
-		if source != body {
-			t.Fatalf("source = %q, want %q", source, body)
-		}
-		if baseURL != target.String() {
-			t.Fatalf("baseURL = %q, want %q", baseURL, target.String())
-		}
-		if tabID != "tab" || runtimeToken != "rt" || controlPrefix != "/zp/" {
-			t.Fatalf("hook args = tab %q rt %q prefix %q", tabID, runtimeToken, controlPrefix)
-		}
-		return `{"imports":{"a":"/zp/from-rust"}}`, nil
-	}
-
-	out, err := Transform(
-		strings.NewReader(`<body><script type="importmap">`+body+`</script></body>`),
-		Options{
-			TabID:             "tab",
-			EntryID:           "entry",
-			TargetURL:         target,
-			RuntimeToken:      "rt",
-			ImportMapRewriter: hook,
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !called {
-		t.Fatal("import-map hook was not called")
-	}
-	if !strings.Contains(s, `{"imports":{"a":"/zp/from-rust"}}`) {
-		t.Fatalf("hook output not emitted: %s", s)
-	}
-}
-
-func TestTransformImportMapRewriterFailureFailsClosed(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	called := false
-	hook := func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
-		called = true
-		return "", errors.New("boom")
-	}
-
-	out, err := Transform(
-		strings.NewReader(`<body><script type="importmap">{"imports":{"a":"/a.js"}}</script></body>`),
-		Options{
-			TabID:             "tab",
-			EntryID:           "entry",
-			TargetURL:         target,
-			RuntimeToken:      "rt",
-			ImportMapRewriter: hook,
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !called {
-		t.Fatal("import-map hook was not called")
-	}
-	if !strings.Contains(s, `<script type="importmap">{}</script>`) {
-		t.Fatalf("import-map hook failure did not fail closed: %s", s)
-	}
-}
-
-func TestTransformImportMapWithoutRewriterFailsClosed(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(
-		strings.NewReader(`<body><script type="importmap">{"imports":{"a":"/a.js"}}</script></body>`),
-		Options{
-			TabID:        "tab",
-			EntryID:      "entry",
-			TargetURL:    target,
-			RuntimeToken: "rt",
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if !strings.Contains(s, `<script type="importmap">{}</script>`) {
-		t.Fatalf("missing fail-closed import map without hook: %s", s)
-	}
-	if strings.Contains(s, `/zp/api/script?`) || strings.Contains(s, `/a.js`) {
-		t.Fatalf("Go import-map fallback rewrote policy without Rust hook: %s", s)
-	}
-}
-
-func TestTransformSkipsImportMapRewriterForExternalScripts(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	hook := func(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
-		t.Fatal("import-map hook should not be called for external scripts")
-		return "", nil
-	}
-
-	if _, err := Transform(
-		strings.NewReader(`<body><script type="importmap" src="/map.json"></script><script src="/app.js"></script></body>`),
-		Options{
-			TabID:             "tab",
-			EntryID:           "entry",
-			TargetURL:         target,
-			RuntimeToken:      "rt",
-			ScriptURLRewriter: scriptURLRewriterForTest,
-			ImportMapRewriter: hook,
-		},
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestTransformStripsIntegrityButBacksUpForRuntimeMasking(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/")
-	out, err := Transform(strings.NewReader(`<body><script src="/app.js" integrity="sha384-script" data-zp-integrity="attacker"></script><link rel="stylesheet" href="/app.css" integrity="sha256-style"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, ScriptURLRewriter: scriptURLRewriterForTest, FetchURLRewriter: fetchURLRewriterForTest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	for _, want := range []string{`data-zp-integrity="sha384-script"`, `data-zp-integrity="sha256-style"`, `/zp/api/script?`, `/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp.css`, `data-zp-target-url="https://example.com/app.css"`} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("missing %q in %s", want, s)
-		}
-	}
-	for _, forbidden := range []string{` integrity="sha384-script"`, ` integrity="sha256-style"`, `data-zp-integrity="attacker"`, `href="/app.css"`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("forbidden integrity marker %q remained in %s", forbidden, s)
-		}
-	}
-}
-
-func TestTransformProxiesPassiveSubresources(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<body><img src="/logo.png" srcset="/small.png 1x, ../large.png 2x"><video poster="poster.jpg"><source src="../media.webm"></video><svg><use href="/icons.svg#icon-a"></use></svg><img src="data:image/png;base64,AAAA"></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, FetchURLRewriter: fetchURLRewriterForTest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	for _, want := range []string{
-		`src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flogo.png"`,
-		`data-zp-target-url="https://example.com/logo.png"`,
-		`srcset="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fsmall.png 1x, /zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flarge.png 2x"`,
-		`data-zp-target-srcset="https://example.com/small.png 1x, https://example.com/large.png 2x"`,
-		`poster="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp%2Fposter.jpg"`,
-		`src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fmedia.webm"`,
-		`href="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Ficons.svg#icon-a"`,
-		`data-zp-target-url="https://example.com/icons.svg#icon-a"`,
-		`src="data:image/png;base64,AAAA"`,
-	} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("missing %q in %s", want, s)
-		}
-	}
-	for _, forbidden := range []string{`src="/logo.png"`, `poster="poster.jpg"`, `src="../media.webm"`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("unresolved passive subresource %q remained in %s", forbidden, s)
-		}
-	}
-}
-
-func TestTransformFetchURLWithoutRewriterFailsClosed(t *testing.T) {
-	target, _ := url.Parse("https://example.com/app/page.html")
-	out, err := Transform(strings.NewReader(`<body><img src="/logo.png"><link rel="stylesheet" href="/app.css"><svg><use href="/icons.svg#icon-a"></use></svg></body>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	if strings.Contains(s, `/zp/api/fetch?`) {
-		t.Fatalf("Go fetch URL fallback survived without Rust hook: %s", s)
-	}
-	for _, forbidden := range []string{`src="/logo.png"`, `href="/app.css"`, `href="/icons.svg#icon-a"`} {
-		if strings.Contains(s, forbidden) {
-			t.Fatalf("raw fetch URL remained active without Rust hook %q: %s", forbidden, s)
-		}
-	}
-}
-
-// TestTransformPinsStaticScriptMarkerOnBlockedFragmentSrc characterizes the
-// EXACT current data-zp-static-script marker behavior for a script whose src is a
-// bare fragment. rewriteToken aliases tok.Attr's backing array (attrs :=
-// tok.Attr[:0]); the blocked-src branch appends data-zp-blocked-url OVER the src
-// slot, so the post-loop attr(tok,"src") read returns "" and the marker is added
-// EVEN THOUGH a src attribute was present in the input. This is an aliasing
-// artifact, but it is the current behavior consumed by runtime-prelude.js
-// (data-zp-static-script handling). It is pinned here so any future refactor that
-// substitutes clean pre-loop snapshots — dropping the marker — is caught by the
-// suite, not just by the differential harness.
-func TestTransformPinsStaticScriptMarkerOnBlockedFragmentSrc(t *testing.T) {
-	target, _ := url.Parse("https://example.com/dir/page.html")
-	out, err := Transform(strings.NewReader(`<script type="" src="#frag"></script>`), Options{TabID: "tab", EntryID: "entry", TargetURL: target, RuntimeToken: "rt"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(out)
-	// The load-bearing facts (not the full serialization): the fragment src is
-	// blocked and backed up, AND the static-script marker is present even though a
-	// src was supplied. The marker is the value a snapshot refactor would drop.
-	for _, want := range []string{
-		`data-zp-static-script="1"`,      // marker present despite src in input
-		`src="/zp/error/POLICY_BLOCKED"`, // fragment src was blocked, not proxied
-		`data-zp-blocked-url="#frag"`,    // original fragment backed up
-		`nonce="zp"`,                     // executable script forced onto zp nonce
-	} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("static-script marker behavior changed: missing %q in %s", want, s)
-		}
-	}
-	// The original bare src must not survive as an active fragment src.
-	if strings.Contains(s, `src="#frag"`) {
-		t.Fatalf("raw fragment src remained active in %s", s)
+	if strings.Contains(prelude, `</script><script>evil()`) {
+		t.Fatalf("boot JSON was not script-safe: %s", prelude)
 	}
 }

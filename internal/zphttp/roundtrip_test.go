@@ -42,7 +42,7 @@ func TestBuildHTTP1RequestConstructsTargetHeaders(t *testing.T) {
 	if wire.Header.Get("User-Agent") != TargetUserAgent {
 		t.Fatalf("user-agent not normalized: %#v", wire.Header)
 	}
-	if wire.Header.Get("Sec-CH-UA-Platform") != `"Windows"` || wire.Header.Get("Sec-CH-UA-Full-Version") != `"134.0.0.0"` {
+	if wire.Header.Get("Sec-CH-UA-Platform") != `"Windows"` || wire.Header.Get("Sec-CH-UA-Full-Version") != `"148.0.7778.217"` {
 		t.Fatalf("client hints not normalized: %#v", wire.Header)
 	}
 	if wire.Header.Get("Origin") != "https://example.com" || wire.Header.Get("Referer") != target.String() {

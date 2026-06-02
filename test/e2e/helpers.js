@@ -88,7 +88,20 @@ async function waitForPage(page, predicate, args = [], timeoutMs = 30000) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw last || new Error('timed out waiting for page condition');
+  let state = {};
+  try {
+    state = await page.evaluate(() => ({
+      href: location.href,
+      title: document.title,
+      readyState: document.readyState,
+      statusText: document.querySelector('#status')?.textContent || '',
+      differentialType: typeof window.__differential,
+      differentialError: (window.__differential && window.__differential.error) || '',
+    }));
+  } catch (err) {
+    state = { error: (err && err.message) || String(err) };
+  }
+  throw last || new Error(`timed out waiting for page condition: ${JSON.stringify(state)}`);
 }
 
 module.exports = {

@@ -3,16 +3,37 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 const read = (path) => fs.readFileSync(path, 'utf8');
-const readServiceWorker = () => [read('web/sw.js'), read('web/sw/responses.js')].join('\n');
+const readServiceWorker = () =>
+  [
+    read('web/sw.js'),
+    read('web/sw/kernel.js'),
+    read('web/sw/routes.js'),
+    read('web/sw/transport.js'),
+    read('web/sw/responses.js'),
+  ].join('\n');
 const readRuntime = () =>
   [
     read('web/runtime-prelude.mjs'),
     read('web/runtime/abi/artifact-masking.mjs'),
     read('web/runtime/abi/native-capture.mjs'),
+    read('web/runtime/dynamic-code/facade.mjs'),
     read('web/runtime/dynamic-code/source.mjs'),
+    read('web/runtime/dom/attributes.mjs'),
+    read('web/runtime/facades/document.mjs'),
     read('web/runtime/facades/events.mjs'),
     read('web/runtime/facades/fingerprinting.mjs'),
+    read('web/runtime/facades/history.mjs'),
+    read('web/runtime/facades/location.mjs'),
+    read('web/runtime/facades/navigator.mjs'),
+    read('web/runtime/facades/storage.mjs'),
+    read('web/runtime/frames/accessors.mjs'),
+    read('web/runtime/frames/child-rewrite.mjs'),
+    read('web/runtime/frames/messaging.mjs'),
+    read('web/runtime/frames/policy.mjs'),
+    read('web/runtime/frames/sandbox.mjs'),
+    read('web/runtime/network/http.mjs'),
     read('web/runtime/network/websocket.mjs'),
+    read('web/runtime/workers/facades.mjs'),
   ].join('\n');
 
 test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
@@ -81,13 +102,13 @@ test('runtime preactivates p routes and masks navigator identity', () => {
   assert.match(rt, /ZP\.encryptShareURL\(target\)/);
   assert.match(rt, /ZP_HISTORY_UPDATE/);
   assert.match(rt, /Native\.locationAssign\(path\)/);
-  assert.ok(rt.includes('Chrome/134.0.0.0 Safari/537.36'));
+  assert.ok(rt.includes('Chrome/148.0.0.0 Safari/537.36'));
   assert.ok(rt.includes("const TARGET_PLATFORM = 'Win32'"));
   assert.ok(rt.includes('const TARGET_UA_BRANDS'));
   assert.ok(rt.includes("defineAccessor(proto, 'userAgentData'"));
-  assert.ok(rt.includes("platformVersion: '10.0.0'"));
+  assert.ok(rt.includes("platformVersion: '15.0.0'"));
   assert.match(rt, /installNavigatorIdentity/);
-  assert.ok(worker.includes('Chrome/134.0.0.0 Safari/537.36'));
+  assert.ok(worker.includes('Chrome/148.0.0.0 Safari/537.36'));
   assert.ok(worker.includes('userAgentData'));
   assert.ok(worker.includes('fullVersionList'));
 });

@@ -1,5 +1,8 @@
-use serde_json::{Map, Value};
-use url::{form_urlencoded, Url};
+mod address;
+mod document;
+
+use document::rewrite_imports;
+use serde_json::Value;
 
 pub(crate) fn rewrite(
     source: &str,
@@ -18,112 +21,12 @@ pub(crate) fn rewrite(
         return "{}".to_string();
     };
 
-    if let Some(imports) = map.get_mut("imports").and_then(Value::as_object_mut) {
-        rewrite_addresses(imports, base_url, tab_id, runtime_token, control_prefix);
-    }
-    if let Some(scopes) = map.get("scopes").and_then(Value::as_object) {
-        map.insert(
-            "scopes".to_string(),
-            Value::Object(rewrite_scopes(
-                scopes,
-                base_url,
-                tab_id,
-                runtime_token,
-                control_prefix,
-            )),
-        );
-    }
+    rewrite_imports(map, base_url, tab_id, runtime_token, control_prefix);
 
     match serde_json::to_string(&doc) {
         Ok(json) => escape_html_json_chars(json),
         Err(_) => "{}".to_string(),
     }
-}
-
-fn rewrite_address(
-    raw: &str,
-    base_url: &str,
-    tab_id: &str,
-    runtime_token: &str,
-    control_prefix: &str,
-) -> String {
-    let Some(abs) = absolute_url(raw, base_url) else {
-        return policy_blocked(control_prefix);
-    };
-    if abs.scheme() != "http" && abs.scheme() != "https" {
-        return policy_blocked(control_prefix);
-    }
-
-    let mut query = form_urlencoded::Serializer::new(String::new());
-    query.append_pair("kind", "module");
-    query.append_pair("rt", runtime_token);
-    query.append_pair("tab", tab_id);
-    query.append_pair("u", abs.as_str());
-    format!("{}api/script?{}", control_prefix, query.finish())
-}
-
-fn absolute_url(raw: &str, base_url: &str) -> Option<Url> {
-    let trimmed = raw.trim();
-    match Url::parse(trimmed) {
-        Ok(url) => Some(url),
-        Err(_) => Url::parse(base_url).ok()?.join(trimmed).ok(),
-    }
-}
-
-fn policy_blocked(control_prefix: &str) -> String {
-    format!("{}error/POLICY_BLOCKED", control_prefix)
-}
-
-fn rewrite_addresses(
-    addresses: &mut Map<String, Value>,
-    base_url: &str,
-    tab_id: &str,
-    runtime_token: &str,
-    control_prefix: &str,
-) {
-    for value in addresses.values_mut() {
-        if let Some(raw) = value.as_str() {
-            *value = Value::String(rewrite_address(
-                raw,
-                base_url,
-                tab_id,
-                runtime_token,
-                control_prefix,
-            ));
-        }
-    }
-}
-
-fn rewrite_scopes(
-    scopes: &Map<String, Value>,
-    base_url: &str,
-    tab_id: &str,
-    runtime_token: &str,
-    control_prefix: &str,
-) -> Map<String, Value> {
-    let mut next = Map::new();
-    for (scope, raw_entries) in scopes {
-        let scope_key = rewrite_address(scope, base_url, tab_id, runtime_token, control_prefix);
-        let mut out = Map::new();
-        if let Some(entries) = raw_entries.as_object() {
-            for (key, value) in entries {
-                if let Some(raw) = value.as_str() {
-                    out.insert(
-                        key.clone(),
-                        Value::String(rewrite_address(
-                            raw,
-                            base_url,
-                            tab_id,
-                            runtime_token,
-                            control_prefix,
-                        )),
-                    );
-                }
-            }
-        }
-        next.insert(scope_key, Value::Object(out));
-    }
-    next
 }
 
 fn escape_html_json_chars(json: String) -> String {

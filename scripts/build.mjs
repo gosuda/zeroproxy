@@ -197,7 +197,7 @@ function virtualSourcePlugin(modules) {
 
 function stripServiceWorkerImports(source) {
   return source.replace(
-    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|http-rewriter|wasm_exec|sw-responses)\.js'\);\n/gm,
+    /^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter|http-rewriter|wasm_exec|sw-kernel|sw-routes|sw-transport|sw-responses)\.js'\);\n/gm,
     '',
   );
 }
@@ -224,8 +224,9 @@ async function makeRustRewriterClassic() {
     path.join(targetDir, 'wasm32-unknown-unknown', 'release', 'zp_rewriter.wasm'),
   ]);
   const js = await readFile(path.join(bindgenOut, 'zp_rewriter.js'), 'utf8');
-  const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString(
-    'base64',
+  await writeOptimizedWasm(
+    path.join(bindgenOut, 'zp_rewriter_bg.wasm'),
+    path.join(webOut, 'rust-rewriter.wasm'),
   );
   return [
     '/* Generated from Rust WASM ZeroProxy rewriter. */',
@@ -233,33 +234,71 @@ async function makeRustRewriterClassic() {
     '(() => {',
     "const VERSION = 'phase3-rust-wasm-ast-4-import-map';",
     `const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";`,
-    `const __zp_rust_b64 = ${JSON.stringify(wasmBase64)};`,
-    `const __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));`,
-    `wasm_bindgen.initSync({ module: __zp_rust_bytes });`,
+    `const WASM_URL = '/zp/assets/rust-rewriter.wasm';`,
+    `let initialized = false;`,
+    `let initError = null;`,
+    `let initPromise = null;`,
+    `function wasmSource() { return WASM_URL; }`,
+    `function loadWasmBytesSync() { if (typeof XMLHttpRequest !== 'function') return null; const xhr = new XMLHttpRequest(); xhr.open('GET', WASM_URL, false); if (xhr.overrideMimeType) xhr.overrideMimeType('text/plain; charset=x-user-defined'); xhr.send(null); if (!((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0)) throw new Error('RUST_REWRITER_WASM_HTTP_' + xhr.status); const text = String(xhr.responseText || ''); const bytes = new Uint8Array(text.length); for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 255; return bytes; }`,
+    `function clearWasmTiming() { try { if (globalThis.performance && typeof globalThis.performance.clearResourceTimings === 'function') globalThis.performance.clearResourceTimings(); } catch {} }`,
+    `function init() { if (initialized) return Promise.resolve(true); if (!initPromise) initPromise = wasm_bindgen({ module_or_path: wasmSource() }).then(() => { initialized = true; clearWasmTiming(); return true; }).catch(err => { initError = err; initPromise = null; throw err; }); return initPromise; }`,
+    `function initSync(bytes) { const source = bytes || loadWasmBytesSync(); if (!source) return false; if (!initialized) { wasm_bindgen.initSync({ module: source }); initialized = true; clearWasmTiming(); } return true; }`,
+    `function ensureReady() { if (!initialized) throw initError || new Error('RUST_REWRITER_NOT_READY'); }`,
     `function normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }`,
     `function lowLevel(source, kind, targetUrl, controlPrefix) { return lowLevelWithContext(source, kind, targetUrl, controlPrefix, '', ''); }`,
-    `function lowLevelWithContext(source, kind, targetUrl, controlPrefix, tabId, runtimeToken) { const out = wasm_bindgen.rewrite_script_with_context(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/'), String(tabId || ''), String(runtimeToken || '')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
-    `function lowLevelScriptURL(raw, kind, targetUrl, controlPrefix, tabId, runtimeToken) { const out = wasm_bindgen.rewrite_script_url(String(raw || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/'), String(tabId || ''), String(runtimeToken || '')); try { return { ok: !!out.ok, url: out.url, target: out.target, error: out.error || '' }; } finally { out.free && out.free(); } }`,
-    `function lowLevelFetchURL(raw, targetUrl, controlPrefix) { const out = wasm_bindgen.rewrite_fetch_url(String(raw || ''), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, url: out.url, target: out.target, error: out.error || '' }; } finally { out.free && out.free(); } }`,
-    `function lowLevelCSS(source, baseUrl, controlPrefix) { const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
-    `function lowLevelImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix) { return wasm_bindgen.rewrite_import_map(String(source || ''), String(baseUrl || ''), String(tabId || ''), String(runtimeToken || ''), String(controlPrefix || '/zp/')); }`,
+    `function lowLevelWithContext(source, kind, targetUrl, controlPrefix, tabId, runtimeToken) { ensureReady(); const out = wasm_bindgen.rewrite_script_with_context(String(source || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/'), String(tabId || ''), String(runtimeToken || '')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelScriptURL(raw, kind, targetUrl, controlPrefix, tabId, runtimeToken) { ensureReady(); const out = wasm_bindgen.rewrite_script_url(String(raw || ''), normalizeKind(kind), String(targetUrl || ''), String(controlPrefix || '/zp/'), String(tabId || ''), String(runtimeToken || '')); try { return { ok: !!out.ok, url: out.url, target: out.target, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelFetchURL(raw, targetUrl, controlPrefix) { ensureReady(); const out = wasm_bindgen.rewrite_fetch_url(String(raw || ''), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, url: out.url, target: out.target, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelSrcset(raw, targetUrl, controlPrefix) { ensureReady(); const out = wasm_bindgen.rewrite_srcset(String(raw || ''), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, url: out.url, target: out.target, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelTargetURL(raw, targetUrl, controlPrefix) { ensureReady(); const out = wasm_bindgen.resolve_target_url(String(raw || ''), String(targetUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, url: out.url, target: out.target, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelLinkRel(rel) { ensureReady(); return wasm_bindgen.classify_link_rel(String(rel || '')); }`,
+    `function lowLevelBlockedElement(tag) { ensureReady(); return wasm_bindgen.classify_blocked_element(String(tag || '')); }`,
+    `function lowLevelMetaPolicy(httpEquiv) { ensureReady(); return wasm_bindgen.classify_meta_policy(String(httpEquiv || '')); }`,
+    `function lowLevelAttrPolicy(tag, key) { ensureReady(); return wasm_bindgen.classify_attr_policy(String(tag || ''), String(key || '')); }`,
+    `function lowLevelScriptType(scriptType) { ensureReady(); return wasm_bindgen.classify_script_type(String(scriptType || '')); }`,
+    `function lowLevelEventHandlerAttr(attrName) { ensureReady(); return wasm_bindgen.classify_event_handler_attr(String(attrName || '')); }`,
+    `function lowLevelCSS(source, baseUrl, controlPrefix) { ensureReady(); const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix) { ensureReady(); return wasm_bindgen.rewrite_import_map(String(source || ''), String(baseUrl || ''), String(tabId || ''), String(runtimeToken || ''), String(controlPrefix || '/zp/')); }`,
+    `function lowLevelHTMLDocument(source, targetUrl, controlPrefix, servers, runtimePrelude, tabId, runtimeToken) { ensureReady(); const out = wasm_bindgen.rewrite_html_document(String(source || ''), String(targetUrl || ''), String(controlPrefix || '/zp/'), JSON.stringify(Array.isArray(servers) ? servers : []), String(runtimePrelude || ''), String(tabId || ''), String(runtimeToken || '')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
+    `function lowLevelShareURL(target, servers) { ensureReady(); const out = wasm_bindgen.make_share_url(String(target || ''), JSON.stringify(Array.isArray(servers) ? servers : [])); try { return { ok: !!out.ok, url: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }`,
     `function publicOk(code) { return { ok: true, code, diagnostics: [] }; }`,
     `function publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }`,
     `function rewriteScriptPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevelWithContext(source, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/', opts.tabId || opts.tab || '', opts.runtimeToken || opts.rt || ''); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
     `function rewriteScriptURLPublic(raw, options = {}) { const opts = options && typeof options === 'object' ? options : { kind: options }; const out = lowLevelScriptURL(raw, opts.scriptKind || opts.kind, opts.url || opts.targetUrl || opts.baseUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/', opts.tabId || opts.tab || '', opts.runtimeToken || opts.rt || ''); return out.ok ? { ok: true, url: out.url, target: out.target, diagnostics: [] } : { ok: false, url: out.url || '', target: '', errorCode: out.error || 'POLICY_BLOCKED', diagnostics: [{ level: 'error', message: out.error || 'POLICY_BLOCKED' }] }; }`,
     `function rewriteFetchURLPublic(raw, options = {}) { const opts = options && typeof options === 'object' ? options : { targetUrl: options }; const out = lowLevelFetchURL(raw, opts.url || opts.targetUrl || opts.baseUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? { ok: true, url: out.url, target: out.target, diagnostics: [] } : { ok: false, url: out.url || '', target: '', errorCode: out.error || 'POLICY_BLOCKED', diagnostics: [{ level: 'error', message: out.error || 'POLICY_BLOCKED' }] }; }`,
+    `function rewriteSrcsetPublic(raw, options = {}) { const opts = options && typeof options === 'object' ? options : { targetUrl: options }; const out = lowLevelSrcset(raw, opts.url || opts.targetUrl || opts.baseUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? { ok: true, url: out.url, target: out.target, diagnostics: [] } : { ok: false, url: out.url || '', target: out.target || String(raw || ''), errorCode: out.error || 'UNCHANGED', diagnostics: [{ level: 'error', message: out.error || 'UNCHANGED' }] }; }`,
+    `function rewriteTargetURLPublic(raw, options = {}) { const opts = options && typeof options === 'object' ? options : { targetUrl: options }; const out = lowLevelTargetURL(raw, opts.url || opts.targetUrl || opts.baseUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? { ok: true, url: out.url, target: out.target, diagnostics: [] } : { ok: false, url: out.url || '', target: '', errorCode: out.error || 'POLICY_BLOCKED', diagnostics: [{ level: 'error', message: out.error || 'POLICY_BLOCKED' }] }; }`,
+    `function classifyLinkRelPublic(rel) { return lowLevelLinkRel(rel); }`,
+    `function classifyBlockedElementPublic(tag) { return lowLevelBlockedElement(tag); }`,
+    `function classifyMetaPolicyPublic(httpEquiv) { return lowLevelMetaPolicy(httpEquiv); }`,
+    `function classifyAttrPolicyPublic(tag, key) { return lowLevelAttrPolicy(tag, key); }`,
+    `function classifyScriptTypePublic(scriptType) { return lowLevelScriptType(scriptType); }`,
+    `function classifyEventHandlerAttrPublic(attrName) { return lowLevelEventHandlerAttr(attrName); }`,
     `function rewriteCSSPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; const out = lowLevelCSS(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
     `function rewriteImportMapPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; return publicOk(lowLevelImportMap(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.tabId || opts.tab || '', opts.runtimeToken || opts.rt || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/')); }`,
-    `function rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const end = out.code.length - suffix.length; if (end < prefix.length) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: out.code.slice(prefix.length, end), error: '' }; }`,
+    `function rewriteHTMLDocumentPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { targetUrl: options }; const out = lowLevelHTMLDocument(source, opts.url || opts.targetUrl || opts.baseUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/', opts.servers || [], opts.runtimePrelude || opts.prelude || '', opts.tabId || opts.tab || '', opts.runtimeToken || opts.rt || ''); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
+    `function makeShareURLPublic(target, options = {}) { const opts = options && typeof options === 'object' ? options : {}; const out = lowLevelShareURL(target, opts.servers || []); return out.ok ? { ok: true, url: out.url, diagnostics: [] } : { ok: false, url: '', errorCode: out.error || 'POLICY_BLOCKED', diagnostics: [{ level: 'error', message: out.error || 'POLICY_BLOCKED' }] }; }`,
+    `function generatedFunctionBody(code) { const start = String(code || '').indexOf('{'); const end = String(code || '').lastIndexOf('}'); return start >= 0 && end >= start ? String(code).slice(start + 1, end) : null; }`,
+    `function rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix) { const list = Array.isArray(params) ? params : []; const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\\n'; const suffix = '\\n}'; const out = lowLevel(prefix + String(source || '') + suffix, 'classic', targetUrl, controlPrefix); if (!out.ok) return out; const body = generatedFunctionBody(out.code); if (body == null) return { ok: false, code: '', error: 'REWRITE_FAILED' }; return { ok: true, code: body, error: '' }; }`,
     `function rewriteFunctionBodyPublic(source, params, targetUrl, controlPrefix) { const out = rewriteFunctionBodyRaw(source, params, targetUrl, controlPrefix); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }`,
-    `const rustApi = Object.freeze({ rewriteScript(source, kind, targetUrl, controlPrefix, tabId, runtimeToken) { return lowLevelWithContext(source, kind, targetUrl, controlPrefix, tabId, runtimeToken); }, rewriteScriptURL(raw, kind, targetUrl, controlPrefix, tabId, runtimeToken) { return lowLevelScriptURL(raw, kind, targetUrl, controlPrefix, tabId, runtimeToken); }, rewriteFetchURL(raw, targetUrl, controlPrefix) { return lowLevelFetchURL(raw, targetUrl, controlPrefix); }, rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); }, rewriteImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix) { return { ok: true, code: lowLevelImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix), error: '' }; }, rewriteFunctionBody: rewriteFunctionBodyRaw });`,
-    `const rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteScript: rewriteScriptPublic, rewriteScriptURL: rewriteScriptURLPublic, rewriteFetchURL: rewriteFetchURLPublic, rewriteCSS: rewriteCSSPublic, rewriteImportMap: rewriteImportMapPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });`,
+    `const rustApi = Object.freeze({ init, initSync, get ready() { return initialized; }, rewriteScript(source, kind, targetUrl, controlPrefix, tabId, runtimeToken) { return lowLevelWithContext(source, kind, targetUrl, controlPrefix, tabId, runtimeToken); }, rewriteScriptURL(raw, kind, targetUrl, controlPrefix, tabId, runtimeToken) { return lowLevelScriptURL(raw, kind, targetUrl, controlPrefix, tabId, runtimeToken); }, rewriteFetchURL(raw, targetUrl, controlPrefix) { return lowLevelFetchURL(raw, targetUrl, controlPrefix); }, rewriteSrcset(raw, targetUrl, controlPrefix) { return lowLevelSrcset(raw, targetUrl, controlPrefix); }, rewriteTargetURL(raw, targetUrl, controlPrefix) { return lowLevelTargetURL(raw, targetUrl, controlPrefix); }, classifyLinkRel(rel) { return lowLevelLinkRel(rel); }, classifyBlockedElement(tag) { return lowLevelBlockedElement(tag); }, classifyMetaPolicy(httpEquiv) { return lowLevelMetaPolicy(httpEquiv); }, classifyAttrPolicy(tag, key) { return lowLevelAttrPolicy(tag, key); }, classifyScriptType(scriptType) { return lowLevelScriptType(scriptType); }, classifyEventHandlerAttr(attrName) { return lowLevelEventHandlerAttr(attrName); }, rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); }, rewriteImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix) { return { ok: true, code: lowLevelImportMap(source, baseUrl, tabId, runtimeToken, controlPrefix), error: '' }; }, rewriteHTMLDocument(source, targetUrl, controlPrefix, servers, runtimePrelude, tabId, runtimeToken) { return lowLevelHTMLDocument(source, targetUrl, controlPrefix, servers, runtimePrelude, tabId, runtimeToken); }, makeShareURL(target, servers) { return lowLevelShareURL(target, servers); }, rewriteFunctionBody: rewriteFunctionBodyRaw });`,
+    `const rewriterApi = Object.freeze({ VERSION, get ready() { return initialized; }, init, initSync, rewriteScript: rewriteScriptPublic, rewriteScriptURL: rewriteScriptURLPublic, rewriteFetchURL: rewriteFetchURLPublic, rewriteSrcset: rewriteSrcsetPublic, rewriteTargetURL: rewriteTargetURLPublic, classifyLinkRel: classifyLinkRelPublic, classifyBlockedElement: classifyBlockedElementPublic, classifyMetaPolicy: classifyMetaPolicyPublic, classifyAttrPolicy: classifyAttrPolicyPublic, classifyScriptType: classifyScriptTypePublic, classifyEventHandlerAttr: classifyEventHandlerAttrPublic, rewriteCSS: rewriteCSSPublic, rewriteImportMap: rewriteImportMapPublic, rewriteHTMLDocument: rewriteHTMLDocumentPublic, makeShareURL: makeShareURLPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });`,
     `Object.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });`,
     `Object.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });`,
+    `if (!initSync()) init().catch(() => {});`,
     '})();',
     '',
   ].join('\n');
 }
+
+async function writeOptimizedWasm(from, to) {
+  if (!hasCommand('wasm-opt')) {
+    await copyFile(from, to);
+    return;
+  }
+  run('wasm-opt', ['-Oz', from, '-o', to]);
+}
+
 async function readGoWasmExec() {
   const goroot = goEnv('GOROOT');
   const candidates = [
@@ -291,6 +330,15 @@ function run(cmd, argv, extraEnv = {}) {
   });
   if (result.status !== 0)
     throw new Error(`${cmd} ${argv.join(' ')} failed with exit code ${result.status}`);
+}
+
+function hasCommand(cmd) {
+  const result = spawnSync(cmd, ['--version'], {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: 'ignore',
+  });
+  return result.status === 0;
 }
 
 async function copyOptional(from, to) {

@@ -74,6 +74,28 @@ func runDeliver(req *http.Request, resp *http.Response, finalURL *url.URL) deliv
 	return out
 }
 
+func installDeliverTestRewriter(t *testing.T) func() {
+	t.Helper()
+	rewriter := js.Global().Get("ZPRewriter")
+	rewriteHTML := js.FuncOf(func(_ js.Value, args []js.Value) any {
+		source := ""
+		if len(args) > 0 {
+			source = args[0].String()
+		}
+		return map[string]any{
+			"ok":   true,
+			"code": source + "<!--rewritten-by-test-rewriter-->",
+		}
+	})
+	js.Global().Set("ZPRewriter", map[string]any{
+		"rewriteHTMLDocument": rewriteHTML,
+	})
+	return func() {
+		rewriteHTML.Release()
+		js.Global().Set("ZPRewriter", rewriter)
+	}
+}
+
 func deliverReq(hdr map[string]string, raw string) *http.Request {
 	u, _ := url.Parse(raw)
 	r := &http.Request{Method: "GET", URL: u, Header: http.Header{}}
@@ -112,6 +134,9 @@ func mustURL(t *testing.T, raw string) *url.URL {
 // teardown-ownership flag), basic response delivery, document transform, and
 // cookie capture / credentials-omit.
 func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
+	cleanupRewriter := installDeliverTestRewriter(t)
+	defer cleanupRewriter()
+
 	plain := "https://t.test/a.js"
 
 	// Body present -> ownership transfers to the body cancel goroutine -> false.

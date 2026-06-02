@@ -209,18 +209,18 @@
     return internalURL('/zp/api/script?kind=module&u=' + encodeURIComponent(u.href) + '&tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken));
   });
   installWorkerOwnPropertyMasking();
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
   const TARGET_UA_BRANDS = Object.freeze([
-    Object.freeze({ brand: 'Chromium', version: '134' }),
+    Object.freeze({ brand: 'Chromium', version: '148' }),
     Object.freeze({ brand: 'Not:A-Brand', version: '24' }),
-    Object.freeze({ brand: 'Google Chrome', version: '134' })
+    Object.freeze({ brand: 'Google Chrome', version: '148' })
   ]);
   const TARGET_UA_FULL_VERSION_LIST = Object.freeze([
-    Object.freeze({ brand: 'Chromium', version: '134.0.0.0' }),
+    Object.freeze({ brand: 'Chromium', version: '148.0.7778.217' }),
     Object.freeze({ brand: 'Not:A-Brand', version: '24.0.0.0' }),
-    Object.freeze({ brand: 'Google Chrome', version: '134.0.0.0' })
+    Object.freeze({ brand: 'Google Chrome', version: '148.0.7778.217' })
   ]);
   function makeUserAgentData() {
     return Object.freeze({
@@ -236,9 +236,9 @@
           mobile: false,
           model: '',
           platform: 'Windows',
-          platformVersion: '10.0.0',
-          uaFullVersion: '134.0.0.0',
-          fullVersion: '134.0.0.0',
+          platformVersion: '15.0.0',
+          uaFullVersion: '148.0.7778.217',
+          fullVersion: '148.0.7778.217',
           wow64: false
         };
         const out = { brands: values.brands, mobile: false, platform: 'Windows' };

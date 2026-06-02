@@ -208,11 +208,7 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 			Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
 			DynamicCompileAllowed: dynamicCompileAllowed,
 			ReferrerPolicy:        referrerPolicy,
-			ScriptRewriter:        rewriteScriptFromJS,
-			ScriptURLRewriter:     rewriteScriptURLFromJS,
-			FetchURLRewriter:      rewriteFetchURLFromJS,
-			CSSRewriter:           rewriteCSSFromJS,
-			ImportMapRewriter:     rewriteImportMapFromJS,
+			DocumentRewriter:      rewriteHTMLDocumentFromJS,
 		})
 		closeErr := source.Close()
 		if err != nil {
@@ -301,88 +297,31 @@ func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
 	return out
 }
 
-func rewriteScriptFromJS(source, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, error) {
+func rewriteHTMLDocumentFromJS(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error) {
 	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("rewriteScript").Type() != js.TypeFunction {
-		return "", fmt.Errorf("REALM_INJECTION_FAILURE")
+	if !rewriter.Truthy() || rewriter.Get("rewriteHTMLDocument").Type() != js.TypeFunction {
+		return "", fmt.Errorf("HTML_DOCUMENT_REWRITE_UNAVAILABLE")
 	}
-	out := rewriter.Call("rewriteScript", source, map[string]any{
-		"kind":          kind,
+	out := rewriter.Call("rewriteHTMLDocument", source, map[string]any{
 		"targetUrl":     targetURL,
 		"controlPrefix": controlPrefix,
+		"prelude":       runtimePrelude,
 		"tabId":         tabID,
 		"runtimeToken":  runtimeToken,
-		"strict":        true,
+		"servers":       stringsForJS(servers),
 	})
 	if out.Truthy() && out.Get("ok").Bool() {
 		return out.Get("code").String(), nil
 	}
-	return "", fmt.Errorf("REWRITE_FAILED")
+	return "", fmt.Errorf("HTML_DOCUMENT_REWRITE_FAILED")
 }
 
-func rewriteScriptURLFromJS(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string) (string, string, error) {
-	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("rewriteScriptURL").Type() != js.TypeFunction {
-		return "", "", fmt.Errorf("REALM_INJECTION_FAILURE")
+func stringsForJS(values []string) []any {
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
 	}
-	out := rewriter.Call("rewriteScriptURL", raw, map[string]any{
-		"kind":          kind,
-		"targetUrl":     targetURL,
-		"controlPrefix": controlPrefix,
-		"tabId":         tabID,
-		"runtimeToken":  runtimeToken,
-	})
-	if out.Truthy() && out.Get("ok").Bool() {
-		return out.Get("url").String(), out.Get("target").String(), nil
-	}
-	return "", "", fmt.Errorf("REWRITE_FAILED")
-}
-
-func rewriteFetchURLFromJS(raw, targetURL, controlPrefix string) (string, string, error) {
-	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("rewriteFetchURL").Type() != js.TypeFunction {
-		return "", "", fmt.Errorf("REALM_INJECTION_FAILURE")
-	}
-	out := rewriter.Call("rewriteFetchURL", raw, map[string]any{
-		"targetUrl":     targetURL,
-		"controlPrefix": controlPrefix,
-	})
-	if out.Truthy() && out.Get("ok").Bool() {
-		return out.Get("url").String(), out.Get("target").String(), nil
-	}
-	return "", "", fmt.Errorf("REWRITE_FAILED")
-}
-
-func rewriteCSSFromJS(source, baseURL string) (string, error) {
-	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("rewriteCSS").Type() != js.TypeFunction {
-		return "", fmt.Errorf("CSS_REWRITE_UNAVAILABLE")
-	}
-	out := rewriter.Call("rewriteCSS", source, map[string]any{
-		"baseUrl":       baseURL,
-		"controlPrefix": "/zp/",
-	})
-	if out.Truthy() && out.Get("ok").Bool() {
-		return out.Get("code").String(), nil
-	}
-	return "", fmt.Errorf("CSS_REWRITE_FAILED")
-}
-
-func rewriteImportMapFromJS(source, baseURL, tabID, runtimeToken, controlPrefix string) (string, error) {
-	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("rewriteImportMap").Type() != js.TypeFunction {
-		return "", fmt.Errorf("IMPORT_MAP_REWRITE_UNAVAILABLE")
-	}
-	out := rewriter.Call("rewriteImportMap", source, map[string]any{
-		"baseUrl":       baseURL,
-		"tabId":         tabID,
-		"runtimeToken":  runtimeToken,
-		"controlPrefix": controlPrefix,
-	})
-	if out.Truthy() && out.Get("ok").Bool() {
-		return out.Get("code").String(), nil
-	}
-	return "", fmt.Errorf("IMPORT_MAP_REWRITE_FAILED")
+	return out
 }
 
 func targetDynamicCompileAllowed(h http.Header) bool {

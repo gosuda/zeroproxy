@@ -6,14 +6,32 @@ import {
   readBootConfig,
 } from './runtime/abi/native-capture.mjs';
 import {
-  dynamicSource,
-  isEvalExpressionCandidate,
-  simpleDynamicValue,
-  stringArgs,
-} from './runtime/dynamic-code/source.mjs';
+  createDynamicCodeFacade,
+} from './runtime/dynamic-code/facade.mjs';
+import {
+  attrLocalName,
+  isBlockedLinkRelValue,
+  isIconLinkRelValue,
+  isResourceURLAttribute,
+  isSrcsetAttribute,
+  isStylesheetLinkRelValue,
+  usesRawURLAttribute,
+} from './runtime/dom/attributes.mjs';
+import { createDocumentFacades } from './runtime/facades/document.mjs';
 import { createEventTargetFacade } from './runtime/facades/events.mjs';
 import { createFingerprintingFacades } from './runtime/facades/fingerprinting.mjs';
+import { createHistoryFacade } from './runtime/facades/history.mjs';
+import { createLocationFacades } from './runtime/facades/location.mjs';
+import { createNavigatorFacade } from './runtime/facades/navigator.mjs';
+import { createStorageFacades } from './runtime/facades/storage.mjs';
+import { createFrameAccessors } from './runtime/frames/accessors.mjs';
+import { createChildRewriteHelpers } from './runtime/frames/child-rewrite.mjs';
+import { createFrameMessaging } from './runtime/frames/messaging.mjs';
+import { isFrameElement } from './runtime/frames/policy.mjs';
+import { createFrameSandbox } from './runtime/frames/sandbox.mjs';
+import { createHTTPFetchFacade } from './runtime/network/http.mjs';
 import { createWebSocketFacades } from './runtime/network/websocket.mjs';
+import { createWorkerFacades } from './runtime/workers/facades.mjs';
 
 (() => {
   'use strict';
@@ -26,19 +44,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   const runtimeToken = String(boot.runtimeToken || '');
   clearBootConfig(root);
   const Native = captureNative(root);
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
-  const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
-  const TARGET_PLATFORM = 'Win32';
-  const TARGET_UA_BRANDS = Object.freeze([
-    Object.freeze({ brand: 'Chromium', version: '134' }),
-    Object.freeze({ brand: 'Not:A-Brand', version: '24' }),
-    Object.freeze({ brand: 'Google Chrome', version: '134' })
-  ]);
-  const TARGET_UA_FULL_VERSION_LIST = Object.freeze([
-    Object.freeze({ brand: 'Chromium', version: '134.0.0.0' }),
-    Object.freeze({ brand: 'Not:A-Brand', version: '24.0.0.0' }),
-    Object.freeze({ brand: 'Google Chrome', version: '134.0.0.0' })
-  ]);
   const toStringMap = new WeakMap();
   const toStringMaskedPrototypes = new WeakSet();
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
@@ -53,11 +58,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   let baseURL = virtualURL.href;
   let explicitBaseURL = '';
   let activeShareVersion = 0;
-  let documentCookie = String(boot.documentCookie || '');
   let documentReferrerPolicy = normalizeReferrerPolicy(boot.referrerPolicy || '');
   const dynamicCompileAllowed = boot.dynamicCompileAllowed === true;
-  const documentCookieRecords = [];
-  initDocumentCookieRecords(documentCookie);
   const urlMeta = new WeakMap();
   const messageListenerWrappers = new WeakMap();
   const frameWindowOrigins = new WeakMap();
@@ -65,7 +67,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   const directExternalFrameWindowOrigins = new WeakMap();
   const crossWindowProxyCache = new WeakMap();
   const postMessageWrappers = new WeakMap();
-  const postMessageOriginals = new WeakMap();
   const frameTargetOriginMarker = Symbol.for('zeroproxy.frame.targetOrigin');
   const networkContainmentMarker = Symbol.for('zeroproxy.network.contained');
   const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
@@ -74,23 +75,13 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   const membraneRawTargets = new WeakMap();
   const rewrittenInlineScripts = new WeakSet();
   const rewrittenStyleNodes = new WeakSet();
-  const nativeFormSubmissions = new WeakSet();
   const documentWriteHookedWindows = new WeakSet();
   const windowMethodBindings = new Map();
   const integrityBackupAttr = 'data-zp-integrity';
   const nonceBackupAttr = 'data-zp-target-nonce';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
-  const workerBlobURLs = new Set();
-  const workerBlobURLMap = new Map();
-  const blobURLRawMap = new Map();
-  const deferredTerminateWorkers = new WeakSet();
   const serviceWorkerFacades = new WeakMap();
-  const storageMaps = new Map();
-  const storageWindows = new Set();
-  const storageDirtyKeys = new Map();
-  let storageDBPromise = null;
-  let workerTerminateHooked = false;
 
   const normalizedError = createNormalizedError(Native);
   const {
@@ -119,8 +110,95 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   const {
     installCanvasAntiFingerprinting,
     installAudioAntiFingerprinting,
-  } = createFingerprintingFacades({ define });
+    installPerformanceMasking,
+  } = createFingerprintingFacades({
+    define,
+    Native,
+    ZP,
+    proxyOrigin,
+    normalizedError,
+    getVirtualURL: () => virtualURL,
+    isZeroProxyAssetURL,
+    scriptProxyPath,
+    resourceProxyPath,
+  });
   const { installEventMethods } = createEventTargetFacade({ define, listenersKey });
+  const {
+    installDocumentAccessors,
+    installCookieSync,
+  } = createDocumentFacades({
+    root,
+    boot,
+    Native,
+    defineAccessor,
+    getVirtualURL: () => virtualURL,
+    getBaseURL: () => baseURL,
+    postMessageToSW,
+  });
+  const { installStorageFacades } = createStorageFacades({
+    Native,
+    define,
+    defineAccessor,
+    normalizedError,
+    getVirtualURL: () => virtualURL,
+  });
+  const { installNavigatorIdentity } = createNavigatorFacade({
+    defineAccessor,
+    maskMethods,
+  });
+  const {
+    commitVirtualHistory,
+    updateVirtualHash,
+    setVirtualLocation,
+    applyResolvedHistoryEntry,
+    installHistoryMethods,
+  } = createHistoryFacade({
+    root,
+    Native,
+    ZP,
+    boot,
+    proxyOrigin,
+    activeServers,
+    initialProxyURL,
+    normalizedError,
+    targetURL,
+    navigateToTarget,
+    postMessageToSW,
+    getActiveProxyPath: () => activeProxyPath,
+    setActiveProxyPath: value => { activeProxyPath = value; },
+    getActiveProxyFragment: () => activeProxyFragment,
+    setActiveProxyFragment: value => { activeProxyFragment = value; },
+    getActiveRouteKey: () => activeRouteKey,
+    setActiveRouteKey: value => { activeRouteKey = value; },
+    getActiveEntryId: () => activeEntryId,
+    setActiveEntryId: value => { activeEntryId = value; },
+    getVirtualURL: () => virtualURL,
+    setVirtualURL: value => { virtualURL = value; },
+    getBaseURL: () => baseURL,
+    setBaseURL: value => { baseURL = value; },
+    getExplicitBaseURL: () => explicitBaseURL,
+    setExplicitBaseURL: value => { explicitBaseURL = value; },
+    getActiveShareVersion: () => activeShareVersion,
+    setActiveShareVersion: value => { activeShareVersion = value; },
+  });
+  const {
+    fetchThroughRuntime,
+    replayableBodySize,
+    requestTargetURL,
+  } = createHTTPFetchFacade({
+    root,
+    Native,
+    boot,
+    runtimeToken,
+    normalizedError,
+    postMessageToSW,
+    openUploadStream,
+    getActiveEntryId: () => activeEntryId,
+    getVirtualURL: () => virtualURL,
+    getBaseURL: () => baseURL,
+    getDocumentReferrerPolicy: () => documentReferrerPolicy,
+    proxyOrigin,
+  });
   const { installWebSocket, installWebSocketStream } = createWebSocketFacades({
     root,
     Native,
@@ -132,6 +210,19 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     targetWSURL,
     postMessageToSW,
     currentDocumentURL: () => virtualURL.href,
+  });
+  const { installWorkerHooks } = createWorkerFacades({
+    root,
+    Native,
+    boot,
+    runtimeToken,
+    proxyOrigin,
+    activeServers,
+    currentVirtualURL: () => virtualURL,
+    define,
+    maskNativeFunction,
+    normalizedError,
+    requestTargetURL,
   });
 
   function installDocumentWriteHooks(w) {
@@ -198,36 +289,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     } catch { return ''; }
   }
   function shareFragmentForKey(key) { return ZP.makeShareFragment(String(key), activeServers); }
-  function proxyHistoryURL() { return activeProxyPath + activeProxyFragment; }
-  function nativeLocationURL() {
-    try {
-      const href = Native.locationHref && Native.locationHref.get && Native.locationHref.get.call(root.location);
-      if (href) return new URL(href);
-    } catch {}
-    try { return new URL(proxyHistoryURL(), proxyOrigin); } catch { return new URL(initialProxyURL.href); }
-  }
-  function visibleProxyURL() { const u = nativeLocationURL(); return u.pathname + u.search + u.hash; }
-  function setActiveShareRoute(share) {
-    activeProxyPath = ZP.makeSharePath(share.encrypted);
-    activeRouteKey = share.encrypted;
-    activeProxyFragment = shareFragmentForKey(share.key);
-  }
-  function replaceVisibleProxyURL() {
-    const next = proxyHistoryURL();
-    if (visibleProxyURL() !== next) {
-      try { Native.historyReplace(root.history.state, '', next); } catch {}
-    }
-  }
-  function refreshVisibleShareRoute(entryId, target, base) {
-    const version = ++activeShareVersion;
-    ZP.encryptShareURL(target).then(share => {
-      return postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: base, replace: true }).then(() => share);
-    }).then(share => {
-      if (version !== activeShareVersion || entryId !== activeEntryId || target !== virtualURL.href) return;
-      setActiveShareRoute(share);
-      replaceVisibleProxyURL();
-    }).catch(()=>{});
-  }
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
   function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
@@ -252,37 +313,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin, activeServers); }
-  function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
-  function commitVirtualHistory(state, title, url, replace = false) {
-    const next = url != null ? sameOriginHistoryURL(url) : new URL(virtualURL.href);
-    virtualURL = next;
-    if (!explicitBaseURL) baseURL = virtualURL.href;
-    const entryId = replace && activeEntryId ? activeEntryId : `e${ZP.randomId()}`;
-    activeEntryId = entryId;
-    postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
-    const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyHistoryURL());
-    refreshVisibleShareRoute(entryId, virtualURL.href, baseURL);
-    return out;
-  }
-  function updateVirtualHash(raw, replace = false) {
-    const oldURL = virtualURL.href;
-    const next = new URL(virtualURL.href);
-    let hash = String(raw);
-    if (hash && hash[0] !== '#') hash = `#${hash}`;
-    next.hash = hash;
-    if (next.href === virtualURL.href) return;
-    const out = commitVirtualHistory(null, '', next.href, replace);
-    try { window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: virtualURL.href })); } catch { try { window.dispatchEvent(new Event('hashchange')); } catch {} }
-    return out;
-  }
-  function setVirtualLocation(raw, replace = false) {
-    const next = new URL(targetURL(raw));
-    if (next.origin === virtualURL.origin && next.pathname === virtualURL.pathname && next.search === virtualURL.search) {
-      updateVirtualHash(next.hash, replace);
-      return;
-    }
-    navigateToTarget(next.href, replace);
-  }
   async function activatedNavPath(raw, replace = false, base = baseURL) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
@@ -355,6 +385,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     return source;
   }
   function navigateToTarget(raw, replace = false, base = baseURL) {
+    if (initialProxyURL.href === 'about:srcdoc') return;
     activatedNavPath(raw, replace, base).then(path => {
       if (replace && Native.locationReplace) Native.locationReplace(path);
       else if (!replace && Native.locationAssign) Native.locationAssign(path);
@@ -561,131 +592,43 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 	    if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteCSSSource !== 'function') return '';
 	    return root.ZPHTTPRewriter.rewriteCSSSource(String(source || ''), { baseUrl: base, controlPrefix: ZP.CONTROL_PREFIX, fallback: () => '' });
 	  }
-  function rawPostMessageTarget(target) {
-    try {
-      if (target && (typeof target === 'object' || typeof target === 'function')) {
-        const raw = Native.reflectApply && Native.weakMapGet ? Native.reflectApply(Native.weakMapGet, membraneRawTargets, [target]) : membraneRawTargets.get(target);
-        return raw || target;
-      }
-    } catch {}
-    return target;
-  }
-  function normalizePostMessageTargetOrigin(targetOrigin) {
-    if (targetOrigin == null) return targetOrigin;
-    const s = String(targetOrigin);
-    if (s === '*' || s === '/') return s;
-    try {
-      const u = new URL(s);
-      if (u.protocol === 'http:' || u.protocol === 'https:') return proxyOrigin;
-    } catch {}
-    return s;
-  }
-  function normalizePostMessageTargetOriginForTarget(target, targetOrigin) {
-    if (targetOrigin == null) return targetOrigin;
-    const s = String(targetOrigin);
-    if (s === '*' || s === '/') return s;
-    let requestedOrigin = '';
-    try {
-      const u = new URL(s);
-      if (u.protocol === 'http:' || u.protocol === 'https:') requestedOrigin = u.origin;
-    } catch {}
-    const directOrigin = directExternalFrameOriginForSource(target);
-    if (directOrigin && requestedOrigin === directOrigin) return directOrigin;
-    let frameOrigin = '';
-    try {
-      frameOrigin = frameOriginForSource(target) || frameWindowOrigins.get(target) || '';
-    } catch {}
-    if (frameOrigin && requestedOrigin === frameOrigin) return proxyOrigin;
-    return normalizePostMessageTargetOrigin(s);
-  }
-  function postMessageWrapperFor(target) {
-    target = rawPostMessageTarget(target);
-    if (!target || typeof target.postMessage !== 'function') return undefined;
-    if (postMessageWrappers.has(target)) return postMessageWrappers.get(target);
-    const wrapped = function postMessage(message, targetOrigin, transfer) {
-      if (arguments.length < 2) return target.postMessage(message, proxyOrigin);
-      const mapped = normalizePostMessageTargetOriginForTarget(target, targetOrigin);
-      return arguments.length > 2 ? target.postMessage(message, mapped, transfer) : target.postMessage(message, mapped);
-    };
-    maskNativeFunction(wrapped, 'postMessage');
-    postMessageWrappers.set(target, wrapped);
-    return wrapped;
-  }
-  function virtualOriginForMessage(ev) {
-    if (!ev || !ev.source) return '';
-    const directOrigin = directExternalFrameOriginForSource(ev.source);
-    if (directOrigin && ev.origin === directOrigin) return '';
-    if (ev.origin !== proxyOrigin) return '';
-    try {
-      const origin = frameOriginForSource(ev.source) || frameWindowOrigins.get(ev.source) || ev.source[frameTargetOriginMarker];
-      return origin || '';
-    } catch {
-      return '';
-    }
-  }
-  function frameOriginForSource(source) {
-    if (!source || !document || !document.querySelectorAll) return '';
-    let frames;
-    try { frames = document.querySelectorAll('iframe,frame'); } catch { return ''; }
-    for (const frame of frames) {
-      try {
-        if (frame.contentWindow !== source) continue;
-        const target = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url') || '';
-        if (target) return new URL(target).origin;
-      } catch {}
-    }
-    return '';
-  }
-  function directExternalFrameOriginForSource(source) {
-    try {
-      const directOrigin = directExternalFrameWindowOrigins.get(source);
-      if (directOrigin) return directOrigin;
-    } catch {}
-    if (!source || !document || !document.querySelectorAll) return '';
-    let frames;
-    try { frames = document.querySelectorAll('iframe,frame'); } catch { return ''; }
-    for (const frame of frames) {
-      try {
-        if (frame.contentWindow !== source || !isDirectExternalFrameElement(frame)) continue;
-        const target = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url') || Native.getAttribute.call(frame, 'src') || '';
-        if (target) return new URL(target).origin;
-      } catch {}
-    }
-    return '';
-  }
-  function virtualizeMessageEvent(ev) {
-    const origin = virtualOriginForMessage(ev);
-    if (!origin) return ev;
-    try {
-      return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: ev.source, ports: ev.ports || [] });
-    } catch {
-      try {
-        Object.defineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
-        return ev;
-      } catch {}
-      try {
-        const clone = Object.create(ev);
-        Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
-        return clone;
-      } catch {
-        return ev;
-      }
-    }
-  }
-  function rememberFrameOrigin(frame) {
-    if (!frame) return;
-    let target = '';
-    try { target = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url') || ''; } catch {}
-    if (!target) return;
-    try {
-      const child = frame.contentWindow;
-      if (child) {
-        const origin = new URL(target).origin;
-        frameWindowOrigins.set(child, origin);
-        if (isDirectExternalFrameElement(frame)) directExternalFrameWindowOrigins.set(child, origin);
-      }
-    } catch {}
-  }
+  const {
+    postMessageWrapperFor,
+    virtualizeMessageEvent,
+    rememberFrameOrigin,
+  } = createFrameMessaging({
+    Native,
+    document,
+    proxyOrigin,
+    urlMeta,
+    frameWindowOrigins,
+    directExternalFrameWindowOrigins,
+    postMessageWrappers,
+    membraneRawTargets,
+    frameTargetOriginMarker,
+    maskNativeFunction,
+    isDirectExternalFrameElement,
+  });
+  const { installChildRewriteHelpers } = createChildRewriteHelpers({
+    root,
+    maskNativeFunction,
+    maskMethods,
+    getVirtualURL: () => virtualURL,
+    windowBoundMethods: WINDOW_BOUND_METHODS,
+    postMessageWrapperFor,
+    setVirtualLocation,
+  });
+  const {
+    setFrameSandboxAttribute,
+    sanitizeFrameSandbox,
+    frameSandboxValue,
+    hasFrameSandboxValue,
+    forgetFrameSandbox,
+  } = createFrameSandbox({
+    Native,
+    frameSandboxMeta,
+    isDirectExternalFrameElement,
+  });
   try { Object.defineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
   installToStringMasking(root);
   define(root, '__ZP_SET_BASE', updateVirtualBase);
@@ -727,98 +670,25 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       return bound;
     }
 
-    const NativeAsyncFunction = (async function(){}).constructor;
-    const NativeGeneratorFunction = (function*(){}).constructor;
-    const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
-    function compileSimpleDynamic(params, body, kind) {
-      if (params.length || kind !== 'function') return null;
-      const text = String(body || '').trim();
-      const m = /^return\s+([\s\S]*?);?$/.exec(text);
-      if (!m) return null;
-      const fn = function anonymous() { return simpleDynamicValue(m[1], virtualURL); };
-      toStringMap.set(fn, dynamicSource(kind, params, body));
-      return fn;
-    }
-    function compileTimerString(source) {
-      const text = String(source || '');
-      return function anonymous() { return runScopedNativeEval(text); };
-    }
-    function scopedCallArgs(args) {
-      const argv = new Array(args.length + 1);
-      argv[0] = scope;
-      for (let i = 0; i < args.length; i++) argv[i + 1] = args[i];
-      return argv;
-    }
-    function compileDynamic(ctor, args, kind) {
-      const parts = stringArgs(args);
-      const body = parts.length ? parts[parts.length - 1] : '';
-      const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
-      for (let i = 0; i < params.length; i++) params[i] = parts[i];
-      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-      const simple = compileSimpleDynamic(params, body, kind);
-      if (simple) return simple;
-      const rewritten = rewriteDynamicFunctionBody(params, body);
-      const fn = Reflect.construct(ctor, params.concat(rewritten));
-      toStringMap.set(fn, dynamicSource(kind, params, body));
-      return fn;
-    }
-    function dynamicEval(source) {
-      if (arguments.length === 0) return undefined;
-      if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-      return runScopedNativeEval(String(source));
-    }
-    function runScopedNativeEval(text) {
-      if (typeof Native.eval !== 'function') throw normalizedError('NotSupportedError');
-      const previous = root.__ZP_EVAL_SCOPE;
-      const hadPrevious = Object.prototype.hasOwnProperty.call(root, '__ZP_EVAL_SCOPE');
-      Object.defineProperty(root, '__ZP_EVAL_SCOPE', { value: scope, enumerable: false, configurable: true, writable: true });
-      try {
-        const expr = isEvalExpressionCandidate(text) ? `(${text})` : text;
-        return (0, Native.eval)(`with(__ZP_EVAL_SCOPE){${expr}\n}`);
-      } finally {
-        try {
-          if (hadPrevious) Object.defineProperty(root, '__ZP_EVAL_SCOPE', { value: previous, enumerable: false, configurable: true, writable: true });
-          else delete root.__ZP_EVAL_SCOPE;
-        } catch {}
-      }
-    }
-    const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
-    const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
-    const dynamicGeneratorFunction = function GeneratorFunction(...args) { return compileDynamic(NativeGeneratorFunction, args, 'generator'); };
-    const dynamicAsyncGeneratorFunction = function AsyncGeneratorFunction(...args) { return compileDynamic(NativeAsyncGeneratorFunction, args, 'asyncGenerator'); };
-    function setDynamicConstructorIdentity(fn, name, proto) {
-      try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
-      try { Object.defineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}
-      if (proto) try { Object.defineProperty(fn, 'prototype', { value: proto, enumerable: false, configurable: false, writable: false }); } catch {}
-      maskNativeFunction(fn, name);
-    }
-    setDynamicConstructorIdentity(dynamicFunction, 'Function', Native.FunctionCtor && Native.FunctionCtor.prototype);
-    setDynamicConstructorIdentity(dynamicAsyncFunction, 'AsyncFunction', NativeAsyncFunction && NativeAsyncFunction.prototype);
-    setDynamicConstructorIdentity(dynamicGeneratorFunction, 'GeneratorFunction', NativeGeneratorFunction && NativeGeneratorFunction.prototype);
-    setDynamicConstructorIdentity(dynamicAsyncGeneratorFunction, 'AsyncGeneratorFunction', NativeAsyncGeneratorFunction && NativeAsyncGeneratorFunction.prototype);
-    try { Object.defineProperty(dynamicEval, 'name', { value: 'eval', configurable: true }); } catch {}
-    try { Object.defineProperty(dynamicEval, 'length', { value: 1, configurable: true }); } catch {}
-    maskNativeFunction(dynamicEval, 'eval');
-    const dynamicConstructorWrappers = new Map([
-      [Native.FunctionCtor, dynamicFunction],
-      [dynamicFunction, dynamicFunction],
-      [NativeAsyncFunction, dynamicAsyncFunction],
-      [dynamicAsyncFunction, dynamicAsyncFunction],
-      [NativeGeneratorFunction, dynamicGeneratorFunction],
-      [dynamicGeneratorFunction, dynamicGeneratorFunction],
-      [NativeAsyncGeneratorFunction, dynamicAsyncGeneratorFunction],
-      [dynamicAsyncGeneratorFunction, dynamicAsyncGeneratorFunction]
-    ]);
-    function dynamicWrapperFor(value) { return dynamicConstructorWrappers.get(value) || null; }
-    function dynamicGlobal(name) {
-      if (name === 'eval') return dynamicEval;
-      if (name === 'Function') return dynamicFunction;
-      if (name === 'AsyncFunction') return dynamicAsyncFunction;
-      if (name === 'GeneratorFunction') return dynamicGeneratorFunction;
-      if (name === 'AsyncGeneratorFunction') return dynamicAsyncGeneratorFunction;
-      if (name === 'origin') return virtualURL.origin;
-      return null;
-    }
+    const dynamicCode = createDynamicCodeFacade({
+      root,
+      Native,
+      dynamicCompileAllowed,
+      normalizedError,
+      getVirtualURL: () => virtualURL,
+      getScope: () => scope,
+      define,
+      defineReplacingNative,
+      maskNativeFunction,
+      toStringMap,
+    });
+    const {
+      dynamicFunction,
+      dynamicGlobal,
+      dynamicWrapperFor,
+      installDynamicCodeHooks,
+      isDynamicConstructor,
+    } = dynamicCode;
     const virtualPrototypeCache = new WeakMap();
     function unwrapRaw(value) {
       try {
@@ -844,7 +714,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       if (t !== 'object' && t !== 'function') return true;
       if (typeof proto === 'function') return false;
       const ctor = proto && proto.constructor;
-      return ctor === Native.FunctionCtor || ctor === NativeAsyncFunction || ctor === NativeGeneratorFunction || ctor === NativeAsyncGeneratorFunction || dynamicWrapperFor(ctor);
+      return isDynamicConstructor(ctor);
     }
     function safeGetPrototypeOf(value) {
       const raw = unwrapRaw(value);
@@ -853,34 +723,14 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     }
     if (Native.objectGetPrototypeOf) define(Object, 'getPrototypeOf', safeGetPrototypeOf);
     if (Native.reflectGetPrototypeOf && root.Reflect) define(root.Reflect, 'getPrototypeOf', safeGetPrototypeOf);
-    const virtualLocation = {
-      get href() { return virtualURL.href; },
-      set href(v) { setVirtualLocation(v); },
-      get protocol() { return virtualURL.protocol; },
-      get host() { return virtualURL.host; },
-      get hostname() { return virtualURL.hostname; },
-      get port() { return virtualURL.port; },
-      get pathname() { return virtualURL.pathname; },
-      get search() { return virtualURL.search; },
-      get hash() { return virtualURL.hash; },
-      set hash(v) { updateVirtualHash(v); },
-      get origin() { return virtualURL.origin; },
-      assign(v) { setVirtualLocation(v); },
-      replace(v) { setVirtualLocation(v, true); },
-      reload() { Native.locationReload && Native.locationReload(); },
-      toString() { return virtualURL.href; },
-      valueOf() { return virtualURL.href; },
-      [Symbol.toPrimitive]() { return virtualURL.href; }
-    };
-    try {
-      Object.defineProperty(virtualLocation, Symbol.toStringTag, {
-        value: 'Location',
-        enumerable: false,
-        configurable: true
-      });
-    } catch {}
-    try { Object.freeze(virtualLocation); } catch {}
-    maskMethods(virtualLocation, ['assign','replace','reload','toString','valueOf']);
+    const { virtualLocation, crossWindowLocation } = createLocationFacades({
+      Native,
+      getVirtualURL: () => virtualURL,
+      setVirtualLocation,
+      updateVirtualHash,
+      maskMethods,
+      maskNativeFunction,
+    });
     function safeCrossWindow(targetWindow) {
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
@@ -892,7 +742,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
         top: { get() { return proxy; }, enumerable: true },
         parent: { get() { return proxy; }, enumerable: true },
         frames: { get() { return proxy; }, enumerable: true },
-        location: { get() { return virtualLocation; }, enumerable: true },
+        location: { get() { return crossWindowLocation; }, enumerable: true },
         postMessage: { value: postMessageWrapperFor(targetWindow), enumerable: true }
       });
       membraneRawTargets.set(proxy, targetWindow);
@@ -916,7 +766,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       }
       return scope;
     }
-    maskNativeFunction(virtualLocation[Symbol.toPrimitive], Symbol.toPrimitive);
     const scope = new Proxy(root, {
       has(_target, prop) { return prop !== Symbol.unscopables; },
       get(target, prop) {
@@ -1088,169 +937,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
-    function rewriteDynamicFunctionBody(params, body) {
-      if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteFunctionBody !== 'function') throw normalizedError('NotSupportedError');
-      return root.ZPHTTPRewriter.rewriteFunctionBody(String(body || ''), params, virtualURL.href, ZP.CONTROL_PREFIX);
-    }
-    defineReplacingNative(root, 'eval', dynamicEval);
-    defineReplacingNative(root, 'Function', dynamicFunction);
-    for (const [ctor, wrapper] of dynamicConstructorWrappers) {
-      if (ctor && ctor.prototype) try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: true, writable: true }); } catch {}
-    }
-    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args); });
-    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args); });
+    installDynamicCodeHooks();
     installDocumentWriteHooks(root);
-  }
-  function requestTargetURL(input) {
-    const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
-    const parsed = new URL(raw, compatRelativeRequestBase(raw) || baseURL);
-    if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + parsed.search + parsed.hash, baseURL).href;
-    return ZP.canonicalTargetURL(parsed.href, baseURL).href;
-  }
-  function compatRelativeRequestBase(raw) {
-    const text = String(raw || '');
-    if (!text || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(text) || text.startsWith('//')) return '';
-    let path = '';
-    try { path = new URL(text, virtualURL.href).pathname; } catch { return ''; }
-    if (virtualURL.hostname === 'www.naver.com' && path === '/api/auth') return 'https://shopsquare.naver.com/';
-    return '';
-  }
-  function replayableBodySize(body) {
-    if (body == null) return 0;
-    if (typeof body === 'string') return new TextEncoder().encode(body).byteLength;
-    if (body instanceof ArrayBuffer) return body.byteLength;
-    if (ArrayBuffer.isView(body)) return body.byteLength;
-    if (Native.Blob && body instanceof Native.Blob) return body.size;
-    if (body instanceof URLSearchParams) return new TextEncoder().encode(String(body)).byteLength;
-    return null;
-  }
-  function replayableRequestBody(input, init) {
-    if (!init || !Object.prototype.hasOwnProperty.call(init, 'body')) return false;
-    const size = replayableBodySize(init.body);
-    return size != null && size <= 1024 * 1024;
-  }
-  function filteredResponseHeaders(resp) {
-    const headers = new Native.Headers();
-    try {
-      resp.headers.forEach((value, key) => {
-        if (!String(key).toLowerCase().startsWith('x-zp-response-')) headers.append(key, value);
-      });
-    } catch {}
-    return headers;
-  }
-  function sameOriginURL(a, b) {
-    try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
-  }
-  function opaqueResponseFacade(resp) {
-    if (!resp || !Native.Headers) return resp;
-    const emptyHeaders = new Native.Headers();
-    const cloneOpaque = () => opaqueResponseFacade(resp.clone());
-    return new Proxy(resp, {
-      get(target, prop, receiver) {
-        if (prop === 'type') return 'opaque';
-        if (prop === 'url') return '';
-        if (prop === 'redirected') return false;
-        if (prop === 'status') return 0;
-        if (prop === 'statusText') return '';
-        if (prop === 'ok') return false;
-        if (prop === 'headers') return emptyHeaders;
-        if (prop === 'body') return null;
-        if (prop === 'bodyUsed') return false;
-        if (prop === 'clone') return cloneOpaque;
-        if (prop === 'text') return () => Promise.resolve('');
-        if (prop === 'arrayBuffer') return () => Promise.resolve(new ArrayBuffer(0));
-        if (prop === 'blob') return () => Promise.resolve(new Blob([]));
-        if (prop === 'json') return () => Promise.reject(new SyntaxError('Unexpected end of JSON input'));
-        if (prop === 'formData') return () => Promise.reject(normalizedError('TypeError'));
-        const value = Reflect.get(target, prop, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      }
-    });
-  }
-  function responseFacade(resp, fallbackURL) {
-    if (!resp || !resp.headers || !Native.Headers) return resp;
-    const visibleURL = resp.headers.get('X-ZP-Response-URL') || fallbackURL || resp.url;
-    const visibleRedirected = resp.headers.get('X-ZP-Response-Redirected') === '1';
-    let visibleHeaders = null;
-    const cloneFacade = () => responseFacade(resp.clone(), visibleURL);
-    return new Proxy(resp, {
-      get(target, prop, receiver) {
-        if (prop === 'url') return visibleURL;
-        if (prop === 'redirected') return visibleRedirected;
-        if (prop === 'headers') return visibleHeaders || (visibleHeaders = filteredResponseHeaders(target));
-        if (prop === 'clone') return cloneFacade;
-        const value = Reflect.get(target, prop, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      }
-    });
-  }
-  async function fetchThroughRuntime(input, init = {}) {
-    if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
-    const target = requestTargetURL(input);
-    const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
-    const apiHeaders = new Native.Headers(req.headers);
-    apiHeaders.delete('X-ZP-Upload-Replayable');
-    apiHeaders.set('X-ZP-Tab-Id', boot.tabId);
-    apiHeaders.set('X-ZP-Entry-Id', activeEntryId);
-    apiHeaders.set('X-ZP-Runtime-Token', runtimeToken);
-    apiHeaders.set('X-ZP-Document-URL', virtualURL.href);
-    const requestId = ZP.randomId('req');
-    apiHeaders.set('X-ZP-Request-Id', requestId);
-    apiHeaders.set('X-ZP-Fetch-Credentials', req.credentials || 'same-origin');
-    apiHeaders.set('X-ZP-Fetch-Mode', req.mode || 'cors');
-    apiHeaders.set('X-ZP-Fetch-Cache', req.cache || 'default');
-    apiHeaders.set('X-ZP-Fetch-Redirect', req.redirect || 'follow');
-    apiHeaders.set('X-ZP-Fetch-Referrer', req.referrer || 'about:client');
-    apiHeaders.set('X-ZP-Fetch-Referrer-Policy', req.referrerPolicy || documentReferrerPolicy || '');
-    apiHeaders.set('X-ZP-Fetch-Integrity', req.integrity || '');
-    apiHeaders.set('X-ZP-Fetch-Keepalive', req.keepalive ? '1' : '0');
-    if ('priority' in req) {
-      try { apiHeaders.set('X-ZP-Fetch-Priority', String(req.priority || '')); } catch {}
-    }
-    if (replayableRequestBody(input, init)) apiHeaders.set('X-ZP-Upload-Replayable', '1');
-    const apiInit = {
-      method: req.method,
-      headers: apiHeaders,
-      credentials: 'same-origin',
-      cache: 'no-store',
-      redirect: 'follow'
-    };
-    let abortListener = null;
-    let abortPromise = null;
-    if (req.signal) {
-      abortPromise = new Promise((_, reject) => {
-        abortListener = () => {
-          postMessageToSW({ type: 'ZP_FETCH_ABORT', tabId: boot.tabId, entryId: activeEntryId, requestId }).catch(()=>{});
-          reject(normalizedError('AbortError'));
-        };
-      });
-      if (req.signal.aborted) abortListener();
-      else req.signal.addEventListener('abort', abortListener, { once: true });
-    }
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      const opened = openUploadStream(req.body, req.signal);
-      const streamId = abortPromise ? await Promise.race([opened, abortPromise]) : await opened;
-      if (streamId) apiHeaders.set('X-ZP-Upload-Stream-Id', streamId);
-      else {
-        apiInit.body = req.body;
-        apiInit.duplex = 'half';
-      }
-    }
-    if (req.signal) apiInit.signal = req.signal;
-    try {
-      const fetchPromise = Native.fetch(`${ZP.apiPath('fetch')}?url=${encodeURIComponent(target)}`, apiInit);
-      const resp = abortPromise ? await Promise.race([fetchPromise, abortPromise]) : await fetchPromise;
-      if ((req.redirect || 'follow') === 'error' && resp.status === 403) {
-        const text = await resp.clone().text().catch(() => '');
-        if (/ZeroProxy\s+POLICY_BLOCKED|POLICY_BLOCKED/.test(text)) throw normalizedError('TypeError');
-      }
-      if ((req.mode || 'cors') === 'no-cors' && !sameOriginURL(virtualURL.href, target)) return opaqueResponseFacade(resp);
-      return responseFacade(resp, target);
-    } finally {
-      if (abortListener && req.signal) {
-        try { req.signal.removeEventListener('abort', abortListener); } catch {}
-      }
-    }
   }
   function fireEvent(target, type) {
     let ev;
@@ -1622,9 +1310,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { setVirtualLocation(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { setVirtualLocation(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload(); });
-    define(history, 'pushState', function(state, title, url) { return commitVirtualHistory(state, title, url, false); });
-    define(history, 'replaceState', function(state, title, url) { return commitVirtualHistory(state, title, url, true); });
-    window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: activeProxyPath }).then(reply => { activeEntryId = reply.entryId || activeEntryId; virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
+    installHistoryMethods(define);
+    window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: activeProxyPath }).then(applyResolvedHistoryEntry).catch(()=>{}); }, true);
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: activeEntryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
     function submitForm(form, submitter) { submitFormNavigation(form, submitter).catch(() => { Native.locationAssign && Native.locationAssign(ZP.errorPath('TARGET_CONNECT_FAILED')); }); }
@@ -1697,51 +1384,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       return null;
     }
   }
-  function installNavigatorIdentity(w) {
-    const nav = w.navigator;
-    if (!nav) return;
-    const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
-    defineAccessor(proto, 'userAgent', () => TARGET_USER_AGENT);
-    defineAccessor(nav, 'userAgent', () => TARGET_USER_AGENT);
-    defineAccessor(proto, 'appVersion', () => TARGET_APP_VERSION);
-    defineAccessor(nav, 'appVersion', () => TARGET_APP_VERSION);
-    defineAccessor(proto, 'platform', () => TARGET_PLATFORM);
-    defineAccessor(nav, 'platform', () => TARGET_PLATFORM);
-    const userAgentData = makeUserAgentData();
-    defineAccessor(proto, 'userAgentData', () => userAgentData);
-    defineAccessor(nav, 'userAgentData', () => userAgentData);
-  }
-  function makeUserAgentData() {
-    const data = {
-      brands: TARGET_UA_BRANDS.map(b => Object.freeze({ brand: b.brand, version: b.version })),
-      mobile: false,
-      platform: 'Windows',
-      getHighEntropyValues(hints) {
-        const requested = Array.isArray(hints) ? hints.map(String) : [];
-        const values = {
-          architecture: 'x86',
-          bitness: '64',
-          brands: TARGET_UA_BRANDS.map(b => ({ brand: b.brand, version: b.version })),
-          fullVersionList: TARGET_UA_FULL_VERSION_LIST.map(b => ({ brand: b.brand, version: b.version })),
-          mobile: false,
-          model: '',
-          platform: 'Windows',
-          platformVersion: '10.0.0',
-          uaFullVersion: '134.0.0.0',
-          fullVersion: '134.0.0.0',
-          wow64: false
-        };
-        const out = { brands: values.brands, mobile: false, platform: 'Windows' };
-        for (const hint of requested) if (Object.prototype.hasOwnProperty.call(values, hint)) out[hint] = values[hint];
-        return Promise.resolve(out);
-      },
-      toJSON() { return { brands: this.brands, mobile: false, platform: 'Windows' }; }
-    };
-    maskMethods(data, ['getHighEntropyValues','toJSON']);
-    try { Object.freeze(data.brands); Object.freeze(data); } catch {}
-    return data;
-  }
-
   function installPopupHooks(w) {
     if (!Native.open) return;
     define(w, 'open', function(url = 'about:blank', target = '_blank', features) {
@@ -1785,20 +1427,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     });
   }
 
-  function usesRawURLAttribute(el, key) {
-    const tag = el && el.localName;
-    const localKey = attrLocalName(key);
-    return localKey === 'href' && (tag === 'a' || tag === 'area') || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button');
-  }
-  function isResourceURLAttribute(el, key) {
-    const tag = el && el.localName;
-    const localKey = attrLocalName(key);
-    return localKey === 'src' && (tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input') || localKey === 'poster' && tag === 'video' || localKey === 'href' && el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (tag === 'image' || tag === 'use');
-  }
-  function isSrcsetAttribute(el, key) {
-    const tag = el && el.localName;
-    return attrLocalName(key) === 'srcset' && (tag === 'img' || tag === 'source');
-  }
   function visibleResourceURL(el, attrName) {
     return urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url') || Native.getAttribute.call(el, attrName) || '';
   }
@@ -1854,14 +1482,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const locGet = p => () => new URL(virtualURL.href)[p];
     for (const p of ['href','protocol','host','hostname','port','pathname','search','hash','origin']) defineAccessor(w.Location && w.Location.prototype, p, locGet(p), p === 'href' ? v => { setVirtualLocation(v); } : p === 'hash' ? v => { updateVirtualHash(v); } : undefined);
     define(w.Location && w.Location.prototype, 'toString', function(){ return virtualURL.href; });
-    defineAccessor(w.Document && w.Document.prototype, 'URL', () => virtualURL.href);
-    defineAccessor(w.Document && w.Document.prototype, 'documentURI', () => virtualURL.href);
-    defineAccessor(w.Document && w.Document.prototype, 'baseURI', () => baseURL);
-    defineAccessor(w.Document && w.Document.prototype, 'referrer', () => boot.documentReferrer || '');
-    defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(()=>{}); });
-    defineAccessor(w, 'origin', () => {
-      try { return new URL(w.document.URL).origin; } catch { return virtualURL.origin; }
-    });
+    installDocumentAccessors(w);
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');
@@ -1869,294 +1490,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     installURLProp(w.HTMLButtonElement && w.HTMLButtonElement.prototype, 'formAction');
     function installURLProp(proto, prop) { if (!proto) return; defineAccessor(proto, prop, function(){ return Native.getAttribute.call(this, 'data-zp-target-url') || urlMeta.get(this) || targetURL(this.getAttribute(prop === 'formAction' ? 'formaction' : prop) || virtualURL.href); }, function(v){ const t = targetURL(v); urlMeta.set(this, t); Native.setAttribute.call(this, 'data-zp-target-url', t); this.setAttribute(prop === 'formAction' ? 'formaction' : prop, t); }); }
   }
-  function initDocumentCookieRecords(cookieString) {
-    documentCookieRecords.splice(0, documentCookieRecords.length);
-    for (const part of String(cookieString || '').split(/;\s*/)) {
-      const eq = part.indexOf('=');
-      if (eq > 0) documentCookieRecords.push({ name: part.slice(0, eq), value: part.slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: '/', secure: virtualURL.protocol === 'https:', sameSite: 'Unspecified', expires: Infinity });
-    }
-    documentCookie = documentCookieString();
-  }
-  function pruneCookieRecordsForSource(sourceHost, sourceSecure) {
-    for (let i = documentCookieRecords.length - 1; i >= 0; i--) {
-      const r = documentCookieRecords[i];
-      if ((r.hostOnly ? r.domain === sourceHost : sourceHost === r.domain || sourceHost.endsWith(`.${r.domain}`)) && (!r.secure || sourceSecure)) documentCookieRecords.splice(i, 1);
-    }
-  }
-  function buildSyncedCookieRecord(raw, sourceHost) {
-    const domain = String(raw.domain || sourceHost).replace(/^\./, '').toLowerCase();
-    return {
-      name: raw.name,
-      value: String(raw.value || ''),
-      domain,
-      hostOnly: raw.hostOnly !== false,
-      path: String(raw.path || '/').startsWith('/') ? String(raw.path || '/') : '/',
-      secure: !!raw.secure,
-      sameSite: normalizeSameSite(raw.sameSite),
-      expires: typeof raw.expiresMs === 'number' ? raw.expiresMs : Infinity
-    };
-  }
-  function syncDocumentCookieRecords(records, sourceUrl) {
-    let source;
-    try { source = new URL(sourceUrl || virtualURL.href); } catch { source = virtualURL; }
-    const sourceHost = source.hostname.toLowerCase();
-    const sourceSecure = source.protocol === 'https:';
-    pruneCookieRecordsForSource(sourceHost, sourceSecure);
-    const now = Date.now();
-    for (const raw of Array.isArray(records) ? records : []) {
-      if (!raw || typeof raw.name !== 'string' || raw.name === '') continue;
-      const rec = buildSyncedCookieRecord(raw, sourceHost);
-      if (rec.expires <= now) continue;
-      documentCookieRecords.push(rec);
-    }
-    documentCookie = documentCookieString();
-  }
-  function applyCookieDomain(rec, v) {
-    if (!v) return;
-    const d = v.replace(/^\./, '').toLowerCase();
-    if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith(`.${d}`)) { rec.domain = d; rec.hostOnly = false; }
-  }
-  function applyCookieExpiry(rec, k, v) {
-    if (k === 'max-age') { rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000; return; }
-    const ts = Date.parse(v);
-    if (!Number.isNaN(ts)) rec.expires = ts;
-  }
-  function applyCookieAttribute(rec, k, v) {
-    if (k === 'domain') return applyCookieDomain(rec, v);
-    if (k === 'max-age' || k === 'expires') return applyCookieExpiry(rec, k, v);
-    if (k === 'path' && v && v[0] === '/') rec.path = v;
-    else if (k === 'secure') rec.secure = true;
-    else if (k === 'samesite') rec.sameSite = normalizeSameSite(v);
-  }
-  function parseCookieLine(line) {
-    const parts = String(line).split(';').map(p => p.trim()).filter(Boolean);
-    if (!parts.length) return null;
-    const eq = parts[0].indexOf('=');
-    if (eq <= 0) return null;
-    const rec = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: defaultCookiePath(), secure: false, sameSite: 'Unspecified', expires: Infinity };
-    for (let i = 1; i < parts.length; i++) {
-      const [rawK, ...rest] = parts[i].split('=');
-      applyCookieAttribute(rec, rawK.toLowerCase(), rest.join('='));
-    }
-    if (rec.sameSite === 'None' && !rec.secure) return null;
-    return rec;
-  }
-  function commitCookieRecord(rec) {
-    const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
-    if (rec.expires <= Date.now()) { if (idx >= 0) documentCookieRecords.splice(idx, 1); }
-    else if (idx >= 0) documentCookieRecords[idx] = rec;
-    else documentCookieRecords.push(rec);
-    documentCookie = documentCookieString();
-  }
-  function setDocumentCookie(line) {
-    const rec = parseCookieLine(line);
-    if (rec) commitCookieRecord(rec);
-  }
-  function documentCookieString() {
-    const now = Date.now();
-    const host = virtualURL.hostname.toLowerCase();
-    const path = virtualURL.pathname || '/';
-    return documentCookieRecords.filter(r => r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith(`.${r.domain}`)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')))).sort((a, b) => b.path.length - a.path.length).map(r => `${r.name}=${r.value}`).join('; ');
-  }
-  function normalizeSameSite(value) {
-    const v = String(value || '').toLowerCase();
-    if (v === 'lax') return 'Lax';
-    if (v === 'strict') return 'Strict';
-    if (v === 'none') return 'None';
-    return 'Unspecified';
-  }
-  function defaultCookiePath() { const p = virtualURL.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
-  function installCookieSync() {
-    const sw = navigator.serviceWorker;
-    if (!sw || !sw.addEventListener) return;
-    sw.addEventListener('message', ev => {
-      const msg = ev && ev.data || {};
-      if (msg.type !== 'ZP_COOKIE_SYNC') return;
-      if (msg.tabId && msg.tabId !== boot.tabId) return;
-      if (msg.targetUrl) {
-        try {
-          const u = new URL(msg.targetUrl);
-          if (u.origin !== virtualURL.origin) return;
-        } catch { return; }
-      }
-      if (Array.isArray(msg.cookieRecords)) syncDocumentCookieRecords(msg.cookieRecords, msg.targetUrl);
-      else if (typeof msg.cookieString === 'string') initDocumentCookieRecords(msg.cookieString);
-    });
-  }
 
-  function installStorageFacades(w) {
-    const prefix = storagePrefixForVirtualOrigin();
-    const localKey = `${prefix}local`;
-    const sessionKey = `${prefix}session`;
-    const local = storageObject(localKey, w);
-    const session = storageObject(sessionKey, w);
-    storageWindows.add({ w, localKey, sessionKey });
-    defineAccessor(w, 'localStorage', () => local);
-    defineAccessor(w, 'sessionStorage', () => session);
-    if (w.indexedDB) {
-      const nativeIDB = w.indexedDB;
-      const idbPrefix = `${prefix}idb:`;
-      define(w, 'indexedDB', {
-        open(name, version) { return nativeIDB.open(idbPrefix + String(name), version); },
-        deleteDatabase(name) { return nativeIDB.deleteDatabase(idbPrefix + String(name)); },
-        cmp: nativeIDB.cmp ? nativeIDB.cmp.bind(nativeIDB) : undefined,
-        databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
-      });
-    }
-  if (w.caches) {
-    const nativeCaches = w.caches;
-    const cachePrefix = `${prefix}cache:`;
-    define(w, 'caches', {
-      open(name) { return nativeCaches.open(cachePrefix + String(name)); },
-      delete(name) { return nativeCaches.delete(cachePrefix + String(name)); },
-      has(name) { return nativeCaches.has(cachePrefix + String(name)); },
-      keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix)).map(k => k.slice(cachePrefix.length))); },
-      match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
-    });
-  }
-  }
-  function storagePrefixForVirtualOrigin() { return `zp:${virtualURL.origin}:`; }
-  function storageMap(key) {
-    let map = storageMaps.get(key);
-    if (!map) {
-      map = new Map();
-      storageMaps.set(key, map);
-      loadStorageMirror(key, map);
-      loadPersistentStorage(key, map).then(() => saveStorageMirror(key, map)).catch(()=>{});
-    }
-    return map;
-  }
-  function storageObject(namespaceKey, ownerWindow) {
-    const map = storageMap(namespaceKey);
-    return Object.freeze({
-      get length() { return map.size; },
-      key(i) { return Array.from(map.keys())[Number(i)] || null; },
-      getItem(k) { k = String(k); return map.has(k) ? map.get(k) : null; },
-      setItem(k, v) { k = String(k); v = String(v); const oldValue = map.has(k) ? map.get(k) : null; map.set(k, v); markStorageDirty(namespaceKey, k); saveStorageMirror(namespaceKey, map); persistStorageValue(namespaceKey, k, v).catch(()=>{}); dispatchStorageEvents(namespaceKey, ownerWindow, k, oldValue, v); },
-      removeItem(k) { k = String(k); const oldValue = map.has(k) ? map.get(k) : null; map.delete(k); markStorageDirty(namespaceKey, k); saveStorageMirror(namespaceKey, map); deletePersistentStorageValue(namespaceKey, k).catch(()=>{}); dispatchStorageEvents(namespaceKey, ownerWindow, k, oldValue, null); },
-      clear() { if (!map.size) return; map.clear(); markStorageDirty(namespaceKey, '*'); saveStorageMirror(namespaceKey, map); clearPersistentStorage(namespaceKey).catch(()=>{}); dispatchStorageEvents(namespaceKey, ownerWindow, null, null, null); }
-    });
-  }
-  function storageMirrorKey(namespace) { return `zp:idb-mirror:${namespace}`; }
-  function loadStorageMirror(namespace, map) {
-    const store = Native.localStorage;
-    if (!store) return;
-    try {
-      const raw = store.getItem(storageMirrorKey(namespace));
-      const items = raw && JSON.parse(raw);
-      if (!Array.isArray(items)) return;
-      for (const pair of items) {
-        if (Array.isArray(pair) && typeof pair[0] === 'string') map.set(pair[0], String(pair[1]));
-      }
-    } catch {}
-  }
-  function saveStorageMirror(namespace, map) {
-    const store = Native.localStorage;
-    if (!store) return;
-    try {
-      store.setItem(storageMirrorKey(namespace), JSON.stringify(Array.from(map.entries())));
-    } catch {}
-  }
-  function markStorageDirty(namespace, key) {
-    let keys = storageDirtyKeys.get(namespace);
-    if (!keys) {
-      keys = new Set();
-      storageDirtyKeys.set(namespace, keys);
-    }
-    keys.add(String(key));
-  }
-  function isStorageDirty(namespace, key) {
-    const keys = storageDirtyKeys.get(namespace);
-    return !!keys && (keys.has('*') || keys.has(String(key)));
-  }
-  function storageDB() {
-    if (!Native.indexedDB) return Promise.reject(normalizedError('NotSupportedError'));
-    if (storageDBPromise) return storageDBPromise;
-    storageDBPromise = new Promise((resolve, reject) => {
-      const req = Native.indexedDB.open('zeroproxy-storage-v1', 1);
-      req.onupgradeneeded = () => { try { req.result.createObjectStore('kv', { keyPath: ['namespace', 'key'] }); } catch {} };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error || normalizedError('UnknownError'));
-    });
-    return storageDBPromise;
-  }
-  async function loadPersistentStorage(namespace, map) {
-    const db = await storageDB();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction('kv', 'readonly');
-      const store = tx.objectStore('kv');
-      const req = store.openCursor();
-      req.onsuccess = () => {
-        const cursor = req.result;
-        if (!cursor) return;
-        const rec = cursor.value;
-        if (rec && rec.namespace === namespace && typeof rec.key === 'string' && !isStorageDirty(namespace, rec.key)) map.set(rec.key, String(rec.value));
-        cursor.continue();
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || normalizedError('UnknownError'));
-    });
-  }
-  async function persistStorageValue(namespace, key, value) {
-    const db = await storageDB();
-    const tx = db.transaction('kv', 'readwrite');
-    tx.objectStore('kv').put({ namespace, key, value });
-  }
-  async function deletePersistentStorageValue(namespace, key) {
-    const db = await storageDB();
-    const tx = db.transaction('kv', 'readwrite');
-    tx.objectStore('kv').delete([namespace, key]);
-  }
-  async function clearPersistentStorage(namespace) {
-    const db = await storageDB();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction('kv', 'readwrite');
-      const store = tx.objectStore('kv');
-      const req = store.openCursor();
-      req.onsuccess = () => {
-        const cursor = req.result;
-        if (!cursor) return;
-        if (cursor.value && cursor.value.namespace === namespace) cursor.delete();
-        cursor.continue();
-      };
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || normalizedError('UnknownError'));
-    });
-  }
-  function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
-    for (const rec of Array.from(storageWindows)) {
-      const w = rec.w;
-      if (!w || w === sourceWindow || (rec.localKey !== namespaceKey && rec.sessionKey !== namespaceKey)) continue;
-      try {
-        const ev = new w.StorageEvent('storage', { key, oldValue, newValue, url: virtualURL.href });
-        w.dispatchEvent(ev);
-      } catch { try { w.dispatchEvent(new Event('storage')); } catch {} }
-    }
-  }
-  function attrLocalName(key) {
-    const s = String(key || '').toLowerCase();
-    const i = s.indexOf(':');
-    return i >= 0 ? s.slice(i + 1) : s;
-  }
-  function tokenListContains(list, token) {
-    return String(list || '').toLowerCase().split(/[\s,]+/).includes(token);
-  }
-  function isBlockedLinkRelValue(rel) {
-    for (const token of ['modulepreload','preload','prefetch','preconnect','dns-prefetch','prerender','manifest']) {
-      if (tokenListContains(rel, token)) return true;
-    }
-    return false;
-  }
-	  function isIconLinkRelValue(rel) {
-	    for (const token of String(rel || '').toLowerCase().split(/[\s,]+/)) {
-	      if (token === 'icon' || token === 'mask-icon' || token === 'apple-touch-icon' || token === 'apple-touch-icon-precomposed' || token === 'apple-touch-startup-image' || token === 'fluid-icon') return true;
-	    }
-	    return false;
-	  }
-	  function isStylesheetLinkRelValue(rel) {
-	    for (const token of String(rel || '').toLowerCase().split(/[\s,]+/)) if (token === 'stylesheet') return true;
-	    return false;
-	  }
 	  function isBlockedLink(el) { return el && el.localName === 'link' && isBlockedLinkRelValue(Native.getAttribute.call(el, 'rel') || ''); }
 	  function isIconLink(el) { return el && el.localName === 'link' && isIconLinkRelValue(Native.getAttribute.call(el, 'rel') || ''); }
 	  function isStylesheetLink(el) { return el && el.localName === 'link' && isStylesheetLinkRelValue(Native.getAttribute.call(el, 'rel') || ''); }
@@ -2322,32 +1656,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const tag = el && el.localName;
     return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
   }
-  function isFrameElement(el) {
-    const tag = el && el.localName;
-    return tag === 'iframe' || tag === 'frame';
-  }
-  function frameSandboxAllowsEscape(raw) {
-    const tokens = new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean));
-    return tokens.has('allow-scripts') && tokens.has('allow-same-origin');
-  }
-  function setFrameSandboxAttribute(el, raw) {
-    const value = String(raw == null ? '' : raw);
-    if (frameSandboxAllowsEscape(value) && !isDirectExternalFrameElement(el)) {
-      frameSandboxMeta.set(el, value);
-      if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
-      return;
-    }
-    frameSandboxMeta.delete(el);
-    Native.setAttribute.call(el, 'sandbox', value);
-  }
-  function sanitizeFrameSandbox(el) {
-    if (!isFrameElement(el)) return;
-    const raw = Native.getAttribute.call(el, 'sandbox');
-    if (raw !== null && frameSandboxAllowsEscape(raw) && !isDirectExternalFrameElement(el)) {
-      frameSandboxMeta.set(el, raw);
-      if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
-    }
-  }
   function isMetaPolicyElement(el) {
     if (!el || el.localName !== 'meta') return false;
     const equiv = String(Native.getAttribute.call(el, 'http-equiv') || '').trim().toLowerCase();
@@ -2399,7 +1707,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   function cleanupRemovedAttribute(owner, key) {
     const local = attrLocalName(key);
     if (!owner || !local) return;
-    if (isFrameElement(owner) && local === 'sandbox') frameSandboxMeta.delete(owner);
+    if (local === 'sandbox') forgetFrameSandbox(owner);
     if (isResourceURLAttribute(owner, local) || isURLBearing(owner, local)) {
       urlMeta.delete(owner);
       try { Native.removeAttribute.call(owner, 'data-zp-target-url'); } catch {}
@@ -2419,6 +1727,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     if (!raw) return false;
     try {
       const u = new URL(String(raw), proxyOrigin);
+      if (u.pathname === ZP.assetPath('rust-rewriter.wasm')) return true;
       return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js') || u.pathname === ZP.assetPath('http-rewriter.js') || u.pathname === ZP.assetPath('wasm_exec.js') || u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script'));
     } catch { return false; }
   }
@@ -2645,179 +1954,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     });
   }
 
-  function visibleResourceEntryName(raw) {
-    try {
-      const u = new URL(String(raw || ''), proxyOrigin);
-      if (u.origin !== proxyOrigin) return String(raw || '');
-      if (u.pathname === ZP.apiPath('fetch')) return u.searchParams.get('url') || String(raw || '');
-      if (u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script')) return u.searchParams.get('u') || String(raw || '');
-      if (u.pathname === '/favicon.ico') return new URL('/favicon.ico', virtualURL.href).href;
-      if (isZeroProxyAssetURL(u.href)) return '';
-    } catch {}
-    return String(raw || '');
-  }
-  function visibleDocumentURLFor(w) {
-    try { return w && w.document && w.document.URL || virtualURL.href; } catch { return virtualURL.href; }
-  }
-  function wrapPerformanceEntry(entry, documentURL) {
-    const visible = entry && entry.entryType === 'navigation' ? documentURL || virtualURL.href : visibleResourceEntryName(entry && entry.name);
-    if (!visible) return null;
-    if (!entry || visible === entry.name) return entry;
-    return new Proxy(entry, {
-      get(target, prop) {
-        if (prop === 'name') return visible;
-        if (prop === 'transferSize') {
-          const transfer = Number(target.transferSize || 0);
-          if (transfer > 0) return transfer;
-          const encoded = Number(target.encodedBodySize || 0);
-          const decoded = Number(target.decodedBodySize || 0);
-          const size = Math.max(encoded, decoded);
-          return size > 0 ? size + 300 : 0;
-        }
-        if (prop === 'toJSON') return () => {
-          const out = Object.assign({}, target.toJSON ? target.toJSON() : target, { name: visible });
-          const transfer = Number(out.transferSize || 0);
-          if (transfer <= 0) {
-            const size = Math.max(Number(out.encodedBodySize || 0), Number(out.decodedBodySize || 0));
-            if (size > 0) out.transferSize = size + 300;
-          }
-          return out;
-        };
-        const value = target[prop];
-        return typeof value === 'function' ? value.bind(target) : value;
-      }
-    });
-  }
-  function maskPerformanceList(list, documentURL) {
-    return Array.from(list || []).map(entry => wrapPerformanceEntry(entry, documentURL)).filter(Boolean);
-  }
-  function performanceObserverListFacade(list, documentURL) {
-    return new Proxy(list, {
-      get(target, prop, receiver) {
-        if (prop === 'getEntries') return () => maskPerformanceList(target.getEntries(), documentURL);
-        if (prop === 'getEntriesByType') return type => maskPerformanceList(target.getEntriesByType(type), documentURL);
-        if (prop === 'getEntriesByName') return (name, type) => {
-          const text = String(name);
-          return maskPerformanceList(target.getEntries(), documentURL).filter(entry => {
-            if (!entry || entry.name !== text) return false;
-            return type == null || String(type) === String(entry.entryType);
-          });
-        };
-        const value = Reflect.get(target, prop, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      }
-    });
-  }
-  function syntheticResourceTiming(name, initiatorType = 'script') {
-    const now = (() => { try { return Math.max(0, performance.now()); } catch { return 0; } })();
-    const entry = {
-      name, entryType: 'resource', startTime: 0, duration: now, initiatorType,
-      deliveryType: '', nextHopProtocol: '', renderBlockingStatus: 'non-blocking',
-      contentType: '', contentEncoding: '', workerStart: 0,
-      workerRouterEvaluationStart: 0, workerCacheLookupStart: 0,
-      workerMatchedSourceType: '', workerFinalSourceType: '',
-      redirectStart: 0, redirectEnd: 0, fetchStart: 0, domainLookupStart: 0,
-      domainLookupEnd: 0, connectStart: 0, secureConnectionStart: 0,
-      connectEnd: 0, requestStart: 0, responseStart: 0,
-      firstInterimResponseStart: 0, finalResponseHeadersStart: 0,
-      responseEnd: now, transferSize: 0, encodedBodySize: 0,
-      decodedBodySize: 0, responseStatus: 0, serverTiming: []
-    };
-    entry.toJSON = function() {
-      const out = {};
-      for (const key of Object.keys(entry)) if (key !== 'toJSON') out[key] = entry[key];
-      return out;
-    };
-    return entry;
-  }
-  function syntheticScriptTimingFor(name, doc) {
-    try {
-      doc = doc || document;
-      let scripts = [];
-      if (Native.querySelectorAll) scripts = Native.querySelectorAll.call(doc, 'script[data-zp-target-url]');
-      else if (Native.documentScripts && Native.documentScripts.get) scripts = Native.documentScripts.get.call(doc);
-      for (const script of scripts) {
-        if ((Native.getAttribute.call(script, 'data-zp-target-url') || '') === name) return [syntheticResourceTiming(name, 'script')];
-      }
-    } catch {}
-    return [];
-  }
-  function syntheticScriptTimings(doc, existing) {
-    const seen = new Set(Array.from(existing || []).map(entry => visibleResourceEntryName(entry && entry.name)));
-    const out = [];
-    try {
-      doc = doc || document;
-      let scripts = [];
-      if (Native.querySelectorAll) scripts = Native.querySelectorAll.call(doc, 'script[data-zp-target-url]');
-      else if (Native.documentScripts && Native.documentScripts.get) scripts = Native.documentScripts.get.call(doc);
-      for (const script of scripts) {
-        const target = Native.getAttribute.call(script, 'data-zp-target-url') || '';
-        if (!target || seen.has(target)) continue;
-        seen.add(target);
-        out.push(syntheticResourceTiming(target, 'script'));
-      }
-    } catch {}
-    return out;
-  }
-  function installPerformanceMasking(w) {
-    const perf = w && w.performance;
-    if (!perf) return;
-    const visibleDocumentURL = () => visibleDocumentURLFor(w);
-    if (typeof w.PerformanceObserver === 'function') {
-      const NativePerformanceObserver = w.PerformanceObserver;
-      const ZPPerformanceObserver = function PerformanceObserver(callback) {
-        if (typeof callback !== 'function') throw normalizedError('TypeError');
-        let observer;
-        let facade;
-        observer = new NativePerformanceObserver(list => callback.call(facade, performanceObserverListFacade(list, visibleDocumentURL()), facade));
-        facade = new Proxy(observer, {
-          get(target, prop, receiver) {
-            if (prop === 'takeRecords') return () => maskPerformanceList(target.takeRecords(), visibleDocumentURL());
-            const value = Reflect.get(target, prop, target);
-            return typeof value === 'function' ? value.bind(target) : value;
-          }
-        });
-        return facade;
-      };
-      try { Object.setPrototypeOf(ZPPerformanceObserver, NativePerformanceObserver); } catch {}
-      try { ZPPerformanceObserver.prototype = NativePerformanceObserver.prototype; } catch {}
-      try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get() { return NativePerformanceObserver.supportedEntryTypes; }, enumerable: true, configurable: true }); } catch {}
-      define(w, 'PerformanceObserver', ZPPerformanceObserver);
-    }
-    if (typeof perf.getEntries === 'function') {
-      const native = perf.getEntries.bind(perf);
-      define(perf, 'getEntries', function() {
-        const entries = Array.from(native() || []);
-        return maskPerformanceList(entries, visibleDocumentURL()).concat(syntheticScriptTimings(w.document, entries));
-      });
-    }
-    if (typeof perf.getEntriesByType === 'function') {
-      const native = perf.getEntriesByType.bind(perf);
-      define(perf, 'getEntriesByType', function(type) {
-        if (String(type) === 'navigation') return maskPerformanceList(native(type), visibleDocumentURL());
-        if (String(type) !== 'resource') return native(type);
-        const entries = Array.from(native(type) || []);
-        return maskPerformanceList(entries, visibleDocumentURL()).concat(syntheticScriptTimings(w.document, entries));
-      });
-    }
-    if (typeof perf.getEntriesByName === 'function') {
-      const native = perf.getEntriesByName.bind(perf);
-      define(perf, 'getEntriesByName', function(name, type) {
-        const direct = native(name, type);
-        if (direct && direct.length) return maskPerformanceList(direct);
-        const text = String(name);
-        const candidates = [scriptProxyPath(text, 'classic'), scriptProxyPath(text, 'module'), resourceProxyPath(text)];
-        for (const candidate of candidates.concat(candidates.map(candidate => proxyOrigin + candidate))) {
-          const entries = native(candidate, type);
-          if (entries && entries.length) return maskPerformanceList(entries, visibleDocumentURL());
-        }
-        if (!type || String(type) === 'resource') return syntheticScriptTimingFor(text, w.document);
-        return [];
-      });
-    }
-  }
-
-
   function setAttributeHook(k, v) {
     const key = String(k).toLowerCase();
     const localKey = attrLocalName(key);
@@ -2965,7 +2101,10 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       const backed = backedScriptNonce(this);
       if (backed !== null) return backed;
     }
-    if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return frameSandboxMeta.get(this);
+    if (key === 'sandbox') {
+      const sandbox = frameSandboxValue(this);
+      if (sandbox !== undefined) return sandbox;
+    }
     if (key === 'srcset' || isSrcsetAttribute(this, key)) return visibleSrcset(this);
     if (isURLBearing(this, key)) return usesRawURLAttribute(this, key) ? visibleNavigationURL(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
     return Native.getAttribute.call(this, k);
@@ -2978,7 +2117,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       return Native.removeAttribute.call(this, k);
     }
     if (key === 'nonce' && this.localName === 'script') Native.removeAttribute.call(this, nonceBackupAttr);
-    if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
+    if (localKey === 'sandbox') forgetFrameSandbox(this);
     if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) {
       urlMeta.delete(this);
       if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-target-url');
@@ -3001,13 +2140,13 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     if (isZPAttrName(key)) return false;
     if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
     if (key === 'nonce' && this.localName === 'script') return backedScriptNonce(this) !== null || Native.hasAttribute.call(this, k);
-    if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return true;
+    if (key === 'sandbox' && hasFrameSandboxValue(this)) return true;
     return Native.hasAttribute.call(this, k);
   }
   function getAttributeNamesHook() {
     const names = Native.getAttributeNames.call(this).filter(name => !isZPAttrName(name));
     if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
-    if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
+    if (hasFrameSandboxValue(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
     return names;
   }
   function installAttributeNodeHooks(w) {
@@ -3410,14 +2549,19 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const dtype = executableScriptDataType(node);
     if (dtype === 'importmap') setScriptText(node, rewriteImportMapText(getScriptText(node)));
     else if (dtype && (Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'))) {
-      setScriptSource(node, Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href'));
-      Native.setAttribute.call(node, 'data-zp-docwrite-src', Native.getAttribute.call(node, 'src') || '');
+      const raw = Native.getAttribute.call(node, 'src') || Native.getAttribute.call(node, 'href');
+      setScriptSource(node, raw);
+      const rewrittenSrc = Native.getAttribute.call(node, 'src') || '';
+      Native.setAttribute.call(node, 'data-zp-docwrite-src', rewrittenSrc);
       Native.setAttribute.call(node, 'data-zp-docwrite-type', dtype);
       Native.setAttribute.call(node, 'data-zp-docwrite-pending', '1');
       if (Native.removeAttribute) Native.removeAttribute.call(node, 'src');
+      if (Native.removeAttribute) Native.removeAttribute.call(node, 'href');
+      if (Native.removeAttribute) Native.removeAttribute.call(node, 'data-zp-target-url');
+      urlMeta.delete(node);
       Native.setAttribute.call(node, 'type', 'application/x-zeroproxy-docwrite-external');
     }
-    else if (dtype) blockInlineScriptElement(node);
+    else if (dtype) rewriteInlineScriptElement(node, dtype);
   }
   function rewriteSerializedNodeAttributes(node) {
     for (const attrName of Native.getAttributeNames.call(node)) rewriteSerializedAttribute(node, attrName);
@@ -3566,149 +2710,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     }
   }
 
-  function workerBootstrapBlobURL(sourceURL) {
-    const params = new URLSearchParams();
-    for (const server of activeServers) params.append('server', server);
-    const workerLocation = virtualBlobWorkerLocation(sourceURL);
-    const body = [
-      "const __zp_native_importScripts=importScripts.bind(self);\n",
-      "self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\n",
-      "self.__ZP_WORKER_LOCATION=", JSON.stringify(workerLocation), ";\n",
-      "self.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\n",
-      "self.__ZP_WORKER_RUNTIME_TOKEN=", JSON.stringify(runtimeToken), ";\n",
-      "self.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\n",
-      "self.__ZP_WORKER_SERVERS=new URLSearchParams(", JSON.stringify(params.toString()), ").getAll('server');\n",
-      "importScripts(", JSON.stringify(`${proxyOrigin}/zp/assets/worker-prelude.js`), ");\n",
-      "__zp_native_importScripts(", JSON.stringify(sourceURL), ");\n"
-    ];
-    const wrapper = new Blob(body, { type: 'text/javascript' });
-    const wrapperURL = Native.createObjectURL(wrapper);
-    workerBlobURLs.add(wrapperURL);
-    return wrapperURL;
-  }
-  function virtualBlobWorkerLocation(sourceURL) {
-    try {
-      const parsed = new URL(String(sourceURL));
-      if (parsed.protocol === 'blob:') {
-        const pathname = parsed.pathname || '';
-        const id = pathname.slice(pathname.lastIndexOf('/') + 1);
-        if (id) return `blob:${virtualURL.origin}/${id}`;
-      }
-    } catch {}
-    return virtualURL.href;
-  }
-  function scriptBlobURLForPage(sourceURL, blob) {
-    const type = String(blob && blob.type || '').toLowerCase();
-    if (!type || (!/(?:^|[+/.-])(?:javascript|ecmascript)(?:$|[;])/i.test(type) && type !== 'text/javascript' && type !== 'application/javascript')) return String(sourceURL);
-    return virtualBlobWorkerLocation(sourceURL);
-  }
-  function installWorkerTerminateHook() {
-    if (workerTerminateHooked || !Native.Worker || !Native.Worker.prototype) return;
-    const nativeTerminate = Native.Worker.prototype.terminate;
-    if (typeof nativeTerminate !== 'function') return;
-    const terminate = function terminate() {
-      if (deferredTerminateWorkers.has(this)) {
-        const worker = this;
-        const callTerminate = () => Native.reflectApply ? Native.reflectApply(nativeTerminate, worker, []) : nativeTerminate.call(worker);
-        try { (Native.setTimeout || setTimeout)(callTerminate, 250); }
-        catch { callTerminate(); }
-        return undefined;
-      }
-      return Native.reflectApply ? Native.reflectApply(nativeTerminate, this, []) : nativeTerminate.call(this);
-    };
-    try { Object.defineProperty(terminate, 'name', { value: 'terminate', configurable: true }); } catch {}
-    maskNativeFunction(terminate, 'terminate');
-    try {
-      Object.defineProperty(Native.Worker.prototype, 'terminate', { value: terminate, enumerable: true, configurable: true, writable: true });
-      workerTerminateHooked = true;
-    } catch {}
-  }
-  function installWorkerHooks() {
-    if (Native.Worker) installWorkerConstructor();
-    if (Native.SharedWorker) installSharedWorkerConstructor();
-    if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.resolve(undefined); });
-    if (Native.createObjectURL) installCreateObjectURLHook();
-    if (Native.revokeObjectURL) installRevokeObjectURLHook();
-    installWorkletModuleHooks();
-  }
-  function installWorkerConstructor() {
-    installWorkerTerminateHook();
-    const ZPWorker = function Worker(url) {
-      const blobWorker = isBlobWorkerURL(url);
-      const opts = arguments[1];
-      const worker = new Native.Worker(workerBootstrapURL(url, workerKindForOptions(opts)), bootstrapWorkerOptions(opts));
-      if (blobWorker) {
-        try { deferredTerminateWorkers.add(worker); } catch {}
-      }
-      return worker;
-    };
-    try { Object.setPrototypeOf(ZPWorker, Native.Worker); } catch {}
-    try { Object.defineProperty(ZPWorker, 'prototype', { value: Native.Worker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
-    try { Object.defineProperty(Native.Worker.prototype, 'constructor', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-    maskNativeFunction(ZPWorker, 'Worker');
-    try { Object.defineProperty(root, 'Worker', { value: ZPWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-  }
-  function installSharedWorkerConstructor() {
-    const ZPSharedWorker = function SharedWorker(url) {
-      const opts = arguments[1];
-      return new Native.SharedWorker(workerBootstrapURL(url, workerKindForOptions(opts)), bootstrapWorkerOptions(opts));
-    };
-    try { Object.setPrototypeOf(ZPSharedWorker, Native.SharedWorker); } catch {}
-    try { Object.defineProperty(ZPSharedWorker, 'prototype', { value: Native.SharedWorker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
-    try { Object.defineProperty(Native.SharedWorker.prototype, 'constructor', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-    maskNativeFunction(ZPSharedWorker, 'SharedWorker');
-    try { Object.defineProperty(root, 'SharedWorker', { value: ZPSharedWorker, enumerable: false, configurable: true, writable: true }); } catch {}
-  }
-  function installCreateObjectURLHook() {
-    const createObjectURL = function createObjectURL(blob) {
-    const url = Native.createObjectURL(blob);
-    try {
-      if (typeof Blob !== 'undefined' && blob instanceof Blob) {
-        const virtual = scriptBlobURLForPage(url, blob);
-        const wrapper = workerBootstrapBlobURL(url);
-        workerBlobURLMap.set(url, wrapper);
-        if (virtual !== url) {
-          blobURLRawMap.set(virtual, url);
-          workerBlobURLMap.set(virtual, wrapper);
-          return virtual;
-        }
-      }
-    } catch {}
-    return url;
-    };
-    try { Object.defineProperty(createObjectURL, 'name', { value: 'createObjectURL', configurable: true }); } catch {}
-    maskNativeFunction(createObjectURL, 'createObjectURL');
-    try { Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
-  }
-  function installRevokeObjectURLHook() {
-    const revokeObjectURL = function revokeObjectURL(url) {
-    const visible = String(url);
-    const raw = blobURLRawMap.get(visible) || visible;
-    const workerURL = workerBlobURLMap.get(visible) || workerBlobURLMap.get(raw);
-    blobURLRawMap.delete(visible);
-    workerBlobURLMap.delete(visible);
-    workerBlobURLMap.delete(raw);
-    if (workerURL) {
-      const revokeWorkerURL = () => {
-        workerBlobURLs.delete(workerURL);
-        try { Native.revokeObjectURL(workerURL); } catch {}
-        try { Native.revokeObjectURL(raw); } catch {}
-      };
-      try { (Native.setTimeout || setTimeout)(revokeWorkerURL, 30000); } catch { revokeWorkerURL(); }
-      return undefined;
-    }
-    return Native.revokeObjectURL(raw);
-    };
-    try { Object.defineProperty(revokeObjectURL, 'name', { value: 'revokeObjectURL', configurable: true }); } catch {}
-    maskNativeFunction(revokeObjectURL, 'revokeObjectURL');
-    try { Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, enumerable: true, configurable: true, writable: true }); } catch {}
-  }
-  function installWorkletModuleHooks() {
-    for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
-  }
-  function isBlobWorkerURL(url) {
-    try { return new URL(String(url), virtualURL.href).protocol === 'blob:'; } catch { return false; }
-  }
   function installTargetServiceWorkerBlocker(w) {
     const nav = w && w.navigator;
     if (!nav) return;
@@ -3741,50 +2742,17 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     defineAccessor(proto, 'serviceWorker', () => facade);
     defineAccessor(nav, 'serviceWorker', () => facade);
   }
-  function workerKindForOptions(opts) {
-    return opts && typeof opts === 'object' && String(opts.type || '').toLowerCase() === 'module' ? 'module' : 'worker';
-  }
-  function workerBootstrapURL(url, kind) {
-    const raw = String(url);
-    const parsed = new URL(raw, virtualURL.href);
-    if (parsed.protocol === 'blob:') {
-      const wrapped = workerBlobURLMap.get(parsed.href) || parsed.href;
-      if (!workerBlobURLs.has(wrapped)) throw normalizedError('NotSupportedError');
-      return wrapped;
-    }
-    if (parsed.protocol === 'data:') return dataWorkerURL(parsed.href);
-    const params = new URLSearchParams();
-    params.set('u', requestTargetURL(raw));
-    params.set('loc', requestTargetURL(raw));
-    params.set('tab', boot.tabId);
-    params.set('rt', runtimeToken);
-    for (const server of activeServers) params.append('server', server);
-    const bootstrapKind = kind === 'module' ? '?kind=module' : '';
-    return `${ZP.controlPath('worker-bootstrap.js')}${bootstrapKind}#${params.toString()}`;
-  }
-  function bootstrapWorkerOptions(opts) {
-    if (!opts || typeof opts !== 'object') return opts;
-    const out = Object.assign({}, opts);
-    if (String(out.type || '').toLowerCase() === 'module') out.type = 'module';
-    else delete out.type;
-    return out;
-  }
-  function dataWorkerURL(raw) {
-    const comma = raw.indexOf(',');
-    if (comma < 0) throw normalizedError('NotSupportedError');
-    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_LOCATION=", JSON.stringify(raw), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nself.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\nimportScripts(", JSON.stringify(`${proxyOrigin}/zp/assets/worker-prelude.js`), ");\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
-    const safe = Native.createObjectURL(blocked);
-    workerBlobURLs.add(safe);
-    return safe;
-  }
-
   function installIframeHooks(w) {
     if (!w || !w.document || !w.Node || !w.Element) return;
     try {
       if (w[iframeHooksMarker]) return;
       Object.defineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
     } catch {}
-    const instrumentedWindows = new WeakSet();
+    const { installFrameAccessors } = createFrameAccessors({
+      networkContainmentMarker,
+      isDirectExternalFrameElement,
+      installNetworkContainment,
+    });
     const nativeCreateElement = w === root ? Native.createElement : w.document.createElement.bind(w.document);
     const nativeCreateElementNS = w === root ? Native.createElementNS : w.document.createElementNS && w.document.createElementNS.bind(w.document);
 
@@ -3823,42 +2791,14 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
         return ret;
       });
     }
-    function installFrameAccessors(proto) {
-      if (!proto) return;
-      const win = frameDescriptor(proto, 'contentWindow');
-      if (win && win.get) {
-        try { Object.defineProperty(proto, 'contentWindow', { get() { const childWin = win.get.call(this); return isDirectExternalFrameElement(this) ? childWin : containFrameWindow(childWin, this); }, configurable: false, enumerable: true }); } catch {}
-      }
-      const doc = frameDescriptor(proto, 'contentDocument');
-      if (doc && doc.get) {
-        try { Object.defineProperty(proto, 'contentDocument', { get() { const childDoc = doc.get.call(this); if (childDoc && childDoc.defaultView && !isDirectExternalFrameElement(this)) containFrameWindow(childDoc.defaultView, this); return childDoc; }, configurable: false, enumerable: true }); } catch {}
-      }
-    }
-    function frameDescriptor(proto, prop) {
-      for (let p = proto; p; p = Object.getPrototypeOf(p)) {
-        const d = Object.getOwnPropertyDescriptor(p, prop);
-        if (d) return d;
-      }
-      return null;
-    }
-    function containFrameWindow(childWin, frame) {
-      if (!childWin) return childWin;
-      try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
-      instrumentedWindows.add(childWin);
-      try { installNetworkContainment(childWin); }
-      catch (e) {
-        instrumentedWindows.delete(childWin);
-        try { frame && frame.remove && frame.remove(); } catch {}
-        throw e;
-      }
-      return childWin;
-    }
     function installFrameProp(proto, prop) {
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
       try {
         Object.defineProperty(proto, prop, {
-          get: d.get,
+          get() {
+            return prop === 'src' ? visibleNavigationURL(this, 'src') || d.get.call(this) : d.get.call(this);
+          },
           set(v) {
             if (prop === 'srcdoc') d.set.call(this, injectSrcdoc(String(v)));
             else if (isHTTPURL(v) && !String(v).startsWith(proxyOrigin)) {
@@ -3929,76 +2869,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       if (isDirectExternalFrameElement(frame)) return;
       if ((!src || /^about:blank$/i.test(src)) && !Native.getAttribute.call(frame, 'data-zp-target-url') && frame.contentWindow) installNetworkContainment(frame.contentWindow);
     } catch { try { frame.remove(); } catch {} }
-  }
-  function installChildRewriteHelpers(w) {
-    if (!w) return;
-    const defineChild = (key, value) => {
-      try {
-        Object.defineProperty(w, key, { value, enumerable: false, configurable: true, writable: true });
-        maskNativeFunction(value, key);
-        return true;
-      } catch { return false; }
-    };
-    const wrapDynamicConstructor = ctor => {
-      try { return root.__zp_get ? root.__zp_get({ constructor: ctor }, 'constructor') : ctor; } catch { return ctor; }
-    };
-    const scope = new Proxy(w, {
-      has(_target, prop) { return prop !== Symbol.unscopables; },
-      get(target, prop) {
-        if (prop === Symbol.unscopables) return undefined;
-        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
-        if (prop === 'top' || prop === 'parent' || prop === 'opener') return target[prop] === target ? scope : target[prop];
-        const value = target[prop];
-        return typeof value === 'function' && WINDOW_BOUND_METHODS.has(prop) ? value.bind(target) : value;
-      },
-      set(target, prop, value) { target[prop] = value; return true; }
-    });
-    const isWindowLike = value => {
-      try { return value === w || value === scope || value && value.window === value; } catch { return false; }
-    };
-    const get = (base, prop) => {
-      if (typeof prop !== 'symbol') prop = String(prop);
-      if (isWindowLike(base) && (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames')) return base === scope || base === w ? scope : base;
-      if (isWindowLike(base) && prop === 'postMessage') return postMessageWrapperFor(base === scope ? w : base);
-      if (prop === 'constructor') return wrapDynamicConstructor(Reflect.get(Object(base), prop));
-      const value = Reflect.get(Object(base), prop);
-      return typeof value === 'function' && prop === 'postMessage' ? value.bind(base) : value;
-    };
-    const set = (base, prop, value) => { if (typeof prop !== 'symbol') prop = String(prop); Reflect.set(Object(base), prop, value); return value; };
-    const assign = (base, prop, op, value) => {
-      const current = get(base, prop);
-      const next = op === '+=' ? current + value : op === '-=' ? current - value : op === '*=' ? current * value : op === '/=' ? current / value : op === '%=' ? current % value : value;
-      set(base, prop, next);
-      return next;
-    };
-    const update = (base, prop, op, prefix) => {
-      const current = get(base, prop);
-      const next = op === '++' ? current + 1 : current - 1;
-      set(base, prop, next);
-      return prefix ? next : current;
-    };
-    defineChild('__zp_get', get);
-    defineChild('__zp_set', set);
-    defineChild('__zp_assign', assign);
-    defineChild('__zp_call', (base, prop, args) => {
-      const fn = get(base, prop);
-      if (typeof fn !== 'function') return undefined;
-      return Reflect.apply(fn, base === scope ? w : base, Array.isArray(args) ? args : []);
-    });
-    defineChild('__zp_update', update);
-    defineChild('__zp_construct', (ctor, args) => Reflect.construct(wrapDynamicConstructor(ctor), Array.isArray(args) ? args : []));
-    defineChild('__zp_has', (base, prop) => {
-      if (typeof prop !== 'symbol') prop = String(prop);
-      const raw = base === scope ? w : base;
-      return Reflect.has(Object(raw), prop);
-    });
-    defineChild('__zp_getOwnPropertyDescriptor', (base, prop) => Reflect.getOwnPropertyDescriptor(Object(base), prop));
-    defineChild('__zp_ownKeys', base => Reflect.ownKeys(Object(base)));
-    if (root.__zp_module_url) defineChild('__zp_module_url', root.__zp_module_url);
-    defineChild('__zp_nav_assign', v => setVirtualLocation(v));
-    defineChild('__zp_nav_replace', v => setVirtualLocation(v, true));
-    defineChild('__zp_runClassic', fn => fn.call(w, scope));
-    defineChild('__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
   }
   function installNetworkContainment(w) {
     if (!w) return;

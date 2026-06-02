@@ -3,8 +3,24 @@ importScripts('/zp/assets/zp-core.js');
 importScripts('/zp/assets/rust-rewriter.js');
 importScripts('/zp/assets/http-rewriter.js');
 importScripts('/zp/assets/wasm_exec.js');
+importScripts('/zp/assets/sw-kernel.js');
+importScripts('/zp/assets/sw-routes.js');
+importScripts('/zp/assets/sw-transport.js');
 importScripts('/zp/assets/sw-responses.js');
 
+const {
+  createKernelController,
+} = self.ZPSWKernel;
+const {
+  createTransportHelpers,
+} = self.ZPSWTransport;
+const {
+  internalPath,
+  isInternalAssetPath,
+  isRuntimeAPIPath,
+  parseSharePath,
+  sameOriginTargetURL,
+} = self.ZPSWRoutes;
 const {
   addCSP,
   applyCORS,
@@ -23,64 +39,18 @@ const resourceContext = new Map();
 const streams = new Map();
 const uploadStreams = new Map();
 const inflightFetches = new Map();
-let readiness = 'UNINITIALIZED';
-let readinessSince = Date.now();
-let kernelPromise = null;
+const {
+  initKernel,
+  initRewriter,
+  isReady,
+  readinessState,
+} = createKernelController({ nativeFetch });
+let transportHelpers = null;
 self.__zp_cookie_sync = payload => broadcastCookieSync(payload);
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
 self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initKernel().catch(() => {}); })()));
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
-
-function setReadiness(next) {
-  if (readiness === next) return;
-  readiness = next;
-  readinessSince = Date.now();
-}
-
-function readinessState() {
-  return {
-    readiness,
-    readinessAgeMs: Date.now() - readinessSince,
-    startupPhase: readinessStartupPhase(),
-    kernelStarting: !!kernelPromise,
-    wasmLoading: readiness === 'WASM_LOADING',
-  };
-}
-function readinessStartupPhase() {
-  if (readiness === 'REWRITE_LOADING') return 'rewriter-loading';
-  if (readiness === 'WASM_LOADING') return 'wasm-downloading';
-  if (readiness === 'WASM_LOADED') return 'wasm-starting';
-  if (readiness === 'READY') return 'ready';
-  return 'idle';
-}
-
-async function initKernel(servers) {
-  if (readiness === 'READY') return;
-  if (kernelPromise) return kernelPromise;
-  kernelPromise = (async () => {
-    setReadiness('REWRITE_LOADING');
-    await initRewriter();
-    setReadiness('WASM_LOADING');
-    const go = new Go();
-    const resp = await nativeFetch('/zp/kernel.wasm', { cache: 'no-store' });
-    if (!resp.ok) throw new Error('SW_NOT_READY');
-    const result = await WebAssembly.instantiateStreaming(resp, go.importObject);
-    setReadiness('WASM_LOADED');
-    go.run(result.instance);
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline && (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function')) await new Promise(r => setTimeout(r, 20));
-    if (typeof self.__go_jshttp !== 'function' || typeof self.__zp_stream !== 'function' || typeof self.__zp_kernel_init !== 'function') throw new Error('SW_NOT_READY');
-    await self.__zp_kernel_init({ servers: servers || [] });
-    setReadiness('READY');
-  })().catch(err => { setReadiness('UNINITIALIZED'); kernelPromise = null; throw err; });
-  return kernelPromise;
-}
-
-async function initRewriter() {
-  if (!self.ZPRewriter || !self.ZPRewriter.ready || typeof self.ZPRewriter.rewriteScript !== 'function') throw new Error('REALM_INJECTION_FAILURE');
-  if (!self.ZPHTTPRewriter || typeof self.ZPHTTPRewriter.rewriteScriptOutcome !== 'function') throw new Error('REALM_INJECTION_FAILURE');
-}
 
 async function handleFetch(event) {
   const req = event.request;
@@ -121,17 +91,6 @@ function classifyShareOrSubresource(req, url, clientId) {
   if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
   return { kind: 'UNKNOWN' };
 }
-function isInternalAssetPath(pathname) {
-  return pathname === ZP.CONTROL_PREFIX || pathname === ZP.controlPath('index.html') || pathname === ZP.controlPath('sw.js') || internalPath(pathname);
-}
-
-function internalPath(path) {
-  return path === '/favicon.ico' || path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('http-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.assetPath('wasm_exec.js') || path === ZP.controlPath('kernel.wasm') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
-}
-function isRuntimeAPIPath(path) {
-  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script');
-}
-
 async function internalAsset(req, url) {
   if (url.pathname.startsWith(ZP.controlPath('error/'))) return safeError(decodeURIComponent(url.pathname.split('/').pop() || 'POLICY_BLOCKED'), 400);
   if (url.pathname === ZP.controlPath('worker-bootstrap.js')) return workerBootstrap(url);
@@ -139,14 +98,6 @@ async function internalAsset(req, url) {
   if (!internalPath(url.pathname) && url.pathname !== ZP.controlPath('sw.js')) return safeError('POLICY_BLOCKED', 403);
   return addCSP(await nativeFetch(req, { cache: 'no-store' }), req);
 }
-
-function parseSharePath(path) {
-  const m = /^\/zp\/p\/([^/]+)$/.exec(path);
-  if (!m) return null;
-  return { routeKey: m[1] };
-}
-
-
 
 async function proxyDocument(req, route, clientId) {
   const state = shareRoutes.get(route.routeKey);
@@ -173,15 +124,6 @@ async function virtualSubresource(req, cls, clientId) {
   rememberResourceContext(cls.crossOriginURL || cls.sameOriginURL, targetUrl, ctx);
   if (shouldRewriteCSS(req, resp)) return rewriteCSSResponse(resp, { targetUrl });
   return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req) }) : resp;
-}
-
-function sameOriginTargetURL(sameOriginURL, ctx) {
-  const baseTargetURL = ctx.baseUrl || ctx.targetUrl;
-  if (sameOriginURL.pathname.startsWith(ZP.controlPath('p/'))) {
-    return new URL(sameOriginURL.pathname.slice(ZP.controlPath('p/').length) + sameOriginURL.search, baseTargetURL).href;
-  }
-  const path = sameOriginURL.pathname.startsWith(ZP.CONTROL_PREFIX) ? '/' + sameOriginURL.pathname.slice(ZP.CONTROL_PREFIX.length) : sameOriginURL.pathname;
-  return new URL(path + sameOriginURL.search, baseTargetURL).href;
 }
 
 async function runtimeAPI(req, url, clientId) {
@@ -238,7 +180,7 @@ async function apiWorkerScript(req, url, clientId) {
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
-  if (readiness !== 'READY') { try { await initKernel(tabServers(opt)); } catch { return safeError('SW_NOT_READY', 503); } }
+  if (!isReady()) { try { await initKernel(tabServers(opt)); } catch { return safeError('SW_NOT_READY', 503); } }
   const headers = buildTransportHeaders(opt, u);
   const uploadStreamId = takeHeader(headers, 'X-ZP-Upload-Stream-Id');
   const requestId = takeHeader(headers, 'X-ZP-Request-Id');
@@ -264,103 +206,22 @@ function transportMethod(opt) {
 function tabServers(opt) {
   return opt.tab && opt.tab.servers;
 }
-// Reads a header value, then removes it from the outbound set (read BEFORE delete
-// is load-bearing: these internal control headers must not reach the kernel).
-function takeHeader(headers, name) {
-  const value = headers.get(name) || '';
-  headers.delete(name);
-  return value;
+function transport() {
+  if (!transportHelpers) {
+    transportHelpers = createTransportHelpers({
+      inflightFetches,
+      uploadStreams,
+      readableStreamFromUpload,
+    });
+  }
+  return transportHelpers;
 }
 
-// Builds the authoritative outbound transport headers from TRUSTED per-tab state.
-// Order is load-bearing: page-forged values are overwritten/deleted here, never
-// trusted. The arm-header delete-then-conditional-set mirrors X-ZP-Tab-Id /
-// X-ZP-Runtime-Token (B1 INBOUND-STRIP OBLIGATION).
-function buildTransportHeaders(opt, u) {
-  const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
-  setTrustedTransportHeaders(headers, opt);
-  setDocumentTransportHeaders(headers, opt, u);
-  setFetchPolicyHeaders(headers, opt);
-  return headers;
-}
-// Authoritative identity headers from TRUSTED per-tab state.
-function setTrustedTransportHeaders(headers, opt) {
-  headers.set('X-ZP-Tab-Id', opt.tab.tabId);
-  headers.set('X-ZP-Entry-Id', opt.entryId || opt.tab.activeEntryId || '');
-  headers.set('X-ZP-Stream-Isolation-Key', opt.tab.streamIsolationKey);
-  headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
-  headers.set('X-ZP-Relay-Servers', JSON.stringify(opt.tab.servers || []));
-}
-function setDocumentTransportHeaders(headers, opt, u) {
-  if (opt.document) headers.set('X-ZP-Document-Request', '1');
-  if (!headers.has('X-ZP-Document-URL')) {
-    const entry = transportDocumentEntry(opt);
-    headers.set('X-ZP-Document-URL', entry && (entry.baseUrl || entry.targetUrl) || u);
-  }
-  if (opt.document && !headers.has('X-ZP-Document-Referrer')) {
-    const entry = transportDocumentEntry(opt);
-    headers.set('X-ZP-Document-Referrer', entry && entry.referrerUrl || '');
-  }
-}
-function setFetchPolicyHeaders(headers, opt) {
-  const req = opt.request;
-  const credentials = opt.document ? 'include' : reqProp(req, 'credentials', 'same-origin');
-  const mode = reqProp(req, 'mode', opt.document ? 'navigate' : 'cors');
-  setDefaultHeader(headers, 'X-ZP-Fetch-Credentials', credentials);
-  setDefaultHeader(headers, 'X-ZP-Fetch-Mode', mode);
-  setDefaultHeader(headers, 'X-ZP-Fetch-Cache', reqProp(req, 'cache', 'default'));
-  if (opt.document) headers.set('X-ZP-Fetch-Redirect', 'follow');
-  else setDefaultHeader(headers, 'X-ZP-Fetch-Redirect', reqProp(req, 'redirect', 'follow'));
-  setDefaultHeader(headers, 'X-ZP-Fetch-Referrer', reqProp(req, 'referrer', 'about:client'));
-  setDefaultHeader(headers, 'X-ZP-Fetch-Referrer-Policy', reqProp(req, 'referrerPolicy', ''));
-}
-// Reads `req[key]` with the original `req && req[key] || fallback` semantics
-// (falsy values, including '', fall through to the fallback).
-function reqProp(req, key, fallback) {
-  return req && req[key] || fallback;
-}
-// Sets a header only when absent — the !headers.has(name) guard, factored out so
-// the per-header default expressions stay flat.
-function setDefaultHeader(headers, name, value) {
-  if (!headers.has(name)) headers.set(name, value);
-}
-function transportDocumentEntry(opt) {
-  return opt.tab.entries && opt.tab.entries.get(opt.entryId || opt.tab.activeEntryId);
-}
-function setupTransportAbort(opt, init, requestId) {
-  if (!(requestId || opt.request && opt.request.signal)) return null;
-  const controller = new AbortController();
-  init.signal = controller.signal;
-  if (requestId) inflightFetches.set(requestId, controller);
-  let listener = null;
-  if (opt.request && opt.request.signal) {
-    listener = () => controller.abort();
-    if (opt.request.signal.aborted) controller.abort();
-    else opt.request.signal.addEventListener('abort', listener, { once: true });
-  }
-  return { controller, listener };
-}
-function detachTransportAbort(opt, abort) {
-  if (abort && abort.listener && opt.request && opt.request.signal) {
-    try { opt.request.signal.removeEventListener('abort', abort.listener); } catch {}
-  }
-}
-// Wires the request body. Returns true when the upload stream is unauthorized
-// (tab mismatch / missing) so the caller can fail closed with POLICY_BLOCKED.
-function attachTransportBody(init, opt, uploadStreamId) {
-  if (opt.body != null) {
-    init.body = opt.body;
-  } else if (uploadStreamId) {
-    const upload = uploadStreams.get(uploadStreamId);
-    if (!upload || upload.tabId !== opt.tab.tabId) return true;
-    init.body = readableStreamFromUpload(uploadStreamId, upload);
-    init.duplex = 'half';
-  } else if (opt.request && opt.request.body) {
-    init.body = opt.request.body;
-    init.duplex = 'half';
-  }
-  return false;
-}
+function takeHeader(headers, name) { return transport().takeHeader(headers, name); }
+function buildTransportHeaders(opt, u) { return transport().buildTransportHeaders(opt, u); }
+function setupTransportAbort(opt, init, requestId) { return transport().setupTransportAbort(opt, init, requestId); }
+function detachTransportAbort(opt, abort) { return transport().detachTransportAbort(opt, abort); }
+function attachTransportBody(init, opt, uploadStreamId) { return transport().attachTransportBody(init, opt, uploadStreamId); }
 
 function scriptKindFromRequest(req) {
   if (req.destination === 'worker' || req.destination === 'sharedworker') return 'worker';
@@ -598,7 +459,7 @@ function readableStreamFromUpload(id, upload) {
 async function openRuntimeStream(event, msg, ok, fail) {
   const tab = runtimeTabForMessage(event, msg, fail);
   if (!tab) return;
-  if (readiness !== 'READY') { try { await initKernel(tab.servers); } catch { fail('SW_NOT_READY'); return; } }
+  if (!isReady()) { try { await initKernel(tab.servers); } catch { fail('SW_NOT_READY'); return; } }
   if (typeof self.__zp_stream !== 'function') { fail('SW_NOT_READY'); return; }
   const stream = await self.__zp_stream({ url: msg.url, protocols: msg.protocols || [], tabId: tab.tabId, documentUrl: msg.documentUrl || '', streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
   const channel = new MessageChannel();

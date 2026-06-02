@@ -10,7 +10,34 @@ const path = require('node:path');
 const puppeteer = require('puppeteer');
 
 const TARGET_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+const TARGET_CH_UA = '"Chromium";v="148", "Not:A-Brand";v="24", "Google Chrome";v="148"';
+const TARGET_CH_UA_FULL_VERSION = '"148.0.7778.217"';
+const TARGET_CH_UA_FULL_VERSION_LIST =
+  '"Chromium";v="148.0.7778.217", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="148.0.7778.217"';
+const TARGET_UA_BRANDS = [
+  { brand: 'Chromium', version: '148' },
+  { brand: 'Not:A-Brand', version: '24' },
+  { brand: 'Google Chrome', version: '148' },
+];
+const TARGET_UA_FULL_VERSION_LIST = [
+  { brand: 'Chromium', version: '148.0.7778.217' },
+  { brand: 'Not:A-Brand', version: '24.0.0.0' },
+  { brand: 'Google Chrome', version: '148.0.7778.217' },
+];
+const TARGET_UA_HIGH_ENTROPY = {
+  architecture: 'x86',
+  bitness: '64',
+  brands: TARGET_UA_BRANDS,
+  fullVersionList: TARGET_UA_FULL_VERSION_LIST,
+  mobile: false,
+  model: '',
+  platform: 'Windows',
+  platformVersion: '15.0.0',
+  uaFullVersion: '148.0.7778.217',
+  fullVersion: '148.0.7778.217',
+  wow64: false,
+};
 const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
 const EXPECTED_DELTAS = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'expected-deltas.json'), 'utf8'),
@@ -35,6 +62,11 @@ function createTargetServer(requests) {
       method: req.method,
       host: req.headers.host || '',
       userAgent: req.headers['user-agent'] || '',
+      secChUa: req.headers['sec-ch-ua'] || '',
+      secChUaFullVersion: req.headers['sec-ch-ua-full-version'] || '',
+      secChUaFullVersionList: req.headers['sec-ch-ua-full-version-list'] || '',
+      secChUaPlatform: req.headers['sec-ch-ua-platform'] || '',
+      secChUaPlatformVersion: req.headers['sec-ch-ua-platform-version'] || '',
       cookie: req.headers.cookie || '',
       contentType: req.headers['content-type'] || '',
       origin: req.headers.origin || '',
@@ -151,9 +183,13 @@ function createTargetServer(requests) {
         'Cache-Control': 'no-store',
       });
       res.end(`<!doctype html><html><head><title>Differential Fixture</title></head><body>
-        <main><h1>Differential Fixture</h1></main>
+        <main><h1>Differential Fixture</h1><pre id="fingerprint-report">{}</pre></main>
         <script>
           (async () => {
+            const writeFingerprintReport = (value) => {
+              const report = document.getElementById('fingerprint-report');
+              if (report) report.textContent = JSON.stringify(value, null, 2);
+            };
             const fnSource = (fn) => {
               try {
                 return Function.prototype.toString.call(fn);
@@ -180,6 +216,68 @@ function createTargetServer(requests) {
             const hiddenArtifactKeys = () => Reflect.ownKeys(window)
               .map(k => typeof k === 'symbol' ? k.toString() : String(k))
               .filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_|zeroproxy/i.test(k));
+            const fingerprintSurfaceObservations = () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = 80;
+              canvas.height = 24;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.fillStyle = '#f60';
+                ctx.fillRect(0, 0, 80, 24);
+                ctx.font = '13px Arial';
+                ctx.fillStyle = '#069';
+                ctx.fillText('ZeroProxy fp', 4, 16);
+              }
+              const canvasA = canvas.toDataURL();
+              const canvasB = canvas.toDataURL();
+              const rectProbe = document.createElement('div');
+              rectProbe.style.cssText = 'position:absolute;left:11.25px;top:17.5px;width:33.5px;height:19.25px;padding:3px;border:2px solid transparent;';
+              document.body.appendChild(rectProbe);
+              const rect = rectProbe.getBoundingClientRect();
+              rectProbe.remove();
+              const glCanvas = document.createElement('canvas');
+              const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+              const debugInfo = gl && gl.getExtension('WEBGL_debug_renderer_info');
+              return {
+                screen: {
+                  width: screen.width,
+                  height: screen.height,
+                  availWidth: screen.availWidth,
+                  availHeight: screen.availHeight,
+                  colorDepth: screen.colorDepth,
+                  pixelDepth: screen.pixelDepth,
+                  devicePixelRatio,
+                },
+                locale: {
+                  language: navigator.language,
+                  languages: Array.from(navigator.languages || []),
+                  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+                },
+                canvas: {
+                  stableRead: canvasA === canvasB,
+                  prefix: canvasA.slice(0, 22),
+                  length: canvasA.length,
+                  toDataURLSource: fnSource(HTMLCanvasElement.prototype.toDataURL),
+                  getImageDataSource: fnSource(CanvasRenderingContext2D.prototype.getImageData),
+                },
+                webgl: gl
+                  ? {
+                      vendor: String(gl.getParameter(gl.VENDOR) || ''),
+                      renderer: String(gl.getParameter(gl.RENDERER) || ''),
+                      debugVendor: debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || '') : '',
+                      debugRenderer: debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '') : '',
+                      extensionCount: (gl.getSupportedExtensions() || []).length,
+                    }
+                  : null,
+                domRect: {
+                  x: rect.x,
+                  y: rect.y,
+                  width: rect.width,
+                  height: rect.height,
+                  source: fnSource(Element.prototype.getBoundingClientRect),
+                },
+              };
+            };
             const frameLocationKind = (href) => {
               if (href === 'about:blank') return 'about:blank';
               if (href === location.href) return 'parent-virtual';
@@ -228,6 +326,9 @@ function createTargetServer(requests) {
                   origin: ev.origin,
                   href: ev.data.href,
                   topOrigin: ev.data.topOrigin,
+                  functionHref: ev.data.functionHref,
+                  fetchSource: ev.data.fetchSource,
+                  selfIsGlobalThis: ev.data.selfIsGlobalThis,
                   sourceIsFrame: ev.source === frame.contentWindow,
                   contentWindowObject: !!child,
                   contentDocumentObject: !!childDoc,
@@ -399,7 +500,8 @@ function createTargetServer(requests) {
                   historyTag: Object.prototype.toString.call(history),
                   documentTag: Object.prototype.toString.call(document)
                 },
-                frame: frameObservations()
+                frame: frameObservations(),
+                fingerprint: fingerprintSurfaceObservations()
               }
             };
             out.surface.frameDocument = await frameDocumentObservations();
@@ -484,8 +586,14 @@ function createTargetServer(requests) {
               ws.onopen = () => ws.send('differential');
               ws.onmessage = ev => { clearTimeout(timer); const value = String(ev.data); const result = { url: ws.url, protocol: ws.protocol, data: value }; try { ws.close(); } catch {} resolve(result); };
             });
+            writeFingerprintReport(out.surface.fingerprint);
             window.__differential = out;
-          })().catch(err => { window.__differential = { error: err && (err.name + ':' + err.message) || String(err) }; });
+          })().catch(err => {
+            const error = { error: err && (err.name + ':' + err.message) || String(err) };
+            const report = document.getElementById('fingerprint-report');
+            if (report) report.textContent = JSON.stringify(error, null, 2);
+            window.__differential = error;
+          });
         </script>
       </body></html>`);
       return;
@@ -820,7 +928,40 @@ function createTargetServer(requests) {
         'Cache-Control': 'no-store',
       });
       res.end(`<!doctype html><html><body><p>frame child</p><script>
-        parent.postMessage({ type: 'frame-child-ready', href: location.href, topOrigin: top.location.origin }, location.origin);
+        parent.postMessage({
+          type: 'frame-child-ready',
+          href: location.href,
+          topOrigin: top.location.origin,
+          functionHref: Function('return location.href')(),
+          fetchSource: Function.prototype.toString.call(fetch),
+          selfIsGlobalThis: self === globalThis
+        }, location.origin);
+      </script></body></html>`);
+      return;
+    }
+    if (url.pathname === '/frame-relation') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`<!doctype html><html><body><p>frame relation</p><script>
+        const params = new URL(location.href).searchParams;
+        const key = params.get('key') || '';
+        const readParent = (fn) => {
+          try { return fn(); } catch (err) { return 'error:' + ((err && err.name) || 'Error'); }
+        };
+        parent.postMessage({
+          type: 'frame-relation',
+          key,
+          href: location.href,
+          origin: location.origin,
+          topOrigin: readParent(() => top.location.origin),
+          cookie: document.cookie,
+          local: localStorage.getItem(key),
+          session: sessionStorage.getItem(key),
+          parentLocal: readParent(() => parent.localStorage.getItem(key)),
+          parentLocationHref: readParent(() => parent.location.href)
+        }, '*');
       </script></body></html>`);
       return;
     }
@@ -1222,6 +1363,18 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   });
   t.after(() => browser.close());
   let page = await browser.newPage();
+  const pageEvents = [];
+  page.on('pageerror', (err) => {
+    pageEvents.push(`pageerror:${(err && err.message) || String(err)}`);
+  });
+  page.on('console', (msg) => {
+    pageEvents.push(`console:${msg.type()}:${msg.text()}`);
+  });
+  page.on('framenavigated', (frame) => {
+    pageEvents.push(
+      `framenavigated:${frame === page.mainFrame() ? 'main' : 'child'}:${frame.url()}`,
+    );
+  });
   await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
   await waitForPage(
     page,
@@ -1252,92 +1405,144 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       document.getElementById('dynamic-image-probe')?.complete,
   );
 
-  const home = await page.evaluate(() => ({
-    href: location.href,
-    hash: location.hash,
-    title: document.title,
-    shellVisible: Boolean(document.querySelector('#open')),
-    userAgent: navigator.userAgent,
-    appVersion: navigator.appVersion,
-    platform: navigator.platform,
-    templateLink: window.__templateLinkFixture,
-    phase2Location: window.__phase2Location,
-    phase2DynamicFunction: window.__phase2DynamicFunction,
-    phase2EvalLocation: window.__phase2EvalLocation,
-    innerHTMLScriptFixture: window.__innerHTMLScriptFixture,
-    styleProbe: (() => {
-      const el = document.getElementById('style-probe');
-      const cs = el && getComputedStyle(el);
-      return (
-        cs && {
-          borderTopWidth: cs.borderTopWidth,
-          borderTopColor: cs.borderTopColor,
-          paddingLeft: cs.paddingLeft,
+  const home = await page.evaluate(async () => {
+    const userAgentData = navigator.userAgentData
+      ? {
+          brands: navigator.userAgentData.brands,
+          mobile: navigator.userAgentData.mobile,
+          platform: navigator.userAgentData.platform,
+          highEntropy: await navigator.userAgentData.getHighEntropyValues([
+            'architecture',
+            'bitness',
+            'brands',
+            'fullVersionList',
+            'mobile',
+            'model',
+            'platform',
+            'platformVersion',
+            'uaFullVersion',
+            'fullVersion',
+            'wow64',
+          ]),
+          json: navigator.userAgentData.toJSON(),
         }
-      );
-    })(),
-    imageProbe: (() => {
-      const el = document.getElementById('image-probe');
-      const attr = el && el.attributes.getNamedItem('src');
-      return (
-        el && {
-          complete: el.complete,
-          naturalWidth: el.naturalWidth,
-          src: el.getAttribute('src'),
-          srcProp: el.src,
-          currentSrc: el.currentSrc,
-          attrValue: attr && attr.value,
-          outerHTML: el.outerHTML,
-        }
-      );
-    })(),
-    dynamicImageProbe: (() => {
-      const el = document.getElementById('dynamic-image-probe');
-      const attr = el && el.attributes.getNamedItem('src');
-      return (
-        el && {
-          complete: el.complete,
-          naturalWidth: el.naturalWidth,
-          src: el.getAttribute('src'),
-          srcProp: el.src,
-          attrValue: attr && attr.value,
-          outerHTML: el.outerHTML,
-        }
-      );
-    })(),
-    faviconProbe: (() => {
-      const el = document.getElementById('icon-link');
-      const hrefAttr = el && el.attributes.getNamedItem('href');
-      return (
-        el && {
-          rel: el.getAttribute('rel'),
-          href: el.getAttribute('href'),
-          hrefProp: el.href,
-          hrefAttrValue: hrefAttr && hrefAttr.value,
-          outerHTML: el.outerHTML,
-        }
-      );
-    })(),
-    metaPolicyProbe: {
-      live: Array.from(document.querySelectorAll('meta[http-equiv]')).map((el) => ({
-        httpEquiv: el.getAttribute('http-equiv'),
-        content: el.getAttribute('content'),
-      })),
-      blocked: Array.from(document.querySelectorAll('meta[data-zp-blocked-http-equiv]')).map(
-        (el) => ({
-          blocked: el.getAttribute('data-zp-blocked-http-equiv'),
+      : null;
+    return {
+      href: location.href,
+      hash: location.hash,
+      title: document.title,
+      shellVisible: Boolean(document.querySelector('#open')),
+      userAgent: navigator.userAgent,
+      appVersion: navigator.appVersion,
+      platform: navigator.platform,
+      userAgentData,
+      templateLink: window.__templateLinkFixture,
+      phase2Location: window.__phase2Location,
+      phase2DynamicFunction: window.__phase2DynamicFunction,
+      phase2EvalLocation: window.__phase2EvalLocation,
+      innerHTMLScriptFixture: window.__innerHTMLScriptFixture,
+      styleProbe: (() => {
+        const el = document.getElementById('style-probe');
+        const cs = el && getComputedStyle(el);
+        return (
+          cs && {
+            borderTopWidth: cs.borderTopWidth,
+            borderTopColor: cs.borderTopColor,
+            paddingLeft: cs.paddingLeft,
+          }
+        );
+      })(),
+      imageProbe: (() => {
+        const el = document.getElementById('image-probe');
+        const attr = el && el.attributes.getNamedItem('src');
+        return (
+          el && {
+            complete: el.complete,
+            naturalWidth: el.naturalWidth,
+            src: el.getAttribute('src'),
+            srcProp: el.src,
+            currentSrc: el.currentSrc,
+            attrValue: attr && attr.value,
+            outerHTML: el.outerHTML,
+          }
+        );
+      })(),
+      dynamicImageProbe: (() => {
+        const el = document.getElementById('dynamic-image-probe');
+        const attr = el && el.attributes.getNamedItem('src');
+        return (
+          el && {
+            complete: el.complete,
+            naturalWidth: el.naturalWidth,
+            src: el.getAttribute('src'),
+            srcProp: el.src,
+            attrValue: attr && attr.value,
+            outerHTML: el.outerHTML,
+          }
+        );
+      })(),
+      faviconProbe: (() => {
+        const el = document.getElementById('icon-link');
+        const hrefAttr = el && el.attributes.getNamedItem('href');
+        return (
+          el && {
+            rel: el.getAttribute('rel'),
+            href: el.getAttribute('href'),
+            hrefProp: el.href,
+            hrefAttrValue: hrefAttr && hrefAttr.value,
+            outerHTML: el.outerHTML,
+          }
+        );
+      })(),
+      metaPolicyProbe: {
+        live: Array.from(document.querySelectorAll('meta[http-equiv]')).map((el) => ({
           httpEquiv: el.getAttribute('http-equiv'),
           content: el.getAttribute('content'),
-        }),
-      ),
-      parser: window.__metaPolicyParserProbe,
-    },
-  }));
+        })),
+        blocked: Array.from(document.querySelectorAll('meta[data-zp-blocked-http-equiv]')).map(
+          (el) => ({
+            blocked: el.getAttribute('data-zp-blocked-http-equiv'),
+            httpEquiv: el.getAttribute('http-equiv'),
+            content: el.getAttribute('content'),
+          }),
+        ),
+        parser: window.__metaPolicyParserProbe,
+      },
+    };
+  });
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
   assert.equal(home.shellVisible, false);
   assert.equal(home.userAgent, TARGET_UA);
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
+  assert.deepEqual(home.userAgentData, {
+    brands: TARGET_UA_BRANDS,
+    mobile: false,
+    platform: 'Windows',
+    highEntropy: TARGET_UA_HIGH_ENTROPY,
+    json: {
+      brands: TARGET_UA_BRANDS,
+      mobile: false,
+      platform: 'Windows',
+    },
+  });
+  const rootDocumentRequest = requests.find((r) => r.url === '/');
+  assert.deepEqual(
+    rootDocumentRequest && {
+      secChUa: rootDocumentRequest.secChUa,
+      secChUaFullVersion: rootDocumentRequest.secChUaFullVersion,
+      secChUaFullVersionList: rootDocumentRequest.secChUaFullVersionList,
+      secChUaPlatform: rootDocumentRequest.secChUaPlatform,
+      secChUaPlatformVersion: rootDocumentRequest.secChUaPlatformVersion,
+    },
+    {
+      secChUa: TARGET_CH_UA,
+      secChUaFullVersion: TARGET_CH_UA_FULL_VERSION,
+      secChUaFullVersionList: TARGET_CH_UA_FULL_VERSION_LIST,
+      secChUaPlatform: '"Windows"',
+      secChUaPlatformVersion: '"15.0.0"',
+    },
+  );
   assert.deepEqual(home.templateLink, {
     childCount: 1,
     firstNode: 'link',
@@ -1644,6 +1849,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     `target requests: ${JSON.stringify(requests)}`,
   );
 
+  const iframeTarget = `http://${targetHost}:${targetPort}/next?frame=dynamic`;
   const iframeIsolation = await page.evaluate(async (target) => {
     const blockedByPolicy = (fn) => {
       try {
@@ -1684,8 +1890,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     await new Promise((resolve) => {
       const deadline = Date.now() + 1000;
       (function poll() {
+        const pendingExternal = Array.from(docwrite.contentDocument.scripts).some(
+          (script) => script.type === 'application/x-zeroproxy-docwrite-external',
+        );
         if (
-          !docwrite.contentDocument.querySelector('[data-zp-docwrite-pending]') ||
+          docwrite.contentWindow.__dynamicScriptLoaded ||
+          !pendingExternal ||
           Date.now() > deadline
         ) {
           resolve();
@@ -1697,20 +1907,40 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const docwriteHTML = docwrite.contentDocument.documentElement.outerHTML;
     const docwriteHelperType = typeof docwrite.contentWindow.__zp_runClassic;
     const docwriteInlineRan = docwrite.contentWindow.__docwriteInlineRan === true;
+    const docwriteDynamic = docwrite.contentWindow.__dynamicScriptLoaded || null;
 
     const observed = document.createElement('iframe');
     document.body.appendChild(observed);
-    const waitForRewrittenFrameSrc = (frame, label) =>
+    const waitForVisibleFrameSrc = (frame, label) =>
       new Promise((resolve, reject) => {
         const deadline = Date.now() + 5000;
         (function poll() {
           const current = frame.src || '';
-          if (current.startsWith(`${location.origin}/zp/p/`)) {
+          if (current === target) {
             resolve(current);
             return;
           }
           if (Date.now() > deadline) {
-            reject(new Error(`${label} src not rewritten: ${current}`));
+            reject(new Error(`${label} src not virtualized: ${current}`));
+            return;
+          }
+          setTimeout(poll, 25);
+        })();
+      });
+    const waitForLoadedNextFrame = (frame, label) =>
+      new Promise((resolve, reject) => {
+        const deadline = Date.now() + 5000;
+        (function poll() {
+          let title = '';
+          try {
+            title = frame.contentDocument && frame.contentDocument.title;
+          } catch {}
+          if (title === 'E2E Next') {
+            resolve(title);
+            return;
+          }
+          if (Date.now() > deadline) {
+            reject(new Error(`${label} frame did not load target document: ${title}`));
             return;
           }
           setTimeout(poll, 25);
@@ -1719,19 +1949,22 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const attr = document.createAttribute('src');
     attr.value = target;
     observed.attributes.setNamedItem(attr);
-    const rewrittenSrc = await waitForRewrittenFrameSrc(observed, 'setNamedItem');
+    const rewrittenSrc = await waitForVisibleFrameSrc(observed, 'setNamedItem');
+    await waitForLoadedNextFrame(observed, 'setNamedItem');
 
     const nsFrame = document.createElement('iframe');
     document.body.appendChild(nsFrame);
     nsFrame.setAttributeNS(null, 'src', target);
-    const nsFrameSrc = await waitForRewrittenFrameSrc(nsFrame, 'setAttributeNS');
+    const nsFrameSrc = await waitForVisibleFrameSrc(nsFrame, 'setAttributeNS');
+    await waitForLoadedNextFrame(nsFrame, 'setAttributeNS');
 
     const nodeFrame = document.createElement('iframe');
     document.body.appendChild(nodeFrame);
     const nodeAttr = document.createAttribute('src');
     nodeAttr.value = target;
     nodeFrame.setAttributeNode(nodeAttr);
-    const nodeFrameSrc = await waitForRewrittenFrameSrc(nodeFrame, 'setAttributeNode');
+    const nodeFrameSrc = await waitForVisibleFrameSrc(nodeFrame, 'setAttributeNode');
+    await waitForLoadedNextFrame(nodeFrame, 'setAttributeNode');
 
     const ownedAttrFrame = document.createElement('iframe');
     document.body.appendChild(ownedAttrFrame);
@@ -1739,7 +1972,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     ownedAttr.value = 'about:blank';
     ownedAttrFrame.setAttributeNode(ownedAttr);
     ownedAttr.value = target;
-    const ownedAttrFrameSrc = await waitForRewrittenFrameSrc(ownedAttrFrame, 'owned Attr.value');
+    const ownedAttrFrameSrc = await waitForVisibleFrameSrc(ownedAttrFrame, 'owned Attr.value');
+    await waitForLoadedNextFrame(ownedAttrFrame, 'owned Attr.value');
 
     sync.remove();
     modern.remove();
@@ -1760,32 +1994,25 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       docwriteHTML,
       docwriteHelperType,
       docwriteInlineRan,
+      docwriteDynamic,
       rewrittenSrc,
       nsFrameSrc,
       nodeFrameSrc,
       ownedAttrFrameSrc,
     };
-  }, `http://${targetHost}:${targetPort}/next`);
+  }, iframeTarget);
   assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.modernRTC, 'Blocked by ZeroProxy policy');
   assert.equal(iframeIsolation.websocketShared, true);
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
-  assert.match(
-    iframeIsolation.rewrittenSrc,
-    new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`),
-  );
-  assert.match(
-    iframeIsolation.nsFrameSrc,
-    new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`),
-  );
-  assert.match(
-    iframeIsolation.nodeFrameSrc,
-    new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`),
-  );
-  assert.match(
-    iframeIsolation.ownedAttrFrameSrc,
-    new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`),
+  assert.equal(iframeIsolation.rewrittenSrc, iframeTarget);
+  assert.equal(iframeIsolation.nsFrameSrc, iframeTarget);
+  assert.equal(iframeIsolation.nodeFrameSrc, iframeTarget);
+  assert.equal(iframeIsolation.ownedAttrFrameSrc, iframeTarget);
+  assert.ok(
+    requests.some((r) => r.url === '/next?frame=dynamic' && r.userAgent === TARGET_UA),
+    `dynamic iframe transport request missing: ${JSON.stringify(requests)}`,
   );
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionShared, true);
@@ -1796,9 +2023,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(iframeIsolation.docwriteHelperType, 'function');
   assert.doesNotMatch(
     iframeIsolation.docwriteHTML,
-    /__docwriteInlineRan|\/zp\/api\/script|data-zp-|application\/x-zeroproxy-blocked.*dynamic-script/,
+    /\/zp\/api\/script|data-zp-|application\/x-zeroproxy-docwrite-external|application\/x-zeroproxy-blocked/,
   );
-  assert.equal(iframeIsolation.docwriteInlineRan, false);
+  assert.equal(iframeIsolation.docwriteInlineRan, true);
+  assert.equal(iframeIsolation.docwriteDynamic && iframeIsolation.docwriteDynamic.loaded, true);
 
   const frameMessage = await page.evaluate(async (target) => {
     const before = location.href;
@@ -1808,7 +2036,14 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         if (!ev.data || ev.data.type !== 'frame-child-ready') return;
         window.removeEventListener('message', onMessage);
         clearTimeout(timer);
-        resolve({ origin: ev.origin, href: ev.data.href, topOrigin: ev.data.topOrigin });
+        resolve({
+          origin: ev.origin,
+          href: ev.data.href,
+          topOrigin: ev.data.topOrigin,
+          functionHref: ev.data.functionHref,
+          fetchSource: ev.data.fetchSource,
+          selfIsGlobalThis: ev.data.selfIsGlobalThis,
+        });
       });
     });
     const frame = document.createElement('iframe');
@@ -1822,6 +2057,105 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(frameMessage.message.origin, `http://${targetHost}:${targetPort}`);
   assert.equal(frameMessage.message.href, `http://${targetHost}:${targetPort}/frame-child`);
   assert.equal(frameMessage.message.topOrigin, `http://${targetHost}:${targetPort}`);
+  assert.equal(frameMessage.message.functionHref, `http://${targetHost}:${targetPort}/frame-child`);
+  assert.equal(frameMessage.message.fetchSource, 'function fetch() { [native code] }');
+  assert.equal(frameMessage.message.selfIsGlobalThis, true);
+
+  const readFrameRelations = (probePage) =>
+    probePage.evaluate(
+      async (targetPort, crossPort) => {
+        const key = `frame-shared-${Date.now()}`;
+        const cookieValue = `parent-${key}`;
+        localStorage.setItem(key, 'parent-local');
+        sessionStorage.setItem(key, 'parent-session');
+        document.cookie = `frame_cookie=${cookieValue}; Path=/`;
+        async function loadRelationFrame(src) {
+          return new Promise((resolve, reject) => {
+            const frame = document.createElement('iframe');
+            const timer = setTimeout(() => {
+              try {
+                frame.remove();
+              } catch {}
+              reject(new Error(`frame relation timed out: ${src}`));
+            }, 10000);
+            window.addEventListener('message', function onMessage(ev) {
+              if (!ev.data || ev.data.type !== 'frame-relation' || ev.data.key !== key) return;
+              window.removeEventListener('message', onMessage);
+              clearTimeout(timer);
+              const out = {
+                eventOrigin: ev.origin,
+                sourceIsFrame: ev.source === frame.contentWindow,
+                frameSrc: frame.src,
+                data: ev.data,
+              };
+              frame.remove();
+              resolve(out);
+            });
+            frame.src = src;
+            document.body.appendChild(frame);
+          });
+        }
+        const same = await loadRelationFrame(
+          `http://localhost:${targetPort}/frame-relation?key=${encodeURIComponent(key)}&same=1`,
+        );
+        const cross = await loadRelationFrame(
+          `http://localhost:${crossPort}/frame-relation?key=${encodeURIComponent(key)}&cross=1`,
+        );
+        return {
+          key,
+          cookieValue,
+          parentLocal: localStorage.getItem(key),
+          parentSession: sessionStorage.getItem(key),
+          same,
+          cross,
+        };
+      },
+      targetPort,
+      crossPort,
+    );
+  const frameRelationSummary = (value) => ({
+    parentLocal: value.parentLocal,
+    parentSession: value.parentSession,
+    same: summarizeFrameRelation(value.same, value.cookieValue),
+    cross: summarizeFrameRelation(value.cross, value.cookieValue),
+  });
+  const frameRelations = await readFrameRelations(page);
+  const nativeFrameContext = await (browser.createBrowserContext
+    ? browser.createBrowserContext()
+    : browser.createIncognitoBrowserContext());
+  const nativeFramePage = await nativeFrameContext.newPage();
+  const nativeFrameRequestStart = requests.length;
+  const nativeCrossFrameRequestStart = crossRequests.length;
+  try {
+    await nativeFramePage.goto(`http://${targetHost}:${targetPort}/next`, {
+      waitUntil: 'domcontentloaded',
+    });
+    const nativeFrameRelations = await readFrameRelations(nativeFramePage);
+    assert.deepEqual(
+      frameRelationSummary(frameRelations),
+      frameRelationSummary(nativeFrameRelations),
+    );
+  } finally {
+    await nativeFrameContext.close();
+    requests.splice(nativeFrameRequestStart);
+    crossRequests.splice(nativeCrossFrameRequestStart);
+  }
+  assert.equal(
+    normalizeRelationURL(frameRelations.same.frameSrc),
+    normalizeRelationURL(frameRelations.same.data.href),
+  );
+  assert.equal(
+    normalizeRelationURL(frameRelations.cross.frameSrc),
+    normalizeRelationURL(frameRelations.cross.data.href),
+  );
+  assert.ok(
+    requests.some((r) => r.url.startsWith('/frame-relation?') && r.userAgent === TARGET_UA),
+    `same-origin frame relation transport request missing: ${JSON.stringify(requests)}`,
+  );
+  assert.ok(
+    crossRequests.some((r) => r.url.startsWith('/frame-relation?') && r.userAgent === TARGET_UA),
+    `cross-origin frame relation transport request missing: ${JSON.stringify(crossRequests)}`,
+  );
 
   const fingerprintMasking = await page.evaluate(() => {
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
@@ -1873,7 +2207,6 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   });
   assert.equal(fingerprintMasking.canvasMask, 'function toDataURL() { [native code] }');
   assert.equal(fingerprintMasking.voicesMask, 'function getVoices() { [native code] }');
-  assert.equal(fingerprintMasking.canvasVaries, true);
   assert.deepEqual(fingerprintMasking.pixel.slice(0, 4), [1, 0, 1, 255]);
   assert.ok(fingerprintMasking.audioDelta === null || Math.abs(fingerprintMasking.audioDelta) > 0);
   assert.equal(fingerprintMasking.voiceCount, 2);
@@ -2650,6 +2983,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const beforeSrcdoc = location.href;
     const evil = document.createElement('iframe');
     evil.srcdoc = `<script>top.location.href='https://evil.example/'; parent.postMessage({type:'evil-srcdoc'}, '*')<\/script>`;
+    out.evilSrcdocRewritten = /__zp_get|Blocked by ZeroProxy rewrite policy/.test(
+      evil.getAttribute('srcdoc') || '',
+    );
     document.body.appendChild(evil);
     await new Promise((resolve) => setTimeout(resolve, 100));
     out.afterSrcdocHref = location.href;
@@ -2667,6 +3003,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(escapeMatrix.virtualHash, '#zp-fragment');
   assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
   assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref);
+  assert.equal(escapeMatrix.evilSrcdocRewritten, true);
   assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
   assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
   assert.equal(escapeMatrix.stringTimer, 'ran');
@@ -2687,22 +3024,29 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     `target requests: ${JSON.stringify(requests)}`,
   );
 
-  const serviceWorkerPolicy = await page.evaluate(async () => {
-    const out = {
-      exposed: 'serviceWorker' in navigator,
-      controller: navigator.serviceWorker && navigator.serviceWorker.controller,
-      registrationCount: null,
-      registerError: '',
-    };
-    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
-      out.registrationCount = (await navigator.serviceWorker.getRegistrations()).length;
-    try {
-      await navigator.serviceWorker.register('/target-sw.js');
-    } catch (err) {
-      out.registerError = (err && err.name) || String(err);
-    }
-    return out;
-  });
+  let serviceWorkerPolicy;
+  try {
+    serviceWorkerPolicy = await page.evaluate(async () => {
+      const out = {
+        exposed: 'serviceWorker' in navigator,
+        controller: navigator.serviceWorker && navigator.serviceWorker.controller,
+        registrationCount: null,
+        registerError: '',
+      };
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations)
+        out.registrationCount = (await navigator.serviceWorker.getRegistrations()).length;
+      try {
+        await navigator.serviceWorker.register('/target-sw.js');
+      } catch (err) {
+        out.registerError = (err && err.name) || String(err);
+      }
+      return out;
+    });
+  } catch (err) {
+    throw new Error(
+      `serviceWorkerPolicy evaluate failed: ${(err && err.message) || String(err)}; page=${page.url()}; events=${JSON.stringify(pageEvents)}`,
+    );
+  }
   assert.equal(serviceWorkerPolicy.exposed, true);
   assert.equal(serviceWorkerPolicy.controller, null);
   assert.equal(serviceWorkerPolicy.registrationCount, 0);
@@ -2933,6 +3277,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   );
 
   const readDifferential = (p) => p.evaluate(() => window.__differential);
+  const readFingerprintReport = (p) =>
+    p.evaluate(() =>
+      JSON.parse(document.querySelector('#fingerprint-report')?.textContent || '{}'),
+    );
   const comparableDifferential = (value) => ({
     locationHref: value.locationHref,
     locationOrigin: value.locationOrigin,
@@ -2964,8 +3312,15 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   );
   await page.type('#url', `http://${targetHost}:${targetPort}/differential-fixture`);
   await page.click('button');
-  await waitForPage(page, () => document.title === 'Differential Fixture' && window.__differential);
-  const proxyDiff = comparableDifferential(await readDifferential(page));
+  await waitForPage(
+    page,
+    () => document.title === 'Differential Fixture' && window.__differential,
+  ).catch((err) => {
+    throw new Error(`${err.message}\npage events:\n${pageEvents.slice(-20).join('\n')}`);
+  });
+  const proxyRawDiff = await readDifferential(page);
+  const proxyDiff = comparableDifferential(proxyRawDiff);
+  assert.deepEqual(await readFingerprintReport(page), proxyRawDiff.surface.fingerprint);
   assert.equal(proxyDiff.surface.workerRealm.imported.loaded, true);
   assert.ok(
     requests.some((r) => r.url === '/worker-imported-fixture.js' && r.userAgent === TARGET_UA),
@@ -3126,7 +3481,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     waitUntil: 'domcontentloaded',
   });
   await waitForPage(page, () => window.__differential);
-  const nativeDiff = comparableDifferential(await readDifferential(page));
+  const nativeRawDiff = await readDifferential(page);
+  const nativeDiff = comparableDifferential(nativeRawDiff);
+  assert.deepEqual(await readFingerprintReport(page), nativeRawDiff.surface.fingerprint);
   assert.deepEqual(
     diffObjects(proxyDiff, nativeDiff),
     EXPECTED_DELTAS.nativeVsZeroProxyDifferential,
@@ -3147,6 +3504,7 @@ function normalizeSurface(value) {
     ...value,
     frameDocument: normalizeFrameDocument(value.frameDocument),
     frameSrcdoc: normalizeFrameDocument(value.frameSrcdoc),
+    fingerprint: normalizeFingerprintSurface(value.fingerprint),
   };
 }
 
@@ -3159,6 +3517,7 @@ function normalizeFrameDocument(value) {
     topOrigin: normalizeFrameOrigin(value.topOrigin),
     timeout: normalizeFrameValue(value.timeout),
     sourceIsFrame: normalizeFrameValue(value.sourceIsFrame),
+    functionHref: normalizeFrameURL(value.functionHref, value.href),
     contentWindowParentIsWindow: normalizeFrameValue(value.contentWindowParentIsWindow),
     contentWindowTopIsWindow: normalizeFrameValue(value.contentWindowTopIsWindow),
     contentDocumentDefaultView: normalizeFrameValue(value.contentDocumentDefaultView),
@@ -3166,6 +3525,58 @@ function normalizeFrameDocument(value) {
     contentWindowHref: normalizeFrameURL(value.contentWindowHref, value.href),
     contentDocumentURL: normalizeFrameURL(value.contentDocumentURL, value.href),
   };
+}
+
+function normalizeFingerprintSurface(value) {
+  if (!value || typeof value !== 'object') return value;
+  return {
+    ...value,
+    screen: value.screen && {
+      ...value.screen,
+      width: normalizePositiveNumber(value.screen.width),
+      height: normalizePositiveNumber(value.screen.height),
+      availWidth: normalizePositiveNumber(value.screen.availWidth),
+      availHeight: normalizePositiveNumber(value.screen.availHeight),
+      devicePixelRatio: normalizePositiveNumber(value.screen.devicePixelRatio),
+    },
+    canvas: value.canvas && {
+      ...value.canvas,
+      stableRead: '<canvas-randomized>',
+      prefix: '<canvas-data-url>',
+      length: '<canvas-data-url-length>',
+    },
+    webgl: value.webgl && {
+      ...value.webgl,
+      vendor: normalizeNonEmptyString(value.webgl.vendor),
+      renderer: normalizeNonEmptyString(value.webgl.renderer),
+      debugVendor: normalizeOptionalString(value.webgl.debugVendor),
+      debugRenderer: normalizeOptionalString(value.webgl.debugRenderer),
+      extensionCount: normalizePositiveNumber(value.webgl.extensionCount),
+    },
+    domRect: value.domRect && {
+      ...value.domRect,
+      x: normalizeFiniteNumber(value.domRect.x),
+      y: normalizeFiniteNumber(value.domRect.y),
+      width: normalizeFiniteNumber(value.domRect.width),
+      height: normalizeFiniteNumber(value.domRect.height),
+    },
+  };
+}
+
+function normalizePositiveNumber(value) {
+  return typeof value === 'number' && value > 0 ? '<positive-number>' : value;
+}
+
+function normalizeFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? '<finite-number>' : value;
+}
+
+function normalizeNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0 ? '<non-empty-string>' : value;
+}
+
+function normalizeOptionalString(value) {
+  return typeof value === 'string' && value.length > 0 ? '<non-empty-string>' : value;
 }
 
 function normalizeFrameURL(value, targetHref) {
@@ -3201,6 +3612,26 @@ function normalizePolicyHeader(value) {
     return '<zeroproxy-membrane-csp>';
   }
   return csp;
+}
+
+function summarizeFrameRelation(value, cookieValue) {
+  const data = (value && value.data) || {};
+  return {
+    eventOrigin: value && value.eventOrigin,
+    sourceIsFrame: value && value.sourceIsFrame,
+    href: normalizeRelationURL(data.href),
+    origin: data.origin,
+    cookieShared: String(data.cookie || '').includes(`frame_cookie=${cookieValue}`),
+    local: data.local,
+    session: data.session,
+  };
+}
+
+function normalizeRelationURL(value) {
+  if (!value) return '';
+  const url = new URL(String(value));
+  url.searchParams.set('key', '<key>');
+  return url.href;
 }
 
 function diffObjects(proxyValue, nativeValue, prefix = '') {

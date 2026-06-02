@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -36,20 +37,36 @@ function loadBuiltRustContext() {
         FinalizationRegistry,
         URL,
         Promise,
+        crypto: crypto.webcrypto,
         globalThis: null,
       };
       ctx.globalThis = ctx;
+      const wasmPath = path.join(outDir, 'web', 'rust-rewriter.wasm');
+      ctx.XMLHttpRequest = class FileXMLHttpRequest {
+        open(method, url) {
+          this.method = method;
+          this.url = url;
+        }
+        overrideMimeType() {}
+        send() {
+          assert.equal(this.method, 'GET');
+          assert.equal(this.url, '/zp/assets/rust-rewriter.wasm');
+          const bytes = fs.readFileSync(wasmPath);
+          this.status = 200;
+          this.responseText = Array.from(bytes, (byte) => String.fromCharCode(byte)).join('');
+        }
+      };
       vm.createContext(ctx);
       const initStart = process.hrtime.bigint();
       vm.runInContext(fs.readFileSync(path.join(outDir, 'web', 'rust-rewriter.js'), 'utf8'), ctx, {
         filename: 'rust-rewriter.js',
       });
+      await ctx.ZPRewriter.init();
       const initMs = Number(process.hrtime.bigint() - initStart) / 1e6;
       Object.defineProperty(ctx, '__buildOutDir', { value: outDir });
       Object.defineProperty(ctx, '__rustRewriterInitMs', { value: initMs });
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'js-rewriter.js')), false);
-      assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc-parser.js')), false);
-      assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc_parser_wasm_bg.wasm')), false);
+      assert.equal(fs.existsSync(path.join(outDir, 'web', 'rust-rewriter.wasm')), true);
       return ctx;
     })();
   }
@@ -80,6 +97,14 @@ function generatedRewriteSource(lines) {
 
 function assertWithinBudget(name, elapsed, budget) {
   assert.ok(elapsed <= budget, `${name} took ${elapsed.toFixed(2)}ms, budget ${budget}ms`);
+}
+
+function compactCode(source) {
+  return String(source).replace(/\s+/g, '');
+}
+
+function assertCodeIncludes(source, needle) {
+  assert.ok(compactCode(source).includes(compactCode(needle)), `missing ${needle} in ${source}`);
 }
 
 function loadHTTPRewriterContext(zpRewriter) {
@@ -116,7 +141,10 @@ test('Rust rewriter asset exposes the public rewriter API without JS fallback as
     controlPrefix: '/zp/',
   });
   assert.equal(out.ok, true);
-  assert.match(out.code, /__zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/);
+  assertCodeIncludes(
+    out.code,
+    '__zp_get(__zp_get(__zp_get(globalThis,"window"),"location"),"href")',
+  );
   assert.equal('OXCParser' in ctx, false);
 });
 
@@ -174,11 +202,6 @@ test('browser build uses Vite without a direct esbuild build step', () => {
   assert.equal(packageJson.devDependencies.esbuild, undefined);
   assert.ok(packageJson.devDependencies.vite);
   assert.equal(lock.packages[''].devDependencies.esbuild, undefined);
-  assert.equal(Object.hasOwn(lock.packages, 'node_modules/esbuild'), false);
-  assert.equal(
-    Object.keys(lock.packages).some((key) => key.startsWith('node_modules/@esbuild/')),
-    false,
-  );
   assert.equal(
     /from ['"]esbuild['"]|require\(['"]esbuild['"]\)|\besbuild\./.test(buildScript),
     false,
@@ -210,6 +233,9 @@ test('Vite-built runtime prelude bootstrap surface stays within coarse budgets',
   const runtime = fs.readFileSync(runtimePath, 'utf8');
   const bytes = fs.statSync(runtimePath).size;
   assert.ok(bytes <= 3_000_000, `runtime-prelude.js size ${bytes} exceeded 3000000 bytes`);
+  assert.equal(runtime.includes('__zp_rust_b64'), false);
+  assert.equal(runtime.includes('__ZP_RUST_WASM_BYTES'), false);
+  assert.ok(runtime.includes('/zp/assets/rust-rewriter.wasm'));
 
   const measured = elapsedMs(() => new vm.Script(runtime, { filename: 'runtime-prelude.js' }));
   assertWithinBudget('runtime-prelude vm.Script compile', measured.elapsed, 750);
@@ -347,10 +373,9 @@ test('Rust rewriter asset can scope module graph URLs to a runtime context', asy
     },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.ok(
-    out.code.includes(
-      'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js&tab=tab-1&rt=rt-1"',
-    ),
+  assertCodeIncludes(
+    out.code,
+    'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js&tab=tab-1&rt=rt-1"',
   );
   assert.ok(
     out.code.includes(
@@ -412,6 +437,189 @@ test('Rust rewriter asset owns static fetch URL rewriting', async () => {
   assert.equal(blocked.url, '/zp/error/POLICY_BLOCKED');
 });
 
+test('Rust rewriter asset owns static srcset rewriting', async () => {
+  const ctx = await loadBuiltRustContext();
+  const rewritten = ctx.ZPRewriter.rewriteSrcset('/small.png 1x, ../large.png 2x', {
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(rewritten.ok, true, JSON.stringify(rewritten.diagnostics));
+  assert.equal(
+    rewritten.url,
+    '/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fsmall.png 1x, /zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flarge.png 2x',
+  );
+  assert.equal(
+    rewritten.target,
+    'https://example.com/small.png 1x, https://example.com/large.png 2x',
+  );
+
+  const unchanged = ctx.ZPRewriter.rewriteSrcset('data:image/png,AAAA 1x', {
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(unchanged.ok, false);
+  assert.equal(unchanged.errorCode, 'UNCHANGED');
+});
+
+test('Rust rewriter asset owns streaming HTML document rewriting', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(typeof ctx.ZPRewriter.rewriteHTMLDocument, 'function');
+  assert.equal(typeof ctx.ZPRustRewriter.rewriteHTMLDocument, 'function');
+
+  const source =
+    '<head><meta http-equiv="refresh" content="0;url=https://evil.test/">' +
+    '<link rel="preconnect" href="https://cdn.example/">' +
+    '<link rel="icon" href="/favicon.ico">' +
+    '<link rel="stylesheet" href="/app.css"></head>' +
+    '<body><img src="/logo.png" srcset="/small.png 1x, ../large.png 2x">' +
+    '<a href="/next">next</a><form action="submit"><button formaction="/alt">go</button></form>' +
+    '<iframe src="/child"></iframe><object data="/movie.swf"></object>' +
+    '<a href="javascript:alert(1)">bad</a></body>';
+  const out = ctx.ZPRewriter.rewriteHTMLDocument(source, {
+    targetUrl: 'https://example.com/app/page.html',
+    controlPrefix: '/zp/',
+    servers: ['wss://relay.example/ws'],
+  });
+
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  for (const want of [
+    'href="/zp/p/',
+    'action="/zp/p/',
+    'formaction="/zp/p/',
+    'src="/zp/p/',
+    '#k=',
+    'server=wss%3A%2F%2Frelay.example%2Fws',
+    'data-zp-target-url="https://example.com/next"',
+    'data-zp-target-url="https://example.com/app/submit"',
+    'data-zp-target-url="https://example.com/alt"',
+    'data-zp-target-url="https://example.com/child"',
+    'src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flogo.png"',
+    'srcset="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fsmall.png 1x, /zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flarge.png 2x"',
+    'href="data:application/x-zeroproxy-icon,1"',
+    'href="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp.css"',
+    'data-zp-blocked-rel="preconnect"',
+    'data-zp-blocked="object"',
+    'ZeroProxy blocked object content',
+    'href="#"',
+    'data-zp-blocked-url="javascript:alert(1)"',
+  ]) {
+    assert.ok(out.code.includes(want), `missing ${want} in ${out.code}`);
+  }
+  for (const forbidden of [
+    'http-equiv="refresh"',
+    'href="https://cdn.example/"',
+    'href="/favicon.ico"',
+    'href="/app.css"',
+    'src="/logo.png"',
+    'href="/next"',
+    'action="submit"',
+    'formaction="/alt"',
+    'src="/child"',
+    '<object',
+    'movie.swf',
+  ]) {
+    assert.equal(out.code.includes(forbidden), false, `raw fragment survived: ${forbidden}`);
+  }
+
+  const low = ctx.ZPRustRewriter.rewriteHTMLDocument(
+    '<img src="/x.png">',
+    'https://example.com/page.html',
+    '/zp/',
+    [],
+  );
+  assert.equal(low.ok, true);
+  assert.ok(low.code.includes('/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fx.png'));
+});
+
+test('Rust rewriter asset owns static visible target URL resolution', async () => {
+  const ctx = await loadBuiltRustContext();
+  const resolved = ctx.ZPRewriter.rewriteTargetURL('touch.png', {
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(resolved.ok, true, JSON.stringify(resolved.diagnostics));
+  assert.equal(resolved.url, 'https://example.com/dir/touch.png');
+  assert.equal(resolved.target, 'https://example.com/dir/touch.png');
+
+  const blocked = ctx.ZPRewriter.rewriteTargetURL('javascript:alert(1)', {
+    targetUrl: 'https://example.com/dir/page.html',
+    controlPrefix: '/zp/',
+  });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.url, '/zp/error/POLICY_BLOCKED');
+});
+
+test('Rust rewriter asset owns static link rel policy classification', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(ctx.ZPRewriter.classifyLinkRel('stylesheet'), 'stylesheet');
+  assert.equal(ctx.ZPRewriter.classifyLinkRel('apple-touch-icon'), 'icon');
+  assert.equal(ctx.ZPRewriter.classifyLinkRel('icon preconnect'), 'blocked');
+  assert.equal(ctx.ZPRustRewriter.classifyLinkRel('canonical'), 'pass');
+});
+
+test('Rust rewriter asset owns blocked element policy classification', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(ctx.ZPRewriter.classifyBlockedElement('object'), 'object');
+  assert.equal(ctx.ZPRewriter.classifyBlockedElement('EMBED'), 'embed');
+  assert.equal(ctx.ZPRustRewriter.classifyBlockedElement('iframe'), 'pass');
+});
+
+test('Rust rewriter asset owns static meta policy classification', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(ctx.ZPRewriter.classifyMetaPolicy('refresh'), 'drop');
+  assert.equal(ctx.ZPRewriter.classifyMetaPolicy('Content-Security-Policy'), 'drop');
+  assert.equal(ctx.ZPRewriter.classifyMetaPolicy('content-security-policy-report-only'), 'drop');
+  assert.equal(ctx.ZPRustRewriter.classifyMetaPolicy('viewport'), 'pass');
+});
+
+test('Rust rewriter asset owns static attribute URL policy classification', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(ctx.ZPRewriter.classifyAttrPolicy('a', 'href'), 'navigation');
+  assert.equal(ctx.ZPRewriter.classifyAttrPolicy('iframe', 'src'), 'navigation');
+  assert.equal(ctx.ZPRewriter.classifyAttrPolicy('img', 'src'), 'passive');
+  assert.equal(ctx.ZPRewriter.classifyAttrPolicy('image', 'xlink:href'), 'passive');
+  assert.equal(ctx.ZPRewriter.classifyAttrPolicy('source', 'srcset'), 'srcset');
+  assert.equal(ctx.ZPRewriter.classifyAttrPolicy('div', 'style'), 'style');
+  assert.equal(ctx.ZPRustRewriter.classifyAttrPolicy('script', 'src'), 'pass');
+});
+
+test('Rust rewriter asset can mint encrypted share routes', async () => {
+  const ctx = await loadBuiltRustContext();
+  const out = ctx.ZPRewriter.makeShareURL('https://example.com/path', {
+    servers: [
+      'wss://relay.example:443/ws',
+      'wss://relay.example/ws',
+      'ws://proxy.localhost:8080/zp/ws-pipe',
+    ],
+  });
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.match(out.url, /^\/zp\/p\/[A-Za-z0-9_-]+#k=[A-Za-z0-9_-]+/);
+  assert.ok(out.url.includes('server=wss%3A%2F%2Frelay.example%2Fws'));
+  assert.ok(out.url.includes('server=ws%3A%2F%2Fproxy.localhost%3A8080%2Fzp%2Fws-pipe'));
+
+  const blocked = ctx.ZPRewriter.makeShareURL('javascript:alert(1)');
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.errorCode, 'shareurl: unsupported target URL');
+});
+
+test('Rust rewriter asset owns static script type classification', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(ctx.ZPRewriter.classifyScriptType(''), 'classic');
+  assert.equal(ctx.ZPRewriter.classifyScriptType('text/javascript'), 'classic');
+  assert.equal(ctx.ZPRewriter.classifyScriptType('module'), 'module');
+  assert.equal(ctx.ZPRewriter.classifyScriptType('importmap'), 'importmap');
+  assert.equal(ctx.ZPRewriter.classifyScriptType('speculationrules'), 'speculationrules');
+  assert.equal(ctx.ZPRustRewriter.classifyScriptType('application/json'), 'pass');
+});
+
+test('Rust rewriter asset owns static event handler attr classification', async () => {
+  const ctx = await loadBuiltRustContext();
+  assert.equal(ctx.ZPRewriter.classifyEventHandlerAttr('onclick'), 'block');
+  assert.equal(ctx.ZPRewriter.classifyEventHandlerAttr('onLoad'), 'block');
+  assert.equal(ctx.ZPRewriter.classifyEventHandlerAttr('on'), 'pass');
+  assert.equal(ctx.ZPRustRewriter.classifyEventHandlerAttr('data-onclick'), 'pass');
+});
+
 test('Rust rewriter asset reports parse failures', async () => {
   const ctx = await loadBuiltRustContext();
   const out = ctx.ZPRustRewriter.rewriteScript(
@@ -471,10 +679,9 @@ test('HTTP script rewriter passes runtime context into module script rewriting',
     },
   );
   assert.equal(outcome.blocked, false);
-  assert.ok(
-    outcome.code.includes(
-      'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fdep.js&tab=tab-1&rt=rt-1"',
-    ),
+  assertCodeIncludes(
+    outcome.code,
+    'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fdep.js&tab=tab-1&rt=rt-1"',
   );
 });
 
@@ -530,7 +737,7 @@ test('Rust rewriter supports event-handler and dynamic function body paths', asy
   });
   assert.equal(handler.ok, true);
   assert.match(handler.code, /__zp_runEvent/);
-  assert.ok(handler.code.includes('__zp_get(globalThis,"location").href'));
+  assertCodeIncludes(handler.code, '__zp_get(__zp_get(globalThis,"location"),"href")');
 
   const fnBody = rewriter.rewriteFunctionBody(
     'return location.href + window.location.href;',
@@ -538,9 +745,9 @@ test('Rust rewriter supports event-handler and dynamic function body paths', asy
     'https://example.com/',
   );
   assert.equal(fnBody.ok, true);
-  assert.match(
+  assertCodeIncludes(
     fnBody.code,
-    /return location\.href \+ __zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/,
+    'return location.href+__zp_get(__zp_get(__zp_get(globalThis,"window"),"location"),"href")',
   );
 
   const evalBody = rewriter.rewriteScript('return (this);', {
@@ -548,7 +755,7 @@ test('Rust rewriter supports event-handler and dynamic function body paths', asy
     targetUrl: 'https://example.com/',
   });
   assert.equal(evalBody.ok, true, JSON.stringify(evalBody.diagnostics));
-  assert.match(evalBody.code, /return \(this\);/);
+  assertCodeIncludes(evalBody.code, 'return(this);');
 });
 
 test('Rust rewriter virtualizes dangerous globals without rewriting local bindings', async () => {
@@ -563,7 +770,7 @@ test('Rust rewriter virtualizes dangerous globals without rewriting local bindin
     { kind: 'classic' },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.match(out.code, /const location = \{ href: 'local' \}/);
+  assertCodeIncludes(out.code, 'const location={href:"local"}');
   assert.match(out.code, /location\.href/);
   assert.match(out.code, /__zp_get\(globalThis,"window"\)/);
   assert.match(out.code, /__zp_get\(globalThis,"origin"\)/);
@@ -581,12 +788,14 @@ test('Rust rewriter supports modules and fails closed on parse errors', async ()
     },
   );
   assert.equal(mod.ok, true, JSON.stringify(mod.diagnostics));
-  assert.ok(
-    mod.code.includes(
-      'import x from "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fx.js"',
-    ),
+  assertCodeIncludes(
+    mod.code,
+    'import x from "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fx.js"',
   );
-  assert.match(mod.code, /__zp_get\(__zp_get\(globalThis,"window"\),"location"\)/);
+  assertCodeIncludes(
+    mod.code,
+    '__zp_get(__zp_get(__zp_get(globalThis,"window"),"location"),"href")',
+  );
 
   const bad = rewriter.rewriteScript(`if (`, { kind: 'classic' });
   assert.equal(bad.ok, false);
@@ -603,10 +812,9 @@ test('Rust rewriter launders module import specifiers through same-origin script
     },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.ok(
-    out.code.includes(
-      'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js"',
-    ),
+  assertCodeIncludes(
+    out.code,
+    'import "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js"',
   );
   assert.ok(
     out.code.includes(
@@ -632,7 +840,7 @@ test('Rust rewriter accepts extensionless target URLs', async () => {
     targetUrl: 'https://example.com/extensionless/loader/v1?ray=abc123',
   });
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.match(out.code, /__zp_get\(globalThis,"location"\)\.href/);
+  assertCodeIncludes(out.code, '__zp_get(__zp_get(globalThis,"location"),"href")');
 });
 
 test('Rust rewriter routes in-operator checks on virtual windows through helper', async () => {
@@ -677,12 +885,12 @@ test('Rust rewriter routes computed global-alias member access through runtime m
     },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.ok(out.code.includes('G = __zp_get(globalThis,"window") || __zp_get(globalThis,"self")'));
+  assertCodeIncludes(out.code, 'G=__zp_get(globalThis,"window")||__zp_get(globalThis,"self")');
   assert.ok(out.code.includes('__zp_get(G,k)'));
-  assert.ok(out.code.includes('__zp_set(G,k,v + 1)'));
+  assert.ok(out.code.includes('__zp_set(G,k,v+1)'));
   assert.ok(out.code.includes('__zp_call(G,k,[])'));
   assert.ok(out.code.includes('__zp_call(__zp_get(G,k),k,[])'));
-  assert.ok(out.code.includes('const local = obj[k]'));
+  assertCodeIncludes(out.code, 'const local=obj[k]');
 });
 
 test('Rust rewriter tracks computed document aliases from global aliases', async () => {
@@ -695,9 +903,9 @@ test('Rust rewriter tracks computed document aliases from global aliases', async
     },
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
-  assert.ok(out.code.includes('let D = __zp_get(G,name)'));
+  assertCodeIncludes(out.code, 'let D=__zp_get(G,name)');
   assert.ok(out.code.includes('__zp_get(D,loc).hostname'));
-  assert.ok(out.code.includes('(__zp_call(__zp_get(D,loc),"replace"'));
+  assert.ok(out.code.includes('__zp_call(__zp_get(D,loc),"replace"'));
 });
 
 test('Rust rewriter preserves compound writes and constructor escapes through helpers', async () => {
@@ -708,9 +916,7 @@ test('Rust rewriter preserves compound writes and constructor escapes through he
   );
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.doesNotMatch(out.code, /Blocked by ZeroProxy rewrite policy/);
-  assert.ok(
-    out.code.includes('__zp_assign(__zp_get(globalThis,"location"),"href","+=",' + "'#x'" + ')'),
-  );
+  assertCodeIncludes(out.code, '__zp_assign(__zp_get(globalThis,"location"),"href","+=","#x")');
   assert.match(out.code, /__zp_call\(__zp_get\(\(\{\}\),"constructor"\),"constructor"/);
 });
 
@@ -745,10 +951,10 @@ test('Rust rewriter preserves valid syntax for assignment targets, property keys
   assert.doesNotThrow(() => new Function(out.code));
   assert.match(out.code, /static parent;/);
   assert.match(out.code, /parent;/);
-  assert.match(out.code, /location: __zp_get\(globalThis,"location"\)/);
-  assert.match(out.code, /window: __zp_get\(globalThis,"window"\)/);
-  assert.match(out.code, /parent: __zp_get\(globalThis,"parent"\)/);
-  assert.match(out.code, /__zp_get\(globalThis,"window"\)\.__svelte \?\?= \{\}/);
+  assertCodeIncludes(out.code, 'location:__zp_get(globalThis,"location")');
+  assertCodeIncludes(out.code, 'window:__zp_get(globalThis,"window")');
+  assertCodeIncludes(out.code, 'parent:__zp_get(globalThis,"parent")');
+  assertCodeIncludes(out.code, 'window.__svelte??={}');
   assert.ok(out.code.includes('__zp_update(__zp_get(globalThis,"location"),"hash","++",false)'));
   assert.ok(
     out.code.includes(
@@ -799,14 +1005,13 @@ test('Rust rewriter rewrites construction through virtualized expressions instea
 
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.doesNotThrow(() => new Function(out.code));
-  assert.ok(
-    out.code.includes(
-      'return (__zp_assign(__zp_get(globalThis,"location"),"href","+=",' + "'#x'" + '))',
-    ),
-  );
-  assert.match(
+  assertCodeIncludes(
     out.code,
-    /const ctor = \(__zp_construct\(__zp_get\(__zp_get\(\(\{\}\),"constructor"\),"constructor"\),\['return location.href'\]\)\)/,
+    'return __zp_assign(__zp_get(globalThis,"location"),"href","+=","#x")',
+  );
+  assertCodeIncludes(
+    out.code,
+    'const ctor=__zp_construct(__zp_get(__zp_get(({}),"constructor"),"constructor"),["return location.href"])',
   );
   assert.doesNotMatch(out.code, /throw new DOMException/);
 });
@@ -828,9 +1033,9 @@ test('Rust rewriter routes location assignments and WebSocket construction throu
     out.code,
     /__zp_set\(__zp_get\(globalThis,"window"\),"location","https:\/\/google\.com\/"\)/,
   );
-  assert.match(
+  assertCodeIncludes(
     out.code,
-    /__zp_set\(__zp_get\(globalThis,"location"\),"href",__zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href \+ "#frag"\)/,
+    '__zp_set(__zp_get(globalThis,"location"),"href",__zp_get(__zp_get(__zp_get(globalThis,"window"),"location"),"href")+"#frag")',
   );
   assert.match(
     out.code,

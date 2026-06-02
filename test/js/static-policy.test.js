@@ -8,16 +8,33 @@ function readRuntimeSource() {
     fs.readFileSync('web/runtime-prelude.mjs', 'utf8'),
     fs.readFileSync('web/runtime/abi/artifact-masking.mjs', 'utf8'),
     fs.readFileSync('web/runtime/abi/native-capture.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/dynamic-code/facade.mjs', 'utf8'),
     fs.readFileSync('web/runtime/dynamic-code/source.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/dom/attributes.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/document.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/events.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/fingerprinting.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/history.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/location.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/navigator.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/facades/storage.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/frames/accessors.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/frames/child-rewrite.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/frames/messaging.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/frames/policy.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/frames/sandbox.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/network/http.mjs', 'utf8'),
     fs.readFileSync('web/runtime/network/websocket.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/workers/facades.mjs', 'utf8'),
   ].join('\n');
 }
 
 function readServiceWorkerSource() {
   return [
     fs.readFileSync('web/sw.js', 'utf8'),
+    fs.readFileSync('web/sw/kernel.js', 'utf8'),
+    fs.readFileSync('web/sw/routes.js', 'utf8'),
+    fs.readFileSync('web/sw/transport.js', 'utf8'),
     fs.readFileSync('web/sw/responses.js', 'utf8'),
   ].join('\n');
 }
@@ -274,68 +291,62 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
   );
 });
 
-test('script rewrite ABI carries runtime context into Rust module URL rewriting', () => {
+test('HTML document transform is a thin Go wrapper over Rust lol_html policy', () => {
   const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rust = fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8');
 
   assert.match(
     htmltx,
-    /ScriptRewriter\s+func\(source, kind, targetURL, controlPrefix, tabID, runtimeToken string\)/,
+    /DocumentRewriter\s+func\(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers \[\]string\)/,
   );
-  assert.ok(
-    htmltx.includes(
-      'opt.ScriptRewriter(source, kind, opt.TargetURL.String(), shareurl.ControlPrefix, opt.TabID, opt.RuntimeToken)',
-    ),
-  );
-  assert.ok(
-    htmltx.includes(
-      'ScriptURLRewriter     func(raw, kind, targetURL, controlPrefix, tabID, runtimeToken string)',
-    ),
-  );
-  const scriptURLMatch = htmltx.match(
-    /func wrapScriptURL\(raw string, opt Options, kind string\) \(wrapped, target string, ok bool\) \{([\s\S]*?)\n\}/,
-  );
-  assert.ok(scriptURLMatch, 'wrapScriptURL missing');
-  assert.equal(scriptURLMatch[1].includes('url.Values'), false);
-  assert.equal(scriptURLMatch[1].includes('q.Set('), false);
-  assert.ok(htmltx.includes('opt.ScriptURLRewriter(raw, kind, opt.TargetURL.String()'));
+  assert.ok(htmltx.includes('opt.DocumentRewriter('));
+  assert.equal(htmltx.includes('golang.org/x/net/html'), false);
+  for (const forbidden of [
+    'xhtml.',
+    'streamTransformer',
+    'tokenRewriter',
+    'rewriteToken',
+    'wrapScriptURL',
+    'wrapFetchURL',
+    'rewriteSrcset',
+    'resolveVisibleTargetURL',
+    'baseSyncScript',
+    'classifyAttrPolicy',
+    'classifyScriptType',
+    'rewriteInlineStyle',
+    'rewriteInlineScript',
+    'rewriteInlineImportMap',
+  ]) {
+    assert.equal(htmltx.includes(forbidden), false, `${forbidden} must not remain in Go htmltx`);
+  }
+  assert.match(kernel, /DocumentRewriter:\s+rewriteHTMLDocumentFromJS/);
+  assert.ok(kernel.includes('rewriteHTMLDocumentFromJS'));
   assert.ok(kernel.includes('"tabId":         tabID'));
   assert.ok(kernel.includes('"runtimeToken":  runtimeToken'));
-  assert.ok(kernel.includes('rewriteScriptURLFromJS'));
-  assert.ok(build.includes('wasm_bindgen.rewrite_script_url'));
-  assert.ok(build.includes('rewriteScriptURL: rewriteScriptURLPublic'));
-  assert.ok(
-    sw.includes(
-      'rewriteScriptResponse(resp, { targetUrl: target, kind, tabId: resolved.tab.tabId, runtimeToken: resolved.tab.runtimeToken })',
-    ),
-  );
-});
-
-test('static fetch URL policy delegates to Rust rewriter ABI', () => {
-  const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
-  const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
-  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-
-  assert.ok(
-    htmltx.includes(
-      'FetchURLRewriter      func(raw, targetURL, controlPrefix string) (wrapped, target string, err error)',
-    ),
-  );
-  const fetchURLMatch = htmltx.match(
-    /func wrapFetchURL\(raw string, opt Options\) \(wrapped, target string, ok bool\) \{([\s\S]*?)\n\}/,
-  );
-  assert.ok(fetchURLMatch, 'wrapFetchURL missing');
-  assert.equal(fetchURLMatch[1].includes('url.Values'), false);
-  assert.equal(fetchURLMatch[1].includes('ResolveReference'), false);
-  assert.ok(
-    htmltx.includes('opt.FetchURLRewriter(raw, opt.TargetURL.String(), shareurl.ControlPrefix)'),
-  );
-  assert.ok(kernel.includes('FetchURLRewriter:      rewriteFetchURLFromJS'));
-  assert.ok(kernel.includes('rewriteFetchURLFromJS'));
-  assert.ok(build.includes('wasm_bindgen.rewrite_fetch_url'));
-  assert.ok(build.includes('rewriteFetchURL: rewriteFetchURLPublic'));
+  assert.ok(build.includes('wasm_bindgen.rewrite_html_document'));
+  assert.ok(build.includes('rewriteHTMLDocument: rewriteHTMLDocumentPublic'));
+  for (const needle of [
+    'rewrite_script(',
+    'script_url(',
+    'fetch_url(',
+    'srcset(',
+    'target_url(',
+    'new_with_servers',
+    'link_rel_kind',
+    'blocked_element_kind',
+    'meta_policy_kind',
+    'attr_policy_kind',
+    'script_type_kind',
+    'event_handler_attr_kind',
+    'rewrite_inline_script',
+    'rewrite_inline_style',
+    'import_map::rewrite',
+    'srcdoc',
+  ]) {
+    assert.ok(rust.includes(needle), `Rust document policy missing ${needle}`);
+  }
 });
 
 test('runtime import maps delegate rewrite policy to Rust rewriter ABI', () => {
@@ -355,32 +366,36 @@ test('runtime import maps delegate rewrite policy to Rust rewriter ABI', () => {
   assert.equal(body.includes('new URL'), false);
 });
 
-test('html transformer import maps fail closed without Rust rewriter hook', () => {
-  const src = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
-  assert.equal(src.includes('func rewriteImportMap('), false);
-  assert.equal(src.includes('return rewriteImportMap(source, opt)'), false);
-  assert.match(src, /if opt\.ImportMapRewriter == nil \{\s*return `\{\}`\s*\}/);
+test('Rust HTML document rewrite surface is backed by lol_html', () => {
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const cargo = fs.readFileSync('rewriter-rs/Cargo.toml', 'utf8');
+  const rust = fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8');
+
+  assert.ok(cargo.includes('lol_html'));
+  assert.ok(rust.includes('rewrite_str'));
+  assert.equal(rust.includes('html5ever'), false);
+  assert.equal(rust.includes('swc_html'), false);
+  assert.ok(build.includes('wasm_bindgen.rewrite_html_document'));
+  assert.ok(build.includes('rewriteHTMLDocument: rewriteHTMLDocumentPublic'));
 });
 
-test('html and wasm CSS rewriting fail closed without Rust rewriter hook', () => {
+test('html transformer fails closed without Rust document rewriter hook', () => {
+  const src = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  assert.match(
+    src,
+    /if opt\.DocumentRewriter == nil \{\s*return fmt\.Errorf\("%w: document rewriter unavailable", ErrMalformedHTML\)\s*\}/,
+  );
+});
+
+test('runtime CSS rewriting still fails closed without Rust rewriter hook', () => {
   const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const http = fs.readFileSync('web/http-rewriter.js', 'utf8');
-  const match = htmltx.match(
-    /func rewriteInlineStyle\(source string, opt Options\) string \{([\s\S]*?)\n\}/,
-  );
-  assert.ok(match, 'rewriteInlineStyle missing');
-  assert.ok(match[1].includes('if opt.CSSRewriter != nil'));
-  assert.ok(match[1].includes('return ""'));
-  assert.equal(match[1].includes('return source'), false);
-  const kernelMatch = kernel.match(
-    /func rewriteCSSFromJS\(source, baseURL string\) \(string, error\) \{([\s\S]*?)\n\}/,
-  );
-  assert.ok(kernelMatch, 'rewriteCSSFromJS missing');
-  assert.equal(kernelMatch[1].includes('return source, nil'), false);
-  assert.ok(kernelMatch[1].includes('CSS_REWRITE_UNAVAILABLE'));
+  assert.equal(htmltx.includes('func rewriteInlineStyle'), false);
+  assert.equal(kernel.includes('func rewriteCSSFromJS'), false);
+  assert.equal(kernel.includes('return source, nil'), false);
   assert.equal(rt.includes('fallbackRewriteCSS'), false);
   assert.equal(rt.includes('cssUrlToken'), false);
   assert.ok(
@@ -418,7 +433,7 @@ test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
     'message origin virtualization must avoid own-origin override as the first path',
   );
   assert.ok(
-    !rt.includes('return u.origin;'),
+    rt.includes('if (httpOrigin(s)) return proxyOrigin;'),
     'targetOrigin must not bypass proxied iframe origin mapping',
   );
 });
@@ -489,10 +504,10 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   const index = fs.readFileSync('web/index.html', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const cargo = fs.readFileSync('rewriter-rs/Cargo.toml', 'utf8');
   assert.ok(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"));
   assert.ok(sw.includes("importScripts('/zp/assets/http-rewriter.js')"));
   assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
-  assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
   assert.ok(sw.includes('/zp/api/script'));
   assert.ok(sw.includes('rewriteScriptResponse'));
   assert.ok(sw.includes('rewriteScriptOutcome'));
@@ -501,15 +516,21 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(build.includes('ZPRewriter'));
   assert.ok(build.includes('ZPRustRewriter'));
   assert.ok(build.includes('http-rewriter.js'));
+  assert.ok(build.includes('rust-rewriter.wasm'));
+  assert.equal(build.includes('__zp_rust_b64'), false);
+  assert.equal(build.includes('__ZP_RUST_WASM_BYTES'), false);
   assert.ok(fs.readFileSync('web/http-rewriter.js', 'utf8').includes('ZPHTTPRewriter'));
   assert.ok(build.includes('phase3-rust-wasm-ast-4-import-map'));
   assert.ok(build.includes('cargoBinPath'));
   assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
   assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust rewriter AST walker missing');
+  assert.equal(cargo.includes('html5ever'), false);
+  assert.equal(cargo.includes('swc_html_parser'), false);
+  assert.equal(cargo.includes('swc_html_ast'), false);
+  assert.ok(cargo.includes('lol_html'));
   assert.ok(build.includes('wasm_exec.js'));
+  assert.ok(sw.includes("ZP.assetPath('rust-rewriter.wasm')"));
   assert.equal(fs.existsSync('web/js-rewriter.js'), false);
-  assert.equal(fs.existsSync('web/oxc-parser.js'), false);
-  assert.equal(fs.existsSync('web/oxc_parser_wasm_bg.wasm'), false);
   assert.equal(fs.existsSync('web/wasm_exec.js'), false);
   assert.match(rt, /setAttributeNS/);
   assert.match(rt, /setAttributeNode/);

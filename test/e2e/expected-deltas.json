@@ -12,45 +12,13 @@
       "proxy": "<zeroproxy-frame-route>",
       "native": "<target-frame-url>"
     },
-    "surface.frameDocument.frameSrc": {
-      "proxy": "<zeroproxy-frame-route>",
-      "native": "<target-frame-url>"
-    },
-    "surface.frameSrcdoc.contentDocumentDefaultView": {
-      "proxy": "<missing>",
-      "native": true
-    },
     "surface.frameSrcdoc.contentDocumentURL": {
       "proxy": "<target-document-url>",
       "native": "<srcdoc-url>"
     },
-    "surface.frameSrcdoc.contentWindowParentIsWindow": {
-      "proxy": "<missing>",
-      "native": true
-    },
-    "surface.frameSrcdoc.contentWindowTopIsWindow": {
-      "proxy": "<missing>",
-      "native": true
-    },
-    "surface.frameSrcdoc.href": {
-      "proxy": "<missing>",
-      "native": "<srcdoc-url>"
-    },
-    "surface.frameSrcdoc.origin": {
-      "proxy": "<missing>",
-      "native": "<target-origin>"
-    },
     "surface.frameSrcdoc.sourceIsFrame": {
-      "proxy": "<missing>",
+      "proxy": false,
       "native": true
-    },
-    "surface.frameSrcdoc.timeout": {
-      "proxy": true,
-      "native": "<missing>"
-    },
-    "surface.frameSrcdoc.topOrigin": {
-      "proxy": "<missing>",
-      "native": "<target-origin>"
     }
   }
 }

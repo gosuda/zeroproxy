@@ -91,7 +91,8 @@ func TestServeAssetAllowlist(t *testing.T) {
 
 	allowed := []string{
 		"zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "http-rewriter.js",
-		"wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest",
+		"rust-rewriter.wasm", "wasm_exec.js", "worker-prelude.js", "favicon.ico",
+		"manifest.webmanifest",
 	}
 	for _, name := range allowed {
 		req := httptest.NewRequest(http.MethodGet, assetPrefix+name, nil)

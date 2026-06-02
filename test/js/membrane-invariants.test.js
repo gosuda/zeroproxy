@@ -12,16 +12,37 @@ const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
 
 const read = (path) => fs.readFileSync(path, 'utf8');
-const readServiceWorker = () => [read('web/sw.js'), read('web/sw/responses.js')].join('\n');
+const readServiceWorker = () =>
+  [
+    read('web/sw.js'),
+    read('web/sw/kernel.js'),
+    read('web/sw/routes.js'),
+    read('web/sw/transport.js'),
+    read('web/sw/responses.js'),
+  ].join('\n');
 const readRuntime = () =>
   [
     read('web/runtime-prelude.mjs'),
     read('web/runtime/abi/artifact-masking.mjs'),
     read('web/runtime/abi/native-capture.mjs'),
+    read('web/runtime/dynamic-code/facade.mjs'),
     read('web/runtime/dynamic-code/source.mjs'),
+    read('web/runtime/dom/attributes.mjs'),
+    read('web/runtime/facades/document.mjs'),
     read('web/runtime/facades/events.mjs'),
     read('web/runtime/facades/fingerprinting.mjs'),
+    read('web/runtime/facades/history.mjs'),
+    read('web/runtime/facades/location.mjs'),
+    read('web/runtime/facades/navigator.mjs'),
+    read('web/runtime/facades/storage.mjs'),
+    read('web/runtime/frames/accessors.mjs'),
+    read('web/runtime/frames/child-rewrite.mjs'),
+    read('web/runtime/frames/messaging.mjs'),
+    read('web/runtime/frames/policy.mjs'),
+    read('web/runtime/frames/sandbox.mjs'),
+    read('web/runtime/network/http.mjs'),
     read('web/runtime/network/websocket.mjs'),
+    read('web/runtime/workers/facades.mjs'),
   ].join('\n');
 
 // ---------------------------------------------------------------------------
@@ -92,6 +113,15 @@ function loadServiceWorker() {
     },
     importScripts: (...urls) => {
       for (const url of urls) {
+        if (String(url).includes('/zp/assets/sw-kernel.js')) {
+          vm.runInContext(read('web/sw/kernel.js'), sandbox);
+        }
+        if (String(url).includes('/zp/assets/sw-routes.js')) {
+          vm.runInContext(read('web/sw/routes.js'), sandbox);
+        }
+        if (String(url).includes('/zp/assets/sw-transport.js')) {
+          vm.runInContext(read('web/sw/transport.js'), sandbox);
+        }
         if (String(url).includes('/zp/assets/sw-responses.js')) {
           vm.runInContext(read('web/sw/responses.js'), sandbox);
         }

@@ -23,16 +23,16 @@ func TestBuildHTTP1RequestPinsFullClientHintSet(t *testing.T) {
 	// Test-local literals (NOT the production constants) so that changing the
 	// spoofed identity constants makes this freeze go red -- that is the point.
 	want := map[string]string{
-		"Sec-CH-UA":                   `"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"`,
+		"Sec-CH-UA":                   `"Chromium";v="148", "Not:A-Brand";v="24", "Google Chrome";v="148"`,
 		"Sec-CH-UA-Mobile":            "?0",
 		"Sec-CH-UA-Platform":          `"Windows"`,
 		"Sec-CH-UA-Arch":              `"x86"`,
 		"Sec-CH-UA-Bitness":           `"64"`,
-		"Sec-CH-UA-Full-Version":      `"134.0.0.0"`,
-		"Sec-CH-UA-Full-Version-List": `"Chromium";v="134.0.0.0", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="134.0.0.0"`,
+		"Sec-CH-UA-Full-Version":      `"148.0.7778.217"`,
+		"Sec-CH-UA-Full-Version-List": `"Chromium";v="148.0.7778.217", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="148.0.7778.217"`,
 		"Sec-CH-UA-Model":             `""`,
-		"Sec-CH-UA-Platform-Version":  `"10.0.0"`,
-		"User-Agent":                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+		"Sec-CH-UA-Platform-Version":  `"15.0.0"`,
+		"User-Agent":                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
 		"Accept-Encoding":             "identity",
 	}
 	for name, w := range want {
