@@ -1,4 +1,4 @@
-# Clippy configuration for the zp-rewriter (Rust SWC/OXC WASM rewriter).
+# Clippy configuration for the zp-rewriter Rust WASM rewriter.
 #
 # cognitive-complexity-threshold configures clippy::cognitive_complexity.
 #

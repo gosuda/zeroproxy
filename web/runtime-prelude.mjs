@@ -54,6 +54,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   let activeProxyFragment = preservedShareFragment(initialProxyURL.hash);
   let activeRouteKey = ZP.isSharePath(activeProxyPath) ? ZP.shareRouteKey(activeProxyPath) : '';
   let virtualURL = new URL(boot.targetUrl);
+  const srcdocVisibleURL = initialProxyURL.href === 'about:srcdoc' ? new URL('about:srcdoc') : null;
   let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
   let explicitBaseURL = '';
@@ -392,6 +393,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       u.hash = '';
       return u.href;
     } catch { return ''; }
+  }
+  function visibleLocationURL() {
+    return srcdocVisibleURL || virtualURL;
   }
   function documentReferrerFor(target) {
     const source = referrerURLWithoutHash(virtualURL.href);
@@ -997,6 +1001,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const { virtualLocation, crossWindowLocation } = createLocationFacades({
       Native,
       getVirtualURL: () => virtualURL,
+      getVisibleURL: visibleLocationURL,
       setVirtualLocation,
       updateVirtualHash,
       maskMethods,
@@ -1789,9 +1794,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return writeAttr(el, ns, attrName, rewritten.actual);
   }
   function installGetterMasking(w) {
-    const locGet = p => () => new URL(virtualURL.href)[p];
+    const locGet = p => () => new URL(visibleLocationURL().href)[p];
     for (const p of ['href','protocol','host','hostname','port','pathname','search','hash','origin']) defineAccessor(w.Location && w.Location.prototype, p, locGet(p), p === 'href' ? v => { setVirtualLocation(v); } : p === 'hash' ? v => { updateVirtualHash(v); } : undefined);
-    define(w.Location && w.Location.prototype, 'toString', function(){ return virtualURL.href; });
+    define(w.Location && w.Location.prototype, 'toString', function(){ return visibleLocationURL().href; });
     installDocumentAccessors(w);
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');

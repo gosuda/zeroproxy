@@ -145,12 +145,36 @@ test('Rust rewriter asset exposes the public rewriter API without JS fallback as
     out.code,
     '__zp_get(__zp_get(__zp_get(globalThis,"window"),"location"),"href")',
   );
-  assert.equal('OXCParser' in ctx, false);
+  assert.equal('wasm_bindgen' in ctx, false);
 });
 
 test('Rust rewriter initialization stays within a coarse budget', async () => {
   const ctx = await loadBuiltRustContext();
   assertWithinBudget('rust-rewriter initSync asset load', ctx.__rustRewriterInitMs, 1000);
+});
+
+test('Rust rewriter asset is idempotent in a single realm', async () => {
+  const ctx = await loadBuiltRustContext();
+  const rustRewriter = ctx.ZPRustRewriter;
+  const publicRewriter = ctx.ZPRewriter;
+  const rustDescriptor = Object.getOwnPropertyDescriptor(ctx, 'ZPRustRewriter');
+  const publicDescriptor = Object.getOwnPropertyDescriptor(ctx, 'ZPRewriter');
+  assert.equal(rustDescriptor.enumerable, false);
+  assert.equal(rustDescriptor.configurable, false);
+  assert.equal(rustDescriptor.writable, false);
+  assert.equal(publicDescriptor.enumerable, false);
+  assert.equal(publicDescriptor.configurable, false);
+  assert.equal(publicDescriptor.writable, false);
+
+  assert.doesNotThrow(() => {
+    vm.runInContext(
+      fs.readFileSync(path.join(ctx.__buildOutDir, 'web', 'rust-rewriter.js'), 'utf8'),
+      ctx,
+      { filename: 'rust-rewriter.js' },
+    );
+  });
+  assert.equal(ctx.ZPRustRewriter, rustRewriter);
+  assert.equal(ctx.ZPRewriter, publicRewriter);
 });
 
 test('Rust rewriter latency stays within coarse size-bucket budgets', async () => {
@@ -219,7 +243,7 @@ test('Vite-built runtime prelude remains a classic bundled target asset', async 
   assert.equal(/^\s*import\s/m.test(runtime), false);
   assert.equal(/^\s*export\s/m.test(runtime), false);
   assert.ok(runtime.includes('SHARE_INFO_ENC'), 'runtime bundle should include zp-core');
-  assert.ok(runtime.includes('Object.defineProperty(globalThis, "ZPRustRewriter"'));
+  assert.ok(runtime.includes('defineHiddenAPI("ZPRustRewriter"'));
   assert.ok(runtime.includes('Object.defineProperty(globalThis, "ZPHTTPRewriter"'));
   for (const asset of ['zp-core', 'rust-rewriter', 'http-rewriter']) {
     assert.equal(runtime.includes(`<script nonce=zp src=/zp/assets/${asset}.js>`), false);
@@ -261,7 +285,7 @@ test('Vite-built service worker remains a classic bundled runtime asset', async 
   assert.equal(/^\s*import\s/m.test(sw), false);
   assert.equal(/^\s*export\s/m.test(sw), false);
   assert.ok(sw.includes('SHARE_INFO_ENC'), 'service worker bundle should include zp-core');
-  assert.ok(sw.includes('Object.defineProperty(globalThis, "ZPRustRewriter"'));
+  assert.ok(sw.includes('defineHiddenAPI("ZPRustRewriter"'));
   assert.ok(sw.includes('Object.defineProperty(globalThis, "ZPHTTPRewriter"'));
   assert.ok(sw.includes('globalThis.Go = class'));
   assert.ok(sw.includes('const go = new Go()'));
