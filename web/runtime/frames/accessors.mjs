@@ -1,6 +1,7 @@
 export function createFrameAccessors({
   networkContainmentMarker,
   isDirectExternalFrameElement,
+  shouldContainFrameWindow,
   installNetworkContainment,
   frameWindowFacadeFor,
   frameDocumentFacadeFor,
@@ -47,8 +48,10 @@ export function createFrameAccessors({
     return function contentWindow() {
       const childWin = nativeGet.call(this);
       if (isDirectExternalFrameElement(this)) return childWin;
-      const contained = containFrameWindow(childWin, this);
-      return frameWindowFacadeFor ? frameWindowFacadeFor(this, contained) : contained;
+      const exposed = shouldContainFrameWindow && shouldContainFrameWindow(this, childWin)
+        ? containFrameWindow(childWin, this)
+        : childWin;
+      return frameWindowFacadeFor ? frameWindowFacadeFor(this, exposed) : exposed;
     };
   }
 
@@ -56,7 +59,10 @@ export function createFrameAccessors({
     return function contentDocument() {
       const childDoc = nativeGet.call(this);
       if (!childDoc || isDirectExternalFrameElement(this)) return childDoc;
-      const childWin = childDoc.defaultView ? containFrameWindow(childDoc.defaultView, this) : null;
+      const rawWin = childDoc.defaultView || null;
+      const childWin = rawWin && shouldContainFrameWindow && shouldContainFrameWindow(this, rawWin)
+        ? containFrameWindow(rawWin, this)
+        : rawWin;
       if (frameDocumentFacadeFor) return frameDocumentFacadeFor(this, childDoc, childWin);
       return childDoc;
     };

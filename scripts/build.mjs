@@ -243,6 +243,7 @@ async function makeRustRewriterClassic() {
     `function clearWasmTiming() { try { if (globalThis.performance && typeof globalThis.performance.clearResourceTimings === 'function') globalThis.performance.clearResourceTimings(); } catch {} }`,
     `function init() { if (initialized) return Promise.resolve(true); if (!initPromise) initPromise = wasm_bindgen({ module_or_path: wasmSource() }).then(() => { initialized = true; clearWasmTiming(); return true; }).catch(err => { initError = err; initPromise = null; throw err; }); return initPromise; }`,
     `function initSync(bytes) { const source = bytes || loadWasmBytesSync(); if (!source) return false; if (!initialized) { wasm_bindgen.initSync({ module: source }); initialized = true; clearWasmTiming(); } return true; }`,
+    `function bootstrapInit() { try { if (initSync()) return; } catch {} init().catch(() => {}); }`,
     `function ensureReady() { if (!initialized) throw initError || new Error('RUST_REWRITER_NOT_READY'); }`,
     `function normalizeKind(kind) { kind = String(kind || 'classic').toLowerCase(); if (kind === 'worker') return 'classic'; if (kind === 'event' || kind === 'event-handler') return 'event-handler'; if (kind === 'function') return 'function'; if (kind === 'module') return 'module'; return 'classic'; }`,
     `function lowLevel(source, kind, targetUrl, controlPrefix) { return lowLevelWithContext(source, kind, targetUrl, controlPrefix, '', ''); }`,
@@ -285,7 +286,7 @@ async function makeRustRewriterClassic() {
     `const rewriterApi = Object.freeze({ VERSION, get ready() { return initialized; }, init, initSync, rewriteScript: rewriteScriptPublic, rewriteScriptURL: rewriteScriptURLPublic, rewriteFetchURL: rewriteFetchURLPublic, rewriteSrcset: rewriteSrcsetPublic, rewriteTargetURL: rewriteTargetURLPublic, classifyLinkRel: classifyLinkRelPublic, classifyBlockedElement: classifyBlockedElementPublic, classifyMetaPolicy: classifyMetaPolicyPublic, classifyAttrPolicy: classifyAttrPolicyPublic, classifyScriptType: classifyScriptTypePublic, classifyEventHandlerAttr: classifyEventHandlerAttrPublic, rewriteCSS: rewriteCSSPublic, rewriteImportMap: rewriteImportMapPublic, rewriteHTMLDocument: rewriteHTMLDocumentPublic, makeShareURL: makeShareURLPublic, rewriteFunctionBody: rewriteFunctionBodyPublic, blockSource() { return BLOCK_CODE; } });`,
     `Object.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });`,
     `Object.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });`,
-    `if (!initSync()) init().catch(() => {});`,
+    `bootstrapInit();`,
     '})();',
     '',
   ].join('\n');

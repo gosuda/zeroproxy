@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 function loadCore() {
   const ctx = {
@@ -53,6 +55,54 @@ test('base64url decoder is raw path-safe only', () => {
   assert.throws(() => ZP.base64UrlToBytes('abcd='), /INVALID_BASE64URL/);
   assert.throws(() => ZP.base64UrlToBytes('ab+cd'), /INVALID_BASE64URL/);
   assert.throws(() => ZP.base64UrlToBytes('a'), /INVALID_BASE64URL/);
+});
+
+test('runtime HTTP facade keeps ZeroProxy assets on the proxy origin', async () => {
+  const { createHTTPFetchFacade } = await import(
+    pathToFileURL(path.resolve('web/runtime/network/http.mjs')).href
+  );
+  const previousZP = globalThis.ZP;
+  globalThis.ZP = {
+    canonicalTargetURL: (input, base) => new URL(String(input), base || undefined),
+  };
+  let fetched = null;
+  const Native = {
+    fetch: (url, init) => {
+      fetched = { url, init };
+      return Promise.resolve(new Response('asset'));
+    },
+    Request,
+    Headers,
+  };
+  const facade = createHTTPFetchFacade({
+    root: {},
+    Native,
+    boot: { tabId: 't' },
+    runtimeToken: 'rt',
+    normalizedError: code => new Error(code),
+    postMessageToSW: async () => {},
+    openUploadStream: async () => '',
+    getActiveEntryId: () => 'e',
+    getVirtualURL: () => new URL('https://www.naver.com/'),
+    getBaseURL: () => 'https://www.naver.com/',
+    getDocumentReferrerPolicy: () => '',
+    proxyOrigin: 'https://proxy.example',
+    isInternalRequestURL: raw => new URL(raw).pathname === '/zp/assets/rust-rewriter.wasm',
+  });
+  try {
+    assert.equal(
+      facade.requestTargetURL('/zp/assets/rust-rewriter.wasm'),
+      'https://proxy.example/zp/assets/rust-rewriter.wasm',
+    );
+    await facade.fetchThroughRuntime('/zp/assets/rust-rewriter.wasm', { cache: 'no-store' });
+    assert.deepEqual(fetched, {
+      url: 'https://proxy.example/zp/assets/rust-rewriter.wasm',
+      init: { cache: 'no-store' },
+    });
+  } finally {
+    if (previousZP === undefined) delete globalThis.ZP;
+    else globalThis.ZP = previousZP;
+  }
 });
 test('relay server fragments normalize, dedupe, and round-trip through share URLs', async () => {
   const ZP = loadCore();

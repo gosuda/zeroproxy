@@ -12,21 +12,28 @@ export function createHTTPFetchFacade({
   getBaseURL,
   getDocumentReferrerPolicy,
   proxyOrigin,
+  isInternalRequestURL = () => false,
 }) {
-  function requestTargetURL(input) {
-    const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
-    const parsed = new URL(raw, compatRelativeRequestBase(raw) || getBaseURL());
-    if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + parsed.search + parsed.hash, getBaseURL()).href;
-    return ZP.canonicalTargetURL(parsed.href, getBaseURL()).href;
+  function requestURLString(input) {
+    return input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
   }
 
-  function compatRelativeRequestBase(raw) {
-    const text = String(raw || '');
-    if (!text || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(text) || text.startsWith('//')) return '';
-    let path = '';
-    try { path = new URL(text, getVirtualURL().href).pathname; } catch { return ''; }
-    if (getVirtualURL().hostname === 'www.naver.com' && path === '/api/auth') return 'https://shopsquare.naver.com/';
-    return '';
+  function internalProxyRequestURL(raw) {
+    try {
+      const u = new URL(String(raw), proxyOrigin);
+      return isInternalRequestURL(u.href) ? u.href : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function requestTargetURL(input) {
+    const raw = requestURLString(input);
+    const internal = internalProxyRequestURL(raw);
+    if (internal) return internal;
+    const parsed = new URL(raw, getBaseURL());
+    if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + parsed.search + parsed.hash, getBaseURL()).href;
+    return ZP.canonicalTargetURL(parsed.href, getBaseURL()).href;
   }
 
   function replayableBodySize(body) {
@@ -114,6 +121,8 @@ export function createHTTPFetchFacade({
 
   async function fetchThroughRuntime(input, init = {}) {
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
+    const internal = internalProxyRequestURL(requestURLString(input));
+    if (internal) return Native.fetch(internal, init);
     const target = requestTargetURL(input);
     const req = runtimeRequest(input, init);
     const virtualURL = getVirtualURL();

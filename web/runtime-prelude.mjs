@@ -59,6 +59,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentReferrerPolicy = normalizeReferrerPolicy(boot.referrerPolicy || '');
+  const documentCharset = String(boot.documentCharset || '');
   const dynamicCompileAllowed = boot.dynamicCompileAllowed === true;
   const urlMeta = new WeakMap();
   const messageListenerWrappers = new WeakMap();
@@ -222,6 +223,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     getBaseURL: () => baseURL,
     getDocumentReferrerPolicy: () => documentReferrerPolicy,
     proxyOrigin,
+    isInternalRequestURL: isZeroProxyAssetURL,
   });
   const { installWebSocket, installWebSocketStream } = createWebSocketFacades({
     root,
@@ -428,12 +430,26 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return new Promise((resolve, reject) => {
       const channel = new MessageChannel();
       const sealed = Object.assign({}, message, { runtimeToken });
+      const done = fn => data => {
+        clearTimeout(timer);
+        try { channel.port1.close(); } catch {}
+        fn(data);
+      };
+      const timer = setTimeout(done(() => reject(normalizedError('NetworkError'))), 8000);
       channel.port1.onmessage = ev => {
         const data = ev.data || {};
-        if (data.ok) resolve(data);
-        else { const err = new Error(data.error || 'NetworkError'); err.code = data.error || 'NetworkError'; reject(err); }
+        if (data.ok) done(resolve)(data);
+        else {
+          const err = new Error(data.error || 'NetworkError');
+          err.code = data.error || 'NetworkError';
+          done(reject)(err);
+        }
       };
-      controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
+      try {
+        controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
+      } catch (err) {
+        done(reject)(err);
+      }
     });
   }
   async function openUploadStream(body, signal) {
@@ -1214,7 +1230,18 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     try { ev = new ProgressEvent(type, { loaded, total, lengthComputable }); } catch { ev = { type, loaded, total, lengthComputable }; }
     return target.dispatchEvent(ev);
   }
+  function installRequestFacade() {
+    function ZPRequest(input, init) {
+      if (!new.target) throw new TypeError("Failed to construct 'Request': Please use the 'new' operator.");
+      const requestLike = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function';
+      return new Native.Request(requestLike ? input : requestTargetURL(input), init);
+    }
+    try { Object.setPrototypeOf(ZPRequest, Native.Request); } catch {}
+    try { ZPRequest.prototype = Native.Request.prototype; } catch {}
+    defineReplacingNative(root, 'Request', ZPRequest);
+  }
   function installHTTPAPIs() {
+    if (Native.Request) installRequestFacade();
     if (Native.fetch && Native.Request && Native.Headers) defineReplacingNative(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
@@ -1416,17 +1443,20 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         xhr._sent = true;
         fireEvent(xhr, 'loadstart');
         const nativeXHR = new Native.XMLHttpRequest();
-        nativeXHR.open(xhr._method, `${ZP.apiPath('fetch')}?url=${encodeURIComponent(xhr._url)}`, false);
-        nativeXHR.setRequestHeader('X-ZP-Tab-Id', boot.tabId);
-        nativeXHR.setRequestHeader('X-ZP-Entry-Id', activeEntryId);
-        nativeXHR.setRequestHeader('X-ZP-Runtime-Token', runtimeToken);
-        nativeXHR.setRequestHeader('X-ZP-Document-URL', virtualURL.href);
-        nativeXHR.setRequestHeader('X-ZP-Fetch-Credentials', xhr._withCredentials ? 'include' : 'same-origin');
-        nativeXHR.setRequestHeader('X-ZP-Fetch-Mode', 'cors');
-        nativeXHR.setRequestHeader('X-ZP-Fetch-Redirect', 'follow');
-        nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer', virtualURL.href);
-        nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer-Policy', '');
-        if (replayableBodySize(body) != null && replayableBodySize(body) <= 1024 * 1024) nativeXHR.setRequestHeader('X-ZP-Upload-Replayable', '1');
+        const internal = isZeroProxyAssetURL(xhr._url);
+        nativeXHR.open(xhr._method, internal ? xhr._url : `${ZP.apiPath('fetch')}?url=${encodeURIComponent(xhr._url)}`, false);
+        if (!internal) {
+          nativeXHR.setRequestHeader('X-ZP-Tab-Id', boot.tabId);
+          nativeXHR.setRequestHeader('X-ZP-Entry-Id', activeEntryId);
+          nativeXHR.setRequestHeader('X-ZP-Runtime-Token', runtimeToken);
+          nativeXHR.setRequestHeader('X-ZP-Document-URL', virtualURL.href);
+          nativeXHR.setRequestHeader('X-ZP-Fetch-Credentials', xhr._withCredentials ? 'include' : 'same-origin');
+          nativeXHR.setRequestHeader('X-ZP-Fetch-Mode', 'cors');
+          nativeXHR.setRequestHeader('X-ZP-Fetch-Redirect', 'follow');
+          nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer', virtualURL.href);
+          nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer-Policy', '');
+          if (replayableBodySize(body) != null && replayableBodySize(body) <= 1024 * 1024) nativeXHR.setRequestHeader('X-ZP-Upload-Replayable', '1');
+        }
         for (const [name, value] of xhr._headers) nativeXHR.setRequestHeader(name, value);
         try {
           nativeXHR.send(xhr._method === 'GET' || xhr._method === 'HEAD' ? null : syncXHRBody(body));
@@ -1567,7 +1597,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; define(navigator, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
 
   function installNavigationTraps() {
-    document.addEventListener('click', ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href && nav.target && nav.target !== '_self') root.open(nav.href, nav.target); else if (nav.href) setVirtualLocation(nav.href); }, true);
+    const handleNavigationClick = ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href && nav.target && nav.target !== '_self') root.open(nav.href, nav.target); else if (nav.href) setVirtualLocation(nav.href); };
+    root.addEventListener('click', handleNavigationClick, true);
+    document.addEventListener('click', handleNavigationClick, true);
     document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
     if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
@@ -2076,7 +2108,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         const value = raw && raw[prop];
         return typeof value === 'function' ? value.bind(raw) : value;
       },
-      has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\d*)$/.test(String(prop)) && Number(prop) < length()); }
+      has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\d*)$/.test(String(prop)) && Number(prop) < length()); }
     });
   }
   function sanitizeSerializedHTML(html) {
@@ -2525,6 +2557,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const ref = documentReferrerFor(target);
       if (ref) params.set('ref', ref);
       if (documentReferrerPolicy) params.set('rp', documentReferrerPolicy);
+      if (kind === 'classic' && documentCharset) params.set('dc', documentCharset);
       params.set('tab', boot.tabId);
       params.set('rt', runtimeToken);
     }
@@ -3029,6 +3062,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const { installFrameAccessors } = createFrameAccessors({
       networkContainmentMarker,
       isDirectExternalFrameElement,
+      shouldContainFrameWindow: isInitialAboutBlankFrame,
       installNetworkContainment,
       frameWindowFacadeFor,
       frameDocumentFacadeFor,
@@ -3147,7 +3181,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const src = Native.getAttribute.call(frame, 'src');
       rememberFrameOrigin(frame);
       if (isDirectExternalFrameElement(frame)) return;
-      if ((!src || /^about:blank$/i.test(src)) && !Native.getAttribute.call(frame, 'data-zp-target-url') && frame.contentWindow) installNetworkContainment(frame.contentWindow);
+      if (!src || /^about:blank$/i.test(src)) return;
     } catch { try { frame.remove(); } catch {} }
   }
   function installNetworkContainment(w) {

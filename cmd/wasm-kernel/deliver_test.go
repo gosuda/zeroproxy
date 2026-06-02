@@ -13,6 +13,8 @@ import (
 
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
+	"golang.org/x/text/encoding/korean"
+	"golang.org/x/text/transform"
 )
 
 func deliverAwait(p js.Value) (js.Value, bool) {
@@ -121,6 +123,15 @@ func deliverResp(status int, hdr map[string]string, setCookie, body string, hasB
 	return r
 }
 
+func eucKRString(t *testing.T, text string) string {
+	t.Helper()
+	encoded, _, err := transform.String(korean.EUCKR.NewEncoder(), text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)
@@ -164,6 +175,12 @@ func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
 	}
 	if doc.body == "<html><head></head><body>hi</body></html>" || !strings.Contains(doc.body, "hi") {
 		t.Fatalf("document body not transformed (membrane injection missing): %q", doc.body)
+	}
+
+	eucKRDoc := eucKRString(t, `<html><head></head><body>뉴스</body></html>`)
+	decodedDoc := runDeliver(deliverReq(map[string]string{"X-Zp-Document-Request": "1"}, "https://news.naver.com/"), deliverResp(200, map[string]string{"Content-Type": "text/html; charset=euc-kr"}, "", eucKRDoc, true), mustURL(t, "https://news.naver.com/"))
+	if !strings.Contains(decodedDoc.body, "뉴스") {
+		t.Fatalf("document transform must decode euc-kr before rewrite, got body %q", decodedDoc.body)
 	}
 
 	// Set-Cookie is captured into the jar; credentials=omit skips capture.

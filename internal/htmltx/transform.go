@@ -22,6 +22,7 @@ type Options struct {
 	Servers               []string
 	DynamicCompileAllowed bool
 	ReferrerPolicy        string
+	DocumentCharset       string
 	DocumentRewriter      func(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error)
 }
 
@@ -74,6 +75,7 @@ type bootConfig struct {
 	Servers               []string `json:"servers,omitempty"`
 	DynamicCompileAllowed bool     `json:"dynamicCompileAllowed,omitempty"`
 	ReferrerPolicy        string   `json:"referrerPolicy,omitempty"`
+	DocumentCharset       string   `json:"documentCharset,omitempty"`
 }
 
 func runtimePrelude(opt Options) string {
@@ -87,6 +89,7 @@ func runtimePrelude(opt Options) string {
 		Servers:               opt.Servers,
 		DynamicCompileAllowed: opt.DynamicCompileAllowed,
 		ReferrerPolicy:        opt.ReferrerPolicy,
+		DocumentCharset:       opt.DocumentCharset,
 	})
 	var b strings.Builder
 	b.Grow(len(bootJSON) + 130)

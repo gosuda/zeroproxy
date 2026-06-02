@@ -147,6 +147,7 @@ test('runtime installs required escape-vector hooks', () => {
   const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
   for (const needle of [
     "document.addEventListener('click'",
+    "root.addEventListener('click'",
     "document.addEventListener('submit'",
     'HTMLFormElement.prototype',
     'popstate',
@@ -227,10 +228,10 @@ test('runtime installs required escape-vector hooks', () => {
     "name === 'origin'",
     "base === document && prop === 'location'",
     'frameOriginForSource(ev.source)',
-    "!Native.getAttribute.call(frame, 'data-zp-target-url')",
-    'compatRelativeRequestBase(raw)',
-    "path === '/api/auth'",
-    'https://shopsquare.naver.com/',
+    'shouldContainFrameWindow: isInitialAboutBlankFrame',
+    'shouldContainFrameWindow && shouldContainFrameWindow(this, childWin)',
+    'installRequestFacade',
+    'return new Native.Request(requestLike ? input : requestTargetURL(input), init)',
     "Native.setAttribute.call(this, k, '')",
     "'WebSocketStream'",
     'getUserMedia',
@@ -292,6 +293,42 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
     body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('tab'"),
     'runtime tab token must not be part of module identity',
   );
+});
+
+test('filtered DOM collections expose numeric indexes to native slice', () => {
+  const rt = readRuntimeSource();
+  assert.ok(
+    rt.includes("has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\d*)$/.test(String(prop)) && Number(prop) < length()); }"),
+    'filtered collection HasProperty must recognize all numeric indexes',
+  );
+  assert.equal(
+    rt.includes("has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\\\d*)$/.test(String(prop)) && Number(prop) < length()); }"),
+    false,
+    'filtered collection HasProperty must not match a literal backslash-d',
+  );
+});
+
+test('classic script rewrite carries document charset for legacy Korean news scripts', () => {
+  const rt = readRuntimeSource();
+  const sw = readServiceWorkerSource();
+  assert.ok(rt.includes("const documentCharset = String(boot.documentCharset || '')"));
+  assert.ok(rt.includes("params.set('dc', documentCharset)"));
+  assert.ok(sw.includes("const documentCharset = url.searchParams.get('dc') || ''"));
+  assert.ok(sw.includes('scriptResponseText(resp, opt.documentCharset ||'));
+  assert.ok(sw.includes('new TextDecoder(charset).decode(bytes)'));
+});
+
+test('runtime HTTP facade resolves relative requests without site-specific host maps', () => {
+  const http = fs.readFileSync('web/runtime/network/http.mjs', 'utf8');
+  assert.equal(/naver|pstatic|shopsquare|recoshopping/i.test(http), false);
+  assert.ok(http.includes('const parsed = new URL(raw, getBaseURL())'));
+});
+
+test('Rust rewriter bootstrap falls back to async WASM load if sync bytes fail', () => {
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.ok(build.includes('function bootstrapInit()'));
+  assert.ok(build.includes('try { if (initSync()) return; } catch {} init().catch(() => {})'));
+  assert.ok(build.includes('bootstrapInit();'));
 });
 
 test('HTML document transform is a thin Go wrapper over Rust lol_html policy', () => {

@@ -161,11 +161,12 @@ async function apiScript(req, url, clientId) {
   const headers = [['Accept', 'text/javascript, application/javascript, */*;q=0.8']];
   const ref = url.searchParams.get('ref') || '';
   const refPolicy = url.searchParams.get('rp') || '';
+  const documentCharset = url.searchParams.get('dc') || '';
   if (ref) headers.push(['X-ZP-Fetch-Referrer', ref]);
   if (refPolicy) headers.push(['X-ZP-Fetch-Referrer-Policy', refPolicy]);
   rememberRuntimeScriptContext(url, target, resolved);
   const resp = await transportFetch(target, { request: req, method: 'GET', headers, tab: resolved.tab, entryId: resolved.entryId });
-  return rewriteScriptResponse(resp, { targetUrl: target, kind, tabId: resolved.tab.tabId, runtimeToken: resolved.tab.runtimeToken });
+  return rewriteScriptResponse(resp, { targetUrl: target, kind, tabId: resolved.tab.tabId, runtimeToken: resolved.tab.runtimeToken, documentCharset });
 }
 
 async function apiWorkerScript(req, url, clientId) {
@@ -237,12 +238,26 @@ async function rewriteScriptResponse(resp, opt) {
   let code = '';
   try {
     await initRewriter();
-    const source = await resp.text();
+    const source = await scriptResponseText(resp, opt.documentCharset || '');
     code = self.ZPHTTPRewriter.rewriteScriptOutcome(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX, tabId: opt.tabId || '', runtimeToken: opt.runtimeToken || '' }).code;
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   }
   return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
+}
+async function scriptResponseText(resp, documentCharset) {
+  const bytes = await resp.arrayBuffer();
+  const charset = responseCharset(resp) || documentCharset || 'utf-8';
+  try {
+    return new TextDecoder(charset).decode(bytes);
+  } catch {
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+}
+function responseCharset(resp) {
+  const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
+  const m = /(?:^|;)\s*charset=([^;]+)/i.exec(ct);
+  return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : '';
 }
 function shouldRewriteCSS(req, resp) {
   if (req.destination === 'style') return true;

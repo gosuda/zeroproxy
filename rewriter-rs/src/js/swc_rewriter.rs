@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use swc_common::{
-    sync::Lrc, FileName, Globals, Mark, SourceMap, SyntaxContext, DUMMY_SP, GLOBALS as SWC_GLOBALS,
+    comments::SingleThreadedComments, sync::Lrc, FileName, Globals, Mark, SourceMap, SyntaxContext,
+    DUMMY_SP, GLOBALS as SWC_GLOBALS,
 };
 use swc_ecma_ast::{
     op, ArrayLit, AssignOp, AssignTarget, BinaryOp, Callee, EsVersion, Expr, ExprOrSpread, Ident,
@@ -92,6 +93,7 @@ fn rewrite_script_in_globals(
     ctx: RewriteContext<'_>,
 ) -> Result<String, String> {
     let cm: Lrc<SourceMap> = Default::default();
+    let comments = SingleThreadedComments::default();
     let fm = cm.new_source_file(
         FileName::Custom("zeroproxy-input.js".into()).into(),
         source.to_string(),
@@ -104,7 +106,7 @@ fn rewrite_script_in_globals(
         }),
         EsVersion::latest(),
         StringInput::from(&*fm),
-        None,
+        Some(&comments),
     );
     let mut parser = Parser::new_from(lexer);
     let mut program = if module {
@@ -134,17 +136,21 @@ fn rewrite_script_in_globals(
         window_aliases: HashSet::new(),
         document_aliases: HashSet::new(),
     });
-    print_program(cm, &program)
+    print_program(cm, &program, &comments)
 }
 
-fn print_program(cm: Lrc<SourceMap>, program: &Program) -> Result<String, String> {
+fn print_program(
+    cm: Lrc<SourceMap>,
+    program: &Program,
+    comments: &SingleThreadedComments,
+) -> Result<String, String> {
     let mut out = Vec::new();
     {
         let wr = JsWriter::new(cm.clone(), "\n", &mut out, None);
         let mut emitter = Emitter {
             cfg: Config::default().with_minify(true),
             cm,
-            comments: None,
+            comments: Some(comments),
             wr,
         };
         emitter
@@ -856,6 +862,23 @@ mod tests {
         assert!(out.contains("location.href;"));
         assert!(out.contains("__zp_get(globalThis,\"window\")"));
         assert!(!out.contains("__zp_get(globalThis, \"location\").href"));
+    }
+
+    #[test]
+    fn preserves_function_body_block_comments_for_to_string_templates() {
+        let out = rewrite_script(
+            r#"const html = parseTemplate(function () {
+/*!@preserve
+<div class="legacy-template">뉴스</div>
+*/
+return true;
+});"#,
+            false,
+            ctx(),
+        )
+        .expect("swc rewrite should succeed");
+        assert!(out.contains("/*!@preserve"));
+        assert!(out.contains("<div class=\"legacy-template\">뉴스</div>"));
     }
 
     #[test]

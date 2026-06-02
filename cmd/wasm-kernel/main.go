@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/gosuda/zeroproxy/internal/wsproto"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
+	"golang.org/x/net/html/charset"
 )
 
 type Kernel struct {
@@ -196,9 +198,14 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 	if source == nil {
 		source = http.NoBody
 	}
+	decodedSource, err := charset.NewReader(source, resp.Header.Get("Content-Type"))
+	if err != nil {
+		decodedSource = source
+	}
+	docCharset := responseCharset(resp.Header.Get("Content-Type"))
 	pr, pw := io.Pipe()
 	go func() {
-		err := htmltx.TransformTo(pw, source, htmltx.Options{
+		err := htmltx.TransformTo(pw, decodedSource, htmltx.Options{
 			TabID:                 tab.TabID,
 			EntryID:               req.Header.Get("X-Zp-Entry-Id"),
 			TargetURL:             finalURL,
@@ -208,6 +215,7 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 			Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
 			DynamicCompileAllowed: dynamicCompileAllowed,
 			ReferrerPolicy:        referrerPolicy,
+			DocumentCharset:       docCharset,
 			DocumentRewriter:      rewriteHTMLDocumentFromJS,
 		})
 		closeErr := source.Close()
@@ -227,6 +235,14 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 	return true, true
+}
+
+func responseCharset(contentType string) string {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(params["charset"])
 }
 
 // applyResponsePolicy stamps the response-shaping headers after transform: the
