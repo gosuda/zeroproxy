@@ -91,6 +91,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   const normalizedError = createNormalizedError(Native);
   const {
     nativeFunctionSource,
+    nativeAccessorSource,
     maskNativeFunction,
     maskMethods,
     define,
@@ -110,6 +111,23 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return true;
     } catch {
       return define(obj, key, value);
+    }
+  }
+  function defineReplacingAccessor(obj, key, get, set) {
+    if (!obj) return false;
+    const d = Object.getOwnPropertyDescriptor(obj, key);
+    try {
+      Object.defineProperty(obj, key, {
+        get,
+        set,
+        enumerable: d ? d.enumerable : true,
+        configurable: d ? d.configurable : true
+      });
+      if (typeof get === 'function') toStringMap.set(get, nativeAccessorSource('get', key));
+      if (typeof set === 'function') toStringMap.set(set, nativeAccessorSource('set', key));
+      return true;
+    } catch {
+      return defineAccessor(obj, key, get, set);
     }
   }
   const {
@@ -136,6 +154,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     boot,
     Native,
     defineAccessor,
+    defineReplacingAccessor,
     getVirtualURL: () => virtualURL,
     getBaseURL: () => baseURL,
     postMessageToSW,
@@ -660,6 +679,18 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     catch { return false; }
   }
 
+  function isInitialAboutBlankFrame(frame, childWin) {
+    if (!frame || isSrcdocFrame(frame)) return false;
+    try {
+      if (Native.getAttribute.call(frame, 'data-zp-target-url') || Native.getAttribute.call(frame, 'data-zp-blocked-url')) return false;
+      const rawSrc = String(Native.getAttribute.call(frame, 'src') || '').trim().toLowerCase();
+      if (rawSrc && rawSrc !== 'about:blank') return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function frameLocationFacadeFor(frame, childDoc, childWin) {
     const current = () => {
       try { return new URL(frameDocumentURL(frame, childDoc, childWin)); }
@@ -695,7 +726,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (prop === Symbol.toStringTag) return 'Window';
     if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return proxy;
     if (prop === 'location') return locationFacade;
-    if (prop === 'origin') return locationFacade.origin;
+    if (prop === 'origin') return isInitialAboutBlankFrame(frame, childWin) ? virtualURL.origin : locationFacade.origin;
     if (prop === 'postMessage') return postMessageWrapperFor(childWin);
     if (prop === 'document') {
       try { return frameDocumentFacadeFor(frame, childWin.document, childWin); } catch { return undefined; }
@@ -778,6 +809,14 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (prop === Symbol.toStringTag) return 'HTMLDocument';
     if (prop === 'defaultView') return windowFacade;
     if (prop === 'location') return locationFacade;
+    if (isInitialAboutBlankFrame(frame, childWin)) {
+      if (prop === 'URL' || prop === 'documentURI') return 'about:blank';
+      if (prop === 'referrer') return virtualURL.href;
+      if (prop === 'domain') return virtualURL.hostname;
+      if (prop === 'cookie') {
+        try { return document.cookie; } catch { return ''; }
+      }
+    }
     if (prop === 'URL' || prop === 'documentURI') return locationFacade.href;
     const value = childDoc[prop];
     return typeof value === 'function' ? value.bind(childDoc) : value;
@@ -1164,6 +1203,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     installDynamicCodeHooks();
     installDocumentWriteHooks(root);
   }
+
   function fireEvent(target, type) {
     let ev;
     try { ev = new Event(type); } catch { ev = { type }; }

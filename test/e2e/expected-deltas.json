@@ -26,11 +26,6 @@
       "reason": "Canvas export randomization intentionally changes repeated data URL reads."
     },
     {
-      "id": "window-screen-position-persona",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(0|22|[1-9][0-9]*)$",
-      "reason": "The proxy applies the Windows Chrome persona and normalizes screen/window coordinates."
-    },
-    {
       "id": "navigator-app-version-persona",
       "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
       "reason": "Native Chromium exposes host platform appVersion while ZeroProxy exposes the Windows Chrome persona."
@@ -44,36 +39,6 @@
       "id": "navigator-platform-persona",
       "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(MacIntel|Win32)$",
       "reason": "Native Chromium exposes host platform while ZeroProxy exposes the Windows Chrome persona."
-    },
-    {
-      "id": "initial-blank-document-url",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.about:blank$",
-      "reason": "The native clean iframe document starts at about:blank; ZeroProxy maps contained frame document URLs through virtual location facades."
-    },
-    {
-      "id": "target-origin-bucket",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.http://localhost:[0-9]+$",
-      "reason": "Native exposes the target test origin while ZeroProxy exposes the proxy origin."
-    },
-    {
-      "id": "target-document-url-bucket",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.http://localhost:[0-9]+/differential-fixture$",
-      "reason": "Native exposes the target fixture URL while ZeroProxy virtualizes frame document URL values."
-    },
-    {
-      "id": "document-domain-bucket",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(localhost|proxy\\.localhost)$",
-      "reason": "Native document.domain is the target host while ZeroProxy runs on the proxy host."
-    },
-    {
-      "id": "opaque-proxy-origin-bucket",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.null$",
-      "reason": "Contained ZeroProxy frame origin can be opaque for protected about:blank/srcdoc boundary cases."
-    },
-    {
-      "id": "document-cookie-presence",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.s$",
-      "reason": "The raw oracle records document.cookie presence/type only; normalized comparison ignores cookie value exposure."
     }
   ]
 }

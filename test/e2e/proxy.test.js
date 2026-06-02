@@ -419,13 +419,17 @@ function createTargetServer(requests) {
             // ============================================================================
             // 4. MAIN EXECUTION CONTROLLER (SANDBOX ISOLATION)
             // ============================================================================
-            const getFingerPrint = () => {
+            const waitForFrameLayout = () => new Promise((resolve) => {
+              requestAnimationFrame(() => requestAnimationFrame(resolve));
+            });
+            const getFingerPrint = async () => {
               const doc = window.document;
               try {
                 const iframe = doc.createElement('iframe');
                 iframe.style.display = 'none';
                 iframe.tabIndex = '-1';
                 doc.body.appendChild(iframe);
+                await waitForFrameLayout();
                 const iframeWin = iframe.contentWindow;
                 let dataStore = {};
                 dataStore = buildObjectSnapshot(iframeWin, iframeWin, '', dataStore);
@@ -443,8 +447,8 @@ function createTargetServer(requests) {
                 };
               }
             };
-            const objectPropertyCollectionFingerprint = () => {
-              const result = getFingerPrint();
+            const objectPropertyCollectionFingerprint = async () => {
+              const result = await getFingerPrint();
               if (result.e === null) {
                 sortFingerprintRecords(result.r);
                 let jsonString = JSON.stringify(result.r);
@@ -682,7 +686,7 @@ function createTargetServer(requests) {
                 frame: frameObservations(),
                 fingerprint: {
                   ...fingerprintSurfaceObservations(),
-                  objectPropertyCollection: objectPropertyCollectionFingerprint()
+                  objectPropertyCollection: await objectPropertyCollectionFingerprint()
                 }
               }
             };

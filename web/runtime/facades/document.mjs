@@ -3,6 +3,7 @@ export function createDocumentFacades({
   boot,
   Native,
   defineAccessor,
+  defineReplacingAccessor = defineAccessor,
   getVirtualURL,
   getBaseURL,
   postMessageToSW,
@@ -11,11 +12,11 @@ export function createDocumentFacades({
   initDocumentCookieRecords(String(boot.documentCookie || ''));
 
   function installDocumentAccessors(w) {
-    defineAccessor(w.Document && w.Document.prototype, 'URL', () => getVirtualURL().href);
-    defineAccessor(w.Document && w.Document.prototype, 'documentURI', () => getVirtualURL().href);
-    defineAccessor(w.Document && w.Document.prototype, 'baseURI', () => getBaseURL());
-    defineAccessor(w.Document && w.Document.prototype, 'referrer', () => boot.documentReferrer || '');
-    defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), value => {
+    defineReplacingAccessor(w.Document && w.Document.prototype, 'URL', () => getVirtualURL().href);
+    defineReplacingAccessor(w.Document && w.Document.prototype, 'documentURI', () => getVirtualURL().href);
+    defineReplacingAccessor(w.Document && w.Document.prototype, 'baseURI', () => getBaseURL());
+    defineReplacingAccessor(w.Document && w.Document.prototype, 'referrer', () => boot.documentReferrer || '');
+    defineReplacingAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), value => {
       const cookie = String(value);
       setDocumentCookie(cookie);
       postMessageToSW({
@@ -25,7 +26,7 @@ export function createDocumentFacades({
         cookie
       }).catch(()=>{});
     });
-    defineAccessor(w, 'origin', () => {
+    defineReplacingAccessor(w, 'origin', () => {
       try {
         return new URL(w.document.URL).origin;
       } catch {
