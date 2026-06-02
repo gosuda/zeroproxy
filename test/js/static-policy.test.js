@@ -85,9 +85,11 @@ test('runtime dynamic constructor descriptors stay assignable for app bundles', 
     rt,
     /ctor\.prototype,\s*'constructor',\s*\{\s*value: wrapper,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/,
   );
+  assert.match(rt, /const containedFunction = containedChildFunction\(childFunction\);/);
+  assert.match(rt, /define\(w,\s*'Function',\s*containedFunction\)/);
   assert.match(
     rt,
-    /childFunction\.prototype,\s*'constructor',\s*\{\s*value: root\.Function,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/,
+    /childFunction\.prototype,\s*'constructor',\s*\{\s*value: containedFunction,\s*enumerable: false,\s*configurable: true,\s*writable: true\s*\}/,
   );
   assert.equal(
     rt.includes(
@@ -101,6 +103,7 @@ test('runtime dynamic constructor descriptors stay assignable for app bundles', 
     ),
     false,
   );
+  assert.equal(rt.includes("define(w, 'Function', root.Function)"), false);
 });
 
 test('runtime dynamic eval uses one native-scoped path without rewritten fallback', () => {

@@ -390,12 +390,12 @@ test('membrane: stealth + masking hooks are installed into the runtime global', 
   // The stealth membrane overrides the live DOM enumeration surface so ZP asset
   // nodes are filtered out of getElementsByTagName / scripts / querySelectorAll.
   for (const needle of [
-    "define(w.Document.prototype, 'getElementsByTagName'",
-    "define(w.Element.prototype, 'getElementsByTagName'",
+    "defineReplacingNative(w.Document.prototype, 'getElementsByTagName'",
+    "defineReplacingNative(w.Element.prototype, 'getElementsByTagName'",
     "Object.defineProperty(w.Document.prototype, 'scripts'",
-    "define(w.Document.prototype, 'querySelectorAll'",
-    "define(w.Element.prototype, 'querySelectorAll'",
-    "define(w.Document.prototype, 'createTreeWalker'",
+    "defineReplacingNative(w.Document.prototype, 'querySelectorAll'",
+    "defineReplacingNative(w.Element.prototype, 'querySelectorAll'",
+    "defineReplacingNative(w.Document.prototype, 'createTreeWalker'",
     'isZPAssetNode',
   ]) {
     assert.ok(rt.includes(needle), `stealth membrane missing hook: ${needle}`);

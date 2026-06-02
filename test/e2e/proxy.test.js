@@ -216,6 +216,23 @@ function createTargetServer(requests) {
             const hiddenArtifactKeys = () => Reflect.ownKeys(window)
               .map(k => typeof k === 'symbol' ? k.toString() : String(k))
               .filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_|zeroproxy/i.test(k));
+            const frameDescriptorProbe = (obj, key) => {
+              try {
+                const descriptor = Object.getOwnPropertyDescriptor(obj, key);
+                return descriptor
+                  ? {
+                      ok: true,
+                      configurable: descriptor.configurable,
+                      enumerable: descriptor.enumerable,
+                      valueType: typeof descriptor.value,
+                      hasGet: typeof descriptor.get === 'function',
+                      hasSet: typeof descriptor.set === 'function',
+                    }
+                  : { ok: true, missing: true };
+              } catch (err) {
+                return { ok: false, error: err && err.name || 'Error' };
+              }
+            };
             const fingerprintSurfaceObservations = () => {
               const canvas = document.createElement('canvas');
               canvas.width = 80;
@@ -278,6 +295,166 @@ function createTargetServer(requests) {
                 },
               };
             };
+            // ============================================================================
+            // 1. OBJECT PROPERTY COLLECTION MODULE
+            // ============================================================================
+            const getPrototypeChainKeys = (obj) => {
+              let keys = [];
+              for (let current = obj; current !== null; current = Object.getPrototypeOf(current)) {
+                keys = keys.concat(Object.keys(current));
+              }
+              return keys;
+            };
+            const deduplicate = (array) => {
+              array.sort();
+              for (let i = 0; i < array.length; ) {
+                if (array[i + 1] === array[i]) {
+                  array.splice(i + 1, 1);
+                } else {
+                  i++;
+                }
+              }
+              return array;
+            };
+            const extractUniqueKeys = (win, obj) => {
+              let keys = getPrototypeChainKeys(obj);
+              if (win.Object.getOwnPropertyNames) {
+                keys = keys.concat(win.Object.getOwnPropertyNames(obj));
+              }
+              if (win.Array.from && win.Set) {
+                return win.Array.from(new win.Set(keys));
+              }
+              return deduplicate(keys);
+            };
+
+            // ============================================================================
+            // 2. TYPE DETECTION & SHORTCODE MAPPING MODULE
+            // ============================================================================
+            const checkNativeFunction = (win, value) => {
+              const isFunctionInstance = value instanceof win.Function;
+              const hasNativeCodeSignature = win.Function.prototype.toString.call(value).indexOf('[native code]') > 0;
+              return isFunctionInstance && hasNativeCodeSignature;
+            };
+            const getSafeTypeOrNull = (win, obj, key) => {
+              try {
+                obj[key].catch(() => {});
+                return 'p';
+              } catch {}
+              try {
+                if (obj[key] === null || obj[key] === undefined) {
+                  return obj[key] === undefined ? 'u' : 'x';
+                }
+              } catch {
+                return 'i';
+              }
+              return null;
+            };
+            const getStandardTypeChar = (win, value) => {
+              if (win.Array.isArray(value)) return 'a';
+              if (value === win.Array) return 'q0';
+              if (value === true) return 'T';
+              if (value === false) return 'F';
+              const rawType = typeof value;
+              if (rawType === 'function') {
+                return checkNativeFunction(win, value) ? 'N' : 'f';
+              }
+              const typeMap = {
+                object: 'o',
+                string: 's',
+                undefined: 'u',
+                symbol: 'z',
+                number: 'n',
+                bigint: 'I',
+                boolean: 'b',
+              };
+              return typeMap[rawType] || '?';
+            };
+            const resolvePropertyType = (win, obj, key) => {
+              const safeType = getSafeTypeOrNull(win, obj, key);
+              if (safeType !== null) return safeType;
+              return getStandardTypeChar(win, obj[key]);
+            };
+
+            // ============================================================================
+            // 3. DATA AGGREGATION & INVERTED INDEXING MODULE
+            // ============================================================================
+            const saveRecord = (accumulator, storageKey, path) => {
+              if (!Object.prototype.hasOwnProperty.call(accumulator, storageKey)) {
+                accumulator[storageKey] = [];
+              }
+              accumulator[storageKey].push(path);
+            };
+            const analyzeSingleProperty = (win, obj, key, prefix, accumulator) => {
+              const fullPath = prefix + key;
+              const typeChar = resolvePropertyType(win, obj, key);
+              const valueStoreTypes = ['n', 's', 'a', 'b'];
+              if (!valueStoreTypes.includes(typeChar)) {
+                saveRecord(accumulator, typeChar, fullPath);
+                return;
+              }
+              if (fullPath === 'd.cookie') {
+                saveRecord(accumulator, typeChar, fullPath);
+                return;
+              }
+              const isNumericString = typeChar === 's' && !win.isNaN(obj[key]);
+              if (!isNumericString) {
+                saveRecord(accumulator, obj[key], fullPath);
+              }
+            };
+            const buildObjectSnapshot = (win, targetObj, prefix, accumulator) => {
+              if (targetObj === null || targetObj === undefined) return accumulator;
+              const allKeys = extractUniqueKeys(win, targetObj);
+              for (let i = 0; i < allKeys.length; i++) {
+                analyzeSingleProperty(win, targetObj, allKeys[i], prefix, accumulator);
+              }
+              return accumulator;
+            };
+            const sortFingerprintRecords = (records) => {
+              for (const key of Object.keys(records || {})) {
+                if (Array.isArray(records[key])) records[key].sort();
+              }
+              return records;
+            };
+
+            // ============================================================================
+            // 4. MAIN EXECUTION CONTROLLER (SANDBOX ISOLATION)
+            // ============================================================================
+            const getFingerPrint = () => {
+              const doc = window.document;
+              try {
+                const iframe = doc.createElement('iframe');
+                iframe.style.display = 'none';
+                iframe.tabIndex = '-1';
+                doc.body.appendChild(iframe);
+                const iframeWin = iframe.contentWindow;
+                let dataStore = {};
+                dataStore = buildObjectSnapshot(iframeWin, iframeWin, '', dataStore);
+                dataStore = buildObjectSnapshot(iframeWin, iframeWin.clientInformation || iframeWin.navigator, 'n.', dataStore);
+                dataStore = buildObjectSnapshot(iframeWin, iframe.contentDocument, 'd.', dataStore);
+                doc.body.removeChild(iframe);
+                return { r: dataStore, e: null };
+              } catch (error) {
+                return {
+                  r: {},
+                  e: error && {
+                    name: error.name || 'Error',
+                    message: error.message || String(error),
+                  },
+                };
+              }
+            };
+            const objectPropertyCollectionFingerprint = () => {
+              const result = getFingerPrint();
+              if (result.e === null) {
+                sortFingerprintRecords(result.r);
+                let jsonString = JSON.stringify(result.r);
+                jsonString = jsonString.replace(/\\d{2}\\/\\d{2}\\/\\d{4} \\d{2}:\\d{2}:\\d{2}/, '%timestamp%');
+                console.log(jsonString);
+                return { r: JSON.parse(jsonString), e: null };
+              }
+              console.error('Fingerprinting Failed:', result.e);
+              return result;
+            };
             const frameLocationKind = (href) => {
               if (href === 'about:blank') return 'about:blank';
               if (href === location.href) return 'parent-virtual';
@@ -296,7 +473,9 @@ function createTargetServer(requests) {
                 childOpenerIsNull: child && child.opener === null,
                 childDocumentDefaultView: !!(childDoc && childDoc.defaultView === child),
                 childLocationKind: child && child.location && frameLocationKind(child.location.href),
-                childPostMessageSource: child && fnSource(child.postMessage)
+                childPostMessageSource: child && fnSource(child.postMessage),
+                childFunctionDescriptor: child && frameDescriptorProbe(child, 'Function'),
+                childOwnKeysHasFunction: child && Reflect.ownKeys(child).includes('Function')
               };
               frame.remove();
               return out;
@@ -501,7 +680,10 @@ function createTargetServer(requests) {
                   documentTag: Object.prototype.toString.call(document)
                 },
                 frame: frameObservations(),
-                fingerprint: fingerprintSurfaceObservations()
+                fingerprint: {
+                  ...fingerprintSurfaceObservations(),
+                  objectPropertyCollection: objectPropertyCollectionFingerprint()
+                }
               }
             };
             out.surface.frameDocument = await frameDocumentObservations();
@@ -1873,6 +2055,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const websocketURL = ws.url;
     const childCanvasMask = modern.contentWindow.HTMLCanvasElement.prototype.toDataURL.toString();
     const childFunctionShared = modern.contentWindow.Function === window.Function;
+    const childFunctionSelfInstance =
+      modern.contentWindow.Function instanceof modern.contentWindow.Function;
+    const childEvalInstance = modern.contentWindow.eval instanceof modern.contentWindow.Function;
+    const childFunctionSource = modern.contentWindow.Function.prototype.toString.call(
+      modern.contentWindow.Function,
+    );
     const childFunctionHref = modern.contentWindow.Function('return location.href')();
     try {
       ws.close();
@@ -1990,6 +2178,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       websocketURL,
       childCanvasMask,
       childFunctionShared,
+      childFunctionSelfInstance,
+      childEvalInstance,
+      childFunctionSource,
       childFunctionHref,
       docwriteHTML,
       docwriteHelperType,
@@ -2015,7 +2206,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     `dynamic iframe transport request missing: ${JSON.stringify(requests)}`,
   );
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
-  assert.equal(iframeIsolation.childFunctionShared, true);
+  assert.equal(iframeIsolation.childFunctionShared, false);
+  assert.equal(iframeIsolation.childFunctionSelfInstance, true);
+  assert.equal(iframeIsolation.childEvalInstance, true);
+  assert.equal(iframeIsolation.childFunctionSource, 'function Function() { [native code] }');
   assert.equal(
     iframeIsolation.childFunctionHref,
     `http://${targetHost}:${targetPort}/#compound-tail`,
@@ -3484,10 +3678,31 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const nativeRawDiff = await readDifferential(page);
   const nativeDiff = comparableDifferential(nativeRawDiff);
   assert.deepEqual(await readFingerprintReport(page), nativeRawDiff.surface.fingerprint);
-  assert.deepEqual(
-    diffObjects(proxyDiff, nativeDiff),
-    EXPECTED_DELTAS.nativeVsZeroProxyDifferential,
+  const rawSetDelta = diffObjectsSetAware(proxyRawDiff, nativeRawDiff);
+  const comparableDelta = diffObjects(proxyDiff, nativeDiff);
+  if (process.env.ZP_WRITE_SET_DELTA) {
+    const deltaPath = path.resolve(process.env.ZP_WRITE_SET_DELTA);
+    fs.mkdirSync(path.dirname(deltaPath), { recursive: true });
+    fs.writeFileSync(
+      deltaPath,
+      JSON.stringify(
+        sortObjectKeys({
+          generatedAt: new Date().toISOString(),
+          nativeUrl: `http://${targetHost}:${targetPort}/differential-fixture`,
+          proxyUrl: `http://proxy.localhost:${proxyPort}/`,
+          nativeVsZeroProxyRawSetDifferential: rawSetDelta,
+          nativeVsZeroProxyComparableDifferential: comparableDelta,
+        }),
+        null,
+        2,
+      ),
+    );
+  }
+  assertExpectedRawSetDeltas(
+    rawSetDelta,
+    EXPECTED_DELTAS.nativeVsZeroProxyRawSetDifferentialAllowlist,
   );
+  assert.deepEqual(comparableDelta, EXPECTED_DELTAS.nativeVsZeroProxyDifferential);
 });
 
 function normalizePolicyHeaders(value) {
@@ -3559,6 +3774,34 @@ function normalizeFingerprintSurface(value) {
       y: normalizeFiniteNumber(value.domRect.y),
       width: normalizeFiniteNumber(value.domRect.width),
       height: normalizeFiniteNumber(value.domRect.height),
+    },
+    objectPropertyCollection: normalizeObjectPropertyCollection(value.objectPropertyCollection),
+  };
+}
+
+function normalizeObjectPropertyCollection(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (value.e) {
+    return {
+      ok: false,
+      error: value.e.name || String(value.e),
+    };
+  }
+  const paths = [];
+  for (const entries of Object.values(value.r || {})) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) paths.push(String(entry));
+  }
+  const hasPath = (path) => paths.includes(path);
+  return {
+    ok: true,
+    bucketCount: normalizePositiveNumber(Object.keys(value.r || {}).length),
+    pathCount: normalizePositiveNumber(paths.length),
+    probes: {
+      window: hasPath('window') || hasPath('self') || hasPath('globalThis'),
+      navigator: hasPath('n.userAgent') && hasPath('n.platform'),
+      document: paths.some((path) => path.startsWith('d.')),
+      nativeFunctionBucket: Object.prototype.hasOwnProperty.call(value.r || {}, 'N'),
     },
   };
 }
@@ -3661,4 +3904,82 @@ function diffObjects(proxyValue, nativeValue, prefix = '') {
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function diffObjectsSetAware(proxyValue, nativeValue, prefix = '') {
+  if (Object.is(proxyValue, nativeValue)) return {};
+  if (Array.isArray(proxyValue) && Array.isArray(nativeValue)) {
+    return diffArrayAsSet(proxyValue, nativeValue, prefix);
+  }
+  if (!isPlainObject(proxyValue) || !isPlainObject(nativeValue)) {
+    return { [prefix || '<root>']: { proxy: proxyValue, native: nativeValue } };
+  }
+  const out = {};
+  for (const key of Array.from(
+    new Set([...Object.keys(proxyValue), ...Object.keys(nativeValue)]),
+  )) {
+    Object.assign(
+      out,
+      diffObjectsSetAware(proxyValue[key], nativeValue[key], prefix ? `${prefix}.${key}` : key),
+    );
+  }
+  return out;
+}
+
+function assertExpectedRawSetDeltas(rawSetDelta, allowlist) {
+  assert.ok(Array.isArray(allowlist) && allowlist.length > 0, 'raw Set delta allowlist missing');
+  const unmatched = [];
+  for (const key of Object.keys(rawSetDelta || {}).sort()) {
+    const match = allowlist.find((entry) => {
+      assert.equal(typeof entry.id, 'string', 'raw Set delta allowlist entry id missing');
+      assert.equal(typeof entry.reason, 'string', `raw Set delta reason missing: ${entry.id}`);
+      assert.equal(typeof entry.pattern, 'string', `raw Set delta pattern missing: ${entry.id}`);
+      return new RegExp(entry.pattern).test(key);
+    });
+    if (!match) unmatched.push(key);
+  }
+  assert.deepEqual(unmatched, [], 'unexpected native-vs-ZeroProxy raw Set deltas');
+}
+
+function diffArrayAsSet(proxyValue, nativeValue, prefix) {
+  const proxyMap = indexedSet(proxyValue);
+  const nativeMap = indexedSet(nativeValue);
+  const onlyProxy = [];
+  const onlyNative = [];
+  for (const [key, value] of proxyMap) {
+    if (!nativeMap.has(key)) onlyProxy.push(value);
+  }
+  for (const [key, value] of nativeMap) {
+    if (!proxyMap.has(key)) onlyNative.push(value);
+  }
+  if (onlyProxy.length === 0 && onlyNative.length === 0) return {};
+  return {
+    [prefix || '<root>']: {
+      proxyCount: proxyValue.length,
+      nativeCount: nativeValue.length,
+      commonCount: proxyValue.length - onlyProxy.length,
+      onlyProxy: onlyProxy.sort(compareStableValues),
+      onlyNative: onlyNative.sort(compareStableValues),
+    },
+  };
+}
+
+function indexedSet(values) {
+  return new Map(values.map((value) => [stableValueKey(value), value]));
+}
+
+function stableValueKey(value) {
+  return JSON.stringify(sortObjectKeys(value));
+}
+
+function compareStableValues(a, b) {
+  return stableValueKey(a).localeCompare(stableValueKey(b));
+}
+
+function sortObjectKeys(value) {
+  if (Array.isArray(value)) return value.map(sortObjectKeys);
+  if (!isPlainObject(value)) return value;
+  const out = {};
+  for (const key of Object.keys(value).sort()) out[key] = sortObjectKeys(value[key]);
+  return out;
 }

@@ -725,6 +725,17 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return typeof value === 'function' && WINDOW_BOUND_METHODS.has(prop) ? value.bind(childWin) : value;
   }
 
+  function configurableFacadeDescriptor(raw, prop) {
+    let d;
+    try { d = Reflect.getOwnPropertyDescriptor(raw, prop); } catch { return undefined; }
+    if (!d) return undefined;
+    const out = { ...d, configurable: true };
+    if ('value' in out && typeof out.value === 'function' && WINDOW_BOUND_METHODS.has(prop)) {
+      try { out.value = out.value.bind(raw); } catch {}
+    }
+    return out;
+  }
+
   function frameWindowFacadeFor(frame, childWin, forceFacade = false) {
     if (!childWin) return childWin;
     if (!forceFacade && isSrcdocFrame(frame)) {
@@ -751,7 +762,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         if (prop === 'location' || prop === 'document' || prop === 'parent' || prop === 'top') {
           return { configurable: true, enumerable: true, get() { return frameWindowValue(frame, childWin, proxy, locationFacade, prop); } };
         }
-        try { return Reflect.getOwnPropertyDescriptor(childWin, prop); } catch { return undefined; }
+        return configurableFacadeDescriptor(childWin, prop);
       },
       ownKeys() {
         try { return Reflect.ownKeys(childWin); } catch { return []; }
@@ -790,7 +801,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         if (prop === 'defaultView' || prop === 'URL' || prop === 'documentURI') {
           return { configurable: true, enumerable: true, get() { return frameDocumentValue(frame, childDoc, rawWindow, windowFacade, locationFacade, prop); } };
         }
-        try { return Reflect.getOwnPropertyDescriptor(childDoc, prop); } catch { return undefined; }
+        return configurableFacadeDescriptor(childDoc, prop);
+      },
+      getPrototypeOf() {
+        try { return Reflect.getPrototypeOf(childDoc); } catch { return null; }
       },
       ownKeys() {
         try { return Reflect.ownKeys(childDoc); } catch { return []; }
@@ -2067,11 +2081,11 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function installTagCollectionStealthHooks(w) {
     const docGetTags = w.Document.prototype.getElementsByTagName;
     const elemGetTags = w.Element.prototype.getElementsByTagName;
-    if (typeof docGetTags === 'function') define(w.Document.prototype, 'getElementsByTagName', function(tag) {
+    if (typeof docGetTags === 'function') defineReplacingNative(w.Document.prototype, 'getElementsByTagName', function(tag) {
       const raw = docGetTags.apply(this, arguments);
       return shouldFilterTag(tag) ? filteredCollection(raw, node => !isZPAssetNode(node)) : raw;
     });
-    if (typeof elemGetTags === 'function') define(w.Element.prototype, 'getElementsByTagName', function(tag) {
+    if (typeof elemGetTags === 'function') defineReplacingNative(w.Element.prototype, 'getElementsByTagName', function(tag) {
       const raw = elemGetTags.apply(this, arguments);
       return shouldFilterTag(tag) ? filteredCollection(raw, node => !isZPAssetNode(node)) : raw;
     });
@@ -2083,20 +2097,20 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const docQSA = w.Document.prototype.querySelectorAll;
     const elemQS = w.Element.prototype.querySelector;
     const elemQSA = w.Element.prototype.querySelectorAll;
-    if (typeof docQS === 'function') define(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, arguments)); });
-    if (typeof elemQS === 'function') define(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, arguments)); });
-    if (typeof docQSA === 'function') define(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
-    if (typeof elemQSA === 'function') define(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    if (typeof docQS === 'function') defineReplacingNative(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, arguments)); });
+    if (typeof elemQS === 'function') defineReplacingNative(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, arguments)); });
+    if (typeof docQSA === 'function') defineReplacingNative(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    if (typeof elemQSA === 'function') defineReplacingNative(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
     const matches = w.Element.prototype.matches;
     const closest = w.Element.prototype.closest;
-    if (typeof matches === 'function') define(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });
-    if (typeof closest === 'function') define(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(closest.apply(this, arguments)); });
+    if (typeof matches === 'function') defineReplacingNative(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });
+    if (typeof closest === 'function') defineReplacingNative(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(closest.apply(this, arguments)); });
   }
   function installTraversalStealthHooks(w) {
     const nodeIterator = w.Document.prototype.createNodeIterator;
-    if (typeof nodeIterator === 'function') define(w.Document.prototype, 'createNodeIterator', function() { return filteredTraversal(nodeIterator.apply(this, arguments)); });
+    if (typeof nodeIterator === 'function') defineReplacingNative(w.Document.prototype, 'createNodeIterator', function() { return filteredTraversal(nodeIterator.apply(this, arguments)); });
     const treeWalker = w.Document.prototype.createTreeWalker;
-    if (typeof treeWalker === 'function') define(w.Document.prototype, 'createTreeWalker', function() { return filteredTraversal(treeWalker.apply(this, arguments)); });
+    if (typeof treeWalker === 'function') defineReplacingNative(w.Document.prototype, 'createTreeWalker', function() { return filteredTraversal(treeWalker.apply(this, arguments)); });
   }
   function shouldFilterTag(tag) {
     const t = String(tag || '').toLowerCase();
@@ -3009,7 +3023,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
 
     function patchInsertion(proto, name, nativeFn) {
       if (!proto || typeof nativeFn !== 'function') return;
-      define(proto, name, function(...args) {
+      defineReplacingNative(proto, name, function(...args) {
         prepareActivatingNodes(args);
         const frames = collectIframesFromArgs(args);
         const ret = nativeFn.apply(this, args);
@@ -3122,9 +3136,38 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function installContainedExecGlobals(w) {
     const childFunction = w.Function;
     if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
-    if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
-    if (childFunction && childFunction.prototype) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: root.Function, enumerable: false, configurable: true, writable: true }); } catch {}
+    const containedFunction = containedChildFunction(childFunction);
+    if (containedFunction && !define(w, 'Function', containedFunction)) throw normalizedError('SecurityError');
+    if (childFunction && childFunction.prototype && containedFunction) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: containedFunction, enumerable: false, configurable: true, writable: true }); } catch {}
     if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
+  }
+  function containedChildFunction(childFunction) {
+    if (typeof root.Function !== 'function') return root.Function;
+    const rootFunction = root.Function;
+    const childPrototype = childFunction && childFunction.prototype;
+    const contained = function Function(...args) { return rootFunction(...args); };
+    try { Object.defineProperty(contained, 'name', { value: 'Function', configurable: true }); } catch {}
+    try { Object.defineProperty(contained, 'length', { value: 1, configurable: true }); } catch {}
+    if (childPrototype) {
+      try { Object.defineProperty(contained, 'prototype', { value: childPrototype, enumerable: false, configurable: false, writable: false }); } catch {}
+    }
+    try {
+      Object.defineProperty(contained, Symbol.hasInstance, {
+        value(value) {
+          try {
+            return value === contained ||
+              (typeof childFunction === 'function' && value instanceof childFunction) ||
+              value instanceof rootFunction;
+          } catch {
+            return false;
+          }
+        },
+        enumerable: false,
+        configurable: true
+      });
+    } catch {}
+    maskNativeFunction(contained, 'Function');
+    return contained;
   }
   function installContainedNetworkGlobals(w) {
     if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
