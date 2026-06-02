@@ -389,6 +389,17 @@ fn emit_client_hello_for_retry(
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
     }
 
+    // Phase 5.6: GREASE cipher inject (RFC 8701). cipher_suites is a
+    // Vec<CipherSuite> emitted verbatim — the `Unknown` variant carries
+    // the GREASE u16 to the wire with no special encoder path. JA3
+    // strips GREASE before hashing so the hash doesn't change; this is
+    // purely for browser-mimicking the on-wire layout.
+    //
+    // (Extension and group GREASE channels remain disabled — they
+    // tripped a sent_extensions consistency check inside rustls during
+    // ServerHello processing. See bisection notes in the trap notebook.)
+    cipher_suites.insert(0, CipherSuite::Unknown(crate::ja3::random_grease()));
+
     let mut chp_payload = ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: input.random,
@@ -649,10 +660,36 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     let captured_order = crate::ja3::with_current(|spec| {
         spec.map(|s| s.extensions.clone())
     });
-    exts.contiguous_extensions = match captured_order {
+    let mut order = match captured_order {
         Some(order) if !order.is_empty() => order,
         _ => chrome134_fallback_extension_order(),
     };
+
+    // Phase 5.6: GREASE-inject the extension list. Chrome 134 always
+    // brackets the wire layout with two distinct GREASE IDs (RFC 8701).
+    // JA3 strips them so the hash doesn't change; we still need them
+    // because anti-bot signal also includes "no GREASE = not a real
+    // browser". The encoder's catch-arm in macros.rs emits a zero-byte
+    // body for any GREASE ID, so the wire shape is correct.
+    order.retain(|e| !crate::ja3::is_grease_value(u16::from(*e)));
+    order.insert(0, crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
+    order.push(crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
+    exts.contiguous_extensions = order;
+
+    // GREASE-inject named_groups (supported_groups extension body).
+    // Chrome puts a GREASE NamedGroup at position 0. Same JA3-stripping
+    // logic applies. We only do this when the captured spec or our
+    // fallback actually set named_groups; otherwise rustls's normal
+    // path (driven by `config.provider.kx_groups`) is in charge.
+    // Phase 5.6: GREASE-inject the named_groups (supported_groups
+    // body). Chrome 134 puts a single GREASE NamedGroup at position 0.
+    // The client-side `find_kx_group` lookup uses the kx_groups list
+    // (live keypair generation), not named_groups, so an Unknown here
+    // is wire-only — server-side it's silently skipped per RFC 8701.
+    if let Some(groups) = exts.named_groups.as_mut() {
+        groups.retain(|g| !crate::ja3::is_grease_value(u16::from(*g)));
+        groups.insert(0, crate::msgs::enums::NamedGroup::Unknown(crate::ja3::random_grease()));
+    }
 }
 
 /// Hardcoded Chrome 134 extension order, used when no captured spec is

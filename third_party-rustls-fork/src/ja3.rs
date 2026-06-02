@@ -94,3 +94,55 @@ pub fn set_captured_spec(spec: CapturedSpec) {
 pub fn with_current<R>(f: impl FnOnce(Option<&CapturedSpec>) -> R) -> R {
     CAPTURED.with(|c| f(c.borrow().as_ref()))
 }
+
+/// RFC 8701 GREASE values. The TLS protocol designates these 16
+/// `0x?A?A` code points as reserved for browsers to randomly inject
+/// into ClientHello cipher / extension / group lists. Servers must
+/// ignore them; if they don't, the protocol's intolerance is exposed
+/// and the deployment can be flagged.
+///
+/// JA3 strips GREASE before hashing — they don't change the JA3 hash.
+/// But the *absence* of GREASE is itself a strong fingerprint: every
+/// modern browser emits GREASE, so a ClientHello without GREASE is
+/// almost certainly a bot. NAVER's WAF appears to weight GREASE
+/// presence into its bot-detection signal.
+pub const GREASE_VALUES: [u16; 16] = [
+    0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a,
+    0x8a8a, 0x9a9a, 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
+];
+
+/// True iff `v` is a GREASE code point (RFC 8701: high and low nibbles
+/// of both bytes are `0xA`). The extension encoder uses this to emit a
+/// zero-byte body for any extension whose ID falls in this range —
+/// without it, `encode_one`'s catch-all arm would drop GREASE extension
+/// IDs on the floor.
+pub fn is_grease_value(v: u16) -> bool {
+    (v & 0x0f0f) == 0x0a0a && (v & 0xf0f0) == 0xa0a0
+}
+
+/// Pick a random GREASE value. The choice is per-emission so two
+/// ClientHellos from the same session present different GREASE bytes
+/// — that's part of the browser-like behaviour.
+///
+/// Uses a thread-local xorshift64 PRNG. The seed is a deterministic
+/// non-zero constant (golden-ratio bytes); on wasm32-unknown-unknown
+/// `std::time::SystemTime::now()` panics with "time not implemented",
+/// and we'd rather not pull in `web-time` or `rand_core` here. The
+/// first GREASE per SW activation is therefore deterministic, but
+/// every subsequent call advances the state — every ClientHello after
+/// the first sees a fresh value, which is what RFC 8701 requires.
+pub fn random_grease() -> u16 {
+    use core::cell::Cell;
+    thread_local! {
+        static RNG: Cell<u64> = const { Cell::new(0x9E3779B97F4A7C15) };
+    }
+    RNG.with(|s| {
+        // xorshift64 step
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        GREASE_VALUES[(x as usize) & 0x0f]
+    })
+}

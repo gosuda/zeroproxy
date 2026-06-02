@@ -216,6 +216,19 @@ macro_rules! extension_struct {
                 typ: ExtensionType,
                 output: &mut Vec<u8>,
             ) {
+                // ZeroProxy JA3 phase 5.6: emit GREASE extension IDs
+                // (RFC 8701, 0x?A?A code points) with a zero-length
+                // body. The matcher below has no `$item_id` arm for
+                // these synthetic IDs, so without this fast-path they
+                // would be silently dropped by the catch-all. Browsers
+                // (and our `apply_chrome_ja3_shape`) place GREASE
+                // entries in `contiguous_extensions` to fingerprint
+                // themselves as "real" TLS stacks.
+                if crate::ja3::is_grease_value(u16::from(typ)) {
+                    typ.encode(output);
+                    0u16.encode(output);
+                    return;
+                }
                 match typ {
                     $(
                         $item_id => if let Some(item) = &self.$item_slot {
