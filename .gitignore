@@ -13,3 +13,4 @@ rewriter-rs/target/
 GOAL.md
 .claude/
 .npm-cache
+.puppeteer-cache

@@ -36,7 +36,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: 24.16.0
           cache: npm
           cache-dependency-path: package-lock.json
       - name: Print toolchain versions
@@ -49,6 +49,14 @@ jobs:
 
       - name: Install wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
+      - name: Cache Puppeteer browser
+        uses: actions/cache@v4
+        with:
+          path: .puppeteer-cache
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            puppeteer-${{ runner.os }}-
 
       - name: Install Node dependencies
         run: npm ci
@@ -92,7 +100,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: 24.16.0
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -119,6 +127,8 @@ jobs:
 
       - name: Install Node dependencies
         run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
 
       - name: Run Biome
         run: npx biome ci web scripts test
