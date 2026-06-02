@@ -110,9 +110,18 @@ test('service worker uses Rust kernel transport and cookie bridge', () => {
   assert.equal(sw.includes('__zp_cookie_set'), false, 'Go __zp_cookie_set must not be referenced');
   assert.equal(sw.includes('__go_jshttp'), false, 'Go __go_jshttp must not be referenced');
   assert.equal(sw.includes('__zp_stream'), false, 'Go __zp_stream must not be referenced');
-  // Cookie jar bridge: SW tab state → Cookie header + Set-Cookie capture.
-  assert.match(sw, /headers\.set\('Cookie',\s*opt\.tab\.documentCookie\)/, 'cookie header must be attached to outgoing relay request');
-  assert.match(sw, /mergeCookie\(opt\.tab\.documentCookie/, 'response Set-Cookie must be merged back into tab state');
+  // Cookie jar bridge: SW tab state → URL-scoped (RFC 6265) Cookie
+  // header + Set-Cookie capture. The flat `tab.documentCookie` string
+  // approach was replaced (2026-06-02) by `tab.cookieJar` (a port of
+  // internal/cookiejar/jar.go) to stop cross-subdomain cookie leakage
+  // and to preserve login state across back/forward navigation between
+  // mail.naver.com / pay.naver.com / nid.naver.com / www.naver.com.
+  assert.ok(sw.includes('createCookieJar'), 'service worker must define RFC 6265 cookie jar factory');
+  assert.match(sw, /opt\.tab\.cookieJar[\s\S]{0,200}cookieHeader\(opt\.url\)/, 'outgoing Cookie header must come from URL-scoped jar lookup');
+  assert.match(sw, /opt\.tab\.cookieJar[\s\S]{0,200}setCookieLine\(opt\.url/, 'response Set-Cookie must be fed into jar scoped to the response URL');
+  assert.match(sw, /cookieJar\.documentCookieFor\(entry\.targetUrl\)/, 'boot config must expose only cookies that match the target URL');
+  assert.equal(sw.includes('mergeCookie('), false, 'flat mergeCookie shim must be removed (RFC-6265 jar replaces it)');
+  assert.equal(/tab\.documentCookie\s*=/.test(sw), false, 'tab.documentCookie flat-string state must be removed');
   assert.ok(sw.includes('runtimeTabForMessage'), 'service worker does not gate runtime messages by tab');
   assert.ok(sw.includes('runtimeMessageAuthorized'), 'service worker does not validate runtime capability tokens');
   assert.ok(sw.includes('runtimeToken: ZP.randomId'), 'service worker does not generate runtime capability tokens');

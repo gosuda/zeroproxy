@@ -481,11 +481,17 @@ async function transportFetch(targetUrl, opt) {
   // challenge-platform path). Only when BOTH hold does the relay emit the
   // X-ZP-Challenge-Compat: 1 response marker; SW addCSP then strips it.
   if (opt.tab.challengeCompat) headers.set('X-ZP-Arm-Challenge-Compat', '1');
-  // Cookie jar bridge: SW maintains tab.documentCookie via ZP_COOKIE_SET
-  // messages from the page. Attach it as the outgoing Cookie header so the
-  // target sees the page-state cookies. The Rust kernel passes Cookie
-  // through unchanged to the relay.
-  if (opt.tab.documentCookie) headers.set('Cookie', opt.tab.documentCookie);
+  // Cookie jar bridge: SW maintains tab.cookieJar (RFC 6265-scoped) via
+  // ZP_COOKIE_SET messages from the page and Set-Cookie response headers.
+  // Attach the cookies that domain/path-match the outgoing URL so each
+  // subdomain sees only the cookies it's entitled to (no cross-leak of
+  // login state between mail.naver.com / pay.naver.com / nid.naver.com /
+  // www.naver.com). The Rust kernel passes Cookie through unchanged to
+  // the relay.
+  if (opt.tab.cookieJar) {
+    const cookieStr = opt.tab.cookieJar.cookieHeader(opt.url);
+    if (cookieStr) headers.set('Cookie', cookieStr);
+  }
   // Build a flat [[k, v], ...] header list from BOTH our `headers` Headers
   // object AND the page-side `req.headers`. The Fetch-spec `new Request()`
   // we used to call strips "forbidden header names" — Sec-Fetch-*,
@@ -556,12 +562,15 @@ async function transportFetch(targetUrl, opt) {
   } catch (e) {
     return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
   }
-  // Capture Set-Cookie from the response and merge into tab.documentCookie so
-  // subsequent page reads of document.cookie observe server-set cookies.
+  // Capture Set-Cookie from the response and feed into the RFC-6265
+  // jar scoped to the response URL so Domain/Path/Secure/HttpOnly
+  // attributes are honored on the next outgoing request.
   try {
     const getSetCookie = resp && resp.headers && resp.headers.getSetCookie;
     const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
-    for (const line of setCookies) opt.tab.documentCookie = mergeCookie(opt.tab.documentCookie || '', line);
+    if (opt.tab.cookieJar) {
+      for (const line of setCookies) opt.tab.cookieJar.setCookieLine(opt.url, line);
+    }
   } catch {}
   return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab);
 }
@@ -677,11 +686,16 @@ function isHTMLResponse(resp) {
   return /\btext\/html\b/i.test(ct) || /\bapplication\/xhtml\+xml\b/i.test(ct);
 }
 function buildRuntimePrelude(tab, entry) {
+  // documentCookie is what the page's JS will see for `document.cookie`
+  // on this navigation — only non-HttpOnly cookies that match the target
+  // URL's domain/path/secure. The page maintains its own jar but seeds
+  // it from this string on boot.
+  const documentCookie = tab.cookieJar ? tab.cookieJar.documentCookieFor(entry.targetUrl) : '';
   const boot = {
     tabId: tab.tabId,
     entryId: entry.entryId,
     targetUrl: entry.targetUrl,
-    documentCookie: tab.documentCookie || '',
+    documentCookie,
     runtimeToken: tab.runtimeToken || '',
     servers: tab.servers || [],
   };
@@ -822,7 +836,12 @@ async function handleMessage(event) {
     if (msg.type === 'ZP_COOKIE_SET') {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
-      tab.documentCookie = mergeCookie(tab.documentCookie || '', msg.cookie);
+      // Page sends ZP_COOKIE_SET with the virtualURL it observed, so the
+      // jar can scope the cookie by Domain/Path against the right host
+      // (default Domain = the target host, not the SW origin).
+      if (tab.cookieJar && msg.targetUrl && msg.cookie) {
+        tab.cookieJar.setCookieLine(String(msg.targetUrl), String(msg.cookie));
+      }
       ok();
       return;
     }
@@ -904,7 +923,7 @@ function createTab(targetUrl, servers, challengeCompat) {
   // the armed CSP projection without re-reading the message stream. The
   // header/URL classifier (Go side) is the second of two signals; this flag
   // alone grants no egress, no eval, no cache skip.
-  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: null, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), documentCookie: '', servers: relayServers, challengeCompat: !!challengeCompat };
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: createCookieJar(), storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;
@@ -930,7 +949,133 @@ function rememberResourceContext(requestURL, targetUrl, ctx) {
   resourceContext.set(targetUrl, next);
   while (resourceContext.size > 2048) resourceContext.delete(resourceContext.keys().next().value);
 }
-function mergeCookie(current, line) { const first = String(line).split(';',1)[0]; const eq = first.indexOf('='); if (eq <= 0) return current; const name = first.slice(0, eq); const kept = current ? current.split(/;\s*/).filter(p => p.split('=')[0] !== name) : []; kept.push(first); return kept.join('; '); }
+// RFC 6265 cookie jar (port of internal/cookiejar/jar.go).
+// Replaces the prior flat tab.documentCookie string + name-only merge
+// helper which discarded every Set-Cookie attribute except name/value
+// (no Domain/Path/Secure/HttpOnly scoping). That caused cookie leakage
+// between subdomains —
+// www.naver.com cookies were echoed to mail.naver.com, nid login
+// cookies polluted www, and back navigation rendered pages cold-state
+// because the merged cookie blob no longer matched the per-host
+// expectations. Cookies are now scoped by (Domain, Path, Name) and
+// re-emitted only to URLs that match.
+function createCookieJar() {
+  const records = [];
+  function canonHost(h) { return String(h || '').toLowerCase().replace(/\.$/, ''); }
+  function defaultPath(u) {
+    const p = u.pathname || '/';
+    if (!p.startsWith('/')) return '/';
+    const i = p.lastIndexOf('/');
+    return i <= 0 ? '/' : p.slice(0, i);
+  }
+  function domainMatch(host, domain, hostOnly) {
+    if (!domain) return false;
+    if (hostOnly) return host === domain;
+    return host === domain || host.endsWith('.' + domain);
+  }
+  function pathMatch(reqPath, cookiePath) {
+    cookiePath = cookiePath || '/';
+    if (reqPath === cookiePath) return true;
+    if (!reqPath.startsWith(cookiePath)) return false;
+    return cookiePath.endsWith('/') || (reqPath.length > cookiePath.length && reqPath[cookiePath.length] === '/');
+  }
+  function expired(r, now) {
+    if (r.maxAge != null) {
+      if (r.maxAge <= 0) return true;
+      return r.creation + r.maxAge * 1000 < now;
+    }
+    return r.expires != null && r.expires < now;
+  }
+  function parse(line, url) {
+    let u; try { u = new URL(url); } catch { return null; }
+    const parts = String(line).split(/;\s*/);
+    const head = parts.shift() || '';
+    const eq = head.indexOf('=');
+    if (eq <= 0) return null;
+    const name = head.slice(0, eq).trim();
+    if (!name || /[=;\r\n]/.test(name)) return null;
+    const host = canonHost(u.hostname);
+    const rec = {
+      name, value: head.slice(eq + 1),
+      domain: host, hostOnly: true,
+      path: defaultPath(u),
+      secure: false, httpOnly: false, sameSite: '',
+      expires: null, maxAge: null,
+      creation: Date.now(),
+    };
+    for (const attr of parts) {
+      const aeq = attr.indexOf('=');
+      const k = (aeq >= 0 ? attr.slice(0, aeq) : attr).trim().toLowerCase();
+      const v = aeq >= 0 ? attr.slice(aeq + 1).trim() : '';
+      if (k === 'domain' && v) {
+        const dom = canonHost(v.replace(/^\./, ''));
+        if (!dom || !domainMatch(host, dom, false)) continue;
+        rec.domain = dom;
+        rec.hostOnly = false;
+      } else if (k === 'path' && v && v[0] === '/') {
+        rec.path = v;
+      } else if (k === 'expires' && v) {
+        const t = Date.parse(v);
+        if (!isNaN(t)) rec.expires = t;
+      } else if (k === 'max-age' && v) {
+        const n = parseInt(v, 10);
+        if (!isNaN(n)) rec.maxAge = n;
+      } else if (k === 'secure') rec.secure = true;
+      else if (k === 'httponly') rec.httpOnly = true;
+      else if (k === 'samesite') rec.sameSite = v.toLowerCase();
+    }
+    return rec;
+  }
+  function setCookieLine(url, line) {
+    const rec = parse(line, url);
+    if (!rec) return;
+    if (rec.maxAge != null && rec.maxAge <= 0) {
+      for (let i = 0; i < records.length; i++) {
+        const r = records[i];
+        if (r.name === rec.name && r.domain === rec.domain && r.path === rec.path) {
+          records.splice(i, 1);
+          return;
+        }
+      }
+      return;
+    }
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      if (r.name === rec.name && r.domain === rec.domain && r.path === rec.path) {
+        rec.creation = r.creation;
+        records[i] = rec;
+        return;
+      }
+    }
+    records.push(rec);
+  }
+  function cookiesForURL(url, includeHttpOnly) {
+    let u; try { u = new URL(url); } catch { return []; }
+    const host = canonHost(u.hostname);
+    const path = u.pathname || '/';
+    const isSecure = u.protocol === 'https:';
+    const now = Date.now();
+    const out = [];
+    for (let i = records.length - 1; i >= 0; i--) {
+      const r = records[i];
+      if (expired(r, now)) { records.splice(i, 1); continue; }
+      if (!includeHttpOnly && r.httpOnly) continue;
+      if (!domainMatch(host, r.domain, r.hostOnly)) continue;
+      if (!pathMatch(path, r.path)) continue;
+      if (r.secure && !isSecure) continue;
+      out.push(r);
+    }
+    out.sort((a, b) => (b.path.length - a.path.length) || (a.creation - b.creation));
+    return out;
+  }
+  function cookieHeader(url) {
+    return cookiesForURL(url, true).map(r => r.name + '=' + r.value).join('; ');
+  }
+  function documentCookieFor(url) {
+    return cookiesForURL(url, false).map(r => r.name + '=' + r.value).join('; ');
+  }
+  return { setCookieLine, cookieHeader, documentCookieFor };
+}
 function isCORSPreflight(req) { return req.method === 'OPTIONS' && req.headers.has('Access-Control-Request-Method'); }
 function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set('Access-Control-Max-Age', '86400'); h.set('Cache-Control', 'no-store'); return new Response(null, { status: 204, headers: h }); }
 function applyCORS(h, req) {
