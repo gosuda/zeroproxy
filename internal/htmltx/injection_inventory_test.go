@@ -19,16 +19,18 @@ type injectionInventory struct {
 }
 
 type injectedScript struct {
-	Scope  string `json:"scope"`
-	Src    string `json:"src,omitempty"`
-	Inline string `json:"inline,omitempty"`
+	Scope     string `json:"scope"`
+	Src       string `json:"src,omitempty"`
+	Inline    string `json:"inline,omitempty"`
+	Rationale string `json:"rationale"`
 }
 
 type controlAttr struct {
-	Scope string `json:"scope"`
-	Tag   string `json:"tag"`
-	Name  string `json:"name"`
-	Value string `json:"value"`
+	Scope     string `json:"scope"`
+	Tag       string `json:"tag"`
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	Rationale string `json:"rationale"`
 }
 
 func TestTransformInjectionInventorySnapshot(t *testing.T) {
@@ -45,6 +47,7 @@ func TestTransformInjectionInventorySnapshot(t *testing.T) {
 	}
 
 	got := collectInjectionInventory(t, "document", string(out))
+	requireRationale(t, got)
 	gotJSON := marshalInventory(t, got)
 	golden := filepath.Join("testdata", "injection_inventory.json")
 	want, err := os.ReadFile(golden)
@@ -76,6 +79,7 @@ func collectInjectionInventory(t *testing.T, scope string, html string) injectio
 				for _, attr := range tok.Attr {
 					if strings.EqualFold(attr.Key, "src") && strings.HasPrefix(attr.Val, "/zp/assets/") {
 						script.Src = attr.Val
+						script.Rationale = scriptRationale(script)
 					}
 				}
 				if script.Src != "" {
@@ -91,10 +95,11 @@ func collectInjectionInventory(t *testing.T, scope string, html string) injectio
 				name := strings.ToLower(attr.Key)
 				if strings.HasPrefix(name, "data-zp-") {
 					inv.ControlAttrs = append(inv.ControlAttrs, controlAttr{
-						Scope: scope,
-						Tag:   tag,
-						Name:  name,
-						Value: attr.Val,
+						Scope:     scope,
+						Tag:       tag,
+						Name:      name,
+						Value:     attr.Val,
+						Rationale: controlAttrRationale(tag, name),
 					})
 				}
 				if name == "srcdoc" && (tag == "iframe" || tag == "frame") {
@@ -110,6 +115,7 @@ func collectInjectionInventory(t *testing.T, scope string, html string) injectio
 			marker := inlineInjectionMarker(z.Token().Data)
 			if marker != "" {
 				currentScript.Inline = marker
+				currentScript.Rationale = scriptRationale(*currentScript)
 				inv.Scripts = append(inv.Scripts, *currentScript)
 			}
 			currentScript = nil
@@ -128,6 +134,53 @@ func inlineInjectionMarker(source string) string {
 	default:
 		return ""
 	}
+}
+
+func requireRationale(t *testing.T, inv injectionInventory) {
+	t.Helper()
+	for _, script := range inv.Scripts {
+		if script.Rationale == "" {
+			t.Fatalf("missing rationale for injected script: %+v", script)
+		}
+	}
+	for _, attr := range inv.ControlAttrs {
+		if attr.Rationale == "" {
+			t.Fatalf("missing rationale for control attribute: %+v", attr)
+		}
+	}
+}
+
+func scriptRationale(script injectedScript) string {
+	switch {
+	case script.Inline == "boot-config":
+		return "seed target document runtime boot config, then self-remove"
+	case script.Inline == "base-sync":
+		return "synchronize target-visible base URL after transformed base element"
+	case script.Src == "/zp/assets/runtime-prelude.js":
+		return "load the single bundled target-document runtime asset"
+	default:
+		return ""
+	}
+}
+
+func controlAttrRationale(tag, name string) string {
+	switch name {
+	case "data-zp-target-url":
+		return "preserve target-visible URL while routing through ZeroProxy"
+	case "data-zp-blocked-url":
+		return "record blocked target URL for artifact masking and diagnostics"
+	case "data-zp-blocked-rel":
+		return "record suppressed link relation that would create direct egress"
+	case "data-zp-integrity":
+		return "preserve target script integrity after proxy-side URL rewrite"
+	case "data-zp-target-nonce":
+		return "preserve target script nonce after proxy runtime nonce substitution"
+	case "data-zp-blocked":
+		if tag == "div" {
+			return "replace unsupported active content with inert visible placeholder"
+		}
+	}
+	return ""
 }
 
 func sortedInventory(inv injectionInventory) injectionInventory {

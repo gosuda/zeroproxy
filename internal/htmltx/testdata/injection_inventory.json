@@ -2,23 +2,28 @@
   "scripts": [
     {
       "scope": "document/srcdoc",
-      "src": "/zp/assets/runtime-prelude.js"
+      "src": "/zp/assets/runtime-prelude.js",
+      "rationale": "load the single bundled target-document runtime asset"
     },
     {
       "scope": "document/srcdoc",
-      "inline": "boot-config"
+      "inline": "boot-config",
+      "rationale": "seed target document runtime boot config, then self-remove"
     },
     {
       "scope": "document",
-      "src": "/zp/assets/runtime-prelude.js"
+      "src": "/zp/assets/runtime-prelude.js",
+      "rationale": "load the single bundled target-document runtime asset"
     },
     {
       "scope": "document",
-      "inline": "base-sync"
+      "inline": "base-sync",
+      "rationale": "synchronize target-visible base URL after transformed base element"
     },
     {
       "scope": "document",
-      "inline": "boot-config"
+      "inline": "boot-config",
+      "rationale": "seed target document runtime boot config, then self-remove"
     }
   ],
   "controlAttrs": [
@@ -26,67 +31,78 @@
       "scope": "document",
       "tag": "a",
       "name": "data-zp-target-url",
-      "value": "https://example.com/next"
+      "value": "https://example.com/next",
+      "rationale": "preserve target-visible URL while routing through ZeroProxy"
     },
     {
       "scope": "document",
       "tag": "button",
       "name": "data-zp-target-url",
-      "value": "https://example.com/alt"
+      "value": "https://example.com/alt",
+      "rationale": "preserve target-visible URL while routing through ZeroProxy"
     },
     {
       "scope": "document",
       "tag": "div",
       "name": "data-zp-blocked",
-      "value": "object"
+      "value": "object",
+      "rationale": "replace unsupported active content with inert visible placeholder"
     },
     {
       "scope": "document",
       "tag": "form",
       "name": "data-zp-target-url",
-      "value": "https://example.com/dir/submit"
+      "value": "https://example.com/dir/submit",
+      "rationale": "preserve target-visible URL while routing through ZeroProxy"
     },
     {
       "scope": "document",
       "tag": "iframe",
       "name": "data-zp-target-url",
-      "value": "https://example.com/child"
+      "value": "https://example.com/child",
+      "rationale": "preserve target-visible URL while routing through ZeroProxy"
     },
     {
       "scope": "document",
       "tag": "link",
       "name": "data-zp-blocked-rel",
-      "value": "preconnect"
+      "value": "preconnect",
+      "rationale": "record suppressed link relation that would create direct egress"
     },
     {
       "scope": "document",
       "tag": "link",
       "name": "data-zp-blocked-url",
-      "value": "https://cdn.example/"
+      "value": "https://cdn.example/",
+      "rationale": "record blocked target URL for artifact masking and diagnostics"
     },
     {
       "scope": "document",
       "tag": "link",
       "name": "data-zp-target-url",
-      "value": "https://example.com/favicon.ico"
+      "value": "https://example.com/favicon.ico",
+      "rationale": "preserve target-visible URL while routing through ZeroProxy"
     },
     {
       "scope": "document",
       "tag": "script",
       "name": "data-zp-integrity",
-      "value": "sha384-i"
+      "value": "sha384-i",
+      "rationale": "preserve target script integrity after proxy-side URL rewrite"
     },
     {
       "scope": "document",
       "tag": "script",
       "name": "data-zp-target-nonce",
-      "value": "targetnonce"
+      "value": "targetnonce",
+      "rationale": "preserve target script nonce after proxy runtime nonce substitution"
     },
     {
       "scope": "document",
       "tag": "script",
       "name": "data-zp-target-url",
-      "value": "https://example.com/early.js"
+      "value": "https://example.com/early.js",
+      "rationale": "preserve target-visible URL while routing through ZeroProxy"
     }
   ]
 }

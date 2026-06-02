@@ -5,13 +5,16 @@
 
   const BLOCK_CODE = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
 
-  function rewriteError() {
-    try { return new DOMException('Blocked by ZeroProxy rewrite policy', 'NotSupportedError'); }
+  function rewriteError(code) {
+    let err;
+    try { err = new DOMException('Blocked by ZeroProxy rewrite policy', 'NotSupportedError'); }
     catch {
-      const err = new Error('Blocked by ZeroProxy rewrite policy');
+      err = new Error('Blocked by ZeroProxy rewrite policy');
       err.name = 'NotSupportedError';
-      return err;
     }
+    try { Object.defineProperty(err, 'zpErrorCode', { value: code || 'REWRITE_FAILED' }); }
+    catch {}
+    return err;
   }
 
   function api() {
@@ -21,19 +24,33 @@
 
   function requireScriptAPI() {
     const rw = api();
-    if (!rw || typeof rw.rewriteScript !== 'function') throw rewriteError();
+    if (!rw || typeof rw.rewriteScript !== 'function') throw rewriteError('REWRITER_UNAVAILABLE');
     return rw;
   }
 
-  function rewriteScriptResult(source, options = {}) {
+  function rewriteScriptCall(source, options = {}) {
     const rw = requireScriptAPI();
-    const out = rw.rewriteScript(String(source || ''), {
+    return rw.rewriteScript(String(source || ''), {
       kind: options.kind || 'classic',
       targetUrl: options.targetUrl || options.url || '',
       strict: options.strict !== false,
       controlPrefix: options.controlPrefix || (globalThis.ZP && globalThis.ZP.CONTROL_PREFIX) || '/zp/',
     });
-    if (!out || !out.ok || typeof out.code !== 'string') throw rewriteError();
+  }
+
+  function stableFailureCode(raw, fallback) {
+    if (typeof raw !== 'string' || !/^[A-Z0-9_:-]{1,64}$/.test(raw)) return fallback;
+    return raw;
+  }
+
+  function rewriteFailureCode(value) {
+    const raw = value && (value.zpErrorCode || value.errorCode || value.error);
+    return stableFailureCode(raw, 'REWRITE_FAILED');
+  }
+
+  function rewriteScriptResult(source, options = {}) {
+    const out = rewriteScriptCall(source, options);
+    if (!out || !out.ok || typeof out.code !== 'string') throw rewriteError(rewriteFailureCode(out));
     return out.code;
   }
 
@@ -42,8 +59,17 @@
   }
 
   function rewriteScriptOrBlock(source, options = {}) {
-    try { return rewriteScriptResult(source, options); }
-    catch { return blockSource(); }
+    return rewriteScriptOutcome(source, options).code;
+  }
+
+  function rewriteScriptOutcome(source, options = {}) {
+    try {
+      const out = rewriteScriptCall(source, options);
+      if (out && out.ok && typeof out.code === 'string') return { blocked: false, code: out.code, errorCode: '' };
+      return { blocked: true, code: blockSource(), errorCode: rewriteFailureCode(out) };
+    } catch (err) {
+      return { blocked: true, code: blockSource(), errorCode: rewriteFailureCode(err) };
+    }
   }
 
   function rewriteFunctionBody(source, params, targetUrl, controlPrefix) {
@@ -79,6 +105,7 @@
     ready() { return !!api(); },
     rewriteScriptSource,
     rewriteScriptOrBlock,
+    rewriteScriptOutcome,
     rewriteFunctionBody,
     rewriteCSSSource,
     blockSource,

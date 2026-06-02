@@ -13,6 +13,12 @@
   function maskNativeFunction(fn, name) {
     if (typeof fn === 'function') toStringMap.set(fn, nativeFunctionSource(name));
   }
+  function defineMasked(obj, key, value) {
+    try {
+      Object.defineProperty(obj, key, { value, enumerable: false, configurable: true, writable: true });
+      maskNativeFunction(value, key);
+    } catch {}
+  }
   if (nativeFunctionToString) {
     const maskedToString = function toString() {
       if (toStringMap.has(this)) return toStringMap.get(this);
@@ -53,6 +59,71 @@
   function expose(name, value) { Object.defineProperty(self, name, { value, enumerable: false, configurable: false }); }
   function isWorkerGlobal(value) { return value === self || value === scope; }
   function workerTarget(value) { return value === scope ? self : value; }
+  function hiddenWorkerGlobalKey(key) {
+    if (typeof key === 'symbol') {
+      const desc = String(key.description || '').toLowerCase();
+      return desc.includes('zeroproxy') || desc.startsWith('zp.');
+    }
+    const name = String(key || '');
+    return name === 'ZP' || name.startsWith('__ZP_') || name.startsWith('__zp_');
+  }
+  function hiddenWorkerOwnKey(key) {
+    return hiddenWorkerGlobalKey(key) || key === 'location' || key === 'fetch' || key === 'importScripts';
+  }
+  function visibleWorkerOwnKeys(value, keys) {
+    return isWorkerGlobal(value) ? Array.from(keys || []).filter(key => !hiddenWorkerOwnKey(key)) : keys;
+  }
+  function workerDescriptorKeys(out, Obj, Refl, reflectOwnKeys, getNames) {
+    return reflectOwnKeys ? reflectOwnKeys.call(Refl, out) : getNames.call(Obj, out);
+  }
+  function scrubWorkerDescriptors(value, out, Obj, Refl, reflectOwnKeys, getNames) {
+    if (!isWorkerGlobal(value)) return out;
+    for (const key of workerDescriptorKeys(out, Obj, Refl, reflectOwnKeys, getNames)) {
+      if (hiddenWorkerOwnKey(key)) delete out[key];
+    }
+    return out;
+  }
+  function installWorkerKeyMasking(Obj) {
+    const keys = Obj.keys;
+    const getNames = Obj.getOwnPropertyNames;
+    const getSymbols = Obj.getOwnPropertySymbols;
+    if (typeof keys === 'function') defineMasked(Obj, 'keys', function keys(value) {
+      return visibleWorkerOwnKeys(value, keys.call(Obj, value));
+    });
+    if (typeof getNames === 'function') defineMasked(Obj, 'getOwnPropertyNames', function getOwnPropertyNames(value) {
+      return visibleWorkerOwnKeys(value, getNames.call(Obj, value));
+    });
+    if (typeof getSymbols === 'function') defineMasked(Obj, 'getOwnPropertySymbols', function getOwnPropertySymbols(value) {
+      return visibleWorkerOwnKeys(value, getSymbols.call(Obj, value));
+    });
+  }
+  function installWorkerDescriptorMasking(Obj, Refl) {
+    const getNames = Obj.getOwnPropertyNames;
+    const getDescriptor = Obj.getOwnPropertyDescriptor;
+    const getDescriptors = Obj.getOwnPropertyDescriptors;
+    const reflectOwnKeys = Refl && Refl.ownKeys;
+    if (typeof getDescriptor === 'function') defineMasked(Obj, 'getOwnPropertyDescriptor', function getOwnPropertyDescriptor(value, key) {
+      if (isWorkerGlobal(value) && hiddenWorkerOwnKey(key)) return undefined;
+      return getDescriptor.call(Obj, value, key);
+    });
+    if (typeof getDescriptors === 'function') defineMasked(Obj, 'getOwnPropertyDescriptors', function getOwnPropertyDescriptors(value) {
+      return scrubWorkerDescriptors(value, getDescriptors.call(Obj, value), Obj, Refl, reflectOwnKeys, getNames);
+    });
+  }
+  function installWorkerReflectMasking(Refl) {
+    const reflectOwnKeys = Refl && Refl.ownKeys;
+    if (Refl && typeof reflectOwnKeys === 'function') defineMasked(Refl, 'ownKeys', function ownKeys(value) {
+      return visibleWorkerOwnKeys(value, reflectOwnKeys.call(Refl, value));
+    });
+  }
+  function installWorkerOwnPropertyMasking() {
+    const Obj = self.Object;
+    const Refl = self.Reflect;
+    if (!Obj) return;
+    installWorkerKeyMasking(Obj);
+    installWorkerDescriptorMasking(Obj, Refl);
+    installWorkerReflectMasking(Refl);
+  }
   function get(target, prop) {
     if (typeof prop !== 'symbol') prop = String(prop);
     if (isWorkerGlobal(target)) {
@@ -137,6 +208,7 @@
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
     return internalURL('/zp/api/script?kind=module&u=' + encodeURIComponent(u.href) + '&tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken));
   });
+  installWorkerOwnPropertyMasking();
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';

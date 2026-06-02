@@ -101,6 +101,21 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     defineAccessor,
     installToStringMasking,
   } = createArtifactMasking({ root, toStringMap, toStringMaskedPrototypes, origToString });
+  function defineReplacingNative(obj, key, value) {
+    const d = Object.getOwnPropertyDescriptor(obj, key);
+    try {
+      Object.defineProperty(obj, key, {
+        value,
+        enumerable: d ? d.enumerable : true,
+        configurable: d ? d.configurable : true,
+        writable: d && Object.hasOwn(d, 'writable') ? d.writable : true
+      });
+      maskNativeFunction(value, key);
+      return true;
+    } catch {
+      return define(obj, key, value);
+    }
+  }
   const {
     installCanvasAntiFingerprinting,
     installAudioAntiFingerprinting,
@@ -110,7 +125,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     root,
     Native,
     boot,
-    define,
+    define: defineReplacingNative,
     installEventMethods,
     maskNativeFunction,
     normalizedError,
@@ -136,9 +151,9 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       try { timer.call(w, () => activateDocumentWrittenScripts(targetDoc), 0); } catch {}
     };
     if (write) define(doc, 'write', function(...parts) { const ret = write(parts.map(p => transformHTML(String(p))).join('')); scheduleActivation(doc); return ret; });
-    if (writeln) define(doc, 'writeln', function(...parts) { const ret = writeln(parts.map(p => transformHTML(String(p))).join('') + '\n'); scheduleActivation(doc); return ret; });
+    if (writeln) define(doc, 'writeln', function(...parts) { const ret = writeln(`${parts.map(p => transformHTML(String(p))).join('')}\n`); scheduleActivation(doc); return ret; });
     if (typeof protoWrite === 'function') define(proto, 'write', function(...parts) { const ret = protoWrite.call(this, parts.map(p => transformHTML(String(p))).join('')); scheduleActivation(this); return ret; });
-    if (typeof protoWriteln === 'function') define(proto, 'writeln', function(...parts) { const ret = protoWriteln.call(this, parts.map(p => transformHTML(String(p))).join('') + '\n'); scheduleActivation(this); return ret; });
+    if (typeof protoWriteln === 'function') define(proto, 'writeln', function(...parts) { const ret = protoWriteln.call(this, `${parts.map(p => transformHTML(String(p))).join('')}\n`); scheduleActivation(this); return ret; });
     if (parser && w.DOMParser) define(w.DOMParser.prototype, 'parseFromString', function(markup, type) { return parser.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
     if (rangeFragment && w.Range) define(w.Range.prototype, 'createContextualFragment', function(markup) { return rangeFragment.call(this, transformHTML(String(markup))); });
   }
@@ -242,7 +257,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const next = url != null ? sameOriginHistoryURL(url) : new URL(virtualURL.href);
     virtualURL = next;
     if (!explicitBaseURL) baseURL = virtualURL.href;
-    const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();
+    const entryId = replace && activeEntryId ? activeEntryId : `e${ZP.randomId()}`;
     activeEntryId = entryId;
     postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
     const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyHistoryURL());
@@ -253,7 +268,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const oldURL = virtualURL.href;
     const next = new URL(virtualURL.href);
     let hash = String(raw);
-    if (hash && hash[0] !== '#') hash = '#' + hash;
+    if (hash && hash[0] !== '#') hash = `#${hash}`;
     next.hash = hash;
     if (next.href === virtualURL.href) return;
     const out = commitVirtualHistory(null, '', next.href, replace);
@@ -272,19 +287,19 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     const path = ZP.makeSharePath(share.encrypted);
-    const entryId = replace ? activeEntryId : 'e' + ZP.randomId();
+    const entryId = replace ? activeEntryId : `e${ZP.randomId()}`;
     await postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, replace });
     activeProxyPath = path;
     activeRouteKey = share.encrypted;
     activeProxyFragment = shareFragmentForKey(share.key);
-    return path + activeProxyFragment;
+    return `${path}${activeProxyFragment}`;
   }
   async function activatedFrameURL(raw, base = baseURL) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
-    const entryId = 'e' + ZP.randomId();
+    const entryId = `e${ZP.randomId()}`;
     await postMessageToSW({ type: 'ZP_FRAME_ROUTE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, referrerUrl: documentReferrerFor(target) });
-    return proxyOrigin + ZP.makeSharePath(share.encrypted) + shareFragmentForKey(share.key);
+    return `${proxyOrigin}${ZP.makeSharePath(share.encrypted)}${shareFragmentForKey(share.key)}`;
   }
   function directExternalFrameURL(target) {
     return '';
@@ -334,9 +349,9 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const policy = documentReferrerPolicy || 'strict-origin-when-cross-origin';
     if (policy === 'no-referrer') return '';
     if (src.protocol === 'https:' && dst.protocol === 'http:' && (policy === 'strict-origin-when-cross-origin' || policy === 'no-referrer-when-downgrade')) return '';
-    if (policy === 'origin' || policy === 'strict-origin') return src.origin + '/';
+    if (policy === 'origin' || policy === 'strict-origin') return `${src.origin}/`;
     if (policy === 'same-origin') return src.origin === dst.origin ? source : '';
-    if (policy === 'origin-when-cross-origin' || policy === 'strict-origin-when-cross-origin') return src.origin === dst.origin ? source : src.origin + '/';
+    if (policy === 'origin-when-cross-origin' || policy === 'strict-origin-when-cross-origin') return src.origin === dst.origin ? source : `${src.origin}/`;
     return source;
   }
   function navigateToTarget(raw, replace = false, base = baseURL) {
@@ -420,7 +435,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     return id;
   }
   function workerUploadChannelName() {
-    return '__zp_worker_upload:' + boot.tabId + ':' + runtimeToken;
+    return `__zp_worker_upload:${boot.tabId}:${runtimeToken}`;
   }
   function installWorkerUploadRelay() {
     if (typeof root.BroadcastChannel !== 'function' || typeof root.ReadableStream !== 'function') return;
@@ -506,11 +521,11 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 	      const u = new URL(target);
 	      const hash = u.hash;
 	      u.hash = '';
-	      return ZP.apiPath('fetch') + '?url=' + encodeURIComponent(u.href) + hash;
-	    } catch {
-	      return ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target);
-	    }
-	  }
+      return `${ZP.apiPath('fetch')}?url=${encodeURIComponent(u.href)}${hash}`;
+    } catch {
+      return `${ZP.apiPath('fetch')}?url=${encodeURIComponent(target)}`;
+    }
+  }
 	  function parseSrcset(raw) {
 	    const out = [];
 	    let s = String(raw || '').trim();
@@ -528,7 +543,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 	    }
 	    return out;
 	  }
-	  function joinSrcsetCandidate(url, descriptor) { return descriptor ? url + ' ' + descriptor : url; }
+  function joinSrcsetCandidate(url, descriptor) { return descriptor ? `${url} ${descriptor}` : url; }
 	  function rewriteSrcsetValue(raw, base = baseURL) {
 	    const candidates = parseSrcset(raw);
 	    if (!candidates.length) return { changed: false, actual: String(raw || ''), visible: String(raw || '') };
@@ -593,7 +608,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 	    if (quote && css[j] === quote) j++;
 	    j = skipCssWhitespace(css, j);
 	    if (css[j] !== ')') return null;
-	    return { out: 'url("' + cssResourceURL(scanned.value, base) + '")', next: j + 1 };
+    return { out: `url("${cssResourceURL(scanned.value, base)}")`, next: j + 1 };
 	  }
 	  function cssImportToken(css, i, base) {
 	    if (!(css[i] === '@' && css.slice(i, i + 7).toLowerCase() === '@import')) return null;
@@ -605,7 +620,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 	    const scanned = scanCssEscapedValue(css, j, quote);
 	    j = scanned.next;
 	    if (css[j] === quote) j++;
-	    out += '"' + cssResourceURL(scanned.value, base) + '"';
+      out += `"${cssResourceURL(scanned.value, base)}"`;
 	    return { out, next: j };
 	  }
 	  function fallbackRewriteCSS(source, base) {
@@ -840,8 +855,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       const hadPrevious = Object.prototype.hasOwnProperty.call(root, '__ZP_EVAL_SCOPE');
       Object.defineProperty(root, '__ZP_EVAL_SCOPE', { value: scope, enumerable: false, configurable: true, writable: true });
       try {
-        const expr = isEvalExpressionCandidate(text) ? '(' + text + ')' : text;
-        return (0, Native.eval)('with(__ZP_EVAL_SCOPE){' + expr + '\n}');
+        const expr = isEvalExpressionCandidate(text) ? `(${text})` : text;
+        return (0, Native.eval)(`with(__ZP_EVAL_SCOPE){${expr}\n}`);
       } finally {
         try {
           if (hadPrevious) Object.defineProperty(root, '__ZP_EVAL_SCOPE', { value: previous, enumerable: false, configurable: true, writable: true });
@@ -920,7 +935,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     }
     if (Native.objectGetPrototypeOf) define(Object, 'getPrototypeOf', safeGetPrototypeOf);
     if (Native.reflectGetPrototypeOf && root.Reflect) define(root.Reflect, 'getPrototypeOf', safeGetPrototypeOf);
-    const virtualLocation = Object.freeze({
+    const virtualLocation = {
       get href() { return virtualURL.href; },
       set href(v) { setVirtualLocation(v); },
       get protocol() { return virtualURL.protocol; },
@@ -938,7 +953,15 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       toString() { return virtualURL.href; },
       valueOf() { return virtualURL.href; },
       [Symbol.toPrimitive]() { return virtualURL.href; }
-    });
+    };
+    try {
+      Object.defineProperty(virtualLocation, Symbol.toStringTag, {
+        value: 'Location',
+        enumerable: false,
+        configurable: true
+      });
+    } catch {}
+    try { Object.freeze(virtualLocation); } catch {}
     maskMethods(virtualLocation, ['assign','replace','reload','toString','valueOf']);
     function safeCrossWindow(targetWindow) {
       if (!targetWindow || targetWindow === root) return scope;
@@ -959,7 +982,15 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       return proxy;
     }
     function virtualWindowProperty(target, prop) {
-      if (prop === 'top' || prop === 'parent' || prop === 'opener') {
+      if (prop === 'opener') {
+        try {
+          const opener = target.opener;
+          if (!opener) return null;
+          if (opener !== target) return safeCrossWindow(opener);
+        } catch {}
+        return scope;
+      }
+      if (prop === 'top' || prop === 'parent') {
         try {
           const child = target[prop];
           if (child && child !== target) return safeCrossWindow(child);
@@ -1004,9 +1035,20 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       if (base === document && prop === 'referrer') return boot.documentReferrer || '';
       if (isWindowLike(base)) {
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return base === scope || base === root ? scope : base;
-        if (prop === 'top' || prop === 'parent' || prop === 'opener') return base === scope || base === root ? virtualWindowProperty(root, prop) : base;
-        if (prop === 'location') return virtualLocation;
-        if (prop === 'origin') return virtualURL.origin;
+        if (prop === 'top' || prop === 'parent' || prop === 'opener') {
+          if (base === scope || base === root) return virtualWindowProperty(root, prop);
+          try {
+            const value = base[prop];
+            if (!value) return null;
+            if (value === root) return scope;
+            if (value === base) return base;
+            return safeCrossWindow(value);
+          } catch {
+            return base;
+          }
+        }
+        if (prop === 'location') return base === scope || base === root ? virtualLocation : base.location;
+        if (prop === 'origin') return base === scope || base === root ? virtualURL.origin : base.location && base.location.origin;
         if (prop === 'postMessage') return postMessageWrapperFor(base === scope ? root : base);
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
@@ -1132,8 +1174,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteFunctionBody !== 'function') throw normalizedError('NotSupportedError');
       return root.ZPHTTPRewriter.rewriteFunctionBody(String(body || ''), params, virtualURL.href, ZP.CONTROL_PREFIX);
     }
-    define(root, 'eval', dynamicEval);
-    define(root, 'Function', dynamicFunction);
+    defineReplacingNative(root, 'eval', dynamicEval);
+    defineReplacingNative(root, 'Function', dynamicFunction);
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
       if (ctor && ctor.prototype) try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: true, writable: true }); } catch {}
     }
@@ -1278,7 +1320,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     }
     if (req.signal) apiInit.signal = req.signal;
     try {
-      const fetchPromise = Native.fetch(ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target), apiInit);
+      const fetchPromise = Native.fetch(`${ZP.apiPath('fetch')}?url=${encodeURIComponent(target)}`, apiInit);
       const resp = abortPromise ? await Promise.race([fetchPromise, abortPromise]) : await fetchPromise;
       if ((req.redirect || 'follow') === 'error' && resp.status === 403) {
         const text = await resp.clone().text().catch(() => '');
@@ -1303,7 +1345,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     return target.dispatchEvent(ev);
   }
   function installHTTPAPIs() {
-    if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
+    if (Native.fetch && Native.Request && Native.Headers) defineReplacingNative(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
       function hiddenXHRSlot(xhr, key, value) {
@@ -1442,7 +1484,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
           if (active) xhrDone(this, 'abort');
         },
         getResponseHeader(name) { return this._responseHeaders ? this._responseHeaders.get(String(name)) : null; },
-        getAllResponseHeaders() { if (!this._responseHeaders) return ''; let out = ''; this._responseHeaders.forEach((v, k) => { out += k + ': ' + v + '\r\n'; }); return out; },
+        getAllResponseHeaders() { if (!this._responseHeaders) return ''; let out = ''; this._responseHeaders.forEach((v, k) => { out += `${k}: ${v}\r\n`; }); return out; },
         overrideMimeType(mime) {}
       });
       function syncXHRBody(body) {
@@ -1504,7 +1546,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
         xhr._sent = true;
         fireEvent(xhr, 'loadstart');
         const nativeXHR = new Native.XMLHttpRequest();
-        nativeXHR.open(xhr._method, ZP.apiPath('fetch') + '?url=' + encodeURIComponent(xhr._url), false);
+        nativeXHR.open(xhr._method, `${ZP.apiPath('fetch')}?url=${encodeURIComponent(xhr._url)}`, false);
         nativeXHR.setRequestHeader('X-ZP-Tab-Id', boot.tabId);
         nativeXHR.setRequestHeader('X-ZP-Entry-Id', activeEntryId);
         nativeXHR.setRequestHeader('X-ZP-Runtime-Token', runtimeToken);
@@ -1584,7 +1626,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
         }
       });
       maskMethods(ZPEventSource.prototype, ['close']);
-      define(root, 'EventSource', ZPEventSource);
+      defineReplacingNative(root, 'EventSource', ZPEventSource);
       function runEventSource(es, url, init) {
         fetchThroughRuntime(url, { method: 'GET', headers: [['Accept', 'text/event-stream']], credentials: init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }).then(async resp => {
           if (!resp.ok) throw normalizedError('NetworkError');
@@ -1593,6 +1635,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
           fireEvent(es, 'open');
           if (!resp.body || !resp.body.getReader) {
             consumeSSE(es, await resp.text(), true);
+            finishEventSourceStream(es);
             return;
           }
           const reader = resp.body.getReader();
@@ -1604,11 +1647,17 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
             buf = consumeSSE(es, buf + decoder.decode(part.value, { stream: true }), false);
           }
           consumeSSE(es, buf + decoder.decode(), true);
+          finishEventSourceStream(es);
         }).catch(() => {
           if (es._closed) return;
           es.readyState = CLOSED;
           fireEvent(es, 'error');
         });
+      }
+      function finishEventSourceStream(es) {
+        if (es._closed) return;
+        es.readyState = CONNECTING;
+        fireEvent(es, 'error');
       }
       function consumeSSE(es, text, final) {
         let buf = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -1632,7 +1681,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
           const field = colon < 0 ? line : line.slice(0, colon);
           let value = colon < 0 ? '' : line.slice(colon + 1);
           if (value[0] === ' ') value = value.slice(1);
-          if (field === 'data') data += value + '\n';
+          if (field === 'data') data += `${value}\n`;
           else if (field === 'event') eventType = value || 'message';
           else if (field === 'id') lastEventId = value;
         }
@@ -1673,7 +1722,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
           const qs = new URLSearchParams();
           for (const [k, v] of data) qs.append(k, formEntryValue(v));
           const encoded = qs.toString();
-          if (encoded) target.search = target.search ? target.search + '&' + encoded : encoded;
+          if (encoded) target.search = target.search ? `${target.search}&${encoded}` : encoded;
         } catch {}
         navigateToTarget(target.href);
         return;
@@ -1712,7 +1761,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     }
     function formEntryValue(v) { return v && typeof v === 'object' && typeof v.name === 'string' && typeof v.size === 'number' ? v.name : String(v); }
     function urlEncodedFormBody(data) { const qs = new URLSearchParams(); for (const [k, v] of data) qs.append(k, formEntryValue(v)); return qs.toString(); }
-    function plainFormBody(data) { const out = []; for (const [k, v] of data) out.push(String(k) + '=' + formEntryValue(v)); return out.join('\r\n'); }
+    function plainFormBody(data) { const out = []; for (const [k, v] of data) out.push(`${String(k)}=${formEntryValue(v)}`); return out.join('\r\n'); }
     function clickNavigationTarget(ev) {
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
@@ -1913,7 +1962,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   function pruneCookieRecordsForSource(sourceHost, sourceSecure) {
     for (let i = documentCookieRecords.length - 1; i >= 0; i--) {
       const r = documentCookieRecords[i];
-      if ((r.hostOnly ? r.domain === sourceHost : sourceHost === r.domain || sourceHost.endsWith('.' + r.domain)) && (!r.secure || sourceSecure)) documentCookieRecords.splice(i, 1);
+      if ((r.hostOnly ? r.domain === sourceHost : sourceHost === r.domain || sourceHost.endsWith(`.${r.domain}`)) && (!r.secure || sourceSecure)) documentCookieRecords.splice(i, 1);
     }
   }
   function buildSyncedCookieRecord(raw, sourceHost) {
@@ -1947,7 +1996,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   function applyCookieDomain(rec, v) {
     if (!v) return;
     const d = v.replace(/^\./, '').toLowerCase();
-    if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; }
+    if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith(`.${d}`)) { rec.domain = d; rec.hostOnly = false; }
   }
   function applyCookieExpiry(rec, k, v) {
     if (k === 'max-age') { rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000; return; }
@@ -1989,7 +2038,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const now = Date.now();
     const host = virtualURL.hostname.toLowerCase();
     const path = virtualURL.pathname || '/';
-    return documentCookieRecords.filter(r => r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith('.' + r.domain)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')))).sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
+    return documentCookieRecords.filter(r => r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith(`.${r.domain}`)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')))).sort((a, b) => b.path.length - a.path.length).map(r => `${r.name}=${r.value}`).join('; ');
   }
   function normalizeSameSite(value) {
     const v = String(value || '').toLowerCase();
@@ -2019,8 +2068,8 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 
   function installStorageFacades(w) {
     const prefix = storagePrefixForVirtualOrigin();
-    const localKey = prefix + 'local';
-    const sessionKey = prefix + 'session';
+    const localKey = `${prefix}local`;
+    const sessionKey = `${prefix}session`;
     const local = storageObject(localKey, w);
     const session = storageObject(sessionKey, w);
     storageWindows.add({ w, localKey, sessionKey });
@@ -2028,25 +2077,27 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     defineAccessor(w, 'sessionStorage', () => session);
     if (w.indexedDB) {
       const nativeIDB = w.indexedDB;
+      const idbPrefix = `${prefix}idb:`;
       define(w, 'indexedDB', {
-        open(name, version) { return nativeIDB.open(prefix + 'idb:' + String(name), version); },
-        deleteDatabase(name) { return nativeIDB.deleteDatabase(prefix + 'idb:' + String(name)); },
+        open(name, version) { return nativeIDB.open(idbPrefix + String(name), version); },
+        deleteDatabase(name) { return nativeIDB.deleteDatabase(idbPrefix + String(name)); },
         cmp: nativeIDB.cmp ? nativeIDB.cmp.bind(nativeIDB) : undefined,
-        databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(prefix + 'idb:')).map(db => Object.assign({}, db, { name: db.name.slice((prefix + 'idb:').length) }))) : undefined
+        databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
       });
     }
-    if (w.caches) {
-      const nativeCaches = w.caches;
-      define(w, 'caches', {
-        open(name) { return nativeCaches.open(prefix + 'cache:' + String(name)); },
-        delete(name) { return nativeCaches.delete(prefix + 'cache:' + String(name)); },
-        has(name) { return nativeCaches.has(prefix + 'cache:' + String(name)); },
-        keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(prefix + 'cache:')).map(k => k.slice((prefix + 'cache:').length))); },
-        match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(prefix + 'cache:'))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
-      });
-    }
+  if (w.caches) {
+    const nativeCaches = w.caches;
+    const cachePrefix = `${prefix}cache:`;
+    define(w, 'caches', {
+      open(name) { return nativeCaches.open(cachePrefix + String(name)); },
+      delete(name) { return nativeCaches.delete(cachePrefix + String(name)); },
+      has(name) { return nativeCaches.has(cachePrefix + String(name)); },
+      keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix)).map(k => k.slice(cachePrefix.length))); },
+      match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
+    });
   }
-  function storagePrefixForVirtualOrigin() { return 'zp:' + virtualURL.origin + ':'; }
+  }
+  function storagePrefixForVirtualOrigin() { return `zp:${virtualURL.origin}:`; }
   function storageMap(key) {
     let map = storageMaps.get(key);
     if (!map) {
@@ -2068,7 +2119,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       clear() { if (!map.size) return; map.clear(); markStorageDirty(namespaceKey, '*'); saveStorageMirror(namespaceKey, map); clearPersistentStorage(namespaceKey).catch(()=>{}); dispatchStorageEvents(namespaceKey, ownerWindow, null, null, null); }
     });
   }
-  function storageMirrorKey(namespace) { return 'zp:idb-mirror:' + namespace; }
+  function storageMirrorKey(namespace) { return `zp:idb-mirror:${namespace}`; }
   function loadStorageMirror(namespace, map) {
     const store = Native.localStorage;
     if (!store) return;
@@ -2408,7 +2459,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     if (!owner || !attr) return null;
     const name = String(attr.name || '').toLowerCase();
     const old = oldAttributeNode(owner, attr);
-    Native.setAttribute.call(owner, 'data-zp-blocked-' + name, String(attr.value || ''));
+    Native.setAttribute.call(owner, `data-zp-blocked-${name}`, String(attr.value || ''));
     try { Native.setAttribute.call(owner, attr.name, ''); } catch {}
     return old;
   }
@@ -2873,7 +2924,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
     if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
     if (key.startsWith('on') && key.length > 2) {
-      Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
+      Native.setAttribute.call(this, `data-zp-blocked-${key}`, String(v));
       return Native.setAttribute.call(this, k, '');
     }
     if (this.localName === 'base' && localKey === 'href') {
@@ -2931,7 +2982,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     }
     if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));
     if (key.startsWith('on') && key.length > 2) {
-      Native.setAttribute.call(this, 'data-zp-blocked-' + key, String(v));
+      Native.setAttribute.call(this, `data-zp-blocked-${key}`, String(v));
       return Native.setAttributeNS.call(this, ns, k, '');
     }
     return Native.setAttributeNS.call(this, ns, k, v);
@@ -3142,7 +3193,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       params.set('tab', boot.tabId);
       params.set('rt', runtimeToken);
     }
-    return ZP.apiPath('script') + '?' + params.toString();
+    return `${ZP.apiPath('script')}?${params.toString()}`;
   }
   function setScriptSource(el, raw) {
     const kind = executableScriptKindForElement(el);
@@ -3452,7 +3503,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     const href = Native.getAttribute.call(node, 'href') || '';
     updateVirtualBase(href);
     const script = parserDoc.createElement('script');
-    setScriptText(script, 'window.__ZP_SET_BASE&&window.__ZP_SET_BASE(' + JSON.stringify(href).replace(/</g, '\\\\u003c') + ');');
+    setScriptText(script, `window.__ZP_SET_BASE&&window.__ZP_SET_BASE(${JSON.stringify(href).replace(/</g, '\\\\u003c')});`);
     node.replaceWith(script);
   }
   function injectSerializedFrameSrcdoc(node) {
@@ -3492,10 +3543,10 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   }
   function blockSerializedEventAttribute(node, attrName, lowerAttr) {
     const val = Native.getAttribute.call(node, attrName) || '';
-    Native.setAttribute.call(node, 'data-zp-blocked-' + lowerAttr, val);
+    Native.setAttribute.call(node, `data-zp-blocked-${lowerAttr}`, val);
     if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
   }
-  function injectSrcdoc(s) { return '<script nonce="zp">(function(){const boot=' + bootJSON() + ';Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
+  function injectSrcdoc(s) { return `<script nonce="zp">(function(){const boot=${bootJSON()};Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>${transformHTML(String(s))}`; }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) {
     try { return rewritePageSource(source, 'event-handler'); }
@@ -3630,7 +3681,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       "self.__ZP_WORKER_RUNTIME_TOKEN=", JSON.stringify(runtimeToken), ";\n",
       "self.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\n",
       "self.__ZP_WORKER_SERVERS=new URLSearchParams(", JSON.stringify(params.toString()), ").getAll('server');\n",
-      "importScripts(", JSON.stringify(proxyOrigin + '/zp/assets/worker-prelude.js'), ");\n",
+      "importScripts(", JSON.stringify(`${proxyOrigin}/zp/assets/worker-prelude.js`), ");\n",
       "__zp_native_importScripts(", JSON.stringify(sourceURL), ");\n"
     ];
     const wrapper = new Blob(body, { type: 'text/javascript' });
@@ -3644,7 +3695,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
       if (parsed.protocol === 'blob:') {
         const pathname = parsed.pathname || '';
         const id = pathname.slice(pathname.lastIndexOf('/') + 1);
-        if (id) return 'blob:' + virtualURL.origin + '/' + id;
+        if (id) return `blob:${virtualURL.origin}/${id}`;
       }
     } catch {}
     return virtualURL.href;
@@ -3804,7 +3855,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
     params.set('tab', boot.tabId);
     params.set('rt', runtimeToken);
     for (const server of activeServers) params.append('server', server);
-    return ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();
+    return `${ZP.controlPath('worker-bootstrap.js')}#${params.toString()}`;
   }
   function bootstrapWorkerOptions(opts) {
     if (!opts || typeof opts !== 'object') return opts;
@@ -3815,7 +3866,7 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
   function dataWorkerURL(raw) {
     const comma = raw.indexOf(',');
     if (comma < 0) throw normalizedError('NotSupportedError');
-    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_LOCATION=", JSON.stringify(raw), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nself.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\nimportScripts(", JSON.stringify(proxyOrigin + '/zp/assets/worker-prelude.js'), ");\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
+    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_LOCATION=", JSON.stringify(raw), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nself.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\nimportScripts(", JSON.stringify(`${proxyOrigin}/zp/assets/worker-prelude.js`), ");\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
     const safe = Native.createObjectURL(blocked);
     workerBlobURLs.add(safe);
     return safe;

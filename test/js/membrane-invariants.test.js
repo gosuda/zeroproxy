@@ -323,8 +323,7 @@ test('membrane: hiddenGlobalKey predicate classifies ZP globals vs app globals',
 // selectors. Extract and exercise it directly.
 function loadSelectorFilter() {
   const src = readRuntime();
-  const code =
-    extractFunction(src, 'selectorTargetsZP') + '\nmodule.exports = { selectorTargetsZP };';
+  const code = `${extractFunction(src, 'selectorTargetsZP')}\nmodule.exports = { selectorTargetsZP };`;
   const sandbox = { module: { exports: {} }, String };
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox);
@@ -381,6 +380,9 @@ test('membrane: stealth + masking hooks are installed into the runtime global', 
   assert.match(worker, /maskNativeFunction/);
   assert.ok(worker.includes("maskNativeFunction(self.fetch, 'fetch')"));
   assert.ok(worker.includes("maskNativeFunction(self.importScripts, 'importScripts')"));
+  assert.ok(worker.includes('installWorkerOwnPropertyMasking()'));
+  assert.ok(worker.includes("defineMasked(Refl, 'ownKeys'"));
+  assert.ok(worker.includes("defineMasked(Obj, 'getOwnPropertyDescriptor'"));
 });
 
 // ---------------------------------------------------------------------------

@@ -1,3 +1,12 @@
 {
-  "nativeVsZeroProxyDifferential": {}
+  "nativeVsZeroProxyDifferential": {
+    "policyHeaders.csp": {
+      "proxy": "<zeroproxy-membrane-csp>",
+      "native": "default-src 'none'; script-src 'none'"
+    },
+    "policyHeaders.reportOnly": {
+      "proxy": "",
+      "native": "default-src 'none'; connect-src 'none'"
+    }
+  }
 }

@@ -32,7 +32,7 @@ export function dynamicSource(kind, params, body) {
         : kind === 'asyncGenerator'
           ? 'async function*'
           : 'function';
-  return prefix + ' anonymous(' + params.join(',') + '\n) {\n' + body + '\n}';
+  return `${prefix} anonymous(${params.join(',')}\n) {\n${body}\n}`;
 }
 
 export function isEvalExpressionCandidate(text) {

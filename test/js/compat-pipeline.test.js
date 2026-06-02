@@ -17,13 +17,14 @@ const readRuntime = () =>
 
 test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
   const rt = readRuntime();
-  assert.match(rt, /define\(root, 'fetch'/);
+  assert.match(rt, /defineReplacingNative\(root, 'fetch'/);
   assert.match(rt, /Object\.defineProperty\(root, 'XMLHttpRequest'/);
-  assert.match(rt, /define\(root, 'EventSource'/);
+  assert.match(rt, /defineReplacingNative\(root, 'EventSource'/);
+  assert.match(rt, /finishEventSourceStream\(es\)/);
   assert.ok(rt.includes('ZPXMLHttpRequest'));
   assert.ok(rt.includes('ZPEventSource'));
   assert.ok(rt.includes("ZP.apiPath('fetch')"));
-  assert.match(rt, /Native\.fetch\(ZP\.apiPath\('fetch'\)/);
+  assert.match(rt, /Native\.fetch\(`\$\{ZP\.apiPath\('fetch'\)\}\?url=/);
   for (const needle of [
     'X-ZP-Fetch-Credentials',
     'X-ZP-Fetch-Redirect',

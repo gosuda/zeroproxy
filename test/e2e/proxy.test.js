@@ -125,17 +125,189 @@ function createTargetServer(requests) {
         <main><h1>Differential Fixture</h1></main>
         <script>
           (async () => {
+            const fnSource = (fn) => {
+              try {
+                return Function.prototype.toString.call(fn);
+              } catch (err) {
+                return 'error:' + ((err && err.name) || 'Error');
+              }
+            };
+            const descriptorShape = (obj, key) => {
+              const d = Object.getOwnPropertyDescriptor(obj, key);
+              if (!d) return null;
+              const out = {
+                configurable: d.configurable,
+                enumerable: d.enumerable,
+                writable: Object.hasOwn(d, 'writable') ? d.writable : null,
+                hasGet: typeof d.get === 'function',
+                hasSet: typeof d.set === 'function',
+                valueType: typeof d.value
+              };
+              if (typeof d.value === 'function') out.valueSource = fnSource(d.value);
+              if (typeof d.get === 'function') out.getSource = fnSource(d.get);
+              if (typeof d.set === 'function') out.setSource = fnSource(d.set);
+              return out;
+            };
+            const hiddenArtifactKeys = () => Reflect.ownKeys(window)
+              .map(k => typeof k === 'symbol' ? k.toString() : String(k))
+              .filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_|zeroproxy/i.test(k));
+            const frameLocationKind = (href) => {
+              if (href === 'about:blank') return 'about:blank';
+              if (href === location.href) return 'parent-virtual';
+              return 'other';
+            };
+            const frameObservations = () => {
+              const frame = document.createElement('iframe');
+              document.body.appendChild(frame);
+              const child = frame.contentWindow;
+              const childDoc = frame.contentDocument;
+              const out = {
+                contentWindowObject: !!child,
+                contentDocumentObject: !!childDoc,
+                childParentIsWindow: child && child.parent === window,
+                childTopIsWindow: child && child.top === window,
+                childOpenerIsNull: child && child.opener === null,
+                childDocumentDefaultView: !!(childDoc && childDoc.defaultView === child),
+                childLocationKind: child && child.location && frameLocationKind(child.location.href),
+                childPostMessageSource: child && fnSource(child.postMessage)
+              };
+              frame.remove();
+              return out;
+            };
+            const workerObservations = () => new Promise((resolve) => {
+              let worker;
+              try {
+                worker = new Worker('/worker-differential.js');
+                const timer = setTimeout(() => {
+                  try {
+                    worker.terminate();
+                  } catch {}
+                  resolve({ timeout: true });
+                }, 5000);
+                worker.onmessage = (ev) => {
+                  clearTimeout(timer);
+                  try {
+                    worker.terminate();
+                  } catch {}
+                  resolve(ev.data || null);
+                };
+                worker.onerror = (ev) => {
+                  clearTimeout(timer);
+                  try {
+                    worker.terminate();
+                  } catch {}
+                  resolve({ error: ev && ev.message || 'worker-error' });
+                };
+              } catch (err) {
+                resolve({ error: err && (err.name + ':' + err.message) || String(err) });
+              }
+            });
+            const withDeadline = (promise, label, ms = 5000) =>
+              Promise.race([
+                promise,
+                new Promise(resolve => setTimeout(() => resolve({ timeout: label }), ms))
+              ]);
             const out = {
               locationHref: location.href,
               locationOrigin: location.origin,
               functionHref: Function('return location.href')(),
-              evalOrigin: eval('location.origin')
+              evalOrigin: eval('location.origin'),
+              surface: {
+                globals: {
+                  windowIsSelf: window === self,
+                  globalThisIsWindow: globalThis === window,
+                  documentDefaultViewIsWindow: document.defaultView === window,
+                  topIsWindow: top === window,
+                  parentIsWindow: parent === window,
+                  openerIsNull: opener === null
+                },
+                sources: {
+                  fetch: fnSource(fetch),
+                  xhr: fnSource(XMLHttpRequest),
+                  websocket: fnSource(WebSocket),
+                  eventSource: fnSource(EventSource),
+                  worker: fnSource(Worker),
+                  Function: fnSource(Function),
+                  eval: fnSource(eval),
+                  setTimeout: fnSource(setTimeout),
+                  locationAssign: fnSource(location.assign),
+                  historyPushState: fnSource(history.pushState)
+                },
+                descriptors: {
+                  fetch: descriptorShape(window, 'fetch'),
+                  XMLHttpRequest: descriptorShape(window, 'XMLHttpRequest'),
+                  WebSocket: descriptorShape(window, 'WebSocket'),
+                  EventSource: descriptorShape(window, 'EventSource'),
+                  Worker: descriptorShape(window, 'Worker'),
+                  Function: descriptorShape(window, 'Function'),
+                  eval: descriptorShape(window, 'eval'),
+                  location: descriptorShape(window, 'location'),
+                  history: descriptorShape(window, 'history'),
+                  postMessage: descriptorShape(window, 'postMessage')
+                },
+                ownKeys: {
+                  hiddenArtifacts: hiddenArtifactKeys(),
+                  hasLocation: Reflect.ownKeys(window).includes('location'),
+                  hasHistory: Reflect.ownKeys(window).includes('history')
+                },
+                prototypes: {
+                  locationTag: Object.prototype.toString.call(location),
+                  historyTag: Object.prototype.toString.call(history),
+                  documentTag: Object.prototype.toString.call(document)
+                },
+                frame: frameObservations()
+              }
             };
+            out.surface.workerRealm = await workerObservations();
             out.stringTimerOrigin = await new Promise(resolve => {
               window.__diffTimerOrigin = '';
               setTimeout('window.__diffTimerOrigin = location.origin', 0);
               setTimeout(() => resolve(window.__diffTimerOrigin), 25);
             });
+            out.dynamicImport = (await import('/differential-module.js')).observation;
+            out.eventSource = await new Promise(resolve => {
+              let es;
+              try {
+                es = new EventSource('/sse-differential?diff=1');
+                const timer = setTimeout(() => {
+                  resolve({ timeout: true });
+                  try {
+                    es.close();
+                  } catch {}
+                }, 5000);
+                es.onmessage = ev => {
+                  clearTimeout(timer);
+                  const result = {
+                    url: es.url,
+                    readyState: es.readyState,
+                    data: ev.data,
+                    origin: ev.origin || '',
+                    lastEventId: ev.lastEventId || ''
+                  };
+                  resolve(result);
+                  try {
+                    es.close();
+                  } catch {}
+                };
+                es.onerror = ev => {
+                  clearTimeout(timer);
+                  resolve({ error: ev && ev.type || 'eventsource-error' });
+                  try {
+                    es.close();
+                  } catch {}
+                };
+              } catch (err) {
+                resolve({ error: err && (err.name + ':' + err.message) || String(err) });
+              }
+            });
+            out.policyHeaders = await withDeadline((async () => {
+              const policyHeaders = await fetch('/policy-header-fixture?diff=1', { cache: 'no-store' });
+              return {
+                text: await policyHeaders.text(),
+                csp: policyHeaders.headers.get('Content-Security-Policy') || '',
+                reportOnly: policyHeaders.headers.get('Content-Security-Policy-Report-Only') || ''
+              };
+            })(), 'policy-headers');
             const redirected = await fetch('/redirect302?diff=1', { cache: 'no-store' });
             out.redirect = { status: redirected.status, text: await redirected.text(), url: redirected.url, redirected: redirected.redirected, type: redirected.type };
             const post = await fetch('/request-echo?diff=post', { method: 'POST', body: 'diff-body', headers: { 'Content-Type': 'text/plain' }, cache: 'no-store' });
@@ -318,6 +490,107 @@ function createTargetServer(requests) {
         }
         postMessage({ loaded: true, href: location.href, userAgent: navigator.userAgent, platform: navigator.platform, upload });
       })();`);
+      return;
+    }
+    if (url.pathname === '/worker-differential.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`(async () => {
+        const fnSource = (fn) => {
+          try {
+            return Function.prototype.toString.call(fn);
+          } catch (err) {
+            return 'error:' + ((err && err.name) || 'Error');
+          }
+        };
+        const descriptorShape = (obj, key) => {
+          const d = Object.getOwnPropertyDescriptor(obj, key);
+          if (!d) return null;
+          const out = {
+            configurable: d.configurable,
+            enumerable: d.enumerable,
+            writable: Object.hasOwn(d, 'writable') ? d.writable : null,
+            hasGet: typeof d.get === 'function',
+            hasSet: typeof d.set === 'function',
+            valueType: typeof d.value
+          };
+          if (typeof d.value === 'function') out.valueSource = fnSource(d.value);
+          if (typeof d.get === 'function') out.getSource = fnSource(d.get);
+          if (typeof d.set === 'function') out.setSource = fnSource(d.set);
+          return out;
+        };
+        const hiddenArtifactKeys = () => Reflect.ownKeys(self)
+          .map(k => typeof k === 'symbol' ? k.toString() : String(k))
+          .filter(k => /^ZP$|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|__zp_|__ZP_|zeroproxy/i.test(k));
+        const out = {
+          href: location.href,
+          origin,
+          globals: {
+            selfIsGlobalThis: self === globalThis,
+            locationTag: Object.prototype.toString.call(location)
+          },
+          sources: {
+            fetch: fnSource(fetch),
+            importScripts: fnSource(importScripts),
+            Function: fnSource(Function),
+            eval: fnSource(eval),
+            setTimeout: fnSource(setTimeout),
+            postMessage: fnSource(postMessage)
+          },
+          descriptors: {
+            fetch: descriptorShape(self, 'fetch'),
+            importScripts: descriptorShape(self, 'importScripts'),
+            Function: descriptorShape(self, 'Function'),
+            eval: descriptorShape(self, 'eval'),
+            location: descriptorShape(self, 'location'),
+            postMessage: descriptorShape(self, 'postMessage')
+          },
+          ownKeys: {
+            hiddenArtifacts: hiddenArtifactKeys(),
+            hasLocation: Reflect.ownKeys(self).includes('location')
+          }
+        };
+        postMessage(out);
+      })();`);
+      return;
+    }
+    if (url.pathname === '/differential-module.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(`export const observation = {
+        href: location.href,
+        origin: location.origin,
+        importMetaURL: import.meta.url,
+        defaultViewHref: document.defaultView.location.href,
+        fetchSource: Function.prototype.toString.call(fetch)
+      };`);
+      return;
+    }
+    if (url.pathname === '/sse-differential') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.write('id: diff-id\\ndata: event-source-ok\\n\\n');
+      setTimeout(() => {
+        try {
+          res.end();
+        } catch {}
+      }, 250);
+      return;
+    }
+    if (url.pathname === '/policy-header-fixture') {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Content-Security-Policy': "default-src 'none'; script-src 'none'",
+        'Content-Security-Policy-Report-Only': "default-src 'none'; connect-src 'none'",
+      });
+      res.end('policy-header-ok');
       return;
     }
     if (url.pathname === '/frame-child') {
@@ -576,7 +849,7 @@ function handleWebSocketUpgrade(req, socket, requests) {
   }
   const accept = crypto
     .createHash('sha1')
-    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
     .digest('base64');
   const requestedProtocol =
     String(req.headers['sec-websocket-protocol'] || '')
@@ -584,11 +857,11 @@ function handleWebSocketUpgrade(req, socket, requests) {
       .map((s) => s.trim())
       .filter(Boolean)[0] || '';
   ignoreBenignSocketErrors(socket);
+  const protocolHeader = requestedProtocol
+    ? `\r\nSec-WebSocket-Protocol: ${requestedProtocol}`
+    : '';
   socket.write(
-    'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' +
-      accept +
-      (requestedProtocol ? '\r\nSec-WebSocket-Protocol: ' + requestedProtocol : '') +
-      '\r\n\r\n',
+    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}${protocolHeader}\r\n\r\n`,
   );
   let buffered = Buffer.alloc(0);
   socket.on('data', (chunk) => {
@@ -607,7 +880,7 @@ function handleWebSocketUpgrade(req, socket, requests) {
         continue;
       }
       if (frame.opcode === 0x1)
-        writeWebSocketFrame(socket, 0x1, Buffer.from('echo:' + frame.payload.toString('utf8')));
+        writeWebSocketFrame(socket, 0x1, Buffer.from(`echo:${frame.payload.toString('utf8')}`));
       if (frame.opcode === 0x2) writeWebSocketFrame(socket, 0x2, frame.payload);
     }
   });
@@ -1165,7 +1438,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         const deadline = Date.now() + 5000;
         (function poll() {
           const current = frame.src || '';
-          if (current.startsWith(location.origin + '/zp/p/')) {
+          if (current.startsWith(`${location.origin}/zp/p/`)) {
             resolve(current);
             return;
           }
@@ -1351,15 +1624,33 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       async function waitForCookieHeader(needle) {
         let last = '';
         for (let i = 0; i < 30; i++) {
-          last = await readText('/cookie-echo?needle=' + encodeURIComponent(needle) + '&i=' + i);
+          last = await readText(`/cookie-echo?needle=${encodeURIComponent(needle)}&i=${i}`);
           if (last.includes(needle)) return last;
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        throw new Error('cookie header never contained ' + needle + ': ' + last);
+        throw new Error(`cookie header never contained ${needle}: ${last}`);
+      }
+      async function waitForDocumentCookie(needle) {
+        let last = '';
+        for (let i = 0; i < 30; i++) {
+          last = document.cookie;
+          if (last.includes(needle)) return last;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error(`document.cookie never contained ${needle}: ${last}`);
+      }
+      async function waitForPathCookie(path, needle) {
+        let last = '';
+        for (let i = 0; i < 30; i++) {
+          last = await readText(`${path}${path.includes('?') ? '&' : '?'}i=${i}`);
+          if (last.includes(needle)) return last;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error(`${path} never contained ${needle}: ${last}`);
       }
       async function readStream() {
         const started = performance.now();
-        const resp = await fetch('/stream?ts=' + Date.now(), { cache: 'no-store' });
+        const resp = await fetch(`/stream?ts=${Date.now()}`, { cache: 'no-store' });
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         const first = await reader.read();
@@ -1391,18 +1682,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
           const events = [];
           const mark = (name) =>
             events.push(
-              name +
-                ':' +
-                xhr.readyState +
-                ':' +
-                xhr.status +
-                ':' +
-                (xhr.responseText || '').length,
+              `${name}:${xhr.readyState}:${xhr.status}:${(xhr.responseText || '').length}`,
             );
           xhr.onreadystatechange = () => mark('readystatechange');
           xhr.onloadstart = () => mark('loadstart');
           xhr.onprogress = (ev) =>
-            events.push('progress:' + xhr.readyState + ':' + ev.loaded + ':' + ev.lengthComputable);
+            events.push(`progress:${xhr.readyState}:${ev.loaded}:${ev.lengthComputable}`);
           xhr.onload = () => mark('load');
           xhr.onerror = () => mark('error');
           xhr.ontimeout = () => mark('timeout');
@@ -1426,13 +1711,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
           const xhr = new XMLHttpRequest();
           const uploadEvents = [];
           xhr.upload.onloadstart = (ev) =>
-            uploadEvents.push('loadstart:' + ev.loaded + ':' + ev.lengthComputable);
+            uploadEvents.push(`loadstart:${ev.loaded}:${ev.lengthComputable}`);
           xhr.upload.onprogress = (ev) =>
-            uploadEvents.push('progress:' + ev.loaded + ':' + ev.lengthComputable);
-          xhr.upload.onload = (ev) =>
-            uploadEvents.push('load:' + ev.loaded + ':' + ev.lengthComputable);
+            uploadEvents.push(`progress:${ev.loaded}:${ev.lengthComputable}`);
+          xhr.upload.onload = (ev) => uploadEvents.push(`load:${ev.loaded}:${ev.lengthComputable}`);
           xhr.upload.onloadend = (ev) =>
-            uploadEvents.push('loadend:' + ev.loaded + ':' + ev.lengthComputable);
+            uploadEvents.push(`loadend:${ev.loaded}:${ev.lengthComputable}`);
           xhr.onloadend = () =>
             resolve({
               status: xhr.status,
@@ -1497,7 +1781,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
                   xhr.responseXML.getElementsByTagName('item')[0].textContent) ||
                 '',
             });
-          xhr.open('GET', '/xml?async=' + asyncMode, asyncMode);
+          xhr.open('GET', `/xml?async=${asyncMode}`, asyncMode);
           xhr.send();
           if (!asyncMode) xhr.onloadend();
         });
@@ -1523,7 +1807,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         };
       }
       async function noCORSShape() {
-        const resp = await fetch('http://localhost:' + crossPort + '/request-echo?mode=no-cors', {
+        const resp = await fetch(`http://localhost:${crossPort}/request-echo?mode=no-cors`, {
           mode: 'no-cors',
           cache: 'no-store',
         });
@@ -1543,7 +1827,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       }
       function websocketEcho() {
         return new Promise((resolve, reject) => {
-          const ws = new WebSocket('ws://localhost:' + targetPort + '/ws', ['zp-test']);
+          const ws = new WebSocket(`ws://localhost:${targetPort}/ws`, ['zp-test']);
           let settled = false;
           const finish = (fn) => (value) => {
             if (settled) return;
@@ -1572,7 +1856,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         });
       }
       async function websocketStreamEcho() {
-        const stream = new WebSocketStream('ws://localhost:' + targetPort + '/ws', {
+        const stream = new WebSocketStream(`ws://localhost:${targetPort}/ws`, {
           protocols: ['zp-stream'],
         });
         const opened = await stream.opened;
@@ -1589,7 +1873,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         };
       }
 
-      const setCookieBody = await readText('/set-cookie?ts=' + Date.now());
+      const setCookieBody = await readText(`/set-cookie?ts=${Date.now()}`);
       const serverCookie = await waitForCookieHeader('target_server=from-target');
       document.cookie = 'client_runtime=from-runtime; Path=/';
       const visibleCookie = document.cookie;
@@ -1627,9 +1911,13 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       referrerMeta.setAttribute('content', 'origin');
       await new Promise((resolve) => setTimeout(resolve, 0));
       const metaOriginEcho = await readJSON('/request-echo?referrer=meta-origin');
-      const scopedCookieBody = await readText('/account/set-cookie-scope?ts=' + Date.now());
-      const visibleAfterScopedSet = document.cookie;
-      const accountCookie = await readText('/account/cookie-echo?ts=' + Date.now());
+      const scopedCookieBody = await readText(`/account/set-cookie-scope?ts=${Date.now()}`);
+      await waitForCookieHeader('target_root=visible-root');
+      const visibleAfterScopedSet = await waitForDocumentCookie('target_root=visible-root');
+      const accountCookie = await waitForPathCookie(
+        `/account/cookie-echo?ts=${Date.now()}`,
+        'target_scoped=visible-account',
+      );
       const syncXHR = (() => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/post-echo', false);
@@ -1667,7 +1955,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       const ws = await websocketEcho();
       const wsStream = await websocketStreamEcho();
       const xhrSuccess = await withDeadline(
-        xhrEventProbe('/stream?xhr=success&ts=' + Date.now()),
+        xhrEventProbe(`/stream?xhr=success&ts=${Date.now()}`),
         'xhr-success',
       );
       const xhrBlobUpload = await xhrUploadProbe(
@@ -1681,7 +1969,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       const xhrRestrictions = await xhrRestrictionProbe();
       const xhrXMLAsync = await xhrXMLProbe(true);
       const xhrXMLSync = await xhrXMLProbe(false);
-      const xhr404 = await withDeadline(xhrEventProbe('/missing-xhr?ts=' + Date.now()), 'xhr-404');
+      const xhr404 = await withDeadline(xhrEventProbe(`/missing-xhr?ts=${Date.now()}`), 'xhr-404');
       const xhrRedirect = await withDeadline(
         xhrEventProbe('/redirect302?xhr=redirect'),
         'xhr-redirect',
@@ -1951,16 +2239,16 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     `target requests: ${JSON.stringify(requests)}`,
   );
 
-  const storageSeed = 'stored-' + Date.now();
+  const storageSeed = `stored-${Date.now()}`;
   const storageBeforeReload = await page.evaluate((seed) => {
     localStorage.setItem('zp-persist', seed);
-    sessionStorage.setItem('zp-session', seed + '-session');
+    sessionStorage.setItem('zp-session', `${seed}-session`);
     return {
       local: localStorage.getItem('zp-persist'),
       session: sessionStorage.getItem('zp-session'),
     };
   }, storageSeed);
-  assert.deepEqual(storageBeforeReload, { local: storageSeed, session: storageSeed + '-session' });
+  assert.deepEqual(storageBeforeReload, { local: storageSeed, session: `${storageSeed}-session` });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await waitForPage(page, () => document.title === 'E2E Home');
   const storageAfterReload = await page.evaluate(() => ({
@@ -1969,26 +2257,26 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     session: sessionStorage.getItem('zp-session'),
   }));
   assert.deepEqual(storageAfterReload, {
-    initial: { local: storageSeed, session: storageSeed + '-session' },
+    initial: { local: storageSeed, session: `${storageSeed}-session` },
     local: storageSeed,
-    session: storageSeed + '-session',
+    session: `${storageSeed}-session`,
   });
 
   const escapeMatrix = await page.evaluate(async (targetPort) => {
-    const directBase = 'http://localhost:' + targetPort;
+    const directBase = `http://localhost:${targetPort}`;
     const out = {};
-    out.fetch = await fetch(directBase + '/direct-fetch', { cache: 'no-store' })
-      .then((r) => 'ok:' + r.status)
-      .catch((err) => 'blocked:' + ((err && err.name) || 'Error'));
+    out.fetch = await fetch(`${directBase}/direct-fetch`, { cache: 'no-store' })
+      .then((r) => `ok:${r.status}`)
+      .catch((err) => `blocked:${(err && err.name) || 'Error'}`);
     out.xhr = await new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
-      xhr.onload = () => resolve('ok:' + xhr.status);
+      xhr.onload = () => resolve(`ok:${xhr.status}`);
       xhr.onerror = () => resolve('blocked:error');
       try {
-        xhr.open('GET', directBase + '/direct-xhr');
+        xhr.open('GET', `${directBase}/direct-xhr`);
         xhr.send();
       } catch (err) {
-        resolve('blocked:' + ((err && err.name) || 'Error'));
+        resolve(`blocked:${(err && err.name) || 'Error'}`);
       }
     });
     out.eventSource = await new Promise((resolve) => {
@@ -2004,16 +2292,16 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       };
       let es;
       try {
-        es = new EventSource(directBase + '/sse');
-        es.onmessage = (ev) => finish('ok:' + ev.data);
+        es = new EventSource(`${directBase}/sse`);
+        es.onmessage = (ev) => finish(`ok:${ev.data}`);
         es.onerror = () => finish('blocked:error');
         setTimeout(() => finish('blocked:timeout'), 1000);
       } catch (err) {
-        resolve('blocked:' + ((err && err.name) || 'Error'));
+        resolve(`blocked:${(err && err.name) || 'Error'}`);
       }
     });
     out.websocket = await new Promise((resolve, reject) => {
-      const ws = new WebSocket('ws://localhost:' + targetPort + '/ws');
+      const ws = new WebSocket(`ws://localhost:${targetPort}/ws`);
       const timer = setTimeout(() => reject(new Error('internal-mode websocket timed out')), 10000);
       ws.onerror = () => {
         clearTimeout(timer);
@@ -2055,10 +2343,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         };
         worker.onerror = (ev) => {
           clearTimeout(timer);
-          resolve('error:' + ((ev && ev.message) || 'worker-error'));
+          resolve(`error:${(ev && ev.message) || 'worker-error'}`);
         };
       } catch (err) {
-        resolve('throw:' + ((err && err.message) || String(err)));
+        resolve(`throw:${(err && err.message) || String(err)}`);
       }
     });
     out.dataWorker = await new Promise((resolve) => {
@@ -2080,7 +2368,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
           resolve('error');
         };
       } catch (err) {
-        resolve('throw:' + ((err && err.message) || String(err)));
+        resolve(`throw:${(err && err.message) || String(err)}`);
       }
     });
     const button = document.createElement('button');
@@ -2294,7 +2582,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       button.type = 'submit';
       button.name = 'submitter';
       button.value = kind;
-      button.setAttribute('formaction', '/form-echo?kind=' + kind);
+      button.setAttribute('formaction', `/form-echo?kind=${kind}`);
       f.appendChild(button);
       document.body.appendChild(f);
       f.requestSubmit(button);
@@ -2386,10 +2674,14 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     functionHref: value.functionHref,
     evalOrigin: value.evalOrigin,
     stringTimerOrigin: value.stringTimerOrigin,
+    dynamicImport: value.dynamicImport,
+    eventSource: value.eventSource,
+    policyHeaders: normalizePolicyHeaders(value.policyHeaders),
     redirect: value.redirect,
     post: value.post,
     xhr: value.xhr,
     ws: value.ws,
+    surface: value.surface,
   });
   // Yield after the target-page navigation before reusing the same tab for the shell.
   // Under load Chromium can otherwise starve the next Puppeteer navigation until the
@@ -2417,7 +2709,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     }
     async function fetchAbortBeforeHeaders() {
       const controller = new AbortController();
-      const pending = fetch('/slow-headers?fetch=abort-before-headers&ts=' + Date.now(), {
+      const pending = fetch(`/slow-headers?fetch=abort-before-headers&ts=${Date.now()}`, {
         cache: 'no-store',
         signal: controller.signal,
       }).then(
@@ -2429,7 +2721,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     }
     async function fetchAbortDuringDownload() {
       const controller = new AbortController();
-      const resp = await fetch('/slow-body?fetch=abort-download&ts=' + Date.now(), {
+      const resp = await fetch(`/slow-body?fetch=abort-download&ts=${Date.now()}`, {
         cache: 'no-store',
         signal: controller.signal,
       });
@@ -2456,7 +2748,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         start(ctrl) {
           timer = setInterval(() => {
             produced++;
-            ctrl.enqueue(encoder.encode('upload-' + produced + '\n'));
+            ctrl.enqueue(encoder.encode(`upload-${produced}\n`));
             if (produced > 100) {
               clearInterval(timer);
               ctrl.close();
@@ -2467,7 +2759,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
           clearInterval(timer);
         },
       });
-      const pending = fetch('/slow-upload?fetch=abort-upload&ts=' + Date.now(), {
+      const pending = fetch(`/slow-upload?fetch=abort-upload&ts=${Date.now()}`, {
         method: 'POST',
         body: stream,
         duplex: 'half',
@@ -2486,13 +2778,11 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         const xhr = new XMLHttpRequest();
         const events = [];
         const mark = (name) =>
-          events.push(
-            name + ':' + xhr.readyState + ':' + xhr.status + ':' + (xhr.responseText || '').length,
-          );
+          events.push(`${name}:${xhr.readyState}:${xhr.status}:${(xhr.responseText || '').length}`);
         xhr.onreadystatechange = () => mark('readystatechange');
         xhr.onloadstart = () => mark('loadstart');
         xhr.onprogress = (ev) =>
-          events.push('progress:' + xhr.readyState + ':' + ev.loaded + ':' + ev.lengthComputable);
+          events.push(`progress:${xhr.readyState}:${ev.loaded}:${ev.lengthComputable}`);
         xhr.onload = () => mark('load');
         xhr.onerror = () => mark('error');
         xhr.ontimeout = () => mark('timeout');
@@ -2518,13 +2808,13 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       ),
       abortDuringDownload: await withDeadline(fetchAbortDuringDownload(), 'fetch-abort-download'),
       xhrTimeout: await withDeadline(
-        xhrEventProbe('/slow-headers?xhr=timeout&ts=' + Date.now(), (xhr) => {
+        xhrEventProbe(`/slow-headers?xhr=timeout&ts=${Date.now()}`, (xhr) => {
           xhr.timeout = 50;
         }),
         'xhr-timeout',
       ),
       xhrAbort: await withDeadline(
-        xhrEventProbe('/slow-headers?xhr=abort&ts=' + Date.now(), (xhr) => {
+        xhrEventProbe(`/slow-headers?xhr=abort&ts=${Date.now()}`, (xhr) => {
           setTimeout(() => xhr.abort(), 50);
         }),
         'xhr-abort',
@@ -2571,6 +2861,26 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     EXPECTED_DELTAS.nativeVsZeroProxyDifferential,
   );
 });
+
+function normalizePolicyHeaders(value) {
+  if (!value || typeof value !== 'object') return value;
+  return {
+    ...value,
+    csp: normalizePolicyHeader(value.csp),
+  };
+}
+
+function normalizePolicyHeader(value) {
+  const csp = String(value || '');
+  if (
+    csp.includes("default-src 'none'") &&
+    csp.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'") &&
+    /connect-src 'self' ws:\/\/proxy\.localhost:\d+/.test(csp)
+  ) {
+    return '<zeroproxy-membrane-csp>';
+  }
+  return csp;
+}
 
 function diffObjects(proxyValue, nativeValue, prefix = '') {
   if (Object.is(proxyValue, nativeValue)) return {};

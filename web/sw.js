@@ -55,7 +55,7 @@ async function initKernel(servers) {
 
 async function initRewriter() {
   if (!self.ZPRewriter || !self.ZPRewriter.ready || typeof self.ZPRewriter.rewriteScript !== 'function') throw new Error('REALM_INJECTION_FAILURE');
-  if (!self.ZPHTTPRewriter || typeof self.ZPHTTPRewriter.rewriteScriptOrBlock !== 'function') throw new Error('REALM_INJECTION_FAILURE');
+  if (!self.ZPHTTPRewriter || typeof self.ZPHTTPRewriter.rewriteScriptOutcome !== 'function') throw new Error('REALM_INJECTION_FAILURE');
 }
 
 async function handleFetch(event) {
@@ -350,7 +350,7 @@ async function rewriteScriptResponse(resp, opt) {
   try {
     await initRewriter();
     const source = await resp.text();
-    code = self.ZPHTTPRewriter.rewriteScriptOrBlock(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX });
+    code = self.ZPHTTPRewriter.rewriteScriptOutcome(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, controlPrefix: ZP.CONTROL_PREFIX }).code;
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
   }

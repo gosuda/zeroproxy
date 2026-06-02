@@ -1,11 +1,11 @@
 export function createArtifactMasking({ root, toStringMap, toStringMaskedPrototypes, origToString }) {
   function nativeFunctionSource(key) {
     const name = typeof key === 'symbol' ? '' : String(key);
-    return 'function ' + name + '() { [native code] }';
+    return `function ${name}() { [native code] }`;
   }
   function nativeAccessorSource(kind, key) {
     const name = typeof key === 'symbol' ? '' : String(key);
-    return 'function ' + kind + ' ' + name + '() { [native code] }';
+    return `function ${kind} ${name}() { [native code] }`;
   }
   function maskNativeFunction(fn, key) {
     if (typeof fn === 'function') toStringMap.set(fn, nativeFunctionSource(key));

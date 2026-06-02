@@ -40,10 +40,13 @@ function loadBuiltRustContext() {
       };
       ctx.globalThis = ctx;
       vm.createContext(ctx);
+      const initStart = process.hrtime.bigint();
       vm.runInContext(fs.readFileSync(path.join(outDir, 'web', 'rust-rewriter.js'), 'utf8'), ctx, {
         filename: 'rust-rewriter.js',
       });
+      const initMs = Number(process.hrtime.bigint() - initStart) / 1e6;
       Object.defineProperty(ctx, '__buildOutDir', { value: outDir });
+      Object.defineProperty(ctx, '__rustRewriterInitMs', { value: initMs });
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'js-rewriter.js')), false);
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc-parser.js')), false);
       assert.equal(fs.existsSync(path.join(outDir, 'web', 'oxc_parser_wasm_bg.wasm')), false);
@@ -56,6 +59,46 @@ function loadBuiltRustContext() {
 async function loadRewriter() {
   const ctx = await loadBuiltRustContext();
   return ctx.ZPRewriter;
+}
+
+function elapsedMs(fn) {
+  const start = process.hrtime.bigint();
+  const value = fn();
+  const elapsed = Number(process.hrtime.bigint() - start) / 1e6;
+  return { value, elapsed };
+}
+
+function generatedRewriteSource(lines) {
+  const out = [];
+  for (let i = 0; i < lines; i++) {
+    out.push(
+      `window["slot${i}"] = location.href + document.defaultView.location.href; history.pushState({}, "", "#${i}");`,
+    );
+  }
+  return out.join('\n');
+}
+
+function assertWithinBudget(name, elapsed, budget) {
+  assert.ok(elapsed <= budget, `${name} took ${elapsed.toFixed(2)}ms, budget ${budget}ms`);
+}
+
+function loadHTTPRewriterContext(zpRewriter) {
+  const ctx = {
+    DOMException,
+    ZP: { CONTROL_PREFIX: '/zp/' },
+    ZPRewriter: zpRewriter,
+    globalThis: null,
+  };
+  ctx.globalThis = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(
+    fs.readFileSync(path.resolve(__dirname, '../../web/http-rewriter.js'), 'utf8'),
+    ctx,
+    {
+      filename: 'web/http-rewriter.js',
+    },
+  );
+  return ctx;
 }
 
 test('Rust rewriter asset exposes the public rewriter API without JS fallback assets', async () => {
@@ -75,6 +118,51 @@ test('Rust rewriter asset exposes the public rewriter API without JS fallback as
   assert.equal(out.ok, true);
   assert.match(out.code, /__zp_get\(__zp_get\(globalThis,"window"\),"location"\)\.href/);
   assert.equal('OXCParser' in ctx, false);
+});
+
+test('Rust rewriter initialization stays within a coarse budget', async () => {
+  const ctx = await loadBuiltRustContext();
+  assertWithinBudget('rust-rewriter initSync asset load', ctx.__rustRewriterInitMs, 1000);
+});
+
+test('Rust rewriter latency stays within coarse size-bucket budgets', async () => {
+  const rewriter = await loadRewriter();
+  const cases = [
+    { name: 'small', lines: 8, budgetMs: 250 },
+    { name: 'medium', lines: 128, budgetMs: 750 },
+    { name: 'large', lines: 512, budgetMs: 2000 },
+  ];
+
+  for (const { name, lines, budgetMs } of cases) {
+    const source = generatedRewriteSource(lines);
+    const warm = rewriter.rewriteScript(source, {
+      kind: 'classic',
+      targetUrl: `https://example.com/${name}.js`,
+      controlPrefix: '/zp/',
+    });
+    assert.equal(warm.ok, true, JSON.stringify(warm.diagnostics));
+
+    const measured = elapsedMs(() =>
+      rewriter.rewriteScript(source, {
+        kind: 'classic',
+        targetUrl: `https://example.com/${name}.js`,
+        controlPrefix: '/zp/',
+      }),
+    );
+    assert.equal(measured.value.ok, true, JSON.stringify(measured.value.diagnostics));
+    assertWithinBudget(`rewriteScript ${name}`, measured.elapsed, budgetMs);
+  }
+
+  const dynamicLines = Array.from(
+    { length: 128 },
+    (_, i) => `const v${i} = location.href + window.location.href;`,
+  ).join('\n');
+  const dynamicBody = `${dynamicLines}\nreturn v127;`;
+  const dynamic = elapsedMs(() =>
+    rewriter.rewriteFunctionBody(dynamicBody, [], 'https://example.com/dynamic.js', '/zp/'),
+  );
+  assert.equal(dynamic.value.ok, true, JSON.stringify(dynamic.value.diagnostics));
+  assertWithinBudget('rewriteFunctionBody dynamic', dynamic.elapsed, 750);
 });
 
 test('browser build uses Vite without a direct esbuild build step', () => {
@@ -252,6 +340,34 @@ test('Rust rewriter asset reports parse failures', async () => {
   assert.equal(publicOut.ok, false);
   assert.equal(publicOut.errorCode, 'PARSE_FAILED');
   assert.match(ctx.ZPRewriter.blockSource(), /Blocked by ZeroProxy rewrite policy/);
+});
+
+test('HTTP script rewriter reports redacted fail-close classifications', () => {
+  const secret = 'target-secret-token';
+  const block =
+    "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
+  const ctx = loadHTTPRewriterContext({
+    ready: true,
+    rewriteScript() {
+      return { ok: false, errorCode: 'PARSE_FAILED', diagnostics: [{ message: secret }] };
+    },
+    blockSource() {
+      return block;
+    },
+  });
+  const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome(`if (${secret}`, { kind: 'classic' });
+  assert.deepEqual(Object.keys(outcome).sort(), ['blocked', 'code', 'errorCode']);
+  assert.equal(outcome.blocked, true);
+  assert.equal(outcome.code, block);
+  assert.equal(outcome.errorCode, 'PARSE_FAILED');
+  assert.equal(JSON.stringify(outcome).includes(secret), false);
+  assert.equal(ctx.ZPHTTPRewriter.rewriteScriptOrBlock(secret), block);
+
+  const unavailable = loadHTTPRewriterContext({ ready: false });
+  const unavailableOutcome = unavailable.ZPHTTPRewriter.rewriteScriptOutcome(secret);
+  assert.equal(unavailableOutcome.blocked, true);
+  assert.equal(unavailableOutcome.errorCode, 'REWRITER_UNAVAILABLE');
+  assert.equal(JSON.stringify(unavailableOutcome).includes(secret), false);
 });
 
 test('Rust CSS rewriter rewrites only AST URL resources', async () => {

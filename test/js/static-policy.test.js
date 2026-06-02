@@ -79,7 +79,7 @@ test('runtime dynamic eval uses one native-scoped path without rewritten fallbac
     'dynamic eval must use the single scoped eval path',
   );
   assert.ok(
-    rt.includes("(0, Native.eval)('with(__ZP_EVAL_SCOPE){' + expr + '\\n}')"),
+    rt.includes('(0, Native.eval)(`with(__ZP_EVAL_SCOPE){${expr}\\n}`)'),
     'scoped eval must preserve native eval semantics',
   );
   assert.equal(
@@ -336,6 +336,7 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
   assert.ok(sw.includes('/zp/api/script'));
   assert.ok(sw.includes('rewriteScriptResponse'));
+  assert.ok(sw.includes('rewriteScriptOutcome'));
   assert.ok(build.includes('rewriter-rs'));
   assert.ok(build.includes('wasm-bindgen'));
   assert.ok(build.includes('ZPRewriter'));
