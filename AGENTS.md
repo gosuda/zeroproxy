@@ -2,16 +2,10 @@
 
 ZeroProxy is a **human-in-the-loop** virtual-browsing privacy membrane: a real person drives a real browser, and target traffic egresses only through `Service Worker → Go WASM kernel → WebSocket/yamux → SOCKS5 → uTLS`. `ARCHITECTURE.md` holds the data-flow diagram and the full **Core invariants** list — read it before touching membrane/transport code; this file only adds what that doesn't, the conventions and traps that are expensive to rediscover.
 
-## Scope boundary (hard line)
-
-- **Challenge work is _compatibility only_** — stop the membrane from *breaking* a challenge a real human would solve. It is **never** a solver, token forgery, fingerprint spoofing, or detection-evasion. *Why:* anti-bot spoofing is a documented project non-goal (`ARCHITECTURE.md`), and those techniques serve bot evasion — the opposite of this product.
-- **Challenge compatibility must not be a policy bypass.** Do not add wildcard egress, direct fetch, token synthesis, fingerprint spoofing, or challenge-specific CSP relaxations. Prefer ordinary browser-compatibility fixes that keep target traffic inside the Service Worker → Go WASM kernel → WebSocket/yamux → SOCKS5 → uTLS path and honor but never manufacture `'unsafe-eval'`.
-- Treat real challenge validation as **human-run, redacted compatibility evidence only**. Do not log or publish challenge tokens, clearance cookie values, raw challenge URLs, challenge script bodies, VM bytecode/opcodes, request bodies, or opaque challenge configuration values. *Why:* clearance is server-authoritative and those artifacts cross from compatibility tracing into bypass-enabling material.
-- Decomposing or editing the membrane must **preserve every fail-closed branch** (no-direct-egress, unknown-request-blocked-with-no-`fetch` fallback, capability-token stripping). Any change to an *observable* security invariant (egress, fail-closed, masking) is surfaced for explicit approval, not applied silently. *Why:* shipping a weakened boundary is breaking the product, not cleaning it.
-
 ## Membrane/protocol refactor discipline (load-bearing)
 
 - A behavior-preserving change to membrane or protocol code must be proven by a **transient differential harness**, not a green suite: freeze the pre-change function verbatim under a new name, drive both old and new over a generated + edge corpus through the package's existing test seam (`scriptedRW` in socks5, `net.Pipe`/`pipeMux` in wsproto/zphttp), assert **0 mismatches** (return value, error string, bytes on the wire), then **delete the harness — never commit it** (`zz_*` scaffolding is correctly rejected in review). Keep a *permanent* characterization/adversarial oracle. *Why:* the `transform.go` decomposition passed the full suite but silently changed a marker; only a differential caught it. Suite-green ≠ behavior-preserved.
+
 - Removing a complexity `//nolint` is only real if the gate actually fires on that file. Prove it **red-before**, not just green-after: drop the pre-decomposition original (nolint stripped) at the path, confirm golangci **fails** on the complexity linter, then restore the decomposed file byte-identical (md5). *Why:* a stale `.golangci.yml` header once claimed the gates were "disabled" while they were live — green-after alone would have been hollow.
 
 ## Lint / complexity gates

@@ -346,10 +346,10 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(core.includes("'unsafe-eval'"));
   assert.equal(server.includes("'unsafe-eval'"), false);
   assert.ok(core.includes("'wasm-unsafe-eval'"));
-  assert.ok(index.includes("'wasm-unsafe-eval'"));
   assert.ok(core.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
   assert.ok(core.includes('allowDynamicCompile'));
-  assert.ok(index.includes("script-src 'self' 'nonce-zp' 'wasm-unsafe-eval'"));
+  assert.equal(/http-equiv=["']Content-Security-Policy/i.test(index), false);
+  assert.equal(index.includes("'wasm-unsafe-eval'"), false);
   assert.ok(server.includes("script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'"));
   assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
   assert.match(htmltx, /runtimePrelude[\s\S]*rust-rewriter\.js[\s\S]*http-rewriter\.js/);
