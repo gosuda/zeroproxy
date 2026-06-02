@@ -7,18 +7,6 @@
     "policyHeaders.reportOnly": {
       "proxy": "",
       "native": "default-src 'none'; connect-src 'none'"
-    },
-    "surface.frameDocument.contentWindowHref": {
-      "proxy": "<zeroproxy-frame-route>",
-      "native": "<target-frame-url>"
-    },
-    "surface.frameSrcdoc.contentDocumentURL": {
-      "proxy": "<target-document-url>",
-      "native": "<srcdoc-url>"
-    },
-    "surface.frameSrcdoc.sourceIsFrame": {
-      "proxy": false,
-      "native": true
     }
   }
 }

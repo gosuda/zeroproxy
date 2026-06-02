@@ -66,6 +66,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   const frameSandboxMeta = new WeakMap();
   const directExternalFrameWindowOrigins = new WeakMap();
   const crossWindowProxyCache = new WeakMap();
+  const frameWindowFacades = new WeakMap();
+  const frameElementWindowFacades = new WeakMap();
+  const frameSrcdocMessageSources = new WeakMap();
+  const frameDocumentFacades = new WeakMap();
   const postMessageWrappers = new WeakMap();
   const frameTargetOriginMarker = Symbol.for('zeroproxy.frame.targetOrigin');
   const networkContainmentMarker = Symbol.for('zeroproxy.network.contained');
@@ -76,6 +80,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   const rewrittenInlineScripts = new WeakSet();
   const rewrittenStyleNodes = new WeakSet();
   const documentWriteHookedWindows = new WeakSet();
+  const messageEventSourceHookedPrototypes = new WeakSet();
   const windowMethodBindings = new Map();
   const integrityBackupAttr = 'data-zp-integrity';
   const nonceBackupAttr = 'data-zp-target-nonce';
@@ -608,6 +613,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     frameTargetOriginMarker,
     maskNativeFunction,
     isDirectExternalFrameElement,
+    messageSourceFacadeFor,
   });
   const { installChildRewriteHelpers } = createChildRewriteHelpers({
     root,
@@ -629,6 +635,202 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     frameSandboxMeta,
     isDirectExternalFrameElement,
   });
+
+  function frameDocumentURL(frame, childDoc, childWin) {
+    try {
+      if (frame && Native.getAttribute.call(frame, 'srcdoc') != null) return 'about:srcdoc';
+    } catch {}
+    try {
+      const target = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url') || '';
+      if (target) return target;
+    } catch {}
+    try {
+      const href = childWin && childWin.location && childWin.location.href;
+      if (href) return String(href);
+    } catch {}
+    try {
+      const href = childDoc && childDoc.URL;
+      if (href) return String(href);
+    } catch {}
+    return 'about:blank';
+  }
+
+  function isSrcdocFrame(frame) {
+    try { return !!frame && Native.getAttribute.call(frame, 'srcdoc') != null; }
+    catch { return false; }
+  }
+
+  function frameLocationFacadeFor(frame, childDoc, childWin) {
+    const current = () => {
+      try { return new URL(frameDocumentURL(frame, childDoc, childWin)); }
+      catch { return new URL('about:blank'); }
+    };
+    const locationFacade = {
+      get href() { return current().href; },
+      set href(_v) {},
+      get protocol() { return current().protocol; },
+      get host() { return current().host; },
+      get hostname() { return current().hostname; },
+      get port() { return current().port; },
+      get pathname() { return current().pathname; },
+      get search() { return current().search; },
+      get hash() { return current().hash; },
+      set hash(_v) {},
+      get origin() { return current().origin; },
+      assign(_v) {},
+      replace(_v) {},
+      reload() {},
+      toString() { return current().href; },
+      valueOf() { return current().href; },
+      [Symbol.toPrimitive]() { return current().href; }
+    };
+    try { Object.defineProperty(locationFacade, Symbol.toStringTag, { value: 'Location', enumerable: false, configurable: true }); } catch {}
+    maskMethods(locationFacade, ['assign','replace','reload','toString','valueOf']);
+    maskNativeFunction(locationFacade[Symbol.toPrimitive], Symbol.toPrimitive);
+    try { Object.freeze(locationFacade); } catch {}
+    return locationFacade;
+  }
+
+  function frameWindowValue(frame, childWin, proxy, locationFacade, prop) {
+    if (prop === Symbol.toStringTag) return 'Window';
+    if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return proxy;
+    if (prop === 'location') return locationFacade;
+    if (prop === 'origin') return locationFacade.origin;
+    if (prop === 'postMessage') return postMessageWrapperFor(childWin);
+    if (prop === 'document') {
+      try { return frameDocumentFacadeFor(frame, childWin.document, childWin); } catch { return undefined; }
+    }
+    if (prop === 'parent' || prop === 'top') {
+      if (isSrcdocFrame(frame)) return root;
+      try {
+        const value = childWin[prop];
+        if (!value || value === childWin) return proxy;
+        if (value === root) return root;
+        return frameWindowFacades.get(value) || value;
+      } catch {
+        return root;
+      }
+    }
+    if (prop === 'opener') {
+      try {
+        const value = childWin.opener;
+        if (!value) return null;
+        if (value === root) return root;
+        return frameWindowFacades.get(value) || value;
+      } catch {
+        return null;
+      }
+    }
+    const value = childWin[prop];
+    return typeof value === 'function' && WINDOW_BOUND_METHODS.has(prop) ? value.bind(childWin) : value;
+  }
+
+  function frameWindowFacadeFor(frame, childWin, forceFacade = false) {
+    if (!childWin) return childWin;
+    if (!forceFacade && isSrcdocFrame(frame)) {
+      try { return frameSrcdocMessageSources.get(frame) || childWin; }
+      catch { return childWin; }
+    }
+    try {
+      const existing = frame && frameElementWindowFacades.get(frame);
+      if (existing) return existing;
+    } catch {}
+    if (frameWindowFacades.has(childWin)) return frameWindowFacades.get(childWin);
+    let proxy;
+    const locationFacade = frameLocationFacadeFor(frame, null, childWin);
+    proxy = new Proxy({}, {
+      get(_target, prop) { return frameWindowValue(frame, childWin, proxy, locationFacade, prop); },
+      set(_target, prop, value) {
+        if (prop === 'location') return true;
+        try { childWin[prop] = value; return true; } catch { return false; }
+      },
+      has(_target, prop) {
+        return prop === 'location' || prop === 'document' || prop === 'parent' || prop === 'top' || prop in childWin;
+      },
+      getOwnPropertyDescriptor(_target, prop) {
+        if (prop === 'location' || prop === 'document' || prop === 'parent' || prop === 'top') {
+          return { configurable: true, enumerable: true, get() { return frameWindowValue(frame, childWin, proxy, locationFacade, prop); } };
+        }
+        try { return Reflect.getOwnPropertyDescriptor(childWin, prop); } catch { return undefined; }
+      },
+      ownKeys() {
+        try { return Reflect.ownKeys(childWin); } catch { return []; }
+      }
+    });
+    membraneRawTargets.set(proxy, childWin);
+    frameWindowFacades.set(childWin, proxy);
+    try { if (frame) frameElementWindowFacades.set(frame, proxy); } catch {}
+    return proxy;
+  }
+
+  function frameDocumentValue(frame, childDoc, childWin, windowFacade, locationFacade, prop) {
+    if (prop === Symbol.toStringTag) return 'HTMLDocument';
+    if (prop === 'defaultView') return windowFacade;
+    if (prop === 'location') return locationFacade;
+    if (prop === 'URL' || prop === 'documentURI') return locationFacade.href;
+    const value = childDoc[prop];
+    return typeof value === 'function' ? value.bind(childDoc) : value;
+  }
+
+  function frameDocumentFacadeFor(frame, childDoc, childWin) {
+    if (!childDoc) return childDoc;
+    if (frameDocumentFacades.has(childDoc)) return frameDocumentFacades.get(childDoc);
+    const rawWindow = childWin || childDoc.defaultView;
+    const windowFacade = frameWindowFacadeFor(frame, rawWindow);
+    const locationFacade = frameLocationFacadeFor(frame, childDoc, rawWindow);
+    const proxy = new Proxy({}, {
+      get(_target, prop) { return frameDocumentValue(frame, childDoc, rawWindow, windowFacade, locationFacade, prop); },
+      set(_target, prop, value) {
+        try { childDoc[prop] = value; return true; } catch { return false; }
+      },
+      has(_target, prop) {
+        return prop === 'defaultView' || prop === 'URL' || prop === 'documentURI' || prop in childDoc;
+      },
+      getOwnPropertyDescriptor(_target, prop) {
+        if (prop === 'defaultView' || prop === 'URL' || prop === 'documentURI') {
+          return { configurable: true, enumerable: true, get() { return frameDocumentValue(frame, childDoc, rawWindow, windowFacade, locationFacade, prop); } };
+        }
+        try { return Reflect.getOwnPropertyDescriptor(childDoc, prop); } catch { return undefined; }
+      },
+      ownKeys() {
+        try { return Reflect.ownKeys(childDoc); } catch { return []; }
+      }
+    });
+    membraneRawTargets.set(proxy, childDoc);
+    frameDocumentFacades.set(childDoc, proxy);
+    return proxy;
+  }
+
+  function messageSourceFacadeFor(source, ev) {
+    if (!source) return srcdocMessageSourceFacade(ev);
+    if (frameWindowFacades.has(source)) return frameWindowFacades.get(source);
+    try {
+      const frames = document.querySelectorAll && document.querySelectorAll('iframe,frame');
+      if (!frames) return source;
+      for (let i = 0; i < frames.length; i++) {
+        const facade = frames[i].contentWindow;
+        const raw = membraneRawTargets.get(facade) || facade;
+        if (raw === source) return facade;
+      }
+    } catch {}
+    return srcdocMessageSourceFacade(ev, source) || source;
+  }
+
+  function srcdocMessageSourceFacade(ev, source) {
+    try {
+      if (!ev) return null;
+      const frames = document.querySelectorAll && document.querySelectorAll('iframe[srcdoc],frame[srcdoc]');
+      if (!frames || frames.length !== 1) return null;
+      if (source) {
+        const facade = frameWindowFacadeFor(frames[0], source, true);
+        frameSrcdocMessageSources.set(frames[0], facade);
+        return facade;
+      }
+      return frames[0].contentWindow || null;
+    } catch {
+      return null;
+    }
+  }
   try { Object.defineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
   installToStringMasking(root);
   define(root, '__ZP_SET_BASE', updateVirtualBase);
@@ -800,6 +1002,14 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (base === document && (prop === 'URL' || prop === 'documentURI')) return virtualURL.href;
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return boot.documentReferrer || '';
+      if (prop === 'source' && base && typeof base === 'object') {
+        try {
+          const rawSource = Reflect.get(Object(base), prop);
+          const framedSource = messageSourceFacadeFor(rawSource, base);
+          if (framedSource) return framedSource;
+          return rawSource;
+        } catch {}
+      }
       if (isWindowLike(base)) {
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return base === scope || base === root ? scope : base;
         if (prop === 'top' || prop === 'parent' || prop === 'opener') {
@@ -1403,6 +1613,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const addEventListener = w && w.addEventListener && w.addEventListener.bind(w);
     const removeEventListener = w && w.removeEventListener && w.removeEventListener.bind(w);
     if (!addEventListener || !removeEventListener) return;
+    installMessageEventSourceAccessor(w);
     function wrap(listener) {
       if (!listener || (typeof listener !== 'function' && typeof listener.handleEvent !== 'function')) return listener;
       if (messageListenerWrappers.has(listener)) return messageListenerWrappers.get(listener);
@@ -1424,6 +1635,19 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (onmessage) removeEventListener('message', messageListenerWrappers.get(onmessage) || onmessage);
       onmessage = typeof value === 'function' ? value : null;
       if (onmessage) addEventListener('message', wrap(onmessage));
+    });
+  }
+
+  function installMessageEventSourceAccessor(w) {
+    const proto = w && w.MessageEvent && w.MessageEvent.prototype;
+    if (!proto) return;
+    if (messageEventSourceHookedPrototypes.has(proto)) return;
+    const d = Object.getOwnPropertyDescriptor(proto, 'source');
+    if (!d || typeof d.get !== 'function') return;
+    messageEventSourceHookedPrototypes.add(proto);
+    defineAccessor(proto, 'source', function() {
+      const raw = d.get.call(this);
+      return messageSourceFacadeFor(raw, this) || raw;
     });
   }
 
@@ -2752,6 +2976,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       networkContainmentMarker,
       isDirectExternalFrameElement,
       installNetworkContainment,
+      frameWindowFacadeFor,
+      frameDocumentFacadeFor,
     });
     const nativeCreateElement = w === root ? Native.createElement : w.document.createElement.bind(w.document);
     const nativeCreateElementNS = w === root ? Native.createElementNS : w.document.createElementNS && w.document.createElementNS.bind(w.document);

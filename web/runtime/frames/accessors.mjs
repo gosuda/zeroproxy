@@ -2,6 +2,8 @@ export function createFrameAccessors({
   networkContainmentMarker,
   isDirectExternalFrameElement,
   installNetworkContainment,
+  frameWindowFacadeFor,
+  frameDocumentFacadeFor,
 }) {
   const instrumentedWindows = new WeakSet();
 
@@ -44,16 +46,18 @@ export function createFrameAccessors({
   function contentWindowGetter(nativeGet) {
     return function contentWindow() {
       const childWin = nativeGet.call(this);
-      return isDirectExternalFrameElement(this) ? childWin : containFrameWindow(childWin, this);
+      if (isDirectExternalFrameElement(this)) return childWin;
+      const contained = containFrameWindow(childWin, this);
+      return frameWindowFacadeFor ? frameWindowFacadeFor(this, contained) : contained;
     };
   }
 
   function contentDocumentGetter(nativeGet) {
     return function contentDocument() {
       const childDoc = nativeGet.call(this);
-      if (childDoc && childDoc.defaultView && !isDirectExternalFrameElement(this)) {
-        containFrameWindow(childDoc.defaultView, this);
-      }
+      if (!childDoc || isDirectExternalFrameElement(this)) return childDoc;
+      const childWin = childDoc.defaultView ? containFrameWindow(childDoc.defaultView, this) : null;
+      if (frameDocumentFacadeFor) return frameDocumentFacadeFor(this, childDoc, childWin);
       return childDoc;
     };
   }

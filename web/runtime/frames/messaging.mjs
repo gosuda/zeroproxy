@@ -10,6 +10,7 @@ export function createFrameMessaging({
   frameTargetOriginMarker,
   maskNativeFunction,
   isDirectExternalFrameElement,
+  messageSourceFacadeFor,
 }) {
   function frameTargetURL(frame, includeVisibleSrc = false) {
     try {
@@ -45,7 +46,9 @@ export function createFrameMessaging({
 
   function frameOwnsSource(frame, source) {
     try {
-      return frame.contentWindow === source;
+      const child = frame.contentWindow;
+      if (child === source) return true;
+      return rawPostMessageTarget(child) === rawPostMessageTarget(source);
     } catch {
       return false;
     }
@@ -155,22 +158,48 @@ export function createFrameMessaging({
   }
 
   function virtualizeMessageEvent(ev) {
+    if (!ev) return ev;
     const origin = virtualOriginForMessage(ev);
+    const source = virtualSourceForMessage(ev);
+    if (!origin && source !== ev.source) return cloneMessageEvent(ev, ev.origin, source);
     if (!origin) return ev;
+    if (source !== ev.source) return cloneMessageEvent(ev, origin, source);
+    return syntheticMessageEvent(ev, origin, source);
+  }
+
+  function virtualSourceForMessage(ev) {
+    return messageSourceFacadeFor ? messageSourceFacadeFor(ev.source, ev) || ev.source : ev.source;
+  }
+
+  function syntheticMessageEvent(ev, origin, source) {
     try {
-      return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: ev.source, ports: ev.ports || [] });
+      return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source, ports: ev.ports || [] });
     } catch {
-      try {
-        Object.defineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
-        return ev;
-      } catch {}
-      try {
-        const clone = Object.create(ev);
-        Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
-        return clone;
-      } catch {
-        return ev;
-      }
+      return defineMessageOriginSource(ev, origin, source);
+    }
+  }
+
+  function defineMessageOriginSource(ev, origin, source) {
+    try {
+      Object.defineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
+      Object.defineProperty(ev, 'source', { value: source, enumerable: true, configurable: true });
+      return ev;
+    } catch {}
+    return cloneMessageEvent(ev, origin, source);
+  }
+
+  function cloneMessageEvent(ev, origin, source) {
+    try {
+      const clone = Object.create(ev);
+      Object.defineProperty(clone, 'type', { value: ev.type, configurable: true });
+      Object.defineProperty(clone, 'data', { value: ev.data, configurable: true });
+      Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
+      Object.defineProperty(clone, 'lastEventId', { value: ev.lastEventId || '', configurable: true });
+      Object.defineProperty(clone, 'source', { value: source, configurable: true });
+      Object.defineProperty(clone, 'ports', { value: ev.ports || [], configurable: true });
+      return clone;
+    } catch {
+      return ev;
     }
   }
 
@@ -183,6 +212,8 @@ export function createFrameMessaging({
       if (child) {
         const origin = new URL(target).origin;
         frameWindowOrigins.set(child, origin);
+        const rawChild = rawPostMessageTarget(child);
+        if (rawChild && rawChild !== child) frameWindowOrigins.set(rawChild, origin);
         if (isDirectExternalFrameElement(frame)) directExternalFrameWindowOrigins.set(child, origin);
       }
     } catch {}
