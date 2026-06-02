@@ -873,6 +873,8 @@ test('Rust rewriter preserves optional access semantics for guarded probes', asy
   assert.ok(out.code.includes('__zp_optionalCall'));
   assert.ok(out.code.includes('__zp_optionalCall(Object,"getOwnPropertyDescriptors"'));
   assert.ok(out.code.includes('__zp_optionalCall(Reflect,"ownKeys"'));
+  assert.ok(out.code.includes('__zp_optionalCall(__zp_optionalGet(frame,"contentWindow"),"postMessage"'));
+  assert.equal(out.code.includes('__zp_optionalGet(__zp_optionalGet(frame,"contentWindow"),"postMessage")('), false);
 });
 
 test('Rust rewriter routes computed global-alias member access through runtime membrane', async () => {

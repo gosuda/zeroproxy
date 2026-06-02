@@ -27,17 +27,17 @@
     },
     {
       "id": "navigator-app-version-persona",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
+      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64|X11; Linux x86_64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
       "reason": "Native Chromium exposes host platform appVersion while ZeroProxy exposes the Windows Chrome persona."
     },
     {
       "id": "navigator-user-agent-persona",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.Mozilla/5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
+      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.Mozilla/5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64|X11; Linux x86_64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
       "reason": "Native Chromium exposes host platform userAgent while ZeroProxy exposes the Windows Chrome persona."
     },
     {
       "id": "navigator-platform-persona",
-      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(MacIntel|Win32)$",
+      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(Linux x86_64|MacIntel|Win32)$",
       "reason": "Native Chromium exposes host platform while ZeroProxy exposes the Windows Chrome persona."
     }
   ]

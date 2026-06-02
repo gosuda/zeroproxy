@@ -663,10 +663,44 @@ impl SwcRewriter<'_> {
     }
 
     fn rewrite_optional_call(&mut self, call: &OptCall) -> Option<Expr> {
-        let callee = Callee::Expr(call.callee.clone());
-        let (base, prop) = self.call_target_parts(&callee, true)?;
-        let args = array_expr(call.args.iter().cloned().map(expr_from_spread).collect());
+        let (base, prop) = self.optional_call_target_parts(&call.callee)?;
+        let args = array_expr(
+            call.args
+                .iter()
+                .cloned()
+                .map(|arg| self.transformed_arg_expr(arg))
+                .collect(),
+        );
         Some(call_helper("__zp_optionalCall", vec![base, prop, args]))
+    }
+
+    fn optional_call_target_parts(&mut self, callee: &Expr) -> Option<(Expr, Expr)> {
+        match callee {
+            Expr::Member(member) => {
+                let wrapped = Callee::Expr(Box::new(Expr::Member(member.clone())));
+                self.call_target_parts(&wrapped, true)
+            }
+            Expr::OptChain(chain) => match &*chain.base {
+                OptChainBase::Member(member) => {
+                    let base = self.transformed_expr(&member.obj);
+                    let prop = self.member_prop_expr(&member.prop);
+                    Some((base, prop))
+                }
+                _ => None,
+            },
+            Expr::Paren(paren) => self.optional_call_target_parts(&paren.expr),
+            _ => None,
+        }
+    }
+
+    fn transformed_arg_expr(&mut self, arg: ExprOrSpread) -> Expr {
+        let ExprOrSpread { spread, expr } = arg;
+        let mut expr = *expr;
+        expr.visit_mut_with(self);
+        expr_from_spread(ExprOrSpread {
+            spread,
+            expr: Box::new(expr),
+        })
     }
 }
 
