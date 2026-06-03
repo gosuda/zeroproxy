@@ -1059,13 +1059,39 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.virtualHref = loc.href;
     const beforeSrcdoc = location.href;
     const evil = document.createElement('iframe');
-    evil.srcdoc = `<script>top.location.href='https://evil.example/'; parent.postMessage({type:'evil-srcdoc'}, '*')<\/script>`;
+    // B2: srcdoc inline script must observe the *virtual* top.location at the
+    // moment the script body runs — proves the prelude installed itself before
+    // the first script in the new realm executed. If ordering were broken the
+    // probe would record the proxy origin (`proxy.localhost:...`).
+    const srcdocEchoPromise = new Promise(resolve => {
+      let captured = null;
+      const handler = ev => {
+        if (ev.data && ev.data.type === 'zp-srcdoc-at-run') {
+          captured = ev.data;
+          window.removeEventListener('message', handler);
+          resolve(captured);
+        }
+      };
+      window.addEventListener('message', handler);
+      setTimeout(() => { window.removeEventListener('message', handler); resolve(captured); }, 400);
+    });
+    evil.srcdoc = `<script>
+      var probe = { type: 'zp-srcdoc-at-run' };
+      try { probe.topHrefAtRun = top.location.href; }
+      catch (err) { probe.topHrefAtRun = 'throw:' + (err && err.name || String(err)); }
+      try { probe.topOriginAtRun = top.location.origin; }
+      catch (err) { probe.topOriginAtRun = 'throw:' + (err && err.name || String(err)); }
+      try { top.location.href='https://evil.example/'; } catch {}
+      parent.postMessage(probe, '*');
+    <\/script>`;
     document.body.appendChild(evil);
-    await new Promise(resolve => setTimeout(resolve, 100));
+    const srcdocEcho = await srcdocEchoPromise;
     out.afterSrcdocHref = location.href;
     out.afterSrcdocVirtualHref = loc.href;
     out.topOrigin = __zp_get(globalThis, 'top').location.origin;
     out.beforeSrcdoc = beforeSrcdoc;
+    out.srcdocTopHrefAtRun = (srcdocEcho && srcdocEcho.topHrefAtRun) || 'no-echo';
+    out.srcdocTopOriginAtRun = (srcdocEcho && srcdocEcho.topOriginAtRun) || 'no-echo';
     evil.remove();
     // A6 hardening: dynamic compilation paths must throw, not silently exec.
     out.functionEscape = (() => {
@@ -1179,6 +1205,173 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
+    // E1: Indirect eval `(0,eval)('location.href')` must hit prelude's
+    // dynamicEval (virtual URL), not native realm's eval.
+    out.indirectEval = (() => {
+      try {
+        const v = (0, eval)('location.href');
+        return /e2e\.test/.test(String(v)) ? 'virtual:' + v : 'native:' + v;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: globalThis.eval — same routing requirement.
+    out.globalThisEval = (() => {
+      try {
+        const v = globalThis.eval('location.href');
+        return /e2e\.test/.test(String(v)) ? 'virtual:' + v : 'native:' + v;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: Computed property access `window['loca'+'tion']` — must route
+    // through the membrane like any other property access.
+    out.computedAccess = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const loc = w['loca' + 'tion'];
+        const href = loc && loc.href;
+        return /e2e\.test/.test(href || '') ? 'virtual' : 'native:' + href;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: Destructuring `const { location } = window` — the unpacked
+    // reference must still be the virtual surface.
+    out.destructuringAccess = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const { location } = w;
+        return /e2e\.test/.test(location.href) ? 'virtual' : 'native:' + location.href;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: Optional chaining `window?.location?.href`.
+    out.optionalChainAccess = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const href = w?.location?.href;
+        return /e2e\.test/.test(href || '') ? 'virtual' : 'native:' + href;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: `Object.getOwnPropertyDescriptor(window, 'location')` — if it
+    // hands back a getter, that getter must yield the virtual surface.
+    out.locationDescriptor = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const desc = Object.getOwnPropertyDescriptor(w, 'location');
+        if (!desc) return 'no-desc';
+        const v = desc.get ? desc.get.call(w) : desc.value;
+        const href = v && v.href;
+        return /e2e\.test/.test(String(href || '')) ? 'virtual' : 'native:' + href;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: DOMParser.parseFromString — per HTML5 spec, inline <script>s
+    // inside the parsed document must NOT execute. Verify no regression.
+    out.domParserScript = (() => {
+      try {
+        window.__domParserRan = false;
+        const doc = new DOMParser().parseFromString(
+          '<html><body><script>window.__domParserRan = true<\/script></body></html>',
+          'text/html'
+        );
+        // Adopting the parsed node into the live document must not run the
+        // inline script either (it's parser-inserted, not inserted-while-parsed).
+        document.body.appendChild(document.importNode(doc.body, true));
+        return window.__domParserRan ? 'ran' : 'blocked';
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: Range.createContextualFragment — <script> created via fragment
+    // API must not execute in current realm.
+    out.rangeFragmentScript = (() => {
+      try {
+        window.__rangeFragmentRan = false;
+        const r = document.createRange();
+        r.selectNodeContents(document.body);
+        const frag = r.createContextualFragment('<script>window.__rangeFragmentRan = true<\/script>');
+        document.body.appendChild(frag);
+        return window.__rangeFragmentRan ? 'ran' : 'blocked';
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1: innerHTML inline <script> never executes (HTML5 spec), regression guard.
+    out.innerHTMLScript = (() => {
+      try {
+        window.__innerHTMLRan = false;
+        const d = document.createElement('div');
+        d.innerHTML = '<script>window.__innerHTMLRan = true<\/script>';
+        document.body.appendChild(d);
+        return window.__innerHTMLRan ? 'ran' : 'blocked';
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1 D7: sessionStorage isolation parity with localStorage.
+    out.sessionStoragePrefix = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const ss = w.sessionStorage;
+        ss.setItem('zp-sess-probe', 'v2');
+        const got = ss.getItem('zp-sess-probe');
+        const keys = [];
+        for (let i = 0; i < ss.length; i++) keys.push(ss.key(i));
+        ss.removeItem('zp-sess-probe');
+        const removed = ss.getItem('zp-sess-probe');
+        // Bare key visible to target — internal `zp:s:...` prefix must not leak.
+        const leaked = keys.some(k => /^zp:/.test(k));
+        return got === 'v2' && removed === null && !leaked
+          ? 'isolated'
+          : 'leak:' + JSON.stringify({ got, removed, leaked, keys });
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1 D7: caches (CacheStorage) origin prefix — target-visible names
+    // are un-prefixed, internal namespace is hidden.
+    out.cachesAPI = await (async () => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        if (!w.caches) return 'missing';
+        await w.caches.open('zp-probe-cache');
+        const keys = await w.caches.keys();
+        const leaked = keys.some(k => /^zp:/.test(k));
+        try { await w.caches.delete('zp-probe-cache'); } catch {}
+        return !leaked ? 'isolated' : 'leak:' + JSON.stringify(keys);
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1 D7: performance.timeOrigin must be numeric (virtualized to navigation
+    // baseline). The exact value depends on prelude state but it must not be
+    // missing or stringified.
+    out.performanceTimeOrigin = (() => {
+      try {
+        const w = __zp_get(globalThis, 'window');
+        const to = w.performance && w.performance.timeOrigin;
+        return typeof to === 'number' && to > 0 ? 'numeric' : 'missing:' + typeof to;
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
+    // E1 D4/D5: WebTransport / RTCPeerConnection virtual gateway stubs —
+    // construction succeeds (feature detection works) but `.ready` rejects.
+    out.webTransport = await (async () => {
+      try {
+        const WT = __zp_get(globalThis, 'WebTransport');
+        if (typeof WT !== 'function') return 'absent';
+        const wt = new WT('https://evil.example/');
+        try { await wt.ready; return 'allowed:resolved'; }
+        catch (err) { return 'gateway-stub:' + (err && err.name || String(err)); }
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+    out.rtcPeerConnection = (() => {
+      try {
+        const RTC = __zp_get(globalThis, 'RTCPeerConnection');
+        if (typeof RTC !== 'function') return 'absent';
+        const pc = new RTC();
+        // The gateway stub must refuse data channels (and other surface)
+        // synchronously — `.createDataChannel()` throws our NotSupportedError.
+        try { pc.createDataChannel('chan'); return 'allowed:dc'; }
+        catch (err) { return 'gateway-stub:' + (err && err.name || String(err)); }
+      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
+    })();
+
     return out;
   }, targetPort);
   assert.equal(escapeMatrix.fetch, 'ok:404');
@@ -1190,6 +1383,11 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
   assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref);
   assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
+  // B2 srcdoc ordering proof: the inline script ran AFTER the prelude installed
+  // itself in the srcdoc realm, so it observed the virtual top.location, not
+  // the proxy origin. A failure here means a clean-realm window of attack.
+  assert.equal(escapeMatrix.srcdocTopOriginAtRun, `http://${targetHost}:${targetPort}`, `srcdoc inline saw native top.origin: ${escapeMatrix.srcdocTopOriginAtRun}`);
+  assert.match(escapeMatrix.srcdocTopHrefAtRun, /^http:\/\/localhost:\d+/, `srcdoc inline saw native top.href: ${escapeMatrix.srcdocTopHrefAtRun}`);
   assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
   assert.equal(escapeMatrix.stringTimer, 'ran');
   assert.notEqual(escapeMatrix.blobWorker, 'ran');
@@ -1217,6 +1415,26 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(escapeMatrix.documentOrigin, /^virtual:/, `document.origin leak: ${escapeMatrix.documentOrigin}`);
   // D7 BroadcastChannel facade returns un-prefixed name (target-visible truth).
   assert.equal(escapeMatrix.broadcastChannelName, 'unprefixed-facade', `BroadcastChannel: ${escapeMatrix.broadcastChannelName}`);
+  // E1 indirect eval / globalThis.eval / computed / destructuring / optional
+  // chaining / descriptor — every location read path lands on the virtual surface.
+  assert.match(escapeMatrix.indirectEval, /^virtual:/, `indirect eval: ${escapeMatrix.indirectEval}`);
+  assert.match(escapeMatrix.globalThisEval, /^virtual:/, `globalThis.eval: ${escapeMatrix.globalThisEval}`);
+  assert.equal(escapeMatrix.computedAccess, 'virtual', `computed access: ${escapeMatrix.computedAccess}`);
+  assert.equal(escapeMatrix.destructuringAccess, 'virtual', `destructuring: ${escapeMatrix.destructuringAccess}`);
+  assert.equal(escapeMatrix.optionalChainAccess, 'virtual', `optional chain: ${escapeMatrix.optionalChainAccess}`);
+  assert.equal(escapeMatrix.locationDescriptor, 'virtual', `descriptor leak: ${escapeMatrix.locationDescriptor}`);
+  // E1 HTML compilation paths — DOMParser / Range fragment / innerHTML
+  // never run their inline <script> bodies in the current realm.
+  assert.equal(escapeMatrix.domParserScript, 'blocked', `DOMParser script: ${escapeMatrix.domParserScript}`);
+  assert.equal(escapeMatrix.rangeFragmentScript, 'blocked', `range fragment script: ${escapeMatrix.rangeFragmentScript}`);
+  assert.equal(escapeMatrix.innerHTMLScript, 'blocked', `innerHTML script: ${escapeMatrix.innerHTMLScript}`);
+  // D7 parity: sessionStorage / caches / performance.timeOrigin virtualized.
+  assert.equal(escapeMatrix.sessionStoragePrefix, 'isolated', `sessionStorage leak: ${escapeMatrix.sessionStoragePrefix}`);
+  assert.equal(escapeMatrix.cachesAPI, 'isolated', `caches leak: ${escapeMatrix.cachesAPI}`);
+  assert.equal(escapeMatrix.performanceTimeOrigin, 'numeric', `timeOrigin: ${escapeMatrix.performanceTimeOrigin}`);
+  // D4 / D5 gateway stubs — construction succeeds but operations fail-closed.
+  assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`);
+  assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`);
 
   const serviceWorkerPolicy = await page.evaluate(async () => {
     const out = {
