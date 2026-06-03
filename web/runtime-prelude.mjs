@@ -2066,6 +2066,27 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (owner) enforceAttributeNodeOwner(owner, attr);
     return ret;
   }
+  function eventAttributeFacade(owner, name, backing) {
+    return new Proxy(backing || {}, {
+      get(target, prop) {
+        if (prop === 'name' || prop === 'nodeName' || prop === 'localName') return name;
+        if (prop === 'value' || prop === 'nodeValue' || prop === 'textContent') return '';
+        if (prop === 'ownerElement') return owner || null;
+        if (prop === 'namespaceURI' || prop === 'prefix') return null;
+        if (prop === 'specified') return true;
+        const value = target && target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      set(target, prop, value) {
+        if (prop === 'value' || prop === 'nodeValue' || prop === 'textContent') {
+          if (owner) setEventAttribute(owner, name, value);
+          return true;
+        }
+        target[prop] = value;
+        return true;
+      }
+    });
+  }
   function removeNamedAttributeNode(owner, raw, name, ns) {
     const local = String(name || '').toLowerCase();
     if (isZPAttrName(local)) return null;
@@ -2112,6 +2133,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const lower = String(name || '').toLowerCase();
       if (isZPAttrName(lower)) return null;
       for (let i = 0; raw && i < raw.length; i++) if (raw[i] && String(raw[i].name).toLowerCase() === lower && visible(raw[i])) return raw[i];
+      if (eventAttrName(lower)) {
+        const backed = raw && raw.getNamedItem ? raw.getNamedItem(eventDataAttrName(lower)) : null;
+        if (backed) return eventAttributeFacade(owner, lower, backed);
+      }
       return null;
     };
     const findNamedNS = (ns, name) => {
@@ -2164,10 +2189,17 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
           const index = Number(prop);
           return index < length() ? nth(index) : undefined;
         }
+        if (typeof prop === 'string' && methods && typeof methods.getNamedItem === 'function') {
+          const named = methods.getNamedItem(prop);
+          if (named) return named;
+        }
         const value = raw && raw[prop];
         return typeof value === 'function' ? value.bind(raw) : value;
       },
-      has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\d*)$/.test(String(prop)) && Number(prop) < length()); }
+      has(_target, prop) {
+        if (prop === 'length' || (/^(?:0|[1-9]\d*)$/.test(String(prop)) && Number(prop) < length())) return true;
+        return typeof prop === 'string' && methods && typeof methods.getNamedItem === 'function' && !!methods.getNamedItem(prop);
+      }
     });
   }
   function sanitizeSerializedHTML(html) {

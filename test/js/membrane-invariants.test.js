@@ -348,6 +348,70 @@ test('membrane: hiddenGlobalKey predicate classifies ZP globals vs app globals',
   );
 });
 
+function loadFilteredNamedNodeMap() {
+  const src = readRuntime();
+  const code = [
+    'function attrLocalName(key) { const s = String(key || "").toLowerCase(); const i = s.indexOf(":"); return i >= 0 ? s.slice(i + 1) : s; }',
+    extractFunction(src, 'eventAttrName'),
+    extractFunction(src, 'eventDataAttrName'),
+    extractFunction(src, 'eventAttributeFacade'),
+    extractFunction(src, 'filteredNamedNodeMap'),
+    extractFunction(src, 'filteredCollection'),
+    'function isZPAttrName(name) { return String(name || "").toLowerCase().startsWith("data-zp-"); }',
+    'function setEventAttribute(owner, name, value) { owner.lastEventSet = { name, value }; }',
+    'function setNamedAttributeNode() { return null; }',
+    'function removeNamedAttributeNode() { return null; }',
+    'module.exports = { filteredNamedNodeMap };',
+  ].join('\n\n');
+  const sandbox = { module: { exports: {} }, Object, Proxy, String, Number, Symbol };
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+  return sandbox.module.exports.filteredNamedNodeMap;
+}
+
+test('membrane: NamedNodeMap named lookup exposes masked event attrs without ZP backing attrs', () => {
+  const filteredNamedNodeMap = loadFilteredNamedNodeMap();
+  const owner = {};
+  const backing = { name: 'data-zp-event-onsubmit', value: 'rewritten-internal-code' };
+  const href = { name: 'href', value: '/home' };
+  const raw = [backing, href];
+  raw.length = 2;
+  raw.getNamedItem = (name) =>
+    raw.find((attr) => String(attr.name).toLowerCase() === String(name).toLowerCase()) || null;
+
+  const filtered = filteredNamedNodeMap(raw, owner);
+  const eventAttr = filtered.onsubmit;
+
+  assert.equal(filtered.length, 1, 'hidden ZP backing attr must not count as visible');
+  assert.equal(filtered.href, href, 'ordinary named attributes must remain reachable');
+  assert.equal(
+    filtered['data-zp-event-onsubmit'],
+    undefined,
+    'ZP event backing attr must stay hidden',
+  );
+  assert.equal(
+    filtered.getNamedItem('onsubmit').name,
+    'onsubmit',
+    'property and getNamedItem agree',
+  );
+  assert.equal(eventAttr.name, 'onsubmit');
+  assert.equal(
+    eventAttr.value,
+    '',
+    'rewritten event handler source must not leak through Attr.value',
+  );
+  assert.equal(eventAttr.ownerElement, owner);
+  assert.equal(
+    'onsubmit' in filtered,
+    true,
+    'named event attr must participate in property existence',
+  );
+
+  eventAttr.value = 'next-source';
+  assert.equal(owner.lastEventSet.name, 'onsubmit');
+  assert.equal(owner.lastEventSet.value, 'next-source');
+});
+
 // DOM-enumeration filter: selectorTargetsZP is the pure gate that makes
 // querySelector / querySelectorAll / matches / closest refuse ZP-artifact
 // selectors. Extract and exercise it directly.

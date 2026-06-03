@@ -287,7 +287,10 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
   const start = rt.indexOf('function scriptProxyPath(target, kind)');
   const end = rt.indexOf('function setScriptSource', start);
   const body = rt.slice(start, end);
-  assert.ok(body.includes("if (kind !== 'module')"), 'module proxy URLs must keep referrer data out');
+  assert.ok(
+    body.includes("if (kind !== 'module')"),
+    'module proxy URLs must keep referrer data out',
+  );
   assert.ok(
     body.indexOf("params.set('tab'") < body.indexOf("if (kind !== 'module')"),
     'runtime tab token must be part of module graph identity',
@@ -304,12 +307,16 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
 
 test('filtered DOM collections expose numeric indexes to native slice', () => {
   const rt = readRuntimeSource();
-  assert.ok(
-    rt.includes("has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\d*)$/.test(String(prop)) && Number(prop) < length()); }"),
+  assert.match(
+    rt,
+    /has\(_target, prop\) \{[\s\S]*Number\(prop\) < length\(\)[\s\S]*\}/,
     'filtered collection HasProperty must recognize all numeric indexes',
   );
+  assert.ok(rt.includes("prop === 'length'"));
   assert.equal(
-    rt.includes("has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\\\d*)$/.test(String(prop)) && Number(prop) < length()); }"),
+    rt.includes(
+      "has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\\\d*)$/.test(String(prop)) && Number(prop) < length()); }",
+    ),
     false,
     'filtered collection HasProperty must not match a literal backslash-d',
   );

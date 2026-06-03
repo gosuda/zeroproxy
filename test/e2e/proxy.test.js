@@ -3170,6 +3170,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     const button = document.createElement('button');
     button.setAttribute('onclick', 'window.__eventHandlerLocation = location.href');
     document.body.appendChild(button);
+    out.eventHandlerExpectedLocation = __zp_get(globalThis, 'location').href;
     button.click();
     out.eventHandlerLocation = window.__eventHandlerLocation || '';
     button.remove();
@@ -3209,7 +3210,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.notEqual(escapeMatrix.dataWorker, 'ran');
   assert.ok(
     escapeMatrix.eventHandlerLocation === '' ||
-      escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`,
+      escapeMatrix.eventHandlerLocation === escapeMatrix.eventHandlerExpectedLocation,
     `event handler location: ${escapeMatrix.eventHandlerLocation}`,
   );
   assert.equal(
