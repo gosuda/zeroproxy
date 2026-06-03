@@ -19,6 +19,9 @@ site behind a controlled privacy boundary.
 - Fail closed when a request or execution path is unknown or unsafe.
 - Verify compatibility with native-browser-vs-ZeroProxy browser tests.
 
+For the full target-visible masking inventory, see
+[`docs/masking-surfaces.md`](docs/masking-surfaces.md).
+
 ## How It Works
 
 ZeroProxy loads the target page inside its own controlled origin, prepares the
