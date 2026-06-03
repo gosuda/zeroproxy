@@ -5,7 +5,7 @@
 //! (reused instance) latency across script size buckets.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use zp_rewriter::{rewrite_script, RewriterInstance, RewriteOpts, ScriptKind};
+use zp_rewriter::{rewrite_script, RewriteOpts, RewriterInstance, ScriptKind};
 
 fn opts() -> RewriteOpts {
     RewriteOpts {
@@ -78,5 +78,10 @@ fn bench_patch_count_sanity(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_cold_rewrites, bench_warm_rewrites, bench_patch_count_sanity);
+criterion_group!(
+    benches,
+    bench_cold_rewrites,
+    bench_warm_rewrites,
+    bench_patch_count_sanity
+);
 criterion_main!(benches);

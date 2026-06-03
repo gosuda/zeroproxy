@@ -44,9 +44,11 @@
 // allow on the file that has reached its first real caller.
 #![allow(dead_code)]
 
+pub(crate) mod decode;
 pub(crate) mod fetch;
 pub(crate) mod http1;
 pub(crate) mod http2;
+pub(crate) mod mlkem_hybrid;
 pub(crate) mod pool;
 pub(crate) mod socks5;
 pub(crate) mod tls;

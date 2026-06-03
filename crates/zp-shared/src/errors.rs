@@ -83,7 +83,10 @@ mod tests {
         for c in codes {
             let s = c.as_str();
             for ch in s.chars() {
-                assert!(ch.is_ascii_uppercase() || ch == '_', "code not screaming snake: {s}");
+                assert!(
+                    ch.is_ascii_uppercase() || ch == '_',
+                    "code not screaming snake: {s}"
+                );
             }
         }
     }

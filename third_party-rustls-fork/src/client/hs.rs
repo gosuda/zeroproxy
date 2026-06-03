@@ -384,9 +384,39 @@ fn emit_client_hello_for_retry(
         })
         .collect();
 
-    if supported_versions.tls12 {
+    // Phase 5.8: skip the SCSV pseudo-cipher when a captured spec is
+    // installed — Chrome 134+ relies on the renegotiation_info extension
+    // (id 65281) for the same purpose and does NOT advertise the SCSV.
+    // Emitting both is a rustls tell (visible as extra cipher `0x00ff` in
+    // JA3 / JA4 cipher count). The renegotiation_info extension is
+    // unconditionally emitted by apply_chrome_ja3_shape below.
+    let has_captured = crate::ja3::with_current(|s| s.is_some());
+    if supported_versions.tls12 && !has_captured {
         // We don't do renegotiation at all, in fact.
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+    }
+
+    // Phase 5.8: Override the wire-emitted cipher list with the captured
+    // spec when available. Rustls's negotiation logic on ServerHello
+    // looks up the chosen cipher in `config.provider.cipher_suites`
+    // (unchanged), so emitting "decoy" RSA/CBC fallback ciphers that
+    // rustls-rustcrypto doesn't implement is safe — a modern server
+    // will pick a TLS 1.3 suite or an ECDHE_*_GCM/CHACHA20 that rustls
+    // does support. The decoys exist only to make the on-wire cipher
+    // tuple match Chrome's 15-entry list (and therefore the JA3 hash).
+    //
+    // Without this override, only the 9 ciphers rustls-rustcrypto
+    // actually implements get emitted, and the JA3 cipher component
+    // diverges from any real Chrome.
+    let captured_ciphers = crate::ja3::with_current(|s| {
+        s.map(|s| s.cipher_suites.clone()).unwrap_or_default()
+    });
+    if !captured_ciphers.is_empty() {
+        // Captured spec is authoritative — emit only what Chrome 148
+        // sends on the wire. No SCSV append (Chrome relies on the
+        // renegotiation_info extension instead; see SCSV-skip comment
+        // above where the non-captured path adds it).
+        cipher_suites = captured_ciphers;
     }
 
     // Phase 5.6: GREASE cipher inject (RFC 8701). cipher_suites is a
@@ -675,51 +705,159 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     order.insert(0, crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
     order.push(crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
 
-    // Phase 5.7: ensure ExtensionType::Padding (id 21, RFC 7685) is the
-    // last contiguous extension before the trailing GREASE entry when
-    // the captured spec or fallback hasn't already placed it. Chrome
-    // 134 always emits Padding to pad the cleartext ClientHello to 512
-    // bytes (F5 BIG-IP intolerance workaround). macros.rs encode_one
-    // fast-path handles the body without a struct field.
-    if !order.iter().any(|e| u16::from(*e) == 0x0015) {
+    // Phase 5.7 / 5.8: ensure ExtensionType::Padding (id 21, RFC 7685)
+    // is the last contiguous extension before the trailing GREASE entry,
+    // BUT only when:
+    //   (a) the captured spec / hardcoded fallback explicitly listed it,
+    //       OR
+    //   (b) no captured spec is installed at all (legacy fallback path).
+    //
+    // Rationale: Chrome 148 with MLKEM768 key_share already produces a
+    // >512-byte ClientHello (the post-quantum key share alone is ~1184
+    // bytes), so it does NOT emit padding. ZP can't currently produce
+    // the MLKEM key share (rustls-rustcrypto doesn't implement MLKEM),
+    // so our ClientHello is much smaller — adding padding "to be safe"
+    // would push id 21 into the JA3 extension tuple where Chrome 148
+    // has nothing. Captured-spec mode honours the captured layout
+    // verbatim; only the no-captured fallback synthesises padding.
+    let captured_has_padding = crate::ja3::with_current(|s| {
+        s.map(|s| s.extensions.iter().any(|e| u16::from(*e) == 0x0015))
+            .unwrap_or(false)
+    });
+    let no_captured = crate::ja3::with_current(|s| s.is_none());
+    if !order.iter().any(|e| u16::from(*e) == 0x0015)
+        && (captured_has_padding || no_captured)
+    {
         let pos = order.len().saturating_sub(1);
         order.insert(pos, crate::msgs::enums::ExtensionType::Padding);
     }
     exts.contiguous_extensions = order;
 
-    // Phase 5.7 ECH GREASE — DISABLED (2026-06-02 regression).
+    // Phase 5.10 ECH GREASE — RE-ARMED (2026-06-03) with the
+    // BoringSSL-compatible discriminators that Phase 5.7's random-
+    // config_id attempt missed.
     //
-    // The original intent was to emit a synthetic outer-only ECH
-    // extension (id 0xfe0d) mimicking Chrome 134's GREASE because
-    // anti-bot WAFs treat "ECH absent" as a rustls-vs-browser tell.
+    // Wire format (draft-ietf-tls-esni-24 §5):
+    //     ECHClientHelloType=outer || HpkeSymmetricCipherSuite
+    //     || config_id || enc<u16> || payload<u16>
     //
-    // Empirical regression: enabling this broke TLS handshakes against
-    // mail.naver.com (TARGET_CONNECT_FAILED), confirmed by bisect —
-    // disabling this block alone restores connectivity. Suspected
-    // cause: our GREASE payload (random 32B enc + 176B payload with
-    // HKDF-SHA256+AES-128-GCM cipher suite) decodes as a valid outer
-    // ECH structure, so NAVER mail's server tries to decrypt it
-    // against its actual ECHConfig, fails, and aborts the handshake
-    // instead of ignoring it as GREASE.
+    // Discriminators vs. Phase 5.7:
+    //   1. `config_id = 0` (was: random). Real Chrome / BoringSSL
+    //      `SSL_set_enable_ech_grease` writes a literal `0x00` to the
+    //      config_id slot — it's the documented "no known ECHConfig"
+    //      signal a server uses to distinguish GREASE from a real
+    //      client that mis-remembers its ECHConfig. The Phase 5.7
+    //      attempt used `random_grease() & 0xff` which on most
+    //      handshakes produced a non-zero value that NAVER mail's
+    //      Akamai treated as a real ECH offer, tried to decrypt
+    //      against the deployed ECHConfig, failed AEAD-auth, and
+    //      aborted instead of falling back.
+    //   2. `payload` length is 192 B (was: 176). Matches Chrome 148's
+    //      typical inner-CH-encrypted size (≈176 inner CH + 16-byte
+    //      AEAD tag) — fingerprinters that bucket on payload length
+    //      see the same envelope as Chrome.
+    //   3. `cipher_suite = HKDF-SHA256 + AES-128-GCM`, `enc = 32B`
+    //      → DHKEM(X25519, HKDF-SHA256) -shape wire (the KEM ID
+    //      itself isn't on the wire; servers infer it from the
+    //      32-byte length). Matches Chrome 148.
     //
-    // Real Chrome's ECH GREASE algorithm is more specific than RFC
-    // 8701-style random — BoringSSL derives the config_id and payload
-    // from per-connection HMAC state so servers that reject "bad ECH
-    // attempts" can still distinguish GREASE from a real (failed)
-    // ECH client. A faithful port of that logic is out of scope for
-    // Phase 5.7. The Padding (RFC 7685) portion of Phase 5.7 is
-    // unaffected by this regression and remains active.
+    // Why we set the field directly rather than going through
+    // `ClientConfig::with_ech(EchMode::Grease(...))`:
+    //   - rustls's built-in `EchGreaseConfig` hardcodes the HPKE
+    //     KEM to `DHKEM_P256_HKDF_SHA256` (65-byte enc), which is
+    //     visibly NOT what Chrome 148 emits.
+    //   - rustls-rustcrypto doesn't ship an HPKE provider, so the
+    //     normal path doesn't compile in our build either.
+    // Direct field-set avoids both: the extension encoder emits
+    // `EncryptedClientHelloOuter` byte-equivalent to Chrome's GREASE,
+    // and we never invoke real HPKE.
     //
-    // www.naver.com / nid.naver.com / Wikipedia / GitHub all work
-    // either way, so the "ECH absent" signal isn't a blocker for the
-    // sites we currently care about. Re-enable only after a BoringSSL-
-    // compatible GREASE construction is in place.
+    // If a server validates GREASE as a real ECH attempt (Akamai's
+    // mail.naver.com policy was the historic regression case), bisect
+    // by flipping `enable_ech_grease` to `false` below — leaves
+    // every other Phase 5.x fingerprint shaping untouched.
+    // Set to `false` if a server reverts to ECH-bad-attempt behaviour
+    // and starts rejecting handshakes. Bisect on a per-host basis with
+    // tls.peet.ws (JA4 must read t13d1516h2_ when true, t13d1515h2_
+    // when false) before broader changes.
+    let enable_ech_grease = true;
+    if enable_ech_grease && exts.encrypted_client_hello.is_none() {
+        use crate::msgs::base::PayloadU16;
+        use crate::msgs::enums::{HpkeAead, HpkeKdf};
+        use crate::msgs::handshake::{
+            EncryptedClientHello, EncryptedClientHelloOuter, HpkeSymmetricCipherSuite,
+        };
+        // 32-byte `enc` — random bytes. BoringSSL uses a real X25519
+        // ephemeral keypair, but a fingerprint observer only sees 32
+        // bytes; a server that tries DHKEM(X25519) decap will fail
+        // anyway (random vs. real public key) and SHOULD fall back to
+        // outer SNI per draft-ietf-tls-esni §5. Real X25519 keygen
+        // would need x25519-dalek inside the rustls fork — extra deps
+        // we avoid here for one wire bit of difference.
+        let enc_bytes = crate::ja3::random_bytes(32);
+        let payload_bytes = crate::ja3::random_bytes(192);
+        exts.encrypted_client_hello = Some(EncryptedClientHello::Outer(
+            EncryptedClientHelloOuter {
+                cipher_suite: HpkeSymmetricCipherSuite {
+                    kdf_id: HpkeKdf::HKDF_SHA256,
+                    aead_id: HpkeAead::AES_128_GCM,
+                },
+                config_id: 0,
+                enc: PayloadU16::new(enc_bytes),
+                payload: PayloadU16::new(payload_bytes),
+            },
+        ));
+        // ECH ext goes near the end of the ClientHello (real Chrome
+        // 148 emits it second-to-last, immediately before
+        // pre_shared_key). `used_extensions_in_encoding_order`
+        // already places ECH after the contiguous block when the
+        // struct field is Some, so we MUST NOT also list it in
+        // `contiguous_extensions` (would double-emit). Strip if a
+        // captured spec listed 65037 there.
+        let ech_typ = crate::msgs::enums::ExtensionType::EncryptedClientHello;
+        exts.contiguous_extensions
+            .retain(|e| *e != ech_typ);
+    }
 
-    // GREASE-inject named_groups (supported_groups extension body).
-    // Chrome puts a GREASE NamedGroup at position 0. Same JA3-stripping
-    // logic applies. We only do this when the captured spec or our
-    // fallback actually set named_groups; otherwise rustls's normal
-    // path (driven by `config.provider.kx_groups`) is in charge.
+    // Phase 5.9: override named_groups (supported_groups extension body
+    // = JA3 "Curves" field) from the captured spec — Chrome 148 sends
+    // [GREASE, X25519MLKEM768, X25519, P-256, P-384]. With our real
+    // MLKEM impl registered in provider.kx_groups the override is now
+    // wire-functionally identical to the default path; we still apply
+    // it so spec changes (e.g. swapping in a different captured browser)
+    // take effect without rebuilding the provider's KX list.
+    // Phase 5.9 override + diagnostic dump. Records what we got from the
+    // captured spec and the default rustls vec side-by-side so the next
+    // diag trace shows whether the captured values are degenerate.
+    let captured_groups = crate::ja3::with_current(|s| {
+        s.map(|s| s.named_groups.clone()).unwrap_or_default()
+    });
+    crate::ja3::set_last_named_groups_dump(
+        exts.named_groups.as_ref()
+            .map(|g| g.iter().map(|n| u16::from(*n)).collect())
+            .unwrap_or_default(),
+        captured_groups.iter().map(|n| u16::from(*n)).collect(),
+    );
+    if !captured_groups.is_empty() {
+        exts.named_groups = Some(captured_groups);
+    }
+
+    // Phase 5.8 NOTE — captured spec's named_groups (Chrome 148 advertises
+    // X25519MLKEM768 = group 4588) is INTENTIONALLY NOT applied to the wire
+    // supported_groups extension. Rationale: empirical regression — nid.naver.com
+    // immediately fails TLS handshake (<3s TARGET_CONNECT_FAILED) when we
+    // advertise MLKEM without a matching key_share entry. The server prefers
+    // MLKEM, sends a HelloRetryRequest demanding an MLKEM key_share, and we
+    // can't generate one (rustls_rustcrypto has no MLKEM implementation).
+    // tls.peet.ws survives because its server picks X25519 from the list, but
+    // NAVER nid prefers post-quantum and refuses to fall back.
+    //
+    // Trade-off accepted: JA3 curves field diverges from Chrome 148
+    // (`29-23-24` instead of `4588-29-23-24`) — one cosmetic JA3 diff vs.
+    // blowing up TLS to deep-WAF sites. Re-enable only after implementing
+    // a real MLKEM key_share generator (or after isolating which servers
+    // demand it vs. tolerate "advertise but no key share").
+    //
     // Phase 5.6: GREASE-inject the named_groups (supported_groups
     // body). Chrome 134 puts a single GREASE NamedGroup at position 0.
     // The client-side `find_kx_group` lookup uses the kx_groups list

@@ -141,7 +141,12 @@ where
             "http1: method contains invalid token bytes",
         ));
     }
-    if path.is_empty() || path.as_bytes().iter().any(|&b| b == b' ' || b == b'\r' || b == b'\n') {
+    if path.is_empty()
+        || path
+            .as_bytes()
+            .iter()
+            .any(|&b| b == b' ' || b == b'\r' || b == b'\n')
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "http1: request-URI must be non-empty and whitespace-free",
@@ -235,12 +240,56 @@ where
     let leftover = &head_bytes[head_len..];
 
     let body = read_body(stream, &headers, leftover, body_prefix).await?;
+    // Phase 5.12 mirror of the h2 path: unwrap Content-Encoding so the
+    // SW returns plaintext bytes. h1 responses on the modern web are
+    // rare (TLS 1.3 + ALPN almost always lands on h2), but the
+    // mid-handshake h1 fallback path still needs this for sites that
+    // never get to h2.
+    let (body, headers) = unwrap_response_body(headers, body);
     Ok(HttpResponse {
         status,
         reason,
         headers,
         body,
     })
+}
+
+fn unwrap_response_body(
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (Vec<u8>, Vec<(String, String)>) {
+    let mut ce_value: Option<String> = None;
+    let mut ce_index: Option<usize> = None;
+    let mut cl_index: Option<usize> = None;
+    for (i, (k, v)) in headers.iter().enumerate() {
+        let lower = k.to_ascii_lowercase();
+        if lower == "content-encoding" {
+            ce_value = Some(v.clone());
+            ce_index = Some(i);
+        } else if lower == "content-length" {
+            cl_index = Some(i);
+        }
+    }
+    let Some(ce_value) = ce_value else {
+        return (body, headers);
+    };
+    let (decoded, residual) = crate::kernel::transport::decode::decode_body(&ce_value, body);
+    let decoded_len = decoded.len().to_string();
+    let mut new_headers: Vec<(String, String)> = Vec::with_capacity(headers.len());
+    let coding_changed = residual != ce_value.trim();
+    for (i, (k, v)) in headers.into_iter().enumerate() {
+        if Some(i) == ce_index {
+            if residual.is_empty() {
+                continue;
+            }
+            new_headers.push((k, residual.clone()));
+        } else if Some(i) == cl_index && coding_changed {
+            new_headers.push((k, decoded_len.clone()));
+        } else {
+            new_headers.push((k, v));
+        }
+    }
+    (decoded, new_headers)
 }
 
 /// Read bytes until we see CRLFCRLF. Returns (head_bytes, _) — the second
@@ -294,9 +343,9 @@ fn parse_head(buf: &[u8]) -> io::Result<(u16, String, Vec<(String, String)>, usi
             ))
         }
     };
-    let status = resp.code.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "http1: missing status code")
-    })?;
+    let status = resp
+        .code
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "http1: missing status code"))?;
     let reason = resp.reason.unwrap_or("").to_string();
     let mut out = Vec::with_capacity(resp.headers.len());
     for h in resp.headers.iter() {
@@ -396,7 +445,9 @@ where
         let remaining = n - out.len();
         let start = out.len();
         out.resize(n, 0);
-        stream.read_exact(&mut out[start..start + remaining]).await?;
+        stream
+            .read_exact(&mut out[start..start + remaining])
+            .await?;
     }
     Ok(out)
 }
@@ -455,7 +506,10 @@ where
             ));
         }
         let chunk_size = u64::from_str_radix(size_hex, 16).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("http1: chunk size: {e}"))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("http1: chunk size: {e}"),
+            )
         })?;
         if chunk_size == 0 {
             // Trailers (and one final CRLF) follow. Consume until CRLFCRLF
@@ -509,9 +563,7 @@ where
         if let Some(pos) = prefix.windows(2).position(|w| w == b"\r\n") {
             let line: Vec<u8> = prefix.drain(..pos + 2).collect();
             // line includes CRLF; strip.
-            return Ok(
-                String::from_utf8_lossy(&line[..line.len() - 2]).into_owned()
-            );
+            return Ok(String::from_utf8_lossy(&line[..line.len() - 2]).into_owned());
         }
         if prefix.len() > MAX_HEAD_BYTES {
             return Err(io::Error::new(
@@ -579,11 +631,7 @@ where
 }
 
 /// Consume optional trailers + the final CRLF that ends a chunked body.
-async fn consume_trailers<S>(
-    stream: &mut S,
-    prefix: &mut Vec<u8>,
-    tmp: &mut [u8],
-) -> io::Result<()>
+async fn consume_trailers<S>(stream: &mut S, prefix: &mut Vec<u8>, tmp: &mut [u8]) -> io::Result<()>
 where
     S: AsyncRead + Unpin,
 {

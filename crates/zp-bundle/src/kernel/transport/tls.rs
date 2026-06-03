@@ -92,13 +92,25 @@ thread_local! {
 /// internal state (root store, crypto provider) so a TLS handshake
 /// allocates only the per-connection `ClientConnection` itself.
 /// Build a Chrome-ordered cipher suite list from `rustls_rustcrypto`'s
-/// public constants. Order matches Chrome 134 stable's TLS ClientHello:
-/// TLS 1.3 first (`AES128, AES256, CHACHA20`), then TLS 1.2 ECDHE_ECDSA,
-/// then ECDHE_RSA, both in `AES128, AES256, CHACHA20` per-family order.
+/// public constants. Order matches Chrome 148 stable's TLS ClientHello:
+/// TLS 1.3 first (`AES128, AES256, CHACHA20`), then TLS 1.2 ECDHE
+/// suites INTERLEAVED by AES key size — Chrome puts each ECDHE_ECDSA
+/// next to its ECDHE_RSA twin (AES128 ECDSA → AES128 RSA → AES256 ECDSA
+/// → AES256 RSA → CHACHA ECDSA → CHACHA RSA), not grouped-by-cert-type
+/// like rustls's stock layout.
 ///
 /// JA3's "Cipher" component hashes this list verbatim, so changing the
 /// order changes the hash. rustls's stock ordering is TLS 1.2 first,
 /// which is the giveaway — no browser does that today.
+///
+/// Phase 5.8: this list is only the rustls-NEGOTIABLE subset (9 entries
+/// = ciphers `rustls_rustcrypto` actually implements). The wire-emitted
+/// ClientHello cipher list is overridden in the rustls fork's
+/// `client::hs::apply_chrome_ja3_shape` from `ja3::CapturedSpec` when
+/// installed, adding the 6 legacy RSA fallback ciphers (49171, 49172,
+/// 156, 157, 47, 53) as decoys so the on-wire tuple matches Chrome 148
+/// exactly. Decoys never get negotiated because a modern server picks
+/// TLS 1.3 or ECDHE_GCM/CHACHA20 — which are in this list.
 fn chrome_ordered_cipher_suites() -> Vec<rustls::SupportedCipherSuite> {
     use rustls_rustcrypto as rc;
     vec![
@@ -106,13 +118,15 @@ fn chrome_ordered_cipher_suites() -> Vec<rustls::SupportedCipherSuite> {
         rc::TLS13_AES_128_GCM_SHA256,
         rc::TLS13_AES_256_GCM_SHA384,
         rc::TLS13_CHACHA20_POLY1305_SHA256,
-        // TLS 1.2 ECDHE_ECDSA (Chrome: AES128 → AES256 → CHACHA20)
+        // TLS 1.2 ECDHE interleaved by AES size (Chrome 148 order):
+        // AES128 ECDSA → AES128 RSA
         rc::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-        rc::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-        rc::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-        // TLS 1.2 ECDHE_RSA (Chrome: AES128 → AES256 → CHACHA20)
         rc::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        // AES256 ECDSA → AES256 RSA
+        rc::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         rc::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        // CHACHA20 ECDSA → CHACHA20 RSA
+        rc::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         rc::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     ]
 }
@@ -131,6 +145,23 @@ fn build_client_config(alpn: &[&[u8]]) -> io::Result<Arc<ClientConfig>> {
         // KeyProvider — stays as rustls-rustcrypto built it.
         let mut provider = rustls_rustcrypto::provider();
         provider.cipher_suites = chrome_ordered_cipher_suites();
+        // Phase 5.9 (re-armed): prepend our X25519MLKEM768 hybrid
+        // (group 0x11ec = 4588) so a captured Chrome 148 ClientHello
+        // with `supportedCurves: [4588, 29, 23, 24]` can emit the
+        // matching key_share. Chrome 148 advertises both the hybrid
+        // and the classical X25519 sibling — our `Active::hybrid_component`
+        // returns the X25519 tail of the 1216-byte share so rustls
+        // emits the "free" extra entry too (see hs.rs:287-296). On
+        // wasm32 the hybrid uses ml-kem 0.3.2 (FIPS 203 standard
+        // (t_hat || rho) encoding) + x25519-dalek; this is the parked
+        // 2026-06-02 attempt with `hybrid_component` and
+        // `complete_hybrid_component` added so the wire share matches
+        // Chrome 148 rather than emitting only the 1216-byte hybrid
+        // alone (which produced an `IllegalParameter` reject on
+        // tls.peet.ws in the first attempt).
+        let mut kx_groups = provider.kx_groups.clone();
+        kx_groups.insert(0, &super::mlkem_hybrid::X25519MLKEM768);
+        provider.kx_groups = kx_groups;
         let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls: config: {e}")))?
@@ -202,9 +233,9 @@ where
             self.drain_pending_out().await?;
             while self.conn.wants_write() {
                 let mut chunk = Vec::with_capacity(4096);
-                self.conn
-                    .write_tls(&mut chunk)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls: write_tls: {e}")))?;
+                self.conn.write_tls(&mut chunk).map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("tls: write_tls: {e}"))
+                })?;
                 self.inner.write_all(&chunk).await?;
             }
             self.inner.flush().await?;

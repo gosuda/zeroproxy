@@ -70,10 +70,44 @@ async function captureBrowserFingerprint() {
   // Chrome refuses SW fetches to self-signed HTTPS in this dev setup.
   // Production path (real cert): un-comment the HTTPS fetch and remove
   // this constant. See trap notebook entry for details.
-  // Phase 5 spec: includes the three extensions rustls didn't have
-  // struct fields for before phase 5 — id 18 (SCT request), 28
-  // (record_size_limit), and 17613 (ApplicationSettings / ALPS).
-  capturedFingerprint = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzE2LDEzLDExLDUsMjMsMCwxOCw0NSwzNSwxMCw1MSw2NTI4MSwyOCw0MywyNywxNzYxM10sInN1cHBvcnRlZEN1cnZlcyI6WzI5LDIzLDI0XSwic3VwcG9ydGVkUG9pbnRzIjoiQUE9PSIsInNpZ25hdHVyZVNjaGVtZXMiOlsxMDI3LDIwNTIsMTAyNSwxMjgzLDIwNTMsMTI4MSwyMDU0LDE1MzddLCJhbHBuUHJvdG9jb2xzIjpbImgyIiwiaHR0cC8xLjEiXX0K';
+  // Phase 5.8 spec: Chrome 148 layout captured from real Edge/WebView2
+  // browser at tls.peet.ws (2026-06-02). Differs from prior Chrome 134
+  // capture in:
+  //   - cipherSuites: 15 entries in interleaved (AES128, AES256, CHACHA)
+  //     order with ECDSA/RSA per-row pairs (Chrome 148 wire order),
+  //     instead of the 9 rustls-rustcrypto-implementable subset.
+  //     The 6 RSA fallback ciphers (49171, 49172, 156, 157, 47, 53) are
+  //     emit-only decoys — see hs.rs phase 5.8 override comment.
+  //   - extensions: Chrome 148 order [0, 17613, 51, 65281, 43, 16, 5, 11,
+  //     13, 18, 23, 27, 10, 35, 45] — note record_size_limit (id 28) is
+  //     ABSENT (Firefox-specific; Chrome doesn't send it), and ECH
+  //     (id 65037) is also ABSENT pending the safe-GREASE work
+  //     (regression on mail.naver.com — see hs.rs phase 5.7 comment).
+  //   - supportedCurves: [4588, 29, 23, 24] adds X25519MLKEM768 (4588)
+  //     as the post-quantum hybrid group Chrome 148 advertises. rustls
+  //     can't actually do MLKEM key exchange so it would never be
+  //     picked in key_share, but having it in supported_groups (id 10)
+  //     matches the JA3 curve tuple.
+  // Phase 5.9 (re-armed 2026-06-03): `supportedCurves` restored to
+  // [4588, 29, 23, 24]. The X25519MLKEM768 KX impl in
+  // `crates/zp-bundle/src/kernel/transport/mlkem_hybrid.rs` now
+  // implements `hybrid_component()` + `complete_hybrid_component()` so
+  // the rustls fork emits BOTH the 1216-byte hybrid share AND the
+  // classical X25519 sibling as a "free" second entry (matches Chrome
+  // 148 wire — see hs.rs:283-297). The 1216-byte EK uses ml-kem
+  // 0.3.2's FIPS 203 `(t_hat || rho)` encoding, byte-equivalent to
+  // aws_lc_rs's `ML_KEM_768`. If a server still answers
+  // `IllegalParameter`, capture the wire bytes and compare against a
+  // real Chrome ClientHello — that's the next debug starting point.
+  // Phase 5.10 (2026-06-03): extensions list now includes 65037
+  // (encrypted_client_hello) immediately after 45 (psk_key_exchange_modes)
+  // — Chrome 148 emits ECH GREASE near the end of the ClientHello, just
+  // before the auto-appended pre_shared_key (41). Setting it via the
+  // captured spec primarily affects the named_groups override path; the
+  // actual wire emission is driven by the rustls-fork direct field-set
+  // in apply_chrome_ja3_shape (see Phase 5.10 comment block). The base64
+  // below decodes to the JSON spec with extensions field updated.
+  capturedFingerprint = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
   return capturedFingerprint;
   /* Original fetch path — used once we have a trusted dev cert:
   const here = new URL(self.location.href);
@@ -121,6 +155,7 @@ async function initBundle() {
       kernelFetch: wbg.kernelFetch,
       kernelEchoSync: wbg.kernelEchoSync,
       kernelStream: wbg.kernelStream,
+      kernelLastNamedGroups: wbg.kernelLastNamedGroups,
     });
     // Step 13: expose the Rust kernel under the same globals the SW
     // transport path already probes (self.kernelFetch / self.kernelStream).
@@ -209,7 +244,7 @@ function internalPath(path) {
   return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
-  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script');
+  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === '/zp/api/diag/trace';
 }
 
 async function internalAsset(req, url) {
@@ -308,6 +343,71 @@ async function runtimeAPI(req, url, clientId) {
   // A2 hardening: privileged API endpoints must resolve a tab from an
   // explicit signal (URL ?tab=, referer-derived context, or client context).
   // No first-available-tab fallback — multi-tab requests must not piggy-back.
+  if (url.pathname === '/zp/api/diag/trace') {
+    // Connection-timing investigation: classify every tx:* line by host
+    // and pattern. Produces five histograms — tls / socks5 / mux / http
+    // for h2-reuse vs first-handshake — so we can tell whether the
+    // dominant cost is TLS, SOCKS5 dial, mux open, or actual upstream
+    // RTT. Per-host first-tls also separates "many cold origins" from
+    // "one host but slow handshake".
+    const ring = Array.isArray(self.__zpRustTrace) ? self.__zpRustTrace.slice() : [];
+    if (url.searchParams.get('clear') === '1') { try { self.__zpRustTrace = []; } catch {} }
+    const head = {};
+    const buckets = {};
+    const hostFirstTls = {};
+    const hostCount = {};
+    const slow = [];
+    const stat = (k, v) => {
+      if (!buckets[k]) buckets[k] = { n: 0, sum: 0, min: Infinity, max: 0, samples: [] };
+      const b = buckets[k]; b.n++; b.sum += v;
+      if (v < b.min) b.min = v;
+      if (v > b.max) b.max = v;
+      if (b.samples.length < 12) b.samples.push(v);
+    };
+    for (const line of ring) {
+      const tag = (line.split(' ')[0] || '');
+      head[tag] = (head[tag] || 0) + 1;
+      const mHost = / host=([^\s]+)/.exec(line);
+      const host = mHost ? mHost[1] : '';
+      if (host && tag.startsWith('tx:')) hostCount[host] = (hostCount[host] || 0) + 1;
+      const pull = (k) => { const m = new RegExp(' ' + k + '=(\\d+)').exec(line); return m ? Number(m[1]) : null; };
+      const tlsV = pull('tls'); if (tlsV != null) {
+        stat(tag + '.tls', tlsV);
+        if (host && !(host in hostFirstTls)) hostFirstTls[host] = tlsV;
+      }
+      const socksV = pull('socks5'); if (socksV != null) stat(tag + '.socks5', socksV);
+      const muxV = pull('mux'); if (muxV != null) stat(tag + '.mux', muxV);
+      const httpV = pull('http'); if (httpV != null) {
+        stat(tag + '.http', httpV);
+        if (httpV >= 1000 && slow.length < 30) slow.push({ tag, host, http: httpV, line });
+      }
+      const totV = pull('total'); if (totV != null) stat(tag + '.total', totV);
+    }
+    // Phase 5.8 diag: when ?filter=<substr> is provided, return matching
+    // raw trace lines (last 50). Useful for "why is github.com h2-err?"
+    // kind of investigation — the aggregated buckets hide the exact line.
+    const filter = url.searchParams.get('filter') || '';
+    const rawMatches = filter
+      ? ring.filter(l => l.includes(filter)).slice(-50)
+      : [];
+    // Phase 5.9 named_groups dump from rustls fork's apply_chrome_ja3_shape.
+    let namedGroups = '';
+    try {
+      if (self.ZPBundle && typeof self.ZPBundle.kernelLastNamedGroups === 'function') {
+        namedGroups = self.ZPBundle.kernelLastNamedGroups();
+      }
+    } catch (e) { namedGroups = 'err: ' + (e && e.message); }
+    return new Response(JSON.stringify({
+      totalLines: ring.length,
+      head,
+      buckets,
+      hostFirstTls,
+      hostCount,
+      slow,
+      rawMatches,
+      namedGroups,
+    }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
   if (url.pathname === '/zp/api/fetch') {
     // GET ?url=<absolute> — issued by the CSS rewriter for url(...) / @import
     // subresources. Routes the same way as the POST form below but takes the
@@ -392,6 +492,10 @@ async function runtimeAPI(req, url, clientId) {
     // spin inside their WASM `$_start` when the proxy membrane is detected.
     // Debugger pause confirms the page wedges on this exact frame. Return
     // a noop body so the script tag resolves without executing the tracker.
+    // ntm.pstatic.net (ntm_<hex>.js) was investigated as a candidate: 121s
+    // load time looked similar, but blocking it actually breaks more ads
+    // than it fixes (premium-area, da_public_*, veta_* lose their inventory
+    // because GFP SDK uses ntm as a bid-token source). Leave ntm enabled.
     try {
       const tu = new URL(target);
       if (tu.host === 'wtm.pstatic.net' || tu.host === 'ncpt.naver.com') {
@@ -425,6 +529,14 @@ async function transportFetch(targetUrl, opt) {
   try { await initBundle(); } catch { return safeError('SW_NOT_READY', 503, u); }
   if (typeof self.kernelFetch !== 'function') return safeError('SW_NOT_READY', 503, u);
   const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
+  // Phase 5.8 note: page-side User-Agent survives this Headers init and
+  // wins over the `pushOnce('user-agent', ZP.TARGET_USER_AGENT)` further
+  // down (pushOnce no-ops when 'seen' already has it). That is the
+  // desired behaviour — the page-side UA is the genuine browser UA
+  // (e.g. `...Chrome/148 Safari/537.36 Edg/148.0.0.0` for Edge WebView2)
+  // which is consistent with the sec-ch-ua brand list the browser also
+  // forwards. TARGET_USER_AGENT only applies as a fallback for callers
+  // that don't pass a Request (e.g. internal scheduled fetches).
   // Origin masking: browser-added Referer/Origin point at proxy.localhost
   // (the SW origin). Rewrite to the virtual target URL/origin so target
   // servers never see the proxy as the requester. The entry's targetUrl is
@@ -461,7 +573,9 @@ async function transportFetch(targetUrl, opt) {
   }
   // User-Agent is a forbidden header for fetch() — same smuggle pattern.
   // Without a UA, sites like Wikipedia reject requests as suspicious bots.
-  headers.set('X-ZP-User-Agent', ZP.TARGET_USER_AGENT);
+  // Phase 5.8: User-Agent moved inline into headerEntries below so the
+  // Chrome 148 order pass positions it after upgrade-insecure-requests.
+  // The kernel still strips X-ZP-User-Agent if seen (legacy fallback).
   // Strip proxy.localhost from any header the page synthesised. (If they
   // remain after our rewrite, the value is genuinely the proxy origin.)
   for (const name of ['Referer', 'Origin']) {
@@ -489,7 +603,13 @@ async function transportFetch(targetUrl, opt) {
   // www.naver.com). The Rust kernel passes Cookie through unchanged to
   // the relay.
   if (opt.tab.cookieJar) {
-    const cookieStr = opt.tab.cookieJar.cookieHeader(opt.url);
+    // BUG FIX (2026-06-02): used to read `opt.url` which is undefined here —
+    // transportFetch takes `targetUrl` as the first positional arg, never as
+    // `opt.url`. Result: the cookie jar silently shipped zero cookies on
+    // every outgoing request, including NAVER NACT/NID anti-bot tokens. Every
+    // nid.naver.com / mail.naver.com / pay.naver.com nav was therefore cold
+    // session → 60s anti-credential-stuffing slow lane.
+    const cookieStr = opt.tab.cookieJar.cookieHeader(u);
     if (cookieStr) headers.set('Cookie', cookieStr);
   }
   // Build a flat [[k, v], ...] header list from BOTH our `headers` Headers
@@ -501,9 +621,43 @@ async function transportFetch(targetUrl, opt) {
   // still satisfying the kernel's `headerEntries` reader.
   const headerEntries = [];
   const seen = new Set();
+  // Phase 5.8 header hygiene. Browser-emitted Client Hints split into:
+  //
+  //   * DEFAULT: always sent by Chrome on cross-origin nav to ANY origin.
+  //     Includes sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform.
+  //     Keep — anti-bot WAFs check presence as a "is this Chromium" signal.
+  //
+  //   * GRANT-OPT-IN: Chrome only sends after the origin returns
+  //     `Accept-CH: <hint>` on a previous response. Includes
+  //     device-memory, downlink, dpr, ect, rtt, sec-ch-ua-arch,
+  //     sec-ch-ua-full-version, sec-ch-ua-full-version-list,
+  //     sec-ch-ua-model, sec-ch-ua-platform-version, sec-ch-ua-bitness,
+  //     sec-ch-ua-wow64, viewport-width, viewport-height, save-data,
+  //     prefers-color-scheme, prefers-reduced-motion.
+  //     The SW-intercepted Request inherits these from whatever the
+  //     page's Origin (proxy.localhost) has accumulated via Accept-CH.
+  //     Forwarding them upstream lies about the target's prior grant —
+  //     real Chrome would have sent NONE on first contact. NAVER WAF
+  //     flags this as bot-like (Chrome 148 cold-nav baseline has only
+  //     the 3 DEFAULT hints).
+  //
+  //   * INFERRED: viewport-width, viewport-height, device-pixel-ratio
+  //     — same rule as grant-opt-in.
+  //
+  // DROP everything in GRANT-OPT-IN / INFERRED unconditionally; the
+  // 60s slow-lane originating from over-sending hints disappears.
+  const DROP_CLIENT_HINTS = new Set([
+    'device-memory', 'downlink', 'dpr', 'ect', 'rtt',
+    'sec-ch-ua-arch', 'sec-ch-ua-bitness', 'sec-ch-ua-full-version',
+    'sec-ch-ua-full-version-list', 'sec-ch-ua-model',
+    'sec-ch-ua-platform-version', 'sec-ch-ua-wow64',
+    'viewport-width', 'viewport-height', 'device-pixel-ratio',
+    'save-data', 'prefers-color-scheme', 'prefers-reduced-motion',
+  ]);
   const pushOnce = (k, v) => {
     const kl = k.toLowerCase();
     if (seen.has(kl)) return;
+    if (DROP_CLIENT_HINTS.has(kl)) return;
     seen.add(kl);
     headerEntries.push([k, v]);
   };
@@ -538,6 +692,45 @@ async function transportFetch(targetUrl, opt) {
   if (!seen.has('sec-fetch-site')) pushOnce('sec-fetch-site', 'cross-site');
   if (opt.document && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
   if (!seen.has('accept-language')) pushOnce('accept-language', 'en-US,en;q=0.9,ko;q=0.8');
+  // Phase 5.8: emit User-Agent inline so the HEADER_ORDER sort positions
+  // it correctly (real Chrome 148 sends user-agent right after
+  // upgrade-insecure-requests). Previously promoted via X-ZP-User-Agent
+  // in the kernel which appended at end — visible h2 fingerprint diff vs
+  // Chrome at peet.ws (user-agent at index 11 instead of 4).
+  pushOnce('user-agent', ZP.TARGET_USER_AGENT);
+  // Phase 5.8 force Chrome 148 header order. Real Chrome emits headers
+  // in this deterministic order on the wire (HEADERS frame after the
+  // four pseudo-headers `m,a,s,p` which the h2 fork already pins).
+  // Without this pass, headerEntries' order is "Headers.entries() = sorted
+  // lowercase, then request.headers.entries() = sorted lowercase" = pure
+  // alphabetical, which is a 100% Go/Rust HTTP client tell.
+  //
+  // Bot signal (tls.peet.ws akamai_fingerprint hash includes header order):
+  //   real Chrome 148: sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform,
+  //   upgrade-insecure-requests, user-agent, accept, sec-fetch-site,
+  //   sec-fetch-mode, sec-fetch-user, sec-fetch-dest, accept-encoding,
+  //   accept-language, priority, [cookie last, auto-added by browser]
+  //
+  // We slot ZP-internal headers (X-ZP-*, Cookie) at the end after the
+  // real-browser tail so the prefix matches Chrome verbatim.
+  const HEADER_ORDER = [
+    'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
+    'upgrade-insecure-requests', 'user-agent', 'accept',
+    'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-user', 'sec-fetch-dest',
+    'referer', 'accept-encoding', 'accept-language', 'priority',
+    'cookie',
+  ];
+  const orderIndex = (k) => {
+    const i = HEADER_ORDER.indexOf(k.toLowerCase());
+    return i < 0 ? HEADER_ORDER.length : i;
+  };
+  headerEntries.sort((a, b) => {
+    const ai = orderIndex(a[0]);
+    const bi = orderIndex(b[0]);
+    if (ai !== bi) return ai - bi;
+    // Stable for entries beyond the known order (X-ZP-* sidechannel etc).
+    return 0;
+  });
   const method = opt.method || (opt.request && opt.request.method) || 'GET';
   let bodyU8 = null;
   if (method !== 'GET' && method !== 'HEAD') {
@@ -569,7 +762,28 @@ async function transportFetch(targetUrl, opt) {
     const getSetCookie = resp && resp.headers && resp.headers.getSetCookie;
     const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
     if (opt.tab.cookieJar) {
-      for (const line of setCookies) opt.tab.cookieJar.setCookieLine(opt.url, line);
+      // Same fix as the outgoing read above — `opt.url` was undefined, so
+      // every Set-Cookie header from upstream silently dropped on the floor.
+      // Now scopes the cookie to `u` (the canonical target URL we actually
+      // fetched), which is the response URL for jar bookkeeping. Redirects
+      // are followed server-side and the final URL would technically be
+      // more accurate for Domain/Path defaults, but the kernel doesn't
+      // surface it here yet; the request URL is close enough for now.
+      for (const line of setCookies) opt.tab.cookieJar.setCookieLine(u, line);
+      // Upstream Set-Cookie is also stripped by the Go server's
+      // ConstructorPolicy (otherwise target-site auth cookies would be
+      // readable by any proxy-origin page) and re-emitted into the
+      // X-ZP-Set-Cookie sidechannel. Without consuming the sidechannel,
+      // the jar would only see cookies that page-side JS set via
+      // `document.cookie = ...` and would miss every server-issued
+      // anti-bot token (NACT, etc.). The sidechannel values are joined
+      // by a tab character — match the server-side encoder.
+      const sidechannel = resp.headers.get('X-ZP-Set-Cookie');
+      if (sidechannel) {
+        for (const line of sidechannel.split('\t')) {
+          if (line) opt.tab.cookieJar.setCookieLine(u, line);
+        }
+      }
     }
   } catch {}
   return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab);
@@ -700,7 +914,17 @@ function buildRuntimePrelude(tab, entry) {
     servers: tab.servers || [],
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
-  return '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
+  // The chain consumer must run before the target's anti-bot JS does (it
+  // scrubs proxy-origin localStorage on naver.com, so that key family is
+  // useless for hop hand-off). State now travels in the URL fragment —
+  // immune to localStorage scrubs, survives reloads, no SW round trip
+  // required. The inline script pops the front of `zp_chain`, rewrites
+  // the current fragment to drop the consumed entry, and after the
+  // per-hop wait re-encodes the remaining chain into the next URL's
+  // fragment before calling location.assign on it.
+  const prewarmInline = '(function(){try{var p=new URLSearchParams(location.hash.slice(1));var c=p.get("zp_chain");if(!c)return;var chain;try{chain=JSON.parse(atob(decodeURIComponent(c)));}catch(e){return;}if(!Array.isArray(chain)||!chain.length)return;var next=chain.shift();var wait=Math.max(0,Math.min(120000,Number(next.waitMs)||0));var u=new URL(next.path,location.origin);var np=new URLSearchParams(u.hash.startsWith("#")?u.hash.slice(1):u.hash);if(chain.length){np.set("zp_chain",encodeURIComponent(btoa(JSON.stringify(chain))));}else{np.delete("zp_chain");}u.hash="#"+np.toString();var assign=location.assign.bind(location);p.delete("zp_chain");try{history.replaceState(null,"","#"+p.toString());}catch(e){}setTimeout(function(){try{assign(u.toString());}catch(e){}},wait);}catch(e){}})();';
+  return '<script nonce=zp>' + prewarmInline + '</script>' +
+    '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
     '<script nonce=zp src=' + ZP.assetPath('rust-rewriter.js') + '></script>' +
     '<script nonce=zp id=__zp-boot type=application/json>' + bootJSON + '</script>' +
     '<script nonce=zp src=' + ZP.assetPath('runtime-prelude.js') + '></script>';
@@ -769,9 +993,27 @@ async function handleMessage(event) {
     if (msg.type === 'ZP_OPEN_SHARE') {
       const routeKey = String(msg.routeKey || '');
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
-      const tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
+      // Launcher pre-nav: if `reuseTabId` names an existing tab, append a
+      // new entry to it instead of allocating a fresh tab. Keeps the
+      // cookieJar (NACT/NID/etc.) populated by the warm-up navigation
+      // available to the follow-up nav to a deep subdomain. The follow-up
+      // nav is a separate ZP_OPEN_SHARE call from the launcher, fired
+      // before the actual page navigation happens.
+      let tab = null;
+      if (msg.reuseTabId) {
+        tab = tabs.get(String(msg.reuseTabId)) || null;
+      }
+      if (tab) {
+        const entryId = randomEntryId();
+        const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
+        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+        shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
+        ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: true });
+        return;
+      }
+      tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
-      ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers });
+      ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: false });
       return;
     }
     if (msg.type === 'ZP_FRAME_ROUTE') {

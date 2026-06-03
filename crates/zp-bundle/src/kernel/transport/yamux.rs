@@ -72,9 +72,9 @@ impl MuxSession {
         self.tx
             .unbounded_send(Cmd::Open(tx))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mux: driver gone"))?;
-        let stream = rx
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mux: driver dropped reply"))??;
+        let stream = rx.await.map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "mux: driver dropped reply")
+        })??;
         Ok(MuxStream { inner: stream })
     }
 }
@@ -183,9 +183,7 @@ async fn drive(mut conn: Connection<WsStream>, mut cmd_rx: mpsc::UnboundedReceiv
                     drop(stream); // client mode: ignore inbound streams
                     made_progress = true;
                 }
-                Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
-                    return Poll::Ready(Event::Eof)
-                }
+                Poll::Ready(Some(Err(_))) | Poll::Ready(None) => return Poll::Ready(Event::Eof),
                 Poll::Pending => {}
             }
             // (3) If a request is waiting, try to make it. Only the first

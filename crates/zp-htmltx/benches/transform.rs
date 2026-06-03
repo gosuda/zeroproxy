@@ -17,7 +17,13 @@ fn make_page(n_scripts: usize, n_links: usize, n_imgs: usize, n_anchors: usize) 
     make_page_with_inline(n_scripts, n_links, n_imgs, n_anchors, 3)
 }
 
-fn make_page_with_inline(n_scripts: usize, n_links: usize, n_imgs: usize, n_anchors: usize, n_inline: usize) -> String {
+fn make_page_with_inline(
+    n_scripts: usize,
+    n_links: usize,
+    n_imgs: usize,
+    n_anchors: usize,
+    n_inline: usize,
+) -> String {
     let mut s = String::with_capacity(64 * 1024);
     s.push_str("<!DOCTYPE html><html><head>");
     s.push_str("<meta charset=\"utf-8\">");

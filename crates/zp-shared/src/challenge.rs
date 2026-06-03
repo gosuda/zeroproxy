@@ -78,26 +78,68 @@ mod tests {
     fn challenge_host_matches_case_insensitive() {
         assert!(is_challenge_document("", "challenges.cloudflare.com", "/"));
         assert!(is_challenge_document("", "CHALLENGES.CLOUDFLARE.COM", "/"));
-        assert!(!is_challenge_document("", "challenges.cloudflare.com.evil.test", "/"));
-        assert!(!is_challenge_document("", "evil.challenges.cloudflare.com", "/"));
+        assert!(!is_challenge_document(
+            "",
+            "challenges.cloudflare.com.evil.test",
+            "/"
+        ));
+        assert!(!is_challenge_document(
+            "",
+            "evil.challenges.cloudflare.com",
+            "/"
+        ));
     }
 
     #[test]
     fn challenge_platform_prefix_matches_path_exactly() {
-        assert!(is_challenge_document("", "example.test", "/cdn-cgi/challenge-platform/h/g/orchestrate"));
-        assert!(!is_challenge_document("", "example.test", "/cdn-cgi/challenge-platform")); // missing trailing slash
-        assert!(!is_challenge_document("", "example.test", "/CDN-CGI/CHALLENGE-PLATFORM/")); // path match is case-sensitive
-        assert!(!is_challenge_document("", "example.test", "/x/cdn-cgi/challenge-platform/"));
+        assert!(is_challenge_document(
+            "",
+            "example.test",
+            "/cdn-cgi/challenge-platform/h/g/orchestrate"
+        ));
+        assert!(!is_challenge_document(
+            "",
+            "example.test",
+            "/cdn-cgi/challenge-platform"
+        )); // missing trailing slash
+        assert!(!is_challenge_document(
+            "",
+            "example.test",
+            "/CDN-CGI/CHALLENGE-PLATFORM/"
+        )); // path match is case-sensitive
+        assert!(!is_challenge_document(
+            "",
+            "example.test",
+            "/x/cdn-cgi/challenge-platform/"
+        ));
     }
 
     #[test]
     fn subresource_gate_requires_armed_and_not_doc_and_classifier() {
         // ALL FOUR must hold: armed, !is_doc, classifier match.
-        assert!(challenge_subresource_skip(true, false, "challenge", "x", "/"));
+        assert!(challenge_subresource_skip(
+            true,
+            false,
+            "challenge",
+            "x",
+            "/"
+        ));
         // disarmed → never
-        assert!(!challenge_subresource_skip(false, false, "challenge", "x", "/"));
+        assert!(!challenge_subresource_skip(
+            false,
+            false,
+            "challenge",
+            "x",
+            "/"
+        ));
         // is_doc → never (document stays on no-store)
-        assert!(!challenge_subresource_skip(true, true, "challenge", "x", "/"));
+        assert!(!challenge_subresource_skip(
+            true,
+            true,
+            "challenge",
+            "x",
+            "/"
+        ));
         // classifier miss → never
         assert!(!challenge_subresource_skip(true, false, "", "x", "/"));
     }

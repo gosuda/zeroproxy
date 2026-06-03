@@ -219,14 +219,14 @@ where
 /// re-parsing strings.
 fn map_rep_kind(rep: u8) -> io::ErrorKind {
     match rep {
-        0x01 => io::ErrorKind::Other,             // general SOCKS server failure
-        0x02 => io::ErrorKind::PermissionDenied,  // connection not allowed by ruleset
+        0x01 => io::ErrorKind::Other,            // general SOCKS server failure
+        0x02 => io::ErrorKind::PermissionDenied, // connection not allowed by ruleset
         0x03 => io::ErrorKind::NetworkUnreachable, // Network unreachable
-        0x04 => io::ErrorKind::HostUnreachable,   // Host unreachable
+        0x04 => io::ErrorKind::HostUnreachable,  // Host unreachable
         0x05 => io::ErrorKind::ConnectionRefused, // Connection refused
-        0x06 => io::ErrorKind::TimedOut,          // TTL expired
-        0x07 => io::ErrorKind::Unsupported,       // Command not supported
-        0x08 => io::ErrorKind::Unsupported,       // Address type not supported
+        0x06 => io::ErrorKind::TimedOut,         // TTL expired
+        0x07 => io::ErrorKind::Unsupported,      // Command not supported
+        0x08 => io::ErrorKind::Unsupported,      // Address type not supported
         _ => io::ErrorKind::Other,
     }
 }

@@ -15,7 +15,11 @@
   // as a forbidden header for fetch(), so the SW smuggles it via
   // X-ZP-User-Agent and the relay promotes it. Matches the value the prelude
   // exposes via navigator.userAgent so HTTP+JS UA stay consistent.
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  // Phase 5.8: matches the JA3/extension layout in sw.js capturedFingerprint
+  // (Chrome 148). Sec-CH-UA emitted by the page-side prelude pins v=148 on
+  // the brand entries; mismatch with this UA string is a WAF signal
+  // ("UA claims 148, sec-ch-ua claims 134" = bot).
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
   const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);

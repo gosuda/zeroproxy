@@ -90,8 +90,10 @@ mod tests {
         let csp = build_csp("wss://proxy.example");
         assert!(csp.contains("connect-src 'self' wss://proxy.example"));
         assert!(!csp.contains("connect-src *"));
-        assert!(!csp.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob"));
-        assert!(!csp.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data"));
+        assert!(!csp
+            .contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob"));
+        assert!(!csp
+            .contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data"));
         assert!(!csp.contains("style-src *"));
         assert!(!csp.contains("img-src *"));
         assert!(!csp.contains("font-src *"));
@@ -106,7 +108,10 @@ mod tests {
     fn build_csp_matches_golden() {
         let golden = include_str!("../testdata/csp.golden").trim_end();
         let got = build_csp("wss://proxy.example");
-        assert_eq!(got, golden, "CSP output drift; regenerate testdata/csp.golden or fix Rust");
+        assert_eq!(
+            got, golden,
+            "CSP output drift; regenerate testdata/csp.golden or fix Rust"
+        );
     }
 
     #[test]
@@ -121,16 +126,24 @@ mod tests {
     fn build_csp_armed_adds_cloudflare_to_exactly_four_directives() {
         let armed = build_csp_with(
             "wss://proxy.example",
-            &CspOptions { challenge_compat: true },
+            &CspOptions {
+                challenge_compat: true,
+            },
         );
         // Exactly one occurrence per affected directive: script/frame/child/connect.
-        assert_eq!(armed.matches("https://challenges.cloudflare.com").count(), 4);
+        assert_eq!(
+            armed.matches("https://challenges.cloudflare.com").count(),
+            4
+        );
         assert!(armed.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://challenges.cloudflare.com"));
         assert!(armed.contains("frame-src 'self' blob: https://challenges.cloudflare.com"));
         assert!(armed.contains("child-src 'self' blob: https://challenges.cloudflare.com"));
-        assert!(armed.contains("connect-src 'self' wss://proxy.example https://challenges.cloudflare.com"));
+        assert!(armed
+            .contains("connect-src 'self' wss://proxy.example https://challenges.cloudflare.com"));
         // Untouched directives must NOT gain the challenge host.
-        assert!(!armed.contains("style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com"));
+        assert!(
+            !armed.contains("style-src 'self' 'unsafe-inline' https://challenges.cloudflare.com")
+        );
         assert!(!armed.contains("img-src 'self' blob: data: https://challenges.cloudflare.com"));
         assert!(!armed.contains("worker-src 'self' blob: https://challenges.cloudflare.com"));
         // No wildcards, no new eval, no nonce inflation.
@@ -147,7 +160,9 @@ mod tests {
         let golden = include_str!("../testdata/csp_challenge.golden").trim_end();
         let got = build_csp_with(
             "wss://proxy.example",
-            &CspOptions { challenge_compat: true },
+            &CspOptions {
+                challenge_compat: true,
+            },
         );
         assert_eq!(
             got, golden,

@@ -67,8 +67,18 @@ mod tests {
 
     #[test]
     fn rejects_invalid_schemes() {
-        for bad in &["ws://x", "wss://x", "javascript:alert(1)", "data:,a", "blob:abc", "file:///etc/passwd"] {
-            assert!(matches!(parse_share_url(bad), Err(ShareUrlError::InvalidScheme)), "should reject: {bad}");
+        for bad in &[
+            "ws://x",
+            "wss://x",
+            "javascript:alert(1)",
+            "data:,a",
+            "blob:abc",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                matches!(parse_share_url(bad), Err(ShareUrlError::InvalidScheme)),
+                "should reject: {bad}"
+            );
         }
     }
 
@@ -77,16 +87,22 @@ mod tests {
         assert_eq!(parse_share_url(""), Err(ShareUrlError::Empty));
         assert_eq!(parse_share_url("   "), Err(ShareUrlError::Empty));
         assert_eq!(parse_share_url("notaurl"), Err(ShareUrlError::Malformed));
-        assert_eq!(parse_share_url("https:no-slashes"), Err(ShareUrlError::Malformed));
-        assert_eq!(parse_share_url("https:///nohost"), Err(ShareUrlError::Malformed));
+        assert_eq!(
+            parse_share_url("https:no-slashes"),
+            Err(ShareUrlError::Malformed)
+        );
+        assert_eq!(
+            parse_share_url("https:///nohost"),
+            Err(ShareUrlError::Malformed)
+        );
     }
 
     /// Parity with internal/shareurl/parity_test.go using shared JSON fixtures.
     #[test]
     fn matches_shareurl_cases_json() {
         let raw = include_str!("../testdata/shareurl_cases.json");
-        let cases: Vec<ShareUrlCase> = serde_json::from_str(raw)
-            .expect("testdata/shareurl_cases.json must be valid JSON");
+        let cases: Vec<ShareUrlCase> =
+            serde_json::from_str(raw).expect("testdata/shareurl_cases.json must be valid JSON");
         for c in cases {
             let got = parse_share_url(&c.input);
             match (c.ok, got) {

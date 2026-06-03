@@ -141,6 +141,11 @@
   let __zpTraceSeq = 0;
   let __zpNativeStorage = null;
   try { __zpNativeStorage = root.localStorage; } catch {}
+
+  // Pre-warm chain consumer lives in the SW-injected inline script (see
+  // sw.js buildRuntimePrelude). State now travels in the URL fragment so
+  // naver.com's anti-bot JS can't scrub it the way it scrubs proxy-origin
+  // localStorage.
   function zpTrace(tag, extra) {
     if (!__zpNativeStorage) return;
     try {
@@ -824,7 +829,18 @@
     // breaking schema validators (zod) that compare href/origin to
     // SSR'd expected values.
     const wrappedLocationCache = new WeakMap();
-    const LOC_VIRT_PROPS = new Set(['pathname','search','hash']);
+    // Every URL component on a wrapped Location proxy must return the
+    // virtual (target) value, not the proxy origin. The original Phase-2
+    // set covered only `pathname / search / hash`, which left target
+    // code reading `location.href`, `location.host`, `location.origin`,
+    // etc. seeing `proxy.localhost:18080` — domain checks
+    // (`if (location.host === 'naver.com')`), anti-bot scripts comparing
+    // `location.href` against a marker, and OXC-bypassed inline reads
+    // all leaked the proxy origin into the page. Bisected 2026-06-03
+    // against Wikipedia anchor clicks: extending this set does NOT
+    // affect anchor click navigation (the earlier suspicion was a flaky
+    // test selector that hit `/wiki/Main_Page` self-link).
+    const LOC_VIRT_PROPS = new Set(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
     const LOC_ALL_URL_PROPS = new Set(['href','protocol','host','hostname','port','pathname','search','hash','origin']);
     // Hoist the 4 fixed Location methods outside wrappedLocationFor so each
     // call doesn't allocate a fresh closure set. They only capture

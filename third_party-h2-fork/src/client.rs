@@ -137,7 +137,7 @@
 
 use crate::codec::{Codec, SendError, UserError};
 use crate::ext::Protocol;
-use crate::frame::{Headers, Pseudo, Reason, Settings, StreamId};
+use crate::frame::{Headers, Pseudo, Reason, Settings, StreamDependency, StreamId};
 use crate::proto::{self, Error};
 use crate::{FlowControl, PingPong, RecvStream, SendStream};
 
@@ -1660,6 +1660,21 @@ impl Peer {
         if end_of_stream {
             frame.set_end_stream()
         }
+
+        // ZeroProxy h2 fork (Phase 5.8+): stamp every outbound request
+        // HEADERS frame with Chrome-style PRIORITY. Real Chrome 134/148
+        // sends `{exclusive=1, depends_on=0, weight=256}` (wire weight
+        // byte = `weight - 1 = 255` per RFC 7540 §6.3) on every request,
+        // which the Akamai-style H2 fingerprint hash bakes into its
+        // last field. Without this stamp the frame flags are just
+        // `EndStream|EndHeaders` — a 100% non-Chrome H2 fingerprint
+        // tell that NAVER nid / Cloudflare bot manager check.
+        //
+        // RFC 9218 ("Extensible Prioritization Scheme for HTTP") makes
+        // the legacy PRIORITY frame optional, but Chrome 134/148 still
+        // emits the field for backwards compat with HTTP/2 stacks
+        // (Akamai, Cloudflare) that key on it.
+        frame.set_priority(StreamDependency::new(StreamId::ZERO, 255, true));
 
         Ok(frame)
     }

@@ -241,6 +241,19 @@ impl Headers {
         self.flags.set_end_stream()
     }
 
+    /// ZeroProxy h2 fork: stamp a PRIORITY-flagged HEADERS frame with a
+    /// Chrome-style stream dependency. Real Chrome 134/148 sends every
+    /// request HEADERS with PRIORITY (0x20) set and a 5-byte payload
+    /// `{exclusive=1, dep_id=0, weight=255}` (weight 256 over the wire
+    /// is `weight - 1 = 255` per RFC 7540 §6.3). Akamai-style H2
+    /// fingerprint hashes include the priority frame field; without
+    /// this stamp the frame just shows `EndStream|EndHeaders` flags
+    /// and the fingerprint diverges from any real Chrome.
+    pub fn set_priority(&mut self, stream_dep: StreamDependency) {
+        self.stream_dep = Some(stream_dep);
+        self.flags.set_priority();
+    }
+
     pub fn is_over_size(&self) -> bool {
         self.header_block.is_over_size
     }
@@ -282,9 +295,30 @@ impl Headers {
         // Get the HEADERS frame head
         let head = self.head();
 
+        // ZeroProxy h2 fork: if the PRIORITY flag is set, the frame
+        // payload starts with a 5-byte stream dependency block per
+        // RFC 7540 §6.2 (HEADERS) / §6.3 (PRIORITY):
+        //   4 bytes:  E (1 bit) + Stream Dependency (31 bits, big-endian)
+        //   1 byte:   Weight
+        // The encoder callback is invoked AFTER `head.encode` writes the
+        // 9-byte FRAME HEADER (with provisional length=0) and BEFORE
+        // the HPACK block, so it's the right place to emit the dep
+        // bytes — the encoder's length fix-up runs afterward and counts
+        // them into the payload length automatically.
+        let stream_dep = self.stream_dep;
         self.header_block
             .into_encoding(encoder)
-            .encode(&head, dst, |_| {})
+            .encode(&head, dst, |dst| {
+                if let Some(dep) = stream_dep {
+                    use bytes::BufMut;
+                    let mut dep_id: u32 = dep.dependency_id().into();
+                    if dep.is_exclusive() {
+                        dep_id |= 0x8000_0000;
+                    }
+                    dst.put_u32(dep_id);
+                    dst.put_u8(dep.weight());
+                }
+            })
     }
 
     fn head(&self) -> Head {
@@ -774,6 +808,14 @@ impl HeadersFlag {
 
     pub fn is_priority(&self) -> bool {
         self.0 & PRIORITY == PRIORITY
+    }
+
+    /// ZeroProxy h2 fork (Phase 5.8+): set the PRIORITY (0x20) flag.
+    /// Companion to `Headers::set_priority` which provides the 5-byte
+    /// stream dependency payload that the encode path writes ahead of
+    /// the HPACK block.
+    pub fn set_priority(&mut self) {
+        self.0 |= PRIORITY;
     }
 }
 

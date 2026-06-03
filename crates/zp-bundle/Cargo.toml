@@ -32,6 +32,19 @@ rustls-pki-types = { workspace = true }
 rustls-rustcrypto = { workspace = true }
 webpki-roots = { workspace = true }
 getrandom = { workspace = true }
+# Phase 5.9: X25519MLKEM768 hybrid KX group (group 0x11ec = 4588).
+# Chrome 148 advertises this on every TLS 1.3 ClientHello; without it the
+# JA3 curves component diverges from any real Chrome. ml-kem (RustCrypto)
+# is pure-Rust, wasm32-unknown-unknown clean, and provides the FIPS 203
+# ML-KEM-768 keygen/encap/decap. x25519-dalek already comes in via
+# rustls-rustcrypto for the X25519 half of the hybrid.
+ml-kem = { version = "0.3", default-features = false, features = ["alloc", "getrandom"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+rand_core = "0.6"
+# ml-kem 0.3 transitively pulls getrandom 0.4 via kem 0.3. On
+# wasm32-unknown-unknown getrandom 0.4 needs the explicit `wasm_js`
+# feature gate (mirrors what `getrandom_02` does for the 0.2 graph).
+getrandom_04 = { package = "getrandom", version = "0.4", default-features = false, features = ["wasm_js"] }
 yamux = { workspace = true }
 futures = { workspace = true }
 # HTTP/2 stack — one TLS handshake serves every parallel fetch to the same
@@ -46,6 +59,18 @@ tokio-util = { workspace = true }
 # Cargo unifies feature flags within a single major version, so this
 # direct-dep entry is just to *enable* `js` on the transitive 0.2 graph.
 getrandom_02 = { package = "getrandom", version = "0.2", default-features = false, features = ["js"] }
+
+# Phase 5.12 (2026-06-03): wasm32-compatible response-body decoders so
+# we can advertise `Accept-Encoding: gzip, deflate, br, zstd` like
+# Chrome 148. Without these the kernel must force `identity` (a strong
+# bot tell). All three crates are pure-Rust, no C deps, no platform asm.
+#   flate2 with the `rust_backend` feature → pure-Rust miniz_oxide
+#     (gzip + deflate).
+#   brotli default-features = false strips std-only paths.
+#   ruzstd is the pure-Rust zstd decoder (encoder side not needed).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+brotli = { version = "8", default-features = false, features = ["std"] }
+ruzstd = { version = "0.8", default-features = false, features = ["std"] }
 
 # web-sys feature set carried over from the absorbed zp-kernel crate
 # (kernel mux opens WebSocket, builds Headers/Response/Request, streams via

@@ -35,8 +35,12 @@ pub fn kernel_version() -> String {
 /// for this crate's wasm-bindgen surface.
 #[wasm_bindgen(js_name = kernelEchoSync)]
 pub fn kernel_echo_sync(arg: JsValue) -> JsValue {
-    push_trace(&format!("echo_sync:is_undef={} is_obj={} as_str={:?}",
-        arg.is_undefined(), arg.is_object(), arg.as_string()));
+    push_trace(&format!(
+        "echo_sync:is_undef={} is_obj={} as_str={:?}",
+        arg.is_undefined(),
+        arg.is_object(),
+        arg.as_string()
+    ));
     arg
 }
 
@@ -45,7 +49,10 @@ pub fn kernel_echo_sync(arg: JsValue) -> JsValue {
 /// is the deferred perf follow-up.
 #[wasm_bindgen(js_name = kernelInit)]
 pub fn kernel_init() -> String {
-    format!("zp-kernel v{} (rust, ws-tcp + socks5 + tls + http1)", zp_shared::TRANSFORMER_VERSION)
+    format!(
+        "zp-kernel v{} (rust, ws-tcp + socks5 + tls + http1)",
+        zp_shared::TRANSFORMER_VERSION
+    )
 }
 
 /// Phase 4 JA3 mirror: install a captured browser TLS ClientHello so
@@ -91,6 +98,16 @@ pub fn kernel_set_captured_spec(b64_json: &str) {
         spec.named_groups.len()
     ));
     rustls::ja3::set_captured_spec(spec);
+}
+
+/// Phase 5.9 diagnostic: read the named_groups dump set inside
+/// apply_chrome_ja3_shape. Returns "default=…;captured=…" so the SW's
+/// `/zp/api/diag/trace` (or any caller) can include it in the
+/// diagnostic report.
+#[wasm_bindgen(js_name = kernelLastNamedGroups)]
+pub fn kernel_last_named_groups() -> String {
+    let (def, cap) = rustls::ja3::last_named_groups_dump();
+    format!("default={:?};captured={:?}", def, cap)
 }
 
 /// Converts the JSON envelope from `/zp/api/fp` into a rustls
@@ -163,10 +180,17 @@ fn captured_spec_from_json(j: &serde_json::Value) -> Option<rustls::ja3::Capture
 /// transport layer reads `request_js.url` it's already `undefined`.
 #[wasm_bindgen(js_name = kernelFetch)]
 pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
-    push_trace(&format!("kernel_fetch:entry is_undef={} is_obj={}", request_js.is_undefined(), request_js.is_object()));
+    push_trace(&format!(
+        "kernel_fetch:entry is_undef={} is_obj={}",
+        request_js.is_undefined(),
+        request_js.is_object()
+    ));
     let url = get_string_prop(&request_js, "url").unwrap_or_default();
     let method = get_string_prop(&request_js, "method").unwrap_or_else(|| "GET".to_string());
-    push_trace(&format!("kernel_fetch:captured url={} method={}", url, method));
+    push_trace(&format!(
+        "kernel_fetch:captured url={} method={}",
+        url, method
+    ));
 
     let mut headers_owned: Vec<(String, String)> = Vec::new();
     // Prefer `headerEntries` — a plain `[[k,v], ...]` array the SW builds
@@ -205,7 +229,10 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
             }
         }
     }
-    push_trace(&format!("kernel_fetch:captured headers={}", headers_owned.len()));
+    push_trace(&format!(
+        "kernel_fetch:captured headers={}",
+        headers_owned.len()
+    ));
     // X-ZP-* sidechannel promotion + strip. Mirrors zphttp.BuildHTTP1Request
     // (Go server-side) since the Step-14 client-TLS cutover bypasses that
     // helper entirely — upstream now receives whatever this kernel writes,
@@ -217,31 +244,69 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     headers_owned.retain(|(k, v)| {
         let kl = k.to_ascii_lowercase();
         match kl.as_str() {
-            "x-zp-referer" => { promoted_referer = Some(v.clone()); false }
-            "x-zp-origin" => { promoted_origin = Some(v.clone()); false }
-            "x-zp-user-agent" => { promoted_ua = Some(v.clone()); false }
+            "x-zp-referer" => {
+                promoted_referer = Some(v.clone());
+                false
+            }
+            "x-zp-origin" => {
+                promoted_origin = Some(v.clone());
+                false
+            }
+            "x-zp-user-agent" => {
+                promoted_ua = Some(v.clone());
+                false
+            }
             // Strip all remaining x-zp-* internal sidechannel headers.
             s if s.starts_with("x-zp-") => false,
-            // Strip browser-controlled or framing-controlled headers — let
-            // the transport set them from canonical sources. `user-agent`
-            // is included because the SW also forwards the page-side UA
-            // (it survives `new Headers(req.headers)`) and we promote our
-            // own ZP.TARGET_USER_AGENT via X-ZP-User-Agent; without this
-            // strip we ship two `User-Agent` headers and origin servers
-            // reject the request.
-            "host" | "cookie" | "origin" | "referer" | "user-agent" | "accept-encoding"
+            // Strip framing-controlled headers — let the transport set
+            // them from canonical sources. Phase 5.8: user-agent is NOT
+            // stripped because the SW now emits exactly one (canonical
+            // ZP.TARGET_USER_AGENT, positioned by the Chrome 148 header
+            // order pass). The old X-ZP-User-Agent promotion path
+            // appended UA at the end of the list — visibly wrong in the
+            // h2 frame at tls.peet.ws.
+            "host" | "cookie" | "origin" | "referer" | "accept-encoding"
             | "connection" | "content-length" | "transfer-encoding" => false,
             _ => true,
         }
     });
-    if let Some(v) = promoted_referer { headers_owned.push(("Referer".to_string(), v)); }
-    if let Some(v) = promoted_origin { headers_owned.push(("Origin".to_string(), v)); }
-    if let Some(v) = promoted_ua { headers_owned.push(("User-Agent".to_string(), v)); }
-    headers_owned.push(("Accept-Encoding".to_string(), "identity".to_string()));
-    push_trace(&format!("kernel_fetch:hdr-promoted count={}", headers_owned.len()));
+    if let Some(v) = promoted_referer {
+        headers_owned.push(("Referer".to_string(), v));
+    }
+    if let Some(v) = promoted_origin {
+        headers_owned.push(("Origin".to_string(), v));
+    }
+    if let Some(v) = promoted_ua {
+        headers_owned.push(("User-Agent".to_string(), v));
+    }
+    // 2026-06-03 hypothesis test (Accept-Encoding fingerprint): the
+    // previous `identity` value is one of the strongest curl/python-
+    // requests bot tells — no real browser asks for an uncompressed body.
+    // Chrome 148 ships `gzip, deflate, br, zstd`. We don't yet have a
+    // decompression layer in the WASM kernel, so until that lands the
+    // hypothesis is only testable for upstreams that honour our
+    // `q=`-ranked preference for identity. A WAF that lock-steps on
+    // `Accept-Encoding == identity` will release the lock once it sees
+    // the Chrome-shape header even if the body comes back gzipped and
+    // unreadable. If the experiment confirms the WAF signal, the
+    // follow-up commit adds gzip/br decoders.
+    headers_owned.push((
+        "Accept-Encoding".to_string(),
+        "gzip, deflate, br, zstd, identity;q=0.1".to_string(),
+    ));
+    push_trace(&format!(
+        "kernel_fetch:hdr-promoted count={}",
+        headers_owned.len()
+    ));
     if url.contains("nid.naver.com") || url.contains("github.com") {
-        let names: Vec<String> = headers_owned.iter().map(|(k, v)| format!("{}={}", k, v.chars().take(40).collect::<String>())).collect();
-        push_trace(&format!("kernel_fetch:hdr-final url={} hdrs={:?}", url, names));
+        let names: Vec<String> = headers_owned
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v.chars().take(40).collect::<String>()))
+            .collect();
+        push_trace(&format!(
+            "kernel_fetch:hdr-final url={} hdrs={:?}",
+            url, names
+        ));
     }
 
     if url.is_empty() {
@@ -262,7 +327,10 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     } else {
         Vec::new()
     };
-    push_trace(&format!("kernel_fetch:captured body bytes={}", body_bytes.len()));
+    push_trace(&format!(
+        "kernel_fetch:captured body bytes={}",
+        body_bytes.len()
+    ));
 
     transport::fetch::fetch(&url, &method, &headers_owned, &body_bytes).await
 }

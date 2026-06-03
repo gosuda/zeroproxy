@@ -147,7 +147,8 @@ impl WsStream {
             let inner = inner.clone();
             Closure::wrap(Box::new(move |ev: MessageEvent| {
                 let data = ev.data();
-                let bytes: Vec<u8> = if let Ok(ab) = data.clone().dyn_into::<js_sys::ArrayBuffer>() {
+                let bytes: Vec<u8> = if let Ok(ab) = data.clone().dyn_into::<js_sys::ArrayBuffer>()
+                {
                     let arr = Uint8Array::new(&ab);
                     let mut v = vec![0u8; arr.length() as usize];
                     arr.copy_to(&mut v);
@@ -382,4 +383,3 @@ fn js_err(v: JsValue) -> io::Error {
         .unwrap_or_else(|| "ws_stream: opaque JS error".to_string());
     io::Error::new(io::ErrorKind::Other, msg)
 }
-

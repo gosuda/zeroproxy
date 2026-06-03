@@ -240,7 +240,9 @@ fn apply_patches(source: &str, patches: &[Patch]) -> String {
     // - 그 외 (`(`/`,`/`{`/`}`/`;`/`=`/`\n` + identifier-continue 가 아닌 경우)
     //   는 paren 미추가 — `var x=1\n(call)` 같은 ASI 위험 회피.
     let needs_paren_prefix = |start: usize| -> bool {
-        if start == 0 { return false; }
+        if start == 0 {
+            return false;
+        }
         let prev = bytes[start - 1];
         if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$' {
             return true;
@@ -375,9 +377,15 @@ fn apply_patches(source: &str, patches: &[Patch]) -> String {
                         String::new()
                     };
                     if needs_paren_prefix(start) {
-                        out.push_str(&format!("(__zp_call({},{:?},[{}]))", obj_src, method, args_src));
+                        out.push_str(&format!(
+                            "(__zp_call({},{:?},[{}]))",
+                            obj_src, method, args_src
+                        ));
                     } else {
-                        out.push_str(&format!("__zp_call({},{:?},[{}])", obj_src, method, args_src));
+                        out.push_str(&format!(
+                            "__zp_call({},{:?},[{}])",
+                            obj_src, method, args_src
+                        ));
                     }
                     cursor = end;
                     continue;
@@ -410,7 +418,11 @@ impl RewriterInstance {
         Self {}
     }
 
-    pub fn rewrite(&mut self, source: &str, opts: &RewriteOpts) -> Result<RewriteResult, RewriteError> {
+    pub fn rewrite(
+        &mut self,
+        source: &str,
+        opts: &RewriteOpts,
+    ) -> Result<RewriteResult, RewriteError> {
         rewrite_script(source, opts)
     }
 
@@ -450,10 +462,7 @@ impl RewriteVisitor {
     }
 
     fn is_shadowed(&self, name: &str) -> bool {
-        self.scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
+        self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
 
     fn emit_global_get(&mut self, span: Span, name: &str) {
@@ -464,7 +473,6 @@ impl RewriteVisitor {
             replacement: format!("\u{1}GLOBAL_GET\u{1}{}\u{1}", name),
         });
     }
-
 }
 
 impl<'a> Visit<'a> for RewriteVisitor {
@@ -718,7 +726,10 @@ impl<'a> StaticMemberExt for StaticMemberExpression<'a> {
 /// Extract a static string-literal argument from a call's argument list.
 /// Used to recognise patterns like `Reflect.get(x, 'location')` where the
 /// property is statically known. Returns None for computed/dynamic args.
-fn static_string_arg<'a>(args: &oxc_allocator::Vec<'a, Argument<'a>>, idx: usize) -> Option<&'a str> {
+fn static_string_arg<'a>(
+    args: &oxc_allocator::Vec<'a, Argument<'a>>,
+    idx: usize,
+) -> Option<&'a str> {
     let arg = args.get(idx)?;
     match arg {
         Argument::StringLiteral(s) => Some(s.value.as_str()),
@@ -772,11 +783,16 @@ mod tests {
         // Real-world pattern from kw-owner: class extends a rewritten global,
         // constructor calls super(args). Rewriter must keep super() in place
         // and the class context valid.
-        let src = "class A extends globalThis.X { constructor(p) { super(p); this.location = p; } }";
+        let src =
+            "class A extends globalThis.X { constructor(p) { super(p); this.location = p; } }";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(r.code.contains("super(p)"), "super(p) gone: {}", r.code);
         // Make sure we didn't accidentally rewrite super.location to __zp_set(super,...)
-        assert!(!r.code.contains("__zp_set(super"), "super target wrapped: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_set(super"),
+            "super target wrapped: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -791,7 +807,11 @@ mod tests {
             "super.method() must stay native, got: {}",
             r.code
         );
-        assert!(r.code.contains("super.write"), "super.write missing: {}", r.code);
+        assert!(
+            r.code.contains("super.write"),
+            "super.write missing: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -841,42 +861,70 @@ mod tests {
     fn rewrites_unbound_location() {
         let src = "var x = location.href;";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(r.code.contains("__zp_get(globalThis,\"location\")"), "got: {}", r.code);
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"location\")"),
+            "got: {}",
+            r.code
+        );
     }
 
     #[test]
     fn rewrites_unbound_window() {
         let src = "console.log(window);";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(r.code.contains("__zp_get(globalThis,\"window\")"), "got: {}", r.code);
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"window\")"),
+            "got: {}",
+            r.code
+        );
     }
 
     #[test]
     fn does_not_rewrite_shadowed_location() {
         let src = "function f(location){ return location.href; }";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(!r.code.contains("__zp_get"), "shadowed param should not be rewritten, got: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_get"),
+            "shadowed param should not be rewritten, got: {}",
+            r.code
+        );
     }
 
     #[test]
     fn does_not_rewrite_var_decl_with_same_name() {
         let src = "var location = 'x'; use(location);";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(!r.code.contains("__zp_get"), "shadowed var should not be rewritten, got: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_get"),
+            "shadowed var should not be rewritten, got: {}",
+            r.code
+        );
     }
 
     #[test]
     fn rewrites_history_and_top() {
         let src = "history.pushState({}, '', top.location.pathname);";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(r.code.contains("__zp_get(globalThis,\"history\")"), "history not rewritten: {}", r.code);
-        assert!(r.code.contains("__zp_get(globalThis,\"top\")"), "top not rewritten: {}", r.code);
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"history\")"),
+            "history not rewritten: {}",
+            r.code
+        );
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"top\")"),
+            "top not rewritten: {}",
+            r.code
+        );
     }
 
     #[test]
     fn parse_failure_is_strict_error() {
         let r = rewrite_script("function {", &opts());
-        assert!(matches!(r, Err(RewriteError::ParseFailed(_))), "got: {:?}", r);
+        assert!(
+            matches!(r, Err(RewriteError::ParseFailed(_))),
+            "got: {:?}",
+            r
+        );
     }
 
     #[test]
@@ -900,7 +948,11 @@ mod tests {
     fn destructuring_param_shadows() {
         let src = "function f({location}) { return location.href; }";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(!r.code.contains("__zp_get"), "destructured param should shadow, got: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_get"),
+            "destructured param should shadow, got: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -940,7 +992,11 @@ mod tests {
     fn member_access_to_safe_prop_left_alone() {
         let src = "obj.foo.bar();";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(!r.code.contains("__zp_get"), "safe member must not be rewritten: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_get"),
+            "safe member must not be rewritten: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -974,7 +1030,11 @@ mod tests {
         let r = rewrite_script(&src, &opts()).unwrap();
         // Only one patch (the `location` reference) should be emitted.
         // The rest of the source flows through unchanged via apply_patches.
-        assert_eq!(r.patches.len(), 1, "patch-mode should emit only changed regions");
+        assert_eq!(
+            r.patches.len(),
+            1,
+            "patch-mode should emit only changed regions"
+        );
     }
 
     #[test]
@@ -983,7 +1043,8 @@ mod tests {
         let r = rewrite_script(src, &opts()).unwrap();
         // location is dangerous global -> __zp_get; .assign is dangerous method -> __zp_call.
         assert!(
-            r.code.contains("__zp_call(__zp_get(globalThis,\"location\"),\"assign\","),
+            r.code
+                .contains("__zp_call(__zp_get(globalThis,\"location\"),\"assign\","),
             "location.assign() not routed: {}",
             r.code
         );
@@ -994,7 +1055,11 @@ mod tests {
         let src = "var p = 'x'; location.replace(p);";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(r.code.contains("__zp_call("), "no call rewrite: {}", r.code);
-        assert!(r.code.contains("\"replace\","), "method name missing: {}", r.code);
+        assert!(
+            r.code.contains("\"replace\","),
+            "method name missing: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -1003,7 +1068,11 @@ mod tests {
         let r = rewrite_script(src, &opts()).unwrap();
         // contentWindow member -> __zp_get wrap + postMessage method -> __zp_call.
         assert!(r.code.contains("__zp_call("), "no call rewrite: {}", r.code);
-        assert!(r.code.contains("__zp_get(iframe,\"contentWindow\")"), "iframe wrap missing: {}", r.code);
+        assert!(
+            r.code.contains("__zp_get(iframe,\"contentWindow\")"),
+            "iframe wrap missing: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -1012,14 +1081,22 @@ mod tests {
         let r = rewrite_script(src, &opts()).unwrap();
         // window is dangerous global -> wrapped; .location = ... is dangerous member set.
         assert!(r.code.contains("__zp_set("), "no set rewrite: {}", r.code);
-        assert!(r.code.contains("\"location\","), "set property name missing: {}", r.code);
+        assert!(
+            r.code.contains("\"location\","),
+            "set property name missing: {}",
+            r.code
+        );
     }
 
     #[test]
     fn safe_method_call_left_alone() {
         let src = "obj.someMethod(arg);";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(!r.code.contains("__zp_call"), "safe call must not be rewritten: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_call"),
+            "safe call must not be rewritten: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -1028,7 +1105,11 @@ mod tests {
         // and the membrane setter handles the write side effect.
         let src = "obj.location += 'x';";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(!r.code.contains("__zp_set"), "compound assignment must not use __zp_set: {}", r.code);
+        assert!(
+            !r.code.contains("__zp_set"),
+            "compound assignment must not use __zp_set: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -1038,27 +1119,48 @@ mod tests {
         // The Reflect.get(...) call site is replaced by __zp_get(window, 'location').
         // The `window` arg is itself rewritten to __zp_get(globalThis,'window').
         assert!(
-            r.code.contains("__zp_get(__zp_get(globalThis,\"window\"),\"location\")"),
+            r.code
+                .contains("__zp_get(__zp_get(globalThis,\"window\"),\"location\")"),
             "Reflect.get not routed: {}",
             r.code
         );
-        assert!(!r.code.contains("Reflect.get"), "stale Reflect.get remained: {}", r.code);
+        assert!(
+            !r.code.contains("Reflect.get"),
+            "stale Reflect.get remained: {}",
+            r.code
+        );
     }
 
     #[test]
     fn reflect_set_window_location_routed() {
         let src = "Reflect.set(window, 'location', 'https://x/');";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(r.code.contains("__zp_set("), "Reflect.set not routed: {}", r.code);
-        assert!(r.code.contains("\"location\","), "prop name missing: {}", r.code);
-        assert!(!r.code.contains("Reflect.set"), "stale Reflect.set remained: {}", r.code);
+        assert!(
+            r.code.contains("__zp_set("),
+            "Reflect.set not routed: {}",
+            r.code
+        );
+        assert!(
+            r.code.contains("\"location\","),
+            "prop name missing: {}",
+            r.code
+        );
+        assert!(
+            !r.code.contains("Reflect.set"),
+            "stale Reflect.set remained: {}",
+            r.code
+        );
     }
 
     #[test]
     fn reflect_get_with_safe_prop_unchanged() {
         let src = "Reflect.get(obj, 'foo');";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert!(r.code.contains("Reflect.get"), "safe Reflect.get must pass through: {}", r.code);
+        assert!(
+            r.code.contains("Reflect.get"),
+            "safe Reflect.get must pass through: {}",
+            r.code
+        );
     }
 
     #[test]
@@ -1144,7 +1246,8 @@ mod tests {
         // globalThis must be parenthesised so the `new MemberExpression
         // Arguments` rule consumes `.Request(...)` as a single member-call.
         assert!(
-            r.code.contains("new (__zp_get(globalThis,\"globalThis\")).Request("),
+            r.code
+                .contains("new (__zp_get(globalThis,\"globalThis\")).Request("),
             "new globalThis.Request(...) not preserved as constructor: {}",
             r.code
         );
@@ -1160,7 +1263,8 @@ mod tests {
         // `window` is dangerous global -> wrapped; `.frames` is also a
         // dangerous member -> outer __zp_get wraps the wrapped window.
         assert!(
-            r.code.contains("__zp_get(__zp_get(globalThis,\"window\"),\"frames\")"),
+            r.code
+                .contains("__zp_get(__zp_get(globalThis,\"window\"),\"frames\")"),
             "nested rewrite missing: {}",
             r.code
         );

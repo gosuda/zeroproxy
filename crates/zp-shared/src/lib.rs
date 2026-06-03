@@ -11,8 +11,7 @@ pub mod shareurl;
 pub mod version;
 
 pub use challenge::{
-    challenge_subresource_skip, is_challenge_document, CHALLENGE_HOST,
-    CHALLENGE_PLATFORM_PREFIX,
+    challenge_subresource_skip, is_challenge_document, CHALLENGE_HOST, CHALLENGE_PLATFORM_PREFIX,
 };
 pub use csp::{build_csp, build_csp_with, CspOptions};
 pub use errors::ErrorCode;

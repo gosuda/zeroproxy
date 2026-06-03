@@ -88,7 +88,11 @@ fn ascii_trim(input: &[u8]) -> &[u8] {
 
 #[inline]
 fn ascii_lower(b: u8) -> u8 {
-    if b.is_ascii_uppercase() { b + 32 } else { b }
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
 }
 
 fn classify_scheme(input: &[u8]) -> UrlClass {
@@ -127,18 +131,30 @@ fn classify_scheme(input: &[u8]) -> UrlClass {
     // would re-iterate, so do manual lowercase compare).
     match scheme.len() {
         2 => {
-            if eq_ci(scheme, b"ws") { return UrlClass::Ws; }
+            if eq_ci(scheme, b"ws") {
+                return UrlClass::Ws;
+            }
         }
         3 => {
-            if eq_ci(scheme, b"wss") { return UrlClass::Ws; }
+            if eq_ci(scheme, b"wss") {
+                return UrlClass::Ws;
+            }
         }
         4 => {
-            if eq_ci(scheme, b"http") { return UrlClass::Http; }
-            if eq_ci(scheme, b"blob") { return UrlClass::Blob; }
-            if eq_ci(scheme, b"data") { return UrlClass::Data; }
+            if eq_ci(scheme, b"http") {
+                return UrlClass::Http;
+            }
+            if eq_ci(scheme, b"blob") {
+                return UrlClass::Blob;
+            }
+            if eq_ci(scheme, b"data") {
+                return UrlClass::Data;
+            }
         }
         5 => {
-            if eq_ci(scheme, b"https") { return UrlClass::Http; }
+            if eq_ci(scheme, b"https") {
+                return UrlClass::Http;
+            }
             if eq_ci(scheme, b"about") {
                 // about:blank specifically vs other about:* (e.g. about:srcdoc)
                 return if eq_ci(rest, b"blank") {
@@ -149,10 +165,14 @@ fn classify_scheme(input: &[u8]) -> UrlClass {
             }
         }
         8 => {
-            if eq_ci(scheme, b"vbscript") { return UrlClass::VbScript; }
+            if eq_ci(scheme, b"vbscript") {
+                return UrlClass::VbScript;
+            }
         }
         10 => {
-            if eq_ci(scheme, b"javascript") { return UrlClass::JavaScript; }
+            if eq_ci(scheme, b"javascript") {
+                return UrlClass::JavaScript;
+            }
         }
         _ => {}
     }
@@ -161,8 +181,12 @@ fn classify_scheme(input: &[u8]) -> UrlClass {
 
 #[inline]
 fn eq_ci(a: &[u8], b_lower: &[u8]) -> bool {
-    if a.len() != b_lower.len() { return false; }
-    a.iter().zip(b_lower.iter()).all(|(x, y)| ascii_lower(*x) == *y)
+    if a.len() != b_lower.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b_lower.iter())
+        .all(|(x, y)| ascii_lower(*x) == *y)
 }
 
 // ---------------------------------------------------------------------------
@@ -184,16 +208,22 @@ struct UrlEntry {
 #[derive(Default)]
 struct IdentityHasher(u64);
 impl Hasher for IdentityHasher {
-    fn finish(&self) -> u64 { self.0 }
-    fn write(&mut self, _bytes: &[u8]) { unreachable!("u64 keys only") }
-    fn write_u64(&mut self, n: u64) { self.0 = n; }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _bytes: &[u8]) {
+        unreachable!("u64 keys only")
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
 }
 type FastMap<V> = HashMap<u64, V, BuildHasherDefault<IdentityHasher>>;
 
 struct UrlPool {
     bytes: Vec<u8>,
     entries: Vec<UrlEntry>,
-    class_cache: Vec<u8>,           // UrlClass as u8 per entry index
+    class_cache: Vec<u8>, // UrlClass as u8 per entry index
     // by_hash: pre-hashed key → handle. Collisions are verified by byte
     // compare against the entries table. Identity hasher avoids re-hashing.
     by_hash: FastMap<u32>,
@@ -313,9 +343,7 @@ pub extern "C" fn url_intern(ptr: u32, len: u32) -> u32 {
     // Safety: caller is JS glue which only passes pointers into our own
     // linear memory. Read len bytes. If out-of-bounds, wasm trap will abort,
     // which is correct (JS bug, not user bug).
-    let bytes = unsafe {
-        core::slice::from_raw_parts(ptr as *const u8, len as usize)
-    };
+    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     POOL.with(|p| p.borrow_mut().intern(bytes))
 }
 
@@ -373,9 +401,7 @@ pub extern "C" fn url_classify_scheme_only(ptr: u32, len: u32) -> u32 {
     if len == 0 || len > 256 {
         return UrlClass::Invalid as u32;
     }
-    let bytes = unsafe {
-        core::slice::from_raw_parts(ptr as *const u8, len as usize)
-    };
+    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
     classify_scheme(bytes) as u32
 }
 
@@ -411,19 +437,17 @@ pub extern "C" fn bulk_intern_and_classify(
     bytes_ptr: u32,
     out_ptr: u32,
 ) -> u32 {
-    if count == 0 { return 0; }
-    let lens = unsafe {
-        core::slice::from_raw_parts(lens_ptr as *const u32, count as usize)
-    };
+    if count == 0 {
+        return 0;
+    }
+    let lens = unsafe { core::slice::from_raw_parts(lens_ptr as *const u32, count as usize) };
     // Walk bytes_ptr advancing by each len, intern, write packed result.
     POOL.with(|p| {
         let mut pool = p.borrow_mut();
         let mut byte_cur = bytes_ptr as *const u8;
         let mut out_cur = out_ptr as *mut u32;
         for &len in lens {
-            let bytes = unsafe {
-                core::slice::from_raw_parts(byte_cur, len as usize)
-            };
+            let bytes = unsafe { core::slice::from_raw_parts(byte_cur, len as usize) };
             let handle = pool.intern(bytes);
             let cls = pool.class_of(handle);
             let packed = (cls << 16) | (handle & 0xFFFF);

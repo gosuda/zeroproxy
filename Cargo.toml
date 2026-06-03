@@ -14,7 +14,7 @@ members = [
 # dead-strip interference (see trap-notebook 2026-05-30 wasm-page-rt entry).
 # Legacy standalone crate kept as a separate build target via build.mjs's
 # makeRustRewriterClassic() — must not be pulled into the workspace.
-exclude = ["rewriter-rs"]
+exclude = ["rewriter-rs", "third_party-rustls-fork", "third_party-h2-fork"]
 
 [workspace.package]
 version = "0.1.0"

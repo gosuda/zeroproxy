@@ -90,9 +90,15 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                         .filter_map(|a| {
                             let name = a.name();
                             let lower_view = name.as_str();
-                            let is_url_attr = matches!(lower_view, "href" | "src" | "action" | "formaction");
-                            let is_on_handler = lower_view.starts_with("on") && lower_view.len() > 2;
-                            if is_url_attr || is_on_handler { Some((name, a.value())) } else { None }
+                            let is_url_attr =
+                                matches!(lower_view, "href" | "src" | "action" | "formaction");
+                            let is_on_handler =
+                                lower_view.starts_with("on") && lower_view.len() > 2;
+                            if is_url_attr || is_on_handler {
+                                Some((name, a.value()))
+                            } else {
+                                None
+                            }
                         })
                         .collect();
                     for (name, value) in attrs_snapshot {
@@ -125,12 +131,22 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                 // runtime-prelude click/submit/iframe hooks.
                                 let is_subresource = matches!(
                                     (tag.as_str(), lower),
-                                    ("link", "href") | ("script", "src") | ("img", "src")
-                                        | ("source", "src") | ("video", "src") | ("audio", "src")
-                                        | ("track", "src") | ("embed", "src")
+                                    ("link", "href")
+                                        | ("script", "src")
+                                        | ("img", "src")
+                                        | ("source", "src")
+                                        | ("video", "src")
+                                        | ("audio", "src")
+                                        | ("track", "src")
+                                        | ("embed", "src")
                                 );
                                 if is_subresource {
-                                    if let Some(next) = proxied_subresource_url(trimmed, &proxy_origin, "/zp/", &target_for_attr) {
+                                    if let Some(next) = proxied_subresource_url(
+                                        trimmed,
+                                        &proxy_origin,
+                                        "/zp/",
+                                        &target_for_attr,
+                                    ) {
                                         let _ = el.set_attribute(&name, &next);
                                         // Stash the original absolute URL so the runtime-
                                         // prelude can return it when target code reads
@@ -140,8 +156,11 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                         // the proxy URL to `/zp/api/` and all chunk loads
                                         // 404 — observed on github.com.
                                         if matches!(tag.as_str(), "script" | "link") {
-                                            if let Some(abs) = absolute_target_url(trimmed, &target_for_attr) {
-                                                let _ = el.set_attribute("data-zp-target-url", &abs);
+                                            if let Some(abs) =
+                                                absolute_target_url(trimmed, &target_for_attr)
+                                            {
+                                                let _ =
+                                                    el.set_attribute("data-zp-target-url", &abs);
                                             }
                                         }
                                     }
@@ -149,10 +168,8 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                 continue;
                             }
                             // Extract body after `javascript:` prefix.
-                            let prefix_end = trimmed
-                                .find(':')
-                                .map(|i| i + 1)
-                                .unwrap_or(trimmed.len());
+                            let prefix_end =
+                                trimmed.find(':').map(|i| i + 1).unwrap_or(trimmed.len());
                             let body = trimmed[prefix_end..].to_string();
                             // URL-decode the body (target sites often percent-encode).
                             let body = percent_decode(&body);
@@ -198,10 +215,9 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                 let _ = el.set_attribute(&name, &r.code);
                             }
                             Err(e) => {
-                                diags_for_attr.borrow_mut().push(format!(
-                                    "event handler {} rewrite failed: {}",
-                                    name, e
-                                ));
+                                diags_for_attr
+                                    .borrow_mut()
+                                    .push(format!("event handler {} rewrite failed: {}", name, e));
                                 if strict {
                                     el.remove_attribute(&name);
                                 } else {
@@ -375,12 +391,21 @@ fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
     // Split base into scheme://host[:port] and path.
     let scheme_end = base.find("://")? + 3;
     let after_scheme = &base[scheme_end..];
-    let path_start = after_scheme.find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+    let path_start = after_scheme
+        .find('/')
+        .map(|i| scheme_end + i)
+        .unwrap_or(base.len());
     let origin = &base[..path_start];
-    let base_path_full = if path_start >= base.len() { "/" } else { &base[path_start..] };
+    let base_path_full = if path_start >= base.len() {
+        "/"
+    } else {
+        &base[path_start..]
+    };
     // Strip query/fragment from base path for path-relative resolution.
     let base_path = base_path_full
-        .split(['?', '#']).next().unwrap_or(base_path_full);
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(base_path_full);
     if rel.starts_with('?') || rel.starts_with('#') {
         let mut out = String::with_capacity(origin.len() + base_path.len() + rel.len());
         out.push_str(origin);
@@ -467,7 +492,12 @@ fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
 /// where it would resolve without a base — exactly the failure mode observed
 /// inside NAVER's `shopsquare.naver.com` iframe). Returns None for fragment-
 /// only refs and inert schemes (data:/blob:/about:/mailto:).
-fn proxied_subresource_url(raw: &str, proxy_origin: &str, control_prefix: &str, target_url: &str) -> Option<String> {
+fn proxied_subresource_url(
+    raw: &str,
+    proxy_origin: &str,
+    control_prefix: &str,
+    target_url: &str,
+) -> Option<String> {
     use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
     let s = raw.trim();
     if s.is_empty() || s.starts_with('#') {
@@ -496,10 +526,13 @@ fn proxied_subresource_url(raw: &str, proxy_origin: &str, control_prefix: &str, 
     //
     // Reserve generously (~3× absolute) — percent-encoding `NON_ALPHANUMERIC`
     // expands every non-alphanumeric byte to `%XX`. Worst-case 3x for ASCII.
-    let mut out = String::with_capacity(proxy_origin.len() + control_prefix.len() + absolute.len() * 3 + 32);
+    let mut out =
+        String::with_capacity(proxy_origin.len() + control_prefix.len() + absolute.len() * 3 + 32);
     out.push_str(proxy_origin.trim_end_matches('/'));
     out.push_str(control_prefix);
-    if !out.ends_with('/') { out.push('/'); }
+    if !out.ends_with('/') {
+        out.push('/');
+    }
     out.push_str("api/fetch?url=");
     // Stream percent-encoded chunks directly into `out` instead of
     // collecting into an intermediate String via `.to_string()`. Saves one
@@ -539,8 +572,7 @@ fn absolute_target_url(raw: &str, target_url: &str) -> Option<String> {
 /// `to_ascii_lowercase()` allocation dominates.
 #[inline]
 fn starts_with_ascii_ci(s: &str, prefix: &str) -> bool {
-    s.len() >= prefix.len()
-        && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 /// True if `s` (already trimmed) starts with an inert URL scheme that the
@@ -653,15 +685,27 @@ mod tests {
         // the src-rewrite path is identical to production.
         let html = "<script src=\"https://example.com/runtime.js\"></script>";
         let r = transform(html, &opts()).unwrap();
-        assert!(r.html.contains("/zp/api/fetch?url="), "src must route through SW: {}", r.html);
-        assert!(!r.html.contains("__zp_get"), "no body rewrite expected: {}", r.html);
+        assert!(
+            r.html.contains("/zp/api/fetch?url="),
+            "src must route through SW: {}",
+            r.html
+        );
+        assert!(
+            !r.html.contains("__zp_get"),
+            "no body rewrite expected: {}",
+            r.html
+        );
     }
 
     #[test]
     fn template_type_script_left_alone() {
         let html = "<script type=\"text/x-handlebars\">{{location}}</script>";
         let r = transform(html, &opts()).unwrap();
-        assert!(!r.html.contains("__zp_get"), "template script must not be rewritten: {}", r.html);
+        assert!(
+            !r.html.contains("__zp_get"),
+            "template script must not be rewritten: {}",
+            r.html
+        );
     }
 
     #[test]
@@ -674,7 +718,11 @@ mod tests {
             "module wrap missing: {}",
             r.html
         );
-        assert!(r.html.contains("use(window)"), "raw payload missing: {}", r.html);
+        assert!(
+            r.html.contains("use(window)"),
+            "raw payload missing: {}",
+            r.html
+        );
     }
 
     #[test]
@@ -682,16 +730,32 @@ mod tests {
         // The body `function {` is a parse error; strict mode removes the attribute.
         let html = "<a onclick=\"function {\">x</a>";
         let r = transform(html, &opts()).unwrap();
-        assert!(!r.html.contains("onclick"), "malformed handler should be removed: {}", r.html);
+        assert!(
+            !r.html.contains("onclick"),
+            "malformed handler should be removed: {}",
+            r.html
+        );
     }
 
     #[test]
     fn javascript_url_anchor_routed() {
         let html = "<a href=\"javascript:location.href='x'\">go</a>";
         let r = transform(html, &opts()).unwrap();
-        assert!(r.html.contains("href=\"javascript:void(0)\""), "href not neutralised: {}", r.html);
-        assert!(r.html.contains("data-zp-jsurl"), "data-zp-jsurl missing: {}", r.html);
-        assert!(r.html.contains("data-zp-jsurl-kind=\"anchor\""), "kind missing: {}", r.html);
+        assert!(
+            r.html.contains("href=\"javascript:void(0)\""),
+            "href not neutralised: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains("data-zp-jsurl"),
+            "data-zp-jsurl missing: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains("data-zp-jsurl-kind=\"anchor\""),
+            "kind missing: {}",
+            r.html
+        );
         // Body should be rewritten through zp-rewriter (location is dangerous global).
         assert!(
             r.html.contains("__zp_get(globalThis,&quot;location&quot;)")
@@ -740,12 +804,24 @@ mod tests {
         // empty CSS. Decode first, then percent-encode the canonical URL.
         let html = "<link rel=\"stylesheet\" href=\"https://cdn.example.com/load.php?lang=en&amp;modules=site.styles\">";
         let r = transform(html, &opts()).unwrap();
-        assert!(r.html.contains("/zp/api/fetch?url="), "link href must route through SW: {}", r.html);
+        assert!(
+            r.html.contains("/zp/api/fetch?url="),
+            "link href must route through SW: {}",
+            r.html
+        );
         // The encoded URL must not contain the encoded entity `%26amp%3B`
         // (which is `&amp;` percent-encoded). It must contain `%26` (`&`)
         // followed by `modules=` directly.
-        assert!(!r.html.contains("%26amp%3B"), "must not preserve `&amp;` entity in URL: {}", r.html);
-        assert!(r.html.contains("%26modules%3D"), "expected `&modules=` encoded form: {}", r.html);
+        assert!(
+            !r.html.contains("%26amp%3B"),
+            "must not preserve `&amp;` entity in URL: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains("%26modules%3D"),
+            "expected `&modules=` encoded form: {}",
+            r.html
+        );
     }
 
     #[test]
@@ -765,7 +841,8 @@ mod tests {
         // Original URL must be preserved on data-zp-target-url so script/link
         // .src/.href getters return the virtual URL (membrane invariant).
         assert!(
-            r.html.contains("data-zp-target-url=\"https://cdn.example.com/main.css\""),
+            r.html
+                .contains("data-zp-target-url=\"https://cdn.example.com/main.css\""),
             "data-zp-target-url should preserve the original absolute URL: {}",
             r.html
         );
@@ -786,7 +863,8 @@ mod tests {
         // Encoded form of `https://shopsquare.naver.com/_next/image?url=%2Fpng%2Ferror.png&w=1920&q=75`
         // (we expect the absolute URL to be percent-encoded into the proxy fetch query).
         assert!(
-            r.html.contains("shopsquare%2Enaver%2Ecom%2F%5Fnext%2Fimage"),
+            r.html
+                .contains("shopsquare%2Enaver%2Ecom%2F%5Fnext%2Fimage"),
             "host-relative img src must be resolved against target URL: {}",
             r.html
         );
@@ -824,7 +902,8 @@ mod tests {
         let html = "<script defer src=\"https://pm.pstatic.net/resources/js/preload.js\"></script>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("http://proxy.localhost:18080/zp/api/fetch?url="),
+            r.html
+                .contains("http://proxy.localhost:18080/zp/api/fetch?url="),
             "script src must include proxy_origin: {}",
             r.html
         );
@@ -848,7 +927,8 @@ mod tests {
         // /zp/, so `/static/a.css` actually fell through to UNKNOWN → fetch
         // failure. The real fix is to resolve relatives against the target
         // URL here so the browser issues a proxified absolute fetch.
-        let html = "<link rel=\"stylesheet\" href=\"/static/a.css\"><script src=\"./b.js\"></script>";
+        let html =
+            "<link rel=\"stylesheet\" href=\"/static/a.css\"><script src=\"./b.js\"></script>";
         let r = transform(html, &opts()).unwrap();
         // Host-relative against https://example.com/ → https://example.com/static/a.css
         assert!(
@@ -879,10 +959,16 @@ mod tests {
         // not by attribute rewriting at parse time.
         let html = "<a href=\"https://other.example/p\">x</a><iframe src=\"https://other.example/f\"></iframe>";
         let r = transform(html, &opts()).unwrap();
-        assert!(r.html.contains("href=\"https://other.example/p\""), "{}", r.html);
-        assert!(r.html.contains("src=\"https://other.example/f\""), "{}", r.html);
+        assert!(
+            r.html.contains("href=\"https://other.example/p\""),
+            "{}",
+            r.html
+        );
+        assert!(
+            r.html.contains("src=\"https://other.example/f\""),
+            "{}",
+            r.html
+        );
         assert!(!r.html.contains("/zp/api/fetch"), "{}", r.html);
     }
 }
-
-

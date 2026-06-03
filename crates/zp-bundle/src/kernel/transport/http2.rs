@@ -210,22 +210,59 @@ pub(crate) async fn send_request(
 
     let mut body_buf: Vec<u8> = Vec::new();
     let mut body_stream = response.into_body();
-    while let Some(chunk) = body_stream.data().await {
-        let chunk = chunk
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("h2: body: {e}")))?;
-        let len = chunk.len();
-        body_buf.extend_from_slice(&chunk);
-        // Release flow-control credit on the LIVE stream — not a clone.
-        // `flow_control()` returns `&mut FlowControl`; cloning would
-        // detach the released capacity from the underlying stream
-        // accounting and the server would stall after the first window
-        // (default 65 KiB). The cost of getting this wrong is a 60s
-        // upstream idle timeout per request.
-        let _ = body_stream.flow_control().release_capacity(len);
+    loop {
+        match body_stream.data().await {
+            Some(Ok(chunk)) => {
+                let len = chunk.len();
+                body_buf.extend_from_slice(&chunk);
+                // Release flow-control credit on the LIVE stream — not a clone.
+                // `flow_control()` returns `&mut FlowControl`; cloning would
+                // detach the released capacity from the underlying stream
+                // accounting and the server would stall after the first window
+                // (default 65 KiB). The cost of getting this wrong is a 60s
+                // upstream idle timeout per request.
+                let _ = body_stream.flow_control().release_capacity(len);
+            }
+            Some(Err(e)) => {
+                // Phase 5.8: tolerate stream-level errors mid-body. The
+                // common case is `h2: body: bytes remaining on stream`
+                // from github.com / Cloudflare (server closes the stream
+                // while declaring more bytes via content-length). Real
+                // browsers show the partial body and surface a non-fatal
+                // network warning; we mirror that by returning what we
+                // have and pushing the error to the trace ring.
+                //
+                // If we got ZERO bytes the error is fatal — the upstream
+                // never started a real response, propagate as before.
+                crate::kernel::push_trace(&format!(
+                    "tx:h2-body-trunc bytes={} err={}",
+                    body_buf.len(),
+                    e
+                ));
+                if body_buf.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("h2: body: {e}"),
+                    ));
+                }
+                break;
+            }
+            None => break,
+        }
     }
     // h2 trailers — not used by browser fetch responses, but draining
     // keeps the protocol state consistent.
     let _ = body_stream.trailers().await;
+
+    // Phase 5.12 (2026-06-03): Chrome-shape Accept-Encoding advertises
+    // gzip / deflate / br / zstd; servers happily respond compressed.
+    // Unwrap here so the SW returns plaintext bytes to the page realm
+    // (target JS expects `response.text()` to decode HTML, not gzip
+    // bytes). Strip the Content-Encoding header for the codings we
+    // peeled — leaving it would mislead the browser into double-
+    // decoding. If a coding fails or is unknown, `decode_body` returns
+    // the residual codings so the header stays accurate.
+    let (body_buf, resp_headers) = unwrap_response_body(resp_headers, body_buf);
 
     Ok(HttpResponse {
         status,
@@ -233,6 +270,54 @@ pub(crate) async fn send_request(
         headers: resp_headers,
         body: body_buf,
     })
+}
+
+/// Pull the `Content-Encoding` header out of the response header list,
+/// pipe the body through the matching decoders, and write back a
+/// residual `Content-Encoding` only if some codings were not peeled.
+/// Header lookup is case-insensitive; the original casing is preserved
+/// on any header we kept.
+fn unwrap_response_body(
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (Vec<u8>, Vec<(String, String)>) {
+    let mut ce_value: Option<String> = None;
+    let mut ce_index: Option<usize> = None;
+    let mut cl_index: Option<usize> = None;
+    for (i, (k, v)) in headers.iter().enumerate() {
+        let lower = k.to_ascii_lowercase();
+        if lower == "content-encoding" {
+            ce_value = Some(v.clone());
+            ce_index = Some(i);
+        } else if lower == "content-length" {
+            cl_index = Some(i);
+        }
+    }
+    let Some(ce_value) = ce_value else {
+        return (body, headers);
+    };
+    let (decoded, residual) = crate::kernel::transport::decode::decode_body(&ce_value, body);
+    // Rebuild header list. The order is preserved except the
+    // Content-Encoding entry which we rewrite (or drop) and the
+    // Content-Length entry which we rewrite to match the decoded length
+    // when we actually decoded something (browsers reject mismatched
+    // content-length with the wrong body length).
+    let decoded_len = decoded.len().to_string();
+    let mut new_headers: Vec<(String, String)> = Vec::with_capacity(headers.len());
+    let coding_changed = residual != ce_value.trim();
+    for (i, (k, v)) in headers.into_iter().enumerate() {
+        if Some(i) == ce_index {
+            if residual.is_empty() {
+                continue; // drop entirely — everything peeled
+            }
+            new_headers.push((k, residual.clone()));
+        } else if Some(i) == cl_index && coding_changed {
+            new_headers.push((k, decoded_len.clone()));
+        } else {
+            new_headers.push((k, v));
+        }
+    }
+    (decoded, new_headers)
 }
 
 fn headers_to_vec(map: &HeaderMap) -> Vec<(String, String)> {

@@ -192,18 +192,17 @@ pub(crate) async fn fetch(
         }
         FreshConn::Http1(mut conn) => {
             let t_req = now_ms();
-            let resp =
-                http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body)
-                    .await
-                    .map_err(|e| {
-                        crate::kernel::push_trace(&format!(
-                            "tx:http-err host={} err={} t={}ms",
-                            parsed.host,
-                            e,
-                            delta_ms(t0)
-                        ));
-                        jserr("TARGET_HTTP_FAILED", &e)
-                    })?;
+            let resp = http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body)
+                .await
+                .map_err(|e| {
+                    crate::kernel::push_trace(&format!(
+                        "tx:http-err host={} err={} t={}ms",
+                        parsed.host,
+                        e,
+                        delta_ms(t0)
+                    ));
+                    jserr("TARGET_HTTP_FAILED", &e)
+                })?;
             crate::kernel::push_trace(&format!(
                 "tx:http-ok host={} status={} http={}ms total={}ms keepalive={}",
                 parsed.host,
@@ -255,14 +254,14 @@ fn delta_ms(t0: f64) -> u32 {
 /// (TLS if https). Retries once if the yamux session itself looks stale.
 /// `t0` is the parent caller's start time; we report each stage as a
 /// delta off t0 so it's easy to spot which layer dominates total latency.
-async fn open_fresh(
-    parsed: &ParsedUrl,
-    relay_url: &str,
-    t0: f64,
-) -> Result<FreshConn, JsValue> {
+async fn open_fresh(parsed: &ParsedUrl, relay_url: &str, t0: f64) -> Result<FreshConn, JsValue> {
     let t_mux = now_ms();
     let session = yamux::get_or_open(relay_url).await.map_err(|e| {
-        crate::kernel::push_trace(&format!("tx:mux-session-err err={} t={}ms", e, delta_ms(t0)));
+        crate::kernel::push_trace(&format!(
+            "tx:mux-session-err err={} t={}ms",
+            e,
+            delta_ms(t0)
+        ));
         jserr("TARGET_CONNECT_FAILED:mux-session", &e)
     })?;
     let mut stream = match session.open_stream().await {
@@ -409,7 +408,9 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
             80
         }
     } else {
-        port_str.parse().map_err(|_| format!("bad port: {port_str}"))?
+        port_str
+            .parse()
+            .map_err(|_| format!("bad port: {port_str}"))?
     };
     let mut path = u.pathname();
     let search = u.search();
@@ -430,10 +431,7 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
 /// `Host:` header content. Default-port pairings get host only; non-default
 /// ports get `host:port` (per RFC 7230 §5.4).
 fn host_header(u: &ParsedUrl) -> String {
-    let default = matches!(
-        (u.scheme.as_str(), u.port),
-        ("http", 80) | ("https", 443)
-    );
+    let default = matches!((u.scheme.as_str(), u.port), ("http", 80) | ("https", 443));
     if default {
         u.host.clone()
     } else {
@@ -481,11 +479,34 @@ fn build_js_response(resp: HttpResponse, final_url: &str) -> Result<JsValue, JsV
             .unwrap_or("(none)")
     ));
     let headers = Headers::new()?;
+    // SW cookie-jar side-channel: web_sys::Response's response-guard strips
+    // Set-Cookie in many runtimes (the Fetch spec puts it on the forbidden
+    // response-header list for non-SW callers, and several engines apply
+    // that filter inside the Response constructor regardless). As a result
+    // `response.headers.getSetCookie()` returns empty in the SW even when
+    // upstream actually sent NACT-style anti-bot tokens. Mirror every
+    // Set-Cookie value into the X-ZP-Set-Cookie sidechannel so the SW's
+    // RFC-6265 jar can consume them. Tab separator stays inside the HTTP
+    // header line shape (no newlines) and the SW splits on it.
+    let mut set_cookies: Vec<&str> = Vec::new();
     for (k, v) in &resp.headers {
+        if k.eq_ignore_ascii_case("set-cookie") {
+            set_cookies.push(v.as_str());
+        }
         // Headers.append rejects a few wire-level header names by spec
         // (e.g. forbidden response headers). Ignore failures so a single
         // hostile header doesn't abort the whole response.
         let _ = headers.append(k, v);
+    }
+    if !set_cookies.is_empty() {
+        let joined = set_cookies.join("\t");
+        crate::kernel::push_trace(&format!(
+            "tx:resp-set-cookie url={} count={} len={}",
+            final_url,
+            set_cookies.len(),
+            joined.len()
+        ));
+        let _ = headers.append("X-ZP-Set-Cookie", &joined);
     }
     let body_array = Uint8Array::new_with_length(resp.body.len() as u32);
     body_array.copy_from(&resp.body);
@@ -495,10 +516,8 @@ fn build_js_response(resp: HttpResponse, final_url: &str) -> Result<JsValue, JsV
     init.set_status_text(&resp.reason);
     init.set_headers(&headers);
 
-    let response = Response::new_with_opt_buffer_source_and_init(
-        Some(&body_array.buffer()),
-        &init,
-    )?;
+    let response =
+        Response::new_with_opt_buffer_source_and_init(Some(&body_array.buffer()), &init)?;
     Ok(response.into())
 }
 

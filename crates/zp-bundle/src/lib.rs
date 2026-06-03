@@ -55,7 +55,11 @@ pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str) -> Result<S
 
 /// Transform target HTML — calls zp-htmltx + zp-rewriter for inline scripts.
 #[wasm_bindgen(js_name = transformHtml)]
-pub fn transform_html_js(html: &str, target_url: &str, proxy_origin: &str) -> Result<String, JsError> {
+pub fn transform_html_js(
+    html: &str,
+    target_url: &str,
+    proxy_origin: &str,
+) -> Result<String, JsError> {
     let opts = zp_htmltx::TransformOptions {
         target_url: target_url.to_string(),
         strict: true,
@@ -79,10 +83,7 @@ pub fn build_csp_js(ws_origin: &str) -> String {
 /// script/frame/child/connect-src (and nothing else) for Cloudflare Turnstile.
 #[wasm_bindgen(js_name = buildCSPWith)]
 pub fn build_csp_with_js(ws_origin: &str, challenge_compat: bool) -> String {
-    zp_shared::build_csp_with(
-        ws_origin,
-        &zp_shared::CspOptions { challenge_compat },
-    )
+    zp_shared::build_csp_with(ws_origin, &zp_shared::CspOptions { challenge_compat })
 }
 
 /// Pure predicate: does the response classify as a Cloudflare challenge

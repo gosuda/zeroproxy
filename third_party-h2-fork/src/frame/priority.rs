@@ -69,4 +69,17 @@ impl StreamDependency {
     pub fn dependency_id(&self) -> StreamId {
         self.dependency_id
     }
+
+    /// ZeroProxy h2 fork (Phase 5.8+): wire-level weight byte (0..=255;
+    /// `weight - 1` of the RFC 7540 §6.3 1..=256 range — Chrome 134/148
+    /// sends 255 for "weight 256").
+    pub fn weight(&self) -> u8 {
+        self.weight
+    }
+
+    /// ZeroProxy h2 fork (Phase 5.8+): exclusive bit. Chrome 134/148
+    /// sets this to 1.
+    pub fn is_exclusive(&self) -> bool {
+        self.is_exclusive
+    }
 }

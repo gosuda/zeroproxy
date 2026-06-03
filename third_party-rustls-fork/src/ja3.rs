@@ -95,6 +95,24 @@ pub fn with_current<R>(f: impl FnOnce(Option<&CapturedSpec>) -> R) -> R {
     CAPTURED.with(|c| f(c.borrow().as_ref()))
 }
 
+thread_local! {
+    /// Phase 5.9 diagnostic: snapshot of named_groups Vec before/after
+    /// the captured-spec override fires inside
+    /// `apply_chrome_ja3_shape`. JS-side diag endpoint reads this back.
+    static LAST_NAMED_GROUPS_DUMP: RefCell<(Vec<u16>, Vec<u16>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// Phase 5.9 diagnostic setter.
+pub fn set_last_named_groups_dump(default: Vec<u16>, captured: Vec<u16>) {
+    LAST_NAMED_GROUPS_DUMP.with(|c| *c.borrow_mut() = (default, captured));
+}
+
+/// Phase 5.9 diagnostic getter.
+pub fn last_named_groups_dump() -> (Vec<u16>, Vec<u16>) {
+    LAST_NAMED_GROUPS_DUMP.with(|c| c.borrow().clone())
+}
+
 /// RFC 8701 GREASE values. The TLS protocol designates these 16
 /// `0x?A?A` code points as reserved for browsers to randomly inject
 /// into ClientHello cipher / extension / group lists. Servers must

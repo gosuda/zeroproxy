@@ -182,16 +182,57 @@
     const el = document.getElementById('challenge-compat');
     return !!(el && el.checked);
   }
+  // Anti-bot WAF subdomains served a 60s+ "anti-credential-stuffing" slow
+  // lane to cold sessions (no NACT/NID-style tracking cookies). The fix
+  // is not a wire optimisation — measurement (tx:* trace) shows TLS 24-51
+  // ms, SOCKS5 8-39 ms, h2 mux 0 ms reuse, but http=54155 ms on a single
+  // upstream response. Cost is *upstream policy*, not local. The relief
+  // is a real-page warm-up: navigate first to the parent origin so the
+  // page's own JS sets the WAF cookies via `document.cookie` (which the
+  // membrane forwards to the SW jar through ZP_COOKIE_SET), then follow
+  // up with the original target on the SAME SW tab — same cookieJar →
+  // warm path on the slow subdomain (~400 ms instead of 54 s).
+  // Slow-lane subdomains: NAVER's WAF holds the first-visit response for
+  // ~60 s when the SW fetch has no per-IP/per-session reputation built up.
+  // We measured the multi-step warm-up chain (www → search → target on
+  // one SW tab with cookieJar accumulating NAC + NACT + _naver_usersession_)
+  // and the 60 s is unchanged — NAVER's check isn't cookie-gated, it's an
+  // IP/JA3 reputation gate that nothing on the client can short-circuit.
+  // So we don't chain. Instead the launcher just warns and the user sees a
+  // countdown. The cookie URL fix (transportFetch opt.url) means follow-up
+  // visits in the same session are instant once the first one lands.
+  const SLOW_LANE_RULES = [
+    { test: h => /(?:^|\.)naver\.com$/.test(h) && h !== 'www.naver.com' && h !== 'naver.com', label: 'NAVER', expectedSec: 60 },
+  ];
+  function slowLaneRuleFor(targetUrl) {
+    try {
+      const host = new URL(targetUrl).hostname.toLowerCase();
+      return SLOW_LANE_RULES.find(r => r.test(host)) || null;
+    } catch { return null; }
+  }
+  async function registerShare(targetUrl, servers, challengeCompat, reuseTabId) {
+    const share = await ZP.encryptShareURL(targetUrl);
+    const msg = { type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat };
+    if (reuseTabId) msg.reuseTabId = reuseTabId;
+    const result = await swRequest(msg);
+    const finalServers = Array.isArray(result.servers) && result.servers.length ? result.servers : servers;
+    return { share, result, servers: finalServers };
+  }
   async function openTarget(targetUrl) {
     const target = ZP.canonicalTargetURL(targetUrl).href;
-    const share = await ZP.encryptShareURL(target);
     let servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
     const challengeCompat = challengeCompatEnabled();
-    try {
-      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat });
-      if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
-    } catch {}
-    location.assign(proxyOrigin() + ZP.makeSharePath(share.encrypted) + ZP.makeShareFragment(share.key, servers));
+    const slowLane = slowLaneRuleFor(target);
+    if (slowLane) {
+      setStatus(
+        slowLane.label + ' delays first-time visits to this subdomain by ~' +
+        slowLane.expectedSec + ' s (IP-reputation gate). Loading now — '
+        + 'follow-up links in this session will be instant.',
+        false
+      );
+    }
+    const out = await registerShare(target, servers, challengeCompat);
+    location.assign(proxyOrigin() + ZP.makeSharePath(out.share.encrypted) + ZP.makeShareFragment(out.share.key, out.servers));
   }
   async function handleShare() {
     if (!ZP.isSharePath(location.pathname)) return false;
