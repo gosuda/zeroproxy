@@ -1,6 +1,6 @@
 # AGENTS.md — ZeroProxy
 
-ZeroProxy is a **human-in-the-loop** virtual-browsing privacy membrane: a real person drives a real browser, and target traffic egresses only through `Service Worker → Go WASM kernel → WebSocket/yamux → SOCKS5 → uTLS`. `ARCHITECTURE.md` holds the data-flow diagram and the full **Core invariants** list — read it before touching membrane/transport code; this file only adds what that doesn't, the conventions and traps that are expensive to rediscover.
+ZeroProxy is a **human-in-the-loop** virtual-browsing privacy membrane: a real person drives a real browser, and target traffic egresses only through `Service Worker → Go WASM kernel → WebSocket/yamux → SOCKS5 → uTLS`.
 
 ## Membrane/protocol refactor discipline (load-bearing)
 
