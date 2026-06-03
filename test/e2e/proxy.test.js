@@ -3706,6 +3706,23 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const proxyRawDiff = await readDifferential(page);
   const proxyDiff = comparableDifferential(proxyRawDiff);
   assert.deepEqual(await readFingerprintReport(page), proxyRawDiff.surface.fingerprint);
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const out = {};
+      for (const name of ['setTimeout', 'setInterval']) {
+        const descriptor = Object.getOwnPropertyDescriptor(window, name);
+        Object.defineProperty(window, name, {
+          value: descriptor.value,
+          enumerable: descriptor.enumerable,
+          configurable: descriptor.configurable,
+          writable: descriptor.writable,
+        });
+        out[name] = Object.getOwnPropertyDescriptor(window, name).configurable;
+      }
+      return out;
+    }),
+    { setTimeout: true, setInterval: true },
+  );
   assert.equal(proxyDiff.surface.workerRealm.imported.loaded, true);
   assert.ok(
     requests.some((r) => r.url === '/worker-imported-fixture.js' && r.userAgent === TARGET_UA),

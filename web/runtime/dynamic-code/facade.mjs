@@ -189,12 +189,12 @@ export function createDynamicCodeFacade({
     defineReplacingNative(root, 'Function', dynamicFunction);
     installDynamicConstructorBackrefs();
     if (Native.setTimeout) {
-      define(root, 'setTimeout', function(handler, delay, ...args) {
+      defineReplacingNative(root, 'setTimeout', function(handler, delay, ...args) {
         return Native.setTimeout(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args);
       });
     }
     if (Native.setInterval) {
-      define(root, 'setInterval', function(handler, delay, ...args) {
+      defineReplacingNative(root, 'setInterval', function(handler, delay, ...args) {
         return Native.setInterval(typeof handler === 'string' ? compileTimerString(handler) : handler, delay, ...args);
       });
     }
