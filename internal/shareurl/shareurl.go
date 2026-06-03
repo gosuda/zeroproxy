@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -15,6 +14,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/gosuda/zeroproxy/internal/randbuf"
 )
 
 var (
@@ -34,7 +35,7 @@ const (
 // same AES-256-CBC + HMAC-SHA256 envelope as web/zp-core.js, carrying explicit
 // relay server parameters.
 func NewWithServers(target string, servers []string) (string, error) {
-	return NewWithRandAndServers(rand.Reader, target, servers)
+	return NewWithRandAndServers(randbuf.Reader, target, servers)
 }
 
 func NewWithRand(random io.Reader, target string) (string, error) {

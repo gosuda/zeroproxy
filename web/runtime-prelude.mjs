@@ -63,6 +63,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   const documentCharset = String(boot.documentCharset || '');
   const dynamicCompileAllowed = boot.dynamicCompileAllowed === true;
   const urlMeta = new WeakMap();
+  const navShareVersions = new WeakMap();
   const messageListenerWrappers = new WeakMap();
   const frameWindowOrigins = new WeakMap();
   const frameSandboxMeta = new WeakMap();
@@ -318,6 +319,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function shareFragmentForKey(key) { return ZP.makeShareFragment(String(key), activeServers); }
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
+  function isControlURL(raw) {
+    const value = String(raw || '').trim();
+    return value.startsWith(ZP.CONTROL_PREFIX) || value.startsWith(proxyOrigin + ZP.CONTROL_PREFIX);
+  }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
   function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
   function shouldBlockURLAttribute(el, key, raw) {
@@ -1749,6 +1754,29 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function visibleNavigationURL(el, attrName) {
     return Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || Native.getAttribute.call(el, attrName) || '';
   }
+  function isShareNavigationAttribute(el, attrName) {
+    const tag = el && el.localName;
+    return attrLocalName(attrName) === 'href' && (tag === 'a' || tag === 'area');
+  }
+  function bumpNavigationShareVersion(el) {
+    const version = (navShareVersions.get(el) || 0) + 1;
+    navShareVersions.set(el, version);
+    return version;
+  }
+  function scheduleNavigationShareURL(el, attrName, target) {
+    if (!isShareNavigationAttribute(el, attrName)) return;
+    const version = bumpNavigationShareVersion(el);
+    ZP.encryptShareURL(target).then(share => {
+      if (navShareVersions.get(el) !== version) return;
+      if ((Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || '') !== target) return;
+      const href = `${ZP.makeSharePath(share.encrypted)}${shareFragmentForKey(share.key)}`;
+      if (Native.getAttribute.call(el, attrName) !== href) Native.setAttribute.call(el, attrName, href);
+    }).catch(() => {});
+  }
+  function rememberNavigationTarget(el, target) {
+    urlMeta.set(el, target);
+    if (Native.getAttribute.call(el, 'data-zp-target-url') !== target) Native.setAttribute.call(el, 'data-zp-target-url', target);
+  }
   function visibleSrcset(el) {
     const stored = Native.getAttribute.call(el, 'data-zp-target-srcset');
     if (stored) return stored;
@@ -2392,10 +2420,11 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v);
     if (isURLBearing(this, key)) {
       if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
+      if (isControlURL(v)) return Native.setAttribute.call(this, k, v);
       if (isHTTPURL(v)) {
         const t = targetURL(v);
-        urlMeta.set(this, t);
-        if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
+        rememberNavigationTarget(this, t);
+        scheduleNavigationShareURL(this, k, t);
         if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
           setFrameSourceAttribute(this, k, t);
           return;
@@ -2425,10 +2454,11 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (isResourceURLAttribute(this, key)) return setResourceURLAttribute(this, k, v, ns);
     if (isURLBearing(this, key)) {
       if (shouldBlockURLAttribute(this, localKey, v)) return blockExecutableURL(this, localKey, v);
+      if (isControlURL(v)) return Native.setAttributeNS.call(this, ns, k, v);
       if (isHTTPURL(v)) {
         const t = targetURL(v);
-        urlMeta.set(this, t);
-        if (!usesRawURLAttribute(this, key)) Native.setAttribute.call(this, 'data-zp-target-url', t);
+        rememberNavigationTarget(this, t);
+        scheduleNavigationShareURL(this, k, t);
         if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
           setFrameSourceAttribute(this, k, t, ns);
           return;
@@ -2529,6 +2559,11 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return ret;
     }
     if (isResourceURLAttribute(this, key)) {
+      urlMeta.delete(this);
+      Native.removeAttribute.call(this, 'data-zp-target-url');
+    }
+    if (isURLBearing(this, key) && usesRawURLAttribute(this, key)) {
+      bumpNavigationShareVersion(this);
       urlMeta.delete(this);
       Native.removeAttribute.call(this, 'data-zp-target-url');
     }
@@ -3081,16 +3116,16 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (!isURLBearing(el, key)) return;
     const raw = Native.getAttribute.call(el, key);
     if (shouldBlockURLAttribute(el, localKey, raw)) { blockExecutableURL(el, localKey, raw); return; }
-    if (!raw || !isHTTPURL(raw) || String(raw).startsWith(proxyOrigin)) return;
+    if (!raw || !isHTTPURL(raw) || isControlURL(raw) || String(raw).startsWith(proxyOrigin)) return;
     if (isResourceURLAttribute(el, key)) {
       if (!Native.getAttribute.call(el, 'data-zp-target-url')) setResourceURLAttribute(el, key, raw);
       return;
     }
     let target;
     try { target = targetURL(raw); } catch { return; }
-    const alreadyMapped = urlMeta.get(el) === target && (!usesRawURLAttribute(el, key) ? Native.getAttribute.call(el, 'data-zp-target-url') === target : true);
-    urlMeta.set(el, target);
-    if (!usesRawURLAttribute(el, key)) Native.setAttribute.call(el, 'data-zp-target-url', target);
+    const alreadyMapped = urlMeta.get(el) === target && Native.getAttribute.call(el, 'data-zp-target-url') === target;
+    rememberNavigationTarget(el, target);
+    scheduleNavigationShareURL(el, key, target);
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'src') {
       sanitizeFrameSandbox(el);
       setFrameSourceAttribute(el, key, target);

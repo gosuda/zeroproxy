@@ -3,7 +3,6 @@ package wsproto
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gosuda/zeroproxy/internal/randbuf"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
 )
 
@@ -49,7 +49,7 @@ func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols
 		return nil, nil, err
 	}
 	keyBytes := make([]byte, 16)
-	if _, err := rand.Read(keyBytes); err != nil {
+	if err := randbuf.ReadFull(keyBytes); err != nil {
 		_ = c.Close()
 		return nil, nil, err
 	}
@@ -155,7 +155,7 @@ func (c *Conn) WriteFrame(op byte, payload []byte) error {
 		n = 10
 	}
 	var mask [4]byte
-	if _, err := rand.Read(mask[:]); err != nil {
+	if err := randbuf.ReadFull(mask[:]); err != nil {
 		return err
 	}
 	copy(hdr[n:], mask[:])

@@ -105,6 +105,11 @@ function createTargetServer(requests) {
           dynamicImage.id = 'dynamic-image-probe';
           dynamicImage.src = '/image-probe.png?dynamic=1';
           document.body.appendChild(dynamicImage);
+          const dynamicRelativeLink = document.createElement('a');
+          dynamicRelativeLink.id = 'dynamic-relative-next';
+          dynamicRelativeLink.setAttribute('href', '/next');
+          dynamicRelativeLink.textContent = 'Dynamic next page';
+          document.body.appendChild(dynamicRelativeLink);
           const dynamicCSP = document.createElement('meta');
           dynamicCSP.setAttribute('http-equiv', 'Content-Security-Policy');
           dynamicCSP.setAttribute('content', "default-src 'none'");
@@ -1623,6 +1628,16 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       platform: navigator.platform,
       userAgentData,
       templateLink: window.__templateLinkFixture,
+      dynamicRelativeLink: (() => {
+        const el = document.getElementById('dynamic-relative-next');
+        return (
+          el && {
+            href: el.getAttribute('href'),
+            hrefProp: el.href,
+            outerHTML: el.outerHTML,
+          }
+        );
+      })(),
       phase2Location: window.__phase2Location,
       phase2DynamicFunction: window.__phase2DynamicFunction,
       phase2EvalLocation: window.__phase2EvalLocation,
@@ -1824,6 +1839,45 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(addressBarShare, relayServerParam);
   const staticNextHref = await page.$eval('#next', (el) => el.getAttribute('href') || '');
   assert.equal(staticNextHref, `http://${targetHost}:${targetPort}/next`);
+  assert.deepEqual(home.dynamicRelativeLink, {
+    href: `http://${targetHost}:${targetPort}/next`,
+    hrefProp: `http://${targetHost}:${targetPort}/next`,
+    outerHTML: `<a id="dynamic-relative-next" href="http://${targetHost}:${targetPort}/next">Dynamic next page</a>`,
+  });
+  const rawDynamicRelativeLink = await (async () => {
+    const client = await page.target().createCDPSession();
+    const deadline = Date.now() + 5000;
+    let last = null;
+    while (Date.now() < deadline) {
+      const snap = await client.send('DOMSnapshot.captureSnapshot', {
+        computedStyles: [],
+        includeDOMRects: false,
+        includePaintOrder: false,
+      });
+      const strings = snap.strings;
+      for (const doc of snap.documents) {
+        const attrs = doc.nodes.attributes || [];
+        for (const nodeAttrs of attrs) {
+          const pairs = {};
+          for (let i = 0; i < (nodeAttrs || []).length; i += 2) {
+            pairs[strings[nodeAttrs[i]]] = strings[nodeAttrs[i + 1]];
+          }
+          if (pairs.id === 'dynamic-relative-next') {
+            last = pairs;
+            if (/^\/zp\/p\//.test(pairs.href || '')) return pairs;
+          }
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return last;
+  })();
+  assert.match(rawDynamicRelativeLink && rawDynamicRelativeLink.href || '', /^\/zp\/p\//);
+  assert.match(rawDynamicRelativeLink && rawDynamicRelativeLink.href || '', /#k=/);
+  assert.equal(
+    rawDynamicRelativeLink && rawDynamicRelativeLink['data-zp-target-url'],
+    `http://${targetHost}:${targetPort}/next`,
+  );
   const externalContext = await (browser.createBrowserContext
     ? browser.createBrowserContext()
     : browser.createIncognitoBrowserContext());

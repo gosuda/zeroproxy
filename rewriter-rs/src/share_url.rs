@@ -4,7 +4,9 @@ use base64::Engine;
 use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::io::{self, BufReader, Read};
 use std::net::IpAddr;
 use url::Url;
 
@@ -19,11 +21,35 @@ const MAX_RELAY_SERVERS: usize = 8;
 const MAX_RELAY_SERVER_BYTES: usize = 2048;
 const SEED_LEN: usize = 64;
 const IV_LEN: usize = 16;
+const RANDOM_BUFFER_SIZE: usize = 32 * 1024;
+
+thread_local! {
+    static RANDOM_READER: RefCell<BufReader<GetRandomReader>> =
+        RefCell::new(BufReader::with_capacity(RANDOM_BUFFER_SIZE, GetRandomReader));
+}
+
+struct GetRandomReader;
+
+impl Read for GetRandomReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        getrandom::getrandom(buf).map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(buf.len())
+    }
+}
 
 pub(crate) fn new_with_servers(target: &str, servers: &[String]) -> Result<String, String> {
     let mut random = [0u8; SEED_LEN + IV_LEN];
-    getrandom::getrandom(&mut random).map_err(|err| err.to_string())?;
+    fill_random(&mut random)?;
     new_with_seed_iv_and_servers(target, servers, &random[..SEED_LEN], &random[SEED_LEN..])
+}
+
+fn fill_random(buf: &mut [u8]) -> Result<(), String> {
+    RANDOM_READER.with(|reader| {
+        reader
+            .borrow_mut()
+            .read_exact(buf)
+            .map_err(|err| err.to_string())
+    })
 }
 
 pub(crate) fn new_with_seed_iv_and_servers(

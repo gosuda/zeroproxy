@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/headers"
 	"github.com/gosuda/zeroproxy/internal/htmltx"
+	"github.com/gosuda/zeroproxy/internal/randbuf"
 	"github.com/gosuda/zeroproxy/internal/smuxconn"
 	"github.com/gosuda/zeroproxy/internal/swhttp"
 	"github.com/gosuda/zeroproxy/internal/wsconn"
@@ -527,7 +527,7 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 	key, _ := base64.RawURLEncoding.DecodeString(keyB64)
 	if len(key) == 0 {
 		key = make([]byte, 32)
-		_, _ = rand.Read(key)
+		_ = randbuf.ReadFull(key)
 	}
 	t := &zphttp.TabState{TabID: tabID, CookieJar: cookiejar.New(), StreamIsolationKey: key}
 	k.tabs[tabID] = t
