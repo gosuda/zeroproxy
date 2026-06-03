@@ -1087,6 +1087,19 @@
       promise.finally(() => { try { (Native.revokeObjectURL || URL.revokeObjectURL).call(URL, url); } catch {} });
       return promise;
     });
+    // `_REWRITTEN` variants take code that zp-htmltx already rewrote — they
+    // skip the page-side rewriter entirely. NAVER ships ~200KB + ~150KB
+    // EAGER-DATA inline scripts; rewriting them twice (SW + page) wedged the
+    // main thread for tens of seconds. SW already pays the OXC cost during
+    // HTML transform, so the page just executes the result.
+    define(root, '__ZP_EXEC_INLINE_REWRITTEN', code => Native.FunctionCtor(String(code || '')).call(root));
+    define(root, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', code => {
+      const blob = new Blob([String(code || '')], { type: 'text/javascript' });
+      const url = Native.createObjectURL ? Native.createObjectURL(blob) : URL.createObjectURL(blob);
+      const promise = import(url);
+      promise.finally(() => { try { (Native.revokeObjectURL || URL.revokeObjectURL).call(URL, url); } catch {} });
+      return promise;
+    });
     define(root, '__ZP_EXEC_EVENT', (selfValue, event, source) => Native.FunctionCtor('event', rewriteWithPageRewriter(source, 'event-handler')).call(selfValue, event));
     define(root, 'eval', dynamicEval);
     define(root, 'Function', dynamicFunction);
@@ -2523,7 +2536,7 @@
     return kind === 'module' ? '__ZP_EXEC_INLINE_MODULE(' + payload + ');' : '__ZP_EXEC_INLINE_SCRIPT(' + payload + ');';
   }
   function isPreparedInlineScript(text) {
-    return /^__ZP_EXEC_INLINE_(?:SCRIPT|MODULE)\(/.test(String(text || '').trim());
+    return /^__ZP_EXEC_INLINE_(?:SCRIPT|MODULE|REWRITTEN|REWRITTEN_MODULE)\(/.test(String(text || '').trim());
   }
   function prepareScriptElement(el) {
     if (!el || el.localName !== 'script') return;
@@ -3246,6 +3259,16 @@
     if (childFunction) {
       const childExecInline = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic'))).call(w);
       const childExecModule = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'module'))).call(w);
+      // `_REWRITTEN` variants: code already rewritten by zp-htmltx — execute
+      // directly in the child realm without going through the page rewriter.
+      const childExecRewritten = code => (new childFunction(String(code || ''))).call(w);
+      const childExecRewrittenModule = code => {
+        const blob = new (w.Blob || Blob)([String(code || '')], { type: 'text/javascript' });
+        const url = (w.URL && w.URL.createObjectURL || URL.createObjectURL).call(w.URL || URL, blob);
+        const p = w.eval ? w.eval('import(' + JSON.stringify(url) + ')') : import(url);
+        Promise.resolve(p).finally(() => { try { (w.URL && w.URL.revokeObjectURL || URL.revokeObjectURL).call(w.URL || URL, url); } catch {} });
+        return p;
+      };
       // External script loader for iframe. SW only controls top-level (parent)
       // — `document.write` 가 iframe 의 about:blank document 를 reset 한 뒤에는
       // 자식이 SW client 자격을 잃어 `<script src=ext>` fetch 가 SW 우회 직행 → Go
@@ -3255,10 +3278,14 @@
       const childLoadExternal = (url, kind) => Native.fetch(scriptProxyPath(String(url || ''), String(kind || 'classic'))).then(r => r.text()).then(code => { (new childFunction(code)).call(w); });
       if (!define(w, '__ZP_EXEC_INLINE_SCRIPT', childExecInline)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_MODULE', childExecModule)) throw normalizedError('SecurityError');
+      if (!define(w, '__ZP_EXEC_INLINE_REWRITTEN', childExecRewritten)) throw normalizedError('SecurityError');
+      if (!define(w, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', childExecRewrittenModule)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_LOAD_EXTERNAL_SCRIPT', childLoadExternal)) throw normalizedError('SecurityError');
     } else {
       if (root.__ZP_EXEC_INLINE_SCRIPT && !define(w, '__ZP_EXEC_INLINE_SCRIPT', root.__ZP_EXEC_INLINE_SCRIPT)) throw normalizedError('SecurityError');
       if (root.__ZP_EXEC_INLINE_MODULE && !define(w, '__ZP_EXEC_INLINE_MODULE', root.__ZP_EXEC_INLINE_MODULE)) throw normalizedError('SecurityError');
+      if (root.__ZP_EXEC_INLINE_REWRITTEN && !define(w, '__ZP_EXEC_INLINE_REWRITTEN', root.__ZP_EXEC_INLINE_REWRITTEN)) throw normalizedError('SecurityError');
+      if (root.__ZP_EXEC_INLINE_REWRITTEN_MODULE && !define(w, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', root.__ZP_EXEC_INLINE_REWRITTEN_MODULE)) throw normalizedError('SecurityError');
     }
     if (root.__ZP_EXEC_EVENT && !define(w, '__ZP_EXEC_EVENT', root.__ZP_EXEC_EVENT)) throw normalizedError('SecurityError');
     if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');

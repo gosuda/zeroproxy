@@ -296,26 +296,33 @@ fn rewrite_inline_script_bodies(
                         if let Some(kind) = *kind_for_end.borrow() {
                             let src = buf_for_end.borrow().clone();
                             buf_for_end.borrow_mut().clear();
-                            // Validate strict-mode parseability with the rewriter,
-                            // but DO NOT emit the rewritten code here. runtime-prelude's
-                            // prepareScriptElement wraps the (untouched) source in
-                            // __ZP_EXEC_INLINE_SCRIPT(<source>) and the runtime
-                            // rewriter rewrites it at execution time. Emitting
-                            // already-rewritten code here causes a DOUBLE rewrite
-                            // (prelude wraps it then rewrites again, mangling
-                            // __zp_get(...) calls into __zp_get(__zp_get(...))).
-                            // See .ai/trap-notebook/rewriter.md (2026-05-29 double rewrite).
+                            // Emit the rewriter's output directly, wrapped in
+                            // `__ZP_EXEC_INLINE_REWRITTEN(<code>)` which the prelude
+                            // executes WITHOUT going through the page-side rewriter
+                            // again. NAVER's main page ships ~200KB + ~150KB
+                            // EAGER-DATA inline scripts; rewriting them twice
+                            // (once here, once in prelude) wedges the main thread
+                            // for tens of seconds. The `_REWRITTEN` wrapper is the
+                            // single-rewrite path — its prelude handler is a thin
+                            // `Native.FunctionCtor(code)` call. Dynamic injection
+                            // (createElement('script').textContent = …) still
+                            // uses `__ZP_EXEC_INLINE_SCRIPT(<source>)` because the
+                            // page only sees raw source at that point.
+                            // Trap-notebook (2026-05-29 double rewrite) describes
+                            // the historical reason this was a re-rewrite loop;
+                            // the new wrapper sidesteps it by NOT going through
+                            // `rewriteWithPageRewriter` on the prelude side.
                             let opts = RewriteOpts {
                                 kind,
                                 target_url: target_for_end.clone(),
                                 strict,
                             };
                             let replacement = match rewrite_script(&src, &opts) {
-                                Ok(_) => {
-                                    let payload = inline_script_payload(&src);
+                                Ok(r) => {
+                                    let payload = inline_script_payload(&r.code);
                                     let wrapper_name = match kind {
-                                        ScriptKind::Module => "__ZP_EXEC_INLINE_MODULE",
-                                        _ => "__ZP_EXEC_INLINE_SCRIPT",
+                                        ScriptKind::Module => "__ZP_EXEC_INLINE_REWRITTEN_MODULE",
+                                        _ => "__ZP_EXEC_INLINE_REWRITTEN",
                                     };
                                     format!("{}({});", wrapper_name, payload)
                                 }
@@ -330,7 +337,13 @@ fn rewrite_inline_script_bodies(
                                     }
                                 }
                             };
-                            chunk.before(&replacement, ContentType::Text);
+                            // ContentType::Html → raw passthrough (no HTML
+                            // escaping). The browser parses <script> bodies as
+                            // raw text and does NOT entity-decode them, so any
+                            // `&` we let lol_html turn into `&amp;` lands
+                            // verbatim in the JS source and produces
+                            // SyntaxError: Unexpected token '&'.
+                            chunk.before(&replacement, ContentType::Html);
                         }
                     }
                     Ok(())
@@ -650,16 +663,23 @@ mod tests {
     fn inline_script_rewrites_location() {
         let html = "<html><body><script>var u = location.href;</script></body></html>";
         let r = transform(html, &opts()).unwrap();
-        // zp-htmltx wraps the inline body in __ZP_EXEC_INLINE_SCRIPT(<raw>);
-        // runtime-prelude rewrites at execution time. Verify wrap + raw payload.
+        // zp-htmltx now wraps the *rewritten* inline body in
+        // __ZP_EXEC_INLINE_REWRITTEN(<rewritten>) — prelude executes without
+        // re-rewriting. Verify the wrapper is present and the payload contains
+        // membrane calls, not the raw `location.href` access.
         assert!(
-            r.html.contains("__ZP_EXEC_INLINE_SCRIPT("),
+            r.html.contains("__ZP_EXEC_INLINE_REWRITTEN("),
             "wrap missing: {}",
             r.html
         );
         assert!(
-            r.html.contains("var u = location.href"),
-            "raw payload missing: {}",
+            r.html.contains("__zp_get"),
+            "rewritten payload missing: {}",
+            r.html
+        );
+        assert!(
+            !r.html.contains("var u = location.href"),
+            "raw source must not survive — leak: {}",
             r.html
         );
     }
@@ -712,15 +732,15 @@ mod tests {
     fn module_script_rewrites_window() {
         let html = "<script type=\"module\">import x from './m.js'; use(window);</script>";
         let r = transform(html, &opts()).unwrap();
-        // Wrap in __ZP_EXEC_INLINE_MODULE; runtime rewrites the body.
+        // Wrap in __ZP_EXEC_INLINE_REWRITTEN_MODULE with the rewritten body.
         assert!(
-            r.html.contains("__ZP_EXEC_INLINE_MODULE("),
+            r.html.contains("__ZP_EXEC_INLINE_REWRITTEN_MODULE("),
             "module wrap missing: {}",
             r.html
         );
         assert!(
-            r.html.contains("use(window)"),
-            "raw payload missing: {}",
+            r.html.contains("__zp_get"),
+            "rewritten payload missing: {}",
             r.html
         );
     }
