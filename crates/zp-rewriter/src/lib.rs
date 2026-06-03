@@ -684,8 +684,33 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if matches!(expr.object, Expression::Super(_)) {
             return;
         }
+        // If the receiver is a bare identifier that's bound in the current
+        // lexical scope (function param, destructured param, var/let/const,
+        // catch parameter), the access is *local* and the membrane rewrite
+        // would change semantics. `function f(location){ return location.href; }`
+        // must remain `location.href`, not `__zp_get(location, "href")` —
+        // the param shadows the global. The visit_identifier_reference path
+        // already honours `is_shadowed` for the receiver; mirror that here
+        // so the dangerous-member detection doesn't override the shadowing.
+        if let Expression::Identifier(recv) = &expr.object {
+            if self.is_shadowed(recv.name.as_str()) {
+                return;
+            }
+        }
         let prop = expr.property.name.as_str();
         if is_dangerous_member(prop) {
+            // Note: we intentionally keep the inner identifier patch that
+            // visit_identifier_reference may have emitted for the receiver.
+            // `apply_patches` sorts overlapping patches outer-first into
+            // `chosen` and drops the inner one from the apply set, but the
+            // `MEMBER_GET` marker resolver re-runs `rewrite_range` over the
+            // receiver substring — that step picks the inner identifier
+            // patch back up so a `location.href` read renders as
+            // `__zp_get(__zp_get(globalThis,"location"),"href")` and an
+            // `obj.href = v` assignment uses the rewritten receiver inside
+            // the `__zp_set` call. Draining the inner patch here would strip
+            // the receiver back to the bare source slice and break the
+            // `javascript_url_anchor_routed` contract in zp-htmltx.
             // Record the textual span of the object so we can splice it as the
             // first arg to __zp_get(obj, 'name'). We don't have the source
             // string here; we record the object span and the visitor's caller
@@ -1028,12 +1053,18 @@ mod tests {
         }
         src.push_str("var u = location.href;\n");
         let r = rewrite_script(&src, &opts()).unwrap();
-        // Only one patch (the `location` reference) should be emitted.
-        // The rest of the source flows through unchanged via apply_patches.
+        // Exactly the two patches the changed region requires: the bare
+        // `location` identifier (global-get patch, recursively applied
+        // inside the receiver substring by apply_patches' `rewrite_range`)
+        // and the outer `location.href` member access (MEMBER_GET marker,
+        // chosen for emission). 200 unchanged `function a(){…}` lines
+        // contribute zero patches — exercise the patch-mode contract that
+        // the rewriter does not re-emit clean source.
         assert_eq!(
             r.patches.len(),
-            1,
-            "patch-mode should emit only changed regions"
+            2,
+            "patch-mode should emit only changed regions, got {} patches",
+            r.patches.len()
         );
     }
 
