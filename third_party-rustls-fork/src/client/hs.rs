@@ -373,6 +373,24 @@ fn emit_client_hello_for_retry(
     // `contiguous_extensions`, so if we list every extension we set here,
     // the random pool becomes empty and the encoding order *is* our list.
     apply_chrome_ja3_shape(&mut exts);
+    // Phase 5.10 follow-up (2026-06-03 gosuda.org regression):
+    // `apply_chrome_ja3_shape` may have written an ECH GREASE outer
+    // hello extension into `exts.encrypted_client_hello`. If we leave
+    // `cx.data.ech_status` at `NotOffered`, a server that responds
+    // with an ECH-aware `encrypted_client_hello_ack` (Cloudflare's
+    // edge does this for any ECH attempt — failed-decrypt → retry
+    // configs in the EE) is treated as misbehaving and rustls aborts
+    // the handshake with `UnsolicitedEchExtension`. Real Chrome marks
+    // its own GREASE attempts as `EchStatus::Grease` so the same EE
+    // is silently dropped (the retry-config path is only taken on a
+    // genuine ECH `Rejected` status). Mirror that — the GREASE-bit
+    // check matches `apply_chrome_ja3_shape`'s precondition
+    // (`exts.encrypted_client_hello.is_none()`), so a real
+    // `EchMode::Enable` config that populated the field earlier
+    // never reaches this branch.
+    if exts.encrypted_client_hello.is_some() && cx.data.ech_status == EchStatus::NotOffered {
+        cx.data.ech_status = EchStatus::Grease;
+    }
 
     let mut cipher_suites: Vec<_> = config
         .provider

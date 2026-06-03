@@ -47,7 +47,7 @@ httparse = "1"
 # rustls-rustcrypto (pure-Rust, WASM-friendly). `ring` and `aws-lc-rs`
 # either fail to compile on wasm32-unknown-unknown or pull in C/asm code
 # the WASM linker rejects, so they're not options.
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "brotli", "zlib"] }
 # `web` feature gives UnixTime::now() via web-time on wasm32-unknown-unknown.
 # Without it rustls's default TimeProvider fails to compile against pki-types.
 rustls-pki-types = { version = "1", features = ["web"] }
