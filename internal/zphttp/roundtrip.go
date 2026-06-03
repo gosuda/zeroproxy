@@ -171,7 +171,7 @@ func (e *Engine) roundTripHTTP2(ctx context.Context, hc *h2Conn, wireReq *http.R
 }
 
 // DialTarget opens a single target TCP/TLS connection through the required
-// WebSocket → yamux → Tor SOCKS5 DOMAINNAME path. It never uses net.Dial or
+// WebSocket → smux → Tor SOCKS5 DOMAINNAME path. It never uses net.Dial or
 // http.Transport for target egress. The exported path remains HTTP/1.1-only so
 // WebSocket upgrade callers never negotiate h2 accidentally.
 func (e *Engine) DialTarget(ctx context.Context, target *url.URL, tab *TabState) (net.Conn, error) {

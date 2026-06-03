@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/gosuda/zeroproxy/internal/yamuxconn"
+	"github.com/gosuda/zeroproxy/internal/smuxconn"
 )
 
 type server struct {
@@ -210,7 +210,7 @@ func (s *server) handlePipe(w http.ResponseWriter, r *http.Request) {
 	}
 	conn := newWebSocketNetConn(c)
 	defer conn.Close()
-	sess, err := yamuxconn.Server(conn)
+	sess, err := smuxconn.Server(conn)
 	if err != nil {
 		_ = conn.Close()
 		return
@@ -296,7 +296,7 @@ type addr string
 func (a addr) Network() string { return "websocket" }
 func (a addr) String() string  { return string(a) }
 
-func (s *server) acceptStreams(ctx context.Context, sess *yamuxconn.Session) {
+func (s *server) acceptStreams(ctx context.Context, sess *smuxconn.Session) {
 	defer sess.Close()
 	for {
 		stream, err := sess.Accept(ctx)

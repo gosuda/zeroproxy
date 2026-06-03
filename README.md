@@ -25,7 +25,7 @@ ZeroProxy loads the target page inside its own controlled origin, prepares the
 page before it runs, and routes network traffic through:
 
 ```text
-Service Worker -> Go WASM kernel -> WebSocket/yamux -> SOCKS5 -> uTLS
+Service Worker -> Go WASM kernel -> WebSocket/smux -> SOCKS5 -> uTLS
 ```
 
 For local development, the built-in SOCKS mode exercises the same browser
@@ -95,7 +95,7 @@ Use the npm scripts instead of invoking `node --test` directly.
 | `web/` | Browser shell, Service Worker, runtime membrane, worker prelude. |
 | `rewriter-rs/` | Rust WASM HTML/CSS/JS/import-map rewriter. |
 | `cmd/wasm-kernel/` | Go WASM transport kernel. |
-| `cmd/zeroproxy-server/` | Static asset server and WebSocket/yamux relay. |
+| `cmd/zeroproxy-server/` | Static asset server and WebSocket/smux relay. |
 | `internal/htmltx/` | Thin Go adapter into the Rust HTML rewriter. |
 | `internal/zphttp/`, `internal/socks5/`, `internal/wsproto/` | Target transport path. |
 | `test/js/`, `test/e2e/` | Policy, build, runtime, and browser compatibility tests. |

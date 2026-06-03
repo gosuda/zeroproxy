@@ -20,10 +20,10 @@ import (
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/headers"
 	"github.com/gosuda/zeroproxy/internal/htmltx"
+	"github.com/gosuda/zeroproxy/internal/smuxconn"
 	"github.com/gosuda/zeroproxy/internal/swhttp"
 	"github.com/gosuda/zeroproxy/internal/wsconn"
 	"github.com/gosuda/zeroproxy/internal/wsproto"
-	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
 	"golang.org/x/net/html/charset"
 )
@@ -66,7 +66,7 @@ func (k *Kernel) ensure(ctx context.Context, servers []string) error {
 	if err != nil {
 		return err
 	}
-	sess, err := yamuxconn.Client(conn)
+	sess, err := smuxconn.Client(conn)
 	if err != nil {
 		_ = conn.Close()
 		return err
