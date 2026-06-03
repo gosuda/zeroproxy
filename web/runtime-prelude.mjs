@@ -1448,11 +1448,24 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         if (xhr.readyState !== UNSENT && xhr.readyState !== OPENED || xhr._sent) throw normalizedError('InvalidStateError');
         xhr._withCredentials = !!value;
       }
+      function syncXHRAllowed() {
+        const doc = root.document;
+        const policy = doc && (doc.permissionsPolicy || doc.featurePolicy);
+        if (!policy || typeof policy.allowsFeature !== 'function') return true;
+        try { return policy.allowsFeature('sync-xhr'); } catch { return true; }
+      }
+      function failSyncXHR(xhr) {
+        xhr.status = 0;
+        xhr.statusText = '';
+        xhr._sent = false;
+        xhrDone(xhr, 'error');
+      }
       function sendSyncXHR(xhr, body) {
         if (xhr._timeout) throw normalizedError('InvalidAccessError');
         if (xhr._responseType && xhr._responseType !== 'text') throw normalizedError('InvalidAccessError');
         xhr._sent = true;
         fireEvent(xhr, 'loadstart');
+        if (!syncXHRAllowed()) return failSyncXHR(xhr);
         const nativeXHR = new Native.XMLHttpRequest();
         const internal = isZeroProxyAssetURL(xhr._url);
         nativeXHR.open(xhr._method, internal ? xhr._url : `${ZP.apiPath('fetch')}?url=${encodeURIComponent(xhr._url)}`, false);
@@ -1484,12 +1497,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
           if (xhr._responseType === 'document') xhr.response = xhr.responseXML;
           xhr._sent = false;
           xhrDone(xhr, 'load');
-        } catch {
-          xhr.status = 0;
-          xhr.statusText = '';
-          xhr._sent = false;
-          xhrDone(xhr, 'error');
-        }
+        } catch { failSyncXHR(xhr); }
       }
       Object.defineProperties(ZPXMLHttpRequest.prototype, {
         [Symbol.toStringTag]: { value: 'XMLHttpRequest', configurable: true },

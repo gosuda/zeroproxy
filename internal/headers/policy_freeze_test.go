@@ -18,6 +18,7 @@ func TestConstructorPolicyStripsFullHiddenSet(t *testing.T) {
 	strip := []string{
 		"Set-Cookie", "Set-Cookie2",
 		"Content-Security-Policy", "Content-Security-Policy-Report-Only",
+		"Permissions-Policy", "Feature-Policy",
 		"Report-To", "Reporting-Endpoints", "NEL",
 		"Service-Worker-Allowed",
 		"SourceMap", "X-SourceMap",
@@ -140,7 +141,8 @@ func TestConstructorPolicyStripsLocationAndHopByHop(t *testing.T) {
 func TestHiddenHeaderTableOracle(t *testing.T) {
 	hiddenTrue := []string{
 		"set-cookie", "SET-COOKIE2", "content-security-policy",
-		"content-security-policy-report-only", "report-to", "reporting-endpoints",
+		"content-security-policy-report-only", "permissions-policy", "feature-policy",
+		"report-to", "reporting-endpoints",
 		"nel", "service-worker-allowed", "sourcemap", "x-sourcemap",
 		"alt-svc", "link", "refresh", "clear-site-data",
 		// hop-by-hop

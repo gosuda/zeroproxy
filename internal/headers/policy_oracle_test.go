@@ -86,6 +86,8 @@ func policyOracleCorpus() []policyOracleCase {
 				// stripped:
 				"Set-Cookie":              {"sid=1; Path=/"},
 				"Content-Security-Policy": {"default-src 'self'"},
+				"Permissions-Policy":      {"sync-xhr=()"},
+				"Feature-Policy":          {"sync-xhr 'none'"},
 				"Location":                {"https://target.example/next"},
 				"Alt-Svc":                 {"h3=\":443\""},
 				"Connection":              {"keep-alive"},

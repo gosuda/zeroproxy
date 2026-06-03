@@ -6,9 +6,9 @@ import (
 )
 
 func TestConstructorPolicyStripsForbiddenHeaders(t *testing.T) {
-	h := http.Header{"Set-Cookie": {"a=b"}, "Content-Security-Policy": {"default-src *"}, "Location": {"https://target/"}, "Alt-Svc": {"h3=\":443\""}, "Content-Type": {"text/html"}, "Content-Length": {"10"}}
+	h := http.Header{"Set-Cookie": {"a=b"}, "Content-Security-Policy": {"default-src *"}, "Permissions-Policy": {"sync-xhr=()"}, "Location": {"https://target/"}, "Alt-Svc": {"h3=\":443\""}, "Content-Type": {"text/html"}, "Content-Length": {"10"}}
 	out := ConstructorPolicy(h, true, false)
-	for _, name := range []string{"Set-Cookie", "Content-Security-Policy", "Location", "Alt-Svc", "Content-Length"} {
+	for _, name := range []string{"Set-Cookie", "Content-Security-Policy", "Permissions-Policy", "Location", "Alt-Svc", "Content-Length"} {
 		if out.Get(name) != "" {
 			t.Fatalf("%s leaked: %#v", name, out)
 		}

@@ -753,7 +753,9 @@ function createTargetServer(requests) {
               return {
                 text: await policyHeaders.text(),
                 csp: policyHeaders.headers.get('Content-Security-Policy') || '',
-                reportOnly: policyHeaders.headers.get('Content-Security-Policy-Report-Only') || ''
+                reportOnly: policyHeaders.headers.get('Content-Security-Policy-Report-Only') || '',
+                permissionsPolicy: policyHeaders.headers.get('Permissions-Policy') || '',
+                featurePolicy: policyHeaders.headers.get('Feature-Policy') || ''
               };
             })(), 'policy-headers');
             const redirected = await fetch('/redirect302?diff=1', { cache: 'no-store' });
@@ -1109,6 +1111,8 @@ function createTargetServer(requests) {
         'Cache-Control': 'no-store',
         'Content-Security-Policy': "default-src 'none'; script-src 'none'",
         'Content-Security-Policy-Report-Only': "default-src 'none'; connect-src 'none'",
+        'Permissions-Policy': 'sync-xhr=()',
+        'Feature-Policy': "sync-xhr 'none'",
       });
       res.end('policy-header-ok');
       return;

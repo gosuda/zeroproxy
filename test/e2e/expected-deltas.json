@@ -7,6 +7,14 @@
     "policyHeaders.reportOnly": {
       "proxy": "",
       "native": "default-src 'none'; connect-src 'none'"
+    },
+    "policyHeaders.permissionsPolicy": {
+      "proxy": "",
+      "native": "sync-xhr=()"
+    },
+    "policyHeaders.featurePolicy": {
+      "proxy": "",
+      "native": "sync-xhr 'none'"
     }
   },
   "nativeVsZeroProxyRawSetDifferentialAllowlist": [
@@ -19,6 +27,16 @@
       "id": "membrane-report-only-header",
       "pattern": "^policyHeaders\\.reportOnly$",
       "reason": "ZeroProxy strips upstream report-only policy before constructing proxy responses."
+    },
+    {
+      "id": "membrane-permissions-policy-header",
+      "pattern": "^policyHeaders\\.permissionsPolicy$",
+      "reason": "ZeroProxy strips upstream permissions policy before constructing proxy responses."
+    },
+    {
+      "id": "membrane-feature-policy-header",
+      "pattern": "^policyHeaders\\.featurePolicy$",
+      "reason": "ZeroProxy strips upstream legacy feature policy before constructing proxy responses."
     },
     {
       "id": "canvas-randomization",

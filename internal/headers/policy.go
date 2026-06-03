@@ -8,6 +8,7 @@ import (
 var hidden = map[string]struct{}{
 	"set-cookie": {}, "set-cookie2": {},
 	"content-security-policy": {}, "content-security-policy-report-only": {},
+	"permissions-policy": {}, "feature-policy": {},
 	"report-to": {}, "reporting-endpoints": {}, "nel": {},
 	"service-worker-allowed": {},
 	"sourcemap":              {}, "x-sourcemap": {},

@@ -85,6 +85,8 @@
     const h = new Headers(resp.headers);
     const allowDynamicCompile = h.get('X-ZP-Dynamic-Compile') === '1';
     h.delete('X-ZP-Dynamic-Compile');
+    h.delete('Permissions-Policy');
+    h.delete('Feature-Policy');
     h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { allowDynamicCompile }));
     h.set('X-Content-Type-Options', 'nosniff');
     h.set('Cache-Control', h.get('Cache-Control') || 'no-store');

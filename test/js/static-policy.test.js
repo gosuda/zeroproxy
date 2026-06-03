@@ -350,9 +350,23 @@ test('runtime HTTP facade resolves relative requests without site-specific host 
 
 test('Rust rewriter bootstrap falls back to async WASM load if sync bytes fail', () => {
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.ok(build.includes("policy.allowsFeature('sync-xhr')"));
+  assert.ok(build.includes("typeof XMLHttpRequest !== 'function' || !syncXHRAllowed()"));
   assert.ok(build.includes('function bootstrapInit()'));
   assert.ok(build.includes('try { if (initSync()) return; } catch {} init().catch(() => {})'));
   assert.ok(build.includes('bootstrapInit();'));
+});
+
+test('response wrappers strip target permissions policy headers', () => {
+  const swResponses = fs.readFileSync('web/sw/responses.js', 'utf8');
+  assert.ok(swResponses.includes("h.delete('Permissions-Policy')"));
+  assert.ok(swResponses.includes("h.delete('Feature-Policy')"));
+});
+
+test('runtime sync XHR avoids native sync requests when policy disables them', () => {
+  const rt = readRuntimeSource();
+  assert.ok(rt.includes("policy.allowsFeature('sync-xhr')"));
+  assert.ok(rt.includes('if (!syncXHRAllowed()) return failSyncXHR(xhr);'));
 });
 
 test('HTML document transform is a thin Go wrapper over Rust lol_html policy', () => {
