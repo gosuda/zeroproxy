@@ -232,7 +232,10 @@ test('runtime installs required escape-vector hooks', () => {
     'shouldContainFrameWindow && shouldContainFrameWindow(this, childWin)',
     'installRequestFacade',
     'return new Native.Request(requestLike ? input : requestTargetURL(input), init)',
-    "Native.setAttribute.call(this, k, '')",
+    'eventHandlerBindings',
+    'data-zp-event-',
+    "Native.FunctionCtor('event'",
+    'bindEventAttribute',
     "'WebSocketStream'",
     'getUserMedia',
     'mediaDevices',
@@ -284,14 +287,18 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
   const start = rt.indexOf('function scriptProxyPath(target, kind)');
   const end = rt.indexOf('function setScriptSource', start);
   const body = rt.slice(start, end);
-  assert.ok(body.includes("if (kind !== 'module')"), 'module proxy URLs must stay canonical');
+  assert.ok(body.includes("if (kind !== 'module')"), 'module proxy URLs must keep referrer data out');
+  assert.ok(
+    body.indexOf("params.set('tab'") < body.indexOf("if (kind !== 'module')"),
+    'runtime tab token must be part of module graph identity',
+  );
+  assert.ok(
+    body.indexOf("params.set('rt'") < body.indexOf("if (kind !== 'module')"),
+    'runtime token must be part of module graph identity',
+  );
   assert.ok(
     body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('ref'"),
     'ref/rp must not be part of module identity',
-  );
-  assert.ok(
-    body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('tab'"),
-    'runtime tab token must not be part of module identity',
   );
 });
 

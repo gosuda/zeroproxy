@@ -338,7 +338,7 @@ fn rewrite_program_source(source: &str, module: bool, ctx: RewriteContext<'_>) -
     }
 }
 
-fn rewrite_wrapped_source(
+pub(crate) fn rewrite_wrapped_source(
     source: &str,
     prefix: &str,
     suffix: &str,
@@ -445,14 +445,16 @@ mod tests {
     #[test]
     fn rewrites_calls_and_constructors() {
         let code = rewrite_ok(
-            "window.location = '/next'; const ws = new WebSocket('/ws', ['chat']); Object.getOwnPropertyDescriptor(window, 'location');",
+            "window.location = '/next'; const ws = new WebSocket('/ws', ['chat']); Object.getOwnPropertyDescriptor(window, 'location'); Object.assign(target, ...sources); new WebSocket(...wsArgs);",
             "classic",
             "https://example.com/app.js",
         );
         assert!(code.contains("__zp_set(__zp_get(globalThis,\"window\"),\"location\",\"/next\")"));
         assert!(code
             .contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),[\"/ws\",[\"chat\"]])"));
+        assert!(code.contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),[...wsArgs])"));
         assert!(code.contains("__zp_call(Object,\"getOwnPropertyDescriptor\",[__zp_get(globalThis,\"window\"),\"location\"])"));
+        assert!(code.contains("__zp_call(Object,\"assign\",[target,...sources])"));
     }
 
     #[test]

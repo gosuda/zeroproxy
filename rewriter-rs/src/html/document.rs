@@ -6,7 +6,9 @@ use std::{
 
 use lol_html::{element, end, html_content::ContentType, rewrite_str, text, RewriteStrSettings};
 
-use crate::{css, import_map, js, share_url, RewriteContext};
+use crate::{
+    css, import_map, js, rewrite_wrapped_source, share_url, RewriteContext, RewriteOutput,
+};
 
 use super::{attr_policy_kind, fetch_url, link_rel_kind, srcset, target_url as resolve_target_url};
 use super::{blocked_element_kind, event_handler_attr_kind, meta_policy_kind, script_type_kind};
@@ -161,6 +163,7 @@ fn rewrite_element_attrs<H: lol_html::HandlerTypes>(
     if tag == "link" {
         backup_masked_attrs(el, false)?;
     }
+    rewrite_event_handler_attrs(el, target_url, control_prefix)?;
     if tag == "base" {
         rewrite_base_element(el, target_url, control_prefix)?;
         return Ok(());
@@ -172,7 +175,6 @@ fn rewrite_element_attrs<H: lol_html::HandlerTypes>(
         rewrite_link_attrs(el, target_url, control_prefix)?;
         return Ok(());
     }
-    rewrite_event_handler_attrs(el)?;
     rewrite_inline_style_attr(el, target_url, control_prefix)?;
     rewrite_srcdoc_attr(el, &tag, runtime_prelude)?;
     for attr in ["href", "xlink:href", "src", "poster"] {
@@ -214,6 +216,8 @@ fn rewrite_base_element<H: lol_html::HandlerTypes>(
 
 fn rewrite_event_handler_attrs<H: lol_html::HandlerTypes>(
     el: &mut lol_html::html_content::Element<'_, '_, H>,
+    target_url: &str,
+    control_prefix: &str,
 ) -> lol_html::HandlerResult {
     let handlers = attr_names(el)
         .into_iter()
@@ -222,9 +226,26 @@ fn rewrite_event_handler_attrs<H: lol_html::HandlerTypes>(
     for name in handlers {
         let value = el.get_attribute(&name).unwrap_or_default();
         el.remove_attribute(&name);
-        el.set_attribute(&format!("data-zp-blocked-{name}"), &value)?;
+        let rewritten = rewrite_event_handler(&value, target_url, control_prefix);
+        if rewritten.ok {
+            el.set_attribute(&format!("data-zp-event-{name}"), &rewritten.code)?;
+        } else {
+            el.set_attribute(&format!("data-zp-blocked-{name}"), &value)?;
+        }
     }
     Ok(())
+}
+
+fn rewrite_event_handler(source: &str, target_url: &str, control_prefix: &str) -> RewriteOutput {
+    let ctx = RewriteContext::new(target_url, control_prefix, "", "");
+    rewrite_wrapped_source(
+        source,
+        "function __zp_event__(event){\n",
+        "\n}",
+        false,
+        ctx.without_runtime_context(),
+        true,
+    )
 }
 
 fn rewrite_inline_style_attr<H: lol_html::HandlerTypes>(
@@ -461,6 +482,11 @@ fn escape_inline_script_sentinel(code: &str) -> String {
 fn drop_control_attrs<H: lol_html::HandlerTypes>(
     el: &mut lol_html::html_content::Element<'_, '_, H>,
 ) {
+    for attr in attr_names(el) {
+        if attr.to_ascii_lowercase().starts_with("data-zp-event-") {
+            el.remove_attribute(&attr);
+        }
+    }
     for attr in [
         "data-zp-target-url",
         "data-zp-target-srcset",
@@ -862,7 +888,7 @@ mod tests {
     #[test]
     fn rewrites_link_policy_with_lol_html() {
         let out = rewrite_document(
-            r#"<head><link rel="preconnect" href="https://cdn.example/"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="touch.png"><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="data:text/css,x"></head>"#,
+            r#"<head><link rel="preconnect" href="https://cdn.example/"><link rel="icon" href="/favicon.ico"><link rel="apple-touch-icon" href="touch.png"><link rel="stylesheet" media="print" onload="this.media='all'; this.onload=null;" href="/app.css"><link rel="stylesheet" href="data:text/css,x"></head>"#,
             DocumentOptions {
                 target_url: "https://example.com/app/page.html",
                 control_prefix: "/zp/",
@@ -882,6 +908,8 @@ mod tests {
             r#"data-zp-target-url="https://example.com/app/touch.png""#,
             r#"href="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp.css""#,
             r#"data-zp-target-url="https://example.com/app.css""#,
+            r#"data-zp-event-onload=""#,
+            r#"__zp_runEvent"#,
             r#"href="/zp/error/POLICY_BLOCKED""#,
             r#"data-zp-blocked-url="data:text/css,x""#,
         ] {
@@ -894,6 +922,8 @@ mod tests {
             r#"href="/favicon.ico""#,
             r#"href="touch.png""#,
             r#"href="/app.css""#,
+            r#" onload="#,
+            r#"data-zp-blocked-onload"#,
         ] {
             assert!(
                 !out.contains(forbidden),
@@ -1056,7 +1086,7 @@ mod tests {
     fn rewrites_script_style_importmap_and_srcdoc_with_lol_html() {
         let prelude = r#"<script nonce=zp>boot()</script><script nonce=zp src="/zp/assets/runtime-prelude.js"></script>"#;
         let out = rewrite_document(
-            r#"<body onload="location.href='/boot'"><script src="/app.js" integrity="sha384-i" nonce="target-nonce"></script><script>window.location.href="<\/script>";</script><script type="module">import "./dep.js"; window.location.href;</script><script type="importmap">{"imports":{"a":"./a.js"}}</script><style>body{background:url("/bg.png")}</style><button onclick="return location.href"></button><iframe srcdoc="<p>x</p>"></iframe></body>"#,
+            r#"<body onload="location.href='/boot'"><script src="/app.js" integrity="sha384-i" nonce="target-nonce"></script><script type="module" src="/entry.js"></script><script>window.location.href="<\/script>";</script><script type="module">import "./dep.js"; window.location.href;</script><script type="importmap">{"imports":{"a":"./a.js"}}</script><style>body{background:url("/bg.png")}</style><button onclick="return location.href"></button><iframe srcdoc="<p>x</p>"></iframe></body>"#,
             DocumentOptions {
                 target_url: "https://example.com/app/page.html",
                 control_prefix: "/zp/",
@@ -1070,7 +1100,9 @@ mod tests {
 
         for want in [
             r#"src="/zp/api/script?kind=classic&u=https%3A%2F%2Fexample.com%2Fapp.js&tab=tab-1&rt=rt-1""#,
+            r#"src="/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fentry.js&tab=tab-1&rt=rt-1""#,
             r#"data-zp-target-url="https://example.com/app.js""#,
+            r#"data-zp-target-url="https://example.com/entry.js""#,
             r#"data-zp-integrity="sha384-i""#,
             r#"data-zp-target-nonce="target-nonce""#,
             r#"nonce="zp""#,
@@ -1079,8 +1111,9 @@ mod tests {
             r#"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fapp%2Fdep.js&tab=tab-1&rt=rt-1"#,
             r#""a":"/zp/api/script?kind=module\u0026rt=rt-1\u0026tab=tab-1\u0026u=https%3A%2F%2Fexample.com%2Fapp%2Fa.js""#,
             r#"url("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fbg.png")"#,
-            r#"data-zp-blocked-onload="location.href='/boot'""#,
-            r#"data-zp-blocked-onclick="return location.href""#,
+            r#"data-zp-event-onload=""#,
+            r#"data-zp-event-onclick=""#,
+            r#"__zp_runEvent"#,
             r#"srcdoc="<script nonce=zp>boot()</script>"#,
         ] {
             assert!(out.contains(want), "missing {want} in {out}");
@@ -1089,6 +1122,8 @@ mod tests {
         for forbidden in [
             r#" onload="#,
             r#" onclick="#,
+            r#"data-zp-blocked-onload"#,
+            r#"data-zp-blocked-onclick"#,
             r#" integrity="sha384-i""#,
             r#" nonce="target-nonce""#,
             r#"src="/app.js""#,

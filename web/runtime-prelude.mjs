@@ -81,6 +81,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   const membraneRawTargets = new WeakMap();
   const rewrittenInlineScripts = new WeakSet();
   const rewrittenStyleNodes = new WeakSet();
+  const eventHandlerBindings = new WeakMap();
   const documentWriteHookedWindows = new WeakSet();
   const messageEventSourceHookedPrototypes = new WeakSet();
   const windowMethodBindings = new Map();
@@ -1988,6 +1989,61 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return Native.setAttribute.call(el, attrName, '_self');
   }
   function isZPAttrName(name) { return String(name || '').toLowerCase().startsWith('data-zp-'); }
+  function eventAttrName(name) {
+    const key = attrLocalName(String(name || '').toLowerCase());
+    return key.startsWith('on') && key.length > 2 ? key : '';
+  }
+  function eventDataAttrName(name) { return `data-zp-event-${eventAttrName(name)}`; }
+  function bindEventAttribute(el, attrName, code) {
+    const key = eventAttrName(attrName);
+    if (!el || !key || !code || typeof Native.FunctionCtor !== 'function') return false;
+    const type = key.slice(2);
+    let bindings = eventHandlerBindings.get(el);
+    if (!bindings) {
+      bindings = new Map();
+      eventHandlerBindings.set(el, bindings);
+    }
+    const previous = bindings.get(key);
+    if (previous && el.removeEventListener) {
+      try { el.removeEventListener(type, previous); } catch {}
+    }
+    let fn;
+    try { fn = Native.FunctionCtor('event', String(code)); }
+    catch { return false; }
+    const listener = function(event) {
+      const result = fn.call(this, event);
+      if (result === false && event && event.preventDefault) event.preventDefault();
+      return result;
+    };
+    bindings.set(key, listener);
+    try { el.addEventListener(type, listener); return true; }
+    catch { return false; }
+  }
+  function setEventAttribute(el, attrName, value) {
+    const key = eventAttrName(attrName);
+    if (!key) return false;
+    const code = rewriteEventAttribute(value);
+    Native.setAttribute.call(el, eventDataAttrName(key), code);
+    if (Native.removeAttribute) Native.removeAttribute.call(el, attrName);
+    else Native.setAttribute.call(el, attrName, '');
+    bindEventAttribute(el, key, code);
+    return undefined;
+  }
+  function bindElementEventAttributes(el) {
+    if (!el || !Native.getAttributeNames) return;
+    for (const name of Native.getAttributeNames.call(el)) {
+      const raw = String(name || '').toLowerCase();
+      if (!raw.startsWith('data-zp-event-on')) continue;
+      bindEventAttribute(el, raw.slice('data-zp-event-'.length), Native.getAttribute.call(el, name) || '');
+    }
+  }
+  function bindSubtreeEventAttributes(node) {
+    if (!node || typeof node !== 'object') return;
+    if (node.nodeType === 1) bindElementEventAttributes(node);
+    if (!node.querySelectorAll) return;
+    const nodes = node.querySelectorAll('*');
+    for (let i = 0; i < nodes.length; i++) bindElementEventAttributes(nodes[i]);
+  }
   function oldAttributeNode(owner, attr) {
     if (!owner || !attr) return null;
     try {
@@ -1996,18 +2052,16 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     } catch {}
     return null;
   }
-  function blockEventAttributeNode(owner, attr) {
+  function setEventAttributeNode(owner, attr) {
     if (!owner || !attr) return null;
-    const name = String(attr.name || '').toLowerCase();
     const old = oldAttributeNode(owner, attr);
-    Native.setAttribute.call(owner, `data-zp-blocked-${name}`, String(attr.value || ''));
-    try { Native.setAttribute.call(owner, attr.name, ''); } catch {}
+    setEventAttribute(owner, attr.name, attr.value || '');
     return old;
   }
   function setNamedAttributeNode(owner, raw, attr, ns) {
     if (!attr) return ns && Native.namedSetNamedItemNS ? Native.namedSetNamedItemNS.call(raw, attr) : Native.namedSetNamedItem.call(raw, attr);
     const name = String(attr.name || '').toLowerCase();
-    if (owner && name.startsWith('on') && name.length > 2) return blockEventAttributeNode(owner, attr);
+    if (owner && name.startsWith('on') && name.length > 2) return setEventAttributeNode(owner, attr);
     const ret = ns && Native.namedSetNamedItemNS ? Native.namedSetNamedItemNS.call(raw, attr) : Native.namedSetNamedItem.call(raw, attr);
     if (owner) enforceAttributeNodeOwner(owner, attr);
     return ret;
@@ -2292,10 +2346,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (this.localName === 'link' && localKey === 'href' && (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this))) return blockLinkURL(this, v);
     if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, v);
     if (this.localName === 'link' && localKey === 'href' && isStylesheetLink(this)) return setStylesheetLinkHref(this, v);
-    if (key.startsWith('on') && key.length > 2) {
-      Native.setAttribute.call(this, `data-zp-blocked-${key}`, String(v));
-      return Native.setAttribute.call(this, k, '');
-    }
+    if (eventAttrName(key)) return setEventAttribute(this, k, v);
     if (this.localName === 'base' && localKey === 'href') {
       updateVirtualBase(v);
       return Native.setAttribute.call(this, k, v);
@@ -2350,10 +2401,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       }
     }
     if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));
-    if (key.startsWith('on') && key.length > 2) {
-      Native.setAttribute.call(this, `data-zp-blocked-${key}`, String(v));
-      return Native.setAttributeNS.call(this, ns, k, '');
-    }
+    if (eventAttrName(key)) return setEventAttribute(this, k, v);
     return Native.setAttributeNS.call(this, ns, k, v);
   }
   function installDOMHooks(w) {
@@ -2376,6 +2424,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     }
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html))); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
     installBaseObserver();
+    bindSubtreeEventAttributes(document);
   }
   function patchHTMLSetter(proto, prop) {
     let d = null;
@@ -2470,13 +2519,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function installAttributeNodeMutationHooks(w) {
     if (Native.setAttributeNode) define(w.Element.prototype, 'setAttributeNode', function(attr) {
-      if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return blockEventAttributeNode(this, attr);
+      if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return setEventAttributeNode(this, attr);
       const ret = Native.setAttributeNode.call(this, attr);
       enforceAttributeNodeOwner(this, attr);
       return ret;
     });
     if (Native.setAttributeNodeNS) define(w.Element.prototype, 'setAttributeNodeNS', function(attr) {
-      if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return blockEventAttributeNode(this, attr);
+      if (attr && String(attr.name || '').toLowerCase().startsWith('on')) return setEventAttributeNode(this, attr);
       const ret = Native.setAttributeNodeNS.call(this, attr);
       enforceAttributeNodeOwner(this, attr);
       return ret;
@@ -2558,13 +2607,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const params = new URLSearchParams();
     params.set('kind', kind);
     params.set('u', target);
+    params.set('tab', boot.tabId);
+    params.set('rt', runtimeToken);
     if (kind !== 'module') {
       const ref = documentReferrerFor(target);
       if (ref) params.set('ref', ref);
       if (documentReferrerPolicy) params.set('rp', documentReferrerPolicy);
       if (kind === 'classic' && documentCharset) params.set('dc', documentCharset);
-      params.set('tab', boot.tabId);
-      params.set('rt', runtimeToken);
     }
     return `${ZP.apiPath('script')}?${params.toString()}`;
   }
@@ -2884,8 +2933,12 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function rewriteSerializedAttribute(node, attrName) {
     const lowerAttr = String(attrName).toLowerCase();
+    if (lowerAttr.startsWith('data-zp-event-')) {
+      if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
+      return;
+    }
     rewriteSerializedAttributeContent(node, attrName, lowerAttr);
-    if (lowerAttr.startsWith('on') && lowerAttr.length > 2) blockSerializedEventAttribute(node, attrName, lowerAttr);
+    if (eventAttrName(lowerAttr)) rewriteSerializedEventAttribute(node, attrName, lowerAttr);
     if (isSrcsetAttribute(node, lowerAttr) || isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
   }
   // Content-rewriting branches (style/srcset/integrity). Split out from the
@@ -2898,9 +2951,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (isSrcsetAttribute(node, lowerAttr)) setSrcsetAttribute(node, attrName, Native.getAttribute.call(node, attrName) || '');
     if (lowerAttr === 'integrity' && isIntegrityBearing(node)) setBackedIntegrity(node, Native.getAttribute.call(node, attrName) || '');
   }
-  function blockSerializedEventAttribute(node, attrName, lowerAttr) {
+  function rewriteSerializedEventAttribute(node, attrName, lowerAttr) {
     const val = Native.getAttribute.call(node, attrName) || '';
-    Native.setAttribute.call(node, `data-zp-blocked-${lowerAttr}`, val);
+    Native.setAttribute.call(node, eventDataAttrName(lowerAttr), rewriteEventAttribute(val));
     if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
   }
   function injectSrcdoc(s) { return `<script nonce="zp">(function(){const boot=${bootJSON()};Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>${transformHTML(String(s))}`; }
@@ -3012,6 +3065,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
+    bindSubtreeEventAttributes(node);
     if (node.nodeType === 1) enforceElementPolicy(node);
     if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,svg a,svg image,svg use').forEach(enforceElementPolicy);
   }

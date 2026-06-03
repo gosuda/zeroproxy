@@ -206,7 +206,7 @@ impl VisitMut for SwcRewriter<'_> {
             for arg in &mut call.args {
                 arg.expr.visit_mut_with(self);
             }
-            let args = array_expr(call.args.iter().cloned().map(expr_from_spread).collect());
+            let args = array_expr_from_args(call.args.clone());
             *call = call_expr("__zp_call", vec![base, prop, args]);
             return;
         }
@@ -285,13 +285,11 @@ impl VisitMut for SwcRewriter<'_> {
                             arg.expr.visit_mut_with(self);
                         }
                     }
-                    let args = array_expr(
-                        new_expr
-                            .args
-                            .as_ref()
-                            .map(|args| args.iter().cloned().map(expr_from_spread).collect())
-                            .unwrap_or_default(),
-                    );
+                    let args = new_expr
+                        .args
+                        .as_ref()
+                        .map(|args| array_expr_from_args(args.clone()))
+                        .unwrap_or_else(|| array_expr(Vec::new()));
                     *expr = call_helper("__zp_construct", vec![callee, args]);
                     return;
                 }
@@ -670,11 +668,11 @@ impl SwcRewriter<'_> {
 
     fn rewrite_optional_call(&mut self, call: &OptCall) -> Option<Expr> {
         let (base, prop) = self.optional_call_target_parts(&call.callee)?;
-        let args = array_expr(
+        let args = array_expr_from_args(
             call.args
                 .iter()
                 .cloned()
-                .map(|arg| self.transformed_arg_expr(arg))
+                .map(|arg| self.transformed_arg(arg))
                 .collect(),
         );
         Some(call_helper("__zp_optionalCall", vec![base, prop, args]))
@@ -699,14 +697,14 @@ impl SwcRewriter<'_> {
         }
     }
 
-    fn transformed_arg_expr(&mut self, arg: ExprOrSpread) -> Expr {
+    fn transformed_arg(&mut self, arg: ExprOrSpread) -> ExprOrSpread {
         let ExprOrSpread { spread, expr } = arg;
         let mut expr = *expr;
         expr.visit_mut_with(self);
-        expr_from_spread(ExprOrSpread {
+        ExprOrSpread {
             spread,
             expr: Box::new(expr),
-        })
+        }
     }
 }
 
@@ -763,15 +761,11 @@ fn array_expr(values: Vec<Expr>) -> Expr {
     })
 }
 
-fn expr_from_spread(arg: ExprOrSpread) -> Expr {
-    if arg.spread.is_some() {
-        Expr::Array(ArrayLit {
-            span: DUMMY_SP,
-            elems: vec![Some(arg)],
-        })
-    } else {
-        *arg.expr
-    }
+fn array_expr_from_args(args: Vec<ExprOrSpread>) -> Expr {
+    Expr::Array(ArrayLit {
+        span: DUMMY_SP,
+        elems: args.into_iter().map(Some).collect(),
+    })
 }
 
 fn call_expr(name: &str, args: Vec<Expr>) -> swc_ecma_ast::CallExpr {

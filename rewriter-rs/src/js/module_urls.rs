@@ -68,10 +68,8 @@ pub(crate) fn script_url(
         normalized_kind,
         percent_encode(abs.clone())
     );
-    if normalized_kind != "module" {
-        append_context(&mut out, "tab", tab_id);
-        append_context(&mut out, "rt", runtime_token);
-    }
+    append_context(&mut out, "tab", tab_id);
+    append_context(&mut out, "rt", runtime_token);
     ScriptURL {
         ok: true,
         url: out,
@@ -297,7 +295,7 @@ mod tests {
         assert!(module.ok);
         assert_eq!(
             module.url,
-            "/zp/api/script?kind=module&u=https%3A%2F%2Ftarget.example%2Fmain.js"
+            "/zp/api/script?kind=module&u=https%3A%2F%2Ftarget.example%2Fmain.js&tab=tab&rt=rt"
         );
     }
 

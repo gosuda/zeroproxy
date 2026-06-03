@@ -432,7 +432,10 @@ test('Rust rewriter asset owns external script URL rewriting', async () => {
     controlPrefix: '/zp/',
   });
   assert.equal(module.ok, true, JSON.stringify(module.diagnostics));
-  assert.equal(module.url, '/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fmain.js');
+  assert.equal(
+    module.url,
+    '/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fmain.js&tab=tab-1&rt=rt-1',
+  );
 
   const blocked = ctx.ZPRewriter.rewriteScriptURL('data:text/javascript,0', {
     kind: 'classic',
@@ -904,6 +907,41 @@ test('Rust rewriter preserves optional access semantics for guarded probes', asy
     out.code.includes('__zp_optionalGet(__zp_optionalGet(frame,"contentWindow"),"postMessage")('),
     false,
   );
+});
+
+test('Rust rewriter preserves spread call arguments passed through helpers', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(
+    `
+    const sources = [{ reducer: 1 }, { middleware() { return 'ok'; } }];
+    const target = {};
+    Object.assign(target, ...sources);
+    window.result = [target.reducer, typeof target.middleware, target.middleware()];
+  `,
+    {
+      kind: 'classic',
+      targetUrl: 'https://widgets.example/assets/api.js',
+    },
+  );
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assertCodeIncludes(out.code, '__zp_call(Object,"assign",[target,...sources])');
+
+  const ctx = {
+    Object,
+    window: {},
+    globalThis: null,
+    __zp_get: (base, prop) => base[prop],
+    __zp_set: (base, prop, value) => {
+      base[prop] = value;
+      return value;
+    },
+    __zp_call: (base, prop, args) => Reflect.apply(base[prop], base, args),
+  };
+  ctx.globalThis = ctx;
+  vm.runInNewContext(out.code, ctx);
+  assert.equal(ctx.window.result[0], 1);
+  assert.equal(ctx.window.result[1], 'function');
+  assert.equal(ctx.window.result[2], 'ok');
 });
 
 test('Rust rewriter routes computed global-alias member access through runtime membrane', async () => {
