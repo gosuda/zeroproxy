@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -37,8 +36,9 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: 24.16.0
           cache: npm
+          cache-dependency-path: package-lock.json
       - name: Print toolchain versions
         run: |
           go version
@@ -50,6 +50,14 @@ jobs:
       - name: Install wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
 
+      - name: Cache Puppeteer browser
+        uses: actions/cache@v4
+        with:
+          path: .puppeteer-cache
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            puppeteer-${{ runner.os }}-
+
       - name: Install Node dependencies
         run: npm ci
 
@@ -59,8 +67,68 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
+      - name: Run Go js/wasm tests
+        run: npm run test:wasm
+
       - name: Run JavaScript and Puppeteer tests
         run: npm test
 
       - name: Build deployable artifacts
         run: npm run build
+
+  lint:
+    name: Lint (Go, Rust, JavaScript)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install golangci-lint v2.12.2
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.12.2/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          golangci-lint version
+
+      - name: Verify golangci-lint config
+        run: golangci-lint config verify
+
+      - name: Run golangci-lint (native)
+        run: golangci-lint run --timeout=5m
+
+      - name: Run golangci-lint (js/wasm)
+        run: GOOS=js GOARCH=wasm golangci-lint run --timeout=5m
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rewriter-rs/Cargo.toml --all --check
+
+      - name: Run clippy
+        run: cargo clippy --manifest-path rewriter-rs/Cargo.toml --all-targets -- -D warnings
+
+      - name: Install Node dependencies
+        run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+
+      - name: Run Biome
+        run: npx biome ci web scripts test

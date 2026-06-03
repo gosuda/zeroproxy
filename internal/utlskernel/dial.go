@@ -14,14 +14,6 @@ const (
 	ALPNHTTP1 = "http/1.1"
 )
 
-// Wrap performs a browser-like uTLS client handshake over an already connected
-// stream. It preserves the existing HTTP/1.1-only behavior for callers such as
-// WebSocket upgrade that must not negotiate HTTP/2.
-func Wrap(ctx context.Context, stream net.Conn, serverName string) (net.Conn, error) {
-	conn, _, err := WrapWithALPN(ctx, stream, serverName, []string{ALPNHTTP1})
-	return conn, err
-}
-
 // WrapWithALPN performs a browser-like uTLS client handshake and returns the
 // negotiated application protocol. An empty negotiated protocol means the peer
 // did not select ALPN; callers should treat that as HTTP/1.1 fallback.
@@ -43,10 +35,6 @@ func WrapWithALPN(ctx context.Context, stream net.Conn, serverName string, proto
 		return nil, "", err
 	}
 	return conn, conn.ConnectionState().NegotiatedProtocol, nil
-}
-
-func http1OnlyChromeSpec() (*utls.ClientHelloSpec, error) {
-	return chromeSpecForALPN([]string{ALPNHTTP1})
 }
 
 func chromeSpecForALPN(protocols []string) (*utls.ClientHelloSpec, error) {

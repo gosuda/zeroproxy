@@ -7,7 +7,7 @@ import (
 )
 
 func TestHTTP1OnlyChromeSpecDoesNotAdvertiseH2(t *testing.T) {
-	spec, err := http1OnlyChromeSpec()
+	spec, err := chromeSpecForALPN([]string{ALPNHTTP1})
 	if err != nil {
 		t.Fatal(err)
 	}

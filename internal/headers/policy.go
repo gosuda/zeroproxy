@@ -22,33 +22,55 @@ func ConstructorPolicy(src http.Header, bodyTransformed, bodyDecoded bool) http.
 	dst := make(http.Header, len(src)+6)
 	for name, vals := range src {
 		canon := http.CanonicalHeaderKey(name)
-		lower := strings.ToLower(canon)
-		if _, ok := hidden[lower]; ok {
-			continue
-		}
-		if lower == "content-length" && bodyTransformed {
-			continue
-		}
-		if lower == "content-encoding" && bodyDecoded {
-			continue
-		}
-		if lower == "location" {
-			continue
-		}
-		if isHopByHop(lower) {
+		if stripFromResponse(strings.ToLower(canon), bodyTransformed, bodyDecoded) {
 			continue
 		}
 		for _, v := range vals {
 			dst.Add(canon, v)
 		}
 	}
+	applyResponseDefaults(dst)
+	return dst
+}
+
+// stripFromResponse reports whether an upstream response header (keyed by its
+// lowercase canonical name) must be withheld from the browser Response. It is
+// the fail-closed allowlist gate: the unconditional hidden/storage/network
+// strips, the two body-rewrite-conditional encoding strips, the always-withheld
+// Location (the redirect engine re-adds it after final resolution), and the
+// hop-by-hop set.
+//
+// This is DELIBERATELY distinct from HiddenHeader, which is the request-side
+// oracle and does NOT strip location/content-length/content-encoding. They must
+// not be merged: routing ConstructorPolicy through HiddenHeader would leak
+// Location onto the Response.
+func stripFromResponse(lower string, bodyTransformed, bodyDecoded bool) bool {
+	if _, ok := hidden[lower]; ok {
+		return true
+	}
+	if lower == "content-length" && bodyTransformed {
+		return true
+	}
+	if lower == "content-encoding" && bodyDecoded {
+		return true
+	}
+	if lower == "location" {
+		return true
+	}
+	return isHopByHop(lower)
+}
+
+// applyResponseDefaults overwrites dst with ZeroProxy's fixed response-header
+// block: the no-store default, the nosniff guard, and the CORS emulation. These
+// use Set, so any upstream copy of these names that survived the copy loop is
+// overwritten here -- the forced values are authoritative, never appended to.
+func applyResponseDefaults(dst http.Header) {
 	dst.Set("Cache-Control", "no-store")
 	dst.Set("X-Content-Type-Options", "nosniff")
 	dst.Set("Access-Control-Allow-Origin", "*")
 	dst.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
 	dst.Set("Access-Control-Allow-Headers", "*")
 	dst.Set("Access-Control-Expose-Headers", "*")
-	return dst
 }
 
 func isHopByHop(lower string) bool {

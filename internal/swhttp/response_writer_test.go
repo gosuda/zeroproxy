@@ -6,7 +6,10 @@ import (
 )
 
 func TestResponseMayHaveBodyMatchesFetchNullBodyStatuses(t *testing.T) {
-	for _, status := range []int{http.StatusNoContent, http.StatusResetContent, http.StatusNotModified} {
+	for _, status := range []int{
+		http.StatusContinue, http.StatusSwitchingProtocols, http.StatusProcessing, http.StatusEarlyHints,
+		http.StatusNoContent, http.StatusResetContent, http.StatusNotModified,
+	} {
 		if responseMayHaveBody(status) {
 			t.Fatalf("status %d must be constructed with a null JS Response body", status)
 		}

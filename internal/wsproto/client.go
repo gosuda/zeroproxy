@@ -34,7 +34,7 @@ type Conn struct {
 	mu sync.Mutex
 }
 
-func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState) (*Conn, *http.Response, error) {
+func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols []string, tab *zphttp.TabState, origin string) (*Conn, *http.Response, error) {
 	if target.Scheme != "ws" && target.Scheme != "wss" {
 		return nil, nil, fmt.Errorf("TARGET_PROTOCOL_BLOCKED")
 	}
@@ -54,15 +54,7 @@ func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols
 		return nil, nil, err
 	}
 	key := base64.StdEncoding.EncodeToString(keyBytes)
-	req := &http.Request{Method: http.MethodGet, URL: &httpURL, Header: make(http.Header), Host: httpURL.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Sec-WebSocket-Version", "13")
-	req.Header.Set("Sec-WebSocket-Key", key)
-	req.Header.Set("User-Agent", zphttp.TargetUserAgent)
-	if len(protocols) > 0 {
-		req.Header.Set("Sec-WebSocket-Protocol", strings.Join(protocols, ", "))
-	}
+	req := buildUpgradeRequest(&httpURL, key, protocols, origin)
 	if err := req.Write(c); err != nil {
 		_ = c.Close()
 		return nil, nil, err
@@ -72,17 +64,45 @@ func Dial(ctx context.Context, engine *zphttp.Engine, target *url.URL, protocols
 		_ = c.Close()
 		return nil, nil, err
 	}
-	if resp.StatusCode != http.StatusSwitchingProtocols || !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+	if err := validateUpgradeResponse(resp, key); err != nil {
 		_ = c.Close()
 		_ = resp.Body.Close()
-		return nil, resp, fmt.Errorf("TARGET_CONNECT_FAILED: websocket upgrade failed")
-	}
-	if resp.Header.Get("Sec-WebSocket-Accept") != acceptKey(key) {
-		_ = c.Close()
-		_ = resp.Body.Close()
-		return nil, resp, fmt.Errorf("TARGET_CONNECT_FAILED: websocket accept mismatch")
+		return nil, resp, err
 	}
 	return &Conn{c: c}, resp, nil
+}
+
+// buildUpgradeRequest constructs the RFC6455 client upgrade request: a GET with
+// the mandatory Connection/Upgrade/Version handshake headers plus the per-dial
+// Sec-WebSocket-Key, and the optional Origin / Sec-WebSocket-Protocol headers.
+func buildUpgradeRequest(httpURL *url.URL, key string, protocols []string, origin string) *http.Request {
+	req := &http.Request{Method: http.MethodGet, URL: httpURL, Header: make(http.Header), Host: httpURL.Host, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", key)
+	req.Header.Set("User-Agent", zphttp.TargetUserAgent)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	if len(protocols) > 0 {
+		req.Header.Set("Sec-WebSocket-Protocol", strings.Join(protocols, ", "))
+	}
+	return req
+}
+
+// validateUpgradeResponse fails closed unless the peer completed a valid 101
+// Switching Protocols handshake: the status code, the Upgrade header, and the
+// Sec-WebSocket-Accept digest must all match. It only computes the error; the
+// caller owns connection teardown so failure-path ordering is unchanged.
+func validateUpgradeResponse(resp *http.Response, key string) error {
+	if resp.StatusCode != http.StatusSwitchingProtocols || !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
+		return fmt.Errorf("TARGET_CONNECT_FAILED: websocket upgrade failed")
+	}
+	if resp.Header.Get("Sec-WebSocket-Accept") != acceptKey(key) {
+		return fmt.Errorf("TARGET_CONNECT_FAILED: websocket accept mismatch")
+	}
+	return nil
 }
 
 func (c *Conn) ReadFrame(ctx context.Context) (byte, []byte, error) {
@@ -161,23 +181,8 @@ func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, 
 	fin = h[0]&0x80 != 0
 	op = h[0] & 0x0f
 	masked := h[1]&0x80 != 0
-	l := uint64(h[1] & 0x7f)
-	if l == 126 {
-		var b [2]byte
-		if _, err = io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
-			return
-		}
-		l = uint64(binary.BigEndian.Uint16(b[:]))
-	}
-	if l == 127 {
-		var b [8]byte
-		if _, err = io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
-			return
-		}
-		l = binary.BigEndian.Uint64(b[:])
-	}
-	if l > 64<<20 {
-		err = fmt.Errorf("POLICY_BLOCKED: websocket frame too large")
+	l, err := c.readFrameLength(ctx, h[1])
+	if err != nil {
 		return
 	}
 	var mask [4]byte
@@ -196,6 +201,41 @@ func (c *Conn) readOne(ctx context.Context) (op byte, fin bool, payload []byte, 
 		}
 	}
 	return
+}
+
+// readFrameLength decodes the RFC6455 payload length from the second header byte
+// (b1): the 7-bit value, or the 16-bit (126) / 64-bit (127) extended forms read
+// off the wire, and fails closed on a frame larger than the 64 MiB cap. The 7-bit
+// indicator selects the form; the forms are mutually exclusive, so a decoded
+// extended length is never re-tested against another indicator (a 127-byte payload
+// is sent as indicator-126 + 16-bit-value-127, and must not be mistaken for the
+// 64-bit form).
+func (c *Conn) readFrameLength(ctx context.Context, b1 byte) (uint64, error) {
+	switch ind := b1 & 0x7f; ind {
+	case 126:
+		var b [2]byte
+		if _, err := io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
+			return 0, err
+		}
+		return checkFrameLength(uint64(binary.BigEndian.Uint16(b[:])))
+	case 127:
+		var b [8]byte
+		if _, err := io.ReadFull(ctxReader{ctx: ctx, r: c.c}, b[:]); err != nil {
+			return 0, err
+		}
+		return checkFrameLength(binary.BigEndian.Uint64(b[:]))
+	default:
+		return uint64(ind), nil
+	}
+}
+
+// checkFrameLength fails closed on a frame larger than the 64 MiB cap, before the
+// caller allocates the payload buffer.
+func checkFrameLength(l uint64) (uint64, error) {
+	if l > 64<<20 {
+		return 0, fmt.Errorf("POLICY_BLOCKED: websocket frame too large")
+	}
+	return l, nil
 }
 
 func acceptKey(key string) string {

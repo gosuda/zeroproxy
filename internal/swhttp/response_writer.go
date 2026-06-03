@@ -1,40 +1,15 @@
 package swhttp
 
-import (
-	"bytes"
-	"net/http"
-)
-
-// ResponseRecorder is a small server-style ResponseWriter used by runtime API
-// handlers that run inside the WASM kernel before they are converted to a JS
-// Response. It does not perform target egress.
-type ResponseRecorder struct {
-	HeaderMap http.Header
-	Status    int
-	Body      bytes.Buffer
-}
-
-func NewResponseRecorder() *ResponseRecorder {
-	return &ResponseRecorder{HeaderMap: make(http.Header), Status: http.StatusOK}
-}
-func (w *ResponseRecorder) Header() http.Header { return w.HeaderMap }
-func (w *ResponseRecorder) WriteHeader(status int) {
-	if w.Status == http.StatusOK {
-		w.Status = status
-	}
-}
-func (w *ResponseRecorder) Write(p []byte) (int, error) { return w.Body.Write(p) }
-func (w *ResponseRecorder) Response() *http.Response {
-	return &http.Response{StatusCode: w.Status, Status: http.StatusText(w.Status), Header: w.HeaderMap, Body: ioNopCloser{bytes.NewReader(w.Body.Bytes())}, ContentLength: int64(w.Body.Len())}
-}
-
-type ioNopCloser struct{ *bytes.Reader }
-
-func (c ioNopCloser) Close() error { return nil }
+import "net/http"
 
 func responseMayHaveBody(status int) bool {
-	switch status {
-	case http.StatusNoContent, http.StatusResetContent, http.StatusNotModified:
+	// 1xx informational and 204/205/304 carry no message body (RFC 9110 6.4.1);
+	// attaching one makes the JS Response constructor throw in the WASM kernel.
+	switch {
+	case status >= 100 && status < 200,
+		status == http.StatusNoContent,
+		status == http.StatusResetContent,
+		status == http.StatusNotModified:
 		return false
 	default:
 		return true

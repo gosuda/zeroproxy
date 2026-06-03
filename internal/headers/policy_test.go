@@ -20,3 +20,13 @@ func TestConstructorPolicyStripsForbiddenHeaders(t *testing.T) {
 		t.Fatalf("CORS emulation headers missing: %#v", out)
 	}
 }
+
+func TestConstructorPolicyAlwaysForcesNoStore(t *testing.T) {
+	doc := ConstructorPolicy(http.Header{
+		"Cache-Control": {"public, max-age=300"},
+		"Content-Type":  {"text/html"},
+	}, false, false)
+	if got := doc.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("default policy must force no-store, got %q: %#v", got, doc)
+	}
+}

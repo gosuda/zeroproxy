@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/gosuda/zeroproxy/internal/wsproto"
 	"github.com/gosuda/zeroproxy/internal/yamuxconn"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
+	"golang.org/x/net/html/charset"
 )
 
 type Kernel struct {
@@ -45,6 +47,7 @@ func main() {
 	select {}
 }
 
+//nolint:cyclop // TODO(complexity): kernel relay-ensure (cyclop 11); lazily establishes/validates the relay set the wasm kernel routes through. Membrane bootstrap; needs dedicated differential-harness decomposition.
 func (k *Kernel) ensure(ctx context.Context, servers []string) error {
 	server := selectedRelayServer(servers)
 	k.mu.Lock()
@@ -115,7 +118,12 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	}
 	reqv := args[0]
 	return promise(func(resolve, reject js.Value) {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, abortCancel := swhttp.ContextWithAbortSignal(timeoutCtx, reqv)
+		cancel := func() {
+			abortCancel()
+			timeoutCancel()
+		}
 		releaseOnReturn := true
 		defer func() {
 			if releaseOnReturn {
@@ -141,61 +149,265 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 			resolve.Invoke(safeResponse(classifyErr(err), statusForErr(err), req.URL.Host))
 			return
 		}
-		if tab.CookieJar != nil {
-			tab.CookieJar.SetCookies(finalURL, resp.Cookies())
-		}
-		transformed := false
-		decoded := false
-		if isDocumentRequest(req) && isHTML(resp.Header.Get("Content-Type")) {
-			source := resp.Body
-			if source == nil {
-				source = http.NoBody
-			}
-			pr, pw := io.Pipe()
-			go func() {
-				err := htmltx.TransformTo(pw, source, htmltx.Options{
-					TabID:          tab.TabID,
-					EntryID:        req.Header.Get("X-Zp-Entry-Id"),
-					TargetURL:      finalURL,
-					DocumentCookie: tab.CookieJar.DocumentCookie(finalURL),
-					RuntimeToken:   req.Header.Get("X-Zp-Runtime-Token"),
-					Servers:        headerServers(req.Header.Get("X-Zp-Relay-Servers")),
-				})
-				closeErr := source.Close()
-				if err != nil {
-					_ = pw.CloseWithError(err)
-					return
-				}
-				if closeErr != nil {
-					_ = pw.CloseWithError(closeErr)
-					return
-				}
-				_ = pw.Close()
-			}()
-			resp.Body = &closeWithSource{ReadCloser: pr, source: source}
-			resp.ContentLength = -1
-			resp.Header.Del("Content-Length")
-			resp.Header.Del("Content-Encoding")
-			resp.Header.Set("Content-Type", "text/html; charset=utf-8")
-			transformed = true
-			decoded = true
-		}
-		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+		releaseOnReturn = deliverResponse(ctx, resolve, req, resp, finalURL, tab, cancel)
+	})
+}
+
+// deliverResponse runs the post-fetch half of the bridge on an already-fetched
+// response: cookie capture, document transform, policy header shaping,
+// body-cancellation ownership, and the final ResponseToJS marshal +
+// resolve. It returns the resolved releaseOnReturn ownership flag (false once the
+// response body's cancel goroutine owns teardown, true again if ResponseToJS
+// fails and the body is closed here). Taking the response as an argument keeps it
+// drivable without the engine; it uses no Kernel state.
+func deliverResponse(ctx context.Context, resolve js.Value, req *http.Request, resp *http.Response, finalURL *url.URL, tab *zphttp.TabState, cancel func()) bool {
+	releaseOnReturn := true
+	dynamicCompileAllowed := targetDynamicCompileAllowed(resp.Header)
+	referrerPolicy := targetReferrerPolicy(resp.Header)
+	if tab.CookieJar != nil && req.Header.Get("X-Zp-Fetch-Credentials") != "omit" {
+		tab.CookieJar.SetCookies(finalURL, resp.Cookies())
+		broadcastCookieSync(tab, finalURL)
+	}
+	transformed, decoded := transformDocumentResponse(req, resp, tab, finalURL, dynamicCompileAllowed, referrerPolicy)
+	applyResponsePolicy(resp, req, finalURL, dynamicCompileAllowed, transformed, decoded)
+	if installBodyCancellation(ctx, resp, cancel) {
+		releaseOnReturn = false
+	}
+	jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
+	if err != nil {
 		if resp.Body != nil {
-			resp.Body = &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
-			releaseOnReturn = false
+			_ = resp.Body.Close()
 		}
-		jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
+		releaseOnReturn = true
+		resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway, finalURL.Host))
+		return releaseOnReturn
+	}
+	resolve.Invoke(jsResp)
+	return releaseOnReturn
+}
+
+// transformDocumentResponse rewrites an HTML document response through the htmltx
+// membrane (streamed via an io.Pipe goroutine), replacing resp.Body and the
+// content headers in place. It reports whether the body was transformed and
+// decoded; a non-document or non-HTML response is left untouched.
+func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zphttp.TabState, finalURL *url.URL, dynamicCompileAllowed bool, referrerPolicy string) (transformed, decoded bool) {
+	if !isDocumentRequest(req) || !isHTML(resp.Header.Get("Content-Type")) {
+		return false, false
+	}
+	source := resp.Body
+	if source == nil {
+		source = http.NoBody
+	}
+	decodedSource, err := charset.NewReader(source, resp.Header.Get("Content-Type"))
+	if err != nil {
+		decodedSource = source
+	}
+	docCharset := responseCharset(resp.Header.Get("Content-Type"))
+	pr, pw := io.Pipe()
+	go func() {
+		err := htmltx.TransformTo(pw, decodedSource, htmltx.Options{
+			TabID:                 tab.TabID,
+			EntryID:               req.Header.Get("X-Zp-Entry-Id"),
+			TargetURL:             finalURL,
+			DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
+			DocumentReferrer:      req.Header.Get("X-Zp-Document-Referrer"),
+			RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
+			Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+			DynamicCompileAllowed: dynamicCompileAllowed,
+			ReferrerPolicy:        referrerPolicy,
+			DocumentCharset:       docCharset,
+			DocumentRewriter:      rewriteHTMLDocumentFromJS,
+		})
+		closeErr := source.Close()
 		if err != nil {
-			if resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			releaseOnReturn = true
-			resolve.Invoke(safeResponse("TARGET_CONNECT_FAILED", http.StatusBadGateway, finalURL.Host))
+			_ = pw.CloseWithError(err)
 			return
 		}
-		resolve.Invoke(jsResp)
+		if closeErr != nil {
+			_ = pw.CloseWithError(closeErr)
+			return
+		}
+		_ = pw.Close()
+	}()
+	resp.Body = &closeWithSource{ReadCloser: pr, source: source}
+	resp.ContentLength = -1
+	resp.Header.Del("Content-Length")
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	return true, true
+}
+
+func responseCharset(contentType string) string {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(params["charset"])
+}
+
+// applyResponsePolicy stamps the response-shaping headers after transform: the
+// dynamic-compile signal, the ConstructorPolicy strip, and the response-URL /
+// redirect markers.
+func applyResponsePolicy(resp *http.Response, req *http.Request, finalURL *url.URL, dynamicCompileAllowed, transformed, decoded bool) {
+	if dynamicCompileAllowed {
+		resp.Header.Set("X-ZP-Dynamic-Compile", "1")
+	}
+	resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+	resp.Header.Set("X-ZP-Response-URL", finalURL.String())
+	if finalURL.String() != req.URL.String() {
+		resp.Header.Set("X-ZP-Response-Redirected", "1")
+	} else {
+		resp.Header.Set("X-ZP-Response-Redirected", "0")
+	}
+}
+
+// installBodyCancellation wraps resp.Body so a context cancellation closes it,
+// transferring teardown ownership to the body's lifetime. It reports whether the
+// wrap happened (a nil body leaves ownership with the caller's deferred cancel).
+func installBodyCancellation(ctx context.Context, resp *http.Response, cancel func()) bool {
+	if resp.Body == nil {
+		return false
+	}
+	body := &cancelReadCloser{ReadCloser: resp.Body, cancel: cancel}
+	resp.Body = body
+	go func() {
+		<-ctx.Done()
+		_ = body.Close()
+	}()
+	return true
+}
+
+func broadcastCookieSync(tab *zphttp.TabState, targetURL *url.URL) {
+	if tab == nil || tab.CookieJar == nil || targetURL == nil {
+		return
+	}
+	fn := js.Global().Get("__zp_cookie_sync")
+	if fn.Type() != js.TypeFunction {
+		return
+	}
+	fn.Invoke(map[string]any{
+		"tabId":         tab.TabID,
+		"targetUrl":     targetURL.String(),
+		"cookieString":  tab.CookieJar.DocumentCookie(targetURL),
+		"cookieRecords": cookieRecordsForJS(tab.CookieJar.VisibleRecords(targetURL)),
 	})
+}
+
+func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
+	out := make([]any, 0, len(records))
+	for _, r := range records {
+		rec := map[string]any{
+			"name":     r.Name,
+			"value":    r.Value,
+			"domain":   r.Domain,
+			"hostOnly": r.HostOnly,
+			"path":     r.Path,
+			"secure":   r.Secure,
+			"sameSite": r.SameSite,
+		}
+		if r.ExpiresMS != nil {
+			rec["expiresMs"] = *r.ExpiresMS
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func rewriteHTMLDocumentFromJS(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("rewriteHTMLDocument").Type() != js.TypeFunction {
+		return "", fmt.Errorf("HTML_DOCUMENT_REWRITE_UNAVAILABLE")
+	}
+	out := rewriter.Call("rewriteHTMLDocument", source, map[string]any{
+		"targetUrl":     targetURL,
+		"controlPrefix": controlPrefix,
+		"prelude":       runtimePrelude,
+		"tabId":         tabID,
+		"runtimeToken":  runtimeToken,
+		"servers":       stringsForJS(servers),
+	})
+	if out.Truthy() && out.Get("ok").Bool() {
+		return out.Get("code").String(), nil
+	}
+	return "", fmt.Errorf("HTML_DOCUMENT_REWRITE_FAILED")
+}
+
+func stringsForJS(values []string) []any {
+	out := make([]any, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
+func targetDynamicCompileAllowed(h http.Header) bool {
+	policies := h.Values("Content-Security-Policy")
+	if len(policies) == 0 {
+		return true
+	}
+	for _, policy := range policies {
+		if !cspPolicyAllowsEval(policy) {
+			return false
+		}
+	}
+	return true
+}
+
+func targetReferrerPolicy(h http.Header) string {
+	for _, header := range h.Values("Referrer-Policy") {
+		for _, part := range strings.Split(header, ",") {
+			if policy := normalizeReferrerPolicy(part); policy != "" {
+				return policy
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeReferrerPolicy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "no-referrer", "no-referrer-when-downgrade", "origin", "origin-when-cross-origin", "same-origin", "strict-origin", "strict-origin-when-cross-origin", "unsafe-url":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
+}
+
+func cspPolicyAllowsEval(policy string) bool {
+	directives := parseCSPDirectives(policy)
+	sources, ok := directives["script-src"]
+	if !ok {
+		sources, ok = directives["default-src"]
+	}
+	if !ok {
+		return true
+	}
+	for _, source := range sources {
+		if source == "'unsafe-eval'" || source == "unsafe-eval" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCSPDirectives(policy string) map[string][]string {
+	out := make(map[string][]string)
+	for _, raw := range strings.Split(policy, ";") {
+		fields := strings.Fields(strings.TrimSpace(raw))
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.ToLower(fields[0])
+		if _, exists := out[name]; exists {
+			continue
+		}
+		values := make([]string, 0, len(fields)-1)
+		for _, field := range fields[1:] {
+			values = append(values, strings.ToLower(field))
+		}
+		out[name] = values
+	}
+	return out
 }
 
 func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
@@ -219,7 +431,7 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 		}
 		protocols := jsStringArray(opts.Get("protocols"))
 		tab := k.tabFromValues(opts.Get("tabId").String(), opts.Get("streamIsolationKey").String())
-		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab)
+		conn, resp, err := wsproto.Dial(ctx, k.engine, u, protocols, tab, websocketOrigin(opts.Get("documentUrl").String()))
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -237,6 +449,14 @@ func (k *Kernel) jsStream(this js.Value, args []js.Value) any {
 		}
 		resolve.Invoke(stream)
 	})
+}
+
+func websocketOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func selectedRelayServer(servers []string) string {
@@ -314,6 +534,43 @@ func (k *Kernel) tabFromValues(tabID, keyB64 string) *zphttp.TabState {
 	return t
 }
 
+// dispatchInboundFrame delivers one frame read from the relay to the JS handlers
+// and reports whether the read loop should stop. A read error (handlers, when set,
+// receive an "error") and an OpClose both terminate; a text frame delivers a
+// string and a binary frame an ArrayBuffer, both letting the loop continue.
+func dispatchInboundFrame(handlers js.Value, op byte, payload []byte, err error) (stop bool) {
+	if err != nil {
+		if handlers.Truthy() {
+			callHandler(handlers, "error", jsError("TARGET_CONNECT_FAILED"))
+		}
+		return true
+	}
+	if op == wsproto.OpClose {
+		callHandler(handlers, "close", js.Null())
+		return true
+	}
+	if op == wsproto.OpText {
+		callHandler(handlers, "message", string(payload))
+		return false
+	}
+	arr := js.Global().Get("Uint8Array").New(len(payload))
+	js.CopyBytesToJS(arr, payload)
+	callHandler(handlers, "message", arr.Get("buffer"))
+	return false
+}
+
+// runReadLoop pumps frames from readFrame, dispatching each to the current JS
+// handlers (read live via getHandlers, since the JS side may install them after
+// the loop has started) until a frame signals stop.
+func runReadLoop(ctx context.Context, getHandlers func() js.Value, readFrame func(context.Context) (byte, []byte, error)) {
+	for {
+		op, payload, err := readFrame(ctx)
+		if dispatchInboundFrame(getHandlers(), op, payload, err) {
+			return
+		}
+	}
+}
+
 func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *wsproto.Conn) js.Value {
 	handlers := js.Value{}
 	var start sync.Once
@@ -321,26 +578,7 @@ func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *
 	readLoop := func() {
 		defer cancel()
 		defer conn.Close()
-		for {
-			op, payload, err := conn.ReadFrame(ctx)
-			if err != nil {
-				if handlers.Truthy() {
-					callHandler(handlers, "error", jsError("TARGET_CONNECT_FAILED"))
-				}
-				return
-			}
-			if op == wsproto.OpClose {
-				callHandler(handlers, "close", js.Null())
-				return
-			}
-			if op == wsproto.OpText {
-				callHandler(handlers, "message", string(payload))
-				continue
-			}
-			arr := js.Global().Get("Uint8Array").New(len(payload))
-			js.CopyBytesToJS(arr, payload)
-			callHandler(handlers, "message", arr.Get("buffer"))
-		}
+		runReadLoop(ctx, func() js.Value { return handlers }, conn.ReadFrame)
 	}
 	obj.Set("setHandlers", js.FuncOf(func(this js.Value, args []js.Value) any {
 		if len(args) > 0 {
@@ -370,6 +608,7 @@ func newJSWebSocketStream(ctx context.Context, cancel context.CancelFunc, conn *
 func promise(fn func(resolve, reject js.Value)) js.Value {
 	return js.Global().Get("Promise").New(js.FuncOf(func(this js.Value, args []js.Value) any { go fn(args[0], args[1]); return nil }))
 }
+
 func rejected(msg string) js.Value {
 	return promise(func(resolve, reject js.Value) { reject.Invoke(jsError(msg)) })
 }
@@ -391,6 +630,7 @@ func jsStringArray(v js.Value) []string {
 	}
 	return out
 }
+
 func jsPayload(v js.Value) ([]byte, bool) {
 	if v.Type() == js.TypeString {
 		return []byte(v.String()), false
@@ -430,6 +670,7 @@ func safeResponse(code string, status int, host ...string) js.Value {
 func htmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;").Replace(s)
 }
+
 func classifyErr(err error) string {
 	s := err.Error()
 	switch {
@@ -447,6 +688,7 @@ func classifyErr(err error) string {
 		return "TARGET_CONNECT_FAILED"
 	}
 }
+
 func statusForErr(err error) int {
 	c := classifyErr(err)
 	if c == "TARGET_PROTOCOL_BLOCKED" || c == "POLICY_BLOCKED" {
@@ -454,6 +696,7 @@ func statusForErr(err error) int {
 	}
 	return http.StatusBadGateway
 }
+
 func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }

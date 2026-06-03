@@ -8,9 +8,33 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-oxc_allocator = "0.60"
-oxc_ast = "0.60"
-oxc_parser = "0.60"
-oxc_span = "0.60"
-oxc_syntax = "0.60"
+aes = "0.8"
+base64 = "0.22"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+getrandom = { version = "0.2", features = ["js"] }
+hkdf = "0.12"
+hmac = "0.12"
+lol_html = "2.9.0"
+serde_json = "1.0"
+sha2 = "0.10"
+swc_common = "23.0.0"
+swc_css_ast = "23.0.0"
+swc_css_codegen = "23.0.0"
+swc_css_parser = "23.0.0"
+swc_css_visit = "23.0.0"
+swc_ecma_ast = "25.0.0"
+swc_ecma_codegen = "28.0.0"
+swc_ecma_parser = "41.0.0"
+swc_ecma_transforms_base = "44.0.1"
+swc_ecma_visit = "25.0.0"
+url = "2.5"
 wasm-bindgen = "0.2"
+
+# A.2: HARD cognitive-complexity gate. cognitive_complexity is an allow-by-
+# default nursery lint; "deny" promotes it to a hard error at the threshold set
+# in clippy.toml (cognitive-complexity-threshold = 15). New rewriter functions
+# over budget fail `cargo clippy --all-targets -- -D warnings`. The crate is
+# currently clean at 15 (highest function measures 14 by clippy's metric), so
+# no inline #[allow(clippy::cognitive_complexity)] suppressions are needed.
+[lints.clippy]
+cognitive_complexity = "deny"

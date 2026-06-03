@@ -1,11 +1,10 @@
-use std::collections::HashSet;
-
-use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
-use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType, Span};
-use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
 use wasm_bindgen::prelude::*;
+
+mod css;
+pub mod html;
+mod import_map;
+mod js;
+mod share_url;
 
 #[wasm_bindgen]
 pub struct RewriteOutput {
@@ -15,26 +14,77 @@ pub struct RewriteOutput {
 }
 
 #[wasm_bindgen]
-impl RewriteOutput {
-    #[wasm_bindgen(getter)]
-    pub fn ok(&self) -> bool { self.ok }
-    #[wasm_bindgen(getter)]
-    pub fn code(&self) -> String { self.code.clone() }
-    #[wasm_bindgen(getter)]
-    pub fn error(&self) -> String { self.error.clone() }
+pub struct URLRewriteOutput {
+    ok: bool,
+    url: String,
+    target: String,
+    error: String,
 }
 
 #[wasm_bindgen]
-pub fn rewrite_script(source: &str, kind: &str, target_url: &str, control_prefix: &str) -> RewriteOutput {
+impl URLRewriteOutput {
+    #[wasm_bindgen(getter)]
+    pub fn ok(&self) -> bool {
+        self.ok
+    }
+    #[wasm_bindgen(getter)]
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn target(&self) -> String {
+        self.target.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn error(&self) -> String {
+        self.error.clone()
+    }
+}
+
+#[wasm_bindgen]
+impl RewriteOutput {
+    #[wasm_bindgen(getter)]
+    pub fn ok(&self) -> bool {
+        self.ok
+    }
+    #[wasm_bindgen(getter)]
+    pub fn code(&self) -> String {
+        self.code.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn error(&self) -> String {
+        self.error.clone()
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_script(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+    control_prefix: &str,
+) -> RewriteOutput {
+    rewrite_script_with_context(source, kind, target_url, control_prefix, "", "")
+}
+
+#[wasm_bindgen]
+pub fn rewrite_script_with_context(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+    control_prefix: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> RewriteOutput {
+    let ctx = RewriteContext::new(target_url, control_prefix, tab_id, runtime_token);
     match normalize_kind(kind) {
-        "module" => rewrite_program_source(source, true, target_url, control_prefix),
+        "module" => rewrite_program_source(source, true, ctx),
         "event-handler" => rewrite_wrapped_source(
             source,
             "function __zp_event__(event){\n",
             "\n}",
             false,
-            target_url,
-            control_prefix,
+            ctx.without_runtime_context(),
             true,
         ),
         "function" => rewrite_wrapped_source(
@@ -42,12 +92,190 @@ pub fn rewrite_script(source: &str, kind: &str, target_url: &str, control_prefix
             "function __zp_dynamic__(){\n",
             "\n}",
             false,
-            target_url,
-            control_prefix,
+            ctx.without_runtime_context(),
             false,
         ),
-        _ => rewrite_program_source(source, false, target_url, control_prefix),
+        _ => rewrite_program_source(source, false, ctx.without_runtime_context()),
     }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str) -> RewriteOutput {
+    match css::rewrite(source, base_url, control_prefix) {
+        Ok(code) => RewriteOutput {
+            ok: true,
+            code,
+            error: String::new(),
+        },
+        Err(error) => RewriteOutput {
+            ok: false,
+            code: String::new(),
+            error,
+        },
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_import_map(
+    source: &str,
+    base_url: &str,
+    tab_id: &str,
+    runtime_token: &str,
+    control_prefix: &str,
+) -> String {
+    import_map::rewrite(source, base_url, tab_id, runtime_token, control_prefix)
+}
+
+#[wasm_bindgen]
+pub fn rewrite_html_document(
+    source: &str,
+    target_url: &str,
+    control_prefix: &str,
+    servers_json: &str,
+    runtime_prelude: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> RewriteOutput {
+    let servers = serde_json::from_str::<Vec<String>>(servers_json).unwrap_or_default();
+    match html::document::rewrite_document(
+        source,
+        html::document::DocumentOptions {
+            target_url,
+            control_prefix,
+            servers: &servers,
+            runtime_prelude,
+            tab_id,
+            runtime_token,
+        },
+    ) {
+        Ok(code) => RewriteOutput {
+            ok: true,
+            code,
+            error: String::new(),
+        },
+        Err(error) => RewriteOutput {
+            ok: false,
+            code: String::new(),
+            error,
+        },
+    }
+}
+
+#[wasm_bindgen]
+pub fn make_share_url(target: &str, servers_json: &str) -> RewriteOutput {
+    let servers = serde_json::from_str::<Vec<String>>(servers_json).unwrap_or_default();
+    match share_url::new_with_servers(target, &servers) {
+        Ok(code) => RewriteOutput {
+            ok: true,
+            code,
+            error: String::new(),
+        },
+        Err(error) => RewriteOutput {
+            ok: false,
+            code: String::new(),
+            error,
+        },
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_script_url(
+    raw: &str,
+    kind: &str,
+    target_url: &str,
+    control_prefix: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> URLRewriteOutput {
+    let out = js::module_urls::script_url(
+        raw,
+        normalize_kind(kind),
+        target_url,
+        RewriteContext::new(target_url, control_prefix, tab_id, runtime_token).control_prefix,
+        tab_id,
+        runtime_token,
+    );
+    URLRewriteOutput {
+        ok: out.ok,
+        url: out.url,
+        target: out.target,
+        error: out.error,
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_fetch_url(raw: &str, target_url: &str, control_prefix: &str) -> URLRewriteOutput {
+    let out = html::fetch_url(
+        raw,
+        target_url,
+        RewriteContext::new(target_url, control_prefix, "", "").control_prefix,
+    );
+    URLRewriteOutput {
+        ok: out.ok,
+        url: out.url,
+        target: out.target,
+        error: out.error,
+    }
+}
+
+#[wasm_bindgen]
+pub fn rewrite_srcset(raw: &str, target_url: &str, control_prefix: &str) -> URLRewriteOutput {
+    let out = html::srcset(
+        raw,
+        target_url,
+        RewriteContext::new(target_url, control_prefix, "", "").control_prefix,
+    );
+    URLRewriteOutput {
+        ok: out.ok,
+        url: out.url,
+        target: out.target,
+        error: out.error,
+    }
+}
+
+#[wasm_bindgen]
+pub fn resolve_target_url(raw: &str, target_url: &str, control_prefix: &str) -> URLRewriteOutput {
+    let out = html::target_url(
+        raw,
+        target_url,
+        RewriteContext::new(target_url, control_prefix, "", "").control_prefix,
+    );
+    URLRewriteOutput {
+        ok: out.ok,
+        url: out.url,
+        target: out.target,
+        error: out.error,
+    }
+}
+
+#[wasm_bindgen]
+pub fn classify_link_rel(rel: &str) -> String {
+    html::link_rel_kind(rel).to_string()
+}
+
+#[wasm_bindgen]
+pub fn classify_blocked_element(tag: &str) -> String {
+    html::blocked_element_kind(tag).to_string()
+}
+
+#[wasm_bindgen]
+pub fn classify_meta_policy(http_equiv: &str) -> String {
+    html::meta_policy_kind(http_equiv).to_string()
+}
+
+#[wasm_bindgen]
+pub fn classify_attr_policy(tag: &str, key: &str) -> String {
+    html::attr_policy_kind(tag, key).to_string()
+}
+
+#[wasm_bindgen]
+pub fn classify_script_type(script_type: &str) -> String {
+    html::script_type_kind(script_type).to_string()
+}
+
+#[wasm_bindgen]
+pub fn classify_event_handler_attr(attr_name: &str) -> String {
+    html::event_handler_attr_kind(attr_name).to_string()
 }
 
 fn normalize_kind(kind: &str) -> &'static str {
@@ -59,16 +287,55 @@ fn normalize_kind(kind: &str) -> &'static str {
     }
 }
 
-fn rewrite_program_source(source: &str, module: bool, target_url: &str, control_prefix: &str) -> RewriteOutput {
-    let allocator = Allocator::default();
-    let source_type = if module { SourceType::mjs() } else { SourceType::cjs() };
-    let ret = Parser::new(&allocator, source, source_type).parse();
-    if !ret.errors.is_empty() {
-        return RewriteOutput { ok: false, code: String::new(), error: "PARSE_FAILED".to_string() };
+#[derive(Clone, Copy)]
+pub(crate) struct RewriteContext<'a> {
+    pub(crate) target_url: &'a str,
+    pub(crate) control_prefix: &'a str,
+    pub(crate) tab_id: &'a str,
+    pub(crate) runtime_token: &'a str,
+}
+
+impl<'a> RewriteContext<'a> {
+    pub(crate) fn new(
+        target_url: &'a str,
+        control_prefix: &'a str,
+        tab_id: &'a str,
+        runtime_token: &'a str,
+    ) -> Self {
+        Self {
+            target_url,
+            control_prefix: if control_prefix.is_empty() {
+                "/zp/"
+            } else {
+                control_prefix
+            },
+            tab_id,
+            runtime_token,
+        }
     }
-    let mut rewriter = Rewriter::new(source, module, target_url, control_prefix);
-    rewriter.walk_program(&ret.program);
-    RewriteOutput { ok: true, code: rewriter.finish(), error: String::new() }
+
+    pub(crate) fn without_runtime_context(self) -> Self {
+        Self {
+            tab_id: "",
+            runtime_token: "",
+            ..self
+        }
+    }
+}
+
+fn rewrite_program_source(source: &str, module: bool, ctx: RewriteContext<'_>) -> RewriteOutput {
+    match js::swc_rewriter::rewrite_script(source, module, ctx) {
+        Ok(code) => RewriteOutput {
+            ok: true,
+            code,
+            error: String::new(),
+        },
+        Err(error) => RewriteOutput {
+            ok: false,
+            code: String::new(),
+            error,
+        },
+    }
 }
 
 fn rewrite_wrapped_source(
@@ -76,23 +343,24 @@ fn rewrite_wrapped_source(
     prefix: &str,
     suffix: &str,
     module: bool,
-    target_url: &str,
-    control_prefix: &str,
+    ctx: RewriteContext<'_>,
     event_handler: bool,
 ) -> RewriteOutput {
     let mut wrapped = String::with_capacity(prefix.len() + source.len() + suffix.len());
     wrapped.push_str(prefix);
     wrapped.push_str(source);
     wrapped.push_str(suffix);
-    let out = rewrite_program_source(&wrapped, module, target_url, control_prefix);
+    let out = rewrite_program_source(&wrapped, module, ctx);
     if !out.ok {
         return out;
     }
-    if out.code.len() < prefix.len() + suffix.len() {
-        return RewriteOutput { ok: false, code: String::new(), error: "REWRITE_FAILED".to_string() };
-    }
-    let inner_end = out.code.len() - suffix.len();
-    let inner = &out.code[prefix.len()..inner_end];
+    let Some(inner) = generated_function_body(&out.code) else {
+        return RewriteOutput {
+            ok: false,
+            code: String::new(),
+            error: "REWRITE_FAILED".to_string(),
+        };
+    };
     let code = if event_handler {
         let mut event = String::with_capacity(inner.len() + 76);
         event.push_str("return __zp_runEvent(this,event,function(__zp_scope){with(__zp_scope){\n");
@@ -102,1043 +370,17 @@ fn rewrite_wrapped_source(
     } else {
         inner.to_string()
     };
-    RewriteOutput { ok: true, code, error: String::new() }
-}
-
-const GLOBALS: &[&str] = &[
-    "window", "self", "globalThis", "location", "document", "history", "top", "parent", "opener", "frames",
-    "WebSocket", "eval", "Function", "AsyncFunction", "GeneratorFunction", "AsyncGeneratorFunction",
-];
-const MEMBER_HELPER_PROPS: &[&str] = &[
-    "location", "defaultView", "contentWindow", "contentDocument", "top", "parent", "opener", "frames", "constructor", "postMessage",
-];
-const CALL_HELPER_PROPS: &[&str] = &[
-    "assign", "replace", "open", "get", "getOwnPropertyDescriptor", "defineProperty",
-];
-
-#[derive(Clone)]
-struct Replacement {
-    start: usize,
-    end: usize,
-    text: String,
-    priority: i32,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ScopeMode {
-    FunctionRoot,
-    Block,
-}
-
-struct Rewriter<'a> {
-    source: &'a str,
-    module: bool,
-    target_url: &'a str,
-    control_prefix: &'a str,
-    replacements: Vec<Replacement>,
-    scopes: Vec<HashSet<String>>,
-}
-
-impl<'a> Rewriter<'a> {
-    fn new(source: &'a str, module: bool, target_url: &'a str, control_prefix: &'a str) -> Self {
-        Self {
-            source,
-            module,
-            target_url,
-            control_prefix: if control_prefix.is_empty() { "/zp/" } else { control_prefix },
-            replacements: Vec::new(),
-            scopes: Vec::new(),
-        }
-    }
-
-    fn finish(mut self) -> String {
-        self.replacements.sort_by(|a, b| {
-            a.start.cmp(&b.start)
-                .then(b.priority.cmp(&a.priority))
-                .then((b.end - b.start).cmp(&(a.end - a.start)))
-        });
-        let mut chosen: Vec<Replacement> = Vec::new();
-        let mut covered_end = 0usize;
-        for r in self.replacements {
-            if !chosen.is_empty() && r.start < covered_end { continue; }
-            covered_end = r.end;
-            chosen.push(r);
-        }
-        let mut out = String::with_capacity(self.source.len() + chosen.iter().map(|r| r.text.len()).sum::<usize>());
-        let mut pos = 0usize;
-        for r in chosen {
-            out.push_str(&self.source[pos..r.start]);
-            out.push_str(&r.text);
-            pos = r.end;
-        }
-        out.push_str(&self.source[pos..]);
-        out
-    }
-
-    fn span_text(&self, span: Span) -> &str {
-        self.source.get(span.start as usize..span.end as usize).unwrap_or("")
-    }
-
-    fn push_scope(&mut self, scope: HashSet<String>) { self.scopes.push(scope); }
-    fn pop_scope(&mut self) { self.scopes.pop(); }
-    fn declare(&mut self, name: &str) {
-        if let Some(scope) = self.scopes.last_mut() { scope.insert(name.to_string()); }
-    }
-    fn declared(&self, name: &str) -> bool { self.scopes.iter().rev().any(|scope| scope.contains(name)) }
-    fn add_replacement(&mut self, span: Span, text: String, priority: i32) {
-        let start = span.start as usize;
-        let end = span.end as usize;
-        if start < end { self.replacements.push(Replacement { start, end, text, priority }); }
-    }
-
-    fn walk_program(&mut self, program: &Program<'a>) {
-        self.push_scope(self.collect_body_bindings(&program.body, ScopeMode::FunctionRoot));
-        for stmt in &program.body { self.walk_statement(stmt); }
-        self.pop_scope();
-    }
-
-    fn walk_statement(&mut self, stmt: &Statement<'a>) {
-        match stmt {
-            Statement::BlockStatement(block) => {
-                self.push_scope(self.collect_body_bindings(&block.body, ScopeMode::Block));
-                for stmt in &block.body { self.walk_statement(stmt); }
-                self.pop_scope();
-            }
-            Statement::ExpressionStatement(expr) => self.walk_expression(&expr.expression),
-            Statement::IfStatement(stmt) => {
-                self.walk_expression(&stmt.test);
-                self.walk_statement(&stmt.consequent);
-                if let Some(alt) = &stmt.alternate { self.walk_statement(alt); }
-            }
-            Statement::WhileStatement(stmt) => { self.walk_expression(&stmt.test); self.walk_statement(&stmt.body); }
-            Statement::DoWhileStatement(stmt) => { self.walk_statement(&stmt.body); self.walk_expression(&stmt.test); }
-            Statement::ForStatement(stmt) => {
-                let scoped = matches!(stmt.init.as_ref(), Some(ForStatementInit::VariableDeclaration(decl)) if decl.kind != VariableDeclarationKind::Var);
-                if scoped { self.push_scope(HashSet::new()); }
-                if let Some(init) = &stmt.init {
-                    match init {
-                        ForStatementInit::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
-                        _ => self.walk_expression(init.to_expression()),
-                    }
-                }
-                if let Some(test) = &stmt.test { self.walk_expression(test); }
-                if let Some(update) = &stmt.update { self.walk_expression(update); }
-                self.walk_statement(&stmt.body);
-                if scoped { self.pop_scope(); }
-            }
-            Statement::ForInStatement(stmt) => {
-                let scoped = matches!(&stmt.left, ForStatementLeft::VariableDeclaration(decl) if decl.kind != VariableDeclarationKind::Var);
-                if scoped { self.push_scope(HashSet::new()); }
-                match &stmt.left {
-                    ForStatementLeft::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
-                    _ => self.walk_assignment_target(stmt.left.to_assignment_target()),
-                }
-                self.walk_expression(&stmt.right);
-                self.walk_statement(&stmt.body);
-                if scoped { self.pop_scope(); }
-            }
-            Statement::ForOfStatement(stmt) => {
-                let scoped = matches!(&stmt.left, ForStatementLeft::VariableDeclaration(decl) if decl.kind != VariableDeclarationKind::Var);
-                if scoped { self.push_scope(HashSet::new()); }
-                match &stmt.left {
-                    ForStatementLeft::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
-                    _ => self.walk_assignment_target(stmt.left.to_assignment_target()),
-                }
-                self.walk_expression(&stmt.right);
-                self.walk_statement(&stmt.body);
-                if scoped { self.pop_scope(); }
-            }
-            Statement::ReturnStatement(stmt) => { if let Some(arg) = &stmt.argument { self.walk_expression(arg); } }
-            Statement::ThrowStatement(stmt) => self.walk_expression(&stmt.argument),
-            Statement::SwitchStatement(stmt) => {
-                self.walk_expression(&stmt.discriminant);
-                for case in &stmt.cases {
-                    if let Some(test) = &case.test { self.walk_expression(test); }
-                    for stmt in &case.consequent { self.walk_statement(stmt); }
-                }
-            }
-            Statement::TryStatement(stmt) => {
-                self.walk_block_statement(&stmt.block);
-                if let Some(handler) = &stmt.handler {
-                    let mut scope = HashSet::new();
-                    if let Some(param) = &handler.param { self.collect_binding_pattern(&param.pattern, &mut scope); }
-                    self.push_scope(scope);
-                    self.walk_block_statement(&handler.body);
-                    self.pop_scope();
-                }
-                if let Some(finalizer) = &stmt.finalizer { self.walk_block_statement(finalizer); }
-            }
-            Statement::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
-            Statement::FunctionDeclaration(func) => self.walk_function(func),
-            Statement::ClassDeclaration(class) => self.walk_class(class, true),
-            Statement::ImportDeclaration(decl) => self.add_replacement(decl.source.span, format!("{:?}", self.module_specifier(decl.source.value.as_str())), 95),
-            Statement::ExportNamedDeclaration(decl) => {
-                if let Some(source) = &decl.source { self.add_replacement(source.span, format!("{:?}", self.module_specifier(source.value.as_str())), 95); }
-                if let Some(inner) = &decl.declaration { self.walk_declaration(inner); }
-            }
-            Statement::ExportAllDeclaration(decl) => self.add_replacement(decl.source.span, format!("{:?}", self.module_specifier(decl.source.value.as_str())), 95),
-            Statement::ExportDefaultDeclaration(decl) => self.walk_export_default(decl),
-            _ => {}
-        }
-    }
-    fn walk_declaration(&mut self, decl: &Declaration<'a>) {
-        match decl {
-            Declaration::VariableDeclaration(decl) => self.walk_variable_declaration(decl),
-            Declaration::FunctionDeclaration(func) => self.walk_function(func),
-            Declaration::ClassDeclaration(class) => self.walk_class(class, true),
-            _ => {}
-        }
-    }
-    fn walk_export_default(&mut self, decl: &ExportDefaultDeclaration<'a>) {
-        match &decl.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(func) => self.walk_function(func),
-            ExportDefaultDeclarationKind::ClassDeclaration(class) => self.walk_class(class, true),
-            other => {
-                if let Some(expr) = other.as_expression() { self.walk_expression(expr); }
-            }
-        }
-    }
-    fn walk_function(&mut self, func: &Function<'a>) {
-        if let Some(id) = &func.id { self.declare(id.name.as_str()); }
-        let mut scope = HashSet::new();
-        if let Some(id) = &func.id { scope.insert(id.name.to_string()); }
-        self.collect_formal_parameters(&func.params, &mut scope);
-        if let Some(body) = &func.body {
-            let body_scope = self.collect_body_bindings(&body.statements, ScopeMode::FunctionRoot);
-            scope.extend(body_scope);
-            self.push_scope(scope);
-            for stmt in &body.statements { self.walk_statement(stmt); }
-            self.pop_scope();
-        }
-    }
-    fn walk_class(&mut self, class: &Class<'a>, declare_id: bool) {
-        if declare_id {
-            if let Some(id) = &class.id { self.declare(id.name.as_str()); }
-        }
-        if let Some(super_class) = &class.super_class { self.walk_expression(super_class); }
-        let mut pushed_name_scope = false;
-        if let Some(id) = &class.id {
-            let mut scope = HashSet::new();
-            scope.insert(id.name.to_string());
-            self.push_scope(scope);
-            pushed_name_scope = true;
-        }
-        for elem in &class.body.body {
-            match elem {
-                ClassElement::StaticBlock(block) => {
-                    self.push_scope(self.collect_body_bindings(&block.body, ScopeMode::Block));
-                    for stmt in &block.body { self.walk_statement(stmt); }
-                    self.pop_scope();
-                }
-                ClassElement::MethodDefinition(method) => {
-                    if method.computed { self.walk_property_key(&method.key); }
-                    self.walk_function(&method.value);
-                }
-                ClassElement::PropertyDefinition(prop) => {
-                    if prop.computed { self.walk_property_key(&prop.key); }
-                    if let Some(value) = &prop.value { self.walk_expression(value); }
-                }
-                ClassElement::AccessorProperty(prop) => {
-                    if prop.computed { self.walk_property_key(&prop.key); }
-                    if let Some(value) = &prop.value { self.walk_expression(value); }
-                }
-                _ => {}
-            }
-        }
-        if pushed_name_scope { self.pop_scope(); }
-    }
-    fn walk_block_statement(&mut self, block: &BlockStatement<'a>) {
-        self.push_scope(self.collect_body_bindings(&block.body, ScopeMode::Block));
-        for stmt in &block.body { self.walk_statement(stmt); }
-        self.pop_scope();
-    }
-
-    fn walk_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
-        for declarator in &decl.declarations {
-            self.declare_binding_pattern(&declarator.id);
-            self.walk_binding_pattern(&declarator.id);
-            if let Some(init) = &declarator.init { self.walk_expression(init); }
-        }
-    }
-
-    fn declare_binding_pattern(&mut self, pattern: &BindingPattern<'a>) {
-        let mut names = HashSet::new();
-        self.collect_binding_pattern(pattern, &mut names);
-        for name in names { self.declare(&name); }
-    }
-
-    fn walk_binding_pattern(&mut self, pattern: &BindingPattern<'a>) {
-        match &pattern.kind {
-            BindingPatternKind::BindingIdentifier(_) => {}
-            BindingPatternKind::AssignmentPattern(pat) => {
-                self.walk_binding_pattern(&pat.left);
-                self.walk_expression(&pat.right);
-            }
-            BindingPatternKind::ArrayPattern(arr) => {
-                for elem in &arr.elements { if let Some(p) = elem { self.walk_binding_pattern(p); } }
-                if let Some(rest) = &arr.rest { self.walk_binding_pattern(&rest.argument); }
-            }
-            BindingPatternKind::ObjectPattern(obj) => {
-                for prop in &obj.properties {
-                    if prop.computed { self.walk_property_key(&prop.key); }
-                    self.walk_binding_pattern(&prop.value);
-                }
-                if let Some(rest) = &obj.rest { self.walk_binding_pattern(&rest.argument); }
-            }
-        }
-    }
-
-    fn walk_assignment_target(&mut self, target: &AssignmentTarget<'a>) {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(_) => {}
-            AssignmentTarget::ComputedMemberExpression(expr) => {
-                self.walk_expression(&expr.object);
-                self.walk_expression(&expr.expression);
-            }
-            AssignmentTarget::StaticMemberExpression(expr) => self.walk_expression(&expr.object),
-            AssignmentTarget::PrivateFieldExpression(expr) => self.walk_expression(&expr.object),
-            AssignmentTarget::ArrayAssignmentTarget(arr) => {
-                for elem in &arr.elements { if let Some(item) = elem { self.walk_assignment_target_maybe_default(item); } }
-                if let Some(rest) = &arr.rest { self.walk_assignment_target(&rest.target); }
-            }
-            AssignmentTarget::ObjectAssignmentTarget(obj) => {
-                for prop in &obj.properties {
-                    match prop {
-                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
-                            if let Some(init) = &id.init { self.walk_expression(init); }
-                        }
-                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(prop) => {
-                            if prop.computed { self.walk_property_key(&prop.name); }
-                            self.walk_assignment_target_maybe_default(&prop.binding);
-                        }
-                    }
-                }
-                if let Some(rest) = &obj.rest { self.walk_assignment_target(&rest.target); }
-            }
-            _ => {}
-        }
-    }
-
-    fn walk_assignment_target_maybe_default(&mut self, target: &AssignmentTargetMaybeDefault<'a>) {
-        match target {
-            AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(_) => {}
-            AssignmentTargetMaybeDefault::ComputedMemberExpression(expr) => { self.walk_expression(&expr.object); self.walk_expression(&expr.expression); }
-            AssignmentTargetMaybeDefault::StaticMemberExpression(expr) => self.walk_expression(&expr.object),
-            AssignmentTargetMaybeDefault::PrivateFieldExpression(expr) => self.walk_expression(&expr.object),
-            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(target) => {
-                self.walk_assignment_target(&target.binding);
-                self.walk_expression(&target.init);
-            }
-            _ => {}
-        }
-    }
-
-    fn walk_property_key(&mut self, key: &PropertyKey<'a>) {
-        match key {
-            PropertyKey::StaticIdentifier(_) | PropertyKey::PrivateIdentifier(_) => {}
-            _ => self.walk_expression(key.to_expression()),
-        }
-    }
-
-    fn walk_expression(&mut self, expr: &Expression<'a>) {
-        match expr {
-            Expression::Identifier(id) => {
-                if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
-                    self.add_replacement(id.span, format!("__zp_get(globalThis,{:?})", id.name.as_str()), 10);
-                }
-            }
-            Expression::StaticMemberExpression(expr) => {
-                if self.is_import_meta_url_static(expr) {
-                    self.add_replacement(expr.span, format!("{:?}", self.target_url), 90);
-                    return;
-                }
-                if self.member_needs_helper_static(expr) {
-                    self.add_replacement(expr.span, format!("__zp_get({},{:?})", self.render_expression(&expr.object), expr.property.name.as_str()), 80);
-                    return;
-                }
-                self.walk_expression(&expr.object);
-            }
-            Expression::ComputedMemberExpression(expr) => {
-                if self.member_needs_helper_computed(expr) {
-                    self.add_replacement(expr.span, format!("__zp_get({},{})", self.render_expression(&expr.object), self.render_expression(&expr.expression)), 80);
-                    return;
-                }
-                self.walk_expression(&expr.object);
-                self.walk_expression(&expr.expression);
-            }
-            Expression::PrivateFieldExpression(expr) => self.walk_expression(&expr.object),
-            Expression::AssignmentExpression(expr) => self.walk_assignment_expression(expr),
-            Expression::UpdateExpression(expr) => self.walk_update_expression(expr),
-            Expression::ImportExpression(expr) => self.walk_import_expression(expr),
-            Expression::CallExpression(expr) => self.walk_call_expression(expr),
-            Expression::NewExpression(expr) => self.walk_new_expression(expr),
-            Expression::BinaryExpression(expr) => { self.walk_expression(&expr.left); self.walk_expression(&expr.right); }
-            Expression::LogicalExpression(expr) => { self.walk_expression(&expr.left); self.walk_expression(&expr.right); }
-            Expression::ConditionalExpression(expr) => { self.walk_expression(&expr.test); self.walk_expression(&expr.consequent); self.walk_expression(&expr.alternate); }
-            Expression::UnaryExpression(expr) => self.walk_expression(&expr.argument),
-            Expression::AwaitExpression(expr) => self.walk_expression(&expr.argument),
-            Expression::YieldExpression(expr) => if let Some(arg) = &expr.argument { self.walk_expression(arg); },
-            Expression::SequenceExpression(expr) => for e in &expr.expressions { self.walk_expression(e); },
-            Expression::ParenthesizedExpression(expr) => self.walk_expression(&expr.expression),
-            Expression::ChainExpression(expr) => match &expr.expression {
-                ChainElement::CallExpression(call) => self.walk_call_expression(call),
-                ChainElement::TSNonNullExpression(inner) => self.walk_expression(&inner.expression),
-                ChainElement::ComputedMemberExpression(inner) => { self.walk_expression(&inner.object); self.walk_expression(&inner.expression); }
-                ChainElement::StaticMemberExpression(inner) => self.walk_expression(&inner.object),
-                ChainElement::PrivateFieldExpression(inner) => self.walk_expression(&inner.object),
-            },
-            Expression::ObjectExpression(expr) => {
-                for prop in &expr.properties {
-                    match prop {
-                        ObjectPropertyKind::ObjectProperty(prop) => {
-                            if prop.computed { self.walk_property_key(&prop.key); }
-                            if prop.shorthand {
-                                if let Expression::Identifier(id) = &prop.value {
-                                    if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
-                                        self.add_replacement(prop.span, format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)), 90);
-                                        continue;
-                                    }
-                                }
-                            }
-                            self.walk_expression(&prop.value);
-                        }
-                        ObjectPropertyKind::SpreadProperty(prop) => self.walk_expression(&prop.argument),
-                    }
-                }
-            }
-            Expression::ArrayExpression(expr) => {
-                for elem in &expr.elements {
-                    match elem {
-                        ArrayExpressionElement::SpreadElement(spread) => self.walk_expression(&spread.argument),
-                        ArrayExpressionElement::Elision(_) => {}
-                        _ => self.walk_expression(elem.to_expression()),
-                    }
-                }
-            }
-            Expression::FunctionExpression(func) => self.walk_function(func),
-            Expression::ClassExpression(class) => self.walk_class(class, false),
-            Expression::ArrowFunctionExpression(func) => {
-                let mut scope = HashSet::new();
-                self.collect_formal_parameters(&func.params, &mut scope);
-                scope.extend(self.collect_body_bindings(&func.body.statements, ScopeMode::FunctionRoot));
-                self.push_scope(scope);
-                for stmt in &func.body.statements { self.walk_statement(stmt); }
-                self.pop_scope();
-            }
-            Expression::TemplateLiteral(tpl) => {
-                for expr in &tpl.expressions { self.walk_expression(expr); }
-            }
-            Expression::TaggedTemplateExpression(tagged) => {
-                self.walk_expression(&tagged.tag);
-                for expr in &tagged.quasi.expressions { self.walk_expression(expr); }
-            }
-            Expression::TSAsExpression(expr) => self.walk_expression(&expr.expression),
-            Expression::TSSatisfiesExpression(expr) => self.walk_expression(&expr.expression),
-            Expression::TSNonNullExpression(expr) => self.walk_expression(&expr.expression),
-            Expression::TSTypeAssertion(expr) => self.walk_expression(&expr.expression),
-            Expression::TSInstantiationExpression(expr) => self.walk_expression(&expr.expression),
-            _ => {}
-        }
-    }
-
-    fn walk_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
-        if let Some((base, prop)) = self.assignment_target(&expr.left) {
-            if expr.operator == AssignmentOperator::Assign {
-                self.add_replacement(expr.span, format!("(__zp_set({},{},{}))", base, prop, self.render_expression(&expr.right)), 100);
-                return;
-            }
-            let op = assignment_operator_text(expr.operator);
-            let rhs = if matches!(expr.operator, AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalOr | AssignmentOperator::LogicalNullish) {
-                format!("()=>({})", self.render_expression(&expr.right))
-            } else {
-                self.render_expression(&expr.right)
-            };
-            self.add_replacement(expr.span, format!("(__zp_assign({},{},{:?},{}))", base, prop, op, rhs), 100);
-            return;
-        }
-        self.walk_assignment_target(&expr.left);
-        self.walk_expression(&expr.right);
-    }
-
-    fn walk_update_expression(&mut self, expr: &UpdateExpression<'a>) {
-        if let Some((base, prop)) = self.simple_assignment_target(&expr.argument) {
-            self.add_replacement(
-                expr.span,
-                format!("(__zp_update({},{},{:?},{}))", base, prop, update_operator_text(expr.operator), expr.prefix),
-                100,
-            );
-            return;
-        }
-        self.walk_simple_assignment_target(&expr.argument);
-    }
-
-    fn walk_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'a>) {
-        match target {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => {}
-            SimpleAssignmentTarget::ComputedMemberExpression(expr) => { self.walk_expression(&expr.object); self.walk_expression(&expr.expression); }
-            SimpleAssignmentTarget::StaticMemberExpression(expr) => self.walk_expression(&expr.object),
-            SimpleAssignmentTarget::PrivateFieldExpression(expr) => self.walk_expression(&expr.object),
-            _ => {}
-        }
-    }
-
-    fn walk_import_expression(&mut self, expr: &ImportExpression<'a>) {
-        if let Expression::StringLiteral(spec) = &expr.source {
-            self.add_replacement(spec.span, format!("{:?}", self.module_specifier(spec.value.as_str())), 95);
-            return;
-        }
-        self.add_replacement(expr.source.span(), format!("__zp_module_url({},{:?})", self.render_expression(&expr.source), self.target_url), 95);
-    }
-
-    fn walk_call_expression(&mut self, expr: &CallExpression<'a>) {
-        if let Some((base, prop)) = self.call_target(&expr.callee) {
-            let args = self.render_arguments(&expr.arguments);
-            self.add_replacement(expr.span, format!("(__zp_call({},{},[{}]))", base, prop, args), 90);
-            return;
-        }
-        self.walk_expression(&expr.callee);
-        for arg in &expr.arguments { self.walk_argument(arg); }
-    }
-
-    fn walk_new_expression(&mut self, expr: &NewExpression<'a>) {
-        if let Some(target) = self.construct_target(&expr.callee) {
-            let args = self.render_arguments(&expr.arguments);
-            self.add_replacement(expr.span, format!("(__zp_construct({},[{}]))", target, args), 90);
-            return;
-        }
-        self.walk_expression(&expr.callee);
-        for arg in &expr.arguments { self.walk_argument(arg); }
-    }
-
-    fn walk_argument(&mut self, arg: &Argument<'a>) {
-        match arg {
-            Argument::SpreadElement(spread) => self.walk_expression(&spread.argument),
-            _ => self.walk_expression(arg.to_expression()),
-        }
-    }
-
-    fn render_arguments(&self, args: &[Argument<'a>]) -> String {
-        args.iter().map(|arg| match arg {
-            Argument::SpreadElement(spread) => format!("...{}", self.render_expression(&spread.argument)),
-            _ => self.render_expression(arg.to_expression()),
-        }).collect::<Vec<_>>().join(",")
-    }
-
-    fn render_expression(&self, expr: &Expression<'a>) -> String {
-        match expr {
-            Expression::Identifier(id) => {
-                if self.is_global_name(id.name.as_str()) && !self.declared(id.name.as_str()) {
-                    format!("__zp_get(globalThis,{:?})", id.name.as_str())
-                } else {
-                    self.span_text(id.span).to_string()
-                }
-            }
-            Expression::StaticMemberExpression(expr) => self.render_static_member(expr),
-            Expression::ComputedMemberExpression(expr) => self.render_computed_member(expr),
-            Expression::PrivateFieldExpression(expr) => {
-                self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))])
-            }
-            Expression::CallExpression(expr) => self.render_call_expression(expr),
-            Expression::NewExpression(expr) => self.render_new_expression(expr),
-            Expression::ImportExpression(expr) => self.render_import_expression(expr),
-            Expression::BinaryExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.left.span(), self.render_expression(&expr.left)),
-                (expr.right.span(), self.render_expression(&expr.right)),
-            ]),
-            Expression::LogicalExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.left.span(), self.render_expression(&expr.left)),
-                (expr.right.span(), self.render_expression(&expr.right)),
-            ]),
-            Expression::ConditionalExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.test.span(), self.render_expression(&expr.test)),
-                (expr.consequent.span(), self.render_expression(&expr.consequent)),
-                (expr.alternate.span(), self.render_expression(&expr.alternate)),
-            ]),
-            Expression::UnaryExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.argument.span(), self.render_expression(&expr.argument)),
-            ]),
-            Expression::UpdateExpression(expr) => self.render_update_expression(expr),
-            Expression::AwaitExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.argument.span(), self.render_expression(&expr.argument)),
-            ]),
-            Expression::YieldExpression(expr) => {
-                if let Some(arg) = &expr.argument {
-                    self.render_span_with(expr.span, vec![(arg.span(), self.render_expression(arg))])
-                } else {
-                    self.span_text(expr.span).to_string()
-                }
-            }
-            Expression::SequenceExpression(expr) => self.render_span_with(
-                expr.span,
-                expr.expressions.iter().map(|e| (e.span(), self.render_expression(e))).collect(),
-            ),
-            Expression::ParenthesizedExpression(expr) => self.render_span_with(expr.span, vec![
-                (expr.expression.span(), self.render_expression(&expr.expression)),
-            ]),
-            Expression::ChainExpression(expr) => self.render_chain_element(expr.span, &expr.expression),
-            Expression::TemplateLiteral(expr) => self.render_span_with(
-                expr.span,
-                expr.expressions.iter().map(|e| (e.span(), self.render_expression(e))).collect(),
-            ),
-            Expression::TaggedTemplateExpression(expr) => {
-                let mut parts = Vec::with_capacity(expr.quasi.expressions.len() + 1);
-                parts.push((expr.tag.span(), self.render_expression(&expr.tag)));
-                parts.extend(expr.quasi.expressions.iter().map(|e| (e.span(), self.render_expression(e))));
-                self.render_span_with(expr.span, parts)
-            }
-            Expression::ObjectExpression(expr) => self.render_object_expression(expr),
-            Expression::ArrayExpression(expr) => self.render_array_expression(expr),
-            Expression::AssignmentExpression(expr) => self.render_assignment_expression(expr),
-            Expression::TSAsExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
-            Expression::TSSatisfiesExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
-            Expression::TSNonNullExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
-            Expression::TSTypeAssertion(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
-            Expression::TSInstantiationExpression(expr) => self.render_span_with(expr.span, vec![(expr.expression.span(), self.render_expression(&expr.expression))]),
-            _ => self.span_text(expr.span()).to_string(),
-        }
-    }
-
-    fn render_span_with(&self, span: Span, mut parts: Vec<(Span, String)>) -> String {
-        parts.sort_by_key(|(part_span, _)| part_span.start);
-        let start = span.start as usize;
-        let end = span.end as usize;
-        let mut out = String::with_capacity(end.saturating_sub(start) + parts.iter().map(|(_, text)| text.len()).sum::<usize>());
-        let mut pos = start;
-        for (part_span, text) in parts {
-            let part_start = part_span.start as usize;
-            let part_end = part_span.end as usize;
-            if part_start < pos || part_end > end { continue; }
-            out.push_str(&self.source[pos..part_start]);
-            out.push_str(&text);
-            pos = part_end;
-        }
-        out.push_str(&self.source[pos..end]);
-        out
-    }
-
-    fn render_static_member(&self, expr: &StaticMemberExpression<'a>) -> String {
-        if self.is_import_meta_url_static(expr) { return format!("{:?}", self.target_url); }
-        if self.member_needs_helper_static(expr) {
-            return format!("__zp_get({},{:?})", self.render_expression(&expr.object), expr.property.name.as_str());
-        }
-        self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))])
-    }
-
-    fn render_computed_member(&self, expr: &ComputedMemberExpression<'a>) -> String {
-        if self.member_needs_helper_computed(expr) {
-            return format!("__zp_get({},{})", self.render_expression(&expr.object), self.render_expression(&expr.expression));
-        }
-        self.render_span_with(expr.span, vec![
-            (expr.object.span(), self.render_expression(&expr.object)),
-            (expr.expression.span(), self.render_expression(&expr.expression)),
-        ])
-    }
-
-    fn render_call_expression(&self, expr: &CallExpression<'a>) -> String {
-        if let Some((base, prop)) = self.call_target(&expr.callee) {
-            return format!("(__zp_call({},{},[{}]))", base, prop, self.render_arguments(&expr.arguments));
-        }
-        let mut parts = Vec::with_capacity(expr.arguments.len() + 1);
-        parts.push((expr.callee.span(), self.render_expression(&expr.callee)));
-        parts.extend(expr.arguments.iter().map(|arg| (arg.span(), self.render_argument(arg))));
-        self.render_span_with(expr.span, parts)
-    }
-
-    fn render_new_expression(&self, expr: &NewExpression<'a>) -> String {
-        if let Some(target) = self.construct_target(&expr.callee) {
-            return format!("(__zp_construct({},[{}]))", target, self.render_arguments(&expr.arguments));
-        }
-        let mut parts = Vec::with_capacity(expr.arguments.len() + 1);
-        parts.push((expr.callee.span(), self.render_expression(&expr.callee)));
-        parts.extend(expr.arguments.iter().map(|arg| (arg.span(), self.render_argument(arg))));
-        self.render_span_with(expr.span, parts)
-    }
-
-    fn render_import_expression(&self, expr: &ImportExpression<'a>) -> String {
-        let source = if let Expression::StringLiteral(spec) = &expr.source {
-            format!("{:?}", self.module_specifier(spec.value.as_str()))
-        } else {
-            format!("__zp_module_url({},{:?})", self.render_expression(&expr.source), self.target_url)
-        };
-        self.render_span_with(expr.span, vec![(expr.source.span(), source)])
-    }
-
-    fn render_update_expression(&self, expr: &UpdateExpression<'a>) -> String {
-        if let Some((base, prop)) = self.simple_assignment_target(&expr.argument) {
-            return format!("(__zp_update({},{},{:?},{}))", base, prop, update_operator_text(expr.operator), expr.prefix);
-        }
-        self.render_span_with(expr.span, vec![(expr.argument.span(), self.render_simple_assignment_target(&expr.argument))])
-    }
-
-    fn render_object_expression(&self, expr: &ObjectExpression<'a>) -> String {
-        let mut parts = Vec::new();
-        for prop in &expr.properties {
-            match prop {
-                ObjectPropertyKind::SpreadProperty(spread) => parts.push(format!("...{}", self.render_expression(&spread.argument))),
-                ObjectPropertyKind::ObjectProperty(prop) => {
-                    if prop.method || prop.kind != PropertyKind::Init {
-                        parts.push(self.span_text(prop.span).to_string());
-                    } else if prop.shorthand {
-                        parts.push(format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)));
-                    } else if prop.computed {
-                        parts.push(format!("[{}]: {}", self.render_property_key(&prop.key), self.render_expression(&prop.value)));
-                    } else {
-                        parts.push(format!("{}: {}", self.span_text(prop.key.span()), self.render_expression(&prop.value)));
-                    }
-                }
-            }
-        }
-        format!("{{{}}}", parts.join(","))
-    }
-
-    fn render_array_expression(&self, expr: &ArrayExpression<'a>) -> String {
-        let mut parts = Vec::new();
-        for elem in &expr.elements {
-            match elem {
-                ArrayExpressionElement::Elision(_) => parts.push(String::new()),
-                ArrayExpressionElement::SpreadElement(spread) => parts.push(format!("...{}", self.render_expression(&spread.argument))),
-                _ => parts.push(self.render_expression(elem.to_expression())),
-            }
-        }
-        format!("[{}]", parts.join(","))
-    }
-
-    fn render_assignment_expression(&self, expr: &AssignmentExpression<'a>) -> String {
-        if let Some((base, prop)) = self.assignment_target(&expr.left) {
-            if expr.operator == AssignmentOperator::Assign {
-                format!("(__zp_set({},{},{}))", base, prop, self.render_expression(&expr.right))
-            } else {
-                let rhs = if matches!(expr.operator, AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalOr | AssignmentOperator::LogicalNullish) {
-                    format!("()=>({})", self.render_expression(&expr.right))
-                } else {
-                    self.render_expression(&expr.right)
-                };
-                format!("(__zp_assign({},{},{:?},{}))", base, prop, assignment_operator_text(expr.operator), rhs)
-            }
-        } else {
-            self.render_span_with(expr.span, vec![
-                (expr.left.span(), self.render_assignment_target(&expr.left)),
-                (expr.right.span(), self.render_expression(&expr.right)),
-            ])
-        }
-    }
-
-    fn render_chain_element(&self, _span: Span, elem: &ChainElement<'a>) -> String {
-        match elem {
-            ChainElement::CallExpression(call) => self.render_call_expression(call),
-            ChainElement::TSNonNullExpression(inner) => self.render_expression(&inner.expression),
-            ChainElement::ComputedMemberExpression(inner) => self.render_computed_member(inner),
-            ChainElement::StaticMemberExpression(inner) => self.render_static_member(inner),
-            ChainElement::PrivateFieldExpression(inner) => {
-                self.render_span_with(inner.span, vec![(inner.object.span(), self.render_expression(&inner.object))])
-            }
-        }
-    }
-
-    fn render_property_key(&self, key: &PropertyKey<'a>) -> String {
-        match key {
-            PropertyKey::StaticIdentifier(id) => id.name.to_string(),
-            PropertyKey::PrivateIdentifier(id) => self.span_text(id.span).to_string(),
-            _ => self.render_expression(key.to_expression()),
-        }
-    }
-
-    fn render_argument(&self, arg: &Argument<'a>) -> String {
-        match arg {
-            Argument::SpreadElement(spread) => format!("...{}", self.render_expression(&spread.argument)),
-            _ => self.render_expression(arg.to_expression()),
-        }
-    }
-
-    fn render_assignment_target(&self, target: &AssignmentTarget<'a>) -> String {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(id) => self.span_text(id.span).to_string(),
-            AssignmentTarget::StaticMemberExpression(expr) => self.render_static_member(expr),
-            AssignmentTarget::ComputedMemberExpression(expr) => self.render_computed_member(expr),
-            AssignmentTarget::PrivateFieldExpression(expr) => self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))]),
-            _ => self.span_text(target.span()).to_string(),
-        }
-    }
-
-    fn render_simple_assignment_target(&self, target: &SimpleAssignmentTarget<'a>) -> String {
-        match target {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.span_text(id.span).to_string(),
-            SimpleAssignmentTarget::StaticMemberExpression(expr) => self.render_static_member(expr),
-            SimpleAssignmentTarget::ComputedMemberExpression(expr) => self.render_computed_member(expr),
-            SimpleAssignmentTarget::PrivateFieldExpression(expr) => self.render_span_with(expr.span, vec![(expr.object.span(), self.render_expression(&expr.object))]),
-            _ => self.span_text(target.span()).to_string(),
-        }
-    }
-
-    fn collect_body_bindings(&self, body: &[Statement<'a>], mode: ScopeMode) -> HashSet<String> {
-        let mut names = HashSet::new();
-        for stmt in body { self.collect_statement_bindings(stmt, mode, &mut names); }
-        names
-    }
-
-    fn collect_statement_bindings(&self, stmt: &Statement<'a>, mode: ScopeMode, names: &mut HashSet<String>) {
-        match stmt {
-            Statement::ImportDeclaration(decl) => {
-                if let Some(specs) = &decl.specifiers {
-                    for spec in specs {
-                        match spec {
-                            ImportDeclarationSpecifier::ImportSpecifier(spec) => { names.insert(spec.local.name.to_string()); }
-                            ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => { names.insert(spec.local.name.to_string()); }
-                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(spec) => { names.insert(spec.local.name.to_string()); }
-                        }
-                    }
-                }
-            }
-            Statement::FunctionDeclaration(func) => { if let Some(id) = &func.id { names.insert(id.name.to_string()); } }
-            Statement::ClassDeclaration(class) => { if let Some(id) = &class.id { names.insert(id.name.to_string()); } }
-            Statement::VariableDeclaration(decl) => {
-                if mode == ScopeMode::Block {
-                    if decl.kind != VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } }
-                } else if decl.kind == VariableDeclarationKind::Var {
-                    for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); }
-                }
-            }
-            Statement::BlockStatement(block) if mode != ScopeMode::Block => for stmt in &block.body { self.collect_statement_bindings(stmt, mode, names); },
-            Statement::IfStatement(stmt) if mode != ScopeMode::Block => { self.collect_statement_bindings(&stmt.consequent, mode, names); if let Some(alt) = &stmt.alternate { self.collect_statement_bindings(alt, mode, names); } }
-            Statement::ForStatement(stmt) if mode != ScopeMode::Block => {
-                if let Some(ForStatementInit::VariableDeclaration(decl)) = &stmt.init { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } }
-                self.collect_statement_bindings(&stmt.body, mode, names);
-            }
-            Statement::ForInStatement(stmt) if mode != ScopeMode::Block => { if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } } self.collect_statement_bindings(&stmt.body, mode, names); }
-            Statement::ForOfStatement(stmt) if mode != ScopeMode::Block => { if let ForStatementLeft::VariableDeclaration(decl) = &stmt.left { if decl.kind == VariableDeclarationKind::Var { for d in &decl.declarations { self.collect_binding_pattern(&d.id, names); } } } self.collect_statement_bindings(&stmt.body, mode, names); }
-            Statement::WhileStatement(stmt) if mode != ScopeMode::Block => self.collect_statement_bindings(&stmt.body, mode, names),
-            Statement::DoWhileStatement(stmt) if mode != ScopeMode::Block => self.collect_statement_bindings(&stmt.body, mode, names),
-            Statement::LabeledStatement(stmt) if mode != ScopeMode::Block => self.collect_statement_bindings(&stmt.body, mode, names),
-            Statement::SwitchStatement(stmt) if mode != ScopeMode::Block => for case in &stmt.cases { for child in &case.consequent { self.collect_statement_bindings(child, mode, names); } },
-            Statement::TryStatement(stmt) if mode != ScopeMode::Block => {
-                self.collect_block_bindings(&stmt.block, names, mode);
-                if let Some(handler) = &stmt.handler { self.collect_block_bindings(&handler.body, names, mode); }
-                if let Some(finalizer) = &stmt.finalizer { self.collect_block_bindings(finalizer, names, mode); }
-            }
-            _ => {}
-        }
-    }
-    fn collect_block_bindings(&self, block: &BlockStatement<'a>, names: &mut HashSet<String>, mode: ScopeMode) {
-        for stmt in &block.body { self.collect_statement_bindings(stmt, mode, names); }
-    }
-
-    fn collect_binding_pattern(&self, pattern: &BindingPattern<'a>, names: &mut HashSet<String>) {
-        match &pattern.kind {
-            BindingPatternKind::BindingIdentifier(id) => { names.insert(id.name.to_string()); }
-            BindingPatternKind::AssignmentPattern(pat) => self.collect_binding_pattern(&pat.left, names),
-            BindingPatternKind::ArrayPattern(arr) => {
-                for elem in &arr.elements { if let Some(p) = elem { self.collect_binding_pattern(p, names); } }
-                if let Some(rest) = &arr.rest { self.collect_binding_pattern(&rest.argument, names); }
-            }
-            BindingPatternKind::ObjectPattern(obj) => {
-                for prop in &obj.properties { self.collect_binding_pattern(&prop.value, names); }
-                if let Some(rest) = &obj.rest { self.collect_binding_pattern(&rest.argument, names); }
-            }
-        }
-    }
-
-    fn collect_formal_parameters(&self, params: &FormalParameters<'a>, names: &mut HashSet<String>) {
-        for param in &params.items { self.collect_binding_pattern(&param.pattern, names); }
-        if let Some(rest) = &params.rest { self.collect_binding_pattern(&rest.argument, names); }
-    }
-
-    fn is_global_name(&self, name: &str) -> bool { GLOBALS.iter().any(|global| *global == name) && !self.declared(name) }
-
-    fn member_needs_helper_static(&self, expr: &StaticMemberExpression<'a>) -> bool {
-        !matches!(&expr.object, Expression::Super(_)) && MEMBER_HELPER_PROPS.iter().any(|prop| *prop == expr.property.name.as_str())
-    }
-
-    fn member_needs_helper_computed(&self, expr: &ComputedMemberExpression<'a>) -> bool {
-        self.is_window_like_expression(&expr.object)
-    }
-
-    fn is_window_like_expression(&self, expr: &Expression<'a>) -> bool {
-        match expr {
-            Expression::Identifier(id) => matches!(id.name.as_str(), "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames" | "document") && !self.declared(id.name.as_str()),
-            Expression::StaticMemberExpression(member) => matches!(member.property.name.as_str(), "defaultView" | "contentWindow" | "window" | "self" | "globalThis" | "top" | "parent" | "opener" | "frames") && self.is_window_like_expression(&member.object),
-            Expression::ComputedMemberExpression(member) => self.is_window_like_expression(&member.object),
-            _ => false,
-        }
-    }
-
-    fn is_virtual_location_expression(&self, expr: &Expression<'a>) -> bool {
-        match expr {
-            Expression::Identifier(id) => id.name == "location" && !self.declared(id.name.as_str()),
-            Expression::StaticMemberExpression(member) => member.property.name == "location" && self.is_window_like_expression(&member.object),
-            Expression::ComputedMemberExpression(member) => self.is_window_like_expression(&member.object),
-            _ => false,
-        }
-    }
-
-    fn assignment_target(&self, target: &AssignmentTarget<'a>) -> Option<(String, String)> {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(id) if self.is_global_name(id.name.as_str()) && matches!(id.name.as_str(), "location" | "window") => Some(("globalThis".to_string(), format!("{:?}", id.name.as_str()))),
-            AssignmentTarget::StaticMemberExpression(expr) if expr.property.name == "location" && self.is_window_like_expression(&expr.object) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
-            AssignmentTarget::StaticMemberExpression(expr) if matches!(expr.property.name.as_str(), "href" | "hash") && self.is_virtual_location_expression(&expr.object) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
-            AssignmentTarget::ComputedMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.is_virtual_location_expression(&expr.object) => Some((self.render_expression(&expr.object), self.render_expression(&expr.expression))),
-            AssignmentTarget::StaticMemberExpression(expr) if self.member_needs_helper_static(expr) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
-            AssignmentTarget::ComputedMemberExpression(expr) if self.member_needs_helper_computed(expr) => Some((self.render_expression(&expr.object), self.render_expression(&expr.expression))),
-            _ => None,
-        }
-    }
-
-
-    fn simple_assignment_target(&self, target: &SimpleAssignmentTarget<'a>) -> Option<(String, String)> {
-        match target {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) if self.is_global_name(id.name.as_str()) && matches!(id.name.as_str(), "location" | "window") => Some(("globalThis".to_string(), format!("{:?}", id.name.as_str()))),
-            SimpleAssignmentTarget::StaticMemberExpression(expr) if expr.property.name == "location" && self.is_window_like_expression(&expr.object) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
-            SimpleAssignmentTarget::StaticMemberExpression(expr) if matches!(expr.property.name.as_str(), "href" | "hash") && self.is_virtual_location_expression(&expr.object) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
-            SimpleAssignmentTarget::ComputedMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.is_virtual_location_expression(&expr.object) => Some((self.render_expression(&expr.object), self.render_expression(&expr.expression))),
-            SimpleAssignmentTarget::StaticMemberExpression(expr) if self.member_needs_helper_static(expr) => Some((self.render_expression(&expr.object), format!("{:?}", expr.property.name.as_str()))),
-            SimpleAssignmentTarget::ComputedMemberExpression(expr) if self.member_needs_helper_computed(expr) => Some((self.render_expression(&expr.object), self.render_expression(&expr.expression))),
-            _ => None,
-        }
-    }
-    fn call_target(&self, callee: &Expression<'a>) -> Option<(String, String)> {
-        match callee {
-            Expression::StaticMemberExpression(expr) => {
-                if matches!(&expr.object, Expression::Super(_)) {
-                    return None;
-                }
-                let prop = expr.property.name.as_str();
-                if CALL_HELPER_PROPS.iter().any(|name| *name == prop) || self.member_needs_helper_static(expr) {
-                    Some((self.render_expression(&expr.object), format!("{:?}", prop)))
-                } else {
-                    None
-                }
-            }
-            Expression::ComputedMemberExpression(expr) => {
-                if self.member_needs_helper_computed(expr) {
-                    Some((self.render_expression(&expr.object), self.render_expression(&expr.expression)))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn construct_target(&self, callee: &Expression<'a>) -> Option<String> {
-        match callee {
-            Expression::Identifier(id) if self.is_global_name(id.name.as_str()) => Some(self.render_expression(callee)),
-            Expression::StaticMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.member_needs_helper_static(expr) => Some(self.render_expression(callee)),
-            Expression::ComputedMemberExpression(expr) if self.is_window_like_expression(&expr.object) || self.member_needs_helper_computed(expr) => Some(self.render_expression(callee)),
-            Expression::ChainExpression(expr) => match &expr.expression {
-                ChainElement::StaticMemberExpression(inner) if self.is_window_like_expression(&inner.object) || self.member_needs_helper_static(inner) => Some(self.render_expression(callee)),
-                ChainElement::ComputedMemberExpression(inner) if self.is_window_like_expression(&inner.object) || self.member_needs_helper_computed(inner) => Some(self.render_expression(callee)),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn is_import_meta_url_static(&self, expr: &StaticMemberExpression<'a>) -> bool {
-        self.module && expr.property.name == "url" && matches!(&expr.object, Expression::MetaProperty(meta) if meta.meta.name == "import" && meta.property.name == "meta")
-    }
-
-    fn module_specifier(&self, raw: &str) -> String {
-        if self.target_url.is_empty() { return raw.to_string(); }
-        if is_bare_specifier(raw) { return raw.to_string(); }
-        if has_scheme(raw) && !raw.starts_with("http://") && !raw.starts_with("https://") {
-            return format!("{}error/POLICY_BLOCKED", self.control_prefix);
-        }
-        let abs = join_url(self.target_url, raw);
-        if !abs.starts_with("http://") && !abs.starts_with("https://") {
-            return format!("{}error/POLICY_BLOCKED", self.control_prefix);
-        }
-        format!("{}api/script?kind=module&u={}", self.control_prefix, percent_encode(abs))
+    RewriteOutput {
+        ok: true,
+        code,
+        error: String::new(),
     }
 }
 
-fn assignment_operator_text(op: AssignmentOperator) -> &'static str {
-    match op {
-        AssignmentOperator::Assign => "=",
-        AssignmentOperator::Addition => "+=",
-        AssignmentOperator::Subtraction => "-=",
-        AssignmentOperator::Multiplication => "*=",
-        AssignmentOperator::Division => "/=",
-        AssignmentOperator::Remainder => "%=",
-        AssignmentOperator::Exponential => "**=",
-        AssignmentOperator::ShiftLeft => "<<=",
-        AssignmentOperator::ShiftRight => ">>=",
-        AssignmentOperator::ShiftRightZeroFill => ">>>=",
-        AssignmentOperator::BitwiseOR => "|=",
-        AssignmentOperator::BitwiseXOR => "^=",
-        AssignmentOperator::BitwiseAnd => "&=",
-        AssignmentOperator::LogicalOr => "||=",
-        AssignmentOperator::LogicalAnd => "&&=",
-        AssignmentOperator::LogicalNullish => "??=",
-    }
-}
-
-
-fn update_operator_text(op: UpdateOperator) -> &'static str {
-    match op {
-        UpdateOperator::Increment => "++",
-        UpdateOperator::Decrement => "--",
-    }
-}
-fn is_bare_specifier(spec: &str) -> bool {
-    !spec.starts_with('/') && !spec.starts_with("./") && !spec.starts_with("../") && !has_scheme(spec)
-}
-
-fn has_scheme(spec: &str) -> bool {
-    let mut chars = spec.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    for c in chars {
-        if c == ':' { return true; }
-        if !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') { return false; }
-    }
-    false
-}
-
-fn join_url(base: &str, raw: &str) -> String {
-    if raw.starts_with("http://") || raw.starts_with("https://") { return raw.to_string(); }
-    if raw.starts_with('/') {
-        if let Some(idx) = base.find("://") {
-            let rest = &base[idx + 3..];
-            if let Some(slash) = rest.find('/') { return format!("{}{}", &base[..idx + 3 + slash], raw); }
-        }
-        return raw.to_string();
-    }
-    let prefix = match base.rfind('/') { Some(i) => &base[..=i], None => base };
-    let mut parts: Vec<&str> = prefix.split('/').collect();
-    if parts.last() == Some(&"") {
-        parts.pop();
-    }
-    for part in raw.split('/') {
-        match part {
-            "." => {}
-            ".." => { if parts.len() > 3 { parts.pop(); } }
-            _ => parts.push(part),
-        }
-    }
-    parts.join("/")
-}
-
-fn percent_encode(input: String) -> String {
-    let mut out = String::with_capacity(input.len());
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => {
-                out.push('%');
-                out.push(hex(b >> 4));
-                out.push(hex(b & 15));
-            }
-        }
-    }
-    out
-}
-
-fn hex(v: u8) -> char {
-    match v {
-        0..=9 => (b'0' + v) as char,
-        _ => (b'A' + (v - 10)) as char,
-    }
+fn generated_function_body(code: &str) -> Option<&str> {
+    let start = code.find('{')? + 1;
+    let end = code.rfind('}')?;
+    (start <= end).then_some(&code[start..end])
 }
 
 #[cfg(test)]
@@ -1159,7 +401,9 @@ mod tests {
             "https://example.com/app.js",
         );
         assert!(code.contains("return location.href;"));
-        assert!(code.contains("__zp_assign(__zp_get(__zp_get(globalThis,\"window\"),\"location\"),\"hash\""));
+        assert!(code.contains(
+            "__zp_assign(__zp_get(__zp_get(globalThis,\"window\"),\"location\"),\"hash\""
+        ));
         assert!(code.contains("__zp_get(__zp_get(globalThis,\"document\"),\"defaultView\")"));
         assert!(!code.contains("return __zp_get(globalThis,\"location\")"));
     }
@@ -1171,9 +415,31 @@ mod tests {
             "module",
             "https://example.com/assets/main.js",
         );
-        assert!(code.contains("import \"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js\";"));
-        assert!(code.contains("__zp_module_url('./chunks/' + name + '.js',\"https://example.com/assets/main.js\")"));
+        assert!(code
+            .contains("/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js"));
+        assert!(code.contains(
+            "__zp_module_url(\"./chunks/\"+name+\".js\",\"https://example.com/assets/main.js\")"
+        ));
         assert!(code.contains("\"https://example.com/assets/main.js\""));
+    }
+
+    #[test]
+    fn rewrites_module_urls_with_runtime_context_when_supplied() {
+        let out = rewrite_script_with_context(
+            "import './dep.js'; export async function load() { return import('./chunk.js'); }",
+            "module",
+            "https://example.com/assets/main.js",
+            "/zp/",
+            "tab-1",
+            "rt-1",
+        );
+        assert!(out.ok, "rewrite failed: {}", out.error);
+        assert!(out.code.contains(
+            "/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fdep.js&tab=tab-1&rt=rt-1"
+        ));
+        assert!(out.code.contains(
+            "import(\"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fassets%2Fchunk.js&tab=tab-1&rt=rt-1\")"
+        ));
     }
 
     #[test]
@@ -1183,9 +449,10 @@ mod tests {
             "classic",
             "https://example.com/app.js",
         );
-        assert!(code.contains("__zp_set(__zp_get(globalThis,\"window\"),\"location\",'/next')"));
-        assert!(code.contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),['/ws',['chat']])"));
-        assert!(code.contains("__zp_call(Object,\"getOwnPropertyDescriptor\",[__zp_get(globalThis,\"window\"),'location'])"));
+        assert!(code.contains("__zp_set(__zp_get(globalThis,\"window\"),\"location\",\"/next\")"));
+        assert!(code
+            .contains("__zp_construct(__zp_get(globalThis,\"WebSocket\"),[\"/ws\",[\"chat\"]])"));
+        assert!(code.contains("__zp_call(Object,\"getOwnPropertyDescriptor\",[__zp_get(globalThis,\"window\"),\"location\"])"));
     }
 
     #[test]

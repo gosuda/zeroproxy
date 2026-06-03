@@ -1,0 +1,44 @@
+{
+  "nativeVsZeroProxyDifferential": {
+    "policyHeaders.csp": {
+      "proxy": "<zeroproxy-membrane-csp>",
+      "native": "default-src 'none'; script-src 'none'"
+    },
+    "policyHeaders.reportOnly": {
+      "proxy": "",
+      "native": "default-src 'none'; connect-src 'none'"
+    }
+  },
+  "nativeVsZeroProxyRawSetDifferentialAllowlist": [
+    {
+      "id": "membrane-csp-header",
+      "pattern": "^policyHeaders\\.csp$",
+      "reason": "ZeroProxy replaces target CSP with the membrane CSP on the proxy origin."
+    },
+    {
+      "id": "membrane-report-only-header",
+      "pattern": "^policyHeaders\\.reportOnly$",
+      "reason": "ZeroProxy strips upstream report-only policy before constructing proxy responses."
+    },
+    {
+      "id": "canvas-randomization",
+      "pattern": "^surface\\.fingerprint\\.canvas\\.(length|stableRead)$",
+      "reason": "Canvas export randomization intentionally changes repeated data URL reads."
+    },
+    {
+      "id": "navigator-app-version-persona",
+      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64|X11; Linux x86_64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
+      "reason": "Native Chromium exposes host platform appVersion while ZeroProxy exposes the Windows Chrome persona."
+    },
+    {
+      "id": "navigator-user-agent-persona",
+      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.Mozilla/5\\.0 \\((Macintosh; Intel Mac OS X 10_15_7|Windows NT 10\\.0; Win64; x64|X11; Linux x86_64)\\) AppleWebKit/537\\.36 \\(KHTML, like Gecko\\) (HeadlessChrome|Chrome)/[0-9]+\\.0\\.0\\.0 Safari/537\\.36$",
+      "reason": "Native Chromium exposes host platform userAgent while ZeroProxy exposes the Windows Chrome persona."
+    },
+    {
+      "id": "navigator-platform-persona",
+      "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(Linux x86_64|MacIntel|Win32)$",
+      "reason": "Native Chromium exposes host platform while ZeroProxy exposes the Windows Chrome persona."
+    }
+  ]
+}
