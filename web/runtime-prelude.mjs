@@ -317,7 +317,6 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return key ? ZP.makeShareFragment(key, activeServers) : '';
     } catch { return ''; }
   }
-  function shareFragmentForKey(key) { return ZP.makeShareFragment(String(key), activeServers); }
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function isControlURL(raw) {
     const value = String(raw || '').trim();
@@ -345,24 +344,33 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
-  function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin, activeServers); }
+  function shareRouteForTarget(target) {
+    const rw = root.ZPRewriter;
+    if (!rw || typeof rw.makeShareURL !== 'function') throw new Error('REWRITER_UNAVAILABLE');
+    const out = rw.makeShareURL(target, { servers: activeServers });
+    if (!out || !out.ok || typeof out.url !== 'string') throw new Error(out && out.errorCode || 'POLICY_BLOCKED');
+    const u = new URL(out.url, proxyOrigin);
+    const routeKey = ZP.shareRouteKey(u.pathname);
+    if (!routeKey || !new URLSearchParams(u.hash.slice(1)).get('k')) throw new Error('MALFORMED_ROUTE');
+    return { routeKey, path: u.pathname, fragment: u.hash, url: `${u.pathname}${u.hash}`, absoluteURL: u.href };
+  }
+  function shareNavURL(raw, base = baseURL) { return shareRouteForTarget(targetURL(raw, base)).absoluteURL; }
   async function activatedNavPath(raw, replace = false, base = baseURL) {
     const target = targetURL(raw, base);
-    const share = await ZP.encryptShareURL(target);
-    const path = ZP.makeSharePath(share.encrypted);
+    const share = shareRouteForTarget(target);
     const entryId = replace ? activeEntryId : `e${ZP.randomId()}`;
-    await postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, replace });
-    activeProxyPath = path;
-    activeRouteKey = share.encrypted;
-    activeProxyFragment = shareFragmentForKey(share.key);
-    return `${path}${activeProxyFragment}`;
+    await postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.routeKey, entryId, targetUrl: target, baseUrl: target, replace });
+    activeProxyPath = share.path;
+    activeRouteKey = share.routeKey;
+    activeProxyFragment = share.fragment;
+    return share.url;
   }
   async function activatedFrameURL(raw, base = baseURL) {
     const target = targetURL(raw, base);
-    const share = await ZP.encryptShareURL(target);
+    const share = shareRouteForTarget(target);
     const entryId = `e${ZP.randomId()}`;
-    await postMessageToSW({ type: 'ZP_FRAME_ROUTE', tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, referrerUrl: documentReferrerFor(target) });
-    return `${proxyOrigin}${ZP.makeSharePath(share.encrypted)}${shareFragmentForKey(share.key)}`;
+    await postMessageToSW({ type: 'ZP_FRAME_ROUTE', tabId: boot.tabId, routeKey: share.routeKey, entryId, targetUrl: target, baseUrl: target, referrerUrl: documentReferrerFor(target) });
+    return share.absoluteURL;
   }
   function directExternalFrameURL(target) {
     return '';
@@ -427,12 +435,14 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       else if (!replace && Native.locationAssign) Native.locationAssign(path);
       else if (replace) location.replace(path);
       else location.href = path;
-    }).catch(() => shareNavURL(raw, base).then(u => {
+    }).catch(() => {
+      let u;
+      try { u = shareNavURL(raw, base); } catch { return; }
       if (replace && Native.locationReplace) Native.locationReplace(u);
       else if (!replace && Native.locationAssign) Native.locationAssign(u);
       else if (replace) location.replace(u);
       else location.href = u;
-    }).catch(()=>{}));
+    });
   }
   function postMessageToSW(message, transfer) {
     const controller = Native.serviceWorkerController || Native.serviceWorker && Native.serviceWorker.controller;
@@ -1619,9 +1629,6 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const handleNavigationClick = ev => { const nav = clickNavigationTarget(ev); if (!nav) return; ev.preventDefault(); ev.stopImmediatePropagation(); if (nav.hash != null) updateVirtualHash(nav.hash); else if (nav.href && nav.target && nav.target !== '_self') root.open(nav.href, nav.target); else if (nav.href) setVirtualLocation(nav.href); };
     root.addEventListener('click', handleNavigationClick, true);
     document.addEventListener('click', handleNavigationClick, true);
-    document.addEventListener('submit', ev => { const f = ev.target; if (!f) return; ev.preventDefault(); submitForm(f, ev.submitter); }, true);
-    if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
-    if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { setVirtualLocation(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { setVirtualLocation(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload(); });
@@ -1629,59 +1636,6 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: activeProxyPath }).then(applyResolvedHistoryEntry).catch(()=>{}); }, true);
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: activeEntryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
-    function submitForm(form, submitter) { submitFormNavigation(form, submitter).catch(() => { Native.locationAssign && Native.locationAssign(ZP.errorPath('TARGET_CONNECT_FAILED')); }); }
-    async function submitFormNavigation(form, submitter) {
-      const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href;
-      const method = String(submitter && submitter.getAttribute && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
-      if (method === 'DIALOG') return;
-      const target = new URL(targetURL(raw));
-      urlMeta.set(form, target.href);
-      if (method === 'GET') {
-        try {
-          const data = submitter ? new Native.FormData(form, submitter) : new Native.FormData(form);
-          const qs = new URLSearchParams();
-          for (const [k, v] of data) qs.append(k, formEntryValue(v));
-          const encoded = qs.toString();
-          if (encoded) target.search = target.search ? `${target.search}&${encoded}` : encoded;
-        } catch {}
-        navigateToTarget(target.href);
-        return;
-      }
-      const body = formRequestBody(form, submitter);
-      const reqHeaders = new Native.Headers();
-      reqHeaders.set('X-ZP-Document-Request', '1');
-      const resp = await fetchThroughRuntime(target.href, { method, body, headers: reqHeaders });
-      const html = await resp.text();
-      virtualURL = new URL(target.href);
-      baseURL = virtualURL.href;
-      explicitBaseURL = '';
-      try {
-        const share = await preactivateRouteFor(target.href, false, target.href);
-        activeRouteKey = share.encrypted;
-        activeProxyPath = ZP.makeSharePath(share.encrypted);
-        activeProxyFragment = shareFragmentForKey(share.key);
-      } catch {}
-      if (Native.documentOpen) Native.documentOpen();
-      if (Native.documentWrite) Native.documentWrite(html);
-      if (Native.documentClose) Native.documentClose();
-    }
-    function formRequestBody(form, submitter) {
-      const data = submitter ? new Native.FormData(form, submitter) : new Native.FormData(form);
-      const enctype = normalizedFormEncoding(form, submitter);
-      if (enctype === 'multipart/form-data') {
-        return data;
-      }
-      const text = enctype === 'text/plain' ? plainFormBody(data) : urlEncodedFormBody(data);
-      const type = enctype === 'text/plain' ? 'text/plain;charset=UTF-8' : 'application/x-www-form-urlencoded;charset=UTF-8';
-      return new Blob([text], { type });
-    }
-    function normalizedFormEncoding(form, submitter) {
-      const raw = String(submitter && submitter.getAttribute && submitter.getAttribute('formenctype') || form.getAttribute('enctype') || 'application/x-www-form-urlencoded').toLowerCase();
-      return raw === 'multipart/form-data' || raw === 'text/plain' ? raw : 'application/x-www-form-urlencoded';
-    }
-    function formEntryValue(v) { return v && typeof v === 'object' && typeof v.name === 'string' && typeof v.size === 'number' ? v.name : String(v); }
-    function urlEncodedFormBody(data) { const qs = new URLSearchParams(); for (const [k, v] of data) qs.append(k, formEntryValue(v)); return qs.toString(); }
-    function plainFormBody(data) { const out = []; for (const [k, v] of data) out.push(`${String(k)}=${formEntryValue(v)}`); return out.join('\r\n'); }
     function clickNavigationTarget(ev) {
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
@@ -1705,7 +1659,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const raw = String(url || 'about:blank');
       let child;
       if (raw === 'about:blank' || raw === '') child = Native.open('about:blank', target, features);
-      else if (isHTTPURL(raw)) { child = Native.open('about:blank', target, features); if (child) shareNavURL(raw).then(u => { child.location.href = u; }).catch(() => { try { child.close(); } catch {} }); }
+      else if (isHTTPURL(raw)) {
+        child = Native.open('about:blank', target, features);
+        if (child) {
+          try { child.location.href = shareNavURL(raw); }
+          catch { try { child.close(); } catch {} }
+        }
+      }
       else child = Native.open('about:blank', target, features);
       if (child && (raw === 'about:blank' || raw === '')) {
         try { installNetworkContainment(child); } catch { try { child.close(); } catch {} return null; }
@@ -1762,24 +1722,20 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function visibleNavigationURL(el, attrName) {
     return Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || Native.getAttribute.call(el, attrName) || '';
   }
-  function isShareNavigationAttribute(el, attrName) {
-    const tag = el && el.localName;
-    return attrLocalName(attrName) === 'href' && (tag === 'a' || tag === 'area');
-  }
   function bumpNavigationShareVersion(el) {
     const version = (navShareVersions.get(el) || 0) + 1;
     navShareVersions.set(el, version);
     return version;
   }
   function scheduleNavigationShareURL(el, attrName, target) {
-    if (!isShareNavigationAttribute(el, attrName)) return;
+    if (!usesRawURLAttribute(el, attrName)) return;
     const version = bumpNavigationShareVersion(el);
-    ZP.encryptShareURL(target).then(share => {
-      if (navShareVersions.get(el) !== version) return;
-      if ((Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || '') !== target) return;
-      const href = `${ZP.makeSharePath(share.encrypted)}${shareFragmentForKey(share.key)}`;
-      if (Native.getAttribute.call(el, attrName) !== href) Native.setAttribute.call(el, attrName, href);
-    }).catch(() => {});
+    let route;
+    try { route = shareRouteForTarget(target); } catch { blockExecutableURL(el, attrLocalName(attrName), target); return; }
+    if (navShareVersions.get(el) !== version) return;
+    if ((Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || '') !== target) return;
+    const name = attrLocalName(attrName) === 'formaction' ? 'formaction' : attrName;
+    if (Native.getAttribute.call(el, name) !== route.url) Native.setAttribute.call(el, name, route.url);
   }
   function rememberNavigationTarget(el, target) {
     urlMeta.set(el, target);
@@ -2432,13 +2388,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (isHTTPURL(v)) {
         const t = targetURL(v);
         rememberNavigationTarget(this, t);
-        scheduleNavigationShareURL(this, k, t);
+        if (usesRawURLAttribute(this, key)) { scheduleNavigationShareURL(this, k, t); return; }
         if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
           setFrameSourceAttribute(this, k, t);
           return;
         }
         if (this.localName === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
-        return Native.setAttribute.call(this, k, usesRawURLAttribute(this, key) ? v : t);
+        return Native.setAttribute.call(this, k, t);
       }
     }
     if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
@@ -2466,12 +2422,12 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (isHTTPURL(v)) {
         const t = targetURL(v);
         rememberNavigationTarget(this, t);
-        scheduleNavigationShareURL(this, k, t);
+        if (usesRawURLAttribute(this, key)) { scheduleNavigationShareURL(this, k, t); return; }
         if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'src') {
           setFrameSourceAttribute(this, k, t, ns);
           return;
         }
-        return Native.setAttributeNS.call(this, ns, k, usesRawURLAttribute(this, key) ? v : t);
+        return Native.setAttributeNS.call(this, ns, k, t);
       }
     }
     if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));

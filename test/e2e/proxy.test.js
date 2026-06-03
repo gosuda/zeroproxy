@@ -1876,8 +1876,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     }
     return last;
   })();
-  assert.match(rawDynamicRelativeLink && rawDynamicRelativeLink.href || '', /^\/zp\/p\//);
-  assert.match(rawDynamicRelativeLink && rawDynamicRelativeLink.href || '', /#k=/);
+  assert.match((rawDynamicRelativeLink && rawDynamicRelativeLink.href) || '', /^\/zp\/p\//);
+  assert.match((rawDynamicRelativeLink && rawDynamicRelativeLink.href) || '', /#k=/);
   assert.equal(
     rawDynamicRelativeLink && rawDynamicRelativeLink['data-zp-target-url'],
     `http://${targetHost}:${targetPort}/next`,
@@ -3477,6 +3477,122 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(multipartForm.echo.contentType, /^multipart\/form-data; boundary=/);
   assert.match(multipartForm.echo.body, /name="upload"; filename="hello.txt"/);
   assert.match(multipartForm.echo.body, /file-body/);
+  const preventedForm = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const before = location.href;
+        const f = document.createElement('form');
+        f.method = 'POST';
+        f.action = '/form-echo?kind=prevented';
+        const input = document.createElement('input');
+        input.name = 'alpha';
+        input.value = 'blocked';
+        f.appendChild(input);
+        const button = document.createElement('button');
+        button.type = 'submit';
+        f.appendChild(button);
+        f.addEventListener('submit', (ev) => ev.preventDefault());
+        document.body.appendChild(f);
+        f.requestSubmit(button);
+        setTimeout(() => resolve({ before, after: location.href }), 100);
+      }),
+  );
+  assert.equal(preventedForm.after, preventedForm.before);
+  await page.evaluate(() => {
+    const f = document.createElement('form');
+    f.method = 'POST';
+    f.action = '/form-echo?kind=script-post-wrong';
+    const input = document.createElement('input');
+    input.name = 'alpha';
+    input.value = 'one';
+    f.appendChild(input);
+    const button = document.createElement('button');
+    button.type = 'submit';
+    button.name = 'submitter';
+    button.value = 'script-post';
+    f.appendChild(button);
+    f.addEventListener('submit', () => {
+      f.action = '/form-echo?kind=script-post';
+      input.value = 'two';
+    });
+    document.body.appendChild(f);
+    f.requestSubmit(button);
+  });
+  await waitForPage(page, () => window.__formEcho && window.__formEcho.kind === 'script-post');
+  const scriptPostForm = await page.evaluate(() => window.__formEcho);
+  assert.equal(scriptPostForm.method, 'POST');
+  assert.equal(scriptPostForm.body, 'alpha=two&submitter=script-post');
+  await page.evaluate(() => {
+    const f = document.createElement('form');
+    f.method = 'POST';
+    f.action = '/form-echo?kind=formdata';
+    const input = document.createElement('input');
+    input.name = 'alpha';
+    input.value = 'one';
+    f.appendChild(input);
+    const button = document.createElement('button');
+    button.type = 'submit';
+    button.name = 'submitter';
+    button.value = 'formdata';
+    f.appendChild(button);
+    f.addEventListener('formdata', (ev) => {
+      ev.formData.set('alpha', 'from-formdata');
+      ev.formData.append('beta', 'two');
+    });
+    document.body.appendChild(f);
+    f.requestSubmit(button);
+  });
+  await waitForPage(page, () => window.__formEcho && window.__formEcho.kind === 'formdata');
+  const formdataForm = await page.evaluate(() => window.__formEcho);
+  assert.equal(formdataForm.body, 'alpha=from-formdata&submitter=formdata&beta=two');
+  await page.evaluate(() => {
+    const f = document.createElement('form');
+    f.method = 'POST';
+    f.action = '/form-echo?kind=form-submit';
+    const input = document.createElement('input');
+    input.name = 'alpha';
+    input.value = 'one';
+    f.appendChild(input);
+    f.addEventListener('submit', () => {
+      const marker = document.createElement('input');
+      marker.name = 'submitEvent';
+      marker.value = 'fired';
+      f.appendChild(marker);
+    });
+    f.addEventListener('formdata', (ev) => {
+      ev.formData.append('formdata', 'yes');
+    });
+    document.body.appendChild(f);
+    f.submit();
+  });
+  await waitForPage(page, () => window.__formEcho && window.__formEcho.kind === 'form-submit');
+  const formSubmitForm = await page.evaluate(() => window.__formEcho);
+  assert.equal(formSubmitForm.body, 'alpha=one&formdata=yes');
+  await page.evaluate(() => {
+    const f = document.createElement('form');
+    f.method = 'GET';
+    f.action = '/form-echo';
+    for (const [name, value] of [
+      ['kind', 'get-native'],
+      ['alpha', 'one'],
+    ]) {
+      const input = document.createElement('input');
+      input.name = name;
+      input.value = value;
+      f.appendChild(input);
+    }
+    const button = document.createElement('button');
+    button.type = 'submit';
+    button.name = 'submitter';
+    button.value = 'get-native';
+    f.appendChild(button);
+    document.body.appendChild(f);
+    f.requestSubmit(button);
+  });
+  await waitForPage(page, () => window.__formEcho && window.__formEcho.kind === 'get-native');
+  const getForm = await page.evaluate(() => window.__formEcho);
+  assert.equal(getForm.method, 'GET');
+  assert.equal(getForm.body, '');
   const rawAfterSubmit = page.url();
   const rawKey = new URL(rawAfterSubmit).hash
     ? new URLSearchParams(new URL(rawAfterSubmit).hash.slice(1)).get('k')
@@ -3512,6 +3628,18 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         r.url.startsWith('/form-echo?kind=multipart') &&
         r.contentType.startsWith('multipart/form-data'),
     ),
+    `target requests: ${JSON.stringify(requests)}`,
+  );
+  assert.ok(
+    requests.some(
+      (r) =>
+        r.url.startsWith('/form-echo?kind=script-post') &&
+        r.contentType.startsWith('application/x-www-form-urlencoded'),
+    ),
+    `target requests: ${JSON.stringify(requests)}`,
+  );
+  assert.ok(
+    requests.some((r) => r.url === '/form-echo?kind=get-native&alpha=one&submitter=get-native'),
     `target requests: ${JSON.stringify(requests)}`,
   );
   await page.click('#next');

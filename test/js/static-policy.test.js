@@ -148,7 +148,6 @@ test('runtime installs required escape-vector hooks', () => {
   for (const needle of [
     "document.addEventListener('click'",
     "root.addEventListener('click'",
-    "document.addEventListener('submit'",
     'HTMLFormElement.prototype',
     'popstate',
     'ZP_RESOLVE_ENTRY',
@@ -250,8 +249,8 @@ test('runtime installs required escape-vector hooks', () => {
     'rewriteEventAttribute',
     'enforceSubtreePolicies',
     'installTargetServiceWorkerBlocker',
-    'formRequestBody',
-    'shareFragmentForKey',
+    'shareRouteForTarget',
+    'makeShareURL',
     'postMessageWrapperFor',
     'frameSandboxAllowsEscape',
     'setFrameSandboxAttribute',
@@ -260,6 +259,7 @@ test('runtime installs required escape-vector hooks', () => {
     "Reflect, 'getPrototypeOf'",
   ])
     assert.ok(rt.includes(needle), `missing ${needle}`);
+  assert.equal(rt.includes("document.addEventListener('submit'"), false);
   for (const needle of [
     'makeWorkerLocationFacade',
     "Object.defineProperty(self, 'location'",

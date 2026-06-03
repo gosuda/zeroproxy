@@ -58,7 +58,7 @@ async function handleFetch(event) {
   try {
     if (isCORSPreflight(req)) return corsPreflight(req);
     const clientId = event.resultingClientId || event.clientId;
-    const cls = classify(req, url, clientId);
+    const cls = classify(req, url, clientId, event.clientId);
     switch (cls.kind) {
       case 'INTERNAL_ASSET': return internalAsset(req, url);
       case 'PROXY_DOCUMENT': return proxyDocument(req, cls, clientId);
@@ -71,24 +71,24 @@ async function handleFetch(event) {
   }
 }
 
-function classify(req, url, clientId) {
-  if (url.origin === ORIGIN) return classifySameOrigin(req, url, clientId);
+function classify(req, url, clientId, sourceClientId) {
+  if (url.origin === ORIGIN) return classifySameOrigin(req, url, clientId, sourceClientId);
   const ctx = contextFor(req, clientId);
   if (ctx && (url.protocol === 'http:' || url.protocol === 'https:')) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, crossOriginURL: url };
   return { kind: 'UNKNOWN' };
 }
-function classifySameOrigin(req, url, clientId) {
+function classifySameOrigin(req, url, clientId, sourceClientId) {
   if (isRuntimeAPIPath(url.pathname)) return { kind: 'RUNTIME_API' };
   if (url.pathname.startsWith(ZP.controlPath('error/'))) return { kind: 'INTERNAL_ASSET' };
   if (isInternalAssetPath(url.pathname)) return { kind: 'INTERNAL_ASSET' };
-  return classifyShareOrSubresource(req, url, clientId);
+  return classifyShareOrSubresource(req, url, clientId, sourceClientId);
 }
-function classifyShareOrSubresource(req, url, clientId) {
-  const ctx = contextFor(req, clientId);
+function classifyShareOrSubresource(req, url, clientId, sourceClientId) {
+  const ctx = contextFor(req, clientId) || contextFor(req, sourceClientId);
   const p = parseSharePath(url.pathname);
-  if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p };
+  if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p, ctx, requestURL: url };
   if (ctx && url.pathname.startsWith(ZP.CONTROL_PREFIX)) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
-  if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
+  if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p, ctx, requestURL: url };
   return { kind: 'UNKNOWN' };
 }
 async function internalAsset(req, url) {
@@ -100,7 +100,7 @@ async function internalAsset(req, url) {
 }
 
 async function proxyDocument(req, route, clientId) {
-  const state = shareRoutes.get(route.routeKey);
+  const state = await documentRouteState(route);
   if (!state) return internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
   const tab = tabs.get(state.tabId);
   const entry = tab && tab.entries.get(state.entryId);
@@ -109,8 +109,65 @@ async function proxyDocument(req, route, clientId) {
     return internalAsset(new Request(ZP.CONTROL_PREFIX), new URL(ZP.CONTROL_PREFIX, ORIGIN));
   }
   tab.activeEntryId = entry.entryId;
+  const targetUrl = documentTargetURL(route.requestURL, entry);
+  updateDocumentEntry(entry, targetUrl);
   bindClientContext(clientId, tab, entry);
-  return transportFetch(entry.targetUrl, { request: req, document: true, tab, entryId: entry.entryId });
+  return transportFetch(targetUrl, { request: req, document: true, tab, entryId: entry.entryId });
+}
+
+async function documentRouteState(route) {
+  const state = shareRoutes.get(route.routeKey);
+  if (state) return state;
+  return openRouteFromFragment(route.routeKey, route.requestURL, route.ctx);
+}
+
+async function openRouteFromFragment(routeKey, requestURL, ctx) {
+  const key = shareKeyFromURL(requestURL);
+  if (!key) return null;
+  let targetUrl;
+  try { targetUrl = await ZP.decryptShareURL(routeKey, key); } catch { return null; }
+  if (ctx) return openContextRoute(routeKey, targetUrl, ctx);
+  const tab = createTab(targetUrl, shareServersFromURL(requestURL));
+  const state = { tabId: tab.tabId, entryId: tab.activeEntryId };
+  shareRoutes.set(routeKey, state);
+  return state;
+}
+
+function openContextRoute(routeKey, targetUrl, ctx) {
+  const tab = tabs.get(ctx.tabId);
+  if (!tab) return null;
+  const entryId = randomEntryId();
+  tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, referrerUrl: ctx.targetUrl || '', title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+  const state = { tabId: tab.tabId, entryId };
+  shareRoutes.set(routeKey, state);
+  return state;
+}
+
+function shareKeyFromURL(requestURL) {
+  try {
+    const params = new URLSearchParams(requestURL.hash && requestURL.hash[0] === '#' ? requestURL.hash.slice(1) : requestURL.hash);
+    return params.get('k') || '';
+  } catch { return ''; }
+}
+
+function shareServersFromURL(requestURL) {
+  try {
+    return ZP.parseRelayServersFromFragment(requestURL.hash, { allowLoopbackWS: ZP.isLoopbackHost(self.location.hostname), origin: ORIGIN });
+  } catch {
+    return ZP.relayServersForShare([], { origin: ORIGIN });
+  }
+}
+
+function documentTargetURL(requestURL, entry) {
+  const target = new URL(entry.targetUrl);
+  if (requestURL?.search) target.search = requestURL.search;
+  target.hash = '';
+  return target.href;
+}
+
+function updateDocumentEntry(entry, targetUrl) {
+  entry.targetUrl = targetUrl;
+  entry.baseUrl = targetUrl;
 }
 
 
