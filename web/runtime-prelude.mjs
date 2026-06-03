@@ -2176,7 +2176,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       for (let i = 0; raw && i < raw.length; i++) if (predicate(raw[i])) n++;
       return n;
     };
-    return new Proxy({}, {
+    const target = raw && typeof raw === 'object' ? Object.create(Object.getPrototypeOf(raw)) : {};
+    return new Proxy(target, {
       get(_target, prop) {
         if (prop === 'length') return length();
         if (methods && Object.prototype.hasOwnProperty.call(methods, prop)) {
@@ -2262,8 +2263,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const elemQSA = w.Element.prototype.querySelectorAll;
     if (typeof docQS === 'function') defineReplacingNative(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, arguments)); });
     if (typeof elemQS === 'function') defineReplacingNative(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, arguments)); });
-    if (typeof docQSA === 'function') defineReplacingNative(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
-    if (typeof elemQSA === 'function') defineReplacingNative(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    if (typeof docQSA === 'function') defineReplacingNative(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNativeNodeList(docQSA, this), () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    if (typeof elemQSA === 'function') defineReplacingNative(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNativeNodeList(elemQSA, this), () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
     const matches = w.Element.prototype.matches;
     const closest = w.Element.prototype.closest;
     if (typeof matches === 'function') defineReplacingNative(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });
@@ -2282,6 +2283,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function selectorTargetsZP(selector) {
     const s = String(selector || '').toLowerCase();
     return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('/zp/api/') || s.includes('src*="zp"') || s.includes("src*='zp'") || s.includes('src*=zp') || s.includes('zeroproxy') || s.includes('x-zeroproxy-icon');
+  }
+  function emptyNativeNodeList(querySelectorAll, self) {
+    try { return querySelectorAll.call(self, ':not(*)'); } catch { return []; }
   }
   function filterSelectorOne(node) { return isZPAssetNode(node) ? null : node; }
   function filteredTraversal(raw) {

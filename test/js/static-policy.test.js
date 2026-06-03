@@ -322,6 +322,16 @@ test('filtered DOM collections expose numeric indexes to native slice', () => {
   );
 });
 
+test('blocked selector NodeList facades do not use array-backed filtered collections', () => {
+  const rt = readRuntimeSource();
+  assert.equal(
+    rt.includes('filteredCollection([], () => false)'),
+    false,
+    'blocked querySelectorAll results must preserve a native NodeList prototype',
+  );
+  assert.ok(rt.includes("querySelectorAll.call(self, ':not(*)')"));
+});
+
 test('classic script rewrite carries document charset for legacy Korean news scripts', () => {
   const rt = readRuntimeSource();
   const sw = readServiceWorkerSource();

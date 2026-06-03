@@ -369,6 +369,33 @@ function loadFilteredNamedNodeMap() {
   return sandbox.module.exports.filteredNamedNodeMap;
 }
 
+function loadFilteredCollection() {
+  const src = readRuntime();
+  const code = `${extractFunction(src, 'filteredCollection')}\nmodule.exports = { filteredCollection };`;
+  const sandbox = { module: { exports: {} }, Object, Proxy, String, Number, Symbol };
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+  return sandbox.module.exports.filteredCollection;
+}
+
+test('membrane: filtered DOM collections preserve native collection instanceof checks', () => {
+  const filteredCollection = loadFilteredCollection();
+  function FakeNodeList() {}
+  const keep = { id: 'keep' };
+  const hidden = { id: 'hide' };
+  const raw = Object.create(FakeNodeList.prototype);
+  raw[0] = hidden;
+  raw[1] = keep;
+  raw.length = 2;
+
+  const filtered = filteredCollection(raw, (node) => node.id !== 'hide');
+
+  assert.equal(filtered instanceof FakeNodeList, true);
+  assert.deepEqual(Array.from(filtered), [keep]);
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0], keep);
+});
+
 test('membrane: NamedNodeMap named lookup exposes masked event attrs without ZP backing attrs', () => {
   const filteredNamedNodeMap = loadFilteredNamedNodeMap();
   const owner = {};
@@ -423,6 +450,33 @@ function loadSelectorFilter() {
   vm.runInContext(code, sandbox);
   return sandbox.module.exports.selectorTargetsZP;
 }
+
+function loadEmptyNativeNodeList() {
+  const src = readRuntime();
+  const code = `${extractFunction(src, 'emptyNativeNodeList')}\nmodule.exports = { emptyNativeNodeList };`;
+  const sandbox = { module: { exports: {} } };
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+  return sandbox.module.exports.emptyNativeNodeList;
+}
+
+test('membrane: blocked selector collections keep a native NodeList backing when possible', () => {
+  const emptyNativeNodeList = loadEmptyNativeNodeList();
+  const raw = { length: 0 };
+  const owner = {};
+  const out = emptyNativeNodeList(function querySelectorAll(selector) {
+    this.selector = selector;
+    return raw;
+  }, owner);
+
+  assert.equal(out, raw);
+  assert.equal(owner.selector, ':not(*)');
+  const fallback = emptyNativeNodeList(() => {
+    throw new Error('native qsa unavailable');
+  }, owner);
+  assert.equal(Array.isArray(fallback), true);
+  assert.equal(fallback.length, 0);
+});
 
 test('membrane: selector filter rejects probes for data-zp-*, /zp/assets/, /zp/api/, zeroproxy', () => {
   const selectorTargetsZP = loadSelectorFilter();
