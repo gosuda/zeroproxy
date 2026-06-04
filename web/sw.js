@@ -502,6 +502,75 @@ async function runtimeAPI(req, url, clientId) {
         return new Response('/* ZP_TRACKER_BLOCKED ' + tu.host + ' */',
           { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
       }
+      // DIAG: incrementally block NAVER ad / anti-bot SDKs to isolate which
+      // one wedges V8 once NACT unlocks the heavy tracker bundle. The Veta
+      // ad core, GFP display SDK, and NAC synchronizer all contain logic
+      // that probes for membrane traces and busy-loops when proxied. NTM
+      // is left enabled (prior session note: blocking it broke GFP bid
+      // tokens and removed more ad inventory than it fixed).
+      // NAVER warm-session V8 wedge. Bisect identified two scripts that
+      // tight-loop in V8 once NACT unlocks the heavy bundle variant:
+      //
+      //   1. `pm.pstatic.net/resources/js/search.*.js`
+      //      — search-bar autocomplete bundle. Contains an anti-bot probe
+      //        that detects the membrane and tight-loops. Blocking removes
+      //        the autocomplete dropdown but the page still renders, and
+      //        the user can still type + submit (the form action is set
+      //        elsewhere by main.js).
+      //
+      //   2. Ad SDKs on `ssl.pstatic.net` — Veta core, GFP display SDK, and
+      //      NAC synchronizer all contain the same shape of probe. They
+      //      load asynchronously so the wedge surfaces a few seconds after
+      //      first paint rather than blocking initial render.
+      //
+      // Every `pause` after navigation returns an empty `js_stack` with the
+      // renderer in native code, and minidumps show no JS frame on top —
+      // classic V8 tight-loop signature. The probes are reachable only on
+      // the warm path because NAVER's WAF gates the heavy bundle on a
+      // valid NACT cookie. Persisting NACT (the previous commit) is what
+      // exposes this — without it the lighter cold variant ships and these
+      // scripts never run.
+      //
+      // Long-term fix: rewriter detects the `for(;;)` / `while(1)` probe
+      // shape and emits a `break` after N iterations. For now we stub the
+      // scripts; the visible loss is autocomplete + ad inventory delivered
+      // by these specific SDKs (main.js's own NAVER ads still render).
+      // NAVER warm-session V8 wedge. Once NACT (persisted via the IDB
+      // cookie jar) unlocks the "trusted session" bundle path, every script
+      // NAVER ships under `pm.pstatic.net/resources/js/*.js` and the
+      // ad-SDKs under `ssl.pstatic.net/{tveta,melona}/...` contains an
+      // anti-bot probe that detects the membrane's Proxy traps and
+      // tight-loops in V8. Bisect was unstable across runs — search alone
+      // wedged in one run, polyfill+preload paired with search in another,
+      // and main.js once on its own — suggesting either probe code is
+      // shared across these bundles or there's a load-order race in the
+      // probe initialisation.
+      //
+      // Block the full NAVER bundle family on `pm.pstatic.net` (main,
+      // polyfill, preload, search) and the Veta / GFP / NAC ad SDKs on
+      // `ssl.pstatic.net`. The home page still renders via the inline
+      // EAGER-DATA blocks (13 keys → news-stand, ad-banner data, election
+      // data) and `nmain` initialiser. The cost is dynamic UI (the React
+      // app delivered in main.js for personalised tabs / news feed
+      // rotation, the search autocomplete dropdown, and ad slots).
+      //
+      // Long-term fix: rewriter detects the `for(;;)` / `while(1)` /
+      // recursive-set-immediate probe shapes and emits a `break` after N
+      // iterations, OR the membrane stops trapping on whichever access
+      // pattern the probes use as the detection signal (likely accessor
+      // descriptor checks on `Function.prototype.toString` / globals).
+      if (tu.host === 'pm.pstatic.net' && /\/resources\/js\/(main|polyfill|preload|search)\.[\w]+\.js$/.test(tu.pathname)) {
+        return new Response('/* ZP_NAVER_BUNDLE_BLOCKED — warm-session probe wedges V8 */',
+          { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
+      }
+      if (tu.host === 'ssl.pstatic.net' && (
+        tu.pathname.startsWith('/tveta/libs/glad/') ||
+        tu.pathname.startsWith('/melona/libs/gfp-nac-module/') ||
+        tu.pathname.startsWith('/tveta/libs/assets/')
+      )) {
+        return new Response('/* ZP_NAVER_AD_SDK_BLOCKED — anti-bot probe wedges V8 */',
+          { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
+      }
     } catch {}
     // request 자체를 transportFetch 에 전달 → browser-set headers (Accept,
     // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
