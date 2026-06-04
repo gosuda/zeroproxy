@@ -1160,12 +1160,19 @@ function createTab(targetUrl, servers, challengeCompat) {
   const tabId = ZP.randomId('t');
   const entryId = randomEntryId();
   const relayServers = ZP.relayServersForShare(servers || [], { allowLoopbackWS: true });
+  // Cookie jar is shared across all tabs viewing the same target origin so
+  // anti-bot warm-up cookies (NACT/NID/etc.) issued in one tab immediately
+  // benefit every other tab targeting the same site. The IDB layer above
+  // ensures the cookies also persist across SW restarts — the NAVER 60s
+  // anti-credential-stuffing lock is paid ONCE per first-cold-visit per
+  // browser profile rather than on every tab open.
   // challengeCompat is the per-tab operator opt-in (B-series arm sender).
   // Persisted on the tab so every response routed through this tab can take
   // the armed CSP projection without re-reading the message stream. The
   // header/URL classifier (Go side) is the second of two signals; this flag
   // alone grants no egress, no eval, no cache skip.
-  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: createCookieJar(), storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat };
+  const targetOrigin = originKeyForURL(target);
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: getOrCreateJarForOrigin(targetOrigin), cookieJarOrigin: targetOrigin, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;
@@ -1201,8 +1208,124 @@ function rememberResourceContext(requestURL, targetUrl, ctx) {
 // because the merged cookie blob no longer matched the per-host
 // expectations. Cookies are now scoped by (Domain, Path, Name) and
 // re-emitted only to URLs that match.
-function createCookieJar() {
-  const records = [];
+// Shared cookie jars keyed by target-origin (eTLD+host:port string the user
+// originally typed). Multiple tabs viewing the same target share the same
+// jar so a NACT issued in tab A's first navigation is immediately available
+// to tab B's pstatic.net sub-resource fetch. RFC 6265 domain/path matching
+// inside the jar handles per-host scoping — sub-resources to s.pstatic.net
+// still only see cookies whose Domain attribute matches.
+//
+// Records are durably mirrored to IndexedDB so the NAVER 60-second
+// anti-credential-stuffing slow lane is paid ONCE per first-cold-visit per
+// browser profile, not on every tab open. Without persistence, every tab
+// close drops NACT/NID/long-term tokens and the next NAVER nav restarts
+// the lock.
+const sharedJars = new Map(); // originKey → jar
+const COOKIE_DB_NAME = 'zp-cookies';
+const COOKIE_DB_VERSION = 1;
+const COOKIE_DB_STORE = 'jars';
+const COOKIE_FLUSH_INTERVAL_MS = 60_000;
+const COOKIE_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // session cookies: 7d
+let cookieDbPromise = null;
+function openCookieDb() {
+  if (cookieDbPromise) return cookieDbPromise;
+  cookieDbPromise = new Promise((resolve, reject) => {
+    try {
+      const req = indexedDB.open(COOKIE_DB_NAME, COOKIE_DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(COOKIE_DB_STORE)) {
+          db.createObjectStore(COOKIE_DB_STORE, { keyPath: 'targetOrigin' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    } catch (e) { reject(e); }
+  }).catch(err => { cookieDbPromise = null; throw err; });
+  return cookieDbPromise;
+}
+async function loadAllStoredJars() {
+  try {
+    const db = await openCookieDb();
+    await new Promise((resolve) => {
+      const tx = db.transaction(COOKIE_DB_STORE, 'readonly');
+      const store = tx.objectStore(COOKIE_DB_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const now = Date.now();
+        for (const entry of req.result || []) {
+          if (!entry || !entry.targetOrigin || !Array.isArray(entry.records)) continue;
+          // Strip expired before mounting — a 7-day-old session cookie that
+          // already passed its synthetic TTL should not be revived.
+          const live = entry.records.filter(r => {
+            if (!r) return false;
+            if (r.maxAge != null) {
+              if (r.maxAge <= 0) return false;
+              return r.creation + r.maxAge * 1000 > now;
+            }
+            return r.expires == null || r.expires > now;
+          });
+          getOrCreateJarForOrigin(entry.targetOrigin, live);
+        }
+        resolve();
+      };
+      req.onerror = () => resolve();
+    });
+  } catch {}
+}
+async function flushDirtyJarsToIDB() {
+  try {
+    const dirty = [];
+    for (const [origin, jar] of sharedJars) {
+      if (jar.consumeDirty()) dirty.push({ origin, records: jar.snapshot() });
+    }
+    if (!dirty.length) return;
+    const db = await openCookieDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(COOKIE_DB_STORE, 'readwrite');
+      const store = tx.objectStore(COOKIE_DB_STORE);
+      for (const { origin, records } of dirty) {
+        store.put({ targetOrigin: origin, records, updatedAt: Date.now() });
+      }
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {}
+}
+// Boot: kick off async restore. Tabs created before restore completes will
+// race-create empty jars; the IDB load will MERGE entries into those jars
+// rather than replace, so cookies issued during the warm-up window are not
+// dropped on top by the restore.
+const restorePromise = loadAllStoredJars();
+// Periodic background flush. Also flush on `unload`-equivalent transitions
+// where possible — SW lifecycle doesn't have a true `beforeunload`, but
+// `freeze`/`activate` happen at predictable points.
+setInterval(() => { flushDirtyJarsToIDB(); }, COOKIE_FLUSH_INTERVAL_MS);
+self.addEventListener('message', evt => {
+  if (evt.data && evt.data.type === 'ZP_FLUSH_COOKIES') {
+    evt.waitUntil ? evt.waitUntil(flushDirtyJarsToIDB()) : flushDirtyJarsToIDB();
+  }
+});
+
+function originKeyForURL(targetUrl) {
+  try { return new URL(targetUrl).origin; } catch { return ''; }
+}
+function getOrCreateJarForOrigin(originKey, initialRecords) {
+  let jar = sharedJars.get(originKey);
+  if (jar) {
+    // Merge initial records (used by IDB restore arriving after first tab).
+    if (Array.isArray(initialRecords) && initialRecords.length) jar.merge(initialRecords);
+    return jar;
+  }
+  jar = createCookieJar(initialRecords || []);
+  sharedJars.set(originKey, jar);
+  return jar;
+}
+
+function createCookieJar(initialRecords) {
+  const records = Array.isArray(initialRecords) ? initialRecords.slice() : [];
+  let dirty = false;
+  function markDirty() { dirty = true; }
   function canonHost(h) { return String(h || '').toLowerCase().replace(/\.$/, ''); }
   function defaultPath(u) {
     const p = u.pathname || '/';
@@ -1276,20 +1399,33 @@ function createCookieJar() {
         const r = records[i];
         if (r.name === rec.name && r.domain === rec.domain && r.path === rec.path) {
           records.splice(i, 1);
+          markDirty();
           return;
         }
       }
       return;
+    }
+    // Session cookies (neither Expires nor Max-Age) survive across SW
+    // restarts via the IDB layer — without this synthetic TTL their
+    // `expires==null` would be persisted indefinitely and never pruned.
+    // 7 days mirrors the upper bound NAVER's NACT lifecycle uses in
+    // practice; longer would leak stale anti-bot tokens, shorter would
+    // re-trigger the 60s slow-lane on weekly use.
+    if (rec.maxAge == null && rec.expires == null) {
+      rec.expires = Date.now() + COOKIE_SESSION_TTL_MS;
+      rec.session = true;
     }
     for (let i = 0; i < records.length; i++) {
       const r = records[i];
       if (r.name === rec.name && r.domain === rec.domain && r.path === rec.path) {
         rec.creation = r.creation;
         records[i] = rec;
+        markDirty();
         return;
       }
     }
     records.push(rec);
+    markDirty();
   }
   function cookiesForURL(url, includeHttpOnly) {
     let u; try { u = new URL(url); } catch { return []; }
@@ -1316,7 +1452,51 @@ function createCookieJar() {
   function documentCookieFor(url) {
     return cookiesForURL(url, false).map(r => r.name + '=' + r.value).join('; ');
   }
-  return { setCookieLine, cookieHeader, documentCookieFor };
+  function snapshot() {
+    // Return non-expired records for IDB serialisation. HttpOnly stays in —
+    // it's a server-side flag that gates `document.cookie` exposure, not
+    // jar membership. Strip the `creation` jitter to keep serialised blobs
+    // stable across short-interval flushes (smaller IDB writes).
+    const now = Date.now();
+    return records.filter(r => !expired(r, now)).map(r => ({
+      name: r.name, value: r.value,
+      domain: r.domain, hostOnly: !!r.hostOnly,
+      path: r.path,
+      secure: !!r.secure, httpOnly: !!r.httpOnly,
+      sameSite: r.sameSite || '',
+      expires: r.expires, maxAge: r.maxAge,
+      creation: r.creation,
+      session: !!r.session,
+    }));
+  }
+  function merge(restored) {
+    // Used by the IDB restore path when records arrive AFTER live cookies
+    // already populated the jar (e.g. a fast warm-up navigation finished
+    // before the IDB GET resolved). Restored records DO NOT clobber live
+    // ones with the same (name, domain, path) tuple — the live value is the
+    // freshest authoritative one. Restored records also do not mark the
+    // jar dirty (no need to re-persist what we just loaded).
+    const now = Date.now();
+    for (const r of restored) {
+      if (!r || !r.name || !r.domain) continue;
+      let liveIdx = -1;
+      for (let i = 0; i < records.length; i++) {
+        const cur = records[i];
+        if (cur.name === r.name && cur.domain === r.domain && cur.path === r.path) {
+          liveIdx = i; break;
+        }
+      }
+      if (liveIdx >= 0) continue;
+      // Skip already-expired restored records.
+      if (r.maxAge != null) {
+        if (r.maxAge <= 0) continue;
+        if (r.creation + r.maxAge * 1000 <= now) continue;
+      } else if (r.expires != null && r.expires <= now) continue;
+      records.push(r);
+    }
+  }
+  function consumeDirty() { const was = dirty; dirty = false; return was; }
+  return { setCookieLine, cookieHeader, documentCookieFor, snapshot, merge, consumeDirty };
 }
 function isCORSPreflight(req) { return req.method === 'OPTIONS' && req.headers.has('Access-Control-Request-Method'); }
 function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set('Access-Control-Max-Age', '86400'); h.set('Cache-Control', 'no-store'); return new Response(null, { status: 204, headers: h }); }
