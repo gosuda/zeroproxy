@@ -666,53 +666,17 @@ async function transportFetch(targetUrl, opt) {
   // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,
   // upgrade-insecure-requests). `request.headers.entries()` from the
   // SW-intercepted request DOES include these in Chromium.
-  // Compute the Sec-Fetch-Site value a real (non-proxied) browser would have
-  // sent for SUB-RESOURCES, using the virtual document URL vs the target.
-  // Page-side `fetch('/zp/api/script?u=…')` reports `same-origin`
-  // (proxy.localhost → proxy.localhost), which `pm.pstatic.net` and other
-  // NAVER CDNs reject with 404 because no real cross-site script load looks
-  // same-origin. Real Chrome computes the value against the eTLD+1 of the
-  // *document* host versus the target host; we approximate eTLD+1 with the
-  // last two labels (correct for the vast majority of TLDs).
-  //
-  // For the top-level navigation request itself (opt.document === true) we
-  // keep the existing `cross-site` default. Setting it to `same-origin`
-  // (which a strict virtual eTLD compare would yield for `www.naver.com →
-  // www.naver.com`) made NAVER serve a different bundle path that wedged the
-  // renderer; the safer choice for the initial doc fetch is the previous
-  // behaviour.
-  const lastTwoLabels = host => {
-    const parts = String(host || '').toLowerCase().split('.');
-    return parts.length >= 2 ? parts.slice(-2).join('.') : parts.join('.');
-  };
-  let subresourceSecFetchSite = 'cross-site';
-  try {
-    const targetHost = new URL(u).hostname;
-    const baseHost = virtualBase ? new URL(virtualBase).hostname : '';
-    if (baseHost && targetHost) {
-      if (targetHost === baseHost) subresourceSecFetchSite = 'same-origin';
-      else if (lastTwoLabels(targetHost) === lastTwoLabels(baseHost)) subresourceSecFetchSite = 'same-site';
-      else subresourceSecFetchSite = 'cross-site';
-    }
-  } catch {}
-  // Pre-mark Sec-Fetch-Site for sub-resources so the page-side `same-origin`
-  // (proxy.localhost) value doesn't win via pushOnce's seen-check below.
-  // For the document fetch we leave it for the request-headers loop to
-  // forward whatever the browser provided, then fall back to `cross-site`.
-  if (!opt.document) pushOnce('sec-fetch-site', subresourceSecFetchSite);
   if (opt.request && opt.request.headers) {
     for (const [k, v] of opt.request.headers.entries()) {
       const kl = k.toLowerCase();
       // Skip ones we explicitly own (Referer/UA/Cookie were promoted via
       // X-ZP-* and would be lost here anyway). Accept-Encoding is forced
-      // below. Sec-Fetch-Site for non-document was pre-marked above; let
-      // it through here only for documents (where we trust the browser).
+      // to identity below.
       if (kl === 'cookie' || kl === 'host' || kl === 'origin' || kl === 'referer'
           || kl === 'user-agent' || kl === 'accept-encoding'
           || kl === 'connection' || kl === 'content-length' || kl === 'transfer-encoding') {
         continue;
       }
-      if (kl === 'sec-fetch-site' && !opt.document) continue;
       pushOnce(k, v);
     }
   }
