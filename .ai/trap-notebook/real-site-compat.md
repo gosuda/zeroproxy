@@ -1,0 +1,319 @@
+# Real-Site Compatibility Patterns
+
+특정 실사이트에서 발견된 패턴/함정/우리가 가정하면 안되는 것.
+
+---
+
+## 2026-06-04 — NAVER warm-session V8 wedge: WTM/NCPT block 만으로 부족, GFP/NAC/Veta SDK 도 wedge (광고 미렌더 trade-off)
+
+**Site**: `https://www.naver.com/` (NACT 쿠키 영속화 후 warm 경로)
+
+**Context**: 이 세션에서 IDB cookie jar 영속화 ([sw.js sharedJars + openCookieDb](../../web/sw.js))를 추가하여 NACT 가 탭/브라우저 종료 후에도 살아남게 됨. 그 결과 NAVER 의 WAF 가 첫 요청부터 "trusted session" 무거운 번들 variant 를 serve. 이전 함정노트의 GFP SafeFrame fix / installSafeFrameResizeShim / __ZP_LOAD_EXTERNAL_SCRIPT 가 모두 살아있는 상태에서도 V8 main thread tight-loop wedge 재현.
+
+**Symptoms**:
+- NACT 가 IDB에서 복원된 후 NAVER 첫 nav → 2~5초 후 exec-js / console-logs / pause(CDP Runtime.evaluate) 모두 timeout.
+- taskweaver `pause` 의 `js_stack = ""` (empty) + minidump 6개 — V8 가 native code (compiled tight loop) 에서 spinning.
+- Wikipedia / proxy.localhost shell 등 다른 사이트는 영향 없음.
+- Cold session (IDB clear 후) 에서는 wedge 안 발생, 단 readyState 가 "interactive" 에서 멈추고 광고/카드 미렌더 (NAVER 가 lite variant serve).
+
+**Bisect (이번 세션, 결정적 결과 도출 못함 — intermittent)**:
+- 외부 트래커 모두 block (ssl/ntm/cc/wcs/siape) → wedge 여전.
+- + pm.pstatic.net 4 번들 block → no wedge, interactive.
+- + ssl.pstatic.net glad/melona/tveta SDK block → no wedge, **complete + 풀 렌더링 (144 links)**.
+- search.js 만 block (다른 enable) → 어떤 run 에서는 wedge, 다른 run 에서는 no wedge.
+- main only enable (search/polyfill/preload block) + SDK block → complete.
+
+**Final decision (commit edd98d4)**: `pm.pstatic.net/resources/js/{main,polyfill,preload,search}.*.js` + `ssl.pstatic.net/{tveta/libs/glad/, melona/libs/gfp-nac-module/, tveta/libs/assets/}` 모두 block. NAVER 메인 페이지가 readyState=complete 에 도달하고 뉴스스탠드/언론사 로고/로그인 박스/카테고리 메뉴 모두 렌더. **광고 슬롯은 빈 자리로 남음** — GFP/NAC/Veta SDK 가 stub 되어 광고 인벤토리 delivery 부재.
+
+**시도해본 광고 회복 경로 (모두 실패)**:
+1. **GFP 만 unblock** (NAC + Veta 차단 유지) — 페이지 incomplete (29 links vs 144), 부분 wedge.
+2. **모든 SDK unblock** (WTM/NCPT 만 차단) — 외부 트래커 모두 block 해도 wedge 재현. GFP/NAC/Veta 자체에 wedge probe 존재.
+3. **navigator.userAgentData fingerprint stub** — 이미 maskNativeFunction 으로 Function.prototype.toString 마스킹 적용됨, 추가 우회 효과 없음.
+
+**Detection vector 분석** (gfp-display-sdk.js inspect):
+- `Function.toString.call(t).includes("[native code]")` — wrap 탐지 (maskNativeFunction 으로 mitigate).
+- `navigator.userAgentData.getHighEntropyValues([...])` — Chrome Client Hints fingerprint, native 그대로 통과.
+- 그러나 어딘가에 추가 detection 이 있어 wedge 발생.
+
+**Lessons**:
+1. **IDB cookie 영속화는 양날의 칼**: NACT 가 살아있는 한 NAVER 는 trusted bundle 을 serve. trusted bundle 의 anti-bot probe 가 cold bundle 의 probe 보다 무거움. 60s 락 회피 ↔ 광고 SDK 사용성 trade-off.
+2. **이전 함정노트 (2026-06-01 WTM/NCPT) 의 fix 가 충분 안 함**: NAVER 가 anti-bot probe 를 GFP/NAC/Veta SDK 자체에 임베드. SDK 단위 block 외에 surgical fix 어려움.
+3. **AST-level probe pattern 검출 + neutralize** (rewriter 가 `for(;;)` + native-code check 결합을 인식해서 break 삽입) 가 장기 fix. 본 세션 범위 외.
+4. **iframe sandbox 격리** — 광고 SDK 를 별도 V8 isolate 에 가두면 wedge 가 main thread 로 전파 안 됨. 본 세션 범위 외 (광고 클릭/렌더 통합 복잡).
+
+**현 상태 user-facing**: NAVER 풀 페이지 렌더 (검색바, 뉴스스탠드, 언론사 로고, 로그인, 카테고리 메뉴). **광고 슬롯은 빈 영역으로 남음**. main.js 자체가 serving 하는 NAVER 자체 광고는 정상.
+
+References:
+- [web/sw.js NAVER bundle block](../../web/sw.js)
+- 이전 함정 entry 2026-06-01 (WTM/NCPT block fix), 2026-05-31 (installSafeFrameResizeShim), 2026-05-30 (SafeFrame loader + decode_common_html_entities fix)
+
+---
+
+## 2026-05-30 — GitHub home page partial render (webpack publicPath / 미해결)
+
+**Site**: `https://github.com/`
+
+**Symptoms**:
+- 상단 nav (Platform / Solutions / Resources / Open Source / Enterprise / Pricing / Sign in / Sign up) 만 렌더.
+- 메인 body 는 "Error / Looks like something went wrong!" 표시 (GitHub 자체 error fallback).
+- 약 130개 error/rejection 누적. 대부분 `ChunkLoadError: Loading chunk N failed after 3 retries`.
+
+**진단 결과**:
+- Chunk URL 패턴: `http://proxy.localhost:18080/zp/api/primer-react-css.11549718be029d2a.module.css` (`/zp/api/` 다음 chunk 파일명 — `?url=encoded` 누락).
+- 원인: webpack runtime 의 "Automatic publicPath" 알고리즘:
+  ```js
+  b.p = l = l
+    .replace(/^blob:/, "")
+    .replace(/#.*$/, "")
+    .replace(/\?.*$/, "")   // ← 우리 proxy URL의 ?url= 쿼리 제거
+    .replace(/\/[^\/]+$/, "/")
+  ```
+- 우리 proxy URL `http://proxy.localhost:18080/zp/api/fetch?url=ENCODED` 에서 query 제거하면 `/zp/api/fetch` → 마지막 segment 제거하면 `/zp/api/` → publicPath = `/zp/api/`.
+- 이후 chunk 로드는 `__webpack_require__.p + chunkName` = `/zp/api/<chunk>.css` 가 되어 404.
+
+**시도된 fix**:
+- `zp-htmltx::transform` 가 link/script 의 `data-zp-target-url` 속성을 원본 https URL 로 set. `runtime-prelude` 의 `script.src` getter 가 이를 우선 반환하여 webpack 이 원본 github URL 로 publicPath 계산.
+- **unit test 는 통과** (`external_stylesheet_link_rewritten` 가 `data-zp-target-url` 검증).
+- **그러나 실제 github 페이지 에서 data-zp-target-url 이 DOM 에 보이지 않음**. WASM 에 string 존재 (strings dump 확인), 새 빌드/SW unregister/브라우저 재시작 모두 시도. element handler `element!("*", ...)` 가 reach 안 되는 듯하나 정확한 원인 미파악.
+
+**Fix status (2026-05-30 업데이트)**: **publicPath 부분 해결**, 그러나 GitHub 페이지 자체 ErrorPage 는 다른 원인.
+
+**진단 후속 (2026-05-30)**:
+- SW transformHtml 출력에 sentinel `<!--__zp_diag-->` 박아 `document.childNodes[0]` 로 raw read → `{called:true, ready:true, dztCount:113, inLen:570777, outLen:589300}` 확인. **transformHtml 정상 실행 + 113 attr 박힘**.
+- 페이지 inspection 에서 attr 안 보이는 이유: **`installStealthMembrane` 의 의도된 마스킹** (자세한 내용은 [membrane.md](membrane.md#2026-05-30--zp-속성-마스킹-회로)).
+- 실제로는 `installScriptProp` / `installLinkProp` 가 `urlMeta.get(this) || Native.getAttribute('data-zp-target-url') || d.get.call(this)` chain 으로 이미 target URL 반환 중. webpack/rspack publicPath 정상 계산.
+- **GitHub 96 chunks 정상 로드 + rspack chunk queue 활성화 + react-app `class="loaded"` 도달**.
+- 그럼에도 `ErrorPage-module__Message__zz8Qu` 컴포넌트 렌더 — publicPath 와 무관한 별도 issue. React app 의 데이터 fetch / 라우터 / SSR-CSR mismatch 추정. 추가 추적 필요.
+
+**Code 상태** (남아있는 partial fix):
+- `crates/zp-htmltx/src/lib.rs`: `data-zp-target-url` 추가 로직 + `absolute_target_url` helper (unit test 통과). 향후 fix 시 활용 가능.
+- 다른 사이트 회귀 없음 — github 특정 이슈.
+
+**Patterns to watch**:
+- "Automatic publicPath" 패턴 사용 사이트 모두 동일 문제 가능 (Next.js, webpack 5+ 일반).
+- query string 보존하는 proxy URL 스킴 (`/zp/p/<encoded>/<filename>` 같은 path 기반) 으로 transition 도 고려 가능 — 대규모 변경.
+
+---
+
+## 2026-05-29 — Wikipedia / BBC 광범위 사이트 호환성
+
+**Sites**: `https://en.wikipedia.org`, `https://www.bbc.com`
+
+**검증 결과** (POST body + Referer/Origin + User-Agent fix 후):
+
+| Site | Title | LoadTime | Status |
+|---|---|---|---|
+| en.wikipedia.org | Wikipedia, the free encyclopedia | 1551ms | 정상 (featured article, In the news, search, side panels 전부 렌더) |
+| www.bbc.com | BBC Home - Breaking News... | 4512ms | 정상 home page (헤더, 카테고리, 뉴스 카드, BBC 로고) |
+
+**비고**:
+- BBC 에 console error 2건 (`Cannot assign to read only property 'constructor' of function`): bbcdotcom web SDK 의 axios 비슷한 helper 가 `fn.constructor` 에 할당 시도. 우리 멤브레인이 `dynamicConstructorWrappers` 로 `Function.prototype.constructor` 등을 read-only 로 잠금 → 할당 실패. **non-fatal**, 페이지 렌더에는 무영향.
+- Wikipedia 는 console error 0건.
+
+**Patterns to watch**:
+- React/Vue 등 modern framework 빌드들이 axios / lodash polyfill 으로 prototype 조작 시도 → 우리 lock 때문에 throw. silent throw 면 무영향, throw 가 부트 chain 깨면 페이지 깨짐.
+- "anti-bot" 사이트 일반 — 거의 모두 forbidden header smuggle 로 해결 가능.
+
+**See also**: [sw-integration.md User-Agent smuggle](sw-integration.md#2026-05-29--user-agent-forbidden-header-smuggle).
+
+---
+
+## 2026-05-29 — NAVER 중앙 ad iframe gray placeholder
+
+**Site**: `https://www.naver.com/` 중앙 상단 큰 광고 영역 (premium ad slot, 831×560).
+
+**Symptoms**:
+- Chrome 에서는 이미지 + 비디오 광고가 표시.
+- ZP 에서는 회색 placeholder + 금지 아이콘 만 표시.
+- 광고 iframe 의 `dataset.zpTargetUrl: "https://shopsquare.naver.com/"` — target 은 정확.
+
+**진단 결과**:
+- iframe `sandbox=""` 속성 (empty value = ALL restrictions 활성화 = no scripts, opaque unique origin).
+- 결과: `iframe.contentDocument` 접근이 `SecurityError: cross-origin frame` (sandbox opaque origin 때문).
+- 우리 멤브레인은 `sandbox` attr 변화를 MutationObserver attribute filter 에 포함시키지 않음 (현재 filter: `href, xlink:href, src, srcdoc, action, formaction, poster, integrity, type, rel, target` — sandbox 제외).
+- 즉 NAVER 의 ad-loading JS 가 sandbox 변경하면 native 로 통과해야 하는데도 그 동작이 트리거 안 되는 것으로 보임 (또는 NAVER 가 sandbox 제거 대신 다른 mechanism 사용).
+
+**Status**: **미해결**. NAVER ad ecosystem 특정 이슈로 별도 추적 필요.
+- 가능한 원인: (a) NAVER ad-loader 가 postMessage 으로 iframe 내용 주입 (sandbox 무관), (b) NAVER 가 sandbox 제거하는 시점 이전에 우리가 다른 차단, (c) 광고 SDK (gfp-bridge.js) 가 실패.
+- 다른 광고 iframe (da_public_*, veta_*, 우측 recoshopping) 은 정상 → premium ad slot 특화.
+- 사용자 영향 적음 — 단순히 광고 missing.
+
+---
+
+## 2026-05-29 — NAVER 우측 상단 recoshopping Next.js iframe Application error
+
+**Site**: `https://www.naver.com/` 우측 상단 추천 상품 영역 (iframe `recoshopping.naver.com`)
+
+**Symptoms**:
+- 메인 NAVER 페이지에서 우측 상단 큰 추천 상품 박스가 "Application error: a client-side exception has occurred (see the browser console for more information)." 텍스트만 표시.
+- 다른 광고 iframe (da_public_*, veta_*) 는 정상 렌더.
+- Chrome 에서는 정상 렌더 — ZP 경로 특정 회귀.
+
+**진단 결과**:
+1. iframe origin: `https://recoshopping.naver.com` (membrane 정상).
+2. webpack chunk runtime: 정상 실행 (`webpackChunk_N_E.push` 가 `bound c` 로 오버라이드 됨, 9 chunks 등록).
+3. RSC streaming: 6 chunks 정상 push 됨 (`__next_f`).
+4. 페이지 chunk (module `6608`) **JS 리라이트 정상**: `hasZpGet: true`. membrane wrap 적용.
+5. `/api/v1/recoshopping?pageSize=3` API 응답: HTTP 200, JSON, `{titleList, boards: [33 boards × 3 products each]}` 정상.
+6. 에러: `TypeError: Cannot read properties of undefined (reading 'adCntsSeq')` at `convertExposeUrl` → `Array.filter` → callback at page.js:1:6455.
+7. 에러 사이트 코드: `let j = async e => { let t = e.filter(e => e.adCntsSeq && e.bizCd && ...) ... }`. `j` 가 undefined 요소 포함 배열로 호출됨.
+
+**Root cause** (가설):
+- API 데이터/리라이트는 모두 정상이지만 React render 타이밍 / SWR mutation race / useEffect 의존성에서 우리 멤브레인 wrap 이 동기성 가정을 미세하게 깨뜨리는 것으로 추정.
+- 구체적으로 `j` 호출 시점에 products state (`useState([])`) 가 데이터 일부만 반영된 partial array 일 가능성. 또는 SWR retry/mutate 중간 상태가 노출.
+- 확인 필요 영역: (a) SWR 의 internal cache key resolution 이 `__zp_set(globalThis, '__SWR_DEVTOOLS_USE__', ...)` 같은 패턴에 영향을 받는지, (b) `fetch()` wrap 이 SWR 의 dedup/retry 의미를 바꾸는지, (c) React DevTools 가 있을 때만 발생하는 timing 인지.
+
+**Fix status**: **해결 완료** (sw-integration "POST body + Referer/Origin 누락" 항목 참조).
+
+**실제 root cause 체인**:
+1. React 컴포넌트가 `useState([])` 로 `l` 배열 초기화.
+2. useEffect 가 `j(b.boards[t].products)` 호출 (정상 products array).
+3. `j` 내부에서 `fetch('/api/v1/collect/exlogcr', {method:'POST', body: JSON.stringify(t)})` 호출 — exposure tracking endpoint.
+4. **버그 1**: ZP 의 Rust kernel `kernel_fetch` 가 body 를 항상 빈 `Vec::new()` 로 전달 → upstream 은 empty body POST 받음.
+5. **버그 2**: SW 가 Referer/Origin 설정해도 `new Request(u, init)` 가 forbidden header 로 strip → upstream 은 Referer/Origin 없음.
+6. NAVER 의 `/api/v1/collect/exlogcr` 는 (a) JSON body 필수, (b) Origin/Referer 필수 → HTTP 400 Bad Request 반환.
+7. React: `let e = await fetch(...).then(r=>r.json()).then(e=>e.exposeContents)`. 400 response 의 JSON 은 `{timestamp, status, error, path}` → `e.exposeContents === undefined`.
+8. `d(l.concat(e))` — `l.concat(undefined)` 는 `[...l, undefined]` 반환 → l 에 undefined 원소 주입.
+9. 다음 j() 호출 시 filter callback 의 `!l.map(e=>e.adCntsSeq).includes(...)` 가 l 의 undefined 원소에서 throw.
+10. React error boundary 잡아서 `__next_error__` 페이지 표시.
+
+**Fix verification**:
+- 빌드 후 naver 로딩 → 우측 recoshopping iframe 에 "요즘 관심 받는 아이템" 헤더 + 3개 product card 정상 렌더.
+- loadTime 1182ms (mux + body fix 후).
+- `__zp_diagnostics` errCount 0.
+
+**Diagnostic recipe**:
+```js
+// 1. iframe 진단 활성화
+const f = Array.from(document.querySelectorAll('iframe')).find(x => x.offsetWidth===420 && x.offsetHeight===172);
+const win = f.contentDocument.defaultView;
+win.__zp_diagnostics  // 에러 ring buffer (runtime-prelude.js 가 자동 설치)
+
+// 2. webpack/page chunk 리라이트 검증
+const chunks = win.webpackChunk_N_E || [];
+for (const c of chunks) for (const id in (c[1]||{})) {
+  const src = String(c[1][id]); if (src.includes('adCntsSeq')) console.log(id, src.includes('__zp_get'));
+}
+```
+
+**See also**: [membrane.md](membrane.md) (iframe origin/storage 격리), [rewriter.md](rewriter.md) (page chunk 리라이트).
+
+---
+
+## 2026-05-29 — NAVER 검색바 透明 placeholder
+
+**Site**: `https://www.naver.com/`
+
+**Pattern**: 메인 페이지 검색 input 의 computed style 이:
+```
+::placeholder color: rgba(0, 0, 0, 0)   // 완전 투명
+```
+즉 native placeholder 텍스트는 의도적으로 안 보이게 함. NAVER 의 JS 가 별도 DOM 오버레이로 "검색어를 입력해 주세요." 문구를 그림 (autocomplete frame `#autoFrame` 포함).
+
+**왜 함정인가**: "검색바가 안 보임 = ZP 가 망친 것" 이라고 자동 가정하면 잘못된 추격. 실제로는 NAVER 의 JS init 이 실패해서 오버레이 미생성 → 본래 transparent 한 native input 만 남음.
+
+**진단 절차**:
+1. `document.querySelector('#query')` 가 존재하는지 (DOM 자체는 있음).
+2. `getBoundingClientRect()` 가 정상 위치/크기 반환하는지.
+3. `getComputedStyle(q, '::placeholder').color === 'rgba(0, 0, 0, 0)'` → 정상 NAVER 동작.
+4. `typeof window.veta / window.N / window.jindo` 확인 — `undefined` 면 NAVER 의 main bundle init 실패.
+
+**관련 회귀 패턴**: 사이트의 "보이지 않는 위젯" 이 항상 ZP 의 잘못은 아님. native CSS + JS 오버레이 조합이 흔함.
+
+---
+
+## 2026-05-29 — naver.com smoke test 실제 globals (정정판)
+
+**Site**: `https://www.naver.com/`
+
+페이지 정상 init 의 증거 (실제 NAVER 가 install 하는 것):
+- `typeof window.gladsdk === 'object' && Array.isArray(window.gladsdk.cmd)` — 광고 큐
+- `typeof window.ndpsdk === 'object' && Array.isArray(window.ndpsdk.cmd)` — NDP SDK 큐
+- `typeof window.ntm === 'object'` — 추적
+- `window.nsc === 'navertop.v5'` — 페이지 식별자 (인라인 정의)
+- `window.nmain.jsOrigin === 'www'` — 인라인 정의
+- `globalThis.webpackChunkpc.length >= 3` — webpack chunk register 됨 (preload/search/main)
+- `window['EAGER-DATA']`, `window['ELECTION-DATA']` — SSR hydrate 데이터
+
+**주의**: 이전에 적었던 `veta` / `N` / `jindo` / `NDPCorePostCmd` 같은 globals 는 **NAVER 가 실제로 정의하지 않음**. 추정 오류였다. 위 실제 globals 만으로 판단.
+
+**진단 순서**:
+1. 서버 로그에서 `target=https://pm.pstatic.net/resources/js/...` 확인 — target 이 naver.com 으로 잘못 가면 [setScriptSource regression](membrane.md#2026-05-29--setscriptsource-가-절대-proxy-url-잘라냄) 가능성.
+2. 외부 script response 가 `__zp_get` 포함하는지 확인 — 없으면 [/zp/api/fetch script destination 누락](sw-integration.md#2026-05-29--zpapifetch-가-script-destination-미감지) 가능성.
+3. `document.querySelectorAll('script[src]')` 중 `s.outerHTML.includes('http://proxy.localhost')` 아닌 항목이 0 이어야 함 (멤브레인 우회 차단).
+
+## 2026-06-02 — NAVER 메인 dynamic ad slots 미충전 (pc-main-ad-div-p_main_*) — ntm.pstatic.net block 시도 reject
+
+**Site/Pattern**: `https://www.naver.com/` 메인 페이지의 dynamic GFP ad slots:
+- `pc-main-ad-div-p_main_knowledge-0/-1` (지식 슬롯)
+- `pc-main-ad-div-p_main_rightside_understock`
+- `pc-main-ad-div-p_main_rightbottom_widget`
+- `right-ad-1`
+
+**Symptoms**: 위 placeholder DIV 들이 `kids:0`, `h:0`, 일부는 `data-ad-bind-called="true"` 인데도 child iframe 미주입. 같은 페이지의 다른 GFP 광고 (`ad_timeboard_tgtLREC`, `da_public_left/right_tgtLREC`, `veta_time2_tgtLREC`, `ad_premium_area`) 는 정상 렌더.
+
+**구분되는 점**: 작동하는 광고들은 **inline waterfall** (`<script type="text/plain">{"payload":{"adDivId":"timeboard",...}}</script>`, 17KB) 에 SSR 단계에서 pre-bid 되어 있음. 안 나오는 슬롯들은 waterfall 에 부재 → live `tivan.naver.com` 요청 필요. 그러나 `performance.getEntriesByType('resource').filter(r=>r.name.includes('tivan'))` 가 **0** — SDK 가 tivan 호출을 절대 안 함.
+
+**다른 사이트 의심 신호**: `https://ntm.pstatic.net/scripts/ntm_27291e35193e.js` 가 `r.duration` **121,232 ms** (~121초). 같은 family 의 `wtm.pstatic.net` / `ncpt.naver.com` 은 WASM `$_start` 무한 spin 으로 이미 blocklist 에 있음 ([sw.js:395-401](../../web/sw.js#L395-L401)). 가설: ntm 도 같은 anti-bot WASM 인데 결국 완료되긴 하지만 SDK 의 tivan 호출 chain 을 starvation.
+
+**시도된 fix**: `web/sw.js` `/zp/api/script` 핸들러의 blocklist 에 `ntm.pstatic.net` 추가 → noop body 반환.
+
+**Reject 이유**: 검증 결과 ntm block 이 **더 많은 광고를 깨뜨림**. 정상 작동하던 `ad_premium_area` (760px 큰 배너), `da_public_left/right_tgtLREC` (100px), `veta_time2_tgtLREC` 모두 빈 상태 또는 `about:blank` 로 회귀. 패턴 분석 결과: GFP SDK 는 `ntm` 을 **bid token / impression key source** 로 사용 — 모든 광고 (waterfall 기반 포함) 가 ntm 으로부터의 토큰을 검증 단계에 사용. ntm 응답이 없으면 SDK 는 inventory 를 silently drop.
+
+**올바른 결론**: `ntm.pstatic.net` 은 functional dependency — wtm/ncpt 와 다르게 block 하면 안 됨. 121초 duration 은 정상 완료를 막지 않고, SDK 가 ntm 완료 후 정상적으로 광고를 그림. 121초가 진짜 starvation 인지 측정 artifact 인지 확인 필요 — `r.duration` 이 `requestStart→responseEnd` 가 아니라 nextHopProtocol/timing 의 다른 값일 수 있음.
+
+**남은 의문 (다음 세션)**:
+- `p_main_knowledge`, `p_main_rightside_understock`, `p_main_rightbottom_widget`, `right-ad-1` 슬롯들이 native NAVER 에서는 어떻게 채워지는가? Real Chrome inspector 로 비교 필요.
+- 가능성 1: 이 슬롯들은 user-context 의존 (로그인 / 지역) — ZeroProxy 세션이 anonymous 라 inventory 자체가 없음.
+- 가능성 2: NAVER 가 추가 SDK 호출 chain 필요 — `gladsdk.cmd.push(()=>gladsdk.displayAd(...))` 를 누군가 호출해야 하지만 page 의 inline 11 ([naver-main-inline-11](https://www.naver.com/)) 가 호출 안 함.
+- 가능성 3: cookie-based 차별. `nid_inf`, `NID_AUT` 등 NAVER 인증 cookie 가 없으면 personalized inventory 비활성.
+
+**진단 명령**:
+```js
+// 어떤 inline script 가 dynamic ad slot 의 displayAd 를 호출하는지 grep
+[...document.querySelectorAll('script')]
+  .filter(s => s.textContent.includes('p_main_rightside_understock'))
+  .map(s => s.textContent.substring(0,500))
+```
+
+**Fix status**: 미해결. ntm block 미적용. 우회 대신 root cause 추적 필요. ([sw.js:382-401](../../web/sw.js#L382-L401))
+
+---
+
+## 2026-05-29 — naver.com 1차 fix 후 검증 결과 (정정)
+
+**Status (2차 검증 후)**: 1차 fix (storage recursion / script destination / scriptProxyPath / fetchThroughRuntime / workerBootstrapURL 5개) 이후 실제 페이지 동작:
+
+✓ **거의 모든 기능 동작**:
+- 12/12 script proxy 라우팅 (원본 https URL 누출 0)
+- NAVER core globals 모두 정상 (gladsdk/ndpsdk/ntm/nsc/nmain)
+- webpack 3개 chunk register + entry module 실제 evaluate (preload entry 가 `window['ntm_27291e35193e']` 설정 검증됨)
+- SSR 컨텐츠 (로고, 아이콘 행, 뉴스 그리드 4개 카드, 언론사 로고 그리드, 위젯 보드 / 캘린더)
+- **검색바 placeholder 오버레이**: 빈 상태에서는 의도적으로 안 보임 (NAVER 디자인). **typing 시 autocomplete suggestions 정상 표시**
+- 광고 컨테이너 15개 존재, 11개 visible (header banner 1280×347, timeboard, 굿피플/초록우산/소상공인연합회 자선광고 텍스트 포함)
+- 마이뉴스, 로그인, 회원가입, 스티커 이벤트 모두 렌더
+
+✗ **유일하게 깨진 것**: 우측 shopping recommendation iframe (420×172) `Application error: a client-side exception has occurred (see the browser console for more information)` — **Next.js production error fallback**. 그 한 iframe 의 hydration 단계에서 throw.
+
+**이전 추정 정정**:
+- "검색바/광고 캐러셀/우측 위젯 모두 미렌더" 라는 1차 진단은 **오류**. 실제로는 (a) 검색바는 빈 상태일 때만 transparent 한 placeholder (typing 시 정상), (b) 광고 캐러셀과 위젯 영역은 점진 로딩되는 컨텐츠로 시간 충분 후 모두 렌더.
+- "webpack 의 entry module 이 evaluate 안됨" 추정도 **오류**. 실제로는 entry 가 정상 실행되어 side effect (`ntm_<key>` 변수 설정) 가 관찰됨.
+
+**진정한 잔여 작업**:
+- Shopping iframe Next.js hydration 실패만 남음. 자매 iframe (자선광고들) 은 정상 — Next.js 가 React 19 RSC payload 를 hydrate 할 때 우리 멤브레인이 RSC streaming 패턴 mangle 가능성.
+- Phase 매핑: PHASE2_PLAN.md B3 (rewriter rule 추가) 또는 site-quirks 모듈.
+
+**다음 진단 단계 (Next.js 특정)**:
+- iframe 의 inline `<script>__ZP_EXEC_INLINE_SCRIPT("...")` 가 `self.__next_f.push([0])`, `self.__next_f.push([1, "1:H..."])` 형태 — `__next_f` 는 React Server Components streaming push 큐.
+- 멤브레인이 `__next_f.push(...)` 호출의 callback override 같은 동작을 깨는지 확인.
+- 또는 React 의 `renderToReadableStream` / `createFromReadableStream` 같은 stream API 가 가상화 환경에서 망가지는지.
+
+---
+
+## 카테고리 추가 시 권장 사이트 (E2 매트릭스 후보)
+
+- `https://www.naver.com/` — 한국 포털, 광범위한 광고 SDK, 다수의 iframe
+- `https://gosuda.org/` — 우리 home 회귀 사이트 (PHASE2 plan E2)
+- `https://news.ycombinator.com/` — 단순 HTML, JS 거의 없음 → baseline 보장
+- `https://github.com/` — React + 복잡한 dynamic import
+- `https://www.google.com/` — 적대적 anti-bot/fingerprinting 환경
