@@ -37,18 +37,15 @@
 //!   `MAX_REQUEST_BODY_BYTES` (8 MiB) before calling the kernel.
 
 use std::io;
-use std::str;
 
 use futures_util::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Maximum bytes we'll buffer for the response head (status line + headers).
-/// Larger than any sane server's reply head; smaller than enough to be an
-/// attacker memory-exhaustion vector if the upstream is hostile.
-const MAX_HEAD_BYTES: usize = 64 * 1024;
+use zp_transport_codec::http1 as codec;
 
-/// Maximum response headers. `httparse::EMPTY_HEADER` is cheap, but we want
-/// a hard upper bound on parser work.
-const MAX_HEADERS: usize = 128;
+/// Maximum bytes we'll buffer for the response head (status line + headers).
+/// Mirrors `codec::MAX_HEAD_BYTES` so the wasm wrapper and host codec are
+/// bounded identically.
+const MAX_HEAD_BYTES: usize = codec::MAX_HEAD_BYTES;
 
 /// Maximum bytes we'll buffer for a single response body. The SW also
 /// imposes its own limit on what it'll surface to the page, so this is a
@@ -63,30 +60,10 @@ const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// connections whose response body was *close-delimited* (no
 /// `Content-Length`, no `Transfer-Encoding: chunked`, not a no-body
 /// status) — `read_body` had to drain to EOF on those, which means the
-/// underlying yamux stream is already closed.
+/// underlying yamux stream is already closed. Decision is delegated to
+/// `codec::response_keepalive` so host tests pin the contract.
 pub fn response_is_keepalive(resp: &HttpResponse) -> bool {
-    for (k, v) in &resp.headers {
-        if k.eq_ignore_ascii_case("connection") {
-            for token in v.split(',') {
-                if token.trim().eq_ignore_ascii_case("close") {
-                    return false;
-                }
-            }
-        }
-    }
-    let chunked = resp.headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("transfer-encoding")
-            && v.split(',')
-                .map(|s| s.trim())
-                .last()
-                .is_some_and(|t| t.eq_ignore_ascii_case("chunked"))
-    });
-    let has_cl = resp
-        .headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
-    let no_body_status = matches!(resp.status, 100..=199 | 204 | 304);
-    chunked || has_cl || no_body_status
+    codec::response_keepalive(resp.status, &resp.headers)
 }
 
 /// Parsed HTTP/1.1 response.
@@ -123,7 +100,9 @@ where
     read_response(stream).await
 }
 
-/// Serialise + send the request head and body.
+/// Serialise + send the request head and body. The head bytes are built
+/// by `codec::build_request_head` (host-tested); we just push them and
+/// the body through the stream.
 async fn write_request<S>(
     stream: &mut S,
     method: &str,
@@ -135,91 +114,8 @@ async fn write_request<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    if !is_token(method) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "http1: method contains invalid token bytes",
-        ));
-    }
-    if path.is_empty()
-        || path
-            .as_bytes()
-            .iter()
-            .any(|&b| b == b' ' || b == b'\r' || b == b'\n')
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "http1: request-URI must be non-empty and whitespace-free",
-        ));
-    }
-
-    let mut buf = Vec::with_capacity(256 + body.len());
-    // Request line.
-    buf.extend_from_slice(method.as_bytes());
-    buf.push(b' ');
-    buf.extend_from_slice(path.as_bytes());
-    buf.extend_from_slice(b" HTTP/1.1\r\n");
-
-    // Track which header names the caller already supplied so we don't
-    // double-add Host / Content-Length / Connection.
-    let mut have_host = false;
-    let mut have_content_length = false;
-    let mut have_connection = false;
-    let mut have_transfer_encoding = false;
-    for (k, v) in headers {
-        if !is_token(k) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("http1: header name {k:?} is not a valid HTTP token"),
-            ));
-        }
-        if v.as_bytes().iter().any(|&b| b == b'\r' || b == b'\n') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("http1: header value for {k:?} contains CR/LF"),
-            ));
-        }
-        let kl = k.to_ascii_lowercase();
-        match kl.as_str() {
-            "host" => have_host = true,
-            "content-length" => have_content_length = true,
-            "connection" => have_connection = true,
-            "transfer-encoding" => have_transfer_encoding = true,
-            _ => {}
-        }
-        buf.extend_from_slice(k.as_bytes());
-        buf.extend_from_slice(b": ");
-        buf.extend_from_slice(v.as_bytes());
-        buf.extend_from_slice(b"\r\n");
-    }
-    if !have_host {
-        if host_header.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "http1: Host header missing and no host provided",
-            ));
-        }
-        buf.extend_from_slice(b"Host: ");
-        buf.extend_from_slice(host_header.as_bytes());
-        buf.extend_from_slice(b"\r\n");
-    }
-    if !body.is_empty() && !have_content_length && !have_transfer_encoding {
-        buf.extend_from_slice(b"Content-Length: ");
-        buf.extend_from_slice(body.len().to_string().as_bytes());
-        buf.extend_from_slice(b"\r\n");
-    }
-    // Don't force `Connection: close` — browsers always send keep-alive and
-    // anti-bot WAFs (nid.naver.com, github.com) treat `Connection: close` on
-    // a fresh HTTPS connection as a robot signature and slam the TCP socket
-    // shut. Our reader handles both: Content-Length / chunked frame the body
-    // explicitly, and a missing Content-Length on a connection the server
-    // closes still resolves via read-to-EOF. The keep-alive cost is one idle
-    // TCP per request until Step 6 lands pooling.
-    if !have_connection {
-        buf.extend_from_slice(b"Connection: keep-alive\r\n");
-    }
-    buf.extend_from_slice(b"\r\n");
-    stream.write_all(&buf).await?;
+    let head = codec::build_request_head(method, host_header, path, headers, body.len())?;
+    stream.write_all(&head).await?;
     if !body.is_empty() {
         stream.write_all(body).await?;
     }
@@ -322,45 +218,15 @@ where
     }
 }
 
+/// Probe for the head-terminator CRLFCRLF.
 fn find_crlf2(b: &[u8]) -> Option<usize> {
-    b.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+    codec::find_crlf2(b)
 }
 
-/// httparse-based parser for the status line + headers. Returns the body
-/// offset (== `head_len`).
+/// Parse status line + headers via the host-tested codec.
 fn parse_head(buf: &[u8]) -> io::Result<(u16, String, Vec<(String, String)>, usize)> {
-    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-    let mut resp = httparse::Response::new(&mut headers);
-    let parsed = resp
-        .parse(buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("http1: parse: {e}")))?;
-    let head_len = match parsed {
-        httparse::Status::Complete(n) => n,
-        httparse::Status::Partial => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "http1: parse: incomplete after CRLFCRLF",
-            ))
-        }
-    };
-    let status = resp
-        .code
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "http1: missing status code"))?;
-    let reason = resp.reason.unwrap_or("").to_string();
-    let mut out = Vec::with_capacity(resp.headers.len());
-    for h in resp.headers.iter() {
-        let name = h.name.to_string();
-        let value = match str::from_utf8(h.value) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                // RFC 7230 says header values are ASCII-ish; non-UTF-8 is
-                // rare but legal. Lossy-decode rather than fail closed.
-                String::from_utf8_lossy(h.value).into_owned()
-            }
-        };
-        out.push((name, value));
-    }
-    Ok((status, reason, out, head_len))
+    let head = codec::parse_response_head(buf)?;
+    Ok((head.status, head.reason, head.headers, head.head_len))
 }
 
 /// Decide body framing from headers and dispatch. RFC 7230 §3.3.3 ordering:
@@ -392,40 +258,11 @@ where
 }
 
 fn header_terminal_chunked(headers: &[(String, String)]) -> bool {
-    for (k, v) in headers {
-        if k.eq_ignore_ascii_case("transfer-encoding") {
-            // Last comma-separated token is the terminal coding.
-            if let Some(last) = v.split(',').map(|s| s.trim()).last() {
-                return last.eq_ignore_ascii_case("chunked");
-            }
-        }
-    }
-    false
+    codec::header_terminal_chunked(headers)
 }
 
 fn header_content_length(headers: &[(String, String)]) -> io::Result<Option<u64>> {
-    let mut found: Option<u64> = None;
-    for (k, v) in headers {
-        if !k.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        let parsed: u64 = v.trim().parse().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("http1: bad Content-Length {v:?}"),
-            )
-        })?;
-        if let Some(prev) = found {
-            if prev != parsed {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "http1: conflicting Content-Length",
-                ));
-            }
-        }
-        found = Some(parsed);
-    }
-    Ok(found)
+    codec::header_content_length(headers)
 }
 
 async fn read_fixed<S>(stream: &mut S, n: u64, leftover: &[u8]) -> io::Result<Vec<u8>>
@@ -644,23 +481,12 @@ where
     }
 }
 
-/// Predicate: is the entire byte slice a valid HTTP token (RFC 7230 §3.2.6)?
-fn is_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes().all(|b| {
-            matches!(
-                b,
-                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.'
-                    | b'^' | b'_' | b'`' | b'|' | b'~'
-                    | b'0'..=b'9'
-                    | b'A'..=b'Z'
-                    | b'a'..=b'z'
-            )
-        })
-}
-
-// TODO(test): same caveat as `socks5` — host-side tests pending the
-// transport-subcrate or wasm-bindgen-test infra. Once landed, golden tests
-// for: identity (Content-Length), chunked (incl. trailers), EOF-delimited,
-// duplicate Content-Length rejection, header injection rejection (CR/LF in
-// value), missing Host auto-add, and Connection: close auto-add.
+// Host-side tests for the byte-layout invariants live in
+// `crates/zp-transport-codec/src/http1.rs` (request-line shape, header
+// auto-add, CRLF injection rejection, response-head parse, chunked /
+// Content-Length / EOF framing decisions, keep-alive predicate). The
+// async behaviours that remain in this module (chunked decoder
+// loop-tolerance, body cap, trailer drain) are exercised end-to-end
+// when the kernel makes a real upstream fetch — there's no
+// out-of-process server to mock against in `cargo test` because the
+// parent `kernel` module is `cfg(target_arch = "wasm32")`.

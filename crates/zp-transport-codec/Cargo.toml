@@ -1,0 +1,22 @@
+[package]
+name = "zp-transport-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Pure-byte protocol codecs shared by `zp-bundle`'s wasm32-only async
+# transport stack and host-side `cargo test`. The async traffic logic
+# (futures-io, yamux, rustls) stays in `zp-bundle/src/kernel/transport`
+# because it pulls wasm-only deps; this crate only contains
+# Vec<u8> ↔ struct serdes (RFC 1928 / RFC 1929 SOCKS5, RFC 9112 HTTP/1.1
+# request line + headers) so the parsers can be unit-tested without
+# wasm-pack and without standing up a fake server.
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Only `httparse` for the HTTP/1.1 response-head parser. Pure-Rust,
+# no_std-friendly, used by both this crate and the wasm async wrapper —
+# pinning the same major version here keeps the two callers byte-identical.
+httparse = { workspace = true }

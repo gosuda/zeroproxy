@@ -3082,6 +3082,7 @@ dependencies = [
  "zp-htmltx",
  "zp-rewriter",
  "zp-shared",
+ "zp-transport-codec",
 ]
 
 [[package]]
@@ -3126,4 +3127,11 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "zp-transport-codec"
+version = "0.1.0"
+dependencies = [
+ "httparse",
 ]

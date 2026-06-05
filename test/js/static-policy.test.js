@@ -712,6 +712,105 @@ test('C1: Rust WebSocket client implements RFC 6455 handshake + codec', () => {
   assert.match(modRs, /transport::ws_client::open\(&url, &protocols\)\.await/, 'kernel_stream must call ws_client::open');
 });
 
+test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
+  // zp-bundle's wasm-only async transport modules now delegate every
+  // byte-layout decision to crates/zp-transport-codec — which IS
+  // host-buildable and carries the unit tests the wasm wrappers can't
+  // run themselves (parent kernel mod is #![cfg(target_arch = "wasm32")]).
+  // Pin the wiring so a future refactor can't silently re-introduce the
+  // duplicated inline byte layouts.
+  const socks5 = fs.readFileSync('crates/zp-bundle/src/kernel/transport/socks5.rs', 'utf8');
+  assert.match(
+    socks5,
+    /use zp_transport_codec::socks5 as codec;/,
+    'socks5.rs must import the codec crate',
+  );
+  assert.match(
+    socks5,
+    /codec::build_greeting\(auth\)/,
+    'socks5 method-neg must build the greeting through the codec',
+  );
+  assert.match(
+    socks5,
+    /codec::parse_greeting_reply\(reply, auth\)/,
+    'socks5 method-neg must parse the greeting reply through the codec',
+  );
+  assert.match(
+    socks5,
+    /codec::build_userpass_subneg\(user, pass\)/,
+    'userpass subneg must come from the codec',
+  );
+  assert.match(
+    socks5,
+    /codec::parse_userpass_reply\(reply\)/,
+    'userpass reply must be parsed by the codec',
+  );
+  assert.match(
+    socks5,
+    /codec::build_connect_request\(host, port\)/,
+    'CONNECT request must come from the codec',
+  );
+  assert.match(
+    socks5,
+    /codec::parse_connect_reply_head\(head\)/,
+    'CONNECT reply head must be parsed by the codec',
+  );
+  // The legacy inline constants that used to live here are gone — the
+  // codec crate is the single source of truth.
+  assert.equal(
+    socks5.includes('const VER: u8 = 0x05'),
+    false,
+    'inline VER constant must be removed (now lives in zp-transport-codec)',
+  );
+  assert.equal(
+    socks5.includes('fn map_rep_kind'),
+    false,
+    'inline REP-code mapping must move to zp-transport-codec',
+  );
+  assert.equal(
+    /TODO\(test\)/.test(socks5),
+    false,
+    'socks5.rs TODO(test) marker must be retired (codec carries the tests)',
+  );
+
+  const http1 = fs.readFileSync('crates/zp-bundle/src/kernel/transport/http1.rs', 'utf8');
+  assert.match(
+    http1,
+    /use zp_transport_codec::http1 as codec;/,
+    'http1.rs must import the codec crate',
+  );
+  assert.match(
+    http1,
+    /codec::build_request_head\(method, host_header, path, headers, body\.len\(\)\)/,
+    'http1 write_request must build the head via the codec',
+  );
+  assert.match(
+    http1,
+    /codec::parse_response_head\(buf\)/,
+    'http1 parse_head must delegate to the codec',
+  );
+  assert.match(
+    http1,
+    /codec::response_keepalive\(resp\.status, &resp\.headers\)/,
+    'response_is_keepalive must delegate to the codec',
+  );
+  assert.equal(
+    http1.includes('fn is_token'),
+    false,
+    'inline is_token helper must move to zp-transport-codec',
+  );
+  assert.equal(
+    /TODO\(test\)/.test(http1),
+    false,
+    'http1.rs TODO(test) marker must be retired (codec carries the tests)',
+  );
+
+  // Workspace must declare the crate so cargo picks the host tests up.
+  const rootCargo = fs.readFileSync('Cargo.toml', 'utf8');
+  assert.match(rootCargo, /"crates\/zp-transport-codec"/);
+  assert.match(rootCargo, /zp-transport-codec = \{ path = "crates\/zp-transport-codec" \}/);
+});
+
 test('C1: WS closing handshake defers finish until port ack (RFC 6455 §7.1.6)', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const sw = fs.readFileSync('web/sw.js', 'utf8');

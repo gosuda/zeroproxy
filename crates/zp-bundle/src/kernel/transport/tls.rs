@@ -463,9 +463,11 @@ where
     }
 }
 
-// TODO(test): handshake against a local TLS server (rcgen + a tokio
-// listener loop on the host side) once the test infra split (see
-// http1.rs note) lands. wasm-bindgen-test can also drive a handshake
-// against a real public host inside Node, but that's a network-bound
-// test. For now the SOCKS5 → TLS → HTTP integration is exercised
-// end-to-end by the SW once `kernel_fetch` is rewired (Step 7).
+// Host-side TLS handshake tests remain deferred — rustls is wired
+// against `rustls-rustcrypto` and the WASM-only `getrandom/wasm_js`
+// entropy backend, so a `cargo test -p zp-bundle` driver would need to
+// pull a parallel host CryptoProvider just for the test, doubling the
+// dep surface. Better to verify the handshake end-to-end through the
+// SW against a real upstream and let the rustls test suite cover the
+// codec itself. wasm-bindgen-test against a public TLS host inside
+// Node is the other option once we settle the test infra question.
