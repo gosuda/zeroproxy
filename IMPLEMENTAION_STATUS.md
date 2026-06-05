@@ -186,7 +186,8 @@ Initial seed corpus:
 | `https://naver.com` | Desktop homepage load, full primary content load, ad iframe discovery, ad iframe nonblank/load-state check, major navigation/search entry points visible. |
 | `https://m.naver.com` | Mobile homepage load under a mobile viewport/user-agent profile, full primary content load, ad iframe discovery, ad iframe nonblank/load-state check, major navigation/search entry points visible. |
 | `https://www.google.com/search?q=zeroproxy` | Search result page render, result links visible, no unexpected script fail-close. |
-| `https://www.youtube.com` | Shell render, script graph load, media/player container visible without requiring playback success. |
+| `https://www.google.com/maps` | Maps shell render, search box and map controls visible, map canvas/tile container nonblank, geolocation/permission behavior compared with native, tile/API request failures classified. |
+| Embedded Google Maps fixture | Checked-in host fixture embedding a Google Maps embed URL in an iframe; iframe load, map content nonblank state, postMessage/frame behavior, sandbox/CSP deltas, and third-party widget console errors compared with native. |
 | `https://www.wikipedia.org` | Static-heavy baseline render, search input visible, navigation links visible. |
 | `https://github.com` | Modern app shell render, navigation/header visible, unauthenticated content visible. |
 | `https://news.ycombinator.com` | Low-JS baseline, link list render, navigation visible. |
@@ -195,8 +196,9 @@ Initial seed corpus:
 | `https://www.amazon.com` | Commerce-style homepage render, image/script/css load state, navigation/search controls visible. |
 | `https://www.nytimes.com` | News/media layout render, image/script/css load state, paywall/consent behavior compared with native. |
 | `https://www.cloudflare.com` | CDN/security/challenge-adjacent baseline, script and navigation render compared with native. |
+| `https://ipleak.net` | Leak-test surface render, IP/DNS/WebRTC result containers visible, WebRTC/WebTransport no-goal behavior classified separately, raw IP/DNS values redacted and compared only by coarse consistency classes. |
 
-The corpus should capture only redacted operational data. It must not log raw page bodies, raw scripts, request bodies, cookies, challenge tokens, clearance cookies, challenge configuration, or sensitive URLs beyond normalized site identifiers and coarse failure categories.
+The corpus should capture only redacted operational data. It must not log raw page bodies, raw scripts, request bodies, cookies, challenge tokens, clearance cookies, challenge configuration, raw IP addresses, raw DNS resolver values, or sensitive URLs beyond normalized site identifiers and coarse failure categories.
 
 ### Planned Browser-Comparison Verification Pipeline
 
@@ -223,7 +225,9 @@ Rendering comparison should not require exact pixel equality. It should use tole
 - major navigation/search controls are visible where native shows them;
 - console error count and normalized error classes do not exceed native by an allowed threshold;
 - blocked/fail-closed paths are either expected deltas or classified compatibility failures;
-- ad iframes for `https://naver.com` and `https://m.naver.com` are discovered and reach a loaded/nonblank state when native does.
+- ad iframes for `https://naver.com` and `https://m.naver.com` are discovered and reach a loaded/nonblank state when native does;
+- Google Maps and embedded Google Maps reach a nonblank map/tile state when native does, with frame, postMessage, console, tile/API, and permission deltas classified;
+- `https://ipleak.net` renders its leak-test result containers and classifies IP/DNS/WebRTC-related differences without logging raw IP addresses or resolver values.
 
 The pipeline should produce a per-site triage record:
 
@@ -388,6 +392,69 @@ Planned fixtures:
 
 Each framework fixture should verify render completion, console/runtime errors, dynamic script/chunk loading, event handling, and representative network calls through the membrane.
 
+### Planned Event Listener Compatibility Matrix
+
+The compatibility plan should include a dedicated event-listener matrix because event delivery and listener bookkeeping are core to framework hydration, navigation interception, ads, widgets, login flows, and cross-frame messaging.
+
+The current architecture should preserve the useful simplification that native DOM event dispatch remains native where possible. ZeroProxy-owned internal listeners should remain hidden from target code and should not be removable through ordinary page JavaScript. At the same time, target-visible listener APIs must behave like the host browser.
+
+The matrix should cover:
+
+- `EventTarget.prototype.addEventListener`;
+- `EventTarget.prototype.removeEventListener`;
+- `EventTarget.prototype.dispatchEvent`;
+- listener identity and duplicate-registration behavior;
+- function listeners and object listeners with `handleEvent`;
+- options object behavior for `capture`, `once`, `passive`, and `signal`;
+- boolean capture argument compatibility;
+- `AbortSignal` removal behavior;
+- listener ordering across capture, target, and bubble phases;
+- `stopPropagation`, `stopImmediatePropagation`, and `preventDefault`;
+- `defaultPrevented`, cancelable events, and passive-listener warnings/deltas;
+- `on*` property handlers such as `onclick`, `onload`, `onerror`, and `onmessage`;
+- rewritten inline event-handler attributes;
+- cross-frame `message` events, `event.origin`, `event.source`, and `MessageEvent.source`;
+- facade event targets such as XHR, XHR upload, EventSource, WebSocket, workers, service-worker facade objects, and storage events;
+- listener behavior across window, document, elements, shadow roots, frames, popups, and initial `about:blank` documents;
+- descriptor, `toString`, own-key, symbol, and property-name visibility of listener hooks and internal stores.
+
+The matrix should explicitly prove that ZeroProxy internal listeners cannot be enumerated, obtained, or removed by target code through standard DOM APIs. Any unavoidable DevTools-only visibility should be documented as outside the target-page threat model, while target-page-visible leakage should be classified as a compatibility or stealth bug.
+
+Expected implementation direction:
+
+- keep native DOM listener dispatch for ordinary DOM targets where the host browser can safely own ordering and phase behavior;
+- virtualize only the listener APIs that need target-visible event objects, such as `message` source/origin mapping;
+- keep original listener identity mappings in weak storage so target `removeEventListener` works when ZeroProxy wraps a listener;
+- avoid target-visible symbol or expando listener stores on native DOM objects;
+- make ZeroProxy-created facade event targets match native `EventTarget` semantics instead of using a simplified listener list;
+- add native-vs-ZeroProxy oracle fixtures for every matrix row.
+
+### Planned Observer and Input Event Parity
+
+The compatibility plan should include a dedicated observer and input-event parity matrix because modern app shells depend on observers and high-fidelity input events for hydration, lazy loading, infinite scroll, editors, maps, drag interactions, menus, and mobile layouts.
+
+Observer parity should cover:
+
+- `MutationObserver` constructor shape, callback timing, record shape, subtree behavior, attribute filters, old-value options, `takeRecords`, and `disconnect`;
+- `IntersectionObserver` constructor shape, root/rootMargin/threshold behavior, callback timing, entry shape, visibility transitions, lazy-loading sentinel behavior, and frame/scroll-container cases;
+- `ResizeObserver` constructor shape, callback timing, entry box sizes, loop-limit behavior, hidden/display-none transitions, SVG/iframe edge cases, and framework layout recalculation behavior;
+- observer callback ordering relative to microtasks, animation frames, timers, DOM mutations, layout, and navigation;
+- descriptor, `toString`, own-key, symbol, and visible-string parity for observer constructors, prototypes, callbacks, and entries.
+
+Input-event parity should cover:
+
+- pointer events: `pointerdown`, `pointermove`, `pointerup`, `pointercancel`, `pointerenter`, `pointerleave`, pointer capture, pressure/tilt/twist metadata, primary pointer state, and mouse compatibility events;
+- mouse events: click/dblclick/contextmenu ordering, button/buttons, coordinates, relatedTarget, capture/bubble behavior, and prevented-default effects;
+- touch events: `touchstart`, `touchmove`, `touchend`, `touchcancel`, touch lists, passive listener behavior, preventDefault restrictions, mobile viewport behavior, and scroll interaction;
+- keyboard events: key/code/location/repeat/modifier state, keydown/keypress/keyup ordering, focus target behavior, shortcut handling, and editable-field behavior;
+- composition and text input events: `compositionstart`, `compositionupdate`, `compositionend`, `beforeinput`, `input`, selection state, IME behavior, textarea/contenteditable behavior, and framework-controlled input reconciliation;
+- focus/blur/focusin/focusout ordering across frames, popups, shadow roots, and dynamically inserted controls;
+- wheel/scroll events, passive behavior, infinite-scroll sentinel behavior, and native-vs-ZeroProxy scroll state.
+
+The matrix should compare native host-browser behavior and ZeroProxy behavior using fixture pages that exercise framework hydration, lazy images, infinite scrolling, map pan/zoom, autocomplete/search fields, drag/drop-like pointer flows, IME-style text input, and contenteditable editors. Expected deltas should be explicit, especially where privacy/persona choices intentionally clamp high-entropy device metadata.
+
+Telemetry should classify observer/input failures separately from script rewrite, DOM insertion, network, frame, and rendering failures. It must not log typed text, clipboard data, selected text, raw pointer paths, or sensitive form values; it should record only redacted event type, target class, phase, option flags, and coarse failure categories.
+
 ### Planned Frame, Srcdoc, and Sandbox Milestone
 
 Frame behavior should be split out as its own compatibility milestone instead of being treated as only part of general runtime work. Real breakage is likely to occur in iframe ads, login widgets, payment widgets, embeds, challenge pages, and `srcdoc` content.
@@ -517,6 +584,8 @@ WebRTC and WebTransport remain out of scope. Failures on those no-goal surfaces 
 22. Add a complete DOM manipulation hook inventory and parity matrix.
 23. Add a JS-root visible surface oracle comparing visible objects, properties, and strings against native browser behavior.
 24. Add target-visible selector virtualization for rewritten URL attributes.
+25. Add an event-listener compatibility matrix and internal-listener invisibility oracle.
+26. Add observer and input-event parity matrices for hydration, lazy loading, infinite scroll, maps, and editable controls.
 
 ### Planned Completion Conditions
 
@@ -533,6 +602,8 @@ The planned final state requires:
 - minimized and snapshot-tested injection inventory;
 - representative-site corpus produces triage records for native and ZeroProxy runs, including console, rendering, iframe, and transport deltas;
 - `https://naver.com` and `https://m.naver.com` pass desktop/mobile full-content and ad-iframe load checks, or failures are classified as expected external/native deltas;
+- Google Maps and embedded Google Maps pass nonblank map/tile, frame, postMessage, permission, and widget-console checks, or failures are classified as expected external/native deltas;
+- `https://ipleak.net` passes leak-test surface rendering checks with raw IP/DNS values redacted and WebRTC/WebTransport no-goal behavior classified separately;
 - real measured timing records are collected from browser, runtime, Service Worker, Go WASM bridge, and Go network engine layers;
 - target transport uses bounded browser-like connection pooling/reuse without weakening isolation;
 - redacted failure telemetry identifies first failing surfaces without logging target secrets;
@@ -542,6 +613,10 @@ The planned final state requires:
 - selector APIs match target-visible URL attributes for rewritten DOM where native selectors would match;
 - cookie, storage, SameSite, fetch, and XHR matrices are covered by compatibility oracles;
 - framework fixtures cover modern hydration, module graphs, dynamic chunks, and timer patching;
+- event-listener APIs match native behavior for listener identity, options, ordering, handler properties, wrapped message events, and facade event targets;
+- ZeroProxy internal listeners and listener stores are not enumerable, obtainable, or removable by target code through standard page APIs;
+- observer APIs and input events match native behavior for callback timing, record/entry shape, ordering, pointer/mouse/touch/keyboard/composition/input semantics, and scroll/focus interactions;
+- observer/input telemetry uses redacted event classes and never logs typed text, clipboard data, selected text, raw pointer paths, or sensitive form values;
 - frame, `srcdoc`, and sandbox behavior is tracked as a separate milestone with explicit expected deltas;
 - Performance API entries expose target-visible names with real measured timing data where safe, falling back to synthetic entries only as an explicit telemetry-counted limitation;
 - JS root visible objects, visible properties, visible strings, descriptors, prototypes, symbols, and function/accessor source strings are compared against a native host-browser baseline;
@@ -905,7 +980,7 @@ Current evidence:
 
 Difference from plan:
 
-- `https://naver.com` and `https://m.naver.com` are not currently part of the verification pipeline.
+- `https://naver.com`, `https://m.naver.com`, `https://www.google.com/maps`, the embedded Google Maps fixture, and `https://ipleak.net` are not currently part of the verification pipeline.
 - Desktop/mobile profile comparison is not currently encoded as a reusable corpus runner.
 - Ad iframe discovery and full-content-load checks are not currently encoded.
 - Console-error and rendering-state comparison against native host-browser behavior is not currently a gate.
@@ -1073,6 +1148,47 @@ Difference from plan:
 - No Webpack dynamic chunk loading fixture was found.
 - Import maps are tested at the rewriter level, but not as part of a framework-style app fixture.
 
+### 20a. Event Listener Compatibility Matrix
+
+Status: partially implemented for selected surfaces; dedicated compatibility matrix is not started.
+
+Current evidence:
+
+- Native DOM event dispatch is mostly preserved for ordinary page DOM targets.
+- Runtime navigation hooks install internal `click`, `popstate`, and `scroll` listeners before target code runs.
+- Standard page JavaScript cannot enumerate native browser listener lists, and ZeroProxy internal listener function references are closure-local, so they are not normally removable through `removeEventListener`.
+- `message` listeners are wrapped so `MessageEvent` source/origin can be virtualized while original listener identity is tracked for `removeEventListener`.
+- Rewritten inline event-handler attributes are moved to ZeroProxy-controlled backing attributes and rebound as listeners.
+- ZeroProxy-created facade targets such as XHR, XHR upload, EventSource, and WebSocket use a simplified internal listener implementation.
+
+Difference from plan:
+
+- There is no native-vs-ZeroProxy matrix for `addEventListener`, `removeEventListener`, `dispatchEvent`, listener identity, duplicate registration, and listener ordering.
+- Listener options such as `capture`, `once`, `passive`, and `signal` are not comprehensively tested across native DOM targets and ZeroProxy-created facade event targets.
+- Object listeners with `handleEvent`, `AbortSignal` removal, passive listener behavior, and propagation edge cases are not covered as a dedicated oracle.
+- Internal listener invisibility is not proven by a focused test that checks descriptors, own keys, symbols, function source, and removal attempts.
+- Facade event targets use a simplified listener list and may not match native `EventTarget` semantics for all listener options and ordering rules.
+- The document does not yet classify event-listener failures separately in the representative-site/browser-comparison pipeline.
+
+### 20b. Observer and Input Event Parity
+
+Status: not started as a dedicated compatibility matrix.
+
+Current evidence:
+
+- Runtime uses `MutationObserver` internally to enforce dynamic attribute and subtree policies after page mutations.
+- No dedicated native-vs-ZeroProxy observer parity matrix was found.
+- No dedicated native-vs-ZeroProxy input-event parity matrix was found.
+
+Difference from plan:
+
+- `MutationObserver` callback timing, record shape, option behavior, `takeRecords`, and `disconnect` are not covered by a native-vs-ZeroProxy oracle.
+- `IntersectionObserver` and `ResizeObserver` behavior is not covered for lazy loading, infinite scroll, map containers, layout recalculation, hidden elements, scroll containers, or frame edge cases.
+- Pointer, mouse, touch, wheel, keyboard, focus, composition, `beforeinput`, and `input` event ordering and payload shape are not covered as a matrix.
+- Framework hydration, lazy image loading, infinite scroll sentinels, map pan/zoom, autocomplete fields, IME-like text input, and contenteditable editor flows are not dedicated fixtures.
+- Observer/input failures are not classified separately in representative-site triage records.
+- Redacted telemetry rules for observer/input failures are not defined.
+
 ### 21. Frame, Srcdoc, and Sandbox Dedicated Milestone
 
 Status: partially implemented, not separated as a milestone.
@@ -1106,7 +1222,7 @@ Difference from plan:
 | Reduce injection inventory and remove HTML/meta CSP reliance | Mostly done | Snapshot and CSP tests exist. |
 | Performance budgets and regression gates | Partially done | Coarse budgets exist; full plan is not gated and real load timing is not collected. |
 | Performance API real-data facade | Not started | Current Performance API facade masks names and creates synthetic script entries, but does not expose Go/network real timing data. |
-| Representative-site corpus and browser comparison pipeline | Not started | No external site list, native-vs-ZeroProxy console/render comparison, or Naver desktop/mobile ad-iframe/full-content checks are currently checked in. |
+| Representative-site corpus and browser comparison pipeline | Not started | No external site list, native-vs-ZeroProxy console/render comparison, Naver checks, Google Maps checks, embedded Maps checks, or ipleak checks are currently checked in. |
 | Browser-equivalent pooled/reuse network engine | Not started | Some reuse primitives exist, but there is no browser-like scheduler, concurrency policy, queueing/backpressure gate, or transport reuse metric gate. |
 | Real performance telemetry propagation | Not started | No Go-network-engine-to-browser timing envelope exists. |
 | Redacted failure telemetry | Not started | No unified redacted failure event schema or first-failing-surface aggregation exists. |
@@ -1117,6 +1233,8 @@ Difference from plan:
 | Cookie/storage/SameSite diagnostics | Not started | Cookie/storage components exist, but no dedicated native-vs-ZeroProxy state matrix exists. |
 | Fetch/XHR compatibility matrix | Not started | Fetch/XHR components exist, but no complete option/error matrix exists. |
 | Framework compatibility fixtures | Not started | jQuery exists, but React/Next/Vite/Vue/Angular/Webpack fixture coverage is absent. |
+| Event-listener compatibility matrix | Not started as a dedicated matrix | Selected hooks exist and internal listeners are closure-local, but native-vs-ZeroProxy listener API parity and internal-listener invisibility are not proven. |
+| Observer and input-event parity matrix | Not started | Runtime uses `MutationObserver` internally, but observer APIs and pointer/mouse/touch/keyboard/composition/input event parity are not covered by native-vs-ZeroProxy fixtures. |
 | Frame/srcdoc/sandbox dedicated milestone | Partially done | Frame pieces exist, but `srcdoc`, sandbox deltas, and iframe-pattern coverage are not separated into a dedicated milestone. |
 | JS-root visible surface comparison | Not started | Selected artifact probes exist, but no bounded root graph comparison against native browser visible objects/properties/strings exists. |
 
@@ -1135,6 +1253,9 @@ Difference from plan:
 | Representative-site corpus with browser comparison | Not started. |
 | `https://naver.com` desktop full-content and ad-iframe checks | Not started. |
 | `https://m.naver.com` mobile full-content and ad-iframe checks | Not started. |
+| `https://www.google.com/maps` nonblank map/tile checks | Not started. |
+| Embedded Google Maps iframe/widget checks | Not started. |
+| `https://ipleak.net` leak-test surface checks with redacted IP/DNS comparison | Not started. |
 | Browser-equivalent pooled/reuse network engine | Not started. |
 | Real performance telemetry from Go network engine to browser reports | Not started. |
 | Performance API exposes real measured target timing data | Not started. |
@@ -1146,6 +1267,8 @@ Difference from plan:
 | Cookie/storage/SameSite diagnostics | Not started as a dedicated matrix. |
 | Fetch/XHR compatibility matrix | Not started as a dedicated matrix. |
 | Framework compatibility fixtures | Not started. |
+| Event-listener compatibility matrix and internal-listener invisibility oracle | Not started as a dedicated matrix. |
+| Observer and input-event parity matrix | Not started as a dedicated matrix. |
 | Frame/srcdoc/sandbox dedicated milestone | Not started as a separate milestone. |
 | JS-root visible object/property/string comparison | Not started. |
 | CSP/security invariants green | Strongly implemented and tested; still requires running gates before claiming release readiness. |
@@ -1164,9 +1287,11 @@ Difference from plan:
 ## Recommended Next Work
 
 1. Add the representative-site corpus and browser-comparison runner.
-   - Seed the corpus with `https://naver.com` and `https://m.naver.com` first.
+   - Seed the corpus with `https://naver.com`, `https://m.naver.com`, `https://www.google.com/maps`, an embedded Google Maps fixture, and `https://ipleak.net` first.
    - Capture native and ZeroProxy console errors, rendering health, screenshot/layout state, iframe state, and transport deltas.
    - Add Naver desktop/mobile full-content and ad-iframe load checks as `Not started` work items until implemented.
+   - Add Google Maps and embedded Google Maps nonblank map/tile, frame, postMessage, permission, and widget-console checks as `Not started` work items until implemented.
+   - Add ipleak.net leak-test surface checks with raw IP/DNS redaction and WebRTC/WebTransport no-goal classification as `Not started` work items until implemented.
 
 2. Add the browser-equivalent pooled/reuse network engine.
    - Define per-origin and global concurrency limits.
@@ -1222,38 +1347,49 @@ Difference from plan:
 13. Add framework compatibility fixtures.
    - Add React hydration, Next/Vite module graph, Vue, Angular zone/timer patching, Webpack dynamic chunks, and framework import-map coverage.
 
-14. Split frame, `srcdoc`, and sandbox into a dedicated milestone.
+14. Add the event-listener compatibility matrix.
+   - Compare native and ZeroProxy behavior for `addEventListener`, `removeEventListener`, `dispatchEvent`, listener identity, duplicate registration, `handleEvent`, and listener options.
+   - Cover `capture`, `once`, `passive`, `signal`, propagation order, `stopImmediatePropagation`, inline handlers, `on*` properties, wrapped `message` events, and facade event targets.
+   - Prove ZeroProxy internal listeners and listener stores are not enumerable, obtainable, or removable through standard target-page APIs.
+
+15. Add observer and input-event parity matrices.
+   - Cover `MutationObserver`, `IntersectionObserver`, and `ResizeObserver` constructor shape, callback timing, entry/record shape, ordering, and framework lazy-loading/hydration behavior.
+   - Cover pointer, mouse, touch, wheel, keyboard, focus, composition, `beforeinput`, and `input` event ordering and payload shape.
+   - Add native-vs-ZeroProxy fixtures for infinite scroll, lazy images, map pan/zoom, autocomplete/search fields, contenteditable editors, and IME-style text input.
+   - Keep observer/input telemetry redacted and avoid logging typed text, clipboard data, selected text, raw pointer paths, or sensitive form values.
+
+16. Split frame, `srcdoc`, and sandbox into a dedicated milestone.
    - Track ad/login/widget/payment/challenge iframe patterns.
    - Move `srcdoc` toward full document transformation.
    - Record sandbox security deltas explicitly.
 
-15. Finish end-to-end streaming HTML transformation.
+17. Finish end-to-end streaming HTML transformation.
    - Replace the current `io.ReadAll` adapter path with a streaming Rust/lol_html bridge, or explicitly document the non-streaming limitation.
    - Add first-byte and partial-flush tests.
 
-16. Upgrade `srcdoc` handling.
+18. Upgrade `srcdoc` handling.
    - Run `srcdoc` through the same Rust document policy with explicit parent/context handling.
    - Add native-vs-ZeroProxy expected deltas for any intentional containment.
 
-17. Expand expected-delta coverage.
+19. Expand expected-delta coverage.
    - Cover frame sandbox containment, `srcdoc`, data/blob worker and frame limits, and target-visible wrapper artifacts.
 
-18. Close rewrite-surface long tail.
+20. Close rewrite-surface long tail.
    - Add explicit tests or implementation for `typeof` and `delete`.
    - Add adversarial tests for challenge-token/config preservation and non-rewriting of JSON/comment/string content.
 
-19. Complete performance gates.
+21. Complete performance gates.
    - Add HTML first-byte and total-time budgets.
    - Add runtime bootstrap and page-load overhead budgets.
    - Add dynamic eval/string timer latency coverage.
    - Base representative-site performance gates on real timing records, not only synthetic unit budgets.
 
-20. Clarify delivery versioning and minification.
+22. Clarify delivery versioning and minification.
    - Decide whether minification should be default.
    - Document ABI helper preservation under minification.
    - Version or otherwise document the Rust rewriter/runtime asset compatibility strategy.
 
-21. Run the full verification gate after status-changing work.
+23. Run the full verification gate after status-changing work.
    - `npm test`
    - `npm run test:wasm`
    - `npm run lint:go`
