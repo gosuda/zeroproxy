@@ -1477,6 +1477,7 @@
       if (ws._closed) return;
       ws._closed = true;
       ws.readyState = CLOSED;
+      if (ws._closeGuard) { try { clearTimeout(ws._closeGuard); } catch {} ws._closeGuard = null; }
       ws.dispatchEvent(closeEvent(code || 1000, reason || '', wasClean !== false));
     }
     function fail(ws) {
@@ -1574,12 +1575,28 @@
         this._closingCode = finalCode;
         this._closingReason = finalReason;
         this.readyState = CLOSING;
-        if (this._port) this._port.postMessage({ type: 'close', code: finalCode, reason: finalReason });
-        // TODO(C1-transport): when Rust kernel WS lands, defer finish() until
-        // the port's {type:'close'} ack so in-flight messages drain first
-        // (RFC 6455 §7.1.6). Today the transport is a stub so deferring
-        // would hang the close event forever.
-        finish(this, finalCode, finalReason, true);
+        if (!this._port) {
+          // Mid-handshake close: no port yet, so the SW side will get a
+          // close on the port from the open() resolve path. Settle now.
+          finish(this, finalCode, finalReason, true);
+          return;
+        }
+        // RFC 6455 §7.1.6: closing handshake — wait for the peer's close
+        // echo before transitioning to CLOSED so in-flight messages drain
+        // first. The port's {type:'close'} ack (line ~1531 above) calls
+        // finish() with the remote-supplied code/reason once the Rust
+        // ws_client surfaces it. As a defense against a hung transport
+        // (e.g. server never echoes per §7.1.6 timeout window), fail
+        // closed with 1006 after 30 s.
+        this._port.postMessage({ type: 'close', code: finalCode, reason: finalReason });
+        const ws = this;
+        const guardMs = 30000;
+        const guard = setTimeout(() => {
+          if (!ws._closed) finish(ws, 1006, '', false);
+        }, guardMs);
+        // Browsers don't expose unref on setTimeout from JS; we just let
+        // the guard fire if close never resolves. Caller cannot cancel.
+        this._closeGuard = guard;
       }
     });
     // bufferedAmount: read-only per IDL.

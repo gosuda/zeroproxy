@@ -712,6 +712,49 @@ test('C1: Rust WebSocket client implements RFC 6455 handshake + codec', () => {
   assert.match(modRs, /transport::ws_client::open\(&url, &protocols\)\.await/, 'kernel_stream must call ws_client::open');
 });
 
+test('C1: WS closing handshake defers finish until port ack (RFC 6455 §7.1.6)', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // Prelude no longer carries the pre-C1 TODO marker — the deferred
+  // finish() is the close-handshake landing.
+  assert.equal(rt.includes('TODO(C1-transport)'), false, 'pre-C1 close-handshake TODO must be retired');
+  // close() posts the close frame to the port and DOES NOT immediately
+  // call finish(): the port handler (line ~1531) calls finish() when the
+  // Rust ws_client surfaces the server's close echo. Match the structure
+  // of the close() method: send postMessage then wire a guard timer.
+  assert.match(
+    rt,
+    /this\._port\.postMessage\(\{\s*type:\s*'close',\s*code:\s*finalCode,\s*reason:\s*finalReason\s*\}\)\s*;\s*const\s+ws\s*=\s*this\s*;[\s\S]{0,200}setTimeout\(/,
+    'close() must post the close frame and arm a guard timer instead of calling finish() inline',
+  );
+  // Guard must fall back to 1006 (abnormal closure) if the peer never
+  // echoes the close — defense against a hung transport.
+  assert.match(
+    rt,
+    /setTimeout\(\(\)\s*=>\s*\{[\s\S]{0,120}finish\(ws,\s*1006,\s*''\s*,\s*false\)/,
+    'guard timer must finish with 1006 if the close handshake never completes',
+  );
+  // finish() clears the guard so a successful close echo doesn't leak
+  // a timer.
+  assert.match(rt, /ws\._closeGuard[\s\S]{0,80}clearTimeout\(ws\._closeGuard\)/, 'finish() must clear the close guard timer');
+  // SW must forward the page-supplied code/reason to stream.close() so
+  // the WS close frame on the wire carries the caller's choice
+  // (RFC 6455 §7.1.4 / §5.5.1). The old call passed no args.
+  assert.match(
+    sw,
+    /m\.type === 'close'\)\s*\{\s*try\s*\{\s*stream\.close\(m\.code,\s*m\.reason\)/,
+    'SW must forward the page-supplied close code/reason to the Rust ws_client',
+  );
+  // stream.delete is deferred until the Rust handler fires (close echo)
+  // so the close handler can still drain a server-close-arrives-first
+  // race.
+  assert.equal(
+    /m\.type === 'close'\)\s*\{[^}]*streams\.delete\(id\)/.test(sw),
+    false,
+    'streams.delete must not run on page-initiated close — wait for Rust close echo',
+  );
+});
+
 test('zp-bundle WASM export uses patch-mode under the hood', () => {
   const bundle = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
   // The WASM export must call the patch-only crate API — otherwise we pay
