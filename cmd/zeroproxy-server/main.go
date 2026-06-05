@@ -2,21 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"html"
 	"io"
 	"log"
-	"math/big"
 	"mime"
 	"net"
 	"net/http"
@@ -28,7 +20,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
-	"github.com/gosuda/zeroproxy/internal/fpcapture"
 	"github.com/gosuda/zeroproxy/internal/headers"
 	"github.com/gosuda/zeroproxy/internal/rtcgw"
 	"github.com/gosuda/zeroproxy/internal/wtproxy"
@@ -40,12 +31,6 @@ type server struct {
 	socksAddr string
 	jarsMu    sync.Mutex
 	jars      map[string]*cookiejar.Jar
-	// fpStore caches per-peer TLS ClientHello fingerprints captured at
-	// handshake time on the HTTPS listener. /zp/api/fp serves them back
-	// to the page so the SW can hand the spec to the WASM kernel for
-	// browser-mimicking upstream TLS. Nil when no HTTPS listener is up
-	// (server-side fingerprint capture is impossible over plain HTTP).
-	fpStore *fpcapture.Store
 }
 
 // jarFor returns the cookie jar for the given tabId, creating one on demand.
@@ -75,10 +60,9 @@ const (
 )
 
 func main() {
-	var addr, tlsAddr string
+	var addr string
 	s := &server{}
-	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address (no fingerprint capture)")
-	flag.StringVar(&tlsAddr, "tls-addr", "", "Optional HTTPS listen address (e.g. :18443). When set, an in-memory self-signed cert is generated and used; ClientHello fingerprints are captured and served via /zp/api/fp. Browsers will show a security warning on first connect.")
+	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&s.webDir, "web", "dist/web", "built static web asset directory")
 	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address with IsolateSOCKSAuth, or 'internal' for the built-in test SOCKS5 parser/direct dialer")
 	flag.Parse()
@@ -86,79 +70,19 @@ func main() {
 	mux.HandleFunc("/", s.handle)
 	h := securityHeaders(mux)
 
-	// HTTPS listener runs in parallel with HTTP when both are configured.
-	// The TLS path is the only one that can capture browser fingerprints
-	// (Go's `crypto/tls` invokes `GetConfigForClient` per ClientHello);
-	// HTTP traffic is fingerprint-blind, which is the existing
-	// dev-loopback behaviour we preserve so this change is opt-in.
-	if tlsAddr != "" {
-		s.fpStore = fpcapture.NewStore()
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{mustSelfSignCert()},
-			GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
-				if chi.Conn != nil {
-					s.fpStore.Set(chi.Conn.RemoteAddr().String(), fpcapture.FromClientHello(chi))
-				}
-				return nil, nil
-			},
-			NextProtos: []string{"h2", "http/1.1"},
-		}
-		go func() {
-			ln, err := tls.Listen("tcp", tlsAddr, tlsConfig)
-			if err != nil {
-				log.Fatalf("tls listen: %v", err)
-			}
-			log.Printf("zeroproxy TLS (self-signed) listening on %s", tlsAddr)
-			tlsSrv := &http.Server{Handler: h}
-			if err := tlsSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Fatal(err)
-			}
-		}()
-	}
-
+	// The Go server is a pure byte-pipe — no TLS termination here. The Rust
+	// WASM kernel (crates/zp-bundle) handles every target TLS handshake
+	// inside the browser, so the relay sees only ciphertext inside yamux
+	// streams. ClientHello mimicry is captured into the kernel's hardcoded
+	// Chrome 148 spec at build time (web/sw.js captureBrowserFingerprint);
+	// the historical `-tls-addr` listener + /zp/api/fp capture endpoint
+	// were deleted 2026-06-05 since the SW never actually fetched them in
+	// practice (self-signed cert + Chrome's SW HTTPS refusal made the
+	// loopback fetch path dead on arrival).
 	log.Printf("zeroproxy listening on %s", addr)
 	if err := http.ListenAndServe(addr, h); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
-}
-
-// mustSelfSignCert generates a fresh in-memory P-256 self-signed cert
-// valid for localhost / proxy.localhost and 127.0.0.1. Browser shows
-// an "unknown CA" warning on first navigation — accept once per profile.
-// Cert lifetime is 24h; the server is expected to be a short-lived
-// dev process. Re-running the binary regenerates a different cert,
-// which the browser's HSTS / cert pinning will not care about because
-// neither applies to self-signed certs.
-func mustSelfSignCert() tls.Certificate {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		log.Fatalf("certgen: %v", err)
-	}
-	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: "zeroproxy-dev"},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost", "proxy.localhost"},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		log.Fatalf("certgen: %v", err)
-	}
-	keyDER, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		log.Fatalf("keymarshal: %v", err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		log.Fatalf("x509keypair: %v", err)
-	}
-	return cert
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -172,16 +96,6 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveWeb(w, r, "index.html")
 	case path == controlPrefix+"sw.js":
 		s.serveWeb(w, r, "sw.js")
-	case path == controlPrefix+"api/fp":
-		// Phase 4: serve the caller's captured TLS ClientHello spec
-		// back as JSON. Lookup is keyed by `r.RemoteAddr` (Go fills it
-		// from the underlying conn) so we hand each peer their own
-		// fingerprint, not someone else's. SW fetches this on boot,
-		// hands the spec to the WASM kernel, kernel passes it through
-		// the rustls fork to mirror the user's browser on upstream
-		// handshakes. 404 means no capture — either no HTTPS listener,
-		// or this request came over plain HTTP, or TTL expired.
-		s.serveCapturedFP(w, r)
 	case path == controlPrefix+"ws-pipe":
 		// Step 14 + yamux: 1 WS = N yamux streams, each = 1 TCP+SOCKS5
 		// byte-pipe to the upstream dialer. The Rust WASM kernel speaks
@@ -254,46 +168,6 @@ func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 	s.serveFile(w, r, filepath.Join(s.webDir, name), mime.TypeByExtension(filepath.Ext(name)))
-}
-
-// serveCapturedFP hands back the caller's own TLS fingerprint as JSON.
-// The store is keyed on remote address (host:port), which `r.RemoteAddr`
-// reflects per-connection. Returns 404 with `{"captured":false}` when:
-//   - server was started without `-tls-addr` (no store at all), or
-//   - this particular request arrived over plain HTTP (no handshake to
-//     capture), or
-//   - the entry already aged out of the store (10 min TTL).
-//
-// The 404+JSON shape (rather than empty 404) keeps the SW's fetch logic
-// branch-free: parse the body, check `captured`, fall through to the
-// hardcoded Chrome 134 fallback in the rustls fork if missing.
-func (s *server) serveCapturedFP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	// CORS open: the SW runs on the HTTP origin (proxy.localhost:18080)
-	// but calls this endpoint cross-origin against the HTTPS port so
-	// the browser actually performs a TLS handshake we can capture.
-	// `Origin: *` is safe — the endpoint reveals nothing the caller's
-	// own connection didn't already determine, and there's no
-	// credential reflection (we don't read cookies or auth headers).
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET")
-	w.Header().Set("Access-Control-Max-Age", "600")
-	if s.fpStore == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"captured":false,"reason":"no-tls-listener"}`))
-		return
-	}
-	spec, ok := s.fpStore.Get(r.RemoteAddr)
-	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"captured":false,"reason":"no-entry-or-expired"}`))
-		return
-	}
-	// Encode envelope so the SW can tell capture-failure apart from a
-	// genuine empty spec (which shouldn't happen, but be defensive).
-	body := fmt.Sprintf(`{"captured":true,"spec":%q}`, spec.EncodeBase64())
-	_, _ = io.WriteString(w, body)
 }
 
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {

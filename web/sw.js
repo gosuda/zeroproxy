@@ -93,97 +93,29 @@ async function initRewriter() {
 // self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
 // The JS ZPRewriter remains the primary path during this migration window;
 // the Rust bundle is available for parity tests and gradual cut-over.
-// captureBrowserFingerprint asks the Go server for the browser-side
-// TLS ClientHello it observed when the SW's own fetch hit the HTTPS
-// listener. The HTTPS listener (`-tls-addr`) records every ClientHello
-// via `tls.Config.GetConfigForClient`; `/zp/api/fp` looks the caller
-// up by `r.RemoteAddr` and returns a base64 JSON Spec.
 //
-// Why a *cross-origin* HTTPS fetch from an HTTP-loaded SW: Chrome
-// refuses to register a Service Worker over HTTPS when the cert is
-// only "advanced-bypass" trusted (self-signed), so we can't host the
-// launcher on the HTTPS port directly. The launcher lives on plain
-// HTTP — no SW registration trouble — and the SW reaches out to the
-// adjacent HTTPS port purely so the browser performs a TLS handshake
-// the server can sample. The captured fingerprint *is* the browser's,
-// regardless of which port we fetched from.
+// captureBrowserFingerprint returns the hardcoded Chrome 148 ClientHello
+// spec the WASM kernel installs into rustls' `set_captured_spec`. The
+// historical server-side capture endpoint (Go `-tls-addr` HTTPS listener
+// + `/zp/api/fp`) was deleted 2026-06-05: in practice the SW never
+// actually fetched from it because Chrome refuses to grant SW fetch
+// permission to a self-signed HTTPS port, and shipping a trusted cert in
+// a local dev binary is impractical. The Chrome 148 spec below was
+// captured once from a real browser at tls.peet.ws and frozen into the
+// build. Updating to a future Chrome version is a one-line replacement
+// of the base64 blob (decode shape: `{supportedVersions,cipherSuites,
+// extensions,supportedCurves,supportedPoints,signatureSchemes,alpnProtocols}`).
 //
-// Cert error tolerance: the HTTPS endpoint is self-signed, so the
-// fetch resolves with a network error if Chrome refuses the cert
-// even for cross-origin sub-fetches. In that case we silently fall
-// back to the rustls fork's hardcoded Chrome 134 layout (phase 2,
-// commit 2f7dfd3) — the kernel still works, just with the static
-// guess instead of a live mirror.
-//
-// Production note: ZeroProxy in production should serve a properly
-// trusted cert on its HTTPS port (e.g. via a local mkcert CA or a
-// real ACME-issued cert for a custom dev domain). Self-signed is the
-// dev-loopback path.
-let capturedFingerprint = null;
-async function captureBrowserFingerprint() {
-  if (capturedFingerprint !== null) return capturedFingerprint;
-  // TEMP investigation-only hardcode: a previously-captured WebView2 /
-  // Chrome 134 spec (sans GREASE / non-rustls-emittable extensions).
-  // This verifies the end-to-end pipeline (SW → kernel_set_captured_spec
-  // → rustls::ja3::set_captured_spec → apply_chrome_ja3_shape uses the
-  // captured order) without depending on the self-signed cert dance —
-  // Chrome refuses SW fetches to self-signed HTTPS in this dev setup.
-  // Production path (real cert): un-comment the HTTPS fetch and remove
-  // this constant. See trap notebook entry for details.
-  // Phase 5.8 spec: Chrome 148 layout captured from real Edge/WebView2
-  // browser at tls.peet.ws (2026-06-02). Differs from prior Chrome 134
-  // capture in:
-  //   - cipherSuites: 15 entries in interleaved (AES128, AES256, CHACHA)
-  //     order with ECDSA/RSA per-row pairs (Chrome 148 wire order),
-  //     instead of the 9 rustls-rustcrypto-implementable subset.
-  //     The 6 RSA fallback ciphers (49171, 49172, 156, 157, 47, 53) are
-  //     emit-only decoys — see hs.rs phase 5.8 override comment.
-  //   - extensions: Chrome 148 order [0, 17613, 51, 65281, 43, 16, 5, 11,
-  //     13, 18, 23, 27, 10, 35, 45] — note record_size_limit (id 28) is
-  //     ABSENT (Firefox-specific; Chrome doesn't send it), and ECH
-  //     (id 65037) is also ABSENT pending the safe-GREASE work
-  //     (regression on mail.naver.com — see hs.rs phase 5.7 comment).
-  //   - supportedCurves: [4588, 29, 23, 24] adds X25519MLKEM768 (4588)
-  //     as the post-quantum hybrid group Chrome 148 advertises. rustls
-  //     can't actually do MLKEM key exchange so it would never be
-  //     picked in key_share, but having it in supported_groups (id 10)
-  //     matches the JA3 curve tuple.
-  // Phase 5.9 (re-armed 2026-06-03): `supportedCurves` restored to
-  // [4588, 29, 23, 24]. The X25519MLKEM768 KX impl in
-  // `crates/zp-bundle/src/kernel/transport/mlkem_hybrid.rs` now
-  // implements `hybrid_component()` + `complete_hybrid_component()` so
-  // the rustls fork emits BOTH the 1216-byte hybrid share AND the
-  // classical X25519 sibling as a "free" second entry (matches Chrome
-  // 148 wire — see hs.rs:283-297). The 1216-byte EK uses ml-kem
-  // 0.3.2's FIPS 203 `(t_hat || rho)` encoding, byte-equivalent to
-  // aws_lc_rs's `ML_KEM_768`. If a server still answers
-  // `IllegalParameter`, capture the wire bytes and compare against a
-  // real Chrome ClientHello — that's the next debug starting point.
-  // Phase 5.10 (2026-06-03): extensions list now includes 65037
-  // (encrypted_client_hello) immediately after 45 (psk_key_exchange_modes)
-  // — Chrome 148 emits ECH GREASE near the end of the ClientHello, just
-  // before the auto-appended pre_shared_key (41). Setting it via the
-  // captured spec primarily affects the named_groups override path; the
-  // actual wire emission is driven by the rustls-fork direct field-set
-  // in apply_chrome_ja3_shape (see Phase 5.10 comment block). The base64
-  // below decodes to the JSON spec with extensions field updated.
-  capturedFingerprint = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
-  return capturedFingerprint;
-  /* Original fetch path — used once we have a trusted dev cert:
-  const here = new URL(self.location.href);
-  const httpsPort = (parseInt(here.port || (here.protocol === 'https:' ? '443' : '80'), 10) + 363).toString();
-  const fpURL = `https://${here.hostname}:${httpsPort}/zp/api/fp`;
-  try {
-    const resp = await self.fetch(fpURL, { cache: 'no-store', mode: 'cors', credentials: 'omit' });
-    if (!resp.ok) { capturedFingerprint = ''; return capturedFingerprint; }
-    const body = await resp.json();
-    capturedFingerprint = body && body.captured ? body.spec : '';
-  } catch {
-    capturedFingerprint = '';
-  }
-  return capturedFingerprint;
-  */
-}
+// Phase 5.8 spec details:
+//   - cipherSuites: 15 entries in Chrome 148 interleaved (AES128, AES256,
+//     CHACHA) order with ECDSA/RSA per-row pairs.
+//   - extensions: Chrome 148 order [0, 17613, 51, 65281, 43, 16, 5, 11,
+//     13, 18, 23, 27, 10, 35, 45, 65037] — 65037 = ECH GREASE (Phase 5.10).
+//   - supportedCurves: [4588, 29, 23, 24] — 4588 = X25519MLKEM768 (Phase
+//     5.9 hybrid emit in mlkem_hybrid.rs).
+//   - record_size_limit (id 28) ABSENT (Firefox-specific).
+const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
+function captureBrowserFingerprint() { return CAPTURED_FINGERPRINT_B64; }
 
 async function initBundle() {
   if (self.ZPBundle && self.ZPBundle.ready) return;
