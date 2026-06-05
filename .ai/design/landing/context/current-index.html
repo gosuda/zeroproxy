@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-src 'self' blob:; child-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+<title>ZeroProxy</title>
+<style>
+  body{font:16px system-ui,sans-serif;margin:2rem;max-width:52rem} form{display:flex;gap:.5rem} input{flex:1;padding:.6rem} button{padding:.6rem .9rem}.err{color:#991b1b}
+</style>
+<h1>ZeroProxy</h1>
+<p>Enter an HTTP or HTTPS URL. Target pages render through <code>/zp/p/&lt;encrypted&gt;#k=&lt;key&gt;</code> on the proxy origin.</p>
+<form id="open"><input id="url" autocomplete="url" spellcheck="false" placeholder="https://example.com" required><button>Open</button></form>
+<p id="status" role="status"></p>
+<script src="/zp/assets/zp-core.js"></script>
+<script>
+(() => {
+  'use strict';
+  const status = document.getElementById('status');
+  const setStatus = (text, err=false) => { status.textContent = text; status.className = err ? 'err' : ''; };
+  async function registerSW() {
+    if (!('serviceWorker' in navigator)) throw new Error('Service Worker unavailable');
+    const reg = await navigator.serviceWorker.register('/zp/sw.js', { scope: ZP.CONTROL_PREFIX, updateViaCache: 'none' });
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) {
+      await new Promise(resolve => {
+        const done = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(done, 5000);
+        navigator.serviceWorker.addEventListener('controllerchange', done, { once: true });
+      });
+    }
+    if (!navigator.serviceWorker.controller) {
+      location.reload();
+      await new Promise(() => {});
+    }
+    return reg;
+  }
+  function swRequest(message) {
+    return new Promise((resolve, reject) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = e => e.data && e.data.ok ? resolve(e.data) : reject(new Error(e.data && e.data.error || 'SW_NOT_READY'));
+      navigator.serviceWorker.controller.postMessage(message, [channel.port2]);
+    });
+  }
+  function proxyOrigin() {
+    const u = new URL(location.href);
+    if (u.hostname === 'proxy.localhost') return u.origin;
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1') {
+      u.hostname = 'proxy.localhost';
+      return u.origin;
+    }
+    return u.origin;
+  }
+  function relayOptions() {
+    return { allowLoopbackWS: ZP.isLoopbackHost(location.hostname), origin: proxyOrigin() };
+  }
+  async function openTarget(targetUrl) {
+    const target = ZP.canonicalTargetURL(targetUrl).href;
+    const share = await ZP.encryptShareURL(target);
+    let servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
+    try {
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers });
+      if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
+    } catch {}
+    location.assign(proxyOrigin() + ZP.makeSharePath(share.encrypted) + ZP.makeShareFragment(share.key, servers));
+  }
+  async function handleShare() {
+    if (!ZP.isSharePath(location.pathname)) return false;
+    const encrypted = ZP.shareRouteKey(location.pathname);
+    const params = new URLSearchParams(location.hash.startsWith('#') ? location.hash.slice(1) : location.hash);
+    const key = params.get('k');
+    let servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
+    if (!key) { location.replace(ZP.errorPath('INVALID_SHARE_LINK')); return true; }
+    try {
+      const targetUrl = await ZP.decryptShareURL(encrypted, key);
+      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl, servers });
+      if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
+      const next = result.path + ZP.makeShareFragment(key, servers);
+      if (location.pathname === result.path) {
+        try { history.replaceState(null, '', ZP.CONTROL_PREFIX); } catch {}
+      }
+      location.replace(next);
+    } catch (e) {
+      const code = e && e.code || e && e.message || 'INVALID_SHARE_LINK';
+      location.replace(ZP.errorPath(code));
+    }
+    return true;
+  }
+  document.getElementById('open').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    try { setStatus('Opening through ZeroProxy…'); await openTarget(document.getElementById('url').value); }
+    catch (e) { setStatus(e.message || 'Unable to open target', true); }
+  });
+  (async () => { try { setStatus('Preparing isolated transport…'); await registerSW(); if (!(await handleShare())) setStatus('Ready.'); } catch (e) { setStatus(e.message || 'Startup failed', true); } })();
+})();
+</script>

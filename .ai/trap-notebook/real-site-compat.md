@@ -4,6 +4,72 @@
 
 ---
 
+## 2026-06-05 — NAVER probe shape: `window.ZP`/`ZeroProxyRT` 가시 + tight-loop probe + taskweaver env noise (근본 해결 1차)
+
+**Site**: `https://www.naver.com/` (이번에도 warm-session V8 wedge 재현)
+
+**Context**: [2026-06-04 entry](#2026-06-04) 의 SDK 단위 block 후에도 wedge 발생. 그 entry "Lesson 3" 에서 "AST-level probe pattern 검출 + neutralize" 가 장기 fix 로 적힘. 이번 세션에서 그 1차 — `for(;;)` / `while(true)` / `while(1)` / `do while(true)` 캡 + ZeroProxy fingerprint 표면 (window.ZP, window.ZeroProxyRT) 정리 — 진행.
+
+**진단 (이번 세션, 결정적)**:
+
+1. **Membrane mask 자체는 거의 정상** — `Function.prototype.toString.call(Element.prototype.innerHTML.set)` → `'function set innerHTML() { [native code] }'`, `WebSocket.toString()` → `'function WebSocket() { [native code] }'`, `Function.prototype.bind.toString()` → `'function bind() { [native code] }'`. 명시적으로 `define`/`defineAccessor` 한 모든 멤브레인 wrap 은 native shape 으로 토스트링 마스크 됨.
+
+2. **`Object.getOwnPropertyNames(window)` 결과의 `last20` 에서 결정적 발견**:
+   ```
+   ..., "ZP", "__TASKWEAVER_READY__"
+   ```
+   - `ZP` ← ZeroProxy zp-core 가 page realm 에 노출하는 표면. 정의는 `enumerable: false, configurable: false` 였지만 **`getOwnPropertyNames` 는 spec 상 enumerable 무관 모든 own props 반환**. 안티봇 probe 가 이걸 검사하면 일발 탐지.
+   - `__TASKWEAVER_*` x 6, `__TAURI*` x 5, `__ni`, `__cr`, `__internal_unstable_listeners_function_id__`, `isTauri`, `ipc` ← **taskweaver/Tauri 가 host 환경에서 inject 하는 globals**. 우리 통제 밖.
+
+3. **`window.ZeroProxyRT`** 도 같은 패턴 — `globalThis.ZeroProxyRT` 로 page-rt glue 노출.
+
+**이번 세션 fix (커밋 대상)**:
+
+- **`web/zp-core.js`** + **`web/zp-rt.js`**: `Object.defineProperty(globalThis, 'ZP'/'ZeroProxyRT', { ..., configurable: true })` 로 변경. delete 가 노옵이 안 되게.
+- **`web/runtime-prelude.js`** IIFE 맨 위에 클로저 캡처 + 삭제:
+  ```js
+  const ZP = globalThis.ZP;
+  const ZeroProxyRTGlobal = globalThis.ZeroProxyRT;
+  try { delete globalThis.ZP; } catch {}
+  try { delete globalThis.ZeroProxyRT; } catch {}
+  ```
+  Symbol.for('zeroproxy.runtime.installed') 마커는 그대로 — Symbol-keyed 는 `getOwnPropertyNames` 에 안 나옴, 오직 `getOwnPropertySymbols` 만.
+- **`crates/zp-rewriter` 루프 캡** (7개 단위 테스트):
+  - `for(;;)` / `while(true)` / `while(1)` → `for(let __zp_lc_<id>=0;__zp_lc_<id>++<10000000;)` 헤더 치환 (body 그대로 — `break`/`continue`/closure 의미 보존)
+  - `do body while(true)` / `do body while(1)` → `let __zp_lc_<id>=0;` 주입 + test 슬롯을 `__zp_lc_<id>++<10000000` 로 치환
+  - finite test (`while(running)`, `for(let i=0; i<5; i++)`) 는 건드리지 않음
+  - 중첩 무한 루프는 각각 별개 카운터 (`__zp_lc_1` / `__zp_lc_2`) — 안쪽이 바깥 매 반복마다 리셋되는 것 방지
+
+**검증 결과**:
+- **taskweaver 환경 (WebView2 + Tauri host)**: NAVER 여전히 wedge.
+- **msedge.exe (사용자 수동 검증, 2026-06-05)**: **NAVER 풀 페이지 렌더** ✅ — 검색바, 카테고리 메뉴 (메일/카페/블로그/쇼핑/뉴스/증권/부동산/지도/웹툰/치지직), 뉴스스탠드 (전체 언론사 그리드 표시), 광고 배너 (LGE 가전 57% 할인 / 디에트르 / Kurly NMart 반값쿠폰), NAVER 로그인 박스, 쇼핑 슬롯, 날씨 위젯 전부 정상. **wedge 0회**.
+
+**중요 — taskweaver 의 실체**: taskweaver 는 Tauri 기반이고 Windows 에서는 **WebView2 (Edge Chromium 엔진, Microsoft fork)** 위에서 동작. 진짜 `chrome.exe` 가 아니며, **Tauri host bridge 가 페이지 realm 에 `__TAURI__` / `ipc` / `isTauri` / `__internal_unstable_listeners_function_id__` 등 한 다스 가까운 host-bridge globals 를 inject**. 일반 사용자가 ZeroProxy 를 실제 사용하는 환경 (chrome.exe / msedge.exe / firefox.exe) 에는 이런 inject 가 **없음** — Edge 검증이 이를 증명.
+
+**Root cause 확정 (실 Edge 검증 후)**:
+- taskweaver = WebView2 + Tauri inject globals 가 dominant fingerprint surface — taskweaver 환경에선 ZP/ZeroProxyRT hide 의 효과가 가려짐.
+- 일반 chromium 브라우저 (msedge.exe 검증 ✅, chrome.exe 추정 동일) 에서는 ZP/ZeroProxyRT hide 가 NAVER probe 가 보던 마지막 obvious ZeroProxy tell 을 제거 → **wedge 풀림**.
+- Loop-cap rule 은 NAVER 메인 페이지에서는 fire 여부 미관찰 (지문 hide 만으로 정상 진입). 다른 사이트의 `for(;;)` probe 에 대해 defense-in-depth 로 valid.
+
+**Firefox 환경**: 별개 (Gecko, SpiderMonkey) — NAVER probe trigger 가 chromium 과 다를 수 있음. 별도 검증 필요.
+
+**Lessons**:
+1. `defineProperty(..., { enumerable: false })` 는 `Object.getOwnPropertyNames` 에는 보임 — fingerprint 숨기려면 **Symbol-keyed 또는 클로저 only**.
+2. taskweaver 환경은 NAVER 같은 강한 anti-bot 사이트의 end-to-end 검증에는 부적합. 실 Chrome 으로 확인 필요.
+3. Loop-cap 룰은 NAVER 단독으로 효과 작지만, **다른 사이트의 단순 `for(;;)` probe 에는 첫 방어선** — 일반화된 defense-in-depth.
+4. 향후 Phase 3 후보: (a) MutationObserver 한정 instrumentation 검출 → SDK 격리 iframe sandbox, (b) probe 가 즐겨 쓰는 `Function.prototype.bind.call(getOwnPropertyDescriptor(...))` 같은 chained reflection 의 결과 모양 조정, (c) `recursive setTimeout(0)` 도 같은 cap 룰로 확장.
+
+**현 상태 user-facing**: taskweaver 환경에선 NAVER 미해결. 일반 Chrome 환경에서는 별도 검증 후 보고.
+
+References:
+- [web/runtime-prelude.js top-of-IIFE capture](../../web/runtime-prelude.js)
+- [web/zp-core.js ZP defineProperty](../../web/zp-core.js)
+- [web/zp-rt.js ZeroProxyRT defineProperty](../../web/zp-rt.js)
+- [crates/zp-rewriter/src/lib.rs visit_for_statement / visit_while_statement / visit_do_while_statement](../../crates/zp-rewriter/src/lib.rs)
+- [2026-06-04 NAVER entry](#2026-06-04-—-naver-warm-session-v8-wedge) — 같은 위협 모델의 SDK-level mitigation
+
+---
+
 ## 2026-06-04 — NAVER warm-session V8 wedge: WTM/NCPT block 만으로 부족, GFP/NAC/Veta SDK 도 wedge (광고 미렌더 trade-off)
 
 **Site**: `https://www.naver.com/` (NACT 쿠키 영속화 후 warm 경로)
