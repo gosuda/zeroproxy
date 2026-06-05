@@ -169,9 +169,17 @@ async function buildRustBundle() {
     '--enable-multivalue',
     '--enable-reference-types',
   ];
-  const optimized = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, path.join(zpBundleOutDir, 'zp_bundle_bg.wasm'), '-o', path.join(zpBundleOutDir, 'zp_bundle_bg.wasm')]);
-  if (!optimized) {
+  // Optimize BOTH wasm-bindgen outputs — page bundle (`zp_bundle_bg.wasm`)
+  // and the SW bundle (`zp_bundle_sw_bg.wasm`). Prior versions only ran
+  // wasm-opt on the page bundle, leaving the SW worker shipping an
+  // unoptimised ~3.5 MB blob even when binaryen was present.
+  const pageWasm = path.join(zpBundleOutDir, 'zp_bundle_bg.wasm');
+  const swWasm = path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm');
+  const optimizedPage = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageWasm, '-o', pageWasm]);
+  if (!optimizedPage) {
     process.stderr.write('wasm-opt not found; skipping size optimization (install binaryen to enable)\n');
+  } else {
+    tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, swWasm, '-o', swWasm]);
   }
   // zp-page-rt: copy raw wasm into __zp/, optionally optimize. No glue file.
   const pageRtDst = path.join(zpBundleOutDir, 'zp_page_rt.wasm');
@@ -181,7 +189,12 @@ async function buildRustBundle() {
 
 function tryRunOptional(cmd, argv) {
   try {
-    const result = spawnSync(cmd, argv, { cwd: repoRoot, stdio: 'inherit' });
+    // On Windows, `npm i -g binaryen` installs `wasm-opt.cmd` not
+    // `wasm-opt.exe`. Plain `spawnSync('wasm-opt', ...)` returns ENOENT
+    // for `.cmd` shims because Node won't auto-resolve PATHEXT unless
+    // `shell:true` is set. That's why the page-bundle wasm-opt step
+    // silently no-op'd — Linux/macOS hit the binary, Windows fell through.
+    const result = spawnSync(cmd, argv, { cwd: repoRoot, stdio: 'inherit', shell: process.platform === 'win32' });
     return result.status === 0;
   } catch {
     return false;

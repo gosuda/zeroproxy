@@ -241,6 +241,12 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     let mut promoted_referer: Option<String> = None;
     let mut promoted_origin: Option<String> = None;
     let mut promoted_ua: Option<String> = None;
+    // Capture the per-tab challenge-compat arm BEFORE strip: the marker
+    // header itself MUST be stripped (never leaks upstream), but the response
+    // builder needs the armed flag to decide whether to emit the response-
+    // side `X-ZP-Challenge-Compat: 1` marker when the response classifies as
+    // a Cloudflare challenge. Mirrors `internal/headers/ApplyChallengeCompat`.
+    let mut armed_challenge_compat = false;
     headers_owned.retain(|(k, v)| {
         let kl = k.to_ascii_lowercase();
         match kl.as_str() {
@@ -254,6 +260,12 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
             }
             "x-zp-user-agent" => {
                 promoted_ua = Some(v.clone());
+                false
+            }
+            "x-zp-arm-challenge-compat" => {
+                if v.trim() == "1" {
+                    armed_challenge_compat = true;
+                }
                 false
             }
             // Strip all remaining x-zp-* internal sidechannel headers.
@@ -332,21 +344,45 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
         body_bytes.len()
     ));
 
-    transport::fetch::fetch(&url, &method, &headers_owned, &body_bytes).await
+    transport::fetch::fetch(
+        &url,
+        &method,
+        &headers_owned,
+        &body_bytes,
+        armed_challenge_compat,
+    )
+    .await
 }
 
-/// Target-side WebSocket bridge. The Step-13 implementation used a
-/// `/zp/ws-bridge` server endpoint that terminated TLS server-side —
-/// removed in Step 14. The client-side replacement (SOCKS5 + TLS + WS
-/// upgrade in the kernel) is a deferred follow-up; until it lands, this
-/// stub returns an error so callers fail loudly instead of hanging on a
-/// never-resolving Promise.
+/// Target-side WebSocket bridge. Opens a yamux → SOCKS5 → optional TLS
+/// → RFC 6455 client handshake to `arg.url`, then returns a JS object
+/// (`WsClient`) with `protocol`, `bufferedAmount`, `send`, `setHandlers`,
+/// `close`. The SW (`web/sw.js` `openRuntimeStream`) drives it. Returns
+/// a `Promise<WsClient>` — the resolved value is the same JS class
+/// instance regardless of how `Promise` unwraps it.
 #[wasm_bindgen(js_name = kernelStream)]
-pub fn kernel_stream(_arg: JsValue) -> Result<JsValue, JsValue> {
-    Err(JsValue::from_str(
-        "TARGET_WS_NOT_REWIRED: client-side WebSocket transport is the Step-14 perf follow-up; \
-         only HTTP/HTTPS fetch is wired in this build",
-    ))
+pub fn kernel_stream(arg: JsValue) -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        // SW passes `{url, protocols, tabId, streamIsolationKey, servers}`.
+        // tabId / streamIsolationKey / servers aren't consumed yet — the
+        // per-tab isolation key flows through yamux's session keying when
+        // we land per-tab mux sessions; for now `pick_relay_url` returns
+        // the loopback relay and yamux multiplexes shared.
+        let url = js_sys::Reflect::get(&arg, &JsValue::from_str("url"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| JsValue::from_str("MALFORMED_ROUTE: kernel_stream missing url"))?;
+        let protocols: Vec<String> = js_sys::Reflect::get(&arg, &JsValue::from_str("protocols"))
+            .ok()
+            .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+            .map(|arr| {
+                (0..arr.length())
+                    .filter_map(|i| arr.get(i).as_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        transport::ws_client::open(&url, &protocols).await
+    })
 }
 
 /// Cookie jar bridge stub. Real implementation will mirror document.cookie

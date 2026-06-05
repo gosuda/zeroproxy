@@ -117,8 +117,20 @@ test('service worker uses Rust kernel transport and cookie bridge', () => {
   // and to preserve login state across back/forward navigation between
   // mail.naver.com / pay.naver.com / nid.naver.com / www.naver.com.
   assert.ok(sw.includes('createCookieJar'), 'service worker must define RFC 6265 cookie jar factory');
-  assert.match(sw, /opt\.tab\.cookieJar[\s\S]{0,200}cookieHeader\(opt\.url\)/, 'outgoing Cookie header must come from URL-scoped jar lookup');
-  assert.match(sw, /opt\.tab\.cookieJar[\s\S]{0,200}setCookieLine\(opt\.url/, 'response Set-Cookie must be fed into jar scoped to the response URL');
+  // The outgoing-cookie path used to read `opt.url` (undefined — the
+  // bug-fixed 2026-06-02 entry), and now reads the local `u` URL object
+  // built from the positional `targetUrl` arg. Match either form so a
+  // future rename doesn't silently re-introduce the regression.
+  assert.match(
+    sw,
+    /opt\.tab\.cookieJar[\s\S]{0,300}cookieHeader\((u|opt\.url|targetUrl)\)/,
+    'outgoing Cookie header must come from URL-scoped jar lookup',
+  );
+  assert.match(
+    sw,
+    /opt\.tab\.cookieJar[\s\S]{0,300}setCookieLine\((u|opt\.url|targetUrl)/,
+    'response Set-Cookie must be fed into jar scoped to the response URL',
+  );
   assert.match(sw, /cookieJar\.documentCookieFor\(entry\.targetUrl\)/, 'boot config must expose only cookies that match the target URL');
   assert.equal(sw.includes('mergeCookie('), false, 'flat mergeCookie shim must be removed (RFC-6265 jar replaces it)');
   assert.equal(/tab\.documentCookie\s*=/.test(sw), false, 'tab.documentCookie flat-string state must be removed');
@@ -177,8 +189,23 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.match(rt, /tag === 'script' \|\| tag === 'iframe' \|\| tag === 'frame' \|\| tag === 'embed' \|\| tag === 'object'/, 'blob: must be blocked for code-loading tags');
   // Empty MIME type still routed through worker bootstrap wrapper.
   assert.ok(rt.includes('application\\/octet-stream|^$'), 'createObjectURL must catch empty-MIME blob workers');
-  // ServiceWorker.register must reject (target sites cannot install rogue SWs).
-  assert.match(rt, /navigator\.serviceWorker.+register.+Promise\.reject/, 'navigator.serviceWorker.register must be neutralized');
+  // D3: ServiceWorker facade is "fail soft" — register/ready/getRegistration
+  // resolve to a fake registration so target code doesn't crash on the
+  // SW-init code path, but no real SW controls the origin. The line that
+  // patches the NATIVE Navigator.prototype.serviceWorker.register is still
+  // a security backstop (target can't reach a real SW via prop-accessor
+  // hop) and must keep rejecting.
+  assert.match(rt, /navigator\.serviceWorker.+register.+Promise\.reject/, 'native navigator.serviceWorker.register must remain a hard-reject backstop');
+  // Facade fail-soft surface — register/ready/getRegistration resolve, but
+  // controller stays null so no real SW takes over the origin.
+  assert.match(rt, /facade,\s*'register',\s*function register\(\)\s*\{\s*return Promise\.resolve\(fakeReg\)/, 'facade.register must resolve to fakeReg');
+  assert.match(rt, /defineAccessor\(facade,\s*'ready',\s*\(\)\s*=>\s*readyPromise\)/, 'facade.ready must resolve');
+  assert.match(rt, /defineAccessor\(facade,\s*'controller',\s*\(\)\s*=>\s*null\)/, 'facade.controller must remain null (no real SW on origin)');
+  // SyncManager / PeriodicSyncManager / PushManager / navigationPreload stubs.
+  assert.match(rt, /syncMgr.+'register'.+Promise\.resolve/, 'SyncManager.register must resolve');
+  assert.match(rt, /periodicSyncMgr.+'register'.+Promise\.resolve/, 'PeriodicSyncManager.register must resolve');
+  assert.match(rt, /pushMgr.+'subscribe'.+Promise\.reject\(normalizedError\('NotAllowedError'\)\)/, 'PushManager.subscribe must reject NotAllowedError (graceful denied-permission shape)');
+  assert.match(rt, /navPreload.+'enable'.+Promise\.resolve/, 'navigationPreload.enable must resolve');
   // B3 (foreground): dynamic compilation is rewritten/scoped, not blocked.
   // The runtime wraps eval/Function/Async/Generator constructors so their
   // bodies execute in a `with(__zp_scope){...}` envelope where dangerous
@@ -206,6 +233,125 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(sw.includes('REQUEST_BODY_TOO_LARGE'));
   assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
   assert.ok(server.includes('closeBoth'));
+});
+
+// C4: in-memory LRU cache for rewritten script bodies. We can't actually
+// invoke the SW pipeline from this Node test (no fetch/crypto.subtle/WASM
+// harness), but we can pin the source-level invariants that prevent
+// regressions:
+//   1. cache helpers exist and are wired into rewriteScriptResponse
+//   2. cache key mixes transformer version, kind, target URL, and source
+//      length-prefixed (so two distinct inputs cannot field-boundary collide)
+//   3. fail-closed block stubs are NEVER cached (cacheSet is gated on
+//      the success branch only)
+//   4. entry / byte caps exist and LRU eviction is in place
+test('service worker rewrite cache enforces strict invariants', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.ok(sw.includes('REWRITE_CACHE_MAX_ENTRIES'), 'entry cap constant missing');
+  assert.ok(sw.includes('REWRITE_CACHE_MAX_BYTES'), 'byte cap constant missing');
+  assert.ok(sw.includes('rewriteCacheGet'), 'cache get helper missing');
+  assert.ok(sw.includes('rewriteCacheSet'), 'cache set helper missing');
+  assert.ok(sw.includes('rewriteCacheKey'), 'cache key helper missing');
+  assert.match(sw, /SHA-256/);
+  assert.match(sw, /rewriteCacheTransformerVersion/);
+  // Block stub never cached — rewriteCacheSet must only fire in the
+  // success branch (after a non-empty `code` is produced). After D2
+  // landed, the success branch also appends the sourceMappingURL, so
+  // the cache-set is now nested inside an `if (cacheKey)` under the
+  // outer `else` — match both forms.
+  assert.match(
+    sw,
+    /(?:else if \(cacheKey\)|if \(cacheKey\))\s*\{[\s\S]*?rewriteCacheSet\(cacheKey, code\)/,
+  );
+  // LRU eviction loop exists.
+  assert.match(sw, /rewriteCache\.size > REWRITE_CACHE_MAX_ENTRIES \|\| rewriteCacheBytes > REWRITE_CACHE_MAX_BYTES/);
+  // Cap values per plan C4 (200 entries / 50MB).
+  assert.match(sw, /REWRITE_CACHE_MAX_ENTRIES\s*=\s*200/);
+  assert.match(sw, /REWRITE_CACHE_MAX_BYTES\s*=\s*50\s*\*\s*1024\s*\*\s*1024/);
+});
+
+// C2: malformed HTML must fail-closed to the styled MALFORMED_HTML page,
+// NOT fall open with the raw HTML body. Falling open would let target
+// inline scripts execute UN-rewritten — exactly the strict-mode escape
+// the "no-escape jail" design forbids.
+test('transformDocumentResponse fails closed on malformed HTML (no raw passthrough)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // Success tracking exists.
+  assert.ok(sw.includes('transformOk'), 'transformOk success flag missing');
+  assert.ok(sw.includes('transformFailure'), 'transformFailure diagnostic field missing');
+  // Successful transform sets transformOk = true.
+  assert.match(sw, /transformed = out;\s*transformOk = true;/);
+  // Failure path is fail-closed: returns the styled MALFORMED_HTML page,
+  // never `transformed = html` (which would ship raw body unrewritten).
+  assert.match(sw, /if \(!transformOk\) \{[\s\S]*?return safeError\('MALFORMED_HTML', 502, targetUrl\)/);
+  // No fail-open recovery shortcut anywhere in transformDocumentResponse.
+  assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
+});
+
+// B4: EventSource fidelity. WHATWG SSE §9.2 — auto-reconnect after a soft
+// transport error, with `Last-Event-ID` echoed on every reconnect and the
+// server-supplied `retry:` interval applied. Wrong Content-Type / non-2xx
+// is a hard fail (no reconnect). HTTP 204 closes cleanly.
+test('EventSource wrapper enforces SSE auto-reconnect + Last-Event-ID fidelity', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  // Reconnect plumbing exists.
+  assert.ok(rt.includes('scheduleReconnect'), 'scheduleReconnect helper missing');
+  assert.ok(rt.includes('DEFAULT_RECONNECT_MS'), 'default reconnect interval constant missing');
+  assert.match(rt, /DEFAULT_RECONNECT_MS\s*=\s*3000/, 'default reconnect interval must match WHATWG spec (3000 ms)');
+  // Last-Event-ID echo on reconnect.
+  assert.match(rt, /headers\.push\(\['Last-Event-ID', es\._lastEventId\]\)/, 'Last-Event-ID header missing on reconnect');
+  // retry: field updates reconnect interval (digit-string only).
+  assert.match(rt, /field === 'retry'/);
+  assert.match(rt, /\/\^\\d\+\$\/\.test\(value\)/);
+  // Content-Type validation (text/event-stream) is enforced.
+  assert.match(rt, /\/\^text\\\/event-stream\\b\/i\.test\(ct\)/);
+  // 204 → clean close, no reconnect.
+  assert.match(rt, /resp\.status === 204[\s\S]*?readyState = CLOSED;\s*return;/);
+  // close() short-circuits an armed reconnect timer.
+  assert.match(rt, /if \(this\._reconnectTimer\) \{[\s\S]*?clearTimeout\(this\._reconnectTimer\)/);
+  // Per-attempt AbortController so a prior abort doesn't poison the next fetch.
+  assert.match(rt, /es\._controller = new AbortController\(\);\s*runEventSource\(es\)/);
+});
+
+// C1: WebSocket boundary fidelity. The kernel transport is currently a
+// stub so we cannot exercise round-trip from Node — but we CAN pin the
+// invariants that prevent regressions:
+//   1. close() validates code (RFC 6455 §7.4: 1000 or [3000,4999]) and
+//      reason byte length (≤123 UTF-8 bytes)
+//   2. negotiated sub-protocol is checked against the offered list both
+//      page-side and SW-side (§4.2.2)
+//   3. bufferedAmount accessor exists (read-only getter)
+//   4. binaryType setter enforces 'blob' | 'arraybuffer' enum (silently
+//      ignores invalid — matches browser behavior)
+//   5. fail() preserves a user-requested close code instead of always
+//      clobbering with 1006
+test('WebSocket wrapper enforces RFC 6455 close + protocol fidelity', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // 1. Close code/reason validation helpers exist and are invoked.
+  assert.ok(rt.includes('validateCloseCode'), 'validateCloseCode helper missing');
+  assert.ok(rt.includes('validateReason'), 'validateReason helper missing');
+  // 1000 is the only allowed code outside [3000, 4999].
+  assert.match(rt, /n !== 1000 && \(n < 3000 \|\| n > 4999\)/);
+  // Reason byte-length cap = 123.
+  assert.match(rt, /len > 123/);
+  // 2. Sub-protocol selection enforced on both ends.
+  assert.match(rt, /plist\.indexOf\(negotiated\) < 0/, 'page-side sub-protocol check missing');
+  assert.match(sw, /requestedProtocols\.indexOf\(negotiated\) < 0/, 'SW-side sub-protocol check missing');
+  // SW must also re-validate the token shape (defense in depth).
+  assert.match(sw, /!\/\^\[\!#\$%&'\*\+\\-\.\^_`\|~0-9A-Za-z\]\+\$\/\.test\(p\)/);
+  // 3. bufferedAmount is a getter (read-only per IDL).
+  assert.match(rt, /Object\.defineProperty\(ZPWebSocket\.prototype, 'bufferedAmount'/);
+  assert.match(rt, /get\(\) \{ return this\._bufferedAmount \| 0; \}/);
+  // 4. binaryType setter accepts only 'blob' | 'arraybuffer'.
+  assert.match(rt, /Object\.defineProperty\(ZPWebSocket\.prototype, 'binaryType'/);
+  assert.match(rt, /s === 'blob' \|\| s === 'arraybuffer'/);
+  // 5. fail() preserves a user-requested close code if the page already
+  //    asked for a clean close before the transport died.
+  assert.match(rt, /const code = ws\._closingCode \|\| 1006/);
+  // SW close handler forwards code+reason (transport stub still gets the
+  // chance to surface them when wired).
+  assert.match(sw, /close: \(code, reason\) =>[\s\S]*?type: 'close', code: code \|\| 1000, reason: reason \|\| ''/);
 });
 
 test('service worker names every required safe error class', () => {
@@ -283,15 +429,46 @@ test('service worker plumbs challenge-compat arm + strips response marker', () =
 // Pins the Go side: relay extracts the arm header, strips the x-zp-* range
 // before forwarding, classifies via headers.IsChallengeDocument, and only
 // emits X-ZP-Challenge-Compat: 1 when both signals hold.
-test('Go relay implements two-signal challenge gate', () => {
-  const relay = fs.readFileSync('cmd/zeroproxy-server/relay.go', 'utf8');
-  assert.match(relay, /armedChallengeRequestHeader\s*=\s*"X-ZP-Arm-Challenge-Compat"/);
-  assert.match(relay, /armedChallengeResponseHeader\s*=\s*"X-ZP-Challenge-Compat"/);
-  assert.match(relay, /maybeApplyChallengeMarker/);
-  assert.match(relay, /headers\.IsChallengeDocument/);
-  // Used in BOTH bridgeRelayWS and bridgeMuxRelayWS code paths.
-  const armedReads = relay.match(/armedChallenge\s*=\s*strings\.TrimSpace\(kv\[1\]\)\s*==\s*"1"/g) || [];
-  assert.ok(armedReads.length >= 2, `armedChallenge must be wired in both relay paths, got ${armedReads.length}`);
+// The relay was reworked: the Rust kernel `transport::fetch::fetch` is now the
+// active upstream path (the Go `relay.go` shim was retired during the Step-14
+// client-TLS cutover). The two-signal challenge-compat gate is enforced in the
+// Rust kernel via the same `zp_shared::is_challenge_document` predicate the Go
+// `internal/headers/ApplyChallengeCompat` uses (parity via shared golden
+// fixtures). The Go helper stays in-tree as a defense-in-depth utility, but
+// the live wire-up is Rust-side.
+test('Rust kernel implements two-signal challenge gate', () => {
+  const fetchRs = fs.readFileSync('crates/zp-bundle/src/kernel/transport/fetch.rs', 'utf8');
+  // armed flag threaded through fetch() + build_js_response().
+  assert.match(fetchRs, /armed_challenge_compat: bool/, 'fetch() must accept armed flag');
+  assert.match(
+    fetchRs,
+    /zp_shared::is_challenge_document\(cf,\s*&host,\s*&path\)/,
+    'response builder must consult zp_shared::is_challenge_document',
+  );
+  assert.match(
+    fetchRs,
+    /headers\.append\("X-ZP-Challenge-Compat",\s*"1"\)/,
+    'response builder must emit the marker only via Headers.append',
+  );
+  // Two-signal gate: emission is gated on the armed flag being true.
+  assert.match(fetchRs, /if armed_challenge_compat \{/, 'emission must be inside the armed-only branch');
+
+  // Request-side capture-before-strip in kernel/mod.rs.
+  const modRs = fs.readFileSync('crates/zp-bundle/src/kernel/mod.rs', 'utf8');
+  assert.match(modRs, /let mut armed_challenge_compat = false;/);
+  assert.match(modRs, /"x-zp-arm-challenge-compat"\s*=>/);
+  assert.match(modRs, /armed_challenge_compat = true;/);
+  // Threading: fetch() call must pass the flag.
+  assert.match(
+    modRs,
+    /transport::fetch::fetch\([\s\S]*?armed_challenge_compat,[\s\S]*?\)/,
+    'kernel_fetch must thread armed flag into transport::fetch::fetch',
+  );
+
+  // Defense-in-depth Go helper still exists and is unit-tested for parity.
+  const goHelper = fs.readFileSync('internal/headers/challenge.go', 'utf8');
+  assert.match(goHelper, /func ApplyChallengeCompat\(header http\.Header, armed bool, finalURL \*url\.URL\)/);
+  assert.match(goHelper, /TargetIsChallengeDocument\(header, finalURL\)/);
 });
 
 // Pins the membrane sandbox virtualization: target sites that fingerprint
@@ -352,6 +529,197 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes("'--target', 'no-modules'"), 'build must produce no-modules variant for SW');
   assert.ok(build.includes('zp_bundle_sw'), 'build must emit zp_bundle_sw artifacts');
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
+});
+
+test('SW patch-mode emit is wired with applier helper', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.ok(sw.includes('rewriteScriptPatches'), 'SW must expose rewriteScriptPatches on ZPBundle');
+  assert.ok(sw.includes('applyScriptPatches'), 'SW must implement applier helper');
+  // Preference order: patch path attempted before full re-emit fallback.
+  const patchCall = sw.indexOf('self.ZPBundle.rewriteScriptPatches(');
+  const fullCall = sw.indexOf('self.ZPBundle.rewriteScript(');
+  assert.ok(patchCall > 0, 'SW must call rewriteScriptPatches');
+  assert.ok(fullCall > patchCall, 'patch-mode must be attempted before full re-emit fallback');
+  // Envelope shape contract: applier must reject malformed JSON, walk
+  // patches in order, and splice replacements between original spans.
+  assert.ok(sw.includes('JSON.parse(envelopeJson)'), 'applier must parse JSON envelope');
+  assert.ok(sw.includes('env.patches'), 'applier must read patches array');
+  assert.ok(sw.includes('source.slice(cursor, start)'), 'applier must splice unmodified spans');
+  // Empty source must not be cached as a successful rewrite (fail-closed posture).
+  assert.ok(
+    /typeof patched === 'string' && patched\.length > 0/.test(sw),
+    'patched fallback must guard against empty string',
+  );
+});
+
+test('applyScriptPatches behavior: empty patches, splice, malformed envelopes', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // Extract the applier verbatim so behavior is exercised, not just shape.
+  // `\n}` (no trailing newline) tolerates both LF and CRLF line endings.
+  const m = sw.match(/function applyScriptPatches\(source, envelopeJson\) \{[\s\S]*?\n\}/);
+  assert.ok(m, 'applyScriptPatches definition must be locatable');
+  // eslint-disable-next-line no-new-func
+  const apply = new Function(`${m[0]}\nreturn applyScriptPatches;`)();
+
+  // Empty source + empty patches → original string passes through.
+  assert.equal(apply('', JSON.stringify({ len: 0, patches: [] })), '');
+  // No patches → caller gets the source verbatim (no allocation).
+  assert.equal(apply('var x = 1;', JSON.stringify({ len: 10, patches: [] })), 'var x = 1;');
+  // Single splice — replace `location` (chars 8..16) with `__zp_loc`.
+  const src = 'var u = location.href;';
+  const env = JSON.stringify({ len: src.length, patches: [{ start: 8, end: 16, replacement: '__zp_loc' }] });
+  assert.equal(apply(src, env), 'var u = __zp_loc.href;');
+  // Two non-overlapping splices in order.
+  const env2 = JSON.stringify({
+    len: src.length,
+    patches: [
+      { start: 8, end: 16, replacement: '__zp_loc' },
+      { start: 17, end: 21, replacement: '__zp_href_str' },
+    ],
+  });
+  assert.equal(apply(src, env2), 'var u = __zp_loc.__zp_href_str;');
+  // Malformed JSON → null (caller falls back).
+  assert.equal(apply(src, '{not json'), null);
+  // Out-of-order patches (start < cursor) → null (defensive).
+  const bad = JSON.stringify({
+    len: src.length,
+    patches: [
+      { start: 8, end: 16, replacement: 'A' },
+      { start: 4, end: 7, replacement: 'B' },
+    ],
+  });
+  assert.equal(apply(src, bad), null);
+  // end > source.length → null.
+  const oob = JSON.stringify({ len: src.length, patches: [{ start: 0, end: 9999, replacement: 'X' }] });
+  assert.equal(apply(src, oob), null);
+  // Missing patches array → null.
+  assert.equal(apply(src, JSON.stringify({ len: 10 })), null);
+});
+
+test('Anti-fingerprint: ZP + ZeroProxyRT hide from getOwnPropertyNames', () => {
+  // Anti-bot probes enumerate `Object.getOwnPropertyNames(window)` to
+  // detect instrumentation (NAVER's warm-session V8 wedge is the canonical
+  // example). The named properties `ZP` and `ZeroProxyRT` are obvious
+  // ZeroProxy tells; runtime-prelude captures both into closure-local
+  // bindings and deletes them from globalThis before any target script
+  // executes. The Symbol.for('zeroproxy.runtime.installed') marker stays
+  // — Symbol-keyed props don't appear in getOwnPropertyNames.
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /const ZP = globalThis\.ZP;/, 'runtime-prelude must capture ZP into closure');
+  assert.match(rt, /const ZeroProxyRTGlobal = globalThis\.ZeroProxyRT;/, 'runtime-prelude must capture ZeroProxyRT into closure');
+  assert.match(rt, /try \{ delete globalThis\.ZP; \} catch \{\}/, 'runtime-prelude must delete window.ZP');
+  assert.match(rt, /try \{ delete globalThis\.ZeroProxyRT; \} catch \{\}/, 'runtime-prelude must delete window.ZeroProxyRT');
+  // The two source globals must declare `configurable: true` so the
+  // delete actually takes effect (defineProperty defaults are immutable).
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  assert.match(core, /defineProperty\(globalThis, 'ZP'[\s\S]{0,200}configurable: true/);
+  const rtjs = fs.readFileSync('web/zp-rt.js', 'utf8');
+  assert.match(rtjs, /defineProperty\(globalThis, 'ZeroProxyRT'[\s\S]{0,200}configurable: true/);
+});
+
+test('Loop cap: rewriter neutralises infinite for/while probes', () => {
+  // NAVER warm-session V8 wedge and similar anti-bot probes use tight
+  // `for(;;)` / `while(1)` / `while(true)` loops to detect membrane
+  // instrumentation. The rewriter caps each occurrence with a fresh
+  // counter so the loop terminates after 10 M iterations regardless of
+  // how the body interacts with the membrane.
+  const rewriter = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
+  assert.match(rewriter, /fn visit_for_statement\(&mut self, stmt: &ForStatement<'a>\)/);
+  assert.match(rewriter, /fn visit_while_statement\(&mut self, stmt: &WhileStatement<'a>\)/);
+  assert.match(rewriter, /fn visit_do_while_statement\(&mut self, stmt: &DoWhileStatement<'a>\)/);
+  assert.match(rewriter, /fn is_truthy_constant/);
+  // The 10 M cap is the policy constant; lower would risk breaking
+  // legitimate long loops, higher would let the probe wedge V8.
+  assert.match(rewriter, /__zp_lc_\{id\}\+\+<10000000/);
+  // Each loop must get a fresh counter ID so nested infinites don't
+  // collide and reset each other.
+  assert.match(rewriter, /fn next_loop_id/);
+});
+
+test('D2: sourcemap composer + SW /zp/api/sourcemap route are wired', () => {
+  const rewriter = fs.readFileSync('crates/zp-rewriter/src/sourcemap.rs', 'utf8');
+  // §A.4 VLQ encoder is the load-bearing primitive.
+  assert.match(rewriter, /fn vlq_encode_into\(value: i64/);
+  // Source Map v3 schema fields must all appear in the JSON template
+  // (escaped in the Rust string literal — match the source form).
+  assert.match(rewriter, /\\"version\\":3/);
+  assert.match(rewriter, /\\"sources\\":/);
+  assert.match(rewriter, /\\"sourcesContent\\":/);
+  assert.match(rewriter, /\\"names\\":\[\]/);
+  assert.match(rewriter, /\\"mappings\\":/);
+  // Public composer API used by the WASM export.
+  assert.match(rewriter, /pub fn compose_rewrite_map/);
+  // Re-export from lib so external crates can call it.
+  const lib = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
+  assert.match(lib, /pub mod sourcemap/);
+  assert.match(lib, /pub use sourcemap::compose_rewrite_map/);
+  assert.match(lib, /pub fn compose_source_map/);
+
+  // WASM bundle must expose composeSourceMap.
+  const bundle = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
+  assert.match(bundle, /#\[wasm_bindgen\(js_name = composeSourceMap\)\]/);
+  assert.match(bundle, /zp_rewriter::compose_source_map\(source, &opts, target_url\)/);
+
+  // SW must append a fresh `//# sourceMappingURL=` pointing to the proxy
+  // route on successful rewrites — DevTools loads the composed map.
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /sourceMappingURL=' \+ mapURL/);
+  assert.match(sw, /ZP\.apiPath\('sourcemap'\)/);
+  // Pragma emission must be gated to script kinds with a fetchable origin
+  // URL — synthesised wrappers (event-handler, eval, function) have none,
+  // so the map URL would 404.
+  assert.match(sw, /kind === 'classic' \|\| kind === 'module' \|\| kind === 'worker'/);
+
+  // /zp/api/sourcemap must be a runtime API path and have a handler.
+  assert.match(sw, /isRuntimeAPIPath[\s\S]{0,200}ZP\.apiPath\('sourcemap'\)/, 'sourcemap path must classify as RUNTIME_API');
+  assert.match(sw, /url\.pathname === ZP\.apiPath\('sourcemap'\)/, 'runtimeAPI must dispatch the sourcemap route');
+  assert.match(sw, /self\.ZPBundle\.composeSourceMap\(source, kind, target\)/, 'route must call the WASM composer');
+  // The map must NOT be cached on the page — a transformer-version bump
+  // invalidates the composition.
+  assert.match(sw, /composeSourceMap[\s\S]{0,400}'Cache-Control': 'no-store'/);
+});
+
+test('C1: Rust WebSocket client implements RFC 6455 handshake + codec', () => {
+  const ws = fs.readFileSync('crates/zp-bundle/src/kernel/transport/ws_client.rs', 'utf8');
+  // §1.3 magic GUID for Sec-WebSocket-Accept.
+  assert.match(ws, /258EAFA5-E914-47DA-95CA-C5AB0DC85B11/, 'WS_GUID must equal the RFC 6455 §1.3 value');
+  // Handshake headers.
+  assert.match(ws, /Upgrade: websocket/, 'handshake must request the websocket upgrade');
+  assert.match(ws, /Sec-WebSocket-Version: 13/, 'handshake must announce protocol version 13');
+  assert.match(ws, /Sec-WebSocket-Key: /, 'handshake must carry the client nonce');
+  // §1.3 Accept computation = base64(SHA1(key || GUID)).
+  assert.match(ws, /Sha1::new\(\)[\s\S]{0,200}WS_GUID/, 'expected_accept must SHA1 the key + GUID');
+  // §5.3 client mask MUST be set.
+  assert.match(ws, /out\.push\(0x80 \| \(op as u8\)\)/, 'frame must set FIN=1 + opcode');
+  assert.match(ws, /out\.push\(0x80 \| \(len as u8\)\)/, 'MASK bit must be set on outbound frames');
+  // §5.1 server frames MUST NOT be masked.
+  assert.match(ws, /server frame is masked \(§5\.1 violation\)/, 'masked server frames must abort the connection');
+  // Control-frame discipline (§5.5: ≤125, FIN=1, no fragmentation).
+  assert.match(ws, /control frame fragmented \(FIN=0\)/);
+  assert.match(ws, /control payload > 125/);
+  // §4.2.2 negotiated protocol must come from the offered list.
+  assert.match(ws, /ws-protocol-not-offered/, 'negotiated subprotocol must come from offered list');
+  // Close payload semantics: empty → 1005; single byte → 1002 (malformed).
+  assert.match(ws, /fn decode_close_payload/);
+  assert.match(ws, /return \(1005, String::new\(\)\)/, 'empty close payload → 1005');
+  assert.match(ws, /return \(1002, "malformed close payload"/, 'single-byte close payload → 1002');
+  // §8.1: invalid UTF-8 in text frames closes with 1007.
+  assert.match(ws, /1007, "invalid UTF-8 in text frame"/);
+
+  // kernel_stream is now wired to ws_client::open (not the old stub).
+  const modRs = fs.readFileSync('crates/zp-bundle/src/kernel/mod.rs', 'utf8');
+  assert.equal(modRs.includes('TARGET_WS_NOT_REWIRED'), false, 'kernel_stream must no longer return the stub error');
+  assert.match(modRs, /transport::ws_client::open\(&url, &protocols\)\.await/, 'kernel_stream must call ws_client::open');
+});
+
+test('zp-bundle WASM export uses patch-mode under the hood', () => {
+  const bundle = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
+  // The WASM export must call the patch-only crate API — otherwise we pay
+  // the O(n) re-emit cost on the Rust side and only save on the wire.
+  assert.ok(
+    bundle.includes('zp_rewriter::rewrite_script_patches(source, &opts)'),
+    'rewriteScriptPatches WASM export must call rewrite_script_patches (not the full re-emit path)',
+  );
 });
 
 test('D1: javascript: URL routing client-side handler', () => {

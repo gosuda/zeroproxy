@@ -256,11 +256,83 @@
     }
     return true;
   }
-  document.getElementById('open').addEventListener('submit', async ev => {
+  const openForm = document.getElementById('open');
+  const openBtn = openForm.querySelector('button');
+  const urlInput = document.getElementById('url');
+  // The SW + Rust WASM bundle (~3 MB) loads + instantiates on first
+  // activation. Until `ZPBundle.ready` is true, any kernelFetch /
+  // kernelStream call SW_NOT_READY's, the rewriter can't transform
+  // target scripts, and the user sees a half-broken page. Disable the
+  // Open button until the SW reports `bundleReady` via __zpKernelProbe,
+  // so the first navigation always lands on a hot runtime.
+  let runtimeReady = false;
+  openBtn.disabled = true;
+  openBtn.textContent = 'Loading…';
+  openForm.addEventListener('submit', async ev => {
     ev.preventDefault();
-    try { setStatus('Opening through ZeroProxy…'); await openTarget(document.getElementById('url').value); }
+    if (!runtimeReady) {
+      setStatus('Runtime is still loading — please wait.', true);
+      return;
+    }
+    try { setStatus('Opening through ZeroProxy…'); await openTarget(urlInput.value); }
     catch (e) { setStatus(e.message || 'Unable to open target', true); }
   });
-  (async () => { try { setStatus('Preparing isolated transport…'); await registerSW(); if (!(await handleShare())) setStatus('Ready.'); } catch (e) { setStatus(e.message || 'Startup failed', true); } })();
+  // Probe the SW until `bundleReady === true`. The SW's __zpKernelProbe
+  // handler internally awaits `initBundle()`, so a single resolved probe
+  // means the WASM is fully instantiated. We still poll defensively in
+  // case the SW restarted between calls (e.g. update-on-controllerchange).
+  function probeBundle() {
+    return new Promise((resolve, reject) => {
+      if (!navigator.serviceWorker.controller) {
+        reject(new Error('SW_NOT_READY'));
+        return;
+      }
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => reject(new Error('PROBE_TIMEOUT')), 30000);
+      channel.port1.onmessage = e => { clearTimeout(timer); resolve(e.data && e.data.probe); };
+      try { navigator.serviceWorker.controller.postMessage({ type: '__zpKernelProbe' }, [channel.port2]); }
+      catch (e) { clearTimeout(timer); reject(e); }
+    });
+  }
+  async function waitForRuntime() {
+    const t0 = Date.now();
+    let tick = null;
+    tick = setInterval(() => {
+      if (runtimeReady) { clearInterval(tick); return; }
+      const secs = Math.round((Date.now() - t0) / 1000);
+      setStatus('Loading ZeroProxy runtime — ' + secs + 's…');
+    }, 500);
+    try {
+      // Up to 60 s of probes — first WASM compile on cold cache can take
+      // ~10-15 s on slower laptops; 60 s leaves headroom for first-boot
+      // pathologies without burning forever.
+      for (let i = 0; i < 60; i++) {
+        try {
+          const probe = await probeBundle();
+          if (probe && probe.bundleReady && probe.kernelFetch === 'function') {
+            runtimeReady = true;
+            clearInterval(tick);
+            openBtn.disabled = false;
+            openBtn.textContent = 'Open';
+            return;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      throw new Error('RUNTIME_LOAD_TIMEOUT');
+    } finally {
+      clearInterval(tick);
+    }
+  }
+  (async () => {
+    try {
+      setStatus('Preparing isolated transport…');
+      await registerSW();
+      await waitForRuntime();
+      if (!(await handleShare())) setStatus('Ready.');
+    } catch (e) {
+      setStatus(e.message || 'Startup failed', true);
+    }
+  })();
 })();
 </script>

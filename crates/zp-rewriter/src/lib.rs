@@ -21,6 +21,9 @@ use oxc_span::{SourceType, Span};
 use std::collections::HashSet;
 use zp_shared::ErrorCode;
 
+pub mod sourcemap;
+pub use sourcemap::compose_rewrite_map;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptKind {
     Classic,
@@ -150,6 +153,74 @@ fn is_dangerous_method(name: &str) -> bool {
     DANGEROUS_METHODS.iter().any(|m| *m == name)
 }
 
+/// Patch-mode rewrite — returns the patch list without the re-emit cost.
+/// Saves O(n) string-copy when the caller plans to apply patches in place
+/// over its own buffer (typical Service Worker / page-prelude path).
+/// `code` in the returned `RewriteResult` is the original source verbatim;
+/// patches carry the offsets + replacements.
+pub fn rewrite_script_patches(
+    source: &str,
+    opts: &RewriteOpts,
+) -> Result<RewriteResult, RewriteError> {
+    let allocator = Allocator::default();
+    let source_type = opts.kind.source_type();
+    let ret = Parser::new(&allocator, source, source_type).parse();
+
+    if !ret.errors.is_empty() && opts.strict {
+        let msg = ret
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(RewriteError::ParseFailed(msg));
+    }
+
+    let mut visitor = RewriteVisitor::new();
+    visitor.visit_program(&ret.program);
+
+    let mut patches = visitor.patches;
+    patches.sort_by_key(|p| p.start);
+
+    Ok(RewriteResult {
+        // Patch-mode: caller already has the original bytes — don't waste
+        // a heap allocation reconstructing them.
+        code: String::new(),
+        patches,
+        diagnostics: visitor.diagnostics,
+    })
+}
+
+/// D2 composer entry point. Re-runs the rewrite pipeline to derive patches,
+/// applies them over the stripped source, and emits a Source Map v3 JSON
+/// pointing each generated position back to its original byte offset.
+///
+/// `source_url` is what goes into `"sources": [source_url]` — typically the
+/// proxy-side target URL of the script. `sourcesContent` embeds the
+/// *stripped* original source so the browser can render the original
+/// listing without a separate round trip.
+pub fn compose_source_map(
+    source: &str,
+    opts: &RewriteOpts,
+    source_url: &str,
+) -> Result<String, RewriteError> {
+    let result = rewrite_script_patches(source, opts)?;
+    // The rewriter never patches the trailing sourceMappingURL pragma
+    // (those bytes live inside a `//#`-comment past the last identifier),
+    // so the patches' offsets in `source` are byte-identical to offsets
+    // in `strip_sourcemap_pragma(source)`. We strip first so the
+    // generated string the composer walks lines up 1:1 with what the
+    // browser is actually executing.
+    let stripped = strip_sourcemap_pragma(source);
+    let rewritten = apply_patches(&stripped, &result.patches);
+    Ok(compose_rewrite_map(
+        &stripped,
+        &rewritten,
+        &result.patches,
+        source_url,
+    ))
+}
+
 /// Rewrite a JavaScript source string per the strict-mode policy.
 pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult, RewriteError> {
     let allocator = Allocator::default();
@@ -173,7 +244,10 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
     // and non-overlapping (visitor guarantees this for identifier rewrites).
     let mut patches = visitor.patches;
     patches.sort_by_key(|p| p.start);
-    let code = apply_patches(source, &patches);
+    let patched = apply_patches(source, &patches);
+    // D2: strip stale `sourceMappingURL` pragma — the original map describes
+    // the un-rewritten source and would misattribute lines in DevTools.
+    let code = strip_sourcemap_pragma(&patched);
 
     Ok(RewriteResult {
         code,
@@ -210,7 +284,7 @@ fn shift_marker_positions(replacement: &str, offset: u32) -> String {
     replacement.to_string()
 }
 
-fn apply_patches(source: &str, patches: &[Patch]) -> String {
+pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     // Deduplicate overlapping patches: when patch B is fully contained inside
     // patch A (A.start <= B.start && B.end <= A.end), prefer A (outer) and
     // drop B. This matches the rewrite semantics where outer member-get
@@ -399,12 +473,52 @@ fn apply_patches(source: &str, patches: &[Patch]) -> String {
     out
 }
 
-/// Persistent rewriter instance — reuses an allocator across calls.
+/// D2: remove a trailing `sourceMappingURL` pragma. Per source-map spec
+/// it must be on the last non-empty line of the file. We're strict about
+/// LAST occurrence and forgiving about whitespace.
+pub fn strip_sourcemap_pragma(src: &str) -> String {
+    // Scan only the tail; pragmas live at the end of the file. 4 KiB
+    // is generous — typical pragmas are < 200 bytes.
+    let scan_from = src.len().saturating_sub(4096);
+    let tail = &src[scan_from..];
+    let needle = "sourceMappingURL=";
+    let Some(rel_idx) = tail.rfind(needle) else {
+        return src.to_string();
+    };
+    let abs_idx = scan_from + rel_idx;
+    // Find the comment opener on the same line.
+    let line_start = src[..abs_idx].rfind('\n').map(|n| n + 1).unwrap_or(0);
+    let before_needle = &src[line_start..abs_idx];
+    let trimmed = before_needle.trim_start();
+    let comment_opens = trimmed.starts_with("//#")
+        || trimmed.starts_with("//@")
+        || trimmed.starts_with("/*#")
+        || trimmed.starts_with("/*@");
+    if !comment_opens {
+        return src.to_string();
+    }
+    // Trim the entire trailing line (including the preceding newline if
+    // present) so we don't leave a dangling empty line at EOF.
+    let cut_at = if line_start > 0 && src.as_bytes()[line_start - 1] == b'\n' {
+        line_start - 1
+    } else {
+        line_start
+    };
+    src[..cut_at].to_string()
+}
+
+/// Persistent rewriter instance — reuses a single bump allocator across
+/// calls so warm-path rewrites amortise the arena allocation cost.
+///
+/// Memory plan (#2): the OXC AST is a bump arena. Allocating a fresh
+/// `Allocator` per call walks `mmap` / `VirtualAlloc` system calls and
+/// reserves new pages every time — for small (≤ 10 KB) scripts the arena
+/// init cost dominates parse cost. We instead own one `Allocator`, run
+/// parse + visit + emit inside a single method scope so the AST never
+/// escapes, then `reset()` the allocator to reclaim the bytes (capacity
+/// stays — the pages are reused on the next call).
 pub struct RewriterInstance {
-    // OXC Allocator is reset between calls. Holding a single one here would
-    // require unsafe trickery to outlive the borrow; we instead allocate
-    // per call but keep the configuration here as a placeholder for future
-    // arena reuse via bumpalo Reset.
+    allocator: Allocator,
 }
 
 impl Default for RewriterInstance {
@@ -415,7 +529,9 @@ impl Default for RewriterInstance {
 
 impl RewriterInstance {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            allocator: Allocator::default(),
+        }
     }
 
     pub fn rewrite(
@@ -423,10 +539,51 @@ impl RewriterInstance {
         source: &str,
         opts: &RewriteOpts,
     ) -> Result<RewriteResult, RewriteError> {
-        rewrite_script(source, opts)
+        // Parse + visit + apply_patches must all complete inside this
+        // method so the AST (which borrows from `self.allocator`) never
+        // escapes our scope. The final `reset()` reclaims the arena bytes
+        // for the next call.
+        let source_type = opts.kind.source_type();
+        let ret = Parser::new(&self.allocator, source, source_type).parse();
+
+        if !ret.errors.is_empty() && opts.strict {
+            let msg = ret
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.allocator.reset();
+            return Err(RewriteError::ParseFailed(msg));
+        }
+
+        let mut visitor = RewriteVisitor::new();
+        visitor.visit_program(&ret.program);
+
+        let mut patches = visitor.patches;
+        patches.sort_by_key(|p| p.start);
+        let patched = apply_patches(source, &patches);
+        let code = strip_sourcemap_pragma(&patched);
+
+        // CRITICAL: reset must happen AFTER `code` (an owned String) is
+        // built and `patches` (which carry owned `String` replacements)
+        // are detached from the AST nodes. Both are heap-allocated outside
+        // the arena, so the reset is safe.
+        self.allocator.reset();
+
+        Ok(RewriteResult {
+            code,
+            patches,
+            diagnostics: visitor.diagnostics,
+        })
     }
 
-    pub fn reset(&mut self) {}
+    /// Explicit reset hook — usually unnecessary (`rewrite` resets at the
+    /// end of each call), but exposed for callers that want to force-drop
+    /// arena capacity after a one-off large rewrite.
+    pub fn reset(&mut self) {
+        self.allocator.reset();
+    }
 }
 
 /// AST visitor that walks programs and produces global-identifier patches.
@@ -436,6 +593,9 @@ struct RewriteVisitor {
     /// Stack of lexical scopes; each scope holds names that should NOT be
     /// rewritten because they shadow the dangerous globals.
     scopes: Vec<HashSet<String>>,
+    /// Counts infinite-loop detections so the trap notebook can be
+    /// updated with prevalence data after a real-site capture.
+    infinite_loop_caps: u32,
 }
 
 impl RewriteVisitor {
@@ -444,6 +604,7 @@ impl RewriteVisitor {
             patches: Vec::new(),
             diagnostics: Vec::new(),
             scopes: vec![HashSet::new()],
+            infinite_loop_caps: 0,
         }
     }
 
@@ -472,6 +633,27 @@ impl RewriteVisitor {
             end: span.end,
             replacement: format!("\u{1}GLOBAL_GET\u{1}{}\u{1}", name),
         });
+    }
+
+    /// Allocate a fresh ID for an infinite-loop cap so each replacement
+    /// declares its own counter variable (no cross-loop collision).
+    fn next_loop_id(&mut self) -> u32 {
+        self.infinite_loop_caps += 1;
+        self.infinite_loop_caps
+    }
+}
+
+/// Detect a `true`-equivalent constant expression — `true` literal, `1`
+/// numeric literal (the two NAVER probe shapes we've seen). Strings /
+/// objects / etc. could also be truthy but the rewriter is conservative
+/// and only caps the unambiguous infinite forms.
+fn is_truthy_constant(expr: &Expression) -> bool {
+    match expr {
+        Expression::BooleanLiteral(b) => b.value,
+        Expression::NumericLiteral(n) => n.value != 0.0,
+        // Parenthesised — peer through.
+        Expression::ParenthesizedExpression(p) => is_truthy_constant(&p.expression),
+        _ => false,
     }
 }
 
@@ -729,6 +911,78 @@ impl<'a> Visit<'a> for RewriteVisitor {
                     expr.object_span().end,
                     prop
                 ),
+            });
+        }
+    }
+
+    /// `for (;;) body` — unbounded loop. The classic anti-bot probe
+    /// shape uses this to detect membrane instrumentation: the probe
+    /// runs a tight loop while inspecting a global accessor, and if the
+    /// loop never yields, the page wedges V8. Cap with a fresh counter
+    /// so the loop terminates after a generous 10 M iterations. Forms
+    /// with init / update are left alone for now — none of the observed
+    /// NAVER probe shapes use them, and the patch would need to weave
+    /// the counter into the existing test slot.
+    fn visit_for_statement(&mut self, stmt: &ForStatement<'a>) {
+        walk::walk_for_statement(self, stmt);
+        if stmt.init.is_none() && stmt.test.is_none() && stmt.update.is_none() {
+            use oxc_span::GetSpan;
+            let id = self.next_loop_id();
+            let body_start = stmt.body.span().start;
+            // The `for(;;)` header is everything from `stmt.span.start`
+            // up to the body. Replace with a counted form; body is left
+            // untouched so `break` / `continue` / closures retain their
+            // semantics.
+            self.patches.push(Patch {
+                start: stmt.span.start,
+                end: body_start,
+                replacement: format!(
+                    "for(let __zp_lc_{id}=0;__zp_lc_{id}++<10000000;)"
+                ),
+            });
+        }
+    }
+
+    /// `while(true) body` / `while(1) body` — same probe shape.
+    fn visit_while_statement(&mut self, stmt: &WhileStatement<'a>) {
+        walk::walk_while_statement(self, stmt);
+        if is_truthy_constant(&stmt.test) {
+            use oxc_span::GetSpan;
+            let id = self.next_loop_id();
+            let body_start = stmt.body.span().start;
+            self.patches.push(Patch {
+                start: stmt.span.start,
+                end: body_start,
+                replacement: format!(
+                    "for(let __zp_lc_{id}=0;__zp_lc_{id}++<10000000;)"
+                ),
+            });
+        }
+    }
+
+    /// `do body while(true);` / `do body while(1);`. The header
+    /// rewrite trick doesn't fit because `do` requires a trailing
+    /// `while(test);`. Patch the test expression itself with a
+    /// post-increment counter; declare the counter immediately before
+    /// the `do` so its scope covers the test.
+    fn visit_do_while_statement(&mut self, stmt: &DoWhileStatement<'a>) {
+        walk::walk_do_while_statement(self, stmt);
+        if is_truthy_constant(&stmt.test) {
+            use oxc_span::GetSpan;
+            let id = self.next_loop_id();
+            let counter = format!("__zp_lc_{id}");
+            // Inject counter declaration just before `do`.
+            self.patches.push(Patch {
+                start: stmt.span.start,
+                end: stmt.span.start,
+                replacement: format!("let {counter}=0;"),
+            });
+            // Replace the test expression with the counter check.
+            let test_span = stmt.test.span();
+            self.patches.push(Patch {
+                start: test_span.start,
+                end: test_span.end,
+                replacement: format!("{counter}++<10000000"),
             });
         }
     }
@@ -1297,6 +1551,176 @@ mod tests {
             r.code
                 .contains("__zp_get(__zp_get(globalThis,\"window\"),\"frames\")"),
             "nested rewrite missing: {}",
+            r.code
+        );
+    }
+
+    // D2: sourcemap pragma strip
+    #[test]
+    fn d2_strips_line_comment_pragma() {
+        let src = "var a=1;\n//# sourceMappingURL=app.js.map";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(!r.code.contains("sourceMappingURL"), "line pragma not stripped: {}", r.code);
+        assert!(r.code.contains("var a=1"));
+    }
+
+    #[test]
+    fn d2_strips_legacy_at_pragma() {
+        let src = "var a=1;\n//@ sourceMappingURL=app.js.map";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(!r.code.contains("sourceMappingURL"));
+    }
+
+    #[test]
+    fn d2_strips_block_comment_pragma() {
+        let src = "var a=1;\n/*# sourceMappingURL=app.js.map */";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(!r.code.contains("sourceMappingURL"));
+    }
+
+    #[test]
+    fn d2_strips_data_url_pragma() {
+        let map = "data:application/json;base64,eyJ2ZXJzaW9uIjozfQ==";
+        let src = format!("var a=1;\n//# sourceMappingURL={}", map);
+        let r = rewrite_script(&src, &opts()).unwrap();
+        assert!(!r.code.contains("sourceMappingURL"));
+        assert!(!r.code.contains("data:application/json"));
+    }
+
+    #[test]
+    fn d2_preserves_source_without_pragma() {
+        let src = "var sourceMappingURL = 'not a pragma';\nvar a=1;";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(r.code.contains("sourceMappingURL"));
+    }
+
+    #[test]
+    fn d2_only_strips_last_pragma() {
+        let src = "var s = '//# sourceMappingURL=fake.map';\nvar a=1;\n//# sourceMappingURL=real.map";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(!r.code.contains("real.map"));
+        assert!(r.code.contains("fake.map"));
+    }
+
+    // Perf: persistent arena rewriter reuses one Allocator across calls.
+    #[test]
+    fn rewriter_instance_reuses_arena() {
+        let mut inst = RewriterInstance::new();
+        for _ in 0..5 {
+            let src = "location.href; window.open('x');";
+            let r = inst.rewrite(src, &opts()).expect("rewrite");
+            assert!(r.code.contains("__zp_get"), "warm path produced: {}", r.code);
+        }
+    }
+
+    // ----- Infinite-loop cap (NAVER warm-session V8 wedge fix) -----
+
+    #[test]
+    fn caps_bare_for_infinite_loop() {
+        // `for(;;) body` is the canonical anti-bot probe shape — it
+        // wedges V8 if the loop body never breaks. Rewriter must inject
+        // a counter so the loop terminates after a generous bound.
+        let src = "function probe(){ for(;;) { a(); } }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("for(;;)"),
+            "bare for(;;) must be replaced with a capped form, got: {}",
+            r.code
+        );
+        assert!(
+            r.code.contains("__zp_lc_1"),
+            "expected counter __zp_lc_1, got: {}",
+            r.code
+        );
+        assert!(
+            r.code.contains("<10000000"),
+            "expected iteration cap constant, got: {}",
+            r.code
+        );
+        // The body identifier `a()` must remain — only the header is
+        // rewritten.
+        assert!(r.code.contains("a()"), "body lost: {}", r.code);
+    }
+
+    #[test]
+    fn caps_while_true() {
+        let src = "while (true) { step() }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("while (true)") && !r.code.contains("while(true)"),
+            "while(true) must be replaced: {}",
+            r.code
+        );
+        assert!(r.code.contains("__zp_lc_"), "no counter: {}", r.code);
+    }
+
+    #[test]
+    fn caps_while_one() {
+        let src = "while(1){step()}";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("while(1)"),
+            "while(1) must be replaced: {}",
+            r.code
+        );
+        assert!(r.code.contains("__zp_lc_"), "no counter: {}", r.code);
+    }
+
+    #[test]
+    fn caps_do_while_true() {
+        let src = "do{step()}while(true);";
+        let r = rewrite_script(src, &opts()).unwrap();
+        // The do-while form requires the trailing `while(test)` so we
+        // patch the test slot rather than the header. The counter is
+        // declared before the `do`.
+        assert!(
+            r.code.contains("let __zp_lc_") && r.code.contains("=0;do"),
+            "do-while counter decl missing: {}",
+            r.code
+        );
+        assert!(
+            r.code.contains("__zp_lc_1++<10000000"),
+            "do-while test not capped: {}",
+            r.code
+        );
+        // Body unchanged.
+        assert!(r.code.contains("step()"), "body lost: {}", r.code);
+    }
+
+    #[test]
+    fn does_not_cap_finite_loops() {
+        // A loop with a finite test condition must not be touched —
+        // capping would change semantics for legitimate code.
+        let src = "for (let i = 0; i < 5; i++) { sum += i }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("__zp_lc_"),
+            "finite for-loop must not be capped: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn does_not_cap_while_with_variable_test() {
+        let src = "while (running) { tick() }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("__zp_lc_"),
+            "variable-test while must not be capped: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn nested_infinite_loops_get_distinct_counters() {
+        // Each infinite loop must allocate its own counter ID so the
+        // inner cap doesn't shadow the outer one (which would let the
+        // inner reset on every outer iteration).
+        let src = "for(;;){ while(true){ y() } }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_lc_1") && r.code.contains("__zp_lc_2"),
+            "nested loops must have distinct counters: {}",
             r.code
         );
     }

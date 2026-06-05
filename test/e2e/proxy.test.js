@@ -1436,22 +1436,50 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`);
   assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`);
 
+  // D3: SW facade is fail-soft — register() resolves to a fake registration
+  // so target init code doesn't crash, but the security invariant holds:
+  // no real SW controls the origin (controller === null) and the fake
+  // registration's .active is null (no actual worker bound). Sync /
+  // periodicSync register cleanly (no event ever fires; matches native
+  // throttling). Push subscribe rejects NotAllowedError (graceful denial).
   const serviceWorkerPolicy = await page.evaluate(async () => {
     const out = {
       exposed: 'serviceWorker' in navigator,
       controller: navigator.serviceWorker && navigator.serviceWorker.controller,
       registrationCount: null,
       registerError: '',
+      registeredScope: '',
+      registeredActive: 'missing',
+      syncRegister: '',
+      pushSubscribeError: '',
+      pushSubscription: 'missing',
     };
     if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) out.registrationCount = (await navigator.serviceWorker.getRegistrations()).length;
-    try { await navigator.serviceWorker.register('/target-sw.js'); }
-    catch (err) { out.registerError = err && err.name || String(err); }
+    try {
+      const reg = await navigator.serviceWorker.register('/target-sw.js');
+      out.registeredScope = String(reg && reg.scope || '');
+      out.registeredActive = reg && reg.active === null ? 'null' : String(reg && reg.active);
+      if (reg && reg.sync && reg.sync.register) out.syncRegister = String(await reg.sync.register('zp-test'));
+      if (reg && reg.pushManager) {
+        try { await reg.pushManager.subscribe({ userVisibleOnly: true }); }
+        catch (err) { out.pushSubscribeError = err && err.name || String(err); }
+        out.pushSubscription = (await reg.pushManager.getSubscription()) === null ? 'null' : 'leaked';
+      }
+    } catch (err) { out.registerError = err && err.name || String(err); }
     return out;
   });
   assert.equal(serviceWorkerPolicy.exposed, true);
+  // Security invariants: no real SW controls the origin, fake reg's .active is null.
   assert.equal(serviceWorkerPolicy.controller, null);
-  assert.equal(serviceWorkerPolicy.registrationCount, 0);
-  assert.equal(serviceWorkerPolicy.registerError, 'NotSupportedError');
+  assert.equal(serviceWorkerPolicy.registeredActive, 'null', 'fake registration must have null .active (no real SW)');
+  // Fail-soft surface: register resolves, scope is virtual origin, sync
+  // registers no-op, push subscribe rejects gracefully, getSubscription null.
+  assert.equal(serviceWorkerPolicy.registerError, '');
+  assert.equal(serviceWorkerPolicy.registrationCount, 1, 'facade getRegistrations should surface the single fake reg');
+  assert.match(serviceWorkerPolicy.registeredScope, /^https?:\/\//, 'registration.scope should be the virtual origin');
+  assert.equal(serviceWorkerPolicy.syncRegister, 'zp-test', 'SyncManager.register should resolve with the supplied tag');
+  assert.equal(serviceWorkerPolicy.pushSubscribeError, 'NotAllowedError', 'PushManager.subscribe must reject NotAllowedError');
+  assert.equal(serviceWorkerPolicy.pushSubscription, 'null', 'PushManager.getSubscription must resolve null');
   const bootLeak = await page.evaluate(() => ({
     bootType: typeof window.__ZP_BOOT,
     scriptContainsRuntimeToken: Array.from(document.scripts).some(s => s.textContent.includes('runtimeToken')),

@@ -44,6 +44,12 @@ func NewWithRand(random io.Reader, target string) (string, error) {
 }
 
 func NewWithRandAndServers(random io.Reader, target string, servers []string) (string, error) {
+	// C3 parity: match Rust `parse_share_url` which calls `s.trim()` first —
+	// user-pasted URLs commonly carry surrounding whitespace (clipboard /
+	// auto-fill artifacts). Trimming opens no injection vector because the
+	// resulting URL is sealed into the AES-256-CBC + HMAC envelope below;
+	// consumers re-parse a clean string.
+	target = strings.TrimSpace(target)
 	u, err := url.Parse(target)
 	if err != nil || u == nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", fmt.Errorf("shareurl: unsupported target URL")

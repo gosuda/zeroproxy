@@ -335,10 +335,14 @@
   }
 
   const api = Object.freeze({ load, UrlClass });
+  // Match zp-core's ZP: configurable so runtime-prelude can delete the
+  // named property after capturing the API into a closure local. Hides
+  // it from `Object.getOwnPropertyNames(window)` fingerprinting. See
+  // [web/runtime-prelude.js] top-of-IIFE capture block for the delete.
   Object.defineProperty(globalThis, 'ZeroProxyRT', {
     value: api,
     enumerable: false,
-    configurable: false,
+    configurable: true,
     writable: false,
   });
 })();

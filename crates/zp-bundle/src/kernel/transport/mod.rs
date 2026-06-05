@@ -52,5 +52,6 @@ pub(crate) mod mlkem_hybrid;
 pub(crate) mod pool;
 pub(crate) mod socks5;
 pub(crate) mod tls;
+pub(crate) mod ws_client;
 pub(crate) mod ws_stream;
 pub(crate) mod yamux;

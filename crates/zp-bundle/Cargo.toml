@@ -18,6 +18,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # base64 decode for the `/zp/api/fp` captured ClientHello spec.
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# RFC 6455 `Sec-WebSocket-Accept` = base64(SHA1(key || GUID)). RustCrypto
+# sha1 is pure-Rust, no_std-compatible, wasm32 clean.
+sha1 = { version = "0.10", default-features = false }
 
 # Step 14: client-side transport stack. The kernel speaks SOCKS5+TLS+HTTP
 # itself over a WebSocket byte-pipe so the relay never sees plaintext.

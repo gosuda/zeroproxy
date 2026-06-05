@@ -5,7 +5,7 @@
 //! (reused instance) latency across script size buckets.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use zp_rewriter::{rewrite_script, RewriteOpts, RewriterInstance, ScriptKind};
+use zp_rewriter::{rewrite_script, rewrite_script_patches, RewriteOpts, RewriterInstance, ScriptKind};
 
 fn opts() -> RewriteOpts {
     RewriteOpts {
@@ -78,10 +78,45 @@ fn bench_patch_count_sanity(c: &mut Criterion) {
     group.finish();
 }
 
+/// Patch-mode emit (`rewrite_script_patches`) vs full re-emit
+/// (`rewrite_script`). The patch path skips the O(n) `apply_patches`
+/// + `strip_sourcemap_pragma` string reconstruction; on 90%-unchanged
+/// scripts it should be substantially cheaper.
+fn bench_patch_vs_full(c: &mut Criterion) {
+    let mut group = c.benchmark_group("patch_vs_full");
+    for &size_kb in &[10_usize, 100, 1024] {
+        let src = synth_source(size_kb * 1024);
+        group.throughput(Throughput::Bytes(src.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("full_reemit", size_kb),
+            &src,
+            |b, s| {
+                b.iter(|| {
+                    let r = rewrite_script(black_box(s), &opts()).expect("rewrite");
+                    black_box(r.code.len());
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("patch_only", size_kb),
+            &src,
+            |b, s| {
+                b.iter(|| {
+                    let r =
+                        rewrite_script_patches(black_box(s), &opts()).expect("rewrite-patches");
+                    black_box(r.patches.len());
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_cold_rewrites,
     bench_warm_rewrites,
-    bench_patch_count_sanity
+    bench_patch_count_sanity,
+    bench_patch_vs_full
 );
 criterion_main!(benches);

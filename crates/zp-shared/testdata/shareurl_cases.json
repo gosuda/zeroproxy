@@ -11,5 +11,19 @@
   {"input": "file:///etc/passwd", "ok": false, "reason": "InvalidScheme"},
   {"input": "", "ok": false, "reason": "Empty"},
   {"input": "   ", "ok": false, "reason": "Empty"},
-  {"input": "notaurl", "ok": false, "reason": "Malformed"}
+  {"input": "notaurl", "ok": false, "reason": "Malformed"},
+  {"input": "https:", "ok": false, "reason": "Malformed"},
+  {"input": "https:/single-slash", "ok": false, "reason": "Malformed"},
+  {"input": "https://", "ok": false, "reason": "Malformed"},
+  {"input": "https://example.com:65535/", "ok": true, "scheme": "https", "host": "example.com:65535"},
+  {"input": "http://[::1]/", "ok": true, "scheme": "http"},
+  {"input": "http://192.168.1.1:8080/", "ok": true, "scheme": "http", "host": "192.168.1.1:8080"},
+  {"input": "mailto:test@example.com", "ok": false, "reason": "InvalidScheme"},
+  {"input": "ftp://example.com/", "ok": false, "reason": "InvalidScheme"},
+  {"input": "ssh://example.com/", "ok": false, "reason": "InvalidScheme"},
+  {"input": "about:blank", "ok": false, "reason": "InvalidScheme"},
+  {"input": "chrome://settings/", "ok": false, "reason": "InvalidScheme"},
+  {"input": "intent://x.example.com#Intent;scheme=https;end", "ok": false, "reason": "InvalidScheme"},
+  {"input": "Http://EXAMPLE.COM/path", "ok": true, "scheme": "http", "host": "EXAMPLE.COM"},
+  {"input": "  https://example.com/  ", "ok": true, "scheme": "https", "host": "example.com"}
 ]

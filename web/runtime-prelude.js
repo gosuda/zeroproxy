@@ -5,6 +5,20 @@
   if (root[marker]) return;
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
+  // Fingerprint hardening: capture the ZeroProxy runtime helpers into
+  // closure-local bindings, then DELETE the named globals so a target
+  // script's `Object.getOwnPropertyNames(window)` enumeration can't see
+  // them. The named properties are the obvious tells — `window.ZP`,
+  // `window.ZeroProxyRT` — that anti-bot probes (e.g. NAVER's warm-
+  // session V8 wedge) check before deciding whether to enter their
+  // probe-defense tight loop. The Symbol.for('zeroproxy.runtime.installed')
+  // marker above is keyed by Symbol so it doesn't appear in
+  // getOwnPropertyNames either; only getOwnPropertySymbols can reach it.
+  const ZP = globalThis.ZP;
+  const ZeroProxyRTGlobal = globalThis.ZeroProxyRT;
+  try { delete globalThis.ZP; } catch {}
+  try { delete globalThis.ZeroProxyRT; } catch {}
+
   const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, readBootConfig());
   const runtimeToken = String(boot.runtimeToken || '');
   // Single source of truth lives in zp-core (web/zp-core.js); the SW smuggles
@@ -26,9 +40,9 @@
   // before this IIFE runs. The wasm fetch is async; rt stays null until
   // instantiation completes (~10-50ms after page load on warm cache).
   let rt = null;
-  if (typeof globalThis.ZeroProxyRT === 'object' && globalThis.ZeroProxyRT) {
+  if (typeof ZeroProxyRTGlobal === 'object' && ZeroProxyRTGlobal) {
     try {
-      globalThis.ZeroProxyRT.load('/__zp/zp_page_rt.wasm')
+      ZeroProxyRTGlobal.load('/__zp/zp_page_rt.wasm')
         .then(instance => { rt = instance; })
         .catch(() => { /* fall back to JS path */ });
     } catch { /* defensive */ }
@@ -1274,14 +1288,23 @@
       define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
     }
     if (Native.EventSource && Native.fetch && Native.Request && Native.Headers) {
+      // B4: EventSource fidelity. WHATWG HTML SSE §9.2 — auto-reconnect after
+      // soft transport errors with the server-supplied `retry:` interval,
+      // Last-Event-ID echo on reconnect, Content-Type enforcement, 204 clean
+      // close, non-2xx hard fail (no reconnect).
       const CONNECTING = 0, OPEN = 1, CLOSED = 2;
+      const DEFAULT_RECONNECT_MS = 3000;
       function ZPEventSource(url, init = {}) {
         this.url = requestTargetURL(url);
         this.withCredentials = !!(init && init.withCredentials);
         this.readyState = CONNECTING;
         this._closed = false;
         this._controller = new AbortController();
-        runEventSource(this, url, init || {});
+        this._lastEventId = '';
+        this._reconnectMs = DEFAULT_RECONNECT_MS;
+        this._reconnectTimer = 0;
+        this._init = init || {};
+        runEventSource(this);
       }
       installEventMethods(ZPEventSource.prototype);
       Object.assign(ZPEventSource.prototype, {
@@ -1290,34 +1313,66 @@
         close() {
           this._closed = true;
           this.readyState = CLOSED;
+          if (this._reconnectTimer) { try { clearTimeout(this._reconnectTimer); } catch {} this._reconnectTimer = 0; }
           try { this._controller.abort(); } catch {}
         }
       });
       maskMethods(ZPEventSource.prototype, ['close']);
       define(root, 'EventSource', ZPEventSource);
-      function runEventSource(es, url, init) {
-        fetchThroughRuntime(url, { method: 'GET', headers: [['Accept', 'text/event-stream']], credentials: init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }).then(async resp => {
-          if (!resp.ok) throw normalizedError('NetworkError');
+
+      function scheduleReconnect(es) {
+        if (es._closed) return;
+        es.readyState = CONNECTING;
+        fireEvent(es, 'error');
+        if (es._closed) return;
+        es._reconnectTimer = setTimeout(() => {
+          es._reconnectTimer = 0;
           if (es._closed) return;
+          // New controller per attempt so prior abort doesn't poison next fetch.
+          es._controller = new AbortController();
+          runEventSource(es);
+        }, es._reconnectMs);
+      }
+
+      function runEventSource(es) {
+        const headers = [['Accept', 'text/event-stream'], ['Cache-Control', 'no-cache']];
+        if (es._lastEventId) headers.push(['Last-Event-ID', es._lastEventId]);
+        fetchThroughRuntime(es.url, { method: 'GET', headers, credentials: es._init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }).then(async resp => {
+          if (es._closed) return;
+          // 204 = end of stream, close cleanly (no reconnect).
+          if (resp.status === 204) {
+            es.readyState = CLOSED;
+            return;
+          }
+          const ct = (resp.headers && resp.headers.get('Content-Type')) || '';
+          // Per spec wrong MIME or non-2xx is a HARD fail — no reconnect.
+          if (!resp.ok || !/^text\/event-stream\b/i.test(ct)) {
+            es.readyState = CLOSED;
+            fireEvent(es, 'error');
+            return;
+          }
           es.readyState = OPEN;
           fireEvent(es, 'open');
           if (!resp.body || !resp.body.getReader) {
             consumeSSE(es, await resp.text(), true);
+            if (!es._closed) scheduleReconnect(es);
             return;
           }
           const reader = resp.body.getReader();
           const decoder = new TextDecoder();
           let buf = '';
-          for (;;) {
-            const part = await reader.read();
-            if (part.done) break;
-            buf = consumeSSE(es, buf + decoder.decode(part.value, { stream: true }), false);
-          }
-          consumeSSE(es, buf + decoder.decode(), true);
+          try {
+            for (;;) {
+              const part = await reader.read();
+              if (part.done) break;
+              buf = consumeSSE(es, buf + decoder.decode(part.value, { stream: true }), false);
+            }
+            consumeSSE(es, buf + decoder.decode(), true);
+          } catch {}
+          if (!es._closed) scheduleReconnect(es);
         }).catch(() => {
           if (es._closed) return;
-          es.readyState = CLOSED;
-          fireEvent(es, 'error');
+          scheduleReconnect(es);
         });
       }
       function consumeSSE(es, text, final) {
@@ -1335,7 +1390,7 @@
       }
       function dispatchSSE(es, block) {
         if (es._closed) return;
-        let data = '', eventType = 'message', lastEventId = '';
+        let data = '', eventType = 'message', eventLastId = null;
         for (const line of String(block).split('\n')) {
           if (!line || line[0] === ':') continue;
           const colon = line.indexOf(':');
@@ -1344,18 +1399,32 @@
           if (value[0] === ' ') value = value.slice(1);
           if (field === 'data') data += value + '\n';
           else if (field === 'event') eventType = value || 'message';
-          else if (field === 'id') lastEventId = value;
+          else if (field === 'id') eventLastId = value;
+          else if (field === 'retry') {
+            // Per spec only digit-strings update reconnect interval.
+            if (/^\d+$/.test(value)) es._reconnectMs = parseInt(value, 10);
+          }
         }
+        // Per spec the "last event ID buffer" updates on EVERY id field.
+        if (eventLastId !== null) es._lastEventId = eventLastId;
         if (!data) return;
         data = data.slice(0, -1);
         let ev;
-        try { ev = new MessageEvent(eventType, { data, origin: new URL(es.url).origin, lastEventId }); }
-        catch { ev = new Event(eventType); try { Object.defineProperties(ev, { data: { value: data }, origin: { value: new URL(es.url).origin }, lastEventId: { value: lastEventId } }); } catch {} }
+        const origin = new URL(es.url).origin;
+        try { ev = new MessageEvent(eventType, { data, origin, lastEventId: es._lastEventId }); }
+        catch { ev = new Event(eventType); try { Object.defineProperties(ev, { data: { value: data }, origin: { value: origin }, lastEventId: { value: es._lastEventId } }); } catch {} }
         es.dispatchEvent(ev);
       }
     }
   }
   function installWebSocket() {
+    // C1: WebSocket boundary fidelity (RFC 6455). Sub-protocol selection
+    // §4.2.2, close code/reason validation §7.4 (code: 1000 or [3000,4999];
+    // reason ≤ 123 UTF-8 bytes), binaryType setter validation,
+    // bufferedAmount accounting. The kernel transport is currently a stub
+    // (TARGET_WS_NOT_REWIRED) so end-to-end can't be exercised, but
+    // boundary-correct behavior prevents target scripts from tripping on
+    // validation throws browsers would do.
     const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
     const tokenRE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
     function protocolList(protocols) {
@@ -1372,6 +1441,34 @@
       }
       return out;
     }
+    // RFC 6455 §7.4: close code must be 1000 or in [3000, 4999].
+    function validateCloseCode(code) {
+      if (code === undefined) return;
+      const n = Number(code);
+      if (!Number.isFinite(n) || (n !== 1000 && (n < 3000 || n > 4999))) {
+        throw normalizedError('InvalidAccessError');
+      }
+    }
+    // RFC 6455 §7.4.1: close reason ≤ 123 UTF-8 bytes.
+    function validateReason(reason) {
+      if (reason === undefined || reason === '') return;
+      const enc = (typeof TextEncoder === 'function') ? new TextEncoder().encode(String(reason)) : null;
+      const len = enc ? enc.length : String(reason).length;
+      if (len > 123) throw normalizedError('SyntaxError');
+    }
+    function utf8ByteLength(s) {
+      if (typeof TextEncoder === 'function') {
+        try { return new TextEncoder().encode(s).length; } catch {}
+      }
+      return s.length;
+    }
+    function payloadByteLength(data) {
+      if (typeof data === 'string') return utf8ByteLength(data);
+      if (data instanceof ArrayBuffer) return data.byteLength;
+      if (Native.Blob && data instanceof Native.Blob) return data.size;
+      if (data && typeof data.byteLength === 'number') return data.byteLength;
+      return 0;
+    }
     function closeEvent(code, reason, wasClean) {
       try { return new CloseEvent('close', { code, reason, wasClean }); }
       catch { const ev = new Event('close'); try { Object.defineProperties(ev, { code: { value: code }, reason: { value: reason }, wasClean: { value: wasClean } }); } catch {} return ev; }
@@ -1385,7 +1482,10 @@
     function fail(ws) {
       if (ws._closed) return;
       ws.dispatchEvent(new Event('error'));
-      finish(ws, 1006, '', false);
+      // Preserve user-requested close code if they were mid-handshake.
+      const code = ws._closingCode || 1006;
+      const reason = ws._closingReason || '';
+      finish(ws, code, reason, false);
     }
     function ZPWebSocket(url, protocols) {
       if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
@@ -1393,25 +1493,45 @@
       this.protocol = '';
       this.extensions = '';
       this.readyState = CONNECTING;
-      this.bufferedAmount = 0;
-      this.binaryType = 'blob';
       this._port = null;
       this._closed = false;
+      this._bufferedAmount = 0;
+      this._binaryType = 'blob';
+      this._closingCode = 0;
+      this._closingReason = '';
       const plist = protocolList(protocols);
+      this._requestedProtocols = plist;
       postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId }).then(reply => {
         if (this._closed) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
-        this.protocol = String(reply.protocol || '');
+        const negotiated = String(reply.protocol || '');
+        // RFC 6455 §4.2.2: server must pick from the offered list.
+        if (negotiated && plist.length > 0 && plist.indexOf(negotiated) < 0) {
+          fail(this);
+          return;
+        }
+        this.protocol = negotiated;
         this._port = reply.port;
         this._port.onmessage = ev => {
           const m = ev.data || {};
           if (m.type === 'message') {
             let data = m.data;
-            if (this.binaryType === 'blob' && data instanceof ArrayBuffer && Native.Blob) data = new Native.Blob([data]);
+            if (this._binaryType === 'blob' && data instanceof ArrayBuffer && Native.Blob) {
+              data = new Native.Blob([data]);
+            } else if (this._binaryType === 'arraybuffer' && Native.Blob && data instanceof Native.Blob) {
+              data.arrayBuffer().then(buf => {
+                if (this._closed) return;
+                this.dispatchEvent(new MessageEvent('message', { data: buf, origin: new URL(this.url).origin }));
+              }).catch(() => fail(this));
+              return;
+            }
             this.dispatchEvent(new MessageEvent('message', { data, origin: new URL(this.url).origin }));
           } else if (m.type === 'error') {
             fail(this);
           } else if (m.type === 'close') {
             finish(this, m.code || 1000, m.reason || '', true);
+          } else if (m.type === 'senddrained' && typeof m.bytes === 'number') {
+            // Best-effort backpressure (kernel emits once Rust WS lands).
+            this._bufferedAmount = Math.max(0, this._bufferedAmount - m.bytes);
           }
         };
         this._port.start && this._port.start();
@@ -1425,20 +1545,61 @@
     Object.assign(ZPWebSocket.prototype, {
       constructor: ZPWebSocket,
       send(data) {
-        if (this.readyState !== OPEN || !this._port) throw normalizedError('InvalidStateError');
-        if (Native.Blob && data instanceof Native.Blob) {
-          data.arrayBuffer().then(buf => { if (this.readyState === OPEN && this._port) this._port.postMessage({ type: 'send', data: buf }); }).catch(() => fail(this));
+        if (this.readyState === CONNECTING) throw normalizedError('InvalidStateError');
+        if (this.readyState !== OPEN || !this._port) {
+          // CLOSING/CLOSED: spec silently grows bufferedAmount and drops.
+          this._bufferedAmount += payloadByteLength(data);
           return;
         }
-        this._port.postMessage({ type: 'send', data });
+        const bytes = payloadByteLength(data);
+        this._bufferedAmount += bytes;
+        if (Native.Blob && data instanceof Native.Blob) {
+          data.arrayBuffer().then(buf => {
+            if (this.readyState === OPEN && this._port) {
+              this._port.postMessage({ type: 'send', data: buf, bytes });
+            } else {
+              this._bufferedAmount = Math.max(0, this._bufferedAmount - bytes);
+            }
+          }).catch(() => fail(this));
+          return;
+        }
+        this._port.postMessage({ type: 'send', data, bytes });
       },
-      close(code = 1000, reason = '') {
+      close(code, reason) {
+        validateCloseCode(code);
+        validateReason(reason);
         if (this._closed || this.readyState === CLOSING || this.readyState === CLOSED) return;
+        const finalCode = code === undefined ? 1000 : Number(code);
+        const finalReason = reason === undefined ? '' : String(reason);
+        this._closingCode = finalCode;
+        this._closingReason = finalReason;
         this.readyState = CLOSING;
-        if (this._port) this._port.postMessage({ type: 'close', code, reason });
-        finish(this, code, reason, true);
+        if (this._port) this._port.postMessage({ type: 'close', code: finalCode, reason: finalReason });
+        // TODO(C1-transport): when Rust kernel WS lands, defer finish() until
+        // the port's {type:'close'} ack so in-flight messages drain first
+        // (RFC 6455 §7.1.6). Today the transport is a stub so deferring
+        // would hang the close event forever.
+        finish(this, finalCode, finalReason, true);
       }
     });
+    // bufferedAmount: read-only per IDL.
+    try {
+      Object.defineProperty(ZPWebSocket.prototype, 'bufferedAmount', {
+        configurable: false,
+        get() { return this._bufferedAmount | 0; },
+      });
+    } catch {}
+    // binaryType: strict enum; invalid assignments silently dropped (browser-equivalent).
+    try {
+      Object.defineProperty(ZPWebSocket.prototype, 'binaryType', {
+        configurable: false,
+        get() { return this._binaryType; },
+        set(v) {
+          const s = String(v);
+          if (s === 'blob' || s === 'arraybuffer') this._binaryType = s;
+        },
+      });
+    } catch {}
     define(root, 'WebSocket', ZPWebSocket);
   }
 
@@ -2812,22 +2973,70 @@
     if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/zp/assets/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' }); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
   }
+  // D3: virtual SW facade. The original behavior was a hard
+  // `NotSupportedError` reject, which made every site gating feature init
+  // on `serviceWorker.register(...).then(...)` go down the
+  // unhandled-rejection path. The full plan (run target SW code in an
+  // isolated ZP_VIRTUAL_SW realm + dispatch sync/periodicsync/push events)
+  // is out of scope for Phase 2; we provide a "fail soft" stand-in:
+  //   - register/ready/getRegistration[s] resolve to a fake registration
+  //   - SyncManager / PeriodicSyncManager register cleanly + never fire
+  //     (matches native — browsers may delay sync indefinitely)
+  //   - PushManager.subscribe rejects NotAllowedError (denied-permission shape)
+  //   - navigationPreload is a no-op shim
+  // Egress invariants stay closed: target JS can't intercept fetch, can't
+  // schedule a real background sync, can't push from outside our origin.
   function installTargetServiceWorkerBlocker(w) {
     const nav = w && w.navigator;
     if (!nav) return;
     if (serviceWorkerFacades.has(w)) return;
     const facade = {};
-    const blockedReady = Promise.reject(normalizedError('NotSupportedError'));
-    blockedReady.catch(()=>{});
+
+    const fakeReg = {};
+    const syncMgr = {};
+    define(syncMgr, 'register', function register(tag) { return Promise.resolve(String(tag || '')); });
+    define(syncMgr, 'getTags', function getTags() { return Promise.resolve([]); });
+    const periodicSyncMgr = {};
+    define(periodicSyncMgr, 'register', function register(tag, _opts) { return Promise.resolve(String(tag || '')); });
+    define(periodicSyncMgr, 'unregister', function unregister(_tag) { return Promise.resolve(undefined); });
+    define(periodicSyncMgr, 'getTags', function getTags() { return Promise.resolve([]); });
+    const pushMgr = {};
+    define(pushMgr, 'subscribe', function subscribe() { return Promise.reject(normalizedError('NotAllowedError')); });
+    define(pushMgr, 'getSubscription', function getSubscription() { return Promise.resolve(null); });
+    define(pushMgr, 'permissionState', function permissionState() { return Promise.resolve('denied'); });
+    const navPreload = {};
+    define(navPreload, 'enable', function enable() { return Promise.resolve(undefined); });
+    define(navPreload, 'disable', function disable() { return Promise.resolve(undefined); });
+    define(navPreload, 'setHeaderValue', function setHeaderValue() { return Promise.resolve(undefined); });
+    define(navPreload, 'getState', function getState() { return Promise.resolve({ enabled: false, headerValue: '' }); });
+
+    defineAccessor(fakeReg, 'scope', () => { try { return virtualURL.origin + '/'; } catch { return '/'; } });
+    defineAccessor(fakeReg, 'active', () => null);
+    defineAccessor(fakeReg, 'installing', () => null);
+    defineAccessor(fakeReg, 'waiting', () => null);
+    defineAccessor(fakeReg, 'updateViaCache', () => 'imports');
+    defineAccessor(fakeReg, 'sync', () => syncMgr);
+    defineAccessor(fakeReg, 'periodicSync', () => periodicSyncMgr);
+    defineAccessor(fakeReg, 'pushManager', () => pushMgr);
+    defineAccessor(fakeReg, 'navigationPreload', () => navPreload);
+    define(fakeReg, 'update', function update() { return Promise.resolve(undefined); });
+    define(fakeReg, 'unregister', function unregister() { return Promise.resolve(true); });
+    define(fakeReg, 'showNotification', function showNotification() { return Promise.reject(normalizedError('NotAllowedError')); });
+    define(fakeReg, 'getNotifications', function getNotifications() { return Promise.resolve([]); });
+    define(fakeReg, 'addEventListener', function addEventListener() {});
+    define(fakeReg, 'removeEventListener', function removeEventListener() {});
+
+    const readyPromise = Promise.resolve(fakeReg);
     let oncontrollerchange = null;
-    define(facade, 'register', function register() { return Promise.reject(normalizedError('NotSupportedError')); });
-    define(facade, 'getRegistration', function getRegistration() { return Promise.resolve(undefined); });
-    define(facade, 'getRegistrations', function getRegistrations() { return Promise.resolve([]); });
+    define(facade, 'register', function register() { return Promise.resolve(fakeReg); });
+    define(facade, 'getRegistration', function getRegistration() { return Promise.resolve(fakeReg); });
+    define(facade, 'getRegistrations', function getRegistrations() { return Promise.resolve([fakeReg]); });
     define(facade, 'startMessages', function startMessages() {});
     define(facade, 'addEventListener', function addEventListener() {});
     define(facade, 'removeEventListener', function removeEventListener() {});
+    // controller stays null — no SW actually controls the target realm.
     defineAccessor(facade, 'controller', () => null);
-    defineAccessor(facade, 'ready', () => blockedReady);
+    defineAccessor(facade, 'ready', () => readyPromise);
     defineAccessor(facade, 'oncontrollerchange', () => oncontrollerchange, v => { oncontrollerchange = typeof v === 'function' ? v : null; });
     const existing = (() => { try { return nav.serviceWorker; } catch { return null; } })();
     if (existing && existing !== facade) {
@@ -2836,7 +3045,7 @@
       define(existing, 'getRegistrations', facade.getRegistrations);
       define(existing, 'startMessages', facade.startMessages);
       defineAccessor(existing, 'controller', () => null);
-      defineAccessor(existing, 'ready', () => blockedReady);
+      defineAccessor(existing, 'ready', () => readyPromise);
       defineAccessor(existing, 'oncontrollerchange', () => oncontrollerchange, v => { oncontrollerchange = typeof v === 'function' ? v : null; });
     }
     serviceWorkerFacades.set(w, facade);

@@ -209,5 +209,13 @@
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
   const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
-  Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
+  // `configurable: true` so the page-realm runtime-prelude can DELETE the
+  // named property after capturing it into a closure-local binding.
+  // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`
+  // (the spec returns all own properties regardless of `enumerable`) and
+  // an anti-bot probe trivially fingerprints ZeroProxy. SW realm uses ZP
+  // directly (no membrane there), so the live mutability concern is only
+  // page realm — and runtime-prelude runs BEFORE any target script, so
+  // the delete happens before there is anyone to tamper with it.
+  Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: true, writable: false });
 })();

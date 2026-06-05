@@ -58,6 +58,7 @@ pub(crate) async fn fetch(
     method: &str,
     headers: &[(String, String)],
     body: &[u8],
+    armed_challenge_compat: bool,
 ) -> Result<JsValue, JsValue> {
     let parsed = parse_url(target_url).map_err(jserr_str)?;
     let relay_url = pick_relay_url().map_err(jserr_str)?;
@@ -97,7 +98,7 @@ pub(crate) async fn fetch(
                     delta_ms(t_req),
                     delta_ms(t0)
                 ));
-                return build_js_response(resp, target_url);
+                return build_js_response(resp, target_url, armed_challenge_compat);
             }
             Err(e) => {
                 crate::kernel::push_trace(&format!(
@@ -137,7 +138,7 @@ pub(crate) async fn fetch(
                 if http1::response_is_keepalive(&resp) {
                     pool::put(key, conn);
                 }
-                return build_js_response(resp, target_url);
+                return build_js_response(resp, target_url, armed_challenge_compat);
             }
             Err(e) => {
                 crate::kernel::push_trace(&format!(
@@ -188,7 +189,7 @@ pub(crate) async fn fetch(
                 delta_ms(t_req),
                 delta_ms(t0)
             ));
-            build_js_response(resp, target_url)
+            build_js_response(resp, target_url, armed_challenge_compat)
         }
         FreshConn::Http1(mut conn) => {
             let t_req = now_ms();
@@ -214,7 +215,7 @@ pub(crate) async fn fetch(
             if http1::response_is_keepalive(&resp) {
                 pool::put(key, conn);
             }
-            build_js_response(resp, target_url)
+            build_js_response(resp, target_url, armed_challenge_compat)
         }
     }
 }
@@ -444,7 +445,7 @@ fn host_header(u: &ParsedUrl) -> String {
 /// on the WebSocket and bridges each yamux stream through
 /// `bridgeTargetStream` (SOCKS5 → upstream). Step-14's intermediate
 /// `/zp/ws-tcp` (1 WS = 1 stream) was removed once yamux landed.
-fn pick_relay_url() -> Result<String, String> {
+pub(crate) fn pick_relay_url() -> Result<String, String> {
     let global = js_sys::global();
     let location = js_sys::Reflect::get(&global, &JsValue::from_str("location"))
         .map_err(|_| "SW_NOT_READY: no location".to_string())?;
@@ -466,7 +467,11 @@ fn pick_relay_url() -> Result<String, String> {
 /// Convert the buffered HTTP response into a web_sys::Response. Headers
 /// are appended (not set) so multi-valued headers like `Set-Cookie` and
 /// repeated `Link` survive.
-fn build_js_response(resp: HttpResponse, final_url: &str) -> Result<JsValue, JsValue> {
+fn build_js_response(
+    resp: HttpResponse,
+    final_url: &str,
+    armed_challenge_compat: bool,
+) -> Result<JsValue, JsValue> {
     crate::kernel::push_trace(&format!(
         "tx:resp-body url={} status={} body={}B ct={}",
         final_url,
@@ -507,6 +512,34 @@ fn build_js_response(resp: HttpResponse, final_url: &str) -> Result<JsValue, JsV
             joined.len()
         ));
         let _ = headers.append("X-ZP-Set-Cookie", &joined);
+    }
+    // C4-adjacent: two-signal challenge-compat marker. Emitted ONLY when the
+    // SW armed this tab (operator opt-in via `X-ZP-Arm-Challenge-Compat: 1`,
+    // captured in `kernel/mod.rs` before x-zp-* strip) AND the response
+    // classifies as a Cloudflare challenge document. The SW `addCSP` consumes
+    // and deletes the marker before the page sees it (B4 strip obligation).
+    // Mirrors `internal/headers/ApplyChallengeCompat` on the Go side via the
+    // shared `zp_shared::is_challenge_document` predicate.
+    if armed_challenge_compat {
+        let cf = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("cf-mitigated"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        // parse_url handles scheme + host extraction; on malformed URLs we
+        // simply skip the emission so we never panic.
+        let (host, path) = match parse_url(final_url) {
+            Ok(u) => (u.host, u.path),
+            Err(_) => (String::new(), String::new()),
+        };
+        if zp_shared::is_challenge_document(cf, &host, &path) {
+            crate::kernel::push_trace(&format!(
+                "tx:challenge-compat-mark url={} cf={} host={}",
+                final_url, cf, host
+            ));
+            let _ = headers.append("X-ZP-Challenge-Compat", "1");
+        }
     }
     let body_array = Uint8Array::new_with_length(resp.body.len() as u32);
     body_array.copy_from(&resp.body);

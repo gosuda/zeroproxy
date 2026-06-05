@@ -32,17 +32,21 @@ pub fn bundle_version() -> String {
 }
 
 /// Rewrite a JS source. Strict mode. Returns code or throws.
+fn parse_script_kind(kind: &str) -> Result<zp_rewriter::ScriptKind, JsError> {
+    match kind {
+        "classic" => Ok(zp_rewriter::ScriptKind::Classic),
+        "module" => Ok(zp_rewriter::ScriptKind::Module),
+        "event-handler" => Ok(zp_rewriter::ScriptKind::EventHandler),
+        "eval" => Ok(zp_rewriter::ScriptKind::Eval),
+        "function" => Ok(zp_rewriter::ScriptKind::Function),
+        "worker" => Ok(zp_rewriter::ScriptKind::Worker),
+        other => Err(JsError::new(&format!("unknown script kind: {other}"))),
+    }
+}
+
 #[wasm_bindgen(js_name = rewriteScript)]
 pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str) -> Result<String, JsError> {
-    let kind = match kind {
-        "classic" => zp_rewriter::ScriptKind::Classic,
-        "module" => zp_rewriter::ScriptKind::Module,
-        "event-handler" => zp_rewriter::ScriptKind::EventHandler,
-        "eval" => zp_rewriter::ScriptKind::Eval,
-        "function" => zp_rewriter::ScriptKind::Function,
-        "worker" => zp_rewriter::ScriptKind::Worker,
-        other => return Err(JsError::new(&format!("unknown script kind: {other}"))),
-    };
+    let kind = parse_script_kind(kind)?;
     let opts = zp_rewriter::RewriteOpts {
         kind,
         target_url: target_url.to_string(),
@@ -50,6 +54,96 @@ pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str) -> Result<S
     };
     zp_rewriter::rewrite_script(source, &opts)
         .map(|r| r.code)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Patch-mode emit (memory plan #3). Returns the patch list as a flat
+/// JSON string the caller can deserialise once and apply in-place over
+/// the original source buffer. Avoids the full re-emit cost on
+/// 90%-unchanged scripts.
+///
+/// Output schema:
+///   `{"patches":[{"start":<u32>,"end":<u32>,"replacement":"<str>"}],"len":<u32>}`
+///
+/// `len` is the original source byte length (lets the JS side allocate
+/// the exact output buffer up-front).
+#[wasm_bindgen(js_name = rewriteScriptPatches)]
+pub fn rewrite_script_patches_js(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+) -> Result<String, JsError> {
+    let kind = parse_script_kind(kind)?;
+    let opts = zp_rewriter::RewriteOpts {
+        kind,
+        target_url: target_url.to_string(),
+        strict: true,
+    };
+    // Use the patch-only API: skips the O(n) `apply_patches` +
+    // `strip_sourcemap_pragma` string reconstruction. The JS caller already
+    // owns the original source buffer and applies patches against it.
+    let result = zp_rewriter::rewrite_script_patches(source, &opts)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    // Hand-rolled JSON (no serde_json dependency drag). Replacement
+    // strings can contain quotes / backslashes / control chars, so we
+    // escape them per JSON spec.
+    let mut out = String::with_capacity(source.len() / 4 + 64);
+    out.push_str("{\"len\":");
+    out.push_str(&source.len().to_string());
+    out.push_str(",\"patches\":[");
+    for (i, p) in result.patches.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"start\":");
+        out.push_str(&p.start.to_string());
+        out.push_str(",\"end\":");
+        out.push_str(&p.end.to_string());
+        out.push_str(",\"replacement\":");
+        json_escape_into(&p.replacement, &mut out);
+        out.push('}');
+    }
+    out.push_str("]}");
+    Ok(out)
+}
+
+fn json_escape_into(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// D2 source-map composer: returns a Source Map v3 JSON document mapping
+/// the rewritten script back to the original source. The SW serves it at
+/// `/__zp/sourcemap?u=<targetUrl>&k=<kind>` so DevTools breakpoints set on
+/// the rewritten (`__zp_*`-wrapped) code land on the original identifiers.
+#[wasm_bindgen(js_name = composeSourceMap)]
+pub fn compose_source_map_js(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+) -> Result<String, JsError> {
+    let kind = parse_script_kind(kind)?;
+    let opts = zp_rewriter::RewriteOpts {
+        kind,
+        target_url: target_url.to_string(),
+        strict: true,
+    };
+    zp_rewriter::compose_source_map(source, &opts, target_url)
         .map_err(|e| JsError::new(&e.to_string()))
 }
 

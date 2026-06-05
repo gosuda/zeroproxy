@@ -20,6 +20,66 @@ const SUBMISSION_TTL_MS = 5 * 60 * 1000;
 let rewriterPromise = null;
 let bundlePromise = null;
 
+// C4: in-memory LRU cache for rewritten script bodies. Key invariant:
+// SHA-256(transformerVersion | kind | targetURL | sourceBytes). A version
+// bump on either rewriter pipeline invalidates every entry. Only
+// SUCCESSFUL rewrites are stored — failures fall through to the
+// fail-closed `blockSource()` so a transient parser bug never gets pinned.
+const REWRITE_CACHE_MAX_ENTRIES = 200;
+const REWRITE_CACHE_MAX_BYTES = 50 * 1024 * 1024;
+const rewriteCache = new Map();
+let rewriteCacheBytes = 0;
+let rewriteCacheVersion = '';
+
+function rewriteCacheTransformerVersion() {
+  if (rewriteCacheVersion) return rewriteCacheVersion;
+  try {
+    if (self.ZPBundle && self.ZPBundle.bundleVersion) {
+      rewriteCacheVersion = String(self.ZPBundle.bundleVersion || '');
+    }
+  } catch {}
+  return rewriteCacheVersion;
+}
+
+async function rewriteCacheKey(kind, targetUrl, source) {
+  const version = rewriteCacheTransformerVersion();
+  // Length-prefix every field so two distinct triples can't field-boundary collide.
+  const payload = `${version.length}:${version}|${String(kind).length}:${kind}|${String(targetUrl).length}:${targetUrl}|${source.length}:${source}`;
+  const bytes = new TextEncoder().encode(payload);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const view = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < view.length; i++) hex += view[i].toString(16).padStart(2, '0');
+  return hex;
+}
+
+function rewriteCacheGet(key) {
+  if (!rewriteCache.has(key)) return null;
+  const entry = rewriteCache.get(key);
+  rewriteCache.delete(key);
+  rewriteCache.set(key, entry);
+  return entry.code;
+}
+
+function rewriteCacheSet(key, code) {
+  if (typeof code !== 'string' || code.length === 0) return;
+  if (code.length > REWRITE_CACHE_MAX_BYTES) return;
+  if (rewriteCache.has(key)) {
+    const prev = rewriteCache.get(key);
+    rewriteCacheBytes -= prev.code.length;
+    rewriteCache.delete(key);
+  }
+  rewriteCache.set(key, { code });
+  rewriteCacheBytes += code.length;
+  while (rewriteCache.size > REWRITE_CACHE_MAX_ENTRIES || rewriteCacheBytes > REWRITE_CACHE_MAX_BYTES) {
+    const oldest = rewriteCache.keys().next().value;
+    if (oldest === undefined) break;
+    const ev = rewriteCache.get(oldest);
+    rewriteCache.delete(oldest);
+    rewriteCacheBytes -= ev.code.length;
+  }
+}
+
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
 self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initBundle().catch(() => {}); })()));
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
@@ -148,6 +208,13 @@ async function initBundle() {
       ready: true,
       bundleVersion: wbg.bundleVersion,
       rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(source, kind || 'classic', targetUrl || ''),
+      // Patch-mode emit: returns `{"len":N,"patches":[{start,end,replacement},…]}`
+      // as a JSON string. Caller applies patches over the original source it
+      // already holds — skips the O(n) full re-emit + cross-ABI string copy.
+      // Optional (export missing on older bundles → SW falls back to full path).
+      rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'
+        ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '')
+        : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
       buildCSP: (wsOrigin) => wbg.buildCSP(wsOrigin || ''),
       kernelVersion: wbg.kernelVersion,
@@ -244,7 +311,7 @@ function internalPath(path) {
   return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
-  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === '/zp/api/diag/trace';
+  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';
 }
 
 async function internalAsset(req, url) {
@@ -508,69 +575,33 @@ async function runtimeAPI(req, url, clientId) {
       // that probes for membrane traces and busy-loops when proxied. NTM
       // is left enabled (prior session note: blocking it broke GFP bid
       // tokens and removed more ad inventory than it fixed).
-      // NAVER warm-session V8 wedge. Bisect identified two scripts that
-      // tight-loop in V8 once NACT unlocks the heavy bundle variant:
+      // (NAVER pm.pstatic.net / ssl.pstatic.net SDK bundle blocks removed
+      // 2026-06-05 after the wedge root cause (`window.ZP` enumeration via
+      // getOwnPropertyNames) was fixed by runtime-prelude closure-capture +
+      // delete and the rewriter loop-cap rule landed. See the longer
+      // explanation block below and `.ai/trap-notebook/real-site-compat.md`
+      // 2026-06-05 entry.)
+      // NAVER warm-session V8 wedge — historical block list. The probe
+      // root cause (2026-06-05) is now understood: NAVER's anti-bot scripts
+      // enumerated `Object.getOwnPropertyNames(window)` and tripped on the
+      // `ZP` / `ZeroProxyRT` named properties (defineProperty with
+      // `enumerable: false` still appeared in getOwnPropertyNames per spec).
+      // runtime-prelude now captures both into closure-locals and deletes
+      // them, and the rewriter caps any literal `for(;;)` / `while(true)`
+      // / `while(1)` / `do while(true)` shape after 10 M iterations
+      // (defense-in-depth even for sites whose probe slipped past the
+      // fingerprint hide). With those two landed, the manual block list is
+      // no longer load-bearing — Edge real-browser verification (2026-06-05)
+      // showed NAVER renders the full page including the previously
+      // blocked bundles. Removing the block also lets GFP / NAC / Veta
+      // deliver ad inventory again ("기능적으로 완전한 가상 브라우징"
+      // strict-mode aim).
       //
-      //   1. `pm.pstatic.net/resources/js/search.*.js`
-      //      — search-bar autocomplete bundle. Contains an anti-bot probe
-      //        that detects the membrane and tight-loops. Blocking removes
-      //        the autocomplete dropdown but the page still renders, and
-      //        the user can still type + submit (the form action is set
-      //        elsewhere by main.js).
-      //
-      //   2. Ad SDKs on `ssl.pstatic.net` — Veta core, GFP display SDK, and
-      //      NAC synchronizer all contain the same shape of probe. They
-      //      load asynchronously so the wedge surfaces a few seconds after
-      //      first paint rather than blocking initial render.
-      //
-      // Every `pause` after navigation returns an empty `js_stack` with the
-      // renderer in native code, and minidumps show no JS frame on top —
-      // classic V8 tight-loop signature. The probes are reachable only on
-      // the warm path because NAVER's WAF gates the heavy bundle on a
-      // valid NACT cookie. Persisting NACT (the previous commit) is what
-      // exposes this — without it the lighter cold variant ships and these
-      // scripts never run.
-      //
-      // Long-term fix: rewriter detects the `for(;;)` / `while(1)` probe
-      // shape and emits a `break` after N iterations. For now we stub the
-      // scripts; the visible loss is autocomplete + ad inventory delivered
-      // by these specific SDKs (main.js's own NAVER ads still render).
-      // NAVER warm-session V8 wedge. Once NACT (persisted via the IDB
-      // cookie jar) unlocks the "trusted session" bundle path, every script
-      // NAVER ships under `pm.pstatic.net/resources/js/*.js` and the
-      // ad-SDKs under `ssl.pstatic.net/{tveta,melona}/...` contains an
-      // anti-bot probe that detects the membrane's Proxy traps and
-      // tight-loops in V8. Bisect was unstable across runs — search alone
-      // wedged in one run, polyfill+preload paired with search in another,
-      // and main.js once on its own — suggesting either probe code is
-      // shared across these bundles or there's a load-order race in the
-      // probe initialisation.
-      //
-      // Block the full NAVER bundle family on `pm.pstatic.net` (main,
-      // polyfill, preload, search) and the Veta / GFP / NAC ad SDKs on
-      // `ssl.pstatic.net`. The home page still renders via the inline
-      // EAGER-DATA blocks (13 keys → news-stand, ad-banner data, election
-      // data) and `nmain` initialiser. The cost is dynamic UI (the React
-      // app delivered in main.js for personalised tabs / news feed
-      // rotation, the search autocomplete dropdown, and ad slots).
-      //
-      // Long-term fix: rewriter detects the `for(;;)` / `while(1)` /
-      // recursive-set-immediate probe shapes and emits a `break` after N
-      // iterations, OR the membrane stops trapping on whichever access
-      // pattern the probes use as the detection signal (likely accessor
-      // descriptor checks on `Function.prototype.toString` / globals).
-      if (tu.host === 'pm.pstatic.net' && /\/resources\/js\/(main|polyfill|preload|search)\.[\w]+\.js$/.test(tu.pathname)) {
-        return new Response('/* ZP_NAVER_BUNDLE_BLOCKED — warm-session probe wedges V8 */',
-          { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
-      }
-      if (tu.host === 'ssl.pstatic.net' && (
-        tu.pathname.startsWith('/tveta/libs/glad/') ||
-        tu.pathname.startsWith('/melona/libs/gfp-nac-module/') ||
-        tu.pathname.startsWith('/tveta/libs/assets/')
-      )) {
-        return new Response('/* ZP_NAVER_AD_SDK_BLOCKED — anti-bot probe wedges V8 */',
-          { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
-      }
+      // If a future NAVER probe shape resurfaces a wedge, re-introduce
+      // a targeted block here AND file a trap-notebook entry naming the
+      // specific signal — the right long-term fix is to add a new
+      // hardening to runtime-prelude or zp-rewriter, not to grow this
+      // list silently.
     } catch {}
     // request 자체를 transportFetch 에 전달 → browser-set headers (Accept,
     // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
@@ -586,6 +617,35 @@ async function runtimeAPI(req, url, clientId) {
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
     return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId }), { targetUrl: target, kind: 'worker' });
+  }
+  if (url.pathname === ZP.apiPath('sourcemap')) {
+    // D2: serve the composed Source Map v3 JSON for a previously-rewritten
+    // script. DevTools requests this when the operator opens the script in
+    // the Sources panel; the URL is the `//# sourceMappingURL=…` we appended
+    // in rewriteScriptResponse. Cache-Control: no-store so a re-rewrite
+    // (transformer version bump, etc.) invalidates the cached map.
+    const target = url.searchParams.get('u') || '';
+    const kind = url.searchParams.get('k') || 'classic';
+    if (!target) return safeError('POLICY_BLOCKED', 400);
+    const ctx = contextFor(req, clientId);
+    const tab = ctx && tabs.get(ctx.tabId);
+    if (!tab) return safeError('SW_NOT_READY', 503);
+    try {
+      await initBundle();
+      if (!self.ZPBundle || !self.ZPBundle.ready || typeof self.ZPBundle.composeSourceMap !== 'function') {
+        return safeError('SW_NOT_READY', 503);
+      }
+      const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId });
+      if (!upstream || upstream.status >= 400) return safeError('TARGET_HTTP_FAILED', 502, target);
+      const source = await upstream.text();
+      const mapJson = self.ZPBundle.composeSourceMap(source, kind, target);
+      return new Response(mapJson, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' },
+      });
+    } catch (e) {
+      return safeError('REWRITE_FAILED', 502, target);
+    }
   }
   return safeError('POLICY_BLOCKED', 404);
 }
@@ -867,12 +927,51 @@ function shouldRewriteScript(req, resp) {
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
 }
+// Apply a patch envelope produced by `ZPBundle.rewriteScriptPatches` over the
+// original source. Patches are non-overlapping byte ranges (sorted by start
+// inside the Rust crate) — we walk them in order, splicing replacements
+// between untouched spans. Returns the rewritten source, or null when the
+// envelope is malformed (caller falls back to full re-emit).
+function applyScriptPatches(source, envelopeJson) {
+  if (typeof envelopeJson !== 'string' || envelopeJson.length === 0) return null;
+  let env;
+  try { env = JSON.parse(envelopeJson); } catch { return null; }
+  if (!env || !Array.isArray(env.patches)) return null;
+  const patches = env.patches;
+  // No patches → original source is already strict-safe (no dangerous
+  // identifiers / member accesses). Cheaper than re-encoding via OXC.
+  if (patches.length === 0) return source;
+  const out = [];
+  let cursor = 0;
+  for (let i = 0; i < patches.length; i++) {
+    const p = patches[i];
+    const start = p && p.start | 0;
+    const end = p && p.end | 0;
+    if (start < cursor || end < start || end > source.length) return null;
+    if (start > cursor) out.push(source.slice(cursor, start));
+    out.push(typeof p.replacement === 'string' ? p.replacement : '');
+    cursor = end;
+  }
+  if (cursor < source.length) out.push(source.slice(cursor));
+  return out.join('');
+}
+
 async function rewriteScriptResponse(resp, opt) {
   const h = scriptResponseHeaders(resp);
   let code = '';
+  let cacheKey = '';
   try {
     await initRewriter();
     const source = await resp.text();
+    // C4: cache check before invoking the OXC pipeline. Hash inputs that
+    // affect output: transformer version, script kind, target URL, source bytes.
+    try {
+      cacheKey = await rewriteCacheKey(opt.kind || 'classic', opt.targetUrl || '', source);
+      const cached = rewriteCacheGet(cacheKey);
+      if (cached !== null) {
+        return new Response(cached, { status: resp.status, statusText: resp.statusText, headers: h });
+      }
+    } catch { cacheKey = ''; }
     let out = null;
     try {
       out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
@@ -887,9 +986,27 @@ async function rewriteScriptResponse(resp, opt) {
       try {
         await initBundle();
         if (self.ZPBundle && self.ZPBundle.ready) {
-          const rustCode = self.ZPBundle.rewriteScript(source, opt.kind || 'classic', opt.targetUrl || '');
-          if (typeof rustCode === 'string' && rustCode.length > 0) {
-            code = rustCode;
+          // Prefer patch-mode emit: the Rust crate returns the patch list
+          // as a JSON envelope (~kB) instead of the full rewritten source
+          // (~MB on large scripts). Applying patches in JS over the buffer
+          // we already hold avoids both the OXC re-emit cost and the
+          // wasm-bindgen string-copy crossing.
+          const kind = opt.kind || 'classic';
+          const target = opt.targetUrl || '';
+          if (typeof self.ZPBundle.rewriteScriptPatches === 'function') {
+            try {
+              const envelope = self.ZPBundle.rewriteScriptPatches(source, kind, target);
+              const patched = applyScriptPatches(source, envelope);
+              if (typeof patched === 'string' && patched.length > 0) {
+                code = patched;
+              }
+            } catch { /* fall through to full re-emit */ }
+          }
+          if (!code) {
+            const rustCode = self.ZPBundle.rewriteScript(source, kind, target);
+            if (typeof rustCode === 'string' && rustCode.length > 0) {
+              code = rustCode;
+            }
           }
         }
       } catch (rustErr) { /* swallow; fall through to block */ }
@@ -899,6 +1016,28 @@ async function rewriteScriptResponse(resp, opt) {
     if (!code) {
       code = (self.ZPRewriter && self.ZPRewriter.blockSource) ? self.ZPRewriter.blockSource()
         : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
+    } else {
+      // D2: append a fresh sourceMappingURL pointing to the proxy-side
+      // composer. The Rust rewriter already stripped the original pragma
+      // (which described the un-rewritten source) so this is the only
+      // map DevTools will see. We DON'T inline a data: URL because
+      // (a) every page-load would pay the compose cost regardless of
+      // whether DevTools is open, and (b) the JSON is large enough that
+      // injecting it would bloat the rewritten body significantly.
+      // Only emit for `classic` / `module` kinds — `event-handler`,
+      // `eval`, `function` are synthesised wrappers without a fetchable
+      // origin URL, so a sourceMappingURL there would 404.
+      const kind = opt.kind || 'classic';
+      const target = opt.targetUrl || '';
+      if (target && (kind === 'classic' || kind === 'module' || kind === 'worker')) {
+        const mapURL = ZP.apiPath('sourcemap') + '?u=' + encodeURIComponent(target) + '&k=' + encodeURIComponent(kind);
+        code = code + '\n//# sourceMappingURL=' + mapURL + '\n';
+      }
+      if (cacheKey) {
+        // Cache only successful rewrites — never the fail-closed block stub,
+        // so a transient parser bug never gets pinned in the cache.
+        rewriteCacheSet(cacheKey, code);
+      }
     }
   } catch {
     code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
@@ -912,6 +1051,14 @@ async function transformDocumentResponse(resp, opt) {
   let html = '';
   try { html = await resp.text(); } catch { return resp; }
   let transformed = html;
+  // C2: malformed-HTML policy is FAIL-CLOSED → MALFORMED_HTML error page.
+  // The prior implementation fell open (ship raw HTML on lol_html error),
+  // which meant target inline scripts could execute UN-rewritten and the
+  // membrane / OXC pipeline would all be bypassed — the literal opposite
+  // of strict mode. Track success explicitly so we route to A5 instead of
+  // leaking the raw body.
+  let transformOk = false;
+  let transformFailure = '';
   try {
     await initBundle();
     if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.transformHtml === 'function') {
@@ -921,7 +1068,16 @@ async function transformDocumentResponse(resp, opt) {
       // We post-process stylesheet links below to fix the redirect-host
       // mismatch without making scripts initialise on the "real" host.
       const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
-      transformed = self.ZPBundle.transformHtml(html, targetUrl) || html;
+      // C2: separate "transform threw" (malformed HTML) from "transform
+      // returned empty". Both route to fail-closed because the alternative
+      // is shipping the un-rewritten body, which is a strict-mode escape.
+      const out = self.ZPBundle.transformHtml(html, targetUrl);
+      if (typeof out === 'string' && out.length > 0) {
+        transformed = out;
+        transformOk = true;
+      } else {
+        transformFailure = 'empty transform output';
+      }
       // Post-process stylesheet URLs only — repoint /foo.css that 404s at
       // the originally requested host (pay.naver.com) to the post-redirect
       // host (nid.naver.com). Scripts intentionally stay broken on the
@@ -947,10 +1103,18 @@ async function transformDocumentResponse(resp, opt) {
         } catch {}
       }
     }
-  } catch {
-    // Fail-open on transform error: ship the original HTML rather than the
-    // styled error page; the runtime-prelude still enforces containment.
-    transformed = html;
+  } catch (e) {
+    transformFailure = (e && (e.message || e.code)) || 'transform threw';
+  }
+  // C2 fail-closed: if the HTML transform pipeline produced no usable
+  // output, route to the A5 MALFORMED_HTML page instead of shipping the
+  // raw body. The prior fail-open behaviour bypassed every membrane
+  // invariant for any input lol_html refused to parse — the strict-mode
+  // escape vector the "탈출 없는 감옥" design forbids.
+  if (!transformOk) {
+    const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
+    void transformFailure; // reserved for diagnostics surfacing
+    return safeError('MALFORMED_HTML', 502, targetUrl);
   }
   // Prelude virtualURL stays at the originally requested URL — using the
   // post-redirect URL here triggers the NAVER-login script-completion hang
@@ -1188,19 +1352,41 @@ async function openRuntimeStream(event, msg, ok, fail) {
   // Step 13: Rust kernelStream (crates/zp-kernel via zp-bundle) only.
   try { await initBundle(); } catch { fail('SW_NOT_READY'); return; }
   if (typeof self.kernelStream !== 'function') { fail('SW_NOT_READY'); return; }
+  // C1: defense-in-depth — runtime prelude validates sub-protocol tokens
+  // before sending ZP_WS_OPEN, but a compromised page realm could bypass
+  // that. Re-validate so a malformed protocol header never reaches the
+  // upstream handshake (RFC 6455 §4.1).
+  const requestedProtocols = Array.isArray(msg.protocols) ? msg.protocols.slice() : [];
+  for (const p of requestedProtocols) {
+    if (typeof p !== 'string' || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(p)) {
+      fail('POLICY_BLOCKED');
+      return;
+    }
+  }
   let stream;
   try {
-    stream = await self.kernelStream({ url: msg.url, protocols: msg.protocols || [], tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
+    stream = await self.kernelStream({ url: msg.url, protocols: requestedProtocols, tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
   } catch (e) {
     fail(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED');
+    return;
+  }
+  // C1: server-selected sub-protocol must come from the offered list
+  // (RFC 6455 §4.2.2). Never propagate a non-offered protocol back to
+  // the page — matches native browser fail-the-connection.
+  const negotiated = String((stream && stream.protocol) || '');
+  if (negotiated && requestedProtocols.length > 0 && requestedProtocols.indexOf(negotiated) < 0) {
+    try { stream.close(); } catch {}
+    fail('WS_BLOCKED');
     return;
   }
   const channel = new MessageChannel();
   const id = ZP.randomId('s');
   streams.set(id, stream);
   channel.port1.onmessage = ev => { const m = ev.data || {}; if (m.type === 'send') stream.send(m.data); if (m.type === 'close') { stream.close(); streams.delete(id); } };
-  stream.setHandlers({ message: data => channel.port1.postMessage({ type: 'message', data }), close: () => { channel.port1.postMessage({ type: 'close' }); streams.delete(id); }, error: () => channel.port1.postMessage({ type: 'error' }) });
-  event.ports[0].postMessage({ ok: true, id, protocol: stream.protocol || '', port: channel.port2 }, [channel.port2]);
+  // C1: propagate upstream close code/reason if the kernel surfaces them
+  // (today the transport is a stub so the page sees default 1000/'').
+  stream.setHandlers({ message: data => channel.port1.postMessage({ type: 'message', data }), close: (code, reason) => { channel.port1.postMessage({ type: 'close', code: code || 1000, reason: reason || '' }); streams.delete(id); }, error: () => channel.port1.postMessage({ type: 'error' }) });
+  event.ports[0].postMessage({ ok: true, id, protocol: negotiated, port: channel.port2 }, [channel.port2]);
 }
 
 function runtimeTabForMessage(event, msg, fail) {
