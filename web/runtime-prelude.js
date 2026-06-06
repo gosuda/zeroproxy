@@ -3026,6 +3026,15 @@
         continue;
       }
       if (tag === 'link') enforceLinkPolicy(node);
+      // 2026-06-06 follow-up: navigation URL attribute rewrite. The
+      // server-side zp-htmltx pass handles the initial document, but
+      // every page-side HTML ingestion (innerHTML/outerHTML/
+      // insertAdjacentHTML/document.write/Range.createContextualFragment/
+      // DOMParser.parseFromString) routes through this walker — without
+      // this branch, NAVER's autocomplete widget (atcmp_*) and similar
+      // SDK-injected fragments leave raw target hrefs on the DOM,
+      // surfacing them to hover / middle-click / copy-link.
+      applyNavigationBackstop(node);
       if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc')) {
         Native.setAttribute.call(node, 'srcdoc', injectSrcdoc(Native.getAttribute.call(node, 'srcdoc') || ''));
       }

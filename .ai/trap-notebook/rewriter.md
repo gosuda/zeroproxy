@@ -106,15 +106,24 @@
 
 primary fix 만으로 **~93% leak 봉쇄**. backstop 의 추가 효과는 미미 (10→10) — backstop scan 시점에 잔존 10개 anchor 가 DOM 에 없거나 (hydration 미완료), 또는 setTimeout/idleCallback 보다 늦게 들어옴. Initial scan 은 SSR transform 결과의 `data-zp-target-url` 이 NAVER 에 의해 strip 됐을 때 `urlMeta` 복원 가드로 의미는 있음.
 
-**남은 ~7% (10 anchor)** — 모두 `help.naver.com` 도움말 widget 의 중복 anchor (검색 box 도움말 link). 우리 setter/setAttribute wrap + backstop scan 모두 우회. 가설:
-- (가) `cloneNode(true)` 로 template 복제 시 cloneNode wrap 없음 — attribute 복사가 native fast path 라 우리 setter 안 거침
-- (나) 페이지 안의 후속 `setInterval` 또는 long-running mutation 이 deferred scan 시점 후에 anchor 추가
-- (다) Shadow DOM 안 — querySelectorAll 미커버
+**남은 10 anchor 의 정확한 path 진단 결과 (follow-up commit)**: 모두 NAVER 검색 자동완성 widget (`.atcmp_*` / `.api_atcmp_wrap` / `#atcmp_recent` / `#atcmp_keyword`) 안의 `<a class="kwd_help">` / `<a class="link_dsc">` / `<a class="link_view">` / `<a class="btn_login">`. Shadow DOM 아님 (`inShadow: false`), main document 안 (`ownerDocument === document`, not iframe), SSR HTML 의 `<div style="display: none">` 영역에 박혀있음.
 
-**후속 PR**:
-1. `Node.prototype.cloneNode` wrap 검토 — clone 후 attribute scan
-2. periodic scan (5초 간격, requestIdleCallback) 추가 — 페이지 lifetime 동안 잔존 raw 복원
-3. Shadow DOM 안의 anchor 도 scan 대상 — `composedPath` / shadowRoot 순회
+**진짜 root cause**: `tmp.innerHTML = '<a href="https://x.com">a</a>'` 호출 후 `tmp.querySelector('a').getAttribute('href')` 가 `https://x.com` 그대로 — 즉 [runtime-prelude.js#L3006 `transformHTML`](../../web/runtime-prelude.js#L3006) (page-side, prelude 가 patchHTMLSetter / insertAdjacentHTML / document.write / Range.createContextualFragment / DOMParser.parseFromString 모두에서 호출하는 단일 entry) 가 **wbg.transformHtml (zp-bundle WASM) 호출 안 함**. 대신 JS DOM walker 로 element 별 직접 처리 — base/link/iframe srcdoc/script/style 만 분기 — **anchor/area/form/input/button URL attribute 분기 없음**. 따라서 NAVER autocomplete SDK 가 widget mount 시 `innerHTML = ...` 호출해도 anchor 변환 skip.
+
+**Fix** ([web/runtime-prelude.js transformHTML walker](../../web/runtime-prelude.js)): walker loop 안 `enforceLinkPolicy(node)` 직후에 `applyNavigationBackstop(node)` 호출 — 1줄 추가로 page-side HTML 수집 모든 path 가 navigation rewrite 거침. backstop helper 가 이미 inert scheme / fragment / proxy URL skip 다 처리하므로 회귀 안전.
+
+**최종 검증** (NAVER 메인, taskweaver):
+
+| | fix 전 | primary fix | + walker fix |
+|---|---|---|---|
+| total anchor | 346 | 140 | 124 |
+| proxy `?via=` | 0 | 111 | 105 |
+| fragment | 18 | 19 | 19 |
+| **raw external (leak)** | **143** | **10** | **0** ✓ |
+
+**100% leak 봉쇄** — anchor / area href / form action / formaction 모든 escape vector 가 page-side 의 모든 DOM ingestion path 에서 cover. 사용자가 본 "프록시인데 네이버 주소가 그대로 뜨는" 의 모든 surface 차단.
+
+**Lesson**: page-side `transformHTML` 가 server-side 와 **이름은 같지만 구현체 다름** — server-side 는 wbg/Rust zp-htmltx 호출, page-side 는 JS DOM walker 자체 구현. 이름 동일 + 의미 다름 → silent skip 위험. **두 구현체의 element 분기를 1-1 비교하는 invariant test** 가 필요 (static-policy 에 추가 후속).
 
 **Lessons**:
 
