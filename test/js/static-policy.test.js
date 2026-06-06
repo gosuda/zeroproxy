@@ -794,6 +794,31 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
     /codec::response_keepalive\(resp\.status, &resp\.headers\)/,
     'response_is_keepalive must delegate to the codec',
   );
+  // Chunked decoder: the chunk-size line parse used to live inline as a
+  // hand-rolled hex + chunk-ext walk. The codec now owns the RFC 9112
+  // §7.1.1 edge cases (whitespace tolerance, overflow rejection,
+  // non-hex rejection, terminal-zero detection) so they carry unit
+  // tests; the async loop just feeds bytes in.
+  assert.match(
+    http1,
+    /codec::parse_chunk_size_line\(&size_line\)/,
+    'read_chunked must call the codec parse_chunk_size_line helper',
+  );
+  assert.match(
+    http1,
+    /codec::CHUNK_TERMINATOR/,
+    'post-chunk CRLF check must use the codec constant (no inline literal)',
+  );
+  assert.equal(
+    /size_line\.split\(';'\)/.test(http1),
+    false,
+    'inline chunk-ext split must be removed (lives in zp-transport-codec)',
+  );
+  assert.equal(
+    /u64::from_str_radix\(size_hex, 16\)/.test(http1),
+    false,
+    'inline hex chunk-size parse must move to zp-transport-codec',
+  );
   assert.equal(
     http1.includes('fn is_token'),
     false,

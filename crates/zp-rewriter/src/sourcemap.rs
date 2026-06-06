@@ -307,12 +307,15 @@ pub fn compose_rewrite_map(
         );
         let _ = needs_line_separator;
     }
+    // Tail walk only needs to advance `src_offset` so we can pin a
+    // segment at column 0 of each new generated line; `gen_offset` was
+    // already consumed at the slice into `tail_gen` above, so further
+    // ticking it would be a dead store (compiler warning).
     for c in tail_gen.chars() {
         if c == '\n' {
             mappings.push(';');
             current_gen_line += 1;
             prev_gen_col = 0;
-            gen_offset += 1;
             src_offset += 1;
             let (sline, scol) = offset_to_line_col(source, src_offset);
             emit_segment(
@@ -327,9 +330,7 @@ pub fn compose_rewrite_map(
                 scol,
             );
         } else {
-            let len = c.len_utf8();
-            gen_offset += len;
-            src_offset += len;
+            src_offset += c.len_utf8();
         }
     }
     let _ = current_gen_line;

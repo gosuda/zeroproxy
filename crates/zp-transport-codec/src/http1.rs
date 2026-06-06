@@ -230,6 +230,59 @@ pub fn no_body_status(status: u16) -> bool {
     matches!(status, 100..=199 | 204 | 304)
 }
 
+// --- RFC 9112 §7.1 chunked-transfer helpers --------------------------------
+
+/// Parsed `chunk-size [ ";" chunk-ext ]` line per RFC 9112 §7.1.1. The
+/// extension is dropped (we don't act on any chunk-ext today). A size of
+/// zero marks the terminal chunk, after which trailers (if any) and the
+/// final empty line follow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkSize {
+    /// Decoded chunk length in bytes. RFC 9112 §7.1 says hex value; we
+    /// also reject non-hex digits and empty size fields.
+    pub size: u64,
+    /// True when `size == 0` — caller now reads trailers + final CRLF.
+    pub is_terminal: bool,
+}
+
+/// Parse one chunk-size line (the CRLF must already be stripped). Accepts
+/// `"5"`, `"5;ignored"`, `"a3   ;name=value"`. Rejects empty / non-hex.
+pub fn parse_chunk_size_line(line: &str) -> io::Result<ChunkSize> {
+    // Take everything up to the first `;` and trim ASCII whitespace.
+    let head = match line.split(';').next() {
+        Some(s) => s.trim(),
+        None => "",
+    };
+    if head.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("http1: invalid chunk-size line {line:?}"),
+        ));
+    }
+    if !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("http1: invalid chunk-size line {line:?}"),
+        ));
+    }
+    let size = u64::from_str_radix(head, 16)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("http1: chunk size: {e}")))?;
+    Ok(ChunkSize {
+        size,
+        is_terminal: size == 0,
+    })
+}
+
+/// Per-chunk trailer (CRLF) that must follow the chunk body bytes
+/// (RFC 9112 §7.1). Hard-coded so the async wrapper doesn't accidentally
+/// drift to a single-LF terminator.
+pub const CHUNK_TERMINATOR: &[u8] = b"\r\n";
+
+/// Caller-visible cap on the chunk-size line itself. RFC 9112 §7.1 has
+/// no explicit limit but a sane upstream stays well under 1 KB (size +
+/// extensions). Anything longer is treated as a chunk-line DoS attempt.
+pub const MAX_CHUNK_LINE: usize = MAX_HEAD_BYTES;
+
 /// Predicate matching the wasm wrapper's `response_is_keepalive`: an
 /// HTTP/1.1 connection survives the response only when (a) no
 /// `Connection: close` was sent, AND (b) the body was bounded
@@ -523,6 +576,87 @@ mod tests {
         assert!(!is_token("Bad Name"));
         assert!(!is_token("X\tName"));
         assert!(!is_token("X\r"));
+    }
+
+    // -- chunked decoder helpers ---
+
+    #[test]
+    fn chunk_size_plain_hex() {
+        let cs = parse_chunk_size_line("5").expect("ok");
+        assert_eq!(cs.size, 5);
+        assert!(!cs.is_terminal);
+    }
+
+    #[test]
+    fn chunk_size_terminal_zero() {
+        let cs = parse_chunk_size_line("0").expect("ok");
+        assert_eq!(cs.size, 0);
+        assert!(cs.is_terminal, "size 0 must mark terminal chunk");
+    }
+
+    #[test]
+    fn chunk_size_uppercase_hex() {
+        let cs = parse_chunk_size_line("A3").expect("ok");
+        assert_eq!(cs.size, 0xa3);
+    }
+
+    #[test]
+    fn chunk_size_extension_dropped() {
+        // RFC 9112 §7.1.1 chunk-ext is parsed but not acted on. We don't
+        // even validate its grammar — every byte after the first `;` is
+        // discarded.
+        let cs = parse_chunk_size_line("5;name=value").expect("ok");
+        assert_eq!(cs.size, 5);
+        let cs = parse_chunk_size_line("a3;ignored=stuff;more=bits").expect("ok");
+        assert_eq!(cs.size, 0xa3);
+    }
+
+    #[test]
+    fn chunk_size_trims_whitespace_before_semicolon() {
+        let cs = parse_chunk_size_line("a3   ;name=value").expect("ok");
+        assert_eq!(cs.size, 0xa3);
+    }
+
+    #[test]
+    fn chunk_size_empty_rejected() {
+        let err = parse_chunk_size_line("").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn chunk_size_only_extension_rejected() {
+        // ";foo" → empty size field
+        let err = parse_chunk_size_line(";foo").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn chunk_size_non_hex_rejected() {
+        for bad in ["xyz", "5g", "0x10"] {
+            let err = parse_chunk_size_line(bad).expect_err("must fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "input {bad:?}");
+        }
+    }
+
+    #[test]
+    fn chunk_size_leading_or_trailing_whitespace_accepted() {
+        // Parser does a full trim() before hex validation, matching how
+        // tolerant real upstreams are with the chunk-size line.
+        assert_eq!(parse_chunk_size_line(" 5").unwrap().size, 5);
+        assert_eq!(parse_chunk_size_line("5 ").unwrap().size, 5);
+        assert_eq!(parse_chunk_size_line("  a3  ").unwrap().size, 0xa3);
+    }
+
+    #[test]
+    fn chunk_size_overflow_rejected() {
+        // 17 hex digits → > u64::MAX, parse fails.
+        let err = parse_chunk_size_line("ffffffffffffffff0").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn chunk_terminator_is_crlf() {
+        assert_eq!(CHUNK_TERMINATOR, b"\r\n");
     }
 
     #[test]

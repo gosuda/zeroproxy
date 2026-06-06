@@ -332,23 +332,13 @@ where
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(out),
             Err(e) => return Err(e),
         };
-        let size_hex = match size_line.split(';').next() {
-            Some(s) => s.trim(),
-            None => "",
-        };
-        if size_hex.is_empty() || !size_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("http1: invalid chunk-size line {size_line:?}"),
-            ));
-        }
-        let chunk_size = u64::from_str_radix(size_hex, 16).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("http1: chunk size: {e}"),
-            )
-        })?;
-        if chunk_size == 0 {
+        // Hex parsing + chunk-ext drop lives in zp-transport-codec so the
+        // RFC 9112 §7.1.1 edge cases (whitespace tolerance, overflow,
+        // non-hex rejection) carry host-side unit tests instead of being
+        // wired into this async loop.
+        let cs = codec::parse_chunk_size_line(&size_line)?;
+        let chunk_size = cs.size;
+        if cs.is_terminal {
             // Trailers (and one final CRLF) follow. Consume until CRLFCRLF
             // OR a bare CRLF if no trailers were sent. EOF here is benign:
             // the trailer CRLF was the last byte the upstream owed us.
@@ -375,9 +365,9 @@ where
         // Each chunk is terminated by CRLF; consume it. Same tolerance: EOF
         // here means the trailing CRLF was lost to the close, not a parser
         // error worth propagating.
-        match read_exact_n(stream, prefix, &mut tmp, 2).await {
+        match read_exact_n(stream, prefix, &mut tmp, codec::CHUNK_TERMINATOR.len()).await {
             Ok(crlf) => {
-                if &crlf[..] != b"\r\n" {
+                if &crlf[..] != codec::CHUNK_TERMINATOR {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "http1: missing CRLF after chunk data",
