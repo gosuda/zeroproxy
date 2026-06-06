@@ -148,6 +148,17 @@ async function initBundle() {
         ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '')
         : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
+      // D2: unchained composer (rewriter_map only). Required by
+      // /zp/api/sourcemap when no upstream `.map` is present.
+      composeSourceMap: (source, kind, targetUrl) =>
+        wbg.composeSourceMap(source, kind || 'classic', targetUrl || ''),
+      // D2 follow-on: chained composer (rewriter_map ∘ original_map).
+      // Optional on older bundles; the SW falls back to the unchained
+      // composer when missing or when no upstream map exists.
+      composeSourceMapChained: typeof wbg.composeSourceMapChained === 'function'
+        ? (source, kind, targetUrl, originalMapJson) =>
+            wbg.composeSourceMapChained(source, kind || 'classic', targetUrl || '', originalMapJson || '')
+        : null,
       buildCSP: (wsOrigin) => wbg.buildCSP(wsOrigin || ''),
       kernelVersion: wbg.kernelVersion,
       kernelInit: wbg.kernelInit,
@@ -570,7 +581,16 @@ async function runtimeAPI(req, url, clientId) {
       const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId });
       if (!upstream || upstream.status >= 400) return safeError('TARGET_HTTP_FAILED', 502, target);
       const source = await upstream.text();
-      const mapJson = self.ZPBundle.composeSourceMap(source, kind, target);
+      // D2 follow-on: chain with the target site's *original* `.map`
+      // when one is referenced. DevTools then walks straight to
+      // pre-bundle TypeScript / pre-minify source instead of stopping
+      // at the bundled .js. Best-effort — if the upstream map can't be
+      // fetched or is malformed, the chained composer falls back to
+      // the unchained map (never breaks DevTools).
+      const originalMapJson = await fetchOriginalSourceMap(source, target, tab).catch(() => '');
+      const mapJson = originalMapJson && typeof self.ZPBundle.composeSourceMapChained === 'function'
+        ? self.ZPBundle.composeSourceMapChained(source, kind, target, originalMapJson)
+        : self.ZPBundle.composeSourceMap(source, kind, target);
       return new Response(mapJson, {
         status: 200,
         headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' },
@@ -580,6 +600,49 @@ async function runtimeAPI(req, url, clientId) {
     }
   }
   return safeError('POLICY_BLOCKED', 404);
+}
+
+// D2 follow-on: locate the target site's original sourceMappingURL
+// pragma (RFC: `//# sourceMappingURL=…` or legacy `//@`), resolve it
+// against the script URL, and fetch the JSON through the transport so
+// the composer can chain `rewriter_map ∘ original_map`. Returns the
+// raw map JSON, or `''` when no pragma / fetch failure / non-OK status
+// / data URI parse failure. The composer's chained-mode treats `''`
+// as "no chain, use the unchained map".
+async function fetchOriginalSourceMap(source, target, tab) {
+  // Last pragma wins per Source Map v3 §A.3. Tolerate `//#` and
+  // legacy `//@` and arbitrary whitespace after the marker.
+  const re = /\/\/[#@]\s*sourceMappingURL=([^\s'"]+)/g;
+  let m, last = null;
+  while ((m = re.exec(source))) last = m[1];
+  if (!last) return '';
+  // Inline data URI (typical for dev builds).
+  if (last.startsWith('data:')) {
+    try {
+      const comma = last.indexOf(',');
+      if (comma < 0) return '';
+      const meta = last.slice(5, comma);
+      const payload = last.slice(comma + 1);
+      const isBase64 = /;\s*base64\b/i.test(meta);
+      const decoded = isBase64 ? atob(payload) : decodeURIComponent(payload);
+      // Reject obviously non-JSON to avoid passing garbage to the parser.
+      if (!decoded.trimStart().startsWith('{')) return '';
+      return decoded;
+    } catch { return ''; }
+  }
+  // Resolve against the script URL.
+  let absUrl;
+  try { absUrl = new URL(last, target).toString(); } catch { return ''; }
+  try {
+    const resp = await transportFetch(absUrl, {
+      method: 'GET',
+      headers: [['Accept', 'application/json,*/*']],
+      tab,
+      entryId: tab.activeEntryId,
+    });
+    if (!resp || resp.status >= 400) return '';
+    return await resp.text();
+  } catch { return ''; }
 }
 
 async function transportFetch(targetUrl, opt) {

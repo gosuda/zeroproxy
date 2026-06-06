@@ -19,6 +19,11 @@ oxc_codegen = "0.133"
 oxc_span = "0.133"
 oxc_str = "0.133"
 oxc_syntax = "0.133"
+# D2 follow-on: parse the target site's original `.map` so we can
+# emit `rewriter_map ∘ original_map` and DevTools resolves back to
+# pre-bundler TypeScript / pre-minify sources instead of stopping at
+# the bundled .js. Pure-Rust, wasm32-clean.
+sourcemap = { version = "9", default-features = false }
 
 [dev-dependencies]
 serde_json = { workspace = true }

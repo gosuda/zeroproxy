@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use zp_shared::ErrorCode;
 
 pub mod sourcemap;
-pub use sourcemap::compose_rewrite_map;
+pub use sourcemap::{chain_with_original_map, compose_rewrite_map};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptKind {
@@ -219,6 +219,26 @@ pub fn compose_source_map(
         &result.patches,
         source_url,
     ))
+}
+
+/// Same as `compose_source_map` but additionally composes the result
+/// with the target site's original `.map` (the one the bundler emitted
+/// alongside the source). The chained map points DevTools directly at
+/// the pre-bundle TypeScript / pre-minify origin instead of stopping at
+/// the bundled `.js`. When `original_map_json` is empty or malformed,
+/// the function silently falls back to the unchained map — a bad
+/// upstream `.map` must never break DevTools entirely.
+pub fn compose_source_map_chained(
+    source: &str,
+    opts: &RewriteOpts,
+    source_url: &str,
+    original_map_json: &str,
+) -> Result<String, RewriteError> {
+    let zp_map = compose_source_map(source, opts, source_url)?;
+    if original_map_json.is_empty() {
+        return Ok(zp_map);
+    }
+    Ok(chain_with_original_map(&zp_map, original_map_json))
 }
 
 /// Rewrite a JavaScript source string per the strict-mode policy.

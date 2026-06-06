@@ -347,6 +347,81 @@ pub fn compose_rewrite_map(
     out
 }
 
+// ---------------------------------------------------------------------------
+// D2 follow-on: chain the rewriter's map with the target site's *original*
+// map (the `.map` file the bundler emitted alongside `bundled.js`). DevTools
+// then resolves rewritten → typescript-source directly, instead of stopping
+// at the bundled .js. Best-effort: any malformed input falls through to the
+// unchained map so DevTools still gets *something*.
+// ---------------------------------------------------------------------------
+
+/// Compose `rewriter_map ∘ original_map` and return the JSON for the
+/// composed map. When `original_map_json` is malformed / missing
+/// required fields, returns `zp_map_json` verbatim — never break the
+/// DevTools experience just because an upstream `.map` was bad.
+pub fn chain_with_original_map(zp_map_json: &str, original_map_json: &str) -> String {
+    match chain_with_original_map_impl(zp_map_json, original_map_json) {
+        Ok(json) => json,
+        Err(_) => zp_map_json.to_string(),
+    }
+}
+
+fn chain_with_original_map_impl(
+    zp_map_json: &str,
+    original_map_json: &str,
+) -> Result<String, sourcemap::Error> {
+    use sourcemap::{SourceMap, SourceMapBuilder};
+    let zp_map = SourceMap::from_slice(zp_map_json.as_bytes())?;
+    let orig_map = SourceMap::from_slice(original_map_json.as_bytes())?;
+
+    // Pre-add every original source so source IDs in `add_raw` are
+    // stable. We re-add through the builder API because there's no
+    // direct "clone sources" entrypoint.
+    let mut builder = SourceMapBuilder::new(zp_map.get_file());
+    let mut orig_src_remap = Vec::with_capacity(orig_map.get_source_count() as usize);
+    for i in 0..orig_map.get_source_count() {
+        let src = orig_map.get_source(i).unwrap_or("");
+        let new_id = builder.add_source(src);
+        if let Some(content) = orig_map.get_source_contents(i) {
+            builder.set_source_contents(new_id, Some(content));
+        }
+        orig_src_remap.push(new_id);
+    }
+
+    // For each token in zp_map, look up its src position in orig_map.
+    // If the original map covers that point, emit a chained token; if
+    // not, drop this mapping (Source Map v3 §A.5 interpolation falls
+    // back to the previous neighbour — usually one line above).
+    for tok in zp_map.tokens() {
+        if let Some(orig_tok) = orig_map.lookup_token(tok.get_src_line(), tok.get_src_col()) {
+            let orig_src = orig_tok.get_src_id();
+            let new_src_id =
+                if orig_src != !0 && (orig_src as usize) < orig_src_remap.len() {
+                    Some(orig_src_remap[orig_src as usize])
+                } else {
+                    None
+                };
+            builder.add_raw(
+                tok.get_dst_line(),
+                tok.get_dst_col(),
+                orig_tok.get_src_line(),
+                orig_tok.get_src_col(),
+                new_src_id,
+                None,
+                false,
+            );
+        }
+    }
+
+    let sm = builder.into_sourcemap();
+    let mut out = Vec::new();
+    sm.to_writer(&mut out)?;
+    Ok(String::from_utf8(out).unwrap_or_else(|e| {
+        // sourcemap crate always emits UTF-8; this branch is defensive.
+        String::from_utf8_lossy(&e.into_bytes()).into_owned()
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +519,91 @@ mod tests {
         assert_eq!(offset_to_line_col(src, 4), (1, 0));
         assert_eq!(offset_to_line_col(src, 8), (2, 0));
         assert_eq!(offset_to_line_col(src, 10), (2, 2));
+    }
+
+    // ---- D2 chaining ----
+
+    #[test]
+    fn chain_with_original_map_redirects_to_typescript_source() {
+        // Scenario: target site shipped `bundled.js` compiled from
+        // `original.ts` with a sibling `bundled.js.map`. We rewrote the
+        // bundled.js into rewritten and emitted a zp-map. After chaining,
+        // a token in the rewritten output must resolve back to a position
+        // in `original.ts`, not `bundled.js`.
+        //
+        // Layout of the original.ts → bundled.js map:
+        //   sources = ["original.ts"]
+        //   sourcesContent = ["const url = location.href;\nconsole.log(url);"]
+        //   Bundled.js line 0 col 6  (`const url`) ← original.ts line 0 col 6
+        //   Bundled.js line 1 col 12 (`console.log`) ← original.ts line 1 col 0
+        //
+        // We craft the original map directly so the test stays
+        // deterministic without invoking a real TS compiler.
+        let mut orig = sourcemap::SourceMapBuilder::new(Some("bundled.js"));
+        let src = orig.add_source("original.ts");
+        orig.set_source_contents(
+            src,
+            Some("const url = location.href;\nconsole.log(url);"),
+        );
+        // (dst_line, dst_col) -> (src_line, src_col)
+        orig.add_raw(0, 6, 0, 6, Some(src), None, false);
+        orig.add_raw(1, 0, 1, 0, Some(src), None, false);
+        let mut orig_json = Vec::new();
+        orig.into_sourcemap().to_writer(&mut orig_json).unwrap();
+        let orig_json = String::from_utf8(orig_json).unwrap();
+
+        // The zp_map's source is `bundled.js` (the SW fetched it as the
+        // "original" relative to the rewrite). One token that points
+        // into bundled.js line 0 col 6 — the place orig_map says is
+        // const-url in original.ts.
+        let mut zp = sourcemap::SourceMapBuilder::new(Some("rewritten.js"));
+        let zp_src = zp.add_source("bundled.js");
+        zp.set_source_contents(zp_src, Some("const url = __zp_get(globalThis,'location').href;\nconsole.log(url);"));
+        zp.add_raw(0, 0, 0, 0, Some(zp_src), None, false);
+        zp.add_raw(0, 12, 0, 6, Some(zp_src), None, false);
+        let mut zp_json = Vec::new();
+        zp.into_sourcemap().to_writer(&mut zp_json).unwrap();
+        let zp_json = String::from_utf8(zp_json).unwrap();
+
+        // Compose: rewritten.js → original.ts directly.
+        let chained = chain_with_original_map(&zp_json, &orig_json);
+        let chained_map = sourcemap::SourceMap::from_slice(chained.as_bytes()).unwrap();
+
+        // Sources list now contains original.ts.
+        let sources: Vec<&str> = (0..chained_map.get_source_count())
+            .map(|i| chained_map.get_source(i).unwrap_or(""))
+            .collect();
+        assert!(sources.contains(&"original.ts"), "chained map must point at original.ts, got {sources:?}");
+
+        // At least one token in the chained map must resolve to
+        // (line 0, col 6) of original.ts — the const-url site.
+        let tokens: Vec<_> = chained_map.tokens().collect();
+        assert!(!tokens.is_empty(), "chained map must carry tokens");
+        let mapped = tokens.iter().find(|t| {
+            t.get_source() == Some("original.ts")
+                && t.get_src_line() == 0
+                && t.get_src_col() == 6
+        });
+        assert!(
+            mapped.is_some(),
+            "expected at least one token resolving to original.ts:(0,6), got tokens: {:?}",
+            tokens.iter().map(|t| (t.get_source(), t.get_src_line(), t.get_src_col())).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn chain_with_malformed_original_returns_zp_map_verbatim() {
+        // Best-effort guarantee: an invalid upstream `.map` must NOT
+        // break DevTools. Return the rewriter map verbatim.
+        let zp_json = compose_rewrite_map("a", "a", &[], "x.js");
+        let chained = chain_with_original_map(&zp_json, "not a sourcemap");
+        assert_eq!(chained, zp_json, "fallback must be byte-identical to the zp map");
+    }
+
+    #[test]
+    fn chain_with_empty_original_map_returns_zp_map_verbatim() {
+        let zp_json = compose_rewrite_map("a", "a", &[], "x.js");
+        let chained = chain_with_original_map(&zp_json, "");
+        assert_eq!(chained, zp_json);
     }
 }

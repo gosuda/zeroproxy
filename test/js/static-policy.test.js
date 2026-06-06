@@ -652,7 +652,7 @@ test('D2: sourcemap composer + SW /zp/api/sourcemap route are wired', () => {
   // Re-export from lib so external crates can call it.
   const lib = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
   assert.match(lib, /pub mod sourcemap/);
-  assert.match(lib, /pub use sourcemap::compose_rewrite_map/);
+  assert.match(lib, /pub use sourcemap::\{chain_with_original_map, compose_rewrite_map\}/);
   assert.match(lib, /pub fn compose_source_map/);
 
   // WASM bundle must expose composeSourceMap.
@@ -834,6 +834,88 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
   const rootCargo = fs.readFileSync('Cargo.toml', 'utf8');
   assert.match(rootCargo, /"crates\/zp-transport-codec"/);
   assert.match(rootCargo, /zp-transport-codec = \{ path = "crates\/zp-transport-codec" \}/);
+});
+
+test('D2 follow-on: sourcemap chain (rewriter_map ∘ original_map)', () => {
+  // The original D2 composer mapped rewritten → bundled.js. Sites that
+  // ship TypeScript via a bundler also publish a `bundled.js.map`; the
+  // chained composer walks the upstream map so DevTools resolves
+  // rewritten → original.ts in one hop. Best-effort — when the upstream
+  // map is missing / malformed, the chained path silently falls back
+  // to the unchained composer.
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const bundleLib = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
+  const rewriterLib = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
+
+  // WASM export must be present.
+  assert.match(
+    bundleLib,
+    /#\[wasm_bindgen\(js_name = composeSourceMapChained\)\]/,
+    'composeSourceMapChained WASM export must exist',
+  );
+  assert.match(
+    bundleLib,
+    /zp_rewriter::compose_source_map_chained\(source, &opts, target_url, original_map_json\)/,
+    'export must call zp_rewriter::compose_source_map_chained with the wasm-passed args',
+  );
+  // Rust public API + re-export from the crate root.
+  assert.match(
+    rewriterLib,
+    /pub use sourcemap::\{chain_with_original_map, compose_rewrite_map\}/,
+    'zp-rewriter must re-export chain_with_original_map',
+  );
+  assert.match(
+    rewriterLib,
+    /pub fn compose_source_map_chained\(/,
+    'compose_source_map_chained must be the public entry on zp-rewriter',
+  );
+  // SW: composeSourceMap (unchained) MUST be on the ZPBundle frozen
+  // object. The previous build referenced it without defining it — the
+  // /zp/api/sourcemap route always 503'd. Pin so a future rename or
+  // accidental removal can't silently re-introduce the regression.
+  assert.match(
+    sw,
+    /composeSourceMap: \(source, kind, targetUrl\) =>\s*wbg\.composeSourceMap\(/,
+    'ZPBundle.composeSourceMap (unchained) must be defined',
+  );
+  // SW: composeSourceMapChained is optional (older bundles miss it);
+  // when present, must be wired to wbg.composeSourceMapChained.
+  assert.match(
+    sw,
+    /composeSourceMapChained: typeof wbg\.composeSourceMapChained === 'function'/,
+    'ZPBundle.composeSourceMapChained must feature-detect',
+  );
+  // SW route must call fetchOriginalSourceMap + prefer the chained
+  // composer when an upstream map is available.
+  assert.match(
+    sw,
+    /async function fetchOriginalSourceMap\(source, target, tab\)/,
+    'fetchOriginalSourceMap helper must exist',
+  );
+  assert.match(
+    sw,
+    /const originalMapJson = await fetchOriginalSourceMap\(source, target, tab\)\.catch\(\(\) => ''\)/,
+    'sourcemap route must call fetchOriginalSourceMap before composing',
+  );
+  assert.match(
+    sw,
+    /const mapJson = originalMapJson && typeof self\.ZPBundle\.composeSourceMapChained === 'function'/,
+    'sourcemap route must prefer the chained composer when an upstream map exists',
+  );
+  // Pragma detection: tolerate both `//#` and legacy `//@` and pick the
+  // last pragma per Source Map v3 §A.3 (last-wins).
+  assert.match(
+    sw,
+    /\/\\\/\\\/\[#@\]\\s\*sourceMappingURL=/,
+    'fetchOriginalSourceMap regex must accept //# and //@ markers',
+  );
+  // data: URI parse must reject non-JSON payloads (e.g. binary blobs)
+  // so the chained composer doesn't choke.
+  assert.match(
+    sw,
+    /if \(!decoded\.trimStart\(\)\.startsWith\('\{'\)\) return ''/,
+    'data: URI sourceMappingURL must reject non-JSON payloads',
+  );
 });
 
 test('fingerprint hardening: navigator.webdriver + window.chrome facade', () => {

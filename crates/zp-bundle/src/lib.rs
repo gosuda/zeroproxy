@@ -147,6 +147,29 @@ pub fn compose_source_map_js(
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// Same as `composeSourceMap` but additionally chains the resulting map
+/// with the target site's *original* `.map` (the one the bundler emitted
+/// alongside the source). DevTools resolves rewritten → typescript /
+/// pre-minify origin in one hop instead of stopping at the bundled `.js`.
+/// `original_map_json` may be empty — the function falls back to the
+/// unchained map without raising.
+#[wasm_bindgen(js_name = composeSourceMapChained)]
+pub fn compose_source_map_chained_js(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+    original_map_json: &str,
+) -> Result<String, JsError> {
+    let kind = parse_script_kind(kind)?;
+    let opts = zp_rewriter::RewriteOpts {
+        kind,
+        target_url: target_url.to_string(),
+        strict: true,
+    };
+    zp_rewriter::compose_source_map_chained(source, &opts, target_url, original_map_json)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
 /// Transform target HTML — calls zp-htmltx + zp-rewriter for inline scripts.
 #[wasm_bindgen(js_name = transformHtml)]
 pub fn transform_html_js(
