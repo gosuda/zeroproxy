@@ -283,6 +283,179 @@ pub const CHUNK_TERMINATOR: &[u8] = b"\r\n";
 /// extensions). Anything longer is treated as a chunk-line DoS attempt.
 pub const MAX_CHUNK_LINE: usize = MAX_HEAD_BYTES;
 
+/// Streaming chunked-body decoder (RFC 9112 §7.1). The async wrapper in
+/// `zp-bundle/src/kernel/transport/http1.rs` pushes raw bytes from the
+/// upstream stream; `step()` advances the state machine and accumulates
+/// chunk bodies into an internal buffer. Trailers (and the final empty
+/// line) are recognised but the trailer content is discarded — every
+/// caller today only consumes the body bytes.
+///
+/// On a mid-body / mid-trailer EOF the caller invokes `finish()` to get
+/// whatever's already been accumulated; matches the wasm wrapper's
+/// "WAF-cut-the-socket tolerance" semantics (a partial body renders
+/// better than an empty error page).
+pub struct ChunkedDecoder {
+    state: ChunkedState,
+    input: Vec<u8>,
+    body: Vec<u8>,
+    body_cap: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkedState {
+    /// Need the next chunk-size line.
+    WaitingForSize,
+    /// Mid-chunk; this many body bytes still need to be consumed.
+    ReadingBody { remaining: u64 },
+    /// Body of current chunk just finished; need the CRLF before the
+    /// next size line (RFC 9112 §7.1, per-chunk terminator).
+    WaitingForCrlfAfterBody,
+    /// Terminal zero chunk seen; consume trailer lines until a blank
+    /// line.
+    DrainingTrailers,
+    /// Body complete.
+    Done,
+}
+
+/// Outcome of one `ChunkedDecoder::step()` call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChunkedStep {
+    /// State machine needs more input bytes — caller reads more and
+    /// pushes them with `push`.
+    NeedMore,
+    /// Progress made; call `step()` again. The body is in the decoder's
+    /// internal buffer; access via `into_body()` when `Done`.
+    Progress,
+    /// Body complete. Caller takes the body via `into_body()`.
+    Done,
+}
+
+impl ChunkedDecoder {
+    /// Create a fresh decoder. `body_cap` caps the buffered body; an
+    /// overrun surfaces as `InvalidData`.
+    pub fn new(body_cap: usize) -> Self {
+        Self {
+            state: ChunkedState::WaitingForSize,
+            input: Vec::with_capacity(8192),
+            body: Vec::new(),
+            body_cap,
+        }
+    }
+
+    /// Append raw upstream bytes to the decoder's internal buffer.
+    pub fn push(&mut self, input: &[u8]) {
+        self.input.extend_from_slice(input);
+    }
+
+    /// Advance the state machine by one transition. Returns `NeedMore`
+    /// when the next transition needs bytes not yet pushed.
+    pub fn step(&mut self) -> io::Result<ChunkedStep> {
+        match self.state {
+            ChunkedState::WaitingForSize => {
+                let Some(line) = self.consume_line() else {
+                    return Ok(ChunkedStep::NeedMore);
+                };
+                let cs = parse_chunk_size_line(&line)?;
+                if cs.is_terminal {
+                    self.state = ChunkedState::DrainingTrailers;
+                } else {
+                    if self.body.len() as u64 + cs.size > self.body_cap as u64 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "http1: chunked body exceeded cap",
+                        ));
+                    }
+                    self.state = ChunkedState::ReadingBody { remaining: cs.size };
+                }
+                Ok(ChunkedStep::Progress)
+            }
+            ChunkedState::ReadingBody { remaining } => {
+                if remaining == 0 {
+                    self.state = ChunkedState::WaitingForCrlfAfterBody;
+                    return Ok(ChunkedStep::Progress);
+                }
+                let avail = self.input.len() as u64;
+                if avail == 0 {
+                    return Ok(ChunkedStep::NeedMore);
+                }
+                let take = remaining.min(avail) as usize;
+                self.body.extend_from_slice(&self.input[..take]);
+                self.input.drain(..take);
+                let left = remaining - take as u64;
+                self.state = if left == 0 {
+                    ChunkedState::WaitingForCrlfAfterBody
+                } else {
+                    ChunkedState::ReadingBody { remaining: left }
+                };
+                Ok(ChunkedStep::Progress)
+            }
+            ChunkedState::WaitingForCrlfAfterBody => {
+                if self.input.len() < CHUNK_TERMINATOR.len() {
+                    return Ok(ChunkedStep::NeedMore);
+                }
+                if &self.input[..CHUNK_TERMINATOR.len()] != CHUNK_TERMINATOR {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "http1: missing CRLF after chunk data",
+                    ));
+                }
+                self.input.drain(..CHUNK_TERMINATOR.len());
+                self.state = ChunkedState::WaitingForSize;
+                Ok(ChunkedStep::Progress)
+            }
+            ChunkedState::DrainingTrailers => {
+                let Some(line) = self.consume_line() else {
+                    return Ok(ChunkedStep::NeedMore);
+                };
+                if line.is_empty() {
+                    self.state = ChunkedState::Done;
+                    return Ok(ChunkedStep::Done);
+                }
+                // Non-empty trailer — discard and loop. Real trailers
+                // (e.g. gRPC-Status, Server-Timing) aren't surfaced to
+                // the page today.
+                Ok(ChunkedStep::Progress)
+            }
+            ChunkedState::Done => Ok(ChunkedStep::Done),
+        }
+    }
+
+    /// Drive `step()` until it returns `NeedMore` or `Done`. Returns
+    /// the same outcome.
+    pub fn step_until_blocked(&mut self) -> io::Result<ChunkedStep> {
+        loop {
+            match self.step()? {
+                ChunkedStep::Progress => continue,
+                other => return Ok(other),
+            }
+        }
+    }
+
+    /// True iff `step` would return `Done`.
+    pub fn is_done(&self) -> bool {
+        self.state == ChunkedState::Done
+    }
+
+    /// Consume the decoder and return whatever body has accumulated so
+    /// far. Safe to call mid-stream — matches the wasm wrapper's
+    /// WAF-cut-the-socket tolerance, returning a partial body instead
+    /// of dropping the response.
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+
+    /// Peek the body accumulated so far without consuming the decoder.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    fn consume_line(&mut self) -> Option<String> {
+        let pos = self.input.windows(2).position(|w| w == b"\r\n")?;
+        let bytes: Vec<u8> = self.input.drain(..pos + 2).collect();
+        Some(String::from_utf8_lossy(&bytes[..bytes.len() - 2]).into_owned())
+    }
+}
+
 /// Predicate matching the wasm wrapper's `response_is_keepalive`: an
 /// HTTP/1.1 connection survives the response only when (a) no
 /// `Connection: close` was sent, AND (b) the body was bounded
@@ -657,6 +830,118 @@ mod tests {
     #[test]
     fn chunk_terminator_is_crlf() {
         assert_eq!(CHUNK_TERMINATOR, b"\r\n");
+    }
+
+    // -- ChunkedDecoder ---
+
+    fn run_one_shot(input: &[u8]) -> io::Result<Vec<u8>> {
+        let mut d = ChunkedDecoder::new(1 << 20);
+        d.push(input);
+        let outcome = d.step_until_blocked()?;
+        match outcome {
+            ChunkedStep::Done => Ok(d.into_body()),
+            ChunkedStep::NeedMore => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "decoder still needs more bytes",
+            )),
+            ChunkedStep::Progress => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn decoder_single_chunk_no_trailer() {
+        let body = run_one_shot(b"5\r\nhello\r\n0\r\n\r\n").unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn decoder_multi_chunk() {
+        let body = run_one_shot(b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n").unwrap();
+        assert_eq!(body, b"hello world");
+    }
+
+    #[test]
+    fn decoder_chunk_extension_dropped() {
+        let body = run_one_shot(b"5;name=value\r\nhello\r\n0;eof=true\r\n\r\n").unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn decoder_trailers_drained() {
+        let raw = b"5\r\nhello\r\n0\r\nX-Trailer-A: foo\r\nX-Trailer-B: bar\r\n\r\n";
+        let body = run_one_shot(raw).unwrap();
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn decoder_missing_crlf_after_body_rejected() {
+        // "hello" is 5 bytes, followed by "XX" instead of CRLF.
+        let err = run_one_shot(b"5\r\nhelloXX0\r\n\r\n").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn decoder_invalid_size_line_rejected() {
+        let err = run_one_shot(b"xyz\r\nhello\r\n0\r\n\r\n").expect_err("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn decoder_body_cap_enforced() {
+        let mut d = ChunkedDecoder::new(4);
+        d.push(b"5\r\nhello\r\n0\r\n\r\n");
+        let err = d.step_until_blocked().expect_err("cap must trip");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn decoder_incremental_push_handles_split_boundaries() {
+        // Feed bytes in arbitrarily small slices to prove the state
+        // machine doesn't depend on chunks lining up with reads.
+        let mut d = ChunkedDecoder::new(1 << 20);
+        let raw: &[u8] = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let mut i = 0;
+        let mut done = false;
+        while i < raw.len() {
+            // Push one byte at a time.
+            d.push(&raw[i..i + 1]);
+            i += 1;
+            match d.step_until_blocked().unwrap() {
+                ChunkedStep::NeedMore => continue,
+                ChunkedStep::Done => {
+                    done = true;
+                    break;
+                }
+                ChunkedStep::Progress => unreachable!(),
+            }
+        }
+        assert!(done, "decoder must finish even with single-byte feeds");
+        assert_eq!(d.into_body(), b"hello world");
+    }
+
+    #[test]
+    fn decoder_finish_mid_stream_returns_partial_body() {
+        // Server closed the socket mid-chunk after delivering the first
+        // 4 bytes of a 5-byte chunk. Caller invokes into_body() and
+        // gets the partial — matches the wasm wrapper's WAF-cut-socket
+        // tolerance.
+        let mut d = ChunkedDecoder::new(1 << 20);
+        d.push(b"5\r\nhell");
+        // Drive until blocked.
+        let outcome = d.step_until_blocked().unwrap();
+        assert_eq!(outcome, ChunkedStep::NeedMore);
+        assert!(!d.is_done());
+        let partial = d.into_body();
+        assert_eq!(partial, b"hell", "partial body must be the bytes we did receive");
+    }
+
+    #[test]
+    fn decoder_drains_no_trailer_terminator() {
+        // RFC 9112 §7.1.2: a chunked body MAY have zero trailers, in
+        // which case the terminal "0\r\n\r\n" is the entire trailer
+        // section. Decoder must read both CRLFs.
+        let body = run_one_shot(b"0\r\n\r\n").unwrap();
+        assert!(body.is_empty());
     }
 
     #[test]

@@ -794,20 +794,34 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
     /codec::response_keepalive\(resp\.status, &resp\.headers\)/,
     'response_is_keepalive must delegate to the codec',
   );
-  // Chunked decoder: the chunk-size line parse used to live inline as a
-  // hand-rolled hex + chunk-ext walk. The codec now owns the RFC 9112
-  // §7.1.1 edge cases (whitespace tolerance, overflow rejection,
-  // non-hex rejection, terminal-zero detection) so they carry unit
-  // tests; the async loop just feeds bytes in.
+  // Chunked decoder: the WHOLE state machine (size-line parse,
+  // chunk-ext drop, body framing, missing-CRLF reject, body cap,
+  // trailer drain, single-byte incremental feed, mid-body EOF
+  // tolerance) lives in zp-transport-codec::http1::ChunkedDecoder.
+  // The async loop here just pushes bytes in and drains via the
+  // state machine — no inline framing logic.
   assert.match(
     http1,
-    /codec::parse_chunk_size_line\(&size_line\)/,
-    'read_chunked must call the codec parse_chunk_size_line helper',
+    /codec::ChunkedDecoder::new\(MAX_BODY_BYTES\)/,
+    'read_chunked must construct the codec ChunkedDecoder',
   );
   assert.match(
     http1,
-    /codec::CHUNK_TERMINATOR/,
-    'post-chunk CRLF check must use the codec constant (no inline literal)',
+    /codec::ChunkedStep::Done => return Ok\(decoder\.into_body\(\)\)/,
+    'read_chunked must return the decoder body on Done',
+  );
+  assert.match(
+    http1,
+    /codec::ChunkedStep::NeedMore =>/,
+    'read_chunked must bridge codec::ChunkedStep::NeedMore to stream.read',
+  );
+  // EOF tolerance: a clean / UnexpectedEof close while NeedMore must
+  // surface the partial body (matches the previous hand-rolled
+  // WAF-cut-the-socket tolerance, now driven by ChunkedDecoder::into_body).
+  assert.match(
+    http1,
+    /UnexpectedEof[\s\S]{0,80}return Ok\(decoder\.into_body\(\)\)/,
+    'mid-stream UnexpectedEof must yield the partial body via into_body',
   );
   assert.equal(
     /size_line\.split\(';'\)/.test(http1),
@@ -818,6 +832,16 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
     /u64::from_str_radix\(size_hex, 16\)/.test(http1),
     false,
     'inline hex chunk-size parse must move to zp-transport-codec',
+  );
+  assert.equal(
+    /fn read_line\b/.test(http1),
+    false,
+    'dead read_line helper must be removed (ChunkedDecoder owns line consumption)',
+  );
+  assert.equal(
+    /fn consume_trailers\b/.test(http1),
+    false,
+    'dead consume_trailers helper must be removed (ChunkedDecoder owns trailer drain)',
   );
   assert.equal(
     http1.includes('fn is_token'),

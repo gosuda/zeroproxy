@@ -310,173 +310,57 @@ where
     }
 }
 
-/// Chunked transfer decoder. RFC 7230 §4.1.
-///
-/// `prefix` is bytes already read after the head that may contain the
-/// first chunk-size line and beyond. We append to `prefix` and consume
-/// from the front; needing more data falls through to a `stream.read()`.
+/// Chunked transfer decoder. RFC 9112 §7.1. The state machine lives in
+/// `zp_transport_codec::http1::ChunkedDecoder` so every byte-level edge
+/// case (chunk-ext drop, missing-CRLF reject, body-cap enforcement,
+/// trailer drain, multi-chunk + zero-trailer terminator, single-byte
+/// incremental feed) is exercised on the host. This async wrapper just
+/// pushes bytes into the decoder and surfaces what comes back —
+/// including the WAF-cut-the-socket tolerance: on `UnexpectedEof`
+/// before `Done`, return whatever body has accumulated rather than
+/// drop the whole response.
 async fn read_chunked<S>(stream: &mut S, prefix: &mut Vec<u8>) -> io::Result<Vec<u8>>
 where
     S: AsyncRead + Unpin,
 {
-    let mut out = Vec::new();
-    let mut tmp = [0u8; 8192];
-
-    loop {
-        // Read chunk-size line (hex digits, optionally followed by ";ext").
-        // EOF here just means the upstream closed between chunks — common when
-        // a WAF rate-limits and slams the socket after the body; surface what
-        // we already buffered instead of dropping the whole response.
-        let size_line = match read_line(stream, prefix, &mut tmp).await {
-            Ok(line) => line,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(out),
-            Err(e) => return Err(e),
-        };
-        // Hex parsing + chunk-ext drop lives in zp-transport-codec so the
-        // RFC 9112 §7.1.1 edge cases (whitespace tolerance, overflow,
-        // non-hex rejection) carry host-side unit tests instead of being
-        // wired into this async loop.
-        let cs = codec::parse_chunk_size_line(&size_line)?;
-        let chunk_size = cs.size;
-        if cs.is_terminal {
-            // Trailers (and one final CRLF) follow. Consume until CRLFCRLF
-            // OR a bare CRLF if no trailers were sent. EOF here is benign:
-            // the trailer CRLF was the last byte the upstream owed us.
-            match consume_trailers(stream, prefix, &mut tmp).await {
-                Ok(()) | Err(_) => {}
-            }
-            return Ok(out);
-        }
-        if out.len() as u64 + chunk_size > MAX_BODY_BYTES as u64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "http1: chunked body exceeded cap",
-            ));
-        }
-        let want = chunk_size as usize;
-        // Mid-chunk EOF: same WAF-cut-the-socket pattern. Return the partial
-        // body we have. A page rendered from the partial bytes is strictly
-        // better than the empty-error-page outcome.
-        match read_into(stream, prefix, &mut tmp, want, &mut out).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(out),
-            Err(e) => return Err(e),
-        }
-        // Each chunk is terminated by CRLF; consume it. Same tolerance: EOF
-        // here means the trailing CRLF was lost to the close, not a parser
-        // error worth propagating.
-        match read_exact_n(stream, prefix, &mut tmp, codec::CHUNK_TERMINATOR.len()).await {
-            Ok(crlf) => {
-                if &crlf[..] != codec::CHUNK_TERMINATOR {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "http1: missing CRLF after chunk data",
-                    ));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(out),
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// Read one CRLF-terminated line from (prefix + stream). The terminating
-/// CRLF is consumed and not returned.
-async fn read_line<S>(stream: &mut S, prefix: &mut Vec<u8>, tmp: &mut [u8]) -> io::Result<String>
-where
-    S: AsyncRead + Unpin,
-{
-    loop {
-        if let Some(pos) = prefix.windows(2).position(|w| w == b"\r\n") {
-            let line: Vec<u8> = prefix.drain(..pos + 2).collect();
-            // line includes CRLF; strip.
-            return Ok(String::from_utf8_lossy(&line[..line.len() - 2]).into_owned());
-        }
-        if prefix.len() > MAX_HEAD_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "http1: chunk-line too long",
-            ));
-        }
-        let n = stream.read(tmp).await?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "http1: EOF while reading line",
-            ));
-        }
-        prefix.extend_from_slice(&tmp[..n]);
-    }
-}
-
-/// Read exactly `want` bytes from (prefix + stream) and append to `out`.
-async fn read_into<S>(
-    stream: &mut S,
-    prefix: &mut Vec<u8>,
-    tmp: &mut [u8],
-    want: usize,
-    out: &mut Vec<u8>,
-) -> io::Result<()>
-where
-    S: AsyncRead + Unpin,
-{
-    let mut left = want;
+    let mut decoder = codec::ChunkedDecoder::new(MAX_BODY_BYTES);
     if !prefix.is_empty() {
-        let take = prefix.len().min(left);
-        out.extend_from_slice(&prefix[..take]);
-        prefix.drain(..take);
-        left -= take;
+        decoder.push(prefix);
+        prefix.clear();
     }
-    while left > 0 {
-        let bound = left.min(tmp.len());
-        let n = stream.read(&mut tmp[..bound]).await?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "http1: EOF mid-chunk",
-            ));
-        }
-        out.extend_from_slice(&tmp[..n]);
-        left -= n;
-    }
-    Ok(())
-}
-
-/// Read exactly `n` bytes from (prefix + stream) and return them.
-async fn read_exact_n<S>(
-    stream: &mut S,
-    prefix: &mut Vec<u8>,
-    tmp: &mut [u8],
-    n: usize,
-) -> io::Result<Vec<u8>>
-where
-    S: AsyncRead + Unpin,
-{
-    let mut out = Vec::with_capacity(n);
-    read_into(stream, prefix, tmp, n, &mut out).await?;
-    Ok(out)
-}
-
-/// Consume optional trailers + the final CRLF that ends a chunked body.
-async fn consume_trailers<S>(stream: &mut S, prefix: &mut Vec<u8>, tmp: &mut [u8]) -> io::Result<()>
-where
-    S: AsyncRead + Unpin,
-{
+    let mut tmp = [0u8; 8192];
     loop {
-        let line = read_line(stream, prefix, tmp).await?;
-        if line.is_empty() {
-            return Ok(());
+        match decoder.step_until_blocked()? {
+            codec::ChunkedStep::Done => return Ok(decoder.into_body()),
+            codec::ChunkedStep::NeedMore => {
+                let n = match stream.read(&mut tmp).await {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        return Ok(decoder.into_body());
+                    }
+                    Err(e) => return Err(e),
+                };
+                if n == 0 {
+                    // Clean EOF mid-stream — surface the partial body
+                    // (matches the previous hand-rolled loop's tolerance).
+                    return Ok(decoder.into_body());
+                }
+                decoder.push(&tmp[..n]);
+            }
+            codec::ChunkedStep::Progress => unreachable!("step_until_blocked never returns Progress"),
         }
-        // Non-empty line → trailer; loop until blank line.
     }
 }
 
 // Host-side tests for the byte-layout invariants live in
 // `crates/zp-transport-codec/src/http1.rs` (request-line shape, header
-// auto-add, CRLF injection rejection, response-head parse, chunked /
-// Content-Length / EOF framing decisions, keep-alive predicate). The
-// async behaviours that remain in this module (chunked decoder
-// loop-tolerance, body cap, trailer drain) are exercised end-to-end
-// when the kernel makes a real upstream fetch — there's no
-// out-of-process server to mock against in `cargo test` because the
-// parent `kernel` module is `cfg(target_arch = "wasm32")`.
+// auto-add, CRLF injection rejection, response-head parse, chunked
+// decoder state machine incl. chunk-ext drop / missing-CRLF reject /
+// body-cap / trailer drain / single-byte-incremental-feed /
+// mid-body EOF tolerance, Content-Length / EOF framing decisions,
+// keep-alive predicate). What stays in this module is the async
+// glue (stream.read into the decoder buffer, EOF tolerance bridge
+// to ChunkedDecoder::into_body) plus the EOF-delimited body reader —
+// those run end-to-end against real upstreams; the parent `kernel`
+// module is `cfg(target_arch = "wasm32")` so neither piece is
+// reachable from host `cargo test`.
