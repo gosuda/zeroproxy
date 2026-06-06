@@ -672,6 +672,7 @@
   __zpStep('Blockers', () => installBlockers(root));
   __zpStep('CanvasAntiFingerprinting', () => installCanvasAntiFingerprinting(root));
   __zpStep('AudioAntiFingerprinting', () => installAudioAntiFingerprinting(root));
+  __zpStep('NavigationBackstop', () => installNavigationBackstop(root, root.document && root.document.documentElement));
   zpTrace('install:all:done');
   // Modal-dialog override — synchronous alert/confirm/prompt block the
   // main thread until the browser shell dismisses them. In headless /
@@ -1982,7 +1983,104 @@
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');
     installURLProp(w.HTMLInputElement && w.HTMLInputElement.prototype, 'formAction');
     installURLProp(w.HTMLButtonElement && w.HTMLButtonElement.prototype, 'formAction');
-    function installURLProp(proto, prop) { if (!proto) return; defineAccessor(proto, prop, function(){ return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || targetURL(this.getAttribute(prop === 'formAction' ? 'formaction' : prop) || virtualURL.href); }, function(v){ const t = targetURL(v); urlMeta.set(this, t); Native.setAttribute.call(this, 'data-zp-target-url', t); this.setAttribute(prop === 'formAction' ? 'formaction' : prop, t); }); }
+    function installURLProp(proto, prop) {
+      if (!proto) return;
+      const attrName = prop === 'formAction' ? 'formaction' : prop;
+      defineAccessor(
+        proto,
+        prop,
+        function () {
+          return urlMeta.get(this)
+            || Native.getAttribute.call(this, 'data-zp-target-url')
+            || targetURL(this.getAttribute(attrName) || virtualURL.href);
+        },
+        function (v) {
+          const t = targetURL(v);
+          urlMeta.set(this, t);
+          Native.setAttribute.call(this, 'data-zp-target-url', t);
+          // 2026-06-06 escape vector fix: previously
+          // `this.setAttribute(attrName, t)` put the absolute target URL on
+          // the DOM attribute, leaking it to browser-native UI
+          // (hover/middle-click/copy-link/target=_blank/right-click). Mirror
+          // the server-side zp-htmltx rewrite by writing a proxy-origin
+          // "?via=" URL on the raw attribute. The absolute target stays
+          // recoverable via `urlMeta` + `data-zp-target-url` for the prelude
+          // click handler's fast path.
+          this.setAttribute(attrName, proxyViaURL(t));
+        }
+      );
+    }
+  }
+  // Mirror of zp-htmltx::proxied_navigation_url. Build a proxy-origin
+  // "go-via launcher" URL so dynamically-created anchor/form attributes
+  // never expose the target host to browser-native UI. Inert URL schemes
+  // (#fragment / javascript: / data: / blob: / about: / mailto: /
+  // vbscript:) pass through unchanged.
+  function proxyViaURL(absolute) {
+    const s = String(absolute || '');
+    if (!s) return s;
+    if (s[0] === '#') return s;
+    if (/^(?:javascript|mailto|data|blob|about|vbscript):/i.test(s)) return s;
+    if (!/^https?:/i.test(s)) return s;
+    const prefix = (typeof ZP !== 'undefined' && ZP && ZP.CONTROL_PREFIX) || '/zp/';
+    return proxyOrigin + prefix + '?via=' + encodeURIComponent(s);
+  }
+  // 2026-06-06 backstop: NAVER / GitHub / other SPA sites use code paths
+  // outside `installURLProp` setter + `setAttribute` wrap to put raw target
+  // hrefs on the DOM — e.g. `cloneNode(true)` on a server-rendered template,
+  // `DocumentFragment` building via direct DOM APIs that don't trip our
+  // setter wraps, or strips of `data-zp-*` attributes post-load (NAVER's
+  // anti-bot scrubber, see trap-notebook 2026-06-02 NAVER fingerprint
+  // hide). MutationObserver re-checks every anchor / form attribute change
+  // and re-applies the proxy `?via=` URL. `urlMeta` is the authoritative
+  // source the click handler reads, so even if the page later strips
+  // `data-zp-target-url`, the click still routes via the proxy.
+  function applyNavigationBackstop(el) {
+    if (!el || el.nodeType !== 1) return;
+    const ln = el.localName;
+    let attrName;
+    if (ln === 'a' || ln === 'area') attrName = 'href';
+    else if (ln === 'form') attrName = 'action';
+    else if (ln === 'input' || ln === 'button') {
+      if (!el.hasAttribute || !el.hasAttribute('formaction')) return;
+      attrName = 'formaction';
+    } else return;
+    const raw = Native.getAttribute.call(el, attrName);
+    if (!raw) return;
+    if (raw.indexOf(proxyOrigin) === 0) return; // already proxied
+    if (raw[0] === '#') return;
+    if (/^(?:javascript|mailto|data|blob|about|vbscript):/i.test(raw)) return;
+    let abs;
+    if (/^https?:/i.test(raw)) abs = raw;
+    else if (raw.indexOf('//') === 0) abs = 'https:' + raw;
+    else { try { abs = new URL(raw, virtualURL.href).href; } catch { return; } }
+    if (!/^https?:/i.test(abs)) return;
+    urlMeta.set(el, abs);
+    try { Native.setAttribute.call(el, 'data-zp-target-url', abs); } catch {}
+    try { Native.setAttribute.call(el, attrName, proxyViaURL(abs)); } catch {}
+  }
+  function scanNavigationBackstop(root) {
+    if (!root || !root.querySelectorAll) return;
+    try {
+      root.querySelectorAll(
+        'a[href], area[href], form[action], input[formaction], button[formaction]'
+      ).forEach(applyNavigationBackstop);
+    } catch {}
+  }
+  function installNavigationBackstop(w, docEl) {
+    if (!w || !docEl) return;
+    // Single deferred sweep. Earlier draft also installed a
+    // MutationObserver — that wedged the renderer on NAVER (Tauri/WebView2
+    // can't drain the storm of attribute mutations a SPA emits during
+    // hydration, even with `attributeFilter`). Setter / setAttribute wraps
+    // already cover the JS hydration path; this sweep catches whatever the
+    // server-side zp-htmltx rewrite missed on the initial document.
+    scanNavigationBackstop(docEl);
+    if (typeof w.requestIdleCallback === 'function') {
+      try { w.requestIdleCallback(() => scanNavigationBackstop(docEl), { timeout: 2000 }); } catch {}
+    } else if (typeof w.setTimeout === 'function') {
+      try { w.setTimeout(() => scanNavigationBackstop(docEl), 1000); } catch {}
+    }
   }
   function initDocumentCookieRecords(cookieString) {
     for (const part of String(cookieString || '').split(/;\s*/)) {
@@ -2546,14 +2644,19 @@
         if (t) {
           const usesRaw = usesRawURLAttribute(this, key, localKey);
           urlMeta.set(this, t);
-          if (!usesRaw) Native.setAttribute.call(this, 'data-zp-target-url', t);
+          // 2026-06-06 escape vector fix: always stash absolute target on
+          // data-zp-target-url + write a proxy-origin "?via=" URL on the raw
+          // attribute for anchor/area href / form action / formaction.
+          // Previously `usesRaw ? v : t` put the absolute target on the DOM
+          // attribute (leaking to hover/middle-click/copy-link).
+          Native.setAttribute.call(this, 'data-zp-target-url', t);
           if ((ln === 'iframe' || ln === 'frame') && localKey === 'src') {
             Native.setAttribute.call(this, k, 'about:blank');
             activatedFrameURL(t).then(u => { Native.setAttribute.call(this, k, u); rememberFrameOrigin(this); }).catch(()=>{});
             return;
           }
           if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
-          return Native.setAttribute.call(this, k, usesRaw ? v : t);
+          return Native.setAttribute.call(this, k, usesRaw ? proxyViaURL(t) : t);
         }
       }
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
@@ -2574,8 +2677,11 @@
         if (t) {
           const usesRaw = usesRawURLAttribute(this, key, localKey);
           urlMeta.set(this, t);
-          if (!usesRaw) Native.setAttribute.call(this, 'data-zp-target-url', t);
-          return Native.setAttributeNS.call(this, ns, k, usesRaw ? v : t);
+          // 2026-06-06 escape vector fix: same rationale as setAttribute
+          // path above — anchor/area href / form action / formaction must
+          // not leak the absolute target URL through the raw DOM attribute.
+          Native.setAttribute.call(this, 'data-zp-target-url', t);
+          return Native.setAttributeNS.call(this, ns, k, usesRaw ? proxyViaURL(t) : t);
         }
       }
       return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v);
@@ -3655,6 +3761,7 @@
     installBlockers(w, true);
     installCanvasAntiFingerprinting(w);
     installAudioAntiFingerprinting(w);
+    installNavigationBackstop(w, w.document && w.document.documentElement);
     try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
   }
 

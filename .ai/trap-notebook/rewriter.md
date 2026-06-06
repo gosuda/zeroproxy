@@ -4,6 +4,129 @@
 
 ---
 
+## 2026-06-06 — anchor/form/formaction raw target URL escape vector — middle-click / Ctrl+click / target=_blank / 우클릭 "open in new tab" / "copy link address" 시 IP leak. zp-htmltx 가 navigation URL attribute 변환 추가 (proxy-origin `?via=` + `data-zp-target-url`)
+
+**Site/Pattern**: NAVER 메인 (`https://www.naver.com/`) 진입 후 anchor 155개 중 **141개가 raw `https://www.naver.com/...` href**. URL bar 는 proxy origin 정상이고 정상 left-click 은 prelude 의 `clickNavigationTarget` ([web/runtime-prelude.js:1786](../../web/runtime-prelude.js#L1786)) 가 intercept 하여 안전. **그러나 raw href attribute 가 그대로** 라서 browser-native UI 들이 모두 NAVER URL 을 보거나 native navigation 으로 직접 사용.
+
+**Discovery**: 사용자 보고 "프록시인데 네이버 주소가 그대로뜨는건지?". 진단 단계:
+
+1. `location.href` = `proxy.localhost:18080/zp/p/<encrypted>...` (정상) — URL bar leak 아님
+2. `document.URL` = `https://www.naver.com/` — 의도된 가상화 (`Document.prototype.URL` getter override, [runtime-prelude.js:1975](../../web/runtime-prelude.js#L1975))
+3. `navigator.serviceWorker.controller = null` — 의도된 facade (`installTargetServiceWorkerBlocker`, [runtime-prelude.js:3118](../../web/runtime-prelude.js#L3118))
+4. `fetch('http://proxy.localhost:18080/zp/api/diag/trace')` → NAVER 404 응답 — 이것도 정상 routing 결과: `requestTargetURL` ([runtime-prelude.js:1159](../../web/runtime-prelude.js#L1159)) 의 `if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + ..., baseURL).href` 가 path 를 NAVER baseURL 에 resolve → SW 가 NAVER 로 outbound → 404
+5. **`document.querySelectorAll('a[href]')` 155개 중 141개가 `https://www.naver.com/...` raw URL**. sample: `<a href="https://www.naver.com/#topAsideButton">상단영역 바로가기</a>`, `<a href="https://whale.naver.com/ko/?wpid=main_theme3">…</a>`
+
+**Vector matrix** (확정):
+
+| 사용자 행동 | 결과 (fix 전) |
+|---|---|
+| Hover | status bar 에 `https://www.naver.com/...` (cosmetic leak — 사용자가 본 게 이것) |
+| Normal left-click | prelude intercept → proxy navigate (안전) |
+| **Middle-click / Ctrl+click** | 새 탭으로 raw NAVER URL → **functional escape — 사용자 IP NAVER 에 직접 노출** |
+| **`target="_blank"`** | 같음 — IP 노출 |
+| **우클릭 → "새 탭으로 열기" / "링크 주소 복사"** | 같음 — IP 노출 + clipboard leak |
+
+검증: `document.querySelector('a[href*="naver.com"]').dispatchEvent(new MouseEvent('click',{button:0,bubbles:true,cancelable:true}))` → `defaultPrevented:true`, `location.href` 안 바뀜 (intercept 정상). 그러나 hover/middle-click/copy 같은 native UI 우회 path 는 prelude 가 잡을 수 없음.
+
+**Root cause**: `crates/zp-htmltx/src/lib.rs` 의 정책 — `is_subresource = ("link","href") | ("script","src") | ("img","src") | ...` 만 `proxied_subresource_url` 로 변환. anchor/form/iframe URL 은 의도적으로 raw 유지하고 prelude 의 click hook 에만 의존. comment line 130-131 이 명시 ("Anchor/form/iframe URLs are handled by the runtime-prelude click/submit/iframe hooks"). 정책 자체가 click event 만 cover — 다른 4 vector 미커버. PHASE3_PLAN line 129 가 본문 작업으로 명시 ("`a[href]`, `area[href]`, `form[action]`, `input[formaction]`, `button[formaction]` ... must all commit the wrapped URL when `wrapAttrURL()` succeeds") — 미구현.
+
+**Fix** ([crates/zp-htmltx/src/lib.rs](../../crates/zp-htmltx/src/lib.rs)):
+
+1. 신규 helper `proxied_navigation_url(absolute, proxy_origin, control_prefix)` — proxy-origin 의 "go-via launcher" URL 생성: `<proxy_origin><control_prefix>?via=<percent_encoded_absolute>`. `proxied_subresource_url` 와 유사한 shape 이지만 control 경로가 `/api/fetch?url=` 가 아니라 `?via=` (launcher 가 받아서 share encrypt + reuseTabId open 처리할 slow-path entry).
+2. main loop 의 `is_subresource` 분기 옆에 `is_navigation = ("a","href") | ("area","href") | ("form","action") | ("input","formaction") | ("button","formaction")` 추가. matched 시 `absolute_target_url` 로 절대화 → `proxied_navigation_url` 결과를 raw attribute 에 set + `data-zp-target-url=<absolute>` 보관.
+3. iframe/frame `src` 는 의도적으로 제외 — prelude `installNetworkContainment` 가 child-realm fetch 파이프라인 (SW control reset after document.write, child Function captured, etc.) 을 따로 잡고 있어서 attribute-level 변환과 race 위험. 함정노트 [rewriter.md "NAVER GFP SafeFrame 광고 미렌더 root cause"](#2026-05-30) 참고.
+4. `proxy_origin` 빈 문자열인 경우 (host-test fallback) 변환 skip — raw href 유지. legacy/test harness 호환.
+
+**Vector matrix** (fix 후):
+
+| 사용자 행동 | 결과 |
+|---|---|
+| Hover | `proxy.localhost:18080/zp/?via=…` (target host 안 보임) ✓ |
+| Normal left-click | `data-zp-target-url` fast path — prelude `clickNavigationTarget` 이 1순위로 그걸 읽음 ([line 1795](../../web/runtime-prelude.js#L1795)) → setVirtualLocation(absolute) → 정상 share nav |
+| Middle-click / Ctrl+click | proxy-origin URL 로 새 탭 navigate → launcher (Phase 2 후속 작업) 가 `?via=` 받아 share encrypt + open. 현재는 launcher 가 `?via=` handler 미구현이라 임시로 launcher 첫 화면 표시 (회귀 없음 — 빈 탭 아님) |
+| target=_blank | 같음 |
+| 우클릭 "새 탭" / "링크 주소 복사" | proxy URL → leak 없음 ✓ |
+
+**Test coverage** ([crates/zp-htmltx/src/lib.rs tests](../../crates/zp-htmltx/src/lib.rs)) — 7 신규 + 1 변경:
+
+- `anchor_absolute_href_rewritten_to_proxy_via` — `<a href="https://example.com/x">` → raw href 사라짐, `href="http://proxy.localhost:18080/zp/?via=..."`, `data-zp-target-url="https://example.com/x"`
+- `anchor_host_relative_resolved_then_proxied` — `<a href="/news/topAside">` → resolve against target → `data-zp-target-url="https://example.com/news/topAside"`
+- `anchor_fragment_only_href_left_alone` — `<a href="#topAside">` → 변경 없음 (page-internal nav 위임)
+- `area_href_rewritten_same_as_anchor` — `<area href>` 동일 처리
+- `form_action_rewritten_to_proxy_via` — `<form action>` 동일
+- `input_formaction_rewritten` — `<input type=submit formaction>`
+- `button_formaction_rewritten` — `<button type=submit formaction>`
+- `iframe_src_still_left_alone` (변경, 회귀 가드) — iframe `src` 는 변환 안 함, `?via=` 안 들어감
+- `proxy_origin_blank_skips_navigation_rewrite` — proxy_origin 비어있으면 변환 skip
+
+회귀: cargo test -p zp-htmltx = 27/27, cargo test --workspace = 0 fail, node test/js/static-policy.test.js = 33/33.
+
+**남은 작업 (Phase 2 후속)**:
+
+1. **Launcher `?via=` handler** — 현재 launcher (`web/index.html`) 가 `?via=` query 를 받아 자동 share encrypt + reuseTabId open 하도록 추가. middle-click new-tab UX 정상화. ([함정노트 sw-integration 2026-06-02 "Launcher pre-nav 구현"](sw-integration.md#2026-06-02--launcher-pre-nav-구현) 의 reuseTabId 인프라 재사용)
+2. **iframe/frame src** — 본 PR 에서 의도적 제외. PHASE3 작업에서 child-realm 파이프라인과 통합 검토.
+3. **`element.innerHTML = X` / `outerHTML` setter** — `DOMParser.parseFromString` 는 이미 `transformHTML` 거침 ([line 1156](../../web/runtime-prelude.js#L1156)). innerHTML setter 가 같은 transform 통과하는지 audit 필요. 통과하면 cover, 아니면 후속 fix.
+
+**Follow-up (같은 세션 후속 fix)**: 본 fix 가 SSR transform side 만 cover 한 사실을 실측에서 확정:
+
+- NAVER 메인 진입 후 `document.querySelectorAll('a[href]')` 346개 중 raw target host 143개 / `?via=` 0개 / `data-zp-target-url` 0개.
+- 동일 패턴 GitHub repo 245 anchor / raw 99 / via 0 / dzpt 0.
+- 그러나 **NAVER 메인 form action 1개는 정상 `?via=` 변환** — `requestTargetURL` + transform 통과 증거.
+- 결론: NAVER/GitHub 의 anchor 들은 거의 모두 **JS hydration 단계에서 `el.href = X` 또는 `el.setAttribute('href', X)` 로 raw target 가 DOM 에 들어옴** — SSR transform 의 결과 (`?via=` + `data-zp-target-url`) 가 hydration overwrite 로 사라짐.
+
+**runtime-prelude 측 fix** (같은 PR 안 추가):
+
+- [installURLProp setter (web/runtime-prelude.js:1985)](../../web/runtime-prelude.js#L1985) — `a.href = X` / `form.action = X` / `el.formAction = X` 시 raw attribute 에 absolute target 을 set 하던 것을 `proxyViaURL(t)` 로 변경. `urlMeta` + `data-zp-target-url` 은 absolute 그대로 보존 (getter fast path).
+- [Element.prototype.setAttribute wrap (web/runtime-prelude.js:2556)](../../web/runtime-prelude.js#L2556) — line 2596 의 `usesRaw ? v : t` 에서 `v` (raw target) 를 anchor/area/form/formaction 에 set 하던 leak path 변경: `usesRaw ? proxyViaURL(t) : t`, 그리고 `data-zp-target-url` 을 항상 set (이전엔 `!usesRaw` 일 때만).
+- [Element.prototype.setAttributeNS wrap (web/runtime-prelude.js:2602)](../../web/runtime-prelude.js#L2602) — 동일 변경.
+- 신규 helper `proxyViaURL(absolute)` — `zp-htmltx::proxied_navigation_url` 의 JS mirror. fragment-only / inert scheme (`javascript:` / `mailto:` / `data:` / `blob:` / `about:` / `vbscript:`) / non-http(s) 은 그대로 pass-through. `proxyOrigin + ZP.CONTROL_PREFIX + '?via=' + encodeURIComponent(absolute)`. `encodeURIComponent` (JS) 와 `NON_ALPHANUMERIC` (Rust) 가 byte 단위로 다르지만 `decodeURIComponent` 양방 OK 라 launcher `?via=` 처리에 무차별.
+
+이 두 변경 결합 시 hydration overwrite vector 까지 봉쇄. NAVER 메인 재진입 후 anchor 142개 중 **proxy `?via=` 113개, raw external 10개로 leak 봉쇄 ~93%** 확인.
+
+**Backstop 추가** (같은 PR, 잔존 10 anchor 봉쇄): zp-htmltx SSR fix + prelude setter/setAttribute wrap 까지 적용해도 NAVER 의 `help.naver.com` 도움말 widget anchor 10개가 여전히 raw — 이건 우리 wrap 을 우회하는 path (`cloneNode(true)` on server-rendered template, DocumentFragment 직접 build, attribute scrubbing 후 재set 등). 또한 NAVER 가 페이지 안의 `data-zp-target-url` attribute 도 strip 가능 (함정노트 [2026-06-02 NAVER fingerprint hide](real-site-compat.md) 의 localStorage scrub 패턴이 DOM 으로 확장).
+
+신규 helper `applyNavigationBackstop(el)` + `scanNavigationBackstop(root)` + `installNavigationBackstop(w, docEl)` ([web/runtime-prelude.js#L2026-L2100](../../web/runtime-prelude.js)):
+
+- **Initial scan**: prelude install 마지막에 `installNavigationBackstop(root, document.documentElement)` 호출 — `a[href], area[href], form[action], input[formaction], button[formaction]` 모두 iterate 하며 raw target 있으면 proxyViaURL 로 재설정. SSR transform 의 `data-zp-target-url` 이 NAVER 에 의해 strip 됐어도 raw href 보고 복원.
+- **MutationObserver — 시도 후 제거**: 첫 draft 에서 `{childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'action', 'formaction']}` 로 install 했더니 **NAVER 메인 진입 후 renderer 가 wedge** (`taskweaver pause` 로 7개 minidump capture, js_stack empty — 메인 스레드 완전 freeze). Tauri/WebView2 의 mutation event drain 이 NAVER 같은 SPA 의 hydration storm 을 못 따라잡음. 가설: MutationObserver callback 이 microtask checkpoint 마다 fire 되는데 attribute storm + `Native.setAttribute` 가 다시 mutation emit (idempotent 체크 안 됨) → 무한 microtask loop. **Fix**: observer 제거, **deferred 2회 scan** (install 시 1회 + `requestIdleCallback`/`setTimeout` 으로 hydration 끝난 후 1회) 만 유지. 동적 anchor leak 은 setter/setAttribute wrap 으로 거의 모두 cover, 나머지 잔존은 후속 PR. **Lesson**: SPA 안에서 `attributeFilter` 가 있는 MutationObserver 도 hydration 단계에선 위험 — observer 없이 정기 scan 만으로 충분한지 먼저 검증.
+- **`urlMeta` populate**: backstop 의 핵심. NAVER 가 `data-zp-target-url` 을 strip 해도 closure-private WeakMap (`urlMeta`) 는 page-side JS 가 못 건드림. click handler 의 `urlMeta.get(this)` fast path 가 항상 작동.
+- **iframe / child realm**: `installNetworkContainment` 안에도 `installNavigationBackstop(w, w.document.documentElement)` 호출 추가 — child realm 의 SPA 도 cover.
+
+성능: 2회 scan 만 (install 1회 + idleCallback/setTimeout 1회). 큰 SPA 에도 부하 미미.
+
+**최종 검증 결과** (NAVER 메인, taskweaver):
+
+| | fix 전 | primary fix only | + backstop |
+|---|---|---|---|
+| total anchor | 346 | 142 | 140 |
+| proxy `?via=` | 0 | 113 | 111 |
+| fragment-only | 18 | 19 | 19 |
+| raw external (leak) | 143 | 10 | 10 |
+| `data-zp-target-url` | 0 | 0 | 0 |
+
+primary fix 만으로 **~93% leak 봉쇄**. backstop 의 추가 효과는 미미 (10→10) — backstop scan 시점에 잔존 10개 anchor 가 DOM 에 없거나 (hydration 미완료), 또는 setTimeout/idleCallback 보다 늦게 들어옴. Initial scan 은 SSR transform 결과의 `data-zp-target-url` 이 NAVER 에 의해 strip 됐을 때 `urlMeta` 복원 가드로 의미는 있음.
+
+**남은 ~7% (10 anchor)** — 모두 `help.naver.com` 도움말 widget 의 중복 anchor (검색 box 도움말 link). 우리 setter/setAttribute wrap + backstop scan 모두 우회. 가설:
+- (가) `cloneNode(true)` 로 template 복제 시 cloneNode wrap 없음 — attribute 복사가 native fast path 라 우리 setter 안 거침
+- (나) 페이지 안의 후속 `setInterval` 또는 long-running mutation 이 deferred scan 시점 후에 anchor 추가
+- (다) Shadow DOM 안 — querySelectorAll 미커버
+
+**후속 PR**:
+1. `Node.prototype.cloneNode` wrap 검토 — clone 후 attribute scan
+2. periodic scan (5초 간격, requestIdleCallback) 추가 — 페이지 lifetime 동안 잔존 raw 복원
+3. Shadow DOM 안의 anchor 도 scan 대상 — `composedPath` / shadowRoot 순회
+
+**Lessons**:
+
+- (a) **"intercept handler 가 있으니 안전"** 가정 위험 — anchor click handler 가 normal left-click 만 cover, browser-native UI (hover/middle/copy/target=_blank) 5+ vector 가 raw attribute 를 그대로 봄. **PHASE2 escape matrix 에 "attribute-surface vs event-surface" 구분 항목 추가 필요** (`.ai/PHASE2_STATUS.md` 의 E1 escape matrix 표 보강).
+- (b) prelude 의 `installURLProp` 가 getter+setter 양쪽을 wrap 하지만, setter 가 `this.setAttribute(prop, absolute)` 로 raw attribute 를 NAVER URL 로 다시 set 하는 미묘한 leak — SSR rewrite + dynamic create 의 두 side 가 다른 path 라 양쪽 모두 audit 의무. ([본 PR 후속 #2](#2026-06-06--anchorformformaction-raw-target-url-escape-vector))
+- (c) `is_subresource` 와 `is_navigation` 의 매칭이 한 곳 (htmltx main loop) 으로 통합돼야 — 분기 분산 시 한쪽만 수정하는 회귀 가능. 본 PR 은 같은 `if !javascript:` 블록 안에서 `else if` 로 묶음.
+- (d) PHASE3_PLAN 의 line 129 가 본 작업을 명시 — plan 의 "candidate" 항목이 실제로 안 들어간 vector 인지 정기 audit (PHASE2 마감 큐 검토 의무).
+
+([crates/zp-htmltx/src/lib.rs](../../crates/zp-htmltx/src/lib.rs) navigation rewrite + proxied_navigation_url, [runtime-prelude.js click intercept](../../web/runtime-prelude.js#L1699), PHASE3_PLAN line 129)
+
+---
+
 ## 2026-05-31 — lol_html attr.value() HTML entity 미디코드 → Wikipedia stylesheet URL 깨짐
 
 **Site/Pattern**: Wikipedia (`en.wikipedia.org`) 메인 페이지가 CSS 없는 raw HTML 로 렌더 — `<link rel="stylesheet">` 태그가 DOM 에는 존재하지만 `link.sheet.cssRules.length === 0` (빈 시트). 시각적: Vector skin 미적용, ad-hoc 마크업 노출 (Main page/Contents/Random article 등 텍스트만).

@@ -127,8 +127,6 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                 // rewritten to a same-origin SW route — the
                                 // strict CSP would otherwise block external
                                 // origins before the SW gets to intercept.
-                                // Anchor/form/iframe URLs are handled by the
-                                // runtime-prelude click/submit/iframe hooks.
                                 let is_subresource = matches!(
                                     (tag.as_str(), lower),
                                     ("link", "href")
@@ -139,6 +137,30 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                         | ("audio", "src")
                                         | ("track", "src")
                                         | ("embed", "src")
+                                );
+                                // Anchor / form / input / button URL attributes.
+                                // Previously left raw because the runtime-prelude
+                                // click handler intercepts normal left-clicks.
+                                // BUG (2026-06-06): the raw `<a href="https://target/...">`
+                                // still surfaces in browser-native UI:
+                                //   - hover → status bar shows target host
+                                //   - middle-click / ctrl-click → new tab navigates
+                                //     directly to target → real IP leak
+                                //   - target="_blank" → same as above
+                                //   - right-click → "open in new tab" /
+                                //     "copy link address" → same leak
+                                // Rewrite to a proxy-origin "via" URL so every
+                                // browser-native vector stays inside the proxy.
+                                // `data-zp-target-url` carries the absolute target
+                                // for the prelude click handler's fast path
+                                // (`clickNavigationTarget` already prefers it).
+                                let is_navigation = matches!(
+                                    (tag.as_str(), lower),
+                                    ("a", "href")
+                                        | ("area", "href")
+                                        | ("form", "action")
+                                        | ("input", "formaction")
+                                        | ("button", "formaction")
                                 );
                                 if is_subresource {
                                     if let Some(next) = proxied_subresource_url(
@@ -162,6 +184,20 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                                 let _ =
                                                     el.set_attribute("data-zp-target-url", &abs);
                                             }
+                                        }
+                                    }
+                                } else if is_navigation {
+                                    if let Some(abs) =
+                                        absolute_target_url(trimmed, &target_for_attr)
+                                    {
+                                        if let Some(next) = proxied_navigation_url(
+                                            &abs,
+                                            &proxy_origin,
+                                            "/zp/",
+                                        ) {
+                                            let _ = el.set_attribute(&name, &next);
+                                            let _ = el
+                                                .set_attribute("data-zp-target-url", &abs);
                                         }
                                     }
                                 }
@@ -580,6 +616,47 @@ fn absolute_target_url(raw: &str, target_url: &str) -> Option<String> {
     resolve_against_base(s, target_url)
 }
 
+/// Build the proxy-origin "go-via launcher" URL used to rewrite anchor /
+/// form / formaction attributes. Output shape:
+///   `<proxy_origin><control_prefix>?via=<percent_encoded_absolute_target>`
+///
+/// Why a launcher URL instead of leaving the raw target: hover, middle-click,
+/// ctrl-click, `target="_blank"`, "open in new tab" and "copy link address"
+/// all read the raw attribute value — leaving the target host on disk would
+/// leak it to the browser's native UI (and through "open in new tab" trigger
+/// a real direct fetch to the target, bypassing the proxy entirely).
+///
+/// The runtime-prelude click handler reads `data-zp-target-url` first
+/// (`clickNavigationTarget` in `web/runtime-prelude.js`), so normal in-page
+/// left-clicks still take the share-encrypt fast path. The `?via=` URL is
+/// the slow-path fallback consumed by the launcher when the browser performs
+/// a native navigation (new tab, etc.).
+///
+/// Returns `None` if `proxy_origin` was not supplied (host-test fallback).
+fn proxied_navigation_url(
+    absolute: &str,
+    proxy_origin: &str,
+    control_prefix: &str,
+) -> Option<String> {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    if proxy_origin.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(
+        proxy_origin.len() + control_prefix.len() + absolute.len() * 3 + 16,
+    );
+    out.push_str(proxy_origin.trim_end_matches('/'));
+    out.push_str(control_prefix);
+    if !out.ends_with('/') {
+        out.push('/');
+    }
+    out.push_str("?via=");
+    for chunk in utf8_percent_encode(absolute, NON_ALPHANUMERIC) {
+        out.push_str(chunk);
+    }
+    Some(out)
+}
+
 /// ASCII case-insensitive prefix check without allocating a lowercase copy.
 /// Used in hot HTML rewrite paths where URLs may be 100B+ and the
 /// `to_ascii_lowercase()` allocation dominates.
@@ -807,12 +884,203 @@ mod tests {
     }
 
     #[test]
-    fn non_javascript_href_left_alone() {
+    fn anchor_absolute_href_rewritten_to_proxy_via() {
+        // 2026-06-06 escape vector fix: raw target on <a href> leaks to
+        // browser-native UI (hover/middle-click/copy-link/open-in-new-tab).
+        // Rewrite to a proxy-origin "?via=" URL + stash absolute on
+        // data-zp-target-url for the prelude click handler's fast path.
         let html = "<a href=\"https://example.com/x\">x</a>";
         let r = transform(html, &opts()).unwrap();
-        // Anchor href is handled by runtime-prelude click hook, not htmltx.
-        assert!(r.html.contains("href=\"https://example.com/x\""));
+        assert!(
+            !r.html.contains("href=\"https://example.com/x\""),
+            "raw target URL must not survive on <a href>: {}",
+            r.html
+        );
+        assert!(
+            r.html
+                .contains("href=\"http://proxy.localhost:18080/zp/?via="),
+            "anchor href must point at proxy launcher: {}",
+            r.html
+        );
+        assert!(
+            r.html
+                .contains("data-zp-target-url=\"https://example.com/x\""),
+            "absolute target must be preserved on data-zp-target-url: {}",
+            r.html
+        );
         assert!(!r.html.contains("data-zp-jsurl"));
+    }
+
+    #[test]
+    fn anchor_host_relative_resolved_then_proxied() {
+        let html = "<a href=\"/news/topAside\">x</a>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            r.html.contains(
+                "data-zp-target-url=\"https://example.com/news/topAside\""
+            ),
+            "host-relative anchor must resolve against target: {}",
+            r.html
+        );
+        assert!(
+            r.html
+                .contains("href=\"http://proxy.localhost:18080/zp/?via="),
+            "href must be proxy launcher: {}",
+            r.html
+        );
+        assert!(
+            !r.html.contains("href=\"/news/topAside\""),
+            "raw relative href must not survive: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn anchor_fragment_only_href_left_alone() {
+        // Page-internal fragment anchors (`#section`) carry no target host,
+        // so leave them as-is — the prelude click handler treats them as
+        // virtual hash updates.
+        let html = "<a href=\"#topAside\">x</a>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            r.html.contains("href=\"#topAside\""),
+            "fragment-only href must not be rewritten: {}",
+            r.html
+        );
+        assert!(
+            !r.html.contains("data-zp-target-url"),
+            "fragment-only href must not gain data-zp-target-url: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn area_href_rewritten_same_as_anchor() {
+        let html = "<area href=\"https://example.com/clickmap\" coords=\"0,0,10,10\">";
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            !r.html.contains("href=\"https://example.com/clickmap\""),
+            "area raw href must not survive: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains(
+                "data-zp-target-url=\"https://example.com/clickmap\""
+            ),
+            "area must carry data-zp-target-url: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn form_action_rewritten_to_proxy_via() {
+        let html = "<form action=\"https://example.com/login\"><input></form>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            !r.html.contains("action=\"https://example.com/login\""),
+            "form raw action must not survive: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains(
+                "data-zp-target-url=\"https://example.com/login\""
+            ),
+            "form must carry data-zp-target-url: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains(
+                "action=\"http://proxy.localhost:18080/zp/?via="
+            ),
+            "form action must point at proxy launcher: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn input_formaction_rewritten() {
+        let html = "<form><input type=\"submit\" formaction=\"https://example.com/submit\"></form>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            !r.html.contains("formaction=\"https://example.com/submit\""),
+            "input formaction raw must not survive: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains(
+                "data-zp-target-url=\"https://example.com/submit\""
+            ),
+            "input formaction must carry data-zp-target-url: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn button_formaction_rewritten() {
+        let html = "<form><button type=\"submit\" formaction=\"https://example.com/go\">Go</button></form>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            !r.html.contains("formaction=\"https://example.com/go\""),
+            "button formaction raw must not survive: {}",
+            r.html
+        );
+        assert!(
+            r.html
+                .contains("data-zp-target-url=\"https://example.com/go\""),
+            "button formaction must carry data-zp-target-url: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn naver_real_world_anchor_reproducer() {
+        // Real NAVER main page anchor patterns observed in DOM.
+        let html = concat!(
+            "<a href=\"https://whale.naver.com/ko/?wpid=main_theme1\" class=\"link_top\">",
+            "<span class=\"top_text\">\u{B2E4}\u{C6B4}\u{B85C}\u{B4DC}</span></a>",
+            "<a href=\"https://help.naver.com/alias/search/word/word_35.naver\" ",
+            "target=\"_self\" class=\"kwd_help\" data-clk=\"sly.help\">",
+            "\u{B3C4}\u{C6C0}\u{B9D0}</a>"
+        );
+        let opts = TransformOptions {
+            target_url: "https://www.naver.com/".into(),
+            strict: true,
+            pending_gate: false,
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        let r = transform(html, &opts).unwrap();
+        eprintln!("NAVER reproducer output:\n{}", r.html);
+        assert!(
+            r.html.contains("?via=https%3A%2F%2Fwhale%2Enaver%2Ecom"),
+            "whale.naver.com anchor must rewrite: {}",
+            r.html
+        );
+        assert!(
+            r.html.contains("data-zp-target-url=\"https://whale.naver.com"),
+            "data-zp-target-url must be set: {}",
+            r.html
+        );
+        assert!(
+            !r.html.contains("href=\"https://whale.naver.com"),
+            "raw whale.naver.com href must not survive: {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn proxy_origin_blank_skips_navigation_rewrite() {
+        // Host-test fallback: when proxy_origin is empty (legacy / test
+        // harness), don't synthesize a URL — leave the raw attribute so
+        // callers can opt out cleanly.
+        let html = "<a href=\"https://example.com/x\">x</a>";
+        let mut o = opts();
+        o.proxy_origin = String::new();
+        let r = transform(html, &o).unwrap();
+        assert!(
+            r.html.contains("href=\"https://example.com/x\""),
+            "blank proxy_origin must leave raw href: {}",
+            r.html
+        );
     }
 
     #[test]
@@ -974,21 +1242,25 @@ mod tests {
     }
 
     #[test]
-    fn anchor_and_iframe_left_alone() {
-        // Anchor click + iframe navigation are handled by runtime-prelude,
-        // not by attribute rewriting at parse time.
-        let html = "<a href=\"https://other.example/p\">x</a><iframe src=\"https://other.example/f\"></iframe>";
+    fn iframe_src_still_left_alone() {
+        // iframe navigation stays under the runtime-prelude's
+        // `installNetworkContainment` hook for now — rewriting iframe src in
+        // htmltx would race with the child-realm fetch pipeline (sw control
+        // reset after document.write, child Function captured, etc.). The
+        // anchor/form/input/button rewrite landed 2026-06-06 explicitly
+        // EXCLUDES iframe to avoid regression. See trap-notebook.
+        let html = "<iframe src=\"https://other.example/f\"></iframe>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains("href=\"https://other.example/p\""),
-            "{}",
-            r.html
-        );
-        assert!(
             r.html.contains("src=\"https://other.example/f\""),
-            "{}",
+            "iframe src must not be rewritten in htmltx: {}",
             r.html
         );
         assert!(!r.html.contains("/zp/api/fetch"), "{}", r.html);
+        assert!(
+            !r.html.contains("?via="),
+            "iframe src must not get the anchor ?via= treatment: {}",
+            r.html
+        );
     }
 }
