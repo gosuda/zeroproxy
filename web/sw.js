@@ -1009,8 +1009,10 @@ async function rewriteScriptResponse(resp, opt) {
       code = out.code;
     }
     if (!code) {
-      code = (self.ZPRewriter && self.ZPRewriter.blockSource) ? self.ZPRewriter.blockSource()
-        : "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
+      // 2026-06-07 split-bundle (c.1) Step 1: blockSource was a Rust-side
+      // accessor for a static string. Inline the literal so we can drop
+      // the wrapper from the rewriter-rs JS glue in the next milestones.
+      code = "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');";
     } else {
       // D2: append a fresh sourceMappingURL pointing to the proxy-side
       // composer. The Rust rewriter already stripped the original pragma

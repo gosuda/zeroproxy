@@ -1071,12 +1071,22 @@
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
     function rewriteDynamicFunctionBody(params, body) {
-      if (root.ZPRewriter && typeof root.ZPRewriter.rewriteFunctionBody === 'function') {
-        const out = root.ZPRewriter.rewriteFunctionBody(String(body || ''), params, virtualURL.href, ZP.CONTROL_PREFIX);
-        if (out && out.ok && typeof out.code === 'string') return out.code;
+      // 2026-06-07 split-bundle (c.1) Step 1: inline the wrap+strip the
+      // rewriter-rs JS glue used to do (`rewriteFunctionBody`). Routing
+      // through `rewriteScript` directly lets us drop the wrapper from
+      // the generated classic in the next milestones.
+      if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') {
         throw normalizedError('NotSupportedError');
       }
-      return rewriteWithPageRewriter(body, 'function');
+      const list = Array.isArray(params) ? params : [];
+      const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\n';
+      const suffix = '\n}';
+      const wrapped = prefix + String(body || '') + suffix;
+      const out = root.ZPRewriter.rewriteScript(wrapped, { kind: 'classic', targetUrl: virtualURL.href, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
+      if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
+      const end = out.code.length - suffix.length;
+      if (end < prefix.length) throw normalizedError('NotSupportedError');
+      return out.code.slice(prefix.length, end);
     }
     function rewriteWithPageRewriter(source, kind) {
       if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');
