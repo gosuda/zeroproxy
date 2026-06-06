@@ -190,14 +190,11 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                                     if let Some(abs) =
                                         absolute_target_url(trimmed, &target_for_attr)
                                     {
-                                        if let Some(next) = proxied_navigation_url(
-                                            &abs,
-                                            &proxy_origin,
-                                            "/zp/",
-                                        ) {
+                                        if let Some(next) =
+                                            proxied_navigation_url(&abs, &proxy_origin, "/zp/")
+                                        {
                                             let _ = el.set_attribute(&name, &next);
-                                            let _ = el
-                                                .set_attribute("data-zp-target-url", &abs);
+                                            let _ = el.set_attribute("data-zp-target-url", &abs);
                                         }
                                     }
                                 }
@@ -642,9 +639,8 @@ fn proxied_navigation_url(
     if proxy_origin.is_empty() {
         return None;
     }
-    let mut out = String::with_capacity(
-        proxy_origin.len() + control_prefix.len() + absolute.len() * 3 + 16,
-    );
+    let mut out =
+        String::with_capacity(proxy_origin.len() + control_prefix.len() + absolute.len() * 3 + 16);
     out.push_str(proxy_origin.trim_end_matches('/'));
     out.push_str(control_prefix);
     if !out.ends_with('/') {
@@ -916,9 +912,8 @@ mod tests {
         let html = "<a href=\"/news/topAside\">x</a>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            r.html.contains(
-                "data-zp-target-url=\"https://example.com/news/topAside\""
-            ),
+            r.html
+                .contains("data-zp-target-url=\"https://example.com/news/topAside\""),
             "host-relative anchor must resolve against target: {}",
             r.html
         );
@@ -964,9 +959,8 @@ mod tests {
             r.html
         );
         assert!(
-            r.html.contains(
-                "data-zp-target-url=\"https://example.com/clickmap\""
-            ),
+            r.html
+                .contains("data-zp-target-url=\"https://example.com/clickmap\""),
             "area must carry data-zp-target-url: {}",
             r.html
         );
@@ -982,16 +976,14 @@ mod tests {
             r.html
         );
         assert!(
-            r.html.contains(
-                "data-zp-target-url=\"https://example.com/login\""
-            ),
+            r.html
+                .contains("data-zp-target-url=\"https://example.com/login\""),
             "form must carry data-zp-target-url: {}",
             r.html
         );
         assert!(
-            r.html.contains(
-                "action=\"http://proxy.localhost:18080/zp/?via="
-            ),
+            r.html
+                .contains("action=\"http://proxy.localhost:18080/zp/?via="),
             "form action must point at proxy launcher: {}",
             r.html
         );
@@ -1007,9 +999,8 @@ mod tests {
             r.html
         );
         assert!(
-            r.html.contains(
-                "data-zp-target-url=\"https://example.com/submit\""
-            ),
+            r.html
+                .contains("data-zp-target-url=\"https://example.com/submit\""),
             "input formaction must carry data-zp-target-url: {}",
             r.html
         );
@@ -1056,7 +1047,8 @@ mod tests {
             r.html
         );
         assert!(
-            r.html.contains("data-zp-target-url=\"https://whale.naver.com"),
+            r.html
+                .contains("data-zp-target-url=\"https://whale.naver.com"),
             "data-zp-target-url must be set: {}",
             r.html
         );
