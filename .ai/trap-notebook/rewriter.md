@@ -63,9 +63,9 @@
 
 **남은 작업 (Phase 2 후속)**:
 
-1. **Launcher `?via=` handler** — 현재 launcher (`web/index.html`) 가 `?via=` query 를 받아 자동 share encrypt + reuseTabId open 하도록 추가. middle-click new-tab UX 정상화. ([함정노트 sw-integration 2026-06-02 "Launcher pre-nav 구현"](sw-integration.md#2026-06-02--launcher-pre-nav-구현) 의 reuseTabId 인프라 재사용)
+1. ~~**Launcher `?via=` handler**~~ → 완료 (별도 commit). `web/index.html` 의 `handleVia()` 가 page load 시 `?via=<target>` query 감지 → `registerShare` → `location.replace(sharePath + fragment)`. middle-click 시 새 탭에서 launcher 잠깐 보였다가 즉시 share URL 로 navigate. 사용자 입장에서 native browser link 동작과 동등 UX. taskweaver 검증: `taskweaver navigate -i zp --url "http://proxy.localhost:18080/zp/?via=https%3A%2F%2Fexample.com%2F"` → 결과 location `/zp/p/<encrypted>#k=<key>&server=...` 즉시 도달. ([web/index.html handleVia](../../web/index.html))
 2. **iframe/frame src** — 본 PR 에서 의도적 제외. PHASE3 작업에서 child-realm 파이프라인과 통합 검토.
-3. **`element.innerHTML = X` / `outerHTML` setter** — `DOMParser.parseFromString` 는 이미 `transformHTML` 거침 ([line 1156](../../web/runtime-prelude.js#L1156)). innerHTML setter 가 같은 transform 통과하는지 audit 필요. 통과하면 cover, 아니면 후속 fix.
+3. **두 `transformHTML` 구현체의 element 분기 1-1 비교 invariant** — static-policy 에 `anchor escape vector: zp-htmltx + prelude + launcher ?via= handler` 테스트 추가 (34/34 pass). zp-htmltx `is_navigation` 분기 + prelude `installURLProp setter` + setAttribute usesRaw + transformHTML walker `applyNavigationBackstop` + launcher `handleVia` 모두 pin. silent-skip 회귀 방지.
 
 **Follow-up (같은 세션 후속 fix)**: 본 fix 가 SSR transform side 만 cover 한 사실을 실측에서 확정:
 

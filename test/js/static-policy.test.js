@@ -1087,6 +1087,52 @@ test('D1: javascript: URL routing client-side handler', () => {
   assert.ok(rt.includes('Native.FunctionCtor'), 'rewritten body must use prelude-private FunctionCtor');
 });
 
+test('anchor escape vector: zp-htmltx + prelude + launcher ?via= handler', () => {
+  const htmltx = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const launcher = fs.readFileSync('web/index.html', 'utf8');
+  // Rust SSR rewrite: anchor/area/form/input/button URL attributes
+  // produce proxy-origin `?via=` URLs + data-zp-target-url stash.
+  assert.ok(
+    htmltx.includes('proxied_navigation_url'),
+    'zp-htmltx must define proxied_navigation_url helper'
+  );
+  assert.ok(
+    /is_navigation\s*=\s*matches!\([\s\S]*?\("a",\s*"href"\)[\s\S]*?\("form",\s*"action"\)/.test(htmltx),
+    'zp-htmltx main loop must dispatch a/area/form/formaction through is_navigation branch'
+  );
+  // Page-side prelude mirror: proxyViaURL helper.
+  assert.ok(rt.includes('function proxyViaURL'), 'runtime-prelude must define proxyViaURL');
+  // installURLProp setter must write the proxy URL (not raw target) to
+  // the DOM attribute.
+  assert.ok(
+    /setAttribute\(attrName,\s*proxyViaURL\(t\)\)/.test(rt),
+    'installURLProp setter must route raw attribute through proxyViaURL'
+  );
+  // setAttribute wrap usesRaw branch must also route through proxyViaURL.
+  assert.ok(
+    /usesRaw \? proxyViaURL\(t\) : t/.test(rt),
+    'setAttribute wrap usesRaw branch must call proxyViaURL'
+  );
+  // page-side transformHTML walker must process every node through the
+  // navigation backstop — same-name silent-skip bug from the 2026-06-06
+  // follow-up commit.
+  assert.ok(
+    /applyNavigationBackstop\(node\)/.test(rt),
+    'transformHTML walker must dispatch every node through applyNavigationBackstop'
+  );
+  // Launcher must convert `?via=<target>` into a real share entry.
+  assert.ok(launcher.includes('async function handleVia'), 'launcher must define handleVia');
+  assert.ok(
+    /params\.get\(['"]via['"]\)/.test(launcher),
+    'handleVia must read the via search param'
+  );
+  assert.ok(
+    /await handleVia\(\)/.test(launcher),
+    'launcher main entry must await handleVia before handleShare'
+  );
+});
+
 test('active browsing emits only encrypted prefixed p routes', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');

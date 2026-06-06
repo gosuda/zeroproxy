@@ -234,6 +234,38 @@
     const out = await registerShare(target, servers, challengeCompat);
     location.assign(proxyOrigin() + ZP.makeSharePath(out.share.encrypted) + ZP.makeShareFragment(out.share.key, out.servers));
   }
+  // 2026-06-06: `?via=<percent-encoded-absolute>` handler. zp-htmltx and
+  // the runtime-prelude rewrite every <a href> / <form action> to a proxy
+  // launcher URL of the form `<proxyOrigin>/zp/?via=<target>`, so any
+  // middle-click / Ctrl+click / target=_blank / "open in new tab" lands
+  // here in a fresh tab. Convert it to a real share entry and redirect.
+  async function handleVia() {
+    const params = new URLSearchParams(location.search);
+    const via = params.get('via');
+    if (!via) return false;
+    try {
+      const target = ZP.canonicalTargetURL(via).href;
+      const servers = ZP.parseRelayServersFromFragment(location.hash, relayOptions());
+      const challengeCompat = challengeCompatEnabled();
+      const slowLane = slowLaneRuleFor(target);
+      if (slowLane) {
+        setStatus(
+          slowLane.label + ' delays first-time visits to this subdomain by ~' +
+          slowLane.expectedSec + ' s (IP-reputation gate). Loading now — '
+          + 'follow-up links in this session will be instant.',
+          false
+        );
+      } else {
+        setStatus('Opening through ZeroProxy…');
+      }
+      const out = await registerShare(target, servers, challengeCompat);
+      location.replace(proxyOrigin() + ZP.makeSharePath(out.share.encrypted) + ZP.makeShareFragment(out.share.key, out.servers));
+    } catch (e) {
+      const code = (e && e.code) || (e && e.message) || 'INVALID_SHARE_LINK';
+      location.replace(ZP.errorPath(code));
+    }
+    return true;
+  }
   async function handleShare() {
     if (!ZP.isSharePath(location.pathname)) return false;
     const encrypted = ZP.shareRouteKey(location.pathname);
@@ -329,7 +361,7 @@
       setStatus('Preparing isolated transport…');
       await registerSW();
       await waitForRuntime();
-      if (!(await handleShare())) setStatus('Ready.');
+      if (!(await handleVia()) && !(await handleShare())) setStatus('Ready.');
     } catch (e) {
       setStatus(e.message || 'Startup failed', true);
     }
