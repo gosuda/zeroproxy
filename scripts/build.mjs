@@ -14,13 +14,18 @@ const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-s
 const cargoHome = process.env.CARGO_HOME || path.join(process.env.HOME || '', '.cargo');
 const cargoBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
 const wasmBindgenBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen');
-const minify = args.minify === true;
+// Minify by default — produces the artifact shipped to clients. Opt out
+// with `--no-minify` for readable dist output when chasing a bug.
+// Explicit `--minify` still works (no-op when default is already true)
+// so existing invocations keep parsing.
+const minify = args.noMinify !== true;
 const zpBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_bundle.wasm');
 const zpPageRtWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_rt.wasm');
 const zpBundleOutDir = path.join(webOut, '__zp');
 
 if (args.help) {
-  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --server-only     Build only the relay server\n  --rust-only       Build only the Rust WASM bundle\n  --skip-web        Do not build browser assets\n  --skip-server     Do not build the relay server\n  --skip-rust       Do not build the Rust WASM bundle\n  --minify          Minify bundled JavaScript\n  --no-clean        Keep existing output files not overwritten by this run\n`);
+  process.stdout.write(`Usage: node scripts/build.mjs [options]\n\nOptions:\n  --out <dir>       Output directory (default: dist)\n  --web-only        Build only browser assets\n  --server-only     Build only the relay server\n  --rust-only       Build only the Rust WASM bundle\n  --skip-web        Do not build browser assets\n  --skip-server     Do not build the relay server\n  --skip-rust       Do not build the Rust WASM bundle\n  --minify          Minify bundled JavaScript (default)
+  --no-minify       Emit readable bundled JavaScript (debug)\n  --no-clean        Keep existing output files not overwritten by this run\n`);
   process.exit(0);
 }
 
@@ -53,6 +58,7 @@ function parseArgs(argv) {
       case '--skip-server':
       case '--skip-rust':
       case '--minify':
+      case '--no-minify':
       case '--no-clean':
       case '--help':
         parsed[toKey(arg)] = true;
