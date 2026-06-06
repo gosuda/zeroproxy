@@ -836,6 +836,91 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
   assert.match(rootCargo, /zp-transport-codec = \{ path = "crates\/zp-transport-codec" \}/);
 });
 
+test('fingerprint hardening: navigator.webdriver + window.chrome facade', () => {
+  // Real Chrome 148 has window.chrome.csi() / .loadTimes() / .app and
+  // returns navigator.webdriver === false outside CDP. WebView2 +
+  // Tauri (the host shell taskweaver runs in) deviates on both
+  // counts (.webdriver may be true; chrome.webview leaks the Tauri
+  // ipc shape). Anti-bot WAFs probe these shapes — install a plausible
+  // facade so target pages can't distinguish ZeroProxy from a real
+  // Chrome.
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(
+    rt,
+    /defineAccessor\(proto, 'webdriver', \(\) => false\)/,
+    'navigator.webdriver must be pinned to false on Navigator.prototype',
+  );
+  assert.match(
+    rt,
+    /defineAccessor\(nav, 'webdriver', \(\) => false\)/,
+    'navigator.webdriver must be pinned to false on the navigator instance',
+  );
+  assert.match(
+    rt,
+    /function installChromeFingerprintFacade\(w\)/,
+    'chrome facade installer must exist',
+  );
+  // Replace whatever WebView2/Tauri put on window.chrome before
+  // installing our own — keeping `chrome.webview` would defeat the
+  // hardening entirely.
+  assert.match(
+    rt,
+    /try \{ delete w\.chrome; \} catch \{\}[\s\S]{0,200}Object\.defineProperty\(w, 'chrome'/,
+    'installChromeFingerprintFacade must drop the existing window.chrome before installing ours',
+  );
+  // installChromeFingerprintFacade must be called from
+  // installNavigatorIdentity so it runs during the standard install
+  // sequence (NavigatorIdentity step).
+  assert.match(
+    rt,
+    /function installNavigatorIdentity\(w\)[\s\S]{0,2000}installChromeFingerprintFacade\(w\);[\s\S]{0,40}\n  \}/,
+    'installNavigatorIdentity must call installChromeFingerprintFacade before returning',
+  );
+  // Plausible Chrome 148 csi() / loadTimes() / app shapes — probes
+  // check the return-value KEYS, not the values.
+  assert.match(rt, /function chromeCsi/);
+  assert.ok(rt.includes('startE:') && rt.includes('onloadT:') && rt.includes('pageT:') && rt.includes('tran:'),
+    'chrome.csi() return shape must include {startE, onloadT, pageT, tran}');
+  assert.match(rt, /function chromeLoadTimes/);
+  assert.ok(rt.includes('requestTime:') && rt.includes('firstPaintTime:') && rt.includes('connectionInfo:'),
+    'chrome.loadTimes() return shape must include {requestTime, firstPaintTime, connectionInfo}');
+  assert.match(
+    rt,
+    /isInstalled: false[\s\S]{0,200}InstallState[\s\S]{0,200}RunningState/,
+    'chrome.app must expose {isInstalled, InstallState, RunningState}',
+  );
+  // The facade object must NOT expose `webview:` or `runtime:` keys.
+  // chrome.webview is the Tauri/WebView2 host-ipc surface (worst tell);
+  // chrome.runtime is undefined off-extension on real Chrome. The
+  // documentation comment in runtime-prelude.js mentions `chrome.webview`
+  // by name — that's fine and excluded from this check; what's not fine
+  // is a `webview:` key on the returned facade.
+  const facadeBlock = rt.slice(
+    rt.indexOf('function buildChromeFingerprint'),
+    rt.indexOf('function installPopupHooks'),
+  );
+  assert.ok(facadeBlock.length > 0, 'buildChromeFingerprint block must exist');
+  assert.equal(
+    /^\s*webview\s*:/m.test(facadeBlock),
+    false,
+    'facade object must not declare a webview key (would re-leak the WebView2 ipc surface)',
+  );
+  assert.equal(
+    /^\s*runtime\s*:/m.test(facadeBlock),
+    false,
+    'facade object must not declare a runtime key (real Chrome leaves it undefined off-extension)',
+  );
+  // Symbol audit: every ZeroProxy install marker must be
+  // description-less so getOwnPropertySymbols(window).map(s => s.description)
+  // returns a list of `undefined` entries instead of the obvious
+  // "zeroproxy.*" tells the previous build leaked.
+  assert.equal(
+    /Symbol\.for\(\s*['"]zeroproxy/.test(rt),
+    false,
+    'no Symbol.for("zeroproxy.*") allowed — markers must be description-less Symbol() so anti-bot probes get no string match',
+  );
+});
+
 test('C1: WS closing handshake defers finish until port ack (RFC 6455 §7.1.6)', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const sw = fs.readFileSync('web/sw.js', 'utf8');

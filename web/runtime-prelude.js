@@ -1,7 +1,11 @@
 (() => {
   'use strict';
   const root = window;
-  const marker = Symbol.for('zeroproxy.runtime.installed');
+  // Description-less Symbol so getOwnPropertySymbols(window) leaks no
+  // "zeroproxy.*" tells. `Symbol.for` re-keys cross-realm, but each
+  // realm gets its own prelude run anyway, so dropping the registry
+  // is free. `marker.description === undefined` after this swap.
+  const marker = Symbol();
   if (root[marker]) return;
   Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
@@ -11,9 +15,10 @@
   // them. The named properties are the obvious tells — `window.ZP`,
   // `window.ZeroProxyRT` — that anti-bot probes (e.g. NAVER's warm-
   // session V8 wedge) check before deciding whether to enter their
-  // probe-defense tight loop. The Symbol.for('zeroproxy.runtime.installed')
-  // marker above is keyed by Symbol so it doesn't appear in
-  // getOwnPropertyNames either; only getOwnPropertySymbols can reach it.
+  // probe-defense tight loop. The install-already-ran marker above is
+  // a Symbol() (no description, not registered with Symbol.for) so
+  // getOwnPropertySymbols(window) returns [Symbol()] — opaque noise
+  // without a "zeroproxy.*" prefix anti-bot probes could match on.
   const ZP = globalThis.ZP;
   const ZeroProxyRTGlobal = globalThis.ZeroProxyRT;
   try { delete globalThis.ZP; } catch {}
@@ -90,12 +95,19 @@
   // proxy 로 override + sender queue 로 message dispatch 시 source 정정.
   const parentPostMessageSenderQueue = [];
   const parentRedirectFacades = new WeakMap();
-  const frameTargetOriginMarker = Symbol.for('zeroproxy.frame.targetOrigin');
-  const networkContainmentMarker = Symbol.for('zeroproxy.network.contained');
-  const iframeHooksMarker = Symbol.for('zeroproxy.iframe.hooks');
-  const safeFrameShimMarker = Symbol.for('zeroproxy.iframe.sfShim');
-  const stealthMarker = Symbol.for('zeroproxy.stealth.membrane');
-  const listenersKey = Symbol('zp.listeners');
+  // Description-less Symbols: `Object.getOwnPropertySymbols(obj)` still
+  // returns these, but `symbol.description === undefined` so anti-bot
+  // probes don't see the "zeroproxy.*" prefix that used to be embedded
+  // here. Cross-realm sharing isn't needed for these markers — each
+  // realm gets its own prelude install — so dropping `Symbol.for` is
+  // free. `listenersKey` was already description-less; pinning the
+  // rest to match.
+  const frameTargetOriginMarker = Symbol();
+  const networkContainmentMarker = Symbol();
+  const iframeHooksMarker = Symbol();
+  const safeFrameShimMarker = Symbol();
+  const stealthMarker = Symbol();
+  const listenersKey = Symbol();
   const windowMethodBindings = new Map();
   const integrityBackupAttr = 'data-zp-integrity';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
@@ -1805,6 +1817,106 @@
     defineAccessor(nav, 'appVersion', () => TARGET_APP_VERSION);
     defineAccessor(proto, 'platform', () => TARGET_PLATFORM);
     defineAccessor(nav, 'platform', () => TARGET_PLATFORM);
+    // navigator.webdriver: real Chrome 148 returns `false`. WebView2
+    // and CDP-controlled instances return `true`, which every modern
+    // anti-bot WAF flags as a robot signal. Pin to `false` so target
+    // pages can't distinguish ZeroProxy from a hand-driven Chrome.
+    defineAccessor(proto, 'webdriver', () => false);
+    defineAccessor(nav, 'webdriver', () => false);
+    installChromeFingerprintFacade(w);
+  }
+
+  // chrome.* surface — present on real Chrome / Edge-Chromium and
+  // checked by anti-bot WAFs (Cloudflare, NAVER, Akamai). Missing on
+  // strict-headless Chrome ≈ bot signal; Edge WebView2 exposes
+  // `chrome.webview` for Tauri ipc, which is a worse tell (it spells
+  // out the host shell). Build a plausible Chrome-148 chrome object
+  // and replace whatever WebView2 dropped in.
+  function installChromeFingerprintFacade(w) {
+    let virtualChrome;
+    try {
+      virtualChrome = buildChromeFingerprint(w);
+    } catch { return; }
+    if (!virtualChrome) return;
+    // Drop the existing object (Tauri / WebView2 may have planted
+    // `chrome.webview`, `chrome.webview.hostObjects`, etc. which all
+    // signal "not a real browser"). Reassign via accessor so a future
+    // delete attempt doesn't unwedge our installation.
+    try { delete w.chrome; } catch {}
+    try {
+      Object.defineProperty(w, 'chrome', {
+        get() { return virtualChrome; },
+        set() { /* swallow */ },
+        enumerable: true, // real Chrome's window.chrome is enumerable
+        configurable: false,
+      });
+    } catch {}
+  }
+
+  function buildChromeFingerprint(w) {
+    // Reference: real Chrome 148 — `chrome.csi()`, `chrome.loadTimes()`,
+    // `chrome.app = { isInstalled, InstallState, RunningState }`. Both
+    // `csi` and `loadTimes` are deprecated for years but ALWAYS present
+    // on a real Chrome page realm — checking their existence + return
+    // shape is a cheap fingerprint probe.
+    const perf = w.performance;
+    const baseT = perf && typeof perf.timeOrigin === 'number' ? perf.timeOrigin : Date.now();
+    const navT = perf && perf.timing ? perf.timing : null;
+    function chromeCsi() {
+      const now = Date.now();
+      return {
+        startE: Math.floor(baseT),
+        onloadT: navT && navT.loadEventEnd ? navT.loadEventEnd : Math.floor(baseT),
+        pageT: now - Math.floor(baseT),
+        tran: 15, // CLIENT_REDIRECT — most common transition type
+      };
+    }
+    function chromeLoadTimes() {
+      const rt = baseT / 1000;
+      const lt = (navT && navT.loadEventEnd ? navT.loadEventEnd : Date.now()) / 1000;
+      return {
+        requestTime: rt,
+        startLoadTime: rt,
+        commitLoadTime: rt,
+        finishDocumentLoadTime: lt,
+        finishLoadTime: lt,
+        firstPaintTime: lt,
+        firstPaintAfterLoadTime: 0,
+        navigationType: 'Other',
+        wasFetchedViaSpdy: true,
+        wasNpnNegotiated: true,
+        npnNegotiatedProtocol: 'h2',
+        wasAlternateProtocolAvailable: false,
+        connectionInfo: 'h2',
+      };
+    }
+    const app = Object.freeze({
+      isInstalled: false,
+      InstallState: Object.freeze({
+        DISABLED: 'disabled',
+        INSTALLED: 'installed',
+        NOT_INSTALLED: 'not_installed',
+      }),
+      RunningState: Object.freeze({
+        CANNOT_RUN: 'cannot_run',
+        READY_TO_RUN: 'ready_to_run',
+        RUNNING: 'running',
+      }),
+    });
+    try { maskNativeFunction(chromeCsi, 'csi'); } catch {}
+    try { maskNativeFunction(chromeLoadTimes, 'loadTimes'); } catch {}
+    return Object.freeze({
+      csi: chromeCsi,
+      loadTimes: chromeLoadTimes,
+      app,
+      // `runtime` is undefined off-extension on real Chrome — leaving
+      // it out is the spec-correct stub. Probes that check
+      // `typeof chrome.runtime === 'undefined'` see what they expect.
+      // `webstore` legacy — also undefined.
+      // `webview` — DELIBERATELY OMITTED. Tauri WebView2 plants this;
+      // its presence is a strong host-shell tell. The accessor above
+      // replaces the whole chrome object so the leak is gone.
+    });
   }
 
   function installPopupHooks(w) {
