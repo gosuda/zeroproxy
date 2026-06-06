@@ -11,14 +11,14 @@ crate-type = ["rlib"]
 zp-shared = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-oxc_allocator = "0.133"
-oxc_parser = "0.133"
-oxc_ast = "0.133"
-oxc_ast_visit = "0.133"
-oxc_codegen = "0.133"
-oxc_span = "0.133"
-oxc_str = "0.133"
-oxc_syntax = "0.133"
+oxc_allocator = { version = "0.133", default-features = false }
+oxc_parser = { version = "0.133", default-features = false }
+oxc_ast = { version = "0.133", default-features = false }
+oxc_ast_visit = { version = "0.133", default-features = false }
+oxc_codegen = { version = "0.133", default-features = false }
+oxc_span = { version = "0.133", default-features = false }
+oxc_str = { version = "0.133", default-features = false }
+oxc_syntax = { version = "0.133", default-features = false }
 # D2 follow-on: parse the target site's original `.map` so we can
 # emit `rewriter_map ∘ original_map` and DevTools resolves back to
 # pre-bundler TypeScript / pre-minify sources instead of stopping at
