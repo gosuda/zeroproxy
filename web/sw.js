@@ -81,7 +81,19 @@ function rewriteCacheSet(key, code) {
 }
 
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
-self.addEventListener('activate', event => event.waitUntil((async () => { await self.clients.claim(); initBundle().catch(() => {}); })()));
+// 2026-06-07 split-bundle (c.1) Step 2.0: activate 가 initBundle 을 실제로
+// await (이전엔 fire-and-forget). SW 가 activated 상태로 진입할 때 ZPBundle.ready
+// 가 보장됨 → 첫 fetch 가 cold-init latency 없이 즉시 ZPBundle 사용 가능. 30s
+// timeout 으로 wasm fetch 가 실패해도 activate 가 stuck 되지 않도록 보호.
+// 그래도 ZPBundle.ready 가 false 면 hot-path 가 `await initBundle()` 재시도.
+self.addEventListener('activate', event => event.waitUntil((async () => {
+  await self.clients.claim();
+  const BUNDLE_BOOT_TIMEOUT_MS = 30000;
+  await Promise.race([
+    initBundle().catch(() => null),
+    new Promise(r => setTimeout(r, BUNDLE_BOOT_TIMEOUT_MS)),
+  ]);
+})()));
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
 

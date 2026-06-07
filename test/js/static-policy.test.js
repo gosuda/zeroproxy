@@ -531,6 +531,29 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
+// 2026-06-07 split-bundle (c.1) Step 2.0: activate event awaits initBundle so
+// the SW transitions to `activated` only when ZPBundle.ready is true. Pin the
+// invariant + the bounded timeout so the activate handler can't accidentally
+// regress to fire-and-forget (which previously meant the first script fetch
+// paid the full cold-init latency, a hypothesis on the NAVER hydration wedge
+// observed during the Step 2a abort — see trap-notebook 2026-06-07).
+test('SW activate event awaits initBundle with bounded timeout (Step 2.0)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // The activate handler MUST `await` either `initBundle()` itself or a
+  // Promise.race wrapping it. Pure fire-and-forget (`initBundle().catch`)
+  // must NOT be the terminal expression of the waitUntil promise.
+  assert.match(sw, /addEventListener\(['"]activate['"]/, 'activate listener must exist');
+  // Bounded timeout sentinel must guard against a stuck wasm fetch.
+  assert.match(sw, /BUNDLE_BOOT_TIMEOUT_MS/, 'activate must declare a bounded timeout for bundle boot');
+  assert.match(sw, /Promise\.race\(\[\s*initBundle\(\)/, 'activate must race initBundle against the timeout');
+  // The Step 2a-era pattern was `initBundle().catch(() => {})` as a trailing
+  // bare statement inside waitUntil. Asserting that the activate body
+  // contains an await against initBundle's race rules that out.
+  const activateBody = sw.match(/addEventListener\(['"]activate['"][\s\S]*?\)\)\);/);
+  assert.ok(activateBody, 'activate handler body must be locatable');
+  assert.match(activateBody[0], /await\s+Promise\.race/, 'activate must await the initBundle race');
+});
+
 test('SW patch-mode emit is wired with applier helper', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   assert.ok(sw.includes('rewriteScriptPatches'), 'SW must expose rewriteScriptPatches on ZPBundle');
