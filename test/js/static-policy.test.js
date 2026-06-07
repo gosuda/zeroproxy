@@ -531,6 +531,32 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
+// 2026-06-07 split-bundle (c.1) Step 2.1: rewriteScriptResponse runs the
+// modern ZPBundle pipeline as a shadow comparison after the legacy
+// ZPRewriter produces the served response. Pin the comparator + buffer +
+// debug endpoint + microtask-deferred invocation so the Step 2.2 swap can
+// be informed by real divergence data instead of guessing.
+test('SW shadow-compare records divergence between legacy + modern rewriters (Step 2.1)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /SHADOW_LOG_CAP/, 'shadow log must declare a capacity constant');
+  assert.match(sw, /function recordShadowDivergence/, 'recorder helper must exist');
+  assert.match(sw, /function shadowCompareRewriters/, 'shadow compare helper must exist');
+  // Comparator must invoke BOTH modern paths so divergences at either layer surface.
+  assert.match(sw, /shadowCompareRewriters[\s\S]*?ZPBundle\.rewriteScriptPatches/, 'shadow must invoke patch-mode modern path');
+  assert.match(sw, /shadowCompareRewriters[\s\S]*?ZPBundle\.rewriteScript\(/, 'shadow must also invoke full re-emit modern path');
+  // Divergence record fields — pin so the schema can't silently regress
+  // before Step 2.2's analysis script depends on them.
+  assert.match(sw, /firstDiffIdx/, 'divergence record must include firstDiffIdx');
+  assert.match(sw, /legacyAroundDiff/, 'divergence record must include legacy excerpt');
+  assert.match(sw, /modernAroundDiff/, 'divergence record must include modern excerpt');
+  assert.match(sw, /modernThrew/, 'divergence record must include modern-throw branch');
+  // Must run in a deferred microtask after the legacy SUCCESS branch sets `code`.
+  assert.match(sw, /Promise\.resolve\(\)\.then\(\(\)\s*=>\s*shadowCompareRewriters/, 'shadow must run deferred after legacy success');
+  // Debug endpoint for page-realm probe + clear support.
+  assert.match(sw, /'\/zp\/api\/__shadow_log'/, 'debug endpoint must exist for page probe');
+  assert.match(sw, /searchParams\.get\(['"]clear['"]\)/, 'debug endpoint must support clearing the buffer');
+});
+
 // 2026-06-07 split-bundle (c.1) Step 2.0: activate event awaits initBundle so
 // the SW transitions to `activated` only when ZPBundle.ready is true. Pin the
 // invariant + the bounded timeout so the activate handler can't accidentally

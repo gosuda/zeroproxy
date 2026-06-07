@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import esbuild from 'esbuild';
 import { spawnSync } from 'node:child_process';
-import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -91,12 +91,30 @@ function selectedTargets(parsed) {
 }
 
 async function cleanSelectedOutputs(selected) {
+  // When the Rust step is skipped, the `dist/web/__zp/` subdir holds the
+  // wasm-bindgen output from a previous build — wiping it would force the
+  // dev to re-run the (slow) Rust build before SW can register. Preserve
+  // __zp when rust is not being rebuilt.
+  async function rmWebPreserveZp() {
+    if (!selected.rust) {
+      const entries = await readdir(webOut, { withFileTypes: true }).catch(() => []);
+      await Promise.all(entries
+        .filter(d => d.name !== '__zp')
+        .map(d => rm(path.join(webOut, d.name), { recursive: true, force: true })));
+    } else {
+      await rm(webOut, { recursive: true, force: true });
+    }
+  }
   if (selected.web && selected.server) {
-    await rm(outRoot, { recursive: true, force: true });
+    if (!selected.rust) {
+      await Promise.all([rmWebPreserveZp(), rm(serverOut, { force: true })]);
+    } else {
+      await rm(outRoot, { recursive: true, force: true });
+    }
     return;
   }
   const removals = [];
-  if (selected.web) removals.push(rm(webOut, { recursive: true, force: true }));
+  if (selected.web) removals.push(rmWebPreserveZp());
   if (selected.server) removals.push(rm(serverOut, { force: true }));
   await Promise.all(removals);
 }

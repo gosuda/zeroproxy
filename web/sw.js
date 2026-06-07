@@ -266,7 +266,7 @@ function internalPath(path) {
   return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
-  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';
+  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace' || path === '/zp/api/__shadow_log';
 }
 
 async function internalAsset(req, url) {
@@ -429,6 +429,19 @@ async function runtimeAPI(req, url, clientId) {
       rawMatches,
       namedGroups,
     }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  if (url.pathname === '/zp/api/__shadow_log') {
+    // 2026-06-07 split-bundle (c.1) Step 2.1: dump the shadow-compare
+    // circular buffer for the page-realm probe. Plain JSON; the buffer
+    // is process-local SW state (resets on SW restart). Cleared on
+    // ?clear=1.
+    if (url.searchParams.get('clear') === '1') {
+      shadowLog.length = 0;
+    }
+    return new Response(JSON.stringify(shadowLog, null, 2), {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    });
   }
   if (url.pathname === '/zp/api/fetch') {
     // GET ?url=<absolute> — issued by the CSS rewriter for url(...) / @import
@@ -934,6 +947,69 @@ function shouldRewriteScript(req, resp) {
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\b(?:java|ecma)script\b/i.test(ct) || /\btext\/(?:x-)?javascript\b/i.test(ct);
 }
+// 2026-06-07 split-bundle (c.1) Step 2.1: shadow-compare circular buffer and
+// recorder. `rewriteScriptResponse` runs the modern ZPBundle pipeline in a
+// deferred microtask after the legacy ZPRewriter produced the served response,
+// then any divergence (output length / first differing byte / modern-only
+// throw) is appended here. Capped circular buffer; readable from page realm
+// via the `/zp/api/__shadow_log` debug endpoint. NO behavior change to the
+// served response — legacy output stays the source of truth in Step 2.1.
+const SHADOW_LOG_CAP = 100;
+const shadowLog = [];
+function recordShadowDivergence(entry) {
+  if (shadowLog.length >= SHADOW_LOG_CAP) shadowLog.shift();
+  shadowLog.push(entry);
+}
+function shadowCompareRewriters(source, opt, legacyCode) {
+  if (typeof legacyCode !== 'string' || !legacyCode) return;
+  if (!self.ZPBundle || !self.ZPBundle.ready) return;
+  const kind = opt.kind || 'classic';
+  const target = opt.targetUrl || '';
+  let modernCode = null;
+  let modernThrew = null;
+  let path = '';
+  try {
+    if (typeof self.ZPBundle.rewriteScriptPatches === 'function') {
+      path = 'patches';
+      const envelope = self.ZPBundle.rewriteScriptPatches(source, kind, target);
+      modernCode = applyScriptPatches(source, envelope);
+    } else {
+      path = 'full';
+      modernCode = self.ZPBundle.rewriteScript(source, kind, target);
+    }
+  } catch (e) {
+    modernThrew = String(e && e.message || e);
+  }
+  if (modernThrew) {
+    recordShadowDivergence({
+      ts: Date.now(), kind, target, path,
+      sourceLen: source.length,
+      legacyLen: legacyCode.length,
+      modernThrew,
+      legacyHead: legacyCode.slice(0, 200),
+      sourceHead: source.slice(0, 200),
+    });
+    return;
+  }
+  if (typeof modernCode !== 'string' || modernCode === legacyCode) return;
+  const n = Math.min(legacyCode.length, modernCode.length);
+  let firstDiffIdx = -1;
+  for (let i = 0; i < n; i++) {
+    if (legacyCode.charCodeAt(i) !== modernCode.charCodeAt(i)) { firstDiffIdx = i; break; }
+  }
+  if (firstDiffIdx < 0) firstDiffIdx = n;
+  const around = (s, i) => s.slice(Math.max(0, i - 20), i + 40);
+  recordShadowDivergence({
+    ts: Date.now(), kind, target, path,
+    sourceLen: source.length,
+    legacyLen: legacyCode.length,
+    modernLen: modernCode.length,
+    firstDiffIdx,
+    legacyAroundDiff: around(legacyCode, firstDiffIdx),
+    modernAroundDiff: around(modernCode, firstDiffIdx),
+  });
+}
+
 // Apply a patch envelope produced by `ZPBundle.rewriteScriptPatches` over the
 // original source. Patches are non-overlapping byte ranges (sorted by start
 // inside the Rust crate) — we walk them in order, splicing replacements
@@ -1019,6 +1095,19 @@ async function rewriteScriptResponse(resp, opt) {
       } catch (rustErr) { /* swallow; fall through to block */ }
     } else {
       code = out.code;
+      // 2026-06-07 split-bundle (c.1) Step 2.1: shadow-compare. Fire the
+      // modern ZPBundle pipeline in a deferred microtask so the legacy
+      // response (`code`) ships without the modern's CPU cost on the hot
+      // path. Divergence appended to `shadowLog`; readable via
+      // /zp/api/__shadow_log.
+      // CRITICAL: capture the legacy output value NOW, not via the `code`
+      // let-binding. The pragma-append + cache-set code below mutates
+      // `code`, so passing `code` into the microtask closure would
+      // compare against a corrupted post-pragma legacy form.
+      const legacyForShadow = code;
+      if (legacyForShadow) {
+        Promise.resolve().then(() => shadowCompareRewriters(source, opt, legacyForShadow));
+      }
     }
     if (!code) {
       // 2026-06-07 split-bundle (c.1) Step 1: blockSource was a Rust-side

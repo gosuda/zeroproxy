@@ -4,6 +4,37 @@
 
 ---
 
+## 2026-06-07 — split-bundle (c.1) Step 2.1 shadow-compare 가 발견한 modern rewriter 의 두 가지 회귀 — patch-mode marker resolution 누락 + `Function` global 미보호
+
+**Site/Pattern**: shadow-compare 모드 ([web/sw.js](../../web/sw.js) `shadowCompareRewriters`) 로 NAVER + Wikipedia 의 SW-rewritten 스크립트 outputs (legacy ZPRewriter vs modern ZPBundle) 를 비교. Wikipedia 전체 스크립트는 0 divergence (modern 도 OK). NAVER 의 두 스크립트가 divergence 노출.
+
+**Finding 1 — patch-mode marker resolution 누락 (FATAL, patches API 가 그대로 못 씀)**:
+- Source: `https://ssl.pstatic.net/tveta/libs/ndpsdk/prod/ndp-loader.js` (1170 byte upstream JS)
+- Legacy output (1354 byte): `__zp_get(globalThis,"window").ndpsdk=...`
+- Modern output (1274 byte): `GLOBAL_GETwindow.ndpsdk=GLOBAL_GETw...`
+- 원인: [crates/zp-rewriter/src/lib.rs](../../crates/zp-rewriter/src/lib.rs) 의 `rewrite_script_patches` 가 반환하는 patch envelope 안의 `replacement` 필드는 raw marker 문자열 (`\u{1}GLOBAL_GET\u{1}<name>\u{1}`, `\u{1}MEMBER_GET\u{1}<obj_start>\u{1}<obj_end>\u{1}<prop>\u{1}`, `\u{1}METHOD_CALL\u{1}...`). Rust 의 `apply_patches` (lib.rs line 307) 가 이 marker 들을 해석해서 `__zp_get(globalThis,"window")` / `__zp_get(window, "navigator")` 등 최종 코드로 변환. 그러나 SW 의 `applyScriptPatches` ([web/sw.js](../../web/sw.js)) 는 단순 splicer — marker 인식 못 하고 그대로 source 에 splice → 실행 시 SyntaxError.
+- 함의: SW 의 patch-mode fallback 경로 (`rewriteScriptPatches` → `applyScriptPatches`) 가 marker 가 나오는 모든 script (실제로 거의 모든 real-world JS) 에 대해 invalid JS 를 생성. 지금까지는 legacy ZPRewriter 가 primary 라 fallback 이 거의 호출 안 되어 silent 였음. Step 2.2 swap 전에 **필수 fix**: (a) `rewrite_script_patches` 가 marker 가 이미 resolve 된 final replacement strings 만 반환하도록 수정, (b) 혹은 patches API 를 deprecate 하고 `rewriteScript` (full re-emit) 만 사용. 옵션 (a) 가 patch-mode 의 성능 이득 (~MB 의 wbg string-copy 회피) 을 유지하지만 Rust 측 작업 필요.
+
+**Finding 2 — `Function` global 누락 (SEMANTIC GAP, eval-equivalent escape vector)**:
+- Source: `https://ssl.pstatic.net/sstatic/fe/sfe/cross-domain-storage/cross-domain-storage-remote-3.0.0.js` (39923 byte)
+- Legacy output (40899 byte): `...i=__zp_get(globalThis,"Function").prototype;...`
+- Modern output (40235 byte): `...i=Function.prototype;...`
+- 원인: [crates/zp-rewriter/src/lib.rs:86](../../crates/zp-rewriter/src/lib.rs#L86) 의 `DANGEROUS_GLOBALS` 에 `Function` 없음. legacy rewriter-rs ([rewriter-rs/src/lib.rs](../../rewriter-rs/src/lib.rs)) 는 `Function` 포함.
+- 함의: target site 가 `Function.prototype.constructor` 으로 `Function` constructor 에 접근하면 `new Function('return globalThis')()` 같은 escape 가능. membrane 의 `__zp_get` 우회. PHASE2 strict mode "탈출 없는 감옥" 위반. modern 의 `DANGEROUS_GLOBALS` 에 `Function` (그리고 sibling check: `eval`?) 추가 필요.
+
+**Step 2.1 결과**:
+- shadow-compare 인프라 자체는 작동 ([web/sw.js shadowCompareRewriters + recordShadowDivergence](../../web/sw.js)). 100 entry circular buffer + `/zp/api/__shadow_log` endpoint + microtask-deferred 로 hot path latency 0. divergence 형식에 `firstDiffIdx` + 60-byte around-the-diff 양쪽 excerpt + modernThrew branch 포함.
+- 첫 시도 시 closure bug: `code` 가 let-binding 이라 microtask 시점에 pragma-append 후 값으로 비교 → false positive (legacy=source+pragma vs modern=source). 수정: `const legacyForShadow = code` 로 snapshot 캡쳐 후 closure 에 전달.
+- 빌드 pipeline bug 발견: `npm run build -- --skip-rust` 가 `dist/web` 통째로 wipe 한 후 `dist/web/__zp/` (rust 산출물) 미복원 → 다음 SW 등록 시 wasm fetch 503. fix: `scripts/build.mjs` 의 `cleanSelectedOutputs` 가 rust skip 시 `__zp` subdir 만 보존 (rmWebPreserveZp helper).
+
+**다음 단계 (Step 2.2 전 prerequisite)**:
+1. zp-rewriter 의 `rewrite_script_patches` 가 marker-resolved final replacement strings 만 반환하도록 변경, OR JS 측 applyScriptPatches 에 marker resolver 포팅 (Rust 의 GLOBAL_GET/MEMBER_GET/MEMBER_SET/METHOD_CALL marker 형식 보고 결정).
+2. zp-rewriter 의 `DANGEROUS_GLOBALS` 에 `Function` 추가 + 회귀 테스트.
+3. shadow-compare 다시 돌려서 0 divergence 확인.
+4. 그 다음에 Step 2.2 SW primary swap 시도.
+
+---
+
 ## 2026-06-07 — split-bundle (c.1) Step 2a SW swap NAVER renderer wedge — `ZPRewriter.rewriteScript` legacy primary 경로를 `ZPBundle` (modern OXC 0.133) 으로 교체했을 때 NAVER 메인 hydration 단계에서 WebView2 renderer 완전 wedge. **Revert + Step 2 전략 재설계**
 
 **Site/Pattern**: NAVER 메인 (`https://www.naver.com/`) cold load 시 검색 box 만 남고 메인 컨텐츠 (뉴스/쇼핑/광고/추천) 전체 사라짐. taskweaver `console-logs` → `Uncaught SyntaxError: Invalid or unexpected token @http://proxy.localhost:18080/zp/api/fetch?url=https%3A%2F%2Fssl.pstatic.net%2Ftveta%2Flibs%2Fndpsdk%2Fprod%2Fndp-loader.js:1`. SW 측 디버그 stash (`/zp/api/__debug_ndp` endpoint) 로 rewritten body 추출 → **3281 byte HTML 본문** (`<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" ...><html xmlns="..."><head><title>네이버 :: 페이지를 찾을 수 없습니다.`). 즉 upstream 이 JS 가 아닌 **404 HTML** 을 반환. taskweaver `pause` → renderer 완전 wedge (7 minidumps, empty js_stack, JS-thread 응답 없음). 같은 증상 패턴은 2026-06-06 iframe/frame src rewrite 시도 때와 동일.
