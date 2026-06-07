@@ -1,11 +1,13 @@
+const NativeString = String;
+
 export function attrLocalName(key) {
-  const s = String(key || '').toLowerCase();
+  const s = NativeString(key || '').toLowerCase();
   const i = s.indexOf(':');
   return i >= 0 ? s.slice(i + 1) : s;
 }
 
 export function tokenListContains(list, token) {
-  return String(list || '').toLowerCase().split(/[\s,]+/).includes(token);
+  return NativeString(list || '').toLowerCase().split(/[\s,]+/).includes(token);
 }
 
 export function isBlockedLinkRelValue(rel) {
@@ -16,14 +18,14 @@ export function isBlockedLinkRelValue(rel) {
 }
 
 export function isIconLinkRelValue(rel) {
-  for (const token of String(rel || '').toLowerCase().split(/[\s,]+/)) {
+  for (const token of NativeString(rel || '').toLowerCase().split(/[\s,]+/)) {
     if (token === 'icon' || token === 'mask-icon' || token === 'apple-touch-icon' || token === 'apple-touch-icon-precomposed' || token === 'apple-touch-startup-image' || token === 'fluid-icon') return true;
   }
   return false;
 }
 
 export function isStylesheetLinkRelValue(rel) {
-  for (const token of String(rel || '').toLowerCase().split(/[\s,]+/)) if (token === 'stylesheet') return true;
+  for (const token of NativeString(rel || '').toLowerCase().split(/[\s,]+/)) if (token === 'stylesheet') return true;
   return false;
 }
 

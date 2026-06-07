@@ -1,9 +1,28 @@
-const SAME_WINDOW_KEYS = new Set(['window', 'self', 'globalThis', 'frames']);
-const BOUNDARY_WINDOW_KEYS = new Set(['top', 'parent', 'opener']);
-const NO_WINDOW_ALIAS = Symbol('zeroproxy.noWindowAlias');
+const NativeArray = Array;
+const NativeFunctionBind = Function.prototype.bind;
+const NativeObject = Object;
+const NativeProxy = Proxy;
+const NativeReflect = Reflect;
+const NativeSet = Set;
+const NativeString = String;
+const NativeSymbol = Symbol;
+const nativeArrayIsArray = NativeArray.isArray;
+const nativeObjectDefineProperty = NativeObject.defineProperty;
+const nativeObjectFreeze = NativeObject.freeze;
+const nativeReflectApply = NativeReflect.apply;
+const nativeReflectConstruct = NativeReflect.construct;
+const nativeReflectGet = NativeReflect.get;
+const nativeReflectGetOwnPropertyDescriptor = NativeReflect.getOwnPropertyDescriptor;
+const nativeReflectHas = NativeReflect.has;
+const nativeReflectOwnKeys = NativeReflect.ownKeys;
+const nativeReflectSet = NativeReflect.set;
+
+const SAME_WINDOW_KEYS = new NativeSet(['window', 'self', 'globalThis', 'frames']);
+const BOUNDARY_WINDOW_KEYS = new NativeSet(['top', 'parent', 'opener']);
+const NO_WINDOW_ALIAS = NativeSymbol('zeroproxy.noWindowAlias');
 
 function normalizeProperty(prop) {
-  return typeof prop === 'symbol' ? prop : String(prop);
+  return typeof prop === 'symbol' ? prop : NativeString(prop);
 }
 
 function assignmentValue(current, op, value) {
@@ -17,7 +36,7 @@ function assignmentValue(current, op, value) {
 
 function defineChildValue(w, maskNativeFunction, key, value) {
   try {
-    Object.defineProperty(w, key, { value, enumerable: false, configurable: true, writable: true });
+    nativeObjectDefineProperty(w, key, { value, enumerable: false, configurable: true, writable: true });
     maskNativeFunction(value, key);
     return true;
   } catch {
@@ -43,12 +62,12 @@ function createChildLocation({ getVirtualURL, maskMethods, maskNativeFunction })
     reload() {},
     toString() { return getVirtualURL().href; },
     valueOf() { return getVirtualURL().href; },
-    [Symbol.toPrimitive]() { return getVirtualURL().href; }
+    [NativeSymbol.toPrimitive]() { return getVirtualURL().href; }
   };
-  try { Object.defineProperty(locationFacade, Symbol.toStringTag, { value: 'Location', enumerable: false, configurable: true }); } catch {}
-  try { Object.freeze(locationFacade); } catch {}
+  try { nativeObjectDefineProperty(locationFacade, NativeSymbol.toStringTag, { value: 'Location', enumerable: false, configurable: true }); } catch {}
+  try { nativeObjectFreeze(locationFacade); } catch {}
   maskMethods(locationFacade, ['assign','replace','reload','toString','valueOf']);
-  maskNativeFunction(locationFacade[Symbol.toPrimitive], Symbol.toPrimitive);
+  maskNativeFunction(locationFacade[NativeSymbol.toPrimitive], NativeSymbol.toPrimitive);
   return locationFacade;
 }
 
@@ -64,17 +83,17 @@ function createRootHelpers(root) {
 }
 
 function childScopeValue(scope, w, prop, boundaryWindow, windowBoundMethods) {
-  if (prop === Symbol.unscopables) return undefined;
+  if (prop === NativeSymbol.unscopables) return undefined;
   if (SAME_WINDOW_KEYS.has(prop)) return scope;
   if (BOUNDARY_WINDOW_KEYS.has(prop)) return boundaryWindow(w[prop]);
   const value = w[prop];
-  return typeof value === 'function' && windowBoundMethods.has(prop) ? value.bind(w) : value;
+  return typeof value === 'function' && windowBoundMethods.has(prop) ? nativeReflectApply(NativeFunctionBind, value, [w]) : value;
 }
 
 function createChildScope(w, boundaryWindow, windowBoundMethods) {
   let scope;
-  scope = new Proxy(w, {
-    has(_target, prop) { return prop !== Symbol.unscopables; },
+  scope = new NativeProxy(w, {
+    has(_target, prop) { return prop !== NativeSymbol.unscopables; },
     get(_target, prop) { return childScopeValue(scope, w, prop, boundaryWindow, windowBoundMethods); },
     set(target, prop, value) {
       target[prop] = value;
@@ -87,11 +106,11 @@ function createChildScope(w, boundaryWindow, windowBoundMethods) {
 function createRootAccessors(root, rootScope) {
   const rootGet = (base, prop) => {
     if (root.__zp_get) return root.__zp_get(base === root ? rootScope() : base, prop);
-    return Reflect.get(Object(base), prop);
+    return nativeReflectGet(NativeObject(base), prop);
   };
   const rootSet = (base, prop, value) => {
     if (root.__zp_set) return root.__zp_set(base === root ? rootScope() : base, prop, value);
-    Reflect.set(Object(base), prop, value);
+    nativeReflectSet(NativeObject(base), prop, value);
     return value;
   };
   return { rootGet, rootSet };
@@ -124,9 +143,9 @@ function rootWindowValue({ base, prop, childLocation, getVirtualURL, rootGet }) 
 }
 
 function reflectChildValue(base, prop, wrapDynamicConstructor) {
-  if (prop === 'constructor') return wrapDynamicConstructor(Reflect.get(Object(base), prop));
-  const value = Reflect.get(Object(base), prop);
-  return typeof value === 'function' && prop === 'postMessage' ? value.bind(base) : value;
+  if (prop === 'constructor') return wrapDynamicConstructor(nativeReflectGet(NativeObject(base), prop));
+  const value = nativeReflectGet(NativeObject(base), prop);
+  return typeof value === 'function' && prop === 'postMessage' ? nativeReflectApply(NativeFunctionBind, value, [base]) : value;
 }
 
 function createChildAccessors(config, w) {
@@ -191,7 +210,7 @@ function childGet(context) {
 function childSet({ base, prop, value, childLocation, rootSet, isRootBase }) {
   if (base === childLocation) return value;
   if (isRootBase(base)) return rootSet(base, prop, value);
-  Reflect.set(Object(base), prop, value);
+  nativeReflectSet(NativeObject(base), prop, value);
   return value;
 }
 
@@ -203,28 +222,28 @@ function defineChildABI(config, w, accessors) {
   defineChild('__zp_call', (base, prop, args) => {
     const fn = accessors.get(base, prop);
     if (typeof fn !== 'function') return undefined;
-    return Reflect.apply(fn, base === accessors.scope ? w : base, Array.isArray(args) ? args : []);
+    return nativeReflectApply(fn, base === accessors.scope ? w : base, nativeArrayIsArray(args) ? args : []);
   });
   defineChild('__zp_update', accessors.update);
-  defineChild('__zp_construct', (ctor, args) => Reflect.construct(accessors.wrapDynamicConstructor(ctor), Array.isArray(args) ? args : []));
+  defineChild('__zp_construct', (ctor, args) => nativeReflectConstruct(accessors.wrapDynamicConstructor(ctor), nativeArrayIsArray(args) ? args : []));
   defineChild('__zp_has', (base, prop) => {
     const raw = base === accessors.scope ? w : base;
-    return Reflect.has(Object(raw), normalizeProperty(prop));
+    return nativeReflectHas(NativeObject(raw), normalizeProperty(prop));
   });
-  defineChild('__zp_getOwnPropertyDescriptor', (base, prop) => Reflect.getOwnPropertyDescriptor(Object(base), prop));
-  defineChild('__zp_ownKeys', base => Reflect.ownKeys(Object(base)));
+  defineChild('__zp_getOwnPropertyDescriptor', (base, prop) => nativeReflectGetOwnPropertyDescriptor(NativeObject(base), prop));
+  defineChild('__zp_ownKeys', base => nativeReflectOwnKeys(NativeObject(base)));
   if (config.root.__zp_module_url) defineChild('__zp_module_url', config.root.__zp_module_url);
   defineChild('__zp_nav_assign', v => config.setVirtualLocation(v));
   defineChild('__zp_nav_replace', v => config.setVirtualLocation(v, true));
-  defineChild('__zp_runClassic', fn => fn.call(w, accessors.scope));
-  defineChild('__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, eventScope(accessors.scope, event)));
+  defineChild('__zp_runClassic', fn => nativeReflectApply(fn, w, [accessors.scope]));
+  defineChild('__zp_runEvent', (selfValue, event, fn) => nativeReflectApply(fn, selfValue, [eventScope(accessors.scope, event)]));
 }
 
 function eventScope(scope, event) {
-  return new Proxy(scope, {
+  return new NativeProxy(scope, {
     get(target, prop, receiver) {
       if (prop === 'event') return event;
-      return Reflect.get(target, prop, receiver);
+      return nativeReflectGet(target, prop, receiver);
     }
   });
 }

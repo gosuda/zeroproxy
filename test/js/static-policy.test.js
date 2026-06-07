@@ -78,8 +78,8 @@ test('runtime membrane uses captured native WeakMap lookup for raw unwrapping', 
   const rt = readRuntimeSource();
   assert.ok(rt.includes("weakMapGet: value(proto(w, 'WeakMap'), 'get')"));
   assert.match(rt, /function proto\(w, name\)[\s\S]*return value\(w\[name\], 'prototype'\)/);
-  assert.ok(rt.includes('Native.reflectApply(Native.weakMapGet, membraneRawTargets, [value])'));
-  assert.ok(rt.includes('Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs)'));
+  assert.ok(rt.includes('reflectApply(Native.weakMapGet, membraneRawTargets, [value])'));
+  assert.ok(rt.includes('return reflectApply(fn, rawBase, callArgs);'));
 });
 
 test('runtime dynamic constructor descriptors stay assignable for app bundles', () => {
@@ -235,8 +235,8 @@ test('runtime installs required escape-vector hooks', () => {
     'unwrapRaw(base === scope ? root : base)',
     "trimmed.startsWith('blob:')",
     'src*="zp"',
-    "Object.defineProperty(root, 'Worker'",
-    "Object.defineProperty(root, 'SharedWorker'",
+    "objectDefineProperty(root, 'Worker'",
+    "objectDefineProperty(root, 'SharedWorker'",
     '__ZP_WORKER_LOCATION',
     'virtualBlobWorkerLocation',
     'workerBlobURLs',
@@ -245,15 +245,15 @@ test('runtime installs required escape-vector hooks', () => {
     'workerBootstrapBlobURL',
     'scriptBlobURLForPage',
     'workerBlobURLMap.get(parsed.href)',
-    "params.set('loc', requestTargetURL(raw))",
-    "Object.defineProperty(URL, 'createObjectURL'",
+    "reflectApply(urlSearchParamsSet, params, ['loc', requestTargetURL(raw)])",
+    "objectDefineProperty(URL, 'createObjectURL'",
     'try { Native.revokeObjectURL(raw); } catch {}',
     'dataWorkerURL',
     'rewriteDynamicFunctionBody',
     'configurable: true',
-    'w.addEventListener && w.addEventListener.bind(w)',
+    'w.addEventListener && reflectApply(functionBind, w.addEventListener, [w])',
     'rawPostMessageTarget(target)',
-    "Object.defineProperty(ev, 'origin'",
+    "objectDefineProperty(ev, 'origin'",
     "name === 'origin'",
     "base === document && prop === 'location'",
     'frameOriginForSource(ev.source)',
@@ -286,16 +286,16 @@ test('runtime installs required escape-vector hooks', () => {
     'frameSandboxAllowsEscape',
     'setFrameSandboxAttribute',
     'sanitizeFrameSandbox',
-    "Object, 'getPrototypeOf'",
-    "Reflect, 'getPrototypeOf'",
+    'objectGetPrototypeOf: nativeObjectGetPrototypeOf',
+    'reflectGetPrototypeOf: nativeReflectGetPrototypeOf',
   ])
     assert.ok(rt.includes(needle), `missing ${needle}`);
   assert.equal(rt.includes("document.addEventListener('submit'"), false);
   for (const needle of [
     'makeWorkerLocationFacade',
-    "Object.defineProperty(self, 'location'",
+    "objectDefineProperty(self, 'location'",
     "'WorkerLocation'",
-    "Object.defineProperty(self, 'origin'",
+    "objectDefineProperty(self, 'origin'",
     'maskNativeFunction',
     "maskNativeFunction(self.fetch, 'fetch')",
     "maskNativeFunction(self.importScripts, 'importScripts')",
@@ -334,6 +334,62 @@ test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module UR
     body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('ref'"),
     'ref/rp must not be part of module identity',
   );
+});
+
+test('runtime hardens late helper calls with captured method-level natives', () => {
+  const rt = readRuntimeSource();
+  const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
+  for (const needle of [
+    'functionBind: NativeFunctionBind',
+    'objectDefineProperty: nativeObjectDefineProperty',
+    'reflectApply: nativeReflectApply',
+    'reflectConstruct: nativeReflectConstruct',
+    'urlSearchParamsToString: nativeURLSearchParamsToString',
+    'return reflectApply(fn, rawBase, callArgs);',
+    'return reflectConstruct(dynamic || ctor, arrayIsArray(args) ? args : []);',
+    "const nativePostMessage = reflectGet(Object(target), 'postMessage');",
+    'return arguments.length > 2 ? reflectApply(nativePostMessage, target, [message, mapped, transfer])',
+    "objectDefineProperty(proto, 'contentWindow'",
+  ]) {
+    assert.ok(rt.includes(needle), `missing captured native use: ${needle}`);
+  }
+  for (const needle of [
+    'const nativeReflectApply = NativeReflect.apply',
+    "objectDefineProperty(self, '__ZP_WORKER_PRELUDE'",
+    'return reflectApply(get(target, prop), actual, arrayIsArray(args) ? args : []);',
+    'const nativeImportScripts = reflectApply(NativeFunctionBind, self.importScripts, [self]);',
+  ]) {
+    assert.ok(worker.includes(needle), `missing worker captured native use: ${needle}`);
+  }
+  assert.equal(worker.includes('urls.map(importScriptURL)'), false);
+});
+
+test('generated and dynamic JavaScript paths stay routed through the rewriter', () => {
+  const rt = readRuntimeSource();
+  const dynamic = fs.readFileSync('web/runtime/dynamic-code/facade.mjs', 'utf8');
+  const sw = readServiceWorkerSource();
+  for (const needle of [
+    'function installDocumentWriteHooks',
+    'transformHTML(String(markup))',
+    'createContextualFragment',
+    'rewriteEventAttribute(val)',
+    'function rewriteSrcdocDocument(source, frame)',
+    'targetUrl: srcdocTargetURL(frame)',
+    'return `${prelude}${transformHTML(source)}`',
+    "rewritePageSource(source, 'classic')",
+  ]) {
+    assert.ok(rt.includes(needle), `missing generated rewriter route: ${needle}`);
+  }
+  for (const needle of [
+    'rewriteDynamicFunctionBody(params, body)',
+    'root.ZPHTTPRewriter.rewriteFunctionBody',
+    "rewriteScriptSource(String(text || ''), 'classic')",
+    'reflectConstruct(ctor, ctorArgs)',
+  ]) {
+    assert.ok(dynamic.includes(needle), `missing dynamic rewriter route: ${needle}`);
+  }
+  assert.ok(sw.includes('rewriteScriptResponse'));
+  assert.ok(sw.includes('rewriteScriptOutcome'));
 });
 
 test('filtered DOM collections expose numeric indexes to native slice', () => {
@@ -558,8 +614,7 @@ test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
     'message origin virtualization must synthesize a MessageEvent before falling back to own origin override',
   );
   assert.ok(
-    rt.indexOf('return new MessageEvent(ev.type') <
-      rt.indexOf("Object.defineProperty(ev, 'origin'"),
+    rt.indexOf('return new MessageEvent(ev.type') < rt.indexOf("objectDefineProperty(ev, 'origin'"),
     'message origin virtualization must avoid own-origin override as the first path',
   );
   assert.ok(

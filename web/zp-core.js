@@ -1,7 +1,37 @@
 /* ZeroProxy shared browser primitives. Classic script; exposes non-enumerable global ZP. */
 (() => {
   'use strict';
-  if (globalThis.ZP) return;
+  const root = globalThis;
+  const NativeArray = Array;
+  const NativeError = Error;
+  const NativeObject = Object;
+  const NativeSet = Set;
+  const NativeString = String;
+  const NativeTextDecoder = TextDecoder;
+  const NativeTextEncoder = TextEncoder;
+  const NativeUint8Array = Uint8Array;
+  const NativeURL = URL;
+  const NativeURLSearchParams = URLSearchParams;
+  const nativeAtob = root.atob && root.atob.bind(root);
+  const nativeBtoa = root.btoa && root.btoa.bind(root);
+  const nativeCrypto = root.crypto;
+  const nativeEncodeURIComponent = encodeURIComponent;
+  {
+  const Array = NativeArray;
+  const Error = NativeError;
+  const Object = NativeObject;
+  const Set = NativeSet;
+  const String = NativeString;
+  const TextDecoder = NativeTextDecoder;
+  const TextEncoder = NativeTextEncoder;
+  const Uint8Array = NativeUint8Array;
+  const URL = NativeURL;
+  const URLSearchParams = NativeURLSearchParams;
+  const atob = nativeAtob;
+  const btoa = nativeBtoa;
+  const crypto = nativeCrypto;
+  const encodeURIComponent = nativeEncodeURIComponent;
+  if (root.ZP) return;
   const te = new TextEncoder();
   const td = new TextDecoder('utf-8', { fatal: true });
   const SHARE_INFO_ENC = te.encode('zp-url-cbc-enc');
@@ -75,7 +105,7 @@
   function apiPath(name) { return controlPath('api/' + String(name || '').replace(/^\/+/, '')); }
   function errorPath(code) { return controlPath('error/' + encodeURIComponent(String(code || 'POLICY_BLOCKED'))); }
   function makeSharePath(encrypted) { return controlPath('p/' + encrypted); }
-  async function makeShareURL(targetUrl, origin = globalThis.location?.origin || '', servers) {
+  async function makeShareURL(targetUrl, origin = root.location?.origin || '', servers) {
     const s = await encryptShareURL(targetUrl);
     return origin + makeSharePath(s.encrypted) + makeShareFragment(s.key, relayServersForShare(servers, { origin, allowLoopbackWS: true }));
   }
@@ -86,7 +116,7 @@
     return '#' + params.toString();
   }
   function defaultRelayServer(origin) {
-    const loc = globalThis.location;
+    const loc = root.location;
     const rawOrigin = origin || loc && (loc.origin || (loc.protocol && loc.host ? loc.protocol + '//' + loc.host : '')) || 'https://proxy.example';
     const u = new URL(rawOrigin);
     return (u.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + u.host + controlPath('ws-pipe');
@@ -125,7 +155,7 @@
     return Array.from(connect).join(' ');
   }
   function fixedCSP(servers, options = {}) {
-    const loc = globalThis.location;
+    const loc = root.location;
     const ws = loc ? ((loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host) : 'wss://proxy.example';
     const connectSrc = buildConnectSrc(servers, ws);
     const script = options?.allowDynamicCompile ? "script-src 'self' blob: 'nonce-zp' 'unsafe-eval' 'wasm-unsafe-eval'" : "script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'";
@@ -183,5 +213,6 @@
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
   const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS });
-  Object.defineProperty(globalThis, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
+  Object.defineProperty(root, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
+  }
 })();

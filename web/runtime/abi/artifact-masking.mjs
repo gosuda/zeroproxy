@@ -1,4 +1,10 @@
-export function createArtifactMasking({ root, toStringMap, toStringMaskedPrototypes, origToString }) {
+export function createArtifactMasking({ Native, root, toStringMap, toStringMaskedPrototypes, origToString }) {
+  const {
+    String = globalThis.String,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    reflectApply = globalThis.Reflect.apply,
+  } = Native;
+
   function nativeFunctionSource(key) {
     const name = typeof key === 'symbol' ? '' : String(key);
     return `function ${name}() { [native code] }`;
@@ -15,14 +21,14 @@ export function createArtifactMasking({ root, toStringMap, toStringMaskedPrototy
   }
   function define(obj, key, value) {
     try {
-      Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
+      objectDefineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
       maskNativeFunction(value, key);
       return true;
     } catch { return false; }
   }
   function defineAccessor(obj, key, get, set) {
     try {
-      Object.defineProperty(obj, key, { get, set, enumerable: false, configurable: false });
+      objectDefineProperty(obj, key, { get, set, enumerable: false, configurable: false });
       if (typeof get === 'function') toStringMap.set(get, nativeAccessorSource('get', key));
       if (typeof set === 'function') toStringMap.set(set, nativeAccessorSource('set', key));
       return true;
@@ -35,11 +41,11 @@ export function createArtifactMasking({ root, toStringMap, toStringMaskedPrototy
     if (typeof orig !== 'function') return;
     const maskedToString = function toString() {
       if (typeof this === 'function' && toStringMap.has(this)) return toStringMap.get(this);
-      return orig.call(this);
+      return reflectApply(orig, this, []);
     };
     toStringMap.set(maskedToString, 'function toString() { [native code] }');
     try {
-      Object.defineProperty(proto, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true });
+      objectDefineProperty(proto, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true });
       toStringMaskedPrototypes.add(proto);
     } catch {}
   }

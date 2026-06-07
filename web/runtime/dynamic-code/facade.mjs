@@ -16,6 +16,14 @@ export function createDynamicCodeFacade({
   maskNativeFunction,
   toStringMap,
 }) {
+  const {
+    Array = globalThis.Array,
+    Map = globalThis.Map,
+    String = globalThis.String,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    objectFreeze = globalThis.Object.freeze,
+    reflectConstruct = globalThis.Reflect && globalThis.Reflect.construct,
+  } = Native;
   const NativeAsyncFunction = (async function(){}).constructor;
   const NativeGeneratorFunction = (function*(){}).constructor;
   const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
@@ -64,7 +72,10 @@ export function createDynamicCodeFacade({
     const simple = compileSimpleDynamic(params, body, kind);
     if (simple) return simple;
     const rewritten = rewriteDynamicFunctionBody(params, body);
-    const fn = Reflect.construct(ctor, params.concat(rewritten));
+    const ctorArgs = new Array(params.length + 1);
+    for (let i = 0; i < params.length; i += 1) ctorArgs[i] = params[i];
+    ctorArgs[params.length] = rewritten;
+    const fn = reflectConstruct(ctor, ctorArgs);
     toStringMap.set(fn, dynamicSource(kind, params, body));
     return fn;
   }
@@ -76,11 +87,11 @@ export function createDynamicCodeFacade({
   }
 
   function setDynamicConstructorIdentity(fn, name, proto) {
-    try { Object.defineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
-    try { Object.defineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}
+    try { objectDefineProperty(fn, 'name', { value: name, configurable: true }); } catch {}
+    try { objectDefineProperty(fn, 'length', { value: 1, configurable: true }); } catch {}
     if (proto) {
       try {
-        Object.defineProperty(fn, 'prototype', {
+        objectDefineProperty(fn, 'prototype', {
           value: proto,
           enumerable: false,
           configurable: false,
@@ -165,7 +176,7 @@ export function createDynamicCodeFacade({
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
       if (!ctor || !ctor.prototype) continue;
       try {
-        Object.defineProperty(ctor.prototype, 'constructor', {
+        objectDefineProperty(ctor.prototype, 'constructor', {
           value: wrapper,
           enumerable: false,
           configurable: true,
@@ -175,7 +186,7 @@ export function createDynamicCodeFacade({
     }
   }
 
-  return Object.freeze({
+  return objectFreeze({
     dynamicFunction,
     dynamicGlobal,
     dynamicWrapperFor,

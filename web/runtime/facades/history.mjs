@@ -27,6 +27,14 @@ export function createHistoryFacade({
   getActiveShareVersion,
   setActiveShareVersion,
 }) {
+  const {
+    HashChangeEvent = globalThis.HashChangeEvent,
+    Object = globalThis.Object,
+    String = globalThis.String,
+    URL = globalThis.URL,
+    objectFreeze = globalThis.Object.freeze,
+  } = Native;
+
   function shareFragmentForKey(key) {
     return ZP.makeShareFragment(String(key), activeServers);
   }
@@ -120,7 +128,7 @@ export function createHistoryFacade({
     if (next.href === getVirtualURL().href) return;
     const out = commitVirtualHistory(null, '', next.href, replace);
     try {
-      root.dispatchEvent(new root.HashChangeEvent('hashchange', { oldURL, newURL: getVirtualURL().href }));
+      root.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: getVirtualURL().href }));
     } catch {
       try {
         root.dispatchEvent(new root.Event('hashchange'));
@@ -158,7 +166,7 @@ export function createHistoryFacade({
     });
   }
 
-  return Object.freeze({
+  return objectFreeze({
     proxyHistoryURL,
     nativeLocationURL,
     visibleProxyURL,

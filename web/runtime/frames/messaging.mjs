@@ -12,6 +12,17 @@ export function createFrameMessaging({
   isDirectExternalFrameElement,
   messageSourceFacadeFor,
 }) {
+  const {
+    MessageEvent = globalThis.MessageEvent,
+    Object = globalThis.Object,
+    String = globalThis.String,
+    URL = globalThis.URL,
+    objectCreate = globalThis.Object.create,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    reflectApply = globalThis.Reflect.apply,
+    reflectGet = globalThis.Reflect.get,
+  } = Native;
+
   function frameTargetURL(frame, includeVisibleSrc = false) {
     try {
       return urlMeta.get(frame) ||
@@ -83,7 +94,7 @@ export function createFrameMessaging({
   function rawPostMessageTarget(target) {
     try {
       if (target && (typeof target === 'object' || typeof target === 'function')) {
-        const raw = Native.reflectApply && Native.weakMapGet ? Native.reflectApply(Native.weakMapGet, membraneRawTargets, [target]) : membraneRawTargets.get(target);
+        const raw = Native.weakMapGet ? reflectApply(Native.weakMapGet, membraneRawTargets, [target]) : membraneRawTargets.get(target);
         return raw || target;
       }
     } catch {}
@@ -120,12 +131,14 @@ export function createFrameMessaging({
 
   function postMessageWrapperFor(target) {
     target = rawPostMessageTarget(target);
-    if (!target || typeof target.postMessage !== 'function') return undefined;
+    if (!target) return undefined;
     if (postMessageWrappers.has(target)) return postMessageWrappers.get(target);
+    const nativePostMessage = reflectGet(Object(target), 'postMessage');
+    if (typeof nativePostMessage !== 'function') return undefined;
     const wrapped = function postMessage(message, targetOrigin, transfer) {
-      if (arguments.length < 2) return target.postMessage(message, proxyOrigin);
+      if (arguments.length < 2) return reflectApply(nativePostMessage, target, [message, proxyOrigin]);
       const mapped = normalizePostMessageTargetOriginForTarget(target, targetOrigin);
-      return arguments.length > 2 ? target.postMessage(message, mapped, transfer) : target.postMessage(message, mapped);
+      return arguments.length > 2 ? reflectApply(nativePostMessage, target, [message, mapped, transfer]) : reflectApply(nativePostMessage, target, [message, mapped]);
     };
     maskNativeFunction(wrapped, 'postMessage');
     postMessageWrappers.set(target, wrapped);
@@ -181,8 +194,8 @@ export function createFrameMessaging({
 
   function defineMessageOriginSource(ev, origin, source) {
     try {
-      Object.defineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
-      Object.defineProperty(ev, 'source', { value: source, enumerable: true, configurable: true });
+      objectDefineProperty(ev, 'origin', { value: origin, enumerable: true, configurable: true });
+      objectDefineProperty(ev, 'source', { value: source, enumerable: true, configurable: true });
       return ev;
     } catch {}
     return cloneMessageEvent(ev, origin, source);
@@ -190,13 +203,13 @@ export function createFrameMessaging({
 
   function cloneMessageEvent(ev, origin, source) {
     try {
-      const clone = Object.create(ev);
-      Object.defineProperty(clone, 'type', { value: ev.type, configurable: true });
-      Object.defineProperty(clone, 'data', { value: ev.data, configurable: true });
-      Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
-      Object.defineProperty(clone, 'lastEventId', { value: ev.lastEventId || '', configurable: true });
-      Object.defineProperty(clone, 'source', { value: source, configurable: true });
-      Object.defineProperty(clone, 'ports', { value: ev.ports || [], configurable: true });
+      const clone = objectCreate(ev);
+      objectDefineProperty(clone, 'type', { value: ev.type, configurable: true });
+      objectDefineProperty(clone, 'data', { value: ev.data, configurable: true });
+      objectDefineProperty(clone, 'origin', { value: origin, configurable: true });
+      objectDefineProperty(clone, 'lastEventId', { value: ev.lastEventId || '', configurable: true });
+      objectDefineProperty(clone, 'source', { value: source, configurable: true });
+      objectDefineProperty(clone, 'ports', { value: ev.ports || [], configurable: true });
       return clone;
     } catch {
       return ev;

@@ -39,7 +39,7 @@ const readRuntime = () =>
 test('window fetch, XHR, and EventSource route through runtime transport shims', () => {
   const rt = readRuntime();
   assert.match(rt, /defineReplacingNative\(root, 'fetch'/);
-  assert.match(rt, /Object\.defineProperty\(root, 'XMLHttpRequest'/);
+  assert.match(rt, /objectDefineProperty\(root, 'XMLHttpRequest'/);
   assert.match(rt, /defineReplacingNative\(root, 'EventSource'/);
   assert.match(rt, /finishEventSourceStream\(es\)/);
   assert.ok(rt.includes('ZPXMLHttpRequest'));
@@ -102,7 +102,10 @@ test('runtime navigation uses bound Location methods and catches expando href cl
   const rt = readRuntime();
   assert.ok(rt.includes("locationAssign: bindMethod(w.location, 'assign')"));
   assert.ok(rt.includes("locationReplace: bindMethod(w.location, 'replace')"));
-  assert.match(rt, /function bindMethod\(obj, key\)[\s\S]*return fn && fn\.bind\(obj\)/);
+  assert.match(
+    rt,
+    /function bindMethod\(obj, key\)[\s\S]*return fn && nativeReflectApply\(NativeFunctionBind, fn, \[obj\]\)/,
+  );
   assert.match(rt, /function clickNavigationTarget\(ev\)/);
   assert.match(rt, /typeof el\.href === 'string'/);
   assert.match(rt, /stopImmediatePropagation/);

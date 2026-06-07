@@ -5,6 +5,21 @@ export function createStorageFacades({
   normalizedError,
   getVirtualURL,
 }) {
+  const {
+    Array = globalThis.Array,
+    JSON = globalThis.JSON,
+    Map = globalThis.Map,
+    Number = globalThis.Number,
+    Promise = globalThis.Promise,
+    Set = globalThis.Set,
+    String = globalThis.String,
+    arrayFrom = globalThis.Array.from,
+    arrayIsArray = globalThis.Array.isArray,
+    functionBind = globalThis.Function.prototype.bind,
+    objectAssign = globalThis.Object.assign,
+    objectFreeze = globalThis.Object.freeze,
+    reflectApply = globalThis.Reflect.apply,
+  } = Native;
   const storageMaps = new Map();
   const storageWindows = new Set();
   const storageDirtyKeys = new Map();
@@ -30,13 +45,19 @@ export function createStorageFacades({
     define(w, 'indexedDB', {
       open(name, version) { return nativeIDB.open(idbPrefix + String(name), version); },
       deleteDatabase(name) { return nativeIDB.deleteDatabase(idbPrefix + String(name)); },
-      cmp: nativeIDB.cmp ? nativeIDB.cmp.bind(nativeIDB) : undefined,
+      cmp: nativeIDB.cmp ? reflectApply(functionBind, nativeIDB.cmp, [nativeIDB]) : undefined,
       databases: nativeIDB.databases
-        ? () => nativeIDB.databases().then(list => list
-          .filter(db => db.name && db.name.startsWith(idbPrefix))
-          .map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) })))
+        ? () => nativeIDB.databases().then(list => filteredDatabaseList(list, idbPrefix))
         : undefined
     });
+  }
+
+  function filteredDatabaseList(list, idbPrefix) {
+    const out = [];
+    for (const db of list || []) {
+      if (db.name && db.name.startsWith(idbPrefix)) out[out.length] = objectAssign({}, db, { name: db.name.slice(idbPrefix.length) });
+    }
+    return out;
   }
 
   function installCachesFacade(w, prefix) {
@@ -47,14 +68,14 @@ export function createStorageFacades({
       open(name) { return nativeCaches.open(cachePrefix + String(name)); },
       delete(name) { return nativeCaches.delete(cachePrefix + String(name)); },
       has(name) { return nativeCaches.has(cachePrefix + String(name)); },
-      keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix)).map(k => k.slice(cachePrefix.length))); },
+      keys() { return nativeCaches.keys().then(keys => cacheKeysForVirtualPrefix(keys, cachePrefix)); },
       match(request, opts) { return matchVirtualCache(nativeCaches, cachePrefix, request, opts); }
     });
   }
 
   function matchVirtualCache(nativeCaches, cachePrefix, request, opts) {
     return nativeCaches.keys()
-      .then(keys => keys.filter(k => k.startsWith(cachePrefix)))
+      .then(keys => cacheKeysForPrefix(keys, cachePrefix))
       .then(async keys => {
         for (const k of keys) {
           const hit = await (await nativeCaches.open(k)).match(request, opts);
@@ -62,6 +83,18 @@ export function createStorageFacades({
         }
         return undefined;
       });
+  }
+
+  function cacheKeysForPrefix(keys, cachePrefix) {
+    const out = [];
+    for (const key of keys || []) if (key.startsWith(cachePrefix)) out[out.length] = key;
+    return out;
+  }
+
+  function cacheKeysForVirtualPrefix(keys, cachePrefix) {
+    const out = [];
+    for (const key of keys || []) if (key.startsWith(cachePrefix)) out[out.length] = key.slice(cachePrefix.length);
+    return out;
   }
 
   function storagePrefixForVirtualOrigin() {
@@ -81,9 +114,9 @@ export function createStorageFacades({
 
   function storageObject(namespaceKey, ownerWindow) {
     const map = storageMap(namespaceKey);
-    return Object.freeze({
+    return objectFreeze({
       get length() { return map.size; },
-      key(i) { return Array.from(map.keys())[Number(i)] || null; },
+      key(i) { return arrayFrom(map.keys())[Number(i)] || null; },
       getItem(k) { k = String(k); return map.has(k) ? map.get(k) : null; },
       setItem(k, v) {
         k = String(k);
@@ -125,9 +158,9 @@ export function createStorageFacades({
     try {
       const raw = store.getItem(storageMirrorKey(namespace));
       const items = raw && JSON.parse(raw);
-      if (!Array.isArray(items)) return;
+      if (!arrayIsArray(items)) return;
       for (const pair of items) {
-        if (Array.isArray(pair) && typeof pair[0] === 'string') map.set(pair[0], String(pair[1]));
+        if (arrayIsArray(pair) && typeof pair[0] === 'string') map.set(pair[0], String(pair[1]));
       }
     } catch {}
   }
@@ -136,7 +169,7 @@ export function createStorageFacades({
     const store = Native.localStorage;
     if (!store) return;
     try {
-      store.setItem(storageMirrorKey(namespace), JSON.stringify(Array.from(map.entries())));
+      store.setItem(storageMirrorKey(namespace), JSON.stringify(arrayFrom(map.entries())));
     } catch {}
   }
 
@@ -218,7 +251,7 @@ export function createStorageFacades({
   }
 
   function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
-    for (const rec of Array.from(storageWindows)) {
+    for (const rec of arrayFrom(storageWindows)) {
       const w = rec.w;
       if (!w || w === sourceWindow || (rec.localKey !== namespaceKey && rec.sessionKey !== namespaceKey)) continue;
       try {
@@ -230,5 +263,5 @@ export function createStorageFacades({
     }
   }
 
-  return Object.freeze({ installStorageFacades });
+  return objectFreeze({ installStorageFacades });
 }

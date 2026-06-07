@@ -35,21 +35,78 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
 
 (() => {
   'use strict';
-  const root = window;
+  const root = globalThis.window;
+  const Native = captureNative(root);
+  const {
+    Array,
+    ArrayBuffer,
+    AbortController,
+    Event,
+    Error,
+    FormData,
+    JSON,
+    Location,
+    Map,
+    Math,
+    MessageEvent,
+    MessageChannel,
+    Number,
+    Object,
+    ProgressEvent,
+    Promise,
+    Proxy,
+    Reflect,
+    Set,
+    String,
+    Symbol,
+    TextDecoder,
+    TextEncoder,
+    TypeError,
+    URL,
+    URLSearchParams,
+    Uint8Array,
+    WeakMap,
+    WeakSet,
+    arrayFrom,
+    arrayIsArray,
+    decodeURIComponent,
+    encodeURIComponent,
+    functionBind,
+    objectAssign,
+    objectCreate,
+    objectDefineProperty,
+    objectFreeze,
+    objectGetOwnPropertyDescriptor,
+    objectGetPrototypeOf,
+    objectHasOwn,
+    reflectApply,
+    reflectConstruct,
+    reflectDeleteProperty,
+    reflectGet,
+    reflectGetOwnPropertyDescriptor,
+    reflectGetPrototypeOf,
+    reflectHas,
+    reflectOwnKeys,
+    reflectSet,
+  } = Native;
+  const document = root.document;
+  const location = root.location;
+  const navigator = root.navigator;
+  const window = root;
+  const ZP = root.ZP;
   const marker = Symbol.for('zeroproxy.runtime.installed');
   if (root[marker]) return;
-  Object.defineProperty(root, marker, { value: true, enumerable: false, configurable: false });
+  objectDefineProperty(root, marker, { value: true, enumerable: false, configurable: false });
 
-  const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '', documentReferrer: '' }, readBootConfig(root));
+  const boot = objectAssign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '', documentReferrer: '' }, readBootConfig(root));
   const runtimeToken = String(boot.runtimeToken || '');
   clearBootConfig(root);
-  const Native = captureNative(root);
   const toStringMap = new WeakMap();
   const toStringMaskedPrototypes = new WeakSet();
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
   const initialProxyURL = new URL(root.location.href);
   const proxyOrigin = initialProxyURL.origin;
-  const activeServers = ZP.relayServersForShare(Array.isArray(boot.servers) ? boot.servers : [], { allowLoopbackWS: true });
+  const activeServers = ZP.relayServersForShare(arrayIsArray(boot.servers) ? boot.servers : [], { allowLoopbackWS: true });
   let activeProxyPath = initialProxyURL.pathname;
   let activeProxyFragment = preservedShareFragment(initialProxyURL.hash);
   let activeRouteKey = ZP.isSharePath(activeProxyPath) ? ZP.shareRouteKey(activeProxyPath) : '';
@@ -102,15 +159,15 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     define,
     defineAccessor,
     installToStringMasking,
-  } = createArtifactMasking({ root, toStringMap, toStringMaskedPrototypes, origToString });
+  } = createArtifactMasking({ Native, root, toStringMap, toStringMaskedPrototypes, origToString });
   function defineReplacingNative(obj, key, value) {
-    const d = Object.getOwnPropertyDescriptor(obj, key);
+    const d = objectGetOwnPropertyDescriptor(obj, key);
     try {
-      Object.defineProperty(obj, key, {
+      objectDefineProperty(obj, key, {
         value,
         enumerable: d ? d.enumerable : true,
         configurable: d ? d.configurable : true,
-        writable: d && Object.hasOwn(d, 'writable') ? d.writable : true
+        writable: d && objectHasOwn(d, 'writable') ? d.writable : true
       });
       maskNativeFunction(value, key);
       return true;
@@ -120,9 +177,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function defineReplacingAccessor(obj, key, get, set) {
     if (!obj) return false;
-    const d = Object.getOwnPropertyDescriptor(obj, key);
+    const d = objectGetOwnPropertyDescriptor(obj, key);
     try {
-      Object.defineProperty(obj, key, {
+      objectDefineProperty(obj, key, {
         get,
         set,
         enumerable: d ? d.enumerable : true,
@@ -150,7 +207,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     scriptProxyPath,
     resourceProxyPath,
   });
-  const { installEventMethods } = createEventTargetFacade({ define, listenersKey });
+  const { installEventMethods } = createEventTargetFacade({ Native, define, listenersKey });
   const {
     installDocumentAccessors,
     installCookieSync,
@@ -172,6 +229,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     getVirtualURL: () => virtualURL,
   });
   const { installNavigatorIdentity } = createNavigatorFacade({
+    Native,
     defineAccessor,
     maskMethods,
   });
@@ -259,8 +317,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const doc = w && w.document;
     if (!doc || documentWriteHookedWindows.has(w)) return;
     documentWriteHookedWindows.add(w);
-    const write = doc.write && doc.write.bind(doc);
-    const writeln = doc.writeln && doc.writeln.bind(doc);
+    const write = doc.write && reflectApply(functionBind, doc.write, [doc]);
+    const writeln = doc.writeln && reflectApply(functionBind, doc.writeln, [doc]);
     const proto = w.Document && w.Document.prototype;
     const protoWrite = proto && proto.write;
     const protoWriteln = proto && proto.writeln;
@@ -269,21 +327,26 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const scheduleActivation = targetDoc => {
       if (!targetDoc || w === root) return;
       const timer = w.setTimeout || root.setTimeout;
-      try { timer.call(w, () => activateDocumentWrittenScripts(targetDoc), 0); } catch {}
+      try { reflectApply(timer, w, [() => activateDocumentWrittenScripts(targetDoc), 0]); } catch {}
     };
-    if (write) define(doc, 'write', function(...parts) { const ret = write(parts.map(p => transformHTML(String(p))).join('')); scheduleActivation(doc); return ret; });
-    if (writeln) define(doc, 'writeln', function(...parts) { const ret = writeln(`${parts.map(p => transformHTML(String(p))).join('')}\n`); scheduleActivation(doc); return ret; });
-    if (typeof protoWrite === 'function') define(proto, 'write', function(...parts) { const ret = protoWrite.call(this, parts.map(p => transformHTML(String(p))).join('')); scheduleActivation(this); return ret; });
-    if (typeof protoWriteln === 'function') define(proto, 'writeln', function(...parts) { const ret = protoWriteln.call(this, `${parts.map(p => transformHTML(String(p))).join('')}\n`); scheduleActivation(this); return ret; });
-    if (parser && w.DOMParser) define(w.DOMParser.prototype, 'parseFromString', function(markup, type) { return parser.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
-    if (rangeFragment && w.Range) define(w.Range.prototype, 'createContextualFragment', function(markup) { return rangeFragment.call(this, transformHTML(String(markup))); });
+    const transformedParts = parts => {
+      let out = '';
+      for (let i = 0; i < parts.length; i += 1) out += transformHTML(String(parts[i]));
+      return out;
+    };
+    if (write) define(doc, 'write', function(...parts) { const ret = write(transformedParts(parts)); scheduleActivation(doc); return ret; });
+    if (writeln) define(doc, 'writeln', function(...parts) { const ret = writeln(`${transformedParts(parts)}\n`); scheduleActivation(doc); return ret; });
+    if (typeof protoWrite === 'function') define(proto, 'write', function(...parts) { const ret = reflectApply(protoWrite, this, [transformedParts(parts)]); scheduleActivation(this); return ret; });
+    if (typeof protoWriteln === 'function') define(proto, 'writeln', function(...parts) { const ret = reflectApply(protoWriteln, this, [`${transformedParts(parts)}\n`]); scheduleActivation(this); return ret; });
+    if (parser && w.DOMParser) define(w.DOMParser.prototype, 'parseFromString', function(markup, type) { return reflectApply(parser, this, [String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type]); });
+    if (rangeFragment && w.Range) define(w.Range.prototype, 'createContextualFragment', function(markup) { return reflectApply(rangeFragment, this, [transformHTML(String(markup))]); });
   }
 
   function activateDocumentWrittenScripts(doc) {
     if (!doc) return;
     let scripts = [];
     try {
-      scripts = Native.documentGetElementsByTagName ? Array.from(Native.documentGetElementsByTagName.call(doc, 'script')) : Array.from(doc.getElementsByTagName('script'));
+      scripts = Native.documentGetElementsByTagName ? arrayFrom(reflectApply(Native.documentGetElementsByTagName, doc, ['script'])) : arrayFrom(doc.getElementsByTagName('script'));
     } catch { return; }
     for (const oldScript of scripts) {
       const pending = Native.getAttribute.call(oldScript, 'data-zp-docwrite-pending') === '1';
@@ -453,7 +516,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (!controller || !runtimeToken) return Promise.reject(normalizedError('NetworkError'));
     return new Promise((resolve, reject) => {
       const channel = new MessageChannel();
-      const sealed = Object.assign({}, message, { runtimeToken });
+      const sealed = objectAssign({}, message, { runtimeToken });
       const done = fn => data => {
         clearTimeout(timer);
         try { channel.port1.close(); } catch {}
@@ -676,6 +739,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   });
   const { installChildRewriteHelpers } = createChildRewriteHelpers({
     root,
+    Native,
     maskNativeFunction,
     maskMethods,
     getVirtualURL: () => virtualURL,
@@ -755,10 +819,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       valueOf() { return current().href; },
       [Symbol.toPrimitive]() { return current().href; }
     };
-    try { Object.defineProperty(locationFacade, Symbol.toStringTag, { value: 'Location', enumerable: false, configurable: true }); } catch {}
+    try { objectDefineProperty(locationFacade, Symbol.toStringTag, { value: 'Location', enumerable: false, configurable: true }); } catch {}
     maskMethods(locationFacade, ['assign','replace','reload','toString','valueOf']);
     maskNativeFunction(locationFacade[Symbol.toPrimitive], Symbol.toPrimitive);
-    try { Object.freeze(locationFacade); } catch {}
+    try { objectFreeze(locationFacade); } catch {}
     return locationFacade;
   }
 
@@ -793,16 +857,16 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       }
     }
     const value = childWin[prop];
-    return typeof value === 'function' && WINDOW_BOUND_METHODS.has(prop) ? value.bind(childWin) : value;
+    return typeof value === 'function' && WINDOW_BOUND_METHODS.has(prop) ? reflectApply(functionBind, value, [childWin]) : value;
   }
 
   function configurableFacadeDescriptor(raw, prop) {
     let d;
-    try { d = Reflect.getOwnPropertyDescriptor(raw, prop); } catch { return undefined; }
+    try { d = reflectGetOwnPropertyDescriptor(raw, prop); } catch { return undefined; }
     if (!d) return undefined;
     const out = { ...d, configurable: true };
     if ('value' in out && typeof out.value === 'function' && WINDOW_BOUND_METHODS.has(prop)) {
-      try { out.value = out.value.bind(raw); } catch {}
+      try { out.value = reflectApply(functionBind, out.value, [raw]); } catch {}
     }
     return out;
   }
@@ -836,7 +900,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         return configurableFacadeDescriptor(childWin, prop);
       },
       ownKeys() {
-        try { return Reflect.ownKeys(childWin); } catch { return []; }
+        try { return reflectOwnKeys(childWin); } catch { return []; }
       }
     });
     membraneRawTargets.set(proxy, childWin);
@@ -859,7 +923,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     }
     if (prop === 'URL' || prop === 'documentURI') return locationFacade.href;
     const value = childDoc[prop];
-    return typeof value === 'function' ? value.bind(childDoc) : value;
+    return typeof value === 'function' ? reflectApply(functionBind, value, [childDoc]) : value;
   }
 
   function frameDocumentFacadeFor(frame, childDoc, childWin) {
@@ -883,10 +947,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         return configurableFacadeDescriptor(childDoc, prop);
       },
       getPrototypeOf() {
-        try { return Reflect.getPrototypeOf(childDoc); } catch { return null; }
+        try { return reflectGetPrototypeOf(childDoc); } catch { return null; }
       },
       ownKeys() {
-        try { return Reflect.ownKeys(childDoc); } catch { return []; }
+        try { return reflectOwnKeys(childDoc); } catch { return []; }
       }
     });
     membraneRawTargets.set(proxy, childDoc);
@@ -924,7 +988,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return null;
     }
   }
-  try { Object.defineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
+  try { objectDefineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
   installToStringMasking(root);
   define(root, '__ZP_SET_BASE', updateVirtualBase);
   installPhase2Membrane();
@@ -959,7 +1023,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const fn = target[prop];
       if (typeof fn !== 'function') return fn;
       if (windowMethodBindings.has(prop)) return windowMethodBindings.get(prop);
-      const bound = fn.bind(target);
+      const bound = reflectApply(functionBind, fn, [target]);
       maskNativeFunction(bound, prop);
       windowMethodBindings.set(prop, bound);
       return bound;
@@ -987,7 +1051,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const virtualPrototypeCache = new WeakMap();
     function unwrapRaw(value) {
       try {
-        const raw = Native.reflectApply && Native.weakMapGet ? Native.reflectApply(Native.weakMapGet, membraneRawTargets, [value]) : membraneRawTargets.get(value);
+      const raw = Native.weakMapGet ? reflectApply(Native.weakMapGet, membraneRawTargets, [value]) : membraneRawTargets.get(value);
         return raw || value;
       } catch {
         return value;
@@ -996,10 +1060,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     function virtualPrototypeFor(proto) {
       if (!proto || (typeof proto !== 'object' && typeof proto !== 'function')) return proto;
       if (virtualPrototypeCache.has(proto)) return virtualPrototypeCache.get(proto);
-      const safe = Object.create(null);
+      const safe = objectCreate(null);
       const ctor = proto.constructor;
-      Object.defineProperty(safe, 'constructor', { value: dynamicWrapperFor(ctor) || dynamicFunction, enumerable: false, configurable: false, writable: false });
-      try { Object.freeze(safe); } catch {}
+      objectDefineProperty(safe, 'constructor', { value: dynamicWrapperFor(ctor) || dynamicFunction, enumerable: false, configurable: false, writable: false });
+      try { objectFreeze(safe); } catch {}
       virtualPrototypeCache.set(proto, safe);
       return safe;
     }
@@ -1082,7 +1146,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         return true;
       },
       getOwnPropertyDescriptor(target, prop) {
-        return Reflect.getOwnPropertyDescriptor(target, prop);
+        return reflectGetOwnPropertyDescriptor(target, prop);
       }
     });
     membraneRawTargets.set(scope, root);
@@ -1098,7 +1162,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (base === document && prop === 'referrer') return boot.documentReferrer || '';
       if (prop === 'source' && base && typeof base === 'object') {
         try {
-          const rawSource = Reflect.get(Object(base), prop);
+          const rawSource = reflectGet(Object(base), prop);
           const framedSource = messageSourceFacadeFor(rawSource, base);
           if (framedSource) return framedSource;
           return rawSource;
@@ -1122,7 +1186,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         if (prop === 'origin') return base === scope || base === root ? virtualURL.origin : base.location && base.location.origin;
         if (prop === 'postMessage') return postMessageWrapperFor(base === scope ? root : base);
         if (prop === 'eval' && (base === scope || base === root)) {
-          const current = Reflect.get(root, 'eval');
+          const current = reflectGet(root, 'eval');
           return current === Native.eval ? indirectEval : current;
         }
         const dynamic = dynamicGlobal(prop);
@@ -1130,19 +1194,19 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       }
       if (base === document && prop === 'defaultView') return scope;
       if (prop === 'postMessage') {
-        const fn = Reflect.get(Object(base), prop);
+        const fn = reflectGet(Object(base), prop);
         if (typeof fn === 'function') {
-          const bound = fn.bind(base);
+          const bound = reflectApply(functionBind, fn, [base]);
           maskNativeFunction(bound, prop);
           return bound;
         }
         return fn;
       }
       if (prop === 'constructor') {
-        const ctor = Reflect.get(Object(base), prop);
+        const ctor = reflectGet(Object(base), prop);
         return dynamicWrapperFor(ctor) || ctor;
       }
-      return Reflect.get(Object(base), prop);
+      return reflectGet(Object(base), prop);
     }
     function optionalGet(base, prop) {
       if (base === null || base === undefined) return undefined;
@@ -1152,7 +1216,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (typeof prop !== 'symbol') prop = String(prop);
       if ((isWindowLike(base) && prop === 'location') || (base === document && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
-      Reflect.set(Object(base), prop, value);
+      reflectSet(Object(base), prop, value);
       return value;
     }
     function assign(base, prop, operator, value) {
@@ -1189,9 +1253,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     function call(base, prop, args) {
       const rawBase = unwrapRaw(base === scope ? root : base);
       const fn = get(base, prop);
-      const callArgs = Array.isArray(args) ? (preserveMembraneCallArgs(base, prop) ? args : args.map(unwrapRaw)) : [];
+      const callArgs = arrayIsArray(args) ? (preserveMembraneCallArgs(base, prop) ? args : arrayFrom(args, unwrapRaw)) : [];
       if (typeof fn !== 'function') return undefined;
-      return Native.reflectApply ? Native.reflectApply(fn, rawBase, callArgs) : Reflect.apply(fn, rawBase, callArgs);
+      return reflectApply(fn, rawBase, callArgs);
     }
     function optionalCall(base, prop, args) {
       if (base === null || base === undefined) return undefined;
@@ -1206,20 +1270,20 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     }
     function construct(ctor, args) {
       const dynamic = dynamicWrapperFor(ctor);
-      return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
+      return reflectConstruct(dynamic || ctor, arrayIsArray(args) ? args : []);
     }
     function has(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isWindowLike(base) && prop === 'location') return true;
       if (base === document && prop === 'location') return true;
       const raw = unwrapRaw(base === scope ? root : base);
-      return Reflect.has(Object(raw), prop);
+      return reflectHas(Object(raw), prop);
     }
     function deleteProperty(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
       if ((isWindowLike(base) && prop === 'location') || base === document && prop === 'location') return false;
       const raw = unwrapRaw(base === scope ? root : base);
-      return Reflect.deleteProperty(Object(raw), prop);
+      return reflectDeleteProperty(Object(raw), prop);
     }
     function typeOf(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
@@ -1229,9 +1293,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isWindowLike(base) && prop === 'location') return { get() { return virtualLocation; }, set(v) { setVirtualLocation(v); }, enumerable: true, configurable: true };
       if (base === document && (prop === 'location' || prop === 'URL' || prop === 'documentURI' || prop === 'baseURI' || prop === 'referrer' || prop === 'origin' || prop === 'defaultView')) return { value: get(base, prop), enumerable: true, configurable: true };
-      return Reflect.getOwnPropertyDescriptor(Object(unwrapRaw(base === scope ? root : base)), prop);
+      return reflectGetOwnPropertyDescriptor(Object(unwrapRaw(base === scope ? root : base)), prop);
     }
-    function ownKeys(base) { return Reflect.ownKeys(Object(unwrapRaw(base === scope ? root : base))); }
+    function ownKeys(base) { return reflectOwnKeys(Object(unwrapRaw(base === scope ? root : base))); }
     function moduleURL(specifier, referrer) {
       const spec = String(specifier);
       if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw normalizedError('TypeError');
@@ -1249,8 +1313,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (typeof Native.eval !== 'function') throw normalizedError('NotSupportedError');
       return (0, Native.eval)(evalSource(source));
     }
-    try { Object.defineProperty(indirectEval, 'name', { value: 'eval', configurable: true }); } catch {}
-    try { Object.defineProperty(indirectEval, 'length', { value: 1, configurable: true }); } catch {}
+    try { objectDefineProperty(indirectEval, 'name', { value: 'eval', configurable: true }); } catch {}
+    try { objectDefineProperty(indirectEval, 'length', { value: 1, configurable: true }); } catch {}
     maskNativeFunction(indirectEval, 'eval');
     define(root, '__zp_get', get);
     define(root, '__zp_optionalGet', optionalGet);
@@ -1269,8 +1333,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     define(root, '__zp_eval_source', evalSource);
     define(root, '__zp_nav_assign', v => setVirtualLocation(v));
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
-    define(root, '__zp_runClassic', fn => fn.call(root, scope));
-    define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
+    define(root, '__zp_runClassic', fn => reflectApply(fn, root, [scope]));
+    define(root, '__zp_runEvent', (selfValue, event, fn) => reflectApply(fn, selfValue, [new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return reflectGet(t, p, r); } })]));
     installDynamicCodeHooks();
     installDocumentWriteHooks(root);
   }
@@ -1278,12 +1342,12 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function fireEvent(target, type) {
     let ev;
     try { ev = new Event(type); } catch { ev = { type }; }
-    return target.dispatchEvent(ev);
+    return reflectApply(reflectGet(target, 'dispatchEvent'), target, [ev]);
   }
   function fireProgress(target, type, loaded = 0, total = 0, lengthComputable = false) {
     let ev;
     try { ev = new ProgressEvent(type, { loaded, total, lengthComputable }); } catch { ev = { type, loaded, total, lengthComputable }; }
-    return target.dispatchEvent(ev);
+    return reflectApply(reflectGet(target, 'dispatchEvent'), target, [ev]);
   }
   function installRequestFacade() {
     function ZPRequest(input, init) {
@@ -1301,7 +1365,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
       function hiddenXHRSlot(xhr, key, value) {
-        try { Object.defineProperty(xhr, key, { value, enumerable: false, configurable: true, writable: true }); }
+        try { objectDefineProperty(xhr, key, { value, enumerable: false, configurable: true, writable: true }); }
         catch { xhr[key] = value; }
       }
       function ZPXMLHttpRequest() {
@@ -1333,7 +1397,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         LOADING: { value: LOADING, enumerable: true },
         DONE: { value: DONE, enumerable: true }
       });
-      try { Object.defineProperty(ZPXMLHttpRequest, 'name', { value: 'XMLHttpRequest', configurable: true }); } catch {}
+      try { objectDefineProperty(ZPXMLHttpRequest, 'name', { value: 'XMLHttpRequest', configurable: true }); } catch {}
       function xhrReady(xhr, state) {
         xhr.readyState = state;
         fireEvent(xhr, 'readystatechange');
@@ -1346,7 +1410,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         fireEvent(xhr, 'loadend');
       }
       installEventMethods(ZPXMLHttpRequest.prototype);
-      Object.assign(ZPXMLHttpRequest.prototype, {
+      objectAssign(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
         UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
         open(method, url, async = true, user, password) {
@@ -1565,7 +1629,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         withCredentials: { configurable: true, enumerable: true, get() { return !!this._withCredentials; }, set(value) { setXHRWithCredentials(this, value); } }
       });
       maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
-      try { Object.defineProperty(root, 'XMLHttpRequest', { value: ZPXMLHttpRequest, enumerable: false, configurable: true, writable: true }); } catch {}
+      try { objectDefineProperty(root, 'XMLHttpRequest', { value: ZPXMLHttpRequest, enumerable: false, configurable: true, writable: true }); } catch {}
       maskNativeFunction(ZPXMLHttpRequest, 'XMLHttpRequest');
     }
     if (Native.EventSource && Native.fetch && Native.Request && Native.Headers) {
@@ -1579,7 +1643,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         runEventSource(this, url, init || {});
       }
       installEventMethods(ZPEventSource.prototype);
-      Object.assign(ZPEventSource.prototype, {
+      objectAssign(ZPEventSource.prototype, {
         constructor: ZPEventSource,
         CONNECTING, OPEN, CLOSED,
         close() {
@@ -1709,8 +1773,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
 
   function installPostMessageHooks(w) {
-    const addEventListener = w && w.addEventListener && w.addEventListener.bind(w);
-    const removeEventListener = w && w.removeEventListener && w.removeEventListener.bind(w);
+    const addEventListener = w && w.addEventListener && reflectApply(functionBind, w.addEventListener, [w]);
+    const removeEventListener = w && w.removeEventListener && reflectApply(functionBind, w.removeEventListener, [w]);
     if (!addEventListener || !removeEventListener) return;
     installMessageEventSourceAccessor(w);
     function wrap(listener) {
@@ -1718,7 +1782,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (messageListenerWrappers.has(listener)) return messageListenerWrappers.get(listener);
       const wrapped = function(ev) {
         const next = virtualizeMessageEvent(ev);
-        return typeof listener === 'function' ? listener.call(this, next) : listener.handleEvent.call(listener, next);
+        return typeof listener === 'function' ? reflectApply(listener, this, [next]) : reflectApply(listener.handleEvent, listener, [next]);
       };
       messageListenerWrappers.set(listener, wrapped);
       return wrapped;
@@ -1741,11 +1805,11 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const proto = w && w.MessageEvent && w.MessageEvent.prototype;
     if (!proto) return;
     if (messageEventSourceHookedPrototypes.has(proto)) return;
-    const d = Object.getOwnPropertyDescriptor(proto, 'source');
+    const d = objectGetOwnPropertyDescriptor(proto, 'source');
     if (!d || typeof d.get !== 'function') return;
     messageEventSourceHookedPrototypes.add(proto);
     defineAccessor(proto, 'source', function() {
-      const raw = d.get.call(this);
+      const raw = reflectApply(d.get, this, []);
       return messageSourceFacadeFor(raw, this) || raw;
     });
   }
@@ -3274,7 +3338,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (!nav) return;
     if (serviceWorkerFacades.has(w)) return;
     const facade = {};
-    try { Object.defineProperty(facade, Symbol.toStringTag, { value: 'ServiceWorkerContainer', enumerable: false, configurable: true }); } catch {}
+    try { objectDefineProperty(facade, Symbol.toStringTag, { value: 'ServiceWorkerContainer', enumerable: false, configurable: true }); } catch {}
     const serviceWorkerReady = Promise.resolve(undefined);
     let oncontrollerchange = null;
     define(facade, 'register', function register() { return Promise.reject(normalizedError('NotSupportedError')); });
@@ -3297,7 +3361,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       defineAccessor(existing, 'oncontrollerchange', () => oncontrollerchange, v => { oncontrollerchange = typeof v === 'function' ? v : null; });
     }
     serviceWorkerFacades.set(w, facade);
-    const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
+    const proto = w.Navigator && w.Navigator.prototype || objectGetPrototypeOf(nav);
     defineAccessor(proto, 'serviceWorker', () => facade);
     defineAccessor(nav, 'serviceWorker', () => facade);
   }
@@ -3305,9 +3369,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (!w || !w.document || !w.Node || !w.Element) return;
     try {
       if (w[iframeHooksMarker]) return;
-      Object.defineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
+      objectDefineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
     } catch {}
     const { installFrameAccessors } = createFrameAccessors({
+      Native,
       networkContainmentMarker,
       isDirectExternalFrameElement,
       shouldContainFrameWindow: isInitialAboutBlankFrame,
@@ -3315,8 +3380,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       frameWindowFacadeFor,
       frameDocumentFacadeFor,
     });
-    const nativeCreateElement = w === root ? Native.createElement : w.document.createElement.bind(w.document);
-    const nativeCreateElementNS = w === root ? Native.createElementNS : w.document.createElementNS && w.document.createElementNS.bind(w.document);
+    const nativeCreateElement = w === root ? Native.createElement : reflectApply(functionBind, w.document.createElement, [w.document]);
+    const nativeCreateElementNS = w === root ? Native.createElementNS : w.document.createElementNS && reflectApply(functionBind, w.document.createElementNS, [w.document]);
 
     installFrameAccessors(w.HTMLIFrameElement && w.HTMLIFrameElement.prototype);
     installFrameAccessors(w.HTMLFrameElement && w.HTMLFrameElement.prototype);
@@ -3348,18 +3413,18 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       defineReplacingNative(proto, name, function(...args) {
         prepareActivatingNodes(args);
         const frames = collectIframesFromArgs(args);
-        const ret = nativeFn.apply(this, args);
+        const ret = reflectApply(nativeFn, this, args);
         instrumentFrameList(frames);
         return ret;
       });
     }
     function installFrameProp(proto, prop) {
-      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      const d = objectGetOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
       try {
-        Object.defineProperty(proto, prop, {
+        objectDefineProperty(proto, prop, {
           get() {
-            return prop === 'src' ? visibleNavigationURL(this, 'src') || d.get.call(this) : prop === 'srcdoc' ? visibleSrcdoc(this) : d.get.call(this);
+            return prop === 'src' ? visibleNavigationURL(this, 'src') || reflectApply(d.get, this, []) : prop === 'srcdoc' ? visibleSrcdoc(this) : reflectApply(d.get, this, []);
           },
           set(v) {
             if (prop === 'srcdoc') setFrameSrcdocAttribute(this, 'srcdoc', v);
@@ -3371,13 +3436,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
               Native.setAttribute.call(this, 'data-zp-target-url', t);
               const direct = directExternalFrameURL(t);
               if (direct) {
-                d.set.call(this, direct);
+                reflectApply(d.set, this, [direct]);
                 rememberFrameOrigin(this);
               } else {
-                d.set.call(this, 'about:blank');
-                activatedFrameURL(t).then(u => { d.set.call(this, u); rememberFrameOrigin(this); }).catch(()=>{});
+                reflectApply(d.set, this, ['about:blank']);
+                activatedFrameURL(t).then(u => { reflectApply(d.set, this, [u]); rememberFrameOrigin(this); }).catch(()=>{});
               }
-            } else d.set.call(this, v);
+            } else reflectApply(d.set, this, [v]);
             instrumentIframe(this);
           },
           configurable: false
@@ -3455,28 +3520,28 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     installBlockers(w, true);
     installCanvasAntiFingerprinting(w);
     installAudioAntiFingerprinting(w);
-    try { Object.defineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
+    try { objectDefineProperty(w, networkContainmentMarker, { value: true, enumerable: false, configurable: false }); } catch {}
   }
   function installContainedExecGlobals(w) {
     const childFunction = w.Function;
     if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
     const containedFunction = containedChildFunction(childFunction);
     if (containedFunction && !define(w, 'Function', containedFunction)) throw normalizedError('SecurityError');
-    if (childFunction && childFunction.prototype && containedFunction) try { Object.defineProperty(childFunction.prototype, 'constructor', { value: containedFunction, enumerable: false, configurable: true, writable: true }); } catch {}
-    if (root.fetch && !define(w, 'fetch', root.fetch.bind(root))) throw normalizedError('SecurityError');
+    if (childFunction && childFunction.prototype && containedFunction) try { objectDefineProperty(childFunction.prototype, 'constructor', { value: containedFunction, enumerable: false, configurable: true, writable: true }); } catch {}
+    if (root.fetch && !define(w, 'fetch', reflectApply(functionBind, root.fetch, [root]))) throw normalizedError('SecurityError');
   }
   function containedChildFunction(childFunction) {
     if (typeof root.Function !== 'function') return root.Function;
     const rootFunction = root.Function;
     const childPrototype = childFunction && childFunction.prototype;
     const contained = function Function(...args) { return rootFunction(...args); };
-    try { Object.defineProperty(contained, 'name', { value: 'Function', configurable: true }); } catch {}
-    try { Object.defineProperty(contained, 'length', { value: 1, configurable: true }); } catch {}
+    try { objectDefineProperty(contained, 'name', { value: 'Function', configurable: true }); } catch {}
+    try { objectDefineProperty(contained, 'length', { value: 1, configurable: true }); } catch {}
     if (childPrototype) {
-      try { Object.defineProperty(contained, 'prototype', { value: childPrototype, enumerable: false, configurable: false, writable: false }); } catch {}
+      try { objectDefineProperty(contained, 'prototype', { value: childPrototype, enumerable: false, configurable: false, writable: false }); } catch {}
     }
     try {
-      Object.defineProperty(contained, Symbol.hasInstance, {
+      objectDefineProperty(contained, Symbol.hasInstance, {
         value(value) {
           try {
             return value === contained ||
@@ -3497,7 +3562,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
     if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
-    if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
+    if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', reflectApply(functionBind, navigator.sendBeacon, [navigator]));
   }
 
   function installBlockers(w, strict = false) {
@@ -3512,13 +3577,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (nav.mediaDevices) maskMethods(nav.mediaDevices, ['getUserMedia','getDisplayMedia','enumerateDevices']);
     }
     if (w.speechSynthesis) {
-      const voices = Object.freeze([
-        Object.freeze({ name: 'Google US English', lang: 'en-US', default: true, localService: false, voiceURI: 'Google US English' }),
-        Object.freeze({ name: 'Microsoft David - English (United States)', lang: 'en-US', default: false, localService: true, voiceURI: 'Microsoft David' })
+      const voices = objectFreeze([
+        objectFreeze({ name: 'Google US English', lang: 'en-US', default: true, localService: false, voiceURI: 'Google US English' }),
+        objectFreeze({ name: 'Microsoft David - English (United States)', lang: 'en-US', default: false, localService: true, voiceURI: 'Microsoft David' })
       ]);
       const getVoices = function() { return voices.slice(); };
       if (!define(w.speechSynthesis, 'getVoices', getVoices)) {
-        try { define(Object.getPrototypeOf(w.speechSynthesis), 'getVoices', getVoices); } catch {}
+        try { define(objectGetPrototypeOf(w.speechSynthesis), 'getVoices', getVoices); } catch {}
       }
     }
   }

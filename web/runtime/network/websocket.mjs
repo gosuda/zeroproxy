@@ -10,6 +10,22 @@ export function createWebSocketFacades({
   postMessageToSW,
   currentDocumentURL,
 }) {
+  const {
+    Array = globalThis.Array,
+    ArrayBuffer = globalThis.ArrayBuffer,
+    CloseEvent = globalThis.CloseEvent,
+    Event = globalThis.Event,
+    MessageEvent = globalThis.MessageEvent,
+    Promise = globalThis.Promise,
+    Set = globalThis.Set,
+    String = globalThis.String,
+    TypeError = globalThis.TypeError,
+    URL = globalThis.URL,
+    arrayIsArray = globalThis.Array.isArray,
+    objectAssign = globalThis.Object.assign,
+    objectDefineProperty = globalThis.Object.defineProperty,
+  } = Native;
+
   function installWebSocket() {
     const CONNECTING = 0,
       OPEN = 1,
@@ -21,11 +37,16 @@ export function createWebSocketFacades({
       const list = protocolArray(protocols);
       if (!list) throw normalizedError('SyntaxError');
       const seen = new Set();
-      return list.map((p) => checkedProtocol(p, seen, tokenRE, normalizedError));
+      const out = new Array(list.length);
+      for (let i = 0; i < list.length; i += 1) out[i] = checkedProtocol(list[i], seen, tokenRE, normalizedError);
+      return out;
     }
     function protocolArray(protocols) {
       if (typeof protocols === 'string') return [protocols];
-      return Array.isArray(protocols) ? protocols.slice() : null;
+      if (!arrayIsArray(protocols)) return null;
+      const out = new Array(protocols.length);
+      for (let i = 0; i < protocols.length; i += 1) out[i] = protocols[i];
+      return out;
     }
     function checkedProtocol(protocol, seen, tokenRE, normalizedError) {
       const s = String(protocol);
@@ -42,11 +63,9 @@ export function createWebSocketFacades({
       } catch {
         const ev = new Event('close');
         try {
-          Object.defineProperties(ev, {
-            code: { value: code },
-            reason: { value: reason },
-            wasClean: { value: wasClean },
-          });
+          objectDefineProperty(ev, 'code', { value: code });
+          objectDefineProperty(ev, 'reason', { value: reason });
+          objectDefineProperty(ev, 'wasClean', { value: wasClean });
         } catch {}
         return ev;
       }
@@ -123,7 +142,7 @@ export function createWebSocketFacades({
     ZPWebSocket.CLOSED = CLOSED;
     ZPWebSocket.prototype = { CONNECTING, OPEN, CLOSING, CLOSED };
     installEventMethods(ZPWebSocket.prototype);
-    Object.assign(ZPWebSocket.prototype, {
+    objectAssign(ZPWebSocket.prototype, {
       constructor: ZPWebSocket,
       send(data) {
         if (this.readyState !== OPEN || !this._port) throw normalizedError('InvalidStateError');
@@ -215,7 +234,7 @@ export function createWebSocketFacades({
       });
     }
     try {
-      Object.defineProperty(ZPWebSocketStream, 'name', {
+      objectDefineProperty(ZPWebSocketStream, 'name', {
         value: 'WebSocketStream',
         configurable: true,
       });

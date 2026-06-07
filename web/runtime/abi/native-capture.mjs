@@ -1,3 +1,61 @@
+const NativeArray = Array;
+const NativeArrayBuffer = ArrayBuffer;
+const NativeDate = Date;
+const NativeError = Error;
+const NativeFunctionApply = Function.prototype.apply;
+const NativeFunctionBind = Function.prototype.bind;
+const NativeFunctionCall = Function.prototype.call;
+const NativeJSON = JSON;
+const NativeInfinity = Infinity;
+const NativeMap = Map;
+const NativeMath = Math;
+const NativeNumber = Number;
+const NativeObject = Object;
+const NativePromise = Promise;
+const NativeProxy = Proxy;
+const NativeReflect = Reflect;
+const NativeRegExp = RegExp;
+const NativeSet = Set;
+const NativeString = String;
+const NativeSymbol = Symbol;
+const NativeSyntaxError = SyntaxError;
+const NativeTypeError = TypeError;
+const NativeUint8Array = Uint8Array;
+const NativeURL = URL;
+const NativeURLSearchParams = URLSearchParams;
+const NativeWeakMap = WeakMap;
+const NativeWeakSet = WeakSet;
+const nativeArrayFrom = NativeArray.from;
+const nativeArrayIsArray = NativeArray.isArray;
+const nativeDecodeURIComponent = decodeURIComponent;
+const nativeEncodeURIComponent = encodeURIComponent;
+const nativeObjectAssign = NativeObject.assign;
+const nativeObjectCreate = NativeObject.create;
+const nativeObjectDefineProperty = NativeObject.defineProperty;
+const nativeObjectFreeze = NativeObject.freeze;
+const nativeObjectGetOwnPropertyDescriptor = NativeObject.getOwnPropertyDescriptor;
+const nativeObjectGetOwnPropertyDescriptors = NativeObject.getOwnPropertyDescriptors;
+const nativeObjectGetOwnPropertyNames = NativeObject.getOwnPropertyNames;
+const nativeObjectGetOwnPropertySymbols = NativeObject.getOwnPropertySymbols;
+const nativeObjectGetPrototypeOf = NativeObject.getPrototypeOf;
+const nativeObjectHasOwn = NativeObject.hasOwn;
+const nativeObjectKeys = NativeObject.keys;
+const nativeObjectSetPrototypeOf = NativeObject.setPrototypeOf;
+const nativeReflectApply = NativeReflect.apply;
+const nativeReflectConstruct = NativeReflect.construct;
+const nativeReflectDeleteProperty = NativeReflect.deleteProperty;
+const nativeReflectGet = NativeReflect.get;
+const nativeReflectGetOwnPropertyDescriptor = NativeReflect.getOwnPropertyDescriptor;
+const nativeReflectGetPrototypeOf = NativeReflect.getPrototypeOf;
+const nativeReflectHas = NativeReflect.has;
+const nativeReflectOwnKeys = NativeReflect.ownKeys;
+const nativeReflectSet = NativeReflect.set;
+const nativeReflectSetPrototypeOf = NativeReflect.setPrototypeOf;
+const nativeURLSearchParamsAppend = NativeURLSearchParams.prototype.append;
+const nativeURLSearchParamsGetAll = NativeURLSearchParams.prototype.getAll;
+const nativeURLSearchParamsSet = NativeURLSearchParams.prototype.set;
+const nativeURLSearchParamsToString = NativeURLSearchParams.prototype.toString;
+
 export function readBootConfig(root) {
   return root.__ZP_BOOT || {};
 }
@@ -7,7 +65,7 @@ export function clearBootConfig(root) {
     delete root.__ZP_BOOT;
   } catch {
     try {
-      Object.defineProperty(root, '__ZP_BOOT', {
+      nativeObjectDefineProperty(root, '__ZP_BOOT', {
         value: undefined,
         enumerable: false,
       });
@@ -31,6 +89,64 @@ export function captureNative(w) {
 
 function captureCore(w) {
   return {
+    globalThis: w,
+    Array: NativeArray,
+    ArrayBuffer: NativeArrayBuffer,
+    Date: NativeDate,
+    Error: NativeError,
+    JSON: NativeJSON,
+    Infinity: NativeInfinity,
+    Map: NativeMap,
+    Math: NativeMath,
+    Number: NativeNumber,
+    Object: NativeObject,
+    Promise: NativePromise,
+    Proxy: NativeProxy,
+    Reflect: NativeReflect,
+    RegExp: NativeRegExp,
+    Set: NativeSet,
+    String: NativeString,
+    Symbol: NativeSymbol,
+    SyntaxError: NativeSyntaxError,
+    TypeError: NativeTypeError,
+    Uint8Array: NativeUint8Array,
+    URL: NativeURL,
+    URLSearchParams: NativeURLSearchParams,
+    WeakMap: NativeWeakMap,
+    WeakSet: NativeWeakSet,
+    decodeURIComponent: nativeDecodeURIComponent,
+    encodeURIComponent: nativeEncodeURIComponent,
+    functionApply: NativeFunctionApply,
+    functionBind: NativeFunctionBind,
+    functionCall: NativeFunctionCall,
+    arrayFrom: nativeArrayFrom,
+    arrayIsArray: nativeArrayIsArray,
+    objectAssign: nativeObjectAssign,
+    objectCreate: nativeObjectCreate,
+    objectDefineProperty: nativeObjectDefineProperty,
+    objectFreeze: nativeObjectFreeze,
+    objectGetOwnPropertyDescriptor: nativeObjectGetOwnPropertyDescriptor,
+    objectGetOwnPropertyDescriptors: nativeObjectGetOwnPropertyDescriptors,
+    objectGetOwnPropertyNames: nativeObjectGetOwnPropertyNames,
+    objectGetOwnPropertySymbols: nativeObjectGetOwnPropertySymbols,
+    objectGetPrototypeOf: nativeObjectGetPrototypeOf,
+    objectHasOwn: nativeObjectHasOwn,
+    objectKeys: nativeObjectKeys,
+    objectSetPrototypeOf: nativeObjectSetPrototypeOf,
+    reflectApply: nativeReflectApply,
+    reflectConstruct: nativeReflectConstruct,
+    reflectDeleteProperty: nativeReflectDeleteProperty,
+    reflectGet: nativeReflectGet,
+    reflectGetOwnPropertyDescriptor: nativeReflectGetOwnPropertyDescriptor,
+    reflectGetPrototypeOf: nativeReflectGetPrototypeOf,
+    reflectHas: nativeReflectHas,
+    reflectOwnKeys: nativeReflectOwnKeys,
+    reflectSet: nativeReflectSet,
+    reflectSetPrototypeOf: nativeReflectSetPrototypeOf,
+    urlSearchParamsAppend: nativeURLSearchParamsAppend,
+    urlSearchParamsGetAll: nativeURLSearchParamsGetAll,
+    urlSearchParamsSet: nativeURLSearchParamsSet,
+    urlSearchParamsToString: nativeURLSearchParamsToString,
     fetch: bindMethod(w, 'fetch'),
     XMLHttpRequest: w.XMLHttpRequest,
     WebSocket: w.WebSocket,
@@ -40,8 +156,20 @@ function captureCore(w) {
     eval: w.eval,
     SharedWorker: w.SharedWorker,
     FormData: w.FormData,
-    URL: w.URL,
     Blob: w.Blob,
+    TextDecoder: w.TextDecoder,
+    TextEncoder: w.TextEncoder,
+    MessageChannel: w.MessageChannel,
+    BroadcastChannel: w.BroadcastChannel,
+    ReadableStream: w.ReadableStream,
+    WritableStream: w.WritableStream,
+    AbortController: w.AbortController,
+    Event: w.Event,
+    MessageEvent: w.MessageEvent,
+    ProgressEvent: w.ProgressEvent,
+    CloseEvent: w.CloseEvent,
+    HashChangeEvent: w.HashChangeEvent,
+    Location: w.Location,
     DOMException: w.DOMException,
     Request: w.Request,
     Response: w.Response,
@@ -64,7 +192,7 @@ function captureDOM(w) {
   const element = proto(w, 'Element');
   const doc = proto(w, 'Document');
   return {
-    createElement: d.createElement.bind(d),
+    createElement: bindMethod(d, 'createElement'),
     createElementNS: bindMethod(d, 'createElementNS'),
     appendChild: node.appendChild,
     insertBefore: node.insertBefore,
@@ -152,8 +280,8 @@ function captureDocumentIO(w) {
 function captureNavigation(w) {
   const locationProto = proto(w, 'Location');
   return {
-    historyPush: w.history.pushState.bind(w.history),
-    historyReplace: w.history.replaceState.bind(w.history),
+    historyPush: bindMethod(w.history, 'pushState'),
+    historyReplace: bindMethod(w.history, 'replaceState'),
     locationAssign: bindMethod(w.location, 'assign'),
     locationReplace: bindMethod(w.location, 'replace'),
     locationHref: desc(locationProto, 'href') || desc(w.location, 'href'),
@@ -179,20 +307,20 @@ function captureTimersAndParsers(w) {
 
 function captureReflection(w) {
   return {
-    objectGetPrototypeOf: Object.getPrototypeOf,
-    reflectGetPrototypeOf: value(w.Reflect, 'getPrototypeOf'),
-    reflectApply: value(w.Reflect, 'apply'),
+    objectGetPrototypeOf: nativeObjectGetPrototypeOf,
+    reflectGetPrototypeOf: nativeReflectGetPrototypeOf,
+    reflectApply: nativeReflectApply,
     weakMapGet: value(proto(w, 'WeakMap'), 'get'),
   };
 }
 
 function bindMethod(obj, key) {
   const fn = value(obj, key);
-  return fn && fn.bind(obj);
+  return fn && nativeReflectApply(NativeFunctionBind, fn, [obj]);
 }
 
 function desc(obj, key) {
-  return obj ? Object.getOwnPropertyDescriptor(obj, key) : undefined;
+  return obj ? nativeObjectGetOwnPropertyDescriptor(obj, key) : undefined;
 }
 
 function proto(w, name) {
@@ -216,7 +344,7 @@ export function createNormalizedError(Native) {
     try {
       return new Native.DOMException('Blocked by ZeroProxy policy', name);
     } catch {
-      const e = new Error('Blocked by ZeroProxy policy');
+      const e = new NativeError('Blocked by ZeroProxy policy');
       e.name = name;
       return e;
     }

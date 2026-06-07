@@ -14,6 +14,29 @@ export function createHTTPFetchFacade({
   proxyOrigin,
   isInternalRequestURL = () => false,
 }) {
+  const {
+    Array = globalThis.Array,
+    ArrayBuffer = globalThis.ArrayBuffer,
+    Blob = globalThis.Blob,
+    Map = globalThis.Map,
+    Object = globalThis.Object,
+    Promise = globalThis.Promise,
+    Proxy = globalThis.Proxy,
+    String = globalThis.String,
+    SyntaxError = globalThis.SyntaxError,
+    TextEncoder = globalThis.TextEncoder,
+    URL = globalThis.URL,
+    URLSearchParams = globalThis.URLSearchParams,
+    encodeURIComponent = globalThis.encodeURIComponent,
+    functionBind = globalThis.Function.prototype.bind,
+    objectAssign = globalThis.Object.assign,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    objectFreeze = globalThis.Object.freeze,
+    objectHasOwn = globalThis.Object.hasOwn,
+    reflectApply = globalThis.Reflect.apply,
+    reflectGet = globalThis.Reflect.get,
+  } = Native;
+
   function requestURLString(input) {
     return input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
   }
@@ -47,7 +70,7 @@ export function createHTTPFetchFacade({
   }
 
   function replayableRequestBody(input, init) {
-    if (!init || !Object.prototype.hasOwnProperty.call(init, 'body')) return false;
+    if (!init || !objectHasOwn(init, 'body')) return false;
     const size = replayableBodySize(init.body);
     return size != null && size <= 1024 * 1024;
   }
@@ -65,7 +88,7 @@ export function createHTTPFetchFacade({
   function performanceTimingStore() {
     if (!root.__zpPerformanceTimings) {
       try {
-        Object.defineProperty(root, '__zpPerformanceTimings', {
+        objectDefineProperty(root, '__zpPerformanceTimings', {
           value: [],
           enumerable: false,
           configurable: false,
@@ -81,8 +104,13 @@ export function createHTTPFetchFacade({
     const timing = resp && resp.__zpTransportTiming;
     if (!timing || typeof timing !== 'object') return;
     const store = performanceTimingStore();
-    store.push(Object.assign({ targetUrl }, timing));
-    if (store.length > 256) store.splice(0, store.length - 256);
+    store[store.length] = objectAssign({ targetUrl }, timing);
+    if (store.length > 256) {
+      const keep = 256;
+      const offset = store.length - keep;
+      for (let i = 0; i < keep; i += 1) store[i] = store[i + offset];
+      store.length = keep;
+    }
   }
 
   function sameOriginURL(a, b) {
@@ -138,8 +166,8 @@ export function createHTTPFetchFacade({
   }
 
   function boundTargetMember(target, prop) {
-    const value = Reflect.get(target, prop, target);
-    return typeof value === 'function' ? value.bind(target) : value;
+    const value = reflectGet(target, prop, target);
+    return typeof value === 'function' ? reflectApply(functionBind, value, [target]) : value;
   }
 
   async function fetchThroughRuntime(input, init = {}) {
@@ -266,7 +294,7 @@ export function createHTTPFetchFacade({
     try { req.signal.removeEventListener('abort', abort.listener); } catch {}
   }
 
-  return Object.freeze({
+  return objectFreeze({
     fetchThroughRuntime,
     replayableBodySize,
     requestTargetURL,

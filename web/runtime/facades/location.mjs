@@ -7,6 +7,11 @@ export function createLocationFacades({
   maskMethods,
   maskNativeFunction,
 }) {
+  const {
+    Symbol = globalThis.Symbol,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    objectFreeze = globalThis.Object.freeze,
+  } = Native;
   const virtualLocation = {
     get href() { return getVisibleURL().href; },
     set href(v) { setVirtualLocation(v); },
@@ -45,20 +50,20 @@ export function createLocationFacades({
     valueOf() { return getVirtualURL().href; },
     [Symbol.toPrimitive]() { return getVirtualURL().href; }
   };
-  finalizeLocationFacade(virtualLocation, maskMethods, maskNativeFunction);
-  finalizeLocationFacade(crossWindowLocation, maskMethods, maskNativeFunction);
-  return Object.freeze({ virtualLocation, crossWindowLocation });
+  finalizeLocationFacade({ locationFacade: virtualLocation, maskMethods, maskNativeFunction, objectDefineProperty, objectFreeze, Symbol });
+  finalizeLocationFacade({ locationFacade: crossWindowLocation, maskMethods, maskNativeFunction, objectDefineProperty, objectFreeze, Symbol });
+  return objectFreeze({ virtualLocation, crossWindowLocation });
 }
 
-function finalizeLocationFacade(locationFacade, maskMethods, maskNativeFunction) {
+function finalizeLocationFacade({ locationFacade, maskMethods, maskNativeFunction, objectDefineProperty, objectFreeze, Symbol }) {
   try {
-    Object.defineProperty(locationFacade, Symbol.toStringTag, {
+    objectDefineProperty(locationFacade, Symbol.toStringTag, {
       value: 'Location',
       enumerable: false,
       configurable: true
     });
   } catch {}
-  try { Object.freeze(locationFacade); } catch {}
+  try { objectFreeze(locationFacade); } catch {}
   maskMethods(locationFacade, ['assign','replace','reload','toString','valueOf']);
   maskNativeFunction(locationFacade[Symbol.toPrimitive], Symbol.toPrimitive);
 }

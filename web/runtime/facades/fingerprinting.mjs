@@ -9,6 +9,29 @@ export function createFingerprintingFacades({
   scriptProxyPath,
   resourceProxyPath,
 }) {
+  const {
+    Array = globalThis.Array,
+    Math = globalThis.Math,
+    Number = globalThis.Number,
+    Proxy = globalThis.Proxy,
+    Set = globalThis.Set,
+    String = globalThis.String,
+    URL = globalThis.URL,
+    WeakSet = globalThis.WeakSet,
+    arrayFrom = globalThis.Array.from,
+    arrayIsArray = globalThis.Array.isArray,
+    functionBind = globalThis.Function.prototype.bind,
+    objectAssign = globalThis.Object.assign,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    objectGetPrototypeOf = globalThis.Object.getPrototypeOf,
+    objectKeys = globalThis.Object.keys,
+    objectSetPrototypeOf = globalThis.Object.setPrototypeOf,
+    reflectApply = globalThis.Reflect.apply,
+    reflectGet = globalThis.Reflect.get,
+  } = Native;
+  const global = Native.globalThis || globalThis;
+  const document = global.document;
+  const performance = global.performance;
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
 
@@ -22,7 +45,7 @@ export function createFingerprintingFacades({
     const origGetImageData = ctxProto && ctxProto.getImageData;
     if (typeof origGetImageData !== 'function') return;
     define(ctxProto, 'getImageData', function(...args) {
-      const imageData = origGetImageData.apply(this, args);
+      const imageData = reflectApply(origGetImageData, this, args);
       const data = imageData && imageData.data;
       if (data && data.length > 1) {
         data[0] = data[0] ^ 1;
@@ -36,7 +59,7 @@ export function createFingerprintingFacades({
     if (typeof origToDataURL !== 'function') return;
     define(canvasProto, 'toDataURL', function(...args) {
       perturbCanvasForExport(this);
-      return origToDataURL.apply(this, args);
+      return reflectApply(origToDataURL, this, args);
     });
   }
   function perturbCanvasForExport(canvas) {
@@ -69,7 +92,7 @@ export function createFingerprintingFacades({
     const origGetChannelData = proto && proto.getChannelData;
     if (typeof origGetChannelData !== 'function') return;
     define(proto, 'getChannelData', function(channel) {
-      const f32 = origGetChannelData.call(this, channel);
+      const f32 = reflectApply(origGetChannelData, this, [channel]);
       const limit = Math.min(f32.length, 100);
       for (let i = 0; i < limit; i++) {
         if (f32[i] !== 0) {
@@ -134,7 +157,7 @@ export function createFingerprintingFacades({
     if (prop === 'transferSize') return visibleTransferSize(target);
     if (prop === 'toJSON') return () => performanceEntryJSON(target, visible);
     const value = target[prop];
-    return typeof value === 'function' ? value.bind(target) : value;
+    return typeof value === 'function' ? reflectApply(functionBind, value, [target]) : value;
   }
   function visibleTransferSize(entry) {
     const transfer = Number(entry.transferSize || 0);
@@ -143,15 +166,21 @@ export function createFingerprintingFacades({
     return size > 0 ? size + 300 : 0;
   }
   function performanceEntryJSON(target, visible) {
-    const out = Object.assign({}, target.toJSON ? target.toJSON() : target, { name: visible });
+    const out = objectAssign({}, target.toJSON ? target.toJSON() : target, { name: visible });
     if (Number(out.transferSize || 0) <= 0) out.transferSize = visibleTransferSize(out);
     return out;
   }
   function maskPerformanceList(list, documentURL) {
-    return Array.from(list || []).map(entry => wrapPerformanceEntry(entry, documentURL)).filter(Boolean);
+    const raw = arrayFrom(list || []);
+    const out = [];
+    for (const entry of raw) {
+      const wrapped = wrapPerformanceEntry(entry, documentURL);
+      if (wrapped) out[out.length] = wrapped;
+    }
+    return out;
   }
   function mergedPerformanceEntries(entries, documentURL, doc) {
-    const list = Array.from(entries || []);
+    const list = arrayFrom(entries || []);
     return maskPerformanceList(list, documentURL)
       .concat(transportTimingEntries())
       .concat(syntheticScriptTimings(doc, list));
@@ -162,8 +191,8 @@ export function createFingerprintingFacades({
         if (prop === 'getEntries') return () => mergedPerformanceEntries(target.getEntries(), documentURL, doc);
         if (prop === 'getEntriesByType') return type => visibleObservedEntriesByType(target, String(type), documentURL, doc);
         if (prop === 'getEntriesByName') return (name, type) => visibleObservedEntriesByName(target, String(name), type, documentURL, doc);
-        const value = Reflect.get(target, prop, target);
-        return typeof value === 'function' ? value.bind(target) : value;
+        const value = reflectGet(target, prop, target);
+        return typeof value === 'function' ? reflectApply(functionBind, value, [target]) : value;
       }
     });
   }
@@ -184,15 +213,20 @@ export function createFingerprintingFacades({
     };
     entry.toJSON = function() {
       const out = {};
-      for (const key of Object.keys(entry)) if (key !== 'toJSON') out[key] = entry[key];
+      for (const key of objectKeys(entry)) if (key !== 'toJSON') out[key] = entry[key];
       return out;
     };
     return entry;
   }
 
   function transportTimingEntries() {
-    const rows = Array.isArray(globalThis.__zpPerformanceTimings) ? globalThis.__zpPerformanceTimings : [];
-    return rows.map(transportTimingEntry).filter(Boolean);
+    const rows = arrayIsArray(global.__zpPerformanceTimings) ? global.__zpPerformanceTimings : [];
+    const out = [];
+    for (const row of rows) {
+      const entry = transportTimingEntry(row);
+      if (entry) out[out.length] = entry;
+    }
+    return out;
   }
   function transportTimingEntry(row) {
     const name = visibleResourceEntryName(row && row.targetUrl);
@@ -219,20 +253,23 @@ export function createFingerprintingFacades({
     };
     entry.toJSON = function() {
       const out = {};
-      for (const key of Object.keys(entry)) if (key !== 'toJSON') out[key] = entry[key];
+      for (const key of objectKeys(entry)) if (key !== 'toJSON') out[key] = entry[key];
       return out;
     };
     return entry;
   }
   function transportServerTiming(row) {
-    return [
+    const metrics = [
       serverTimingMetric('zp-queue', row.queueWaitMs),
       serverTimingMetric('zp-connect', row.connectionAcquisitionMs),
       serverTimingMetric('zp-socks', row.socksConnectMs),
       serverTimingMetric('zp-tls', row.tlsHandshakeMs),
       serverTimingMetric('zp-first-byte', row.timeToFirstByteMs),
       serverTimingMetric('zp-body', row.bodyDurationMs),
-    ].filter(Boolean);
+    ];
+    const out = [];
+    for (const metric of metrics) if (metric) out[out.length] = metric;
+    return out;
   }
   function serverTimingMetric(name, duration) {
     duration = nonNegativeNumber(duration);
@@ -251,7 +288,8 @@ export function createFingerprintingFacades({
     return [];
   }
   function syntheticScriptTimings(doc, existing) {
-    const seen = new Set(Array.from(existing || []).map(entry => visibleResourceEntryName(entry && entry.name)));
+    const seen = new Set();
+    for (const entry of arrayFrom(existing || [])) seen.add(visibleResourceEntryName(entry && entry.name));
     const out = [];
     try {
       for (const script of documentTargetScripts(doc || document)) {
@@ -265,18 +303,18 @@ export function createFingerprintingFacades({
     return out;
   }
   function syntheticTimingGapStore() {
-    if (!globalThis.__zpSyntheticTimingGaps) {
+    if (!global.__zpSyntheticTimingGaps) {
       try {
-        Object.defineProperty(globalThis, '__zpSyntheticTimingGaps', {
+        objectDefineProperty(global, '__zpSyntheticTimingGaps', {
           value: { script: 0, resource: 0 },
           enumerable: false,
           configurable: false,
         });
       } catch {
-        globalThis.__zpSyntheticTimingGaps = { script: 0, resource: 0 };
+        global.__zpSyntheticTimingGaps = { script: 0, resource: 0 };
       }
     }
-    return globalThis.__zpSyntheticTimingGaps;
+    return global.__zpSyntheticTimingGaps;
   }
   function documentTargetScripts(doc) {
     if (Native.querySelectorAll) return Native.querySelectorAll.call(doc, 'script[data-zp-target-url]');
@@ -300,9 +338,9 @@ export function createFingerprintingFacades({
     if (typeof w.PerformanceObserver !== 'function') return;
     const NativePerformanceObserver = w.PerformanceObserver;
     const ZPPerformanceObserver = createPerformanceObserver(NativePerformanceObserver, visibleDocumentURL, w);
-    try { Object.setPrototypeOf(ZPPerformanceObserver, NativePerformanceObserver); } catch {}
+    try { objectSetPrototypeOf(ZPPerformanceObserver, NativePerformanceObserver); } catch {}
     try { ZPPerformanceObserver.prototype = NativePerformanceObserver.prototype; } catch {}
-    try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get() { return NativePerformanceObserver.supportedEntryTypes; }, enumerable: true, configurable: true }); } catch {}
+    try { objectDefineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get() { return NativePerformanceObserver.supportedEntryTypes; }, enumerable: true, configurable: true }); } catch {}
     define(w, 'PerformanceObserver', ZPPerformanceObserver);
   }
   function createPerformanceObserver(NativePerformanceObserver, visibleDocumentURL, w) {
@@ -311,7 +349,7 @@ export function createFingerprintingFacades({
       let observer;
       let facade;
       const doc = w && w.document;
-      observer = new NativePerformanceObserver(list => callback.call(facade, performanceObserverListFacade(list, visibleDocumentURL(), doc), facade));
+      observer = new NativePerformanceObserver(list => reflectApply(callback, facade, [performanceObserverListFacade(list, visibleDocumentURL(), doc), facade]));
       facade = performanceObserverFacade(observer, visibleDocumentURL, doc);
       return facade;
     };
@@ -320,14 +358,14 @@ export function createFingerprintingFacades({
     return new Proxy(observer, {
       get(target, prop) {
         if (prop === 'takeRecords') return () => mergedPerformanceEntries(target.takeRecords(), visibleDocumentURL(), doc);
-        const value = Reflect.get(target, prop, target);
-        return typeof value === 'function' ? value.bind(target) : value;
+        const value = reflectGet(target, prop, target);
+        return typeof value === 'function' ? reflectApply(functionBind, value, [target]) : value;
       }
     });
   }
   function installPerformanceGetEntries(perf, w, visibleDocumentURL) {
     if (typeof perf.getEntries !== 'function') return;
-    const native = perf.getEntries.bind(perf);
+    const native = reflectApply(functionBind, perf.getEntries, [perf]);
     define(perf, 'getEntries', function() {
       return mergedPerformanceEntries(native(), visibleDocumentURL(), w.document);
     });
@@ -341,14 +379,14 @@ export function createFingerprintingFacades({
     };
     define(perf, 'getEntriesByType', maskedGetEntriesByType);
     try {
-      const proto = Object.getPrototypeOf(perf);
+      const proto = objectGetPrototypeOf(perf);
       if (proto) define(proto, 'getEntriesByType', maskedGetEntriesByType);
     } catch {}
   }
   function visibleEntriesByType(native, self, type, w, visibleDocumentURL) {
-    if (type === 'navigation') return maskPerformanceList(native.call(self, type), visibleDocumentURL());
-    if (type !== 'resource') return native.call(self, type);
-    const entries = native.call(self, type);
+    if (type === 'navigation') return maskPerformanceList(reflectApply(native, self, [type]), visibleDocumentURL());
+    if (type !== 'resource') return reflectApply(native, self, [type]);
+    const entries = reflectApply(native, self, [type]);
     return mergedPerformanceEntries(entries, visibleDocumentURL(), w.document);
   }
   function visibleObservedEntriesByType(list, type, documentURL, doc) {
@@ -358,30 +396,50 @@ export function createFingerprintingFacades({
   }
   function installPerformanceGetEntriesByName(perf, w, visibleDocumentURL) {
     if (typeof perf.getEntriesByName !== 'function') return;
-    const native = perf.getEntriesByName.bind(perf);
+    const native = reflectApply(functionBind, perf.getEntriesByName, [perf]);
     define(perf, 'getEntriesByName', function(name, type) {
       return visibleEntriesByName(native, String(name), type, w.document, visibleDocumentURL);
     });
   }
   function visibleEntriesByName(native, text, type, doc, visibleDocumentURL) {
-    const direct = native(text, type);
+    const direct = reflectApply(native, performance, [text, type]);
     if (direct && direct.length) return maskPerformanceList(direct, visibleDocumentURL());
-    const transport = transportTimingEntries().filter(entry => entry.name === text && (type == null || String(type) === 'resource'));
+    const transport = visibleTransportEntriesByName(text, type);
     if (transport.length) return transport;
     const proxied = proxiedTimingEntries(native, text, type, visibleDocumentURL);
     if (proxied) return proxied;
-    return !type || String(type) === 'resource' ? syntheticScriptTimingFor(text, doc) : [];
+    return wantsResourceEntries(type) ? syntheticScriptTimingFor(text, doc) : [];
   }
   function visibleObservedEntriesByName(list, text, type, documentURL, doc) {
-    return mergedPerformanceEntries(list.getEntries(), documentURL, doc).filter(entry => {
-      if (!entry || entry.name !== text) return false;
-      return type == null || String(type) === String(entry.entryType);
-    });
+    const out = [];
+    for (const entry of mergedPerformanceEntries(list.getEntries(), documentURL, doc)) {
+      if (matchesEntryNameAndType(entry, text, type)) out[out.length] = entry;
+    }
+    return out;
+  }
+  function visibleTransportEntriesByName(text, type) {
+    const out = [];
+    if (!wantsResourceEntries(type)) return out;
+    for (const entry of transportTimingEntries()) {
+      if (entry.name === text) out[out.length] = entry;
+    }
+    return out;
+  }
+  function wantsResourceEntries(type) {
+    return type == null || String(type) === 'resource';
+  }
+  function matchesEntryNameAndType(entry, text, type) {
+    return entry && entry.name === text && (type == null || String(type) === String(entry.entryType));
   }
   function proxiedTimingEntries(native, text, type, visibleDocumentURL) {
     const candidates = [scriptProxyPath(text, 'classic'), scriptProxyPath(text, 'module'), resourceProxyPath(text)];
-    for (const candidate of candidates.concat(candidates.map(candidate => proxyOrigin + candidate))) {
-      const entries = native(candidate, type);
+    const all = new Array(candidates.length * 2);
+    for (let i = 0; i < candidates.length; i += 1) {
+      all[i] = candidates[i];
+      all[i + candidates.length] = proxyOrigin + candidates[i];
+    }
+    for (const candidate of all) {
+      const entries = reflectApply(native, performance, [candidate, type]);
       if (entries && entries.length) return maskPerformanceList(entries, visibleDocumentURL());
     }
     return null;

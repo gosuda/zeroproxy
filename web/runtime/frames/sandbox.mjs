@@ -1,6 +1,8 @@
 import { frameSandboxAllowsEscape, isFrameElement } from './policy.mjs';
 
 export function createFrameSandbox({ Native, frameSandboxMeta, isDirectExternalFrameElement }) {
+  const { String = globalThis.String } = Native;
+
   function shouldHideFrameSandbox(el, raw) {
     return frameSandboxAllowsEscape(raw) && !isDirectExternalFrameElement(el);
   }

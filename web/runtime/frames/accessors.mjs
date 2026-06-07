@@ -1,4 +1,5 @@
 export function createFrameAccessors({
+  Native,
   networkContainmentMarker,
   isDirectExternalFrameElement,
   shouldContainFrameWindow,
@@ -6,11 +7,18 @@ export function createFrameAccessors({
   frameWindowFacadeFor,
   frameDocumentFacadeFor,
 }) {
+  const {
+    WeakSet = globalThis.WeakSet,
+    objectDefineProperty = globalThis.Object.defineProperty,
+    objectGetOwnPropertyDescriptor = globalThis.Object.getOwnPropertyDescriptor,
+    objectGetPrototypeOf = globalThis.Object.getPrototypeOf,
+    reflectApply = globalThis.Reflect.apply,
+  } = Native;
   const instrumentedWindows = new WeakSet();
 
   function frameDescriptor(proto, prop) {
-    for (let p = proto; p; p = Object.getPrototypeOf(p)) {
-      const d = Object.getOwnPropertyDescriptor(p, prop);
+    for (let p = proto; p; p = objectGetPrototypeOf(p)) {
+      const d = objectGetOwnPropertyDescriptor(p, prop);
       if (d) return d;
     }
     return null;
@@ -46,7 +54,7 @@ export function createFrameAccessors({
 
   function contentWindowGetter(nativeGet) {
     return function contentWindow() {
-      const childWin = nativeGet.call(this);
+      const childWin = reflectApply(nativeGet, this, []);
       if (isDirectExternalFrameElement(this)) return childWin;
       const exposed = shouldContainFrameWindow && shouldContainFrameWindow(this, childWin)
         ? containFrameWindow(childWin, this)
@@ -57,7 +65,7 @@ export function createFrameAccessors({
 
   function contentDocumentGetter(nativeGet) {
     return function contentDocument() {
-      const childDoc = nativeGet.call(this);
+      const childDoc = reflectApply(nativeGet, this, []);
       if (!childDoc || isDirectExternalFrameElement(this)) return childDoc;
       const rawWin = childDoc.defaultView || null;
       const childWin = rawWin && shouldContainFrameWindow && shouldContainFrameWindow(this, rawWin)
@@ -73,7 +81,7 @@ export function createFrameAccessors({
     const win = frameDescriptor(proto, 'contentWindow');
     if (win && win.get) {
       try {
-        Object.defineProperty(proto, 'contentWindow', {
+        objectDefineProperty(proto, 'contentWindow', {
           get: contentWindowGetter(win.get),
           configurable: false,
           enumerable: true,
@@ -83,7 +91,7 @@ export function createFrameAccessors({
     const doc = frameDescriptor(proto, 'contentDocument');
     if (doc && doc.get) {
       try {
-        Object.defineProperty(proto, 'contentDocument', {
+        objectDefineProperty(proto, 'contentDocument', {
           get: contentDocumentGetter(doc.get),
           configurable: false,
           enumerable: true,

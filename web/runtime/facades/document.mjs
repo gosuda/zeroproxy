@@ -8,6 +8,16 @@ export function createDocumentFacades({
   getBaseURL,
   postMessageToSW,
 }) {
+  const {
+    Date = globalThis.Date,
+    Infinity: NativeInfinity = globalThis.Infinity,
+    Math = globalThis.Math,
+    Number = globalThis.Number,
+    String = globalThis.String,
+    URL = globalThis.URL,
+    arrayIsArray = globalThis.Array.isArray,
+    objectFreeze = globalThis.Object.freeze,
+  } = Native;
   const documentCookieRecords = [];
   initDocumentCookieRecords(String(boot.documentCookie || ''));
 
@@ -44,7 +54,7 @@ export function createDocumentFacades({
   function handleCookieSyncMessage(ev) {
     const msg = acceptedCookieSyncMessage(ev);
     if (!msg) return;
-    if (Array.isArray(msg.cookieRecords)) syncDocumentCookieRecords(msg.cookieRecords, msg.targetUrl);
+    if (arrayIsArray(msg.cookieRecords)) syncDocumentCookieRecords(msg.cookieRecords, msg.targetUrl);
     else if (typeof msg.cookieString === 'string') initDocumentCookieRecords(msg.cookieString);
   }
 
@@ -78,7 +88,7 @@ export function createDocumentFacades({
           path: '/',
           secure: current.protocol === 'https:',
           sameSite: 'Unspecified',
-          expires: Infinity
+          expires: NativeInfinity
         });
       }
     }
@@ -103,7 +113,7 @@ export function createDocumentFacades({
       path: String(raw.path || '/').startsWith('/') ? String(raw.path || '/') : '/',
       secure: !!raw.secure,
       sameSite: normalizeSameSite(raw.sameSite),
-      expires: typeof raw.expiresMs === 'number' ? raw.expiresMs : Infinity
+      expires: typeof raw.expiresMs === 'number' ? raw.expiresMs : NativeInfinity
     };
   }
 
@@ -117,7 +127,7 @@ export function createDocumentFacades({
     const sourceHost = source.hostname.toLowerCase();
     pruneCookieRecordsForSource(sourceHost, source.protocol === 'https:');
     const now = Date.now();
-    for (const raw of Array.isArray(records) ? records : []) {
+    for (const raw of arrayIsArray(records) ? records : []) {
       if (!raw || typeof raw.name !== 'string' || raw.name === '') continue;
       const rec = buildSyncedCookieRecord(raw, sourceHost);
       if (rec.expires > now) documentCookieRecords.push(rec);
@@ -165,7 +175,7 @@ export function createDocumentFacades({
       path: defaultCookiePath(),
       secure: false,
       sameSite: 'Unspecified',
-      expires: Infinity
+      expires: NativeInfinity
     };
     for (let i = 1; i < parts.length; i++) {
       const [rawKey, ...rest] = parts[i].split('=');
@@ -222,7 +232,7 @@ export function createDocumentFacades({
     return index <= 0 ? '/' : path.slice(0, index);
   }
 
-  return Object.freeze({
+  return objectFreeze({
     installDocumentAccessors,
     installCookieSync,
   });
