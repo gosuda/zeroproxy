@@ -152,39 +152,47 @@ async function buildWeb() {
 
 async function buildRustBundle() {
   run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
+  // 2026-06-08 split-bundle (c.2): zp-page-bundle is the page-realm wasm —
+  // strict subset (rewriter + sourcemap + CSS + html-tx) without the SW
+  // kernel/transport stack.
+  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-bundle']);
   // zp-page-rt: raw extern "C" cdylib loaded by web/zp-rt.js. No wasm-bindgen
   // glue; the .wasm is copied as-is and JS instantiates it directly.
   run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-rt']);
   await mkdir(zpBundleOutDir, { recursive: true });
-  // Foreground / page use: ES-module flavored glue.
-  run('wasm-bindgen', [
-    '--target', 'web',
-    '--out-dir', zpBundleOutDir,
-    '--out-name', 'zp_bundle',
-    zpBundleWasm,
-  ]);
-  // Service Worker use: classic script flavored glue loadable via
-  // importScripts(). wasm-bindgen `no-modules` emits `let wasm_bindgen = ...`
-  // at top level — `let` creates a lexical binding NOT on globalThis. SWs
-  // see it from other importScripts'd scripts via the shared script realm,
-  // but `self.wasm_bindgen` is undefined. We need both forms because the
-  // SW caller code probes via `typeof self.wasm_bindgen === 'function'`.
+  // SW bundle (zp-bundle, full transport stack). No-modules glue loadable
+  // via importScripts(); wrapped in an IIFE so top-level `let wasm_bindgen`
+  // stays function-scoped.
   run('wasm-bindgen', [
     '--target', 'no-modules',
     '--out-dir', zpBundleOutDir,
     '--out-name', 'zp_bundle_sw',
     zpBundleWasm,
   ]);
-  // Wrap our wasm-bindgen output in an IIFE so its top-level `let
-  // wasm_bindgen` is function-scoped (avoids collisions if some future
-  // SW-side script ever declares the same name), then expose under a
-  // distinct global so initBundle can find it.
   const swJsPath = path.join(zpBundleOutDir, 'zp_bundle_sw.js');
   const swGlue = await readFile(swJsPath, 'utf8');
   if (!swGlue.startsWith('(function(){')) {
     await writeFile(
       swJsPath,
       '(function(){\n' + swGlue + '\n;try{ self.ZPBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
+    );
+  }
+  // Page bundle (zp-page-bundle, rewriter + CSS only). Same no-modules
+  // flavor + same IIFE wrap; exposes its factory under a distinct global
+  // so the page boot wrapper can find it.
+  const zpPageBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_bundle.wasm');
+  run('wasm-bindgen', [
+    '--target', 'no-modules',
+    '--out-dir', zpBundleOutDir,
+    '--out-name', 'zp_page_bundle',
+    zpPageBundleWasm,
+  ]);
+  const pageBundleJsPath = path.join(zpBundleOutDir, 'zp_page_bundle.js');
+  const pageBundleGlue = await readFile(pageBundleJsPath, 'utf8');
+  if (!pageBundleGlue.startsWith('(function(){')) {
+    await writeFile(
+      pageBundleJsPath,
+      '(function(){\n' + pageBundleGlue + '\n;try{ self.ZPPageBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
     );
   }
   // wasm-opt feature flags: rustc since 1.82 emits bulk-memory / sign-ext /
@@ -200,17 +208,17 @@ async function buildRustBundle() {
     '--enable-multivalue',
     '--enable-reference-types',
   ];
-  // Optimize BOTH wasm-bindgen outputs — page bundle (`zp_bundle_bg.wasm`)
-  // and the SW bundle (`zp_bundle_sw_bg.wasm`). Prior versions only ran
-  // wasm-opt on the page bundle, leaving the SW worker shipping an
-  // unoptimised ~3.5 MB blob even when binaryen was present.
-  const pageWasm = path.join(zpBundleOutDir, 'zp_bundle_bg.wasm');
+  // Optimize the wasm-bindgen outputs — SW bundle (zp_bundle_sw_bg.wasm)
+  // + page bundle (zp_page_bundle_bg.wasm). The legacy `--target web`
+  // ES-module page output is no longer built (zp-page-bundle is loaded
+  // as a classic script via importScripts-like `<script>` tags).
   const swWasm = path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm');
-  const optimizedPage = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageWasm, '-o', pageWasm]);
-  if (!optimizedPage) {
+  const pageBundleWasm = path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm');
+  const optimizedSw = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, swWasm, '-o', swWasm]);
+  if (!optimizedSw) {
     process.stderr.write('wasm-opt not found; skipping size optimization (install binaryen to enable)\n');
   } else {
-    tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, swWasm, '-o', swWasm]);
+    tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageBundleWasm, '-o', pageBundleWasm]);
   }
   // zp-page-rt: copy raw wasm into __zp/, optionally optimize. No glue file.
   const pageRtDst = path.join(zpBundleOutDir, 'zp_page_rt.wasm');
@@ -266,24 +274,17 @@ function stripWorkerPreludeImports(source) {
   return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/m, '');
 }
 
-// 2026-06-08 split-bundle (c.1) Step 2.3: page-realm ZPBundle.
-// Read the no-modules wasm-bindgen glue (`zp_bundle_sw.js`) that
-// `buildRustBundle` already produces for the SW realm — its IIFE
-// exposes `globalThis.ZPBundleWBG` (the wasm_bindgen factory) — then
-// append a small wrapper that:
-//   (1) inlines `zp_bundle_sw_bg.wasm` as base64,
-//   (2) calls `ZPBundleWBG.initSync({ module: <bytes> })` synchronously,
-//   (3) builds a frozen `globalThis.ZPBundle` mirror with the rewriter
-//       surface the page realm needs.
-// The "_sw" name in `zp_bundle_sw.js` only reflects which wasm-bindgen
-// target (`no-modules`) was used; the underlying WASM is the same Rust
-// crate that powers the SW realm. Step c.2 will split the WASM into
-// page-only / SW-only halves.
+// 2026-06-08 split-bundle (c.2): page-realm ZPBundle uses the dedicated
+// `zp-page-bundle` crate's WASM (~1 MB after wasm-opt) instead of the
+// full SW bundle's (~3.8 MB). The page bundle exposes only the rewriter
+// + CSS rewriter — no kernel/transport stack (rustls / h2 / mlkem /
+// yamux / tokio / flate2 / brotli / ruzstd / membrane / rtcgw / wtproxy
+// all left in the SW bundle).
 async function makeZPBundlePageClassic() {
-  const glueJs = await readFile(path.join(zpBundleOutDir, 'zp_bundle_sw.js'), 'utf8');
-  const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm'));
+  const glueJs = await readFile(path.join(zpBundleOutDir, 'zp_page_bundle.js'), 'utf8');
+  const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm'));
   const wasmBase64 = wasmBytes.toString('base64');
-  return `/* Generated from Rust WASM ZeroProxy bundle (page realm). */\n${glueJs}\n(() => {\nconst __zp_bundle_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_bundle_bytes = Uint8Array.from(atob(__zp_bundle_b64), c => c.charCodeAt(0));\nconst wbg = globalThis.ZPBundleWBG;\nif (typeof wbg !== 'function') throw new Error('ZP_PAGE_BUNDLE_BOOT_FAILED: ZPBundleWBG missing');\nwbg.initSync({ module: __zp_bundle_bytes });\nconst api = Object.freeze({\n  ready: true,\n  bundleVersion: wbg.bundleVersion,\n  rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(String(source || ''), String(kind || 'classic'), String(targetUrl || '')),\n  rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'\n    ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(String(source || ''), String(kind || 'classic'), String(targetUrl || ''))\n    : null,\n  rewriteCSS: typeof wbg.rewriteCSS === 'function'\n    ? (source, baseUrl, controlPrefix) => wbg.rewriteCSS(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/'))\n    : null,\n});\nObject.defineProperty(globalThis, 'ZPBundle', { value: api, enumerable: false, configurable: false, writable: false });\n})();\n`;
+  return `/* Generated from Rust WASM ZeroProxy page bundle (rewriter + CSS only). */\n${glueJs}\n(() => {\nconst __zp_bundle_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_bundle_bytes = Uint8Array.from(atob(__zp_bundle_b64), c => c.charCodeAt(0));\nconst wbg = globalThis.ZPPageBundleWBG;\nif (typeof wbg !== 'function') throw new Error('ZP_PAGE_BUNDLE_BOOT_FAILED: ZPPageBundleWBG missing');\nwbg.initSync({ module: __zp_bundle_bytes });\nconst api = Object.freeze({\n  ready: true,\n  bundleVersion: wbg.bundleVersion,\n  rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(String(source || ''), String(kind || 'classic'), String(targetUrl || '')),\n  rewriteCSS: typeof wbg.rewriteCSS === 'function'\n    ? (source, baseUrl, controlPrefix) => wbg.rewriteCSS(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/'))\n    : null,\n});\nObject.defineProperty(globalThis, 'ZPBundle', { value: api, enumerable: false, configurable: false, writable: false });\n})();\n`;
 }
 
 function run(cmd, argv, extraEnv = {}) {

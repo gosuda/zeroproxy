@@ -6,6 +6,7 @@ members = [
     "crates/zp-htmltx",
     "crates/zp-transport-codec",
     "crates/zp-bundle",
+    "crates/zp-page-bundle",
     "crates/zp-page-rt",
 ]
 # zp-bundle absorbs the former zp-kernel / zp-membrane / zp-wtproxy-client /

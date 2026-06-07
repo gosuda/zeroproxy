@@ -3742,6 +3742,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zp-page-bundle"
+version = "0.1.0"
+dependencies = [
+ "swc_common",
+ "swc_css_ast",
+ "swc_css_parser",
+ "swc_css_visit",
+ "url",
+ "wasm-bindgen",
+ "zp-htmltx",
+ "zp-rewriter",
+ "zp-shared",
+]
+
+[[package]]
 name = "zp-page-rt"
 version = "0.1.0"
 

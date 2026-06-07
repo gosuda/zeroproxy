@@ -531,6 +531,45 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
+// 2026-06-08 split-bundle (c.2): page realm now loads a dedicated
+// `zp-page-bundle` crate's wasm (rewriter + CSS only, ~0.85 MB after wasm-opt
+// vs the full SW bundle's 3.78 MB). The SW continues to load the full bundle
+// via `importScripts('/__zp/zp_bundle_sw.js')`. This test pins:
+//   - the new crate exists + is included in the workspace
+//   - build.mjs builds it + wasm-bindgen's it + reads from the page-bundle
+//     glue + wasm (not the SW bundle's)
+//   - Go server allowlists the new asset paths
+//   - the SW bundle wasm itself is NOT inlined as base64 into zp-page-bundle.js
+//     (which was the c.1 mis-step that ballooned cold load — c.2 corrects it).
+test('split-bundle (c.2): page realm uses a dedicated lighter wasm bundle', () => {
+  assert.ok(fs.existsSync('crates/zp-page-bundle/Cargo.toml'), 'zp-page-bundle crate must exist');
+  assert.ok(fs.existsSync('crates/zp-page-bundle/src/lib.rs'), 'zp-page-bundle lib.rs must exist');
+  assert.ok(fs.existsSync('crates/zp-page-bundle/src/css.rs'), 'zp-page-bundle css.rs must exist');
+  const workspaceCargo = fs.readFileSync('Cargo.toml', 'utf8');
+  assert.match(workspaceCargo, /"crates\/zp-page-bundle"/, 'workspace must include zp-page-bundle');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.match(build, /'-p', 'zp-page-bundle'/, 'build must cargo-build zp-page-bundle');
+  assert.match(build, /zp_page_bundle\.wasm/, 'build must reference zp_page_bundle.wasm');
+  assert.match(build, /zp_page_bundle_bg\.wasm/, 'build must reference zp_page_bundle_bg.wasm');
+  assert.match(build, /ZPPageBundleWBG/, 'build must expose ZPPageBundleWBG factory');
+  // makeZPBundlePageClassic reads the page bundle's glue + wasm, NOT the SW bundle's.
+  assert.match(build, /makeZPBundlePageClassic[\s\S]*?zp_page_bundle\.js/, 'page bundle wrapper must read zp_page_bundle.js glue');
+  assert.match(build, /makeZPBundlePageClassic[\s\S]*?zp_page_bundle_bg\.wasm/, 'page bundle wrapper must read zp_page_bundle_bg.wasm bytes');
+  // The c.1 mis-step (reading zp_bundle_sw_bg.wasm from inside the page wrapper)
+  // would manifest as the SW wasm being inlined into the page bundle. Pin it out.
+  const wrapperMatch = build.match(/async function makeZPBundlePageClassic[\s\S]*?\n\}/);
+  assert.ok(wrapperMatch, 'makeZPBundlePageClassic body must be locatable');
+  assert.equal(
+    wrapperMatch[0].includes('zp_bundle_sw'),
+    false,
+    'page bundle wrapper must NOT reference the SW bundle (c.1 mis-step)',
+  );
+  // Go server allowlists the new artifacts.
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.match(mainGo, /"\/__zp\/zp_page_bundle\.js"/, 'Go server must allow /__zp/zp_page_bundle.js');
+  assert.match(mainGo, /"\/__zp\/zp_page_bundle_bg\.wasm"/, 'Go server must allow /__zp/zp_page_bundle_bg.wasm');
+});
+
 // 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted. The
 // CSS rewriter is ported to crates/zp-bundle/src/css.rs and exposed via the
 // wasm-bindgen `rewriteCSS` export. SW + page realm both call

@@ -1,0 +1,25 @@
+[package]
+name = "zp-page-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# 2026-06-08 split-bundle (c.2): page-realm wasm bundle. Strict subset of
+# zp-bundle — rewriter + sourcemap + CSP/share-url helpers + CSS rewriter
+# only. No kernel, no transport, no rustls/h2/mlkem/tokio/flate2/brotli/
+# ruzstd/rtcgw/wtproxy/membrane. Page realm doesn't make outbound network
+# calls — the SW does, and the SW continues to load the full `zp-bundle`
+# via importScripts('/__zp/zp_bundle_sw.js').
+[dependencies]
+zp-shared = { workspace = true }
+zp-rewriter = { workspace = true }
+zp-htmltx = { workspace = true }
+swc_common = { version = "23.0.0", default-features = false }
+swc_css_ast = { version = "23.0.0", default-features = false }
+swc_css_parser = { version = "23.0.0", default-features = false }
+swc_css_visit = { version = "23.0.0", default-features = false }
+url = { version = "2.5", default-features = false }
+wasm-bindgen = { workspace = true }
