@@ -15,6 +15,8 @@ const sources = () =>
 const matrix = () =>
   JSON.parse(fs.readFileSync('test/fixtures/fetch-xhr-compat-matrix.json', 'utf8'));
 
+const byId = (id) => matrix().find((row) => row.id === id);
+
 test('fetch/XHR compatibility matrix covers planned axes', () => {
   const ids = new Set(matrix().map((row) => row.id));
   for (const id of [
@@ -37,4 +39,47 @@ test('fetch/XHR compatibility matrix rows stay wired to implementation surfaces'
     for (const needle of row.existingNeedles)
       assert.ok(source.includes(needle), `${row.id} missing ${needle}`);
   }
+});
+
+test('fetch/XHR compatibility matrix records concrete request cases and failure classes', () => {
+  for (const row of matrix()) {
+    const oracle = row.behaviorOracle;
+    assert.ok(oracle?.fixture, `${row.id} fixture`);
+    assert.ok(Array.isArray(oracle.requests) && oracle.requests.length >= 3, `${row.id} requests`);
+    assert.ok(
+      Array.isArray(oracle.expectedResponses) && oracle.expectedResponses.length >= 2,
+      `${row.id} expectedResponses`,
+    );
+    assert.deepEqual(row.failureClasses, oracle.failureClasses, `${row.id} failureClasses`);
+    assert.equal(row.telemetrySurface, 'network-api', `${row.id} telemetrySurface`);
+  }
+
+  assert.equal(
+    byId('fetch-redirect-referrer').behaviorOracle.requests.some(
+      (request) => request.redirect === 'manual' && request.expected === 'opaqueredirect',
+    ),
+    true,
+  );
+  assert.equal(
+    byId('fetch-no-cors-opaque').behaviorOracle.requests.some(
+      (request) => request.mode === 'no-cors' && request.expectedType === 'opaque',
+    ),
+    true,
+  );
+  assert.deepEqual(
+    byId('xhr-sync-async').behaviorOracle.requests[0].expectedReadyStates,
+    [1, 2, 3, 4],
+  );
+  assert.deepEqual(
+    byId('xhr-headers-errors-progress').behaviorOracle.requests.find(
+      (request) => request.case === 'timeout',
+    ).expectedEventOrder,
+    ['loadstart', 'timeout', 'loadend'],
+  );
+  assert.equal(
+    byId('range-and-cache-headers').behaviorOracle.requests.some(
+      (request) => request.expectedStatus === 206,
+    ),
+    true,
+  );
 });

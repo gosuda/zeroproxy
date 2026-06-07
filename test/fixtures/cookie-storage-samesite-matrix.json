@@ -9,7 +9,28 @@
       "document.cookie visibility after final load"
     ],
     "redaction": ["cookie names only", "value length bucket", "SameSite enum"],
-    "existingNeedles": ["Set-Cookie", "Cookie", "documentCookieString"]
+    "existingNeedles": ["Set-Cookie", "Cookie", "documentCookieString"],
+    "behaviorOracle": {
+      "fixture": "redirect-chain-cookie-oracle",
+      "stimulus": [
+        "302 Set-Cookie sid=alpha; SameSite=Lax",
+        "200 Set-Cookie pref=beta; SameSite=None; Secure",
+        "final document read"
+      ],
+      "expectedState": {
+        "cookieNames": ["pref", "sid"],
+        "networkCookieNames": ["pref", "sid"],
+        "documentCookieNames": ["pref", "sid"],
+        "sameSiteClasses": ["Lax", "None"]
+      },
+      "redactedEvidence": {
+        "cookieNames": ["pref", "sid"],
+        "valueLengthBuckets": ["short", "short"],
+        "sameSiteClasses": ["Lax", "None"],
+        "httpOnlyNames": []
+      },
+      "forbiddenEvidence": ["alpha", "beta", "sid=alpha", "pref=beta"]
+    }
   },
   {
     "id": "document-cookie-network-cookie",
@@ -22,7 +43,27 @@
       "HttpOnly invisibility"
     ],
     "redaction": ["cookie names only", "HttpOnly boolean", "value length bucket"],
-    "existingNeedles": ["installCookieSync", "ZP_COOKIE_SYNC", "documentCookieString"]
+    "existingNeedles": ["installCookieSync", "ZP_COOKIE_SYNC", "documentCookieString"],
+    "behaviorOracle": {
+      "fixture": "document-cookie-network-sync-oracle",
+      "stimulus": [
+        "document.cookie=\"visible=alpha; SameSite=Lax\"",
+        "network Set-Cookie httpOnlySession=server; HttpOnly",
+        "runtime fetch"
+      ],
+      "expectedState": {
+        "documentCookieNames": ["visible"],
+        "networkCookieNames": ["httpOnlySession", "visible"],
+        "httpOnlyHiddenFromDocument": true,
+        "fetchCookieHeaderNames": ["httpOnlySession", "visible"]
+      },
+      "redactedEvidence": {
+        "cookieNames": ["httpOnlySession", "visible"],
+        "httpOnlyNames": ["httpOnlySession"],
+        "valueLengthBuckets": ["short", "medium"]
+      },
+      "forbiddenEvidence": ["alpha", "server", "visible=alpha", "httpOnlySession=server"]
+    }
   },
   {
     "id": "samesite-lax-strict-none",
@@ -34,7 +75,29 @@
       "SameSite=None; Secure iframe/runtime fetch"
     ],
     "redaction": ["SameSite enum", "secure boolean", "blocked reason bucket"],
-    "existingNeedles": ["normalizeSameSite", "SameSite", "Secure"]
+    "existingNeedles": ["normalizeSameSite", "SameSite", "Secure"],
+    "behaviorOracle": {
+      "fixture": "samesite-policy-oracle",
+      "stimulus": ["top-level navigation", "cross-site subresource fetch", "secure iframe fetch"],
+      "expectedState": {
+        "allowedNamesByContext": {
+          "topLevelNavigation": ["laxCookie", "noneCookie", "strictCookie"],
+          "crossSiteSubresource": ["noneCookie"],
+          "sameSiteSubresource": ["laxCookie", "noneCookie", "strictCookie"]
+        },
+        "blockedReasonBuckets": [
+          "same-site-strict-context",
+          "same-site-lax-context",
+          "insecure-none"
+        ]
+      },
+      "redactedEvidence": {
+        "cookieNames": ["laxCookie", "noneCookie", "strictCookie"],
+        "sameSiteClasses": ["Lax", "None", "Strict"],
+        "secureFlags": [false, true]
+      },
+      "forbiddenEvidence": ["laxSecret", "strictSecret", "noneSecret"]
+    }
   },
   {
     "id": "iframe-cookie-visibility",
@@ -46,7 +109,26 @@
       "same-target iframe storage sharing"
     ],
     "redaction": ["frame class", "cookie names only"],
-    "existingNeedles": ["frameWindowFacades", "installDocumentAccessors", "srcdoc"]
+    "existingNeedles": ["frameWindowFacades", "installDocumentAccessors", "srcdoc"],
+    "behaviorOracle": {
+      "fixture": "frame-cookie-partition-oracle",
+      "stimulus": [
+        "parent sets parentCookie",
+        "same-target iframe reads cookies",
+        "srcdoc frame attempts cookie read"
+      ],
+      "expectedState": {
+        "parentDocumentCookieNames": ["parentCookie"],
+        "sameTargetFrameCookieNames": ["parentCookie"],
+        "srcdocFrameCookieNames": [],
+        "frameClasses": ["ordinary-target-frame", "srcdoc-frame"]
+      },
+      "redactedEvidence": {
+        "cookieNames": ["parentCookie"],
+        "frameClasses": ["ordinary-target-frame", "srcdoc-frame"]
+      },
+      "forbiddenEvidence": ["parentSecret", "parentCookie=parentSecret"]
+    }
   },
   {
     "id": "storage-sharing-reload-popup-frame",
@@ -59,7 +141,29 @@
       "cross-target isolation"
     ],
     "redaction": ["storage key class", "value length bucket"],
-    "existingNeedles": ["installStorageFacades", "localStorage", "sessionStorage"]
+    "existingNeedles": ["installStorageFacades", "localStorage", "sessionStorage"],
+    "behaviorOracle": {
+      "fixture": "storage-partition-sharing-oracle",
+      "stimulus": [
+        "localStorage.setItem(\"theme\",\"dark\")",
+        "reload",
+        "same-target iframe read",
+        "cross-target popup read"
+      ],
+      "expectedState": {
+        "sharedStorageKeyNames": ["theme"],
+        "reloadSeesLocalStorage": true,
+        "sameTargetFrameSeesLocalStorage": true,
+        "crossTargetPopupSeesLocalStorage": false,
+        "sessionStorageSharedAcrossReload": true
+      },
+      "redactedEvidence": {
+        "storageKeyClasses": ["site-preference"],
+        "keyNames": ["theme"],
+        "valueLengthBuckets": ["short"]
+      },
+      "forbiddenEvidence": ["dark", "theme=dark"]
+    }
   },
   {
     "id": "cookie-failure-telemetry",
@@ -72,6 +176,26 @@
       "domain mismatch"
     ],
     "redaction": ["no cookie values", "domain class only", "error bucket"],
-    "existingNeedles": ["zp.failure.telemetry.v1", "redaction"]
+    "existingNeedles": ["zp.failure.telemetry.v1", "redaction"],
+    "behaviorOracle": {
+      "fixture": "cookie-failure-redaction-oracle",
+      "stimulus": [
+        "Set-Cookie malformed SameSite",
+        "SameSite=None without Secure",
+        "oversized cookie",
+        "domain mismatch"
+      ],
+      "expectedState": {
+        "failureBuckets": ["bad-samesite", "insecure-none", "oversize", "domain-mismatch"],
+        "diagnosticCookieNames": ["badSyntax", "noneInsecure", "tooLarge", "wrongDomain"],
+        "domainClasses": ["same-site", "cross-site"]
+      },
+      "redactedEvidence": {
+        "cookieNames": ["badSyntax", "noneInsecure", "tooLarge", "wrongDomain"],
+        "errorBuckets": ["bad-samesite", "insecure-none", "oversize", "domain-mismatch"],
+        "domainClasses": ["same-site", "cross-site"]
+      },
+      "forbiddenEvidence": ["raw-cookie-value", "secret-token", "badSyntax=raw-cookie-value"]
+    }
   }
 ]

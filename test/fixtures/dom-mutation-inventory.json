@@ -116,16 +116,39 @@
       "installFrameProp(w.HTMLIFrameElement.prototype, 'src')",
       "installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc')",
       "installFrameProp(w.HTMLFrameElement.prototype, 'src')",
-      "injectSrcdoc(String(v))"
+      "setFrameSrcdocAttribute(this, 'srcdoc', v)"
     ],
     "coverage": "Frame source properties route through ordinary frame activation or srcdoc injection."
   },
   {
     "family": "clone-import-adopt",
     "apis": ["Node.cloneNode", "Document.importNode", "Document.adoptNode"],
-    "status": "expected-limitation",
-    "sourceNeedles": [],
-    "coverage": "Not directly patched. Insert-time preparation and attribute-observer repair handle many cloned/imported/adopted executable or URL-bearing nodes when they are inserted; detached clones can remain unprepared until insertion."
+    "status": "partial",
+    "sourceNeedles": [
+      "prepareActivatingNodes(args)",
+      "prepareActivatingNode(node)",
+      "node.querySelectorAll('script')",
+      "node.querySelectorAll('iframe,frame')"
+    ],
+    "coverage": "Clone/import/adopt APIs stay native while detached. Insert-time preparation and attribute-observer repair handle cloned/imported/adopted executable or URL-bearing nodes when they are inserted; detached clones can remain unprepared until insertion."
+  },
+  {
+    "family": "script-content-mutation",
+    "apis": [
+      "HTMLScriptElement.text",
+      "HTMLScriptElement.textContent",
+      "HTMLScriptElement.innerText",
+      "HTMLScriptElement.src",
+      "HTMLScriptElement.href"
+    ],
+    "status": "hooked",
+    "sourceNeedles": [
+      "installScriptTextProps(w)",
+      "for (const prop of ['text', 'textContent', 'innerText'])",
+      "if (this.isConnected) prepareScriptElement(this)",
+      "setScriptSource(el, raw)"
+    ],
+    "coverage": "Connected script text/property and script URL mutations route through prepareScriptElement or setScriptSource before executable source can run."
   },
   {
     "family": "serialize",

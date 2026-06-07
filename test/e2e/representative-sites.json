@@ -5,9 +5,18 @@
     "url": "https://naver.com",
     "profile": "desktop",
     "primaryFlow": "desktop-homepage",
-    "readiness": ["body", "a[href]"],
-    "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
-    "iframeExpectations": { "adCandidates": true }
+    "readiness": [
+      "body",
+      "a[href]"
+    ],
+    "primarySelectors": [
+      "body",
+      "a[href]",
+      "input[type=search], input[name=query], input[name=q]"
+    ],
+    "iframeExpectations": {
+      "adCandidates": true
+    }
   },
   {
     "id": "naver-mobile",
@@ -15,9 +24,25 @@
     "url": "https://m.naver.com",
     "profile": "mobile",
     "primaryFlow": "mobile-homepage",
-    "readiness": ["body", "a[href]"],
-    "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
-    "iframeExpectations": { "adCandidates": true }
+    "readiness": [
+      "body",
+      "a[href]"
+    ],
+    "primarySelectors": [
+      "body",
+      "a[href]",
+      "input[type=search], input[name=query], input[name=q]"
+    ],
+    "iframeExpectations": {
+      "adCandidates": true
+    },
+    "expectedDeltas": [
+      {
+        "surface": "network",
+        "classification": "expected-compatibility-gap",
+        "reason": "Mobile homepage completes primary render, but post-render third-party fetch aborts still diverge from native."
+      }
+    ]
   },
   {
     "id": "google-search",
@@ -25,8 +50,21 @@
     "url": "https://www.google.com/search?q=zeroproxy",
     "profile": "desktop",
     "primaryFlow": "search-results",
-    "readiness": ["body"],
-    "primarySelectors": ["textarea[name=q], input[name=q]", "#search, [role=main]", "a[href]"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "textarea[name=q], input[name=q]",
+      "#search, [role=main]",
+      "a[href]"
+    ],
+    "expectedDeltas": [
+      {
+        "surface": "rendering",
+        "classification": "expected-compatibility-gap",
+        "reason": "Search-results shell currently diverges on selector visibility and one proxied SyntaxError relative to native."
+      }
+    ]
   },
   {
     "id": "google-maps",
@@ -34,12 +72,23 @@
     "url": "https://www.google.com/maps",
     "profile": "desktop",
     "primaryFlow": "maps-shell",
-    "readiness": ["body"],
+    "readiness": [
+      "body"
+    ],
     "primarySelectors": [
       "input[aria-label], input[role=combobox], #searchboxinput",
       "canvas, [role=application], [aria-label*=Map], [aria-label*=map]"
     ],
-    "renderExpectations": { "nonBlankMap": true }
+    "renderExpectations": {
+      "nonBlankMap": true
+    },
+    "expectedDeltas": [
+      {
+        "surface": "rendering",
+        "classification": "expected-compatibility-gap",
+        "reason": "Maps shell currently remains an allowed rendering delta while map/tile compatibility work continues."
+      }
+    ]
   },
   {
     "id": "embedded-google-maps",
@@ -47,9 +96,24 @@
     "fixture": "embedded-google-maps.html",
     "profile": "desktop",
     "primaryFlow": "embedded-map-iframe",
-    "readiness": ["iframe[data-corpus-google-maps]"],
-    "primarySelectors": ["main", "iframe[data-corpus-google-maps]"],
-    "iframeExpectations": { "nonBlank": true, "googleMaps": true }
+    "readiness": [
+      "iframe[data-corpus-google-maps]"
+    ],
+    "primarySelectors": [
+      "main",
+      "iframe[data-corpus-google-maps]"
+    ],
+    "iframeExpectations": {
+      "nonBlank": true,
+      "googleMaps": true
+    },
+    "expectedDeltas": [
+      {
+        "surface": "navigation",
+        "classification": "expected-compatibility-gap",
+        "reason": "Embedded Maps iframe currently remains an allowed navigation/widget delta under the checked-in host fixture."
+      }
+    ]
   },
   {
     "id": "wikipedia",
@@ -57,8 +121,14 @@
     "url": "https://www.wikipedia.org",
     "profile": "desktop",
     "primaryFlow": "static-homepage",
-    "readiness": ["body"],
-    "primarySelectors": ["input[name=search], input[type=search]", "a[href]", "main, body"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "input[name=search], input[type=search]",
+      "a[href]",
+      "main, body"
+    ]
   },
   {
     "id": "github",
@@ -66,8 +136,21 @@
     "url": "https://github.com",
     "profile": "desktop",
     "primaryFlow": "unauthenticated-homepage",
-    "readiness": ["body"],
-    "primarySelectors": ["header, nav", "a[href]", "main, [role=main]"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "header, nav",
+      "a[href]",
+      "main, [role=main]"
+    ],
+    "expectedDeltas": [
+      {
+        "surface": "rendering",
+        "classification": "expected-compatibility-gap",
+        "reason": "GitHub app-shell rendering remains a classified compatibility delta in the live corpus."
+      }
+    ]
   },
   {
     "id": "hacker-news",
@@ -75,8 +158,14 @@
     "url": "https://news.ycombinator.com",
     "profile": "desktop",
     "primaryFlow": "link-list",
-    "readiness": ["body"],
-    "primarySelectors": [".athing, .titleline", "a[href]", "table"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      ".athing, .titleline",
+      "a[href]",
+      "table"
+    ]
   },
   {
     "id": "reddit",
@@ -84,8 +173,14 @@
     "url": "https://www.reddit.com",
     "profile": "desktop",
     "primaryFlow": "app-shell-feed",
-    "readiness": ["body"],
-    "primarySelectors": ["body", "a[href]", "shreddit-app, [role=main], main"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "body",
+      "a[href]",
+      "shreddit-app, [role=main], main"
+    ]
   },
   {
     "id": "x-com",
@@ -93,8 +188,21 @@
     "url": "https://x.com",
     "profile": "desktop",
     "primaryFlow": "unauthenticated-landing",
-    "readiness": ["body"],
-    "primarySelectors": ["body", "a[href], [role=button]", "main, [role=main]"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "body",
+      "a[href], [role=button]",
+      "main, [role=main]"
+    ],
+    "expectedDeltas": [
+      {
+        "surface": "rendering",
+        "classification": "expected-compatibility-gap",
+        "reason": "X unauthenticated landing behavior remains a classified compatibility delta in the live corpus."
+      }
+    ]
   },
   {
     "id": "amazon",
@@ -102,8 +210,21 @@
     "url": "https://www.amazon.com",
     "profile": "desktop",
     "primaryFlow": "commerce-homepage",
-    "readiness": ["body"],
-    "primarySelectors": ["input[type=search], input[name=field-keywords]", "a[href]", "img"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "input[type=search], input[name=field-keywords]",
+      "a[href]",
+      "img"
+    ],
+    "expectedDeltas": [
+      {
+        "surface": "rendering",
+        "classification": "expected-compatibility-gap",
+        "reason": "Amazon commerce-homepage rendering remains a classified compatibility delta in the live corpus."
+      }
+    ]
   },
   {
     "id": "nytimes",
@@ -111,8 +232,21 @@
     "url": "https://www.nytimes.com",
     "profile": "desktop",
     "primaryFlow": "news-homepage",
-    "readiness": ["body"],
-    "primarySelectors": ["main, [role=main]", "a[href]", "img, picture"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "main, [role=main]",
+      "a[href]",
+      "img, picture"
+    ],
+    "expectedDeltas": [
+      {
+        "surface": "script-runtime",
+        "classification": "expected-compatibility-gap",
+        "reason": "NYTimes script/runtime divergence remains a classified compatibility delta in the live corpus."
+      }
+    ]
   },
   {
     "id": "cloudflare",
@@ -120,8 +254,21 @@
     "url": "https://www.cloudflare.com",
     "profile": "desktop",
     "primaryFlow": "security-baseline-homepage",
-    "readiness": ["body"],
-    "primarySelectors": ["main, [role=main]", "nav, header", "a[href]"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "main, [role=main]",
+      "nav, header",
+      "a[href]"
+    ],
+    "expectedDeltas": [
+      {
+        "surface": "navigation",
+        "classification": "expected-compatibility-gap",
+        "reason": "Cloudflare security-baseline navigation remains a classified compatibility delta in the live corpus."
+      }
+    ]
   },
   {
     "id": "ipleak",
@@ -129,9 +276,20 @@
     "url": "https://ipleak.net",
     "profile": "desktop",
     "primaryFlow": "leak-test-surface",
-    "readiness": ["body"],
-    "primarySelectors": ["body", "#content, main, table", "iframe, section, div"],
-    "redaction": { "coarseIpDnsClassesOnly": true },
-    "unsupportedSurfaces": ["webrtc", "webtransport"]
+    "readiness": [
+      "body"
+    ],
+    "primarySelectors": [
+      "body",
+      "#content, main, table",
+      "iframe, section, div"
+    ],
+    "redaction": {
+      "coarseIpDnsClassesOnly": true
+    },
+    "unsupportedSurfaces": [
+      "webrtc",
+      "webtransport"
+    ]
   }
 ]

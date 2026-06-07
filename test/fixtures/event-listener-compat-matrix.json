@@ -9,14 +9,61 @@
       "remove with capture mismatch",
       "handleEvent object identity"
     ],
-    "existingNeedles": ["addEventListener", "removeEventListener", "handleEvent"]
+    "existingNeedles": ["addEventListener", "removeEventListener", "handleEvent"],
+    "behaviorOracle": {
+      "fixture": "event-listener-identity-oracle",
+      "scenarios": [
+        {
+          "case": "same-function-removed-once",
+          "expectedCalls": 0
+        },
+        {
+          "case": "duplicate-registration-deduped",
+          "expectedCalls": 1
+        },
+        {
+          "case": "handleEvent-object-removal",
+          "expectedCallsAfterRemove": 0
+        },
+        {
+          "case": "capture-mismatch-not-removed",
+          "expectedCallsAfterWrongRemove": 1
+        }
+      ],
+      "expectedOrder": ["target-listener"],
+      "targetVisibleKeys": []
+    }
   },
   {
     "id": "listener-options",
     "priority": "p0",
     "apis": ["addEventListener options"],
     "probes": ["capture", "once", "passive", "signal abort", "boolean options"],
-    "existingNeedles": ["capture", "once", "passive", "signal"]
+    "existingNeedles": ["capture", "once", "passive", "signal"],
+    "behaviorOracle": {
+      "fixture": "event-listener-options-oracle",
+      "scenarios": [
+        {
+          "case": "once",
+          "dispatches": 2,
+          "expectedCalls": 1
+        },
+        {
+          "case": "abort-signal-before-dispatch",
+          "expectedCalls": 0
+        },
+        {
+          "case": "passive-prevent-default",
+          "expectedDefaultPrevented": false
+        },
+        {
+          "case": "boolean-capture",
+          "expectedPhase": "capture"
+        }
+      ],
+      "expectedOrder": ["capture", "target", "bubble"],
+      "targetVisibleKeys": []
+    }
   },
   {
     "id": "dispatch-propagation-order",
@@ -28,7 +75,30 @@
       "stopImmediatePropagation",
       "preventDefault return value"
     ],
-    "existingNeedles": ["dispatchEvent", "stopImmediatePropagation", "preventDefault"]
+    "existingNeedles": ["dispatchEvent", "stopImmediatePropagation", "preventDefault"],
+    "behaviorOracle": {
+      "fixture": "event-dispatch-order-oracle",
+      "scenarios": [
+        {
+          "case": "capture-target-bubble",
+          "expectedOrder": ["parent-capture", "target-capture", "target-bubble", "parent-bubble"]
+        },
+        {
+          "case": "stopPropagation",
+          "expectedSkipped": ["parent-bubble"]
+        },
+        {
+          "case": "stopImmediatePropagation",
+          "expectedSkipped": ["sibling-listener"]
+        },
+        {
+          "case": "cancelable-preventDefault",
+          "expectedDispatchReturn": false
+        }
+      ],
+      "expectedOrder": ["parent-capture", "target-capture", "target-bubble", "parent-bubble"],
+      "targetVisibleKeys": []
+    }
   },
   {
     "id": "inline-and-onproperty",
@@ -40,7 +110,30 @@
       "property clear",
       "this/currentTarget"
     ],
-    "existingNeedles": ["bindEventAttribute", "event-handler", "onmessage"]
+    "existingNeedles": ["bindEventAttribute", "event-handler", "onmessage"],
+    "behaviorOracle": {
+      "fixture": "inline-onproperty-event-oracle",
+      "scenarios": [
+        {
+          "case": "onclick-property-this",
+          "expectedCurrentTarget": "button"
+        },
+        {
+          "case": "inline-handler-currentTarget",
+          "expectedCurrentTarget": "button"
+        },
+        {
+          "case": "property-clear",
+          "expectedCallsAfterClear": 0
+        },
+        {
+          "case": "onmessage-property",
+          "expectedSourceWrapped": true
+        }
+      ],
+      "expectedOrder": ["property-handler", "addEventListener-handler"],
+      "targetVisibleKeys": []
+    }
   },
   {
     "id": "message-event-wrapping",
@@ -52,7 +145,30 @@
       "targetOrigin mapping",
       "frame/window message delivery"
     ],
-    "existingNeedles": ["postMessage", "MessageEvent", "targetOrigin"]
+    "existingNeedles": ["postMessage", "MessageEvent", "targetOrigin"],
+    "behaviorOracle": {
+      "fixture": "message-event-wrapping-oracle",
+      "scenarios": [
+        {
+          "case": "frame-message-source",
+          "expectedSourceClass": "facade-window"
+        },
+        {
+          "case": "target-origin-map",
+          "expectedDelivery": "matching-target"
+        },
+        {
+          "case": "origin-redaction",
+          "expectedOriginClass": "target-origin"
+        },
+        {
+          "case": "cross-frame-order",
+          "expectedOrder": ["child-post", "parent-message"]
+        }
+      ],
+      "expectedOrder": ["child-post", "parent-message"],
+      "targetVisibleKeys": []
+    }
   },
   {
     "id": "internal-listener-invisibility",
@@ -64,6 +180,29 @@
       "toString masking",
       "closed-over internal listeners"
     ],
-    "existingNeedles": ["installToStringMasking", "hiddenGlobalKey", "messageListenerWrappers"]
+    "existingNeedles": ["installToStringMasking", "hiddenGlobalKey", "messageListenerWrappers"],
+    "behaviorOracle": {
+      "fixture": "internal-listener-invisibility-oracle",
+      "scenarios": [
+        {
+          "case": "ownKeys",
+          "forbiddenKeys": ["__zp", "hiddenGlobalKey", "messageListenerWrappers"]
+        },
+        {
+          "case": "getOwnPropertyNames",
+          "forbiddenKeys": ["__zp", "hiddenGlobalKey", "messageListenerWrappers"]
+        },
+        {
+          "case": "removeEventListener-hostile",
+          "expectedInternalDelivery": true
+        },
+        {
+          "case": "function-toString",
+          "expectedClass": "native-or-page-source"
+        }
+      ],
+      "expectedOrder": ["page-listener", "internal-listener-hidden"],
+      "targetVisibleKeys": ["addEventListener", "removeEventListener", "dispatchEvent"]
+    }
   }
 ]

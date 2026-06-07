@@ -82,6 +82,8 @@ test('runtime Performance API consumes real transport timing metadata', () => {
     'recordTransportTiming(resp, target)',
     'transportTimingEntries',
     'serverTimingMetric',
+    'bodyDurationMs',
+    "serverTimingMetric('zp-body'",
   ]) {
     assert.ok(rt.includes(needle), `missing ${needle}`);
   }
@@ -89,6 +91,8 @@ test('runtime Performance API consumes real transport timing metadata', () => {
     'copyTransportTiming',
     'ZP_TRANSPORT_TIMINGS',
     'recordTransportTiming(resp, requestId, opt)',
+    'transportSafeError',
+    'safeError(code, status, targetUrl, timing)',
   ]) {
     assert.ok(sw.includes(needle), `missing ${needle}`);
   }

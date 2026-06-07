@@ -95,6 +95,7 @@ export function summarizeRecord(record) {
     iframes: record.iframes,
     resources: record.resources,
     transportTimings: summarizeTransportTimings(record.transportTimings),
+    syntheticTimingGaps: record.syntheticTimingGaps,
     rootSurface: record.rootSurface,
   };
 }
@@ -113,15 +114,20 @@ export function compareSiteRecords(nativeRecord, zeroProxyRecord, spec) {
     rendering: renderingDelta(nativeRecord, zeroProxyRecord),
     iframes: iframeDelta(nativeRecord, zeroProxyRecord),
     timing: timingDelta(nativeRecord, zeroProxyRecord),
+    rootSurface: rootSurfaceDelta(nativeRecord.rootSurface, zeroProxyRecord.rootSurface),
     transport: transportDelta(nativeRecord, zeroProxyRecord),
   };
   const firstFailingSurface = classifyFirstFailure(nativeRecord, zeroProxyRecord, delta, spec);
+  const expectedDelta = expectedCorpusDelta(spec, firstFailingSurface);
+  const status =
+    firstFailingSurface === 'none' ? 'pass' : expectedDelta ? 'expected-delta' : 'triage';
   const failureTelemetry = buildFailureTelemetry(
     nativeRecord,
     zeroProxyRecord,
     delta,
     spec,
     firstFailingSurface,
+    expectedDelta,
   );
   return {
     site: spec.id,
@@ -129,7 +135,8 @@ export function compareSiteRecords(nativeRecord, zeroProxyRecord, spec) {
     primaryFlow: spec.primaryFlow,
     firstFailingSurface,
     ownerModule: ownerForSurface(firstFailingSurface),
-    status: firstFailingSurface === 'none' ? 'pass' : 'triage',
+    status,
+    expectedDelta,
     failureTelemetry,
     native: nativeSummary,
     zeroProxy: zeroProxySummary,
@@ -154,6 +161,8 @@ function defaultArgs() {
     mode: 'both',
     corpus: DEFAULT_CORPUS,
     out: '',
+    releaseOut: '',
+    failOnReleaseGate: false,
     sites: [],
     timeoutMs: DEFAULT_TIMEOUT_MS,
     proxyUrl: '',
@@ -183,6 +192,20 @@ function argHandlers(args) {
       (argv, i) => {
         args.out = path.resolve(argv[i + 1]);
         return i + 1;
+      },
+    ],
+    [
+      '--release-out',
+      (argv, i) => {
+        args.releaseOut = path.resolve(argv[i + 1]);
+        return i + 1;
+      },
+    ],
+    [
+      '--fail-on-release-gate',
+      (_argv, i) => {
+        args.failOnReleaseGate = true;
+        return i;
       },
     ],
     [
@@ -255,6 +278,13 @@ export async function runCorpus(options) {
     const records = await collectCorpusRecords(browser, corpus, fixtureServer, proxy, options);
     const report = buildCorpusReport(corpus, records, options);
     writeCorpusReport(report, options.out);
+    writeCorpusReport(report.releaseGate, options.releaseOut);
+    if (options.failOnReleaseGate && report.releaseGate.status !== 'pass') {
+      const metrics = report.releaseGate.metrics;
+      throw new Error(
+        `release corpus gate failed: triage=${metrics.triageSites} missing=${metrics.missingComparisons} script=${metrics.scriptRewriteInducedFailures} syntax=${metrics.generatedJavaScriptSyntaxErrors} failClosed=${metrics.unexpectedScriptFailCloseFallbacks}`,
+      );
+    }
     return report;
   } finally {
     await browser.close();
@@ -307,6 +337,7 @@ function buildCorpusReport(corpus, records, options) {
       rawIpDnsValues: false,
       fingerprints: 'sha256-20-of-redacted-text',
     },
+    releaseGate: buildReleaseGateReport(corpus, records),
     records,
   };
 }
@@ -315,6 +346,104 @@ function writeCorpusReport(report, out) {
   if (!out) return;
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, `${JSON.stringify(report, null, 2)}\n`);
+}
+
+export function buildReleaseGateReport(corpus, records) {
+  const siteRecords = Array.isArray(records) ? records : [];
+  const compared = siteRecords.filter((record) => record.comparison);
+  const metrics = compared.reduce(
+    (acc, record) => {
+      const comparison = record.comparison;
+      const script = comparison.failureTelemetry?.evidence?.script || {};
+      acc.passSites += comparison.status === 'pass' ? 1 : 0;
+      acc.expectedDeltaSites += comparison.status === 'expected-delta' ? 1 : 0;
+      acc.triageSites += comparison.status === 'triage' ? 1 : 0;
+      if (comparison.status !== 'expected-delta') {
+        acc.scriptRewriteInducedFailures += Number(script.rewriteInducedFailureCount) || 0;
+        acc.generatedJavaScriptSyntaxErrors +=
+          Number(script.generatedJavaScriptSyntaxErrorCount) || 0;
+        acc.unexpectedScriptFailCloseFallbacks += Number(script.unexpectedFailCloseCount) || 0;
+      }
+      return acc;
+    },
+    {
+      siteCount: Array.isArray(corpus) ? corpus.length : 0,
+      comparedSites: compared.length,
+      missingComparisons: siteRecords.filter((record) => !record.comparison).length,
+      passSites: 0,
+      expectedDeltaSites: 0,
+      triageSites: 0,
+      scriptRewriteInducedFailures: 0,
+      generatedJavaScriptSyntaxErrors: 0,
+      unexpectedScriptFailCloseFallbacks: 0,
+    },
+  );
+  const gates = {
+    allSitesCompared:
+      metrics.comparedSites === metrics.siteCount && metrics.missingComparisons === 0,
+    noTriageSites: metrics.triageSites === 0,
+    noRewriteInducedScriptFailures: metrics.scriptRewriteInducedFailures === 0,
+    noGeneratedJavaScriptSyntaxErrors: metrics.generatedJavaScriptSyntaxErrors === 0,
+    noUnexpectedScriptFailCloseFallbacks: metrics.unexpectedScriptFailCloseFallbacks === 0,
+  };
+  return {
+    schema: 'zp.compat.release-gate.v1',
+    corpusVersion: corpusHash(corpus || []),
+    status: Object.values(gates).every(Boolean) ? 'pass' : 'triage',
+    metrics,
+    gates,
+    seedCorpus: releaseGateSeedSemantics(corpus),
+    triageSites: compared
+      .filter((record) => record.comparison.status === 'triage')
+      .map((record) => ({
+        site: record.site,
+        firstFailingSurface: record.comparison.firstFailingSurface,
+        ownerModule: record.comparison.ownerModule,
+      })),
+    expectedDeltaSites: compared
+      .filter((record) => record.comparison.status === 'expected-delta')
+      .map((record) => ({
+        site: record.site,
+        firstFailingSurface: record.comparison.firstFailingSurface,
+        ownerModule: record.comparison.ownerModule,
+        reason: record.comparison.expectedDelta?.reason || '',
+        classification: record.comparison.expectedDelta?.classification || 'expected-delta',
+      })),
+    redaction: {
+      rawUrls: false,
+      rawConsoleText: false,
+      rawIpDnsValues: false,
+      rawSourceBodies: false,
+    },
+  };
+}
+
+export function releaseGateSeedSemantics(corpus) {
+  return (Array.isArray(corpus) ? corpus : []).map((site) => ({
+    id: site.id,
+    site: site.site,
+    profile: site.profile,
+    primaryFlow: site.primaryFlow,
+    source: site.fixture ? 'checked-in-html-fixture' : 'sanitized-seed-fixture',
+    expectations: {
+      iframeAdCandidates: site.iframeExpectations?.adCandidates === true,
+      iframeNonBlank: site.iframeExpectations?.nonBlank === true,
+      googleMapsFrame: site.iframeExpectations?.googleMaps === true,
+      nonBlankMap: site.renderExpectations?.nonBlankMap === true,
+      coarseIpDnsClassesOnly: site.redaction?.coarseIpDnsClassesOnly === true,
+      unsupportedSurfaces: [...(site.unsupportedSurfaces || [])].sort(),
+      expectedDeltas: (Array.isArray(site.expectedDeltas) ? site.expectedDeltas : []).map((row) => ({
+        surface: row.surface,
+        classification: row.classification || 'expected-delta',
+      })),
+    },
+  }));
+}
+
+function expectedCorpusDelta(spec, surface) {
+  if (!spec || surface === 'none') return null;
+  const rows = Array.isArray(spec.expectedDeltas) ? spec.expectedDeltas : [];
+  return rows.find((row) => row.surface === surface) || null;
 }
 async function runOne(browser, spec, url, mode, options) {
   const page = await browser.newPage();
@@ -511,12 +640,33 @@ async function observePage(page, spec, events, startedAt, navigationError) {
             return { errorName: errorName(err) };
           }
         };
+        const inspectObjectGraph = (key) => {
+          try {
+            const d = Object.getOwnPropertyDescriptor(globalThis, key);
+            if (!d || !Object.hasOwn(d, 'value')) return null;
+            const value = d.value;
+            if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
+            const names = Object.getOwnPropertyNames(value);
+            const proto = Object.getPrototypeOf(value);
+            return {
+              ownNameCount: names.length,
+              ownSymbolCount: Object.getOwnPropertySymbols(value).length,
+              firstNames: names.slice(0, 64).sort(),
+              toStringTag: valueToStringTag(value),
+              constructorName: constructorName(value),
+              prototypeConstructorName: constructorName(proto),
+            };
+          } catch (err) {
+            return { errorName: errorName(err) };
+          }
+        };
         return {
           ownKeyCount: keys.length,
           ownNameCount: Object.getOwnPropertyNames(globalThis).length,
           ownSymbolCount: Object.getOwnPropertySymbols(globalThis).length,
           firstNames: Object.getOwnPropertyNames(globalThis).slice(0, 200).sort(),
           selectedDescriptors: Object.fromEntries(selected.map((key) => [key, descriptor(key)])),
+          selectedGraph: Object.fromEntries(selected.map((key) => [key, inspectObjectGraph(key)])),
           toStringTag: globalThis[Symbol.toStringTag] || '',
         };
       };
@@ -542,6 +692,7 @@ async function observePage(page, spec, events, startedAt, navigationError) {
             domContentLoaded: Math.round(entry.domContentLoadedEventEnd),
             loadEventEnd: Math.round(entry.loadEventEnd),
           }))[0] || null,
+        syntheticTimingGaps: globalThis.__zpSyntheticTimingGaps || { script: 0, resource: 0 },
         rootSurface: rootSurfaceOracle(),
       };
     },
@@ -562,7 +713,7 @@ async function observePage(page, spec, events, startedAt, navigationError) {
     },
     console: events.console,
     pageErrors: events.pageErrors,
-    requestFailures: events.requestFailures,
+    requestFailures: normalizeRequestFailures(events.requestFailures, events.responses, !navigationError),
     responses: events.responses,
     selectors: dom.selectors || [],
     rendering: {
@@ -574,6 +725,7 @@ async function observePage(page, spec, events, startedAt, navigationError) {
     iframes: summarizeIframes(dom.iframes || [], spec),
     resources: summarizeResources(dom.resources || [], spec),
     transportTimings,
+    syntheticTimingGaps: dom.syntheticTimingGaps || { script: 0, resource: 0 },
     rootSurface: dom.rootSurface || {},
   };
 }
@@ -922,6 +1074,23 @@ function failureKey(item) {
   return `${item.resourceType}:${item.urlClass.scheme}:${item.urlClass.hostClass}:${item.failureClass}`;
 }
 
+
+function normalizeRequestFailures(failures, responses, pageOK) {
+  const rows = Array.isArray(failures) ? failures : [];
+  if (!pageOK) return rows;
+  const responseRows = Array.isArray(responses) ? responses : [];
+  const hasDocumentResponse = responseRows.some(
+    (row) => row.resourceType === 'document' && row.statusBucket !== '5xx',
+  );
+  if (!hasDocumentResponse) return rows;
+  return rows.filter(
+    (row) =>
+      !(
+        row.resourceType === 'document' &&
+        /ERR_ABORTED/i.test(String(row.failureClass || ''))
+      ),
+  );
+}
 function responseKey(item) {
   return `${item.resourceType}:${item.urlClass.hostClass}:${item.statusBucket}:${item.contentTypeBucket}`;
 }
@@ -957,6 +1126,97 @@ function iframeDelta(nativeRecord, zeroProxyRecord) {
   };
 }
 
+function rootSurfaceDelta(nativeRoot, zeroRoot) {
+  const nativeSurface = nativeRoot || {};
+  const zeroSurface = zeroRoot || {};
+  const mismatches = [];
+  pushRootSurfaceMismatch(
+    mismatches,
+    'ownKeyCount',
+    nativeSurface.ownKeyCount,
+    zeroSurface.ownKeyCount,
+  );
+  pushRootSurfaceMismatch(
+    mismatches,
+    'ownNameCount',
+    nativeSurface.ownNameCount,
+    zeroSurface.ownNameCount,
+  );
+  pushRootSurfaceMismatch(
+    mismatches,
+    'ownSymbolCount',
+    nativeSurface.ownSymbolCount,
+    zeroSurface.ownSymbolCount,
+  );
+  pushRootSurfaceMismatch(
+    mismatches,
+    'toStringTag',
+    nativeSurface.toStringTag,
+    zeroSurface.toStringTag,
+  );
+  compareRootSurfaceMap(
+    mismatches,
+    'selectedDescriptors',
+    nativeSurface.selectedDescriptors,
+    zeroSurface.selectedDescriptors,
+  );
+  compareRootSurfaceMap(
+    mismatches,
+    'selectedGraph',
+    nativeSurface.selectedGraph,
+    zeroSurface.selectedGraph,
+  );
+  return {
+    mismatchCount: mismatches.length,
+    mismatches: mismatches.slice(0, 64),
+    classes: countBy(mismatches, (row) => row.classification),
+  };
+}
+
+function compareRootSurfaceMap(out, prefix, nativeMap, zeroMap) {
+  const left = nativeMap || {};
+  const right = zeroMap || {};
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    const nativeValue = stableJSONString(left[key]);
+    const zeroValue = stableJSONString(right[key]);
+    if (nativeValue === zeroValue) continue;
+    out.push({
+      path: `${prefix}.${key}`,
+      classification: classifyRootSurfacePath(`${prefix}.${key}`),
+    });
+  }
+}
+
+function pushRootSurfaceMismatch(out, pathKey, nativeValue, zeroValue) {
+  if (stableJSONString(nativeValue) === stableJSONString(zeroValue)) return;
+  out.push({
+    path: pathKey,
+    classification: classifyRootSurfacePath(pathKey),
+  });
+}
+
+function stableJSONString(value) {
+  if (value == null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableJSONString(item)).join(',')}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJSONString(value[key])}`)
+    .join(',')}}`;
+}
+
+function classifyRootSurfacePath(pathKey) {
+  if (/(window|self|globalThis|location|document|history|frames|top|parent|opener)/.test(pathKey)) {
+    return 'security-delta';
+  }
+  if (/(navigator|screen|timezone|locale|language|platform)/.test(pathKey)) {
+    return 'privacy-persona-delta';
+  }
+  if (/(fetch|XMLHttpRequest|WebSocket|Worker|PerformanceObserver|Function)/.test(pathKey)) {
+    return 'compatibility-gap';
+  }
+  return 'native-browser-version-delta';
+}
+
 function summarizeTransportTimings(timings) {
   const rows = Array.isArray(timings) ? timings : [];
   return {
@@ -969,6 +1229,11 @@ function summarizeTransportTimings(timings) {
     ),
     queueWait: countBy(rows, (row) => durationBucket(Number(row.queueWaitMs) || 0)),
     firstByte: countBy(rows, (row) => durationBucket(Number(row.timeToFirstByteMs) || 0)),
+    body: countBy(rows, (row) => durationBucket(Number(row.bodyDurationMs) || 0)),
+    retries: countBy(rows, (row) => String(Number(row.retryCount) || 0)),
+    staticResourceTimingMerged: rows.filter(
+      (row) => row.resourceType && row.resourceType !== 'document',
+    ).length,
   };
 }
 function timingDelta(nativeRecord, zeroProxyRecord) {
@@ -993,24 +1258,35 @@ function transportDelta(nativeRecord, zeroProxyRecord) {
     goTimingAvailable: zeroProxyRecord.transportTimings.length > 0,
     goTimingCountDelta:
       zeroProxyRecord.transportTimings.length - nativeRecord.transportTimings.length,
+    syntheticTimingGapCount:
+      (zeroProxyRecord.syntheticTimingGaps?.script || 0) +
+      (zeroProxyRecord.syntheticTimingGaps?.resource || 0),
   };
 }
 
-function buildFailureTelemetry(nativeRecord, zeroProxyRecord, delta, spec, surface) {
+function buildFailureTelemetry(nativeRecord, zeroProxyRecord, delta, spec, surface, expectedDelta) {
   return {
     schema: 'zp.failure.telemetry.v1',
     site: spec.id,
     profile: spec.profile,
     surface,
     ownerModule: ownerForSurface(surface),
-    severity: surface === 'none' ? 'none' : 'triage',
+    severity: surface === 'none' ? 'none' : expectedDelta ? 'expected-delta' : 'triage',
     evidence: {
       consoleDelta: delta.console,
       pageErrorDelta: delta.pageErrors,
       requestFailureDeltaKeys: Object.keys(delta.requestFailures).sort().slice(0, 32),
       responseDeltaKeys: Object.keys(delta.responses).sort().slice(0, 32),
+      rootSurface: {
+        mismatchCount: delta.rootSurface.mismatchCount,
+        classes: delta.rootSurface.classes,
+        samplePaths: delta.rootSurface.mismatches.map((row) => row.path).slice(0, 16),
+      },
+      apiFailureClass: classifyAPIFailure(surface, delta),
+      syntheticTimingGaps: delta.transport.syntheticTimingGapCount,
       missingVisibleSelectors: delta.rendering.missingNativeVisibleSelectors.slice(0, 32),
       iframe: delta.iframes,
+      script: scriptFailureTelemetry(nativeRecord, zeroProxyRecord, delta, surface),
       timing: {
         elapsedMsDelta: durationBucket(Math.abs(delta.timing.elapsedMs)),
         navigationDurationMsDelta: durationBucket(Math.abs(delta.timing.navigationDurationMs)),
@@ -1019,6 +1295,12 @@ function buildFailureTelemetry(nativeRecord, zeroProxyRecord, delta, spec, surfa
       },
       nativeOK: nativeRecord.ok,
       zeroProxyOK: zeroProxyRecord.ok,
+      expectedDelta: expectedDelta
+        ? {
+            classification: expectedDelta.classification || 'expected-delta',
+            reason: expectedDelta.reason || '',
+          }
+        : null,
     },
     redaction: {
       rawURL: false,
@@ -1027,6 +1309,40 @@ function buildFailureTelemetry(nativeRecord, zeroProxyRecord, delta, spec, surfa
       rawSelectorText: true,
       fingerprintsOnly: true,
     },
+  };
+}
+
+function classifyAPIFailure(surface, delta) {
+  if (surface === 'none') return 'none';
+  if (surface === 'script-runtime') return 'script-runtime';
+  if (surface === 'network') return 'network-request';
+  if (surface === 'navigation') return 'navigation';
+  if (surface === 'frame') return 'frame-boundary';
+  if (surface === 'rendering') {
+    if (delta.rootSurface?.mismatchCount) return 'root-surface';
+    return 'rendering';
+  }
+  return 'other';
+}
+
+function scriptFailureTelemetry(nativeRecord, zeroProxyRecord, delta, surface) {
+  const nativeErrors = countBy(nativeRecord.pageErrors, (item) => item.name || 'Error');
+  const zeroProxyErrors = countBy(zeroProxyRecord.pageErrors, (item) => item.name || 'Error');
+  const generatedJavaScriptSyntaxErrorCount = Math.max(
+    0,
+    (zeroProxyErrors.SyntaxError || 0) - (nativeErrors.SyntaxError || 0),
+  );
+  const failCloseDeltaKeys = Object.keys(delta.requestFailures)
+    .filter((key) => /^script:/.test(key) || /POLICY|BLOCK|rewrite|script/i.test(key))
+    .sort()
+    .slice(0, 32);
+  return {
+    rewriteInducedFailureCount:
+      surface === 'script-runtime' ? Math.max(0, Number(delta.pageErrors) || 0) : 0,
+    generatedJavaScriptSyntaxErrorCount,
+    unexpectedFailCloseCount: failCloseDeltaKeys.length,
+    pageErrorNames: subtractCounts(zeroProxyErrors, nativeErrors),
+    failCloseDeltaKeys,
   };
 }
 
@@ -1074,7 +1390,7 @@ function corpusHash(corpus) {
 
 function printHelp() {
   process.stdout.write(
-    `Usage: node scripts/compat-corpus.mjs [options]\n\nOptions:\n  --mode native|zeroproxy|both   Run native host browser, ZeroProxy, or both (default: both)\n  --sites id,id                  Limit to selected representative-site ids\n  --out path                     Write redacted report JSON\n  --timeout-ms n                 Per-page navigation/readiness timeout\n  --proxy-url url                Reuse an already running ZeroProxy origin\n  --dist path                    Reuse an existing build output for auto-started ZeroProxy\n  --headed                       Run a visible browser\n`,
+    `Usage: node scripts/compat-corpus.mjs [options]\n\nOptions:\n  --mode native|zeroproxy|both   Run native host browser, ZeroProxy, or both (default: both)\n  --sites id,id                  Limit to selected representative-site ids\n  --out path                     Write redacted report JSON\n  --release-out path             Write stable release-gate summary JSON\n  --fail-on-release-gate         Exit non-zero unless the release-gate summary passes\n  --timeout-ms n                 Per-page navigation/readiness timeout\n  --proxy-url url                Reuse an already running ZeroProxy origin\n  --dist path                    Reuse an existing build output for auto-started ZeroProxy\n  --headed                       Run a visible browser\n`,
   );
 }
 

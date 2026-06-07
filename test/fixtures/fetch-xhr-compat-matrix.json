@@ -10,7 +10,31 @@
       "credentials omit",
       "credentialed redirect"
     ],
-    "existingNeedles": ["X-ZP-Fetch-Credentials", "X-ZP-Fetch-Mode", "fetchThroughRuntime"]
+    "existingNeedles": ["X-ZP-Fetch-Credentials", "X-ZP-Fetch-Mode", "fetchThroughRuntime"],
+    "behaviorOracle": {
+      "fixture": "fetch-mode-credentials-oracle",
+      "requests": [
+        {
+          "mode": "same-origin",
+          "credentials": "include",
+          "expectedCookieProjection": "same-origin-jar"
+        },
+        {
+          "mode": "cors",
+          "credentials": "omit",
+          "expectedCookieProjection": "none"
+        },
+        {
+          "mode": "cors",
+          "credentials": "include",
+          "expectedCookieProjection": "credentialed-cors-jar"
+        }
+      ],
+      "expectedResponses": ["success", "cors-policy-failure"],
+      "failureClasses": ["cors-policy", "credential-projection"]
+    },
+    "failureClasses": ["cors-policy", "credential-projection"],
+    "telemetrySurface": "network-api"
   },
   {
     "id": "fetch-redirect-referrer",
@@ -23,7 +47,35 @@
       "manual opaqueredirect",
       "strict-origin-when-cross-origin"
     ],
-    "existingNeedles": ["X-ZP-Fetch-Redirect", "X-ZP-Fetch-Referrer-Policy", "enforceRedirectError"]
+    "existingNeedles": [
+      "X-ZP-Fetch-Redirect",
+      "X-ZP-Fetch-Referrer-Policy",
+      "enforceRedirectError"
+    ],
+    "behaviorOracle": {
+      "fixture": "fetch-redirect-referrer-oracle",
+      "requests": [
+        {
+          "redirect": "follow",
+          "referrerPolicy": "strict-origin-when-cross-origin",
+          "expected": "final-response"
+        },
+        {
+          "redirect": "error",
+          "referrerPolicy": "no-referrer",
+          "expected": "TypeError"
+        },
+        {
+          "redirect": "manual",
+          "referrerPolicy": "origin",
+          "expected": "opaqueredirect"
+        }
+      ],
+      "expectedResponses": ["final-response", "opaqueredirect", "TypeError"],
+      "failureClasses": ["redirect-policy", "referrer-policy"]
+    },
+    "failureClasses": ["redirect-policy", "referrer-policy"],
+    "telemetrySurface": "network-api"
   },
   {
     "id": "fetch-no-cors-opaque",
@@ -31,7 +83,31 @@
     "priority": "p0",
     "axes": ["no-cors", "opaque response", "blocked unknown subresource"],
     "probes": ["opaque facade", "Response.error fail-close", "status/header/body opacity"],
-    "existingNeedles": ["opaqueResponseFacade", "no-cors", "Response.error()"]
+    "existingNeedles": ["opaqueResponseFacade", "no-cors", "Response.error()"],
+    "behaviorOracle": {
+      "fixture": "fetch-no-cors-opaque-oracle",
+      "requests": [
+        {
+          "mode": "no-cors",
+          "resource": "image",
+          "expectedType": "opaque"
+        },
+        {
+          "mode": "no-cors",
+          "resource": "script",
+          "expectedType": "opaque"
+        },
+        {
+          "mode": "cors",
+          "resource": "unknown",
+          "expectedType": "error"
+        }
+      ],
+      "expectedResponses": ["opaque", "error"],
+      "failureClasses": ["opaque-redaction", "fail-closed"]
+    },
+    "failureClasses": ["opaque-redaction", "fail-closed"],
+    "telemetrySurface": "network-api"
   },
   {
     "id": "fetch-abort-upload-stream",
@@ -44,7 +120,31 @@
       "FormData replayable",
       "ReadableStream upload"
     ],
-    "existingNeedles": ["ZP_UPLOAD_STREAM", "X-ZP-Upload-Replayable", "signal"]
+    "existingNeedles": ["ZP_UPLOAD_STREAM", "X-ZP-Upload-Replayable", "signal"],
+    "behaviorOracle": {
+      "fixture": "fetch-abort-upload-stream-oracle",
+      "requests": [
+        {
+          "body": "FormData",
+          "abortAt": "before-headers",
+          "expected": "AbortError"
+        },
+        {
+          "body": "ReadableStream",
+          "abortAt": "during-upload",
+          "expected": "AbortError"
+        },
+        {
+          "body": "Blob",
+          "abortAt": "none",
+          "expected": "success"
+        }
+      ],
+      "expectedResponses": ["AbortError", "success"],
+      "failureClasses": ["abort", "upload-stream", "body-replay"]
+    },
+    "failureClasses": ["abort", "upload-stream", "body-replay"],
+    "telemetrySurface": "network-api"
   },
   {
     "id": "xhr-sync-async",
@@ -52,7 +152,31 @@
     "priority": "p0",
     "axes": ["async", "sync policy", "readyState", "responseType"],
     "probes": ["GET async", "POST body", "sync blocked or shimmed", "arraybuffer/blob/text/json"],
-    "existingNeedles": ["ZPXMLHttpRequest", "sync XHR", "readyState"]
+    "existingNeedles": ["ZPXMLHttpRequest", "sync XHR", "readyState"],
+    "behaviorOracle": {
+      "fixture": "xhr-sync-async-oracle",
+      "requests": [
+        {
+          "async": true,
+          "method": "GET",
+          "expectedReadyStates": [1, 2, 3, 4]
+        },
+        {
+          "async": true,
+          "method": "POST",
+          "expectedReadyStates": [1, 2, 3, 4]
+        },
+        {
+          "async": false,
+          "method": "GET",
+          "expected": "sync-blocked-or-shimmed"
+        }
+      ],
+      "expectedResponses": ["load", "sync-blocked-or-shimmed"],
+      "failureClasses": ["sync-policy", "ready-state"]
+    },
+    "failureClasses": ["sync-policy", "ready-state"],
+    "telemetrySurface": "network-api"
   },
   {
     "id": "xhr-headers-errors-progress",
@@ -65,7 +189,32 @@
       "timeout",
       "load/error/abort/loadend ordering"
     ],
-    "existingNeedles": ["setRequestHeader", "getAllResponseHeaders", "dispatchEvent"]
+    "existingNeedles": ["setRequestHeader", "getAllResponseHeaders", "dispatchEvent"],
+    "behaviorOracle": {
+      "fixture": "xhr-headers-errors-progress-oracle",
+      "requests": [
+        {
+          "case": "custom-request-header",
+          "expected": "header-projected"
+        },
+        {
+          "case": "timeout",
+          "expectedEventOrder": ["loadstart", "timeout", "loadend"]
+        },
+        {
+          "case": "network-error",
+          "expectedEventOrder": ["loadstart", "error", "loadend"]
+        },
+        {
+          "case": "abort",
+          "expectedEventOrder": ["loadstart", "abort", "loadend"]
+        }
+      ],
+      "expectedResponses": ["header-projected", "timeout", "error", "abort"],
+      "failureClasses": ["timeout", "network-error", "abort", "progress-order"]
+    },
+    "failureClasses": ["timeout", "network-error", "abort", "progress-order"],
+    "telemetrySurface": "network-api"
   },
   {
     "id": "range-and-cache-headers",
@@ -78,6 +227,31 @@
       "cache reload/no-store",
       "compressed response body"
     ],
-    "existingNeedles": ["Range", "cache", "contentEncoding"]
+    "existingNeedles": ["Range", "cache", "contentEncoding"],
+    "behaviorOracle": {
+      "fixture": "range-cache-header-oracle",
+      "requests": [
+        {
+          "headers": {
+            "Range": "bytes=0-9"
+          },
+          "expectedStatus": 206
+        },
+        {
+          "headers": {
+            "If-None-Match": "known-etag"
+          },
+          "expectedStatus": 304
+        },
+        {
+          "cache": "no-store",
+          "expected": "fresh-network-response"
+        }
+      ],
+      "expectedResponses": ["206", "304", "fresh-network-response"],
+      "failureClasses": ["range-policy", "cache-validation", "content-encoding"]
+    },
+    "failureClasses": ["range-policy", "cache-validation", "content-encoding"],
+    "telemetrySurface": "network-api"
   }
 ]

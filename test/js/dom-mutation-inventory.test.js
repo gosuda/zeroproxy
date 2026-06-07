@@ -18,6 +18,7 @@ test('DOM mutation inventory covers every planned API family', () => {
     'template-content',
     'frame-source-properties',
     'clone-import-adopt',
+    'script-content-mutation',
     'serialize',
     'remove',
   ]) {
@@ -39,4 +40,25 @@ test('DOM mutation inventory hooked rows stay wired to runtime source', () => {
       assert.ok(source.includes(needle), `${row.family} missing ${needle}`);
     }
   }
+});
+
+test('DOM mutation inventory pins parser, script, template, and selector-adjacent mutation risks', () => {
+  const rows = new Map(inventory().map((row) => [row.family, row]));
+  assert.equal(rows.get('document-write-and-fragment-parse').status, 'hooked');
+  assert.ok(
+    rows
+      .get('document-write-and-fragment-parse')
+      .sourceNeedles.includes("define(w.DOMParser.prototype, 'parseFromString'"),
+  );
+  assert.ok(
+    rows
+      .get('document-write-and-fragment-parse')
+      .sourceNeedles.includes("define(w.Range.prototype, 'createContextualFragment'"),
+  );
+  assert.equal(rows.get('template-content').status, 'hooked');
+  assert.ok(rows.get('clone-import-adopt').coverage.includes('insertion'));
+  assert.equal(rows.get('script-content-mutation').status, 'hooked');
+  assert.ok(
+    rows.get('script-content-mutation').sourceNeedles.includes('installScriptTextProps(w)'),
+  );
 });

@@ -1,0 +1,369 @@
+{
+  "schema": "zp.compat.release-gate.v1",
+  "corpusVersion": "fb5a2e02193896eb83f9",
+  "status": "pass",
+  "metrics": {
+    "siteCount": 14,
+    "comparedSites": 14,
+    "missingComparisons": 0,
+    "passSites": 5,
+    "expectedDeltaSites": 9,
+    "triageSites": 0,
+    "scriptRewriteInducedFailures": 0,
+    "generatedJavaScriptSyntaxErrors": 0,
+    "unexpectedScriptFailCloseFallbacks": 0
+  },
+  "gates": {
+    "allSitesCompared": true,
+    "noTriageSites": true,
+    "noRewriteInducedScriptFailures": true,
+    "noGeneratedJavaScriptSyntaxErrors": true,
+    "noUnexpectedScriptFailCloseFallbacks": true
+  },
+  "seedCorpus": [
+    {
+      "id": "naver-desktop",
+      "site": "naver.com",
+      "profile": "desktop",
+      "primaryFlow": "desktop-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": true,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": []
+      }
+    },
+    {
+      "id": "naver-mobile",
+      "site": "m.naver.com",
+      "profile": "mobile",
+      "primaryFlow": "mobile-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": true,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "network",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "google-search",
+      "site": "google-search",
+      "profile": "desktop",
+      "primaryFlow": "search-results",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "rendering",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "google-maps",
+      "site": "google-maps",
+      "profile": "desktop",
+      "primaryFlow": "maps-shell",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": true,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "rendering",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "embedded-google-maps",
+      "site": "embedded-google-maps",
+      "profile": "desktop",
+      "primaryFlow": "embedded-map-iframe",
+      "source": "checked-in-html-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": true,
+        "googleMapsFrame": true,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "navigation",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wikipedia",
+      "site": "wikipedia.org",
+      "profile": "desktop",
+      "primaryFlow": "static-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": []
+      }
+    },
+    {
+      "id": "github",
+      "site": "github.com",
+      "profile": "desktop",
+      "primaryFlow": "unauthenticated-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "rendering",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "hacker-news",
+      "site": "news.ycombinator.com",
+      "profile": "desktop",
+      "primaryFlow": "link-list",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": []
+      }
+    },
+    {
+      "id": "reddit",
+      "site": "reddit.com",
+      "profile": "desktop",
+      "primaryFlow": "app-shell-feed",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": []
+      }
+    },
+    {
+      "id": "x-com",
+      "site": "x.com",
+      "profile": "desktop",
+      "primaryFlow": "unauthenticated-landing",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "rendering",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "amazon",
+      "site": "amazon.com",
+      "profile": "desktop",
+      "primaryFlow": "commerce-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "rendering",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "nytimes",
+      "site": "nytimes.com",
+      "profile": "desktop",
+      "primaryFlow": "news-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "script-runtime",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "cloudflare",
+      "site": "cloudflare.com",
+      "profile": "desktop",
+      "primaryFlow": "security-baseline-homepage",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": false,
+        "unsupportedSurfaces": [],
+        "expectedDeltas": [
+          {
+            "surface": "navigation",
+            "classification": "expected-compatibility-gap"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ipleak",
+      "site": "ipleak.net",
+      "profile": "desktop",
+      "primaryFlow": "leak-test-surface",
+      "source": "sanitized-seed-fixture",
+      "expectations": {
+        "iframeAdCandidates": false,
+        "iframeNonBlank": false,
+        "googleMapsFrame": false,
+        "nonBlankMap": false,
+        "coarseIpDnsClassesOnly": true,
+        "unsupportedSurfaces": [
+          "webrtc",
+          "webtransport"
+        ],
+        "expectedDeltas": []
+      }
+    }
+  ],
+  "triageSites": [],
+  "expectedDeltaSites": [
+    {
+      "site": "naver-mobile",
+      "firstFailingSurface": "network",
+      "ownerModule": "service-worker/go-transport",
+      "reason": "Mobile homepage completes primary render, but post-render third-party fetch aborts still diverge from native.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "google-search",
+      "firstFailingSurface": "rendering",
+      "ownerModule": "runtime/html-rewriter",
+      "reason": "Search-results shell currently diverges on selector visibility and one proxied SyntaxError relative to native.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "google-maps",
+      "firstFailingSurface": "rendering",
+      "ownerModule": "runtime/html-rewriter",
+      "reason": "Maps shell currently remains an allowed rendering delta while map/tile compatibility work continues.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "embedded-google-maps",
+      "firstFailingSurface": "navigation",
+      "ownerModule": "service-worker/runtime-routing",
+      "reason": "Embedded Maps iframe currently remains an allowed navigation/widget delta under the checked-in host fixture.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "github",
+      "firstFailingSurface": "rendering",
+      "ownerModule": "runtime/html-rewriter",
+      "reason": "GitHub app-shell rendering remains a classified compatibility delta in the live corpus.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "x-com",
+      "firstFailingSurface": "rendering",
+      "ownerModule": "runtime/html-rewriter",
+      "reason": "X unauthenticated landing behavior remains a classified compatibility delta in the live corpus.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "amazon",
+      "firstFailingSurface": "rendering",
+      "ownerModule": "runtime/html-rewriter",
+      "reason": "Amazon commerce-homepage rendering remains a classified compatibility delta in the live corpus.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "nytimes",
+      "firstFailingSurface": "script-runtime",
+      "ownerModule": "runtime/js-rewriter",
+      "reason": "NYTimes script/runtime divergence remains a classified compatibility delta in the live corpus.",
+      "classification": "expected-compatibility-gap"
+    },
+    {
+      "site": "cloudflare",
+      "firstFailingSurface": "navigation",
+      "ownerModule": "service-worker/runtime-routing",
+      "reason": "Cloudflare security-baseline navigation remains a classified compatibility delta in the live corpus.",
+      "classification": "expected-compatibility-gap"
+    }
+  ],
+  "redaction": {
+    "rawUrls": false,
+    "rawConsoleText": false,
+    "rawIpDnsValues": false,
+    "rawSourceBodies": false
+  }
+}

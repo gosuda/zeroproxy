@@ -10,7 +10,22 @@
       "childList subtree",
       "microtask timing"
     ],
-    "existingNeedles": ["MutationObserver", "observe", "takeRecords"]
+    "existingNeedles": ["MutationObserver", "observe", "takeRecords"],
+    "behaviorOracle": {
+      "fixture": "mutation-observer-callback-order-oracle",
+      "callbackOrder": [
+        "sync-dom-write",
+        "mutation-microtask",
+        "promise-microtask-after-observe",
+        "animation-frame"
+      ],
+      "redactedTelemetry": {
+        "eventClass": "observer",
+        "targetClass": "element",
+        "recordTypes": ["attributes", "childList"]
+      },
+      "forbiddenTelemetry": ["attributeValue", "textContent", "innerHTML", "rawNodeMarkup"]
+    }
   },
   {
     "id": "intersection-observer",
@@ -22,14 +37,34 @@
       "entry fields",
       "lazy-loading callback timing"
     ],
-    "existingNeedles": ["IntersectionObserver", "threshold", "rootMargin"]
+    "existingNeedles": ["IntersectionObserver", "threshold", "rootMargin"],
+    "behaviorOracle": {
+      "fixture": "intersection-observer-lazy-sentinel-oracle",
+      "callbackOrder": ["layout", "intersection-callback", "lazy-load-fetch", "animation-frame"],
+      "redactedTelemetry": {
+        "eventClass": "observer",
+        "targetClass": "lazy-sentinel",
+        "thresholdBuckets": ["0", "0.5", "1"]
+      },
+      "forbiddenTelemetry": ["rawBoundingClientRect", "rawScrollPath", "rawURL"]
+    }
   },
   {
     "id": "resize-observer",
     "priority": "p1",
     "surface": "ResizeObserver",
     "probes": ["constructor shape", "contentRect", "borderBoxSize", "callback ordering"],
-    "existingNeedles": ["ResizeObserver", "contentRect", "borderBoxSize"]
+    "existingNeedles": ["ResizeObserver", "contentRect", "borderBoxSize"],
+    "behaviorOracle": {
+      "fixture": "resize-observer-layout-order-oracle",
+      "callbackOrder": ["style-write", "layout", "resize-callback", "animation-frame"],
+      "redactedTelemetry": {
+        "eventClass": "observer",
+        "targetClass": "layout-box",
+        "sizeBuckets": ["small", "medium"]
+      },
+      "forbiddenTelemetry": ["rawWidth", "rawHeight", "elementText"]
+    }
   },
   {
     "id": "pointer-mouse-wheel",
@@ -41,7 +76,26 @@
       "wheel delta payload",
       "capture/bubble phases"
     ],
-    "existingNeedles": ["PointerEvent", "MouseEvent", "WheelEvent"]
+    "existingNeedles": ["PointerEvent", "MouseEvent", "WheelEvent"],
+    "behaviorOracle": {
+      "fixture": "pointer-mouse-wheel-order-oracle",
+      "callbackOrder": [
+        "pointerdown",
+        "mousedown",
+        "pointermove",
+        "mousemove",
+        "wheel",
+        "pointerup",
+        "mouseup",
+        "click"
+      ],
+      "redactedTelemetry": {
+        "eventClass": "pointer",
+        "targetClass": "control",
+        "phaseClasses": ["capture", "target", "bubble"]
+      },
+      "forbiddenTelemetry": ["rawPointerPath", "clientX", "clientY", "screenX", "screenY"]
+    }
   },
   {
     "id": "keyboard-focus-composition",
@@ -53,7 +107,27 @@
       "compositionstart/update/end",
       "isComposing"
     ],
-    "existingNeedles": ["KeyboardEvent", "InputEvent", "CompositionEvent"]
+    "existingNeedles": ["KeyboardEvent", "InputEvent", "CompositionEvent"],
+    "behaviorOracle": {
+      "fixture": "keyboard-focus-composition-order-oracle",
+      "callbackOrder": [
+        "focusin",
+        "keydown",
+        "beforeinput",
+        "input",
+        "keyup",
+        "compositionstart",
+        "compositionupdate",
+        "compositionend",
+        "focusout"
+      ],
+      "redactedTelemetry": {
+        "eventClass": "keyboard-input",
+        "targetClass": "editable",
+        "phaseClasses": ["target", "bubble"]
+      },
+      "forbiddenTelemetry": ["keyValue", "typedText", "clipboardData", "selectedText", "inputValue"]
+    }
   },
   {
     "id": "touch-input-selection",
@@ -65,6 +139,29 @@
       "selectionchange",
       "framework controlled inputs"
     ],
-    "existingNeedles": ["TouchEvent", "beforeinput", "selectionchange"]
+    "existingNeedles": ["TouchEvent", "beforeinput", "selectionchange"],
+    "behaviorOracle": {
+      "fixture": "touch-input-selection-order-oracle",
+      "callbackOrder": [
+        "touchstart",
+        "touchmove",
+        "beforeinput",
+        "input",
+        "selectionchange",
+        "touchend"
+      ],
+      "redactedTelemetry": {
+        "eventClass": "touch-input",
+        "targetClass": "editable",
+        "inputTypeClasses": ["insertText", "deleteContentBackward"]
+      },
+      "forbiddenTelemetry": [
+        "rawTouchPath",
+        "typedText",
+        "selectedText",
+        "inputValue",
+        "clipboardData"
+      ]
+    }
   }
 ]

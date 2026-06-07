@@ -74,9 +74,29 @@
       "reason": "Data/blob worker and frame limits are expected containment deltas until those schemes have full isolated-runtime support."
     },
     {
+      "id": "unsupported-frame-scheme-limit",
+      "pattern": "^surface\\.frames\\.(data|blob|javascript)\\.(blocked|opaqueOrigin|unsupported)$",
+      "reason": "Data, blob, and javascript iframe navigations are classified as frame containment limits unless a future isolated document route supports them."
+    },
+    {
       "id": "target-visible-wrapper-artifact",
       "pattern": "^surface\\.(selectors|performance|events)\\.(targetVisibleName|wrapperShape|timingShape)$",
       "reason": "Target-visible facades can intentionally differ where ZeroProxy exposes target names while hiding proxy implementation routes."
+    },
+    {
+      "id": "selector-url-attribute-virtualization",
+      "pattern": "^surface\\.selectors\\.(href|src|srcset|action|formaction|poster|srcdoc|xlinkHref)\\.(targetVisibleMatch|rawRouteMismatch)$",
+      "reason": "Selectors match target-visible URL-bearing attributes while the raw DOM may contain encrypted ZeroProxy routes or injected srcdoc markup."
+    },
+    {
+      "id": "rewrite-failure-redacted-telemetry",
+      "pattern": "^surface\\.rewrite\\.(parserErrorKind|sourceSizeBucket|recoveryVariant|finalBlocked)$",
+      "reason": "Rewrite failures expose only redacted parser, size-bucket, recovery, and final blocking classifications."
+    },
+    {
+      "id": "transport-timing-shape",
+      "pattern": "^surface\\.performance\\.transport\\.(bodyDuration|retryCount|safeErrorTiming|serverTiming)$",
+      "reason": "ZeroProxy exposes measured proxy transport phases as target-visible timing fields rather than native direct-network timing."
     }
   ]
 }

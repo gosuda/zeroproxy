@@ -4,13 +4,16 @@ const fs = require('node:fs');
 
 const deltas = () => JSON.parse(fs.readFileSync('test/e2e/expected-deltas.json', 'utf8'));
 
-test('expected delta allowlist covers frame, srcdoc, data/blob, and wrapper artifacts', () => {
+test('expected delta allowlist covers frame, srcdoc, data/blob, wrapper, rewrite, and timing artifacts', () => {
   const ids = new Set(deltas().nativeVsZeroProxyRawSetDifferentialAllowlist.map((row) => row.id));
   for (const id of [
     'frame-srcdoc-runtime-gap',
     'frame-sandbox-security-delta',
     'data-blob-worker-frame-limit',
     'target-visible-wrapper-artifact',
+    'selector-url-attribute-virtualization',
+    'rewrite-failure-redacted-telemetry',
+    'transport-timing-shape',
   ])
     assert.equal(ids.has(id), true, id);
 });

@@ -18,6 +18,8 @@ test('dynamic DOM insertion matrix prioritizes every planned fixture family', ()
     'domparser-html-document',
     'hydration-dynamic-chunk',
     'dynamic-srcdoc-frame',
+    'template-clone-later-insertion',
+    'selector-srcdoc-xlink-virtualization',
   ]) {
     assert.equal(ids.has(id), true, id);
   }
@@ -36,4 +38,48 @@ test('dynamic DOM insertion matrix rows stay wired to runtime hooks', () => {
       assert.ok(source.includes(needle), `${row.id} missing ${needle}`);
     }
   }
+});
+
+test('dynamic DOM insertion matrix pins high-risk behavior surfaces to concrete hooks', () => {
+  const rows = new Map(matrix().map((row) => [row.id, row]));
+  assert.deepEqual(rows.get('dynamic-srcdoc-frame').existingHookNeedles, [
+    "installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc')",
+    "setFrameSrcdocAttribute(this, 'srcdoc', v)",
+    'createFrameMessaging',
+  ]);
+  assert.ok(rows.get('dynamic-srcdoc-frame').probes.includes('runtime prelude injection'));
+  assert.ok(
+    rows
+      .get('template-clone-later-insertion')
+      .probes.includes('cloned script descendants are prepared at insertion'),
+  );
+  assert.ok(
+    rows
+      .get('contextual-fragment')
+      .existingHookNeedles.includes("define(w.Range.prototype, 'createContextualFragment'"),
+  );
+  assert.ok(
+    rows
+      .get('domparser-html-document')
+      .existingHookNeedles.includes("String(type).toLowerCase() === 'text/html'"),
+  );
+  assert.ok(
+    rows.get('programmatic-script-insertion').existingHookNeedles.includes('prepareScriptElement'),
+  );
+});
+
+test('dynamic DOM insertion matrix covers target-visible selector virtualization for srcdoc and xlink:href', () => {
+  const selectorRow = matrix().find((row) => row.id === 'selector-srcdoc-xlink-virtualization');
+  assert.ok(selectorRow);
+  assert.equal(selectorRow.priority, 'p0');
+  assert.ok(
+    selectorRow.probes.includes(
+      'querySelectorAll matches iframe[srcdoc] against target-visible srcdoc',
+    ),
+  );
+  assert.ok(
+    selectorRow.probes.includes('matches/closest handle SVG xlink:href target-visible URLs'),
+  );
+  assert.ok(selectorRow.existingHookNeedles.includes("attr === 'srcdoc'"));
+  assert.ok(selectorRow.existingHookNeedles.includes("attr === 'xlink:href'"));
 });

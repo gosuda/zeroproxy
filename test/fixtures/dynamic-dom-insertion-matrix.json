@@ -133,9 +133,47 @@
     ],
     "existingHookNeedles": [
       "installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc')",
-      "injectSrcdoc(String(v))",
+      "setFrameSrcdocAttribute(this, 'srcdoc', v)",
       "createFrameMessaging"
     ],
-    "expectedDelta": "known gap until srcdoc milestone completes"
+    "expectedDelta": "none"
+  },
+  {
+    "id": "template-clone-later-insertion",
+    "surface": "template.content cloneNode/importNode followed by insertion",
+    "priority": "p1",
+    "fixtureClass": "template-clone",
+    "probes": [
+      "cloned script descendants are prepared at insertion",
+      "cloned frame/srcdoc descendants are sandboxed and instrumented",
+      "target-visible URL attributes survive clone insertion"
+    ],
+    "existingHookNeedles": [
+      "prepareActivatingNodes(args)",
+      "prepareActivatingNode(node)",
+      "node.querySelectorAll('script')",
+      "node.querySelectorAll('iframe,frame')"
+    ],
+    "expectedDelta": "none after insertion; detached clones remain native until insertion"
+  },
+  {
+    "id": "selector-srcdoc-xlink-virtualization",
+    "surface": "selector APIs over srcdoc and xlink:href",
+    "priority": "p0",
+    "fixtureClass": "selector-virtualization",
+    "probes": [
+      "querySelectorAll matches iframe[srcdoc] against target-visible srcdoc",
+      "querySelector matches rewritten srcdoc backup values",
+      "matches/closest handle SVG xlink:href target-visible URLs",
+      "operator coverage includes equality, prefix, suffix, substring, token, and dash-match"
+    ],
+    "existingHookNeedles": [
+      "targetVisibleSelectorAttrRE",
+      "attr === 'srcdoc'",
+      "attr === 'xlink:href'",
+      "visibleSrcdoc(el)",
+      "visibleResourceURL(el, 'href')"
+    ],
+    "expectedDelta": "none"
   }
 ]

@@ -5,7 +5,20 @@
     "priority": "p0",
     "entry": "react-hydration.html",
     "surfaces": ["SSR hydration", "event delegation", "dynamic script/module fetch"],
-    "expectedDelta": "none"
+    "expectedDelta": "none",
+    "runner": {
+      "readySelector": "[data-fixture=\"react-button\"]",
+      "readyText": "React count: 0",
+      "actions": [
+        {
+          "type": "click",
+          "selector": "[data-fixture=\"react-button\"]",
+          "expectedText": "React count: 1"
+        }
+      ],
+      "networkProbes": ["https://esm.sh/react@18.2.0", "https://esm.sh/react-dom@18.2.0/client"],
+      "consoleFailureClasses": ["hydration-error", "event-handler-error", "module-fetch-error"]
+    }
   },
   {
     "id": "next-vite-module-graph",
@@ -13,7 +26,20 @@
     "priority": "p0",
     "entry": "next-vite-module-graph.html",
     "surfaces": ["import map", "module graph", "dynamic import chunk", "preload/modulepreload"],
-    "expectedDelta": "none"
+    "expectedDelta": "none",
+    "runner": {
+      "readySelector": "[data-fixture=\"vite-dynamic-chunk\"]",
+      "readyText": "dynamic chunk mounted",
+      "actions": [
+        {
+          "type": "click",
+          "selector": "[data-fixture=\"vite-dynamic-chunk\"]",
+          "expectedText": "dynamic chunk clicked"
+        }
+      ],
+      "networkProbes": ["./vite-entry.mjs", "./vite-chunk.mjs"],
+      "consoleFailureClasses": ["modulepreload-error", "import-map-error", "dynamic-import-error"]
+    }
   },
   {
     "id": "vue-reactivity",
@@ -21,7 +47,20 @@
     "priority": "p1",
     "entry": "vue-reactivity.html",
     "surfaces": ["template mount", "reactive DOM update", "event handler", "dynamic image src"],
-    "expectedDelta": "none"
+    "expectedDelta": "none",
+    "runner": {
+      "readySelector": "[data-fixture=\"vue-button\"]",
+      "readyText": "Vue count: 0",
+      "actions": [
+        {
+          "type": "click",
+          "selector": "[data-fixture=\"vue-button\"]",
+          "expectedText": "Vue count: 1"
+        }
+      ],
+      "networkProbes": ["https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js", "./vue-image.svg"],
+      "consoleFailureClasses": ["reactivity-error", "event-handler-error", "dynamic-src-error"]
+    }
   },
   {
     "id": "angular-zone-timer",
@@ -29,7 +68,20 @@
     "priority": "p1",
     "entry": "angular-zone-timer.html",
     "surfaces": ["zone timer patching", "event listener wrapping", "XHR/fetch patch observation"],
-    "expectedDelta": "none"
+    "expectedDelta": "none",
+    "runner": {
+      "readySelector": "[data-fixture=\"zone-button\"]",
+      "readyText": "zone ready",
+      "actions": [
+        {
+          "type": "click",
+          "selector": "[data-fixture=\"zone-button\"]",
+          "expectedText": "zone clicked"
+        }
+      ],
+      "networkProbes": ["https://unpkg.com/zone.js@0.14.10/bundles/zone.umd.min.js"],
+      "consoleFailureClasses": ["zone-patch-error", "timer-order-error", "event-handler-error"]
+    }
   },
   {
     "id": "webpack-dynamic-chunk",
@@ -42,6 +94,13 @@
       "dynamic JSON/script URL",
       "error callback"
     ],
-    "expectedDelta": "none"
+    "expectedDelta": "none",
+    "runner": {
+      "readySelector": "[data-fixture=\"webpack-root\"]",
+      "readyText": "webpack chunk loaded",
+      "actions": [],
+      "networkProbes": ["./webpack-chunk.js", "./webpack-image.svg"],
+      "consoleFailureClasses": ["script-chunk-load-error", "public-path-error"]
+    }
   }
 ]
