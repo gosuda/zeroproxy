@@ -1,0 +1,137 @@
+[
+  {
+    "id": "naver-desktop",
+    "site": "naver.com",
+    "url": "https://naver.com",
+    "profile": "desktop",
+    "primaryFlow": "desktop-homepage",
+    "readiness": ["body", "a[href]"],
+    "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
+    "iframeExpectations": { "adCandidates": true }
+  },
+  {
+    "id": "naver-mobile",
+    "site": "m.naver.com",
+    "url": "https://m.naver.com",
+    "profile": "mobile",
+    "primaryFlow": "mobile-homepage",
+    "readiness": ["body", "a[href]"],
+    "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
+    "iframeExpectations": { "adCandidates": true }
+  },
+  {
+    "id": "google-search",
+    "site": "google-search",
+    "url": "https://www.google.com/search?q=zeroproxy",
+    "profile": "desktop",
+    "primaryFlow": "search-results",
+    "readiness": ["body"],
+    "primarySelectors": ["textarea[name=q], input[name=q]", "#search, [role=main]", "a[href]"]
+  },
+  {
+    "id": "google-maps",
+    "site": "google-maps",
+    "url": "https://www.google.com/maps",
+    "profile": "desktop",
+    "primaryFlow": "maps-shell",
+    "readiness": ["body"],
+    "primarySelectors": [
+      "input[aria-label], input[role=combobox], #searchboxinput",
+      "canvas, [role=application], [aria-label*=Map], [aria-label*=map]"
+    ],
+    "renderExpectations": { "nonBlankMap": true }
+  },
+  {
+    "id": "embedded-google-maps",
+    "site": "embedded-google-maps",
+    "fixture": "embedded-google-maps.html",
+    "profile": "desktop",
+    "primaryFlow": "embedded-map-iframe",
+    "readiness": ["iframe[data-corpus-google-maps]"],
+    "primarySelectors": ["main", "iframe[data-corpus-google-maps]"],
+    "iframeExpectations": { "nonBlank": true, "googleMaps": true }
+  },
+  {
+    "id": "wikipedia",
+    "site": "wikipedia.org",
+    "url": "https://www.wikipedia.org",
+    "profile": "desktop",
+    "primaryFlow": "static-homepage",
+    "readiness": ["body"],
+    "primarySelectors": ["input[name=search], input[type=search]", "a[href]", "main, body"]
+  },
+  {
+    "id": "github",
+    "site": "github.com",
+    "url": "https://github.com",
+    "profile": "desktop",
+    "primaryFlow": "unauthenticated-homepage",
+    "readiness": ["body"],
+    "primarySelectors": ["header, nav", "a[href]", "main, [role=main]"]
+  },
+  {
+    "id": "hacker-news",
+    "site": "news.ycombinator.com",
+    "url": "https://news.ycombinator.com",
+    "profile": "desktop",
+    "primaryFlow": "link-list",
+    "readiness": ["body"],
+    "primarySelectors": [".athing, .titleline", "a[href]", "table"]
+  },
+  {
+    "id": "reddit",
+    "site": "reddit.com",
+    "url": "https://www.reddit.com",
+    "profile": "desktop",
+    "primaryFlow": "app-shell-feed",
+    "readiness": ["body"],
+    "primarySelectors": ["body", "a[href]", "shreddit-app, [role=main], main"]
+  },
+  {
+    "id": "x-com",
+    "site": "x.com",
+    "url": "https://x.com",
+    "profile": "desktop",
+    "primaryFlow": "unauthenticated-landing",
+    "readiness": ["body"],
+    "primarySelectors": ["body", "a[href], [role=button]", "main, [role=main]"]
+  },
+  {
+    "id": "amazon",
+    "site": "amazon.com",
+    "url": "https://www.amazon.com",
+    "profile": "desktop",
+    "primaryFlow": "commerce-homepage",
+    "readiness": ["body"],
+    "primarySelectors": ["input[type=search], input[name=field-keywords]", "a[href]", "img"]
+  },
+  {
+    "id": "nytimes",
+    "site": "nytimes.com",
+    "url": "https://www.nytimes.com",
+    "profile": "desktop",
+    "primaryFlow": "news-homepage",
+    "readiness": ["body"],
+    "primarySelectors": ["main, [role=main]", "a[href]", "img, picture"]
+  },
+  {
+    "id": "cloudflare",
+    "site": "cloudflare.com",
+    "url": "https://www.cloudflare.com",
+    "profile": "desktop",
+    "primaryFlow": "security-baseline-homepage",
+    "readiness": ["body"],
+    "primarySelectors": ["main, [role=main]", "nav, header", "a[href]"]
+  },
+  {
+    "id": "ipleak",
+    "site": "ipleak.net",
+    "url": "https://ipleak.net",
+    "profile": "desktop",
+    "primaryFlow": "leak-test-surface",
+    "readiness": ["body"],
+    "primarySelectors": ["body", "#content, main, table", "iframe, section, div"],
+    "redaction": { "coarseIpDnsClassesOnly": true },
+    "unsupportedSurfaces": ["webrtc", "webtransport"]
+  }
+]

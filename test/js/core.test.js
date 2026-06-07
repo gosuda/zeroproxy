@@ -79,7 +79,7 @@ test('runtime HTTP facade keeps ZeroProxy assets on the proxy origin', async () 
     Native,
     boot: { tabId: 't' },
     runtimeToken: 'rt',
-    normalizedError: code => new Error(code),
+    normalizedError: (code) => new Error(code),
     postMessageToSW: async () => {},
     openUploadStream: async () => '',
     getActiveEntryId: () => 'e',
@@ -87,7 +87,7 @@ test('runtime HTTP facade keeps ZeroProxy assets on the proxy origin', async () 
     getBaseURL: () => 'https://www.naver.com/',
     getDocumentReferrerPolicy: () => '',
     proxyOrigin: 'https://proxy.example',
-    isInternalRequestURL: raw => new URL(raw).pathname === '/zp/assets/rust-rewriter.wasm',
+    isInternalRequestURL: (raw) => new URL(raw).pathname === '/zp/assets/rust-rewriter.wasm',
   });
   try {
     assert.equal(

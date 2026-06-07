@@ -73,6 +73,27 @@ test('window fetch, XHR, and EventSource route through runtime transport shims',
   }
 });
 
+test('runtime Performance API consumes real transport timing metadata', () => {
+  const rt = readRuntime();
+  const sw = readServiceWorker();
+  for (const needle of [
+    '__zpTransportTiming',
+    '__zpPerformanceTimings',
+    'recordTransportTiming(resp, target)',
+    'transportTimingEntries',
+    'serverTimingMetric',
+  ]) {
+    assert.ok(rt.includes(needle), `missing ${needle}`);
+  }
+  for (const needle of [
+    'copyTransportTiming',
+    'ZP_TRANSPORT_TIMINGS',
+    'recordTransportTiming(resp, requestId, opt)',
+  ]) {
+    assert.ok(sw.includes(needle), `missing ${needle}`);
+  }
+});
+
 test('runtime navigation uses bound Location methods and catches expando href clicks', () => {
   const rt = readRuntime();
   assert.ok(rt.includes("locationAssign: bindMethod(w.location, 'assign')"));

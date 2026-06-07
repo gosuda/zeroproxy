@@ -189,6 +189,56 @@ export function createFingerprintingFacades({
     };
     return entry;
   }
+
+  function transportTimingEntries() {
+    const rows = Array.isArray(globalThis.__zpPerformanceTimings) ? globalThis.__zpPerformanceTimings : [];
+    return rows.map(transportTimingEntry).filter(Boolean);
+  }
+  function transportTimingEntry(row) {
+    const name = visibleResourceEntryName(row && row.targetUrl);
+    if (!name) return null;
+    const queue = nonNegativeNumber(row.queueWaitMs);
+    const acquire = nonNegativeNumber(row.connectionAcquisitionMs);
+    const firstByte = nonNegativeNumber(row.timeToFirstByteMs);
+    const total = Math.max(nonNegativeNumber(row.totalMs), queue + acquire + firstByte);
+    const entry = {
+      name, entryType: 'resource', startTime: 0, duration: total, initiatorType: 'fetch',
+      deliveryType: '', nextHopProtocol: String(row.negotiatedProtocol || ''), renderBlockingStatus: 'non-blocking',
+      contentType: '', contentEncoding: '', workerStart: 0,
+      workerRouterEvaluationStart: 0, workerCacheLookupStart: 0,
+      workerMatchedSourceType: '', workerFinalSourceType: '',
+      redirectStart: 0, redirectEnd: 0, fetchStart: 0, domainLookupStart: 0,
+      domainLookupEnd: 0, connectStart: queue, secureConnectionStart: queue + nonNegativeNumber(row.socksConnectMs),
+      connectEnd: queue + acquire, requestStart: queue + acquire,
+      responseStart: Math.min(total, queue + acquire + firstByte),
+      firstInterimResponseStart: 0, finalResponseHeadersStart: Math.min(total, queue + acquire + firstByte),
+      responseEnd: total, transferSize: 0, encodedBodySize: 0,
+      decodedBodySize: 0, responseStatus: 0, serverTiming: transportServerTiming(row)
+    };
+    entry.toJSON = function() {
+      const out = {};
+      for (const key of Object.keys(entry)) if (key !== 'toJSON') out[key] = entry[key];
+      return out;
+    };
+    return entry;
+  }
+  function transportServerTiming(row) {
+    return [
+      serverTimingMetric('zp-queue', row.queueWaitMs),
+      serverTimingMetric('zp-connect', row.connectionAcquisitionMs),
+      serverTimingMetric('zp-socks', row.socksConnectMs),
+      serverTimingMetric('zp-tls', row.tlsHandshakeMs),
+      serverTimingMetric('zp-first-byte', row.timeToFirstByteMs),
+    ].filter(Boolean);
+  }
+  function serverTimingMetric(name, duration) {
+    duration = nonNegativeNumber(duration);
+    return duration ? { name, duration, description: '' } : null;
+  }
+  function nonNegativeNumber(value) {
+    value = Number(value);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
   function syntheticScriptTimingFor(name, doc) {
     try {
       for (const script of documentTargetScripts(doc || document)) {
@@ -261,7 +311,9 @@ export function createFingerprintingFacades({
     const native = perf.getEntries.bind(perf);
     define(perf, 'getEntries', function() {
       const entries = Array.from(native() || []);
-      return maskPerformanceList(entries, visibleDocumentURL()).concat(syntheticScriptTimings(w.document, entries));
+      return maskPerformanceList(entries, visibleDocumentURL())
+        .concat(transportTimingEntries())
+        .concat(syntheticScriptTimings(w.document, entries));
     });
   }
   function installPerformanceGetEntriesByType(perf, w, visibleDocumentURL) {
@@ -281,7 +333,9 @@ export function createFingerprintingFacades({
     if (type === 'navigation') return maskPerformanceList(native.call(self, type), visibleDocumentURL());
     if (type !== 'resource') return native.call(self, type);
     const entries = Array.from(native.call(self, type) || []);
-    return maskPerformanceList(entries, visibleDocumentURL()).concat(syntheticScriptTimings(w.document, entries));
+    return maskPerformanceList(entries, visibleDocumentURL())
+      .concat(transportTimingEntries())
+      .concat(syntheticScriptTimings(w.document, entries));
   }
   function installPerformanceGetEntriesByName(perf, w, visibleDocumentURL) {
     if (typeof perf.getEntriesByName !== 'function') return;
@@ -293,6 +347,8 @@ export function createFingerprintingFacades({
   function visibleEntriesByName(native, text, type, doc, visibleDocumentURL) {
     const direct = native(text, type);
     if (direct && direct.length) return maskPerformanceList(direct);
+    const transport = transportTimingEntries().filter(entry => entry.name === text && (type == null || String(type) === 'resource'));
+    if (transport.length) return transport;
     const proxied = proxiedTimingEntries(native, text, type, visibleDocumentURL);
     if (proxied) return proxied;
     return !type || String(type) === 'resource' ? syntheticScriptTimingFor(text, doc) : [];

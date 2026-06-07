@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ZeroProxy Webpack Dynamic Chunk Fixture</title>
+<main id="webpack-root">waiting</main>
+<script>
+  window.__webpack_public_path__ = './';
+  const script = document.createElement('script');
+  script.src = window.__webpack_public_path__ + 'webpack-chunk.js';
+  script.onload = () => window.fixtureWebpackChunk(document.getElementById('webpack-root'));
+  script.onerror = () => { document.getElementById('webpack-root').textContent = 'chunk failed'; };
+  document.head.appendChild(script);
+</script>

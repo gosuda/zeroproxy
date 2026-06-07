@@ -65,6 +65,18 @@
   }
 
   function rewriteScriptOutcome(source, options = {}) {
+    const first = attemptRewriteScript(source, options);
+    if (!first.blocked) return first;
+    const recovery = [];
+    for (const variant of safeRewriteVariants(source, options, first.errorCode)) {
+      recovery.push(variant.kind);
+      const out = attemptRewriteScript(variant.source, Object.assign({}, options, variant.options || {}));
+      if (!out.blocked) return Object.assign(out, { recovery: { attempted: recovery, used: variant.kind } });
+    }
+    return Object.assign(first, recovery.length ? { recovery: { attempted: recovery, used: '' } } : {});
+  }
+
+  function attemptRewriteScript(source, options) {
     try {
       const out = rewriteScriptCall(source, options);
       if (out && out.ok && typeof out.code === 'string') return { blocked: false, code: out.code, errorCode: '' };
@@ -72,6 +84,24 @@
     } catch (err) {
       return { blocked: true, code: blockSource(), errorCode: rewriteFailureCode(err) };
     }
+  }
+
+  function safeRewriteVariants(source, options, errorCode) {
+    if (errorCode !== 'PARSE_FAILED') return [];
+    const text = String(source || '');
+    const out = [];
+    if (text.charCodeAt(0) === 0xfeff) out.push({ kind: 'strip-bom', source: text.slice(1) });
+    if ((options.kind || 'classic') === 'classic') {
+      const htmlCommentSafe = normalizeClassicHTMLComments(text);
+      if (htmlCommentSafe !== text) out.push({ kind: 'classic-html-comment', source: htmlCommentSafe });
+    }
+    return out;
+  }
+
+  function normalizeClassicHTMLComments(source) {
+    return String(source || '')
+      .replace(/^(\s*)<!--/, '$1//<!--')
+      .replace(/(^|\n)(\s*)-->/g, '$1$2//-->');
   }
 
   function rewriteFunctionBody(source, params, targetUrl, controlPrefix) {

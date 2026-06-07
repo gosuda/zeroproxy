@@ -1,0 +1,77 @@
+[
+  {
+    "id": "redirect-chain-set-cookie",
+    "priority": "p0",
+    "surface": "redirect chain cookies",
+    "probes": [
+      "Set-Cookie on 30x response",
+      "final request Cookie header",
+      "document.cookie visibility after final load"
+    ],
+    "redaction": ["cookie names only", "value length bucket", "SameSite enum"],
+    "existingNeedles": ["Set-Cookie", "Cookie", "documentCookieString"]
+  },
+  {
+    "id": "document-cookie-network-cookie",
+    "priority": "p0",
+    "surface": "document.cookie vs network jar",
+    "probes": [
+      "document.cookie setter",
+      "document.cookie getter",
+      "subsequent runtime fetch Cookie header",
+      "HttpOnly invisibility"
+    ],
+    "redaction": ["cookie names only", "HttpOnly boolean", "value length bucket"],
+    "existingNeedles": ["installCookieSync", "ZP_COOKIE_SYNC", "documentCookieString"]
+  },
+  {
+    "id": "samesite-lax-strict-none",
+    "priority": "p0",
+    "surface": "SameSite variants",
+    "probes": [
+      "SameSite=Lax top-level navigation",
+      "SameSite=Strict cross-site subresource",
+      "SameSite=None; Secure iframe/runtime fetch"
+    ],
+    "redaction": ["SameSite enum", "secure boolean", "blocked reason bucket"],
+    "existingNeedles": ["normalizeSameSite", "SameSite", "Secure"]
+  },
+  {
+    "id": "iframe-cookie-visibility",
+    "priority": "p1",
+    "surface": "frame cookie partition visibility",
+    "probes": [
+      "ordinary iframe document.cookie",
+      "srcdoc child cookie denial",
+      "same-target iframe storage sharing"
+    ],
+    "redaction": ["frame class", "cookie names only"],
+    "existingNeedles": ["frameWindowFacades", "installDocumentAccessors", "srcdoc"]
+  },
+  {
+    "id": "storage-sharing-reload-popup-frame",
+    "priority": "p1",
+    "surface": "localStorage/sessionStorage sharing",
+    "probes": [
+      "reload persistence",
+      "popup opener partition",
+      "same-target frame partition",
+      "cross-target isolation"
+    ],
+    "redaction": ["storage key class", "value length bucket"],
+    "existingNeedles": ["installStorageFacades", "localStorage", "sessionStorage"]
+  },
+  {
+    "id": "cookie-failure-telemetry",
+    "priority": "p1",
+    "surface": "redacted diagnostics",
+    "probes": [
+      "bad SameSite syntax",
+      "blocked insecure SameSite=None",
+      "oversized cookie",
+      "domain mismatch"
+    ],
+    "redaction": ["no cookie values", "domain class only", "error bucket"],
+    "existingNeedles": ["zp.failure.telemetry.v1", "redaction"]
+  }
+]

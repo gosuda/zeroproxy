@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ZeroProxy Angular Zone Timer Fixture</title>
+<button id="zone-button" data-fixture="zone-button">zone pending</button>
+<script src="https://unpkg.com/zone.js@0.14.10/bundles/zone.umd.min.js"></script>
+<script>
+  Zone.current.fork({ name: 'fixture-zone' }).run(() => {
+    const button = document.getElementById('zone-button');
+    button.addEventListener('click', () => setTimeout(() => { button.textContent = 'zone clicked'; }, 0));
+    setTimeout(() => { button.textContent = 'zone ready'; }, 0);
+  });
+</script>

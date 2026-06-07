@@ -694,6 +694,32 @@ test('HTTP script rewriter reports redacted fail-close classifications', () => {
   assert.equal(JSON.stringify(unavailableOutcome).includes(secret), false);
 });
 
+test('HTTP script rewriter retries safe parse-recovery variants before blocking', () => {
+  const calls = [];
+  const ctx = loadHTTPRewriterContext({
+    ready: true,
+    rewriteScript(source) {
+      calls.push(source);
+      if (String(source).startsWith('//<!--')) return { ok: true, code: 'location.href;' };
+      return { ok: false, errorCode: 'PARSE_FAILED' };
+    },
+    blockSource() {
+      return 'blocked();';
+    },
+  });
+  const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome('<!--\nlocation.href;', {
+    kind: 'classic',
+  });
+  assert.equal(outcome.blocked, false);
+  assert.equal(outcome.code, 'location.href;');
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome.recovery)), {
+    attempted: ['classic-html-comment'],
+    used: 'classic-html-comment',
+  });
+  assert.equal(calls[0], '<!--\nlocation.href;');
+  assert.equal(calls[1], '//<!--\nlocation.href;');
+});
+
 test('HTTP script rewriter passes runtime context into module script rewriting', async () => {
   const ctx = loadHTTPRewriterContext(await loadRewriter());
   const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome(

@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ZeroProxy Next/Vite Module Graph Fixture</title>
+<link rel="modulepreload" href="./vite-entry.mjs">
+<script type="importmap">
+{
+  "imports": {
+    "fixture:chunk": "./vite-chunk.mjs"
+  }
+}
+</script>
+<main id="app">pending</main>
+<script type="module" src="./vite-entry.mjs"></script>

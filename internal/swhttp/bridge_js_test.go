@@ -31,6 +31,35 @@ func TestResponseToJSUsesNullBodyForNullBodyStatus(t *testing.T) {
 	}
 }
 
+func TestResponseToJSMovesTransportTimingToHiddenProperty(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     http.StatusText(http.StatusOK),
+		Header: http.Header{
+			"X-Zp-Transport-Timing": {`{"requestId":"req_test","queueWaitMs":1}`},
+			"Content-Type":          {"text/plain"},
+		},
+		Body: io.NopCloser(strings.NewReader("ok")),
+	}
+	v, err := ResponseToJS(context.Background(), resp, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Get("headers").Call("get", "X-Zp-Transport-Timing"); !got.IsNull() {
+		t.Fatalf("transport timing leaked as header: %q", got)
+	}
+	timing := v.Get("__zpTransportTiming")
+	if !timing.Truthy() || timing.Get("requestId").String() != "req_test" || timing.Get("queueWaitMs").Int() != 1 {
+		t.Fatalf("transport timing property = %s", timing)
+	}
+	keys := js.Global().Get("Object").Call("keys", v)
+	for i := 0; i < keys.Length(); i++ {
+		if keys.Index(i).String() == "__zpTransportTiming" {
+			t.Fatal("transport timing property is enumerable")
+		}
+	}
+}
+
 // buildFetchFacade constructs a minimal JS fetch-facade object (url/method/
 // headers/body/bodyUsed) the way the Service Worker hands one to RequestFromJS.
 // A nil body yields a null .body; a non-nil body becomes a real ReadableStream.

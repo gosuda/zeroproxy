@@ -91,11 +91,24 @@
     h.set('X-Content-Type-Options', 'nosniff');
     h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
     applyCORS(h, req);
-    return new Response(normalizedByteStream(resp.body), {
+    const out = new Response(normalizedByteStream(resp.body), {
       status: resp.status,
       statusText: resp.statusText,
       headers: h,
     });
+    copyTransportTiming(resp, out);
+    return out;
+  }
+
+  function copyTransportTiming(src, dst) {
+    if (!src || !src.__zpTransportTiming) return;
+    try {
+      Object.defineProperty(dst, '__zpTransportTiming', {
+        value: src.__zpTransportTiming,
+        enumerable: false,
+        configurable: false,
+      });
+    } catch {}
   }
 
   function safeError(code, status = 400, targetUrl = '') {

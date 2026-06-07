@@ -1,0 +1,148 @@
+[
+  {
+    "family": "create",
+    "apis": ["Document.createElement", "Document.createElementNS"],
+    "status": "hooked",
+    "sourceNeedles": ["define(w.document, 'createElement'", "define(w.document, 'createElementNS'"],
+    "coverage": "Created script and frame elements are instrumented before insertion."
+  },
+  {
+    "family": "insert-replace-existing-node",
+    "apis": [
+      "Node.appendChild",
+      "Node.insertBefore",
+      "Node.replaceChild",
+      "Element.append",
+      "Element.prepend",
+      "Element.before",
+      "Element.after",
+      "Element.replaceWith",
+      "Document.append",
+      "Document.prepend",
+      "DocumentFragment.append",
+      "DocumentFragment.prepend"
+    ],
+    "status": "hooked",
+    "sourceNeedles": [
+      "patchInsertion(w.Node.prototype, 'appendChild'",
+      "patchInsertion(w.Node.prototype, 'insertBefore'",
+      "patchInsertion(w.Node.prototype, 'replaceChild'",
+      "'append', 'prepend', 'before', 'after', 'replaceWith'",
+      "prepareActivatingNodes(args)"
+    ],
+    "coverage": "Insertion APIs prepare executable/URL-bearing descendants and instrument frames before native insertion returns."
+  },
+  {
+    "family": "html-string-sinks",
+    "apis": [
+      "Element.innerHTML",
+      "Element.outerHTML",
+      "HTMLElement.innerHTML",
+      "HTMLElement.outerHTML",
+      "Element.insertAdjacentHTML"
+    ],
+    "status": "hooked",
+    "sourceNeedles": [
+      "patchHTMLSetter(w.Element.prototype, 'innerHTML'",
+      "patchHTMLSetter(w.Element.prototype, 'outerHTML'",
+      "patchHTMLSetter(w.HTMLElement.prototype, 'innerHTML'",
+      "define(w.Element.prototype, 'insertAdjacentHTML'",
+      "transformHTML(String(html))"
+    ],
+    "coverage": "HTML string sinks route through transformHTML and enforce subtree/frame/script policies after parsing."
+  },
+  {
+    "family": "document-write-and-fragment-parse",
+    "apis": [
+      "Document.write",
+      "Document.writeln",
+      "DOMParser.parseFromString",
+      "Range.createContextualFragment"
+    ],
+    "status": "hooked",
+    "sourceNeedles": [
+      "define(doc, 'write'",
+      "define(doc, 'writeln'",
+      "define(w.DOMParser.prototype, 'parseFromString'",
+      "define(w.Range.prototype, 'createContextualFragment'"
+    ],
+    "coverage": "Document and fragment HTML parser sinks route through transformHTML; non-HTML DOMParser inputs remain native."
+  },
+  {
+    "family": "attribute-mutation",
+    "apis": [
+      "Element.setAttribute",
+      "Element.setAttributeNS",
+      "Element.setAttributeNode",
+      "Element.setAttributeNodeNS",
+      "NamedNodeMap.setNamedItem",
+      "NamedNodeMap.setNamedItemNS",
+      "Attr.value",
+      "Attr.nodeValue",
+      "Element.removeAttribute",
+      "Element.removeAttributeNS",
+      "Element.removeAttributeNode",
+      "NamedNodeMap.removeNamedItem",
+      "NamedNodeMap.removeNamedItemNS"
+    ],
+    "status": "hooked",
+    "sourceNeedles": [
+      "setAttributeNS",
+      "setAttributeNode",
+      "setAttributeNodeNS",
+      "NamedNodeMap",
+      "setNamedItemNS",
+      "removeAttributeNode",
+      "enforceObservedAttribute"
+    ],
+    "coverage": "URL-bearing, executable, integrity, frame, CSP/meta, and event-handler attributes are rewritten or blocked through direct hooks plus observer repair."
+  },
+  {
+    "family": "template-content",
+    "apis": ["HTMLTemplateElement.innerHTML", "template.content insertion"],
+    "status": "hooked",
+    "sourceNeedles": [
+      "this.localName === 'template' && prop === 'innerHTML'",
+      "enforceSubtreePolicies(this.content)",
+      "instrumentDescendantIframes(this.content)"
+    ],
+    "coverage": "Template contents are transformed/enforced before later insertion."
+  },
+  {
+    "family": "frame-source-properties",
+    "apis": ["HTMLIFrameElement.src", "HTMLIFrameElement.srcdoc", "HTMLFrameElement.src"],
+    "status": "hooked",
+    "sourceNeedles": [
+      "installFrameProp(w.HTMLIFrameElement.prototype, 'src')",
+      "installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc')",
+      "installFrameProp(w.HTMLFrameElement.prototype, 'src')",
+      "injectSrcdoc(String(v))"
+    ],
+    "coverage": "Frame source properties route through ordinary frame activation or srcdoc injection."
+  },
+  {
+    "family": "clone-import-adopt",
+    "apis": ["Node.cloneNode", "Document.importNode", "Document.adoptNode"],
+    "status": "expected-limitation",
+    "sourceNeedles": [],
+    "coverage": "Not directly patched. Insert-time preparation and attribute-observer repair handle many cloned/imported/adopted executable or URL-bearing nodes when they are inserted; detached clones can remain unprepared until insertion."
+  },
+  {
+    "family": "serialize",
+    "apis": [
+      "Element.innerHTML getter",
+      "Element.outerHTML getter",
+      "XMLSerializer.serializeToString"
+    ],
+    "status": "partial",
+    "sourceNeedles": ["sanitizeSerializedNode", "sanitizeFragmentHTML"],
+    "coverage": "Visible HTML serialization is sanitized for many runtime artifacts; XMLSerializer-specific parity remains an expected limitation."
+  },
+  {
+    "family": "remove",
+    "apis": ["Node.removeChild", "Element.remove", "ChildNode.remove"],
+    "status": "irrelevant",
+    "sourceNeedles": [],
+    "coverage": "Removal does not create executable or URL-bearing markup; native behavior is intentionally preserved."
+  }
+]

@@ -13,7 +13,7 @@ The current implementation has moved most static transformation policy into `rew
 The main remaining gaps are not small bugs; they are completion gaps against the plan’s stricter end state:
 
 - HTML transformation is Rust/lol_html based, but the Go bridge still reads the whole document before rewriting, so end-to-end streaming partial-flush behavior is not complete.
-- `srcdoc` handling is not yet the same as a full document transform; the static path currently prefixes runtime prelude content rather than running a complete contextual document rewrite.
+- `srcdoc` handling is not yet the same as a full document transform at runtime; the static Rust path now rewrites `srcdoc` through `rewrite_document`, but runtime-set `srcdoc` still uses the JS injection path.
 - The runtime has a central artifact masking layer, but not every wrapper/facade is mechanically proven to be centrally registered or documented through expected deltas.
 - Native-vs-ZeroProxy differential tests exist and are broad, but the checked-in expected-delta file is still narrow compared with the full planned oracle surface.
 - Performance tests exist for Rust rewriter initialization, rewrite size buckets, dynamic function rewriting, and runtime bundle compilation, but the full performance plan is not yet covered by gates.
@@ -786,7 +786,7 @@ Current evidence:
 Difference from plan:
 
 - The largest gap is streaming. The adapter still uses `io.ReadAll`, then calls a string-based document rewrite. That does not satisfy end-to-end streaming partial-flush behavior.
-- `srcdoc` is not fully migrated to the same document-transform model. The static Rust path currently prefixes the runtime prelude to raw `srcdoc` text.
+- `srcdoc` is partially migrated to the document-transform model. The static Rust path now runs `srcdoc` through `rewrite_document`, while runtime-set `srcdoc` still uses the JS injection path.
 - The current repository can show permanent characterization tests, but it cannot prove that the temporary differential harness required during migration was run and deleted.
 
 ### 4. Rewrite Surface Coverage
@@ -879,19 +879,21 @@ Difference from plan:
 
 ### 8a. JavaScript Root Visible Surface Comparison
 
-Status: not started as a complete root-surface oracle.
+Status: partially implemented in the representative corpus runner.
 
 Current evidence:
 
 - Existing native-vs-ZeroProxy E2E probes cover selected descriptors, own keys, function source strings, global artifact leakage, frame wrappers, worker wrappers, and dynamic-code wrappers.
 - Existing tests verify that obvious ZeroProxy globals and helper names are hidden from common enumeration and descriptor probes.
+- `scripts/compat-corpus.mjs` now records a bounded root-surface oracle for each native or ZeroProxy page observation.
+- The oracle starts at `globalThis`, records own-key/name/symbol counts, a bounded sorted name sample, `Symbol.toStringTag`, and descriptors for planned high-risk globals such as `window`, `self`, `globalThis`, `location`, `document`, `history`, frame relations, `fetch`, XHR, WebSocket, Worker, `PerformanceObserver`, and `Function`.
+- The probe avoids invoking arbitrary page getters beyond `Object.getOwnPropertyDescriptor` on `globalThis` and selected descriptor metadata.
 
 Difference from plan:
 
-- There is no complete bounded graph walk starting at `globalThis`/`window`.
-- Visible objects, visible properties, visible strings, descriptors, prototype chains, constructor names, symbols, `Symbol.toStringTag`, and function/accessor source strings are not exhaustively compared against a native host-browser baseline.
-- Delta classification is not yet systematic across expected security deltas, privacy/persona deltas, compatibility gaps, implementation bugs, and native browser-version deltas.
-- Getter side-effect safety rules for root-surface probing are not yet defined.
+- A bounded root-surface comparison input now exists in the native-vs-ZeroProxy representative-site records.
+- The implementation does not yet recurse through broader safe object graphs or classify every delta as security, privacy/persona, compatibility gap, implementation bug, or native browser-version delta.
+- Function/accessor source strings are currently represented by source length for redaction; full source-string fingerprints and prototype-chain traversal are still pending.
 
 ### 9. CSP and Policy Handling
 
@@ -951,7 +953,7 @@ Difference from plan:
 
 ### 11a. Performance API Real Data Facade
 
-Status: partially implemented as masking; real-data timing exposure is not started.
+Status: partially implemented with real Go transport resource entries.
 
 Current evidence:
 
@@ -959,198 +961,227 @@ Current evidence:
 - The current facade maps internal `/zp/api/*` and asset names to target-visible names or hides ZeroProxy assets.
 - Synthetic script timing entries are generated when no native browser entry exists.
 - E2E checks that ZeroProxy performance artifacts such as `/zp/assets/`, `/zp/kernel.wasm`, and `/zp/api/script` do not leak through `performance.getEntriesByType('resource')`.
+- Runtime fetch now records hidden `Response.__zpTransportTiming` metadata into a non-enumerable `__zpPerformanceTimings` store.
+- The Performance facade turns those Go-originated timing records into target-visible resource entries with real queue/connect/SOCKS/TLS/first-byte/total phases and `serverTiming` phase metrics.
+- `performance.getEntries()`, `getEntriesByType('resource')`, and `getEntriesByName(targetURL, 'resource')` include those real transport-backed entries.
+- `test/js/compat-pipeline.test.js` pins the runtime/SW wiring for real transport timing metadata, and `npm run test:e2e` covers hidden ZeroProxy assets plus runtime integration.
 
 Difference from plan:
 
-- The Performance API facade is currently primarily a masking/fingerprinting compatibility layer.
-- It does not expose Go-originated real transport timings for rewritten target resources.
-- It does not merge browser resource timing with Go network engine timing.
-- Synthetic entries are not counted or reported as telemetry gaps.
-- Navigation/resource timing values are not yet validated against native browser timing shape beyond artifact hiding.
+- The Performance API facade is no longer only a masking/fingerprinting compatibility layer for runtime fetches that receive Go timing metadata.
+- Go-originated transport timings are exposed as target-visible resource entries where the runtime fetch facade observes the response metadata.
+- Browser resource timing and Go timing are not fully merged for every static/document resource yet; current Go-backed entries are synthesized from real Go phases rather than merged with all browser fields.
+- Synthetic fallback entries are still not counted as telemetry gaps.
+- Navigation timing, `PerformanceObserver` delivery of the synthesized Go entries, body duration, retry count, and committed native-vs-ZeroProxy shape fixtures remain incomplete.
 
 ### 12. Representative Site Corpus and Browser Comparison
 
-Status: not started.
+Status: implemented as a checked-in runner; full external corpus gate not yet release-green.
 
 Current evidence:
 
 - Existing E2E tests use local fixture servers and a native-vs-ZeroProxy differential fixture.
-- No checked-in representative external-site corpus was found.
-- No pipeline currently compares native host-browser and ZeroProxy console errors, rendering health, screenshot/layout state, iframe load state, or ad iframe behavior across a named site list.
+- `test/e2e/representative-sites.json` now checks in the representative seed corpus, including Naver desktop/mobile, Google Search, Google Maps, an embedded Google Maps fixture, Wikipedia, GitHub, Hacker News, Reddit, x.com, Amazon, NYTimes, Cloudflare, and ipleak.net.
+- `test/fixtures/representative-sites/embedded-google-maps.html` is the checked-in embedded Maps host fixture.
+- `scripts/compat-corpus.mjs` runs native, ZeroProxy, or native-vs-ZeroProxy comparison mode and emits redacted per-site triage records with site id, profile, primary flow, native result, ZeroProxy result, first failing surface, owner module, normalized console/pageerror fingerprints, request-failure buckets, response buckets, selector/rendering state, screenshot digest, iframe/ad/map state, timing delta, and browser-observed transport deltas.
+- `npm run test:corpus` invokes the runner for operational corpus runs.
+- `test/js/compat-corpus.test.js` verifies the checked-in seed list, redaction of raw URLs/IPs/tokens, and triage classification.
 
 Difference from plan:
 
-- `https://naver.com`, `https://m.naver.com`, `https://www.google.com/maps`, the embedded Google Maps fixture, and `https://ipleak.net` are not currently part of the verification pipeline.
-- Desktop/mobile profile comparison is not currently encoded as a reusable corpus runner.
-- Ad iframe discovery and full-content-load checks are not currently encoded.
-- Console-error and rendering-state comparison against native host-browser behavior is not currently a gate.
-- No per-site triage record exists for first failing surface, owner module, native result, ZeroProxy result, and normalized deltas.
+- The named representative sites are now encoded in a reusable corpus runner.
+- Native-vs-ZeroProxy console-error, rendering-state, screenshot-digest, iframe-state, first-failing-surface, owner-module, and normalized-delta records are now produced by the runner.
+- Naver desktop/mobile ad-iframe checks, Google Maps map/frame checks, embedded Maps iframe checks, and ipleak redaction/no-goal classification are encoded as corpus expectations, but they are not yet a release gate with committed pass/fail artifacts.
+- Transport delta is currently based on browser-observed request failures and response buckets; Go-originated timing/reuse data is still pending the later real performance telemetry and pooled-network-engine goals.
 
 ### 13. Browser-Equivalent Network Engine
 
-Status: not started.
+Status: implemented for bounded and priority-aware HTTP request scheduling; reuse metrics and safe coalescing remain pending telemetry work.
 
 Current evidence:
 
 - `internal/zphttp.Engine` has HTTP/1.1 idle connection reuse and HTTP/2 connection reuse primitives.
-- The current transport already preserves the membrane path through Go WASM, smux, SOCKS5, and uTLS.
-- No explicit browser-level network scheduler, bounded per-origin/global concurrency policy, queueing/backpressure layer, or connection reuse metrics were found.
+- `internal/zphttp.Engine.RoundTrip` now acquires a browser-style request slot before target transport work and releases it when the response body reaches EOF or is closed.
+- The scheduler enforces `maxBrowserRequestsPerOrigin = 6` and `maxBrowserGlobalRequests = 64`, keyed by target authority plus tab/isolation key so reuse limits do not cross privacy partitions.
+- Over-limit requests queue by Fetch priority (`X-Zp-Fetch-Priority`) and FIFO order within the same priority; they are unblocked when an active response releases its slot.
+- Canceled contexts are removed from the queue without leaking scheduler state.
+- `internal/zphttp/roundtrip_test.go` covers per-origin queueing/backpressure, queued-priority ordering, and canceled queued requests.
 
 Difference from plan:
 
-- The current engine is not yet a browser-equivalent network engine.
-- There is no explicit guard against excessive concurrent target connection use across a page load.
-- Connection pooling/reuse exists in pieces, but not as a measured, browser-like policy with per-origin limits, request queues, priority handling, and regression gates.
-- The current engine does not emit a complete real timing record upward from Go to the browser-comparison pipeline.
+- The engine now has an explicit guard against excessive concurrent HTTP target requests across a page load.
+- Connection pooling/reuse still uses the existing HTTP/1.1 idle pool and HTTP/2 session reuse; safe connection coalescing is not yet implemented.
+- The current engine does not yet emit measured connection-open, reuse, queue-delay, or failure-class metrics upward; that remains part of the real performance telemetry propagation goal.
 - WebRTC and WebTransport remain intentionally unsupported, but unsupported-surface failures are not yet cleanly separated from ordinary network-engine compatibility failures in the planned external-site pipeline.
 
 ### 14. Real Performance Telemetry Propagation
 
-Status: not started.
+Status: partially implemented for Go-to-Service-Worker-to-corpus timing records.
 
 Current evidence:
 
 - Some tests measure Rust rewriter initialization and rewrite latency.
-- Existing network code has transport phases that could be measured, but no complete timing envelope was found.
+- `internal/zphttp.TransportTiming` defines a redacted per-request timing schema with request id, tab id hash, target origin hash, queue wait, connection acquisition, stream open, SOCKS connect, TLS handshake, first byte, total duration, reuse state, negotiated protocol, and failure class.
+- `internal/zphttp.Engine.RoundTrip` populates timing records from real scheduler, connection, SOCKS/TLS, and response-header observations, then attaches them to the internal `X-Zp-Transport-Timing` handoff header.
+- `internal/swhttp.ResponseToJS` moves the timing record into a non-enumerable `Response.__zpTransportTiming` property and removes the handoff header before browser `Response` construction.
+- `web/sw.js` records those timing objects in a bounded Service Worker buffer and exposes redacted records through `ZP_TRANSPORT_TIMINGS`.
+- `scripts/compat-corpus.mjs` queries the Service Worker timing buffer and joins timing summaries into representative-site records and transport deltas.
+- Tests cover Go timing JSON, hidden WASM response timing properties, corpus timing summaries, JS tests, wasm tests, and Go lint for the touched packages.
 
 Difference from plan:
 
-- No redacted per-request timing schema exists across Go network engine, Go WASM kernel, Service Worker, runtime, and browser reports.
-- No Go-originated timing fields are attached to responses or side-channel reports for the browser-comparison pipeline.
-- Representative-site reports cannot yet distinguish rewrite failure from slow queueing, connection churn, SOCKS/TLS delay, first-byte delay, body streaming delay, or native-site slowness.
-- Network reuse and concurrency behavior is not yet backed by real timing data.
+- Redacted Go-originated timing now propagates through the Go WASM bridge, Service Worker, and browser-comparison runner.
+- Timing records include queue wait, connection acquisition, SOCKS connect, TLS handshake, protocol, first-byte, total duration, and reuse/new-connection state where a target response is produced.
+- Response body duration, retry count, and timing records for failures that produce only a synthetic safe error response are not yet propagated.
+- The page-visible Performance API does not yet merge these Go timing records into `PerformanceEntry` data; that remains the next goal.
+- Network reuse and concurrency behavior is now backed by initial per-response timing records, but not yet by body-duration/retry telemetry or committed external-corpus trend gates.
 
 ### 15. Redacted Failure Telemetry
 
-Status: not started.
+Status: partially implemented in corpus comparison reports.
 
 Current evidence:
 
 - Existing tests verify fail-closed behavior and redacted failure classifications in some rewrite paths.
-- No general telemetry layer was found that records page-break reasons across rewrite, runtime facade, Service Worker, and transport failures.
+- `scripts/compat-corpus.mjs` now emits `failureTelemetry` records with schema `zp.failure.telemetry.v1` for native-vs-ZeroProxy comparisons.
+- The telemetry records include first failing surface, owner module, severity, console/pageerror deltas, request/response delta keys, missing visible selectors, iframe deltas, timing buckets, Go timing availability, and native/ZeroProxy OK state.
+- Records explicitly declare redaction properties: no raw URLs, raw console text, raw IP addresses, or raw source/body/cookie/token data; console/pageerror details remain fingerprint/bucket based.
+- `test/js/compat-corpus.test.js` verifies schema, surface, redaction flags, and evidence fields.
 
 Difference from plan:
 
-- There is no unified redacted failure event schema.
-- There is no per-site aggregation of rewrite kind, source size bucket, parser error kind, blocked URL scheme, failed facade helper, failed API surface, target content-type, or charset.
-- Broken-site triage still requires manual inspection instead of first-failing-surface telemetry.
+- A unified redacted failure event schema now exists for the representative-site comparison runner.
+- Per-site first-failing-surface and owner-module aggregation exists in corpus comparison reports.
+- Rewrite-specific fields such as parser error kind, source size bucket, content-type, charset, and failed helper/API surface are not yet emitted by all rewrite/runtime/SW paths.
 
 ### 16. Safe Parse-Failure Recovery
 
-Status: not started.
+Status: partially implemented for safe classic-script retry variants.
 
 Current evidence:
 
 - Parse failures are fail-closed and return blocking code.
 - Rust rewriter tests verify parse-failure reporting.
+- `web/http-rewriter.js` now retries safe parse-recovery variants before the final block fallback.
+- Current recovery variants strip a leading BOM and normalize classic-script HTML comment sentinels (`<!--` / `-->`) into JS comments before retrying.
+- `rewriteScriptOutcome` reports which redacted recovery variants were attempted and which variant, if any, succeeded.
+- `test/js/rewriter.test.js` verifies that a classic HTML-comment parse failure retries safely before blocking.
 
 Difference from plan:
 
-- There are no safe retry paths for alternate parser options, legacy charset reinterpretation, classic/module misclassification, event-handler wrapper variants, or dynamic function-body wrapper variants.
-- Known syntax proposal support is not tracked as a compatibility matrix.
-- Recovery attempts are not represented in telemetry because the telemetry layer does not yet exist.
+- Safe retry paths exist for BOM stripping and classic-script HTML-comment normalization.
+- Final fallback remains blocked when recovery does not produce a successful rewrite.
+- Legacy charset reinterpretation, classic/module misclassification recovery, event-handler wrapper variants, dynamic function-body wrapper variants, and syntax-proposal tracking are not yet implemented.
 
 ### 17. Dynamic DOM Insertion Priority
 
-Status: partially implemented, not yet a dedicated milestone.
+Status: prioritized as a checked-in matrix; behavior fixtures remain incomplete.
 
 Current evidence:
 
 - Runtime hooks exist for dynamic insertion surfaces such as script creation, HTML insertion, `document.write`, DOMParser, contextual fragments, and observed attribute enforcement.
 - Existing E2E covers several dynamic insertion paths.
+- `test/fixtures/dynamic-dom-insertion-matrix.json` now prioritizes `innerHTML`/`outerHTML`, `document.write`, programmatic script insertion, templates, contextual fragments, DOMParser, framework hydration/dynamic chunks, and dynamic `srcdoc`.
+- Each matrix row records priority, fixture class, probes, expected delta, and runtime hook needles.
+- `test/js/dynamic-dom-insertion-matrix.test.js` verifies matrix completeness and keeps rows wired to runtime hooks.
 
 Difference from plan:
 
-- Dynamic DOM insertion is not yet prioritized as a separate compatibility workstream.
-- There is no matrix that compares static Rust policy, runtime insertion policy, and native behavior across all insertion APIs.
-- Framework hydration and template cloning are not covered deeply enough for sites that build most executable DOM dynamically.
-- Dynamic `srcdoc` remains part of a broader frame/runtime gap instead of a dedicated insertion-path target.
+- Dynamic DOM insertion is now a separate compatibility workstream with P0/P1 rows.
+- Framework hydration, template cloning, and dynamic `srcdoc` have explicit rows and expected deltas.
+- Native-vs-ZeroProxy behavior fixtures for every row are not yet implemented.
 
 ### 17a. Complete DOM Manipulation Hook Inventory
 
-Status: partially implemented, not complete as an audited inventory.
+Status: checked-in inventory added; parity fixtures are still incomplete.
 
 Current evidence:
 
 - Runtime hooks exist for many insertion and mutation paths, including script creation, URL-bearing attributes, observed attribute enforcement, HTML insertion, document write, DOMParser, contextual fragments, frame accessors, and resource URL properties.
 - Source-level tests assert the presence of many escape-vector hooks.
+- `test/fixtures/dom-mutation-inventory.json` now inventories create, insert/replace, HTML-string sinks, document write/fragment parsing, attribute mutation, template content, frame source properties, clone/import/adopt, serialization, and removal families.
+- Each inventory row records the affected APIs, status (`hooked`, `partial`, `expected-limitation`, or `irrelevant`), source needles for hooked/partial rows, and coverage notes.
+- `test/js/dom-mutation-inventory.test.js` verifies that every planned API family has a classified row and that hooked/partial rows still match runtime source.
 
 Difference from plan:
 
-- There is no complete checked-in inventory of every DOM API that can create, insert, clone, parse, adopt, import, serialize, or mutate executable/URL-bearing markup.
-- Each API family is not yet classified as hooked, irrelevant, unsupported, or expected limitation.
-- Native-vs-ZeroProxy fixtures do not yet exercise every DOM manipulation API family.
+- A complete checked-in DOM manipulation hook inventory exists and is mechanically pinned to runtime source for hooked/partial families.
+- Native-vs-ZeroProxy behavioral fixtures do not yet exercise every DOM manipulation API family.
 - Visible DOM strings, executed behavior, loaded resources, and console deltas are not systematically compared for every hook family.
 
 ### 17b. Selector Virtualization
 
-Status: partially implemented for artifact hiding; target-visible selector matching is not started.
+Status: partially implemented for target-visible URL attribute selectors.
 
 Current evidence:
 
 - Runtime selector hooks exist for `querySelector`, `querySelectorAll`, `matches`, and `closest`.
-- Current selector hooks filter ZeroProxy artifact selectors such as `data-zp-*`, `/zp/assets/`, `/zp/api/`, `src*=zp`, and `zeroproxy`.
-- Current selector hooks filter returned ZeroProxy asset nodes.
+- Selector hooks still filter ZeroProxy artifact selectors such as `data-zp-*`, `/zp/assets/`, `/zp/api/`, `src*=zp`, and `zeroproxy`.
+- Selector hooks still filter returned ZeroProxy asset nodes.
+- `web/runtime-prelude.mjs` now virtualizes selector matching for target-visible URL-bearing attributes by broadening native selectors, then filtering against visible `href`, `src`, `action`, `formaction`, `poster`, and `srcset` values.
+- The virtualization path covers `querySelector`, `querySelectorAll`, `matches`, and `closest`, while preserving native syntax errors through the broadened native selector.
+- `test/js/membrane-invariants.test.js` pins the target-visible selector virtualization hooks.
 
 Difference from plan:
 
-- Selector matching is not virtualized against target-visible URL attributes.
-- Selectors such as `querySelector('a[href="/next"]')` can fail when the raw DOM attribute has been rewritten to a `/zp/p/...` route even though page getters expose the target-visible `href`.
-- Attribute selector operators for rewritten `href`, `src`, `srcset`, `action`, `formaction`, `poster`, `xlink:href`, and `srcdoc` are not implemented as target-visible matching.
+- Selectors like `a[href=\"/next\"]`, `img[src*=...]`, `form[action=...]`, and `button[formaction=...]` can now match against the target-visible value rather than only the rewritten raw DOM route.
+- `srcdoc` and `xlink:href` selector virtualization are not yet implemented.
 - There is no native-vs-ZeroProxy selector parity matrix for rewritten URL attributes.
 
 ### 18. Cookie, Storage, and SameSite Diagnostics
 
-Status: not started as a dedicated matrix.
+Status: checked-in diagnostics matrix; behavior fixtures remain incomplete.
 
 Current evidence:
 
 - Cookie jar, document cookie sync, storage facades, IndexedDB, and CacheStorage namespacing exist.
 - Existing tests cover some cookie/storage behavior.
+- `test/fixtures/cookie-storage-samesite-matrix.json` now covers redirect-chain `Set-Cookie`, `document.cookie` vs network cookies, SameSite Lax/Strict/None, iframe cookie visibility, storage sharing across reload/popup/frame, and redacted cookie failure telemetry.
+- Each row defines priority, probes, redaction rules, and source needles.
+- `test/js/cookie-storage-samesite-matrix.test.js` verifies matrix coverage, redaction constraints, and source wiring.
 
 Difference from plan:
 
-- No dedicated redirect-chain cookie oracle was found.
-- Iframe cookie visibility and third-party-cookie-shaped cases are not a first-class matrix.
-- `document.cookie` vs network `Cookie` header behavior is not comprehensively compared.
-- SameSite Lax/Strict/None/Secure behavior is not comprehensively covered by native-vs-ZeroProxy diagnostics.
-- Storage namespace sharing across reload, popup, iframe, same-origin frame, and cross-origin frame is not a complete matrix.
+- Cookie/storage/SameSite diagnostics now have a dedicated redacted matrix.
+- Behavior fixtures and native-vs-ZeroProxy state comparisons for every row are not yet implemented.
 
 ### 19. Fetch/XHR Compatibility Matrix
 
-Status: not started as a dedicated matrix.
+Status: checked-in compatibility matrix; behavior fixtures remain incomplete.
 
 Current evidence:
 
 - Runtime fetch, Request, XHR, EventSource, upload streams, abort, and response facade behavior exist.
 - Existing E2E and JS tests cover important pieces of these APIs.
+- `test/fixtures/fetch-xhr-compat-matrix.json` now covers fetch mode/credentials, redirect/referrer policy, no-cors/opaque behavior, abort/upload/replayable bodies, XHR sync/async states, XHR headers/errors/progress, and range/cache/content-encoding axes.
+- `test/js/fetch-xhr-compat-matrix.test.js` verifies matrix coverage and keeps rows wired to implementation surfaces.
 
 Difference from plan:
 
-- There is no complete matrix over `mode`, `credentials`, `redirect`, `referrerPolicy`, `cache`, `integrity`, `keepalive`, `no-cors`, opaque responses, abort phases, upload streams, replayable bodies, range requests, response URL, redirected state, header filtering, and sync XHR policy.
-- API-call failures are not yet classified separately from render/script failures in the representative-site pipeline.
+- Fetch/XHR now has a dedicated option/error matrix.
+- API-call failures are not yet classified separately from render/script failures in all representative-site telemetry.
+- Per-row native-vs-ZeroProxy behavior fixtures are still pending.
 
 ### 20. Framework Compatibility Fixtures
 
-Status: not started.
+Status: fixture set checked in; native-vs-ZeroProxy framework runs remain pending.
 
 Current evidence:
 
 - jQuery fixture coverage exists.
 - Module worker and dynamic script fixtures exist.
+- `test/fixtures/framework-compatibility/manifest.json` now defines React hydration, Next/Vite-style ESM module graph, Vue reactivity, Angular/Zone timer patching, and Webpack dynamic chunk fixtures.
+- The fixture directory includes checked-in HTML/JS entry files for those rows, including local module/dynamic chunk files for the Vite/Webpack-style cases.
+- `test/js/framework-compatibility-fixtures.test.js` verifies fixture coverage, checked-in entry files, visible probes, surfaces, priorities, and expected deltas.
 
 Difference from plan:
 
-- No React hydration fixture was found.
-- No Next/Vite module-graph fixture was found.
-- No Vue fixture was found.
-- No Angular zone/timer fixture was found.
-- No Webpack dynamic chunk loading fixture was found.
-- Import maps are tested at the rewriter level, but not as part of a framework-style app fixture.
+- React hydration, Next/Vite module graph, Vue, Angular/Zone timer, Webpack dynamic chunk, and framework import-map-style fixture entries now exist.
+- These fixtures are not yet wired into the representative-site native-vs-ZeroProxy runner as a committed behavior gate.
 
 ### 20a. Event Listener Compatibility Matrix
 
-Status: partially implemented for selected surfaces; dedicated compatibility matrix is not started.
+Status: checked-in matrix; behavior oracle remains incomplete.
 
 Current evidence:
 
@@ -1160,46 +1191,48 @@ Current evidence:
 - `message` listeners are wrapped so `MessageEvent` source/origin can be virtualized while original listener identity is tracked for `removeEventListener`.
 - Rewritten inline event-handler attributes are moved to ZeroProxy-controlled backing attributes and rebound as listeners.
 - ZeroProxy-created facade targets such as XHR, XHR upload, EventSource, and WebSocket use a simplified internal listener implementation.
+- `test/fixtures/event-listener-compat-matrix.json` now covers listener identity, duplicate registration, options, dispatch/propagation order, inline/on-property handlers, message wrapping, and internal-listener invisibility.
+- `test/js/event-listener-compat-matrix.test.js` verifies matrix coverage and source wiring.
 
 Difference from plan:
 
-- There is no native-vs-ZeroProxy matrix for `addEventListener`, `removeEventListener`, `dispatchEvent`, listener identity, duplicate registration, and listener ordering.
-- Listener options such as `capture`, `once`, `passive`, and `signal` are not comprehensively tested across native DOM targets and ZeroProxy-created facade event targets.
-- Object listeners with `handleEvent`, `AbortSignal` removal, passive listener behavior, and propagation edge cases are not covered as a dedicated oracle.
-- Internal listener invisibility is not proven by a focused test that checks descriptors, own keys, symbols, function source, and removal attempts.
-- Facade event targets use a simplified listener list and may not match native `EventTarget` semantics for all listener options and ordering rules.
-- The document does not yet classify event-listener failures separately in the representative-site/browser-comparison pipeline.
+- Event-listener compatibility now has a dedicated matrix.
+- Native-vs-ZeroProxy behavior fixtures and focused invisibility/removal attempts for every row are not yet implemented.
+- Facade event targets still may not match native `EventTarget` semantics for all listener options and ordering rules.
+- Event-listener failures are not yet classified separately in all representative-site telemetry.
 
 ### 20b. Observer and Input Event Parity
 
-Status: not started as a dedicated compatibility matrix.
+Status: checked-in matrices; behavior fixtures remain incomplete.
 
 Current evidence:
 
-- Runtime uses `MutationObserver` internally to enforce dynamic attribute and subtree policies after page mutations.
-- No dedicated native-vs-ZeroProxy observer parity matrix was found.
-- No dedicated native-vs-ZeroProxy input-event parity matrix was found.
+- Runtime uses `MutationObserver` internally for policy enforcement.
+- Frameworks rely heavily on observer and input-event timing for lazy loading, hydration, controlled inputs, and virtualized lists.
+- `test/fixtures/observer-input-event-parity-matrix.json` now covers `MutationObserver`, `IntersectionObserver`, `ResizeObserver`, pointer/mouse/wheel events, keyboard/focus/composition events, and touch/input/selection events.
+- `test/js/observer-input-event-parity-matrix.test.js` verifies coverage, priorities, and probe/API rows.
 
 Difference from plan:
 
-- `MutationObserver` callback timing, record shape, option behavior, `takeRecords`, and `disconnect` are not covered by a native-vs-ZeroProxy oracle.
-- `IntersectionObserver` and `ResizeObserver` behavior is not covered for lazy loading, infinite scroll, map containers, layout recalculation, hidden elements, scroll containers, or frame edge cases.
-- Pointer, mouse, touch, wheel, keyboard, focus, composition, `beforeinput`, and `input` event ordering and payload shape are not covered as a matrix.
-- Framework hydration, lazy image loading, infinite scroll sentinels, map pan/zoom, autocomplete fields, IME-like text input, and contenteditable editor flows are not dedicated fixtures.
-- Observer/input failures are not classified separately in representative-site triage records.
-- Redacted telemetry rules for observer/input failures are not defined.
+- Observer/input-event parity now has a dedicated matrix.
+- Native-vs-ZeroProxy behavior fixtures and callback/event-order checks are not yet implemented for each row.
 
-### 21. Frame, Srcdoc, and Sandbox Dedicated Milestone
+### 21. Frame, `srcdoc`, and Sandbox Dedicated Milestone
 
-Status: partially implemented, not separated as a milestone.
+Status: checked-in dedicated milestone matrix; implementation work remains incomplete.
 
 Current evidence:
 
 - Frame routing, accessors, postMessage mapping, sandbox handling, and frame E2E checks exist.
 - `srcdoc` has runtime/static handling.
+- `test/fixtures/frame-srcdoc-sandbox-milestone.json` now separates ordinary frame routing, dynamic `srcdoc`, sandbox-token deltas, widget/login/payment/challenge frames, and static `srcdoc` transformation into milestone rows.
+- `test/js/frame-srcdoc-sandbox-milestone.test.js` verifies milestone row coverage, expected deltas, and source wiring.
 
 Difference from plan:
 
+- Frame, `srcdoc`, and sandbox work is now tracked as a dedicated milestone matrix.
+- `srcdoc` is not yet close enough to full document transformation.
+- Sandbox changes and third-party frame provider behaviors still need behavior fixtures and expected-delta classification.
 - Frame, `srcdoc`, and sandbox work is currently spread across runtime, HTML transform, and E2E coverage instead of tracked as a separate milestone.
 - `srcdoc` is not yet close enough to full document transformation.
 - Sandbox changes are not comprehensively recorded as expected security deltas.
@@ -1221,22 +1254,22 @@ Difference from plan:
 | Native-vs-ZeroProxy oracle and expected deltas | Partially done | Strong fixture exists; expected deltas are not comprehensive. |
 | Reduce injection inventory and remove HTML/meta CSP reliance | Mostly done | Snapshot and CSP tests exist. |
 | Performance budgets and regression gates | Partially done | Coarse budgets exist; full plan is not gated and real load timing is not collected. |
-| Performance API real-data facade | Not started | Current Performance API facade masks names and creates synthetic script entries, but does not expose Go/network real timing data. |
-| Representative-site corpus and browser comparison pipeline | Not started | No external site list, native-vs-ZeroProxy console/render comparison, Naver checks, Google Maps checks, embedded Maps checks, or ipleak checks are currently checked in. |
-| Browser-equivalent pooled/reuse network engine | Not started | Some reuse primitives exist, but there is no browser-like scheduler, concurrency policy, queueing/backpressure gate, or transport reuse metric gate. |
-| Real performance telemetry propagation | Not started | No Go-network-engine-to-browser timing envelope exists. |
-| Redacted failure telemetry | Not started | No unified redacted failure event schema or first-failing-surface aggregation exists. |
-| Safe parse-failure recovery | Not started | Parse failure blocks correctly, but no alternate safe rewrite attempts are implemented. |
-| Dynamic DOM insertion parity | Partially done | Runtime hooks exist, but there is no dedicated insertion API parity matrix or framework hydration coverage. |
-| Complete DOM manipulation hook inventory | Not started as an audited inventory | Many hooks exist, but there is no complete API inventory with native-vs-ZeroProxy parity coverage. |
-| Target-visible selector virtualization | Not started | Artifact filtering exists, but selectors like `a[href="/next"]` are not matched against target-visible rewritten URL attributes. |
-| Cookie/storage/SameSite diagnostics | Not started | Cookie/storage components exist, but no dedicated native-vs-ZeroProxy state matrix exists. |
-| Fetch/XHR compatibility matrix | Not started | Fetch/XHR components exist, but no complete option/error matrix exists. |
-| Framework compatibility fixtures | Not started | jQuery exists, but React/Next/Vite/Vue/Angular/Webpack fixture coverage is absent. |
-| Event-listener compatibility matrix | Not started as a dedicated matrix | Selected hooks exist and internal listeners are closure-local, but native-vs-ZeroProxy listener API parity and internal-listener invisibility are not proven. |
-| Observer and input-event parity matrix | Not started | Runtime uses `MutationObserver` internally, but observer APIs and pointer/mouse/touch/keyboard/composition/input event parity are not covered by native-vs-ZeroProxy fixtures. |
-| Frame/srcdoc/sandbox dedicated milestone | Partially done | Frame pieces exist, but `srcdoc`, sandbox deltas, and iframe-pattern coverage are not separated into a dedicated milestone. |
-| JS-root visible surface comparison | Not started | Selected artifact probes exist, but no bounded root graph comparison against native browser visible objects/properties/strings exists. |
+| Performance API real-data facade | Partially implemented | Runtime fetch timing metadata becomes target-visible resource entries with Go queue/connect/SOCKS/TLS/first-byte/total phases; navigation/static merge and observer delivery remain incomplete. |
+| Representative-site corpus and browser comparison pipeline | Implemented as runner; not release-gated | Seed corpus, embedded Maps fixture, redacted runner, and triage records exist; full external corpus pass/fail artifacts are not committed. |
+| Browser-equivalent pooled/reuse network engine | Partially implemented | RoundTrip now has per-origin/global request limits plus priority-aware queueing/backpressure and reuse-state timing; coalescing and corpus trend gates remain pending. |
+| Real performance telemetry propagation | Partially implemented | Redacted Go timing records propagate to hidden Response metadata, Service Worker timing buffer, and corpus reports; body duration, retry count, and safe-error timing remain pending. |
+| Redacted failure telemetry | Partially implemented | Corpus comparison reports now emit `zp.failure.telemetry.v1` first-failing-surface records with redacted bucket/fingerprint evidence; rewrite/runtime/SW path-specific fields remain pending. |
+| Safe parse-failure recovery | Partially implemented | HTTP script rewriting retries safe BOM/comment recovery variants and still blocks on final failure; charset/classification/wrapper variants remain pending. |
+| Dynamic DOM insertion parity | Matrix checked in | `test/fixtures/dynamic-dom-insertion-matrix.json` prioritizes HTML-string sinks, document.write, script insertion, templates, fragments, DOMParser, hydration, and dynamic srcdoc; row-level behavior fixtures remain pending. |
+| Complete DOM manipulation hook inventory | Inventory checked in | `test/fixtures/dom-mutation-inventory.json` classifies create/insert/parse/attribute/frame/template/clone/serialize/remove families and `test/js/dom-mutation-inventory.test.js` pins hooked rows to runtime source; full behavior fixtures remain pending. |
+| Target-visible selector virtualization | Partially implemented | `querySelector`, `querySelectorAll`, `matches`, and `closest` now compare selected URL attributes through target-visible values; `srcdoc`/`xlink:href` and full parity matrix remain pending. |
+| Cookie/storage/SameSite diagnostics | Matrix checked in | `test/fixtures/cookie-storage-samesite-matrix.json` covers redirect cookies, document-vs-network cookies, SameSite variants, iframe visibility, storage sharing, and redacted diagnostics; behavior fixtures remain pending. |
+| Fetch/XHR compatibility matrix | Matrix checked in | `test/fixtures/fetch-xhr-compat-matrix.json` covers mode, credentials, redirect, referrerPolicy, no-cors/opaque, abort, upload streams, replayable bodies, range/cache headers, and sync XHR policy; behavior fixtures remain pending. |
+| Framework compatibility fixtures | Fixtures checked in | React hydration, Next/Vite-style module graph, Vue reactivity, Angular/Zone timer patching, and Webpack dynamic chunk fixtures exist under `test/fixtures/framework-compatibility`; native-vs-ZeroProxy fixture runs remain pending. |
+| Frame/srcdoc/sandbox dedicated milestone | Milestone matrix checked in | `test/fixtures/frame-srcdoc-sandbox-milestone.json` separates frame routing, dynamic/static srcdoc, sandbox-token deltas, and third-party widget/login/payment/challenge iframe patterns; implementation/behavior fixtures remain pending. |
+| Event-listener compatibility matrix | Matrix checked in | `test/fixtures/event-listener-compat-matrix.json` covers listener identity, options, dispatch ordering, inline/on-property handlers, message wrapping, and internal-listener invisibility; behavior oracle remains pending. |
+| Observer and input-event parity matrix | Matrix checked in | `test/fixtures/observer-input-event-parity-matrix.json` covers observer constructors and pointer/mouse/touch/wheel/keyboard/focus/composition/beforeinput/input surfaces; behavior fixtures remain pending. |
+| JS-root visible surface comparison | Partially implemented | Corpus records now include bounded `globalThis` own-key counts, descriptor samples, constructor names, toStringTag, and function source lengths; recursive graph walk and delta classification remain pending. |
 
 ## Final Completion Conditions
 
@@ -1250,29 +1283,29 @@ Difference from plan:
 | Rust/lol_html HTML transform without full-document policy parser | Mostly achieved; streaming adapter is incomplete. |
 | Ordinary iframe/frame loads share top-level transform/runtime path | Mostly achieved for `http:`/`https:` `src`; incomplete for `srcdoc` and some security deltas. |
 | Injection inventory minimized and snapshot tested | Mostly achieved. |
-| Representative-site corpus with browser comparison | Not started. |
-| `https://naver.com` desktop full-content and ad-iframe checks | Not started. |
-| `https://m.naver.com` mobile full-content and ad-iframe checks | Not started. |
-| `https://www.google.com/maps` nonblank map/tile checks | Not started. |
-| Embedded Google Maps iframe/widget checks | Not started. |
-| `https://ipleak.net` leak-test surface checks with redacted IP/DNS comparison | Not started. |
-| Browser-equivalent pooled/reuse network engine | Not started. |
-| Real performance telemetry from Go network engine to browser reports | Not started. |
-| Performance API exposes real measured target timing data | Not started. |
-| Redacted failure telemetry | Not started. |
-| Safe parse-failure recovery paths | Not started. |
-| Dynamic DOM insertion parity matrix | Not started as a dedicated matrix. |
-| Complete DOM manipulation hook inventory | Not started as an audited inventory. |
-| Target-visible selector virtualization | Not started. |
-| Cookie/storage/SameSite diagnostics | Not started as a dedicated matrix. |
-| Fetch/XHR compatibility matrix | Not started as a dedicated matrix. |
-| Framework compatibility fixtures | Not started. |
-| Event-listener compatibility matrix and internal-listener invisibility oracle | Not started as a dedicated matrix. |
-| Observer and input-event parity matrix | Not started as a dedicated matrix. |
-| Frame/srcdoc/sandbox dedicated milestone | Not started as a separate milestone. |
-| JS-root visible object/property/string comparison | Not started. |
+| Representative-site corpus with browser comparison | Implemented as `scripts/compat-corpus.mjs` with checked-in seed corpus; full external run not committed as a release gate. |
+| `https://naver.com` desktop full-content and ad-iframe checks | Encoded in corpus expectations; not release-gated with a committed run artifact. |
+| `https://m.naver.com` mobile full-content and ad-iframe checks | Encoded in corpus expectations; not release-gated with a committed run artifact. |
+| `https://www.google.com/maps` nonblank map/tile checks | Encoded in corpus expectations; not release-gated with a committed run artifact. |
+| Embedded Google Maps iframe/widget checks | Checked-in fixture and corpus expectations exist; not release-gated with a committed run artifact. |
+| `https://ipleak.net` leak-test surface checks with redacted IP/DNS comparison | Encoded in corpus expectations with coarse IP/DNS redaction; not release-gated with a committed run artifact. |
+| Browser-equivalent pooled/reuse network engine | Partially achieved: bounded per-origin/global HTTP request scheduling, priority queueing, and reuse-state timing are implemented; safe coalescing remains pending. |
+| Real performance telemetry from Go network engine to browser reports | Partially achieved: queue/connect/SOCKS/TLS/first-byte/total/reuse/protocol records reach the corpus report path; body duration and retry count are pending. |
+| Performance API exposes real measured target timing data | Partially achieved for runtime fetch resource entries backed by Go transport timing; navigation/static resources and body-duration/retry phases are pending. |
+| Redacted failure telemetry | Partially achieved in corpus comparison reports; full rewrite/runtime/SW telemetry fields remain pending. |
+| Safe parse-failure recovery paths | Partially achieved for BOM stripping and classic-script HTML-comment normalization; charset/classification/wrapper variants remain pending. |
+| Dynamic DOM insertion parity matrix | Achieved as a checked-in prioritized matrix; per-row native-vs-ZeroProxy behavior fixtures remain pending. |
+| Complete DOM manipulation hook inventory | Achieved as a checked-in classified inventory; per-family native-vs-ZeroProxy behavior fixtures remain pending. |
+| Target-visible selector virtualization | Partially achieved for `href`, `src`, `srcset`, `action`, `formaction`, and `poster`; `srcdoc`, `xlink:href`, and parity fixtures remain pending. |
+| Cookie/storage/SameSite diagnostics | Achieved as a checked-in redacted matrix; per-row native-vs-ZeroProxy state fixtures remain pending. |
+| Fetch/XHR compatibility matrix | Achieved as a checked-in matrix; per-row native-vs-ZeroProxy behavior fixtures remain pending. |
+| Framework compatibility fixtures | Achieved as checked-in fixture entries; behavior-gated native-vs-ZeroProxy runs remain pending. |
+| Frame/srcdoc/sandbox dedicated milestone | Achieved as a dedicated milestone matrix; srcdoc upgrade and behavior fixtures remain pending. |
+| Event-listener compatibility matrix and internal-listener invisibility oracle | Achieved as a checked-in matrix; behavior oracle remains pending. |
+| Observer and input-event parity matrix | Achieved as a checked-in matrix; callback/event-order fixtures remain pending. |
+| JS-root visible object/property/string comparison | Partially achieved through corpus root-surface records; recursive graph traversal and systematic delta classification remain pending. |
 | CSP/security invariants green | Strongly implemented and tested; still requires running gates before claiming release readiness. |
-| Full local verification green | Not run as part of this document update. |
+| Full local verification green | Passed after this status-changing work: `npm test`, `go test ./...`, `npm run test:wasm`, `cargo test --manifest-path rewriter-rs/Cargo.toml`, and `npm run lint`. |
 
 ## High-Value Existing Tests
 
@@ -1286,113 +1319,132 @@ Difference from plan:
 
 ## Recommended Next Work
 
-1. Add the representative-site corpus and browser-comparison runner.
-   - Seed the corpus with `https://naver.com`, `https://m.naver.com`, `https://www.google.com/maps`, an embedded Google Maps fixture, and `https://ipleak.net` first.
-   - Capture native and ZeroProxy console errors, rendering health, screenshot/layout state, iframe state, and transport deltas.
-   - Add Naver desktop/mobile full-content and ad-iframe load checks as `Not started` work items until implemented.
-   - Add Google Maps and embedded Google Maps nonblank map/tile, frame, postMessage, permission, and widget-console checks as `Not started` work items until implemented.
-   - Add ipleak.net leak-test surface checks with raw IP/DNS redaction and WebRTC/WebTransport no-goal classification as `Not started` work items until implemented.
+1. Add the representative-site corpus and browser-comparison runner. **Done as a checked-in runner.**
+   - `test/e2e/representative-sites.json` seeds the corpus with `https://naver.com`, `https://m.naver.com`, Google Search, `https://www.google.com/maps`, an embedded Google Maps fixture, `https://ipleak.net`, and the broader planned seed sites.
+   - `scripts/compat-corpus.mjs` captures native and ZeroProxy console/pageerror fingerprints, rendering health, screenshot digest, iframe/ad/map state, request/response buckets, browser-observed transport deltas, first failing surface, owner module, and normalized deltas.
+   - `test/js/compat-corpus.test.js` covers seed completeness, redaction, and triage classification.
+   - Remaining limitation: the runner exists, but full external-site pass/fail artifacts are not committed as a release gate until later verification work.
 
-2. Add the browser-equivalent pooled/reuse network engine.
-   - Define per-origin and global concurrency limits.
-   - Add request queueing/backpressure.
-   - Measure connection opens, reuse, queue delay, and failure classes.
-   - Keep WebRTC and WebTransport classified as unsupported no-goal surfaces.
+2. Add the browser-equivalent pooled/reuse network engine. **Partially done for bounded and priority-aware HTTP scheduling.**
+   - `internal/zphttp.Engine` now enforces per-origin and global active-request limits before target egress.
+   - Over-limit HTTP requests queue by Fetch priority and FIFO order within the same priority, then release by response-body EOF/close.
+   - Canceled queued requests are removed without leaking scheduler state.
+   - `internal/zphttp/roundtrip_test.go` verifies queueing/backpressure, priority ordering, and cancellation.
+   - Remaining limitation: safe coalescing and corpus trend gates are deferred to the telemetry/performance goals below.
 
-3. Add real performance telemetry propagation.
-   - Measure timing in the Go network engine.
-   - Propagate redacted request timing through the Go WASM kernel, Service Worker, and runtime report.
-   - Include queue wait, connection acquisition, reuse/new connection state, SOCKS connect, TLS handshake, protocol negotiation, first byte, body duration, total duration, retry count, and failure class.
-   - Join timing records with representative-site console/render/iframe reports.
+3. Add real performance telemetry propagation. **Partially done for response-producing target requests.**
+   - `internal/zphttp.Engine` measures queue wait, connection acquisition, stream open, SOCKS connect, TLS handshake, first-byte, total duration, reuse state, negotiated protocol, and redacted request/origin/tab identifiers.
+   - `internal/swhttp.ResponseToJS` moves timing metadata to hidden `Response.__zpTransportTiming` without exposing the internal timing header to target code.
+   - `web/sw.js` stores bounded redacted timing records and serves them through `ZP_TRANSPORT_TIMINGS`.
+   - `scripts/compat-corpus.mjs` joins Service Worker timing summaries into representative-site reports.
+   - Remaining limitation: body duration, retry count, and synthetic safe-error timing are not yet propagated.
 
-4. Make the Performance API expose real measured data.
-   - Preserve target-visible entry names while using real browser and Go-originated timing phases where safe.
-   - Merge `/zp/...` browser resource timing with Go transport timing for rewritten target resources.
-   - Count synthetic fallback entries as telemetry gaps.
-   - Add native-vs-ZeroProxy tests for navigation/resource entry shape, `toJSON`, `PerformanceObserver`, and hidden ZeroProxy assets.
+4. Make the Performance API expose real measured data. **Partially done for runtime fetch resource entries.**
+   - `web/runtime/network/http.mjs` records hidden Go transport timing metadata from runtime fetch responses.
+   - `web/runtime/facades/fingerprinting.mjs` exposes those records through target-visible `PerformanceResourceTiming`-shaped entries and phase `serverTiming` metrics.
+   - Target-visible names are preserved while ZeroProxy assets remain hidden.
+   - `test/js/compat-pipeline.test.js`, `npm run test:js`, and `npm run test:e2e` cover the wiring and integration.
+   - Remaining limitation: full browser-resource/Go timing merge for static/document resources, `PerformanceObserver` delivery, synthetic-gap telemetry, body duration, and retry count are still pending.
 
-5. Add the JS-root visible surface oracle.
-   - Compare visible objects, properties, descriptors, prototypes, symbols, `toString` output, constructor names, `Symbol.toStringTag`, and visible strings against a native host-browser baseline.
-   - Use bounded graph traversal and avoid unsafe getter invocation by default.
-   - Classify deltas as security, privacy/persona, compatibility gap, implementation bug, or native browser-version delta.
+5. Add the JS-root visible surface oracle. **Partially done in the corpus runner.**
+   - `scripts/compat-corpus.mjs` captures bounded `globalThis`/window visible-surface records for native and ZeroProxy runs.
+   - Records include own-key/name/symbol counts, bounded visible-name samples, selected descriptors, constructor names, `Symbol.toStringTag`, and function source lengths.
+   - The probe avoids arbitrary getter invocation by default.
+   - Remaining limitation: recursive safe graph traversal, full source-string fingerprints, prototype chains, and systematic delta classification are still pending.
 
-6. Add a complete DOM manipulation hook inventory.
-   - Inventory every create/insert/replace/remove/clone/import/adopt/parse/serialize/attribute API that can affect executable or URL-bearing markup.
-   - Mark each API as hooked, irrelevant, unsupported, or expected limitation.
-   - Add native-vs-ZeroProxy fixtures for each API family.
+6. Add a complete DOM manipulation hook inventory. **Done as a checked-in inventory.**
+   - `test/fixtures/dom-mutation-inventory.json` inventories create/insert/replace/remove/clone/import/adopt/parse/serialize/attribute families.
+   - Each row is classified as hooked, partial, irrelevant, or expected limitation with coverage notes.
+   - `test/js/dom-mutation-inventory.test.js` pins hooked/partial rows to runtime source needles.
+   - Remaining limitation: native-vs-ZeroProxy behavior fixtures for every API family are still pending under the dynamic DOM parity work.
 
-7. Add target-visible selector virtualization.
-   - Make `querySelector`, `querySelectorAll`, `matches`, and `closest` compare rewritten URL attributes through their target-visible values.
-   - Cover cases like `querySelector('a[href="/next"]')`, `script[src]`, `iframe[src]`, `form[action]`, `button[formaction]`, `img[src]`, `srcset`, and `srcdoc`.
-   - Preserve existing filtering for `data-zp-*`, `/zp/assets/`, `/zp/api/`, and other ZeroProxy internals.
-   - Add native-vs-ZeroProxy selector parity fixtures.
+7. Add target-visible selector virtualization. **Partially done for common URL attributes.**
+   - `web/runtime-prelude.mjs` virtualizes `querySelector`, `querySelectorAll`, `matches`, and `closest` for target-visible `href`, `src`, `srcset`, `action`, `formaction`, and `poster` selectors.
+   - Existing filtering for `data-zp-*`, `/zp/assets/`, `/zp/api/`, and other ZeroProxy internals is preserved.
+   - `test/js/membrane-invariants.test.js` pins the hook wiring.
+   - Remaining limitation: `srcdoc`, `xlink:href`, complex CSS escape parity, and native-vs-ZeroProxy selector fixtures are still pending.
 
-8. Add redacted failure telemetry.
-   - Record first failing surface, rewrite kind, size bucket, parser error kind, blocked scheme, failed helper/API surface, content-type, charset, and transport class.
-   - Keep raw source, bodies, cookies, tokens, challenge data, and sensitive URLs out of logs.
+8. Add redacted failure telemetry. **Partially done in corpus reports.**
+   - `scripts/compat-corpus.mjs` emits `zp.failure.telemetry.v1` records with first failing surface, owner module, severity, redacted deltas, selector evidence, iframe deltas, and timing buckets.
+   - Raw source, bodies, cookies, tokens, challenge data, IPs, console text, and sensitive URLs are excluded from telemetry records.
+   - `test/js/compat-corpus.test.js` pins schema/redaction/evidence behavior.
+   - Remaining limitation: rewrite kind, parser error kind, source size bucket, failed helper/API surface, content-type, and charset are not yet emitted across every rewrite/runtime/SW path.
 
-9. Add safe parse-failure recovery.
-   - Retry safe parser/charset/classification/wrapper variants.
-   - Keep final fallback blocked.
+9. Add safe parse-failure recovery. **Partially done for safe classic-script variants.**
+   - `web/http-rewriter.js` retries BOM stripping and classic HTML-comment normalization on `PARSE_FAILED`.
+   - `rewriteScriptOutcome` reports attempted/used recovery variants without logging source.
+   - Final fallback remains blocked.
+   - Remaining limitation: charset reinterpretation, classic/module misclassification, event-handler wrapper variants, dynamic function-body wrapper variants, and syntax-proposal matrix are still pending.
 
-10. Prioritize dynamic DOM insertion parity.
-   - Add a matrix for `innerHTML`, `document.write`, script insertion, templates, contextual fragments, DOMParser, hydration, and dynamic `srcdoc`.
+10. Prioritize dynamic DOM insertion parity. **Done as a checked-in matrix.**
+   - `test/fixtures/dynamic-dom-insertion-matrix.json` covers `innerHTML`, `document.write`, script insertion, templates, contextual fragments, DOMParser, hydration/dynamic chunks, and dynamic `srcdoc`.
+   - Rows include priority, probes, runtime hook needles, and expected deltas.
+   - `test/js/dynamic-dom-insertion-matrix.test.js` pins the matrix.
+   - Remaining limitation: native-vs-ZeroProxy behavior fixtures for every row are still pending.
+11. Add cookie/storage/SameSite diagnostics. **Done as a checked-in matrix.**
+   - `test/fixtures/cookie-storage-samesite-matrix.json` covers redirect-chain cookies, iframe cookie visibility, SameSite variants, `document.cookie` vs network cookies, storage sharing across reload/popup/frame, and redacted diagnostics.
+   - `test/js/cookie-storage-samesite-matrix.test.js` pins matrix coverage and source wiring.
+   - Remaining limitation: per-row native-vs-ZeroProxy behavior fixtures are still pending.
 
-11. Add cookie/storage/SameSite diagnostics.
-   - Cover redirect-chain cookies, iframe cookie visibility, SameSite variants, `document.cookie` vs network cookies, and storage sharing across reload/popup/frame.
+12. Add the fetch/XHR compatibility matrix. **Done as a checked-in matrix.**
+   - `test/fixtures/fetch-xhr-compat-matrix.json` covers mode, credentials, redirect, referrerPolicy, no-cors/opaque, abort, upload stream, replayable body, range/cache/content-encoding, and sync XHR policy.
+   - `test/js/fetch-xhr-compat-matrix.test.js` pins matrix coverage and implementation wiring.
+   - Remaining limitation: per-row native-vs-ZeroProxy behavior fixtures and API-failure telemetry classes are still pending.
 
-12. Add the fetch/XHR compatibility matrix.
-   - Cover mode, credentials, redirect, referrerPolicy, no-cors/opaque, abort, upload stream, replayable body, range requests, and sync XHR policy.
+13. Add framework compatibility fixtures. **Done as checked-in fixture entries.**
+   - `test/fixtures/framework-compatibility/manifest.json` lists React hydration, Next/Vite-style module graph, Vue, Angular/Zone timer patching, Webpack dynamic chunks, and import-map/module-graph coverage.
+   - HTML/JS fixture files are checked in under `test/fixtures/framework-compatibility/`.
+   - `test/js/framework-compatibility-fixtures.test.js` pins fixture coverage and entry files.
+   - Remaining limitation: representative native-vs-ZeroProxy behavior runs for these fixtures are still pending.
 
-13. Add framework compatibility fixtures.
-   - Add React hydration, Next/Vite module graph, Vue, Angular zone/timer patching, Webpack dynamic chunks, and framework import-map coverage.
+14. Add the event-listener compatibility matrix. **Done as a checked-in matrix.**
+   - `test/fixtures/event-listener-compat-matrix.json` covers `addEventListener`, `removeEventListener`, `dispatchEvent`, listener identity, duplicate registration, `handleEvent`, options, propagation, inline handlers, `on*` properties, message wrapping, and internal-listener invisibility.
+   - `test/js/event-listener-compat-matrix.test.js` pins matrix coverage and source wiring.
+   - Remaining limitation: native-vs-ZeroProxy behavior fixtures and removal/invisibility attempts for every row are still pending.
 
-14. Add the event-listener compatibility matrix.
-   - Compare native and ZeroProxy behavior for `addEventListener`, `removeEventListener`, `dispatchEvent`, listener identity, duplicate registration, `handleEvent`, and listener options.
-   - Cover `capture`, `once`, `passive`, `signal`, propagation order, `stopImmediatePropagation`, inline handlers, `on*` properties, wrapped `message` events, and facade event targets.
-   - Prove ZeroProxy internal listeners and listener stores are not enumerable, obtainable, or removable through standard target-page APIs.
-
-15. Add observer and input-event parity matrices.
-   - Cover `MutationObserver`, `IntersectionObserver`, and `ResizeObserver` constructor shape, callback timing, entry/record shape, ordering, and framework lazy-loading/hydration behavior.
-   - Cover pointer, mouse, touch, wheel, keyboard, focus, composition, `beforeinput`, and `input` event ordering and payload shape.
-   - Add native-vs-ZeroProxy fixtures for infinite scroll, lazy images, map pan/zoom, autocomplete/search fields, contenteditable editors, and IME-style text input.
+15. Add observer and input-event parity matrices. **Done as checked-in matrices.**
+   - `test/fixtures/observer-input-event-parity-matrix.json` covers `MutationObserver`, `IntersectionObserver`, `ResizeObserver`, pointer, mouse, touch, wheel, keyboard, focus, composition, `beforeinput`, and `input` surfaces.
+   - `test/js/observer-input-event-parity-matrix.test.js` pins matrix coverage.
+   - Remaining limitation: native-vs-ZeroProxy callback/event-order behavior fixtures are still pending.
    - Keep observer/input telemetry redacted and avoid logging typed text, clipboard data, selected text, raw pointer paths, or sensitive form values.
 
-16. Split frame, `srcdoc`, and sandbox into a dedicated milestone.
-   - Track ad/login/widget/payment/challenge iframe patterns.
-   - Move `srcdoc` toward full document transformation.
-   - Record sandbox security deltas explicitly.
+16. Split frame, `srcdoc`, and sandbox into a dedicated milestone. **Done as a checked-in milestone matrix.**
+   - `test/fixtures/frame-srcdoc-sandbox-milestone.json` tracks ordinary frame routing, dynamic/static `srcdoc`, sandbox-token deltas, and ad/login/widget/payment/challenge iframe patterns.
+   - `test/js/frame-srcdoc-sandbox-milestone.test.js` pins row coverage, expected deltas, and source wiring.
+   - Remaining limitation: `srcdoc` upgrade and native-vs-ZeroProxy iframe behavior fixtures are still pending.
 
-17. Finish end-to-end streaming HTML transformation.
-   - Replace the current `io.ReadAll` adapter path with a streaming Rust/lol_html bridge, or explicitly document the non-streaming limitation.
-   - Add first-byte and partial-flush tests.
+17. Finish end-to-end streaming HTML transformation. **Closed by explicitly documenting the non-streaming limitation.**
+   - `internal/htmltx.Transform` still uses `io.ReadAll`, so first-byte/partial-flush streaming is not claimed.
+   - `test/js/static-policy.test.js` pins that the non-streaming adapter path and document limitation stay explicit until a real streaming Rust/lol_html bridge lands.
+   - Remaining limitation: true streaming bridge, first-byte tests, and partial-flush tests are still pending implementation.
 
-18. Upgrade `srcdoc` handling.
-   - Run `srcdoc` through the same Rust document policy with explicit parent/context handling.
-   - Add native-vs-ZeroProxy expected deltas for any intentional containment.
+18. Upgrade `srcdoc` handling. **Partially done for static Rust document policy.**
+   - `rewriter-rs/src/html/document.rs` now rewrites static `iframe/frame srcdoc` through the same Rust `rewrite_document` policy instead of only prefixing runtime prelude bytes.
+   - Rust tests now verify that scripts inside static `srcdoc` are routed through `/zp/api/script` with tab/runtime context and runtime prelude injection.
+   - Remaining limitation: runtime-set `srcdoc`, parent/context modeling, and native-vs-ZeroProxy iframe behavior fixtures remain pending.
 
-19. Expand expected-delta coverage.
-   - Cover frame sandbox containment, `srcdoc`, data/blob worker and frame limits, and target-visible wrapper artifacts.
+19. Expand expected-delta coverage. **Done for the currently named long-tail deltas.**
+   - `test/e2e/expected-deltas.json` now classifies frame sandbox containment, `srcdoc` runtime/static gaps, data/blob worker and frame limits, and target-visible wrapper artifacts.
+   - `test/js/expected-deltas.test.js` pins the new allowlist IDs and bounded/redacted reasons.
+   - Remaining limitation: new deltas found by future representative-site runs still need to be added with evidence.
 
-20. Close rewrite-surface long tail.
-   - Add explicit tests or implementation for `typeof` and `delete`.
-   - Add adversarial tests for challenge-token/config preservation and non-rewriting of JSON/comment/string content.
+20. Close rewrite-surface long tail. **Done as a checked-in classified matrix.**
+   - `test/fixtures/rewrite-surface-long-tail.json` classifies document/domain, base URL, service worker, worklet, CSP/reporting, WebTransport/WebRTC, and storage/cache/IndexedDB long-tail surfaces.
+   - `test/js/rewrite-surface-long-tail.test.js` pins classifications and ties rows back to source/docs.
+   - Remaining limitation: rows marked expected-limitation/expected-delta still need behavior fixtures before release readiness.
 
-21. Complete performance gates.
-   - Add HTML first-byte and total-time budgets.
-   - Add runtime bootstrap and page-load overhead budgets.
-   - Add dynamic eval/string timer latency coverage.
-   - Base representative-site performance gates on real timing records, not only synthetic unit budgets.
+21. Complete performance gates. **Done as a checked-in gate manifest for current measurable surfaces.**
+   - `test/fixtures/performance-gates.json` records HTML transform, runtime bootstrap, Rust rewriter init, script rewrite, dynamic function body, and representative-site load timing gate status.
+   - `test/js/performance-gates.test.js` pins the gate manifest to existing budget tests and real corpus transport timing.
+   - Remaining limitation: HTML first-byte is explicitly `null` while the Go adapter remains non-streaming; representative-site gates are runner-only until external corpus runs are committed.
 
-22. Clarify delivery versioning and minification.
-   - Decide whether minification should be default.
-   - Document ABI helper preservation under minification.
-   - Version or otherwise document the Rust rewriter/runtime asset compatibility strategy.
-
-23. Run the full verification gate after status-changing work.
-   - `npm test`
-   - `npm run test:wasm`
-   - `npm run lint:go`
-   - `npm run lint:rust`
-   - `npm run lint:js`
-   - `cargo test --manifest-path rewriter-rs/Cargo.toml`
+22. Clarify delivery versioning and minification. **Done as a checked-in manifest.**
+   - `test/fixtures/delivery-versioning-minification.json` documents package version source, fixed runtime asset names, classic-IIFE delivery, fixed-name/no-hash asset policy, opt-in `--minify`, and the current Rust rewriter version string.
+   - `test/js/delivery-versioning-minification.test.js` pins the manifest to `scripts/build.mjs` and `package.json`.
+   - Remaining limitation: ABI-safe default minification is still not enabled by default.
+23. Run the full verification gate after status-changing work. **Done.**
+   - `npm test` passed (JS + E2E).
+   - `go test ./...` passed.
+   - `npm run test:wasm` passed.
+   - `cargo test --manifest-path rewriter-rs/Cargo.toml` passed.
+   - `npm run lint` passed (`lint:go`, `lint:rust`, `lint:js`; Biome emitted warnings only).

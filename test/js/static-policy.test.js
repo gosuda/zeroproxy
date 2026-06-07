@@ -333,6 +333,17 @@ test('blocked selector NodeList facades do not use array-backed filtered collect
   assert.ok(rt.includes("querySelectorAll.call(self, ':not(*)')"));
 });
 
+test('HTML transform streaming limitation is explicit while adapter is non-streaming', () => {
+  const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
+  const status = fs.readFileSync('IMPLEMENTAION_STATUS.md', 'utf8');
+  assert.ok(
+    tx.includes('io.ReadAll(r)'),
+    'Go adapter no longer looks like the documented non-streaming path',
+  );
+  assert.ok(status.includes('Go bridge still reads the whole document before rewriting'));
+  assert.ok(status.includes('non-streaming limitation'));
+});
+
 test('classic script rewrite carries document charset for legacy Korean news scripts', () => {
   const rt = readRuntimeSource();
   const sw = readServiceWorkerSource();

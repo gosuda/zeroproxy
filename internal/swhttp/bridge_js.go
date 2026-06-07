@@ -179,7 +179,13 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 	if resp == nil {
 		return js.Null(), fmt.Errorf("nil response")
 	}
-	safe := headers.ConstructorPolicy(resp.Header, bodyTransformed, bodyDecoded)
+	timing := resp.Header.Get("X-Zp-Transport-Timing")
+	safeSource := resp.Header
+	if timing != "" {
+		safeSource = resp.Header.Clone()
+		safeSource.Del("X-Zp-Transport-Timing")
+	}
+	safe := headers.ConstructorPolicy(safeSource, bodyTransformed, bodyDecoded)
 	jsHeaders := js.Global().Get("Headers").New()
 	for name, vals := range safe {
 		for _, v := range vals {
@@ -193,7 +199,21 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 		_ = resp.Body.Close()
 	}
 	init := map[string]any{"status": resp.StatusCode, "statusText": http.StatusText(resp.StatusCode), "headers": jsHeaders}
-	return js.Global().Get("Response").New(bodyArg, init), nil
+	out := js.Global().Get("Response").New(bodyArg, init)
+	defineTransportTiming(out, timing)
+	return out, nil
+}
+
+func defineTransportTiming(resp js.Value, timing string) {
+	if timing == "" {
+		return
+	}
+	parsed := js.Global().Get("JSON").Call("parse", timing)
+	js.Global().Get("Object").Call("defineProperty", resp, "__zpTransportTiming", map[string]any{
+		"value":        parsed,
+		"enumerable":   false,
+		"configurable": false,
+	})
 }
 
 func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {

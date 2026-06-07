@@ -1,0 +1,51 @@
+[
+  {
+    "id": "document-domain",
+    "priority": "p0",
+    "surface": "document.domain",
+    "status": "blocked-or-virtualized",
+    "needles": ["document", "domain"]
+  },
+  {
+    "id": "base-uri-and-url-properties",
+    "priority": "p0",
+    "surface": "baseURI / URL properties",
+    "status": "target-visible",
+    "needles": ["baseURI", "visibleDocumentURL"]
+  },
+  {
+    "id": "navigator-service-worker",
+    "priority": "p0",
+    "surface": "navigator.serviceWorker",
+    "status": "membrane-owned",
+    "needles": ["serviceWorker", "ZP_ENSURE_READY"]
+  },
+  {
+    "id": "worklet-and-audio-worklet",
+    "priority": "p1",
+    "surface": "worklet module URLs",
+    "status": "expected-limitation",
+    "needles": ["Worker", "module"]
+  },
+  {
+    "id": "trusted-types-csp-reporting",
+    "priority": "p1",
+    "surface": "TrustedTypes/CSP reporting",
+    "status": "expected-delta",
+    "needles": ["Content-Security-Policy", "report-only"]
+  },
+  {
+    "id": "webtransport-webrtc",
+    "priority": "p0",
+    "surface": "WebTransport/WebRTC",
+    "status": "unsupported-redacted",
+    "needles": ["webtransport", "webrtc"]
+  },
+  {
+    "id": "storage-cache-indexeddb",
+    "priority": "p1",
+    "surface": "Storage APIs",
+    "status": "namespaced",
+    "needles": ["indexedDB", "caches", "localStorage"]
+  }
+]

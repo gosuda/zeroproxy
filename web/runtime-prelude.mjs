@@ -2253,14 +2253,14 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const docQSA = w.Document.prototype.querySelectorAll;
     const elemQS = w.Element.prototype.querySelector;
     const elemQSA = w.Element.prototype.querySelectorAll;
-    if (typeof docQS === 'function') defineReplacingNative(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, arguments)); });
-    if (typeof elemQS === 'function') defineReplacingNative(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, arguments)); });
-    if (typeof docQSA === 'function') defineReplacingNative(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNativeNodeList(docQSA, this), () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
-    if (typeof elemQSA === 'function') defineReplacingNative(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNativeNodeList(elemQSA, this), () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    if (typeof docQS === 'function') defineReplacingNative(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : targetVisibleSelectorOne(this, sel, docQS, docQSA); });
+    if (typeof elemQS === 'function') defineReplacingNative(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : targetVisibleSelectorOne(this, sel, elemQS, elemQSA); });
+    if (typeof docQSA === 'function') defineReplacingNative(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNativeNodeList(docQSA, this), () => false) : targetVisibleSelectorAll(this, sel, docQSA); });
+    if (typeof elemQSA === 'function') defineReplacingNative(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNativeNodeList(elemQSA, this), () => false) : targetVisibleSelectorAll(this, sel, elemQSA); });
     const matches = w.Element.prototype.matches;
     const closest = w.Element.prototype.closest;
-    if (typeof matches === 'function') defineReplacingNative(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });
-    if (typeof closest === 'function') defineReplacingNative(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(closest.apply(this, arguments)); });
+    if (typeof matches === 'function') defineReplacingNative(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : targetVisibleElementMatches(this, sel, matches); });
+    if (typeof closest === 'function') defineReplacingNative(w.Element.prototype, 'closest', function(sel) { return selectorTargetsZP(sel) ? null : targetVisibleClosest(this, sel, closest, matches); });
   }
   function installTraversalStealthHooks(w) {
     const nodeIterator = w.Document.prototype.createNodeIterator;
@@ -2275,6 +2275,67 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function selectorTargetsZP(selector) {
     const s = String(selector || '').toLowerCase();
     return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('/zp/api/') || s.includes('src*="zp"') || s.includes("src*='zp'") || s.includes('src*=zp') || s.includes('zeroproxy') || s.includes('x-zeroproxy-icon');
+  }
+  const targetVisibleSelectorAttrRE = /\[\s*(href|src|action|formaction|poster|srcset)\s*([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*([is])?\s*\]/ig;
+  function selectorUsesTargetVisibleURL(selector) {
+    targetVisibleSelectorAttrRE.lastIndex = 0;
+    return targetVisibleSelectorAttrRE.test(String(selector || ''));
+  }
+  function targetVisibleSelectorOne(self, sel, nativeQS, nativeQSA) {
+    if (!selectorUsesTargetVisibleURL(sel)) return filterSelectorOne(nativeQS.call(self, sel));
+    const list = targetVisibleSelectorAll(self, sel, nativeQSA);
+    return list[0] || null;
+  }
+  function targetVisibleSelectorAll(self, sel, nativeQSA) {
+    if (!selectorUsesTargetVisibleURL(sel)) return filteredCollection(nativeQSA.call(self, sel), node => !isZPAssetNode(node));
+    const broad = broadTargetVisibleSelector(sel);
+    const raw = nativeQSA.call(self, broad);
+    return filteredCollection(raw, node => !isZPAssetNode(node) && targetVisibleSelectorMatch(node, sel));
+  }
+  function targetVisibleElementMatches(el, sel, nativeMatches) {
+    if (!selectorUsesTargetVisibleURL(sel)) return nativeMatches.call(el, sel);
+    return nativeMatches.call(el, broadTargetVisibleSelector(sel)) && targetVisibleSelectorMatch(el, sel);
+  }
+  function targetVisibleClosest(el, sel, nativeClosest, nativeMatches) {
+    if (!selectorUsesTargetVisibleURL(sel)) return filterSelectorOne(nativeClosest.call(el, sel));
+    for (let cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
+      if (targetVisibleElementMatches(cur, sel, nativeMatches)) return filterSelectorOne(cur);
+    }
+    return null;
+  }
+  function broadTargetVisibleSelector(sel) {
+    return String(sel || '').replace(targetVisibleSelectorAttrRE, '[$1]');
+  }
+  function targetVisibleSelectorMatch(el, sel) {
+    targetVisibleSelectorAttrRE.lastIndex = 0;
+    let m;
+    while ((m = targetVisibleSelectorAttrRE.exec(String(sel || '')))) {
+      const expected = m[3] != null ? m[3] : m[4] != null ? m[4] : m[5] || '';
+      if (!targetVisibleAttrMatch(visibleSelectorAttr(el, m[1]), m[2], expected, m[6])) return false;
+    }
+    return true;
+  }
+  function visibleSelectorAttr(el, attr) {
+    attr = String(attr || '').toLowerCase();
+    if (attr === 'srcset') return visibleSrcset(el);
+    if (usesRawURLAttribute(el, attr)) return visibleNavigationURL(el, attr);
+    if (isResourceURLAttribute(el, attr) || el.localName === 'link' && attr === 'href') return visibleResourceURL(el, attr);
+    return Native.getAttribute.call(el, attr) || '';
+  }
+  function targetVisibleAttrMatch(actual, op, expected, flag) {
+    actual = String(actual || '');
+    expected = String(expected || '');
+    if (String(flag || '').toLowerCase() === 'i') {
+      actual = actual.toLowerCase();
+      expected = expected.toLowerCase();
+    }
+    if (op === '=') return actual === expected;
+    if (op === '*=') return actual.includes(expected);
+    if (op === '^=') return actual.startsWith(expected);
+    if (op === '$=') return actual.endsWith(expected);
+    if (op === '~=') return actual.split(/\s+/).includes(expected);
+    if (op === '|=') return actual === expected || actual.startsWith(`${expected}-`);
+    return false;
   }
   function emptyNativeNodeList(querySelectorAll, self) {
     try { return querySelectorAll.call(self, ':not(*)'); } catch { return []; }

@@ -62,6 +62,29 @@ export function createHTTPFetchFacade({
     return headers;
   }
 
+  function performanceTimingStore() {
+    if (!root.__zpPerformanceTimings) {
+      try {
+        Object.defineProperty(root, '__zpPerformanceTimings', {
+          value: [],
+          enumerable: false,
+          configurable: false,
+        });
+      } catch {
+        root.__zpPerformanceTimings = [];
+      }
+    }
+    return root.__zpPerformanceTimings;
+  }
+
+  function recordTransportTiming(resp, targetUrl) {
+    const timing = resp && resp.__zpTransportTiming;
+    if (!timing || typeof timing !== 'object') return;
+    const store = performanceTimingStore();
+    store.push(Object.assign({ targetUrl }, timing));
+    if (store.length > 256) store.splice(0, store.length - 256);
+  }
+
   function sameOriginURL(a, b) {
     try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
   }
@@ -128,19 +151,36 @@ export function createHTTPFetchFacade({
     const virtualURL = getVirtualURL();
     const requestId = ZP.randomId('req');
     const apiHeaders = runtimeFetchHeaders(req, virtualURL, requestId);
-    if (replayableRequestBody(input, init)) apiHeaders.set('X-ZP-Upload-Replayable', '1');
+    markReplayableRequestBody(apiHeaders, input, init);
     const apiInit = runtimeFetchInit(req, apiHeaders);
     const abort = setupFetchAbort(req, requestId);
-    await attachFetchBody(req, apiInit, apiHeaders, abort && abort.promise);
-    if (req.signal) apiInit.signal = req.signal;
+    await prepareRuntimeFetchBody(req, apiInit, apiHeaders, abort);
     try {
       const resp = await fetchRuntimeAPI(target, apiInit, abort && abort.promise);
-      await enforceRedirectError(req, resp);
-      if ((req.mode || 'cors') === 'no-cors' && !sameOriginURL(virtualURL.href, target)) return opaqueResponseFacade(resp);
-      return responseFacade(resp, target);
+      return runtimeFetchResponse(req, resp, target, virtualURL);
     } finally {
       detachFetchAbort(req, abort);
     }
+  }
+
+  function markReplayableRequestBody(apiHeaders, input, init) {
+    if (replayableRequestBody(input, init)) apiHeaders.set('X-ZP-Upload-Replayable', '1');
+  }
+
+  async function prepareRuntimeFetchBody(req, apiInit, apiHeaders, abort) {
+    await attachFetchBody(req, apiInit, apiHeaders, abort && abort.promise);
+    if (req.signal) apiInit.signal = req.signal;
+  }
+
+  async function runtimeFetchResponse(req, resp, target, virtualURL) {
+    recordTransportTiming(resp, target);
+    await enforceRedirectError(req, resp);
+    if (opaqueResponseRequired(req, target, virtualURL)) return opaqueResponseFacade(resp);
+    return responseFacade(resp, target);
+  }
+
+  function opaqueResponseRequired(req, target, virtualURL) {
+    return (req.mode || 'cors') === 'no-cors' && !sameOriginURL(virtualURL.href, target);
   }
 
   function runtimeRequest(input, init) {

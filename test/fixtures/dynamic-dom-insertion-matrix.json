@@ -1,0 +1,141 @@
+[
+  {
+    "id": "inner-html-url-script-frame",
+    "surface": "Element.innerHTML / outerHTML",
+    "priority": "p0",
+    "fixtureClass": "html-string-sink",
+    "probes": [
+      "script execution is rewritten or blocked",
+      "iframe src routes through frame activation",
+      "img/srcset URL getters stay target-visible",
+      "console deltas are fingerprint-only"
+    ],
+    "existingHookNeedles": [
+      "patchHTMLSetter(w.Element.prototype, 'innerHTML'",
+      "transformHTML(String(v))",
+      "enforceSubtreePolicies(this)"
+    ],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "document-write-script-base",
+    "surface": "Document.write / Document.writeln",
+    "priority": "p0",
+    "fixtureClass": "parser-stream-sink",
+    "probes": [
+      "classic script rewrite",
+      "base element synchronization",
+      "document-written external script activation",
+      "blocked executable URL fallback"
+    ],
+    "existingHookNeedles": [
+      "define(doc, 'write'",
+      "activateDocumentWrittenScripts",
+      "syncBaseElement"
+    ],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "programmatic-script-insertion",
+    "surface": "createElement + appendChild/insertBefore/replaceChild",
+    "priority": "p0",
+    "fixtureClass": "node-insertion",
+    "probes": [
+      "script.src route generation",
+      "inline script text rewrite",
+      "nonce masking",
+      "remove/replace race"
+    ],
+    "existingHookNeedles": [
+      "define(w.document, 'createElement'",
+      "patchInsertion(w.Node.prototype, 'appendChild'",
+      "prepareScriptElement"
+    ],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "template-content-later-insertion",
+    "surface": "template.innerHTML + template.content insertion",
+    "priority": "p1",
+    "fixtureClass": "template",
+    "probes": [
+      "template content policy enforcement",
+      "later insertion does not bypass script/frame hooks",
+      "target-visible serialization"
+    ],
+    "existingHookNeedles": [
+      "this.localName === 'template' && prop === 'innerHTML'",
+      "enforceSubtreePolicies(this.content)",
+      "instrumentDescendantIframes(this.content)"
+    ],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "contextual-fragment",
+    "surface": "Range.createContextualFragment",
+    "priority": "p1",
+    "fixtureClass": "fragment-parser",
+    "probes": [
+      "fragment HTML transformation",
+      "script/frame activation after insertion",
+      "URL-bearing attributes preserve target-visible getters"
+    ],
+    "existingHookNeedles": [
+      "define(w.Range.prototype, 'createContextualFragment'",
+      "transformHTML(String(markup))"
+    ],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "domparser-html-document",
+    "surface": "DOMParser.parseFromString(text/html)",
+    "priority": "p1",
+    "fixtureClass": "detached-document-parser",
+    "probes": [
+      "text/html documents are transformed",
+      "non-HTML parser modes stay native",
+      "adopted/imported transformed nodes remain enforced"
+    ],
+    "existingHookNeedles": [
+      "define(w.DOMParser.prototype, 'parseFromString'",
+      "String(type).toLowerCase() === 'text/html'"
+    ],
+    "expectedDelta": "none for text/html; native for XML/SVG modes"
+  },
+  {
+    "id": "hydration-dynamic-chunk",
+    "surface": "framework hydration inserting dynamic chunks",
+    "priority": "p0",
+    "fixtureClass": "framework-hydration",
+    "probes": [
+      "dynamic import chunk URL rewrite",
+      "hydration event handlers",
+      "lazy image/srcset",
+      "selector virtualization over rewritten URLs"
+    ],
+    "existingHookNeedles": [
+      "scriptProxyPath(target",
+      "setSrcsetAttribute",
+      "targetVisibleSelectorAll"
+    ],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "dynamic-srcdoc-frame",
+    "surface": "iframe.srcdoc set after page load",
+    "priority": "p0",
+    "fixtureClass": "frame-srcdoc",
+    "probes": [
+      "runtime prelude injection",
+      "child frame network containment",
+      "postMessage source/origin mapping",
+      "sandbox preservation"
+    ],
+    "existingHookNeedles": [
+      "installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc')",
+      "injectSrcdoc(String(v))",
+      "createFrameMessaging"
+    ],
+    "expectedDelta": "known gap until srcdoc milestone completes"
+  }
+]

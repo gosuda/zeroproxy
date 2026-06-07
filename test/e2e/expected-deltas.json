@@ -57,6 +57,26 @@
       "id": "navigator-platform-persona",
       "pattern": "^surface\\.fingerprint\\.objectPropertyCollection\\.r\\.(Linux x86_64|MacIntel|Win32)$",
       "reason": "Native Chromium exposes host platform while ZeroProxy exposes the Windows Chrome persona."
+    },
+    {
+      "id": "frame-srcdoc-runtime-gap",
+      "pattern": "^surface\\.frames\\.srcdoc\\.(runtimeInjection|documentTransform|messageSource)$",
+      "reason": "Static srcdoc is now Rust-document transformed, but runtime-set srcdoc still uses the JS injection path until the srcdoc upgrade is complete."
+    },
+    {
+      "id": "frame-sandbox-security-delta",
+      "pattern": "^surface\\.frames\\.sandbox\\.(hiddenAttribute|tokenSet|sameOriginScript)$",
+      "reason": "ZeroProxy may hide unsafe sandbox token combinations to preserve membrane containment; these are expected security deltas only when classified."
+    },
+    {
+      "id": "data-blob-worker-frame-limit",
+      "pattern": "^surface\\.(workers|frames)\\.(data|blob)\\.(blocked|opaqueOrigin|unsupported)$",
+      "reason": "Data/blob worker and frame limits are expected containment deltas until those schemes have full isolated-runtime support."
+    },
+    {
+      "id": "target-visible-wrapper-artifact",
+      "pattern": "^surface\\.(selectors|performance|events)\\.(targetVisibleName|wrapperShape|timingShape)$",
+      "reason": "Target-visible facades can intentionally differ where ZeroProxy exposes target names while hiding proxy implementation routes."
     }
   ]
 }

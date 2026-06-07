@@ -498,6 +498,25 @@ test('membrane: selector filter rejects probes for data-zp-*, /zp/assets/, /zp/a
   }
 });
 
+test('membrane: selector virtualization hooks target-visible URL attributes', () => {
+  const rt = readRuntime();
+  for (const needle of [
+    'targetVisibleSelectorOne',
+    'targetVisibleSelectorAll',
+    'targetVisibleElementMatches',
+    'targetVisibleClosest',
+    'broadTargetVisibleSelector',
+    'targetVisibleSelectorMatch',
+    'visibleSelectorAttr',
+    'targetVisibleAttrMatch',
+  ]) {
+    assert.ok(rt.includes(needle), `missing ${needle}`);
+  }
+  assert.ok(rt.includes('visibleNavigationURL(el, attr)'));
+  assert.ok(rt.includes('visibleResourceURL(el, attr)'));
+  assert.ok(rt.includes('visibleSrcset(el)'));
+});
+
 test('membrane: stealth + masking hooks are installed into the runtime global', () => {
   const rt = readRuntime();
   // The installers exist and are invoked during membrane setup.

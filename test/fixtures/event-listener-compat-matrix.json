@@ -1,0 +1,69 @@
+[
+  {
+    "id": "add-remove-identity",
+    "priority": "p0",
+    "apis": ["addEventListener", "removeEventListener"],
+    "probes": [
+      "same listener identity",
+      "duplicate registration",
+      "remove with capture mismatch",
+      "handleEvent object identity"
+    ],
+    "existingNeedles": ["addEventListener", "removeEventListener", "handleEvent"]
+  },
+  {
+    "id": "listener-options",
+    "priority": "p0",
+    "apis": ["addEventListener options"],
+    "probes": ["capture", "once", "passive", "signal abort", "boolean options"],
+    "existingNeedles": ["capture", "once", "passive", "signal"]
+  },
+  {
+    "id": "dispatch-propagation-order",
+    "priority": "p0",
+    "apis": ["dispatchEvent"],
+    "probes": [
+      "capture target bubble order",
+      "stopPropagation",
+      "stopImmediatePropagation",
+      "preventDefault return value"
+    ],
+    "existingNeedles": ["dispatchEvent", "stopImmediatePropagation", "preventDefault"]
+  },
+  {
+    "id": "inline-and-onproperty",
+    "priority": "p1",
+    "apis": ["onclick", "onmessage", "inline event attributes"],
+    "probes": [
+      "on* property assignment",
+      "inline handler rewrite",
+      "property clear",
+      "this/currentTarget"
+    ],
+    "existingNeedles": ["bindEventAttribute", "event-handler", "onmessage"]
+  },
+  {
+    "id": "message-event-wrapping",
+    "priority": "p0",
+    "apis": ["postMessage", "MessageEvent"],
+    "probes": [
+      "source facade",
+      "origin mapping",
+      "targetOrigin mapping",
+      "frame/window message delivery"
+    ],
+    "existingNeedles": ["postMessage", "MessageEvent", "targetOrigin"]
+  },
+  {
+    "id": "internal-listener-invisibility",
+    "priority": "p0",
+    "apis": ["EventTarget listener enumeration"],
+    "probes": [
+      "no ZP listener globals",
+      "framework listener bookkeeping unaffected",
+      "toString masking",
+      "closed-over internal listeners"
+    ],
+    "existingNeedles": ["installToStringMasking", "hiddenGlobalKey", "messageListenerWrappers"]
+  }
+]

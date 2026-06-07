@@ -3,6 +3,9 @@ package zphttp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -33,19 +36,26 @@ type TabState struct {
 type Engine struct {
 	Mux StreamMux
 
-	mu sync.Mutex
-	h1 map[h2Key][]*h1Conn
-	h2 map[h2Key]*h2Conn
+	mu            sync.Mutex
+	h1            map[h2Key][]*h1Conn
+	h2            map[h2Key]*h2Conn
+	activeGlobal  int
+	activeByKey   map[h2Key]int
+	nextWaitSeq   uint64
+	requestWaiter []*requestWaiter
 }
 
 const TargetUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 
 const (
-	browserIdleConnTimeout = 90 * time.Second
-	maxH1IdleConnsPerKey   = 6
-	targetCHUA             = `"Chromium";v="148", "Not:A-Brand";v="24", "Google Chrome";v="148"`
-	targetCHUAFullList     = `"Chromium";v="148.0.7778.217", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="148.0.7778.217"`
+	browserIdleConnTimeout      = 90 * time.Second
+	maxH1IdleConnsPerKey        = 6
+	maxBrowserGlobalRequests    = 64
+	maxBrowserRequestsPerOrigin = 6
+	targetCHUA                  = `"Chromium";v="148", "Not:A-Brand";v="24", "Google Chrome";v="148"`
+	targetCHUAFullList          = `"Chromium";v="148.0.7778.217", "Not:A-Brand";v="24.0.0.0", "Google Chrome";v="148.0.7778.217"`
 )
+const transportTimingHeader = "X-Zp-Transport-Timing"
 
 var (
 	fetchTLSProtocols = [...]string{utlskernel.ALPNHTTP2, utlskernel.ALPNHTTP1}
@@ -62,31 +72,280 @@ type RequestPolicy struct {
 	DocumentRequest bool
 }
 
+type TransportTiming struct {
+	RequestID               string `json:"requestId,omitempty"`
+	TabIDHash               string `json:"tabIdHash,omitempty"`
+	TargetOriginHash        string `json:"targetOriginHash,omitempty"`
+	QueueWaitMS             int64  `json:"queueWaitMs"`
+	ConnectionAcquisitionMS int64  `json:"connectionAcquisitionMs"`
+	StreamOpenMS            int64  `json:"streamOpenMs"`
+	SOCKSConnectMS          int64  `json:"socksConnectMs"`
+	TLSHandshakeMS          int64  `json:"tlsHandshakeMs"`
+	TimeToFirstByteMS       int64  `json:"timeToFirstByteMs"`
+	TotalMS                 int64  `json:"totalMs"`
+	ConnectionReused        bool   `json:"connectionReused"`
+	NegotiatedProtocol      string `json:"negotiatedProtocol,omitempty"`
+	FailureClass            string `json:"failureClass,omitempty"`
+}
+
 func (e *Engine) RoundTrip(ctx context.Context, req *http.Request, target *url.URL, tab *TabState) (*http.Response, error) {
 	if target == nil || target.Hostname() == "" {
 		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: missing target host")
 	}
+	start := time.Now()
+	timing := newTransportTiming(req, target, tab)
 	wireReq, err := BuildHTTP1Request(req, target, jar(tab))
 	if err != nil {
 		return nil, err
 	}
 	key := h2PoolKey(target, tab)
+	queueStart := time.Now()
+	release, err := e.acquireRequestSlot(ctx, key, requestPriority(req))
+	timing.QueueWaitMS = durationMS(time.Since(queueStart))
+	if err != nil {
+		timing.FailureClass = transportFailureClass(err)
+		return nil, err
+	}
+	resp, err := e.roundTripWithSlot(ctx, wireReq, target, tab, key, timing)
+	timing.TotalMS = durationMS(time.Since(start))
+	if err != nil {
+		timing.FailureClass = transportFailureClass(err)
+	}
+	attachTransportTiming(resp, timing)
+	return responseWithRequestSlot(resp, err, release)
+}
+
+func newTransportTiming(req *http.Request, target *url.URL, tab *TabState) *TransportTiming {
+	requestID := ""
+	if req != nil {
+		requestID = req.Header.Get("X-Zp-Request-Id")
+	}
+	t := &TransportTiming{RequestID: redactedToken(requestID)}
+	if tab != nil {
+		t.TabIDHash = redactedHash(tab.TabID)
+	}
+	if target != nil {
+		t.TargetOriginHash = redactedHash(target.Scheme + "://" + canonicalAuthority(target))
+	}
+	return t
+}
+
+func attachTransportTiming(resp *http.Response, timing *TransportTiming) {
+	if resp == nil || timing == nil {
+		return
+	}
+	data, err := json.Marshal(timing)
+	if err != nil {
+		return
+	}
+	if resp.Header == nil {
+		resp.Header = make(http.Header)
+	}
+	resp.Header.Set(transportTimingHeader, string(data))
+}
+
+func durationMS(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return d.Milliseconds()
+}
+
+func redactedToken(value string) string {
+	value = strings.TrimSpace(value)
+	for _, r := range value {
+		if r != '-' && r != '_' && (r < '0' || r > '9') && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+			return ""
+		}
+	}
+	return value
+}
+
+func redactedHash(value string) string {
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:8])
+}
+
+func transportFailureClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	switch {
+	case strings.Contains(text, "TARGET_PROTOCOL_BLOCKED"):
+		return "target_protocol_blocked"
+	case strings.Contains(text, "POLICY_BLOCKED"):
+		return "policy_blocked"
+	case strings.Contains(text, "context canceled"):
+		return "context_canceled"
+	case strings.Contains(text, "deadline exceeded"):
+		return "timeout"
+	default:
+		return "target_connect_failed"
+	}
+}
+
+func (e *Engine) roundTripWithSlot(ctx context.Context, wireReq *http.Request, target *url.URL, tab *TabState, key h2Key, timing *TransportTiming) (*http.Response, error) {
 	if target.Scheme == "https" {
 		if hc := e.reserveH2(key); hc != nil {
-			return e.roundTripHTTP2(ctx, hc, wireReq)
+			timing.ConnectionReused = true
+			timing.NegotiatedProtocol = utlskernel.ALPNHTTP2
+			return timedRoundTrip(func() (*http.Response, error) { return e.roundTripHTTP2(ctx, hc, wireReq) }, timing)
 		}
 	}
 	if pc := e.reserveH1(key); pc != nil {
-		resp, err := e.roundTripHTTP1(pc, wireReq)
+		timing.ConnectionReused = true
+		timing.NegotiatedProtocol = utlskernel.ALPNHTTP1
+		resp, err := timedRoundTrip(func() (*http.Response, error) { return e.roundTripHTTP1(pc, wireReq) }, timing)
 		if err == nil || !canRetryHTTP1(wireReq) {
 			return resp, err
 		}
 	}
-	tc, err := e.dialTarget(ctx, target, tab, fetchTLSProtocols[:])
+	connStart := time.Now()
+	tc, err := e.dialTarget(ctx, target, tab, fetchTLSProtocols[:], timing)
+	timing.ConnectionAcquisitionMS = durationMS(time.Since(connStart))
 	if err != nil {
 		return nil, err
 	}
-	return e.roundTripConn(ctx, tc, wireReq, key)
+	timing.NegotiatedProtocol = tc.protocol
+	return timedRoundTrip(func() (*http.Response, error) { return e.roundTripConn(ctx, tc, wireReq, key) }, timing)
+}
+
+func timedRoundTrip(fn func() (*http.Response, error), timing *TransportTiming) (*http.Response, error) {
+	start := time.Now()
+	resp, err := fn()
+	timing.TimeToFirstByteMS = durationMS(time.Since(start))
+	return resp, err
+}
+
+func responseWithRequestSlot(resp *http.Response, err error, release func()) (*http.Response, error) {
+	if err != nil {
+		release()
+		return nil, err
+	}
+	if resp == nil || resp.Body == nil {
+		release()
+		return resp, nil
+	}
+	resp.Body = &bodyWithRequestSlot{ReadCloser: resp.Body, release: release}
+	return resp, nil
+}
+
+func (e *Engine) acquireRequestSlot(ctx context.Context, key h2Key, priority int) (func(), error) {
+	e.mu.Lock()
+	if e.canAcquireRequestSlotLocked(key) {
+		e.takeRequestSlotLocked(key)
+		e.mu.Unlock()
+		return e.releaseRequestSlotFunc(key), nil
+	}
+	waiter := e.newRequestWaiterLocked(key, priority)
+	e.requestWaiter = append(e.requestWaiter, waiter)
+	e.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		if !e.cancelRequestWaiter(waiter) {
+			e.releaseRequestSlot(key)
+		}
+		return nil, ctx.Err()
+	case <-waiter.ready:
+		return e.releaseRequestSlotFunc(key), nil
+	}
+}
+
+func (e *Engine) newRequestWaiterLocked(key h2Key, priority int) *requestWaiter {
+	waiter := &requestWaiter{key: key, priority: priority, seq: e.nextWaitSeq, ready: make(chan struct{})}
+	e.nextWaitSeq++
+	return waiter
+}
+
+func (e *Engine) canAcquireRequestSlotLocked(key h2Key) bool {
+	return e.activeGlobal < maxBrowserGlobalRequests && e.activeByKey[key] < maxBrowserRequestsPerOrigin
+}
+
+func (e *Engine) takeRequestSlotLocked(key h2Key) {
+	if e.activeByKey == nil {
+		e.activeByKey = make(map[h2Key]int)
+	}
+	e.activeGlobal++
+	e.activeByKey[key]++
+}
+
+func (e *Engine) releaseRequestSlotFunc(key h2Key) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() { e.releaseRequestSlot(key) })
+	}
+}
+
+func (e *Engine) releaseRequestSlot(key h2Key) {
+	e.mu.Lock()
+	if e.activeGlobal > 0 {
+		e.activeGlobal--
+	}
+	if e.activeByKey[key] <= 1 {
+		delete(e.activeByKey, key)
+	} else {
+		e.activeByKey[key]--
+	}
+	e.wakeRequestWaitersLocked()
+	e.mu.Unlock()
+}
+
+func (e *Engine) cancelRequestWaiter(waiter *requestWaiter) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i, queued := range e.requestWaiter {
+		if queued != waiter {
+			continue
+		}
+		e.requestWaiter = append(e.requestWaiter[:i], e.requestWaiter[i+1:]...)
+		return true
+	}
+	return false
+}
+
+func (e *Engine) wakeRequestWaitersLocked() {
+	for {
+		next := e.nextWakeableWaiterLocked()
+		if next < 0 {
+			return
+		}
+		waiter := e.requestWaiter[next]
+		e.takeRequestSlotLocked(waiter.key)
+		e.requestWaiter = append(e.requestWaiter[:next], e.requestWaiter[next+1:]...)
+		close(waiter.ready)
+	}
+}
+
+func (e *Engine) nextWakeableWaiterLocked() int {
+	best := -1
+	for i, waiter := range e.requestWaiter {
+		if !e.canAcquireRequestSlotLocked(waiter.key) {
+			continue
+		}
+		if best < 0 || requestWaiterBefore(waiter, e.requestWaiter[best]) {
+			best = i
+		}
+	}
+	return best
+}
+
+func requestWaiterBefore(a, b *requestWaiter) bool {
+	return a.priority > b.priority || (a.priority == b.priority && a.seq < b.seq)
+}
+
+func requestPriority(req *http.Request) int {
+	switch strings.ToLower(strings.TrimSpace(req.Header.Get("X-Zp-Fetch-Priority"))) {
+	case "high":
+		return 2
+	case "low":
+		return 0
+	default:
+		return 1
+	}
 }
 
 func (e *Engine) roundTripConn(ctx context.Context, tc *targetConn, wireReq *http.Request, key h2Key) (*http.Response, error) {
@@ -175,29 +434,45 @@ func (e *Engine) roundTripHTTP2(ctx context.Context, hc *h2Conn, wireReq *http.R
 // http.Transport for target egress. The exported path remains HTTP/1.1-only so
 // WebSocket upgrade callers never negotiate h2 accidentally.
 func (e *Engine) DialTarget(ctx context.Context, target *url.URL, tab *TabState) (net.Conn, error) {
-	tc, err := e.dialTarget(ctx, target, tab, http1TLSProtocols[:])
+	tc, err := e.dialTarget(ctx, target, tab, http1TLSProtocols[:], nil)
 	if err != nil {
 		return nil, err
 	}
 	return tc.conn, nil
 }
 
-func (e *Engine) dialTarget(ctx context.Context, target *url.URL, tab *TabState, tlsProtocols []string) (*targetConn, error) {
+func (e *Engine) dialTarget(ctx context.Context, target *url.URL, tab *TabState, tlsProtocols []string, timing *TransportTiming) (*targetConn, error) {
 	if err := e.validateDialTarget(target); err != nil {
 		return nil, err
 	}
 	host := canonicalHost(target)
 	token := zpiso.Token(isolationKey(tab), host)
+	streamStart := time.Now()
 	stream, err := e.Mux.OpenStream(ctx)
+	if timing != nil {
+		timing.StreamOpenMS = durationMS(time.Since(streamStart))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: %w", err)
 	}
+	socksStart := time.Now()
 	if err := socks5.ConnectDomain(ctx, stream, socks5.Options{Host: host, Port: canonicalPort(target), Username: token, Password: "zp"}); err != nil {
+		if timing != nil {
+			timing.SOCKSConnectMS = durationMS(time.Since(socksStart))
+		}
 		_ = stream.Close()
 		return nil, fmt.Errorf("TARGET_CONNECT_FAILED: %w", err)
 	}
+	if timing != nil {
+		timing.SOCKSConnectMS = durationMS(time.Since(socksStart))
+	}
 	if target.Scheme == "https" {
-		return wrapTargetTLS(ctx, stream, host, tlsProtocols)
+		tlsStart := time.Now()
+		tc, err := wrapTargetTLS(ctx, stream, host, tlsProtocols)
+		if timing != nil {
+			timing.TLSHandshakeMS = durationMS(time.Since(tlsStart))
+		}
+		return tc, err
 	}
 	return &targetConn{conn: stream, protocol: utlskernel.ALPNHTTP1}, nil
 }
@@ -798,6 +1073,13 @@ func canonicalPort(u *url.URL) string {
 	return "443"
 }
 
+type requestWaiter struct {
+	key      h2Key
+	priority int
+	seq      uint64
+	ready    chan struct{}
+}
+
 type targetConn struct {
 	conn     net.Conn
 	protocol string
@@ -858,6 +1140,34 @@ func (b *bodyWithH1Reuse) Close() error {
 		b.engine.closeH1(b.conn)
 	})
 	return b.closeErr
+}
+
+type bodyWithRequestSlot struct {
+	io.ReadCloser
+	release   func()
+	slotOnce  sync.Once
+	closeOnce sync.Once
+	err       error
+}
+
+func (b *bodyWithRequestSlot) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.releaseSlot()
+	}
+	return n, err
+}
+
+func (b *bodyWithRequestSlot) Close() error {
+	b.closeOnce.Do(func() {
+		b.err = b.ReadCloser.Close()
+		b.releaseSlot()
+	})
+	return b.err
+}
+
+func (b *bodyWithRequestSlot) releaseSlot() {
+	b.slotOnce.Do(func() { b.release() })
 }
 
 type bodyWithH2Close struct {

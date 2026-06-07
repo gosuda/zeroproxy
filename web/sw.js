@@ -39,6 +39,7 @@ const resourceContext = new Map();
 const streams = new Map();
 const uploadStreams = new Map();
 const inflightFetches = new Map();
+const transportTimings = [];
 const {
   initKernel,
   initRewriter,
@@ -252,6 +253,7 @@ async function transportFetch(targetUrl, opt) {
   }
   try {
     const resp = await self.__go_jshttp(new Request(u, init));
+    recordTransportTiming(resp, requestId, opt);
     return addCSP(resp, opt.request, tabServers(opt));
   } finally {
     if (requestId) inflightFetches.delete(requestId);
@@ -263,6 +265,19 @@ function transportMethod(opt) {
 }
 function tabServers(opt) {
   return opt.tab && opt.tab.servers;
+}
+
+function recordTransportTiming(resp, requestId, opt) {
+  const timing = resp && resp.__zpTransportTiming;
+  if (!timing || typeof timing !== 'object') return;
+  const record = Object.assign({}, timing, {
+    requestId: String(timing.requestId || requestId || ''),
+    entryId: String(opt.entryId || opt.tab && opt.tab.activeEntryId || ''),
+    resourceType: opt.document ? 'document' : opt.request && opt.request.destination || 'unknown',
+    observedAt: Date.now(),
+  });
+  transportTimings.push(record);
+  if (transportTimings.length > 512) transportTimings.splice(0, transportTimings.length - 512);
 }
 function transport() {
   if (!transportHelpers) {
@@ -351,6 +366,7 @@ const MESSAGE_HANDLERS = new Map([
   ['ZP_COOKIE_SET', handleCookieSet],
   ['ZP_FETCH_ABORT', handleFetchAbort],
   ['ZP_UPLOAD_STREAM_OPEN', handleUploadStreamOpen],
+  ['ZP_TRANSPORT_TIMINGS', handleTransportTimings],
   ['ZP_WS_OPEN', openRuntimeStream],
 ]);
 
@@ -364,6 +380,14 @@ async function handleMessage(event) {
     if (handler) await handler(event, msg, ok, fail);
     else fail('POLICY_BLOCKED');
   } catch (e) { fail(e && e.code || e && e.message || 'POLICY_BLOCKED'); }
+}
+
+function handleTransportTimings(event, msg, ok) {
+  void event;
+  const limit = Math.max(0, Math.min(512, Number(msg.limit || 128) || 128));
+  const timings = transportTimings.slice(-limit);
+  if (msg.clear) transportTimings.splice(0, transportTimings.length);
+  ok({ timings });
 }
 
 function handleStatus(event, msg, ok) {

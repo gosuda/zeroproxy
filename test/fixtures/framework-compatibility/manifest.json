@@ -1,0 +1,47 @@
+[
+  {
+    "id": "react-hydration",
+    "framework": "React",
+    "priority": "p0",
+    "entry": "react-hydration.html",
+    "surfaces": ["SSR hydration", "event delegation", "dynamic script/module fetch"],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "next-vite-module-graph",
+    "framework": "Next/Vite-style ESM",
+    "priority": "p0",
+    "entry": "next-vite-module-graph.html",
+    "surfaces": ["import map", "module graph", "dynamic import chunk", "preload/modulepreload"],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "vue-reactivity",
+    "framework": "Vue",
+    "priority": "p1",
+    "entry": "vue-reactivity.html",
+    "surfaces": ["template mount", "reactive DOM update", "event handler", "dynamic image src"],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "angular-zone-timer",
+    "framework": "Angular/Zone",
+    "priority": "p1",
+    "entry": "angular-zone-timer.html",
+    "surfaces": ["zone timer patching", "event listener wrapping", "XHR/fetch patch observation"],
+    "expectedDelta": "none"
+  },
+  {
+    "id": "webpack-dynamic-chunk",
+    "framework": "Webpack runtime",
+    "priority": "p1",
+    "entry": "webpack-dynamic-chunk.html",
+    "surfaces": [
+      "script chunk insertion",
+      "publicPath",
+      "dynamic JSON/script URL",
+      "error callback"
+    ],
+    "expectedDelta": "none"
+  }
+]

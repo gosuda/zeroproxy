@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ZeroProxy Vue Reactivity Fixture</title>
+<div id="app"></div>
+<script type="module">
+  import { createApp, h, ref } from 'https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js';
+  createApp({
+    setup() {
+      const count = ref(0);
+      const image = ref('./vue-image.png');
+      return () => h('div', [
+        h('button', { 'data-fixture': 'vue-button', onClick: () => { count.value += 1; } }, `Vue count: ${count.value}`),
+        h('img', { src: image.value, alt: 'dynamic' }),
+      ]);
+    },
+  }).mount('#app');
+</script>

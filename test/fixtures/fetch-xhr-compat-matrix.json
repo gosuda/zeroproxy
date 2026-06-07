@@ -1,0 +1,83 @@
+[
+  {
+    "id": "fetch-mode-credentials",
+    "api": "fetch",
+    "priority": "p0",
+    "axes": ["mode", "credentials", "cors same-origin", "cookie projection"],
+    "probes": [
+      "same-origin include",
+      "cross-origin cors",
+      "credentials omit",
+      "credentialed redirect"
+    ],
+    "existingNeedles": ["X-ZP-Fetch-Credentials", "X-ZP-Fetch-Mode", "fetchThroughRuntime"]
+  },
+  {
+    "id": "fetch-redirect-referrer",
+    "api": "fetch",
+    "priority": "p0",
+    "axes": ["redirect", "referrerPolicy", "Location exposure"],
+    "probes": [
+      "redirect follow",
+      "redirect error",
+      "manual opaqueredirect",
+      "strict-origin-when-cross-origin"
+    ],
+    "existingNeedles": ["X-ZP-Fetch-Redirect", "X-ZP-Fetch-Referrer-Policy", "enforceRedirectError"]
+  },
+  {
+    "id": "fetch-no-cors-opaque",
+    "api": "fetch",
+    "priority": "p0",
+    "axes": ["no-cors", "opaque response", "blocked unknown subresource"],
+    "probes": ["opaque facade", "Response.error fail-close", "status/header/body opacity"],
+    "existingNeedles": ["opaqueResponseFacade", "no-cors", "Response.error()"]
+  },
+  {
+    "id": "fetch-abort-upload-stream",
+    "api": "fetch",
+    "priority": "p1",
+    "axes": ["AbortSignal", "upload body", "replayable body", "stream token"],
+    "probes": [
+      "abort before headers",
+      "abort during body",
+      "FormData replayable",
+      "ReadableStream upload"
+    ],
+    "existingNeedles": ["ZP_UPLOAD_STREAM", "X-ZP-Upload-Replayable", "signal"]
+  },
+  {
+    "id": "xhr-sync-async",
+    "api": "XMLHttpRequest",
+    "priority": "p0",
+    "axes": ["async", "sync policy", "readyState", "responseType"],
+    "probes": ["GET async", "POST body", "sync blocked or shimmed", "arraybuffer/blob/text/json"],
+    "existingNeedles": ["ZPXMLHttpRequest", "sync XHR", "readyState"]
+  },
+  {
+    "id": "xhr-headers-errors-progress",
+    "api": "XMLHttpRequest",
+    "priority": "p1",
+    "axes": ["request headers", "response headers", "network errors", "progress events"],
+    "probes": [
+      "setRequestHeader",
+      "getAllResponseHeaders",
+      "timeout",
+      "load/error/abort/loadend ordering"
+    ],
+    "existingNeedles": ["setRequestHeader", "getAllResponseHeaders", "dispatchEvent"]
+  },
+  {
+    "id": "range-and-cache-headers",
+    "api": "fetch/xhr",
+    "priority": "p1",
+    "axes": ["Range", "If-None-Match", "cache", "content encoding"],
+    "probes": [
+      "206 partial",
+      "304 not modified",
+      "cache reload/no-store",
+      "compressed response body"
+    ],
+    "existingNeedles": ["Range", "cache", "contentEncoding"]
+  }
+]

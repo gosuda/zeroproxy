@@ -3,6 +3,7 @@ package zphttp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 )
@@ -119,6 +121,7 @@ func TestRoundTripUsesSocksDomainAndHTTP1(t *testing.T) {
 	engine := &Engine{Mux: mux}
 	target, _ := url.Parse("http://example.com/resource?q=1")
 	req, _ := http.NewRequest("GET", target.String(), nil)
+	req.Header.Set("X-Zp-Request-Id", "req_test")
 	done := make(chan error, 1)
 	go func() {
 		c := <-mux.streams
@@ -220,7 +223,145 @@ func TestRoundTripUsesSocksDomainAndHTTP1(t *testing.T) {
 	if string(body) != "ok" || resp.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected response %d %q", resp.StatusCode, string(body))
 	}
+	var timing TransportTiming
+	if err := json.Unmarshal([]byte(resp.Header.Get(transportTimingHeader)), &timing); err != nil {
+		t.Fatalf("transport timing header is not JSON: %v", err)
+	}
+	if timing.RequestID != "req_test" || timing.TargetOriginHash == "" || timing.NegotiatedProtocol != "http/1.1" {
+		t.Fatalf("transport timing missing redacted fields: %#v", timing)
+	}
+	if timing.ConnectionReused || timing.StreamOpenMS < 0 || timing.SOCKSConnectMS < 0 || timing.TimeToFirstByteMS < 0 || timing.TotalMS < 0 {
+		t.Fatalf("transport timing has invalid values: %#v", timing)
+	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestBrowserSchedulerLimitsPerOriginAndQueues(t *testing.T) {
+	var engine Engine
+	key := h2Key{authority: "example.com", isolation: "iso", tabID: "tab"}
+	releases := make([]func(), 0, maxBrowserRequestsPerOrigin)
+	for range maxBrowserRequestsPerOrigin {
+		release, err := engine.acquireRequestSlot(context.Background(), key, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	acquired := make(chan func(), 1)
+	go func() {
+		release, err := engine.acquireRequestSlot(context.Background(), key, 1)
+		if err != nil {
+			t.Errorf("queued acquire: %v", err)
+			return
+		}
+		acquired <- release
+	}()
+	select {
+	case release := <-acquired:
+		release()
+		t.Fatal("per-origin scheduler did not queue over-limit request")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releases[0]()
+	select {
+	case release := <-acquired:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("queued request did not acquire after release")
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+	if engine.activeGlobal != 0 || len(engine.activeByKey) != 0 || len(engine.requestWaiter) != 0 {
+		t.Fatalf("scheduler state leaked: global=%d byKey=%d waiters=%d", engine.activeGlobal, len(engine.activeByKey), len(engine.requestWaiter))
+	}
+}
+
+func TestBrowserSchedulerCancelsQueuedRequest(t *testing.T) {
+	var engine Engine
+	key := h2Key{authority: "example.com", isolation: "iso", tabID: "tab"}
+	releases := make([]func(), 0, maxBrowserRequestsPerOrigin)
+	for range maxBrowserRequestsPerOrigin {
+		release, err := engine.acquireRequestSlot(context.Background(), key, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if release, err := engine.acquireRequestSlot(ctx, key, 1); err == nil {
+		release()
+		t.Fatal("canceled queued request acquired a slot")
+	}
+	for _, release := range releases {
+		release()
+	}
+	if engine.activeGlobal != 0 || len(engine.activeByKey) != 0 || len(engine.requestWaiter) != 0 {
+		t.Fatalf("scheduler state leaked: global=%d byKey=%d waiters=%d", engine.activeGlobal, len(engine.activeByKey), len(engine.requestWaiter))
+	}
+}
+
+func TestBrowserSchedulerHonorsFetchPriority(t *testing.T) {
+	var engine Engine
+	key := h2Key{authority: "example.com", isolation: "iso", tabID: "tab"}
+	releases := make([]func(), 0, maxBrowserRequestsPerOrigin)
+	for range maxBrowserRequestsPerOrigin {
+		release, err := engine.acquireRequestSlot(context.Background(), key, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, release)
+	}
+	low := make(chan func(), 1)
+	high := make(chan func(), 1)
+	go acquireSlotForTest(t, &engine, key, 0, low)
+	go acquireSlotForTest(t, &engine, key, 2, high)
+	waitForQueuedRequests(t, &engine, 2)
+	releases[0]()
+	select {
+	case release := <-high:
+		release()
+	case release := <-low:
+		release()
+		t.Fatal("low-priority request acquired before queued high-priority request")
+	case <-time.After(time.Second):
+		t.Fatal("priority request did not acquire")
+	}
+	for _, release := range releases[1:] {
+		release()
+	}
+	select {
+	case release := <-low:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("low-priority request did not acquire after capacity returned")
+	}
+}
+
+func acquireSlotForTest(t *testing.T, engine *Engine, key h2Key, priority int, out chan<- func()) {
+	t.Helper()
+	release, err := engine.acquireRequestSlot(context.Background(), key, priority)
+	if err != nil {
+		t.Errorf("queued acquire: %v", err)
+		return
+	}
+	out <- release
+}
+
+func waitForQueuedRequests(t *testing.T, engine *Engine, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		engine.mu.Lock()
+		got := len(engine.requestWaiter)
+		engine.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("queued request count did not reach %d", want)
 }

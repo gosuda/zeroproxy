@@ -1,0 +1,70 @@
+[
+  {
+    "id": "mutation-observer",
+    "priority": "p0",
+    "surface": "MutationObserver",
+    "probes": [
+      "constructor shape",
+      "record ordering",
+      "attributeOldValue",
+      "childList subtree",
+      "microtask timing"
+    ],
+    "existingNeedles": ["MutationObserver", "observe", "takeRecords"]
+  },
+  {
+    "id": "intersection-observer",
+    "priority": "p1",
+    "surface": "IntersectionObserver",
+    "probes": [
+      "constructor shape",
+      "root/rootMargin/thresholds",
+      "entry fields",
+      "lazy-loading callback timing"
+    ],
+    "existingNeedles": ["IntersectionObserver", "threshold", "rootMargin"]
+  },
+  {
+    "id": "resize-observer",
+    "priority": "p1",
+    "surface": "ResizeObserver",
+    "probes": ["constructor shape", "contentRect", "borderBoxSize", "callback ordering"],
+    "existingNeedles": ["ResizeObserver", "contentRect", "borderBoxSize"]
+  },
+  {
+    "id": "pointer-mouse-wheel",
+    "priority": "p0",
+    "surface": "pointer/mouse/wheel events",
+    "probes": [
+      "pointerdown/move/up ordering",
+      "mouse compatibility events",
+      "wheel delta payload",
+      "capture/bubble phases"
+    ],
+    "existingNeedles": ["PointerEvent", "MouseEvent", "WheelEvent"]
+  },
+  {
+    "id": "keyboard-focus-composition",
+    "priority": "p0",
+    "surface": "keyboard/focus/composition events",
+    "probes": [
+      "keydown/beforeinput/input/keyup",
+      "focusin/focusout",
+      "compositionstart/update/end",
+      "isComposing"
+    ],
+    "existingNeedles": ["KeyboardEvent", "InputEvent", "CompositionEvent"]
+  },
+  {
+    "id": "touch-input-selection",
+    "priority": "p1",
+    "surface": "touch/input/selection events",
+    "probes": [
+      "touchstart/move/end",
+      "inputType/data",
+      "selectionchange",
+      "framework controlled inputs"
+    ],
+    "existingNeedles": ["TouchEvent", "beforeinput", "selectionchange"]
+  }
+]

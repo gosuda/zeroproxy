@@ -1,0 +1,68 @@
+[
+  {
+    "id": "ordinary-frame-routing",
+    "priority": "p0",
+    "surface": "iframe/frame src routing",
+    "probes": [
+      "http/https src proxy route",
+      "contentWindow facade",
+      "postMessage source/origin",
+      "history/location mapping"
+    ],
+    "expectedDelta": "none",
+    "existingNeedles": ["installFrameProp", "createFrameMessaging", "contentWindow"]
+  },
+  {
+    "id": "dynamic-srcdoc-document-transform",
+    "priority": "p0",
+    "surface": "iframe.srcdoc",
+    "probes": [
+      "runtime prelude injection",
+      "script/style/import-map transform",
+      "frame messaging",
+      "base/referrer/cookie context"
+    ],
+    "expectedDelta": "known gap until srcdoc upgrade completes",
+    "existingNeedles": ["injectSrcdoc", "srcdoc", "runtime-prelude"]
+  },
+  {
+    "id": "sandbox-token-deltas",
+    "priority": "p0",
+    "surface": "sandbox",
+    "probes": [
+      "allow-scripts",
+      "allow-same-origin",
+      "allow-popups",
+      "blocked unsafe tokens",
+      "expected security delta docs"
+    ],
+    "expectedDelta": "security deltas allowed only when classified",
+    "existingNeedles": ["sandbox", "allow-scripts", "allow-same-origin"]
+  },
+  {
+    "id": "widget-login-payment-challenge",
+    "priority": "p1",
+    "surface": "third-party widget frames",
+    "probes": [
+      "login iframe",
+      "payment iframe",
+      "challenge iframe",
+      "ad/widget postMessage",
+      "frame load/error telemetry"
+    ],
+    "expectedDelta": "none except classified provider security deltas",
+    "existingNeedles": ["iframe", "postMessage", "failureTelemetry"]
+  },
+  {
+    "id": "srcdoc-static-html-transform",
+    "priority": "p1",
+    "surface": "static srcdoc attributes",
+    "probes": [
+      "HTML transform injects runtime",
+      "serialized visible srcdoc",
+      "nested frame routing"
+    ],
+    "expectedDelta": "known gap until srcdoc upgrade completes",
+    "existingNeedles": ["srcdoc", "injectSrcdoc", "rewrite_document"]
+  }
+]

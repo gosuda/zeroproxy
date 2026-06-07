@@ -55,6 +55,8 @@ pub fn rewrite_document(source: &str, opt: DocumentOptions<'_>) -> Result<String
     let body_prelude = runtime_prelude.clone();
     let script_prelude = runtime_prelude.clone();
     let attr_prelude = runtime_prelude.clone();
+    let attr_tab_id = tab_id.clone();
+    let attr_runtime_token = runtime_token.clone();
     let end_prelude = runtime_prelude;
     let script_target_url = target_url.clone();
     let script_control_prefix = control_prefix.clone();
@@ -132,6 +134,8 @@ pub fn rewrite_document(source: &str, opt: DocumentOptions<'_>) -> Result<String
                         &control_prefix,
                         &servers,
                         &attr_prelude,
+                        &attr_tab_id,
+                        &attr_runtime_token,
                     )?;
                     Ok(())
                 }),
@@ -154,6 +158,8 @@ fn rewrite_element_attrs<H: lol_html::HandlerTypes>(
     control_prefix: &str,
     servers: &[String],
     runtime_prelude: &str,
+    tab_id: &str,
+    runtime_token: &str,
 ) -> lol_html::HandlerResult {
     let tag = el.tag_name();
     drop_control_attrs(el);
@@ -176,7 +182,15 @@ fn rewrite_element_attrs<H: lol_html::HandlerTypes>(
         return Ok(());
     }
     rewrite_inline_style_attr(el, target_url, control_prefix)?;
-    rewrite_srcdoc_attr(el, &tag, runtime_prelude)?;
+    rewrite_srcdoc_attr(
+        el,
+        &tag,
+        target_url,
+        control_prefix,
+        runtime_prelude,
+        tab_id,
+        runtime_token,
+    )?;
     for attr in ["href", "xlink:href", "src", "poster"] {
         if attr_policy_kind(&tag, attr) == "passive" {
             rewrite_passive_attr(el, attr, target_url, control_prefix)?;
@@ -266,7 +280,11 @@ fn rewrite_inline_style_attr<H: lol_html::HandlerTypes>(
 fn rewrite_srcdoc_attr<H: lol_html::HandlerTypes>(
     el: &mut lol_html::html_content::Element<'_, '_, H>,
     tag: &str,
+    target_url: &str,
+    control_prefix: &str,
     runtime_prelude: &str,
+    tab_id: &str,
+    runtime_token: &str,
 ) -> lol_html::HandlerResult {
     if tag != "iframe" && tag != "frame" {
         return Ok(());
@@ -274,7 +292,18 @@ fn rewrite_srcdoc_attr<H: lol_html::HandlerTypes>(
     let Some(srcdoc) = el.get_attribute("srcdoc") else {
         return Ok(());
     };
-    el.set_attribute("srcdoc", &format!("{runtime_prelude}{srcdoc}"))?;
+    let rewritten = rewrite_document(
+        &srcdoc,
+        DocumentOptions {
+            target_url,
+            control_prefix,
+            servers: &[],
+            runtime_prelude,
+            tab_id,
+            runtime_token,
+        },
+    )?;
+    el.set_attribute("srcdoc", &rewritten)?;
     Ok(())
 }
 
@@ -1086,7 +1115,7 @@ mod tests {
     fn rewrites_script_style_importmap_and_srcdoc_with_lol_html() {
         let prelude = r#"<script nonce=zp>boot()</script><script nonce=zp src="/zp/assets/runtime-prelude.js"></script>"#;
         let out = rewrite_document(
-            r#"<body onload="location.href='/boot'"><script src="/app.js" integrity="sha384-i" nonce="target-nonce"></script><script type="module" src="/entry.js"></script><script>window.location.href="<\/script>";</script><script type="module">import "./dep.js"; window.location.href;</script><script type="importmap">{"imports":{"a":"./a.js"}}</script><style>body{background:url("/bg.png")}</style><button onclick="return location.href"></button><iframe srcdoc="<p>x</p>"></iframe></body>"#,
+            r#"<body onload="location.href='/boot'"><script src="/app.js" integrity="sha384-i" nonce="target-nonce"></script><script type="module" src="/entry.js"></script><script>window.location.href="<\/script>";</script><script type="module">import "./dep.js"; window.location.href;</script><script type="importmap">{"imports":{"a":"./a.js"}}</script><style>body{background:url("/bg.png")}</style><button onclick="return location.href"></button><iframe srcdoc="<p>x</p><script src='/child.js'></script>"></iframe></body>"#,
             DocumentOptions {
                 target_url: "https://example.com/app/page.html",
                 control_prefix: "/zp/",
@@ -1114,7 +1143,8 @@ mod tests {
             r#"data-zp-event-onload=""#,
             r#"data-zp-event-onclick=""#,
             r#"__zp_runEvent"#,
-            r#"srcdoc="<script nonce=zp>boot()</script>"#,
+            r#"srcdoc="<p>x</p><script nonce=zp>boot()</script><script nonce=zp src=&quot;/zp/assets/runtime-prelude.js&quot;></script>"#,
+            r#"/zp/api/script?kind=classic&u=https%3A%2F%2Fexample.com%2Fchild.js&tab=tab-1&rt=rt-1&quot; data-zp-target-url=&quot;https://example.com/child.js&quot; nonce=&quot;zp&quot;"#,
         ] {
             assert!(out.contains(want), "missing {want} in {out}");
         }
