@@ -162,6 +162,66 @@ pub fn rewrite_html_document(
 }
 
 #[wasm_bindgen]
+pub struct HtmlDocumentRewriter {
+    inner: html::document::StreamingDocumentRewriter,
+}
+
+#[wasm_bindgen]
+impl HtmlDocumentRewriter {
+    pub fn write_chunk(&mut self, chunk: &[u8]) -> RewriteOutput {
+        match self.inner.write(chunk) {
+            Ok(code) => RewriteOutput {
+                ok: true,
+                code,
+                error: String::new(),
+            },
+            Err(error) => RewriteOutput {
+                ok: false,
+                code: String::new(),
+                error,
+            },
+        }
+    }
+
+    pub fn end(&mut self) -> RewriteOutput {
+        match self.inner.end() {
+            Ok(code) => RewriteOutput {
+                ok: true,
+                code,
+                error: String::new(),
+            },
+            Err(error) => RewriteOutput {
+                ok: false,
+                code: String::new(),
+                error,
+            },
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn create_html_document_rewriter(
+    target_url: &str,
+    control_prefix: &str,
+    servers_json: &str,
+    runtime_prelude: &str,
+    tab_id: &str,
+    runtime_token: &str,
+) -> HtmlDocumentRewriter {
+    let servers = serde_json::from_str::<Vec<String>>(servers_json).unwrap_or_default();
+    HtmlDocumentRewriter {
+        inner: html::document::StreamingDocumentRewriter::new(html::document::DocumentOptions {
+            target_url,
+            control_prefix,
+            servers: &servers,
+            runtime_prelude,
+            tab_id,
+            runtime_token,
+        }),
+    }
+}
+
+#[wasm_bindgen]
 pub fn make_share_url(target: &str, servers_json: &str) -> RewriteOutput {
     let servers = serde_json::from_str::<Vec<String>>(servers_json).unwrap_or_default();
     match share_url::new_with_servers(target, &servers) {

@@ -2,9 +2,12 @@ package htmltx
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTransformDelegatesWholeDocumentToRustHook(t *testing.T) {
@@ -51,6 +54,74 @@ func TestTransformDelegatesWholeDocumentToRustHook(t *testing.T) {
 	if string(out) != `<html><body>rust</body></html>` {
 		t.Fatalf("unexpected delegated output: %s", out)
 	}
+}
+
+type scriptedStreamRewriter struct {
+	writes int
+}
+
+func (s *scriptedStreamRewriter) WriteChunk(chunk []byte) ([]byte, error) {
+	s.writes++
+	if s.writes == 1 && len(chunk) > 0 {
+		return []byte("first-byte:"), nil
+	}
+	return nil, nil
+}
+
+func (s *scriptedStreamRewriter) End() ([]byte, error) {
+	return []byte("end"), nil
+}
+
+func TestTransformStreamFlushesBeforeInputEOF(t *testing.T) {
+	target, err := url.Parse("https://example.com/app/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputR, inputW := io.Pipe()
+	outputR, outputW := io.Pipe()
+	errs := make(chan error, 1)
+	go func() {
+		errs <- TransformTo(outputW, inputR, Options{
+			TargetURL: target,
+			DocumentStreamRewriter: func(targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (DocumentStreamRewriter, error) {
+				if targetURL != "https://example.com/app/" || controlPrefix != "/zp/" {
+					return nil, fmt.Errorf("unexpected stream context target=%q prefix=%q", targetURL, controlPrefix)
+				}
+				if !strings.Contains(runtimePrelude, "runtime-prelude.js") {
+					return nil, fmt.Errorf("runtime prelude was not passed: %q", runtimePrelude)
+				}
+				return &scriptedStreamRewriter{}, nil
+			},
+		})
+		_ = outputW.Close()
+	}()
+	first := make(chan string, 1)
+	go func() {
+		buf := make([]byte, len("first-byte:"))
+		n, _ := io.ReadFull(outputR, buf)
+		first <- string(buf[:n])
+	}()
+	if _, err := inputW.Write([]byte("<html><body>")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-first:
+		if got != "first-byte:" {
+			t.Fatalf("first output = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("streaming transform did not flush before input EOF")
+	}
+	_ = inputW.Close()
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, outputR)
+		close(drained)
+	}()
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	<-drained
 }
 
 func TestTransformRequiresRustDocumentRewriter(t *testing.T) {

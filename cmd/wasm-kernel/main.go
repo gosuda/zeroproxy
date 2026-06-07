@@ -206,17 +206,18 @@ func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zpht
 	pr, pw := io.Pipe()
 	go func() {
 		err := htmltx.TransformTo(pw, decodedSource, htmltx.Options{
-			TabID:                 tab.TabID,
-			EntryID:               req.Header.Get("X-Zp-Entry-Id"),
-			TargetURL:             finalURL,
-			DocumentCookie:        tab.CookieJar.DocumentCookie(finalURL),
-			DocumentReferrer:      req.Header.Get("X-Zp-Document-Referrer"),
-			RuntimeToken:          req.Header.Get("X-Zp-Runtime-Token"),
-			Servers:               headerServers(req.Header.Get("X-Zp-Relay-Servers")),
-			DynamicCompileAllowed: dynamicCompileAllowed,
-			ReferrerPolicy:        referrerPolicy,
-			DocumentCharset:       docCharset,
-			DocumentRewriter:      rewriteHTMLDocumentFromJS,
+			TabID:                  tab.TabID,
+			EntryID:                req.Header.Get("X-Zp-Entry-Id"),
+			TargetURL:              finalURL,
+			DocumentCookie:         tab.CookieJar.DocumentCookie(finalURL),
+			DocumentReferrer:       req.Header.Get("X-Zp-Document-Referrer"),
+			RuntimeToken:           req.Header.Get("X-Zp-Runtime-Token"),
+			Servers:                headerServers(req.Header.Get("X-Zp-Relay-Servers")),
+			DynamicCompileAllowed:  dynamicCompileAllowed,
+			ReferrerPolicy:         referrerPolicy,
+			DocumentCharset:        docCharset,
+			DocumentStreamRewriter: rewriteHTMLDocumentStreamFromJS,
+			DocumentRewriter:       rewriteHTMLDocumentFromJS,
 		})
 		closeErr := source.Close()
 		if err != nil {
@@ -311,6 +312,47 @@ func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
 		out = append(out, rec)
 	}
 	return out
+}
+
+type jsHTMLDocumentStream struct {
+	value js.Value
+}
+
+func rewriteHTMLDocumentStreamFromJS(targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (htmltx.DocumentStreamRewriter, error) {
+	rewriter := js.Global().Get("ZPRewriter")
+	if !rewriter.Truthy() || rewriter.Get("createHTMLDocumentRewriter").Type() != js.TypeFunction {
+		return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_UNAVAILABLE")
+	}
+	stream := rewriter.Call("createHTMLDocumentRewriter", map[string]any{
+		"targetUrl":     targetURL,
+		"controlPrefix": controlPrefix,
+		"prelude":       runtimePrelude,
+		"tabId":         tabID,
+		"runtimeToken":  runtimeToken,
+		"servers":       stringsForJS(servers),
+	})
+	if !stream.Truthy() || stream.Get("writeChunk").Type() != js.TypeFunction || stream.Get("end").Type() != js.TypeFunction {
+		return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_UNAVAILABLE")
+	}
+	return jsHTMLDocumentStream{value: stream}, nil
+}
+
+func (s jsHTMLDocumentStream) WriteChunk(chunk []byte) ([]byte, error) {
+	jsChunk := js.Global().Get("Uint8Array").New(len(chunk))
+	js.CopyBytesToJS(jsChunk, chunk)
+	out := s.value.Call("writeChunk", jsChunk)
+	if out.Truthy() && out.Get("ok").Bool() {
+		return []byte(out.Get("code").String()), nil
+	}
+	return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_FAILED")
+}
+
+func (s jsHTMLDocumentStream) End() ([]byte, error) {
+	out := s.value.Call("end")
+	if out.Truthy() && out.Get("ok").Bool() {
+		return []byte(out.Get("code").String()), nil
+	}
+	return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_FAILED")
 }
 
 func rewriteHTMLDocumentFromJS(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error) {

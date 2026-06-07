@@ -4,7 +4,10 @@ use std::{
     rc::Rc,
 };
 
-use lol_html::{element, end, html_content::ContentType, rewrite_str, text, RewriteStrSettings};
+use lol_html::{
+    element, end, html_content::ContentType, rewrite_str, text, HtmlRewriter, RewriteStrSettings,
+    Settings,
+};
 
 use crate::{
     css, import_map, js, rewrite_wrapped_source, share_url, RewriteContext, RewriteOutput,
@@ -35,6 +38,88 @@ enum RawTextKind {
 }
 
 pub fn rewrite_document(source: &str, opt: DocumentOptions<'_>) -> Result<String, String> {
+    rewrite_str(source, document_rewrite_settings(opt)).map_err(|err| err.to_string())
+}
+
+type StreamingHtmlRewriter = HtmlRewriter<'static, Box<dyn FnMut(&[u8])>>;
+
+pub struct StreamingDocumentRewriter {
+    rewriter: Option<StreamingHtmlRewriter>,
+    output: Rc<RefCell<Vec<u8>>>,
+    pending_utf8: Vec<u8>,
+}
+
+impl StreamingDocumentRewriter {
+    pub fn new(opt: DocumentOptions<'_>) -> Self {
+        let output = Rc::new(RefCell::new(Vec::new()));
+        let sink_output = Rc::clone(&output);
+        let settings: Settings<'static, 'static> = document_rewrite_settings(opt).into();
+        let rewriter = HtmlRewriter::new(
+            settings,
+            Box::new(move |chunk: &[u8]| sink_output.borrow_mut().extend_from_slice(chunk))
+                as Box<dyn FnMut(&[u8])>,
+        );
+        Self {
+            rewriter: Some(rewriter),
+            output,
+            pending_utf8: Vec::new(),
+        }
+    }
+
+    pub fn write(&mut self, chunk: &[u8]) -> Result<String, String> {
+        let rewriter = self
+            .rewriter
+            .as_mut()
+            .ok_or_else(|| "HTML_DOCUMENT_STREAM_CLOSED".to_string())?;
+        rewriter.write(chunk).map_err(|err| err.to_string())?;
+        self.take_output(false)
+    }
+
+    pub fn end(&mut self) -> Result<String, String> {
+        let rewriter = self
+            .rewriter
+            .take()
+            .ok_or_else(|| "HTML_DOCUMENT_STREAM_CLOSED".to_string())?;
+        rewriter.end().map_err(|err| err.to_string())?;
+        self.take_output(true)
+    }
+
+    fn take_output(&mut self, final_chunk: bool) -> Result<String, String> {
+        let mut bytes = Vec::new();
+        bytes.append(&mut self.pending_utf8);
+        {
+            let mut output = self.output.borrow_mut();
+            bytes.extend_from_slice(&output);
+            output.clear();
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(text),
+            Err(err) => split_utf8_output(err.into_bytes(), final_chunk, &mut self.pending_utf8),
+        }
+    }
+}
+
+fn split_utf8_output(
+    bytes: Vec<u8>,
+    final_chunk: bool,
+    pending_utf8: &mut Vec<u8>,
+) -> Result<String, String> {
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => Ok(text.to_string()),
+        Err(err) => {
+            if err.error_len().is_some() || final_chunk {
+                return Err("HTML_DOCUMENT_STREAM_UTF8".to_string());
+            }
+            let split = err.valid_up_to();
+            pending_utf8.extend_from_slice(&bytes[split..]);
+            Ok(std::str::from_utf8(&bytes[..split])
+                .map_err(|_| "HTML_DOCUMENT_STREAM_UTF8".to_string())?
+                .to_string())
+        }
+    }
+}
+
+fn document_rewrite_settings(opt: DocumentOptions<'_>) -> RewriteStrSettings<'static, 'static> {
     let target_url = opt.target_url.to_string();
     let control_prefix = if opt.control_prefix.is_empty() {
         "/zp/".to_string()
@@ -71,85 +156,81 @@ pub fn rewrite_document(source: &str, opt: DocumentOptions<'_>) -> Result<String
     let raw_text_for_script = Rc::clone(&raw_text);
     let raw_text_for_style = Rc::clone(&raw_text);
     let raw_text_for_text = Rc::clone(&raw_text);
-    rewrite_str(
-        source,
-        RewriteStrSettings {
-            element_content_handlers: vec![
-                element!("head", move |el| {
-                    if !head_injected.replace(true) {
-                        el.prepend(&head_prelude, ContentType::Html);
-                    }
-                    Ok(())
-                }),
-                element!("body", move |el| {
-                    if !body_injected.replace(true) {
-                        el.before(&body_prelude, ContentType::Html);
-                    }
-                    Ok(())
-                }),
-                element!("script", move |el| {
-                    if !script_injected.replace(true) {
-                        el.before(&script_prelude, ContentType::Html);
-                    }
-                    rewrite_script_attrs(
-                        el,
-                        &script_target_url,
-                        &script_control_prefix,
-                        &script_tab_id,
-                        &script_runtime_token,
-                    )?;
-                    if let Some(kind) = script_raw_text_kind(el) {
-                        raw_text_for_script.borrow_mut().push_back(RawTextState {
-                            kind,
-                            text: String::new(),
-                        });
-                    }
-                    Ok(())
-                }),
-                element!("style", move |el| {
-                    rewrite_style_attrs(el, &style_target_url, &style_control_prefix)?;
-                    raw_text_for_style.borrow_mut().push_back(RawTextState {
-                        kind: RawTextKind::Style,
-                        text: String::new(),
-                    });
-                    Ok(())
-                }),
-                text!("script, style", move |txt| {
-                    rewrite_raw_text_chunk(
-                        txt,
-                        &raw_text_for_text,
-                        &text_target_url,
-                        &text_control_prefix,
-                        &text_tab_id,
-                        &text_runtime_token,
-                    )
-                }),
-                element!("*", move |el| {
-                    if matches!(el.tag_name().as_str(), "script" | "style") {
-                        return Ok(());
-                    }
-                    rewrite_element_attrs(
-                        el,
-                        &target_url,
-                        &control_prefix,
-                        &servers,
-                        &attr_prelude,
-                        &attr_tab_id,
-                        &attr_runtime_token,
-                    )?;
-                    Ok(())
-                }),
-            ],
-            document_content_handlers: vec![end!(move |doc| {
-                if !end_injected.replace(true) {
-                    doc.append(&end_prelude, ContentType::Html);
+    RewriteStrSettings {
+        element_content_handlers: vec![
+            element!("head", move |el| {
+                if !head_injected.replace(true) {
+                    el.prepend(&head_prelude, ContentType::Html);
                 }
                 Ok(())
-            })],
-            ..RewriteStrSettings::new()
-        },
-    )
-    .map_err(|err| err.to_string())
+            }),
+            element!("body", move |el| {
+                if !body_injected.replace(true) {
+                    el.before(&body_prelude, ContentType::Html);
+                }
+                Ok(())
+            }),
+            element!("script", move |el| {
+                if !script_injected.replace(true) {
+                    el.before(&script_prelude, ContentType::Html);
+                }
+                rewrite_script_attrs(
+                    el,
+                    &script_target_url,
+                    &script_control_prefix,
+                    &script_tab_id,
+                    &script_runtime_token,
+                )?;
+                if let Some(kind) = script_raw_text_kind(el) {
+                    raw_text_for_script.borrow_mut().push_back(RawTextState {
+                        kind,
+                        text: String::new(),
+                    });
+                }
+                Ok(())
+            }),
+            element!("style", move |el| {
+                rewrite_style_attrs(el, &style_target_url, &style_control_prefix)?;
+                raw_text_for_style.borrow_mut().push_back(RawTextState {
+                    kind: RawTextKind::Style,
+                    text: String::new(),
+                });
+                Ok(())
+            }),
+            text!("script, style", move |txt| {
+                rewrite_raw_text_chunk(
+                    txt,
+                    &raw_text_for_text,
+                    &text_target_url,
+                    &text_control_prefix,
+                    &text_tab_id,
+                    &text_runtime_token,
+                )
+            }),
+            element!("*", move |el| {
+                if matches!(el.tag_name().as_str(), "script" | "style") {
+                    return Ok(());
+                }
+                rewrite_element_attrs(
+                    el,
+                    &target_url,
+                    &control_prefix,
+                    &servers,
+                    &attr_prelude,
+                    &attr_tab_id,
+                    &attr_runtime_token,
+                )?;
+                Ok(())
+            }),
+        ],
+        document_content_handlers: vec![end!(move |doc| {
+            if !end_injected.replace(true) {
+                doc.append(&end_prelude, ContentType::Html);
+            }
+            Ok(())
+        })],
+        ..RewriteStrSettings::new()
+    }
 }
 
 fn rewrite_element_attrs<H: lol_html::HandlerTypes>(
@@ -719,7 +800,7 @@ mod tests {
     use lol_html::{element, rewrite_str, text, RewriteStrSettings};
     use serde_json::Value;
 
-    use super::{rewrite_document, DocumentOptions};
+    use super::{rewrite_document, DocumentOptions, StreamingDocumentRewriter};
 
     const INJECTION_INVENTORY: &str =
         include_str!("../../../internal/htmltx/testdata/injection_inventory.json");
@@ -875,6 +956,39 @@ mod tests {
         inv
     }
 
+    #[test]
+    fn streaming_rewriter_matches_string_rewriter_across_chunk_boundaries() {
+        let source = r#"<html><head><title>한글</title></head><body><script>window.location.href="/next";</script><img src="/로고.png"><iframe srcdoc="<script>window.parent.location.href='/x'</script>"></iframe></body></html>"#;
+        let prelude = r#"<script nonce=zp>boot()</script><script nonce=zp src="/zp/assets/runtime-prelude.js"></script>"#;
+        let full = rewrite_document(
+            source,
+            DocumentOptions {
+                target_url: "https://example.com/app/page.html",
+                control_prefix: "/zp/",
+                servers: &[],
+                runtime_prelude: prelude,
+                tab_id: "tab-1",
+                runtime_token: "rt-1",
+            },
+        )
+        .expect("string document rewrite should succeed");
+        let mut stream = StreamingDocumentRewriter::new(DocumentOptions {
+            target_url: "https://example.com/app/page.html",
+            control_prefix: "/zp/",
+            servers: &[],
+            runtime_prelude: prelude,
+            tab_id: "tab-1",
+            runtime_token: "rt-1",
+        });
+        let mut out = String::new();
+        for chunk in source.as_bytes().chunks(7) {
+            out.push_str(&stream.write(chunk).expect("stream chunk should rewrite"));
+        }
+        out.push_str(&stream.end().expect("stream end should rewrite"));
+        assert_eq!(out, full);
+        assert!(out.contains("runtime-prelude.js"));
+        assert!(out.contains("__zp_set"));
+    }
     #[test]
     fn rewrites_passive_subresources_with_lol_html() {
         let out = rewrite_document(

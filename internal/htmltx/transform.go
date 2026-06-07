@@ -12,18 +12,26 @@ import (
 	"github.com/gosuda/zeroproxy/internal/shareurl"
 )
 
+type DocumentStreamRewriter interface {
+	WriteChunk([]byte) ([]byte, error)
+	End() ([]byte, error)
+}
+
+type DocumentStreamRewriterFactory func(targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (DocumentStreamRewriter, error)
+
 type Options struct {
-	TabID                 string
-	EntryID               string
-	TargetURL             *url.URL
-	DocumentCookie        string
-	DocumentReferrer      string
-	RuntimeToken          string
-	Servers               []string
-	DynamicCompileAllowed bool
-	ReferrerPolicy        string
-	DocumentCharset       string
-	DocumentRewriter      func(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error)
+	TabID                  string
+	EntryID                string
+	TargetURL              *url.URL
+	DocumentCookie         string
+	DocumentReferrer       string
+	RuntimeToken           string
+	Servers                []string
+	DynamicCompileAllowed  bool
+	ReferrerPolicy         string
+	DocumentCharset        string
+	DocumentStreamRewriter DocumentStreamRewriterFactory
+	DocumentRewriter       func(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error)
 }
 
 var ErrMalformedHTML = errors.New("MALFORMED_HTML")
@@ -42,6 +50,23 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 	if opt.TargetURL == nil || opt.TargetURL.Scheme == "" || opt.TargetURL.Host == "" {
 		return fmt.Errorf("%w: missing target URL", ErrMalformedHTML)
 	}
+	runtime := runtimePrelude(opt)
+	if opt.DocumentStreamRewriter != nil {
+		stream, err := opt.DocumentStreamRewriter(
+			opt.TargetURL.String(),
+			shareurl.ControlPrefix,
+			runtime,
+			opt.TabID,
+			opt.RuntimeToken,
+			opt.Servers,
+		)
+		if err == nil {
+			return transformStreamTo(w, r, stream)
+		}
+		if opt.DocumentRewriter == nil {
+			return err
+		}
+	}
 	if opt.DocumentRewriter == nil {
 		return fmt.Errorf("%w: document rewriter unavailable", ErrMalformedHTML)
 	}
@@ -53,7 +78,7 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 		string(source),
 		opt.TargetURL.String(),
 		shareurl.ControlPrefix,
-		runtimePrelude(opt),
+		runtime,
 		opt.TabID,
 		opt.RuntimeToken,
 		opt.Servers,
@@ -62,6 +87,39 @@ func TransformTo(w io.Writer, r io.Reader, opt Options) error {
 		return err
 	}
 	_, err = io.WriteString(w, out)
+	return err
+}
+
+func transformStreamTo(w io.Writer, r io.Reader, stream DocumentStreamRewriter) error {
+	buf := make([]byte, 16*1024)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			if err := writeStreamChunk(w, stream, buf[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	chunk, err := stream.End()
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(chunk)
+	return err
+}
+
+func writeStreamChunk(w io.Writer, stream DocumentStreamRewriter, chunk []byte) error {
+	out, err := stream.WriteChunk(chunk)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(out)
 	return err
 }
 
