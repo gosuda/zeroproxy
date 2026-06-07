@@ -5,15 +5,8 @@
     "url": "https://naver.com",
     "profile": "desktop",
     "primaryFlow": "desktop-homepage",
-    "readiness": [
-      "body",
-      "a[href]"
-    ],
-    "primarySelectors": [
-      "body",
-      "a[href]",
-      "input[type=search], input[name=query], input[name=q]"
-    ],
+    "readiness": ["body", "a[href]"],
+    "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
     "iframeExpectations": {
       "adCandidates": true
     }
@@ -24,15 +17,8 @@
     "url": "https://m.naver.com",
     "profile": "mobile",
     "primaryFlow": "mobile-homepage",
-    "readiness": [
-      "body",
-      "a[href]"
-    ],
-    "primarySelectors": [
-      "body",
-      "a[href]",
-      "input[type=search], input[name=query], input[name=q]"
-    ],
+    "readiness": ["body", "a[href]"],
+    "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
     "iframeExpectations": {
       "adCandidates": true
     },
@@ -50,14 +36,8 @@
     "url": "https://www.google.com/search?q=zeroproxy",
     "profile": "desktop",
     "primaryFlow": "search-results",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "textarea[name=q], input[name=q]",
-      "#search, [role=main]",
-      "a[href]"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["textarea[name=q], input[name=q]", "#search, [role=main]", "a[href]"],
     "expectedDeltas": [
       {
         "surface": "rendering",
@@ -72,9 +52,7 @@
     "url": "https://www.google.com/maps",
     "profile": "desktop",
     "primaryFlow": "maps-shell",
-    "readiness": [
-      "body"
-    ],
+    "readiness": ["body"],
     "primarySelectors": [
       "input[aria-label], input[role=combobox], #searchboxinput",
       "canvas, [role=application], [aria-label*=Map], [aria-label*=map]"
@@ -96,13 +74,8 @@
     "fixture": "embedded-google-maps.html",
     "profile": "desktop",
     "primaryFlow": "embedded-map-iframe",
-    "readiness": [
-      "iframe[data-corpus-google-maps]"
-    ],
-    "primarySelectors": [
-      "main",
-      "iframe[data-corpus-google-maps]"
-    ],
+    "readiness": ["iframe[data-corpus-google-maps]"],
+    "primarySelectors": ["main", "iframe[data-corpus-google-maps]"],
     "iframeExpectations": {
       "nonBlank": true,
       "googleMaps": true
@@ -121,14 +94,8 @@
     "url": "https://www.wikipedia.org",
     "profile": "desktop",
     "primaryFlow": "static-homepage",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "input[name=search], input[type=search]",
-      "a[href]",
-      "main, body"
-    ]
+    "readiness": ["body"],
+    "primarySelectors": ["input[name=search], input[type=search]", "a[href]", "main, body"]
   },
   {
     "id": "github",
@@ -136,14 +103,8 @@
     "url": "https://github.com",
     "profile": "desktop",
     "primaryFlow": "unauthenticated-homepage",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "header, nav",
-      "a[href]",
-      "main, [role=main]"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["header, nav", "a[href]", "main, [role=main]"],
     "expectedDeltas": [
       {
         "surface": "rendering",
@@ -158,14 +119,8 @@
     "url": "https://news.ycombinator.com",
     "profile": "desktop",
     "primaryFlow": "link-list",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      ".athing, .titleline",
-      "a[href]",
-      "table"
-    ]
+    "readiness": ["body"],
+    "primarySelectors": [".athing, .titleline", "a[href]", "table"]
   },
   {
     "id": "reddit",
@@ -173,14 +128,8 @@
     "url": "https://www.reddit.com",
     "profile": "desktop",
     "primaryFlow": "app-shell-feed",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "body",
-      "a[href]",
-      "shreddit-app, [role=main], main"
-    ]
+    "readiness": ["body"],
+    "primarySelectors": ["body", "a[href]", "shreddit-app, [role=main], main"]
   },
   {
     "id": "x-com",
@@ -188,14 +137,8 @@
     "url": "https://x.com",
     "profile": "desktop",
     "primaryFlow": "unauthenticated-landing",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "body",
-      "a[href], [role=button]",
-      "main, [role=main]"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["body", "a[href], [role=button]", "main, [role=main]"],
     "expectedDeltas": [
       {
         "surface": "rendering",
@@ -210,14 +153,8 @@
     "url": "https://www.amazon.com",
     "profile": "desktop",
     "primaryFlow": "commerce-homepage",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "input[type=search], input[name=field-keywords]",
-      "a[href]",
-      "img"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["input[type=search], input[name=field-keywords]", "a[href]", "img"],
     "expectedDeltas": [
       {
         "surface": "rendering",
@@ -232,14 +169,8 @@
     "url": "https://www.nytimes.com",
     "profile": "desktop",
     "primaryFlow": "news-homepage",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "main, [role=main]",
-      "a[href]",
-      "img, picture"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["main, [role=main]", "a[href]", "img, picture"],
     "expectedDeltas": [
       {
         "surface": "script-runtime",
@@ -254,14 +185,8 @@
     "url": "https://www.cloudflare.com",
     "profile": "desktop",
     "primaryFlow": "security-baseline-homepage",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "main, [role=main]",
-      "nav, header",
-      "a[href]"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["main, [role=main]", "nav, header", "a[href]"],
     "expectedDeltas": [
       {
         "surface": "navigation",
@@ -276,20 +201,11 @@
     "url": "https://ipleak.net",
     "profile": "desktop",
     "primaryFlow": "leak-test-surface",
-    "readiness": [
-      "body"
-    ],
-    "primarySelectors": [
-      "body",
-      "#content, main, table",
-      "iframe, section, div"
-    ],
+    "readiness": ["body"],
+    "primarySelectors": ["body", "#content, main, table", "iframe, section, div"],
     "redaction": {
       "coarseIpDnsClassesOnly": true
     },
-    "unsupportedSurfaces": [
-      "webrtc",
-      "webtransport"
-    ]
+    "unsupportedSurfaces": ["webrtc", "webtransport"]
   }
 ]

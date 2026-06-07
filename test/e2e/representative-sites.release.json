@@ -286,10 +286,7 @@
         "googleMapsFrame": false,
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": true,
-        "unsupportedSurfaces": [
-          "webrtc",
-          "webtransport"
-        ],
+        "unsupportedSurfaces": ["webrtc", "webtransport"],
         "expectedDeltas": []
       }
     }

@@ -307,7 +307,11 @@ test('representative release gate excludes expected corpus deltas from triage co
     {
       ...native,
       selectors: [{ selector: 'main', count: 0, visible: false }],
-      rendering: { ...native.rendering, visibleTextLength: 10, screenshot: { sha256: 'b', byteBucket: '<64KiB' } },
+      rendering: {
+        ...native.rendering,
+        visibleTextLength: 10,
+        screenshot: { sha256: 'b', byteBucket: '<64KiB' },
+      },
       pageErrors: [{ name: 'SyntaxError' }],
     },
     {
@@ -323,7 +327,10 @@ test('representative release gate excludes expected corpus deltas from triage co
       ],
     },
   );
-  const gate = buildReleaseGateReport([{ id: 'expected-site' }], [{ site: 'expected-site', comparison: expected }]);
+  const gate = buildReleaseGateReport(
+    [{ id: 'expected-site' }],
+    [{ site: 'expected-site', comparison: expected }],
+  );
   assert.equal(gate.status, 'pass');
   assert.equal(gate.metrics.expectedDeltaSites, 1);
   assert.equal(gate.metrics.triageSites, 0);

@@ -432,10 +432,12 @@ export function releaseGateSeedSemantics(corpus) {
       nonBlankMap: site.renderExpectations?.nonBlankMap === true,
       coarseIpDnsClassesOnly: site.redaction?.coarseIpDnsClassesOnly === true,
       unsupportedSurfaces: [...(site.unsupportedSurfaces || [])].sort(),
-      expectedDeltas: (Array.isArray(site.expectedDeltas) ? site.expectedDeltas : []).map((row) => ({
-        surface: row.surface,
-        classification: row.classification || 'expected-delta',
-      })),
+      expectedDeltas: (Array.isArray(site.expectedDeltas) ? site.expectedDeltas : []).map(
+        (row) => ({
+          surface: row.surface,
+          classification: row.classification || 'expected-delta',
+        }),
+      ),
     },
   }));
 }
@@ -713,7 +715,11 @@ async function observePage(page, spec, events, startedAt, navigationError) {
     },
     console: events.console,
     pageErrors: events.pageErrors,
-    requestFailures: normalizeRequestFailures(events.requestFailures, events.responses, !navigationError),
+    requestFailures: normalizeRequestFailures(
+      events.requestFailures,
+      events.responses,
+      !navigationError,
+    ),
     responses: events.responses,
     selectors: dom.selectors || [],
     rendering: {
@@ -1074,7 +1080,6 @@ function failureKey(item) {
   return `${item.resourceType}:${item.urlClass.scheme}:${item.urlClass.hostClass}:${item.failureClass}`;
 }
 
-
 function normalizeRequestFailures(failures, responses, pageOK) {
   const rows = Array.isArray(failures) ? failures : [];
   if (!pageOK) return rows;
@@ -1085,10 +1090,7 @@ function normalizeRequestFailures(failures, responses, pageOK) {
   if (!hasDocumentResponse) return rows;
   return rows.filter(
     (row) =>
-      !(
-        row.resourceType === 'document' &&
-        /ERR_ABORTED/i.test(String(row.failureClass || ''))
-      ),
+      !(row.resourceType === 'document' && /ERR_ABORTED/i.test(String(row.failureClass || ''))),
   );
 }
 function responseKey(item) {
