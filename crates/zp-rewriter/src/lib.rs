@@ -94,6 +94,16 @@ pub(crate) const DANGEROUS_GLOBALS: &[&str] = &[
     "frames",
     "self",
     "globalThis",
+    // 2026-06-07 split-bundle (c.1) Step 2.1.5: shadow-compare 가 NAVER
+    // cross-domain-storage 에서 legacy 는 `__zp_get(globalThis,"Function")` 으로
+    // rewrite 하는데 modern (이 crate) 은 raw `Function` 유지하는 divergence
+    // 발견. target site 가 `Function.prototype.constructor` 으로 native Function
+    // 접근 → `new Function('return globalThis')()` 으로 membrane 우회 가능
+    // (PHASE2 "탈출 없는 감옥" 위반). 추가 sibling: 함수 형태로 eval-equivalent
+    // 인 native들 — `eval` 도 이미 함수지만 식별자로 access 되는 경우는 동일
+    // 회로. 둘 다 dangerous 로 분류.
+    "Function",
+    "eval",
 ];
 
 /// Member names that, when accessed on ANY object, must go through the
@@ -1103,6 +1113,36 @@ mod tests {
                 r2,
             );
         }
+    }
+
+    #[test]
+    fn function_global_is_rewritten_to_membrane() {
+        // 2026-06-07 split-bundle (c.1) Step 2.1.5: shadow-compare 가 NAVER
+        // cross-domain-storage 에서 발견한 escape vector. `Function.prototype`
+        // 으로 native Function constructor 접근 → eval-equivalent. legacy
+        // rewriter-rs 는 `Function` 을 dangerous global 로 분류 — modern 도
+        // 동일하게 처리해야 NAVER (그리고 PHASE2 strict mode) 회귀 방지.
+        let src = "var i = Function.prototype; return new Function('return globalThis')();";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"Function\")"),
+            "Function global must route through membrane: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn eval_global_is_rewritten_to_membrane() {
+        // `eval` 도 native escape vector — `eval("...")` 으로 임의 코드 실행.
+        // identifier reference 로 접근될 때 (e.g. `var f = eval; f("...")`)
+        // dangerous 로 분류 의무.
+        let src = "var f = eval; f('return globalThis');";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"eval\")"),
+            "eval global must route through membrane: {}",
+            r.code,
+        );
     }
 
     #[test]

@@ -531,6 +531,24 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
+// 2026-06-08 split-bundle (c.1) Step 2.2: SW primary swap — ZPBundle is the
+// primary script rewriter, ZPRewriter (rewriter-rs/) survives only as the
+// fallback if modern errors. Pin the call ordering + the explicit fallback
+// guard so the swap can't silently revert.
+test('SW rewriteScriptResponse uses ZPBundle primary + ZPRewriter fallback (Step 2.2)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const fnMatch = sw.match(/async function rewriteScriptResponse\b[\s\S]*?return new Response\(code,/);
+  assert.ok(fnMatch, 'rewriteScriptResponse body must be locatable');
+  const body = fnMatch[0];
+  const modernIdx = body.indexOf('self.ZPBundle.rewriteScript(');
+  const legacyIdx = body.indexOf('self.ZPRewriter && self.ZPRewriter.rewriteScript(');
+  assert.ok(modernIdx > 0, 'rewriteScriptResponse must call ZPBundle.rewriteScript');
+  assert.ok(legacyIdx > 0, 'rewriteScriptResponse must retain legacy ZPRewriter as fallback');
+  assert.ok(modernIdx < legacyIdx, 'ZPBundle (modern) must be primary, ZPRewriter is the fallback');
+  // The fallback must be GATED on modern failing (empty code), not invoked unconditionally.
+  assert.match(body, /if \(!code\)[\s\S]*?ZPRewriter/, 'legacy fallback must be gated on modern returning empty code');
+});
+
 // 2026-06-07 split-bundle (c.1) Step 2.1: rewriteScriptResponse runs the
 // modern ZPBundle pipeline as a shadow comparison after the legacy
 // ZPRewriter produces the served response. Pin the comparator + buffer +
@@ -541,9 +559,13 @@ test('SW shadow-compare records divergence between legacy + modern rewriters (St
   assert.match(sw, /SHADOW_LOG_CAP/, 'shadow log must declare a capacity constant');
   assert.match(sw, /function recordShadowDivergence/, 'recorder helper must exist');
   assert.match(sw, /function shadowCompareRewriters/, 'shadow compare helper must exist');
-  // Comparator must invoke BOTH modern paths so divergences at either layer surface.
-  assert.match(sw, /shadowCompareRewriters[\s\S]*?ZPBundle\.rewriteScriptPatches/, 'shadow must invoke patch-mode modern path');
-  assert.match(sw, /shadowCompareRewriters[\s\S]*?ZPBundle\.rewriteScript\(/, 'shadow must also invoke full re-emit modern path');
+  // 2026-06-08 Step 2.1.5: shadow comparator uses full re-emit only.
+  // Patch-mode (`rewriteScriptPatches` + `applyScriptPatches`) emits raw
+  // markers (`\u{1}GLOBAL_GET\u{1}…`) that the JS applier can't resolve, so
+  // comparing patch-mode output against legacy would surface noise instead
+  // of real semantic gaps. Until the patches API is marker-resolved at the
+  // Rust boundary, full re-emit is the only valid modern path here.
+  assert.match(sw, /shadowCompareRewriters[\s\S]*?ZPBundle\.rewriteScript\(/, 'shadow must invoke full re-emit modern path');
   // Divergence record fields — pin so the schema can't silently regress
   // before Step 2.2's analysis script depends on them.
   assert.match(sw, /firstDiffIdx/, 'divergence record must include firstDiffIdx');
@@ -580,25 +602,37 @@ test('SW activate event awaits initBundle with bounded timeout (Step 2.0)', () =
   assert.match(activateBody[0], /await\s+Promise\.race/, 'activate must await the initBundle race');
 });
 
-test('SW patch-mode emit is wired with applier helper', () => {
+// 2026-06-08 split-bundle (c.1) Step 2.1.5: patch-mode call site DROPPED from
+// rewriteScriptResponse because `rewriteScriptPatches` returns raw marker
+// strings (`\u{1}GLOBAL_GET\u{1}…`, `\u{1}MEMBER_GET\u{1}…`, …) that only
+// `apply_patches` in Rust knows how to expand into `__zp_get(…)` / `__zp_set(…)`
+// / `__zp_call(…)`. JS-side `applyScriptPatches` is a naive splicer; using it
+// against the patches envelope produces invalid JS embedded with raw markers
+// (discovered by shadow-compare on NAVER ndp-loader, see trap-notebook).
+//
+// The wbg wrapper still exposes `rewriteScriptPatches` (downstream callers
+// that ship a Rust-side resolver can use it), the `applyScriptPatches` helper
+// still exists (kept for the future marker-resolver port + still required by
+// the behavior test below), but rewriteScriptResponse must NOT call them.
+test('SW does not use patch-mode in rewriteScriptResponse (Step 2.1.5 marker hazard)', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  assert.ok(sw.includes('rewriteScriptPatches'), 'SW must expose rewriteScriptPatches on ZPBundle');
-  assert.ok(sw.includes('applyScriptPatches'), 'SW must implement applier helper');
-  // Preference order: patch path attempted before full re-emit fallback.
-  const patchCall = sw.indexOf('self.ZPBundle.rewriteScriptPatches(');
-  const fullCall = sw.indexOf('self.ZPBundle.rewriteScript(');
-  assert.ok(patchCall > 0, 'SW must call rewriteScriptPatches');
-  assert.ok(fullCall > patchCall, 'patch-mode must be attempted before full re-emit fallback');
-  // Envelope shape contract: applier must reject malformed JSON, walk
-  // patches in order, and splice replacements between original spans.
-  assert.ok(sw.includes('JSON.parse(envelopeJson)'), 'applier must parse JSON envelope');
-  assert.ok(sw.includes('env.patches'), 'applier must read patches array');
-  assert.ok(sw.includes('source.slice(cursor, start)'), 'applier must splice unmodified spans');
-  // Empty source must not be cached as a successful rewrite (fail-closed posture).
-  assert.ok(
-    /typeof patched === 'string' && patched\.length > 0/.test(sw),
-    'patched fallback must guard against empty string',
+  // wbg wrapper still exposes the API for future use.
+  assert.ok(sw.includes('rewriteScriptPatches'), 'ZPBundle wrapper still exposes rewriteScriptPatches');
+  assert.ok(sw.includes('applyScriptPatches'), 'applier helper kept for future marker resolver port');
+  // The actual hot-path call site must be GONE from rewriteScriptResponse.
+  // Match the structural pattern: rewriteScriptResponse → full re-emit only.
+  const fnMatch = sw.match(/async function rewriteScriptResponse\b[\s\S]*?return new Response\(code,/);
+  assert.ok(fnMatch, 'rewriteScriptResponse body must be locatable');
+  const body = fnMatch[0];
+  assert.equal(
+    body.includes('self.ZPBundle.rewriteScriptPatches('), false,
+    'rewriteScriptResponse must NOT call rewriteScriptPatches (markers unresolved)',
   );
+  assert.equal(
+    body.includes('applyScriptPatches('), false,
+    'rewriteScriptResponse must NOT call applyScriptPatches (naive splicer leaks markers)',
+  );
+  assert.match(body, /self\.ZPBundle\.rewriteScript\(/, 'rewriteScriptResponse must call full re-emit');
 });
 
 test('applyScriptPatches behavior: empty patches, splice, malformed envelopes', () => {

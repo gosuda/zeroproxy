@@ -967,16 +967,14 @@ function shadowCompareRewriters(source, opt, legacyCode) {
   const target = opt.targetUrl || '';
   let modernCode = null;
   let modernThrew = null;
-  let path = '';
+  // 2026-06-08 Step 2.1.5: full re-emit only (patches path emits unresolved
+  // markers — see rewriteScriptResponse). Both modern paths (`rewriteScript`
+  // and `rewriteScriptPatches`+`applyScriptPatches`) used to be exercised
+  // here, but until the patches API is marker-resolved at the Rust boundary
+  // the only valid comparison is against the full re-emit.
+  const path = 'full';
   try {
-    if (typeof self.ZPBundle.rewriteScriptPatches === 'function') {
-      path = 'patches';
-      const envelope = self.ZPBundle.rewriteScriptPatches(source, kind, target);
-      modernCode = applyScriptPatches(source, envelope);
-    } else {
-      path = 'full';
-      modernCode = self.ZPBundle.rewriteScript(source, kind, target);
-    }
+    modernCode = self.ZPBundle.rewriteScript(source, kind, target);
   } catch (e) {
     modernThrew = String(e && e.message || e);
   }
@@ -1055,58 +1053,42 @@ async function rewriteScriptResponse(resp, opt) {
         return new Response(cached, { status: resp.status, statusText: resp.statusText, headers: h });
       }
     } catch { cacheKey = ''; }
-    let out = null;
+    // 2026-06-08 split-bundle (c.1) Step 2.2: SW primary swap. ZPBundle
+    // (modern OXC 0.133) is now the primary script rewriter; legacy
+    // ZPRewriter (OXC 0.60, in rewriter-rs/) only runs as a fallback if
+    // modern errors. Shadow-compare on NAVER + Wikipedia recorded 0
+    // divergence after Step 2.1.5 added `Function` / `eval` to
+    // DANGEROUS_GLOBALS and dropped the marker-unsafe patches path.
     try {
-      out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-    } catch (jsErr) {
-      // JS rewriter threw — try Rust bundle fallback before fail-closing.
-      out = null;
-    }
-    if (!out || !out.ok) {
-      // Fallback to Rust ZPBundle if initialized. The Rust rewriter covers a
-      // subset of rules (identifier, member, call, assignment); if it succeeds
-      // its output is just as safe as the JS one — fail-closed posture intact.
-      try {
-        await initBundle();
-        if (self.ZPBundle && self.ZPBundle.ready) {
-          // Prefer patch-mode emit: the Rust crate returns the patch list
-          // as a JSON envelope (~kB) instead of the full rewritten source
-          // (~MB on large scripts). Applying patches in JS over the buffer
-          // we already hold avoids both the OXC re-emit cost and the
-          // wasm-bindgen string-copy crossing.
-          const kind = opt.kind || 'classic';
-          const target = opt.targetUrl || '';
-          if (typeof self.ZPBundle.rewriteScriptPatches === 'function') {
-            try {
-              const envelope = self.ZPBundle.rewriteScriptPatches(source, kind, target);
-              const patched = applyScriptPatches(source, envelope);
-              if (typeof patched === 'string' && patched.length > 0) {
-                code = patched;
-              }
-            } catch { /* fall through to full re-emit */ }
-          }
-          if (!code) {
-            const rustCode = self.ZPBundle.rewriteScript(source, kind, target);
-            if (typeof rustCode === 'string' && rustCode.length > 0) {
-              code = rustCode;
-            }
-          }
+      await initBundle();
+      if (self.ZPBundle && self.ZPBundle.ready) {
+        const kind = opt.kind || 'classic';
+        const target = opt.targetUrl || '';
+        const rustCode = self.ZPBundle.rewriteScript(source, kind, target);
+        if (typeof rustCode === 'string' && rustCode.length > 0) {
+          code = rustCode;
+          // Inverted shadow: compare LEGACY against the modern output we
+          // just shipped, so we keep observing any future divergence
+          // (e.g. when a target site triggers a path one rewriter has
+          // not implemented). NOTE: legacyForShadow is captured BEFORE
+          // pragma append below.
+          const modernForShadow = code;
+          Promise.resolve().then(() => shadowCompareRewriters(source, opt, modernForShadow));
         }
-      } catch (rustErr) { /* swallow; fall through to block */ }
-    } else {
-      code = out.code;
-      // 2026-06-07 split-bundle (c.1) Step 2.1: shadow-compare. Fire the
-      // modern ZPBundle pipeline in a deferred microtask so the legacy
-      // response (`code`) ships without the modern's CPU cost on the hot
-      // path. Divergence appended to `shadowLog`; readable via
-      // /zp/api/__shadow_log.
-      // CRITICAL: capture the legacy output value NOW, not via the `code`
-      // let-binding. The pragma-append + cache-set code below mutates
-      // `code`, so passing `code` into the microtask closure would
-      // compare against a corrupted post-pragma legacy form.
-      const legacyForShadow = code;
-      if (legacyForShadow) {
-        Promise.resolve().then(() => shadowCompareRewriters(source, opt, legacyForShadow));
+      }
+    } catch (rustErr) { /* swallow; legacy fallback below */ }
+    if (!code) {
+      // Legacy fallback — modern threw or wasn't ready. ZPRewriter
+      // (rewriter-rs/) survives in SW realm as the safety net + the
+      // CSS rewriter (Step 4 will port). Drop it once the Step 3 / 4
+      // milestones land and the Function/eval coverage is verified on
+      // additional real sites beyond NAVER + Wikipedia.
+      let out = null;
+      try {
+        out = self.ZPRewriter && self.ZPRewriter.rewriteScript(source, { kind: opt.kind || 'classic', targetUrl: opt.targetUrl, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
+      } catch { out = null; }
+      if (out && out.ok && typeof out.code === 'string' && out.code.length > 0) {
+        code = out.code;
       }
     }
     if (!code) {
