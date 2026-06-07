@@ -76,7 +76,7 @@ function createTargetServer(requests) {
     if (url.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Home</title><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'"><meta http-equiv="Content-Security-Policy-Report-Only" content="default-src 'none'; connect-src 'none'"><link rel="stylesheet" href="/site.css"><link id="icon-link" rel="icon" href="/site-icon.png"></head><body>
-        <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><img id="image-probe" src="/image-probe.png" alt=""><a id="next" href="/next">Next page</a></main>
+        <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><img id="image-probe" src="/image-probe.png" alt=""><span class="masked-item"></span><span class="masked-item"></span><a id="next" href="/next">Next page</a></main>
         <script>
           window.__ua = navigator.userAgent;
           window.__platform = navigator.platform;
@@ -84,6 +84,18 @@ function createTargetServer(requests) {
           window.__storageInitial = { local: localStorage.getItem('zp-persist'), session: sessionStorage.getItem('zp-session') };
           window.__phase2DynamicFunction = Function('return location.href')();
           window.__phase2EvalLocation = eval('location.href');
+          window.__phase2WindowEvalLocation = window.eval('location.href');
+          const indirectEvalAlias = window.eval;
+          window.__phase2IndirectEvalLocation = indirectEvalAlias('location.href');
+          window.__maskedSelectorEval = (() => {
+            const localCollector = (root, className) => root.getElementsByClassName(className);
+            const buildSelector = () => {
+              const generated = "(function(root) { return localCollector(root, 'masked-item').length; })";
+              eval('var compiledSelector = ' + generated + ';');
+              return compiledSelector;
+            };
+            return buildSelector()(document);
+          })();
           window.__messageEvents = [];
           window.addEventListener('message', ev => {
             if (ev.data && ev.data.type) window.__messageEvents.push({ type: ev.data.type, origin: ev.origin, href: ev.data.href || '' });
@@ -1645,6 +1657,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       phase2Location: window.__phase2Location,
       phase2DynamicFunction: window.__phase2DynamicFunction,
       phase2EvalLocation: window.__phase2EvalLocation,
+      phase2WindowEvalLocation: window.__phase2WindowEvalLocation,
+      phase2IndirectEvalLocation: window.__phase2IndirectEvalLocation,
+      maskedSelectorEval: window.__maskedSelectorEval,
       innerHTMLScriptFixture: window.__innerHTMLScriptFixture,
       styleProbe: (() => {
         const el = document.getElementById('style-probe');
@@ -1783,6 +1798,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   });
   assert.equal(home.phase2DynamicFunction, `http://${targetHost}:${targetPort}/`);
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
+  assert.equal(home.phase2WindowEvalLocation, `http://${targetHost}:${targetPort}/`);
+  assert.equal(home.phase2IndirectEvalLocation, `http://${targetHost}:${targetPort}/`);
+  assert.equal(home.maskedSelectorEval, 2);
   assert.equal(home.innerHTMLScriptFixture, `http://${targetHost}:${targetPort}/`);
   assert.deepEqual(home.styleProbe, {
     borderTopWidth: '7px',

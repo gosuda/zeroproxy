@@ -109,19 +109,46 @@ test('runtime dynamic constructor descriptors stay assignable for app bundles', 
   assert.equal(rt.includes("define(w, 'Function', root.Function)"), false);
 });
 
-test('runtime dynamic eval uses one native-scoped path without rewritten fallback', () => {
+test('runtime preserves native direct eval for lexical generated functions', () => {
   const rt = readRuntimeSource();
   assert.ok(
     rt.includes('eval: w.eval'),
-    'native eval capture is required for strict app-bundle compatibility',
+    'native eval capture is required for string timer compatibility',
+  );
+  assert.equal(
+    rt.includes("defineReplacingNative(root, 'eval'"),
+    false,
+    'bare eval must keep native direct-eval lexical scope',
+  );
+  assert.equal(
+    rt.includes("if (name === 'eval')"),
+    false,
+    'global helper reads must not redirect bare eval through a facade',
   );
   assert.ok(
-    rt.includes('return runScopedNativeEval(String(source));'),
-    'dynamic eval must use the single scoped eval path',
+    rt.includes("return rewritePageSource(source, 'classic');"),
+    'direct eval source must go through the JavaScript rewriter',
   );
   assert.ok(
-    rt.includes('(0, Native.eval)(`with(__ZP_EVAL_SCOPE){${expr}\\n}`)'),
-    'scoped eval must preserve native eval semantics',
+    rt.includes('return current === Native.eval ? indirectEval : current;'),
+    'native window.eval reads must receive the indirect rewritten eval wrapper',
+  );
+  assert.equal(
+    rt.includes('with(__zp_eval_scope())'),
+    false,
+    'direct eval must not use a with-scope wrapper',
+  );
+  const dynamic = fs.readFileSync('web/runtime/dynamic-code/facade.mjs', 'utf8');
+  assert.ok(
+    dynamic.includes(
+      "return (0, Native.eval)(rewriteScriptSource(String(text || ''), 'classic'));",
+    ),
+    'string timers still execute rewritten source through native indirect eval',
+  );
+  assert.equal(
+    dynamic.includes('__ZP_EVAL_SCOPE'),
+    false,
+    'string timers must not use with-scope eval state',
   );
   assert.equal(
     rt.includes('return compileEvalSource(text).call(root, scope);'),

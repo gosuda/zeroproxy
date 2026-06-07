@@ -877,6 +877,34 @@ test('Rust rewriter virtualizes dangerous globals without rewriting local bindin
   assert.match(out.code, /__zp_get\(globalThis,"Function"\)/);
 });
 
+test('Rust rewriter preserves bare eval as lexical direct eval', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(
+    `
+    (function() {
+      var localCollector = function(root) { return root.items.length; };
+      var source = "(function(root) { return localCollector(root); })";
+      eval("var compiledSelector = " + source + ";");
+      window.__maskedSelectorEval = compiledSelector({ items: [1, 2, 3] });
+    })();
+    window.__maskedEvalOrigin = eval('location.origin');
+    window.__maskedWindowEvalOrigin = window.eval('location.origin');
+    var maskedIndirectEval = window.eval;
+    window.__maskedIndirectEvalOrigin = maskedIndirectEval('location.origin');
+  `,
+    { kind: 'classic' },
+  );
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assert.match(out.code, /\beval\(__zp_eval_source\("var compiledSelector = "\+source\+";"\)\)/);
+  assert.match(out.code, /\beval\(__zp_eval_source\("location.origin"\)\)/);
+  assert.match(
+    out.code,
+    /__zp_call\(__zp_get\(globalThis,"window"\),"eval",\["location.origin"\]\)/,
+  );
+  assert.match(out.code, /maskedIndirectEval=__zp_get\(__zp_get\(globalThis,"window"\),"eval"\)/);
+  assert.doesNotMatch(out.code, /__zp_get\(globalThis,"eval"\)/);
+});
+
 test('Rust rewriter supports modules and fails closed on parse errors', async () => {
   const rewriter = await loadRewriter();
   const mod = rewriter.rewriteScript(

@@ -971,7 +971,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       dynamicCompileAllowed,
       normalizedError,
       getVirtualURL: () => virtualURL,
-      getScope: () => scope,
+      rewriteScriptSource: rewritePageSource,
       define,
       defineReplacingNative,
       maskNativeFunction,
@@ -1121,6 +1121,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         if (prop === 'location') return base === scope || base === root ? virtualLocation : base.location;
         if (prop === 'origin') return base === scope || base === root ? virtualURL.origin : base.location && base.location.origin;
         if (prop === 'postMessage') return postMessageWrapperFor(base === scope ? root : base);
+        if (prop === 'eval' && (base === scope || base === root)) {
+          const current = Reflect.get(root, 'eval');
+          return current === Native.eval ? indirectEval : current;
+        }
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
       }
@@ -1235,6 +1239,19 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (u.protocol !== 'http:' && u.protocol !== 'https:') throw normalizedError('NotSupportedError');
       return scriptProxyPath(u.href, 'module');
     }
+    function evalSource(source) {
+      if (typeof source !== 'string') return source;
+      return rewritePageSource(source, 'classic');
+    }
+    function indirectEval(source) {
+      if (arguments.length === 0) return undefined;
+      if (typeof source !== 'string') return source;
+      if (typeof Native.eval !== 'function') throw normalizedError('NotSupportedError');
+      return (0, Native.eval)(evalSource(source));
+    }
+    try { Object.defineProperty(indirectEval, 'name', { value: 'eval', configurable: true }); } catch {}
+    try { Object.defineProperty(indirectEval, 'length', { value: 1, configurable: true }); } catch {}
+    maskNativeFunction(indirectEval, 'eval');
     define(root, '__zp_get', get);
     define(root, '__zp_optionalGet', optionalGet);
     define(root, '__zp_set', set);
@@ -1249,6 +1266,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     define(root, '__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
     define(root, '__zp_ownKeys', ownKeys);
     define(root, '__zp_module_url', moduleURL);
+    define(root, '__zp_eval_source', evalSource);
     define(root, '__zp_nav_assign', v => setVirtualLocation(v));
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));

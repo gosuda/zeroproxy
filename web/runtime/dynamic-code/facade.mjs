@@ -1,6 +1,5 @@
 import {
   dynamicSource,
-  isEvalExpressionCandidate,
   simpleDynamicValue,
   stringArgs,
 } from './source.mjs';
@@ -11,7 +10,7 @@ export function createDynamicCodeFacade({
   dynamicCompileAllowed,
   normalizedError,
   getVirtualURL,
-  getScope,
+  rewriteScriptSource,
   define,
   defineReplacingNative,
   maskNativeFunction,
@@ -54,7 +53,7 @@ export function createDynamicCodeFacade({
 
   function compileTimerString(source) {
     const text = String(source || '');
-    return function anonymous() { return runScopedNativeEval(text); };
+    return function anonymous() { return runRewrittenNativeEval(text); };
   }
 
   function compileDynamic(ctor, args, kind) {
@@ -70,43 +69,10 @@ export function createDynamicCodeFacade({
     return fn;
   }
 
-  function dynamicEval(source) {
-    if (arguments.length === 0) return undefined;
-    if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-    return runScopedNativeEval(String(source));
-  }
-
-  function runScopedNativeEval(text) {
+  function runRewrittenNativeEval(text) {
     if (typeof Native.eval !== 'function') throw normalizedError('NotSupportedError');
-    const previous = root.__ZP_EVAL_SCOPE;
-    const hadPrevious = Object.hasOwn(root, '__ZP_EVAL_SCOPE');
-    Object.defineProperty(root, '__ZP_EVAL_SCOPE', {
-      value: getScope(),
-      enumerable: false,
-      configurable: true,
-      writable: true,
-    });
-    try {
-      const expr = isEvalExpressionCandidate(text) ? `(${text})` : text;
-      return (0, Native.eval)(`with(__ZP_EVAL_SCOPE){${expr}\n}`);
-    } finally {
-      restoreEvalScope(previous, hadPrevious);
-    }
-  }
-
-  function restoreEvalScope(previous, hadPrevious) {
-    try {
-      if (hadPrevious) {
-        Object.defineProperty(root, '__ZP_EVAL_SCOPE', {
-          value: previous,
-          enumerable: false,
-          configurable: true,
-          writable: true,
-        });
-      } else {
-        delete root.__ZP_EVAL_SCOPE;
-      }
-    } catch {}
+    if (typeof rewriteScriptSource !== 'function') throw normalizedError('NotSupportedError');
+    return (0, Native.eval)(rewriteScriptSource(String(text || ''), 'classic'));
   }
 
   function setDynamicConstructorIdentity(fn, name, proto) {
@@ -130,7 +96,6 @@ export function createDynamicCodeFacade({
   }
 
   function dynamicGlobal(name) {
-    if (name === 'eval') return dynamicEval;
     if (name === 'Function') return dynamicFunction;
     if (name === 'AsyncFunction') return dynamicAsyncFunction;
     if (name === 'GeneratorFunction') return dynamicGeneratorFunction;
@@ -182,10 +147,6 @@ export function createDynamicCodeFacade({
       'AsyncGeneratorFunction',
       NativeAsyncGeneratorFunction && NativeAsyncGeneratorFunction.prototype,
     );
-    try { Object.defineProperty(dynamicEval, 'name', { value: 'eval', configurable: true }); } catch {}
-    try { Object.defineProperty(dynamicEval, 'length', { value: 1, configurable: true }); } catch {}
-    maskNativeFunction(dynamicEval, 'eval');
-    defineReplacingNative(root, 'eval', dynamicEval);
     defineReplacingNative(root, 'Function', dynamicFunction);
     installDynamicConstructorBackrefs();
     if (Native.setTimeout) {

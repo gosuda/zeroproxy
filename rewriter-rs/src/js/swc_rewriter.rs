@@ -32,7 +32,6 @@ const GLOBAL_NAMES: &[&str] = &[
     "opener",
     "frames",
     "WebSocket",
-    "eval",
     "Function",
     "AsyncFunction",
     "GeneratorFunction",
@@ -200,6 +199,18 @@ impl VisitMut for SwcRewriter<'_> {
     fn visit_mut_call_expr(&mut self, call: &mut swc_ecma_ast::CallExpr) {
         if matches!(call.callee, Callee::Import(_)) {
             self.rewrite_dynamic_import(call);
+            return;
+        }
+        if self.is_direct_eval_callee(&call.callee) {
+            for arg in &mut call.args {
+                arg.expr.visit_mut_with(self);
+            }
+            if let Some(first) = call.args.first_mut() {
+                if first.spread.is_none() {
+                    let source = *first.expr.clone();
+                    *first.expr = call_helper("__zp_eval_source", vec![source]);
+                }
+            }
             return;
         }
         if let Some((base, prop)) = self.call_target_parts(&call.callee, false) {
@@ -529,6 +540,7 @@ impl SwcRewriter<'_> {
         match &member.prop {
             MemberProp::Ident(id) => {
                 MEMBER_HELPER_PROPS.contains(&id.sym.as_ref())
+                    || id.sym == *"eval" && self.is_window_like_expr(&member.obj)
                     || matches!(id.sym.as_ref(), "href" | "hash")
                         && self.is_virtual_location_expr(&member.obj)
             }
@@ -641,6 +653,14 @@ impl SwcRewriter<'_> {
             }
             _ => None,
         }
+    }
+
+    fn is_direct_eval_callee(&self, callee: &Callee) -> bool {
+        matches!(
+            callee,
+            Callee::Expr(expr)
+                if matches!(&**expr, Expr::Ident(id) if id.sym == *"eval" && self.is_unresolved(id.ctxt))
+        )
     }
 
     fn construct_target(&mut self, callee: &Expr) -> Option<Expr> {
