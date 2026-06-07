@@ -818,3 +818,260 @@ test('membrane: blocked navigation response carries the default-deny membrane CS
     'fail-closed error page must keep nosniff',
   );
 });
+
+test('membrane: event facade options & object listener support', () => {
+  const src = fs.readFileSync('web/runtime/facades/events.mjs', 'utf8');
+  const code =
+    src.replace('export function createEventTargetFacade', 'function createEventTargetFacade') +
+    '\ncreateEventTargetFacade;';
+  const sandbox = {};
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  const createEventTargetFacade = vm.runInContext(code, sandbox);
+
+  const target = {};
+  const ZPEventTarget = createEventTargetFacade({
+    Native: {
+      Map,
+      String,
+      Array: { from: Array.from },
+      arrayFrom: Array.from,
+      Object: { defineProperty: Object.defineProperty },
+      objectDefineProperty: Object.defineProperty,
+      Reflect: { apply: Reflect.apply },
+      reflectApply: Reflect.apply,
+    },
+    define: (obj, name, fn) => {
+      obj[name] = fn;
+    },
+    listenersKey: '__listeners',
+  });
+  ZPEventTarget.installEventMethods(target);
+
+  // 1. once option
+  let onceCount = 0;
+  target.addEventListener(
+    'once-test',
+    () => {
+      onceCount++;
+    },
+    { once: true },
+  );
+  target.dispatchEvent({ type: 'once-test' });
+  target.dispatchEvent({ type: 'once-test' });
+  assert.equal(onceCount, 1, 'once listener must fire exactly once');
+
+  // 2. signal option
+  let signalCount = 0;
+  const controller = new AbortController();
+  target.addEventListener(
+    'signal-test',
+    () => {
+      signalCount++;
+    },
+    { signal: controller.signal },
+  );
+  target.dispatchEvent({ type: 'signal-test' });
+  controller.abort();
+  target.dispatchEvent({ type: 'signal-test' });
+  assert.equal(signalCount, 1, 'signal-aborted listener must not fire after abort');
+
+  // 3. handleEvent object listener
+  let handleEventCount = 0;
+  const listener = {
+    handleEvent(e) {
+      assert.equal(e.type, 'handle-event-test');
+      handleEventCount++;
+    },
+  };
+  target.addEventListener('handle-event-test', listener);
+  target.dispatchEvent({ type: 'handle-event-test' });
+  assert.equal(handleEventCount, 1, 'handleEvent listener must fire');
+  target.removeEventListener('handle-event-test', listener);
+  target.dispatchEvent({ type: 'handle-event-test' });
+  assert.equal(handleEventCount, 1, 'handleEvent listener must not fire after removal');
+});
+
+test('membrane: direct Storage access via Proxy', () => {
+  const src = fs.readFileSync('web/runtime/facades/storage.mjs', 'utf8');
+  const code =
+    src.replace('export function createStorageFacades', 'function createStorageFacades') +
+    '\ncreateStorageFacades;';
+  const sandbox = {};
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  const createStorageFacades = vm.runInContext(code, sandbox);
+
+  const storageMock = new Map();
+  const ZPStorage = createStorageFacades({
+    Native: {
+      Array: { from: Array.from, isArray: Array.isArray },
+      arrayFrom: Array.from,
+      arrayIsArray: Array.isArray,
+      JSON,
+      Map,
+      Number,
+      Promise,
+      Proxy,
+      Set,
+      String,
+      Function: { prototype: { bind: Function.prototype.bind } },
+      functionBind: Function.prototype.bind,
+      Object: {
+        assign: Object.assign,
+        freeze: Object.freeze,
+        getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+      },
+      objectAssign: Object.assign,
+      objectFreeze: Object.freeze,
+      objectGetOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+      Reflect: { apply: Reflect.apply },
+      reflectApply: Reflect.apply,
+      localStorage: {
+        getItem(key) {
+          return storageMock.get(key) || null;
+        },
+        setItem(key, val) {
+          storageMock.set(key, val);
+        },
+      },
+    },
+    define: (obj, name, val) => {
+      obj[name] = val;
+    },
+    defineAccessor: (obj, name, get, set) => {
+      Object.defineProperty(obj, name, { get, set, configurable: true });
+    },
+    normalizedError: (msg) => new Error(msg),
+    getVirtualURL: () => new URL('https://example.com/'),
+  });
+
+  const w = {
+    indexedDB: {
+      open() {
+        return {};
+      },
+    },
+    caches: {
+      open() {
+        return Promise.resolve({});
+      },
+    },
+  };
+  ZPStorage.installStorageFacades(w);
+
+  const storage = w.localStorage;
+  // Test direct property set
+  storage.testkey = 'value';
+  assert.equal(storage.getItem('testkey'), 'value');
+  assert.equal(storage.testkey, 'value');
+
+  // Test ownKeys
+  assert.deepEqual(Object.keys(storage), ['testkey']);
+
+  // Test property descriptor
+  const desc = Object.getOwnPropertyDescriptor(storage, 'testkey');
+  assert.ok(desc);
+  assert.equal(desc.value, 'value');
+  assert.equal(desc.enumerable, true);
+
+  // Test direct property delete
+  delete storage.testkey;
+  assert.equal(storage.testkey, undefined);
+  assert.equal(storage.getItem('testkey'), null);
+  assert.deepEqual(Object.keys(storage), []);
+});
+
+test('membrane: generic Location setters & dispatcher', () => {
+  const src = fs.readFileSync('web/runtime/facades/location.mjs', 'utf8');
+  const code =
+    src
+      .replace('export function createLocationFacades', 'function createLocationFacades')
+      .replace('function finalizeLocationFacade', 'function finalizeLocationFacade') +
+    '\ncreateLocationFacades;';
+  const sandbox = {};
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  const createLocationFacades = vm.runInContext(code, sandbox);
+
+  let virtualUrl = new URL('https://example.com/foo?q=1#hash');
+  let setCalls = [];
+  const ZPLocation = createLocationFacades({
+    Native: {
+      Symbol,
+      URL,
+      Object: {
+        defineProperty: Object.defineProperty,
+        freeze: Object.freeze,
+        getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+      },
+      objectDefineProperty: Object.defineProperty,
+      objectFreeze: Object.freeze,
+      objectGetOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+    },
+    getVirtualURL: () => virtualUrl,
+    getVisibleURL: () => virtualUrl,
+    setVirtualLocation: (v, replace) => {
+      virtualUrl = new URL(v);
+      setCalls.push({ v, replace });
+    },
+    updateVirtualHash: (v) => {
+      virtualUrl.hash = v;
+    },
+    maskMethods: () => {},
+    maskNativeFunction: () => {},
+  });
+
+  const { virtualLocation } = ZPLocation;
+
+  assert.equal(virtualLocation.pathname, '/foo');
+  assert.equal(virtualLocation.search, '?q=1');
+
+  // Test setting search
+  virtualLocation.search = '?q=2';
+  assert.equal(virtualUrl.search, '?q=2');
+  assert.equal(setCalls[setCalls.length - 1].v, 'https://example.com/foo?q=2#hash');
+
+  // Test setting pathname
+  virtualLocation.pathname = '/bar';
+  assert.equal(virtualUrl.pathname, '/bar');
+  assert.equal(setCalls[setCalls.length - 1].v, 'https://example.com/bar?q=2#hash');
+
+  // Test setting protocol
+  virtualLocation.protocol = 'http:';
+  assert.equal(virtualUrl.protocol, 'http:');
+  assert.equal(setCalls[setCalls.length - 1].v, 'http://example.com/bar?q=2#hash');
+
+  // Now test the generic setter dispatch in runtime-prelude.mjs
+  const preludeSrc = readRuntime();
+  const codePrelude = [
+    extractFunction(preludeSrc, 'isLocationAssign'),
+    extractFunction(preludeSrc, 'set'),
+    'module.exports = { isLocationAssign, set };',
+  ].join('\n\n');
+  const sandboxPrelude = {
+    module: { exports: {} },
+    isWindowLike: () => false,
+    document: {},
+    virtualLocation,
+    setVirtualLocation: (v) => {
+      virtualUrl = new URL(v);
+    },
+    updateVirtualHash: (v) => {
+      virtualUrl.hash = v;
+    },
+    Native: {
+      objectGetOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+    },
+    objectGetOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+    reflectApply: Reflect.apply,
+    reflectSet: Reflect.set,
+    Object,
+  };
+  vm.createContext(sandboxPrelude);
+  vm.runInContext(codePrelude, sandboxPrelude);
+  const runtimeSet = sandboxPrelude.module.exports.set;
+
+  runtimeSet(virtualLocation, 'search', '?q=3');
+  assert.equal(virtualUrl.search, '?q=3');
+});

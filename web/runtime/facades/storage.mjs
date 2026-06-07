@@ -11,6 +11,7 @@ export function createStorageFacades({
     Map = globalThis.Map,
     Number = globalThis.Number,
     Promise = globalThis.Promise,
+    Proxy = globalThis.Proxy,
     Set = globalThis.Set,
     String = globalThis.String,
     arrayFrom = globalThis.Array.from,
@@ -18,8 +19,50 @@ export function createStorageFacades({
     functionBind = globalThis.Function.prototype.bind,
     objectAssign = globalThis.Object.assign,
     objectFreeze = globalThis.Object.freeze,
+    objectGetOwnPropertyDescriptor = globalThis.Object.getOwnPropertyDescriptor,
     reflectApply = globalThis.Reflect.apply,
   } = Native;
+
+  function storageObjectGet(target, prop) {
+    if (prop in target) return target[prop];
+    if (typeof prop === 'symbol') return undefined;
+    const val = target.getItem(prop);
+    return val === null ? undefined : val;
+  }
+
+  function storageObjectSet(target, prop, value) {
+    if (prop in target) return false;
+    if (typeof prop === 'symbol') return false;
+    target.setItem(prop, value);
+    return true;
+  }
+
+  function storageObjectDelete(target, prop) {
+    if (prop in target) return false;
+    if (typeof prop === 'symbol') return false;
+    target.removeItem(prop);
+    return true;
+  }
+
+  function storageObjectKeys(target, map) {
+    return arrayFrom(map.keys());
+  }
+
+  function storageObjectDescriptor(target, prop, map, getDescriptor) {
+    if (prop in target) {
+      const desc = getDescriptor(target, prop);
+      if (desc) return desc;
+    }
+    if (map.has(prop)) {
+      return {
+        value: map.get(prop),
+        writable: true,
+        enumerable: true,
+        configurable: true
+      };
+    }
+    return undefined;
+  }
   const storageMaps = new Map();
   const storageWindows = new Set();
   const storageDirtyKeys = new Map();
@@ -114,7 +157,7 @@ export function createStorageFacades({
 
   function storageObject(namespaceKey, ownerWindow) {
     const map = storageMap(namespaceKey);
-    return objectFreeze({
+    const api = {
       get length() { return map.size; },
       key(i) { return arrayFrom(map.keys())[Number(i)] || null; },
       getItem(k) { k = String(k); return map.has(k) ? map.get(k) : null; },
@@ -145,6 +188,14 @@ export function createStorageFacades({
         clearPersistentStorage(namespaceKey).catch(()=>{});
         dispatchStorageEvents(namespaceKey, ownerWindow, null, null, null);
       }
+    };
+
+    return new Proxy(api, {
+      get(target, prop) { return storageObjectGet(target, prop); },
+      set(target, prop, value) { return storageObjectSet(target, prop, value); },
+      deleteProperty(target, prop) { return storageObjectDelete(target, prop); },
+      ownKeys(target) { return storageObjectKeys(target, map); },
+      getOwnPropertyDescriptor(target, prop) { return storageObjectDescriptor(target, prop, map, objectGetOwnPropertyDescriptor); }
     });
   }
 
@@ -250,16 +301,22 @@ export function createStorageFacades({
     });
   }
 
+  function dispatchStorageEventToWindow(rec, namespaceKey, sourceWindow, eventInit) {
+    const w = rec.w;
+    if (!w || w === sourceWindow || (rec.localKey !== namespaceKey && rec.sessionKey !== namespaceKey)) return;
+    try {
+      const storageArea = rec.localKey === namespaceKey ? w.localStorage : w.sessionStorage;
+      const ev = new w.StorageEvent('storage', objectAssign({}, eventInit, { storageArea }));
+      w.dispatchEvent(ev);
+    } catch {
+      try { w.dispatchEvent(new w.Event('storage')); } catch {}
+    }
+  }
+
   function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
+    const eventInit = { key, oldValue, newValue, url: getVirtualURL().href };
     for (const rec of arrayFrom(storageWindows)) {
-      const w = rec.w;
-      if (!w || w === sourceWindow || (rec.localKey !== namespaceKey && rec.sessionKey !== namespaceKey)) continue;
-      try {
-        const ev = new w.StorageEvent('storage', { key, oldValue, newValue, url: getVirtualURL().href });
-        w.dispatchEvent(ev);
-      } catch {
-        try { w.dispatchEvent(new w.Event('storage')); } catch {}
-      }
+      dispatchStorageEventToWindow(rec, namespaceKey, sourceWindow, eventInit);
     }
   }
 

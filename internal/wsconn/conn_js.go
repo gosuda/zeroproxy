@@ -30,6 +30,7 @@ func Dial(ctx context.Context, rawURL string) (net.Conn, error) {
 	done := make(chan error, 1)
 	var onOpen js.Func
 	onOpen = js.FuncOf(func(this js.Value, args []js.Value) any {
+		ws.Call("removeEventListener", "open", onOpen)
 		onOpen.Release()
 		done <- nil
 		return nil
@@ -65,6 +66,8 @@ func Dial(ctx context.Context, rawURL string) (net.Conn, error) {
 	case err := <-done:
 		return c, err
 	case <-ctx.Done():
+		ws.Call("removeEventListener", "open", onOpen)
+		onOpen.Release()
 		c.Close()
 		return nil, ctx.Err()
 	}
@@ -124,12 +127,15 @@ func (c *Conn) closeLocal() {
 		close(c.closed)
 	}
 	if c.onMsg.Truthy() {
+		c.ws.Call("removeEventListener", "message", c.onMsg)
 		c.onMsg.Release()
 	}
 	if c.onErr.Truthy() {
+		c.ws.Call("removeEventListener", "error", c.onErr)
 		c.onErr.Release()
 	}
 	if c.onCl.Truthy() {
+		c.ws.Call("removeEventListener", "close", c.onCl)
 		c.onCl.Release()
 	}
 }

@@ -39,7 +39,7 @@
   const Object = NativeObject;
   const Promise = NativePromise;
   const Proxy = NativeProxy;
-  const Reflect = NativeReflect;
+  const _Reflect = NativeReflect;
   const String = NativeString;
   const Symbol = NativeSymbol;
   const TypeError = NativeTypeError;

@@ -1212,10 +1212,21 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       if (base === null || base === undefined) return undefined;
       return get(base, prop);
     }
+    function isLocationAssign(base, prop) {
+      if (prop === 'location') return isWindowLike(base) || base === document;
+      return base === virtualLocation && prop === 'href';
+    }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
-      if ((isWindowLike(base) && prop === 'location') || (base === document && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
-      if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
+      if (isLocationAssign(base, prop)) { setVirtualLocation(value); return value; }
+      if (base === virtualLocation) {
+        if (prop === 'hash') { updateVirtualHash(value); return value; }
+        const d = objectGetOwnPropertyDescriptor(base, prop);
+        if (d && typeof d.set === 'function') {
+          reflectApply(d.set, base, [value]);
+          return value;
+        }
+      }
       reflectSet(Object(base), prop, value);
       return value;
     }

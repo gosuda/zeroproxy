@@ -221,7 +221,6 @@ func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
 	var start js.Func
 	var cancel js.Func
 	var closeOnce sync.Once
-	var cleanupOnce sync.Once
 	cancelled := make(chan struct{})
 	closeBody := func() {
 		closeOnce.Do(func() {
@@ -229,23 +228,21 @@ func readableStreamFrom(ctx context.Context, body io.ReadCloser) js.Value {
 			_ = body.Close()
 		})
 	}
-	cleanup := func() {
-		cleanupOnce.Do(func() {
-			start.Release()
-			cancel.Release()
-		})
-	}
 	start = js.FuncOf(func(this js.Value, args []js.Value) any {
 		controller := args[0]
 		go func() {
-			defer cleanup()
 			defer closeBody()
 			pumpBody(ctx, controller, body, cancelled)
 		}()
+		start.Release()
 		return nil
 	})
+	var cancelOnce sync.Once
 	cancel = js.FuncOf(func(this js.Value, args []js.Value) any {
 		closeBody()
+		cancelOnce.Do(func() {
+			cancel.Release()
+		})
 		return nil
 	})
 	source.Set("start", start)
