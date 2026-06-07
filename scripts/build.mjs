@@ -122,7 +122,6 @@ async function cleanSelectedOutputs(selected) {
 async function buildWeb() {
   await mkdir(webOut, { recursive: true });
 
-  const rustRewriter = await makeRustRewriterClassic();
   const zpBundlePage = await makeZPBundlePageClassic();
   const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
@@ -138,15 +137,17 @@ async function buildWeb() {
   // globalThis before runtime-prelude.js runs. The async rt.load() call
   // inside runtime-prelude will fetch /__zp/zp_page_rt.wasm.
   await writeBundled('runtime-prelude.js', [await readSource('zp-rt.js'), await readSource('runtime-prelude.js')]);
-  await writeBundled('rust-rewriter.js', [rustRewriter]);
-  // 2026-06-08 split-bundle (c.1) Step 2.3: classic-script wrapper that
+  // 2026-06-08 split-bundle (c.1) Step 4: classic-script wrapper that
   // inlines the SW-flavored ZPBundle wasm-bindgen glue + wasm bytes and
   // does an `initSync()` so the page realm has `globalThis.ZPBundle`
-  // ready synchronously by the time runtime-prelude's IIFE runs. Step
-  // 2.4 swaps page-realm rewriter calls from ZPRewriter to ZPBundle.
+  // ready synchronously by the time runtime-prelude's IIFE runs. Both
+  // JS and CSS rewrite live here now (legacy crate deleted in Step 4).
   await writeBundled('zp-page-bundle.js', [zpBundlePage]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
-  await writeBundled('sw.js', [await readSource('zp-core.js'), rustRewriter, serviceWorker]);
+  // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js dropped
+  // from the SW bundle. The SW realm loads the modern ZPBundle via the
+  // top-level `importScripts('/__zp/zp_bundle_sw.js')` (see sw.js).
+  await writeBundled('sw.js', [await readSource('zp-core.js'), serviceWorker]);
 }
 
 async function buildRustBundle() {
@@ -174,11 +175,10 @@ async function buildRustBundle() {
     '--out-name', 'zp_bundle_sw',
     zpBundleWasm,
   ]);
-  // Two wasm-bindgen no-modules outputs live in the SW realm: this one
-  // (zp-bundle) AND the legacy rewriter-rs glue. Both declare top-level
-  // `let wasm_bindgen` which collides → SyntaxError on importScripts.
-  // Wrap our output in an IIFE so `let wasm_bindgen` is function-scoped,
-  // then expose under a distinct global so initBundle can find it.
+  // Wrap our wasm-bindgen output in an IIFE so its top-level `let
+  // wasm_bindgen` is function-scoped (avoids collisions if some future
+  // SW-side script ever declares the same name), then expose under a
+  // distinct global so initBundle can find it.
   const swJsPath = path.join(zpBundleOutDir, 'zp_bundle_sw.js');
   const swGlue = await readFile(swJsPath, 'utf8');
   if (!swGlue.startsWith('(function(){')) {
@@ -259,7 +259,7 @@ function stripServiceWorkerImports(source) {
   // would then have two top-level `let wasm_bindgen` declarations (one
   // from inlined rust-rewriter, one from importScripts'd rust-rewriter),
   // causing a SyntaxError during SW evaluation.
-  return source.replace(/^importScripts\('\/zp\/assets\/(?:zp-core|rust-rewriter)\.js'\);\r?\n/gm, '');
+  return source.replace(/^importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/gm, '');
 }
 
 function stripWorkerPreludeImports(source) {
@@ -283,30 +283,7 @@ async function makeZPBundlePageClassic() {
   const glueJs = await readFile(path.join(zpBundleOutDir, 'zp_bundle_sw.js'), 'utf8');
   const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm'));
   const wasmBase64 = wasmBytes.toString('base64');
-  return `/* Generated from Rust WASM ZeroProxy bundle (page realm). */\n${glueJs}\n(() => {\nconst __zp_bundle_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_bundle_bytes = Uint8Array.from(atob(__zp_bundle_b64), c => c.charCodeAt(0));\nconst wbg = globalThis.ZPBundleWBG;\nif (typeof wbg !== 'function') throw new Error('ZP_PAGE_BUNDLE_BOOT_FAILED: ZPBundleWBG missing');\nwbg.initSync({ module: __zp_bundle_bytes });\nconst api = Object.freeze({\n  ready: true,\n  bundleVersion: wbg.bundleVersion,\n  rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(String(source || ''), String(kind || 'classic'), String(targetUrl || '')),\n  rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'\n    ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(String(source || ''), String(kind || 'classic'), String(targetUrl || ''))\n    : null,\n});\nObject.defineProperty(globalThis, 'ZPBundle', { value: api, enumerable: false, configurable: false, writable: false });\n})();\n`;
-}
-
-async function makeRustRewriterClassic() {
-  const crateDir = path.join(repoRoot, 'rewriter-rs');
-  const targetDir = path.join(crateDir, 'target');
-  run(cargoBinPath, ['build', '--manifest-path', path.join(crateDir, 'Cargo.toml'), '--target', 'wasm32-unknown-unknown', '--release']);
-  const bindgenOut = path.join(targetDir, 'wasm-bindgen');
-  await rm(bindgenOut, { recursive: true, force: true });
-  await mkdir(bindgenOut, { recursive: true });
-  run(wasmBindgenBinPath, ['--target', 'no-modules', '--out-dir', bindgenOut, path.join(targetDir, 'wasm32-unknown-unknown', 'release', 'zp_rewriter.wasm')]);
-  const js = await readFile(path.join(bindgenOut, 'zp_rewriter.js'), 'utf8');
-  const wasmBase64 = (await readFile(path.join(bindgenOut, 'zp_rewriter_bg.wasm'))).toString('base64');
-  // 2026-06-07 split-bundle (c.1) Step 1: dropped the JS-side
-  // `rewriteFunctionBody` wrap+strip (now inlined in runtime-prelude's
-  // `rewriteDynamicFunctionBody`) and `blockSource()` (now inlined in
-  // sw.js as a literal string). Neither needed Rust; both were JS
-  // wrappers exposed on `ZPRewriter` for historical reasons.
-  // 2026-06-08 split-bundle (c.1) Step 3: rewriter-rs/ JS-rewriter dropped.
-  // The classic-script `ZPRewriter` now exposes only `rewriteCSS`; the
-  // `rewriteScript` surface has moved entirely to `ZPBundle` (modern
-  // OXC 0.133, served by `zp-page-bundle.js` in the page realm and by
-  // `importScripts('/__zp/zp_bundle_sw.js')` in the SW realm).
-  return `/* Generated from Rust WASM ZeroProxy CSS rewriter. */\n${js}\n(() => {\nconst VERSION = 'phase3-rust-wasm-css';\nconst __zp_rust_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_rust_bytes = Uint8Array.from(atob(__zp_rust_b64), ch => ch.charCodeAt(0));\nwasm_bindgen.initSync({ module: __zp_rust_bytes });\nfunction lowLevelCSS(source, baseUrl, controlPrefix) { const out = wasm_bindgen.rewrite_css(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/')); try { return { ok: !!out.ok, code: out.code, error: out.error || '' }; } finally { out.free && out.free(); } }\nfunction publicOk(code) { return { ok: true, code, diagnostics: [] }; }\nfunction publicBlocked(error) { const code = error || 'REWRITE_FAILED'; return { ok: false, errorCode: code, diagnostics: [{ level: 'error', message: code }] }; }\nfunction rewriteCSSPublic(source, options = {}) { const opts = options && typeof options === 'object' ? options : { baseUrl: options }; const out = lowLevelCSS(source, opts.baseUrl || opts.url || opts.targetUrl || '', opts.controlPrefix || globalThis.ZP && globalThis.ZP.CONTROL_PREFIX || '/zp/'); return out.ok ? publicOk(out.code) : publicBlocked(out.error); }\nconst rustApi = Object.freeze({ rewriteCSS(source, baseUrl, controlPrefix) { return lowLevelCSS(source, baseUrl, controlPrefix); } });\nconst rewriterApi = Object.freeze({ VERSION, ready: true, init() { return Promise.resolve(true); }, initSync() { return true; }, rewriteCSS: rewriteCSSPublic });\nObject.defineProperty(globalThis, 'ZPRustRewriter', { value: rustApi, enumerable: false, configurable: false, writable: false });\nObject.defineProperty(globalThis, 'ZPRewriter', { value: rewriterApi, enumerable: false, configurable: false, writable: false });\n})();\n`;
+  return `/* Generated from Rust WASM ZeroProxy bundle (page realm). */\n${glueJs}\n(() => {\nconst __zp_bundle_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_bundle_bytes = Uint8Array.from(atob(__zp_bundle_b64), c => c.charCodeAt(0));\nconst wbg = globalThis.ZPBundleWBG;\nif (typeof wbg !== 'function') throw new Error('ZP_PAGE_BUNDLE_BOOT_FAILED: ZPBundleWBG missing');\nwbg.initSync({ module: __zp_bundle_bytes });\nconst api = Object.freeze({\n  ready: true,\n  bundleVersion: wbg.bundleVersion,\n  rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(String(source || ''), String(kind || 'classic'), String(targetUrl || '')),\n  rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'\n    ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(String(source || ''), String(kind || 'classic'), String(targetUrl || ''))\n    : null,\n  rewriteCSS: typeof wbg.rewriteCSS === 'function'\n    ? (source, baseUrl, controlPrefix) => wbg.rewriteCSS(String(source || ''), String(baseUrl || ''), String(controlPrefix || '/zp/'))\n    : null,\n});\nObject.defineProperty(globalThis, 'ZPBundle', { value: api, enumerable: false, configurable: false, writable: false });\n})();\n`;
 }
 
 function run(cmd, argv, extraEnv = {}) {

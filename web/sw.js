@@ -1,6 +1,7 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the Rust WASM kernel. */
 importScripts('/zp/assets/zp-core.js');
-importScripts('/zp/assets/rust-rewriter.js');
+// 2026-06-08 split-bundle (c.1) Step 4: legacy rewriter-rs/ deleted. Both
+// JS and CSS rewriters live on ZPBundle (modern, single source of truth).
 // Rust zp-bundle (no-modules variant). Must be imported at top-level: SW
 // `importScripts` only succeeds during initial script evaluation; lazy
 // import from inside an event handler is blocked by the worker spec and
@@ -97,10 +98,6 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
 
-async function initRewriter() {
-  if (!self.ZPRewriter || !self.ZPRewriter.ready || typeof self.ZPRewriter.rewriteScript !== 'function') throw new Error('REALM_INJECTION_FAILURE');
-}
-
 // Rust zp-bundle (OXC native crate). Initializes lazily and exposes
 // self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
 // The JS ZPRewriter remains the primary path during this migration window;
@@ -160,6 +157,10 @@ async function initBundle() {
         ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '')
         : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
+      // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported here from
+      // rewriter-rs/. Mirrors the legacy `rewriteCSS` surface (positional
+      // args, throws on parse failure).
+      rewriteCSS: (source, baseUrl, controlPrefix) => wbg.rewriteCSS(source, baseUrl || '', controlPrefix || '/zp/'),
       // D2: unchained composer (rewriter_map only). Required by
       // /zp/api/sourcemap when no upstream `.map` is present.
       composeSourceMap: (source, kind, targetUrl) =>
@@ -263,7 +264,7 @@ function internalPath(path) {
   // sites (GitHub) hit subtle membrane bugs that surface as React
   // hydration errors → "Looks like something went wrong" SSR fallback.
   if (path.startsWith('/__zp/')) return true;
-  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('zp-page-bundle.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('zp-page-bundle.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';
@@ -340,9 +341,15 @@ async function rewriteCSSResponse(resp, opt) {
   try { css = await resp.text(); } catch { return resp; }
   let out = css;
   try {
-    if (self.ZPRewriter && typeof self.ZPRewriter.rewriteCSS === 'function') {
-      const r = self.ZPRewriter.rewriteCSS(css, { baseUrl: opt.targetUrl || '', controlPrefix: ZP.CONTROL_PREFIX });
-      if (r && r.ok && typeof r.code === 'string') out = r.code;
+    // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported to ZPBundle
+    // (SWC-based, same surface). The legacy ZPRewriter is being deleted in
+    // this step; the wbg wrapper exposes `rewriteCSS(source, base_url,
+    // control_prefix)` (positional) which throws a `CSS_PARSE_FAILED`
+    // JsError on parse failure — both cases fall through to ship the
+    // original body.
+    if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.rewriteCSS === 'function') {
+      const code = self.ZPBundle.rewriteCSS(css, opt.targetUrl || '', ZP.CONTROL_PREFIX);
+      if (typeof code === 'string' && code.length > 0) out = code;
     }
   } catch { /* fall through with original */ }
   const headers = new Headers(resp.headers);
@@ -1153,11 +1160,10 @@ function buildRuntimePrelude(tab, entry) {
   const prewarmInline = '(function(){try{var p=new URLSearchParams(location.hash.slice(1));var c=p.get("zp_chain");if(!c)return;var chain;try{chain=JSON.parse(atob(decodeURIComponent(c)));}catch(e){return;}if(!Array.isArray(chain)||!chain.length)return;var next=chain.shift();var wait=Math.max(0,Math.min(120000,Number(next.waitMs)||0));var u=new URL(next.path,location.origin);var np=new URLSearchParams(u.hash.startsWith("#")?u.hash.slice(1):u.hash);if(chain.length){np.set("zp_chain",encodeURIComponent(btoa(JSON.stringify(chain))));}else{np.delete("zp_chain");}u.hash="#"+np.toString();var assign=location.assign.bind(location);p.delete("zp_chain");try{history.replaceState(null,"","#"+p.toString());}catch(e){}setTimeout(function(){try{assign(u.toString());}catch(e){}},wait);}catch(e){}})();';
   return '<script nonce=zp>' + prewarmInline + '</script>' +
     '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
-    '<script nonce=zp src=' + ZP.assetPath('rust-rewriter.js') + '></script>' +
-    // 2026-06-08 split-bundle (c.1) Step 2.3: page-realm ZPBundle.
-    // initSync's inline wasm bytes so `globalThis.ZPBundle.ready === true`
-    // by the time runtime-prelude's IIFE runs. Step 2.4 swaps page-realm
-    // rewriter callsites from ZPRewriter to ZPBundle.
+    // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js script
+    // tag dropped. zp-page-bundle.js inlines the wasm + initSync's so
+    // `globalThis.ZPBundle.ready === true` by the time runtime-prelude's
+    // IIFE runs — the modern bundle covers both JS and CSS rewrite.
     '<script nonce=zp src=' + ZP.assetPath('zp-page-bundle.js') + '></script>' +
     '<script nonce=zp id=__zp-boot type=application/json>' + bootJSON + '</script>' +
     '<script nonce=zp src=' + ZP.assetPath('runtime-prelude.js') + '></script>';

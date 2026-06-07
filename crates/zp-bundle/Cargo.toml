@@ -12,6 +12,14 @@ zp-shared = { workspace = true }
 zp-rewriter = { workspace = true }
 zp-htmltx = { workspace = true }
 zp-transport-codec = { workspace = true }
+# 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported here from the
+# (now-deleted) rewriter-rs/ crate. SWC + url crates are pure-Rust and
+# wasm32-unknown-unknown clean.
+swc_common = { version = "23.0.0", default-features = false }
+swc_css_ast = { version = "23.0.0", default-features = false }
+swc_css_parser = { version = "23.0.0", default-features = false }
+swc_css_visit = { version = "23.0.0", default-features = false }
+url = { version = "2.5", default-features = false }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = "0.4"
 js-sys = { workspace = true }

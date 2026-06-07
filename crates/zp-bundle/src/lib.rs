@@ -13,6 +13,7 @@
 // `zp-shared` stays a separate crate (Go parity boundary), and the legacy
 // `zp-page-rt` raw-C cdylib stays separate (dead-strip avoidance with
 // wasm-bindgen — see trap-notebook 2026-05-30 wasm-page-rt entry).
+pub mod css;
 pub mod kernel;
 pub mod membrane;
 pub mod rtcgw_client;
@@ -186,6 +187,21 @@ pub fn transform_html_js(
     zp_htmltx::transform(html, &opts)
         .map(|r| r.html)
         .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// 2026-06-08 split-bundle (c.1) Step 4: SWC-based CSS rewriter (ported from
+/// the now-deleted `rewriter-rs/` crate). Returns the rewritten CSS or
+/// throws a `CSS_PARSE_FAILED` JsError. `base_url` is the CSS file's
+/// absolute URL (used to resolve relative refs in `url(...)` / `@import`);
+/// `control_prefix` is typically `/zp/`.
+#[wasm_bindgen(js_name = rewriteCSS)]
+pub fn rewrite_css_js(source: &str, base_url: &str, control_prefix: &str) -> Result<String, JsError> {
+    let out = css::rewrite_css(source, base_url, control_prefix);
+    if out.ok {
+        Ok(out.code)
+    } else {
+        Err(JsError::new(&out.error))
+    }
 }
 
 /// Build the strict CSP for a given proxy WebSocket origin.

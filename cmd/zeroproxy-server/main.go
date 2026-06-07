@@ -158,7 +158,7 @@ func (s *server) legacyZP(w http.ResponseWriter, r *http.Request) {
 		}
 		name := strings.TrimPrefix(r.URL.Path, "/__zp/")
 		switch name {
-		case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "worker-prelude.js", "zp-page-bundle.js":
+		case "zp-core.js", "runtime-prelude.js", "worker-prelude.js", "zp-page-bundle.js":
 			redirectLegacy(w, r, assetPrefix+name)
 		default:
 			s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
@@ -172,7 +172,7 @@ func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	switch name {
-	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "worker-prelude.js", "zp-page-bundle.js", "favicon.ico", "manifest.webmanifest":
+	case "zp-core.js", "runtime-prelude.js", "worker-prelude.js", "zp-page-bundle.js", "favicon.ico", "manifest.webmanifest":
 		s.serveWeb(w, r, name)
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)

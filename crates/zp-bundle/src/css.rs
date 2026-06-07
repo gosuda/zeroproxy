@@ -1,41 +1,29 @@
-// 2026-06-08 split-bundle (c.1) Step 3: drop OXC-based JS rewriter. The
-// `crates/zp-rewriter` (modern OXC 0.133) crate is now the SOLE OXC-based
-// JS rewriter — it powers both SW (via `rewriteScript` on `self.ZPBundle`)
-// and page realm (via `globalThis.ZPBundle`). This crate is reduced to
-// the SWC-based CSS rewriter only; Step 4 will port the CSS path to
-// `zp-bundle` and delete `rewriter-rs/` entirely.
+//! 2026-06-08 split-bundle (c.1) Step 4: SWC-based CSS rewriter ported from
+//! the (now-deleted) `rewriter-rs/` crate. Same surface as before:
+//! `rewrite_css(source, base_url, control_prefix)` → rewrites `url(...)` and
+//! `@import` references to route through the proxy's `/zp/api/fetch?url=...`
+//! endpoint. The wasm-bindgen export `rewriteCSS` (see `lib.rs`) is what
+//! `web/sw.js` (and Step 4-onwards page realm if needed) calls.
 
 use swc_css_ast::{DeclarationOrAtRule, ImportHref, ListOfComponentValues, Str, Stylesheet, UrlValue};
 use swc_css_visit::{Visit, VisitWith};
-use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
-pub struct RewriteOutput {
-    ok: bool,
-    code: String,
-    error: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CssRewriteResult {
+    pub ok: bool,
+    pub code: String,
+    pub error: String,
 }
 
-#[wasm_bindgen]
-impl RewriteOutput {
-    #[wasm_bindgen(getter)]
-    pub fn ok(&self) -> bool { self.ok }
-    #[wasm_bindgen(getter)]
-    pub fn code(&self) -> String { self.code.clone() }
-    #[wasm_bindgen(getter)]
-    pub fn error(&self) -> String { self.error.clone() }
-}
-
-#[wasm_bindgen]
-pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str) -> RewriteOutput {
+pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str) -> CssRewriteResult {
     let control_prefix = if control_prefix.is_empty() { "/zp/" } else { control_prefix };
     match collect_css_replacements(source, base_url, control_prefix) {
-        Ok(replacements) => RewriteOutput {
+        Ok(replacements) => CssRewriteResult {
             ok: true,
             code: apply_css_replacements(source, replacements),
             error: String::new(),
         },
-        Err(error) => RewriteOutput { ok: false, code: String::new(), error },
+        Err(error) => CssRewriteResult { ok: false, code: String::new(), error },
     }
 }
 

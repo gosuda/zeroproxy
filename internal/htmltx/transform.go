@@ -189,13 +189,11 @@ func runtimePrelude(opt Options) string {
 	})
 	var b strings.Builder
 	b.Grow(len(bootJSON) + 240)
-	// 2026-06-08 split-bundle (c.1) Step 2.3: load page-realm ZPBundle
-	// (`zp-page-bundle.js`) alongside the legacy ZPRewriter. Both glues
-	// `initSync` synchronously during their `<script>` tag, so by the time
-	// runtime-prelude's IIFE runs both `globalThis.ZPRewriter` and
-	// `globalThis.ZPBundle` are ready. Step 2.4 swaps prelude's rewriter
-	// callsites from ZPRewriter → ZPBundle.
-	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/rust-rewriter.js></script><script nonce=zp src=/zp/assets/zp-page-bundle.js></script><script nonce=zp id=__zp-boot type=application/json>`)
+	// 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js dropped.
+	// `zp-page-bundle.js` initSync's the modern WASM bundle so
+	// `globalThis.ZPBundle.ready === true` by the time runtime-prelude runs;
+	// the bundle covers both JS and CSS rewrite.
+	b.WriteString(`<script nonce=zp src=/zp/assets/zp-core.js></script><script nonce=zp src=/zp/assets/zp-page-bundle.js></script><script nonce=zp id=__zp-boot type=application/json>`)
 	b.Write(bootJSON)
 	b.WriteString(`</script><script nonce=zp src=/zp/assets/runtime-prelude.js></script>`)
 	return b.String()

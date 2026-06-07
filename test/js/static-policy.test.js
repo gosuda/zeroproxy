@@ -164,19 +164,19 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   const csp = fs.readFileSync('internal/headers/csp.go', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-  assert.ok(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"));
+  // 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ deleted. SW realm
+  // loads the modern bundle via `importScripts('/__zp/zp_bundle_sw.js')`
+  // (and the runtime-prelude tags are emitted by sw.js's prelude injector).
+  assert.equal(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"), false, 'legacy rewriter importScripts must be gone');
   assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
   assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
+  assert.match(sw, /importScripts\('\/__zp\/zp_bundle_sw\.js'\)/, 'SW must import the modern bundle glue');
   assert.ok(sw.includes('/zp/api/script'));
   assert.ok(sw.includes('rewriteScriptResponse'));
-  assert.ok(build.includes('rewriter-rs'));
+  assert.equal(build.includes('rewriter-rs'), false, 'build must not reference deleted rewriter-rs/ crate');
   assert.ok(build.includes('wasm-bindgen'));
-  assert.ok(build.includes('ZPRewriter'));
-  assert.ok(build.includes('ZPRustRewriter'));
-  assert.ok(build.includes('phase3-rust-wasm-css'));
-  assert.ok(build.includes('cargoBinPath'));
-  assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
-  assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust rewriter AST walker missing');
+  assert.equal(fs.existsSync('rewriter-rs/Cargo.toml'), false, 'rewriter-rs/ crate must be deleted');
+  assert.equal(fs.existsSync('rewriter-rs/src/lib.rs'), false, 'rewriter-rs/ crate must be deleted');
   assert.equal(fs.existsSync('web/js-rewriter.js'), false);
   assert.equal(fs.existsSync('web/oxc-parser.js'), false);
   assert.equal(fs.existsSync('web/oxc_parser_wasm_bg.wasm'), false);
@@ -531,30 +531,39 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
-// 2026-06-08 split-bundle (c.1) Step 3: rewriter-rs/ crate is now CSS-only.
-// All OXC dependencies removed from rewriter-rs/Cargo.toml + rewrite_script
-// gone from rewriter-rs/src/lib.rs. The generated classic script (`rust-rewriter.js`)
-// exposes only rewriteCSS on ZPRewriter/ZPRustRewriter.
-test('rewriter-rs/ is CSS-only after Step 3', () => {
-  const cargo = fs.readFileSync('rewriter-rs/Cargo.toml', 'utf8');
-  const lib = fs.readFileSync('rewriter-rs/src/lib.rs', 'utf8');
+// 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted. The
+// CSS rewriter is ported to crates/zp-bundle/src/css.rs and exposed via the
+// wasm-bindgen `rewriteCSS` export. SW + page realm both call
+// `ZPBundle.rewriteCSS`.
+test('rewriter-rs/ is deleted; CSS rewriter lives in zp-bundle (Step 4)', () => {
+  // Crate directory + workspace exclusion + asset name all gone.
+  assert.equal(fs.existsSync('rewriter-rs'), false, 'rewriter-rs/ directory must be removed');
+  const workspaceCargo = fs.readFileSync('Cargo.toml', 'utf8');
+  assert.equal(workspaceCargo.includes('"rewriter-rs"'), false, 'workspace must not exclude (or include) rewriter-rs');
+  // zp-bundle has the CSS module + the SWC deps.
+  assert.ok(fs.existsSync('crates/zp-bundle/src/css.rs'), 'CSS module must live at crates/zp-bundle/src/css.rs');
+  const bundleCargo = fs.readFileSync('crates/zp-bundle/Cargo.toml', 'utf8');
+  assert.match(bundleCargo, /^swc_css_ast\b/m, 'zp-bundle must declare swc_css_ast');
+  assert.match(bundleCargo, /^swc_css_parser\b/m, 'zp-bundle must declare swc_css_parser');
+  assert.match(bundleCargo, /^swc_css_visit\b/m, 'zp-bundle must declare swc_css_visit');
+  // wasm-bindgen export wired in lib.rs.
+  const bundleLib = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
+  assert.match(bundleLib, /pub mod css\b/, 'lib.rs must declare the css module');
+  assert.match(bundleLib, /js_name = rewriteCSS\b/, 'lib.rs must export rewriteCSS via wasm-bindgen');
+  assert.match(bundleLib, /css::rewrite_css\(/, 'rewriteCSS export must delegate to css::rewrite_css');
+  // SW + page bundle wrapper expose rewriteCSS.
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /rewriteCSS:\s*\(source,\s*baseUrl,\s*controlPrefix\)\s*=>\s*wbg\.rewriteCSS\(/, 'SW initBundle must expose rewriteCSS on ZPBundle');
+  assert.match(sw, /self\.ZPBundle\.rewriteCSS\(/, 'rewriteCSSResponse must call ZPBundle.rewriteCSS');
+  // build.mjs page bundle wrapper exposes rewriteCSS.
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-  // No OXC dependencies.
-  assert.equal(/^oxc_/m.test(cargo), false, 'rewriter-rs Cargo.toml must NOT declare any oxc_* crate');
-  // SWC CSS deps survive.
-  assert.match(cargo, /^swc_css_ast\b/m, 'rewriter-rs must keep swc_css_ast');
-  assert.match(cargo, /^swc_css_parser\b/m, 'rewriter-rs must keep swc_css_parser');
-  // lib.rs: no rewrite_script + no OXC use statements.
-  assert.equal(lib.includes('pub fn rewrite_script'), false, 'rewrite_script must be removed from rewriter-rs');
-  assert.equal(/use oxc_/.test(lib), false, 'rewriter-rs lib.rs must not import any oxc_* crate');
-  assert.match(lib, /pub fn rewrite_css\b/, 'rewrite_css must survive');
-  // Generated rust-rewriter.js exposes ZPRewriter with rewriteCSS only.
-  assert.match(build, /rewriteCSS:\s*rewriteCSSPublic/, 'rewriter-rs classic must expose rewriteCSS');
-  // The old rewriteScript wrapper is gone from the generator (search for the
-  // public wrapper name AND the WASM raw export call so an accidental partial
-  // revert surfaces).
-  assert.equal(build.includes('rewriteScript: rewriteScriptPublic'), false, 'rewriter-rs classic must NOT expose rewriteScript');
-  assert.equal(build.includes('wasm_bindgen.rewrite_script'), false, 'rewriter-rs classic must NOT call rewrite_script');
+  assert.match(build, /rewriteCSS:.*wbg\.rewriteCSS/, 'page bundle wrapper must expose rewriteCSS');
+  // build.mjs no longer generates the legacy rust-rewriter.js artifact.
+  assert.equal(build.includes("writeBundled('rust-rewriter.js'"), false, 'rust-rewriter.js artifact must not be generated');
+  // ZPRewriter (legacy) is gone from SW + prelude.
+  assert.equal(sw.includes('self.ZPRewriter'), false, 'SW must no longer reference self.ZPRewriter');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.equal(rt.includes('root.ZPRewriter'), false, 'prelude must no longer reference root.ZPRewriter');
 });
 
 // 2026-06-08 split-bundle (c.1) Step 2.3 + 2.4 + 3: page-realm ZPBundle infra,
