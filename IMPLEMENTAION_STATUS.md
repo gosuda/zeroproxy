@@ -1,6 +1,6 @@
 # ZeroProxy Implementation Status
 
-Date: 2026-06-05
+Date: 2026-06-07
 
 This document is a standalone implementation-status report. It summarizes the current compatibility and privacy-membrane plan, then compares that plan against the implementation that exists in this repository today.
 
@@ -19,7 +19,17 @@ The main remaining gaps are not small bugs; they are completion gaps against the
 - Performance tests exist for Rust rewriter initialization, rewrite size buckets, dynamic function rewriting, and runtime bundle compilation, but the full performance plan is not yet covered by gates.
 - Final corpus-level claims such as “0 rewrite-induced script failures” and “0 generated JavaScript syntax errors” are not proven by the current repository alone.
 
-Overall status: approximately 70-80% complete against the plan. The core architecture is in place; the remaining work is mostly about closing strict compatibility proof, streaming semantics, frame/srcdoc edge cases, and performance/oracle completeness.
+Overall status: approximately 70-80% complete against the architecture plan, but only about 55-60% complete against the stricter final release-completion conditions. The core architecture is in place; the remaining work is mostly about closing strict compatibility proof, streaming semantics, frame/srcdoc edge cases, behavior-level matrices, and performance/oracle completeness.
+
+Verification update on 2026-06-07: local proof still supports the architecture-level estimate, but it also confirms that many “done” items are inventory, matrix, or runner completion rather than end-to-end native-vs-ZeroProxy behavior gates. The main shortfalls are:
+
+- Representative-site corpus runs are encoded, but no committed native-vs-ZeroProxy pass/fail artifact proves Naver, Google Maps, embedded Maps, ipleak, or the broader seed corpus.
+- Multiple compatibility matrices are checked in, but per-row behavior fixtures are still pending for dynamic DOM insertion, DOM mutation, cookie/storage/SameSite, fetch/XHR, framework fixtures, event listeners, observer/input events, and frame/srcdoc/sandbox.
+- HTML transformation still lacks true streaming first-byte/partial-flush behavior because the Go adapter reads the whole document before calling the Rust transformer.
+- Runtime-set `srcdoc`, sandbox deltas, unsupported frame edge cases, and third-party widget/ad/login iframe behavior remain below the planned frame milestone.
+- Root-surface and expected-delta coverage is bounded and selective; it does not yet recursively classify visible object/property/string deltas across a safe object graph.
+- Real timing now flows through important paths, but navigation/static resources, body duration, retry count, synthetic timing-gap telemetry, and PerformanceObserver delivery are not complete.
+- `npm run lint` passes, but Biome currently emits warning-level cleanup findings; they do not fail the gate, but they are not evidence of zero-warning JS hygiene.
 
 ## The Plan
 
@@ -1305,7 +1315,7 @@ Difference from plan:
 | Observer and input-event parity matrix | Achieved as a checked-in matrix; callback/event-order fixtures remain pending. |
 | JS-root visible object/property/string comparison | Partially achieved through corpus root-surface records; recursive graph traversal and systematic delta classification remain pending. |
 | CSP/security invariants green | Strongly implemented and tested; still requires running gates before claiming release readiness. |
-| Full local verification green | Passed after this status-changing work: `npm test`, `go test ./...`, `npm run test:wasm`, `cargo test --manifest-path rewriter-rs/Cargo.toml`, and `npm run lint`. |
+| Full local verification green | Re-verified on 2026-06-07 with `npm run test:js`, `npm run test:e2e`, `go test ./...`, `npm run test:wasm`, `cargo test --manifest-path rewriter-rs/Cargo.toml`, and `npm run lint`; lint passed with Biome warnings. |
 
 ## High-Value Existing Tests
 
@@ -1442,9 +1452,10 @@ Difference from plan:
    - `test/fixtures/delivery-versioning-minification.json` documents package version source, fixed runtime asset names, classic-IIFE delivery, fixed-name/no-hash asset policy, opt-in `--minify`, and the current Rust rewriter version string.
    - `test/js/delivery-versioning-minification.test.js` pins the manifest to `scripts/build.mjs` and `package.json`.
    - Remaining limitation: ABI-safe default minification is still not enabled by default.
-23. Run the full verification gate after status-changing work. **Done.**
-   - `npm test` passed (JS + E2E).
+23. Run the full verification gate after status-changing work. **Re-verified 2026-06-07.**
+   - `npm run test:js` passed: 130 tests.
+   - `npm run test:e2e` passed: 1 browser integration test.
    - `go test ./...` passed.
-   - `npm run test:wasm` passed.
-   - `cargo test --manifest-path rewriter-rs/Cargo.toml` passed.
-   - `npm run lint` passed (`lint:go`, `lint:rust`, `lint:js`; Biome emitted warnings only).
+   - `npm run test:wasm` passed for `cmd/wasm-kernel` and `internal/swhttp`.
+   - `cargo test --manifest-path rewriter-rs/Cargo.toml` passed: 46 tests.
+   - `npm run lint` passed (`lint:go`, `lint:rust`, `lint:js`); Biome emitted warning-level findings only.
