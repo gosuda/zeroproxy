@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-06-07 — split-bundle (c.1) Step 2a SW swap NAVER renderer wedge — `ZPRewriter.rewriteScript` legacy primary 경로를 `ZPBundle` (modern OXC 0.133) 으로 교체했을 때 NAVER 메인 hydration 단계에서 WebView2 renderer 완전 wedge. **Revert + Step 2 전략 재설계**
+
+**Site/Pattern**: NAVER 메인 (`https://www.naver.com/`) cold load 시 검색 box 만 남고 메인 컨텐츠 (뉴스/쇼핑/광고/추천) 전체 사라짐. taskweaver `console-logs` → `Uncaught SyntaxError: Invalid or unexpected token @http://proxy.localhost:18080/zp/api/fetch?url=https%3A%2F%2Fssl.pstatic.net%2Ftveta%2Flibs%2Fndpsdk%2Fprod%2Fndp-loader.js:1`. SW 측 디버그 stash (`/zp/api/__debug_ndp` endpoint) 로 rewritten body 추출 → **3281 byte HTML 본문** (`<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" ...><html xmlns="..."><head><title>네이버 :: 페이지를 찾을 수 없습니다.`). 즉 upstream 이 JS 가 아닌 **404 HTML** 을 반환. taskweaver `pause` → renderer 완전 wedge (7 minidumps, empty js_stack, JS-thread 응답 없음). 같은 증상 패턴은 2026-06-06 iframe/frame src rewrite 시도 때와 동일.
+
+**Root cause (가설)**:
+1. ZPBundle (zp-rewriter 0.133, strict mode) 는 HTML body 에 대해 ParseFailed → JsError → JS catch → fail-closed block stub 을 emit 해야 정상. cargo `html_body_must_parse_error_under_strict_mode` 테스트로 확인됨.
+2. 그러나 runtime trace 의 `__zp_debug_ndp_loader` 가 raw HTML 본문을 그대로 보유하고 있는 이상 동작 관찰. SW 가 어느 경로로든 HTML 을 `code` 로 emit 한 흔적 — 정확한 경로 미규명 (`debugTrace` 변수까지 도입했으나 browser SW lifecycle 의 stale activation 문제로 신규 trace 출력 미관찰).
+3. 가장 유력한 가설: `await initBundle()` 을 primary path 에 추가하면서 첫 script 응답이 50-200ms 지연 → NAVER 의 anti-bot/CDN 이 timing pattern 으로 bot 판정 → ndp-loader 등 일부 subresource 에 대해 404 HTML 회신 → 이 HTML 이 fail-closed stub 으로 변환되지만 그 사이 ssl.pstatic.net 의 SafeFrame/광고 SDK orchestration timing 이 깨지고 main hydration 시점에 cross-realm postMessage 큐가 어긋나 WebView2 renderer 가 wedge.
+
+**Step 2a 시도 변경 (revert 적용)**:
+- [web/sw.js](../../web/sw.js): `initRewriter()` 제거 + `await initBundle()` 로 교체, `ZPRewriter.rewriteScript` primary 호출 제거 → `ZPBundle.rewriteScriptPatches` (patch 모드) → `ZPBundle.rewriteScript` (full re-emit) 로 단순화. **전체 revert 됨**.
+
+**보존**: [crates/zp-rewriter/src/lib.rs](../../crates/zp-rewriter/src/lib.rs) 에 2개 회귀 테스트 추가 — `html_body_must_parse_error_under_strict_mode` (strict mode 의 HTML 거부 invariant), `naver_ndp_loader_round_trips_as_valid_js` (ndp-loader full re-emit + patch-mode 동등성 + 두 path 의 OXC re-parse valid). [crates/zp-rewriter/src/ndp-loader-fixture.js](../../crates/zp-rewriter/src/ndp-loader-fixture.js) 도 fixture 로 보존.
+
+**Lessons**:
+- (a) SW 측 rewriter 교체는 cargo 차원 동등성만으로 충분하지 않음. 실제 runtime 의 timing/anti-bot 회피까지 검증해야 함. ZPBundle 의 첫 호출 cold-init latency 가 NAVER 의 timing-sensitive orchestration 을 trip 할 수 있음.
+- (b) 대안 패턴: `ZPBundle` 을 SW boot (activate) 단계에서 완전히 warm 시키고 (이미 `initBundle().catch(() => {})` 호출 있음) primary path 진입 시점에 `if (!self.ZPBundle.ready)` 만 비동기 await 하도록 분기. 첫 script 응답이 ZPBundle.ready 시점 이전에 도착하면 legacy ZPRewriter 로 fallback 하는 hybrid 도 검토.
+- (c) Step 2 의 진짜 stop-gap: SW 측에서 두 rewriter 의 output 을 **shadow-compare** (parallel run, log divergence) 모드로 한 세션 굴려서 정확히 어느 script 가 가지는 OXC 0.60 vs 0.133 의 의미적 차이를 데이터로 잡은 다음에 실제 swap.
+- (d) Step 2 의 page-realm half 는 더 어렵다 — runtime-prelude 가 `root.ZPRewriter` 에 의존하고 page realm 에는 ZPBundle 이 아예 로드되지 않음. ZPBundle 을 page realm 으로 옮기려면 wasm-bindgen `--target web` glue 를 page side classic-script 로 embed 하고 boot 시점에 sync init 해야 함 (rewriter-rs 의 base64 inline 패턴 모방). 이 작업 비용이 큼.
+- (e) 따라서 (c.1) Step 2 의 정확한 후속 단계 재정의 필요: **Step 2.0** SW boot 의 ZPBundle warm-up 보장 + ready-gate 추가, **Step 2.1** shadow-compare 모드로 두 rewriter output divergence 수집 (test/ 또는 .lean-ctx fixture 화), **Step 2.2** divergence 0 확인 후 SW primary swap, **Step 2.3** page realm 의 ZPBundle 로드 인프라 구축, **Step 2.4** page realm primary swap. 한 세션 1개 Step 권장.
+- (f) trap-notebook 의 2026-06-06 iframe wedge 와 본 wedge 모두 NAVER hydration timing-sensitive orchestration 위반. NAVER 메인은 SW 측 rewrite latency / async 추가에 매우 민감 — 동일 패턴 발견 시 본 entry 참고.
+
+---
+
 ## 2026-06-06 — anchor/form/formaction raw target URL escape vector — middle-click / Ctrl+click / target=_blank / 우클릭 "open in new tab" / "copy link address" 시 IP leak. zp-htmltx 가 navigation URL attribute 변환 추가 (proxy-origin `?via=` + `data-zp-target-url`)
 
 **Site/Pattern**: NAVER 메인 (`https://www.naver.com/`) 진입 후 anchor 155개 중 **141개가 raw `https://www.naver.com/...` href**. URL bar 는 proxy origin 정상이고 정상 left-click 은 prelude 의 `clickNavigationTarget` ([web/runtime-prelude.js:1786](../../web/runtime-prelude.js#L1786)) 가 intercept 하여 안전. **그러나 raw href attribute 가 그대로** 라서 browser-native UI 들이 모두 NAVER URL 을 보거나 native navigation 으로 직접 사용.

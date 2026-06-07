@@ -1078,6 +1078,69 @@ mod tests {
     }
 
     #[test]
+    fn html_body_must_parse_error_under_strict_mode() {
+        // 2026-06-07 split-bundle (c.1) Step 2a aborted: NAVER's anti-bot
+        // occasionally returns a 404 HTML body for script subresources
+        // (ssl.pstatic.net/.../ndp-loader.js). Strict-mode parse rejection
+        // is the contract the SW's fail-closed posture relies on — if it
+        // ever regresses, the browser will execute raw HTML and surface a
+        // SyntaxError instead of a clean POLICY_BLOCKED stub. Pin both a
+        // minimal HTML body and the real NAVER 404 shape.
+        for html in &[
+            "<!DOCTYPE html\n<html><head><title>404</title></head><body><h1>not found</h1></body></html>",
+            "<!DOCTYPE html\n    PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\">\n<head>\n<title>네이버</title>\n<script type=text/javascript>\nif (!['/', '/index.html'].includes(window.location.pathname)) { window.location.href = '/'; }\n</script>\n</head>\n<body><h1>not found</h1></body>\n</html>",
+        ] {
+            let r = rewrite_script(html, &opts());
+            assert!(
+                matches!(r, Err(RewriteError::ParseFailed(_))),
+                "strict mode must reject HTML-as-JS; got: {:?}",
+                r,
+            );
+            let r2 = rewrite_script_patches(html, &opts());
+            assert!(
+                matches!(r2, Err(RewriteError::ParseFailed(_))),
+                "patch-mode strict must also reject HTML-as-JS; got: {:?}",
+                r2,
+            );
+        }
+    }
+
+    #[test]
+    fn naver_ndp_loader_round_trips_as_valid_js() {
+        // 2026-06-07 split-bundle (c.1) Step 2a investigation: NAVER's
+        // ssl.pstatic.net/tveta/libs/ndpsdk/prod/ndp-loader.js is the
+        // smallest real-site canary for the OXC 0.133 patch-mode emit.
+        // Pin both code paths the SW rewrite calls into:
+        //  (1) `rewrite_script` (full re-emit)
+        //  (2) `rewrite_script_patches` + `apply_patches` (patch envelope)
+        // Both must produce syntactically valid JS, and the two outputs
+        // must match byte-for-byte (modulo the pragma strip — ndp-loader
+        // has no sourceMappingURL pragma).
+        let src = include_str!("ndp-loader-fixture.js");
+        let alloc1 = oxc_allocator::Allocator::default();
+        let st = oxc_span::SourceType::cjs();
+        let r1 = rewrite_script(src, &opts()).expect("full re-emit must succeed");
+        let p1 = oxc_parser::Parser::new(&alloc1, &r1.code, st).parse();
+        assert!(
+            p1.errors.is_empty(),
+            "full re-emit produced invalid JS: {:#?}\n----\n{}",
+            p1.errors,
+            r1.code,
+        );
+        let r2 = rewrite_script_patches(src, &opts()).expect("patch-mode must succeed");
+        let patched = apply_patches(src, &r2.patches);
+        let alloc2 = oxc_allocator::Allocator::default();
+        let p2 = oxc_parser::Parser::new(&alloc2, &patched, st).parse();
+        assert!(
+            p2.errors.is_empty(),
+            "patch-mode produced invalid JS: {:#?}\n----\n{}",
+            p2.errors,
+            patched,
+        );
+        assert_eq!(r1.code, patched, "patch-mode vs full re-emit divergence");
+    }
+
+    #[test]
     fn super_constructor_with_extends_globalthis_member() {
         // Real-world pattern from kw-owner: class extends a rewritten global,
         // constructor calls super(args). Rewriter must keep super() in place
