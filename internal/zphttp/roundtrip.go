@@ -83,6 +83,9 @@ type TransportTiming struct {
 	TLSHandshakeMS          int64  `json:"tlsHandshakeMs"`
 	TimeToFirstByteMS       int64  `json:"timeToFirstByteMs"`
 	TotalMS                 int64  `json:"totalMs"`
+	BodyDurationMS          int64  `json:"bodyDurationMs"`
+	RetryCount              int    `json:"retryCount"`
+	RetryReason             string `json:"retryReason,omitempty"`
 	ConnectionReused        bool   `json:"connectionReused"`
 	NegotiatedProtocol      string `json:"negotiatedProtocol,omitempty"`
 	FailureClass            string `json:"failureClass,omitempty"`
@@ -112,7 +115,7 @@ func (e *Engine) RoundTrip(ctx context.Context, req *http.Request, target *url.U
 		timing.FailureClass = transportFailureClass(err)
 	}
 	attachTransportTiming(resp, timing)
-	return responseWithRequestSlot(resp, err, release)
+	return responseWithRequestSlot(resp, err, release, timing)
 }
 
 func newTransportTiming(req *http.Request, target *url.URL, tab *TabState) *TransportTiming {
@@ -203,6 +206,9 @@ func (e *Engine) roundTripWithSlot(ctx context.Context, wireReq *http.Request, t
 		if err == nil || !canRetryHTTP1(wireReq) {
 			return resp, err
 		}
+		timing.RetryCount++
+		timing.RetryReason = "stale_http1_connection"
+		timing.ConnectionReused = false
 	}
 	connStart := time.Now()
 	tc, err := e.dialTarget(ctx, target, tab, fetchTLSProtocols[:], timing)
@@ -221,7 +227,7 @@ func timedRoundTrip(fn func() (*http.Response, error), timing *TransportTiming) 
 	return resp, err
 }
 
-func responseWithRequestSlot(resp *http.Response, err error, release func()) (*http.Response, error) {
+func responseWithRequestSlot(resp *http.Response, err error, release func(), timing *TransportTiming) (*http.Response, error) {
 	if err != nil {
 		release()
 		return nil, err
@@ -230,7 +236,7 @@ func responseWithRequestSlot(resp *http.Response, err error, release func()) (*h
 		release()
 		return resp, nil
 	}
-	resp.Body = &bodyWithRequestSlot{ReadCloser: resp.Body, release: release}
+	resp.Body = &bodyWithRequestSlot{ReadCloser: resp.Body, release: release, timing: timing, resp: resp, bodyStart: time.Now()}
 	return resp, nil
 }
 
@@ -830,7 +836,7 @@ func h2PoolKey(target *url.URL, tab *TabState) h2Key {
 		key = tab.StreamIsolationKey
 		tabID = tab.TabID
 	}
-	return h2Key{authority: canonicalAuthority(target), isolation: zpiso.Token(key, host), tabID: tabID}
+	return h2Key{scheme: target.Scheme, authority: canonicalAuthority(target), isolation: zpiso.Token(key, host), tabID: tabID}
 }
 
 func (e *Engine) reserveH1(key h2Key) *h1Conn {
@@ -1095,6 +1101,7 @@ type h1Conn struct {
 }
 
 type h2Key struct {
+	scheme    string
 	authority string
 	isolation string
 	tabID     string
@@ -1145,6 +1152,9 @@ func (b *bodyWithH1Reuse) Close() error {
 type bodyWithRequestSlot struct {
 	io.ReadCloser
 	release   func()
+	timing    *TransportTiming
+	resp      *http.Response
+	bodyStart time.Time
 	slotOnce  sync.Once
 	closeOnce sync.Once
 	err       error
@@ -1153,6 +1163,7 @@ type bodyWithRequestSlot struct {
 func (b *bodyWithRequestSlot) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err == io.EOF {
+		b.finishBodyTiming()
 		b.releaseSlot()
 	}
 	return n, err
@@ -1161,9 +1172,18 @@ func (b *bodyWithRequestSlot) Read(p []byte) (int, error) {
 func (b *bodyWithRequestSlot) Close() error {
 	b.closeOnce.Do(func() {
 		b.err = b.ReadCloser.Close()
+		b.finishBodyTiming()
 		b.releaseSlot()
 	})
 	return b.err
+}
+
+func (b *bodyWithRequestSlot) finishBodyTiming() {
+	if b.timing == nil || b.bodyStart.IsZero() {
+		return
+	}
+	b.timing.BodyDurationMS = durationMS(time.Since(b.bodyStart))
+	attachTransportTiming(b.resp, b.timing)
 }
 
 func (b *bodyWithRequestSlot) releaseSlot() {

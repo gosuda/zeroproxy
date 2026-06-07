@@ -150,18 +150,18 @@ export function createFingerprintingFacades({
   function maskPerformanceList(list, documentURL) {
     return Array.from(list || []).map(entry => wrapPerformanceEntry(entry, documentURL)).filter(Boolean);
   }
-  function performanceObserverListFacade(list, documentURL) {
+  function mergedPerformanceEntries(entries, documentURL, doc) {
+    const list = Array.from(entries || []);
+    return maskPerformanceList(list, documentURL)
+      .concat(transportTimingEntries())
+      .concat(syntheticScriptTimings(doc, list));
+  }
+  function performanceObserverListFacade(list, documentURL, doc) {
     return new Proxy(list, {
       get(target, prop) {
-        if (prop === 'getEntries') return () => maskPerformanceList(target.getEntries(), documentURL);
-        if (prop === 'getEntriesByType') return type => maskPerformanceList(target.getEntriesByType(type), documentURL);
-        if (prop === 'getEntriesByName') return (name, type) => {
-          const text = String(name);
-          return maskPerformanceList(target.getEntries(), documentURL).filter(entry => {
-            if (!entry || entry.name !== text) return false;
-            return type == null || String(type) === String(entry.entryType);
-          });
-        };
+        if (prop === 'getEntries') return () => mergedPerformanceEntries(target.getEntries(), documentURL, doc);
+        if (prop === 'getEntriesByType') return type => visibleObservedEntriesByType(target, String(type), documentURL, doc);
+        if (prop === 'getEntriesByName') return (name, type) => visibleObservedEntriesByName(target, String(name), type, documentURL, doc);
         const value = Reflect.get(target, prop, target);
         return typeof value === 'function' ? value.bind(target) : value;
       }
@@ -200,7 +200,9 @@ export function createFingerprintingFacades({
     const queue = nonNegativeNumber(row.queueWaitMs);
     const acquire = nonNegativeNumber(row.connectionAcquisitionMs);
     const firstByte = nonNegativeNumber(row.timeToFirstByteMs);
-    const total = Math.max(nonNegativeNumber(row.totalMs), queue + acquire + firstByte);
+    const body = nonNegativeNumber(row.bodyDurationMs);
+    const headerEnd = queue + acquire + firstByte;
+    const total = Math.max(nonNegativeNumber(row.totalMs), headerEnd + body);
     const entry = {
       name, entryType: 'resource', startTime: 0, duration: total, initiatorType: 'fetch',
       deliveryType: '', nextHopProtocol: String(row.negotiatedProtocol || ''), renderBlockingStatus: 'non-blocking',
@@ -210,8 +212,8 @@ export function createFingerprintingFacades({
       redirectStart: 0, redirectEnd: 0, fetchStart: 0, domainLookupStart: 0,
       domainLookupEnd: 0, connectStart: queue, secureConnectionStart: queue + nonNegativeNumber(row.socksConnectMs),
       connectEnd: queue + acquire, requestStart: queue + acquire,
-      responseStart: Math.min(total, queue + acquire + firstByte),
-      firstInterimResponseStart: 0, finalResponseHeadersStart: Math.min(total, queue + acquire + firstByte),
+      responseStart: Math.min(total, headerEnd),
+      firstInterimResponseStart: 0, finalResponseHeadersStart: Math.min(total, headerEnd),
       responseEnd: total, transferSize: 0, encodedBodySize: 0,
       decodedBodySize: 0, responseStatus: 0, serverTiming: transportServerTiming(row)
     };
@@ -229,6 +231,7 @@ export function createFingerprintingFacades({
       serverTimingMetric('zp-socks', row.socksConnectMs),
       serverTimingMetric('zp-tls', row.tlsHandshakeMs),
       serverTimingMetric('zp-first-byte', row.timeToFirstByteMs),
+      serverTimingMetric('zp-body', row.bodyDurationMs),
     ].filter(Boolean);
   }
   function serverTimingMetric(name, duration) {
@@ -257,8 +260,23 @@ export function createFingerprintingFacades({
         seen.add(target);
         out.push(syntheticResourceTiming(target, 'script'));
       }
+      if (out.length) syntheticTimingGapStore().script += out.length;
     } catch {}
     return out;
+  }
+  function syntheticTimingGapStore() {
+    if (!globalThis.__zpSyntheticTimingGaps) {
+      try {
+        Object.defineProperty(globalThis, '__zpSyntheticTimingGaps', {
+          value: { script: 0, resource: 0 },
+          enumerable: false,
+          configurable: false,
+        });
+      } catch {
+        globalThis.__zpSyntheticTimingGaps = { script: 0, resource: 0 };
+      }
+    }
+    return globalThis.__zpSyntheticTimingGaps;
   }
   function documentTargetScripts(doc) {
     if (Native.querySelectorAll) return Native.querySelectorAll.call(doc, 'script[data-zp-target-url]');
@@ -281,26 +299,27 @@ export function createFingerprintingFacades({
   function installPerformanceObserver(w, visibleDocumentURL) {
     if (typeof w.PerformanceObserver !== 'function') return;
     const NativePerformanceObserver = w.PerformanceObserver;
-    const ZPPerformanceObserver = createPerformanceObserver(NativePerformanceObserver, visibleDocumentURL);
+    const ZPPerformanceObserver = createPerformanceObserver(NativePerformanceObserver, visibleDocumentURL, w);
     try { Object.setPrototypeOf(ZPPerformanceObserver, NativePerformanceObserver); } catch {}
     try { ZPPerformanceObserver.prototype = NativePerformanceObserver.prototype; } catch {}
     try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get() { return NativePerformanceObserver.supportedEntryTypes; }, enumerable: true, configurable: true }); } catch {}
     define(w, 'PerformanceObserver', ZPPerformanceObserver);
   }
-  function createPerformanceObserver(NativePerformanceObserver, visibleDocumentURL) {
+  function createPerformanceObserver(NativePerformanceObserver, visibleDocumentURL, w) {
     return function PerformanceObserver(callback) {
       if (typeof callback !== 'function') throw normalizedError('TypeError');
       let observer;
       let facade;
-      observer = new NativePerformanceObserver(list => callback.call(facade, performanceObserverListFacade(list, visibleDocumentURL()), facade));
-      facade = performanceObserverFacade(observer, visibleDocumentURL);
+      const doc = w && w.document;
+      observer = new NativePerformanceObserver(list => callback.call(facade, performanceObserverListFacade(list, visibleDocumentURL(), doc), facade));
+      facade = performanceObserverFacade(observer, visibleDocumentURL, doc);
       return facade;
     };
   }
-  function performanceObserverFacade(observer, visibleDocumentURL) {
+  function performanceObserverFacade(observer, visibleDocumentURL, doc) {
     return new Proxy(observer, {
       get(target, prop) {
-        if (prop === 'takeRecords') return () => maskPerformanceList(target.takeRecords(), visibleDocumentURL());
+        if (prop === 'takeRecords') return () => mergedPerformanceEntries(target.takeRecords(), visibleDocumentURL(), doc);
         const value = Reflect.get(target, prop, target);
         return typeof value === 'function' ? value.bind(target) : value;
       }
@@ -310,10 +329,7 @@ export function createFingerprintingFacades({
     if (typeof perf.getEntries !== 'function') return;
     const native = perf.getEntries.bind(perf);
     define(perf, 'getEntries', function() {
-      const entries = Array.from(native() || []);
-      return maskPerformanceList(entries, visibleDocumentURL())
-        .concat(transportTimingEntries())
-        .concat(syntheticScriptTimings(w.document, entries));
+      return mergedPerformanceEntries(native(), visibleDocumentURL(), w.document);
     });
   }
   function installPerformanceGetEntriesByType(perf, w, visibleDocumentURL) {
@@ -332,10 +348,13 @@ export function createFingerprintingFacades({
   function visibleEntriesByType(native, self, type, w, visibleDocumentURL) {
     if (type === 'navigation') return maskPerformanceList(native.call(self, type), visibleDocumentURL());
     if (type !== 'resource') return native.call(self, type);
-    const entries = Array.from(native.call(self, type) || []);
-    return maskPerformanceList(entries, visibleDocumentURL())
-      .concat(transportTimingEntries())
-      .concat(syntheticScriptTimings(w.document, entries));
+    const entries = native.call(self, type);
+    return mergedPerformanceEntries(entries, visibleDocumentURL(), w.document);
+  }
+  function visibleObservedEntriesByType(list, type, documentURL, doc) {
+    if (type === 'navigation') return maskPerformanceList(list.getEntriesByType(type), documentURL);
+    if (type !== 'resource') return maskPerformanceList(list.getEntriesByType(type), documentURL);
+    return mergedPerformanceEntries(list.getEntriesByType(type), documentURL, doc);
   }
   function installPerformanceGetEntriesByName(perf, w, visibleDocumentURL) {
     if (typeof perf.getEntriesByName !== 'function') return;
@@ -346,12 +365,18 @@ export function createFingerprintingFacades({
   }
   function visibleEntriesByName(native, text, type, doc, visibleDocumentURL) {
     const direct = native(text, type);
-    if (direct && direct.length) return maskPerformanceList(direct);
+    if (direct && direct.length) return maskPerformanceList(direct, visibleDocumentURL());
     const transport = transportTimingEntries().filter(entry => entry.name === text && (type == null || String(type) === 'resource'));
     if (transport.length) return transport;
     const proxied = proxiedTimingEntries(native, text, type, visibleDocumentURL);
     if (proxied) return proxied;
     return !type || String(type) === 'resource' ? syntheticScriptTimingFor(text, doc) : [];
+  }
+  function visibleObservedEntriesByName(list, text, type, documentURL, doc) {
+    return mergedPerformanceEntries(list.getEntries(), documentURL, doc).filter(entry => {
+      if (!entry || entry.name !== text) return false;
+      return type == null || String(type) === String(entry.entryType);
+    });
   }
   function proxiedTimingEntries(native, text, type, visibleDocumentURL) {
     const candidates = [scriptProxyPath(text, 'classic'), scriptProxyPath(text, 'module'), resourceProxyPath(text)];

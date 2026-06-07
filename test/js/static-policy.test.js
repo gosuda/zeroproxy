@@ -49,11 +49,14 @@ function htmlFiles(root) {
   return out.sort();
 }
 
-function runtimeSrcdocInjectionTemplate() {
+function runtimeSrcdocHelpers() {
   const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
-  const match = rt.match(/function injectSrcdoc\(s\) \{ return `([^`]+)`; \}/);
-  assert.ok(match, 'runtime srcdoc injection template missing');
-  return match[1];
+  return {
+    runtimePreludeMarkup: rt.match(
+      /function runtimePreludeMarkup\(bootValue\) \{\s+return `([^`]+)`;\s+\}/,
+    ),
+    fullSource: rt,
+  };
 }
 
 test('service worker has no unclassified native fetch fallback', () => {
@@ -333,15 +336,25 @@ test('blocked selector NodeList facades do not use array-backed filtered collect
   assert.ok(rt.includes("querySelectorAll.call(self, ':not(*)')"));
 });
 
-test('HTML transform streaming limitation is explicit while adapter is non-streaming', () => {
+test('HTML document transform has a streaming Go-to-Rust bridge', () => {
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
-  const status = fs.readFileSync('IMPLEMENTAION_STATUS.md', 'utf8');
-  assert.ok(
+  const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const rust = fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8');
+  assert.ok(tx.includes('DocumentStreamRewriter'));
+  assert.ok(tx.includes('stream.WriteChunk(chunk)'));
+  assert.ok(tx.includes('stream.End()'));
+  assert.ok(tx.includes('make([]byte, 16*1024)'));
+  assert.ok(kernel.includes('DocumentStreamRewriter: rewriteHTMLDocumentStreamFromJS'));
+  assert.ok(kernel.includes('createHTMLDocumentRewriter'));
+  assert.ok(build.includes('wasm_bindgen.create_html_document_rewriter'));
+  assert.ok(build.includes('createHTMLDocumentRewriter: createHTMLDocumentRewriterPublic'));
+  assert.ok(rust.includes('HtmlRewriter::new'));
+  assert.equal(
     tx.includes('io.ReadAll(r)'),
-    'Go adapter no longer looks like the documented non-streaming path',
+    true,
+    'whole-document fallback must remain for old hooks',
   );
-  assert.ok(status.includes('Go bridge still reads the whole document before rewriting'));
-  assert.ok(status.includes('non-streaming limitation'));
 });
 
 test('classic script rewrite carries document charset for legacy Korean news scripts', () => {
@@ -441,7 +454,7 @@ test('HTML document transform is a thin Go wrapper over Rust lol_html policy', (
 
 test('runtime import maps delegate rewrite policy to Rust rewriter ABI', () => {
   const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
-  const match = rt.match(/function rewriteImportMapText\(source\) \{([\s\S]*?)\n  \}/);
+  const match = rt.match(/function rewriteImportMapText\(source\) \{([\s\S]*?)\n {2}\}/);
   assert.ok(match, 'runtime import-map rewrite function missing');
   const body = match[1];
   assert.ok(body.includes('root.ZPRewriter'));
@@ -684,7 +697,9 @@ test('committed HTML does not carry CSP meta policy', () => {
 });
 
 test('runtime srcdoc injection inventory stays single-runtime-asset', () => {
-  const tmpl = runtimeSrcdocInjectionTemplate();
+  const { runtimePreludeMarkup, fullSource } = runtimeSrcdocHelpers();
+  assert.ok(runtimePreludeMarkup, 'runtime srcdoc prelude template missing');
+  const tmpl = runtimePreludeMarkup[1];
   assert.equal((tmpl.match(/<script\b/g) || []).length, 2);
   assert.equal((tmpl.match(/\/zp\/assets\/runtime-prelude\.js/g) || []).length, 1);
   for (const forbidden of [
@@ -697,7 +712,10 @@ test('runtime srcdoc injection inventory stays single-runtime-asset', () => {
   }
   assert.ok(tmpl.includes('__ZP_BOOT'));
   assert.ok(tmpl.includes('document.currentScript.remove()'));
-  assert.ok(tmpl.includes('${transformHTML(String(s))}'));
+  assert.ok(fullSource.includes('rw.rewriteHTMLDocument(source, opts)'));
+  assert.ok(fullSource.includes('documentReferrer: referrer'));
+  assert.ok(fullSource.includes('targetUrl: srcdocTargetURL(frame)'));
+  assert.ok(fullSource.includes('return `${prelude}${transformHTML(source)}`'));
 });
 
 test('service worker names every required safe error class', () => {

@@ -237,9 +237,10 @@ async function apiWorkerScript(req, url, clientId) {
 }
 
 async function transportFetch(targetUrl, opt) {
+  const startedAt = Date.now();
   let u;
-  try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
-  if (!isReady()) { try { await initKernel(tabServers(opt)); } catch { return safeError('SW_NOT_READY', 503); } }
+  try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return transportSafeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl, '', opt, startedAt); }
+  if (!isReady()) { try { await initKernel(tabServers(opt)); } catch { return transportSafeError('SW_NOT_READY', 503, u, '', opt, startedAt); } }
   const headers = buildTransportHeaders(opt, u);
   const uploadStreamId = takeHeader(headers, 'X-ZP-Upload-Stream-Id');
   const requestId = takeHeader(headers, 'X-ZP-Request-Id');
@@ -249,12 +250,14 @@ async function transportFetch(targetUrl, opt) {
   // try/finally exactly as in the original, so (matching prior behavior) it does
   // NOT run the inflight/abort cleanup that the finally performs.
   if (init.method !== 'GET' && init.method !== 'HEAD' && attachTransportBody(init, opt, uploadStreamId)) {
-    return safeError('POLICY_BLOCKED', 403);
+    return transportSafeError('POLICY_BLOCKED', 403, u, requestId, opt, startedAt);
   }
   try {
     const resp = await self.__go_jshttp(new Request(u, init));
     recordTransportTiming(resp, requestId, opt);
     return addCSP(resp, opt.request, tabServers(opt));
+  } catch (e) {
+    return transportSafeError(e && e.code || e && e.message || 'TARGET_CONNECT_FAILED', 400, u, requestId, opt, startedAt);
   } finally {
     if (requestId) inflightFetches.delete(requestId);
     detachTransportAbort(opt, abort);
@@ -265,6 +268,18 @@ function transportMethod(opt) {
 }
 function tabServers(opt) {
   return opt.tab && opt.tab.servers;
+}
+function transportSafeError(code, status, targetUrl, requestId, opt, startedAt) {
+  const timing = {
+    requestId: String(requestId || ''),
+    entryId: String(opt.entryId || opt.tab && opt.tab.activeEntryId || ''),
+    resourceType: opt.document ? 'document' : opt.request && opt.request.destination || 'unknown',
+    totalMs: Math.max(0, Date.now() - startedAt),
+    failureClass: String(code || 'POLICY_BLOCKED').toLowerCase(),
+  };
+  const resp = safeError(code, status, targetUrl, timing);
+  recordTransportTiming(resp, requestId, opt);
+  return resp;
 }
 
 function recordTransportTiming(resp, requestId, opt) {

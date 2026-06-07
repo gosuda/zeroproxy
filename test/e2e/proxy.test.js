@@ -2472,6 +2472,30 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   ]);
   const runtimeIntegration = await page.evaluate(
     async (targetPort, crossPort) => {
+      const performanceRows = (entries) =>
+        Array.from(entries || []).map((entry) => ({
+          name: entry.name,
+          entryType: entry.entryType,
+          initiatorType: entry.initiatorType || '',
+          duration: Math.round(Number(entry.duration) || 0),
+          serverTiming: Array.from(entry.serverTiming || []).map((metric) => metric.name),
+        }));
+      const observedPerformance = [];
+      const performanceObserver =
+        typeof PerformanceObserver === 'function'
+          ? new PerformanceObserver((list) => {
+              for (const entry of list.getEntries()) {
+                observedPerformance.push({
+                  name: entry.name,
+                  entryType: entry.entryType,
+                  initiatorType: entry.initiatorType || '',
+                  duration: Math.round(Number(entry.duration) || 0),
+                  serverTiming: Array.from(entry.serverTiming || []).map((metric) => metric.name),
+                });
+              }
+            })
+          : null;
+      performanceObserver?.observe({ type: 'resource', buffered: true });
       async function readText(path) {
         const resp = await fetch(path, { cache: 'no-store' });
         return resp.text();
@@ -2829,6 +2853,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         xhrEventProbe('/redirect302?xhr=redirect'),
         'xhr-redirect',
       );
+      const takeRecords = performanceObserver
+        ? performanceRows(performanceObserver.takeRecords())
+        : [];
+      performanceObserver?.disconnect();
+      const performanceResources = performanceRows(performance.getEntriesByType('resource'));
+      const syntheticTimingGaps = globalThis.__zpSyntheticTimingGaps || { script: 0, resource: 0 };
       return {
         setCookieBody,
         serverCookie,
@@ -2866,6 +2896,12 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         redirectCookie,
         redirectPost,
         oversized,
+        performance: {
+          resources: performanceResources,
+          observed: observedPerformance,
+          takeRecords,
+          syntheticTimingGaps,
+        },
       };
     },
     targetPort,
@@ -2949,6 +2985,37 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     runtimeIntegration.stream.firstMs < 500,
     `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`,
   );
+  assert.ok(
+    runtimeIntegration.performance.resources.some(
+      (entry) =>
+        (entry.name.startsWith(`http://${targetHost}:${targetPort}/jquery.js`) ||
+          entry.name.startsWith(`http://${targetHost}:${targetPort}/image-probe.png`)) &&
+        entry.entryType === 'resource',
+    ),
+    `visible static resource timing missing: ${JSON.stringify(runtimeIntegration.performance.resources)}`,
+  );
+  assert.ok(
+    runtimeIntegration.performance.resources.some(
+      (entry) =>
+        entry.name.startsWith(`http://${targetHost}:${targetPort}/stream?ts=`) &&
+        entry.entryType === 'resource',
+    ),
+    `visible fetch timing missing: ${JSON.stringify(runtimeIntegration.performance.resources)}`,
+  );
+  assert.ok(
+    runtimeIntegration.performance.observed.some(
+      (entry) =>
+        entry.name.startsWith(`http://${targetHost}:${targetPort}/stream?ts=`) &&
+        entry.entryType === 'resource',
+    ) ||
+      runtimeIntegration.performance.takeRecords.some(
+        (entry) =>
+          entry.name.startsWith(`http://${targetHost}:${targetPort}/stream?ts=`) &&
+          entry.entryType === 'resource',
+      ),
+    `PerformanceObserver resource entry missing: ${JSON.stringify(runtimeIntegration.performance)}`,
+  );
+  assert.ok(runtimeIntegration.performance.syntheticTimingGaps.script >= 0);
   assert.equal(runtimeIntegration.xhrSuccess.status, 200);
   assert.equal(runtimeIntegration.xhrSuccess.readyState, 4);
   assert.equal(runtimeIntegration.xhrSuccess.text, 'chunk-one\nchunk-two\n');
@@ -3225,6 +3292,102 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         resolve(`throw:${(err && err.message) || String(err)}`);
       }
     });
+    out.sandboxSecurityDelta = (() => {
+      const cases = [
+        { id: 'scripts-same-origin', value: 'allow-scripts allow-same-origin', dangerous: true },
+        {
+          id: 'same-origin-scripts-case',
+          value: 'allow-same-origin ALLOW-SCRIPTS',
+          dangerous: true,
+        },
+        { id: 'scripts-only', value: 'allow-scripts', dangerous: false },
+        { id: 'same-origin-only', value: 'allow-same-origin', dangerous: false },
+        { id: 'popups-only', value: 'allow-popups', dangerous: false },
+        { id: 'empty', value: '', dangerous: false },
+      ];
+      return cases.map((item) => {
+        const frame = document.createElement('iframe');
+        frame.setAttribute('sandbox', item.value);
+        document.body.appendChild(frame);
+        const names = frame.getAttributeNames().map((name) => String(name).toLowerCase());
+        const serialized = frame.outerHTML;
+        const result = {
+          ...item,
+          getAttribute: frame.getAttribute('sandbox'),
+          hasAttribute: frame.hasAttribute('sandbox'),
+          getAttributeNamesHasSandbox: names.includes('sandbox'),
+          serializedHasSandbox: /\ssandbox(?:=|\s|>)/i.test(serialized),
+          serializedHasZPAttribute: /\sdata-zp-/i.test(serialized),
+        };
+        frame.remove();
+        return result;
+      });
+    })();
+    out.unsupportedFrameSchemes = await (async () => {
+      const messages = new Set();
+      const onMessage = (ev) => {
+        if (ev.data && ev.data.type === 'unsupported-frame') messages.add(ev.data.scheme);
+      };
+      const srcKind = (value) => {
+        const text = String(value || '');
+        if (text === 'about:blank') return 'about:blank';
+        if (text.startsWith('data:')) return 'data';
+        if (text.startsWith('blob:')) return 'blob';
+        if (text.startsWith('javascript:')) return 'javascript';
+        return text ? 'other' : 'empty';
+      };
+      const classify = async (scheme, source) => {
+        const frame = document.createElement('iframe');
+        window.addEventListener('message', onMessage);
+        try {
+          frame.src = source;
+          document.body.appendChild(frame);
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const visibleSrcKind = srcKind(frame.getAttribute('src'));
+          const propertySrcKind = srcKind(frame.src);
+          const messageDelivered = messages.has(scheme);
+          return {
+            scheme,
+            visibleSrcKind,
+            propertySrcKind,
+            messageDelivered,
+            classification:
+              visibleSrcKind === 'about:blank' &&
+              propertySrcKind === 'about:blank' &&
+              !messageDelivered
+                ? 'blocked'
+                : 'unsupported',
+            serializedHasZPAttribute: /\sdata-zp-/i.test(frame.outerHTML),
+          };
+        } finally {
+          window.removeEventListener('message', onMessage);
+          try {
+            frame.remove();
+          } catch {}
+        }
+      };
+      const blobURL = URL.createObjectURL(
+        new Blob(
+          [`<script>parent.postMessage({type:'unsupported-frame',scheme:'blob'}, '*')<\/script>`],
+          { type: 'text/html' },
+        ),
+      );
+      try {
+        return [
+          await classify(
+            'data',
+            `data:text/html,<script>parent.postMessage({type:'unsupported-frame',scheme:'data'}, '*')<\/script>`,
+          ),
+          await classify(
+            'javascript',
+            `javascript:parent.postMessage({type:'unsupported-frame',scheme:'javascript'}, '*')`,
+          ),
+          await classify('blob', blobURL),
+        ];
+      } finally {
+        URL.revokeObjectURL(blobURL);
+      }
+    })();
     const button = document.createElement('button');
     button.setAttribute('onclick', 'window.__eventHandlerLocation = location.href');
     document.body.appendChild(button);
@@ -3239,10 +3402,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.virtualHref = loc.href;
     const beforeSrcdoc = location.href;
     const evil = document.createElement('iframe');
-    evil.srcdoc = `<script>top.location.href='https://evil.example/'; parent.postMessage({type:'evil-srcdoc'}, '*')<\/script>`;
-    out.evilSrcdocRewritten = /__zp_get|Blocked by ZeroProxy rewrite policy/.test(
-      evil.getAttribute('srcdoc') || '',
-    );
+    const evilSrcdoc = `<script>top.location.href='https://evil.example/'; parent.postMessage({type:'evil-srcdoc'}, '*')<\/script>`;
+    evil.srcdoc = evilSrcdoc;
+    out.evilSrcdocVisible = (evil.getAttribute('srcdoc') || '') === evilSrcdoc;
     document.body.appendChild(evil);
     await new Promise((resolve) => setTimeout(resolve, 100));
     out.afterSrcdocHref = location.href;
@@ -3260,12 +3422,63 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(escapeMatrix.virtualHash, '#zp-fragment');
   assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
   assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref);
-  assert.equal(escapeMatrix.evilSrcdocRewritten, true);
+  assert.equal(escapeMatrix.evilSrcdocVisible, true);
   assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
   assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
   assert.equal(escapeMatrix.stringTimer, 'ran');
   assert.equal(escapeMatrix.blobWorker, 'ran');
   assert.notEqual(escapeMatrix.dataWorker, 'ran');
+  for (const row of escapeMatrix.sandboxSecurityDelta) {
+    assert.equal(row.getAttribute, row.value, `sandbox getAttribute mismatch: ${row.id}`);
+    assert.equal(row.hasAttribute, true, `sandbox hasAttribute mismatch: ${row.id}`);
+    assert.equal(
+      row.getAttributeNamesHasSandbox,
+      true,
+      `sandbox getAttributeNames mismatch: ${row.id}`,
+    );
+    assert.equal(row.serializedHasZPAttribute, false, `sandbox leaked ZP attr: ${row.id}`);
+    assert.equal(
+      row.serializedHasSandbox,
+      !row.dangerous,
+      `sandbox native visibility mismatch: ${JSON.stringify(row)}`,
+    );
+  }
+  assert.deepEqual(
+    escapeMatrix.unsupportedFrameSchemes.map((row) => ({
+      scheme: row.scheme,
+      classification: row.classification,
+      visibleSrcKind: row.visibleSrcKind,
+      propertySrcKind: row.propertySrcKind,
+      messageDelivered: row.messageDelivered,
+      serializedHasZPAttribute: row.serializedHasZPAttribute,
+    })),
+    [
+      {
+        scheme: 'data',
+        classification: 'blocked',
+        visibleSrcKind: 'about:blank',
+        propertySrcKind: 'about:blank',
+        messageDelivered: false,
+        serializedHasZPAttribute: false,
+      },
+      {
+        scheme: 'javascript',
+        classification: 'blocked',
+        visibleSrcKind: 'about:blank',
+        propertySrcKind: 'about:blank',
+        messageDelivered: false,
+        serializedHasZPAttribute: false,
+      },
+      {
+        scheme: 'blob',
+        classification: 'blocked',
+        visibleSrcKind: 'about:blank',
+        propertySrcKind: 'about:blank',
+        messageDelivered: false,
+        serializedHasZPAttribute: false,
+      },
+    ],
+  );
   assert.ok(
     escapeMatrix.eventHandlerLocation === '' ||
       escapeMatrix.eventHandlerLocation === escapeMatrix.eventHandlerExpectedLocation,

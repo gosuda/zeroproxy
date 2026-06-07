@@ -111,7 +111,7 @@
     } catch {}
   }
 
-  function safeError(code, status = 400, targetUrl = '') {
+  function safeError(code, status = 400, targetUrl = '', timing = null) {
     const safeCode = ZP.ERRORS.includes(code) ? code : 'POLICY_BLOCKED';
     const hostHTML = targetHostHTML(targetUrl);
     const body =
@@ -122,7 +122,7 @@
       '</p>' +
       hostHTML +
       '<button onclick="history.back()">Back</button><button onclick="location.reload()">Retry</button></main>';
-    return new Response(body, {
+    const resp = new Response(body, {
       status,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
@@ -135,6 +135,16 @@
         'Access-Control-Expose-Headers': '*',
       },
     });
+    if (timing && typeof timing === 'object') {
+      try {
+        Object.defineProperty(resp, '__zpTransportTiming', {
+          value: timing,
+          enumerable: false,
+          configurable: false,
+        });
+      } catch {}
+    }
+    return resp;
   }
 
   function targetHostHTML(targetUrl) {

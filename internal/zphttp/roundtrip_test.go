@@ -230,11 +230,29 @@ func TestRoundTripUsesSocksDomainAndHTTP1(t *testing.T) {
 	if timing.RequestID != "req_test" || timing.TargetOriginHash == "" || timing.NegotiatedProtocol != "http/1.1" {
 		t.Fatalf("transport timing missing redacted fields: %#v", timing)
 	}
-	if timing.ConnectionReused || timing.StreamOpenMS < 0 || timing.SOCKSConnectMS < 0 || timing.TimeToFirstByteMS < 0 || timing.TotalMS < 0 {
+	if timing.ConnectionReused || timing.StreamOpenMS < 0 || timing.SOCKSConnectMS < 0 || timing.TimeToFirstByteMS < 0 || timing.TotalMS < 0 || timing.BodyDurationMS < 0 || timing.RetryCount != 0 {
 		t.Fatalf("transport timing has invalid values: %#v", timing)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPoolKeySeparatesSchemeAuthorityAndIsolation(t *testing.T) {
+	httpURL, _ := url.Parse("http://example.com/")
+	httpsURL, _ := url.Parse("https://example.com/")
+	tabA := &TabState{TabID: "tab-a", StreamIsolationKey: []byte("0123456789abcdef0123456789abcdef")}
+	tabB := &TabState{TabID: "tab-b", StreamIsolationKey: []byte("0123456789abcdef0123456789abcdef")}
+	httpKey := h2PoolKey(httpURL, tabA)
+	httpsKey := h2PoolKey(httpsURL, tabA)
+	if httpKey == httpsKey {
+		t.Fatal("http and https pool keys must differ")
+	}
+	if httpKey.scheme != "http" || httpsKey.scheme != "https" {
+		t.Fatalf("unexpected schemes in pool keys: %#v %#v", httpKey, httpsKey)
+	}
+	if h2PoolKey(httpsURL, tabA) == h2PoolKey(httpsURL, tabB) {
+		t.Fatal("pool keys must remain isolated per tab")
 	}
 }
 

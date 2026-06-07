@@ -7,7 +7,7 @@ use swc_common::{
 use swc_ecma_ast::{
     op, ArrayLit, AssignOp, AssignTarget, BinaryOp, Callee, EsVersion, Expr, ExprOrSpread, Ident,
     IdentName, ImportDecl, Lit, MemberExpr, MemberProp, MetaPropKind, ModuleDecl, OptCall,
-    OptChainBase, OptChainExpr, Pat, Program, Prop, PropName, Str, UpdateOp,
+    OptChainBase, OptChainExpr, Pat, Program, Prop, PropName, Str, UnaryOp, UpdateOp,
 };
 use swc_ecma_codegen::Config;
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
@@ -275,6 +275,21 @@ impl VisitMut for SwcRewriter<'_> {
                     bin.right.visit_mut_with(self);
                     *expr = call_helper("__zp_has", vec![*bin.right.clone(), *bin.left.clone()]);
                     return;
+                }
+                expr.visit_mut_children_with(self);
+            }
+            Expr::Unary(unary) => {
+                if unary.op == UnaryOp::Delete {
+                    if let Some((base, prop)) = self.unary_target_parts(&unary.arg) {
+                        *expr = call_helper("__zp_delete", vec![base, prop]);
+                        return;
+                    }
+                }
+                if unary.op == UnaryOp::TypeOf {
+                    if let Some((base, prop)) = self.unary_target_parts(&unary.arg) {
+                        *expr = call_helper("__zp_typeof", vec![base, prop]);
+                        return;
+                    }
                 }
                 expr.visit_mut_children_with(self);
             }
@@ -562,6 +577,17 @@ impl SwcRewriter<'_> {
             }
             Expr::Member(member) => self.member_parts(member),
             Expr::Paren(paren) => self.update_target_parts(&paren.expr),
+            _ => None,
+        }
+    }
+
+    fn unary_target_parts(&mut self, target: &Expr) -> Option<(Expr, Expr)> {
+        match target {
+            Expr::Ident(id) if self.is_global_ident(id) => {
+                Some((global_this_expr(), str_expr(id.sym.as_ref())))
+            }
+            Expr::Member(member) => self.member_parts(member),
+            Expr::Paren(paren) => self.unary_target_parts(&paren.expr),
             _ => None,
         }
     }
@@ -873,6 +899,19 @@ return true;
         .expect("swc rewrite should succeed");
         assert!(out.contains("/*!@preserve"));
         assert!(out.contains("<div class=\"legacy-template\">뉴스</div>"));
+    }
+
+    #[test]
+    fn routes_delete_and_typeof_through_virtual_helpers() {
+        let out = rewrite_script(
+            "delete window.location; typeof window.location; typeof location;",
+            false,
+            ctx(),
+        )
+        .expect("swc rewrite should succeed");
+        assert!(out.contains("__zp_delete(__zp_get(globalThis,\"window\"),\"location\")"));
+        assert!(out.contains("__zp_typeof(__zp_get(globalThis,\"window\"),\"location\")"));
+        assert!(out.contains("__zp_typeof(globalThis,\"location\")"));
     }
 
     #[test]

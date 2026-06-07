@@ -80,10 +80,33 @@
     try {
       const out = rewriteScriptCall(source, options);
       if (out && out.ok && typeof out.code === 'string') return { blocked: false, code: out.code, errorCode: '' };
-      return { blocked: true, code: blockSource(), errorCode: rewriteFailureCode(out) };
+      const errorCode = rewriteFailureCode(out);
+      return { blocked: true, code: blockSource(), errorCode, failureTelemetry: rewriteFailureTelemetry(source, options, errorCode) };
     } catch (err) {
-      return { blocked: true, code: blockSource(), errorCode: rewriteFailureCode(err) };
+      const errorCode = rewriteFailureCode(err);
+      return { blocked: true, code: blockSource(), errorCode, failureTelemetry: rewriteFailureTelemetry(source, options, errorCode) };
     }
+  }
+
+  function rewriteFailureTelemetry(source, options, errorCode) {
+    const text = String(source || '');
+    return {
+      schema: 'zp.rewrite.failure.v1',
+      rewriteKind: String(options.kind || 'classic'),
+      sourceSizeBucket: sourceSizeBucket(text.length),
+      parserErrorKind: errorCode === 'PARSE_FAILED' ? 'parse-failed' : '',
+      contentType: String(options.contentType || ''),
+      charset: String(options.charset || ''),
+      finalAction: 'block',
+    };
+  }
+
+  function sourceSizeBucket(size) {
+    if (size <= 0) return '0B';
+    if (size < 1024) return '<1KiB';
+    if (size < 16 * 1024) return '<16KiB';
+    if (size < 256 * 1024) return '<256KiB';
+    return '>=256KiB';
   }
 
   function safeRewriteVariants(source, options, errorCode) {
@@ -91,11 +114,31 @@
     const text = String(source || '');
     const out = [];
     if (text.charCodeAt(0) === 0xfeff) out.push({ kind: 'strip-bom', source: text.slice(1) });
-    if ((options.kind || 'classic') === 'classic') {
-      const htmlCommentSafe = normalizeClassicHTMLComments(text);
-      if (htmlCommentSafe !== text) out.push({ kind: 'classic-html-comment', source: htmlCommentSafe });
-    }
+    pushKindRecoveryVariants(out, text, rewriteKind(options));
     return out;
+  }
+
+  function pushKindRecoveryVariants(out, text, kind) {
+    if (kind === 'classic') return pushClassicRecoveryVariants(out, text);
+    if (kind === 'module' && !hasModuleSyntax(text)) {
+      out.push({ kind: 'module-to-classic', source: text, options: { kind: 'classic' } });
+    }
+  }
+
+  function pushClassicRecoveryVariants(out, text) {
+    const htmlCommentSafe = normalizeClassicHTMLComments(text);
+    if (htmlCommentSafe !== text) out.push({ kind: 'classic-html-comment', source: htmlCommentSafe });
+    if (hasModuleSyntax(text)) {
+      out.push({ kind: 'classic-to-module', source: text, options: { kind: 'module' } });
+    }
+  }
+
+  function rewriteKind(options) {
+    return options && options.kind || 'classic';
+  }
+
+  function hasModuleSyntax(text) {
+    return /^\s*(?:import|export)\b/m.test(text);
   }
 
   function normalizeClassicHTMLComments(source) {

@@ -498,6 +498,167 @@ test('membrane: selector filter rejects probes for data-zp-*, /zp/assets/, /zp/a
   }
 });
 
+function loadTargetVisibleSelectorHarness() {
+  const src = readRuntime();
+  const attrRE = src.match(/const targetVisibleSelectorAttrRE = .*;/);
+  assert.ok(attrRE, 'target-visible selector attribute regex must exist');
+  const functions = [
+    'filteredCollection',
+    'filterSelectorOne',
+    'selectorUsesTargetVisibleURL',
+    'targetVisibleSelectorOne',
+    'targetVisibleSelectorAll',
+    'targetVisibleElementMatches',
+    'targetVisibleClosest',
+    'broadTargetVisibleSelector',
+    'targetVisibleSelectorMatch',
+    'visibleSelectorAttr',
+    'targetVisibleAttrMatch',
+  ]
+    .map((name) => extractFunction(src, name))
+    .join('\n');
+  const code = `
+    const Native = {
+      getAttribute(attr) {
+        return this.attrs && Object.prototype.hasOwnProperty.call(this.attrs, attr)
+          ? this.attrs[attr]
+          : null;
+      }
+    };
+    function visibleSrcset(el) { return el.visibleSrcset || ''; }
+    function visibleSrcdoc(el) { return el.visibleSrcdoc || Native.getAttribute.call(el, 'srcdoc') || ''; }
+    function visibleNavigationURL(el, attr) { return el.visibleNavigation && el.visibleNavigation[attr] || Native.getAttribute.call(el, attr) || ''; }
+    function visibleResourceURL(el, attr) { return el.visibleResource && el.visibleResource[attr] || Native.getAttribute.call(el, attr) || ''; }
+    function usesRawURLAttribute(el, attr) { return !!(el.rawURLAttrs && el.rawURLAttrs.includes(attr)); }
+    function isResourceURLAttribute(el, attr) { return !!(el.resourceURLAttrs && el.resourceURLAttrs.includes(attr)); }
+    function isZPAssetNode(node) { return !!(node && node.zp); }
+    ${attrRE[0]}
+    ${functions}
+    module.exports = {
+      targetVisibleSelectorOne,
+      targetVisibleSelectorAll,
+      targetVisibleElementMatches,
+      targetVisibleClosest,
+      broadTargetVisibleSelector,
+      targetVisibleSelectorMatch,
+      targetVisibleAttrMatch,
+      visibleSelectorAttr,
+    };
+  `;
+  const sandbox = { module: { exports: {} }, Object, Proxy, String, Symbol };
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+  return sandbox.module.exports;
+}
+
+test('membrane: selector virtualization matches target-visible srcdoc and xlink:href values', () => {
+  const selector = loadTargetVisibleSelectorHarness();
+  const srcdocFrame = {
+    nodeType: 1,
+    localName: 'iframe',
+    attrs: { srcdoc: '<script src="/zp/assets/runtime.js"></script>' },
+    visibleSrcdoc: '<h1>Native Secret</h1><script src="/app.js"></script>',
+    broadMatches: ['iframe[srcdoc]'],
+  };
+  const xlinkUse = {
+    nodeType: 1,
+    localName: 'use',
+    attrs: { 'xlink:href': '/zp/p/route#k=abc' },
+    visibleResource: { href: 'https://target.example/sprite.svg#icon' },
+    broadMatches: ['use[xlink\\:href]'],
+  };
+  const zpAsset = {
+    nodeType: 1,
+    localName: 'script',
+    zp: true,
+    attrs: { src: '/zp/assets/runtime.js' },
+  };
+  const qsaSelectors = [];
+  const root = {
+    querySelectorAll(sel) {
+      qsaSelectors.push(sel);
+      return [srcdocFrame, xlinkUse, zpAsset];
+    },
+  };
+
+  const srcdocMatches = selector.targetVisibleSelectorAll(
+    root,
+    'iframe[srcdoc*="Native Secret"]',
+    root.querySelectorAll,
+  );
+  assert.equal(qsaSelectors.pop(), 'iframe[srcdoc]');
+  assert.equal(srcdocMatches.length, 1);
+  assert.equal(srcdocMatches[0], srcdocFrame);
+  assert.equal(
+    selector.targetVisibleSelectorOne(
+      root,
+      'iframe[srcdoc$="</script>"]',
+      null,
+      root.querySelectorAll,
+    ),
+    srcdocFrame,
+  );
+
+  const xlinkMatches = selector.targetVisibleSelectorAll(
+    root,
+    'use[xlink\\:href$="#icon"]',
+    root.querySelectorAll,
+  );
+  assert.equal(qsaSelectors.pop(), 'use[xlink\\:href]');
+  assert.equal(xlinkMatches.length, 1);
+  assert.equal(xlinkMatches[0], xlinkUse);
+  assert.equal(
+    selector.visibleSelectorAttr(xlinkUse, 'xlink\\:href'),
+    'https://target.example/sprite.svg#icon',
+  );
+});
+
+test('membrane: selector virtualization applies URL operators across matches and closest', () => {
+  const selector = loadTargetVisibleSelectorHarness();
+  const frame = {
+    nodeType: 1,
+    localName: 'iframe',
+    parentElement: null,
+    attrs: { srcdoc: '<script src="/zp/assets/runtime.js"></script>' },
+    visibleSrcdoc: '<main data-lang="en-US">primary secret </main>',
+    broadMatches: ['iframe[srcdoc]'],
+  };
+  const child = {
+    nodeType: 1,
+    localName: 'span',
+    parentElement: frame,
+    attrs: {},
+    broadMatches: [],
+  };
+  const nativeMatches = function (sel) {
+    return this.broadMatches.includes(sel);
+  };
+
+  assert.equal(
+    selector.targetVisibleElementMatches(frame, 'iframe[srcdoc^="<main"]', nativeMatches),
+    true,
+  );
+  assert.equal(
+    selector.targetVisibleElementMatches(frame, 'iframe[srcdoc~="secret"]', nativeMatches),
+    true,
+  );
+  assert.equal(
+    selector.targetVisibleClosest(child, 'iframe[srcdoc*="data-lang"]', null, nativeMatches),
+    frame,
+  );
+  assert.equal(selector.targetVisibleAttrMatch('en-US', '|=', 'en'), true);
+  assert.equal(selector.targetVisibleAttrMatch('bundle.module.js', '$=', '.js'), true);
+  assert.equal(
+    selector.targetVisibleAttrMatch(
+      'HTTPS://TARGET.EXAMPLE/APP.JS',
+      '^=',
+      'https://target.example/',
+      'i',
+    ),
+    true,
+  );
+});
+
 test('membrane: selector virtualization hooks target-visible URL attributes', () => {
   const rt = readRuntime();
   for (const needle of [
@@ -515,6 +676,11 @@ test('membrane: selector virtualization hooks target-visible URL attributes', ()
   assert.ok(rt.includes('visibleNavigationURL(el, attr)'));
   assert.ok(rt.includes('visibleResourceURL(el, attr)'));
   assert.ok(rt.includes('visibleSrcset(el)'));
+  assert.match(rt, /href\|src\|action\|formaction\|poster\|srcset\|srcdoc\|xlink/);
+  assert.ok(rt.includes("attr === 'srcdoc'"));
+  assert.ok(rt.includes("attr === 'xlink:href'"));
+  assert.ok(rt.includes('visibleSrcdoc(el)'));
+  assert.ok(rt.includes('data-zp-target-srcdoc'));
 });
 
 test('membrane: stealth + masking hooks are installed into the runtime global', () => {

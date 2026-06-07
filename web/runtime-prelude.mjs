@@ -88,6 +88,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   const windowMethodBindings = new Map();
   const integrityBackupAttr = 'data-zp-integrity';
   const nonceBackupAttr = 'data-zp-target-nonce';
+  const srcdocBackupAttr = 'data-zp-target-srcdoc';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const serviceWorkerFacades = new WeakMap();
@@ -323,11 +324,14 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return value.startsWith(ZP.CONTROL_PREFIX) || value.startsWith(proxyOrigin + ZP.CONTROL_PREFIX);
   }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
+  function hasFrameBlockedURLScheme(raw) { return /^(?:javascript|data|blob|vbscript):/i.test(String(raw).trim()); }
   function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
   function shouldBlockURLAttribute(el, key, raw) {
     const tag = el && el.localName;
     const localKey = attrLocalName(key);
-    const strict = localKey === 'src' && tag === 'script' || localKey === 'src' && (tag === 'iframe' || tag === 'frame') || usesRawURLAttribute(el, key);
+    const frameSrc = localKey === 'src' && (tag === 'iframe' || tag === 'frame');
+    if (frameSrc) return hasFrameBlockedURLScheme(raw);
+    const strict = localKey === 'src' && tag === 'script' || usesRawURLAttribute(el, key);
     return strict ? hasExecutableURLScheme(raw) : hasDangerousURLScheme(raw);
   }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
@@ -1207,6 +1211,16 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const raw = unwrapRaw(base === scope ? root : base);
       return Reflect.has(Object(raw), prop);
     }
+    function deleteProperty(base, prop) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if ((isWindowLike(base) && prop === 'location') || base === document && prop === 'location') return false;
+      const raw = unwrapRaw(base === scope ? root : base);
+      return Reflect.deleteProperty(Object(raw), prop);
+    }
+    function typeOf(base, prop) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      return typeof get(base, prop);
+    }
     function getOwnPropertyDescriptor(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isWindowLike(base) && prop === 'location') return { get() { return virtualLocation; }, set(v) { setVirtualLocation(v); }, enumerable: true, configurable: true };
@@ -1230,6 +1244,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     define(root, '__zp_update', update);
     define(root, '__zp_construct', construct);
     define(root, '__zp_has', has);
+    define(root, '__zp_delete', deleteProperty);
+    define(root, '__zp_typeof', typeOf);
     define(root, '__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
     define(root, '__zp_ownKeys', ownKeys);
     define(root, '__zp_module_url', moduleURL);
@@ -1740,6 +1756,17 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function rememberNavigationTarget(el, target) {
     urlMeta.set(el, target);
     if (Native.getAttribute.call(el, 'data-zp-target-url') !== target) Native.setAttribute.call(el, 'data-zp-target-url', target);
+  }
+  function setFrameSrcdocAttribute(el, attrName, raw, ns) {
+    const visible = String(raw || '');
+    Native.setAttribute.call(el, srcdocBackupAttr, visible);
+    const rewritten = injectSrcdoc(visible, el);
+    if (ns !== undefined && Native.setAttributeNS) return Native.setAttributeNS.call(el, ns, attrName, rewritten);
+    return Native.setAttribute.call(el, attrName, rewritten);
+  }
+  function visibleSrcdoc(el) {
+    const backed = Native.getAttribute.call(el, srcdocBackupAttr);
+    return backed !== null ? backed : Native.getAttribute.call(el, 'srcdoc') || '';
   }
   function visibleSrcset(el) {
     const stored = Native.getAttribute.call(el, 'data-zp-target-srcset');
@@ -2276,7 +2303,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     const s = String(selector || '').toLowerCase();
     return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('/zp/api/') || s.includes('src*="zp"') || s.includes("src*='zp'") || s.includes('src*=zp') || s.includes('zeroproxy') || s.includes('x-zeroproxy-icon');
   }
-  const targetVisibleSelectorAttrRE = /\[\s*(href|src|action|formaction|poster|srcset)\s*([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*([is])?\s*\]/ig;
+  const targetVisibleSelectorAttrRE = /\[\s*(href|src|action|formaction|poster|srcset|srcdoc|xlink\\?:href)\s*([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*([is])?\s*\]/ig;
   function selectorUsesTargetVisibleURL(selector) {
     targetVisibleSelectorAttrRE.lastIndex = 0;
     return targetVisibleSelectorAttrRE.test(String(selector || ''));
@@ -2316,8 +2343,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return true;
   }
   function visibleSelectorAttr(el, attr) {
-    attr = String(attr || '').toLowerCase();
+    attr = String(attr || '').toLowerCase().replace('\\:', ':');
     if (attr === 'srcset') return visibleSrcset(el);
+    if (attr === 'srcdoc' && (el.localName === 'iframe' || el.localName === 'frame')) return visibleSrcdoc(el);
+    if (attr === 'xlink:href') return visibleResourceURL(el, 'href');
     if (usesRawURLAttribute(el, attr)) return visibleNavigationURL(el, attr);
     if (isResourceURLAttribute(el, attr) || el.localName === 'link' && attr === 'href') return visibleResourceURL(el, attr);
     return Native.getAttribute.call(el, attr) || '';
@@ -2458,7 +2487,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         return Native.setAttribute.call(this, k, t);
       }
     }
-    if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
+    if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return setFrameSrcdocAttribute(this, k, v);
     return Native.setAttribute.call(this, k, v);
   }
   function setAttributeNSHook(ns, k, v) {
@@ -2491,7 +2520,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         return Native.setAttributeNS.call(this, ns, k, t);
       }
     }
-    if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return Native.setAttributeNS.call(this, ns, k, injectSrcdoc(String(v)));
+    if ((this.localName === 'iframe' || this.localName === 'frame') && localKey === 'srcdoc') return setFrameSrcdocAttribute(this, k, v, ns);
     if (eventAttrName(key)) return setEventAttribute(this, k, v);
     return Native.setAttributeNS.call(this, ns, k, v);
   }
@@ -2560,6 +2589,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       const sandbox = frameSandboxValue(this);
       if (sandbox !== undefined) return sandbox;
     }
+    if (key === 'srcdoc' && (this.localName === 'iframe' || this.localName === 'frame')) return visibleSrcdoc(this);
     if (key === 'srcset' || isSrcsetAttribute(this, key)) return visibleSrcset(this);
     if (isURLBearing(this, key)) return usesRawURLAttribute(this, key) ? visibleNavigationURL(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
     return Native.getAttribute.call(this, k);
@@ -2592,6 +2622,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       urlMeta.delete(this);
       Native.removeAttribute.call(this, 'data-zp-target-url');
     }
+    if (key === 'srcdoc' && (this.localName === 'iframe' || this.localName === 'frame')) Native.removeAttribute.call(this, srcdocBackupAttr);
     if (isSrcsetAttribute(this, key)) Native.removeAttribute.call(this, 'data-zp-target-srcset');
     return Native.removeAttribute.call(this, k);
   }
@@ -3004,7 +3035,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     node.replaceWith(script);
   }
   function injectSerializedFrameSrcdoc(node) {
-    Native.setAttribute.call(node, 'srcdoc', injectSrcdoc(Native.getAttribute.call(node, 'srcdoc') || ''));
+    setFrameSrcdocAttribute(node, 'srcdoc', Native.getAttribute.call(node, 'srcdoc') || '');
   }
   function transformHTMLScriptNode(node) {
     const dtype = executableScriptDataType(node);
@@ -3052,8 +3083,52 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     Native.setAttribute.call(node, eventDataAttrName(lowerAttr), rewriteEventAttribute(val));
     if (Native.removeAttribute) Native.removeAttribute.call(node, attrName);
   }
-  function injectSrcdoc(s) { return `<script nonce="zp">(function(){const boot=${bootJSON()};Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>${transformHTML(String(s))}`; }
-  function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
+  function injectSrcdoc(s, frame) { return rewriteSrcdocDocument(String(s), frame); }
+  function rewriteSrcdocDocument(source, frame) {
+    const prelude = srcdocRuntimePrelude(frame);
+    const opts = {
+      targetUrl: srcdocTargetURL(frame),
+      controlPrefix: ZP.CONTROL_PREFIX,
+      servers: activeServers,
+      runtimePrelude: prelude,
+      tabId: boot.tabId,
+      runtimeToken,
+    };
+    try {
+      const rw = root.ZPRewriter;
+      if (rw && typeof rw.rewriteHTMLDocument === 'function') {
+        const out = rw.rewriteHTMLDocument(source, opts);
+        if (out && out.ok && typeof out.code === 'string') return out.code;
+      }
+    } catch {}
+    return `${prelude}${transformHTML(source)}`;
+  }
+  function srcdocRuntimePrelude(frame) {
+    return runtimePreludeMarkup(srcdocBootJSON(frame));
+  }
+  function srcdocBootJSON(frame) {
+    const targetUrl = srcdocTargetURL(frame);
+    const referrer = documentReferrerFor(targetUrl) || visibleLocationURL().href;
+    return bootJSON({
+      targetUrl,
+      documentReferrer: referrer,
+    });
+  }
+  function srcdocTargetURL(frame) {
+    try {
+      return Native.getAttribute.call(frame, 'data-zp-target-url') || baseURL;
+    } catch {
+      return baseURL;
+    }
+  }
+  function hasInjectedSrcdocPrelude(raw) {
+    const text = String(raw || '');
+    return text.includes('__ZP_BOOT') && text.includes('/zp/assets/runtime-prelude.js');
+  }
+  function runtimePreludeMarkup(bootValue) {
+    return `<script nonce="zp">(function(){const boot=${bootValue};Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>`;
+  }
+  function bootJSON(overrides) { return JSON.stringify(Object.assign({}, boot, { servers: activeServers }, overrides || {})).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) {
     try { return rewritePageSource(source, 'event-handler'); }
     catch { return "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError')"; }
@@ -3129,7 +3204,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'srcdoc') {
       sanitizeFrameSandbox(el);
       const raw = Native.getAttribute.call(el, 'srcdoc');
-      if (raw && !raw.startsWith(injectSrcdoc(''))) Native.setAttribute.call(el, 'srcdoc', injectSrcdoc(String(raw)));
+      if (raw && !hasInjectedSrcdocPrelude(raw)) setFrameSrcdocAttribute(el, 'srcdoc', raw);
       instrumentIframe(el);
       return;
     }
@@ -3266,11 +3341,13 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       try {
         Object.defineProperty(proto, prop, {
           get() {
-            return prop === 'src' ? visibleNavigationURL(this, 'src') || d.get.call(this) : d.get.call(this);
+            return prop === 'src' ? visibleNavigationURL(this, 'src') || d.get.call(this) : prop === 'srcdoc' ? visibleSrcdoc(this) : d.get.call(this);
           },
           set(v) {
-            if (prop === 'srcdoc') d.set.call(this, injectSrcdoc(String(v)));
-            else if (isHTTPURL(v) && !String(v).startsWith(proxyOrigin)) {
+            if (prop === 'srcdoc') setFrameSrcdocAttribute(this, 'srcdoc', v);
+            else if (shouldBlockURLAttribute(this, 'src', v)) {
+              blockExecutableURL(this, 'src', v);
+            } else if (isHTTPURL(v) && !String(v).startsWith(proxyOrigin)) {
               const t = targetURL(v);
               urlMeta.set(this, t);
               Native.setAttribute.call(this, 'data-zp-target-url', t);

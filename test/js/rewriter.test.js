@@ -679,11 +679,29 @@ test('HTTP script rewriter reports redacted fail-close classifications', () => {
       return block;
     },
   });
-  const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome(`if (${secret}`, { kind: 'classic' });
-  assert.deepEqual(Object.keys(outcome).sort(), ['blocked', 'code', 'errorCode']);
+  const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome(`if (${secret}`, {
+    kind: 'classic',
+    contentType: 'application/javascript',
+    charset: 'utf-8',
+  });
+  assert.deepEqual(Object.keys(outcome).sort(), [
+    'blocked',
+    'code',
+    'errorCode',
+    'failureTelemetry',
+  ]);
   assert.equal(outcome.blocked, true);
   assert.equal(outcome.code, block);
   assert.equal(outcome.errorCode, 'PARSE_FAILED');
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome.failureTelemetry)), {
+    schema: 'zp.rewrite.failure.v1',
+    rewriteKind: 'classic',
+    sourceSizeBucket: '<1KiB',
+    parserErrorKind: 'parse-failed',
+    contentType: 'application/javascript',
+    charset: 'utf-8',
+    finalAction: 'block',
+  });
   assert.equal(JSON.stringify(outcome).includes(secret), false);
   assert.equal(ctx.ZPHTTPRewriter.rewriteScriptOrBlock(secret), block);
 
@@ -718,6 +736,34 @@ test('HTTP script rewriter retries safe parse-recovery variants before blocking'
   });
   assert.equal(calls[0], '<!--\nlocation.href;');
   assert.equal(calls[1], '//<!--\nlocation.href;');
+});
+
+test('HTTP script rewriter retries classic-module classification mismatches safely', () => {
+  const calls = [];
+  const kinds = [];
+  const ctx = loadHTTPRewriterContext({
+    ready: true,
+    rewriteScript(source, options = {}) {
+      calls.push(String(source));
+      kinds.push(String(options.kind || 'classic'));
+      if (options.kind === 'module') return { ok: true, code: 'export default 1;' };
+      return { ok: false, errorCode: 'PARSE_FAILED' };
+    },
+    blockSource() {
+      return 'blocked();';
+    },
+  });
+  const outcome = ctx.ZPHTTPRewriter.rewriteScriptOutcome('export default 1;', {
+    kind: 'classic',
+  });
+  assert.equal(outcome.blocked, false);
+  assert.equal(outcome.code, 'export default 1;');
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome.recovery)), {
+    attempted: ['classic-to-module'],
+    used: 'classic-to-module',
+  });
+  assert.deepEqual(kinds, ['classic', 'module']);
+  assert.deepEqual(calls, ['export default 1;', 'export default 1;']);
 });
 
 test('HTTP script rewriter passes runtime context into module script rewriting', async () => {
@@ -905,6 +951,48 @@ test('Rust rewriter routes in-operator checks on virtual windows through helper'
   assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
   assert.ok(out.code.includes('(__zp_has(__zp_get(globalThis,"window"),"widget"))'));
   assert.equal(out.code.includes('"widget" in __zp_get(globalThis,"window")'), false);
+});
+
+test('Rust rewriter routes delete and typeof checks on virtual globals through helpers', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(
+    `delete window.location; typeof window.location; typeof location;`,
+    {
+      kind: 'classic',
+      targetUrl: 'https://widgets.example/assets/api.js',
+    },
+  );
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assertCodeIncludes(out.code, '__zp_delete(__zp_get(globalThis,"window"),"location")');
+  assertCodeIncludes(out.code, '__zp_typeof(__zp_get(globalThis,"window"),"location")');
+  assertCodeIncludes(out.code, '__zp_typeof(globalThis,"location")');
+});
+
+test('Rust rewriter preserves inert strings comments regexes and property keys', async () => {
+  const rewriter = await loadRewriter();
+  const out = rewriter.rewriteScript(
+    `
+    // window.location.href in a comment must stay inert
+    const text = "window.location.href";
+    const pattern = /window\\.location\\.href/;
+    const object = { location: "key", window() { return "method"; } };
+    const executable = window.location.href;
+    window.__probe = { text, pattern, object, executable };
+  `,
+    {
+      kind: 'classic',
+      targetUrl: 'https://widgets.example/assets/api.js',
+    },
+  );
+  assert.equal(out.ok, true, JSON.stringify(out.diagnostics));
+  assertCodeIncludes(out.code, '"window.location.href"');
+  assertCodeIncludes(out.code, '/window\\.location\\.href/');
+  assertCodeIncludes(out.code, 'location:"key"');
+  assertCodeIncludes(out.code, 'window(){');
+  assertCodeIncludes(
+    out.code,
+    '__zp_get(__zp_get(__zp_get(globalThis,"window"),"location"),"href")',
+  );
 });
 
 test('Rust rewriter preserves optional access semantics for guarded probes', async () => {
