@@ -263,7 +263,7 @@ function internalPath(path) {
   // sites (GitHub) hit subtle membrane bugs that surface as React
   // hydration errors → "Looks like something went wrong" SSR fallback.
   if (path.startsWith('/__zp/')) return true;
-  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('rust-rewriter.js') || path === ZP.assetPath('zp-page-bundle.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace' || path === '/zp/api/__shadow_log';
@@ -1239,6 +1239,11 @@ function buildRuntimePrelude(tab, entry) {
   return '<script nonce=zp>' + prewarmInline + '</script>' +
     '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
     '<script nonce=zp src=' + ZP.assetPath('rust-rewriter.js') + '></script>' +
+    // 2026-06-08 split-bundle (c.1) Step 2.3: page-realm ZPBundle.
+    // initSync's inline wasm bytes so `globalThis.ZPBundle.ready === true`
+    // by the time runtime-prelude's IIFE runs. Step 2.4 swaps page-realm
+    // rewriter callsites from ZPRewriter to ZPBundle.
+    '<script nonce=zp src=' + ZP.assetPath('zp-page-bundle.js') + '></script>' +
     '<script nonce=zp id=__zp-boot type=application/json>' + bootJSON + '</script>' +
     '<script nonce=zp src=' + ZP.assetPath('runtime-prelude.js') + '></script>';
 }

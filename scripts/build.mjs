@@ -123,6 +123,7 @@ async function buildWeb() {
   await mkdir(webOut, { recursive: true });
 
   const rustRewriter = await makeRustRewriterClassic();
+  const zpBundlePage = await makeZPBundlePageClassic();
   const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
 
@@ -138,6 +139,12 @@ async function buildWeb() {
   // inside runtime-prelude will fetch /__zp/zp_page_rt.wasm.
   await writeBundled('runtime-prelude.js', [await readSource('zp-rt.js'), await readSource('runtime-prelude.js')]);
   await writeBundled('rust-rewriter.js', [rustRewriter]);
+  // 2026-06-08 split-bundle (c.1) Step 2.3: classic-script wrapper that
+  // inlines the SW-flavored ZPBundle wasm-bindgen glue + wasm bytes and
+  // does an `initSync()` so the page realm has `globalThis.ZPBundle`
+  // ready synchronously by the time runtime-prelude's IIFE runs. Step
+  // 2.4 swaps page-realm rewriter calls from ZPRewriter to ZPBundle.
+  await writeBundled('zp-page-bundle.js', [zpBundlePage]);
   await writeBundled('worker-prelude.js', [await readSource('zp-core.js'), workerPrelude]);
   await writeBundled('sw.js', [await readSource('zp-core.js'), rustRewriter, serviceWorker]);
 }
@@ -257,6 +264,26 @@ function stripServiceWorkerImports(source) {
 
 function stripWorkerPreludeImports(source) {
   return source.replace(/^\s*importScripts\('\/zp\/assets\/zp-core\.js'\);\r?\n/m, '');
+}
+
+// 2026-06-08 split-bundle (c.1) Step 2.3: page-realm ZPBundle.
+// Read the no-modules wasm-bindgen glue (`zp_bundle_sw.js`) that
+// `buildRustBundle` already produces for the SW realm — its IIFE
+// exposes `globalThis.ZPBundleWBG` (the wasm_bindgen factory) — then
+// append a small wrapper that:
+//   (1) inlines `zp_bundle_sw_bg.wasm` as base64,
+//   (2) calls `ZPBundleWBG.initSync({ module: <bytes> })` synchronously,
+//   (3) builds a frozen `globalThis.ZPBundle` mirror with the rewriter
+//       surface the page realm needs.
+// The "_sw" name in `zp_bundle_sw.js` only reflects which wasm-bindgen
+// target (`no-modules`) was used; the underlying WASM is the same Rust
+// crate that powers the SW realm. Step c.2 will split the WASM into
+// page-only / SW-only halves.
+async function makeZPBundlePageClassic() {
+  const glueJs = await readFile(path.join(zpBundleOutDir, 'zp_bundle_sw.js'), 'utf8');
+  const wasmBytes = await readFile(path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm'));
+  const wasmBase64 = wasmBytes.toString('base64');
+  return `/* Generated from Rust WASM ZeroProxy bundle (page realm). */\n${glueJs}\n(() => {\nconst __zp_bundle_b64 = ${JSON.stringify(wasmBase64)};\nconst __zp_bundle_bytes = Uint8Array.from(atob(__zp_bundle_b64), c => c.charCodeAt(0));\nconst wbg = globalThis.ZPBundleWBG;\nif (typeof wbg !== 'function') throw new Error('ZP_PAGE_BUNDLE_BOOT_FAILED: ZPBundleWBG missing');\nwbg.initSync({ module: __zp_bundle_bytes });\nconst api = Object.freeze({\n  ready: true,\n  bundleVersion: wbg.bundleVersion,\n  rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(String(source || ''), String(kind || 'classic'), String(targetUrl || '')),\n  rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'\n    ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(String(source || ''), String(kind || 'classic'), String(targetUrl || ''))\n    : null,\n});\nObject.defineProperty(globalThis, 'ZPBundle', { value: api, enumerable: false, configurable: false, writable: false });\n})();\n`;
 }
 
 async function makeRustRewriterClassic() {

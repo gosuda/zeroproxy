@@ -531,6 +531,38 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
+// 2026-06-08 split-bundle (c.1) Step 2.3 + 2.4: page-realm ZPBundle infra +
+// prelude primary swap. The page realm now loads `zp-page-bundle.js` (which
+// inlines the wasm + initSync's at script-tag time so `globalThis.ZPBundle.ready
+// === true` synchronously by the time runtime-prelude's IIFE runs), and the
+// prelude's `callPageRewriter` calls ZPBundle first with ZPRewriter as fallback.
+test('page-realm prelude swaps to ZPBundle with ZPRewriter fallback (Step 2.3 + 2.4)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  // Build produces the page bundle artifact.
+  assert.match(build, /async function makeZPBundlePageClassic\b/, 'build must generate page bundle wrapper');
+  assert.match(build, /zp-page-bundle\.js/, 'build must write zp-page-bundle.js');
+  // Go server allowlists the new asset on both legacy + canonical paths.
+  assert.match(mainGo, /"zp-page-bundle\.js"/, 'Go server must allow the new asset name');
+  // SW injects the bundle <script> tag alongside the legacy rewriter.
+  assert.match(sw, /assetPath\('zp-page-bundle\.js'\)/, "SW must inject zp-page-bundle.js script tag");
+  // Prelude swap: callPageRewriter prefers ZPBundle, falls back to ZPRewriter.
+  assert.match(rt, /function callPageRewriter\b/, 'prelude must define callPageRewriter helper');
+  const fnMatch = rt.match(/function callPageRewriter\([\s\S]*?^    \}/m);
+  assert.ok(fnMatch, 'callPageRewriter body must be locatable');
+  const fn = fnMatch[0];
+  const modernIdx = fn.indexOf('root.ZPBundle');
+  const legacyIdx = fn.indexOf('root.ZPRewriter');
+  assert.ok(modernIdx > 0, 'callPageRewriter must call ZPBundle');
+  assert.ok(legacyIdx > 0, 'callPageRewriter must retain ZPRewriter as fallback');
+  assert.ok(modernIdx < legacyIdx, 'ZPBundle must be tried before ZPRewriter in callPageRewriter');
+  // rewriteDynamicFunctionBody + rewriteWithPageRewriter both route through it.
+  assert.match(rt, /function rewriteDynamicFunctionBody[\s\S]*?callPageRewriter\(/, 'rewriteDynamicFunctionBody must route through callPageRewriter');
+  assert.match(rt, /function rewriteWithPageRewriter[\s\S]*?callPageRewriter\(/, 'rewriteWithPageRewriter must route through callPageRewriter');
+});
+
 // 2026-06-08 split-bundle (c.1) Step 2.2: SW primary swap — ZPBundle is the
 // primary script rewriter, ZPRewriter (rewriter-rs/) survives only as the
 // fallback if modern errors. Pin the call ordering + the explicit fallback

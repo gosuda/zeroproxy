@@ -1070,29 +1070,42 @@
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, scope));
     define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
-    function rewriteDynamicFunctionBody(params, body) {
-      // 2026-06-07 split-bundle (c.1) Step 1: inline the wrap+strip the
-      // rewriter-rs JS glue used to do (`rewriteFunctionBody`). Routing
-      // through `rewriteScript` directly lets us drop the wrapper from
-      // the generated classic in the next milestones.
-      if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') {
-        throw normalizedError('NotSupportedError');
+    // 2026-06-08 split-bundle (c.1) Step 2.4: page-realm primary swap.
+    // `globalThis.ZPBundle` (loaded by `zp-page-bundle.js` per Step 2.3) is
+    // now the primary rewriter; legacy ZPRewriter (rewriter-rs/, OXC 0.60)
+    // survives only as the fallback if modern errors. Step 3 will drop
+    // OXC from rewriter-rs entirely; Step 4 will delete the crate.
+    //
+    // ZPBundle's `rewriteScript` is positional `(source, kind, target_url)`
+    // and either returns the rewritten string or throws a JsError. Legacy
+    // ZPRewriter is options-object + returns `{ok, code, errorCode, …}`.
+    // The helpers below normalize both shapes behind a single try/catch.
+    function callPageRewriter(source, kind) {
+      const target = virtualURL.href;
+      if (root.ZPBundle && root.ZPBundle.ready && typeof root.ZPBundle.rewriteScript === 'function') {
+        try {
+          const out = root.ZPBundle.rewriteScript(source, kind, target);
+          if (typeof out === 'string' && out.length > 0) return out;
+        } catch (e) { /* fall through to legacy */ }
       }
+      if (root.ZPRewriter && root.ZPRewriter.ready && typeof root.ZPRewriter.rewriteScript === 'function') {
+        const out = root.ZPRewriter.rewriteScript(source, { kind, targetUrl: target, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
+        if (out && out.ok && typeof out.code === 'string') return out.code;
+      }
+      throw normalizedError('NotSupportedError');
+    }
+    function rewriteDynamicFunctionBody(params, body) {
       const list = Array.isArray(params) ? params : [];
       const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\n';
       const suffix = '\n}';
       const wrapped = prefix + String(body || '') + suffix;
-      const out = root.ZPRewriter.rewriteScript(wrapped, { kind: 'classic', targetUrl: virtualURL.href, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-      if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
-      const end = out.code.length - suffix.length;
+      const code = callPageRewriter(wrapped, 'classic');
+      const end = code.length - suffix.length;
       if (end < prefix.length) throw normalizedError('NotSupportedError');
-      return out.code.slice(prefix.length, end);
+      return code.slice(prefix.length, end);
     }
     function rewriteWithPageRewriter(source, kind) {
-      if (!root.ZPRewriter || !root.ZPRewriter.ready || typeof root.ZPRewriter.rewriteScript !== 'function') throw normalizedError('NotSupportedError');
-      const out = root.ZPRewriter.rewriteScript(String(source || ''), { kind, targetUrl: virtualURL.href, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-      if (!out || !out.ok || typeof out.code !== 'string') throw normalizedError('NotSupportedError');
-      return out.code;
+      return callPageRewriter(String(source || ''), kind);
     }
     // 인라인 <script> 본문은 브라우저가 raw text mode 로 토크나이즈하여 HTML
     // 엔티티를 디코딩하지 않는다. React `dangerouslySetInnerHTML` 가 JS 연산자
