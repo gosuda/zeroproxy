@@ -173,7 +173,7 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(build.includes('wasm-bindgen'));
   assert.ok(build.includes('ZPRewriter'));
   assert.ok(build.includes('ZPRustRewriter'));
-  assert.ok(build.includes('phase3-rust-wasm-ast-3-css'));
+  assert.ok(build.includes('phase3-rust-wasm-css'));
   assert.ok(build.includes('cargoBinPath'));
   assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
   assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust rewriter AST walker missing');
@@ -531,12 +531,40 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   assert.ok(build.includes('ZPBundleWBG'), 'build must wrap glue in IIFE exposing ZPBundleWBG');
 });
 
-// 2026-06-08 split-bundle (c.1) Step 2.3 + 2.4: page-realm ZPBundle infra +
-// prelude primary swap. The page realm now loads `zp-page-bundle.js` (which
-// inlines the wasm + initSync's at script-tag time so `globalThis.ZPBundle.ready
-// === true` synchronously by the time runtime-prelude's IIFE runs), and the
-// prelude's `callPageRewriter` calls ZPBundle first with ZPRewriter as fallback.
-test('page-realm prelude swaps to ZPBundle with ZPRewriter fallback (Step 2.3 + 2.4)', () => {
+// 2026-06-08 split-bundle (c.1) Step 3: rewriter-rs/ crate is now CSS-only.
+// All OXC dependencies removed from rewriter-rs/Cargo.toml + rewrite_script
+// gone from rewriter-rs/src/lib.rs. The generated classic script (`rust-rewriter.js`)
+// exposes only rewriteCSS on ZPRewriter/ZPRustRewriter.
+test('rewriter-rs/ is CSS-only after Step 3', () => {
+  const cargo = fs.readFileSync('rewriter-rs/Cargo.toml', 'utf8');
+  const lib = fs.readFileSync('rewriter-rs/src/lib.rs', 'utf8');
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  // No OXC dependencies.
+  assert.equal(/^oxc_/m.test(cargo), false, 'rewriter-rs Cargo.toml must NOT declare any oxc_* crate');
+  // SWC CSS deps survive.
+  assert.match(cargo, /^swc_css_ast\b/m, 'rewriter-rs must keep swc_css_ast');
+  assert.match(cargo, /^swc_css_parser\b/m, 'rewriter-rs must keep swc_css_parser');
+  // lib.rs: no rewrite_script + no OXC use statements.
+  assert.equal(lib.includes('pub fn rewrite_script'), false, 'rewrite_script must be removed from rewriter-rs');
+  assert.equal(/use oxc_/.test(lib), false, 'rewriter-rs lib.rs must not import any oxc_* crate');
+  assert.match(lib, /pub fn rewrite_css\b/, 'rewrite_css must survive');
+  // Generated rust-rewriter.js exposes ZPRewriter with rewriteCSS only.
+  assert.match(build, /rewriteCSS:\s*rewriteCSSPublic/, 'rewriter-rs classic must expose rewriteCSS');
+  // The old rewriteScript wrapper is gone from the generator (search for the
+  // public wrapper name AND the WASM raw export call so an accidental partial
+  // revert surfaces).
+  assert.equal(build.includes('rewriteScript: rewriteScriptPublic'), false, 'rewriter-rs classic must NOT expose rewriteScript');
+  assert.equal(build.includes('wasm_bindgen.rewrite_script'), false, 'rewriter-rs classic must NOT call rewrite_script');
+});
+
+// 2026-06-08 split-bundle (c.1) Step 2.3 + 2.4 + 3: page-realm ZPBundle infra,
+// prelude primary swap, and removal of the legacy ZPRewriter.rewriteScript
+// fallback. The page realm loads `zp-page-bundle.js` (initSync's wasm at
+// script-tag time so `globalThis.ZPBundle.ready === true` synchronously by
+// the time runtime-prelude runs), and the prelude's `callPageRewriter`
+// calls ZPBundle exclusively — there is no legacy script-rewriter to fall
+// back to (rewriter-rs/ is CSS-only after Step 3).
+test('page-realm prelude routes JS through ZPBundle only (Step 2.3 + 2.4 + 3)', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
@@ -548,67 +576,50 @@ test('page-realm prelude swaps to ZPBundle with ZPRewriter fallback (Step 2.3 + 
   assert.match(mainGo, /"zp-page-bundle\.js"/, 'Go server must allow the new asset name');
   // SW injects the bundle <script> tag alongside the legacy rewriter.
   assert.match(sw, /assetPath\('zp-page-bundle\.js'\)/, "SW must inject zp-page-bundle.js script tag");
-  // Prelude swap: callPageRewriter prefers ZPBundle, falls back to ZPRewriter.
+  // Prelude: callPageRewriter routes ONLY through ZPBundle.
   assert.match(rt, /function callPageRewriter\b/, 'prelude must define callPageRewriter helper');
   const fnMatch = rt.match(/function callPageRewriter\([\s\S]*?^    \}/m);
   assert.ok(fnMatch, 'callPageRewriter body must be locatable');
   const fn = fnMatch[0];
-  const modernIdx = fn.indexOf('root.ZPBundle');
-  const legacyIdx = fn.indexOf('root.ZPRewriter');
-  assert.ok(modernIdx > 0, 'callPageRewriter must call ZPBundle');
-  assert.ok(legacyIdx > 0, 'callPageRewriter must retain ZPRewriter as fallback');
-  assert.ok(modernIdx < legacyIdx, 'ZPBundle must be tried before ZPRewriter in callPageRewriter');
+  assert.match(fn, /root\.ZPBundle/, 'callPageRewriter must call ZPBundle');
+  assert.equal(
+    fn.includes('root.ZPRewriter.rewriteScript'),
+    false,
+    'callPageRewriter must NOT call legacy ZPRewriter.rewriteScript (Step 3 dropped the JS path)',
+  );
   // rewriteDynamicFunctionBody + rewriteWithPageRewriter both route through it.
   assert.match(rt, /function rewriteDynamicFunctionBody[\s\S]*?callPageRewriter\(/, 'rewriteDynamicFunctionBody must route through callPageRewriter');
   assert.match(rt, /function rewriteWithPageRewriter[\s\S]*?callPageRewriter\(/, 'rewriteWithPageRewriter must route through callPageRewriter');
 });
 
-// 2026-06-08 split-bundle (c.1) Step 2.2: SW primary swap — ZPBundle is the
-// primary script rewriter, ZPRewriter (rewriter-rs/) survives only as the
-// fallback if modern errors. Pin the call ordering + the explicit fallback
-// guard so the swap can't silently revert.
-test('SW rewriteScriptResponse uses ZPBundle primary + ZPRewriter fallback (Step 2.2)', () => {
+// 2026-06-08 split-bundle (c.1) Step 2.2 + 3: SW rewriteScriptResponse now
+// uses ZPBundle exclusively. The legacy ZPRewriter.rewriteScript fallback
+// was removed when Step 3 dropped the OXC-based JS rewriter from rewriter-rs/.
+test('SW rewriteScriptResponse routes JS through ZPBundle only (Step 2.2 + 3)', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const fnMatch = sw.match(/async function rewriteScriptResponse\b[\s\S]*?return new Response\(code,/);
   assert.ok(fnMatch, 'rewriteScriptResponse body must be locatable');
   const body = fnMatch[0];
-  const modernIdx = body.indexOf('self.ZPBundle.rewriteScript(');
-  const legacyIdx = body.indexOf('self.ZPRewriter && self.ZPRewriter.rewriteScript(');
-  assert.ok(modernIdx > 0, 'rewriteScriptResponse must call ZPBundle.rewriteScript');
-  assert.ok(legacyIdx > 0, 'rewriteScriptResponse must retain legacy ZPRewriter as fallback');
-  assert.ok(modernIdx < legacyIdx, 'ZPBundle (modern) must be primary, ZPRewriter is the fallback');
-  // The fallback must be GATED on modern failing (empty code), not invoked unconditionally.
-  assert.match(body, /if \(!code\)[\s\S]*?ZPRewriter/, 'legacy fallback must be gated on modern returning empty code');
+  assert.match(body, /self\.ZPBundle\.rewriteScript\(/, 'rewriteScriptResponse must call ZPBundle.rewriteScript');
+  assert.equal(
+    body.includes('self.ZPRewriter && self.ZPRewriter.rewriteScript'),
+    false,
+    'rewriteScriptResponse must NOT call legacy ZPRewriter.rewriteScript (Step 3 dropped the JS path)',
+  );
 });
 
-// 2026-06-07 split-bundle (c.1) Step 2.1: rewriteScriptResponse runs the
-// modern ZPBundle pipeline as a shadow comparison after the legacy
-// ZPRewriter produces the served response. Pin the comparator + buffer +
-// debug endpoint + microtask-deferred invocation so the Step 2.2 swap can
-// be informed by real divergence data instead of guessing.
-test('SW shadow-compare records divergence between legacy + modern rewriters (Step 2.1)', () => {
+// 2026-06-08 split-bundle (c.1) Step 3: shadow-compare infrastructure removed.
+// After Step 2.1.5 closed the modern rewriter's `Function`/`eval` global
+// gap and Step 2.2 swapped ZPBundle to primary, the legacy ZPRewriter.rewriteScript
+// path no longer exists (Step 3 dropped OXC from rewriter-rs/). With only one
+// rewriter, there is nothing to compare against — the recorder + buffer +
+// debug endpoint are all gone.
+test('SW shadow-compare infrastructure is removed after Step 3', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  assert.match(sw, /SHADOW_LOG_CAP/, 'shadow log must declare a capacity constant');
-  assert.match(sw, /function recordShadowDivergence/, 'recorder helper must exist');
-  assert.match(sw, /function shadowCompareRewriters/, 'shadow compare helper must exist');
-  // 2026-06-08 Step 2.1.5: shadow comparator uses full re-emit only.
-  // Patch-mode (`rewriteScriptPatches` + `applyScriptPatches`) emits raw
-  // markers (`\u{1}GLOBAL_GET\u{1}…`) that the JS applier can't resolve, so
-  // comparing patch-mode output against legacy would surface noise instead
-  // of real semantic gaps. Until the patches API is marker-resolved at the
-  // Rust boundary, full re-emit is the only valid modern path here.
-  assert.match(sw, /shadowCompareRewriters[\s\S]*?ZPBundle\.rewriteScript\(/, 'shadow must invoke full re-emit modern path');
-  // Divergence record fields — pin so the schema can't silently regress
-  // before Step 2.2's analysis script depends on them.
-  assert.match(sw, /firstDiffIdx/, 'divergence record must include firstDiffIdx');
-  assert.match(sw, /legacyAroundDiff/, 'divergence record must include legacy excerpt');
-  assert.match(sw, /modernAroundDiff/, 'divergence record must include modern excerpt');
-  assert.match(sw, /modernThrew/, 'divergence record must include modern-throw branch');
-  // Must run in a deferred microtask after the legacy SUCCESS branch sets `code`.
-  assert.match(sw, /Promise\.resolve\(\)\.then\(\(\)\s*=>\s*shadowCompareRewriters/, 'shadow must run deferred after legacy success');
-  // Debug endpoint for page-realm probe + clear support.
-  assert.match(sw, /'\/zp\/api\/__shadow_log'/, 'debug endpoint must exist for page probe');
-  assert.match(sw, /searchParams\.get\(['"]clear['"]\)/, 'debug endpoint must support clearing the buffer');
+  assert.equal(sw.includes('SHADOW_LOG_CAP'), false, 'SHADOW_LOG_CAP constant must be gone');
+  assert.equal(sw.includes('function recordShadowDivergence'), false, 'recordShadowDivergence helper must be gone');
+  assert.equal(sw.includes('function shadowCompareRewriters'), false, 'shadowCompareRewriters helper must be gone');
+  assert.equal(sw.includes('__shadow_log'), false, 'debug endpoint must be gone');
 });
 
 // 2026-06-07 split-bundle (c.1) Step 2.0: activate event awaits initBundle so

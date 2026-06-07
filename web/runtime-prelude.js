@@ -1080,18 +1080,19 @@
     // and either returns the rewritten string or throws a JsError. Legacy
     // ZPRewriter is options-object + returns `{ok, code, errorCode, …}`.
     // The helpers below normalize both shapes behind a single try/catch.
+    // 2026-06-08 split-bundle (c.1) Step 3: legacy ZPRewriter.rewriteScript
+    // fallback dropped — the rewriter-rs/ crate is now CSS-only. ZPBundle
+    // is the single rewriter; on failure we surface NotSupportedError so
+    // the calling __ZP_EXEC_* helper falls through to the strict-mode
+    // block stub.
     function callPageRewriter(source, kind) {
-      const target = virtualURL.href;
-      if (root.ZPBundle && root.ZPBundle.ready && typeof root.ZPBundle.rewriteScript === 'function') {
-        try {
-          const out = root.ZPBundle.rewriteScript(source, kind, target);
-          if (typeof out === 'string' && out.length > 0) return out;
-        } catch (e) { /* fall through to legacy */ }
+      if (!root.ZPBundle || !root.ZPBundle.ready || typeof root.ZPBundle.rewriteScript !== 'function') {
+        throw normalizedError('NotSupportedError');
       }
-      if (root.ZPRewriter && root.ZPRewriter.ready && typeof root.ZPRewriter.rewriteScript === 'function') {
-        const out = root.ZPRewriter.rewriteScript(source, { kind, targetUrl: target, strict: true, controlPrefix: ZP.CONTROL_PREFIX });
-        if (out && out.ok && typeof out.code === 'string') return out.code;
-      }
+      try {
+        const out = root.ZPBundle.rewriteScript(source, kind, virtualURL.href);
+        if (typeof out === 'string' && out.length > 0) return out;
+      } catch (e) { /* fall through */ }
       throw normalizedError('NotSupportedError');
     }
     function rewriteDynamicFunctionBody(params, body) {
