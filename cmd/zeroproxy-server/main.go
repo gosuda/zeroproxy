@@ -61,14 +61,47 @@ const (
 
 func main() {
 	var addr string
+	var wtAddr, wtCert, wtKey, wtPath string
 	s := &server{}
 	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&s.webDir, "web", "dist/web", "built static web asset directory")
 	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address with IsolateSOCKSAuth, or 'internal' for the built-in test SOCKS5 parser/direct dialer")
+	// D4 — server-side WebTransport gateway. Empty `-wt-addr` keeps the
+	// listener disabled (the page realm still sees the stub WT_UNSUPPORTED
+	// error from runtime-prelude's installBlockers fallback).
+	flag.StringVar(&wtAddr, "wt-addr", "", "WebTransport (HTTP/3) gateway UDP listen address (e.g. ':18443'); empty disables D4")
+	flag.StringVar(&wtCert, "wt-cert", "", "WebTransport listener TLS cert path (optional — falls back to in-memory self-signed dev cert)")
+	flag.StringVar(&wtKey, "wt-key", "", "WebTransport listener TLS key path")
+	flag.StringVar(&wtPath, "wt-path", "/__zp/wt", "WebTransport CONNECT request path")
 	flag.Parse()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 	h := securityHeaders(mux)
+
+	// D4 listener runs on its own UDP socket — HTTP/3 + WebTransport
+	// extension. Disabled by default (empty addr); operator opts in
+	// during dogfood with `-wt-addr :18443`. Per-target relay happens
+	// inside internal/wtproxy/listener.go::handleUpgrade; the page-side
+	// virtual `WebTransport` surface that drives it is a separate
+	// follow-up — without it the listener is exercised only by host
+	// tests + direct webtransport-go clients.
+	if wtAddr != "" {
+		wtListener, err := wtproxy.New(wtproxy.Config{
+			Addr:                 wtAddr,
+			Path:                 wtPath,
+			CertFile:             wtCert,
+			KeyFile:              wtKey,
+			AllowInsecureDevCert: true,
+		})
+		if err != nil {
+			log.Fatalf("wtproxy: %v", err)
+		}
+		go func() {
+			if err := wtListener.Run(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("wtproxy: listener exited: %v", err)
+			}
+		}()
+	}
 
 	// The Go server is a pure byte-pipe — no TLS termination here. The Rust
 	// WASM kernel (crates/zp-bundle) handles every target TLS handshake
