@@ -3754,12 +3754,15 @@
         throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator.");
       }
       // We don't trust the page-supplied iceServers — they'd point at
-      // remote STUN/TURN that could leak IP. Force-set to nothing so
-      // the native PC only generates host + relay candidates we route
-      // via the gateway's signaling instead. (A future enhancement
-      // wires our own embedded TURN into ICEServers here.)
+      // remote STUN/TURN that could leak IP. Replace with the
+      // operator's embedded TURN cred tuple (from `boot.rtcICEServers`)
+      // when present; otherwise force empty so the native PC only
+      // generates host candidates the gateway signaling can route.
       const safeConfig = Object.assign({}, config || {});
-      safeConfig.iceServers = [];
+      const issuedICEServers = (boot && Array.isArray(boot.rtcICEServers))
+        ? boot.rtcICEServers
+        : [];
+      safeConfig.iceServers = issuedICEServers;
       safeConfig.iceTransportPolicy = 'all';
       const native = new NativeRTC(safeConfig);
       this._native = native;

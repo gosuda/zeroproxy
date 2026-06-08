@@ -70,11 +70,11 @@ const ALL_TARGETS = {
 // known-good across the SW + transport + rewriter pipeline.
 // `mdn` / `hackernews` remain in `ALL_TARGETS` for opt-in evidence
 // runs and Phase 3 investigation:
-//   - `mdn` — initial transport stalls on first cold visit (not a
-//     harness flake — the retry-on-context-destroyed loop landed
-//     2026-06-08, MDN's failure now manifests as transport hang
-//     rather than execution-context destruction). Likely a
-//     fingerprint or upstream-timing interaction; Phase 3.
+//   - `mdn` — Cloudflare 403 anti-bot rejection (corrected diagnosis
+//     2026-06-09; the earlier "transport hang" hypothesis was wrong
+//     — the page is unresponsive because the SW returned an error
+//     page after the 403, NOT because the SW is stuck). Same class
+//     as gosuda.org; Phase 3 fingerprint hardening would address it.
 //   - `hackernews` — sequential cookie probes noisy under headless
 //     puppeteer without further harness work.
 const MATRIX_KEYS = ['wikipedia', 'example'];

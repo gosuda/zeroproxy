@@ -164,3 +164,64 @@ func TestAllowedSetNormalizesIPv6(t *testing.T) {
 		t.Fatalf("IPv6 normalization missing: %+v", s)
 	}
 }
+
+// TestTURNServerLifecycle pins the embedded TURN server's startup +
+// cred-issuance + shutdown path. We bind to 127.0.0.1:0 so the kernel
+// picks a free port and the test stays hermetic.
+func TestTURNServerLifecycle(t *testing.T) {
+	srv, err := NewTURNServer(TURNConfig{
+		Addr:         "127.0.0.1:0",
+		PublicAddr:   "turn.example:3478",
+		ExternalIP:   "127.0.0.1",
+		Realm:        "zp-test",
+		SharedSecret: "deadbeef",
+		DefaultTTL:   1 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewTURNServer: %v", err)
+	}
+	defer func() {
+		if err := srv.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
+	if srv.PublicAddr() != "turn.example:3478" {
+		t.Fatalf("PublicAddr: got %q want %q", srv.PublicAddr(), "turn.example:3478")
+	}
+	cred, err := srv.IssueICEServerCreds("session-A")
+	if err != nil {
+		t.Fatalf("IssueICEServerCreds: %v", err)
+	}
+	if len(cred.URLs) == 0 || cred.URLs[0] != "turn:turn.example:3478" {
+		t.Fatalf("URLs: got %+v want [\"turn:turn.example:3478\"]", cred.URLs)
+	}
+	if cred.Username == "" || cred.Credential == "" {
+		t.Fatalf("empty cred tuple: %+v", cred)
+	}
+	// Username is "<expiry-unix>:<label>"; verify it contains the label.
+	if !strings.Contains(cred.Username, "session-A") {
+		t.Fatalf("username missing session-A label: %q", cred.Username)
+	}
+	// Successive calls must produce different usernames (timestamp differs)
+	// — actually they may share a timestamp if called in the same second,
+	// so we only assert that with an explicit different label the
+	// username differs.
+	cred2, err := srv.IssueICEServerCreds("session-B")
+	if err != nil {
+		t.Fatalf("IssueICEServerCreds #2: %v", err)
+	}
+	if cred2.Username == cred.Username {
+		t.Fatalf("different-label creds collided: %q vs %q", cred.Username, cred2.Username)
+	}
+}
+
+// TestTURNServerRejectsBadAddr pins the fail-closed behavior when the
+// operator passes a malformed listener address.
+func TestTURNServerRejectsBadAddr(t *testing.T) {
+	if _, err := NewTURNServer(TURNConfig{Addr: ""}); err == nil {
+		t.Fatalf("expected error for empty addr")
+	}
+	if _, err := NewTURNServer(TURNConfig{Addr: "not-an-addr"}); err == nil {
+		t.Fatalf("expected error for malformed addr")
+	}
+}

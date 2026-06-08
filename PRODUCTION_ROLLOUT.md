@@ -78,8 +78,8 @@ These are documented in [`PHASE2_STATUS.md`](PHASE2_STATUS.md) `Phase 2 follow-u
 - ~~**Patch-mode wire-up in SW**~~ — landed. SW prefers `rewriteScriptPatches` + `applyScriptPatches` over the full re-emit path. (Note: post split-bundle c.1 the JS-side patch envelope was retired in favour of full re-emit on the SW hot path — see PHASE2_STATUS.md E3 (c.1) entry — because patch-mode markers can't be resolved JS-side. Rust-side patch API stays for host-side benchmarks.)
 - ~~**split-bundle (c.1 / c.2 / c.3)**~~ — landed 2026-06-08. (c.1) deleted legacy rewriter-rs/ + ported CSS rewriter to zp-bundle. (c.2) split page realm into `crates/zp-page-bundle` (~0.81 MB wasm). (c.3) split SW kernel/transport into `crates/zp-kernel-bundle` (~2.37 MB) loaded lazily on first `transportFetch`. SW activate-path footprint **3.84 MB → 1.45 MB** (-64%).
 - **wasm-opt bundle ceiling** — `zp_bundle_sw_bg.wasm` 1.34 MB / `zp_kernel_sw_bg.wasm` 2.37 MB (lazy) / `zp_page_bundle_bg.wasm` 0.81 MB. Hard target ≤ 500 KB still requires a Phase 3 streaming-parse architecture (split-bundle already exhausted).
-- **D4 WebTransport** — virtual surface ✅; quic-go HTTP/3 listener deferred (`WT_UNSUPPORTED` error page). Full implementation queued post-E4.
-- **D5 WebRTC** — virtual surface ✅; pion SFU/TURN deferred (`RTC_GATEWAY_UNAVAILABLE` error page). Full implementation queued post-E4.
+- ~~**D4 WebTransport**~~ — landed. quic-go 0.59 + webtransport-go 0.10 HTTP/3 listener + per-session bidi/datagram bridge; browser-side virtual `WebTransport` routes through the gateway.
+- ~~**D5 WebRTC**~~ — landed end-to-end. pion/webrtc v4 SFU bridge + per-session PC pair + browser-side virtual `RTCPeerConnection`. D5 polish (2026-06-08 → 2026-06-09): SDP candidate munging + RTCP/NACK/PLI/REMB interceptors + embedded pion/turn/v4 server with RFC 7635 short-term TURN-REST credentials threaded through `/zp/api/config` → page-realm `iceServers`. Remaining: per-tab session attribution gated on `X-ZP-Runtime-Token` (Phase 3).
 
 ---
 

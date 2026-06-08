@@ -115,7 +115,7 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 // Refreshed on each activate (and lazily on demand if a navigation
 // arrives before activate completes). The endpoint is plain JSON
 // served from the Go control plane (`/zp/api/config`).
-let runtimeConfig = { wtGateway: '', rtcGateway: '' };
+let runtimeConfig = { wtGateway: '', rtcGateway: '', rtcICEServers: [] };
 let runtimeConfigPromise = null;
 async function refreshRuntimeConfig() {
   if (runtimeConfigPromise) return runtimeConfigPromise;
@@ -128,6 +128,11 @@ async function refreshRuntimeConfig() {
           runtimeConfig = {
             wtGateway: typeof cfg.wtGateway === 'string' ? cfg.wtGateway : '',
             rtcGateway: typeof cfg.rtcGateway === 'string' ? cfg.rtcGateway : '',
+            // Each /zp/api/config response carries a fresh TURN-REST cred
+            // tuple (when -rtc-turn-addr is set on the server). The
+            // tuple is opaque to the SW — it's pasted into the boot JSON
+            // and consumed by runtime-prelude's ZPRTCPeerConnection.
+            rtcICEServers: Array.isArray(cfg.rtcICEServers) ? cfg.rtcICEServers : [],
           };
         }
       }
@@ -1235,6 +1240,11 @@ function buildRuntimePrelude(tab, entry) {
     // -rtc-public-url`; page-realm virtual `RTCPeerConnection` falls
     // back to the rejected stub path (RTC_GATEWAY_UNAVAILABLE).
     rtcGateway: runtimeConfig.rtcGateway || '',
+    // D5 embedded TURN: array of `{urls,username,credential}` cred
+    // tuples the page realm RTCPC passes verbatim to native. Empty
+    // means no embedded TURN — page realm forces iceServers=[] and
+    // gets host candidates only (existing behaviour).
+    rtcICEServers: Array.isArray(runtimeConfig.rtcICEServers) ? runtimeConfig.rtcICEServers : [],
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
   // The chain consumer must run before the target's anti-bot JS does (it

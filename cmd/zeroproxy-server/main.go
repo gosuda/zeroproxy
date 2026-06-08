@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,6 +33,7 @@ type server struct {
 	wtGatewayURL  string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
 	rtcGatewayURL string // D5 — public URL the browser uses to reach the RTC signaling endpoint; empty disables the virtual RTCPC pass-through
 	rtcGateway    *rtcgw.Gateway
+	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
 	jarsMu        sync.Mutex
 	jars          map[string]*cookiejar.Jar
 }
@@ -89,9 +91,15 @@ func main() {
 	// from `/zp/api/config`. Empty leaves the legacy stub Handler() up.
 	var rtcEnabled bool
 	var rtcAllowedIPs string
+	var rtcTurnAddr, rtcTurnPublicAddr, rtcTurnExternalIP, rtcTurnRealm, rtcTurnSecret string
 	flag.BoolVar(&rtcEnabled, "rtc-enable", false, "Enable the D5 WebRTC signaling gateway (in-process pion/webrtc bridge)")
 	flag.StringVar(&s.rtcGatewayURL, "rtc-public-url", "", "Public URL of the RTC signaling endpoint (e.g. 'http://proxy.localhost:18080/zp/api/rtc/signal'); empty disables the page-side virtual RTCPeerConnection pass-through")
 	flag.StringVar(&rtcAllowedIPs, "rtc-allowed-ips", "", "Comma-separated list of IPs the gateway's own SDP candidates are allowed to advertise — used to strip host candidates that would leak the operator's LAN/NAT interfaces. Empty = no munging (public-IP-only deployments).")
+	flag.StringVar(&rtcTurnAddr, "rtc-turn-addr", "", "UDP listener for the embedded TURN server (e.g. '0.0.0.0:3478'). Empty disables embedded TURN — page realm falls back to host candidates only.")
+	flag.StringVar(&rtcTurnPublicAddr, "rtc-turn-public-addr", "", "host:port clients reach the TURN server at (covers NAT / port-forwarding). Defaults to -rtc-turn-addr.")
+	flag.StringVar(&rtcTurnExternalIP, "rtc-turn-external-ip", "", "Relay address IP pion advertises in TURN allocation responses. For a port-forwarded box, the public IP. Defaults to listener IP — wrong for NAT'd deployments.")
+	flag.StringVar(&rtcTurnRealm, "rtc-turn-realm", "zeroproxy", "TURN realm string")
+	flag.StringVar(&rtcTurnSecret, "rtc-turn-secret", "", "Long-term TURN-REST shared secret (hex). Empty = random per-process secret (creds expire on restart).")
 	flag.Parse()
 	if rtcEnabled {
 		var allowed []string
@@ -107,6 +115,20 @@ func main() {
 			log.Fatalf("rtcgw: %v", err)
 		}
 		s.rtcGateway = gw
+		if rtcTurnAddr != "" {
+			turnSrv, err := rtcgw.NewTURNServer(rtcgw.TURNConfig{
+				Addr:         rtcTurnAddr,
+				PublicAddr:   rtcTurnPublicAddr,
+				ExternalIP:   rtcTurnExternalIP,
+				Realm:        rtcTurnRealm,
+				SharedSecret: rtcTurnSecret,
+			})
+			if err != nil {
+				log.Fatalf("rtcgw: embedded TURN: %v", err)
+			}
+			s.rtcTURN = turnSrv
+			log.Printf("rtcgw: embedded TURN listening on %s (public %s, realm %q)", rtcTurnAddr, turnSrv.PublicAddr(), rtcTurnRealm)
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
@@ -300,14 +322,30 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveConfig emits the minimal client-facing runtime config the SW
-// reads on activate. D4 = wtGateway; D5 = rtcGateway. SW only ever
-// does ONE fetch on boot.
+// reads on activate. D4 = wtGateway; D5 = rtcGateway + rtcICEServers.
+// SW only ever does ONE fetch on boot.
+//
+// `rtcICEServers` is a fresh time-limited cred tuple from the
+// embedded TURN server (when -rtc-turn-addr is set). Each call to
+// serveConfig issues a new cred set so re-registration of the SW
+// (which re-fetches /zp/api/config) rotates credentials. Without
+// embedded TURN the field is `[]` so page realm's RTCPC falls back
+// to host candidates only.
 func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	wt := strings.ReplaceAll(s.wtGatewayURL, `"`, `\"`)
 	rtc := strings.ReplaceAll(s.rtcGatewayURL, `"`, `\"`)
-	_, _ = fmt.Fprintf(w, `{"wtGateway":"%s","rtcGateway":"%s"}`, wt, rtc)
+	iceServers := "[]"
+	if s.rtcTURN != nil {
+		cred, err := s.rtcTURN.IssueICEServerCreds("")
+		if err == nil {
+			if buf, err := json.Marshal([]rtcgw.ICEServerCred{cred}); err == nil {
+				iceServers = string(buf)
+			}
+		}
+	}
+	_, _ = fmt.Fprintf(w, `{"wtGateway":"%s","rtcGateway":"%s","rtcICEServers":%s}`, wt, rtc, iceServers)
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {

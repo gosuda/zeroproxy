@@ -739,10 +739,15 @@ test('D5 client: virtual RTCPeerConnection routes signaling through ZeroProxy ga
   assert.match(prelude, /ZPRTCPeerConnection/, 'runtime-prelude must define ZPRTCPeerConnection class');
   assert.match(prelude, /'RTCPeerConnection':[^}]*ctor:\s*\(\)\s*=>\s*makeRTCPeerConnectionConstructor/, 'installBlockers RTCPeerConnection entry must use the factory');
   assert.match(prelude, /'webkitRTCPeerConnection':[^}]*ctor:\s*\(\)\s*=>\s*makeRTCPeerConnectionConstructor/, 'installBlockers webkitRTCPeerConnection entry must use the factory');
-  // Defense-in-depth: page-supplied iceServers are wiped before we hand
-  // config to the native PC (so a malicious page can't point ICE
-  // gathering at an arbitrary STUN/TURN host that would leak its IP).
-  assert.match(prelude, /safeConfig\.iceServers\s*=\s*\[\]/, 'ZPRTCPeerConnection must force iceServers to []');
+  // Defense-in-depth: page-supplied iceServers are NEVER used —
+  // they'd point at attacker STUN/TURN that could leak the page IP.
+  // Either we replace them with the operator's embedded TURN cred
+  // tuple (`boot.rtcICEServers`) or we force empty. Post 2026-06-09
+  // D5 embedded-TURN landing the assignment routes through
+  // `issuedICEServers` (which falls back to `[]` when boot has no
+  // tuple), so the page-supplied list is still discarded.
+  assert.match(prelude, /safeConfig\.iceServers\s*=\s*issuedICEServers/, 'ZPRTCPeerConnection must overwrite iceServers (never use page-supplied)');
+  assert.match(prelude, /const issuedICEServers = \(boot && Array\.isArray\(boot\.rtcICEServers\)\)/, 'ZPRTCPeerConnection must source iceServers from boot.rtcICEServers');
 });
 
 // 2026-06-08 wiki load.php deferred fix: `await initRewriter()` was a stale
@@ -1571,6 +1576,35 @@ test('D5 polish: SDP candidate munging + RTCP interceptors', () => {
   assert.match(server, /webrtc\.WithInterceptorRegistry/, 'gateway api must be built with InterceptorRegistry');
   const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   assert.match(mainGo, /"rtc-allowed-ips"/, 'Go server must expose -rtc-allowed-ips flag');
+});
+
+// 2026-06-09 D5 embedded TURN. pion/turn/v4 spun in-process when
+// `-rtc-turn-addr` is set, short-term TURN-REST creds re-issued on
+// each /zp/api/config fetch. Pins:
+//   - rtcgw.NewTURNServer + TURNConfig + ICEServerCred exist
+//   - main.go has -rtc-turn-addr / -rtc-turn-external-ip / etc flags
+//   - serveConfig emits rtcICEServers field
+//   - SW threads rtcICEServers from /zp/api/config into boot JSON
+//   - runtime-prelude ZPRTCPC reads boot.rtcICEServers (not force-empty)
+test('D5 embedded TURN: pion/turn server + short-term creds + page-realm iceServers wiring', () => {
+  const turn = fs.readFileSync('internal/rtcgw/turn.go', 'utf8');
+  assert.match(turn, /func NewTURNServer\(cfg TURNConfig\) \(\*TURNServer, error\)/, 'NewTURNServer must exist');
+  assert.match(turn, /type ICEServerCred struct/, 'ICEServerCred type must exist');
+  assert.match(turn, /func \(s \*TURNServer\) IssueICEServerCreds\(/, 'IssueICEServerCreds method must exist');
+  assert.match(turn, /GenerateLongTermTURNRESTCredentials/, 'must use pion long-term TURN-REST helper');
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.match(mainGo, /"rtc-turn-addr"/, 'main.go must expose -rtc-turn-addr');
+  assert.match(mainGo, /"rtc-turn-external-ip"/, 'main.go must expose -rtc-turn-external-ip');
+  assert.match(mainGo, /"rtc-turn-secret"/, 'main.go must expose -rtc-turn-secret');
+  assert.match(mainGo, /rtcgw\.NewTURNServer\(/, 'main.go must call rtcgw.NewTURNServer when -rtc-turn-addr set');
+  assert.match(mainGo, /s\.rtcTURN/, 'main.go server struct must carry rtcTURN field');
+  assert.match(mainGo, /"rtcICEServers":/, 'serveConfig must emit rtcICEServers field');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /rtcICEServers:\s*Array\.isArray\(cfg\.rtcICEServers\)/, 'SW refreshRuntimeConfig must parse rtcICEServers array');
+  assert.match(sw, /rtcICEServers:\s*Array\.isArray\(runtimeConfig\.rtcICEServers\)/, 'SW boot JSON must thread rtcICEServers');
+  const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(prelude, /boot\.rtcICEServers/, 'runtime-prelude must read boot.rtcICEServers');
+  assert.match(prelude, /safeConfig\.iceServers\s*=\s*issuedICEServers/, 'ZPRTCPC must assign embedded TURN creds to native iceServers (not force-empty)');
 });
 
 // 2026-06-09 E3 size guard: page bundle must stay ≤ 500 KB. The page

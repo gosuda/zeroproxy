@@ -1,0 +1,29 @@
+TAP version 13
+# Subtest: E2 real-site regression — fresh profile, no stale SW
+    # Subtest: en.wikipedia.org
+    ok 1 - en.wikipedia.org
+      ---
+      duration_ms: 2777.5088
+      type: 'test'
+      ...
+    # Subtest: example.com
+    ok 2 - example.com
+      ---
+      duration_ms: 1346.1256
+      type: 'test'
+      ...
+    1..2
+ok 1 - E2 real-site regression — fresh profile, no stale SW
+  ---
+  duration_ms: 6450.8056
+  type: 'test'
+  ...
+1..1
+# tests 3
+# suites 0
+# pass 3
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7168.8689
