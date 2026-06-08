@@ -1050,7 +1050,15 @@ async function rewriteScriptResponse(resp, opt) {
   let code = '';
   let cacheKey = '';
   try {
-    await initRewriter();
+    // 2026-06-08: dead init-rewriter helper call removed (helper
+    // deleted in split-bundle c.1 Step 3, call site forgotten). The
+    // ReferenceError it produced was swallowed by the outer try/catch
+    // and replaced with the "Blocked by ZeroProxy rewrite policy" block
+    // stub for every external `<script src>` — Wikipedia's
+    // `load.php?modules=startup` was the most visible victim because
+    // mw.loader surfaces the throw as an uncaught console error.
+    // ZPBundle.ready is guaranteed by the activate handler now, so
+    // `await initBundle()` below covers the lazy-retry case alone.
     const source = await resp.text();
     // C4: cache check before invoking the OXC pipeline. Hash inputs that
     // affect output: transformer version, script kind, target URL, source bytes.

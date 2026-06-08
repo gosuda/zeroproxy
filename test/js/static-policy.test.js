@@ -702,6 +702,32 @@ test('D4 client: virtual WebTransport routes through ZeroProxy gateway when enab
   assert.match(prelude, /params\.set\('target',\s*target\)/, 'ZPWebTransport must inject target into the gateway query string');
 });
 
+// 2026-06-08 wiki load.php deferred fix: `await initRewriter()` was a stale
+// call left behind by split-bundle (c.1) Step 3 (the helper was deleted
+// but the call site survived). Every external-script rewrite threw
+// `ReferenceError: initRewriter is not defined`, which the outer
+// try/catch swallowed and replaced with the
+// `throw new DOMException('Blocked by ZeroProxy rewrite policy',
+// 'NotSupportedError')` stub — visible to the page as the
+// `NotSupportedError` console message on `load.php?modules=startup`.
+// Pin the call site to never reintroduce the dead helper.
+test('rewriteScriptResponse must not call the removed initRewriter helper', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.equal(
+    /\binitRewriter\s*\(/.test(sw),
+    false,
+    'sw.js must not call initRewriter() (helper deleted in split-bundle c.1 Step 3)',
+  );
+  // ZPBundle is now the only rewriter and its readiness is guaranteed by
+  // the activate handler. rewriteScriptResponse still does an idempotent
+  // `await initBundle()` defensively before invoking rewriteScript.
+  assert.match(
+    sw,
+    /async function rewriteScriptResponse[\s\S]*?await initBundle\(\)/,
+    'rewriteScriptResponse must still await initBundle() before calling ZPBundle.rewriteScript',
+  );
+});
+
 // 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted. The
 // CSS rewriter is ported to crates/zp-bundle/src/css.rs and exposed via the
 // wasm-bindgen `rewriteCSS` export. SW + page realm both call
