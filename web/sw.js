@@ -115,7 +115,7 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 // Refreshed on each activate (and lazily on demand if a navigation
 // arrives before activate completes). The endpoint is plain JSON
 // served from the Go control plane (`/zp/api/config`).
-let runtimeConfig = { wtGateway: '' };
+let runtimeConfig = { wtGateway: '', rtcGateway: '' };
 let runtimeConfigPromise = null;
 async function refreshRuntimeConfig() {
   if (runtimeConfigPromise) return runtimeConfigPromise;
@@ -125,7 +125,10 @@ async function refreshRuntimeConfig() {
       if (r && r.ok) {
         const cfg = await r.json();
         if (cfg && typeof cfg === 'object') {
-          runtimeConfig = { wtGateway: typeof cfg.wtGateway === 'string' ? cfg.wtGateway : '' };
+          runtimeConfig = {
+            wtGateway: typeof cfg.wtGateway === 'string' ? cfg.wtGateway : '',
+            rtcGateway: typeof cfg.rtcGateway === 'string' ? cfg.rtcGateway : '',
+          };
         }
       }
     } catch {}
@@ -1228,6 +1231,10 @@ function buildRuntimePrelude(tab, entry) {
     // page-realm virtual `WebTransport` falls back to the rejected stub
     // path (WT_UNSUPPORTED) when this is empty.
     wtGateway: runtimeConfig.wtGateway || '',
+    // D5 — empty string when the operator hasn't enabled `-rtc-enable +
+    // -rtc-public-url`; page-realm virtual `RTCPeerConnection` falls
+    // back to the rejected stub path (RTC_GATEWAY_UNAVAILABLE).
+    rtcGateway: runtimeConfig.rtcGateway || '',
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
   // The chain consumer must run before the target's anti-bot JS does (it

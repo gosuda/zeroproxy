@@ -3730,6 +3730,148 @@
     return ZPWebTransport;
   }
 
+  // D5: virtual RTCPeerConnection that wraps the *native* RTCPC and
+  // routes all signaling (offer / answer / ICE candidates) through the
+  // ZeroProxy gateway (`boot.rtcGateway`). Native RTCPC handles the
+  // media/DTLS/SCTP stack locally; the gateway maintains a parallel
+  // PeerConnection on its side and SFU-forwards tracks + data channels
+  // to the target's real remote peer. The target never sees the page's
+  // real IP because all candidates that reach the remote peer originate
+  // from the gateway.
+  //
+  // When `boot.rtcGateway` is empty (operator hasn't enabled the D5
+  // gateway) or native RTCPC is absent, we fall back to the legacy
+  // rejected-promise stub (`makeVirtualGateway`).
+  function makeRTCPeerConnectionConstructor(name) {
+    const NativeRTC = root.RTCPeerConnection || root.webkitRTCPeerConnection;
+    const gateway = (boot && typeof boot.rtcGateway === 'string' && boot.rtcGateway) ? boot.rtcGateway : '';
+    if (!NativeRTC || !gateway) {
+      return makeVirtualGateway(name, { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' });
+    }
+    let sessionCounter = 0;
+    function ZPRTCPeerConnection(config) {
+      if (!(this instanceof ZPRTCPeerConnection)) {
+        throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator.");
+      }
+      // We don't trust the page-supplied iceServers — they'd point at
+      // remote STUN/TURN that could leak IP. Force-set to nothing so
+      // the native PC only generates host + relay candidates we route
+      // via the gateway's signaling instead. (A future enhancement
+      // wires our own embedded TURN into ICEServers here.)
+      const safeConfig = Object.assign({}, config || {});
+      safeConfig.iceServers = [];
+      safeConfig.iceTransportPolicy = 'all';
+      const native = new NativeRTC(safeConfig);
+      this._native = native;
+      const sid = (boot && boot.tabId ? boot.tabId : 'sess') + '-' + (++sessionCounter) + '-' + Date.now().toString(36);
+      this._sessionId = sid;
+      // Forward locally-generated ICE candidates to the gateway.
+      try {
+        native.addEventListener('icecandidate', ev => {
+          const cand = ev && ev.candidate;
+          if (!cand) return;
+          postSignal({ op: 'candidate', sessionId: sid, candidate: cand.toJSON ? cand.toJSON() : { candidate: cand.candidate, sdpMid: cand.sdpMid, sdpMLineIndex: cand.sdpMLineIndex } });
+        });
+      } catch {}
+      // Start the long-poll loop to pull gateway-originated events.
+      this._pollCtl = startSignalPoll(this, sid);
+    }
+    function postSignal(env) {
+      try {
+        return Native.fetch(gateway, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(env),
+          credentials: 'same-origin',
+        });
+      } catch { return Promise.resolve(); }
+    }
+    function startSignalPoll(self, sid) {
+      let stopped = false;
+      (async function loop() {
+        while (!stopped) {
+          try {
+            const r = await Native.fetch(gateway + '?session=' + encodeURIComponent(sid), { credentials: 'same-origin' });
+            if (!r.ok) { await new Promise(res => setTimeout(res, 1000)); continue; }
+            const envs = await r.json();
+            if (!Array.isArray(envs)) continue;
+            for (const env of envs) {
+              try { await applyEnvelope(self, env); } catch {}
+            }
+          } catch {
+            await new Promise(res => setTimeout(res, 1000));
+          }
+        }
+      })();
+      return { stop() { stopped = true; } };
+    }
+    async function applyEnvelope(self, env) {
+      if (!env || typeof env !== 'object') return;
+      if (env.op === 'answer' && env.sdp) {
+        await self._native.setRemoteDescription(env.sdp);
+      } else if (env.op === 'offer' && env.sdp) {
+        await self._native.setRemoteDescription(env.sdp);
+        const ans = await self._native.createAnswer();
+        await self._native.setLocalDescription(ans);
+        postSignal({ op: 'answer', sessionId: self._sessionId, sdp: self._native.localDescription });
+      } else if (env.op === 'candidate' && env.candidate) {
+        try { await self._native.addIceCandidate(env.candidate); } catch {}
+      } else if (env.op === 'close') {
+        try { self._native.close(); } catch {}
+      }
+    }
+    // Forward every spec method/getter; intercept SDP-bearing ones so we
+    // can route them through the gateway in addition to the native PC.
+    function delegate(name) {
+      Object.defineProperty(ZPRTCPeerConnection.prototype, name, {
+        configurable: true,
+        get() { try { return this._native[name]; } catch { return undefined; } },
+      });
+    }
+    ['localDescription', 'remoteDescription', 'pendingLocalDescription', 'pendingRemoteDescription',
+     'currentLocalDescription', 'currentRemoteDescription',
+     'signalingState', 'iceGatheringState', 'iceConnectionState', 'connectionState',
+     'canTrickleIceCandidates', 'sctp']
+      .forEach(delegate);
+    ZPRTCPeerConnection.prototype.createOffer = function(opts) { return this._native.createOffer(opts); };
+    ZPRTCPeerConnection.prototype.createAnswer = function(opts) { return this._native.createAnswer(opts); };
+    ZPRTCPeerConnection.prototype.setLocalDescription = async function(desc) {
+      const r = await this._native.setLocalDescription(desc);
+      // After local SDP is finalized, forward it to the gateway so the
+      // gateway's target-side PC can complete its half of the handshake.
+      const local = this._native.localDescription;
+      if (local && local.sdp) {
+        postSignal({ op: local.type === 'offer' ? 'offer' : 'answer', sessionId: this._sessionId, sdp: { type: local.type, sdp: local.sdp } });
+      }
+      return r;
+    };
+    ZPRTCPeerConnection.prototype.setRemoteDescription = function(desc) { return this._native.setRemoteDescription(desc); };
+    ZPRTCPeerConnection.prototype.addIceCandidate = function(cand) { return this._native.addIceCandidate(cand); };
+    ZPRTCPeerConnection.prototype.addTrack = function(track, ...streams) { return this._native.addTrack(track, ...streams); };
+    ZPRTCPeerConnection.prototype.removeTrack = function(sender) { return this._native.removeTrack(sender); };
+    ZPRTCPeerConnection.prototype.getSenders = function() { return this._native.getSenders(); };
+    ZPRTCPeerConnection.prototype.getReceivers = function() { return this._native.getReceivers(); };
+    ZPRTCPeerConnection.prototype.getTransceivers = function() { return this._native.getTransceivers(); };
+    ZPRTCPeerConnection.prototype.addTransceiver = function(...args) { return this._native.addTransceiver(...args); };
+    ZPRTCPeerConnection.prototype.getStats = function(selector) { return this._native.getStats(selector); };
+    ZPRTCPeerConnection.prototype.createDataChannel = function(label, opts) { return this._native.createDataChannel(label, opts); };
+    ZPRTCPeerConnection.prototype.close = function() {
+      try { this._pollCtl && this._pollCtl.stop(); } catch {}
+      postSignal({ op: 'close', sessionId: this._sessionId });
+      try { return this._native.close(); } catch { return undefined; }
+    };
+    ZPRTCPeerConnection.prototype.addEventListener = function(type, listener, opts) {
+      try { return this._native.addEventListener(type, listener, opts); } catch {}
+    };
+    ZPRTCPeerConnection.prototype.removeEventListener = function(type, listener, opts) {
+      try { return this._native.removeEventListener(type, listener, opts); } catch {}
+    };
+    ZPRTCPeerConnection.prototype.dispatchEvent = function(ev) {
+      try { return this._native.dispatchEvent(ev); } catch { return true; }
+    };
+    return ZPRTCPeerConnection;
+  }
+
   // D4/D5 virtual gateway constructor. Returns an object whose `.ready` /
   // `.closed` promises reject with a structured ZeroProxy error so target
   // code can fall back gracefully. Methods on the object also reject.
@@ -3900,14 +4042,19 @@
     // production sites detect WebTransport availability via the Promise.
     const gatewayMeta = {
       // D4: `WebTransport` slot prefers the real native-pass-through
-      // virtual class when `boot.wtGateway` is set; otherwise
-      // makeWebTransportConstructor returns the legacy stub
-      // automatically. Stub keys (WebSocketStream, RTC*) keep using the
-      // makeVirtualGateway rejection path until D5 lands.
+      // virtual class when `boot.wtGateway` is set; otherwise the ctor
+      // factory returns the legacy stub automatically.
+      // D5: same shape for `RTCPeerConnection` /
+      // `webkitRTCPeerConnection` — pass-through to a native PC with
+      // signaling routed via `boot.rtcGateway` when set, else legacy
+      // stub.
       'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport', ctor: makeWebTransportConstructor },
       'WebSocketStream': { code: 'WT_UNSUPPORTED', kind: 'WebSocketStream' },
-      'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
-      'webkitRTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
+      'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor('RTCPeerConnection') },
+      'webkitRTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor('webkitRTCPeerConnection') },
+      // RTCDataChannel is not user-constructible; it's returned by
+      // createDataChannel on the (now-virtual) PC. Keep the legacy stub
+      // for direct construction attempts.
       'RTCDataChannel': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
     };
     for (const name of Object.keys(gatewayMeta)) {

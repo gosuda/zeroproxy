@@ -27,11 +27,13 @@ import (
 )
 
 type server struct {
-	webDir       string
-	socksAddr    string
-	wtGatewayURL string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
-	jarsMu       sync.Mutex
-	jars         map[string]*cookiejar.Jar
+	webDir        string
+	socksAddr     string
+	wtGatewayURL  string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
+	rtcGatewayURL string // D5 — public URL the browser uses to reach the RTC signaling endpoint; empty disables the virtual RTCPC pass-through
+	rtcGateway    *rtcgw.Gateway
+	jarsMu        sync.Mutex
+	jars          map[string]*cookiejar.Jar
 }
 
 // jarFor returns the cookie jar for the given tabId, creating one on demand.
@@ -81,7 +83,21 @@ func main() {
 	// `new WebTransport(...)` calls reject (Promise.ready). Operators set
 	// this to e.g. `https://proxy.localhost:18443/__zp/wt` for local dogfood.
 	flag.StringVar(&s.wtGatewayURL, "wt-public-url", "", "Public URL of the WebTransport gateway (e.g. 'https://proxy.localhost:18443/__zp/wt'); empty hides the gateway from the page-side virtual class")
+	// D5 — WebRTC signaling gateway. The gateway runs in-process on the
+	// same HTTP listener (`/zp/api/rtc/signal`), so there's no separate
+	// addr flag; just an enable toggle + the public URL the page reads
+	// from `/zp/api/config`. Empty leaves the legacy stub Handler() up.
+	var rtcEnabled bool
+	flag.BoolVar(&rtcEnabled, "rtc-enable", false, "Enable the D5 WebRTC signaling gateway (in-process pion/webrtc bridge)")
+	flag.StringVar(&s.rtcGatewayURL, "rtc-public-url", "", "Public URL of the RTC signaling endpoint (e.g. 'http://proxy.localhost:18080/zp/api/rtc/signal'); empty disables the page-side virtual RTCPeerConnection pass-through")
 	flag.Parse()
+	if rtcEnabled {
+		gw, err := rtcgw.New(rtcgw.Config{})
+		if err != nil {
+			log.Fatalf("rtcgw: %v", err)
+		}
+		s.rtcGateway = gw
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
 	h := securityHeaders(mux)
@@ -154,10 +170,21 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
 	case path == controlPrefix+"api/config":
-		// D4 client config — exposes the public WT gateway URL (if
-		// `-wt-public-url` is set). SW fetches this once on activate
-		// and threads `wtGateway` into the boot JSON the page realm reads.
+		// D4/D5 client config — exposes the public WT gateway URL (if
+		// `-wt-public-url` is set) + RTC signaling URL (if
+		// `-rtc-public-url` is set). SW fetches this once on activate
+		// and threads `wtGateway` / `rtcGateway` into the boot JSON the
+		// page realm reads.
 		s.serveConfig(w, r)
+	case path == controlPrefix+"api/rtc/signal":
+		// D5 — WebRTC signaling endpoint. Active only when
+		// `-rtc-enable` is set; otherwise the stub Handler() at
+		// `/__zp/rtc/` is still in place.
+		if s.rtcGateway == nil {
+			s.safeError(w, r, "RTC_GATEWAY_UNAVAILABLE", http.StatusServiceUnavailable)
+			return
+		}
+		s.rtcGateway.HandlerForAPI().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
 		// Defensive: in case build pipeline emits a double-prefixed path.
 		s.safeError(w, r, "MALFORMED_ROUTE", http.StatusBadRequest)
@@ -263,15 +290,14 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveConfig emits the minimal client-facing runtime config the SW
-// reads on activate. Currently just the WT gateway URL (D4); future
-// fields (D5 RTC gateway, feature flags, etc.) get tacked on here so
-// the SW only ever does ONE fetch on boot.
+// reads on activate. D4 = wtGateway; D5 = rtcGateway. SW only ever
+// does ONE fetch on boot.
 func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	// Hand-rolled to avoid encoding/json's reflection cost for a 1-field doc.
-	gateway := strings.ReplaceAll(s.wtGatewayURL, `"`, `\"`)
-	_, _ = fmt.Fprintf(w, `{"wtGateway":"%s"}`, gateway)
+	wt := strings.ReplaceAll(s.wtGatewayURL, `"`, `\"`)
+	rtc := strings.ReplaceAll(s.rtcGatewayURL, `"`, `\"`)
+	_, _ = fmt.Fprintf(w, `{"wtGateway":"%s","rtcGateway":"%s"}`, wt, rtc)
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {

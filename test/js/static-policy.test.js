@@ -702,6 +702,39 @@ test('D4 client: virtual WebTransport routes through ZeroProxy gateway when enab
   assert.match(prelude, /params\.set\('target',\s*target\)/, 'ZPWebTransport must inject target into the gateway query string');
 });
 
+// 2026-06-08 D5 client-side virtual RTCPeerConnection. Page-realm
+// `new RTCPeerConnection(...)` now wraps a native PC and routes signaling
+// (offer / answer / ICE candidates) through the ZP gateway when the
+// operator has enabled `-rtc-enable + -rtc-public-url`; otherwise it
+// falls back to the legacy rejected-promise stub. Pins:
+//   - Go server has `-rtc-enable` + `-rtc-public-url` flags + the
+//     /zp/api/rtc/signal route + serveConfig emits `rtcGateway`
+//   - SW threads `rtcGateway` into the boot JSON
+//   - runtime-prelude has `makeRTCPeerConnectionConstructor` factory +
+//     installBlockers RTC entries route through it
+//   - the wrapper forces `iceServers: []` so page-supplied ICE servers
+//     can't bypass us (defense-in-depth on top of the gateway flow).
+test('D5 client: virtual RTCPeerConnection routes signaling through ZeroProxy gateway when enabled', () => {
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.match(mainGo, /"rtc-enable"/, 'Go server must expose -rtc-enable flag');
+  assert.match(mainGo, /"rtc-public-url"/, 'Go server must expose -rtc-public-url flag');
+  assert.match(mainGo, /controlPrefix\+"api\/rtc\/signal"/, 'Go server must route /zp/api/rtc/signal');
+  assert.match(mainGo, /"rtcGateway":/, 'serveConfig must emit the rtcGateway field');
+
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /rtcGateway:\s*runtimeConfig\.rtcGateway/, 'SW buildRuntimePrelude must inject rtcGateway into boot JSON');
+
+  const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(prelude, /function makeRTCPeerConnectionConstructor\(/, 'runtime-prelude must define makeRTCPeerConnectionConstructor');
+  assert.match(prelude, /ZPRTCPeerConnection/, 'runtime-prelude must define ZPRTCPeerConnection class');
+  assert.match(prelude, /'RTCPeerConnection':[^}]*ctor:\s*\(\)\s*=>\s*makeRTCPeerConnectionConstructor/, 'installBlockers RTCPeerConnection entry must use the factory');
+  assert.match(prelude, /'webkitRTCPeerConnection':[^}]*ctor:\s*\(\)\s*=>\s*makeRTCPeerConnectionConstructor/, 'installBlockers webkitRTCPeerConnection entry must use the factory');
+  // Defense-in-depth: page-supplied iceServers are wiped before we hand
+  // config to the native PC (so a malicious page can't point ICE
+  // gathering at an arbitrary STUN/TURN host that would leak its IP).
+  assert.match(prelude, /safeConfig\.iceServers\s*=\s*\[\]/, 'ZPRTCPeerConnection must force iceServers to []');
+});
+
 // 2026-06-08 wiki load.php deferred fix: `await initRewriter()` was a stale
 // call left behind by split-bundle (c.1) Step 3 (the helper was deleted
 // but the call site survived). Every external-script rewrite threw
