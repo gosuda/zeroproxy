@@ -1726,10 +1726,24 @@ impl<'a> Codec<'a> for CertificateExtensions<'a> {
         let len = usize::from(u16::read(r)?);
         let mut sub = r.sub(len)?;
 
+        // ZeroProxy fork patch (2026-06-08): tolerate unknown
+        // CertificateEntry extensions. Upstream rustls 0.23 (incl. main
+        // HEAD) only models `StatusRequest` in `CertificateExtensions`
+        // and errors on anything else with
+        // `InvalidMessage::UnknownCertificateExtension`. RFC 8446 §4.4.2
+        // explicitly permits `signed_certificate_timestamp` (RFC 6962)
+        // in CertificateEntry extensions, and Cloudflare-fronted origins
+        // (example.com, …) deliver SCT this way — so the upstream
+        // behaviour breaks every Cloudflare-served site whose CA emits
+        // SCT via TLS rather than embedding it in the X.509 cert. We
+        // skip-on-unknown instead of erroring: rustls's
+        // `Reader::read_one` already consumes the unknown extension's
+        // bytes from `sub` before invoking the closure, so returning
+        // Ok(()) is sound. This sacrifices nothing security-wise —
+        // unknown CertificateEntry extensions cannot influence the
+        // already-validated certificate chain.
         while sub.any_left() {
-            out.read_one(&mut sub, |_unk| {
-                Err(InvalidMessage::UnknownCertificateExtension)
-            })?;
+            out.read_one(&mut sub, |_unk| Ok(()))?;
         }
 
         Ok(out)

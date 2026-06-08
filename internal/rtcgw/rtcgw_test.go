@@ -100,3 +100,67 @@ func TestGatewayPollReturnsEmptyArrayBeforeTimeout(t *testing.T) {
 		t.Fatalf("expected empty envelope list, got %d", len(envs))
 	}
 }
+
+// TestStripDisallowedCandidates pins the D5 polish SDP munging rule:
+// `a=candidate:` lines whose connection-address (field 4) is NOT in
+// the operator-supplied AllowedExternalIPs allowlist must be dropped
+// from the outgoing SDP, but every other line (m=, c=, a=mid:, …)
+// must round-trip byte-for-byte.
+func TestStripDisallowedCandidates(t *testing.T) {
+	sdp := strings.Join([]string{
+		"v=0",
+		"o=- 1 2 IN IP4 0.0.0.0",
+		"s=-",
+		"t=0 0",
+		"m=audio 9 UDP/TLS/RTP/SAVPF 111",
+		"c=IN IP4 0.0.0.0",
+		"a=candidate:1 1 udp 2122260223 192.168.1.10 50000 typ host",
+		"a=candidate:2 1 udp 2122260223 203.0.113.5 50001 typ host",
+		"a=candidate:3 1 udp 1686052607 198.51.100.42 50002 typ srflx raddr 192.168.1.10 rport 50000",
+		"a=candidate:4 1 udp 2122260223 fe80::1 50003 typ host",
+		"a=mid:0",
+	}, "\r\n")
+	allowed := allowedSet([]string{"203.0.113.5", "198.51.100.42"})
+	out := stripDisallowedCandidates(sdp, allowed)
+	if strings.Contains(out, "192.168.1.10 50000") {
+		t.Fatalf("LAN host candidate not stripped:\n%s", out)
+	}
+	if strings.Contains(out, "fe80::1") {
+		t.Fatalf("link-local IPv6 candidate not stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "203.0.113.5 50001") {
+		t.Fatalf("allowed external candidate stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "198.51.100.42 50002 typ srflx") {
+		t.Fatalf("allowed srflx candidate stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "a=mid:0") {
+		t.Fatalf("non-candidate line dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "c=IN IP4 0.0.0.0") {
+		t.Fatalf("c= line dropped:\n%s", out)
+	}
+}
+
+// TestStripDisallowedCandidatesEmptyAllowlist confirms the no-op
+// fast path: when AllowedExternalIPs is empty (operator deploys on
+// a publicly-routed host where pion's host candidates ARE the
+// public IPs), no munging happens — the SDP returns verbatim.
+func TestStripDisallowedCandidatesEmptyAllowlist(t *testing.T) {
+	sdp := "a=candidate:1 1 udp 2122260223 10.0.0.1 50000 typ host\r\na=mid:0"
+	out := stripDisallowedCandidates(sdp, nil)
+	if out != sdp {
+		t.Fatalf("empty allowlist must round-trip; got:\n%s", out)
+	}
+}
+
+// TestAllowedSetNormalizesIPv6 pins that IPv6 addresses written in
+// different canonical forms still match — `net.ParseIP("0:0:0:0:0:0:0:1")`
+// normalizes to `::1` so the lookup keys agree regardless of
+// operator-supplied notation.
+func TestAllowedSetNormalizesIPv6(t *testing.T) {
+	s := allowedSet([]string{"0:0:0:0:0:0:0:1"})
+	if _, ok := s["::1"]; !ok {
+		t.Fatalf("IPv6 normalization missing: %+v", s)
+	}
+}

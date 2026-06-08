@@ -32,10 +32,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -49,6 +52,16 @@ type Config struct {
 	// IdleSessionTimeout — sessions with no activity for this long are
 	// torn down. Defaults to 5 min.
 	IdleSessionTimeout time.Duration
+	// AllowedExternalIPs — when non-empty, the gateway munges the
+	// target-side PC's outgoing SDP to drop every `a=candidate:` line
+	// whose connection-address is NOT in this set. Operators behind
+	// CGN / RFC1918 NAT / docker bridges need this so pion's
+	// auto-collected host candidates (e.g. 192.168.x.y, 172.17.x.y) do
+	// not leak to the target's remote peer. Public-IP-only deployments
+	// can leave this empty — host candidates ARE the public IP. Pass
+	// IPs as strings ("203.0.113.5", "2001:db8::1"); the gateway
+	// matches the candidate's address byte-for-byte.
+	AllowedExternalIPs []string
 	// Logger receives one line per session lifecycle event. nil → log.Default.
 	Logger *log.Logger
 }
@@ -77,13 +90,86 @@ func New(cfg Config) (*Gateway, error) {
 	if err := me.RegisterDefaultCodecs(); err != nil {
 		return nil, fmt.Errorf("rtcgw: RegisterDefaultCodecs: %w", err)
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(me))
+	// pion default interceptors: NACK, PLI, REMB, transport-cc, twcc.
+	// Buys us standards-compliant RTCP / jitter / packet-loss recovery
+	// on the SFU path without rolling our own — RTCP no longer dead-ends
+	// at either PC, packets are forwarded between page-side and
+	// target-side via the interceptor chain.
+	ir := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
+		return nil, fmt.Errorf("rtcgw: RegisterDefaultInterceptors: %w", err)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir))
 	return &Gateway{
 		cfg:     cfg,
 		api:     api,
 		logger:  logger,
 		sessMap: make(map[string]*session),
 	}, nil
+}
+
+// stripDisallowedCandidates rewrites an SDP blob so that every
+// `a=candidate:` line whose connection-address is NOT in `allowed`
+// is removed. This guards against pion picking up host candidates
+// from internal interfaces (LAN, docker0, …) when the gateway is
+// deployed behind NAT or a containerized network. RFC 5245 §15.1
+// candidate-attribute format:
+//
+//	candidate:<foundation> <component> <transport> <priority>
+//	          <connection-address> <port> typ <type> [...]
+//
+// We split on whitespace, take field index 4 (zero-based) as the
+// address, and drop the entire line if it's not in the allowlist.
+// IPv6 addresses don't contain whitespace in the SDP encoding, so
+// the simple split is correct. `allowed == nil` means "no filter".
+func stripDisallowedCandidates(sdp string, allowed map[string]struct{}) string {
+	if len(allowed) == 0 {
+		return sdp
+	}
+	lines := strings.Split(sdp, "\r\n")
+	out := lines[:0]
+	for _, line := range lines {
+		const prefix = "a=candidate:"
+		if !strings.HasPrefix(line, prefix) {
+			out = append(out, line)
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 5 {
+			// Malformed — drop conservatively.
+			continue
+		}
+		addr := parts[4]
+		if _, ok := allowed[addr]; ok {
+			out = append(out, line)
+		}
+		// else: drop the candidate line entirely.
+	}
+	return strings.Join(out, "\r\n")
+}
+
+// allowedSet builds the lookup map and normalizes IPv6 forms so
+// `::1` and `0:0:0:0:0:0:0:1` both match. Invalid entries are
+// silently skipped (caller-supplied operator config).
+func allowedSet(addrs []string) map[string]struct{} {
+	if len(addrs) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(addrs))
+	for _, a := range addrs {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if ip := net.ParseIP(a); ip != nil {
+			m[ip.String()] = struct{}{}
+			continue
+		}
+		// Hostname fallback: store as-is (operator may want to allow
+		// FQDN-style candidates if they ever appear).
+		m[a] = struct{}{}
+	}
+	return m
 }
 
 // session tracks one page-side + one target-side PeerConnection and
@@ -167,7 +253,15 @@ func (g *Gateway) serveSignal(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("setLocalDescription: %v", err), http.StatusInternalServerError)
 			return
 		}
-		sess.emit(signalEnvelope{Op: "answer", SessionID: sess.id, SDP: sess.pagePC.LocalDescription()})
+		ans := sess.pagePC.LocalDescription()
+		if ans != nil && len(g.cfg.AllowedExternalIPs) > 0 {
+			munged := webrtc.SessionDescription{
+				Type: ans.Type,
+				SDP:  stripDisallowedCandidates(ans.SDP, allowedSet(g.cfg.AllowedExternalIPs)),
+			}
+			ans = &munged
+		}
+		sess.emit(signalEnvelope{Op: "answer", SessionID: sess.id, SDP: ans})
 	case "answer":
 		// Page-supplied answer for a gateway-initiated re-offer. Apply
 		// against the page-side PC.

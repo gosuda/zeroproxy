@@ -88,11 +88,21 @@ func main() {
 	// addr flag; just an enable toggle + the public URL the page reads
 	// from `/zp/api/config`. Empty leaves the legacy stub Handler() up.
 	var rtcEnabled bool
+	var rtcAllowedIPs string
 	flag.BoolVar(&rtcEnabled, "rtc-enable", false, "Enable the D5 WebRTC signaling gateway (in-process pion/webrtc bridge)")
 	flag.StringVar(&s.rtcGatewayURL, "rtc-public-url", "", "Public URL of the RTC signaling endpoint (e.g. 'http://proxy.localhost:18080/zp/api/rtc/signal'); empty disables the page-side virtual RTCPeerConnection pass-through")
+	flag.StringVar(&rtcAllowedIPs, "rtc-allowed-ips", "", "Comma-separated list of IPs the gateway's own SDP candidates are allowed to advertise — used to strip host candidates that would leak the operator's LAN/NAT interfaces. Empty = no munging (public-IP-only deployments).")
 	flag.Parse()
 	if rtcEnabled {
-		gw, err := rtcgw.New(rtcgw.Config{})
+		var allowed []string
+		if rtcAllowedIPs != "" {
+			for _, p := range strings.Split(rtcAllowedIPs, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					allowed = append(allowed, p)
+				}
+			}
+		}
+		gw, err := rtcgw.New(rtcgw.Config{AllowedExternalIPs: allowed})
 		if err != nil {
 			log.Fatalf("rtcgw: %v", err)
 		}

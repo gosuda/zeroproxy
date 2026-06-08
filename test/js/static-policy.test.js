@@ -1506,3 +1506,73 @@ test('active browsing emits only encrypted prefixed p routes', () => {
   assert.ok(sw.includes('PROXY_DOCUMENT'), 'service worker must handle /zp/p documents');
   assert.ok(rt.includes('makeShareURL'), 'runtime navigation must use encrypted /p share URLs');
 });
+
+// 2026-06-08 rustls fork patch: tolerate unknown TLS 1.3 CertificateEntry
+// extensions. Upstream rustls 0.23 only models `StatusRequest` in
+// `CertificateExtensions` and rejects everything else (notably SCT /
+// signed_certificate_timestamp delivered via RFC 6962 TLS path) with
+// `InvalidMessage::UnknownCertificateExtension`. Cloudflare-fronted
+// origins (example.com etc.) hit this path; without the patch the
+// matrix harness lost example.com after our matrix expansion. The
+// patch makes the unknown-extension closure return Ok(()) — rustls
+// `read_one` consumes the extension body via `r.sub(len)?` before
+// invoking the closure, so dropping the error is sound.
+//
+// This test pins the patched closure so a future upstream resync
+// (`UPSTREAM` file bumped + sources refreshed) can't silently lose
+// the fix and re-break every Cloudflare-fronted target.
+test('rustls fork patch: CertificateExtensions tolerates unknown TLS 1.3 cert-entry extensions', () => {
+  const upstream = fs.readFileSync('third_party-rustls-fork/UPSTREAM', 'utf8');
+  assert.match(upstream, /rustls-0\.23/, 'fork must declare its upstream base version');
+  const handshake = fs.readFileSync('third_party-rustls-fork/src/msgs/handshake.rs', 'utf8');
+  // The patched closure inside `Codec for CertificateExtensions::read`
+  // must return Ok(()) for unknown extensions, NOT
+  // `Err(InvalidMessage::UnknownCertificateExtension)`.
+  const certExtRead = handshake.match(/impl<'a> Codec<'a> for CertificateExtensions<'a>[\s\S]*?fn read\(r:[\s\S]*?Ok\(out\)\s*\n\s*\}/);
+  assert.ok(certExtRead, 'CertificateExtensions::read must be locatable in the fork');
+  assert.match(
+    certExtRead[0],
+    /out\.read_one\(&mut sub, \|_unk\| Ok\(\(\)\)\)/,
+    'CertificateExtensions::read closure must return Ok(()) on unknown ext (rustls fork patch 2026-06-08)',
+  );
+  assert.equal(
+    /Err\(InvalidMessage::UnknownCertificateExtension\)/.test(certExtRead[0]),
+    false,
+    'CertificateExtensions::read must NOT error on unknown ext (would reject SCT-in-TLS Cloudflare origins)',
+  );
+});
+
+// 2026-06-08 D5 polish: SDP candidate munging + pion default
+// interceptors (NACK / PLI / REMB / transport-cc) so the WebRTC
+// gateway no longer leaks internal-interface host candidates and
+// real-world media RTCP works through the SFU bridge. Pins:
+//   - rtcgw.Config has AllowedExternalIPs field
+//   - stripDisallowedCandidates + allowedSet helpers exist
+//   - gateway answer emission routes through the munger
+//   - api built with WithInterceptorRegistry + RegisterDefaultInterceptors
+//   - main.go exposes `-rtc-allowed-ips`
+test('D5 polish: SDP candidate munging + RTCP interceptors', () => {
+  const server = fs.readFileSync('internal/rtcgw/server.go', 'utf8');
+  assert.match(server, /AllowedExternalIPs\s+\[\]string/, 'Config must carry AllowedExternalIPs');
+  assert.match(server, /func stripDisallowedCandidates\(sdp string, allowed map\[string\]struct\{\}\) string/, 'stripDisallowedCandidates helper must exist');
+  assert.match(server, /func allowedSet\(addrs \[\]string\) map\[string\]struct\{\}/, 'allowedSet helper must exist');
+  assert.match(server, /stripDisallowedCandidates\(ans\.SDP, allowedSet\(g\.cfg\.AllowedExternalIPs\)\)/, 'answer emission must route through the munger');
+  assert.match(server, /RegisterDefaultInterceptors/, 'gateway api must register pion default interceptors');
+  assert.match(server, /webrtc\.WithInterceptorRegistry/, 'gateway api must be built with InterceptorRegistry');
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.match(mainGo, /"rtc-allowed-ips"/, 'Go server must expose -rtc-allowed-ips flag');
+});
+
+// 2026-06-08 puppeteer harness hardening for the real-site
+// regression matrix:
+//   (a) random ephemeral port — no orphan-process aliasing
+//   (b) fail-fast on server-bind conflicts
+//   (c) per-subtest BrowserContext isolation (SW + cookies + storage)
+//   (d) retry-on-context-destroyed title polling for SPA redirects.
+test('puppeteer real-site harness: random port + bind fail-fast + subtest isolation + context-destroyed retry', () => {
+  const harness = fs.readFileSync('test/e2e/real-site-regression.test.js', 'utf8');
+  assert.match(harness, /30000 \+ Math\.floor\(Math\.random\(\) \* 20000\)/, 'harness must pick a random ephemeral port');
+  assert.match(harness, /bind:\.\*permitted\|address already in use/i, 'harness must fail-fast on bind conflicts');
+  assert.match(harness, /browser\.createBrowserContext\(\)/, 'harness must create a fresh BrowserContext per subtest');
+  assert.match(harness, /Execution context was destroyed\|Target closed/, 'title-retry loop must tolerate context destruction');
+});

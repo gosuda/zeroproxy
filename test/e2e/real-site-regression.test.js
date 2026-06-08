@@ -63,20 +63,21 @@ const ALL_TARGETS = {
   // an automated regression.
   cloudflare: { host: 'gosuda.org', url: 'https://gosuda.org', titleMatches: /gosuda/i },
 };
-// `ZP_TARGETS=matrix` expands to the auto-evidence matrix.
-// Currently only `wikipedia` qualifies as known-good across the SW +
-// transport + rewriter pipeline. The other three keys
-// (`example` / `mdn` / `hackernews`) remain in `ALL_TARGETS` for
-// opt-in manual evidence runs and Phase 3 investigation:
-//   - `example` — tiny HTTP/1.1 static page surfaces a
-//     `Could not reach target` transport failure (see
-//     `.ai/trap-notebook/INDEX.md` 2026-06-08 real-site-compat entry).
-//   - `mdn` — initial JS does a `location.replace` that destroys
-//     puppeteer's execution context before the title settles
-//     (harness-side incompat, not a proxy bug).
+// `ZP_TARGETS=matrix` expands to the auto-evidence matrix. Both
+// `wikipedia` and `example` (the latter after the rustls fork patch
+// landed 2026-06-08 to tolerate SCT in TLS 1.3 CertificateEntry
+// extensions, see `.ai/trap-notebook/INDEX.md`) qualify as
+// known-good across the SW + transport + rewriter pipeline.
+// `mdn` / `hackernews` remain in `ALL_TARGETS` for opt-in evidence
+// runs and Phase 3 investigation:
+//   - `mdn` — initial transport stalls on first cold visit (not a
+//     harness flake — the retry-on-context-destroyed loop landed
+//     2026-06-08, MDN's failure now manifests as transport hang
+//     rather than execution-context destruction). Likely a
+//     fingerprint or upstream-timing interaction; Phase 3.
 //   - `hackernews` — sequential cookie probes noisy under headless
 //     puppeteer without further harness work.
-const MATRIX_KEYS = ['wikipedia'];
+const MATRIX_KEYS = ['wikipedia', 'example'];
 const rawTargets = process.env.ZP_TARGETS || 'wikipedia';
 const REAL_TARGETS = (rawTargets === 'matrix' ? MATRIX_KEYS.join(',') : rawTargets)
   .split(',')
@@ -181,7 +182,14 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
 
   for (const target of REAL_TARGETS) {
     await t.test(target.host, async (sub) => {
-      const page = await browser.newPage();
+      // Fresh incognito BrowserContext per subtest so SW
+      // registrations / cookies / storage do NOT cross-contaminate.
+      // The matrix-run-4 (2026-06-08) regression showed Wikipedia's
+      // SW state aliased to the next subtest's proxy.localhost
+      // origin and broke example.com's launcher submission.
+      const ctx = await browser.createBrowserContext();
+      sub.after(() => ctx.close().catch(() => {}));
+      const page = await ctx.newPage();
       const consoleErrors = [];
       page.on('console', msg => {
         if (msg.type() === 'error') consoleErrors.push(msg.text());
@@ -207,19 +215,60 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
       // launcher" — instead we rely on the strict per-target title
       // regex (configured above) which won't match the launcher's
       // "ZeroProxy" title.
+      //
+      // Sites that do `location.replace` (e.g. MDN's locale resolver)
+      // destroy the page's execution context mid-poll, which makes
+      // `page.title()` block until the protocol timeout. We avoid
+      // that by binding a `page.on('domcontentloaded', …)` listener
+      // that fires every time the renderer commits a new doc —
+      // recording the most-recent `document.title` snapshot from
+      // within each fresh context. The harness then races a deadline
+      // against "any committed doc whose title matches the regex."
+      //
+      // Belt-and-suspenders: also poll every 250 ms inside try/catch,
+      // tolerating context-destroyed faults so stable docs that
+      // never re-commit (the common case — Wikipedia, example.com)
+      // still resolve quickly.
+      let titleSeen = '';
+      const titleListener = async () => {
+        try { titleSeen = (await page.title()) || titleSeen; } catch {}
+      };
+      page.on('domcontentloaded', titleListener);
+      page.on('load', titleListener);
+      const titleDeadline = Date.now() + 45000;
+      let lastTitleErr = null;
+      let titleMatched = false;
+      while (Date.now() < titleDeadline) {
+        if (target.titleMatches.test(titleSeen)) { titleMatched = true; break; }
+        try {
+          const t = await page.title();
+          if (t) titleSeen = t;
+          if (target.titleMatches.test(titleSeen)) { titleMatched = true; break; }
+        } catch (e) {
+          const msg = String(e && e.message || e);
+          if (!/Execution context was destroyed|Target closed|Most likely the page has been closed|frame got detached/i.test(msg)) {
+            lastTitleErr = e;
+            break;
+          }
+        }
+        await new Promise(r => setTimeout(r, 250));
+      }
+      page.off('domcontentloaded', titleListener);
+      page.off('load', titleListener);
       try {
-        await page.waitForFunction(
-          (re) => new RegExp(re, 'i').test(document.title || ''),
-          { timeout: 45000 },
-          target.titleMatches.source,
-        );
+        if (!titleMatched) {
+          throw lastTitleErr || new Error(`title did not match ${target.titleMatches} within 45 s (last seen: ${JSON.stringify(titleSeen)})`);
+        }
       } catch (err) {
-        const state = await page.evaluate(() => ({
-          title: document.title,
-          url: location.href,
-          bodyLen: (document.body && document.body.innerText || '').length,
-        }));
-        await page.screenshot({ path: path.join(outDir, `${target.host}-FAIL.png`), fullPage: false });
+        let state = { title: titleSeen, url: '(unknown)', bodyLen: 0 };
+        try {
+          state = await page.evaluate(() => ({
+            title: document.title,
+            url: location.href,
+            bodyLen: (document.body && document.body.innerText || '').length,
+          }));
+        } catch { /* context destroyed — fall back to listener-captured title */ }
+        try { await page.screenshot({ path: path.join(outDir, `${target.host}-FAIL.png`), fullPage: false }); } catch {}
         fs.writeFileSync(
           path.join(outDir, `${target.host}-errors.json`),
           JSON.stringify({ state, consoleErrors, serverLog: serverLog.slice(-4096) }, null, 2),

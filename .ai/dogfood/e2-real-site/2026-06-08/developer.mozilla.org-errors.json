@@ -1,0 +1,14 @@
+{
+  "state": {
+    "title": "ZeroProxy",
+    "url": "(unknown)",
+    "bodyLen": 0
+  },
+  "consoleErrors": [
+    "The Content Security Policy directive 'frame-ancestors' is ignored when delivered via a <meta> element.",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "The Content Security Policy directive 'frame-ancestors' is ignored when delivered via a <meta> element.",
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)"
+  ],
+  "serverLog": "2026/06/08 18:20:21 zeroproxy listening on 127.0.0.1:33856\n2026/06/08 18:25:32 [ERR] yamux: Failed to read header: websocket: close 1001 (going away)\n"
+}
