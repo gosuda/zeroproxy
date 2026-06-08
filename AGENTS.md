@@ -1,6 +1,12 @@
 # AGENTS.md — ZeroProxy
 
-ZeroProxy is a **human-in-the-loop** virtual-browsing privacy membrane: a real person drives a real browser, and target traffic egresses only through `Service Worker → Go WASM kernel → WebSocket/smux → SOCKS5 → uTLS`.
+ZeroProxy is a **human-in-the-loop** virtual-browsing privacy membrane: a real person drives a real browser, and target traffic egresses only through the approved membrane transport. The legacy path is `Service Worker → Go WASM kernel → WebSocket/smux → SOCKS5 → uTLS`; the active migration plan in `PLAN.md` removes Service Worker interception while keeping the Go WASM network engine behind `GoNetworkBackend`.
+
+## Implementation status discipline
+
+- Keep `IMPLEMENTATION_STATUS.md` updated while working. Any implementation change for the QuickJS/GoNetworkBackend migration that changes behavior, phase status, verification results, known gaps, or scope must update `IMPLEMENTATION_STATUS.md` in the same branch.
+- Treat `PLAN.md` as the architecture/contract source of truth and `IMPLEMENTATION_STATUS.md` as the repository-backed status ledger. Do not let status text claim work is implemented without code and verification backing it.
+- When a verification command is not run, record that explicitly in `IMPLEMENTATION_STATUS.md` instead of implying green status.
 
 ## Membrane/protocol refactor discipline (load-bearing)
 
