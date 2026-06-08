@@ -22,7 +22,14 @@ const os = require('node:os');
 const { spawn } = require('node:child_process');
 const puppeteer = require('puppeteer');
 
-const PROXY_PORT = process.env.ZP_PROXY_PORT || '18181';
+// Pick an ephemeral port per harness invocation by default — sharing a
+// fixed `18181` across reruns meant a previous orphan process could
+// silently own the port and answer requests, hiding fresh-spawn bind
+// failures (Wikipedia "passes" through the orphan, later tests fail
+// when the orphan finally stutters). Caller can pin via `ZP_PROXY_PORT`
+// when manually correlating logs/screenshots.
+const PROXY_PORT = process.env.ZP_PROXY_PORT
+  || String(30000 + Math.floor(Math.random() * 20000));
 const DIST_WEB = path.resolve('dist/web');
 const SERVER_BIN = path.resolve(process.platform === 'win32' ? 'dist/zeroproxy-server.exe' : 'dist/zeroproxy-server');
 
@@ -37,10 +44,41 @@ const SERVER_BIN = path.resolve(process.platform === 'win32' ? 'dist/zeroproxy-s
 // protocolTimeout on first visit — they're closer to a manual
 // dogfood check than an automated regression.
 const ALL_TARGETS = {
+  // Wikipedia — SPA-style mw.loader, no CF gate, stable cold visit.
   wikipedia: { host: 'en.wikipedia.org', url: 'https://en.wikipedia.org/wiki/Main_Page', titleMatches: /Wikipedia, the free encyclopedia/i },
+  // example.com — IANA reserved-for-documentation domain. Tiny static
+  // page, no JS frameworks, ZERO third-party fetches: the canonical
+  // "does the SW + rewriter + transport path produce a renderable
+  // document at all" smoke target.
+  example: { host: 'example.com', url: 'https://example.com/', titleMatches: /Example Domain/i },
+  // MDN docs landing page. Heavier JS surface (Yari React app), useful
+  // signal for "real developer site" smoke under the page bundle.
+  mdn: { host: 'developer.mozilla.org', url: 'https://developer.mozilla.org/en-US/docs/Web', titleMatches: /MDN|Mozilla/i },
+  // Hacker News — server-rendered, minimal JS, lightweight. Exercises
+  // the document path with no SPA bundle to confound title timing.
+  hackernews: { host: 'news.ycombinator.com', url: 'https://news.ycombinator.com/', titleMatches: /Hacker News/i },
+  // Cloudflare-protected sites are opt-in via `ZP_TARGETS=cloudflare`
+  // because CF challenge handling can exceed puppeteer's default 180 s
+  // protocolTimeout — they're closer to a manual dogfood check than
+  // an automated regression.
   cloudflare: { host: 'gosuda.org', url: 'https://gosuda.org', titleMatches: /gosuda/i },
 };
-const REAL_TARGETS = (process.env.ZP_TARGETS || 'wikipedia')
+// `ZP_TARGETS=matrix` expands to the auto-evidence matrix.
+// Currently only `wikipedia` qualifies as known-good across the SW +
+// transport + rewriter pipeline. The other three keys
+// (`example` / `mdn` / `hackernews`) remain in `ALL_TARGETS` for
+// opt-in manual evidence runs and Phase 3 investigation:
+//   - `example` — tiny HTTP/1.1 static page surfaces a
+//     `Could not reach target` transport failure (see
+//     `.ai/trap-notebook/INDEX.md` 2026-06-08 real-site-compat entry).
+//   - `mdn` — initial JS does a `location.replace` that destroys
+//     puppeteer's execution context before the title settles
+//     (harness-side incompat, not a proxy bug).
+//   - `hackernews` — sequential cookie probes noisy under headless
+//     puppeteer without further harness work.
+const MATRIX_KEYS = ['wikipedia'];
+const rawTargets = process.env.ZP_TARGETS || 'wikipedia';
+const REAL_TARGETS = (rawTargets === 'matrix' ? MATRIX_KEYS.join(',') : rawTargets)
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
@@ -103,8 +141,10 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let serverLog = '';
+  let serverDied = false;
   serverProc.stdout.on('data', c => { serverLog += c; });
   serverProc.stderr.on('data', c => { serverLog += c; });
+  serverProc.on('exit', code => { serverDied = code !== null; });
   t.after(() => {
     if (serverProc && !serverProc.killed) serverProc.kill('SIGKILL');
     if (serverLog) fs.writeFileSync(path.join(outDir, 'server.log'), serverLog);
@@ -113,6 +153,13 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
   await waitForHTTP(`http://127.0.0.1:${PROXY_PORT}/zp/`).catch(err => {
     throw new Error(`${err.message}\nserver log:\n${serverLog}`);
   });
+  // Fail-fast: if the spawned server exited before waitForHTTP returned
+  // (typically `bind: address already in use` from a prior orphan), the
+  // waitForHTTP poll may have succeeded against the *orphan* instead.
+  // Refuse to proceed — a real evidence run must own its own port.
+  if (serverDied || /bind:.*permitted|address already in use/i.test(serverLog)) {
+    throw new Error(`server died during boot (likely port conflict on ${PROXY_PORT}):\n${serverLog}`);
+  }
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zp-e2-'));
   t.after(() => { try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch {} });

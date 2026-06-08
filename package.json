@@ -13,7 +13,8 @@
     "test:js": "node scripts/test.mjs js",
     "test:e2e": "node scripts/test.mjs e2e",
     "dogfood:baseline": "node scripts/dogfood-baseline.mjs",
-    "dogfood:real-site": "node --test test/e2e/real-site-regression.test.js"
+    "dogfood:real-site": "node --test test/e2e/real-site-regression.test.js",
+    "dogfood:matrix": "node scripts/dogfood-matrix.mjs"
   },
   "devDependencies": {
     "binaryen": "^129.0.0",

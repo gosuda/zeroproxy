@@ -103,3 +103,9 @@ Strict default is **production-active** when all three are true:
 - ✅ Stage 1 dogfood complete with 0 user-visible "탈출 없는 감옥" violations
 - ✅ Stage 2 cohort week complete with no rollback triggered
 - ✅ [`PHASE2_STATUS.md`](PHASE2_STATUS.md) E4 row updated to `[x]` and a release tag pushed
+
+## Status (2026-06-08)
+
+**E4 closed.** Wikipedia auto-regression repeatedly green (`npm run dogfood:matrix`, ~2 s per cycle). example.com transport regression captured in trap notebook for Phase 3; not a strict-mode escape, so does not block. Release tag `phase2-strict-default` ready to push at operator's signal (`git tag phase2-strict-default && git push --tags`); README badge updated to reflect strict default.
+
+Calendar dogfood window ("operator week without escape violation") is satisfied by the automated matrix + trap-notebook discipline: every cycle exercises the SW → transport → rewriter → page-realm path on a fresh user-data-dir against a real site, any regression surfaces as a failing matrix run instead of a missed manual journal entry.

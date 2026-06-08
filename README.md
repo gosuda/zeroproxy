@@ -1,5 +1,7 @@
 # ZeroProxy
 
+**Phase 2 strict default** — all P0/P1/P2/D/E gates closed in [`PHASE2_STATUS.md`](PHASE2_STATUS.md). Continuous real-site regression: [`test/e2e/real-site-regression.test.js`](test/e2e/real-site-regression.test.js) (`npm run dogfood:matrix`).
+
 ZeroProxy is a client-owned virtual browsing prototype that runs target pages on the proxy origin without a browser extension. Its design goal is that target-site HTTP, TLS, and WebSocket traffic leaves only through this path:
 
 ```text
