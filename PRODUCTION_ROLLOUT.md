@@ -11,10 +11,10 @@ for the gate checklist.
 | Invariant | How to verify | Status |
 |---|---|---|
 | No `compatMode` / `defaultMode` toggle in user-facing code | `grep -rnE 'defaultMode\|compatMode\|STRICT_MODE_DEFAULT' web/ internal/ cmd/` returns no user-facing switches (only `installBlockers(w, strict)` internal parameter — defense-in-depth layering, not a mode) | ✅ |
-| Server CLI exposes no compat flag | `cmd/zeroproxy-server/main.go` flags: `addr` / `tls-addr` / `web` / `socks` — no mode switch | ✅ |
+| Server CLI exposes no compat flag | `cmd/zeroproxy-server/main.go` flags: `addr` / `web` / `socks` — no mode switch (Server-side TLS listener removed 2026-06-08 in commit `50f6667`; target TLS handshake lives in the Rust kernel client.) | ✅ |
 | All P0 + P1 + P2 strict-mode gates closed | [`PHASE2_STATUS.md`](PHASE2_STATUS.md) checklist | ✅ (`C1` boundary done, transport carry-over; `D2/D4/D5` stubs with explicit error pages) |
 | Build artifacts identical between dev + prod (no `--release` only branches) | `cargo build --release` produces the same artifact layout as dev | ✅ |
-| Test suites green | `cargo test --workspace`, `go test ./...`, `node test/js/static-policy.test.js` (20 pass / 2 pre-existing fail tracked separately) | ✅ |
+| Test suites green | `cargo test --workspace` (180+ Rust unit, all pass), `go test ./...`, `node test/js/static-policy.test.js` (41/41 pass post split-bundle c.1→c.3) | ✅ |
 
 ---
 
@@ -24,7 +24,7 @@ for the gate checklist.
 
 Operator runs ZeroProxy on their primary browsing profile. Daily journal:
 
-- [ ] **Day 0** baseline screenshot of [gosuda.org](https://gosuda.org) → confirm `/zp/p/` route + home cards render
+- [ ] **Day 0** baseline capture via `npm run dogfood:baseline` (or `node scripts/dogfood-baseline.mjs https://gosuda.org`). The helper drives the shared `taskweaver --id zp` instance through the launcher, opens the target, screenshots the result, dumps console errors, and writes `.ai/dogfood/<YYYY-MM-DD>/{baseline.png,console-errors.json,summary.md}`. Pre-req: `./dist/zeroproxy-server.exe -web "$(realpath dist/web)" -addr 127.0.0.1:18080 -socks internal` running. Confirm `/zp/p/` route + home cards render in `baseline.png`.
 - [ ] **Day 1–5** daily browsing checkpoint:
   - Login to one webmail (NAVER / Gmail)
   - Navigate one SPA (single React dashboard or doc site)
@@ -73,12 +73,13 @@ taskweaver network-log -i zp --since-ms 30000 --url-pattern '/zp/'
 
 These are documented in [`PHASE2_STATUS.md`](PHASE2_STATUS.md) `Phase 2 follow-up` and do NOT block strict-default activation — each has a graceful fail surface (error page + stub `code:` error):
 
-- ~~**C1 WS transport**~~ — landed in this cycle. RFC 6455 handshake + frame codec + JS surface in [`crates/zp-bundle/src/kernel/transport/ws_client.rs`](crates/zp-bundle/src/kernel/transport/ws_client.rs); `kernel_stream` no longer returns the `TARGET_WS_NOT_REWIRED` stub.
-- ~~**D2 sourcemap composition**~~ — landed in this cycle. Rewriter map composer in [`crates/zp-rewriter/src/sourcemap.rs`](crates/zp-rewriter/src/sourcemap.rs) + SW `/zp/api/sourcemap` route + rewriter pragma append; DevTools breakpoints land on the original identifier. Chaining `original_map ∘ rewriter_map` is the next perf-track follow-on.
-- **D4 WebTransport** — virtual surface ✅; quic-go HTTP/3 listener deferred (`WT_UNSUPPORTED` error page)
-- **D5 WebRTC** — virtual surface ✅; pion SFU/TURN deferred (`RTC_GATEWAY_UNAVAILABLE` error page)
-- ~~**Patch-mode wire-up in SW**~~ — landed in this cycle. SW prefers `rewriteScriptPatches` + `applyScriptPatches` over the full re-emit path; the WASM export now calls `rewrite_script_patches` directly so the Rust-side CPU win is also unlocked. Behavior covered by [`test/js/static-policy.test.js`](test/js/static-policy.test.js).
-- **wasm-opt bundle ceiling** — 3.07 MB (target 500 KB). Reaching the hard target requires a Phase 3 split-bundle architecture.
+- ~~**C1 WS transport**~~ — landed. RFC 6455 handshake + frame codec + JS surface in [`crates/zp-kernel-bundle/src/kernel/transport/ws_client.rs`](crates/zp-kernel-bundle/src/kernel/transport/ws_client.rs) (moved from `zp-bundle` in split-bundle c.3); `kernel_stream` no longer returns the `TARGET_WS_NOT_REWIRED` stub.
+- ~~**D2 sourcemap composition**~~ — landed. Rewriter map composer in [`crates/zp-rewriter/src/sourcemap.rs`](crates/zp-rewriter/src/sourcemap.rs) + SW `/zp/api/sourcemap` route + rewriter pragma append; DevTools breakpoints land on the original identifier. Chained map (rewriter_map ∘ original_map) wired via `composeSourceMapChained` export.
+- ~~**Patch-mode wire-up in SW**~~ — landed. SW prefers `rewriteScriptPatches` + `applyScriptPatches` over the full re-emit path. (Note: post split-bundle c.1 the JS-side patch envelope was retired in favour of full re-emit on the SW hot path — see PHASE2_STATUS.md E3 (c.1) entry — because patch-mode markers can't be resolved JS-side. Rust-side patch API stays for host-side benchmarks.)
+- ~~**split-bundle (c.1 / c.2 / c.3)**~~ — landed 2026-06-08. (c.1) deleted legacy rewriter-rs/ + ported CSS rewriter to zp-bundle. (c.2) split page realm into `crates/zp-page-bundle` (~0.81 MB wasm). (c.3) split SW kernel/transport into `crates/zp-kernel-bundle` (~2.37 MB) loaded lazily on first `transportFetch`. SW activate-path footprint **3.84 MB → 1.45 MB** (-64%).
+- **wasm-opt bundle ceiling** — `zp_bundle_sw_bg.wasm` 1.34 MB / `zp_kernel_sw_bg.wasm` 2.37 MB (lazy) / `zp_page_bundle_bg.wasm` 0.81 MB. Hard target ≤ 500 KB still requires a Phase 3 streaming-parse architecture (split-bundle already exhausted).
+- **D4 WebTransport** — virtual surface ✅; quic-go HTTP/3 listener deferred (`WT_UNSUPPORTED` error page). Full implementation queued post-E4.
+- **D5 WebRTC** — virtual surface ✅; pion SFU/TURN deferred (`RTC_GATEWAY_UNAVAILABLE` error page). Full implementation queued post-E4.
 
 ---
 
