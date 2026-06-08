@@ -101,7 +101,39 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
     initBundle().catch(() => null),
     new Promise(r => setTimeout(r, BUNDLE_BOOT_TIMEOUT_MS)),
   ]);
+  // D4: refresh the runtime config (currently just the public WT
+  // gateway URL). Bounded + fire-and-forget — if the endpoint hangs or
+  // returns garbage the page-side virtual WT just falls back to the
+  // rejected stub, which is fine.
+  await Promise.race([
+    refreshRuntimeConfig().catch(() => null),
+    new Promise(r => setTimeout(r, 5000)),
+  ]);
 })()));
+
+// Runtime config the SW threads into the boot JSON every navigation.
+// Refreshed on each activate (and lazily on demand if a navigation
+// arrives before activate completes). The endpoint is plain JSON
+// served from the Go control plane (`/zp/api/config`).
+let runtimeConfig = { wtGateway: '' };
+let runtimeConfigPromise = null;
+async function refreshRuntimeConfig() {
+  if (runtimeConfigPromise) return runtimeConfigPromise;
+  runtimeConfigPromise = (async () => {
+    try {
+      const r = await self.fetch(ZP.CONTROL_PREFIX + 'api/config', { cache: 'no-store' });
+      if (r && r.ok) {
+        const cfg = await r.json();
+        if (cfg && typeof cfg === 'object') {
+          runtimeConfig = { wtGateway: typeof cfg.wtGateway === 'string' ? cfg.wtGateway : '' };
+        }
+      }
+    } catch {}
+    runtimeConfigPromise = null;
+    return runtimeConfig;
+  })();
+  return runtimeConfigPromise;
+}
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
 self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
 
@@ -1184,6 +1216,10 @@ function buildRuntimePrelude(tab, entry) {
     documentCookie,
     runtimeToken: tab.runtimeToken || '',
     servers: tab.servers || [],
+    // D4 — empty string when the operator hasn't enabled `-wt-public-url`;
+    // page-realm virtual `WebTransport` falls back to the rejected stub
+    // path (WT_UNSUPPORTED) when this is empty.
+    wtGateway: runtimeConfig.wtGateway || '',
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
   // The chain consumer must run before the target's anti-bot JS does (it

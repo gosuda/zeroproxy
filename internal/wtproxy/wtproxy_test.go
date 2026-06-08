@@ -103,6 +103,23 @@ func TestListenerRejectsMissingTargetHeader(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
+
+	// Same listener — confirm the query-string fallback path: browsers
+	// can't set `X-ZP-WT-Target` from `new WebTransport(...)` so the
+	// JS-side virtual class shovels the target into `?target=...`. We
+	// expect the same 400 because the target won't actually dial, but a
+	// DIFFERENT failure mode (no longer "missing target"). The point is
+	// the gateway no longer immediately rejects the CONNECT.
+	gwURLWithQuery := (&url.URL{Scheme: "https", Host: gwAddr, Path: "/__zp/wt", RawQuery: "target=https%3A%2F%2F127.0.0.1%3A1%2Fecho"}).String()
+	dialCtx2, dialCancel2 := context.WithTimeout(context.Background(), 8*time.Second)
+	defer dialCancel2()
+	resp2, _, _ := dialer.Dial(dialCtx2, gwURLWithQuery, nil)
+	// The dial may either succeed (gateway accepts CONNECT, then closes
+	// when target dial fails) or fail with a non-400 error code. We just
+	// pin that we no longer get 400 with the query-string variant.
+	if resp2 != nil && resp2.StatusCode == http.StatusBadRequest {
+		t.Fatalf("query-string target should not have produced 400; got %d", resp2.StatusCode)
+	}
 }
 
 func freeUDPAddr(t *testing.T) string {

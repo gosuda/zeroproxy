@@ -27,10 +27,11 @@ import (
 )
 
 type server struct {
-	webDir    string
-	socksAddr string
-	jarsMu    sync.Mutex
-	jars      map[string]*cookiejar.Jar
+	webDir       string
+	socksAddr    string
+	wtGatewayURL string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
+	jarsMu       sync.Mutex
+	jars         map[string]*cookiejar.Jar
 }
 
 // jarFor returns the cookie jar for the given tabId, creating one on demand.
@@ -73,6 +74,13 @@ func main() {
 	flag.StringVar(&wtCert, "wt-cert", "", "WebTransport listener TLS cert path (optional — falls back to in-memory self-signed dev cert)")
 	flag.StringVar(&wtKey, "wt-key", "", "WebTransport listener TLS key path")
 	flag.StringVar(&wtPath, "wt-path", "/__zp/wt", "WebTransport CONNECT request path")
+	// D4 client-side: the browser-side virtual `WebTransport` shim needs a
+	// publicly-reachable URL for the gateway (different from the UDP listen
+	// addr, which may be a local bind or an internal LB pool). When empty,
+	// the page falls back to the stub WT_UNSUPPORTED behaviour and target
+	// `new WebTransport(...)` calls reject (Promise.ready). Operators set
+	// this to e.g. `https://proxy.localhost:18443/__zp/wt` for local dogfood.
+	flag.StringVar(&s.wtGatewayURL, "wt-public-url", "", "Public URL of the WebTransport gateway (e.g. 'https://proxy.localhost:18443/__zp/wt'); empty hides the gateway from the page-side virtual class")
 	flag.Parse()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
@@ -145,6 +153,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveAsset(w, r, strings.TrimPrefix(path, assetPrefix))
 	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
+	case path == controlPrefix+"api/config":
+		// D4 client config — exposes the public WT gateway URL (if
+		// `-wt-public-url` is set). SW fetches this once on activate
+		// and threads `wtGateway` into the boot JSON the page realm reads.
+		s.serveConfig(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
 		// Defensive: in case build pipeline emits a double-prefixed path.
 		s.safeError(w, r, "MALFORMED_ROUTE", http.StatusBadRequest)
@@ -157,7 +170,13 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// fetches them from /__zp/<name>; serve from that nested path.
 		s.serveFile(w, r, filepath.Join(s.webDir, "__zp", filepath.Base(r.URL.Path)), mime.TypeByExtension(filepath.Ext(r.URL.Path)))
 	case strings.HasPrefix(r.URL.Path, "/__zp/wt"):
-		// D4: WebTransport gateway endpoint (placeholder until HTTP/3 + quic-go land).
+		// D4 fallback: the real WebTransport gateway listens on a
+		// SEPARATE UDP port (configured via `-wt-addr`) — it speaks
+		// HTTP/3, not HTTP/1.1, so any /__zp/wt arrival on this TCP
+		// listener means the page-side virtual class accidentally
+		// routed here. Reply 501 with the stable WT_UNSUPPORTED code so
+		// the page can detect "gateway not available over HTTP/1.1
+		// fallback" and surface a friendlier message.
 		wtproxy.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/rtc/"):
 		// D5: WebRTC signaling endpoint (placeholder until pion SFU lands).
@@ -241,6 +260,18 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, body)
+}
+
+// serveConfig emits the minimal client-facing runtime config the SW
+// reads on activate. Currently just the WT gateway URL (D4); future
+// fields (D5 RTC gateway, feature flags, etc.) get tacked on here so
+// the SW only ever does ONE fetch on boot.
+func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	// Hand-rolled to avoid encoding/json's reflection cost for a 1-field doc.
+	gateway := strings.ReplaceAll(s.wtGatewayURL, `"`, `\"`)
+	_, _ = fmt.Fprintf(w, `{"wtGateway":"%s"}`, gateway)
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {

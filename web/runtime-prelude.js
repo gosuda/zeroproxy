@@ -231,6 +231,12 @@
       fetch: w.fetch && w.fetch.bind(w),
       XMLHttpRequest: w.XMLHttpRequest,
       WebSocket: w.WebSocket,
+      // D4: native WebTransport for the virtual-class pass-through to
+      // the ZeroProxy gateway. Captured here so target code that
+      // overwrites `globalThis.WebTransport` later can't break our
+      // shim. May be undefined on browsers that don't ship WT —
+      // ZPWebTransport falls back to the rejected-promise stub.
+      WebTransport: w.WebTransport,
       EventSource: w.EventSource,
       Worker: w.Worker,
       FunctionCtor: w.Function,
@@ -3638,6 +3644,92 @@
     };
     start();
   }
+  // D4: virtual WebTransport that proxies through the ZeroProxy
+  // gateway when one is configured (`boot.wtGateway` set by the server
+  // via `/zp/api/config`). The virtual class wraps the *native*
+  // WebTransport: the page calls `new WebTransport(targetUrl)`, we
+  // build a gateway URL `gw?target=<encoded>&tab=<id>` and instantiate
+  // the native class against the gateway. Everything else
+  // (`ready`, `closed`, streams, datagrams) is delegated directly to
+  // the native instance, so the IDL surface stays identical without
+  // re-implementing stream wrappers.
+  //
+  // When `boot.wtGateway` is empty (operator hasn't set `-wt-public-url`)
+  // or the browser lacks native WT, we fall back to the rejected-
+  // promise stub so target code's `.ready.catch(...)` branch fires
+  // cleanly. The stub path also covers the legacy WebSocketStream slot.
+  function makeWebTransportConstructor() {
+    const NativeWT = Native.WebTransport;
+    const gateway = (boot && typeof boot.wtGateway === 'string' && boot.wtGateway) ? boot.wtGateway : '';
+    if (!NativeWT || !gateway) {
+      return makeVirtualGateway('WebTransport', { code: 'WT_UNSUPPORTED', kind: 'WebTransport' });
+    }
+    function ZPWebTransport(targetUrl, opts) {
+      if (!(this instanceof ZPWebTransport)) {
+        throw new TypeError("Failed to construct 'WebTransport': Please use the 'new' operator.");
+      }
+      const target = String(targetUrl == null ? '' : targetUrl);
+      // Validate the target URL minimally — browsers throw SyntaxError for
+      // invalid URLs and TypeError for wrong schemes; we mirror to keep
+      // feature-detection of "WT throws on bad URL" working.
+      let parsed;
+      try { parsed = new URL(target); } catch { throw normalizedError('SyntaxError'); }
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'wt:') {
+        throw normalizedError('SyntaxError');
+      }
+      const gw = new URL(gateway);
+      const params = gw.searchParams;
+      params.set('target', target);
+      if (boot && boot.tabId) params.set('tab', String(boot.tabId));
+      // Build the gateway URL with our target injected. The native WT
+      // ctor will throw SyntaxError if the gw URL isn't https.
+      const native = new NativeWT(gw.toString(), opts);
+      // Delegate every property via a Proxy so target code that does
+      // `wt.ready.then(...)` or `wt.createBidirectionalStream()` etc.
+      // sees the native object's IDL surface byte-for-byte. We override
+      // only `close` so we can record local state if needed; everything
+      // else falls through.
+      this._native = native;
+    }
+    // Expose the same readonly properties as the native WT spec by
+    // forwarding to the underlying instance. We can't use a Proxy as the
+    // class identity (target code may do `wt instanceof WebTransport`
+    // against our class object), so we define instance accessors.
+    function forward(name) {
+      Object.defineProperty(ZPWebTransport.prototype, name, {
+        configurable: true,
+        get() { try { return this._native[name]; } catch { return undefined; } },
+      });
+    }
+    forward('ready');
+    forward('closed');
+    forward('datagrams');
+    forward('incomingBidirectionalStreams');
+    forward('incomingUnidirectionalStreams');
+    forward('reliability');
+    forward('congestionControl');
+    forward('protocol');
+    ZPWebTransport.prototype.createBidirectionalStream = function(opts) {
+      return this._native.createBidirectionalStream(opts);
+    };
+    ZPWebTransport.prototype.createUnidirectionalStream = function(opts) {
+      return this._native.createUnidirectionalStream(opts);
+    };
+    ZPWebTransport.prototype.close = function(closeInfo) {
+      try { return this._native.close(closeInfo); } catch { return undefined; }
+    };
+    ZPWebTransport.prototype.addEventListener = function(type, listener, opts) {
+      try { return this._native.addEventListener(type, listener, opts); } catch {}
+    };
+    ZPWebTransport.prototype.removeEventListener = function(type, listener, opts) {
+      try { return this._native.removeEventListener(type, listener, opts); } catch {}
+    };
+    ZPWebTransport.prototype.dispatchEvent = function(ev) {
+      try { return this._native.dispatchEvent(ev); } catch { return true; }
+    };
+    return ZPWebTransport;
+  }
+
   // D4/D5 virtual gateway constructor. Returns an object whose `.ready` /
   // `.closed` promises reject with a structured ZeroProxy error so target
   // code can fall back gracefully. Methods on the object also reject.
@@ -3807,7 +3899,12 @@
     // reason. This is strictly better than a hard ctor-throw because most
     // production sites detect WebTransport availability via the Promise.
     const gatewayMeta = {
-      'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport' },
+      // D4: `WebTransport` slot prefers the real native-pass-through
+      // virtual class when `boot.wtGateway` is set; otherwise
+      // makeWebTransportConstructor returns the legacy stub
+      // automatically. Stub keys (WebSocketStream, RTC*) keep using the
+      // makeVirtualGateway rejection path until D5 lands.
+      'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport', ctor: makeWebTransportConstructor },
       'WebSocketStream': { code: 'WT_UNSUPPORTED', kind: 'WebSocketStream' },
       'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
       'webkitRTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
@@ -3815,7 +3912,7 @@
     };
     for (const name of Object.keys(gatewayMeta)) {
       const meta = gatewayMeta[name];
-      const blockCtor = makeVirtualGateway(name, meta);
+      const blockCtor = typeof meta.ctor === 'function' ? meta.ctor() : makeVirtualGateway(name, meta);
       try { Object.defineProperty(blockCtor, 'name', { value: name, configurable: true }); } catch {}
       maskNativeFunction(blockCtor, name);
       const ok = define(w, name, blockCtor);

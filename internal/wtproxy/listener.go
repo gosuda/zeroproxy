@@ -164,10 +164,16 @@ func (l *Listener) Close() error {
 }
 
 // handleUpgrade is the CONNECT entry point. It pulls the target URL out
-// of `X-ZP-WT-Target`, optionally checks the allowlist, dials the
-// target, and bridges the two sessions until either side closes.
+// of `X-ZP-WT-Target` (preferred — used by host-test / curl-style
+// clients) or `?target=` query string (used by browser `new
+// WebTransport(...)` since the JS API doesn't allow custom request
+// headers), optionally checks the allowlist, dials the target, and
+// bridges the two sessions until either side closes.
 func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	targetURL := r.Header.Get("X-ZP-WT-Target")
+	if targetURL == "" {
+		targetURL = r.URL.Query().Get("target")
+	}
 	if targetURL == "" {
 		http.Error(w, "missing X-ZP-WT-Target", http.StatusBadRequest)
 		return

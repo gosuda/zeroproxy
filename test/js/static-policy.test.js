@@ -661,6 +661,47 @@ test('split-bundle (c.3): SW kernel/transport wasm splits off into zp-kernel-bun
   assert.match(mainGo, /"\/__zp\/zp_kernel_sw_bg\.wasm"/, 'Go server must allow /__zp/zp_kernel_sw_bg.wasm');
 });
 
+// 2026-06-08 D4 client-side virtual WebTransport. The page-realm
+// `WebTransport` slot now resolves to a real native-pass-through class
+// when the operator has enabled the gateway (`-wt-public-url` set);
+// otherwise it falls back to the existing rejected-promise stub
+// (WT_UNSUPPORTED). Pins:
+//   - Go server has `-wt-public-url` flag + `/zp/api/config` endpoint
+//   - Go server emits `{wtGateway: ...}` from serveConfig
+//   - Go listener accepts target via `?target=` query string (browser
+//     `new WebTransport(...)` can't set custom request headers)
+//   - SW refreshes runtime config on activate + injects `wtGateway`
+//     into the boot JSON
+//   - runtime-prelude captures native WebTransport + has the
+//     ZPWebTransport wrapping factory
+//   - installBlockers' WebTransport slot routes through that factory.
+test('D4 client: virtual WebTransport routes through ZeroProxy gateway when enabled', () => {
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.match(mainGo, /"wt-public-url"/, 'Go server must expose -wt-public-url flag');
+  assert.match(mainGo, /controlPrefix\+"api\/config"/, 'Go server must route /zp/api/config');
+  assert.match(mainGo, /func \(s \*server\) serveConfig\(/, 'serveConfig handler must exist');
+  assert.match(mainGo, /"wtGateway":"/, 'serveConfig must emit the wtGateway field');
+
+  const listener = fs.readFileSync('internal/wtproxy/listener.go', 'utf8');
+  assert.match(listener, /r\.URL\.Query\(\)\.Get\("target"\)/, 'listener must accept target via ?target= query string');
+
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /async function refreshRuntimeConfig\b/, 'SW must define refreshRuntimeConfig()');
+  assert.match(sw, /api\/config/, 'SW must fetch the /zp/api/config endpoint');
+  assert.match(sw, /wtGateway:\s*runtimeConfig\.wtGateway/, 'SW buildRuntimePrelude must inject wtGateway into boot JSON');
+
+  const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(prelude, /WebTransport:\s*w\.WebTransport/, 'runtime-prelude must capture native WebTransport');
+  assert.match(prelude, /function makeWebTransportConstructor\(\)/, 'runtime-prelude must define makeWebTransportConstructor');
+  assert.match(prelude, /ZPWebTransport/, 'runtime-prelude must define ZPWebTransport class');
+  assert.match(prelude, /ctor:\s*makeWebTransportConstructor/, 'installBlockers WebTransport entry must use the real constructor factory');
+  // The wrapper must build a gateway URL with `target` set from the
+  // caller's argument — pinning this prevents accidental regressions
+  // where the wrapper opens WT directly against the target URL
+  // (bypassing the gateway).
+  assert.match(prelude, /params\.set\('target',\s*target\)/, 'ZPWebTransport must inject target into the gateway query string');
+});
+
 // 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted. The
 // CSS rewriter is ported to crates/zp-bundle/src/css.rs and exposed via the
 // wasm-bindgen `rewriteCSS` export. SW + page realm both call
