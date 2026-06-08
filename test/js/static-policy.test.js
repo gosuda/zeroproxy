@@ -437,7 +437,7 @@ test('service worker plumbs challenge-compat arm + strips response marker', () =
 // fixtures). The Go helper stays in-tree as a defense-in-depth utility, but
 // the live wire-up is Rust-side.
 test('Rust kernel implements two-signal challenge gate', () => {
-  const fetchRs = fs.readFileSync('crates/zp-bundle/src/kernel/transport/fetch.rs', 'utf8');
+  const fetchRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/fetch.rs', 'utf8');
   // armed flag threaded through fetch() + build_js_response().
   assert.match(fetchRs, /armed_challenge_compat: bool/, 'fetch() must accept armed flag');
   assert.match(
@@ -454,7 +454,7 @@ test('Rust kernel implements two-signal challenge gate', () => {
   assert.match(fetchRs, /if armed_challenge_compat \{/, 'emission must be inside the armed-only branch');
 
   // Request-side capture-before-strip in kernel/mod.rs.
-  const modRs = fs.readFileSync('crates/zp-bundle/src/kernel/mod.rs', 'utf8');
+  const modRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/mod.rs', 'utf8');
   assert.match(modRs, /let mut armed_challenge_compat = false;/);
   assert.match(modRs, /"x-zp-arm-challenge-compat"\s*=>/);
   assert.match(modRs, /armed_challenge_compat = true;/);
@@ -568,6 +568,97 @@ test('split-bundle (c.2): page realm uses a dedicated lighter wasm bundle', () =
   const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   assert.match(mainGo, /"\/__zp\/zp_page_bundle\.js"/, 'Go server must allow /__zp/zp_page_bundle.js');
   assert.match(mainGo, /"\/__zp\/zp_page_bundle_bg\.wasm"/, 'Go server must allow /__zp/zp_page_bundle_bg.wasm');
+});
+
+// 2026-06-08 split-bundle (c.3): SW kernel/transport half (rustls + h2 + yamux +
+// mlkem + tokio + flate2/brotli/ruzstd + membrane/rtcgw/wtproxy) moved to a
+// dedicated `zp-kernel-bundle` crate so its wasm gets fetched + instantiated
+// lazily — only on first `transportFetch` — instead of blocking SW `activate`.
+// This test pins:
+//   - the new crate exists + is in the workspace
+//   - kernel/membrane/rtcgw/wtproxy modules live there (not in zp-bundle)
+//   - zp-bundle no longer carries the kernel module declarations or the heavy
+//     transport deps (rustls / h2 / yamux / tokio / mlkem / decoders)
+//   - build.mjs builds + wasm-bindgen's the kernel bundle under `ZPKernelWBG`
+//   - the SW top-level importScripts the kernel glue
+//   - the SW has a separate `initKernel()` that owns kernel wasm instantiation
+//   - transportFetch / openRuntimeStream / kernelEcho diag await initKernel()
+//   - initBundle no longer wires kernel{Init,Fetch,Stream,...} into ZPBundle
+//   - Go server allowlists the new asset paths.
+test('split-bundle (c.3): SW kernel/transport wasm splits off into zp-kernel-bundle (lazy)', () => {
+  // New crate exists.
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/Cargo.toml'), 'zp-kernel-bundle crate must exist');
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/src/lib.rs'), 'zp-kernel-bundle lib.rs must exist');
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/src/kernel/mod.rs'), 'kernel module must move into zp-kernel-bundle');
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/src/kernel/transport/mod.rs'), 'transport submodule must move with kernel');
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/src/membrane.rs'), 'membrane.rs must move into zp-kernel-bundle');
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/src/rtcgw_client.rs'), 'rtcgw_client.rs must move into zp-kernel-bundle');
+  assert.ok(fs.existsSync('crates/zp-kernel-bundle/src/wtproxy_client.rs'), 'wtproxy_client.rs must move into zp-kernel-bundle');
+  const workspaceCargo = fs.readFileSync('Cargo.toml', 'utf8');
+  assert.match(workspaceCargo, /"crates\/zp-kernel-bundle"/, 'workspace must include zp-kernel-bundle');
+  // zp-bundle no longer owns those modules.
+  assert.equal(fs.existsSync('crates/zp-bundle/src/kernel'), false, 'kernel/ must not remain under zp-bundle');
+  assert.equal(fs.existsSync('crates/zp-bundle/src/membrane.rs'), false, 'membrane.rs must not remain under zp-bundle');
+  assert.equal(fs.existsSync('crates/zp-bundle/src/rtcgw_client.rs'), false, 'rtcgw_client.rs must not remain under zp-bundle');
+  assert.equal(fs.existsSync('crates/zp-bundle/src/wtproxy_client.rs'), false, 'wtproxy_client.rs must not remain under zp-bundle');
+  const bundleLib = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
+  assert.equal(/^pub mod kernel\b/m.test(bundleLib), false, 'zp-bundle lib.rs must NOT declare pub mod kernel');
+  assert.equal(/^pub mod membrane\b/m.test(bundleLib), false, 'zp-bundle lib.rs must NOT declare pub mod membrane');
+  assert.equal(/^pub mod rtcgw_client\b/m.test(bundleLib), false, 'zp-bundle lib.rs must NOT declare pub mod rtcgw_client');
+  assert.equal(/^pub mod wtproxy_client\b/m.test(bundleLib), false, 'zp-bundle lib.rs must NOT declare pub mod wtproxy_client');
+  // zp-bundle Cargo.toml must not pull in the heavy transport stack any more.
+  // (The same deps now live in zp-kernel-bundle/Cargo.toml.)
+  const bundleCargo = fs.readFileSync('crates/zp-bundle/Cargo.toml', 'utf8');
+  for (const heavy of ['rustls', 'h2', 'yamux', 'tokio', 'tokio-util', 'ml-kem', 'x25519-dalek', 'flate2', 'brotli', 'ruzstd', 'zp-transport-codec', 'httparse', 'webpki-roots']) {
+    assert.equal(
+      new RegExp(`^${heavy}\\s*=`, 'm').test(bundleCargo),
+      false,
+      `zp-bundle must NOT depend on '${heavy}' after the (c.3) kernel split`,
+    );
+  }
+  const kernelCargo = fs.readFileSync('crates/zp-kernel-bundle/Cargo.toml', 'utf8');
+  assert.match(kernelCargo, /^rustls\b/m, 'zp-kernel-bundle must declare rustls');
+  assert.match(kernelCargo, /^h2\b/m, 'zp-kernel-bundle must declare h2');
+  assert.match(kernelCargo, /^yamux\b/m, 'zp-kernel-bundle must declare yamux');
+  assert.match(kernelCargo, /^tokio\b/m, 'zp-kernel-bundle must declare tokio');
+  assert.match(kernelCargo, /^ml-kem\b/m, 'zp-kernel-bundle must declare ml-kem');
+  // build.mjs builds the new crate + wasm-bindgen's it under ZPKernelWBG.
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.match(build, /'-p', 'zp-kernel-bundle'/, 'build must cargo-build zp-kernel-bundle');
+  assert.match(build, /'zp_kernel_sw'/, 'build must wasm-bindgen --out-name zp_kernel_sw');
+  assert.match(build, /ZPKernelWBG/, 'build must wrap kernel glue to expose ZPKernelWBG');
+  assert.match(build, /zpKernelBundleWasm/, 'build must declare zp_kernel_bundle.wasm path constant');
+  // SW imports kernel glue at top level (importScripts can only happen there).
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /importScripts\('\/__zp\/zp_kernel_sw\.js'\)/, 'SW must importScripts the kernel glue at top level');
+  // SW has a separate lazy `initKernel()` keyed on `self.ZPKernel.ready`.
+  assert.match(sw, /async function initKernel\b/, 'SW must define async initKernel()');
+  assert.match(sw, /self\.ZPKernel\s*=\s*Object\.freeze\(/, 'initKernel must freeze ZPKernel on self');
+  assert.match(sw, /zp_kernel_sw_bg\.wasm/, 'initKernel must instantiate zp_kernel_sw_bg.wasm');
+  // initBundle (the eager one) no longer exposes any kernel* members on
+  // ZPBundle — kernel* moved to ZPKernel. (CRLF-tolerant regex: web/sw.js
+  // may be checked out with either LF or CRLF line endings.)
+  const initBundleMatch = sw.match(/async function initBundle\(\)[\s\S]*?\r?\n}\r?\n/);
+  assert.ok(initBundleMatch, 'initBundle body must be locatable in sw.js');
+  for (const kname of ['kernelFetch', 'kernelStream', 'kernelInit', 'kernelEchoSync', 'kernelLastNamedGroups', 'kernelVersion', 'kernelSetCapturedSpec']) {
+    assert.equal(
+      new RegExp(`${kname}:\\s*wbg\\.`).test(initBundleMatch[0]),
+      false,
+      `initBundle must NOT wire ${kname} into ZPBundle (it belongs on ZPKernel after c.3)`,
+    );
+  }
+  // transportFetch + openRuntimeStream + kernelEcho diag await initKernel,
+  // not initBundle, so the kernel wasm fetch happens lazily on first use.
+  const transportFetchMatch = sw.match(/async function transportFetch[\s\S]*?\r?\n}\r?\n/);
+  assert.ok(transportFetchMatch, 'transportFetch body must be locatable in sw.js');
+  assert.match(transportFetchMatch[0], /await initKernel\(\)/, 'transportFetch must await initKernel()');
+  const openRuntimeStreamMatch = sw.match(/async function openRuntimeStream[\s\S]*?\r?\n}\r?\n/);
+  assert.ok(openRuntimeStreamMatch, 'openRuntimeStream body must be locatable in sw.js');
+  assert.match(openRuntimeStreamMatch[0], /await initKernel\(\)/, 'openRuntimeStream must await initKernel() before reading self.kernelStream');
+  // Go server allowlists the new artifacts.
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.match(mainGo, /"\/__zp\/zp_kernel_sw\.js"/, 'Go server must allow /__zp/zp_kernel_sw.js');
+  assert.match(mainGo, /"\/__zp\/zp_kernel_sw_bg\.wasm"/, 'Go server must allow /__zp/zp_kernel_sw_bg.wasm');
 });
 
 // 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted. The
@@ -854,7 +945,7 @@ test('D2: sourcemap composer + SW /zp/api/sourcemap route are wired', () => {
 });
 
 test('C1: Rust WebSocket client implements RFC 6455 handshake + codec', () => {
-  const ws = fs.readFileSync('crates/zp-bundle/src/kernel/transport/ws_client.rs', 'utf8');
+  const ws = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/ws_client.rs', 'utf8');
   // §1.3 magic GUID for Sec-WebSocket-Accept.
   assert.match(ws, /258EAFA5-E914-47DA-95CA-C5AB0DC85B11/, 'WS_GUID must equal the RFC 6455 §1.3 value');
   // Handshake headers.
@@ -881,7 +972,7 @@ test('C1: Rust WebSocket client implements RFC 6455 handshake + codec', () => {
   assert.match(ws, /1007, "invalid UTF-8 in text frame"/);
 
   // kernel_stream is now wired to ws_client::open (not the old stub).
-  const modRs = fs.readFileSync('crates/zp-bundle/src/kernel/mod.rs', 'utf8');
+  const modRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/mod.rs', 'utf8');
   assert.equal(modRs.includes('TARGET_WS_NOT_REWIRED'), false, 'kernel_stream must no longer return the stub error');
   assert.match(modRs, /transport::ws_client::open\(&url, &protocols\)\.await/, 'kernel_stream must call ws_client::open');
 });
@@ -893,7 +984,7 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
   // run themselves (parent kernel mod is #![cfg(target_arch = "wasm32")]).
   // Pin the wiring so a future refactor can't silently re-introduce the
   // duplicated inline byte layouts.
-  const socks5 = fs.readFileSync('crates/zp-bundle/src/kernel/transport/socks5.rs', 'utf8');
+  const socks5 = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/socks5.rs', 'utf8');
   assert.match(
     socks5,
     /use zp_transport_codec::socks5 as codec;/,
@@ -947,7 +1038,7 @@ test('transport codec crate owns the SOCKS5 / HTTP/1.1 byte invariants', () => {
     'socks5.rs TODO(test) marker must be retired (codec carries the tests)',
   );
 
-  const http1 = fs.readFileSync('crates/zp-bundle/src/kernel/transport/http1.rs', 'utf8');
+  const http1 = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/http1.rs', 'utf8');
   assert.match(
     http1,
     /use zp_transport_codec::http1 as codec;/,

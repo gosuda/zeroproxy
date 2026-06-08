@@ -7,110 +7,24 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# 2026-06-08 split-bundle (c.3): rewriter half of the former monolithic
+# zp-bundle. Kernel + transport stack moved to the sibling
+# `zp-kernel-bundle` crate so its wasm gets fetched + instantiated lazily
+# (on first `transportFetch`) instead of blocking SW `activate`. This
+# crate retains only what runs on the eager critical path — every script
+# / CSS / HTML response gets transformed here.
+
 [dependencies]
 zp-shared = { workspace = true }
 zp-rewriter = { workspace = true }
 zp-htmltx = { workspace = true }
-zp-transport-codec = { workspace = true }
-# 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported here from the
-# (now-deleted) rewriter-rs/ crate. SWC + url crates are pure-Rust and
-# wasm32-unknown-unknown clean.
+
+# CSS rewriter (SWC + url) — ported from the deleted rewriter-rs/ in
+# split-bundle (c.1) Step 4.
 swc_common = { version = "23.0.0", default-features = false }
 swc_css_ast = { version = "23.0.0", default-features = false }
 swc_css_parser = { version = "23.0.0", default-features = false }
 swc_css_visit = { version = "23.0.0", default-features = false }
 url = { version = "2.5", default-features = false }
+
 wasm-bindgen = { workspace = true }
-wasm-bindgen-futures = "0.4"
-js-sys = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-# base64 decode for the `/zp/api/fp` captured ClientHello spec.
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
-# RFC 6455 `Sec-WebSocket-Accept` = base64(SHA1(key || GUID)). RustCrypto
-# sha1 is pure-Rust, no_std-compatible, wasm32 clean.
-sha1 = { version = "0.10", default-features = false }
-
-# Step 14: client-side transport stack. The kernel speaks SOCKS5+TLS+HTTP
-# itself over a WebSocket byte-pipe so the relay never sees plaintext.
-# More deps (rustls, h2, yamux) land in later steps; this round is just the
-# WebSocket → futures::io::AsyncRead/AsyncWrite adapter foundation.
-futures-util = { workspace = true }
-pin-project-lite = { workspace = true }
-bytes = { workspace = true }
-httparse = { workspace = true }
-rustls = { workspace = true }
-rustls-pki-types = { workspace = true }
-rustls-rustcrypto = { workspace = true }
-webpki-roots = { workspace = true }
-getrandom = { workspace = true }
-# Phase 5.9: X25519MLKEM768 hybrid KX group (group 0x11ec = 4588).
-# Chrome 148 advertises this on every TLS 1.3 ClientHello; without it the
-# JA3 curves component diverges from any real Chrome. ml-kem (RustCrypto)
-# is pure-Rust, wasm32-unknown-unknown clean, and provides the FIPS 203
-# ML-KEM-768 keygen/encap/decap. x25519-dalek already comes in via
-# rustls-rustcrypto for the X25519 half of the hybrid.
-ml-kem = { version = "0.3", default-features = false, features = ["alloc", "getrandom"] }
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
-rand_core = "0.6"
-# ml-kem 0.3 transitively pulls getrandom 0.4 via kem 0.3. On
-# wasm32-unknown-unknown getrandom 0.4 needs the explicit `wasm_js`
-# feature gate (mirrors what `getrandom_02` does for the 0.2 graph).
-getrandom_04 = { package = "getrandom", version = "0.4", default-features = false, features = ["wasm_js"] }
-yamux = { workspace = true }
-futures = { workspace = true }
-# HTTP/2 stack — one TLS handshake serves every parallel fetch to the same
-# origin via stream multiplex. ALPN advertises "h2","http/1.1" and we branch
-# on `tls.alpn_protocol()` after handshake.
-h2 = { workspace = true }
-http = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-# RustCrypto chains (sha2, p256, etc) still depend on getrandom 0.2 and
-# refuse to compile on wasm32-unknown-unknown without the `js` feature.
-# Cargo unifies feature flags within a single major version, so this
-# direct-dep entry is just to *enable* `js` on the transitive 0.2 graph.
-getrandom_02 = { package = "getrandom", version = "0.2", default-features = false, features = ["js"] }
-
-# Phase 5.12 (2026-06-03): wasm32-compatible response-body decoders so
-# we can advertise `Accept-Encoding: gzip, deflate, br, zstd` like
-# Chrome 148. Without these the kernel must force `identity` (a strong
-# bot tell). All three crates are pure-Rust, no C deps, no platform asm.
-#   flate2 with the `rust_backend` feature → pure-Rust miniz_oxide
-#     (gzip + deflate).
-#   brotli default-features = false strips std-only paths.
-#   ruzstd is the pure-Rust zstd decoder (encoder side not needed).
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-brotli = { version = "8", default-features = false, features = ["std"] }
-ruzstd = { version = "0.8", default-features = false, features = ["std"] }
-
-# web-sys feature set carried over from the absorbed zp-kernel crate
-# (kernel mux opens WebSocket, builds Headers/Response/Request, streams via
-# ReadableStream, reads File/Blob bodies for upload). The membrane/wtproxy/
-# rtcgw stubs don't need any web-sys features yet; expand this list as
-# Phase B3/B4/D4/D5 land.
-[dependencies.web-sys]
-workspace = true
-features = [
-    "WebSocket",
-    "Headers",
-    "Response",
-    "ResponseInit",
-    "Request",
-    "RequestInit",
-    "ReadableStream",
-    "MessageEvent",
-    "Event",
-    "EventTarget",
-    "BinaryType",
-    "CloseEvent",
-    "ErrorEvent",
-    "WorkerGlobalScope",
-    "ServiceWorkerGlobalScope",
-    "Location",
-    "Url",
-    "Blob",
-    "FileReader",
-    "ProgressEvent",
-    "console",
-]

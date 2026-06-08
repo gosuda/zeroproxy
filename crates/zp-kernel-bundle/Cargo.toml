@@ -1,0 +1,88 @@
+[package]
+name = "zp-kernel-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# 2026-06-08 split-bundle (c.3): SW kernel/transport WASM bundle. Holds the
+# heavy client-side stack (rustls + h2 + yamux + mlkem + tokio adapter +
+# compression decoders + membrane/rtcgw/wtproxy stubs) so it can be
+# fetched + instantiated *lazily* — only on first `transportFetch` —
+# instead of blocking SW `activate`. The eager `zp-bundle` keeps the
+# rewriter + htmltx + sourcemap + CSP/CSS helpers (those run on every
+# script/CSS response, so they stay on the critical path).
+#
+# Same export surface as the kernel-side of the pre-(c.3) `zp-bundle`:
+# `kernelVersion / kernelInit / kernelFetch / kernelStream /
+# kernelEchoSync / kernelLastNamedGroups / kernelSetCapturedSpec`,
+# plus the (currently stub) `zp_membrane_version / rtcgw_version /
+# wtproxy_version`.
+
+[dependencies]
+zp-shared = { workspace = true }
+zp-transport-codec = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# base64 decode for the `/zp/api/fp` captured ClientHello spec.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# RFC 6455 `Sec-WebSocket-Accept` = base64(SHA1(key || GUID)).
+sha1 = { version = "0.10", default-features = false }
+
+# Client-side transport stack — same set the pre-(c.3) zp-bundle had.
+futures-util = { workspace = true }
+pin-project-lite = { workspace = true }
+bytes = { workspace = true }
+httparse = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-rustcrypto = { workspace = true }
+webpki-roots = { workspace = true }
+getrandom = { workspace = true }
+ml-kem = { version = "0.3", default-features = false, features = ["alloc", "getrandom"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+rand_core = "0.6"
+getrandom_04 = { package = "getrandom", version = "0.4", default-features = false, features = ["wasm_js"] }
+yamux = { workspace = true }
+futures = { workspace = true }
+h2 = { workspace = true }
+http = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+getrandom_02 = { package = "getrandom", version = "0.2", default-features = false, features = ["js"] }
+
+# Phase 5.12 response-body decoders (gzip/deflate/brotli/zstd).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+brotli = { version = "8", default-features = false, features = ["std"] }
+ruzstd = { version = "0.8", default-features = false, features = ["std"] }
+
+[dependencies.web-sys]
+workspace = true
+features = [
+    "WebSocket",
+    "Headers",
+    "Response",
+    "ResponseInit",
+    "Request",
+    "RequestInit",
+    "ReadableStream",
+    "MessageEvent",
+    "Event",
+    "EventTarget",
+    "BinaryType",
+    "CloseEvent",
+    "ErrorEvent",
+    "WorkerGlobalScope",
+    "ServiceWorkerGlobalScope",
+    "Location",
+    "Url",
+    "Blob",
+    "FileReader",
+    "ProgressEvent",
+    "console",
+]

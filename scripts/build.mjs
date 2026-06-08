@@ -20,6 +20,7 @@ const wasmBindgenBinPath = path.join(cargoHome, 'bin', process.platform === 'win
 // so existing invocations keep parsing.
 const minify = args.noMinify !== true;
 const zpBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_bundle.wasm');
+const zpKernelBundleWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_kernel_bundle.wasm');
 const zpPageRtWasm = path.join(repoRoot, 'target', 'wasm32-unknown-unknown', 'release', 'zp_page_rt.wasm');
 const zpBundleOutDir = path.join(webOut, '__zp');
 
@@ -152,6 +153,12 @@ async function buildWeb() {
 
 async function buildRustBundle() {
   run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
+  // 2026-06-08 split-bundle (c.3): zp-kernel-bundle holds the SW
+  // transport/kernel half (rustls + h2 + yamux + mlkem + tokio +
+  // flate2/brotli/ruzstd + membrane/rtcgw/wtproxy). Its wasm is fetched +
+  // instantiated lazily — only on first `transportFetch` — instead of
+  // blocking SW `activate`.
+  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-kernel-bundle']);
   // 2026-06-08 split-bundle (c.2): zp-page-bundle is the page-realm wasm —
   // strict subset (rewriter + sourcemap + CSS + html-tx) without the SW
   // kernel/transport stack.
@@ -175,6 +182,26 @@ async function buildRustBundle() {
     await writeFile(
       swJsPath,
       '(function(){\n' + swGlue + '\n;try{ self.ZPBundleWBG = wasm_bindgen; }catch(_e){};\n})();\n',
+    );
+  }
+  // 2026-06-08 split-bundle (c.3): SW kernel bundle (zp-kernel-bundle —
+  // rustls + h2 + yamux + mlkem + tokio + decoders + membrane/rtcgw/
+  // wtproxy). Same no-modules + IIFE wrap shape as the rewriter bundle,
+  // but its factory is exposed under `self.ZPKernelWBG` so the SW's
+  // `initKernel()` shim can find it independently. The wasm itself
+  // stays unfetched until first `transportFetch`.
+  run('wasm-bindgen', [
+    '--target', 'no-modules',
+    '--out-dir', zpBundleOutDir,
+    '--out-name', 'zp_kernel_sw',
+    zpKernelBundleWasm,
+  ]);
+  const kernelJsPath = path.join(zpBundleOutDir, 'zp_kernel_sw.js');
+  const kernelGlue = await readFile(kernelJsPath, 'utf8');
+  if (!kernelGlue.startsWith('(function(){')) {
+    await writeFile(
+      kernelJsPath,
+      '(function(){\n' + kernelGlue + '\n;try{ self.ZPKernelWBG = wasm_bindgen; }catch(_e){};\n})();\n',
     );
   }
   // Page bundle (zp-page-bundle, rewriter + CSS only). Same no-modules
@@ -213,11 +240,13 @@ async function buildRustBundle() {
   // ES-module page output is no longer built (zp-page-bundle is loaded
   // as a classic script via importScripts-like `<script>` tags).
   const swWasm = path.join(zpBundleOutDir, 'zp_bundle_sw_bg.wasm');
+  const kernelWasm = path.join(zpBundleOutDir, 'zp_kernel_sw_bg.wasm');
   const pageBundleWasm = path.join(zpBundleOutDir, 'zp_page_bundle_bg.wasm');
   const optimizedSw = tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, swWasm, '-o', swWasm]);
   if (!optimizedSw) {
     process.stderr.write('wasm-opt not found; skipping size optimization (install binaryen to enable)\n');
   } else {
+    tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, kernelWasm, '-o', kernelWasm]);
     tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, pageBundleWasm, '-o', pageBundleWasm]);
   }
   // zp-page-rt: copy raw wasm into __zp/, optionally optimize. No glue file.

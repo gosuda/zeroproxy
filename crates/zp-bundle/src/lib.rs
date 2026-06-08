@@ -1,23 +1,25 @@
-//! ZeroProxy single WASM bundle (cdylib).
+//! ZeroProxy SW rewriter WASM bundle (cdylib).
 //!
-//! Loaded by both Service Worker (`web/sw.js`) and page prelude
-//! (`web/runtime-prelude.js`). Exposes rewriter + membrane + transport kernel
-//! through one wasm-bindgen surface so JS shims stay thin.
+//! 2026-06-08 split-bundle (c.3): the rewriter half of the former
+//! monolithic `zp-bundle`. The kernel / transport stack (rustls + h2 +
+//! yamux + mlkem + tokio + flate2 / brotli / ruzstd + membrane / rtcgw /
+//! wtproxy) moved to the sibling `zp-kernel-bundle` crate so its wasm
+//! can be fetched + instantiated lazily — only on the first
+//! `transportFetch` — instead of blocking SW `activate`. This crate
+//! covers the eager path: every script / CSS / HTML response runs
+//! through `rewriteScript`, `rewriteCSS`, or `transformHtml`, so its
+//! wasm must be ready before the SW serves the first byte.
+//!
+//! Loaded by the Service Worker (`web/sw.js`) via
+//! `importScripts('/__zp/zp_bundle_sw.js')` + `wbg({ module_or_path:
+//! '/__zp/zp_bundle_sw_bg.wasm' })` inside `initBundle()`.
+//!
+//! Page-realm continues to use `zp-page-bundle` — an even leaner cdylib
+//! that drops `transformHtml` / sourcemap / CSP exports.
 
 #![cfg(target_arch = "wasm32")]
 
-// Browser-side modules absorbed from the former zp-kernel / zp-membrane /
-// zp-wtproxy-client / zp-rtcgw-client crates. They all link into the same
-// cdylib anyway; keeping them as sub-modules removes 4× Cargo.toml + linker
-// boundaries and lets helpers share state without going through pub APIs.
-// `zp-shared` stays a separate crate (Go parity boundary), and the legacy
-// `zp-page-rt` raw-C cdylib stays separate (dead-strip avoidance with
-// wasm-bindgen — see trap-notebook 2026-05-30 wasm-page-rt entry).
 pub mod css;
-pub mod kernel;
-pub mod membrane;
-pub mod rtcgw_client;
-pub mod wtproxy_client;
 
 use wasm_bindgen::prelude::*;
 
@@ -229,8 +231,4 @@ pub fn is_challenge_document_js(cf_mitigated: &str, host: &str, path: &str) -> b
     zp_shared::is_challenge_document(cf_mitigated, host, path)
 }
 
-// Kernel's #[wasm_bindgen] exports live in the `kernel` module of this same
-// cdylib now (previously a separate rlib that needed force-linking). Same-
-// crate wasm-bindgen exports are emitted by the proc macro and reachable from
-// the JS glue without the dead-strip workaround the old rlib structure
-// required. Left in source as a reminder for anyone re-splitting later.
+// Kernel exports moved out in (c.3) — see `crates/zp-kernel-bundle/`.

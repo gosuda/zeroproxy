@@ -3687,6 +3687,33 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zp-bundle"
 version = "0.1.0"
 dependencies = [
+ "swc_common",
+ "swc_css_ast",
+ "swc_css_parser",
+ "swc_css_visit",
+ "url",
+ "wasm-bindgen",
+ "zp-htmltx",
+ "zp-rewriter",
+ "zp-shared",
+]
+
+[[package]]
+name = "zp-htmltx"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "lol_html",
+ "percent-encoding",
+ "thiserror",
+ "zp-rewriter",
+ "zp-shared",
+]
+
+[[package]]
+name = "zp-kernel-bundle"
+version = "0.1.0"
+dependencies = [
  "base64",
  "brotli",
  "bytes",
@@ -3710,35 +3737,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "swc_common",
- "swc_css_ast",
- "swc_css_parser",
- "swc_css_visit",
  "tokio",
  "tokio-util",
- "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
  "webpki-roots 0.26.11",
  "x25519-dalek",
  "yamux",
- "zp-htmltx",
- "zp-rewriter",
  "zp-shared",
  "zp-transport-codec",
-]
-
-[[package]]
-name = "zp-htmltx"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "lol_html",
- "percent-encoding",
- "thiserror",
- "zp-rewriter",
- "zp-shared",
 ]
 
 [[package]]

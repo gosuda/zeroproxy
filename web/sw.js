@@ -7,6 +7,13 @@ importScripts('/zp/assets/zp-core.js');
 // import from inside an event handler is blocked by the worker spec and
 // fails with "failed to load" even if the URL is served correctly.
 importScripts('/__zp/zp_bundle_sw.js');
+// 2026-06-08 split-bundle (c.3): kernel/transport WASM glue is split into
+// its own bundle so the heavy stack (rustls + h2 + yamux + mlkem + tokio
+// + decoders + membrane/rtcgw/wtproxy) only instantiates on the first
+// upstream fetch. The JS *glue* (~tens of KB) is loaded eagerly here at
+// top level because importScripts is unavailable later; the actual wasm
+// (~MB) is fetched + instantiated lazily inside `initKernel()`.
+importScripts('/__zp/zp_kernel_sw.js');
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
@@ -145,6 +152,12 @@ async function initBundle() {
     // value is the raw `wasm.exports` table, which takes/returns ints
     // (heap indices) directly and would mishandle JS objects. Always read
     // through wbg.<name>, never through the awaited factory result.
+    //
+    // 2026-06-08 split-bundle (c.3): kernel* names moved to `self.ZPKernel`
+    // (instantiated by `initKernel()` on first upstream fetch). The eager
+    // `ZPBundle` surface no longer carries `kernel{Init,Fetch,Stream,
+    // EchoSync,LastNamedGroups,Version}` — call sites await `initKernel()`
+    // and read from `self.ZPKernel` / `self.kernelFetch` instead.
     self.ZPBundle = Object.freeze({
       ready: true,
       bundleVersion: wbg.bundleVersion,
@@ -173,6 +186,30 @@ async function initBundle() {
             wbg.composeSourceMapChained(source, kind || 'classic', targetUrl || '', originalMapJson || '')
         : null,
       buildCSP: (wsOrigin) => wbg.buildCSP(wsOrigin || ''),
+    });
+  })().catch(err => { bundlePromise = null; throw err; });
+  return bundlePromise;
+}
+
+// 2026-06-08 split-bundle (c.3): kernel/transport half — fetched +
+// instantiated lazily on first upstream fetch. The JS glue was already
+// loaded by the top-level `importScripts('/__zp/zp_kernel_sw.js')` (no
+// way to importScripts later — worker spec forbids it), but the actual
+// `zp_kernel_sw_bg.wasm` (multi-MB rustls + h2 + yamux + mlkem +
+// decoders) only crosses the network when something actually needs to
+// talk upstream.
+let kernelPromise = null;
+async function initKernel() {
+  if (self.ZPKernel && self.ZPKernel.ready) return;
+  if (kernelPromise) return kernelPromise;
+  const wbg = self.ZPKernelWBG;
+  if (typeof wbg !== 'function') {
+    throw new Error('KERNEL_REALM_INJECTION_FAILURE');
+  }
+  kernelPromise = (async () => {
+    await wbg({ module_or_path: '/__zp/zp_kernel_sw_bg.wasm' });
+    self.ZPKernel = Object.freeze({
+      ready: true,
       kernelVersion: wbg.kernelVersion,
       kernelInit: wbg.kernelInit,
       kernelFetch: wbg.kernelFetch,
@@ -180,37 +217,31 @@ async function initBundle() {
       kernelStream: wbg.kernelStream,
       kernelLastNamedGroups: wbg.kernelLastNamedGroups,
     });
-    // Step 13: expose the Rust kernel under the same globals the SW
-    // transport path already probes (self.kernelFetch / self.kernelStream).
-    const kf = self.ZPBundle.kernelFetch;
-    if (typeof kf === 'function') {
-      // Call directly, no wrapper: ensures we don't accidentally drop or
-      // re-wrap the JsValue ABI ref between page and WASM.
-      self.kernelFetch = kf;
+    // Expose the Rust kernel under the globals the SW transport path
+    // probes. Call directly (no wrapper) so the JsValue ABI ref doesn't
+    // get dropped between page and WASM.
+    if (typeof self.ZPKernel.kernelFetch === 'function') {
+      self.kernelFetch = self.ZPKernel.kernelFetch;
     }
-    const ks = self.ZPBundle.kernelStream;
-    if (typeof ks === 'function') self.kernelStream = ks;
-    const ki = self.ZPBundle.kernelInit;
-    if (typeof ki === 'function') {
-      try { ki(); } catch {}
+    if (typeof self.ZPKernel.kernelStream === 'function') {
+      self.kernelStream = self.ZPKernel.kernelStream;
     }
-    // Hand the captured spec to the kernel before any upstream fetch.
-    // Run this in parallel with the rest of bundle init so the SW's
-    // own self.fetch round-trip doesn't gate kernel readiness; if the
-    // spec arrives after the first kernel_fetch, that fetch uses the
-    // rustls fork's hardcoded fallback (Chrome 134, phase 2) and only
-    // subsequent fetches use the captured layout. Acceptable, because
-    // the launcher's first navigation happens many seconds after SW
-    // activation in practice.
+    if (typeof self.ZPKernel.kernelInit === 'function') {
+      try { self.ZPKernel.kernelInit(); } catch {}
+    }
+    // Hand the captured spec to the kernel before the first upstream
+    // fetch finishes resolving. The rustls fork's hardcoded Chrome 134
+    // fallback covers the race window if a kernel_fetch fires before
+    // this resolves.
     const setSpec = wbg.kernelSetCapturedSpec;
     if (typeof setSpec === 'function') {
-      const spec = await captureBrowserFingerprint();
+      const spec = captureBrowserFingerprint();
       if (spec) {
         try { setSpec(spec); } catch {}
       }
     }
-  })().catch(err => { bundlePromise = null; throw err; });
-  return bundlePromise;
+  })().catch(err => { kernelPromise = null; throw err; });
+  return kernelPromise;
 }
 
 async function handleFetch(event) {
@@ -420,10 +451,13 @@ async function runtimeAPI(req, url, clientId) {
       ? ring.filter(l => l.includes(filter)).slice(-50)
       : [];
     // Phase 5.9 named_groups dump from rustls fork's apply_chrome_ja3_shape.
+    // 2026-06-08 split-bundle (c.3): kernel surface moved to `self.ZPKernel`.
+    // Only available after the kernel wasm has been lazy-instantiated by
+    // a prior `transportFetch`; if not yet, just leave the field empty.
     let namedGroups = '';
     try {
-      if (self.ZPBundle && typeof self.ZPBundle.kernelLastNamedGroups === 'function') {
-        namedGroups = self.ZPBundle.kernelLastNamedGroups();
+      if (self.ZPKernel && typeof self.ZPKernel.kernelLastNamedGroups === 'function') {
+        namedGroups = self.ZPKernel.kernelLastNamedGroups();
       }
     } catch (e) { namedGroups = 'err: ' + (e && e.message); }
     return new Response(JSON.stringify({
@@ -667,9 +701,12 @@ async function fetchOriginalSourceMap(source, target, tab) {
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
-  // Step 13: HTTP transport is Rust-only (crates/zp-kernel via zp-bundle).
-  // Both kernelFetch and kernelStream are exposed from the same WASM bundle.
-  try { await initBundle(); } catch { return safeError('SW_NOT_READY', 503, u); }
+  // Step 13: HTTP transport is Rust-only (crates/zp-kernel-bundle).
+  // 2026-06-08 split-bundle (c.3): kernel + transport wasm is lazy —
+  // first `transportFetch` is what actually triggers the multi-MB
+  // `zp_kernel_sw_bg.wasm` fetch + instantiate. Subsequent calls hit the
+  // ready check at the top of `initKernel()`.
+  try { await initKernel(); } catch { return safeError('SW_NOT_READY', 503, u); }
   if (typeof self.kernelFetch !== 'function') return safeError('SW_NOT_READY', 503, u);
   const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
   // Phase 5.8 note: page-side User-Agent survives this Headers init and
@@ -1200,10 +1237,12 @@ async function handleMessage(event) {
   const msg = event.data || {};
   const reply = event.ports && event.ports[0];
   if (msg && msg.type === '__zpKernelEchoTest') {
-    try { await initBundle(); } catch {}
+    // 2026-06-08 split-bundle (c.3): echoSync is a kernel-half export now.
+    // Probe through initKernel() — initBundle() doesn't carry kernel*.
+    try { await initKernel(); } catch {}
     let result;
     try {
-      const echoFn = (self.ZPBundle && self.ZPBundle.kernelEchoSync) || (self.ZPBundleWBG && self.ZPBundleWBG.kernelEchoSync);
+      const echoFn = (self.ZPKernel && self.ZPKernel.kernelEchoSync) || (self.ZPKernelWBG && self.ZPKernelWBG.kernelEchoSync);
       const echoed = echoFn ? echoFn(msg.val) : null;
       result = { ok: true, echoedType: typeof echoed, echoed, kernelType: typeof self.kernelFetch };
     } catch (e) {
@@ -1214,13 +1253,20 @@ async function handleMessage(event) {
   }
   if (msg && msg.type === '__zpKernelProbe') {
     let initErr = null;
+    // 2026-06-08 split-bundle (c.3): the diagnostic probe should reflect
+    // the *post-init* kernel state. Force-init the kernel half before
+    // reporting (independent of whether anything has yet routed a fetch).
     try { await initBundle(); } catch (e) { initErr = (e && e.message) || String(e); }
+    try { await initKernel(); } catch (e) { initErr = initErr || (e && e.message) || String(e); }
     if (reply) reply.postMessage({ probe: {
       kernelFetch: typeof self.kernelFetch,
       kernelStream: typeof self.kernelStream,
       bundleReady: !!(self.ZPBundle && self.ZPBundle.ready),
+      kernelReady: !!(self.ZPKernel && self.ZPKernel.ready),
       hasZPBundleWBG: typeof self.ZPBundleWBG,
+      hasZPKernelWBG: typeof self.ZPKernelWBG,
       bundleVersion: self.ZPBundle && self.ZPBundle.bundleVersion ? self.ZPBundle.bundleVersion() : null,
+      kernelVersion: self.ZPKernel && self.ZPKernel.kernelVersion ? self.ZPKernel.kernelVersion() : null,
       rustTrace: (self.__zpRustTrace || []).slice(-400),
       initErr,
     }});
@@ -1355,8 +1401,10 @@ async function handleMessage(event) {
 async function openRuntimeStream(event, msg, ok, fail) {
   const tab = runtimeTabForMessage(event, msg, fail);
   if (!tab) return;
-  // Step 13: Rust kernelStream (crates/zp-kernel via zp-bundle) only.
-  try { await initBundle(); } catch { fail('SW_NOT_READY'); return; }
+  // Step 13: Rust kernelStream (crates/zp-kernel-bundle).
+  // 2026-06-08 split-bundle (c.3): kernel wasm is lazy — first ZP_WS_OPEN
+  // is what actually triggers the multi-MB kernel wasm instantiation.
+  try { await initKernel(); } catch { fail('SW_NOT_READY'); return; }
   if (typeof self.kernelStream !== 'function') { fail('SW_NOT_READY'); return; }
   // C1: defense-in-depth — runtime prelude validates sub-protocol tokens
   // before sending ZP_WS_OPEN, but a compromised page realm could bypass

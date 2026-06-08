@@ -116,6 +116,7 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// Defensive: in case build pipeline emits a double-prefixed path.
 		s.safeError(w, r, "MALFORMED_ROUTE", http.StatusBadRequest)
 	case r.URL.Path == "/__zp/zp_bundle_sw.js" || r.URL.Path == "/__zp/zp_bundle_sw_bg.wasm" ||
+		r.URL.Path == "/__zp/zp_kernel_sw.js" || r.URL.Path == "/__zp/zp_kernel_sw_bg.wasm" ||
 		r.URL.Path == "/__zp/zp_page_bundle.js" || r.URL.Path == "/__zp/zp_page_bundle_bg.wasm" ||
 		r.URL.Path == "/__zp/zp_page_rt.wasm":
 		// Rust zp-bundle artifacts produced by wasm-bindgen (web/ + no-modules
