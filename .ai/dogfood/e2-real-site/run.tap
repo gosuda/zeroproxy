@@ -1,0 +1,48 @@
+TAP version 13
+# Subtest: E2 real-site regression — fresh profile, no stale SW
+    # Subtest: gosuda.org
+    not ok 1 - gosuda.org
+      ---
+      duration_ms: 210901.9666
+      type: 'test'
+      location: 'F:\\git\\zeroproxy\\test\\e2e\\real-site-regression.test.js:116:13'
+      failureType: 'testCodeFailure'
+      error: "Runtime.callFunctionOn timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed."
+      code: 'ERR_TEST_FAILURE'
+      stack: |-
+        <instance_members_initializer> (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/common/CallbackRegistry.js:102:14)
+        new Callback (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/common/CallbackRegistry.js:106:16)
+        CallbackRegistry.create (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/common/CallbackRegistry.js:25:26)
+        Connection._rawSend (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/cdp/Connection.js:118:26)
+        CdpCDPSession.send (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/cdp/CdpSession.js:72:14)
+        #evaluate (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/cdp/ExecutionContext.js:360:50)
+        ExecutionContext.evaluate (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/cdp/ExecutionContext.js:274:36)
+        IsolatedWorld.evaluate (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/cdp/IsolatedWorld.js:102:30)
+        CdpFrame.evaluate (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/api/Frame.js:359:43)
+        CdpFrame.<anonymous> (file:///F:/git/zeroproxy/node_modules/puppeteer-core/lib/puppeteer/util/decorators.js:101:27)
+      ...
+    # Subtest: en.wikipedia.org
+    ok 2 - en.wikipedia.org
+      ---
+      duration_ms: 1520.2918
+      type: 'test'
+      ...
+    1..2
+not ok 1 - E2 real-site regression — fresh profile, no stale SW
+  ---
+  duration_ms: 2669368.5407
+  type: 'test'
+  location: 'F:\\git\\zeroproxy\\test\\e2e\\real-site-regression.test.js:74:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+1..1
+# tests 3
+# suites 0
+# pass 1
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2669973.3117
