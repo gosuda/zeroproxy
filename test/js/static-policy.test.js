@@ -544,7 +544,17 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
 test('split-bundle (c.2): page realm uses a dedicated lighter wasm bundle', () => {
   assert.ok(fs.existsSync('crates/zp-page-bundle/Cargo.toml'), 'zp-page-bundle crate must exist');
   assert.ok(fs.existsSync('crates/zp-page-bundle/src/lib.rs'), 'zp-page-bundle lib.rs must exist');
-  assert.ok(fs.existsSync('crates/zp-page-bundle/src/css.rs'), 'zp-page-bundle css.rs must exist');
+  // 2026-06-09 E3 size win: css.rs deleted, swc_common/swc_css_*/url
+  // deps dropped, zp-htmltx (lol_html) dep dropped — page bundle is
+  // JS-rewriter-only now (375 KB, below the 500 KB hard target).
+  // The page realm never called rewriteCSS / transformHtml; the SW
+  // realm continues to do both via the full zp-bundle.
+  const pageCargo = fs.readFileSync('crates/zp-page-bundle/Cargo.toml', 'utf8');
+  for (const dropped of ['swc_common', 'swc_css_ast', 'swc_css_parser', 'swc_css_visit', 'zp-htmltx', /^url\s*=/m]) {
+    const re = dropped instanceof RegExp ? dropped : new RegExp(`^${dropped}\\s*=`, 'm');
+    assert.equal(re.test(pageCargo), false, `zp-page-bundle must NOT depend on ${dropped} after E3 slim`);
+  }
+  assert.equal(fs.existsSync('crates/zp-page-bundle/src/css.rs'), false, 'zp-page-bundle css.rs must have been removed in E3 slim');
   const workspaceCargo = fs.readFileSync('Cargo.toml', 'utf8');
   assert.match(workspaceCargo, /"crates\/zp-page-bundle"/, 'workspace must include zp-page-bundle');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
@@ -1561,6 +1571,31 @@ test('D5 polish: SDP candidate munging + RTCP interceptors', () => {
   assert.match(server, /webrtc\.WithInterceptorRegistry/, 'gateway api must be built with InterceptorRegistry');
   const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   assert.match(mainGo, /"rtc-allowed-ips"/, 'Go server must expose -rtc-allowed-ips flag');
+});
+
+// 2026-06-09 E3 size guard: page bundle must stay ≤ 500 KB. The page
+// realm wasm ships to every navigation, so it's the dominant cold-load
+// cost. SW-side wasm artifacts (zp_bundle_sw + lazy zp_kernel_sw) are
+// not gated here because (a) they ship once per origin, not per
+// navigation, and (b) they carry the full transport + CSS rewriter +
+// HTML transformer which are architecturally required for SW
+// document/CSS interception.
+//
+// If a future change pushes the page bundle back over 500 KB, the
+// trigger is almost always a new transitive dep — re-audit and either
+// route the call through the SW or split-load.
+test('E3 size guard: zp_page_bundle_bg.wasm ≤ 500 KB', () => {
+  const wasmPath = 'dist/web/__zp/zp_page_bundle_bg.wasm';
+  if (!fs.existsSync(wasmPath)) {
+    // Skip when dist hasn't been built — CI gates on `npm run build`
+    // before running tests, but local dev may run tests pre-build.
+    return;
+  }
+  const size = fs.statSync(wasmPath).size;
+  assert.ok(
+    size <= 500 * 1024,
+    `zp_page_bundle_bg.wasm = ${size} bytes (${(size / 1024).toFixed(1)} KB) > 500 KB hard target`,
+  );
 });
 
 // 2026-06-08 puppeteer harness hardening for the real-site

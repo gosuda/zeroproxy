@@ -12,7 +12,11 @@
 
 #![cfg(target_arch = "wasm32")]
 
-pub mod css;
+// 2026-06-09 E3 size win: CSS rewriter dropped from the page bundle —
+// audit confirmed the page realm never calls `rewriteCSS` (only the SW
+// realm does, via the full `zp-bundle`). See Cargo.toml for the
+// rationale. The build.mjs binding script already null-guards
+// `rewriteCSS`, so removing the export is a graceful no-op page-side.
 
 use wasm_bindgen::prelude::*;
 
@@ -45,8 +49,3 @@ pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str) -> Result<S
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
-#[wasm_bindgen(js_name = rewriteCSS)]
-pub fn rewrite_css_js(source: &str, base_url: &str, control_prefix: &str) -> Result<String, JsError> {
-    let out = css::rewrite_css(source, base_url, control_prefix);
-    if out.ok { Ok(out.code) } else { Err(JsError::new(&out.error)) }
-}
