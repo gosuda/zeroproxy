@@ -186,7 +186,7 @@ pub fn rewrite_script_patches(
         return Err(RewriteError::ParseFailed(msg));
     }
 
-    let mut visitor = RewriteVisitor::new();
+    let mut visitor = RewriteVisitor::new(opts.target_url.clone());
     visitor.visit_program(&ret.program);
 
     let mut patches = visitor.patches;
@@ -267,7 +267,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
         return Err(RewriteError::ParseFailed(msg));
     }
 
-    let mut visitor = RewriteVisitor::new();
+    let mut visitor = RewriteVisitor::new(opts.target_url.clone());
     visitor.visit_program(&ret.program);
 
     // Apply patches to produce final code. Patches sorted by start ascending
@@ -587,7 +587,7 @@ impl RewriterInstance {
             return Err(RewriteError::ParseFailed(msg));
         }
 
-        let mut visitor = RewriteVisitor::new();
+        let mut visitor = RewriteVisitor::new(opts.target_url.clone());
         visitor.visit_program(&ret.program);
 
         let mut patches = visitor.patches;
@@ -626,15 +626,22 @@ struct RewriteVisitor {
     /// Counts infinite-loop detections so the trap notebook can be
     /// updated with prevalence data after a real-site capture.
     infinite_loop_caps: u32,
+    /// Target page URL — used as base when resolving dynamic
+    /// `import("./relative.js")` arguments to an absolute proxy
+    /// route. Empty / unparsable → dynamic import rewriting falls
+    /// back to leaving the source alone (the original URL still
+    /// passes through the SW fetch path; only relative paths break).
+    target_url: String,
 }
 
 impl RewriteVisitor {
-    fn new() -> Self {
+    fn new(target_url: String) -> Self {
         Self {
             patches: Vec::new(),
             diagnostics: Vec::new(),
             scopes: vec![HashSet::new()],
             infinite_loop_caps: 0,
+            target_url,
         }
     }
 
@@ -671,6 +678,97 @@ impl RewriteVisitor {
         self.infinite_loop_caps += 1;
         self.infinite_loop_caps
     }
+}
+
+/// Resolve `raw` against `base` per RFC 3986 §5.3 — minimal subset
+/// that covers the dynamic-import use cases (relative path / abs
+/// path / abs URL). Restricted to http(s) ASCII inputs; punycode /
+/// IDN handling is deliberately out of scope (pulling the full
+/// `url` crate would add ~250 KB to the page bundle via ICU).
+/// Returns `None` for unparsable or non-http(s) inputs.
+fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
+    let raw = raw.trim();
+    // 1. raw is already an absolute URL → return as-is (after scheme check).
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        // Guard against unprintable bytes — anything outside ASCII
+        // visible is rejected to keep the encoder predictable.
+        if raw.bytes().any(|b| !(0x21..=0x7e).contains(&b)) {
+            return None;
+        }
+        return Some(raw.to_string());
+    }
+    // Parse `base` into (scheme, authority, path). RFC 3986 §3.
+    let scheme_end = base.find("://")?;
+    let scheme = &base[..scheme_end];
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let rest = &base[scheme_end + 3..];
+    // Authority is everything before the next '/' '?' or '#'.
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    if authority.is_empty() {
+        return None;
+    }
+    let base_path_with_q = &rest[auth_end..];
+    // Strip query + fragment from base path — RFC 3986 §5.3 R 3.
+    let path_end = base_path_with_q.find(['?', '#']).unwrap_or(base_path_with_q.len());
+    let base_path = if path_end == 0 { "/" } else { &base_path_with_q[..path_end] };
+
+    // 2. raw is host-absolute → keep authority, replace path.
+    if let Some(after_slash) = raw.strip_prefix('/') {
+        return Some(format!("{scheme}://{authority}/{after_slash}"));
+    }
+    // 3. raw is relative — resolve against base_path's directory.
+    // Take everything up to the last '/' in base_path (the "directory").
+    let dir_end = base_path.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let dir = &base_path[..dir_end];
+    let combined = format!("{dir}{raw}");
+
+    // Collapse `./` and `../` segments per RFC 3986 §5.2.4.
+    let trailing_slash = combined.ends_with('/');
+    let mut segments: Vec<String> = Vec::new();
+    for seg in combined.split('/') {
+        match seg {
+            "" => continue,
+            "." => continue,
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other.to_string()),
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(&segments.join("/"));
+    if trailing_slash && !out.ends_with('/') {
+        out.push('/');
+    }
+    Some(format!("{scheme}://{authority}{out}"))
+}
+
+/// Build the proxied form of a module URL the dynamic import handler
+/// observed in source. `raw` is the literal as-written (e.g.
+/// `"./mod.js"`, `"/abs/path"`, `"https://cdn/x.js"`). `target_url`
+/// is the page's location URL — empty / unparsable returns None and
+/// the call site leaves the import alone.
+///
+/// Returned shape: `/zp/api/script?u=<percent-encoded-absolute>&kind=module`.
+/// The SW intercepts `/zp/api/script?u=…` and routes the actual
+/// fetch through the proxy transport, returning a rewritten ES
+/// module response. `kind=module` ensures the SW parses the body
+/// as an ES module (dynamic `import()` always loads a module).
+fn proxied_module_url(raw: &str, target_url: &str) -> Option<String> {
+    if target_url.is_empty() {
+        return None;
+    }
+    let abs = resolve_module_base(raw, target_url)?;
+    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+    const QUERY_ENC: &AsciiSet = &CONTROLS
+        .add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'&').add(b'=')
+        .add(b'+').add(b'%').add(b'?').add(b'/').add(b':').add(b';').add(b'\'')
+        .add(b'\\').add(b'`').add(b'{').add(b'}').add(b'[').add(b']').add(b'^').add(b'|');
+    let encoded = utf8_percent_encode(&abs, QUERY_ENC).to_string();
+    Some(format!("/zp/api/script?u={encoded}&kind=module"))
 }
 
 /// Detect a `true`-equivalent constant expression — `true` literal, `1`
@@ -742,6 +840,55 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if is_dangerous_global(name) && !self.is_shadowed(name) {
             self.emit_global_get(ident.span, name);
         }
+    }
+
+    fn visit_import_expression(&mut self, expr: &ImportExpression<'a>) {
+        // Recurse first so any dangerous-global identifiers inside the
+        // argument expression still get patched (e.g. a computed source
+        // like `import(window.__cdn + '/mod.js')` — `window` here still
+        // routes through __zp_get).
+        walk::walk_import_expression(self, expr);
+
+        // Only literal sources can be resolved statically. For computed
+        // expressions (variable / template / concatenation) we leave the
+        // call alone — the SW's fetch interception will still route the
+        // download through the proxy when the page actually issues the
+        // request, but only if the *resolved* URL is already proxy-aware.
+        // Phase 3 follow-up: wrap computed-source `import(expr)` calls
+        // in a runtime helper that runs the same proxy-URL rewrite on
+        // the value at evaluation time.
+        let Expression::StringLiteral(lit) = &expr.source else {
+            return;
+        };
+        let raw = lit.value.as_str();
+        // Skip schemes the SW can't proxy and bare specifiers (bare
+        // specs are package-manager names with no URL semantics — they
+        // never round-trip through fetch).
+        let lower = raw.trim_start().to_ascii_lowercase();
+        if lower.starts_with("data:")
+            || lower.starts_with("blob:")
+            || lower.starts_with("javascript:")
+            || lower.starts_with("about:")
+            || (!raw.starts_with("./")
+                && !raw.starts_with("../")
+                && !raw.starts_with('/')
+                && !lower.starts_with("http://")
+                && !lower.starts_with("https://"))
+        {
+            return;
+        }
+        let Some(proxied) = proxied_module_url(raw, &self.target_url) else {
+            return;
+        };
+        // Replace the literal's content with the proxy-routed URL. The
+        // span covers the *literal* node — including the surrounding
+        // quotes. Re-quote with single quotes; the proxied URL never
+        // contains them (percent-encoded query string).
+        self.patches.push(Patch {
+            start: lit.span.start,
+            end: lit.span.end,
+            replacement: format!("'{proxied}'"),
+        });
     }
 
     fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
@@ -1299,6 +1446,93 @@ mod tests {
         assert!(
             !r.code.contains("__zp_get"),
             "shadowed var should not be rewritten, got: {}",
+            r.code
+        );
+    }
+
+    // 2026-06-09 NAVER dynamic import fix: literal-URL `import("./mod")`
+    // calls are resolved against `target_url` and rewritten to a
+    // `/zp/api/script?u=<percent-encoded-abs>` so the SW transports
+    // them through the proxy. NAVER's `gfp-core.js` does
+    // `import('./gfp-display-glog-logger.js')` from its origin —
+    // before this fix the SW had no transport hook because the path
+    // resolved against `proxy.localhost` (page realm sees that as
+    // the base) and 404'd.
+    #[test]
+    fn dynamic_import_relative_literal_routes_through_proxy() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        o.target_url = "https://ssl.pstatic.net/tveta/libs/glad/prod/gfp-core.js".into();
+        let src = "await import('./gfp-display-glog-logger.js')";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(
+            r.code.contains("/zp/api/script?u="),
+            "import literal must be proxy-routed: {}",
+            r.code
+        );
+        // The encoded absolute URL must reflect the resolved path.
+        assert!(
+            r.code.contains("gfp-display-glog-logger.js")
+                || r.code.contains("gfp-display-glog-logger.js")
+                || r.code.contains("gfp-display-glog-logger.js"),
+            "proxied URL must encode the resolved absolute path: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn dynamic_import_absolute_https_literal_routes_through_proxy() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        let src = "import('https://cdn.example.com/m.js?v=1').then(use);";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(
+            r.code.contains("/zp/api/script?u="),
+            "absolute https import must be proxy-routed: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn dynamic_import_data_uri_is_left_alone() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        let src = "import('data:text/javascript,export const x=1').then(use);";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(
+            !r.code.contains("/zp/api/script"),
+            "data: import must NOT be proxy-routed (SW can't fetch data:): {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn dynamic_import_bare_specifier_left_alone() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        // Bare specifiers (`react`, `lodash/find`) have no URL semantics
+        // — they're resolved by an import-map / bundler, not fetch.
+        let src = "import('lodash').then(use);";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(
+            !r.code.contains("/zp/api/script"),
+            "bare specifier must NOT be proxy-routed: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn dynamic_import_computed_left_alone_but_inner_globals_still_rewritten() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        // Computed source — can't statically resolve, so the import call
+        // itself stays as-written. But `location.href` inside MUST still
+        // go through the membrane (visit_identifier_reference fires).
+        let src = "import(location.href + 'mod.js').then(use);";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(
+            r.code.contains("__zp_get"),
+            "inner location reference must be membrane-rewritten even when import is computed: {}",
             r.code
         );
     }

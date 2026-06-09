@@ -3775,6 +3775,7 @@ dependencies = [
  "oxc_span",
  "oxc_str",
  "oxc_syntax",
+ "percent-encoding",
  "serde",
  "serde_json",
  "sourcemap",

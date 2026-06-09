@@ -11,6 +11,15 @@ crate-type = ["rlib"]
 zp-shared = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# 2026-06-09 NAVER dynamic import fix: rewrite `import("./mod.js")`
+# arguments through the proxy. `url` crate was tried first but pulls
+# in ~250 KB of ICU for IDN handling — too expensive for the page
+# bundle (E3 size guard ≤500 KB). The dynamic-import-fix call site
+# only ever resolves ASCII URLs against an ASCII base, so we use a
+# hand-rolled minimal RFC 3986 §5.3 resolver instead. The
+# `percent-encoding` crate stays — it's tiny (~5 KB) and we still
+# need it to build the `/zp/api/script?u=<encoded>` query value.
+percent-encoding = "2.3"
 oxc_allocator = { version = "0.133", default-features = false }
 oxc_parser = { version = "0.133", default-features = false }
 oxc_ast = { version = "0.133", default-features = false }

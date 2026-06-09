@@ -39,6 +39,26 @@ const rewriteCache = new Map();
 let rewriteCacheBytes = 0;
 let rewriteCacheVersion = '';
 
+// 2026-06-09 perf telemetry: per-SW-lifetime counters surfaced via the
+// `__zpKernelProbe` diagnostic message. Production tuning + trap
+// notebook entries reference these — e.g. "NAVER load: cache hits
+// 12/19, total rewrite latency 540 ms" pins exactly where the cold
+// path spent CPU. Counters reset on SW activate (intentional —
+// they're per-session, not persistent).
+const rewriteStats = {
+  hits: 0,
+  misses: 0,
+  // Cumulative `self.ZPBundle.rewriteScript` wall time in ms (cold path).
+  rewriteLatencyMs: 0,
+  // Cumulative `crypto.subtle.digest` wall time in ms (cache-key SHA-256).
+  // High ratio of this vs rewriteLatencyMs flags the cache key as a
+  // pessimization — every cold-path call pays it even when the result
+  // is later cached.
+  cacheKeyLatencyMs: 0,
+  // Number of `rewriteScriptResponse` invocations (== cache lookups).
+  invocations: 0,
+};
+
 function rewriteCacheTransformerVersion() {
   if (rewriteCacheVersion) return rewriteCacheVersion;
   try {
@@ -1054,6 +1074,7 @@ function applyScriptPatches(source, envelopeJson) {
 }
 
 async function rewriteScriptResponse(resp, opt) {
+  rewriteStats.invocations++;
   const h = scriptResponseHeaders(resp);
   let code = '';
   let cacheKey = '';
@@ -1071,12 +1092,16 @@ async function rewriteScriptResponse(resp, opt) {
     // C4: cache check before invoking the OXC pipeline. Hash inputs that
     // affect output: transformer version, script kind, target URL, source bytes.
     try {
+      const keyT0 = performance.now();
       cacheKey = await rewriteCacheKey(opt.kind || 'classic', opt.targetUrl || '', source);
+      rewriteStats.cacheKeyLatencyMs += performance.now() - keyT0;
       const cached = rewriteCacheGet(cacheKey);
       if (cached !== null) {
+        rewriteStats.hits++;
         return new Response(cached, { status: resp.status, statusText: resp.statusText, headers: h });
       }
-    } catch { cacheKey = ''; }
+      rewriteStats.misses++;
+    } catch { cacheKey = ''; rewriteStats.misses++; }
     // 2026-06-08 split-bundle (c.1) Step 2.2: SW primary swap. ZPBundle
     // (modern OXC 0.133) is now the primary script rewriter; legacy
     // ZPRewriter (OXC 0.60, in rewriter-rs/) only runs as a fallback if
@@ -1088,7 +1113,9 @@ async function rewriteScriptResponse(resp, opt) {
       if (self.ZPBundle && self.ZPBundle.ready) {
         const kind = opt.kind || 'classic';
         const target = opt.targetUrl || '';
+        const rewriteT0 = performance.now();
         const rustCode = self.ZPBundle.rewriteScript(source, kind, target);
+        rewriteStats.rewriteLatencyMs += performance.now() - rewriteT0;
         if (typeof rustCode === 'string' && rustCode.length > 0) {
           code = rustCode;
         }
@@ -1329,6 +1356,26 @@ async function handleMessage(event) {
       bundleVersion: self.ZPBundle && self.ZPBundle.bundleVersion ? self.ZPBundle.bundleVersion() : null,
       kernelVersion: self.ZPKernel && self.ZPKernel.kernelVersion ? self.ZPKernel.kernelVersion() : null,
       rustTrace: (self.__zpRustTrace || []).slice(-400),
+      // 2026-06-09 perf telemetry — see `rewriteStats` declaration.
+      // hitRatio rounded so probe output stays compact; raw counts
+      // are also included for ad-hoc analysis. cacheKeyShare is the
+      // % of `rewriteLatencyMs` spent on the SHA-256 cache key —
+      // when this dominates, the cache key is a pessimization.
+      rewriteStats: {
+        invocations: rewriteStats.invocations,
+        hits: rewriteStats.hits,
+        misses: rewriteStats.misses,
+        hitRatio: rewriteStats.invocations > 0
+          ? Math.round((rewriteStats.hits / rewriteStats.invocations) * 1000) / 1000
+          : 0,
+        rewriteLatencyMs: Math.round(rewriteStats.rewriteLatencyMs),
+        cacheKeyLatencyMs: Math.round(rewriteStats.cacheKeyLatencyMs),
+        cacheKeyShare: rewriteStats.rewriteLatencyMs > 0
+          ? Math.round((rewriteStats.cacheKeyLatencyMs / (rewriteStats.rewriteLatencyMs + rewriteStats.cacheKeyLatencyMs)) * 1000) / 1000
+          : 0,
+        cacheEntries: rewriteCache.size,
+        cacheBytes: rewriteCacheBytes,
+      },
       initErr,
     }});
     return;

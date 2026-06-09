@@ -1607,6 +1607,46 @@ test('D5 embedded TURN: pion/turn server + short-term creds + page-realm iceServ
   assert.match(prelude, /safeConfig\.iceServers\s*=\s*issuedICEServers/, 'ZPRTCPC must assign embedded TURN creds to native iceServers (not force-empty)');
 });
 
+// 2026-06-09 perf telemetry: SW exposes rewrite-cache hit ratio +
+// rewriter latency + cache-key SHA-256 share via __zpKernelProbe.
+// Pinned so future tuning has stable data — also so a refactor
+// can't silently drop the counters (cache hit rate is the single
+// most important perf signal in trap notebook entries).
+test('perf telemetry: SW exposes rewrite cache hit/miss + latency counters', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /const rewriteStats = \{/, 'rewriteStats counter object must exist');
+  for (const field of ['hits', 'misses', 'rewriteLatencyMs', 'cacheKeyLatencyMs', 'invocations']) {
+    assert.match(sw, new RegExp(`${field}:\\s*[\\d.+\\-/* ]`), `rewriteStats must declare ${field}`);
+  }
+  assert.match(sw, /rewriteStats\.hits\+\+/, 'cache hits must increment rewriteStats.hits');
+  assert.match(sw, /rewriteStats\.misses\+\+/, 'cache misses must increment rewriteStats.misses');
+  assert.match(sw, /rewriteStats\.rewriteLatencyMs \+= performance\.now\(\) - rewriteT0/, 'rewrite latency must be timed');
+  assert.match(sw, /rewriteStats\.cacheKeyLatencyMs \+= performance\.now\(\) - keyT0/, 'cache-key SHA-256 latency must be timed');
+  assert.match(sw, /rewriteStats:\s*\{[\s\S]*?hitRatio:/, '__zpKernelProbe must emit rewriteStats with hitRatio');
+});
+
+// 2026-06-09 NAVER dynamic import fix: zp-rewriter's
+// `visit_import_expression` rewrites `import("./mod.js")` literal
+// sources to `/zp/api/script?u=<encoded-abs>&kind=module`. Before
+// this fix, NAVER's `gfp-core.js` did `import('./gfp-display-glog-logger.js')`
+// which resolved against the page realm's base (`proxy.localhost`)
+// and 404'd. The fix routes the resolved absolute URL through the
+// SW. Pins both the visitor entry + the minimal URL resolver
+// (we explicitly avoid the `url` crate to stay under the 500 KB
+// page bundle target — see Cargo.toml).
+test('NAVER dynamic import fix: rewriter routes literal import() through /zp/api/script', () => {
+  const rewriter = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
+  assert.match(rewriter, /fn visit_import_expression\(/, 'visitor must override visit_import_expression');
+  assert.match(rewriter, /fn proxied_module_url\(/, 'proxied_module_url helper must exist');
+  assert.match(rewriter, /fn resolve_module_base\(/, 'resolve_module_base helper must exist (replaces url crate)');
+  assert.match(rewriter, /"\/zp\/api\/script\?u=\{encoded\}&kind=module"/, 'proxied URL must include kind=module');
+  // The url crate would pull ~250 KB of ICU into the page bundle;
+  // verify Cargo.toml does NOT depend on it.
+  const cargo = fs.readFileSync('crates/zp-rewriter/Cargo.toml', 'utf8');
+  assert.equal(/^url\s*=/m.test(cargo), false, 'zp-rewriter must NOT depend on the url crate (ICU bloat)');
+  assert.match(cargo, /^percent-encoding\s*=/m, 'zp-rewriter must depend on percent-encoding for query encoding');
+});
+
 // 2026-06-09 E3 size guard: page bundle must stay ≤ 500 KB. The page
 // realm wasm ships to every navigation, so it's the dominant cold-load
 // cost. SW-side wasm artifacts (zp_bundle_sw + lazy zp_kernel_sw) are

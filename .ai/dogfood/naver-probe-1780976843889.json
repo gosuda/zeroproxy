@@ -1,0 +1,35 @@
+{
+  "state": {
+    "err": "Execution context was destroyed, most likely because of a navigation."
+  },
+  "consoleErrors": [
+    "[error] The Content Security Policy directive 'frame-ancestors' is ignored when delivered via a <meta> element.",
+    "[error] Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    "[error] Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "[error] Failed to fetch dynamically imported module: http://proxy.localhost:18080/zp/api/script?u=https%3A%2F%2Fssl.pstatic.net%2Ftveta%2Flibs%2Fglad%2Fprod%2F3.10.4%2Fgfp-display-glog-logger.js&kind=module",
+    "[pageerror] Failed to fetch dynamically imported module: http://proxy.localhost:18080/zp/api/script?u=https%3A%2F%2Fssl.pstatic.net%2Ftveta%2Flibs%2Fglad%2Fprod%2F3.10.4%2Fgfp-display-glog-logger.js&kind=module",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Framing 'http://proxy.localhost:18080/' violates the following Content Security Policy directive: \"frame-ancestors 'none'\". The request has been blocked.\n",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: the server responded with a status of 403 ()",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED",
+    "[error] Failed to load resource: net::ERR_FAILED"
+  ]
+}
