@@ -32,8 +32,22 @@ async function probe(page, label) {
     });
   });
   console.log(`\n=== ${label} ===`);
-  if (r && r.probe && r.probe.rustTrace) {
-    for (const line of r.probe.rustTrace) console.log(`  ${line}`);
+  if (r && r.probe) {
+    if (r.probe.rustTrace) {
+      console.log(`  -- rustTrace --`);
+      for (const line of r.probe.rustTrace) console.log(`    ${line}`);
+    }
+    if (r.probe.rewriteStats) {
+      console.log(`  -- rewriteStats --`);
+      console.log(`    ${JSON.stringify(r.probe.rewriteStats)}`);
+    }
+    if (r.probe.outgoingHeaders && r.probe.outgoingHeaders.length) {
+      console.log(`  -- outgoingHeaders (last ${r.probe.outgoingHeaders.length}) --`);
+      for (const ent of r.probe.outgoingHeaders) {
+        console.log(`    ▸ ${ent.method} ${ent.target}`);
+        for (const [k, v] of ent.headers) console.log(`      ${k}: ${v}`);
+      }
+    }
   } else {
     console.log(`  ${JSON.stringify(r, null, 2)}`);
   }
@@ -79,11 +93,19 @@ try {
   console.log(`\n=== PAGE STATE POST-SUBMIT ===`);
   console.log(JSON.stringify(state, null, 2));
 
-  // After the navigation lands, SW controller should be available
-  // again in the new doc realm.
+  // Open a fresh launcher tab so the SW controller is in a known state
+  // (the proxy.localhost share-URL page may still be navigating or
+  // detaching). The SW lifetime + outgoingHeaderLog persists across
+  // tabs, so the headers we sent for NAVER are still captured.
   try {
-    await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller, { timeout: 15000 });
-    await probe(page, 'POST-NAVER-FETCH');
+    const launcherPage = await browser.newPage();
+    await launcherPage.goto(`${PROXY}/zp/`, { waitUntil: 'domcontentloaded' });
+    await launcherPage.waitForFunction(
+      () => navigator.serviceWorker && navigator.serviceWorker.controller,
+      { timeout: 15000 },
+    );
+    await probe(launcherPage, 'POST-NAVER-FETCH (via fresh launcher tab)');
+    await launcherPage.close();
   } catch (e) {
     console.log(`\n=== PROBE FAILED: ${e.message} ===`);
   }

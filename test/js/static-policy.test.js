@@ -1607,6 +1607,30 @@ test('D5 embedded TURN: pion/turn server + short-term creds + page-realm iceServ
   assert.match(prelude, /safeConfig\.iceServers\s*=\s*issuedICEServers/, 'ZPRTCPC must assign embedded TURN creds to native iceServers (not force-empty)');
 });
 
+// 2026-06-09 NAVER anti-bot User-Agent override: page-side
+// `HeadlessChrome` UA (puppeteer / WebView2 in some configs) used to
+// reach the upstream because `new Headers(opt.request.headers)`
+// preserved it through the first entries() loop, beating the later
+// `pushOnce('user-agent', ZP.TARGET_USER_AGENT)` no-op. NAVER WAF
+// instantly 403'd everything containing `HeadlessChrome`. Fix:
+// pushOnce(TARGET_USER_AGENT) BEFORE the entries() loop so the
+// canonical Chrome 148 UA wins regardless of what the page realm
+// supplied. Verified by `node scripts/probe-naver.mjs https://www.naver.com/`
+// — console errors dropped from 28 → 2 (the 2 remaining are unrelated
+// CSP `frame-ancestors` warning + one stray 403 deeper in the ad SDK
+// chain).
+test('NAVER anti-bot fix: SW force-overrides page-side User-Agent before forward', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // Locate the FIRST entries() loop in sw.js (it's inside
+  // transportFetch's header build) and verify a pushOnce of the
+  // canonical UA precedes it. Regex used on the whole file because
+  // transportFetch is multi-hundred-line and lazy `\n}\n` matches
+  // pickup nested arrow-function closings before the real end.
+  const uaIdx = sw.search(/pushOnce\('user-agent',\s*ZP\.TARGET_USER_AGENT\);\s*\n\s*for \(const \[k, v\] of headers\.entries\(\)\) pushOnce/);
+  assert.ok(uaIdx > 0,
+    'SW must pushOnce(user-agent, ZP.TARGET_USER_AGENT) immediately BEFORE the headers.entries() loop — otherwise puppeteer/WebView2 HeadlessChrome UA leaks through and triggers NAVER WAF 403');
+});
+
 // 2026-06-09 perf telemetry: SW exposes rewrite-cache hit ratio +
 // rewriter latency + cache-key SHA-256 share via __zpKernelProbe.
 // Pinned so future tuning has stable data — also so a refactor

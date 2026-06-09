@@ -59,6 +59,24 @@ const rewriteStats = {
   invocations: 0,
 };
 
+// 2026-06-09 transport header debug ring buffer. Captures the last
+// N outgoing `transportFetch` header arrays so the probe can dump
+// what we're sending upstream to an anti-bot WAF. Comparing this to
+// real-Chrome capture (e.g. wireshark / chrome://net-export) is the
+// fastest way to spot a header gap that triggers a 403. Bounded to
+// MAX_HEADER_LOG to avoid unbounded memory growth.
+const MAX_HEADER_LOG = 16;
+const outgoingHeaderLog = [];
+function logOutgoingHeaders(targetUrl, method, entries) {
+  outgoingHeaderLog.push({
+    ts: Date.now(),
+    target: String(targetUrl).slice(0, 256),
+    method,
+    headers: entries.map(([k, v]) => [k, String(v).slice(0, 256)]),
+  });
+  while (outgoingHeaderLog.length > MAX_HEADER_LOG) outgoingHeaderLog.shift();
+}
+
 function rewriteCacheTransformerVersion() {
   if (rewriteCacheVersion) return rewriteCacheVersion;
   try {
@@ -901,6 +919,17 @@ async function transportFetch(targetUrl, opt) {
     seen.add(kl);
     headerEntries.push([k, v]);
   };
+  // 2026-06-09 NAVER anti-bot fix: force-set User-Agent FIRST so the
+  // page-side `HeadlessChrome`-flavored UA from puppeteer / WebView2
+  // never reaches the upstream. NAVER WAF instantly classifies the
+  // `HeadlessChrome` substring as a bot and returns 403 on every ad
+  // SDK fetch (gfp-display-sdk.js, gfp-display-glog-logger.js, …).
+  // Before this fix, the request.headers loop below would inject
+  // `user-agent: ...HeadlessChrome/148.0.0.0...` and the later
+  // `pushOnce('user-agent', ZP.TARGET_USER_AGENT)` no-op'd because
+  // `seen` already had it. Real-Chrome operators in WebView2 still
+  // get the canonical Chrome 148 UA — no harm.
+  pushOnce('user-agent', ZP.TARGET_USER_AGENT);
   for (const [k, v] of headers.entries()) pushOnce(k, v);
   // Now grab anything the browser added that Headers refused to copy
   // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,
@@ -979,6 +1008,7 @@ async function transportFetch(targetUrl, opt) {
     if (n > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, u);
     bodyU8 = body ? new Uint8Array(body instanceof ArrayBuffer ? body : await body.arrayBuffer()) : null;
   }
+  logOutgoingHeaders(u, method, headerEntries);
   // Plain object — no Request constructor, so forbidden headers survive.
   // The kernel reads `headerEntries` first (preferred) and `arrayBuffer`
   // for the body (still a function so the kernel's existing extractor
@@ -1376,6 +1406,10 @@ async function handleMessage(event) {
         cacheEntries: rewriteCache.size,
         cacheBytes: rewriteCacheBytes,
       },
+      // 2026-06-09 transport header debug — last N outgoing fetches.
+      // Compare with chrome://net-export / Wireshark capture from a
+      // real Chrome 148 hit to spot anti-bot trigger gaps.
+      outgoingHeaders: outgoingHeaderLog.slice(),
       initErr,
     }});
     return;
