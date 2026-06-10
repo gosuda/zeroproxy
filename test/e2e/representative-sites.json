@@ -21,14 +21,7 @@
     "primarySelectors": ["body", "a[href]", "input[type=search], input[name=query], input[name=q]"],
     "iframeExpectations": {
       "adCandidates": true
-    },
-    "expectedDeltas": [
-      {
-        "surface": "network",
-        "classification": "expected-compatibility-gap",
-        "reason": "Mobile homepage completes primary render, but post-render third-party fetch aborts still diverge from native."
-      }
-    ]
+    }
   },
   {
     "id": "google-search",
@@ -37,14 +30,7 @@
     "profile": "desktop",
     "primaryFlow": "search-results",
     "readiness": ["body"],
-    "primarySelectors": ["textarea[name=q], input[name=q]", "#search, [role=main]", "a[href]"],
-    "expectedDeltas": [
-      {
-        "surface": "rendering",
-        "classification": "expected-compatibility-gap",
-        "reason": "Search-results shell currently diverges on selector visibility and one proxied SyntaxError relative to native."
-      }
-    ]
+    "primarySelectors": ["textarea[name=q], input[name=q]", "#search, [role=main]", "a[href]"]
   },
   {
     "id": "google-maps",
@@ -59,14 +45,7 @@
     ],
     "renderExpectations": {
       "nonBlankMap": true
-    },
-    "expectedDeltas": [
-      {
-        "surface": "rendering",
-        "classification": "expected-compatibility-gap",
-        "reason": "Maps shell currently remains an allowed rendering delta while map/tile compatibility work continues."
-      }
-    ]
+    }
   },
   {
     "id": "embedded-google-maps",
@@ -79,14 +58,7 @@
     "iframeExpectations": {
       "nonBlank": true,
       "googleMaps": true
-    },
-    "expectedDeltas": [
-      {
-        "surface": "navigation",
-        "classification": "expected-compatibility-gap",
-        "reason": "Embedded Maps iframe currently remains an allowed navigation/widget delta under the checked-in host fixture."
-      }
-    ]
+    }
   },
   {
     "id": "wikipedia",
@@ -104,14 +76,7 @@
     "profile": "desktop",
     "primaryFlow": "unauthenticated-homepage",
     "readiness": ["body"],
-    "primarySelectors": ["header, nav", "a[href]", "main, [role=main]"],
-    "expectedDeltas": [
-      {
-        "surface": "rendering",
-        "classification": "expected-compatibility-gap",
-        "reason": "GitHub app-shell rendering remains a classified compatibility delta in the live corpus."
-      }
-    ]
+    "primarySelectors": ["header, nav", "a[href]", "main, [role=main]"]
   },
   {
     "id": "hacker-news",
@@ -138,14 +103,7 @@
     "profile": "desktop",
     "primaryFlow": "unauthenticated-landing",
     "readiness": ["body"],
-    "primarySelectors": ["body", "a[href], [role=button]", "main, [role=main]"],
-    "expectedDeltas": [
-      {
-        "surface": "rendering",
-        "classification": "expected-compatibility-gap",
-        "reason": "X unauthenticated landing behavior remains a classified compatibility delta in the live corpus."
-      }
-    ]
+    "primarySelectors": ["body", "a[href], [role=button]", "main, [role=main]"]
   },
   {
     "id": "amazon",
@@ -159,7 +117,7 @@
       {
         "surface": "rendering",
         "classification": "expected-compatibility-gap",
-        "reason": "Amazon commerce-homepage rendering remains a classified compatibility delta in the live corpus."
+        "reason": "Amazon intermittently serves a sparse anti-automation/region shell in native and ZeroProxy; required commerce selectors are not stable enough for release gating yet."
       }
     ]
   },
@@ -170,14 +128,7 @@
     "profile": "desktop",
     "primaryFlow": "news-homepage",
     "readiness": ["body"],
-    "primarySelectors": ["main, [role=main]", "a[href]", "img, picture"],
-    "expectedDeltas": [
-      {
-        "surface": "script-runtime",
-        "classification": "expected-compatibility-gap",
-        "reason": "NYTimes script/runtime divergence remains a classified compatibility delta in the live corpus."
-      }
-    ]
+    "primarySelectors": ["main, [role=main]", "a[href]", "img, picture"]
   },
   {
     "id": "cloudflare",
@@ -186,14 +137,7 @@
     "profile": "desktop",
     "primaryFlow": "security-baseline-homepage",
     "readiness": ["body"],
-    "primarySelectors": ["main, [role=main]", "nav, header", "a[href]"],
-    "expectedDeltas": [
-      {
-        "surface": "navigation",
-        "classification": "expected-compatibility-gap",
-        "reason": "Cloudflare security-baseline navigation remains a classified compatibility delta in the live corpus."
-      }
-    ]
+    "primarySelectors": ["main, [role=main]", "nav, header", "a[href]"]
   },
   {
     "id": "ipleak",

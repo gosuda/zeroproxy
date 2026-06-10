@@ -6,10 +6,11 @@ const matrix = () =>
   JSON.parse(fs.readFileSync('test/fixtures/event-listener-compat-matrix.json', 'utf8'));
 const source = () =>
   [
+    fs.readFileSync('web/runtime/dom/virtual-dom.mjs', 'utf8'),
     fs.readFileSync('web/runtime-prelude.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/events.mjs', 'utf8'),
     fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8'),
-    fs.readFileSync('test/js/membrane-invariants.test.js', 'utf8'),
+    fs.readFileSync('test/js/virtual-dom.test.js', 'utf8'),
   ].join('\n');
 
 const byId = (id) => matrix().find((row) => row.id === id);

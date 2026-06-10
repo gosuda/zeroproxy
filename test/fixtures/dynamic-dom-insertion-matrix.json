@@ -23,9 +23,9 @@
     "priority": "p0",
     "fixtureClass": "parser-stream-sink",
     "probes": [
-      "classic script rewrite",
+      "classic script source fails closed in native prelude",
       "base element synchronization",
-      "document-written external script activation",
+      "document-written external script activation is blocked",
       "blocked executable URL fallback"
     ],
     "existingHookNeedles": [
@@ -41,8 +41,8 @@
     "priority": "p0",
     "fixtureClass": "node-insertion",
     "probes": [
-      "script.src route generation",
-      "inline script text rewrite",
+      "script.src fails closed instead of route generation",
+      "inline script text is blocked for native execution",
       "nonce masking",
       "remove/replace race"
     ],
@@ -108,13 +108,13 @@
     "priority": "p0",
     "fixtureClass": "framework-hydration",
     "probes": [
-      "dynamic import chunk URL rewrite",
+      "dynamic import chunk URL fails closed in native prelude",
       "hydration event handlers",
       "lazy image/srcset",
       "selector virtualization over rewritten URLs"
     ],
     "existingHookNeedles": [
-      "scriptProxyPath(target",
+      "blockExecutableURL(el, 'src', value)",
       "setSrcsetAttribute",
       "targetVisibleSelectorAll"
     ],

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "score": 4,
+  "targetScore": 4,
+  "failures": [],
+  "mappedGaps": [],
+  "screenshot": {
+    "status": "passed",
+    "hash": "acid-lite:dom-range-cssom-svg-eventloop"
+  }
+}

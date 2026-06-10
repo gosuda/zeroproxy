@@ -102,7 +102,6 @@
     return CONTROL_PREFIX + raw.replace(/^\/+/, '');
   }
   function assetPath(name) { return ASSET_PREFIX + String(name || '').replace(/^\/+/, ''); }
-  function apiPath(name) { return controlPath('api/' + String(name || '').replace(/^\/+/, '')); }
   function errorPath(code) { return controlPath('error/' + encodeURIComponent(String(code || 'POLICY_BLOCKED'))); }
   function makeSharePath(encrypted) { return controlPath('p/' + encrypted); }
   async function makeShareURL(targetUrl, origin = root.location?.origin || '', servers) {
@@ -212,7 +211,7 @@
     const h = String(host || '').toLowerCase();
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS });
   Object.defineProperty(root, 'ZP', { value: api, enumerable: false, configurable: false, writable: false });
   }
 })();

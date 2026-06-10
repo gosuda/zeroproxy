@@ -93,7 +93,7 @@ test('representative comparison records first failing surface and owner', async 
     primaryFlow: 'render',
   });
   assert.equal(comparison.firstFailingSurface, 'rendering');
-  assert.equal(comparison.ownerModule, 'runtime/html-rewriter');
+  assert.equal(comparison.ownerModule, 'runtime/virtual-renderer');
   assert.equal(comparison.status, 'triage');
   assert.deepEqual(comparison.delta.rendering.missingNativeVisibleSelectors, ['main']);
   assert.equal(comparison.failureTelemetry.schema, 'zp.failure.telemetry.v1');
@@ -160,6 +160,91 @@ test('representative comparison can classify expected corpus deltas', async () =
     classification: 'expected-compatibility-gap',
     reason: 'known fixture delta',
   });
+});
+
+test('representative comparison does not fail sparse pages on text floor alone', async () => {
+  const { compareSiteRecords } = await corpusModule();
+  const native = releaseFixtureRecord({
+    id: 'sparse-native',
+    site: 'sparse.example',
+    profile: 'desktop',
+    primaryFlow: 'map-shell',
+    primarySelectors: ['input[aria-label]', '[role=application]'],
+  });
+  native.selectors = native.selectors.map((row) => ({ ...row, count: 1, visible: true }));
+  native.rendering = { ...native.rendering, visibleTextLength: 5 };
+  const zeroProxy = {
+    ...native,
+    selectors: native.selectors.map((row) => ({ ...row, count: 1, visible: true })),
+    rendering: {
+      ...native.rendering,
+      visibleTextLength: 5,
+      screenshot: { sha256: 'different', byteBucket: '<64KiB' },
+    },
+  };
+  const comparison = compareSiteRecords(native, zeroProxy, {
+    id: 'sparse-native',
+    profile: 'desktop',
+    primaryFlow: 'map-shell',
+  });
+  assert.equal(comparison.status, 'pass');
+});
+
+test('representative comparison skips text-ratio failure without a visible native anchor', async () => {
+  const { compareSiteRecords } = await corpusModule();
+  const native = releaseFixtureRecord({
+    id: 'hidden-native-shell',
+    site: 'hidden.example',
+    profile: 'desktop',
+    primaryFlow: 'landing',
+    primarySelectors: ['body', 'main, [role=main]'],
+  });
+  native.selectors = native.selectors.map((row) => ({
+    ...row,
+    count: row.selector === 'body' ? 1 : 0,
+    visible: row.selector === 'body',
+  }));
+  native.rendering = { ...native.rendering, visibleTextLength: 1000 };
+  const zeroProxy = {
+    ...native,
+    rendering: {
+      ...native.rendering,
+      visibleTextLength: 20,
+      screenshot: { sha256: 'different', byteBucket: '<64KiB' },
+    },
+  };
+  const comparison = compareSiteRecords(native, zeroProxy, {
+    id: 'hidden-native-shell',
+    profile: 'desktop',
+    primaryFlow: 'landing',
+  });
+  assert.equal(comparison.status, 'pass');
+});
+
+test('representative comparison ignores native-only request failures', async () => {
+  const { compareSiteRecords } = await corpusModule();
+  const native = releaseFixtureRecord({
+    id: 'native-only-failure',
+    site: 'nativefail.example',
+    profile: 'desktop',
+    primaryFlow: 'news',
+    primarySelectors: ['main'],
+  });
+  native.requestFailures = [
+    {
+      resourceType: 'script',
+      urlClass: { scheme: 'https', hostClass: 'third-party', pathClass: 'path' },
+      failureClass: 'net::ERR_ABORTED',
+    },
+  ];
+  const zeroProxy = { ...native, requestFailures: [] };
+  const comparison = compareSiteRecords(native, zeroProxy, {
+    id: 'native-only-failure',
+    profile: 'desktop',
+    primaryFlow: 'news',
+  });
+  assert.equal(comparison.status, 'pass');
+  assert.deepEqual(comparison.failureTelemetry.evidence.requestFailureDeltaKeys, []);
 });
 
 test('representative comparison records script release-gate counters', async () => {
@@ -267,7 +352,7 @@ test('representative release gate summarizes checked-in corpus proof', async () 
     {
       site: 'script-site',
       firstFailingSurface: 'script-runtime',
-      ownerModule: 'runtime/js-rewriter',
+      ownerModule: 'runtime/quickjs',
     },
   ]);
   assert.equal(gate.redaction.rawSourceBodies, false);
@@ -339,7 +424,7 @@ test('representative release gate excludes expected corpus deltas from triage co
     {
       site: 'expected-site',
       firstFailingSurface: 'rendering',
-      ownerModule: 'runtime/html-rewriter',
+      ownerModule: 'runtime/virtual-renderer',
       reason: 'known site delta',
       classification: 'expected-compatibility-gap',
     },

@@ -7,11 +7,10 @@ const gates = () => JSON.parse(fs.readFileSync('test/fixtures/performance-gates.
 test('performance gates declare every planned budget surface', () => {
   const g = gates();
   for (const key of [
-    'htmlTransform',
+    'htmlSanitizer',
     'runtimeBootstrap',
-    'rustRewriterInit',
-    'rewriteScript',
-    'dynamicFunctionBody',
+    'quickjsRuntimeInit',
+    'quickjsScriptEval',
     'representativeSiteLoad',
   ])
     assert.ok(g[key], key);
@@ -19,12 +18,12 @@ test('performance gates declare every planned budget surface', () => {
 
 test('performance gates are tied to existing measured paths', () => {
   const g = gates();
-  const tests = fs.readFileSync('test/js/rewriter.test.js', 'utf8');
+  const quickjs = fs.readFileSync('test/js/quickjs-runtime.test.js', 'utf8');
   const corpus = fs.readFileSync('scripts/compat-corpus.mjs', 'utf8');
-  assert.ok(tests.includes('assertWithinBudget'));
-  assert.ok(tests.includes(String(g.runtimeBootstrap.maxBytes)));
-  assert.ok(tests.includes(String(g.dynamicFunctionBody.maxMs)));
+  assert.ok(quickjs.includes('QuickJS'));
+  assert.ok(quickjs.includes('evalClassic'));
+  assert.equal(g.quickjsRuntimeInit.maxMs, 1000);
   assert.ok(corpus.includes('transportTimings'));
-  assert.equal(g.htmlTransform.firstByteMs, null);
-  assert.equal(g.htmlTransform.status, 'documented-non-streaming');
+  assert.equal(g.htmlSanitizer.firstByteMs, null);
+  assert.equal(g.htmlSanitizer.status, 'documented-non-streaming');
 });

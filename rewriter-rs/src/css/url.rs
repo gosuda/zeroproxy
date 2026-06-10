@@ -8,25 +8,16 @@ pub(crate) fn proxied_url(raw: &str, base_url: &str, control_prefix: &str) -> Op
         return None;
     }
     let base = url::Url::parse(base_url).ok()?;
-    let mut abs = base.join(s).ok()?;
+    let abs = base.join(s).ok()?;
     if abs.scheme() != "http" && abs.scheme() != "https" {
         return None;
     }
-    let fragment = abs.fragment().map(str::to_string);
-    abs.set_fragment(None);
     let mut out = String::new();
     out.push_str(control_prefix);
     if !out.ends_with('/') {
         out.push('/');
     }
-    out.push_str("api/fetch?url=");
-    out.extend(url::form_urlencoded::byte_serialize(
-        abs.as_str().as_bytes(),
-    ));
-    if let Some(fragment) = fragment {
-        out.push('#');
-        out.push_str(&fragment);
-    }
+    out.push_str("error/POLICY_BLOCKED");
     Some(out)
 }
 

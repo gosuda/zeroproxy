@@ -112,28 +112,15 @@ export function createFingerprintingFacades({
     return fallback;
   }
   function visibleURLName(u, fallback) {
-    if (u.pathname === ZP.assetPath('rust-rewriter.wasm')) return '';
     if (u.origin !== proxyOrigin) return fallback;
     return visibleProxyPathName(u, fallback);
   }
   function visibleProxyPathName(u, fallback) {
-    if (u.pathname === ZP.apiPath('fetch')) return visibleQueryTargetName(u, 'url', fallback);
-    if (u.pathname === ZP.apiPath('script')) return visibleQueryTargetName(u, 'u', fallback);
-    if (u.pathname === ZP.apiPath('worker-script')) return visibleQueryTargetName(u, 'u', fallback);
     if (u.pathname === '/favicon.ico') return new URL('/favicon.ico', getVirtualURL().href).href;
     return isZeroProxyAssetURL(u.href) ? '' : fallback;
   }
-  function visibleQueryTargetName(u, param, fallback) {
-    const visible = visibleInternalTargetName(u.searchParams.get(param));
-    return visible == null ? fallback : visible;
-  }
   function visibleInternalTargetName(raw) {
-    if (!raw) return null;
-    try {
-      const u = new URL(String(raw), proxyOrigin);
-      if (u.pathname === ZP.assetPath('rust-rewriter.wasm')) return '';
-    } catch {}
-    return String(raw);
+    return raw ? String(raw) : null;
   }
   function visibleDocumentURLFor(w) {
     try { return w && w.document && w.document.URL || getVirtualURL().href; } catch { return getVirtualURL().href; }

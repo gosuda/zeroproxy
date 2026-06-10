@@ -176,6 +176,10 @@ func (r *jsReadableStreamReadCloser) Close() error {
 }
 
 func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded bool) (js.Value, error) {
+	return ResponseToJSWithPolicy(ctx, resp, bodyTransformed, bodyDecoded, false)
+}
+
+func ResponseToJSWithPolicy(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded, preserveHeaders bool) (js.Value, error) {
 	if resp == nil {
 		return js.Null(), fmt.Errorf("nil response")
 	}
@@ -185,7 +189,10 @@ func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bod
 		safeSource = resp.Header.Clone()
 		safeSource.Del("X-Zp-Transport-Timing")
 	}
-	safe := headers.ConstructorPolicy(safeSource, bodyTransformed, bodyDecoded)
+	safe := safeSource
+	if !preserveHeaders {
+		safe = headers.ConstructorPolicy(safeSource, bodyTransformed, bodyDecoded)
+	}
 	jsHeaders := js.Global().Get("Headers").New()
 	for name, vals := range safe {
 		for _, v := range vals {

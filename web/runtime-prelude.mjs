@@ -34,7 +34,6 @@ import { createWebSocketFacades } from './runtime/network/websocket.mjs';
 import { createWorkerFacades } from './runtime/workers/facades.mjs';
 
 (() => {
-  'use strict';
   const root = globalThis.window;
   const Native = captureNative(root);
   const {
@@ -411,20 +410,17 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
-  function shareRouteForTarget(target) {
-    const rw = root.ZPRewriter;
-    if (!rw || typeof rw.makeShareURL !== 'function') throw new Error('REWRITER_UNAVAILABLE');
-    const out = rw.makeShareURL(target, { servers: activeServers });
-    if (!out || !out.ok || typeof out.url !== 'string') throw new Error(out && out.errorCode || 'POLICY_BLOCKED');
-    const u = new URL(out.url, proxyOrigin);
+  async function shareRouteForTarget(target) {
+    const href = await ZP.makeShareURL(target, proxyOrigin, activeServers);
+    const u = new URL(href, proxyOrigin);
     const routeKey = ZP.shareRouteKey(u.pathname);
     if (!routeKey || !new URLSearchParams(u.hash.slice(1)).get('k')) throw new Error('MALFORMED_ROUTE');
     return { routeKey, path: u.pathname, fragment: u.hash, url: `${u.pathname}${u.hash}`, absoluteURL: u.href };
   }
-  function shareNavURL(raw, base = baseURL) { return shareRouteForTarget(targetURL(raw, base)).absoluteURL; }
+  function shareNavURL(raw, base = baseURL) { return targetURL(raw, base); }
   async function activatedNavPath(raw, replace = false, base = baseURL) {
     const target = targetURL(raw, base);
-    const share = shareRouteForTarget(target);
+    const share = await shareRouteForTarget(target);
     const entryId = replace ? activeEntryId : `e${ZP.randomId()}`;
     await postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: share.routeKey, entryId, targetUrl: target, baseUrl: target, replace });
     activeProxyPath = share.path;
@@ -434,7 +430,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   async function activatedFrameURL(raw, base = baseURL) {
     const target = targetURL(raw, base);
-    const share = shareRouteForTarget(target);
+    const share = await shareRouteForTarget(target);
     const entryId = `e${ZP.randomId()}`;
     await postMessageToSW({ type: 'ZP_FRAME_ROUTE', tabId: boot.tabId, routeKey: share.routeKey, entryId, targetUrl: target, baseUrl: target, referrerUrl: documentReferrerFor(target) });
     return share.absoluteURL;
@@ -511,33 +507,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       else location.href = u;
     });
   }
-  function postMessageToSW(message, transfer) {
-    const controller = Native.serviceWorkerController || Native.serviceWorker && Native.serviceWorker.controller;
-    if (!controller || !runtimeToken) return Promise.reject(normalizedError('NetworkError'));
-    return new Promise((resolve, reject) => {
-      const channel = new MessageChannel();
-      const sealed = objectAssign({}, message, { runtimeToken });
-      const done = fn => data => {
-        clearTimeout(timer);
-        try { channel.port1.close(); } catch {}
-        fn(data);
-      };
-      const timer = setTimeout(done(() => reject(normalizedError('NetworkError'))), 8000);
-      channel.port1.onmessage = ev => {
-        const data = ev.data || {};
-        if (data.ok) done(resolve)(data);
-        else {
-          const err = new Error(data.error || 'NetworkError');
-          err.code = data.error || 'NetworkError';
-          done(reject)(err);
-        }
-      };
-      try {
-        controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
-      } catch (err) {
-        done(reject)(err);
-      }
-    });
+  function postMessageToSW() {
+    return Promise.resolve({ ok: false, error: 'ServiceWorkerUnsupported' });
   }
   async function openUploadStream(body, signal) {
     if (!body || typeof body.getReader !== 'function') return '';
@@ -665,19 +636,11 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return baseURL;
     }
   }
-  function rewritePageSource(source, kind) {
-    if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteScriptSource !== 'function') throw normalizedError('NotSupportedError');
-    return root.ZPHTTPRewriter.rewriteScriptSource(String(source || ''), { kind, targetUrl: virtualURL.href, controlPrefix: ZP.CONTROL_PREFIX });
+  function rewritePageSource() {
+    throw normalizedError('NotSupportedError');
   }
-	  function resourceProxyPath(target) {
-	    try {
-	      const u = new URL(target);
-	      const hash = u.hash;
-	      u.hash = '';
-      return `${ZP.apiPath('fetch')}?url=${encodeURIComponent(u.href)}${hash}`;
-    } catch {
-      return `${ZP.apiPath('fetch')}?url=${encodeURIComponent(target)}`;
-    }
+  function resourceProxyPath() {
+    return ZP.errorPath('POLICY_BLOCKED');
   }
 	  function parseSrcset(raw) {
 	    const out = [];
@@ -715,10 +678,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
 	    }
 	    return { changed, actual: actual.join(', '), visible: visible.join(', ') };
 	  }
-	  function rewriteCSSSource(source, base = baseURL) {
-	    if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteCSSSource !== 'function') return '';
-	    return root.ZPHTTPRewriter.rewriteCSSSource(String(source || ''), { baseUrl: base, controlPrefix: ZP.CONTROL_PREFIX, fallback: () => '' });
-	  }
+	  function rewriteCSSSource() { return ''; }
   const {
     postMessageWrapperFor,
     virtualizeMessageEvent,
@@ -1035,7 +995,6 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       dynamicCompileAllowed,
       normalizedError,
       getVirtualURL: () => virtualURL,
-      rewriteScriptSource: rewritePageSource,
       define,
       defineReplacingNative,
       maskNativeFunction,
@@ -1585,21 +1544,10 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
         xhr._sent = true;
         fireEvent(xhr, 'loadstart');
         if (!syncXHRAllowed()) return failSyncXHR(xhr);
-        const nativeXHR = new Native.XMLHttpRequest();
         const internal = isZeroProxyAssetURL(xhr._url);
-        nativeXHR.open(xhr._method, internal ? xhr._url : `${ZP.apiPath('fetch')}?url=${encodeURIComponent(xhr._url)}`, false);
-        if (!internal) {
-          nativeXHR.setRequestHeader('X-ZP-Tab-Id', boot.tabId);
-          nativeXHR.setRequestHeader('X-ZP-Entry-Id', activeEntryId);
-          nativeXHR.setRequestHeader('X-ZP-Runtime-Token', runtimeToken);
-          nativeXHR.setRequestHeader('X-ZP-Document-URL', virtualURL.href);
-          nativeXHR.setRequestHeader('X-ZP-Fetch-Credentials', xhr._withCredentials ? 'include' : 'same-origin');
-          nativeXHR.setRequestHeader('X-ZP-Fetch-Mode', 'cors');
-          nativeXHR.setRequestHeader('X-ZP-Fetch-Redirect', 'follow');
-          nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer', virtualURL.href);
-          nativeXHR.setRequestHeader('X-ZP-Fetch-Referrer-Policy', '');
-          if (replayableBodySize(body) != null && replayableBodySize(body) <= 1024 * 1024) nativeXHR.setRequestHeader('X-ZP-Upload-Replayable', '1');
-        }
+        if (!internal) return failSyncXHR(xhr);
+        const nativeXHR = new Native.XMLHttpRequest();
+        nativeXHR.open(xhr._method, xhr._url, false);
         for (const [name, value] of xhr._headers) nativeXHR.setRequestHeader(name, value);
         try {
           nativeXHR.send(xhr._method === 'GET' || xhr._method === 'HEAD' ? null : syncXHRBody(body));
@@ -1839,12 +1787,12 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function scheduleNavigationShareURL(el, attrName, target) {
     if (!usesRawURLAttribute(el, attrName)) return;
     const version = bumpNavigationShareVersion(el);
-    let route;
-    try { route = shareRouteForTarget(target); } catch { blockExecutableURL(el, attrLocalName(attrName), target); return; }
-    if (navShareVersions.get(el) !== version) return;
-    if ((Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || '') !== target) return;
-    const name = attrLocalName(attrName) === 'formaction' ? 'formaction' : attrName;
-    if (Native.getAttribute.call(el, name) !== route.url) Native.setAttribute.call(el, name, route.url);
+    shareRouteForTarget(target).then(route => {
+      if (navShareVersions.get(el) !== version) return;
+      if ((Native.getAttribute.call(el, 'data-zp-target-url') || urlMeta.get(el) || '') !== target) return;
+      const name = attrLocalName(attrName) === 'formaction' ? 'formaction' : attrName;
+      if (Native.getAttribute.call(el, name) !== route.url) Native.setAttribute.call(el, name, route.url);
+    }).catch(() => blockExecutableURL(el, attrLocalName(attrName), target));
   }
   function rememberNavigationTarget(el, target) {
     urlMeta.set(el, target);
@@ -1866,7 +1814,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (stored) return stored;
     const raw = Native.getAttribute.call(el, 'srcset') || '';
     const rewritten = rewriteSrcsetValue(raw);
-    return rewritten.changed ? rewritten.visible : raw.replace(/(?:https?:\/\/[^/\s,]+)?\/zp\/api\/fetch\?url=([^\s,]+)/g, (_m, encoded) => {
+    return rewritten.changed ? rewritten.visible : raw.replace(/(?:https?:\/\/[^/\s,]+)?\/zp\/resource\/fetch\?url=([^\s,]+)/g, (_m, encoded) => {
       try { return decodeURIComponent(encoded); } catch { return _m; }
     });
   }
@@ -1924,16 +1872,9 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
 	  function isStylesheetLink(el) { return el && el.localName === 'link' && isStylesheetLinkRelValue(Native.getAttribute.call(el, 'rel') || ''); }
 	  function hasSuppressedBlockedLinkRel(el) { return el && el.localName === 'link' && isBlockedLinkRelValue(Native.getAttribute.call(el, 'data-zp-blocked-rel') || ''); }
 	  function visibleLinkTarget(el) { return urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url') || ''; }
-	  function proxiedFetchTarget(raw) {
-	    try {
-	      const u = new URL(String(raw || ''), proxyOrigin);
-	      if (u.pathname === ZP.apiPath('fetch')) {
-	        const target = u.searchParams.get('url') || '';
-	        return target && u.hash ? target + u.hash : target;
-	      }
-	    } catch {}
-	    return '';
-	  }
+  function proxiedFetchTarget() {
+    return '';
+  }
 	  function setStylesheetLinkHref(el, raw) {
 	    const value = raw == null ? '' : String(raw);
 	    let target = proxiedFetchTarget(value);
@@ -2068,7 +2009,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (!node || node.localName !== 'script') return false;
     let text = '';
     try { text = node.textContent || ''; } catch { return false; }
-    return /__zp_|__ZP_|ZPRewriter|ZPRustRewriter|ZPHTTPRewriter|runtimeToken|data-zp-|\/zp\/assets\/|\/zp\/api\/script|zeroproxy/i.test(text);
+    return /__zp_|__ZP_|runtimeToken|data-zp-|\/zp\/assets\/|\/zp\/resource\/|zeroproxy/i.test(text);
   }
   function sanitizeSerializedNode(node) {
     restoreVisibleLinkState(node);
@@ -2229,8 +2170,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (!raw) return false;
     try {
       const u = new URL(String(raw), proxyOrigin);
-      if (u.pathname === ZP.assetPath('rust-rewriter.wasm')) return true;
-      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('rust-rewriter.js') || u.pathname === ZP.assetPath('http-rewriter.js') || u.pathname === ZP.assetPath('wasm_exec.js') || u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script'));
+      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('wasm_exec.js'));
     } catch { return false; }
   }
   function isZPAssetNode(node) {
@@ -2394,7 +2334,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   }
   function selectorTargetsZP(selector) {
     const s = String(selector || '').toLowerCase();
-    return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('/zp/api/') || s.includes('src*="zp"') || s.includes("src*='zp'") || s.includes('src*=zp') || s.includes('zeroproxy') || s.includes('x-zeroproxy-icon');
+    return s.includes('data-zp-') || s.includes('#__zp-boot') || s.includes('/zp/assets/') || s.includes('src*="zp"') || s.includes("src*='zp'") || s.includes('src*=zp') || s.includes('zeroproxy') || s.includes('x-zeroproxy-icon');
   }
   const targetVisibleSelectorAttrRE = /\[\s*(href|src|action|formaction|poster|srcset|srcdoc|xlink\\?:href)\s*([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*([is])?\s*\]/ig;
   function selectorUsesTargetVisibleURL(selector) {
@@ -2483,7 +2423,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return desc.toLowerCase().includes('zeroproxy') || desc.toLowerCase().startsWith('zp.');
     }
     const name = String(key || '');
-    return name === 'ZP' || name === 'ZPRewriter' || name === 'ZPRustRewriter' || name === 'ZPHTTPRewriter' || name === '__ZP_BOOT' || name === '__ZP_SET_BASE' || name.startsWith('__zp_') || name.startsWith('__ZP_');
+    return name === 'ZP' || name === '__ZP_BOOT' || name === '__ZP_SET_BASE' || name.startsWith('__zp_') || name.startsWith('__ZP_');
   }
   function isGlobalObjectForMasking(value, w) {
     try { return value === w || value && value.window === value; } catch { return false; }
@@ -2823,20 +2763,6 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     if (t === '' || t === 'text/javascript' || t === 'application/javascript' || t === 'application/ecmascript' || t === 'text/ecmascript') return 'classic';
     return '';
   }
-  function scriptProxyPath(target, kind) {
-    const params = new URLSearchParams();
-    params.set('kind', kind);
-    params.set('u', target);
-    params.set('tab', boot.tabId);
-    params.set('rt', runtimeToken);
-    if (kind !== 'module') {
-      const ref = documentReferrerFor(target);
-      if (ref) params.set('ref', ref);
-      if (documentReferrerPolicy) params.set('rp', documentReferrerPolicy);
-      if (kind === 'classic' && documentCharset) params.set('dc', documentCharset);
-    }
-    return `${ZP.apiPath('script')}?${params.toString()}`;
-  }
   function setScriptSource(el, raw) {
     const kind = executableScriptKindForElement(el);
     const value = String(raw);
@@ -2856,12 +2782,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
       return Native.setAttribute.call(el, 'src', value);
     }
     if (hasExecutableURLScheme(value) || !isHTTPURL(value)) return blockExecutableURL(el, 'src', value);
-    let target;
-    try { target = targetURL(value); } catch { return blockExecutableURL(el, 'src', value); }
-    urlMeta.set(el, target);
-    Native.setAttribute.call(el, 'data-zp-target-url', target);
-    Native.setAttribute.call(el, 'nonce', 'zp');
-    return Native.setAttribute.call(el, 'src', scriptProxyPath(target, kind));
+    try { targetURL(value); } catch { return blockExecutableURL(el, 'src', value); }
+    return blockExecutableURL(el, 'src', value);
   }
   function installScriptTextProps(w) {
     const scriptProto = w.HTMLScriptElement && w.HTMLScriptElement.prototype;
@@ -3063,20 +2985,8 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     Native.setAttribute.call(el, 'data-zp-blocked-script', '1');
     setScriptText(el, '');
   }
-  function rewriteImportMapText(source) {
-    const rw = root.ZPRewriter;
-    if (!rw || typeof rw.rewriteImportMap !== 'function') return '{}';
-    try {
-      const out = rw.rewriteImportMap(String(source || ''), {
-        baseUrl: baseURL,
-        tabId: boot.tabId,
-        runtimeToken,
-        controlPrefix: ZP.CONTROL_PREFIX,
-      });
-      return out && out.ok && typeof out.code === 'string' ? out.code : '{}';
-    } catch {
-      return '{}';
-    }
+  function rewriteImportMapText() {
+    return '{}';
   }
   function transformHTML(value) {
     const html = String(value);
@@ -3179,21 +3089,6 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
   function injectSrcdoc(s, frame) { return rewriteSrcdocDocument(String(s), frame); }
   function rewriteSrcdocDocument(source, frame) {
     const prelude = srcdocRuntimePrelude(frame);
-    const opts = {
-      targetUrl: srcdocTargetURL(frame),
-      controlPrefix: ZP.CONTROL_PREFIX,
-      servers: activeServers,
-      runtimePrelude: prelude,
-      tabId: boot.tabId,
-      runtimeToken,
-    };
-    try {
-      const rw = root.ZPRewriter;
-      if (rw && typeof rw.rewriteHTMLDocument === 'function') {
-        const out = rw.rewriteHTMLDocument(source, opts);
-        if (out && out.ok && typeof out.code === 'string') return out.code;
-      }
-    } catch {}
     return `${prelude}${transformHTML(source)}`;
   }
   function srcdocRuntimePrelude(frame) {
@@ -3219,7 +3114,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
     return text.includes('__ZP_BOOT') && text.includes('/zp/assets/runtime-prelude.js');
   }
   function runtimePreludeMarkup(bootValue) {
-    return `<script nonce="zp">(function(){const boot=${bootValue};Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();<\/script><script nonce="zp" src="/zp/assets/runtime-prelude.js"><\/script>`;
+    return `<script nonce="zp">(function(){const boot=${bootValue};Object.defineProperty(window,"__ZP_BOOT",{value:boot,enumerable:false,configurable:true,writable:false});try{document.currentScript.remove()}catch{}})();</script><script nonce="zp" src="/zp/assets/runtime-prelude.js"></script>`;
   }
   function bootJSON(overrides) { return JSON.stringify(Object.assign({}, boot, { servers: activeServers }, overrides || {})).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) {
@@ -3601,7 +3496,7 @@ import { createWorkerFacades } from './runtime/workers/facades.mjs';
 
   function removeBootstrapArtifacts() {
     try {
-      const nodes = document.querySelectorAll && document.querySelectorAll('script[src*="/zp/assets/zp-core.js"],script[src*="/zp/assets/rust-rewriter.js"],script[src*="/zp/assets/http-rewriter.js"],script[src*="/zp/assets/runtime-prelude.js"]');
+      const nodes = document.querySelectorAll && document.querySelectorAll('script[src*="/zp/assets/zp-core.js"],script[src*="/zp/assets/runtime-prelude.js"]');
       if (nodes) nodes.forEach(node => { try { node.remove(); } catch {} });
     } catch {}
   }

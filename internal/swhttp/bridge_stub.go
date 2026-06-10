@@ -14,3 +14,7 @@ func RequestFromJS(ctx context.Context, v any) (*http.Request, error) { return n
 func ResponseToJS(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded bool) (any, error) {
 	return nil, ErrWASMOnly
 }
+
+func ResponseToJSWithPolicy(ctx context.Context, resp *http.Response, bodyTransformed, bodyDecoded, preserveHeaders bool) (any, error) {
+	return nil, ErrWASMOnly
+}

@@ -18,22 +18,11 @@ pub(crate) fn fetch_url(raw: &str, target_url: &str, control_prefix: &str) -> UR
     if text.is_empty() || text.starts_with('#') || is_executable_scheme(text) {
         return blocked();
     }
-    let mut abs = match resolve_http_target(target_url, text) {
-        Some(value) => value,
+    let target = match resolve_http_target(target_url, text) {
+        Some(value) => value.to_string(),
         None => return blocked(),
     };
-    let target = abs.to_string();
-    let fragment = abs.fragment().map(str::to_string);
-    abs.set_fragment(None);
-    let mut out = format!(
-        "{}api/fetch?url={}",
-        control_prefix,
-        percent_encode(abs.to_string())
-    );
-    if let Some(value) = fragment {
-        out.push('#');
-        out.push_str(&value);
-    }
+    let out = format!("{}error/POLICY_BLOCKED", control_prefix);
     URLPolicy {
         ok: true,
         url: out,
@@ -370,30 +359,6 @@ fn has_scheme(spec: &str) -> bool {
     false
 }
 
-fn percent_encode(input: String) -> String {
-    let mut out = String::with_capacity(input.len());
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => {
-                out.push('%');
-                out.push(hex(b >> 4));
-                out.push(hex(b & 15));
-            }
-        }
-    }
-    out
-}
-
-fn hex(v: u8) -> char {
-    match v {
-        0..=9 => (b'0' + v) as char,
-        _ => (b'A' + (v - 10)) as char,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -410,10 +375,7 @@ mod tests {
         );
         assert!(out.ok, "rewrite failed: {}", out.error);
         assert_eq!(out.target, "https://target.example/icons.svg#icon-a");
-        assert_eq!(
-            out.url,
-            "/zp/api/fetch?url=https%3A%2F%2Ftarget.example%2Ficons.svg#icon-a"
-        );
+        assert_eq!(out.url, "/zp/error/POLICY_BLOCKED");
     }
 
     #[test]
@@ -425,10 +387,7 @@ mod tests {
         );
         assert!(out.ok, "rewrite failed: {}", out.error);
         assert_eq!(out.target, "https://target.example/media.webm");
-        assert_eq!(
-            out.url,
-            "/zp/api/fetch?url=https%3A%2F%2Ftarget.example%2Fmedia.webm"
-        );
+        assert_eq!(out.url, "/zp/error/POLICY_BLOCKED");
     }
 
     #[test]
@@ -441,7 +400,7 @@ mod tests {
         assert!(out.ok, "rewrite failed: {}", out.error);
         assert_eq!(
             out.url,
-            "/zp/api/fetch?url=https%3A%2F%2Ftarget.example%2Fsmall.png 1x, /zp/api/fetch?url=https%3A%2F%2Ftarget.example%2Flarge.png 2x, data:image/png,AAAA 3x"
+            "/zp/error/POLICY_BLOCKED 1x, /zp/error/POLICY_BLOCKED 2x, data:image/png,AAAA 3x"
         );
         assert_eq!(
             out.target,

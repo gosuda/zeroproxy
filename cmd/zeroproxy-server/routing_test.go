@@ -22,8 +22,8 @@ var routeCases = []routeCase{
 	// Redirects to the canonical control prefix.
 	{"root redirects to control", "/", http.StatusFound, controlPrefix, ""},
 	{"index.html redirects to control", "/index.html", http.StatusFound, controlPrefix, ""},
-	// Legacy /p/, /__zp/, /sw.js spellings were removed at the Phase-3 cutover;
-	// they now fail closed (default-deny) instead of redirecting to controlPrefix.
+	// Legacy /p/, /__zp/, /sw.js, and worker bootstrap spellings are removed;
+	// they now fail closed (default-deny) instead of serving legacy runtime code.
 	{"legacy root sw is denied", "/sw.js", http.StatusForbidden, "", "POLICY_BLOCKED"},
 	{"legacy page path is denied", "/p/abc", http.StatusForbidden, "", "POLICY_BLOCKED"},
 	{"legacy zp control path is denied", "/__zp/ws-pipe", http.StatusForbidden, "", "POLICY_BLOCKED"},
@@ -34,14 +34,19 @@ var routeCases = []routeCase{
 	// the key point is they routed to a serve path rather than default-deny.
 	{"control index serves", controlPrefix, http.StatusServiceUnavailable, "", "SW_NOT_READY"},
 	{"control index.html serves", controlPrefix + "index.html", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
-	{"sw.js serves", controlPrefix + "sw.js", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
+	{"control sw is denied", controlPrefix + "sw.js", http.StatusForbidden, "", "POLICY_BLOCKED"},
 	{"kernel.wasm serves", controlPrefix + "kernel.wasm", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
 	{"deep page serves index", controlPrefix + "p/deep/route", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
 	{"allowlisted asset serves", assetPrefix + "zp-core.js", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
+	{"host shell asset serves", assetPrefix + "host-shell.js", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
+	{"network worker asset serves", assetPrefix + "network-worker.js", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
+	{"quickjs runtime asset serves", assetPrefix + "quickjs-runtime.mjs", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
+	{"quickjs wasm asset serves", assetPrefix + "quickjs-runtime.wasm", http.StatusServiceUnavailable, "", "SW_NOT_READY"},
 
-	// favicon and worker-bootstrap are served inline (no filesystem).
+	// favicon is served inline (no filesystem); worker bootstrap is gone with the
+	// native worker-script hot path.
 	{"empty favicon", "/favicon.ico", http.StatusOK, "", ""},
-	{"worker bootstrap", controlPrefix + "worker-bootstrap.js", http.StatusOK, "", "importScripts"},
+	{"worker bootstrap is denied", controlPrefix + "worker-bootstrap.js", http.StatusForbidden, "", "POLICY_BLOCKED"},
 
 	// control error path returns the sanitized client error class.
 	{"control error path", controlPrefix + "error/POLICY_BLOCKED", http.StatusBadRequest, "", "POLICY_BLOCKED"},
@@ -90,9 +95,9 @@ func TestServeAssetAllowlist(t *testing.T) {
 	s := &server{webDir: "testdata-does-not-exist"}
 
 	allowed := []string{
-		"zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "http-rewriter.js",
-		"rust-rewriter.wasm", "wasm_exec.js", "worker-prelude.js", "favicon.ico",
-		"manifest.webmanifest",
+		"zp-core.js", "host-shell.js", "runtime-prelude.js", "wasm_exec.js",
+		"worker-prelude.js", "network-worker.js", "quickjs-runtime.mjs",
+		"quickjs-runtime.wasm", "favicon.ico", "manifest.webmanifest",
 	}
 	for _, name := range allowed {
 		req := httptest.NewRequest(http.MethodGet, assetPrefix+name, nil)
@@ -109,7 +114,7 @@ func TestServeAssetAllowlist(t *testing.T) {
 		}
 	}
 
-	denied := []string{"secret.js", "config.json", "../main.go", "", "zp-core.js.map"}
+	denied := []string{"secret.js", "config.json", "../main.go", "", "zp-core.js.map", "rust-rewriter.js", "rust-rewriter.wasm", "http-rewriter.js"}
 	for _, name := range denied {
 		req := httptest.NewRequest(http.MethodGet, assetPrefix+name, nil)
 		rec := httptest.NewRecorder()

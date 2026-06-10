@@ -100,9 +100,16 @@
     {
       "scope": "document",
       "tag": "script",
-      "name": "data-zp-target-url",
-      "value": "https://example.com/early.js",
-      "rationale": "preserve target-visible URL while routing through ZeroProxy"
+      "name": "data-zp-blocked-url",
+      "value": "/early.js",
+      "rationale": "record blocked executable target after native script rewrite removal"
+    },
+    {
+      "scope": "document",
+      "tag": "script",
+      "name": "data-zp-static-script",
+      "value": "1",
+      "rationale": "mark inert executable script after native script rewrite removal"
     }
   ]
 }

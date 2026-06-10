@@ -11,28 +11,28 @@ function read(rel) {
   return fs.readFileSync(path.join(root, rel), 'utf8');
 }
 
-test('rewriter parser and codegen selection is checked in and source-backed', () => {
-  assert.equal(fixture.schema, 'zp.rewriter.parser-codegen-selection.v1');
-  assert.equal(fixture.javascript.parser, 'swc_ecma_parser');
-  assert.equal(fixture.javascript.codegen, 'swc_ecma_codegen');
-  assert.equal(fixture.javascript.resolver, 'swc_ecma_transforms_base::resolver');
+test('target JavaScript AST/codegen rewriter is removed from active browser build', () => {
+  assert.equal(fixture.schema, 'zp.rewriter.parser-codegen-selection.v2');
+  assert.equal(fixture.javascript.status, 'removed-from-target-hot-path');
   assert.ok(fixture.javascript.selectionReasons.length >= 3);
 
-  const cargo = read('rewriter-rs/Cargo.toml');
-  for (const dep of fixture.javascript.manifestDependencies) {
-    assert.match(cargo, new RegExp(`^${dep} = `, 'm'), dep);
-  }
-  for (const dep of fixture.css.manifestDependencies) {
-    assert.match(cargo, new RegExp(`^${dep} = `, 'm'), dep);
+  const activeSources = [
+    'scripts/build.mjs',
+    'web/runtime-prelude-entry.mjs',
+    'web/runtime-prelude.mjs',
+    'web/runtime/dynamic-code/facade.mjs',
+    'cmd/wasm-kernel/main.go',
+  ]
+    .map(read)
+    .join('\n');
+  for (const needle of fixture.javascript.forbiddenSourceNeedles) {
+    assert.equal(activeSources.includes(needle), false, `${needle} must not be active`);
   }
 
-  const jsRewriter = read('rewriter-rs/src/js/swc_rewriter.rs');
-  for (const needle of fixture.javascript.sourceNeedles) {
-    assert.ok(jsRewriter.includes(needle), needle);
-  }
+  const htmlSanitizer = read(fixture.html.source);
+  for (const needle of fixture.html.sourceNeedles)
+    assert.ok(htmlSanitizer.includes(needle), needle);
 
-  const htmlRewriter = read('rewriter-rs/src/html/document.rs');
-  for (const needle of fixture.html.sourceNeedles) {
-    assert.ok(htmlRewriter.includes(needle), needle);
-  }
+  const cssRewriter = read(fixture.css.source);
+  for (const needle of fixture.css.sourceNeedles) assert.ok(cssRewriter.includes(needle), needle);
 });

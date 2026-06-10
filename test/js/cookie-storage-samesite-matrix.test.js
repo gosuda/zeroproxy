@@ -5,9 +5,10 @@ const fs = require('node:fs');
 const sources = () =>
   [
     fs.readFileSync('web/runtime-prelude.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/network/api.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/webapi/core.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/document.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/storage.mjs', 'utf8'),
-    fs.readFileSync('web/sw.js', 'utf8'),
     fs.readFileSync('scripts/compat-corpus.mjs', 'utf8'),
     fs.readFileSync('internal/cookiejar/jar.go', 'utf8'),
     fs.readFileSync('internal/zphttp/redirect.go', 'utf8'),

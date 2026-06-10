@@ -86,13 +86,11 @@ var routes = []route{
 	{pat: controlPrefix, handler: serveIndex},
 	{pat: controlPrefix + "index.html", handler: serveIndex},
 	{pat: "/favicon.ico", handler: (*server).emptyFavicon},
-	{pat: controlPrefix + "sw.js", handler: serveSW},
 	{pat: controlPrefix + "ws-pipe", handler: (*server).handlePipe},
 	{pat: controlPrefix + "kernel.wasm", handler: serveKernelWASM},
 	{pat: controlPrefix + "p/", prefix: true, handler: serveIndex},
 	{pat: controlPrefix + "error/", prefix: true, handler: serveControlError},
 	{pat: assetPrefix, prefix: true, handler: serveAssetRoute},
-	{pat: controlPrefix + "worker-bootstrap.js", handler: (*server).workerBootstrap},
 }
 
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
@@ -112,8 +110,6 @@ func redirectToControl(_ *server, w http.ResponseWriter, r *http.Request) {
 
 func serveIndex(s *server, w http.ResponseWriter, r *http.Request) { s.serveWeb(w, r, "index.html") }
 
-func serveSW(s *server, w http.ResponseWriter, r *http.Request) { s.serveWeb(w, r, "sw.js") }
-
 func serveKernelWASM(s *server, w http.ResponseWriter, r *http.Request) {
 	s.serveFile(w, r, s.kernelWASM, "application/wasm")
 }
@@ -132,9 +128,9 @@ func (s *server) serveWeb(w http.ResponseWriter, r *http.Request, name string) {
 
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, name string) {
 	switch name {
-	case "zp-core.js", "runtime-prelude.js", "rust-rewriter.js", "http-rewriter.js", "wasm_exec.js", "worker-prelude.js", "favicon.ico", "manifest.webmanifest":
+	case "zp-core.js", "host-shell.js", "runtime-prelude.js", "wasm_exec.js", "worker-prelude.js", "network-worker.js", "quickjs-runtime.mjs", "favicon.ico", "manifest.webmanifest":
 		s.serveWeb(w, r, name)
-	case "rust-rewriter.wasm":
+	case "quickjs-runtime.wasm":
 		s.serveFile(w, r, filepath.Join(s.webDir, name), "application/wasm")
 	default:
 		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
@@ -172,13 +168,6 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, st.Name(), st.ModTime(), f)
-}
-
-func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
-	body := "const __zp_URLSearchParams=URLSearchParams;const __zp_encodeURIComponent=encodeURIComponent;const __zp_importScripts=importScripts.bind(self);const __zp_worker_params=new __zp_URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_LOCATION=__zp_worker_params.get('loc')||self.__ZP_WORKER_TARGET;self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_RUNTIME_TOKEN=__zp_worker_params.get('rt')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');__zp_importScripts('/zp/assets/worker-prelude.js');__zp_importScripts('/zp/api/worker-script?tab=' + __zp_encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&rt=' + __zp_encodeURIComponent(self.__ZP_WORKER_RUNTIME_TOKEN) + '&u=' + __zp_encodeURIComponent(self.__ZP_WORKER_TARGET));"
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.WriteString(w, body)
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {
@@ -531,8 +520,8 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		if needsServiceWorkerWASMCSP(r.URL.Path) {
-			w.Header().Set("Content-Security-Policy", serviceWorkerCSP(r))
+		if needsWasmAssetCSP(r.URL.Path) {
+			w.Header().Set("Content-Security-Policy", wasmAssetCSP(r))
 		} else {
 			w.Header().Set("Content-Security-Policy", zeroCSP(r))
 		}
@@ -540,15 +529,15 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func needsServiceWorkerWASMCSP(path string) bool {
-	return path == controlPrefix+"sw.js" || path == assetPrefix+"rust-rewriter.js" || path == assetPrefix+"http-rewriter.js" || path == assetPrefix+"wasm_exec.js"
+func needsWasmAssetCSP(path string) bool {
+	return path == assetPrefix+"host-shell.js" || path == assetPrefix+"wasm_exec.js" || path == assetPrefix+"network-worker.js" || path == assetPrefix+"quickjs-runtime.mjs"
 }
 
 func zeroCSP(r *http.Request) string {
 	return cspWithScriptSrc(r, "script-src 'self' blob: 'nonce-zp' 'wasm-unsafe-eval'")
 }
 
-func serviceWorkerCSP(r *http.Request) string {
+func wasmAssetCSP(r *http.Request) string {
 	return cspWithScriptSrc(r, "script-src 'self' blob: 'wasm-unsafe-eval'")
 }
 

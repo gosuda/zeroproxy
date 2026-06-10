@@ -87,16 +87,16 @@ test('runtime HTTP facade keeps ZeroProxy assets on the proxy origin', async () 
     getBaseURL: () => 'https://www.naver.com/',
     getDocumentReferrerPolicy: () => '',
     proxyOrigin: 'https://proxy.example',
-    isInternalRequestURL: (raw) => new URL(raw).pathname === '/zp/assets/rust-rewriter.wasm',
+    isInternalRequestURL: (raw) => new URL(raw).pathname === '/zp/assets/quickjs-runtime.wasm',
   });
   try {
     assert.equal(
-      facade.requestTargetURL('/zp/assets/rust-rewriter.wasm'),
-      'https://proxy.example/zp/assets/rust-rewriter.wasm',
+      facade.requestTargetURL('/zp/assets/quickjs-runtime.wasm'),
+      'https://proxy.example/zp/assets/quickjs-runtime.wasm',
     );
-    await facade.fetchThroughRuntime('/zp/assets/rust-rewriter.wasm', { cache: 'no-store' });
+    await facade.fetchThroughRuntime('/zp/assets/quickjs-runtime.wasm', { cache: 'no-store' });
     assert.deepEqual(fetched, {
-      url: 'https://proxy.example/zp/assets/rust-rewriter.wasm',
+      url: 'https://proxy.example/zp/assets/quickjs-runtime.wasm',
       init: { cache: 'no-store' },
     });
   } finally {

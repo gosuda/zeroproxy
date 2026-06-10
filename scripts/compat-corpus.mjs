@@ -454,15 +454,30 @@ async function runOne(browser, spec, url, mode, options) {
   await applyProfile(page, spec.profile);
   const startedAt = Date.now();
   let navigationError = null;
+  let readinessError = null;
   try {
     if (mode === 'zeroproxy')
       await openThroughProxy(page, options.proxyUrl, url, options.timeoutMs);
     else await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
-    await waitForReadiness(page, spec.readiness || [], options.timeoutMs);
   } catch (err) {
     navigationError = err;
   }
-  const observed = await observePage(page, spec, events, startedAt, navigationError);
+  if (!navigationError) {
+    try {
+      await waitForReadiness(page, spec.readiness || [], options.timeoutMs, mode);
+    } catch (err) {
+      readinessError = err;
+    }
+  }
+  const observed = await observePage(
+    page,
+    spec,
+    events,
+    startedAt,
+    navigationError,
+    readinessError,
+    mode,
+  );
   await page.close();
   return observed;
 }
@@ -519,7 +534,10 @@ async function openThroughProxy(page, proxyUrl, targetUrl, timeoutMs) {
   await page.goto(proxyUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
   await waitForFunction(
     page,
-    () => document.querySelector('#status')?.textContent === 'Ready.',
+    () => {
+      const statusText = document.querySelector('#status')?.textContent || '';
+      return statusText === 'Ready.' || statusText.startsWith('Network backend ready');
+    },
     timeoutMs,
   );
   await page.type('#url', targetUrl);
@@ -527,15 +545,32 @@ async function openThroughProxy(page, proxyUrl, targetUrl, timeoutMs) {
     page.click('button'),
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => null),
   ]);
+  await waitForVirtualDocument(page, timeoutMs);
 }
 
-async function waitForReadiness(page, selectors, timeoutMs) {
+async function waitForVirtualDocument(page, timeoutMs) {
+  await waitForFunction(
+    page,
+    () => {
+      const summary = globalThis.__ZP_VIRTUAL_DOCUMENT || null;
+      const statusText = document.querySelector('#status')?.textContent || '';
+      return Boolean(summary?.hasDoc || /^Virtual document ready/.test(statusText));
+    },
+    timeoutMs,
+  );
+}
+
+async function waitForReadiness(page, selectors, timeoutMs, mode = 'native') {
   if (!selectors.length) return;
   await waitForFunction(
     page,
-    (required) => required.every((selector) => document.querySelector(selector)),
+    (required, runMode) => {
+      const root = runMode === 'zeroproxy' ? document.querySelector('#zp-render-root') : document;
+      return Boolean(root) && required.every((selector) => root.querySelector(selector));
+    },
     Math.min(timeoutMs, 20000),
     selectors,
+    mode,
   );
 }
 
@@ -553,181 +588,216 @@ async function waitForFunction(page, predicate, timeoutMs, ...args) {
   throw last || new Error('timed out waiting for page predicate');
 }
 
-async function observePage(page, spec, events, startedAt, navigationError) {
+const observeDOMSnapshot = (selectors, runMode) => {
+  const renderRoot =
+    runMode === 'zeroproxy'
+      ? document.querySelector('#zp-render-root') || document.body
+      : document.body;
+  const queryRoot = runMode === 'zeroproxy' ? renderRoot : document;
+  const visible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return (
+      rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+    );
+  };
+  const selectorRows = selectors.map((selector) => {
+    if (runMode === 'zeroproxy' && selector.trim() === 'body') {
+      return { selector, count: renderRoot ? 1 : 0, visible: visible(renderRoot) };
+    }
+    const nodes = Array.from(queryRoot?.querySelectorAll?.(selector) || []);
+    return { selector, count: nodes.length, visible: nodes.some(visible) };
+  });
+  const iframeRows = Array.from(queryRoot?.querySelectorAll?.('iframe') || []).map((frame) => {
+    const rect = frame.getBoundingClientRect();
+    let accessible = false;
+    let textLength = 0;
+    try {
+      accessible = !!frame.contentDocument;
+      textLength = frame.contentDocument?.body?.innerText?.length || 0;
+    } catch {}
+    const marker = `${frame.id || ''} ${frame.name || ''} ${frame.title || ''} ${frame.className || ''} ${frame.getAttribute('src') || ''}`;
+    return {
+      src: frame.getAttribute('src') || frame.src || '',
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      visible: visible(frame),
+      accessible,
+      nonBlank: rect.width > 8 && rect.height > 8 && (!accessible || textLength > 0),
+      adCandidate: /\bad\b|ads|doubleclick|googlesyndication|adservice/i.test(marker),
+      googleMapsCandidate: /google.*maps|maps.*google/i.test(marker),
+    };
+  });
+  const bodyRect = renderRoot?.getBoundingClientRect();
+  const rootSurfaceOracle = () => {
+    const keys = Reflect.ownKeys(globalThis);
+    const selected = [
+      'window',
+      'self',
+      'globalThis',
+      'location',
+      'document',
+      'history',
+      'frames',
+      'top',
+      'parent',
+      'opener',
+      'fetch',
+      'XMLHttpRequest',
+      'WebSocket',
+      'Worker',
+      'PerformanceObserver',
+      'Function',
+    ];
+    const constructorName = (value) => value?.constructor?.name || '';
+    const valueToStringTag = (value) => value?.[Symbol.toStringTag] || '';
+    const functionSourceLength = (value) =>
+      typeof value === 'function' ? Function.prototype.toString.call(value).length : 0;
+    const errorName = (err) => err?.name || 'Error';
+    const valueMetadata = (value) => ({
+      valueType: typeof value,
+      constructorName: constructorName(value),
+      toStringTag: valueToStringTag(value),
+      functionSourceLength: functionSourceLength(value),
+    });
+    const descriptorMetadata = (d) => ({
+      configurable: d.configurable,
+      enumerable: d.enumerable,
+      writable: Object.hasOwn(d, 'writable') ? d.writable : null,
+      hasGet: typeof d.get === 'function',
+      hasSet: typeof d.set === 'function',
+      ...valueMetadata(d.value),
+    });
+    const descriptor = (key) => {
+      try {
+        const d = Object.getOwnPropertyDescriptor(globalThis, key);
+        return d ? descriptorMetadata(d) : null;
+      } catch (err) {
+        return { errorName: errorName(err) };
+      }
+    };
+    const inspectObjectGraph = (key) => {
+      try {
+        const d = Object.getOwnPropertyDescriptor(globalThis, key);
+        if (!d || !Object.hasOwn(d, 'value')) return null;
+        const value = d.value;
+        if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
+        const names = Object.getOwnPropertyNames(value);
+        const proto = Object.getPrototypeOf(value);
+        return {
+          ownNameCount: names.length,
+          ownSymbolCount: Object.getOwnPropertySymbols(value).length,
+          firstNames: names.slice(0, 64).sort(),
+          toStringTag: valueToStringTag(value),
+          constructorName: constructorName(value),
+          prototypeConstructorName: constructorName(proto),
+        };
+      } catch (err) {
+        return { errorName: errorName(err) };
+      }
+    };
+    return {
+      ownKeyCount: keys.length,
+      ownNameCount: Object.getOwnPropertyNames(globalThis).length,
+      ownSymbolCount: Object.getOwnPropertySymbols(globalThis).length,
+      firstNames: Object.getOwnPropertyNames(globalThis).slice(0, 200).sort(),
+      selectedDescriptors: Object.fromEntries(selected.map((key) => [key, descriptor(key)])),
+      selectedGraph: Object.fromEntries(selected.map((key) => [key, inspectObjectGraph(key)])),
+      toStringTag: globalThis[Symbol.toStringTag] || '',
+    };
+  };
+  const resources = performance.getEntriesByType('resource').map((entry) => ({
+    name: entry.name,
+    initiatorType: entry.initiatorType || 'other',
+    duration: Number.isFinite(entry.duration) ? Math.round(entry.duration) : 0,
+    transferSize: Number.isFinite(entry.transferSize) ? entry.transferSize : 0,
+  }));
+  const virtualTitle = runMode === 'zeroproxy' ? globalThis.__ZP_VIRTUAL_DOCUMENT?.title : '';
+  const statusText = document.querySelector('#status')?.textContent || '';
+  const virtualDocumentReady = Boolean(
+    runMode === 'zeroproxy' &&
+      (globalThis.__ZP_VIRTUAL_DOCUMENT?.hasDoc ||
+        /^Virtual document ready/.test(statusText) ||
+        renderRoot?.querySelector?.('*')),
+  );
+  return {
+    virtualDocumentReady,
+    titleLength: (virtualTitle || document.title || '').length,
+    readyState: document.readyState,
+    visibleTextLength: renderRoot?.innerText?.length || renderRoot?.textContent?.length || 0,
+    body: bodyRect
+      ? { width: Math.round(bodyRect.width), height: Math.round(bodyRect.height) }
+      : { width: 0, height: 0 },
+    selectors: selectorRows,
+    iframes: iframeRows,
+    resources,
+    navigationTiming:
+      performance.getEntriesByType('navigation').map((entry) => ({
+        duration: Math.round(entry.duration),
+        domContentLoaded: Math.round(entry.domContentLoadedEventEnd),
+        loadEventEnd: Math.round(entry.loadEventEnd),
+      }))[0] || null,
+    syntheticTimingGaps: globalThis.__zpSyntheticTimingGaps || { script: 0, resource: 0 },
+    rootSurface: rootSurfaceOracle(),
+  };
+};
+
+function optionalErrorSummary(error, spec) {
+  if (!error) return null;
+  return {
+    name: error.name || 'Error',
+    fingerprint: fingerprintText(error.message || error, spec),
+  };
+}
+
+function lifecycleSummary(dom, startedAt) {
+  return {
+    readyState: dom.readyState || 'unknown',
+    elapsedMs: Date.now() - startedAt,
+    navigation: dom.navigationTiming || null,
+  };
+}
+
+function renderingSummary(dom, screenshot) {
+  return {
+    titleLength: dom.titleLength || 0,
+    visibleTextLength: dom.visibleTextLength || 0,
+    body: dom.body || { width: 0, height: 0 },
+    screenshot,
+  };
+}
+
+async function observePage(
+  page,
+  spec,
+  events,
+  startedAt,
+  navigationError,
+  readinessError = null,
+  mode = 'native',
+) {
   const pageURL = page.url();
   const screenshot = await screenshotDigest(page);
-  const dom = await safeEvaluate(
-    page,
-    (selectors) => {
-      const visible = (el) => {
-        if (!el) return false;
-        const rect = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          style.visibility !== 'hidden' &&
-          style.display !== 'none'
-        );
-      };
-      const selectorRows = selectors.map((selector) => {
-        const nodes = Array.from(document.querySelectorAll(selector));
-        return { selector, count: nodes.length, visible: nodes.some(visible) };
-      });
-      const iframeRows = Array.from(document.querySelectorAll('iframe')).map((frame) => {
-        const rect = frame.getBoundingClientRect();
-        let accessible = false;
-        let textLength = 0;
-        try {
-          accessible = !!frame.contentDocument;
-          textLength = frame.contentDocument?.body?.innerText?.length || 0;
-        } catch {}
-        const marker = `${frame.id || ''} ${frame.name || ''} ${frame.title || ''} ${frame.className || ''} ${frame.getAttribute('src') || ''}`;
-        return {
-          src: frame.getAttribute('src') || frame.src || '',
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-          visible: visible(frame),
-          accessible,
-          nonBlank: rect.width > 8 && rect.height > 8 && (!accessible || textLength > 0),
-          adCandidate: /\bad\b|ads|doubleclick|googlesyndication|adservice/i.test(marker),
-          googleMapsCandidate: /google.*maps|maps.*google/i.test(marker),
-        };
-      });
-      const bodyRect = document.body?.getBoundingClientRect();
-      const rootSurfaceOracle = () => {
-        const keys = Reflect.ownKeys(globalThis);
-        const selected = [
-          'window',
-          'self',
-          'globalThis',
-          'location',
-          'document',
-          'history',
-          'frames',
-          'top',
-          'parent',
-          'opener',
-          'fetch',
-          'XMLHttpRequest',
-          'WebSocket',
-          'Worker',
-          'PerformanceObserver',
-          'Function',
-        ];
-        const constructorName = (value) => value?.constructor?.name || '';
-        const valueToStringTag = (value) => value?.[Symbol.toStringTag] || '';
-        const functionSourceLength = (value) =>
-          typeof value === 'function' ? Function.prototype.toString.call(value).length : 0;
-        const errorName = (err) => err?.name || 'Error';
-        const valueMetadata = (value) => ({
-          valueType: typeof value,
-          constructorName: constructorName(value),
-          toStringTag: valueToStringTag(value),
-          functionSourceLength: functionSourceLength(value),
-        });
-        const descriptorMetadata = (d) => ({
-          configurable: d.configurable,
-          enumerable: d.enumerable,
-          writable: Object.hasOwn(d, 'writable') ? d.writable : null,
-          hasGet: typeof d.get === 'function',
-          hasSet: typeof d.set === 'function',
-          ...valueMetadata(d.value),
-        });
-        const descriptor = (key) => {
-          try {
-            const d = Object.getOwnPropertyDescriptor(globalThis, key);
-            return d ? descriptorMetadata(d) : null;
-          } catch (err) {
-            return { errorName: errorName(err) };
-          }
-        };
-        const inspectObjectGraph = (key) => {
-          try {
-            const d = Object.getOwnPropertyDescriptor(globalThis, key);
-            if (!d || !Object.hasOwn(d, 'value')) return null;
-            const value = d.value;
-            if (!value || (typeof value !== 'object' && typeof value !== 'function')) return null;
-            const names = Object.getOwnPropertyNames(value);
-            const proto = Object.getPrototypeOf(value);
-            return {
-              ownNameCount: names.length,
-              ownSymbolCount: Object.getOwnPropertySymbols(value).length,
-              firstNames: names.slice(0, 64).sort(),
-              toStringTag: valueToStringTag(value),
-              constructorName: constructorName(value),
-              prototypeConstructorName: constructorName(proto),
-            };
-          } catch (err) {
-            return { errorName: errorName(err) };
-          }
-        };
-        return {
-          ownKeyCount: keys.length,
-          ownNameCount: Object.getOwnPropertyNames(globalThis).length,
-          ownSymbolCount: Object.getOwnPropertySymbols(globalThis).length,
-          firstNames: Object.getOwnPropertyNames(globalThis).slice(0, 200).sort(),
-          selectedDescriptors: Object.fromEntries(selected.map((key) => [key, descriptor(key)])),
-          selectedGraph: Object.fromEntries(selected.map((key) => [key, inspectObjectGraph(key)])),
-          toStringTag: globalThis[Symbol.toStringTag] || '',
-        };
-      };
-      const resources = performance.getEntriesByType('resource').map((entry) => ({
-        name: entry.name,
-        initiatorType: entry.initiatorType || 'other',
-        duration: Number.isFinite(entry.duration) ? Math.round(entry.duration) : 0,
-        transferSize: Number.isFinite(entry.transferSize) ? entry.transferSize : 0,
-      }));
-      return {
-        titleLength: document.title.length,
-        readyState: document.readyState,
-        visibleTextLength: document.body?.innerText?.length || 0,
-        body: bodyRect
-          ? { width: Math.round(bodyRect.width), height: Math.round(bodyRect.height) }
-          : { width: 0, height: 0 },
-        selectors: selectorRows,
-        iframes: iframeRows,
-        resources,
-        navigationTiming:
-          performance.getEntriesByType('navigation').map((entry) => ({
-            duration: Math.round(entry.duration),
-            domContentLoaded: Math.round(entry.domContentLoadedEventEnd),
-            loadEventEnd: Math.round(entry.loadEventEnd),
-          }))[0] || null,
-        syntheticTimingGaps: globalThis.__zpSyntheticTimingGaps || { script: 0, resource: 0 },
-        rootSurface: rootSurfaceOracle(),
-      };
-    },
-    spec.primarySelectors || [],
-  );
+  const dom = await safeEvaluate(page, observeDOMSnapshot, spec.primarySelectors || [], mode);
   const transportTimings = await readTransportTimings(page);
+  const recoveredNavigation = mode === 'zeroproxy' && dom.virtualDocumentReady;
   return {
-    ok: !navigationError,
-    navigationError: navigationError && {
-      name: navigationError.name || 'Error',
-      fingerprint: fingerprintText(navigationError.message || navigationError, spec),
-    },
+    ok: !navigationError || recoveredNavigation,
+    navigationError: recoveredNavigation ? null : optionalErrorSummary(navigationError, spec),
+    readinessError: optionalErrorSummary(readinessError, spec),
     urlClass: classifyURL(pageURL, spec),
-    lifecycle: {
-      readyState: dom.readyState || 'unknown',
-      elapsedMs: Date.now() - startedAt,
-      navigation: dom.navigationTiming || null,
-    },
+    lifecycle: lifecycleSummary(dom, startedAt),
     console: events.console,
     pageErrors: events.pageErrors,
     requestFailures: normalizeRequestFailures(
       events.requestFailures,
       events.responses,
-      !navigationError,
+      !navigationError || recoveredNavigation,
     ),
     responses: events.responses,
     selectors: dom.selectors || [],
-    rendering: {
-      titleLength: dom.titleLength || 0,
-      visibleTextLength: dom.visibleTextLength || 0,
-      body: dom.body || { width: 0, height: 0 },
-      screenshot,
-    },
+    rendering: renderingSummary(dom, screenshot),
     iframes: summarizeIframes(dom.iframes || [], spec),
     resources: summarizeResources(dom.resources || [], spec),
     transportTimings,
@@ -844,7 +914,7 @@ async function startFixtureServer(corpus) {
     });
   });
   const port = await listen(server);
-  return { server, origin: `http://127.0.0.1:${port}` };
+  return { server, origin: `http://localhost:${port}` };
 }
 
 async function maybeStartProxy(options) {
@@ -1012,7 +1082,6 @@ function classifyPath(parsed) {
   if (parsed.protocol === 'data:') return 'data';
   if (parsed.protocol === 'blob:') return 'blob';
   if (parsed.pathname.startsWith('/zp/assets/')) return 'zeroproxy-asset';
-  if (parsed.pathname.startsWith('/zp/api/')) return 'zeroproxy-api';
   if (parsed.pathname.startsWith('/zp/p/')) return 'zeroproxy-route';
   if (parsed.pathname === '/' || parsed.pathname === '') return 'root';
   const ext = path.extname(parsed.pathname).toLowerCase();
@@ -1076,8 +1145,20 @@ function subtractCounts(left, right) {
   return out;
 }
 
+function positiveDeltaKeys(counts) {
+  return Object.entries(counts || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([key]) => key);
+}
+
 function failureKey(item) {
   return `${item.resourceType}:${item.urlClass.scheme}:${item.urlClass.hostClass}:${item.failureClass}`;
+}
+
+function isBenignPostDocumentAbort(row) {
+  if (!/ERR_ABORTED/i.test(String(row.failureClass || ''))) return false;
+  if (row.resourceType === 'document') return true;
+  return row.urlClass?.scheme === 'blob' && row.urlClass?.hostClass === 'none';
 }
 
 function normalizeRequestFailures(failures, responses, pageOK) {
@@ -1088,10 +1169,7 @@ function normalizeRequestFailures(failures, responses, pageOK) {
     (row) => row.resourceType === 'document' && row.statusBucket !== '5xx',
   );
   if (!hasDocumentResponse) return rows;
-  return rows.filter(
-    (row) =>
-      !(row.resourceType === 'document' && /ERR_ABORTED/i.test(String(row.failureClass || ''))),
-  );
+  return rows.filter((row) => !isBenignPostDocumentAbort(row));
 }
 function responseKey(item) {
   return `${item.resourceType}:${item.urlClass.hostClass}:${item.statusBucket}:${item.contentTypeBucket}`;
@@ -1277,7 +1355,7 @@ function buildFailureTelemetry(nativeRecord, zeroProxyRecord, delta, spec, surfa
     evidence: {
       consoleDelta: delta.console,
       pageErrorDelta: delta.pageErrors,
-      requestFailureDeltaKeys: Object.keys(delta.requestFailures).sort().slice(0, 32),
+      requestFailureDeltaKeys: positiveDeltaKeys(delta.requestFailures).sort().slice(0, 32),
       responseDeltaKeys: Object.keys(delta.responses).sort().slice(0, 32),
       rootSurface: {
         mismatchCount: delta.rootSurface.mismatchCount,
@@ -1334,7 +1412,7 @@ function scriptFailureTelemetry(nativeRecord, zeroProxyRecord, delta, surface) {
     0,
     (zeroProxyErrors.SyntaxError || 0) - (nativeErrors.SyntaxError || 0),
   );
-  const failCloseDeltaKeys = Object.keys(delta.requestFailures)
+  const failCloseDeltaKeys = positiveDeltaKeys(delta.requestFailures)
     .filter((key) => /^script:/.test(key) || /POLICY|BLOCK|rewrite|script/i.test(key))
     .sort()
     .slice(0, 32);
@@ -1346,6 +1424,10 @@ function scriptFailureTelemetry(nativeRecord, zeroProxyRecord, delta, surface) {
     pageErrorNames: subtractCounts(zeroProxyErrors, nativeErrors),
     failCloseDeltaKeys,
   };
+}
+
+function hasVisibleNonBodySelector(record) {
+  return record.selectors.some((row) => row.visible && row.selector !== 'body');
 }
 
 function classifyFirstFailure(nativeRecord, zeroProxyRecord, delta, spec) {
@@ -1363,10 +1445,11 @@ function classifyFirstFailure(nativeRecord, zeroProxyRecord, delta, spec) {
   )
     return 'frame';
   if (delta.pageErrors > 0) return 'script-runtime';
-  if (Object.keys(delta.requestFailures).length) return 'network';
+  if (positiveDeltaKeys(delta.requestFailures).length) return 'network';
   if (
-    zeroProxyRecord.rendering.visibleTextLength <
-    Math.max(64, nativeRecord.rendering.visibleTextLength * 0.25)
+    hasVisibleNonBodySelector(nativeRecord) &&
+    nativeRecord.rendering.visibleTextLength >= 64 &&
+    zeroProxyRecord.rendering.visibleTextLength < nativeRecord.rendering.visibleTextLength * 0.25
   )
     return 'rendering';
   return 'none';
@@ -1377,11 +1460,11 @@ function ownerForSurface(surface) {
     {
       none: 'none',
       'native-site': 'external',
-      navigation: 'service-worker/runtime-routing',
-      rendering: 'runtime/html-rewriter',
-      frame: 'runtime-frames/html-rewriter',
-      'script-runtime': 'runtime/js-rewriter',
-      network: 'service-worker/go-transport',
+      navigation: 'runtime/virtual-navigation',
+      rendering: 'runtime/virtual-renderer',
+      frame: 'runtime/frames',
+      'script-runtime': 'runtime/quickjs',
+      network: 'runtime/gonetworkbackend',
     }[surface] || 'triage'
   );
 }

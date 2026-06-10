@@ -13,8 +13,6 @@ import (
 
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
-	"golang.org/x/text/encoding/korean"
-	"golang.org/x/text/transform"
 )
 
 func deliverAwait(p js.Value) (js.Value, bool) {
@@ -76,28 +74,6 @@ func runDeliver(req *http.Request, resp *http.Response, finalURL *url.URL) deliv
 	return out
 }
 
-func installDeliverTestRewriter(t *testing.T) func() {
-	t.Helper()
-	rewriter := js.Global().Get("ZPRewriter")
-	rewriteHTML := js.FuncOf(func(_ js.Value, args []js.Value) any {
-		source := ""
-		if len(args) > 0 {
-			source = args[0].String()
-		}
-		return map[string]any{
-			"ok":   true,
-			"code": source + "<!--rewritten-by-test-rewriter-->",
-		}
-	})
-	js.Global().Set("ZPRewriter", map[string]any{
-		"rewriteHTMLDocument": rewriteHTML,
-	})
-	return func() {
-		rewriteHTML.Release()
-		js.Global().Set("ZPRewriter", rewriter)
-	}
-}
-
 func deliverReq(hdr map[string]string, raw string) *http.Request {
 	u, _ := url.Parse(raw)
 	r := &http.Request{Method: "GET", URL: u, Header: http.Header{}}
@@ -123,15 +99,6 @@ func deliverResp(status int, hdr map[string]string, setCookie, body string, hasB
 	return r
 }
 
-func eucKRString(t *testing.T, text string) string {
-	t.Helper()
-	encoded, _, err := transform.String(korean.EUCKR.NewEncoder(), text)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return encoded
-}
-
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)
@@ -142,12 +109,10 @@ func mustURL(t *testing.T, raw string) *url.URL {
 }
 
 // TestDeliverResponseOwnershipAndDelivery pins releaseOnReturn per path (the
-// teardown-ownership flag), basic response delivery, document transform, and
-// cookie capture / credentials-omit.
+// teardown-ownership flag), basic response delivery, legacy document-transform
+// fail-closed behavior, raw document delivery, and cookie capture /
+// credentials-omit.
 func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
-	cleanupRewriter := installDeliverTestRewriter(t)
-	defer cleanupRewriter()
-
 	plain := "https://t.test/a.js"
 
 	// Body present -> ownership transfers to the body cancel goroutine -> false.
@@ -168,19 +133,23 @@ func TestDeliverResponseOwnershipAndDelivery(t *testing.T) {
 		t.Fatalf("nil-body delivery: status=%d body=%q, want 204/empty (response must still be delivered)", noBody.status, noBody.body)
 	}
 
-	// Document + HTML -> transformed to text/html; body is rewritten (not the input).
+	// Legacy non-raw document transform is removed with the native JS rewriter path:
+	// old callers fail closed instead of receiving untransformed target HTML.
 	doc := runDeliver(deliverReq(map[string]string{"X-Zp-Document-Request": "1"}, "https://t.test/"), deliverResp(200, map[string]string{"Content-Type": "text/html"}, "", "<html><head></head><body>hi</body></html>", true), mustURL(t, "https://t.test/"))
-	if !strings.Contains(strings.ToLower(doc.headers["content-type"]), "text/html") {
-		t.Fatalf("document transform Content-Type = %q, want text/html", doc.headers["content-type"])
-	}
-	if doc.body == "<html><head></head><body>hi</body></html>" || !strings.Contains(doc.body, "hi") {
-		t.Fatalf("document body not transformed (membrane injection missing): %q", doc.body)
+	if doc.status != http.StatusNotImplemented || !strings.Contains(doc.body, "HTML_DOCUMENT_TRANSFORM_UNAVAILABLE") {
+		t.Fatalf("legacy document transform status=%d body=%q, want fail-closed", doc.status, doc.body)
 	}
 
-	eucKRDoc := eucKRString(t, `<html><head></head><body>뉴스</body></html>`)
-	decodedDoc := runDeliver(deliverReq(map[string]string{"X-Zp-Document-Request": "1"}, "https://news.naver.com/"), deliverResp(200, map[string]string{"Content-Type": "text/html; charset=euc-kr"}, "", eucKRDoc, true), mustURL(t, "https://news.naver.com/"))
-	if !strings.Contains(decodedDoc.body, "뉴스") {
-		t.Fatalf("document transform must decode euc-kr before rewrite, got body %q", decodedDoc.body)
+	rawDoc := runDeliver(
+		deliverReq(map[string]string{"X-Zp-Document-Request": "1", "X-ZP-Raw-Mode": "1"}, "https://t.test/raw"),
+		deliverResp(200, map[string]string{"Content-Type": "text/html", "Link": "</font.woff2>; rel=preload"}, "", "<html><body>raw</body></html>", true),
+		mustURL(t, "https://t.test/raw"),
+	)
+	if rawDoc.body != "<html><body>raw</body></html>" {
+		t.Fatalf("raw-mode document body transformed: %q", rawDoc.body)
+	}
+	if rawDoc.headers["link"] == "" {
+		t.Fatalf("raw-mode document must preserve Link header for sanitizer, headers=%v", rawDoc.headers)
 	}
 
 	// Set-Cookie is captured into the jar; credentials=omit skips capture.

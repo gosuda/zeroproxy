@@ -1,10 +1,10 @@
-use url::{form_urlencoded, Url};
+use url::Url;
 
 pub(crate) fn rewrite_address(
     raw: &str,
     base_url: &str,
-    tab_id: &str,
-    runtime_token: &str,
+    _tab_id: &str,
+    _runtime_token: &str,
     control_prefix: &str,
 ) -> String {
     let Some(abs) = absolute_url(raw, base_url) else {
@@ -14,12 +14,7 @@ pub(crate) fn rewrite_address(
         return policy_blocked(control_prefix);
     }
 
-    let mut query = form_urlencoded::Serializer::new(String::new());
-    query.append_pair("kind", "module");
-    query.append_pair("rt", runtime_token);
-    query.append_pair("tab", tab_id);
-    query.append_pair("u", abs.as_str());
-    format!("{}api/script?{}", control_prefix, query.finish())
+    policy_blocked(control_prefix)
 }
 
 fn absolute_url(raw: &str, base_url: &str) -> Option<Url> {

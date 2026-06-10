@@ -1,8 +1,3 @@
-import {
-  dynamicSource,
-  simpleDynamicValue,
-  stringArgs,
-} from './source.mjs';
 
 export function createDynamicCodeFacade({
   root,
@@ -10,19 +5,13 @@ export function createDynamicCodeFacade({
   dynamicCompileAllowed,
   normalizedError,
   getVirtualURL,
-  rewriteScriptSource,
   define,
   defineReplacingNative,
   maskNativeFunction,
-  toStringMap,
 }) {
   const {
-    Array = globalThis.Array,
-    Map = globalThis.Map,
-    String = globalThis.String,
     objectDefineProperty = globalThis.Object.defineProperty,
     objectFreeze = globalThis.Object.freeze,
-    reflectConstruct = globalThis.Reflect && globalThis.Reflect.construct,
   } = Native;
   const NativeAsyncFunction = (async function(){}).constructor;
   const NativeGeneratorFunction = (function*(){}).constructor;
@@ -50,40 +39,18 @@ export function createDynamicCodeFacade({
     [dynamicAsyncGeneratorFunction, dynamicAsyncGeneratorFunction],
   ]);
 
-  function compileSimpleDynamic(params, body, kind) {
-    if (params.length || kind !== 'function') return null;
-    const m = /^return\s+([\s\S]*?);?$/.exec(String(body || '').trim());
-    if (!m) return null;
-    const fn = function anonymous() { return simpleDynamicValue(m[1], getVirtualURL()); };
-    toStringMap.set(fn, dynamicSource(kind, params, body));
-    return fn;
+
+  function compileTimerString() {
+    return function anonymous() { throw normalizedError('NotSupportedError'); };
   }
 
-  function compileTimerString(source) {
-    const text = String(source || '');
-    return function anonymous() { return runRewrittenNativeEval(text); };
-  }
-
-  function compileDynamic(ctor, args, kind) {
-    const parts = stringArgs(args);
-    const body = parts.length ? parts[parts.length - 1] : '';
-    const params = parts.slice(0, -1);
+  function compileDynamic(_ctor, _args, _kind) {
     if (!dynamicCompileAllowed) throw normalizedError('SecurityError');
-    const simple = compileSimpleDynamic(params, body, kind);
-    if (simple) return simple;
-    const rewritten = rewriteDynamicFunctionBody(params, body);
-    const ctorArgs = new Array(params.length + 1);
-    for (let i = 0; i < params.length; i += 1) ctorArgs[i] = params[i];
-    ctorArgs[params.length] = rewritten;
-    const fn = reflectConstruct(ctor, ctorArgs);
-    toStringMap.set(fn, dynamicSource(kind, params, body));
-    return fn;
+    throw normalizedError('NotSupportedError');
   }
 
-  function runRewrittenNativeEval(text) {
-    if (typeof Native.eval !== 'function') throw normalizedError('NotSupportedError');
-    if (typeof rewriteScriptSource !== 'function') throw normalizedError('NotSupportedError');
-    return (0, Native.eval)(rewriteScriptSource(String(text || ''), 'classic'));
+  function runRewrittenNativeEval() {
+    throw normalizedError('NotSupportedError');
   }
 
   function setDynamicConstructorIdentity(fn, name, proto) {
@@ -125,17 +92,6 @@ export function createDynamicCodeFacade({
     );
   }
 
-  function rewriteDynamicFunctionBody(params, body) {
-    if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteFunctionBody !== 'function') {
-      throw normalizedError('NotSupportedError');
-    }
-    return root.ZPHTTPRewriter.rewriteFunctionBody(
-      String(body || ''),
-      params,
-      getVirtualURL().href,
-      root.ZP && root.ZP.CONTROL_PREFIX,
-    );
-  }
 
   function installDynamicCodeHooks() {
     setDynamicConstructorIdentity(

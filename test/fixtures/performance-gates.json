@@ -1,8 +1,7 @@
 {
-  "htmlTransform": { "firstByteMs": null, "totalMs": 250, "status": "documented-non-streaming" },
+  "htmlSanitizer": { "firstByteMs": null, "totalMs": 250, "status": "documented-non-streaming" },
   "runtimeBootstrap": { "maxBytes": 3000000, "status": "gated" },
-  "rustRewriterInit": { "maxMs": 1000, "status": "gated" },
-  "rewriteScript": { "smallMs": 250, "mediumMs": 500, "largeMs": 1000, "status": "gated" },
-  "dynamicFunctionBody": { "maxMs": 750, "status": "gated" },
+  "quickjsRuntimeInit": { "maxMs": 1000, "status": "gated" },
+  "quickjsScriptEval": { "status": "covered-by-quickjs-tests" },
   "representativeSiteLoad": { "usesRealTransportTiming": true, "status": "runner-only" }
 }

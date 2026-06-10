@@ -7,10 +7,10 @@ const matrix = () =>
 const source = () =>
   [
     fs.readFileSync('web/runtime-prelude.mjs', 'utf8'),
+    fs.readFileSync('web/runtime/webapi/core.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/fingerprinting.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/document.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/storage.mjs', 'utf8'),
-    fs.readFileSync('web/sw.js', 'utf8'),
     fs.readFileSync('scripts/compat-corpus.mjs', 'utf8'),
     fs.readFileSync('test/e2e/representative-sites.json', 'utf8'),
     fs.readFileSync('docs/masking-surfaces.md', 'utf8'),

@@ -1,23 +1,24 @@
 {
   "packageVersionSource": "package.json#version",
   "runtimeAssetNames": [
+    "host-shell.js",
     "runtime-prelude.js",
     "worker-prelude.js",
-    "sw.js",
     "zp-core.js",
-    "http-rewriter.js",
-    "rust-rewriter.js",
-    "rust-rewriter.wasm"
+    "network-worker.js",
+    "quickjs-runtime.mjs",
+    "quickjs-runtime.wasm"
   ],
+  "removedRuntimeAssets": ["http-rewriter.js", "rust-rewriter.js", "rust-rewriter.wasm"],
   "bundling": {
     "format": "classic-iife",
     "hashNames": false,
-    "reason": "service worker/runtime references fixed asset names"
+    "reason": "host shell/runtime references fixed asset names"
   },
   "minification": {
     "default": false,
     "flag": "--minify",
     "abiSafeRequirement": "hidden public APIs and ZP helper names must remain stable"
   },
-  "rewriterVersion": "phase3-rust-wasm-ast-4-import-map"
+  "quickjsRuntime": "source-built-quickjs-ng"
 }

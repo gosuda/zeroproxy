@@ -13,9 +13,12 @@ test('delivery/versioning/minification manifest matches build surfaces', () => {
   assert.equal(m.packageVersionSource, 'package.json#version');
   assert.ok(build.includes('const minify = args.minify === true'));
   assert.ok(build.includes("case '--minify':"));
-  assert.ok(build.includes(`const VERSION = '${m.rewriterVersion}';`));
+  assert.equal(build.includes('makeRustRewriterClassic'), false);
+  assert.ok(build.includes('makeQuickJSRuntime'));
   for (const asset of m.runtimeAssetNames)
     assert.ok(build.includes(asset) || fs.existsSync(`web/${asset}`), asset);
+  for (const asset of m.removedRuntimeAssets)
+    assert.equal(build.includes(asset) || fs.existsSync(`web/${asset}`), false, asset);
 });
 
 test('delivery/minification manifest keeps ABI-safe defaults explicit', () => {

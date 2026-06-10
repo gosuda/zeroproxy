@@ -4,10 +4,10 @@ const fs = require('node:fs');
 
 const sources = () =>
   [
+    fs.readFileSync('web/runtime/network/api.mjs', 'utf8'),
     fs.readFileSync('web/runtime/network/http.mjs', 'utf8'),
     fs.readFileSync('web/runtime-prelude.mjs', 'utf8'),
     fs.readFileSync('web/runtime/facades/fingerprinting.mjs', 'utf8'),
-    fs.readFileSync('web/sw.js', 'utf8'),
     fs.readFileSync('internal/zphttp/roundtrip.go', 'utf8'),
     fs.readFileSync('test/js/compat-pipeline.test.js', 'utf8'),
     fs.readFileSync('test/js/static-policy.test.js', 'utf8'),

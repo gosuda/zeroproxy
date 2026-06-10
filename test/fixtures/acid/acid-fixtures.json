@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "targetScore": 4,
+  "fixtures": [
+    {
+      "id": "dom-range-traversal",
+      "owner": "webapi-core",
+      "surfaces": ["Range", "TreeWalker", "NodeIterator"],
+      "expected": "pass"
+    },
+    {
+      "id": "cssom-layout",
+      "owner": "virtual-dom",
+      "surfaces": ["CSSStyleDeclaration", "getComputedStyle", "getBoundingClientRect"],
+      "expected": "pass"
+    },
+    {
+      "id": "svg-xml",
+      "owner": "virtual-dom",
+      "surfaces": ["namespaces", "XMLSerializer", "DOMParser"],
+      "expected": "pass"
+    },
+    {
+      "id": "event-loop-order",
+      "owner": "quickjs-event-loop",
+      "surfaces": ["queueMicrotask", "requestAnimationFrame", "timers"],
+      "expected": "pass"
+    }
+  ]
+}

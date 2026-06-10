@@ -9,9 +9,7 @@ use lol_html::{
     Settings,
 };
 
-use crate::{
-    css, import_map, js, rewrite_wrapped_source, share_url, RewriteContext, RewriteOutput,
-};
+use crate::{css, import_map, share_url, RewriteOutput};
 
 use super::{attr_policy_kind, fetch_url, link_rel_kind, srcset, target_url as resolve_target_url};
 use super::{blocked_element_kind, event_handler_attr_kind, meta_policy_kind, script_type_kind};
@@ -331,16 +329,12 @@ fn rewrite_event_handler_attrs<H: lol_html::HandlerTypes>(
     Ok(())
 }
 
-fn rewrite_event_handler(source: &str, target_url: &str, control_prefix: &str) -> RewriteOutput {
-    let ctx = RewriteContext::new(target_url, control_prefix, "", "");
-    rewrite_wrapped_source(
-        source,
-        "function __zp_event__(event){\n",
-        "\n}",
-        false,
-        ctx.without_runtime_context(),
-        true,
-    )
+fn rewrite_event_handler(_source: &str, _target_url: &str, _control_prefix: &str) -> RewriteOutput {
+    RewriteOutput {
+        ok: false,
+        code: String::new(),
+        error: "UNSUPPORTED_TARGET_JS_REWRITE".to_string(),
+    }
 }
 
 fn rewrite_inline_style_attr<H: lol_html::HandlerTypes>(
@@ -396,10 +390,10 @@ fn attr_names<H: lol_html::HandlerTypes>(
 
 fn rewrite_script_attrs<H: lol_html::HandlerTypes>(
     el: &mut lol_html::html_content::Element<'_, '_, H>,
-    target_url: &str,
-    control_prefix: &str,
-    tab_id: &str,
-    runtime_token: &str,
+    _target_url: &str,
+    _control_prefix: &str,
+    _tab_id: &str,
+    _runtime_token: &str,
 ) -> lol_html::HandlerResult {
     drop_control_attrs(el);
     backup_masked_attrs(el, true)?;
@@ -410,18 +404,8 @@ fn rewrite_script_attrs<H: lol_html::HandlerTypes>(
     }
     if let Some(src) = el.get_attribute("src") {
         if matches!(script_kind, "classic" | "module") {
-            let rewritten = js::module_urls::script_url(
-                &src,
-                script_kind,
-                target_url,
-                control_prefix,
-                tab_id,
-                runtime_token,
-            );
-            el.set_attribute("src", &rewritten.url)?;
-            if rewritten.ok {
-                el.set_attribute("data-zp-target-url", &rewritten.target)?;
-            } else if !src.trim().is_empty() {
+            el.remove_attribute("src");
+            if !src.trim().is_empty() {
                 el.set_attribute("data-zp-blocked-url", src.trim())?;
             }
         }
@@ -544,21 +528,16 @@ fn rewrite_raw_text_chunk(
 
 fn rewrite_inline_script(
     source: &str,
-    kind: &str,
-    target_url: &str,
-    control_prefix: &str,
-    tab_id: &str,
-    runtime_token: &str,
+    _kind: &str,
+    _target_url: &str,
+    _control_prefix: &str,
+    _tab_id: &str,
+    _runtime_token: &str,
 ) -> String {
     if source.trim().is_empty() {
         return String::new();
     }
-    let module = kind == "module";
-    let ctx = RewriteContext::new(target_url, control_prefix, tab_id, runtime_token);
-    match js::swc_rewriter::rewrite_script(source, module, ctx) {
-        Ok(code) => escape_inline_script_sentinel(&code),
-        Err(_) => block_script_source(),
-    }
+    block_script_source()
 }
 
 fn rewrite_inline_style(source: &str, target_url: &str, control_prefix: &str) -> String {
@@ -570,23 +549,6 @@ fn rewrite_inline_style(source: &str, target_url: &str, control_prefix: &str) ->
 
 fn block_script_source() -> String {
     "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');".to_string()
-}
-
-fn escape_inline_script_sentinel(code: &str) -> String {
-    let mut out = String::new();
-    let lower = code.to_ascii_lowercase();
-    let mut start = 0usize;
-    while let Some(offset) = lower[start..].find("</script") {
-        let pos = start + offset;
-        out.push_str(&code[start..pos]);
-        out.push_str("<\\/script");
-        start = pos + "</script".len();
-    }
-    if start == 0 {
-        return code.to_string();
-    }
-    out.push_str(&code[start..]);
-    out
 }
 
 fn drop_control_attrs<H: lol_html::HandlerTypes>(
@@ -987,7 +949,7 @@ mod tests {
         out.push_str(&stream.end().expect("stream end should rewrite"));
         assert_eq!(out, full);
         assert!(out.contains("runtime-prelude.js"));
-        assert!(out.contains("__zp_set"));
+        assert!(out.contains("Blocked by ZeroProxy rewrite policy"));
     }
     #[test]
     fn rewrites_passive_subresources_with_lol_html() {
@@ -1005,13 +967,13 @@ mod tests {
         .expect("document rewrite should succeed");
 
         for want in [
-            r#"src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flogo.png""#,
+            r#"src="/zp/error/POLICY_BLOCKED""#,
             r#"data-zp-target-url="https://example.com/logo.png""#,
-            r#"srcset="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fsmall.png 1x, /zp/api/fetch?url=https%3A%2F%2Fexample.com%2Flarge.png 2x""#,
+            r#"srcset="/zp/error/POLICY_BLOCKED 1x, /zp/error/POLICY_BLOCKED 2x""#,
             r#"data-zp-target-srcset="https://example.com/small.png 1x, https://example.com/large.png 2x""#,
-            r#"poster="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp%2Fposter.jpg""#,
-            r#"src="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fmedia.webm""#,
-            r#"href="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Ficons.svg#icon-a""#,
+            r#"poster="/zp/error/POLICY_BLOCKED""#,
+            r#"src="/zp/error/POLICY_BLOCKED""#,
+            r#"href="/zp/error/POLICY_BLOCKED""#,
             r#"data-zp-target-url="https://example.com/icons.svg#icon-a""#,
             r#"src="/zp/error/POLICY_BLOCKED""#,
             r#"data-zp-blocked-url="data:image/png;base64,AAAA""#,
@@ -1049,10 +1011,9 @@ mod tests {
             r#"href="data:application/x-zeroproxy-icon,1""#,
             r#"data-zp-target-url="https://example.com/favicon.ico""#,
             r#"data-zp-target-url="https://example.com/app/touch.png""#,
-            r#"href="/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fapp.css""#,
+            r#"href="/zp/error/POLICY_BLOCKED""#,
             r#"data-zp-target-url="https://example.com/app.css""#,
-            r#"data-zp-event-onload=""#,
-            r#"__zp_runEvent"#,
+            r#"data-zp-blocked-onload="this.media='all'; this.onload=null;""#,
             r#"href="/zp/error/POLICY_BLOCKED""#,
             r#"data-zp-blocked-url="data:text/css,x""#,
         ] {
@@ -1066,7 +1027,6 @@ mod tests {
             r#"href="touch.png""#,
             r#"href="/app.css""#,
             r#" onload="#,
-            r#"data-zp-blocked-onload"#,
         ] {
             assert!(
                 !out.contains(forbidden),
@@ -1242,23 +1202,17 @@ mod tests {
         .expect("document rewrite should succeed");
 
         for want in [
-            r#"src="/zp/api/script?kind=classic&u=https%3A%2F%2Fexample.com%2Fapp.js&tab=tab-1&rt=rt-1""#,
-            r#"src="/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fentry.js&tab=tab-1&rt=rt-1""#,
-            r#"data-zp-target-url="https://example.com/app.js""#,
-            r#"data-zp-target-url="https://example.com/entry.js""#,
+            r#"data-zp-blocked-url="/app.js""#,
+            r#"data-zp-blocked-url="/entry.js""#,
             r#"data-zp-integrity="sha384-i""#,
             r#"data-zp-target-nonce="target-nonce""#,
             r#"nonce="zp""#,
             r#"data-zp-static-script="1""#,
-            r#"<\/script>"#,
-            r#"/zp/api/script?kind=module&u=https%3A%2F%2Fexample.com%2Fapp%2Fdep.js&tab=tab-1&rt=rt-1"#,
-            r#""a":"/zp/api/script?kind=module\u0026rt=rt-1\u0026tab=tab-1\u0026u=https%3A%2F%2Fexample.com%2Fapp%2Fa.js""#,
-            r#"url("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fbg.png")"#,
-            r#"data-zp-event-onload=""#,
-            r#"data-zp-event-onclick=""#,
-            r#"__zp_runEvent"#,
+            "Blocked by ZeroProxy rewrite policy",
+            r#"data-zp-blocked-onload="location.href='/boot'""#,
+            r#"data-zp-blocked-onclick="return location.href""#,
             r#"srcdoc="<p>x</p><script nonce=zp>boot()</script><script nonce=zp src=&quot;/zp/assets/runtime-prelude.js&quot;></script>"#,
-            r#"/zp/api/script?kind=classic&u=https%3A%2F%2Fexample.com%2Fchild.js&tab=tab-1&rt=rt-1&quot; data-zp-target-url=&quot;https://example.com/child.js&quot; nonce=&quot;zp&quot;"#,
+            r#"data-zp-blocked-url=&quot;/child.js&quot; nonce=&quot;zp&quot;"#,
         ] {
             assert!(out.contains(want), "missing {want} in {out}");
         }
@@ -1266,8 +1220,8 @@ mod tests {
         for forbidden in [
             r#" onload="#,
             r#" onclick="#,
-            r#"data-zp-blocked-onload"#,
-            r#"data-zp-blocked-onclick"#,
+            r#"data-zp-event-onload"#,
+            r#"data-zp-event-onclick"#,
             r#" integrity="sha384-i""#,
             r#" nonce="target-nonce""#,
             r#"src="/app.js""#,

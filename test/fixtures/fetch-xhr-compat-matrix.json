@@ -83,7 +83,7 @@
     "priority": "p0",
     "axes": ["no-cors", "opaque response", "blocked unknown subresource"],
     "probes": ["opaque facade", "Response.error fail-close", "status/header/body opacity"],
-    "existingNeedles": ["opaqueResponseFacade", "no-cors", "Response.error()"],
+    "existingNeedles": ["opaqueResponseFacade", "no-cors", "static error()"],
     "behaviorOracle": {
       "fixture": "fetch-no-cors-opaque-oracle",
       "requests": [

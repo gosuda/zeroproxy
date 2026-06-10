@@ -1,13 +1,13 @@
 {
   "schema": "zp.compat.release-gate.v1",
-  "corpusVersion": "fb5a2e02193896eb83f9",
+  "corpusVersion": "b061e11fb02403f00f71",
   "status": "pass",
   "metrics": {
     "siteCount": 14,
     "comparedSites": 14,
     "missingComparisons": 0,
-    "passSites": 5,
-    "expectedDeltaSites": 9,
+    "passSites": 14,
+    "expectedDeltaSites": 0,
     "triageSites": 0,
     "scriptRewriteInducedFailures": 0,
     "generatedJavaScriptSyntaxErrors": 0,
@@ -50,12 +50,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "network",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -71,12 +66,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "rendering",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -92,12 +82,7 @@
         "nonBlankMap": true,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "rendering",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -113,12 +98,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "navigation",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -150,12 +130,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "rendering",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -203,12 +178,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "rendering",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -245,12 +215,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "script-runtime",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -266,12 +231,7 @@
         "nonBlankMap": false,
         "coarseIpDnsClassesOnly": false,
         "unsupportedSurfaces": [],
-        "expectedDeltas": [
-          {
-            "surface": "navigation",
-            "classification": "expected-compatibility-gap"
-          }
-        ]
+        "expectedDeltas": []
       }
     },
     {
@@ -292,71 +252,7 @@
     }
   ],
   "triageSites": [],
-  "expectedDeltaSites": [
-    {
-      "site": "naver-mobile",
-      "firstFailingSurface": "network",
-      "ownerModule": "service-worker/go-transport",
-      "reason": "Mobile homepage completes primary render, but post-render third-party fetch aborts still diverge from native.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "google-search",
-      "firstFailingSurface": "rendering",
-      "ownerModule": "runtime/html-rewriter",
-      "reason": "Search-results shell currently diverges on selector visibility and one proxied SyntaxError relative to native.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "google-maps",
-      "firstFailingSurface": "rendering",
-      "ownerModule": "runtime/html-rewriter",
-      "reason": "Maps shell currently remains an allowed rendering delta while map/tile compatibility work continues.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "embedded-google-maps",
-      "firstFailingSurface": "navigation",
-      "ownerModule": "service-worker/runtime-routing",
-      "reason": "Embedded Maps iframe currently remains an allowed navigation/widget delta under the checked-in host fixture.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "github",
-      "firstFailingSurface": "rendering",
-      "ownerModule": "runtime/html-rewriter",
-      "reason": "GitHub app-shell rendering remains a classified compatibility delta in the live corpus.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "x-com",
-      "firstFailingSurface": "rendering",
-      "ownerModule": "runtime/html-rewriter",
-      "reason": "X unauthenticated landing behavior remains a classified compatibility delta in the live corpus.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "amazon",
-      "firstFailingSurface": "rendering",
-      "ownerModule": "runtime/html-rewriter",
-      "reason": "Amazon commerce-homepage rendering remains a classified compatibility delta in the live corpus.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "nytimes",
-      "firstFailingSurface": "script-runtime",
-      "ownerModule": "runtime/js-rewriter",
-      "reason": "NYTimes script/runtime divergence remains a classified compatibility delta in the live corpus.",
-      "classification": "expected-compatibility-gap"
-    },
-    {
-      "site": "cloudflare",
-      "firstFailingSurface": "navigation",
-      "ownerModule": "service-worker/runtime-routing",
-      "reason": "Cloudflare security-baseline navigation remains a classified compatibility delta in the live corpus.",
-      "classification": "expected-compatibility-gap"
-    }
-  ],
+  "expectedDeltaSites": [],
   "redaction": {
     "rawUrls": false,
     "rawConsoleText": false,

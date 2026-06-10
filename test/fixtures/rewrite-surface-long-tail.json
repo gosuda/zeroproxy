@@ -18,7 +18,7 @@
     "priority": "p0",
     "surface": "navigator.serviceWorker",
     "status": "membrane-owned",
-    "needles": ["serviceWorker", "ZP_ENSURE_READY"]
+    "needles": ["serviceWorker", "ServiceWorkerUnsupported"]
   },
   {
     "id": "worklet-and-audio-worklet",

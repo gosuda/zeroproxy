@@ -29,14 +29,19 @@ function readRuntimeSource() {
   ].join('\n');
 }
 
-function readServiceWorkerSource() {
-  return [
-    fs.readFileSync('web/sw.js', 'utf8'),
-    fs.readFileSync('web/sw/kernel.js', 'utf8'),
-    fs.readFileSync('web/sw/routes.js', 'utf8'),
-    fs.readFileSync('web/sw/transport.js', 'utf8'),
-    fs.readFileSync('web/sw/responses.js', 'utf8'),
-  ].join('\n');
+const legacyServiceWorkerPaths = [
+  'web/sw.js',
+  'web/sw-entry.mjs',
+  'web/sw/kernel.js',
+  'web/sw/routes.js',
+  'web/sw/transport.js',
+  'web/sw/responses.js',
+];
+
+function assertLegacyServiceWorkerDeleted() {
+  for (const file of legacyServiceWorkerPaths) {
+    assert.equal(fs.existsSync(file), false, `${file} must be deleted after QuickJS cutover`);
+  }
 }
 
 function htmlFiles(root) {
@@ -59,10 +64,12 @@ function runtimeSrcdocHelpers() {
   };
 }
 
-test('service worker has no unclassified native fetch fallback', () => {
-  const sw = readServiceWorkerSource();
-  assert.equal(/return\s+fetch\s*\(\s*event\.request\s*\)/.test(sw), false);
-  assert.match(sw, /event\.respondWith\(handleFetch\(event\)\)/);
+test('legacy service worker source path is deleted', () => {
+  assertLegacyServiceWorkerDeleted();
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.equal(build.includes('sw-entry.mjs'), false);
+  assert.equal(server.includes('controlPrefix + "sw.js"'), false);
 });
 
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {
@@ -126,12 +133,16 @@ test('runtime preserves native direct eval for lexical generated functions', () 
     'global helper reads must not redirect bare eval through a facade',
   );
   assert.ok(
-    rt.includes("return rewritePageSource(source, 'classic');"),
-    'direct eval source must go through the JavaScript rewriter',
+    rt.includes('function rewritePageSource()'),
+    'legacy native page-source rewrite hook must be reduced to a fail-closed stub',
+  );
+  assert.ok(
+    rt.includes("throw normalizedError('NotSupportedError');"),
+    'legacy native dynamic/eval source must fail closed after QuickJS cutover',
   );
   assert.ok(
     rt.includes('return current === Native.eval ? indirectEval : current;'),
-    'native window.eval reads must receive the indirect rewritten eval wrapper',
+    'native window.eval reads must receive the indirect fail-closed eval wrapper',
   );
   assert.equal(
     rt.includes('with(__zp_eval_scope())'),
@@ -140,10 +151,8 @@ test('runtime preserves native direct eval for lexical generated functions', () 
   );
   const dynamic = fs.readFileSync('web/runtime/dynamic-code/facade.mjs', 'utf8');
   assert.ok(
-    dynamic.includes(
-      "return (0, Native.eval)(rewriteScriptSource(String(text || ''), 'classic'));",
-    ),
-    'string timers still execute rewritten source through native indirect eval',
+    dynamic.includes("throw normalizedError('NotSupportedError');"),
+    'string timers and dynamic Function wrappers must fail closed in native prelude',
   );
   assert.equal(
     dynamic.includes('__ZP_EVAL_SCOPE'),
@@ -237,19 +246,13 @@ test('runtime installs required escape-vector hooks', () => {
     'src*="zp"',
     "objectDefineProperty(root, 'Worker'",
     "objectDefineProperty(root, 'SharedWorker'",
-    '__ZP_WORKER_LOCATION',
-    'virtualBlobWorkerLocation',
-    'workerBlobURLs',
-    'workerBlobURLMap',
-    'blobURLRawMap',
-    'workerBootstrapBlobURL',
-    'scriptBlobURLForPage',
-    'workerBlobURLMap.get(parsed.href)',
-    "reflectApply(urlSearchParamsSet, params, ['loc', requestTargetURL(raw)])",
+    "throw normalizedError('NotSupportedError')",
+    "maskNativeFunction(ZPWorker, 'Worker')",
+    "maskNativeFunction(ZPSharedWorker, 'SharedWorker')",
+    "define(wk, 'addModule', function(){ return Promise.reject(normalizedError('NotSupportedError')); })",
     "objectDefineProperty(URL, 'createObjectURL'",
-    'try { Native.revokeObjectURL(raw); } catch {}',
-    'dataWorkerURL',
-    'rewriteDynamicFunctionBody',
+    'return Native.createObjectURL(blob);',
+    "throw normalizedError('NotSupportedError')",
     'configurable: true',
     'w.addEventListener && reflectApply(functionBind, w.addEventListener, [w])',
     'rawPostMessageTarget(target)',
@@ -303,37 +306,20 @@ test('runtime installs required escape-vector hooks', () => {
     assert.ok(worker.includes(needle), `missing worker ${needle}`);
 });
 
-test('runtime keeps JavaScript rewriting fail-closed and canonicalizes module URLs', () => {
+test('runtime keeps native JavaScript rewrite path fail-closed after QuickJS cutover', () => {
   const rt = readRuntimeSource();
   assert.equal(
     rt.includes('fallbackRewritePageSource'),
     false,
     'page script rewriting must not use a regex fallback',
   );
-  assert.ok(
-    rt.includes(
-      "if (!root.ZPHTTPRewriter || typeof root.ZPHTTPRewriter.rewriteScriptSource !== 'function') throw normalizedError('NotSupportedError');",
-    ),
-  );
-  const start = rt.indexOf('function scriptProxyPath(target, kind)');
-  const end = rt.indexOf('function setScriptSource', start);
-  const body = rt.slice(start, end);
-  assert.ok(
-    body.includes("if (kind !== 'module')"),
-    'module proxy URLs must keep referrer data out',
-  );
-  assert.ok(
-    body.indexOf("params.set('tab'") < body.indexOf("if (kind !== 'module')"),
-    'runtime tab token must be part of module graph identity',
-  );
-  assert.ok(
-    body.indexOf("params.set('rt'") < body.indexOf("if (kind !== 'module')"),
-    'runtime token must be part of module graph identity',
-  );
-  assert.ok(
-    body.indexOf("if (kind !== 'module')") < body.indexOf("params.set('ref'"),
-    'ref/rp must not be part of module identity',
-  );
+  assert.ok(rt.includes('function rewritePageSource()'));
+  assert.equal(rt.includes('ZPHTTPRewriter'), false);
+  assert.equal(rt.includes('ZPRewriter'), false);
+  assert.equal(rt.includes('function scriptProxyPath'), false);
+  assert.equal(rt.includes("ZP.apiPath('script')"), false);
+  assert.equal(rt.includes("params.set('u', target)"), false);
+  assert.ok(rt.includes("return blockExecutableURL(el, 'src', value);"));
 });
 
 test('runtime hardens late helper calls with captured method-level natives', () => {
@@ -357,39 +343,35 @@ test('runtime hardens late helper calls with captured method-level natives', () 
     'const nativeReflectApply = NativeReflect.apply',
     "objectDefineProperty(self, '__ZP_WORKER_PRELUDE'",
     'return reflectApply(get(target, prop), actual, arrayIsArray(args) ? args : []);',
-    'const nativeImportScripts = reflectApply(NativeFunctionBind, self.importScripts, [self]);',
   ]) {
     assert.ok(worker.includes(needle), `missing worker captured native use: ${needle}`);
   }
   assert.equal(worker.includes('urls.map(importScriptURL)'), false);
+  assert.equal(worker.includes('/zp/api/'), false);
 });
 
-test('generated and dynamic JavaScript paths stay routed through the rewriter', () => {
+test('generated and dynamic JavaScript paths stay inside runtime hooks', () => {
   const rt = readRuntimeSource();
   const dynamic = fs.readFileSync('web/runtime/dynamic-code/facade.mjs', 'utf8');
-  const sw = readServiceWorkerSource();
+  const quickjs = fs.readFileSync('web/runtime/quickjs/engine.mjs', 'utf8');
   for (const needle of [
     'function installDocumentWriteHooks',
     'transformHTML(String(markup))',
     'createContextualFragment',
     'rewriteEventAttribute(val)',
     'function rewriteSrcdocDocument(source, frame)',
-    'targetUrl: srcdocTargetURL(frame)',
-    'return `${prelude}${transformHTML(source)}`',
-    "rewritePageSource(source, 'classic')",
+    'return `$' + '{prelude}$' + '{transformHTML(source)}`',
   ]) {
-    assert.ok(rt.includes(needle), `missing generated rewriter route: ${needle}`);
+    assert.ok(rt.includes(needle), `missing generated runtime hook: ${needle}`);
   }
   for (const needle of [
-    'rewriteDynamicFunctionBody(params, body)',
-    'root.ZPHTTPRewriter.rewriteFunctionBody',
-    "rewriteScriptSource(String(text || ''), 'classic')",
-    'reflectConstruct(ctor, ctorArgs)',
+    'function compileDynamic(_ctor, _args, _kind)',
+    "throw normalizedError('NotSupportedError')",
+    'function compileTimerString()',
   ]) {
-    assert.ok(dynamic.includes(needle), `missing dynamic rewriter route: ${needle}`);
+    assert.ok(dynamic.includes(needle), `missing dynamic runtime hook: ${needle}`);
   }
-  assert.ok(sw.includes('rewriteScriptResponse'));
-  assert.ok(sw.includes('rewriteScriptOutcome'));
+  assert.ok(quickjs.includes('evalClassic'));
 });
 
 test('filtered DOM collections expose numeric indexes to native slice', () => {
@@ -419,35 +401,30 @@ test('blocked selector NodeList facades do not use array-backed filtered collect
   assert.ok(rt.includes("querySelectorAll.call(self, ':not(*)')"));
 });
 
-test('HTML document transform has a streaming Go-to-Rust bridge', () => {
+test('legacy HTML document transform bridge is fail-closed after QuickJS raw mode cutover', () => {
   const tx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-  const rust = fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8');
   assert.ok(tx.includes('DocumentStreamRewriter'));
-  assert.ok(tx.includes('stream.WriteChunk(chunk)'));
-  assert.ok(tx.includes('stream.End()'));
-  assert.ok(tx.includes('make([]byte, 16*1024)'));
-  assert.ok(kernel.includes('DocumentStreamRewriter: rewriteHTMLDocumentStreamFromJS'));
-  assert.ok(kernel.includes('createHTMLDocumentRewriter'));
-  assert.ok(build.includes('wasm_bindgen.create_html_document_rewriter'));
-  assert.ok(build.includes('createHTMLDocumentRewriter: createHTMLDocumentRewriterPublic'));
-  assert.ok(rust.includes('HtmlRewriter::new'));
+  assert.equal(kernel.includes('DocumentStreamRewriter: rewriteHTMLDocumentStreamFromJS'), false);
+  assert.equal(kernel.includes('createHTMLDocumentRewriter'), false);
+  assert.equal(build.includes('wasm_bindgen.create_html_document_rewriter'), false);
   assert.equal(
-    tx.includes('io.ReadAll(r)'),
-    true,
-    'whole-document fallback must remain for old hooks',
+    build.includes('createHTMLDocumentRewriter: createHTMLDocumentRewriterPublic'),
+    false,
   );
+  assert.ok(kernel.includes('legacyDocumentTransformBlocked'));
+  assert.ok(kernel.includes('HTML_DOCUMENT_TRANSFORM_UNAVAILABLE'));
 });
 
-test('classic script rewrite carries document charset for legacy Korean news scripts', () => {
-  const rt = readRuntimeSource();
-  const sw = readServiceWorkerSource();
-  assert.ok(rt.includes("const documentCharset = String(boot.documentCharset || '')"));
-  assert.ok(rt.includes("params.set('dc', documentCharset)"));
-  assert.ok(sw.includes("const documentCharset = url.searchParams.get('dc') || ''"));
-  assert.ok(sw.includes('scriptResponseText(resp, opt.documentCharset ||'));
-  assert.ok(sw.includes('new TextDecoder(charset).decode(bytes)'));
+test('target script source now enters QuickJS without Service Worker charset routing', () => {
+  const loader = fs.readFileSync('web/runtime/resources/loader.mjs', 'utf8');
+  const quickjs = fs.readFileSync('web/runtime/quickjs/engine.mjs', 'utf8');
+  assert.ok(loader.includes('executeInlineScript'));
+  assert.ok(loader.includes('executeExternalScript'));
+  assert.ok(loader.includes('this.realm.evalClassic'));
+  assert.ok(quickjs.includes('evalClassic'));
+  assert.equal(loader.includes('/zp/api/'), false);
 });
 
 test('runtime HTTP facade resolves relative requests without site-specific host maps', () => {
@@ -456,19 +433,19 @@ test('runtime HTTP facade resolves relative requests without site-specific host 
   assert.ok(http.includes('const parsed = new URL(raw, getBaseURL())'));
 });
 
-test('Rust rewriter bootstrap falls back to async WASM load if sync bytes fail', () => {
+test('QuickJS runtime is built directly from QuickJS-NG source instead of Rust rewriter assets', () => {
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-  assert.ok(build.includes("policy.allowsFeature('sync-xhr')"));
-  assert.ok(build.includes("typeof XMLHttpRequest !== 'function' || !syncXHRAllowed()"));
-  assert.ok(build.includes('function bootstrapInit()'));
-  assert.ok(build.includes('try { if (initSync()) return; } catch {} init().catch(() => {})'));
-  assert.ok(build.includes('bootstrapInit();'));
+  assert.ok(build.includes('makeQuickJSRuntime'));
+  assert.ok(build.includes('quickjs.c'));
+  assert.ok(build.includes('emcc is required to build QuickJS-NG from source'));
+  assert.equal(build.includes('bootstrapInit();'), false);
+  assert.equal(build.includes('rust-rewriter.wasm'), false);
 });
 
 test('response wrappers strip target permissions policy headers', () => {
-  const swResponses = fs.readFileSync('web/sw/responses.js', 'utf8');
-  assert.ok(swResponses.includes("h.delete('Permissions-Policy')"));
-  assert.ok(swResponses.includes("h.delete('Feature-Policy')"));
+  const headersPolicy = fs.readFileSync('internal/headers/policy.go', 'utf8');
+  assert.ok(headersPolicy.includes('"permissions-policy"'));
+  assert.ok(headersPolicy.includes('"feature-policy"'));
 });
 
 test('runtime sync XHR avoids native sync requests when policy disables them', () => {
@@ -477,82 +454,42 @@ test('runtime sync XHR avoids native sync requests when policy disables them', (
   assert.ok(rt.includes('if (!syncXHRAllowed()) return failSyncXHR(xhr);'));
 });
 
-test('HTML document transform is a thin Go wrapper over Rust lol_html policy', () => {
+test('legacy htmltx wrapper is no longer wired to browser-packaged Rust document rewrite', () => {
   const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
-  const rust = fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8');
+  const rustLib = fs.readFileSync('rewriter-rs/src/lib.rs', 'utf8');
 
   assert.match(
     htmltx,
     /DocumentRewriter\s+func\(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers \[\]string\)/,
   );
-  assert.ok(htmltx.includes('opt.DocumentRewriter('));
-  assert.equal(htmltx.includes('golang.org/x/net/html'), false);
-  for (const forbidden of [
-    'xhtml.',
-    'streamTransformer',
-    'tokenRewriter',
-    'rewriteToken',
-    'wrapScriptURL',
-    'wrapFetchURL',
-    'rewriteSrcset',
-    'resolveVisibleTargetURL',
-    'baseSyncScript',
-    'classifyAttrPolicy',
-    'classifyScriptType',
-    'rewriteInlineStyle',
-    'rewriteInlineScript',
-    'rewriteInlineImportMap',
-  ]) {
-    assert.equal(htmltx.includes(forbidden), false, `${forbidden} must not remain in Go htmltx`);
-  }
-  assert.match(kernel, /DocumentRewriter:\s+rewriteHTMLDocumentFromJS/);
-  assert.ok(kernel.includes('rewriteHTMLDocumentFromJS'));
-  assert.ok(kernel.includes('"tabId":         tabID'));
-  assert.ok(kernel.includes('"runtimeToken":  runtimeToken'));
-  assert.ok(build.includes('wasm_bindgen.rewrite_html_document'));
-  assert.ok(build.includes('rewriteHTMLDocument: rewriteHTMLDocumentPublic'));
-  for (const needle of [
-    'rewrite_script(',
-    'script_url(',
-    'fetch_url(',
-    'srcset(',
-    'target_url(',
-    'new_with_servers',
-    'link_rel_kind',
-    'blocked_element_kind',
-    'meta_policy_kind',
-    'attr_policy_kind',
-    'script_type_kind',
-    'event_handler_attr_kind',
-    'rewrite_inline_script',
-    'rewrite_inline_style',
-    'import_map::rewrite',
-    'srcdoc',
-  ]) {
-    assert.ok(rust.includes(needle), `Rust document policy missing ${needle}`);
-  }
+  assert.equal(kernel.includes('DocumentRewriter:'), false);
+  assert.equal(kernel.includes('rewriteHTMLDocumentFromJS'), false);
+  assert.ok(kernel.includes('legacyDocumentTransformBlocked'));
+  assert.ok(kernel.includes('HTML_DOCUMENT_TRANSFORM_UNAVAILABLE'));
+  assert.equal(build.includes('wasm_bindgen.rewrite_html_document'), false);
+  assert.equal(build.includes('rewriteHTMLDocument: rewriteHTMLDocumentPublic'), false);
+  assert.equal(build.includes('virtual:zeroproxy-rust-rewriter'), false);
+  assert.ok(
+    rustLib.includes('rewrite_css('),
+    'Rust helper crate may retain CSS/resource helpers during cleanup',
+  );
 });
 
-test('runtime import maps delegate rewrite policy to Rust rewriter ABI', () => {
+test('runtime import maps fail closed without Rust AST rewriter ABI', () => {
   const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
-  const match = rt.match(/function rewriteImportMapText\(source\) \{([\s\S]*?)\n {2}\}/);
-  assert.ok(match, 'runtime import-map rewrite function missing');
+  const match = rt.match(/function rewriteImportMapText\(\) \{([\s\S]*?)\n {2}\}/);
+  assert.ok(match, 'runtime import-map fail-closed function missing');
   const body = match[1];
-  assert.ok(body.includes('root.ZPRewriter'));
-  assert.ok(body.includes('rw.rewriteImportMap'));
-  assert.ok(body.includes('baseUrl: baseURL'));
-  assert.ok(body.includes('tabId: boot.tabId'));
-  assert.ok(body.includes('runtimeToken'));
-  assert.ok(body.includes('controlPrefix: ZP.CONTROL_PREFIX'));
+  assert.equal(body.includes('ZPRewriter'), false);
+  assert.equal(body.includes('rewriteImportMap'), false);
   assert.ok(body.includes("return '{}';"));
-  assert.equal(body.includes('JSON.parse'), false);
   assert.equal(body.includes('scriptProxyPath'), false);
   assert.equal(body.includes('new URL'), false);
 });
 
-test('Rust HTML document rewrite surface is backed by lol_html', () => {
+test('Rust helper crate is not browser-packaged after AST cutover', () => {
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
   const cargo = fs.readFileSync('rewriter-rs/Cargo.toml', 'utf8');
   const rust = fs.readFileSync('rewriter-rs/src/html/document.rs', 'utf8');
@@ -561,8 +498,8 @@ test('Rust HTML document rewrite surface is backed by lol_html', () => {
   assert.ok(rust.includes('rewrite_str'));
   assert.equal(rust.includes('html5ever'), false);
   assert.equal(rust.includes('swc_html'), false);
-  assert.ok(build.includes('wasm_bindgen.rewrite_html_document'));
-  assert.ok(build.includes('rewriteHTMLDocument: rewriteHTMLDocumentPublic'));
+  assert.equal(build.includes('wasm_bindgen.rewrite_html_document'), false);
+  assert.equal(build.includes('rewriteHTMLDocument: rewriteHTMLDocumentPublic'), false);
 });
 
 test('html transformer fails closed without Rust document rewriter hook', () => {
@@ -573,30 +510,19 @@ test('html transformer fails closed without Rust document rewriter hook', () => 
   );
 });
 
-test('runtime CSS rewriting still fails closed without Rust rewriter hook', () => {
+test('runtime CSS rewriting still fails closed without unsafe fallback hooks', () => {
   const htmltx = fs.readFileSync('internal/htmltx/transform.go', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
   const rt = fs.readFileSync('web/runtime-prelude.mjs', 'utf8');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const http = fs.readFileSync('web/http-rewriter.js', 'utf8');
+  const sanitizerCSS = fs.readFileSync('internal/htmlsanitize/css.go', 'utf8');
   assert.equal(htmltx.includes('func rewriteInlineStyle'), false);
   assert.equal(kernel.includes('func rewriteCSSFromJS'), false);
   assert.equal(kernel.includes('return source, nil'), false);
   assert.equal(rt.includes('fallbackRewriteCSS'), false);
   assert.equal(rt.includes('cssUrlToken'), false);
-  assert.ok(
-    rt.includes(
-      "return root.ZPHTTPRewriter.rewriteCSSSource(String(source || ''), { baseUrl: base, controlPrefix: ZP.CONTROL_PREFIX, fallback: () => '' });",
-    ),
-  );
-  assert.equal(sw.includes("fallback: value => String(value || '')"), false);
-  assert.ok(sw.includes("fallback: () => ''"));
-  assert.equal(sw.includes("new Response(await resp.text().catch(() => '')"), false);
-  assert.ok(
-    http.includes(
-      "const fallback = typeof options.fallback === 'function' ? options.fallback : () => '';",
-    ),
-  );
+  assert.ok(sanitizerCSS.includes('cssrewrite.RewriteWithMapper'));
+  assert.equal(sanitizerCSS.includes('/zp/api/'), false);
+  assert.equal(fs.existsSync('web/http-rewriter.js'), false);
 });
 
 test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
@@ -623,66 +549,43 @@ test('runtime maps postMessage targetOrigin for proxied iframe windows', () => {
   );
 });
 
-test('service worker waits for initialized WASM transport and cookie bridge', () => {
-  const sw = readServiceWorkerSource();
+test('host shell boots GoNetworkBackend without service worker control', () => {
+  assertLegacyServiceWorkerDeleted();
   const index = fs.readFileSync('web/index.html', 'utf8');
+  const host = fs.readFileSync('web/host-shell-entry.mjs', 'utf8');
   const kernel = fs.readFileSync('cmd/wasm-kernel/main.go', 'utf8');
-  assert.ok(sw.includes('__zp_kernel_init'), 'service worker does not require transport init');
-  assert.match(
-    sw,
-    /^importScripts\('\/zp\/assets\/wasm_exec\.js'\);/m,
-    'wasm_exec must be imported during service worker installation',
-  );
-  assert.ok(
-    sw.includes('__zp_cookie_set'),
-    'service worker does not bridge document.cookie to kernel jar',
-  );
-  assert.ok(
-    sw.includes('runtimeTabForMessage'),
-    'service worker does not gate runtime messages by tab',
-  );
-  assert.ok(
-    sw.includes('runtimeMessageAuthorized'),
-    'service worker does not validate runtime capability tokens',
-  );
-  assert.ok(
-    sw.includes('runtimeToken: ZP.randomId'),
-    'service worker does not generate runtime capability tokens',
-  );
-  assert.ok(
-    sw.includes('X-ZP-Runtime-Token'),
-    'service worker does not pass runtime capability to documents',
-  );
-  assert.ok(sw.includes('startupPhase: readinessStartupPhase()'));
-  assert.ok(sw.includes("if (readiness === 'WASM_LOADING') return 'wasm-downloading';"));
-  assert.ok(sw.includes("if (readiness === 'WASM_LOADED') return 'wasm-starting';"));
-  assert.ok(
-    index.includes(
-      "if (!(await waitForController(5000))) await startupReload('service-worker-not-controlling');",
-    ),
-  );
-  assert.ok(index.includes('function startupProgressing(state)'));
-  assert.ok(index.includes("state.startupPhase === 'wasm-downloading'"));
-  assert.ok(index.includes("state.startupPhase === 'wasm-starting'"));
-  assert.equal(
-    index.includes('state.kernelStarting && state.readinessAgeMs'),
-    false,
-    'index must not wait just because the service worker has a kernel promise',
-  );
+  assert.ok(index.includes('/zp/assets/host-shell.js'));
+  assert.equal(index.includes('navigator.serviceWorker'), false);
+  assert.equal(index.includes("register('/zp/sw.js'"), false);
+  assert.equal(index.includes('ZP_OPEN_SHARE'), false);
+  assert.ok(host.includes('new GoNetworkBackend'));
+  assert.ok(host.includes("workerURL: '/zp/assets/network-worker.js'"));
+  assert.ok(host.includes("from './runtime/quickjs/engine.mjs'"));
+  assert.ok(host.includes("from './runtime/webapi/core.mjs'"));
+  assert.ok(host.includes('lazyForegroundBackend'));
+  assert.ok(host.includes('forceForeground()'));
+  assert.ok(host.includes('/zp/assets/wasm_exec.js'));
+  assert.ok(host.includes('/zp/kernel.wasm'));
+  assert.ok(host.includes('__ZP_NETWORK_BACKEND'));
+  assert.ok(host.includes('__ZP_CURRENT_SHARE'));
+  assert.ok(host.includes('__ZP_QUICKJS_READY'));
+  assert.ok(host.includes('initQuickJSRuntime'));
+  assert.equal(host.includes('/zp/api/'), false);
   assert.ok(kernel.includes('js.Global().Set("__zp_kernel_init"'), 'kernel init export missing');
   assert.ok(kernel.includes('js.Global().Set("__zp_cookie_set"'), 'kernel cookie export missing');
   assert.ok(kernel.includes('Target host:'), 'kernel error page does not expose target host');
-  assert.ok(sw.includes('Target host:'), 'service worker error page does not expose target host');
 });
 
-test('service worker response wrappers force nosniff', () => {
-  const sw = readServiceWorkerSource();
-  assert.match(sw, /h\.set\('X-Content-Type-Options', 'nosniff'\)/);
-  assert.match(sw, /'X-Content-Type-Options': 'nosniff'/);
+test('server response wrappers force nosniff without service worker routes', () => {
+  const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  assert.ok(server.includes('X-Content-Type-Options'));
+  assert.ok(server.includes('nosniff'));
+  assert.equal(server.includes('serveSW'), false);
+  assert.equal(server.includes('workerBootstrap'), false);
+  assert.equal(server.includes('/zp/api/'), false);
 });
 
-test('phase 3 script rewriting pipeline is fail-closed', () => {
-  const sw = readServiceWorkerSource();
+test('native JS rewriter hot path is disabled after QuickJS cutover', () => {
   const rt = readRuntimeSource();
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
   const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
@@ -690,41 +593,32 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   const index = fs.readFileSync('web/index.html', 'utf8');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
   const cargo = fs.readFileSync('rewriter-rs/Cargo.toml', 'utf8');
-  assert.ok(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"));
-  assert.ok(sw.includes("importScripts('/zp/assets/http-rewriter.js')"));
-  assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
-  assert.ok(sw.includes('/zp/api/script'));
-  assert.ok(sw.includes('rewriteScriptResponse'));
-  assert.ok(sw.includes('rewriteScriptOutcome'));
-  assert.ok(build.includes('rewriter-rs'));
-  assert.ok(build.includes('wasm-bindgen'));
-  assert.ok(build.includes('ZPRewriter'));
-  assert.ok(build.includes('ZPRustRewriter'));
-  assert.ok(build.includes('http-rewriter.js'));
-  assert.ok(build.includes('rust-rewriter.wasm'));
+  const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
+  const loader = fs.readFileSync('web/runtime/resources/loader.mjs', 'utf8');
+  for (const src of [build, server, worker, loader]) {
+    assert.equal(src.includes('/zp/api/'), false);
+  }
+  assert.equal(build.includes('sw-entry.mjs'), false);
+  assert.equal(build.includes('virtual:zeroproxy-sw-body'), false);
+  assert.ok(build.includes('quickjs-ng'));
+  assert.ok(build.includes('quickjs-runtime.mjs'));
+  assert.ok(build.includes('quickjs-runtime.wasm'));
   assert.equal(build.includes('__zp_rust_b64'), false);
   assert.equal(build.includes('__ZP_RUST_WASM_BYTES'), false);
-  assert.ok(fs.readFileSync('web/http-rewriter.js', 'utf8').includes('ZPHTTPRewriter'));
-  assert.ok(build.includes('phase3-rust-wasm-ast-4-import-map'));
-  assert.ok(build.includes('cargoBinPath'));
-  assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust rewriter manifest missing');
-  assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust rewriter AST walker missing');
+  assert.equal(build.includes('cargoBinPath'), false);
+  assert.equal(build.includes('virtual:zeroproxy-rust-rewriter'), false);
+  assert.equal(build.includes('rust-rewriter.wasm'), false);
+  assert.ok(fs.existsSync('rewriter-rs/Cargo.toml'), 'Rust helper manifest missing');
+  assert.ok(fs.existsSync('rewriter-rs/src/lib.rs'), 'Rust helper source missing');
   assert.equal(cargo.includes('html5ever'), false);
   assert.equal(cargo.includes('swc_html_parser'), false);
   assert.equal(cargo.includes('swc_html_ast'), false);
   assert.ok(cargo.includes('lol_html'));
   assert.ok(build.includes('wasm_exec.js'));
-  assert.ok(sw.includes("ZP.assetPath('rust-rewriter.wasm')"));
   assert.equal(fs.existsSync('web/js-rewriter.js'), false);
   assert.equal(fs.existsSync('web/wasm_exec.js'), false);
   assert.match(rt, /setAttributeNS/);
-  assert.match(rt, /setAttributeNode/);
-  assert.match(rt, /setAttributeNodeNS/);
-  assert.match(rt, /getAttributeNode/);
-  assert.match(rt, /removeAttributeNode/);
   assert.match(rt, /NamedNodeMap/);
-  assert.match(rt, /setNamedItemNS/);
-  assert.match(rt, /Attr\.prototype/);
   assert.equal(/connect-src\s+\*/.test(core), false);
   assert.ok(core.includes('connect-src '));
   assert.equal(/script-src \*/.test(core), false);
@@ -740,22 +634,15 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(server.includes("script-src 'self' blob: 'wasm-unsafe-eval'"));
   assert.match(htmltx, /runtimePrelude[\s\S]*runtime-prelude\.js/);
   assert.match(rt, /injectSrcdoc[\s\S]*runtime-prelude\.js/);
-  assert.equal(/runtimePrelude[\s\S]*zp-core\.js/.test(htmltx), false);
-  assert.equal(/runtimePrelude[\s\S]*rust-rewriter\.js/.test(htmltx), false);
-  assert.equal(/runtimePrelude[\s\S]*http-rewriter\.js/.test(htmltx), false);
   assert.equal(rt.includes('Reflect.construct(Native.FunctionCtor'), false);
   assert.match(server, /connect-src 'self'/);
   assert.equal(core.includes('navigate-to'), false);
   assert.equal(server.includes('navigate-to'), false);
-  assert.equal(sw.includes('MAX_REQUEST_BODY_BYTES'), false);
-  assert.equal(sw.includes('pendingSubmissions'), false);
-  assert.equal(sw.includes('ZP_SUBMIT_PREPARE'), false);
-  assert.equal(sw.includes('zp_submit'), false);
-  assert.equal(sw.includes('REQUEST_BODY_TOO_LARGE'), false);
-  assert.ok(sw.includes('runtimeFetchContext'));
-  assert.ok(sw.includes('scriptRequestContext'));
-  assert.equal(/url\.pathname === '\/zp\/api\/fetch'[\s\S]{0,240}firstTab\(\)/.test(sw), false);
-  assert.equal(sw.includes('firstTab'), false);
+  assert.equal(worker.includes('MAX_REQUEST_BODY_BYTES'), false);
+  assert.equal(worker.includes('pendingSubmissions'), false);
+  assert.equal(worker.includes('ZP_SUBMIT_PREPARE'), false);
+  assert.equal(worker.includes('zp_submit'), false);
+  assert.equal(worker.includes('REQUEST_BODY_TOO_LARGE'), false);
   assert.ok(rt.includes('root.open(nav.href, nav.target)'));
   assert.ok(rt.includes('data-zp-blocked-target'));
   const bridge = fs.readFileSync('internal/swhttp/bridge_js.go', 'utf8');
@@ -788,19 +675,19 @@ test('runtime srcdoc injection inventory stays single-runtime-asset', () => {
     '/zp/assets/zp-core.js',
     '/zp/assets/rust-rewriter.js',
     '/zp/assets/http-rewriter.js',
-    '/zp/api/script',
+    '/zp/error/POLICY_BLOCKED',
   ]) {
     assert.equal(tmpl.includes(forbidden), false, `${forbidden} must not be injected into srcdoc`);
   }
   assert.ok(tmpl.includes('__ZP_BOOT'));
   assert.ok(tmpl.includes('document.currentScript.remove()'));
-  assert.ok(fullSource.includes('rw.rewriteHTMLDocument(source, opts)'));
+  assert.equal(fullSource.includes('rw.rewriteHTMLDocument(source, opts)'), false);
   assert.ok(fullSource.includes('documentReferrer: referrer'));
-  assert.ok(fullSource.includes('targetUrl: srcdocTargetURL(frame)'));
-  assert.ok(fullSource.includes('return `${prelude}${transformHTML(source)}`'));
+  assert.ok(fullSource.includes('targetUrl,'));
+  assert.ok(fullSource.includes('return `$' + '{prelude}$' + '{transformHTML(source)}`'));
 });
 
-test('service worker names every required safe error class', () => {
+test('core names every required safe error class', () => {
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
   for (const code of [
     'BAD_HMAC',
@@ -822,10 +709,10 @@ test('service worker names every required safe error class', () => {
 });
 
 test('active browsing emits only encrypted prefixed p routes', () => {
-  const sw = readServiceWorkerSource();
   const rt = readRuntimeSource();
-  assert.equal(sw.includes('/v/'), false, 'service worker must not produce legacy /v routes');
+  const host = fs.readFileSync('web/host-shell-entry.mjs', 'utf8');
   assert.equal(rt.includes('/v/'), false, 'runtime must not produce legacy /v routes');
-  assert.ok(sw.includes('PROXY_DOCUMENT'), 'service worker must handle /zp/p documents');
+  assert.equal(host.includes('/v/'), false, 'host shell must not produce legacy /v routes');
   assert.ok(rt.includes('makeShareURL'), 'runtime navigation must use encrypted /p share URLs');
+  assert.ok(host.includes('openShare'), 'host shell must open encrypted /p share routes');
 });

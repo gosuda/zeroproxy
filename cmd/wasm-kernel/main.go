@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,14 +17,13 @@ import (
 
 	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/headers"
-	"github.com/gosuda/zeroproxy/internal/htmltx"
+	"github.com/gosuda/zeroproxy/internal/htmlsanitize"
 	"github.com/gosuda/zeroproxy/internal/randbuf"
 	"github.com/gosuda/zeroproxy/internal/smuxconn"
 	"github.com/gosuda/zeroproxy/internal/swhttp"
 	"github.com/gosuda/zeroproxy/internal/wsconn"
 	"github.com/gosuda/zeroproxy/internal/wsproto"
 	"github.com/gosuda/zeroproxy/internal/zphttp"
-	"golang.org/x/net/html/charset"
 )
 
 type Kernel struct {
@@ -43,6 +41,8 @@ func main() {
 	js.Global().Set("__zp_stream", js.FuncOf(k.jsStream))
 	js.Global().Set("__zp_kernel_init", js.FuncOf(k.jsInit))
 	js.Global().Set("__zp_cookie_set", js.FuncOf(k.jsCookieSet))
+	js.Global().Set("__zp_sanitize_html", js.FuncOf(k.jsSanitizeHTML))
+	js.Global().Set("__zp_sanitize_css", js.FuncOf(k.jsSanitizeCSS))
 	js.Global().Set("__zp_kernel_ready", true)
 	select {}
 }
@@ -112,6 +112,89 @@ func (k *Kernel) jsCookieSet(this js.Value, args []js.Value) any {
 	return true
 }
 
+func (k *Kernel) jsSanitizeHTML(this js.Value, args []js.Value) any {
+	_ = k
+	if len(args) < 1 {
+		return jsSanitizeError("BAD_SANITIZE_REQUEST")
+	}
+	out, err := htmlsanitize.SanitizeDocument(htmlSanitizeInput(args[0]))
+	if err != nil {
+		return jsSanitizeError(err.Error())
+	}
+	return jsJSON(out)
+}
+
+func (k *Kernel) jsSanitizeCSS(this js.Value, args []js.Value) any {
+	_ = k
+	if len(args) < 1 {
+		return jsSanitizeError("BAD_SANITIZE_REQUEST")
+	}
+	out, err := htmlsanitize.SanitizeCSS(htmlSanitizeCSSInput(args[0]))
+	if err != nil {
+		return jsSanitizeError(err.Error())
+	}
+	return jsJSON(out)
+}
+
+func htmlSanitizeInput(v js.Value) htmlsanitize.Input {
+	return htmlsanitize.Input{
+		DocID:         jsPropString(v, "docId"),
+		TargetURL:     jsPropString(v, "targetUrl"),
+		FinalURL:      jsPropString(v, "finalUrl"),
+		HTML:          jsPropString(v, "html"),
+		Charset:       jsPropString(v, "charset"),
+		ControlPrefix: jsPropString(v, "controlPrefix"),
+		FaviconMode:   jsPropString(v, "faviconMode"),
+		Headers:       jsHeaders(v.Get("headers")),
+	}
+}
+
+func htmlSanitizeCSSInput(v js.Value) htmlsanitize.CSSInput {
+	return htmlsanitize.CSSInput{
+		DocID:   jsPropString(v, "docId"),
+		BaseURL: jsPropString(v, "baseUrl"),
+		CSS:     jsPropString(v, "css"),
+		Kind:    jsPropString(v, "kind"),
+	}
+}
+
+func jsPropString(v js.Value, name string) string {
+	p := v.Get(name)
+	if p.IsUndefined() || p.IsNull() {
+		return ""
+	}
+	return p.String()
+}
+
+func jsHeaders(v js.Value) map[string][]string {
+	headers := make(map[string][]string)
+	if v.IsUndefined() || v.IsNull() {
+		return headers
+	}
+	for i, n := 0, v.Length(); i < n; i++ {
+		pair := v.Index(i)
+		if pair.IsUndefined() || pair.IsNull() || pair.Length() < 2 {
+			continue
+		}
+		name := pair.Index(0).String()
+		value := pair.Index(1).String()
+		headers[name] = append(headers[name], value)
+	}
+	return headers
+}
+
+func jsSanitizeError(message string) js.Value {
+	return jsJSON(map[string]any{"error": map[string]any{"code": "SANITIZE_FAILED", "debug": message}})
+}
+
+func jsJSON(value any) js.Value {
+	data, err := json.Marshal(value)
+	if err != nil {
+		data = []byte(`{"error":{"code":"SANITIZE_ENCODE_FAILED"}}`)
+	}
+	return js.Global().Get("JSON").Call("parse", string(data))
+}
+
 func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return rejected("BAD_REQUEST")
@@ -163,17 +246,24 @@ func (k *Kernel) jsHTTP(this js.Value, args []js.Value) any {
 func deliverResponse(ctx context.Context, resolve js.Value, req *http.Request, resp *http.Response, finalURL *url.URL, tab *zphttp.TabState, cancel func()) bool {
 	releaseOnReturn := true
 	dynamicCompileAllowed := targetDynamicCompileAllowed(resp.Header)
-	referrerPolicy := targetReferrerPolicy(resp.Header)
 	if tab.CookieJar != nil && req.Header.Get("X-Zp-Fetch-Credentials") != "omit" {
 		tab.CookieJar.SetCookies(finalURL, resp.Cookies())
 		broadcastCookieSync(tab, finalURL)
 	}
-	transformed, decoded := transformDocumentResponse(req, resp, tab, finalURL, dynamicCompileAllowed, referrerPolicy)
-	applyResponsePolicy(resp, req, finalURL, dynamicCompileAllowed, transformed, decoded)
+	if legacyDocumentTransformBlocked(req, resp) {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		resolve.Invoke(safeResponse("HTML_DOCUMENT_TRANSFORM_UNAVAILABLE", http.StatusNotImplemented, finalURL.Host))
+		return true
+	}
+	rawMode := isRawModeRequest(req)
+	transformed, decoded := false, false
+	applyResponsePolicy(resp, req, finalURL, dynamicCompileAllowed, transformed, decoded, rawMode)
 	if installBodyCancellation(ctx, resp, cancel) {
 		releaseOnReturn = false
 	}
-	jsResp, err := swhttp.ResponseToJS(ctx, resp, transformed, decoded)
+	jsResp, err := swhttp.ResponseToJSWithPolicy(ctx, resp, transformed, decoded, rawMode)
 	if err != nil {
 		if resp.Body != nil {
 			_ = resp.Body.Close()
@@ -186,80 +276,34 @@ func deliverResponse(ctx context.Context, resolve js.Value, req *http.Request, r
 	return releaseOnReturn
 }
 
-// transformDocumentResponse rewrites an HTML document response through the htmltx
-// membrane (streamed via an io.Pipe goroutine), replacing resp.Body and the
-// content headers in place. It reports whether the body was transformed and
-// decoded; a non-document or non-HTML response is left untouched.
-func transformDocumentResponse(req *http.Request, resp *http.Response, tab *zphttp.TabState, finalURL *url.URL, dynamicCompileAllowed bool, referrerPolicy string) (transformed, decoded bool) {
-	if !isDocumentRequest(req) || !isHTML(resp.Header.Get("Content-Type")) {
-		return false, false
-	}
-	source := resp.Body
-	if source == nil {
-		source = http.NoBody
-	}
-	decodedSource, err := charset.NewReader(source, resp.Header.Get("Content-Type"))
-	if err != nil {
-		decodedSource = source
-	}
-	docCharset := responseCharset(resp.Header.Get("Content-Type"))
-	pr, pw := io.Pipe()
-	go func() {
-		err := htmltx.TransformTo(pw, decodedSource, htmltx.Options{
-			TabID:                  tab.TabID,
-			EntryID:                req.Header.Get("X-Zp-Entry-Id"),
-			TargetURL:              finalURL,
-			DocumentCookie:         tab.CookieJar.DocumentCookie(finalURL),
-			DocumentReferrer:       req.Header.Get("X-Zp-Document-Referrer"),
-			RuntimeToken:           req.Header.Get("X-Zp-Runtime-Token"),
-			Servers:                headerServers(req.Header.Get("X-Zp-Relay-Servers")),
-			DynamicCompileAllowed:  dynamicCompileAllowed,
-			ReferrerPolicy:         referrerPolicy,
-			DocumentCharset:        docCharset,
-			DocumentStreamRewriter: rewriteHTMLDocumentStreamFromJS,
-			DocumentRewriter:       rewriteHTMLDocumentFromJS,
-		})
-		closeErr := source.Close()
-		if err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		if closeErr != nil {
-			_ = pw.CloseWithError(closeErr)
-			return
-		}
-		_ = pw.Close()
-	}()
-	resp.Body = &closeWithSource{ReadCloser: pr, source: source}
-	resp.ContentLength = -1
-	resp.Header.Del("Content-Length")
-	resp.Header.Del("Content-Encoding")
-	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
-	return true, true
-}
-
-func responseCharset(contentType string) string {
-	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(params["charset"])
+// legacyDocumentTransformBlocked fail-closes the removed native-browser document
+// transform path. QuickJS document/resource loading uses X-ZP-Raw-Mode and the
+// Go sanitizer RPCs instead; passing untransformed target HTML to the native
+// browser would reintroduce the deleted Service Worker/JS rewriter dependency.
+func legacyDocumentTransformBlocked(req *http.Request, resp *http.Response) bool {
+	return !isRawModeRequest(req) && isDocumentRequest(req) && isHTML(resp.Header.Get("Content-Type"))
 }
 
 // applyResponsePolicy stamps the response-shaping headers after transform: the
 // dynamic-compile signal, the ConstructorPolicy strip, and the response-URL /
 // redirect markers.
-func applyResponsePolicy(resp *http.Response, req *http.Request, finalURL *url.URL, dynamicCompileAllowed, transformed, decoded bool) {
+func applyResponsePolicy(resp *http.Response, req *http.Request, finalURL *url.URL, dynamicCompileAllowed, transformed, decoded, rawMode bool) {
 	if dynamicCompileAllowed {
 		resp.Header.Set("X-ZP-Dynamic-Compile", "1")
 	}
-	resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+	if !rawMode {
+		resp.Header = headers.ConstructorPolicy(resp.Header, transformed, decoded)
+	}
 	resp.Header.Set("X-ZP-Response-URL", finalURL.String())
 	if finalURL.String() != req.URL.String() {
 		resp.Header.Set("X-ZP-Response-Redirected", "1")
 	} else {
 		resp.Header.Set("X-ZP-Response-Redirected", "0")
 	}
+}
+
+func isRawModeRequest(req *http.Request) bool {
+	return req.Header.Get("X-ZP-Raw-Mode") == "1"
 }
 
 // installBodyCancellation wraps resp.Body so a context cancellation closes it,
@@ -314,74 +358,6 @@ func cookieRecordsForJS(records []cookiejar.SnapshotRecord) []any {
 	return out
 }
 
-type jsHTMLDocumentStream struct {
-	value js.Value
-}
-
-func rewriteHTMLDocumentStreamFromJS(targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (htmltx.DocumentStreamRewriter, error) {
-	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("createHTMLDocumentRewriter").Type() != js.TypeFunction {
-		return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_UNAVAILABLE")
-	}
-	stream := rewriter.Call("createHTMLDocumentRewriter", map[string]any{
-		"targetUrl":     targetURL,
-		"controlPrefix": controlPrefix,
-		"prelude":       runtimePrelude,
-		"tabId":         tabID,
-		"runtimeToken":  runtimeToken,
-		"servers":       stringsForJS(servers),
-	})
-	if !stream.Truthy() || stream.Get("writeChunk").Type() != js.TypeFunction || stream.Get("end").Type() != js.TypeFunction {
-		return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_UNAVAILABLE")
-	}
-	return jsHTMLDocumentStream{value: stream}, nil
-}
-
-func (s jsHTMLDocumentStream) WriteChunk(chunk []byte) ([]byte, error) {
-	jsChunk := js.Global().Get("Uint8Array").New(len(chunk))
-	js.CopyBytesToJS(jsChunk, chunk)
-	out := s.value.Call("writeChunk", jsChunk)
-	if out.Truthy() && out.Get("ok").Bool() {
-		return []byte(out.Get("code").String()), nil
-	}
-	return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_FAILED")
-}
-
-func (s jsHTMLDocumentStream) End() ([]byte, error) {
-	out := s.value.Call("end")
-	if out.Truthy() && out.Get("ok").Bool() {
-		return []byte(out.Get("code").String()), nil
-	}
-	return nil, fmt.Errorf("HTML_DOCUMENT_STREAM_REWRITE_FAILED")
-}
-
-func rewriteHTMLDocumentFromJS(source, targetURL, controlPrefix, runtimePrelude, tabID, runtimeToken string, servers []string) (string, error) {
-	rewriter := js.Global().Get("ZPRewriter")
-	if !rewriter.Truthy() || rewriter.Get("rewriteHTMLDocument").Type() != js.TypeFunction {
-		return "", fmt.Errorf("HTML_DOCUMENT_REWRITE_UNAVAILABLE")
-	}
-	out := rewriter.Call("rewriteHTMLDocument", source, map[string]any{
-		"targetUrl":     targetURL,
-		"controlPrefix": controlPrefix,
-		"prelude":       runtimePrelude,
-		"tabId":         tabID,
-		"runtimeToken":  runtimeToken,
-		"servers":       stringsForJS(servers),
-	})
-	if out.Truthy() && out.Get("ok").Bool() {
-		return out.Get("code").String(), nil
-	}
-	return "", fmt.Errorf("HTML_DOCUMENT_REWRITE_FAILED")
-}
-
-func stringsForJS(values []string) []any {
-	out := make([]any, 0, len(values))
-	for _, value := range values {
-		out = append(out, value)
-	}
-	return out
-}
-
 func targetDynamicCompileAllowed(h http.Header) bool {
 	policies := h.Values("Content-Security-Policy")
 	if len(policies) == 0 {
@@ -393,26 +369,6 @@ func targetDynamicCompileAllowed(h http.Header) bool {
 		}
 	}
 	return true
-}
-
-func targetReferrerPolicy(h http.Header) string {
-	for _, header := range h.Values("Referrer-Policy") {
-		for _, part := range strings.Split(header, ",") {
-			if policy := normalizeReferrerPolicy(part); policy != "" {
-				return policy
-			}
-		}
-	}
-	return ""
-}
-
-func normalizeReferrerPolicy(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "no-referrer", "no-referrer-when-downgrade", "origin", "origin-when-cross-origin", "same-origin", "strict-origin", "strict-origin-when-cross-origin", "unsafe-url":
-		return strings.ToLower(strings.TrimSpace(raw))
-	default:
-		return ""
-	}
 }
 
 func cspPolicyAllowsEval(policy string) bool {
@@ -743,20 +699,6 @@ func isHTML(ct string) bool {
 	return strings.Contains(strings.ToLower(ct), "text/html") || strings.Contains(strings.ToLower(ct), "application/xhtml")
 }
 func isDocumentRequest(req *http.Request) bool { return req.Header.Get("X-Zp-Document-Request") == "1" }
-
-type closeWithSource struct {
-	io.ReadCloser
-	source io.Closer
-}
-
-func (c *closeWithSource) Close() error {
-	err := c.ReadCloser.Close()
-	cerr := c.source.Close()
-	if err != nil {
-		return err
-	}
-	return cerr
-}
 
 type cancelReadCloser struct {
 	io.ReadCloser

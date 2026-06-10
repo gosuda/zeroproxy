@@ -2,7 +2,6 @@
 (() => {
   'use strict';
   const NativeArray = Array;
-  const NativeArrayBuffer = ArrayBuffer;
   const NativeDOMException = DOMException;
   const NativeFunctionBind = Function.prototype.bind;
   const NativeObject = Object;
@@ -12,13 +11,10 @@
   const NativeString = String;
   const NativeSymbol = Symbol;
   const NativeTypeError = TypeError;
-  const NativeUint8Array = Uint8Array;
   const NativeURL = URL;
   const NativeWeakMap = WeakMap;
   const nativeArrayFrom = NativeArray.from;
   const nativeArrayIsArray = NativeArray.isArray;
-  const nativeEncodeURIComponent = encodeURIComponent;
-  const nativeObjectAssign = NativeObject.assign;
   const nativeObjectDefineProperty = NativeObject.defineProperty;
   const nativeObjectFreeze = NativeObject.freeze;
   const nativeObjectGetPrototypeOf = NativeObject.getPrototypeOf;
@@ -30,11 +26,8 @@
   const nativeReflectHas = NativeReflect.has;
   const nativeReflectOwnKeys = NativeReflect.ownKeys;
   const nativeReflectSet = NativeReflect.set;
-  const nativeClearTimeout = self.clearTimeout && nativeReflectApply(NativeFunctionBind, self.clearTimeout, [self]);
-  const nativeSetTimeout = self.setTimeout && nativeReflectApply(NativeFunctionBind, self.setTimeout, [self]);
   {
   const Array = NativeArray;
-  const ArrayBuffer = NativeArrayBuffer;
   const DOMException = NativeDOMException;
   const Object = NativeObject;
   const Promise = NativePromise;
@@ -43,14 +36,10 @@
   const String = NativeString;
   const Symbol = NativeSymbol;
   const TypeError = NativeTypeError;
-  const Uint8Array = NativeUint8Array;
   const URL = NativeURL;
   const WeakMap = NativeWeakMap;
   const arrayFrom = nativeArrayFrom;
   const arrayIsArray = nativeArrayIsArray;
-  const clearTimeout = nativeClearTimeout;
-  const encodeURIComponent = nativeEncodeURIComponent;
-  const objectAssign = nativeObjectAssign;
   const objectDefineProperty = nativeObjectDefineProperty;
   const objectFreeze = nativeObjectFreeze;
   const objectGetPrototypeOf = nativeObjectGetPrototypeOf;
@@ -62,15 +51,13 @@
   const reflectHas = nativeReflectHas;
   const reflectOwnKeys = nativeReflectOwnKeys;
   const reflectSet = nativeReflectSet;
-  const setTimeout = nativeSetTimeout;
   if (self.__ZP_WORKER_PRELUDE) return;
   objectDefineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
-  const ZP = self.ZP;
   const FunctionCtor = self.Function;
   const originalLocation = self.location;
-  const proxyOrigin = String(self.__ZP_WORKER_PROXY_ORIGIN || originalLocation && originalLocation.origin || '');
-  function internalURL(path) {
-    return proxyOrigin ? new URL(path, proxyOrigin).href : path;
+  const _proxyOrigin = String(self.__ZP_WORKER_PROXY_ORIGIN || originalLocation && originalLocation.origin || '');
+  function _internalURL(path) {
+    return _proxyOrigin ? new URL(path, _proxyOrigin).href : path;
   }
   const nativeFunctionToString = FunctionCtor?.prototype?.toString;
   const toStringMap = new WeakMap();
@@ -92,7 +79,6 @@
     toStringMap.set(maskedToString, nativeFunctionSource('toString'));
     try { objectDefineProperty(FunctionCtor.prototype, 'toString', { value: maskedToString, enumerable: false, configurable: true, writable: true }); } catch {}
   }
-  const nativeFetch = reflectApply(NativeFunctionBind, self.fetch, [self]);
   const base = new URL(self.__ZP_WORKER_LOCATION || self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   function makeWorkerLocationFacade(url) {
     const loc = {};
@@ -107,9 +93,7 @@
   const workerLocation = makeWorkerLocationFacade(base);
   try { objectDefineProperty(self, 'location', { value: workerLocation, enumerable: true, configurable: true }); } catch {}
   try { objectDefineProperty(self, 'origin', { value: base.origin, enumerable: true, configurable: true }); } catch {}
-  const tabId = String(self.__ZP_WORKER_TAB_ID || '');
-  const runtimeToken = String(self.__ZP_WORKER_RUNTIME_TOKEN || '');
-  const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
+  const blockedDynamic = () => { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); };
   const scope = new Proxy(self, {
     has(_target, prop) { return prop !== Symbol.unscopables; },
     get(target, prop) {
@@ -275,13 +259,7 @@
   expose('__zp_has', has);
   expose('__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
   expose('__zp_ownKeys', ownKeys);
-  expose('__zp_module_url', (specifier, referrer) => {
-    const spec = String(specifier);
-    if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
-    const u = new URL(spec, referrer || base.href);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
-    return internalURL('/zp/api/script?kind=module&u=' + encodeURIComponent(u.href) + '&tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken));
-  });
+  expose('__zp_module_url', () => { throw blockedDynamic(); });
   installWorkerOwnPropertyMasking();
   const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
@@ -338,181 +316,9 @@
     try { objectDefineProperty(proto, 'userAgentData', { get: () => userAgentData, enumerable: false, configurable: false }); } catch {}
     try { objectDefineProperty(nav, 'userAgentData', { get: () => userAgentData, enumerable: false, configurable: false }); } catch {}
   }
-  function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
-  function postMessageToSW(message, transfer) {
-    const controller = nav && nav.serviceWorker && nav.serviceWorker.controller;
-    if (!controller || !runtimeToken) return Promise.reject(new TypeError('NetworkError'));
-    return new Promise((resolve, reject) => {
-      const channel = new MessageChannel();
-      const sealed = objectAssign({}, message, { runtimeToken });
-      channel.port1.onmessage = ev => {
-        const data = ev.data || {};
-        if (data.ok) resolve(data);
-        else reject(new TypeError(data.error || 'NetworkError'));
-      };
-      controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
-    });
-  }
-  function workerUploadChannelName() {
-    return '__zp_worker_upload:' + tabId + ':' + runtimeToken;
-  }
-  function isStreamableBody(body) {
-    return !!body && typeof body.getReader === 'function';
-  }
-  function chunkToArrayBuffer(value) {
-    let bytes;
-    if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-    else if (value && value.buffer instanceof ArrayBuffer) bytes = new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength);
-    else bytes = new Uint8Array();
-    return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
-  }
-  function makeStreamCloser(reader, transport) {
-    let closed = false;
-    return {
-      isClosed: () => closed,
-      close() {
-        if (closed) return;
-        closed = true;
-        try { reader.releaseLock && reader.releaseLock(); } catch {}
-        try { transport.close(); } catch {}
-      }
-    };
-  }
-  function cancelReader(reader) {
-    try { reader.cancel && reader.cancel(); } catch {}
-  }
-  // Serializes pulls behind a single-flight guard so a re-entrant pull (arriving while
-  // a prior read() is in flight) is dropped rather than double-reading the body.
-  function makePullGate(reader, sink, closer) {
-    let reading = false;
-    return async () => {
-      if (closer.isClosed() || reading) return;
-      reading = true;
-      try { await pumpUploadChunk(reader, sink, closer); } finally { reading = false; }
-    };
-  }
-  // Routes one inbound BroadcastChannel message addressed to this relay (role 'page',
-  // matching id) to the open-stream lifecycle. `settle` carries the open-promise's
-  // resolve/reject and a cancelTimer() that clears the ready timeout.
-  function routeRelayMessage(msg, ctx) {
-    if (msg.role !== 'page' || msg.id !== ctx.id) return;
-    if (msg.type === 'ready') { ctx.settle.cancelTimer(); ctx.settle.resolve(String(msg.streamId || '')); return; }
-    if (msg.type === 'cancel') { cancelReader(ctx.reader); ctx.closer.close(); return; }
-    if (msg.type === 'error') { ctx.settle.cancelTimer(); ctx.closer.close(); ctx.settle.reject(new TypeError(msg.error || 'NetworkError')); return; }
-    if (msg.type === 'pull') ctx.pull();
-  }
-  // Pulls one chunk and forwards it via the supplied transport sink, then closes on
-  // done/error. `sink` owns the transport-specific postMessage (relay: no transfer;
-  // MessageChannel: transfers the buffer) so each path keeps its exact semantics.
-  async function pumpUploadChunk(reader, sink, closer) {
-    try {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        sink.close();
-        closer.close();
-        return;
-      }
-      sink.chunk(chunkToArrayBuffer(chunk.value));
-    } catch {
-      sink.error(err && (err.name || err.message) || 'NetworkError');
-      closer.close();
-    }
-  }
-  async function openRelayedUploadStream(body) {
-    if (typeof self.BroadcastChannel !== 'function' || !isStreamableBody(body)) return '';
-    const id = ZP.randomId('wup');
-    const bc = new BroadcastChannel(workerUploadChannelName());
-    const reader = body.getReader();
-    const closer = makeStreamCloser(reader, bc);
-    const sink = {
-      chunk: (data) => bc.postMessage({ role: 'worker', type: 'chunk', id, tabId, runtimeToken, data }),
-      close: () => bc.postMessage({ role: 'worker', type: 'close', id, tabId, runtimeToken }),
-      error: (error) => bc.postMessage({ role: 'worker', type: 'error', id, tabId, runtimeToken, error })
-    };
-    const pull = makePullGate(reader, sink, closer);
-    const streamId = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { closer.close(); reject(new TypeError('NetworkError')); }, 5000);
-      const settle = { resolve, reject, cancelTimer: () => clearTimeout(timer) };
-      const ctx = { id, reader, closer, pull, settle };
-      bc.onmessage = ev => routeRelayMessage(ev && ev.data || {}, ctx);
-      bc.postMessage({ role: 'worker', type: 'open', id, tabId, runtimeToken });
-    });
-    return streamId;
-  }
-  async function openUploadStream(body) {
-    if (!isStreamableBody(body)) return '';
-    const controller = nav && nav.serviceWorker && nav.serviceWorker.controller;
-    if (!controller) return openRelayedUploadStream(body);
-    const id = ZP.randomId('up');
-    const channel = new MessageChannel();
-    const port = channel.port1;
-    const reader = body.getReader();
-    const closer = makeStreamCloser(reader, port);
-    const sink = {
-      // chunk post is intentionally NOT wrapped: a throwing post (e.g. DataCloneError)
-      // must propagate to pumpUploadChunk's catch so the stream fails closed (error + close).
-      chunk: (data) => port.postMessage({ type: 'chunk', data }, [data]),
-      close: () => { try { port.postMessage({ type: 'close' }); } catch {} },
-      error: (error) => { try { port.postMessage({ type: 'error', error }); } catch {} }
-    };
-    const pull = makePullGate(reader, sink, closer);
-    port.onmessage = ev => {
-      const msg = ev && ev.data || {};
-      if (msg.type === 'cancel') { cancelReader(reader); closer.close(); return; }
-      if (msg.type === 'pull') return pull();
-    };
-    try {
-      await postMessageToSW({ type: 'ZP_UPLOAD_STREAM_OPEN', tabId, id }, [channel.port2]);
-      return id;
-    } catch {
-      closer.close();
-      return openRelayedUploadStream(body);
-    }
-  }
-  function buildFetchRequest(input, init) {
-    if (input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function') return new Request(input, init);
-    return new Request(String(input), init);
-  }
-  // `priority` is not universally present on Request; guard membership and tolerate a
-  // throwing getter so the header set never breaks the forward request.
-  function setFetchPriorityHeader(req, headers) {
-    if (!('priority' in req)) return;
-    try { headers.set('X-ZP-Fetch-Priority', String(req.priority || '')); } catch {}
-  }
-  // Stamps the ZP transport headers carrying tab/runtime identity and the original
-  // fetch-init semantics the server must replay. Every header is load-bearing.
-  function buildForwardHeaders(req) {
-    const headers = new Headers(req.headers);
-    headers.set('X-ZP-Tab-Id', tabId);
-    headers.set('X-ZP-Runtime-Token', runtimeToken);
-    headers.set('X-ZP-Document-URL', self.__ZP_WORKER_TARGET || base.href);
-    headers.set('X-ZP-Fetch-Credentials', req.credentials || 'same-origin');
-    headers.set('X-ZP-Fetch-Mode', req.mode || 'cors');
-    headers.set('X-ZP-Fetch-Cache', req.cache || 'default');
-    headers.set('X-ZP-Fetch-Redirect', req.redirect || 'follow');
-    headers.set('X-ZP-Fetch-Referrer', req.referrer || self.__ZP_WORKER_TARGET || 'about:client');
-    headers.set('X-ZP-Fetch-Referrer-Policy', req.referrerPolicy || '');
-    headers.set('X-ZP-Fetch-Integrity', req.integrity || '');
-    headers.set('X-ZP-Fetch-Keepalive', req.keepalive ? '1' : '0');
-    setFetchPriorityHeader(req, headers);
-    return headers;
-  }
-  // Routes the request body through the upload-stream relay when present, falling back
-  // to a half-duplex streaming body when no stream channel could be opened.
-  async function applyUploadBody(req, headers, apiInit) {
-    if (req.method === 'GET' || req.method === 'HEAD') return;
-    const streamId = await openUploadStream(req.body).catch(() => '');
-    if (streamId) { headers.set('X-ZP-Upload-Stream-Id', streamId); return; }
-    apiInit.body = req.body;
-    apiInit.duplex = 'half';
-  }
-  self.fetch = async function fetch(input, init={}) {
-    const target = ZP.canonicalTargetURL(input?.url || input, base.href).href;
-    const req = buildFetchRequest(input, init);
-    const headers = buildForwardHeaders(req);
-    const apiInit = { method: req.method, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'follow' };
-    await applyUploadBody(req, headers, apiInit);
-    return nativeFetch(internalURL('/zp/api/fetch?url=' + encodeURIComponent(target)), apiInit);
+  function blocked(){ throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); }
+  self.fetch = async function fetch() {
+    throw new TypeError('ZeroProxy worker fetch is unavailable after QuickJS cutover');
   };
   maskNativeFunction(self.fetch, 'fetch');
   function blockedConstructor() { blocked(); }
@@ -521,12 +327,8 @@
   self.EventSource = blockedConstructor;
   self.RTCPeerConnection = self.webkitRTCPeerConnection = self.WebTransport = self.WebSocketStream = blockedConstructor;
   const nativeImportScripts = reflectApply(NativeFunctionBind, self.importScripts, [self]);
-  function importScriptURL(raw) {
-    const value = String(raw);
-    const internal = new URL(value, proxyOrigin || self.location.href);
-    if (internal.origin === proxyOrigin && internal.pathname === '/zp/api/worker-script') return internal.href;
-    const parsed = new URL(value, base.href);
-    return internalURL('/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&rt=' + encodeURIComponent(runtimeToken) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href));
+  function importScriptURL() {
+    throw blockedDynamic();
   }
   self.importScripts = function importScripts(...urls) {
     const rewritten = new Array(urls.length);

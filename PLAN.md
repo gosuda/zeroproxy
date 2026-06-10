@@ -37,6 +37,15 @@ emulation, not the already-working network transport.
 - Do not attempt to pass Acid with fixture hacks. Acid progress must come from
   general DOM, CSSOM, event loop, resource loader, SVG/XML, and Web API bridge
   behavior.
+- Do not reimplement, shadow, or replace ECMAScript language built-ins already
+  supplied by QuickJS-NG. Built-ins such as `String`, `BigInt`, `Array`, typed
+  arrays, `Map`, `Set`, `Promise`, `JSON`, and `Reflect` are QuickJS-owned
+  unless a narrowly documented membrane hook proves otherwise.
+- Do not use regex/text scraping as a parser for HTML, CSS, JavaScript, WebIDL,
+  or browser API surfaces. Use a maintained parser or the host browser's own
+  APIs (`Reflect.ownKeys`, descriptors, DOM/CSSOM/IDL APIs, `DOMParser`,
+  `CSSStyleSheet`, `golang.org/x/net/html`, QuickJS-NG parsing, or an
+  equivalent purpose-built parser).
 
 ## Target Architecture
 
@@ -758,6 +767,69 @@ The navigation manager must handle:
 - HTTP redirects;
 - downloads/resource classification.
 
+## WebIDL Host-Bridge Policy
+
+Most Web APIs must not be reimplemented by hand unless there is a membrane or
+virtual-state reason to do so. The default implementation strategy is
+WebIDL-driven reuse of the host browser's already-implemented semantics through
+a controlled bridge, provided the bridge preserves the privacy membrane:
+
+- snapshot host-browser/WebIDL surfaces first, then classify each interface/member
+  as `host-bridge`, `virtualized`, `direct-shim`, or `blocked`;
+- bridge host implementations by default when target code cannot observe native
+  DOM objects, raw target URLs, host-origin storage, native network fetches, or
+  privileged shell state;
+- use the host browser for WebIDL algorithms/descriptors/serialization/parsing
+  where safe; do not hand-write approximate browser algorithms merely because
+  they are listed in the plan;
+- keep direct virtual implementations only for unavoidable boundaries:
+  `Window`/`WindowProxy`, `window.location`, `history`, virtual `Document`/DOM
+  identity, event-loop scheduling, navigation, storage/cookies/cache, network
+  APIs, workers, resource loading, policy-blocked APIs, and realm/lifetime
+  glue;
+- wrap bridged values in realm-scoped QuickJS handles/facades so target code
+  still sees virtual identities and browser-like brand checks;
+- route all network, storage, cookie, navigation, worker, and resource-loading
+  side effects through `GoNetworkBackend`, the virtual storage manager, and the
+  virtual navigation/resource loader, even when a host API implementation is
+  reused for parsing, algorithms, descriptors, or serialization;
+- re-audit already-landed direct implementations before expanding them. Replace
+  them with host bridges where the membrane can be preserved; keep direct code
+  only with an explicit reason in `bridge-surface.json`;
+- record every bridge/direct/block decision in `bridge-surface.json`, with a
+  behavior probe for bridged semantics and an explicit owner note for remaining
+  gaps.
+
+QuickJS-NG's raw ECMAScript global surface is a baseline, not a work queue.
+Before adding, shimming, or replacing any global, compute the Set-level diff
+between the host browser `globalThis` own-property key list and a pristine
+QuickJS-NG `globalThis` own-property key list:
+
+```text
+browserOnly = hostBrowserGlobalThisKeys - quickJSGlobalThisKeys
+quickJSNative = hostBrowserGlobalThisKeys ∩ quickJSGlobalThisKeys
+quickJSOnly = quickJSGlobalThisKeys - hostBrowserGlobalThisKeys
+```
+
+Use `browserOnly` as the Web API candidate list that must be classified in
+`bridge-surface.json`. Use `quickJSNative` as the do-not-touch list for
+ECMAScript language built-ins already supplied by QuickJS-NG (`String`,
+`BigInt`, collection/typed-array constructors, promises, JSON, reflection, and
+other standard engine features). Use `quickJSOnly` to catch accidental
+QuickJS-specific globals that should not leak unless explicitly accepted. This
+diff must be regenerated and consulted whenever the surface manifest changes.
+
+All surface extraction must use actual runtime APIs or maintained parsers, not
+regex parsing. Host browser data comes from the browser itself (`Reflect.ownKeys`,
+descriptors, brand checks, DOM/CSSOM/IDL APIs). QuickJS-NG data comes from an
+actual pristine QuickJS-NG realm. HTML/CSS/JS/WebIDL analysis must use
+purpose-built parsers or host browser parsing APIs.
+
+Injected QuickJS realm code should be ordinary source modules built by the
+project bundler into checked-in/generated source strings. Avoid maintaining
+large hand-written `String.raw` blobs when a bundler can preserve module
+boundaries, tree-shaking decisions, and reviewable source files.
+
 ## Web API Bridge Surface
 
 Track bridge coverage with a machine-readable manifest:
@@ -782,6 +854,17 @@ Each entry should include:
 - brand-check behavior;
 - stringification behavior;
 - cross-realm behavior;
+- implementation strategy: `host-bridge`, `virtualized`, `direct-shim`, or
+  `blocked`;
+  - `host-bridge`: use host browser implementation through a membrane-safe
+    bridge;
+  - `virtualized`: implement because the target-visible state is virtual
+    (`window.location`, history, DOM identity, storage/cookies/cache, network,
+    navigation, workers, resource loading);
+  - `direct-shim`: small compatibility shim where host bridging is unavailable
+    or would be more dangerous than a local deterministic shim;
+  - `blocked`: intentionally absent or policy-blocked;
+- bridge replacement decision for existing direct implementations;
 - implementation status;
 - Acid relevance;
 - WPT/idlharness relevance;
@@ -811,7 +894,7 @@ scripts/probe-webapi-behavior.mjs
 Comparator outputs:
 
 ```text
-test/fixtures/webapi/chromium-surface.json
+test/fixtures/webapi/host-surface.json
 test/fixtures/webapi/quickjs-surface.json
 test/fixtures/webapi/webapi-gap-report.json
 test/fixtures/webapi/webapi-gap-report.md
@@ -837,8 +920,8 @@ Gap categories:
 ### Full Browser API Surface Audit
 
 The virtual browser must be driven by a full API surface comparison, not by
-hand-written TODO lists alone. The comparator should snapshot Chromium and the
-QuickJS virtual browser under the same test page shape and produce a diff that
+hand-written TODO lists alone. The comparator should snapshot the host browser
+and the QuickJS virtual browser under the same test page shape and produce a diff
 implementation work can follow.
 
 Snapshot all practical surface categories:
@@ -864,6 +947,22 @@ Snapshot all practical surface categories:
 - event class inheritance;
 - error names/messages where stable enough to compare;
 - unsupported/policy-blocked APIs with explicit reason codes.
+
+The comparator must also emit the raw Set-level `globalThis` diff between a
+host browser and pristine QuickJS-NG realm. This diff is an input to the
+implementation plan, not a substitute for behavior probes:
+
+- `browserOnly`: host-browser globals absent from raw QuickJS-NG; every
+  target-visible entry must be classified in `bridge-surface.json`;
+- `quickJSNative`: globals present in both; standard ECMAScript built-ins here
+  must remain owned by QuickJS-NG and must not be reimplemented just because
+  the host browser also exposes them;
+- `quickJSOnly`: raw QuickJS-NG globals absent from the host browser; expose
+  only if explicitly accepted and membrane-safe.
+
+The Set diff must use complete own-property keys, including symbol keys, from
+`Reflect.ownKeys(globalThis)` and descriptor-aware follow-up probes. Do not
+derive the surface with regex source scanning.
 
 Use browser IDL data where practical. The target comparison set should include
 at least:
@@ -1274,7 +1373,7 @@ test/e2e/acid.test.js
 
 Harness requirements:
 
-- native Chromium baseline;
+- native host-browser baseline;
 - ZeroProxy QuickJS virtual runtime run;
 - screenshot capture;
 - DOM-visible score capture where available;
@@ -1713,7 +1812,7 @@ Additional required tests:
   `screen`, `visualViewport`, `resize`, `matchMedia`, CSS media queries, layout
   readback, `ResizeObserver`, `IntersectionObserver`, and `requestAnimationFrame`
   ordering;
-- full Web API surface snapshot comparison against Chromium;
+- full Web API surface snapshot comparison against the host browser;
 - Web API behavior probes for constructors, descriptors, brand checks,
   receivers, collection liveness, event timing, URL behavior, fetch/XHR
   semantics, storage, focus/selection, and form defaults;
@@ -1815,7 +1914,7 @@ References expected to remain:
   scheduling, and renderer-safe mutation records.
 - The Rust JS rewriter is not on the target-JS execution hot path.
 - Full Web API surface comparator produces actionable missing/partial/blocked
-  reports against Chromium.
+  reports against the host browser.
 - Implemented APIs have descriptor, brand-check, receiver, timing, and behavior
   probe coverage.
 - New Acid-blocking or framework-blocking API gaps fail CI unless explicitly

@@ -174,21 +174,7 @@ export function createHTTPFetchFacade({
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
     const internal = internalProxyRequestURL(requestURLString(input));
     if (internal) return Native.fetch(internal, init);
-    const target = requestTargetURL(input);
-    const req = runtimeRequest(input, init);
-    const virtualURL = getVirtualURL();
-    const requestId = ZP.randomId('req');
-    const apiHeaders = runtimeFetchHeaders(req, virtualURL, requestId);
-    markReplayableRequestBody(apiHeaders, input, init);
-    const apiInit = runtimeFetchInit(req, apiHeaders);
-    const abort = setupFetchAbort(req, requestId);
-    await prepareRuntimeFetchBody(req, apiInit, apiHeaders, abort);
-    try {
-      const resp = await fetchRuntimeAPI(target, apiInit, abort && abort.promise);
-      return runtimeFetchResponse(req, resp, target, virtualURL);
-    } finally {
-      detachFetchAbort(req, abort);
-    }
+    throw normalizedError('NetworkError');
   }
 
   function markReplayableRequestBody(apiHeaders, input, init) {
@@ -278,9 +264,9 @@ export function createHTTPFetchFacade({
     init.duplex = 'half';
   }
 
-  function fetchRuntimeAPI(target, init, abortPromise) {
-    const fetchPromise = Native.fetch(`${ZP.apiPath('fetch')}?url=${encodeURIComponent(target)}`, init);
-    return abortPromise ? Promise.race([fetchPromise, abortPromise]) : fetchPromise;
+  function fetchRuntimeAPI(_target, _init, abortPromise) {
+    const blocked = Promise.reject(normalizedError('NetworkError'));
+    return abortPromise ? Promise.race([blocked, abortPromise]) : blocked;
   }
 
   async function enforceRedirectError(req, resp) {

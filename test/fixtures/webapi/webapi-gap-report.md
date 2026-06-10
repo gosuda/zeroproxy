@@ -1,0 +1,2772 @@
+# Web API gap report
+
+Entries: 979
+Implemented: 219
+Partial: 726
+Blocked by gap: 0
+Blocked by policy: 29
+Out of scope: 5
+Hidden missing: 0
+
+## globalThis Set diff
+
+The first diff is the pristine QuickJS-NG runtime before ZeroProxy installs DOM/WebAPI facades. It is a baseline engine delta, not the virtual browser exposure after `installWebAPICore()`.
+
+Host browser own keys: 979
+Pristine QuickJS-NG own keys: 71
+Browser-only before install: 911
+Pristine QuickJS-native shared keys: 68
+Pristine QuickJS-only keys: 3
+
+## Installed virtual globalThis Set diff
+
+Installed QuickJS virtual own keys: 1060
+Browser-only after install: 2
+Installed virtual shared keys: 977
+Installed virtual QuickJS-only keys: 83
+
+### Browser-only globals
+- `AbortController`
+- `AbortSignal`
+- `AbstractRange`
+- `AnalyserNode`
+- `Animation`
+- `AnimationEffect`
+- `AnimationEvent`
+- `AnimationPlaybackEvent`
+- `AnimationTimeline`
+- `AnimationTrigger`
+- `Attr`
+- `Audio`
+- `AudioBuffer`
+- `AudioBufferSourceNode`
+- `AudioContext`
+- `AudioData`
+- `AudioDestinationNode`
+- `AudioListener`
+- `AudioNode`
+- `AudioParam`
+- `AudioParamMap`
+- `AudioProcessingEvent`
+- `AudioScheduledSourceNode`
+- `AudioSinkInfo`
+- `AudioWorkletNode`
+- `BackgroundFetchManager`
+- `BackgroundFetchRecord`
+- `BackgroundFetchRegistration`
+- `BarProp`
+- `BaseAudioContext`
+- `BeforeInstallPromptEvent`
+- `BeforeUnloadEvent`
+- `BiquadFilterNode`
+- `Blob`
+- `BlobEvent`
+- `BluetoothUUID`
+- `BroadcastChannel`
+- `BrowserCaptureMediaStreamTrack`
+- `ByteLengthQueuingStrategy`
+- `CDATASection`
+- `CSPViolationReportBody`
+- `CSS`
+- `CSSAnimation`
+- `CSSConditionRule`
+- `CSSContainerRule`
+- `CSSCounterStyleRule`
+- `CSSFontFaceRule`
+- `CSSFontFeatureValuesRule`
+- `CSSFontPaletteValuesRule`
+- `CSSFunctionDeclarations`
+- `CSSFunctionDescriptors`
+- `CSSFunctionRule`
+- `CSSGroupingRule`
+- `CSSImageValue`
+- `CSSImportRule`
+- `CSSKeyframeRule`
+- `CSSKeyframesRule`
+- `CSSKeywordValue`
+- `CSSLayerBlockRule`
+- `CSSLayerStatementRule`
+- `CSSMarginRule`
+- `CSSMathClamp`
+- `CSSMathInvert`
+- `CSSMathMax`
+- `CSSMathMin`
+- `CSSMathNegate`
+- `CSSMathProduct`
+- `CSSMathSum`
+- `CSSMathValue`
+- `CSSMatrixComponent`
+- `CSSMediaRule`
+- `CSSNamespaceRule`
+- `CSSNestedDeclarations`
+- `CSSNumericArray`
+- `CSSNumericValue`
+- `CSSPageRule`
+- `CSSPerspective`
+- `CSSPositionTryDescriptors`
+- `CSSPositionTryRule`
+- `CSSPositionValue`
+- `CSSPropertyRule`
+- `CSSRotate`
+- `CSSRule`
+- `CSSRuleList`
+- `CSSScale`
+- `CSSScopeRule`
+- `CSSSkew`
+- `CSSSkewX`
+- `CSSSkewY`
+- `CSSStartingStyleRule`
+- `CSSStyleDeclaration`
+- `CSSStyleRule`
+- `CSSStyleSheet`
+- `CSSStyleValue`
+- `CSSSupportsRule`
+- `CSSTransformComponent`
+- `CSSTransformValue`
+- `CSSTransition`
+- `CSSTranslate`
+- `CSSUnitValue`
+- `CSSUnparsedValue`
+- `CSSVariableReferenceValue`
+- `CSSViewTransitionRule`
+- `CanvasCaptureMediaStreamTrack`
+- `CanvasGradient`
+- `CanvasPattern`
+- `CanvasRenderingContext2D`
+- `CaretPosition`
+- `ChannelMergerNode`
+- `ChannelSplitterNode`
+- `ChapterInformation`
+- `CharacterBoundsUpdateEvent`
+- `CharacterData`
+- `ClipboardEvent`
+- `CloseEvent`
+- `CloseWatcher`
+- `CommandEvent`
+- `Comment`
+- `CompositionEvent`
+- `CompressionStream`
+- `ConstantSourceNode`
+- `ContentVisibilityAutoStateChangeEvent`
+- `ConvolverNode`
+- `CountQueuingStrategy`
+- `CrashReportContext`
+- `CropTarget`
+- `Crypto`
+- `CustomElementRegistry`
+- `CustomEvent`
+- `CustomStateSet`
+- `DOMError`
+- `DOMImplementation`
+- `DOMMatrix`
+- `DOMMatrixReadOnly`
+- `DOMParser`
+- `DOMPoint`
+- `DOMPointReadOnly`
+- `DOMQuad`
+- `DOMRect`
+- `DOMRectList`
+- `DOMRectReadOnly`
+- `DOMStringList`
+- `DOMStringMap`
+- `DOMTokenList`
+- `DataTransfer`
+- `DataTransferItem`
+- `DataTransferItemList`
+- `DecompressionStream`
+- `DelayNode`
+- `DelegatedInkTrailPresenter`
+- `Document`
+- `DocumentFragment`
+- `DocumentPictureInPictureEvent`
+- `DocumentTimeline`
+- `DocumentType`
+- `DragEvent`
+- `DynamicsCompressorNode`
+- `EditContext`
+- `Element`
+- `ElementInternals`
+- `EncodedAudioChunk`
+- `EncodedVideoChunk`
+- `ErrorEvent`
+- `Event`
+- `EventCounts`
+- `EventSource`
+- `EventTarget`
+- `External`
+- `FeaturePolicy`
+- `Fence`
+- `FencedFrameConfig`
+- `File`
+- `FileList`
+- `FileReader`
+- `FocusEvent`
+- `FontFace`
+- `FontFaceSetLoadEvent`
+- `FormData`
+- `FormDataEvent`
+- `FragmentDirective`
+- `GainNode`
+- `Gamepad`
+- `GamepadButton`
+- `GamepadEvent`
+- `GamepadHapticActuator`
+- `Geolocation`
+- `GeolocationCoordinates`
+- `GeolocationPosition`
+- `GeolocationPositionError`
+- `HTMLAllCollection`
+- `HTMLAnchorElement`
+- `HTMLAreaElement`
+- `HTMLAudioElement`
+- `HTMLBRElement`
+- `HTMLBaseElement`
+- `HTMLBodyElement`
+- `HTMLButtonElement`
+- `HTMLCanvasElement`
+- `HTMLCollection`
+- `HTMLDListElement`
+- `HTMLDataElement`
+- `HTMLDataListElement`
+- `HTMLDetailsElement`
+- `HTMLDialogElement`
+- `HTMLDirectoryElement`
+- `HTMLDivElement`
+- `HTMLDocument`
+- `HTMLElement`
+- `HTMLEmbedElement`
+- `HTMLFencedFrameElement`
+- `HTMLFieldSetElement`
+- `HTMLFontElement`
+- `HTMLFormControlsCollection`
+- `HTMLFormElement`
+- `HTMLFrameElement`
+- `HTMLFrameSetElement`
+- `HTMLGeolocationElement`
+- `HTMLHRElement`
+- `HTMLHeadElement`
+- `HTMLHeadingElement`
+- `HTMLHtmlElement`
+- `HTMLIFrameElement`
+- `HTMLImageElement`
+- `HTMLInputElement`
+- `HTMLLIElement`
+- `HTMLLabelElement`
+- `HTMLLegendElement`
+- `HTMLLinkElement`
+- `HTMLMapElement`
+- `HTMLMarqueeElement`
+- `HTMLMediaElement`
+- `HTMLMenuElement`
+- `HTMLMetaElement`
+- `HTMLMeterElement`
+- `HTMLModElement`
+- `HTMLOListElement`
+- `HTMLObjectElement`
+- `HTMLOptGroupElement`
+- `HTMLOptionElement`
+- `HTMLOptionsCollection`
+- `HTMLOutputElement`
+- `HTMLParagraphElement`
+- `HTMLParamElement`
+- `HTMLPictureElement`
+- `HTMLPreElement`
+- `HTMLProgressElement`
+- `HTMLQuoteElement`
+- `HTMLScriptElement`
+- `HTMLSelectElement`
+- `HTMLSelectedContentElement`
+- `HTMLSlotElement`
+- `HTMLSourceElement`
+- `HTMLSpanElement`
+- `HTMLStyleElement`
+- `HTMLTableCaptionElement`
+- `HTMLTableCellElement`
+- `HTMLTableColElement`
+- `HTMLTableElement`
+- `HTMLTableRowElement`
+- `HTMLTableSectionElement`
+- `HTMLTemplateElement`
+- `HTMLTextAreaElement`
+- `HTMLTimeElement`
+- `HTMLTitleElement`
+- `HTMLTrackElement`
+- `HTMLUListElement`
+- `HTMLUnknownElement`
+- `HTMLVideoElement`
+- `HashChangeEvent`
+- `Headers`
+- `Highlight`
+- `HighlightRegistry`
+- `History`
+- `IDBCursor`
+- `IDBCursorWithValue`
+- `IDBDatabase`
+- `IDBFactory`
+- `IDBIndex`
+- `IDBKeyRange`
+- `IDBObjectStore`
+- `IDBOpenDBRequest`
+- `IDBRecord`
+- `IDBRequest`
+- `IDBTransaction`
+- `IDBVersionChangeEvent`
+- `IIRFilterNode`
+- `IdleDeadline`
+- `Image`
+- `ImageBitmap`
+- `ImageBitmapRenderingContext`
+- `ImageData`
+- `Ink`
+- `InputDeviceCapabilities`
+- `InputDeviceInfo`
+- `InputEvent`
+- `IntegrityViolationReportBody`
+- `InterestEvent`
+- `IntersectionObserver`
+- `IntersectionObserverEntry`
+- `Intl`
+- `KeyboardEvent`
+- `KeyframeEffect`
+- `LargestContentfulPaint`
+- `LaunchParams`
+- `LaunchQueue`
+- `LayoutShift`
+- `LayoutShiftAttribution`
+- `Location`
+- `MathMLElement`
+- `MediaCapabilities`
+- `MediaElementAudioSourceNode`
+- `MediaEncryptedEvent`
+- `MediaError`
+- `MediaList`
+- `MediaMetadata`
+- `MediaQueryList`
+- `MediaQueryListEvent`
+- `MediaRecorder`
+- `MediaSession`
+- `MediaSource`
+- `MediaSourceHandle`
+- `MediaStream`
+- `MediaStreamAudioDestinationNode`
+- `MediaStreamAudioSourceNode`
+- `MediaStreamEvent`
+- `MediaStreamTrack`
+- `MediaStreamTrackAudioStats`
+- `MediaStreamTrackEvent`
+- `MediaStreamTrackGenerator`
+- `MediaStreamTrackProcessor`
+- `MediaStreamTrackVideoStats`
+- `MessageChannel`
+- `MessageEvent`
+- `MessagePort`
+- `MimeType`
+- `MimeTypeArray`
+- `MouseEvent`
+- `MutationObserver`
+- `MutationRecord`
+- `NamedNodeMap`
+- `NavigateEvent`
+- `Navigation`
+- `NavigationActivation`
+- `NavigationCurrentEntryChangeEvent`
+- `NavigationDestination`
+- `NavigationHistoryEntry`
+- `NavigationPrecommitController`
+- `NavigationTransition`
+- `Navigator`
+- `NavigatorUAData`
+- `NetworkInformation`
+- `Node`
+- `NodeFilter`
+- `NodeIterator`
+- `NodeList`
+- `NotRestoredReasonDetails`
+- `NotRestoredReasons`
+- `Notification`
+- `Observable`
+- `OfflineAudioCompletionEvent`
+- `OfflineAudioContext`
+- `OffscreenCanvas`
+- `OffscreenCanvasRenderingContext2D`
+- `Option`
+- `Origin`
+- `OscillatorNode`
+- `OverconstrainedError`
+- `PageRevealEvent`
+- `PageSwapEvent`
+- `PageTransitionEvent`
+- `PannerNode`
+- `Path2D`
+- `Performance`
+- `PerformanceElementTiming`
+- `PerformanceEntry`
+- `PerformanceEventTiming`
+- `PerformanceLongAnimationFrameTiming`
+- `PerformanceLongTaskTiming`
+- `PerformanceMark`
+- `PerformanceMeasure`
+- `PerformanceNavigation`
+- `PerformanceNavigationTiming`
+- `PerformanceObserver`
+- `PerformanceObserverEntryList`
+- `PerformancePaintTiming`
+- `PerformanceResourceTiming`
+- `PerformanceScriptTiming`
+- `PerformanceServerTiming`
+- `PerformanceTiming`
+- `PerformanceTimingConfidence`
+- `PeriodicSyncManager`
+- `PeriodicWave`
+- `PermissionStatus`
+- `Permissions`
+- `PictureInPictureEvent`
+- `PictureInPictureWindow`
+- `Plugin`
+- `PluginArray`
+- `PointerEvent`
+- `PopStateEvent`
+- `ProcessingInstruction`
+- `Profiler`
+- `ProgressEvent`
+- `PromiseRejectionEvent`
+- `PushManager`
+- `PushSubscription`
+- `PushSubscriptionOptions`
+- `QuotaExceededError`
+- `RTCCertificate`
+- `RTCDTMFSender`
+- `RTCDTMFToneChangeEvent`
+- `RTCDataChannel`
+- `RTCDataChannelEvent`
+- `RTCDtlsTransport`
+- `RTCEncodedAudioFrame`
+- `RTCEncodedVideoFrame`
+- `RTCError`
+- `RTCErrorEvent`
+- `RTCIceCandidate`
+- `RTCIceTransport`
+- `RTCPeerConnection`
+- `RTCPeerConnectionIceErrorEvent`
+- `RTCPeerConnectionIceEvent`
+- `RTCRtpReceiver`
+- `RTCRtpScriptTransform`
+- `RTCRtpSender`
+- `RTCRtpTransceiver`
+- `RTCSctpTransport`
+- `RTCSessionDescription`
+- `RTCStatsReport`
+- `RTCTrackEvent`
+- `RadioNodeList`
+- `Range`
+- `ReadableByteStreamController`
+- `ReadableStream`
+- `ReadableStreamBYOBReader`
+- `ReadableStreamBYOBRequest`
+- `ReadableStreamDefaultController`
+- `ReadableStreamDefaultReader`
+- `RemotePlayback`
+- `ReportBody`
+- `ReportingObserver`
+- `Request`
+- `ResizeObserver`
+- `ResizeObserverEntry`
+- `ResizeObserverSize`
+- `Response`
+- `RestrictionTarget`
+- `SVGAElement`
+- `SVGAngle`
+- `SVGAnimateElement`
+- `SVGAnimateMotionElement`
+- `SVGAnimateTransformElement`
+- `SVGAnimatedAngle`
+- `SVGAnimatedBoolean`
+- `SVGAnimatedEnumeration`
+- `SVGAnimatedInteger`
+- `SVGAnimatedLength`
+- `SVGAnimatedLengthList`
+- `SVGAnimatedNumber`
+- `SVGAnimatedNumberList`
+- `SVGAnimatedPreserveAspectRatio`
+- `SVGAnimatedRect`
+- `SVGAnimatedString`
+- `SVGAnimatedTransformList`
+- `SVGAnimationElement`
+- `SVGCircleElement`
+- `SVGClipPathElement`
+- `SVGComponentTransferFunctionElement`
+- `SVGDefsElement`
+- `SVGDescElement`
+- `SVGElement`
+- `SVGEllipseElement`
+- `SVGFEBlendElement`
+- `SVGFEColorMatrixElement`
+- `SVGFEComponentTransferElement`
+- `SVGFECompositeElement`
+- `SVGFEConvolveMatrixElement`
+- `SVGFEDiffuseLightingElement`
+- `SVGFEDisplacementMapElement`
+- `SVGFEDistantLightElement`
+- `SVGFEDropShadowElement`
+- `SVGFEFloodElement`
+- `SVGFEFuncAElement`
+- `SVGFEFuncBElement`
+- `SVGFEFuncGElement`
+- `SVGFEFuncRElement`
+- `SVGFEGaussianBlurElement`
+- `SVGFEImageElement`
+- `SVGFEMergeElement`
+- `SVGFEMergeNodeElement`
+- `SVGFEMorphologyElement`
+- `SVGFEOffsetElement`
+- `SVGFEPointLightElement`
+- `SVGFESpecularLightingElement`
+- `SVGFESpotLightElement`
+- `SVGFETileElement`
+- `SVGFETurbulenceElement`
+- `SVGFilterElement`
+- `SVGForeignObjectElement`
+- `SVGGElement`
+- `SVGGeometryElement`
+- `SVGGradientElement`
+- `SVGGraphicsElement`
+- `SVGImageElement`
+- `SVGLength`
+- `SVGLengthList`
+- `SVGLineElement`
+- `SVGLinearGradientElement`
+- `SVGMPathElement`
+- `SVGMarkerElement`
+- `SVGMaskElement`
+- `SVGMatrix`
+- `SVGMetadataElement`
+- `SVGNumber`
+- `SVGNumberList`
+- `SVGPathElement`
+- `SVGPatternElement`
+- `SVGPoint`
+- `SVGPointList`
+- `SVGPolygonElement`
+- `SVGPolylineElement`
+- `SVGPreserveAspectRatio`
+- `SVGRadialGradientElement`
+- `SVGRect`
+- `SVGRectElement`
+- `SVGSVGElement`
+- `SVGScriptElement`
+- `SVGSetElement`
+- `SVGStopElement`
+- `SVGStringList`
+- `SVGStyleElement`
+- `SVGSwitchElement`
+- `SVGSymbolElement`
+- `SVGTSpanElement`
+- `SVGTextContentElement`
+- `SVGTextElement`
+- `SVGTextPathElement`
+- `SVGTextPositioningElement`
+- `SVGTitleElement`
+- `SVGTransform`
+- `SVGTransformList`
+- `SVGUnitTypes`
+- `SVGUseElement`
+- `SVGViewElement`
+- `Sanitizer`
+- `Scheduler`
+- `Scheduling`
+- `Screen`
+- `ScreenOrientation`
+- `ScriptProcessorNode`
+- `ScrollTimeline`
+- `SecurityPolicyViolationEvent`
+- `Selection`
+- `ShadowRoot`
+- `SharedStorage`
+- `SharedStorageAppendMethod`
+- `SharedStorageClearMethod`
+- `SharedStorageDeleteMethod`
+- `SharedStorageModifierMethod`
+- `SharedStorageSetMethod`
+- `SharedStorageWorklet`
+- `SharedWorker`
+- `SnapEvent`
+- `SourceBuffer`
+- `SourceBufferList`
+- `SpeechGrammar`
+- `SpeechGrammarList`
+- `SpeechRecognition`
+- `SpeechRecognitionErrorEvent`
+- `SpeechRecognitionEvent`
+- `SpeechSynthesis`
+- `SpeechSynthesisErrorEvent`
+- `SpeechSynthesisEvent`
+- `SpeechSynthesisUtterance`
+- `SpeechSynthesisVoice`
+- `StaticRange`
+- `StereoPannerNode`
+- `Storage`
+- `StorageEvent`
+- `StylePropertyMap`
+- `StylePropertyMapReadOnly`
+- `StyleSheet`
+- `StyleSheetList`
+- `SubmitEvent`
+- `Subscriber`
+- `SyncManager`
+- `TaskAttributionTiming`
+- `TaskController`
+- `TaskPriorityChangeEvent`
+- `TaskSignal`
+- `Temporal`
+- `Text`
+- `TextDecoder`
+- `TextDecoderStream`
+- `TextEncoder`
+- `TextEncoderStream`
+- `TextEvent`
+- `TextFormat`
+- `TextFormatUpdateEvent`
+- `TextMetrics`
+- `TextTrack`
+- `TextTrackCue`
+- `TextTrackCueList`
+- `TextTrackList`
+- `TextUpdateEvent`
+- `TimeRanges`
+- `TimelineTrigger`
+- `TimelineTriggerRange`
+- `TimelineTriggerRangeList`
+- `ToggleEvent`
+- `Touch`
+- `TouchEvent`
+- `TouchList`
+- `TrackEvent`
+- `TransformStream`
+- `TransformStreamDefaultController`
+- `TransitionEvent`
+- `TreeWalker`
+- `TrustedHTML`
+- `TrustedScript`
+- `TrustedScriptURL`
+- `TrustedTypePolicy`
+- `TrustedTypePolicyFactory`
+- `UIEvent`
+- `URL`
+- `URLPattern`
+- `URLSearchParams`
+- `UserActivation`
+- `VTTCue`
+- `ValidityState`
+- `VideoColorSpace`
+- `VideoFrame`
+- `VideoPlaybackQuality`
+- `ViewTimeline`
+- `ViewTransition`
+- `ViewTransitionTypeSet`
+- `Viewport`
+- `VirtualKeyboardGeometryChangeEvent`
+- `VisibilityStateEntry`
+- `VisualViewport`
+- `WaveShaperNode`
+- `WebAssembly`
+- `WebGL2RenderingContext`
+- `WebGLActiveInfo`
+- `WebGLBuffer`
+- `WebGLContextEvent`
+- `WebGLFramebuffer`
+- `WebGLObject`
+- `WebGLProgram`
+- `WebGLQuery`
+- `WebGLRenderbuffer`
+- `WebGLRenderingContext`
+- `WebGLSampler`
+- `WebGLShader`
+- `WebGLShaderPrecisionFormat`
+- `WebGLSync`
+- `WebGLTexture`
+- `WebGLTransformFeedback`
+- `WebGLUniformLocation`
+- `WebGLVertexArrayObject`
+- `WebKitCSSMatrix`
+- `WebKitMutationObserver`
+- `WebSocket`
+- `WebSocketError`
+- `WebSocketStream`
+- `WheelEvent`
+- `Window`
+- `WindowControlsOverlay`
+- `WindowControlsOverlayGeometryChangeEvent`
+- `Worker`
+- `WritableStream`
+- `WritableStreamDefaultController`
+- `WritableStreamDefaultWriter`
+- `XMLDocument`
+- `XMLHttpRequest`
+- `XMLHttpRequestEventTarget`
+- `XMLHttpRequestUpload`
+- `XMLSerializer`
+- `XPathEvaluator`
+- `XPathExpression`
+- `XPathResult`
+- `alert`
+- `blur`
+- `cancelAnimationFrame`
+- `cancelIdleCallback`
+- `captureEvents`
+- `chrome`
+- `clearInterval`
+- `clearTimeout`
+- `clientInformation`
+- `close`
+- `closed`
+- `confirm`
+- `console`
+- `crashReport`
+- `createImageBitmap`
+- `credentialless`
+- `crossOriginIsolated`
+- `crypto`
+- `customElements`
+- `devicePixelRatio`
+- `document`
+- `event`
+- `external`
+- `fence`
+- `fetch`
+- `find`
+- `focus`
+- `frameElement`
+- `frames`
+- `getComputedStyle`
+- `getSelection`
+- `history`
+- `indexedDB`
+- `innerHeight`
+- `innerWidth`
+- `isSecureContext`
+- `launchQueue`
+- `length`
+- `localStorage`
+- `location`
+- `locationbar`
+- `matchMedia`
+- `menubar`
+- `moveBy`
+- `moveTo`
+- `name`
+- `navigation`
+- `navigator`
+- `offscreenBuffering`
+- `onabort`
+- `onafterprint`
+- `onanimationcancel`
+- `onanimationend`
+- `onanimationiteration`
+- `onanimationstart`
+- `onappinstalled`
+- `onauxclick`
+- `onbeforeinput`
+- `onbeforeinstallprompt`
+- `onbeforematch`
+- `onbeforeprint`
+- `onbeforetoggle`
+- `onbeforeunload`
+- `onbeforexrselect`
+- `onblur`
+- `oncancel`
+- `oncanplay`
+- `oncanplaythrough`
+- `onchange`
+- `onclick`
+- `onclose`
+- `oncommand`
+- `oncontentvisibilityautostatechange`
+- `oncontextlost`
+- `oncontextmenu`
+- `oncontextrestored`
+- `oncuechange`
+- `ondblclick`
+- `ondrag`
+- `ondragend`
+- `ondragenter`
+- `ondragleave`
+- `ondragover`
+- `ondragstart`
+- `ondrop`
+- `ondurationchange`
+- `onemptied`
+- `onended`
+- `onerror`
+- `onfocus`
+- `onformdata`
+- `ongamepadconnected`
+- `ongamepaddisconnected`
+- `ongotpointercapture`
+- `onhashchange`
+- `oninput`
+- `oninvalid`
+- `onkeydown`
+- `onkeypress`
+- `onkeyup`
+- `onlanguagechange`
+- `onload`
+- `onloadeddata`
+- `onloadedmetadata`
+- `onloadstart`
+- `onlostpointercapture`
+- `onmessage`
+- `onmessageerror`
+- `onmousedown`
+- `onmouseenter`
+- `onmouseleave`
+- `onmousemove`
+- `onmouseout`
+- `onmouseover`
+- `onmouseup`
+- `onmousewheel`
+- `onoffline`
+- `ononline`
+- `onpagehide`
+- `onpagereveal`
+- `onpageshow`
+- `onpageswap`
+- `onpause`
+- `onplay`
+- `onplaying`
+- `onpointercancel`
+- `onpointerdown`
+- `onpointerenter`
+- `onpointerleave`
+- `onpointermove`
+- `onpointerout`
+- `onpointerover`
+- `onpointerup`
+- `onpopstate`
+- `onprogress`
+- `onratechange`
+- `onrejectionhandled`
+- `onreset`
+- `onresize`
+- `onscroll`
+- `onscrollend`
+- `onscrollsnapchange`
+- `onscrollsnapchanging`
+- `onsearch`
+- `onsecuritypolicyviolation`
+- `onseeked`
+- `onseeking`
+- `onselect`
+- `onselectionchange`
+- `onselectstart`
+- `onslotchange`
+- `onstalled`
+- `onstorage`
+- `onsubmit`
+- `onsuspend`
+- `ontimeupdate`
+- `ontoggle`
+- `ontransitioncancel`
+- `ontransitionend`
+- `ontransitionrun`
+- `ontransitionstart`
+- `onunhandledrejection`
+- `onunload`
+- `onvolumechange`
+- `onwaiting`
+- `onwebkitanimationend`
+- `onwebkitanimationiteration`
+- `onwebkitanimationstart`
+- `onwebkittransitionend`
+- `onwheel`
+- `open`
+- `opener`
+- `origin`
+- `originAgentCluster`
+- `outerHeight`
+- `outerWidth`
+- `pageXOffset`
+- `pageYOffset`
+- `parent`
+- `personalbar`
+- `postMessage`
+- `print`
+- `prompt`
+- `releaseEvents`
+- `reportError`
+- `requestAnimationFrame`
+- `requestIdleCallback`
+- `resizeBy`
+- `resizeTo`
+- `scheduler`
+- `screen`
+- `screenLeft`
+- `screenTop`
+- `screenX`
+- `screenY`
+- `scroll`
+- `scrollBy`
+- `scrollTo`
+- `scrollX`
+- `scrollY`
+- `scrollbars`
+- `self`
+- `sessionStorage`
+- `setInterval`
+- `setTimeout`
+- `speechSynthesis`
+- `status`
+- `statusbar`
+- `stop`
+- `structuredClone`
+- `styleMedia`
+- `toolbar`
+- `top`
+- `trustedTypes`
+- `viewport`
+- `visualViewport`
+- `webkitCancelAnimationFrame`
+- `webkitMediaStream`
+- `webkitRTCPeerConnection`
+- `webkitRequestAnimationFrame`
+- `webkitRequestFileSystem`
+- `webkitResolveLocalFileSystemURL`
+- `webkitSpeechGrammar`
+- `webkitSpeechGrammarList`
+- `webkitSpeechRecognition`
+- `webkitSpeechRecognitionError`
+- `webkitSpeechRecognitionEvent`
+- `webkitURL`
+- `window`
+
+### QuickJS-native shared globals
+- `AggregateError`
+- `Array`
+- `ArrayBuffer`
+- `AsyncDisposableStack`
+- `Atomics`
+- `BigInt`
+- `BigInt64Array`
+- `BigUint64Array`
+- `Boolean`
+- `DOMException`
+- `DataView`
+- `Date`
+- `DisposableStack`
+- `Error`
+- `EvalError`
+- `FinalizationRegistry`
+- `Float16Array`
+- `Float32Array`
+- `Float64Array`
+- `Function`
+- `Infinity`
+- `Int16Array`
+- `Int32Array`
+- `Int8Array`
+- `Iterator`
+- `JSON`
+- `Map`
+- `Math`
+- `NaN`
+- `Number`
+- `Object`
+- `Promise`
+- `Proxy`
+- `RangeError`
+- `ReferenceError`
+- `Reflect`
+- `RegExp`
+- `Set`
+- `String`
+- `SuppressedError`
+- `Symbol`
+- `SyntaxError`
+- `TypeError`
+- `URIError`
+- `Uint16Array`
+- `Uint32Array`
+- `Uint8Array`
+- `Uint8ClampedArray`
+- `WeakMap`
+- `WeakRef`
+- `WeakSet`
+- `atob`
+- `btoa`
+- `decodeURI`
+- `decodeURIComponent`
+- `encodeURI`
+- `encodeURIComponent`
+- `escape`
+- `eval`
+- `globalThis`
+- `isFinite`
+- `isNaN`
+- `parseFloat`
+- `parseInt`
+- `performance`
+- `queueMicrotask`
+- `undefined`
+- `unescape`
+
+### QuickJS-only globals
+- `InternalError`
+- `SharedArrayBuffer`
+- `Symbol(Symbol.toStringTag)`
+
+### Browser-only after install
+- `Temporal`
+- `WebAssembly`
+
+### Installed virtual shared globals
+- `AbortController`
+- `AbortSignal`
+- `AbstractRange`
+- `AggregateError`
+- `AnalyserNode`
+- `Animation`
+- `AnimationEffect`
+- `AnimationEvent`
+- `AnimationPlaybackEvent`
+- `AnimationTimeline`
+- `AnimationTrigger`
+- `Array`
+- `ArrayBuffer`
+- `AsyncDisposableStack`
+- `Atomics`
+- `Attr`
+- `Audio`
+- `AudioBuffer`
+- `AudioBufferSourceNode`
+- `AudioContext`
+- `AudioData`
+- `AudioDestinationNode`
+- `AudioListener`
+- `AudioNode`
+- `AudioParam`
+- `AudioParamMap`
+- `AudioProcessingEvent`
+- `AudioScheduledSourceNode`
+- `AudioSinkInfo`
+- `AudioWorkletNode`
+- `BackgroundFetchManager`
+- `BackgroundFetchRecord`
+- `BackgroundFetchRegistration`
+- `BarProp`
+- `BaseAudioContext`
+- `BeforeInstallPromptEvent`
+- `BeforeUnloadEvent`
+- `BigInt`
+- `BigInt64Array`
+- `BigUint64Array`
+- `BiquadFilterNode`
+- `Blob`
+- `BlobEvent`
+- `BluetoothUUID`
+- `Boolean`
+- `BroadcastChannel`
+- `BrowserCaptureMediaStreamTrack`
+- `ByteLengthQueuingStrategy`
+- `CDATASection`
+- `CSPViolationReportBody`
+- `CSS`
+- `CSSAnimation`
+- `CSSConditionRule`
+- `CSSContainerRule`
+- `CSSCounterStyleRule`
+- `CSSFontFaceRule`
+- `CSSFontFeatureValuesRule`
+- `CSSFontPaletteValuesRule`
+- `CSSFunctionDeclarations`
+- `CSSFunctionDescriptors`
+- `CSSFunctionRule`
+- `CSSGroupingRule`
+- `CSSImageValue`
+- `CSSImportRule`
+- `CSSKeyframeRule`
+- `CSSKeyframesRule`
+- `CSSKeywordValue`
+- `CSSLayerBlockRule`
+- `CSSLayerStatementRule`
+- `CSSMarginRule`
+- `CSSMathClamp`
+- `CSSMathInvert`
+- `CSSMathMax`
+- `CSSMathMin`
+- `CSSMathNegate`
+- `CSSMathProduct`
+- `CSSMathSum`
+- `CSSMathValue`
+- `CSSMatrixComponent`
+- `CSSMediaRule`
+- `CSSNamespaceRule`
+- `CSSNestedDeclarations`
+- `CSSNumericArray`
+- `CSSNumericValue`
+- `CSSPageRule`
+- `CSSPerspective`
+- `CSSPositionTryDescriptors`
+- `CSSPositionTryRule`
+- `CSSPositionValue`
+- `CSSPropertyRule`
+- `CSSRotate`
+- `CSSRule`
+- `CSSRuleList`
+- `CSSScale`
+- `CSSScopeRule`
+- `CSSSkew`
+- `CSSSkewX`
+- `CSSSkewY`
+- `CSSStartingStyleRule`
+- `CSSStyleDeclaration`
+- `CSSStyleRule`
+- `CSSStyleSheet`
+- `CSSStyleValue`
+- `CSSSupportsRule`
+- `CSSTransformComponent`
+- `CSSTransformValue`
+- `CSSTransition`
+- `CSSTranslate`
+- `CSSUnitValue`
+- `CSSUnparsedValue`
+- `CSSVariableReferenceValue`
+- `CSSViewTransitionRule`
+- `CanvasCaptureMediaStreamTrack`
+- `CanvasGradient`
+- `CanvasPattern`
+- `CanvasRenderingContext2D`
+- `CaretPosition`
+- `ChannelMergerNode`
+- `ChannelSplitterNode`
+- `ChapterInformation`
+- `CharacterBoundsUpdateEvent`
+- `CharacterData`
+- `ClipboardEvent`
+- `CloseEvent`
+- `CloseWatcher`
+- `CommandEvent`
+- `Comment`
+- `CompositionEvent`
+- `CompressionStream`
+- `ConstantSourceNode`
+- `ContentVisibilityAutoStateChangeEvent`
+- `ConvolverNode`
+- `CountQueuingStrategy`
+- `CrashReportContext`
+- `CropTarget`
+- `Crypto`
+- `CustomElementRegistry`
+- `CustomEvent`
+- `CustomStateSet`
+- `DOMError`
+- `DOMException`
+- `DOMImplementation`
+- `DOMMatrix`
+- `DOMMatrixReadOnly`
+- `DOMParser`
+- `DOMPoint`
+- `DOMPointReadOnly`
+- `DOMQuad`
+- `DOMRect`
+- `DOMRectList`
+- `DOMRectReadOnly`
+- `DOMStringList`
+- `DOMStringMap`
+- `DOMTokenList`
+- `DataTransfer`
+- `DataTransferItem`
+- `DataTransferItemList`
+- `DataView`
+- `Date`
+- `DecompressionStream`
+- `DelayNode`
+- `DelegatedInkTrailPresenter`
+- `DisposableStack`
+- `Document`
+- `DocumentFragment`
+- `DocumentPictureInPictureEvent`
+- `DocumentTimeline`
+- `DocumentType`
+- `DragEvent`
+- `DynamicsCompressorNode`
+- `EditContext`
+- `Element`
+- `ElementInternals`
+- `EncodedAudioChunk`
+- `EncodedVideoChunk`
+- `Error`
+- `ErrorEvent`
+- `EvalError`
+- `Event`
+- `EventCounts`
+- `EventSource`
+- `EventTarget`
+- `External`
+- `FeaturePolicy`
+- `Fence`
+- `FencedFrameConfig`
+- `File`
+- `FileList`
+- `FileReader`
+- `FinalizationRegistry`
+- `Float16Array`
+- `Float32Array`
+- `Float64Array`
+- `FocusEvent`
+- `FontFace`
+- `FontFaceSetLoadEvent`
+- `FormData`
+- `FormDataEvent`
+- `FragmentDirective`
+- `Function`
+- `GainNode`
+- `Gamepad`
+- `GamepadButton`
+- `GamepadEvent`
+- `GamepadHapticActuator`
+- `Geolocation`
+- `GeolocationCoordinates`
+- `GeolocationPosition`
+- `GeolocationPositionError`
+- `HTMLAllCollection`
+- `HTMLAnchorElement`
+- `HTMLAreaElement`
+- `HTMLAudioElement`
+- `HTMLBRElement`
+- `HTMLBaseElement`
+- `HTMLBodyElement`
+- `HTMLButtonElement`
+- `HTMLCanvasElement`
+- `HTMLCollection`
+- `HTMLDListElement`
+- `HTMLDataElement`
+- `HTMLDataListElement`
+- `HTMLDetailsElement`
+- `HTMLDialogElement`
+- `HTMLDirectoryElement`
+- `HTMLDivElement`
+- `HTMLDocument`
+- `HTMLElement`
+- `HTMLEmbedElement`
+- `HTMLFencedFrameElement`
+- `HTMLFieldSetElement`
+- `HTMLFontElement`
+- `HTMLFormControlsCollection`
+- `HTMLFormElement`
+- `HTMLFrameElement`
+- `HTMLFrameSetElement`
+- `HTMLGeolocationElement`
+- `HTMLHRElement`
+- `HTMLHeadElement`
+- `HTMLHeadingElement`
+- `HTMLHtmlElement`
+- `HTMLIFrameElement`
+- `HTMLImageElement`
+- `HTMLInputElement`
+- `HTMLLIElement`
+- `HTMLLabelElement`
+- `HTMLLegendElement`
+- `HTMLLinkElement`
+- `HTMLMapElement`
+- `HTMLMarqueeElement`
+- `HTMLMediaElement`
+- `HTMLMenuElement`
+- `HTMLMetaElement`
+- `HTMLMeterElement`
+- `HTMLModElement`
+- `HTMLOListElement`
+- `HTMLObjectElement`
+- `HTMLOptGroupElement`
+- `HTMLOptionElement`
+- `HTMLOptionsCollection`
+- `HTMLOutputElement`
+- `HTMLParagraphElement`
+- `HTMLParamElement`
+- `HTMLPictureElement`
+- `HTMLPreElement`
+- `HTMLProgressElement`
+- `HTMLQuoteElement`
+- `HTMLScriptElement`
+- `HTMLSelectElement`
+- `HTMLSelectedContentElement`
+- `HTMLSlotElement`
+- `HTMLSourceElement`
+- `HTMLSpanElement`
+- `HTMLStyleElement`
+- `HTMLTableCaptionElement`
+- `HTMLTableCellElement`
+- `HTMLTableColElement`
+- `HTMLTableElement`
+- `HTMLTableRowElement`
+- `HTMLTableSectionElement`
+- `HTMLTemplateElement`
+- `HTMLTextAreaElement`
+- `HTMLTimeElement`
+- `HTMLTitleElement`
+- `HTMLTrackElement`
+- `HTMLUListElement`
+- `HTMLUnknownElement`
+- `HTMLVideoElement`
+- `HashChangeEvent`
+- `Headers`
+- `Highlight`
+- `HighlightRegistry`
+- `History`
+- `IDBCursor`
+- `IDBCursorWithValue`
+- `IDBDatabase`
+- `IDBFactory`
+- `IDBIndex`
+- `IDBKeyRange`
+- `IDBObjectStore`
+- `IDBOpenDBRequest`
+- `IDBRecord`
+- `IDBRequest`
+- `IDBTransaction`
+- `IDBVersionChangeEvent`
+- `IIRFilterNode`
+- `IdleDeadline`
+- `Image`
+- `ImageBitmap`
+- `ImageBitmapRenderingContext`
+- `ImageData`
+- `Infinity`
+- `Ink`
+- `InputDeviceCapabilities`
+- `InputDeviceInfo`
+- `InputEvent`
+- `Int16Array`
+- `Int32Array`
+- `Int8Array`
+- `IntegrityViolationReportBody`
+- `InterestEvent`
+- `IntersectionObserver`
+- `IntersectionObserverEntry`
+- `Intl`
+- `Iterator`
+- `JSON`
+- `KeyboardEvent`
+- `KeyframeEffect`
+- `LargestContentfulPaint`
+- `LaunchParams`
+- `LaunchQueue`
+- `LayoutShift`
+- `LayoutShiftAttribution`
+- `Location`
+- `Map`
+- `Math`
+- `MathMLElement`
+- `MediaCapabilities`
+- `MediaElementAudioSourceNode`
+- `MediaEncryptedEvent`
+- `MediaError`
+- `MediaList`
+- `MediaMetadata`
+- `MediaQueryList`
+- `MediaQueryListEvent`
+- `MediaRecorder`
+- `MediaSession`
+- `MediaSource`
+- `MediaSourceHandle`
+- `MediaStream`
+- `MediaStreamAudioDestinationNode`
+- `MediaStreamAudioSourceNode`
+- `MediaStreamEvent`
+- `MediaStreamTrack`
+- `MediaStreamTrackAudioStats`
+- `MediaStreamTrackEvent`
+- `MediaStreamTrackGenerator`
+- `MediaStreamTrackProcessor`
+- `MediaStreamTrackVideoStats`
+- `MessageChannel`
+- `MessageEvent`
+- `MessagePort`
+- `MimeType`
+- `MimeTypeArray`
+- `MouseEvent`
+- `MutationObserver`
+- `MutationRecord`
+- `NaN`
+- `NamedNodeMap`
+- `NavigateEvent`
+- `Navigation`
+- `NavigationActivation`
+- `NavigationCurrentEntryChangeEvent`
+- `NavigationDestination`
+- `NavigationHistoryEntry`
+- `NavigationPrecommitController`
+- `NavigationTransition`
+- `Navigator`
+- `NavigatorUAData`
+- `NetworkInformation`
+- `Node`
+- `NodeFilter`
+- `NodeIterator`
+- `NodeList`
+- `NotRestoredReasonDetails`
+- `NotRestoredReasons`
+- `Notification`
+- `Number`
+- `Object`
+- `Observable`
+- `OfflineAudioCompletionEvent`
+- `OfflineAudioContext`
+- `OffscreenCanvas`
+- `OffscreenCanvasRenderingContext2D`
+- `Option`
+- `Origin`
+- `OscillatorNode`
+- `OverconstrainedError`
+- `PageRevealEvent`
+- `PageSwapEvent`
+- `PageTransitionEvent`
+- `PannerNode`
+- `Path2D`
+- `Performance`
+- `PerformanceElementTiming`
+- `PerformanceEntry`
+- `PerformanceEventTiming`
+- `PerformanceLongAnimationFrameTiming`
+- `PerformanceLongTaskTiming`
+- `PerformanceMark`
+- `PerformanceMeasure`
+- `PerformanceNavigation`
+- `PerformanceNavigationTiming`
+- `PerformanceObserver`
+- `PerformanceObserverEntryList`
+- `PerformancePaintTiming`
+- `PerformanceResourceTiming`
+- `PerformanceScriptTiming`
+- `PerformanceServerTiming`
+- `PerformanceTiming`
+- `PerformanceTimingConfidence`
+- `PeriodicSyncManager`
+- `PeriodicWave`
+- `PermissionStatus`
+- `Permissions`
+- `PictureInPictureEvent`
+- `PictureInPictureWindow`
+- `Plugin`
+- `PluginArray`
+- `PointerEvent`
+- `PopStateEvent`
+- `ProcessingInstruction`
+- `Profiler`
+- `ProgressEvent`
+- `Promise`
+- `PromiseRejectionEvent`
+- `Proxy`
+- `PushManager`
+- `PushSubscription`
+- `PushSubscriptionOptions`
+- `QuotaExceededError`
+- `RTCCertificate`
+- `RTCDTMFSender`
+- `RTCDTMFToneChangeEvent`
+- `RTCDataChannel`
+- `RTCDataChannelEvent`
+- `RTCDtlsTransport`
+- `RTCEncodedAudioFrame`
+- `RTCEncodedVideoFrame`
+- `RTCError`
+- `RTCErrorEvent`
+- `RTCIceCandidate`
+- `RTCIceTransport`
+- `RTCPeerConnection`
+- `RTCPeerConnectionIceErrorEvent`
+- `RTCPeerConnectionIceEvent`
+- `RTCRtpReceiver`
+- `RTCRtpScriptTransform`
+- `RTCRtpSender`
+- `RTCRtpTransceiver`
+- `RTCSctpTransport`
+- `RTCSessionDescription`
+- `RTCStatsReport`
+- `RTCTrackEvent`
+- `RadioNodeList`
+- `Range`
+- `RangeError`
+- `ReadableByteStreamController`
+- `ReadableStream`
+- `ReadableStreamBYOBReader`
+- `ReadableStreamBYOBRequest`
+- `ReadableStreamDefaultController`
+- `ReadableStreamDefaultReader`
+- `ReferenceError`
+- `Reflect`
+- `RegExp`
+- `RemotePlayback`
+- `ReportBody`
+- `ReportingObserver`
+- `Request`
+- `ResizeObserver`
+- `ResizeObserverEntry`
+- `ResizeObserverSize`
+- `Response`
+- `RestrictionTarget`
+- `SVGAElement`
+- `SVGAngle`
+- `SVGAnimateElement`
+- `SVGAnimateMotionElement`
+- `SVGAnimateTransformElement`
+- `SVGAnimatedAngle`
+- `SVGAnimatedBoolean`
+- `SVGAnimatedEnumeration`
+- `SVGAnimatedInteger`
+- `SVGAnimatedLength`
+- `SVGAnimatedLengthList`
+- `SVGAnimatedNumber`
+- `SVGAnimatedNumberList`
+- `SVGAnimatedPreserveAspectRatio`
+- `SVGAnimatedRect`
+- `SVGAnimatedString`
+- `SVGAnimatedTransformList`
+- `SVGAnimationElement`
+- `SVGCircleElement`
+- `SVGClipPathElement`
+- `SVGComponentTransferFunctionElement`
+- `SVGDefsElement`
+- `SVGDescElement`
+- `SVGElement`
+- `SVGEllipseElement`
+- `SVGFEBlendElement`
+- `SVGFEColorMatrixElement`
+- `SVGFEComponentTransferElement`
+- `SVGFECompositeElement`
+- `SVGFEConvolveMatrixElement`
+- `SVGFEDiffuseLightingElement`
+- `SVGFEDisplacementMapElement`
+- `SVGFEDistantLightElement`
+- `SVGFEDropShadowElement`
+- `SVGFEFloodElement`
+- `SVGFEFuncAElement`
+- `SVGFEFuncBElement`
+- `SVGFEFuncGElement`
+- `SVGFEFuncRElement`
+- `SVGFEGaussianBlurElement`
+- `SVGFEImageElement`
+- `SVGFEMergeElement`
+- `SVGFEMergeNodeElement`
+- `SVGFEMorphologyElement`
+- `SVGFEOffsetElement`
+- `SVGFEPointLightElement`
+- `SVGFESpecularLightingElement`
+- `SVGFESpotLightElement`
+- `SVGFETileElement`
+- `SVGFETurbulenceElement`
+- `SVGFilterElement`
+- `SVGForeignObjectElement`
+- `SVGGElement`
+- `SVGGeometryElement`
+- `SVGGradientElement`
+- `SVGGraphicsElement`
+- `SVGImageElement`
+- `SVGLength`
+- `SVGLengthList`
+- `SVGLineElement`
+- `SVGLinearGradientElement`
+- `SVGMPathElement`
+- `SVGMarkerElement`
+- `SVGMaskElement`
+- `SVGMatrix`
+- `SVGMetadataElement`
+- `SVGNumber`
+- `SVGNumberList`
+- `SVGPathElement`
+- `SVGPatternElement`
+- `SVGPoint`
+- `SVGPointList`
+- `SVGPolygonElement`
+- `SVGPolylineElement`
+- `SVGPreserveAspectRatio`
+- `SVGRadialGradientElement`
+- `SVGRect`
+- `SVGRectElement`
+- `SVGSVGElement`
+- `SVGScriptElement`
+- `SVGSetElement`
+- `SVGStopElement`
+- `SVGStringList`
+- `SVGStyleElement`
+- `SVGSwitchElement`
+- `SVGSymbolElement`
+- `SVGTSpanElement`
+- `SVGTextContentElement`
+- `SVGTextElement`
+- `SVGTextPathElement`
+- `SVGTextPositioningElement`
+- `SVGTitleElement`
+- `SVGTransform`
+- `SVGTransformList`
+- `SVGUnitTypes`
+- `SVGUseElement`
+- `SVGViewElement`
+- `Sanitizer`
+- `Scheduler`
+- `Scheduling`
+- `Screen`
+- `ScreenOrientation`
+- `ScriptProcessorNode`
+- `ScrollTimeline`
+- `SecurityPolicyViolationEvent`
+- `Selection`
+- `Set`
+- `ShadowRoot`
+- `SharedStorage`
+- `SharedStorageAppendMethod`
+- `SharedStorageClearMethod`
+- `SharedStorageDeleteMethod`
+- `SharedStorageModifierMethod`
+- `SharedStorageSetMethod`
+- `SharedStorageWorklet`
+- `SharedWorker`
+- `SnapEvent`
+- `SourceBuffer`
+- `SourceBufferList`
+- `SpeechGrammar`
+- `SpeechGrammarList`
+- `SpeechRecognition`
+- `SpeechRecognitionErrorEvent`
+- `SpeechRecognitionEvent`
+- `SpeechSynthesis`
+- `SpeechSynthesisErrorEvent`
+- `SpeechSynthesisEvent`
+- `SpeechSynthesisUtterance`
+- `SpeechSynthesisVoice`
+- `StaticRange`
+- `StereoPannerNode`
+- `Storage`
+- `StorageEvent`
+- `String`
+- `StylePropertyMap`
+- `StylePropertyMapReadOnly`
+- `StyleSheet`
+- `StyleSheetList`
+- `SubmitEvent`
+- `Subscriber`
+- `SuppressedError`
+- `Symbol`
+- `SyncManager`
+- `SyntaxError`
+- `TaskAttributionTiming`
+- `TaskController`
+- `TaskPriorityChangeEvent`
+- `TaskSignal`
+- `Text`
+- `TextDecoder`
+- `TextDecoderStream`
+- `TextEncoder`
+- `TextEncoderStream`
+- `TextEvent`
+- `TextFormat`
+- `TextFormatUpdateEvent`
+- `TextMetrics`
+- `TextTrack`
+- `TextTrackCue`
+- `TextTrackCueList`
+- `TextTrackList`
+- `TextUpdateEvent`
+- `TimeRanges`
+- `TimelineTrigger`
+- `TimelineTriggerRange`
+- `TimelineTriggerRangeList`
+- `ToggleEvent`
+- `Touch`
+- `TouchEvent`
+- `TouchList`
+- `TrackEvent`
+- `TransformStream`
+- `TransformStreamDefaultController`
+- `TransitionEvent`
+- `TreeWalker`
+- `TrustedHTML`
+- `TrustedScript`
+- `TrustedScriptURL`
+- `TrustedTypePolicy`
+- `TrustedTypePolicyFactory`
+- `TypeError`
+- `UIEvent`
+- `URIError`
+- `URL`
+- `URLPattern`
+- `URLSearchParams`
+- `Uint16Array`
+- `Uint32Array`
+- `Uint8Array`
+- `Uint8ClampedArray`
+- `UserActivation`
+- `VTTCue`
+- `ValidityState`
+- `VideoColorSpace`
+- `VideoFrame`
+- `VideoPlaybackQuality`
+- `ViewTimeline`
+- `ViewTransition`
+- `ViewTransitionTypeSet`
+- `Viewport`
+- `VirtualKeyboardGeometryChangeEvent`
+- `VisibilityStateEntry`
+- `VisualViewport`
+- `WaveShaperNode`
+- `WeakMap`
+- `WeakRef`
+- `WeakSet`
+- `WebGL2RenderingContext`
+- `WebGLActiveInfo`
+- `WebGLBuffer`
+- `WebGLContextEvent`
+- `WebGLFramebuffer`
+- `WebGLObject`
+- `WebGLProgram`
+- `WebGLQuery`
+- `WebGLRenderbuffer`
+- `WebGLRenderingContext`
+- `WebGLSampler`
+- `WebGLShader`
+- `WebGLShaderPrecisionFormat`
+- `WebGLSync`
+- `WebGLTexture`
+- `WebGLTransformFeedback`
+- `WebGLUniformLocation`
+- `WebGLVertexArrayObject`
+- `WebKitCSSMatrix`
+- `WebKitMutationObserver`
+- `WebSocket`
+- `WebSocketError`
+- `WebSocketStream`
+- `WheelEvent`
+- `Window`
+- `WindowControlsOverlay`
+- `WindowControlsOverlayGeometryChangeEvent`
+- `Worker`
+- `WritableStream`
+- `WritableStreamDefaultController`
+- `WritableStreamDefaultWriter`
+- `XMLDocument`
+- `XMLHttpRequest`
+- `XMLHttpRequestEventTarget`
+- `XMLHttpRequestUpload`
+- `XMLSerializer`
+- `XPathEvaluator`
+- `XPathExpression`
+- `XPathResult`
+- `alert`
+- `atob`
+- `blur`
+- `btoa`
+- `cancelAnimationFrame`
+- `cancelIdleCallback`
+- `captureEvents`
+- `chrome`
+- `clearInterval`
+- `clearTimeout`
+- `clientInformation`
+- `close`
+- `closed`
+- `confirm`
+- `console`
+- `crashReport`
+- `createImageBitmap`
+- `credentialless`
+- `crossOriginIsolated`
+- `crypto`
+- `customElements`
+- `decodeURI`
+- `decodeURIComponent`
+- `devicePixelRatio`
+- `document`
+- `encodeURI`
+- `encodeURIComponent`
+- `escape`
+- `eval`
+- `event`
+- `external`
+- `fence`
+- `fetch`
+- `find`
+- `focus`
+- `frameElement`
+- `frames`
+- `getComputedStyle`
+- `getSelection`
+- `globalThis`
+- `history`
+- `indexedDB`
+- `innerHeight`
+- `innerWidth`
+- `isFinite`
+- `isNaN`
+- `isSecureContext`
+- `launchQueue`
+- `length`
+- `localStorage`
+- `location`
+- `locationbar`
+- `matchMedia`
+- `menubar`
+- `moveBy`
+- `moveTo`
+- `name`
+- `navigation`
+- `navigator`
+- `offscreenBuffering`
+- `onabort`
+- `onafterprint`
+- `onanimationcancel`
+- `onanimationend`
+- `onanimationiteration`
+- `onanimationstart`
+- `onappinstalled`
+- `onauxclick`
+- `onbeforeinput`
+- `onbeforeinstallprompt`
+- `onbeforematch`
+- `onbeforeprint`
+- `onbeforetoggle`
+- `onbeforeunload`
+- `onbeforexrselect`
+- `onblur`
+- `oncancel`
+- `oncanplay`
+- `oncanplaythrough`
+- `onchange`
+- `onclick`
+- `onclose`
+- `oncommand`
+- `oncontentvisibilityautostatechange`
+- `oncontextlost`
+- `oncontextmenu`
+- `oncontextrestored`
+- `oncuechange`
+- `ondblclick`
+- `ondrag`
+- `ondragend`
+- `ondragenter`
+- `ondragleave`
+- `ondragover`
+- `ondragstart`
+- `ondrop`
+- `ondurationchange`
+- `onemptied`
+- `onended`
+- `onerror`
+- `onfocus`
+- `onformdata`
+- `ongamepadconnected`
+- `ongamepaddisconnected`
+- `ongotpointercapture`
+- `onhashchange`
+- `oninput`
+- `oninvalid`
+- `onkeydown`
+- `onkeypress`
+- `onkeyup`
+- `onlanguagechange`
+- `onload`
+- `onloadeddata`
+- `onloadedmetadata`
+- `onloadstart`
+- `onlostpointercapture`
+- `onmessage`
+- `onmessageerror`
+- `onmousedown`
+- `onmouseenter`
+- `onmouseleave`
+- `onmousemove`
+- `onmouseout`
+- `onmouseover`
+- `onmouseup`
+- `onmousewheel`
+- `onoffline`
+- `ononline`
+- `onpagehide`
+- `onpagereveal`
+- `onpageshow`
+- `onpageswap`
+- `onpause`
+- `onplay`
+- `onplaying`
+- `onpointercancel`
+- `onpointerdown`
+- `onpointerenter`
+- `onpointerleave`
+- `onpointermove`
+- `onpointerout`
+- `onpointerover`
+- `onpointerup`
+- `onpopstate`
+- `onprogress`
+- `onratechange`
+- `onrejectionhandled`
+- `onreset`
+- `onresize`
+- `onscroll`
+- `onscrollend`
+- `onscrollsnapchange`
+- `onscrollsnapchanging`
+- `onsearch`
+- `onsecuritypolicyviolation`
+- `onseeked`
+- `onseeking`
+- `onselect`
+- `onselectionchange`
+- `onselectstart`
+- `onslotchange`
+- `onstalled`
+- `onstorage`
+- `onsubmit`
+- `onsuspend`
+- `ontimeupdate`
+- `ontoggle`
+- `ontransitioncancel`
+- `ontransitionend`
+- `ontransitionrun`
+- `ontransitionstart`
+- `onunhandledrejection`
+- `onunload`
+- `onvolumechange`
+- `onwaiting`
+- `onwebkitanimationend`
+- `onwebkitanimationiteration`
+- `onwebkitanimationstart`
+- `onwebkittransitionend`
+- `onwheel`
+- `open`
+- `opener`
+- `origin`
+- `originAgentCluster`
+- `outerHeight`
+- `outerWidth`
+- `pageXOffset`
+- `pageYOffset`
+- `parent`
+- `parseFloat`
+- `parseInt`
+- `performance`
+- `personalbar`
+- `postMessage`
+- `print`
+- `prompt`
+- `queueMicrotask`
+- `releaseEvents`
+- `reportError`
+- `requestAnimationFrame`
+- `requestIdleCallback`
+- `resizeBy`
+- `resizeTo`
+- `scheduler`
+- `screen`
+- `screenLeft`
+- `screenTop`
+- `screenX`
+- `screenY`
+- `scroll`
+- `scrollBy`
+- `scrollTo`
+- `scrollX`
+- `scrollY`
+- `scrollbars`
+- `self`
+- `sessionStorage`
+- `setInterval`
+- `setTimeout`
+- `speechSynthesis`
+- `status`
+- `statusbar`
+- `stop`
+- `structuredClone`
+- `styleMedia`
+- `toolbar`
+- `top`
+- `trustedTypes`
+- `undefined`
+- `unescape`
+- `viewport`
+- `visualViewport`
+- `webkitCancelAnimationFrame`
+- `webkitMediaStream`
+- `webkitRTCPeerConnection`
+- `webkitRequestAnimationFrame`
+- `webkitRequestFileSystem`
+- `webkitResolveLocalFileSystemURL`
+- `webkitSpeechGrammar`
+- `webkitSpeechGrammarList`
+- `webkitSpeechRecognition`
+- `webkitSpeechRecognitionError`
+- `webkitSpeechRecognitionEvent`
+- `webkitURL`
+- `window`
+
+## Descriptor shape audit
+
+Shape-audited entries: 930
+Entries with descriptor/prototype mismatches: 426
+Implemented entries with descriptor/prototype mismatches: 0
+
+### Implemented shape mismatches
+
+
+
+## Missing or partial
+- Scheduler: partial [virtualized] — globalThis.scheduler exposes a branded illegal-constructor Scheduler facade with postTask(callback, {priority, signal}) routed through the deterministic virtual timer queue, priority validation, TaskSignal priority defaults, callback result promise resolution, and aborted-signal rejection basics; browser scheduling heuristics and full AbortSignal inheritance parity remain partial. Decision: Keep virtualized because target-visible scheduling must be deterministic and driven by the virtual event loop rather than host scheduler state.
+- TaskController: partial [virtualized] — TaskController is constructible with a branded TaskSignal, priority initialization, setPriority() dispatching TaskPriorityChangeEvent, and abort(reason) cleanup for scheduler.postTask; full AbortController inheritance and descriptor parity remain partial. Decision: Keep virtualized because task priorities must affect the deterministic virtual scheduler, not host scheduler state.
+- TaskSignal: partial [virtualized] — TaskSignal is exposed as a branded illegal constructor with priority, aborted/reason, throwIfAborted(), add/removeEventListener(), onabort, and onprioritychange basics for scheduler.postTask; full AbortSignal/EventTarget inheritance and descriptor parity remain partial. Decision: Keep virtualized because task cancellation/priority state must stay inside the deterministic virtual scheduler.
+- TaskPriorityChangeEvent: partial [virtualized] — TaskPriorityChangeEvent is constructible/branded with type, previousPriority, non-cancelable event fields, and dispatch through TaskSignal prioritychange listeners; full Event inheritance and descriptor parity remain partial. Decision: Keep virtualized because task priority changes are virtual scheduler state.
+- structuredClone: partial [direct-shim] — structuredClone preserves object cycles plus Date, RegExp lastIndex, Map/Set graph identity, ArrayBuffer/typed-array copies, Blob slices, TypeError/Error name/message/stack, DOMException name/message/code, and browser-shaped DataCloneError failures for functions, symbols, WeakMap/WeakSet/Promise, URL, and URLSearchParams; transfer-list detachment semantics, broader platform-object clones, and full host algorithm parity remain partial. Decision: Prefer host bridge; current direct code remains partial until membrane-safe host structuredClone reuse or a fuller algorithm is available.
+- Crypto: partial [host-bridge] — globalThis.crypto is a frozen branded Crypto facade with getRandomValues() and randomUUID(); SubtleCrypto and CryptoKey surfaces remain absent/partial pending bridge-safe crypto decisions. Decision: Prefer host bridge; current facade is backed by membrane-approved random bytes while broader crypto remains pending.
+- console: partial [direct-shim] — Common console methods now expose Chromium-like own-property ordering/descriptors plus captured log/info/warn/error/debug/assert messages, basic %s/%d/%i/%f/%o/%O/%c substitution, deterministic count/countReset telemetry, and virtual-time time/timeLog/timeEnd telemetry; full DevTools object inspection, console.table rendering, task attribution, and profiler semantics remain partial. Decision: Keep direct shim because console output is harness telemetry captured inside the virtual QuickJS event loop; host DevTools console state is not target-visible membrane state.
+- Performance: partial [virtualized] — Virtual performance is branded as [object Performance], exposes illegal-constructor Performance, timeOrigin, now(), basic mark/measure/getEntries/getEntriesByName/getEntriesByType/clearMarks/clearMeasures/clearResourceTimings, a stable navigation PerformanceNavigationTiming entry, a branded EventCounts facade for dispatched virtual event counts, branded PerformanceEntry/PerformanceMark/PerformanceMeasure/PerformanceResourceTiming/PerformanceNavigationTiming/PerformanceServerTiming classes tied to virtual time, and PerformanceObserver/PerformanceObserverEntryList basics for navigation/mark/measure entries; resource entry population, mark/measure detail options, full EventTiming/EventCounts parity, full observer task timing, and descriptor parity remain partial. Decision: Keep virtualized because target-visible timing must come from the virtual event loop rather than host page timing.
+- PerformanceResourceTiming: partial [virtualized] — PerformanceResourceTiming now uses hidden WeakMap state, empty own-property instances for synthesized entries, native-order enumerable resource timing getters/toJSON(), modern Chromium fields, serverTiming array handling, and illegal-invocation behavior; actual non-navigation resource population, buffer limits, size semantics, and network membrane timing merge remain partial. Decision: Keep virtualized because target-visible timing must come from the virtual event loop/resource membrane rather than host page timing.
+- VisibilityStateEntry: partial [virtualized] — VisibilityStateEntry is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding; document visibility transitions, entry population, and descriptor parity remain partial. Decision: Keep virtualized because visibility-state timing must follow the virtual document lifecycle and policy, not host tab visibility.
+- LayoutShiftAttribution: partial [virtualized] — LayoutShiftAttribution is exposed as an illegal-constructor payload class with browser-shaped branding for layout-shift attribution payloads; node/rect source attribution population, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- TaskAttributionTiming: partial [virtualized] — TaskAttributionTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for task-attribution entries; container attribution population, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- LayoutShift: partial [virtualized] — LayoutShift is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for layout-shift entries; layout-shift value/source population, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- LargestContentfulPaint: partial [virtualized] — LargestContentfulPaint is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for largest-contentful-paint entries; LCP candidate population, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- PerformanceElementTiming: partial [virtualized] — PerformanceElementTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for element timing entries; element render/load timing, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- PerformanceScriptTiming: partial [virtualized] — PerformanceScriptTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for script timing entries; script attribution and execution timing, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- PerformanceLongAnimationFrameTiming: partial [virtualized] — PerformanceLongAnimationFrameTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for long-animation-frame entries; render/script timing population, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- PerformanceLongTaskTiming: partial [virtualized] — PerformanceLongTaskTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for long-task entries; long-task attribution and task scheduling, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- PerformanceEventTiming: partial [virtualized] — PerformanceEventTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding for event timing entries; event processing and interaction timing, observer delivery, and descriptor parity remain partial. Decision: Keep virtualized because performance timeline data must describe the virtual document/renderer lifecycle rather than host page timing.
+- PerformancePaintTiming: partial [virtualized] — PerformancePaintTiming is exposed as an illegal-constructor PerformanceEntry subclass with browser-shaped branding; synthesized first-paint/first-contentful-paint entries, paint timing policy, and descriptor parity remain partial. Decision: Keep virtualized because paint timing must describe the virtual renderer lifecycle, not host page paints.
+- AnimationTimeline: partial [virtualized] — AnimationTimeline is exposed as an illegal-constructor branded base class for virtual document timelines with instanceof support; animation attachment, timeline ranges, and descriptor parity remain partial. Decision: Keep virtualized because animation timeline time must follow the virtual event loop/page clock.
+- DocumentTimeline: partial [virtualized] — document.timeline exposes a branded DocumentTimeline with currentTime derived from the virtual viewport clock and constructible originTime offsets; Web Animations integration and descriptor parity remain partial. Decision: Keep virtualized because document animation time belongs to the virtual document lifecycle.
+- ScrollTimeline: partial [virtualized] — ScrollTimeline is constructible/branded as an AnimationTimeline subclass with source, axis normalization, and virtual currentTime; full scroll-linked progress/range semantics remain partial. Decision: Keep virtualized because scroll/view timeline progress must be derived from virtual viewport and virtual DOM layout state.
+- ViewTimeline: partial [virtualized] — ViewTimeline is constructible/branded as a ScrollTimeline subclass with subject/source, axis, and inset payloads; full view progress and named-range semantics remain partial. Decision: Keep virtualized because scroll/view timeline progress must be derived from virtual viewport and virtual DOM layout state.
+- AnimationEffect: partial [virtualized] — AnimationEffect is exposed as an illegal-constructor branded base class for virtual KeyframeEffect instances; effect composition and full Web Animations timing model remain partial. Decision: Keep virtualized because effects target virtual DOM nodes and virtual timelines.
+- KeyframeEffect: partial [virtualized] — KeyframeEffect is constructible/branded with target/keyframe storage, getKeyframes(), getTiming(), getComputedTiming(), updateTiming(), and AnimationEffect instanceof support; keyframe parsing/composite algorithms and full descriptor parity remain partial. Decision: Keep virtualized because keyframe effects reference virtual DOM nodes.
+- Animation: partial [virtualized] — Animation is constructible/branded as an EventTarget with play/pause/cancel/finish/reverse/updatePlaybackRate/persist/commitStyles basics, ready/finished promises, Element.animate() integration, Document/Element getAnimations() tracking, and virtual timeline/effect wiring; full playback timing, promises, replace states, CSSAnimation/CSSTransition objects, and descriptor parity remain partial. Decision: Keep virtualized because animation state and events belong to virtual DOM/timeline state.
+- CSSAnimation: partial [virtualized] — CSSAnimation is exposed as an illegal-constructor branded facade reserved for future stylesheet-driven animation objects; CSS animation generation and descriptor parity remain partial. Decision: Keep virtualized because CSS animation objects must be derived from virtual CSSOM and virtual timelines.
+- CSSTransition: partial [virtualized] — CSSTransition is exposed as an illegal-constructor branded facade reserved for future stylesheet-driven transition objects; CSS transition generation and descriptor parity remain partial. Decision: Keep virtualized because CSS transition objects must be derived from virtual CSSOM and virtual timelines.
+- PerformanceObserver: partial [virtualized] — PerformanceObserver is constructible/branded with supportedEntryTypes, observe(), disconnect(), takeRecords(), buffered navigation/mark basics, and queued virtual mark/measure entries; full task timing, resource entry sources, callback timing parity, and descriptor parity remain partial. Decision: Keep virtualized because target-visible timing must come from the virtual event loop rather than host page timing.
+- ResizeObserver: partial [virtualized] — ResizeObserver is constructible/branded and delivers virtual resize records for observed virtual elements when viewport/layout updates run; real box option handling, asynchronous delivery timing, and descriptor parity remain partial. Decision: Keep virtualized because target-visible layout observer records must describe virtual layout, not host DOM geometry.
+- ResizeObserverEntry: partial [virtualized] — ResizeObserverEntry is exposed as an illegal-constructor branded record with target, contentRect, frozen contentBoxSize/borderBoxSize/devicePixelContentBoxSize arrays, and ResizeObserverSize payloads derived from virtual layout rects; exact box metrics, fragmentation, and descriptor parity remain partial. Decision: Keep virtualized because target-visible layout observer records must describe virtual layout, not host DOM geometry.
+- ResizeObserverSize: partial [virtualized] — ResizeObserverSize is exposed as an illegal-constructor branded inlineSize/blockSize record used by virtual ResizeObserverEntry box arrays; full writing-mode/fragmentation semantics and descriptor parity remain partial. Decision: Keep virtualized because target-visible layout observer records must describe virtual layout, not host DOM geometry.
+- IntersectionObserver: partial [virtualized] — IntersectionObserver is constructible/branded and delivers virtual fully-intersecting records for observed virtual elements during viewport/layout updates; root/rootMargin/threshold filtering, clipping, asynchronous delivery timing, and descriptor parity remain partial. Decision: Keep virtualized because target-visible intersection records must describe virtual layout, not host DOM geometry.
+- IntersectionObserverEntry: partial [virtualized] — IntersectionObserverEntry is exposed as an illegal-constructor branded record with target, time, null rootBounds, boundingClientRect/intersectionRect, isIntersecting, and intersectionRatio basics derived from virtual layout rects; threshold/root/clipping semantics and descriptor parity remain partial. Decision: Keep virtualized because target-visible intersection records must describe virtual layout, not host DOM geometry.
+- Window: partial [virtualized] — QuickJS global exposes Window constructor branding, [object Window], instanceof Window, policy-stable BarProp chrome properties (locationbar/menubar/personalbar/scrollbars/statusbar/toolbar), window.status string state, and a frozen External facade at window.external; full browser Window property descriptor surface remains partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- clientInformation: partial [virtualized] — clientInformation aliases the frozen virtual navigator singleton and preserves Navigator branding. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- frames: partial [virtualized] — Top-level virtual window frames aliases globalThis; nested browsing-context population remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- parent: partial [virtualized] — Top-level virtual window parent aliases globalThis; nested browsing-context parentage remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- top: partial [virtualized] — Top-level virtual window top aliases globalThis; nested browsing-context hierarchy remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- opener: partial [virtualized] — Virtual top-level window exposes null opener; opener relationships from real auxiliary browsing contexts remain policy-gated/partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- frameElement: partial [virtualized] — Virtual top-level window exposes null frameElement; embedded frame host-element wiring remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- length: partial [virtualized] — Virtual top-level window exposes a zero child-frame length; live child frame counting remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- closed: partial [virtualized] — Virtual top-level window exposes closed=false; real auxiliary window close lifecycle remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- name: partial [virtualized] — Virtual window exposes writable name storage; cross-navigation/window-name persistence remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- isSecureContext: partial [virtualized] — Virtual window derives isSecureContext from basic trustworthy URL schemes/localhost; full browser trust computation remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- crossOriginIsolated: partial [virtualized] — Virtual window exposes crossOriginIsolated=false because isolated-agent features are not enabled in the membrane. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- credentialless: partial [virtualized] — Virtual window exposes credentialless=false; credentialless iframe/container policy remains partial. Decision: Keep virtualized because this Window/Navigator global reflects virtual browsing-context state rather than host state.
+- alert: partial [virtualized] — alert is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- blur: partial [virtualized] — blur is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- captureEvents: partial [virtualized] — captureEvents is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- close: partial [virtualized] — close is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- confirm: partial [virtualized] — confirm is exposed as a policy-safe virtual Window method with false return; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- find: partial [virtualized] — find is exposed as a policy-safe virtual Window method with false return; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- focus: partial [virtualized] — focus is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- moveBy: partial [virtualized] — moveBy is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- moveTo: partial [virtualized] — moveTo is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- open: partial [virtualized] — open is exposed as a policy-safe virtual Window method with null return; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- print: partial [virtualized] — print is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- prompt: partial [virtualized] — prompt is exposed as a policy-safe virtual Window method with null return; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- releaseEvents: partial [virtualized] — releaseEvents is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- reportError: partial [virtualized] — reportError is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- resizeBy: partial [virtualized] — resizeBy is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- resizeTo: partial [virtualized] — resizeTo is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- stop: partial [virtualized] — stop is exposed as a policy-safe virtual Window method with undefined no-op; full browser UI/browsing-context effects remain intentionally partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- postMessage: partial [virtualized] — postMessage is exposed as a virtual same-window message dispatcher using MessageEvent when installed; cross-window/channel semantics and structured transfer remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- scroll: partial [virtualized] — scroll is exposed as an alias into the virtual viewport/frame scheduler; real browser compositor timing remains partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- webkitRequestAnimationFrame: partial [virtualized] — webkitRequestAnimationFrame is exposed as an alias into the virtual viewport/frame scheduler; real browser compositor timing remains partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- webkitCancelAnimationFrame: partial [virtualized] — webkitCancelAnimationFrame is exposed as an alias into the virtual viewport/frame scheduler; real browser compositor timing remains partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- outerWidth: partial [virtualized] — outerWidth is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- outerHeight: partial [virtualized] — outerHeight is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- screenX: partial [virtualized] — screenX is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- screenY: partial [virtualized] — screenY is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- screenLeft: partial [virtualized] — screenLeft is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- screenTop: partial [virtualized] — screenTop is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- originAgentCluster: partial [virtualized] — originAgentCluster is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- offscreenBuffering: partial [virtualized] — offscreenBuffering is exposed as a deterministic virtual Window property derived from the virtual viewport/policy state; browser chrome and process-isolation edge semantics remain partial. Decision: Keep virtualized because this Window API reflects virtual browsing-context state rather than host state.
+- onabort: partial [virtualized] — onabort is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onafterprint: partial [virtualized] — onafterprint is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onanimationcancel: partial [virtualized] — onanimationcancel is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onanimationend: partial [virtualized] — onanimationend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onanimationiteration: partial [virtualized] — onanimationiteration is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onanimationstart: partial [virtualized] — onanimationstart is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onappinstalled: partial [virtualized] — onappinstalled is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onauxclick: partial [virtualized] — onauxclick is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforeinput: partial [virtualized] — onbeforeinput is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforeinstallprompt: partial [virtualized] — onbeforeinstallprompt is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforematch: partial [virtualized] — onbeforematch is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforeprint: partial [virtualized] — onbeforeprint is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforetoggle: partial [virtualized] — onbeforetoggle is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforeunload: partial [virtualized] — onbeforeunload is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onbeforexrselect: partial [virtualized] — onbeforexrselect is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onblur: partial [virtualized] — onblur is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncancel: partial [virtualized] — oncancel is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncanplay: partial [virtualized] — oncanplay is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncanplaythrough: partial [virtualized] — oncanplaythrough is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onchange: partial [virtualized] — onchange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onclick: partial [virtualized] — onclick is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onclose: partial [virtualized] — onclose is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncommand: partial [virtualized] — oncommand is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncontentvisibilityautostatechange: partial [virtualized] — oncontentvisibilityautostatechange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncontextlost: partial [virtualized] — oncontextlost is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncontextmenu: partial [virtualized] — oncontextmenu is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncontextrestored: partial [virtualized] — oncontextrestored is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oncuechange: partial [virtualized] — oncuechange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondblclick: partial [virtualized] — ondblclick is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondrag: partial [virtualized] — ondrag is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondragend: partial [virtualized] — ondragend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondragenter: partial [virtualized] — ondragenter is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondragleave: partial [virtualized] — ondragleave is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondragover: partial [virtualized] — ondragover is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondragstart: partial [virtualized] — ondragstart is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondrop: partial [virtualized] — ondrop is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ondurationchange: partial [virtualized] — ondurationchange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onemptied: partial [virtualized] — onemptied is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onended: partial [virtualized] — onended is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onerror: partial [virtualized] — onerror is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onfocus: partial [virtualized] — onfocus is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onformdata: partial [virtualized] — onformdata is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ongamepadconnected: partial [virtualized] — ongamepadconnected is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ongamepaddisconnected: partial [virtualized] — ongamepaddisconnected is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ongotpointercapture: partial [virtualized] — ongotpointercapture is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onhashchange: partial [virtualized] — onhashchange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oninput: partial [virtualized] — oninput is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- oninvalid: partial [virtualized] — oninvalid is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onkeydown: partial [virtualized] — onkeydown is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onkeypress: partial [virtualized] — onkeypress is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onkeyup: partial [virtualized] — onkeyup is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onlanguagechange: partial [virtualized] — onlanguagechange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onload: partial [virtualized] — onload is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onloadeddata: partial [virtualized] — onloadeddata is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onloadedmetadata: partial [virtualized] — onloadedmetadata is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onloadstart: partial [virtualized] — onloadstart is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onlostpointercapture: partial [virtualized] — onlostpointercapture is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmessage: partial [virtualized] — onmessage is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmessageerror: partial [virtualized] — onmessageerror is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmousedown: partial [virtualized] — onmousedown is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmouseenter: partial [virtualized] — onmouseenter is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmouseleave: partial [virtualized] — onmouseleave is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmousemove: partial [virtualized] — onmousemove is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmouseout: partial [virtualized] — onmouseout is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmouseover: partial [virtualized] — onmouseover is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmouseup: partial [virtualized] — onmouseup is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onmousewheel: partial [virtualized] — onmousewheel is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onoffline: partial [virtualized] — onoffline is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ononline: partial [virtualized] — ononline is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpagehide: partial [virtualized] — onpagehide is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpagereveal: partial [virtualized] — onpagereveal is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpageshow: partial [virtualized] — onpageshow is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpageswap: partial [virtualized] — onpageswap is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpause: partial [virtualized] — onpause is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onplay: partial [virtualized] — onplay is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onplaying: partial [virtualized] — onplaying is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointercancel: partial [virtualized] — onpointercancel is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointerdown: partial [virtualized] — onpointerdown is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointerenter: partial [virtualized] — onpointerenter is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointerleave: partial [virtualized] — onpointerleave is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointermove: partial [virtualized] — onpointermove is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointerout: partial [virtualized] — onpointerout is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointerover: partial [virtualized] — onpointerover is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpointerup: partial [virtualized] — onpointerup is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onpopstate: partial [virtualized] — onpopstate is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onprogress: partial [virtualized] — onprogress is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onratechange: partial [virtualized] — onratechange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onrejectionhandled: partial [virtualized] — onrejectionhandled is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onreset: partial [virtualized] — onreset is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onresize: partial [virtualized] — onresize is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onscroll: partial [virtualized] — onscroll is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onscrollend: partial [virtualized] — onscrollend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onscrollsnapchange: partial [virtualized] — onscrollsnapchange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onscrollsnapchanging: partial [virtualized] — onscrollsnapchanging is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onsearch: partial [virtualized] — onsearch is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onsecuritypolicyviolation: partial [virtualized] — onsecuritypolicyviolation is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onseeked: partial [virtualized] — onseeked is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onseeking: partial [virtualized] — onseeking is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onselect: partial [virtualized] — onselect is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onselectionchange: partial [virtualized] — onselectionchange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onselectstart: partial [virtualized] — onselectstart is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onslotchange: partial [virtualized] — onslotchange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onstalled: partial [virtualized] — onstalled is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onstorage: partial [virtualized] — onstorage is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onsubmit: partial [virtualized] — onsubmit is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onsuspend: partial [virtualized] — onsuspend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ontimeupdate: partial [virtualized] — ontimeupdate is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ontoggle: partial [virtualized] — ontoggle is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ontransitioncancel: partial [virtualized] — ontransitioncancel is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ontransitionend: partial [virtualized] — ontransitionend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ontransitionrun: partial [virtualized] — ontransitionrun is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- ontransitionstart: partial [virtualized] — ontransitionstart is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onunhandledrejection: partial [virtualized] — onunhandledrejection is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onunload: partial [virtualized] — onunload is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onvolumechange: partial [virtualized] — onvolumechange is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onwaiting: partial [virtualized] — onwaiting is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onwebkitanimationend: partial [virtualized] — onwebkitanimationend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onwebkitanimationiteration: partial [virtualized] — onwebkitanimationiteration is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onwebkitanimationstart: partial [virtualized] — onwebkitanimationstart is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onwebkittransitionend: partial [virtualized] — onwebkittransitionend is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- onwheel: partial [virtualized] — onwheel is exposed as a virtual Window/EventTarget handler property with EventTarget dispatch integration; browser-specific legacy handler signatures and lifecycle side effects remain partial. Decision: Keep virtualized because handler state belongs to the virtual window/event-target graph.
+- DOMImplementation: partial [virtualized] — document.implementation now returns a stable branded DOMImplementation with createHTMLDocument, createDocumentType, createDocument, and hasFeature basics; full namespace validation and descriptor parity remain partial. Decision: Keep virtualized because produced Document/DocumentType nodes must remain inside the QuickJS virtual DOM membrane.
+- DocumentType: partial [virtualized] — DOMImplementation.createDocumentType returns branded DocumentType nodes with name/publicId/systemId and nodeType 10; serialization, validation, and full descriptor parity remain partial. Decision: Keep virtualized because doctype nodes are part of the virtual document tree.
+- Document: partial [virtualized] — Virtual Document exposes core createElement/createElementNS/createTextNode/createComment/CDATA/ProcessingInstruction factories, selectors/live collections, animation lookup, append/prepend, importNode/adoptNode ownership transfer basics, legacy createEvent()/initEvent support for common event families, document.styleSheets, and adoptedStyleSheets with CSSStyleSheet validation. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- HTMLDocument: partial [virtualized] — HTMLDocument is exposed as an illegal-constructor brand facade for virtual text/html documents, with main document instanceof/toStringTag coverage; full browser descriptor split from Document remains partial. Decision: Keep virtualized because document identity belongs to the virtual browsing context.
+- XMLDocument: partial [virtualized] — XMLDocument is exposed as an illegal-constructor brand facade for non-text/html virtual documents produced by XML DOMImplementation/DOMParser paths; full XML parser/document descriptor parity remains partial. Decision: Keep virtualized because document identity and parsed XML nodes belong to the virtual DOM membrane.
+- FeaturePolicy: partial [virtualized] — FeaturePolicy now matches the browser-shaped illegal-constructor descriptor surface with native-order allowedFeatures()/allowsFeature()/features()/getAllowlistForFeature()/constructor prototype methods, no custom Symbol.hasInstance, non-enumerable writable/configurable global descriptor, empty own-property instances, [object FeaturePolicy] branding, and required-argument/illegal-invocation errors; full Permissions Policy parsing remains partial. Decision: Keep policy-virtualized because permissions-policy state must describe the virtual document policy and must not mirror host browser policy decisions.
+- document.featurePolicy: partial [virtualized] — document.featurePolicy now exposes an extensible browser-shaped FeaturePolicy facade with no own keys and prototype methods backed by membrane configuration plus safe deny-by-default behavior; full Permissions Policy header/container-policy parsing remains partial. Decision: Keep policy-virtualized because target-visible feature availability must be policy-controlled by the virtual document rather than inherited from the host shell.
+- TrustedTypePolicyFactory: partial [virtualized] — TrustedTypePolicyFactory now matches Chromium's descriptor surface with illegal constructor call/new errors, no custom Symbol.hasInstance, native emptyHTML/emptyScript/defaultPolicy/createPolicy/getAttributeType/getPropertyType/getTypeMapping/isHTML/isScript/isScriptURL/constructor prototype order, enumerable accessors/methods, non-enumerable writable/configurable global descriptor, empty own-property factory instances, [object TrustedTypePolicyFactory] branding, browser-shaped empty trusted values, and type-check helpers. It remains partial because CSP Trusted Types enforcement, duplicate-policy-name restrictions, default-policy wiring, and full attribute/property type mapping are not implemented. Decision: Keep policy-virtualized because Trusted Types policy state must be scoped to the virtual target document and not the host shell.
+- trustedTypes: partial [virtualized] — globalThis.trustedTypes now exposes an extensible browser-shaped TrustedTypePolicyFactory singleton with no own keys, prototype accessors/methods, browser-shaped emptyHTML/emptyScript trusted values, createPolicy() validation, and isHTML/isScript/isScriptURL branding checks; CSP Trusted Types enforcement, default-policy application, duplicate-policy-name restrictions, and full type mappings remain partial. Decision: Keep policy-virtualized because target Trusted Types policy creation and sink enforcement must stay inside the QuickJS membrane.
+- Node: partial [virtualized] — Virtual Node exposes appendChild/removeChild/insertBefore/replaceChild, cloneNode, hasChildNodes, getRootNode/isConnected, isSameNode/isEqualNode, compareDocumentPosition constants/basic tree ordering, normalize, contains/sibling access/textContent, and ChildNode-style before/after/remove/replaceWith with string-to-Text coercion. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- Element: partial [virtualized] — Virtual Element exposes attributes plus hasAttributes/getAttributeNames/toggleAttribute/namespace checks, id/className, children, querySelector/querySelectorAll/closest/matches, getBoundingClientRect(), ParentNode-style append/prepend/replaceChildren with string-to-Text coercion, and core-installed insertAdjacentHTML/insertAdjacentElement/insertAdjacentText. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- HTMLElement: partial [virtualized] — HTMLElement constructor branding and instanceof checks distinguish HTML elements from SVG elements; common and long-tail per-element constructors expose browser-like illegal constructors, instanceof branding, and [object ...] tags for mapped HTML tags, while generic and custom tags resolve to HTMLElement and unknown tags resolve to HTMLUnknownElement; long-tail element-specific property/descriptors remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- CustomElementRegistry: partial [virtualized] — customElements is exposed as a branded CustomElementRegistry singleton with illegal-constructor CustomElementRegistry, define()/get()/getName()/whenDefined() basics, duplicate-name/duplicate-constructor errors, custom-element name validation, and no-op upgrade(); parser/createElement upgrade reactions, lifecycle callbacks, customized built-ins, ElementInternals, and descriptor parity remain partial. Decision: Keep virtualized because custom element definitions and lifecycle hooks must operate on virtual DOM nodes rather than host DOM objects.
+- ElementInternals: partial [virtualized] — HTMLElement.attachInternals() returns a stable branded ElementInternals facade with states, role/ariaLabel/ariaHidden storage, form/labels/shadowRoot getters, setFormValue(), setValidity(), validationMessage, validity/willValidate, and checkValidity()/reportValidity() forwarding basics; true custom-element lifecycle restrictions, AOM descriptor parity, form-associated custom elements, and validation integration remain partial. Decision: Keep virtualized because custom element internals must stay attached to virtual DOM elements rather than host DOM objects.
+- CustomStateSet: partial [virtualized] — ElementInternals.states exposes a branded illegal-constructor CustomStateSet backed by Set semantics with add()/delete()/has()/iteration basics; selector integration and descriptor parity remain partial. Decision: Keep virtualized because custom states describe virtual custom-element state.
+- HTMLUnknownElement: partial [virtualized] — HTMLUnknownElement is exposed as an illegal-constructor branded fallback for unknown HTML local names, with instanceof/toStringTag coverage in the per-element constructor probe; descriptor parity and parser integration edge cases remain partial. Decision: Keep virtualized because unknown-element identity belongs to the virtual DOM membrane.
+- HTMLAnchorElement: partial [virtualized] — HTMLAnchorElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLAnchorElement] tags for mapped HTML tag(s): a; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLAreaElement: partial [virtualized] — HTMLAreaElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLAreaElement] tags for mapped HTML tag(s): area; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLAudioElement: partial [virtualized] — HTMLAudioElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLAudioElement] tags for mapped HTML tag(s): audio; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLBaseElement: partial [virtualized] — HTMLBaseElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLBaseElement] tags for mapped HTML tag(s): base; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLBodyElement: partial [virtualized] — HTMLBodyElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLBodyElement] tags for mapped HTML tag(s): body; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLBRElement: partial [virtualized] — HTMLBRElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLBRElement] tags for mapped HTML tag(s): br; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLButtonElement: partial [virtualized] — HTMLButtonElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLButtonElement] tags for mapped HTML tag(s): button; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTableCaptionElement: partial [virtualized] — HTMLTableCaptionElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTableCaptionElement] tags for mapped HTML tag(s): caption; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTableColElement: partial [virtualized] — HTMLTableColElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTableColElement] tags for mapped HTML tag(s): col, colgroup; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLDataListElement: partial [virtualized] — HTMLDataListElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLDataListElement] tags for mapped HTML tag(s): datalist; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLDirectoryElement: partial [virtualized] — HTMLDirectoryElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLDirectoryElement] tags for mapped HTML tag(s): dir; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLDivElement: partial [virtualized] — HTMLDivElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLDivElement] tags for mapped HTML tag(s): div; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLDListElement: partial [virtualized] — HTMLDListElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLDListElement] tags for mapped HTML tag(s): dl; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLEmbedElement: partial [virtualized] — HTMLEmbedElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLEmbedElement] tags for mapped HTML tag(s): embed; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLFencedFrameElement: partial [virtualized] — HTMLFencedFrameElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLFencedFrameElement] tags for mapped HTML tag(s): fencedframe; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLFontElement: partial [virtualized] — HTMLFontElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLFontElement] tags for mapped HTML tag(s): font; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLFormElement: partial [virtualized] — HTMLFormElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, [object HTMLFormElement] tags, form.elements/RadioNodeList basics, external form-owner inclusion, explicit foreign-owner exclusion, and FormData(form) integration for mapped HTML tag(s): form; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and remaining layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLFrameElement: partial [virtualized] — HTMLFrameElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLFrameElement] tags for mapped HTML tag(s): frame; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLFrameSetElement: partial [virtualized] — HTMLFrameSetElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLFrameSetElement] tags for mapped HTML tag(s): frameset; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLGeolocationElement: partial [virtualized] — HTMLGeolocationElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLGeolocationElement] tags for mapped HTML tag(s): geolocation; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLHeadingElement: partial [virtualized] — HTMLHeadingElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLHeadingElement] tags for mapped HTML tag(s): h1, h6; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLHeadElement: partial [virtualized] — HTMLHeadElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLHeadElement] tags for mapped HTML tag(s): head; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLHRElement: partial [virtualized] — HTMLHRElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLHRElement] tags for mapped HTML tag(s): hr; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLHtmlElement: partial [virtualized] — HTMLHtmlElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLHtmlElement] tags for mapped HTML tag(s): html; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLIFrameElement: partial [virtualized] — HTMLIFrameElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLIFrameElement] tags for mapped HTML tag(s): iframe; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLImageElement: partial [virtualized] — HTMLImageElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLImageElement] tags for mapped HTML tag(s): img; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLInputElement: partial [virtualized] — HTMLInputElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLInputElement] tags for mapped HTML tag(s): input; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLLIElement: partial [virtualized] — HTMLLIElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLLIElement] tags for mapped HTML tag(s): li; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLLinkElement: partial [virtualized] — HTMLLinkElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, [object HTMLLinkElement] tags for mapped HTML tag(s): link, stylesheet `.sheet` wiring for rel=stylesheet links, href/media/title synchronization, and disabled/sheet.disabled synchronization; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLMapElement: partial [virtualized] — HTMLMapElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLMapElement] tags for mapped HTML tag(s): map; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLMarqueeElement: partial [virtualized] — HTMLMarqueeElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLMarqueeElement] tags for mapped HTML tag(s): marquee; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLMenuElement: partial [virtualized] — HTMLMenuElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLMenuElement] tags for mapped HTML tag(s): menu; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLMetaElement: partial [virtualized] — HTMLMetaElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLMetaElement] tags for mapped HTML tag(s): meta; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLObjectElement: partial [virtualized] — HTMLObjectElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, [object HTMLObjectElement] tags, form-owner lookup including form="id", and inclusion in form.elements while remaining excluded from FormData successful controls; plugin/resource loading, reflected-property descriptor parity, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLOListElement: partial [virtualized] — HTMLOListElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLOListElement] tags for mapped HTML tag(s): ol; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLOptGroupElement: partial [virtualized] — HTMLOptGroupElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLOptGroupElement] tags for mapped HTML tag(s): optgroup; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLOptionElement: partial [virtualized] — HTMLOptionElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLOptionElement] tags for mapped HTML tag(s): option; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLParagraphElement: partial [virtualized] — HTMLParagraphElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLParagraphElement] tags for mapped HTML tag(s): p; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLParamElement: partial [virtualized] — HTMLParamElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLParamElement] tags for mapped HTML tag(s): param; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLPictureElement: partial [virtualized] — HTMLPictureElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLPictureElement] tags for mapped HTML tag(s): picture; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLPreElement: partial [virtualized] — HTMLPreElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLPreElement] tags for mapped HTML tag(s): pre; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLScriptElement: partial [virtualized] — HTMLScriptElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLScriptElement] tags for mapped HTML tag(s): script; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLSelectElement: partial [virtualized] — HTMLSelectElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLSelectElement] tags for mapped HTML tag(s): select; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLSelectedContentElement: partial [virtualized] — HTMLSelectedContentElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLSelectedContentElement] tags for mapped HTML tag(s): selectedcontent; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLSlotElement: partial [virtualized] — HTMLSlotElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, [object HTMLSlotElement] tags for mapped HTML tag(s): slot, assignedNodes()/assignedElements(), and basic manual assign() plus named/default distribution; reflected-property descriptor parity, parser side effects, and full slotting lifecycle remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLSourceElement: partial [virtualized] — HTMLSourceElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLSourceElement] tags for mapped HTML tag(s): source; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLSpanElement: partial [virtualized] — HTMLSpanElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLSpanElement] tags for mapped HTML tag(s): span; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLStyleElement: partial [virtualized] — HTMLStyleElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, [object HTMLStyleElement] tags for mapped HTML tag(s): style, stylesheet `.sheet` wiring from style text, media/title synchronization, and disabled/sheet.disabled synchronization; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTableElement: partial [virtualized] — HTMLTableElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTableElement] tags for mapped HTML tag(s): table; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTableSectionElement: partial [virtualized] — HTMLTableSectionElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTableSectionElement] tags for mapped HTML tag(s): thead, tbody, tfoot; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTableCellElement: partial [virtualized] — HTMLTableCellElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTableCellElement] tags for mapped HTML tag(s): td, th; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTemplateElement: partial [virtualized] — HTMLTemplateElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, [object HTMLTemplateElement] tags for mapped HTML tag(s): template, and basic `.content` DocumentFragment plus template `innerHTML` redirection; reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTextAreaElement: partial [virtualized] — HTMLTextAreaElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTextAreaElement] tags for mapped HTML tag(s): textarea; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTitleElement: partial [virtualized] — HTMLTitleElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTitleElement] tags for mapped HTML tag(s): title; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTableRowElement: partial [virtualized] — HTMLTableRowElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTableRowElement] tags for mapped HTML tag(s): tr; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLTrackElement: partial [virtualized] — HTMLTrackElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLTrackElement] tags for mapped HTML tag(s): track; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLUListElement: partial [virtualized] — HTMLUListElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLUListElement] tags for mapped HTML tag(s): ul; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLVideoElement: partial [virtualized] — HTMLVideoElement is covered by virtual per-element constructor branding, illegal-constructor behavior, instanceof checks, and [object HTMLVideoElement] tags for mapped HTML tag(s): video; element-specific algorithms, reflected-property descriptor parity, loading lifecycles, parser side effects, and layout/form edge cases remain partial. Decision: Keep virtualized because HTML element identity and target-visible element state belong to the virtual DOM membrane.
+- HTMLDialogElement: partial [virtualized] — HTMLDialogElement is covered by per-element constructor branding and exposes virtual open/returnValue reflection plus show(), showModal(), close(), and requestClose() basics with close/cancel event dispatch; modal focus/inertness, top-layer integration, form method=dialog, and descriptor parity remain partial. Decision: Keep virtualized because dialog open/modal state and events belong to the virtual document, not the host page top layer.
+- HTMLDetailsElement: partial [virtualized] — HTMLDetailsElement is covered by per-element constructor branding and exposes virtual open boolean reflection against the open content attribute; toggle-event timing, summary activation behavior, grouping/name semantics, and descriptor parity remain partial. Decision: Keep virtualized because disclosure state and events belong to the virtual document, not host DOM state.
+- HTMLDataElement: partial [virtualized] — HTMLDataElement is covered by per-element constructor branding and exposes value string reflection against the value content attribute; descriptor parity remains partial. Decision: Keep virtualized because element reflected state belongs to the virtual DOM membrane.
+- HTMLLabelElement: partial [virtualized] — HTMLLabelElement is covered by per-element constructor branding and exposes htmlFor reflection, explicit/implicit control resolution, form owner lookup through its labeled control, and labels collections for labelable virtual controls; full labelable-element edge cases, activation behavior, and descriptor parity remain partial. Decision: Keep virtualized because label/control associations belong to the virtual document, not host DOM state.
+- HTMLFieldSetElement: partial [virtualized] — HTMLFieldSetElement is covered by per-element constructor branding and exposes name/disabled/type/form plus elements collection basics for contained virtual form controls; FormData(form) now applies disabled-fieldset propagation with the first-legend exception, while validity grouping, labels, and descriptor parity remain partial. Decision: Keep virtualized because form-control grouping state belongs to the virtual document, not host DOM state.
+- HTMLLegendElement: partial [virtualized] — HTMLLegendElement is covered by per-element constructor branding and inherits virtual form owner lookup through the nearest ancestor form; fieldset-caption layout/activation behavior and descriptor parity remain partial. Decision: Keep virtualized because fieldset/legend association belongs to the virtual document, not host DOM state.
+- HTMLOutputElement: partial [virtualized] — HTMLOutputElement is covered by per-element constructor branding, value reflection coupled to virtual textContent, form-owner lookup, and inclusion in form.elements while remaining excluded from FormData successful controls; defaultValue, labels, and descriptor parity remain partial. Decision: Keep virtualized because form/output state belongs to the virtual document, not host DOM state.
+- HTMLProgressElement: partial [virtualized] — HTMLProgressElement is covered by per-element constructor branding and exposes numeric value/max reflection plus position basics including indeterminate -1 when value is absent; labels, constraint details, and descriptor parity remain partial. Decision: Keep virtualized because progress state belongs to the virtual document, not host DOM state.
+- HTMLMeterElement: partial [virtualized] — HTMLMeterElement is covered by per-element constructor branding and exposes numeric value/min/max/low/high/optimum reflection basics; gauge normalization, labels, and descriptor parity remain partial. Decision: Keep virtualized because meter state belongs to the virtual document, not host DOM state.
+- HTMLTimeElement: partial [virtualized] — HTMLTimeElement is covered by per-element constructor branding and exposes dateTime reflection against the datetime content attribute; date parsing and descriptor parity remain partial. Decision: Keep virtualized because reflected datetime state belongs to the virtual DOM membrane.
+- HTMLModElement: partial [virtualized] — HTMLModElement is covered by per-element constructor branding for ins/del elements and exposes dateTime/cite reflection against the datetime/cite content attributes; date parsing and descriptor parity remain partial. Decision: Keep virtualized because reflected modification metadata belongs to the virtual DOM membrane.
+- HTMLQuoteElement: partial [virtualized] — HTMLQuoteElement is covered by per-element constructor branding for q and blockquote elements and exposes cite reflection against the cite content attribute; descriptor parity remains partial. Decision: Keep virtualized because reflected quote metadata belongs to the virtual DOM membrane.
+- SVGElement: partial [virtualized] — SVGElement illegal-constructor branding and instanceof checks distinguish SVG namespace elements created through createElementNS from HTML elements; SVG-specific constructors are tracked separately and animated SVG APIs remain partial. Decision: Keep virtualized because SVG namespace element identity must match the virtual DOM membrane.
+- SVGGraphicsElement: partial [virtualized] — SVGGraphicsElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGGeometryElement: partial [virtualized] — SVGGeometryElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGTextContentElement: partial [virtualized] — SVGTextContentElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGTextPositioningElement: partial [virtualized] — SVGTextPositioningElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGGradientElement: partial [virtualized] — SVGGradientElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGAnimationElement: partial [virtualized] — SVGAnimationElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGComponentTransferFunctionElement: partial [virtualized] — SVGComponentTransferFunctionElement is exposed as an illegal-constructor brand facade with virtual DOM namespace/local-name instanceof matching; SVG geometry, text, animation, and animated-value APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGAElement: partial [virtualized] — SVGAElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGAnimateElement: partial [virtualized] — SVGAnimateElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGAnimateMotionElement: partial [virtualized] — SVGAnimateMotionElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGAnimateTransformElement: partial [virtualized] — SVGAnimateTransformElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGCircleElement: partial [virtualized] — SVGCircleElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGClipPathElement: partial [virtualized] — SVGClipPathElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGDefsElement: partial [virtualized] — SVGDefsElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGDescElement: partial [virtualized] — SVGDescElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGEllipseElement: partial [virtualized] — SVGEllipseElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEBlendElement: partial [virtualized] — SVGFEBlendElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEColorMatrixElement: partial [virtualized] — SVGFEColorMatrixElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEComponentTransferElement: partial [virtualized] — SVGFEComponentTransferElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFECompositeElement: partial [virtualized] — SVGFECompositeElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEConvolveMatrixElement: partial [virtualized] — SVGFEConvolveMatrixElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEDiffuseLightingElement: partial [virtualized] — SVGFEDiffuseLightingElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEDisplacementMapElement: partial [virtualized] — SVGFEDisplacementMapElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEDistantLightElement: partial [virtualized] — SVGFEDistantLightElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEDropShadowElement: partial [virtualized] — SVGFEDropShadowElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEFloodElement: partial [virtualized] — SVGFEFloodElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEFuncAElement: partial [virtualized] — SVGFEFuncAElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEFuncBElement: partial [virtualized] — SVGFEFuncBElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEFuncGElement: partial [virtualized] — SVGFEFuncGElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEFuncRElement: partial [virtualized] — SVGFEFuncRElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEGaussianBlurElement: partial [virtualized] — SVGFEGaussianBlurElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEImageElement: partial [virtualized] — SVGFEImageElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEMergeElement: partial [virtualized] — SVGFEMergeElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEMergeNodeElement: partial [virtualized] — SVGFEMergeNodeElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEMorphologyElement: partial [virtualized] — SVGFEMorphologyElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEOffsetElement: partial [virtualized] — SVGFEOffsetElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFEPointLightElement: partial [virtualized] — SVGFEPointLightElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFESpecularLightingElement: partial [virtualized] — SVGFESpecularLightingElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFESpotLightElement: partial [virtualized] — SVGFESpotLightElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFETileElement: partial [virtualized] — SVGFETileElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFETurbulenceElement: partial [virtualized] — SVGFETurbulenceElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGFilterElement: partial [virtualized] — SVGFilterElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGForeignObjectElement: partial [virtualized] — SVGForeignObjectElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGGElement: partial [virtualized] — SVGGElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGImageElement: partial [virtualized] — SVGImageElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGLineElement: partial [virtualized] — SVGLineElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGLinearGradientElement: partial [virtualized] — SVGLinearGradientElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGMarkerElement: partial [virtualized] — SVGMarkerElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGMaskElement: partial [virtualized] — SVGMaskElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGMetadataElement: partial [virtualized] — SVGMetadataElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGMPathElement: partial [virtualized] — SVGMPathElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGPathElement: partial [virtualized] — SVGPathElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGPatternElement: partial [virtualized] — SVGPatternElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGPolygonElement: partial [virtualized] — SVGPolygonElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGPolylineElement: partial [virtualized] — SVGPolylineElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGRadialGradientElement: partial [virtualized] — SVGRadialGradientElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGRectElement: partial [virtualized] — SVGRectElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGSVGElement: partial [virtualized] — SVGSVGElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGScriptElement: partial [virtualized] — SVGScriptElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGSetElement: partial [virtualized] — SVGSetElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGStopElement: partial [virtualized] — SVGStopElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGStyleElement: partial [virtualized] — SVGStyleElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGSwitchElement: partial [virtualized] — SVGSwitchElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGSymbolElement: partial [virtualized] — SVGSymbolElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGTSpanElement: partial [virtualized] — SVGTSpanElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGTextElement: partial [virtualized] — SVGTextElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGTextPathElement: partial [virtualized] — SVGTextPathElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGTitleElement: partial [virtualized] — SVGTitleElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGUseElement: partial [virtualized] — SVGUseElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGViewElement: partial [virtualized] — SVGViewElement is exposed as an illegal-constructor brand facade for matching createElementNS-created SVG elements; element-specific SVG animated/reflection APIs remain partial. Decision: Keep virtualized because SVG element identity is derived from virtual DOM namespace/local-name state.
+- SVGAngle: partial [virtualized] — SVGAngle is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGLength: partial [virtualized] — SVGLength is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGNumber: partial [virtualized] — SVGNumber is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGStringList: partial [virtualized] — SVGStringList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGLengthList: partial [virtualized] — SVGLengthList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGNumberList: partial [virtualized] — SVGNumberList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGPoint: partial [virtualized] — SVGPoint is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGPointList: partial [virtualized] — SVGPointList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGMatrix: partial [virtualized] — SVGMatrix is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGRect: partial [virtualized] — SVGRect is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGTransform: partial [virtualized] — SVGTransform is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGTransformList: partial [virtualized] — SVGTransformList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGPreserveAspectRatio: partial [virtualized] — SVGPreserveAspectRatio is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedAngle: partial [virtualized] — SVGAnimatedAngle is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedBoolean: partial [virtualized] — SVGAnimatedBoolean is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedEnumeration: partial [virtualized] — SVGAnimatedEnumeration is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedInteger: partial [virtualized] — SVGAnimatedInteger is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedLength: partial [virtualized] — SVGAnimatedLength is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedLengthList: partial [virtualized] — SVGAnimatedLengthList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedNumber: partial [virtualized] — SVGAnimatedNumber is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedNumberList: partial [virtualized] — SVGAnimatedNumberList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedPreserveAspectRatio: partial [virtualized] — SVGAnimatedPreserveAspectRatio is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedRect: partial [virtualized] — SVGAnimatedRect is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedString: partial [virtualized] — SVGAnimatedString is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGAnimatedTransformList: partial [virtualized] — SVGAnimatedTransformList is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- SVGUnitTypes: partial [virtualized] — SVGUnitTypes is exposed as a branded illegal-constructor SVG value facade with WebIDL toStringTag and constants where applicable; element-reflected live animated values/lists remain partial. Decision: Keep virtualized because SVG value objects are derived from virtual DOM attributes and must not reflect host DOM state directly.
+- MathMLElement: partial [virtualized] — MathMLElement is exposed as an illegal-constructor brand facade for MathML namespace elements created through createElementNS; MathML-specific element interfaces and layout semantics remain partial. Decision: Keep virtualized because MathML namespace element identity must match the virtual DOM membrane.
+- CharacterData: partial [virtualized] — CharacterData has illegal-constructor branding/instanceof support for virtual Text, Comment, CDATASection, and ProcessingInstruction nodes, while data/nodeValue/length and append/insert/delete/replace/substring operations live on those concrete node prototypes; full descriptor/prototype-chain parity remains partial. Decision: Keep virtualized because character-data nodes are part of the virtual DOM tree.
+- CDATASection: partial [virtualized] — document.createCDATASection returns branded CDATASection CharacterData nodes with nodeType/nodeName/data mutation basics and illegal-constructor/instanceof coverage; XML document parsing/serialization semantics and descriptor parity remain partial. Decision: Keep virtualized because character-data nodes are part of the virtual DOM tree and must not expose host nodes across the membrane.
+- ProcessingInstruction: partial [virtualized] — document.createProcessingInstruction returns branded ProcessingInstruction CharacterData nodes with target/nodeName/data mutation basics and simple target/data validation; XML parser/serializer integration and descriptor parity remain partial. Decision: Keep virtualized because processing-instruction nodes are part of the virtual DOM tree and must not expose host nodes across the membrane.
+- HTMLFormControlsCollection: partial [virtualized] — form.elements returns a branded HTMLFormControlsCollection with HTMLCollection prototype inheritance/instanceof behavior, item(), prototype namedItem(), numeric indexes, enumerable numeric/id/name own data-property descriptors, dynamic Object.keys/Object.getOwnPropertyNames shape, hidden own length descriptor, RadioNodeList grouping for same-name radios, associated fieldset/object/output controls, external form-owner controls, and explicit foreign-owner exclusion; exact inherited HTMLCollection item identity and full named-property edge parity remain partial. Decision: Keep virtualized because form controls belong to the virtual DOM tree.
+- HTMLOptionsCollection: partial [virtualized] — select.options returns a branded HTMLOptionsCollection with live item(), namedItem(), numeric indexes, enumerable numeric/id/name own data-property descriptors, dynamic Object.keys/Object.getOwnPropertyNames shape, length/selectedIndex prototype accessors, add()/remove(), length growth/truncation, selectedIndex mutation, and iteration over virtual option elements; inherited HTMLCollection prototype parity and long-tail add/remove exception details remain partial. Decision: Keep virtualized because select option state belongs to the virtual DOM tree.
+- innerHTML: partial [host-bridge] — innerHTML parses through the host fragment parser with the target element context, rebuilds plain snapshots into the virtual DOM, and serializes virtual children; long-tail browser tree-construction and descriptor edge cases remain partial. Decision: Use the host parser bridge for tree construction; keep virtual DOM mutation and serialization inside QuickJS because target-visible DOM state belongs to the membrane.
+- outerHTML: partial [host-bridge] — outerHTML serializes virtual DOM subtrees and replacement parses markup through the host fragment parser using the parent context; long-tail browser tree-construction edge cases remain partial. Decision: Use the host parser bridge for replacement parsing; keep virtual DOM mutation and serialization inside QuickJS because target-visible DOM state belongs to the membrane.
+- DOMParser: partial [host-bridge] — DOMParser delegates host-supported parser modes to the host DOMParser, receives plain document snapshots, and rebuilds html/head/body plus parsed nodes into the virtual DOM; XML error documents and full XML namespace semantics remain partial. Element.setHTML()/setHTMLUnsafe() and Document.parseHTML()/parseHTMLUnsafe() now reuse the host parser snapshot bridge for safe/unsafe HTML insertion; full Sanitizer algorithm parity remains partial. Decision: Use the host DOMParser bridge for parser algorithms while keeping returned document/node identity virtualized inside QuickJS.
+- XMLSerializer: partial [virtualized] — XMLSerializer serializes virtual DOM elements, text, comments, attributes, and void elements; namespace/XML edge semantics remain partial. Decision: Keep virtualized because it serializes QuickJS virtual DOM nodes that cannot cross the membrane as host DOM objects.
+- document.write: partial [host-bridge] — document.write appends markup parsed by the host fragment parser using the virtual body context, including document.implementation.createHTMLDocument coverage; parser-insertion timing and open/close stream semantics remain partial. Decision: Use the host parser bridge for markup parsing; keep write timing and DOM mutation virtualized inside QuickJS because navigation/document state belongs to the membrane.
+- Range: partial [direct-shim] — Range exposes browser-like boundary containers/offsets, AbstractRange instanceof support, collapsed/commonAncestorContainer, setStart/setEnd, selectNode/selectNodeContents, collapse, cloneRange, text extraction across element/text boundaries, geometry, boundary comparison, point/intersection checks, and basic same-text/same-container clone/extract/delete/insert/surround/contextual-fragment operations; descriptor parity and cross-boundary mutation edge cases remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe descriptor/algorithm reuse is available or direct code is safer.
+- Selection: partial [direct-shim] — Selection exposes rangeCount, anchor/focus state, isCollapsed/type, addRange/removeRange/removeAllRanges/empty/getRangeAt, collapse/collapseToStart/collapseToEnd/setPosition, extend/setBaseAndExtent, selectAllChildren, deleteFromDocument, containsNode, and toString; direction/multiple-range browser edge cases remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe descriptor/algorithm reuse is available or direct code is safer.
+- XPathEvaluator: partial [direct-shim] — XPathEvaluator is constructible/branded and backs document.evaluate/createExpression/createNSResolver for common virtual DOM XPath queries including descendant tag/attribute lookups, id(), string(), count(), boolean(), iterator, snapshot, and single-node result basics; full XPath grammar, namespace resolution, attribute/text result nodes, and browser descriptor parity remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe XPath algorithms can operate on virtual DOM nodes without exposing host DOM objects.
+- XPathExpression: partial [direct-shim] — XPathExpression is exposed as a branded illegal-constructor object created by XPathEvaluator.createExpression() with evaluate() against virtual DOM contexts; full parser, namespace resolver semantics, and descriptor parity remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe XPath algorithms can operate on virtual DOM nodes without exposing host DOM objects.
+- XPathResult: partial [direct-shim] — XPathResult is exposed as a branded illegal-constructor result object with browser constant values, scalar getters, singleNodeValue, iterateNext(), snapshotLength/snapshotItem(), invalidIteratorState basics, and result-object reuse; mutation invalidation and full XPath result coercion semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe XPath algorithms can operate on virtual DOM nodes without exposing host DOM objects.
+- EventTarget: partial [virtualized] — EventTarget is constructible/branded as [object EventTarget] with addEventListener/removeEventListener/dispatchEvent and handler-property invocation for virtual events. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- MessagePort: partial [virtualized] — MessagePort is branded/EventTarget-backed with postMessage(), start(), close(), onmessage delivery, structuredClone payload copying, and MessageEvent dispatch basics; transfer/disentangling edge cases, task-queue ordering, messageerror, and descriptor parity remain partial. Decision: Keep virtualized because message channels are intra-realm virtual task queues and must not use host ports across the membrane.
+- MessageChannel: partial [virtualized] — MessageChannel is branded and creates entangled virtual MessagePort endpoints with asynchronous MessageEvent delivery; transfer semantics, worker/cross-realm handoff, messageerror, and descriptor parity remain partial. Decision: Keep virtualized because message channels are intra-realm virtual task queues and must not use host ports across the membrane.
+- BroadcastChannel: partial [virtualized] — BroadcastChannel is branded/EventTarget-backed with name, postMessage(), close(), onmessage delivery to same-name peer channels, structuredClone payload copying, MessageEvent origin, and no self-delivery basics; cross-realm/tab delivery, task-queue ordering, messageerror, and descriptor parity remain partial. Decision: Keep virtualized because broadcast delivery is virtual-origin state and must not use host channels across the membrane.
+- FontFace: partial [virtualized] — FontFace is constructible/branded with family/source/descriptors, status, loaded promise, and load() resolving to the virtual font face; real font fetching, parsing, and decode errors remain partial. Decision: Keep virtualized because font loading and availability must be mediated by virtual resource/CSSOM state, not host document fonts.
+- FontFaceSet: partial [virtualized] — document.fonts exposes a branded EventTarget FontFaceSet facade with add/delete/clear/has, size/status, ready promise, load()/check(), and set-like iteration; real font matching, layout invalidation, and loading events remain partial. Decision: Keep virtualized because font loading and availability must be mediated by virtual resource/CSSOM state, not host document fonts.
+- CropTarget: partial [virtualized] — CropTarget is exposed as an illegal-constructor branded prototype with fromElement() rejecting InvalidStateError under the default capture-disabled policy; real capture target production and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because capture targets can expose host screen/window capture state and require explicit membrane policy.
+- RestrictionTarget: partial [virtualized] — RestrictionTarget is exposed as an illegal-constructor branded prototype with fromElement() rejecting InvalidStateError under the default capture-disabled policy; real restriction target production and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because capture restriction targets can expose host screen/window capture state and require explicit membrane policy.
+- DelegatedInkTrailPresenter: partial [virtualized] — DelegatedInkTrailPresenter is exposed as an illegal-constructor branded prototype with null presentationArea and no-op updateInkTrailStartPoint(); real OS ink trail presentation and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because delegated ink trails describe host input/UI presentation and must not cross the membrane without explicit policy.
+- ReadableStream: partial [direct-shim] — ReadableStream is exposed as a branded constructible virtual stream with start/enqueue/close/error basics, getReader(), cancel(), pipeTo(), pipeThrough(), and tee() placeholders; full WHATWG queuing, backpressure, tee cloning, byte-source, and descriptor semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- ReadableStreamDefaultReader: partial [direct-shim] — ReadableStreamDefaultReader is exposed as a branded constructible reader for virtual ReadableStream instances with read(), cancel(), releaseLock(), closed, and lock ownership basics; full promise timing/backpressure/error semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- ReadableStreamBYOBReader: partial [direct-shim] — ReadableStreamBYOBReader is exposed as a branded constructible BYOB reader for virtual ReadableStream instances with basic ArrayBuffer-view read() copying; full byte stream controller/BYOB request semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- ReadableStreamDefaultController: partial [direct-shim] — ReadableStreamDefaultController is exposed as an illegal-constructor branded controller passed to virtual ReadableStream start() with enqueue(), close(), error(), and desiredSize basics; full queue strategy/backpressure semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- ReadableByteStreamController: partial [direct-shim] — ReadableByteStreamController is exposed as an illegal-constructor branded controller for virtual byte streams with default enqueue/close/error behavior and null byobRequest; full byte-source/BYOB semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- ReadableStreamBYOBRequest: partial [direct-shim] — ReadableStreamBYOBRequest is exposed as an illegal-constructor branded BYOB request facade with view/respond/respondWithNewView placeholders; full browser byte-stream ownership semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- WritableStream: partial [direct-shim] — WritableStream is exposed as a branded constructible virtual stream with underlying sink start/write/close/abort dispatch, getWriter(), close(), abort(), and locked basics; full backpressure, writer promises, and descriptor parity remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- WritableStreamDefaultWriter: partial [direct-shim] — WritableStreamDefaultWriter is exposed as a branded constructible writer for virtual WritableStream instances with write(), close(), abort(), releaseLock(), desiredSize, ready, and closed basics; full backpressure/error timing remains partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- WritableStreamDefaultController: partial [direct-shim] — WritableStreamDefaultController is exposed as an illegal-constructor branded controller passed to virtual WritableStream start() with error() basics; full browser sink-controller semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- TransformStream: partial [direct-shim] — TransformStream is exposed as a branded constructible virtual transform with readable/writable stream endpoints and transformer start/transform/flush dispatch; full backpressure, error propagation, and stream algorithm parity remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- TransformStreamDefaultController: partial [direct-shim] — TransformStreamDefaultController is exposed as an illegal-constructor branded controller passed to virtual TransformStream algorithms with enqueue(), error(), terminate(), and desiredSize basics; full transform algorithm parity remains partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe stream algorithms/backpressure can be shared safely.
+- CompressionStream: partial [direct-shim] — CompressionStream is constructible/branded for gzip/deflate/deflate-raw formats with ReadableStream/WritableStream-shaped endpoints; actual compression transform, backpressure, and byte semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe TransformStream/compression plumbing is available.
+- DecompressionStream: partial [direct-shim] — DecompressionStream is constructible/branded for gzip/deflate/deflate-raw formats with ReadableStream/WritableStream-shaped endpoints; actual decompression transform, backpressure, and byte semantics remain partial. Decision: Re-evaluate for host bridge; keep direct shim until bridge-safe TransformStream/compression plumbing is available.
+- MediaStream: partial [virtualized] — MediaStream is constructible/branded with virtual id, active state, track-list storage, getTracks()/getAudioTracks()/getVideoTracks()/getTrackById(), addTrack()/removeTrack(), clone(), and webkitMediaStream alias coverage; real capture tracks, event dispatch, and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because media stream membership and capture state must describe membrane-approved virtual tracks rather than host capture devices.
+- webkitMediaStream: partial [virtualized] — webkitMediaStream aliases the virtual MediaStream constructor for legacy browser-shape compatibility; vendor-specific descriptor parity remains partial. Decision: Keep as a policy-virtualized legacy alias of MediaStream because host media streams must not cross the membrane.
+- MediaStreamTrack: partial [virtualized] — MediaStreamTrack is exposed as an illegal-constructor branded EventTarget with virtual kind/id/label/enabled/muted/readyState/contentHint accessors, stop(), clone(), empty capabilities/settings/constraints, and getCaptureHandle(); real capture source integration and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because track state and labels can expose host devices and must only reflect approved membrane streams.
+- CanvasCaptureMediaStreamTrack: partial [virtualized] — CanvasCaptureMediaStreamTrack is exposed as an illegal-constructor MediaStreamTrack subclass with canvas getter and requestFrame() no-op shape; canvas capture production and descriptor parity remain partial. Decision: Keep virtualized because captured frames must come from virtual canvas state rather than host DOM objects.
+- BrowserCaptureMediaStreamTrack: partial [virtualized] — BrowserCaptureMediaStreamTrack is exposed as an illegal-constructor MediaStreamTrack subclass with cropTo()/restrictTo() resolved-policy stubs; real tab/window capture and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because browser capture must never expose host tab/window state without explicit membrane approval.
+- MediaStreamTrackAudioStats: partial [virtualized] — MediaStreamTrackAudioStats now matches Chromium descriptor parity for the zeroed virtual stats value facade: illegal constructor call/new errors, native deliveredFrames/deliveredFramesDuration/totalFrames/totalFramesDuration/latency/averageLatency/minimumLatency/maximumLatency/resetLatency/toJSON/constructor/[Symbol.toStringTag] prototype order, enumerable readonly getters and methods, non-enumerable writable/configurable global descriptor, no custom Symbol.hasInstance, [object MediaStreamTrackAudioStats] branding, zero-valued counters, resetLatency() no-op, and toJSON() serialization. It remains partial until real audio pipeline statistics are produced from approved media tracks. Decision: Keep policy-virtualized because capture/audio stats can reveal host device and pipeline state.
+- MediaStreamTrackVideoStats: partial [virtualized] — MediaStreamTrackVideoStats now matches Chromium descriptor parity for the zeroed virtual stats value facade: illegal constructor call/new errors, native deliveredFrames/discardedFrames/totalFrames/toJSON/constructor/[Symbol.toStringTag] prototype order, enumerable readonly getters and toJSON(), non-enumerable writable/configurable global descriptor, no custom Symbol.hasInstance, [object MediaStreamTrackVideoStats] branding, zero-valued counters, and toJSON() serialization. It remains partial until real video pipeline statistics are produced from approved media tracks. Decision: Keep policy-virtualized because capture/video stats can reveal host device and pipeline state.
+- MediaRecorder: partial [virtualized] — MediaRecorder is constructible/branded for virtual MediaStream objects with stream/mimeType/state/bitrate fields, basic isTypeSupported(), start()/pause()/resume()/requestData()/stop() state transitions, empty BlobEvent dataavailable dispatch, and InvalidStateError validation; real encoded media capture, timeslice buffering, codec negotiation, and descriptor parity remain partial. Decision: Keep policy-virtualized because recording output must come only from approved virtual media streams and must not expose host capture devices.
+- AudioData: partial [virtualized] — AudioData is constructible/branded with virtual format/sampleRate/frame/channel/timestamp/duration fields, allocationSize(), copyTo(), clone(), and close() basics; plane layout validation and real decoder integration remain partial. Decision: Keep virtualized because audio sample data must be deterministic and membrane-provided.
+- VideoFrame: partial [virtualized] — VideoFrame is constructible/branded from virtual image-like sources with coded/display dimensions, timestamp/duration/colorSpace, allocationSize(), copyTo(), clone(), and close() basics; real pixel planes, transfer semantics, and decoder integration remain partial. Decision: Keep virtualized because decoded frame pixels must be deterministic and membrane-controlled.
+- VideoPlaybackQuality: partial [virtualized] — VideoPlaybackQuality is exposed as an illegal-constructor branded snapshot returned by HTMLVideoElement.getVideoPlaybackQuality(), with creationTime and zeroed frame counters for virtual video elements; real decoder/frame-drop telemetry remains partial. Decision: Keep virtualized because playback telemetry must describe virtual media elements, not host media decoders.
+- MediaSource: partial [virtualized] — MediaSource is constructible/branded as an EventTarget with readyState/duration/handle, sourceBuffers/activeSourceBuffers, addSourceBuffer()/removeSourceBuffer(), endOfStream(), seekable-range no-ops, and basic MIME allow-listing; real append parsing, demuxing, playback integration, and descriptor parity remain partial. Decision: Keep virtualized because media append buffers and playback state must describe virtual media resources, not host media pipelines.
+- MediaSourceHandle: partial [virtualized] — MediaSourceHandle is exposed as an illegal-constructor branded handle returned from virtual MediaSource.handle; worker-transfer and playback attachment semantics remain partial. Decision: Keep virtualized because MediaSource handles must reference virtual media sources only.
+- SourceBuffer: partial [virtualized] — SourceBuffer is exposed as an illegal-constructor branded EventTarget created by virtual MediaSource.addSourceBuffer(), with mode/updating/buffered/timestampOffset/window fields, update event dispatch, append/remove/abort/changeType method shape, and empty media track lists; real media segment parsing and buffered range mutation remain partial. Decision: Keep virtualized because appended media bytes and buffered ranges must be derived from membrane-approved virtual media.
+- SourceBufferList: partial [virtualized] — SourceBufferList is exposed as an illegal-constructor branded EventTarget list with length, numeric access, item(), and iteration for virtual MediaSource buffers; live mutation edge cases and event descriptor parity remain partial. Decision: Keep virtualized because source-buffer collections reflect virtual MediaSource state.
+- TimeRanges: partial [virtualized] — TimeRanges is exposed as an illegal-constructor branded range list with length/start()/end() basics and IndexSizeError validation; real media buffering/seekable range integration remains partial. Decision: Keep virtualized because buffered/seekable ranges must represent virtual media playback state.
+- TextTrack: partial [virtualized] — TextTrack is exposed as an illegal-constructor branded EventTarget with kind/label/language/id/mode, cue/activeCue lists, addCue(), and removeCue() basics for virtual captions/subtitles; media element integration, cue rendering, and full descriptor parity remain partial. Decision: Keep virtualized because text tracks and cue rendering belong to virtual media playback state.
+- TextTrackCue: partial [virtualized] — TextTrackCue is exposed as an illegal-constructor branded EventTarget base with track/id/startTime/endTime/pauseOnExit accessors used by VTTCue; full cue subclasses/rendering remain partial. Decision: Keep virtualized because cue state belongs to virtual text-track playback.
+- TextTrackCueList: partial [virtualized] — TextTrackCueList is exposed as an illegal-constructor branded list with length, numeric access, item(), getCueById(), and iteration for virtual text-track cues; live-list edge cases remain partial. Decision: Keep virtualized because cue lists reflect virtual TextTrack state.
+- TextTrackList: partial [virtualized] — TextTrackList is exposed as an illegal-constructor branded EventTarget list with length, item(), getTrackById(), and iteration basics; HTMLMediaElement track-list integration and events remain partial. Decision: Keep virtualized because text-track collections reflect virtual media element state.
+- VTTCue: partial [virtualized] — VTTCue is constructible/branded as a TextTrackCue subclass with start/end/text, layout fields, getCueAsHTML(), and track attachment basics; WebVTT parsing/rendering and region support remain partial. Decision: Keep virtualized because cue rendering must target the virtual document/media pipeline.
+- SpeechSynthesis: partial [virtualized] — SpeechSynthesis is exposed through a branded speechSynthesis singleton with pending/speaking/paused, getVoices() policy-empty results, pause()/resume()/cancel(), and speak() event/error/end dispatch for virtual utterances; real TTS voices/audio output remain policy-denied/partial. Decision: Keep policy-denied because speech output/voices can expose host capabilities and side effects.
+- SpeechSynthesisUtterance: partial [virtualized] — SpeechSynthesisUtterance remains partial because real utterance queue/audio output is policy-denied, but event payload validation now requires a browser-shaped SpeechSynthesisUtterance instance for SpeechSynthesisEvent and SpeechSynthesisErrorEvent construction. Decision: Keep virtualized because utterances are inputs to policy-denied speech synthesis.
+- SpeechSynthesisVoice: partial [virtualized] — SpeechSynthesisVoice is exposed as an illegal-constructor branded prototype with voiceURI/name/lang/localService/default accessors for virtual voice metadata; real host voice enumeration remains policy-empty. Decision: Keep policy-empty because voice lists expose host installed voices/locales.
+- SpeechRecognition: partial [virtualized] — SpeechRecognition is constructible/branded as an EventTarget with grammars/lang/continuous/interimResults/maxAlternatives fields and policy-denied start() error/end dispatch; real microphone capture and recognition remain policy-denied. Decision: Keep policy-denied because speech recognition requires microphone capture and external recognition services.
+- SpeechRecognitionEvent: partial [virtualized] — SpeechRecognitionEvent is constructible/branded with resultIndex/results/interpretation/emma payloads for virtual recognition dispatch; real result-list objects remain partial. Decision: Keep virtualized because recognition results must come from policy-approved virtual sources.
+- webkitSpeechRecognition: partial [virtualized] — webkitSpeechRecognition aliases the virtual SpeechRecognition facade for Chromium legacy compatibility; real speech recognition/capture remains policy-denied. Decision: Keep policy-denied because speech recognition requires microphone capture and external recognition services.
+- webkitSpeechRecognitionEvent: partial [virtualized] — webkitSpeechRecognitionEvent aliases the virtual SpeechRecognitionEvent facade for Chromium legacy compatibility; real speech recognition/capture remains policy-denied. Decision: Keep policy-denied because speech recognition requires microphone capture and external recognition services.
+- BaseAudioContext: partial [virtualized] — BaseAudioContext is exposed as an illegal-constructor EventTarget base with destination/sampleRate/currentTime/listener/state/audioWorklet and factory method shape for virtual audio graphs; real audio rendering remains policy-disabled/partial. Decision: Keep virtualized because Web Audio rendering and device state can expose host audio hardware/timing.
+- AudioContext: partial [virtualized] — AudioContext is constructible/branded with sampleRate/state/destination/listener/audioWorklet, base/output latency, suspend()/resume()/close(), getOutputTimestamp(), and common node factory methods; real output/rendering remains policy-disabled/partial. Decision: Keep virtualized because live audio output and timing can expose host capabilities and create side effects.
+- OfflineAudioContext: partial [virtualized] — OfflineAudioContext is constructible/branded with length/sampleRate/state and startRendering() resolving deterministic silent AudioBuffer data; real offline rendering remains partial. Decision: Keep virtualized because rendered audio data must be deterministic and membrane-controlled.
+- AudioNode: partial [virtualized] — AudioNode is exposed as an illegal-constructor EventTarget base with context/channel fields and connect()/disconnect() graph-shape methods; real audio graph rendering remains policy-disabled. Decision: Keep virtualized because audio graph state must not trigger host audio output.
+- AudioDestinationNode: partial [virtualized] — AudioDestinationNode is exposed as an AudioNode subclass for virtual contexts with maxChannelCount and outputless destination shape; real output devices remain policy-disabled. Decision: Keep virtualized because output device access is side-effectful and fingerprintable.
+- AudioParam: partial [virtualized] — AudioParam is exposed as an illegal-constructor branded parameter with value/default/min/max and chainable scheduling method shape; real automation timeline processing remains partial. Decision: Keep virtualized because parameter automation only affects virtual audio graph state.
+- AudioBuffer: partial [virtualized] — AudioBuffer is constructible/branded with numberOfChannels/length/sampleRate/duration, Float32 channel storage, getChannelData(), copyFromChannel(), and copyToChannel() basics; full validation and rendering integration remain partial. Decision: Keep virtualized because audio sample data must be deterministic and membrane-controlled.
+- AudioBufferSourceNode: partial [virtualized] — AudioBufferSourceNode is constructible/branded for virtual contexts with AudioScheduledSourceNode inheritance, buffer/playbackRate/detune/loop, and start()/stop() ended-event shape; real playback remains policy-disabled. Decision: Keep virtualized because playback output must not reach host audio devices.
+- GainNode: partial [virtualized] — GainNode is constructible/branded with gain AudioParam and AudioNode inheritance for virtual graph wiring; real signal processing remains partial. Decision: Keep virtualized because audio processing happens only inside virtual graphs.
+- OscillatorNode: partial [virtualized] — OscillatorNode is constructible/branded with AudioScheduledSourceNode inheritance, type/frequency/detune, setPeriodicWave(), and start()/stop() ended-event shape; real oscillator rendering remains partial. Decision: Keep virtualized because generated audio must not reach host output devices.
+- AnalyserNode: partial [virtualized] — AnalyserNode is constructible/branded with fftSize/frequencyBinCount/decibel/smoothing fields and deterministic zero/silence data extraction methods; real signal analysis remains partial. Decision: Keep virtualized because audio analysis data can fingerprint host audio pipelines.
+- AudioListener: partial [virtualized] — AudioListener is exposed as an illegal-constructor branded object with position/orientation AudioParams and legacy setPosition()/setOrientation() shape; real spatialization remains partial. Decision: Keep virtualized because spatial audio state only affects virtual graphs.
+- AudioWorklet: partial [virtualized] — AudioWorklet is exposed as an illegal-constructor branded object on virtual contexts with addModule() rejecting NotAllowedError; real worklet module execution/render thread integration remains policy-disabled. Decision: Keep policy-disabled because audio worklets execute code in timing-sensitive rendering contexts.
+- AudioScheduledSourceNode: partial [virtualized] — AudioScheduledSourceNode is exposed as an illegal-constructor AudioNode base inherited by virtual scheduled sources with start()/stop() ended-event shape; real scheduling remains partial. Decision: Keep virtualized because scheduled audio playback is policy-controlled virtual graph state.
+- BiquadFilterNode: partial [virtualized] — BiquadFilterNode is constructible/branded with type, frequency/detune/Q/gain AudioParams, and deterministic getFrequencyResponse(); real filtering remains partial. Decision: Keep virtualized because audio signal processing must remain deterministic.
+- DelayNode: partial [virtualized] — DelayNode is constructible/branded with delayTime AudioParam; real delay processing remains partial. Decision: Keep virtualized because audio signal processing must remain deterministic.
+- DynamicsCompressorNode: partial [virtualized] — DynamicsCompressorNode is constructible/branded with threshold/knee/ratio/attack/release AudioParams and deterministic reduction; real compression remains partial. Decision: Keep virtualized because audio analysis/processing must not expose host behavior.
+- StereoPannerNode: partial [virtualized] — StereoPannerNode is constructible/branded with pan AudioParam; real panning remains partial. Decision: Keep virtualized because panning only affects virtual graph state.
+- PannerNode: partial [virtualized] — PannerNode is constructible/branded with position/orientation AudioParams, model/distance/cone fields, and legacy setters; real spatialization remains partial. Decision: Keep virtualized because spatial audio only affects virtual graph state.
+- WaveShaperNode: partial [virtualized] — WaveShaperNode is constructible/branded with curve and oversample fields; real waveshaping remains partial. Decision: Keep virtualized because audio processing must remain deterministic.
+- ConvolverNode: partial [virtualized] — ConvolverNode is constructible/branded with buffer and normalize fields; real convolution remains partial. Decision: Keep virtualized because audio processing must remain deterministic.
+- IIRFilterNode: partial [virtualized] — IIRFilterNode is constructible/branded with feedforward/feedback storage and deterministic getFrequencyResponse(); real filtering remains partial. Decision: Keep virtualized because filter responses must remain deterministic.
+- ChannelSplitterNode: partial [virtualized] — ChannelSplitterNode is constructible/branded with virtual input/output counts; real channel splitting remains partial. Decision: Keep virtualized because channel routing belongs to virtual graph state.
+- ChannelMergerNode: partial [virtualized] — ChannelMergerNode is constructible/branded with virtual input/output counts; real channel merging remains partial. Decision: Keep virtualized because channel routing belongs to virtual graph state.
+- ConstantSourceNode: partial [virtualized] — ConstantSourceNode is constructible/branded with AudioScheduledSourceNode inheritance, offset AudioParam, and start()/stop() ended-event shape; real signal generation remains partial. Decision: Keep virtualized because generated audio must not reach host output devices.
+- PeriodicWave: partial [virtualized] — PeriodicWave is constructible/branded with virtual real/imag coefficient storage; real oscillator wave shaping remains partial. Decision: Keep virtualized because waveform state only affects virtual graphs.
+- AudioParamMap: partial [virtualized] — AudioParamMap is exposed as an illegal-constructor branded empty map-like parameter collection for virtual AudioWorkletNode; real worklet parameters remain policy-disabled. Decision: Keep virtualized because AudioWorklet execution is policy-disabled.
+- AudioWorkletNode: partial [virtualized] — AudioWorkletNode is constructible/branded with parameters AudioParamMap and virtual MessagePort shape; processor execution remains policy-disabled. Decision: Keep policy-disabled because audio worklet processors run timing-sensitive code.
+- MediaElementAudioSourceNode: partial [virtualized] — MediaElementAudioSourceNode is constructible/branded with mediaElement payload and AudioNode inheritance; real media element audio routing remains partial. Decision: Keep virtualized because media element audio is virtual playback state.
+- MediaStreamAudioSourceNode: partial [virtualized] — MediaStreamAudioSourceNode is constructible/branded with mediaStream payload and AudioNode inheritance; real capture stream audio routing remains policy-gated. Decision: Keep virtualized because media streams must remain membrane-approved virtual streams.
+- MediaStreamAudioDestinationNode: partial [virtualized] — MediaStreamAudioDestinationNode is constructible/branded with a virtual MediaStream output; real graph-to-capture rendering remains partial. Decision: Keep virtualized because graph output streams must be virtual media streams.
+- ScriptProcessorNode: partial [virtualized] — ScriptProcessorNode is exposed through createScriptProcessor() with illegal-constructor branding, virtual bufferSize/input/output counts, and onaudioprocess handler storage; real legacy audio processing callbacks remain policy-disabled. Decision: Keep policy-disabled because legacy script audio processing is timing-sensitive executable code.
+- RTCTrackEvent: partial [virtualized] — RTCTrackEvent remains partial because real RTCRtpReceiver/RTCRtpTransceiver objects are policy-gated, but the live Chromium probe now documents its required receiver/track/transceiver payload validation target for future work. Decision: Keep policy-virtualized because WebRTC track events must describe virtual peer-connection state and must not expose host devices/network state.
+- RTCPeerConnection: partial [virtualized] — RTCPeerConnection is constructible/branded as an EventTarget with configuration/state accessors, policy-denied offer/answer/certificate operations, empty sender/receiver/transceiver lists, createDataChannel() returning a closed virtual channel, getStats() returning an empty RTCStatsReport, and close() state transitions; real ICE/DTLS/SCTP/media transport is disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- webkitRTCPeerConnection: partial [virtualized] — webkitRTCPeerConnection aliases the virtual RTCPeerConnection constructor for Chromium legacy compatibility; real WebRTC transport remains policy-denied. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCDataChannel: partial [virtualized] — RTCDataChannel is exposed as an illegal-constructor brand and as closed virtual channels created by RTCPeerConnection.createDataChannel(); real SCTP delivery is disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCDtlsTransport: partial [virtualized] — RTCDtlsTransport is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCIceTransport: partial [virtualized] — RTCIceTransport is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCSctpTransport: partial [virtualized] — RTCSctpTransport is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCDTMFSender: partial [virtualized] — RTCDTMFSender is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCRtpReceiver: partial [virtualized] — RTCRtpReceiver is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCRtpSender: partial [virtualized] — RTCRtpSender is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCRtpTransceiver: partial [virtualized] — RTCRtpTransceiver is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCCertificate: partial [virtualized] — RTCCertificate is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCEncodedAudioFrame: partial [virtualized] — RTCEncodedAudioFrame is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCEncodedVideoFrame: partial [virtualized] — RTCEncodedVideoFrame is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCRtpScriptTransform: partial [virtualized] — RTCRtpScriptTransform is exposed as a branded policy/illegal-constructor facade so feature detection sees the WebRTC surface while real host WebRTC execution remains disabled. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- RTCStatsReport: partial [virtualized] — RTCStatsReport is exposed as a Map-shaped illegal-constructor facade and returned empty from virtual RTCPeerConnection.getStats(); real transport statistics remain unavailable. Decision: Keep policy-denied/virtualized because WebRTC can expose host network addresses, devices, codecs, and cross-origin transport side effects.
+- event constructors: partial [virtualized] — Event exposes basic [object Event] branding, browser-shaped bubbles/cancelable/composed/defaultPrevented defaults, phase constants, returnValue/cancelBubble, timeStamp, and composedPath(); CustomEvent, UIEvent, MouseEvent, PointerEvent, TouchEvent, FocusEvent, KeyboardEvent, InputEvent, CompositionEvent, ClipboardEvent, DragEvent, WheelEvent, AnimationEvent, TransitionEvent, TrackEvent, MediaStreamTrackEvent, MediaEncryptedEvent, CharacterBoundsUpdateEvent, TextFormatUpdateEvent, TextUpdateEvent, PageRevealEvent, PageSwapEvent, DeviceMotionEvent, DeviceOrientationEvent, SecurityPolicyViolationEvent, ErrorEvent, HashChangeEvent, PopStateEvent, PromiseRejectionEvent, PageTransitionEvent, BeforeUnloadEvent, BeforeInstallPromptEvent, SubmitEvent, FormDataEvent, MessageEvent, and ProgressEvent constructors expose basic browser-shaped init properties, branding, and Event inheritance. TextEvent exposes the legacy illegal-constructor UIEvent prototype shape; TextFormat covers virtual text-format payloads. Touch/TouchList, MessagePort/MessageChannel, and BroadcastChannel expose basic event payload/channel surfaces. Full event-constructor descriptor parity and remaining long-tail event classes remain partial. Decision: Keep virtualized because target-visible event objects and dispatch state belong to the virtual DOM membrane.
+- forms: partial [virtualized] — Form URLs are virtualized; HTMLFormElement/HTMLInputElement/HTMLTextAreaElement/HTMLSelectElement/HTMLOptionElement branding, form.elements, input value/type/name/checked/file-list/required/disabled reflection, textarea value reflection, select/options/selectedIndex/value and option selected/defaultSelected basics, DataTransfer-backed selected file population, FormData(form) for text/checked/file/textarea/select controls, and basic constraint validation (ValidityState, checkValidity/reportValidity, invalid events, required/type/pattern/length/range/custom validity) are covered. Submission/navigation algorithms and full form-control validation remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- Option: partial [virtualized] — globalThis.Option is exposed as a browser-shaped constructor returning virtual HTMLOptionElement instances with text/value/defaultSelected/selected initialization and shared HTMLOptionElement.prototype; full descriptor and parser/default-selection parity remain partial. Decision: Keep virtualized because option selection/default state belongs to the virtual form-control model.
+- anchors: partial [virtualized] — Anchor URLs are sanitized/virtualized and QuickJS exposes HTMLAnchorElement branding plus href/origin/protocol/host/path/search/hash reflection against the virtual document URL; navigation activation/default action remains partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- images/scripts/links/styles: partial [virtualized] — Resource URLs are sanitized/virtualized and QuickJS exposes src/href absolute URL reflection plus HTMLImageElement/HTMLScriptElement/HTMLLinkElement branding for common resource elements; loading/error lifecycle parity remains partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- Audio: partial [virtualized] — globalThis.Audio is exposed as a browser-shaped constructor that returns virtual HTMLAudioElement instances, applies optional src URL reflection, and shares HTMLAudioElement.prototype; media loading/playback lifecycle remains partial. Decision: Keep virtualized because audio element construction and resource loading must be owned by the virtual DOM/media pipeline.
+- Image: partial [virtualized] — globalThis.Image is exposed as a browser-shaped constructor that returns virtual HTMLImageElement instances, applies optional width/height own properties, and shares HTMLImageElement.prototype; image decoding/loading events remain partial. Decision: Keep virtualized because image elements and resource loading must be owned by the virtual DOM/resource pipeline.
+- iframes: partial [virtualized] — URLs virtualized; child context runtime pending. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- tables: partial [virtualized] — Table caption/head/body/foot helpers, tBodies/rows/cells collections, insertRow/deleteRow, insertCell/deleteCell, and rowIndex/sectionRowIndex/cellIndex basics are virtualized; full table layout, foster parenting/parser placement, and descriptor parity remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- DOMRectList: partial [virtualized] — Virtual DOMRectList is a branded illegal-constructor list returned by Element.getClientRects(), with length, indexed access, item(), and iteration over virtual DOMRect geometry; multi-fragment inline layout, live-list semantics, and descriptor parity remain partial. Decision: Keep virtualized because client rects must describe virtual layout boxes, not host DOM boxes.
+- DOMMatrixReadOnly: partial [virtualized] — Virtual DOMMatrixReadOnly is constructible/branded from 2D/4x4 matrix-like input, exposes matrix slots plus a-f aliases, is2D/isIdentity, translate()/scale(), transformPoint(), toJSON(), and fromMatrix(); full matrix algebra, string parsing, toString(), inverse/multiply/rotate/skew APIs, typed-array edge cases, and descriptor parity remain partial. Decision: Keep virtualized because geometry transforms must describe the virtual DOM membrane, not host DOM nodes.
+- DOMMatrix: partial [virtualized] — Virtual DOMMatrix extends DOMMatrixReadOnly with writable matrix slots, a-f aliases, translateSelf(), scaleSelf(), fromMatrix(), fromFloat32Array(), and fromFloat64Array(); full matrix algebra, string parsing, inverse/multiply/rotate/skew APIs, and descriptor parity remain partial. Decision: Keep virtualized because geometry transforms must describe the virtual DOM membrane, not host DOM nodes.
+- layout readback: partial [virtualized] Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- CSS: partial [host-bridge] — CSS namespace now uses the generic host Web API namespace bridge for CSS.escape(), CSS.supports(), function reflection, descriptor flags, and [object CSS] tagging, with a direct fallback for non-browser hosts; CSS.highlights remains virtual, and broad CSS parser/layout/Typed OM integration remains partial. Decision: Prefer host parser/IDL reuse for pure CSS algorithms where membrane-safe; keep declaration support virtualized because target-visible style state belongs to the virtual DOM.
+- Highlight: partial [virtualized] — Highlight is constructible/branded with Set-like AbstractRange storage, priority/type accessors, duplicate suppression, iteration, and forEach() semantics; style painting, layout invalidation, and descriptor parity remain partial. Decision: Keep virtualized because highlight ranges reference virtual DOM Range/StaticRange objects and painting/hit-testing must describe the virtual document, not host DOM state.
+- HighlightRegistry: partial [virtualized] — CSS.highlights exposes a stable illegal-constructor HighlightRegistry facade with Map-like storage, Highlight value validation, iteration, forEach(), and policy-empty highlightsFromPoint(); actual highlight painting and layout hit-testing remain partial. Decision: Keep virtualized because registered highlights and point lookups belong to the virtual DOM/layout membrane rather than the host page.
+- CSSStyleDeclaration: partial [host-bridge] — CSSStyleDeclaration exposes [object CSSStyleDeclaration], length/item/cssText, setProperty/getPropertyValue/getPropertyPriority/removeProperty, common camelCase aliases, custom properties, and cssText declaration parsing through the host CSS parser; full descriptor/property inventory remains partial. Decision: Use the host CSS parser for declaration parsing; keep storage, mutation, and property reflection virtualized because target-visible style state belongs to the virtual DOM.
+- StyleSheet: partial [virtualized] — StyleSheet is exposed as an illegal-constructor branded base with type/href/ownerNode/parentStyleSheet/title/media/disabled shape, ownerNode/href/title/media wiring from virtual style/link elements, and disabled synchronization with style/link elements; descriptor parity remains partial. Decision: Keep virtualized because style sheet ownership and mutation are target-visible virtual DOM state.
+- CSSStyleSheet: partial [virtualized] — CSSStyleSheet is constructible/branded with cssRules/rules, insertRule/deleteRule/addRule/removeRule, replaceSync(), replace(), virtual style/link owner wiring, and document/shadow adoptedStyleSheets assignment plus CSSStyleSheet validation basics for style/media/supports rules; full parser, cascade, constructable stylesheet adoption lifecycle, and descriptor parity remain partial. Decision: Keep virtualized because stylesheet mutation and adopted/owned sheet state belong to the virtual DOM.
+- CSSRule: partial [virtualized] — CSSRule is exposed as an illegal-constructor branded base with common type constants, cssText, parentRule, and parentStyleSheet shape; full CSSOM rule taxonomy remains partial. Decision: Prefer host parser reuse later; keep rule ownership/mutation virtualized for target-visible stylesheet state.
+- CSSGroupingRule: partial [virtualized] — CSSGroupingRule is exposed as an illegal-constructor CSSRule subclass with cssRules, insertRule(), and deleteRule() basics for virtual nested rules; nested parser/cascade semantics remain partial. Decision: Keep virtualized because nested rule mutation belongs to virtual stylesheet state.
+- CSSConditionRule: partial [virtualized] — CSSConditionRule is exposed as an illegal-constructor CSSGroupingRule subclass with conditionText shape; full condition parsing/evaluation remains partial. Decision: Prefer host parser/evaluator reuse later; keep rule state virtualized.
+- CSSStyleRule: partial [virtualized] — CSSStyleRule is exposed as an illegal-constructor CSSRule subclass for virtual parsed style rules with selectorText, CSSStyleDeclaration style, styleMap placeholder, and nested-rule rejection; full parser and nesting semantics remain partial. Decision: Keep virtualized because selector/style mutation targets virtual stylesheet state.
+- CSSMediaRule: partial [virtualized] — CSSMediaRule is exposed as an illegal-constructor CSSConditionRule subclass with media/conditionText and virtual nested rule list basics; media query evaluation remains partial. Decision: Prefer host media-query parser reuse later; keep current rule state virtualized.
+- CSSSupportsRule: partial [virtualized] — CSSSupportsRule is exposed as an illegal-constructor CSSConditionRule subclass with conditionText and virtual nested rule list basics; full supports-condition parsing/evaluation remains partial. Decision: Prefer host supports parser/evaluator reuse later; keep current rule state virtualized.
+- CSSImportRule: partial [virtualized] — CSSImportRule is exposed as an illegal-constructor CSSRule subclass with href, media, styleSheet, layerName, and supportsText shape for virtual @import rules; fetch/loading and full parser semantics remain partial. Decision: Keep virtualized because imported stylesheet loading and ownership must be mediated by the virtual resource pipeline.
+- CSSFontFaceRule: partial [virtualized] — CSSFontFaceRule is exposed as an illegal-constructor CSSRule subclass with CSSStyleDeclaration style payload basics; font loading and full descriptor parsing remain partial. Decision: Keep virtualized because font source loading and stylesheet mutation belong to the membrane-controlled virtual document.
+- CSSPageRule: partial [virtualized] — CSSPageRule is exposed as an illegal-constructor CSSGroupingRule subclass with selectorText, style, and nested rule-list shape; paged-media layout semantics remain partial. Decision: Keep virtualized because page-rule state belongs to virtual stylesheet state.
+- CSSMarginRule: partial [virtualized] — CSSMarginRule is exposed as an illegal-constructor CSSRule subclass with name and style basics; paged-media margin box layout remains partial. Decision: Keep virtualized because margin-rule state belongs to virtual stylesheet state.
+- CSSKeyframesRule: partial [virtualized] — CSSKeyframesRule is exposed as an illegal-constructor CSSRule subclass with name, cssRules, length, appendRule(), deleteRule(), and findRule() basics; full animation parser/cascade behavior remains partial. Decision: Keep virtualized because keyframe mutation belongs to virtual stylesheet and animation state.
+- CSSKeyframeRule: partial [virtualized] — CSSKeyframeRule is exposed as an illegal-constructor CSSRule subclass with keyText and style basics; full keyframe parser and computed animation effects remain partial. Decision: Keep virtualized because keyframe rule state belongs to virtual stylesheet and animation state.
+- CSSNamespaceRule: partial [virtualized] — CSSNamespaceRule is exposed as an illegal-constructor CSSRule subclass with namespaceURI and prefix basics; full selector namespace integration remains partial. Decision: Keep virtualized because namespace bindings belong to virtual stylesheet state.
+- CSSLayerBlockRule: partial [virtualized] — CSSLayerBlockRule is exposed as an illegal-constructor CSSGroupingRule subclass with name and nested rule-list basics; cascade-layer ordering semantics remain partial. Decision: Keep virtualized because cascade-layer state belongs to virtual stylesheet state.
+- CSSLayerStatementRule: partial [virtualized] — CSSLayerStatementRule is exposed as an illegal-constructor CSSRule subclass with nameList basics; full cascade-layer ordering semantics remain partial. Decision: Keep virtualized because layer declaration state belongs to virtual stylesheet state.
+- CSSContainerRule: partial [virtualized] — CSSContainerRule is exposed as an illegal-constructor CSSConditionRule subclass with containerName, containerQuery, conditionText, and nested rule-list basics; container query evaluation remains partial. Decision: Keep virtualized until host query parsing/evaluation can be reused against virtual layout state.
+- CSSScopeRule: partial [virtualized] — CSSScopeRule is exposed as an illegal-constructor CSSGroupingRule subclass with start/end and nested rule-list basics; full scope selector matching remains partial. Decision: Keep virtualized because scoped rule matching must run against the virtual DOM.
+- CSSStartingStyleRule: partial [virtualized] — CSSStartingStyleRule is exposed as an illegal-constructor CSSGroupingRule subclass with nested rule-list basics; transition starting-style integration remains partial. Decision: Keep virtualized because transition starting-style state belongs to virtual animation/style state.
+- CSSNestedDeclarations: partial [virtualized] — CSSNestedDeclarations is exposed as an illegal-constructor CSSRule subclass with CSSStyleDeclaration style basics; full CSS nesting parser and cascade semantics remain partial. Decision: Keep virtualized because nested declaration state belongs to virtual stylesheet state.
+- CSSCounterStyleRule: partial [virtualized] — CSSCounterStyleRule is exposed as an illegal-constructor CSSRule subclass for virtual @counter-style rules with name/system/symbols/fallback and common descriptor accessors; full counter style parsing/rendering remains partial. Decision: Keep virtualized because counter-style state belongs to virtual stylesheet and generated-content state.
+- CSSFontFeatureValuesRule: partial [virtualized] — CSSFontFeatureValuesRule is exposed as an illegal-constructor CSSRule subclass with fontFamily and valueText payloads for virtual @font-feature-values rules; full descriptor maps and font shaping remain partial. Decision: Keep virtualized because font feature state belongs to virtual stylesheet/font state.
+- CSSFontPaletteValuesRule: partial [virtualized] — CSSFontPaletteValuesRule is exposed as an illegal-constructor CSSRule subclass with name/fontFamily/basePalette/overrideColors descriptors; real font palette application remains partial. Decision: Keep virtualized because font palette state belongs to virtual stylesheet/font state.
+- CSSPropertyRule: partial [virtualized] — CSSPropertyRule is exposed as an illegal-constructor CSSRule subclass for virtual @property rules with name/syntax/inherits/initialValue descriptors; registration with computed style and full syntax validation remain partial. Decision: Keep virtualized because custom-property registration affects virtual computed style.
+- CSSPositionTryRule: partial [virtualized] — CSSPositionTryRule is exposed as an illegal-constructor CSSRule subclass with name and CSSStyleDeclaration style payload for virtual @position-try rules; anchor-positioning layout remains partial. Decision: Keep virtualized because position-try fallback state belongs to virtual layout/style state.
+- CSSViewTransitionRule: partial [virtualized] — CSSViewTransitionRule is exposed as an illegal-constructor CSSRule subclass with navigation and types descriptors for virtual @view-transition rules; real view-transition capture/animation remains partial. Decision: Keep virtualized because view-transition state must not expose host document snapshots.
+- ViewTransition: partial [virtualized] — ViewTransition is exposed as an illegal-constructor facade returned by document.startViewTransition(), with updateCallbackDone/ready/finished promises, skipTransition(), and a virtual ViewTransitionTypeSet; real snapshot capture, rendering phases, and animation integration remain partial. Decision: Keep virtualized because view-transition state must describe virtual document updates and must not expose host rendering snapshots.
+- ViewTransitionTypeSet: partial [virtualized] — ViewTransitionTypeSet is exposed as an illegal-constructor set-like facade for ViewTransition types, with add/delete/has/iteration basics; descriptor and rendering integration remain partial. Decision: Keep virtualized because view-transition state must describe virtual document updates and must not expose host rendering snapshots.
+- StylePropertyMapReadOnly: partial [virtualized] — StylePropertyMapReadOnly is exposed as an illegal-constructor branded map facade with size/get/getAll/has/entries/keys/values/forEach over virtual CSSStyleDeclaration values parsed as CSS Typed OM values; full computed style maps and descriptor parity remain partial. Decision: Keep virtualized because style maps mutate/read virtual element style state and must not expose host computed style objects.
+- StylePropertyMap: partial [virtualized] — Element.attributeStyleMap exposes a stable branded StylePropertyMap with set/append/delete/clear backed by virtual CSSStyleDeclaration and CSS Typed OM value serialization; full CSS parser/value-list semantics remain partial. Decision: Keep virtualized because style maps mutate/read virtual element style state and must not expose host computed style objects.
+- CSSStyleValue: partial [virtualized] — CSSStyleValue is exposed as an illegal-constructor Typed OM base with parse()/parseAll() returning virtual CSSUnparsedValue payloads; full browser parser and property-specific value classes remain partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSImageValue: partial [virtualized] — CSSImageValue global is present as an illegal-constructor Typed OM image base facade; concrete image parser/value subclasses remain partial. Decision: Keep virtualized because CSS Typed OM values must describe virtual style/layout state.
+- CSSTransformComponent: partial [virtualized] — CSSTransformComponent global is present as an illegal-constructor transform base facade, and transform component classes inherit from it; full matrix decomposition/composition remains partial. Decision: Keep virtualized because CSS Typed OM values must describe virtual style/layout state.
+- CSSNumericValue: partial [virtualized] — CSSNumericValue is exposed as an illegal-constructor Typed OM numeric base with parse(), arithmetic combinators, equals(), to(), toSum(), and type() basics; unit algebra/conversion parity remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSNumericArray: partial [virtualized] — CSSNumericArray is exposed as an illegal-constructor branded list for virtual CSSMathValue values with length/item()/iteration/numeric indexes; descriptor parity remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathValue: partial [virtualized] — CSSMathValue is exposed as an illegal-constructor CSSNumericValue subclass with operator and values list shape for virtual math values; real dimensional simplification remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathSum: partial [virtualized] — CSSMathSum is constructible/branded for virtual numeric sums with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathProduct: partial [virtualized] — CSSMathProduct is constructible/branded for virtual numeric products with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathNegate: partial [virtualized] — CSSMathNegate is constructible/branded for virtual numeric negation with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathInvert: partial [virtualized] — CSSMathInvert is constructible/branded for virtual numeric inversion with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathMin: partial [virtualized] — CSSMathMin is constructible/branded for virtual min() values with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathMax: partial [virtualized] — CSSMathMax is constructible/branded for virtual max() values with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSMathClamp: partial [virtualized] — CSSMathClamp is constructible/branded for virtual clamp() values with CSSNumericArray values; real unit algebra remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSUnparsedValue: partial [virtualized] — CSSUnparsedValue is constructible/branded with array-like members, iteration, forEach(), and string serialization; parser token fidelity remains partial. Decision: Keep virtualized because Typed OM values must describe virtual stylesheet/computed-style state.
+- CSSTransformValue: partial [virtualized] — CSSTransformValue is constructible/branded with array-like transform components, is2D, iteration, and string serialization; transform parser/matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSTranslate: partial [virtualized] — CSSTranslate is constructible/branded with x/y/z CSSNumericValue fields, is2D, and translate()/translate3d() serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSRotate: partial [virtualized] — CSSRotate is constructible/branded with angle/x/y/z CSSNumericValue fields, is2D, and rotate()/rotate3d() serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSScale: partial [virtualized] — CSSScale is constructible/branded with x/y/z CSSNumericValue fields, is2D, and scale()/scale3d() serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSSkew: partial [virtualized] — CSSSkew is constructible/branded with ax/ay CSSNumericValue fields and serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSSkewX: partial [virtualized] — CSSSkewX is constructible/branded with ax CSSNumericValue and serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSSkewY: partial [virtualized] — CSSSkewY is constructible/branded with ay CSSNumericValue and serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSPerspective: partial [virtualized] — CSSPerspective is constructible/branded with length CSSNumericValue, is2D=false, and serialization; matrix composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- CSSMatrixComponent: partial [virtualized] — CSSMatrixComponent is constructible/branded with matrix/is2D payload fields and serialization fallback; DOMMatrix decomposition/composition remains partial. Decision: Keep virtualized because CSS transform components must describe virtual style/layout state.
+- HTMLCanvasElement: partial [virtualized] — HTMLCanvasElement is exposed through the virtual HTML element branding map with width/height reflection, getContext('2d'/'bitmaprenderer'), toDataURL(), toBlob(), captureStream(), and transferControlToOffscreen() basics; real rasterization, tainting, encoding, and descriptor parity remain partial. Decision: Keep virtualized because canvas pixels, capture streams, and export/tainting must be mediated by the privacy membrane.
+- CanvasRenderingContext2D: partial [virtualized] — CanvasRenderingContext2D is exposed as an illegal-constructor branded virtual context with stable canvas identity, common state fields, no-op drawing/path/text methods, measureText(), ImageData read/write helpers, gradient/pattern factories, and policy-empty pixel buffers; real drawing/rasterization remains partial. Decision: Keep virtualized because canvas rendering and readback can fingerprint the host and must be deterministic/membrane-controlled.
+- OffscreenCanvasRenderingContext2D: partial [virtualized] — OffscreenCanvasRenderingContext2D is exposed as a CanvasRenderingContext2D subclass for virtual OffscreenCanvas getContext('2d') with the same deterministic no-op drawing/ImageData behavior; worker transfer/rasterization remains partial. Decision: Keep virtualized because offscreen rendering/readback must not expose host GPU/font/rendering details.
+- CanvasGradient: partial [virtualized] — CanvasGradient is exposed as an illegal-constructor branded object with addColorStop() range validation and virtual stop storage; gradient rasterization remains partial. Decision: Keep virtualized as part of deterministic canvas rendering state.
+- CanvasPattern: partial [virtualized] — CanvasPattern is exposed as an illegal-constructor branded object with setTransform() shape; pattern source validation/rasterization remains partial. Decision: Keep virtualized as part of deterministic canvas rendering state.
+- createImageBitmap: partial [virtualized] — createImageBitmap is exposed as a promise-returning virtual facade that creates branded ImageBitmap snapshots from image-like sources with resize/crop dimensions and close() behavior; real decode, orientation, color conversion, and raster transfer remain partial. Decision: Keep virtualized because decoded image pixels and raster transfer must remain deterministic and membrane-controlled.
+- ImageBitmap: partial [virtualized] — ImageBitmap is exposed as an illegal-constructor branded object returned by virtual OffscreenCanvas.transferToImageBitmap(), with width/height and close() basics; real decode/raster transfer remains partial. Decision: Keep virtualized because decoded image pixels and GPU-backed bitmaps must remain membrane-controlled.
+- ImageBitmapRenderingContext: partial [virtualized] — ImageBitmapRenderingContext is exposed as an illegal-constructor branded context for getContext('bitmaprenderer') with canvas identity and transferFromImageBitmap() shape; bitmap presentation remains partial. Decision: Keep virtualized because bitmap presentation must not expose host GPU state.
+- OffscreenCanvas: partial [virtualized] — OffscreenCanvas is constructible/branded with width/height, getContext('2d'), transferToImageBitmap(), and convertToBlob() basics; worker transfer, real rasterization, and encoding remain partial. Decision: Keep virtualized because offscreen canvas rendering/readback can fingerprint host GPU/font/rendering behavior.
+- Path2D: partial [virtualized] — Path2D is constructible/branded with common path method shapes and virtual command storage placeholder; path parsing/rasterization remains partial. Decision: Keep virtualized as deterministic canvas drawing state.
+- TextMetrics: partial [virtualized] — TextMetrics is exposed as an illegal-constructor branded object returned by measureText(), with deterministic width and zeroed metric fields; real font shaping/layout metrics remain policy-gated/partial. Decision: Keep virtualized because real text metrics can fingerprint installed fonts and host rendering.
+- WebGLRenderingContext: partial [virtualized] — WebGLRenderingContext is exposed as an illegal-constructor branded prototype with common constants, context-loss-safe getters, no-op/deterministic method shape, null resource creation, and no extension exposure; real GPU-backed rendering remains policy-gated/partial. Decision: Keep virtualized because WebGL exposes GPU, driver, precision, and timing fingerprinting surfaces.
+- WebGL2RenderingContext: partial [virtualized] — WebGL2RenderingContext is exposed as a WebGLRenderingContext subclass with WebGL2 constants and context-loss-safe method shape; real GPU-backed WebGL2 rendering remains policy-gated/partial. Decision: Keep virtualized because WebGL2 exposes GPU, driver, precision, and timing fingerprinting surfaces.
+- WebGLBuffer: partial [virtualized] — WebGLBuffer is exposed as an illegal-constructor branded WebGL resource prototype; real buffer allocation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL resource surface.
+- WebGLFramebuffer: partial [virtualized] — WebGLFramebuffer is exposed as an illegal-constructor branded WebGL resource prototype; real framebuffer allocation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL resource surface.
+- WebGLProgram: partial [virtualized] — WebGLProgram is exposed as an illegal-constructor branded WebGL resource prototype; real shader program compilation/linking is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL shader/program surface.
+- WebGLRenderbuffer: partial [virtualized] — WebGLRenderbuffer is exposed as an illegal-constructor branded WebGL resource prototype; real renderbuffer allocation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL resource surface.
+- WebGLShader: partial [virtualized] — WebGLShader is exposed as an illegal-constructor branded WebGL resource prototype; real shader compilation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL shader surface.
+- WebGLTexture: partial [virtualized] — WebGLTexture is exposed as an illegal-constructor branded WebGL resource prototype; real texture allocation/upload is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL texture surface.
+- WebGLUniformLocation: partial [virtualized] — WebGLUniformLocation is exposed as an illegal-constructor branded WebGL resource prototype; real uniform lookup is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL program surface.
+- WebGLVertexArrayObject: partial [virtualized] — WebGLVertexArrayObject is exposed as an illegal-constructor branded WebGL2 resource prototype; real vertex array allocation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL2 resource surface.
+- WebGLSampler: partial [virtualized] — WebGLSampler is exposed as an illegal-constructor branded WebGL2 resource prototype; real sampler allocation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL2 resource surface.
+- WebGLQuery: partial [virtualized] — WebGLQuery is exposed as an illegal-constructor branded WebGL2 resource prototype; real GPU query/timing behavior is policy-disabled. Decision: Keep virtualized because GPU query/timing surfaces are high-risk fingerprinting signals.
+- WebGLSync: partial [virtualized] — WebGLSync is exposed as an illegal-constructor branded WebGL2 resource prototype; real GPU synchronization is policy-disabled. Decision: Keep virtualized because GPU timing/synchronization can expose host rendering behavior.
+- WebGLTransformFeedback: partial [virtualized] — WebGLTransformFeedback is exposed as an illegal-constructor branded WebGL2 resource prototype; real transform feedback allocation is policy-disabled. Decision: Keep virtualized as part of the policy-disabled WebGL2 resource surface.
+- WebGLActiveInfo: partial [virtualized] — WebGLActiveInfo is exposed as an illegal-constructor branded metadata prototype with size/type/name accessors for deterministic virtual shader metadata; real shader reflection remains policy-disabled. Decision: Keep virtualized because shader reflection can expose GPU/compiler behavior.
+- WebGLShaderPrecisionFormat: partial [virtualized] — WebGLShaderPrecisionFormat is exposed as an illegal-constructor branded metadata prototype with deterministic zeroed precision fields; real GPU precision reporting remains policy-disabled. Decision: Keep virtualized because shader precision reporting fingerprints GPU/driver behavior.
+- getComputedStyle: partial [virtualized] — getComputedStyle returns a CSSStyleDeclaration snapshot with inline declarations, host-parsed declaration values/priorities, and basic color keyword normalization for common properties; cascade/inheritance/layout-dependent computed values remain partial. Decision: Keep virtualized because computed style reads target-visible virtual DOM state; host parser reuse is limited to declaration parsing.
+- MediaQueryList: partial [virtualized] — MediaQueryList now matches Chromium descriptor shape for matchMedia() results while remaining partial for full CSS media-query parsing: hidden WeakMap media/matches/onchange state, empty own-property EventTarget instances, native media/matches/onchange/addListener/removeListener/constructor/[Symbol.toStringTag] prototype order, enumerable accessors/method descriptors, non-enumerable writable/configurable global descriptor, no custom Symbol.hasInstance, browser-shaped illegal constructor call/new errors, [object MediaQueryList] branding, legacy addListener/removeListener aliases, onchange dispatch, and viewport-driven updates for the supported min/max/width query subset. Decision: Keep virtualized because media query evaluation depends on virtual viewport state.
+- WindowControlsOverlay: partial [virtualized] — navigator.windowControlsOverlay exposes a branded EventTarget facade with visible=false and zero DOMRectReadOnly getTitlebarAreaRect() for the virtual window; installed-PWA titlebar geometry, real visibility transitions, geometrychange dispatch, and descriptor parity remain partial. Decision: Keep virtualized because titlebar overlay geometry is host UI state and must not expose the real browser chrome to target content.
+- Window scrolling: partial [virtualized] — Virtual Window exposes scrollX/scrollY/pageXOffset/pageYOffset, scrollTo(), scrollBy(), basic scroll event dispatch, and onscroll handler plumbing backed by virtual viewport state; scroll options dictionaries, layout scrolling, and scroll restoration parity remain partial. Decision: Keep virtualized because scroll position is target-visible virtual browsing state.
+- XMLHttpRequestEventTarget: partial [virtualized] — XMLHttpRequestEventTarget is exposed as an illegal-constructor brand facade for virtual XMLHttpRequest and XMLHttpRequestUpload event targets with handler properties; progress event payload/details remain partial. Decision: Keep virtualized because XHR event dispatch and upload state belong to the virtual network membrane.
+- XMLHttpRequestUpload: partial [virtualized] — XMLHttpRequest.upload now returns a stable branded XMLHttpRequestUpload event target with illegal-constructor coverage; true byte-progress upload events remain partial. Decision: Keep virtualized because upload progress is derived from virtual network transport state.
+- WebSocket: partial [virtualized] — Open, send, text/binary message, close events, protocol validation, binaryType assignment, close-code validation, close-reason byte limits, binaryType='blob' delivery, and basic bufferedAmount accounting route through GoNetworkBackend/QuickJS behavior; remaining parity work covers transport backpressure high-water behavior and failure timing. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- FileReader: partial [virtualized] — Virtual FileReader stores readyState/result/error/on* handlers in hidden WeakMap state with empty own-property instances, aligns browser-ordered prototype getters/event-handler descriptors/constants/methods/constructor, exposes non-enumerable browser-shaped global descriptor, preserves EventTarget inheritance and [object FileReader] branding, validates read method required arguments, supports readAsText/readAsArrayBuffer/readAsDataURL/readAsBinaryString over Blob/File inputs, covers UTF-8 and common Windows-1252/ISO-8859-1 readAsText labels, emits ProgressEvent loadstart/progress/load/loadend metadata, and abort() behavior. Full TextDecoder encoding-label coverage, exact async event timing, and long-tail File API edge cases remain partial. Decision: Keep virtualized for now because FileReader consumes target-owned virtual Blob/File bytes and dispatches virtual EventTarget events; host bridging may still supply parser/encoding probes but must not expose host FileReader instances.
+- FormData: partial [virtualized] — In-memory FormData uses hidden WeakMap state with empty own-property instances and browser-ordered append/delete/get/getAll/has/set/entries/forEach/keys/values/constructor descriptors, preserves [object FormData] branding, validates required arguments and filename-with-non-Blob errors, supports text/Blob/File entries, Request multipart serialization, FormData(form), submitter validation for button/input submitters, image-submit coordinate entries, dirname text-direction entries, disabled fieldset exclusion with first-legend exception, external form-owner attributes, formdata event dispatch/mutation timing for constructor-created data, object/output/fieldset exclusion from successful controls while retaining form.elements association, and integration with virtual input.files/DataTransfer.files. Long-tail form submission algorithms remain partial: full native successful-control ordering and unimplemented form-associated custom-element edge cases. Decision: Keep virtualized because FormData entries are target-owned virtual form/file/body state consumed by the virtual network membrane; host bridging may still supply parser/algorithm probes but must not expose host FormData instances.
+- redirects: partial [virtualized] — finalUrl/redirected metadata, Request.redirect validation, and Response.redirect() are covered; redirect policy modes still rely on backend behavior and remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- credentials modes: partial [virtualized] — Request.credentials enum validation and GoNetworkBackend transport records are covered; cookie attachment/omission semantics across same-origin/cross-origin requests remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- streaming bodies: partial [virtualized] — Backend emits chunks; QuickJS Request/Response expose ReadableStream-shaped body surfaces over buffered bodies plus text/json/arrayBuffer/blob/formData with browser-like clone/bodyUsed semantics. True incremental request/response streaming and backpressure parity remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- cookie jar behavior: partial [virtualized] Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- IndexedDB: partial [virtualized] — Target IndexedDB facade supports open, upgrade, branded DOMStringList objectStoreNames/indexNames, object stores, get/put/delete/clear/getAll, createIndex/deleteIndex/index, compound array key-path indexes, IDBIndex get/getAll, IDBKeyRange only/lowerBound/upperBound/bound, object-store/index openCursor with value cursors, key-range filtering, next/prev/unique cursor directions, transaction complete/error/abort handler basics, multiEntry/unique index validation, and IndexedDB-backed persistence; transaction durability/auto-commit edge semantics and browser edge semantics remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- Storage: partial [virtualized] — Storage is exposed as an illegal-constructor brand facade so virtual localStorage/sessionStorage pass instanceof Storage while retaining quota-backed getItem/setItem/removeItem/clear/key/length basics; descriptor parity, named property access, cross-tab event scheduling, and eviction remain partial. Decision: Keep virtualized because storage state belongs to the virtual origin/partition, not host page storage.
+- localStorage: partial [virtualized] — Synchronous QuickJS facade backed by a host IndexedDB mirror with storage event dispatch; browser edge semantics remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- sessionStorage: partial [virtualized] — Synchronous QuickJS facade backed by a host IndexedDB mirror with tab/context partitioning; browser edge semantics remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- StorageManager: partial [virtualized] — StorageManager now has hidden WeakMap quota/persistence state, empty own-property instances, native estimate/persisted/constructor/getDirectory/persist prototype order, enumerable method descriptors, non-enumerable writable/configurable global descriptor, [object StorageManager] branding, illegal-constructor behavior, virtual quota/usage estimates across local/session storage, IndexedDB, and Cache API, and virtual persistence grants. getDirectory is policy-denied and broader eviction/storage-pressure/native filesystem behavior remain partial. Decision: Keep virtualized because quota, persistence, and filesystem access decisions belong to the virtual browser storage partition and privacy policy.
+- navigator.storage: partial [virtualized] — StorageManager facade exposes estimate(), persisted(), and persist(); estimate reports virtual local/session storage, IndexedDB, and Cache API usage against the configured virtual quota, persist() records a virtual persistence grant, and local/session storage, IndexedDB object-store writes, plus Cache API writes enforce QuotaExceededError rollback. Eviction parity and broader browser storage-pressure behavior remain partial. Decision: Keep virtualized because quota and persistence decisions belong to the virtual browser storage partition.
+- IDBFactory: partial [virtualized] — IDBFactory is exposed as an illegal-constructor branded facade for indexedDB with open() and deleteDatabase() backed by the virtual IndexedDB mirror; cmp(), blocked/versionchange cross-context lifecycle, and descriptor parity remain partial. Decision: Keep virtualized because database factory state belongs to the virtual IndexedDB mirror.
+- IDBDatabase: partial [virtualized] — IDBDatabase is exposed as an illegal-constructor branded facade for virtual IndexedDB database connections with name/version/objectStoreNames, createObjectStore/deleteObjectStore/transaction/close basics, and persisted object-store metadata; versionchange/close lifecycle, blocked connections, and descriptor parity remain partial. Decision: Keep virtualized because database connection state belongs to the virtual IndexedDB mirror.
+- IDBTransaction: partial [virtualized] — IDBTransaction is exposed as an illegal-constructor branded facade with mode/objectStoreNames, objectStore(), abort(), complete/error/abort handler and listener basics, plus request tracking across queued cursor work; durability, inactive-state checks, auto-commit edge timing, and descriptor parity remain partial. Decision: Keep virtualized because transaction scheduling belongs to the virtual IndexedDB mirror.
+- IDBObjectStore: partial [virtualized] — IDBObjectStore is exposed as an illegal-constructor branded facade with name/keyPath/autoIncrement/indexNames plus put/add/get/getAll/openCursor/createIndex/deleteIndex/index/delete/clear basics over the virtual IndexedDB mirror; count(), getKey(), openKeyCursor(), transaction mode enforcement, and descriptor parity remain partial. Decision: Keep virtualized because object-store state belongs to the virtual IndexedDB mirror.
+- IDBIndex: partial [virtualized] — IDBIndex is exposed as an illegal-constructor branded facade with name/keyPath/unique/multiEntry/objectStore and get/getAll/openCursor basics including multiEntry and compound key-path indexes; count(), getKey(), openKeyCursor(), locale behavior, and descriptor parity remain partial. Decision: Keep virtualized because index state belongs to the virtual IndexedDB mirror.
+- IDBRequest: partial [virtualized] — IDBRequest is exposed as an illegal-constructor branded EventTarget-like facade for virtual IndexedDB requests with result/error/source/transaction/readyState, onsuccess/onerror, listener dispatch, and transaction tracking basics; browser event inheritance, bubbling, and descriptor parity remain partial. Decision: Keep virtualized because request lifecycle and transaction scheduling belong to the virtual IndexedDB mirror.
+- IDBOpenDBRequest: partial [virtualized] — IDBOpenDBRequest is exposed as an illegal-constructor branded subclass of IDBRequest with onupgradeneeded/onblocked fields and virtual open/deleteDatabase lifecycle dispatch; blocked/versionchange cross-context scheduling and descriptor parity remain partial. Decision: Keep virtualized because database-open lifecycle and upgrade scheduling belong to the virtual IndexedDB mirror.
+- IDBCursor: partial [virtualized] — IDBCursor is exposed as an illegal-constructor base brand facade for virtual IndexedDB cursors; IDBCursorWithValue instances pass instanceof IDBCursor and support key/primaryKey/source/direction/continue() basics. advance(), continuePrimaryKey(), update/delete(), request identity, and descriptor parity remain partial. Decision: Keep virtualized because cursor state belongs to the virtual IndexedDB mirror, not host IndexedDB objects.
+- IDBCursorWithValue: partial [virtualized] — IDBCursorWithValue is exposed as an illegal-constructor branded virtual cursor with key, primaryKey, source, direction, cloned value, and continue() basics over object-store and index cursor snapshots; mutation methods, request identity, live transaction timing, and descriptor parity remain partial. Decision: Keep virtualized because cursor state belongs to the virtual IndexedDB mirror, not host IndexedDB objects.
+- IDBKeyRange: partial [virtualized] — IDBKeyRange is exposed as an illegal-constructor branded facade with static only/lowerBound/upperBound/bound factories, lower/upper/open flags, includes(), and virtual IndexedDB query filtering; full structured clone/key-conversion and descriptor parity remain partial. Decision: Keep virtualized because key-range filtering belongs to the virtual IndexedDB mirror, not host IndexedDB objects.
+- Cache API: partial [virtualized] — Cache API facade persists metadata and chunked bodies through the virtual cache manager and rolls back writes with QuotaExceededError when they exceed the configured virtual quota; eviction policy remains partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- history: partial [virtualized] — History exposes browser-shaped object/state cloning, same-origin pushState/replaceState validation, popstate dispatch on traversal, and location coupling; session history traversal scheduling and persistence remain partial. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- History: partial [virtualized] — History is exposed as an illegal-constructor brand facade so the virtual history object passes instanceof History while preserving browser-shaped state, same-origin mutation validation, and popstate basics; descriptor parity and full session-history scheduling remain partial. Decision: Keep virtualized because target-visible session history state belongs to the virtual browsing context.
+- location: partial [virtualized] — Location exposes parsed href/origin/protocol/host/path/search/hash, assign/replace/reload stubs, toStringTag, and is updated by History; full navigation side effects remain host-policy controlled. Decision: Keep virtualized because target-visible state or side effects belong to the virtual browser membrane.
+- Location: partial [virtualized] — Location is exposed as an illegal-constructor brand facade so the virtual location object passes instanceof Location while preserving parsed URL accessors and history coupling; real navigation side effects remain host-policy controlled and descriptor parity remains partial. Decision: Keep virtualized because target-visible location state belongs to the virtual browsing context.
+- navigator: partial [direct-shim] — Navigator exposes browser-shaped identity/device fields, NavigatorUAData client-hints facade, deterministic Chromium-style PDF PluginArray/MimeTypeArray facades with pdfViewerEnabled=true, sendBeacon, permissions, policy-denied Geolocation facade, stable NetworkInformation connection facade, navigator.locks LockManager basics, stable UserActivation facade, navigator.keyboard, navigator.wakeLock, policy-empty getGamepads(), policy-empty credentials and contacts containers, policy-denied share/canShare, clipboard policy stubs, and unsupported serviceWorker facade; additional device/media/credential/contact/share capability surfaces remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe descriptor/algorithm reuse is available or direct code is safer.
+- Navigator: partial [direct-shim] — Navigator is exposed as an illegal-constructor brand facade so the virtual navigator object passes instanceof Navigator while preserving identity/device fields and policy-safe capability containers; host descriptor parity and additional device/media capability surfaces remain partial. Decision: Re-evaluate for host bridge; keep direct shim only until bridge-safe descriptor/algorithm reuse is available or direct code is safer.
+- Keyboard: partial [virtualized] — navigator.keyboard now exposes a browser-shaped Keyboard facade with hidden WeakMap layout policy state, empty own-property singleton, native getLayoutMap/lock/unlock/constructor prototype order, enumerable method descriptors, non-enumerable writable/configurable global descriptor, no custom Symbol.hasInstance, illegal constructor call/new errors, [object Keyboard] branding, virtual KeyboardLayoutMap snapshots, and policy-empty lock()/unlock() behavior; real host layout parity remains partial. Decision: Keep policy-virtualized because keyboard layout and lock state are fingerprinting/user-input sensitive.
+- Gamepad: partial [virtualized] — navigator.getGamepads() exposes the browser-shaped policy-empty four-slot gamepad array (non-frozen, four null entries) plus Gamepad constructor/global/prototype descriptor parity: illegal constructor call/new errors, native id/index/connected/timestamp/mapping/axes/buttons/vibrationActuator/constructor prototype order, enumerable readonly accessors, non-enumerable writable/configurable global descriptor, no custom Symbol.hasInstance, and [object Gamepad] branding. Decision: Keep policy-virtualized because gamepad hardware identity and state are fingerprinting-sensitive.
+- PictureInPictureWindow: partial [virtualized] — PictureInPictureWindow is exposed as an illegal-constructor branded facade reserved for future approved virtual Picture-in-Picture windows; width/height changes and resize events remain unimplemented. Decision: Keep policy-virtualized because Picture-in-Picture window geometry describes host UI unless synthesized by membrane policy.
+- PictureInPictureEvent: partial [virtualized] — PictureInPictureEvent remains partial because real PictureInPictureWindow payloads and lifecycle dispatch are policy-disabled; the live Chromium probe now documents its required pictureInPictureWindow payload validation target for future work. Decision: Keep policy-virtualized because Picture-in-Picture windows are host UI state and must not be exposed to target content without explicit policy.
+- RemotePlayback: partial [virtualized] — Virtual audio/video elements expose a branded RemotePlayback facade with stable disconnected state, watchAvailability(false), cancelWatchAvailability(), and policy-denied prompt(); real device discovery/casting remains policy-gated and descriptor parity remains partial. Decision: Keep policy-virtualized because remote playback device discovery and casting can expose host devices and must not cross the privacy membrane without explicit policy.
+- HTMLMediaElement: partial [virtualized] — HTMLMediaElement brands virtual audio/video elements and exposes policy-disabled media Picture-in-Picture hooks on virtual video elements; media playback algorithms and full descriptor/prototype-chain parity remain partial. Decision: Keep virtualized because target-visible media element state and policy-gated media side effects must stay inside the virtual DOM membrane.
+- CredentialsContainer: partial [virtualized] — navigator.credentials now exposes a browser-shaped CredentialsContainer facade with hidden WeakMap state, empty own-property instances, native create/get/preventSilentAccess/store/constructor prototype order, enumerable method descriptors, non-enumerable writable/configurable global descriptor, no custom Symbol.hasInstance, illegal constructor call/new errors, and policy-empty get/create/store/preventSilentAccess promise behavior. It remains partial until real credential store/WebAuthn/password/federated credential flows are implemented. Decision: Keep policy-virtualized because credential discovery/storage must not leak host credentials through the membrane.
+- PaymentRequest: partial [virtualized] — PaymentRequest is constructible/branded as an EventTarget with id/shipping fields plus canMakePayment()/hasEnrolledInstrument() resolving false, abort() resolving, and show() rejecting NotAllowedError; real payment UI, merchant validation, update events, and descriptor parity remain policy-gated/partial. Decision: Keep policy-virtualized because payment UI and instruments must not access host payment credentials without explicit membrane policy.
+- PaymentResponse: partial [virtualized] — PaymentResponse is exposed as an illegal-constructor branded facade reserved for future approved virtual payment responses; complete()/retry(), payer fields, and method details remain policy-gated/partial. Decision: Keep policy-virtualized because response payloads represent payment credentials/identity.
+- PaymentAddress: partial [virtualized] — PaymentAddress is exposed as an illegal-constructor branded facade reserved for future approved virtual shipping/contact addresses; real address population remains policy-gated/partial. Decision: Keep policy-virtualized because address payloads are identity-sensitive.
+- ContactsManager: partial [virtualized] — navigator.contacts exposes a frozen branded ContactsManager with getProperties() resolving stable contact property names and select() rejecting NotAllowedError; real contact picker UI, permission prompts, and contact payloads remain policy-gated/partial. Decision: Keep policy-virtualized because host contacts are identity-sensitive and must not leak through the membrane.
+- ContactAddress: partial [virtualized] — ContactAddress is exposed as an illegal-constructor branded facade reserved for future approved virtual contact picker payloads; real address/contact population remains policy-gated/partial. Decision: Keep policy-virtualized because contact address payloads are identity-sensitive.
+- launchQueue: partial [virtualized] — globalThis.launchQueue now exposes an extensible browser-shaped LaunchQueue singleton with no own keys, prototype setConsumer(), callback validation, and delivery of configured virtual LaunchParams; native OS launch-handler integration remains policy-gated/partial. Decision: Keep policy-virtualized because app launch targets and file handles are host OS state and must not leak through the membrane without explicit policy.
+- LaunchQueue: partial [virtualized] — LaunchQueue now matches the browser-shaped descriptor surface for the policy-virtual launchQueue singleton: illegal constructor call/new errors, no custom Symbol.hasInstance, empty extensible own-property singleton, native setConsumer/constructor prototype order, enumerable setConsumer length/name descriptors, non-enumerable writable/configurable global descriptor, [object LaunchQueue] branding, callback validation, and delivery of configured virtual LaunchParams. Native OS launch-handler integration remains policy-gated/partial. Decision: Keep policy-virtualized because launch handling describes host app/OS state unless synthesized by membrane policy.
+- navigator.share: partial [virtualized] — navigator.canShare() returns false and navigator.share() rejects NotAllowedError to keep Web Share policy-denied while preserving API shape; native share-sheet integration, file support, validation detail, and permission/user-activation behavior remain partial. Decision: Keep policy-virtualized because host share sheets can disclose host applications/accounts and require explicit membrane policy.
+- MediaSession: partial [virtualized] — navigator.mediaSession exposes a frozen branded MediaSession facade with metadata/playbackState setters, setActionHandler() validation/storage, and setPositionState() no-op basics; native media controls, action dispatch, platform metadata integration, and playback position lifecycle remain partial. Decision: Keep policy-virtualized because media-control integration exposes or affects host UI and must be driven by virtual media state, not host browser state.
+- Notification: partial [virtualized] — Notification now exposes a browser-shaped policy-virtual EventTarget facade: permission='denied', maxActions=0, requestPermission() resolving/callbacking denied, non-enumerable writable/configurable global descriptor, native static permission/maxActions/requestPermission descriptors, EventTarget inheritance, empty own-property instances, native onclick/onshow/onerror/onclose/title/dir/lang/body/tag/icon/badge/vibrate/timestamp/renotify/silent/requireInteraction/data/actions/close/constructor prototype order, enumerable accessors/methods, constructor option validation for missing title/actions/silent+vibrate, and virtual no-UI Notification objects. Native notification UI, real permission prompts, service-worker persistent notifications, actions, and lifecycle dispatch remain policy-gated/partial. Decision: Keep policy-virtualized because native notifications expose host permission/UI state and can affect the user's device without explicit membrane policy.
+- ReportBody: partial [virtualized] — ReportBody now matches the browser-shaped illegal-constructor base facade with native-order toJSON/constructor prototype descriptors, no custom Symbol.hasInstance, non-enumerable writable/configurable global descriptor, and illegal-invocation checks; actual virtual report production remains tracked under ReportingObserver. Decision: Keep policy-virtualized because browser-generated intervention, crash, CSP, and integrity reports describe host/runtime state that must not leak across the membrane.
+- CSPViolationReportBody: partial [virtualized] — CSPViolationReportBody now matches the browser-shaped illegal-constructor ReportBody subtype descriptor surface, including native-order readonly report-field getters, toJSON, constructor, [object CSPViolationReportBody] branding, no custom Symbol.hasInstance, and non-enumerable writable/configurable global descriptor; real CSP report population remains tracked under ReportingObserver. Decision: Keep policy-virtualized because CSP reports must describe virtual policy decisions rather than host browser enforcement details.
+- IntegrityViolationReportBody: partial [virtualized] — IntegrityViolationReportBody now matches the browser-shaped illegal-constructor ReportBody subtype descriptor surface, including native-order readonly report-field getters, toJSON, constructor, [object IntegrityViolationReportBody] branding, no custom Symbol.hasInstance, and non-enumerable writable/configurable global descriptor; real integrity report population remains tracked under ReportingObserver. Decision: Keep policy-virtualized because integrity-policy diagnostics must describe virtual resource loading, not host browser fetch state.
+- ReportingObserver: partial [virtualized] — ReportingObserver now matches the browser-shaped constructor/prototype descriptor surface: constructor length/name and new-vs-call errors, required callback validation, empty own-property observer instances, native-order observe()/disconnect()/takeRecords()/constructor prototype methods, no custom Symbol.hasInstance, non-enumerable writable/configurable global descriptor, [object ReportingObserver] branding, and illegal-invocation checks. The report queue is still virtual and empty until CSP/deprecation/intervention/integrity report production is implemented. Decision: Keep policy-virtualized because target-visible reports must come from the virtual browser membrane and must not expose host browser diagnostics.
+- CrashReportContext: partial [virtualized] — CrashReportContext now matches the browser-shaped descriptor surface for the crashReport singleton: illegal constructor call/new errors, empty own-property singleton, native-order delete()/initialize()/set()/constructor prototype methods with browser arity, no custom Symbol.hasInstance, non-enumerable writable/configurable global descriptor, [object CrashReportContext] branding, initialization-state errors, one-shot initialize(), and local quota validation. Native crash-report upload integration remains policy-gated/partial. Decision: Keep policy-virtualized because crash-report metadata must stay inside the virtual runtime unless an explicit membrane policy exports it.
+- crashReport: partial [virtualized] — globalThis.crashReport now exposes an extensible browser-shaped CrashReportContext singleton with no own keys, prototype initialize()/set()/delete(), initialization-state errors, one-shot initialize(), and local quota validation; native crash-report context propagation/upload remains policy-gated/partial. Decision: Keep policy-virtualized because crash-report state can reveal target activity and must not be forwarded to host reporting infrastructure without explicit policy.
+- Navigation: partial [virtualized] — Navigation is exposed as an illegal-constructor EventTarget with a global navigation object, currentEntry, entries(), canGoBack/canGoForward, navigate()/reload()/back()/forward()/traverseTo() promise-result basics, and same-origin History integration; full navigation lifecycle, interception, and transition semantics remain partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigationHistoryEntry: partial [virtualized] — NavigationHistoryEntry is exposed as an illegal-constructor EventTarget facade for virtual history entries with id/key/index/url/sameDocument/getState(); disposal and descriptor parity remain partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigationDestination: partial [virtualized] — NavigationDestination is exposed as an illegal-constructor facade for NavigateEvent destinations with id/key/url/index/sameDocument/getState(); full navigation destination semantics remain partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigateEvent: partial [virtualized] — NavigateEvent is constructible/branded with navigationType, destination, canIntercept, userInitiated, hashChange, signal/formData/downloadRequest/info payloads, and intercept()/scroll()/transitionWhile() basics; real precommit/interception lifecycle remains partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigationCurrentEntryChangeEvent: partial [virtualized] — NavigationCurrentEntryChangeEvent is constructible/branded with navigationType and from payload basics; real dispatch timing and descriptor parity remain partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigationTransition: partial [virtualized] — NavigationTransition is exposed as an illegal-constructor branded placeholder; active transition lifecycle remains partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigationActivation: partial [virtualized] — NavigationActivation is exposed as an illegal-constructor branded placeholder; activation source/entry lifecycle remains partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- NavigationPrecommitController: partial [virtualized] — NavigationPrecommitController is exposed as an illegal-constructor branded placeholder; precommit controller behavior remains partial. Decision: Keep virtualized because target-visible navigation history/lifecycle state must be owned by the virtual browsing context, not host tab navigation.
+- permissions: partial [direct-shim] — navigator.permissions reports a stable policy-configured Permissions singleton and PermissionStatus results with browser-shaped query validation/descriptors; the broader Navigator property remains partial because the virtual navigator object still exposes many capability fields as own frozen data rather than a full native Navigator.prototype descriptor graph, and host permission prompts/runtime state-change events remain policy-driven. Decision: Keep direct shim for now because navigator.permissions is policy-controlled virtual state; revisit when the broader Navigator descriptor graph is migrated.
+- window: partial [virtualized] — window aliases globalThis in the virtual top-level browsing context and carries [object Window] branding; full cross-window proxy descriptor behavior remains partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- self: partial [virtualized] — self aliases globalThis in the virtual top-level browsing context; WorkerGlobalScope-specific self semantics remain separate and partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- document: partial [virtualized] — document exposes the current VirtualDocument singleton for the target realm; parser/tree-construction and descriptor parity remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- innerWidth: partial [virtualized] — innerWidth reflects the virtual viewport width and updates through viewport test hooks; browser chrome/layout viewport edge cases remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- innerHeight: partial [virtualized] — innerHeight reflects the virtual viewport height and updates through viewport test hooks; browser chrome/layout viewport edge cases remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- devicePixelRatio: partial [virtualized] — devicePixelRatio reflects the virtual viewport scale; host display hardware and zoom integration remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- screen: partial [virtualized] — screen exposes the virtual Screen singleton with deterministic dimensions/orientation; host monitor topology is not exposed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- visualViewport: partial [virtualized] — visualViewport exposes the virtual VisualViewport singleton with resize/scroll events; full browser visual/layout viewport edge cases remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- scrollX: partial [virtualized] — scrollX reflects the virtual viewport horizontal scroll offset. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- scrollY: partial [virtualized] — scrollY reflects the virtual viewport vertical scroll offset. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- pageXOffset: partial [virtualized] — pageXOffset aliases the virtual viewport horizontal scroll offset. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- pageYOffset: partial [virtualized] — pageYOffset aliases the virtual viewport vertical scroll offset. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- scrollTo: partial [virtualized] — scrollTo mutates the virtual viewport scroll offsets and dispatches virtual scroll events; compositor/layout side effects remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- scrollBy: partial [virtualized] — scrollBy mutates the virtual viewport scroll offsets relative to the current virtual position; compositor/layout side effects remain partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- requestAnimationFrame: partial [virtualized] — requestAnimationFrame is backed by the deterministic virtual timer queue and supplies virtual timestamps; real compositor frame pacing remains partial. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- cancelAnimationFrame: partial [virtualized] — cancelAnimationFrame cancels virtual requestAnimationFrame timers. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- external: partial [virtualized] — external exposes a frozen branded External facade with AddSearchProvider/IsSearchProviderInstalled policy-stable behavior. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- status: partial [virtualized] — status exposes writable virtual Window status text without host browser UI side effects. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- locationbar: partial [virtualized] — locationbar exposes a virtual BarProp with stable visible=true; host browser chrome visibility is not revealed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- menubar: partial [virtualized] — menubar exposes a virtual BarProp with stable visible=true; host browser chrome visibility is not revealed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- personalbar: partial [virtualized] — personalbar exposes a virtual BarProp with stable visible=true; host browser chrome visibility is not revealed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- scrollbars: partial [virtualized] — scrollbars exposes a virtual BarProp with stable visible=true; host browser chrome visibility is not revealed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- statusbar: partial [virtualized] — statusbar exposes a virtual BarProp with stable visible=true; host browser chrome visibility is not revealed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- toolbar: partial [virtualized] — toolbar exposes a virtual BarProp with stable visible=true; host browser chrome visibility is not revealed. Decision: Keep virtualized because this Window/global property reflects virtual browsing-context state rather than host page state.
+- setTimeout: partial [virtualized] — setTimeout is backed by the deterministic QuickJS virtual event loop timer queue. Decision: Keep virtualized because target-visible scheduling must be deterministic and driven by the virtual event loop rather than host scheduler state.
+- setInterval: partial [virtualized] — setInterval is backed by the deterministic QuickJS virtual event loop repeated timer queue. Decision: Keep virtualized because target-visible scheduling must be deterministic and driven by the virtual event loop rather than host scheduler state.
+- clearTimeout: partial [virtualized] — clearTimeout clears virtual event-loop timers. Decision: Keep virtualized because target-visible scheduling must be deterministic and driven by the virtual event loop rather than host scheduler state.
+- clearInterval: partial [virtualized] — clearInterval clears virtual event-loop interval timers. Decision: Keep virtualized because target-visible scheduling must be deterministic and driven by the virtual event loop rather than host scheduler state.
+- scheduler: partial [virtualized] — scheduler exposes the branded virtual Scheduler singleton with postTask() priority/signal handling. Decision: Keep virtualized because target-visible scheduling must be deterministic and driven by the virtual event loop rather than host scheduler state.
+- crypto: partial [virtualized] — crypto exposes the virtual Crypto singleton with getRandomValues/randomUUID validation and branding. Decision: Keep virtualized because this global reflects virtual origin/tab/storage/permission state rather than host browser state.
+- customElements: partial [virtualized] — customElements exposes the virtual CustomElementRegistry singleton with define/get/getName/whenDefined/upgrade basics; upgrade lifecycle callbacks and parser integration remain partial. Decision: Keep virtualized because this global reflects virtual origin/tab/storage/permission state rather than host browser state.
+- indexedDB: partial [virtualized] — indexedDB exposes the virtual IDBFactory backed by the storage manager mirror; full IndexedDB transaction scheduling and durability semantics remain partial. Decision: Keep virtualized because this global reflects virtual origin/tab/storage/permission state rather than host browser state.
+- getSelection: partial [virtualized] — getSelection returns the virtual Selection singleton with Range anchoring basics; browser selection UI/focus integration remains partial. Decision: Keep virtualized because this global reflects virtual origin/tab/storage/permission state rather than host browser state.
+- speechSynthesis: partial [virtualized] — speechSynthesis exposes the virtual policy-safe SpeechSynthesis singleton with utterance queue/event basics and empty voice list; real speech output remains disabled. Decision: Keep policy-denied because speech output can create host side effects and fingerprinting signals.
+- ShadowRoot: partial [virtualized] — ShadowRoot is exposed as an illegal-constructor DocumentFragment subclass returned by Element.attachShadow({mode}), with host/mode/delegatesFocus/slotAssignment/adoptedStyleSheets/styleSheets basics, open-vs-closed shadowRoot access, and basic named/default/manual slot assignment; event retargeting, style scoping, declarative shadow DOM, and lifecycle integration remain partial. Decision: Keep virtualized because shadow-tree state belongs to the virtual DOM and event retargeting/style scoping must not leak host DOM state.
+- HTMLAllCollection: partial [virtualized] — HTMLAllCollection is exposed as an illegal-constructor branded document.all facade with live length, item(), namedItem(), and iterator basics; browser IsHTMLDDA typeof/equality magic and named-property visibility remain unsupported. Decision: Keep virtualized because document.all is derived from the virtual DOM tree and cannot be safely delegated to the host DOM.
+- AnimationTrigger: partial [virtualized] — AnimationTrigger is exposed as a branded illegal-constructor facade for animation trigger feature detection; full scroll/view-timeline trigger behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- TimelineTriggerRange: partial [virtualized] — TimelineTriggerRange is exposed as a branded illegal-constructor facade for animation trigger feature detection; full scroll/view-timeline trigger behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- TimelineTriggerRangeList: partial [virtualized] — TimelineTriggerRangeList is exposed as a branded illegal-constructor facade for animation trigger feature detection; full scroll/view-timeline trigger behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- TimelineTrigger: partial [virtualized] — TimelineTrigger is exposed as a constructible branded facade carrying range fields; full animation trigger integration remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- CSSFunctionDeclarations: partial [virtualized] — CSSFunctionDeclarations is exposed as a branded illegal-constructor CSSOM facade; full CSS function/position-try parsing and rule integration remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- CSSFunctionDescriptors: partial [virtualized] — CSSFunctionDescriptors is exposed as a branded illegal-constructor CSSOM facade; full CSS function/position-try parsing and rule integration remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- CSSFunctionRule: partial [virtualized] — CSSFunctionRule is exposed as a branded illegal-constructor CSSOM facade; full CSS function/position-try parsing and rule integration remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- CSSPositionTryDescriptors: partial [virtualized] — CSSPositionTryDescriptors is exposed as a branded illegal-constructor CSSOM facade; full CSS function/position-try parsing and rule integration remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- CaretPosition: partial [virtualized] — CaretPosition is exposed as an illegal-constructor branded facade returned by document.caretPositionFromPoint(), with offsetNode/offset/getClientRect() basics wired to virtual point queries; real layout hit-testing and text-offset calculation remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- EditContext: partial [virtualized] — EditContext is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Ink: partial [virtualized] — Ink is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- NotRestoredReasonDetails: partial [virtualized] — NotRestoredReasonDetails is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- NotRestoredReasons: partial [virtualized] — NotRestoredReasons is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Observable: partial [virtualized] — Observable is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Origin: partial [virtualized] — Origin is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Profiler: partial [virtualized] — Profiler is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Sanitizer: partial [virtualized] — Sanitizer is exposed as a branded constructible facade with configuration mutators/get() and is wired into Element.setHTML() / Document.parseHTML() basic unsafe-content removal; full Sanitizer API validation, allow/remove policy algorithms, and browser descriptor parity remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Scheduling: partial [virtualized] — Scheduling is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SnapEvent: partial [virtualized] — SnapEvent is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Subscriber: partial [virtualized] — Subscriber is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Viewport: partial [virtualized] — Viewport is exposed as a branded facade for browser feature detection and basic shape coverage; full browser behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- IDBRecord: partial [virtualized] — IDBRecord is exposed as a branded illegal-constructor facade for IndexedDB feature detection; record payload integration remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- chrome: partial [virtualized] — chrome exposes a minimal frozen Chromium compatibility object with app/csi/loadTimes placeholders; extension APIs remain unavailable. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- event: partial [virtualized] — event exposes the legacy global event property as present-but-undefined; browser dispatch-time mutation remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- navigation: partial [virtualized] — navigation exposes the existing virtual Navigation singleton; full navigation lifecycle/interception semantics remain partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- styleMedia: partial [virtualized] — styleMedia exposes a virtual StyleMedia object with type=screen and matchMedium() backed by virtual matchMedia. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- viewport: partial [virtualized] — viewport exposes a branded frozen Viewport placeholder; full Viewport Segments API behavior remains partial. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- pointer capture: partial [virtualized] — Element.setPointerCapture(), releasePointerCapture(), and hasPointerCapture() track virtual pointer IDs and dispatch branded gotpointercapture/lostpointercapture PointerEvents; active-pointer validation, pointer retargeting, implicit release, and renderer event integration remain partial. Decision: Keep virtualized because pointer capture state must follow the virtual DOM event-target graph rather than host renderer DOM nodes.
+- Fullscreen API: partial [virtualized] — Element.requestFullscreen(), Document.fullscreenElement/fullscreenEnabled/exitFullscreen, and fullscreenchange handler properties are exposed with virtual document-local state and event dispatch; permission/user-activation checks, top-layer rendering, viewport side effects, and cross-document fullscreen rules remain partial. Decision: Keep virtualized because fullscreen state is target-document UI state and must not affect host browser fullscreen or top-layer state.
+
+## Blocked
+- shadow DOM: out-of-scope [blocked] Decision: Keep blocked or out-of-scope until policy/architecture explicitly changes.
+- custom elements: out-of-scope [blocked] Decision: Keep blocked or out-of-scope until policy/architecture explicitly changes.
+- Worker: blocked-by-policy [virtualized] — Worker constructor is exposed as a branded EventTarget-compatible policy-denied facade; real worker execution is disabled in the QuickJS virtual browser realm. Decision: Keep policy-denied/virtualized because worker and streaming socket APIs would create host execution or network side effects outside the approved membrane.
+- SharedWorker: blocked-by-policy [virtualized] — SharedWorker constructor is exposed as a branded EventTarget-compatible policy-denied facade; cross-context shared worker execution is disabled in the QuickJS virtual browser realm. Decision: Keep policy-denied/virtualized because worker and streaming socket APIs would create host execution or network side effects outside the approved membrane.
+- WebSocketStream: blocked-by-policy [virtualized] — WebSocketStream is exposed as a branded facade with URL protocol validation and policy-denied construction; streaming WebSocket transport remains blocked behind the approved network membrane. Decision: Keep policy-denied/virtualized because worker and streaming socket APIs would create host execution or network side effects outside the approved membrane.
+- clipboard: blocked-by-policy [blocked] Decision: Keep blocked or out-of-scope until policy/architecture explicitly changes.
+- navigator.serviceWorker: blocked-by-policy [blocked] — Facade reports unsupported registration and exposes no native controller. Decision: Keep blocked or out-of-scope until policy/architecture explicitly changes.
+- BackgroundFetchManager: blocked-by-policy [virtualized] — BackgroundFetchManager is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- BackgroundFetchRecord: blocked-by-policy [virtualized] — BackgroundFetchRecord is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- BackgroundFetchRegistration: blocked-by-policy [virtualized] — BackgroundFetchRegistration is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- PushManager: blocked-by-policy [virtualized] — PushManager is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- PushSubscription: blocked-by-policy [virtualized] — PushSubscription is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- PushSubscriptionOptions: blocked-by-policy [virtualized] — PushSubscriptionOptions is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- SyncManager: blocked-by-policy [virtualized] — SyncManager is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- PeriodicSyncManager: blocked-by-policy [virtualized] — PeriodicSyncManager is exposed as a branded illegal-constructor facade for feature detection, but background fetch/push/sync registration and delivery remain blocked because Service Worker execution is disabled in the active QuickJS path. Decision: Keep policy-denied because background fetch, push, and sync require Service Worker/background execution outside the approved user-driven membrane.
+- Fence: blocked-by-policy [virtualized] — Fence is exposed as a branded illegal-constructor facade while fenced-frame execution remains blocked by policy in the virtual browser membrane. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- FencedFrameConfig: blocked-by-policy [virtualized] — FencedFrameConfig is exposed as a branded illegal-constructor facade while fenced-frame execution remains blocked by policy in the virtual browser membrane. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorage: blocked-by-policy [virtualized] — SharedStorage is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorageAppendMethod: blocked-by-policy [virtualized] — SharedStorageAppendMethod is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorageClearMethod: blocked-by-policy [virtualized] — SharedStorageClearMethod is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorageDeleteMethod: blocked-by-policy [virtualized] — SharedStorageDeleteMethod is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorageModifierMethod: blocked-by-policy [virtualized] — SharedStorageModifierMethod is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorageSetMethod: blocked-by-policy [virtualized] — SharedStorageSetMethod is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- SharedStorageWorklet: blocked-by-policy [virtualized] — SharedStorageWorklet is exposed as a branded illegal-constructor facade while Shared Storage worklet/storage execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- GamepadHapticActuator: blocked-by-policy [virtualized] — GamepadHapticActuator is exposed as a branded illegal-constructor facade; hardware haptics remain blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- MediaStreamTrackGenerator: blocked-by-policy [virtualized] — MediaStreamTrackGenerator is exposed as a branded stream-shaped facade; real media frame generation/processing remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- MediaStreamTrackProcessor: blocked-by-policy [virtualized] — MediaStreamTrackProcessor is exposed as a branded stream-shaped facade; real media frame generation/processing remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- WebGLObject: blocked-by-policy [virtualized] — WebGLObject is exposed as a branded illegal-constructor base facade; real WebGL object allocation remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- fence: blocked-by-policy [virtualized] — fence is exposed as null while fenced-frame execution remains blocked by policy. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- webkitRequestFileSystem: blocked-by-policy [virtualized] — webkitRequestFileSystem exposes a policy-denied legacy FileSystem callback facade. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- webkitResolveLocalFileSystemURL: blocked-by-policy [virtualized] — webkitResolveLocalFileSystemURL exposes a policy-denied legacy FileSystem URL resolver facade. Decision: Keep virtualized because this emerging/browser-specific API must be owned by the QuickJS virtual browser state or policy boundary rather than delegated to host page state.
+- Intl: out-of-scope [blocked] — ECMAScript internationalization built-in, not a Web API facade; QuickJS-NG/runtime-level support must be handled separately from the Web API bridge surface. Decision: Out of Web API bridge scope; do not fake language/runtime built-ins with partial WebIDL shims.
+- Temporal: out-of-scope [blocked] — ECMAScript Temporal built-in proposal surface, not a Web API facade; QuickJS-NG/runtime-level support must be handled separately from the Web API bridge surface. Decision: Out of Web API bridge scope; do not fake language/runtime built-ins with partial WebIDL shims.
+- WebAssembly: out-of-scope [blocked] — ECMAScript WebAssembly API surface, not a DOM/Web API facade; executing Wasm inside target QuickJS requires runtime-level support rather than a WebIDL shim. Decision: Out of Web API bridge scope; do not fake language/runtime built-ins with partial WebIDL shims.
+

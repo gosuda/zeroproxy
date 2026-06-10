@@ -35,47 +35,8 @@ export function createWorkerFacades({
   const deferredTerminateWorkers = new WeakSet();
   let workerTerminateHooked = false;
 
-  function workerBootstrapBlobURL(sourceURL) {
-    const params = new URLSearchParams();
-    for (const server of activeServers) reflectApply(urlSearchParamsAppend, params, ['server', server]);
-    const virtualURL = currentVirtualURL();
-    const workerLocation = virtualBlobWorkerLocation(sourceURL);
-    const body = [
-      "const __zp_URLSearchParams=URLSearchParams;\n",
-      "const __zp_native_importScripts=importScripts.bind(self);\n",
-      "self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\n",
-      "self.__ZP_WORKER_LOCATION=", JSON.stringify(workerLocation), ";\n",
-      "self.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\n",
-      "self.__ZP_WORKER_RUNTIME_TOKEN=", JSON.stringify(runtimeToken), ";\n",
-      "self.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\n",
-      "self.__ZP_WORKER_SERVERS=new __zp_URLSearchParams(", JSON.stringify(reflectApply(urlSearchParamsToString, params, [])), ").getAll('server');\n",
-      "__zp_native_importScripts(", JSON.stringify(`${proxyOrigin}/zp/assets/worker-prelude.js`), ");\n",
-      "__zp_native_importScripts(", JSON.stringify(sourceURL), ");\n"
-    ];
-    const wrapper = new Blob(body, { type: 'text/javascript' });
-    const wrapperURL = Native.createObjectURL(wrapper);
-    workerBlobURLs.add(wrapperURL);
-    return wrapperURL;
-  }
 
-  function virtualBlobWorkerLocation(sourceURL) {
-    const virtualURL = currentVirtualURL();
-    try {
-      const parsed = new URL(String(sourceURL));
-      if (parsed.protocol === 'blob:') {
-        const pathname = parsed.pathname || '';
-        const id = pathname.slice(pathname.lastIndexOf('/') + 1);
-        if (id) return `blob:${virtualURL.origin}/${id}`;
-      }
-    } catch {}
-    return virtualURL.href;
-  }
 
-  function scriptBlobURLForPage(sourceURL, blob) {
-    const type = String(blob && blob.type || '').toLowerCase();
-    if (!type || (!/(?:^|[+/.-])(?:javascript|ecmascript)(?:$|[;])/i.test(type) && type !== 'text/javascript' && type !== 'application/javascript')) return String(sourceURL);
-    return virtualBlobWorkerLocation(sourceURL);
-  }
 
   function installWorkerTerminateHook() {
     if (workerTerminateHooked || !Native.Worker || !Native.Worker.prototype) return;
@@ -101,22 +62,14 @@ export function createWorkerFacades({
   function installWorkerHooks() {
     if (Native.Worker) installWorkerConstructor();
     if (Native.SharedWorker) installSharedWorkerConstructor();
-    if (root.navigator && root.navigator.serviceWorker && root.navigator.serviceWorker.register) define(root.navigator.serviceWorker, 'register', function() { return Promise.resolve(undefined); });
     if (Native.createObjectURL) installCreateObjectURLHook();
     if (Native.revokeObjectURL) installRevokeObjectURLHook();
     installWorkletModuleHooks();
   }
 
   function installWorkerConstructor() {
-    installWorkerTerminateHook();
-    const ZPWorker = function Worker(url) {
-      const blobWorker = isBlobWorkerURL(url);
-      const opts = arguments[1];
-      const worker = new Native.Worker(workerBootstrapURL(url, workerKindForOptions(opts)), bootstrapWorkerOptions(opts));
-      if (blobWorker) {
-        try { deferredTerminateWorkers.add(worker); } catch {}
-      }
-      return worker;
+    const ZPWorker = function Worker() {
+      throw normalizedError('NotSupportedError');
     };
     try { objectSetPrototypeOf(ZPWorker, Native.Worker); } catch {}
     try { objectDefineProperty(ZPWorker, 'prototype', { value: Native.Worker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
@@ -126,9 +79,8 @@ export function createWorkerFacades({
   }
 
   function installSharedWorkerConstructor() {
-    const ZPSharedWorker = function SharedWorker(url) {
-      const opts = arguments[1];
-      return new Native.SharedWorker(workerBootstrapURL(url, workerKindForOptions(opts)), bootstrapWorkerOptions(opts));
+    const ZPSharedWorker = function SharedWorker() {
+      throw normalizedError('NotSupportedError');
     };
     try { objectSetPrototypeOf(ZPSharedWorker, Native.SharedWorker); } catch {}
     try { objectDefineProperty(ZPSharedWorker, 'prototype', { value: Native.SharedWorker.prototype, enumerable: false, configurable: false, writable: false }); } catch {}
@@ -139,20 +91,7 @@ export function createWorkerFacades({
 
   function installCreateObjectURLHook() {
     const createObjectURL = function createObjectURL(blob) {
-      const url = Native.createObjectURL(blob);
-      try {
-        if (typeof Blob !== 'undefined' && blob instanceof Blob) {
-          const virtual = scriptBlobURLForPage(url, blob);
-          const wrapper = workerBootstrapBlobURL(url);
-          workerBlobURLMap.set(url, wrapper);
-          if (virtual !== url) {
-            blobURLRawMap.set(virtual, url);
-            workerBlobURLMap.set(virtual, wrapper);
-            return virtual;
-          }
-        }
-      } catch {}
-      return url;
+      return Native.createObjectURL(blob);
     };
     try { objectDefineProperty(createObjectURL, 'name', { value: 'createObjectURL', configurable: true }); } catch {}
     maskNativeFunction(createObjectURL, 'createObjectURL');
@@ -187,56 +126,15 @@ export function createWorkerFacades({
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) {
       const wk = root.CSS && root.CSS[name] || root[name];
       if (wk && wk.addModule) {
-        const nativeAddModule = wk.addModule;
-        define(wk, 'addModule', function(url, opts){ return reflectApply(nativeAddModule, wk, [workerBootstrapURL(url), opts]); });
+        define(wk, 'addModule', function(){ return Promise.reject(normalizedError('NotSupportedError')); });
       }
     }
   }
 
-  function isBlobWorkerURL(url) {
-    try { return new URL(String(url), currentVirtualURL().href).protocol === 'blob:'; } catch { return false; }
-  }
 
-  function workerKindForOptions(opts) {
-    return opts && typeof opts === 'object' && String(opts.type || '').toLowerCase() === 'module' ? 'module' : 'worker';
-  }
 
-  function workerBootstrapURL(url, kind) {
-    const raw = String(url);
-    const parsed = new URL(raw, currentVirtualURL().href);
-    if (parsed.protocol === 'blob:') {
-      const wrapped = workerBlobURLMap.get(parsed.href) || parsed.href;
-      if (!workerBlobURLs.has(wrapped)) throw normalizedError('NotSupportedError');
-      return wrapped;
-    }
-    if (parsed.protocol === 'data:') return dataWorkerURL(parsed.href);
-    const params = new URLSearchParams();
-    reflectApply(urlSearchParamsSet, params, ['u', requestTargetURL(raw)]);
-    reflectApply(urlSearchParamsSet, params, ['loc', requestTargetURL(raw)]);
-    reflectApply(urlSearchParamsSet, params, ['tab', boot.tabId]);
-    reflectApply(urlSearchParamsSet, params, ['rt', runtimeToken]);
-    for (const server of activeServers) reflectApply(urlSearchParamsAppend, params, ['server', server]);
-    const bootstrapKind = kind === 'module' ? '?kind=module' : '';
-    return `${ZP.controlPath('worker-bootstrap.js')}${bootstrapKind}#${reflectApply(urlSearchParamsToString, params, [])}`;
-  }
 
-  function bootstrapWorkerOptions(opts) {
-    if (!opts || typeof opts !== 'object') return opts;
-    const out = objectAssign({}, opts);
-    if (String(out.type || '').toLowerCase() === 'module') out.type = 'module';
-    else delete out.type;
-    return out;
-  }
 
-  function dataWorkerURL(raw) {
-    const comma = raw.indexOf(',');
-    if (comma < 0) throw normalizedError('NotSupportedError');
-    const virtualURL = currentVirtualURL();
-    const blocked = new Blob(["const __zp_DOMException=DOMException;\nconst __zp_importScripts=importScripts.bind(self);\nself.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_LOCATION=", JSON.stringify(raw), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nself.__ZP_WORKER_PROXY_ORIGIN=", JSON.stringify(proxyOrigin), ";\n__zp_importScripts(", JSON.stringify(`${proxyOrigin}/zp/assets/worker-prelude.js`), ");\nthrow new __zp_DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
-    const safe = Native.createObjectURL(blocked);
-    workerBlobURLs.add(safe);
-    return safe;
-  }
 
   return { installWorkerHooks };
 }

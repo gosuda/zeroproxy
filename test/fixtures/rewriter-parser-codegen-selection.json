@@ -1,37 +1,28 @@
 {
-  "schema": "zp.rewriter.parser-codegen-selection.v1",
+  "schema": "zp.rewriter.parser-codegen-selection.v2",
   "javascript": {
-    "parser": "swc_ecma_parser",
-    "codegen": "swc_ecma_codegen",
-    "resolver": "swc_ecma_transforms_base::resolver",
-    "syntax": ["jsx", "import_attributes", "EsVersion::latest"],
+    "status": "removed-from-target-hot-path",
     "selectionReasons": [
-      "single Rust-owned AST parse/rewrite/codegen path for classic and module scripts",
-      "resolver marks preserve local bindings while identifying unresolved globals",
-      "codegen emits rewritten JavaScript without a JavaScript fallback asset"
+      "target classic scripts and modules execute as source inside QuickJS",
+      "native-browser whole-program JavaScript AST/codegen is excluded by PLAN.md Phase 10",
+      "dynamic code uses QuickJS compile/eval semantics instead of Rust re-emission"
     ],
-    "sourceNeedles": [
-      "use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax};",
-      "use swc_ecma_codegen::{text_writer::JsWriter, Emitter};",
-      "use swc_ecma_transforms_base::resolver;",
-      "program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));",
-      "Config::default().with_minify(true)"
-    ],
-    "manifestDependencies": [
-      "swc_ecma_ast",
-      "swc_ecma_codegen",
-      "swc_ecma_parser",
-      "swc_ecma_transforms_base",
-      "swc_ecma_visit"
+    "forbiddenSourceNeedles": [
+      "virtual:zeroproxy-rust-rewriter",
+      "ZPHTTPRewriter",
+      "rewriteScriptSource",
+      "rewriteFunctionBody",
+      "wasm_bindgen.rewrite_script_with_context"
     ]
   },
   "html": {
-    "parserRewriter": "lol_html",
-    "sourceNeedles": ["lol_html", "rewrite_str"]
+    "activeParser": "golang.org/x/net/html",
+    "source": "internal/htmlsanitize/sanitize.go",
+    "sourceNeedles": ["html.Parse", "SanitizeDocument"]
   },
   "css": {
-    "parser": "swc_css_parser",
-    "codegen": "swc_css_codegen",
-    "manifestDependencies": ["swc_css_ast", "swc_css_codegen", "swc_css_parser", "swc_css_visit"]
+    "activeParser": "github.com/tdewolff/parse/v2/css",
+    "source": "internal/cssrewrite/rewrite.go",
+    "sourceNeedles": ["github.com/tdewolff/parse/v2/css", "css.NewLexer"]
   }
 }
