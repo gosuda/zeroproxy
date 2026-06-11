@@ -20,10 +20,10 @@ Pristine QuickJS-only keys: 3
 
 ## Installed virtual globalThis Set diff
 
-Installed QuickJS virtual own keys: 1060
+Installed QuickJS virtual own keys: 1061
 Browser-only after install: 2
 Installed virtual shared keys: 977
-Installed virtual QuickJS-only keys: 83
+Installed virtual QuickJS-only keys: 84
 
 ### Browser-only globals
 - `AbortController`
@@ -1999,7 +1999,7 @@ Installed virtual QuickJS-only keys: 83
 ## Descriptor shape audit
 
 Shape-audited entries: 930
-Entries with descriptor/prototype mismatches: 426
+Entries with descriptor/prototype mismatches: 242
 Implemented entries with descriptor/prototype mismatches: 0
 
 ### Implemented shape mismatches

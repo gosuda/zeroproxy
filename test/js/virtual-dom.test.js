@@ -457,8 +457,8 @@ test('QuickJS virtual DOM supports nodes live collections mutations and events',
             toggleKeep,
             toggleRemove,
             div.hasAttribute('hidden'),
-            div.hasAttributeNS('urn:test', 'x:flag'),
-            div.getAttributeNS('urn:test', 'x:flag'),
+            div.hasAttributeNS('urn:test', 'flag'),
+            div.getAttributeNS('urn:test', 'flag'),
             div.getAttributeNames(),
           ];
           const cloneHost = document.createElement('div');
@@ -1610,6 +1610,10 @@ test('Virtual DOM supports namespaces viewport media queries observers layout an
       offsetTimeline instanceof DocumentTimeline,
       offsetTimeline.currentTime,
       newAnimationTimeline,
+      Object.getOwnPropertyNames(AnimationTimeline.prototype),
+      Object.getOwnPropertyNames(DocumentTimeline.prototype),
+      Object.getOwnPropertyNames(ScrollTimeline.prototype),
+      Object.getOwnPropertyNames(ViewTimeline.prototype),
       typeof ScrollTimeline,
       typeof ViewTimeline,
       Object.prototype.toString.call(scrollTimeline),
@@ -1855,6 +1859,9 @@ test('Virtual DOM supports namespaces viewport media queries observers layout an
       effect.getComputedTiming().activeDuration,
       animationEvents,
       newAnimationEffect,
+      Object.getOwnPropertyNames(AnimationEffect.prototype),
+      Object.getOwnPropertyNames(KeyframeEffect.prototype),
+      [effect.target === appElement, effect.pseudoElement, effect.composite],
     ];
     let newCSSAnimation;
     try {
@@ -1880,6 +1887,10 @@ test('Virtual DOM supports namespaces viewport media queries observers layout an
       appElement.getAnimations().length,
       newCSSAnimation,
       newCSSTransition,
+      Object.getPrototypeOf(CSSAnimation.prototype) === Animation.prototype,
+      Object.getOwnPropertyNames(CSSAnimation.prototype),
+      Object.getPrototypeOf(CSSTransition.prototype) === Animation.prototype,
+      Object.getOwnPropertyNames(CSSTransition.prototype),
     ];
     trackedAnimation.cancel();
     animationTrackingSummary.push(document.getAnimations().includes(trackedAnimation), appElement.getAnimations().length);
@@ -2687,6 +2698,10 @@ test('Virtual DOM supports namespaces viewport media queries observers layout an
       true,
       -5,
       ['TypeError', "Failed to construct 'AnimationTimeline': Illegal constructor"],
+      ['constructor', 'currentTime', 'duration'],
+      ['constructor'],
+      ['constructor', 'source', 'axis'],
+      ['constructor', 'subject', 'startOffset', 'endOffset'],
       'function',
       'function',
       '[object ScrollTimeline]',
@@ -2723,6 +2738,9 @@ test('Virtual DOM supports namespaces viewport media queries observers layout an
       150,
       ['finish', 'cancel'],
       ['TypeError', "Failed to construct 'AnimationEffect': Illegal constructor"],
+      ['constructor', 'getTiming', 'getComputedTiming', 'updateTiming'],
+      ['constructor', 'target', 'pseudoElement', 'composite', 'getKeyframes', 'setKeyframes'],
+      [true, null, 'replace'],
     ],
     animationTrackingSummary: [
       'function',
@@ -2733,6 +2751,10 @@ test('Virtual DOM supports namespaces viewport media queries observers layout an
       1,
       ['TypeError', "Failed to construct 'CSSAnimation': Illegal constructor"],
       ['TypeError', "Failed to construct 'CSSTransition': Illegal constructor"],
+      true,
+      ['constructor', 'animationName'],
+      true,
+      ['constructor', 'transitionProperty'],
       false,
       0,
     ],

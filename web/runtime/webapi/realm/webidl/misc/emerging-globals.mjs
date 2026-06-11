@@ -95,18 +95,18 @@ function makeEditContext(EventTargetBase) {
       this.oncompositionstart = null;
       this.oncompositionend = null;
     }
-    updateText(rangeStart = 0, rangeEnd = 0, text = '') {
+    updateText(rangeStart, rangeEnd, text) {
       const start = Math.max(0, Number(rangeStart) || 0);
       const end = Math.max(start, Number(rangeEnd) || start);
-      this.text = this.text.slice(0, start) + String(text) + this.text.slice(end);
+      this.text = this.text.slice(0, start) + String(text ?? '') + this.text.slice(end);
     }
-    updateSelection(start = 0, end = start) {
+    updateSelection(start, end) {
       this.selectionStart = Math.max(0, Number(start) || 0);
       this.selectionEnd = Math.max(this.selectionStart, Number(end) || this.selectionStart);
     }
-    updateControlBounds() {}
-    updateSelectionBounds() {}
-    updateCharacterBounds(rangeStart = 0) { this.characterBoundsRangeStart = Math.max(0, Number(rangeStart) || 0); }
+    updateControlBounds(controlBounds) { void controlBounds; }
+    updateSelectionBounds(selectionBounds) { void selectionBounds; }
+    updateCharacterBounds(rangeStart, characterBounds) { void characterBounds; this.characterBoundsRangeStart = Math.max(0, Number(rangeStart) || 0); }
     attachedElements() { return []; }
   }
   Object.defineProperty(EditContext.prototype, Symbol.toStringTag, { value: 'EditContext', configurable: true });
@@ -281,8 +281,8 @@ function makeSanitizer() {
     allowAttribute(attribute, element = '*') { this.__zpConfig.attributes = [...(this.__zpConfig.attributes || []), [String(attribute), String(element)]]; return this; }
     removeAttribute(attribute, element = '*') { this.__zpConfig.removeAttributes = [...(this.__zpConfig.removeAttributes || []), [String(attribute), String(element)]]; return this; }
     removeUnsafe() { this.__zpConfig.removeUnsafe = true; return this; }
-    setComments(allow = true) { this.__zpConfig.comments = Boolean(allow); return this; }
-    setDataAttributes(allow = true) { this.__zpConfig.dataAttributes = Boolean(allow); return this; }
+    setComments(allow) { this.__zpConfig.comments = Boolean(allow); return this; }
+    setDataAttributes(allow) { this.__zpConfig.dataAttributes = Boolean(allow); return this; }
   }
   Object.defineProperty(Sanitizer.prototype, Symbol.toStringTag, { value: 'Sanitizer', configurable: true });
   return Sanitizer;

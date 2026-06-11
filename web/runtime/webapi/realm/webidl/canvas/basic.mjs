@@ -142,7 +142,7 @@ export function createCanvasFacades() {
       defineHidden(this, '__zpCanvas', canvas);
     }
     get canvas() { return this.__zpCanvas; }
-    transferFromImageBitmap() {}
+    transferFromImageBitmap(imageBitmap) { void imageBitmap; }
   }
   Object.defineProperty(ImageBitmapRenderingContext.prototype, Symbol.toStringTag, { value: 'ImageBitmapRenderingContext', configurable: true });
 
@@ -164,17 +164,17 @@ export function createCanvasFacades() {
 
   class Path2D {
     constructor() { defineHidden(this, '__zpCommands', []); }
-    addPath() {}
+    addPath(path, transform = undefined) { void path; void transform; }
     closePath() {}
-    moveTo() {}
-    lineTo() {}
-    bezierCurveTo() {}
-    quadraticCurveTo() {}
-    arc() {}
-    arcTo() {}
-    ellipse() {}
-    rect() {}
-    roundRect() {}
+    moveTo(x, y) { void x; void y; }
+    lineTo(x, y) { void x; void y; }
+    bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x, y) { void cp1x; void cp1y; void cp2x; void cp2y; void x; void y; }
+    quadraticCurveTo(cpx, cpy, x, y) { void cpx; void cpy; void x; void y; }
+    arc(x, y, radius, startAngle, endAngle, counterclockwise = false) { void x; void y; void radius; void startAngle; void endAngle; void counterclockwise; }
+    arcTo(x1, y1, x2, y2, radius) { void x1; void y1; void x2; void y2; void radius; }
+    ellipse(x, y, radiusX, radiusY, rotation, startAngle, endAngle, counterclockwise = false) { void x; void y; void radiusX; void radiusY; void rotation; void startAngle; void endAngle; void counterclockwise; }
+    rect(x, y, width, height) { void x; void y; void width; void height; }
+    roundRect(x, y, width, height, radii = undefined) { void x; void y; void width; void height; void radii; }
   }
   Object.defineProperty(Path2D.prototype, Symbol.toStringTag, { value: 'Path2D', configurable: true });
 

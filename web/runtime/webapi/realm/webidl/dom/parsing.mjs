@@ -17,8 +17,9 @@ export function createDOMParsing({ childArray }) {
     if (node.nodeType === 8) return '<!--' + String(node.textContent || '') + '-->';
     if (node.nodeType !== 1) return serializeChildren(node);
     const attrs = node.attributes ? [...node.attributes].map((attr) => ' ' + attr.name + '="' + escapeHTML(attr.value) + '"').join('') : '';
-    const open = '<' + node.localName + attrs + '>';
-    return voidElements.has(node.localName) ? open : open + serializeChildren(node) + '</' + node.localName + '>';
+    const tagName = node.namespaceURI && node.namespaceURI !== 'http://www.w3.org/1999/xhtml' ? (node.nodeName || node.localName) : node.localName;
+    const open = '<' + tagName + attrs + '>';
+    return voidElements.has(node.localName) ? open : open + serializeChildren(node) + '</' + tagName + '>';
   }
 
   function serializeChildren(node) { return childArray(node).map(serializeNode).join(''); }

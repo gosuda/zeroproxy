@@ -43,6 +43,7 @@ export function createSpeechFacades(EventBase, EventTargetBase) {
     set pitch(value) { defineHidden(this, '__zpPitch', Number(value)); }
   }
   Object.defineProperty(SpeechSynthesisUtterance.prototype, Symbol.toStringTag, { value: 'SpeechSynthesisUtterance', configurable: true });
+  defineEventHandlerAccessors(SpeechSynthesisUtterance.prototype, ['onboundary', 'onend', 'onerror', 'onmark', 'onpause', 'onresume', 'onstart']);
 
   const speechSynthesisEventState = new WeakMap();
   function SpeechSynthesisEvent(type, init) {
@@ -107,6 +108,7 @@ export function createSpeechFacades(EventBase, EventTargetBase) {
     getVoices() { return this.__zpVoices.slice(); }
   }
   Object.defineProperty(SpeechSynthesis.prototype, Symbol.toStringTag, { value: 'SpeechSynthesis', configurable: true });
+  Object.defineProperty(SpeechSynthesis.prototype, 'onvoiceschanged', eventHandlerAccessor('onvoiceschanged'));
 
   const speechGrammarState = new WeakMap();
   function SpeechGrammar() {
@@ -237,6 +239,15 @@ function appendSpeechGrammar(list, grammar) {
     abort() { this.dispatchEvent(new EventBase('end')); }
   }
   Object.defineProperty(SpeechRecognition.prototype, Symbol.toStringTag, { value: 'SpeechRecognition', configurable: true });
+  defineEventHandlerAccessors(SpeechRecognition.prototype, ['onaudioend', 'onaudiostart', 'onend', 'onerror', 'onnomatch', 'onresult', 'onsoundend', 'onsoundstart', 'onspeechend', 'onspeechstart', 'onstart']);
+  Object.defineProperties(SpeechRecognition.prototype, {
+    phrases: eventHandlerAccessor('phrases'),
+    processLocally: eventHandlerAccessor('processLocally'),
+  });
+  Object.defineProperties(SpeechRecognition, {
+    available: { value: function available(options) { void options; return Promise.resolve('unavailable'); }, enumerable: true, writable: true, configurable: true },
+    install: { value: function install(options) { void options; return Promise.resolve(false); }, enumerable: true, writable: true, configurable: true },
+  });
 
   class SpeechRecognitionEvent extends EventBase {
     constructor(type, init = {}) {
@@ -321,6 +332,19 @@ function speechRecognitionErrorEventValue(event) {
 }
 
   return { SpeechSynthesis, SpeechSynthesisUtterance, SpeechSynthesisEvent, SpeechSynthesisErrorEvent, SpeechSynthesisVoice, SpeechGrammar, SpeechGrammarList, SpeechRecognition, SpeechRecognitionEvent, SpeechRecognitionErrorEvent, speechSynthesis: new SpeechSynthesis(speechSynthesisToken) };
+}
+
+function defineEventHandlerAccessors(proto, names) {
+  for (const name of names) Object.defineProperty(proto, name, eventHandlerAccessor(name));
+}
+
+function eventHandlerAccessor(name) {
+  return {
+    get() { return this?.['__zp_' + name] ?? null; },
+    set(value) { defineHidden(this, '__zp_' + name, typeof value === 'function' ? value : value ?? null); },
+    enumerable: true,
+    configurable: true,
+  };
 }
 
 function defineHidden(target, key, value) {

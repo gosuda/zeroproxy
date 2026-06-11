@@ -49,6 +49,10 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   const elementInternalsToken = {};
   const customStateSetToken = {};
   const treeWalkerToken = {};
+  const navigatorSlots = new WeakMap();
+  const navigatorPrototypeInstallSet = new WeakSet();
+  const historyPrototypeInstallSet = new WeakSet();
+  let virtualNavigatorPrototype = null;
   const nodeIteratorToken = {};
   let storageQuotaBytes = DEFAULT_STORAGE_QUOTA_BYTES;
   const blobURLRegistry = new Map();
@@ -108,7 +112,8 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   });
   const supportedCSSProperties = new Set(['background-color', 'background-image', 'color', 'display', 'float', 'height', 'margin-left', 'width']);
   let historyIndex = 0;
-  const { svgElementConstructors, elementToStringTag: svgElementToStringTag } = createSVGWebIDL();
+  let historyScrollRestoration = 'auto';
+  const { svgElementConstructors, elementToStringTag: svgElementToStringTag, interfaceNameForTag: svgInterfaceNameForTag } = createSVGWebIDL();
   const svgValueFacades = createSVGValueFacades();
   const { htmlElementConstructors, HTMLFormControlsCollection, HTMLOptionsCollection, RadioNodeList, elementToStringTag, isElement } = createHTMLWebIDL({ svgElementToStringTag });
   installHTMLFormControlsCollectionPrototype();
@@ -826,6 +831,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     get(name) { return this.__zpDefinitions.get(String(name))?.constructor; }
     getName(constructor) { return this.__zpConstructors.get(constructor) || null; }
     upgrade(root) { void root; }
+    initialize(root) { void root; }
     whenDefined(name) {
       const localName = validCustomElementName(name);
       const defined = this.__zpDefinitions.get(localName);
@@ -854,6 +860,21 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       super(values);
     }
   }
+  function customStateSetValues() { return Set.prototype.values.call(this); }
+  Object.defineProperty(customStateSetValues, 'name', { value: 'values', configurable: true });
+  Object.defineProperties(CustomStateSet.prototype, {
+    size: Object.getOwnPropertyDescriptor(Set.prototype, 'size'),
+    add: { value: Set.prototype.add, writable: true, configurable: true },
+    clear: { value: Set.prototype.clear, writable: true, configurable: true },
+    delete: { value: Set.prototype.delete, writable: true, configurable: true },
+    entries: { value: Set.prototype.entries, writable: true, configurable: true },
+    forEach: { value: Set.prototype.forEach, writable: true, configurable: true },
+    has: { value: Set.prototype.has, writable: true, configurable: true },
+    keys: { value: customStateSetValues, writable: true, configurable: true },
+    values: { value: Set.prototype.values, writable: true, configurable: true },
+    [Symbol.iterator]: { value: Set.prototype[Symbol.iterator], writable: true, configurable: true },
+  });
+  Object.setPrototypeOf(CustomStateSet.prototype, Object.prototype);
   Object.defineProperty(CustomStateSet.prototype, Symbol.toStringTag, { value: 'CustomStateSet', configurable: true });
 
   class ElementInternals {
@@ -879,6 +900,34 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     setFormValue(value = null) { this.__zpFormValue = value; }
     setValidity(flags = {}, message = '') { this.__zpValidityFlags = { ...flags }; this.__zpValidationMessage = String(message || ''); }
   }
+  function elementInternalsAccessor(name, fallback = '') {
+    return {
+      get() { return Object.prototype.hasOwnProperty.call(this, '__zp_' + name) ? this['__zp_' + name] : fallback; },
+      set(value) { Object.defineProperty(this, '__zp_' + name, { value, configurable: true, writable: true }); },
+      enumerable: true,
+      configurable: true,
+    };
+  }
+  for (const name of [
+    'ariaActiveDescendantElement', 'ariaAtomic', 'ariaAutoComplete', 'ariaBrailleLabel',
+    'ariaBrailleRoleDescription', 'ariaBusy', 'ariaChecked', 'ariaColCount', 'ariaColIndex',
+    'ariaColIndexText', 'ariaColSpan', 'ariaControlsElements', 'ariaCurrent',
+    'ariaDescribedByElements', 'ariaDescription', 'ariaDetailsElements', 'ariaDisabled',
+    'ariaErrorMessageElements', 'ariaExpanded', 'ariaFlowToElements', 'ariaHasPopup',
+    'ariaHidden', 'ariaInvalid', 'ariaKeyShortcuts', 'ariaLabel', 'ariaLabelledByElements',
+    'ariaLevel', 'ariaLive', 'ariaModal', 'ariaMultiLine', 'ariaMultiSelectable',
+    'ariaOrientation', 'ariaPlaceholder', 'ariaPosInSet', 'ariaPressed', 'ariaReadOnly',
+    'ariaRelevant', 'ariaRequired', 'ariaRoleDescription', 'ariaRowCount', 'ariaRowIndex',
+    'ariaRowIndexText', 'ariaRowSpan', 'ariaSelected', 'ariaSetSize', 'ariaSort',
+    'ariaValueMax', 'ariaValueMin', 'ariaValueNow', 'ariaValueText', 'role',
+  ]) {
+    Object.defineProperty(ElementInternals.prototype, name, elementInternalsAccessor(name, null));
+  }
+  Object.defineProperty(ElementInternals.prototype, 'states', { get() { return Object.getOwnPropertyDescriptor(this, 'states')?.value ?? null; }, enumerable: true, configurable: true });
+  Object.defineProperties(ElementInternals.prototype, {
+    setFormValue: { value: function setFormValue(value) { this.__zpFormValue = arguments.length > 0 ? value : null; }, writable: true, configurable: true },
+    setValidity: { value: function setValidity(flags) { const message = arguments.length > 1 ? arguments[1] : ''; this.__zpValidityFlags = { ...(flags || {}) }; this.__zpValidationMessage = String(message || ''); }, writable: true, configurable: true },
+  });
   Object.defineProperty(ElementInternals.prototype, Symbol.toStringTag, { value: 'ElementInternals', configurable: true });
 
   class CSSStyleDeclaration {
@@ -1057,8 +1106,8 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     }
     get collapsed() { return rangeCollapsed(this); }
     get commonAncestorContainer() { return commonAncestor(this.startContainer, this.endContainer); }
-    setStart(node, offset = 0) { this.__zpStartContainer = node; this.__zpStartOffset = Number(offset) || 0; }
-    setEnd(node, offset = 0) { this.__zpEndContainer = node; this.__zpEndOffset = Number(offset) || 0; }
+    setStart(node, offset) { this.__zpStartContainer = node; this.__zpStartOffset = Number(offset) || 0; }
+    setEnd(node, offset) { this.__zpEndContainer = node; this.__zpEndOffset = Number(offset) || 0; }
     setStartBefore(node) { this.setStart(node.parentNode, nodeIndex(node)); }
     setStartAfter(node) { this.setStart(node.parentNode, nodeIndex(node) + 1); }
     setEndBefore(node) { this.setEnd(node.parentNode, nodeIndex(node)); }
@@ -1069,15 +1118,16 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     cloneRange() { const next = new Range(this.startContainer); next.setStart(this.startContainer, this.startOffset); next.setEnd(this.endContainer, this.endOffset); return next; }
     detach() {}
     compareBoundaryPoints(how, sourceRange) { return compareRangeBoundaryPoint(this, how, sourceRange); }
-    comparePoint(node, offset = 0) { return comparePointInRange(this, node, offset); }
-    isPointInRange(node, offset = 0) { return this.comparePoint(node, offset) === 0; }
+    comparePoint(node, offset) { return comparePointInRange(this, node, offset); }
+    isPointInRange(node, offset) { return this.comparePoint(node, offset) === 0; }
+    expand() {}
     intersectsNode(node) { return rangeIntersectsNode(this, node); }
     cloneContents() { return rangeCloneContents(this); }
     extractContents() { const fragment = this.cloneContents(); this.deleteContents(); return fragment; }
     deleteContents() { rangeDeleteContents(this); }
     insertNode(node) { rangeInsertNode(this, node); }
     surroundContents(newParent) { rangeSurroundContents(this, newParent); }
-    createContextualFragment(markup = '') { return rangeCreateContextualFragment(this, markup); }
+    createContextualFragment(markup) { return rangeCreateContextualFragment(this, markup); }
     getClientRects() { return rectListFromRects(rangeClientRects(this)); }
     getBoundingClientRect() { return boundingRectFromRects(rangeClientRects(this)); }
     toString() { return rangeText(this); }
@@ -1301,6 +1351,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   Object.defineProperty(Range.prototype, Symbol.toStringTag, { value: 'Range', configurable: true });
   Object.setPrototypeOf(Range.prototype, AbstractRange.prototype);
   Object.defineProperty(Range.prototype, 'constructor', { value: Range, configurable: true, writable: true });
+  delete Range.prototype.collapsed;
   Object.defineProperties(Range, {
     START_TO_START: { value: 0, enumerable: true },
     START_TO_END: { value: 1, enumerable: true },
@@ -1542,6 +1593,14 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       });
       persistCachePut(this.name, record.request, record.response);
     }
+    async add(request) {
+      const response = await fetch(request);
+      if (!response || !response.ok) throw new TypeError('Cache.add() encountered a network error');
+      await this.put(request, response);
+    }
+    async addAll(requests) {
+      await Promise.all(Array.from(requests || [], (request) => this.add(request)));
+    }
     async delete(request) { const key = cacheKey(request); const deleted = this.map.delete(key); if (deleted) persistCacheDelete(this.name, requestRecordFromInput(request)); return deleted; }
     async keys() { return [...this.map.values()].map((record) => new Request(record.request.url, record.request)); }
   }
@@ -1627,14 +1686,23 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   class IDBRequest {
     constructor(token) {
       if (token !== idbRequestToken) throw new TypeError("Failed to construct 'IDBRequest': Illegal constructor");
-      this.result = undefined; this.error = null; this.source = null; this.transaction = null; this.readyState = 'pending'; this.onsuccess = null; this.onerror = null; this.listeners = new Map();
+      Object.defineProperties(this, {
+        result: { value: undefined, writable: true, configurable: true },
+        error: { value: null, writable: true, configurable: true },
+        source: { value: null, writable: true, configurable: true },
+        transaction: { value: null, writable: true, configurable: true },
+        readyState: { value: 'pending', writable: true, configurable: true },
+        onsuccess: { value: null, writable: true, configurable: true },
+        onerror: { value: null, writable: true, configurable: true },
+        listeners: { value: new Map(), configurable: true },
+        addEventListener: { value: function addEventListener(type, callback) { const key = String(type); const bucket = this.listeners.get(key) || []; bucket.push(callback); this.listeners.set(key, bucket); }, configurable: true },
+        removeEventListener: { value: function removeEventListener(type, callback) { const key = String(type); const bucket = this.listeners.get(key) || []; const index = bucket.indexOf(callback); if (index >= 0) bucket.splice(index, 1); }, configurable: true },
+        __dispatch: { value: function __dispatch(type, init = {}) { const event = { type, target: this, currentTarget: this, ...init }; const handler = this['on' + type]; if (typeof handler === 'function') handler.call(this, event); for (const callback of [...(this.listeners.get(type) || [])]) callback.call(this, event); }, configurable: true },
+      });
     }
-    addEventListener(type, callback) { const key = String(type); const bucket = this.listeners.get(key) || []; bucket.push(callback); this.listeners.set(key, bucket); }
-    removeEventListener(type, callback) { const key = String(type); const bucket = this.listeners.get(key) || []; const index = bucket.indexOf(callback); if (index >= 0) bucket.splice(index, 1); }
-    __dispatch(type, init = {}) { const event = { type, target: this, currentTarget: this, ...init }; const handler = this['on' + type]; if (typeof handler === 'function') handler.call(this, event); for (const callback of [...(this.listeners.get(type) || [])]) callback.call(this, event); }
   }
 
-  class IDBOpenDBRequest extends IDBRequest { constructor(token) { if (token !== idbRequestToken) throw new TypeError("Failed to construct 'IDBOpenDBRequest': Illegal constructor"); super(token); this.onupgradeneeded = null; this.onblocked = null; } }
+  class IDBOpenDBRequest extends IDBRequest { constructor(token) { if (token !== idbRequestToken) throw new TypeError("Failed to construct 'IDBOpenDBRequest': Illegal constructor"); super(token); Object.defineProperties(this, { onupgradeneeded: { value: null, writable: true, configurable: true }, onblocked: { value: null, writable: true, configurable: true } }); } }
   const domStringListToken = {};
   const domStringListSlots = new WeakMap();
   class DOMStringList {
@@ -1668,10 +1736,10 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   class IDBDatabase {
     constructor(token, record) {
       if (token !== idbInternalToken) throw new TypeError("Failed to construct 'IDBDatabase': Illegal constructor");
-      this.__zpRecord = record; this.name = record.name; this.version = record.version; this.objectStoreNames = nameList(Object.keys(record.stores));
+      this.__zpRecord = record; Object.defineProperties(this, { name: { value: record.name, configurable: true }, version: { value: record.version, configurable: true }, objectStoreNames: { value: nameList(Object.keys(record.stores)), configurable: true } });
     }
-    createObjectStore(name, options = {}) { const key = String(name); if (this.__zpRecord.stores[key]) throw namedError('ConstraintError'); this.__zpRecord.stores[key] = { keyPath: options.keyPath || null, autoIncrement: Boolean(options.autoIncrement), nextKey: 1, records: {}, indexes: {} }; this.objectStoreNames = nameList(Object.keys(this.__zpRecord.stores)); persistIndexedDB(this.__zpRecord.name, this.__zpRecord); return new IDBObjectStore(idbInternalToken, this.__zpRecord, key); }
-    deleteObjectStore(name) { delete this.__zpRecord.stores[String(name)]; this.objectStoreNames = nameList(Object.keys(this.__zpRecord.stores)); persistIndexedDB(this.__zpRecord.name, this.__zpRecord); }
+    createObjectStore(name, options = {}) { const key = String(name); if (this.__zpRecord.stores[key]) throw namedError('ConstraintError'); this.__zpRecord.stores[key] = { keyPath: options.keyPath || null, autoIncrement: Boolean(options.autoIncrement), nextKey: 1, records: {}, indexes: {} }; Object.defineProperty(this, 'objectStoreNames', { value: nameList(Object.keys(this.__zpRecord.stores)), configurable: true }); persistIndexedDB(this.__zpRecord.name, this.__zpRecord); return new IDBObjectStore(idbInternalToken, this.__zpRecord, key); }
+    deleteObjectStore(name) { delete this.__zpRecord.stores[String(name)]; Object.defineProperty(this, 'objectStoreNames', { value: nameList(Object.keys(this.__zpRecord.stores)), configurable: true }); persistIndexedDB(this.__zpRecord.name, this.__zpRecord); }
     transaction(storeNames, mode = 'readonly') { return new IDBTransaction(idbInternalToken, this.__zpRecord, Array.isArray(storeNames) ? storeNames : [storeNames], mode); }
     close() {}
   }
@@ -1683,53 +1751,82 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       this.__zpPending = 0;
       this.__zpFinished = false;
       this.__zpListeners = new Map();
-      this.mode = String(mode || 'readonly');
-      this.objectStoreNames = nameList(storeNames.map(String));
-      this.oncomplete = null;
-      this.onerror = null;
-      this.onabort = null;
+      Object.defineProperties(this, {
+        db: { value: new IDBDatabase(idbInternalToken, database), configurable: true },
+        durability: { value: 'default', configurable: true },
+        mode: { value: String(mode || 'readonly'), configurable: true, writable: true },
+        objectStoreNames: { value: nameList(storeNames.map(String)), configurable: true, writable: true },
+        error: { value: null, configurable: true, writable: true },
+        oncomplete: { value: null, configurable: true, writable: true },
+        onerror: { value: null, configurable: true, writable: true },
+        onabort: { value: null, configurable: true, writable: true },
+        addEventListener: { value: function addEventListener(type, callback) { const key = String(type); const bucket = this.__zpListeners.get(key) || []; bucket.push(callback); this.__zpListeners.set(key, bucket); }, configurable: true },
+        removeEventListener: { value: function removeEventListener(type, callback) { const key = String(type); const bucket = this.__zpListeners.get(key) || []; const index = bucket.indexOf(callback); if (index >= 0) bucket.splice(index, 1); }, configurable: true },
+        __zpTrack: { value: function __zpTrack(request) { if (this.__zpFinished) return request; this.__zpPending += 1; request.transaction = this; request.addEventListener('success', () => this.__zpRequestDone()); request.addEventListener('error', () => this.__zpRequestError(request.error)); return request; }, configurable: true },
+        __zpHold: { value: function __zpHold() { if (!this.__zpFinished) this.__zpPending += 1; }, configurable: true },
+        __zpRequestDone: { value: function __zpRequestDone() { this.__zpPending = Math.max(0, this.__zpPending - 1); this.__zpMaybeComplete(); }, configurable: true },
+        __zpRequestError: { value: function __zpRequestError(error) { this.error = error || namedError('UnknownError'); this.__zpDispatch('error'); this.__zpRequestDone(); }, configurable: true },
+        __zpMaybeComplete: { value: function __zpMaybeComplete() { if (this.__zpFinished || this.__zpPending > 0) return; Promise.resolve().then(() => { if (!this.__zpFinished && this.__zpPending === 0) { this.__zpFinished = true; this.__zpDispatch('complete'); } }); }, configurable: true },
+        __zpDispatch: { value: function __zpDispatch(type) { const event = { type, target: this, currentTarget: this }; const handler = this['on' + type]; if (typeof handler === 'function') handler.call(this, event); for (const callback of [...(this.__zpListeners.get(type) || [])]) callback.call(this, event); }, configurable: true },
+      });
       Promise.resolve().then(() => this.__zpMaybeComplete());
     }
-    addEventListener(type, callback) { const key = String(type); const bucket = this.__zpListeners.get(key) || []; bucket.push(callback); this.__zpListeners.set(key, bucket); }
-    removeEventListener(type, callback) { const key = String(type); const bucket = this.__zpListeners.get(key) || []; const index = bucket.indexOf(callback); if (index >= 0) bucket.splice(index, 1); }
     objectStore(name) { const key = String(name); if (!this.__zpDatabase.stores[key]) throw namedError('NotFoundError'); return new IDBObjectStore(idbInternalToken, this.__zpDatabase, key, this); }
     abort() { if (this.__zpFinished) return; this.__zpFinished = true; this.__zpDispatch('abort'); }
-    __zpTrack(request) { if (this.__zpFinished) return request; this.__zpPending += 1; request.transaction = this; request.addEventListener('success', () => this.__zpRequestDone()); request.addEventListener('error', () => this.__zpRequestError(request.error)); return request; }
-    __zpHold() { if (!this.__zpFinished) this.__zpPending += 1; }
-    __zpRequestDone() { this.__zpPending = Math.max(0, this.__zpPending - 1); this.__zpMaybeComplete(); }
-    __zpRequestError(error) { this.error = error || namedError('UnknownError'); this.__zpDispatch('error'); this.__zpRequestDone(); }
-    __zpMaybeComplete() { if (this.__zpFinished || this.__zpPending > 0) return; Promise.resolve().then(() => { if (!this.__zpFinished && this.__zpPending === 0) { this.__zpFinished = true; this.__zpDispatch('complete'); } }); }
-    __zpDispatch(type) { const event = { type, target: this, currentTarget: this }; const handler = this['on' + type]; if (typeof handler === 'function') handler.call(this, event); for (const callback of [...(this.__zpListeners.get(type) || [])]) callback.call(this, event); }
+    commit() { this.__zpMaybeComplete(); }
   }
 
   class IDBObjectStore {
-    constructor(token, database, name, transaction = null) { if (token !== idbInternalToken) throw new TypeError("Failed to construct 'IDBObjectStore': Illegal constructor"); this.__zpDatabase = database; this.__zpStoreName = String(name); this.transaction = transaction; const store = database.stores[this.__zpStoreName]; this.name = this.__zpStoreName; this.keyPath = store.keyPath; this.autoIncrement = store.autoIncrement; this.indexNames = nameList(Object.keys(store.indexes || {})); }
-    put(value, key) { return trackIDBRequest(this.transaction, storeMutation(this.__zpDatabase, this.__zpStoreName, value, key, false)); }
-    add(value, key) { return trackIDBRequest(this.transaction, storeMutation(this.__zpDatabase, this.__zpStoreName, value, key, true)); }
-    get(key) { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, key, false)); }
-    getAll(query) { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, query, true)); }
-    openCursor(query, direction = 'next') { return cursorRequest(this, objectStoreCursorEntries(this.__zpDatabase.stores[this.__zpStoreName], query), this.transaction, direction); }
-    createIndex(name, keyPath, options = {}) { const store = this.__zpDatabase.stores[this.__zpStoreName]; const key = String(name); if (store.indexes?.[key]) throw namedError('ConstraintError'); store.indexes ||= {}; store.indexes[key] = { name: key, keyPath, unique: Boolean(options.unique), multiEntry: Boolean(options.multiEntry) }; validateExistingIndex(store, store.indexes[key]); this.indexNames = nameList(Object.keys(store.indexes)); persistIndexedDB(this.__zpDatabase.name, this.__zpDatabase); return new IDBIndex(idbInternalToken, this.__zpDatabase, this.__zpStoreName, key, this.transaction); }
-    deleteIndex(name) { const store = this.__zpDatabase.stores[this.__zpStoreName]; delete store.indexes?.[String(name)]; this.indexNames = nameList(Object.keys(store.indexes || {})); persistIndexedDB(this.__zpDatabase.name, this.__zpDatabase); }
+    constructor(token, database, name, transaction = null) { if (token !== idbInternalToken) throw new TypeError("Failed to construct 'IDBObjectStore': Illegal constructor"); this.__zpDatabase = database; this.__zpStoreName = String(name); const store = database.stores[this.__zpStoreName]; Object.defineProperties(this, { transaction: { value: transaction, configurable: true }, name: { value: this.__zpStoreName, configurable: true }, keyPath: { value: store.keyPath, configurable: true }, autoIncrement: { value: store.autoIncrement, configurable: true }, indexNames: { value: nameList(Object.keys(store.indexes || {})), configurable: true } }); }
+    put(value) { return trackIDBRequest(this.transaction, storeMutation(this.__zpDatabase, this.__zpStoreName, value, arguments[1], false)); }
+    add(value) { return trackIDBRequest(this.transaction, storeMutation(this.__zpDatabase, this.__zpStoreName, value, arguments[1], true)); }
+    get(key) { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, key, 'value')); }
+    getAll() { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, arguments[0], 'values')); }
+    getKey(query) { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, query, 'key')); }
+    getAllKeys() { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, arguments[0], 'keys')); }
+    getAllRecords() { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, arguments[0], 'records')); }
+    count() { return trackIDBRequest(this.transaction, storeLookup(this.__zpDatabase, this.__zpStoreName, arguments[0], 'count')); }
+    openCursor() { return cursorRequest(this, objectStoreCursorEntries(this.__zpDatabase.stores[this.__zpStoreName], arguments[0]), this.transaction, arguments[1]); }
+    openKeyCursor() { return cursorRequest(this, objectStoreCursorEntries(this.__zpDatabase.stores[this.__zpStoreName], arguments[0]), this.transaction, arguments[1]); }
+    createIndex(name, keyPath, options = {}) { const store = this.__zpDatabase.stores[this.__zpStoreName]; const key = String(name); if (store.indexes?.[key]) throw namedError('ConstraintError'); store.indexes ||= {}; store.indexes[key] = { name: key, keyPath, unique: Boolean(options.unique), multiEntry: Boolean(options.multiEntry) }; validateExistingIndex(store, store.indexes[key]); Object.defineProperty(this, 'indexNames', { value: nameList(Object.keys(store.indexes)), configurable: true }); persistIndexedDB(this.__zpDatabase.name, this.__zpDatabase); return new IDBIndex(idbInternalToken, this.__zpDatabase, this.__zpStoreName, key, this.transaction); }
+    deleteIndex(name) { const store = this.__zpDatabase.stores[this.__zpStoreName]; delete store.indexes?.[String(name)]; Object.defineProperty(this, 'indexNames', { value: nameList(Object.keys(store.indexes || {})), configurable: true }); persistIndexedDB(this.__zpDatabase.name, this.__zpDatabase); }
     index(name) { const key = String(name); if (!this.__zpDatabase.stores[this.__zpStoreName].indexes?.[key]) throw namedError('NotFoundError'); return new IDBIndex(idbInternalToken, this.__zpDatabase, this.__zpStoreName, key, this.transaction); }
     delete(key) { const request = new IDBRequest(idbRequestToken); Promise.resolve().then(() => { delete this.__zpDatabase.stores[this.__zpStoreName].records[String(key)]; persistIndexedDB(this.__zpDatabase.name, this.__zpDatabase); queueSuccess(request, undefined); }); return trackIDBRequest(this.transaction, request); }
     clear() { const request = new IDBRequest(idbRequestToken); Promise.resolve().then(() => { this.__zpDatabase.stores[this.__zpStoreName].records = {}; persistIndexedDB(this.__zpDatabase.name, this.__zpDatabase); queueSuccess(request, undefined); }); return trackIDBRequest(this.transaction, request); }
   }
 
   class IDBIndex {
-    constructor(token, database, storeName, name, transaction = null) { if (token !== idbInternalToken) throw new TypeError("Failed to construct 'IDBIndex': Illegal constructor"); const index = database.stores[storeName].indexes[name]; this.__zpDatabase = database; this.__zpStoreName = storeName; this.__zpIndexName = name; this.transaction = transaction; this.name = index.name; this.keyPath = index.keyPath; this.unique = index.unique; this.multiEntry = index.multiEntry; this.objectStore = new IDBObjectStore(idbInternalToken, database, storeName, transaction); }
-    get(query) { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, query, false)); }
-    getAll(query) { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, query, true)); }
-    openCursor(query, direction = 'next') { const store = this.__zpDatabase.stores[this.__zpStoreName]; return cursorRequest(this, indexCursorEntries(store, store.indexes[this.__zpIndexName], query), this.transaction, direction); }
+    constructor(token, database, storeName, name, transaction = null) { if (token !== idbInternalToken) throw new TypeError("Failed to construct 'IDBIndex': Illegal constructor"); const index = database.stores[storeName].indexes[name]; this.__zpDatabase = database; this.__zpStoreName = storeName; this.__zpIndexName = name; Object.defineProperties(this, { transaction: { value: transaction, configurable: true }, name: { value: index.name, configurable: true }, keyPath: { value: index.keyPath, configurable: true }, unique: { value: index.unique, configurable: true }, multiEntry: { value: index.multiEntry, configurable: true }, objectStore: { value: new IDBObjectStore(idbInternalToken, database, storeName, transaction), configurable: true } }); }
+    get(query) { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, query, 'value')); }
+    getAll() { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, arguments[0], 'values')); }
+    getKey(query) { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, query, 'key')); }
+    getAllKeys() { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, arguments[0], 'keys')); }
+    getAllRecords() { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, arguments[0], 'records')); }
+    count() { return trackIDBRequest(this.transaction, indexLookup(this.__zpDatabase, this.__zpStoreName, this.__zpIndexName, arguments[0], 'count')); }
+    openCursor() { const store = this.__zpDatabase.stores[this.__zpStoreName]; return cursorRequest(this, indexCursorEntries(store, store.indexes[this.__zpIndexName], arguments[0]), this.transaction, arguments[1]); }
+    openKeyCursor() { const store = this.__zpDatabase.stores[this.__zpStoreName]; return cursorRequest(this, indexCursorEntries(store, store.indexes[this.__zpIndexName], arguments[0]), this.transaction, arguments[1]); }
+  }
+
+  class IDBRecord {
+    constructor(token, key, primaryKey, value) {
+      if (token !== idbInternalToken) throw new TypeError("Failed to construct 'IDBRecord': Illegal constructor");
+      Object.defineProperties(this, {
+        key: { value: key, configurable: true },
+        primaryKey: { value: primaryKey, configurable: true },
+        value: { value, configurable: true },
+      });
+    }
   }
 
   class IDBKeyRange {
     constructor(token, lower, upper, lowerOpen = false, upperOpen = false) {
       if (token !== idbKeyRangeToken) throw new TypeError("Failed to construct 'IDBKeyRange': Illegal constructor");
-      this.lower = lower;
-      this.upper = upper;
-      this.lowerOpen = Boolean(lowerOpen);
-      this.upperOpen = Boolean(upperOpen);
+      Object.defineProperties(this, {
+        lower: { value: lower, configurable: true },
+        upper: { value: upper, configurable: true },
+        lowerOpen: { value: Boolean(lowerOpen), configurable: true },
+        upperOpen: { value: Boolean(upperOpen), configurable: true },
+      });
     }
     includes(key) { return keyInRange(key, this); }
     static only(value) { return new IDBKeyRange(idbKeyRangeToken, value, value, false, false); }
@@ -1737,14 +1834,17 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     static upperBound(upper, open = false) { return new IDBKeyRange(idbKeyRangeToken, undefined, upper, true, open); }
     static bound(lower, upper, lowerOpen = false, upperOpen = false) { if (compareIDBKey(lower, upper) > 0 || (compareIDBKey(lower, upper) === 0 && (lowerOpen || upperOpen))) throw namedError('DataError'); return new IDBKeyRange(idbKeyRangeToken, lower, upper, lowerOpen, upperOpen); }
   }
+  if (globalThis.EventTarget?.prototype) {
+    Object.setPrototypeOf(IDBRequest.prototype, globalThis.EventTarget.prototype);
+    Object.setPrototypeOf(IDBTransaction.prototype, globalThis.EventTarget.prototype);
+  }
+  if (globalThis.EventTarget?.prototype) Object.setPrototypeOf(IDBDatabase.prototype, globalThis.EventTarget.prototype);
 
   function IDBCursor() { throw new TypeError("Failed to construct 'IDBCursor': Illegal constructor"); }
-  Object.defineProperty(IDBCursor, Symbol.hasInstance, { value: (value) => value instanceof IDBCursorWithValue, configurable: true });
   Object.defineProperty(IDBCursor.prototype, Symbol.toStringTag, { value: 'IDBCursor', configurable: true });
 
   class IDBCursorWithValue {
-    constructor(token, request, source, entries, position, direction) { if (token !== idbCursorToken) throw new TypeError("Failed to construct 'IDBCursorWithValue': Illegal constructor"); const entry = entries[position]; this.__zpRequest = request; this.__zpSource = source; this.__zpEntries = entries; this.__zpPosition = position; this.source = source; this.direction = direction; this.key = entry.key; this.primaryKey = entry.primaryKey; this.value = cloneValue(entry.value, new Map()); }
-    continue() { this.__zpRequest.transaction?.__zpHold?.(); queueCursor(this.__zpRequest, this.__zpSource, this.__zpEntries, this.__zpPosition + 1, this.direction); }
+    constructor(token, request, source, entries, position, direction) { if (token !== idbCursorToken) throw new TypeError("Failed to construct 'IDBCursorWithValue': Illegal constructor"); const entry = entries[position]; this.__zpRequest = request; this.__zpSource = source; this.__zpEntries = entries; this.__zpPosition = position; Object.defineProperties(this, { source: { value: source, configurable: true }, direction: { value: direction, configurable: true }, key: { value: entry.key, configurable: true }, primaryKey: { value: entry.primaryKey, configurable: true }, value: { value: cloneValue(entry.value, new Map()), configurable: true } }); }
   }
   Object.defineProperty(IDBRequest.prototype, Symbol.toStringTag, { value: 'IDBRequest', configurable: true });
   Object.defineProperty(IDBOpenDBRequest.prototype, Symbol.toStringTag, { value: 'IDBOpenDBRequest', configurable: true });
@@ -1752,11 +1852,143 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   Object.defineProperty(IDBTransaction.prototype, Symbol.toStringTag, { value: 'IDBTransaction', configurable: true });
   Object.defineProperty(IDBObjectStore.prototype, Symbol.toStringTag, { value: 'IDBObjectStore', configurable: true });
   Object.defineProperty(IDBIndex.prototype, Symbol.toStringTag, { value: 'IDBIndex', configurable: true });
+  Object.defineProperty(IDBRecord.prototype, Symbol.toStringTag, { value: 'IDBRecord', configurable: true });
   Object.defineProperty(IDBKeyRange.prototype, Symbol.toStringTag, { value: 'IDBKeyRange', configurable: true });
   Object.defineProperty(IDBCursorWithValue.prototype, Symbol.toStringTag, { value: 'IDBCursorWithValue', configurable: true });
   Object.setPrototypeOf(IDBCursorWithValue.prototype, IDBCursor.prototype);
   Object.defineProperty(IDBCursorWithValue.prototype, 'constructor', { value: IDBCursorWithValue, configurable: true, writable: true });
+  Object.defineProperties(IDBRequest.prototype, {
+    result: idbReadonlyOwnAccessor('result'),
+    error: idbReadonlyOwnAccessor('error'),
+    source: idbReadonlyOwnAccessor('source'),
+    transaction: idbReadonlyOwnAccessor('transaction'),
+    readyState: idbReadonlyOwnAccessor('readyState'),
+    onsuccess: idbEventHandlerAccessor('onsuccess'),
+    onerror: idbEventHandlerAccessor('onerror'),
+  });
+  Object.defineProperties(IDBOpenDBRequest.prototype, {
+    onblocked: idbEventHandlerAccessor('onblocked'),
+    onupgradeneeded: idbEventHandlerAccessor('onupgradeneeded'),
+  });
+  Object.defineProperties(IDBTransaction.prototype, {
+    db: idbReadonlyOwnAccessor('db'),
+    durability: idbReadonlyOwnAccessor('durability'),
+    mode: idbReadonlyOwnAccessor('mode'),
+    objectStoreNames: idbReadonlyOwnAccessor('objectStoreNames'),
+    error: idbReadonlyOwnAccessor('error'),
+    onabort: idbEventHandlerAccessor('onabort'),
+    oncomplete: idbEventHandlerAccessor('oncomplete'),
+    onerror: idbEventHandlerAccessor('onerror'),
+  });
+  Object.defineProperties(IDBDatabase.prototype, {
+    name: idbReadonlyOwnAccessor('name'),
+    version: idbReadonlyOwnAccessor('version'),
+    objectStoreNames: idbReadonlyOwnAccessor('objectStoreNames'),
+    onabort: idbEventHandlerAccessor('onabort'),
+    onclose: idbEventHandlerAccessor('onclose'),
+    onerror: idbEventHandlerAccessor('onerror'),
+    onversionchange: idbEventHandlerAccessor('onversionchange'),
+  });
+  Object.defineProperties(IDBCursor.prototype, {
+    source: idbCursorAccessor('source'),
+    direction: idbCursorAccessor('direction'),
+    key: idbCursorAccessor('key'),
+    primaryKey: idbCursorAccessor('primaryKey'),
+    request: { get() { return this.__zpRequest || null; }, enumerable: true, configurable: true },
+    advance: { value: function advance(count) { cursorContinue(this, Math.max(1, Number(count) || 1)); }, enumerable: true, writable: true, configurable: true },
+    continue: { value: { continue() { cursorContinue(this, 1); } }.continue, enumerable: true, writable: true, configurable: true },
+    continuePrimaryKey: { value: function continuePrimaryKey(key, primaryKey) { void key; void primaryKey; cursorContinue(this, 1); }, enumerable: true, writable: true, configurable: true },
+    update: { value: function update(value) { return cursorStore(this).put(value, this.primaryKey); }, enumerable: true, writable: true, configurable: true },
+    delete: { value: { delete() { return cursorStore(this).delete(this.primaryKey); } }.delete, enumerable: true, writable: true, configurable: true },
+  });
+  Object.defineProperty(IDBCursorWithValue.prototype, 'value', idbCursorAccessor('value'));
+  Object.defineProperties(IDBObjectStore.prototype, {
+    name: idbMutableOwnAccessor('name'),
+    keyPath: idbReadonlyOwnAccessor('keyPath'),
+    indexNames: idbReadonlyOwnAccessor('indexNames'),
+    transaction: idbReadonlyOwnAccessor('transaction'),
+    autoIncrement: idbReadonlyOwnAccessor('autoIncrement'),
+  });
+  Object.defineProperties(IDBIndex.prototype, {
+    name: idbMutableOwnAccessor('name'),
+    objectStore: idbReadonlyOwnAccessor('objectStore'),
+    keyPath: idbReadonlyOwnAccessor('keyPath'),
+    multiEntry: idbReadonlyOwnAccessor('multiEntry'),
+    unique: idbReadonlyOwnAccessor('unique'),
+  });
+  Object.defineProperties(IDBRecord.prototype, {
+    key: idbReadonlyOwnAccessor('key'),
+    primaryKey: idbReadonlyOwnAccessor('primaryKey'),
+    value: idbReadonlyOwnAccessor('value'),
+  });
+  Object.defineProperties(IDBKeyRange.prototype, {
+    lower: idbReadonlyOwnAccessor('lower'),
+    upper: idbReadonlyOwnAccessor('upper'),
+    lowerOpen: idbReadonlyOwnAccessor('lowerOpen'),
+    upperOpen: idbReadonlyOwnAccessor('upperOpen'),
+  });
 
+
+  function installHTMLAudioPrototypeChain() {
+    if (globalThis.HTMLElement?.prototype && globalThis.Element?.prototype && globalThis.HTMLElement.prototype !== globalThis.Element.prototype && Object.getPrototypeOf(globalThis.HTMLElement.prototype) !== globalThis.Element.prototype) {
+      Object.setPrototypeOf(globalThis.HTMLElement.prototype, globalThis.Element.prototype);
+    }
+    if (globalThis.HTMLMediaElement?.prototype && globalThis.HTMLElement?.prototype && globalThis.HTMLMediaElement.prototype !== globalThis.HTMLElement.prototype && Object.getPrototypeOf(globalThis.HTMLMediaElement.prototype) !== globalThis.HTMLElement.prototype) {
+      Object.setPrototypeOf(globalThis.HTMLMediaElement.prototype, globalThis.HTMLElement.prototype);
+    }
+    if (globalThis.HTMLAudioElement?.prototype && globalThis.HTMLMediaElement?.prototype && globalThis.HTMLAudioElement.prototype !== globalThis.HTMLMediaElement.prototype && Object.getPrototypeOf(globalThis.HTMLAudioElement.prototype) !== globalThis.HTMLMediaElement.prototype) {
+      Object.setPrototypeOf(globalThis.HTMLAudioElement.prototype, globalThis.HTMLMediaElement.prototype);
+    }
+  }
+
+  function installGlobalPrototypeChains() {
+    for (const name of ['WebGLBuffer', 'WebGLFramebuffer', 'WebGLProgram', 'WebGLRenderbuffer', 'WebGLShader', 'WebGLTexture', 'WebGLVertexArrayObject', 'WebGLSampler', 'WebGLQuery', 'WebGLSync', 'WebGLTransformFeedback']) {
+      if (globalThis[name]?.prototype && globalThis.WebGLObject?.prototype && Object.getPrototypeOf(globalThis[name].prototype) !== globalThis.WebGLObject.prototype) {
+        Object.setPrototypeOf(globalThis[name].prototype, globalThis.WebGLObject.prototype);
+      }
+    }
+    for (const name of ['SharedStorageAppendMethod', 'SharedStorageClearMethod', 'SharedStorageDeleteMethod', 'SharedStorageSetMethod']) {
+      if (globalThis[name]?.prototype && globalThis.SharedStorageModifierMethod?.prototype && Object.getPrototypeOf(globalThis[name].prototype) !== globalThis.SharedStorageModifierMethod.prototype) {
+        Object.setPrototypeOf(globalThis[name].prototype, globalThis.SharedStorageModifierMethod.prototype);
+      }
+    }
+  }
+
+  function installSchedulerTaskShapes() {
+    const eventTargetProto = globalThis.EventTarget?.prototype || Object.prototype;
+    if (globalThis.TaskController?.prototype) {
+      delete globalThis.TaskController.prototype.abort;
+      if (globalThis.AbortController?.prototype && Object.getPrototypeOf(globalThis.TaskController.prototype) !== globalThis.AbortController.prototype) {
+        Object.setPrototypeOf(globalThis.TaskController.prototype, globalThis.AbortController.prototype);
+      }
+    }
+    if (globalThis.TaskSignal?.prototype) {
+      delete globalThis.TaskSignal.prototype.addEventListener;
+      delete globalThis.TaskSignal.prototype.dispatchEvent;
+      delete globalThis.TaskSignal.prototype.removeEventListener;
+      delete globalThis.TaskSignal.prototype.throwIfAborted;
+      const signalProto = globalThis.AbortSignal?.prototype || eventTargetProto;
+      if (Object.getPrototypeOf(globalThis.TaskSignal.prototype) !== signalProto) {
+        Object.setPrototypeOf(globalThis.TaskSignal.prototype, signalProto);
+      }
+      Object.defineProperties(globalThis.TaskSignal.prototype, {
+        priority: { get() { return this?.__zpPriority || 'user-visible'; }, enumerable: true, configurable: true },
+        onprioritychange: idbEventHandlerAccessor('onprioritychange'),
+      });
+      if (!Object.prototype.hasOwnProperty.call(globalThis.TaskSignal, 'any')) {
+        Object.defineProperty(globalThis.TaskSignal, 'any', { value: function any(signals) { return Array.from(signals || [])[0] || Object.create(globalThis.TaskSignal.prototype); }, enumerable: true, writable: true, configurable: true });
+      }
+    }
+    if (globalThis.TaskPriorityChangeEvent?.prototype) {
+      if (globalThis.Event?.prototype && Object.getPrototypeOf(globalThis.TaskPriorityChangeEvent.prototype) !== globalThis.Event.prototype) {
+        Object.setPrototypeOf(globalThis.TaskPriorityChangeEvent.prototype, globalThis.Event.prototype);
+      }
+      Object.defineProperty(globalThis.TaskPriorityChangeEvent.prototype, 'previousPriority', { get() { return this?.__zpPreviousPriority || ''; }, enumerable: true, configurable: true });
+    }
+    if (globalThis.Scheduling?.prototype) {
+      Object.defineProperty(globalThis.Scheduling.prototype, 'isInputPending', { value: function isInputPending() { return false; }, enumerable: true, writable: true, configurable: true });
+    }
+  }
 
   function installElementReflections() {
     if (!globalThis.Element?.prototype) return;
@@ -1774,23 +2006,65 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   function installElementCoreReflections(proto) {
     defineElementGetter(proto, 'dataset', function dataset() { return datasetFor(this); });
     defineElementGetter(proto, 'classList', function classList() { return classListFor(this); });
+    Object.defineProperty(proto, 'classList', { get: Object.getOwnPropertyDescriptor(proto, 'classList')?.get, set(_) {}, configurable: true });
     defineElementGetter(proto, 'relList', function relList() { return relListFor(this); });
     defineElementGetter(proto, 'style', function style() { return styleFor(this); });
     defineElementGetter(proto, 'attributeStyleMap', function attributeStyleMap() { return stylePropertyMapFor(styleFor(this)); });
     defineElementGetter(proto, 'assignedSlot', function assignedSlot() { return assignedSlotFor(this); });
+
     if (!Object.getOwnPropertyDescriptor(proto, 'assignedNodes')) Object.defineProperty(proto, 'assignedNodes', { value(options = undefined) { return isSlotElement(this) ? assignedNodesForSlot(this, options) : []; }, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'assignedElements')) Object.defineProperty(proto, 'assignedElements', { value(options = undefined) { return assignedNodesForSlot(this, options).filter((node) => node.nodeType === 1); }, configurable: true });
     defineElementGetter(proto, 'sheet', function sheet() { return isStyleSheetOwner(this) ? styleSheetForElement(this) : null; });
+
     if (!Object.getOwnPropertyDescriptor(proto, 'assign')) Object.defineProperty(proto, 'assign', { value(...nodes) { if (isSlotElement(this)) assignSlotNodes(this, nodes); }, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'attachInternals')) Object.defineProperty(proto, 'attachInternals', { value() { return elementInternalsFor(this); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'attachShadow')) Object.defineProperty(proto, 'attachShadow', { value(init = {}) { return attachShadowRoot(this, init); }, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'attachShadow')) Object.defineProperty(proto, 'attachShadow', { value(init) { return attachShadowRoot(this, init || {}); }, writable: true, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'shadowRoot')) Object.defineProperty(proto, 'shadowRoot', { get() { return this.__zpOpenShadowRoot || null; }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'requestFullscreen')) Object.defineProperty(proto, 'requestFullscreen', { value(options = {}) { return requestFullscreenFor(this, options); }, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'requestFullscreen')) Object.defineProperty(proto, 'requestFullscreen', { value() { return requestFullscreenFor(this, arguments[0] || {}); }, writable: true, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'focus')) Object.defineProperty(proto, 'focus', { value() { focusElement(this); }, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'blur')) Object.defineProperty(proto, 'blur', { value() { blurElement(this); }, configurable: true });
     installElementAttrNodeReflections(proto);
     if (!Object.getOwnPropertyDescriptor(proto, Symbol.toStringTag)) Object.defineProperty(proto, Symbol.toStringTag, { get() { return elementToStringTag(this); }, configurable: true });
   }
+
+
+  function installSVGElementPrototypeAssignment() {
+    const proto = globalThis.Document?.prototype;
+    const original = proto?.createElementNS;
+    if (!original || original.__zpSVGPrototypeWrapped) return;
+    const createElementNS = function createElementNS(namespaceURI, qualifiedName) {
+      const element = original.call(this, namespaceURI, qualifiedName, arguments[2]);
+      assignSVGElementPrototype(element);
+      return element;
+    };
+    Object.defineProperty(createElementNS, '__zpSVGPrototypeWrapped', { value: true });
+    Object.defineProperty(proto, 'createElementNS', { value: createElementNS, writable: true, configurable: true });
+  }
+
+  function assignSVGElementPrototype(element) {
+    if (element?.nodeType !== 1 || element.namespaceURI !== 'http://www.w3.org/2000/svg') return;
+    const ctor = globalThis[svgInterfaceNameForTag(element.localName)];
+    if (ctor?.prototype && Object.getPrototypeOf(element) !== ctor.prototype) Object.setPrototypeOf(element, ctor.prototype);
+  }
+
+  function installSVGElementBaseReflection() {
+    const proto = globalThis.SVGElement?.prototype;
+    if (!proto || Object.prototype.hasOwnProperty.call(proto, 'blur')) return;
+    for (const name of ['attributeStyleMap', 'className', 'dataset', 'ownerSVGElement', 'viewportElement']) {
+      Object.defineProperty(proto, name, { get() { return this?.['__zp_' + name] ?? null; }, enumerable: true, configurable: true });
+    }
+    for (const name of ['autofocus', 'nonce', 'style', 'tabIndex']) {
+      Object.defineProperty(proto, name, { get() { return this?.['__zp_' + name] ?? ''; }, set(value) { Object.defineProperty(this, '__zp_' + name, { value, configurable: true, writable: true }); }, enumerable: true, configurable: true });
+    }
+    for (const name of ['onabort', 'onanimationcancel', 'onanimationend', 'onanimationiteration', 'onanimationstart', 'onauxclick', 'onbeforeinput', 'onbeforematch', 'onbeforetoggle', 'onbeforexrselect', 'onblur', 'oncancel', 'oncanplay', 'oncanplaythrough', 'onchange', 'onclick', 'onclose', 'oncommand', 'oncontentvisibilityautostatechange', 'oncontextlost', 'oncontextmenu', 'oncontextrestored', 'oncopy', 'oncuechange', 'oncut', 'ondblclick', 'ondrag', 'ondragend', 'ondragenter', 'ondragleave', 'ondragover', 'ondragstart', 'ondrop', 'ondurationchange', 'onemptied', 'onended', 'onerror', 'onfocus', 'onformdata', 'ongotpointercapture', 'oninput', 'oninvalid', 'onkeydown', 'onkeypress', 'onkeyup', 'onload', 'onloadeddata', 'onloadedmetadata', 'onloadstart', 'onlostpointercapture', 'onmousedown', 'onmouseenter', 'onmouseleave', 'onmousemove', 'onmouseout', 'onmouseover', 'onmouseup', 'onmousewheel', 'onpaste', 'onpause', 'onplay', 'onplaying', 'onpointercancel', 'onpointerdown', 'onpointerenter', 'onpointerleave', 'onpointermove', 'onpointerout', 'onpointerover', 'onpointerup', 'onprogress', 'onratechange', 'onreset', 'onresize', 'onscroll', 'onscrollend', 'onscrollsnapchange', 'onscrollsnapchanging', 'onsecuritypolicyviolation', 'onseeked', 'onseeking', 'onselect', 'onselectionchange', 'onselectstart', 'onslotchange', 'onstalled', 'onsubmit', 'onsuspend', 'ontimeupdate', 'ontoggle', 'ontransitioncancel', 'ontransitionend', 'ontransitionrun', 'ontransitionstart', 'onvolumechange', 'onwaiting', 'onwebkitanimationend', 'onwebkitanimationiteration', 'onwebkitanimationstart', 'onwebkittransitionend', 'onwheel']) {
+      Object.defineProperty(proto, name, { get() { return this?.['__zp_' + name] ?? null; }, set(value) { Object.defineProperty(this, '__zp_' + name, { value: typeof value === 'function' ? value : null, configurable: true, writable: true }); }, enumerable: true, configurable: true });
+    }
+    Object.defineProperties(proto, {
+      blur: { value: function blur() {}, enumerable: true, writable: true, configurable: true },
+      focus: { value: function focus() {}, enumerable: true, writable: true, configurable: true },
+    });
+  }
+
 
   function elementInternalsFor(element) {
     if (!element.__zpElementInternals) Object.defineProperty(element, '__zpElementInternals', { value: new ElementInternals(elementInternalsToken, element), configurable: true });
@@ -1802,9 +2076,9 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     defineElementProperty(proto, 'type', inputType, setInputType);
     defineElementProperty(proto, 'defaultValue', defaultInputValue, setDefaultInputValue);
     defineElementProperty(proto, 'value', elementValue, setElementValue);
-    if (!Object.getOwnPropertyDescriptor(proto, 'setPointerCapture')) Object.defineProperty(proto, 'setPointerCapture', { value(pointerId) { setPointerCaptureFor(this, pointerId); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'releasePointerCapture')) Object.defineProperty(proto, 'releasePointerCapture', { value(pointerId) { releasePointerCaptureFor(this, pointerId); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'hasPointerCapture')) Object.defineProperty(proto, 'hasPointerCapture', { value(pointerId) { return pointerCaptureSet(this).has(toPointerId(pointerId)); }, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'setPointerCapture')) Object.defineProperty(proto, 'setPointerCapture', { value(pointerId) { setPointerCaptureFor(this, pointerId); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'releasePointerCapture')) Object.defineProperty(proto, 'releasePointerCapture', { value(pointerId) { releasePointerCaptureFor(this, pointerId); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'hasPointerCapture')) Object.defineProperty(proto, 'hasPointerCapture', { value(pointerId) { return pointerCaptureSet(this).has(toPointerId(pointerId)); }, writable: true, configurable: true });
     defineElementProperty(proto, 'max', elementMax, setElementMax);
     defineElementProperty(proto, 'min', elementMin, setElementMin);
     defineElementProperty(proto, 'low', elementLow, setElementLow);
@@ -1936,12 +2210,12 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   function installElementMarkupReflections(proto) {
     if (!Object.getOwnPropertyDescriptor(proto, 'innerHTML')) Object.defineProperty(proto, 'innerHTML', { get() { return serializeChildren(elementMarkupChildren(this)); }, set(value) { replaceElementMarkupChildren(this, String(value || '')); }, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'outerHTML')) Object.defineProperty(proto, 'outerHTML', { get() { return serializeNode(this); }, set(value) { replaceOuterHTML(this, String(value || '')); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'setHTMLUnsafe')) Object.defineProperty(proto, 'setHTMLUnsafe', { value(value = '') { replaceElementMarkupChildren(this, String(value || '')); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'setHTML')) Object.defineProperty(proto, 'setHTML', { value(value = '', options = undefined) { replaceElementMarkupChildren(this, String(value || ''), (records) => sanitizeHTMLRecords(records, sanitizerPolicyFromOptions(options))); }, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'setHTMLUnsafe')) Object.defineProperty(proto, 'setHTMLUnsafe', { value(value) { replaceElementMarkupChildren(this, String(value || '')); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'setHTML')) Object.defineProperty(proto, 'setHTML', { value(value) { replaceElementMarkupChildren(this, String(value || ''), (records) => sanitizeHTMLRecords(records, sanitizerPolicyFromOptions(arguments[1]))); }, writable: true, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'content')) Object.defineProperty(proto, 'content', { get() { return isTemplateElement(this) ? templateContentFor(this) : undefined; }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'insertAdjacentHTML')) Object.defineProperty(proto, 'insertAdjacentHTML', { value(position, html = '') { insertAdjacentFragment(this, position, fragmentFromHTML(this, String(html ?? ''))); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'insertAdjacentElement')) Object.defineProperty(proto, 'insertAdjacentElement', { value(position, element) { if (element?.nodeType !== 1) throw new TypeError("Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'."); return insertAdjacentNode(this, position, element); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'insertAdjacentText')) Object.defineProperty(proto, 'insertAdjacentText', { value(position, text = '') { insertAdjacentNode(this, position, this.ownerDocument.createTextNode(String(text ?? ''))); }, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'insertAdjacentHTML')) Object.defineProperty(proto, 'insertAdjacentHTML', { value(position, html) { insertAdjacentFragment(this, position, fragmentFromHTML(this, String(html ?? ''))); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'insertAdjacentElement')) Object.defineProperty(proto, 'insertAdjacentElement', { value(position, element) { if (element?.nodeType !== 1) throw new TypeError("Failed to execute 'insertAdjacentElement' on 'Element': parameter 2 is not of type 'Element'."); return insertAdjacentNode(this, position, element); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'insertAdjacentText')) Object.defineProperty(proto, 'insertAdjacentText', { value(position, text) { insertAdjacentNode(this, position, this.ownerDocument.createTextNode(String(text ?? ''))); }, writable: true, configurable: true });
   }
 
   function elementMarkupChildren(element) {
@@ -2094,9 +2368,9 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     for (const prop of ['clientWidth', 'offsetWidth', 'scrollWidth']) Object.defineProperty(proto, prop, { get() { return this.getBoundingClientRect?.().width || 0; }, configurable: true });
     for (const prop of ['clientHeight', 'offsetHeight', 'scrollHeight']) Object.defineProperty(proto, prop, { get() { return this.getBoundingClientRect?.().height || 0; }, configurable: true });
     proto.scrollTo = function scrollTo(...args) { scrollElementTo(this, scrollToOptions(args)); };
-    proto.scroll = proto.scrollTo;
+    proto.scroll = function scroll(...args) { scrollElementTo(this, scrollToOptions(args)); };
     proto.scrollBy = function scrollBy(...args) { scrollElementBy(this, scrollDeltaOptions(args)); };
-    if (!Object.getOwnPropertyDescriptor(proto, 'scrollIntoView')) Object.defineProperty(proto, 'scrollIntoView', { value(options = true) { scrollIntoViewFor(this, options); }, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'scrollIntoView')) Object.defineProperty(proto, 'scrollIntoView', { value() { scrollIntoViewFor(this, arguments.length ? arguments[0] : true); }, writable: true, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'getBoxQuads')) Object.defineProperty(proto, 'getBoxQuads', { value(options = {}) { return boxQuadsFor(this, options); }, configurable: true });
   }
 
@@ -2413,16 +2687,16 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   }
 
   function CropTarget() { throw new TypeError("Failed to construct 'CropTarget': Illegal constructor"); }
-  CropTarget.fromElement = function fromElement() { return Promise.reject(namedError('InvalidStateError')); };
+  CropTarget.fromElement = function fromElement(element) { void element; return Promise.reject(namedError('InvalidStateError')); };
   Object.defineProperty(CropTarget.prototype, Symbol.toStringTag, { value: 'CropTarget', configurable: true });
 
   function RestrictionTarget() { throw new TypeError("Failed to construct 'RestrictionTarget': Illegal constructor"); }
-  RestrictionTarget.fromElement = function fromElement() { return Promise.reject(namedError('InvalidStateError')); };
+  RestrictionTarget.fromElement = function fromElement(element) { void element; return Promise.reject(namedError('InvalidStateError')); };
   Object.defineProperty(RestrictionTarget.prototype, Symbol.toStringTag, { value: 'RestrictionTarget', configurable: true });
 
   function DelegatedInkTrailPresenter() { throw new TypeError("Failed to construct 'DelegatedInkTrailPresenter': Illegal constructor"); }
   Object.defineProperty(DelegatedInkTrailPresenter.prototype, 'presentationArea', { get() { return null; }, configurable: true });
-  DelegatedInkTrailPresenter.prototype.updateInkTrailStartPoint = function updateInkTrailStartPoint() { return undefined; };
+  DelegatedInkTrailPresenter.prototype.updateInkTrailStartPoint = function updateInkTrailStartPoint(point, style) { void point; void style; return undefined; };
   Object.defineProperty(DelegatedInkTrailPresenter.prototype, Symbol.toStringTag, { value: 'DelegatedInkTrailPresenter', configurable: true });
 
   class VirtualRemotePlayback extends EventTarget {
@@ -2517,8 +2791,8 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       const element = elementAtPoint(this, x, y);
       return element ? globalThis.CaretPosition?.__zpCreate(element, 0) || null : null;
     };
-    proto.caretRangeFromPoint = function caretRangeFromPoint(x, y) {
-      const element = elementAtPoint(this, x, y);
+    proto.caretRangeFromPoint = function caretRangeFromPoint() {
+      const element = elementAtPoint(this, arguments[0], arguments[1]);
       if (!element) return null;
       const range = this.createRange();
       range.setStart(element, 0);
@@ -2549,19 +2823,19 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     if (key === 'keyboardevent' || key === 'keyboardevents') return globalThis.KeyboardEvent;
     return null;
   }
-    if (!Object.getOwnPropertyDescriptor(globalThis.Document, 'parseHTMLUnsafe')) Object.defineProperty(globalThis.Document, 'parseHTMLUnsafe', { value: (html = '') => new DOMParser().parseFromString(String(html || ''), 'text/html'), configurable: true });
-    if (!Object.getOwnPropertyDescriptor(globalThis.Document, 'parseHTML')) Object.defineProperty(globalThis.Document, 'parseHTML', { value: (html = '', options = undefined) => sanitizeDocument(new DOMParser().parseFromString(String(html || ''), 'text/html'), options), configurable: true });
-    proto.write = function write(text) { if (this.body) appendHTML(this.body, String(text || '')); };
+    if (!Object.getOwnPropertyDescriptor(globalThis.Document, 'parseHTMLUnsafe')) Object.defineProperty(globalThis.Document, 'parseHTMLUnsafe', { value: function parseHTMLUnsafe(html) { return new DOMParser().parseFromString(String(html || ''), 'text/html'); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(globalThis.Document, 'parseHTML')) Object.defineProperty(globalThis.Document, 'parseHTML', { value: function parseHTML(html) { return sanitizeDocument(new DOMParser().parseFromString(String(html || ''), 'text/html'), arguments[1]); }, writable: true, configurable: true });
+    proto.write = function write() { if (this.body) appendHTML(this.body, String(arguments[0] || '')); };
     if (!Object.getOwnPropertyDescriptor(proto, 'pictureInPictureEnabled')) Object.defineProperty(proto, 'pictureInPictureEnabled', { get: () => false, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'pictureInPictureElement')) Object.defineProperty(proto, 'pictureInPictureElement', { get: () => null, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'all')) Object.defineProperty(proto, 'all', { get() { return makeHTMLAllCollection(this); }, configurable: true });
     if (!Object.getOwnPropertyDescriptor(proto, 'activeElement')) Object.defineProperty(proto, 'activeElement', { get() { return activeElementFor(this); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'hasFocus')) Object.defineProperty(proto, 'hasFocus', { value() { return Boolean(this.__zpActiveElement); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'exitPictureInPicture')) Object.defineProperty(proto, 'exitPictureInPicture', { value: () => Promise.reject(namedError('InvalidStateError')), configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'fullscreenElement')) Object.defineProperty(proto, 'fullscreenElement', { get() { return this.__zpFullscreenElement || null; }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'fullscreenEnabled')) Object.defineProperty(proto, 'fullscreenEnabled', { get() { return true; }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'exitFullscreen')) Object.defineProperty(proto, 'exitFullscreen', { value() { return exitFullscreenFor(this); }, configurable: true });
-    if (!Object.getOwnPropertyDescriptor(proto, 'startViewTransition')) Object.defineProperty(proto, 'startViewTransition', { value: startViewTransition, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'hasFocus')) Object.defineProperty(proto, 'hasFocus', { value() { return Boolean(this.__zpActiveElement); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'exitPictureInPicture')) Object.defineProperty(proto, 'exitPictureInPicture', { value: () => Promise.reject(namedError('InvalidStateError')), writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'fullscreenElement')) Object.defineProperty(proto, 'fullscreenElement', { get() { return this.__zpFullscreenElement || null; }, set(_) {}, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'fullscreenEnabled')) Object.defineProperty(proto, 'fullscreenEnabled', { get() { return true; }, set(_) {}, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'exitFullscreen')) Object.defineProperty(proto, 'exitFullscreen', { value() { return exitFullscreenFor(this); }, writable: true, configurable: true });
+    if (!Object.getOwnPropertyDescriptor(proto, 'startViewTransition')) Object.defineProperty(proto, 'startViewTransition', { value: startViewTransition, writable: true, configurable: true });
     installDocumentImplementation(proto);
   }
   function HTMLAllCollection() { throw new TypeError("Failed to construct 'HTMLAllCollection': Illegal constructor"); }
@@ -3554,6 +3828,21 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     });
   }
 
+  function htmlCollectionValues() {
+    const length = Number(this?.length) || 0;
+    let index = 0;
+    return {
+      next: () => {
+        if (index >= length) return { value: undefined, done: true };
+        const value = this.item?.(index) ?? this[index] ?? null;
+        index += 1;
+        return { value, done: false };
+      },
+      [Symbol.iterator]() { return this; },
+    };
+  }
+  Object.defineProperty(htmlCollectionValues, 'name', { value: 'values', configurable: true });
+
   function installHTMLOptionsCollectionPrototype() {
     const constructorDescriptor = Object.getOwnPropertyDescriptor(HTMLOptionsCollection.prototype, 'constructor') || { value: HTMLOptionsCollection, writable: true, configurable: true };
     delete HTMLOptionsCollection.prototype.constructor;
@@ -3564,6 +3853,8 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       remove: { value: function remove(index) { removeOptionElement(optionsCollectionSelect(this), index); }, enumerable: true, writable: true, configurable: true },
       constructor: { ...constructorDescriptor, value: HTMLOptionsCollection },
     });
+    Object.defineProperty(HTMLOptionsCollection.prototype, Symbol.iterator, { value: htmlCollectionValues, writable: true, configurable: true });
+    if (globalThis.HTMLCollection?.prototype) Object.setPrototypeOf(HTMLOptionsCollection.prototype, globalThis.HTMLCollection.prototype);
   }
 
   function optionsCollectionSelect(collection) {
@@ -3830,6 +4121,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     const range = rangeValidity(element, value);
     flags.rangeUnderflow = range.underflow;
     flags.rangeOverflow = range.overflow;
+    flags.stepMismatch = inputStepMismatch(element, value);
     return flags;
   }
 
@@ -3865,6 +4157,19 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   function lengthOverflow(element, value) {
     const max = numericAttribute(element, 'maxlength');
     return max >= 0 && String(value).length > max;
+  }
+
+  function inputStepMismatch(element, value) {
+    if (!isElement(element, 'input') || element.type !== 'number' || value === '') return false;
+    const stepText = element.getAttribute?.('step');
+    if (!stepText || String(stepText).toLowerCase() === 'any') return false;
+    const step = Number(stepText);
+    const number = Number(value);
+    if (!Number.isFinite(step) || step <= 0 || !Number.isFinite(number)) return false;
+    const min = Number(element.getAttribute?.('min'));
+    const base = Number.isFinite(min) ? min : 0;
+    const quotient = (number - base) / step;
+    return Math.abs(quotient - Math.round(quotient)) > 1e-9;
   }
 
   function rangeValidity(element, value) {
@@ -3929,6 +4234,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     Object.defineProperties(HTMLFormControlsCollection.prototype, {
       namedItem: { value: function namedItem(name) { return formControlsNamedItem(formControlsCollectionForm(this), name); }, enumerable: true, writable: true, configurable: true },
       constructor: { ...constructorDescriptor, value: HTMLFormControlsCollection },
+      [Symbol.iterator]: { value: htmlCollectionValues, writable: true, configurable: true },
     });
     if (globalThis.HTMLCollection?.prototype) Object.setPrototypeOf(HTMLFormControlsCollection.prototype, globalThis.HTMLCollection.prototype);
   }
@@ -4431,13 +4737,92 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   }
   function computedStyle(element) {
     const out = new CSSStyleDeclaration();
-    const source = element?.style;
-    if (!source) return out;
+    if (!element?.style) return out;
+    applyAuthorStyleRules(out, element);
+    const source = element.style;
     for (let i = 0; i < source.length; i++) {
       const name = source.item(i);
       out.setProperty(name, computedStyleValue(name, source.getPropertyValue(name)), source.getPropertyPriority(name));
     }
     return out;
+  }
+
+  function applyAuthorStyleRules(out, element) {
+    const doc = element.ownerDocument || globalThis.document;
+    const sheets = doc?.styleSheets || [];
+    for (let i = 0; i < sheets.length; i++) {
+      applyStyleSheetRules(out, element, sheets.item ? sheets.item(i) : sheets[i]);
+    }
+    const adopted = doc?.adoptedStyleSheets || [];
+    for (let i = 0; i < adopted.length; i++) {
+      applyStyleSheetRules(out, element, adopted[i]);
+    }
+    const styles = doc?.getElementsByTagName?.('style') || [];
+    for (let i = 0; i < styles.length; i++) {
+      applyStyleSheetText(out, element, styles.item ? styles.item(i)?.textContent : styles[i]?.textContent);
+    }
+    const bodyStyles = doc?.body?.getElementsByTagName?.('style') || [];
+    for (let i = 0; i < bodyStyles.length; i++) {
+      applyStyleSheetText(out, element, bodyStyles.item ? bodyStyles.item(i)?.textContent : bodyStyles[i]?.textContent);
+    }
+    const headStyles = doc?.head?.getElementsByTagName?.('style') || [];
+    for (let i = 0; i < headStyles.length; i++) {
+      applyStyleSheetText(out, element, headStyles.item ? headStyles.item(i)?.textContent : headStyles[i]?.textContent);
+    }
+  }
+
+  function applyStyleSheetRules(out, element, sheet) {
+    const rules = sheet?.cssRules || [];
+    for (let i = 0; i < rules.length; i++) {
+      const rule = rules.item ? rules.item(i) : rules[i];
+      if (!rule?.selectorText || !rule.style) continue;
+      for (const selector of String(rule.selectorText).split(',')) {
+        const query = selector.trim();
+        if (!query || !styleRuleMatchesElement(element, query)) continue;
+        if (rule.style.length) {
+          for (let index = 0; index < rule.style.length; index++) {
+            const name = rule.style.item(index);
+            out.setProperty(name, computedStyleValue(name, rule.style.getPropertyValue(name)), rule.style.getPropertyPriority(name));
+          }
+        } else {
+          const cssText = rule.style.cssText || String(rule.cssText || '').replace(/^[^{]*\{|\}\s*$/g, '');
+          parseStyleDeclarations(cssText, (name, value, priority) => {
+            out.setProperty(name, computedStyleValue(name, value), priority);
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  function applyStyleSheetText(out, element, text) {
+    const css = String(text || '');
+    const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+    for (let match; (match = rulePattern.exec(css));) {
+      const selectorText = match[1].trim();
+      const declarations = match[2];
+      for (const selector of selectorText.split(',')) {
+        const query = selector.trim();
+        if (!query || !styleRuleMatchesElement(element, query)) continue;
+        parseStyleDeclarations(declarations, (name, value, priority) => {
+          out.setProperty(name, computedStyleValue(name, value), priority);
+        });
+        break;
+      }
+    }
+  }
+
+  function styleRuleMatchesElement(element, selector) {
+    try {
+      if (element.matches?.(selector)) return true;
+    } catch {
+      return false;
+    }
+    const text = String(selector || '').trim();
+    if (!text || /[\s>+~:[\],]/.test(text)) return false;
+    if (text[0] === '#') return element.id === text.slice(1);
+    if (text[0] === '.') return String(element.className || '').split(/\s+/).includes(text.slice(1));
+    return String(element.localName || '').toLowerCase() === text.toLowerCase();
   }
   function computedStyleValue(name, value) {
     const key = styleName(name);
@@ -4789,6 +5174,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     Object.defineProperty(URLCtor, 'revokeObjectURL', { value: revokeObjectURL, writable: true, enumerable: true, configurable: true });
     globalThis.URL = URLCtor;
     globalThis.webkitURL = URLCtor;
+    Object.defineProperty(globalThis, '__zpResolveBlobURL', { value: resolveBlobURL, configurable: true });
   }
 
   const virtualURLHref = new WeakMap();
@@ -5055,6 +5441,12 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   function revokeObjectURL(url) {
     blobURLRegistry.delete(String(url));
   }
+
+  function resolveBlobURL(url) {
+    const blob = blobURLRegistry.get(String(url));
+    if (!blob) throw new TypeError('Failed to fetch');
+    return blob;
+  }
   function installWindowEventTarget() {
     if (typeof globalThis.addEventListener === 'function' && typeof globalThis.dispatchEvent === 'function') return;
     const bus = new EventTarget();
@@ -5211,8 +5603,8 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       writable: true,
       configurable: true,
     },
-    getAttributeType: { value: function getAttributeType() { trustedFactoryValue(this, 'getAttributeType'); return null; }, enumerable: true, writable: true, configurable: true },
-    getPropertyType: { value: function getPropertyType() { trustedFactoryValue(this, 'getPropertyType'); return null; }, enumerable: true, writable: true, configurable: true },
+    getAttributeType: { value: function getAttributeType(element, attribute) { void element; void attribute; trustedFactoryValue(this, 'getAttributeType'); return null; }, enumerable: true, writable: true, configurable: true },
+    getPropertyType: { value: function getPropertyType(element, property) { void element; void property; trustedFactoryValue(this, 'getPropertyType'); return null; }, enumerable: true, writable: true, configurable: true },
     getTypeMapping: { value: function getTypeMapping() { trustedFactoryValue(this, 'getTypeMapping'); return null; }, enumerable: true, writable: true, configurable: true },
     isHTML: { value: function isHTML(value) { trustedFactoryValue(this, 'isHTML'); return trustedHTMLSlots.has(value); }, enumerable: true, writable: true, configurable: true },
     isScript: { value: function isScript(value) { trustedFactoryValue(this, 'isScript'); return trustedScriptSlots.has(value); }, enumerable: true, writable: true, configurable: true },
@@ -6172,8 +6564,10 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     }
     class MessageChannel {
       constructor() {
-        this.port1 = new MessagePort();
-        this.port2 = new MessagePort();
+        Object.defineProperties(this, {
+          port1: { value: new MessagePort(), configurable: true },
+          port2: { value: new MessagePort(), configurable: true },
+        });
         this.port1.__zpEntangled = this.port2;
         this.port2.__zpEntangled = this.port1;
       }
@@ -6181,7 +6575,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     class BroadcastChannel extends EventTarget {
       constructor(name) {
         super();
-        this.name = String(name);
+        Object.defineProperty(this, 'name', { value: String(name), configurable: true });
         this.__zpClosed = false;
         const bucket = broadcastChannels.get(this.name) || new Set();
         bucket.add(this);
@@ -6271,10 +6665,23 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       Object.defineProperty(globalThis, name, { value: ctor, writable: true, configurable: true });
     }
     Object.defineProperty(MessagePort.prototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });
+    Object.defineProperties(MessagePort.prototype, {
+      onmessage: idbEventHandlerAccessor('onmessage'),
+      onmessageerror: idbEventHandlerAccessor('onmessageerror'),
+    });
+    Object.defineProperties(MessageChannel.prototype, {
+      port1: idbReadonlyOwnAccessor('port1'),
+      port2: idbReadonlyOwnAccessor('port2'),
+    });
     Object.defineProperty(MessageChannel.prototype, Symbol.toStringTag, { value: 'MessageChannel', configurable: true });
     globalThis.MessagePort = MessagePort;
     globalThis.MessageChannel = MessageChannel;
     Object.defineProperty(BroadcastChannel.prototype, Symbol.toStringTag, { value: 'BroadcastChannel', configurable: true });
+    Object.defineProperties(BroadcastChannel.prototype, {
+      name: idbReadonlyOwnAccessor('name'),
+      onmessage: idbEventHandlerAccessor('onmessage'),
+      onmessageerror: idbEventHandlerAccessor('onmessageerror'),
+    });
     globalThis.BroadcastChannel = BroadcastChannel;
   }
 
@@ -6469,8 +6876,12 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   const WEBIDL_REMOVE_HAS_INSTANCE = new Set([
     'AbortSignal',
     'FragmentDirective',
+    'History',
+    'Navigator',
+    'IDBFactory',
     'NetworkInformation',
     'Screen',
+    'SVGElement',
     'UserActivation',
     'VisualViewport',
   ]);
@@ -6703,7 +7114,9 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     globalThis.Location = makeIllegalBrandConstructor('Location', (value) => hasObjectTag(value, 'Location'));
     globalThis.Navigator = makeIllegalBrandConstructor('Navigator', (value) => hasObjectTag(value, 'Navigator'));
     installGlobalFacades(htmlElementConstructors);
+    installHTMLAudioPrototypeChain();
     installGlobalFacades(svgElementConstructors);
+    installSVGElementPrototypeAssignment();
     installGlobalFacades(svgValueFacades);
     globalThis.Image = makeImageConstructor();
     globalThis.Audio = makeAudioConstructor();
@@ -6719,6 +7132,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     globalThis.OffscreenCanvas = OffscreenCanvas;
     globalThis.OffscreenCanvasRenderingContext2D = OffscreenCanvasRenderingContext2D;
     globalThis.Path2D = Path2D;
+    installSVGElementBaseReflection();
     globalThis.TextMetrics = TextMetrics;
     installGlobalFacades(webGLFacades);
     globalThis.AudioData = AudioData;
@@ -6831,6 +7245,7 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     globalThis.IDBCursor = IDBCursor;
     globalThis.IDBCursorWithValue = IDBCursorWithValue;
     globalThis.IDBKeyRange = IDBKeyRange;
+    globalThis.IDBRecord = IDBRecord;
     Object.defineProperty(globalThis, 'Permissions', { value: Permissions, writable: true, configurable: true });
     Object.defineProperty(globalThis, 'StorageManager', { value: NavigatorStorageManager, writable: true, configurable: true });
     globalThis.PluginArray = PluginArray;
@@ -6899,6 +7314,9 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     globalThis.RTCEncodedVideoFrame = RTCEncodedVideoFrame;
     globalThis.RTCRtpScriptTransform = RTCRtpScriptTransform;
     installGlobalFacades(emergingGlobalFacades);
+    installGlobalPrototypeChains();
+    installSchedulerTaskShapes();
+    globalThis.IDBRecord = IDBRecord;
     installGlobalFacades(backgroundServiceFacades);
     globalThis.MediaStream = MediaStream;
     globalThis.webkitMediaStream = MediaStream;
@@ -6939,19 +7357,27 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     globalThis.Crypto = Crypto;
     globalThis.crypto = makeCrypto();
     globalThis.caches = new CacheStorage();
-    globalThis.indexedDB = makeIndexedDBFactory();
+    const indexedDBValue = makeIndexedDBFactory();
+    const indexedDBDescriptor = Object.getOwnPropertyDescriptor({ get indexedDB() { return indexedDBValue; } }, 'indexedDB');
+    Object.defineProperty(globalThis, 'indexedDB', { get: indexedDBDescriptor.get, enumerable: true, configurable: true });
     globalThis.localStorage = new Storage(storageToken, 'localStorage', storageMaps.localStorage);
     globalThis.sessionStorage = new Storage(storageToken, 'sessionStorage', storageMaps.sessionStorage);
     globalThis.getSelection = () => (globalThis.__zpSelection ||= new Selection());
     globalThis.getComputedStyle = (element) => computedStyle(element);
     globalThis.launchQueue = makeLaunchQueue(config);
     globalThis.crashReport = makeCrashReportContext();
-    Object.defineProperty(globalThis, 'trustedTypes', { value: makeTrustedTypePolicyFactory(), writable: true, configurable: true });
+    const trustedTypesValue = makeTrustedTypePolicyFactory();
+    const trustedTypesAccessor = Object.getOwnPropertyDescriptor({ get trustedTypes() { return trustedTypesValue; } }, 'trustedTypes');
+    Object.defineProperty(globalThis, 'trustedTypes', { get: trustedTypesAccessor.get, enumerable: true, configurable: true });
     installFeaturePolicy(config);
-    globalThis.navigator = makeNavigator(config);
+    const navigatorValue = makeNavigator(config);
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor({ get navigator() { return navigatorValue; } }, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { get: navigatorDescriptor.get, enumerable: true, configurable: true });
     const clientInformationDescriptor = Object.getOwnPropertyDescriptor({ get clientInformation() { return globalThis.navigator; }, set clientInformation(value) { void value; } }, 'clientInformation');
     Object.defineProperty(globalThis, 'clientInformation', { ...clientInformationDescriptor, enumerable: true, configurable: true });
-    globalThis.history = makeHistory();
+    const historyValue = makeHistory();
+    const historyDescriptor = Object.getOwnPropertyDescriptor({ get history() { return historyValue; } }, 'history');
+    Object.defineProperty(globalThis, 'history', { get: historyDescriptor.get, enumerable: true, configurable: true });
     globalThis.navigation = makeNavigation();
     const originDescriptor = Object.getOwnPropertyDescriptor({ get origin() { return globalThis.location?.origin || 'null'; }, set origin(value) { void value; } }, 'origin');
     Object.defineProperty(globalThis, 'origin', { ...originDescriptor, enumerable: true, configurable: true });
@@ -7089,6 +7515,20 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   function applyGlobalDescriptor(name, value, descriptor) {
     if (!descriptor) return;
     try {
+      if (descriptor.kind === 'accessor') {
+        let currentValue = value;
+        const get = function get() { return currentValue; };
+        const set = descriptor.set ? function set(nextValue) { currentValue = nextValue; } : undefined;
+        applyFunctionReflection(get, descriptor.get);
+        applyFunctionReflection(set, descriptor.set);
+        Object.defineProperty(globalThis, name, {
+          get,
+          set,
+          enumerable: Boolean(descriptor.enumerable),
+          configurable: descriptor.configurable !== false,
+        });
+        return;
+      }
       Object.defineProperty(globalThis, name, {
         value,
         writable: descriptor.writable !== false,
@@ -8459,32 +8899,33 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   Object.defineProperty(LockManager.prototype, Symbol.toStringTag, { value: 'LockManager', configurable: true });
 
   function makeNavigator(config) {
+    const prototype = navigatorInstancePrototype(globalThis.Navigator?.prototype);
     const userAgent = config.userAgent || 'ZeroProxy Virtual Browser';
     const languages = Array.isArray(config.languages) && config.languages.length ? config.languages.map(String) : ['en-US', 'en'];
     const navigatorPluginData = makeNavigatorPluginData();
-    const navigator = {
+    const navigator = Object.create(prototype);
+    navigatorSlots.set(navigator, {
       userAgent,
       appVersion: userAgent,
       appName: 'Netscape',
       appCodeName: 'Mozilla',
       platform: config.platform || 'ZeroProxy',
       vendor: config.vendor || 'Google Inc.',
+      vendorSub: '',
       product: 'Gecko',
       productSub: '20030107',
       language: languages[0],
+      languages,
       keyboard: makeKeyboard(config.keyboard || {}),
       windowControlsOverlay: makeWindowControlsOverlay(),
       wakeLock: makeWakeLock(),
       contacts: makeContactsManager(),
       mediaCapabilities: makeMediaCapabilities(),
       mediaSession: makeMediaSession(),
-      getGamepads: () => emptyGamepads(),
-      canShare: () => false,
-      share: () => Promise.reject(namedError('NotAllowedError')),
       credentials: makeCredentialsContainer(),
-      languages,
       onLine: true,
       cookieEnabled: true,
+      doNotTrack: null,
       hardwareConcurrency: Number(config.hardwareConcurrency || 4),
       deviceMemory: Number(config.deviceMemory || 4),
       maxTouchPoints: Number(config.maxTouchPoints || 0),
@@ -8493,7 +8934,6 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       plugins: navigatorPluginData.plugins,
       mimeTypes: navigatorPluginData.mimeTypes,
       userAgentData: new NavigatorUAData(navigatorUADataToken, config),
-      sendBeacon(url, data) { try { fetch(url, { method: 'POST', body: data || '', keepalive: true }); return true; } catch { return false; } },
       permissions: new Permissions(permissionsToken, config.permissions || config.permissionStates || {}),
       storage: new NavigatorStorageManager(storageManagerToken, config.storageQuota),
       geolocation: makeGeolocation(),
@@ -8502,9 +8942,87 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
       userActivation: makeUserActivation(),
       clipboard: { readText: async () => '', writeText: async () => undefined },
       serviceWorker: { register: async () => { throw new Error('ServiceWorkerUnsupported'); }, getRegistration: async () => undefined, getRegistrations: async () => [] },
-    };
-    Object.defineProperty(navigator, Symbol.toStringTag, { value: 'Navigator', configurable: true });
+      ink: null,
+      scheduling: null,
+      webkitPersistentStorage: null,
+      webkitTemporaryStorage: null,
+    });
     return Object.freeze(navigator);
+  }
+
+  function installNavigatorPrototype(proto) {
+    if (!proto || navigatorPrototypeInstallSet.has(proto)) return;
+    Object.defineProperties(proto, {
+      appCodeName: navigatorGetter('appCodeName'),
+      appName: navigatorGetter('appName'),
+      appVersion: navigatorGetter('appVersion'),
+      connection: navigatorGetter('connection'),
+      cookieEnabled: navigatorGetter('cookieEnabled'),
+      doNotTrack: navigatorGetter('doNotTrack'),
+      geolocation: navigatorGetter('geolocation'),
+      hardwareConcurrency: navigatorGetter('hardwareConcurrency'),
+      ink: navigatorGetter('ink'),
+      language: navigatorGetter('language'),
+      languages: navigatorGetter('languages'),
+      maxTouchPoints: navigatorGetter('maxTouchPoints'),
+      mediaCapabilities: navigatorGetter('mediaCapabilities'),
+      mediaSession: navigatorGetter('mediaSession'),
+      mimeTypes: navigatorGetter('mimeTypes'),
+      onLine: navigatorGetter('onLine'),
+      pdfViewerEnabled: navigatorGetter('pdfViewerEnabled'),
+      permissions: navigatorGetter('permissions'),
+      platform: navigatorGetter('platform'),
+      plugins: navigatorGetter('plugins'),
+      product: navigatorGetter('product'),
+      productSub: navigatorGetter('productSub'),
+      scheduling: navigatorGetter('scheduling'),
+      userActivation: navigatorGetter('userActivation'),
+      userAgent: navigatorGetter('userAgent'),
+      vendor: navigatorGetter('vendor'),
+      vendorSub: navigatorGetter('vendorSub'),
+      webdriver: navigatorGetter('webdriver'),
+      webkitPersistentStorage: navigatorGetter('webkitPersistentStorage'),
+      webkitTemporaryStorage: navigatorGetter('webkitTemporaryStorage'),
+      windowControlsOverlay: navigatorGetter('windowControlsOverlay'),
+      getGamepads: { value: function getGamepads() { return emptyGamepads(); }, enumerable: true, configurable: true, writable: true },
+      javaEnabled: { value: function javaEnabled() { return false; }, enumerable: true, configurable: true, writable: true },
+      sendBeacon: { value: function sendBeacon(url) { try { fetch(url, { method: 'POST', body: arguments.length > 1 ? arguments[1] : '', keepalive: true }); return true; } catch { return false; } }, enumerable: true, configurable: true, writable: true },
+      vibrate: { value: function vibrate(pattern) { void pattern; return false; }, enumerable: true, configurable: true, writable: true },
+    });
+    navigatorPrototypeInstallSet.add(proto);
+  }
+
+
+  function navigatorInstancePrototype(basePrototype) {
+    installNavigatorPrototype(basePrototype);
+    if (!basePrototype) return Object.prototype;
+    if (virtualNavigatorPrototype && Object.getPrototypeOf(virtualNavigatorPrototype) === basePrototype) return virtualNavigatorPrototype;
+    virtualNavigatorPrototype = Object.create(basePrototype);
+    Object.defineProperties(virtualNavigatorPrototype, {
+      keyboard: navigatorGetter('keyboard'),
+      wakeLock: navigatorGetter('wakeLock'),
+      contacts: navigatorGetter('contacts'),
+      credentials: navigatorGetter('credentials'),
+      deviceMemory: navigatorGetter('deviceMemory'),
+      userAgentData: navigatorGetter('userAgentData'),
+      storage: navigatorGetter('storage'),
+      locks: navigatorGetter('locks'),
+      clipboard: navigatorGetter('clipboard'),
+      serviceWorker: navigatorGetter('serviceWorker'),
+      canShare: { value: function canShare() { return false; }, enumerable: true, configurable: true, writable: true },
+      share: { value: function share() { return Promise.reject(namedError('NotAllowedError')); }, enumerable: true, configurable: true, writable: true },
+    });
+    return virtualNavigatorPrototype;
+  }
+  function navigatorGetter(name) {
+    const descriptor = Object.getOwnPropertyDescriptor({ get [name]() { return navigatorState(this)[name]; } }, name);
+    return { get: descriptor.get, enumerable: true, configurable: true };
+  }
+
+  function navigatorState(value) {
+    const state = navigatorSlots.get(value);
+    if (!state) throw new TypeError('Illegal invocation');
+    return state;
   }
 
   const pdfPluginMimeTypes = Object.freeze([
@@ -8573,35 +9091,58 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   }
 
   function makeHistory() {
-    const history = {
-      get length() { return historyStack.length; },
-      get state() { return cloneValue(historyStack[historyIndex]?.state ?? null, new Map()); },
-      pushState(...args) {
-        validateHistoryArgs('pushState', args);
-        const url = validateHistoryURL('pushState', args[2]);
-        historyStack.splice(historyIndex + 1);
-        historyIndex += 1;
-        historyStack.push({ state: cloneValue(args[0], new Map()), url });
-        updateLocation(url);
+    installHistoryPrototype(globalThis.History?.prototype);
+    return Object.create(globalThis.History?.prototype || Object.prototype);
+  }
+
+  function installHistoryPrototype(proto) {
+    if (!proto || historyPrototypeInstallSet.has(proto)) return;
+    Object.defineProperties(proto, {
+      length: {
+        get() { return historyStack.length; },
+        enumerable: true,
+        configurable: true,
       },
-      replaceState(...args) {
-        validateHistoryArgs('replaceState', args);
-        const url = validateHistoryURL('replaceState', args[2]);
-        historyStack[historyIndex] = { state: cloneValue(args[0], new Map()), url };
-        updateLocation(url);
+      state: {
+        get() { return cloneValue(historyStack[historyIndex]?.state ?? null, new Map()); },
+        enumerable: true,
+        configurable: true,
       },
-      back() { this.go(-1); },
-      forward() { this.go(1); },
-      go(delta = 0) {
-        const next = Math.max(0, Math.min(historyStack.length - 1, historyIndex + Number(delta || 0)));
-        if (next === historyIndex) return;
-        historyIndex = next;
-        updateLocation(historyStack[historyIndex].url);
-        dispatchPopState(historyStack[historyIndex].state);
+      scrollRestoration: {
+        get() { return historyScrollRestoration; },
+        set(value) { historyScrollRestoration = String(value) === 'manual' ? 'manual' : 'auto'; },
+        enumerable: true,
+        configurable: true,
       },
-    };
-    Object.defineProperty(history, Symbol.toStringTag, { value: 'History', configurable: true });
-    return history;
+      pushState: { value: function pushState(state, unused) { void unused; validateHistoryArgs('pushState', arguments); historyPushState(state, arguments[2]); }, enumerable: true, configurable: true, writable: true },
+      replaceState: { value: function replaceState(state, unused) { void unused; validateHistoryArgs('replaceState', arguments); historyReplaceState(state, arguments[2]); }, enumerable: true, configurable: true, writable: true },
+      back: { value: function back() { historyGo(-1); }, enumerable: true, configurable: true, writable: true },
+      forward: { value: function forward() { historyGo(1); }, enumerable: true, configurable: true, writable: true },
+      go: { value: function go(delta = 0) { historyGo(delta); }, enumerable: true, configurable: true, writable: true },
+    });
+    historyPrototypeInstallSet.add(proto);
+  }
+
+  function historyPushState(state, url) {
+    const nextURL = validateHistoryURL('pushState', url);
+    historyStack.splice(historyIndex + 1);
+    historyIndex += 1;
+    historyStack.push({ state: cloneValue(state, new Map()), url: nextURL });
+    updateLocation(nextURL);
+  }
+
+  function historyReplaceState(state, url) {
+    const nextURL = validateHistoryURL('replaceState', url);
+    historyStack[historyIndex] = { state: cloneValue(state, new Map()), url: nextURL };
+    updateLocation(nextURL);
+  }
+
+  function historyGo(delta = 0) {
+    const next = Math.max(0, Math.min(historyStack.length - 1, historyIndex + Number(delta || 0)));
+    if (next === historyIndex) return;
+    historyIndex = next;
+    updateLocation(historyStack[historyIndex].url);
+    dispatchPopState(historyStack[historyIndex].state);
   }
 
   function IDBFactory() { throw new TypeError("Failed to construct 'IDBFactory': Illegal constructor"); }
@@ -8609,14 +9150,18 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   Object.defineProperty(IDBFactory.prototype, Symbol.toStringTag, { value: 'IDBFactory', configurable: true });
 
   function makeIndexedDBFactory() {
-    const factory = {
-      open(name, version) { const request = new IDBOpenDBRequest(idbRequestToken); Promise.resolve().then(() => openIDBRequest(request, name, version)); return request; },
-      deleteDatabase(name) { const request = new IDBOpenDBRequest(idbRequestToken); Promise.resolve().then(() => { idbDatabases.delete(String(name)); persistIndexedDBDelete(String(name)); queueSuccess(request, undefined); }); return request; },
-    };
-    Object.defineProperty(factory, '__zpIDBFactory', { value: true, configurable: true });
-    Object.defineProperty(factory, Symbol.toStringTag, { value: 'IDBFactory', configurable: true });
-    Object.setPrototypeOf(factory, IDBFactory.prototype);
-    return factory;
+    installIDBFactoryPrototype();
+    return Object.create(IDBFactory.prototype);
+  }
+
+  function installIDBFactoryPrototype() {
+    if (Object.prototype.hasOwnProperty.call(IDBFactory.prototype, 'open')) return;
+    Object.defineProperties(IDBFactory.prototype, {
+      open: { value: function open(name) { const request = new IDBOpenDBRequest(idbRequestToken); Promise.resolve().then(() => openIDBRequest(request, name, arguments[1])); return request; }, enumerable: true, configurable: true, writable: true },
+      deleteDatabase: { value: function deleteDatabase(name) { const request = new IDBOpenDBRequest(idbRequestToken); Promise.resolve().then(() => { idbDatabases.delete(String(name)); persistIndexedDBDelete(String(name)); queueSuccess(request, undefined); }); return request; }, enumerable: true, configurable: true, writable: true },
+      cmp: { value: function cmp(first, second) { return Math.sign(compareIDBKey(first, second)); }, enumerable: true, configurable: true, writable: true },
+      databases: { value: function databases() { return Promise.resolve([...idbDatabases.values()].map((record) => ({ name: record.name, version: record.version }))); }, enumerable: true, configurable: true, writable: true },
+    });
   }
 
   function openIDBRequest(request, name, version) {
@@ -8659,17 +9204,28 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
     return request;
   }
   function recordHasKey(records, key) { return Object.getOwnPropertyDescriptor(records, String(key)) !== undefined; }
-  function storeLookup(database, storeName, query, all) {
+  function storeLookup(database, storeName, query, mode) {
     const request = new IDBRequest(idbRequestToken);
     Promise.resolve().then(() => {
       try {
         const entries = objectStoreCursorEntries(database.stores[storeName], query);
-        queueSuccess(request, all ? entries.map((entry) => cloneValue(entry.value, new Map())) : cloneValue(entries[0]?.value, new Map()));
+        queueSuccess(request, idbLookupResult(entries, mode));
       } catch (error) { queueError(request, error); }
     });
     return request;
   }
-  function indexLookup(database, storeName, indexName, query, all) { const request = new IDBRequest(idbRequestToken); Promise.resolve().then(() => { try { const store = database.stores[storeName]; const entries = indexCursorEntries(store, store.indexes[indexName], query); queueSuccess(request, all ? entries.map((entry) => cloneValue(entry.value, new Map())) : cloneValue(entries[0]?.value, new Map())); } catch (error) { queueError(request, error); } }); return request; }
+  function indexLookup(database, storeName, indexName, query, mode) { const request = new IDBRequest(idbRequestToken); Promise.resolve().then(() => { try { const store = database.stores[storeName]; const entries = indexCursorEntries(store, store.indexes[indexName], query); queueSuccess(request, idbLookupResult(entries, mode)); } catch (error) { queueError(request, error); } }); return request; }
+  function idbLookupResult(entries, mode) {
+    if (mode === 'count') return entries.length;
+    if (mode === 'key') return cloneValue(entries[0]?.primaryKey, new Map());
+    if (mode === 'keys') return entries.map((entry) => cloneValue(entry.primaryKey, new Map()));
+    if (mode === 'records') return entries.map((entry) => ({ key: cloneValue(entry.key, new Map()), primaryKey: cloneValue(entry.primaryKey, new Map()), value: cloneValue(entry.value, new Map()) }));
+    if (mode === 'values') return entries.map((entry) => cloneValue(entry.value, new Map()));
+    return cloneValue(entries[0]?.value, new Map());
+  }
+  function idbEventHandlerAccessor(name) {
+    return { get() { return this?.['__zp_' + name] ?? null; }, set(value) { Object.defineProperty(this, '__zp_' + name, { value: typeof value === 'function' ? value : null, configurable: true, writable: true }); }, enumerable: true, configurable: true };
+  }
   function cursorRequest(source, entries, transaction = null, direction = 'next') { const request = new IDBRequest(idbRequestToken); const cursorDirection = cursorDirectionName(direction); const cursorEntries = cursorEntriesForDirection(entries, cursorDirection); request.source = source; Promise.resolve().then(() => queueCursor(request, source, cursorEntries, 0, cursorDirection)); return trackIDBRequest(transaction, request); }
   function queueCursor(request, source, entries, position, direction) { queueSuccess(request, position < entries.length ? new IDBCursorWithValue(idbCursorToken, request, source, entries, position, direction) : null); }
   function trackIDBRequest(transaction, request) { return transaction ? transaction.__zpTrack(request) : request; }
@@ -8677,6 +9233,22 @@ import { createNavigationFacades } from './realm/webidl/navigation/basic.mjs';
   function indexCursorEntries(store, index, query) { const out = []; for (const [primaryKey, value] of Object.entries(store.records)) { for (const key of indexKeys(index, value)) { if (keyMatchesQuery(key, query)) out.push({ key, primaryKey, value }); } } return out.sort(compareIDBEntries); }
   function cursorDirectionName(direction) { const text = String(direction || 'next'); return ['next', 'nextunique', 'prev', 'prevunique'].includes(text) ? text : 'next'; }
   function cursorEntriesForDirection(entries, direction) { const sorted = direction.startsWith('prev') ? [...entries].reverse() : [...entries]; return direction.endsWith('unique') ? uniqueCursorEntries(sorted) : sorted; }
+  function idbReadonlyOwnAccessor(name) {
+    return { get() { return Object.prototype.hasOwnProperty.call(this, name) ? Object.getOwnPropertyDescriptor(this, name).value : undefined; }, enumerable: true, configurable: true };
+  }
+  function idbMutableOwnAccessor(name) {
+    return { get() { return Object.prototype.hasOwnProperty.call(this, name) ? Object.getOwnPropertyDescriptor(this, name).value : undefined; }, set(value) { Object.defineProperty(this, name, { value: String(value), configurable: true }); }, enumerable: true, configurable: true };
+  }
+  function idbCursorAccessor(name) {
+    return { get() { return this?.[name]; }, enumerable: true, configurable: true };
+  }
+  function cursorContinue(cursor, step) {
+    cursor.__zpRequest?.transaction?.__zpHold?.();
+    queueCursor(cursor.__zpRequest, cursor.__zpSource, cursor.__zpEntries, cursor.__zpPosition + step, cursor.direction);
+  }
+  function cursorStore(cursor) {
+    return cursor.source instanceof IDBIndex ? cursor.source.objectStore : cursor.source;
+  }
   function uniqueCursorEntries(entries) { const seen = new Set(); const out = []; for (const entry of entries) { const id = idbKeyID(entry.key); if (seen.has(id)) continue; seen.add(id); out.push(entry); } return out; }
   function validateExistingIndex(store, index) { if (!index.unique) return; const seen = new Set(); for (const value of Object.values(store.records)) { for (const key of indexKeys(index, value)) { const id = idbKeyID(key); if (seen.has(id)) throw namedError('ConstraintError'); seen.add(id); } } }
   function validateUniqueIndexes(store, value, primaryKey) { for (const index of Object.values(store.indexes || {})) { if (!index.unique) continue; for (const key of indexKeys(index, value)) validateUniqueIndexKey(store, index, key, primaryKey); } }

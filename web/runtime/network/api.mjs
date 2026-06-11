@@ -559,6 +559,10 @@ export const NETWORK_API_SOURCE = String.raw`
   const fetch = (input, init = {}) => {
     const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
     if (request.signal?.aborted) return Promise.reject(abortError(request.signal.reason));
+    if (request.url.startsWith('blob:') && typeof globalThis.__zpResolveBlobURL === 'function') {
+      try { return Promise.resolve(new Response(globalThis.__zpResolveBlobURL(request.url), { status: 200, url: request.url })); }
+      catch (error) { return Promise.reject(error); }
+    }
     return new Promise((resolve, reject) => {
       const id = __zpFetchStart(JSON.stringify(requestRecord(request)));
       pendingFetches.set(id, { resolve, reject });
@@ -1478,14 +1482,23 @@ function deserializeHTTPCacheEntry(entry) {
   };
 }
 function mergeCookie(existing, line) {
-  const [nameValue] = String(line || '').split(';', 1);
-  const [name, value = ''] = nameValue.split('=');
+  const parts = String(line || '').split(';').map((part) => part.trim()).filter(Boolean);
+  const [nameValue] = parts;
+  const [name, value = ''] = String(nameValue || '').split('=');
   const key = name.trim();
   if (!key) return existing;
   const jar = new Map(String(existing || '').split(';').map((part) => part.trim()).filter(Boolean).map((part) => {
     const [k, ...rest] = part.split('=');
     return [k, rest.join('=')];
   }));
-  jar.set(key, value);
+  const attributes = new Map(parts.slice(1).map((part) => {
+    const [attrName, ...rest] = part.split('=');
+    return [attrName.trim().toLowerCase(), rest.join('=').trim()];
+  }));
+  const maxAge = attributes.get('max-age');
+  const expires = attributes.get('expires');
+  const deletesCookie = maxAge === '0' || (expires && Number.isFinite(Date.parse(expires)) && Date.parse(expires) <= Date.now());
+  if (deletesCookie) jar.delete(key);
+  else jar.set(key, value);
   return [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
 }

@@ -233,6 +233,13 @@ export function createHTMLWebIDL(options = {}) {
       if (htmlInterfaceByTag[local]) return htmlInterfaceByTag[local];
       return isGenericHTMLElementLocalName(local) ? 'HTMLElement' : 'HTMLUnknownElement';
     },
+    interfaceNameForTag(localName) {
+      const local = String(localName || '').toLowerCase();
+      return htmlInterfaceByTag[local] || (isGenericHTMLElementLocalName(local) ? 'HTMLElement' : 'HTMLUnknownElement');
+    },
+    parentInterfaceForName(name) {
+      return htmlParentInterfaces[name] || 'HTMLElement';
+    },
     isElement(value, localName) { return matchesHTMLLocalName(value, localName); },
   };
 }
@@ -248,8 +255,8 @@ function makeIllegalHTMLCollectionConstructor(interfaceName) {
 function makeHTMLConstructor(interfaceName, localNames) {
   const ctor = function HTMLConstructor() { throw new TypeError("Failed to construct '" + interfaceName + "': Illegal constructor"); };
   Object.defineProperty(ctor, 'name', { value: interfaceName, configurable: true });
-  Object.defineProperty(ctor, Symbol.hasInstance, { value: (value) => matchesHTMLLocalName(value, localNames), configurable: true });
   Object.defineProperty(ctor.prototype, Symbol.toStringTag, { value: interfaceName, configurable: true });
+  Object.defineProperty(ctor, Symbol.hasInstance, { value: (value) => matchesHTMLLocalName(value, localNames), configurable: true });
   if (globalThis.HTMLElement?.prototype) Object.setPrototypeOf(ctor.prototype, globalThis.HTMLElement.prototype);
   return ctor;
 }

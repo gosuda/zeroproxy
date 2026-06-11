@@ -30,6 +30,7 @@ export function createMediaStreamFacades(EventTargetBase) {
     }
   }
   Object.defineProperty(MediaStream.prototype, Symbol.toStringTag, { value: 'MediaStream', configurable: true });
+  defineEventHandlerAccessors(MediaStream.prototype, ['onactive', 'onaddtrack', 'oninactive', 'onremovetrack']);
 
   class MediaStreamTrack extends EventTargetBase {
     constructor(token) {
@@ -56,6 +57,7 @@ export function createMediaStreamFacades(EventTargetBase) {
     getCaptureHandle() { return null; }
   }
   Object.defineProperty(MediaStreamTrack.prototype, Symbol.toStringTag, { value: 'MediaStreamTrack', configurable: true });
+  defineEventHandlerAccessors(MediaStreamTrack.prototype, ['oncapturehandlechange', 'onended', 'onmute', 'onunmute']);
 
   function CanvasCaptureMediaStreamTrack() { throw new TypeError("Failed to construct 'CanvasCaptureMediaStreamTrack': Illegal constructor"); }
   Object.setPrototypeOf(CanvasCaptureMediaStreamTrack.prototype, MediaStreamTrack.prototype);
@@ -67,8 +69,8 @@ export function createMediaStreamFacades(EventTargetBase) {
   function BrowserCaptureMediaStreamTrack() { throw new TypeError("Failed to construct 'BrowserCaptureMediaStreamTrack': Illegal constructor"); }
   Object.setPrototypeOf(BrowserCaptureMediaStreamTrack.prototype, MediaStreamTrack.prototype);
   Object.defineProperty(BrowserCaptureMediaStreamTrack.prototype, 'constructor', { value: BrowserCaptureMediaStreamTrack, writable: true, configurable: true });
-  Object.defineProperty(BrowserCaptureMediaStreamTrack.prototype, 'cropTo', { value() { return Promise.resolve(); }, writable: true, configurable: true });
-  Object.defineProperty(BrowserCaptureMediaStreamTrack.prototype, 'restrictTo', { value() { return Promise.resolve(); }, writable: true, configurable: true });
+  Object.defineProperty(BrowserCaptureMediaStreamTrack.prototype, 'cropTo', { value(cropTarget) { void cropTarget; return Promise.resolve(); }, writable: true, configurable: true });
+  Object.defineProperty(BrowserCaptureMediaStreamTrack.prototype, 'restrictTo', { value(restrictionTarget) { void restrictionTarget; return Promise.resolve(); }, writable: true, configurable: true });
   Object.defineProperty(BrowserCaptureMediaStreamTrack.prototype, Symbol.toStringTag, { value: 'BrowserCaptureMediaStreamTrack', configurable: true });
 
   function AudioSinkInfo() {
@@ -167,7 +169,7 @@ export function createMediaStreamFacades(EventTargetBase) {
   }
   Object.defineProperty(MediaRecorder.prototype, Symbol.toStringTag, { value: 'MediaRecorder', configurable: true });
   for (const key of ['onstart', 'onstop', 'ondataavailable', 'onpause', 'onresume', 'onerror']) {
-    Object.defineProperty(MediaRecorder.prototype, key, { value: null, writable: true, configurable: true });
+    Object.defineProperty(MediaRecorder.prototype, key, eventHandlerAccessor(key));
   }
 
   return { MediaStream, MediaStreamTrack, CanvasCaptureMediaStreamTrack, BrowserCaptureMediaStreamTrack, AudioSinkInfo, MediaStreamTrackAudioStats, MediaStreamTrackVideoStats, MediaRecorder, createVirtualMediaStreamTrack: (init) => createVirtualMediaStreamTrack(MediaStreamTrack, init) };
@@ -220,6 +222,19 @@ function requireMediaStreamTrack(track, method) {
 
 function mediaTrackValue(target, key, fallback) {
   return Object.hasOwn(target, key) ? target[key] : fallback;
+}
+
+function defineEventHandlerAccessors(proto, names) {
+  for (const name of names) Object.defineProperty(proto, name, eventHandlerAccessor(name));
+}
+
+function eventHandlerAccessor(name) {
+  return {
+    get() { return this?.['__zp_' + name] ?? null; },
+    set(value) { defineHidden(this, '__zp_' + name, typeof value === 'function' ? value : null); },
+    enumerable: true,
+    configurable: true,
+  };
 }
 
 function defineHidden(target, key, value) {

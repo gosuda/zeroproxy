@@ -14,6 +14,7 @@ export function createTextTrackFacades(EventTargetBase, DocumentFragmentBase) {
     set pauseOnExit(value) { defineHidden(this, '__zpPauseOnExit', Boolean(value)); }
   }
   Object.defineProperty(TextTrackCue.prototype, Symbol.toStringTag, { value: 'TextTrackCue', configurable: true });
+  defineEventHandlerAccessors(TextTrackCue.prototype, ['onenter', 'onexit']);
 
   class VTTCue extends TextTrackCue {
     constructor(startTime, endTime, text) {
@@ -69,6 +70,7 @@ export function createTextTrackFacades(EventTargetBase, DocumentFragmentBase) {
     getCueById(id) { return this.__zpCues.find((cue) => cue.id === String(id)) ?? null; }
     [Symbol.iterator]() { return this.__zpCues[Symbol.iterator](); }
   }
+  Object.defineProperty(TextTrackCueList.prototype[Symbol.iterator], 'name', { value: 'values', configurable: true });
   Object.defineProperty(TextTrackCueList.prototype, Symbol.toStringTag, { value: 'TextTrackCueList', configurable: true });
 
   class TextTrack extends EventTargetBase {
@@ -77,7 +79,6 @@ export function createTextTrackFacades(EventTargetBase, DocumentFragmentBase) {
     get label() { return trackValue(this, '__zpLabel', ''); }
     get language() { return trackValue(this, '__zpLanguage', ''); }
     get id() { return trackValue(this, '__zpId', ''); }
-    get inBandMetadataTrackDispatchType() { return trackValue(this, '__zpDispatchType', ''); }
     get mode() { return trackValue(this, '__zpMode', 'disabled'); }
     set mode(value) { defineHidden(this, '__zpMode', String(value)); }
     get cues() { return new TextTrackCueList(cueListToken, trackValue(this, '__zpCues', [])); }
@@ -98,6 +99,7 @@ export function createTextTrackFacades(EventTargetBase, DocumentFragmentBase) {
     }
   }
   Object.defineProperty(TextTrack.prototype, Symbol.toStringTag, { value: 'TextTrack', configurable: true });
+  Object.defineProperty(TextTrack.prototype, 'oncuechange', eventHandlerAccessor('oncuechange'));
 
   class TextTrackList extends EventTargetBase {
     constructor() { throw new TypeError("Failed to construct 'TextTrackList': Illegal constructor"); }
@@ -106,6 +108,8 @@ export function createTextTrackFacades(EventTargetBase, DocumentFragmentBase) {
     getTrackById(id) { return trackValue(this, '__zpTracks', []).find((track) => track.id === String(id)) ?? null; }
     [Symbol.iterator]() { return trackValue(this, '__zpTracks', [])[Symbol.iterator](); }
   }
+  Object.defineProperty(TextTrackList.prototype[Symbol.iterator], 'name', { value: 'values', configurable: true });
+  defineEventHandlerAccessors(TextTrackList.prototype, ['onaddtrack', 'onchange', 'onremovetrack']);
   Object.defineProperty(TextTrackList.prototype, Symbol.toStringTag, { value: 'TextTrackList', configurable: true });
 
   return { TextTrack, TextTrackCue, TextTrackCueList, TextTrackList, VTTCue };
@@ -126,6 +130,19 @@ function refreshIndexes(list) {
 
 function trackValue(target, key, fallback) {
   return Object.hasOwn(target, key) ? target[key] : fallback;
+}
+
+function defineEventHandlerAccessors(proto, names) {
+  for (const name of names) Object.defineProperty(proto, name, eventHandlerAccessor(name));
+}
+
+function eventHandlerAccessor(name) {
+  return {
+    get() { return this?.['__zp_' + name] ?? null; },
+    set(value) { defineHidden(this, '__zp_' + name, typeof value === 'function' ? value : null); },
+    enumerable: true,
+    configurable: true,
+  };
 }
 
 function defineHidden(target, key, value) {

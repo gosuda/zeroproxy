@@ -60,7 +60,7 @@ export function createStreamFacades() {
   class ReadableStreamBYOBRequest {
     constructor(token, view) { if (token !== byobRequestToken) illegalConstructor('ReadableStreamBYOBRequest'); defineHidden(this, '__zpView', view); }
     get view() { return this.__zpView; }
-    respond() {}
+    respond(bytesWritten) { void bytesWritten; }
     respondWithNewView(view) { defineHidden(this, '__zpView', view); }
   }
   Object.defineProperty(ReadableStreamBYOBRequest.prototype, Symbol.toStringTag, { value: 'ReadableStreamBYOBRequest', configurable: true });

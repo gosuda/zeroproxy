@@ -98,6 +98,8 @@ test('virtual fetch Request Response Headers cache credentials cookies and timin
     fetch(req).then(async (response) => {
       const clone = response.clone();
       document.cookie = 'sid=abc; Path=/';
+      document.cookie = 'theme=dark; Path=/';
+      document.cookie = 'theme=gone; Max-Age=0; Path=/';
       globalThis.fetchResult = {
         status: response.status,
         ok: response.ok,
@@ -135,6 +137,16 @@ test('virtual fetch Request Response Headers cache credentials cookies and timin
   assert.deepEqual(calls[1], {
     type: 'cookie.set',
     cookie: 'sid=abc; Path=/',
+    targetUrl: 'https://target.example/app/page.html',
+  });
+  assert.deepEqual(calls[2], {
+    type: 'cookie.set',
+    cookie: 'theme=dark; Path=/',
+    targetUrl: 'https://target.example/app/page.html',
+  });
+  assert.deepEqual(calls[3], {
+    type: 'cookie.set',
+    cookie: 'theme=gone; Max-Age=0; Path=/',
     targetUrl: 'https://target.example/app/page.html',
   });
   realm.destroy();

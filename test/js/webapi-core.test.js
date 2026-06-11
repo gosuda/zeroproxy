@@ -2565,6 +2565,7 @@ test('webapi core installs host integration storage crypto encoding history and 
         const script = policy.createScript('x');
         const scriptURL = policy.createScriptURL('/x.js');
         const htmlOnly = trustedTypes.createPolicy('zp-html-only', { createHTML: (value) => value });
+        const trustedTypesDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'trustedTypes');
         return [
           typeof TrustedHTML,
           typeof TrustedScript,
@@ -2581,6 +2582,9 @@ test('webapi core installs host integration storage crypto encoding history and 
           Object.getOwnPropertyDescriptor(globalThis, 'TrustedHTML').enumerable,
           Object.getOwnPropertyDescriptor(globalThis, 'TrustedTypePolicyFactory').enumerable,
           Object.getOwnPropertyDescriptor(globalThis, 'trustedTypes').enumerable,
+          [trustedTypesDescriptor.enumerable, trustedTypesDescriptor.configurable, trustedTypesDescriptor.get.name, typeof trustedTypesDescriptor.set],
+          TrustedTypePolicyFactory.prototype.getAttributeType.length,
+          TrustedTypePolicyFactory.prototype.getPropertyType.length,
           Object.prototype.hasOwnProperty.call(TrustedHTML, Symbol.hasInstance),
           Object.prototype.hasOwnProperty.call(TrustedTypePolicy, Symbol.hasInstance),
           Object.prototype.hasOwnProperty.call(TrustedTypePolicyFactory, Symbol.hasInstance),
@@ -4274,7 +4278,10 @@ test('webapi core installs host integration storage crypto encoding history and 
       ['toJSON', 'toString', 'constructor'],
       false,
       false,
-      false,
+      true,
+      [true, true, 'get trustedTypes', 'undefined'],
+      2,
+      2,
       false,
       false,
       false,
@@ -5954,6 +5961,8 @@ test('webapi core exposes in-memory Blob File and FormData facades', async () =>
       const fileDataURLRead = await readBlob('readAsDataURL', new Blob(['ok'], { type: 'text/plain' }));
       const constructedProgress = new ProgressEvent('progress', { lengthComputable: true, loaded: 2, total: 6 });
       const objectURL = URL.createObjectURL(blob);
+      const fetchedObjectURL = await fetch(objectURL);
+      const objectURLFetch = [fetchedObjectURL.status, fetchedObjectURL.url === objectURL, await fetchedObjectURL.text()];
       const streamReader = blob.stream().getReader();
       const streamFirst = await streamReader.read();
       const streamDone = await streamReader.read();
@@ -6065,6 +6074,7 @@ test('webapi core exposes in-memory Blob File and FormData facades', async () =>
         streamBytes: Array.from(streamFirst.value || []),
         streamDone: streamDone.done,
         objectURL,
+        objectURLFetch,
         secondObjectURL,
         badObjectURL,
         multipartType: multipartRequest.headers.get('content-type'),
@@ -6209,6 +6219,7 @@ test('webapi core exposes in-memory Blob File and FormData facades', async () =>
     streamBytes: [104, 105, 32, 226, 130, 172],
     streamDone: true,
     objectURL: 'blob:https://target.example/zp-1',
+    objectURLFetch: [200, true, 'hi €'],
     secondObjectURL: 'blob:https://target.example/zp-2',
     badObjectURL: 'TypeError',
     multipartType: 'multipart/form-data; boundary=----zeroproxy-formdata-1',
@@ -6430,6 +6441,11 @@ test('webapi core exposes form controls FileList and FormData(form)', async () =
       email.validity.typeMismatch,
       number.validity.rangeOverflow,
     ];
+    number.setAttribute('step', '2');
+    number.value = '3';
+    const stepValidation = [number.validity.stepMismatch, number.validity.valid, number.validationMessage];
+    number.removeAttribute('step');
+    number.value = '5';
     required.value = 'filled';
     email.setCustomValidity('blocked');
     const customValidation = [email.validity.typeMismatch, email.validity.customError, email.validationMessage, email.checkValidity()];
@@ -6748,6 +6764,7 @@ test('webapi core exposes form controls FileList and FormData(form)', async () =
       validityBefore,
       customValidation,
       validityAfter,
+      stepValidation,
     });
   `);
   assert.deepEqual(JSON.parse(result), {
@@ -7041,6 +7058,7 @@ test('webapi core exposes form controls FileList and FormData(form)', async () =
     ],
     customValidation: [true, true, 'blocked', false],
     validityAfter: [true, true, true, true, ''],
+    stepValidation: [true, false, 'Please enter a valid value.'],
     formData: [
       ['q', 'hello'],
       ['q.dir', 'ltr'],
@@ -10165,6 +10183,20 @@ test('webapi core installs DOMParser XMLSerializer Range Selection Cache and sty
       getSelection().addRange(range);
       const parsed = new DOMParser().parseFromString('<p>x</p>', 'text/html');
       const serialized = new XMLSerializer().serializeToString(el);
+      const namespaced = document.createElementNS('urn:demo', 'demo:item');
+      namespaced.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#h');
+      const namespacedAttr = namespaced.getAttributeNodeNS('http://www.w3.org/1999/xlink', 'href');
+      const namespaceSummary = [
+        namespaced.nodeName,
+        namespaced.localName,
+        namespaced.prefix,
+        namespaced.lookupNamespaceURI('demo'),
+        namespaced.lookupPrefix('urn:demo'),
+        namespaced.isDefaultNamespace('urn:demo'),
+        namespaced.getAttributeNS('http://www.w3.org/1999/xlink', 'href'),
+        [namespacedAttr.name, namespacedAttr.localName, namespacedAttr.prefix],
+        new XMLSerializer().serializeToString(namespaced),
+      ];
       const walker = document.createTreeWalker(document.body);
       const first = walker.nextNode().id;
       const cache = await caches.open('v1');
@@ -10319,6 +10351,7 @@ test('webapi core installs DOMParser XMLSerializer Range Selection Cache and sty
         parsedInner: parsed.body.innerHTML,
         serializedIncludesDataset: serialized.includes('data-answer="44"'),
         first,
+        namespaceSummary,
         cacheKeys: (await caches.keys()).join(','),
         cachedText: await cached.text(),
         mutationObserver: typeof MutationObserver,
@@ -10424,6 +10457,17 @@ test('webapi core installs DOMParser XMLSerializer Range Selection Cache and sty
     parsedInner: '<p>x</p>',
     serializedIncludesDataset: true,
     first: 'el',
+    namespaceSummary: [
+      'demo:item',
+      'item',
+      'demo',
+      'urn:demo',
+      'demo',
+      false,
+      '#h',
+      ['href', 'href', null],
+      '<demo:item xlink:href="#h"></demo:item>',
+    ],
     cacheKeys: 'v1',
     cachedText: 'cached-body',
     mutationObserver: 'function',
@@ -10921,7 +10965,7 @@ test('webapi core exposes basic CSSOM View geometry and scrolling', async () => 
     elementScroll: [
       0,
       0,
-      true,
+      false,
       [
         [5, 7],
         [8, 11],
@@ -11418,7 +11462,7 @@ test('webapi core CSSStyleDeclaration matches common browser style operations', 
     const mediaListDeleteMissing = (() => { try { mediaList.deleteMedium('speech'); return ['ok']; } catch (error) { return [error.name, error.message]; } })();
     let sheetList;
     const styleElement = document.createElement('style');
-    styleElement.textContent = 'article { display: block; }';
+    styleElement.textContent = 'article { display: block; } span { color: blue; margin-top: 2px; } span { color: green; }';
     styleElement.media = 'screen';
     styleElement.setAttribute('title', 'base');
     const linkElement = document.createElement('link');
@@ -11434,6 +11478,23 @@ test('webapi core CSSStyleDeclaration matches common browser style operations', 
     linkElement.setAttribute('title', 'app-v2');
     styleElement.media = 'print';
     const stylesheetReflectionSummary = [styleElement.sheet.media.mediaText, styleElement.sheet.title, linkElement.sheet.href, linkElement.sheet.media.mediaText, linkElement.sheet.title, documentSheets.item(1).href, documentSheets.item(1).media.mediaText];
+    styleElement.sheet.insertRule('span { color: blue; margin-top: 2px; }', styleElement.sheet.cssRules.length);
+    styleElement.sheet.insertRule('span { color: green; }', styleElement.sheet.cssRules.length);
+    const cascadeSheet = new CSSStyleSheet();
+    cascadeSheet.insertRule('span { color: blue; margin-top: 2px; }');
+    cascadeSheet.insertRule('span { color: green; }', 1);
+    document.adoptedStyleSheets = [cascadeSheet];
+    const cascadeTarget = document.createElement('span');
+    cascadeTarget.setAttribute('class', 'cascade-target');
+    document.body.append(cascadeTarget);
+    const cascadeBeforeInline = getComputedStyle(cascadeTarget);
+    cascadeTarget.style.color = 'red';
+    const cascadeAfterInline = getComputedStyle(cascadeTarget);
+    const computedCascadeSummary = [
+      cascadeBeforeInline.getPropertyValue('color'),
+      cascadeBeforeInline.getPropertyValue('margin-top'),
+      cascadeAfterInline.getPropertyValue('color'),
+    ];
     const adoptedSheet = new CSSStyleSheet();
     const adoptedArray = [adoptedSheet];
     document.adoptedStyleSheets = adoptedArray;
@@ -11562,6 +11623,7 @@ test('webapi core CSSStyleDeclaration matches common browser style operations', 
       invalidShadowAdopted,
       styleDisabledSummary,
       linkDisabledSummary,
+      computedCascadeSummary,
       (() => { try { new CSSRule(); return ['ok']; } catch (error) { return [error.name, error.message]; } })(),
       (() => { try { new StyleSheet(); return ['ok']; } catch (error) { return [error.name, error.message]; } })(),
       (() => { try { new CSSRuleList(); return ['ok']; } catch (error) { return [error.name, error.message]; } })(),
@@ -11980,6 +12042,7 @@ test('webapi core CSSStyleDeclaration matches common browser style operations', 
       'TypeError',
       [false, true, true, false, false, false],
       [true, true, false],
+      ['rgb(0, 128, 0)', '2px', 'rgb(255, 0, 0)'],
       ['TypeError', "Failed to construct 'CSSRule': Illegal constructor"],
       ['TypeError', "Failed to construct 'StyleSheet': Illegal constructor"],
       ['TypeError', "Failed to construct 'CSSRuleList': Illegal constructor"],
@@ -12160,13 +12223,20 @@ test('webapi core MutationObserver receives childList and attribute records', as
           removed: record.removedNodes.length,
           attributeName: record.attributeName || null,
           oldValue: record.oldValue ?? null,
+          previousSibling: record.previousSibling?.id || null,
+          nextSibling: record.nextSibling?.id || null,
         });
       }
     });
+    const left = document.createElement('i');
+    left.id = 'left';
+    const right = document.createElement('b');
+    right.id = 'right';
+    root.append(left, right);
     observer.observe(root, { childList: true, attributes: true, subtree: true, attributeOldValue: true });
     const child = document.createElement('span');
     child.id = 'child';
-    root.appendChild(child);
+    root.insertBefore(child, right);
     child.setAttribute('data-x', '1');
     child.setAttribute('data-x', '2');
     root.removeChild(child);
@@ -12183,6 +12253,8 @@ test('webapi core MutationObserver receives childList and attribute records', as
       removed: 0,
       attributeName: null,
       oldValue: null,
+      previousSibling: 'left',
+      nextSibling: 'right',
     },
     {
       observerMatch: true,
@@ -12194,6 +12266,8 @@ test('webapi core MutationObserver receives childList and attribute records', as
       removed: 0,
       attributeName: 'data-x',
       oldValue: null,
+      previousSibling: null,
+      nextSibling: null,
     },
     {
       observerMatch: true,
@@ -12205,6 +12279,8 @@ test('webapi core MutationObserver receives childList and attribute records', as
       removed: 0,
       attributeName: 'data-x',
       oldValue: '1',
+      previousSibling: null,
+      nextSibling: null,
     },
     {
       observerMatch: true,
@@ -12216,6 +12292,8 @@ test('webapi core MutationObserver receives childList and attribute records', as
       removed: 1,
       attributeName: null,
       oldValue: null,
+      previousSibling: 'left',
+      nextSibling: 'right',
     },
   ]);
   assert.deepEqual(JSON.parse(realm.evalClassic('JSON.stringify(mutationRecordConstructor)')), [
@@ -12746,16 +12824,22 @@ test('webapi core persists Cache API entries through the storage manager', async
     (async () => {
       const cache = await caches.open('persistent');
       await cache.put('/asset.txt', new Response('asset-body', { status: 201, headers: [['Content-Type', 'text/plain']] }));
+      const blobURL = URL.createObjectURL(new Blob(['added-body']));
+      await cache.add(blobURL);
       const match = await caches.match('/asset.txt');
-      globalThis.cachePersistResult = await match.text();
+      const added = await cache.match(blobURL);
+      URL.revokeObjectURL(blobURL);
+      globalThis.cachePersistResult = (await match.text()) + '/' + (await added.text());
     })();
   `);
   for (let i = 0; i < 8; i++) realm.drainJobs();
-  assert.equal(realm.evalClassic('cachePersistResult'), 'asset-body');
+  assert.equal(realm.evalClassic('cachePersistResult'), 'asset-body/added-body');
   await storageManager.flush();
   const snapshot = await storageManager.loadSnapshot(storagePartition);
-  assert.equal(snapshot.cacheAPI.length, 1);
-  assert.equal(snapshot.cacheAPI[0].cacheName, 'persistent');
-  assert.equal(snapshot.cacheAPI[0].response.body, 'asset-body');
+  assert.equal(snapshot.cacheAPI.length, 2);
+  assert.deepEqual(snapshot.cacheAPI.map((entry) => [entry.cacheName, entry.response.body]).sort(), [
+    ['persistent', 'added-body'],
+    ['persistent', 'asset-body'],
+  ]);
   realm.destroy();
 });

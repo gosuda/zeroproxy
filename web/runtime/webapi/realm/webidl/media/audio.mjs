@@ -20,13 +20,15 @@ export function createAudioFacades(EventTargetBase) {
     get defaultValue() { return this.__zpDefaultValue; }
     get minValue() { return this.__zpMinValue; }
     get maxValue() { return this.__zpMaxValue; }
-    setValueAtTime(value) { this.value = value; return this; }
-    linearRampToValueAtTime(value) { this.value = value; return this; }
-    exponentialRampToValueAtTime(value) { this.value = value; return this; }
-    setTargetAtTime(value) { this.value = value; return this; }
-    setValueCurveAtTime(values) { if (values?.length) this.value = values[values.length - 1]; return this; }
-    cancelScheduledValues() { return this; }
-    cancelAndHoldAtTime() { return this; }
+    get automationRate() { return this.__zpAutomationRate ?? 'a-rate'; }
+    set automationRate(value) { defineHidden(this, '__zpAutomationRate', String(value)); }
+    setValueAtTime(value, startTime) { void startTime; this.value = value; return this; }
+    linearRampToValueAtTime(value, endTime) { void endTime; this.value = value; return this; }
+    exponentialRampToValueAtTime(value, endTime) { void endTime; this.value = value; return this; }
+    setTargetAtTime(value, startTime, timeConstant) { void startTime; void timeConstant; this.value = value; return this; }
+    setValueCurveAtTime(values, startTime, duration) { void startTime; void duration; if (values?.length) this.value = values[values.length - 1]; return this; }
+    cancelScheduledValues(cancelTime) { void cancelTime; return this; }
+    cancelAndHoldAtTime(cancelTime) { void cancelTime; return this; }
   }
   Object.defineProperty(AudioParam.prototype, Symbol.toStringTag, { value: 'AudioParam', configurable: true });
 
@@ -122,7 +124,7 @@ export function createAudioFacades(EventTargetBase) {
     createOscillator() { return new OscillatorNode(this); }
     createAnalyser() { return new AnalyserNode(this); }
     createScriptProcessor(bufferSize = 0, numberOfInputChannels = 2, numberOfOutputChannels = 2) { return new ScriptProcessorNode(scriptProcessorToken, this, bufferSize, numberOfInputChannels, numberOfOutputChannels); }
-    decodeAudioData() { return Promise.resolve(this.createBuffer(1, 0, this.sampleRate)); }
+    decodeAudioData(audioData) { void audioData; return Promise.resolve(this.createBuffer(1, 0, this.sampleRate)); }
   }
   Object.defineProperty(BaseAudioContext.prototype, Symbol.toStringTag, { value: 'BaseAudioContext', configurable: true });
 
@@ -134,11 +136,15 @@ export function createAudioFacades(EventTargetBase) {
     resume() { defineHidden(this, '__zpState', 'running'); return Promise.resolve(); }
     close() { defineHidden(this, '__zpState', 'closed'); return Promise.resolve(); }
     getOutputTimestamp() { return { contextTime: this.currentTime, performanceTime: performance.now?.() ?? 0 }; }
-    createMediaElementSource() { return new AudioNode(audioNodeToken, this); }
-    createMediaStreamSource() { return new AudioNode(audioNodeToken, this); }
+    createMediaElementSource(mediaElement) { void mediaElement; return new AudioNode(audioNodeToken, this); }
+    createMediaStreamSource(mediaStream) { void mediaStream; return new AudioNode(audioNodeToken, this); }
     createMediaStreamDestination() { return new AudioNode(audioNodeToken, this); }
   }
   Object.defineProperty(AudioContext.prototype, Symbol.toStringTag, { value: 'AudioContext', configurable: true });
+  Object.defineProperties(AudioContext.prototype, {
+    onerror: eventHandlerAccessor('onerror'),
+    playbackStats: { get() { return {}; }, enumerable: true, configurable: true },
+  });
 
   class OfflineAudioContext extends BaseAudioContext {
     constructor(numberOfChannelsOrOptions, length, sampleRate) {
@@ -151,6 +157,11 @@ export function createAudioFacades(EventTargetBase) {
     startRendering() { defineHidden(this, '__zpState', 'closed'); return Promise.resolve(this.createBuffer(this.__zpNumberOfChannels, this.length, this.sampleRate)); }
   }
   Object.defineProperty(OfflineAudioContext.prototype, Symbol.toStringTag, { value: 'OfflineAudioContext', configurable: true });
+  Object.defineProperties(OfflineAudioContext.prototype, {
+    oncomplete: eventHandlerAccessor('oncomplete'),
+    resume: { value: function resume() { defineHidden(this, '__zpState', 'running'); return Promise.resolve(); }, enumerable: true, writable: true, configurable: true },
+    suspend: { value: function suspend() { defineHidden(this, '__zpState', 'suspended'); return Promise.resolve(); }, enumerable: true, writable: true, configurable: true },
+  });
 
   class AudioBuffer {
     constructor(options = {}) {
@@ -180,6 +191,7 @@ export function createAudioFacades(EventTargetBase) {
     stop() { this.dispatchEvent(new Event('ended')); }
   }
   Object.defineProperty(AudioScheduledSourceNode.prototype, Symbol.toStringTag, { value: 'AudioScheduledSourceNode', configurable: true });
+  Object.defineProperty(AudioScheduledSourceNode.prototype, 'onended', eventHandlerAccessor('onended'));
 
   class AudioBufferSourceNode extends AudioScheduledSourceNode {
     constructor(context, init = {}) { super(audioScheduledSourceToken, context); defineHidden(this, '__zpBuffer', init.buffer ?? null); defineHidden(this, '__zpPlaybackRate', new AudioParam(audioParamToken, 1)); defineHidden(this, '__zpDetune', new AudioParam(audioParamToken, 0)); defineHidden(this, '__zpLoop', false); }
@@ -206,9 +218,7 @@ export function createAudioFacades(EventTargetBase) {
     set type(value) { defineHidden(this, '__zpType', String(value)); }
     get frequency() { return this.__zpFrequency; }
     get detune() { return this.__zpDetune; }
-    setPeriodicWave() {}
-    start() { this.dispatchEvent(new Event('ended')); }
-    stop() { this.dispatchEvent(new Event('ended')); }
+    setPeriodicWave(periodicWave) { void periodicWave; }
   }
   Object.defineProperty(OscillatorNode.prototype, Symbol.toStringTag, { value: 'OscillatorNode', configurable: true });
 
@@ -356,11 +366,8 @@ export function createAudioFacades(EventTargetBase) {
   class ConstantSourceNode extends AudioScheduledSourceNode {
     constructor(context, init = {}) { super(audioScheduledSourceToken, context); defineHidden(this, '__zpOffset', audioParam(init.offset ?? 1)); }
     get offset() { return this.__zpOffset; }
-    start() { this.dispatchEvent(new Event('ended')); }
-    stop() { this.dispatchEvent(new Event('ended')); }
   }
   Object.defineProperty(ConstantSourceNode.prototype, Symbol.toStringTag, { value: 'ConstantSourceNode', configurable: true });
-
   class PeriodicWave {
     constructor(_context, init = {}) { defineHidden(this, '__zpReal', Array.from(init.real ?? [])); defineHidden(this, '__zpImag', Array.from(init.imag ?? [])); }
   }
@@ -370,9 +377,13 @@ export function createAudioFacades(EventTargetBase) {
     constructor() { throw new TypeError("Failed to construct 'AudioParamMap': Illegal constructor"); }
   }
   Object.defineProperty(AudioParamMap.prototype, 'size', { get() { return 0; }, configurable: true });
-  Object.defineProperty(AudioParamMap.prototype, 'get', { value() { return undefined; }, writable: true, configurable: true });
-  Object.defineProperty(AudioParamMap.prototype, 'has', { value() { return false; }, writable: true, configurable: true });
-  Object.defineProperty(AudioParamMap.prototype, Symbol.iterator, { value: function* entries() {}, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, 'get', { value: function get(name) { return this?.['__zp_' + String(name)]; }, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, 'has', { value: function has(name) { return Object.prototype.hasOwnProperty.call(this, '__zp_' + String(name)); }, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, 'entries', { value: function* entries() {}, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, 'keys', { value: function* keys() {}, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, 'values', { value: function* values() {}, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, 'forEach', { value: function forEach(callback, thisArg = undefined) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); void thisArg; }, writable: true, configurable: true });
+  Object.defineProperty(AudioParamMap.prototype, Symbol.iterator, { value: AudioParamMap.prototype.entries, writable: true, configurable: true });
   Object.defineProperty(AudioParamMap.prototype, Symbol.toStringTag, { value: 'AudioParamMap', configurable: true });
 
   class AudioWorkletNode extends AudioNode {
@@ -381,6 +392,7 @@ export function createAudioFacades(EventTargetBase) {
     get port() { return this.__zpPort; }
   }
   Object.defineProperty(AudioWorkletNode.prototype, Symbol.toStringTag, { value: 'AudioWorkletNode', configurable: true });
+  Object.defineProperty(AudioWorkletNode.prototype, 'onprocessorerror', eventHandlerAccessor('onprocessorerror'));
 
   class MediaElementAudioSourceNode extends AudioNode {
     constructor(context, init = {}) { super(audioNodeToken, context, { numberOfInputs: 0, numberOfOutputs: 1 }); defineHidden(this, '__zpMediaElement', init.mediaElement ?? null); }
@@ -503,6 +515,15 @@ export function createAudioFacades(EventTargetBase) {
   Object.defineProperty(ScriptProcessorNode.prototype, Symbol.toStringTag, { value: 'ScriptProcessorNode', configurable: true });
 
   return { AnalyserNode, AudioBuffer, AudioBufferSourceNode, AudioContext, AudioDestinationNode, AudioListener, AudioNode, AudioParam, AudioParamMap, AudioProcessingEvent, AudioScheduledSourceNode, AudioWorklet, AudioWorkletNode, BaseAudioContext, BiquadFilterNode, ChannelMergerNode, ChannelSplitterNode, ConstantSourceNode, ConvolverNode, DelayNode, DynamicsCompressorNode, GainNode, IIRFilterNode, MediaElementAudioSourceNode, MediaStreamAudioDestinationNode, MediaStreamAudioSourceNode, OfflineAudioCompletionEvent, OfflineAudioContext, OscillatorNode, PannerNode, PeriodicWave, ScriptProcessorNode, StereoPannerNode, WaveShaperNode };
+}
+
+function eventHandlerAccessor(name) {
+  return {
+    get() { return this?.['__zp_' + name] ?? null; },
+    set(value) { defineHidden(this, '__zp_' + name, typeof value === 'function' ? value : null); },
+    enumerable: true,
+    configurable: true,
+  };
 }
 
 

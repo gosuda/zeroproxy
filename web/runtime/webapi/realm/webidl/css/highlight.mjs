@@ -29,7 +29,7 @@ export function createHighlightSupport(AbstractRange) {
     clear() { this.__zpRanges.clear(); }
     delete(range) { return this.__zpRanges.delete(range); }
     entries() { return this.__zpRanges.entries(); }
-    forEach(callback, thisArg) {
+    forEach(callback, thisArg = undefined) {
       if (typeof callback !== 'function') throw new TypeError("Failed to execute 'forEach' on 'Highlight': parameter 1 is not a function.");
       for (const range of this.__zpRanges) callback.call(thisArg, range, range, this);
     }
@@ -47,16 +47,15 @@ export function createHighlightSupport(AbstractRange) {
     clear() { this.__zpHighlights.clear(); }
     delete(name) { return this.__zpHighlights.delete(String(name)); }
     entries() { return this.__zpHighlights.entries(); }
-    forEach(callback, thisArg) {
+    forEach(callback, thisArg = undefined) {
       if (typeof callback !== 'function') throw new TypeError("Failed to execute 'forEach' on 'HighlightRegistry': parameter 1 is not a function.");
       for (const [name, highlight] of this.__zpHighlights) callback.call(thisArg, highlight, name, this);
     }
     get(name) { return this.__zpHighlights.get(String(name)); }
     has(name) { return this.__zpHighlights.has(String(name)); }
-    highlightsFromPoint(x = missingPointCoordinate, y = missingPointCoordinate) {
-      if (x === missingPointCoordinate || y === missingPointCoordinate) {
-        const present = x === missingPointCoordinate ? 0 : 1;
-        throw new TypeError(`Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': 2 arguments required, but only ${present} present.`);
+    highlightsFromPoint(x, y) {
+      if (arguments.length < 2) {
+        throw new TypeError(`Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': 2 arguments required, but only ${arguments.length} present.`);
       }
       if (!Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) throw new TypeError("Failed to execute 'highlightsFromPoint' on 'HighlightRegistry': The provided float value is non-finite.");
       return [];

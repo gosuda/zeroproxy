@@ -37,21 +37,17 @@ export function createMediaSourceFacades(EventTargetBase) {
     get buffered() { return this.__zpBuffered; }
     get timestampOffset() { return this.__zpTimestampOffset; }
     set timestampOffset(value) { defineHidden(this, '__zpTimestampOffset', Number(value) || 0); }
-    get audioTracks() { return this.__zpAudioTracks; }
-    get videoTracks() { return this.__zpVideoTracks; }
-    get textTracks() { return this.__zpTextTracks; }
     get appendWindowStart() { return this.__zpAppendWindowStart; }
     set appendWindowStart(value) { defineHidden(this, '__zpAppendWindowStart', Number(value) || 0); }
     get appendWindowEnd() { return this.__zpAppendWindowEnd; }
     set appendWindowEnd(value) { defineHidden(this, '__zpAppendWindowEnd', Number(value)); }
-    appendBuffer() { dispatchSourceBufferUpdate(this); }
-    appendBufferAsync(data) { this.appendBuffer(data); return Promise.resolve(); }
-    remove() { dispatchSourceBufferUpdate(this); }
-    removeAsync(start, end) { this.remove(start, end); return Promise.resolve(); }
+    appendBuffer(data) { void data; dispatchSourceBufferUpdate(this); }
+    remove(start, end) { void start; void end; dispatchSourceBufferUpdate(this); }
     abort() { defineHidden(this, '__zpUpdating', false); }
     changeType(type) { defineHidden(this, '__zpMimeType', String(type)); }
   }
   Object.defineProperty(SourceBuffer.prototype, Symbol.toStringTag, { value: 'SourceBuffer', configurable: true });
+  defineEventHandlerAccessors(SourceBuffer.prototype, ['onabort', 'onerror', 'onupdate', 'onupdateend', 'onupdatestart']);
 
   class SourceBufferList extends EventTargetBase {
     constructor(token, buffers = []) {
@@ -64,7 +60,9 @@ export function createMediaSourceFacades(EventTargetBase) {
     item(index) { return this.__zpBuffers[Number(index)] ?? null; }
     [Symbol.iterator]() { return this.__zpBuffers[Symbol.iterator](); }
   }
+  Object.defineProperty(SourceBufferList.prototype[Symbol.iterator], 'name', { value: 'values', configurable: true });
   Object.defineProperty(SourceBufferList.prototype, Symbol.toStringTag, { value: 'SourceBufferList', configurable: true });
+  defineEventHandlerAccessors(SourceBufferList.prototype, ['onaddsourcebuffer', 'onremovesourcebuffer']);
 
   class MediaSource extends EventTargetBase {
     constructor() {
@@ -102,6 +100,8 @@ export function createMediaSourceFacades(EventTargetBase) {
       defineHidden(this, '__zpLiveSeekableRange', null);
     }
   }
+  Object.defineProperty(MediaSource, 'canConstructInDedicatedWorker', { value: false, enumerable: true, configurable: true, writable: false });
+  defineEventHandlerAccessors(MediaSource.prototype, ['onsourceclose', 'onsourceended', 'onsourceopen']);
   Object.defineProperty(MediaSource.prototype, Symbol.toStringTag, { value: 'MediaSource', configurable: true });
 
   class MediaSourceHandle {
@@ -113,6 +113,19 @@ export function createMediaSourceFacades(EventTargetBase) {
 
   return { MediaSource, MediaSourceHandle, SourceBuffer, SourceBufferList, TimeRanges };
 }
+function defineEventHandlerAccessors(proto, names) {
+  for (const name of names) Object.defineProperty(proto, name, eventHandlerAccessor(name));
+}
+
+function eventHandlerAccessor(name) {
+  return {
+    get() { return this?.['__zp_' + name] ?? null; },
+    set(value) { defineHidden(this, '__zp_' + name, typeof value === 'function' ? value : null); },
+    enumerable: true,
+    configurable: true,
+  };
+}
+
 
 function mediaTypeSupported(type) {
   const text = String(type || '').toLowerCase();

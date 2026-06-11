@@ -30,8 +30,8 @@ export function createWebCodecsFacades() {
     get numberOfChannels() { return closedValue(this, this.__zpNumberOfChannels, 0); }
     get duration() { return closedValue(this, this.__zpDuration, null); }
     get timestamp() { return closedValue(this, this.__zpTimestamp, 0); }
-    allocationSize() { return this.__zpClosed ? 0 : this.__zpData.byteLength; }
-    copyTo(destination) { if (!this.__zpClosed) copyBytes(this.__zpData, destination); }
+    allocationSize(options) { void options; return this.__zpClosed ? 0 : this.__zpData.byteLength; }
+    copyTo(destination, options) { void options; if (!this.__zpClosed) copyBytes(this.__zpData, destination); }
     clone() { return new AudioData({ format: this.format, sampleRate: this.sampleRate, numberOfFrames: this.numberOfFrames, numberOfChannels: this.numberOfChannels, duration: this.duration, timestamp: this.timestamp, data: this.__zpData }); }
     close() { defineHidden(this, '__zpClosed', true); }
   }

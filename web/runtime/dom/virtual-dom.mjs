@@ -351,6 +351,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
       setVirtualEventField(ev, 'currentTarget', null);
       return !ev.defaultPrevented;
     }
+    when(type) { return new Promise((resolve) => this.addEventListener(type, resolve, { once: true })); }
   }
   Object.defineProperty(VirtualEventTarget, 'name', { value: 'EventTarget', configurable: true });
   Object.defineProperty(VirtualEventTarget.prototype, Symbol.toStringTag, { value: 'EventTarget', configurable: true });
@@ -519,8 +520,8 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
       super();
       this.__zpNodeType = type;
       this.__zpNodeName = nodeName;
-      this.ownerDocument = ownerDocument;
-      this.parentNode = null;
+      this.__zpOwnerDocument = ownerDocument || null;
+      this.__zpParentNode = null;
       this.__zpChildren = [];
       Object.defineProperty(this, 'childNodes', {
         value: liveCollection(() => this.__zpChildren, 'NodeList'),
@@ -529,23 +530,6 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
       });
       this.__zpNodeId = nodeId || makeNodeId();
       nodes.set(this.__zpNodeId, this);
-    }
-    before(...values) {
-      if (!this.parentNode) return;
-      for (const node of values.map((value) => coerceNode(value, this.ownerDocument))) this.parentNode.insertBefore(node, this);
-    }
-    after(...values) {
-      if (!this.parentNode) return;
-      const before = this.nextSibling;
-      for (const node of values.map((value) => coerceNode(value, this.ownerDocument))) this.parentNode.insertBefore(node, before);
-    }
-    remove() { if (this.parentNode) this.parentNode.removeChild(this); }
-    replaceWith(...values) {
-      if (!this.parentNode) return;
-      const parent = this.parentNode;
-      const before = this.nextSibling;
-      for (const node of values.map((value) => coerceNode(value, this.ownerDocument))) parent.insertBefore(node, before);
-      parent.removeChild(this);
     }
     appendChild(child) { return appendNode(this, child, true); }
     removeChild(child) { return removeNode(this, child, true); }
@@ -566,8 +550,6 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     get previousSibling() { return siblingOf(this, -1); }
     get nextSibling() { return siblingOf(this, 1); }
     get textContent() { return this.__zpChildren.filter((child) => child.nodeType !== 8).map((child) => child.textContent).join(''); }
-    get innerText() { return innerTextForNode(this); }
-    set innerText(value) { setNodeText(this, String(value ?? '')); }
     set textContent(value) { setNodeText(this, String(value ?? '')); }
   }
   const nodeConstants = {
@@ -595,16 +577,50 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     Object.defineProperty(VirtualNode.prototype, name, { value, enumerable: true });
   }
   Object.defineProperties(VirtualNode.prototype, {
+    ownerDocument: { get() { return this.__zpOwnerDocument || null; }, enumerable: true, configurable: true },
+    parentNode: { get() { return this.__zpParentNode || null; }, enumerable: true, configurable: true },
     baseURI: { get() { return this.ownerDocument?.location?.href || globalThis.location?.href || 'about:blank'; }, enumerable: true, configurable: true },
     childNodes: { get() { return liveCollection(() => this.__zpChildren || [], 'NodeList'); }, enumerable: true, configurable: true },
     nodeName: { get() { return this.__zpNodeName ?? this.__zpName ?? ''; }, enumerable: true, configurable: true },
     nodeType: { get() { return this.__zpNodeType ?? 0; }, enumerable: true, configurable: true },
     nodeValue: { get() { if (this.__zpNodeType === 2) return this.value; if (this.__zpNodeType === 3 || this.__zpNodeType === 4 || this.__zpNodeType === 7 || this.__zpNodeType === 8) return this.data; return null; }, set(value) { if (this.__zpNodeType === 2) this.value = value; else if (this.__zpNodeType === 3 || this.__zpNodeType === 4 || this.__zpNodeType === 7 || this.__zpNodeType === 8) this.textContent = value; }, enumerable: true, configurable: true },
     isDefaultNamespace: { value: function isDefaultNamespace(namespaceURI) { return (this.lookupNamespaceURI(null) || null) === (namespaceURI === undefined ? null : namespaceURI); }, enumerable: true, writable: true, configurable: true },
-    lookupNamespaceURI: { value: function lookupNamespaceURI(prefix) { return this.namespaceURI && (prefix === null || prefix === undefined || prefix === this.prefix) ? this.namespaceURI : (this.parentNode?.lookupNamespaceURI?.(prefix) ?? null); }, enumerable: true, writable: true, configurable: true },
+    lookupNamespaceURI: { value: function lookupNamespaceURI(prefix) { const wanted = prefix === undefined ? null : prefix; return this.namespaceURI && wanted === (this.prefix || null) ? this.namespaceURI : (this.parentNode?.lookupNamespaceURI?.(prefix) ?? null); }, enumerable: true, writable: true, configurable: true },
     lookupPrefix: { value: function lookupPrefix(namespaceURI) { return this.namespaceURI === namespaceURI ? (this.prefix || null) : (this.parentNode?.lookupPrefix?.(namespaceURI) ?? null); }, enumerable: true, writable: true, configurable: true },
   });
 
+
+  function childNodeBefore(...values) {
+    if (!this.parentNode) return;
+    for (const node of values.map((value) => coerceNode(value, this.ownerDocument))) this.parentNode.insertBefore(node, this);
+  }
+
+  function childNodeAfter(...values) {
+    if (!this.parentNode) return;
+    const before = this.nextSibling;
+    for (const node of values.map((value) => coerceNode(value, this.ownerDocument))) this.parentNode.insertBefore(node, before);
+  }
+
+  function childNodeRemove() {
+    if (this.parentNode) this.parentNode.removeChild(this);
+  }
+
+  function childNodeReplaceWith(...values) {
+    if (!this.parentNode) return;
+    const parent = this.parentNode;
+    const before = this.nextSibling;
+    for (const node of values.map((value) => coerceNode(value, this.ownerDocument))) parent.insertBefore(node, before);
+    parent.removeChild(this);
+  }
+
+  function defineChildNodeMethods(proto) {
+    Object.defineProperties(proto, {
+      before: { value: childNodeBefore, enumerable: true, writable: true, configurable: true },
+      after: { value: childNodeAfter, enumerable: true, writable: true, configurable: true },
+      remove: { value: childNodeRemove, enumerable: true, writable: true, configurable: true },
+      replaceWith: { value: childNodeReplaceWith, enumerable: true, writable: true, configurable: true },
+    });
+  }
   function cloneVirtualNode(node, deep, ownerDocument = null) {
     const clone = cloneVirtualNodeShallow(node, ownerDocument);
     if (deep) for (const child of node.__zpChildren || []) clone.appendChild(cloneVirtualNode(child, true, ownerDocument || clone.ownerDocument));
@@ -638,7 +654,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   }
 
   function updateOwnerDocument(node, ownerDocument) {
-    node.ownerDocument = ownerDocument;
+    node.__zpOwnerDocument = ownerDocument || null;
     for (const child of node.__zpChildren || []) updateOwnerDocument(child, ownerDocument);
   }
 
@@ -710,6 +726,20 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   function CharacterData() { throw new TypeError("Failed to construct 'CharacterData': Illegal constructor"); }
   Object.defineProperty(CharacterData, Symbol.hasInstance, { value: (value) => value instanceof VirtualText || value instanceof VirtualComment || value instanceof VirtualCDATASection || value instanceof VirtualProcessingInstruction, configurable: true });
   Object.defineProperty(CharacterData.prototype, Symbol.toStringTag, { value: 'CharacterData', configurable: true });
+  Object.setPrototypeOf(CharacterData.prototype, VirtualNode.prototype);
+  Object.defineProperties(CharacterData.prototype, {
+    data: { get() { return Object.prototype.hasOwnProperty.call(this, 'data') ? Object.getOwnPropertyDescriptor(this, 'data').value : ''; }, set(value) { this.textContent = value; }, enumerable: true, configurable: true },
+    length: { get() { return String(this.data ?? '').length; }, enumerable: true, configurable: true },
+    previousElementSibling: { get() { for (let node = this.previousSibling; node; node = node.previousSibling) if (node.nodeType === 1) return node; return null; }, enumerable: true, configurable: true },
+    nextElementSibling: { get() { for (let node = this.nextSibling; node; node = node.nextSibling) if (node.nodeType === 1) return node; return null; }, enumerable: true, configurable: true },
+    appendData: { value: function appendData(data) { this.textContent = String(this.data ?? '') + String(data); }, enumerable: true, writable: true, configurable: true },
+    deleteData: { value: function deleteData(offset, count) { const start = characterDataOffset(this, offset); const remove = Math.max(0, Number(count) || 0); this.textContent = String(this.data ?? '').slice(0, start) + String(this.data ?? '').slice(start + remove); }, enumerable: true, writable: true, configurable: true },
+    insertData: { value: function insertData(offset, data) { const start = characterDataOffset(this, offset); const text = String(this.data ?? ''); this.textContent = text.slice(0, start) + String(data) + text.slice(start); }, enumerable: true, writable: true, configurable: true },
+    replaceData: { value: function replaceData(offset, count, data) { const start = characterDataOffset(this, offset); const text = String(this.data ?? ''); const remove = Math.max(0, Number(count) || 0); this.textContent = text.slice(0, start) + String(data) + text.slice(start + remove); }, enumerable: true, writable: true, configurable: true },
+    substringData: { value: function substringData(offset, count) { const start = characterDataOffset(this, offset); return String(this.data ?? '').slice(start, start + Math.max(0, Number(count) || 0)); }, enumerable: true, writable: true, configurable: true },
+    [Symbol.unscopables]: { value: { after: true, before: true, remove: true, replaceWith: true }, configurable: true },
+  });
+  defineChildNodeMethods(CharacterData.prototype);
 
   class VirtualText extends VirtualNode {
     constructor(text, ownerDocument, nodeId) { super(3, '#text', ownerDocument, nodeId); this.data = String(text || ''); }
@@ -740,6 +770,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   Object.defineProperty(Text.prototype, Symbol.toStringTag, { value: 'Text', configurable: true });
 
 
+
   class VirtualComment extends VirtualNode {
     constructor(text, ownerDocument, nodeId) { super(8, '#comment', ownerDocument, nodeId); this.data = String(text || ''); }
     get textContent() { return this.data; }
@@ -748,6 +779,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   Object.defineProperty(VirtualComment, 'name', { value: 'CharacterData', configurable: true });
   class Comment extends VirtualComment { constructor(data = '', ownerDocument = globalThis.document || null, nodeId) { super(data, ownerDocument, nodeId); } }
   Object.defineProperty(Comment.prototype, Symbol.toStringTag, { value: 'Comment', configurable: true });
+
 
   function CDATASection() { throw new TypeError("Failed to construct 'CDATASection': Illegal constructor"); }
   Object.defineProperty(CDATASection, Symbol.hasInstance, { value: (value) => value instanceof VirtualCDATASection, configurable: true });
@@ -758,6 +790,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     set textContent(value) { const old = this.data; this.data = String(value ?? ''); notifyMutation({ type: 'characterData', target: this, oldValue: old, addedNodes: [], removedNodes: [] }); }
   }
   Object.defineProperty(VirtualCDATASection.prototype, Symbol.toStringTag, { value: 'CDATASection', configurable: true });
+
 
   function ProcessingInstruction() { throw new TypeError("Failed to construct 'ProcessingInstruction': Illegal constructor"); }
   Object.defineProperty(ProcessingInstruction, Symbol.hasInstance, { value: (value) => value instanceof VirtualProcessingInstruction, configurable: true });
@@ -1220,9 +1253,12 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     constructor(tagName, ownerDocument, nodeId, namespaceURI = HTML_NS) {
       const ns = namespaceURI === undefined ? HTML_NS : String(namespaceURI || '');
       const rawName = String(tagName || '');
-      const localName = ns === HTML_NS ? rawName.toLowerCase() : rawName;
-      super(1, ns === HTML_NS ? rawName.toUpperCase() : rawName, ownerDocument, nodeId);
+      const qualified = parseQualifiedName(rawName);
+      const localName = ns === HTML_NS ? rawName.toLowerCase() : qualified.localName;
+      const nodeName = ns === HTML_NS ? rawName.toUpperCase() : rawName;
+      super(1, nodeName, ownerDocument, nodeId);
       this.localName = localName;
+      this.prefix = ns && ns !== HTML_NS ? qualified.prefix : null;
       this.tagName = this.nodeName;
       this.namespaceURI = ns;
       this.__zpAttributes = new Map();
@@ -1258,7 +1294,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     getElementsByTagName(tag) { return tagsUnder(this, tag); }
     querySelectorAll(selector) { return liveCollection(() => descendants(this).filter((node) => matchesSelector(node, selector)), 'NodeList'); }
     querySelector(selector) { return this.querySelectorAll(selector).item(0); }
-    animate(keyframes, options) { const animation = new Animation(new KeyframeEffect(this, keyframes, options), this.ownerDocument?.timeline || globalThis.document?.timeline || null); virtualAnimations.add(animation); animation.play(); return animation; }
+    animate(keyframes) { const animation = new Animation(new KeyframeEffect(this, keyframes, arguments[1]), this.ownerDocument?.timeline || globalThis.document?.timeline || null); virtualAnimations.add(animation); animation.play(); return animation; }
     getAnimations() { return activeAnimationsFor((animation) => animation.effect?.target === this); }
     closest(selector) { for (let node = this; node; node = node.parentNode) if (matchesSelector(node, selector)) return node; return null; }
     matches(selector) { return matchesSelector(this, selector); }
@@ -1274,6 +1310,11 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     getBoundingClientRect() { return rectFor(this.__zpNodeId); }
     getClientRects() { return makeDOMRectList([this.getBoundingClientRect()]); }
   }
+
+  defineChildNodeMethods(VirtualElement.prototype);
+  Object.defineProperties(VirtualElement.prototype, {
+    innerText: { get() { return innerTextForNode(this); }, set(value) { setNodeText(this, String(value ?? '')); }, enumerable: true, configurable: true },
+  });
 
   reflectStringAttribute(VirtualElement.prototype, 'name');
   reflectStringAttribute(VirtualElement.prototype, 'title');
@@ -1346,7 +1387,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   class VirtualDocument extends VirtualNode {
     constructor(href) {
       super(9, '#document', null, 'document');
-      this.ownerDocument = this;
+      this.__zpOwnerDocument = this;
       this.location = makeLocation(href);
       this.contentType = 'text/html';
       this.documentElement = null;
@@ -1716,12 +1757,6 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     state.callback?.(entries, observer);
   }
 
-  for (const prop of handlerProps) {
-    Object.defineProperty(VirtualEventTarget.prototype, prop, {
-      get() { return this['__zp_' + prop] || null; },
-      set(value) { this['__zp_' + prop] = typeof value === 'function' ? value : null; },
-    });
-  }
 
   function __zpLoadDocument(records, options = {}) {
     const doc = new VirtualDocument(options.href || 'about:blank');
@@ -2412,43 +2447,54 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   Object.defineProperty(PerformanceObserver.prototype, Symbol.toStringTag, { value: 'PerformanceObserver', configurable: true });
 
   const animationTimelineToken = {};
+  const animationTimelineState = new WeakMap();
+  function timelineStateFor(value) {
+    const state = animationTimelineState.get(value);
+    if (!state) throw new TypeError('Illegal invocation');
+    return state;
+  }
   class AnimationTimeline {
     constructor(token) {
       if (token !== animationTimelineToken) throw new TypeError("Failed to construct 'AnimationTimeline': Illegal constructor");
-      this.__zpAnimationTimeline = true;
+      animationTimelineState.set(this, { originTime: 0, source: null, axis: 'block', subject: null, startOffset: null, endOffset: null });
     }
+    get currentTime() { return viewport.now - timelineStateFor(this).originTime; }
+    get duration() { return null; }
   }
-  Object.defineProperty(AnimationTimeline, Symbol.hasInstance, { value: (value) => Boolean(value?.__zpAnimationTimeline), configurable: true });
   Object.defineProperty(AnimationTimeline.prototype, Symbol.toStringTag, { value: 'AnimationTimeline', configurable: true });
 
   class DocumentTimeline extends AnimationTimeline {
     constructor(options = {}) {
       super(animationTimelineToken);
-      this.__zpDocumentTimeline = true;
-      this.originTime = rectNumber(options.originTime);
+      timelineStateFor(this).originTime = rectNumber(options.originTime);
     }
-    get currentTime() { return viewport.now - this.originTime; }
   }
   Object.defineProperty(DocumentTimeline.prototype, Symbol.toStringTag, { value: 'DocumentTimeline', configurable: true });
 
   class ScrollTimeline extends AnimationTimeline {
     constructor(options = {}) {
       super(animationTimelineToken);
-      this.__zpScrollTimeline = true;
-      this.source = options.source ?? null;
-      this.axis = normalizeTimelineAxis(options.axis);
+      const state = timelineStateFor(this);
+      state.source = options.source ?? null;
+      state.axis = normalizeTimelineAxis(options.axis);
     }
-    get currentTime() { return viewport.now; }
+    get source() { return timelineStateFor(this).source; }
+    get axis() { return timelineStateFor(this).axis; }
   }
   Object.defineProperty(ScrollTimeline.prototype, Symbol.toStringTag, { value: 'ScrollTimeline', configurable: true });
 
   class ViewTimeline extends ScrollTimeline {
     constructor(options = {}) {
       super({ source: options.subject ?? null, axis: options.axis });
-      this.__zpViewTimeline = true;
-      this.subject = options.subject ?? null;
+      const state = timelineStateFor(this);
+      state.subject = options.subject ?? null;
+      state.startOffset = options.startOffset ?? null;
+      state.endOffset = options.endOffset ?? null;
       this.inset = options.inset ?? 'auto';
     }
+    get subject() { return timelineStateFor(this).subject; }
+    get startOffset() { return timelineStateFor(this).startOffset; }
+    get endOffset() { return timelineStateFor(this).endOffset; }
   }
   Object.defineProperty(ViewTimeline.prototype, Symbol.toStringTag, { value: 'ViewTimeline', configurable: true });
 
@@ -2458,30 +2504,45 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   }
 
   const animationEffectToken = {};
+  const animationEffectState = new WeakMap();
+  function animationEffectStateFor(value) {
+    const state = animationEffectState.get(value);
+    if (!state) throw new TypeError('Illegal invocation');
+    return state;
+  }
   class AnimationEffect {
     constructor(token) {
       if (token !== animationEffectToken) throw new TypeError("Failed to construct 'AnimationEffect': Illegal constructor");
-      this.__zpAnimationEffect = true;
+      animationEffectState.set(this, { target: null, pseudoElement: null, composite: 'replace', keyframes: [], timing: normalizeAnimationTiming() });
+    }
+    getTiming() { return { ...animationEffectStateFor(this).timing }; }
+    getComputedTiming() {
+      const timing = animationEffectStateFor(this).timing;
+      return { ...timing, activeDuration: timing.duration, endTime: timing.duration, localTime: null, progress: null, currentIteration: null };
+    }
+    updateTiming(options = {}) {
+      const state = animationEffectStateFor(this);
+      state.timing = { ...state.timing, ...normalizeAnimationTiming(options, state.timing) };
     }
   }
-  Object.defineProperty(AnimationEffect, Symbol.hasInstance, { value: (value) => Boolean(value?.__zpAnimationEffect), configurable: true });
   Object.defineProperty(AnimationEffect.prototype, Symbol.toStringTag, { value: 'AnimationEffect', configurable: true });
 
   class KeyframeEffect extends AnimationEffect {
     constructor(target = null, keyframes = [], options = {}) {
       super(animationEffectToken);
-      this.__zpKeyframeEffect = true;
-      this.target = target;
-      this.pseudoElement = null;
-      this.composite = 'replace';
-      this.iterationComposite = 'replace';
-      this.__zpKeyframes = normalizeKeyframes(keyframes);
-      this.__zpTiming = normalizeAnimationTiming(options);
+      const state = animationEffectStateFor(this);
+      state.target = target;
+      state.keyframes = normalizeKeyframes(keyframes);
+      state.timing = normalizeAnimationTiming(options);
     }
-    getKeyframes() { return this.__zpKeyframes.map((frame) => ({ ...frame })); }
-    getTiming() { return { ...this.__zpTiming }; }
-    getComputedTiming() { return { ...this.__zpTiming, activeDuration: this.__zpTiming.duration, endTime: this.__zpTiming.duration, localTime: null, progress: null, currentIteration: null }; }
-    updateTiming(options = {}) { this.__zpTiming = { ...this.__zpTiming, ...normalizeAnimationTiming(options, this.__zpTiming) }; }
+    get target() { return animationEffectStateFor(this).target; }
+    set target(value) { animationEffectStateFor(this).target = value; }
+    get pseudoElement() { return animationEffectStateFor(this).pseudoElement; }
+    set pseudoElement(value) { animationEffectStateFor(this).pseudoElement = value; }
+    get composite() { return animationEffectStateFor(this).composite; }
+    set composite(value) { animationEffectStateFor(this).composite = String(value); }
+    getKeyframes() { return animationEffectStateFor(this).keyframes.map((frame) => ({ ...frame })); }
+    setKeyframes(keyframes) { animationEffectStateFor(this).keyframes = normalizeKeyframes(keyframes); }
   }
   Object.defineProperty(KeyframeEffect.prototype, Symbol.toStringTag, { value: 'KeyframeEffect', configurable: true });
 
@@ -2512,11 +2573,13 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   Object.defineProperty(Animation.prototype, Symbol.toStringTag, { value: 'Animation', configurable: true });
 
   function CSSAnimation() { throw new TypeError("Failed to construct 'CSSAnimation': Illegal constructor"); }
-  Object.defineProperty(CSSAnimation, Symbol.hasInstance, { value: (value) => Boolean(value?.__zpCSSAnimation), configurable: true });
+  CSSAnimation.prototype = Object.create(Animation.prototype, { constructor: { value: CSSAnimation, writable: true, configurable: true } });
+  Object.defineProperty(CSSAnimation.prototype, 'animationName', { get() { return ''; }, enumerable: true, configurable: true });
   Object.defineProperty(CSSAnimation.prototype, Symbol.toStringTag, { value: 'CSSAnimation', configurable: true });
 
   function CSSTransition() { throw new TypeError("Failed to construct 'CSSTransition': Illegal constructor"); }
-  Object.defineProperty(CSSTransition, Symbol.hasInstance, { value: (value) => Boolean(value?.__zpCSSTransition), configurable: true });
+  CSSTransition.prototype = Object.create(Animation.prototype, { constructor: { value: CSSTransition, writable: true, configurable: true } });
+  Object.defineProperty(CSSTransition.prototype, 'transitionProperty', { get() { return ''; }, enumerable: true, configurable: true });
   Object.defineProperty(CSSTransition.prototype, Symbol.toStringTag, { value: 'CSSTransition', configurable: true });
 
   function activeAnimationsFor(predicate) {
@@ -2679,7 +2742,11 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
   }
 
   function currentWindowEventTarget() {
-    return (windowEventTarget ||= new VirtualEventTarget());
+    if (!windowEventTarget) {
+      windowEventTarget = new VirtualEventTarget();
+      for (const prop of handlerProps) windowEventTarget[prop] = null;
+    }
+    return windowEventTarget;
   }
 
   function namedWindowAccessor(kind, name, callback) {
@@ -2751,7 +2818,7 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     for (const prop of handlerProps) {
       Object.defineProperty(globalThis, prop, {
         get: namedWindowAccessor('get', prop, () => currentWindowEventTarget()[prop]),
-        set: namedWindowAccessor('set', prop, (value) => { currentWindowEventTarget()[prop] = value; }),
+        set: namedWindowAccessor('set', prop, (value) => { currentWindowEventTarget()[prop] = typeof value === 'function' ? value : null; }),
         enumerable: true,
         configurable: true,
       });
@@ -2999,39 +3066,47 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
     const children = parent.__zpChildren;
 
     const index = before ? children.indexOf(before) : -1;
+    const insertionIndex = index >= 0 ? index : children.length;
+    const previousSibling = children[insertionIndex - 1] || null;
+    const nextSibling = index >= 0 ? before : null;
     if (index >= 0) children.splice(index, 0, child);
     else children.push(child);
-    child.parentNode = parent;
+    child.__zpParentNode = parent;
     if (shouldEmit) emit('dom.appendChild', serializeNode(child, parent));
-    if (shouldEmit) notifyMutation({ type: 'childList', target: parent, addedNodes: [child], removedNodes: [] });
+    if (shouldEmit) notifyMutation({ type: 'childList', target: parent, addedNodes: [child], removedNodes: [], previousSibling, nextSibling });
     return child;
   }
 
   function removeNode(parent, child, shouldEmit) {
     const children = parent.__zpChildren;
     const index = children.indexOf(child);
+    const previousSibling = index >= 0 ? children[index - 1] || null : null;
+    const nextSibling = index >= 0 ? children[index + 1] || null : null;
     if (index >= 0) children.splice(index, 1);
-    child.parentNode = null;
+    child.__zpParentNode = null;
     if (shouldEmit) emit('dom.removeChild', { nodeId: child.__zpNodeId, parentNodeId: parent.__zpNodeId });
-    if (shouldEmit) notifyMutation({ type: 'childList', target: parent, addedNodes: [], removedNodes: [child] });
+    if (shouldEmit) notifyMutation({ type: 'childList', target: parent, addedNodes: [], removedNodes: [child], previousSibling, nextSibling });
     return child;
   }
 
   function setNodeText(node, text) {
     const oldChildren = node.__zpChildren.slice();
     node.__zpChildren = [new Text(text, node.ownerDocument)];
-    node.__zpChildren[0].parentNode = node;
+    node.__zpChildren[0].__zpParentNode = node;
     emit('dom.textContent', { nodeId: node.__zpNodeId, text });
     notifyMutation({ type: 'childList', target: node, addedNodes: node.__zpChildren.slice(), removedNodes: oldChildren });
   }
 
   function setAttr(element, namespaceURI, name, value, shouldEmit) {
-    const key = attrKey(namespaceURI, name);
+    const ns = String(namespaceURI || '');
+    const qualified = parseQualifiedName(name);
+    const keyName = ns ? qualified.localName : String(name);
+    const key = attrKey(ns, keyName);
     const old = element.__zpAttributes.get(key)?.value ?? null;
     const text = String(value ?? '');
-    element.__zpAttributes.set(key, { namespaceURI: String(namespaceURI || ''), name: String(name), value: text });
-    if (shouldEmit) emit('dom.attr', { nodeId: element.__zpNodeId, namespaceURI: String(namespaceURI || ''), name: String(name), value: text });
-    if (shouldEmit) notifyMutation({ type: 'attributes', target: element, attributeName: String(name), attributeNamespace: String(namespaceURI || '') || null, oldValue: old, addedNodes: [], removedNodes: [] });
+    element.__zpAttributes.set(key, { namespaceURI: ns, name: String(name), localName: keyName, prefix: ns ? qualified.prefix : null, value: text });
+    if (shouldEmit) emit('dom.attr', { nodeId: element.__zpNodeId, namespaceURI: ns, name: String(name), value: text });
+    if (shouldEmit) notifyMutation({ type: 'attributes', target: element, attributeName: String(name), attributeNamespace: ns || null, oldValue: old, addedNodes: [], removedNodes: [] });
   }
 
   function attrValue(element, namespaceURI, name) {
@@ -3041,9 +3116,15 @@ export const VIRTUAL_DOM_SOURCE = String.raw`
 
   function removeAttr(element, namespaceURI, name, shouldEmit) {
     const ns = String(namespaceURI || '');
-    const key = attrKey(ns, name);
+    const key = attrKey(ns, ns ? parseQualifiedName(name).localName : name);
     element.__zpAttributes.delete(key);
     if (shouldEmit) emit('dom.removeAttr', { nodeId: element.__zpNodeId, namespaceURI: ns, name: String(name) });
+  }
+
+  function parseQualifiedName(name) {
+    const text = String(name || '');
+    const index = text.indexOf(':');
+    return index > 0 ? { prefix: text.slice(0, index), localName: text.slice(index + 1) } : { prefix: null, localName: text };
   }
 
   function attrKey(namespaceURI, name) { return String(namespaceURI || '') + '|' + String(name); }

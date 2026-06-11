@@ -13,12 +13,12 @@
     "browserOnlyGlobalThisKeys": 911,
     "quickJSNativeGlobalThisKeys": 68,
     "quickJSOnlyGlobalThisKeys": 3,
-    "installedQuickJSGlobalThisKeys": 1060,
+    "installedQuickJSGlobalThisKeys": 1061,
     "browserOnlyAfterInstallGlobalThisKeys": 2,
     "installedSharedGlobalThisKeys": 977,
-    "installedQuickJSOnlyGlobalThisKeys": 83,
+    "installedQuickJSOnlyGlobalThisKeys": 84,
     "shapeAuditedEntries": 930,
-    "shapeMismatchEntries": 426,
+    "shapeMismatchEntries": 242,
     "implementedShapeMismatchEntries": 0
   },
   "globalThisSetDiff": {
@@ -3844,6 +3844,7 @@
       "__zpRandomBytes",
       "__zpRejectFetch",
       "__zpRejectWebSocket",
+      "__zpResolveBlobURL",
       "__zpResolveFetch",
       "__zpResolveWebSocket",
       "__zpSerializeURLSearchParams",
@@ -5155,6 +5156,7 @@
       "__zpRandomBytes",
       "__zpRejectFetch",
       "__zpRejectWebSocket",
+      "__zpResolveBlobURL",
       "__zpResolveFetch",
       "__zpResolveWebSocket",
       "__zpSerializeURLSearchParams",
@@ -5179,10 +5181,10 @@
     ],
     "counts": {
       "hostBrowser": 979,
-      "quickJS": 1060,
+      "quickJS": 1061,
       "browserOnly": 2,
       "quickJSNative": 977,
-      "quickJSOnly": 83
+      "quickJSOnly": 84
     }
   },
   "hiddenMissing": [],
@@ -12792,37 +12794,6 @@
   ],
   "entryShapeDiffs": [
     {
-      "name": "TaskController",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["prototypeOwnKeys:missing=:extra=abort", "prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "TaskSignal",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=any:extra=",
-        "prototypeOwnKeys:missing=onprioritychange|priority:extra=addEventListener|dispatchEvent|removeEventListener|throwIfAborted",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "TaskPriorityChangeEvent",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["prototypeOwnKeys:missing=previousPriority:extra=", "prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "Performance",
       "status": "partial",
       "implementationStrategy": "virtualized",
@@ -12836,100 +12807,12 @@
       "quickJSType": "function"
     },
     {
-      "name": "AnimationTimeline",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=currentTime|duration:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "DocumentTimeline",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=:extra=currentTime"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "ScrollTimeline",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=axis|source:extra=currentTime"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "ViewTimeline",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=endOffset|startOffset|subject:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AnimationEffect",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=getComputedTiming|getTiming|updateTiming:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "KeyframeEffect",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=composite|pseudoElement|setKeyframes|target:extra=getComputedTiming|getTiming|updateTiming"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "Animation",
       "status": "partial",
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": [
         "prototypeOwnKeys:missing=currentTime|effect|finished|id|oncancel|onfinish|onremove|overallProgress|pending|playState|playbackRate|rangeEnd:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "CSSAnimation",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=animationName:extra=",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "CSSTransition",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=transitionProperty:extra=",
-        "prototypeChain"
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -12948,34 +12831,18 @@
       "quickJSType": "function"
     },
     {
-      "name": "clientInformation",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "ownKeys:missing=:extra=Symbol(Symbol.toStringTag)|appCodeName|appName|appVersion|canShare|clipboard|connection|contacts|cookieEnabled|credentials|deviceMemory|geolocation"
-      ],
-      "hostType": "object",
-      "quickJSType": "object"
-    },
-    {
       "name": "frames",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 21,
+      "mismatchCount": 16,
       "mismatches": [
         "ownKeys:missing=Temporal|WebAssembly:extra=AudioWorklet|ContactAddress|ContactsManager|Credential|CredentialsContainer|DeviceMotionEvent|DeviceOrientationEvent|FontFaceSet|InternalError|Keyboard|KeyboardLayoutMap|Lock",
         "ownDescriptors.Intl.enumerable:false!=true",
         "ownDescriptors.customElements.kind:accessor!=data",
-        "ownDescriptors.history.kind:accessor!=data",
         "ownDescriptors.navigation.kind:accessor!=data",
-        "ownDescriptors.navigator.kind:accessor!=data",
         "ownDescriptors.styleMedia.kind:accessor!=data",
         "ownDescriptors.performance.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.enumerable:true!=false",
         "ownDescriptors.crypto.kind:accessor!=data",
-        "ownDescriptors.indexedDB.kind:accessor!=data",
         "ownDescriptors.localStorage.kind:accessor!=data",
         "ownDescriptors.sessionStorage.kind:accessor!=data",
         "ownDescriptors.chrome.configurable:false!=true",
@@ -12993,20 +12860,15 @@
       "name": "parent",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 21,
+      "mismatchCount": 16,
       "mismatches": [
         "ownKeys:missing=Temporal|WebAssembly:extra=AudioWorklet|ContactAddress|ContactsManager|Credential|CredentialsContainer|DeviceMotionEvent|DeviceOrientationEvent|FontFaceSet|InternalError|Keyboard|KeyboardLayoutMap|Lock",
         "ownDescriptors.Intl.enumerable:false!=true",
         "ownDescriptors.customElements.kind:accessor!=data",
-        "ownDescriptors.history.kind:accessor!=data",
         "ownDescriptors.navigation.kind:accessor!=data",
-        "ownDescriptors.navigator.kind:accessor!=data",
         "ownDescriptors.styleMedia.kind:accessor!=data",
         "ownDescriptors.performance.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.enumerable:true!=false",
         "ownDescriptors.crypto.kind:accessor!=data",
-        "ownDescriptors.indexedDB.kind:accessor!=data",
         "ownDescriptors.localStorage.kind:accessor!=data",
         "ownDescriptors.sessionStorage.kind:accessor!=data",
         "ownDescriptors.chrome.configurable:false!=true",
@@ -13024,20 +12886,15 @@
       "name": "top",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 21,
+      "mismatchCount": 16,
       "mismatches": [
         "ownKeys:missing=Temporal|WebAssembly:extra=AudioWorklet|ContactAddress|ContactsManager|Credential|CredentialsContainer|DeviceMotionEvent|DeviceOrientationEvent|FontFaceSet|InternalError|Keyboard|KeyboardLayoutMap|Lock",
         "ownDescriptors.Intl.enumerable:false!=true",
         "ownDescriptors.customElements.kind:accessor!=data",
-        "ownDescriptors.history.kind:accessor!=data",
         "ownDescriptors.navigation.kind:accessor!=data",
-        "ownDescriptors.navigator.kind:accessor!=data",
         "ownDescriptors.styleMedia.kind:accessor!=data",
         "ownDescriptors.performance.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.enumerable:true!=false",
         "ownDescriptors.crypto.kind:accessor!=data",
-        "ownDescriptors.indexedDB.kind:accessor!=data",
         "ownDescriptors.localStorage.kind:accessor!=data",
         "ownDescriptors.sessionStorage.kind:accessor!=data",
         "ownDescriptors.chrome.configurable:false!=true",
@@ -13052,35 +12909,12 @@
       "quickJSType": "object"
     },
     {
-      "name": "DocumentType",
+      "name": "Document",
       "status": "partial",
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.unscopables)|after|before|name|publicId|remove|replaceWith|systemId:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Document",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 13,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.unscopables)|URL|activeViewTransition|alinkColor|applets|ariaNotify|bgColor|body|captureEvents|characterSet|charset|childElementCount:extra=",
-        "staticDescriptors.parseHTMLUnsafe.writable:true!=false",
-        "staticDescriptors.parseHTMLUnsafe.value.length:1!=0",
-        "staticDescriptors.parseHTML.writable:true!=false",
-        "staticDescriptors.parseHTML.value.length:1!=0",
-        "prototypeDescriptors.fullscreenEnabled.set:presence",
-        "prototypeDescriptors.fullscreenElement.set:presence",
-        "prototypeDescriptors.caretRangeFromPoint.value.length:0!=2",
-        "prototypeDescriptors.exitFullscreen.writable:true!=false",
-        "prototypeDescriptors.exitPictureInPicture.writable:true!=false",
-        "prototypeDescriptors.hasFocus.writable:true!=false",
-        "prototypeDescriptors.startViewTransition.writable:true!=false",
-        "prototypeDescriptors.write.value.length:0!=1"
+        "prototypeOwnKeys:missing=Symbol(Symbol.unscopables)|URL|activeViewTransition|alinkColor|applets|ariaNotify|bgColor|body|captureEvents|characterSet|charset|childElementCount:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13104,66 +12938,12 @@
       "quickJSType": "function"
     },
     {
-      "name": "TrustedTypePolicyFactory",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeDescriptors.getAttributeType.value.length:2!=0",
-        "prototypeDescriptors.getPropertyType.value.length:2!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "trustedTypes",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "globalDescriptor.kind:accessor!=data",
-        "globalDescriptor.enumerable:true!=false"
-      ],
-      "hostType": "object",
-      "quickJSType": "object"
-    },
-    {
-      "name": "Node",
+      "name": "Element",
       "status": "partial",
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": [
-        "prototypeOwnKeys:missing=ownerDocument|parentNode:extra=after|before|innerText|remove|replaceWith"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Element",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 20,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.unscopables)|activeViewTransition|after|ariaActiveDescendantElement|ariaAtomic|ariaAutoComplete|ariaBrailleLabel|ariaBrailleRoleDescription|ariaBusy|ariaChecked|ariaColCount|ariaColIndex:extra=action|alt|assign|assignedElements|assignedNodes|attachInternals|attributeStyleMap|autofocus|blur|caption|captureStream|cellIndex",
-        "prototypeDescriptors.classList.set:presence",
-        "prototypeDescriptors.animate.value.length:1!=2",
-        "prototypeDescriptors.attachShadow.writable:true!=false",
-        "prototypeDescriptors.attachShadow.value.length:1!=0",
-        "prototypeDescriptors.hasPointerCapture.writable:true!=false",
-        "prototypeDescriptors.insertAdjacentElement.writable:true!=false",
-        "prototypeDescriptors.insertAdjacentHTML.writable:true!=false",
-        "prototypeDescriptors.insertAdjacentHTML.value.length:2!=1",
-        "prototypeDescriptors.insertAdjacentText.writable:true!=false",
-        "prototypeDescriptors.insertAdjacentText.value.length:2!=1",
-        "prototypeDescriptors.releasePointerCapture.writable:true!=false",
-        "prototypeDescriptors.requestFullscreen.writable:true!=false",
-        "prototypeDescriptors.scroll.value.name:scroll!=scrollTo",
-        "prototypeDescriptors.scrollIntoView.writable:true!=false",
-        "prototypeDescriptors.setHTMLUnsafe.writable:true!=false",
-        "prototypeDescriptors.setHTMLUnsafe.value.length:1!=0",
-        "prototypeDescriptors.setPointerCapture.writable:true!=false",
-        "prototypeDescriptors.setHTML.writable:true!=false",
-        "prototypeDescriptors.setHTML.value.length:1!=0"
+        "prototypeOwnKeys:missing=Symbol(Symbol.unscopables)|activeViewTransition|ariaActiveDescendantElement|ariaAtomic|ariaAutoComplete|ariaBrailleLabel|ariaBrailleRoleDescription|ariaBusy|ariaChecked|ariaColCount|ariaColIndex|ariaColIndexText:extra=action|alt|assign|assignedElements|assignedNodes|attachInternals|attributeStyleMap|autofocus|blur|caption|captureStream|cellIndex"
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13172,45 +12952,10 @@
       "name": "HTMLElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=accessKey|attachInternals|attributeStyleMap|autocapitalize|autofocus|blur|click|contentEditable|dataset|dir|draggable|editContext:extra=",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "CustomElementRegistry",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=initialize:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "ElementInternals",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "prototypeOwnKeys:missing=ariaActiveDescendantElement|ariaAtomic|ariaAutoComplete|ariaBrailleLabel|ariaBrailleRoleDescription|ariaBusy|ariaChecked|ariaColCount|ariaColIndex|ariaColIndexText|ariaColSpan|ariaControlsElements:extra=",
-        "prototypeDescriptors.setFormValue.value.length:1!=0",
-        "prototypeDescriptors.setValidity.value.length:1!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "CustomStateSet",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
       "mismatchCount": 2,
       "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|add|clear|delete|entries|forEach|has|keys|size|values:extra=",
-        "prototypeChain"
+        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
+        "prototypeOwnKeys:missing=accessKey|attachInternals|attributeStyleMap|autocapitalize|autofocus|blur|click|contentEditable|dataset|dir|draggable|editContext:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13219,8 +12964,8 @@
       "name": "HTMLUnknownElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)", "prototypeChain"],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -13228,11 +12973,10 @@
       "name": "HTMLAnchorElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=charset|coords|download|hash|host|hostname|href|hrefTranslate|hreflang|interestForElement|name|origin:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=charset|coords|download|hash|host|hostname|href|hrefTranslate|hreflang|interestForElement|name|origin:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13241,11 +12985,10 @@
       "name": "HTMLAreaElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=alt|coords|download|hash|host|hostname|href|interestForElement|noHref|origin|password|pathname:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=alt|coords|download|hash|host|hostname|href|interestForElement|noHref|origin|password|pathname:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13254,8 +12997,8 @@
       "name": "HTMLAudioElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)", "prototypeChain"],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -13263,11 +13006,10 @@
       "name": "HTMLBaseElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=href|target:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=href|target:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13276,11 +13018,10 @@
       "name": "HTMLBodyElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=aLink|background|bgColor|link|onafterprint|onbeforeprint|onbeforeunload|onblur|onerror|onfocus|ongamepadconnected|ongamepaddisconnected:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=aLink|background|bgColor|link|onafterprint|onbeforeprint|onbeforeunload|onblur|onerror|onfocus|ongamepadconnected|ongamepaddisconnected:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13289,11 +13030,10 @@
       "name": "HTMLBRElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=clear:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=clear:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13302,11 +13042,10 @@
       "name": "HTMLButtonElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=checkValidity|command|commandForElement|disabled|form|formAction|formEnctype|formMethod|formNoValidate|formTarget|interestForElement|labels:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=checkValidity|command|commandForElement|disabled|form|formAction|formEnctype|formMethod|formNoValidate|formTarget|interestForElement|labels:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13315,11 +13054,10 @@
       "name": "HTMLTableCaptionElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13328,11 +13066,10 @@
       "name": "HTMLTableColElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|ch|chOff|span|vAlign|width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|ch|chOff|span|vAlign|width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13341,11 +13078,10 @@
       "name": "HTMLDataListElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=options:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=options:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13354,11 +13090,10 @@
       "name": "HTMLDirectoryElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=compact:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=compact:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13367,11 +13102,10 @@
       "name": "HTMLDivElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13380,11 +13114,10 @@
       "name": "HTMLDListElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=compact:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=compact:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13393,11 +13126,10 @@
       "name": "HTMLEmbedElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|getSVGDocument|height|name|src|type|width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|getSVGDocument|height|name|src|type|width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13406,11 +13138,10 @@
       "name": "HTMLFencedFrameElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=canLoadOpaqueURL:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=allow|config|height|sandbox|width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=allow|config|height|sandbox|width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13419,11 +13150,10 @@
       "name": "HTMLFontElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=color|face|size:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=color|face|size:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13432,11 +13162,10 @@
       "name": "HTMLFormElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|acceptCharset|action|autocomplete|checkValidity|elements|encoding|enctype|length|method|name|noValidate:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|acceptCharset|action|autocomplete|checkValidity|elements|encoding|enctype|length|method|name|noValidate:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13445,11 +13174,10 @@
       "name": "HTMLFrameElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=contentDocument|contentWindow|frameBorder|longDesc|marginHeight|marginWidth|name|noResize|scrolling|src:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=contentDocument|contentWindow|frameBorder|longDesc|marginHeight|marginWidth|name|noResize|scrolling|src:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13458,11 +13186,10 @@
       "name": "HTMLFrameSetElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cols|onafterprint|onbeforeprint|onbeforeunload|onblur|onerror|onfocus|ongamepadconnected|ongamepaddisconnected|onhashchange|onlanguagechange|onload:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=cols|onafterprint|onbeforeprint|onbeforeunload|onblur|onerror|onfocus|ongamepadconnected|ongamepaddisconnected|onhashchange|onlanguagechange|onload:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13471,11 +13198,10 @@
       "name": "HTMLGeolocationElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=accuracymode|autolocate|error|initialPermissionStatus|invalidReason|isValid|onlocation|onpromptaction|onpromptdismiss|onvalidationstatuschange|permissionStatus|position:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=accuracymode|autolocate|error|initialPermissionStatus|invalidReason|isValid|onlocation|onpromptaction|onpromptdismiss|onvalidationstatuschange|permissionStatus|position:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13484,11 +13210,10 @@
       "name": "HTMLHeadingElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13497,8 +13222,8 @@
       "name": "HTMLHeadElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)", "prototypeChain"],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -13506,11 +13231,10 @@
       "name": "HTMLHRElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|color|noShade|size|width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|color|noShade|size|width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13519,11 +13243,10 @@
       "name": "HTMLHtmlElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=version:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=version:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13532,11 +13255,10 @@
       "name": "HTMLIFrameElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|allow|allowFullscreen|allowPaymentRequest|contentDocument|contentWindow|credentialless|csp|featurePolicy|frameBorder|getSVGDocument|height:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|allow|allowFullscreen|allowPaymentRequest|contentDocument|contentWindow|credentialless|csp|featurePolicy|frameBorder|getSVGDocument|height:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13545,11 +13267,10 @@
       "name": "HTMLImageElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|alt|border|complete|crossOrigin|currentSrc|decode|decoding|fetchPriority|height|hspace|isMap:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|alt|border|complete|crossOrigin|currentSrc|decode|decoding|fetchPriority|height|hspace|isMap:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13558,11 +13279,10 @@
       "name": "HTMLInputElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=accept|align|alt|autocomplete|checkValidity|checked|defaultChecked|defaultValue|dirName|disabled|files|form:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=accept|align|alt|autocomplete|checkValidity|checked|defaultChecked|defaultValue|dirName|disabled|files|form:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13571,11 +13291,10 @@
       "name": "HTMLLIElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=type|value:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=type|value:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13584,11 +13303,10 @@
       "name": "HTMLLinkElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=as|blocking|charset|crossOrigin|disabled|fetchPriority|href|hreflang|imageSizes|imageSrcset|integrity|media:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=as|blocking|charset|crossOrigin|disabled|fetchPriority|href|hreflang|imageSizes|imageSrcset|integrity|media:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13597,11 +13315,10 @@
       "name": "HTMLMapElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=areas|name:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=areas|name:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13610,11 +13327,10 @@
       "name": "HTMLMarqueeElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=behavior|bgColor|direction|height|hspace|loop|scrollAmount|scrollDelay|start|stop|trueSpeed|vspace:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=behavior|bgColor|direction|height|hspace|loop|scrollAmount|scrollDelay|start|stop|trueSpeed|vspace:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13623,11 +13339,10 @@
       "name": "HTMLMenuElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=compact:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=compact:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13636,11 +13351,10 @@
       "name": "HTMLMetaElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=content|httpEquiv|media|name|scheme:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=content|httpEquiv|media|name|scheme:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13649,11 +13363,10 @@
       "name": "HTMLObjectElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|archive|border|checkValidity|code|codeBase|codeType|contentDocument|contentWindow|data|declare|form:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|archive|border|checkValidity|code|codeBase|codeType|contentDocument|contentWindow|data|declare|form:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13662,11 +13375,10 @@
       "name": "HTMLOListElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=compact|reversed|start|type:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=compact|reversed|start|type:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13675,11 +13387,10 @@
       "name": "HTMLOptGroupElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=disabled|label:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=disabled|label:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13688,11 +13399,10 @@
       "name": "HTMLOptionElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=defaultSelected|disabled|form|index|label|selected|text|value:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=defaultSelected|disabled|form|index|label|selected|text|value:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13701,11 +13411,10 @@
       "name": "HTMLParagraphElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13714,11 +13423,10 @@
       "name": "HTMLParamElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=name|type|value|valueType:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=name|type|value|valueType:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13727,8 +13435,8 @@
       "name": "HTMLPictureElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)", "prototypeChain"],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -13736,11 +13444,10 @@
       "name": "HTMLPreElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13749,11 +13456,10 @@
       "name": "HTMLScriptElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=supports:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=async|blocking|charset|crossOrigin|defer|event|fetchPriority|htmlFor|innerText|integrity|noModule|referrerPolicy:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=async|blocking|charset|crossOrigin|defer|event|fetchPriority|htmlFor|innerText|integrity|noModule|referrerPolicy:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13762,11 +13468,10 @@
       "name": "HTMLSelectElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|add|autocomplete|checkValidity|disabled|form|item|labels|length|multiple|name|namedItem:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|add|autocomplete|checkValidity|disabled|form|item|labels|length|multiple|name|namedItem:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13775,8 +13480,8 @@
       "name": "HTMLSelectedContentElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)", "prototypeChain"],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -13784,11 +13489,10 @@
       "name": "HTMLSlotElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=assign|assignedElements|assignedNodes|name:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=assign|assignedElements|assignedNodes|name:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13797,11 +13501,10 @@
       "name": "HTMLSourceElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|media|sizes|src|srcset|type|width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=height|media|sizes|src|srcset|type|width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13810,8 +13513,8 @@
       "name": "HTMLSpanElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)", "prototypeChain"],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -13819,11 +13522,10 @@
       "name": "HTMLStyleElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=blocking|disabled|media|sheet|type:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=blocking|disabled|media|sheet|type:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13832,11 +13534,10 @@
       "name": "HTMLTableElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|bgColor|border|caption|cellPadding|cellSpacing|createCaption|createTBody|createTFoot|createTHead|deleteCaption|deleteRow:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|bgColor|border|caption|cellPadding|cellSpacing|createCaption|createTBody|createTFoot|createTHead|deleteCaption|deleteRow:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13845,11 +13546,10 @@
       "name": "HTMLTableSectionElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|ch|chOff|deleteRow|insertRow|rows|vAlign:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|ch|chOff|deleteRow|insertRow|rows|vAlign:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13858,11 +13558,10 @@
       "name": "HTMLTableCellElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=abbr|align|axis|bgColor|cellIndex|ch|chOff|colSpan|headers|height|noWrap|rowSpan:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=abbr|align|axis|bgColor|cellIndex|ch|chOff|colSpan|headers|height|noWrap|rowSpan:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13871,11 +13570,10 @@
       "name": "HTMLTemplateElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=content|shadowRootClonable|shadowRootCustomElementRegistry|shadowRootDelegatesFocus|shadowRootMode|shadowRootSerializable:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=content|shadowRootClonable|shadowRootCustomElementRegistry|shadowRootDelegatesFocus|shadowRootMode|shadowRootSerializable:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13884,11 +13582,10 @@
       "name": "HTMLTextAreaElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=autocomplete|checkValidity|cols|defaultValue|dirName|disabled|form|labels|maxLength|minLength|name|placeholder:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=autocomplete|checkValidity|cols|defaultValue|dirName|disabled|form|labels|maxLength|minLength|name|placeholder:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13897,11 +13594,10 @@
       "name": "HTMLTitleElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=text:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=text:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13910,11 +13606,10 @@
       "name": "HTMLTableRowElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|bgColor|cells|ch|chOff|deleteCell|insertCell|rowIndex|sectionRowIndex|vAlign:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|bgColor|cells|ch|chOff|deleteCell|insertCell|rowIndex|sectionRowIndex|vAlign:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13923,11 +13618,10 @@
       "name": "HTMLTrackElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=ERROR|LOADED|LOADING|NONE:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=ERROR|LOADED|LOADING|NONE|default|kind|label|readyState|src|srclang|track:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=ERROR|LOADED|LOADING|NONE|default|kind|label|readyState|src|srclang|track:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13936,11 +13630,10 @@
       "name": "HTMLUListElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=compact|type:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=compact|type:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13962,11 +13655,10 @@
       "name": "HTMLDialogElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=close|closedBy|open|requestClose|returnValue|show|showModal:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=close|closedBy|open|requestClose|returnValue|show|showModal:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13975,11 +13667,10 @@
       "name": "HTMLDetailsElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=name|open:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=name|open:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -13988,11 +13679,10 @@
       "name": "HTMLDataElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=value:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=value:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14001,11 +13691,10 @@
       "name": "HTMLLabelElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=control|form|htmlFor:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=control|form|htmlFor:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14014,11 +13703,10 @@
       "name": "HTMLFieldSetElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=checkValidity|disabled|elements|form|name|reportValidity|setCustomValidity|type|validationMessage|validity|willValidate:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=checkValidity|disabled|elements|form|name|reportValidity|setCustomValidity|type|validationMessage|validity|willValidate:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14027,11 +13715,10 @@
       "name": "HTMLLegendElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=align|form:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|form:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14040,11 +13727,10 @@
       "name": "HTMLOutputElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=checkValidity|defaultValue|form|htmlFor|labels|name|reportValidity|setCustomValidity|type|validationMessage|validity|value:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=checkValidity|defaultValue|form|htmlFor|labels|name|reportValidity|setCustomValidity|type|validationMessage|validity|value:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14053,11 +13739,10 @@
       "name": "HTMLProgressElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=labels|max|position|value:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=labels|max|position|value:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14066,11 +13751,10 @@
       "name": "HTMLMeterElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=high|labels|low|max|min|optimum|value:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=high|labels|low|max|min|optimum|value:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14079,11 +13763,10 @@
       "name": "HTMLTimeElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=dateTime:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=dateTime:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14092,11 +13775,10 @@
       "name": "HTMLModElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cite|dateTime:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=cite|dateTime:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -14105,1057 +13787,11 @@
       "name": "HTMLQuoteElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cite:extra=",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
       "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=attributeStyleMap|autofocus|blur|className|dataset|focus|nonce|onabort|onanimationcancel|onanimationend|onanimationiteration|onanimationstart:extra="
+        "prototypeOwnKeys:missing=cite:extra="
       ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGGraphicsElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=farthestViewportElement|getBBox|getCTM|getScreenCTM|nearestViewportElement|requiredExtensions|systemLanguage|transform:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGGeometryElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=getPointAtLength|getTotalLength|isPointInFill|isPointInStroke|pathLength:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTextContentElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=LENGTHADJUST_SPACING|LENGTHADJUST_SPACINGANDGLYPHS|LENGTHADJUST_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=LENGTHADJUST_SPACING|LENGTHADJUST_SPACINGANDGLYPHS|LENGTHADJUST_UNKNOWN|getCharNumAtPosition|getComputedTextLength|getEndPositionOfChar|getExtentOfChar|getNumberOfChars|getRotationOfChar|getStartPositionOfChar|getSubStringLength|lengthAdjust:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTextPositioningElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=dx|dy|rotate|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGGradientElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_SPREADMETHOD_PAD|SVG_SPREADMETHOD_REFLECT|SVG_SPREADMETHOD_REPEAT|SVG_SPREADMETHOD_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_SPREADMETHOD_PAD|SVG_SPREADMETHOD_REFLECT|SVG_SPREADMETHOD_REPEAT|SVG_SPREADMETHOD_UNKNOWN|gradientTransform|gradientUnits|href|spreadMethod:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimationElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=beginElement|beginElementAt|endElement|endElementAt|getCurrentTime|getSimpleDuration|getStartTime|onbegin|onend|onrepeat|requiredExtensions|systemLanguage:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGComponentTransferFunctionElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_FECOMPONENTTRANSFER_TYPE_DISCRETE|SVG_FECOMPONENTTRANSFER_TYPE_GAMMA|SVG_FECOMPONENTTRANSFER_TYPE_IDENTITY|SVG_FECOMPONENTTRANSFER_TYPE_LINEAR|SVG_FECOMPONENTTRANSFER_TYPE_TABLE|SVG_FECOMPONENTTRANSFER_TYPE_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_FECOMPONENTTRANSFER_TYPE_DISCRETE|SVG_FECOMPONENTTRANSFER_TYPE_GAMMA|SVG_FECOMPONENTTRANSFER_TYPE_IDENTITY|SVG_FECOMPONENTTRANSFER_TYPE_LINEAR|SVG_FECOMPONENTTRANSFER_TYPE_TABLE|SVG_FECOMPONENTTRANSFER_TYPE_UNKNOWN|amplitude|exponent|intercept|offset|slope|tableValues:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=download|href|hreflang|interestForElement|ping|referrerPolicy|rel|relList|target|type:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimateElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimateMotionElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimateTransformElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGCircleElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cx|cy|r:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGClipPathElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=clipPathUnits|transform:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGDefsElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGDescElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGEllipseElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cx|cy|rx|ry:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEBlendElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_FEBLEND_MODE_COLOR|SVG_FEBLEND_MODE_COLOR_BURN|SVG_FEBLEND_MODE_COLOR_DODGE|SVG_FEBLEND_MODE_DARKEN|SVG_FEBLEND_MODE_DIFFERENCE|SVG_FEBLEND_MODE_EXCLUSION|SVG_FEBLEND_MODE_HARD_LIGHT|SVG_FEBLEND_MODE_HUE|SVG_FEBLEND_MODE_LIGHTEN|SVG_FEBLEND_MODE_LUMINOSITY|SVG_FEBLEND_MODE_MULTIPLY|SVG_FEBLEND_MODE_NORMAL:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_FEBLEND_MODE_COLOR|SVG_FEBLEND_MODE_COLOR_BURN|SVG_FEBLEND_MODE_COLOR_DODGE|SVG_FEBLEND_MODE_DARKEN|SVG_FEBLEND_MODE_DIFFERENCE|SVG_FEBLEND_MODE_EXCLUSION|SVG_FEBLEND_MODE_HARD_LIGHT|SVG_FEBLEND_MODE_HUE|SVG_FEBLEND_MODE_LIGHTEN|SVG_FEBLEND_MODE_LUMINOSITY|SVG_FEBLEND_MODE_MULTIPLY|SVG_FEBLEND_MODE_NORMAL:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEColorMatrixElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_FECOLORMATRIX_TYPE_HUEROTATE|SVG_FECOLORMATRIX_TYPE_LUMINANCETOALPHA|SVG_FECOLORMATRIX_TYPE_MATRIX|SVG_FECOLORMATRIX_TYPE_SATURATE|SVG_FECOLORMATRIX_TYPE_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_FECOLORMATRIX_TYPE_HUEROTATE|SVG_FECOLORMATRIX_TYPE_LUMINANCETOALPHA|SVG_FECOLORMATRIX_TYPE_MATRIX|SVG_FECOLORMATRIX_TYPE_SATURATE|SVG_FECOLORMATRIX_TYPE_UNKNOWN|height|in1|result|type|values|width|x:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEComponentTransferElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|in1|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFECompositeElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_FECOMPOSITE_OPERATOR_ARITHMETIC|SVG_FECOMPOSITE_OPERATOR_ATOP|SVG_FECOMPOSITE_OPERATOR_IN|SVG_FECOMPOSITE_OPERATOR_OUT|SVG_FECOMPOSITE_OPERATOR_OVER|SVG_FECOMPOSITE_OPERATOR_UNKNOWN|SVG_FECOMPOSITE_OPERATOR_XOR:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_FECOMPOSITE_OPERATOR_ARITHMETIC|SVG_FECOMPOSITE_OPERATOR_ATOP|SVG_FECOMPOSITE_OPERATOR_IN|SVG_FECOMPOSITE_OPERATOR_OUT|SVG_FECOMPOSITE_OPERATOR_OVER|SVG_FECOMPOSITE_OPERATOR_UNKNOWN|SVG_FECOMPOSITE_OPERATOR_XOR|height|in1|in2|k1|k2:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEConvolveMatrixElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_EDGEMODE_DUPLICATE|SVG_EDGEMODE_NONE|SVG_EDGEMODE_UNKNOWN|SVG_EDGEMODE_WRAP:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_EDGEMODE_DUPLICATE|SVG_EDGEMODE_NONE|SVG_EDGEMODE_UNKNOWN|SVG_EDGEMODE_WRAP|bias|divisor|edgeMode|height|in1|kernelMatrix|kernelUnitLengthX|kernelUnitLengthY:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEDiffuseLightingElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=diffuseConstant|height|in1|kernelUnitLengthX|kernelUnitLengthY|result|surfaceScale|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEDisplacementMapElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_CHANNEL_A|SVG_CHANNEL_B|SVG_CHANNEL_G|SVG_CHANNEL_R|SVG_CHANNEL_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_CHANNEL_A|SVG_CHANNEL_B|SVG_CHANNEL_G|SVG_CHANNEL_R|SVG_CHANNEL_UNKNOWN|height|in1|in2|result|scale|width|x:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEDistantLightElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=azimuth|elevation:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEDropShadowElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=dx|dy|height|in1|result|setStdDeviation|stdDeviationX|stdDeviationY|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEFloodElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEFuncAElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEFuncBElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEFuncGElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEFuncRElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEGaussianBlurElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|in1|result|setStdDeviation|stdDeviationX|stdDeviationY|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEImageElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|href|preserveAspectRatio|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEMergeElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEMergeNodeElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=in1:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEMorphologyElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_MORPHOLOGY_OPERATOR_DILATE|SVG_MORPHOLOGY_OPERATOR_ERODE|SVG_MORPHOLOGY_OPERATOR_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_MORPHOLOGY_OPERATOR_DILATE|SVG_MORPHOLOGY_OPERATOR_ERODE|SVG_MORPHOLOGY_OPERATOR_UNKNOWN|height|in1|operator|radiusX|radiusY|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEOffsetElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=dx|dy|height|in1|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFEPointLightElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=x|y|z:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFESpecularLightingElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|in1|kernelUnitLengthX|kernelUnitLengthY|result|specularConstant|specularExponent|surfaceScale|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFESpotLightElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=limitingConeAngle|pointsAtX|pointsAtY|pointsAtZ|specularExponent|x|y|z:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFETileElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|in1|result|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFETurbulenceElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_STITCHTYPE_NOSTITCH|SVG_STITCHTYPE_STITCH|SVG_STITCHTYPE_UNKNOWN|SVG_TURBULENCE_TYPE_FRACTALNOISE|SVG_TURBULENCE_TYPE_TURBULENCE|SVG_TURBULENCE_TYPE_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_STITCHTYPE_NOSTITCH|SVG_STITCHTYPE_STITCH|SVG_STITCHTYPE_UNKNOWN|SVG_TURBULENCE_TYPE_FRACTALNOISE|SVG_TURBULENCE_TYPE_TURBULENCE|SVG_TURBULENCE_TYPE_UNKNOWN|baseFrequencyX|baseFrequencyY|height|numOctaves|result|seed:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGFilterElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=filterUnits|height|href|primitiveUnits|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGForeignObjectElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGGElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGImageElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=crossOrigin|decode|decoding|height|href|preserveAspectRatio|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGLineElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=x1|x2|y1|y2:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGLinearGradientElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=x1|x2|y1|y2:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGMarkerElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_MARKERUNITS_STROKEWIDTH|SVG_MARKERUNITS_UNKNOWN|SVG_MARKERUNITS_USERSPACEONUSE|SVG_MARKER_ORIENT_ANGLE|SVG_MARKER_ORIENT_AUTO|SVG_MARKER_ORIENT_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_MARKERUNITS_STROKEWIDTH|SVG_MARKERUNITS_UNKNOWN|SVG_MARKERUNITS_USERSPACEONUSE|SVG_MARKER_ORIENT_ANGLE|SVG_MARKER_ORIENT_AUTO|SVG_MARKER_ORIENT_UNKNOWN|markerHeight|markerUnits|markerWidth|orientAngle|orientType|preserveAspectRatio:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGMaskElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|maskContentUnits|maskUnits|requiredExtensions|systemLanguage|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGMetadataElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGMPathElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=href:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPathElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPatternElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|href|patternContentUnits|patternTransform|patternUnits|preserveAspectRatio|requiredExtensions|systemLanguage|viewBox|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPolygonElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=animatedPoints|points:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPolylineElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=animatedPoints|points:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGRadialGradientElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cx|cy|fr|fx|fy|r:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGRectElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|rx|ry|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGSVGElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_ZOOMANDPAN_DISABLE|SVG_ZOOMANDPAN_MAGNIFY|SVG_ZOOMANDPAN_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_ZOOMANDPAN_DISABLE|SVG_ZOOMANDPAN_MAGNIFY|SVG_ZOOMANDPAN_UNKNOWN|animationsPaused|checkEnclosure|checkIntersection|createSVGAngle|createSVGLength|createSVGMatrix|createSVGNumber|createSVGPoint|createSVGRect:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGScriptElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=async|href|type:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGSetElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGStopElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=offset:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGStyleElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=disabled|media|sheet|title|type:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGSwitchElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGSymbolElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=preserveAspectRatio|viewBox:extra=",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTSpanElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTextElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTextPathElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=TEXTPATH_METHODTYPE_ALIGN|TEXTPATH_METHODTYPE_STRETCH|TEXTPATH_METHODTYPE_UNKNOWN|TEXTPATH_SPACINGTYPE_AUTO|TEXTPATH_SPACINGTYPE_EXACT|TEXTPATH_SPACINGTYPE_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=TEXTPATH_METHODTYPE_ALIGN|TEXTPATH_METHODTYPE_STRETCH|TEXTPATH_METHODTYPE_UNKNOWN|TEXTPATH_SPACINGTYPE_AUTO|TEXTPATH_SPACINGTYPE_EXACT|TEXTPATH_SPACINGTYPE_UNKNOWN|href|method|spacing|startOffset:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTitleElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGUseElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=height|href|width|x|y:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGViewElement",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=SVG_ZOOMANDPAN_DISABLE|SVG_ZOOMANDPAN_MAGNIFY|SVG_ZOOMANDPAN_UNKNOWN:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=SVG_ZOOMANDPAN_DISABLE|SVG_ZOOMANDPAN_MAGNIFY|SVG_ZOOMANDPAN_UNKNOWN|preserveAspectRatio|viewBox|zoomAndPan:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAngle",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=convertToSpecifiedUnits|newValueSpecifiedUnits|unitType|value|valueAsString|valueInSpecifiedUnits:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGLength",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=convertToSpecifiedUnits|newValueSpecifiedUnits|unitType|value|valueAsString|valueInSpecifiedUnits:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGNumber",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=value:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGStringList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|appendItem|clear|getItem|initialize|insertItemBefore|length|numberOfItems|removeItem|replaceItem:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGLengthList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|appendItem|clear|getItem|initialize|insertItemBefore|length|numberOfItems|removeItem|replaceItem:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGNumberList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|appendItem|clear|getItem|initialize|insertItemBefore|length|numberOfItems|removeItem|replaceItem:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPoint",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=matrixTransform|x|y:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPointList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|appendItem|clear|getItem|initialize|insertItemBefore|length|numberOfItems|removeItem|replaceItem:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGMatrix",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=a|b|c|d|e|f|flipX|flipY|inverse|multiply|rotate|rotateFromVector:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGRect",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=height|width|x|y:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTransform",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=angle|matrix|setMatrix|setRotate|setScale|setSkewX|setSkewY|setTranslate|type:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGTransformList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=Symbol(Symbol.iterator)|appendItem|clear|consolidate|createSVGTransformFromMatrix|getItem|initialize|insertItemBefore|length|numberOfItems|removeItem|replaceItem:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGPreserveAspectRatio",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=align|meetOrSlice:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedAngle",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedBoolean",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedEnumeration",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedInteger",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedLength",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedLengthList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedNumber",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedNumberList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedPreserveAspectRatio",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedRect",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedString",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SVGAnimatedTransformList",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=animVal|baseVal:extra="],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15176,12 +13812,8 @@
       "name": "CharacterData",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=Symbol(Symbol.unscopables)|after|appendData|before|data|deleteData|insertData|length|nextElementSibling|previousElementSibling|remove|replaceData:extra=",
-        "prototypeChain"
-      ],
+      "mismatchCount": 1,
+      "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15208,78 +13840,6 @@
       "quickJSType": "function"
     },
     {
-      "name": "HTMLFormControlsCollection",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=Symbol(Symbol.iterator):extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "HTMLOptionsCollection",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["prototypeOwnKeys:missing=Symbol(Symbol.iterator):extra=", "prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Range",
-      "status": "partial",
-      "implementationStrategy": "direct-shim",
-      "mismatchCount": 6,
-      "mismatches": [
-        "prototypeOwnKeys:missing=expand:extra=collapsed",
-        "prototypeDescriptors.comparePoint.value.length:2!=1",
-        "prototypeDescriptors.createContextualFragment.value.length:1!=0",
-        "prototypeDescriptors.isPointInRange.value.length:2!=1",
-        "prototypeDescriptors.setEnd.value.length:2!=1",
-        "prototypeDescriptors.setStart.value.length:2!=1"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "EventTarget",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=when:extra=onabort|onafterprint|onanimationcancel|onanimationend|onanimationiteration|onanimationstart|onappinstalled|onauxclick|onbeforeinput|onbeforeinstallprompt|onbeforematch|onbeforeprint"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "MessagePort",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=onmessage|onmessageerror:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "MessageChannel",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=port1|port2:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "BroadcastChannel",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=name|onmessage|onmessageerror:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "FontFace",
       "status": "partial",
       "implementationStrategy": "virtualized",
@@ -15297,33 +13857,6 @@
       "mismatchCount": 1,
       "mismatches": ["host-missing"],
       "hostType": "missing",
-      "quickJSType": "function"
-    },
-    {
-      "name": "CropTarget",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticDescriptors.fromElement.value.length:1!=0"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "RestrictionTarget",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["staticDescriptors.fromElement.value.length:1!=0"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "DelegatedInkTrailPresenter",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeDescriptors.updateInkTrailStartPoint.value.length:2!=0"],
-      "hostType": "function",
       "quickJSType": "function"
     },
     {
@@ -15348,93 +13881,11 @@
       "quickJSType": "function"
     },
     {
-      "name": "ReadableStreamBYOBRequest",
-      "status": "partial",
-      "implementationStrategy": "direct-shim",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeDescriptors.respond.value.length:1!=0"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "WritableStreamDefaultController",
       "status": "partial",
       "implementationStrategy": "direct-shim",
       "mismatchCount": 1,
       "mismatches": ["prototypeOwnKeys:missing=signal:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "MediaStream",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onactive|onaddtrack|oninactive|onremovetrack:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "webkitMediaStream",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onactive|onaddtrack|oninactive|onremovetrack:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "MediaStreamTrack",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=oncapturehandlechange|onended|onmute|onunmute:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "BrowserCaptureMediaStreamTrack",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeDescriptors.cropTo.value.length:1!=0",
-        "prototypeDescriptors.restrictTo.value.length:1!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "MediaRecorder",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 6,
-      "mismatches": [
-        "prototypeDescriptors.onstart.kind:accessor!=data",
-        "prototypeDescriptors.onstop.kind:accessor!=data",
-        "prototypeDescriptors.ondataavailable.kind:accessor!=data",
-        "prototypeDescriptors.onpause.kind:accessor!=data",
-        "prototypeDescriptors.onresume.kind:accessor!=data",
-        "prototypeDescriptors.onerror.kind:accessor!=data"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AudioData",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeDescriptors.allocationSize.value.length:1!=0",
-        "prototypeDescriptors.copyTo.value.length:2!=1"
-      ],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15466,21 +13917,8 @@
       "implementationStrategy": "virtualized",
       "mismatchCount": 2,
       "mismatches": [
-        "staticOwnKeys:missing=canConstructInDedicatedWorker:extra=",
-        "prototypeOwnKeys:missing=onsourceclose|onsourceended|onsourceopen:extra=handle"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SourceBuffer",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onabort|onerror|onupdate|onupdateend|onupdatestart:extra=appendBufferAsync|audioTracks|removeAsync|textTracks|videoTracks",
-        "prototypeDescriptors.appendBuffer.value.length:1!=0",
-        "prototypeDescriptors.remove.value.length:2!=0"
+        "prototypeOwnKeys:missing=:extra=handle",
+        "staticDescriptors.canConstructInDedicatedWorker.kind:accessor!=data"
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -15489,29 +13927,8 @@
       "name": "SourceBufferList",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onaddsourcebuffer|onremovesourcebuffer:extra=item",
-        "prototypeDescriptors.Symbol(Symbol.iterator).value.name:values!=[Symbol.iterator]"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "TextTrack",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
       "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=oncuechange:extra=inBandMetadataTrackDispatchType"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "TextTrackCue",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=onenter|onexit:extra="],
+      "mismatches": ["prototypeOwnKeys:missing=:extra=item"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15519,11 +13936,8 @@
       "name": "TextTrackCueList",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=:extra=item",
-        "prototypeDescriptors.Symbol(Symbol.iterator).value.name:values!=[Symbol.iterator]"
-      ],
+      "mismatchCount": 1,
+      "mismatches": ["prototypeOwnKeys:missing=:extra=item"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15531,11 +13945,8 @@
       "name": "TextTrackList",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onaddtrack|onchange|onremovetrack:extra=item",
-        "prototypeDescriptors.Symbol(Symbol.iterator).value.name:values!=[Symbol.iterator]"
-      ],
+      "mismatchCount": 1,
+      "mismatches": ["prototypeOwnKeys:missing=:extra=item"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15549,55 +13960,11 @@
       "quickJSType": "function"
     },
     {
-      "name": "SpeechSynthesis",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=onvoiceschanged:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SpeechSynthesisUtterance",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onboundary|onend|onerror|onmark|onpause|onresume|onstart:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SpeechRecognition",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=available|install:extra=",
-        "prototypeOwnKeys:missing=onaudioend|onaudiostart|onend|onerror|onnomatch|onresult|onsoundend|onsoundstart|onspeechend|onspeechstart|onstart|phrases:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "SpeechRecognitionEvent",
       "status": "partial",
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": ["prototypeOwnKeys:missing=:extra=emma|interpretation"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "webkitSpeechRecognition",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=available|install:extra=",
-        "prototypeOwnKeys:missing=onaudioend|onaudiostart|onend|onerror|onnomatch|onresult|onsoundend|onsoundstart|onspeechend|onspeechstart|onstart|phrases:extra="
-      ],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15614,23 +13981,9 @@
       "name": "BaseAudioContext",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
+      "mismatchCount": 1,
       "mismatches": [
-        "prototypeOwnKeys:missing=createBiquadFilter|createChannelMerger|createChannelSplitter|createConstantSource|createConvolver|createDelay|createDynamicsCompressor|createIIRFilter|createPanner|createPeriodicWave|createStereoPanner|createWaveShaper:extra=audioWorklet",
-        "prototypeDescriptors.decodeAudioData.value.length:1!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AudioContext",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "prototypeOwnKeys:missing=onerror|playbackStats:extra=",
-        "prototypeDescriptors.createMediaElementSource.value.length:1!=0",
-        "prototypeDescriptors.createMediaStreamSource.value.length:1!=0"
+        "prototypeOwnKeys:missing=createBiquadFilter|createChannelMerger|createChannelSplitter|createConstantSource|createConvolver|createDelay|createDynamicsCompressor|createIIRFilter|createPanner|createPeriodicWave|createStereoPanner|createWaveShaper:extra=audioWorklet"
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -15640,25 +13993,7 @@
       "status": "partial",
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=oncomplete|resume|suspend:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AudioParam",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 8,
-      "mismatches": [
-        "prototypeOwnKeys:missing=automationRate:extra=",
-        "prototypeDescriptors.cancelAndHoldAtTime.value.length:1!=0",
-        "prototypeDescriptors.cancelScheduledValues.value.length:1!=0",
-        "prototypeDescriptors.exponentialRampToValueAtTime.value.length:2!=1",
-        "prototypeDescriptors.linearRampToValueAtTime.value.length:2!=1",
-        "prototypeDescriptors.setTargetAtTime.value.length:3!=1",
-        "prototypeDescriptors.setValueAtTime.value.length:2!=1",
-        "prototypeDescriptors.setValueCurveAtTime.value.length:3!=1"
-      ],
+      "mismatches": ["prototypeDescriptors.suspend.value.length:1!=0"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15672,64 +14007,12 @@
       "quickJSType": "function"
     },
     {
-      "name": "OscillatorNode",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=:extra=start|stop",
-        "prototypeDescriptors.setPeriodicWave.value.length:1!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "AudioWorklet",
       "status": "partial",
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": ["host-missing"],
       "hostType": "missing",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AudioScheduledSourceNode",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=onended:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "ConstantSourceNode",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=:extra=start|stop"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AudioParamMap",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "prototypeOwnKeys:missing=entries|forEach|keys|values:extra=",
-        "prototypeDescriptors.get.value.length:1!=0",
-        "prototypeDescriptors.has.value.length:1!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "AudioWorkletNode",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=onprocessorerror:extra="],
-      "hostType": "function",
       "quickJSType": "function"
     },
     {
@@ -15913,20 +14196,10 @@
       "name": "Option",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=defaultSelected|disabled|form|index|label|selected|text|value:extra=",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Audio",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
       "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
+      "mismatches": [
+        "prototypeOwnKeys:missing=defaultSelected|disabled|form|index|label|selected|text|value:extra="
+      ],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -15934,10 +14207,9 @@
       "name": "Image",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
+      "mismatchCount": 1,
       "mismatches": [
-        "prototypeOwnKeys:missing=align|alt|border|complete|crossOrigin|currentSrc|decode|decoding|fetchPriority|height|hspace|isMap:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=align|alt|border|complete|crossOrigin|currentSrc|decode|decoding|fetchPriority|height|hspace|isMap:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -15962,27 +14234,6 @@
       "mismatches": [
         "staticOwnKeys:missing=fromFloat32Array|fromFloat64Array:extra=",
         "prototypeOwnKeys:missing=flipX|flipY|inverse|multiply|rotate|rotateAxisAngle|rotateFromVector|scale3d|scaleNonUniform|skewX|skewY|toFloat32Array:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Highlight",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeDescriptors.forEach.value.length:1!=2"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "HighlightRegistry",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeDescriptors.forEach.value.length:1!=2",
-        "prototypeDescriptors.highlightsFromPoint.value.length:2!=0"
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -16303,11 +14554,10 @@
       "name": "HTMLCanvasElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=captureStream|getContext|height|toBlob|toDataURL|transferControlToOffscreen|width:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=captureStream|getContext|height|toBlob|toDataURL|transferControlToOffscreen|width:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -16369,15 +14619,6 @@
       "quickJSType": "function"
     },
     {
-      "name": "ImageBitmapRenderingContext",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeDescriptors.transferFromImageBitmap.value.length:1!=0"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "OffscreenCanvas",
       "status": "partial",
       "implementationStrategy": "virtualized",
@@ -16385,26 +14626,6 @@
       "mismatches": [
         "prototypeOwnKeys:missing=oncontextlost|oncontextrestored:extra=",
         "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Path2D",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 10,
-      "mismatches": [
-        "prototypeDescriptors.addPath.value.length:1!=0",
-        "prototypeDescriptors.roundRect.value.length:4!=0",
-        "prototypeDescriptors.arc.value.length:5!=0",
-        "prototypeDescriptors.arcTo.value.length:5!=0",
-        "prototypeDescriptors.bezierCurveTo.value.length:6!=0",
-        "prototypeDescriptors.ellipse.value.length:7!=0",
-        "prototypeDescriptors.lineTo.value.length:2!=0",
-        "prototypeDescriptors.moveTo.value.length:2!=0",
-        "prototypeDescriptors.quadraticCurveTo.value.length:4!=0",
-        "prototypeDescriptors.rect.value.length:4!=0"
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -16483,105 +14704,6 @@
         "staticDescriptors.FRAGMENT_SHADER.configurable:false!=true",
         "staticDescriptors.VERTEX_SHADER.configurable:false!=true"
       ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLBuffer",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLFramebuffer",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLProgram",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLRenderbuffer",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLShader",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLTexture",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLVertexArrayObject",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLSampler",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLQuery",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLSync",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "WebGLTransformFeedback",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -16686,145 +14808,6 @@
       "quickJSType": "function"
     },
     {
-      "name": "IDBFactory",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=cmp|databases|deleteDatabase|open:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBDatabase",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=name|objectStoreNames|onabort|onclose|onerror|onversionchange|version:extra=",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBTransaction",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=commit|db|durability|error|mode|objectStoreNames|onabort|oncomplete|onerror:extra=__zpDispatch|__zpHold|__zpMaybeComplete|__zpRequestDone|__zpRequestError|__zpTrack|addEventListener|removeEventListener",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBObjectStore",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 5,
-      "mismatches": [
-        "prototypeOwnKeys:missing=autoIncrement|count|getAllKeys|getAllRecords|getKey|indexNames|keyPath|name|openKeyCursor|transaction:extra=",
-        "prototypeDescriptors.add.value.length:1!=2",
-        "prototypeDescriptors.getAll.value.length:0!=1",
-        "prototypeDescriptors.openCursor.value.length:0!=1",
-        "prototypeDescriptors.put.value.length:1!=2"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBIndex",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
-      "mismatches": [
-        "prototypeOwnKeys:missing=count|getAllKeys|getAllRecords|getKey|keyPath|multiEntry|name|objectStore|openKeyCursor|unique:extra=",
-        "prototypeDescriptors.getAll.value.length:0!=1",
-        "prototypeDescriptors.openCursor.value.length:0!=1"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBRequest",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeOwnKeys:missing=error|onerror|onsuccess|readyState|result|source|transaction:extra=__dispatch|addEventListener|removeEventListener",
-        "prototypeChain"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBOpenDBRequest",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": ["prototypeOwnKeys:missing=onblocked|onupgradeneeded:extra=", "prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBCursor",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=advance|continue|continuePrimaryKey|delete|direction|key|primaryKey|request|source|update:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBCursorWithValue",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=value:extra=continue"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBKeyRange",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=lower|lowerOpen|upper|upperOpen:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "history",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "globalDescriptor.kind:accessor!=data",
-        "ownKeys:missing=:extra=Symbol(Symbol.toStringTag)|back|forward|go|length|pushState|replaceState|state"
-      ],
-      "hostType": "object",
-      "quickJSType": "object"
-    },
-    {
-      "name": "History",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=back|forward|go|length|pushState|replaceState|scrollRestoration|state:extra="
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "location",
       "status": "partial",
       "implementationStrategy": "virtualized",
@@ -16864,30 +14847,6 @@
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": ["staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "navigator",
-      "status": "partial",
-      "implementationStrategy": "direct-shim",
-      "mismatchCount": 2,
-      "mismatches": [
-        "globalDescriptor.kind:accessor!=data",
-        "ownKeys:missing=:extra=Symbol(Symbol.toStringTag)|appCodeName|appName|appVersion|canShare|clipboard|connection|contacts|cookieEnabled|credentials|deviceMemory|geolocation"
-      ],
-      "hostType": "object",
-      "quickJSType": "object"
-    },
-    {
-      "name": "Navigator",
-      "status": "partial",
-      "implementationStrategy": "direct-shim",
-      "mismatchCount": 2,
-      "mismatches": [
-        "staticOwnKeys:missing=:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=appCodeName|appName|appVersion|connection|cookieEnabled|doNotTrack|geolocation|getGamepads|hardwareConcurrency|ink|javaEnabled|language:extra="
-      ],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -16939,11 +14898,10 @@
       "name": "HTMLMediaElement",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 3,
+      "mismatchCount": 2,
       "mismatches": [
         "staticOwnKeys:missing=HAVE_CURRENT_DATA|HAVE_ENOUGH_DATA|HAVE_FUTURE_DATA|HAVE_METADATA|HAVE_NOTHING|NETWORK_EMPTY|NETWORK_IDLE|NETWORK_LOADING|NETWORK_NO_SOURCE:extra=Symbol(Symbol.hasInstance)",
-        "prototypeOwnKeys:missing=HAVE_CURRENT_DATA|HAVE_ENOUGH_DATA|HAVE_FUTURE_DATA|HAVE_METADATA|HAVE_NOTHING|NETWORK_EMPTY|NETWORK_IDLE|NETWORK_LOADING|NETWORK_NO_SOURCE|addTextTrack|autoplay|buffered:extra=",
-        "prototypeChain"
+        "prototypeOwnKeys:missing=HAVE_CURRENT_DATA|HAVE_ENOUGH_DATA|HAVE_FUTURE_DATA|HAVE_METADATA|HAVE_NOTHING|NETWORK_EMPTY|NETWORK_IDLE|NETWORK_LOADING|NETWORK_NO_SOURCE|addTextTrack|autoplay|buffered:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -17105,20 +15063,15 @@
       "name": "window",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 21,
+      "mismatchCount": 16,
       "mismatches": [
         "ownKeys:missing=Temporal|WebAssembly:extra=AudioWorklet|ContactAddress|ContactsManager|Credential|CredentialsContainer|DeviceMotionEvent|DeviceOrientationEvent|FontFaceSet|InternalError|Keyboard|KeyboardLayoutMap|Lock",
         "ownDescriptors.Intl.enumerable:false!=true",
         "ownDescriptors.customElements.kind:accessor!=data",
-        "ownDescriptors.history.kind:accessor!=data",
         "ownDescriptors.navigation.kind:accessor!=data",
-        "ownDescriptors.navigator.kind:accessor!=data",
         "ownDescriptors.styleMedia.kind:accessor!=data",
         "ownDescriptors.performance.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.enumerable:true!=false",
         "ownDescriptors.crypto.kind:accessor!=data",
-        "ownDescriptors.indexedDB.kind:accessor!=data",
         "ownDescriptors.localStorage.kind:accessor!=data",
         "ownDescriptors.sessionStorage.kind:accessor!=data",
         "ownDescriptors.chrome.configurable:false!=true",
@@ -17136,20 +15089,15 @@
       "name": "self",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 21,
+      "mismatchCount": 16,
       "mismatches": [
         "ownKeys:missing=Temporal|WebAssembly:extra=AudioWorklet|ContactAddress|ContactsManager|Credential|CredentialsContainer|DeviceMotionEvent|DeviceOrientationEvent|FontFaceSet|InternalError|Keyboard|KeyboardLayoutMap|Lock",
         "ownDescriptors.Intl.enumerable:false!=true",
         "ownDescriptors.customElements.kind:accessor!=data",
-        "ownDescriptors.history.kind:accessor!=data",
         "ownDescriptors.navigation.kind:accessor!=data",
-        "ownDescriptors.navigator.kind:accessor!=data",
         "ownDescriptors.styleMedia.kind:accessor!=data",
         "ownDescriptors.performance.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.kind:accessor!=data",
-        "ownDescriptors.trustedTypes.enumerable:true!=false",
         "ownDescriptors.crypto.kind:accessor!=data",
-        "ownDescriptors.indexedDB.kind:accessor!=data",
         "ownDescriptors.localStorage.kind:accessor!=data",
         "ownDescriptors.sessionStorage.kind:accessor!=data",
         "ownDescriptors.chrome.configurable:false!=true",
@@ -17170,7 +15118,7 @@
       "mismatchCount": 4,
       "mismatches": [
         "objectToString:[object HTMLDocument]!=[object Document]",
-        "ownKeys:missing=:extra=__zpChildren|__zpNodeId|__zpNodeName|__zpNodeType|body|childNodes|contentType|cookie|documentElement|featurePolicy|fonts|fragmentDirective",
+        "ownKeys:missing=:extra=__zpChildren|__zpNodeId|__zpNodeName|__zpNodeType|__zpOwnerDocument|__zpParentNode|body|childNodes|contentType|cookie|documentElement|featurePolicy",
         "ownDescriptors.location.kind:accessor!=data",
         "ownDescriptors.location.configurable:false!=true"
       ],
@@ -17249,18 +15197,6 @@
       "mismatches": [
         "globalDescriptor.kind:accessor!=data",
         "ownKeys:missing=:extra=__zpConstructors|__zpDefinitions|__zpWaiters"
-      ],
-      "hostType": "object",
-      "quickJSType": "object"
-    },
-    {
-      "name": "indexedDB",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "globalDescriptor.kind:accessor!=data",
-        "ownKeys:missing=:extra=Symbol(Symbol.toStringTag)|__zpIDBFactory|deleteDatabase|open"
       ],
       "hostType": "object",
       "quickJSType": "object"
@@ -17479,14 +15415,9 @@
       "name": "EditContext",
       "status": "partial",
       "implementationStrategy": "virtualized",
-      "mismatchCount": 6,
+      "mismatchCount": 1,
       "mismatches": [
-        "prototypeOwnKeys:missing=characterBounds|characterBoundsRangeStart|oncharacterboundsupdate|oncompositionend|oncompositionstart|ontextformatupdate|ontextupdate|selectionEnd|selectionStart|text:extra=",
-        "prototypeDescriptors.updateCharacterBounds.value.length:2!=0",
-        "prototypeDescriptors.updateControlBounds.value.length:1!=0",
-        "prototypeDescriptors.updateSelection.value.length:2!=0",
-        "prototypeDescriptors.updateSelectionBounds.value.length:1!=0",
-        "prototypeDescriptors.updateText.value.length:3!=0"
+        "prototypeOwnKeys:missing=characterBounds|characterBoundsRangeStart|oncharacterboundsupdate|oncompositionend|oncompositionstart|ontextformatupdate|ontextupdate|selectionEnd|selectionStart|text:extra="
       ],
       "hostType": "function",
       "quickJSType": "function"
@@ -17548,27 +15479,6 @@
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": ["prototypeOwnKeys:missing=sampleInterval|stopped:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Sanitizer",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 2,
-      "mismatches": [
-        "prototypeDescriptors.setComments.value.length:1!=0",
-        "prototypeDescriptors.setDataAttributes.value.length:1!=0"
-      ],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "Scheduling",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=isInputPending:extra="],
       "hostType": "function",
       "quickJSType": "function"
     },
@@ -17637,42 +15547,6 @@
       "quickJSType": "function"
     },
     {
-      "name": "SharedStorageAppendMethod",
-      "status": "blocked-by-policy",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SharedStorageClearMethod",
-      "status": "blocked-by-policy",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SharedStorageDeleteMethod",
-      "status": "blocked-by-policy",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "SharedStorageSetMethod",
-      "status": "blocked-by-policy",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeChain"],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
       "name": "SharedStorageWorklet",
       "status": "blocked-by-policy",
       "implementationStrategy": "virtualized",
@@ -17687,15 +15561,6 @@
       "implementationStrategy": "virtualized",
       "mismatchCount": 1,
       "mismatches": ["prototypeOwnKeys:missing=effects|playEffect|reset|type:extra="],
-      "hostType": "function",
-      "quickJSType": "function"
-    },
-    {
-      "name": "IDBRecord",
-      "status": "partial",
-      "implementationStrategy": "virtualized",
-      "mismatchCount": 1,
-      "mismatches": ["prototypeOwnKeys:missing=key|primaryKey|value:extra="],
       "hostType": "function",
       "quickJSType": "function"
     },
