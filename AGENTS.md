@@ -1,27 +1,109 @@
-# AGENTS.md — ZeroProxy
+# PROJECT KNOWLEDGE BASE - ZeroProxy
 
-ZeroProxy is a **human-in-the-loop** virtual-browsing privacy membrane: a real person drives a real browser, and target traffic egresses only through `Service Worker → Go WASM kernel → WebSocket/smux → SOCKS5 → uTLS`.
+**Generated:** 2026-06-13
+**Commit:** ed6d65f
+**Branch:** main
 
-## Membrane/protocol refactor discipline (load-bearing)
+## OVERVIEW
 
-- A behavior-preserving change to membrane or protocol code must be proven by a **transient differential harness**, not a green suite: freeze the pre-change function verbatim under a new name, drive both old and new over a generated + edge corpus through the package's existing test seam (`scriptedRW` in socks5, `net.Pipe`/`pipeMux` in wsproto/zphttp), assert **0 mismatches** (return value, error string, bytes on the wire), then **delete the harness — never commit it** (`zz_*` scaffolding is correctly rejected in review). Keep a *permanent* characterization/adversarial oracle. *Why:* the `transform.go` decomposition passed the full suite but silently changed a marker; only a differential caught it. Suite-green ≠ behavior-preserved.
+ZeroProxy is a human-in-the-loop virtual-browsing privacy membrane: a real
+person drives a real browser, and target traffic egresses only through
+`Service Worker -> Go WASM kernel -> WebSocket/smux -> SOCKS5 -> uTLS`.
 
-- Removing a complexity `//nolint` is only real if the gate actually fires on that file. Prove it **red-before**, not just green-after: drop the pre-decomposition original (nolint stripped) at the path, confirm golangci **fails** on the complexity linter, then restore the decomposed file byte-identical (md5). *Why:* a stale `.golangci.yml` header once claimed the gates were "disabled" while they were live — green-after alone would have been hollow.
+## STRUCTURE
 
-## Lint / complexity gates
+```text
+zeroproxy/
++-- web/                    # browser shell, service worker, runtime membrane
++-- rewriter-rs/            # Rust WASM HTML/CSS/JS/import-map rewriter
++-- cmd/wasm-kernel/        # Go js/wasm transport kernel
++-- cmd/zeroproxy-server/   # native server and WebSocket/smux relay
++-- internal/               # Go protocol, transport, policy, and adapters
++-- test/                   # JS policy tests, Puppeteer e2e, compatibility data
++-- scripts/                # build/test/corpus orchestration
+`-- third_party/quickjs-ng/ # vendored upstream QuickJS-ng tree
+```
 
-- Complexity gates are **live and hard**: golangci `cyclop` ≤10 / `gocognit` ≤15 / `nestif` ≤4 (`_test.go` excluded), clippy `cognitive_complexity = "deny"` @15, Biome `noExcessiveCognitiveComplexity` @15. **Decompose to satisfy them — do not add new suppressions.** *Why:* the campaign is burning these down, not accumulating them.
-- Known, deliberate remaining suppressions (a burn-down tail, not free license) take three forms — keep them straight, they are easy to conflate, and verify against `git grep` not this list, which drifts as the burn-down lands: **(1)** inline `//nolint:cyclop // TODO(complexity)` on exactly one wasm-tagged kernel function — `cmd/wasm-kernel/main.go` `relayEnsure` (cyclop 11; its only safe decomposition splits the engine mutex region and is not differentially verifiable without live `wsconn.Dial`); **(2)** a Biome glob override turning `noExcessiveCognitiveComplexity` **off** for exactly two files — `web/runtime-prelude.js` (the ~4.4k-line membrane, ~72 fns over budget — the one genuinely large remaining decomposition workstream) and `web/index.html` (its inline bootstrap) — plus `test/**` (test bodies out of scope); **(3)** a single inline `biome-ignore lint/complexity/noExcessiveCognitiveComplexity` at `web/worker-prelude.js` (module IIFE — no inner fn exceeds 15; the count is the wrapper-guard aggregate, so splitting relocates the global-exposure boundary rather than cutting complexity). `web/zp-core.js` carries **no** inline complexity ignores (both decomposed). The separate `web/**` Biome override disables only the **formatter** (so `biome ci` never reformats the membrane), **not** the complexity linter — the cognitive-complexity gate stays **hard on every other `web/` file, including `sw.js`**. All of these need a differential-harness decomposition, not a quick edit.
+## WHERE TO LOOK
 
-## Build / verify traps
+| Task | Location | Notes |
+| --- | --- | --- |
+| Browser membrane / SW routing | `web/` | Scoped rules in `web/AGENTS.md`. |
+| Static rewriting pipeline | `rewriter-rs/`, `internal/htmltx/` | Rust behavior is outside `npm test`. |
+| WASM kernel bridge | `cmd/wasm-kernel/`, `internal/swhttp/`, `internal/wsconn/` | Requires js/wasm build, lint, and tests. |
+| Target transport path | `internal/zphttp/`, `internal/socks5/`, `internal/wsproto/`, `internal/smuxconn/` | Protocol changes need differential proof. |
+| Server and relay | `cmd/zeroproxy-server/` | Serves built assets and bridges streams. |
+| Compatibility fixtures | `test/fixtures/`, `test/e2e/` | Scoped rules in `test/AGENTS.md`. |
+| CI/build truth | `package.json`, `scripts/build.mjs`, `scripts/test.mjs`, `.github/workflows/ci.yml` | npm scripts are canonical. |
 
-- **wasm-tagged files** (`//go:build js && wasm`: `cmd/wasm-kernel/main.go`, `internal/swhttp/bridge_js.go`, `internal/wsconn/conn_js.go`) are **skipped by `go test ./...` and the native golangci pass.** Lint/build coverage is `GOOS=js GOARCH=wasm golangci-lint run` and `GOOS=js GOARCH=wasm go build ./cmd/wasm-kernel` (`npm run lint:go` runs both golangci passes). Wasm-tagged **tests** (e.g. `internal/swhttp/bridge_js_test.go`, `cmd/wasm-kernel/wsstream_test.go`) are likewise skipped by `go test ./...`; they run only under `npm run test:wasm`, which executes them via the Go `go_js_wasm_exec` runner (CI runs this as its own step). The script wraps the run in `env -i` preserving only `PATH`/`HOME`/`GOCACHE`/`GOMODCACHE` — the wasm runtime copies the whole env into a bounded argv+env buffer, so an unstripped (large) env overflows it (`total length of command line and environment variables exceeds limit`). Run `npm run test:wasm` after any transport/bridge change or you have verified nothing for that code.
-- Run `golangci-lint cache clean` before trusting lint results — the results cache serves stale issues from deleted worktrees (paths like `../../../../tmp/…`, "can't read file").
-- Use the npm test scripts (`npm test` / `test:js` / `test:e2e` → `node scripts/test.mjs [js|e2e]`). **Do not** run `node --test test/js` — Node 24 treats the directory as a module and reports a spurious failure.
-- Rust rewriter behavior is not covered by `npm test`: run `cargo test --manifest-path rewriter-rs/Cargo.toml` after rewriter changes. `npm run lint:rust` is clippy + fmt only, and CI runs the Rust tests as a separate gate. *Why:* the Rust WASM rewriter is the static compiler pipeline for target scripts/CSS, so a green JS/Puppeteer suite alone can miss parser/rewriter regressions.
-- Do not blanket-format `web/**`. Biome formatting is intentionally disabled there, and `npm run fmt:fix` formats Go/Rust plus `scripts`/`test`, not the membrane web assets. *Why:* large membrane files keep reviewable hand-shaped layout until a differential-harness decomposition proves the behavior-preserving change.
-- **E2E flake:** the two heavy Puppeteer tests can mutually starve under load — one times out at the ~31.5s page deadline while the other passes, and *which* one fails migrates between runs. A migrating failure is environmental, not a regression (a real regression fails the same test deterministically); re-run, or run the e2e tests individually, before blaming a code change.
+## CODE MAP
 
-## Commits
+| Symbol / Surface | Type | Location | Role |
+| --- | --- | --- | --- |
+| `main` | Go function | `cmd/zeroproxy-server/main.go` | Native server entrypoint. |
+| `server.handlePipe` | Go method | `cmd/zeroproxy-server/main.go` | WebSocket/smux relay ingress. |
+| `readSOCKS5Connect` | Go function | `cmd/zeroproxy-server/main.go` | Internal SOCKS handshake parser. |
+| `main` | Go function | `cmd/wasm-kernel/main.go` | js/wasm kernel entrypoint. |
+| `Kernel.ensure` | Go method | `cmd/wasm-kernel/main.go` | Lazy relay engine setup; only live Go complexity suppression. |
+| `runtime-prelude-entry.mjs` | JS entry | `web/` | Vite entry for runtime membrane bundle. |
+| `sw-entry.mjs` | JS entry | `web/` | Vite entry for service worker bundle. |
+| `worker-prelude-entry.mjs` | JS entry | `web/` | Vite entry for worker bootstrap bundle. |
+| `rewrite_*` exports | Rust/wasm | `rewriter-rs/src/lib.rs` | HTML/CSS/JS/import-map rewrite API. |
 
-- Conventional Commits, one concern per commit; substantive commits carry an `Op: compress|extend|correct` trailer (plus `Restores: …` for `correct`). Use the configured git identity — **no** `--author`, `Co-Authored-By`, `Signed-off-by`, or any agent trailer; do not mutate git config.
+## CONVENTIONS
+
+- Behavior-preserving membrane or protocol refactors require a transient
+  differential harness, not only a green suite: freeze the old function
+  verbatim under a temporary name, drive old and new through the package's
+  existing seam (`scriptedRW`, `net.Pipe`, or `pipeMux`), assert 0 mismatches
+  across return values, error strings, and bytes on the wire, then delete the
+  harness before commit. Keep a permanent characterization or adversarial
+  oracle when the behavior boundary matters.
+- Complexity gates are live and hard: Go `cyclop <= 10`, `gocognit <= 15`,
+  `nestif <= 4` for non-test files; Rust `clippy::cognitive_complexity` at 15;
+  Biome `noExcessiveCognitiveComplexity` at 15. Decompose; do not add new
+  suppressions.
+- Removing a complexity suppression is only real if the pre-change original
+  fails the intended gate with the suppression stripped. Prove red-before,
+  restore the decomposed file byte-identical, then prove green-after.
+- Check actual suppressions with `git grep`, not memory. Current deliberate
+  residuals are the wasm-kernel `//nolint:cyclop`, the Biome overrides for
+  `web/runtime-prelude.mjs`, `web/index.html`, and `test/**`, plus the single
+  inline `biome-ignore` in `web/worker-prelude.js`.
+
+## ANTI-PATTERNS (THIS PROJECT)
+
+- Do not commit transient `zz_*` differential scaffolding.
+- Do not trust `go test ./...` for js/wasm files or tests.
+- Do not run `node --test test/js`; Node 24 treats the directory as a module.
+- Do not blanket-format `web/**`; Biome formatting is intentionally disabled
+  there while linting remains active.
+- Do not add `//nolint`, `#[allow(clippy::cognitive_complexity)]`, or
+  `biome-ignore` complexity suppressions for new code.
+- Do not mutate git identity or add agent/co-author/signoff trailers.
+
+## COMMANDS
+
+```bash
+npm run build
+npm test
+npm run test:js
+npm run test:e2e
+npm run test:wasm
+npm run lint:go
+npm run lint:rust
+npm run lint:js
+cargo test --manifest-path rewriter-rs/Cargo.toml
+```
+
+## NOTES
+
+- Run `golangci-lint cache clean` before trusting lint output; stale cache
+  entries can point at deleted worktrees.
+- `npm run test:wasm` strips the environment with `env -i`; this avoids the Go
+  wasm runner's bounded argv/env buffer overflow.
+- The two heavy Puppeteer e2e tests can starve each other under load. A failure
+  that migrates between them is usually environmental; rerun or isolate before
+  blaming a regression.
+- `third_party/quickjs-ng/` is vendor code. Keep ZeroProxy policy in wrappers or
+  integration points unless the task explicitly updates the vendored project.
