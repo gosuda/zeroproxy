@@ -507,7 +507,59 @@ func (s *server) bridgeInternalSOCKS(ctx context.Context, stream net.Conn) {
 		_ = target.Close()
 		return
 	}
-	bridgeConns(ctx, stream, target)
+	a, b := traceBridge(stream, target, host)
+	bridgeConns(ctx, a, b)
+}
+
+// traceBridge optionally wraps both ends of a bridged stream so each
+// direction's read timeline is logged — used to localize the cold-bootstrap
+// "exactly 60s" first-request stall. Gated by ZP_BRIDGE_TRACE so it is
+// zero-cost in normal operation. The discriminator: c2u (browser→upstream)
+// logs request bytes leaving the browser; u2c (upstream→browser) logs the
+// response. A long gap on c2u before the request means the request was
+// stuck on OUR side; a long gap only on u2c (request already forwarded)
+// means the upstream held the response.
+func traceBridge(stream, target net.Conn, host string) (net.Conn, net.Conn) {
+	if os.Getenv("ZP_BRIDGE_TRACE") == "" {
+		return stream, target
+	}
+	start := time.Now()
+	return &traceConn{Conn: stream, label: "c2u host=" + host, start: start},
+		&traceConn{Conn: target, label: "u2c host=" + host, start: start}
+}
+
+// traceConn logs the first read and any read preceded by a >2s gap, so the
+// stall boundary (and which direction stalled) is visible without flooding
+// the log with every TLS record.
+type traceConn struct {
+	net.Conn
+	label string
+	start time.Time
+	mu    sync.Mutex
+	last  time.Time
+	total int64
+	reads int
+}
+
+func (t *traceConn) Read(p []byte) (int, error) {
+	n, err := t.Conn.Read(p)
+	t.mu.Lock()
+	now := time.Now()
+	var gap time.Duration
+	if !t.last.IsZero() {
+		gap = now.Sub(t.last)
+	}
+	since := now.Sub(t.start)
+	t.last = now
+	t.total += int64(n)
+	t.reads++
+	first := t.reads == 1
+	t.mu.Unlock()
+	if first || gap > 2*time.Second {
+		log.Printf("ZPBRIDGE %s +%dms read=%dB gap=%dms total=%d reads=%d err=%v",
+			t.label, since.Milliseconds(), n, gap.Milliseconds(), t.total, t.reads, err)
+	}
+	return n, err
 }
 
 func readSOCKS5Connect(ctx context.Context, rw net.Conn) (string, string, error) {

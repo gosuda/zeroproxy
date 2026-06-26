@@ -22,5 +22,24 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn init() {
-    // Future: install console hooks, panic-hook for diagnostics
+    // Diagnostic panic hook: a Rust panic in wasm compiles to an opaque
+    // `RuntimeError: unreachable` with no message — useless for pinning a
+    // crash. This hook prints the panic payload + source location to the SW
+    // console AND mirrors it into the kernel trace ring (so __zpKernelProbe
+    // surfaces it too). Pure diagnostics — no behavior change.
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "?".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let full = format!("ZP_KERNEL_PANIC at {loc}: {msg}");
+        web_sys::console::error_1(&JsValue::from_str(&full));
+        crate::kernel::push_trace(&full);
+    }));
 }

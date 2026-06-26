@@ -99,6 +99,14 @@ features = ["std"]
 [dependencies.slab]
 version = "0.4.2"
 
+# wasm32-unknown-unknown has no std clock, so `std::time::Instant::now()` panics
+# ("time not implemented on this platform"). The reset-stream cleanup
+# (recv.rs / stream.rs `reset_at`) calls it whenever a stream is RST — which the
+# SW kernel's streaming path does on mid-stream cancel. web-time is a drop-in
+# `Instant` that uses `performance.now()` on wasm and re-exports std elsewhere.
+[dependencies.web-time]
+version = "1"
+
 [dependencies.tokio]
 version = "1"
 features = ["io-util"]

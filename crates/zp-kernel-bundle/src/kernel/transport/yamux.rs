@@ -134,7 +134,18 @@ pub(crate) async fn get_or_open(relay_url: &str) -> io::Result<MuxSession> {
         return Ok(s);
     }
     let ws = WsStream::open(relay_url).await?;
-    let conn = Connection::new(ws, Config::default(), Mode::Client);
+    // 2026-06-13 throughput fix: NAVER 메인 같은 이미지-heavy 페이지에서
+    // 28+ 동시 스트림이 단일 WS/yamux 세션으로 다중화되며 throughput 붕괴
+    // → 모든 다운로드가 ~243s stall 후 동시 release (real Chrome 측정).
+    // 원인: (a) split_send_size 기본 16KB 라 500KB 이미지 = 32 frame, 28
+    // 스트림 × 32 = ~900 frame 이 단일 WS 를 통과하며 frame-당 wasm wake
+    // 오버헤드, (b) per-stream receive window 가 256KB 에서 시작해 RTT 마다
+    // 성장 — proxied high-latency 경로에서 성장이 느려 sender 가 자주 stall.
+    // split_send_size 를 256KB 로 키워 frame 수 1/16 + WS message 오버헤드
+    // 감소. max_connection_receive_window 는 기본 1GiB 유지 (충분).
+    let mut cfg = Config::default();
+    cfg.set_split_send_size(256 * 1024);
+    let conn = Connection::new(ws, cfg, Mode::Client);
     let (cmd_tx, cmd_rx) = mpsc::unbounded::<Cmd>();
     spawn_local(drive(conn, cmd_rx));
     let session = MuxSession { tx: cmd_tx };

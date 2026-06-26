@@ -33,9 +33,40 @@ use futures_util::io::{AsyncRead, AsyncWrite};
 use h2::client::SendRequest;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Uri};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use super::http1::HttpResponse;
+
+/// Result of [`send_request`]. Most responses are fully buffered + decoded
+/// (`Buffered`); HTML documents take the streaming arm (`Streaming`) so the
+/// page can render progressively instead of waiting on a withheld END_STREAM.
+pub(crate) enum H2Response {
+    Buffered(HttpResponse),
+    Streaming(StreamingResponse),
+}
+
+/// A streaming HTML response: headers are fully known after the HEADERS frame;
+/// the body is a `ReadableStream` of already-gunzipped plaintext driven by an
+/// async pump over the h2 `RecvStream`. NO timer, NO whole-body buffering.
+pub(crate) struct StreamingResponse {
+    pub(crate) status: u16,
+    pub(crate) reason: String,
+    /// Content-Encoding / Content-Length already stripped (body is decoded
+    /// plaintext of unknown length → chunked transfer to the page).
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) stream: web_sys::ReadableStream,
+}
+
+impl H2Response {
+    /// HTTP status, regardless of buffered/streaming variant (for tracing).
+    pub(crate) fn status(&self) -> u16 {
+        match self {
+            H2Response::Buffered(r) => r.status,
+            H2Response::Streaming(s) => s.status,
+        }
+    }
+}
 
 /// Cloneable handle to an open HTTP/2 connection. Sending a request via
 /// `SendRequest::ready().await` allocates a fresh stream on the existing
@@ -132,7 +163,7 @@ pub(crate) async fn send_request(
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
-) -> io::Result<HttpResponse> {
+) -> io::Result<H2Response> {
     let method = Method::from_bytes(method.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("h2: method: {e}")))?;
     let uri: Uri = format!("{scheme}://{host_header}{path}")
@@ -208,8 +239,103 @@ pub(crate) async fn send_request(
         .to_string();
     let resp_headers = headers_to_vec(response.headers());
 
+    // Content-Length lets us finish the moment the declared body has fully
+    // arrived, WITHOUT waiting for the peer's END_STREAM frame. This is the
+    // fix for the NAVER cold-bootstrap "exactly 60s" stall: relay byte-trace
+    // proved www.naver.com delivers the entire compressed body in ~167ms but
+    // then withholds the stream-closing frame for its full 60s idle timeout.
+    // `body_stream.data()` only yields `None` on END_STREAM, so without this
+    // short-circuit we block 60s on a response whose body is already
+    // complete. Browsers and curl finish at Content-Length too — that's why
+    // they're fast. Content-Length is the on-wire (still-encoded) length, so
+    // it's compared against the raw `body_buf` before any gzip/br unwrap.
+    let content_length: Option<usize> = resp_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok());
+
+    // Completion for responses WITHOUT a Content-Length. Most naver.com /
+    // pstatic.net responses carry NO Content-Length and the edge withholds the
+    // h2 END_STREAM frame for 60–240s *after* the body has arrived; blocking on
+    // `data()` until END_STREAM delays every such response by minutes and piles
+    // up open streams that starve the shared yamux session. Since these bodies
+    // are compressed (gzip/br), we finish the instant the codec's DEFLATE
+    // stream reaches its final block — a pure read-side check, NO timers.
+    //
+    // ⚠️ Do NOT add a setTimeout-based idle race here. Two attempts proved it
+    // traps the wasm (`RuntimeError: unreachable`) in real Chrome under load —
+    // the timer-wake re-polls a task whose `data()` future was just cancelled
+    // by the race and panics. SW setTimeout is also unreliable (throttled when
+    // the worker has no actively-interacting client). The remaining cost is the
+    // main DOCUMENT, whose final DEFLATE block NAVER withholds until END_STREAM
+    // (~60s); fixing that needs a streaming/progressive render, not a timer.
+    let content_encoding: Option<String> = resp_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, v)| v.clone());
+    let detect_decode_end = content_length.is_none()
+        && content_encoding
+            .as_deref()
+            .map(|ce| !ce.trim().is_empty() && !ce.trim().eq_ignore_ascii_case("identity"))
+            .unwrap_or(false);
+
+    // Streaming arm — ONLY the main HTML document. A 2xx `text/html` body with
+    // a streamable coding (gzip or identity) is handed to the page as a
+    // `ReadableStream` of decoded plaintext so it renders progressively, exactly
+    // like a browser. NAVER withholds the document's final DEFLATE block +
+    // END_STREAM for ~60s; buffering (the else arm) blocks the whole page on it,
+    // while streaming shows the early content in ~1s. Scripts/CSS/images stay
+    // buffered (they finish fast via decode-end and the script rewrite-cache
+    // needs the full source). NO timer is used — the pump simply `await`s
+    // `data()`; a withheld tail just parks the async task with the page already
+    // painted (see trap-notebook 2026-06-16: timers trap the wasm).
+    let is_html = resp_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.trim_start().to_ascii_lowercase().starts_with("text/html"))
+        .unwrap_or(false);
+    let ce_lower = content_encoding
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let coding_streamable =
+        ce_lower.is_empty() || ce_lower == "identity" || ce_lower == "gzip" || ce_lower == "x-gzip";
+    if (200..300).contains(&status) && is_html && coding_streamable {
+        // Plaintext after the kernel-side gunzip → drop the now-false
+        // Content-Encoding and the now-unknown Content-Length.
+        let stream_headers: Vec<(String, String)> = resp_headers
+            .into_iter()
+            .filter(|(k, _)| {
+                let lk = k.to_ascii_lowercase();
+                lk != "content-encoding" && lk != "content-length"
+            })
+            .collect();
+        let body_stream = response.into_body();
+        let stream = build_body_readable_stream(
+            body_stream,
+            content_encoding.clone(),
+            host_header.to_string(),
+        )
+        .map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("h2: readable stream: {e:?}"))
+        })?;
+        crate::kernel::push_trace(&format!(
+            "tx:h2-stream-start host={} status={} ce={}",
+            host_header,
+            status,
+            if ce_lower.is_empty() { "identity" } else { &ce_lower }
+        ));
+        return Ok(H2Response::Streaming(StreamingResponse {
+            status,
+            reason,
+            headers: stream_headers,
+            stream,
+        }));
+    }
+
     let mut body_buf: Vec<u8> = Vec::new();
     let mut body_stream = response.into_body();
+    let mut end_stream = false;
     loop {
         match body_stream.data().await {
             Some(Ok(chunk)) => {
@@ -222,6 +348,36 @@ pub(crate) async fn send_request(
                 // (default 65 KiB). The cost of getting this wrong is a 60s
                 // upstream idle timeout per request.
                 let _ = body_stream.flow_control().release_capacity(len);
+                // Body complete per Content-Length → return now instead of
+                // awaiting END_STREAM. The un-ended stream is dropped/reset on
+                // return, which is fine: the peer sees RST_STREAM and the
+                // pooled connection survives.
+                if let Some(cl) = content_length {
+                    if body_buf.len() >= cl {
+                        crate::kernel::push_trace(&format!(
+                            "tx:h2-body-cl-complete host={} len={} cl={}",
+                            host_header,
+                            body_buf.len(),
+                            cl
+                        ));
+                        break;
+                    }
+                } else if detect_decode_end {
+                    // Compressed body with no Content-Length: stop when the
+                    // codec's end marker validates (the withheld END_STREAM is
+                    // just an empty trailing frame we don't need to wait for).
+                    if let Some(ce) = content_encoding.as_deref() {
+                        if crate::kernel::transport::decode::body_is_complete(ce, &body_buf) {
+                            crate::kernel::push_trace(&format!(
+                                "tx:h2-body-decode-end host={} len={} ce={}",
+                                host_header,
+                                body_buf.len(),
+                                ce.trim()
+                            ));
+                            break;
+                        }
+                    }
+                }
             }
             Some(Err(e)) => {
                 // Phase 5.8: tolerate stream-level errors mid-body. The
@@ -240,19 +396,23 @@ pub(crate) async fn send_request(
                     e
                 ));
                 if body_buf.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("h2: body: {e}"),
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::Other, format!("h2: body: {e}")));
                 }
                 break;
             }
-            None => break,
+            None => {
+                end_stream = true;
+                break;
+            }
         }
     }
-    // h2 trailers — not used by browser fetch responses, but draining
-    // keeps the protocol state consistent.
-    let _ = body_stream.trailers().await;
+    // Drain trailers ONLY when END_STREAM was actually received. After a
+    // Content-Length or idle short-circuit the stream is still open, so
+    // `trailers().await` would block for the peer's full END_STREAM idle
+    // timeout (~60s) — re-introducing the very stall we just eliminated.
+    if end_stream {
+        let _ = body_stream.trailers().await;
+    }
 
     // Phase 5.12 (2026-06-03): Chrome-shape Accept-Encoding advertises
     // gzip / deflate / br / zstd; servers happily respond compressed.
@@ -264,12 +424,106 @@ pub(crate) async fn send_request(
     // the residual codings so the header stays accurate.
     let (body_buf, resp_headers) = unwrap_response_body(resp_headers, body_buf);
 
-    Ok(HttpResponse {
+    Ok(H2Response::Buffered(HttpResponse {
         status,
         reason,
         headers: resp_headers,
         body: body_buf,
-    })
+    }))
+}
+
+/// Build a `ReadableStream` whose body is the h2 response stream, gunzipped
+/// incrementally. The ReadableStream constructor invokes our `start` callback
+/// synchronously with the controller; we `spawn_local` the async pump there.
+/// The pump owns the `RecvStream`, so dropping the stream (page cancels) tears
+/// down the upstream stream cleanly.
+fn build_body_readable_stream(
+    body_stream: h2::RecvStream,
+    content_encoding: Option<String>,
+    host: String,
+) -> Result<web_sys::ReadableStream, JsValue> {
+    let source = js_sys::Object::new();
+    // `once_into_js` yields a JS function callable exactly once — which is the
+    // ReadableStream `start` contract. It also owns/leaks the closure for us.
+    let start = Closure::once_into_js(
+        move |controller: web_sys::ReadableStreamDefaultController| {
+            spawn_local(pump_body(body_stream, controller, content_encoding, host));
+        },
+    );
+    js_sys::Reflect::set(&source, &JsValue::from_str("start"), &start)?;
+    web_sys::ReadableStream::new_with_underlying_source(&source)
+}
+
+/// Async pump: read h2 body chunks, release flow-control credit, gunzip
+/// incrementally, and enqueue decoded plaintext into the stream controller.
+/// Closes the controller on END_STREAM or stream error. NO timer.
+async fn pump_body(
+    mut body_stream: h2::RecvStream,
+    controller: web_sys::ReadableStreamDefaultController,
+    content_encoding: Option<String>,
+    host: String,
+) {
+    let is_gzip = content_encoding
+        .as_deref()
+        .map(|c| {
+            let t = c.trim().to_ascii_lowercase();
+            t == "gzip" || t == "x-gzip"
+        })
+        .unwrap_or(false);
+    let mut gunzip = if is_gzip {
+        Some(crate::kernel::transport::decode::StreamingGunzip::new())
+    } else {
+        None
+    };
+    let mut total_in = 0usize;
+    let mut total_out = 0usize;
+    loop {
+        match body_stream.data().await {
+            Some(Ok(chunk)) => {
+                let len = chunk.len();
+                total_in += len;
+                // Release credit on the LIVE stream (not a clone) — see the
+                // buffered loop's note; getting this wrong stalls after one
+                // window.
+                let _ = body_stream.flow_control().release_capacity(len);
+                let decoded: Vec<u8> = match gunzip.as_mut() {
+                    Some(g) => g.push(&chunk),
+                    None => chunk.to_vec(),
+                };
+                if decoded.is_empty() {
+                    continue;
+                }
+                total_out += decoded.len();
+                let arr = js_sys::Uint8Array::new_with_length(decoded.len() as u32);
+                arr.copy_from(&decoded);
+                if controller.enqueue_with_chunk(&arr).is_err() {
+                    // Consumer cancelled the stream — stop pumping; dropping
+                    // `body_stream` RSTs the upstream stream.
+                    crate::kernel::push_trace(&format!(
+                        "tx:h2-stream-cancel host={} in={} out={}",
+                        host, total_in, total_out
+                    ));
+                    return;
+                }
+            }
+            Some(Err(e)) => {
+                crate::kernel::push_trace(&format!(
+                    "tx:h2-stream-err host={} in={} out={} err={}",
+                    host, total_in, total_out, e
+                ));
+                // Surface as a stream error so the page sees a network failure
+                // rather than a silently-truncated document.
+                controller.error_with_e(&JsValue::from_str(&format!("h2 stream: {e}")));
+                return;
+            }
+            None => break, // END_STREAM
+        }
+    }
+    crate::kernel::push_trace(&format!(
+        "tx:h2-stream-close host={} in={} out={}",
+        host, total_in, total_out
+    ));
+    let _ = controller.close();
 }
 
 /// Pull the `Content-Encoding` header out of the response header list,

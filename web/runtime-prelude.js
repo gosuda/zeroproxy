@@ -555,6 +555,26 @@
       controller.postMessage(sealed, transfer ? [channel.port2, ...transfer] : [channel.port2]);
     });
   }
+  // SW keepalive — the controller dies after ~30s idle, and a restarted SW
+  // comes back with EMPTY in-memory state (tabs/shareRoutes/clientContext).
+  // After that every /zp/api/* transport fetch fails `!tab` → 503
+  // SW_NOT_READY → dynamic import()s + membrane fetch/XHR all reject →
+  // hydration stalls (the "검색창만 뜨고 흰화면" symptom). The worst gap is the
+  // streamed document staying open ~60s while NAVER withholds END_STREAM: no
+  // fetch activity flows in that window, so the SW idles out mid-load exactly
+  // when the page still needs it. A bare ~15s postMessage resets the SW idle
+  // timer (any received event does) so its tab state survives the whole load.
+  // Bare post (no port / no runtimeToken) — we only need the wake, not a reply.
+  let __zpKeepAliveTimer = null;
+  function startSWKeepAlive() {
+    if (__zpKeepAliveTimer) return;
+    __zpKeepAliveTimer = setInterval(() => {
+      const controller = Native.serviceWorkerController || (Native.serviceWorker && Native.serviceWorker.controller);
+      if (!controller) return;
+      try { controller.postMessage({ type: '__zpKeepAlive' }); } catch {}
+    }, 15000);
+  }
+  startSWKeepAlive();
   function updateVirtualBase(raw) {
     try {
       const next = targetURL(raw, baseURL);

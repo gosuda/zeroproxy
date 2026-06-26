@@ -77,6 +77,37 @@ function logOutgoingHeaders(targetUrl, method, entries) {
   while (outgoingHeaderLog.length > MAX_HEADER_LOG) outgoingHeaderLog.shift();
 }
 
+// 2026-06-09 transport-stage perf telemetry. NAVER cold load 1분 분석에서
+// rewriter는 1.1% (679 ms / 60 s) 라는 것이 확인됨. 나머지 99% 는
+// transport (yamux+TLS+h2 핸드셰이크 + sub-resource fetch). 어느 fetch가
+// 무거운지 알아야 다음 최적화 (parallel/preload/connection-pooling) 가
+// 의미가 있음. ring buffer 는 마지막 N 개 fetch 만 보관 — 누적
+// 카운터는 SW lifetime 전체. logTransportEvent 는 transportFetch 가
+// self.kernelFetch 완료 후 호출 — 즉 핸드셰이크+body 합산 wall time.
+const MAX_TRANSPORT_LOG = 32;
+const transportLatencyLog = [];
+const transportStats = {
+  requests: 0,
+  totalLatencyMs: 0,
+  totalBytes: 0,
+  errors: 0,
+};
+function logTransportEvent(targetUrl, method, status, latencyMs, bytes) {
+  transportStats.requests++;
+  transportStats.totalLatencyMs += latencyMs;
+  transportStats.totalBytes += bytes;
+  if (status === 0 || status >= 500) transportStats.errors++;
+  transportLatencyLog.push({
+    ts: Date.now(),
+    target: String(targetUrl).slice(0, 256),
+    method,
+    status,
+    latencyMs: Math.round(latencyMs),
+    bytes,
+  });
+  while (transportLatencyLog.length > MAX_TRANSPORT_LOG) transportLatencyLog.shift();
+}
+
 function rewriteCacheTransformerVersion() {
   if (rewriteCacheVersion) return rewriteCacheVersion;
   try {
@@ -181,7 +212,18 @@ async function refreshRuntimeConfig() {
   return runtimeConfigPromise;
 }
 self.addEventListener('message', event => event.waitUntil(handleMessage(event)));
-self.addEventListener('fetch', event => { event.respondWith(handleFetch(event)); });
+self.addEventListener('fetch', event => {
+  // Only intercept http(s). Non-http schemes — chrome-extension: (a browser
+  // extension's own injected-script channel), data:, blob:, about: — must
+  // reach the browser's NATIVE handler untouched. Calling respondWith on them
+  // routes through classify→UNKNOWN→`Response.error()`, which surfaces as
+  // "FetchEvent ... resulted in a network error response" and breaks the
+  // extension (observed on NAVER: content.js "Failed to establish injected
+  // script channel"). Returning without respondWith = browser default fetch.
+  const u = event.request.url;
+  if (!u.startsWith('http:') && !u.startsWith('https:')) return;
+  event.respondWith(handleFetch(event));
+});
 
 // Rust zp-bundle (OXC native crate). Initializes lazily and exposes
 // self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
@@ -248,6 +290,11 @@ async function initBundle() {
         ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '')
         : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
+      // Phase C streaming render: the wasm-bindgen `HtmlTxn` class. `new
+      // ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML)` then feed decoded
+      // HTML byte chunks via `.write(Uint8Array)` and finish with `.end()`.
+      // Optional (older bundles lack it → SW stays on the buffered path).
+      HtmlTxn: typeof wbg.HtmlTxn === 'function' ? wbg.HtmlTxn : null,
       // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported here from
       // rewriter-rs/. Mirrors the legacy `rewriteCSS` surface (positional
       // args, throws on parse failure).
@@ -776,9 +823,161 @@ async function fetchOriginalSourceMap(source, target, tab) {
   } catch { return ''; }
 }
 
+// 2026-06-10 NAVER 광고/트래커 instant-stub list. NAVER WAF 는 비신뢰
+// IP (residential / VPN / proxy) 에서 광고/anti-bot 트래커 endpoint 를
+// 60s slow-lane 후 응답하는 design — 우리 IP/JA3 가 분류받으면 우회 불가
+// (trap notebook 2026-06-02 IP-reputation gate 결정적 측정). 그 60s 가
+// page hydration chain (메뉴/link binding) 의 await 안에 있어서 첫 NAVER
+// 진입 = 1분 이상 wait. transportLatency telemetry 로 확정한 endpoints:
+//   nam.veta.naver.com/gfp/v1   → 200, 62820ms, 0 bytes (광고 bid)
+//   siape.veta.naver.com/fxshow → 200, 62878ms, 0 bytes (sidebar 광고)
+//   ntm.pstatic.net/scripts/ntm_xxx.js → 200, 64742ms, 206 KB (트래커 WASM)
+// 
+// **Stub 결정**: dogfood 가능성 우선 → 세 host 모두 instant 204.
+// **광고 trade-off** (trap notebook 2026-06-02 ntm reject 항목): ntm block
+// 시 정상 작동 광고들 (premium / da_public / veta) 모두 about:blank
+// iframes 로 깨짐. 그러나 우리 환경에선 이미 nam.veta/siape.veta stub 으로
+// 광고 인벤토리가 어차피 채워지지 않음 → ntm 도 stub 해도 손해 boundary
+// 작음. 광고 자체 보다 메뉴/페이 link 빠른 반응이 dogfood UX 우선.
+// 
+// production deployment 시 광고 표시 원하면 ntm 만 list 에서 제거 + 첫
+// 진입 1분 wait 받아들이거나 SW response cache 구현 (별도 트랙).
+const NAVER_AD_BID_STUB_HOSTS = new Set([
+  'nam.veta.naver.com',
+  'siape.veta.naver.com',
+  'ntm.pstatic.net',
+]);
+
+// 2026-06-10 NAVER dynamic thumbnail proxy (`s.pstatic.net/dthumb.phinf/...`)
+// 도 NAVER WAF 의 추가 slow-lane endpoint — 비신뢰 IP 에서 20s+ wait
+// (transportLatency 측정값: 4 개 × 20040ms = 80s). 페이지의 핵심 이미지
+// (뉴스/카드 thumbnail) 들이 여기 — 그래서 dthumb 응답이 늦으면 page
+// hydration 완성 안 됨. ntm 과 같이 stub 으로 우회 — 차이점은 이미지라
+// 1×1 transparent PNG 로 응답 (binary 이미지 응답). 결과: thumbnail 빈
+// 자리 (UI 깨짐 visible) trade-off, dogfood 가능성 우선.
+const NAVER_IMAGE_STUB_PATHS = [
+  { host: 's.pstatic.net', pathPrefix: '/dthumb.phinf' },
+];
+
+// 2026-06-11 NAVER 광고 SDK ES module stub. **좁은 매칭만** — 광고 SDK 의
+// `gfp-display-glog-logger.js` (logger 전용, dynamic import fail 의 cascade
+// source) 만 빈 module 로 stub. **절대 매치 안 시킬 path**:
+// `gfp-display-sdk.js` (광고 SDK 메인, 168 KB), `gfp-display-nda.js`
+// (정상 작동 SDK), `gfp-core.js`. 너무 광범위한 `gfp-display-*` 패턴은
+// SDK 메인까지 stub 해서 광고 SDK init fail → page hydration 지연
+// (2026-06-11 회귀: 사용자 보고 "또 오래 걸림"). Logger 만 빈 module 로
+// 대체하면 (a) dynamic import 즉시 resolve, (b) SDK 메인은 정상 init,
+// (c) logging 만 silent — page hydration 정상 진행.
+// 2026-06-11: stub 제거. glog-logger 를 빈/Proxy module 로 stub 하면 SDK 의
+// named import 또는 생성자 호출에서 "t is not a constructor" throw (회귀).
+// gfp-display-sdk.js (168 KB) 가 정상 fetch+rewrite 되는 것 확인됐으니
+// glog-logger 도 정상 fetch 경로로 두고, dynamic import 실패의 진짜
+// 원인 (rewriter 의 module 변환 / transport) 을 별도 진단. 빈 list 면
+// 아래 stub 분기 no-op.
+const NAVER_AD_MODULE_STUB_PATTERNS = [];
+// 1×1 transparent PNG (67 bytes) — Web 표준 가장 작은 valid PNG.
+const TRANSPARENT_PNG_BYTES = Uint8Array.from(
+  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII='),
+  c => c.charCodeAt(0)
+);
+
+// 2026-06-10 SW response cache for static assets. NAVER cold-load 의 824
+// requests / 3163s 누적 wait 의 진짜 원인은 SW 가 모든 fetch 를 매번 cold
+// path 로 보낸다는 것 — 브라우저 native HTTP cache 를 SW 가 가로채니
+// 활용 불가. 두 번째 진입 / 새로고침 시 같은 immutable static asset (hash
+// URL 인 `.js`, `.css`, `.png` 등) 을 또 fetch. Cache API 로 SW lifetime
+// 지속되는 persistent cache 를 유지 — GET + 200 + static extension 매치
+// 응답만 cache. NAVER hash URL (`ntm_xxx.js`, `preload.20fd9b94.js`) 은
+// content-addressed 라 invalidation 신경 안 써도 됨. cache version key 로
+// 전체 무효화 가능.
+const RESPONSE_CACHE_NAME = 'zp-resp-v1';
+const STATIC_ASSET_EXT_RE = /\.(?:js|css|png|jpg|jpeg|gif|svg|webp|woff2?|ttf|otf|ico|mp3|mp4|wasm)(?:\?|$)/i;
+
+async function tryRespCacheGet(url) {
+  try {
+    const c = await caches.open(RESPONSE_CACHE_NAME);
+    const r = await c.match(url);
+    return r || null;
+  } catch { return null; }
+}
+async function tryRespCachePut(url, response) {
+  try {
+    const c = await caches.open(RESPONSE_CACHE_NAME);
+    await c.put(url, response);
+  } catch {}
+}
+
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
+  const txMethod = opt.method || (opt.request && opt.request.method) || 'GET';
+  // NAVER 광고/트래커 instant-stub — see NAVER_AD_BID_STUB_HOSTS doc.
+  // ntm.pstatic.net 은 트래커 WASM script 로 응답해야 하므로 빈 .js content,
+  // 그 외 (nam.veta/siape.veta) 는 204 No Content 로 응답.
+  let urlParts = null;
+  try {
+    urlParts = new URL(u);
+    const stubHost = urlParts.host;
+    if (NAVER_AD_BID_STUB_HOSTS.has(stubHost)) {
+      const isScript = stubHost === 'ntm.pstatic.net';
+      // 2026-06-10 stub 응답 shape: 광고 SDK 가 `nam.veta/gfp/v1` /
+      // `siape.veta/fxshow` 응답을 JSON.parse 시도. 204 No Content (빈
+      // body) 반환 시 parse error → SDK 의 catch 가 어떤 fallback content
+      // 를 inject 가능 (사용자 환경에서 binary garbage 가 메인 페이지에
+      // 표시되는 회귀 가설). 대신 200 + `{}` empty JSON 으로 응답하면 SDK
+      // 가 정상 parse + "no bid → no inventory" 로 처리. ntm 은 script 라
+      // 그대로 빈 .js.
+      const stubBody = isScript ? '/* zp:stub */' : '{}';
+      const stubCType = isScript ? 'application/javascript; charset=utf-8' : 'application/json; charset=utf-8';
+      logTransportEvent(u, txMethod, 200, 0, stubBody.length);
+      return new Response(stubBody, {
+        status: 200,
+        headers: { 'Content-Type': stubCType, 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP() },
+      });
+    }
+    // NAVER dynamic thumbnail proxy stub — 1×1 transparent PNG.
+    for (const { host, pathPrefix } of NAVER_IMAGE_STUB_PATHS) {
+      if (urlParts.host === host && urlParts.pathname.startsWith(pathPrefix)) {
+        logTransportEvent(u, txMethod, 200, 0, TRANSPARENT_PNG_BYTES.byteLength);
+        return new Response(TRANSPARENT_PNG_BYTES, {
+          status: 200,
+          headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP() },
+        });
+      }
+    }
+    // NAVER 광고 SDK module stub — no-op ES module 응답으로 dynamic import
+    // 즉시 resolve. ssl.pstatic.net/tveta/libs/glad/.../gfp-display-glog-logger
+    // 매치. 2026-06-11 회귀: `export default {};` 는 SDK 가 logger 를
+    // `new Logger()` 처럼 생성자로 호출할 때 "t is not a constructor"
+    // throw. default export 를 **호출/생성 가능한 no-op class** 로 제공해서
+    // `new X()`, `X()`, `X.method()` 모두 silent no-op 되도록. Proxy 로
+    // 임의 property 접근/호출도 안전하게 흡수.
+    if (urlParts.host === 'ssl.pstatic.net') {
+      for (const re of NAVER_AD_MODULE_STUB_PATTERNS) {
+        if (re.test(urlParts.pathname)) {
+          const modBody =
+            'const noop=function(){};' +
+            'const h={get:(_,p)=>p==="prototype"?noop.prototype:stub,apply:()=>stub,construct:()=>stub};' +
+            'const stub=new Proxy(noop,h);' +
+            'export default stub;';
+          logTransportEvent(u, txMethod, 200, 0, modBody.length);
+          return new Response(modBody, {
+            status: 200,
+            headers: { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP() },
+          });
+        }
+      }
+    }
+  } catch {}
+  // 2026-06-11 SW response cache 임시 비활성화 — dynamic ES module import
+  // 의 cache hit path 에서 puppeteer chromium 의 race / spec edge 로
+  // gfp-display-glog-logger.js 같은 module 이 instantiate fail (console
+  // errors 2 → 5 회귀). dogfood UX 우선으로 cache 제거. stub list (광고/
+  // 트래커/dthumb) 만 유지. 향후 Cache API + ES module 호환 path 별도 트랙.
+  // if (txMethod === 'GET' && urlParts && STATIC_ASSET_EXT_RE.test(urlParts.pathname)) {
+  //   const cached = await tryRespCacheGet(u);
+  //   if (cached) { … }
+  // }
   // Step 13: HTTP transport is Rust-only (crates/zp-kernel-bundle).
   // 2026-06-08 split-bundle (c.3): kernel + transport wasm is lazy —
   // first `transportFetch` is what actually triggers the multi-MB
@@ -1006,7 +1205,16 @@ async function transportFetch(targetUrl, opt) {
     const body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
     const n = body && (body.byteLength || body.size || 0) || 0;
     if (n > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, u);
-    bodyU8 = body ? new Uint8Array(body instanceof ArrayBuffer ? body : await body.arrayBuffer()) : null;
+    // Body 타입은 caller 마다 다름: runtimeAPI 의 /zp/api/fetch path 는
+    // `ZP.base64UrlToBytes` 결과인 Uint8Array, opt.request.clone()
+    // .arrayBuffer() 는 ArrayBuffer, Blob/FormData 같은 표준 body 는
+    // .arrayBuffer() 메서드 보유. 이 분기 빠지면 NAVER preload.js 의 첫
+    // POST 호출에서 `body.arrayBuffer is not a function` 으로 hydration
+    // 전체 멈춤 (2026-06-10 trap notebook).
+    if (body instanceof Uint8Array) bodyU8 = body;
+    else if (body instanceof ArrayBuffer) bodyU8 = new Uint8Array(body);
+    else if (body && typeof body.arrayBuffer === 'function') bodyU8 = new Uint8Array(await body.arrayBuffer());
+    else bodyU8 = null;
   }
   logOutgoingHeaders(u, method, headerEntries);
   // Plain object — no Request constructor, so forbidden headers survive.
@@ -1020,11 +1228,22 @@ async function transportFetch(targetUrl, opt) {
     arrayBuffer: () => Promise.resolve(bodyU8 ? bodyU8.buffer : new ArrayBuffer(0)),
   };
   let resp;
+  const txT0 = performance.now();
   try {
     resp = await self.kernelFetch(reqLike);
   } catch (e) {
+    logTransportEvent(u, method, 0, performance.now() - txT0, 0);
     return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
   }
+  // body length signal — Content-Length is upstream-authoritative when
+  // present; for chunked / unknown we estimate 0 to avoid double-buffer
+  // (probe is best-effort, not metering).
+  let bodyLen = 0;
+  try {
+    const cl = resp && resp.headers && resp.headers.get('content-length');
+    if (cl) bodyLen = parseInt(cl, 10) || 0;
+  } catch {}
+  logTransportEvent(u, method, (resp && resp.status) || 0, performance.now() - txT0, bodyLen);
   // Capture Set-Cookie from the response and feed into the RFC-6265
   // jar scoped to the response URL so Domain/Path/Secure/HttpOnly
   // attributes are honored on the next outgoing request.
@@ -1056,6 +1275,51 @@ async function transportFetch(targetUrl, opt) {
       }
     }
   } catch {}
+  // 2026-06-11 SW response cache write 비활성화 (cache hit path 와 같이
+  // disable). 자세한 이유는 cache_first 분기 주석 참조.
+  // 2026-06-09 cross-host 3xx redirect rewrap.
+  // 함정: Rust kernel 는 redirect-follow 안 함 (fetch.rs 의 `No redirect
+  // follow` policy) — 3xx 를 그대로 SW 로 surface. 우리가 그걸 다시 그대로
+  // 클라이언트로 forward 하면 브라우저는 raw Location URL 로 native nav
+  // → URL bar = `https://nid.naver.com/...`, 우리 share URL escape.
+  // NAVER 페이 link 시나리오 (pay.naver.com 302 → nid.naver.com/nidlogin.login)
+  // 가 정확히 이 경로로 escape 했음 (2026-06-09 trap notebook).
+  //
+  // Fix: SW 가 3xx 를 swallow 하고 같은 transportFetch 안에서 재귀 follow.
+  // (a) entry.targetUrl 을 새 URL 로 업데이트 → virtual location state 동기화,
+  // (b) URL bar 는 share URL 그대로 유지 → fragment (k=…&server=…) 보존,
+  // (c) 다음 transportFetch 호출이 새 host 기준 Cookie / Referer / Origin
+  //     rebuild (entry.targetUrl 이 이미 업데이트됨).
+  // Method 처리: 301/302/303 은 GET 으로 강제 (RFC 7231 §6.4.4), 307/308 은
+  // 원래 method 유지. Depth limit 5 — 무한 loop 차단.
+  const MAX_REDIRECT_DEPTH = 5;
+  if (resp && resp.status >= 300 && resp.status < 400) {
+    const currentDepth = opt.__redirectDepth || 0;
+    if (currentDepth < MAX_REDIRECT_DEPTH) {
+      const loc = resp.headers.get('Location');
+      if (loc) {
+        let resolvedUrl = null;
+        try { resolvedUrl = new URL(loc, u).href; } catch {}
+        if (resolvedUrl) {
+          if (entry) {
+            entry.targetUrl = resolvedUrl;
+            entry.baseUrl = resolvedUrl;
+          }
+          const preserveMethod = resp.status === 307 || resp.status === 308;
+          return transportFetch(resolvedUrl, {
+            request: opt.request,
+            document: opt.document,
+            tab: opt.tab,
+            entryId: opt.entryId,
+            method: preserveMethod ? method : 'GET',
+            headers: undefined, // rebuilt by transportFetch for the new host
+            body: preserveMethod ? opt.body : null,
+            __redirectDepth: currentDepth + 1,
+          });
+        }
+      }
+    }
+  }
   return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab);
 }
 
@@ -1192,6 +1456,35 @@ async function transformDocumentResponse(resp, opt) {
   // Only transform HTML payloads. Anything else (302 redirect, JSON, binary)
   // passes through unchanged — addCSP/streaming preserved.
   if (!resp || resp.status >= 300 || !isHTMLResponse(resp)) return resp;
+
+  // Phase C — progressive streaming render. Used ONLY when the kernel actually
+  // streamed this document (X-ZP-Stream marker, set in build_streaming_js_response
+  // for 2xx text/html gzip|identity). The body is piped through the streaming
+  // HtmlTxn so the page renders as bytes arrive — the fix for NAVER's withheld
+  // END_STREAM (~60s) where the buffered `resp.text()` below would block. Falls
+  // back to the buffered path (which keeps fail-closed MALFORMED_HTML + the
+  // post-redirect CSS host-rewrite) on host mismatch or any failure.
+  const kernelStreamed = resp.headers && resp.headers.get('X-ZP-Stream') === '1';
+  if (kernelStreamed && resp.body) {
+    try {
+      await initBundle();
+      if (self.ZPBundle && self.ZPBundle.ready && typeof self.ZPBundle.HtmlTxn === 'function') {
+        const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
+        // Post-redirect host mismatch needs a whole-doc CSS regex (see the
+        // buffered path below) — not streamable. Use the buffered path there.
+        const finalUrl = (resp.headers && resp.headers.get('X-ZP-Final-URL')) || '';
+        let hostMismatch = false;
+        if (finalUrl && targetUrl) {
+          try { hostMismatch = new URL(targetUrl).host !== new URL(finalUrl).host; } catch {}
+        }
+        if (!hostMismatch) {
+          const streamed = streamDocumentResponse(resp, opt, targetUrl);
+          if (streamed) return streamed;
+        }
+      }
+    } catch { /* fall through to buffered */ }
+  }
+
   let html = '';
   try { html = await resp.text(); } catch { return resp; }
   let transformed = html;
@@ -1271,6 +1564,49 @@ async function transformDocumentResponse(resp, opt) {
   headers.delete('Content-Length');
   headers.set('Content-Type', 'text/html; charset=utf-8');
   return new Response(injected, { status: resp.status, statusText: resp.statusText, headers });
+}
+// Phase C streaming render. Pipes the kernel's decoded-HTML ReadableStream
+// through the wasm `HtmlTxn` (incremental rewrite + prelude injection at
+// <head>) so the page renders progressively. Returns a streaming Response, or
+// null if the txn couldn't be constructed (caller falls back to buffered).
+//
+// Strict-mode fail-closed is preserved: on a rewrite error mid-stream we
+// `controller.error` (the page sees a network failure / what already rendered)
+// instead of shipping un-rewritten bytes. The prelude is injected by HtmlTxn at
+// the <head> open tag, so NO separate injectPrelude is needed here.
+function streamDocumentResponse(resp, opt, targetUrl) {
+  const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
+  let txn;
+  try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
+  catch { return null; }
+  const ts = new TransformStream({
+    transform(chunk, controller) {
+      try {
+        // chunk is a Uint8Array of decoded (gunzipped) HTML bytes.
+        const out = txn.write(chunk);
+        if (out && out.byteLength) controller.enqueue(out);
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+    flush(controller) {
+      try {
+        const tail = txn.end();
+        if (tail && tail.byteLength) controller.enqueue(tail);
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+  });
+  const headers = new Headers(resp.headers);
+  headers.delete('Content-Length');     // decoded plaintext, unknown length
+  headers.delete('X-ZP-Stream');        // strip the SW-internal marker
+  headers.set('Content-Type', 'text/html; charset=utf-8');
+  return new Response(resp.body.pipeThrough(ts), {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
+  });
 }
 function isHTMLResponse(resp) {
   const ct = resp.headers && resp.headers.get('Content-Type') || '';
@@ -1354,6 +1690,21 @@ function scriptResponseHeaders(resp) {
 async function handleMessage(event) {
   const msg = event.data || {};
   const reply = event.ports && event.ports[0];
+  // Proxied-page keepalive ping (runtime-prelude `startSWKeepAlive`). Receiving
+  // this event is the whole point — it resets the SW idle timer so the
+  // in-memory tab state (tabs/shareRoutes/clientContext) survives long
+  // fetch-quiet gaps (notably the ~60s streamed-document withhold). No reply,
+  // no work; just return so we never touch the kernel for a heartbeat.
+  if (msg && msg.type === '__zpKeepAlive') return;
+  // Diagnostic: dump the kernel trace ring WITHOUT touching the kernel. The
+  // full __zpKernelProbe awaits initKernel(), which hangs once the kernel wasm
+  // has trapped (poisoned instance) — exactly when we most need the panic line
+  // the panic-hook pushed here. self.__zpRustTrace is a plain JS array, so it
+  // survives the wasm trap. No init, immediate reply.
+  if (msg && msg.type === '__zpTraceDump') {
+    if (reply) reply.postMessage({ ok: true, trace: (self.__zpRustTrace || []).slice(-400) });
+    return;
+  }
   if (msg && msg.type === '__zpKernelEchoTest') {
     // 2026-06-08 split-bundle (c.3): echoSync is a kernel-half export now.
     // Probe through initKernel() — initBundle() doesn't carry kernel*.
@@ -1410,6 +1761,21 @@ async function handleMessage(event) {
       // Compare with chrome://net-export / Wireshark capture from a
       // real Chrome 148 hit to spot anti-bot trigger gaps.
       outgoingHeaders: outgoingHeaderLog.slice(),
+      // 2026-06-09 transport-stage perf telemetry. NAVER cold-load
+      // attribution: with rewriter at ~1% of wall time, this surfaces
+      // where the other 99% lives (per-fetch yamux+TLS+h2 cost +
+      // upstream RTT). Top-K slowest entries are visible in the
+      // ring buffer; cumulative `transportStats` reflects SW lifetime.
+      transportStats: {
+        requests: transportStats.requests,
+        totalLatencyMs: Math.round(transportStats.totalLatencyMs),
+        totalBytes: transportStats.totalBytes,
+        errors: transportStats.errors,
+        avgLatencyMs: transportStats.requests > 0
+          ? Math.round((transportStats.totalLatencyMs / transportStats.requests) * 10) / 10
+          : 0,
+      },
+      transportLatency: transportLatencyLog.slice(),
       initErr,
     }});
     return;

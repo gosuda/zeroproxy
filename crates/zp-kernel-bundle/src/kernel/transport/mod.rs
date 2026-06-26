@@ -51,6 +51,7 @@ pub(crate) mod http2;
 pub(crate) mod mlkem_hybrid;
 pub(crate) mod pool;
 pub(crate) mod socks5;
+pub(crate) mod timer;
 pub(crate) mod tls;
 pub(crate) mod ws_client;
 pub(crate) mod ws_stream;

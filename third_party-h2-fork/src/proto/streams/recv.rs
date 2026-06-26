@@ -8,7 +8,10 @@ use http::{HeaderMap, Request, Response};
 use std::cmp::Ordering;
 use std::io;
 use std::task::{Context, Poll, Waker};
-use std::time::Instant;
+// wasm32 has no std clock (Instant::now() panics "time not implemented"); the
+// reset-stream cleanup runs on every RST. web-time uses performance.now() on
+// wasm and re-exports std::time elsewhere.
+use web_time::Instant;
 
 #[derive(Debug)]
 pub(super) struct Recv {

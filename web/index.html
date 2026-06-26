@@ -341,7 +341,14 @@
       for (let i = 0; i < 60; i++) {
         try {
           const probe = await probeBundle();
-          if (probe && probe.bundleReady && probe.kernelFetch === 'function') {
+          // 2026-06-11 ready boundary 정확화 — `kernelFetch === 'function'`
+          // 만 검사하면 kernelFetch property 가 설정됐으나 ZPKernel.ready 가
+          // 아직 false 인 race 상태에서 ready 표시. 사용자 click 시 첫
+          // transportFetch 가 SW_NOT_READY (initKernel 미완료) 또는 kernel
+          // cold path 의 multi-MB wasm 추가 wait 발생 → "ready 인데 접속
+          // 안 됨" UX 회귀 (사용자 보고). `probe.kernelReady === true` 까지
+          // 확인하면 ZPKernel.ready === true 보장 — Open 클릭 시 즉시 fetch.
+          if (probe && probe.bundleReady && probe.kernelReady && probe.kernelFetch === 'function') {
             runtimeReady = true;
             clearInterval(tick);
             openBtn.disabled = false;

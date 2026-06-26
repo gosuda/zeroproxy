@@ -191,6 +191,59 @@ pub fn transform_html_js(
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// Streaming HTML transform for progressive document render. Construct once per
+/// document; feed decoded (gunzipped) HTML byte chunks via [`HtmlTxn::write`] as
+/// they arrive from the kernel `ReadableStream`; finish with [`HtmlTxn::end`].
+/// Each `write` returns the rewritten bytes produced so far, so the SW can pipe
+/// them straight to the page. `prelude_html` is injected right after `<head>`
+/// (pass `""` to skip). Same strict-mode rewrite as `transformHtml`, just
+/// incremental — see `zp_htmltx::HtmlTxn` for the chunk-invariance guarantee.
+#[wasm_bindgen]
+pub struct HtmlTxn {
+    // `Option` so `end` can consume the inner txn (lol_html's `end` takes self
+    // by value) while keeping the JS-side object alive; post-`end` calls throw.
+    inner: Option<zp_htmltx::HtmlTxn>,
+}
+
+#[wasm_bindgen]
+impl HtmlTxn {
+    #[wasm_bindgen(constructor)]
+    pub fn new(target_url: &str, proxy_origin: &str, prelude_html: &str) -> HtmlTxn {
+        let opts = zp_htmltx::TransformOptions {
+            target_url: target_url.to_string(),
+            strict: true,
+            pending_gate: true,
+            proxy_origin: proxy_origin.to_string(),
+        };
+        HtmlTxn {
+            inner: Some(zp_htmltx::HtmlTxn::new(&opts, prelude_html.to_string())),
+        }
+    }
+
+    /// Feed a chunk of decoded HTML bytes; returns the rewritten bytes produced
+    /// by it (may be empty while an element is buffered across the boundary).
+    pub fn write(&mut self, chunk: &[u8]) -> Result<Vec<u8>, JsError> {
+        let inner = self
+            .inner
+            .as_mut()
+            .ok_or_else(|| JsError::new("HtmlTxn: write after end"))?;
+        inner.write(chunk).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Flush both passes and return the final tail bytes. Consumes the txn;
+    /// any further `write`/`end` throws.
+    pub fn end(&mut self) -> Result<Vec<u8>, JsError> {
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| JsError::new("HtmlTxn: end after end"))?;
+        inner
+            .end()
+            .map(|(bytes, _diags)| bytes)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
 /// 2026-06-08 split-bundle (c.1) Step 4: SWC-based CSS rewriter (ported from
 /// the now-deleted `rewriter-rs/` crate). Returns the rewritten CSS or
 /// throws a `CSS_PARSE_FAILED` JsError. `base_url` is the CSS file's

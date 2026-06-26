@@ -471,6 +471,162 @@ test('Rust kernel implements two-signal challenge gate', () => {
   assert.match(goHelper, /TargetIsChallengeDocument\(header, finalURL\)/);
 });
 
+// 2026-06-13 yamux transport throughput fix — NAVER 메인 같은 image-heavy
+// 페이지의 28+ 동시 다운로드가 단일 WS/yamux 세션 throughput 붕괴로 ~243s
+// 동시 stall 하던 회귀 (real Chrome 측정). Rust kernel split_send_size
+// 16KB→256KB + Go relay MaxStreamWindowSize 256KB→16MB.
+test('yamux transport throughput is tuned for concurrent downloads (split_send_size + MaxStreamWindowSize)', () => {
+  const yamuxRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/yamux.rs', 'utf8');
+  assert.match(yamuxRs, /set_split_send_size\(256 \* 1024\)/, 'Rust kernel must raise yamux split_send_size to 256 KiB');
+  const sessionGo = fs.readFileSync('internal/yamuxconn/session.go', 'utf8');
+  assert.match(sessionGo, /MaxStreamWindowSize = 16 \* 1024 \* 1024/, 'Go relay must raise yamux MaxStreamWindowSize to 16 MiB');
+  assert.match(sessionGo, /func tunedConfig\(\)/, 'both Client and Server must share the tuned config');
+});
+
+// 2026-06-13 NAVER "정확히 60s" first-request stall 의 ROOT CAUSE 수정.
+// relay 바이트-트레이스로 결정적 규명: www.naver.com 은 본문(압축 ~44KB)을
+// ~167ms 에 전부 보내지만 h2 stream 종료 프레임(END_STREAM)을 정확히 60s
+// withhold. 우리 h2 클라이언트가 END_STREAM 을 기다리느라(`data()`→None)
+// 본문이 이미 완성됐는데도 60s block 함. 브라우저/curl 은 Content-Length
+// 만큼 받으면 즉시 완료 → 그래서 빨랐음. Fix: body_buf 가 Content-Length
+// 도달하면 END_STREAM 안 기다리고 즉시 break+반환. (h1 의 read_fixed 는
+// 이미 Content-Length 존중 → h1 엔 이 버그 없음.)
+test('h2 client returns at Content-Length without waiting for END_STREAM (NAVER 60s root fix)', () => {
+  const http2Rs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/http2.rs', 'utf8');
+  assert.match(http2Rs, /content_length:\s*Option<usize>/, 'h2 must parse Content-Length to short-circuit the body loop');
+  assert.match(http2Rs, /body_buf\.len\(\)\s*>=\s*cl/, 'h2 must finish once the Content-Length body is fully received');
+  assert.match(http2Rs, /h2-body-cl-complete/, 'the Content-Length short-circuit must be observable in the trace ring');
+});
+
+// 2026-06-14 real-Chrome relay trace 확장 진단 + 최종 수정: 대부분 naver/
+// pstatic 응답은 Content-Length 가 없고(chunked) gzip 이며 END_STREAM 을
+// 60~240s withhold → (a) 매 응답 분 단위 지연, (b) 단일 yamux 세션에 스트림
+// 쌓여 flow-control 고갈 → 다른 다운로드 붕괴. 최종 Fix(타이머 없이):
+// Content-Length 없는 압축 응답은 gzip/br 의 자체 end-marker(CRC32+ISIZE
+// footer)가 검증되는 즉시 완료 — 브라우저와 동일, truncation 없음. + END_STREAM
+// 미수신 시 trailers().await 건너뜀(안 그러면 trailers 가 다시 60s block).
+// ※ 이전 setTimeout-race(idle/retry) 방식은 실부하에서 future 취소가 wasm
+// 을 trap(unreachable) 시켜 폐기 — read-side 검사만 사용.
+test('h2 completes no-Content-Length compressed bodies via decode-end — NO setTimeout timer anywhere', () => {
+  const http2Rs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/http2.rs', 'utf8');
+  // decode-end: compressed sub-resources finish the instant their DEFLATE
+  // stream ends — read-side, no timer.
+  assert.match(http2Rs, /detect_decode_end/, 'h2 must detect compressed-stream end for no-Content-Length bodies');
+  assert.match(http2Rs, /decode::body_is_complete/, 'completion must use the codec end-marker check');
+  assert.match(http2Rs, /h2-body-decode-end/, 'the decode-end completion must be observable in the trace ring');
+  // trailers() must be gated on actually receiving END_STREAM, else it
+  // re-blocks for the peer's full ~60s idle timeout.
+  assert.match(http2Rs, /if end_stream\s*\{[\s\S]*?trailers\(\)\.await/, 'trailers() must only be awaited when END_STREAM was received');
+  // HARD BAN: a setTimeout-based idle/timeout race in the request or body path
+  // traps the wasm (`RuntimeError: unreachable`) in real Chrome — confirmed
+  // twice. Neither the body loop nor the cold path may use the timer.
+  assert.doesNotMatch(http2Rs, /with_timeout|BODY_IDLE_MS|timer::/, 'h2 must not use a setTimeout-based timer (crashes real Chrome)');
+  const fetchRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/fetch.rs', 'utf8');
+  assert.doesNotMatch(fetchRs, /with_timeout|COLD_DEADLINE_MS|timer::/, 'fetch must not use a setTimeout-based timer (crashes real Chrome)');
+});
+
+// Phase A (streaming HTML render): the main document (2xx text/html, gzip|
+// identity) is handed to the page as a ReadableStream of incrementally-
+// gunzipped plaintext so it renders progressively instead of blocking on
+// NAVER's withheld END_STREAM (~60s). The pump is a pure `data().await` loop —
+// NO timer (see the HARD BAN above). Scripts/CSS/images stay on the buffered
+// arm. This pins the kernel half of the streaming pipeline.
+test('h2 streams the HTML document via ReadableStream + incremental gunzip — gated, no timer', () => {
+  const http2Rs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/http2.rs', 'utf8');
+  // The streaming arm + its return variant.
+  assert.match(http2Rs, /enum H2Response/, 'send_request must return the buffered/streaming enum');
+  assert.match(http2Rs, /H2Response::Streaming/, 'the streaming arm must exist');
+  assert.match(http2Rs, /fn build_body_readable_stream/, 'must build a ReadableStream body for the document');
+  assert.match(http2Rs, /fn pump_body/, 'an async pump must drive the body stream into the controller');
+  assert.match(http2Rs, /new_with_underlying_source/, 'the ReadableStream must use an underlying source');
+  assert.match(http2Rs, /enqueue_with_chunk/, 'the pump must enqueue decoded chunks');
+  // GATE: streaming is restricted to HTML documents with a streamable coding.
+  assert.match(http2Rs, /is_html\s*&&\s*coding_streamable/, 'streaming must be gated to text/html + gzip|identity');
+  assert.match(http2Rs, /h2-stream-start/, 'the streaming arm must be observable in the trace ring');
+  // The incremental decoder must be a stateful streaming gunzip — NOT the
+  // whole-body decode path. And still NO timer anywhere.
+  const decodeRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/decode.rs', 'utf8');
+  assert.match(decodeRs, /pub\(crate\) struct StreamingGunzip/, 'decode must expose a stateful incremental gunzip');
+  assert.match(http2Rs, /StreamingGunzip::new/, 'the pump must use the incremental gunzip');
+  assert.doesNotMatch(http2Rs, /with_timeout|BODY_IDLE_MS|timer::|Timeout::new/, 'the streaming pump must not use any timer');
+});
+
+// Phase B (streaming HTML rewrite): the htmltx transform is refactored into a
+// streaming `HtmlTxn { write, end }` primitive (two chained lol_html rewriters)
+// that the buffered `transform` now delegates to — one implementation, no
+// divergence. wasm-bindgen exports it as `ZPBundle.HtmlTxn` for the SW pipe.
+// Chunk-invariance (chunked == whole-string) is pinned by the zp-htmltx host
+// test `streaming_htmltxn_is_chunk_invariant`.
+test('htmltx exposes a streaming HtmlTxn { write, end } and exports it to JS', () => {
+  const htmltxRs = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  assert.match(htmltxRs, /pub struct HtmlTxn/, 'zp-htmltx must expose the streaming HtmlTxn');
+  assert.match(htmltxRs, /fn attr_settings/, 'Pass 1 must be a reusable Settings factory');
+  assert.match(htmltxRs, /fn script_settings/, 'Pass 2 must be a reusable Settings factory');
+  assert.match(htmltxRs, /pub fn write\(&mut self, chunk: &\[u8\]\)/, 'HtmlTxn must accept byte chunks');
+  assert.match(htmltxRs, /pub fn end\(self\)/, 'HtmlTxn::end must flush + consume');
+  // transform() now delegates to HtmlTxn — single source of truth.
+  assert.match(htmltxRs, /let mut txn = HtmlTxn::new/, 'buffered transform must delegate to HtmlTxn');
+  // Chunk-invariance + prelude-injection host tests must exist.
+  assert.match(htmltxRs, /fn streaming_htmltxn_is_chunk_invariant/, 'chunk-invariance must be pinned');
+  // wasm-bindgen export for the SW.
+  const bundleRs = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
+  assert.match(bundleRs, /#\[wasm_bindgen\]\s*pub struct HtmlTxn/, 'HtmlTxn must be wasm-exported');
+  assert.match(bundleRs, /pub fn write\(&mut self, chunk: &\[u8\]\) -> Result<Vec<u8>, JsError>/, 'JS write binding');
+  assert.match(bundleRs, /pub fn end\(&mut self\) -> Result<Vec<u8>, JsError>/, 'JS end binding');
+});
+
+// The SW must only intercept http(s). Non-http schemes (chrome-extension:,
+// data:, blob:) must pass through to the browser's native handler — calling
+// respondWith on a chrome-extension: request returns Response.error() and
+// breaks browser extensions' injected-script channels (observed on NAVER).
+test('SW fetch handler passes through non-http(s) schemes (extension channels intact)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // The scheme guard must sit in the fetch listener, before respondWith.
+  assert.match(
+    sw,
+    /addEventListener\('fetch'[\s\S]{0,600}?if \(!u\.startsWith\('http:'\) && !u\.startsWith\('https:'\)\) return;[\s\S]{0,80}?event\.respondWith\(handleFetch\(event\)\)/,
+    'fetch listener must skip respondWith for non-http(s) URLs'
+  );
+});
+
+// Phase C (SW streaming pipe): transformDocumentResponse pipes the kernel's
+// streamed document (X-ZP-Stream marker) through a TransformStream backed by
+// ZPBundle.HtmlTxn for a progressive render, with a buffered fallback that
+// preserves fail-closed + the post-redirect CSS host rewrite.
+test('SW streams the document through HtmlTxn behind the X-ZP-Stream gate, with buffered fallback', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // The kernel marker gates streaming.
+  assert.match(sw, /X-ZP-Stream/, 'SW must consult the kernel X-ZP-Stream marker');
+  assert.match(sw, /function streamDocumentResponse/, 'streaming document helper must exist');
+  assert.match(sw, /pipeThrough/, 'SW must pipe the body through a TransformStream');
+  assert.match(sw, /new self\.ZPBundle\.HtmlTxn/, 'SW must construct the streaming HtmlTxn');
+  assert.match(sw, /txn\.write\(chunk\)/, 'the transform must feed chunks to HtmlTxn.write');
+  assert.match(sw, /txn\.end\(\)/, 'the flush must call HtmlTxn.end');
+  // The marker must be stripped before the page sees it.
+  assert.match(sw, /headers\.delete\('X-ZP-Stream'\)/, 'the X-ZP-Stream marker must be stripped from the page response');
+  // Fail-closed: a mid-stream rewrite error must error the stream, never ship raw bytes.
+  assert.match(sw, /controller\.error\(e\)/, 'a rewrite error must error the stream (fail-closed)');
+  // Buffered fallback must remain reachable (host mismatch / no HtmlTxn).
+  assert.match(sw, /fall through to buffered/, 'a buffered fallback must remain');
+  // Kernel side emits the marker for streamed responses only.
+  const fetchRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/fetch.rs', 'utf8');
+  assert.match(fetchRs, /headers\.append\("X-ZP-Stream", "1"\)/, 'kernel must mark streaming responses');
+});
+
+// body_is_complete 는 gzip 의 경우 DEFLATE 스트림 끝(final block)을 감지 —
+// footer(CRC32+ISIZE)는 안 기다림 (naver 가 footer 를 END_STREAM 까지 60s
+// withhold 하므로). 진짜 truncated 스트림은 StreamEnd 못 만나 false (조기
+// 완료=truncation 방지). decode_gzip 은 footer 없어도 deflate 콘텐츠를 풀도록
+// raw-inflate fallback. 두 동작 다 standalone native 테스트로 검증됨.
+test('decode detects DEFLATE end (footer-independent) and inflates footer-less gzip', () => {
+  const decodeRs = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/decode.rs', 'utf8');
+  assert.match(decodeRs, /pub\(crate\) fn body_is_complete/, 'decode must export body_is_complete');
+  assert.match(decodeRs, /fn gzip_content_complete/, 'gzip completeness must check the DEFLATE stream end, not the footer');
+  assert.match(decodeRs, /Status::StreamEnd/, 'completion is the raw DEFLATE StreamEnd');
+  assert.match(decodeRs, /fn inflate_raw/, 'decode_gzip must fall back to raw inflate for footer-less gzip');
+  assert.match(decodeRs, /fn gzip_header_len/, 'must parse the gzip header to locate the deflate stream');
+});
+
 // Pins the membrane sandbox virtualization: target sites that fingerprint
 // iframe.sandbox containing both allow-scripts and allow-same-origin must see
 // the virtualized value while the real DOM has no sandbox attribute (membrane
@@ -1647,6 +1803,143 @@ test('perf telemetry: SW exposes rewrite cache hit/miss + latency counters', () 
   assert.match(sw, /rewriteStats\.rewriteLatencyMs \+= performance\.now\(\) - rewriteT0/, 'rewrite latency must be timed');
   assert.match(sw, /rewriteStats\.cacheKeyLatencyMs \+= performance\.now\(\) - keyT0/, 'cache-key SHA-256 latency must be timed');
   assert.match(sw, /rewriteStats:\s*\{[\s\S]*?hitRatio:/, '__zpKernelProbe must emit rewriteStats with hitRatio');
+});
+
+// 2026-06-10 NAVER 광고/트래커 instant-stub. NAVER WAF 가 비신뢰 IP 에서
+// 광고/anti-bot 트래커 endpoint 를 60s slow-lane → page hydration chain
+// 의 await 가 1분 hang. dogfood UX 우선으로 세 host 모두 stub:
+//   - nam.veta.naver.com (광고 bid) → 204
+//   - siape.veta.naver.com (sidebar 광고) → 204
+//   - ntm.pstatic.net (트래커 WASM) → 200 빈 .js (광고 trade-off 수용)
+// ntm 은 trap notebook 2026-06-02 "block 시 광고 모두 about:blank" 함정이
+// 있지만, 이미 nam.veta/siape.veta stub 으로 광고 인벤토리가 채워지지 않아서
+// 손해 boundary 작음. production deployment 시 광고 표시 원하면 ntm 만 list
+// 에서 제외 + 첫 진입 1분 wait 복귀.
+test('NAVER 광고/트래커 instant-stub: nam.veta + siape.veta (204) + ntm.pstatic.net (200 stub.js)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /const NAVER_AD_BID_STUB_HOSTS = new Set\(\[/, 'stub list constant must exist');
+  assert.match(sw, /'nam\.veta\.naver\.com'/, 'nam.veta must be stubbed');
+  assert.match(sw, /'siape\.veta\.naver\.com'/, 'siape.veta must be stubbed');
+  assert.match(sw, /'ntm\.pstatic\.net'/, 'ntm.pstatic.net must be stubbed (dogfood trade-off vs ads)');
+  // 진입점 분기 + script vs non-script 응답 분기
+  assert.match(sw, /NAVER_AD_BID_STUB_HOSTS\.has\(stubHost\)/, 'transportFetch must short-circuit on stub host');
+  assert.match(sw, /const isScript = stubHost === 'ntm\.pstatic\.net'/, 'ntm must respond as script (200 + content-type js)');
+  // 2026-06-10 응답 shape 수정: 204 No Content 가 광고 SDK JSON.parse fail
+  // → fallback content (binary garbage) 가 페이지에 inject 되는 회귀 가설.
+  // 대신 200 + {} empty JSON 으로 응답해서 SDK 가 정상 parse 후 no-bid 처리.
+  assert.match(sw, /const stubBody = isScript \? '\/\* zp:stub \*\/' : '\{\}'/, 'non-script stub must return empty JSON body');
+  assert.match(sw, /'application\/json; charset=utf-8'/, 'non-script stub must declare application/json content-type');
+  assert.match(sw, /'\/\* zp:stub \*\/'/, 'ntm response must be a no-op JS comment');
+});
+
+// 2026-06-11 NAVER 광고 SDK ES module stub — `ssl.pstatic.net/tveta/libs/
+// glad/.../gfp-display-*` 매치 시 빈 ES module 반환. dynamic import 실패
+// 가 광고 SDK init chain hang 시켜서 메뉴 binding 함수가 attach 안 되는
+// 회귀 (사용자 보고 햄버거 메뉴 무동작).
+test('NAVER ad SDK module stub list 존재 (현재 비활성 — stub 회귀로 empty)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /const NAVER_AD_MODULE_STUB_PATTERNS = \[\];/, 'module stub list 는 현재 empty (회귀 방지 — glog-logger stub 이 "t is not a constructor" 유발)');
+  assert.match(sw, /NAVER_AD_MODULE_STUB_PATTERNS/, 'transportFetch 진입점에 pattern list 분기는 유지 (향후 재활성화)');
+});
+
+// 2026-06-11 Launcher ready boundary 정확화. 이전엔 `bundleReady &&
+// kernelFetch === 'function'` 만 검사 → `self.kernelFetch` property 가
+// 설정됐어도 `ZPKernel.ready === false` 인 race window 존재. 사용자가
+// "ready 표시 후 Open click 했는데 접속 안 됨" 보고. `kernelReady`
+// 추가 검사로 정확한 ready boundary 확보.
+test('launcher ready boundary: bundleReady + kernelReady + kernelFetch === function', () => {
+  const html = fs.readFileSync('web/index.html', 'utf8');
+  assert.match(html, /probe\.bundleReady && probe\.kernelReady && probe\.kernelFetch === 'function'/,
+    'launcher must require kernelReady (not just kernelFetch property) before showing Ready');
+});
+
+// 2026-06-10 NAVER dynamic thumbnail proxy stub — `s.pstatic.net/dthumb.phinf/...`
+// 가 NAVER WAF 의 추가 slow-lane endpoint (20s+ wait × N) 라 page hydration
+// 가 1분+ 걸림. 1×1 transparent PNG 로 stub → 즉시 hydration, thumbnail
+// 빈 자리 trade-off (dogfood 우선).
+test('NAVER dthumb.phinf stub: 1×1 transparent PNG via path-prefix match', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /const NAVER_IMAGE_STUB_PATHS = \[/, 'image stub list must exist');
+  assert.match(sw, /host: 's\.pstatic\.net', pathPrefix: '\/dthumb\.phinf'/, 's.pstatic.net dthumb.phinf must be stubbed');
+  assert.match(sw, /const TRANSPARENT_PNG_BYTES = Uint8Array\.from/, '1×1 transparent PNG bytes must be defined');
+  assert.match(sw, /urlParts\.pathname\.startsWith\(pathPrefix\)/, 'path-prefix match must use pathname.startsWith');
+  assert.match(sw, /'image\/png'/, 'stub response must declare image/png content-type');
+});
+
+// 2026-06-11 SW response cache 임시 비활성화 — dynamic ES module import
+// 회귀 (gfp-display-glog-logger.js instantiate fail) 로 인해 cache hit
+// path 가 module realm 과 호환 안 됨. dogfood UX 우선으로 cache 제거.
+// helper 와 cache version key 는 향후 재활성화 위해 코드에 유지.
+test('SW response cache: helpers + version key 유지, hit/put path 는 임시 비활성화', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /const RESPONSE_CACHE_NAME = 'zp-resp-v1'/, 'cache version key 유지 (재활성화 위해)');
+  assert.match(sw, /async function tryRespCacheGet\(/, 'cache helper 유지');
+  assert.match(sw, /async function tryRespCachePut\(/, 'cache helper 유지');
+  assert.match(sw, /SW response cache 임시 비활성화/, 'disable 주석으로 의도 명시');
+});
+
+// 2026-06-10 body type handling: transportFetch must accept Uint8Array,
+// ArrayBuffer, AND Blob/FormData-like (.arrayBuffer()) without crashing.
+// 함정: runtimeAPI 의 /zp/api/fetch path 는 `ZP.base64UrlToBytes` 결과인
+// **Uint8Array** 를 body 로 전달. 기존 `body instanceof ArrayBuffer ?
+// body : await body.arrayBuffer()` 분기는 Uint8Array 가 ArrayBuffer 도
+// 아니고 .arrayBuffer() 메서드도 없어서 TypeError 발생 → NAVER preload.js
+// 첫 POST 에서 hydration 전체 중단.
+test('transportFetch body extraction handles Uint8Array + ArrayBuffer + Blob-like', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /body instanceof Uint8Array/, 'must short-circuit Uint8Array');
+  assert.match(sw, /body instanceof ArrayBuffer/, 'must handle ArrayBuffer');
+  assert.match(sw, /typeof body\.arrayBuffer === 'function'/, 'must guard .arrayBuffer() call with typeof check');
+});
+
+// 2026-06-09 cross-host 3xx redirect rewrap: SW must swallow upstream 3xx
+// + recurse instead of forwarding the Location header to the client.
+// 함정: 그대로 forward 하면 브라우저가 raw Location URL 로 native nav,
+// share URL escape + URL bar 가 raw target host 노출 (NAVER 페이 link
+// → nid.naver.com escape 가 정확히 이 경로였음, 2026-06-09 trap notebook).
+// SW 가 redirect 를 swallow + recurse + entry.targetUrl 업데이트하면
+// (a) URL bar = share URL 유지, (b) fragment (k=…&server=…) 보존,
+// (c) virtual location state 정확.
+test('cross-host 3xx redirect: SW swallows upstream redirect and recurses (no client-side rewrap)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // 3xx 감지 후 recursive transportFetch 호출
+  assert.match(sw, /resp\.status >= 300 && resp\.status < 400/, 'transportFetch must detect 3xx');
+  assert.match(sw, /MAX_REDIRECT_DEPTH/, 'depth limit must exist to prevent infinite loops');
+  assert.match(sw, /__redirectDepth/, 'depth counter must be threaded through recursive opt');
+  // 301/302/303 → GET, 307/308 → preserve method (RFC 7231 §6.4.4)
+  assert.match(sw, /preserveMethod = resp\.status === 307 \|\| resp\.status === 308/, 'method preservation must follow RFC 7231');
+  // entry.targetUrl 업데이트 (virtual location state 동기화)
+  assert.match(sw, /entry\.targetUrl = resolvedUrl/, 'entry.targetUrl must update on redirect');
+  assert.match(sw, /entry\.baseUrl = resolvedUrl/, 'entry.baseUrl must update on redirect');
+  // recursive call 시 headers undefined 로 비워서 transportFetch 가 새 host
+  // 기준 Cookie/Referer/Origin 재빌드 (cross-host 라면 cookie scope 바뀜)
+  assert.match(sw, /headers: undefined/, 'recursive call must clear opt.headers so transportFetch rebuilds for new host');
+});
+
+// 2026-06-09 transport-stage perf telemetry. With rewriter at ~1% of
+// NAVER cold-load wall time, the remaining 99% is in transport
+// (yamux+TLS+h2 handshake + RTT + upstream body). Without per-fetch
+// timing, any "make it faster" work shoots in the dark. The pinned
+// counters surface cumulative + per-fetch latency so trap notebook
+// entries can cite specific outliers (e.g. "naver.com /commercial:
+// 4200 ms / 200 / 18 KB" → the slow lane is the analytics endpoint).
+test('perf telemetry: SW exposes transport latency counters + ring buffer', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /const transportStats = \{/, 'transportStats counter object must exist');
+  for (const field of ['requests', 'totalLatencyMs', 'totalBytes', 'errors']) {
+    assert.match(sw, new RegExp(`${field}:\\s*0`), `transportStats must declare ${field}`);
+  }
+  assert.match(sw, /const transportLatencyLog = \[\];/, 'transportLatencyLog ring buffer must exist');
+  assert.match(sw, /function logTransportEvent\(/, 'logTransportEvent helper must exist');
+  // The kernelFetch wrapper must time BOTH success and error paths
+  // (otherwise transport failures vanish from the telemetry and the
+  // user can't distinguish "host unreachable" from "host slow").
+  assert.match(sw, /const txT0 = performance\.now\(\);/, 'transportFetch must capture start time');
+  assert.match(sw, /logTransportEvent\(u, method, 0, performance\.now\(\) - txT0, 0\);/, 'error path must log a transport event');
+  assert.match(sw, /logTransportEvent\(u, method, \(resp && resp\.status\) \|\| 0, performance\.now\(\) - txT0, bodyLen\);/, 'success path must log a transport event');
+  // Probe response must surface both cumulative + ring buffer.
+  assert.match(sw, /transportStats:\s*\{[\s\S]*?avgLatencyMs:/, '__zpKernelProbe must emit transportStats with avgLatencyMs');
+  assert.match(sw, /transportLatency: transportLatencyLog\.slice\(\),/, '__zpKernelProbe must emit transportLatency ring buffer');
 });
 
 // 2026-06-09 NAVER dynamic import fix: zp-rewriter's

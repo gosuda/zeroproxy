@@ -10,10 +10,19 @@
 //!   with a safe `throw new DOMException(...)` (callable from the original
 //!   call sites), and event handler attributes are removed entirely.
 
-use lol_html::{element, html_content::ContentType, rewrite_str, RewriteStrSettings};
+use lol_html::{element, html_content::ContentType, text, HtmlRewriter, Settings};
 use std::cell::RefCell;
 use std::rc::Rc;
 use zp_rewriter::{rewrite_script, RewriteOpts, ScriptKind};
+
+/// Boxed output sink for the streaming rewriters. `Box<dyn FnMut(&[u8])>`
+/// implements `lol_html::OutputSink` via the blanket `FnMut(&[u8])` impl, so it
+/// can be stored as the rewriter's `O` type parameter inside [`HtmlTxn`].
+type Sink = Box<dyn FnMut(&[u8])>;
+
+fn tokenizer_err(e: impl std::fmt::Display) -> TransformError {
+    TransformError::Tokenizer(e.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub struct TransformOptions {
@@ -49,25 +58,20 @@ const BLOCKED_SCRIPT: &str =
 
 /// Transform target HTML — rewrites inline scripts and `on*` event handlers
 /// through `zp-rewriter`. In strict mode failures become safe placeholders.
-pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult, TransformError> {
-    let diagnostics: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let target = opts.target_url.clone();
-    let strict = opts.strict;
-    let proxy_origin = opts.proxy_origin.clone();
-
-    let diags_for_script = diagnostics.clone();
-    let target_for_script = target.clone();
-    let diags_for_attr = diagnostics.clone();
-    let target_for_attr = target.clone();
-
-    // Drop the leftover binders the script-body pass would have consumed;
-    // unused now that on* attributes are handled in a single pass below and
-    // script bodies are handled by `rewrite_inline_script_bodies`.
-    let _ = (diags_for_script, target_for_script);
-    let rewritten = rewrite_str(
-        html,
-        RewriteStrSettings {
-            element_content_handlers: vec![
+/// Streaming `Settings` for the attribute / URL pass (Pass 1). Holds the single
+/// `element!("*")` handler that rewrites href/src/action/formaction URLs and
+/// `on*` / `javascript:` handler bodies. Shared by the buffered `transform`
+/// path and the streaming [`HtmlTxn`] so both apply byte-identical rewrites.
+fn attr_settings(
+    target: String,
+    proxy_origin: String,
+    strict: bool,
+    diagnostics: Rc<RefCell<Vec<String>>>,
+) -> Settings<'static, 'static> {
+    let diags_for_attr = diagnostics;
+    let target_for_attr = target;
+    Settings {
+        element_content_handlers: vec![
                 // on* event handler attributes + javascript: URL attributes.
                 // D1: <a href="javascript:CODE">, <form action="javascript:...">,
                 // <iframe src="javascript:..."> become harmless `javascript:void(0)`
@@ -262,35 +266,38 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
                     Ok(())
                 }),
             ],
-            ..RewriteStrSettings::new()
-        },
-    )
-    .map_err(|e| TransformError::Tokenizer(e.to_string()))?;
+            ..Settings::new()
+        }
+}
 
-    // Second pass: rewrite inline script bodies. The first pass cannot easily
-    // rewrite child text in lol_html's API without TextChunk handlers; we
-    // do it here through a second `rewrite_str` invocation that uses the
-    // `text!` macro on `script` to mutate the inner text.
-    let diags2 = diagnostics.clone();
-    let target2 = target.clone();
-    let final_html = rewrite_inline_script_bodies(&rewritten, target2, strict, diags2)?;
-
+/// Transform target HTML — rewrites inline scripts and `on*` event handlers
+/// through `zp-rewriter`. In strict mode failures become safe placeholders.
+///
+/// Thin wrapper over the streaming [`HtmlTxn`]: it feeds the whole document as a
+/// single chunk, so the buffered and streaming paths share ONE implementation
+/// (no chance of divergence). `HtmlTxn`'s host test pins chunk-invariance.
+pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult, TransformError> {
+    let mut txn = HtmlTxn::new(opts, String::new());
+    let mut out = txn.write(html.as_bytes())?;
+    let (tail, diagnostics) = txn.end()?;
+    out.extend_from_slice(&tail);
     Ok(TransformResult {
-        html: final_html,
-        diagnostics: Rc::try_unwrap(diagnostics)
-            .map(|c| c.into_inner())
-            .unwrap_or_else(|rc| rc.borrow().clone()),
+        html: String::from_utf8(out).map_err(tokenizer_err)?,
+        diagnostics,
     })
 }
 
-fn rewrite_inline_script_bodies(
-    html: &str,
+/// Streaming `Settings` for the inline-script-body pass (Pass 2). Rewrites
+/// `<script>` bodies via `zp-rewriter`. When `prelude` is non-empty it is
+/// prepended right after the `<head>` start tag as raw HTML — lol_html does NOT
+/// re-tokenize inserted content, so our own bootstrap `<script>`s are never
+/// script-rewritten. Shared by the buffered `transform` path and [`HtmlTxn`].
+fn script_settings(
     target_url: String,
     strict: bool,
     diagnostics: Rc<RefCell<Vec<String>>>,
-) -> Result<String, TransformError> {
-    use lol_html::{text, HtmlRewriter, Settings};
-    let mut output: Vec<u8> = Vec::with_capacity(html.len());
+    prelude: String,
+) -> Settings<'static, 'static> {
     let target = target_url.clone();
     let diags = diagnostics.clone();
     // Per-element state for the current script: detect external src or non-JS type.
@@ -304,9 +311,7 @@ fn rewrite_inline_script_bodies(
     let target_for_end = target.clone();
     let diags_for_end = diags.clone();
 
-    let mut rewriter = HtmlRewriter::new(
-        Settings {
-            element_content_handlers: vec![
+    let mut handlers = vec![
                 element!("script", move |el| {
                     if el.has_attribute("src") {
                         *kind_for_el.borrow_mut() = None;
@@ -381,20 +386,113 @@ fn rewrite_inline_script_bodies(
                     }
                     Ok(())
                 }),
-            ],
-            ..Settings::new()
-        },
-        |chunk: &[u8]| output.extend_from_slice(chunk),
-    );
+    ];
+    if !prelude.is_empty() {
+        // Prepend = insert as the FIRST child of <head> (right after the start
+        // tag), matching the SW's regex `injectPrelude`. ContentType::Html →
+        // emitted verbatim, never re-parsed by these script handlers.
+        handlers.push(element!("head", move |el| {
+            el.prepend(&prelude, ContentType::Html);
+            Ok(())
+        }));
+    }
+    Settings {
+        element_content_handlers: handlers,
+        ..Settings::new()
+    }
+}
 
-    rewriter
-        .write(html.as_bytes())
-        .map_err(|e| TransformError::Tokenizer(e.to_string()))?;
-    rewriter
-        .end()
-        .map_err(|e| TransformError::Tokenizer(e.to_string()))?;
+/// The streaming HTML transform: two chained `lol_html` rewriters (attribute
+/// pass → inline-script-body pass) fed incrementally. `write` returns the bytes
+/// produced so far; `end` flushes and returns the tail + collected diagnostics.
+/// Byte output is independent of chunk boundaries (lol_html's streaming
+/// guarantee + a full intermediate buffer between the two passes), so it equals
+/// the whole-string `transform`. NO timer, NO whole-input buffering.
+pub struct HtmlTxn {
+    r1: HtmlRewriter<'static, Sink>,
+    r2: HtmlRewriter<'static, Sink>,
+    /// Output of the attribute pass; drained into the script pass each `write`.
+    mid: Rc<RefCell<Vec<u8>>>,
+    /// Final output of the script pass; drained out to the caller each `write`.
+    out: Rc<RefCell<Vec<u8>>>,
+    diagnostics: Rc<RefCell<Vec<String>>>,
+}
 
-    String::from_utf8(output).map_err(|e| TransformError::Tokenizer(e.to_string()))
+impl HtmlTxn {
+    /// Build a streaming transform for `opts`. A non-empty `prelude` is injected
+    /// right after `<head>` (see [`script_settings`]); the buffered `transform`
+    /// passes an empty prelude (the SW injects separately on that path).
+    pub fn new(opts: &TransformOptions, prelude: String) -> Self {
+        let diagnostics: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let mid: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
+        let out: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let attr = attr_settings(
+            opts.target_url.clone(),
+            opts.proxy_origin.clone(),
+            opts.strict,
+            diagnostics.clone(),
+        );
+        let script = script_settings(
+            opts.target_url.clone(),
+            opts.strict,
+            diagnostics.clone(),
+            prelude,
+        );
+
+        let mid_sink = mid.clone();
+        let r1 = HtmlRewriter::new(
+            attr,
+            Box::new(move |c: &[u8]| mid_sink.borrow_mut().extend_from_slice(c)) as Sink,
+        );
+        let out_sink = out.clone();
+        let r2 = HtmlRewriter::new(
+            script,
+            Box::new(move |c: &[u8]| out_sink.borrow_mut().extend_from_slice(c)) as Sink,
+        );
+        HtmlTxn {
+            r1,
+            r2,
+            mid,
+            out,
+            diagnostics,
+        }
+    }
+
+    /// Feed a chunk; returns the rewritten bytes produced by it (may be empty
+    /// while lol_html buffers an open element across the chunk boundary).
+    pub fn write(&mut self, chunk: &[u8]) -> Result<Vec<u8>, TransformError> {
+        self.r1.write(chunk).map_err(tokenizer_err)?;
+        let mid_bytes = std::mem::take(&mut *self.mid.borrow_mut());
+        if !mid_bytes.is_empty() {
+            self.r2.write(&mid_bytes).map_err(tokenizer_err)?;
+        }
+        Ok(std::mem::take(&mut *self.out.borrow_mut()))
+    }
+
+    /// Flush both passes; returns the final tail bytes + collected diagnostics.
+    /// Consumes self (lol_html's `end` takes the rewriter by value).
+    pub fn end(self) -> Result<(Vec<u8>, Vec<String>), TransformError> {
+        let HtmlTxn {
+            r1,
+            r2,
+            mid,
+            out,
+            diagnostics,
+        } = self;
+        r1.end().map_err(tokenizer_err)?;
+        let mid_bytes = std::mem::take(&mut *mid.borrow_mut());
+        let mut r2 = r2;
+        if !mid_bytes.is_empty() {
+            r2.write(&mid_bytes).map_err(tokenizer_err)?;
+        }
+        r2.end().map_err(tokenizer_err)?;
+        let tail = std::mem::take(&mut *out.borrow_mut());
+        let diags = Rc::try_unwrap(diagnostics)
+            .map(|c| c.into_inner())
+            .unwrap_or_else(|rc| rc.borrow().clone());
+        Ok((tail, diags))
+    }
 }
 
 /// Serialise a script body as a JSON string literal suitable for embedding as
@@ -730,6 +828,79 @@ mod tests {
             pending_gate: false,
             proxy_origin: "http://proxy.localhost:18080".into(),
         }
+    }
+
+    // A representative document exercising every Pass-1 / Pass-2 path: head,
+    // inline classic + module scripts, external script (src), a stylesheet
+    // link, an absolute anchor, an on* handler, and a javascript: URL — so
+    // chunk-invariance is stressed across all handler kinds.
+    const STREAM_SAMPLE: &str = concat!(
+        "<!doctype html><html><head><meta charset=utf-8>",
+        "<link rel=stylesheet href=\"https://cdn.example.com/app.css\">",
+        "<script>var u = location.href; window.x = 1;</script>",
+        "<script type=module>import('./m.js'); export const v = location.host;</script>",
+        "</head><body onclick=\"window.alert(document.cookie)\">",
+        "<a href=\"https://other.example.com/path?q=1&amp;r=2\">go</a>",
+        "<a href=\"javascript:window.open('x')\">js</a>",
+        "<script src=\"https://cdn.example.com/lib.js\"></script>",
+        "<img src=\"https://cdn.example.com/p.png\">",
+        "<p>plain text &amp; entities stay literal</p>",
+        "</body></html>",
+    );
+
+    // Pin: streaming `HtmlTxn` in N chunks == the whole-string `transform`,
+    // for every chunk size — including size 1 (splits tags, scripts, and the
+    // gzip-realistic byte boundaries). This is THE correctness guarantee for
+    // the streaming HTML render: chunk boundaries must never change output.
+    #[test]
+    fn streaming_htmltxn_is_chunk_invariant() {
+        let o = opts();
+        let whole = transform(STREAM_SAMPLE, &o).unwrap().html;
+        for &chunk_size in &[1usize, 2, 3, 7, 13, 64, 256, 100_000] {
+            let mut txn = HtmlTxn::new(&o, String::new());
+            let mut out: Vec<u8> = Vec::new();
+            for c in STREAM_SAMPLE.as_bytes().chunks(chunk_size) {
+                out.extend_from_slice(&txn.write(c).unwrap());
+            }
+            let (tail, _diags) = txn.end().unwrap();
+            out.extend_from_slice(&tail);
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                whole,
+                "chunked output diverged at chunk_size={chunk_size}"
+            );
+        }
+    }
+
+    // Pin: a non-empty prelude is injected exactly once, right after <head>,
+    // and is NOT script-rewritten (our bootstrap must survive verbatim).
+    #[test]
+    fn streaming_htmltxn_injects_prelude_after_head_unrewritten() {
+        let o = opts();
+        let prelude = "<script nonce=zp>var __zp_boot = location.href;</script>";
+        let mut txn = HtmlTxn::new(&o, prelude.to_string());
+        let mut out: Vec<u8> = Vec::new();
+        for c in STREAM_SAMPLE.as_bytes().chunks(5) {
+            out.extend_from_slice(&txn.write(c).unwrap());
+        }
+        let (tail, _d) = txn.end().unwrap();
+        out.extend_from_slice(&tail);
+        let html = String::from_utf8(out).unwrap();
+        // Injected exactly once.
+        assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1: {html}");
+        // Right after the <head> start tag.
+        let head_open = html.find("<head").map(|i| html[i..].find('>').unwrap() + i + 1).unwrap();
+        assert!(
+            html[head_open..].trim_start().starts_with(prelude),
+            "prelude not first child of <head>: {}",
+            &html[head_open..head_open + 120.min(html.len() - head_open)]
+        );
+        // The prelude's own `location.href` must remain raw (NOT wrapped in
+        // __ZP_EXEC_INLINE_REWRITTEN / membrane calls) — it bypassed Pass 2.
+        assert!(
+            html.contains("var __zp_boot = location.href;"),
+            "prelude script was rewritten (must be verbatim): {html}"
+        );
     }
 
     #[test]

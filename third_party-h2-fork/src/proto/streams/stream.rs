@@ -4,7 +4,10 @@ use super::*;
 
 use std::fmt;
 use std::task::{Context, Waker};
-use std::time::Instant;
+// wasm32 has no std clock (Instant::now() panics "time not implemented"); the
+// SW kernel RSTs streams on mid-stream cancel → reset_at. web-time is a drop-in
+// that uses performance.now() on wasm and re-exports std::time elsewhere.
+use web_time::Instant;
 
 /// Tracks Stream related state
 ///

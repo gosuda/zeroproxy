@@ -94,11 +94,11 @@ pub(crate) async fn fetch(
                 crate::kernel::push_trace(&format!(
                     "tx:h2-reuse-ok host={} status={} http={}ms total={}ms",
                     parsed.host,
-                    resp.status,
+                    resp.status(),
                     delta_ms(t_req),
                     delta_ms(t0)
                 ));
-                return build_js_response(resp, target_url, armed_challenge_compat);
+                return finish_h2_response(resp, target_url, armed_challenge_compat);
             }
             Err(e) => {
                 crate::kernel::push_trace(&format!(
@@ -152,9 +152,45 @@ pub(crate) async fn fetch(
         }
     }
 
-    // Cold path: open a fresh conn (yamux + SOCKS5 + TLS), branching on
-    // the negotiated ALPN protocol after the handshake.
-    let opened = open_fresh(&parsed, &relay_url, t0).await?;
+    // Cold path: open a fresh connection (yamux + SOCKS5 + TLS) and send.
+    // The NAVER "withheld END_STREAM" stall is handled structurally in
+    // http2.rs (finish at Content-Length or the compressed body's own end
+    // marker), so no request-level timer/retry is needed here — and we
+    // deliberately avoid one: a setTimeout-race that cancelled the in-flight
+    // request future trapped the wasm under real concurrent load.
+    cold_request(
+        &parsed,
+        &relay_url,
+        &key,
+        &host_h,
+        method,
+        headers,
+        body,
+        target_url,
+        armed_challenge_compat,
+        t0,
+    )
+    .await
+}
+
+/// One cold-path attempt: open a fresh connection (yamux + SOCKS5 + TLS),
+/// branch on negotiated ALPN, send the request, and build the JS response.
+/// Cancel-safe: dropping the returned future mid-flight tears down the h2
+/// stream / TLS conn cleanly (the caller does this on a deadline timeout).
+#[allow(clippy::too_many_arguments)]
+async fn cold_request(
+    parsed: &ParsedUrl,
+    relay_url: &str,
+    key: &PoolKey,
+    host_h: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    target_url: &str,
+    armed_challenge_compat: bool,
+    t0: f64,
+) -> Result<JsValue, JsValue> {
+    let opened = open_fresh(parsed, relay_url, t0).await?;
     match opened {
         FreshConn::Http2(client) => {
             // Cache the h2 client immediately so any concurrent fetches
@@ -167,7 +203,7 @@ pub(crate) async fn fetch(
                 &client,
                 method,
                 &parsed.scheme,
-                &host_h,
+                host_h,
                 &parsed.path,
                 headers,
                 body,
@@ -185,15 +221,15 @@ pub(crate) async fn fetch(
             crate::kernel::push_trace(&format!(
                 "tx:h2-ok host={} status={} http={}ms total={}ms",
                 parsed.host,
-                resp.status,
+                resp.status(),
                 delta_ms(t_req),
                 delta_ms(t0)
             ));
-            build_js_response(resp, target_url, armed_challenge_compat)
+            finish_h2_response(resp, target_url, armed_challenge_compat)
         }
         FreshConn::Http1(mut conn) => {
             let t_req = now_ms();
-            let resp = http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body)
+            let resp = http1::send_request(&mut conn, method, host_h, &parsed.path, headers, body)
                 .await
                 .map_err(|e| {
                     crate::kernel::push_trace(&format!(
@@ -213,7 +249,7 @@ pub(crate) async fn fetch(
                 http1::response_is_keepalive(&resp)
             ));
             if http1::response_is_keepalive(&resp) {
-                pool::put(key, conn);
+                pool::put(key.clone(), conn);
             }
             build_js_response(resp, target_url, armed_challenge_compat)
         }
@@ -233,10 +269,23 @@ enum FreshConn {
 /// rejects HEADERS frames with our HPACK ordering, etc). We don't even
 /// advertise the protocol in the ClientHello for these — pure h1 keeps
 /// the page rendering. Match is exact-host plus single-label suffix.
-/// Empty for now: trials of `nid.naver.com` showed the 60s timeout is a
-/// WAF rejecting the whole request (UA/Sec-Fetch-* mismatch vs a real
-/// browser), not an h2 protocol issue — disabling h2 doesn't help.
+///
+/// 2026-06-12: `www.naver.com` document 의 첫 H2 stream 이 정확히 60s
+/// hold 후 응답하는 회귀 측정 (rustTrace: 첫 fetch 60158ms, 같은 host
+/// 재사용은 33ms, 다른 host h2 는 <300ms). 결정적 비교: `curl
+/// https://www.naver.com/` 가 **HTTP/1.1 로 0.11s** 정상 — 즉 NAVER 의
+/// www document endpoint 가 fresh H2 connection 의 첫 stream 만 anti-bot
+/// 60s slow-lane 하고, HTTP/1.1 은 통과. nid.naver.com (full-request WAF
+/// reject) 과 달리 www 는 h1 다운그레이드로 즉시 해결됨. sub-resource
+/// CDN (ssl.pstatic.net / pm.pstatic.net) 은 h2 유지 (정상 빠름).
 fn host_h2_denied(_host: &str) -> bool {
+    // 2026-06-13: h2-deny 로 naver.com 을 h1 강제했으나 h1 으로도 동일한
+    // 간헐적 60s 가 발생 (heavy probe: www.naver.com h1 60154ms) → 프로토콜
+    // 선택은 원인 아님. 게다가 yamux throughput fix (split_send_size 256KB +
+    // MaxStreamWindowSize 16MB) 적용 후엔 h2 multiplexing 이 유리하므로 h1
+    // 강제는 역효과. 간헐적 60s 는 별도 timeout+retry 트랙으로 처리.
+    // (이전 측정에서 "77ms 로 빨라졌다" 는 favicon 이었고 메인 document 가
+    // 아니었음 — false positive.)
     false
 }
 
@@ -483,6 +532,29 @@ fn build_js_response(
             .map(|(_, v)| v.as_str())
             .unwrap_or("(none)")
     ));
+    let headers = build_response_headers(&resp.headers, final_url, armed_challenge_compat)?;
+    let body_array = Uint8Array::new_with_length(resp.body.len() as u32);
+    body_array.copy_from(&resp.body);
+
+    let init = ResponseInit::new();
+    init.set_status(resp.status);
+    init.set_status_text(&resp.reason);
+    init.set_headers(&headers);
+
+    let response =
+        Response::new_with_opt_buffer_source_and_init(Some(&body_array.buffer()), &init)?;
+    Ok(response.into())
+}
+
+/// Build the `web_sys::Headers` for a response: append every upstream header,
+/// mirror Set-Cookie into the `X-ZP-Set-Cookie` sidechannel, and emit the
+/// challenge-compat marker when armed. Shared by the buffered and streaming
+/// response builders so both paths carry identical SW-facing header semantics.
+fn build_response_headers(
+    resp_headers: &[(String, String)],
+    final_url: &str,
+    armed_challenge_compat: bool,
+) -> Result<Headers, JsValue> {
     let headers = Headers::new()?;
     // SW cookie-jar side-channel: web_sys::Response's response-guard strips
     // Set-Cookie in many runtimes (the Fetch spec puts it on the forbidden
@@ -494,7 +566,7 @@ fn build_js_response(
     // RFC-6265 jar can consume them. Tab separator stays inside the HTTP
     // header line shape (no newlines) and the SW splits on it.
     let mut set_cookies: Vec<&str> = Vec::new();
-    for (k, v) in &resp.headers {
+    for (k, v) in resp_headers {
         if k.eq_ignore_ascii_case("set-cookie") {
             set_cookies.push(v.as_str());
         }
@@ -521,8 +593,7 @@ fn build_js_response(
     // Mirrors `internal/headers/ApplyChallengeCompat` on the Go side via the
     // shared `zp_shared::is_challenge_document` predicate.
     if armed_challenge_compat {
-        let cf = resp
-            .headers
+        let cf = resp_headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("cf-mitigated"))
             .map(|(_, v)| v.as_str())
@@ -541,16 +612,55 @@ fn build_js_response(
             let _ = headers.append("X-ZP-Challenge-Compat", "1");
         }
     }
-    let body_array = Uint8Array::new_with_length(resp.body.len() as u32);
-    body_array.copy_from(&resp.body);
+    Ok(headers)
+}
 
+/// Dispatch a [`http2::H2Response`] to the matching JS Response builder:
+/// buffered bodies go through `build_js_response`, the streaming HTML arm
+/// through `build_streaming_js_response`.
+fn finish_h2_response(
+    resp: http2::H2Response,
+    final_url: &str,
+    armed_challenge_compat: bool,
+) -> Result<JsValue, JsValue> {
+    match resp {
+        http2::H2Response::Buffered(r) => build_js_response(r, final_url, armed_challenge_compat),
+        http2::H2Response::Streaming(s) => {
+            build_streaming_js_response(s, final_url, armed_challenge_compat)
+        }
+    }
+}
+
+/// Convert a kernel streaming HTML response into a `web_sys::Response` whose
+/// body is the decoded-plaintext `ReadableStream`. The page receives bytes as
+/// the pump enqueues them → progressive render. Content-Encoding/Length were
+/// already stripped in `http2::send_request`.
+fn build_streaming_js_response(
+    resp: http2::StreamingResponse,
+    final_url: &str,
+    armed_challenge_compat: bool,
+) -> Result<JsValue, JsValue> {
+    crate::kernel::push_trace(&format!(
+        "tx:resp-stream url={} status={} ct={}",
+        final_url,
+        resp.status,
+        resp.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("(none)")
+    ));
+    let headers = build_response_headers(&resp.headers, final_url, armed_challenge_compat)?;
+    // SW-internal marker: tells `transformDocumentResponse` this body is a live
+    // kernel stream, so it pipes it through the streaming HtmlTxn for a
+    // progressive render. The SW reads + DELETES it before the page sees it.
+    let _ = headers.append("X-ZP-Stream", "1");
     let init = ResponseInit::new();
     init.set_status(resp.status);
     init.set_status_text(&resp.reason);
     init.set_headers(&headers);
-
     let response =
-        Response::new_with_opt_buffer_source_and_init(Some(&body_array.buffer()), &init)?;
+        Response::new_with_opt_readable_stream_and_init(Some(&resp.stream), &init)?;
     Ok(response.into())
 }
 
