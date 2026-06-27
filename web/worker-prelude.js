@@ -97,7 +97,11 @@
   });
   try { self.eval = blockedDynamic; } catch {}
   try { self.Function = blockedDynamic; } catch {}
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+  // Keep in lockstep with ZP.TARGET_USER_AGENT (web/zp-core.js) and the
+  // captured Chrome 148 TLS spec. A Worker reporting a different Chrome version
+  // (was 134) than the main realm (148) is a cross-context inconsistency an
+  // anti-bot can profile — every realm must claim the SAME Chrome build.
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
   const nav = self.navigator;

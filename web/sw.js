@@ -1129,6 +1129,11 @@ async function transportFetch(targetUrl, opt) {
   // `seen` already had it. Real-Chrome operators in WebView2 still
   // get the canonical Chrome 148 UA — no harm.
   pushOnce('user-agent', ZP.TARGET_USER_AGENT);
+  // Force the canonical Chrome 148 sec-ch-ua FIRST so the browser's real header
+  // (Edge/WebView2 → "Microsoft Edge";v="149") loses the pushOnce race and is
+  // dropped. Otherwise the wire shows a Chrome UA + an Edge sec-ch-ua + v149 —
+  // an anti-bot tell. UA, sec-ch-ua, and the TLS spec now all agree: Chrome 148.
+  pushOnce('sec-ch-ua', ZP.TARGET_SEC_CH_UA);
   for (const [k, v] of headers.entries()) pushOnce(k, v);
   // Now grab anything the browser added that Headers refused to copy
   // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,

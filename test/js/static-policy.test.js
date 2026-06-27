@@ -1775,16 +1775,22 @@ test('D5 embedded TURN: pion/turn server + short-term creds + page-realm iceServ
 // — console errors dropped from 28 → 2 (the 2 remaining are unrelated
 // CSP `frame-ancestors` warning + one stray 403 deeper in the ad SDK
 // chain).
-test('NAVER anti-bot fix: SW force-overrides page-side User-Agent before forward', () => {
+test('NAVER anti-bot fix: SW force-overrides page-side User-Agent + sec-ch-ua before forward', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  // Locate the FIRST entries() loop in sw.js (it's inside
-  // transportFetch's header build) and verify a pushOnce of the
-  // canonical UA precedes it. Regex used on the whole file because
-  // transportFetch is multi-hundred-line and lazy `\n}\n` matches
-  // pickup nested arrow-function closings before the real end.
-  const uaIdx = sw.search(/pushOnce\('user-agent',\s*ZP\.TARGET_USER_AGENT\);\s*\n\s*for \(const \[k, v\] of headers\.entries\(\)\) pushOnce/);
-  assert.ok(uaIdx > 0,
-    'SW must pushOnce(user-agent, ZP.TARGET_USER_AGENT) immediately BEFORE the headers.entries() loop — otherwise puppeteer/WebView2 HeadlessChrome UA leaks through and triggers NAVER WAF 403');
+  // Both the canonical UA and the canonical sec-ch-ua must be pushOnce'd
+  // BEFORE the headers.entries() loop so the browser's real values (Edge/
+  // WebView2: HeadlessChrome UA, "Microsoft Edge";v="149" sec-ch-ua) lose the
+  // pushOnce race and are dropped. UA + sec-ch-ua + TLS spec must all agree on
+  // Chrome 148; a UA/sec-ch-ua brand+version mismatch is a NAVER WAF tell.
+  const idx = sw.search(/pushOnce\('user-agent',\s*ZP\.TARGET_USER_AGENT\);[\s\S]{0,400}?pushOnce\('sec-ch-ua',\s*ZP\.TARGET_SEC_CH_UA\);\s*\n\s*for \(const \[k, v\] of headers\.entries\(\)\) pushOnce/);
+  assert.ok(idx > 0,
+    'SW must pushOnce(user-agent) AND pushOnce(sec-ch-ua) immediately BEFORE the headers.entries() loop — otherwise WebView2 HeadlessChrome UA / Edge sec-ch-ua leak through and trip the NAVER WAF');
+  // The canonical sec-ch-ua must claim Chrome 148 (matching the UA), not Edge.
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  assert.match(core, /TARGET_SEC_CH_UA\s*=\s*'[^']*"Google Chrome";v="148"[^']*'/,
+    'TARGET_SEC_CH_UA must brand as Google Chrome v148 to match the UA + TLS spec');
+  assert.doesNotMatch(core, /TARGET_SEC_CH_UA\s*=\s*'[^']*Edge[^']*'/,
+    'TARGET_SEC_CH_UA must NOT leak the Edge/WebView2 brand');
 });
 
 // 2026-06-09 perf telemetry: SW exposes rewrite-cache hit ratio +
