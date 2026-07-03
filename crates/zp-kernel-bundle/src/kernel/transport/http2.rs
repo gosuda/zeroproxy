@@ -490,19 +490,40 @@ async fn pump_body(
                     Some(g) => g.push(&chunk),
                     None => chunk.to_vec(),
                 };
-                if decoded.is_empty() {
-                    continue;
+                if !decoded.is_empty() {
+                    total_out += decoded.len();
+                    let arr = js_sys::Uint8Array::new_with_length(decoded.len() as u32);
+                    arr.copy_from(&decoded);
+                    if controller.enqueue_with_chunk(&arr).is_err() {
+                        // Consumer cancelled the stream — stop pumping; dropping
+                        // `body_stream` RSTs the upstream stream.
+                        crate::kernel::push_trace(&format!(
+                            "tx:h2-stream-cancel host={} in={} out={}",
+                            host, total_in, total_out
+                        ));
+                        return;
+                    }
                 }
-                total_out += decoded.len();
-                let arr = js_sys::Uint8Array::new_with_length(decoded.len() as u32);
-                arr.copy_from(&decoded);
-                if controller.enqueue_with_chunk(&arr).is_err() {
-                    // Consumer cancelled the stream — stop pumping; dropping
-                    // `body_stream` RSTs the upstream stream.
+                // Decoded body complete at the gzip DEFLATE final block — close
+                // the page-facing stream NOW instead of parking on the withheld
+                // END_STREAM. NAVER delivers the whole compressed body fast but
+                // holds the stream-closing frame 60–240s (anti-idle); waiting for
+                // it pins the browser's document in readyState=loading that long,
+                // so `defer` scripts (main.js hydration) don't run until then —
+                // the "search box only for 60s" symptom. A real browser decodes
+                // gzip itself and finishes at StreamEnd, never waiting; we mirror
+                // that. This is the streaming analog of the buffered arm's
+                // `body_is_complete` short-circuit, and unlike the reverted
+                // `</body></html>`-in-plaintext probe it keys on the codec's own
+                // end marker (reliable, no timer, no truncation). Dropping
+                // `body_stream` on return RSTs the upstream stream; the pooled
+                // connection survives.
+                if gunzip.as_ref().map(|g| g.is_finished()).unwrap_or(false) {
                     crate::kernel::push_trace(&format!(
-                        "tx:h2-stream-cancel host={} in={} out={}",
+                        "tx:h2-stream-deflate-end host={} in={} out={}",
                         host, total_in, total_out
                     ));
+                    let _ = controller.close();
                     return;
                 }
             }

@@ -307,6 +307,15 @@ impl StreamingGunzip {
         }
     }
 
+    /// True once the DEFLATE stream reached its final block. The decoded body
+    /// is then COMPLETE even if the h2 `END_STREAM` frame is still withheld —
+    /// which NAVER does for 60–240s. The streaming pump uses this to close the
+    /// page-facing stream at content-end (like a real browser, which decodes
+    /// gzip itself and never waits for the trailing frame) instead of parking.
+    pub(crate) fn is_finished(&self) -> bool {
+        self.finished
+    }
+
     /// Feed one chunk of gzip wire bytes; return the plaintext produced by it.
     /// Returns empty while still accumulating the header or after StreamEnd.
     pub(crate) fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
