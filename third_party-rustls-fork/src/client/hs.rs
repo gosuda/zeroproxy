@@ -635,15 +635,20 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     // will fail (decompressor not found). That's fine — the server's
     // response is a *choice*; if the server doesn't pick this extension
     // we never decompress anything. Browsers send it as a hint.
-    if exts
-        .certificate_compression_algorithms
-        .is_none()
-    {
-        exts.certificate_compression_algorithms = Some(vec![
-            CertificateCompressionAlgorithm::Brotli,
-            CertificateCompressionAlgorithm::Zlib,
-        ]);
-    }
+    // Chrome 148 advertises ONLY Brotli (id 2) in
+    // certificate_compression_algorithms. Sending Brotli+Zlib made
+    // peetprint's cert-compression field read `2-1` vs Chrome's `2`
+    // — a fingerprint tell NAVER's WAF weights. Brotli-only matches.
+    //
+    // FORCE (not `is_none()`-guarded): rustls already populated this from
+    // `config.cert_decompressors` (Brotli+Zlib) at the cert-compression
+    // setup above, which runs BEFORE us — so a guard would always skip.
+    // We overwrite the advertised list to Brotli-only. `offered_cert_
+    // compression` (the validation source of truth) keeps its superset,
+    // and the server can only pick from the Brotli-only wire list, so the
+    // narrower advertisement never causes a chosen-algo validation miss.
+    exts.certificate_compression_algorithms =
+        Some(vec![CertificateCompressionAlgorithm::Brotli]);
 
     // (3) Phase 5 additions: extensions rustls didn't have struct
     // fields for before this commit. We always populate them when the

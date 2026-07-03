@@ -138,13 +138,25 @@ pub const GREASE_VALUES: [u16; 16] = [
     0x8a8a, 0x9a9a, 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
 ];
 
-/// True iff `v` is a GREASE code point (RFC 8701: high and low nibbles
-/// of both bytes are `0xA`). The extension encoder uses this to emit a
-/// zero-byte body for any extension whose ID falls in this range —
-/// without it, `encode_one`'s catch-all arm would drop GREASE extension
-/// IDs on the floor.
+/// True iff `v` is a GREASE code point (RFC 8701). The 16 GREASE values
+/// are `0x0A0A, 0x1A1A, … 0xFAFA` — i.e. the low nibble of each byte is
+/// `0xA` AND the two bytes are identical (the high nibble varies 0x0..0xF).
+/// The extension encoder uses this to emit a zero-byte body for any
+/// extension whose ID falls in this range — without it, `encode_one`'s
+/// catch-all arm would drop GREASE extension IDs on the floor.
+///
+/// BUG HISTORY: the previous test `(v & 0xf0f0) == 0xa0a0` required the
+/// *high* nibble of both bytes to be `0xA` too, which is true only for
+/// `0xAAAA` (1 of the 16 GREASE values). Since `random_grease()` picks
+/// uniformly, ~15/16 of GREASE extension IDs failed the check and were
+/// silently dropped → our ClientHello shipped WITHOUT the two bracketing
+/// GREASE extensions Chrome always sends. NAVER's raw TLS fingerprinter
+/// (ja3/peetprint, which unlike ja4 does NOT strip GREASE) flagged the
+/// absence as bot traffic and tar-pitted the connection. cipher/group
+/// GREASE survived because those are inline list-body values that never
+/// route through this predicate.
 pub fn is_grease_value(v: u16) -> bool {
-    (v & 0x0f0f) == 0x0a0a && (v & 0xf0f0) == 0xa0a0
+    (v & 0x0f0f) == 0x0a0a && (v >> 8) == (v & 0x00ff)
 }
 
 /// Pick a random GREASE value. The choice is per-emission so two

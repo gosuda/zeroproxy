@@ -720,6 +720,27 @@ impl SupportedProtocolVersions {
 impl Codec<'_> for SupportedProtocolVersions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let inner = LengthPrefixedBuffer::new(Self::LIST_LENGTH, bytes);
+        // ZeroProxy JA3: Chrome brackets its supported_versions list with a
+        // leading GREASE version (RFC 8701) — the wire reads `GREASE,1.3,1.2`.
+        // Peers MUST ignore unknown versions (read() below drops them), so
+        // this is wire-only. Without it peetprint's version field read
+        // `1.3,1.2` vs Chrome's `GREASE,1.3,1.2`, a raw-fingerprint tell.
+        // Only the client sends this struct (ServerHello/HRR carry a single
+        // selected ProtocolVersion, a different type), so this never leaks
+        // a GREASE version into a server-role message.
+        //
+        // MUST be a FIXED constant, NOT `random_grease()`: encode() runs
+        // more than once per resumption handshake (the PSK binder is MAC'd
+        // over a serialization of this ClientHello, then the ClientHello is
+        // serialized again for the wire). A per-call random value would
+        // differ between those passes → the binder the server recomputes
+        // over the wire bytes wouldn't match ours → fatal `DecryptError`
+        // alert (observed intermittently against www.naver.com on pooled-
+        // connection resumption). ja3/peetprint normalize every GREASE code
+        // point to the label "GREASE", so a fixed value hashes identically
+        // to Chrome's per-connection-random one — the fingerprint is
+        // unaffected, only the binder stability is fixed.
+        ProtocolVersion::Unknown(0x0a0a).encode(inner.buf);
         if self.tls13 {
             ProtocolVersion::TLSv1_3.encode(inner.buf);
         }

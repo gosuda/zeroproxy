@@ -9,6 +9,65 @@ ZeroProxy 의 client-TLS 스택 (rustls 0.23 + rustls-rustcrypto, WASM linear-me
 
 ---
 
+## 2026-07-03 — NAVER tarpit 근본 원인: `is_grease_value` 비트버그로 extension GREASE 가 wire 에 안 나감 + version GREASE 를 encode() 에서 random 호출 → resumption binder DecryptError
+
+**Symptoms (사용자)**: "그냥 접속하면 잘되는데 아이피 제한이 무에 소용이야" — 같은 IP 로
+real Chrome 직접 접속은 즉시 되는데 ZP 프록시 경유 NAVER 만 body 가 33~70KB 에서
+멈췄다가 2~4분 뒤 나머지가 burst. 이전 세션들이 "IP/reputation tarpit" 으로 오진.
+IP 가 아님이 사용자 지적으로 확정 → wire fingerprint 재검증.
+
+**측정 (tls.peet.ws/api/all, ZP vs real Chrome 148)**: h2/akamai_hash 동일, ja4 동일
+(→ Wikipedia/ja4-기반 사이트는 통과) 이지만 **ja3_hash, peetprint_hash 불일치**. 필드별:
+
+| peetprint 필드 | Real Chrome | ZP before |
+|---|---|---|
+| supported_versions | `GREASE-772-771` | `772-771` (GREASE 버전 없음) |
+| extensions | `…GREASE…GREASE` (양끝) | GREASE 전무 |
+| cert_compression | `2` (Brotli) | `2-1` (Brotli+Zlib) |
+
+**근본 원인 1 — `is_grease_value` 비트버그 (ja3.rs)**: 판정식이
+`(v & 0x0f0f) == 0x0a0a && (v & 0xf0f0) == 0xa0a0`. 두 번째 항이 두 바이트 **상위**
+니블까지 0xA 를 요구 → 16개 GREASE 값 (`0x0a0a…0xfafa`) 중 **`0xaaaa` 하나만 통과**.
+`encode_one` (macros.rs:227) 의 GREASE fast-path 가 이걸로 걸러 zero-length 확장을
+emit 하는데, `random_grease()` 가 뽑는 값의 15/16 이 false → **extension GREASE 가
+조용히 drop**. cipher/group GREASE 는 list 본문 인라인 값 (`CipherSuite::Unknown` /
+`NamedGroup::Unknown`) 이라 이 predicate 를 안 거쳐 살아남음 → "일부 GREASE 만 있는"
+불완전 상태. NAVER raw fingerprinter (ja3/peetprint, ja4 와 달리 GREASE 안 벗김) 가
+"Chrome 이라면서 GREASE 불완전" 을 봇으로 판정 → 그 연결만 서버측 tarpit
+(cologger.shopping.naver.com `http=125009ms` trace 로 확인).
+**Fix**: `(v & 0x0f0f) == 0x0a0a && (v >> 8) == (v & 0x00ff)` (하위 니블 0xA + 두 바이트 동일).
+
+**근본 원인 2 — cert_compression 초과**: rustls 가 `config.cert_decompressors`
+(Brotli+Zlib) 에서 `certificate_compression_algorithms` 를 apply_chrome_ja3_shape
+**보다 먼저** 세팅 → `is_none()` 가드로는 override 못 함. Chrome 148 은 Brotli 만.
+**Fix**: apply_chrome_ja3_shape 에서 `is_none()` 가드 제거하고 무조건 `[Brotli]` 로
+덮어씀 (offered_cert_compression 은 superset 이라 server 선택은 wire 의 Brotli 로 제한 → 검증 안전).
+
+**근본 원인 3 (신규 회귀, 위 fix 후 노출) — version GREASE 를 encode() 에서 random**:
+`SupportedProtocolVersions::encode` 에 `ProtocolVersion::Unknown(random_grease())` 를
+넣었더니 www.naver.com resumption 에서 **간헐적 `fatal alert: DecryptError`**
+("Could not reach target"). 원인: PSK binder 는 ClientHello 를 한 번 직렬화해 MAC 을
+계산하고 wire 로 다시 직렬화하는데, encode() 가 매 호출 `random_grease()` 를 advance →
+두 직렬화의 GREASE 버전이 달라 binder transcript 불일치 → 서버 DecryptError.
+cipher/group/extension GREASE 는 apply_chrome_ja3_shape 에서 **한 번 계산해 struct 에
+저장** 되므로 안전. **오직 encode() 안의 random 만 문제**.
+**Fix**: 고정 상수 `ProtocolVersion::Unknown(0x0a0a)`. ja3/peetprint 는 GREASE 를
+값 무관 "GREASE" 로 정규화 (그래서 Chrome 자신도 매 연결 random 이지만 hash 는 고정)
+→ 고정값이어도 peetprint_hash 동일. **교훈: encode() 등 여러 번 불릴 수 있는 직렬화
+경로에는 절대 RNG 를 넣지 말 것. GREASE 는 handshake 당 1회 계산해 저장.**
+
+**결과**: peetprint_hash `1d4ffe9b0e34acac0bd883fa7f79d7b5` = real Chrome **완전 일치**.
+NAVER 문서 `http=47ms` + `h2-stream-close out=259605` (전체 259KB 전송, 스트림 정상
+종료) — **tarpit 소멸**. TLS 회귀 없음 (wikipedia/github/cloudflare 전부 tls-ok).
+
+**남은 별개 이슈 (tarpit 이 가리고 있다 노출)**: 커널은 문서를 완전 전송/close 하는데
+(`out=251983`) 브라우저 DOM 이 간헐적으로 33KB/interactive 에서 멈춤. trace 상
+www.naver.com 문서가 **두 번 fetch** (첫 스트림 `h2-stream-cancel out=233680` → 재요청
+`h2-stream-close out=251983`). SW streamDocumentResponse/HtmlTxn 렌더 경로 문제로
+추정, fingerprint 와 무관. 별도 조사 필요.
+
+---
+
 ## 2026-06-02 — Phase 5.8: captured spec 이 cipher 도 wire emit 하도록 fork 추가 수정, 헤더 순서 + UA 정렬, Chrome 148 spec 으로 baseline 업데이트. JA3 cipher tuple byte-equivalent Chrome 148 (`8daaf6152771`), nid.naver.com TARGET_CONNECT_FAILED → 정상 로드 회복
 
 **Symptoms (사용자 challenge)**: "근데 정확한 브라우저 모킹은 수행한거야?" — 직전 모든
