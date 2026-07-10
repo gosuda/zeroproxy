@@ -914,9 +914,9 @@
           if (prop === 'replace') return locReplace;
           if (prop === 'reload') return locReload;
           if (typeof prop === 'string' && methodCache.has(prop)) return methodCache.get(prop);
-          const value = Reflect.get(target, prop, target);
+          const value = Reflect.get(nativeLoc, prop, nativeLoc);
           if (typeof value === 'function') {
-            const bound = value.bind(target);
+            const bound = value.bind(nativeLoc);
             if (typeof prop === 'string') methodCache.set(prop, bound);
             return bound;
           }
@@ -929,10 +929,36 @@
             try { const u = new URL(virtualURL.href); u[prop] = value; setVirtualLocation(u.href); } catch {}
             return true;
           }
-          return Reflect.set(target, prop, value, target);
+          return Reflect.set(nativeLoc, prop, value, nativeLoc);
         },
+        has(_t, prop) { return Reflect.has(nativeLoc, prop); },
+        ownKeys() { return Reflect.ownKeys(nativeLoc); },
+        getOwnPropertyDescriptor(_t, prop) {
+          // Virtualized URL props: live value, always configurable.
+          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
+            return { value: virtualURL[prop], writable: true, enumerable: true, configurable: true };
+          }
+          const d = Reflect.getOwnPropertyDescriptor(nativeLoc, prop);
+          // Target is Object.create(nativeLoc) with NO own props, so the proxy
+          // invariant forbids reporting a non-configurable descriptor that the
+          // target doesn't actually have — force configurable so enumeration of
+          // the real Location's keys still works.
+          if (d) d.configurable = true;
+          return d;
+        },
+        getPrototypeOf() { return Reflect.getPrototypeOf(nativeLoc); },
       };
-      const proxy = new Proxy(nativeLoc, handler);
+      // Target is `Object.create(nativeLoc)`, NOT nativeLoc itself. The
+      // unforgeable Location methods (reload/assign/replace) are OWN,
+      // non-configurable, non-writable data properties on the real location, so
+      // with nativeLoc as the proxy target the get-invariant ("must return the
+      // property's actual value") makes returning our virtualized versions throw
+      // `TypeError: 'get' on proxy: property 'reload'...` — which crashed NAVER
+      // main.js during React render. Putting the real location one level up the
+      // prototype chain leaves the target with no own props, so the invariant
+      // never applies; instanceof Location and reflection still resolve through
+      // the proto (forwarded to nativeLoc explicitly in every trap).
+      const proxy = new Proxy(Object.create(nativeLoc), handler);
       wrappedLocationCache.set(nativeLoc, proxy);
       return proxy;
     }
