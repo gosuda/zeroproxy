@@ -1,0 +1,3 @@
+<!doctype html><meta charset="utf-8"><script type="module">
+const params=new URLSearchParams(location.search),id=params.get("id"),expectedParent="http://control.localhost:4173";if(!localStorage.getItem("origin-marker"))localStorage.setItem("origin-marker",id);const registration=await navigator.serviceWorker.register("/synthetic-origin-sw.js",{scope:"/"});await navigator.serviceWorker.ready;if(!navigator.serviceWorker.controller&&!params.has("controlled")){location.replace(location.pathname+"?id="+encodeURIComponent(id)+"&controlled=1")}else{parent.postMessage({kind:"synthetic-origin-ready",id,stored:localStorage.getItem("origin-marker"),controlled:Boolean(navigator.serviceWorker.controller),registrationScope:registration.scope},expectedParent)}
+</script>

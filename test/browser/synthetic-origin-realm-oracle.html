@@ -1,0 +1,417 @@
+<!doctype html><meta charset="utf-8"><title>synthetic origin realm oracle</title><pre id="result"></pre><object id="contained-object" data="about:blank" width="0" height="0"></object><script type="module">
+const ALPHA = "https://alpha.example";
+const BETA = "https://beta.example";
+const result = document.querySelector("#result");
+const reports = new Map();
+let sameFrame;
+let crossFrame;
+let samePopup;
+let crossPopup;
+const trace = [];
+const realmReports = [];
+function record(stage, value = {}) { trace.push({ stage, ...value }); }
+addEventListener("error", event => record("window-error", { message: event.message }));
+addEventListener("unhandledrejection", event => record("unhandledrejection", { reason: String(event.reason) }));
+
+function command(operation, payload) {
+  return new Promise((resolve, reject) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => reject(new Error("mock coordinator timeout")), 10_000);
+    channel.port1.onmessage = event => {
+      clearTimeout(timer);
+      channel.port1.close();
+      event.data?.ok ? resolve(event.data.result) : reject(new DOMException(event.data?.error?.code ?? "MAP_ORIGIN rejected", "SecurityError"));
+    };
+    navigator.serviceWorker.controller.postMessage({ v: 2, request_id: crypto.randomUUID(), operation, payload }, [channel.port2]);
+  });
+}
+
+function waitFor(predicate, label) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 15_000;
+    const poll = () => {
+      if (predicate()) return resolve();
+      if (Date.now() >= deadline) return reject(new Error(`timed out waiting for ${label}`));
+      setTimeout(poll, 20);
+    };
+    poll();
+  });
+}
+
+function receive(event) {
+  const data = event.data;
+  if (!data || typeof data.kind !== "string") return;
+  if (data.kind === "realm-ready" || data.kind === "realm-probe-result") {
+    const key = `${data.kind}:${data.role}:${data.virtual}`;
+    reports.set(key, { ...data, event_origin: event.origin, source: event.source });
+    realmReports.push({ ...data, event_origin: event.origin, source: event.source });
+    record("realm-message", { event_origin: event.origin, key });
+  }
+}
+
+addEventListener("message", receive);
+
+async function controlled() {
+  await navigator.serviceWorker.register("/synthetic-origin-realm-sw.js", { scope: "/" });
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) {
+    location.replace(`${location.pathname}?controlled=1`);
+    return false;
+  }
+  return true;
+}
+
+async function installRuntime() {
+  const version = await fetch("/_zp/version.json", { cache: "no-store" }).then(response => response.json());
+  const runtime = document.createElement("script");
+  runtime.src = `${version.selectors["runtime-prelude.js"]}#abi=__zp_abi_111111111111111111111111111111111111111111111111&url=${encodeURIComponent(`${ALPHA}/parent.html`)}&ports=80%2C443&strings=0&cookie=cccccccccccccccccccccccccccccccc`;
+  const targetURL = `${ALPHA}/parent.html`;
+  runtime.dataset.zpCookieBootstrap = btoa(JSON.stringify({
+    runtime_capability: "c".repeat(32),
+    entry_id: "e".repeat(32),
+    cookie_top_level_site: BETA,
+    policy_context: { profile_id: "test-profile", tab_id: "test-tab", document_id: "test-document", virtual_origin: `${ALPHA}:443`, virtual_site: ALPHA, target_url: targetURL, effective_base_url: targetURL, referrer_url: null, referrer_policy: "strict-origin-when-cross-origin", document_charset: "utf-8", target_csp: [], target_csp_report_only: [], relay_profile: "test-relay-profile", approved_target_ports: [80, 443], policy_version: 2 },
+    document_policy: { version: 1, trusted_types: { directive_present: false, allow_any: true, allowed_policy_names: [], allow_duplicates: false, require_for_script: false }, enforced_report_endpoint_count: 0, report_only_endpoint_count: 0 },
+    decode_metadata: { encoding_used: "utf-8", replacement: false, source: "test" },
+    snapshot: { cookie_seq: 2, jar_or_delta: { kind: "SNAPSHOT", cookies: [
+      { name: "same", value: "unpartitioned", domain: "alpha.example", path: "/", secure: true, http_only: false, same_site: "LAX", creation_seq: 1 },
+      { name: "same", value: "partitioned", domain: "alpha.example", path: "/", secure: true, http_only: false, same_site: "NONE", partition_key: BETA, creation_seq: 2 },
+    ] } },
+  })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  await new Promise((resolve, reject) => {
+    runtime.addEventListener("load", resolve, { once: true });
+    runtime.addEventListener("error", reject, { once: true });
+    document.head.append(runtime);
+  });
+}
+
+function makeFrame(target) {
+  const frame = document.createElement("iframe");
+  frame.addEventListener("load", () => record("frame-load", { target }), { once: true });
+  frame.addEventListener("error", () => record("frame-error", { target }), { once: true });
+  frame.src = target;
+  document.body.append(frame);
+  return frame;
+}
+
+function emptyFrame({ sandbox = null, srcdoc = false } = {}) {
+  const frame = document.createElement("iframe");
+  if (sandbox !== null) frame.setAttribute("sandbox", sandbox);
+  if (srcdoc) frame.srcdoc = "";
+  const loaded = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("empty frame timeout")), 10_000);
+    frame.addEventListener("load", () => { clearTimeout(timeout); resolve(); }, { once: true });
+  });
+  document.body.append(frame);
+  return { frame, loaded };
+}
+
+async function probe(windowRef, targetOrigin) {
+  windowRef.postMessage({ kind: "realm-probe" }, targetOrigin);
+}
+
+async function main() {
+  if (!(await controlled())) return;
+  navigator.serviceWorker.addEventListener("message", event => {
+    if (event.data?.type === "MOCK_REALM_TRACE") record("mock-sw", event.data);
+  });
+  const [alphaMapping, betaMapping] = await Promise.all([
+    command("MAP_ORIGIN", { target_url: `${ALPHA}/frame` }),
+    command("MAP_ORIGIN", { target_url: `${BETA}/frame` }),
+  ]);
+  let unknownMappingRejected = false;
+  try { await command("MAP_ORIGIN", { target_url: "https://unmapped.example/frame" }); }
+  catch (error) { unknownMappingRejected = error.name === "SecurityError"; }
+  record("map-origin", { alphaMapping, betaMapping, unknownMappingRejected });
+
+  await installRuntime();
+  record("runtime-loaded");
+  const cookieBeforeMutation = document.cookie;
+  document.cookie = "same=updated; Path=/; Secure; SameSite=None; Partitioned";
+  const requestProbe = new Request(`${ALPHA}/cookie-request-after-write`);
+  const requestProbeDetail = { ...Object.fromEntries(["url", "referrer", "credentials", "cache", "mode", "method", "redirect", "referrerPolicy", "integrity", "keepalive", "priority"].map(key => [key, requestProbe[key]])), body: requestProbe.body === null ? "null" : typeof requestProbe.body, headers: [...requestProbe.headers] };
+  let requestAfterWriteError = null;
+  const requestAfterWrite = fetch(`${ALPHA}/cookie-request-after-write`).then(response => response.text(), error => {
+    requestAfterWriteError = `${error.name}: ${error.message}`;
+    return null;
+  });
+  const cookieOptimistic = document.cookie;
+  await waitFor(() => document.cookie === "same=unpartitioned; same=updated", "partitioned cookie reconciliation");
+  const requestAfterWriteBody = await requestAfterWrite;
+  if (requestAfterWriteBody !== null) await waitFor(() => trace.some(entry => entry.stage === "api-plan-cookie-fence"), "request cookie fence");
+  const cookieFenceTrace = trace.find(entry => entry.stage === "api-plan-cookie-fence");
+  const partitionedCookieIdentityPreserved = cookieBeforeMutation === "same=unpartitioned; same=partitioned"
+    && cookieOptimistic === "same=unpartitioned; same=updated";
+  const requestWaitedForCookieCommit = requestAfterWriteBody === "cookie-sequenced"
+    && cookieFenceTrace?.cookie_settled === true;
+  const cookieFenceCount = trace.filter(entry => entry.stage === "api-plan-cookie-fence").length;
+  document.cookie = "secret=visible; Path=/";
+  const rejectedCookieOptimistic = document.cookie.includes("secret=visible");
+  const requestAfterRejection = fetch(`${ALPHA}/cookie-request-after-write`).then(response => response.text());
+  await waitFor(() => !document.cookie.includes("secret="), "rejected cookie reconciliation");
+  const requestAfterRejectionBody = await requestAfterRejection;
+  await waitFor(() => trace.filter(entry => entry.stage === "api-plan-cookie-fence").length > cookieFenceCount, "rejected cookie fence");
+  const rejectedCookieFence = trace.filter(entry => entry.stage === "api-plan-cookie-fence").at(-1);
+  const rejectedCookieReconciled = rejectedCookieOptimistic
+    && requestAfterRejectionBody === "cookie-sequenced"
+    && rejectedCookieFence?.cookie_settled === true
+    && !document.cookie.includes("secret=");
+  const aboutBlank = emptyFrame();
+  const srcdoc = emptyFrame({ srcdoc: true });
+  const sandboxed = emptyFrame({ sandbox: "", srcdoc: true });
+  await Promise.all([aboutBlank.loaded, srcdoc.loaded, sandboxed.loaded]);
+  const parentViewBeforeRoutes = document.defaultView;
+  const nestedParentView = aboutBlank.frame.contentWindow;
+  const nestedFrame = aboutBlank.frame.contentDocument.createElement("iframe");
+  aboutBlank.frame.contentDocument.body.append(nestedFrame);
+  const nestedView = nestedFrame.contentWindow;
+  const nestedRealmIdentity = nestedFrame.contentDocument.defaultView === nestedView
+    && nestedView.parent === nestedParentView
+    && nestedView.top === parentViewBeforeRoutes;
+  const inheritedEmptyRealms = aboutBlank.frame.contentDocument !== null
+    && aboutBlank.frame.contentWindow.parent === parentViewBeforeRoutes
+    && aboutBlank.frame.contentDocument.defaultView === aboutBlank.frame.contentWindow
+    && srcdoc.frame.contentDocument !== null
+    && srcdoc.frame.contentWindow.parent === parentViewBeforeRoutes
+    && srcdoc.frame.contentDocument.defaultView === srcdoc.frame.contentWindow
+    && nestedRealmIdentity;
+  const sandboxPreserved = sandboxed.frame.getAttribute("sandbox") === ""
+    && sandboxed.frame.contentDocument === null;
+  const emptyRealmDetail = {
+    about_document: aboutBlank.frame.contentDocument !== null,
+    about_parent: aboutBlank.frame.contentWindow.parent === parentViewBeforeRoutes,
+    about_default_view: aboutBlank.frame.contentDocument?.defaultView === aboutBlank.frame.contentWindow,
+    srcdoc_document: srcdoc.frame.contentDocument !== null,
+    srcdoc_parent: srcdoc.frame.contentWindow.parent === parentViewBeforeRoutes,
+    srcdoc_default_view: srcdoc.frame.contentDocument?.defaultView === srcdoc.frame.contentWindow,
+    nested_default_view: nestedFrame.contentDocument?.defaultView === nestedView,
+    nested_parent: nestedView.parent === nestedParentView,
+    nested_top: nestedView.top === parentViewBeforeRoutes,
+  };
+  const aboutWindow = aboutBlank.frame.contentWindow;
+  const aboutDocument = aboutBlank.frame.contentDocument;
+  const parentFrameGetter = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "contentWindow").get;
+  const parentDefaultViewGetter = Object.getOwnPropertyDescriptor(Document.prototype, "defaultView").get;
+  const childFrameGetter = aboutWindow.Object.getOwnPropertyDescriptor(aboutWindow.HTMLIFrameElement.prototype, "contentWindow").get;
+  const childDefaultViewGetter = aboutWindow.Object.getOwnPropertyDescriptor(aboutWindow.Document.prototype, "defaultView").get;
+  let aboutIndex = -1;
+  for (let index = 0; index < parentViewBeforeRoutes.length; index += 1) {
+    if (parentViewBeforeRoutes[index] === aboutWindow) aboutIndex = index;
+  }
+  const containedObject = document.getElementById("contained-object");
+  await waitFor(() => containedObject.contentWindow !== null && containedObject.contentDocument !== null, "object realm");
+  const objectWindow = containedObject.contentWindow;
+  const objectDocument = containedObject.contentDocument;
+  const objectWindowGetter = Object.getOwnPropertyDescriptor(HTMLObjectElement.prototype, "contentWindow").get;
+  const objectDocumentGetter = Object.getOwnPropertyDescriptor(HTMLObjectElement.prototype, "contentDocument").get;
+  const canonicalContainedDetail = {
+    aboutIndex,
+    parentFrame: parentFrameGetter.call(aboutBlank.frame) === aboutWindow,
+    parentDefaultView: parentDefaultViewGetter.call(aboutDocument) === aboutWindow,
+    childDefaultView: childDefaultViewGetter.call(aboutDocument) === aboutWindow,
+    indexedFrames: aboutIndex >= 0 && parentViewBeforeRoutes.frames[aboutIndex] === aboutWindow,
+    indexedWindow: aboutIndex >= 0 && parentViewBeforeRoutes[aboutIndex] === aboutWindow,
+    nestedFrame: childFrameGetter.call(nestedFrame) === nestedView,
+    objectWindow: objectWindow !== null,
+    objectDocument: objectDocument !== null,
+    objectWindowGetter: objectWindowGetter.call(containedObject) === objectWindow,
+    objectDocumentGetter: objectDocumentGetter.call(containedObject) === objectDocument,
+    objectDefaultView: objectDocument?.defaultView === objectWindow,
+    parentObjectDefaultView: objectDocument !== null && parentDefaultViewGetter.call(objectDocument) === objectWindow,
+  };
+  const canonicalContainedAccessors = Object.entries(canonicalContainedDetail)
+    .every(([name, value]) => name === "aboutIndex" ? value >= 0 : value === true);
+  const parentCompilerProbe = document.createElement("script");
+  parentCompilerProbe.text = "globalThis.__zpParentCompilerIdentity=window===self&&self===globalThis&&globalThis===document.defaultView&&this===window";
+  document.body.append(parentCompilerProbe);
+  const childCompilerProbe = aboutDocument.createElement("script");
+  childCompilerProbe.text = "globalThis.__zpChildCompilerIdentity=window===self&&self===globalThis&&globalThis===document.defaultView&&this===window";
+  aboutDocument.body.append(childCompilerProbe);
+  const compilerOwnedGlobalIdentity = parentViewBeforeRoutes.__zpParentCompilerIdentity === true
+    && aboutWindow.__zpChildCompilerIdentity === true;
+  const dynamicSrcdocFrame = document.createElement("iframe");
+  const dynamicSrcdocSource = "<scr" + "ipt>parent.__zpDynamicSrcdocAttack=true<\/scr" + "ipt>";
+  let dynamicSrcdocBlocked = false;
+  try {
+    dynamicSrcdocFrame.srcdoc = dynamicSrcdocSource;
+    document.body.append(dynamicSrcdocFrame);
+  } catch (error) {
+    dynamicSrcdocBlocked = error.name === "SecurityError";
+  }
+  dynamicSrcdocFrame.remove();
+  const uninstrumentedSrcdocBlocked = dynamicSrcdocBlocked
+    && parentViewBeforeRoutes.__zpDynamicSrcdocAttack !== true;
+  sameFrame = makeFrame(`${ALPHA}/frame`);
+  crossFrame = makeFrame(`${BETA}/frame`);
+  record("frames-created", { cross_src: crossFrame.getAttribute("src"), same_src: sameFrame.getAttribute("src") });
+  await waitFor(() => reports.has(`realm-ready:frame:${ALPHA}`) && reports.has(`realm-ready:frame:${BETA}`), "frame realms");
+
+  const crossSOP = crossFrame.contentDocument === null;
+  const parentView = document.defaultView;
+  const sameWindow = sameFrame.contentWindow;
+  record("frame-window", { acquired: sameWindow !== null });
+  const sameDocument = sameFrame.contentDocument;
+  record("frame-document", { acquired: sameDocument !== null });
+  const sameWindowDocument = sameWindow.document;
+  record("frame-window-document", { same: sameWindowDocument === sameDocument });
+  const sameParent = sameWindow.parent;
+  record("frame-parent", { same: sameParent === parentView });
+  const sameTop = sameWindow.top;
+  record("frame-top", { same: sameTop === parentView });
+  let sameWindowMethods = true;
+  try {
+    const listener = () => {};
+    sameWindow.addEventListener("zeroproxy-contained-realm-probe", listener);
+    sameWindow.removeEventListener("zeroproxy-contained-realm-probe", listener);
+    sameWindow.getSelection();
+  } catch {
+    sameWindowMethods = false;
+  }
+  const sameDOM = sameDocument !== null && sameWindowDocument === sameDocument && sameParent === parentView && sameTop === parentView && sameWindowMethods;
+  record("frame-identity", { crossSOP, sameDOM });
+
+  await probe(sameFrame.contentWindow, ALPHA);
+  await probe(crossFrame.contentWindow, BETA);
+  await waitFor(() => reports.has(`realm-probe-result:frame:${ALPHA}`) && reports.has(`realm-probe-result:frame:${BETA}`), "frame probes");
+  const sameProbeKey = `realm-probe-result:frame:${ALPHA}`;
+  reports.delete(sameProbeKey);
+  sameFrame.contentWindow.postMessage({ kind: "realm-probe" });
+  await waitFor(() => reports.has(sameProbeKey), "default targetOrigin probe");
+  const defaultTargetOriginProbe = reports.get(sameProbeKey);
+  const crossProbeKey = `realm-probe-result:frame:${BETA}`;
+  reports.delete(crossProbeKey);
+  crossFrame.contentWindow.postMessage({ kind: "realm-probe" }, { targetOrigin: `${BETA}/mapped/path` });
+  await waitFor(() => reports.has(crossProbeKey), "URL targetOrigin probe");
+  const urlTargetOriginProbe = reports.get(crossProbeKey);
+  const postMessageTargetOriginOverloads = defaultTargetOriginProbe?.origin === ALPHA
+    && defaultTargetOriginProbe?.source_is_parent
+    && urlTargetOriginProbe?.origin === ALPHA
+    && urlTargetOriginProbe?.source_is_parent;
+  const sameReloadFrame = makeFrame(`${ALPHA}/reload-one`);
+  await waitFor(() => realmReports.some(report => report.kind === "realm-ready" && report.target_path === "/reload-one"), "same-origin reload frame");
+  const heldReloadWindow = sameReloadFrame.contentWindow;
+  sameReloadFrame.src = `${ALPHA}/reload-two`;
+  await waitFor(() => realmReports.some(report => report.kind === "realm-ready" && report.target_path === "/reload-two"), "same-origin reloaded frame");
+  const sameOriginHeldPathRefreshed = heldReloadWindow.location.pathname === "/reload-two";
+  const sameOriginHeldDocumentRefreshed = heldReloadWindow.document.defaultView === heldReloadWindow;
+  const sameOriginHeldReferenceRefreshed = sameOriginHeldPathRefreshed && sameOriginHeldDocumentRefreshed;
+  const transitioningFrame = makeFrame(`${ALPHA}/transition-same`);
+  await waitFor(() => realmReports.some(report => report.kind === "realm-ready" && report.target_path === "/transition-same"), "same-origin transition frame");
+  const transitioningWindow = transitioningFrame.contentWindow;
+  transitioningFrame.src = `${BETA}/transition-cross`;
+  await waitFor(() => realmReports.some(report => report.kind === "realm-ready" && report.target_path === "/transition-cross"), "cross-origin transition frame");
+  let transitionedDocumentDenied = false;
+  try { void transitioningWindow.document; }
+  catch (error) { transitionedDocumentDenied = error.name === "SecurityError"; }
+  const transitionedWindow = transitioningFrame.contentWindow;
+  const transitionedRelationships = transitioningWindow.parent === parentView
+    && transitioningWindow.top === parentView;
+  await probe(transitioningWindow, BETA);
+  await waitFor(() => realmReports.some(report => report.kind === "realm-probe-result" && report.target_path === "/transition-cross"), "cross-origin transition probe");
+  const sameToCrossDowngrade = transitioningWindow === transitionedWindow
+    && transitioningFrame.contentDocument === null
+    && transitionedDocumentDenied
+    && transitionedRelationships;
+  const staleFrame = document.createElement("iframe");
+  staleFrame.src = `${ALPHA}/stale-slow`;
+  staleFrame.src = `${BETA}/stale-latest`;
+  document.body.append(staleFrame);
+  await waitFor(() => realmReports.some(report => report.kind === "realm-ready" && report.target_path === "/stale-latest"), "latest frame generation");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const staleGenerationSuppressed = realmReports.some(report => report.target_path === "/stale-latest")
+    && !realmReports.some(report => report.target_path === "/stale-slow");
+  const staleRouteRevoked = trace.some(entry => entry.operation === "REVOKE_RESOURCE_ROUTE"
+    && entry.payload?.route_id === "stale-slow-route");
+
+  let unknownTargetRejected = false;
+  try { crossFrame.contentWindow.postMessage({ kind: "blocked" }, "https://unmapped.example"); }
+  catch (error) { unknownTargetRejected = error.name === "SecurityError"; }
+
+  const channel = new MessageChannel();
+  const channelAck = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("message channel timeout")), 10_000);
+    channel.port1.onmessage = event => { clearTimeout(timer); resolve(event.data); };
+  });
+  crossFrame.contentWindow.postMessage({ kind: "realm-channel" }, { targetOrigin: `${BETA}/channel`, transfer: [channel.port2] });
+  const channelResult = await channelAck;
+
+  samePopup = open(`${ALPHA}/popup`, "same-realm-popup");
+  crossPopup = open(`${BETA}/popup`, "cross-realm-popup");
+  if (!samePopup || !crossPopup) throw new Error("popup creation blocked");
+  await waitFor(() => reports.has(`realm-ready:popup:${ALPHA}`) && reports.has(`realm-ready:popup:${BETA}`), "popup realms");
+  await probe(samePopup, ALPHA);
+  await probe(crossPopup, BETA);
+  await waitFor(() => reports.has(`realm-probe-result:popup:${ALPHA}`) && reports.has(`realm-probe-result:popup:${BETA}`), "popup probes");
+
+  const popupRelationshipAccess = samePopup.parent === samePopup
+    && samePopup.top === samePopup
+    && samePopup.opener === parentView
+    && crossPopup.parent === crossPopup
+    && crossPopup.top === crossPopup
+    && crossPopup.opener === parentView;
+  let popupMethods = true;
+  try { samePopup.focus(); crossPopup.focus(); samePopup.close(); crossPopup.close(); }
+  catch { popupMethods = false; }
+  await waitFor(() => samePopup.closed && crossPopup.closed, "popup close");
+  const namedPopup = open(`${ALPHA}/popup`, "reused-realm-popup");
+  if (!namedPopup) throw new Error("named popup creation blocked");
+  await waitFor(() => realmReports.filter(report => report.kind === "realm-ready" && report.role === "popup" && report.virtual === ALPHA).length >= 2, "named popup");
+  const namedAgain = open(`${ALPHA}/popup-reloaded`, "reused-realm-popup");
+  const namedPopupReused = namedAgain === namedPopup;
+  await waitFor(() => realmReports.filter(report => report.kind === "realm-ready" && report.role === "popup" && report.virtual === ALPHA).length >= 3, "named popup reuse");
+  const namedPopupReloaded = namedAgain.document.defaultView === namedAgain
+    && namedAgain.opener === parentView
+    && namedAgain.location.pathname === "/popup-reloaded";
+  namedPopup.close();
+  await waitFor(() => namedPopup.closed, "named popup close");
+  const noopenerPopup = open(`${BETA}/popup`, "_blank", "noopener");
+  const noopenerReturnIsNull = noopenerPopup === null;
+
+  const sameReady = realmReports.find(report => report.kind === "realm-ready" && report.role === "frame" && report.virtual === ALPHA && report.target_path === "/frame");
+  const crossReady = realmReports.find(report => report.kind === "realm-ready" && report.role === "frame" && report.virtual === BETA && report.target_path === "/frame");
+  const sameProbe = reports.get(`realm-probe-result:frame:${ALPHA}`);
+  const crossProbe = reports.get(`realm-probe-result:frame:${BETA}`);
+  const samePopupReady = realmReports.find(report => report.kind === "realm-ready" && report.role === "popup" && report.virtual === ALPHA);
+  const crossPopupReady = realmReports.find(report => report.kind === "realm-ready" && report.role === "popup" && report.virtual === BETA);
+  const checks = [
+    { id: "mock-private-plan-map-origin", pass: alphaMapping.virtual_origin === ALPHA && betaMapping.virtual_origin === BETA && unknownMappingRejected },
+    { id: "partitioned-cookie-optimistic-identity", pass: partitionedCookieIdentityPreserved, detail: { before: cookieBeforeMutation, optimistic: cookieOptimistic, reconciled: document.cookie } },
+    { id: "request-after-document-cookie-commit", pass: requestWaitedForCookieCommit, detail: { body: requestAfterWriteBody, error: requestAfterWriteError, fence: cookieFenceTrace, request: requestProbeDetail } },
+    { id: "rejected-cookie-reconciles-before-request", pass: rejectedCookieReconciled, detail: { optimistic: rejectedCookieOptimistic, body: requestAfterRejectionBody, fence: rejectedCookieFence, reconciled: document.cookie } },
+    { id: "same-synthetic-origin-dom-identity", pass: sameDOM, detail: { document: sameWindowDocument === sameDocument, parent: sameParent === parentView, top: sameTop === parentView, window_methods: sameWindowMethods } },
+    { id: "cross-synthetic-origin-native-sop", pass: crossSOP },
+    { id: "same-origin-navigation-refreshes-held-facade", pass: sameOriginHeldReferenceRefreshed, detail: { current_path: sameOriginHeldPathRefreshed, current_document: sameOriginHeldDocumentRefreshed } },
+    { id: "same-to-cross-navigation-downgrades-stable-facade", pass: sameToCrossDowngrade },
+    { id: "frame-targetorigin-translation", pass: sameProbe.origin === ALPHA && crossProbe.origin === ALPHA && sameProbe.source_is_parent && crossProbe.source_is_parent },
+    { id: "postmessage-url-options-and-default-targetorigin", pass: postMessageTargetOriginOverloads },
+    { id: "message-event-origin-source-identity", pass: sameReady.event_origin === ALPHA && crossReady.event_origin === BETA && sameReady.source === sameFrame.contentWindow && crossReady.source === crossFrame.contentWindow },
+    { id: "messagechannel-transfer-through-cross-realm-facade", pass: channelResult?.kind === "realm-channel-ack" && channelResult.origin === ALPHA && channelResult.virtual === BETA },
+    { id: "unknown-target-origin-rejected", pass: unknownTargetRejected },
+    { id: "frame-parent-top-relationships", pass: sameReady.relationships.parent_is_top && !sameReady.relationships.self_is_top && sameReady.relationships.parent_identity && sameReady.relationships.top_identity && crossReady.relationships.parent_is_top && !crossReady.relationships.self_is_top && crossReady.relationships.parent_identity && crossReady.relationships.top_identity },
+    { id: "same-and-cross-popup-relationships", pass: popupRelationshipAccess && samePopupReady.relationships.opener_present && samePopupReady.relationships.opener_identity && crossPopupReady.relationships.opener_present && crossPopupReady.relationships.opener_identity && samePopupReady.source === samePopup && crossPopupReady.source === crossPopup, detail: { native_access: popupRelationshipAccess, same_opener: samePopupReady.relationships.opener_present, cross_opener: crossPopupReady.relationships.opener_present, same_source: samePopupReady.source === samePopup, cross_source: crossPopupReady.source === crossPopup } },
+    { id: "popup-focus-close", pass: popupMethods && samePopup.closed && crossPopup.closed },
+    { id: "aboutblank-and-srcdoc-inherit-contained-realm", pass: inheritedEmptyRealms, detail: emptyRealmDetail },
+    { id: "canonical-contained-window-accessors", pass: canonicalContainedAccessors, detail: canonicalContainedDetail },
+    { id: "compiler-owned-globals-use-canonical-facades", pass: compilerOwnedGlobalIdentity },
+    { id: "dynamic-srcdoc-blocks-uninstrumented-code", pass: uninstrumentedSrcdocBlocked },
+    { id: "sandbox-attribute-preserved-with-native-isolation", pass: sandboxPreserved },
+    { id: "stale-frame-route-generation-suppressed", pass: staleGenerationSuppressed },
+    { id: "stale-frame-route-revoked", pass: staleRouteRevoked },
+    { id: "named-popup-reuses-native-context", pass: namedPopupReused && namedPopupReloaded, detail: { identity: namedPopupReused, current_document: namedPopupReloaded } },
+    { id: "noopener-popup-preserves-native-null-return", pass: noopenerReturnIsNull },
+  ];
+  globalThis.__syntheticOriginRealmOracle = { ok: checks.every(check => check.pass), checks, reports: [...reports.entries()].map(([key, value]) => ({ key, ...value, source: undefined })), trace };
+  result.textContent = JSON.stringify(globalThis.__syntheticOriginRealmOracle);
+}
+
+main().catch(error => {
+  globalThis.__syntheticOriginRealmOracle = {
+    ok: false,
+    error: `${error.name}: ${error.message}`,
+    stack: error.stack,
+    report_keys: [...reports.keys()],
+    trace,
+  };
+  result.textContent = JSON.stringify(globalThis.__syntheticOriginRealmOracle);
+});
+</script>

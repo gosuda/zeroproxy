@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "ga_at": "2026-07-11T00:00:00Z",
+  "sunset_at": "2026-10-09T00:00:00Z",
+  "owner": "release-security",
+  "issue": "cleanroom-v2-migration",
+  "user_notice": "V1 links may be imported locally for 90 days; V1 profile state and credentials are incompatible with V2.",
+  "local_retention": "V1 input remains local and unchanged until the user explicitly deletes it.",
+  "server_retention": "Decoded V1 input is never transmitted or retained.",
+  "importer_asset_hash": "e188f3178fda92682bf56dd43b561c3c75c18db8318cb691f47d7ac148eebc8a",
+  "test_ids": ["migration-malformed","migration-expired","migration-oversize","migration-replay","migration-fragment-privacy","migration-rejection","migration-mint-rollback","migration-sunset","migration-incompatible-artifacts","migration-durable-concurrency"],
+  "rollback_conditions": ["V2 mint failure leaves V1 data unchanged"],
+  "sunset_conditions": ["remove decoder and fixtures at sunset", "serve static upgrade notice after sunset"],
+  "artifacts": [
+    {"name":"public-shares","disposition":"local-import-90-days"},
+    {"name":"bookmarked-routes","disposition":"local-import-90-days"},
+    {"name":"profile-origin-mappings","disposition":"incompatible"},
+    {"name":"cookies-and-storage","disposition":"incompatible"},
+    {"name":"relay-approvals","disposition":"fresh-approval"},
+    {"name":"capabilities-and-sessions","disposition":"incompatible"},
+    {"name":"history-entries","disposition":"incompatible"}
+  ]
+}

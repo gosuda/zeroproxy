@@ -1,0 +1,324 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Advanced network facade oracle</title>
+<body>
+<script src="__ZP_RUNTIME_URL__" data-zp-cookie-bootstrap="__ZP_RUNTIME_BOOTSTRAP__"></script>
+<script>
+(() => {
+  const config = __ZP_CONFIG__;
+  const cases = [];
+  const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const check = (value, name, detail) => {
+    cases.push({ name, pass: Boolean(value), detail });
+    if (!value) throw new Error(`${name}: ${JSON.stringify(detail)}`);
+  };
+  const publish = value => {
+    globalThis.__advancedNetworkResult = value;
+    if (parent !== window) {
+      parent.__advancedNetworkResult = value;
+      parent.postMessage({ type: "ADVANCED_NETWORK_RESULT", result: value }, location.origin);
+    }
+  };
+  async function submitFrame(frame, invoke, name) {
+    const loaded = new Promise(resolve => frame.addEventListener("load", resolve, { once: true }));
+    invoke();
+    await Promise.race([loaded, sleep(5000).then(() => { throw new Error(`${name} frame load timed out`); })]);
+  }
+  let navigationFrameSequence = 0;
+  async function navigateElement(element, invoke, name, frameParent = document.body) {
+    const navigationFrame = document.createElement("iframe");
+    navigationFrame.name = `navigation-result-${++navigationFrameSequence}`;
+    const initialLoad = new Promise(resolve => navigationFrame.addEventListener("load", resolve, { once: true }));
+    frameParent.append(navigationFrame);
+    await Promise.race([initialLoad, sleep(5000).then(() => { throw new Error(`${name} initial frame load timed out`); })]);
+    element.target = navigationFrame.name;
+    sessionStorage.setItem("navigation-stage", JSON.stringify({ name, target: element.target, frameName: navigationFrame.name, frameConnected: navigationFrame.isConnected }));
+    try { await submitFrame(navigationFrame, invoke, name); }
+    finally { navigationFrame.remove(); }
+  }
+  function form(target, method, body) {
+    const value = document.createElement("form");
+    value.action = target;
+    value.method = method;
+    value.target = "form-result";
+    value.innerHTML = body;
+    document.body.append(value);
+    return value;
+  }
+  async function run() {
+    check(navigator.sendBeacon(`${config.target}/beacon-string`, "ready"), "sendBeacon synchronously seals string BodyInit");
+    check(navigator.sendBeacon(`${config.target}/beacon-url`, new URLSearchParams({ q: "a b" })), "sendBeacon synchronously seals URLSearchParams");
+    check(navigator.sendBeacon(`${config.target}/beacon-bytes`, new Uint8Array([7, 8])), "sendBeacon synchronously seals binary views");
+    check(navigator.sendBeacon(`${config.target}/beacon-blob`, new Blob(["blob-body"], { type: "text/plain" })), "sendBeacon preserves Blob BodyInit");
+    const beaconForm = new FormData();
+    beaconForm.append("form", "body");
+    check(navigator.sendBeacon(`${config.target}/beacon-form-data`, beaconForm), "sendBeacon preserves FormData BodyInit");
+
+    const frame = document.createElement("iframe");
+    frame.name = "form-result";
+    document.body.append(frame);
+
+    const get = form(`${config.target}/forms/get?old=1`, "get", '<input name="q" value="hello world">');
+    let getSubmitEvents = 0;
+    get.addEventListener("submit", () => { getSubmitEvents += 1; });
+    await submitFrame(frame, () => get.submit(), "GET form");
+    check(getSubmitEvents === 0, "form.submit preserves native no-submit-event behavior", getSubmitEvents);
+    check(get.action === `${config.target}/forms/get?old=1`, "GET form action remains target-visible after sealing", get.action);
+
+    const post = form(`${config.target}/forms/post`, "post", '<input name="a" value="one"><button name="go" value="yes" type="submit">go</button>');
+    let postSubmitEvents = 0;
+    post.addEventListener("submit", () => { postSubmitEvents += 1; });
+    await submitFrame(frame, () => post.requestSubmit(post.querySelector("button")), "requestSubmit form");
+    check(postSubmitEvents === 1, "requestSubmit emits exactly one submit event", postSubmitEvents);
+    check(post.action === `${config.target}/forms/post`, "POST form action remains target-visible after sealing", post.action);
+
+    const user = form(`${config.target}/forms/user`, "post", '<input name="note" value="user"><button type="submit">submit</button>');
+    user.enctype = "text/plain";
+    let userSubmitEvents = 0;
+    user.addEventListener("submit", () => { userSubmitEvents += 1; });
+    await submitFrame(frame, () => user.querySelector("button").click(), "user form");
+    check(userSubmitEvents === 1, "user submit emits exactly one submit event", userSubmitEvents);
+
+    const multipart = form(`${config.target}/forms/multipart`, "post", '<input name="base" value="kept"><input name="upload" type="file"><button name="send" value="go" type="submit">submit</button>');
+    multipart.enctype = "multipart/form-data";
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["file-body"], "résumé.txt", { type: "text/plain" }));
+    multipart.querySelector('input[type="file"]').files = transfer.files;
+    let multipartSubmitEvents = 0;
+    multipart.addEventListener("submit", () => { multipartSubmitEvents += 1; });
+    let formDataEvents = 0;
+    multipart.addEventListener("formdata", event => {
+      formDataEvents += 1;
+      event.formData.append("augmented", "yes");
+    });
+    await submitFrame(frame, () => multipart.requestSubmit(multipart.querySelector("button")), "multipart form");
+    check(multipartSubmitEvents === 1, "multipart requestSubmit emits one submit event", multipartSubmitEvents);
+    check(formDataEvents >= 1, "multipart submission emits mutable formdata events", formDataEvents);
+
+    const windowStopped = form(`${config.target}/forms/window-capture`, "post", '<input name="window" value="capture"><button type="submit">submit</button>');
+    let windowStoppedTargetEvents = 0;
+    windowStopped.addEventListener("submit", () => { windowStoppedTargetEvents += 1; });
+    const stopSubmitAtWindow = event => event.stopPropagation();
+    window.addEventListener("submit", stopSubmitAtWindow, true);
+    await submitFrame(frame, () => windowStopped.querySelector("button").click(), "window capture form");
+    window.removeEventListener("submit", stopSubmitAtWindow, true);
+    check(windowStoppedTargetEvents === 0, "later window capture stopPropagation preserves target-visible propagation", windowStoppedTargetEvents);
+
+    const raced = form(`${config.target}/forms/race`, "post", '<input name="race" value="initial"><button type="submit" formaction="' + `${config.target}/forms/race-submitter` + '">race</button>');
+    const raceButton = raced.querySelector("button");
+    let actionRemovalBlocked = false;
+    let formActionRemovalBlocked = false;
+    raced.addEventListener("submit", event => {
+      raced.action = `${config.target}/forms/race-mutated`;
+      raceButton.formAction = `${config.target}/forms/race-submitter-mutated`;
+      try { raced.removeAttribute("action"); } catch (error) { actionRemovalBlocked = error.name === "SecurityError"; }
+      try { raceButton.removeAttribute("formaction"); } catch (error) { formActionRemovalBlocked = error.name === "SecurityError"; }
+      event.stopPropagation();
+    });
+    await submitFrame(frame, () => raced.requestSubmit(raceButton), "raced form");
+    check(actionRemovalBlocked && formActionRemovalBlocked, "active action and formaction cannot be removed during submission sealing", { actionRemovalBlocked, formActionRemovalBlocked });
+    check(raced.action === `${config.target}/forms/race-mutated`, "raced action mutation remains target-visible", raced.action);
+    check(raceButton.formAction === `${config.target}/forms/race-submitter-mutated`, "raced formaction mutation remains target-visible", raceButton.formAction);
+
+    const cancelled = form(`${config.target}/forms/cancel`, "post", '<button type="submit">cancel</button>');
+    let cancelledDefaultBefore = null;
+    cancelled.addEventListener("submit", event => {
+      cancelledDefaultBefore = event.defaultPrevented;
+      event.preventDefault();
+    });
+    cancelled.querySelector("button").click();
+    await sleep(100);
+    check(cancelledDefaultBefore === false, "capture sealing does not alter later defaultPrevented state", cancelledDefaultBefore);
+
+    const sealFailure = form("http://127.0.0.1:444/forms/seal-failure", "post", '<button type="submit">fail</button>');
+    let sealFailurePrevented = false;
+    sealFailure.addEventListener("submit", event => {
+      sealFailurePrevented = event.defaultPrevented;
+      event.stopPropagation();
+    });
+    sealFailure.querySelector("button").click();
+    await sleep(100);
+    check(sealFailurePrevented, "form seal failure prevents native default before direct navigation");
+
+    const navigation = document.createElement("a");
+    navigation.href = `${config.target}/navigation/programmatic-initial`;
+    navigation.target = "";
+    document.body.append(navigation);
+    const hrefMutations = [];
+    const hrefObserver = new MutationObserver(records => hrefMutations.push(...records));
+    hrefObserver.observe(navigation, { attributes: true, attributeFilter: ["href"], attributeOldValue: true });
+    navigation.href = `${config.target}/navigation/programmatic`;
+    await Promise.resolve();
+    hrefObserver.disconnect();
+    const hrefMutationDetail = hrefMutations.map(record => ({ name: record.attributeName, oldValue: record.oldValue, value: record.target.getAttribute("href") }));
+    check(hrefMutationDetail.length > 0
+      && hrefMutationDetail.some(record => record.oldValue === `${config.target}/navigation/programmatic-initial`)
+      && hrefMutationDetail.every(record => !JSON.stringify(record).includes("/_zp/")), "href observers receive only target-visible values", hrefMutationDetail);
+    navigation.target = "form-result";
+    let auxclickView;
+    navigation.addEventListener("auxclick", event => {
+      auxclickView = { defaultPrevented: event.defaultPrevented, href: navigation.href, attribute: navigation.getAttribute("href") };
+      event.preventDefault();
+    }, { once: true });
+    navigation.dispatchEvent(new MouseEvent("auxclick", { bubbles: true, cancelable: true, composed: true, button: 1 }));
+    check(auxclickView?.defaultPrevented === false
+      && auxclickView.href === `${config.target}/navigation/programmatic`
+      && auxclickView.attribute === `${config.target}/navigation/programmatic`, "auxclick refreshes a sealed target-visible href", auxclickView);
+    await sleep(100);
+    await navigateElement(navigation, () => navigation.click(), "programmatic anchor navigation");
+    check(navigation.href === `${config.target}/navigation/programmatic`, "programmatic anchor retains target-visible URL", navigation.href);
+
+    const racedNavigation = document.createElement("a");
+    racedNavigation.href = `${config.target}/navigation/initial`;
+    racedNavigation.target = "form-result";
+    let racedNavigationPrevented = false;
+    racedNavigation.addEventListener("click", event => {
+      racedNavigation.href = `${config.target}/navigation/raced`;
+      racedNavigationPrevented = event.defaultPrevented;
+    }, { once: true });
+    document.body.append(racedNavigation);
+    racedNavigation.click();
+    await Promise.resolve();
+    check(racedNavigationPrevented && racedNavigation.href === `${config.target}/navigation/raced`, "click-time href mutation cancels the stale activation and reseals the next", { prevented: racedNavigationPrevented, href: racedNavigation.href });
+
+
+    let extendsReads = 0;
+    const autonomousName = `zp-autonomous-${crypto.randomUUID()}`;
+    const AutonomousElement = class extends HTMLElement {};
+    customElements.define(autonomousName, AutonomousElement, new Proxy({}, { get(_target, key) {
+      if (key !== "extends") return undefined;
+      extendsReads += 1;
+      return extendsReads === 1 ? undefined : "a";
+    } }));
+    let customizedBuiltInBlocked = false;
+    try { customElements.define(`zp-anchor-${crypto.randomUUID()}`, class extends HTMLAnchorElement {}, { extends: "a" }); }
+    catch (error) { customizedBuiltInBlocked = error.name === "SecurityError"; }
+    check(extendsReads === 1
+      && customElements.get(autonomousName) === AutonomousElement
+      && customizedBuiltInBlocked, "customized built-ins cannot observe internal URL attributes", { extendsReads, customizedBuiltInBlocked });
+
+    const areaNavigation = document.createElement("area");
+    areaNavigation.href = `${config.target}/navigation/area`;
+    let areaPrevented = false;
+    areaNavigation.addEventListener("click", event => { areaPrevented = event.defaultPrevented; });
+    document.body.append(areaNavigation);
+    areaNavigation.click();
+    check(areaPrevented && areaNavigation.href === `${config.target}/navigation/area`, "area navigation is blocked without exposing its target URL", { prevented: areaPrevented, href: areaNavigation.href });
+
+    const baseBeforeMutation = document.baseURI;
+    const dynamicBase = document.createElement("base");
+    dynamicBase.href = `${config.target}/base/`;
+    document.head.append(dynamicBase);
+    check(document.baseURI === `${config.target}/base/`
+      && dynamicBase.href === `${config.target}/base/`
+      && dynamicBase.getAttribute("href") === `${config.target}/base/`, "base mutation remains virtual and target-visible", { document: document.baseURI, idl: dynamicBase.href, attribute: dynamicBase.getAttribute("href") });
+    dynamicBase.removeAttributeNode(dynamicBase.getAttributeNode("href"));
+    check(document.baseURI === baseBeforeMutation && dynamicBase.getAttribute("href") === null, "base attribute removal revokes the virtual base", { before: baseBeforeMutation, after: document.baseURI, attribute: dynamicBase.getAttribute("href") });
+    dynamicBase.remove();
+
+    const refresh = document.createElement("meta");
+    refresh.httpEquiv = "refresh";
+    let refreshBlocked = false;
+    try { refresh.content = `0;url=${config.target}/navigation/refresh`; }
+    catch (error) { refreshBlocked = error.name === "SecurityError"; }
+    check(refreshBlocked, "dynamic meta refresh is blocked", refreshBlocked);
+
+    const blockedContainer = document.createElement("div");
+    const blockedBlob = URL.createObjectURL(new Blob(["blocked"], { type: "text/html" }));
+    for (const target of ["javascript:globalThis.__navigationEscape=true", "data:text/html,blocked", blockedBlob, "mailto:blocked@example.test"]) {
+      const escaped = target.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+      blockedContainer.innerHTML = `<a href="${escaped}" target="form-result">blocked</a>`;
+      const blockedAnchor = blockedContainer.querySelector("a");
+      document.body.append(blockedContainer);
+      let prevented = false;
+      blockedAnchor.addEventListener("click", event => { prevented = event.defaultPrevented; });
+      blockedAnchor.click();
+      check(prevented, "non-HTTP navigation scheme is blocked", target);
+    }
+    URL.revokeObjectURL(blockedBlob);
+    check(globalThis.__navigationEscape !== true, "javascript navigation did not execute", globalThis.__navigationEscape);
+
+    const dragAnchor = document.createElement("a");
+    dragAnchor.href = `${config.target}/navigation/drag`;
+    document.body.append(dragAnchor);
+    const dragEvent = new Event("dragstart", { bubbles: true, cancelable: true, composed: true });
+    const dropEvent = new Event("drop", { bubbles: true, cancelable: true, composed: true });
+    dragAnchor.dispatchEvent(dragEvent);
+    document.body.dispatchEvent(dropEvent);
+    check(dragEvent.defaultPrevented && dropEvent.defaultPrevented, "native drag and drop navigation defaults are blocked", { drag: dragEvent.defaultPrevented, drop: dropEvent.defaultPrevented });
+
+    const ping = document.createElement("a");
+    ping.href = "#ping-capture";
+    ping.target = "form-result";
+    ping.setAttribute("ping", `${config.target}/anchor-ping`);
+    document.body.append(ping);
+    const stopAndCancelClickAtWindow = event => { event.preventDefault(); event.stopPropagation(); };
+    const stopClickAtWindow = event => event.stopPropagation();
+    window.addEventListener("click", stopAndCancelClickAtWindow, true);
+    ping.click();
+    window.removeEventListener("click", stopAndCancelClickAtWindow, true);
+    await sleep(20);
+    check(ping.getAttribute("ping") === `${config.target}/anchor-ping`, "cancelled anchor ping remains target-visible and sealed", ping.getAttribute("ping"));
+    ping.click();
+    await sleep(100);
+    check(ping.getAttribute("ping") === `${config.target}/anchor-ping`, "completed anchor ping remains target-visible for later activations", ping.getAttribute("ping"));
+
+    const download = document.createElement("a");
+    download.href = `${config.target}/downloads/report`;
+    download.download = "report final.txt";
+    document.body.append(download);
+    let visibleDownload;
+    download.addEventListener("click", event => {
+      visibleDownload = {
+        attribute: download.getAttribute("href"),
+        href: download.href,
+        outerHTML: download.outerHTML,
+        serialized: new XMLSerializer().serializeToString(download),
+      };
+      event.stopPropagation();
+    });
+    download.click();
+    check(visibleDownload?.attribute === `${config.target}/downloads/report`
+      && visibleDownload.href === `${config.target}/downloads/report`
+      && visibleDownload.outerHTML.includes(`${config.target}/downloads/report`)
+      && visibleDownload.serialized.includes(`${config.target}/downloads/report`)
+      && !visibleDownload.outerHTML.includes("/_zp/download/")
+      && !visibleDownload.serialized.includes("/_zp/download/"), "later click listeners and serialization cannot observe sealed download href", visibleDownload);
+
+    const windowStoppedDownload = document.createElement("a");
+    windowStoppedDownload.href = `${config.target}/downloads/window-capture`;
+    windowStoppedDownload.download = "window-capture.txt";
+    document.body.append(windowStoppedDownload);
+    window.addEventListener("click", stopClickAtWindow, true);
+    windowStoppedDownload.click();
+    window.removeEventListener("click", stopClickAtWindow, true);
+
+    const cancelledDownload = document.createElement("a");
+    cancelledDownload.href = `${config.target}/downloads/cancel`;
+    cancelledDownload.download = "cancel.txt";
+    document.body.append(cancelledDownload);
+    let downloadDefaultBefore = null;
+    cancelledDownload.addEventListener("click", event => {
+      downloadDefaultBefore = event.defaultPrevented;
+      event.preventDefault();
+    });
+    cancelledDownload.click();
+    check(downloadDefaultBefore === false, "download sealing preserves later defaultPrevented state", downloadDefaultBefore);
+    await sleep(500);
+    const navigationHost = document.createElement("div");
+    const navigationShadow = navigationHost.attachShadow({ mode: "closed" });
+    navigationShadow.innerHTML = `<a href="${config.target}/navigation/closed-shadow" target="_self">shadow</a>`;
+    const shadowNavigation = navigationShadow.querySelector("a");
+    shadowNavigation.addEventListener("click", event => {
+      const closedShadowView = { href: shadowNavigation.href, attribute: shadowNavigation.getAttribute("href"), defaultPrevented: event.defaultPrevented };
+      check(closedShadowView.href === `${config.target}/navigation/closed-shadow`
+        && closedShadowView.attribute === `${config.target}/navigation/closed-shadow`, "closed-shadow navigation stays sealed and target-visible", closedShadowView);
+      publish({ ok: true, cases });
+    });
+    document.body.append(navigationHost);
+    sessionStorage.setItem("navigation-stage", JSON.stringify({ name: "closed-shadow anchor navigation", target: shadowNavigation.target, frameConnected: navigationHost.isConnected }));
+    shadowNavigation.click();
+  }
+  run().catch(error => { publish({ ok: false, cases, error: `${error?.name}: ${error?.message}`, stack: error?.stack }); });
+})();
+</script>

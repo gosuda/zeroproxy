@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/protocol/v1-migration-disposition.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version","ga_at","sunset_at","owner","issue","user_notice","local_retention","server_retention","importer_asset_hash","test_ids","rollback_conditions","sunset_conditions","artifacts"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "ga_at": {"type":"string","format":"date-time"},
+    "sunset_at": {"type":"string","format":"date-time"},
+    "owner": {"type":"string","minLength":1},
+    "issue": {"type":"string","minLength":1},
+    "user_notice": {"type":"string","minLength":1},
+    "local_retention": {"type":"string","minLength":1},
+    "server_retention": {"type":"string","minLength":1},
+    "importer_asset_hash": {"type":"string","pattern":"^[a-f0-9]{64}$"},
+    "test_ids": {"type":"array","minItems":1,"items":{"type":"string"}},
+    "rollback_conditions": {"type":"array","minItems":1,"items":{"type":"string"}},
+    "sunset_conditions": {"type":"array","minItems":1,"items":{"type":"string"}},
+    "artifacts": {"type":"array","minItems":7,"items":{"type":"object","additionalProperties":false,"required":["name","disposition"],"properties":{"name":{"type":"string"},"disposition":{"enum":["local-import-90-days","incompatible","fresh-approval"]}}}}
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "policy_id": "zeroproxy-address-policy-v1",
+  "hostname_canonicalization": "UTS46_IDNA2008_LOOKUP",
+  "socks_address_type": "DOMAIN",
+  "reject_ip_literals": true,
+  "reject_single_label": true,
+  "blocked_suffixes": [
+    "alt",
+    "arpa",
+    "corp",
+    "example",
+    "example.com",
+    "example.net",
+    "example.org",
+    "home",
+    "home.arpa",
+    "internal",
+    "invalid",
+    "lan",
+    "local",
+    "localdomain",
+    "localhost",
+    "metadata.aws.internal",
+    "metadata.azure.internal",
+    "metadata.google.internal",
+    "onion",
+    "test"
+  ]
+}

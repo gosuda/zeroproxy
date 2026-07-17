@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<body>
+<script>
+let markupUpgrades=0;
+const markupEvents=[];
+class ZPMarkupProbe extends HTMLElement{constructor(){super();markupUpgrades+=1;markupEvents.push("constructor")}connectedCallback(){markupEvents.push("connected")}}
+customElements.define("zp-markup-probe",ZPMarkupProbe);
+const markupHost=document.createElement("div");
+document.body.append(markupHost);
+const markupMutationObserver=new MutationObserver(()=>{});
+markupMutationObserver.observe(markupHost,{childList:true});
+markupHost.innerHTML="<zp-markup-probe data-safe=\"ok\"><span>safe</span></zp-markup-probe><script>globalThis.markupScriptExecuted=true<\/script>";
+const markupMutationRecords=markupMutationObserver.takeRecords().map(record=>({added:record.addedNodes.length,removed:record.removedNodes.length}));
+const inertScript=markupHost.querySelector("script");
+inertScript.remove();markupHost.append(inertScript);
+const inertClone=inertScript.cloneNode(true);markupHost.append(inertClone);
+const outerMarker=document.createElement("i");
+markupHost.append(outerMarker);
+outerMarker.outerHTML="<strong id=\"outer-safe\">outer</strong>";
+markupHost.insertAdjacentHTML("beforeend","<em id=\"adjacent-safe\">adjacent</em><script>globalThis.adjacentScriptExecuted=true<\/script>");
+const range=document.createRange();
+range.selectNodeContents(markupHost);
+const contextual=range.createContextualFragment("<u id=\"range-safe\">range</u><script>globalThis.rangeScriptExecuted=true<\/script>");
+markupHost.append(contextual);
+const parsedMarkup=new DOMParser().parseFromString("<main><p id=\"parsed-safe\">parsed</p></main>","text/html");
+const parsedXML=new DOMParser().parseFromString("<catalog version=\"2\"><entry id=\"safe\">xml</entry></catalog>","application/xml");
+const parsedSVG=new DOMParser().parseFromString("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><circle id=\"safe-svg\" cx=\".5\" cy=\".5\" r=\".5\"/></svg>","image/svg+xml");
+const shadowHost=document.createElement("div"),shadow=shadowHost.attachShadow({mode:"open"});
+document.body.append(shadowHost);
+shadow.innerHTML="<b id=\"shadow-safe\">shadow</b><script>globalThis.shadowScriptExecuted=true<\/script>";
+const table=document.createElement("table"),tbody=document.createElement("tbody");
+table.append(tbody);tbody.innerHTML="<tr><td>cell</td></tr>";
+const emerging={};
+if(typeof Element.prototype.setHTML==="function"){
+  const safeHost=document.createElement("div");document.body.append(safeHost);
+  const safeReturn=safeHost.setHTML("<p id=\"safe-method\">safe <b>method</b></p><script>globalThis.emergingSafeScript=true<\/script>");
+  const configuredHost=document.createElement("div");configuredHost.setHTML("<p id=\"configured\" data-extra=\"drop\">configured <b>bold</b><i>drop</i></p>",{sanitizer:{elements:["p","b"],attributes:["id"]}});
+  emerging.element={safeReturn:String(safeReturn),safeHTML:safeHost.innerHTML,safeScript:globalThis.emergingSafeScript===true,configuredHTML:configuredHost.innerHTML};
+}
+if(typeof Element.prototype.setHTMLUnsafe==="function"){
+  const unsafeHost=document.createElement("div");document.body.append(unsafeHost);
+  const unsafeReturn=unsafeHost.setHTMLUnsafe("<section id=\"unsafe-method\"><script>globalThis.emergingUnsafeScript=true<\/script><div id=\"declarative-host\"><template shadowrootmode=\"open\"><span>declarative</span><script>globalThis.emergingShadowScript=true<\/script></template></div></section>");
+  const methodTable=document.createElement("table"),methodBody=document.createElement("tbody");methodTable.append(methodBody);methodBody.setHTMLUnsafe("<tr><td>method cell</td></tr>");
+  Object.assign(emerging.element??={}, {unsafeReturn:String(unsafeReturn),unsafeHTML:unsafeHost.innerHTML,unsafeScript:globalThis.emergingUnsafeScript===true,declarativeText:unsafeHost.querySelector("#declarative-host")?.shadowRoot?.textContent,declarativeScript:globalThis.emergingShadowScript===true,tableHTML:methodBody.innerHTML});
+}
+if(typeof ShadowRoot.prototype.setHTML==="function"){
+  const methodShadowHost=document.createElement("div"),methodShadow=methodShadowHost.attachShadow({mode:"open"});document.body.append(methodShadowHost);
+  const safeReturn=methodShadow.setHTML("<p id=\"shadow-method-safe\">safe shadow</p><script>globalThis.emergingShadowSafeScript=true<\/script>");
+  emerging.shadow={safeReturn:String(safeReturn),safeHTML:methodShadow.innerHTML,safeScript:globalThis.emergingShadowSafeScript===true};
+}
+if(typeof ShadowRoot.prototype.setHTMLUnsafe==="function"){
+  const methodShadowHost=document.createElement("div"),methodShadow=methodShadowHost.attachShadow({mode:"open"});document.body.append(methodShadowHost);
+  const unsafeReturn=methodShadow.setHTMLUnsafe("<p id=\"shadow-method-unsafe\">unsafe shadow</p><script>globalThis.emergingShadowUnsafeScript=true<\/script>");
+  Object.assign(emerging.shadow??={}, {unsafeReturn:String(unsafeReturn),unsafeHTML:methodShadow.innerHTML,unsafeScript:globalThis.emergingShadowUnsafeScript===true});
+}
+if(typeof Document.parseHTML==="function"){
+  const safeDocument=Document.parseHTML("<!doctype html><html lang=\"en\"><head><title>safe document</title></head><body><main id=\"safe-document\">safe</main><script>globalThis.emergingDocumentSafeScript=true<\/script></body></html>");
+  emerging.document={safeHTML:safeDocument.documentElement.outerHTML,safeDoctype:safeDocument.doctype?.name,safeScript:globalThis.emergingDocumentSafeScript===true};
+}
+if(typeof Document.parseHTMLUnsafe==="function"){
+  const unsafeDocument=Document.parseHTMLUnsafe("<!doctype html><html lang=\"en\"><head><title>unsafe document</title></head><body><main id=\"unsafe-document\">unsafe</main><script>globalThis.emergingDocumentUnsafeScript=true<\/script></body></html>");
+  Object.assign(emerging.document??={}, {unsafeHTML:unsafeDocument.documentElement.outerHTML,unsafeDoctype:unsafeDocument.doctype?.name,unsafeScript:globalThis.emergingDocumentUnsafeScript===true});
+}
+globalThis.__nativeMarkupOracle={
+  markupUpgrades,
+  markupEvents,
+  markupMutationRecords,
+  customText:markupHost.querySelector("zp-markup-probe span")?.textContent,
+  inertScriptCount:markupHost.querySelectorAll("script").length,
+  markupScriptExecuted:globalThis.markupScriptExecuted===true,
+  outerText:markupHost.querySelector("#outer-safe")?.textContent,
+  adjacentText:markupHost.querySelector("#adjacent-safe")?.textContent,
+  adjacentScriptExecuted:globalThis.adjacentScriptExecuted===true,
+  rangeText:markupHost.querySelector("#range-safe")?.textContent,
+  rangeScriptExecuted:globalThis.rangeScriptExecuted===true,
+  parsedText:parsedMarkup.querySelector("#parsed-safe")?.textContent,
+  parsedHTML:parsedMarkup.documentElement.outerHTML,
+  parsedXML:parsedXML.documentElement.outerHTML,
+  parsedSVG:parsedSVG.documentElement.outerHTML,
+  shadowText:shadow.querySelector("#shadow-safe")?.textContent,
+  shadowHTML:shadow.innerHTML,
+  shadowScriptExecuted:globalThis.shadowScriptExecuted===true,
+  tableRows:tbody.rows.length,
+  tableCells:tbody.rows[0]?.cells.length,
+  tableText:tbody.rows[0]?.cells[0]?.textContent,
+  tableHTML:tbody.innerHTML,
+  emerging,
+};
+</script>
+</body>

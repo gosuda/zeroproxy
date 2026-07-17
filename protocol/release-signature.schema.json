@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/release-signature.schema.json",
+  "title": "ZeroProxy detached release signatures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["algorithm", "canonicalization", "key_epoch", "development_only", "signatures"],
+  "properties": {
+    "algorithm": {"const": "Ed25519"},
+    "canonicalization": {"const": "RFC8785"},
+    "key_epoch": {"type": "integer", "minimum": 1},
+    "development_only": {"type": "boolean"},
+    "signatures": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key_id", "signature"],
+        "properties": {
+          "key_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+          "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}
+        }
+      }
+    }
+  }
+}

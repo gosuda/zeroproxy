@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>protected eval oracle</title>
+<pre id="result"></pre>
+<script type="module">
+const version = await fetch("/_zp/version.json").then(response => response.json());
+const runtime = document.createElement("script");
+const targetURL = "https://target.example/path/index.html";
+const childTargetURL = "https://target.example/path/child.html";
+const abiName = "__zp_abi_555555555555555555555555555555555555555555555555";
+const preinstrumentedFrame = document.createElement("iframe");
+preinstrumentedFrame.id = "preinstrumented-child";
+const preinstrumentedReady = new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => { removeEventListener("message", listener); reject(new Error("child readiness timeout")); }, 5000);
+  const listener = event => {
+    if (event.origin !== location.origin || event.data?.type !== "protected-eval-child-ready-v2") return;
+    clearTimeout(timeout);
+    removeEventListener("message", listener);
+    resolve();
+  };
+  addEventListener("message", listener);
+});
+preinstrumentedFrame.src = "/protected-eval-child.html";
+document.body.append(preinstrumentedFrame);
+runtime.src = version.selectors["runtime-prelude.js"] + "#abi=" + abiName + "&url=" + encodeURIComponent(targetURL) + "&ports=80%2C443";
+runtime.onload = async () => {
+  const tests = [];
+  const run = source => (0, eval)(`${abiName}.scope.window.eval(${JSON.stringify(source)})`);
+  function check(id, action) {
+    try { tests.push({ id, ok: Boolean(action()) }); }
+    catch (error) { tests.push({ id, ok: false, error: error.name + ":" + error.message }); }
+  }
+  async function checkAsync(id, action) {
+    try { tests.push({ id, ok: Boolean(await action()) }); }
+    catch (error) { tests.push({ id, ok: false, error: error.name + ":" + error.message }); }
+  }
+
+  check("direct-eval-lexical", () => run("(()=>{let local=3;eval('local += 4');return local})()") === 7);
+  check("delete-then-direct-eval", () => {
+    const value = run("(()=>{let deleted;try{deleted=delete window.eval}catch(error){deleted=error.name}const descriptor=Object.getOwnPropertyDescriptor(window,'eval');eval('window.__zp_delete_eval=17');return [deleted,descriptor.configurable,descriptor.writable,window.__zp_delete_eval]})()");
+    return value[0] === false && value[1] === false && value[2] === false && value[3] === 17;
+  });
+  check("define-then-direct-eval", () => {
+    const value = run("(()=>{let outcome;try{Object.defineProperty(window,'eval',{value:Function});outcome='redefined'}catch(error){outcome=error.name}eval('window.__zp_define_eval=19');return [outcome,window.__zp_define_eval]})()");
+    return value[0] === "TypeError" && value[1] === 19;
+  });
+  check("prevent-extensions-reflection", () => {
+    const value = run("(()=>{let threw=false;try{Object.preventExtensions(window)}catch(error){threw=error.name==='TypeError'}const reflected=Reflect.preventExtensions(window),descriptor=Object.getOwnPropertyDescriptor(window,'eval');return [threw,reflected,Object.isExtensible(window),Reflect.ownKeys(window).includes('eval'),Object.getPrototypeOf(window)===Window.prototype,descriptor.configurable,descriptor.writable]})()");
+    return value[0] === true && value[1] === false && value[2] === true && value[3] === true && value[4] === true && value[5] === false && value[6] === false;
+  });
+  check("virtual-descriptors-mediated", () => {
+    const value = run("(()=>{const descriptor=name=>Object.getOwnPropertyDescriptor(window,name),blocked=(call,name)=>{try{call();return false}catch(error){return error.name===name}},functionValue=descriptor('Function').value('return location.href')(),locationValue=descriptor('location').value.href,openBlocked=blocked(()=>descriptor('open').value(),'SecurityError'),rtcDescriptor=descriptor('RTCPeerConnection'),transportDescriptor=descriptor('WebTransport'),rtcBlocked=!rtcDescriptor||blocked(()=>new rtcDescriptor.value,'NotSupportedError'),transportBlocked=!transportDescriptor||blocked(()=>new transportDescriptor.value('https://example.com'),'NotSupportedError');return [functionValue,locationValue,openBlocked,rtcBlocked,transportBlocked]})()");
+    return value[0] === targetURL && value[1] === targetURL && value.slice(2).every(Boolean);
+  });
+  check("identity-chains-mediated", () => {
+    const value = run("(()=>{window.window.eval('window.__zp_window_chain=location.href');window.self.eval('window.__zp_self_chain=location.href');const descriptor=Object.getOwnPropertyDescriptor(window,'window');return [window.window===window,window.self===window,window.globalThis===window,window.top===window,window.parent===window,window.frames===window,descriptor.value===window,window.__zp_window_chain,window.__zp_self_chain]})()");
+    return value.slice(0, 7).every(Boolean) && value[7] === targetURL && value[8] === targetURL;
+  });
+  check("window-receiver-methods", () => {
+    const value = run("(()=>{let fired=false;const listener=()=>{fired=true};window.addEventListener('zp-receiver',listener);window.dispatchEvent(new Event('zp-receiver'));window.removeEventListener('zp-receiver',listener);const stable=window.addEventListener===window.addEventListener,descriptor=Object.getOwnPropertyDescriptor(window,'getComputedStyle'),descriptorStable=descriptor.value===window.getComputedStyle,display=window.getComputedStyle(document.body).display;let extractedFired=false,extracted=false;const extractedListener=()=>{extractedFired=true},add=window.addEventListener,remove=window.removeEventListener;try{add('zp-extracted',extractedListener);window.dispatchEvent(new Event('zp-extracted'));remove('zp-extracted',extractedListener);extracted=extractedFired}catch{}return [fired,stable,descriptorStable,typeof display==='string',extracted]})()");
+    return value.every(Boolean);
+  });
+  check("dom-window-getters-mediated", () => {
+    window.__zp_native_ui_event = new UIEvent("zp", { view: window });
+    window.__zp_native_message_event = new MessageEvent("zp", { source: window });
+    const value = run("(()=>{document.defaultView.eval('window.__zp_default_view=location.href');__zp_native_ui_event.view.eval('window.__zp_event_view=location.href');__zp_native_message_event.source.eval('window.__zp_event_source=location.href');return [document.defaultView===window,__zp_native_ui_event.view===window,__zp_native_message_event.source===window,window.__zp_default_view,window.__zp_event_view,window.__zp_event_source]})()");
+    delete window.__zp_native_ui_event;
+    delete window.__zp_native_message_event;
+    return value.slice(0, 3).every(Boolean) && value.slice(3).every(item => item === targetURL);
+  });
+  check("about-blank-realms-mediated", () => {
+    const value = run("(()=>{const index=window.length,frame=document.createElement('iframe');document.body.append(frame);const child=frame.contentWindow,childDocument=frame.contentDocument;child.eval('window.__zp_child_eval=location.href');childDocument.body.dataset.nativeAccess='ok';const grandFrame=childDocument.createElement('iframe');childDocument.body.append(grandFrame);const grandchild=grandFrame.contentWindow;grandchild.eval('window.__zp_grandchild_eval=location.href');const result=[child===window[index],child===window.frames[index],child===childDocument.defaultView,child.window===child,child.self===child,child.parent===window,child.top===window,child.document===childDocument,childDocument.body.dataset.nativeAccess,child.__zp_child_eval,grandchild.window===grandchild,grandchild.parent===child,grandchild.top===window,grandchild.__zp_grandchild_eval,Reflect.ownKeys(child).some(key=>typeof key==='string'&&/^[a-f0-9]{32}$/.test(key))];frame.remove();return result})()");
+    const ok = value.slice(0, 8).every(Boolean) && value[8] === "ok" && value[9] === targetURL && value.slice(10, 13).every(Boolean) && value[13] === targetURL && value[14] === false;
+    if (!ok) throw new Error(JSON.stringify(value));
+    return true;
+  });
+  await checkAsync("preinstrumented-child-handoff", async () => {
+    await preinstrumentedReady;
+    const value = run("(()=>{const frame=document.querySelector('#preinstrumented-child'),child=frame.contentWindow,again=frame.contentDocument.defaultView;child.eval('window.__zp_loaded_child_eval=location.href');return [child===again,child.window===child,child.self===child,child.parent===window,child.top===window,child.document===frame.contentDocument,child.__zp_loaded_child_eval,frame.contentDocument.body.dataset.ready]})()");
+    preinstrumentedFrame.remove();
+    return value.slice(0, 6).every(Boolean) && value[6] === childTargetURL && value[7] === "true";
+  });
+  check("member-eval-mediated", () => run("(()=>{window.eval('window.__zp_member_eval=23');return window.__zp_member_eval})()") === 23);
+  document.querySelector("#result").textContent = JSON.stringify({ tests, ok: tests.every(test => test.ok) });
+};
+runtime.onerror = () => { document.querySelector("#result").textContent = JSON.stringify({ tests: [], ok: false, error: "runtime-load" }); };
+document.head.append(runtime);
+</script>

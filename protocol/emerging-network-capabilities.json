@@ -1,0 +1,2028 @@
+{
+  "schema_version": 1,
+  "inventory_version": 1,
+  "release_id": "2.0.0-dev",
+  "browser_lanes": [
+    {
+      "family": "chromium",
+      "exact_build": "150.0.7871.124",
+      "platform": "darwin-arm64",
+      "binary_sha256": "22ddf33cec88bbfd181588eb3da31250a65ba8ebfdb6efcd2694a36275697284"
+    },
+    {
+      "family": "firefox",
+      "exact_build": "152.0.6",
+      "platform": "darwin-arm64",
+      "binary_sha256": "8489f35e3b2ee8b7ca8aaa34ae0762d3faa884ccef8cbeecfad0cae213b7c0e7"
+    }
+  ],
+  "policy_exception": {
+    "boundary": "synchronous",
+    "name": "NotSupportedError",
+    "message_suffix": " is disabled by ZeroProxy policy"
+  },
+  "packet_test_id": "emerging-capability-zero-egress-v1",
+  "permissions_policy_features": [
+    "attribution-reporting",
+    "bluetooth",
+    "browsing-topics",
+    "camera",
+    "digital-credentials-get",
+    "display-capture",
+    "geolocation",
+    "hid",
+    "identity-credentials-get",
+    "join-ad-interest-group",
+    "microphone",
+    "nfc",
+    "payment",
+    "private-aggregation",
+    "publickey-credentials-create",
+    "publickey-credentials-get",
+    "run-ad-auction",
+    "serial",
+    "speaker-selection",
+    "usb",
+    "web-share"
+  ],
+  "capabilities": [
+    {
+      "id": "fedcm-identity-credential",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "global",
+        "name": "IdentityCredential"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "fedcm-federated-credential",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "global",
+        "name": "FederatedCredential"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "credential-password",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "global",
+        "name": "PasswordCredential"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "credential-container-get",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "CredentialsContainer",
+        "member": "get"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "credential-container-create",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "CredentialsContainer",
+        "member": "create"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "credential-container-store",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "CredentialsContainer",
+        "member": "store"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "credential-container-prevent-silent-access",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "CredentialsContainer",
+        "member": "preventSilentAccess"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "fedcm-disconnect",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "static-method",
+        "owner": "IdentityCredential",
+        "member": "disconnect"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "fedcm-login-status",
+      "category": "federated-identity",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "NavigatorLogin",
+        "member": "setStatus"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "payment-request",
+      "category": "payments",
+      "binding": {
+        "kind": "global",
+        "name": "PaymentRequest"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-manager-delegations",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentManager",
+        "member": "enableDelegations"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-instruments-clear",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentInstruments",
+        "member": "clear"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-instruments-delete",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentInstruments",
+        "member": "delete"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-instruments-get",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentInstruments",
+        "member": "get"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-instruments-has",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentInstruments",
+        "member": "has"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-instruments-keys",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentInstruments",
+        "member": "keys"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "payment-instruments-set",
+      "category": "payments",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PaymentInstruments",
+        "member": "set"
+      },
+      "realms": [
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "notification-constructor",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "global",
+        "name": "Notification"
+      },
+      "realms": [
+        "document",
+        "worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "worker",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "notification-permission",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "static-method",
+        "owner": "Notification",
+        "member": "requestPermission"
+      },
+      "realms": [
+        "document",
+        "worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "worker",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "push-subscribe",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PushManager",
+        "member": "subscribe"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "push-get-subscription",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PushManager",
+        "member": "getSubscription"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "push-permission-state",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PushManager",
+        "member": "permissionState"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "show-notification",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "ServiceWorkerRegistration",
+        "member": "showNotification"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "get-notifications",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "ServiceWorkerRegistration",
+        "member": "getNotifications"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "background-sync-register",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "SyncManager",
+        "member": "register"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "background-sync-tags",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "SyncManager",
+        "member": "getTags"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "periodic-sync-register",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PeriodicSyncManager",
+        "member": "register"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "periodic-sync-unregister",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PeriodicSyncManager",
+        "member": "unregister"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "periodic-sync-tags",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PeriodicSyncManager",
+        "member": "getTags"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "background-fetch-start",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "BackgroundFetchManager",
+        "member": "fetch"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "background-fetch-get",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "BackgroundFetchManager",
+        "member": "get"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "background-fetch-ids",
+      "category": "push-notifications-background",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "BackgroundFetchManager",
+        "member": "getIds"
+      },
+      "realms": [
+        "document",
+        "target-service-worker"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        },
+        {
+          "realm": "target-service-worker",
+          "boundary": "promise-rejection",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "topics",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Document",
+        "member": "browsingTopics"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-join",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "joinAdInterestGroup"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-leave",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "leaveAdInterestGroup"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-update",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "updateAdInterestGroups"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-run",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "runAdAuction"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-clear",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "clearOriginJoinedAdInterestGroups"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-nonce",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "createAuctionNonce"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protected-audience-data",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "getInterestGroupAdAuctionData"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "private-aggregation-contribute",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PrivateAggregation",
+        "member": "contributeToHistogram"
+      },
+      "realms": [
+        "worklet"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "worklet",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "private-aggregation-debug",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "PrivateAggregation",
+        "member": "enableDebugMode"
+      },
+      "realms": [
+        "worklet"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "worklet",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "attribution-anchor",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "markup",
+        "element": "a",
+        "attribute": "attributionsrc"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "document-policy-rejection",
+          "exception": "SecurityError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "attribution-image",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "markup",
+        "element": "img",
+        "attribute": "attributionsrc"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "document-policy-rejection",
+          "exception": "SecurityError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "attribution-script",
+      "category": "advertising-privacy",
+      "binding": {
+        "kind": "markup",
+        "element": "script",
+        "attribute": "attributionsrc"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "document-policy-rejection",
+          "exception": "SecurityError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "portal-constructor",
+      "category": "isolated-navigation",
+      "binding": {
+        "kind": "global",
+        "name": "Portal"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "fenced-frame-config",
+      "category": "isolated-navigation",
+      "binding": {
+        "kind": "global",
+        "name": "FencedFrameConfig"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "portal-src",
+      "category": "isolated-navigation",
+      "binding": {
+        "kind": "markup",
+        "element": "portal",
+        "attribute": "src"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "document-policy-rejection",
+          "exception": "SecurityError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "fenced-frame-src",
+      "category": "isolated-navigation",
+      "binding": {
+        "kind": "markup",
+        "element": "fencedframe",
+        "attribute": "src"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "document-policy-rejection",
+          "exception": "SecurityError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "speculation-rules",
+      "category": "isolated-navigation",
+      "binding": {
+        "kind": "script-type",
+        "type": "speculationrules"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "document-policy-rejection",
+          "exception": "SecurityError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "web-share",
+      "category": "web-share-url-handlers",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "share"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "web-share-query",
+      "category": "web-share-url-handlers",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "canShare"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "protocol-handler-register",
+      "category": "web-share-url-handlers",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "registerProtocolHandler"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "protocol-handler-unregister",
+      "category": "web-share-url-handlers",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Navigator",
+        "member": "unregisterProtocolHandler"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "launch-handler-consumer",
+      "category": "web-share-url-handlers",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "LaunchQueue",
+        "member": "setConsumer"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "webauthn-public-key",
+      "category": "webauthn-passkeys",
+      "binding": {
+        "kind": "global",
+        "name": "PublicKeyCredential"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "digital-credential",
+      "category": "webauthn-passkeys",
+      "binding": {
+        "kind": "global",
+        "name": "DigitalCredential"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "web-otp",
+      "category": "webauthn-passkeys",
+      "binding": {
+        "kind": "global",
+        "name": "OTPCredential"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "media-user-capture",
+      "category": "media-capture-device-discovery",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "MediaDevices",
+        "member": "getUserMedia"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "media-display-capture",
+      "category": "media-capture-device-discovery",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "MediaDevices",
+        "member": "getDisplayMedia"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "media-device-enumeration",
+      "category": "media-capture-device-discovery",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "MediaDevices",
+        "member": "enumerateDevices"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "media-audio-output",
+      "category": "media-capture-device-discovery",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "MediaDevices",
+        "member": "selectAudioOutput"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": true
+      }
+    },
+    {
+      "id": "media-capture-handle",
+      "category": "media-capture-device-discovery",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "MediaDevices",
+        "member": "setCaptureHandleConfig"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "geolocation-current",
+      "category": "geolocation",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Geolocation",
+        "member": "getCurrentPosition"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "geolocation-watch",
+      "category": "geolocation",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Geolocation",
+        "member": "watchPosition"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "geolocation-clear",
+      "category": "geolocation",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Geolocation",
+        "member": "clearWatch"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "usb-request",
+      "category": "usb",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "USB",
+        "member": "requestDevice"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "usb-enumerate",
+      "category": "usb",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "USB",
+        "member": "getDevices"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "bluetooth-request",
+      "category": "bluetooth",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Bluetooth",
+        "member": "requestDevice"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "bluetooth-availability",
+      "category": "bluetooth",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Bluetooth",
+        "member": "getAvailability"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "bluetooth-enumerate",
+      "category": "bluetooth",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Bluetooth",
+        "member": "getDevices"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    },
+    {
+      "id": "serial-request",
+      "category": "serial-hid-nfc",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Serial",
+        "member": "requestPort"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "serial-enumerate",
+      "category": "serial-hid-nfc",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "Serial",
+        "member": "getPorts"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": true
+      }
+    },
+    {
+      "id": "hid-request",
+      "category": "serial-hid-nfc",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "HID",
+        "member": "requestDevice"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "hid-enumerate",
+      "category": "serial-hid-nfc",
+      "binding": {
+        "kind": "prototype-method",
+        "owner": "HID",
+        "member": "getDevices"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": true,
+        "firefox": false
+      }
+    },
+    {
+      "id": "nfc-reader",
+      "category": "serial-hid-nfc",
+      "binding": {
+        "kind": "global",
+        "name": "NDEFReader"
+      },
+      "realms": [
+        "document"
+      ],
+      "disposition": "disabled",
+      "behaviors": [
+        {
+          "realm": "document",
+          "boundary": "synchronous",
+          "exception": "NotSupportedError"
+        }
+      ],
+      "packet_test_id": "emerging-capability-zero-egress-v1",
+      "native_presence": {
+        "chromium": false,
+        "firefox": false
+      }
+    }
+  ]
+}

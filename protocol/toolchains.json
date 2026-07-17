@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "release_id": "2.0.0-dev",
+  "platform": {
+    "os": "darwin-24.6.0",
+    "arch": "arm64"
+  },
+  "tools": [
+    {
+      "name": "node",
+      "version": "24.4.1",
+      "path": "/Users/user/n/bin/node",
+      "sha256": "0429b268de244397f6b8921a938f55151c4469ab70571799780533eae6abfbce",
+      "version_args": ["--version"],
+      "version_pattern": "^v24\\.4\\.1\\s*$"
+    },
+    {
+      "name": "npm",
+      "version": "11.4.2",
+      "path": "/Users/user/n/bin/npm",
+      "sha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+      "version_args": ["--version"],
+      "version_pattern": "^11\\.4\\.2\\s*$"
+    },
+    {
+      "name": "go",
+      "version": "1.26.3",
+      "path": "/Users/user/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.3.darwin-arm64/bin/go",
+      "sha256": "0bdc5a1cfc9067e050f875767547064a2da19c33fec6662a520ab89fcf73ac88",
+      "version_args": ["version"],
+      "version_pattern": "^go version go1\\.26\\.3 darwin/arm64\\s*$"
+    },
+    {
+      "name": "rust",
+      "version": "1.96.0",
+      "path": "/Users/user/.cargo/bin/rustc",
+      "sha256": "aeb4105778ca1bd3c6b0e75768f581c656633cd51368fa61289b6a71696ac7e1",
+      "version_args": ["--version"],
+      "version_pattern": "^rustc 1\\.96\\.0 \\(ac68faa20 2026-05-25\\)\\s*$"
+    },
+    {
+      "name": "wasm-bindgen-cli",
+      "version": "0.2.122",
+      "path": "/Users/user/.cargo/bin/wasm-bindgen",
+      "sha256": "ba562579adec25fe7ab6757595259d7fe148000d772bde7a3a082143c525586e",
+      "version_args": ["--version"],
+      "version_pattern": "^wasm-bindgen 0\\.2\\.122\\s*$"
+    },
+    {
+      "name": "binaryen",
+      "version": "129",
+      "path": "/opt/homebrew/bin/wasm-opt",
+      "sha256": "6fbddc0a76a74d5291cf35a12f212f44d111250bc5111412906f1349fbc72827",
+      "version_args": ["--version"],
+      "version_pattern": "^wasm-opt version 129\\s*$"
+    },
+    {
+      "name": "tor",
+      "version": "0.4.9.11",
+      "path": "/opt/homebrew/bin/tor",
+      "sha256": "824bc682175baaa0baaa3d7d74b9e63d63bfb07579c78a5b9016f17658fefea0",
+      "version_args": ["--version"],
+      "version_pattern": "^Tor version 0\\.4\\.9\\.11\\."
+    },
+    {
+      "name": "tcpdump",
+      "version": "4.99.1 Apple 148 / libpcap 1.10.1",
+      "path": "/usr/sbin/tcpdump",
+      "sha256": "fc7b0a26edfdab78e986830d54c3f980700d9edeffc37e8d9b7eed3cecee8f6d",
+      "version_args": ["--version"],
+      "version_pattern": "^tcpdump version 4\\.99\\.1 -- Apple version 148\\nlibpcap version 1\\.10\\.1"
+    },
+    {
+      "name": "biome",
+      "version": "2.5.3",
+      "path": "node_modules/@biomejs/biome/bin/biome",
+      "sha256": "7ffb4d217e5ddefcc19ca6afe76bb982f5eb36c9a124448105195fbcfc84bd77",
+      "version_args": ["--version"],
+      "version_pattern": "^Version: 2\\.5\\.3\\s*$"
+    },
+    {
+      "name": "esbuild",
+      "version": "0.28.1",
+      "path": "node_modules/@esbuild/darwin-arm64/bin/esbuild",
+      "sha256": "e2dc9a52440a2a34f09434a2f4843cb1e30f84e40dcf238976ec61ef8cd7f36a",
+      "version_args": ["--version"],
+      "version_pattern": "^0\\.28\\.1\\s*$"
+    },
+    {
+      "name": "golangci-lint",
+      "version": "2.12.2",
+      "path": "/Users/user/go/bin/golangci-lint",
+      "sha256": "691b9100ce968ff0009b6b7757ef6a585e31ae9ab11dfe0340ebb6e8e21fdc3d",
+      "version_args": ["version"],
+      "version_pattern": "^golangci-lint has version 2\\.12\\.2\\b"
+    }
+  ],
+  "rust_targets": [
+    {
+      "triple": "wasm32-unknown-unknown",
+      "toolchain": "1.96.0-aarch64-apple-darwin",
+      "path": "/Users/user/.rustup/toolchains/1.96.0-aarch64-apple-darwin/lib/rustlib/wasm32-unknown-unknown",
+      "tree_sha256": "ae0f3c40cd976a9e9c795975d845357d731af8a5db7f014d3f606d3c7e468258"
+    }
+  ],
+  "rust_libraries": [
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.122",
+      "package_sha256": "3ed04576f974d2b2fba0f38c51dbc5518011e38c36bf1143164be765528fd409"
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.122",
+      "package_sha256": "916151b09da36bd82f6615cbf3a419e2f0ba23a03c6160e8e92eb6bd4aa1dec6"
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.122",
+      "package_sha256": "299047362ccbfce148b67ab7e73349f77748e00c8296f9542adfad2ad82c5c5e"
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.122",
+      "package_sha256": "9a929b2c61f11ba3e9bc35b50c1f25cb38e0e892c0c231ae2b8cf78d5dad4437"
+    }
+  ],
+  "browsers": [
+    {
+      "family": "chromium",
+      "exact_build": "150.0.7871.124",
+      "product_build_id": "1639810",
+      "platform": "darwin-arm64",
+      "archive_url": "https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.124/mac-arm64/chrome-mac-arm64.zip",
+      "archive_sha256": "36c8b5fe04c08a418a172206bb392600ec1550941bde6af2d4353df21db87a47",
+      "binary_path": ".puppeteer-cache/chrome/mac_arm-150.0.7871.124/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "binary_sha256": "22ddf33cec88bbfd181588eb3da31250a65ba8ebfdb6efcd2694a36275697284"
+    },
+    {
+      "family": "firefox",
+      "exact_build": "152.0.6",
+      "product_build_id": "20260713164047",
+      "platform": "darwin-arm64",
+      "archive_url": "https://archive.mozilla.org/pub/firefox/releases/152.0.6/mac/en-US/Firefox%20152.0.6.dmg",
+      "archive_sha256": "747002d592063e0b106de0c500b34fe6d84438b3b866621521c8e7be9ea7816c",
+      "binary_path": ".puppeteer-cache/firefox/mac_arm-stable_152.0.6/Firefox.app/Contents/MacOS/firefox",
+      "binary_sha256": "8489f35e3b2ee8b7ca8aaa34ae0762d3faa884ccef8cbeecfad0cae213b7c0e7"
+    }
+  ],
+  "dependency_locks": [
+    {
+      "name": "npm",
+      "path": "package-lock.json",
+      "sha256": "457abe245d6cd17d35fc267c3fc1d03fa00f9d16f1ab1d703538708414460753"
+    },
+    {
+      "name": "cargo",
+      "path": "Cargo.lock",
+      "sha256": "ce4f970ad81d811cdf2da9e1cdda21ca78d10994481a41642f7a1ef5ab3cb613"
+    },
+    {
+      "name": "go",
+      "path": "go.sum",
+      "sha256": "b87b85efc013d7e2efdcc0a1adc6d11b9cce3745fccf7cf7c28f4595107e64cc"
+    }
+  ]
+}

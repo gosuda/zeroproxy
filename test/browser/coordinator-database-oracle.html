@@ -1,0 +1,253 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>coordinator database oracle</title>
+<pre id="result"></pre>
+<script type="module">
+import {
+  COORDINATOR_DB_VERSION,
+  openCookieRecord,
+  openCoordinatorDatabase,
+} from "/control/coordinator-database.mjs";
+
+const output = document.querySelector("#result");
+const tests = [];
+const check = (id, ok, detail) => tests.push({ id, ok: Boolean(ok), ...(detail ? { detail } : {}) });
+
+function request(value) {
+  return new Promise((resolve, reject) => {
+    value.onsuccess = () => resolve(value.result);
+    value.onerror = () => reject(value.error);
+  });
+}
+
+function complete(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = resolve;
+    transaction.onabort = () => reject(transaction.error);
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+function deleteDatabase(name) {
+  return request(indexedDB.deleteDatabase(name));
+}
+
+async function createLegacyDatabase(name, conflicting = false) {
+  const opening = indexedDB.open(name, 4);
+  opening.onupgradeneeded = () => {
+    const db = opening.result;
+    for (const [storeName, keyPath] of [
+      ["profiles", "profile_id"],
+      ["origin_map", "key"],
+      ["tabs", "key"],
+      ["history", "key"],
+      ["handoffs", "id"],
+      ["v1_import_nonces", "nonce"],
+      ["cookies", "profile_id"],
+      ["cookie_journal", "key"],
+      ["target_worker_journal", "key"],
+    ]) db.createObjectStore(storeName, { keyPath });
+  };
+  const db = await request(opening);
+  const rawOriginKey = crypto.getRandomValues(new Uint8Array(32));
+  const originKey = await crypto.subtle.importKey(
+    "raw",
+    rawOriginKey,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const capabilityRoot = crypto.getRandomValues(new Uint8Array(32));
+  const now = Date.now();
+  const profile = {
+    profile_id: "legacy-profile",
+    origin_key: originKey,
+    capability_root: capabilityRoot,
+    capability_epoch: 3,
+    cookie_seq: 1,
+    policy_version: 2,
+    created_at: now - 1000,
+    updated_at: now,
+    relay_capabilities: {
+      "legacy-origin": { nonce: new Uint8Array(12), ciphertext: new Uint8Array([1, 2, 3]) },
+    },
+  };
+  const transaction = db.transaction([...db.objectStoreNames], "readwrite");
+  transaction.objectStore("profiles").add(profile);
+  const mappings = transaction.objectStore("origin_map");
+  const canonicalOrigin = "https://sub.example.com:443";
+  mappings.add({
+    key: `legacy-profile\0${canonicalOrigin}`,
+    profile_id: "legacy-profile",
+    canonical_origin: canonicalOrigin,
+    origin_id: "legacy-origin",
+    collision_counter: 0,
+    version: 2,
+  });
+  mappings.add({
+    key: "legacy-profile\0id\0legacy-origin",
+    profile_id: "legacy-profile",
+    canonical_origin: canonicalOrigin,
+    origin_id: conflicting ? "conflicting-origin" : "legacy-origin",
+    collision_counter: 0,
+    version: 2,
+  });
+  if (!conflicting) {
+    transaction.objectStore("tabs").add({
+      key: "legacy-profile\0legacy-tab",
+      profile_id: "legacy-profile",
+      tab_id: "legacy-tab",
+      origin_id: "legacy-origin",
+      capability_epoch: 3,
+      cookie_capability: "legacy-cookie-capability",
+      created_at: now,
+    });
+    transaction.objectStore("history").add({
+      key: "legacy-profile\0legacy-tab\0legacy-entry",
+      profile_id: "legacy-profile",
+      tab_id: "legacy-tab",
+      entry_id: "legacy-entry",
+      origin_id: "legacy-origin",
+      encrypted_target_url: { nonce: new Uint8Array(12), ciphertext: new Uint8Array([4, 5, 6]) },
+      created_at: now,
+    });
+    transaction.objectStore("cookies").add({
+      profile_id: "legacy-profile",
+      version: 1,
+      state_json: JSON.stringify({
+        version: 1,
+        cookie_seq: 1,
+        cookies: [{
+          name: "sid",
+          value: "top-secret-cookie",
+          domain: "sub.example.com",
+          host_only: true,
+          path: "/",
+          secure: true,
+          http_only: true,
+          same_site: "LAX",
+          expires_at: null,
+          creation_seq: 1,
+        }],
+        journal: {},
+      }),
+      updated_at: now,
+    });
+    transaction.objectStore("target_worker_journal").add({
+      key: "legacy-profile\0legacy-origin\0target-worker",
+      profile_id: "legacy-profile",
+      origin_id: "legacy-origin",
+      revision: 2,
+      state: { schema_version: 1 },
+      updated_at: now,
+    });
+    transaction.objectStore("handoffs").add({ id: "legacy-handoff", expires_at: now + 1000 });
+    transaction.objectStore("v1_import_nonces").add({ nonce: "legacy-nonce", state: "consumed", updated_at: now });
+  }
+  await complete(transaction);
+  db.close();
+  return { profile };
+}
+
+try {
+  const migrationName = `zeroproxy-migration-${crypto.randomUUID()}`;
+  const { profile: legacyProfile } = await createLegacyDatabase(migrationName);
+  const migrated = await openCoordinatorDatabase(migrationName);
+  const expectedStores = [
+    "cookie_journal",
+    "cookies",
+    "handoffs",
+    "history",
+    "origin_kernel_meta",
+    "origin_map",
+    "profiles",
+    "relay_capabilities",
+    "routes",
+    "session_storage",
+    "sessions",
+    "tabs",
+    "target_worker_journal",
+    "v1_import_nonces",
+  ];
+  check("schema-version-and-store-inventory", migrated.version === COORDINATOR_DB_VERSION
+    && JSON.stringify([...migrated.objectStoreNames]) === JSON.stringify(expectedStores));
+  const reading = migrated.transaction(expectedStores, "readonly");
+  const [
+    profiles,
+    mappings,
+    cookies,
+    sessions,
+    tabs,
+    history,
+    relay,
+    targetJournal,
+    metadata,
+  ] = await Promise.all([
+    request(reading.objectStore("profiles").getAll()),
+    request(reading.objectStore("origin_map").getAll()),
+    request(reading.objectStore("cookies").getAll()),
+    request(reading.objectStore("sessions").getAll()),
+    request(reading.objectStore("tabs").getAll()),
+    request(reading.objectStore("history").getAll()),
+    request(reading.objectStore("relay_capabilities").getAll()),
+    request(reading.objectStore("target_worker_journal").getAll()),
+    request(reading.objectStore("origin_kernel_meta").get(COORDINATOR_DB_VERSION)),
+  ]);
+  await complete(reading);
+  check("profile-key-version-migrated", profiles.length === 1 && profiles[0].key_version === 1
+    && profiles[0].relay_profile_digests.length === 0
+    && profiles[0].relay_profiles.length === 0
+    && !Object.hasOwn(profiles[0], "relay_capabilities"));
+  check("origin-map-normalized", mappings.length === 1
+    && mappings[0].canonical_site === "https://example.com"
+    && mappings[0].origin_id === "legacy-origin");
+  check("cookie-value-encrypted-at-rest", cookies.length === 1
+    && !Object.hasOwn(cookies[0], "value")
+    && !Object.hasOwn(cookies[0], "state_json")
+    && JSON.stringify(cookies[0]).includes("top-secret-cookie") === false
+    && (await openCookieRecord(legacyProfile, cookies[0])).value === "top-secret-cookie");
+  check("tab-record-normalized", tabs.length === 1
+    && tabs[0].session_id === "legacy-legacy-tab"
+    && tabs[0].opener_tab_id === null
+    && Object.hasOwn(tabs[0], "encrypted_stream_key")
+    && tabs[0].state === "ACTIVE"
+    && !Object.hasOwn(tabs[0], "client_id"));
+  check("history-record-normalized", history.length === 1
+    && history[0].parent_entry_id === null
+    && history[0].scroll_x === 0
+    && history[0].scroll_y === 0);
+  check("auxiliary-records-normalized", sessions.length === 1
+    && sessions[0].session_id === tabs[0].session_id
+    && relay.length === 0
+    && targetJournal.length === 1
+    && !Object.hasOwn(targetJournal[0], "key")
+    && metadata?.last_migration?.from === 4
+    && metadata?.last_migration?.to === COORDINATOR_DB_VERSION);
+  migrated.close();
+  await deleteDatabase(migrationName);
+
+  const rollbackName = `zeroproxy-rollback-${crypto.randomUUID()}`;
+  await createLegacyDatabase(rollbackName, true);
+  let rejected = false;
+  try {
+    await openCoordinatorDatabase(rollbackName);
+  } catch {
+    rejected = true;
+  }
+  const legacyOpening = indexedDB.open(rollbackName);
+  const rolledBack = await request(legacyOpening);
+  const rollbackTransaction = rolledBack.transaction("origin_map", "readonly");
+  const rollbackMappings = await request(rollbackTransaction.objectStore("origin_map").getAll());
+  await complete(rollbackTransaction);
+  check("failed-migration-rolls-back-atomically", rejected
+    && rolledBack.version === 4
+    && rolledBack.objectStoreNames.contains("routes") === false
+    && rollbackMappings.length === 2);
+  rolledBack.close();
+  await deleteDatabase(rollbackName);
+} catch (error) {
+  tests.push({ id: "oracle-exception", ok: false, detail: error?.stack ?? String(error) });
+}
+
+output.textContent = JSON.stringify({ ok: tests.every(test => test.ok), tests });
+</script>

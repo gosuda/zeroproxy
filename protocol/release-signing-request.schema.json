@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/release-signing-request.schema.json",
+  "title": "ZeroProxy external signing request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_type", "production_eligible", "document_sha256", "canonical_sha256", "schema_sha256", "keyset_sha256", "key_epoch", "threshold", "required_roles"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_type": {"const": "detached-ed25519-rfc8785"},
+    "production_eligible": {"const": false},
+    "document_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "canonical_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "schema_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "keyset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "key_epoch": {"type": "integer", "minimum": 1},
+    "threshold": {"const": 2},
+    "required_roles": {"const": ["security"]}
+  }
+}

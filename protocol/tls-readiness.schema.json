@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.example/protocol/tls-readiness.schema.json",
+  "title": "ZeroProxy TLS readiness tuple",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "key_epoch",
+    "control_authority",
+    "asset_authority",
+    "relay_authority",
+    "browse_wildcard_authority",
+    "certificate_spki_sha256",
+    "control_ready",
+    "asset_ready",
+    "relay_ready",
+    "browse_ready",
+    "issued_at",
+    "expires_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "key_epoch": { "type": "integer", "minimum": 1 },
+    "control_authority": { "$ref": "#/$defs/authority" },
+    "asset_authority": { "$ref": "#/$defs/authority" },
+    "relay_authority": { "$ref": "#/$defs/authority" },
+    "browse_wildcard_authority": {
+      "type": "string",
+      "pattern": "^\\*\\.[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[1-9][0-9]{0,4})?$"
+    },
+    "certificate_spki_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "control_ready": { "const": true },
+    "asset_ready": { "const": true },
+    "relay_ready": { "const": true },
+    "browse_ready": { "const": true },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "authority": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[1-9][0-9]{0,4})?$"
+    }
+  }
+}

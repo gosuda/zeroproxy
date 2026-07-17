@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Cache URL projection oracle</title>
+<script src="__ZP_RUNTIME_URL__" data-zp-cookie-bootstrap="__ZP_RUNTIME_BOOTSTRAP__"></script>
+<script>
+(() => {
+  const config = __ZP_CACHE_CONFIG__;
+  const cases = [];
+  const check = (condition, name, detail = undefined) => {
+    cases.push({ name, pass: Boolean(condition), detail });
+    if (!condition) throw new Error(`${name}${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
+  };
+  const targetURL = `${config.target}/cache-data`;
+
+  async function testCacheURLProjection() {
+    if (typeof caches === "undefined") throw new Error("required CacheStorage API is unavailable");
+    const cache = await caches.open("cache-url-projection");
+    const request = new Request(targetURL);
+    const mediated = await fetch(request);
+    check(mediated.url === targetURL, "mediated response exposes virtual target URL before Cache.put", mediated.url);
+
+    await cache.put(request, mediated.clone());
+    check(true, "Cache.put accepts mediated Response");
+
+    const matched = await cache.match(request);
+    check(matched instanceof Response, "Cache.match returns a Response for mediated request", matched);
+    check((await matched.clone().text()) === "cache-data", "Cache.match preserves mediated Response body");
+
+    const matchedAll = await cache.matchAll(request);
+    check(matchedAll.length === 1 && matchedAll[0] instanceof Response, "Cache.matchAll returns mediated Response", matchedAll.length);
+    check((await matchedAll[0].clone().text()) === "cache-data", "Cache.matchAll preserves mediated Response body");
+
+    const keys = await cache.keys(request);
+    const accessorURLs = {
+      suppliedRequest: request.url,
+      mediatedResponse: mediated.url,
+      matchedResponse: matched.url,
+      matchAllResponse: matchedAll[0].url,
+      cachedRequest: keys[0]?.url,
+    };
+    const serializedURLs = JSON.parse(JSON.stringify(accessorURLs));
+    const urls = Object.values(accessorURLs);
+    check(urls.every(value => value === targetURL), "Cache Request and Response URL accessors retain virtual target URLs", accessorURLs);
+    check(Object.values(serializedURLs).every(value => value === targetURL), "serialized Cache Request and Response URLs retain virtual target URLs", serializedURLs);
+    check(
+      urls.every(value => !value.includes("/_zp/") && new URL(value).origin === config.target && new URL(value).origin !== location.origin),
+      "Cache URL projection hides gateway and synthetic origins",
+      { urls, gatewayOrigin: location.origin },
+    );
+  }
+
+  testCacheURLProjection().then(() => {
+    globalThis.__cacheURLOracle = { ok: true, cases };
+  }).catch(error => {
+    globalThis.__cacheURLOracle = { ok: false, cases, error: `${error?.name}: ${error?.message}` };
+  });
+})();
+</script>

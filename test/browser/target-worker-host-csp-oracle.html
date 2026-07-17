@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>target worker host CSP oracle</title>
+<script nonce="oracle">
+(async () => {
+  const result = { messages: [] };
+  try {
+    const worker = new Worker("/host/host-classic.js", { name: "TargetWorkerHostCSP" });
+    const channel = new MessageChannel();
+    const binding = { profile_id: "profile", synthetic_origin: location.origin, client_epoch: 1, capability: "capability", registration_id: "registration", worker_version: "v1" };
+    const completed = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("host CSP timeout")), 5_000);
+      channel.port1.onmessage = event => {
+        const { type, code, response_plan: responsePlan, sequence } = event.data;
+        result.messages.push({ type, code, body_present: responsePlan?.body_present, sequence });
+        if (type === "WORKER_READY") {
+          channel.port1.postMessage({
+            v: 1,
+            binding,
+            event_id: "bodyless-fetch",
+            event_type: "fetch",
+            session_id: "session",
+            type: "EVENT_START",
+            dispatch_deadline: Date.now() + 1_000,
+            lifetime_deadline: Date.now() + 2_000,
+          });
+        }
+        if (type === "RESPONSE_END") {
+          clearTimeout(timeout);
+          resolve();
+        }
+        if (type === "EVENT_FAIL") {
+          clearTimeout(timeout);
+          reject(new Error(`host failed:${code}`));
+        }
+      };
+    });
+    worker.postMessage({ v: 1, type: "ATTACH_TARGET_WORKER_PORT" }, [channel.port2]);
+    channel.port1.postMessage({
+      v: 1,
+      binding,
+      graph: { classic_gateway: { expires_at: Date.now() + 60_000, id: "g".repeat(32), key: "k".repeat(32), lease_generation: 1 }, graph_hash: "c".repeat(64), resources: [{ hash: "c".repeat(64), module_url: `/_zp/target-worker-exec/${"c".repeat(64)}.mjs`, url: "https://target.example/sw.js" }], type: "classic" },
+      session_id: "session",
+      type: "HYDRATE_WORKER",
+    });
+    await completed;
+    result.ok = result.messages.some(message => message.type === "WORKER_READY")
+      && result.messages.some(message => message.type === "RESPONSE_HEADERS" && message.body_present === false)
+      && result.messages.some(message => message.type === "RESPONSE_END" && message.sequence === 0);
+  } catch (error) {
+    result.error = `${error.name}:${error.message}`;
+    result.ok = false;
+  }
+  globalThis.__targetWorkerHostCSPOracle = result;
+})();
+</script>

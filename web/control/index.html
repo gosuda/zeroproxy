@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>ZeroProxy</title>
+<main>
+  <h1>ZeroProxy</h1>
+  <form id="open-form">
+    <label>Target URL
+      <input id="target" name="target" type="url" required autocomplete="off" placeholder="https://example.com/">
+    </label>
+    <label>Profile
+      <select id="profile-mode" name="profile_mode">
+        <option value="ephemeral">Ephemeral</option>
+        <option value="persistent">Persistent</option>
+      </select>
+    </label>
+    <label>
+      <input id="telemetry-opt-in" name="telemetry_opt_in" type="checkbox">
+      Share aggregate release/stage/code counters (never destinations, target hashes, request data, or source)
+    </label>
+    <label>Relay
+      <select id="relay-profile" name="relay_profile" required>
+        <option value="">Choose an installed relay</option>
+      </select>
+    </label>
+    <p>
+      <button type="submit">Open privately</button>
+      <button id="create-share" type="button">Create encrypted share</button>
+    </p>
+  </form>
+  <output id="status" aria-live="polite"></output>
+  <p id="share-output"></p>
+</main>
+<dialog id="relay-approval">
+  <form method="dialog">
+    <h2>Approve relay access</h2>
+    <p>This relay sees your client IP, destination metadata, timing and volume, and plaintext HTTP traffic.</p>
+    <p>Relay profile: <code id="approval-digest"></code></p>
+    <button value="cancel">Cancel</button>
+    <button value="approve">Approve relay and continue</button>
+  </form>
+</dialog>
+<script type="module" src="/control/app.mjs"></script>

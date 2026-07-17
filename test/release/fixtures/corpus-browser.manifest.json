@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "release_id": "release-gate-test",
+  "oracle_id": "release-gate-browser-oracle-v1",
+  "sites": [
+    {
+      "id": "content",
+      "url": "https://runtime.test/content",
+      "kind": "live-canary",
+      "fixture_category": null,
+      "fixture_sha256": null,
+      "fixture_path": null,
+      "entry_path": null,
+      "mediated_url_template": null,
+      "site_class": "content",
+      "native_url": "https://native.test/content",
+      "mediated_url": "https://runtime.test/content",
+      "actions": [
+        {"id": "load-content", "expression": "true"}
+      ],
+      "compatibility_probes": [
+        {"id": "document-complete", "expression": "document.readyState === 'complete'"}
+      ],
+      "stealth_probes": [
+        {"id": "navigator-shape", "expression": "({ userAgent: navigator.userAgent, languages: navigator.languages, platform: navigator.platform })"}
+      ]
+    }
+  ]
+}

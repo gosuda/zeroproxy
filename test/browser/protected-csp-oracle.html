@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>production CSP runtime oracle</title>
+<pre id="result"></pre>
+<script type="module" nonce="zp-oracle-nonce">
+const version = await fetch("/_zp/version.json").then(response => response.json());
+const runtime = document.createElement("script");
+const targetURL = "https://target.example/path/csp.html";
+const abiName = "__zp_abi_777777777777777777777777777777777777777777777777";
+runtime.nonce = "zp-oracle-nonce";
+runtime.src = version.selectors["runtime-prelude.js"] + "#abi=" + abiName + "&url=" + encodeURIComponent(targetURL) + "&ports=80%2C443&strings=0";
+runtime.onload = () => {
+  const tests = [];
+  function check(id, action) {
+    try { tests.push({ id, ok: Boolean(action()) }); }
+    catch (error) { tests.push({ id, ok: false, error: error.name + ":" + error.message }); }
+  }
+  function denied(action) {
+    try { action(); return false; }
+    catch (error) { return error.name === "EvalError" && error.message === "String compilation is disabled by ZeroProxy policy"; }
+  }
+  const abi = __zp_abi_777777777777777777777777777777777777777777777777;
+  const facade = abi.scope.window;
+  check("runtime-ready-under-csp", () => abi.runtimeHealth() === true && document.currentScript === null);
+  check("eval-policy-unconditional", () => denied(() => facade.eval("window.__zp_csp_eval_escape=1")) && facade.__zp_csp_eval_escape === undefined);
+  check("eval-error-parent-realm", () => {
+    try { facade.eval("1"); return false; }
+    catch (error) { return error instanceof EvalError; }
+  });
+  check("direct-eval-source-policy", () => denied(() => abi.evalSource("window.__zp_csp_direct_escape=1")) && facade.__zp_csp_direct_escape === undefined);
+  check("function-policy-unconditional", () => denied(() => facade.Function("window.__zp_csp_function_escape=1")) && facade.__zp_csp_function_escape === undefined);
+  check("timer-string-policy", () => denied(() => facade.setTimeout("window.__zp_csp_timer_escape=1", 0)) && facade.__zp_csp_timer_escape === undefined);
+  check("timer-object-coercion", () => {
+    let conversions = 0;
+    const handler = { toString() { conversions += 1; return "window.__zp_csp_object_timer_escape=1"; } };
+    return denied(() => facade.setTimeout(handler, 0)) && conversions === 1 && facade.__zp_csp_object_timer_escape === undefined;
+  });
+  check("about-blank-runtime-under-csp", () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const child = frame.contentWindow;
+    const childDocument = frame.contentDocument;
+    childDocument.body.dataset.nativeAccess = "ok";
+    const result = [child === childDocument.defaultView, child.window === child, child.self === child, child.parent === facade, child.top === facade, child.document === childDocument, childDocument.body.dataset.nativeAccess === "ok", denied(() => child.eval("window.__zp_child_csp_escape=1")), child.__zp_child_csp_escape === undefined, denied(() => child.Function("window.__zp_child_function_escape=1")), child.__zp_child_function_escape === undefined];
+    frame.remove();
+    if (!result.every(Boolean)) throw new Error(JSON.stringify(result));
+    return true;
+  });
+  document.querySelector("#result").textContent = JSON.stringify({ tests, ok: tests.every(test => test.ok) });
+};
+runtime.onerror = () => { document.querySelector("#result").textContent = JSON.stringify({ tests: [], ok: false, error: "runtime-load" }); };
+document.head.append(runtime);
+</script>

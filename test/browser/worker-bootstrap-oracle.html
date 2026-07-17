@@ -1,0 +1,403 @@
+<!doctype html><meta charset="utf-8"><pre id="result"></pre><script type="module">
+void (async () => {
+const capability = "w".repeat(32);
+const abi = `__zp_abi_${"b".repeat(48)}`;
+const preRuntimeBlobURL = URL.createObjectURL(new Blob(["postMessage({kind:'untracked-blob-root'})"], { type: "text/javascript" }));
+const pristineFrame = document.createElement("iframe");
+document.body.append(pristineFrame);
+const version = await fetch("/_zp/version.json", { cache: "no-store" }).then(response => response.json());
+const targetBase = location.origin;
+const disabledNetworkNames = __DISABLED_NETWORK_GLOBALS__;
+const disabledCapabilityMethods = __DISABLED_CAPABILITY_METHODS__;
+const runtime = document.createElement("script");
+runtime.src = `${version.selectors["runtime-prelude.js"]}#abi=${abi}&url=${encodeURIComponent(`${targetBase}/app/index.html`)}&ports=${location.port}&cookie=${capability}&strings=1`;
+const targetURL = `${targetBase}/app/index.html`;
+runtime.dataset.zpCookieBootstrap = btoa(JSON.stringify({
+  runtime_capability: capability,
+  entry_id: "e".repeat(32),
+  cookie_top_level_site: `${location.protocol}//${location.hostname}`,
+  decode_metadata: { encoding_used: "utf-8", replacement: false, source: "transport-default" },
+  policy_context: {
+    profile_id: "test-profile",
+    tab_id: "test-tab",
+    document_id: "test-document",
+    virtual_origin: targetBase,
+    virtual_site: `${location.protocol}//${location.hostname}`,
+    target_url: targetURL,
+    effective_base_url: targetURL,
+    referrer_url: null,
+    referrer_policy: "strict-origin-when-cross-origin",
+    document_charset: "utf-8",
+    target_csp: [],
+    target_csp_report_only: [],
+    relay_profile: "test-relay-profile",
+    approved_target_ports: [Number(location.port)],
+    policy_version: 2,
+  },
+  document_policy: { version: 1, trusted_types: { directive_present: false, allow_any: true, allowed_policy_names: [], allow_duplicates: false, require_for_script: false }, enforced_report_endpoint_count: 0, report_only_endpoint_count: 0 },
+  snapshot: { cookie_seq: 0, jar_or_delta: { kind: "SNAPSHOT", cookies: [] } },
+})).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+const plans = [];
+let stage = "preload";
+navigator.serviceWorker.addEventListener("message", event => {
+  if (event.data?.type === "WORKER_BOOTSTRAP_PLAN") plans.push(event.data.payload);
+});
+
+function once(target, predicate, timeout = 8_000, label = "worker message") {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timeout`)), timeout);
+    target.addEventListener("message", event => {
+      if (!predicate(event.data)) return;
+      clearTimeout(timer);
+      resolve(event.data);
+    });
+    target.addEventListener("error", event => {
+      clearTimeout(timer);
+      reject(new Error(`worker error: ${event.message || event.type}`));
+    }, { once: true });
+  });
+}
+
+function inspectDisabledNetwork(view) {
+  const observations = {};
+  for (const name of disabledNetworkNames) {
+    const descriptor = Object.getOwnPropertyDescriptor(view, name);
+    const facade = view[name];
+    if (typeof facade !== "function") {
+      observations[name] = { present: false };
+      continue;
+    }
+    const copied = facade;
+    let callError;
+    let constructError;
+    try { Reflect.apply(copied, undefined, []); }
+    catch (error) { callError = { message: error.message, name: error.name }; }
+    try { Reflect.construct(copied, []); }
+    catch (error) { constructError = { message: error.message, name: error.name }; }
+    let redefineBlocked = false;
+    try { Object.defineProperty(view, name, { value() {} }); }
+    catch (error) { redefineBlocked = error instanceof TypeError; }
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(
+      facade.prototype,
+      "constructor",
+    );
+    observations[name] = {
+      backReference: facade.prototype?.constructor === facade,
+      callError,
+      constructError,
+      copied: copied === facade,
+      globalConfigurable: descriptor?.configurable,
+      globalProtected: descriptor?.writable === false
+        && descriptor?.value === facade
+        && redefineBlocked,
+      length: facade.length,
+      name: facade.name,
+      present: true,
+      prototypeProtected: constructorDescriptor?.configurable === false
+        && constructorDescriptor?.writable === false
+        && constructorDescriptor?.value === facade,
+      reflectedNative: Function.prototype.toString.call(facade).includes("[native code]"),
+    };
+  }
+  return observations;
+}
+
+function inspectDisabledCapabilityMethods(view) {
+  const observations = {};
+  for (const definition of disabledCapabilityMethods) {
+    const owner = view[definition.owner];
+    const target = definition.kind === "static-method" ? owner : owner?.prototype;
+    const facade = target?.[definition.member];
+    if (typeof facade !== "function") {
+      observations[definition.id] = { present: false };
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(target, definition.member);
+    let callError;
+    try {
+      Reflect.apply(facade, undefined, [{
+        url: `https://emerging-egress-probe.invalid/${definition.id}`,
+      }]);
+    } catch (error) {
+      callError = { message: error.message, name: error.name };
+    }
+    let redefineBlocked = false;
+    try { Object.defineProperty(target, definition.member, { value() {} }); }
+    catch (error) { redefineBlocked = error instanceof TypeError; }
+    observations[definition.id] = {
+      callError,
+      length: facade.length,
+      name: facade.name,
+      present: true,
+      protected: descriptor?.configurable === false
+        && descriptor?.writable === false
+        && descriptor?.value === facade
+        && redefineBlocked,
+      reflectedNative: Function.prototype.toString.call(facade).includes("[native code]"),
+    };
+  }
+  return observations;
+}
+
+function runRealtimeContainment() {
+  const main = inspectDisabledNetwork(window);
+  const mainCapabilities = inspectDisabledCapabilityMethods(window);
+  const pristine = inspectDisabledNetwork(pristineFrame.contentWindow);
+  const pristineCapabilities = inspectDisabledCapabilityMethods(pristineFrame.contentWindow);
+  const freshFrame = document.createElement("iframe");
+  document.body.append(freshFrame);
+  const fresh = inspectDisabledNetwork(freshFrame.contentWindow);
+  const freshCapabilities = inspectDisabledCapabilityMethods(freshFrame.contentWindow);
+  freshFrame.remove();
+  pristineFrame.remove();
+  const udpPort = Number(new URL(location.href).searchParams.get("udp"));
+  let iceProbe;
+  try {
+    new RTCPeerConnection({
+      iceServers: [
+        { urls: `stun:127.0.0.1:${udpPort}` },
+        { urls: `stun:realtime-egress-probe.invalid:${udpPort}` },
+      ],
+    });
+  } catch (error) {
+    iceProbe = { message: error.message, name: error.name };
+  }
+  return {
+    capabilityMethods: {
+      fresh: freshCapabilities,
+      main: mainCapabilities,
+      pristine: pristineCapabilities,
+    },
+    fresh,
+    iceProbe,
+    main,
+    pristine,
+  };
+}
+
+async function runWorker(type) {
+  const target = `${targetBase}/target-worker-${type}.js`;
+  const worker = new Worker(target, { credentials: "omit", name: `worker-${type}`, type });
+  const identity = worker instanceof Worker && Object.getPrototypeOf(worker) === Worker.prototype;
+  const messages = [];
+  worker.addEventListener("message", event => messages.push(event.data));
+  const readyPromise = once(worker, message => message?.kind === `${type}-root`);
+  const dynamicPromise = once(worker, message => message?.kind === `${type}-dynamic`);
+  const timerPromise = once(worker, message => message?.kind === `${type}-dynamic-timer`);
+  const ready = await readyPromise;
+  const echoPromise = once(worker, message => message?.echo === `roundtrip-${type}`);
+  worker.postMessage(`roundtrip-${type}`);
+  const [dynamic, echo, timer] = await Promise.all([
+    dynamicPromise,
+    echoPromise,
+    timerPromise,
+  ]);
+  worker.terminate();
+  const countAfterTerminate = messages.length;
+  await new Promise(resolve => setTimeout(resolve, 80));
+  return { countAfterTerminate, dynamic, echo, identity, messages, ready, timer };
+}
+
+async function runExecutableWorker(kind, url, revoke = false, options = undefined) {
+  const worker = new Worker(url, options);
+  if (revoke) URL.revokeObjectURL(url);
+  const message = await once(worker, value => value?.kind === `${kind}-root`);
+  worker.terminate();
+  return message;
+}
+
+async function runRejectedWorker(url, options = undefined) {
+  let worker;
+  try {
+    worker = new Worker(url, options);
+  } catch (error) {
+    return { boundary: "sync", name: error.name };
+  }
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      worker.terminate();
+      resolve({ boundary: "timeout" });
+    }, 8_000);
+    worker.addEventListener("error", event => {
+      event.preventDefault();
+      clearTimeout(timer);
+      worker.terminate();
+      resolve({
+        boundary: "async",
+        bubbles: event.bubbles,
+        cancelable: event.cancelable,
+        errorType: typeof event.error,
+        filenameType: typeof event.filename,
+        interface: event.constructor.name,
+        isErrorEvent: event instanceof ErrorEvent,
+        messageType: typeof event.message,
+        type: event.type,
+      });
+    }, { once: true });
+    worker.addEventListener("message", event => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve({ boundary: "message", data: event.data });
+    }, { once: true });
+  });
+}
+
+async function runSubclassRejectedWorker(url) {
+  const nativeTerminate = Worker.prototype.terminate;
+  class HostileWorker extends Worker {
+    terminate() {
+      this.overrideCalls = (this.overrideCalls ?? 0) + 1;
+    }
+  }
+  const worker = new HostileWorker(url);
+  const boundary = await new Promise(resolve => {
+    const timer = setTimeout(() => resolve("timeout"), 8_000);
+    worker.addEventListener("error", event => {
+      event.preventDefault();
+      clearTimeout(timer);
+      resolve("async");
+    }, { once: true });
+  });
+  const overrideCalls = worker.overrideCalls ?? 0;
+  Reflect.apply(nativeTerminate, worker, []);
+  return { boundary, overrideCalls };
+}
+
+async function runSharedWorker(type) {
+  const name = `shared-${type}`;
+  const target = `${targetBase}/target-shared-worker-${type}.js`;
+  const first = new SharedWorker(target, { credentials: "omit", name, type });
+  const second = new SharedWorker(target, { credentials: "omit", name, type });
+  const identity = first instanceof SharedWorker && second instanceof SharedWorker && Object.getPrototypeOf(first) === SharedWorker.prototype;
+  first.port.start();
+  second.port.start();
+  const reusedPromise = once(second.port, message => message?.kind === `shared-${type}-root`, 8_000, `shared-${type}-second-root`);
+  const ready = await once(first.port, message => message?.kind === `shared-${type}-root`, 8_000, `shared-${type}-first-root`);
+  const echoPromise = once(first.port, message => message?.echo === `roundtrip-${type}`, 8_000, `shared-${type}-echo`);
+  first.port.postMessage(`roundtrip-${type}`);
+  const echo = await echoPromise;
+  const reused = await reusedPromise;
+  first.port.close();
+  second.port.close();
+  const restartedWorker = new SharedWorker(target, { credentials: "omit", name, type });
+  restartedWorker.port.start();
+  const restarted = await once(restartedWorker.port, message => message?.kind === `shared-${type}-root`, 8_000, `shared-${type}-restarted-root`);
+  restartedWorker.port.close();
+  return { echo, identity, ready, restarted, reused };
+}
+
+async function runSharedWorkerIsolation() {
+  const name = "shared-isolation";
+  const first = new SharedWorker(`${targetBase}/target-shared-worker-isolated-a.js`, { credentials: "omit", name });
+  const second = new SharedWorker(`${targetBase}/target-shared-worker-isolated-b.js`, { credentials: "omit", name });
+  first.port.start();
+  second.port.start();
+  const [firstMessage, secondMessage] = await Promise.all([
+    once(first.port, message => message?.kind === "shared-isolated-a-root", 8_000, "shared-isolated-a"),
+    once(second.port, message => message?.kind === "shared-isolated-b-root", 8_000, "shared-isolated-b"),
+  ]);
+  first.port.close();
+  second.port.close();
+  return {
+    first: firstMessage.kind,
+    identity: first instanceof SharedWorker && second instanceof SharedWorker,
+    second: secondMessage.kind,
+  };
+}
+
+async function runWorklet() {
+  const Context = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!Context) return { supported: false };
+  const context = new Context();
+  if (!context.audioWorklet) {
+    await context.close();
+    return { supported: false };
+  }
+  await context.audioWorklet.addModule(`${targetBase}/target-worklet-module.js`);
+  await context.close();
+  return { supported: true };
+}
+
+runtime.onload = async () => {
+  try {
+    stage = "realtime";
+    const realtime = runRealtimeContainment();
+    stage = "worker-classic";
+    const classic = await runWorker("classic");
+    stage = "worker-module";
+    const module = await runWorker("module");
+    stage = "worker-data";
+    const data = await runExecutableWorker("data", "data:text/javascript,postMessage({kind%3A'data-root'})");
+    const dataCharset = await runExecutableWorker("data-charset", "data:text/javascript;charset=windows-1252,postMessage({kind%3A'data-charset-root'%2Cvalue%3A'%E9'})");
+    const dataInvalidCharset = await runExecutableWorker("data-invalid-charset", "data:text/javascript;charset=invalid-label,postMessage({kind%3A'data-invalid-charset-root'%2Cvalue%3A'fallback'})");
+    const dataPercent = await runExecutableWorker("data-percent", "data:text/javascript,postMessage({kind%3A'data-percent-root'%2Cvalue%3A'%ZZ'})");
+    const dataFragmentURL = "data:text/javascript,postMessage({kind%3A'data-fragment-root'%2Chref%3Alocation.href})#ignored-source";
+    const dataFragment = await runExecutableWorker("data-fragment", dataFragmentURL);
+    const dataPlain = await runExecutableWorker("data-plain", "data:text/plain,postMessage({kind%3A'data-plain-root'})");
+    const malformedData = await runRejectedWorker("data:text/javascript;base64,%%%%");
+    const subclassRejected = await runSubclassRejectedWorker("data:text/javascript;base64,%%%%");
+    const modulePlainData = await runRejectedWorker("data:text/plain,export%20default%201", { type: "module" });
+    stage = "worker-blob";
+    const blobURL = URL.createObjectURL(new Blob(["postMessage({kind:'blob-root'})"], { type: "text/javascript" }));
+    const blob = await runExecutableWorker("blob", blobURL, true);
+    const plainBlobURL = URL.createObjectURL(new Blob(["postMessage({kind:'blob-plain-root'})"], { type: "text/plain" }));
+    const blobPlain = await runExecutableWorker("blob-plain", plainBlobURL, true);
+    const modulePlainBlobURL = URL.createObjectURL(new Blob(["export default true"], { type: "text/plain" }));
+    const modulePlainBlob = await runRejectedWorker(modulePlainBlobURL, { type: "module" });
+    URL.revokeObjectURL(modulePlainBlobURL);
+    stage = "worker-rejections";
+    const rejected = [];
+    for (const value of ["https://cross-origin.invalid/worker.js", preRuntimeBlobURL]) {
+      try {
+        new Worker(value);
+        rejected.push(false);
+      } catch (error) {
+        rejected.push(error.name === "SecurityError");
+      }
+    }
+    URL.revokeObjectURL(preRuntimeBlobURL);
+    stage = "shared-classic";
+    const sharedClassic = await runSharedWorker("classic");
+    stage = "shared-module";
+    const sharedModule = await runSharedWorker("module");
+    const sharedIsolation = await runSharedWorkerIsolation();
+    stage = "worklet";
+    const worklet = await runWorklet();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const controlHidden = [...classic.messages, ...module.messages].every(message => !String(message?.operation ?? "").startsWith("ZERO_PROXY_WORKER_"));
+    globalThis.__workerBootstrapResult = {
+      blob,
+      blobPlain,
+      classic,
+      controlHidden,
+      data,
+      dataCharset,
+      dataInvalidCharset,
+      dataFragment,
+      dataPercent,
+      dataPlain,
+      malformedData,
+      module,
+      modulePlainBlob,
+      modulePlainData,
+      plans,
+      realtime,
+      rejected,
+      sharedClassic,
+      sharedModule,
+      sharedIsolation,
+      subclassRejected,
+      worklet,
+    };
+  } catch (error) {
+    globalThis.__workerBootstrapResult = { error: `${stage}:${error.name}:${error.message}`, planKinds: plans.map(plan => plan.source_kind) };
+  }
+  document.querySelector("#result").textContent = JSON.stringify(globalThis.__workerBootstrapResult);
+};
+runtime.onerror = () => {
+  globalThis.__workerBootstrapResult = { error: "runtime preload failed", plans };
+  document.querySelector("#result").textContent = JSON.stringify(globalThis.__workerBootstrapResult);
+};
+document.head.append(runtime);
+})();
+</script>

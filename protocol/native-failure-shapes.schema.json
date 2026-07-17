@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/protocol/native-failure-shapes.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "table_version", "rows"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "table_version": { "const": 1 },
+    "rows": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": { "$ref": "#/$defs/row" }
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "surface",
+        "boundary",
+        "timing",
+        "browser_shape",
+        "exception_name",
+        "original_bytes_executed",
+        "terminal_events",
+        "test_id"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$" },
+        "surface": {
+          "enum": [
+            "navigation",
+            "classic-script",
+            "module-script",
+            "eval-function",
+            "dynamic-policy-sync",
+            "dynamic-policy-async",
+            "css",
+            "import-map",
+            "fetch-cors-transport",
+            "websocket",
+            "runtime-install"
+          ]
+        },
+        "boundary": { "enum": ["response", "event", "promise", "throw", "document"] },
+        "timing": {
+          "enum": [
+            "navigation-commit",
+            "asynchronous-load",
+            "asynchronous-module-evaluation",
+            "synchronous-call",
+            "asynchronous-rejection",
+            "parser-registration",
+            "asynchronous-terminal",
+            "pre-target-execution"
+          ]
+        },
+        "browser_shape": {
+          "enum": [
+            "safe-same-origin-error-document",
+            "load-error-event",
+            "rejected-module-promise",
+            "caller-realm-syntax-error",
+            "stable-blocked-domexception",
+            "typed-load-failure",
+            "typed-document-failure",
+            "native-network-error-or-opaque-response",
+            "single-error-close-sequence",
+            "atomic-rollback-blocked-document"
+          ]
+        },
+        "exception_name": { "type": ["string", "null"], "enum": [null, "TypeError", "SyntaxError", "SecurityError"] },
+        "original_bytes_executed": { "const": false },
+        "terminal_events": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["document", "error", "rejection", "throw", "close", "rollback", "document-block"] }
+        },
+        "test_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,95}$" }
+      }
+    }
+  }
+}

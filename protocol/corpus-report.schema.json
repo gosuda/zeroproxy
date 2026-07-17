@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "corpus-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_type", "generated_at", "status", "test_mode", "certification", "release", "environment", "build", "manifest", "registry", "sites", "violations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_type": {"const": "corpus-gate"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["pass", "fail"]},
+    "test_mode": {"type": "boolean"},
+    "certification": {"$ref": "#/$defs/certification"},
+    "release": {"$ref": "#/$defs/release"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "build": {"$ref": "#/$defs/build"},
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "framework_inventory_sha256", "site_count", "oracle_id", "offline_fixture_categories", "live_canary_count", "fixture_evidence_sha256", "mediated_fixture_origin"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "framework_inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "site_count": {"type": "integer", "minimum": 1},
+        "oracle_id": {"type": "string"},
+        "offline_fixture_categories": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "live_canary_count": {"type": "integer", "minimum": 0},
+        "fixture_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "mediated_fixture_origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "verified", "https", "immutable_cache", "base_url_sha256", "asset_evidence_sha256", "asset_count", "verified_before_after"],
+          "properties": {
+            "status": {"enum": ["verified", "not-applicable"]},
+            "verified": {"type": "boolean"},
+            "https": {"type": "boolean"},
+            "immutable_cache": {"type": "boolean"},
+            "base_url_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+            "asset_evidence_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+            "asset_count": {"type": "integer", "minimum": 0},
+            "verified_before_after": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "oracle_id", "entry_count", "verification"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "oracle_id": {"type": "string"},
+        "entry_count": {"type": "integer", "minimum": 0},
+        "verification": {"type": "object", "required": ["verified"]}
+      }
+    },
+    "sites": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/site"}},
+    "violations": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "certification": {"type": "object", "additionalProperties": false, "required": ["claimed", "reason"], "properties": {"claimed": {"type": "boolean"}, "reason": {"type": "string"}}},
+    "release": {"type": "object", "additionalProperties": false, "required": ["release_id", "performance_config_sha256", "build_tree_sha256"], "properties": {"release_id": {"type": "string"}, "performance_config_sha256": {"$ref": "#/$defs/sha256"}, "build_tree_sha256": {"$ref": "#/$defs/sha256"}}},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["architecture", "os", "node", "toolchain", "browser", "browser_pin", "adapter_toolchain", "registry_scope_verified"], "properties": {"architecture": {"type": "string"}, "os": {"type": "string"}, "node": {"type": "string"}, "toolchain": {"type": "object"}, "browser": {"type": "object", "required": ["family", "exact_build"], "properties": {"family": {"type": "string"}, "exact_build": {"type": "string"}}}, "browser_pin": {"type": "object", "required": ["configured_pin", "boundary_pin_verified", "release_supported"]}, "adapter_toolchain": {}, "registry_scope_verified": {"type": "boolean"}}},
+    "build": {"type": "object", "additionalProperties": false, "required": ["tree_sha256", "assets"], "properties": {"tree_sha256": {"$ref": "#/$defs/sha256"}, "assets": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "size_bytes"], "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}}}}}},
+    "fixtureEvidence": {"type": "object", "additionalProperties": false, "required": ["status", "verified", "tree_sha256", "asset_count", "served_from_snapshot", "entry_path"], "properties": {"status": {"enum": ["verified", "not-applicable"]}, "verified": {"type": "boolean"}, "tree_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}, "asset_count": {"type": "integer", "minimum": 0}, "served_from_snapshot": {"type": "boolean"}, "entry_path": {"type": ["string", "null"]}}},
+    "actions": {"type": "object", "additionalProperties": false, "required": ["passed", "executed", "failures"], "properties": {"passed": {"type": "boolean"}, "executed": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}, "failures": {"type": "array", "items": {"type": "string"}}}},
+    "compatibility": {"type": "object", "additionalProperties": false, "required": ["passed", "failures"], "properties": {"passed": {"type": "boolean"}, "failures": {"type": "array", "items": {"type": "string"}}}},
+    "signal": {"type": "object", "additionalProperties": false, "required": ["id", "signature"], "properties": {"id": {"type": "string"}, "signature": {"type": "string"}}},
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "url", "site_class", "kind", "fixture_category", "fixture_sha256", "fixture_path", "fixture_evidence", "execution_urls", "actions", "compatibility", "stealth"],
+      "properties": {
+        "id": {"type": "string"},
+        "url": {"type": "string"},
+        "site_class": {"enum": ["content", "application", "editor_media_pwa"]},
+        "kind": {"enum": ["offline-fixture", "live-canary"]},
+        "fixture_category": {"type": ["string", "null"]},
+        "fixture_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "fixture_path": {"type": ["string", "null"]},
+        "fixture_evidence": {"$ref": "#/$defs/fixtureEvidence"},
+        "execution_urls": {"type": "object", "additionalProperties": false, "required": ["native", "mediated"], "properties": {"native": {"type": "string", "format": "uri"}, "mediated": {"type": "string", "format": "uri"}}},
+        "actions": {"type": "object", "additionalProperties": false, "required": ["native", "mediated"], "properties": {"native": {"$ref": "#/$defs/actions"}, "mediated": {"$ref": "#/$defs/actions"}}},
+        "compatibility": {"type": "object", "additionalProperties": false, "required": ["native", "mediated"], "properties": {"native": {"$ref": "#/$defs/compatibility"}, "mediated": {"$ref": "#/$defs/compatibility"}}},
+        "stealth": {"type": "object", "additionalProperties": false, "required": ["native_signals", "mediated_signals", "deltas", "outcome"], "properties": {"native_signals": {"type": "array", "items": {"$ref": "#/$defs/signal"}}, "mediated_signals": {"type": "array", "items": {"$ref": "#/$defs/signal"}}, "deltas": {"type": "array", "items": {"type": "object"}}, "outcome": {"enum": ["unowned-delta", "owned-or-no-delta"]}}}
+      }
+    }
+  }
+}

@@ -1,0 +1,79 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>runtime transaction rollback oracle</title>
+<script type="module">
+const version = await fetch("/_zp/version.json").then(response => response.json());
+const abiName = `__zp_abi_${"7".repeat(48)}`;
+const listenerCounts = new Map();
+const addDescriptor = Object.getOwnPropertyDescriptor(EventTarget.prototype, "addEventListener");
+const removeDescriptor = Object.getOwnPropertyDescriptor(EventTarget.prototype, "removeEventListener");
+const observeDescriptor = Object.getOwnPropertyDescriptor(MutationObserver.prototype, "observe");
+const original = {
+  eval: Object.getOwnPropertyDescriptor(window, "eval"),
+  Function: Object.getOwnPropertyDescriptor(window, "Function"),
+  fetch: Object.getOwnPropertyDescriptor(window, "fetch"),
+  baseURI: Object.getOwnPropertyDescriptor(Node.prototype, "baseURI"),
+  defaultView: Object.getOwnPropertyDescriptor(Document.prototype, "defaultView"),
+};
+function count(kind, type) {
+  if (!["submit", "click", "popstate"].includes(type)) return;
+  const key = `${kind}:${type}`;
+  listenerCounts.set(key, (listenerCounts.get(key) ?? 0) + 1);
+}
+Object.defineProperty(EventTarget.prototype, "addEventListener", {
+  ...addDescriptor,
+  value(type, listener, options) {
+    count("add", type);
+    return Reflect.apply(addDescriptor.value, this, [type, listener, options]);
+  },
+});
+Object.defineProperty(EventTarget.prototype, "removeEventListener", {
+  ...removeDescriptor,
+  value(type, listener, options) {
+    count("remove", type);
+    return Reflect.apply(removeDescriptor.value, this, [type, listener, options]);
+  },
+});
+Object.defineProperty(MutationObserver.prototype, "observe", {
+  ...observeDescriptor,
+  value() {
+    throw new Error("transaction-observer-install-failure");
+  },
+});
+const runtime = document.createElement("script");
+runtime.src = `${version.selectors["runtime-prelude.js"]}#abi=${abiName}&url=${encodeURIComponent("https://target.example/transaction.html")}&ports=80%2C443`;
+function same(left, right) {
+  return left?.value === right?.value && left?.get === right?.get && left?.set === right?.set && left?.writable === right?.writable && left?.enumerable === right?.enumerable && left?.configurable === right?.configurable;
+}
+function restoreTestHooks() {
+  Object.defineProperty(EventTarget.prototype, "addEventListener", addDescriptor);
+  Object.defineProperty(EventTarget.prototype, "removeEventListener", removeDescriptor);
+  Object.defineProperty(MutationObserver.prototype, "observe", observeDescriptor);
+}
+function recordFailure(error) {
+  const current = {
+    eval: Object.getOwnPropertyDescriptor(window, "eval"),
+    Function: Object.getOwnPropertyDescriptor(window, "Function"),
+    fetch: Object.getOwnPropertyDescriptor(window, "fetch"),
+    baseURI: Object.getOwnPropertyDescriptor(Node.prototype, "baseURI"),
+    defaultView: Object.getOwnPropertyDescriptor(Document.prototype, "defaultView"),
+  };
+  restoreTestHooks();
+  const listenersRolledBack = ["submit", "click", "popstate"].every(type => listenerCounts.get(`add:${type}`) === 1 && listenerCounts.get(`remove:${type}`) === 1);
+  globalThis.__zp_transaction_rollback_result = {
+    error: String(error),
+    listeners: Object.fromEntries(listenerCounts),
+    ok: String(error).includes("transaction-observer-install-failure")
+      && Object.keys(original).every(key => same(current[key], original[key]))
+      && !(abiName in window)
+      && listenersRolledBack
+      && document.body?.textContent === "ZeroProxy blocked this document because its privacy runtime could not be installed.",
+  };
+}
+addEventListener("error", event => recordFailure(event.error ?? event.message), { once: true });
+runtime.onload = () => setTimeout(() => {
+  globalThis.__zp_transaction_rollback_result ??= { ok: false, error: "missing-failure" };
+}, 0);
+runtime.onerror = () => recordFailure("network-error");
+document.head.append(runtime);
+</script>

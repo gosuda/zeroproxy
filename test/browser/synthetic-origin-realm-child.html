@@ -1,0 +1,95 @@
+<!doctype html><meta charset="utf-8"><title>synthetic realm child</title><script type="module">
+const parameters = new URLSearchParams(location.search);
+const virtual = parameters.get("virtual");
+const parentVirtual = parameters.get("parent_virtual") ?? "https://alpha.example";
+const targetPath = parameters.get("target_path");
+
+async function controller() {
+  await navigator.serviceWorker.register("/synthetic-origin-realm-sw.js", { scope: "/" });
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) {
+    location.replace(`${location.pathname}${location.search}${location.search ? "&" : "?"}controlled=1`);
+    return false;
+  }
+  return true;
+}
+
+async function installRuntime() {
+  const version = await fetch("/_zp/version.json", { cache: "no-store" }).then(response => response.json());
+  const runtime = document.createElement("script");
+  runtime.src = `${version.selectors["runtime-prelude.js"]}#abi=__zp_abi_222222222222222222222222222222222222222222222222&url=${encodeURIComponent(`${virtual}${targetPath}`)}&ports=80%2C443&strings=0&cookie=cccccccccccccccccccccccccccccccc`;
+  const target = new URL(`${virtual}${targetPath}`),port=target.port||(target.protocol==="https:"?"443":"80"),canonicalOrigin=`${target.protocol}//${target.hostname}:${port}`;
+  runtime.dataset.zpCookieBootstrap = btoa(JSON.stringify({
+    runtime_capability: "c".repeat(32),
+    entry_id: "e".repeat(32),
+    cookie_top_level_site: parentVirtual,
+    policy_context: { profile_id: "test-profile", tab_id: "test-tab", document_id: "test-document", virtual_origin: canonicalOrigin, virtual_site: `${target.protocol}//${target.hostname}`, target_url: target.href, effective_base_url: target.href, referrer_url: null, referrer_policy: "strict-origin-when-cross-origin", document_charset: "utf-8", target_csp: [], target_csp_report_only: [], relay_profile: "test-relay-profile", approved_target_ports: [80, 443], policy_version: 2 },
+    document_policy: { version: 1, trusted_types: { directive_present: false, allow_any: true, allowed_policy_names: [], allow_duplicates: false, require_for_script: false }, enforced_report_endpoint_count: 0, report_only_endpoint_count: 0 },
+    decode_metadata: { encoding_used: "utf-8", replacement: false, source: "test" },
+    snapshot: { cookie_seq: 0, jar_or_delta: { kind: "SNAPSHOT", cookies: [] } },
+  })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  await new Promise((resolve, reject) => {
+    runtime.addEventListener("load", resolve, { once: true });
+    runtime.addEventListener("error", reject, { once: true });
+    document.head.append(runtime);
+  });
+}
+
+async function mapParentOrigin() {
+  if (new URL(virtual).origin === new URL(parentVirtual).origin) return;
+  const mapper = document.createElement("iframe");
+  mapper.hidden = true;
+  const loaded = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("origin mapping timeout")), 10_000);
+    const onLoad = () => {
+      if (mapper.contentDocument !== null) return;
+      clearTimeout(timeout);
+      mapper.removeEventListener("load", onLoad);
+      resolve();
+    };
+    mapper.addEventListener("load", onLoad);
+  });
+  mapper.src = `${parentVirtual}/blank`;
+  document.body.append(mapper);
+  await loaded;
+  mapper.remove();
+}
+
+if (await controller()) {
+  await installRuntime();
+  await mapParentOrigin();
+  const realmWindow = document.defaultView;
+  const bridge = realmWindow.opener ?? realmWindow.parent;
+  const role = realmWindow.opener ? "popup" : "frame";
+  bridge.postMessage({
+    kind: "realm-ready",
+    role,
+    relationships: {
+      parent_is_top: realmWindow.parent === realmWindow.top,
+      self_is_top: realmWindow.self === realmWindow.top,
+      opener_present: realmWindow.opener !== null,
+      parent_identity: realmWindow.parent.window === realmWindow.parent && realmWindow.parent.self === realmWindow.parent,
+      top_identity: realmWindow.top.window === realmWindow.top && realmWindow.top.self === realmWindow.top,
+      opener_identity: realmWindow.opener === null || (realmWindow.opener.window === realmWindow.opener && realmWindow.opener.self === realmWindow.opener),
+    },
+    virtual,
+    target_path: targetPath,
+  }, "*");
+  addEventListener("message", event => {
+    if (event.data?.kind === "realm-probe") {
+      event.source.postMessage({
+        kind: "realm-probe-result",
+        origin: event.origin,
+        role,
+        source_is_parent: event.source === bridge,
+        virtual,
+        target_path: targetPath,
+      }, event.origin);
+      return;
+    }
+    if (event.data?.kind === "realm-channel" && event.ports[0]) {
+      event.ports[0].postMessage({ kind: "realm-channel-ack", origin: event.origin, target_path: targetPath, virtual });
+    }
+  });
+}
+</script>

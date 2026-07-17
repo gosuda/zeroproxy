@@ -1,0 +1,245 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic origin storage and realm oracle</title>
+<pre id="result">running</pre>
+<script type="module">
+const primaryPort = location.port;
+const alternatePort = new URL(location.href).searchParams.get("alternatePort");
+const parentOrigin = location.origin;
+const host = {
+  alpha: "o-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.storage.localhost",
+  beta: "o-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.storage.localhost",
+};
+
+if (!alternatePort || !/^\d+$/.test(alternatePort)) throw new Error("alternatePort query parameter is required");
+
+const childPath = "/synthetic-origin-storage-child.html";
+const entries = [
+  { id: "alphaOne", origin: `http://${host.alpha}:${primaryPort}`, query: "id=alphaOne" },
+  { id: "alphaTwo", origin: `http://${host.alpha}:${primaryPort}`, query: "id=alphaTwo" },
+  { id: "beta", origin: `http://${host.beta}:${primaryPort}`, query: "id=beta" },
+  { id: "alphaOtherPort", origin: `http://${host.alpha}:${alternatePort}`, query: "id=alphaOtherPort" },
+];
+const frames = new Map();
+const ready = new Map();
+const pending = new Map();
+const checks = [];
+let nextRequest = 1;
+
+function record(id, pass, detail = undefined) {
+  checks.push({ id, pass, ...(detail === undefined ? {} : { detail }) });
+}
+
+function expectedURL(id) {
+  return frames.get(id).src;
+}
+
+function receive(event) {
+  const entry = entries.find(candidate => candidate.id === event.data?.id);
+  if (!entry || event.origin !== entry.origin || event.source !== frames.get(entry.id).contentWindow) return;
+  if (event.data.kind === "synthetic-origin-storage-ready") {
+    ready.set(entry.id, event.data);
+    return;
+  }
+  if (event.data.kind !== "synthetic-origin-storage-result") return;
+  const request = pending.get(event.data.request);
+  if (!request || request.id !== entry.id) return;
+  pending.delete(event.data.request);
+  if (event.data.error) request.reject(new Error(`${entry.id}/${request.command}: ${event.data.error}`));
+  else request.resolve(event.data.value);
+}
+
+window.addEventListener("message", receive);
+
+function waitForReady() {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 10_000;
+    const check = () => {
+      if (ready.size === entries.length) return resolve();
+      if (Date.now() >= deadline) return reject(new Error(`timed out waiting for child readiness: ${entries.filter(entry => !ready.has(entry.id)).map(entry => entry.id).join(",")}`));
+      setTimeout(check, 20);
+    };
+    check();
+  });
+}
+
+function call(id, command, args = undefined) {
+  const frame = frames.get(id);
+  const entry = entries.find(candidate => candidate.id === id);
+  const request = String(nextRequest++);
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pending.delete(request);
+      reject(new Error(`timed out waiting for ${id}/${command}`));
+    }, 5_000);
+    pending.set(request, {
+      id,
+      command,
+      resolve(value) {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      reject(error) {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    });
+    frame.contentWindow.postMessage({ kind: "synthetic-origin-storage-command", request, command, args }, entry.origin);
+  });
+}
+
+
+async function observations() {
+  return Object.fromEntries(await Promise.all(entries.map(async entry => [entry.id, await call(entry.id, "observations")] )));
+}
+
+async function run() {
+  await waitForReady();
+
+  const missing = Object.fromEntries(entries.map(entry => [entry.id, ready.get(entry.id).missing]));
+  const missingAPIs = Object.entries(missing).filter(([, value]) => value.length > 0);
+  record("required-browser-storage-apis-available", missingAPIs.length === 0, missing);
+  if (missingAPIs.length) throw new Error(`required browser APIs unavailable: ${JSON.stringify(missing)}`);
+
+  await call("alphaOne", "seed", { value: "alpha" });
+  const reads = Object.fromEntries(await Promise.all(entries.map(async entry => [entry.id, await call(entry.id, "read")] )));
+  record(
+    "same-synthetic-origin-shares-localstorage-indexeddb-and-cachestorage",
+    reads.alphaTwo.localStorage === "alpha" && reads.alphaTwo.indexedDB === "alpha" && reads.alphaTwo.cacheStorage === "alpha",
+    reads.alphaTwo,
+  );
+  record(
+    "different-synthetic-host-cannot-read-storage",
+    reads.beta.localStorage === null && reads.beta.indexedDB === null && reads.beta.cacheStorage === null,
+    reads.beta,
+  );
+  record(
+    "same-synthetic-host-different-port-cannot-read-storage",
+    reads.alphaOtherPort.localStorage === null && reads.alphaOtherPort.indexedDB === null && reads.alphaOtherPort.cacheStorage === null,
+    reads.alphaOtherPort,
+  );
+  await call("alphaOne", "shared-worker-set", { value: "alpha-shared-worker" });
+  const sharedWorkerReads = Object.fromEntries(await Promise.all(entries.map(async entry => [
+    entry.id,
+    await call(entry.id, "shared-worker-get"),
+  ])));
+  record(
+    "same-synthetic-origin-shares-sharedworker",
+    sharedWorkerReads.alphaTwo === "alpha-shared-worker",
+    sharedWorkerReads,
+  );
+  record(
+    "different-synthetic-host-isolates-sharedworker",
+    sharedWorkerReads.beta === null,
+    sharedWorkerReads,
+  );
+  record(
+    "same-synthetic-host-different-port-isolates-sharedworker",
+    sharedWorkerReads.alphaOtherPort === null,
+    sharedWorkerReads,
+  );
+
+  await Promise.all(entries.map(entry => call(entry.id, "clear-observations")));
+  await call("alphaTwo", "broadcast", { value: "same-origin-message" });
+  const alphaBroadcast = await call("alphaOne", "wait-for-broadcast", { value: "same-origin-message" });
+  const broadcastObservations = await observations();
+  record("same-synthetic-origin-broadcastchannel-delivers", alphaBroadcast === "same-origin-message", alphaBroadcast);
+  record(
+    "different-synthetic-host-broadcastchannel-isolated",
+    !broadcastObservations.beta.broadcast.includes("same-origin-message"),
+    broadcastObservations.beta,
+  );
+  record(
+    "same-synthetic-host-different-port-broadcastchannel-isolated",
+    !broadcastObservations.alphaOtherPort.broadcast.includes("same-origin-message"),
+    broadcastObservations.alphaOtherPort,
+  );
+
+  await call("alphaOne", "hold-lock");
+  try {
+    const alphaLock = await call("alphaTwo", "try-lock");
+    const betaLock = await call("beta", "try-lock");
+    const portLock = await call("alphaOtherPort", "try-lock");
+    record("same-synthetic-origin-weblocks-contend", alphaLock.acquired === false, alphaLock);
+    record("different-synthetic-host-weblocks-isolated", betaLock.acquired === true, betaLock);
+    record("same-synthetic-host-different-port-weblocks-isolated", portLock.acquired === true, portLock);
+  } finally {
+    await call("alphaOne", "release-lock");
+  }
+
+  const sameOriginFrame = await call("alphaOne", "same-origin-iframe");
+  record("same-synthetic-origin-iframe-window-access", sameOriginFrame.readable && sameOriginFrame.origin === entries[0].origin, sameOriginFrame);
+  const crossOrigin = await call("alphaOne", "cross-origin-iframe", { origin: entries.find(entry => entry.id === "beta").origin });
+  record(
+    "cross-synthetic-origin-windowproxy-sop",
+    crossOrigin.documentDenied && crossOrigin.locationDenied && crossOrigin.contentDocumentIsNull,
+    crossOrigin,
+  );
+
+  const sessionLineage = await call("alphaOne", "session-storage-lineage", {
+    sameOrigin: entries.find(entry => entry.id === "alphaTwo").origin,
+    crossOrigin: entries.find(entry => entry.id === "beta").origin,
+  });
+  record(
+    "same-synthetic-origin-popup-clones-sessionstorage",
+    sessionLineage.sameFirst.marker === "alpha-session" && sessionLineage.sameFirst.child === null,
+    sessionLineage.sameFirst,
+  );
+  record(
+    "same-synthetic-origin-popup-sessionstorage-is-independent-after-clone",
+    sessionLineage.sourceIndependent && sessionLineage.sameChild === "same-popup",
+    { sourceIndependent: sessionLineage.sourceIndependent, sameChild: sessionLineage.sameChild },
+  );
+  record(
+    "different-synthetic-origin-popup-sessionstorage-is-partitioned",
+    sessionLineage.crossFirst.marker === null && sessionLineage.crossFirst.child === null && sessionLineage.crossWindowDenied,
+    { crossFirst: sessionLineage.crossFirst, crossWindowDenied: sessionLineage.crossWindowDenied },
+  );
+  record(
+    "sessionstorage-persists-through-same-origin-popup-navigation-and-back",
+    sessionLineage.sameSecond.marker === "alpha-session" && sessionLineage.sameSecond.child === "same-popup" && sessionLineage.sameBack.marker === "alpha-session",
+    { sameSecond: sessionLineage.sameSecond, sameBack: sessionLineage.sameBack },
+  );
+
+  await Promise.all(entries.map(entry => call(entry.id, "clear-observations")));
+  await call("alphaOne", "set-storage-event", { value: "storage-event-message" });
+  const alphaStorageEvent = await call("alphaTwo", "wait-for-storage-event", { key: "synthetic-origin-storage-event", value: "storage-event-message" });
+  const storageObservations = await observations();
+  record(
+    "same-synthetic-origin-storage-event-reports-source-url",
+    alphaStorageEvent.url === expectedURL("alphaOne") && alphaStorageEvent.key === "synthetic-origin-storage-event" && alphaStorageEvent.newValue === "storage-event-message",
+    alphaStorageEvent,
+  );
+  record(
+    "different-synthetic-host-does-not-receive-storage-event",
+    !storageObservations.beta.storage.some(event => event.key === "synthetic-origin-storage-event"),
+    storageObservations.beta,
+  );
+  record(
+    "same-synthetic-host-different-port-does-not-receive-storage-event",
+    !storageObservations.alphaOtherPort.storage.some(event => event.key === "synthetic-origin-storage-event"),
+    storageObservations.alphaOtherPort,
+  );
+}
+
+async function start() {
+  for (const entry of entries) {
+    const frame = document.createElement("iframe");
+    frame.src = `${entry.origin}${childPath}?${entry.query}&parentOrigin=${encodeURIComponent(parentOrigin)}`;
+    frame.name = entry.id;
+    frames.set(entry.id, frame);
+    document.body.append(frame);
+  }
+  try {
+    await run();
+    const passed = checks.filter(check => check.pass).length;
+    window.__syntheticOriginStorageOracle = { ok: passed === checks.length, passed, total: checks.length, checks };
+  } catch (error) {
+    const passed = checks.filter(check => check.pass).length;
+    window.__syntheticOriginStorageOracle = { ok: false, passed, total: checks.length, checks, error: error.message, ready: [...ready.keys()] };
+  }
+  document.querySelector("#result").textContent = JSON.stringify(window.__syntheticOriginStorageOracle);
+}
+
+start();
+</script>

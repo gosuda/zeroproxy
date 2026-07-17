@@ -1,0 +1,1 @@
+:root{color-scheme:light}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.grid>div{height:32px;background:#246}

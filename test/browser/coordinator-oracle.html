@@ -1,0 +1,454 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>coordinator oracle</title>
+<pre id="result"></pre>
+<script type="module">
+import { COORDINATOR_DB_VERSION } from "/control/coordinator-database.mjs";
+const result = document.querySelector("#result");
+const tests = [];
+
+function check(id, ok, detail) {
+  tests.push({ id, ok: Boolean(ok), ...(detail ? { detail } : {}) });
+}
+
+function connect(url = "/control/coordinator.mjs", name = crypto.randomUUID()) {
+  const worker = new SharedWorker(url, { type: "module", name });
+  const pending = new Map();
+  let revision = null;
+  const messages = [];
+  worker.port.onmessage = event => {
+    const message = event.data;
+    messages.push(message);
+    if (Number.isSafeInteger(message.revision)) revision = Math.max(revision ?? 0, message.revision);
+    const entry = pending.get(message.request_id);
+    if (!entry) return;
+    pending.delete(message.request_id);
+    if (message.ok) entry.resolve(message.result);
+    else entry.reject(Object.assign(new Error(`${entry.operation}: ${message.error.code}`), { code: message.error.code, revision: message.revision }));
+  };
+  worker.port.start();
+  return {
+    worker,
+    messages,
+    call(operation, payload = {}, options = {}) {
+      const request_id = options.request_id ?? crypto.randomUUID();
+      const expected_revision = Object.hasOwn(options, "expected_revision")
+        ? options.expected_revision
+        : revision;
+      return new Promise((resolve, reject) => {
+        pending.set(request_id, { resolve, reject, operation });
+        worker.port.postMessage({
+          v: 2,
+          request_id,
+          operation,
+          expected_revision,
+          payload,
+          ...(options.extra ?? {}),
+        });
+      });
+    },
+    revision() {
+      return revision;
+    },
+  };
+}
+
+function request(value) {
+  return new Promise((resolve, reject) => {
+    value.onsuccess = () => resolve(value.result);
+    value.onerror = () => reject(value.error);
+  });
+}
+
+function complete(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = resolve;
+    transaction.onabort = () => reject(transaction.error);
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+async function readProfile(profileID) {
+  const database = await request(indexedDB.open("zeroproxy-v2-coordinator"));
+  const transaction = database.transaction("profiles", "readonly");
+  const profile = await request(transaction.objectStore("profiles").get(profileID));
+  await complete(transaction);
+  database.close();
+  return profile;
+}
+
+async function readLineage(profileID, tabID) {
+  const database = await request(indexedDB.open("zeroproxy-v2-coordinator"));
+  const transaction = database.transaction(
+    ["sessions", "tabs", "history", "handoffs", "routes"],
+    "readonly",
+  );
+  const [tab, histories, handoffs, sessions, routes] = await Promise.all([
+    request(transaction.objectStore("tabs").get([profileID, tabID])),
+    request(transaction.objectStore("history").index("by_tab").getAll([profileID, tabID])),
+    request(transaction.objectStore("handoffs").getAll()),
+    request(transaction.objectStore("sessions").index("by_profile").getAll(profileID)),
+    request(transaction.objectStore("routes").index("by_tab").getAll([profileID, tabID])),
+  ]);
+  await complete(transaction);
+  database.close();
+  return {
+    tab,
+    histories,
+    handoffs: handoffs.filter(record => record.profile_id === profileID && record.tab_id === tabID),
+    sessions,
+    routes,
+  };
+}
+
+async function addPendingRoute(profileID, tabID, entryID, originID) {
+  const database = await request(indexedDB.open("zeroproxy-v2-coordinator"));
+  const transaction = database.transaction("routes", "readwrite");
+  transaction.objectStore("routes").add({
+    route_hash: crypto.randomUUID(),
+    profile_id: profileID,
+    tab_id: tabID,
+    entry_id: entryID,
+    origin_id: originID,
+    kind: "frame",
+    expires_at: Date.now() + 60_000,
+    revoked_at: null,
+  });
+  await complete(transaction);
+  database.close();
+}
+
+try {
+  const first = connect("/control/coordinator.mjs", "coordinator-lineage");
+  const profileA = await first.call("CREATE_PROFILE", { telemetry_opt_in: true });
+  const profileB = await first.call("CREATE_PROFILE");
+  check("telemetry-consent-is-explicit-profile-state",
+    profileA.telemetry_opt_in === true
+      && profileB.telemetry_opt_in === false
+      && (await readProfile(profileA.profile_id)).telemetry_opt_in === true
+      && (await readProfile(profileB.profile_id)).telemetry_opt_in === false);
+  const configuredRelays = await fetch("/control/config.json", { cache: "no-store" }).then(response => response.json());
+  const [relayProfileDigest, fallbackRelayProfileDigest] = configuredRelays.installed_relay_profile_digests;
+  const relayProfiles = new Map(configuredRelays.relay_profiles.map(record => [record.digest, record.profile]));
+  if (!fallbackRelayProfileDigest) throw new Error("ordered fallback relay fixture unavailable");
+  await first.call("APPROVE_RELAY_SET", {
+    profile_id: profileA.profile_id,
+    relay_profile_digests: [relayProfileDigest, fallbackRelayProfileDigest],
+  });
+  const url = "https://EXAMPLE.test:443/a?secret=1";
+  const revisionAfterProfiles = first.revision();
+  check("durable-response-revisions-monotonic", Number.isSafeInteger(revisionAfterProfiles)
+    && revisionAfterProfiles >= 2);
+  let unknownFieldRejected = false;
+  try {
+    await first.call(
+      "MAP_ORIGIN",
+      { profile_id: profileA.profile_id, target_url: url },
+      { extra: { unexpected: true } },
+    );
+  } catch (error) {
+    unknownFieldRejected = error.code === "INVALID_MESSAGE";
+  }
+  check("exact-envelope-rejects-unknown-fields", unknownFieldRejected
+    && first.revision() === revisionAfterProfiles);
+  let oversizedRejected = false;
+  try {
+    await first.call("MAP_ORIGIN", {
+      profile_id: profileA.profile_id,
+      target_url: `https://example.test/${"x".repeat(70_000)}`,
+    });
+  } catch (error) {
+    oversizedRejected = error.code === "INVALID_MESSAGE";
+  }
+  check("malformed-message-size-rejected", oversizedRejected
+    && first.revision() === revisionAfterProfiles);
+  const replayRequestID = "r".repeat(32);
+  await first.call(
+    "MAP_ORIGIN",
+    { profile_id: profileA.profile_id, target_url: url },
+    { request_id: replayRequestID },
+  );
+  let replayRejected = false;
+  try {
+    await first.call(
+      "MAP_ORIGIN",
+      { profile_id: profileA.profile_id, target_url: url },
+      { request_id: replayRequestID },
+    );
+  } catch (error) {
+    replayRejected = error.code === "REPLAY_DETECTED";
+  }
+  check("request-replay-rejected-before-processing", replayRejected);
+  const successEnvelope = first.messages.find(message => message.ok === true);
+  const failureEnvelope = first.messages.find(message => message.error?.code === "INVALID_MESSAGE");
+  check("responses-use-exact-success-failure-shapes",
+    JSON.stringify(Object.keys(successEnvelope).sort())
+      === JSON.stringify(["ok", "request_id", "result", "revision", "v"])
+    && JSON.stringify(Object.keys(failureEnvelope).sort())
+      === JSON.stringify(["error", "ok", "request_id", "revision", "v"])
+    && JSON.stringify(Object.keys(failureEnvelope.error).sort())
+      === JSON.stringify(["code", "message_key", "request_id", "retryable", "stage"])
+    && failureEnvelope.error.request_id === failureEnvelope.request_id);
+  const mappings = await Promise.all(Array.from({ length: 24 }, () => first.call("MAP_ORIGIN", { profile_id: profileA.profile_id, target_url: url })));
+  check("parallel-map-stable", new Set(mappings.map(value => value.origin_id)).size === 1);
+  const pathVariant = await first.call("MAP_ORIGIN", { profile_id: profileA.profile_id, target_url: "https://example.test/elsewhere" });
+  check("origin-not-path-keyed", pathVariant.origin_id === mappings[0].origin_id);
+  const isolated = await first.call("MAP_ORIGIN", { profile_id: profileB.profile_id, target_url: url });
+  check("profile-keyed-isolation", isolated.origin_id !== mappings[0].origin_id);
+
+  const capability = {
+    capability_id: "cap-a",
+    capability_secret: "c2VjcmV0",
+    deployment_salt: "c2FsdA",
+    claims_digest: "digest",
+    capability_epoch: 1,
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    relay_url: "wss://relay.example.test/_zp/carrier",
+    relay_profile_digest: relayProfileDigest,
+    allowed_target_ports: [80, 443],
+  };
+  const fallbackProfile = relayProfiles.get(fallbackRelayProfileDigest);
+  const fallbackCapability = {
+    ...capability,
+    capability_id: "cap-b",
+    relay_url: fallbackProfile.relay_wss_origin + fallbackProfile.carrier_path,
+    relay_profile_digest: fallbackRelayProfileDigest,
+  };
+  const staleRevision = first.revision() - 1;
+  let staleRejected = false;
+  try {
+    await first.call("SET_RELAY_CAPABILITY", {
+      profile_id: profileA.profile_id,
+      origin_id: mappings[0].origin_id,
+      capability: {},
+    }, { expected_revision: staleRevision });
+  } catch (error) {
+    staleRejected = error.code === "STALE_OPERATION" && error.revision === first.revision();
+  }
+  check("stale-sensitive-revision-rejected-before-payload", staleRejected);
+  await first.call("SET_RELAY_CAPABILITY", { profile_id: profileA.profile_id, origin_id: mappings[0].origin_id, capability });
+  await first.call("SET_RELAY_CAPABILITY", {
+    profile_id: profileA.profile_id,
+    origin_id: mappings[0].origin_id,
+    capability: fallbackCapability,
+  });
+
+  const formBody = new TextEncoder().encode("alpha=1&upload=file");
+  const formDigest = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", formBody))))
+    .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  const formBodyBase64 = btoa(String.fromCharCode(...formBody)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+
+  const handoffPayload = {
+    profile_id: profileA.profile_id,
+    tab_id: "t".repeat(32),
+    entry_id: "e".repeat(32),
+    source_origin_id: "control",
+    destination_origin_id: mappings[0].origin_id,
+    capability_epoch: 1,
+    destination_host: "o-test.browse.example:8443",
+    target_url: url,
+    ancestor_urls: ["https://parent.example/frame"],
+    form_submission: {
+      method: "POST",
+      content_type: "application/x-www-form-urlencoded",
+      body_base64: formBodyBase64,
+      body_length: formBody.byteLength,
+      body_sha256: formDigest,
+      source_url: "https://example.test/form",
+      referrer_policy: "strict-origin-when-cross-origin",
+    },
+  };
+  let uuidRejected = false, uuidError = "";
+  try {
+    await first.call("CREATE_HANDOFF", {
+      ...handoffPayload,
+      tab_id: crypto.randomUUID(),
+      entry_id: crypto.randomUUID(),
+    });
+  } catch (error) {
+    uuidError = error.code;
+    uuidRejected = error.code === "CAPABILITY_REJECTED";
+  }
+  check("handoff-rejects-uuid-identifiers", uuidRejected, uuidError);
+
+  let formDigestRejected = false, formDigestError = "";
+  try {
+    await first.call("CREATE_HANDOFF", {
+      ...handoffPayload,
+      entry_id: "d".repeat(32),
+      form_submission: { ...handoffPayload.form_submission, body_sha256: "A".repeat(43) },
+    });
+  } catch (error) {
+    formDigestError = error.code;
+    formDigestRejected = error.code === "CAPABILITY_REJECTED";
+  }
+  check("form-handoff-rejects-mismatched-body-digest", formDigestRejected, formDigestError);
+
+  const handoff = await first.call("CREATE_HANDOFF", handoffPayload);
+  check("handoff-accepts-opaque-identifiers", typeof handoff.handoff_id === "string" && handoff.handoff_id.length === 32);
+  const pendingLineage = await readLineage(profileA.profile_id, handoffPayload.tab_id);
+  check("lineage-created-before-handoff", pendingLineage.tab?.state === "PENDING"
+    && pendingLineage.tab.pending_entry_id === handoffPayload.entry_id
+    && pendingLineage.tab.encrypted_stream_key?.ciphertext instanceof Uint8Array
+    && pendingLineage.histories[0]?.state === "PENDING"
+    && pendingLineage.sessions[0]?.state === "PENDING");
+  check("handoff-payload-sealed-at-rest", pendingLineage.handoffs.length === 1
+    && !Object.hasOwn(pendingLineage.handoffs[0], "nonce")
+    && !Object.hasOwn(pendingLineage.handoffs[0], "form_submission")
+    && pendingLineage.handoffs[0].sealed_payload?.ciphertext instanceof Uint8Array);
+  let wrongHost = false;
+  try {
+    await first.call("CONSUME_HANDOFF", { handoff_id: handoff.handoff_id, destination_host: "wrong.example", bridge_nonce: handoff.bridge_nonce });
+  } catch (error) {
+    wrongHost = error.code === "CAPABILITY_REJECTED";
+  }
+  check("handoff-host-bound", wrongHost);
+  const destination = connect("/control/coordinator.mjs", "coordinator-lineage");
+  const consumed = await destination.call("CONSUME_HANDOFF", { handoff_id: handoff.handoff_id, destination_host: handoffPayload.destination_host, bridge_nonce: handoff.bridge_nonce });
+  check("handoff-restores-encrypted-target", consumed.target_url === "https://example.test/a?secret=1"
+    && JSON.stringify(consumed.ancestor_urls) === JSON.stringify(handoffPayload.ancestor_urls)
+    && JSON.stringify(consumed.relay_profile_digests) === JSON.stringify([
+      relayProfileDigest,
+      fallbackRelayProfileDigest,
+    ])
+    && consumed.relay_profiles.length === 2
+    && consumed.relay_capabilities[0].capability_id === "cap-a"
+    && consumed.relay_capabilities[1].capability_id === "cap-b"
+    && /^[A-Za-z0-9_-]{43}$/.test(consumed.isolation_username)
+    && /^[A-Za-z0-9_-]{43}$/.test(consumed.isolation_password)
+    && consumed.isolation_username !== handoffPayload.tab_id
+    && consumed.isolation_password !== handoffPayload.entry_id);
+  check("form-handoff-restores-exact-encoded-body", consumed.form_submission?.method === "POST"
+    && consumed.form_submission.content_type === handoffPayload.form_submission.content_type
+    && consumed.form_submission.body_sha256 === formDigest
+    && consumed.form_submission.source_url === "https://example.test/form"
+    && consumed.form_submission.body instanceof Uint8Array
+    && new TextDecoder().decode(consumed.form_submission.body) === "alpha=1&upload=file");
+  const activeLineage = await readLineage(profileA.profile_id, handoffPayload.tab_id);
+  check("consume-rotates-document-capability-atomically", activeLineage.handoffs.length === 0
+    && activeLineage.tab?.state === "ACTIVE"
+    && activeLineage.tab.current_entry_id === handoffPayload.entry_id
+    && activeLineage.tab.document_capability === consumed.document_capability
+    && activeLineage.tab.document_revision === 1
+    && activeLineage.histories[0]?.state === "ACTIVE");
+  let replay = false;
+  try {
+    await destination.call("CONSUME_HANDOFF", { handoff_id: handoff.handoff_id, destination_host: handoffPayload.destination_host, bridge_nonce: handoff.bridge_nonce });
+  } catch (error) {
+    replay = error.code === "CAPABILITY_REJECTED";
+  }
+  check("handoff-one-shot", replay);
+  const secondEntryID = "f".repeat(32);
+  const secondHandoff = await destination.call("CREATE_HANDOFF", {
+    ...handoffPayload,
+    entry_id: secondEntryID,
+    source_origin_id: mappings[0].origin_id,
+    source_entry_id: handoffPayload.entry_id,
+  });
+  const secondPending = await readLineage(profileA.profile_id, handoffPayload.tab_id);
+  check("history-revision-is-monotonic", secondPending.tab.revision === 1
+    && secondPending.tab.pending_revision === 2
+    && secondPending.histories.find(entry => entry.entry_id === secondEntryID)?.revision === 2);
+  await addPendingRoute(
+    profileA.profile_id,
+    handoffPayload.tab_id,
+    secondEntryID,
+    mappings[0].origin_id,
+  );
+  const thirdEntryID = "g".repeat(32);
+  const thirdHandoff = await destination.call("CREATE_HANDOFF", {
+    ...handoffPayload,
+    entry_id: thirdEntryID,
+    source_origin_id: mappings[0].origin_id,
+    source_entry_id: handoffPayload.entry_id,
+  });
+  const nextDestination = connect("/control/coordinator.mjs", "coordinator-lineage");
+  let staleHandoffRejected = false;
+  try {
+    await nextDestination.call("CONSUME_HANDOFF", {
+      handoff_id: secondHandoff.handoff_id,
+      destination_host: handoffPayload.destination_host,
+      bridge_nonce: secondHandoff.bridge_nonce,
+    });
+  } catch (error) {
+    staleHandoffRejected = error.code === "CAPABILITY_REJECTED";
+  }
+  const superseded = await readLineage(profileA.profile_id, handoffPayload.tab_id);
+  check("later-lineage-revokes-stale-pending-work", staleHandoffRejected
+    && superseded.tab.pending_revision === 3
+    && superseded.histories.find(entry => entry.entry_id === secondEntryID)?.state === "ABORTED"
+    && superseded.histories.find(entry => entry.entry_id === thirdEntryID)?.state === "PENDING"
+    && Number.isSafeInteger(superseded.routes[0]?.revoked_at));
+  const thirdConsumed = await nextDestination.call("CONSUME_HANDOFF", {
+    handoff_id: thirdHandoff.handoff_id,
+    destination_host: handoffPayload.destination_host,
+    bridge_nonce: thirdHandoff.bridge_nonce,
+  });
+  check("destination-capability-rotates-per-commit", thirdConsumed.lineage_revision === 3
+    && thirdConsumed.document_capability !== consumed.document_capability
+    && thirdConsumed.isolation_username !== consumed.isolation_username
+    && thirdConsumed.isolation_password !== consumed.isolation_password);
+  const sameOriginEntryID = "h".repeat(32);
+  const sameOrigin = await nextDestination.call("UPDATE_SAME_ORIGIN_HISTORY", {
+    profile_id: profileA.profile_id,
+    tab_id: handoffPayload.tab_id,
+    entry_id: sameOriginEntryID,
+    origin_id: mappings[0].origin_id,
+    capability_epoch: 1,
+    target_url: "https://example.test/same-origin#visible",
+    expected_revision: thirdConsumed.lineage_revision,
+    base_url: "https://example.test/same-origin",
+    referrer_url: thirdConsumed.target_url,
+    state_clone: { page: 2 },
+    scroll_x: 12,
+    scroll_y: 34,
+  });
+  const sameOriginState = await readLineage(profileA.profile_id, handoffPayload.tab_id);
+  const sameOriginHistory = sameOriginState.histories.find(
+    entry => entry.entry_id === sameOriginEntryID,
+  );
+  check("same-origin-history-commits-monotonic-lineage", sameOrigin.revision === 4
+    && sameOriginState.tab.current_entry_id === sameOriginEntryID
+    && sameOriginState.tab.document_capability === sameOrigin.document_capability
+    && sameOriginHistory?.parent_entry_id === thirdEntryID
+    && sameOriginHistory.scroll_x === 12
+    && sameOriginHistory.scroll_y === 34);
+  nextDestination.worker.port.close();
+  destination.worker.port.close();
+  first.worker.port.close();
+
+  const recovered = connect("/control/coordinator.mjs?restart=1");
+  let unboundRejected = false;
+  try {
+    await recovered.call("MAP_ORIGIN", { profile_id: profileA.profile_id, target_url: url });
+  } catch (error) {
+    unboundRejected = error.code === "CAPABILITY_REJECTED";
+  }
+  const recoveredDatabase = await request(indexedDB.open("zeroproxy-v2-coordinator"));
+  const recoveredTransaction = recoveredDatabase.transaction(
+    ["origin_map", "origin_kernel_meta"],
+    "readonly",
+  );
+  const [persistedMapping, coordinatorMetadata] = await Promise.all([
+    request(recoveredTransaction.objectStore("origin_map").get([
+      profileA.profile_id,
+      "https://example.test:443",
+    ])),
+    request(recoveredTransaction.objectStore("origin_kernel_meta").get(COORDINATOR_DB_VERSION)),
+  ]);
+  await complete(recoveredTransaction);
+  recoveredDatabase.close();
+  check("restart-preserves-mapping-but-rejects-unbound-port", unboundRejected
+    && persistedMapping?.origin_id === mappings[0].origin_id);
+  check("durable-revision-matches-last-response",
+    coordinatorMetadata.coordinator_revision === Math.max(
+      first.revision(),
+      destination.revision(),
+      nextDestination.revision(),
+      recovered.revision(),
+    ));
+  recovered.worker.port.close();
+} catch (error) {
+  check("oracle-execution", false, error.stack || String(error));
+}
+result.textContent = JSON.stringify({ ok: tests.every(test => test.ok), tests });
+</script>

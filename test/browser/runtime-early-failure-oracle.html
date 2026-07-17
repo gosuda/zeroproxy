@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>runtime early failure oracle</title></head>
+<body>
+<script type="module">
+const version=await fetch("/_zp/version.json").then(response=>response.json());
+const runtime=document.createElement("script");
+runtime.src=version.selectors["runtime-prelude.js"]+"#abi=invalid&url="+encodeURIComponent("https://target.example/early-failure.html")+"&ports=80%2C443";
+addEventListener("error",event=>setTimeout(()=>{globalThis.__zp_early_failure_result={ok:String(event.error??event.message).includes("invalid runtime policy metadata")&&document.body?.textContent==="ZeroProxy blocked this document because its privacy runtime could not be installed."}},0),{once:true});
+runtime.onload=()=>setTimeout(()=>{globalThis.__zp_early_failure_result??={ok:false,error:"missing-failure"}},0);
+runtime.onerror=()=>{globalThis.__zp_early_failure_result={ok:false,error:"network-error"}};
+document.head.append(runtime);
+</script>
+</body>
+</html>

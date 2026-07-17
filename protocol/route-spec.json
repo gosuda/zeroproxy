@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "policy_version": 2,
+  "sealed_route_kinds": ["navigation", "form", "beacon", "ping", "download"],
+  "target_route_kinds": ["document", "navigation", "resource", "script", "module", "style", "worker", "worklet", "download", "target-worker"],
+  "exact_routes": {
+    "/": "bootstrap",
+    "/_zp/bootstrap": "bootstrap",
+    "/_zp/error": "bootstrap",
+    "/_zp/target-worker-host": "bootstrap",
+    "/_zp/target-worker-host.mjs": "bootstrap",
+    "/_zp/config": "bootstrap",
+    "/_zp/version.json": "bootstrap",
+    "/bootstrap.mjs": "bootstrap",
+    "/_zp/sw.js": "bootstrap"
+  },
+  "route_patterns": [
+    ["internal-immutable-asset", "^/_zp/assets/[a-f0-9]{64}/"],
+    ["api-plan", "^/_zp/api/[A-Za-z0-9_-]{32}$"],
+    ["worker-gateway-classic", "^/_zp/wi/[A-Za-z0-9_-]{32}/[A-Za-z0-9_-]{1,16384}$"],
+    ["worker-gateway-module", "^/_zp/wmi/[A-Za-z0-9_-]{32}/[A-Za-z0-9_-]{1,16384}$"],
+    ["worker-executable-classic", "^/_zp/w/[A-Za-z0-9_-]{32}\\.js$"],
+    ["worker-executable-module", "^/_zp/wm/[A-Za-z0-9_-]{32}/[a-f0-9]{64}\\.mjs$"],
+    ["document-executable-module", "^/_zp/dm/[A-Za-z0-9_-]{32}/[a-f0-9]{64}\\.mjs$"],
+    ["worklet-executable", "^/_zp/worklet/[A-Za-z0-9_-]{32}\\.mjs$"],
+    ["target-worker-executable", "^/_zp/target-worker-exec/[a-f0-9]{64}\\.mjs$"],
+    ["history-route", "^/_zp/history/[A-Za-z0-9_-]{32}/[A-Za-z0-9_-]{1,16384}$"]
+  ]
+}

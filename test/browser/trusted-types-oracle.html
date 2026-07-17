@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>trusted types oracle</title></head>
+<body>
+<script>
+const results={};
+try{
+  const policy=trustedTypes.createPolicy("oracle",{createHTML:value=>value});
+  let reservedPolicyBlocked=false;
+  try{trustedTypes.createPolicy(`zp-${"t".repeat(32)}`,{createHTML:value=>value})}catch(error){reservedPolicyBlocked=error.name==="TypeError"}
+  const trusted=value=>policy.createHTML(value);
+  const host=document.createElement("div");
+  document.body.append(host);
+  let untrustedBlocked=false;
+  try{host.innerHTML="<b>untrusted</b>"}catch(error){untrustedBlocked=error.name==="TypeError"}
+  let untrustedWriteBlocked=false;try{document.write("<span id=untrusted-write>untrusted write</span>")}catch(error){untrustedWriteBlocked=error.name==="TypeError"}
+  host.innerHTML=trusted("<b id=trusted-inner>inner</b>");
+  const outer=document.createElement("i");host.append(outer);outer.outerHTML=trusted("<em id=trusted-outer>outer</em>");
+  host.insertAdjacentHTML("beforeend",trusted("<span id=trusted-adjacent>adjacent</span>"));
+  const range=document.createRange();range.selectNodeContents(host);host.append(range.createContextualFragment(trusted("<u id=trusted-range>range</u>")));
+  const parsed=new DOMParser().parseFromString(trusted("<main id=trusted-parser>parser</main>"),"text/html");
+  const shadowHost=document.createElement("div"),shadow=shadowHost.attachShadow({mode:"open"});document.body.append(shadowHost);shadow.innerHTML=trusted("<b id=trusted-shadow>shadow</b>");
+  document.write(trusted("<span id=trusted-write>write</span>"));
+  document.write(trusted("<script id=trusted-written-script>globalThis.trustedWrittenScript=true<\/script>"));
+  results.core={untrustedBlocked,untrustedWriteBlocked,inner:host.querySelector("#trusted-inner")?.textContent,outer:host.querySelector("#trusted-outer")?.textContent,adjacent:host.querySelector("#trusted-adjacent")?.textContent,range:host.querySelector("#trusted-range")?.textContent,parser:parsed.querySelector("#trusted-parser")?.textContent,shadow:shadow.querySelector("#trusted-shadow")?.textContent,write:document.getElementById("trusted-write")?.textContent,untrustedWrite:document.getElementById("untrusted-write")?.textContent,writtenScript:globalThis.trustedWrittenScript===true,writtenSource:document.getElementById("trusted-written-script")?.text};
+  if(typeof Element.prototype.setHTML==="function"){
+    const target=document.createElement("div");target.setHTML(trusted("<strong>safe method</strong>"));results.elementSafe=target.textContent;
+  }
+  if(typeof Element.prototype.setHTMLUnsafe==="function"){
+    const target=document.createElement("div");target.setHTMLUnsafe(trusted("<strong>unsafe method</strong>"));results.elementUnsafe=target.textContent;
+  }
+  if(typeof ShadowRoot.prototype.setHTML==="function"){
+    const target=document.createElement("div").attachShadow({mode:"open"});target.setHTML(trusted("<strong>safe shadow method</strong>"));results.shadowSafe=target.textContent;
+  }
+  if(typeof ShadowRoot.prototype.setHTMLUnsafe==="function"){
+    const target=document.createElement("div").attachShadow({mode:"open"});target.setHTMLUnsafe(trusted("<strong>unsafe shadow method</strong>"));results.shadowUnsafe=target.textContent;
+  }
+  if(typeof Document.parseHTML==="function")results.documentSafe=Document.parseHTML(trusted("<title>safe parse method</title><p>safe document method</p>")).body.textContent;
+  if(typeof Document.parseHTMLUnsafe==="function")results.documentUnsafe=Document.parseHTMLUnsafe(trusted("<title>unsafe parse method</title><p>unsafe document method</p>")).body.textContent;
+  results.ok=untrustedBlocked&&results.core.untrustedWriteBlocked&&results.core.untrustedWrite===undefined&&results.core.inner==="inner"&&results.core.outer==="outer"&&results.core.adjacent==="adjacent"&&results.core.range==="range"&&results.core.parser==="parser"&&results.core.shadow==="shadow"&&results.core.write==="write"&&results.core.writtenScript&&results.core.writtenSource==="globalThis.trustedWrittenScript=true"&&(!("elementSafe" in results)||results.elementSafe==="safe method")&&(!("elementUnsafe" in results)||results.elementUnsafe==="unsafe method")&&(!("shadowSafe" in results)||results.shadowSafe==="safe shadow method")&&(!("shadowUnsafe" in results)||results.shadowUnsafe==="unsafe shadow method")&&(!("documentSafe" in results)||results.documentSafe==="safe document method")&&(!("documentUnsafe" in results)||results.documentUnsafe==="unsafe document method");
+  results.reservedPolicyBlocked=reservedPolicyBlocked;
+  results.ok=results.ok&&reservedPolicyBlocked;
+}catch(error){results.ok=false;results.error=`${error.name}:${error.message}`}
+globalThis.__trustedTypesOracle=results;
+</script>
+</body>
+</html>

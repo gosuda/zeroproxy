@@ -1,0 +1,505 @@
+<!doctype html>
+<html>
+<head>
+<title>metadata oracle</title>
+<meta id="refresh" http-equiv="refresh" content="0;url=https://example.test/refresh">
+<link id="projected-sheet-link" rel="stylesheet" href="https://example.test/projected.css">
+<style id="static-style">body{color:rgb(0 0 0)}</style>
+<style id="projected-style">@import url("https://example.test/imported.css");#projected-css{background-image:url(https://example.test/projected-bg.png)}</style>
+</head>
+<body>
+<script>globalThis.parserLedgerOrder=["setup"]</script>
+<script id="parser-sync" src="https://example.test/ledger-sync.js"></script>
+<script>globalThis.parserLedgerOrder.push("after-sync")</script>
+<script id="parser-defer" defer src="https://example.test/ledger-defer.js"></script>
+<script id="parser-module" type="module" src="https://example.test/ledger-module.js"></script>
+<script id="parser-async" async src="https://example.test/ledger-async.js"></script>
+<script>for(const id of ["parser-defer","parser-module","parser-async"])document.getElementById(id).addEventListener("load",()=>globalThis.parserLedgerOrder.push(`${id}-load`));globalThis.parserLedgerOrder.push("parser-tail")</script>
+<script>globalThis.documentWriteOrder=["outer-before"];document.write('<span id="written-before">before</span><script id="written-script">globalThis.documentWriteOrder.push("written");document.writeln("<b id=\\"written-nested\\">nested</b>")<\/script>');globalThis.documentWriteOrder.push("outer-after")</script>
+<div id="write-live"><script>document.write("</div><p id='write-after-close'>outside</p>")</script></div>
+<script>globalThis.splitWriteOrder=["before"];document.write("<scr");document.write("ipt id='split-written'>globalThis.splitWriteOrder.push('written')<\/scr");document.write("ipt>");globalThis.splitWriteOrder.push("after")</script>
+<script>document.write('<script>document.write("<sp")<\/script>an id="reentrant-written">reentrant</span>')</script>
+<script>globalThis.writtenEscapedAttack=false;globalThis.writtenEscapedBlocked=false;const writtenEscapedPayload="<script>"+"<"+"!--"+"<script>"+"</"+"script>\nglobalThis.writtenEscapedAttack=true"+"</"+"script>";try{document.write(writtenEscapedPayload)}catch(error){globalThis.writtenEscapedBlocked=error.name==="SecurityError"}</script>
+<script id="absent">globalThis.absentExecuted=true</script>
+<script id="empty" nonce="">globalThis.emptyExecuted=true</script>
+<script id="value" nonce="target-nonce">globalThis.valueExecuted=true</script>
+<script id="integrity" type="application/json" integrity="sha384-target-digest">{}</script>
+<script id="module" type="module">globalThis.moduleExecuted=true</script>
+<script id="authored">globalThis.authoredSourceStack=new Error("authored-source").stack
+//# sourceURL=authored-target.js
+//# sourceMappingURL=https://example.test/authored.map
+</script>
+<img id="image" src="https://example.test/image.png" alt="target">
+<div id="styled" style="background-image:url(https://example.test/bg.png);color:red"></div>
+<!--projection-comment-->
+<div id="projected-css"></div>
+<a id="projected-anchor" href="https://example.test:443/path/name?q=one#part" ping="https://example.test/ping-one https://example.test/ping-two">anchor</a>
+<area id="projected-area" href="https://example.test/area/path?x=1#area" ping="https://example.test/area-ping">
+<img id="source-set-image" src="https://example.test/fallback.png" srcset="https://example.test/candidate-one.png 1x, https://example.test/candidate-two.png 2x" alt="source set">
+<video id="projected-media" src="https://example.test/media.mp4"></video>
+<iframe id="projected-srcdoc" srcdoc="&lt;p id=&quot;inside-srcdoc&quot;&gt;target srcdoc&lt;/p&gt;"></iframe>
+<form id="projected-form" action="https://example.test/submit"><button id="projected-submitter" formaction="https://example.test/submit-button">submit</button></form>
+<svg id="projection-svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1 1"><use id="xlink-use" xlink:href="https://example.test/icon.svg#shape"></use></svg>
+<script>
+const checks=[];
+const check=(name,pass,detail)=>checks.push({name,pass:Boolean(pass),detail:String(detail??"")});
+const absent=document.getElementById("absent"),empty=document.getElementById("empty"),value=document.getElementById("value"),integrity=document.getElementById("integrity"),image=document.getElementById("image"),styled=document.getElementById("styled"),refresh=document.getElementById("refresh");
+const projectedStyle=document.getElementById("projected-style"),projectedSheetLink=document.getElementById("projected-sheet-link"),projectedAnchor=document.getElementById("projected-anchor"),projectedArea=document.getElementById("projected-area"),sourceSetImage=document.getElementById("source-set-image"),projectedMedia=document.getElementById("projected-media"),projectedSrcdoc=document.getElementById("projected-srcdoc"),projectionSVG=document.getElementById("projection-svg"),xlinkUse=document.getElementById("xlink-use"),projectedForm=document.getElementById("projected-form"),projectedSubmitter=document.getElementById("projected-submitter");
+const projectedStyleSource='@import url("https://example.test/imported.css");#projected-css{background-image:url(https://example.test/projected-bg.png)}';
+check("inline scripts execute",globalThis.absentExecuted&&globalThis.emptyExecuted&&globalThis.valueExecuted,"");
+const writtenScript=document.getElementById("written-script");
+check("document.write preserves parser execution and nested write ordering",globalThis.documentWriteOrder.join(",")==="outer-before,written,outer-after"&&document.getElementById("written-before")?.textContent==="before"&&document.getElementById("written-nested")?.textContent==="nested"&&writtenScript?.text.includes('documentWriteOrder.push("written")')&&!writtenScript.outerHTML.includes("__zp_abi_"),JSON.stringify({order:globalThis.documentWriteOrder,before:document.getElementById("written-before")?.outerHTML,nested:document.getElementById("written-nested")?.outerHTML,script:writtenScript?.outerHTML}));
+check("document.write preserves the live insertion point and split script tokens",!document.getElementById("write-live").contains(document.getElementById("write-after-close"))&&document.getElementById("write-after-close")?.textContent==="outside"&&globalThis.splitWriteOrder.join(",")==="before,written,after"&&document.getElementById("split-written")?.text.includes("splitWriteOrder"),JSON.stringify({live:document.getElementById("write-live").outerHTML,outside:document.getElementById("write-after-close")?.outerHTML,split:globalThis.splitWriteOrder,script:document.getElementById("split-written")?.outerHTML}));
+check("document.write splices reentrant pending bytes before the outer stream",document.getElementById("reentrant-written")?.textContent==="reentrant",document.getElementById("reentrant-written")?.outerHTML);
+check("document.write fails closed on script double-escaped tokenizer states",globalThis.writtenEscapedBlocked&&!globalThis.writtenEscapedAttack,JSON.stringify({blocked:globalThis.writtenEscapedBlocked,attack:globalThis.writtenEscapedAttack}));
+let writtenEgressBlocked=false;try{document.write("<img id=written-egress src=https://example.test/written-egress.png>")}catch(error){writtenEgressBlocked=error.name==="SecurityError"}check("document.write blocks resource selection before parser connection",writtenEgressBlocked&&!document.getElementById("written-egress"),writtenEgressBlocked);
+const writtenModuleEvents=[];document.write('<script id="written-module" type="module">globalThis.writtenModuleRuns=(globalThis.writtenModuleRuns??0)+1;globalThis.writtenModuleCurrentScript=document.currentScript<\/script>');const writtenModule=document.getElementById("written-module");writtenModule.addEventListener("load",()=>writtenModuleEvents.push("load"));writtenModule.addEventListener("error",()=>writtenModuleEvents.push("error"));
+check("authored sourceURL preserved",globalThis.authoredSourceStack.includes("authored-target.js")&&!globalThis.authoredSourceStack.includes("example.test/index.html"),globalThis.authoredSourceStack);
+check("meta refresh blocked and facaded",refresh.httpEquiv.toLowerCase()==="refresh"&&refresh.getAttribute("http-equiv")==="refresh",refresh.outerHTML);
+check("virtual Location surface",location.href==="https://example.test/index.html"&&location.toString()===location.href&&typeof location.assign==="function",location.href);
+let documentGetterBrandError,domainBlocked=false;try{Object.getOwnPropertyDescriptor(Document.prototype,"URL").get.call({})}catch(error){documentGetterBrandError=error}try{document.domain="escape.test"}catch(error){domainBlocked=error.name==="SecurityError"}document.domain="example.test";
+check("target document URL referrer domain and base surfaces",document.URL==="https://example.test/index.html"&&document.documentURI===document.URL&&document.referrer===""&&document.domain==="example.test"&&document.baseURI==="https://example.test/index.html"&&documentGetterBrandError instanceof TypeError&&domainBlocked,JSON.stringify({URL:document.URL,documentURI:document.documentURI,referrer:document.referrer,domain:document.domain,baseURI:document.baseURI,brand:documentGetterBrandError?.name,domainBlocked}));
+const reflectedFunctions=[getComputedStyle,MutationObserver,fetch,XMLHttpRequest,Function,setTimeout,open],reflectedFunctionSources=reflectedFunctions.map(value=>Function.prototype.toString.call(value));
+check("function reflection masking",reflectedFunctionSources.every(source=>source.includes("[native code]")&&!/(?:safe|blocked|Facade|ZeroProxy|__zp_)/.test(source))&&reflectedFunctions.map(value=>value.name).join(",")==="getComputedStyle,MutationObserver,fetch,XMLHttpRequest,Function,setTimeout,open",JSON.stringify(reflectedFunctions.map((value,index)=>({name:value.name,length:value.length,source:reflectedFunctionSources[index]}))));
+const inlineStack=new Error("target-stack").stack;
+check("error stack URL facade",/https:\/\/example\.test\/index\.html:22:19\b/u.test(inlineStack)&&!inlineStack.includes("/_zp/")&&!inlineStack.includes("127.0.0.1"),inlineStack);
+const navigationFunctions=[open,history.back,history.forward,history.go,location.assign,location.replace,location.reload,...(globalThis.navigation?["navigate","back","forward","reload","traverseTo"].map(name=>navigation[name]).filter(value=>typeof value==="function"):[])],navigationSources=navigationFunctions.map(value=>Function.prototype.toString.call(value));
+check("navigation function reflection",navigationSources.every(source=>source.includes("[native code]"))&&navigationFunctions.slice(0,7).map(value=>value.name).join(",")==="open,back,forward,go,assign,replace,reload",JSON.stringify(navigationFunctions.map((value,index)=>({name:value.name,length:value.length,source:navigationSources[index]}))));
+const reflectedXHR=new XMLHttpRequest;
+check("gateway constructor reflection",Object.getPrototypeOf(XMLHttpRequest)?.name==="XMLHttpRequestEventTarget"&&XMLHttpRequest.prototype.constructor===XMLHttpRequest&&Object.getPrototypeOf(Function)===Function.prototype&&Function.prototype.constructor===Function&&reflectedXHR.readyState===XMLHttpRequest.UNSENT,JSON.stringify({xhrPrototype:Object.getPrototypeOf(XMLHttpRequest)?.name,xhrConstructor:XMLHttpRequest.prototype.constructor?.name,functionPrototype:Object.getPrototypeOf(Function)?.name,functionConstructor:Function.prototype.constructor?.name,readyState:reflectedXHR.readyState}));
+let navigationBlocked=0;
+const originalHistoryState=history.state;
+for(const operation of [()=>location.assign("/next"),()=>location.replace("/next"),()=>location.reload(),()=>history.pushState({},"","/next"),()=>history.replaceState({safe:true},"","https://example.test/index.html"),()=>history.back()])try{operation()}catch(error){if(error.name==="SecurityError")navigationBlocked+=1}
+check("unbound navigation APIs fail closed",navigationBlocked===5&&history.state===originalHistoryState,navigationBlocked);
+check("absent nonce attribute",absent.getAttribute("nonce")===null&&!absent.hasAttribute("nonce")&&absent.nonce==="",absent.getAttribute("nonce"));
+check("absent nonce nodes",absent.getAttributeNode("nonce")===null&&absent.attributes.getNamedItem("nonce")===null&&![...absent.attributes].some(attribute=>attribute.name==="nonce"),absent.attributes.length);
+check("absent nonce serialization",!absent.outerHTML.includes("nonce="),absent.outerHTML);
+check("empty nonce",empty.getAttribute("nonce")===""&&empty.hasAttribute("nonce")&&empty.nonce==="",empty.outerHTML);
+const emptyNode=empty.getAttributeNode("nonce");
+check("empty nonce node",emptyNode?.value===""&&emptyNode.ownerElement===empty&&empty.attributes.getNamedItem("nonce")===emptyNode,emptyNode?.value);
+check("target nonce",value.getAttribute("nonce")==="target-nonce"&&value.nonce==="target-nonce"&&value.getAttributeNode("nonce")?.value==="target-nonce",value.outerHTML);
+check("static script source facade",absent.text==="globalThis.absentExecuted=true"&&absent.textContent==="globalThis.absentExecuted=true"&&!absent.outerHTML.includes("__zp_abi_"),absent.outerHTML);
+check("target nonce serialization",value.outerHTML.includes("nonce=\"target-nonce\"")&&!value.outerHTML.includes("internal-nonce"),value.outerHTML);
+check("attribute name facade",!absent.getAttributeNames().includes("nonce")&&value.getAttributeNames().includes("nonce")&&integrity.getAttributeNames().includes("integrity"),value.getAttributeNames());
+check("integrity facade",integrity.getAttribute("integrity")==="sha384-target-digest"&&integrity.integrity==="sha384-target-digest"&&integrity.attributes.getNamedItem("integrity")?.value==="sha384-target-digest",integrity.outerHTML);
+check("prototype item",NamedNodeMap.prototype.item.call(integrity.attributes,2)?.value==="sha384-target-digest",integrity.attributes.length);
+const extractedItem=integrity.attributes.item,snapshotFirst=integrity.attributes.item(0);let extractedItemError;
+try{extractedItem(0)}catch(error){extractedItemError=error}
+integrity.removeAttribute("id");
+check("attribute item extraction and liveness",extractedItemError instanceof TypeError&&snapshotFirst?.name==="id"&&integrity.attributes.item(0)?.name==="type",JSON.stringify({error:extractedItemError?.name,first:snapshotFirst?.name,current:integrity.attributes.item(0)?.name}));
+integrity.id="integrity";
+check("prototype iterator",[...NamedNodeMap.prototype[Symbol.iterator].call(integrity.attributes)].some(attribute=>attribute.value==="sha384-target-digest"),integrity.attributes.length);
+const imageAttributes=image.attributes,imageAttributeKeys=Reflect.ownKeys(imageAttributes),imageIndexDescriptor=Object.getOwnPropertyDescriptor(imageAttributes,"1"),imageNamedDescriptor=Object.getOwnPropertyDescriptor(imageAttributes,"src");let attributePreventExtensionsError;
+try{Object.preventExtensions(imageAttributes)}catch(error){attributePreventExtensionsError=error}
+check("NamedNodeMap liveness identity ordering descriptors and brand",image.attributes===imageAttributes&&image.getAttributeNames().join(",")==="id,src,alt"&&[...imageAttributes].map(attribute=>attribute.name).join(",")==="id,src,alt"&&imageAttributeKeys.slice(0,3).join(",")==="0,1,2"&&imageIndexDescriptor?.value===image.getAttributeNode("src")&&imageIndexDescriptor.enumerable&&imageIndexDescriptor.writable===false&&imageIndexDescriptor.configurable&&imageNamedDescriptor?.value===image.getAttributeNode("src")&&!imageNamedDescriptor.enumerable&&attributePreventExtensionsError instanceof TypeError&&Object.prototype.toString.call(imageAttributes)==="[object NamedNodeMap]",JSON.stringify({names:image.getAttributeNames(),keys:imageAttributeKeys.map(String),index:imageIndexDescriptor,named:imageNamedDescriptor,prevent:attributePreventExtensionsError?.name,brand:Object.prototype.toString.call(imageAttributes)}));
+const selected=document.querySelectorAll("script[nonce]");
+check("visible attribute selectors",document.querySelector("[nonce=\"target-nonce\"]")===value&&document.querySelector("[nonce=\"internal-nonce\"]")===null&&selected.length===2&&selected instanceof NodeList,selected.length);
+check("selector NodeList brand",NodeList.prototype.item.call(selected,1)===value&&[...NodeList.prototype.values.call(selected)].includes(empty),selected.length);
+const selectedKeys=Reflect.ownKeys(selected),selectedDescriptor=Object.getOwnPropertyDescriptor(selected,"0"),extractedNodeListItem=selected.item;let selectedExtractionError,selectedPreventExtensionsError;
+try{extractedNodeListItem(0)}catch(error){selectedExtractionError=error}try{Object.preventExtensions(selected)}catch(error){selectedPreventExtensionsError=error}
+check("selector NodeList descriptors extraction and extensibility",selectedKeys.slice(0,2).join(",")==="0,1"&&selectedDescriptor?.value===empty&&selectedDescriptor.enumerable&&selectedDescriptor.writable===false&&selectedDescriptor.configurable&&selectedExtractionError instanceof TypeError&&selectedPreventExtensionsError instanceof TypeError&&Object.prototype.toString.call(selected)==="[object NodeList]",JSON.stringify({keys:selectedKeys.map(String),descriptor:selectedDescriptor,extraction:selectedExtractionError?.name,prevent:selectedPreventExtensionsError?.name,brand:Object.prototype.toString.call(selected)}));
+check("matches and closest",value.matches("script[nonce=\"target-nonce\"]")&&value.closest("body:has([integrity=\"sha384-target-digest\"])")===document.body,value.outerHTML);
+let querySyntaxError,matchesSyntaxError,queryReceiverError;try{document.querySelector("[") }catch(error){querySyntaxError=error}try{value.matches("[") }catch(error){matchesSyntaxError=error}try{Element.prototype.querySelector.call({},"[nonce]")}catch(error){queryReceiverError=error}
+check("selector syntax and receiver errors preserve native classes",querySyntaxError instanceof DOMException&&querySyntaxError.name==="SyntaxError"&&matchesSyntaxError instanceof DOMException&&matchesSyntaxError.name==="SyntaxError"&&queryReceiverError instanceof TypeError,JSON.stringify({query:querySyntaxError?.name,matches:matchesSyntaxError?.name,receiver:queryReceiverError?.name}));
+const projectionShadowHost=document.createElement("div"),projectionShadow=projectionShadowHost.attachShadow({mode:"open"}),shadowImage=image.cloneNode(true);projectionShadow.append(shadowImage);document.body.append(projectionShadowHost);
+const projectedShadowHTML=projectionShadow.innerHTML,projectedShadowXML=new XMLSerializer().serializeToString(projectionShadow);
+check("ShadowRoot selectors matches closest and serialization project target attributes",projectionShadow.querySelector('[src="https://example.test/image.png"]')===shadowImage&&shadowImage.matches('[src="https://example.test/image.png"]')&&shadowImage.closest('[src="https://example.test/image.png"]')===shadowImage&&projectedShadowHTML.includes('src="https://example.test/image.png"')&&!projectedShadowHTML.includes("/_zp/")&&projectedShadowXML.includes('src="https://example.test/image.png"')&&!projectedShadowXML.includes("/_zp/"),JSON.stringify({html:projectedShadowHTML,xml:projectedShadowXML}));
+const imageClone=image.cloneNode(true),imageImport=document.importNode(image,true),serializedImage=new XMLSerializer().serializeToString(image);
+check("clone metadata",imageClone.getAttribute("src")==="https://example.test/image.png"&&imageClone.src==="https://example.test/image.png"&&imageClone.matches("[src=\"https://example.test/image.png\"]"),imageClone.outerHTML);
+check("import metadata",imageImport.getAttribute("src")==="https://example.test/image.png"&&imageImport.src==="https://example.test/image.png",imageImport.outerHTML);
+const adoptionDocument=document.implementation.createHTMLDocument("adoption"),adoptedImage=adoptionDocument.adoptNode(image.cloneNode(true)),returnedImage=document.adoptNode(adoptedImage);
+check("adoptNode preserves cross-document URL metadata",returnedImage===adoptedImage&&returnedImage.ownerDocument===document&&returnedImage.getAttribute("src")==="https://example.test/image.png"&&returnedImage.src==="https://example.test/image.png"&&returnedImage.matches("[src=\"https://example.test/image.png\"]"),returnedImage.outerHTML);
+const serializedDocument=new XMLSerializer().serializeToString(document);
+check("document XML serialization preserves doctype comments and target attributes",/^<!DOCTYPE html>/iu.test(serializedDocument)&&serializedDocument.includes("projection-comment")&&serializedDocument.includes('src="https://example.test/image.png"')&&!serializedDocument.includes(["data-zp-m","-v2"].join(""))&&!serializedDocument.includes(["data-zp-style","-v2"].join("")),serializedDocument.slice(0,240));
+const expectedAnchorHref="https://example.test/path/name?q=one#part",anchorComponents={href:projectedAnchor.href,origin:projectedAnchor.origin,protocol:projectedAnchor.protocol,username:projectedAnchor.username,password:projectedAnchor.password,host:projectedAnchor.host,hostname:projectedAnchor.hostname,port:projectedAnchor.port,pathname:projectedAnchor.pathname,search:projectedAnchor.search,hash:projectedAnchor.hash,string:String(projectedAnchor),ping:projectedAnchor.ping};let anchorBrandError;
+try{HTMLAnchorElement.prototype.toString.call({})}catch(error){anchorBrandError=error}
+const mutableAnchor=projectedAnchor.cloneNode(true);mutableAnchor.pathname="/changed";mutableAnchor.search="?next=2";
+check("anchor and area URL IDL projection",anchorComponents.href===expectedAnchorHref&&anchorComponents.origin==="https://example.test"&&anchorComponents.protocol==="https:"&&anchorComponents.username===""&&anchorComponents.password===""&&anchorComponents.host==="example.test"&&anchorComponents.hostname==="example.test"&&anchorComponents.port===""&&anchorComponents.pathname==="/path/name"&&anchorComponents.search==="?q=one"&&anchorComponents.hash==="#part"&&anchorComponents.string===expectedAnchorHref&&anchorComponents.ping==="https://example.test/ping-one https://example.test/ping-two"&&projectedArea.href==="https://example.test/area/path?x=1#area"&&projectedArea.ping==="https://example.test/area-ping"&&mutableAnchor.href==="https://example.test/changed?next=2#part"&&anchorBrandError instanceof TypeError,JSON.stringify({anchorComponents,area:{href:projectedArea.href,ping:projectedArea.ping},mutable:mutableAnchor.href,brand:anchorBrandError?.name}));
+check("srcset IDL and namespace Attr projection",sourceSetImage.srcset==="https://example.test/candidate-one.png 1x, https://example.test/candidate-two.png 2x"&&sourceSetImage.getAttribute("srcset")===sourceSetImage.srcset&&projectionSVG.getAttribute("viewBox")==="0 0 1 1"&&projectionSVG.getAttribute("viewbox")===null&&xlinkUse.getAttribute("XLINK:HREF")===null&&xlinkUse.getAttributeNS("http://www.w3.org/1999/xlink","href")==="https://example.test/icon.svg#shape"&&xlinkUse.getAttributeNodeNS("http://www.w3.org/1999/xlink","href")?.namespaceURI==="http://www.w3.org/1999/xlink",JSON.stringify({srcset:sourceSetImage.srcset,names:projectionSVG.getAttributeNames(),xlink:xlinkUse.outerHTML}));
+check("iframe srcdoc projection",projectedSrcdoc.srcdoc==='<p id="inside-srcdoc">target srcdoc</p>'&&projectedSrcdoc.getAttribute("srcdoc")===projectedSrcdoc.srcdoc&&!projectedSrcdoc.outerHTML.includes("__zp_abi_")&&!projectedSrcdoc.outerHTML.includes("/_zp/"),projectedSrcdoc.outerHTML);
+check("form link and script URL properties",projectedForm.action==="https://example.test/submit"&&projectedSubmitter.formAction==="https://example.test/submit-button"&&projectedSheetLink.href==="https://example.test/projected.css"&&document.getElementById("parser-sync").src==="https://example.test/ledger-sync.js",JSON.stringify({form:projectedForm.action,submitter:projectedSubmitter.formAction,link:projectedSheetLink.href,script:document.getElementById("parser-sync").src}));
+check("inline CSS facade",styled.style.cssText.includes("https://example.test/bg.png")&&styled.style.backgroundImage.includes("https://example.test/bg.png")&&styled.style.getPropertyValue("background-image").includes("https://example.test/bg.png"),styled.style.cssText);
+const projectedRules=projectedStyle.sheet.cssRules,projectedImportRule=projectedRules[0],projectedBackgroundRule=projectedRules[1],projectedStyleClone=projectedStyle.cloneNode(true);projectedStyleClone.textContent="";
+check("style source text and markup projection",projectedStyle.textContent===projectedStyleSource&&projectedStyle.firstChild?.data===projectedStyleSource&&projectedStyle.innerHTML===projectedStyleSource&&projectedStyle.outerHTML.includes(projectedStyleSource)&&!projectedStyle.outerHTML.includes("/_zp/")&&projectedStyleClone.textContent===""&&!projectedStyleClone.outerHTML.includes("projected-bg"),JSON.stringify({text:projectedStyle.textContent,inner:projectedStyle.innerHTML,outer:projectedStyle.outerHTML,clone:projectedStyleClone.outerHTML}));
+check("CSSOM rule import and computed URL projection",projectedRules.length===2&&projectedImportRule.href==="https://example.test/imported.css"&&projectedImportRule.cssText.includes("https://example.test/imported.css")&&!projectedImportRule.cssText.includes("/_zp/")&&projectedBackgroundRule.cssText.includes("https://example.test/projected-bg.png")&&!projectedBackgroundRule.cssText.includes("/_zp/")&&projectedBackgroundRule.style.backgroundImage.includes("https://example.test/projected-bg.png")&&!projectedBackgroundRule.style.backgroundImage.includes("/_zp/")&&getComputedStyle(document.getElementById("projected-css")).backgroundImage.includes("https://example.test/projected-bg.png")&&!getComputedStyle(document.getElementById("projected-css")).backgroundImage.includes("/_zp/"),JSON.stringify({rules:[...projectedRules].map(rule=>({text:rule.cssText,href:rule.href})),computed:getComputedStyle(document.getElementById("projected-css")).backgroundImage}));
+let cssBlocked=0;
+try{styled.style.setProperty("background-image","url(https://example.test/escape.png)")}catch(error){if(error.name==="SecurityError")cssBlocked+=1}
+try{styled.style.backgroundImage="url(https://example.test/escape.png)"}catch(error){if(error.name==="SecurityError")cssBlocked+=1}
+check("dynamic CSS blocked",cssBlocked===2&&!styled.style.cssText.includes("escape.png"),styled.style.cssText);
+const staticRule=document.getElementById("static-style").sheet.cssRules[0];
+let ruleStyleBlocked=0;
+for(const operation of [()=>{staticRule.style.backgroundImage="url(https://example.test/rule-property.png)"},()=>staticRule.style.setProperty("background-image","url(https://example.test/rule-set-property.png)")])try{operation()}catch(error){if(error.name==="SecurityError")ruleStyleBlocked+=1}
+check("CSS rule declaration mutations blocked preconnection",ruleStyleBlocked===2&&!staticRule.style.cssText.includes("example.test"),staticRule.style.cssText);
+if(styled.attributeStyleMap){let typedOMBlocked=0;for(const operation of [()=>styled.attributeStyleMap.set("background-image","url(https://example.test/typed-set.png)"),()=>styled.attributeStyleMap.append("background-image","url(https://example.test/typed-append.png)")])try{operation()}catch(error){if(error.name==="SecurityError")typedOMBlocked+=1}check("CSS Typed OM mutations blocked preconnection",typedOMBlocked===2,typedOMBlocked)}
+const dynamicStyle=document.createElement("style");document.head.append(dynamicStyle);
+let styleTextBlocked=0;
+for(const operation of [
+  ()=>{dynamicStyle.textContent="@import 'https://example.test/style-text.css'"},
+  ()=>{dynamicStyle.innerText="@import 'https://example.test/style-inner-text.css'"},
+  ()=>dynamicStyle.append("@import 'https://example.test/style-append.css'"),
+  ()=>dynamicStyle.insertAdjacentText("beforeend","@import 'https://example.test/style-adjacent.css'"),
+  ()=>{const text=document.createTextNode("");dynamicStyle.append(text);text.data="@import 'https://example.test/style-data.css'"},
+  ()=>{const range=document.createRange();range.selectNodeContents(dynamicStyle);range.collapse(false);range.insertNode(document.createTextNode("@import 'https://example.test/style-range.css'"))},
+])try{operation()}catch(error){if(error.name==="SecurityError")styleTextBlocked+=1}
+const dynamicSheet=new CSSStyleSheet;
+const sheetOperations=[()=>dynamicSheet.insertRule("@import 'https://example.test/sheet-insert.css'"),()=>dynamicSheet.replaceSync("@import 'https://example.test/sheet-replace.css'")];
+if(typeof dynamicSheet.addRule==="function")sheetOperations.push(()=>dynamicSheet.addRule("body","background:url(https://example.test/sheet-add-rule.png)"));
+let sheetBlocked=0;
+for(const operation of sheetOperations)try{operation()}catch(error){if(error.name==="SecurityError")sheetBlocked+=1}
+check("style text and stylesheet mutations block before connection",styleTextBlocked===6&&sheetBlocked===sheetOperations.length&&dynamicStyle.textContent===""&&dynamicSheet.cssRules.length===0,JSON.stringify({styleTextBlocked,sheetBlocked,sheetOperations:sheetOperations.length,text:dynamicStyle.textContent,rules:dynamicSheet.cssRules.length}));
+const preconnectionHost=document.createElement("div");document.body.append(preconnectionHost);
+const urlIDLResults=[];
+function mediateURLIDL(name,element,setter,visible,expected){
+  let accepted=false,blocked=false;
+  try{setter();preconnectionHost.append(element);accepted=visible()===expected}catch(error){blocked=error.name==="SecurityError"}
+  urlIDLResults.push({name,accepted,blocked});
+}
+const inputImage=document.createElement("input");inputImage.type="image";mediateURLIDL("input-src",inputImage,()=>{inputImage.src="https://example.test/input-idl.png"},()=>inputImage.src,"https://example.test/input-idl.png");
+const sourceSet=document.createElement("source");mediateURLIDL("source-srcset",sourceSet,()=>{sourceSet.srcset="https://example.test/source-srcset.png"},()=>sourceSet.srcset,"https://example.test/source-srcset.png");
+const videoPoster=document.createElement("video");mediateURLIDL("video-poster",videoPoster,()=>{videoPoster.poster="https://example.test/video-poster.png"},()=>videoPoster.poster,"https://example.test/video-poster.png");
+const preload=document.createElement("link");preload.rel="preload";preload.as="image";mediateURLIDL("link-imagesrcset",preload,()=>{preload.imageSrcset="https://example.test/link-srcset.png"},()=>preload.imageSrcset,"https://example.test/link-srcset.png");
+const nestedBody=document.createElement("body");mediateURLIDL("body-background",nestedBody,()=>{nestedBody.background="https://example.test/body-background.png"},()=>nestedBody.background,"https://example.test/body-background.png");
+const svg=document.createElementNS("http://www.w3.org/2000/svg","svg"),svgImage=document.createElementNS("http://www.w3.org/2000/svg","image");svg.append(svgImage);mediateURLIDL("svg-href-baseVal",svg,()=>{svgImage.href.baseVal="https://example.test/svg-href.png"},()=>svgImage.href.baseVal,"https://example.test/svg-href.png");
+let xlinkMediated=false,xlinkBlocked=false;try{svgImage.setAttributeNS("http://www.w3.org/1999/xlink","xlink:href","https://example.test/svg-xlink.png");xlinkMediated=svgImage.getAttributeNS("http://www.w3.org/1999/xlink","href")==="https://example.test/svg-xlink.png"}catch(error){xlinkBlocked=error.name==="SecurityError"}
+check("URL IDL and SVG namespace mutations mediate or fail closed preconnection",urlIDLResults.every(result=>result.accepted||result.blocked)&&(xlinkMediated||xlinkBlocked),JSON.stringify({urlIDLResults,xlinkMediated,xlinkBlocked}));
+if(typeof XSLTProcessor==="function"){
+  const parser=new DOMParser(),source=parser.parseFromString("<root/>","application/xml"),stylesheet=parser.parseFromString(`<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="html"/><xsl:template match="/"><xsl:element name="img" namespace="http://www.w3.org/1999/xhtml"><xsl:attribute name="src">https://example.test/xslt-image.png</xsl:attribute></xsl:element></xsl:template></xsl:stylesheet>`,"application/xml"),processor=new XSLTProcessor;
+  processor.importStylesheet(stylesheet);
+  let transformedBlocked=false;
+  try{const transformed=processor.transformToFragment(source,document);preconnectionHost.append(transformed)}catch(error){transformedBlocked=error.name==="SecurityError"}
+  check("browser-generated insertion trees validate before connection",transformedBlocked&&!preconnectionHost.querySelector('img[src*="xslt-image"]'),transformedBlocked);
+}
+check("computed CSS facade",getComputedStyle(styled).backgroundImage.includes("https://example.test/bg.png")&&!getComputedStyle(styled).backgroundImage.includes("/_zp/"),getComputedStyle(styled).backgroundImage);
+check("XML serialization",serializedImage.includes("src=\"https://example.test/image.png\"")&&!serializedImage.includes("/_zp/p/"),serializedImage);
+const observedAttributeOldValues=[],observedAttributeNullValues=[];
+const attributeOldObserver=new MutationObserver(records=>observedAttributeOldValues.push(...records.map(record=>record.oldValue)));
+const attributeNullObserver=new MutationObserver(records=>observedAttributeNullValues.push(...records.map(record=>record.oldValue)));
+const takenAttributeObserver=new MutationObserver(()=>{});
+attributeOldObserver.observe(image,{attributes:true,attributeOldValue:true,attributeFilter:["src"]});
+attributeNullObserver.observe(image,{attributes:true,attributeFilter:["src"]});
+takenAttributeObserver.observe(image,{attributes:true,attributeOldValue:true,attributeFilter:["src"]});
+const overlappingAttributeOldValues=[];
+const overlappingObserver=new MutationObserver(records=>overlappingAttributeOldValues.push(...records.filter(record=>record.type==="attributes").map(record=>record.oldValue)));
+const overlappingTakenObserver=new MutationObserver(()=>{});
+for(const observer of [overlappingObserver,overlappingTakenObserver]){observer.observe(document.body,{childList:true,subtree:true});observer.observe(image,{attributes:true,attributeOldValue:true,attributeFilter:["src"]})}
+const conflictingFilterValues=[];
+const conflictingFilterObserver=new MutationObserver(records=>conflictingFilterValues.push(...records.filter(record=>record.type==="attributes").map(record=>record.oldValue)));
+const conflictingFilterTakenObserver=new MutationObserver(()=>{});
+for(const observer of [conflictingFilterObserver,conflictingFilterTakenObserver]){observer.observe(document.body,{attributes:true,attributeOldValue:true,attributeFilter:["class"],subtree:true});observer.observe(image,{attributes:true,attributeOldValue:false,attributeFilter:["src"]})}
+class PrivateObserverOptions{#enabled=true;get attributes(){return this.#enabled}}
+const privateOptionsObserver=new MutationObserver(()=>{});
+privateOptionsObserver.observe(imageClone,new PrivateObserverOptions);
+imageClone.setAttribute("data-observer-brand","ok");
+const privateOptionsRecords=privateOptionsObserver.takeRecords();
+image.removeAttribute("src");
+const takenAttributeRecords=takenAttributeObserver.takeRecords();
+const overlappingTakenRecords=overlappingTakenObserver.takeRecords();
+const conflictingFilterTakenRecords=conflictingFilterTakenObserver.takeRecords();
+const dynamicScript=document.createElement("script");
+const mutationView=[];
+const sourceObserver=new MutationObserver((records,observer)=>{mutationView.push(...records.map(record=>({type:record.type,attributeName:record.attributeName,oldValue:record.oldValue,added:[...record.addedNodes].map(node=>node.textContent),removed:[...record.removedNodes].map(node=>node.textContent)})));check("MutationObserver identity",observer===sourceObserver,observer)});
+sourceObserver.observe(dynamicScript,{attributes:true,attributeOldValue:true,childList:true,subtree:true,characterData:true,characterDataOldValue:true});
+globalThis.dynamicScriptNode=dynamicScript;
+const dynamicInitialSource="const dynamicStack=new Error(\"dynamic-stack\").stack;globalThis.dynamicStack=dynamicStack;globalThis.dynamicRuns=(globalThis.dynamicRuns??0)+1;globalThis.dynamicCurrentScript=document.currentScript===globalThis.dynamicScriptNode";
+dynamicScript.text=dynamicInitialSource;
+document.body.appendChild(dynamicScript);
+check("dynamic inline activation",globalThis.dynamicRuns===1&&globalThis.dynamicCurrentScript===true,dynamicScript.outerHTML);
+check("dynamic inline source geometry",/^\s*Error: dynamic-stack\s*\n\s*at https:\/\/example\.test\/index\.html:1:20\b/u.test(globalThis.dynamicStack),globalThis.dynamicStack);
+check("dynamic script source facade",dynamicScript.text.includes("dynamicRuns")&&dynamicScript.textContent===dynamicScript.text&&!dynamicScript.outerHTML.includes(".scope.globalThis"),dynamicScript.outerHTML);
+dynamicScript.firstChild.data="globalThis.dynamicMutationVisible=true";
+check("connected script text mutation",dynamicScript.text==="globalThis.dynamicMutationVisible=true"&&globalThis.dynamicMutationVisible!==true,dynamicScript.text);
+dynamicScript.remove();
+document.body.appendChild(dynamicScript);
+check("dynamic reinsertion state",globalThis.dynamicRuns===1,globalThis.dynamicRuns);
+const dynamicModule=document.createElement("script"),dynamicModuleEvents=[];dynamicModule.type="module";dynamicModule.addEventListener("load",()=>dynamicModuleEvents.push("load"));dynamicModule.addEventListener("error",()=>dynamicModuleEvents.push("error"));dynamicModule.text="globalThis.dynamicModuleRuns=(globalThis.dynamicModuleRuns??0)+1;globalThis.dynamicModuleCurrentScript=document.currentScript";document.body.append(dynamicModule);dynamicModule.remove();document.body.append(dynamicModule);
+const importedDynamicModule=document.createElement("script");importedDynamicModule.type="module";let dynamicModuleGraphBlocked=false;try{importedDynamicModule.text='import "./uncontrolled-module.js"'}catch(error){dynamicModuleGraphBlocked=error.name==="SecurityError"}
+check("dynamic inline module graph fails closed before insertion",dynamicModuleGraphBlocked&&!importedDynamicModule.isConnected,dynamicModuleGraphBlocked);
+const nonceScript=document.createElement("script"),nonceObserver=new MutationObserver(()=>{});
+nonceObserver.observe(nonceScript,{attributes:true,attributeOldValue:true});
+nonceScript.text="globalThis.nonceScriptRan=true";
+nonceScript.nonce="target-dynamic-nonce";
+const nonceBeforeAppend={idl:nonceScript.nonce,attribute:nonceScript.getAttribute("nonce"),outerHTML:nonceScript.outerHTML};
+document.body.appendChild(nonceScript);
+const nonceMutationRecords=nonceObserver.takeRecords();
+check("internal nonce mutations hidden",globalThis.nonceScriptRan===true&&nonceBeforeAppend.idl==="target-dynamic-nonce"&&nonceBeforeAppend.attribute===null&&!nonceBeforeAppend.outerHTML.includes("nonce=")&&nonceScript.nonce==="target-dynamic-nonce"&&nonceScript.getAttribute("nonce")===null&&!nonceScript.matches("[nonce]")&&!nonceScript.outerHTML.includes("nonce=")&&nonceMutationRecords.length===1&&nonceMutationRecords[0].attributeName==="nonce"&&nonceMutationRecords[0].oldValue===null,JSON.stringify({ran:globalThis.nonceScriptRan,before:nonceBeforeAppend,nonce:nonceScript.nonce,attribute:nonceScript.getAttribute("nonce"),outerHTML:nonceScript.outerHTML,records:nonceMutationRecords.map(record=>({name:record.attributeName,oldValue:record.oldValue}))}));
+const attributeNonceScript=document.createElement("script"),attributeNonceObserver=new MutationObserver(()=>{});
+attributeNonceObserver.observe(attributeNonceScript,{attributes:true,attributeOldValue:true});
+attributeNonceScript.text="globalThis.attributeNonceScriptRan=true";
+attributeNonceScript.setAttribute("nonce","target-attribute-nonce");
+document.body.appendChild(attributeNonceScript);
+const attributeNonceRecords=attributeNonceObserver.takeRecords();
+check("dynamic nonce attribute facade",globalThis.attributeNonceScriptRan===true&&attributeNonceScript.nonce==="target-attribute-nonce"&&attributeNonceScript.getAttribute("nonce")==="target-attribute-nonce"&&attributeNonceScript.matches("[nonce=\"target-attribute-nonce\"]")&&attributeNonceScript.outerHTML.includes("nonce=\"target-attribute-nonce\"")&&attributeNonceRecords.length===1&&attributeNonceRecords[0].oldValue===null,JSON.stringify({nonce:attributeNonceScript.nonce,attribute:attributeNonceScript.getAttribute("nonce"),outerHTML:attributeNonceScript.outerHTML,records:attributeNonceRecords.map(record=>({name:record.attributeName,oldValue:record.oldValue}))}));
+const fragment=document.createDocumentFragment(),fragmentScript=document.createElement("script");
+fragmentScript.text="globalThis.fragmentScriptRan=true";
+fragment.append(fragmentScript);
+document.body.append(fragment);
+check("fragment script activation",globalThis.fragmentScriptRan===true,fragmentScript.outerHTML);
+const innerTextScript=document.createElement("script");
+innerTextScript.innerText="globalThis.innerTextScriptRan=true";
+document.body.append(innerTextScript);
+check("innerText script activation",globalThis.innerTextScriptRan===true&&innerTextScript.innerText==="globalThis.innerTextScriptRan=true"&&innerTextScript.textContent===innerTextScript.innerText,innerTextScript.outerHTML);
+const inertScript=document.createElement("script");
+inertScript.type="application/json";
+inertScript.text="{\"target\":true}";
+document.body.append(inertScript);
+check("inert script preservation",inertScript.text==="{\"target\":true}"&&inertScript.textContent==="{\"target\":true}",inertScript.outerHTML);
+const externalScript=document.createElement("script");
+let externalBlocked=false;
+try{externalScript.src="https://example.test/dynamic.js"}catch(error){externalBlocked=error.name==="SecurityError"}
+check("dynamic external script routed",!externalBlocked&&externalScript.src==="https://example.test/dynamic.js"&&externalScript.getAttribute("src")==="https://example.test/dynamic.js",externalScript.outerHTML);
+globalThis.sinkRuns={};
+const rawSinkScript=label=>{const script=document.createElement("script"),source=`globalThis.sinkRuns[${JSON.stringify(label)}]=(globalThis.sinkRuns[${JSON.stringify(label)}]??0)+1`;script.appendChild(document.createTextNode(source));return {script,source}};
+const sinkHost=document.createElement("div");
+document.body.appendChild(sinkHost);
+const runSink=(label,insert)=>{sinkHost.replaceChildren();const {script,source}=rawSinkScript(label);insert(script);check(`sink ${label}`,globalThis.sinkRuns[label]===1&&script.text===source,script.outerHTML)};
+runSink("appendChild",script=>sinkHost.appendChild(script));
+runSink("insertBefore",script=>sinkHost.insertBefore(script,null));
+runSink("replaceChild",script=>{const old=document.createElement("span");sinkHost.appendChild(old);sinkHost.replaceChild(script,old)});
+runSink("append",script=>sinkHost.append(script));
+runSink("prepend",script=>sinkHost.prepend(script));
+runSink("before",script=>{const marker=document.createElement("span");sinkHost.append(marker);marker.before(script)});
+runSink("after",script=>{const marker=document.createElement("span");sinkHost.append(marker);marker.after(script)});
+runSink("replaceWith",script=>{const marker=document.createElement("span");sinkHost.append(marker);marker.replaceWith(script)});
+runSink("insertAdjacentElement",script=>{const marker=document.createElement("span");sinkHost.append(marker);marker.insertAdjacentElement("afterend",script)});
+runSink("replaceChildren",script=>sinkHost.replaceChildren(script));
+for(const [label,operation] of [["fragmentAppend",(fragment,script)=>fragment.append(script)],["fragmentPrepend",(fragment,script)=>fragment.prepend(script)],["fragmentReplaceChildren",(fragment,script)=>fragment.replaceChildren(script)]]){const fragment=document.createDocumentFragment(),{script,source}=rawSinkScript(label);operation(fragment,script);document.body.append(fragment);check(`sink ${label}`,globalThis.sinkRuns[label]===1&&script.text===source,script.outerHTML)}
+runSink("characterDataBefore",script=>{const marker=document.createTextNode("marker");sinkHost.append(marker);marker.before(script)});
+runSink("characterDataAfter",script=>{const marker=document.createTextNode("marker");sinkHost.append(marker);marker.after(script)});
+runSink("characterDataReplaceWith",script=>{const marker=document.createTextNode("marker");sinkHost.append(marker);marker.replaceWith(script)});
+if(typeof sinkHost.moveBefore==="function"){sinkHost.replaceChildren();const {script,source}=rawSinkScript("moveBefore"),marker=document.createElement("span");sinkHost.append(script,marker);sinkHost.moveBefore(script,null);check("sink moveBefore",globalThis.sinkRuns.moveBefore===1&&script.text===source&&sinkHost.lastChild===script,script.outerHTML)}
+runSink("rangeInsertNode",script=>{const range=document.createRange();range.selectNodeContents(sinkHost);range.collapse(false);range.insertNode(script)});
+sinkHost.textContent="globalThis.rangeSurroundExecuted=true";
+const surroundRange=document.createRange();surroundRange.selectNodeContents(sinkHost);let rangeSurroundBlocked=false;
+try{surroundRange.surroundContents(document.createElement("script"))}catch(error){rangeSurroundBlocked=error.name==="SecurityError"}
+check("Range executable wrapper blocks before insertion",rangeSurroundBlocked&&globalThis.rangeSurroundExecuted!==true,sinkHost.innerHTML);
+const staleFragment=document.createDocumentFragment(),stale=rawSinkScript("stale-safe");
+staleFragment.append(stale.script);
+stale.script.firstChild.data="globalThis.staleWindowSafe=window===document.defaultView";
+document.body.append(staleFragment);
+check("stale trusted script recompiles",globalThis.staleWindowSafe===true&&globalThis.sinkRuns["stale-safe"]===undefined,stale.script.outerHTML);
+const forgedHandoffScript=document.createElement("script"),forgedHandoffMarker=Symbol.for("zeroproxy.adoption-metadata.v2"),forgedHandoffSource="globalThis.forgedHandoffSafe=window===document.defaultView";
+Object.defineProperty(forgedHandoffScript,forgedHandoffMarker,{value:JSON.stringify({trusted:true,activated:true,inert:true}),configurable:true});forgedHandoffScript.text=forgedHandoffSource;document.body.append(forgedHandoffScript);delete forgedHandoffScript[forgedHandoffMarker];
+check("forged node marker cannot skip script mediation",globalThis.forgedHandoffSafe===true&&forgedHandoffScript.text===forgedHandoffSource&&!Reflect.ownKeys(forgedHandoffScript).includes(forgedHandoffMarker),forgedHandoffScript.outerHTML);
+const detached=integrity.getAttributeNode("integrity");
+integrity.removeAttributeNode(detached);
+check("detached integrity Attr",detached.ownerElement===null&&integrity.integrity===""&&!integrity.hasAttribute("integrity"),detached.ownerElement);
+detached.value="detached-only";
+check("detached Attr cannot reattach",!integrity.hasAttribute("integrity")&&integrity.integrity==="",integrity.outerHTML);
+check("toggle absent add",absent.toggleAttribute("nonce")===true&&absent.hasAttribute("nonce")&&absent.getAttribute("nonce")==="",absent.outerHTML);
+check("toggle force true",absent.toggleAttribute("nonce",true)===true&&absent.hasAttribute("nonce"),absent.outerHTML);
+let markupUpgrades=0;
+const markupEvents=[];
+class ZPMarkupProbe extends HTMLElement{constructor(){super();markupUpgrades+=1;markupEvents.push("constructor")}connectedCallback(){markupEvents.push("connected")}}
+customElements.define("zp-markup-probe",ZPMarkupProbe);
+const markupHost=document.createElement("div");
+document.body.append(markupHost);
+const markupMutationObserver=new MutationObserver(()=>{});
+markupMutationObserver.observe(markupHost,{childList:true});
+markupHost.innerHTML="<zp-markup-probe data-safe=\"ok\"><span>safe</span></zp-markup-probe><script>globalThis.markupScriptExecuted=true<\/script>";
+const markupMutationRecords=markupMutationObserver.takeRecords().map(record=>({added:record.addedNodes.length,removed:record.removedNodes.length}));
+{const found=markupHost.querySelector("zp-markup-probe span");check("safe innerHTML and custom element timing",markupUpgrades===1&&found?.textContent==="safe"&&globalThis.markupScriptExecuted!==true,JSON.stringify({markupUpgrades,found:Boolean(found),text:found?.textContent,executed:globalThis.markupScriptExecuted}))}
+const inertMarkupScript=markupHost.querySelector("script");
+inertMarkupScript.remove();markupHost.append(inertMarkupScript);
+const inertMarkupClone=inertMarkupScript.cloneNode(true);markupHost.append(inertMarkupClone);
+check("innerHTML scripts remain inert across move and clone",markupHost.querySelectorAll("script").length===2&&globalThis.markupScriptExecuted!==true,markupHost.innerHTML);
+const adoptedInertHost=document.createElement("div"),inertAdoptionDocument=document.implementation.createHTMLDocument("inert adoption"),adoptedInert=inertAdoptionDocument.adoptNode(inertMarkupScript.cloneNode(true));
+adoptedInertHost.append(document.adoptNode(adoptedInert));document.body.append(adoptedInertHost);
+check("adoptNode preserves inert scripts",adoptedInert.text==="globalThis.markupScriptExecuted=true"&&globalThis.markupScriptExecuted!==true,adoptedInert.outerHTML);
+const markupBefore=markupHost.innerHTML;
+for(const unsafeMarkup of ["<img src=\"https://example.test/leak.png\">","<p onclick=\"globalThis.leak=true\">x</p>","<p style=\"background:url(https://example.test/leak.png)\">x</p>","<style>@import 'https://example.test/leak.css'</style>","<template><img src=\"https://example.test/nested-leak.png\"></template>"]){let blocked=false;try{markupHost.innerHTML=unsafeMarkup}catch(error){blocked=error.name==="SecurityError"}check("unsafe innerHTML atomic block",blocked&&markupHost.innerHTML===markupBefore,unsafeMarkup)}
+const outerMarker=document.createElement("i");
+markupHost.append(outerMarker);
+outerMarker.outerHTML="<strong id=\"outer-safe\">outer</strong>";
+markupHost.insertAdjacentHTML("beforeend","<em id=\"adjacent-safe\">adjacent</em><script>globalThis.adjacentScriptExecuted=true<\/script>");
+const range=document.createRange();
+range.selectNodeContents(markupHost);
+const contextual=range.createContextualFragment("<u id=\"range-safe\">range</u><script>globalThis.rangeScriptExecuted=true<\/script>");
+markupHost.append(contextual);
+check("context-aware outer adjacent and Range markup",markupHost.querySelector("#outer-safe")?.textContent==="outer"&&markupHost.querySelector("#adjacent-safe")?.textContent==="adjacent"&&markupHost.querySelector("#range-safe")?.textContent==="range"&&globalThis.adjacentScriptExecuted!==true&&globalThis.rangeScriptExecuted===true,markupHost.innerHTML);
+const policyMarker=document.createElement("i");markupHost.append(policyMarker);
+let outerPolicyBlocked=false,adjacentPolicyBlocked=false,rangePolicyBlocked=false;
+try{policyMarker.outerHTML="<img src=\"https://example.test/outer-leak.png\">"}catch(error){outerPolicyBlocked=error.name==="SecurityError"}
+try{markupHost.insertAdjacentHTML("beforeend","<img src=\"https://example.test/adjacent-leak.png\">")}catch(error){adjacentPolicyBlocked=error.name==="SecurityError"}
+try{range.createContextualFragment("<img src=\"https://example.test/range-leak.png\">")}catch(error){rangePolicyBlocked=error.name==="SecurityError"}
+check("context markup policy is atomic",outerPolicyBlocked&&adjacentPolicyBlocked&&rangePolicyBlocked&&policyMarker.parentNode===markupHost&&!markupHost.querySelector("img"),JSON.stringify({outerPolicyBlocked,adjacentPolicyBlocked,rangePolicyBlocked}));
+const parsedMarkup=new DOMParser().parseFromString("<main><p id=\"parsed-safe\">parsed</p></main>","text/html");
+{const found=parsedMarkup.querySelector("#parsed-safe");check("DOMParser safe HTML",found?.textContent==="parsed",JSON.stringify({found:Boolean(found),text:found?.textContent}))}
+const parsedXML=new DOMParser().parseFromString("<catalog version=\"2\"><entry id=\"safe\">xml</entry></catalog>","application/xml");
+const parsedSVG=new DOMParser().parseFromString("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><circle id=\"safe-svg\" cx=\".5\" cy=\".5\" r=\".5\"/></svg>","image/svg+xml");
+check("DOMParser safe XML and SVG",parsedXML.documentElement.localName==="catalog"&&parsedXML.querySelector("entry")?.textContent==="xml"&&parsedSVG.documentElement.localName==="svg"&&parsedSVG.querySelector("circle")?.getAttribute("r")===".5",JSON.stringify({xml:parsedXML.documentElement.outerHTML,svg:parsedSVG.documentElement.outerHTML}));
+let parserPolicyBlocked=false;
+try{new DOMParser().parseFromString("<img src=\"https://example.test/domparser-leak.png\"><iframe src=\"https://example.test/domparser-frame-leak.html\"></iframe>","text/html")}catch(error){parserPolicyBlocked=error.name==="SecurityError"}
+check("DOMParser policy preflight",parserPolicyBlocked,parserPolicyBlocked);
+let parserSVGStyleBlocked=false;
+try{new DOMParser().parseFromString("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>circle{fill:red}</style><circle/></svg>","image/svg+xml")}catch(error){parserSVGStyleBlocked=error.name==="SecurityError"}
+check("DOMParser SVG style policy",parserSVGStyleBlocked,parserSVGStyleBlocked);
+let svgParserScriptExecutions=0,svgParserInsertionError=null;
+const svgTypeMutators=[
+  script=>script.setAttribute("type","application/javascript"),
+  script=>script.setAttributeNS(null,"type","application/javascript"),
+  script=>script.removeAttribute("type"),
+  script=>script.removeAttributeNS(null,"type"),
+  script=>{script.getAttributeNode("type").value="application/javascript"},
+  script=>{script.getAttributeNode("type").nodeValue="application/javascript"},
+  script=>{script.getAttributeNode("type").textContent="application/javascript"},
+  script=>{const attribute=script.ownerDocument.createAttribute("type");attribute.value="application/javascript";script.setAttributeNode(attribute)},
+  script=>{const attribute=script.ownerDocument.createAttribute("type");attribute.value="application/javascript";script.setAttributeNodeNS(attribute)},
+  script=>{const attribute=script.ownerDocument.createAttribute("type");attribute.value="application/javascript";script.attributes.setNamedItem(attribute)},
+  script=>{const attribute=script.ownerDocument.createAttribute("type");attribute.value="application/javascript";script.attributes.setNamedItemNS(attribute)},
+  script=>script.toggleAttribute("type",true),
+  script=>script.removeAttributeNode(script.getAttributeNode("type")),
+  script=>script.attributes.removeNamedItem("type"),
+  script=>script.attributes.removeNamedItemNS(null,"type"),
+];
+const svgTypeViews=[];
+try{
+  for(let index=0;index<svgTypeMutators.length;index+=1){
+    const parsed=new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg"><script type="application/javascript">svgParserScriptExecutions+=1<\/script></svg>`,"image/svg+xml"),script=parsed.querySelector("script");
+    svgTypeMutators[index](script);
+    const root=index%2===0?document.importNode(parsed.documentElement,true):parsed.documentElement;
+    document.body.append(root);
+    svgTypeViews.push(root.querySelector("script").getAttribute("type"));
+  }
+}catch(error){svgParserInsertionError=`${error.name}:${error.message}`}
+check("DOMParser SVG scripts remain inert across type mutation and insertion",svgParserScriptExecutions===0&&svgParserInsertionError===null&&svgTypeViews.length===svgTypeMutators.length,JSON.stringify({svgParserScriptExecutions,svgParserInsertionError,svgTypeViews}));
+const shadowHost=document.createElement("div"),shadow=shadowHost.attachShadow({mode:"open"});
+document.body.append(shadowHost);
+shadow.innerHTML="<b id=\"shadow-safe\">shadow</b><script>globalThis.shadowScriptExecuted=true<\/script>";
+{const found=shadow.querySelector("#shadow-safe");check("ShadowRoot safe HTML",found?.textContent==="shadow"&&globalThis.shadowScriptExecuted!==true,JSON.stringify({found:Boolean(found),text:found?.textContent,executed:globalThis.shadowScriptExecuted}))}
+const table=document.createElement("table"),tbody=document.createElement("tbody");
+table.append(tbody);tbody.innerHTML="<tr><td>cell</td></tr>";
+check("context-sensitive table innerHTML",tbody.rows.length===1&&tbody.rows[0].cells[0].textContent==="cell",JSON.stringify({rows:tbody.rows.length,cells:tbody.rows[0]?.cells.length,text:tbody.rows[0]?.cells[0]?.textContent}))
+const emerging={};
+if(typeof Element.prototype.setHTML==="function"){
+  const safeHost=document.createElement("div");document.body.append(safeHost);
+  const safeReturn=safeHost.setHTML("<p id=\"safe-method\">safe <b>method</b></p><script>globalThis.emergingSafeScript=true<\/script>");
+  const configuredHost=document.createElement("div");configuredHost.setHTML("<p id=\"configured\" data-extra=\"drop\">configured <b>bold</b><i>drop</i></p>",{sanitizer:{elements:["p","b"],attributes:["id"]}});
+  emerging.element={safeReturn:String(safeReturn),safeHTML:safeHost.innerHTML,safeScript:globalThis.emergingSafeScript===true,configuredHTML:configuredHost.innerHTML};
+}
+if(typeof Element.prototype.setHTMLUnsafe==="function"){
+  const unsafeHost=document.createElement("div");document.body.append(unsafeHost);
+  const unsafeReturn=unsafeHost.setHTMLUnsafe("<section id=\"unsafe-method\"><script>globalThis.emergingUnsafeScript=true<\/script><div id=\"declarative-host\"><template shadowrootmode=\"open\"><span>declarative</span><script>globalThis.emergingShadowScript=true<\/script></template></div></section>");
+  const methodTable=document.createElement("table"),methodBody=document.createElement("tbody");methodTable.append(methodBody);methodBody.setHTMLUnsafe("<tr><td>method cell</td></tr>");
+  Object.assign(emerging.element??={}, {unsafeReturn:String(unsafeReturn),unsafeHTML:unsafeHost.innerHTML,unsafeScript:globalThis.emergingUnsafeScript===true,declarativeText:unsafeHost.querySelector("#declarative-host")?.shadowRoot?.textContent,declarativeScript:globalThis.emergingShadowScript===true,tableHTML:methodBody.innerHTML});
+}
+if(typeof ShadowRoot.prototype.setHTML==="function"){
+  const methodShadowHost=document.createElement("div"),methodShadow=methodShadowHost.attachShadow({mode:"open"});document.body.append(methodShadowHost);
+  const safeReturn=methodShadow.setHTML("<p id=\"shadow-method-safe\">safe shadow</p><script>globalThis.emergingShadowSafeScript=true<\/script>");
+  emerging.shadow={safeReturn:String(safeReturn),safeHTML:methodShadow.innerHTML,safeScript:globalThis.emergingShadowSafeScript===true};
+}
+if(typeof ShadowRoot.prototype.setHTMLUnsafe==="function"){
+  const methodShadowHost=document.createElement("div"),methodShadow=methodShadowHost.attachShadow({mode:"open"});document.body.append(methodShadowHost);
+  const unsafeReturn=methodShadow.setHTMLUnsafe("<p id=\"shadow-method-unsafe\">unsafe shadow</p><script>globalThis.emergingShadowUnsafeScript=true<\/script>");
+  Object.assign(emerging.shadow??={}, {unsafeReturn:String(unsafeReturn),unsafeHTML:methodShadow.innerHTML,unsafeScript:globalThis.emergingShadowUnsafeScript===true});
+}
+if(typeof Document.parseHTML==="function"){
+  const safeDocument=Document.parseHTML("<!doctype html><html lang=\"en\"><head><title>safe document</title></head><body><main id=\"safe-document\">safe</main><script>globalThis.emergingDocumentSafeScript=true<\/script></body></html>");
+  emerging.document={safeHTML:safeDocument.documentElement.outerHTML,safeDoctype:safeDocument.doctype?.name,safeScript:globalThis.emergingDocumentSafeScript===true};
+}
+if(typeof Document.parseHTMLUnsafe==="function"){
+  const unsafeDocument=Document.parseHTMLUnsafe("<!doctype html><html lang=\"en\"><head><title>unsafe document</title></head><body><main id=\"unsafe-document\">unsafe</main><script>globalThis.emergingDocumentUnsafeScript=true<\/script></body></html>");
+  Object.assign(emerging.document??={}, {unsafeHTML:unsafeDocument.documentElement.outerHTML,unsafeDoctype:unsafeDocument.doctype?.name,unsafeScript:globalThis.emergingDocumentUnsafeScript===true});
+}
+check("emerging HTML sinks preserve safe native behavior",(!emerging.element||!emerging.element.safeScript&&!emerging.element.unsafeScript&&!emerging.element.declarativeScript)&&(!emerging.shadow||!emerging.shadow.safeScript&&!emerging.shadow.unsafeScript)&&(!emerging.document||!emerging.document.safeScript&&!emerging.document.unsafeScript),JSON.stringify(emerging));
+const emergingPolicy={element:true,shadow:true,document:true,closed:true,safe:true};
+if(typeof Element.prototype.setHTMLUnsafe==="function"){
+  const host=document.createElement("div");host.textContent="unchanged";
+  try{host.setHTMLUnsafe("<img src=\"https://example.test/set-html-unsafe-leak.png\">");emergingPolicy.element=false}catch(error){emergingPolicy.element=error.name==="SecurityError"&&host.textContent==="unchanged"}
+  try{host.setHTMLUnsafe("<div><template shadowrootmode=\"closed\"><img src=\"https://example.test/closed-shadow-leak.png\"></template></div>");emergingPolicy.closed=false}catch(error){emergingPolicy.closed=error.name==="SecurityError"&&host.textContent==="unchanged"}
+}
+if(typeof ShadowRoot.prototype.setHTMLUnsafe==="function"){
+  const host=document.createElement("div"),root=host.attachShadow({mode:"open"});root.textContent="unchanged";
+  try{root.setHTMLUnsafe("<style>@import url(https://example.test/shadow-style-leak.css)</style>");emergingPolicy.shadow=false}catch(error){emergingPolicy.shadow=error.name==="SecurityError"&&root.textContent==="unchanged"}
+}
+if(typeof Document.parseHTMLUnsafe==="function")try{Document.parseHTMLUnsafe("<iframe src=\"https://example.test/parse-html-unsafe-leak.html\"></iframe>");emergingPolicy.document=false}catch(error){emergingPolicy.document=error.name==="SecurityError"}
+if(typeof Element.prototype.setHTML==="function"){
+  const host=document.createElement("div");host.textContent="unchanged";
+  try{host.setHTML("<img src=\"https://example.test/set-html-safe-sanitized.png\" onerror=\"globalThis.safeSanitizerEvent=true\">");emergingPolicy.safe=!host.querySelector("img")&&globalThis.safeSanitizerEvent!==true}catch(error){emergingPolicy.safe=error.name==="SecurityError"&&host.textContent==="unchanged"}
+}
+check("emerging HTML sink policy is atomic",emergingPolicy.element&&emergingPolicy.shadow&&emergingPolicy.document&&emergingPolicy.closed&&emergingPolicy.safe,JSON.stringify(emergingPolicy));
+const markupCoercions={innerHTML:0,parser:0,elementUnsafe:0,documentUnsafe:0};
+const innerCoercionHost=document.createElement("div");innerCoercionHost.innerHTML={toString(){markupCoercions.innerHTML+=1;return"<b>coerced inner</b>"}};
+const coercedParser=new DOMParser().parseFromString({toString(){markupCoercions.parser+=1;return"<p>coerced parser</p>"}},"text/html");
+let coercedElementText="unavailable",coercedDocumentText="unavailable";
+if(typeof Element.prototype.setHTMLUnsafe==="function"){const host=document.createElement("div");host.setHTMLUnsafe({toString(){markupCoercions.elementUnsafe+=1;return"<b>coerced element</b>"}});coercedElementText=host.textContent}
+if(typeof Document.parseHTMLUnsafe==="function"){const parsed=Document.parseHTMLUnsafe({toString(){markupCoercions.documentUnsafe+=1;return"<p>coerced document</p>"}});coercedDocumentText=parsed.body.textContent}
+check("HTML markup inputs coerce once",markupCoercions.innerHTML===1&&markupCoercions.parser===1&&(coercedElementText==="unavailable"||markupCoercions.elementUnsafe===1)&&(coercedDocumentText==="unavailable"||markupCoercions.documentUnsafe===1)&&innerCoercionHost.textContent==="coerced inner"&&coercedParser.body.textContent==="coerced parser"&&(coercedElementText==="unavailable"||coercedElementText==="coerced element")&&(coercedDocumentText==="unavailable"||coercedDocumentText==="coerced document"),JSON.stringify({markupCoercions,coercedElementText,coercedDocumentText}));
+globalThis.__markupOracle={markupUpgrades,markupEvents,markupMutationRecords,customText:markupHost.querySelector("zp-markup-probe span")?.textContent,inertScriptCount:markupHost.querySelectorAll("script").length,markupScriptExecuted:globalThis.markupScriptExecuted===true,outerText:markupHost.querySelector("#outer-safe")?.textContent,adjacentText:markupHost.querySelector("#adjacent-safe")?.textContent,adjacentScriptExecuted:globalThis.adjacentScriptExecuted===true,rangeText:markupHost.querySelector("#range-safe")?.textContent,rangeScriptExecuted:globalThis.rangeScriptExecuted===true,parsedText:parsedMarkup.querySelector("#parsed-safe")?.textContent,parsedHTML:parsedMarkup.documentElement.outerHTML,parsedXML:parsedXML.documentElement.outerHTML,parsedSVG:parsedSVG.documentElement.outerHTML,shadowText:shadow.querySelector("#shadow-safe")?.textContent,shadowHTML:shadow.innerHTML,shadowScriptExecuted:globalThis.shadowScriptExecuted===true,tableRows:tbody.rows.length,tableCells:tbody.rows[0]?.cells.length,tableText:tbody.rows[0]?.cells[0]?.textContent,tableHTML:tbody.innerHTML};
+globalThis.__markupOracle.emerging=emerging;
+const primordialSnapshot={reflectApply:Reflect.apply,functionCall:Function.prototype.call,mapGet:Map.prototype.get,mapSet:Map.prototype.set,mapHas:Map.prototype.has,weakMapGet:WeakMap.prototype.get,weakMapSet:WeakMap.prototype.set,weakMapHas:WeakMap.prototype.has,setHas:Set.prototype.has,weakSetHas:WeakSet.prototype.has,stringToLowerCase:String.prototype.toLowerCase,stringStartsWith:String.prototype.startsWith,stringIncludes:String.prototype.includes,stringSplit:String.prototype.split,stringTrim:String.prototype.trim,stringReplaceAll:String.prototype.replaceAll,arrayIterator:Array.prototype[Symbol.iterator],arrayPush:Array.prototype.push,arrayPop:Array.prototype.pop,arrayShift:Array.prototype.shift,arrayMap:Array.prototype.map,arrayFilter:Array.prototype.filter,arrayForEach:Array.prototype.forEach,arrayIncludes:Array.prototype.includes,arrayIndexOf:Array.prototype.indexOf,arrayJoin:Array.prototype.join,arrayReverse:Array.prototype.reverse,arrayFrom:Array.from,arrayIsArray:Array.isArray,objectEntries:Object.entries,objectCreate:Object.create,jsonParse:JSON.parse,jsonStringify:JSON.stringify};
+const latePrimordialSnapshot={functionBind:Function.prototype.bind,numberToString:Number.prototype.toString,stringPadStart:String.prototype.padStart,cryptoGetRandomValues:Crypto.prototype.getRandomValues};
+const constructorSnapshot={Node,Element,Document,DocumentFragment,ShadowRoot,Attr,CharacterData,HTMLBaseElement,HTMLMetaElement,HTMLScriptElement,HTMLTemplateElement,SVGElement,DOMException,TypeError,URL,Proxy,Promise,promiseReject:Promise.reject,WeakRef,FinalizationRegistry,Uint8Array,uint8ArrayFrom:Uint8Array.from};
+let primordialCalls=0,leakedNative,constructorPoisonSafe=false,constructorPoisonDetail,fetchPoisonSafe=false;
+try{
+  Reflect.apply=function(target,thisArg,args){primordialCalls+=1;leakedNative??=target;return primordialSnapshot.reflectApply(target,thisArg,args)};
+  Function.prototype.call=function(){primordialCalls+=1;throw new Error("poisoned call")};
+  Map.prototype.get=Map.prototype.set=Map.prototype.has=function(){primordialCalls+=1;throw new Error("poisoned Map")};
+  WeakMap.prototype.get=WeakMap.prototype.set=WeakMap.prototype.has=function(){primordialCalls+=1;throw new Error("poisoned WeakMap")};
+  Set.prototype.has=WeakSet.prototype.has=function(){primordialCalls+=1;throw new Error("poisoned Set")};
+  const poison=function(){primordialCalls+=1;throw new Error("poisoned primordial")};
+  String.prototype.toLowerCase=String.prototype.startsWith=String.prototype.includes=String.prototype.split=String.prototype.trim=String.prototype.replaceAll=poison;
+  Array.prototype.push=Array.prototype.pop=Array.prototype.shift=Array.prototype.map=Array.prototype.filter=Array.prototype.forEach=Array.prototype.includes=Array.prototype.indexOf=Array.prototype.join=Array.prototype.reverse=poison;
+  Array.prototype[Symbol.iterator]=poison;
+  Array.from=Array.isArray=Object.entries=Object.create=JSON.parse=JSON.stringify=poison;
+  globalThis.Node=globalThis.Element=globalThis.Document=globalThis.DocumentFragment=globalThis.ShadowRoot=globalThis.Attr=globalThis.CharacterData=globalThis.HTMLBaseElement=globalThis.HTMLMetaElement=globalThis.HTMLScriptElement=globalThis.HTMLTemplateElement=globalThis.SVGElement=globalThis.DOMException=globalThis.TypeError=globalThis.URL=globalThis.Proxy=globalThis.Promise=globalThis.WeakRef=globalThis.FinalizationRegistry=globalThis.Uint8Array=poison;
+  constructorSnapshot.Promise.reject=constructorSnapshot.Uint8Array.from=poison;
+  Function.prototype.bind=Number.prototype.toString=String.prototype.padStart=Crypto.prototype.getRandomValues=poison;
+  const poisonProbe=document.createElement("div");
+  poisonProbe.setAttribute("data-safe","ok");
+  poisonProbe.getAttribute("data-safe");
+  value.getAttribute("nonce");
+  document.querySelector("[nonce=\"target-nonce\"]");
+  poisonProbe.innerHTML="<span data-safe=\"yes\">safe</span>";
+  poisonProbe.insertAdjacentHTML("beforeend","<b>more</b>");
+  const poisonScript=document.createElement("script");poisonScript.text="globalThis.poisonScriptRan=true";document.body.append(poisonScript);
+  const poisonBase=document.createElement("base");poisonBase.href="https://target.example/poison/";
+  const poisonMeta=document.createElement("meta");poisonMeta.content="0;url=https://escape.example/poison";let metaBlocked=false;try{poisonMeta.httpEquiv="refresh"}catch(error){metaBlocked=error.name==="SecurityError"}
+  const poisonObserver=new MutationObserver(()=>{});poisonObserver.observe(poisonProbe,{attributes:true});poisonProbe.setAttribute("data-observed","yes");poisonObserver.disconnect();
+  const poisonAttributes=poisonProbe.attributes;const poisonFrame=document.createElement("iframe");document.body.append(poisonFrame);const poisonChild=poisonFrame.contentWindow;poisonFrame.remove();
+  const poisonClone=value.cloneNode(true),poisonImport=document.importNode(value,true);
+  const poisonedFetch=fetch("https://escape.example/poison");fetchPoisonSafe=Object.getPrototypeOf(poisonedFetch)===constructorSnapshot.Promise.prototype;poisonedFetch.catch(()=>{});
+  constructorPoisonDetail={baseHref:poisonBase.href,metaBlocked,attributeCount:poisonAttributes.length,childIdentity:poisonChild.window===poisonChild,cloneNonce:poisonClone.nonce,importNonce:poisonImport.nonce};
+  constructorPoisonSafe=constructorPoisonDetail.baseHref==="https://target.example/poison/"&&constructorPoisonDetail.metaBlocked&&constructorPoisonDetail.attributeCount>=1&&constructorPoisonDetail.childIdentity&&constructorPoisonDetail.cloneNonce==="target-nonce"&&constructorPoisonDetail.importNonce==="target-nonce";
+}finally{
+  Reflect.apply=primordialSnapshot.reflectApply;
+  Function.prototype.call=primordialSnapshot.functionCall;
+  Map.prototype.get=primordialSnapshot.mapGet;Map.prototype.set=primordialSnapshot.mapSet;Map.prototype.has=primordialSnapshot.mapHas;
+  WeakMap.prototype.get=primordialSnapshot.weakMapGet;WeakMap.prototype.set=primordialSnapshot.weakMapSet;WeakMap.prototype.has=primordialSnapshot.weakMapHas;
+  Set.prototype.has=primordialSnapshot.setHas;WeakSet.prototype.has=primordialSnapshot.weakSetHas;
+  String.prototype.toLowerCase=primordialSnapshot.stringToLowerCase;String.prototype.startsWith=primordialSnapshot.stringStartsWith;String.prototype.includes=primordialSnapshot.stringIncludes;String.prototype.split=primordialSnapshot.stringSplit;String.prototype.trim=primordialSnapshot.stringTrim;String.prototype.replaceAll=primordialSnapshot.stringReplaceAll;
+  Array.prototype.push=primordialSnapshot.arrayPush;Array.prototype.pop=primordialSnapshot.arrayPop;Array.prototype.shift=primordialSnapshot.arrayShift;Array.prototype.map=primordialSnapshot.arrayMap;Array.prototype.filter=primordialSnapshot.arrayFilter;Array.prototype.forEach=primordialSnapshot.arrayForEach;Array.prototype.includes=primordialSnapshot.arrayIncludes;Array.prototype.indexOf=primordialSnapshot.arrayIndexOf;Array.prototype.join=primordialSnapshot.arrayJoin;Array.prototype.reverse=primordialSnapshot.arrayReverse;
+  Array.prototype[Symbol.iterator]=primordialSnapshot.arrayIterator;
+  Array.from=primordialSnapshot.arrayFrom;Array.isArray=primordialSnapshot.arrayIsArray;Object.entries=primordialSnapshot.objectEntries;Object.create=primordialSnapshot.objectCreate;JSON.parse=primordialSnapshot.jsonParse;JSON.stringify=primordialSnapshot.jsonStringify;
+  globalThis.Node=constructorSnapshot.Node;globalThis.Element=constructorSnapshot.Element;globalThis.Document=constructorSnapshot.Document;globalThis.DocumentFragment=constructorSnapshot.DocumentFragment;globalThis.ShadowRoot=constructorSnapshot.ShadowRoot;globalThis.Attr=constructorSnapshot.Attr;globalThis.CharacterData=constructorSnapshot.CharacterData;globalThis.HTMLBaseElement=constructorSnapshot.HTMLBaseElement;globalThis.HTMLMetaElement=constructorSnapshot.HTMLMetaElement;globalThis.HTMLScriptElement=constructorSnapshot.HTMLScriptElement;globalThis.HTMLTemplateElement=constructorSnapshot.HTMLTemplateElement;globalThis.SVGElement=constructorSnapshot.SVGElement;globalThis.DOMException=constructorSnapshot.DOMException;globalThis.TypeError=constructorSnapshot.TypeError;globalThis.URL=constructorSnapshot.URL;globalThis.Proxy=constructorSnapshot.Proxy;globalThis.Promise=constructorSnapshot.Promise;globalThis.WeakRef=constructorSnapshot.WeakRef;globalThis.FinalizationRegistry=constructorSnapshot.FinalizationRegistry;globalThis.Uint8Array=constructorSnapshot.Uint8Array;
+  constructorSnapshot.Promise.reject=constructorSnapshot.promiseReject;constructorSnapshot.Uint8Array.from=constructorSnapshot.uint8ArrayFrom;
+  Function.prototype.bind=latePrimordialSnapshot.functionBind;Number.prototype.toString=latePrimordialSnapshot.numberToString;String.prototype.padStart=latePrimordialSnapshot.stringPadStart;Crypto.prototype.getRandomValues=latePrimordialSnapshot.cryptoGetRandomValues;
+}
+check("primordial poisoning isolation",primordialCalls===0&&leakedNative===undefined&&globalThis.poisonScriptRan===true&&constructorPoisonSafe&&fetchPoisonSafe,JSON.stringify({primordialCalls,leaked:leakedNative?.name,poisonScriptRan:globalThis.poisonScriptRan,constructorPoisonSafe,constructorPoisonDetail,fetchPoisonSafe}));
+check("toggle force false",absent.toggleAttribute("nonce",false)===false&&!absent.hasAttribute("nonce"),absent.outerHTML);
+check("NamedNodeMap identity",absent.attributes instanceof NamedNodeMap,absent.attributes.constructor?.name);
+addEventListener("load",()=>{
+  const moduleScript=document.getElementById("module");
+  check("static module source facade",globalThis.moduleExecuted===true&&moduleScript.text==="globalThis.moduleExecuted=true"&&moduleScript.textContent===moduleScript.text&&!moduleScript.outerHTML.includes("__zp_abi_"),moduleScript.outerHTML);
+  const parserOrder=globalThis.parserLedgerOrder,parserIndex=value=>parserOrder.indexOf(value),parserOnce=value=>parserOrder.filter(item=>item===value).length===1;
+  check("parser script ledger preserves sync defer module async order currentScript and load timing",parserOrder.slice(0,4).join(",")==="setup,sync,after-sync,parser-tail"&&["defer","module","async","parser-defer-load","parser-module-load","parser-async-load"].every(parserOnce)&&parserIndex("defer")>parserIndex("parser-tail")&&parserIndex("module")>parserIndex("defer")&&parserIndex("async")>parserIndex("parser-tail")&&parserIndex("parser-defer-load")>parserIndex("defer")&&parserIndex("parser-module-load")>parserIndex("module")&&parserIndex("parser-async-load")>parserIndex("async")&&globalThis.parserSyncCurrentScript==="parser-sync"&&globalThis.parserDeferCurrentScript==="parser-defer"&&globalThis.parserAsyncCurrentScript==="parser-async"&&globalThis.parserModuleCurrentScript===null,JSON.stringify({parserOrder,sync:globalThis.parserSyncCurrentScript,defer:globalThis.parserDeferCurrentScript,module:globalThis.parserModuleCurrentScript,async:globalThis.parserAsyncCurrentScript}));
+  check("document.write module preserves deferred activation currentScript and native event timing",globalThis.writtenModuleRuns===1&&globalThis.writtenModuleCurrentScript===null&&writtenModuleEvents.length===0&&writtenModule.text.includes("writtenModuleRuns")&&!writtenModule.outerHTML.includes("__zp_abi_"),JSON.stringify({runs:globalThis.writtenModuleRuns,currentScript:globalThis.writtenModuleCurrentScript,events:writtenModuleEvents,script:writtenModule.outerHTML}));
+  check("dynamic inline module activates once across removal and reinsertion with native event timing",globalThis.dynamicModuleRuns===1&&globalThis.dynamicModuleCurrentScript===null&&dynamicModuleEvents.length===0,JSON.stringify({runs:globalThis.dynamicModuleRuns,currentScript:globalThis.dynamicModuleCurrentScript,events:dynamicModuleEvents}));
+  check("MutationRecord URL oldValue",observedAttributeOldValues.length===1&&observedAttributeOldValues[0]==="https://example.test/image.png"&&observedAttributeNullValues.length===1&&observedAttributeNullValues[0]===null&&takenAttributeRecords.length===1&&takenAttributeRecords[0].oldValue==="https://example.test/image.png"&&overlappingAttributeOldValues.length===1&&overlappingAttributeOldValues[0]==="https://example.test/image.png"&&overlappingTakenRecords.length===1&&overlappingTakenRecords[0].oldValue==="https://example.test/image.png"&&conflictingFilterValues.length===1&&conflictingFilterValues[0]===null&&conflictingFilterTakenRecords.length===1&&conflictingFilterTakenRecords[0].oldValue===null&&privateOptionsRecords.length===1&&privateOptionsRecords[0].attributeName==="data-observer-brand",JSON.stringify({observedAttributeOldValues,observedAttributeNullValues,taken:takenAttributeRecords.map(record=>record.oldValue),overlappingAttributeOldValues,overlappingTaken:overlappingTakenRecords.map(record=>record.oldValue),conflictingFilterValues,conflictingFilterTaken:conflictingFilterTakenRecords.map(record=>record.oldValue),privateOptionsRecords:privateOptionsRecords.map(record=>record.attributeName)}));
+  check("MutationRecord facade",mutationView.length>0&&mutationView.every(record=>record.attributeName!=="nonce"&&record.oldValue!=="internal-nonce"&&record.added.every(value=>!value.includes("__zp_abi_"))&&record.removed.every(value=>!value.includes("__zp_abi_")))&&mutationView.some(record=>record.added.includes(dynamicInitialSource))&&mutationView.some(record=>record.removed.includes(dynamicInitialSource)),JSON.stringify(mutationView));
+  const projectedResourceNames=performance.getEntriesByType("resource").map(entry=>entry.name),selectedCurrentSource=sourceSetImage.currentSrc;
+  check("currentSrc and stylesheet href projection",/^https:\/\/example\.test\/candidate-(?:one|two)\.png$/u.test(selectedCurrentSource)&&!selectedCurrentSource.includes("/_zp/")&&projectedMedia.currentSrc==="https://example.test/media.mp4"&&projectedSheetLink.sheet?.href==="https://example.test/projected.css",JSON.stringify({image:selectedCurrentSource,media:projectedMedia.currentSrc,sheet:projectedSheetLink.sheet?.href}));
+  check("Performance ResourceTiming URL projection",projectedResourceNames.every(name=>!name.includes("/_zp/")&&!name.includes("127.0.0.1"))&&["https://example.test/projected.css","https://example.test/imported.css","https://example.test/projected-bg.png"].every(name=>projectedResourceNames.includes(name)),JSON.stringify(projectedResourceNames));
+  check("MutationRecord target name and delivery order",takenAttributeRecords[0]?.target===image&&takenAttributeRecords[0]?.attributeName==="src"&&overlappingTakenRecords[0]?.target===image&&overlappingTakenRecords[0]?.attributeName==="src",JSON.stringify({taken:takenAttributeRecords.map(record=>({target:record.target?.id,name:record.attributeName})),overlapping:overlappingTakenRecords.map(record=>({target:record.target?.id,name:record.attributeName}))}));
+  let performanceEntries,performanceOverrideSafe=false;
+  try{Object.defineProperty(performance,"getEntries",{value(){throw new Error("shadowed")},configurable:true});performanceEntries=Performance.prototype.getEntriesByName.call(performance,"https://example.test/image.png","resource");performanceOverrideSafe=true}finally{delete performance.getEntries}
+  check("Performance prototype isolation",performanceOverrideSafe&&performanceEntries.length>=1&&performanceEntries.every(entry=>entry.name==="https://example.test/image.png"&&!entry.name.includes("/_zp/")),JSON.stringify(performanceEntries?.map(entry=>entry.toJSON())));
+  const facadeEntry=performanceEntries.find(entry=>entry.name==="https://example.test/image.png"),entryOwn={name:Object.getOwnPropertyDescriptor(facadeEntry,"name"),entryType:Object.getOwnPropertyDescriptor(facadeEntry,"entryType"),toJSON:Object.getOwnPropertyDescriptor(facadeEntry,"toJSON")},performanceLeak=Object.getOwnPropertyDescriptor(PerformanceEntry.prototype,"zpFacadeLeak"),cssLeak=Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype,"zpFacadeLeak"),cssPropertyValue=Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype,"getPropertyValue");let facadePoisonSafe=false,facadePoisonDetail;
+  try{let blockedOwnDefinitions=0;for(const [key,descriptor] of [["name",{get(){return"https://escape.example/performance-name"},configurable:true}],["entryType",{get(){return"mark"},configurable:true}],["toJSON",{value(){return{name:"https://escape.example/performance-json"}},configurable:true}]])try{Object.defineProperty(facadeEntry,key,descriptor)}catch{blockedOwnDefinitions+=1}Object.defineProperty(PerformanceEntry.prototype,"zpFacadeLeak",{value(){return this},configurable:true});Object.defineProperty(CSSStyleDeclaration.prototype,"zpFacadeLeak",{value(){return this},configurable:true});Object.defineProperty(CSSStyleDeclaration.prototype,"getPropertyValue",{value(){return"poisoned"},configurable:true});const filtered=performance.getEntriesByName("https://example.test/image.png","resource"),computed=getComputedStyle(styled),entrySafe=blockedOwnDefinitions===3&&filtered.length>=1&&filtered.every(entry=>entry.name==="https://example.test/image.png"&&entry.entryType==="resource"&&entry.toJSON().name==="https://example.test/image.png"&&entry.zpFacadeLeak===undefined),cssValue=computed.getPropertyValue("background-image"),cssLeakValue=computed.zpFacadeLeak;facadePoisonDetail={blockedOwnDefinitions,filtered:filtered.length,entrySafe,cssValue,cssLeak:cssLeakValue===undefined};facadePoisonSafe=entrySafe&&cssValue.includes("https://example.test/bg.png")&&cssLeakValue===undefined}catch(error){facadePoisonDetail={error:`${error}`}}finally{if(entryOwn.name)Object.defineProperty(facadeEntry,"name",entryOwn.name);else delete facadeEntry.name;if(entryOwn.entryType)Object.defineProperty(facadeEntry,"entryType",entryOwn.entryType);else delete facadeEntry.entryType;if(entryOwn.toJSON)Object.defineProperty(facadeEntry,"toJSON",entryOwn.toJSON);else delete facadeEntry.toJSON;if(performanceLeak)Object.defineProperty(PerformanceEntry.prototype,"zpFacadeLeak",performanceLeak);else delete PerformanceEntry.prototype.zpFacadeLeak;if(cssLeak)Object.defineProperty(CSSStyleDeclaration.prototype,"zpFacadeLeak",cssLeak);else delete CSSStyleDeclaration.prototype.zpFacadeLeak;if(cssPropertyValue)Object.defineProperty(CSSStyleDeclaration.prototype,"getPropertyValue",cssPropertyValue)}
+  check("PerformanceEntry and computed CSS facades resist poisoned getters and leak methods",facadePoisonSafe,JSON.stringify(facadePoisonDetail));
+  const targetGlobalKeys=Reflect.ownKeys(globalThis).map(String),internalAttributes=[...document.querySelectorAll("*")].flatMap(element=>element.getAttributeNames()).filter(name=>name.startsWith("data-zp-")),internalNodeKeys=[...document.querySelectorAll("*")].flatMap(element=>Reflect.ownKeys(element).map(String)).filter(key=>key.includes("zeroproxy.adoption-metadata")),runtimeScripts=[...document.scripts].filter(script=>script.src.includes("runtime-prelude"));
+  check("runtime artifact masking",!targetGlobalKeys.some(name=>/^__zp_abi_[0-9a-f]{48}$/u.test(name))&&internalAttributes.length===0&&internalNodeKeys.length===0&&runtimeScripts.length===0,JSON.stringify({abiKeys:targetGlobalKeys.filter(name=>name.startsWith("__zp_abi_")),internalAttributes,internalNodeKeys,runtimeScripts:runtimeScripts.map(script=>script.src)}));
+  globalThis.__metadataOracle={checks,passed:checks.filter(item=>item.pass).length,total:checks.length};
+},{once:true});
+globalThis.__metadataOracle={checks,passed:checks.filter(item=>item.pass).length,total:checks.length};
+</script>
+</body>

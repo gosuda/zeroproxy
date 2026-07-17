@@ -1,0 +1,1 @@
+globalThis.__fixtureAction=async()=>{$("#increment").trigger("click"); return $("#increment").text()==="1";}; $("#increment").on("click",function(){const end=performance.now()+20;while(performance.now()<end){} this.textContent=String(Number(this.textContent)+1)}); globalThis.__fixtureReady=()=>$.fn.jquery==="3.7.1";

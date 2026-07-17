@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>runtime unbound command oracle</title>
+<script type="module">
+const version = await fetch("/_zp/version.json").then(response => response.json());
+const abiName = `__zp_abi_${"6".repeat(48)}`;
+const runtime = document.createElement("script");
+runtime.src = `${version.selectors["runtime-prelude.js"]}#abi=${abiName}&url=${encodeURIComponent("https://target.example/unbound.html")}&ports=80%2C443`;
+runtime.onload = async () => {
+  const started = performance.now();
+  const outcome = await Promise.race([
+    fetch("https://target.example/unbound-command").then(
+      () => ({ kind: "resolved" }),
+      error => ({ kind: "rejected", name: error?.name, message: error?.message }),
+    ),
+    new Promise(resolve => setTimeout(() => resolve({ kind: "timeout" }), 1_000)),
+  ]);
+  globalThis.__zp_unbound_command_result = {
+    elapsed: performance.now() - started,
+    ok: outcome.kind === "rejected"
+      && outcome.name === "TypeError"
+      && outcome.message === "Failed to fetch",
+    outcome,
+  };
+};
+runtime.onerror = () => {
+  globalThis.__zp_unbound_command_result = { ok: false, outcome: { kind: "runtime-error" } };
+};
+document.head.append(runtime);
+</script>

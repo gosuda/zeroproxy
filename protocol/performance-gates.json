@@ -1,0 +1,62 @@
+{
+  "schema_version": 2,
+  "release_id": "2.0.0-dev",
+  "reference_platform": {
+    "os": "darwin-24.6.0",
+    "arch": "arm64",
+    "hardware": {"availability": "available", "machine_model": "MacBookAir10,1", "cpu_model": "Apple M1 (8 cores: 4 performance, 4 efficiency)", "memory_bytes": 8589934592}
+  },
+  "toolchains_sha256": "71e7691c101794210e0f6b89fdd834d76179d16dc90ecc2fd0a09e3f793f99b7",
+  "browser_boundaries_sha256": "3d6b4010f47815408db0040e9205007136f07aad41b4c1ad8a0be28295a6d084",
+  "browser_lanes": [
+    {
+      "family": "chromium",
+      "exact_build": "150.0.7871.124",
+      "product_build_id": "1639810",
+      "platform": "darwin-arm64",
+      "archive_url": "https://storage.googleapis.com/chrome-for-testing-public/150.0.7871.124/mac-arm64/chrome-mac-arm64.zip",
+      "archive_sha256": "36c8b5fe04c08a418a172206bb392600ec1550941bde6af2d4353df21db87a47",
+      "binary_path": ".puppeteer-cache/chrome/mac_arm-150.0.7871.124/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "binary_sha256": "22ddf33cec88bbfd181588eb3da31250a65ba8ebfdb6efcd2694a36275697284",
+      "availability": "available"
+    },
+    {
+      "family": "firefox",
+      "exact_build": "152.0.6",
+      "product_build_id": "20260713164047",
+      "platform": "darwin-arm64",
+      "archive_url": "https://archive.mozilla.org/pub/firefox/releases/152.0.6/mac/en-US/Firefox%20152.0.6.dmg",
+      "archive_sha256": "747002d592063e0b106de0c500b34fe6d84438b3b866621521c8e7be9ea7816c",
+      "binary_path": ".puppeteer-cache/firefox/mac_arm-stable_152.0.6/Firefox.app/Contents/MacOS/firefox",
+      "binary_sha256": "8489f35e3b2ee8b7ca8aaa34ae0762d3faa884ccef8cbeecfad0cae213b7c0e7",
+      "availability": "available"
+    }
+  ],
+  "deferred_browser_families": [],
+  "packet_capture": {"backend": "tcpdump", "interface": "lo0", "availability": "unavailable", "privilege": "unavailable", "reason": "bpf-permission-denied; sudo-password-required", "certified": false},
+  "cache_modes": ["cold", "warm"],
+  "fixtures": [
+    {"id": "content-01", "site_class": "content", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "content-02", "site_class": "content", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "content-03", "site_class": "content", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "content-04", "site_class": "content", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "content-05", "site_class": "content", "sha256": null, "availability": "unavailable", "v1_baseline": null},
+    {"id": "application-01", "site_class": "application", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "application-02", "site_class": "application", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "application-03", "site_class": "application", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "application-04", "site_class": "application", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "application-05", "site_class": "application", "sha256": null, "availability": "unavailable", "v1_baseline": null},
+    {"id": "editor-media-pwa-01", "site_class": "editor_media_pwa", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "editor-media-pwa-02", "site_class": "editor_media_pwa", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "editor-media-pwa-03", "site_class": "editor_media_pwa", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "editor-media-pwa-04", "site_class": "editor_media_pwa", "sha256": null, "availability": "unavailable", "v1_baseline": null}, {"id": "editor-media-pwa-05", "site_class": "editor_media_pwa", "sha256": null, "availability": "unavailable", "v1_baseline": null}
+  ],
+  "warmups": 5,
+  "measured_pairs": 30,
+  "pair_order": "alternating-native-mediated",
+  "bootstrap_resamples": 10000,
+  "aggregation": {"percentiles": [0.5, 0.95, 0.99], "threshold_percentile": 0.95, "paired_bootstrap_confidence": 0.95, "paired_bootstrap_bound": "upper"},
+  "variance": {"max_cv": 0.1, "on_exceed": "invalidate"},
+  "metric_definitions": {
+    "latency_ms": {"unit": "ms", "source": "browser-navigation-or-operation-timer", "direction": "maximum"},
+    "throughput_mib_s": {"unit": "MiB/s", "source": "transformed-bytes/elapsed-time", "direction": "minimum"},
+    "asset_transfer_bytes": {"unit": "bytes", "source": "NavigationTiming.transferSize", "direction": "maximum"},
+    "memory_bytes": {"unit": "bytes", "source": "CDP Runtime.getHeapUsage", "direction": "maximum"},
+    "queue_depth": {"unit": "requests", "source": "CDP Network lifecycle", "direction": "maximum"},
+    "site_deltas": {"unit": "relative-or-ms", "source": "paired controlled transport", "direction": "maximum"}
+  },
+  "gates": {"control_ready_cold_p95_ms": 2000, "registered_origin_bootstrap_p95_ms": 750, "new_origin_bootstrap_p95_ms": 2000, "rust_init_cold_p95_ms": 500, "rust_init_cached_p95_ms": 75, "js_16k_rewrite_p95_ms": 10, "js_256k_rewrite_p95_ms": 60, "js_1m_rewrite_p95_ms": 250, "dynamic_4k_p95_ms": 5, "html_first_byte_p95_ms": 25, "html_throughput_mib_s": 25, "runtime_install_warm_p95_ms": 100, "main_thread_long_task_ms": 50, "warm_asset_transfer_bytes": 0},
+  "site_classes": {"content": {"dcl_delta": 0.1, "lcp_delta": 0.1, "inp_delta_ms": 20, "cpu_delta": 0.15}, "application": {"dcl_delta": 0.15, "lcp_delta": 0.15, "inp_delta_ms": 30, "cpu_delta": 0.2}, "editor_media_pwa": {"dcl_delta": 0.2, "lcp_delta": 0.2, "inp_delta_ms": 40, "cpu_delta": 0.25}},
+  "leak_tolerances": {"performance": {"memory_growth_bytes": 1048576, "queue_growth": 0}, "soak": {"closed_counts_must_be_zero": ["route", "port", "stream", "worker", "realm"], "fd_growth_max": 2, "goroutine_growth_max": 2, "fd_slope_per_hour_max": 0.25, "goroutine_slope_per_hour_max": 0.25, "rss_growth_relative_max": 0.05, "rss_growth_bytes_floor": 33554432, "rss_slope_bytes_per_hour_max": 2097152, "no_post_stop_monotonic_growth": true}},
+  "v1_aggregate": {"metrics": ["dcl_delta", "lcp_delta", "cpu_delta"], "geometric_mean_overhead_reduction_min": 0.3, "non_worse_fixture_fraction_min": 0.8, "class_p95_regression_max": 0.05, "zero_baseline_policy": "must-remain-zero"},
+  "soak": {"hours": 8, "warmup_minutes": 30, "quiescence_minutes": 15, "origins": 20, "clients": 40, "short_streams": 200, "sse_streams": 20, "websockets": 20, "navigations_per_origin_per_minute": 2, "abort_churn": 0.1, "max_memory_bytes": 536870912, "max_queue_depth": 1024}
+}

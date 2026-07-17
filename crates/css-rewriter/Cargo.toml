@@ -1,0 +1,12 @@
+[package]
+name="css-rewriter"
+version.workspace=true
+edition.workspace=true
+license.workspace=true
+[lib]
+crate-type=["cdylib","rlib"]
+[dependencies]
+cssparser="0.37.0"
+thiserror.workspace=true
+wasm-bindgen.workspace=true
+js-sys="0.3.99"

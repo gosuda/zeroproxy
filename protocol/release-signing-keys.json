@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "key_epoch": 1,
+  "threshold": 2,
+  "development_only": true,
+  "keys": [
+    {
+      "id": "release-a-dev",
+      "role": "release",
+      "owner": "release-engineering-fixture",
+      "public_key": "BDr_dc2ytmdVTLFNsOV5xgztiAcXpls0an6crFGYR4w",
+      "valid_from": "2026-07-01T00:00:00Z",
+      "valid_until": "2027-01-01T00:00:00Z"
+    },
+    {
+      "id": "security-b-dev",
+      "role": "security",
+      "owner": "security-engineering-fixture",
+      "public_key": "1uvnJsgc8db84sg04_4bI4jP8gm_WYc28Mu0G-Q-2eg",
+      "valid_from": "2026-07-01T00:00:00Z",
+      "valid_until": "2027-01-01T00:00:00Z"
+    }
+  ]
+}

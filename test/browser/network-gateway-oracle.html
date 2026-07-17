@@ -1,0 +1,614 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Network gateway facade oracle</title>
+<iframe id="keepalive-contained-frame" srcdoc="&lt;script src='__ZP_RUNTIME_URL__' data-zp-cookie-bootstrap='__ZP_RUNTIME_BOOTSTRAP__'&gt;&lt;/script&gt;&lt;script&gt;globalThis.__networkContainedReady=true&lt;/script&gt;" hidden></iframe>
+<script src="__ZP_RUNTIME_URL__" data-zp-cookie-bootstrap="__ZP_RUNTIME_BOOTSTRAP__"></script>
+<script>
+(() => {
+  const config = __ZP_CONFIG__;
+  const cases = [];
+  const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const check = (condition, name, detail = undefined) => {
+    cases.push({ name, pass: Boolean(condition), detail });
+    if (!condition) throw new Error(`${name}${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
+  };
+  check(document.referrer === config.referrer, "document referrer projects target policy context", document.referrer);
+  const expectReject = async (promise, name, predicate) => {
+    try {
+      await promise;
+      check(false, name, "resolved");
+    } catch (error) {
+      check(predicate(error), name, { name: error?.name, message: error?.message });
+    }
+  };
+  const waitFor = async (predicate, name, timeout = 5_000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const value = predicate();
+      if (value) return value;
+      await sleep(10);
+    }
+    throw new Error(`${name} timed out`);
+  };
+  const toBytes = value => Array.from(new Uint8Array(value));
+
+  async function testFetch() {
+    const persistentCache = await caches.open("network-opaque-persistent-v2");
+    if (!config.reload) {
+      const requestProbe = new Request(`${config.cross}/data`, { mode: "no-cors" });
+      check(true, "no-cors Request construction", { cache: requestProbe.cache, credentials: requestProbe.credentials, integrity: requestProbe.integrity, keepalive: requestProbe.keepalive, mode: requestProbe.mode, priority: requestProbe.priority, referrer: requestProbe.referrer });
+      const persistentOpaque = await fetch(`${config.cross}/data`, { mode: "no-cors" });
+      check(persistentOpaque.type === "opaque" && persistentOpaque.status === 0, "persistent opaque source shape", { type: persistentOpaque.type, status: persistentOpaque.status });
+      await persistentCache.put(`${config.same}/opaque-persistent-key`, persistentOpaque);
+      check(true, "persistent opaque cache put");
+      globalThis.__networkGatewayReloadReady = { ok: true };
+      await new Promise(() => {});
+    }
+    globalThis.__networkGatewayPhase = "persistent-match";
+    const persistentOpaque = await persistentCache.match(`${config.same}/opaque-persistent-key`);
+    globalThis.__networkGatewayPhase = "persistent-consume";
+    check(persistentOpaque?.type === "opaque" && persistentOpaque.status === 0 && persistentOpaque.url === "" && persistentOpaque.body === null && [...persistentOpaque.headers].length === 0 && (await persistentOpaque.text()) === "", "cached no-cors response remains opaque after runtime reload");
+    globalThis.__networkGatewayPhase = "persistent-complete";
+    globalThis.__networkGatewayPhase = "same-fetch";
+    const same = await fetch(`${config.same}/data`, {
+      credentials: "include",
+      headers: { "X-Fetch-Trace": "same" },
+    });
+    globalThis.__networkGatewayPhase = "same-fetch-complete";
+    check(same.ok && same.status === 200, "fetch same-origin status");
+    check(same.url === `${config.same}/data`, "fetch response URL projection", same.url);
+    check(same.type === "basic", "fetch same-origin response type", same.type);
+    check(same.headers.get("x-target") === "same", "fetch projected target header");
+    check(!same.headers.has("x-zp-target-url"), "fetch hides gateway provenance header");
+    check((await same.text()) === "same-data", "fetch same-origin body");
+    const cacheURL = `${config.same}/cache`;
+    check((await (await fetch(cacheURL)).text()) === "cache-1", "fetch default cache stores first response");
+    check((await (await fetch(cacheURL)).text()) === "cache-1", "fetch default cache reuses fresh response");
+    check((await (await fetch(cacheURL, { cache: "reload", headers: { "X-Advance-Cache": "1" } })).text()) === "cache-2", "fetch reload bypasses and updates cache");
+    check((await (await fetch(cacheURL, { cache: "no-cache" })).text()) === "cache-2", "fetch no-cache revalidates cached response");
+    check((await (await fetch(cacheURL, { cache: "force-cache" })).text()) === "cache-2", "fetch force-cache reuses cached response");
+    check((await (await fetch(cacheURL, { cache: "no-store", headers: { "X-Advance-Cache": "1" } })).text()) === "cache-3", "fetch no-store bypasses cache");
+    check((await (await fetch(cacheURL, { cache: "force-cache" })).text()) === "cache-2", "fetch no-store does not update cache");
+    check((await (await fetch(cacheURL, { cache: "only-if-cached", mode: "same-origin" })).text()) === "cache-2", "fetch only-if-cached returns cached response");
+    await expectReject(fetch(`${config.same}/cache-miss`, { cache: "only-if-cached", mode: "same-origin" }), "fetch only-if-cached miss is a network error", error => error?.name === "TypeError");
+    await expectReject(fetch(cacheURL, { cache: "only-if-cached", mode: "cors" }), "fetch only-if-cached requires same-origin mode", error => error?.name === "TypeError");
+    check(!(await caches.keys()).some(name => name.startsWith("__zeroproxy_internal_")), "internal HTTP cache namespace is hidden from CacheStorage.keys");
+    await expectReject(caches.open("__zeroproxy_internal_http_v2"), "internal HTTP cache namespace cannot be opened", error => error?.name === "SecurityError");
+
+
+    const cors = await fetch(`${config.cross}/cors`, {
+      credentials: "include",
+      headers: { "X-Cors-Trace": "cross" },
+    });
+    check(cors.type === "cors", "fetch cross-origin response type", cors.type);
+    check(cors.url === `${config.cross}/cors`, "fetch cross-origin URL projection", cors.url);
+    check(cors.headers.get("x-cors-visible") === "yes", "fetch CORS exposes permitted header");
+    check(!cors.headers.has("x-cors-hidden"), "fetch CORS hides unexposed header");
+    check((await cors.text()) === "cross-cors", "fetch cross-origin body");
+    const corsRepeat = await fetch(`${config.cross}/cors`, {
+      credentials: "include",
+      headers: { "X-Cors-Trace": "cross" },
+    });
+    check(corsRepeat.ok && (await corsRepeat.text()) === "cross-cors", "CORS preflight cache reuses successful grant");
+    for (const [path, name, value] of [
+      ["accept-safe", "Accept", "text/html;q=0.9"],
+      ["accept-byte-boundary", "Accept", "é".repeat(128)],
+      ["language-safe", "Accept-Language", "en-US, fr;q=0.8"],
+      ["content-type-safe", "Content-Type", "text/plain;charset=UTF-8"],
+      ["multipart-safe", "Content-Type", "multipart/form-data; boundary=abc123"],
+      ["range-safe", "Range", "bytes=0-99"],
+    ]) {
+      const response = await fetch(`${config.cross}/cors-safelist-${path}`, { headers: { [name]: value } });
+      check(response.ok && (await response.text()) === "cross-cors", `CORS safelisted ${path} avoids denial`);
+    }
+    await expectReject(fetch(`${config.cross}/cors-safelist-accept-unsafe`, { headers: { Accept: "text/plain(" } }), "CORS unsafe Accept triggers denied preflight", error => error?.name === "TypeError");
+    await expectReject(fetch(`${config.cross}/cors-safelist-language-unsafe`, { headers: { "Accept-Language": "en_US" } }), "CORS unsafe Accept-Language triggers denied preflight", error => error?.name === "TypeError");
+    const invalidType = await fetch(`${config.cross}/cors-safelist-content-type-unsafe`, { headers: { "Content-Type": "application/json" } });
+    check(invalidType.ok, "CORS non-safelisted Content-Type preflight succeeds when allowed");
+    const quotedType = await fetch(`${config.cross}/cors-safelist-content-type-quoted`, { headers: { "Content-Type": "text/plain; charset=\"utf-8\"" } });
+    check(quotedType.ok, "CORS unsafe-byte Content-Type preflight succeeds when allowed");
+    await expectReject(fetch(`${config.cross}/cors-safelist-range-unsafe`, { headers: { Range: "bytes=0-1, 4-5" } }), "CORS multi-range triggers denied preflight", error => error?.name === "TypeError");
+    await expectReject(fetch(`${config.cross}/cors-safelist-accept-long`, { headers: { Accept: "é".repeat(129) } }), "CORS safelist enforces 128-byte value limit", error => error?.name === "TypeError");
+
+    const corsCrossToSame = await fetch(`${config.cross}/redirect-absolute?to=${encodeURIComponent(`${config.same}/data`)}`);
+    check(corsCrossToSame.type === "cors" && corsCrossToSame.headers.get("x-target") === null && corsCrossToSame.headers.get("content-type") === "text/plain", "CORS cross-to-same redirect remains filtered", { type: corsCrossToSame.type, headers: [...corsCrossToSame.headers] });
+    check((await corsCrossToSame.text()) === "same-data", "CORS cross-to-same redirect body");
+    const corsSameToCross = await fetch(`${config.same}/redirect-absolute?to=${encodeURIComponent(`${config.cross}/cors`)}`);
+    check(corsSameToCross.type === "cors" && corsSameToCross.headers.get("x-cors-visible") === "yes" && !corsSameToCross.headers.has("x-cors-hidden"), "CORS same-to-cross redirect becomes filtered", { type: corsSameToCross.type, headers: [...corsSameToCross.headers] });
+
+    const opaque = await fetch(`${config.cross}/data`, { mode: "no-cors" });
+    check(opaque.type === "opaque" && opaque.status === 0 && opaque.url === "" && opaque.body === null, "fetch no-cors opaque shape", { type: opaque.type, status: opaque.status, url: opaque.url, body: opaque.body });
+    check([...opaque.headers].length === 0 && (await opaque.text()) === "", "fetch no-cors hides headers and body");
+    const opaqueCache = await caches.open("network-opaque-v2");
+    await opaqueCache.put(`${config.same}/opaque-cache-key`, opaque.clone());
+    const cachedOpaque = await opaqueCache.match(`${config.same}/opaque-cache-key`);
+    check(cachedOpaque?.type === "opaque" && cachedOpaque.status === 0 && cachedOpaque.body === null && (await cachedOpaque.text()) === "", "cached no-cors response remains opaque");
+
+    const crossToSame = await fetch(`${config.cross}/redirect-absolute?to=${encodeURIComponent(`${config.same}/data`)}`, { mode: "no-cors" });
+    check(crossToSame.type === "opaque" && crossToSame.status === 0 && crossToSame.url === "", "no-cors cross-to-same redirect remains opaque");
+    const sameToCross = await fetch(`${config.same}/redirect-absolute?to=${encodeURIComponent(`${config.cross}/data`)}`, { mode: "no-cors" });
+    check(sameToCross.type === "opaque" && sameToCross.status === 0 && sameToCross.url === "", "no-cors same-to-cross redirect becomes opaque");
+
+    globalThis.__networkGatewayPhase = "opaque-abort";
+    const opaqueAbortController = new AbortController();
+    const pendingOpaque = fetch(`${config.cross}/slow`, { mode: "no-cors", signal: opaqueAbortController.signal });
+    setTimeout(() => opaqueAbortController.abort(), 30);
+    await expectReject(pendingOpaque, "fetch no-cors abort retains AbortError", error => error?.name === "AbortError");
+
+    globalThis.__networkGatewayPhase = "keepalive-detach";
+    const keepaliveFrame = document.getElementById("keepalive-contained-frame");
+    await waitFor(() => keepaliveFrame.contentWindow?.__networkContainedReady === true, "contained keepalive realm");
+    const containedWindow = keepaliveFrame.contentWindow;
+    let accessorReads = 0;
+    const stringKeepalive = containedWindow.fetch(`${config.same}/echo`, {
+      body: "keepalive-after-detach",
+      keepalive: true,
+      method: "POST",
+      priority: "high",
+    });
+    const blobKeepalive = containedWindow.fetch(`${config.same}/echo`, {
+      body: new containedWindow.Blob(["blob-after-detach"]),
+      keepalive: true,
+      method: "POST",
+    });
+    const formBody = new containedWindow.FormData();
+    formBody.set("field", "form-after-detach");
+    const formKeepalive = containedWindow.fetch(`${config.same}/echo`, {
+      body: formBody,
+      keepalive: true,
+      method: "POST",
+    });
+    formBody.set("field", "mutated-after-fetch");
+    const requestKeepalive = containedWindow.fetch(new containedWindow.Request(`${config.same}/echo`, {
+      body: "request-after-detach",
+      keepalive: true,
+      method: "POST",
+    }));
+    const formRequestBody = new containedWindow.FormData();
+    formRequestBody.set("field", "form-request-after-detach");
+    const formRequest = new containedWindow.Request(`${config.same}/echo`, {
+      body: formRequestBody,
+      keepalive: true,
+      method: "POST",
+    });
+    formRequestBody.set("field", "mutated-after-request");
+    const formRequestClone = formRequest.clone();
+    const formRequestKeepalive = containedWindow.fetch(formRequest);
+    const formRequestCloneKeepalive = containedWindow.fetch(formRequestClone);
+    const accessorKeepalive = containedWindow.fetch(`${config.same}/echo`, {
+      get body() {
+        accessorReads += 1;
+        return "accessor-after-detach";
+      },
+      keepalive: true,
+      method: "POST",
+    });
+    let stringConversions = 0;
+    const convertedKeepalive = containedWindow.fetch(`${config.same}/echo`, {
+      body: {
+        toString() {
+          stringConversions += 1;
+          return "converted-after-detach";
+        },
+      },
+      keepalive: true,
+      method: "POST",
+    });
+    keepaliveFrame.remove();
+    const keepaliveKinds = ["string", "Blob", "FormData", "Request", "FormData Request", "FormData Request clone", "accessor", "converted object"];
+    const keepaliveResults = await Promise.allSettled(
+      [stringKeepalive, blobKeepalive, formKeepalive, requestKeepalive, formRequestKeepalive, formRequestCloneKeepalive, accessorKeepalive, convertedKeepalive].map(response => response.then(value => value.json())),
+    );
+    const keepaliveFailures = keepaliveResults.flatMap((result, index) => result.status === "rejected" ? [`${keepaliveKinds[index]}: ${result.reason}`] : []);
+    if (keepaliveFailures.length !== 0) throw new Error(`keepalive teardown failed: ${keepaliveFailures.join("; ")}`);
+    const [stringEcho, blobEcho, formEcho, requestEcho, formRequestEcho, formRequestCloneEcho, accessorEcho, convertedEcho] = keepaliveResults.map(result => result.value);
+    check(stringEcho.body === "keepalive-after-detach", "fetch keepalive string survives contained realm teardown");
+    check(blobEcho.body === "blob-after-detach", "fetch keepalive Blob survives contained realm teardown");
+    const formContentType = formEcho.headers["content-type"];
+    const formBoundary = /boundary=([^;]+)/.exec(formContentType)?.[1];
+    check(formEcho.body.includes("form-after-detach") && !formEcho.body.includes("mutated-after-fetch") && formBoundary && formEcho.body.includes(`--${formBoundary}\r\n`), "fetch keepalive FormData snapshot has a matching multipart boundary", { body: formEcho.body, contentType: formContentType });
+    const formRequestContentType = formRequestEcho.headers["content-type"];
+    const formRequestBoundary = /boundary=([^;]+)/.exec(formRequestContentType)?.[1];
+    check(formRequestEcho.body.includes("form-request-after-detach") && !formRequestEcho.body.includes("mutated-after-request") && formRequestBoundary && formRequestEcho.body.includes(`--${formRequestBoundary}\r\n`), "fetch keepalive FormData Request input preserves snapshot and multipart boundary", { body: formRequestEcho.body, contentType: formRequestContentType });
+    const formRequestCloneContentType = formRequestCloneEcho.headers["content-type"];
+    const formRequestCloneBoundary = /boundary=([^;]+)/.exec(formRequestCloneContentType)?.[1];
+    check(formRequestCloneEcho.body.includes("form-request-after-detach") && formRequestCloneBoundary && formRequestCloneEcho.body.includes(`--${formRequestCloneBoundary}\r\n`), "fetch keepalive cloned Request preserves multipart snapshot and boundary", { body: formRequestCloneEcho.body, contentType: formRequestCloneContentType });
+    check(requestEcho.body === "request-after-detach", "fetch keepalive Request input survives contained realm teardown");
+    check(accessorEcho.body === "accessor-after-detach" && accessorReads === 1, "fetch keepalive body accessor is evaluated once before contained realm teardown", accessorReads);
+    check(convertedEcho.body === "converted-after-detach" && stringConversions === 1, "fetch keepalive BodyInit conversion runs once before contained realm teardown", stringConversions);
+    globalThis.__networkGatewayPhase = "keepalive-detach-complete";
+    await expectReject(fetch(`${config.same}/echo`, {
+      body: "x".repeat(65_537),
+      keepalive: true,
+      method: "POST",
+    }), "fetch keepalive enforces 64 KiB quota", error => error?.name === "TypeError");
+    const firstKeepalive = fetch(`${config.same}/slow`, {
+      body: "a".repeat(40_000),
+      keepalive: true,
+      method: "POST",
+    });
+    await sleep(20);
+    await expectReject(fetch(`${config.same}/slow`, {
+      body: "b".repeat(40_000),
+      keepalive: true,
+      method: "POST",
+    }), "fetch keepalive enforces aggregate 64 KiB quota", error => error?.name === "TypeError");
+    check((await firstKeepalive).status === 200, "fetch keepalive releases aggregate reservation after completion");
+
+    const followed = await fetch(`${config.same}/redirect`, { redirect: "follow" });
+    check(followed.redirected, "fetch redirect follows through gateway");
+    check(followed.url === `${config.same}/final`, "fetch redirect final URL projection", followed.url);
+    check((await followed.text()) === "redirect-final", "fetch redirect final body");
+
+    const manual = await fetch(`${config.same}/redirect`, { redirect: "manual" });
+    check(manual.type === "opaqueredirect" && manual.status === 0 && manual.body === null, "fetch manual redirect is opaque", { type: manual.type, status: manual.status, body: manual.body });
+    check(manual.url === `${config.same}/redirect` && !manual.redirected, "fetch manual redirect URL projection");
+    check([...manual.headers].length === 0, "fetch manual redirect hides headers");
+
+    await expectReject(fetch(`${config.same}/redirect`, { redirect: "error" }), "fetch redirect error fails closed", error => error?.name === "TypeError");
+    await expectReject(fetch(`${config.cross}/cors-denied`, { credentials: "include" }), "fetch CORS denial fails closed", error => error?.name === "TypeError");
+    const ranged = await fetch(`${config.same}/range-data`, { headers: { Range: "bytes=2-5" } });
+    check(ranged.status === 206 && ranged.headers.get("content-range") === "bytes 2-5/10" && (await ranged.text()) === "2345", "fetch preserves single-range response semantics");
+
+    const controller = new AbortController();
+    const pending = fetch(`${config.same}/slow`, { signal: controller.signal });
+    setTimeout(() => controller.abort(), 30);
+    await expectReject(pending, "fetch abort retains AbortError", error => error?.name === "AbortError");
+    const bodyController = new AbortController();
+    const streaming = await fetch(`${config.same}/slow-chunk`, { signal: bodyController.signal });
+    const streamingReader = streaming.body.getReader();
+    const firstChunk = await streamingReader.read();
+    check(new TextDecoder().decode(firstChunk.value) === "first", "fetch streams response before completion");
+    bodyController.abort();
+    await expectReject(streamingReader.read(), "fetch abort during response body retains AbortError", error => error?.name === "AbortError");
+  }
+  async function testFetchUpload() {
+    const echoed = await fetch(`${config.same}/echo`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "text/plain", "X-Body-Trace": "fetch" },
+      body: "fetch-body",
+    });
+    const echo = await echoed.json();
+    check(echo.body === "fetch-body" && echo.headers["x-body-trace"] === "fetch", "fetch body and request headers");
+  }
+
+
+  async function testXHR() {
+    const loadXHR = (path, { body = null, configure, method = "GET", override, responseType = "" } = {}) => new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(method, `${config.same}${path}`);
+      if (override) xhr.overrideMimeType(override);
+      xhr.responseType = responseType;
+      configure?.(xhr);
+      xhr.onload = () => resolve(xhr);
+      xhr.onerror = () => reject(new Error(`XHR ${path} errored`));
+      xhr.send(body);
+    });
+    const loaded = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const states = [];
+      const events = [];
+      const progress = [];
+      xhr.onreadystatechange = () => states.push(xhr.readyState);
+      for (const type of ["loadstart", "progress", "load", "loadend", "error"]) xhr.addEventListener(type, event => {
+        events.push(type);
+        if (type === "progress") progress.push({ lengthComputable: event.lengthComputable, loaded: event.loaded, total: event.total });
+      });
+      xhr.onload = () => resolve({ xhr, states, events, progress });
+      xhr.onerror = () => reject(new Error("XHR chunk request errored"));
+      xhr.open("GET", `${config.same}/chunk`);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("X-XHR-Trace", "chunk");
+      xhr.send();
+    });
+    check(loaded.xhr.status === 200 && loaded.xhr.statusText === "OK", "XHR status projection");
+    check(loaded.xhr.responseURL === `${config.same}/chunk`, "XHR response URL projection", loaded.xhr.responseURL);
+    check(loaded.xhr.getResponseHeader("x-target") === "chunk", "XHR response header projection");
+    check(loaded.xhr.responseText === "chunk-one|chunk-two", "XHR response body");
+    check(loaded.states[0] === XMLHttpRequest.OPENED && loaded.states.includes(XMLHttpRequest.HEADERS_RECEIVED) && loaded.states.includes(XMLHttpRequest.LOADING) && loaded.states.at(-1) === XMLHttpRequest.DONE, "XHR readyState progression", loaded.states);
+    check(["loadstart", "progress", "load", "loadend"].every(type => loaded.events.includes(type)), "XHR load events", loaded.events);
+    check(loaded.progress.some(event => event.lengthComputable && event.loaded === 19 && event.total === 19), "XHR progress exposes Content-Length", loaded.progress);
+    const latin1 = await loadXHR("/latin1");
+    check(latin1.responseText === "café", "XHR decodes response charset", latin1.responseText);
+    const overridden = await loadXHR("/latin1", { override: "text/plain;charset=utf-8" });
+    check(overridden.responseText === "caf�", "XHR overrideMimeType controls decoding", overridden.responseText);
+    const arraybuffer = await loadXHR("/chunk", { responseType: "arraybuffer" });
+    check(toBytes(arraybuffer.response).length === 19, "XHR arraybuffer response type");
+    const blob = await loadXHR("/chunk", { responseType: "blob" });
+    check(blob.response instanceof Blob && blob.response.type === "text/plain" && blob.response.size === 19, "XHR blob response type", { size: blob.response?.size, type: blob.response?.type });
+    const json = await loadXHR("/json", { responseType: "json" });
+    check(json.response?.answer === 42, "XHR JSON response type", json.response);
+    const xml = await loadXHR("/xml", { responseType: "document" });
+    check(xml.responseXML?.documentElement?.localName === "root" && xml.responseXML.querySelector("answer")?.textContent === "42", "XHR document and responseXML response type");
+    const defaultXML = await loadXHR("/xml");
+    const defaultXMLDocument = defaultXML.responseXML;
+    check(defaultXMLDocument?.documentElement?.localName === "root" && defaultXML.responseXML === defaultXMLDocument, "XHR default responseType exposes stable responseXML for XML MIME");
+    let responseXMLError;
+    try {
+      void json.responseXML;
+    } catch (error) {
+      responseXMLError = error;
+    }
+    check(responseXMLError?.name === "InvalidStateError", "XHR responseXML rejects incompatible responseType", responseXMLError?.name);
+    const uploadEvents = [];
+    const echoed = await loadXHR("/echo", {
+      body: "xhr-body",
+      method: "POST",
+      responseType: "json",
+      configure(xhr) {
+        xhr.setRequestHeader("X-XHR-Duplicate", "first");
+        xhr.setRequestHeader("x-xhr-duplicate", "second");
+        xhr.setRequestHeader("Cookie", "forbidden=1");
+        for (const type of ["loadstart", "progress", "load", "loadend"]) xhr.upload.addEventListener(type, event => uploadEvents.push({ type, loaded: event.loaded, total: event.total }));
+      },
+    });
+    check(echoed.response?.body === "xhr-body" && echoed.response?.headers["x-xhr-duplicate"] === "first, second" && echoed.response?.headers.cookie === undefined && echoed.response?.headers["content-type"]?.toLowerCase().startsWith("text/plain"), "XHR combines duplicate headers, derives native body MIME, and ignores forbidden headers", echoed.response);
+    check(uploadEvents[0]?.type === "loadstart" && uploadEvents.some(event => event.type === "progress" && event.loaded > 0) && uploadEvents.at(-2)?.type === "load" && uploadEvents.at(-1)?.type === "loadend", "XHR upload progress order", uploadEvents);
+    let syncError;
+    try {
+      new XMLHttpRequest().open("GET", `${config.same}/data`, false);
+    } catch (error) {
+      syncError = error;
+    }
+    check(syncError?.name === "InvalidAccessError" && syncError?.message === "Synchronous XMLHttpRequest is unavailable", "XHR synchronous path fails before admission with the owned compatibility exception", { name: syncError?.name, message: syncError?.message });
+    let methodError;
+    try {
+      new XMLHttpRequest().open("TRACE", `${config.same}/data`);
+    } catch (error) {
+      methodError = error;
+    }
+    check(methodError?.name === "SecurityError", "XHR forbidden method fails synchronously", methodError?.name);
+
+    const aborted = await new Promise(resolve => {
+      const xhr = new XMLHttpRequest();
+      const events = [];
+      for (const type of ["loadstart", "abort", "loadend", "error"]) xhr.addEventListener(type, () => events.push(type));
+      xhr.onloadend = () => resolve({ xhr, events });
+      xhr.open("GET", `${config.same}/slow`);
+      xhr.send();
+      setTimeout(() => xhr.abort(), 30);
+    });
+    check(aborted.xhr.readyState === XMLHttpRequest.DONE && aborted.xhr.status === 0, "XHR abort terminal state", { state: aborted.xhr.readyState, status: aborted.xhr.status });
+    check(aborted.events.includes("abort") && aborted.events.includes("loadend") && !aborted.events.includes("error"), "XHR abort events", aborted.events);
+
+    const timedOut = await new Promise(resolve => {
+      const xhr = new XMLHttpRequest();
+      const events = [];
+      for (const type of ["timeout", "abort", "error", "loadend"]) xhr.addEventListener(type, () => events.push(type));
+      xhr.onloadend = () => resolve({ xhr, events });
+      xhr.open("GET", `${config.same}/slow`);
+      xhr.timeout = 20;
+      xhr.send();
+    });
+    check(timedOut.xhr.status === 0 && timedOut.events.includes("timeout") && timedOut.events.includes("loadend") && !timedOut.events.includes("abort"), "XHR timeout has one terminal outcome", timedOut);
+
+    const failed = await new Promise(resolve => {
+      const xhr = new XMLHttpRequest();
+      const states = [];
+      xhr.onreadystatechange = () => states.push(xhr.readyState);
+      xhr.onerror = () => resolve({ xhr, states });
+      xhr.open("GET", `${config.cross}/cors-denied`);
+      xhr.withCredentials = true;
+      xhr.send();
+    });
+    check(failed.xhr.status === 0 && failed.states.at(-1) === XMLHttpRequest.DONE, "XHR gateway failure state", { status: failed.xhr.status, states: failed.states });
+  }
+
+  async function testEventSource() {
+    const opens = [];
+    const messages = [];
+    const custom = [];
+    const source = new EventSource(`${config.same}/sse`, { withCredentials: true });
+    source.onopen = () => opens.push(Date.now());
+    source.onmessage = event => messages.push({ data: event.data, id: event.lastEventId, origin: event.origin });
+    source.addEventListener("custom", event => {
+      custom.push({ data: event.data, id: event.lastEventId });
+      source._lastEventID = "page-forged";
+      source._payload = { target_url: "http://127.0.0.1:9/forged" };
+      source.readyState = 99;
+    });
+    await waitFor(() => opens.length >= 2 && messages.length >= 1 && custom.length >= 1, "EventSource retry");
+    source.close();
+    check(source.readyState === EventSource.CLOSED, "EventSource close state");
+    check(custom[0].data === "before\nafter" && custom[0].id === "one", "EventSource event parsing", custom[0]);
+    check(messages[0].data === "reconnect" && messages[0].id === "two", "EventSource retry message parsing", messages[0]);
+    check(messages[0].origin === config.same, "EventSource origin projection", messages[0]);
+    check(source.url === `${config.same}/sse` && source.withCredentials === true, "EventSource identity fields remain readonly", { url: source.url, withCredentials: source.withCredentials });
+  }
+
+  function openSocket(url, protocols) {
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(url, protocols);
+      socket.addEventListener("open", () => resolve(socket), { once: true });
+      socket.addEventListener("error", () => reject(new Error("WebSocket unexpectedly errored before open")), { once: true });
+    });
+  }
+
+  async function testWebSocket() {
+    globalThis.__networkGatewayPhase = "websocket-main";
+    let sendConversions = 0;
+    const result = await new Promise((resolve, reject) => {
+      const socket = new WebSocket(`ws://${config.sameHost}/socket`, ["gateway.v2"]);
+      const messages = [];
+      const timeout = setTimeout(() => reject(new Error(`WebSocket messages timed out: ${JSON.stringify({ messages, sendConversions, readyState: socket.readyState })}`)), 2_000);
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => {
+        socket.send("first");
+        socket.send(new Uint8Array([7, 8]).buffer);
+        socket.send("third");
+        socket.send({ toString() { sendConversions += 1; return "converted"; } });
+        socket.url = "ws://127.0.0.1:9/forged";
+        socket.protocol = "forged";
+        socket.extensions = "forged";
+        socket.readyState = 99;
+        socket.bufferedAmount = 99;
+      };
+      socket.onmessage = event => {
+        messages.push(event.data);
+        if (messages.length === 4) socket.close(1000, "done");
+      };
+      socket.onerror = () => { clearTimeout(timeout); reject(new Error("WebSocket unexpectedly errored")); };
+      socket.onclose = event => { clearTimeout(timeout); resolve({ socket, messages, event, sendConversions }); };
+    });
+    check(result.socket.protocol === "gateway.v2", "WebSocket protocol negotiation", result.socket.protocol);
+    check(result.messages[0] === "first" && result.messages[2] === "third" && result.messages[3] === "converted" && result.messages[4] === "while-closing" && result.sendConversions === 1, "WebSocket ordered sends and closing-handshake messages", result.messages);
+    check(result.messages[1] instanceof ArrayBuffer && toBytes(result.messages[1]).join(",") === "7,8", "WebSocket binary projection", result.messages[1]);
+    check(result.event.code === 1000 && result.event.reason === "done" && result.event.wasClean, "WebSocket clean close projection", result.event);
+    check(result.socket.bufferedAmount === 0, "WebSocket acknowledgements drain bufferedAmount", result.socket.bufferedAmount);
+    check(result.socket.url === `ws://${config.sameHost}/socket` && result.socket.protocol === "gateway.v2" && result.socket.extensions === "" && result.socket.readyState === WebSocket.CLOSED, "WebSocket identity and state fields remain readonly", { url: result.socket.url, protocol: result.socket.protocol, extensions: result.socket.extensions, readyState: result.socket.readyState });
+    globalThis.__networkGatewayPhase = "websocket-validation";
+    const validation = await openSocket(`ws://${config.sameHost}/socket-validation`, new Set(["gateway.v2"]));
+    validation.binaryType = "invalid";
+    check(validation.binaryType === "blob", "WebSocket binaryType ignores invalid enum");
+    let closeCodeError;
+    try { validation.close(1001); } catch (error) { closeCodeError = error; }
+    check(closeCodeError?.name === "InvalidAccessError" && validation.readyState === WebSocket.OPEN, "WebSocket rejects application-forbidden close code", closeCodeError?.name);
+    let closeReasonError;
+    try { validation.close(1000, "x".repeat(124)); } catch (error) { closeReasonError = error; }
+    check(closeReasonError?.name === "SyntaxError" && validation.readyState === WebSocket.OPEN, "WebSocket rejects oversized close reason", closeReasonError?.name);
+    const validationClosed = new Promise(resolve => validation.addEventListener("close", resolve, { once: true }));
+    validation.close(1000);
+    await validationClosed;
+    let duplicateProtocolError;
+    try {
+      new WebSocket(`ws://${config.sameHost}/socket-duplicate`, [{ toString: () => "duplicate" }, "duplicate"]);
+    } catch (error) {
+      duplicateProtocolError = error;
+    }
+    check(duplicateProtocolError?.name === "SyntaxError", "WebSocket protocol iterable coerces before duplicate validation", duplicateProtocolError?.name);
+    globalThis.__networkGatewayPhase = "websocket-immediate-close";
+    const immediate = await new Promise((resolve, reject) => {
+      const socket = new WebSocket(`ws://${config.sameHost}/socket-immediate-close`);
+      const messages = [];
+      const timeout = setTimeout(() => reject(new Error("immediate WebSocket close timed out")), 2_000);
+      socket.onopen = () => {
+        socket.send("send-before-close");
+        socket.close(1000, "immediate");
+      };
+      socket.onmessage = event => messages.push(event.data);
+      socket.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error("immediate WebSocket close errored"));
+      };
+      socket.onclose = event => {
+        clearTimeout(timeout);
+        resolve({ event, messages });
+      };
+    });
+    check(immediate.messages.join(",") === "send-before-close" && immediate.event.code === 1000 && immediate.event.reason === "immediate" && immediate.event.wasClean, "WebSocket drains reserved sends before immediate close", immediate);
+
+    globalThis.__networkGatewayPhase = "websocket-overflow";
+    const overflow = await openSocket(`ws://${config.sameHost}/socket-overflow`);
+    for (let index = 0; index < 64; index += 1) overflow.send(`bounded-${index}`);
+    let overflowError;
+    try { overflow.send("over-limit"); } catch (error) { overflowError = error; }
+    check(overflowError?.name === "QuotaExceededError", "WebSocket bounded send queue", overflowError?.name);
+    const overflowClosed = new Promise(resolve => overflow.addEventListener("close", resolve, { once: true }));
+    overflow.close();
+    await overflowClosed;
+
+    globalThis.__networkGatewayPhase = "websocket-failure";
+    const failed = await new Promise(resolve => {
+      const socket = new WebSocket(`ws://${config.sameHost}/socket-error`);
+      socket.dispatchEvent = () => { throw new Error("page-forged dispatchEvent"); };
+      let errors = 0, closes = 0;
+      socket.onerror = () => { errors += 1; throw new Error("throwing onerror"); };
+      socket.onclose = event => {
+        closes += 1;
+        setTimeout(() => resolve({ errors, closes, event }), 0);
+      };
+    });
+    check(failed.errors === 1 && failed.closes === 1 && failed.event.code === 1006 && !failed.event.wasClean, "WebSocket failure has one terminal error-close sequence", failed);
+  }
+
+  async function testScriptActivationLedger() {
+    const channel = new BroadcastChannel("zeroproxy-script-ledger");
+    const fetchStarted = new Promise(resolve => {
+      channel.onmessage = event => {
+        if (event.data?.type === "fetch-started" && event.data.target === `${config.same}/script-ledger-classic.js`) resolve();
+      };
+    });
+    const script = document.createElement("script"), events = [];
+    globalThis.dynamicExternalScript = script;
+    script.addEventListener("load", () => events.push("load"));
+    script.addEventListener("error", () => events.push("error"));
+    const loaded = new Promise((resolve, reject) => {
+      script.addEventListener("load", resolve, { once: true });
+      script.addEventListener("error", () => reject(new Error("dynamic external script failed")), { once: true });
+    });
+    script.src = `${config.same}/script-ledger-classic.js`;
+    document.body.append(script);
+    await fetchStarted;
+    script.remove();
+    await loaded;
+    document.body.append(script);
+    await sleep(50);
+    channel.close();
+    check(globalThis.dynamicExternalRuns === 1 && globalThis.dynamicExternalCurrentScript === true && events.join(",") === "load" && script.src === `${config.same}/script-ledger-classic.js`, "dynamic external classic preserves removal during fetch, currentScript, load timing, and reinsertion", { runs: globalThis.dynamicExternalRuns, currentScript: globalThis.dynamicExternalCurrentScript, events, src: script.src });
+
+    const moduleTarget = `${config.same}/script-ledger-module.js`;
+    const module = () => {
+      const element = document.createElement("script");
+      element.type = "module";
+      const settled = new Promise((resolve, reject) => {
+        element.addEventListener("load", resolve, { once: true });
+        element.addEventListener("error", () => reject(new Error("dynamic external module failed")), { once: true });
+      });
+      element.src = moduleTarget;
+      return { element, settled };
+    };
+    const first = module(), second = module();
+    document.body.append(first.element, second.element);
+    await Promise.all([first.settled, second.settled]);
+    check(globalThis.dynamicExternalModuleRuns === 1 && globalThis.dynamicExternalModuleCurrentScript === null && first.element.src === moduleTarget && second.element.src === moduleTarget, "dynamic external modules preserve graph identity, currentScript, and visible URLs", { runs: globalThis.dynamicExternalModuleRuns, currentScript: globalThis.dynamicExternalModuleCurrentScript, first: first.element.src, second: second.element.src });
+  }
+
+  async function testWebSocketStream() {
+    if (typeof WebSocketStream !== "function") {
+      throw new Error("Production gap: runtime only installs WebSocketStream when Chromium exposes a native WebSocketStream constructor");
+    }
+    const stream = new WebSocketStream(`ws://${config.sameHost}/stream`, { protocols: ["stream.v2"] });
+    const openedPromise = stream.opened, closedPromise = stream.closed;
+    stream.opened = null;
+    stream.closed = null;
+    const opened = await openedPromise;
+    check(stream.opened === openedPromise && stream.closed === closedPromise, "WebSocketStream promises remain readonly");
+    check(opened.protocol === "stream.v2" && opened.extensions === "", "WebSocketStream protocol negotiation", { protocol: opened.protocol, extensions: opened.extensions });
+    const reader = opened.readable.getReader();
+    const writer = opened.writable.getWriter();
+    let writeSettled = false;
+    const firstWrite = writer.write("stream-text").then(() => { writeSettled = true; });
+    await Promise.resolve();
+    check(!writeSettled, "WebSocketStream write observes transport backpressure");
+    await firstWrite;
+    const text = await reader.read();
+    await writer.write(new Uint8Array([4, 5]));
+    const binary = await reader.read();
+    check(text.value === "stream-text", "WebSocketStream text message");
+    check(binary.value instanceof ArrayBuffer && toBytes(binary.value).join(",") === "4,5", "WebSocketStream binary message", binary.value);
+    await writer.close();
+    const closed = await stream.closed;
+    check(closed.closeCode === 1000 && closed.reason === "", "WebSocketStream clean close", closed);
+  }
+
+  (async () => {
+    await testFetch();
+    globalThis.__networkGatewayPhase = "script-ledger";
+    await testScriptActivationLedger();
+    globalThis.__networkGatewayPhase = "xhr";
+    await testXHR();
+    globalThis.__networkGatewayPhase = "eventsource";
+    await testEventSource();
+    globalThis.__networkGatewayPhase = "websocket";
+    await testWebSocket();
+    globalThis.__networkGatewayPhase = "websocket-stream";
+    await testWebSocketStream();
+    globalThis.__networkGatewayPhase = "fetch-upload";
+    await testFetchUpload();
+    globalThis.__networkGatewayResult = { ok: true, cases };
+  })().catch(error => {
+    globalThis.__networkGatewayResult = { ok: false, cases, error: `${error?.name}: ${error?.message}`, stack: error?.stack };
+  });
+})();
+</script>

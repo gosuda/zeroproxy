@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Network gateway bootstrap</title>
+<script>
+(async () => {
+  try {
+    await navigator.serviceWorker.register("/network-gateway-plan-sw.js", { scope: "/" });
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) {
+      await new Promise(resolve => navigator.serviceWorker.addEventListener("controllerchange", resolve, { once: true }));
+    }
+    globalThis.__networkGatewayBootstrap = { ok: true };
+  } catch (error) {
+    globalThis.__networkGatewayBootstrap = { ok: false, error: `${error?.name}: ${error?.message}` };
+  }
+})();
+</script>

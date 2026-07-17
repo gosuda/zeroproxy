@@ -1,0 +1,329 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic origin storage child</title>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const id = params.get("id");
+const parentOrigin = params.get("parentOrigin");
+const DB_NAME = "synthetic-origin-storage-probe";
+const CACHE_NAME = "synthetic-origin-storage-probe";
+const MARKER_KEY = "synthetic-origin-storage-marker";
+const EVENT_KEY = "synthetic-origin-storage-event";
+const CHANNEL_NAME = "synthetic-origin-storage-channel";
+const LOCK_NAME = "synthetic-origin-storage-lock";
+const storageEvents = [];
+const broadcastMessages = [];
+let releaseHeldLock;
+let heldLockPromise;
+
+if (!id || !parentOrigin) throw new Error("id and parentOrigin are required");
+
+function requiredAPIs() {
+  return [
+    ["localStorage", typeof localStorage !== "undefined"],
+    ["IndexedDB", typeof indexedDB !== "undefined"],
+    ["CacheStorage", typeof caches !== "undefined"],
+    ["BroadcastChannel", typeof BroadcastChannel !== "undefined"],
+    ["Web Locks", typeof navigator.locks?.request === "function"],
+    ["SharedWorker", typeof SharedWorker === "function"],
+    ["sessionStorage", typeof sessionStorage !== "undefined"],
+  ];
+}
+
+function reply(request, value = undefined, error = undefined) {
+  parent.postMessage({ kind: "synthetic-origin-storage-result", id, request, value, error }, parentOrigin);
+}
+
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("values");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function transactionResult(transaction, request) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve(request.result);
+    transaction.onabort = () => reject(transaction.error ?? request.error);
+    transaction.onerror = () => reject(transaction.error ?? request.error);
+  });
+}
+
+async function putIndexedDB(value) {
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction("values", "readwrite");
+    const request = transaction.objectStore("values").put(value, "marker");
+    await transactionResult(transaction, request);
+  } finally {
+    database.close();
+  }
+}
+
+async function getIndexedDB() {
+  const database = await openDatabase();
+  try {
+    const transaction = database.transaction("values", "readonly");
+    const request = transaction.objectStore("values").get("marker");
+    return await transactionResult(transaction, request) ?? null;
+  } finally {
+    database.close();
+  }
+}
+
+function cacheRequest() {
+  return new Request(new URL("/synthetic-origin-storage-cache-entry", location.href));
+}
+
+async function putCache(value) {
+  const cache = await caches.open(CACHE_NAME);
+  await cache.put(cacheRequest(), new Response(value, { headers: { "Content-Type": "text/plain" } }));
+}
+
+async function getCache() {
+  const cache = await caches.open(CACHE_NAME);
+  const response = await cache.match(cacheRequest());
+  return response ? await response.text() : null;
+}
+
+function waitFor(list, predicate, label) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 2_000;
+    const observe = () => {
+      const match = list.find(predicate);
+      if (match) return resolve(match);
+      if (Date.now() >= deadline) return reject(new Error(`timed out waiting for ${label}`));
+      setTimeout(observe, 10);
+    };
+    observe();
+  });
+}
+let sharedWorkerPort;
+let nextSharedWorkerRequest = 1;
+const sharedWorkerRequests = new Map();
+function sharedWorkerStorage(command, value) {
+  if (!sharedWorkerPort) {
+    const worker = new SharedWorker("/synthetic-origin-storage-shared-worker.js", "synthetic-origin-storage");
+    sharedWorkerPort = worker.port;
+    sharedWorkerPort.addEventListener("message", event => {
+      const pending = sharedWorkerRequests.get(event.data?.request);
+      if (!pending) return;
+      sharedWorkerRequests.delete(event.data.request);
+      pending(event.data.value);
+    });
+    sharedWorkerPort.start();
+  }
+  const request = String(nextSharedWorkerRequest++);
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      sharedWorkerRequests.delete(request);
+      reject(new Error(`timed out waiting for SharedWorker ${command}`));
+    }, 2_000);
+    sharedWorkerRequests.set(request, result => {
+      clearTimeout(timeout);
+      resolve(result);
+    });
+    sharedWorkerPort.postMessage({ command, request, value });
+  });
+}
+
+async function holdLock() {
+  if (heldLockPromise) throw new Error("lock is already held");
+  let acquired;
+  const acquiredPromise = new Promise(resolve => { acquired = resolve; });
+  heldLockPromise = navigator.locks.request(LOCK_NAME, { mode: "exclusive" }, async lock => {
+    acquired(Boolean(lock));
+    await new Promise(resolve => { releaseHeldLock = resolve; });
+  });
+  await acquiredPromise;
+  return { held: true };
+}
+
+async function releaseLock() {
+  if (!heldLockPromise || !releaseHeldLock) throw new Error("no held lock to release");
+  releaseHeldLock();
+  await heldLockPromise;
+  releaseHeldLock = undefined;
+  heldLockPromise = undefined;
+  return { released: true };
+}
+
+async function tryLock() {
+  let acquired = false;
+  await navigator.locks.request(LOCK_NAME, { mode: "exclusive", ifAvailable: true }, lock => {
+    acquired = Boolean(lock);
+  });
+  return { acquired };
+}
+
+async function sameOriginIframe() {
+  const frame = document.createElement("iframe");
+  frame.src = new URL("/synthetic-origin-storage-frame.html", location.href).href;
+  const loaded = new Promise((resolve, reject) => {
+    frame.addEventListener("load", resolve, { once: true });
+    frame.addEventListener("error", () => reject(new Error("same-origin frame did not load")), { once: true });
+  });
+  document.body.append(frame);
+  await loaded;
+  const readable = frame.contentDocument?.body?.dataset.realm === "same-origin";
+  const origin = frame.contentWindow.location.origin;
+  frame.remove();
+  return { readable, origin };
+}
+
+async function crossOriginIframe(origin) {
+  const frame = document.createElement("iframe");
+  frame.src = new URL("/synthetic-origin-storage-frame.html", origin).href;
+  const loaded = new Promise((resolve, reject) => {
+    frame.addEventListener("load", resolve, { once: true });
+    frame.addEventListener("error", () => reject(new Error("cross-origin frame did not load")), { once: true });
+  });
+  document.body.append(frame);
+  await loaded;
+  let documentDenied = false;
+  let locationDenied = false;
+  try {
+    void frame.contentWindow.document;
+  } catch (error) {
+    documentDenied = error.name === "SecurityError";
+  }
+  try {
+    void frame.contentWindow.location.href;
+  } catch (error) {
+    locationDenied = error.name === "SecurityError";
+  }
+  const contentDocumentIsNull = frame.contentDocument === null;
+  frame.remove();
+  return { documentDenied, locationDenied, contentDocumentIsNull };
+}
+
+const popupReports = [];
+
+function popupURL(origin, nonce, phase) {
+  const url = new URL("/synthetic-origin-session-popup.html", origin);
+  url.searchParams.set("openerOrigin", location.origin);
+  url.searchParams.set("nonce", nonce);
+  url.searchParams.set("phase", phase);
+  return url.href;
+}
+
+async function sessionStorageLineage({ sameOrigin, crossOrigin }) {
+  sessionStorage.setItem("synthetic-origin-session-marker", "alpha-session");
+  sessionStorage.removeItem("synthetic-origin-session-child");
+  const sameNonce = crypto.randomUUID();
+  const same = window.open(popupURL(sameOrigin, sameNonce, "first"), `_same_${sameNonce}`);
+  if (!same) throw new Error("same-origin popup was blocked");
+  const sameFirst = await waitFor(popupReports, report => report.nonce === sameNonce && report.phase === "first" && report.origin === sameOrigin, "same-origin popup");
+  same.sessionStorage.setItem("synthetic-origin-session-child", "same-popup");
+  const sourceIndependent = sessionStorage.getItem("synthetic-origin-session-child") === null;
+
+  same.location.assign(popupURL(sameOrigin, sameNonce, "second"));
+  const sameSecond = await waitFor(popupReports, report => report.nonce === sameNonce && report.phase === "second" && report.origin === sameOrigin, "same-origin popup navigation");
+  const firstReports = popupReports.filter(report => report.nonce === sameNonce && report.phase === "first").length;
+  same.history.back();
+  const sameBack = await waitFor(
+    popupReports,
+    report => report.nonce === sameNonce && report.phase === "first" && report.origin === sameOrigin && popupReports.filter(candidate => candidate.nonce === sameNonce && candidate.phase === "first").length > firstReports,
+    "same-origin popup history back",
+  );
+
+  const crossNonce = crypto.randomUUID();
+  const cross = window.open(popupURL(crossOrigin, crossNonce, "first"), `_cross_${crossNonce}`);
+  if (!cross) throw new Error("cross-origin popup was blocked");
+  const crossFirst = await waitFor(popupReports, report => report.nonce === crossNonce && report.phase === "first" && report.origin === crossOrigin, "cross-origin popup");
+  let crossWindowDenied = false;
+  try {
+    void cross.sessionStorage;
+  } catch (error) {
+    crossWindowDenied = error.name === "SecurityError";
+  }
+  const sameChild = same.sessionStorage.getItem("synthetic-origin-session-child");
+  same.close();
+  cross.close();
+  return { sameFirst, sourceIndependent, sameSecond, sameBack, sameChild, crossFirst, crossWindowDenied };
+}
+
+const channel = new BroadcastChannel(CHANNEL_NAME);
+channel.addEventListener("message", event => broadcastMessages.push(event.data));
+window.addEventListener("storage", event => {
+  storageEvents.push({ key: event.key, oldValue: event.oldValue, newValue: event.newValue, url: event.url });
+});
+window.addEventListener("message", event => {
+  if (event.data?.kind === "synthetic-origin-session-popup-ready") popupReports.push({ ...event.data, origin: event.origin });
+});
+
+const missing = requiredAPIs().filter(([, supported]) => !supported).map(([name]) => name);
+parent.postMessage({ kind: "synthetic-origin-storage-ready", id, missing }, parentOrigin);
+
+window.addEventListener("message", async event => {
+  if (event.source !== parent || event.origin !== parentOrigin || event.data?.kind !== "synthetic-origin-storage-command") return;
+  const { request, command, args = {} } = event.data;
+  try {
+    let value;
+    switch (command) {
+      case "seed":
+        localStorage.setItem(MARKER_KEY, args.value);
+        await putIndexedDB(args.value);
+        await putCache(args.value);
+        value = { seeded: args.value };
+        break;
+      case "read":
+        value = { localStorage: localStorage.getItem(MARKER_KEY), indexedDB: await getIndexedDB(), cacheStorage: await getCache() };
+        break;
+      case "shared-worker-set":
+        value = await sharedWorkerStorage("set", args.value);
+        break;
+      case "shared-worker-get":
+        value = await sharedWorkerStorage("get");
+        break;
+      case "clear-observations":
+        storageEvents.length = 0;
+        broadcastMessages.length = 0;
+        value = { cleared: true };
+        break;
+      case "observations":
+        value = { storage: [...storageEvents], broadcast: [...broadcastMessages] };
+        break;
+      case "broadcast":
+        channel.postMessage(args.value);
+        value = { sent: args.value };
+        break;
+      case "wait-for-broadcast":
+        value = await waitFor(broadcastMessages, message => message === args.value, `broadcast ${args.value}`);
+        break;
+      case "hold-lock":
+        value = await holdLock();
+        break;
+      case "release-lock":
+        value = await releaseLock();
+        break;
+      case "try-lock":
+        value = await tryLock();
+        break;
+      case "same-origin-iframe":
+        value = await sameOriginIframe();
+        break;
+      case "cross-origin-iframe":
+        value = await crossOriginIframe(args.origin);
+        break;
+      case "session-storage-lineage":
+        value = await sessionStorageLineage(args);
+        break;
+      case "set-storage-event":
+        localStorage.setItem(EVENT_KEY, args.value);
+        value = { set: args.value };
+        break;
+      case "wait-for-storage-event":
+        value = await waitFor(storageEvents, storageEvent => storageEvent.key === args.key && storageEvent.newValue === args.value, `storage event ${args.key}`);
+        break;
+      default:
+        throw new Error(`unknown command ${command}`);
+    }
+    reply(request, value);
+  } catch (error) {
+    reply(request, undefined, error?.message ?? String(error));
+  }
+});
+</script>

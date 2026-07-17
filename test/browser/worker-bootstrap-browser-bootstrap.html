@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><script type="module">
+const registration = await navigator.serviceWorker.register("/worker-bootstrap-plan-sw.js", { scope: "/" });
+await navigator.serviceWorker.ready;
+if (!navigator.serviceWorker.controller) {
+  location.replace(`/worker-bootstrap-browser-bootstrap.html${location.search || "?controlled=1"}`);
+} else {
+  location.replace(`/worker-bootstrap-oracle.html${location.search}`);
+}
+</script>

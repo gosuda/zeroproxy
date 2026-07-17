@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/address-policy.schema.json",
+  "title": "ZeroProxy address policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "hostname_canonicalization",
+    "socks_address_type",
+    "reject_ip_literals",
+    "reject_single_label",
+    "blocked_suffixes"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "policy_id": {"const": "zeroproxy-address-policy-v1"},
+    "hostname_canonicalization": {"const": "UTS46_IDNA2008_LOOKUP"},
+    "socks_address_type": {"const": "DOMAIN"},
+    "reject_ip_literals": {"const": true},
+    "reject_single_label": {"const": true},
+    "blocked_suffixes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9.-]+$", "minLength": 1, "maxLength": 253}
+    }
+  }
+}

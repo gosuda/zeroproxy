@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "soak-workload-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "telemetry_url", "workload_provenance_url", "workload_server_sha256", "fault_driver", "origins"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "telemetry_url": {"type": "string", "format": "uri"},
+    "workload_provenance_url": {"type": "string", "format": "uri"},
+    "workload_server_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "fault_driver": {"type": "object", "additionalProperties": false, "required": ["command", "args"], "properties": {"command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}}},
+    "origins": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["id", "fixture_sha256", "page_url", "short_stream_url", "sse_url", "websocket_url"], "properties": {"id": {"type": "string", "minLength": 1}, "fixture_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "page_url": {"type": "string", "format": "uri"}, "short_stream_url": {"type": "string", "format": "uri"}, "sse_url": {"type": "string", "format": "uri"}, "websocket_url": {"type": "string", "pattern": "^wss?://"}}}}
+  }
+}

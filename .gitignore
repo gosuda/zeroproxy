@@ -14,3 +14,6 @@ GOAL.md
 .claude/
 .npm-cache
 .puppeteer-cache
+
+/target/
+/zeroproxy-server

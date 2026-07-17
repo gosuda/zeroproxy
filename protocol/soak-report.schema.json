@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "soak-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_type", "generated_at", "status", "test_mode", "certification", "release", "environment", "build", "plan", "samples", "resource_maxima", "churn_events", "fault_events", "terminal", "leak_evidence", "violations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_type": {"const": "soak-gate"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["pass", "fail"]},
+    "test_mode": {"type": "boolean"},
+    "certification": {"type": "object", "additionalProperties": false, "required": ["claimed", "reason"], "properties": {"claimed": {"type": "boolean"}, "reason": {"type": "string"}}},
+    "release": {"$ref": "#/$defs/release"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "build": {"$ref": "#/$defs/build"},
+    "plan": {"type": "object", "additionalProperties": false, "required": ["shape", "duration_ms", "warmup_ms", "quiescence_ms", "sample_interval_ms", "churn_interval_ms", "fault_interval_ms", "short", "resource_limits", "deterministic_seed", "fault_kinds"], "properties": {"shape": {"type": "object", "additionalProperties": false, "required": ["hours", "warmup_minutes", "quiescence_minutes", "origins", "clients", "short_streams", "sse_streams", "websockets", "navigations_per_origin_per_minute", "abort_churn"], "properties": {"hours": {"const": 8}, "warmup_minutes": {"const": 30}, "quiescence_minutes": {"const": 15}, "origins": {"const": 20}, "clients": {"const": 40}, "short_streams": {"const": 200}, "sse_streams": {"const": 20}, "websockets": {"const": 20}, "navigations_per_origin_per_minute": {"const": 2}, "abort_churn": {"const": 0.1}}}, "duration_ms": {"type": "number", "exclusiveMinimum": 0}, "warmup_ms": {"type": "number", "exclusiveMinimum": 0}, "quiescence_ms": {"type": "number", "exclusiveMinimum": 0}, "sample_interval_ms": {"type": "number", "exclusiveMinimum": 0}, "churn_interval_ms": {"type": "number", "exclusiveMinimum": 0}, "fault_interval_ms": {"type": "number", "exclusiveMinimum": 0}, "short": {"type": "boolean"}, "resource_limits": {"$ref": "#/$defs/resource_limits"}, "deterministic_seed": {"$ref": "#/$defs/sha256"}, "fault_kinds": {"type": "array", "minItems": 1, "items": {"type": "string"}}}},
+    "samples": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sample"}},
+    "resource_maxima": {"type": "object", "additionalProperties": false, "required": ["memory_bytes", "queue_depth"], "properties": {"memory_bytes": {"type": "number", "minimum": 0}, "queue_depth": {"type": "number", "minimum": 0}}},
+    "churn_events": {"type": "array", "items": {"type": "object"}},
+    "fault_events": {"type": "array", "items": {"type": "object"}},
+    "terminal": {"type": "object", "additionalProperties": false, "required": ["all_terminal", "outstanding_requests", "active_streams", "unrecovered_errors", "memory_bytes", "fd_count", "goroutine_count", "route_count", "port_count", "stream_count", "worker_count", "realm_count"], "properties": {"all_terminal": {"type": "boolean"}, "outstanding_requests": {"type": "number", "minimum": 0}, "active_streams": {"type": "number", "minimum": 0}, "unrecovered_errors": {"type": "number", "minimum": 0}, "memory_bytes": {"type": "number", "minimum": 0}, "fd_count": {"type": "number", "minimum": 0}, "goroutine_count": {"type": "number", "minimum": 0}, "route_count": {"type": "number", "minimum": 0}, "port_count": {"type": "number", "minimum": 0}, "stream_count": {"type": "number", "minimum": 0}, "worker_count": {"type": "number", "minimum": 0}, "realm_count": {"type": "number", "minimum": 0}}},
+    "leak_evidence": {"type": "object", "required": ["status", "violations", "baseline", "terminal", "slopes"], "properties": {"status": {"enum": ["pass", "fail", "not-measured"]}, "violations": {"type": "array", "items": {"type": "object"}}, "baseline": {"type": ["object", "null"]}, "terminal": {"type": ["object", "null"]}, "slopes": {"type": ["object", "null"]}}},
+    "violations": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "release": {"type": "object", "additionalProperties": false, "required": ["release_id", "performance_config_sha256", "build_tree_sha256"], "properties": {"release_id": {"type": "string"}, "performance_config_sha256": {"$ref": "#/$defs/sha256"}, "build_tree_sha256": {"$ref": "#/$defs/sha256"}}},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["architecture", "os", "node", "toolchain", "browser", "browser_pin", "adapter_toolchain"], "properties": {"architecture": {"type": "string"}, "os": {"type": "string"}, "node": {"type": "string"}, "toolchain": {"type": "object"}, "browser": {"type": "object", "required": ["family", "exact_build"], "properties": {"family": {"type": "string"}, "exact_build": {"type": "string"}}}, "browser_pin": {"type": "object", "required": ["configured_pin", "boundary_pin_verified", "release_supported"]}, "adapter_toolchain": {}}},
+    "build": {"type": "object", "additionalProperties": false, "required": ["tree_sha256", "assets"], "properties": {"tree_sha256": {"$ref": "#/$defs/sha256"}, "assets": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "size_bytes"], "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}}}}}},
+    "resource_limits": {"type": "object", "additionalProperties": false, "required": ["max_memory_bytes", "max_queue_depth"], "properties": {"max_memory_bytes": {"type": "number", "exclusiveMinimum": 0}, "max_queue_depth": {"type": "number", "exclusiveMinimum": 0}}},
+    "sample": {"type": "object", "additionalProperties": false, "required": ["phase", "elapsed_ms", "memory_bytes", "queue_depth", "active_clients", "active_origins", "active_streams", "fd_count", "goroutine_count", "route_count", "port_count", "stream_count", "worker_count", "realm_count"], "properties": {"phase": {"enum": ["warmup", "soak", "quiescence"]}, "elapsed_ms": {"type": "number", "minimum": 0}, "memory_bytes": {"type": "number", "minimum": 0}, "queue_depth": {"type": "number", "minimum": 0}, "active_clients": {"type": "number", "minimum": 0}, "active_origins": {"type": "number", "minimum": 0}, "active_streams": {"type": "number", "minimum": 0}, "fd_count": {"type": "number", "minimum": 0}, "goroutine_count": {"type": "number", "minimum": 0}, "route_count": {"type": "number", "minimum": 0}, "port_count": {"type": "number", "minimum": 0}, "stream_count": {"type": "number", "minimum": 0}, "worker_count": {"type": "number", "minimum": 0}, "realm_count": {"type": "number", "minimum": 0}}}
+  }
+}

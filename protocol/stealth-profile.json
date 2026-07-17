@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "profile_id": "bounded-compatibility-v2",
+  "claim": "bounded-browser-compatibility-profile-not-security-proof",
+  "universal_undetectability_claim": false,
+  "browser_scope": [
+    { "family": "chromium", "exact_build": "150.0.7871.124", "platform": "darwin-arm64" },
+    { "family": "firefox", "exact_build": "152.0.6", "platform": "darwin-arm64" }
+  ],
+  "limits": { "surface_count": 12, "probe_count": 51, "maximum_observation_bytes": 65536, "maximum_probe_duration_ms": 5000 },
+  "comparison": { "fixture_bytes": "identical-native-and-mediated", "digest": "sha256-rfc8785-observation", "difference_policy": "native-equal-or-one-exact-registry-entry" },
+  "surfaces": [
+    { "id": "global-equality", "probes": [
+      { "id": "globalthis-window", "measurement": "equality-graph", "expected_relation": "native-equal" },
+      { "id": "window-self", "measurement": "equality-graph", "expected_relation": "native-equal" },
+      { "id": "window-frames", "measurement": "equality-graph", "expected_relation": "native-equal" },
+      { "id": "window-top-parent", "measurement": "equality-graph", "expected_relation": "native-equal" },
+      { "id": "document-defaultview", "measurement": "equality-graph", "expected_relation": "native-equal" },
+      { "id": "window-location", "measurement": "equality-graph", "expected_relation": "native-equal" }
+    ] },
+    { "id": "window-location-reflection", "probes": [
+      { "id": "window-location-descriptors", "measurement": "descriptor-digest", "expected_relation": "native-equal" },
+      { "id": "window-location-prototypes", "measurement": "descriptor-digest", "expected_relation": "native-equal" },
+      { "id": "window-location-own-keys", "measurement": "reflection-digest", "expected_relation": "native-equal" },
+      { "id": "window-location-brands", "measurement": "reflection-digest", "expected_relation": "native-equal" },
+      { "id": "window-location-illegal-receivers", "measurement": "error-digest", "expected_relation": "native-equal" }
+    ] },
+    { "id": "canonical-wrapper-identity", "probes": [
+      { "id": "map-wrapper-key", "measurement": "identity-matrix", "expected_relation": "native-equal" },
+      { "id": "set-wrapper-key", "measurement": "identity-matrix", "expected_relation": "native-equal" },
+      { "id": "weakmap-wrapper-key", "measurement": "identity-matrix", "expected_relation": "native-equal" },
+      { "id": "wrapper-instanceof", "measurement": "identity-matrix", "expected_relation": "native-equal" },
+      { "id": "wrapper-tostringtag", "measurement": "reflection-digest", "expected_relation": "native-equal" }
+    ] },
+    { "id": "function-reflection", "probes": [
+      { "id": "function-source", "measurement": "reflection-digest", "expected_relation": "native-equal" },
+      { "id": "function-name", "measurement": "reflection-digest", "expected_relation": "native-equal" },
+      { "id": "function-length", "measurement": "reflection-digest", "expected_relation": "native-equal" },
+      { "id": "function-prototype", "measurement": "descriptor-digest", "expected_relation": "native-equal" },
+      { "id": "function-tostring", "measurement": "reflection-digest", "expected_relation": "native-equal" }
+    ] },
+    { "id": "target-dom", "probes": [
+      { "id": "target-attributes", "measurement": "dom-observation-digest", "expected_relation": "native-equal" },
+      { "id": "target-nodes", "measurement": "dom-observation-digest", "expected_relation": "native-equal" },
+      { "id": "target-live-collections", "measurement": "dom-observation-digest", "expected_relation": "native-equal" },
+      { "id": "target-selectors", "measurement": "dom-observation-digest", "expected_relation": "native-equal" },
+      { "id": "target-serialization", "measurement": "dom-observation-digest", "expected_relation": "native-equal" },
+      { "id": "target-mutation-records", "measurement": "event-trace", "expected_relation": "native-equal" }
+    ] },
+    { "id": "parser-ordering", "probes": [
+      { "id": "parser-current-script", "measurement": "event-trace", "expected_relation": "native-equal" },
+      { "id": "parser-ready-state", "measurement": "event-trace", "expected_relation": "native-equal" },
+      { "id": "parser-domcontentloaded", "measurement": "event-trace", "expected_relation": "native-equal" },
+      { "id": "parser-load", "measurement": "event-trace", "expected_relation": "native-equal" },
+      { "id": "parser-microtask-order", "measurement": "event-trace", "expected_relation": "native-equal" }
+    ] },
+    { "id": "errors-and-source", "probes": [
+      { "id": "error-stack-urls", "measurement": "error-digest", "expected_relation": "native-equal" },
+      { "id": "script-source-urls", "measurement": "error-digest", "expected_relation": "native-equal" },
+      { "id": "source-map-urls", "measurement": "error-digest", "expected_relation": "native-equal" },
+      { "id": "error-brand-message", "measurement": "error-digest", "expected_relation": "native-equal" }
+    ] },
+    { "id": "performance-observability", "probes": [
+      { "id": "resource-timing", "measurement": "timing-entry-digest", "expected_relation": "owned-internal-names-absent" },
+      { "id": "performance-observer", "measurement": "timing-entry-digest", "expected_relation": "native-equal" },
+      { "id": "navigation-timing", "measurement": "timing-entry-digest", "expected_relation": "native-equal" }
+    ] },
+    { "id": "policy-violations", "probes": [
+      { "id": "csp-violations", "measurement": "violation-trace", "expected_relation": "native-equal" },
+      { "id": "trusted-types-violations", "measurement": "violation-trace", "expected_relation": "native-equal" },
+      { "id": "sri-violations", "measurement": "violation-trace", "expected_relation": "native-equal" }
+    ] },
+    { "id": "target-service-worker", "probes": [
+      { "id": "target-sw-controller", "measurement": "state-snapshot", "expected_relation": "native-equal" },
+      { "id": "target-sw-registrations", "measurement": "state-snapshot", "expected_relation": "native-equal" },
+      { "id": "target-sw-state", "measurement": "state-snapshot", "expected_relation": "native-equal" }
+    ] },
+    { "id": "internal-url-concealment", "probes": [
+      { "id": "raw-route-urls", "measurement": "url-leak-scan", "expected_relation": "owned-internal-names-absent" },
+      { "id": "raw-runtime-urls", "measurement": "url-leak-scan", "expected_relation": "owned-internal-names-absent" },
+      { "id": "raw-proxy-urls", "measurement": "url-leak-scan", "expected_relation": "owned-internal-names-absent" }
+    ] },
+    { "id": "root-injection-concealment", "probes": [
+      { "id": "root-descriptor-graph", "measurement": "descriptor-graph-digest", "expected_relation": "native-equal" },
+      { "id": "injected-global-names", "measurement": "descriptor-graph-digest", "expected_relation": "owned-internal-names-absent" },
+      { "id": "injected-dom-names", "measurement": "descriptor-graph-digest", "expected_relation": "owned-internal-names-absent" }
+    ] }
+  ]
+}

@@ -1,0 +1,3 @@
+import {eager} from "./chunk.mjs"; const result=document.querySelector("#result"),button=document.querySelector("#load"); const load=async()=>{const end=performance.now()+20;while(performance.now()<end){} const lazy=await import("./lazy.mjs"); result.textContent=eager+":"+lazy.default+":"+new URL(import.meta.url).pathname.split("/").at(-1); return result.textContent==="eager:lazy:app.js";}; button.addEventListener("click",load);
+globalThis.__fixtureAction=async()=>{button.click(); while(result.textContent==="")await new Promise(resolve=>setTimeout(resolve)); return result.textContent==="eager:lazy:app.js";};
+globalThis.__fixtureReady=()=>button!==null;

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "soak-telemetry.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "build_tree_sha256", "memory_bytes", "queue_depth", "fd_count", "goroutine_count", "route_count", "port_count", "stream_count", "worker_count", "realm_count", "outstanding_requests", "unrecovered_errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "build_tree_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "memory_bytes": {"type": "number", "minimum": 0},
+    "queue_depth": {"type": "number", "minimum": 0},
+    "fd_count": {"type": "number", "minimum": 0},
+    "goroutine_count": {"type": "number", "minimum": 0},
+    "route_count": {"type": "number", "minimum": 0},
+    "port_count": {"type": "number", "minimum": 0},
+    "stream_count": {"type": "number", "minimum": 0},
+    "worker_count": {"type": "number", "minimum": 0},
+    "realm_count": {"type": "number", "minimum": 0},
+    "outstanding_requests": {"type": "number", "minimum": 0},
+    "unrecovered_errors": {"type": "number", "minimum": 0}
+  }
+}

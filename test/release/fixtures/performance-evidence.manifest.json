@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "release_id": "release-gate-test",
+  "resource_limits": {
+    "max_memory_bytes": 1024,
+    "max_queue_depth": 8
+  },
+  "scenarios": [
+    {
+      "id": "application",
+      "kind": "gate",
+      "gate": "application_p95_ms",
+      "site_class": "application",
+      "fixture_path": "application",
+      "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "entry_path": "index.html",
+      "mediated_url_template": "https://runtime.test/mediate?fixture={fixture_url_encoded}",
+      "native_url": null,
+      "mediated_url": null,
+      "ready_expression": "document.readyState === 'complete'",
+      "interaction": {"kind": "click", "selector": "body"},
+      "postcondition_expression": "true",
+      "settle_ms": 1000
+    },
+    {
+      "id": "content",
+      "kind": "gate",
+      "gate": "content_p95_ms",
+      "site_class": "content",
+      "fixture_path": "content",
+      "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "entry_path": "index.html",
+      "mediated_url_template": "https://runtime.test/mediate?fixture={fixture_url_encoded}",
+      "native_url": null,
+      "mediated_url": null,
+      "ready_expression": "document.readyState === 'complete'",
+      "interaction": {"kind": "click", "selector": "body"},
+      "postcondition_expression": "true",
+      "settle_ms": 1000
+    },
+    {
+      "id": "editor",
+      "kind": "gate",
+      "gate": "editor_p95_ms",
+      "site_class": "editor_media_pwa",
+      "fixture_path": "editor",
+      "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "entry_path": "index.html",
+      "mediated_url_template": "https://runtime.test/mediate?fixture={fixture_url_encoded}",
+      "native_url": null,
+      "mediated_url": null,
+      "ready_expression": "document.readyState === 'complete'",
+      "interaction": {"kind": "click", "selector": "body"},
+      "postcondition_expression": "true",
+      "settle_ms": 1000
+    }
+  ]
+}

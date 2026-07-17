@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/release-signing-keys.schema.json",
+  "title": "ZeroProxy release signing keys",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "key_epoch", "threshold", "development_only", "keys"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "key_epoch": {"type": "integer", "minimum": 1},
+    "threshold": {"const": 2},
+    "development_only": {"type": "boolean"},
+    "keys": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "role", "owner", "public_key", "valid_from", "valid_until"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+          "role": {"enum": ["release", "security"]},
+          "owner": {"type": "string", "minLength": 3, "maxLength": 128},
+          "public_key": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+          "valid_from": {"type": "string", "format": "date-time"},
+          "valid_until": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}

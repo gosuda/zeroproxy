@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/relay-profile.schema.json",
+  "title": "ZeroProxy signed relay profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_id", "display_name", "deployment_id", "relay_wss_origin", "carrier_path", "allowed_browse_domain", "allowed_target_schemes", "allowed_target_ports", "address_policy_digest", "tor_mode", "limits", "privacy_disclosure", "issued_at", "expires_at", "key_epoch"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "deployment_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$"},
+    "relay_wss_origin": {"type": "string", "pattern": "^wss://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$"},
+    "carrier_path": {"const": "/_zp/carrier"},
+    "allowed_browse_domain": {"type": "string", "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", "maxLength": 253},
+    "allowed_target_schemes": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["http", "https"]}},
+    "allowed_target_ports": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
+    "address_policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "tor_mode": {"const": "SOCKS5_DOMAIN_RFC1929"},
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_sessions", "max_streams", "upload_byte_budget", "download_byte_budget", "max_frame_bytes", "max_message_bytes", "max_frames_per_second", "handshake_timeout_ms", "idle_timeout_ms", "session_deadline_ms"],
+      "properties": {
+        "max_sessions": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "max_streams": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "upload_byte_budget": {"type": "integer", "minimum": 1},
+        "download_byte_budget": {"type": "integer", "minimum": 1},
+        "max_frame_bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "max_message_bytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
+        "max_frames_per_second": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "handshake_timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 60000},
+        "idle_timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+        "session_deadline_ms": {"type": "integer", "minimum": 1000, "maximum": 86400000}
+      }
+    },
+    "privacy_disclosure": {"const": "The relay sees the client IP, target hostname and port, timing and volume, and plaintext HTTP, but not verified HTTPS plaintext."},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "key_epoch": {"type": "integer", "minimum": 1},
+    "revoked_at": {"type": "string", "format": "date-time"}
+  }
+}

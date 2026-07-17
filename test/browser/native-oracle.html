@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>ZeroProxy native differential oracle</title><pre id="results"></pre><script>
+"use strict";
+const tests=[];
+function record(id, nativeRun, frozenV1Run) {
+  const observe=run=>{const effects=[];try{return {value:String(run(effects)),effects}}catch(error){return {error:error.constructor.name,effects}}};
+  const native=observe(nativeRun), v1=observe(frozenV1Run);
+  tests.push({id,native,v1,red_before:JSON.stringify(native)!==JSON.stringify(v1)});
+}
+record("optional-call-laziness", e=>{let f=null;return f?.(e.push("arg"))},e=>{const args=[e.push("arg")];let f=null;return f==null?undefined:f(...args)});
+record("primitive-in", ()=>"x" in 1, ()=>Reflect.has(Object(1),"x"));
+record("strict-failed-set", e=>{const o={};Object.defineProperty(o,"x",{value:1});o.x=(e.push("rhs"),2)},e=>{const o={};Object.defineProperty(o,"x",{value:1});const v=(e.push("rhs"),2);Reflect.set(o,"x",v);return v});
+record("non-callable-method", ()=>({m:1}).m(), ()=>{const o={m:1};return typeof o.m==="function"?o.m():undefined});
+record("bigint-update", ()=>{let x=1n;const y=x++;return [typeof y,y,x]},()=>{let x=1n;const y=Number(x);x=BigInt(y+1);return [typeof y,y,x]});
+if(!tests.every(test=>test.red_before)) throw new Error("expected every frozen V1 case to differ from native");
+document.querySelector("#results").textContent=JSON.stringify({ok:true,userAgent:navigator.userAgent,tests},null,2);
+</script>

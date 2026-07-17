@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/key-transition.schema.json",
+  "title": "ZeroProxy release key transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["from_epoch", "to_epoch", "previous_keyset_sha256", "next_keyset_sha256", "reason", "created_at", "revoked_key_ids"],
+  "properties": {
+    "from_epoch": {"type": "integer", "minimum": 1},
+    "to_epoch": {"type": "integer", "minimum": 2},
+    "previous_keyset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "next_keyset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "reason": {"type": "string", "minLength": 8, "maxLength": 512},
+    "created_at": {"type": "string", "format": "date-time"},
+    "revoked_key_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 16,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"}
+    }
+  }
+}

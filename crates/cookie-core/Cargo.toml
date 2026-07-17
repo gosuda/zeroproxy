@@ -1,0 +1,14 @@
+[package]
+name="cookie-core"
+version.workspace=true
+edition.workspace=true
+license.workspace=true
+[lib]
+crate-type=["cdylib","rlib"]
+[dependencies]
+serde.workspace=true
+thiserror.workspace=true
+url.workspace=true
+psl="2.1.218"
+serde_json.workspace=true
+wasm-bindgen.workspace=true

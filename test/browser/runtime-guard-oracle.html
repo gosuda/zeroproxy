@@ -1,0 +1,481 @@
+<!doctype html><meta charset="utf-8"><title>runtime guard oracle</title><pre id="result"></pre><script type="module">
+const version = await fetch("/_zp/version.json").then(response => response.json());
+const runtime = document.createElement("script");
+const targetURL = "https://target.example/path/index.html";
+const abiName = "__zp_abi_444444444444444444444444444444444444444444444444";
+const nativeHasAttribute = Element.prototype.hasAttribute;
+const nativePerformanceName = Object.getOwnPropertyDescriptor(PerformanceEntry.prototype, "name").get;
+const nativePerformanceToJSON = PerformanceEntry.prototype.toJSON;
+const nativeStyleGetPropertyValue = CSSStyleDeclaration.prototype.getPropertyValue;
+const nativeStyleSetProperty = CSSStyleDeclaration.prototype.setProperty;
+const preRuntimeUnsafeSheet = new CSSStyleSheet();
+preRuntimeUnsafeSheet.insertRule("body{background-image:url(https://escape.example/adopted.css)}");
+const shadowedDocumentFrame = document.createElement("iframe");
+document.body.append(shadowedDocumentFrame);
+const rawShadowedRealm = shadowedDocumentFrame.contentWindow;
+let containedGuardCalled = false;
+Object.defineProperty(rawShadowedRealm, "__zeroproxyRuntimeLoadGuardV2", {
+  configurable: true,
+  value: Object.freeze({ complete() { containedGuardCalled = true; } }),
+});
+Object.defineProperty(rawShadowedRealm.document, "nodeType", { value: 1 });
+Object.defineProperty(rawShadowedRealm.document, "defaultView", { value: null, configurable: true });
+runtime.src = `${version.selectors["runtime-prelude.js"]}#abi=${abiName}&url=${encodeURIComponent(targetURL)}&ports=80%2C443`;
+const syntheticOrigin = new URL(runtime.src).origin;
+runtime.onload = async () => {
+  const tests = [];
+  const run = source => (0, eval)(`${abiName}.scope.window.eval(${JSON.stringify(source)})`);
+  function check(id, action) {
+    let record;
+    try {
+      record = { id, ok: Boolean(action()) };
+    } catch (error) {
+      record = { id, ok: false, error: error.name };
+    }
+    tests.push(record);
+  }
+  function blocked(action) {
+    try {
+      action();
+      return false;
+    } catch (error) {
+      return error.name === "SecurityError";
+    }
+  }
+  function accepted(action) {
+    try {
+      action();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  check("compiled-location-visible", () => run("location.href") === targetURL);
+  check("location-navigation-routed", () => run("location.href") === targetURL);
+  check("window-open-fails-closed-without-capability", () => blocked(() => run("open('https://escape.example/')")));
+  check("history-url-fails-closed-without-capability", () => {
+    const beforeURL=run("location.href"),beforeState=history.state;
+    return blocked(()=>history.pushState({routed:true},"","/history-next?query=1#fragment"))&&run("location.href")===beforeURL&&history.state===beforeState;
+  });
+  check("history-brand-check-precedes-title-and-url-coercion", () => {
+    const coercions = [];
+    const title = { toString() { coercions.push("title"); return ""; } };
+    const url = { toString() { coercions.push("url"); return "/must-not-coerce"; } };
+    let typeError = false;
+    try {
+      History.prototype.pushState.call({}, null, title, url);
+    } catch (error) {
+      typeError = error.name === "TypeError";
+    }
+    return typeError && coercions.length === 0;
+  });
+  check("history-coercion-precedes-capability-failure", () => {
+    const coercions = [];
+    const title = { toString() { coercions.push("title"); return ""; } };
+    const url = { toString() { coercions.push("url"); return "/history-coercion"; } };
+    return blocked(()=>History.prototype.replaceState.call(history,null,title,url))&&coercions.join(",")==="title,url";
+  });
+  check("history-url-symbol-has-native-type-error", () => {
+    try {
+      history.replaceState(null, "", Symbol("url"));
+      return false;
+    } catch (error) {
+      return error.name === "TypeError";
+    }
+  });
+  check("history-relative-url-fails-closed-without-capability", () => {
+    const base = document.createElement("base");
+    base.href = "https://target.example/conflicting-base/";
+    document.head.append(base);
+    try {
+      return blocked(()=>history.replaceState(null,"","history-relative"))&&run("location.href")===targetURL;
+    } finally {
+      base.remove();
+    }
+  });
+  check("history-null-undefined-and-empty-retain-current-url", () => {
+    for (const value of [null, undefined, "", { toString() { return ""; } }]) {
+      history.replaceState(null, "", value);
+      if (run("location.href") !== targetURL) return false;
+    }
+    return true;
+  });
+  check("history-credential-mismatch-rejects", () => {
+    for (const value of [
+      "https://user@target.example/path/index.html",
+      "https://:password@target.example/path/index.html",
+    ]) {
+      try {
+        history.replaceState(null, "", value);
+        return false;
+      } catch (error) {
+        if (error.name !== "SecurityError") return false;
+      }
+    }
+    return true;
+  });
+  check("history-uncloneable-state-precedes-bad-url-error", () => {
+    for (const value of ["https://other.example/", "http://["]) {
+      try {
+        history.replaceState({ uncloneable() {} }, "", value);
+        return false;
+      } catch (error) {
+        if (error.name !== "DataCloneError") return false;
+      }
+    }
+    return true;
+  });
+  check("history-synthetic-url-clones-before-virtual-security-error", () => {
+    const syntheticURL = `${syntheticOrigin}/_zp/history/synthetic`;
+    try {
+      history.replaceState({ uncloneable() {} }, "", syntheticURL);
+      return false;
+    } catch (error) {
+      if (error.name !== "DataCloneError") return false;
+    }
+    try {
+      history.replaceState(null, "", syntheticURL);
+      return false;
+    } catch (error) {
+      return error.name === "SecurityError" && run("location.href") === targetURL;
+    }
+  });
+  check("history-zero-and-one-argument-native-errors", () => {
+    for (const method of [History.prototype.pushState, History.prototype.replaceState]) {
+      for (const arguments_ of [[], [null]]) {
+        try {
+          Reflect.apply(method, history, arguments_);
+          return false;
+        } catch (error) {
+          if (error.name !== "TypeError") return false;
+        }
+      }
+    }
+    return true;
+  });
+  check("history-capability-failure-uses-captured-crypto-receiver", () => {
+    const original = Crypto.prototype.getRandomValues;
+    let poisonedCalls = 0;
+    try {
+      Crypto.prototype.getRandomValues = function() {
+        poisonedCalls += 1;
+        throw new Error("poisoned crypto");
+      };
+      return blocked(()=>history.replaceState(null,"","/history-crypto"))&&poisonedCalls===0;
+    } finally {
+      Crypto.prototype.getRandomValues = original;
+    }
+  });
+  check("request-header-abort-blob-binary-prototypes-captured", () => {
+    const restorers = [];
+    let poisonedCalls = 0;
+    const poisonGetter = (object, key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(object, key);
+      if (!descriptor?.configurable || !descriptor.get) return false;
+      restorers.push(() => Object.defineProperty(object, key, descriptor));
+      Object.defineProperty(object, key, { ...descriptor, get() { poisonedCalls += 1; throw new Error(`poisoned ${String(key)}`); } });
+      return true;
+    };
+    const poisonMethod = (object, key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(object, key);
+      if (!descriptor?.configurable || typeof descriptor.value !== "function") return false;
+      restorers.push(() => Object.defineProperty(object, key, descriptor));
+      Object.defineProperty(object, key, { ...descriptor, value() { poisonedCalls += 1; throw new Error(`poisoned ${String(key)}`); } });
+      return true;
+    };
+    const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
+    try {
+      const captured = [
+        poisonGetter(Request.prototype, "method"),
+        poisonMethod(Headers.prototype, "entries"),
+        poisonGetter(AbortSignal.prototype, "aborted"),
+        poisonGetter(Blob.prototype, "size"),
+        poisonGetter(Blob.prototype, "type"),
+        poisonMethod(Blob.prototype, "arrayBuffer"),
+        poisonGetter(ArrayBuffer.prototype, "byteLength"),
+        poisonGetter(typedArray, "buffer"),
+        poisonGetter(typedArray, "byteLength"),
+        poisonGetter(typedArray, "byteOffset"),
+        poisonGetter(DataView.prototype, "buffer"),
+        poisonGetter(DataView.prototype, "byteLength"),
+        poisonGetter(DataView.prototype, "byteOffset"),
+        poisonMethod(TextEncoder.prototype, "encode"),
+      ];
+      if (captured.includes(false)) return false;
+      const controller = new AbortController();
+      void fetch("https://escape.example/captured-request", { headers: new Headers([["X-Captured", "1"]]), signal: controller.signal }).catch(() => {});
+      const blob = new Blob(["blob"]);
+      const blobURL = URL.createObjectURL(blob);
+      URL.revokeObjectURL(blobURL);
+      for (const body of [new ArrayBuffer(2), new Uint8Array([1, 2]), new DataView(new ArrayBuffer(2)), "text"]) {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "https://escape.example/captured-xhr");
+        xhr.send(body);
+      }
+      return poisonedCalls === 0;
+    } catch {
+      return false;
+    } finally {
+      for (const restore of restorers.reverse()) restore();
+    }
+  });
+  check("anchor-idl-routed", () => {
+    const anchor = document.createElement("a");
+    return accepted(() => {
+      anchor.href = "https://escape.example/";
+    }) && anchor.href === "https://escape.example/" && anchor.getAttribute("href") === "https://escape.example/";
+  });
+  check("anchor-attribute-routed", () => {
+    const anchor = document.createElement("a");
+    return accepted(() => anchor.setAttribute("href", "https://escape.example/")) && anchor.href === "https://escape.example/" && anchor.getAttribute("href") === "https://escape.example/";
+  });
+  check("attribute-node-blocked", () => {
+    const anchor = document.createElement("a");
+    const attribute = document.createAttribute("href");
+    attribute.value = "https://escape.example/";
+    return blocked(() => anchor.setAttributeNode(attribute)) && !anchor.hasAttribute("href");
+  });
+  check("passive-data-and-network-urls-mediated", () => {
+    const image = document.createElement("img");
+    image.src = "data:,ok";
+    if (image.getAttribute("src") !== "data:,ok") return false;
+    image.src = "https://escape.example/image.png";
+    return image.src === "https://escape.example/image.png" && image.getAttribute("src") === "https://escape.example/image.png";
+  });
+  check("dynamic-attribute-inputs-coerce-once", () => {
+    let nameCalls = 0;
+    let valueCalls = 0;
+    let idlCalls = 0;
+    const image = document.createElement("img");
+    image.setAttribute({
+      toString() {
+        nameCalls += 1;
+        return nameCalls === 1 ? "src" : "onclick";
+      },
+    }, {
+      toString() {
+        valueCalls += 1;
+        return valueCalls === 1 ? "data:,attribute-once" : "https://escape.example/coercion";
+      },
+    });
+    const secondImage = document.createElement("img");
+    secondImage.src = {
+      toString() {
+        idlCalls += 1;
+        return idlCalls === 1 ? "data:,idl-once" : "https://escape.example/idl-coercion";
+      },
+    };
+    return nameCalls === 1 && valueCalls === 1 && idlCalls === 1 && image.getAttribute("src") === "data:,attribute-once" && !image.hasAttribute("onclick") && secondImage.getAttribute("src") === "data:,idl-once";
+  });
+  check("attr-null-assignment-semantics", () => {
+    const attribute = document.createAttribute("data-value");
+    attribute.value = "present";
+    attribute.nodeValue = null;
+    const nodeValue = attribute.value;
+    attribute.value = "present";
+    attribute.textContent = null;
+    return nodeValue === "" && attribute.value === "";
+  });
+  check("shadowed-attr-name-cannot-bypass-routing", () => {
+    const image = document.createElement("img");
+    image.src = "data:,preserved";
+    const attribute = image.getAttributeNode("src");
+    Object.defineProperty(attribute, "name", { value: "data-safe" });
+    Object.defineProperty(attribute, "namespaceURI", { value: null });
+    return accepted(() => {
+      attribute.value = "https://escape.example/shadowed-attr";
+    }) && image.getAttribute("src") === "https://escape.example/shadowed-attr";
+  });
+  check("shadowed-script-url-identity-cannot-bypass", () => {
+    const script = document.createElement("script");
+    Object.defineProperty(script, "localName", { value: "img" });
+    Object.defineProperty(script, "namespaceURI", { value: "http://www.w3.org/1999/xhtml" });
+    return blocked(() => {
+      script.src = "data:text/javascript,window.__zp_shadowed_url_script=1";
+    }) && !script.hasAttribute("src") && window.__zp_shadowed_url_script === undefined;
+  });
+  check("data-script-url-blocked", () => {
+    const script = document.createElement("script");
+    return blocked(() => {
+      script.src = "data:text/javascript,window.__zp_data_script=1";
+    }) && !script.hasAttribute("src") && window.__zp_data_script === undefined;
+  });
+  check("blob-script-url-blocked", () => {
+    const script = document.createElement("script");
+    const url = URL.createObjectURL(new Blob(["window.__zp_blob_script=1"], { type: "text/javascript" }));
+    try {
+      return blocked(() => {
+        script.src = url;
+      }) && !script.hasAttribute("src") && window.__zp_blob_script === undefined;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  });
+  check("meta-refresh-content-first-blocked", () => {
+    const meta = document.createElement("meta");
+    meta.content = "0;url=https://escape.example/content-first";
+    return blocked(() => {
+      meta.httpEquiv = " refresh ";
+    }) && !meta.hasAttribute("http-equiv") && meta.content === "0;url=https://escape.example/content-first";
+  });
+  check("meta-refresh-http-equiv-first-blocked", () => {
+    const meta = document.createElement("meta");
+    meta.httpEquiv = " ReFrEsH ";
+    return blocked(() => {
+      meta.content = "0;url=https://escape.example/equiv-first";
+    }) && !meta.hasAttribute("content") && meta.httpEquiv === " ReFrEsH ";
+  });
+  check("meta-refresh-markup-atomic", () => {
+    const host = document.createElement("div");
+    host.textContent = "preserved";
+    return blocked(() => {
+      host.innerHTML = '<meta content="0;url=https://escape.example/markup" http-equiv="refresh"><span>changed</span>';
+    }) && host.textContent === "preserved";
+  });
+  check("performance-entry-facade-hides-raw-target", () => {
+    const entry = performance.getEntriesByType("navigation")[0];
+    if (!entry) return true;
+    const nameDescriptor = Object.getOwnPropertyDescriptor(PerformanceEntry.prototype, "name");
+    const jsonDescriptor = Object.getOwnPropertyDescriptor(PerformanceEntry.prototype, "toJSON");
+    let poisonedCalls = 0;
+    let borrowedNameBlocked = false;
+    let borrowedJSONBlocked = false;
+    try {
+      if (nameDescriptor?.configurable) Object.defineProperty(PerformanceEntry.prototype, "name", { ...nameDescriptor, get() { poisonedCalls += 1; return "poisoned"; } });
+      if (jsonDescriptor?.configurable) Object.defineProperty(PerformanceEntry.prototype, "toJSON", { ...jsonDescriptor, value() { poisonedCalls += 1; return { name: "poisoned" }; } });
+      try { nativePerformanceName.call(entry); } catch (error) { borrowedNameBlocked = error.name === "TypeError"; }
+      try { nativePerformanceToJSON.call(entry); } catch (error) { borrowedJSONBlocked = error.name === "TypeError"; }
+      return entry.name === targetURL
+        && entry.toJSON().name === targetURL
+        && poisonedCalls === 0
+        && borrowedNameBlocked
+        && borrowedJSONBlocked
+        && Reflect.ownKeys(entry).length === 0
+        && Object.getOwnPropertyDescriptor(entry, "name") === undefined;
+    } finally {
+      if (nameDescriptor) Object.defineProperty(PerformanceEntry.prototype, "name", nameDescriptor);
+      if (jsonDescriptor) Object.defineProperty(PerformanceEntry.prototype, "toJSON", jsonDescriptor);
+    }
+  });
+  check("css-facades-hide-raw-target-and-block-mutators", () => {
+    const element = document.createElement("div");
+    document.body.append(element);
+    const style = element.style;
+    const descriptor = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, "getPropertyValue");
+    let poisonedCalls = 0;
+    let borrowedGetBlocked = false;
+    let borrowedSetBlocked = false;
+    try {
+      if (descriptor?.configurable) Object.defineProperty(CSSStyleDeclaration.prototype, "getPropertyValue", { ...descriptor, value() { poisonedCalls += 1; return "poisoned"; } });
+      try { nativeStyleGetPropertyValue.call(style, "color"); } catch (error) { borrowedGetBlocked = error.name === "TypeError"; }
+      try { nativeStyleSetProperty.call(style, "background-image", "url(https://escape.example/borrowed.css)"); } catch (error) { borrowedSetBlocked = error.name === "TypeError"; }
+      const stagedSetBlocked = blocked(() => CSSStyleDeclaration.prototype.setProperty.call(style, "background-image", "url(https://escape.example/staged.css)"));
+      const idlSetBlocked = blocked(() => { style.backgroundImage = "url(https://escape.example/idl.css)"; });
+      return style.getPropertyValue("color") === ""
+        && poisonedCalls === 0
+        && borrowedGetBlocked
+        && borrowedSetBlocked
+        && stagedSetBlocked
+        && idlSetBlocked
+        && style.getPropertyValue("background-image") === ""
+        && Reflect.ownKeys(style).length === 0
+        && Object.getOwnPropertyDescriptor(style, "cssText") === undefined
+        && Reflect.defineProperty(style, "backgroundImage", { value: "url(https://escape.example/define.css)" }) === false
+        && Object.getOwnPropertyDescriptor(style, "backgroundImage") === undefined;
+    } finally {
+      if (descriptor) Object.defineProperty(CSSStyleDeclaration.prototype, "getPropertyValue", descriptor);
+      element.remove();
+    }
+  });
+  check("adopted-stylesheets-atomic", () => {
+    if (!("adoptedStyleSheets" in Document.prototype)) return true;
+    const original = document.adoptedStyleSheets;
+    const empty = new CSSStyleSheet();
+    let documentIterations = 0;
+    let shadowIterations = 0;
+    const documentIterable = { *[Symbol.iterator]() { documentIterations += 1; yield empty; } };
+    const shadowIterable = { *[Symbol.iterator]() { shadowIterations += 1; yield empty; } };
+    const host = document.createElement("div");
+    const shadow = host.attachShadow({ mode: "open" });
+    try {
+      document.adoptedStyleSheets = documentIterable;
+      shadow.adoptedStyleSheets = shadowIterable;
+      const emptyAccepted = document.adoptedStyleSheets.length === 1 && document.adoptedStyleSheets[0] === empty && documentIterations === 1;
+      const shadowAccepted = shadow.adoptedStyleSheets.length === 1 && shadow.adoptedStyleSheets[0] === empty && shadowIterations === 1;
+      const unsafeBlocked = blocked(() => {
+        document.adoptedStyleSheets = [preRuntimeUnsafeSheet];
+      }) && document.adoptedStyleSheets.length === 1 && document.adoptedStyleSheets[0] === empty;
+      const shadowBlocked = blocked(() => {
+        shadow.adoptedStyleSheets = [preRuntimeUnsafeSheet];
+      }) && shadow.adoptedStyleSheets.length === 1 && shadow.adoptedStyleSheets[0] === empty;
+      return emptyAccepted && shadowAccepted && unsafeBlocked && shadowBlocked;
+    } finally {
+      document.adoptedStyleSheets = original;
+      shadow.adoptedStyleSheets = [];
+    }
+  });
+  check("shadowed-child-document-and-preseeded-load-guard-cannot-bypass", () => {
+    try {
+      const childDocument = shadowedDocumentFrame.contentDocument;
+      delete childDocument.defaultView;
+      const childFacade = childDocument.defaultView;
+      const exposedFacade = shadowedDocumentFrame.contentWindow;
+      return childFacade !== rawShadowedRealm
+        && exposedFacade !== rawShadowedRealm
+        && exposedFacade.window === exposedFacade
+        && exposedFacade.document === childDocument
+        && childFacade.eval !== rawShadowedRealm.eval
+        && exposedFacade.eval !== rawShadowedRealm.eval
+        && containedGuardCalled === false;
+    } finally {
+      shadowedDocumentFrame.remove();
+    }
+  });
+  check("cross-realm-meta-refresh-blocked", () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    try {
+      const childMeta = frame.contentDocument.createElement("meta");
+      const parentSetAttribute = Element.prototype.setAttribute;
+      parentSetAttribute.call(childMeta, "content", "0;url=https://escape.example/cross-realm");
+      return blocked(() => parentSetAttribute.call(childMeta, "http-equiv", "refresh")) && !childMeta.hasAttribute("http-equiv");
+    } finally {
+      frame.remove();
+    }
+  });
+  check("cross-realm-adopt-node-fails-before-mutation", () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    try {
+      const childDocument = frame.contentDocument;
+      const childScript = childDocument.createElement("script");
+      childScript.text = "window.__zp_cross_realm_adopted=1";
+      return blocked(() => document.adoptNode(childScript)) && childScript.ownerDocument === childDocument && window.__zp_cross_realm_adopted === undefined;
+    } finally {
+      frame.remove();
+    }
+  });
+  check("shadowed-script-identity-cannot-bypass", () => {
+    const script = document.createElement("script");
+    Object.defineProperty(script, "localName", { value: "div" });
+    Object.defineProperty(script, "namespaceURI", { value: null });
+    Object.defineProperty(script, "isConnected", { value: false });
+    script.text = "window.__zp_shadowed_script=1";
+    document.body.append(script);
+    return window.__zp_shadowed_script === 1 && !nativeHasAttribute.call(script, "nonce");
+  });
+  window.__zp_timer_value = 0;
+  setTimeout("window.__zp_timer_value=7", 0);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  check("timer-string-compiled", () => window.__zp_timer_value === 7);
+  const result = { ok: tests.every(test => test.ok), tests };
+  window.__runtimeGuardOracle = result;
+  document.querySelector("#result").textContent = JSON.stringify(result);
+};
+runtime.onerror = () => {
+  const result = { ok: false, error: "load" };
+  window.__runtimeGuardOracle = result;
+  document.querySelector("#result").textContent = JSON.stringify(result);
+};
+document.head.append(runtime);
+</script>

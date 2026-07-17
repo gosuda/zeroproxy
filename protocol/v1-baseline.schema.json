@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/protocol/v1-baseline.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_commit",
+    "dependencies",
+    "browser_evidence",
+    "fixture_digests",
+    "raw_outputs",
+    "corpus",
+    "performance_fixture_classes",
+    "performance_failure_categories",
+    "adversarial_semantic_cases",
+    "evidence_merkle",
+    "product_source_exclusion",
+    "production_eligible"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "source_commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree", "branch", "committed_at", "archive"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/sha1" },
+        "tree": { "$ref": "#/$defs/sha1" },
+        "branch": { "const": "main" },
+        "committed_at": { "type": "string", "format": "date-time" },
+        "archive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "size", "sha256", "capture_commands", "isolation"],
+          "properties": {
+            "format": { "const": "git-archive-tar" },
+            "size": { "type": "integer", "minimum": 1 },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "capture_commands": { "type": "array", "minItems": 3, "items": { "type": "string", "minLength": 1 } },
+            "isolation": { "enum": ["archive", "detached-worktree"] }
+          }
+        }
+      }
+    },
+    "dependencies": { "type": "array", "minItems": 3, "items": { "$ref": "#/$defs/digestEntry" } },
+    "browser_evidence": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["family", "platform", "status", "exact_build", "binary_path", "binary_sha256"],
+        "properties": {
+          "family": { "enum": ["chromium", "firefox"] },
+          "platform": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["captured", "unavailable"] },
+          "exact_build": { "type": ["string", "null"] },
+          "binary_path": { "type": ["string", "null"] },
+          "binary_sha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "fixture_digests": { "type": "array", "minItems": 4, "items": { "$ref": "#/$defs/digestEntry" } },
+    "raw_outputs": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "archive_path", "sha256", "summary"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "archive_path": { "type": "string", "minLength": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "summary": { "type": "object" }
+        }
+      }
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["site_count", "pass_count", "expected_delta_count", "sites"],
+      "properties": {
+        "site_count": { "const": 14 },
+        "pass_count": { "const": 5 },
+        "expected_delta_count": { "const": 9 },
+        "sites": { "type": "array", "minItems": 14, "maxItems": 14, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "performance_fixture_classes": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "v1_measurement_status"],
+        "properties": {
+          "class": { "enum": ["content", "application", "editor_media_pwa"] },
+          "v1_measurement_status": { "enum": ["captured", "not-captured"] }
+        }
+      }
+    },
+    "performance_failure_categories": { "type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "adversarial_semantic_cases": {
+      "type": "array",
+      "minItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "native_contract", "v1_failure"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "native_contract": { "type": "string", "minLength": 1 },
+          "v1_failure": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "evidence_merkle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "leaf_format", "root", "manifest_path"],
+      "properties": {
+        "algorithm": { "const": "sha256-binary-pair-duplicate-last" },
+        "leaf_format": { "const": "sha256(path\\0size\\0sha256)" },
+        "root": { "$ref": "#/$defs/sha256" },
+        "manifest_path": { "type": "string", "pattern": "^evidence/" }
+      }
+    },
+    "product_source_exclusion": { "const": true },
+    "production_eligible": { "const": false }
+  },
+  "$defs": {
+    "sha1": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "digestEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

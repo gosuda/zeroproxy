@@ -1,0 +1,237 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>coordinator cookie authority oracle</title>
+<pre id="result"></pre>
+<script type="module" nonce="cookie-oracle">
+const result = document.querySelector("#result");
+const tests = [];
+let stage = "initial";
+function check(id, ok, detail) {
+  tests.push({ id, ok: Boolean(ok), ...(detail ? { detail } : {}) });
+}
+function connect(url = "/control/coordinator.mjs", name = crypto.randomUUID()) {
+  const worker = new SharedWorker(url, { type: "module", name });
+  const pending = new Map();
+  const events = [];
+  let revision = null;
+  worker.port.onmessage = (event) => {
+    const message = event.data;
+    if (Number.isSafeInteger(message?.revision)) revision = Math.max(revision ?? 0, message.revision);
+    const entry = pending.get(message?.request_id);
+    if (!entry) {
+      events.push(message);
+      return;
+    }
+    pending.delete(message.request_id);
+    if (message.ok) entry.resolve(message.result);
+    else entry.reject(Object.assign(new Error(message.error?.code), { code: message.error?.code, revision: message.revision }));
+  };
+  worker.port.start();
+  return {
+    worker,
+    events,
+    call(operation, payload = {}) {
+      stage = operation;
+      const request_id = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        pending.set(request_id, { resolve, reject });
+        worker.port.postMessage({ v: 2, request_id, operation, expected_revision: revision, payload });
+        setTimeout(() => {
+          if (pending.delete(request_id)) {
+            reject(Object.assign(new Error("coordinator timeout"), { code: "TIMEOUT" }));
+          }
+        }, 10_000);
+      });
+    },
+  };
+}
+function requestContext(url = "https://example.test/app") {
+  return {
+    request_url: url,
+    top_level_site: "https://example.test/",
+    is_top_level_navigation: false,
+    method: "GET",
+  };
+}
+function cookieAuthorityContext(context) {
+  const { top_level_site, ...authority } = context;
+  return authority;
+}
+function mutation(context, op_id, raw, source_kind = "HTTP_RESPONSE", extra = {}) {
+  return {
+    ...cookieAuthorityContext(context),
+    op_id,
+    source_kind,
+    base_seq: 0,
+    causal_after_seq: 0,
+    canonical_target_context: requestContext(),
+    raw_set_cookie_or_document_cookie: raw,
+    ...extra,
+  };
+}
+function snapshot(context, known_seq = 0, projection = "KERNEL") {
+  return {
+    ...cookieAuthorityContext(context),
+    known_seq,
+    projection,
+    canonical_target_context: requestContext(),
+  };
+}
+async function expectCode(action, code) {
+  try {
+    await action();
+    return false;
+  } catch (error) {
+    return error.code === code;
+  }
+}
+try {
+  await new Promise((resolve, reject) => {
+    const deleting = indexedDB.deleteDatabase("zeroproxy-v2-coordinator");
+    deleting.onsuccess = resolve;
+    deleting.onerror = () => reject(deleting.error);
+    deleting.onblocked = resolve;
+  });
+  const coordinatorName = crypto.randomUUID();
+  const first = connect("/control/coordinator.mjs", coordinatorName);
+  const profileA = await first.call("CREATE_PROFILE");
+  const profileB = await first.call("CREATE_PROFILE");
+  const mapA = await first.call("MAP_ORIGIN", { profile_id: profileA.profile_id, target_url: "https://example.test/app" });
+  const mapB = await first.call("MAP_ORIGIN", { profile_id: profileB.profile_id, target_url: "https://example.test/app" });
+  const contextA = await first.call("CREATE_COOKIE_CONTEXT", {
+    profile_id: profileA.profile_id,
+    origin_id: mapA.origin_id,
+    tab_id: "tab-a",
+    capability_epoch: profileA.capability_epoch,
+  });
+  const subdomainMap = await first.call("MAP_ORIGIN", { profile_id: profileA.profile_id, target_url: "https://sub.example.test/app" });
+  const subdomainContext = await first.call("CREATE_COOKIE_CONTEXT", {
+    profile_id: profileA.profile_id,
+    origin_id: subdomainMap.origin_id,
+    tab_id: "tab-a-subdomain",
+    capability_epoch: profileA.capability_epoch,
+  });
+  const contextB = await first.call("CREATE_COOKIE_CONTEXT", {
+    profile_id: profileB.profile_id,
+    origin_id: mapB.origin_id,
+    tab_id: "tab-b",
+    capability_epoch: profileB.capability_epoch,
+  });
+  check("cookie-context-binds-top-level-site", contextA.top_level_site === "https://example.test");
+  const siblingKernel = connect("/control/coordinator.mjs", coordinatorName);
+  await siblingKernel.call("COOKIE_SNAPSHOT_REQUEST", snapshot(contextA));
+  const unboundObserver = connect("/control/coordinator.mjs", coordinatorName);
+  await unboundObserver.call("CREATE_PROFILE");
+  await first.call("COOKIE_MUTATE", mutation(contextB, "profile-b-only", "b=private; Path=/"));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  check(
+    "profile-isolated-broadcasts",
+    !unboundObserver.events.some(
+      (event) => event?.operation === "COOKIE_COMMIT" && event.profile_id === profileB.profile_id,
+    ),
+  );
+  unboundObserver.worker.port.close();
+
+
+  const concurrent = await Promise.all([
+    first.call("COOKIE_MUTATE", mutation(contextA, "document-a", "a=visible; Path=/", "DOCUMENT")),
+    first.call("COOKIE_MUTATE", mutation(contextA, "http-only", "secret=hidden; Path=/; HttpOnly")),
+  ]);
+  const concurrentSequences = concurrent.map((commit) => commit.cookie_seq).sort((left, right) => left - right);
+  check("durable-monotonic-concurrent-sequencing", JSON.stringify(concurrentSequences) === "[1,2]");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  check(
+    "cross-kernel-cookie-commit-broadcast",
+    siblingKernel.events.filter(
+      (event) => event?.operation === "COOKIE_COMMIT" && event.profile_id === profileA.profile_id,
+    ).map((event) => event.op_id).sort().join(",") === "document-a,http-only",
+  );
+  siblingKernel.worker.port.close();
+
+  const replay = await first.call("COOKIE_MUTATE", mutation(contextA, "document-a", "a=visible; Path=/", "DOCUMENT"));
+  check("idempotent-duplicate-replay", replay.cookie_seq === 1 && replay.accepted);
+  check(
+    "duplicate-payload-conflict-rejected",
+    await expectCode(
+      () => first.call("COOKIE_MUTATE", mutation(contextA, "document-a", "a=changed; Path=/", "DOCUMENT")),
+      "DUPLICATE_OPERATION",
+    ),
+  );
+
+  const redirectFirst = await first.call("COOKIE_MUTATE", mutation(contextA, "redirect-0", "r0=one; Path=/", "HTTP_RESPONSE", { response_chain_id: "redirect", header_index: 0 }));
+  const redirectSecond = await first.call("COOKIE_MUTATE", mutation(contextA, "redirect-1", "r1=two; Path=/", "HTTP_RESPONSE", { response_chain_id: "redirect", header_index: 1 }));
+  check("redirect-set-cookie-batch-order", redirectFirst.cookie_seq + 1 === redirectSecond.cookie_seq);
+
+  const removal = await first.call("COOKIE_MUTATE", mutation(contextA, "delete-visible", "a=gone; Path=/; Max-Age=0"));
+  check("max-age-deletion-commits", removal.accepted && removal.cookie_seq === redirectSecond.cookie_seq + 1);
+  const delta = await first.call("COOKIE_SNAPSHOT_REQUEST", snapshot(contextA, 2));
+  check(
+    "durable-contiguous-delta",
+    delta.jar_or_delta.kind === "DELTA"
+      && delta.jar_or_delta.from_seq === 2
+      && delta.jar_or_delta.commits.map((commit) => commit.cookie_seq).join(",") === "3,4,5",
+  );
+  const journaled = await first.call("COOKIE_COMMIT", { ...cookieAuthorityContext(contextA), op_id: "delete-visible" });
+  check(
+    "durable-commit-journal",
+    journaled.cookie_seq === removal.cookie_seq && journaled.accepted && journaled.op_id === "delete-visible",
+  );
+
+  const documentSnapshot = await first.call("COOKIE_SNAPSHOT_REQUEST", snapshot(contextA, 0, "DOCUMENT"));
+  const projectedNames = documentSnapshot.jar_or_delta.cookies.map((cookie) => cookie.name).sort();
+  check("document-projection-excludes-http-only", !projectedNames.includes("secret") && projectedNames.includes("r0") && projectedNames.includes("r1") && !projectedNames.includes("a"));
+  const sharedDomainCommit = await first.call(
+    "COOKIE_MUTATE",
+    mutation(contextA, "shared-domain", "shared=value; Domain=example.test; Path=/"),
+  );
+  const subdomainSnapshotRequest = snapshot(subdomainContext, 0, "DOCUMENT");
+  subdomainSnapshotRequest.canonical_target_context = requestContext("https://sub.example.test/app");
+  const subdomainSnapshot = await first.call("COOKIE_SNAPSHOT_REQUEST", subdomainSnapshotRequest);
+  check(
+    "target-domain-shared-across-mapped-origins",
+    sharedDomainCommit.accepted
+      && subdomainSnapshot.jar_or_delta.cookies.some(
+        (cookie) => cookie.name === "shared" && cookie.value === "value" && cookie.domain === "example.test",
+      ),
+  );
+
+  const beforeRestart = await first.call("COOKIE_SNAPSHOT_REQUEST", snapshot(contextA));
+  first.worker.port.close();
+  const recovered = connect(`/control/coordinator.mjs?restart=${crypto.randomUUID()}`);
+  const afterRestart = await recovered.call("COOKIE_SNAPSHOT_REQUEST", snapshot(contextA));
+  check(
+    "restart-hydrates-durable-cookie-state",
+    afterRestart.cookie_seq === beforeRestart.cookie_seq
+      && afterRestart.jar_or_delta.kind === "SNAPSHOT"
+      && afterRestart.jar_or_delta.cookies.some((cookie) => cookie.name === "secret" && cookie.http_only),
+  );
+
+  const crossProfile = { ...contextB, origin_id: mapA.origin_id };
+  check(
+    "cross-profile-context-rejected",
+    await expectCode(
+      () => recovered.call("COOKIE_MUTATE", mutation(crossProfile, "forged", "x=1; Path=/")),
+      "CAPABILITY_REJECTED",
+    ),
+  );
+  const forgedTopLevel = mutation(contextA, "forged-top-level", "partition=wrong; Secure; SameSite=None; Partitioned");
+  forgedTopLevel.canonical_target_context.top_level_site = "https://other.test/";
+  check(
+    "forged-top-level-cookie-site-rejected",
+    await expectCode(
+      () => recovered.call("COOKIE_MUTATE", forgedTopLevel),
+      "CAPABILITY_REJECTED",
+    ),
+  );
+  const stale = await recovered.call("COOKIE_MUTATE", {
+    ...mutation(contextA, "stale", "late=1; Path=/"),
+    base_seq: afterRestart.cookie_seq + 1,
+    causal_after_seq: afterRestart.cookie_seq + 1,
+  });
+  check("stale-causal-operation-rejected", !stale.accepted && stale.reason === "STALE_SEQUENCE");
+  recovered.worker.port.close();
+} catch (error) {
+  check("oracle-execution", false, `${stage}: ${error.stack || String(error)}`);
+}
+result.textContent = JSON.stringify({ ok: tests.every((test) => test.ok), tests });
+</script>

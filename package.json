@@ -1,0 +1,53 @@
+{
+  "name": "zeroproxy-v2",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.4.1"
+  },
+  "packageManager": "npm@11.4.2",
+  "scripts": {
+    "test": "npm run build && node --test test/compiler/*.test.mjs test/security/*.test.mjs test/runtime/*.test.mjs",
+    "test:go": "GOTOOLCHAIN=go1.26.3 go test ./...",
+    "test:wasm": "env -i HOME=\"$HOME\" PATH=\"$PATH\" GOTOOLCHAIN=go1.26.3 GOOS=js GOARCH=wasm go test -exec=\"$(GOTOOLCHAIN=go1.26.3 go env GOROOT)/lib/wasm/go_js_wasm_exec\" ./cmd/wasm-kernel ./internal/wsconn",
+    "build": "node scripts/build.mjs",
+    "build:framework-fixtures": "node scripts/build-framework-fixtures.mjs",
+    "generate:corpus-manifest": "node scripts/generate-corpus-manifest.mjs",
+    "publish:framework-fixtures": "node scripts/publish-framework-fixtures.mjs",
+    "candidate:workstation": "node scripts/run-workstation-candidate.mjs",
+    "verify:protocol": "GOTOOLCHAIN=go1.26.3 go test ./internal/release",
+    "verify:v1-baseline": "node scripts/verify-v1-baseline.mjs",
+    "verify:browsers": "node scripts/verify-browser-tuples.mjs",
+    "verify:toolchains": "node scripts/verify-toolchains.mjs",
+    "test:release": "npm run build:framework-fixtures && node --test test/release/*.test.mjs",
+    "gate:performance": "node scripts/gates/performance.mjs",
+    "gate:egress": "node scripts/gates/egress.mjs",
+    "gate:test-proxy": "GOTOOLCHAIN=go1.26.3 go run ./cmd/egress-test-proxy",
+    "gate:soak": "node scripts/gates/soak.mjs",
+    "gate:corpus": "node scripts/gates/corpus.mjs",
+    "gate:manifest": "node scripts/gates/release-manifest.mjs",
+    "gate:self-test": "node scripts/gates/performance.mjs --self-test && node scripts/gates/egress.mjs --self-test && node scripts/gates/soak.mjs --self-test && node scripts/gates/corpus.mjs --self-test",
+    "lint:js": "biome lint web scripts test",
+    "lint:go": "GOTOOLCHAIN=go1.26.3 golangci-lint cache clean && GOTOOLCHAIN=go1.26.3 golangci-lint run ./...",
+    "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings"
+  },
+  "devDependencies": {
+    "@angular/compiler": "20.3.26",
+    "@angular/core": "20.3.26",
+    "@angular/platform-browser": "20.3.26",
+    "@biomejs/biome": "2.5.3",
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "esbuild": "0.28.1",
+    "jquery": "3.7.1",
+    "puppeteer-core": "25.0.4",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "rxjs": "7.8.2",
+    "tslib": "2.8.1",
+    "vue": "3.5.39",
+    "webpack": "5.108.4",
+    "zone.js": "0.15.1"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "performance-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_type", "generated_at", "status", "test_mode", "certification", "release", "environment", "build", "measurement", "scenarios", "fixture_reports", "v1_aggregate", "invalidations", "violations"],
+  "properties": {
+    "schema_version": {"const": 1}, "report_type": {"const": "performance-gate"}, "generated_at": {"type": "string", "format": "date-time"}, "status": {"enum": ["pass", "fail", "invalid"]}, "test_mode": {"type": "boolean"},
+    "certification": {"type": "object", "required": ["claimed", "reason"], "properties": {"claimed": {"type": "boolean"}, "reason": {"type": "string"}}},
+    "release": {"$ref": "#/$defs/release"}, "environment": {"type": "object"}, "build": {"$ref": "#/$defs/build"},
+    "measurement": {"type": "object", "required": ["warmups", "measured_pairs", "bootstrap_resamples", "bootstrap_method", "max_cv", "resource_limits", "deterministic_seed"]},
+    "scenarios": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scenario"}},
+    "fixture_reports": {"type": "array", "items": {"$ref": "#/$defs/fixture_report"}},
+    "v1_aggregate": {"$ref": "#/$defs/v1_aggregate"},
+    "invalidations": {"type": "array", "items": {"type": "object"}},
+    "violations": {"type": "array", "items": {"type": "object"}}
+  },
+  "allOf": [
+    {
+      "properties": {
+        "scenarios": {"items": {"required": ["fixture_sha256", "fixture_evidence"], "properties": {"fixture_sha256": {"$ref": "#/$defs/sha256"}, "fixture_evidence": {"$ref": "#/$defs/fixtureEvidence"}}}},
+        "fixture_reports": {"items": {"required": ["fixture_sha256", "fixture_evidence"], "properties": {"fixture_sha256": {"$ref": "#/$defs/sha256"}, "fixture_evidence": {"$ref": "#/$defs/fixtureEvidence"}}}}
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "release": {"type": "object", "required": ["release_id", "performance_config_sha256", "build_tree_sha256"], "properties": {"release_id": {"type": "string"}, "performance_config_sha256": {"$ref": "#/$defs/sha256"}, "build_tree_sha256": {"$ref": "#/$defs/sha256"}}},
+    "build": {"type": "object", "required": ["tree_sha256", "assets"], "properties": {"tree_sha256": {"$ref": "#/$defs/sha256"}, "assets": {"type": "array", "items": {"type": "object"}}}},
+    "scenario": {"type": "object", "required": ["id", "gate", "site_class", "threshold", "sample_count", "warmup_count", "value", "resource", "site_metrics", "pairs"], "properties": {"id": {"type": "string"}, "gate": {"type": "string"}, "site_class": {"enum": ["content", "application", "editor_media_pwa"]}, "threshold": {"type": "object"}, "sample_count": {"type": "integer", "minimum": 1}, "warmup_count": {"type": "integer", "minimum": 1}, "value": {"type": "object", "required": ["native", "mediated", "mediated_percentile", "mediated_cv", "paired_mean_delta_ci"], "properties": {"native": {"$ref": "#/$defs/percentiles"}, "mediated": {"$ref": "#/$defs/percentiles"}, "mediated_percentile": {"type": "number"}, "mediated_cv": {"type": "number"}, "paired_mean_delta_ci": {"type": "object", "required": ["method", "resamples", "seed", "lower", "upper"]}}}, "resource": {"type": "object"}, "site_metrics": {"type": "object"}, "pairs": {"type": "array", "minItems": 1}}},
+    "fixture_report": {"type": "object", "required": ["id", "fixture_id", "site_class", "sample_count", "warmup_count", "resource", "site_metrics", "v1_comparison", "pairs"], "properties": {"id": {"type": "string"}, "fixture_id": {"type": "string"}, "site_class": {"enum": ["content", "application", "editor_media_pwa"]}, "sample_count": {"type": "integer", "minimum": 1}, "warmup_count": {"type": "integer", "minimum": 1}, "resource": {"type": "object"}, "site_metrics": {"type": "object"}, "v1_comparison": {"type": "object"}, "pairs": {"type": "array", "minItems": 1}}},
+    "v1_aggregate": {"type": "object", "required": ["status", "fixture_count", "geometric_mean_overhead_reduction", "non_worse_fixture_fraction", "class_p95_regression"], "properties": {"status": {"enum": ["pass", "fail", "not-measured"]}, "fixture_count": {"type": "integer", "minimum": 0}, "geometric_mean_overhead_reduction": {"type": ["number", "null"]}, "non_worse_fixture_fraction": {"type": ["number", "null"]}, "class_p95_regression": {"type": "object"}}},
+    "fixtureEvidence": {"type": "object", "additionalProperties": false, "required": ["status", "verified", "tree_sha256", "asset_count", "served_from_snapshot", "entry_path"], "properties": {"status": {"const": "verified"}, "verified": {"const": true}, "tree_sha256": {"$ref": "#/$defs/sha256"}, "asset_count": {"type": "integer", "minimum": 1}, "served_from_snapshot": {"const": true}, "entry_path": {"type": "string", "minLength": 1}}},
+    "percentiles": {"type": "object", "additionalProperties": false, "required": ["p50", "p95", "p99"], "properties": {"p50": {"type": "number"}, "p95": {"type": "number"}, "p99": {"type": "number"}}}
+  }
+}

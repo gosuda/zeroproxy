@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/protocol/emerging-network-capabilities.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "inventory_version", "release_id", "browser_lanes", "policy_exception", "packet_test_id", "permissions_policy_features", "capabilities"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "inventory_version": {"const": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "browser_lanes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["family", "exact_build", "platform", "binary_sha256"],
+        "properties": {
+          "family": {"enum": ["chromium", "firefox"]},
+          "exact_build": {"type": "string", "minLength": 1},
+          "platform": {"const": "darwin-arm64"},
+          "binary_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "policy_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boundary", "name", "message_suffix"],
+      "properties": {
+        "boundary": {"const": "synchronous"},
+        "name": {"const": "NotSupportedError"},
+        "message_suffix": {"const": " is disabled by ZeroProxy policy"}
+      }
+    },
+    "packet_test_id": {"const": "emerging-capability-zero-egress-v1"},
+    "permissions_policy_features": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"}
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/capability"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "presence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chromium", "firefox"],
+      "properties": {
+        "chromium": {"type": "boolean"},
+        "firefox": {"type": "boolean"}
+      }
+    },
+    "binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {"kind": {"const": "global"}, "name": {"type": "string", "minLength": 1}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "owner", "member"],
+          "properties": {
+            "kind": {"enum": ["prototype-method", "static-method"]},
+            "owner": {"type": "string", "minLength": 1},
+            "member": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "element", "attribute"],
+          "properties": {
+            "kind": {"const": "markup"},
+            "element": {"type": "string", "minLength": 1},
+            "attribute": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "type"],
+          "properties": {"kind": {"const": "script-type"}, "type": {"const": "speculationrules"}}
+        }
+      ]
+    },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["realm", "boundary", "exception"],
+      "properties": {
+        "realm": {"enum": ["document", "worker", "worklet", "target-service-worker"]},
+        "boundary": {"enum": ["synchronous", "promise-rejection", "document-policy-rejection"]},
+        "exception": {"enum": ["NotSupportedError", "SecurityError"]}
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "binding", "realms", "disposition", "behaviors", "packet_test_id", "native_presence"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "category": {"enum": ["federated-identity", "payments", "push-notifications-background", "advertising-privacy", "isolated-navigation", "web-share-url-handlers", "webauthn-passkeys", "media-capture-device-discovery", "geolocation", "usb", "bluetooth", "serial-hid-nfc"]},
+        "binding": {"$ref": "#/$defs/binding"},
+        "realms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["document", "worker", "worklet", "target-service-worker"]}
+        },
+        "disposition": {"const": "disabled"},
+        "behaviors": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/behavior"}
+        },
+        "packet_test_id": {"const": "emerging-capability-zero-egress-v1"},
+        "native_presence": {"$ref": "#/$defs/presence"}
+      }
+    }
+  }
+}

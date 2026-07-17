@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {"input":"www.example.co.uk","canonical":"www.example.co.uk","allowed":true},
+    {"input":"BÜCHER.example.co.uk","canonical":"xn--bcher-kva.example.co.uk","allowed":true},
+    {"input":"sub.service.dev","canonical":"sub.service.dev","allowed":true},
+    {"input":"127.0.0.1","canonical":null,"allowed":false},
+    {"input":"[::1]","canonical":null,"allowed":false},
+    {"input":"2130706433","canonical":null,"allowed":false},
+    {"input":"0x7f000001","canonical":null,"allowed":false},
+    {"input":"localhost","canonical":null,"allowed":false},
+    {"input":"printer.local","canonical":null,"allowed":false},
+    {"input":"service.internal","canonical":null,"allowed":false},
+    {"input":"metadata.google.internal","canonical":null,"allowed":false},
+    {"input":"example.test","canonical":null,"allowed":false},
+    {"input":"hiddenservice.onion","canonical":null,"allowed":false},
+    {"input":"singlelabel","canonical":null,"allowed":false},
+    {"input":"bad..example.com","canonical":null,"allowed":false},
+    {"input":"trailing.example.co.uk.","canonical":null,"allowed":false},
+    {"input":"-bad.example.co.uk","canonical":null,"allowed":false}
+  ]
+}

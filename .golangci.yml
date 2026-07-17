@@ -1,0 +1,27 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - cyclop
+    - gocognit
+    - nestif
+  settings:
+    cyclop:
+      max-complexity: 10
+    gocognit:
+      min-complexity: 16
+    nestif:
+      min-complexity: 5
+  exclusions:
+    warn-unused: true
+    rules:
+      - path: _test\.go
+        linters:
+          - cyclop
+          - gocognit
+          - nestif
+
+formatters:
+  enable:
+    - gofmt

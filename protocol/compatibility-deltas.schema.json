@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/schema/compatibility-deltas.schema.json",
+  "title": "ZeroProxy exact compatibility delta registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_version", "release_id", "oracle_id", "oracle_digest", "generated_at", "browser_scope", "entries"],
+  "properties": {
+    "registry_version": { "const": 1 },
+    "release_id": { "type": "string", "minLength": 1 },
+    "oracle_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]+$" },
+    "oracle_digest": { "$ref": "#/$defs/sha256" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "browser_scope": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/browser" }
+    },
+    "entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "exact_build", "platform"],
+      "properties": {
+        "family": { "enum": ["chromium", "firefox", "safari"] },
+        "exact_build": { "type": "string", "minLength": 1 },
+        "platform": { "type": "string", "minLength": 1 }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surface", "probe_id", "native_digest", "mediated_digest"],
+      "properties": {
+        "surface": { "type": "string", "minLength": 1 },
+        "probe_id": { "type": "string", "minLength": 1 },
+        "native_digest": { "$ref": "#/$defs/sha256" },
+        "mediated_digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "observation_id", "exact_signature", "category", "issue_url", "owner", "rationale", "affected_release_range", "affected_browser_builds", "introduced_at", "expires_at", "removal_condition", "test_id"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^delta-[a-z0-9-]+$" },
+        "observation_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9./-]+$" },
+        "exact_signature": { "$ref": "#/$defs/signature" },
+        "category": { "enum": ["intentional-security-boundary", "platform-limitation", "browser-implementation-difference"] },
+        "issue_url": { "type": "string", "format": "uri", "pattern": "^https://github\\.com/gosuda/zeroproxy/issues/" },
+        "owner": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 20 },
+        "affected_release_range": { "type": "string", "minLength": 1 },
+        "affected_browser_builds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/browser" }
+        },
+        "introduced_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "removal_condition": { "type": "string", "minLength": 20 },
+        "test_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

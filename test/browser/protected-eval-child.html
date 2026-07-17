@@ -1,0 +1,3 @@
+<!doctype html><meta charset="utf-8"><title>protected eval child</title><body data-ready="false"><script type="module">
+const version=await fetch("/_zp/version.json").then(response=>response.json()),runtime=document.createElement("script"),abiName="__zp_abi_666666666666666666666666666666666666666666666666",targetURL="https://target.example/path/child.html";runtime.src=version.selectors["runtime-prelude.js"]+"#abi="+abiName+"&url="+encodeURIComponent(targetURL)+"&ports=80%2C443";runtime.onload=()=>{document.body.dataset.ready="true";parent.postMessage({type:"protected-eval-child-ready-v2"},location.origin)};runtime.onerror=()=>{document.body.dataset.ready="error"};document.head.append(runtime);
+</script>

@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>sealed history oracle</title>
+<script src="__RUNTIME_URL__" data-zp-cookie-bootstrap="__RUNTIME_BOOTSTRAP__"></script>
+<script>
+const abiName="__ABI_NAME__";
+const replaceTarget="https://target.example/application/replace?secret=replace#replace-fragment";
+const pushedTarget="https://target.example/application/pushed?secret=pushed#pushed-fragment";
+function visibleHistory(){
+  const targetWindow=globalThis[abiName].scope.window;
+  return {href:targetWindow.location.href,documentURL:targetWindow.document.URL,state:targetWindow.history.state};
+}
+function workerMessage(message){
+  return new Promise((resolve,reject)=>{
+    const channel=new MessageChannel(),timeout=setTimeout(()=>reject(new Error("service worker reply timed out")),5_000);
+    channel.port1.onmessage=event=>{clearTimeout(timeout);resolve(event.data)};
+    channel.port1.onmessageerror=()=>{clearTimeout(timeout);reject(new Error("service worker reply failed"))};
+    channel.port1.start?.();
+    navigator.serviceWorker.controller.postMessage(message,[channel.port2]);
+  });
+}
+globalThis.__sealedHistoryStoreRoutes=async routes=>{
+  const reply=await workerMessage({type:"STORE_HISTORY_ROUTES",routes});
+  if(reply?.ok!==true)throw new Error("history route store failed");
+};
+globalThis.__sealedHistoryResetMock=async()=>{
+  const reply=await workerMessage({type:"DROP_HISTORY_MEMORY"});
+  if(reply?.ok!==true)throw new Error("history memory reset failed");
+};
+function nextPop(){return new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>reject(new Error("popstate timed out")),5_000);
+  addEventListener("popstate",()=>{clearTimeout(timeout);resolve()}, {once:true});
+});}
+(async()=>{
+  try{
+    history.replaceState({phase:"replace",visible:"replace"},"",replaceTarget);
+    const replace=visibleHistory();
+    history.pushState({phase:"push",visible:"push"},"",pushedTarget);
+    const pushed=visibleHistory();
+    const backEvent=nextPop();history.back();await backEvent;
+    const back=visibleHistory();
+    const forwardEvent=nextPop();history.forward();await forwardEvent;
+    const forward=visibleHistory();
+    globalThis.__sealedHistoryInitial={ok:true,replace,pushed,back,forward,replaceTarget,pushedTarget};
+  }catch(error){globalThis.__sealedHistoryInitial={ok:false,error:String(error)}}
+})();
+</script>

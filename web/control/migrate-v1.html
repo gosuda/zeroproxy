@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Import a ZeroProxy V1 link</title>
+<main>
+  <h1>Import a V1 link</h1>
+  <p>The link is decoded only in this page. Its fragment is removed from the address bar immediately and is never sent to the server.</p>
+  <section id="proposal" hidden>
+    <p>Target host: <strong id="target-host"></strong></p>
+    <p>This creates a new isolated V2 profile and requests fresh relay access. No V1 credential or relay authority is reused.</p>
+    <p>The installed relay sees your client IP, destination metadata, timing and volume, and plaintext HTTP traffic. Approval applies only to this import.</p>
+    <button id="approve" type="button">Import and request fresh relay access</button>
+    <button id="reject" type="button">Reject</button>
+  </section>
+  <button id="delete-local" type="button">Delete local import data</button>
+  <output id="status" aria-live="polite"></output>
+</main>
+<script type="module" src="/control/migrate-v1.mjs"></script>

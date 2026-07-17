@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>runtime atomic failure oracle</title>
+<script type="module">
+const version = await fetch("/_zp/version.json").then(response => response.json());
+const abiName = "__zp_abi_999999999999999999999999999999999999999999999999";
+const sentinel = Object.freeze({ collision: true });
+const original = {
+  eval: Object.getOwnPropertyDescriptor(window, "eval"),
+  Function: Object.getOwnPropertyDescriptor(window, "Function"),
+  baseURI: Object.getOwnPropertyDescriptor(Node.prototype, "baseURI"),
+  defaultView: Object.getOwnPropertyDescriptor(Document.prototype, "defaultView"),
+};
+Object.defineProperty(window, abiName, { value: sentinel, writable: true, enumerable: true, configurable: true });
+const runtime = document.createElement("script");
+runtime.src = version.selectors["runtime-prelude.js"] + "#abi=" + abiName + "&url=" + encodeURIComponent("https://target.example/atomic.html") + "&ports=80%2C443";
+function recordFailure(error) {
+  const current = {
+    eval: Object.getOwnPropertyDescriptor(window, "eval"),
+    Function: Object.getOwnPropertyDescriptor(window, "Function"),
+    baseURI: Object.getOwnPropertyDescriptor(Node.prototype, "baseURI"),
+    defaultView: Object.getOwnPropertyDescriptor(Document.prototype, "defaultView"),
+    collision: Object.getOwnPropertyDescriptor(window, abiName),
+  };
+  const same = (left, right) => left.value === right.value && left.get === right.get && left.set === right.set && left.writable === right.writable && left.enumerable === right.enumerable && left.configurable === right.configurable;
+  window.__zp_atomic_failure_result = {
+    ok: String(error).includes("ABI identifier collision") && same(current.eval, original.eval) && same(current.Function, original.Function) && same(current.baseURI, original.baseURI) && same(current.defaultView, original.defaultView) && current.collision.value === sentinel && current.collision.writable === true && current.collision.enumerable === true && current.collision.configurable === true,
+  };
+}
+addEventListener("error", event => recordFailure(event.error ?? event.message), { once: true });
+runtime.onload = () => setTimeout(() => {
+  if (window.__zp_atomic_failure_result === undefined) window.__zp_atomic_failure_result = { ok: false, error: "missing-failure" };
+}, 0);
+runtime.onerror = () => recordFailure("network-error");
+document.head.append(runtime);
+</script>

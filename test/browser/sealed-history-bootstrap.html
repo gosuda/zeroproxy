@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>sealed history bootstrap</title>
+<script>
+(async()=>{
+  try{
+    await navigator.serviceWorker.register("__SW_URL__",{scope:"/"});
+    await navigator.serviceWorker.ready;
+    if(!navigator.serviceWorker.controller){location.replace("/sealed-history-bootstrap.html");return}
+    location.replace("/sealed-history-oracle.html");
+  }catch(error){globalThis.__sealedHistoryBootstrap={ok:false,error:String(error)}}
+})();
+</script>

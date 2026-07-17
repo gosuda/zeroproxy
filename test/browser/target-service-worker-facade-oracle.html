@@ -1,0 +1,148 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>virtual target ServiceWorker facade oracle</title>
+<script>
+(async () => {
+  const checks = [];
+  const check = (id, pass, detail = "") => checks.push({ id, pass: Boolean(pass), detail });
+  const config = __ZP_CONFIG__;
+  const rawContainer = navigator.serviceWorker;
+
+  try {
+    await rawContainer.register("/target-service-worker-plan-sw.js", { scope: "/" });
+    await rawContainer.ready;
+    if (!rawContainer.controller) {
+      await new Promise(resolve => rawContainer.addEventListener("controllerchange", resolve, { once: true }));
+    }
+
+    await new Promise((resolve, reject) => {
+      const runtime = document.createElement("script");
+      runtime.src = config.runtimeURL;
+      runtime.dataset.zpCookieBootstrap = config.bootstrap;
+      runtime.onload = resolve;
+      runtime.onerror = () => reject(new Error("runtime failed to load"));
+      document.head.append(runtime);
+    });
+
+    const container = navigator.serviceWorker;
+    let controllerListenerEvents = 0;
+    let controllerHandlerEvents = 0;
+    container.addEventListener("controllerchange", () => { controllerListenerEvents += 1; });
+    container.oncontrollerchange = () => { controllerHandlerEvents += 1; };
+
+    const registration = await container.register(config.scriptURL, {
+      scope: config.scope,
+      type: "module",
+      updateViaCache: "none",
+    });
+    check("container-prototype-is-virtual", container !== rawContainer && container instanceof ServiceWorkerContainer);
+    check("registration-prototype-is-virtual", registration instanceof ServiceWorkerRegistration);
+    check("register-does-not-eagerly-control", container.controller === null);
+    check("registration-native-fields", registration.scope === config.scope && registration.updateViaCache === "none");
+    check("active-worker-native-state", registration.active instanceof ServiceWorker && registration.active.state === "activated");
+    const navigationPreload = registration.navigationPreload;
+    check("navigation-preload-native-prototype", navigationPreload instanceof NavigationPreloadManager);
+    check("navigation-preload-default-disabled", JSON.stringify(await navigationPreload.getState()) === JSON.stringify({ enabled: false, headerValue: "true" }));
+    await navigationPreload.setHeaderValue("target-v1");
+    await navigationPreload.enable();
+    check("navigation-preload-enable-and-header", JSON.stringify(await navigationPreload.getState()) === JSON.stringify({ enabled: true, headerValue: "target-v1" }));
+    await navigationPreload.disable();
+    check("navigation-preload-disable-preserves-header", JSON.stringify(await navigationPreload.getState()) === JSON.stringify({ enabled: false, headerValue: "target-v1" }));
+
+    const readyPromise = container.ready;
+    check("ready-promise-identity", readyPromise === container.ready);
+    const ready = await readyPromise;
+    check("ready-resolves-stable-registration", ready === registration);
+    check("controller-commits-after-notification", container.controller === registration.active);
+    check("controllerchange-listener-and-handler", controllerListenerEvents === 1 && controllerHandlerEvents === 1, `${controllerListenerEvents}:${controllerHandlerEvents}`);
+
+    const same = await container.getRegistration(`${config.scope}page`);
+    const all = await container.getRegistrations();
+    check("registration-identity-across-lookups", same === registration && all.length === 1 && all[0] === registration);
+    check("worker-identity-is-stable", registration.active === registration.active);
+    let queuedMessageEvents = 0;
+    const queuedMessage = new Promise(resolve => container.addEventListener("message", event => {
+      queuedMessageEvents += 1;
+      resolve(event);
+    }, { once: true }));
+    registration.active.postMessage({ ping: "queued-before-start" });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    check("messages-queue-before-start", queuedMessageEvents === 0);
+    const startResult = container.startMessages();
+    const queued = await queuedMessage;
+    check("startmessages-native-return", startResult === undefined);
+    check("startmessages-flushes-queued-message", queued.data?.pong === "queued-before-start" && queuedMessageEvents === 1);
+
+    const previous = registration.active;
+    let previousListenerEvents = 0;
+    let previousHandlerEvents = 0;
+    previous.addEventListener("statechange", () => { previousListenerEvents += 1; });
+    previous.onstatechange = () => { previousHandlerEvents += 1; };
+
+    let updateFoundListenerEvents = 0;
+    let updateFoundHandlerEvents = 0;
+    let candidate = null;
+    const candidateListenerStates = [];
+    const candidateHandlerStates = [];
+    const captureCandidate = () => {
+      if (candidate) return;
+      candidate = registration.installing;
+      candidate?.addEventListener("statechange", () => candidateListenerStates.push(candidate.state));
+      if (candidate) candidate.onstatechange = () => candidateHandlerStates.push(candidate.state);
+    };
+    registration.addEventListener("updatefound", () => {
+      updateFoundListenerEvents += 1;
+      captureCandidate();
+    });
+    registration.onupdatefound = () => {
+      updateFoundHandlerEvents += 1;
+      captureCandidate();
+    };
+
+    const updated = await registration.update();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    check("update-retains-registration-identity", updated === registration);
+    check("updatefound-listener-and-handler", updateFoundListenerEvents === 1 && updateFoundHandlerEvents === 1, `${updateFoundListenerEvents}:${updateFoundHandlerEvents}`);
+    check("candidate-statechange-sequence", JSON.stringify(candidateListenerStates) === JSON.stringify(["installed", "activating", "activated"]), JSON.stringify(candidateListenerStates));
+    check("candidate-statechange-handler-sequence", JSON.stringify(candidateHandlerStates) === JSON.stringify(candidateListenerStates), JSON.stringify(candidateHandlerStates));
+    check("promotion-preserves-worker-identity", candidate === registration.active && registration.active.state === "activated");
+    check("incumbent-becomes-redundant", previous.state === "redundant" && previousListenerEvents === 1 && previousHandlerEvents === 1, `${previous.state}:${previousListenerEvents}:${previousHandlerEvents}`);
+    check("controllerchange-revision-is-ordered", container.controller === candidate && controllerListenerEvents === 2 && controllerHandlerEvents === 2, `${controllerListenerEvents}:${controllerHandlerEvents}`);
+
+    let messageHandlerEvents = 0;
+    container.onmessage = () => { messageHandlerEvents += 1; };
+    const messageEvent = new Promise(resolve => container.addEventListener("message", resolve, { once: true }));
+    const postResult = registration.active.postMessage({ ping: "round-trip" });
+    const received = await messageEvent;
+    check("postmessage-native-return", postResult === undefined);
+    check("message-listener-and-handler", messageHandlerEvents === 1);
+    check("message-round-trip", received.data?.pong === "round-trip");
+    check("message-origin-and-source", received.origin === config.origin && received.source === container.controller);
+    check("ready-does-not-poll", received.data?.diagnostics?.readyCommands === 1, received.data?.diagnostics?.readyCommands);
+    check("update-preserves-registration-type", received.data?.diagnostics?.lastUpdateType === "module", received.data?.diagnostics?.lastUpdateType);
+    check("update-preserves-cache-policy", received.data?.diagnostics?.lastUpdateViaCache === "none", received.data?.diagnostics?.lastUpdateViaCache);
+    const channel = new MessageChannel();
+    channel.port1.start();
+    const transferredPortMessage = new Promise(resolve => { channel.port1.onmessage = event => resolve(event.data); });
+    const transferredMessageEvent = new Promise(resolve => container.addEventListener("message", resolve, { once: true }));
+    const transferResult = registration.active.postMessage({ ping: "transfer-round-trip" }, { transfer: [channel.port2] });
+    const [transferredMessage, transferredPortEvent] = await Promise.all([transferredMessageEvent, transferredPortMessage]);
+    check("transfer-postmessage-native-return", transferResult === undefined);
+    check("transferable-port-reaches-target-worker", transferredPortEvent?.via === "target-worker-port");
+    check("transferable-port-returns-to-client", transferredMessage.data?.pong === "transfer-round-trip" && transferredMessage.data?.transferredPorts === 1 && transferredMessage.ports.length === 1 && transferredMessage.ports[0] instanceof MessagePort);
+
+    check("unregister-first-commit", await registration.unregister() === true);
+    check("unregister-idempotent-result", await registration.unregister() === false);
+    check("unregister-removes-lookups", (await container.getRegistration(`${config.scope}page`)) === undefined && (await container.getRegistrations()).length === 0);
+  } catch (error) {
+    checks.push({ id: "oracle-runtime", pass: false, detail: `${error?.name}:${error?.message}\n${error?.stack ?? ""}` });
+  }
+
+  globalThis.__targetServiceWorkerFacadeOracle = {
+    checks,
+    ok: checks.every(check => check.pass),
+    passed: checks.filter(check => check.pass).length,
+    total: checks.length,
+  };
+})();
+</script>

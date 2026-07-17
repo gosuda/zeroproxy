@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "egress-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "report_type", "generated_at", "status", "test_mode", "certification", "release", "environment", "build", "manifest", "scenarios", "violations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "report_type": {"const": "egress-gate"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["pass", "fail"]},
+    "test_mode": {"type": "boolean"},
+    "certification": {"$ref": "#/$defs/certification"},
+    "release": {"$ref": "#/$defs/release"},
+    "environment": {"$ref": "#/$defs/environment"},
+    "build": {"$ref": "#/$defs/build"},
+    "manifest": {"type": "object", "additionalProperties": false, "required": ["sha256", "scenario_count", "support_matrix_sha256", "surfaces"], "properties": {"sha256": {"$ref": "#/$defs/sha256"}, "scenario_count": {"type": "integer", "minimum": 1}, "support_matrix_sha256": {"$ref": "#/$defs/sha256"}, "surfaces": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}},
+    "scenarios": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scenario"}},
+    "violations": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "certification": {"type": "object", "additionalProperties": false, "required": ["claimed", "reason"], "properties": {"claimed": {"type": "boolean"}, "reason": {"type": "string"}}},
+    "release": {"type": "object", "additionalProperties": false, "required": ["release_id", "performance_config_sha256", "build_tree_sha256"], "properties": {"release_id": {"type": "string"}, "performance_config_sha256": {"$ref": "#/$defs/sha256"}, "build_tree_sha256": {"$ref": "#/$defs/sha256"}}},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["architecture", "os", "node", "toolchain", "browser", "browser_pin", "adapter_toolchain"], "properties": {"architecture": {"type": "string"}, "os": {"type": "string"}, "node": {"type": "string"}, "toolchain": {"type": "object"}, "browser": {"type": "object", "required": ["family", "exact_build"], "properties": {"family": {"type": "string"}, "exact_build": {"type": "string"}}}, "browser_pin": {"type": "object", "required": ["configured_pin", "boundary_pin_verified", "release_supported"]}, "adapter_toolchain": {}}},
+    "build": {"type": "object", "additionalProperties": false, "required": ["tree_sha256", "assets"], "properties": {"tree_sha256": {"$ref": "#/$defs/sha256"}, "assets": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "size_bytes"], "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}}}}}},
+    "scenario": {"type": "object", "additionalProperties": false, "required": ["id", "surfaces", "url", "target", "allowed_dns", "execution", "capture", "violations"], "properties": {"id": {"type": "string"}, "surfaces": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "url": {"type": "string", "format": "uri"}, "target": {"type": "object", "additionalProperties": false, "required": ["host", "ports", "resolved_ips"], "properties": {"host": {"type": "string"}, "ports": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1, "maximum": 65535}}, "resolved_ips": {"type": "array", "minItems": 1, "items": {"type": "string"}}}}, "allowed_dns": {"type": "array", "items": {"type": "string"}}, "execution": {"type": "object", "additionalProperties": false, "required": ["status", "details"], "properties": {"status": {"const": "completed"}, "details": {}}}, "capture": {"type": "object", "additionalProperties": false, "required": ["pcap_path", "pcap_sha256", "pcap_size_bytes", "filter", "provenance", "events", "events_sha256"], "properties": {"pcap_path": {"type": "string"}, "pcap_sha256": {"$ref": "#/$defs/sha256"}, "pcap_size_bytes": {"type": "integer", "minimum": 24}, "filter": {"type": "string"}, "provenance": {"type": "object"}, "events": {"type": "array", "items": {"type": "object"}}, "events_sha256": {"$ref": "#/$defs/sha256"}}}, "violations": {"type": "array", "items": {"type": "object"}}}}
+  }
+}

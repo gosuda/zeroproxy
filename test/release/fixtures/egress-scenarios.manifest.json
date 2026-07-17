@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "release_id": "release-gate-test",
+  "scenarios": [
+    {
+      "id": "navigation-canary",
+      "surfaces": ["navigation"],
+      "url": "https://runtime.test/canary",
+      "target": {
+        "host": "target.test",
+        "ports": [443]
+      },
+      "allowed_dns": ["proxy.test"],
+      "expected_assertions": ["surface:navigation"],
+      "settle_ms": 500
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-cutover-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_type", "release_id", "generated_at", "release_tuple", "gate_reports", "artifact_hashes", "signature_required", "production_eligible", "ineligibility_reasons"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "manifest_type": {"const": "release-cutover-gate"},
+    "release_id": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "release_tuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["performance_config_version", "performance_config_sha256", "performance_schema_sha256", "release_manifest_schema_sha256", "support_matrix_sha256", "support_matrix_schema_sha256", "performance_policy_version", "build_tree_sha256", "signing_key_epoch", "ci_workflow_sha256", "framework_fixtures_sha256", "framework_fixtures_schema_sha256", "soak_workload_server_sha256", "v1_baseline_sha256", "v1_evidence_manifest_sha256", "artifact_hashes_sha256", "artifact_statement_sha256", "artifact_schema_sha256", "artifact_signature_sha256", "artifact_signature_key_epoch"],
+      "properties": {
+        "performance_config_version": {"type": "integer", "minimum": 1},
+        "performance_config_sha256": {"$ref": "#/$defs/sha256"},
+        "performance_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "release_manifest_schema_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "support_matrix_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "support_matrix_schema_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "performance_policy_version": {"type": "string", "minLength": 1},
+        "build_tree_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "signing_key_epoch": {"type": ["integer", "null"], "minimum": 1},
+        "ci_workflow_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "soak_workload_server_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "framework_fixtures_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "framework_fixtures_schema_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "v1_baseline_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "v1_evidence_manifest_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "artifact_hashes_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "artifact_statement_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "artifact_schema_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "artifact_signature_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "artifact_signature_key_epoch": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "gate_reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["performance", "egress", "soak", "corpus"],
+      "properties": {
+        "performance": {"$ref": "#/$defs/gateReport"},
+        "egress": {"$ref": "#/$defs/gateReport"},
+        "soak": {"$ref": "#/$defs/gateReport"},
+        "corpus": {"$ref": "#/$defs/gateReport"}
+      }
+    },
+    "artifact_hashes": {
+      "type": "object",
+      "required": ["server", "control", "service_worker", "kernel", "rust", "runtime", "messages", "carrier", "support_matrix", "framework_fixtures", "framework_fixtures_schema", "soak_workload_server", "compatibility_deltas", "migration_disposition", "v1_baseline", "v1_evidence_manifest", "standards_lock", "build_assets", "ci_workflow"],
+      "additionalProperties": {"$ref": "#/$defs/sha256"},
+      "properties": {
+        "server": {"$ref": "#/$defs/sha256"},
+        "control": {"$ref": "#/$defs/sha256"},
+        "service_worker": {"$ref": "#/$defs/sha256"},
+        "kernel": {"$ref": "#/$defs/sha256"},
+        "rust": {"$ref": "#/$defs/sha256"},
+        "runtime": {"$ref": "#/$defs/sha256"},
+        "messages": {"$ref": "#/$defs/sha256"},
+        "framework_fixtures": {"$ref": "#/$defs/sha256"},
+        "framework_fixtures_schema": {"$ref": "#/$defs/sha256"},
+        "soak_workload_server": {"$ref": "#/$defs/sha256"},
+        "carrier": {"$ref": "#/$defs/sha256"},
+        "support_matrix": {"$ref": "#/$defs/sha256"},
+        "compatibility_deltas": {"$ref": "#/$defs/sha256"},
+        "migration_disposition": {"$ref": "#/$defs/sha256"},
+        "v1_baseline": {"$ref": "#/$defs/sha256"},
+        "v1_evidence_manifest": {"$ref": "#/$defs/sha256"},
+        "standards_lock": {"$ref": "#/$defs/sha256"},
+        "build_assets": {"$ref": "#/$defs/sha256"},
+        "ci_workflow": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "signature_required": {"const": true},
+    "production_eligible": {"type": "boolean"},
+    "ineligibility_reasons": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"production_eligible": {"const": true}}},
+      "then": {"properties": {"ineligibility_reasons": {"maxItems": 0}}},
+      "else": {"properties": {"ineligibility_reasons": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "gateReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_sha256", "report_schema_sha256", "signature_sha256", "signature_key_epoch", "signature_roles", "schema_version", "status", "test_mode"],
+      "properties": {
+        "report_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "report_schema_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "signature_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "signature_key_epoch": {"type": ["integer", "null"], "minimum": 1},
+        "signature_roles": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "schema_version": {"type": ["integer", "null"], "minimum": 1},
+        "status": {"type": "string"},
+        "test_mode": {"type": "boolean"}
+      }
+    }
+  }
+}

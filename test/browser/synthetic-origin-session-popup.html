@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic origin session storage popup</title>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const openerOrigin = params.get("openerOrigin");
+  const nonce = params.get("nonce");
+  const phase = params.get("phase");
+  if (!openerOrigin || !nonce || !phase || !window.opener) throw new Error("session popup opener, nonce, and phase are required");
+  const report = () => window.opener.postMessage({
+    kind: "synthetic-origin-session-popup-ready",
+    nonce,
+    phase,
+    marker: sessionStorage.getItem("synthetic-origin-session-marker"),
+    child: sessionStorage.getItem("synthetic-origin-session-child"),
+  }, openerOrigin);
+  report();
+  window.addEventListener("pageshow", event => {
+    if (event.persisted) report();
+  });
+})();
+</script>

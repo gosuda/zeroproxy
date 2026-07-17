@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "performance-evidence-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "resource_limits", "scenarios"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "resource_limits": {"type": "object", "additionalProperties": false, "required": ["max_memory_bytes", "max_queue_depth"], "properties": {"max_memory_bytes": {"type": "number", "exclusiveMinimum": 0}, "max_queue_depth": {"type": "number", "exclusiveMinimum": 0}}},
+    "scenarios": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/scenario"}}
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "site_class", "fixture_path", "fixture_sha256", "entry_path", "mediated_url_template", "native_url", "mediated_url", "ready_expression", "interaction", "postcondition_expression", "settle_ms"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["gate", "fixture"]},
+        "gate": {"type": "string", "minLength": 1},
+        "fixture_id": {"type": "string", "minLength": 1},
+        "site_class": {"enum": ["content", "application", "editor_media_pwa"]},
+        "fixture_path": {"type": "string", "minLength": 1},
+        "fixture_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "entry_path": {"type": "string", "minLength": 1},
+        "mediated_url_template": {"type": "string", "pattern": "\\{fixture_url_encoded\\}"},
+        "native_url": {"const": null},
+        "mediated_url": {"const": null}
+        ,"ready_expression": {"type": "string", "minLength": 1}
+        ,"interaction": {"$ref": "#/$defs/interaction"}
+        ,"postcondition_expression": {"type": "string", "minLength": 1}
+        ,"settle_ms": {"const": 1000}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "gate"}}}, "then": {"required": ["gate"], "not": {"required": ["fixture_id"]}}},
+        {"if": {"properties": {"kind": {"const": "fixture"}}}, "then": {"required": ["fixture_id"], "not": {"required": ["gate"]}}}
+      ]
+    },
+    "interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "selector"],
+      "properties": {
+        "kind": {"enum": ["click", "type"]},
+        "selector": {"type": "string", "minLength": 1},
+        "text": {"type": "string", "minLength": 1},
+        "submit": {"type": "boolean"}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "click"}}}, "then": {"not": {"anyOf": [{"required": ["text"]}, {"required": ["submit"]}]}}},
+        {"if": {"properties": {"kind": {"const": "type"}}}, "then": {"required": ["text"]}}
+      ]
+    }
+  }
+}

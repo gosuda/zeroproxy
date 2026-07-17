@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/error-authority",
+  "crates/policy-core",
+  "crates/cookie-core",
+  "crates/html-rewriter",
+  "crates/js-compiler",
+  "crates/css-rewriter",
+  "crates/import-map",
+  "crates/share-crypto",
+]
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-only"
+version = "2.0.0"
+
+[workspace.dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+url = "2.5.4"
+wasm-bindgen = "=0.2.122"
+getrandom = { version = "0.2.17", features = ["js"] }

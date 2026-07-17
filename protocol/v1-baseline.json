@@ -1,0 +1,224 @@
+{
+  "schema_version": 2,
+  "source_commit": {
+    "commit": "34b7124214db284df7b8de4ff2a1a5536ed2ba7c",
+    "tree": "93bea096b803954760fad38db0b5394fc855b9d1",
+    "branch": "main",
+    "committed_at": "2026-06-13T12:33:52+09:00",
+    "archive": {
+      "format": "git-archive-tar",
+      "size": 1781760,
+      "sha256": "3b2627c8dd3be382210058df3e297471caa14ae924217fcddd0a60062d18fda0",
+      "capture_commands": [
+        "git cat-file -e 34b7124^{commit}",
+        "git archive --format=tar -o \"$TMPDIR/zeroproxy-v1-34b7124.tar\" 34b7124",
+        "git worktree add --detach \"$TMPDIR/zeroproxy-v1-34b7124\" 34b7124"
+      ],
+      "isolation": "archive"
+    }
+  },
+  "dependencies": [
+    {
+      "path": "package-lock.json",
+      "size": 68371,
+      "sha256": "932e7da5c3dc43e264ec645b718b974f3c23dcfac737ff789a38cf5a12e4d198"
+    },
+    {
+      "path": "go.sum",
+      "size": 2124,
+      "sha256": "321431f874bfe67d1807cc2c5b96a9d377ce9680b86d390973ef6170730a01c4"
+    },
+    {
+      "path": "rewriter-rs/Cargo.lock",
+      "size": 46427,
+      "sha256": "d12a31bdfe32807a0346183223f166b8e4b8d9e97ef3f51f3bd47578e91d15f9"
+    }
+  ],
+  "browser_evidence": [
+    {
+      "family": "chromium",
+      "platform": "darwin-arm64",
+      "status": "captured",
+      "exact_build": "148.0.7778.167",
+      "binary_path": ".puppeteer-cache/chrome/mac_arm-148.0.7778.167/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "binary_sha256": "6c0d5b4fadd09e9277d90b269e193db85aacef0034e04398a0f760d6d3814f01"
+    },
+    {
+      "family": "firefox",
+      "platform": "darwin-arm64",
+      "status": "unavailable",
+      "exact_build": null,
+      "binary_path": null,
+      "binary_sha256": null,
+      "reason": "No official Firefox binary is installed on this evidence-capture workstation; Firefox certification remains blocked."
+    }
+  ],
+  "fixture_digests": [
+    {
+      "path": "test/e2e/representative-sites.json",
+      "size": 6672,
+      "sha256": "23a96d07c728554f112a8affb856b4d9247cb16c44ee247eab9cef2b2ec3b298"
+    },
+    {
+      "path": "test/e2e/representative-sites.release.json",
+      "size": 11051,
+      "sha256": "93fc3c376e1f54894cece3b40433cacfeaab99748d0bf1a8590c52eceeddac76"
+    },
+    {
+      "path": "test/e2e/expected-deltas.json",
+      "size": 5290,
+      "sha256": "0da9740d42afc7b9399b108334211c8cce7ac21cc74d36bc878f270812b3d311"
+    },
+    {
+      "path": "test/fixtures/performance-gates.json",
+      "size": 471,
+      "sha256": "68e316945a7d65a842c6d0a989645a4fb74504b73c75ae7e728ffdfa85b5d963"
+    }
+  ],
+  "raw_outputs": [
+    {
+      "kind": "fourteen-site-corpus",
+      "archive_path": "test/e2e/representative-sites.release.json",
+      "sha256": "93fc3c376e1f54894cece3b40433cacfeaab99748d0bf1a8590c52eceeddac76",
+      "summary": {
+        "status": "pass",
+        "sites": 14,
+        "passes": 5,
+        "expected_deltas": 9,
+        "triage": 0
+      }
+    },
+    {
+      "kind": "expected-delta-registry",
+      "archive_path": "test/e2e/expected-deltas.json",
+      "sha256": "0da9740d42afc7b9399b108334211c8cce7ac21cc74d36bc878f270812b3d311",
+      "summary": {
+        "status": "captured",
+        "format": "broad-regex-v1-evidence-only"
+      }
+    },
+    {
+      "kind": "performance-gates",
+      "archive_path": "test/fixtures/performance-gates.json",
+      "sha256": "68e316945a7d65a842c6d0a989645a4fb74504b73c75ae7e728ffdfa85b5d963",
+      "summary": {
+        "status": "documented-partial",
+        "streaming_first_byte": null,
+        "representative_site_timing": "runner-only"
+      }
+    }
+  ],
+  "corpus": {
+    "site_count": 14,
+    "pass_count": 5,
+    "expected_delta_count": 9,
+    "sites": [
+      "naver-desktop",
+      "naver-mobile",
+      "google-search",
+      "google-maps",
+      "embedded-google-maps",
+      "wikipedia",
+      "github",
+      "hacker-news",
+      "reddit",
+      "x-com",
+      "amazon",
+      "nytimes",
+      "cloudflare",
+      "ipleak"
+    ]
+  },
+  "performance_fixture_classes": [
+    { "class": "content", "v1_measurement_status": "not-captured" },
+    { "class": "application", "v1_measurement_status": "not-captured" },
+    { "class": "editor_media_pwa", "v1_measurement_status": "not-captured" }
+  ],
+  "performance_failure_categories": [
+    "full parse and code generation per script",
+    "parser retry amplification",
+    "whole-body buffering",
+    "cross-language chunk copy amplification",
+    "blanket mutation observation"
+  ],
+  "adversarial_semantic_cases": [
+    {
+      "id": "non-callable-selected-call",
+      "native_contract": "A selected non-callable callee throws TypeError in the operation realm after evaluating the receiver and property once.",
+      "v1_failure": "Generic call lowering could return undefined or alter receiver identity."
+    },
+    {
+      "id": "getter-rhs-setter-order",
+      "native_contract": "Compound assignment performs GetValue, RHS evaluation, conversion, and Set in native order.",
+      "v1_failure": "Helper lowering could reorder or duplicate getter, RHS, or setter effects."
+    },
+    {
+      "id": "tonumeric-update",
+      "native_contract": "Prefix and postfix update preserve Number and BigInt ToNumeric semantics and old-value results.",
+      "v1_failure": "Helper arithmetic could coerce BigInt incorrectly or return the stored value."
+    },
+    {
+      "id": "strict-failed-set",
+      "native_contract": "A failed strict Set throws after evaluating the RHS exactly once.",
+      "v1_failure": "Helper assignment could suppress the strict TypeError."
+    },
+    {
+      "id": "strict-failed-delete",
+      "native_contract": "Strict delete follows native early-error and runtime failure rules.",
+      "v1_failure": "Generic delete lowering could return a boolean instead of preserving the native failure."
+    },
+    {
+      "id": "primitive-in-rhs",
+      "native_contract": "The in operator throws TypeError for primitive right-hand operands.",
+      "v1_failure": "Reflect.has(Object(rhs)) boxed the primitive and returned false."
+    },
+    {
+      "id": "private-in-rhs",
+      "native_contract": "Private-field in performs the branded native check with native parse and abrupt behavior.",
+      "v1_failure": "Broad in lowering could not preserve private-name grammar or branding."
+    },
+    {
+      "id": "proxy-in-rhs",
+      "native_contract": "Proxy has traps receive the original receiver and run exactly once.",
+      "v1_failure": "Boxing or helper indirection could change receiver identity and trap count."
+    },
+    {
+      "id": "optional-call-short-circuit",
+      "native_contract": "Nullish optional calls do not evaluate arguments or spreads.",
+      "v1_failure": "Arguments were materialized before the nullish test."
+    },
+    {
+      "id": "optional-chain-grouping",
+      "native_contract": "Chain continuation and parenthesized grouping preserve distinct short-circuit boundaries.",
+      "v1_failure": "Generic optional helpers could flatten grouping and alter throws."
+    },
+    {
+      "id": "optional-member-receiver",
+      "native_contract": "Optional member calls preserve the original receiver and evaluation count.",
+      "v1_failure": "Helper calls could detach the selected method from its receiver."
+    },
+    {
+      "id": "with-receiver",
+      "native_contract": "Identifiers resolved through with preserve the object environment receiver and Proxy traps.",
+      "v1_failure": "Flow-insensitive rewriting could capture the wrong binding or receiver."
+    },
+    {
+      "id": "derived-this-before-super",
+      "native_contract": "Derived constructors throw ReferenceError when this is accessed before super().",
+      "v1_failure": "Eager this mediation could evaluate before native derived-constructor initialization."
+    },
+    {
+      "id": "broad-member-name-capture",
+      "native_contract": "Ordinary unrelated member names remain native and are never mediated by spelling alone.",
+      "v1_failure": "Broad member-name matching could rewrite unrelated objects."
+    }
+  ],
+  "evidence_merkle": {
+    "algorithm": "sha256-binary-pair-duplicate-last",
+    "leaf_format": "sha256(path\\0size\\0sha256)",
+    "root": "9744ae28b1b856e322a3ef4da3f1c9e6571edadd65892bfc7a27dfcc51564f30",
+    "manifest_path": "evidence/2.0.0/v1/raw-manifest.json"
+  },
+  "product_source_exclusion": true,
+  "production_eligible": false
+}

@@ -1,0 +1,14 @@
+[package]
+name="import-map"
+version.workspace=true
+edition.workspace=true
+license.workspace=true
+[lib]
+crate-type=["cdylib","rlib"]
+[dependencies]
+policy-core={path="../policy-core"}
+serde.workspace=true
+serde_json.workspace=true
+thiserror.workspace=true
+url.workspace=true
+wasm-bindgen.workspace=true

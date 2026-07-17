@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GOTOOLCHAIN: go1.26.3
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Node 24.4.1
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.4.1
+          cache: npm
+      - name: Install Go 1.26.3
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.3
+          cache: true
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install wasm-bindgen CLI 0.2.122
+        run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+      - name: Install golangci-lint 2.12.2
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Verify and lint Rust workspace
+        run: cargo test --workspace --locked && npm run lint:rust
+      - name: Verify Go workspace, WASM target, and release protocol
+        run: npm run test:go && npm run test:wasm && npm run verify:protocol
+      - name: Build and verify browser/runtime behavior
+        run: npm test
+      - name: Verify release-gate logic
+        run: npm run test:release && npm run gate:self-test
+      - name: Lint JavaScript
+        run: npm run lint:js
+      - name: Lint Go
+        run: npm run lint:go

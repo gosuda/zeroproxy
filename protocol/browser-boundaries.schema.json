@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/protocol/browser-boundaries.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "claim_text", "browser_lanes", "deferred_browser_families", "unsupported_fail_closed", "production_release_eligible"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "release_id": {"type": "string", "minLength": 1},
+    "claim_text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mediation", "egress"],
+      "properties": {
+        "mediation": {"const": "ZeroProxy provides a versioned compatibility and artifact-minimization profile. Passing it means every known stable mediation signal in the specified observations and browser builds is minimized, owned, and listed in the signed delta registry, and no unowned deterministic signal is accepted. It is not a proof of invisibility against arbitrary hostile JavaScript, pristine cross-realm inspection, browser internals, extensions, DevTools, or statistical timing analysis."},
+        "egress": {"const": "No direct target IP/DNS egress is known or observed through the complete, versioned, enumerated transport/navigation/execution matrix; every supported release is packet-capture tested, and unsupported surfaces are disabled or fail closed."}
+      }
+    },
+    "browser_lanes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/lane"},
+      "allOf": [
+        {"contains": {"type": "object", "required": ["family"], "properties": {"family": {"const": "chromium"}}}, "minContains": 1, "maxContains": 1},
+        {"contains": {"type": "object", "required": ["family"], "properties": {"family": {"const": "firefox"}}}, "minContains": 1, "maxContains": 1}
+      ]
+    },
+    "deferred_browser_families": {"type": "array", "maxItems": 0},
+    "unsupported_fail_closed": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "production_release_eligible": {"type": "boolean"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "channel", "exact_build", "product_build_id", "platform", "archive_url", "archive_sha256", "binary_path", "binary_sha256", "native_semantics_oracle", "runtime_oracle", "transport_oracle", "performance_oracle", "soak_oracle", "corpus_oracle", "packet_capture_certified", "release_supported"],
+      "properties": {
+        "family": {"enum": ["chromium", "firefox"]},
+        "channel": {"const": "stable"},
+        "exact_build": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+){2,3}$"},
+        "product_build_id": {"type": "string", "minLength": 1},
+        "platform": {"const": "darwin-arm64"},
+        "archive_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+        "archive_sha256": {"$ref": "#/$defs/sha256"},
+        "binary_path": {"type": "string", "minLength": 1},
+        "binary_sha256": {"$ref": "#/$defs/sha256"},
+        "native_semantics_oracle": {"enum": ["pass", "fail", "unavailable"]},
+        "runtime_oracle": {"enum": ["pass", "fail", "unavailable"]},
+        "transport_oracle": {"enum": ["pass", "fail", "unavailable"]},
+        "performance_oracle": {"enum": ["pass", "fail", "unavailable"]},
+        "soak_oracle": {"enum": ["pass", "fail", "unavailable"]},
+        "corpus_oracle": {"enum": ["pass", "fail", "unavailable"]},
+        "packet_capture_certified": {"type": "boolean"},
+        "release_supported": {"type": "boolean"}
+      }
+    }
+  }
+}

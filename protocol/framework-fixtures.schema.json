@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework-fixtures.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "toolchain", "fixtures"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "packages"],
+      "properties": {
+        "node": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "packages": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["@angular/compiler", "@angular/core", "@angular/platform-browser", "esbuild", "jquery", "react", "react-dom", "rxjs", "tslib", "vue", "webpack", "zone.js"],
+          "properties": {
+            "@angular/compiler": {"type": "string", "minLength": 1},
+            "@angular/core": {"type": "string", "minLength": 1},
+            "@angular/platform-browser": {"type": "string", "minLength": 1},
+            "esbuild": {"type": "string", "minLength": 1},
+            "jquery": {"type": "string", "minLength": 1},
+            "react": {"type": "string", "minLength": 1},
+            "react-dom": {"type": "string", "minLength": 1},
+            "rxjs": {"type": "string", "minLength": 1},
+            "tslib": {"type": "string", "minLength": 1},
+            "vue": {"type": "string", "minLength": 1},
+            "webpack": {"type": "string", "minLength": 1},
+            "zone.js": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 19,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "path", "entry_path", "tree_sha256", "action_expression", "ready_expression"],
+        "properties": {
+          "category": {"enum": ["react", "vue", "angular-zone", "vite-next-esm", "webpack", "jquery", "pwa", "frame", "media", "editor", "upload", "download", "article", "styled-document", "gallery", "canvas-app", "interactive-list", "toggle-control", "tab-control"]},
+          "path": {"type": "string", "minLength": 1},
+          "entry_path": {"type": "string", "minLength": 1},
+          "tree_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "action_expression": {"type": "string", "minLength": 1},
+          "ready_expression": {"type": "string", "minLength": 1},
+          "postcondition_expression": {"type": "string", "minLength": 1},
+          "interaction": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "selector"],
+            "properties": {
+              "kind": {"enum": ["click", "type"]},
+              "selector": {"type": "string", "minLength": 1},
+              "text": {"type": "string", "minLength": 1},
+              "submit": {"type": "boolean"}
+            }
+          }
+        },
+        "dependentRequired": {
+          "interaction": ["postcondition_expression"],
+          "postcondition_expression": ["interaction"]
+        }
+      }
+    }
+  }
+}

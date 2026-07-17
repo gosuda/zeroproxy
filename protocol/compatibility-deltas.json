@@ -1,0 +1,962 @@
+{
+  "registry_version": 1,
+  "release_id": "2.0.0-dev",
+  "oracle_id": "stealth-release-oracle-v2",
+  "oracle_digest": "7deac05210835f99c19f2a6dbaa2df44af24d3cf62bb8766b5b403c6038fff2e",
+  "generated_at": "2026-07-17T00:00:00Z",
+  "browser_scope": [
+    {
+      "family": "chromium",
+      "exact_build": "150.0.7871.124",
+      "platform": "darwin-arm64"
+    },
+    {
+      "family": "firefox",
+      "exact_build": "152.0.6",
+      "platform": "darwin-arm64"
+    }
+  ],
+  "entries": [
+    {
+      "id": "delta-about-blank-realm-canonical-wrapper-identity-wrapper-instanceof",
+      "observation_id": "about-blank-realm/canonical-wrapper-identity.wrapper-instanceof",
+      "exact_signature": {
+        "surface": "about-blank-realm/canonical-wrapper-identity",
+        "probe_id": "wrapper-instanceof",
+        "native_digest": "b8192e3fc84951bdba855e7efa89280bc5586607191552239e476b78892aa405",
+        "mediated_digest": "9fd8585e6d317957cedee8a8dcf59437481c7a550e3713e5f0c6fb40c3e0a3de"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Fcanonical-wrapper-identity.wrapper-instanceof%20delta",
+      "owner": "runtime-security",
+      "rationale": "A newly instrumented contained realm uses a canonical Window facade whose prototype cannot preserve raw cross-realm Window identity.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when wrapper-instanceof is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-function-reflection-function-source-chromium",
+      "observation_id": "about-blank-realm/function-reflection.function-source",
+      "exact_signature": {
+        "surface": "about-blank-realm/function-reflection",
+        "probe_id": "function-source",
+        "native_digest": "59fd3a967fefc75afe12c3bb24f6e5199d9d881bd3ce1997f2d84a0000365d8f",
+        "mediated_digest": "deb3dc81a16eb24eb8665cf4dca8d4be2184b7250e1585047b35abb391a4d252"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Ffunction-reflection.function-source%20delta-chromium",
+      "owner": "runtime-security",
+      "rationale": "A pristine parent-realm Function.prototype observes the contained realm fetch wrapper source while the contained realm reflection surface remains native-shaped.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when function-source is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-function-reflection-function-source-firefox",
+      "observation_id": "about-blank-realm/function-reflection.function-source",
+      "exact_signature": {
+        "surface": "about-blank-realm/function-reflection",
+        "probe_id": "function-source",
+        "native_digest": "bf59ca36f197fccd78cb8c53dda65285bfd2a0f3625dd7caa6ef48db941cc5fa",
+        "mediated_digest": "deb3dc81a16eb24eb8665cf4dca8d4be2184b7250e1585047b35abb391a4d252"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Ffunction-reflection.function-source%20delta-firefox",
+      "owner": "runtime-security",
+      "rationale": "A pristine parent-realm Function.prototype observes the contained realm fetch wrapper source while the contained realm reflection surface remains native-shaped.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when function-source is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-global-equality-window-location",
+      "observation_id": "about-blank-realm/global-equality.window-location",
+      "exact_signature": {
+        "surface": "about-blank-realm/global-equality",
+        "probe_id": "window-location",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Fglobal-equality.window-location%20delta",
+      "owner": "runtime-security",
+      "rationale": "Document.location returns the synthetic Location facade so target code cannot recover the network-facing synthetic URL.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-internal-url-concealment-raw-runtime-urls",
+      "observation_id": "about-blank-realm/internal-url-concealment.raw-runtime-urls",
+      "exact_signature": {
+        "surface": "about-blank-realm/internal-url-concealment",
+        "probe_id": "raw-runtime-urls",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Finternal-url-concealment.raw-runtime-urls%20delta",
+      "owner": "runtime-security",
+      "rationale": "The newly instrumented about:blank realm records its trusted runtime bootstrap resource before the contained performance projection is installed.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when raw-runtime-urls is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-performance-observability-resource-timing",
+      "observation_id": "about-blank-realm/performance-observability.resource-timing",
+      "exact_signature": {
+        "surface": "about-blank-realm/performance-observability",
+        "probe_id": "resource-timing",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Fperformance-observability.resource-timing%20delta",
+      "owner": "runtime-security",
+      "rationale": "The newly instrumented about:blank realm records its trusted runtime bootstrap resource before the contained performance projection is installed.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when resource-timing is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-root-injection-concealment-root-descriptor-graph",
+      "observation_id": "about-blank-realm/root-injection-concealment.root-descriptor-graph",
+      "exact_signature": {
+        "surface": "about-blank-realm/root-injection-concealment",
+        "probe_id": "root-descriptor-graph",
+        "native_digest": "b594ff8e1c696eed43d7982bcc36e0a57442b87b92fe233f9fbc5ef96d92d8e1",
+        "mediated_digest": "f7534679dda5f7d8b4da44738488c650915215342803ce2f63d84252eca365f8"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Froot-injection-concealment.root-descriptor-graph%20delta",
+      "owner": "runtime-security",
+      "rationale": "The mediated descriptor graph contains immutable virtualized platform capabilities while exposing no ZeroProxy-owned property names.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when root-descriptor-graph is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-window-location-reflection-window-location-descriptors",
+      "observation_id": "about-blank-realm/window-location-reflection.window-location-descriptors",
+      "exact_signature": {
+        "surface": "about-blank-realm/window-location-reflection",
+        "probe_id": "window-location-descriptors",
+        "native_digest": "0f2ed7adb3a085b11fc001056381d5caafda92a1d425dc8d0b0238fb1844bb45",
+        "mediated_digest": "0b78bb68a30b7cbc68c59ae4362890ec38aac408a253b6b105704b51b736fd07"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Fwindow-location-reflection.window-location-descriptors%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade keeps navigation methods immutable so page code cannot replace the mediation boundary.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-descriptors is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-about-blank-realm-window-location-reflection-window-location-own-keys",
+      "observation_id": "about-blank-realm/window-location-reflection.window-location-own-keys",
+      "exact_signature": {
+        "surface": "about-blank-realm/window-location-reflection",
+        "probe_id": "window-location-own-keys",
+        "native_digest": "1ef5140c075a2da87f82b7db3f2ebd173e5b26b333ca01b47b85bc862a35bf6d",
+        "mediated_digest": "2f03d8d0d94de201914bd30f7b5c67d8005d84a061075d891c49918a8cb42402"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20about-blank-realm%2Fwindow-location-reflection.window-location-own-keys%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade omits raw ancestorOrigins and Symbol.toPrimitive paths that could reveal synthetic routing state.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-own-keys is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-frame-global-equality-window-location",
+      "observation_id": "cross-frame/global-equality.window-location",
+      "exact_signature": {
+        "surface": "cross-frame/global-equality",
+        "probe_id": "window-location",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-frame%2Fglobal-equality.window-location%20delta",
+      "owner": "runtime-security",
+      "rationale": "Document.location returns the synthetic Location facade so target code cannot recover the network-facing synthetic URL.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-frame-root-injection-concealment-root-descriptor-graph",
+      "observation_id": "cross-frame/root-injection-concealment.root-descriptor-graph",
+      "exact_signature": {
+        "surface": "cross-frame/root-injection-concealment",
+        "probe_id": "root-descriptor-graph",
+        "native_digest": "b594ff8e1c696eed43d7982bcc36e0a57442b87b92fe233f9fbc5ef96d92d8e1",
+        "mediated_digest": "0a68962bb7d2509e5e0b5ac0d3aa8f957d76c1859b56c06fb983c33bb9c6a660"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-frame%2Froot-injection-concealment.root-descriptor-graph%20delta",
+      "owner": "runtime-security",
+      "rationale": "The mediated descriptor graph contains immutable virtualized platform capabilities while exposing no ZeroProxy-owned property names.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when root-descriptor-graph is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-frame-window-location-reflection-window-location-descriptors",
+      "observation_id": "cross-frame/window-location-reflection.window-location-descriptors",
+      "exact_signature": {
+        "surface": "cross-frame/window-location-reflection",
+        "probe_id": "window-location-descriptors",
+        "native_digest": "0f2ed7adb3a085b11fc001056381d5caafda92a1d425dc8d0b0238fb1844bb45",
+        "mediated_digest": "0b78bb68a30b7cbc68c59ae4362890ec38aac408a253b6b105704b51b736fd07"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-frame%2Fwindow-location-reflection.window-location-descriptors%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade keeps navigation methods immutable so page code cannot replace the mediation boundary.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-descriptors is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-frame-window-location-reflection-window-location-own-keys",
+      "observation_id": "cross-frame/window-location-reflection.window-location-own-keys",
+      "exact_signature": {
+        "surface": "cross-frame/window-location-reflection",
+        "probe_id": "window-location-own-keys",
+        "native_digest": "1ef5140c075a2da87f82b7db3f2ebd173e5b26b333ca01b47b85bc862a35bf6d",
+        "mediated_digest": "2f03d8d0d94de201914bd30f7b5c67d8005d84a061075d891c49918a8cb42402"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-frame%2Fwindow-location-reflection.window-location-own-keys%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade omits raw ancestorOrigins and Symbol.toPrimitive paths that could reveal synthetic routing state.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-own-keys is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-popup-global-equality-window-location",
+      "observation_id": "cross-popup/global-equality.window-location",
+      "exact_signature": {
+        "surface": "cross-popup/global-equality",
+        "probe_id": "window-location",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-popup%2Fglobal-equality.window-location%20delta",
+      "owner": "runtime-security",
+      "rationale": "Document.location returns the synthetic Location facade so target code cannot recover the network-facing synthetic URL.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-popup-root-injection-concealment-root-descriptor-graph",
+      "observation_id": "cross-popup/root-injection-concealment.root-descriptor-graph",
+      "exact_signature": {
+        "surface": "cross-popup/root-injection-concealment",
+        "probe_id": "root-descriptor-graph",
+        "native_digest": "b594ff8e1c696eed43d7982bcc36e0a57442b87b92fe233f9fbc5ef96d92d8e1",
+        "mediated_digest": "0a68962bb7d2509e5e0b5ac0d3aa8f957d76c1859b56c06fb983c33bb9c6a660"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-popup%2Froot-injection-concealment.root-descriptor-graph%20delta",
+      "owner": "runtime-security",
+      "rationale": "The mediated descriptor graph contains immutable virtualized platform capabilities while exposing no ZeroProxy-owned property names.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when root-descriptor-graph is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-popup-window-location-reflection-window-location-descriptors",
+      "observation_id": "cross-popup/window-location-reflection.window-location-descriptors",
+      "exact_signature": {
+        "surface": "cross-popup/window-location-reflection",
+        "probe_id": "window-location-descriptors",
+        "native_digest": "0f2ed7adb3a085b11fc001056381d5caafda92a1d425dc8d0b0238fb1844bb45",
+        "mediated_digest": "0b78bb68a30b7cbc68c59ae4362890ec38aac408a253b6b105704b51b736fd07"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-popup%2Fwindow-location-reflection.window-location-descriptors%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade keeps navigation methods immutable so page code cannot replace the mediation boundary.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-descriptors is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-cross-popup-window-location-reflection-window-location-own-keys",
+      "observation_id": "cross-popup/window-location-reflection.window-location-own-keys",
+      "exact_signature": {
+        "surface": "cross-popup/window-location-reflection",
+        "probe_id": "window-location-own-keys",
+        "native_digest": "1ef5140c075a2da87f82b7db3f2ebd173e5b26b333ca01b47b85bc862a35bf6d",
+        "mediated_digest": "2f03d8d0d94de201914bd30f7b5c67d8005d84a061075d891c49918a8cb42402"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20cross-popup%2Fwindow-location-reflection.window-location-own-keys%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade omits raw ancestorOrigins and Symbol.toPrimitive paths that could reveal synthetic routing state.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-own-keys is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-frame-global-equality-window-location",
+      "observation_id": "same-frame/global-equality.window-location",
+      "exact_signature": {
+        "surface": "same-frame/global-equality",
+        "probe_id": "window-location",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-frame%2Fglobal-equality.window-location%20delta",
+      "owner": "runtime-security",
+      "rationale": "Document.location returns the synthetic Location facade so target code cannot recover the network-facing synthetic URL.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-frame-root-injection-concealment-root-descriptor-graph",
+      "observation_id": "same-frame/root-injection-concealment.root-descriptor-graph",
+      "exact_signature": {
+        "surface": "same-frame/root-injection-concealment",
+        "probe_id": "root-descriptor-graph",
+        "native_digest": "b594ff8e1c696eed43d7982bcc36e0a57442b87b92fe233f9fbc5ef96d92d8e1",
+        "mediated_digest": "0a68962bb7d2509e5e0b5ac0d3aa8f957d76c1859b56c06fb983c33bb9c6a660"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-frame%2Froot-injection-concealment.root-descriptor-graph%20delta",
+      "owner": "runtime-security",
+      "rationale": "The mediated descriptor graph contains immutable virtualized platform capabilities while exposing no ZeroProxy-owned property names.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when root-descriptor-graph is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-frame-window-location-reflection-window-location-descriptors",
+      "observation_id": "same-frame/window-location-reflection.window-location-descriptors",
+      "exact_signature": {
+        "surface": "same-frame/window-location-reflection",
+        "probe_id": "window-location-descriptors",
+        "native_digest": "0f2ed7adb3a085b11fc001056381d5caafda92a1d425dc8d0b0238fb1844bb45",
+        "mediated_digest": "0b78bb68a30b7cbc68c59ae4362890ec38aac408a253b6b105704b51b736fd07"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-frame%2Fwindow-location-reflection.window-location-descriptors%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade keeps navigation methods immutable so page code cannot replace the mediation boundary.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-descriptors is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-frame-window-location-reflection-window-location-own-keys",
+      "observation_id": "same-frame/window-location-reflection.window-location-own-keys",
+      "exact_signature": {
+        "surface": "same-frame/window-location-reflection",
+        "probe_id": "window-location-own-keys",
+        "native_digest": "1ef5140c075a2da87f82b7db3f2ebd173e5b26b333ca01b47b85bc862a35bf6d",
+        "mediated_digest": "2f03d8d0d94de201914bd30f7b5c67d8005d84a061075d891c49918a8cb42402"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-frame%2Fwindow-location-reflection.window-location-own-keys%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade omits raw ancestorOrigins and Symbol.toPrimitive paths that could reveal synthetic routing state.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-own-keys is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-popup-global-equality-window-location",
+      "observation_id": "same-popup/global-equality.window-location",
+      "exact_signature": {
+        "surface": "same-popup/global-equality",
+        "probe_id": "window-location",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-popup%2Fglobal-equality.window-location%20delta",
+      "owner": "runtime-security",
+      "rationale": "Document.location returns the synthetic Location facade so target code cannot recover the network-facing synthetic URL.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-popup-root-injection-concealment-root-descriptor-graph",
+      "observation_id": "same-popup/root-injection-concealment.root-descriptor-graph",
+      "exact_signature": {
+        "surface": "same-popup/root-injection-concealment",
+        "probe_id": "root-descriptor-graph",
+        "native_digest": "b594ff8e1c696eed43d7982bcc36e0a57442b87b92fe233f9fbc5ef96d92d8e1",
+        "mediated_digest": "0a68962bb7d2509e5e0b5ac0d3aa8f957d76c1859b56c06fb983c33bb9c6a660"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-popup%2Froot-injection-concealment.root-descriptor-graph%20delta",
+      "owner": "runtime-security",
+      "rationale": "The mediated descriptor graph contains immutable virtualized platform capabilities while exposing no ZeroProxy-owned property names.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when root-descriptor-graph is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-popup-window-location-reflection-window-location-descriptors",
+      "observation_id": "same-popup/window-location-reflection.window-location-descriptors",
+      "exact_signature": {
+        "surface": "same-popup/window-location-reflection",
+        "probe_id": "window-location-descriptors",
+        "native_digest": "0f2ed7adb3a085b11fc001056381d5caafda92a1d425dc8d0b0238fb1844bb45",
+        "mediated_digest": "0b78bb68a30b7cbc68c59ae4362890ec38aac408a253b6b105704b51b736fd07"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-popup%2Fwindow-location-reflection.window-location-descriptors%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade keeps navigation methods immutable so page code cannot replace the mediation boundary.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-descriptors is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-same-popup-window-location-reflection-window-location-own-keys",
+      "observation_id": "same-popup/window-location-reflection.window-location-own-keys",
+      "exact_signature": {
+        "surface": "same-popup/window-location-reflection",
+        "probe_id": "window-location-own-keys",
+        "native_digest": "1ef5140c075a2da87f82b7db3f2ebd173e5b26b333ca01b47b85bc862a35bf6d",
+        "mediated_digest": "2f03d8d0d94de201914bd30f7b5c67d8005d84a061075d891c49918a8cb42402"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20same-popup%2Fwindow-location-reflection.window-location-own-keys%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade omits raw ancestorOrigins and Symbol.toPrimitive paths that could reveal synthetic routing state.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-own-keys is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-top-global-equality-window-location",
+      "observation_id": "top/global-equality.window-location",
+      "exact_signature": {
+        "surface": "top/global-equality",
+        "probe_id": "window-location",
+        "native_digest": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "mediated_digest": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20top%2Fglobal-equality.window-location%20delta",
+      "owner": "runtime-security",
+      "rationale": "Document.location returns the synthetic Location facade so target code cannot recover the network-facing synthetic URL.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-top-root-injection-concealment-root-descriptor-graph",
+      "observation_id": "top/root-injection-concealment.root-descriptor-graph",
+      "exact_signature": {
+        "surface": "top/root-injection-concealment",
+        "probe_id": "root-descriptor-graph",
+        "native_digest": "b594ff8e1c696eed43d7982bcc36e0a57442b87b92fe233f9fbc5ef96d92d8e1",
+        "mediated_digest": "0a68962bb7d2509e5e0b5ac0d3aa8f957d76c1859b56c06fb983c33bb9c6a660"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20top%2Froot-injection-concealment.root-descriptor-graph%20delta",
+      "owner": "runtime-security",
+      "rationale": "The mediated descriptor graph contains immutable virtualized platform capabilities while exposing no ZeroProxy-owned property names.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when root-descriptor-graph is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-top-window-location-reflection-window-location-descriptors",
+      "observation_id": "top/window-location-reflection.window-location-descriptors",
+      "exact_signature": {
+        "surface": "top/window-location-reflection",
+        "probe_id": "window-location-descriptors",
+        "native_digest": "0f2ed7adb3a085b11fc001056381d5caafda92a1d425dc8d0b0238fb1844bb45",
+        "mediated_digest": "0b78bb68a30b7cbc68c59ae4362890ec38aac408a253b6b105704b51b736fd07"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20top%2Fwindow-location-reflection.window-location-descriptors%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade keeps navigation methods immutable so page code cannot replace the mediation boundary.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-descriptors is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-top-window-location-reflection-window-location-own-keys",
+      "observation_id": "top/window-location-reflection.window-location-own-keys",
+      "exact_signature": {
+        "surface": "top/window-location-reflection",
+        "probe_id": "window-location-own-keys",
+        "native_digest": "1ef5140c075a2da87f82b7db3f2ebd173e5b26b333ca01b47b85bc862a35bf6d",
+        "mediated_digest": "2f03d8d0d94de201914bd30f7b5c67d8005d84a061075d891c49918a8cb42402"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20top%2Fwindow-location-reflection.window-location-own-keys%20delta",
+      "owner": "runtime-security",
+      "rationale": "The synthetic Location facade omits raw ancestorOrigins and Symbol.toPrimitive paths that could reveal synthetic routing state.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        },
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when window-location-own-keys is native-equal in this exact context without exposing synthetic routing state or weakening mediation.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-worker-context-new-module-worker-firefox",
+      "observation_id": "worker-context.new-module-worker",
+      "exact_signature": {
+        "surface": "worker-context",
+        "probe_id": "new-module-worker",
+        "native_digest": "23ae2a89c53e8ffef1fd926c3f54d5ea0968cf1e408c1d6991b11e3ab34ee781",
+        "mediated_digest": "a185d38cad247db32fbdfc63d0096d81b92c8fac5412c5ab014b4bc2aac60747"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20worker-context.new-module-worker%20delta-firefox",
+      "owner": "runtime-security",
+      "rationale": "The standalone hostile fixture has no authenticated service-worker runtime port, so mediated worker admission fails closed instead of creating an unplanned worker.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "firefox",
+          "exact_build": "152.0.6",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when the hostile fixture binds the authenticated production worker planner and native-equal worker observations execute.",
+      "test_id": "stealth-release-oracle-v2"
+    },
+    {
+      "id": "delta-worker-context-new-module-worker-chromium",
+      "observation_id": "worker-context.new-module-worker",
+      "exact_signature": {
+        "surface": "worker-context",
+        "probe_id": "new-module-worker",
+        "native_digest": "34f9b9d926fd5adca4389ee5fa32dd7b0d4499630f56b181d2d06f3f427efd9c",
+        "mediated_digest": "a185d38cad247db32fbdfc63d0096d81b92c8fac5412c5ab014b4bc2aac60747"
+      },
+      "category": "intentional-security-boundary",
+      "issue_url": "https://github.com/gosuda/zeroproxy/issues/new?title=Remove%20worker-context.new-module-worker%20delta-chromium",
+      "owner": "runtime-security",
+      "rationale": "The standalone hostile fixture has no authenticated service-worker runtime port, so mediated worker admission fails closed instead of creating an unplanned worker.",
+      "affected_release_range": "2.0.0-dev",
+      "affected_browser_builds": [
+        {
+          "family": "chromium",
+          "exact_build": "150.0.7871.124",
+          "platform": "darwin-arm64"
+        }
+      ],
+      "introduced_at": "2026-07-17T00:00:00Z",
+      "expires_at": "2026-10-01T00:00:00Z",
+      "removal_condition": "Remove when the hostile fixture binds the authenticated production worker planner and native-equal worker observations execute.",
+      "test_id": "stealth-release-oracle-v2"
+    }
+  ]
+}

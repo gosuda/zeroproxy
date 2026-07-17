@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "subprotocol": "zeroproxy.carrier.v2",
+  "auth_key_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "capability_claims": {
+    "value": {
+      "capability_id": "capability-fixture-v2",
+      "deployment_id": "deployment-fixture",
+      "session_binding_digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "capability_epoch": 7,
+      "relay_profile_digest": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "expires_unix": 4102444800,
+      "allowed_browsing_origins": ["https://o-abcdefghijklmnopqrstuvwxyz234567.browse.example"],
+      "max_sessions": 2,
+      "limits": {
+        "max_streams": 64,
+        "upload_byte_budget": 1048576,
+        "download_byte_budget": 2097152,
+        "max_frame_bytes": 65536,
+        "max_message_bytes": 1048576,
+        "max_frames_per_second": 1000,
+        "handshake_timeout_ms": 10000,
+        "idle_timeout_ms": 60000,
+        "session_deadline_ms": 900000
+      },
+      "feature_bits": 5
+    },
+    "canonical_cbor_hex": "aa01756361706162696c6974792d666978747572652d763202726465706c6f796d656e742d66697874757265035820808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f0407055820404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f061af48657000781783968747470733a2f2f6f2d6162636465666768696a6b6c6d6e6f707172737475767778797a3233343536372e62726f7773652e6578616d706c65080209a9011840021a00100000031a00200000041a00010000051a00100000061903e8071927100819ea60091a000dbba00a05",
+    "digest_hex": "20e569e1a02eb20a9a3b8bdc5f84c131dad27c85f2e20dca61d31d831f748c0c"
+  },
+  "frames": {
+    "CLIENT_INIT": {
+      "value": {
+        "capability_id": "capability-fixture-v2",
+        "versions": [2, 3],
+        "feature_bits": 5,
+        "client_nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "canonical_cbor_hex": "a401756361706162696c6974792d666978747572652d7632028202030305045820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    "SERVER_CHALLENGE": {
+      "value": {
+        "server_nonce": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "selected_version": 2,
+        "selected_features": 5,
+        "selected_limits": {
+          "max_streams": 64,
+          "upload_byte_budget": 1048576,
+          "download_byte_budget": 2097152,
+          "max_frame_bytes": 65536,
+          "max_message_bytes": 1048576,
+          "max_frames_per_second": 1000,
+          "handshake_timeout_ms": 10000,
+          "idle_timeout_ms": 60000,
+          "session_deadline_ms": 900000
+        },
+        "capability_claims_digest": "20e569e1a02eb20a9a3b8bdc5f84c131dad27c85f2e20dca61d31d831f748c0c",
+        "challenge_id": "606162636465666768696a6b6c6d6e6f7071727374757677"
+      },
+      "canonical_cbor_hex": "a6015820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0202030504a9011840021a00100000031a00200000041a00010000051a00100000061903e8071927100819ea60091a000dbba005582020e569e1a02eb20a9a3b8bdc5f84c131dad27c85f2e20dca61d31d831f748c0c065818606162636465666768696a6b6c6d6e6f7071727374757677"
+    },
+    "CLIENT_AUTH": {
+      "value": {
+        "challenge_id": "606162636465666768696a6b6c6d6e6f7071727374757677",
+        "proof": "37bd4067d6c1719e436d17ff9dd32338e0cbb39823b7fd6d253276d7208d8c59"
+      },
+      "canonical_cbor_hex": "a2015818606162636465666768696a6b6c6d6e6f707172737475767702582037bd4067d6c1719e436d17ff9dd32338e0cbb39823b7fd6d253276d7208d8c59"
+    },
+    "SERVER_ACCEPT": {
+      "value": {
+        "carrier_id": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7",
+        "negotiated_limits": {
+          "max_streams": 64,
+          "upload_byte_budget": 1048576,
+          "download_byte_budget": 2097152,
+          "max_frame_bytes": 65536,
+          "max_message_bytes": 1048576,
+          "max_frames_per_second": 1000,
+          "handshake_timeout_ms": 10000,
+          "idle_timeout_ms": 60000,
+          "session_deadline_ms": 900000
+        },
+        "capability_epoch": 7,
+        "server_proof": "3c605daed7bf7c8f0a639e45498bcc014f304b1ac0e599c55229043f487bf98c"
+      },
+      "canonical_cbor_hex": "a4015818c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d702a9011840021a00100000031a00200000041a00010000051a00100000061903e8071927100819ea60091a000dbba003070458203c605daed7bf7c8f0a639e45498bcc014f304b1ac0e599c55229043f487bf98c"
+    }
+  },
+  "canonical_transcript_hash_hex": "726dc9b596d77717efe6603f7769350f7a353b54932d66300400d2435034e67f",
+  "client_proof_hex": "37bd4067d6c1719e436d17ff9dd32338e0cbb39823b7fd6d253276d7208d8c59",
+  "server_proof_hex": "3c605daed7bf7c8f0a639e45498bcc014f304b1ac0e599c55229043f487bf98c"
+}

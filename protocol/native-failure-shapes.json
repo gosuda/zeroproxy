@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "table_version": 1,
+  "rows": [
+    {
+      "id": "navigation-document",
+      "surface": "navigation",
+      "boundary": "response",
+      "timing": "navigation-commit",
+      "browser_shape": "safe-same-origin-error-document",
+      "exception_name": null,
+      "original_bytes_executed": false,
+      "terminal_events": ["document"],
+      "test_id": "native-failure-navigation-v1"
+    },
+    {
+      "id": "classic-script-load",
+      "surface": "classic-script",
+      "boundary": "event",
+      "timing": "asynchronous-load",
+      "browser_shape": "load-error-event",
+      "exception_name": null,
+      "original_bytes_executed": false,
+      "terminal_events": ["error"],
+      "test_id": "native-failure-executable-v1"
+    },
+    {
+      "id": "module-script-load",
+      "surface": "module-script",
+      "boundary": "promise",
+      "timing": "asynchronous-module-evaluation",
+      "browser_shape": "rejected-module-promise",
+      "exception_name": "TypeError",
+      "original_bytes_executed": false,
+      "terminal_events": ["rejection"],
+      "test_id": "native-failure-executable-v1"
+    },
+    {
+      "id": "eval-function-syntax",
+      "surface": "eval-function",
+      "boundary": "throw",
+      "timing": "synchronous-call",
+      "browser_shape": "caller-realm-syntax-error",
+      "exception_name": "SyntaxError",
+      "original_bytes_executed": false,
+      "terminal_events": ["throw"],
+      "test_id": "dynamic-code-native-failure-v1"
+    },
+    {
+      "id": "dynamic-policy-sync",
+      "surface": "dynamic-policy-sync",
+      "boundary": "throw",
+      "timing": "synchronous-call",
+      "browser_shape": "stable-blocked-domexception",
+      "exception_name": "SecurityError",
+      "original_bytes_executed": false,
+      "terminal_events": ["throw"],
+      "test_id": "dynamic-code-native-failure-v1"
+    },
+    {
+      "id": "dynamic-policy-async",
+      "surface": "dynamic-policy-async",
+      "boundary": "promise",
+      "timing": "asynchronous-rejection",
+      "browser_shape": "stable-blocked-domexception",
+      "exception_name": "SecurityError",
+      "original_bytes_executed": false,
+      "terminal_events": ["rejection"],
+      "test_id": "dynamic-code-native-failure-v1"
+    },
+    {
+      "id": "css-rewrite",
+      "surface": "css",
+      "boundary": "event",
+      "timing": "asynchronous-load",
+      "browser_shape": "typed-load-failure",
+      "exception_name": null,
+      "original_bytes_executed": false,
+      "terminal_events": ["error"],
+      "test_id": "native-failure-css-import-map-v1"
+    },
+    {
+      "id": "import-map-parse",
+      "surface": "import-map",
+      "boundary": "document",
+      "timing": "parser-registration",
+      "browser_shape": "typed-document-failure",
+      "exception_name": null,
+      "original_bytes_executed": false,
+      "terminal_events": ["document"],
+      "test_id": "native-failure-css-import-map-v1"
+    },
+    {
+      "id": "fetch-cors-transport",
+      "surface": "fetch-cors-transport",
+      "boundary": "promise",
+      "timing": "asynchronous-rejection",
+      "browser_shape": "native-network-error-or-opaque-response",
+      "exception_name": "TypeError",
+      "original_bytes_executed": false,
+      "terminal_events": ["rejection"],
+      "test_id": "network-gateway-native-failure-v1"
+    },
+    {
+      "id": "target-websocket-terminal",
+      "surface": "websocket",
+      "boundary": "event",
+      "timing": "asynchronous-terminal",
+      "browser_shape": "single-error-close-sequence",
+      "exception_name": null,
+      "original_bytes_executed": false,
+      "terminal_events": ["error", "close"],
+      "test_id": "network-gateway-native-failure-v1"
+    },
+    {
+      "id": "runtime-install",
+      "surface": "runtime-install",
+      "boundary": "document",
+      "timing": "pre-target-execution",
+      "browser_shape": "atomic-rollback-blocked-document",
+      "exception_name": null,
+      "original_bytes_executed": false,
+      "terminal_events": ["rollback", "document-block"],
+      "test_id": "runtime-atomic-failure-v1"
+    }
+  ]
+}

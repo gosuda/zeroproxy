@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release-artifact-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "performance_config_sha256", "build_tree_sha256", "artifact_hashes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "performance_config_sha256": {"$ref": "#/$defs/sha256"},
+    "build_tree_sha256": {"$ref": "#/$defs/sha256"},
+    "artifact_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "control", "service_worker", "kernel", "rust", "runtime", "messages", "carrier", "support_matrix", "framework_fixtures", "framework_fixtures_schema", "soak_workload_server", "compatibility_deltas", "migration_disposition", "v1_baseline", "v1_evidence_manifest", "standards_lock", "build_assets", "ci_workflow"],
+      "properties": {
+        "server": {"$ref": "#/$defs/sha256"},
+        "control": {"$ref": "#/$defs/sha256"},
+        "service_worker": {"$ref": "#/$defs/sha256"},
+        "kernel": {"$ref": "#/$defs/sha256"},
+        "rust": {"$ref": "#/$defs/sha256"},
+        "runtime": {"$ref": "#/$defs/sha256"},
+        "messages": {"$ref": "#/$defs/sha256"},
+        "carrier": {"$ref": "#/$defs/sha256"},
+        "support_matrix": {"$ref": "#/$defs/sha256"},
+        "soak_workload_server": {"$ref": "#/$defs/sha256"},
+        "framework_fixtures": {"$ref": "#/$defs/sha256"},
+        "framework_fixtures_schema": {"$ref": "#/$defs/sha256"},
+        "compatibility_deltas": {"$ref": "#/$defs/sha256"},
+        "migration_disposition": {"$ref": "#/$defs/sha256"},
+        "v1_baseline": {"$ref": "#/$defs/sha256"},
+        "v1_evidence_manifest": {"$ref": "#/$defs/sha256"},
+        "standards_lock": {"$ref": "#/$defs/sha256"},
+        "build_assets": {"$ref": "#/$defs/sha256"},
+        "ci_workflow": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

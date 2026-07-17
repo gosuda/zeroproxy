@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeroproxy.invalid/protocol/carrier.schema.json",
+  "title": "ZeroProxy carrier V2 handshake frames",
+  "description": "Logical representation of the four canonical-CBOR binary frames admitted before smux. Property names are diagnostic names; x-cbor-key is the unsigned integer map key on the wire.",
+  "oneOf": [
+    { "$ref": "#/$defs/ClientInit" },
+    { "$ref": "#/$defs/ServerChallenge" },
+    { "$ref": "#/$defs/ClientAuth" },
+    { "$ref": "#/$defs/ServerAccept" }
+  ],
+  "$defs": {
+    "Bytes24": {
+      "type": "string",
+      "description": "24-byte CBOR byte string rendered as lowercase hexadecimal for JSON diagnostics.",
+      "pattern": "^[0-9a-f]{48}$"
+    },
+    "Bytes32": {
+      "type": "string",
+      "description": "32-byte CBOR byte string rendered as lowercase hexadecimal for JSON diagnostics.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_streams", "upload_byte_budget", "download_byte_budget", "max_frame_bytes", "max_message_bytes", "max_frames_per_second", "handshake_timeout_ms", "idle_timeout_ms", "session_deadline_ms"],
+      "properties": {
+        "max_streams": {
+          "type": "integer", "minimum": 1, "maximum": 4096,
+          "x-cbor-key": 1, "x-cbor-type": "uint32"
+        },
+        "upload_byte_budget": {
+          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
+          "x-cbor-key": 2, "x-cbor-type": "uint64"
+        },
+        "download_byte_budget": {
+          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
+          "x-cbor-key": 3, "x-cbor-type": "uint64"
+        },
+        "max_frame_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 65536,
+          "x-cbor-key": 4, "x-cbor-type": "uint32"
+        },
+        "max_message_bytes": {
+          "type": "integer", "minimum": 1, "maximum": 4194304,
+          "x-cbor-key": 5, "x-cbor-type": "uint32"
+        },
+        "max_frames_per_second": {
+          "type": "integer", "minimum": 1, "maximum": 10000,
+          "x-cbor-key": 6, "x-cbor-type": "uint32"
+        },
+        "handshake_timeout_ms": {
+          "type": "integer", "minimum": 1000, "maximum": 60000,
+          "x-cbor-key": 7, "x-cbor-type": "uint32"
+        },
+        "idle_timeout_ms": {
+          "type": "integer", "minimum": 1000, "maximum": 3600000,
+          "x-cbor-key": 8, "x-cbor-type": "uint32"
+        },
+        "session_deadline_ms": {
+          "type": "integer", "minimum": 1000, "maximum": 86400000,
+          "x-cbor-key": 9, "x-cbor-type": "uint32"
+        }
+      }
+    },
+    "ClientInit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_id", "versions", "feature_bits", "client_nonce"],
+      "properties": {
+        "capability_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "x-cbor-key": 1,
+          "x-cbor-type": "text"
+        },
+        "versions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "x-cbor-key": 2,
+          "x-cbor-type": "array<uint16>"
+        },
+        "feature_bits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-cbor-key": 3,
+          "x-cbor-type": "uint64"
+        },
+        "client_nonce": {
+          "$ref": "#/$defs/Bytes32",
+          "x-cbor-key": 4,
+          "x-cbor-type": "bytes"
+        }
+      }
+    },
+    "ServerChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server_nonce", "selected_version", "selected_features", "selected_limits", "capability_claims_digest", "challenge_id"],
+      "properties": {
+        "server_nonce": {
+          "$ref": "#/$defs/Bytes32",
+          "x-cbor-key": 1,
+          "x-cbor-type": "bytes"
+        },
+        "selected_version": {
+          "const": 2,
+          "x-cbor-key": 2,
+          "x-cbor-type": "uint16"
+        },
+        "selected_features": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "x-cbor-key": 3,
+          "x-cbor-type": "uint64"
+        },
+        "selected_limits": {
+          "$ref": "#/$defs/Limits",
+          "x-cbor-key": 4,
+          "x-cbor-type": "map"
+        },
+        "capability_claims_digest": {
+          "$ref": "#/$defs/Bytes32",
+          "x-cbor-key": 5,
+          "x-cbor-type": "bytes"
+        },
+        "challenge_id": {
+          "$ref": "#/$defs/Bytes24",
+          "x-cbor-key": 6,
+          "x-cbor-type": "bytes"
+        }
+      }
+    },
+    "ClientAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["challenge_id", "proof"],
+      "properties": {
+        "challenge_id": {
+          "$ref": "#/$defs/Bytes24",
+          "x-cbor-key": 1,
+          "x-cbor-type": "bytes"
+        },
+        "proof": {
+          "$ref": "#/$defs/Bytes32",
+          "x-cbor-key": 2,
+          "x-cbor-type": "bytes"
+        }
+      }
+    },
+    "ServerAccept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["carrier_id", "negotiated_limits", "capability_epoch", "server_proof"],
+      "properties": {
+        "carrier_id": {
+          "$ref": "#/$defs/Bytes24",
+          "x-cbor-key": 1,
+          "x-cbor-type": "bytes"
+        },
+        "negotiated_limits": {
+          "$ref": "#/$defs/Limits",
+          "x-cbor-key": 2,
+          "x-cbor-type": "map"
+        },
+        "capability_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "x-cbor-key": 3,
+          "x-cbor-type": "uint64"
+        },
+        "server_proof": {
+          "$ref": "#/$defs/Bytes32",
+          "x-cbor-key": 4,
+          "x-cbor-type": "bytes"
+        }
+      }
+    },
+    "CapabilityClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_id", "deployment_id", "session_binding_digest", "capability_epoch", "relay_profile_digest", "expires_unix", "allowed_browsing_origins", "max_sessions", "limits", "feature_bits"],
+      "properties": {
+        "capability_id": { "type": "string", "minLength": 1, "maxLength": 256, "x-cbor-key": 1, "x-cbor-type": "text" },
+        "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256, "x-cbor-key": 2, "x-cbor-type": "text" },
+        "session_binding_digest": { "$ref": "#/$defs/Bytes32", "x-cbor-key": 3, "x-cbor-type": "bytes" },
+        "capability_epoch": { "type": "integer", "minimum": 1, "maximum": 9007199254740991, "x-cbor-key": 4, "x-cbor-type": "uint64" },
+        "relay_profile_digest": { "$ref": "#/$defs/Bytes32", "x-cbor-key": 5, "x-cbor-type": "bytes" },
+        "expires_unix": { "type": "integer", "minimum": 1, "maximum": 9007199254740991, "x-cbor-key": 6, "x-cbor-type": "int64" },
+        "allowed_browsing_origins": {
+          "type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^https://o-[a-z2-7]{32}\\.browse\\.[a-z0-9.-]+(?::[1-9][0-9]{0,4})?$" },
+          "x-cbor-key": 7, "x-cbor-type": "array<text>"
+        },
+        "max_sessions": { "type": "integer", "minimum": 1, "maximum": 4096, "x-cbor-key": 8, "x-cbor-type": "uint32" },
+        "limits": { "$ref": "#/$defs/Limits", "x-cbor-key": 9, "x-cbor-type": "map" },
+        "feature_bits": { "type": "integer", "minimum": 0, "maximum": 9007199254740991, "x-cbor-key": 10, "x-cbor-type": "uint64" }
+      }
+    }
+  }
+}

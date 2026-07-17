@@ -1,0 +1,1 @@
+self.addEventListener("install",event=>event.waitUntil(caches.open("fixture-v1").then(cache=>cache.add("./index.html")))); self.addEventListener("activate",event=>event.waitUntil(self.clients.claim())); self.addEventListener("fetch",()=>{});
