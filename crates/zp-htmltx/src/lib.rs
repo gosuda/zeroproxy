@@ -872,6 +872,32 @@ mod tests {
         }
     }
 
+    // Repro: NAVER search.js `loadRemoteFrame` embeds search.naver.com/remote_frame
+    // (the CrossDomainStorage helper). It is XHTML (XHTML-1.0 doctype + xmlns +
+    // self-closing <meta/>). If transform() errors on it, the SW returns
+    // MALFORMED_HTML 502 for the iframe → search hydration stalls. This pins that
+    // the real content transforms cleanly.
+    #[test]
+    fn naver_crossstorage_remote_frame_transforms() {
+        let html = concat!(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n",
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\" lang=\"ko\" xml:lang=\"ko\">\n",
+            "<head><title>CrossStorage</title><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" /><meta http-equiv=\"Content-Script-Type\" content=\"text/javascript\"></head>\n",
+            "<body>\n",
+            "<script src=\"https://ssl.pstatic.net/sstatic/fe/sfe/cross-domain-storage/cross-domain-storage-remote-3.0.0.js\"></script>\n",
+            "<script>new CrossDomainStorage.RemoteFrameStorage({bCheckDomain: true, aWhiteDomainList: [\"*.www.naver.com\"]}).ready();\n",
+            "</script>\n",
+            "<script type=\"text/javascript\">if(window.addEventListener){window.addEventListener(\"load\",function(){setTimeout(function(){var e=[{href:\"https://ssl.pstatic.net/gen/preconn\",rel:\"preconnect\"}];if(e)for(var t=0;t<e.length;t++){ if(!e[t].href || !e[t].rel) continue; var link = document.createElement(\"link\"); if(e[t].rel === \"preload\"){ if(!e[t].as) continue; link.as = e[t].as; } link.href = e[t].href; link.rel = e[t].rel; document.head.appendChild(link); }},200)},false)}</script>\n",
+            "</body>\n</html>\n",
+        );
+        let o = opts();
+        let r = transform(html, &o);
+        assert!(r.is_ok(), "CrossStorage remote_frame failed to transform: {:?}", r.err());
+        let out = r.unwrap().html;
+        // Inline scripts must be rewritten (membrane), external src proxied.
+        assert!(out.contains("/zp/api/script") || out.contains("__zp"), "remote_frame not rewritten: {out}");
+    }
+
     // Pin: a non-empty prelude is injected exactly once, right after <head>,
     // and is NOT script-rewritten (our bootstrap must survive verbatim).
     #[test]
