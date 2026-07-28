@@ -294,7 +294,16 @@ pub(crate) struct StreamingGunzip {
     header_done: bool,
     /// Once the DEFLATE final block validates we stop feeding the inflater —
     /// any trailing footer bytes must NOT reach the raw inflate stream.
+    /// Set when the inflater STOPS — either at the final block (success) or on
+    /// a decode error. Use [`Self::is_stream_end`] to tell those apart.
     finished: bool,
+    /// Set ONLY when the inflater reported `Status::StreamEnd`, i.e. the
+    /// content really is complete. `finished` alone must never be treated as
+    /// "complete": it is also set on decode errors, and closing the page-facing
+    /// stream on an error truncates the document (observed: NAVER rendering as
+    /// a blank page, body ≈ 1.6 KB, because the buffered 181 KB inline script
+    /// never received its closing tag).
+    stream_end: bool,
 }
 
 impl StreamingGunzip {
@@ -304,16 +313,25 @@ impl StreamingGunzip {
             header_buf: Vec::new(),
             header_done: false,
             finished: false,
+            stream_end: false,
         }
     }
 
-    /// True once the DEFLATE stream reached its final block. The decoded body
-    /// is then COMPLETE even if the h2 `END_STREAM` frame is still withheld —
-    /// which NAVER does for 60–240s. The streaming pump uses this to close the
-    /// page-facing stream at content-end (like a real browser, which decodes
-    /// gzip itself and never waits for the trailing frame) instead of parking.
-    pub(crate) fn is_finished(&self) -> bool {
-        self.finished
+    /// True once the DEFLATE stream reached its final block — the decoded body
+    /// is COMPLETE even if the h2 `END_STREAM` frame has not arrived yet. The
+    /// streaming pump uses this to close the page-facing stream at content-end
+    /// (like a real browser, which decodes gzip itself and never waits for the
+    /// trailing frame) instead of parking. Decode ERRORS deliberately do not
+    /// set this: an errored stream must not be reported as a complete one.
+    pub(crate) fn is_stream_end(&self) -> bool {
+        self.stream_end
+    }
+
+    /// The inflater stopped without reaching the final block — the body cannot
+    /// be decoded any further. Callers must surface this instead of parking
+    /// forever on a stream that will never produce another byte.
+    pub(crate) fn is_error(&self) -> bool {
+        self.finished && !self.stream_end
     }
 
     /// Feed one chunk of gzip wire bytes; return the plaintext produced by it.
@@ -361,6 +379,7 @@ impl StreamingGunzip {
             match status {
                 Ok(flate2::Status::StreamEnd) => {
                     self.finished = true;
+                    self.stream_end = true;
                     break;
                 }
                 Ok(_) => {

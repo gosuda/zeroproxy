@@ -518,7 +518,19 @@ async fn pump_body(
                 // end marker (reliable, no timer, no truncation). Dropping
                 // `body_stream` on return RSTs the upstream stream; the pooled
                 // connection survives.
-                if gunzip.as_ref().map(|g| g.is_finished()).unwrap_or(false) {
+                // A gunzip error means no further bytes can ever be produced.
+                // Surface it instead of looping on `data()` forever (a silent
+                // hang), and NEVER treat it as completion — closing here would
+                // ship a truncated document.
+                if gunzip.as_ref().map(|g| g.is_error()).unwrap_or(false) {
+                    crate::kernel::push_trace(&format!(
+                        "tx:h2-stream-inflate-err host={} in={} out={}",
+                        host, total_in, total_out
+                    ));
+                    controller.error_with_e(&JsValue::from_str("gzip: decode failed mid-stream"));
+                    return;
+                }
+                if gunzip.as_ref().map(|g| g.is_stream_end()).unwrap_or(false) {
                     crate::kernel::push_trace(&format!(
                         "tx:h2-stream-deflate-end host={} in={} out={}",
                         host, total_in, total_out

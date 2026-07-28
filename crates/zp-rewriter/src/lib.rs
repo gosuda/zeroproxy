@@ -509,7 +509,18 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
 pub fn strip_sourcemap_pragma(src: &str) -> String {
     // Scan only the tail; pragmas live at the end of the file. 4 KiB
     // is generous — typical pragmas are < 200 bytes.
-    let scan_from = src.len().saturating_sub(4096);
+    //
+    // `len() - 4096` is a RAW BYTE offset and routinely lands inside a
+    // multi-byte character, where slicing panics: NAVER's document ends with a
+    // ~200 KB inline `EAGER-DATA` JSON blob full of Korean text, and the cut
+    // fell inside '일' → `start byte index 204945 is not a char boundary` →
+    // wasm trap ("RuntimeError: unreachable") inside `HtmlTxn.write` → the SW
+    // errored the document stream → blank page. Snap back to a boundary; the
+    // few extra bytes scanned are harmless.
+    let mut scan_from = src.len().saturating_sub(4096);
+    while scan_from > 0 && !src.is_char_boundary(scan_from) {
+        scan_from -= 1;
+    }
     let tail = &src[scan_from..];
     let needle = "sourceMappingURL=";
     let Some(rel_idx) = tail.rfind(needle) else {
@@ -1232,6 +1243,28 @@ mod tests {
             target_url: "https://example.com/".into(),
             strict: true,
         }
+    }
+
+    // Pin: the sourcemap-pragma tail scan starts at a RAW BYTE offset
+    // (`len() - 4096`). Landing inside a multi-byte character used to panic
+    // ("start byte index N is not a char boundary"), which in wasm is a bare
+    // `RuntimeError: unreachable` that killed the SW's document stream and
+    // rendered NAVER as a blank page — its trailing inline JSON is full of
+    // Korean text. Build sources whose 4 KiB cut lands on every possible
+    // offset inside a 3-byte character.
+    #[test]
+    fn strip_sourcemap_pragma_survives_multibyte_tail() {
+        for pad in 0..8usize {
+            // 'ㅏ'/'일' are 3 bytes each; varying the ASCII padding walks the
+            // cut point across all three byte positions of a character.
+            let src = format!("var x=1;{}{}", "a".repeat(pad), "일".repeat(2000));
+            let out = strip_sourcemap_pragma(&src);
+            assert_eq!(out, src, "pad={pad} must be returned unchanged");
+        }
+        // And it still strips a real pragma when one is present after CJK text.
+        let src = format!("var x=1;{}\n//# sourceMappingURL=app.js.map", "일".repeat(2000));
+        let out = strip_sourcemap_pragma(&src);
+        assert!(!out.contains("sourceMappingURL"), "pragma must be stripped: {out}");
     }
 
     #[test]

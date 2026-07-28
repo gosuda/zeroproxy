@@ -25,7 +25,46 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn init() {
-    // Future: install console hooks, panic-hook for diagnostics
+    // Panic hook. Without it a Rust panic in here surfaces to JS as a bare
+    // `RuntimeError: unreachable` with no message and no location — which is
+    // exactly how the NAVER document failure presented (`HtmlTxn.write` threw
+    // "unreachable" after ~247 KB, the SW errored the body stream, and the page
+    // rendered blank). Mirror the kernel bundle: log to the SW console AND push
+    // into `self.__zpRustTrace`, the JS-side ring that survives the trap and can
+    // be read from a page via the SW's `__zpTraceDump` message.
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "?".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let full = format!("ZP_BUNDLE_PANIC at {loc}: {msg}");
+        web_sys::console::error_1(&JsValue::from_str(&full));
+        push_trace(&full);
+    }));
+}
+
+/// Append a diagnostic line to `self.__zpRustTrace` (a plain JS array owned by
+/// the Service Worker). Best-effort: any failure is swallowed, since this runs
+/// from a panic hook where unwinding further would lose the message entirely.
+fn push_trace(line: &str) {
+    let global = js_sys::global();
+    let key = JsValue::from_str("__zpRustTrace");
+    let arr = match js_sys::Reflect::get(&global, &key) {
+        Ok(v) if v.is_object() => js_sys::Array::from(&v),
+        _ => {
+            let fresh = js_sys::Array::new();
+            let _ = js_sys::Reflect::set(&global, &key, &fresh);
+            fresh
+        }
+    };
+    arr.push(&JsValue::from_str(line));
+    let _ = js_sys::Reflect::set(&global, &key, &arr);
 }
 
 /// Bundle version (mirrors zp-shared); used by SW↔prelude version verification (B3.d).

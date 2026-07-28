@@ -319,11 +319,35 @@ where
                 }
             }
 
-            // No plaintext available. Try to pump more from the wire.
-            if !self.conn.wants_read() && self.pending_in.is_empty() {
-                // rustls says it doesn't need more data, and we have no
-                // bytes to give. EOF or true block. Probe the inner read:
-                // if it returns 0 we're at EOF.
+            // No plaintext yet. BEFORE touching the socket, feed rustls any
+            // ciphertext we are already holding.
+            //
+            // `read_tls` takes at most one TLS message per call, so a single
+            // 8 KiB socket read routinely leaves whole records behind in
+            // `pending_in`. Polling the socket first meant that on a `Pending`
+            // (nothing new on the wire — the peer had already sent everything)
+            // we parked with those records still un-decrypted, and they only
+            // moved when the NEXT inbound bytes happened to arrive. Against
+            // NAVER that was the upstream's 60 s keepalive PING: the response
+            // was complete on the wire within ~200 ms, yet the document froze
+            // mid-parse for exactly 60 s at zero CPU. Drain first, and only
+            // fall through to the socket when rustls genuinely cannot take
+            // more (`consumed == 0`), which keeps this loop finite.
+            if !self.pending_in.is_empty() {
+                let raw = std::mem::take(&mut self.pending_in);
+                let mut slice: &[u8] = &raw;
+                let read_res = self.conn.read_tls(&mut slice);
+                let consumed = raw.len() - slice.len();
+                self.pending_in = slice.to_vec();
+                read_res.map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("tls: read_tls: {e}"))
+                })?;
+                if consumed > 0 {
+                    self.conn.process_new_packets().map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("tls: process: {e}"))
+                    })?;
+                    continue; // retry plaintext extraction
+                }
             }
             let mut tmp = [0u8; 8192];
             let read_poll = Pin::new(&mut self.inner).poll_read(cx, &mut tmp);

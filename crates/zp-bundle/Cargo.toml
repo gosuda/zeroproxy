@@ -28,3 +28,8 @@ swc_css_visit = { version = "23.0.0", default-features = false }
 url = { version = "2.5", default-features = false }
 
 wasm-bindgen = { workspace = true }
+# Diagnostics only: the panic hook in `init()` needs `console.error` and the
+# `self.__zpRustTrace` ring so a Rust panic here stops surfacing as a bare
+# `RuntimeError: unreachable`.
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["console"] }

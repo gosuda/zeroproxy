@@ -3688,12 +3688,14 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zp-bundle"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "swc_common",
  "swc_css_ast",
  "swc_css_parser",
  "swc_css_visit",
  "url",
  "wasm-bindgen",
+ "web-sys",
  "zp-htmltx",
  "zp-rewriter",
  "zp-shared",
