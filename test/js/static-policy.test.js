@@ -5,7 +5,28 @@ const fs = require('node:fs');
 test('service worker has no unclassified native fetch fallback', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   assert.equal(/return\s+fetch\s*\(\s*event\.request\s*\)/.test(sw), false);
-  assert.match(sw, /event\.respondWith\(handleFetch\(event\)\)/);
+  // handleFetch's result is respondWith'd (it may be held in a local first so
+  // the same promise can also anchor event.waitUntil — see the streaming
+  // lifetime pin below).
+  assert.match(sw, /event\.respondWith\((?:handleFetch\(event\)|responded)\)/);
+});
+
+// Lifetime pin: `respondWith` alone only keeps the worker alive until the
+// RESPONSE promise settles. A streamed document settles immediately (headers +
+// an unread ReadableStream), so without a `waitUntil` anchored to body
+// completion Chrome may terminate the worker while the wasm pump still owes
+// the page most of the HTML — the document freezes mid-parse at zero CPU.
+// This was the real cause of the long-misattributed "NAVER 60s anti-bot" stall.
+test('SW keeps itself alive until the streamed body is fully delivered', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /event\.waitUntil\(/, 'fetch listener must anchor a waitUntil');
+  assert.match(sw, /__zpBodyDone/, 'streaming response must expose a body-completion promise');
+  // The promise must resolve on every terminal path, or waitUntil would pin
+  // the worker alive forever (and leak it) on error/cancel.
+  const stream = sw.slice(sw.indexOf('function streamDocumentResponse'));
+  const body = stream.slice(0, stream.indexOf('\nfunction '));
+  assert.match(body, /flush\([\s\S]*?markBodyDone\(\)/, 'flush must mark the body done');
+  assert.match(body, /cancel\([^)]*\)\s*\{[\s\S]{0,200}?markBodyDone\(\)/, 'cancel must mark the body done');
 });
 
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {
@@ -584,7 +605,7 @@ test('SW fetch handler passes through non-http(s) schemes (extension channels in
   // The scheme guard must sit in the fetch listener, before respondWith.
   assert.match(
     sw,
-    /addEventListener\('fetch'[\s\S]{0,600}?if \(!u\.startsWith\('http:'\) && !u\.startsWith\('https:'\)\) return;[\s\S]{0,80}?event\.respondWith\(handleFetch\(event\)\)/,
+    /addEventListener\('fetch'[\s\S]{0,600}?if \(!u\.startsWith\('http:'\) && !u\.startsWith\('https:'\)\) return;[\s\S]{0,200}?event\.respondWith\((?:handleFetch\(event\)|responded)\)/,
     'fetch listener must skip respondWith for non-http(s) URLs'
   );
 });

@@ -1453,3 +1453,62 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod naver_perf {
+    use super::*;
+    // Diagnostic: how long does transform() take on the REAL NAVER document
+    // (8 inline scripts, 204 KB total, largest 181 KB)? This runs on the SW's
+    // single JS thread in production, so anything measured in seconds here
+    // means the Service Worker is wedged for that long — no fetch, no stream
+    // delivery, CDP unresponsive.
+    #[test]
+    #[ignore]
+    fn time_naver_document() {
+        let path = std::env::var("ZP_NAVER_HTML").expect("set ZP_NAVER_HTML");
+        let html = std::fs::read_to_string(path).unwrap();
+        let o = TransformOptions {
+            target_url: "https://www.naver.com/".into(),
+            strict: true,
+            pending_gate: false,
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        let t = std::time::Instant::now();
+        let r = transform(&html, &o);
+        let ms = t.elapsed().as_millis();
+        println!("NAVER transform: {} ms, ok={}, in={}B", ms, r.is_ok(), html.len());
+        assert!(r.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod naver_stream_perf {
+    use super::*;
+    // The production path is STREAMING (HtmlTxn.write per decoded chunk), not
+    // the buffered transform(). Measure the real cost at realistic chunk sizes.
+    #[test]
+    #[ignore]
+    fn time_naver_streaming() {
+        let path = std::env::var("ZP_NAVER_HTML").expect("set ZP_NAVER_HTML");
+        let html = std::fs::read_to_string(path).unwrap();
+        let o = TransformOptions {
+            target_url: "https://www.naver.com/".into(),
+            strict: true,
+            pending_gate: false,
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        for &cs in &[65536usize, 16384, 8192, 4096, 1024] {
+            let t = std::time::Instant::now();
+            let mut txn = HtmlTxn::new(&o, String::new());
+            let mut out = 0usize;
+            let mut chunks = 0usize;
+            for c in html.as_bytes().chunks(cs) {
+                out += txn.write(c).unwrap().len();
+                chunks += 1;
+            }
+            let (tail, _d) = txn.end().unwrap();
+            out += tail.len();
+            println!("chunk={:>6}B chunks={:>4} -> {:>7} ms out={}B", cs, chunks, t.elapsed().as_millis(), out);
+        }
+    }
+}

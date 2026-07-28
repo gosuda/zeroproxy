@@ -115,7 +115,33 @@ pub(crate) struct WsStream {
     _on_close: Closure<dyn FnMut(CloseEvent)>,
 }
 
+/// Cheap "is there still un-parsed inbound data?" probe, shared with the yamux
+/// driver (see `yamux::drive`). The driver owns the `Connection`, not the
+/// socket, so it cannot inspect `rx_buf` directly — this handle lets it decide
+/// whether parking is safe.
+///
+/// Why it exists: `Connection::poll_next_inbound` returns `Pending` once it has
+/// consumed the frames it wants for this tick, even when more frames are still
+/// queued here. The driver used to park in that case (its `made_progress` flag
+/// only tracks new inbound streams / completed opens, neither of which happens
+/// for ordinary DATA frames), so the queued remainder sat untouched until the
+/// NEXT WebSocket message happened to arrive — for NAVER that was the upstream's
+/// 60 s keepalive PING. Hence documents that froze mid-parse for exactly 60 s.
+#[derive(Clone)]
+pub(crate) struct RxPending(Rc<RefCell<Inner>>);
+
+impl RxPending {
+    pub(crate) fn has_buffered(&self) -> bool {
+        !self.0.borrow().rx_buf.is_empty()
+    }
+}
+
 impl WsStream {
+    /// Handle for probing whether inbound frames are still queued.
+    pub(crate) fn rx_pending(&self) -> RxPending {
+        RxPending(Rc::clone(&self.inner))
+    }
+
     /// Open a WebSocket to `url` and resolve once `onopen` fires. The
     /// returned `WsStream` is then ready for `AsyncRead`/`AsyncWrite`.
     ///

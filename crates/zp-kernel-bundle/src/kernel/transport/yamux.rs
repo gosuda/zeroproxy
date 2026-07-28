@@ -145,9 +145,10 @@ pub(crate) async fn get_or_open(relay_url: &str) -> io::Result<MuxSession> {
     // 감소. max_connection_receive_window 는 기본 1GiB 유지 (충분).
     let mut cfg = Config::default();
     cfg.set_split_send_size(256 * 1024);
+    let rx_pending = ws.rx_pending();
     let conn = Connection::new(ws, cfg, Mode::Client);
     let (cmd_tx, cmd_rx) = mpsc::unbounded::<Cmd>();
-    spawn_local(drive(conn, cmd_rx));
+    spawn_local(drive(conn, cmd_rx, rx_pending));
     let session = MuxSession { tx: cmd_tx };
     SESSION.with(|c| *c.borrow_mut() = Some(session.clone()));
     Ok(session)
@@ -172,7 +173,11 @@ pub(crate) fn invalidate() {
 /// the inbound pump until the open completes, and the open never
 /// completes because the inbound pump stopped. The poll_fn below drives
 /// both each tick.
-async fn drive(mut conn: Connection<WsStream>, mut cmd_rx: mpsc::UnboundedReceiver<Cmd>) {
+async fn drive(
+    mut conn: Connection<WsStream>,
+    mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    rx_pending: crate::kernel::transport::ws_stream::RxPending,
+) {
     let mut pending: std::collections::VecDeque<OpenReply> = std::collections::VecDeque::new();
     loop {
         let event = poll_fn(|cx| {
@@ -219,7 +224,18 @@ async fn drive(mut conn: Connection<WsStream>, mut cmd_rx: mpsc::UnboundedReceiv
                     }
                 }
             }
-            if made_progress {
+            // Never park while the socket still holds un-parsed frames.
+            // `poll_next_inbound` reports `Pending` once it has taken what it
+            // wants for this tick, and `made_progress` only covers new inbound
+            // streams / completed opens — never plain DATA frames for existing
+            // streams, which is all a response body is. Parking there left the
+            // queued remainder untouched until the next WebSocket message
+            // arrived; against NAVER that was the upstream's 60s keepalive
+            // PING, so a document that was already fully delivered to the relay
+            // froze mid-parse for exactly 60s (kernel pump stuck at ~189 KB of
+            // 241 KB, zero CPU, no deflate-end). Re-polling here costs one extra
+            // pass and only while data is genuinely pending.
+            if made_progress || rx_pending.has_buffered() {
                 // Re-poll immediately to drain anything else ready.
                 cx.waker().wake_by_ref();
             }

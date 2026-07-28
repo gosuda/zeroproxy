@@ -2082,3 +2082,45 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod naver_js_perf {
+    use super::*;
+    // Diagnostic: NAVER ships ~1.5 MB of JS (main 706 KB, search 294 KB,
+    // polyfill 261 KB, preload 197 KB). Every one is rewritten by OXC on the
+    // Service Worker's single thread. Whatever this costs natively, the SW is
+    // blocked for at least that long in production (wasm is slower still) —
+    // no fetch handling, no stream pumping, CDP unresponsive.
+    #[test]
+    #[ignore]
+    fn time_naver_bundles() {
+        let dir = std::env::var("ZP_NAVER_JS_DIR").expect("set ZP_NAVER_JS_DIR");
+        let mut total = 0u128;
+        for name in [
+            "main.fdb73099.js",
+            "search.ff8beebc.js",
+            "polyfill.9d57c570.js",
+            "preload.7ebb5d79.js",
+        ] {
+            let p = format!("{dir}/{name}");
+            let src = match std::fs::read_to_string(&p) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("skip {name}: {e}");
+                    continue;
+                }
+            };
+            let opts = RewriteOpts {
+                kind: ScriptKind::Classic,
+                target_url: "https://pm.pstatic.net/".into(),
+                strict: true,
+            };
+            let t = std::time::Instant::now();
+            let r = rewrite_script(&src, &opts);
+            let ms = t.elapsed().as_millis();
+            total += ms;
+            println!("{name}: {}B -> {} ms (ok={})", src.len(), ms, r.is_ok());
+        }
+        println!("TOTAL native: {total} ms");
+    }
+}

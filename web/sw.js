@@ -222,7 +222,18 @@ self.addEventListener('fetch', event => {
   // script channel"). Returning without respondWith = browser default fetch.
   const u = event.request.url;
   if (!u.startsWith('http:') && !u.startsWith('https:')) return;
-  event.respondWith(handleFetch(event));
+  const responded = handleFetch(event);
+  event.respondWith(responded);
+  // Keep the worker alive until the response BODY has been fully delivered.
+  // `respondWith` only extends the lifetime until the response PROMISE
+  // settles; for a streaming document that is immediate (headers + an unread
+  // ReadableStream), after which Chrome is free to terminate the worker while
+  // the wasm pump still owes the page most of the HTML. Symptom: document
+  // frozen mid-parse (NAVER at ~33 KB, readyState never reaching complete),
+  // zero CPU, and CDP unable to attach to the worker — the stall that looked
+  // for many sessions like NAVER anti-bot but was ours. `streamDocumentResponse`
+  // attaches `__zpBodyDone`; non-streaming responses have none and resolve now.
+  event.waitUntil(responded.then(r => (r && r.__zpBodyDone) || undefined).catch(() => undefined));
 });
 
 // Rust zp-bundle (OXC native crate). Initializes lazily and exposes
@@ -1584,34 +1595,71 @@ function streamDocumentResponse(resp, opt, targetUrl) {
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
   catch { return null; }
+  // Lifetime anchor for `event.waitUntil` (see the fetch listener). Resolves
+  // when the body stream is fully delivered — normally, on error, or on
+  // consumer cancel — so the Service Worker cannot be terminated mid-stream.
+  let markBodyDone;
+  const bodyDone = new Promise(res => { markBodyDone = res; });
+  // Diagnostics for the document pipe. The kernel reports how many decoded
+  // bytes it enqueued (`tx:h2-stream-deflate-end out=…`); these counters say
+  // how many of them actually reached the page. A gap between the two localises
+  // a stalled document to this TransformStream rather than to the network.
+  const stats = { id: (self.__zpStreamSeq = (self.__zpStreamSeq || 0) + 1), url: targetUrl.slice(-40), in: 0, out: 0, chunks: 0, state: 'open', err: '' };
+  // Keep the last few streams: a navigation often fetches the document twice
+  // (first attempt cancelled, then re-requested), so a single global would
+  // report the wrong one.
+  self.__zpStreamStats = ((self.__zpStreamStats || []).concat([stats])).slice(-6);
   const ts = new TransformStream({
     transform(chunk, controller) {
       try {
         // chunk is a Uint8Array of decoded (gunzipped) HTML bytes.
+        stats.chunks++;
+        stats.in += (chunk && chunk.byteLength) || 0;
         const out = txn.write(chunk);
-        if (out && out.byteLength) controller.enqueue(out);
+        if (out && out.byteLength) { stats.out += out.byteLength; controller.enqueue(out); }
       } catch (e) {
+        stats.state = 'error';
+        stats.err = (e && (e.message || e.code)) || String(e);
+        markBodyDone();
         controller.error(e);
       }
     },
     flush(controller) {
       try {
         const tail = txn.end();
-        if (tail && tail.byteLength) controller.enqueue(tail);
+        if (tail && tail.byteLength) { stats.out += tail.byteLength; controller.enqueue(tail); }
+        stats.state = 'closed';
       } catch (e) {
+        stats.state = 'flush-error';
+        stats.err = (e && (e.message || e.code)) || String(e);
         controller.error(e);
       }
+      markBodyDone();
+    },
+    cancel(reason) {
+      stats.state = 'cancelled';
+      stats.err = String(reason || '');
+      markBodyDone();
     },
   });
   const headers = new Headers(resp.headers);
   headers.delete('Content-Length');     // decoded plaintext, unknown length
   headers.delete('X-ZP-Stream');        // strip the SW-internal marker
   headers.set('Content-Type', 'text/html; charset=utf-8');
-  return new Response(resp.body.pipeThrough(ts), {
+  const out = new Response(resp.body.pipeThrough(ts), {
     status: resp.status,
     statusText: resp.statusText,
     headers,
   });
+  // Hand the completion promise to the fetch listener. `respondWith` only
+  // extends the worker's life until the RESPONSE promise settles — which is
+  // immediately, since we return headers + an unread ReadableStream. Without
+  // a `waitUntil` on this, Chrome may terminate the worker while the wasm
+  // pump is still feeding the stream: CPU goes idle, the document freezes
+  // mid-parse (NAVER stalled at ~33 KB, readyState stuck), and CDP can't even
+  // attach to the dead worker. That was the real "NAVER 60s" — not anti-bot.
+  try { Object.defineProperty(out, '__zpBodyDone', { value: bodyDone }); } catch {}
+  return out;
 }
 function isHTMLResponse(resp) {
   const ct = resp.headers && resp.headers.get('Content-Type') || '';
@@ -1707,7 +1755,7 @@ async function handleMessage(event) {
   // the panic-hook pushed here. self.__zpRustTrace is a plain JS array, so it
   // survives the wasm trap. No init, immediate reply.
   if (msg && msg.type === '__zpTraceDump') {
-    if (reply) reply.postMessage({ ok: true, trace: (self.__zpRustTrace || []).slice(-400) });
+    if (reply) reply.postMessage({ ok: true, trace: (self.__zpRustTrace || []).slice(-400), streamStats: self.__zpStreamStats || null });
     return;
   }
   if (msg && msg.type === '__zpKernelEchoTest') {
