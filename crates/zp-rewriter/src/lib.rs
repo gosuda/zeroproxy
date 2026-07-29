@@ -48,6 +48,14 @@ pub struct RewriteOpts {
     pub kind: ScriptKind,
     pub target_url: String,
     pub strict: bool,
+    /// Proxy origin (e.g. `http://proxy.localhost:18080`). Dynamic-import URLs
+    /// are emitted absolute against it. A root-relative `/zp/api/script?…`
+    /// resolves against the IMPORTING context's base, which the membrane
+    /// virtualises to the target host — an inline script then imported
+    /// `https://www.naver.com/zp/api/script?…` and received the target site's
+    /// 404 page (NAVER ad SDK never initialised: `initAd is not defined`).
+    /// Empty keeps the legacy root-relative form for host tests.
+    pub proxy_origin: String,
 }
 
 /// A single source patch: replace `source[span.start..span.end]` with `replacement`.
@@ -186,7 +194,7 @@ pub fn rewrite_script_patches(
         return Err(RewriteError::ParseFailed(msg));
     }
 
-    let mut visitor = RewriteVisitor::new(opts.target_url.clone());
+    let mut visitor = RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone());
     visitor.visit_program(&ret.program);
 
     let mut patches = visitor.patches;
@@ -267,7 +275,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
         return Err(RewriteError::ParseFailed(msg));
     }
 
-    let mut visitor = RewriteVisitor::new(opts.target_url.clone());
+    let mut visitor = RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone());
     visitor.visit_program(&ret.program);
 
     // Apply patches to produce final code. Patches sorted by start ascending
@@ -598,7 +606,7 @@ impl RewriterInstance {
             return Err(RewriteError::ParseFailed(msg));
         }
 
-        let mut visitor = RewriteVisitor::new(opts.target_url.clone());
+        let mut visitor = RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone());
         visitor.visit_program(&ret.program);
 
         let mut patches = visitor.patches;
@@ -643,16 +651,20 @@ struct RewriteVisitor {
     /// back to leaving the source alone (the original URL still
     /// passes through the SW fetch path; only relative paths break).
     target_url: String,
+    /// See [`RewriteOpts::proxy_origin`] — makes dynamic-import URLs absolute
+    /// so a virtualised document base can't redirect them to the target host.
+    proxy_origin: String,
 }
 
 impl RewriteVisitor {
-    fn new(target_url: String) -> Self {
+    fn new(target_url: String, proxy_origin: String) -> Self {
         Self {
             patches: Vec::new(),
             diagnostics: Vec::new(),
             scopes: vec![HashSet::new()],
             infinite_loop_caps: 0,
             target_url,
+            proxy_origin,
         }
     }
 
@@ -768,7 +780,7 @@ fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
 /// fetch through the proxy transport, returning a rewritten ES
 /// module response. `kind=module` ensures the SW parses the body
 /// as an ES module (dynamic `import()` always loads a module).
-fn proxied_module_url(raw: &str, target_url: &str) -> Option<String> {
+fn proxied_module_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
     if target_url.is_empty() {
         return None;
     }
@@ -779,7 +791,7 @@ fn proxied_module_url(raw: &str, target_url: &str) -> Option<String> {
         .add(b'+').add(b'%').add(b'?').add(b'/').add(b':').add(b';').add(b'\'')
         .add(b'\\').add(b'`').add(b'{').add(b'}').add(b'[').add(b']').add(b'^').add(b'|');
     let encoded = utf8_percent_encode(&abs, QUERY_ENC).to_string();
-    Some(format!("/zp/api/script?u={encoded}&kind=module"))
+    Some(format!("{}/zp/api/script?u={encoded}&kind=module", proxy_origin.trim_end_matches('/')))
 }
 
 /// Detect a `true`-equivalent constant expression — `true` literal, `1`
@@ -888,7 +900,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         {
             return;
         }
-        let Some(proxied) = proxied_module_url(raw, &self.target_url) else {
+        let Some(proxied) = proxied_module_url(raw, &self.target_url, &self.proxy_origin) else {
             return;
         };
         // Replace the literal's content with the proxy-routed URL. The
@@ -1242,6 +1254,7 @@ mod tests {
             kind: ScriptKind::Classic,
             target_url: "https://example.com/".into(),
             strict: true,
+            proxy_origin: "http://proxy.localhost:18080".into(),
         }
     }
 
@@ -2147,6 +2160,7 @@ mod naver_js_perf {
                 kind: ScriptKind::Classic,
                 target_url: "https://pm.pstatic.net/".into(),
                 strict: true,
+                proxy_origin: "http://proxy.localhost:18080".into(),
             };
             let t = std::time::Instant::now();
             let r = rewrite_script(&src, &opts);
@@ -2155,5 +2169,31 @@ mod naver_js_perf {
             println!("{name}: {}B -> {} ms (ok={})", src.len(), ms, r.is_ok());
         }
         println!("TOTAL native: {total} ms");
+    }
+}
+
+#[cfg(test)]
+mod dynamic_import_probe {
+    use super::*;
+    // Does a RELATIVE dynamic import get routed through __zp_module_url in both
+    // classic and module scripts? If not, the browser resolves the specifier
+    // against the script's own proxy URL (/zp/api/script?…) and requests
+    // /zp/api/<name>.js — exactly the NAVER ad-SDK 404.
+    #[test]
+    #[ignore]
+    fn probe_relative_dynamic_import() {
+        for kind in [ScriptKind::Classic, ScriptKind::Module] {
+            let opts = RewriteOpts {
+                kind,
+                target_url: "https://ssl.pstatic.net/tveta/libs/glad/prod/gfp-core.js".into(),
+                strict: true,
+                proxy_origin: "http://proxy.localhost:18080".into(),
+            };
+            let src = r#"async function f(){ const m = await import("./gfp-display-sdk.js"); return m; }"#;
+            match rewrite_script(src, &opts) {
+                Ok(out) => println!("{:?}: {}", kind, out.code),
+                Err(e) => println!("{:?}: ERROR {:?}", kind, e),
+            }
+        }
     }
 }

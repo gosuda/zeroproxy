@@ -292,13 +292,18 @@ async function initBundle() {
     self.ZPBundle = Object.freeze({
       ready: true,
       bundleVersion: wbg.bundleVersion,
-      rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(source, kind || 'classic', targetUrl || ''),
+      // proxyOrigin (= this worker's own ORIGIN) makes rewritten dynamic-import
+      // URLs absolute. Root-relative ones resolve against the IMPORTING
+      // context's base, which the membrane virtualises to the target host — an
+      // inline script then imported https://<target>/zp/api/script?… and got
+      // the target's 404 (NAVER ad SDK: 'initAd is not defined').
+      rewriteScript: (source, kind, targetUrl) => wbg.rewriteScript(source, kind || 'classic', targetUrl || '', ORIGIN),
       // Patch-mode emit: returns `{"len":N,"patches":[{start,end,replacement},…]}`
       // as a JSON string. Caller applies patches over the original source it
       // already holds — skips the O(n) full re-emit + cross-ABI string copy.
       // Optional (export missing on older bundles → SW falls back to full path).
       rewriteScriptPatches: typeof wbg.rewriteScriptPatches === 'function'
-        ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '')
+        ? (source, kind, targetUrl) => wbg.rewriteScriptPatches(source, kind || 'classic', targetUrl || '', ORIGIN)
         : null,
       transformHtml: (html, targetUrl) => wbg.transformHtml(html, targetUrl || '', ORIGIN),
       // Phase C streaming render: the wasm-bindgen `HtmlTxn` class. `new
@@ -320,13 +325,13 @@ async function initBundle() {
       // D2: unchained composer (rewriter_map only). Required by
       // /zp/api/sourcemap when no upstream `.map` is present.
       composeSourceMap: (source, kind, targetUrl) =>
-        wbg.composeSourceMap(source, kind || 'classic', targetUrl || ''),
+        wbg.composeSourceMap(source, kind || 'classic', targetUrl || '', ORIGIN),
       // D2 follow-on: chained composer (rewriter_map ∘ original_map).
       // Optional on older bundles; the SW falls back to the unchained
       // composer when missing or when no upstream map exists.
       composeSourceMapChained: typeof wbg.composeSourceMapChained === 'function'
         ? (source, kind, targetUrl, originalMapJson) =>
-            wbg.composeSourceMapChained(source, kind || 'classic', targetUrl || '', originalMapJson || '')
+            wbg.composeSourceMapChained(source, kind || 'classic', targetUrl || '', originalMapJson || '', ORIGIN)
         : null,
       buildCSP: (wsOrigin) => wbg.buildCSP(wsOrigin || ''),
     });

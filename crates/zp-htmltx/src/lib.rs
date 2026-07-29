@@ -214,6 +214,7 @@ fn attr_settings(
                                 kind: ScriptKind::EventHandler,
                                 target_url: target_for_attr.clone(),
                                 strict,
+                                proxy_origin: proxy_origin.clone(),
                             };
                             match rewrite_script(&body, &opts) {
                                 Ok(r) => {
@@ -246,6 +247,7 @@ fn attr_settings(
                             kind: ScriptKind::EventHandler,
                             target_url: target_for_attr.clone(),
                             strict,
+                                proxy_origin: proxy_origin.clone(),
                         };
                         match rewrite_script(&value, &opts) {
                             Ok(r) => {
@@ -294,6 +296,7 @@ pub fn transform(html: &str, opts: &TransformOptions) -> Result<TransformResult,
 /// script-rewritten. Shared by the buffered `transform` path and [`HtmlTxn`].
 fn script_settings(
     target_url: String,
+    proxy_origin: String,
     strict: bool,
     diagnostics: Rc<RefCell<Vec<String>>>,
     prelude: String,
@@ -309,6 +312,9 @@ fn script_settings(
     let buf_for_text = current_buffer.clone();
     let buf_for_end = current_buffer.clone();
     let target_for_end = target.clone();
+    // Dynamic-import URLs inside inline scripts must be proxy-origin absolute
+    // (see RewriteOpts::proxy_origin) — the end handler rewrites those too.
+    let origin_for_end = proxy_origin.clone();
     let diags_for_end = diags.clone();
 
     let mut handlers = vec![
@@ -354,6 +360,7 @@ fn script_settings(
                                 kind,
                                 target_url: target_for_end.clone(),
                                 strict,
+                                proxy_origin: origin_for_end.clone(),
                             };
                             let replacement = match rewrite_script(&src, &opts) {
                                 Ok(r) => {
@@ -435,6 +442,7 @@ impl HtmlTxn {
         );
         let script = script_settings(
             opts.target_url.clone(),
+            opts.proxy_origin.clone(),
             opts.strict,
             diagnostics.clone(),
             prelude,

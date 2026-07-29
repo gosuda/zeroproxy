@@ -1998,7 +1998,13 @@ test('NAVER dynamic import fix: rewriter routes literal import() through /zp/api
   assert.match(rewriter, /fn visit_import_expression\(/, 'visitor must override visit_import_expression');
   assert.match(rewriter, /fn proxied_module_url\(/, 'proxied_module_url helper must exist');
   assert.match(rewriter, /fn resolve_module_base\(/, 'resolve_module_base helper must exist (replaces url crate)');
-  assert.match(rewriter, /"\/zp\/api\/script\?u=\{encoded\}&kind=module"/, 'proxied URL must include kind=module');
+  // The URL must be PROXY-ORIGIN ABSOLUTE. A root-relative `/zp/api/script?…`
+  // resolves against the importing context's base, which the membrane
+  // virtualises to the target host — an inline script then imported
+  // `https://<target>/zp/api/script?…` and received the target's 404 page
+  // (NAVER's ad SDK never initialised: "initAd is not defined").
+  assert.match(rewriter, /"\{\}\/zp\/api\/script\?u=\{encoded\}&kind=module", proxy_origin/, 'proxied URL must be proxy-origin absolute and include kind=module');
+  assert.match(rewriter, /pub proxy_origin: String/, 'RewriteOpts must carry proxy_origin');
   // The url crate would pull ~250 KB of ICU into the page bundle;
   // verify Cargo.toml does NOT depend on it.
   const cargo = fs.readFileSync('crates/zp-rewriter/Cargo.toml', 'utf8');

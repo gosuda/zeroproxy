@@ -41,9 +41,14 @@ fn parse_script_kind(kind: &str) -> Result<zp_rewriter::ScriptKind, JsError> {
 }
 
 #[wasm_bindgen(js_name = rewriteScript)]
-pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str) -> Result<String, JsError> {
+pub fn rewrite_script_js(
+    source: &str,
+    kind: &str,
+    target_url: &str,
+    proxy_origin: &str,
+) -> Result<String, JsError> {
     let kind = parse_script_kind(kind)?;
-    let opts = zp_rewriter::RewriteOpts { kind, target_url: target_url.to_string(), strict: true };
+    let opts = zp_rewriter::RewriteOpts { kind, target_url: target_url.to_string(), strict: true, proxy_origin: proxy_origin.to_string() };
     zp_rewriter::rewrite_script(source, &opts)
         .map(|r| r.code)
         .map_err(|e| JsError::new(&e.to_string()))

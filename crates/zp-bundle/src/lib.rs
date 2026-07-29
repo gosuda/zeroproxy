@@ -87,12 +87,13 @@ fn parse_script_kind(kind: &str) -> Result<zp_rewriter::ScriptKind, JsError> {
 }
 
 #[wasm_bindgen(js_name = rewriteScript)]
-pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str) -> Result<String, JsError> {
+pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str, proxy_origin: &str) -> Result<String, JsError> {
     let kind = parse_script_kind(kind)?;
     let opts = zp_rewriter::RewriteOpts {
         kind,
         target_url: target_url.to_string(),
         strict: true,
+        proxy_origin: proxy_origin.to_string(),
     };
     zp_rewriter::rewrite_script(source, &opts)
         .map(|r| r.code)
@@ -114,12 +115,14 @@ pub fn rewrite_script_patches_js(
     source: &str,
     kind: &str,
     target_url: &str,
+    proxy_origin: &str,
 ) -> Result<String, JsError> {
     let kind = parse_script_kind(kind)?;
     let opts = zp_rewriter::RewriteOpts {
         kind,
         target_url: target_url.to_string(),
         strict: true,
+        proxy_origin: proxy_origin.to_string(),
     };
     // Use the patch-only API: skips the O(n) `apply_patches` +
     // `strip_sourcemap_pragma` string reconstruction. The JS caller already
@@ -178,12 +181,14 @@ pub fn compose_source_map_js(
     source: &str,
     kind: &str,
     target_url: &str,
+    proxy_origin: &str,
 ) -> Result<String, JsError> {
     let kind = parse_script_kind(kind)?;
     let opts = zp_rewriter::RewriteOpts {
         kind,
         target_url: target_url.to_string(),
         strict: true,
+        proxy_origin: proxy_origin.to_string(),
     };
     zp_rewriter::compose_source_map(source, &opts, target_url)
         .map_err(|e| JsError::new(&e.to_string()))
@@ -201,12 +206,14 @@ pub fn compose_source_map_chained_js(
     kind: &str,
     target_url: &str,
     original_map_json: &str,
+    proxy_origin: &str,
 ) -> Result<String, JsError> {
     let kind = parse_script_kind(kind)?;
     let opts = zp_rewriter::RewriteOpts {
         kind,
         target_url: target_url.to_string(),
         strict: true,
+        proxy_origin: proxy_origin.to_string(),
     };
     zp_rewriter::compose_source_map_chained(source, &opts, target_url, original_map_json)
         .map_err(|e| JsError::new(&e.to_string()))
