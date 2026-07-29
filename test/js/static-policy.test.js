@@ -1850,21 +1850,25 @@ test('perf telemetry: SW exposes rewrite cache hit/miss + latency counters', () 
 // 있지만, 이미 nam.veta/siape.veta stub 으로 광고 인벤토리가 채워지지 않아서
 // 손해 boundary 작음. production deployment 시 광고 표시 원하면 ntm 만 list
 // 에서 제외 + 첫 진입 1분 wait 복귀.
-test('NAVER 광고/트래커 instant-stub: nam.veta + siape.veta (204) + ntm.pstatic.net (200 stub.js)', () => {
+// 2026-07-29: the ad/tracker stub list is now EMPTY. It existed to dodge a
+// "NAVER WAF 60s slow-lane" that turned out to be our own transport bug —
+// `TlsStream::poll_read` polled the socket before feeding ciphertext it already
+// held, so a fully-delivered response sat undecrypted until the peer's next
+// keepalive PING (exactly 60s). A direct HTTP/2 probe from the same IP showed
+// gap=0ms 3/3 (trap-notebook 2026-07-28). With the real cause fixed the stubs
+// only damage the page: `{}` bodies render as empty panels in NAVER's own UI.
+// The machinery stays so a regression can be bisected by re-adding one host.
+test('NAVER 광고/트래커 instant-stub 은 비활성 (60s 의 진짜 원인은 우리 TLS lost wakeup 이었음)', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  assert.match(sw, /const NAVER_AD_BID_STUB_HOSTS = new Set\(\[/, 'stub list constant must exist');
-  assert.match(sw, /'nam\.veta\.naver\.com'/, 'nam.veta must be stubbed');
-  assert.match(sw, /'siape\.veta\.naver\.com'/, 'siape.veta must be stubbed');
-  assert.match(sw, /'ntm\.pstatic\.net'/, 'ntm.pstatic.net must be stubbed (dogfood trade-off vs ads)');
-  // 진입점 분기 + script vs non-script 응답 분기
-  assert.match(sw, /NAVER_AD_BID_STUB_HOSTS\.has\(stubHost\)/, 'transportFetch must short-circuit on stub host');
-  assert.match(sw, /const isScript = stubHost === 'ntm\.pstatic\.net'/, 'ntm must respond as script (200 + content-type js)');
-  // 2026-06-10 응답 shape 수정: 204 No Content 가 광고 SDK JSON.parse fail
-  // → fallback content (binary garbage) 가 페이지에 inject 되는 회귀 가설.
-  // 대신 200 + {} empty JSON 으로 응답해서 SDK 가 정상 parse 후 no-bid 처리.
-  assert.match(sw, /const stubBody = isScript \? '\/\* zp:stub \*\/' : '\{\}'/, 'non-script stub must return empty JSON body');
-  assert.match(sw, /'application\/json; charset=utf-8'/, 'non-script stub must declare application/json content-type');
-  assert.match(sw, /'\/\* zp:stub \*\/'/, 'ntm response must be a no-op JS comment');
+  // Only the LIST matters: an empty Set means nothing is short-circuited. (The
+  // host names still appear in the response-shape branch and in the history
+  // comment, which is intentional — the machinery is kept for bisecting.)
+  const listMatch = /const NAVER_AD_BID_STUB_HOSTS = new Set\(\[([\s\S]*?)\]\)/.exec(sw);
+  assert.ok(listMatch, 'stub host list constant must exist');
+  assert.equal(listMatch[1].trim(), '', `stub host list must ship empty, got: ${listMatch[1].trim()}`);
+  // Machinery kept for bisecting a future regression.
+  assert.match(sw, /NAVER_AD_BID_STUB_HOSTS\.has\(stubHost\)/, 'stub short-circuit must remain wired');
+  assert.match(sw, /const stubBody = isScript \? '\/\* zp:stub \*\/' : '\{\}'/, 'stub response shape must remain defined');
 });
 
 // 2026-06-11 NAVER 광고 SDK ES module stub — `ssl.pstatic.net/tveta/libs/
@@ -1892,13 +1896,16 @@ test('launcher ready boundary: bundleReady + kernelReady + kernelFetch === funct
 // 가 NAVER WAF 의 추가 slow-lane endpoint (20s+ wait × N) 라 page hydration
 // 가 1분+ 걸림. 1×1 transparent PNG 로 stub → 즉시 hydration, thumbnail
 // 빈 자리 trade-off (dogfood 우선).
-test('NAVER dthumb.phinf stub: 1×1 transparent PNG via path-prefix match', () => {
+// 2026-07-29: emptied alongside the ad/tracker stubs — the "20s+ per dthumb"
+// it worked around was the same TLS read lost wakeup, and stubbing blanked
+// every news/card thumbnail on the page.
+test('NAVER dthumb.phinf image stub 은 비활성 (썸네일이 통째로 비던 원인)', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  assert.match(sw, /const NAVER_IMAGE_STUB_PATHS = \[/, 'image stub list must exist');
-  assert.match(sw, /host: 's\.pstatic\.net', pathPrefix: '\/dthumb\.phinf'/, 's.pstatic.net dthumb.phinf must be stubbed');
-  assert.match(sw, /const TRANSPARENT_PNG_BYTES = Uint8Array\.from/, '1×1 transparent PNG bytes must be defined');
-  assert.match(sw, /urlParts\.pathname\.startsWith\(pathPrefix\)/, 'path-prefix match must use pathname.startsWith');
-  assert.match(sw, /'image\/png'/, 'stub response must declare image/png content-type');
+  assert.match(sw, /const NAVER_IMAGE_STUB_PATHS = \[\s*\]/, 'image stub list must ship empty');
+  assert.equal(sw.includes("pathPrefix: '/dthumb.phinf'"), false, 'dthumb must not be stubbed — it blanked real thumbnails');
+  // Machinery kept for bisecting a future regression.
+  assert.match(sw, /const TRANSPARENT_PNG_BYTES = Uint8Array\.from/, '1×1 PNG bytes must remain defined');
+  assert.match(sw, /urlParts\.pathname\.startsWith\(pathPrefix\)/, 'path-prefix match must remain wired');
 });
 
 // 2026-06-11 SW response cache 임시 비활성화 — dynamic ES module import

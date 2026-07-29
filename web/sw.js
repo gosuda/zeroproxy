@@ -860,11 +860,19 @@ async function fetchOriginalSourceMap(source, target, tab) {
 // 
 // production deployment 시 광고 표시 원하면 ntm 만 list 에서 제거 + 첫
 // 진입 1분 wait 받아들이거나 SW response cache 구현 (별도 트랙).
-const NAVER_AD_BID_STUB_HOSTS = new Set([
-  'nam.veta.naver.com',
-  'siape.veta.naver.com',
-  'ntm.pstatic.net',
-]);
+// 2026-07-29 — EMPTIED. The 60s these stubs existed to dodge was NOT a NAVER
+// WAF slow-lane: it was our own transport bug (rustls `read_tls` returns one
+// record per call, and `TlsStream::poll_read` polled the socket before feeding
+// the ciphertext it already held, so a fully-delivered response sat undecrypted
+// until the peer's next keepalive PING — exactly 60s). See trap-notebook
+// 2026-07-28. A direct HTTP/2 probe to www.naver.com from the same IP showed
+// last-data and END_STREAM arriving with gap=0ms, 3/3.
+//
+// With the real cause fixed, stubbing these actively BREAKS the page: the `{}`
+// bodies show up as empty panels in NAVER's own UI and the 1×1 PNG blanks every
+// news/card thumbnail. Keep the lists (and this history) so a regression can be
+// bisected by re-adding a host, but ship empty.
+const NAVER_AD_BID_STUB_HOSTS = new Set([]);
 
 // 2026-06-10 NAVER dynamic thumbnail proxy (`s.pstatic.net/dthumb.phinf/...`)
 // 도 NAVER WAF 의 추가 slow-lane endpoint — 비신뢰 IP 에서 20s+ wait
@@ -873,9 +881,10 @@ const NAVER_AD_BID_STUB_HOSTS = new Set([
 // hydration 완성 안 됨. ntm 과 같이 stub 으로 우회 — 차이점은 이미지라
 // 1×1 transparent PNG 로 응답 (binary 이미지 응답). 결과: thumbnail 빈
 // 자리 (UI 깨짐 visible) trade-off, dogfood 가능성 우선.
-const NAVER_IMAGE_STUB_PATHS = [
-  { host: 's.pstatic.net', pathPrefix: '/dthumb.phinf' },
-];
+// 2026-07-29 — EMPTIED for the same reason as NAVER_AD_BID_STUB_HOSTS above:
+// the "20s+ per dthumb request" this worked around was our TLS read lost
+// wakeup, not a WAF slow-lane. Stubbing blanked every news/card thumbnail.
+const NAVER_IMAGE_STUB_PATHS = [];
 
 // 2026-06-11 NAVER 광고 SDK ES module stub. **좁은 매칭만** — 광고 SDK 의
 // `gfp-display-glog-logger.js` (logger 전용, dynamic import fail 의 cascade
@@ -1256,6 +1265,17 @@ async function transportFetch(targetUrl, opt) {
     resp = await self.kernelFetch(reqLike);
   } catch (e) {
     logTransportEvent(u, method, 0, performance.now() - txT0, 0);
+    // Record WHY. The page only ever sees "502 (Bad Gateway)", which tells us
+    // nothing about whether the kernel refused, the handshake failed, or the
+    // stream died — and these failures are intermittent, so a reproduction
+    // without the reason attached is wasted. Goes to the same trace ring the
+    // kernel uses, readable via the SW's `__zpTraceDump` message.
+    try {
+      const reason = (e && (e.message || e.code)) || String(e);
+      (self.__zpRustTrace = self.__zpRustTrace || []).push(
+        `sw:transport-fail ${method} ${String(u).slice(0, 120)} after=${Math.round(performance.now() - txT0)}ms err=${reason}`
+      );
+    } catch {}
     return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
   }
   // body length signal — Content-Length is upstream-authoritative when
@@ -1573,7 +1593,15 @@ async function transformDocumentResponse(resp, opt) {
   // escape vector the "탈출 없는 감옥" design forbids.
   if (!transformOk) {
     const targetUrl = (opt.entry && (opt.entry.targetUrl || opt.entry.baseUrl)) || '';
-    void transformFailure; // reserved for diagnostics surfacing
+    // Surface the reason: a 502 from here and a 502 from a transport failure
+    // are indistinguishable in the page console, and the HTML rewriter can
+    // fail-closed for reasons worth knowing (a wasm panic shows up as a bare
+    // "unreachable" — see the zp-bundle panic hook).
+    try {
+      (self.__zpRustTrace = self.__zpRustTrace || []).push(
+        `sw:html-transform-fail ${String(targetUrl).slice(0, 120)} reason=${String(transformFailure).slice(0, 160)}`
+      );
+    } catch {}
     return safeError('MALFORMED_HTML', 502, targetUrl);
   }
   // Prelude virtualURL stays at the originally requested URL — using the
