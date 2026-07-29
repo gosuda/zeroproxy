@@ -724,9 +724,27 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     // because anti-bot signal also includes "no GREASE = not a real
     // browser". The encoder's catch-arm in macros.rs emits a zero-byte
     // body for any GREASE ID, so the wire shape is correct.
+    //
+    // The two values MUST DIFFER. Chrome brackets with two *distinct* GREASE
+    // IDs, and more importantly TLS forbids a duplicate extension type in a
+    // ClientHello — a strict peer answers `decode_error`. Two independent
+    // `random_grease()` draws collide 1 in 16, which showed up as an
+    // intermittent `received fatal alert: DecodeError` against
+    // cologger.shopping.naver.com while every other host handshaked fine.
     order.retain(|e| !crate::ja3::is_grease_value(u16::from(*e)));
-    order.insert(0, crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
-    order.push(crate::msgs::enums::ExtensionType::Unknown(crate::ja3::random_grease()));
+    let grease_first = crate::ja3::random_grease();
+    let mut grease_last = crate::ja3::random_grease();
+    if grease_last == grease_first {
+        // Walk to the neighbouring GREASE code point — still a valid RFC 8701
+        // value, just guaranteed distinct.
+        let idx = crate::ja3::GREASE_VALUES
+            .iter()
+            .position(|v| *v == grease_first)
+            .unwrap_or(0);
+        grease_last = crate::ja3::GREASE_VALUES[(idx + 1) % crate::ja3::GREASE_VALUES.len()];
+    }
+    order.insert(0, crate::msgs::enums::ExtensionType::Unknown(grease_first));
+    order.push(crate::msgs::enums::ExtensionType::Unknown(grease_last));
 
     // Phase 5.7 / 5.8: ensure ExtensionType::Padding (id 21, RFC 7685)
     // is the last contiguous extension before the trailing GREASE entry,
