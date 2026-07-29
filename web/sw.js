@@ -309,7 +309,14 @@ async function initBundle() {
       // 2026-06-08 split-bundle (c.1) Step 4: CSS rewriter ported here from
       // rewriter-rs/. Mirrors the legacy `rewriteCSS` surface (positional
       // args, throws on parse failure).
-      rewriteCSS: (source, baseUrl, controlPrefix) => wbg.rewriteCSS(source, baseUrl || '', controlPrefix || '/zp/'),
+      // `proxyOrigin` defaults to this worker's own origin (ORIGIN), so the
+      // emitted /zp/api/fetch references are absolute and resolve correctly
+      // no matter what base the consuming context has. Root-relative ones
+      // resolved against the membrane's VIRTUAL base (the target origin) and
+      // 404'd for every target — fonts and sprites just vanished. Derived at
+      // runtime, so it follows whatever host/port the proxy is served on.
+      rewriteCSS: (source, baseUrl, controlPrefix, proxyOrigin) =>
+        wbg.rewriteCSS(source, baseUrl || '', controlPrefix || '/zp/', proxyOrigin === undefined ? ORIGIN : (proxyOrigin || '')),
       // D2: unchained composer (rewriter_map only). Required by
       // /zp/api/sourcemap when no upstream `.map` is present.
       composeSourceMap: (source, kind, targetUrl) =>

@@ -1,6 +1,6 @@
 //! 2026-06-08 split-bundle (c.1) Step 4: SWC-based CSS rewriter ported from
 //! the (now-deleted) `rewriter-rs/` crate. Same surface as before:
-//! `rewrite_css(source, base_url, control_prefix)` → rewrites `url(...)` and
+//! `rewrite_css(source, base_url, control_prefix, proxy_origin)` → rewrites `url(...)` and
 //! `@import` references to route through the proxy's `/zp/api/fetch?url=...`
 //! endpoint. The wasm-bindgen export `rewriteCSS` (see `lib.rs`) is what
 //! `web/sw.js` (and Step 4-onwards page realm if needed) calls.
@@ -15,9 +15,9 @@ pub struct CssRewriteResult {
     pub error: String,
 }
 
-pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str) -> CssRewriteResult {
+pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str, proxy_origin: &str) -> CssRewriteResult {
     let control_prefix = if control_prefix.is_empty() { "/zp/" } else { control_prefix };
-    match collect_css_replacements(source, base_url, control_prefix) {
+    match collect_css_replacements(source, base_url, control_prefix, proxy_origin) {
         Ok(replacements) => CssRewriteResult {
             ok: true,
             code: apply_css_replacements(source, replacements),
@@ -27,7 +27,12 @@ pub fn rewrite_css(source: &str, base_url: &str, control_prefix: &str) -> CssRew
     }
 }
 
-fn proxied_css_url(raw: &str, base_url: &str, control_prefix: &str) -> Option<String> {
+fn proxied_css_url(
+    raw: &str,
+    base_url: &str,
+    control_prefix: &str,
+    proxy_origin: &str,
+) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() || s.starts_with('#') || s.starts_with("var(") {
         return None;
@@ -41,7 +46,18 @@ fn proxied_css_url(raw: &str, base_url: &str, control_prefix: &str) -> Option<St
     if abs.scheme() != "http" && abs.scheme() != "https" {
         return None;
     }
+    // Absolute (proxy-origin) URL, not root-relative. A bare
+    // `/zp/api/fetch?url=…` resolves against whatever base the consuming
+    // context has — and the membrane virtualises the document base to the
+    // TARGET origin. Inside a proxied iframe that turned NAVER's font and
+    // sprite requests into `https://spastatic.naver.com/zp/api/fetch?url=…`
+    // (404: the target host has no such path), so webfonts and shopping
+    // sprites silently vanished. The HTML rewriter already takes
+    // `proxy_origin` for exactly this reason; CSS needs the same. Empty
+    // `proxy_origin` keeps the legacy root-relative form (tests / callers
+    // that render into a non-virtualised base).
     let mut out = String::new();
+    out.push_str(proxy_origin.trim_end_matches('/'));
     out.push_str(control_prefix);
     if !out.ends_with('/') { out.push('/'); }
     out.push_str("api/fetch?url=");
@@ -68,7 +84,7 @@ struct CssReplacement {
     text: String,
 }
 
-fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str) -> Result<Vec<CssReplacement>, String> {
+fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str, proxy_origin: &str) -> Result<Vec<CssReplacement>, String> {
     use swc_common::{sync::Lrc, FileName, SourceMap};
     use swc_css_parser::{parse_file, parser::ParserConfig};
 
@@ -78,7 +94,7 @@ fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str) 
 
     let mut stylesheet_errors = Vec::new();
     if let Ok(stylesheet) = parse_file::<Stylesheet>(&fm, None, ParserConfig::default(), &mut stylesheet_errors) {
-        let mut collector = CssUrlCollector::new(base_url, control_prefix, start_pos, source.len());
+        let mut collector = CssUrlCollector::new(base_url, control_prefix, proxy_origin, start_pos, source.len());
         stylesheet.visit_with(&mut collector);
         if !collector.replacements.is_empty() || source.contains('{') || source.contains("@import") {
             return Ok(collector.replacements);
@@ -87,7 +103,7 @@ fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str) 
 
     let mut declaration_errors = Vec::new();
     if let Ok(declarations) = parse_file::<Vec<DeclarationOrAtRule>>(&fm, None, ParserConfig::default(), &mut declaration_errors) {
-        let mut collector = CssUrlCollector::new(base_url, control_prefix, start_pos, source.len());
+        let mut collector = CssUrlCollector::new(base_url, control_prefix, proxy_origin, start_pos, source.len());
         for declaration in &declarations {
             declaration.visit_with(&mut collector);
         }
@@ -98,7 +114,7 @@ fn collect_css_replacements(source: &str, base_url: &str, control_prefix: &str) 
 
     let mut value_errors = Vec::new();
     if let Ok(values) = parse_file::<ListOfComponentValues>(&fm, None, ParserConfig::default(), &mut value_errors) {
-        let mut collector = CssUrlCollector::new(base_url, control_prefix, start_pos, source.len());
+        let mut collector = CssUrlCollector::new(base_url, control_prefix, proxy_origin, start_pos, source.len());
         values.visit_with(&mut collector);
         return Ok(collector.replacements);
     }
@@ -125,14 +141,15 @@ fn apply_css_replacements(source: &str, mut replacements: Vec<CssReplacement>) -
 struct CssUrlCollector<'a> {
     base_url: &'a str,
     control_prefix: &'a str,
+    proxy_origin: &'a str,
     start_pos: u32,
     source_len: usize,
     replacements: Vec<CssReplacement>,
 }
 
 impl<'a> CssUrlCollector<'a> {
-    fn new(base_url: &'a str, control_prefix: &'a str, start_pos: u32, source_len: usize) -> Self {
-        Self { base_url, control_prefix, start_pos, source_len, replacements: Vec::new() }
+    fn new(base_url: &'a str, control_prefix: &'a str, proxy_origin: &'a str, start_pos: u32, source_len: usize) -> Self {
+        Self { base_url, control_prefix, proxy_origin, start_pos, source_len, replacements: Vec::new() }
     }
 
     fn span_offsets(&self, span: swc_common::Span) -> Option<(usize, usize)> {
@@ -142,7 +159,7 @@ impl<'a> CssUrlCollector<'a> {
     }
 
     fn add_quoted_replacement(&mut self, span: swc_common::Span, raw: &str) {
-        let Some(next) = proxied_css_url(raw, self.base_url, self.control_prefix) else { return; };
+        let Some(next) = proxied_css_url(raw, self.base_url, self.control_prefix, self.proxy_origin) else { return; };
         let Some((start, end)) = self.span_offsets(span) else { return; };
         self.replacements.push(CssReplacement {
             start,
@@ -185,7 +202,7 @@ mod tests {
     fn rewrites_url_in_stylesheet() {
         let (base, prefix) = opts();
         let css = "body { background: url(/img/bg.png); }";
-        let out = rewrite_css(css, base, prefix);
+        let out = rewrite_css(css, base, prefix, "");
         assert!(out.ok, "rewrite failed: {}", out.error);
         assert!(out.code.contains("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fimg%2Fbg.png"), "got: {}", out.code);
     }
@@ -194,7 +211,7 @@ mod tests {
     fn skips_data_blob_javascript_schemes() {
         let (base, prefix) = opts();
         let css = "body { background: url(data:image/png;base64,abc); background-image: url(blob:foo); cursor: url(javascript:alert(1)); }";
-        let out = rewrite_css(css, base, prefix);
+        let out = rewrite_css(css, base, prefix, "");
         assert!(out.ok);
         assert!(out.code.contains("data:image/png"));
         assert!(out.code.contains("blob:foo"));
@@ -205,8 +222,49 @@ mod tests {
     fn rewrites_at_import() {
         let (base, prefix) = opts();
         let css = "@import \"/styles/reset.css\";";
-        let out = rewrite_css(css, base, prefix);
+        let out = rewrite_css(css, base, prefix, "");
         assert!(out.ok);
         assert!(out.code.contains("/zp/api/fetch?url=https%3A%2F%2Fexample.com%2Fstyles%2Freset.css"));
+    }
+
+    // Pin: with a proxy origin the emitted references are ABSOLUTE. Root-
+    // relative ones resolve against the consuming context's base, which the
+    // membrane virtualises to the target origin — inside a proxied iframe the
+    // browser then asked the TARGET host for `/zp/api/fetch?url=…` and got 404
+    // (this is why NAVER's webfonts and shopping sprites silently disappeared).
+    // Target-agnostic: the origin is whatever the proxy is served on at runtime.
+    #[test]
+    fn proxy_origin_makes_urls_absolute() {
+        let (base, prefix) = opts();
+        let origin = "http://proxy.localhost:18080";
+        for css in [
+            "body { background: url(/img/bg.png); }",
+            "@import \"/styles/reset.css\";",
+            "@font-face { src: url(../fonts/x.woff2) format('woff2'); }",
+        ] {
+            let out = rewrite_css(css, base, prefix, origin);
+            assert!(out.ok, "rewrite failed: {}", out.error);
+            assert!(
+                out.code.contains("http://proxy.localhost:18080/zp/api/fetch?url="),
+                "expected absolute proxy URL, got: {}",
+                out.code
+            );
+            // No bare root-relative reference must survive.
+            assert!(
+                !out.code.contains("\"/zp/api/fetch"),
+                "root-relative reference leaked: {}",
+                out.code
+            );
+        }
+    }
+
+    // A trailing slash on the origin must not produce `//zp/`.
+    #[test]
+    fn proxy_origin_trailing_slash_is_normalised() {
+        let (base, prefix) = opts();
+        let out = rewrite_css("body { background: url(/img/bg.png); }", base, prefix, "https://p.example/");
+        assert!(out.ok);
+        assert!(out.code.contains("https://p.example/zp/api/fetch?url="), "got: {}", out.code);
+        assert!(!out.code.contains("//zp/api"), "double slash: {}", out.code);
     }
 }

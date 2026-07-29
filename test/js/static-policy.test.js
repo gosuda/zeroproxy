@@ -975,7 +975,15 @@ test('rewriter-rs/ is deleted; CSS rewriter lives in zp-bundle (Step 4)', () => 
   assert.match(bundleLib, /css::rewrite_css\(/, 'rewriteCSS export must delegate to css::rewrite_css');
   // SW + page bundle wrapper expose rewriteCSS.
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  assert.match(sw, /rewriteCSS:\s*\(source,\s*baseUrl,\s*controlPrefix\)\s*=>\s*wbg\.rewriteCSS\(/, 'SW initBundle must expose rewriteCSS on ZPBundle');
+  assert.match(sw, /rewriteCSS:\s*\(source,\s*baseUrl,\s*controlPrefix(?:,\s*proxyOrigin)?\)\s*=>\s*wbg\.rewriteCSS\(/, 'SW initBundle must expose rewriteCSS on ZPBundle');
+  // The emitted /zp/api/fetch references must be ABSOLUTE against the proxy's
+  // own runtime origin. Root-relative ones resolve against the consuming
+  // context's base, which the membrane virtualises to the TARGET origin — the
+  // browser then requests them from the target host and gets 404 (observed:
+  // NAVER webfonts + shopping sprites vanished). Must stay origin-derived, not
+  // hard-coded, so it follows whatever host/port the proxy is served on.
+  assert.match(sw, /rewriteCSS[\s\S]{0,400}?proxyOrigin === undefined \? ORIGIN/, 'rewriteCSS must default proxyOrigin to the SW runtime ORIGIN');
+  assert.match(sw, /const ORIGIN = self\.location\.origin/, 'ORIGIN must be derived from the SW location at runtime');
   assert.match(sw, /self\.ZPBundle\.rewriteCSS\(/, 'rewriteCSSResponse must call ZPBundle.rewriteCSS');
   // build.mjs page bundle wrapper exposes rewriteCSS.
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');

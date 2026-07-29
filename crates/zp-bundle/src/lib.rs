@@ -288,9 +288,21 @@ impl HtmlTxn {
 /// throws a `CSS_PARSE_FAILED` JsError. `base_url` is the CSS file's
 /// absolute URL (used to resolve relative refs in `url(...)` / `@import`);
 /// `control_prefix` is typically `/zp/`.
+///
+/// `proxy_origin` (e.g. `http://proxy.localhost:18080`) makes the emitted
+/// `/zp/api/fetch?url=…` references ABSOLUTE. Root-relative ones resolve
+/// against the consuming context's base, which the membrane virtualises to the
+/// TARGET origin — so inside a proxied iframe they were requested from the
+/// target host and 404'd (NAVER's webfonts and shopping sprites disappeared
+/// this way). Passing an empty string keeps the legacy root-relative output.
 #[wasm_bindgen(js_name = rewriteCSS)]
-pub fn rewrite_css_js(source: &str, base_url: &str, control_prefix: &str) -> Result<String, JsError> {
-    let out = css::rewrite_css(source, base_url, control_prefix);
+pub fn rewrite_css_js(
+    source: &str,
+    base_url: &str,
+    control_prefix: &str,
+    proxy_origin: &str,
+) -> Result<String, JsError> {
+    let out = css::rewrite_css(source, base_url, control_prefix, proxy_origin);
     if out.ok {
         Ok(out.code)
     } else {
