@@ -1915,17 +1915,40 @@
     // `data-zp-target-url`, exactly as the anchor click path reads it
     // (clickNavigationTarget), so use that first and fall back to the raw
     // attribute only for forms we never rewrote (e.g. JS-built, relative).
+    //
+    // The raw-attribute fallback needs one more step: a proxy-origin action is
+    // NOT a target. htmltx writes the launcher onto `action` but does not always
+    // leave a `data-zp-target-url` stash beside it — NAVER's login form
+    // (`frmNIDLogin`) is exactly that shape: `action` is
+    // `<proxy>/zp/?via=<login url>` with no stash. Handing that back makes
+    // `targetURL()` faithfully dial `proxy.localhost:18080` and the submit dies
+    // as TARGET_CONNECT_FAILED — i.e. logging in was impossible. So unwrap the
+    // launcher back to its target, the same shapes `deproxyEntryName` handles
+    // for resource-timing names.
+    function deproxyNavigationURL(raw) {
+      const s = String(raw == null ? '' : raw);
+      if (!s || s.lastIndexOf(proxyOrigin, 0) !== 0) return s;
+      let u;
+      try { u = new Native.URL(s); } catch { return s; }
+      const via = u.searchParams.get('via');
+      if (via) return via;
+      // `/zp/p/<token>` is encrypted — nothing to decode client-side. The current
+      // document's target is the only sane guess and is right for the common
+      // case (a form posting back to its own page). Any other proxy-origin
+      // action gets the same treatment: it is certainly not a dialable host.
+      return virtualURL.href;
+    }
     function submissionActionURL(form, submitter) {
       if (submitter && submitter.hasAttribute && submitter.hasAttribute('formaction')) {
         const fa = urlMeta.get(submitter)
           || Native.getAttribute.call(submitter, 'data-zp-target-url')
           || submitter.getAttribute('formaction');
-        if (fa) return fa;
+        if (fa) return deproxyNavigationURL(fa);
       }
       const action = urlMeta.get(form)
         || Native.getAttribute.call(form, 'data-zp-target-url')
         || (form.getAttribute && form.getAttribute('action'));
-      return action || virtualURL.href;
+      return (action && deproxyNavigationURL(action)) || virtualURL.href;
     }
     async function submitFormNavigation(form, submitter) {
       const raw = submissionActionURL(form, submitter);

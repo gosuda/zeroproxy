@@ -556,6 +556,16 @@ test('form submit resolves target from urlMeta, not the rewritten action attribu
     'submitter formaction must prefer urlMeta / data-zp-target-url');
   assert.match(body, /urlMeta\.get\(form\)[\s\S]*?data-zp-target-url/,
     'form action must prefer urlMeta / data-zp-target-url');
+  // Regression (2026-07-30): the stash is not always there. NAVER's login form
+  // carries `action="<proxy>/zp/?via=…"` with no `data-zp-target-url`, so the
+  // raw-attribute fallback handed our own origin back and the submit died as
+  // TARGET_CONNECT_FAILED against proxy.localhost — login was impossible.
+  assert.match(body, /deproxyNavigationURL\(fa\)/, 'formaction fallback must be unwrapped');
+  assert.match(body, /deproxyNavigationURL\(action\)/, 'action fallback must be unwrapped');
+  assert.match(rt, /function deproxyNavigationURL\(raw\)[\s\S]{0,700}?searchParams\.get\('via'\)/,
+    'the unwrapper must decode the ?via= launcher');
+  assert.match(rt, /function deproxyNavigationURL\(raw\)[\s\S]{0,900}?return virtualURL\.href;\s*\}/,
+    'a proxy-origin action with no via must fall back to the document target, never the proxy origin');
 });
 
 // B4: EventSource fidelity. WHATWG SSE §9.2 — auto-reconnect after a soft
