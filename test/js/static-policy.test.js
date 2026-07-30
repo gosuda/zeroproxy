@@ -380,8 +380,48 @@ test('child-realm executors reach the page rewriter only through pageRewriteHook
       `installNetworkContainment must not reference installPhase2Membrane's ${local} — it is out of scope`);
   }
   assert.match(body, /const hooks = pageRewriteHooks;/, 'child rewrite must read the shared holder');
-  assert.match(body, /const childExecInline = source => childExecGlobal\(childRewrite\(source, 'classic'\)\)/,
-    'child inline executor must go through childRewrite');
+  // The ordered pipeline: a `<script src>` written by document.write is
+  // parser-blocking, so every child-realm executor must serialize through the
+  // queue or a following inline script wins the race (NAVER ad creatives:
+  // `bridge.createSdkBridge is not a function`).
+  assert.match(body, /let childTail = null;/, 'child realm needs a script queue tail');
+  assert.match(body, /const childEnqueue = work =>/, 'child realm needs childEnqueue');
+  // Download eagerly, execute in order — serializing the fetch too would turn
+  // N parallel downloads into a waterfall.
+  assert.match(body, /const fetching = Native\.fetch\(scriptProxyPath\([\s\S]{0,80}?\)\.then\(r => r\.text\(\)\);/,
+    'external loader must start its download before enqueueing');
+  assert.match(body, /return childEnqueue\(\(\) => fetching\.then\(/,
+    'external loader must execute through the queue');
+  // A failing creative must not stall every script behind it.
+  assert.match(body, /\.catch\(childReportError\)\.then\(childSettle\)/,
+    'queue must swallow-and-report errors, then settle');
+  assert.match(body, /const childExecInline = source => childEnqueue\(\(\) => childExecGlobal\(childRewrite\(source, 'classic'\)\)\)/,
+    'child inline executor must go through childRewrite, on the ordered queue');
+});
+
+// Regression (2026-07-30): making child inline scripts async (the ordered
+// pipeline above) means a creative can call `document.write` after its document
+// closed, which triggers an implicit `document.open()` that wipes everything.
+// Guarded — but ONLY while a deferred script runs, because a genuinely late
+// `document.write` is supposed to wipe the document in a real browser too.
+test('closed-document document.write appends instead of wiping, only when deferred', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /let deferredScriptDepth = 0;/, 'deferred-script depth counter missing');
+  assert.match(rt, /const childRunDeferred = work => \{\s*deferredScriptDepth\+\+;/,
+    'queue must mark deferred runs');
+  assert.match(rt, /\} finally \{ deferredScriptDepth--; \}/, 'depth must be released in finally');
+  for (const method of ['write', 'writeln']) {
+    const re = new RegExp("define\\(docProto, '" + method + "'[\\s\\S]{0,400}?deferredScriptDepth > 0 && documentIsClosed\\(this\\)\\) return appendWrittenHTML\\(this, html\\)");
+    assert.match(rt, re, `document.${method} must guard the closed-document wipe`);
+  }
+  assert.match(rt, /function documentIsClosed\(doc\) \{[\s\S]{0,200}?readyState !== 'loading'/,
+    'closed means the parser is gone, i.e. readyState is not loading');
+  // Scripts inserted via innerHTML/template never execute — the appended chunk
+  // must re-create them, or a written `<script>` silently does nothing.
+  assert.match(rt, /function appendWrittenHTML\(doc, html\) \{[\s\S]{0,1400}?const fresh = doc\.createElement\('script'\);/,
+    'appendWrittenHTML must re-create script elements so they execute');
+  assert.match(rt, /appendWrittenHTML[\s\S]{0,1400}?stale\.replaceWith\(fresh\)/,
+    're-created script must replace the inert one');
 });
 
 // Resource-timing entry names must not leak proxy URLs.
@@ -445,9 +485,9 @@ test('inline classic scripts execute in global scope, not a Function scope', () 
   assert.match(rt, /const childEval = w\.eval;/, 'child realm must capture its own eval');
   assert.match(rt, /const childExecGlobal = code => childEval \? childEval\(code\)/,
     'child realm needs a global-scope executor');
-  assert.match(rt, /const childExecInline = source => childExecGlobal\(/,
+  assert.match(rt, /const childExecInline = source => childEnqueue\(\(\) => childExecGlobal\(/,
     'child inline classic executor must use childExecGlobal');
-  assert.match(rt, /const childExecRewritten = code => childExecGlobal\(/,
+  assert.match(rt, /const childExecRewritten = code => childEnqueue\(\(\) => childExecGlobal\(/,
     'child pre-rewritten executor must use childExecGlobal');
   // Event handlers stay function-scoped — an inline handler IS a function body.
   assert.match(rt, /'__ZP_EXEC_EVENT'[\s\S]{0,120}?Native\.FunctionCtor\('event'/,

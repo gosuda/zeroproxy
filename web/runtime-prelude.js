@@ -128,6 +128,13 @@
   // Published here so both scopes share one implementation.
   let pageRewriteHooks = null;
 
+  // Non-zero while a child-realm script runs off the ordered pipeline instead of
+  // straight off the parser (see `childEnqueue` in installNetworkContainment).
+  // The only thing that reads it is the `document.write` closed-document guard:
+  // outside a deferred run we must keep the native wipe semantics, because a
+  // page doing a late `document.write` gets wiped in a real browser too.
+  let deferredScriptDepth = 0;
+
   // Diagnostic ring buffer: capture target-script errors so we can introspect
   // hydration / runtime failures without instrumenting the page after-the-fact.
   // Exposed as the global __zp_diagnostics — read from devtools/taskweaver.
@@ -3020,13 +3027,17 @@
       if (docProto.write) {
         const protoWrite = docProto.write;
         define(docProto, 'write', function(...parts) {
-          return protoWrite.apply(this, [parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('')]);
+          const html = parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('');
+          if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
+          return protoWrite.apply(this, [html]);
         });
       }
       if (docProto.writeln) {
         const protoWriteln = docProto.writeln;
         define(docProto, 'writeln', function(...parts) {
-          return protoWriteln.apply(this, [parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('') + '\n']);
+          const html = parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('') + '\n';
+          if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
+          return protoWriteln.apply(this, [html]);
         });
       }
     }
@@ -3265,6 +3276,41 @@
       map.scopes = nextScopes;
     }
     return JSON.stringify(map).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026');
+  }
+  // `document.write` on a CLOSED document triggers an implicit
+  // `document.open()` that wipes everything already there. That is correct
+  // browser behaviour and we keep it — except for one case we created
+  // ourselves: the child-realm ordered script pipeline can run an inline script
+  // one microtask after the parser finished, and a creative writing into what it
+  // believes is still-parsing markup would then erase the ad it just built.
+  // Append the markup instead of wiping, and re-create every script element so
+  // it actually executes (parser- and appendChild-inserted scripts run,
+  // innerHTML/template-cloned ones never do).
+  function documentIsClosed(doc) {
+    try { return !!doc && doc.readyState !== 'loading'; } catch { return false; }
+  }
+  function appendWrittenHTML(doc, html) {
+    const target = doc.body || doc.documentElement;
+    if (!target) return;
+    const template = doc.createElement('template');
+    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(template, html);
+    else template.innerHTML = html;
+    const frag = template.content || template;
+    const scripts = frag.querySelectorAll ? Array.prototype.slice.call(frag.querySelectorAll('script')) : [];
+    target.appendChild(frag);
+    for (const stale of scripts) {
+      // Ordering across these is preserved by the pipeline itself: each body is
+      // a `__ZP_EXEC_INLINE_SCRIPT` / `__ZP_LOAD_EXTERNAL_SCRIPT` call, and we
+      // are inside a queued item, so every enqueue lands behind us in order.
+      const fresh = doc.createElement('script');
+      if (Native.getAttributeNames) {
+        for (const name of Native.getAttributeNames.call(stale)) {
+          try { Native.setAttribute.call(fresh, name, Native.getAttribute.call(stale, name) || ''); } catch {}
+        }
+      }
+      setScriptText(fresh, getScriptText(stale));
+      try { stale.replaceWith(fresh); } catch {}
+    }
   }
   function transformHTML(value, opts) {
     const html = String(value);
@@ -4219,18 +4265,62 @@
         if (!hooks) throw normalizedError('InvalidStateError');
         return hooks.rewrite(hooks.decodeEntities(source), kind);
       };
-      const childExecInline = source => childExecGlobal(childRewrite(source, 'classic'));
-      const childExecModule = source => (new childFunction(childRewrite(source, 'module'))).call(w);
+      // Ordered script pipeline for this child realm.
+      //
+      // A `<script src>` written by `document.write` is PARSER-BLOCKING: the
+      // parser stops until it loads, so the next inline script sees the globals
+      // it defined. Our external loader is a `fetch`, so without a queue the
+      // following inline script wins the race — which is exactly the NAVER ad
+      // failure (`bridge.createSdkBridge is not a function`,
+      // `naver_corp_da is not defined`).
+      //
+      // Every executor below goes through `childEnqueue`, so execution order
+      // matches document order regardless of how the code arrived. Downloads
+      // still start the moment the loader is called, so scripts fetch in
+      // parallel and only their EXECUTION is serialized — the same shape the
+      // browser gives `<script defer>`.
+      //
+      // Fast path: with an empty queue the work runs synchronously, so a realm
+      // that never loads an external script keeps today's exact semantics and
+      // nothing becomes async that was not already.
+      let childTail = null;
+      let childPending = 0;
+      const childReportError = err => {
+        // Surface it the way a real script error would, without breaking the
+        // chain — one failing creative must not stall the rest of the queue.
+        try { (w.setTimeout || setTimeout)(() => { throw err; }, 0); } catch {}
+      };
+      const childSettle = () => { if (--childPending === 0) childTail = null; };
+      const childRunDeferred = work => {
+        deferredScriptDepth++;
+        try { return work(); } finally { deferredScriptDepth--; }
+      };
+      const childEnqueue = work => {
+        if (!childTail) {
+          let result;
+          try { result = work(); } catch (err) { childReportError(err); return; }
+          if (!result || typeof result.then !== 'function') return result;
+          childPending++;
+          childTail = Promise.resolve(result).catch(childReportError).then(childSettle);
+          return result;
+        }
+        childPending++;
+        childTail = childTail.then(() => childRunDeferred(work)).catch(childReportError).then(childSettle);
+        return childTail;
+      };
+      const childExecInline = source => childEnqueue(() => childExecGlobal(childRewrite(source, 'classic')));
+      const childExecModule = source => childEnqueue(() => (new childFunction(childRewrite(source, 'module'))).call(w));
       // `_REWRITTEN` variants: code already rewritten by zp-htmltx — execute
       // directly in the child realm without going through the page rewriter.
-      const childExecRewritten = code => childExecGlobal(String(code || ''));
-      const childExecRewrittenModule = code => {
+      const childExecRewritten = code => childEnqueue(() => childExecGlobal(String(code || '')));
+      const childRunRewrittenModule = code => {
         const blob = new (w.Blob || Blob)([String(code || '')], { type: 'text/javascript' });
         const url = (w.URL && w.URL.createObjectURL || URL.createObjectURL).call(w.URL || URL, blob);
         const p = w.eval ? w.eval('import(' + JSON.stringify(url) + ')') : import(url);
         Promise.resolve(p).finally(() => { try { (w.URL && w.URL.revokeObjectURL || URL.revokeObjectURL).call(w.URL || URL, url); } catch {} });
         return p;
       };
+      const childExecRewrittenModule = code => childEnqueue(() => childRunRewrittenModule(code));
       // External script loader for iframe. SW only controls top-level (parent)
       // — `document.write` 가 iframe 의 about:blank document 를 reset 한 뒤에는
       // 자식이 SW client 자격을 잃어 `<script src=ext>` fetch 가 SW 우회 직행 → Go
@@ -4239,31 +4329,29 @@
       // 하여 SafeFrame loader 가 정상 실행되게 한다.
       // External script written into the child document.
       //
-      // KNOWN GAP — script ordering. A real `<script src>` produced by
-      // `document.write` is PARSER-BLOCKING: the parser stops until it loads, so
-      // the next inline script sees the globals it defined. This loader returns
-      // immediately, so the following inline script can run first. NAVER's ad
-      // creatives hit exactly that: `gladBridge.createSdkBridge()` and
-      // `naver_corp_da.Util` read globals the still-in-flight SDK defines
-      // moments later. Control experiment: real naver.com loaded directly logs
-      // 0 console errors, through the proxy 3.
-      //
-      // DEAD END (2026-07-30) — do NOT retry synchronous XHR here. It looks
-      // like the obvious fix (the only way an inline script can wait), but
-      // **the Service Worker does not intercept synchronous XMLHttpRequest**:
-      // measured on one controlled page, the same URL returns 403 from the Go
-      // server for sync XHR and 503 from the SW for `fetch`. Sync XHR therefore
-      // bypasses the whole transport, 403s, and silently degrades to this async
-      // path — one wasted request per script and no ordering gained. The Go
-      // server cannot serve `/zp/api/script` either; the proxied fetch lives in
-      // the browser kernel by design.
-      //
-      // A real fix means sequencing the child pipeline (chain every script in a
-      // written chunk onto the previous one) and first solving the hazard that
-      // makes it dangerous: inline scripts would become async, and a creative
-      // calling `document.write` after its document closed triggers an implicit
-      // `document.open()` that wipes the document. See the trap-notebook entry.
-      const childLoadExternal = (url, kind) => Native.fetch(scriptProxyPath(String(url || ''), String(kind || 'classic'))).then(r => r.text()).then(code => { childExecGlobal(code); });
+      // DEAD END (2026-07-30) — do NOT "fix" the ordering with synchronous XHR.
+      // It looks like the obvious answer (the only way an inline script can
+      // wait), but **the Service Worker does not intercept synchronous
+      // XMLHttpRequest**: measured on one controlled page, the same URL returns
+      // 403 from the Go server for sync XHR and 503 from the SW for `fetch`.
+      // Sync XHR bypasses the whole transport, 403s, and silently degrades back
+      // to the async path — one wasted request per script and no ordering
+      // gained. The Go server cannot serve `/zp/api/script` either; the proxied
+      // fetch lives in the browser kernel by design. Ordering is solved by
+      // `childEnqueue` above instead: fetch in parallel, execute in order.
+      const childLoadExternal = (url, kind) => {
+        const dtype = String(kind || 'classic');
+        // Start downloading NOW so N scripts in one written chunk fetch in
+        // parallel; the queue only serializes their execution.
+        const fetching = Native.fetch(scriptProxyPath(String(url || ''), dtype)).then(r => r.text());
+        // `childRunDeferred` here as well as in `childEnqueue`: this body runs a
+        // microtask after the fetch even on the empty-queue fast path, so the
+        // `document.write` guard has to see the deferred flag either way.
+        return childEnqueue(() => fetching.then(code => childRunDeferred(() => {
+          if (dtype === 'module') return childRunRewrittenModule(code);
+          childExecGlobal(code);
+        })));
+      };
       if (!define(w, '__ZP_EXEC_INLINE_SCRIPT', childExecInline)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_MODULE', childExecModule)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_REWRITTEN', childExecRewritten)) throw normalizedError('SecurityError');
