@@ -404,6 +404,9 @@ async function handleFetch(event) {
       case 'PROXY_DOCUMENT': return proxyDocument(req, cls, clientId);
       case 'RUNTIME_API': return runtimeAPI(req, url, clientId);
       case 'VIRTUAL_SUBRESOURCE': return virtualSubresource(req, cls, clientId);
+      // 204 rather than a 1x1 image: "no icon", stated once and cached, so the
+      // browser stops asking and nothing is logged.
+      case 'BLANK_ICON': return new Response(null, { status: 204, headers: { 'cache-control': 'max-age=86400' } });
       default: return req.mode === 'navigate' ? safeError('POLICY_BLOCKED', 403) : Response.error();
     }
   } catch (e) {
@@ -438,6 +441,21 @@ function classify(req, url, clientId) {
       return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
     }
     if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
+    // The browser's own tab-icon request: proxy origin, `/favicon.ico`, and no
+    // client behind it (browser chrome issues it, not a document). It therefore
+    // resolves no ctx, lands in UNKNOWN and gets `Response.error()` — a console
+    // network error on every proxied page plus a broken tab icon.
+    //
+    // Answer it locally and empty. Asking the TARGET for an icon is not an
+    // option: icon links are deliberately stripped (`x-zeroproxy-icon`) so the
+    // tab cannot identify the site being browsed, and honouring this request
+    // upstream would reintroduce exactly that. There is no local icon file
+    // either (`build.mjs` copies one only if present, and none ships).
+    //
+    // Only the client-less case is claimed. A page-initiated `/favicon.ico`
+    // (`<img src="/favicon.ico">`) resolves a ctx and keeps going through the
+    // normal subresource path — that one IS the target's business.
+    if (url.pathname === '/favicon.ico' && !ctx) return { kind: 'BLANK_ICON' };
     return { kind: 'UNKNOWN' };
   }
   // A2 hardening: same policy for cross-origin — no defaultContext() fallback.

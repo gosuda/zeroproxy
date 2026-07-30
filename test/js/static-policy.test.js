@@ -442,6 +442,25 @@ test('closed-document document.write appends instead of wiping, only when deferr
     'the external-loader call must count as an already-prepared script');
 });
 
+// The browser's tab-icon request has no client, so it used to fall through to
+// UNKNOWN and `Response.error()` — a console network error on every proxied page.
+// Answered locally and empty, because icon links are deliberately stripped so
+// the tab cannot identify the site: asking the target would undo that.
+test('client-less /favicon.ico is answered locally, never from the target', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /if \(url\.pathname === '\/favicon\.ico' && !ctx\) return \{ kind: 'BLANK_ICON' \};/,
+    'client-less favicon must be claimed before the UNKNOWN fallthrough');
+  assert.match(sw, /case 'BLANK_ICON': return new Response\(null, \{ status: 204/,
+    'blank icon must be a 204 with no body');
+  // The guard is what keeps a page-initiated `/favicon.ico` on the normal
+  // subresource path; without it we would answer for the target's own requests.
+  const clsIdx = sw.indexOf('function classify');
+  assert.ok(clsIdx > 0, 'classify not found');
+  const claim = sw.indexOf("=== '/favicon.ico' && !ctx", clsIdx);
+  const ctxResolve = sw.indexOf('const ctx = contextFor(req, clientId);', clsIdx);
+  assert.ok(claim > ctxResolve && ctxResolve > 0, 'the claim must sit after ctx resolution inside classify');
+});
+
 // Resource-timing entry names must not leak proxy URLs.
 //
 // Regression (2026-07-30): `PerformanceEntry.name` was the one URL surface the
