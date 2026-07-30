@@ -3206,7 +3206,14 @@
     return kind === 'module' ? '__ZP_EXEC_INLINE_MODULE(' + payload + ');' : '__ZP_EXEC_INLINE_SCRIPT(' + payload + ');';
   }
   function isPreparedInlineScript(text) {
-    return /^__ZP_EXEC_INLINE_(?:SCRIPT|MODULE|REWRITTEN|REWRITTEN_MODULE)\(/.test(String(text || '').trim());
+    // `__ZP_LOAD_EXTERNAL_SCRIPT` belongs in this set: transformHTML rewrites a
+    // child-realm `<script src>` into that call, and `appendWrittenHTML` has to
+    // re-create the element for it to execute at all. Without it the loader call
+    // gets wrapped a second time as `__ZP_EXEC_INLINE_SCRIPT("__ZP_LOAD_...")`,
+    // which routes our own helper name through the membrane and never loads the
+    // script — the ad SDK's bridge extension silently goes missing
+    // (`bridge.createSdkBridge is not a function`).
+    return /^__ZP_(?:EXEC_INLINE_(?:SCRIPT|MODULE|REWRITTEN|REWRITTEN_MODULE)|LOAD_EXTERNAL_SCRIPT)\(/.test(String(text || '').trim());
   }
   function prepareScriptElement(el) {
     if (!el || el.localName !== 'script') return;
@@ -4291,17 +4298,41 @@
         try { (w.setTimeout || setTimeout)(() => { throw err; }, 0); } catch {}
       };
       const childSettle = () => { if (--childPending === 0) childTail = null; };
-      // Ordering must never become a liveness risk. A real parser blocks
-      // forever on a stalled `<script src>`, but a stall here is OUR failure
-      // (relay hiccup, wedged transport), not the site's, and it would silently
-      // strand every later script in this realm — an ad slot that never fills
-      // and no error anywhere. Stop WAITING after the cap; the stalled script
-      // still runs if it eventually lands, just out of order.
+      // Ordering must never become a liveness risk. A real parser blocks forever
+      // on a stalled `<script src>`, but a stall here is OUR failure (relay
+      // hiccup, wedged transport), not the site's, and it would silently strand
+      // every later script in this realm — an ad slot that never fills and no
+      // error anywhere. So there is a cap; the stranded script still runs if it
+      // eventually lands, just out of order.
+      //
+      // Two things about the cap are load-bearing, both learned the hard way
+      // (the first version got them both wrong and regressed NAVER's ad bridge
+      // straight back to `bridge.createSdkBridge is not a function`):
+      //
+      //  1. The deadline is PER ITEM, timed from when that item starts running.
+      //     Capping the wait on the queue tail instead makes the deadline
+      //     cumulative — every item's timer starts at ENQUEUE, which for a
+      //     written chunk is all at once, so a realm whose scripts collectively
+      //     exceed the cap loses ordering even though nothing stalled.
+      //  2. It is a stall detector, not a slowness budget. Measured on NAVER,
+      //     a 5 s cap fired 3 times per load — those were slow-but-live scripts,
+      //     and firing broke exactly the ordering this queue exists to keep.
+      const CHILD_STALL_MS = 30000;
       const childCapped = pending => new Promise(resolve => {
         let settled = false;
         const finish = () => { if (!settled) { settled = true; resolve(); } };
-        Promise.resolve(pending).then(finish, finish);
-        try { (w.setTimeout || setTimeout)(finish, 5000); } catch { finish(); }
+        // Report rejections here: `childCapped` resolves either way, so a
+        // `.catch` downstream would never see them.
+        Promise.resolve(pending).then(finish, err => { childReportError(err); finish(); });
+        try { (w.setTimeout || setTimeout)(() => {
+          // Record it: a firing cap means ordering was abandoned, and that is
+          // otherwise invisible — no error, just an ad slot that misbehaves.
+          if (!settled) try {
+            const diag = root.__zp_diagnostics;
+            if (diag && diag.length < 200) diag.push({ t: 'script-stall', ms: CHILD_STALL_MS });
+          } catch {}
+          finish();
+        }, CHILD_STALL_MS); } catch { finish(); }
       });
       const childRunDeferred = work => {
         deferredScriptDepth++;
@@ -4313,11 +4344,13 @@
           try { result = work(); } catch (err) { childReportError(err); return; }
           if (!result || typeof result.then !== 'function') return result;
           childPending++;
-          childTail = Promise.resolve(result).catch(childReportError).then(childSettle);
+          // `childCapped` starts this item's stall timer now, i.e. when the
+          // item itself started — see the per-item note above.
+          childTail = childCapped(result).then(childSettle);
           return result;
         }
         childPending++;
-        childTail = childCapped(childTail).then(() => childRunDeferred(work)).catch(childReportError).then(childSettle);
+        childTail = childTail.then(() => childCapped(childRunDeferred(work))).catch(childReportError).then(childSettle);
         return childTail;
       };
       const childExecInline = source => childEnqueue(() => childExecGlobal(childRewrite(source, 'classic')));

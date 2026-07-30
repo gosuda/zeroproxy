@@ -397,8 +397,16 @@ test('child-realm executors reach the page rewriter only through pageRewriteHook
     'queue must swallow-and-report errors, then settle');
   // A stalled transport must not strand every later script in the realm.
   assert.match(body, /const childCapped = pending => new Promise\(/, 'queue wait must be capped');
-  assert.match(body, /childTail = childCapped\(childTail\)\.then\(/,
-    'the deferred branch must wait on the capped tail, not the raw one');
+  // The cap must be PER ITEM, timed from when that item starts. Capping the
+  // tail instead makes it cumulative — every timer starts at enqueue, so a
+  // realm whose scripts collectively exceed the cap loses ordering with nothing
+  // stalled. Measured: a 5s tail cap fired 3x per NAVER load.
+  assert.ok(!/childCapped\(childTail\)/.test(body),
+    'cap must not wrap the queue tail — that makes the deadline cumulative');
+  assert.match(body, /childTail\.then\(\(\) => childCapped\(childRunDeferred\(work\)\)\)/,
+    'the cap must wrap the item, not the wait for the tail');
+  assert.match(body, /const CHILD_STALL_MS = 30000;/,
+    'the cap is a stall detector, not a slowness budget');
   assert.match(body, /const childExecInline = source => childEnqueue\(\(\) => childExecGlobal\(childRewrite\(source, 'classic'\)\)\)/,
     'child inline executor must go through childRewrite, on the ordered queue');
 });
@@ -426,6 +434,12 @@ test('closed-document document.write appends instead of wiping, only when deferr
     'appendWrittenHTML must re-create script elements so they execute');
   assert.match(rt, /appendWrittenHTML[\s\S]{0,1400}?stale\.replaceWith\(fresh\)/,
     're-created script must replace the inert one');
+  // Re-inserting the script re-runs prepareScriptElement, so the loader call a
+  // child-realm `<script src>` was rewritten into must count as prepared. Wrap
+  // it a second time and the script never loads — the ad SDK's bridge extension
+  // silently goes missing (`bridge.createSdkBridge is not a function`).
+  assert.match(rt, /function isPreparedInlineScript[\s\S]{0,900}?LOAD_EXTERNAL_SCRIPT\)\\\(/,
+    'the external-loader call must count as an already-prepared script');
 });
 
 // Resource-timing entry names must not leak proxy URLs.
