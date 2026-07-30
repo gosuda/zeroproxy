@@ -541,10 +541,21 @@ fn build_js_response(
     init.set_status_text(&resp.reason);
     init.set_headers(&headers);
 
-    let response =
-        Response::new_with_opt_buffer_source_and_init(Some(&body_array.buffer()), &init)?;
+    // A "null body status" (101/103/204/205/304) MUST be constructed with a
+    // null body — the Response constructor throws `Response with null body
+    // status cannot have body` otherwise, which surfaced to the page as a bare
+    // 502. NAVER's analytics beacon `POST https://nlog.naver.com/n` answers
+    // 204, so every beacon 502'd; conditional requests answering 304 hit the
+    // same path.
+    let response = if is_null_body_status(resp.status) {
+        Response::new_with_opt_buffer_source_and_init(None, &init)?
+    } else {
+        Response::new_with_opt_buffer_source_and_init(Some(&body_array.buffer()), &init)?
+    };
     Ok(response.into())
 }
+
+use zp_transport_codec::http1::is_null_body_status;
 
 /// Build the `web_sys::Headers` for a response: append every upstream header,
 /// mirror Set-Cookie into the `X-ZP-Set-Cookie` sidechannel, and emit the
@@ -659,8 +670,13 @@ fn build_streaming_js_response(
     init.set_status(resp.status);
     init.set_status_text(&resp.reason);
     init.set_headers(&headers);
-    let response =
-        Response::new_with_opt_readable_stream_and_init(Some(&resp.stream), &init)?;
+    // Same null-body-status rule as the buffered path — a streaming 204/304
+    // would otherwise throw in the Response constructor and become a 502.
+    let response = if is_null_body_status(resp.status) {
+        Response::new_with_opt_readable_stream_and_init(None, &init)?
+    } else {
+        Response::new_with_opt_readable_stream_and_init(Some(&resp.stream), &init)?
+    };
     Ok(response.into())
 }
 

@@ -9,6 +9,41 @@
 use std::io;
 use std::str;
 
+/// True for the WHATWG Fetch "null body status" set (101, 103, 204, 205, 304).
+///
+/// A `Response` for one of these MUST be constructed with a null body — the
+/// browser's Response constructor throws `Response with null body status
+/// cannot have body` otherwise. The kernel's catch turned that throw into a
+/// bare 502, so NAVER's `POST https://nlog.naver.com/n` beacon (answers 204)
+/// and every conditional request answering 304 failed.
+///
+/// Lives here rather than beside the Response construction because
+/// `zp-kernel-bundle::kernel` is `#![cfg(target_arch = "wasm32")]` — a test
+/// placed there would never compile on the host, and a test that never runs
+/// is worse than no test.
+pub fn is_null_body_status(status: u16) -> bool {
+    matches!(status, 101 | 103 | 204 | 205 | 304)
+}
+
+#[cfg(test)]
+mod null_body_status_tests {
+    use super::is_null_body_status;
+
+    #[test]
+    fn covers_exactly_the_fetch_spec_null_body_statuses() {
+        for s in [101u16, 103, 204, 205, 304] {
+            assert!(is_null_body_status(s), "{s} must be a null-body status");
+        }
+        // Neighbours that DO carry a body must not be caught by the guard —
+        // suppressing a real body would silently truncate the response.
+        for s in [
+            100u16, 102, 200, 201, 202, 203, 206, 300, 301, 302, 303, 305, 307, 308, 400, 404, 500,
+        ] {
+            assert!(!is_null_body_status(s), "{s} must keep its body");
+        }
+    }
+}
+
 /// Maximum response head (status line + headers) we accept before
 /// failing closed. Matches the wasm wrapper's cap. Sized above any
 /// realistic upstream and below "kernel heap-exhaustion lever".
