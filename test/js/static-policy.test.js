@@ -309,6 +309,38 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
   assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
 });
 
+// Resource-timing entry names must not leak proxy URLs.
+//
+// Regression (2026-07-30): `PerformanceEntry.name` was the one URL surface the
+// membrane never virtualized, so target code reading
+// `performance.getEntriesByType('resource')[i].name` got
+// `http://<proxy>/zp/api/fetch?url=<target>`. Locating your own script through
+// resource timing is a standard idiom, and it handed page code our origin and
+// internal API paths.
+test('performance entry names are de-proxied back to target URLs', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /const deproxyEntryName = \(raw\) =>/, 'deproxyEntryName helper missing');
+  // Recovers the target from our own proxy URL shapes.
+  assert.match(rt, /p === ZP\.apiPath\('fetch'\)[\s\S]{0,80}searchParams\.get\('url'\)/,
+    'fetch API path must map back via ?url=');
+  assert.match(rt, /ZP\.apiPath\('script'\)[\s\S]{0,160}searchParams\.get\('u'\)/,
+    'script API path must map back via ?u=');
+  // The getter is installed on the prototype so PerformanceObserver sees it too.
+  assert.match(rt, /w\.PerformanceEntry && w\.PerformanceEntry\.prototype/,
+    'must patch PerformanceEntry.prototype, not individual entries');
+  assert.match(rt, /Object\.defineProperty\(entryProto, 'name'/, 'name getter not overridden');
+  // toJSON serialises from internal slots and would bypass the getter.
+  assert.match(rt, /define\(entryProto, 'toJSON'/, 'toJSON must also be de-proxied');
+  // Lookup by name receives a target URL, which the native index cannot match.
+  assert.match(rt, /'getEntriesByName'/, 'getEntriesByName must be resolved against virtual names');
+  // The membrane's POST fetch must carry the target in the query string too,
+  // otherwise every entry is named a bare `/zp/api/fetch` with no recoverable
+  // target — which is what let NAVER's ad SDK resolve `./gfp-display-sdk.js`
+  // against `/zp/api/` and 404.
+  assert.match(rt, /const apiURL = proxyOrigin \+ ZP\.apiPath\('fetch'\) \+ '\?url=' \+ encodeURIComponent\(target\)/,
+    'membrane POST fetch must put the target in the query string');
+});
+
 // Inline classic scripts must execute with real global scope.
 //
 // Regression (2026-07-30, NAVER search): the executors used

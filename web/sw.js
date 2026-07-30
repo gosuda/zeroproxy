@@ -422,7 +422,21 @@ function classify(req, url, clientId) {
     const ctx = contextFor(req, clientId);
     const p = parseSharePath(url.pathname);
     if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p };
-    if (ctx && url.pathname.startsWith(ZP.CONTROL_PREFIX)) return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
+    if (ctx && url.pathname.startsWith(ZP.CONTROL_PREFIX)) {
+      // A same-origin `/zp/…` path that is NOT one of our API paths means some
+      // target code resolved a relative URL against a proxy URL it got hold of
+      // (e.g. a module served from `/zp/api/script?u=…` resolving `./x.js`
+      // against `/zp/api/`). Mapping it onto the target host — which is what
+      // happens below — both leaks our internal path shape upstream and
+      // guarantees a 404 that DevTools attributes to the service worker.
+      // Record who asked so the emitter is identifiable.
+      try {
+        (self.__zpRustTrace = self.__zpRustTrace || []).push(
+          `sw:zp-path-as-subresource ${url.pathname} search=${String(url.search || '(none)').slice(0, 120)} dest=${req.destination || '?'} mode=${req.mode || '?'} initiator=${String(req.referrer || '(none)').slice(-160)} ref=${String(req.headers.get('Referer') || '(none)').slice(-160)}`
+        );
+      } catch {}
+      return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
+    }
     if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
     return { kind: 'UNKNOWN' };
   }

@@ -1300,7 +1300,17 @@
     if (req.signal) apiInit.signal = req.signal;
     // Absolute proxy URL — virtual baseURI resolves root-relative paths
     // against the target host. See scriptProxyPath for the companion bug.
-    return Native.fetch(proxyOrigin + ZP.apiPath('fetch'), apiInit).then(r => { try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {} return r; }, e => { try { zpTrace('fetch:err', target.slice(0,80) + ' ' + String(e).slice(0,60)); } catch {} throw e; });
+    // The target also rides in the query string even though the SW reads it
+    // from the JSON body. Without it every membrane fetch produced a resource
+    // timing entry named exactly `<proxy>/zp/api/fetch`, which (a) is
+    // indistinguishable between requests and (b) carries no target, so the
+    // de-proxy getter on `PerformanceEntry.name` cannot recover one. NAVER's
+    // ad SDK locates itself through resource timing and then resolved
+    // `./gfp-display-sdk.js` against that bare path — producing a 404 on
+    // `<proxy>/zp/api/gfp-display-sdk.js`. Routing is unaffected: the SW
+    // matches on `url.pathname` only.
+    const apiURL = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target);
+    return Native.fetch(apiURL, apiInit).then(r => { try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {} return r; }, e => { try { zpTrace('fetch:err', target.slice(0,80) + ' ' + String(e).slice(0,60)); } catch {} throw e; });
   }
   function fireEvent(target, type) {
     let ev;
@@ -2369,6 +2379,79 @@
       if (w.performance) {
         const baseline = boot.navigationStart || Date.now();
         try { Object.defineProperty(w.performance, 'timeOrigin', { get() { return baseline; }, configurable: true, enumerable: true }); } catch {}
+      }
+    } catch {}
+    // Performance Resource Timing leaked raw proxy URLs. Entry names were the
+    // only URL surface the membrane never virtualized, so
+    // `performance.getEntriesByType('resource')[i].name` came back as
+    // `http://<proxy>/zp/api/fetch?url=<target>`.
+    //
+    // Two problems, one cause:
+    //   1. Locating your own script through resource timing is the standard
+    //      idiom when `currentScript` is unavailable (async callbacks). NAVER's
+    //      ad SDK does exactly that, then resolves `./gfp-display-sdk.js`
+    //      against what it found — producing a request for
+    //      `<proxy>/zp/api/gfp-display-sdk.js`, which 404s. `script.src` was
+    //      already virtualized, which is why every URL-emitting path we
+    //      audited looked correct: the wrong base came from here.
+    //   2. It hands target code our origin and internal API paths, which the
+    //      membrane exists to keep hidden.
+    //
+    // The target is recoverable with no bookkeeping — our proxy URLs carry it
+    // in the query string (`?url=` / `?u=`), and `/zp/p/<token>` documents map
+    // to the virtual URL.
+    try {
+      const deproxyEntryName = (raw) => {
+        const s = String(raw == null ? '' : raw);
+        if (!s || s.lastIndexOf(proxyOrigin, 0) !== 0) return s;
+        let u;
+        try { u = new Native.URL(s); } catch { return s; }
+        const p = u.pathname;
+        if (p === ZP.apiPath('fetch')) return u.searchParams.get('url') || s;
+        if (p === ZP.apiPath('script') || p === ZP.apiPath('worker-script') || p === ZP.apiPath('sourcemap')) {
+          return u.searchParams.get('u') || s;
+        }
+        // Navigation launcher (`/zp/?via=<target>`) and the document route
+        // (`/zp/p/<token>`) both stand in for a page URL.
+        const via = u.searchParams.get('via');
+        if (via) return via;
+        if (/^\/zp\/p\//.test(p)) return virtualURL.href;
+        return s;
+      };
+      const entryProto = w.PerformanceEntry && w.PerformanceEntry.prototype;
+      const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
+      if (nameDesc && typeof nameDesc.get === 'function') {
+        const nativeName = nameDesc.get;
+        Object.defineProperty(entryProto, 'name', {
+          get() { return deproxyEntryName(nativeName.call(this)); },
+          configurable: true,
+          enumerable: nameDesc.enumerable
+        });
+        // `toJSON()` serialises from internal slots, bypassing the getter, so
+        // structured-clone / JSON paths would still leak the proxy URL.
+        const nativeToJSON = entryProto.toJSON;
+        if (typeof nativeToJSON === 'function') {
+          define(entryProto, 'toJSON', function toJSON() {
+            const out = nativeToJSON.call(this);
+            try { if (out && typeof out === 'object' && 'name' in out) out.name = deproxyEntryName(out.name); } catch {}
+            return out;
+          });
+        }
+        // Lookup by name receives a TARGET url from page code, which no longer
+        // matches what the native index stores — resolve it ourselves.
+        const perfProto = w.Performance && w.Performance.prototype;
+        const nativeByName = perfProto && perfProto.getEntriesByName;
+        if (typeof nativeByName === 'function') {
+          define(perfProto, 'getEntriesByName', function getEntriesByName(name, type) {
+            const wanted = String(name);
+            const direct = nativeByName.call(this, wanted, type);
+            if (direct && direct.length) return direct;
+            const all = type ? this.getEntriesByType(type) : this.getEntries();
+            return Array.prototype.filter.call(all, e => {
+              try { return e.name === wanted; } catch { return false; }
+            });
+          });
+        }
       }
     } catch {}
     // D7: Notification permission state must be per-target-origin. Wrap the

@@ -697,6 +697,48 @@ impl RewriteVisitor {
         self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
 
+    /// Rewrite one module specifier string literal to a proxy-routed URL.
+    ///
+    /// Shared by dynamic `import()` and every static form (`import … from`,
+    /// bare `import 'x'`, `export … from`, `export * from`). Static module
+    /// syntax used to be skipped entirely — only `visit_import_expression`
+    /// rewrote specifiers. Because we serve modules from
+    /// `<proxy>/zp/api/script?u=<target>&kind=module`, a relative specifier
+    /// left alone resolves against `/zp/api/`; the browser then requests
+    /// `<proxy>/zp/api/<name>`, which the SW maps onto the target host and the
+    /// target answers 404. That is exactly the long-standing
+    /// `/zp/api/gfp-display-sdk.js` 404 on NAVER.
+    fn rewrite_module_specifier(&mut self, lit: &StringLiteral<'_>) {
+        let raw = lit.value.as_str();
+        // Skip schemes the SW can't proxy and bare specifiers (bare specs are
+        // package-manager names with no URL semantics — they never round-trip
+        // through fetch).
+        let lower = raw.trim_start().to_ascii_lowercase();
+        if lower.starts_with("data:")
+            || lower.starts_with("blob:")
+            || lower.starts_with("javascript:")
+            || lower.starts_with("about:")
+            || (!raw.starts_with("./")
+                && !raw.starts_with("../")
+                && !raw.starts_with('/')
+                && !lower.starts_with("http://")
+                && !lower.starts_with("https://"))
+        {
+            return;
+        }
+        let Some(proxied) = proxied_module_url(raw, &self.target_url, &self.proxy_origin) else {
+            return;
+        };
+        // The span covers the *literal* node including its quotes. Re-quote
+        // with single quotes; the proxied URL never contains one (the query
+        // string is percent-encoded).
+        self.patches.push(Patch {
+            start: lit.span.start,
+            end: lit.span.end,
+            replacement: format!("'{proxied}'"),
+        });
+    }
+
     /// Shorthand object property whose value is a dangerous global. The single
     /// identifier is BOTH the key and the value, so the plain GLOBAL_GET patch
     /// would turn `{ window }` into `{__zp_get(globalThis,"window")}` — a
@@ -952,35 +994,25 @@ impl<'a> Visit<'a> for RewriteVisitor {
             }
             return;
         };
-        let raw = lit.value.as_str();
-        // Skip schemes the SW can't proxy and bare specifiers (bare
-        // specs are package-manager names with no URL semantics — they
-        // never round-trip through fetch).
-        let lower = raw.trim_start().to_ascii_lowercase();
-        if lower.starts_with("data:")
-            || lower.starts_with("blob:")
-            || lower.starts_with("javascript:")
-            || lower.starts_with("about:")
-            || (!raw.starts_with("./")
-                && !raw.starts_with("../")
-                && !raw.starts_with('/')
-                && !lower.starts_with("http://")
-                && !lower.starts_with("https://"))
-        {
-            return;
+        self.rewrite_module_specifier(lit);
+    }
+
+    fn visit_import_declaration(&mut self, decl: &ImportDeclaration<'a>) {
+        walk::walk_import_declaration(self, decl);
+        self.rewrite_module_specifier(&decl.source);
+    }
+
+    fn visit_export_named_declaration(&mut self, decl: &ExportNamedDeclaration<'a>) {
+        walk::walk_export_named_declaration(self, decl);
+        // `export { a }` with no `from` clause has no specifier to rewrite.
+        if let Some(source) = &decl.source {
+            self.rewrite_module_specifier(source);
         }
-        let Some(proxied) = proxied_module_url(raw, &self.target_url, &self.proxy_origin) else {
-            return;
-        };
-        // Replace the literal's content with the proxy-routed URL. The
-        // span covers the *literal* node — including the surrounding
-        // quotes. Re-quote with single quotes; the proxied URL never
-        // contains them (percent-encoded query string).
-        self.patches.push(Patch {
-            start: lit.span.start,
-            end: lit.span.end,
-            replacement: format!("'{proxied}'"),
-        });
+    }
+
+    fn visit_export_all_declaration(&mut self, decl: &ExportAllDeclaration<'a>) {
+        walk::walk_export_all_declaration(self, decl);
+        self.rewrite_module_specifier(&decl.source);
     }
 
     fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
@@ -1641,6 +1673,98 @@ mod tests {
                 .contains("window:__zp_get(globalThis,\"window\")"),
             "arrow-returned object literal must expand, got: {}",
             nested.code
+        );
+    }
+
+    // Static module syntax was never rewritten — only dynamic `import()` was.
+    // We serve modules from `<proxy>/zp/api/script?u=<target>&kind=module`, so
+    // a relative specifier left alone resolves against `/zp/api/`; the browser
+    // requests `<proxy>/zp/api/<name>`, the SW maps that onto the target host,
+    // and the target answers 404. That was the long-standing
+    // `/zp/api/gfp-display-sdk.js` 404 on NAVER (the ad SDK module statically
+    // imports `./gfp-display-*.js` siblings).
+    #[test]
+    fn rewrites_static_module_specifiers() {
+        let opts = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: "https://ssl.pstatic.net/tveta/libs/glad/prod/3.10.7/gfp-display-sdk.js"
+                .to_string(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".to_string(),
+        };
+        // Every static form that carries a specifier, plus dynamic import for
+        // parity. Each must resolve relative to the TARGET url, not /zp/api/.
+        let cases = [
+            "import x from './gfp-display-nda.js';",
+            "import './side.js';",
+            "export { a } from './dep.js';",
+            "export * from './all.js';",
+            "const p = import('./dyn.js');",
+        ];
+        let expected_names = [
+            "gfp-display-nda.js",
+            "side.js",
+            "dep.js",
+            "all.js",
+            "dyn.js",
+        ];
+        for (src, name) in cases.iter().zip(expected_names.iter()) {
+            let r = rewrite_script(src, &opts).unwrap();
+            assert!(
+                r.code
+                    .contains("'http://proxy.localhost:18080/zp/api/script?u="),
+                "specifier must become an absolute proxy URL for {src:?}, got: {}",
+                r.code
+            );
+            assert!(
+                r.code.contains("&kind=module'"),
+                "specifier must be tagged kind=module for {src:?}, got: {}",
+                r.code
+            );
+            // Resolved against the target's directory, not the proxy API path.
+            let want = format!("prod%2F3.10.7%2F{name}");
+            assert!(
+                r.code.contains(&want),
+                "{src:?} must resolve against the target dir ({want}), got: {}",
+                r.code
+            );
+            assert!(
+                !r.code.contains("'./"),
+                "no relative specifier may survive in {src:?}, got: {}",
+                r.code
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_bare_and_inert_module_specifiers_alone() {
+        let opts = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: "https://example.com/app/main.js".to_string(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".to_string(),
+        };
+        // Bare specifiers are package names with no URL semantics; data:/blob:
+        // never round-trip through fetch. Rewriting either would break the
+        // module graph rather than fix it.
+        for src in [
+            "import react from 'react';",
+            "export { x } from 'lodash-es';",
+            "import 'data:text/javascript,void 0';",
+        ] {
+            let r = rewrite_script(src, &opts).unwrap();
+            assert!(
+                !r.code.contains("/zp/api/script"),
+                "{src:?} must not be proxied, got: {}",
+                r.code
+            );
+        }
+        // `export { a }` without a `from` clause has no specifier at all.
+        let local = rewrite_script("const a = 1; export { a };", &opts).unwrap();
+        assert!(
+            !local.code.contains("/zp/api/script"),
+            "local re-export must be untouched, got: {}",
+            local.code
         );
     }
 
