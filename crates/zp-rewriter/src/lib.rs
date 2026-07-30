@@ -256,7 +256,7 @@ pub fn compose_source_map_chained(
     if original_map_json.is_empty() {
         return Ok(zp_map);
     }
-    Ok(chain_with_original_map(&zp_map, original_map_json))
+    Ok(chain_with_original_map(&zp_map, original_map_json, source_url))
 }
 
 /// Rewrite a JavaScript source string per the strict-mode policy.
@@ -709,7 +709,7 @@ impl RewriteVisitor {
 /// IDN handling is deliberately out of scope (pulling the full
 /// `url` crate would add ~250 KB to the page bundle via ICU).
 /// Returns `None` for unparsable or non-http(s) inputs.
-fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
+pub(crate) fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
     let raw = raw.trim();
     // 1. raw is already an absolute URL → return as-is (after scheme check).
     if raw.starts_with("http://") || raw.starts_with("https://") {

@@ -359,8 +359,20 @@ pub fn compose_rewrite_map(
 /// composed map. When `original_map_json` is malformed / missing
 /// required fields, returns `zp_map_json` verbatim — never break the
 /// DevTools experience just because an upstream `.map` was bad.
-pub fn chain_with_original_map(zp_map_json: &str, original_map_json: &str) -> String {
-    match chain_with_original_map_impl(zp_map_json, original_map_json) {
+/// `script_url` is the script's absolute target URL. The upstream map's
+/// `sources` are usually RELATIVE (`"gfp-display-sdk.js"`, `"src/x.ts"`), and
+/// DevTools resolves them against the URL the MAP was served from — for us
+/// `<proxy>/zp/api/sourcemap?…`, which turned them into requests for
+/// `/zp/api/<name>` that 404. (That was the mysterious
+/// `GET /zp/api/gfp-display-sdk.js 404` in NAVER's console: a DevTools-only
+/// artifact, harmless to the page but noisy and misleading.) Resolve them
+/// against the script instead so they point at the real origin.
+pub fn chain_with_original_map(
+    zp_map_json: &str,
+    original_map_json: &str,
+    script_url: &str,
+) -> String {
+    match chain_with_original_map_impl(zp_map_json, original_map_json, script_url) {
         Ok(json) => json,
         Err(_) => zp_map_json.to_string(),
     }
@@ -369,6 +381,7 @@ pub fn chain_with_original_map(zp_map_json: &str, original_map_json: &str) -> St
 fn chain_with_original_map_impl(
     zp_map_json: &str,
     original_map_json: &str,
+    script_url: &str,
 ) -> Result<String, sourcemap::Error> {
     use sourcemap::{SourceMap, SourceMapBuilder};
     let zp_map = SourceMap::from_slice(zp_map_json.as_bytes())?;
@@ -381,7 +394,15 @@ fn chain_with_original_map_impl(
     let mut orig_src_remap = Vec::with_capacity(orig_map.get_source_count() as usize);
     for i in 0..orig_map.get_source_count() {
         let src = orig_map.get_source(i).unwrap_or("");
-        let new_id = builder.add_source(src);
+        // Absolutise against the script so DevTools doesn't resolve the name
+        // against our `/zp/api/sourcemap?…` URL. Names that already carry a
+        // scheme (`http:`, `webpack://`, …) are left untouched.
+        let resolved = if src.is_empty() || src.contains("://") {
+            src.to_string()
+        } else {
+            crate::resolve_module_base(src, script_url).unwrap_or_else(|| src.to_string())
+        };
+        let new_id = builder.add_source(&resolved);
         if let Some(content) = orig_map.get_source_contents(i) {
             builder.set_source_contents(new_id, Some(content));
         }
@@ -566,21 +587,27 @@ mod tests {
         let zp_json = String::from_utf8(zp_json).unwrap();
 
         // Compose: rewritten.js → original.ts directly.
-        let chained = chain_with_original_map(&zp_json, &orig_json);
+        let chained = chain_with_original_map(&zp_json, &orig_json, "https://cdn.example.com/app.js");
         let chained_map = sourcemap::SourceMap::from_slice(chained.as_bytes()).unwrap();
 
         // Sources list now contains original.ts.
         let sources: Vec<&str> = (0..chained_map.get_source_count())
             .map(|i| chained_map.get_source(i).unwrap_or(""))
             .collect();
-        assert!(sources.contains(&"original.ts"), "chained map must point at original.ts, got {sources:?}");
+        // Resolved against the SCRIPT url — DevTools would otherwise resolve the
+        // bare name against our /zp/api/sourcemap?… URL and request
+        // /zp/api/original.ts (404).
+        assert!(
+            sources.contains(&"https://cdn.example.com/original.ts"),
+            "chained map must point at the absolutised original.ts, got {sources:?}"
+        );
 
         // At least one token in the chained map must resolve to
         // (line 0, col 6) of original.ts — the const-url site.
         let tokens: Vec<_> = chained_map.tokens().collect();
         assert!(!tokens.is_empty(), "chained map must carry tokens");
         let mapped = tokens.iter().find(|t| {
-            t.get_source() == Some("original.ts")
+            t.get_source() == Some("https://cdn.example.com/original.ts")
                 && t.get_src_line() == 0
                 && t.get_src_col() == 6
         });
@@ -596,14 +623,14 @@ mod tests {
         // Best-effort guarantee: an invalid upstream `.map` must NOT
         // break DevTools. Return the rewriter map verbatim.
         let zp_json = compose_rewrite_map("a", "a", &[], "x.js");
-        let chained = chain_with_original_map(&zp_json, "not a sourcemap");
+        let chained = chain_with_original_map(&zp_json, "not a sourcemap", "https://cdn.example.com/app.js");
         assert_eq!(chained, zp_json, "fallback must be byte-identical to the zp map");
     }
 
     #[test]
     fn chain_with_empty_original_map_returns_zp_map_verbatim() {
         let zp_json = compose_rewrite_map("a", "a", &[], "x.js");
-        let chained = chain_with_original_map(&zp_json, "");
+        let chained = chain_with_original_map(&zp_json, "", "https://cdn.example.com/app.js");
         assert_eq!(chained, zp_json);
     }
 }
