@@ -800,6 +800,16 @@ async function runtimeAPI(req, url, clientId) {
       return safeError('REWRITE_FAILED', 502, target);
     }
   }
+  // Unmatched /zp/api/* — record who asked. The page console only shows
+  // "404 (from service worker)" with a `script:1` initiator, which is not
+  // enough to find the emitter: a relative reference inside a script we serve
+  // at `/zp/api/script?…` resolves to `/zp/api/<name>` and lands here. Logging
+  // the referrer + destination identifies it in one reproduction.
+  try {
+    (self.__zpRustTrace = self.__zpRustTrace || []).push(
+      `sw:api-404 path=${url.pathname} dest=${req.destination || '?'} mode=${req.mode || '?'} ref=${String(req.headers.get('Referer') || '').slice(-120)}`
+    );
+  } catch {}
   return safeError('POLICY_BLOCKED', 404);
 }
 
