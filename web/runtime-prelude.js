@@ -1806,8 +1806,33 @@
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: activeEntryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
     function submitForm(form, submitter) { submitFormNavigation(form, submitter).catch(err => { const code = err && (err.code || err.message); if (code === 'REQUEST_BODY_TOO_LARGE') Native.locationAssign && Native.locationAssign(ZP.errorPath('REQUEST_BODY_TOO_LARGE')); }); }
+    // Resolve the form's real absolute target, NOT the rewritten attribute.
+    //
+    // htmltx rewrites `action` / `formaction` to the proxy-origin launcher
+    // `<proxy>/zp/?via=<target>` (proxied_navigation_url) so the browser's
+    // native UI never sees the target host. Reading that attribute back here
+    // is fatal for GET: per HTML, a GET submit REPLACES the action URL's
+    // query string with the form data set, which destroys `via=` and leaves
+    // the proxy origin itself as the navigation target — the search box then
+    // navigates to `<proxy>/zp/?query=...` and resolves to TARGET_CONNECT_FAILED
+    // against proxy.localhost. The absolute target is stashed in urlMeta /
+    // `data-zp-target-url`, exactly as the anchor click path reads it
+    // (clickNavigationTarget), so use that first and fall back to the raw
+    // attribute only for forms we never rewrote (e.g. JS-built, relative).
+    function submissionActionURL(form, submitter) {
+      if (submitter && submitter.hasAttribute && submitter.hasAttribute('formaction')) {
+        const fa = urlMeta.get(submitter)
+          || Native.getAttribute.call(submitter, 'data-zp-target-url')
+          || submitter.getAttribute('formaction');
+        if (fa) return fa;
+      }
+      const action = urlMeta.get(form)
+        || Native.getAttribute.call(form, 'data-zp-target-url')
+        || (form.getAttribute && form.getAttribute('action'));
+      return action || virtualURL.href;
+    }
     async function submitFormNavigation(form, submitter) {
-      const raw = submitter && submitter.getAttribute && submitter.getAttribute('formaction') || form.getAttribute('action') || virtualURL.href;
+      const raw = submissionActionURL(form, submitter);
       const method = String(submitter && submitter.getAttribute && submitter.getAttribute('formmethod') || form.getAttribute('method') || 'GET').toUpperCase();
       if (method === 'DIALOG') return;
       const target = new URL(targetURL(raw));

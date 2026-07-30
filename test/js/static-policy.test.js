@@ -309,6 +309,33 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
   assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
 });
 
+// Form submission must resolve the target from urlMeta / data-zp-target-url,
+// NEVER from the rewritten `action` / `formaction` attribute.
+//
+// Regression (2026-07-30, NAVER search): htmltx rewrites those attributes to
+// the proxy-origin launcher `<proxy>/zp/?via=<target>`. Per HTML, a GET submit
+// REPLACES the action URL's query string with the form data set — so reading
+// the attribute back destroyed `via=` and left the proxy origin as the
+// navigation target. NAVER's search box navigated to `<proxy>/zp/?query=...`
+// and died with TARGET_CONNECT_FAILED against proxy.localhost.
+test('form submit resolves target from urlMeta, not the rewritten action attribute', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /function submissionActionURL\(form, submitter\)/,
+    'submissionActionURL helper missing');
+  // The GET/POST submit path must go through the helper, not a raw getAttribute.
+  assert.match(rt, /const raw = submissionActionURL\(form, submitter\);/,
+    'submitFormNavigation must resolve its action via submissionActionURL');
+  assert.ok(!/getAttribute\('formaction'\) \|\| form\.getAttribute\('action'\)/.test(rt),
+    'raw action/formaction attribute read must not come back — it holds the ?via= launcher URL');
+  // urlMeta is consulted before the attribute, for both form and submitter.
+  const helper = rt.slice(rt.indexOf('function submissionActionURL'));
+  const body = helper.slice(0, helper.indexOf('\n    }') + 6);
+  assert.match(body, /urlMeta\.get\(submitter\)[\s\S]*?data-zp-target-url/,
+    'submitter formaction must prefer urlMeta / data-zp-target-url');
+  assert.match(body, /urlMeta\.get\(form\)[\s\S]*?data-zp-target-url/,
+    'form action must prefer urlMeta / data-zp-target-url');
+});
+
 // B4: EventSource fidelity. WHATWG SSE §9.2 — auto-reconnect after a soft
 // transport error, with `Last-Event-ID` echoed on every reconnect and the
 // server-supplied `retry:` interval applied. Wrong Content-Type / non-2xx

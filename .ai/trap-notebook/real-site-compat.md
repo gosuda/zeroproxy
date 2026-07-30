@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-07-30 — 모든 GET 폼 제출이 프록시 자신을 타깃으로 삼음 (NAVER 검색 "찾을 수 없음")
+
+**Symptoms**:
+- NAVER 메인은 완전 렌더되는데 **검색을 누르면 결과가 안 나오고 "찾을 수 없다"**.
+- 에러 페이지 본문: `TARGET_CONNECT_FAILED` / **`Target host: proxy.localhost:18080`** — 타깃이 search.naver.com 이 아니라 **프록시 자신**.
+- 새 `/zp/p/<token>` 이 정상 발급되므로 "토큰/전송 문제" 로 보이기 쉬우나 아님. 토큰이 가리키는 타깃이 처음부터 틀렸다.
+
+**Root cause** — 리라이트된 attribute 를 되읽는 라운드트립 버그:
+- `zp-htmltx` 는 `form@action` / `input|button@formaction` 을 프록시 오리진 런처 URL
+  `<proxy>/zp/?via=<absolute_target>` 로 리라이트한다 (`proxied_navigation_url`).
+  이유는 hover / 중클릭 / `target=_blank` / "링크 주소 복사" 같은 **브라우저 네이티브 UI 가 raw attribute 를 읽어** 타깃 호스트를 노출·직접 접속하는 걸 막기 위함. 절대 타깃은 `data-zp-target-url` 에 stash 된다.
+- 그런데 `runtime-prelude.js` `submitFormNavigation()` 이 타깃을 **`form.getAttribute('action')` 으로 되읽었다** → 런처 URL 을 타깃으로 오인.
+- **GET 분기에서 치명적**: HTML 스펙상 `method=get` 제출은 action URL 의 **쿼리스트링을 폼 데이터셋으로 통째 교체**한다. 그래서 `?via=<target>` 이 **파괴**되고 `<proxy>/zp/?query=...` 가 남아 → 타깃 = 프록시 오리진.
+- POST 분기도 같은 `raw` 를 써서 동일하게 깨져 있었다 (`ZP_SUBMIT_PREPARE` 의 targetUrl 이 런처 URL). 즉 **로그인/댓글 등 모든 폼 제출이 사이트 무관하게 고장**. NAVER 검색은 그중 가장 눈에 띄는 표면일 뿐.
+
+**Why it hid so long**: `form.action` **프로퍼티** 는 `installURLProp` 이 가상화해서 정상적으로 실제 타깃(`https://search.naver.com/search.naver`)을 반환한다. 그래서 콘솔에서 `f.action` 을 찍어보면 멀쩡해 보인다. 깨진 건 `getAttribute('action')` 쪽 뿐이고, 하필 제출 코드가 그걸 썼다. 또 `data-zp-target-url` 은 `installStealthMembrane` 이 마스킹하므로 `getAttribute` 로는 `null` 로 보여 "htmltx 가 stash 를 안 했나" 로 오독하기 쉽다 — 실제로는 stash 되어 있고 `urlMeta` 에 살아 있다.
+
+**Fix**: [web/runtime-prelude.js](../../web/runtime-prelude.js) 에 `submissionActionURL(form, submitter)` 추가 — 앵커 클릭 경로(`clickNavigationTarget`)와 **동일한 우선순위** `urlMeta.get(el) → data-zp-target-url → raw attribute` 로 해소. submitter 의 `formaction` 도 같은 순서. raw attribute 는 우리가 리라이트하지 않은 폼(JS 생성/상대경로)용 fallback 으로만 남김.
+
+**Verification**: NAVER 검색 `weather` → `weather : 네이버 검색` (body 659796, 영어사전 결과 포함), 한글 `서울 날씨` → `서울 날씨 : 네이버 검색`. JS static-policy 70/70.
+
+**Regression guard**: [test/js/static-policy.test.js](../../test/js/static-policy.test.js) — `submissionActionURL` 존재 + 제출 경로가 그걸 경유 + **raw `getAttribute('formaction') || getAttribute('action')` 패턴이 되살아나지 않음** 을 핀.
+
+**Patterns to watch**:
+- (a) **우리가 리라이트한 attribute 를 우리 코드가 되읽으면 안 된다.** 리라이트 값은 "브라우저 네이티브 UI 전용 출력" 이고, 내부 로직의 진실은 `urlMeta`/`data-zp-target-url` 이다. 프로퍼티는 가상화되지만 attribute 는 아니라는 **비대칭**이 함정의 핵심.
+- (b) **URL 을 쿼리스트링에 실어 나르는 설계는 GET 폼 제출에서 반드시 파괴된다** (쿼리 통째 교체). 런처류 URL 을 form action 에 쓰려면 타깃은 **path segment** 에 있어야 안전하다.
+- (c) 증상이 한 사이트의 한 기능(NAVER 검색)으로 보여도, 원인이 prelude 공통 경로면 **전 사이트 전 폼**이 깨진 상태다. 사이트별 회귀로 분류하기 전에 공통 경로인지 확인할 것.
+
+---
+
 ## 2026-06-05 — NAVER probe shape: `window.ZP`/`ZeroProxyRT` 가시 + tight-loop probe + taskweaver env noise (근본 해결 1차)
 
 **Site**: `https://www.naver.com/` (이번에도 warm-session V8 wedge 재현)
