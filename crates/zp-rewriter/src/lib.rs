@@ -420,7 +420,75 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             }
         };
 
-        if p.replacement.starts_with("\u{1}SHORTHAND_GLOBAL_GET\u{1}") {
+        if p.replacement.starts_with("\u{1}GLOBAL_SET\u{1}") {
+            // \u{1}GLOBAL_SET\u{1}<name>\u{1}<val_start>\u{1}<val_end>\u{1}
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 6 {
+                let name = parts[2];
+                let vs: usize = parts[3].parse().unwrap_or(0);
+                let ve: usize = parts[4].parse().unwrap_or(0);
+                if vs < ve && ve <= bytes.len() {
+                    let value = rewrite_range(vs, ve);
+                    out.push_str(&format!(
+                        "__zp_set(globalThis,{:?},({}))",
+                        name, value
+                    ));
+                    cursor = end;
+                    continue;
+                }
+            }
+        } else if p.replacement.starts_with("\u{1}GLOBAL_ASSIGN\u{1}") {
+            // \u{1}GLOBAL_ASSIGN\u{1}<name>\u{1}<op>\u{1}<vs>\u{1}<ve>\u{1}<logical>\u{1}
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 8 {
+                let name = parts[2];
+                let op = parts[3];
+                let vs: usize = parts[4].parse().unwrap_or(0);
+                let ve: usize = parts[5].parse().unwrap_or(0);
+                let logical = parts[6] == "1";
+                if vs < ve && ve <= bytes.len() {
+                    let value = rewrite_range(vs, ve);
+                    // Logical forms must not evaluate the RHS unless the write
+                    // actually happens, so hand `__zp_assign` a thunk.
+                    let value = if logical {
+                        format!("()=>({})", value)
+                    } else {
+                        format!("({})", value)
+                    };
+                    out.push_str(&format!(
+                        "__zp_assign(globalThis,{:?},{:?},{})",
+                        name, op, value
+                    ));
+                    cursor = end;
+                    continue;
+                }
+            }
+        } else if p.replacement.starts_with("\u{1}GLOBAL_UPDATE\u{1}") {
+            // \u{1}GLOBAL_UPDATE\u{1}<name>\u{1}<op>\u{1}<prefix>\u{1}
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 6 {
+                let name = parts[2];
+                let op = parts[3];
+                let prefix = parts[4] == "1";
+                out.push_str(&format!(
+                    "__zp_update(globalThis,{:?},{:?},{})",
+                    name, op, prefix
+                ));
+                cursor = end;
+                continue;
+            }
+        } else if p.replacement.starts_with("\u{1}GLOBAL_DESTR\u{1}") {
+            // \u{1}GLOBAL_DESTR\u{1}<name>\u{1}
+            // Shorthand destructuring target → explicit `key: <settable>` where
+            // the settable member is the prelude's write-only sink.
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 4 {
+                let name = parts[2];
+                out.push_str(&format!("{}: __zp_get.d.{}", name, name));
+                cursor = end;
+                continue;
+            }
+        } else if p.replacement.starts_with("\u{1}SHORTHAND_GLOBAL_GET\u{1}") {
             // \u{1}SHORTHAND_GLOBAL_GET\u{1}<name>\u{1}
             // Inside an object literal, so no `new`-prefix parenthesisation
             // applies — but the key must be restored or the property is lost.
@@ -853,6 +921,39 @@ fn js_quote_body(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Source spelling of a compound assignment operator, as `__zp_assign`'s
+/// switch expects it. `None` for plain `=` (handled by `__zp_set`) so an
+/// unmapped operator degrades to "leave native" instead of emitting a call the
+/// membrane would reject.
+fn assignment_operator_str(op: oxc_syntax::operator::AssignmentOperator) -> Option<&'static str> {
+    use oxc_syntax::operator::AssignmentOperator as A;
+    Some(match op {
+        A::Assign => return None,
+        A::Addition => "+=",
+        A::Subtraction => "-=",
+        A::Multiplication => "*=",
+        A::Division => "/=",
+        A::Remainder => "%=",
+        A::Exponential => "**=",
+        A::ShiftLeft => "<<=",
+        A::ShiftRight => ">>=",
+        A::ShiftRightZeroFill => ">>>=",
+        A::BitwiseAnd => "&=",
+        A::BitwiseOR => "|=",
+        A::BitwiseXOR => "^=",
+        A::LogicalAnd => "&&=",
+        A::LogicalOr => "||=",
+        A::LogicalNullish => "??=",
+    })
+}
+
+/// Logical compound assignments short-circuit, so `__zp_assign` receives their
+/// right-hand side as a thunk and only calls it when the write happens.
+fn is_logical_assignment(op: oxc_syntax::operator::AssignmentOperator) -> bool {
+    use oxc_syntax::operator::AssignmentOperator as A;
+    matches!(op, A::LogicalAnd | A::LogicalOr | A::LogicalNullish)
+}
+
 fn proxied_module_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
     if target_url.is_empty() {
         return None;
@@ -1128,6 +1229,49 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // (`+=`, `-=`, etc.) are intentionally left as native — they have
         // read-then-write semantics that the membrane setter still observes
         // because the read goes through __zp_get.
+        // A bare dangerous global as the assignment TARGET (`location = url`).
+        // The identifier visitor patches it to `__zp_get(globalThis,"location")`,
+        // which is not a valid assignment target: V8 accepts the parse but
+        // throws `ReferenceError: Invalid left-hand side in assignment` when the
+        // statement runs, so `location = url` navigation silently died. Route
+        // the write through the membrane setter instead — the same helpers the
+        // member path uses, and the ones the prelude already exposes.
+        if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &expr.left {
+            let name = ident.name.as_str();
+            if is_dangerous_global(name) && !self.is_shadowed(name) {
+                use oxc_span::GetSpan;
+                let value_span = expr.right.span();
+                let op = expr.operator;
+                let replacement = if op == oxc_syntax::operator::AssignmentOperator::Assign {
+                    format!(
+                        "\u{1}GLOBAL_SET\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        name, value_span.start, value_span.end
+                    )
+                } else {
+                    // `__zp_assign` mirrors every compound operator, including
+                    // the short-circuiting logical forms — which is why those
+                    // take the value as a THUNK (it must not be evaluated when
+                    // the assignment is skipped).
+                    let Some(op_str) = assignment_operator_str(op) else {
+                        return;
+                    };
+                    format!(
+                        "\u{1}GLOBAL_ASSIGN\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        name,
+                        op_str,
+                        value_span.start,
+                        value_span.end,
+                        if is_logical_assignment(op) { "1" } else { "0" }
+                    )
+                };
+                self.patches.push(Patch {
+                    start: expr.span.start,
+                    end: expr.span.end,
+                    replacement,
+                });
+                return;
+            }
+        }
         if expr.operator != oxc_syntax::operator::AssignmentOperator::Assign {
             return;
         }
@@ -1155,6 +1299,58 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 obj_span.start, obj_span.end, prop, value_span.start, value_span.end
             ),
         });
+    }
+
+    fn visit_update_expression(&mut self, expr: &UpdateExpression<'a>) {
+        walk::walk_update_expression(self, expr);
+        // `location++` has the same invalid-target problem as `location = x`.
+        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = &expr.argument {
+            let name = ident.name.as_str();
+            if is_dangerous_global(name) && !self.is_shadowed(name) {
+                self.patches.push(Patch {
+                    start: expr.span.start,
+                    end: expr.span.end,
+                    replacement: format!(
+                        "\u{1}GLOBAL_UPDATE\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        name,
+                        expr.operator.as_str(),
+                        if expr.prefix { "1" } else { "0" }
+                    ),
+                });
+            }
+        }
+    }
+
+    fn visit_assignment_target_property_identifier(
+        &mut self,
+        prop: &AssignmentTargetPropertyIdentifier<'a>,
+    ) {
+        // `({ location } = obj)` — shorthand destructuring TARGET. One
+        // identifier is both the key and the write target, and a target must be
+        // a settable reference, so `__zp_set(...)` (a call) cannot go here:
+        // patching it as a plain reference produced
+        // `({ __zp_get(globalThis,"location") } = obj)`, a SyntaxError that took
+        // the whole file down. Expand to `location: __zp_get.d.location`, whose
+        // write lands on the prelude's write-only sink and routes through the
+        // membrane setter — valid syntax with no escape.
+        //
+        // Only the binding is replaced, so a default (`{ location = 1 }`)
+        // survives as `location: __zp_get.d.location = 1`.
+        let name = prop.binding.name.as_str();
+        if is_dangerous_global(name) && !self.is_shadowed(name) {
+            self.patches.push(Patch {
+                start: prop.binding.span.start,
+                end: prop.binding.span.end,
+                replacement: format!("\u{1}GLOBAL_DESTR\u{1}{}\u{1}", name),
+            });
+            // Walk only the default expression — walking the binding would
+            // re-emit the broken plain patch over the same span.
+            if let Some(init) = &prop.init {
+                self.visit_expression(init);
+            }
+            return;
+        }
+        walk::walk_assignment_target_property_identifier(self, prop);
     }
 
     fn visit_static_member_expression(&mut self, expr: &StaticMemberExpression<'a>) {
@@ -1766,6 +1962,143 @@ mod tests {
             "local re-export must be untouched, got: {}",
             local.code
         );
+    }
+
+    // A bare dangerous global used as an assignment TARGET. The identifier
+    // visitor turned `location = url` into
+    // `__zp_get(globalThis,"location") = url`, which V8 parses but rejects at
+    // run time (`ReferenceError: Invalid left-hand side in assignment`), so this
+    // extremely common navigation idiom silently died. Compound and update
+    // forms had the same broken target.
+    #[test]
+    fn routes_bare_global_writes_through_the_membrane() {
+        let plain = rewrite_script("location = url;", &opts()).unwrap();
+        assert!(
+            plain.code.contains("__zp_set(globalThis,\"location\",(url))"),
+            "plain assignment must use __zp_set, got: {}",
+            plain.code
+        );
+        let compound = rewrite_script("location += '#x';", &opts()).unwrap();
+        assert!(
+            compound
+                .code
+                .contains("__zp_assign(globalThis,\"location\",\"+=\",('#x'))"),
+            "compound assignment must use __zp_assign, got: {}",
+            compound.code
+        );
+        // Logical compound assignments short-circuit: the RHS must be a thunk
+        // so it is not evaluated when the write is skipped.
+        let logical = rewrite_script("location ||= url;", &opts()).unwrap();
+        assert!(
+            logical
+                .code
+                .contains("__zp_assign(globalThis,\"location\",\"||=\",()=>(url))"),
+            "logical assignment must pass a thunk, got: {}",
+            logical.code
+        );
+        let update = rewrite_script("location++;", &opts()).unwrap();
+        assert!(
+            update
+                .code
+                .contains("__zp_update(globalThis,\"location\",\"++\",false)"),
+            "postfix update must use __zp_update, got: {}",
+            update.code
+        );
+        let prefix = rewrite_script("--top;", &opts()).unwrap();
+        assert!(
+            prefix
+                .code
+                .contains("__zp_update(globalThis,\"top\",\"--\",true)"),
+            "prefix update must record prefix=true, got: {}",
+            prefix.code
+        );
+        // No form may leave a call expression in the target position.
+        for src in ["location = url;", "location += 1;", "location++;"] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert!(
+                !r.code.contains("__zp_get(globalThis,\"location\") ="),
+                "{src:?} must not assign to a call expression, got: {}",
+                r.code
+            );
+        }
+    }
+
+    // `({ location } = obj)` — shorthand destructuring TARGET. A target must be
+    // a settable reference, so `__zp_set(...)` cannot go there; patching it as a
+    // plain reference emitted `({ __zp_get(globalThis,"location") } = obj)`, a
+    // SyntaxError that took the whole file down. The prelude's write-only sink
+    // (`__zp_get.d`) gives us a settable member with no read surface.
+    #[test]
+    fn routes_destructured_global_writes_through_the_write_only_sink() {
+        let simple = rewrite_script("({ location } = obj);", &opts()).unwrap();
+        assert!(
+            simple
+                .code
+                .contains("({ location: __zp_get.d.location } = obj)"),
+            "shorthand target must expand to the sink, got: {}",
+            simple.code
+        );
+        // A default survives because only the binding span is replaced.
+        let defaulted = rewrite_script("({ location = 1 } = obj);", &opts()).unwrap();
+        assert!(
+            defaulted
+                .code
+                .contains("({ location: __zp_get.d.location = 1 } = obj)"),
+            "default must be preserved, got: {}",
+            defaulted.code
+        );
+        // Nested inside an array pattern, and alongside untouched properties.
+        let nested = rewrite_script("[{ location }] = arr;", &opts()).unwrap();
+        assert!(
+            nested
+                .code
+                .contains("[{ location: __zp_get.d.location }]"),
+            "nested pattern must expand, got: {}",
+            nested.code
+        );
+        let mixed = rewrite_script("({ location, a } = obj);", &opts()).unwrap();
+        assert!(
+            mixed
+                .code
+                .contains("({ location: __zp_get.d.location, a } = obj)"),
+            "non-dangerous siblings must stay shorthand, got: {}",
+            mixed.code
+        );
+        // The broken keyless form must never come back.
+        for src in [
+            "({ location } = obj);",
+            "({ location = 1 } = obj);",
+            "[{ location }] = arr;",
+        ] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert!(
+                !r.code.contains("{ __zp_get(globalThis,\"location\") }"),
+                "{src:?} must not emit a keyless property, got: {}",
+                r.code
+            );
+        }
+    }
+
+    #[test]
+    fn shadowed_globals_keep_native_write_semantics() {
+        // A local binding named after a global is not the global — neither the
+        // setter helpers nor the sink may appear.
+        for src in [
+            "var location = 2; location = 3;",
+            "(function(location){ location = 1; })();",
+            "(function(location){ ({ location } = o); })();",
+            "(function(top){ top++; })();",
+        ] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert!(
+                !r.code.contains("__zp_set(globalThis")
+                    && !r.code.contains("__zp_assign(globalThis")
+                    && !r.code.contains("__zp_update(globalThis")
+                    && !r.code.contains("__zp_get.d."),
+                "shadowed binding must stay native in {src:?}, got: {}",
+                r.code
+            );
+        }
     }
 
     #[test]

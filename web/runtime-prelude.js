@@ -1124,6 +1124,39 @@
     }
     define(root, '__zp_get', get);
     define(root, '__zp_set', set);
+    // Write-only sink for destructuring assignment targets.
+    //
+    // `({ location } = obj)` needs a *settable member expression*, not a call:
+    // `({ __zp_set(globalThis,"location",…) } = obj)` is a SyntaxError, which
+    // killed the whole script file. The rewriter instead emits
+    // `({ location: __zp_get.d.location } = obj)` — valid syntax whose write
+    // lands on this proxy's `set` trap and routes through the membrane setter,
+    // so a destructured global write cannot escape the jail.
+    //
+    // Deliberately read-*less*: `get` always yields undefined and every other
+    // trap is inert, so target code can never pull a raw native through it.
+    // That is why we do NOT reuse the `with(__zp_scope)` proxy — its `get`
+    // falls through to `target[prop]` and would hand out real natives.
+    // Hung off `__zp_get` rather than a new global so the page's global
+    // namespace gains nothing observable.
+    try {
+      const globalWriteSink = new Proxy(Object.create(null), {
+        get() { return undefined; },
+        set(_target, prop, value) { set(root, prop, value); return true; },
+        has() { return false; },
+        ownKeys() { return []; },
+        getOwnPropertyDescriptor() { return undefined; },
+        getPrototypeOf() { return null; },
+        defineProperty() { return false; },
+        deleteProperty() { return true; }
+      });
+      Object.defineProperty(get, 'd', {
+        value: globalWriteSink,
+        writable: false,
+        enumerable: false,
+        configurable: false
+      });
+    } catch {}
     define(root, '__zp_assign', assign);
     define(root, '__zp_call', call);
     define(root, '__zp_update', update);

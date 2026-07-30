@@ -309,6 +309,33 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
   assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
 });
 
+// The destructuring write sink must stay write-only.
+//
+// `({ location } = obj)` needs a settable member expression, not a call, so the
+// rewriter emits `({ location: __zp_get.d.location } = obj)`. That sink is the
+// one new membrane surface it introduces, so its traps are pinned: writes route
+// through the membrane setter, reads yield nothing. Reusing the
+// `with(__zp_scope)` proxy instead would be an escape — its `get` falls through
+// to `target[prop]` and hands out raw natives.
+test('destructuring write sink routes writes to the membrane and exposes no reads', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('const globalWriteSink = new Proxy(');
+  assert.ok(start > 0, 'globalWriteSink missing');
+  const body = rt.slice(start, start + 900);
+  // Write path goes through the membrane setter, not Reflect/target directly.
+  assert.match(body, /set\(_target, prop, value\) \{ set\(root, prop, value\); return true; \}/,
+    'sink set trap must route through the membrane setter');
+  // No read surface at all.
+  assert.match(body, /get\(\) \{ return undefined; \}/, 'sink get trap must yield undefined');
+  assert.match(body, /has\(\) \{ return false; \}/, 'sink must not report properties');
+  assert.match(body, /ownKeys\(\) \{ return \[\]; \}/, 'sink must not enumerate');
+  assert.match(body, /getPrototypeOf\(\) \{ return null; \}/, 'sink must not expose a prototype');
+  assert.ok(!/target\[prop\]/.test(body), 'sink must never fall through to the raw target');
+  // Hung off __zp_get (no new global name), non-writable/non-configurable.
+  assert.match(rt, /Object\.defineProperty\(get, 'd', \{[\s\S]{0,160}writable: false[\s\S]{0,80}configurable: false/,
+    'sink must be locked onto __zp_get as `d`');
+});
+
 // The child-realm script executors must not reach for `installPhase2Membrane`
 // locals — they live in a different function scope.
 //
