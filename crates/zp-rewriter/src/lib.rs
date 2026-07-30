@@ -420,7 +420,18 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
             }
         };
 
-        if p.replacement.starts_with("\u{1}GLOBAL_GET\u{1}") {
+        if p.replacement.starts_with("\u{1}SHORTHAND_GLOBAL_GET\u{1}") {
+            // \u{1}SHORTHAND_GLOBAL_GET\u{1}<name>\u{1}
+            // Inside an object literal, so no `new`-prefix parenthesisation
+            // applies — but the key must be restored or the property is lost.
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 4 {
+                let name = parts[2];
+                out.push_str(&format!("{}:__zp_get(globalThis,{:?})", name, name));
+                cursor = end;
+                continue;
+            }
+        } else if p.replacement.starts_with("\u{1}GLOBAL_GET\u{1}") {
             // \u{1}GLOBAL_GET\u{1}<name>\u{1}
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 4 {
@@ -686,6 +697,19 @@ impl RewriteVisitor {
         self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
 
+    /// Shorthand object property whose value is a dangerous global. The single
+    /// identifier is BOTH the key and the value, so the plain GLOBAL_GET patch
+    /// would turn `{ window }` into `{__zp_get(globalThis,"window")}` — a
+    /// syntax error that kills the entire script file. Emit the expanded
+    /// `window: __zp_get(globalThis,"window")` form instead.
+    fn emit_shorthand_global_get(&mut self, span: Span, name: &str) {
+        self.patches.push(Patch {
+            start: span.start,
+            end: span.end,
+            replacement: format!("\u{1}SHORTHAND_GLOBAL_GET\u{1}{}\u{1}", name),
+        });
+    }
+
     fn emit_global_get(&mut self, span: Span, name: &str) {
         // 괄호는 contextual 로 apply_patches 에서 결정. 여기서는 marker 로 emission.
         self.patches.push(Patch {
@@ -870,6 +894,28 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if is_dangerous_global(name) && !self.is_shadowed(name) {
             self.emit_global_get(ident.span, name);
         }
+    }
+
+    fn visit_object_property(&mut self, prop: &ObjectProperty<'a>) {
+        // `{ window, document, navigator }` — shorthand properties reuse one
+        // identifier as key AND value, so patching it as a plain reference
+        // produces `{__zp_get(globalThis,"window"), ...}` which fails to parse
+        // and takes the whole file down (observed on NAVER's
+        // ntm.pstatic.net/scripts/ntm_*.js: `this.dom = { window, document,
+        // navigator }`). Expand to the explicit `key: value` form.
+        if prop.shorthand {
+            if let Expression::Identifier(ident) = &prop.value {
+                let name = ident.name.as_str();
+                if is_dangerous_global(name) && !self.is_shadowed(name) {
+                    self.emit_shorthand_global_get(ident.span, name);
+                    // Do not walk the value — it would re-emit the broken
+                    // plain patch over the same span. The key is an
+                    // IdentifierName and is never rewritten.
+                    return;
+                }
+            }
+        }
+        walk::walk_object_property(self, prop);
     }
 
     fn visit_import_expression(&mut self, expr: &ImportExpression<'a>) {
@@ -1512,6 +1558,89 @@ mod tests {
             !r2.code.contains("__zp_set(super"),
             "super.x = v must stay native, got: {}",
             r2.code
+        );
+    }
+
+    // Shorthand object properties reuse ONE identifier as both key and value.
+    // Patching it as a plain reference emitted
+    // `{__zp_get(globalThis,"window"), ...}` — invalid JS that made the whole
+    // script file fail to parse, taking every unrelated symbol in it down.
+    // Observed on NAVER's ntm.pstatic.net/scripts/ntm_*.js:
+    // `this.dom = { window, document, navigator }`.
+    #[test]
+    fn expands_shorthand_object_property_for_dangerous_globals() {
+        let r = rewrite_script("var a = { window, document, navigator };", &opts()).unwrap();
+        assert!(
+            r.code.contains("window:__zp_get(globalThis,\"window\")"),
+            "shorthand `window` must expand to `key: value`, got: {}",
+            r.code
+        );
+        assert!(
+            r.code.contains("document:__zp_get(globalThis,\"document\")"),
+            "shorthand `document` must expand to `key: value`, got: {}",
+            r.code
+        );
+        // The bare broken form must never appear.
+        assert!(
+            !r.code.contains("{ __zp_get(globalThis,\"window\")")
+                && !r.code.contains("{__zp_get(globalThis,\"window\")"),
+            "shorthand must not collapse into a keyless property, got: {}",
+            r.code
+        );
+        // Non-dangerous shorthand stays untouched.
+        assert!(r.code.contains("navigator }"), "got: {}", r.code);
+    }
+
+    #[test]
+    fn shorthand_expansion_respects_shadowing_and_non_shorthand_forms() {
+        // A shadowed `window` is a local binding — must stay shorthand.
+        let shadowed =
+            rewrite_script("(function(window){ return { window }; })();", &opts()).unwrap();
+        assert!(
+            shadowed.code.contains("{ window }"),
+            "shadowed shorthand must stay untouched, got: {}",
+            shadowed.code
+        );
+        // Methods / getters merely NAMED after a global are keys, not
+        // references — they must not be rewritten at all.
+        let method = rewrite_script("f({ window() { return 1; } });", &opts()).unwrap();
+        assert!(
+            !method.code.contains("__zp_get"),
+            "method key must not be rewritten, got: {}",
+            method.code
+        );
+        let getter = rewrite_script("f({ get window() { return 1; } });", &opts()).unwrap();
+        assert!(
+            !getter.code.contains("__zp_get"),
+            "getter key must not be rewritten, got: {}",
+            getter.code
+        );
+        // Computed keys ARE references and must still be rewritten.
+        let computed = rewrite_script("f({ [window]: 1 });", &opts()).unwrap();
+        assert!(
+            computed
+                .code
+                .contains("[__zp_get(globalThis,\"window\")]"),
+            "computed key must be rewritten, got: {}",
+            computed.code
+        );
+        // Explicit `key: value` keeps working (value side rewritten only).
+        let explicit = rewrite_script("f({ window: window });", &opts()).unwrap();
+        assert!(
+            explicit
+                .code
+                .contains("window: __zp_get(globalThis,\"window\")"),
+            "explicit form must rewrite the value, got: {}",
+            explicit.code
+        );
+        // Nested / arrow-returned object literals go through the same path.
+        let nested = rewrite_script("var f = () => ({ window });", &opts()).unwrap();
+        assert!(
+            nested
+                .code
+                .contains("window:__zp_get(globalThis,\"window\")"),
+            "arrow-returned object literal must expand, got: {}",
+            nested.code
         );
     }
 

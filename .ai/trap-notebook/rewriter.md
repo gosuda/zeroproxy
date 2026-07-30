@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-07-30 — shorthand 객체 프로퍼티가 keyless 로 붕괴 → 파일 전체 SyntaxError
+
+**Symptoms**:
+- NAVER 검색 결과 페이지 콘솔: `Uncaught SyntaxError: Unexpected string @ /zp/api/script?kind=classic&u=https://ntm.pstatic.net/scripts/ntm_*.js`
+- 해당 파일(190KB) **전체가 실행 실패** → 그 안의 무관한 심볼 전부 소실.
+
+**Root cause**:
+`{ window, document, navigator }` 같은 **shorthand** 프로퍼티는 식별자 **하나가 key 와 value 를 동시에** 담당한다. `visit_identifier_reference` 가 그 span 을 일반 참조로 보고 `__zp_get(globalThis,"window")` 로 치환하니
+`{__zp_get(globalThis,"window"),__zp_get(globalThis,"document"),navigator}`
+가 되어 **key 없는 프로퍼티** = 파싱 불가. 실제 코드는 `this.dom = { window, document, navigator }`.
+
+**Fix**: [zp-rewriter/src/lib.rs](../../crates/zp-rewriter/src/lib.rs) 에 `visit_object_property` 추가 — `prop.shorthand && value 가 dangerous global` 이면 `SHORTHAND_GLOBAL_GET` 마커를 emit 하고 **value 로 내려가지 않는다**(안 그러면 같은 span 에 깨진 일반 패치가 다시 붙는다). `apply_patches` 가 `window:__zp_get(globalThis,"window")` 로 확장.
+
+**Verification**: ntm_ec8638b0efc1.js / ntm_d2d2463c73f0.js 리라이트 결과가 V8 파싱 통과(이전 `Unexpected string`). NAVER 검색 SyntaxError 0. Wikipedia 무회귀. zp-rewriter 74, zp-htmltx 31, JS 71.
+
+**인접 케이스 전수 확인** (모두 유효 JS 확인): shadowed shorthand 는 미변환 유지, method/getter `window(){}` 는 key 라 미변환, computed key `[window]` 는 변환 유지, explicit `window: window` / spread `...window` / class field / arrow-returned object literal 정상.
+
+**미해결 (별개, 이전부터 존재)**: shorthand **assignment target** `({ location } = obj)` 는 여전히 `({ __zp_get(...) } = obj)` 로 깨진 JS 를 낸다 (`AssignmentTargetPropertyIdentifier` — 다른 AST 노드). 안 고친 이유: 유효한 문법으로 만들려면 (a) 미변환으로 두어 실제 전역 `location` 에 직접 write = **감옥 구멍**, (b) 멤브레인 `scope` Proxy 를 전역 노출 = 새 공격면(E1 escape matrix 교차검증 필요), (c) assignment 전체를 `__zp_set` + temp 로 재작성 = 평가순서/다중 프로퍼티 처리 필요. `window.location` 은 LegacyUnforgeable 이라 프로퍼티 재정의로는 못 막으므로 (a) 는 불가. 설계 결정 사안이라 별도 트랙.
+
+**Patterns to watch**:
+- **key 와 value 가 같은 span 을 공유하는 문법은 span 치환 리라이터의 구조적 함정.** shorthand 프로퍼티가 대표. 새 노드 종류를 다룰 때 "이 식별자가 다른 문법적 역할도 겸하는가"를 먼저 확인.
+- **JS 한 파일의 SyntaxError 는 그 파일 전체를 죽인다** — 증상이 "무관한 심볼이 없다"로 나타나 원인 파일을 못 찾기 쉽다. 콘솔의 SyntaxError 는 최우선으로 볼 것.
+- **리라이터 출력은 반드시 파서에 다시 통과시켜 검증.** 출력을 우리 oxc 파서에 재입력하면 span 까지 나와 위치 특정이 즉시 된다 (이번에 `spans=[(185067,8)]` 로 바로 찾음).
+- **`npm run build:web` 은 wasm 을 재빌드하지 않는다** — Rust 리라이터를 고친 뒤 web-only 빌드로 검증하면 예전 wasm 이 돌아 "고쳐지지 않았다"고 오판한다. cargo 변경 시 반드시 `npm run build`(서버 exe 잠금 때문에 서버 중지 필요).
+
 ## 2026-06-07 — split-bundle (c.1) Step 2.1 shadow-compare 가 발견한 modern rewriter 의 두 가지 회귀 — patch-mode marker resolution 누락 + `Function` global 미보호
 
 **Site/Pattern**: shadow-compare 모드 ([web/sw.js](../../web/sw.js) `shadowCompareRewriters`) 로 NAVER + Wikipedia 의 SW-rewritten 스크립트 outputs (legacy ZPRewriter vs modern ZPBundle) 를 비교. Wikipedia 전체 스크립트는 0 divergence (modern 도 OK). NAVER 의 두 스크립트가 divergence 노출.
