@@ -17,7 +17,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
-use oxc_span::{SourceType, Span};
+use oxc_span::{GetSpan, SourceType, Span};
 use std::collections::HashSet;
 use zp_shared::ErrorCode;
 
@@ -780,6 +780,13 @@ fn resolve_module_base(raw: &str, base: &str) -> Option<String> {
 /// fetch through the proxy transport, returning a rewritten ES
 /// module response. `kind=module` ensures the SW parses the body
 /// as an ES module (dynamic `import()` always loads a module).
+/// Escape a string for embedding inside a double-quoted JS literal. Only the
+/// two characters that can terminate or escape the literal need handling; the
+/// values we embed are URLs, which never contain raw newlines.
+fn js_quote_body(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn proxied_module_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
     if target_url.is_empty() {
         return None;
@@ -872,15 +879,31 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // routes through __zp_get).
         walk::walk_import_expression(self, expr);
 
-        // Only literal sources can be resolved statically. For computed
-        // expressions (variable / template / concatenation) we leave the
-        // call alone — the SW's fetch interception will still route the
-        // download through the proxy when the page actually issues the
-        // request, but only if the *resolved* URL is already proxy-aware.
-        // Phase 3 follow-up: wrap computed-source `import(expr)` calls
-        // in a runtime helper that runs the same proxy-URL rewrite on
-        // the value at evaluation time.
+        // Computed sources (variable / template / concatenation) can't be
+        // resolved at rewrite time, so wrap them in the runtime helper — it
+        // performs the same target→proxy mapping on the evaluated value.
+        //
+        // Leaving them alone is not neutral: the specifier resolves against
+        // the *importing script's own* URL, which for us is
+        // `<proxy>/zp/api/script?…`, so `"./x.js"` became a request for
+        // `/zp/api/x.js` → 404. That is how NAVER's ad SDK failed
+        // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
+        // Wrapping with two zero-width patches keeps the inner expression —
+        // and any nested rewrites inside it — completely intact.
         let Expression::StringLiteral(lit) = &expr.source else {
+            let span = expr.source.span();
+            if !self.target_url.is_empty() {
+                self.patches.push(Patch {
+                    start: span.start,
+                    end: span.start,
+                    replacement: "__zp_module_url(".to_string(),
+                });
+                self.patches.push(Patch {
+                    start: span.end,
+                    end: span.end,
+                    replacement: format!(", \"{}\")", js_quote_body(&self.target_url)),
+                });
+            }
             return;
         };
         let raw = lit.value.as_str();
@@ -1265,6 +1288,53 @@ mod tests {
     // rendered NAVER as a blank page — its trailing inline JSON is full of
     // Korean text. Build sources whose 4 KiB cut lands on every possible
     // offset inside a 3-byte character.
+    // Pin: a COMPUTED dynamic import must be wrapped in the runtime helper.
+    // Left alone, the specifier resolves against the importing script's own
+    // proxy URL (`<proxy>/zp/api/script?…`), so "./x.js" was requested as
+    // /zp/api/x.js and 404'd — NAVER's ad SDK died exactly this way
+    // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
+    #[test]
+    fn computed_dynamic_import_is_wrapped_at_runtime() {
+        let o = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: "https://cdn.example.com/a/b.js".into(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        let out = rewrite_script("const p = import(base + '/mod.js');", &o)
+            .unwrap()
+            .code;
+        assert!(out.contains("__zp_module_url("), "computed import must be wrapped: {out}");
+        assert!(
+            out.contains("https://cdn.example.com/a/b.js"),
+            "referrer must be passed: {out}"
+        );
+        assert!(
+            out.contains("'/mod.js'"),
+            "inner expression must be preserved: {out}"
+        );
+    }
+
+    // Literal imports stay statically resolved — no runtime helper needed.
+    #[test]
+    fn literal_dynamic_import_stays_static() {
+        let o = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: "https://cdn.example.com/a/b.js".into(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        let out = rewrite_script("import('./mod.js');", &o).unwrap().code;
+        assert!(
+            out.contains("http://proxy.localhost:18080/zp/api/script?u="),
+            "literal must resolve to an absolute proxy URL: {out}"
+        );
+        assert!(
+            !out.contains("__zp_module_url("),
+            "literal must not need the helper: {out}"
+        );
+    }
+
     #[test]
     fn strip_sourcemap_pragma_survives_multibyte_tail() {
         for pad in 0..8usize {

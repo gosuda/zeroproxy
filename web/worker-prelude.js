@@ -93,7 +93,11 @@
     if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
     const u = new URL(spec, referrer || base.href);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
-    return '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href);
+    // Proxy-origin ABSOLUTE. A root-relative path resolves against the
+    // worker's virtualized base (the target origin), so the request would be
+    // sent to the target host and 404. `self.location` here is the real worker
+    // script URL on the proxy origin — captured before any virtualization.
+    return self.location.origin + '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href);
   });
   try { self.eval = blockedDynamic; } catch {}
   try { self.Function = blockedDynamic; } catch {}
