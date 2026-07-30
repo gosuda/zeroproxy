@@ -4237,37 +4237,33 @@
       // 서버 403 POLICY_BLOCKED → 광고 미렌더. parent realm 의 native fetch 로
       // SW-routed 경로 (`/zp/api/script?u=...`) 를 fetch + child realm 에서 실행
       // 하여 SafeFrame loader 가 정상 실행되게 한다.
-      // External script written into the child document. A real `<script src>`
-      // produced by `document.write` is PARSER-BLOCKING: the parser stops until
-      // it loads, so the next inline script sees the globals it defined. This
-      // loader used to `fetch(...).then(...)`, which returns immediately — the
-      // following inline script then ran first and NAVER's ad creatives blew up
-      // on `gladBridge.createSdkBridge()` and `naver_corp_da.Util` (both defined
-      // moments later by the script still in flight). Control experiment: real
-      // NAVER loaded directly reports 0 console errors, through the proxy 3.
+      // External script written into the child document.
       //
-      // Synchronous XHR is the only way an inline script can wait, and it costs
-      // exactly what the native parser-blocking load costs. Modules are
-      // deferred by spec, so they keep the async path — blocking there would
-      // change semantics rather than restore them.
-      const childLoadExternal = (url, kind) => {
-        const k = String(kind || 'classic');
-        const proxied = scriptProxyPath(String(url || ''), k);
-        if (k !== 'module' && Native.XMLHttpRequest) {
-          let code = null;
-          try {
-            const xhr = new Native.XMLHttpRequest();
-            xhr.open('GET', proxied, false);
-            xhr.send(null);
-            if (xhr.status >= 200 && xhr.status < 300) code = String(xhr.responseText || '');
-          } catch {}
-          if (code != null) {
-            childExecGlobal(code);
-            return;
-          }
-        }
-        return Native.fetch(proxied).then(r => r.text()).then(code => { childExecGlobal(code); });
-      };
+      // KNOWN GAP — script ordering. A real `<script src>` produced by
+      // `document.write` is PARSER-BLOCKING: the parser stops until it loads, so
+      // the next inline script sees the globals it defined. This loader returns
+      // immediately, so the following inline script can run first. NAVER's ad
+      // creatives hit exactly that: `gladBridge.createSdkBridge()` and
+      // `naver_corp_da.Util` read globals the still-in-flight SDK defines
+      // moments later. Control experiment: real naver.com loaded directly logs
+      // 0 console errors, through the proxy 3.
+      //
+      // DEAD END (2026-07-30) — do NOT retry synchronous XHR here. It looks
+      // like the obvious fix (the only way an inline script can wait), but
+      // **the Service Worker does not intercept synchronous XMLHttpRequest**:
+      // measured on one controlled page, the same URL returns 403 from the Go
+      // server for sync XHR and 503 from the SW for `fetch`. Sync XHR therefore
+      // bypasses the whole transport, 403s, and silently degrades to this async
+      // path — one wasted request per script and no ordering gained. The Go
+      // server cannot serve `/zp/api/script` either; the proxied fetch lives in
+      // the browser kernel by design.
+      //
+      // A real fix means sequencing the child pipeline (chain every script in a
+      // written chunk onto the previous one) and first solving the hazard that
+      // makes it dangerous: inline scripts would become async, and a creative
+      // calling `document.write` after its document closed triggers an implicit
+      // `document.open()` that wipes the document. See the trap-notebook entry.
+      const childLoadExternal = (url, kind) => Native.fetch(scriptProxyPath(String(url || ''), String(kind || 'classic'))).then(r => r.text()).then(code => { childExecGlobal(code); });
       if (!define(w, '__ZP_EXEC_INLINE_SCRIPT', childExecInline)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_MODULE', childExecModule)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_REWRITTEN', childExecRewritten)) throw normalizedError('SecurityError');

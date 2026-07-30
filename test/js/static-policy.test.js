@@ -309,32 +309,22 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
   assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
 });
 
-// Child-realm external scripts must load synchronously to keep script order.
+// Synchronous XHR must never be used to load proxied resources.
 //
-// Regression (2026-07-30): in an ad iframe we replace `<script src>` with an
-// inline `__ZP_LOAD_EXTERNAL_SCRIPT(url, kind)` call (the child loses SW control
-// after `document.write`, so a real src would bypass the SW). The loader used
-// `fetch().then()`, which returns immediately — but a `document.write`ten
-// `<script src>` is PARSER-BLOCKING, so the next inline script must see the
-// globals it defines. NAVER's ad creatives read `gladBridge.createSdkBridge()`
-// and `naver_corp_da.Util` from the following inline script and threw; the
-// control experiment (real NAVER, no proxy) reports 0 console errors.
-// Sync XHR is the only way an inline script can wait.
-test('child-realm classic external scripts load synchronously (parser-blocking parity)', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const start = rt.indexOf('const childLoadExternal =');
-  assert.ok(start > 0, 'childLoadExternal missing');
-  const body = rt.slice(start, start + 1400);
-  // Classic scripts: synchronous XHR (third arg false = sync).
-  assert.match(body, /new Native\.XMLHttpRequest\(\)/, 'classic path must use XHR');
-  assert.match(body, /xhr\.open\('GET', proxied, false\)/,
-    'XHR must be synchronous — async loading reorders scripts');
-  assert.match(body, /childExecGlobal\(code\)/, 'fetched code must run in the child realm');
-  // Modules are deferred by spec; blocking them would change semantics.
-  assert.match(body, /k !== 'module'/, 'modules must keep the async path');
-  // The old unconditional async form must not come back.
-  assert.ok(!/const childLoadExternal = \(url, kind\) => Native\.fetch\(/.test(rt),
-    'childLoadExternal must not go back to an unconditional async fetch');
+// DEAD END (2026-07-30): sync XHR looks like the fix for child-realm script
+// ordering (the only way an inline script can wait for an external one), but the
+// Service Worker does not intercept synchronous XMLHttpRequest. Measured on one
+// controlled page, the same `/zp/api/script?...` URL returns 403 from the Go
+// server for sync XHR and 503 from the SW for `fetch`. Sync XHR bypasses the
+// transport entirely, so it can only ever fail — while looking like it works.
+// Pin the absence so nobody reintroduces it.
+test('no proxied resource is loaded with synchronous XHR (SW cannot intercept it)', () => {
+  for (const file of ['web/runtime-prelude.js', 'web/worker-prelude.js', 'web/sw.js']) {
+    const src = fs.readFileSync(file, 'utf8');
+    // `xhr.open(method, url, false)` — the third argument false means sync.
+    assert.ok(!/\.open\([^)]*,\s*false\s*\)/.test(src),
+      `${file} must not use synchronous XHR — the SW never sees those requests`);
+  }
 });
 
 // The destructuring write sink must stay write-only.
