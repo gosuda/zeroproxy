@@ -240,6 +240,11 @@
       EventSource: w.EventSource,
       Worker: w.Worker,
       FunctionCtor: w.Function,
+      // Native `eval`, captured before `define(root, 'eval', dynamicEval)`
+      // swaps it for the scoped jail variant. Only used through
+      // `execGlobalScript` to give inline <script> bodies real global scope —
+      // site-called `eval()` still goes through `dynamicEval`.
+      globalEval: w.eval,
       SharedWorker: w.SharedWorker,
       FormData: w.FormData,
       URL: w.URL,
@@ -1181,7 +1186,34 @@
         .replace(/&#x27;/g, "'")
         .replace(/&nbsp;/g, ' ');
     }
-    define(root, '__ZP_EXEC_INLINE_SCRIPT', source => Native.FunctionCtor(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic')).call(root));
+    // Execute a classic script body with real *global* scope semantics.
+    //
+    // A classic `<script>` puts its top-level `var` / `function` declarations
+    // on the global object, so the next script can call them.
+    // `new Function(body)` puts them in that function's own scope instead,
+    // where they die when it returns. NAVER's search page declares
+    // `urlencode` / `lcs_do` / `headerfooter_time_year_s` in one inline script
+    // and calls them from another, which produced a ReferenceError storm and
+    // broke the search-option widgets downstream.
+    //
+    // Indirect eval (member-expression call, not the `eval(...)` identifier
+    // form) is the only executor that evaluates in global scope, and it is
+    // sloppy-mode by default — matching classic script semantics exactly.
+    // This does NOT weaken the jail: the body handed to us is already
+    // membrane-rewritten (`__zp_get`/`__zp_set`), and the previous executor
+    // did not install a `with(__zp_scope)` either — only the *lexical* home
+    // of the declarations changes.
+    //
+    // Known remaining gap: top-level `let`/`const`/`class` land in the eval's
+    // own lexical scope rather than the shared global lexical scope, so they
+    // stay invisible to later scripts. Legacy cross-script globals are
+    // `var`/`function`, which this covers.
+    function execGlobalScript(code) {
+      const geval = Native.globalEval;
+      if (geval) return geval(code);
+      return Native.FunctionCtor(code).call(root);
+    }
+    define(root, '__ZP_EXEC_INLINE_SCRIPT', source => execGlobalScript(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic')));
     define(root, '__ZP_EXEC_INLINE_MODULE', source => {
       const code = rewriteWithPageRewriter(decodeInlineEntities(source), 'module');
       const blob = new Blob([code], { type: 'text/javascript' });
@@ -1195,7 +1227,7 @@
     // EAGER-DATA inline scripts; rewriting them twice (SW + page) wedged the
     // main thread for tens of seconds. SW already pays the OXC cost during
     // HTML transform, so the page just executes the result.
-    define(root, '__ZP_EXEC_INLINE_REWRITTEN', code => Native.FunctionCtor(String(code || '')).call(root));
+    define(root, '__ZP_EXEC_INLINE_REWRITTEN', code => execGlobalScript(String(code || '')));
     define(root, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', code => {
       const blob = new Blob([String(code || '')], { type: 'text/javascript' });
       const url = Native.createObjectURL ? Native.createObjectURL(blob) : URL.createObjectURL(blob);
@@ -4042,11 +4074,19 @@
     // 캡처) 으로 새 함수를 만들어 child window 에서 실행하면 realm 보존.
     const childFunction = w.Function;
     if (childFunction) {
-      const childExecInline = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic'))).call(w);
+      // Same global-scope requirement as the parent realm's
+      // `execGlobalScript` — classic script declarations must land on the
+      // child's global object, not inside a Function-constructor scope, or
+      // one inline script's `function foo(){}` is invisible to the next.
+      // Captured before this function swaps the child's `eval` for the
+      // parent's scoped variant (below).
+      const childEval = w.eval;
+      const childExecGlobal = code => childEval ? childEval(code) : (new childFunction(code)).call(w);
+      const childExecInline = source => childExecGlobal(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic'));
       const childExecModule = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'module'))).call(w);
       // `_REWRITTEN` variants: code already rewritten by zp-htmltx — execute
       // directly in the child realm without going through the page rewriter.
-      const childExecRewritten = code => (new childFunction(String(code || ''))).call(w);
+      const childExecRewritten = code => childExecGlobal(String(code || ''));
       const childExecRewrittenModule = code => {
         const blob = new (w.Blob || Blob)([String(code || '')], { type: 'text/javascript' });
         const url = (w.URL && w.URL.createObjectURL || URL.createObjectURL).call(w.URL || URL, blob);
@@ -4060,7 +4100,7 @@
       // 서버 403 POLICY_BLOCKED → 광고 미렌더. parent realm 의 native fetch 로
       // SW-routed 경로 (`/zp/api/script?u=...`) 를 fetch + child realm 에서 실행
       // 하여 SafeFrame loader 가 정상 실행되게 한다.
-      const childLoadExternal = (url, kind) => Native.fetch(scriptProxyPath(String(url || ''), String(kind || 'classic'))).then(r => r.text()).then(code => { (new childFunction(code)).call(w); });
+      const childLoadExternal = (url, kind) => Native.fetch(scriptProxyPath(String(url || ''), String(kind || 'classic'))).then(r => r.text()).then(code => { childExecGlobal(code); });
       if (!define(w, '__ZP_EXEC_INLINE_SCRIPT', childExecInline)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_MODULE', childExecModule)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_EXEC_INLINE_REWRITTEN', childExecRewritten)) throw normalizedError('SecurityError');

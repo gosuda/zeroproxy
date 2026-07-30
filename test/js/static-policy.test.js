@@ -309,6 +309,44 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
   assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
 });
 
+// Inline classic scripts must execute with real global scope.
+//
+// Regression (2026-07-30, NAVER search): the executors used
+// `new Function(body)`, which puts top-level `var` / `function` declarations
+// in the function's own scope instead of on the global object. A classic
+// <script> puts them on the global. NAVER's search page declares `urlencode`
+// / `lcs_do` / `headerfooter_time_year_s` in one inline script and calls them
+// from another → ReferenceError storm + broken search-option widgets.
+// Indirect eval is the only executor with global-scope semantics.
+test('inline classic scripts execute in global scope, not a Function scope', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  // Native eval is captured before the scoped `dynamicEval` replaces it.
+  assert.match(rt, /globalEval:\s*w\.eval/, 'native eval must be captured for global-scope execution');
+  assert.match(rt, /function execGlobalScript\(code\)/, 'execGlobalScript helper missing');
+  assert.match(rt, /const geval = Native\.globalEval;/, 'execGlobalScript must use the captured native eval');
+  // Both parent-realm classic executors go through it.
+  assert.match(rt, /'__ZP_EXEC_INLINE_SCRIPT', source => execGlobalScript\(/,
+    'inline classic executor must use execGlobalScript');
+  assert.match(rt, /'__ZP_EXEC_INLINE_REWRITTEN', code => execGlobalScript\(/,
+    'pre-rewritten inline executor must use execGlobalScript');
+  // The Function-constructor form must not come back for classic bodies.
+  assert.ok(!/__ZP_EXEC_INLINE_SCRIPT', source => Native\.FunctionCtor\(/.test(rt),
+    'inline classic executor must not go back to new Function (declarations would not be global)');
+  assert.ok(!/__ZP_EXEC_INLINE_REWRITTEN', code => Native\.FunctionCtor\(/.test(rt),
+    'pre-rewritten executor must not go back to new Function');
+  // Child (iframe) realm gets the same treatment, using its own realm's eval.
+  assert.match(rt, /const childEval = w\.eval;/, 'child realm must capture its own eval');
+  assert.match(rt, /const childExecGlobal = code => childEval \? childEval\(code\)/,
+    'child realm needs a global-scope executor');
+  assert.match(rt, /const childExecInline = source => childExecGlobal\(/,
+    'child inline classic executor must use childExecGlobal');
+  assert.match(rt, /const childExecRewritten = code => childExecGlobal\(/,
+    'child pre-rewritten executor must use childExecGlobal');
+  // Event handlers stay function-scoped — an inline handler IS a function body.
+  assert.match(rt, /'__ZP_EXEC_EVENT'[\s\S]{0,120}?Native\.FunctionCtor\('event'/,
+    'event-handler executor must stay function-scoped');
+});
+
 // Form submission must resolve the target from urlMeta / data-zp-target-url,
 // NEVER from the rewritten `action` / `formaction` attribute.
 //
