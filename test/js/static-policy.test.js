@@ -395,6 +395,10 @@ test('child-realm executors reach the page rewriter only through pageRewriteHook
   // A failing creative must not stall every script behind it.
   assert.match(body, /\.catch\(childReportError\)\.then\(childSettle\)/,
     'queue must swallow-and-report errors, then settle');
+  // A stalled transport must not strand every later script in the realm.
+  assert.match(body, /const childCapped = pending => new Promise\(/, 'queue wait must be capped');
+  assert.match(body, /childTail = childCapped\(childTail\)\.then\(/,
+    'the deferred branch must wait on the capped tail, not the raw one');
   assert.match(body, /const childExecInline = source => childEnqueue\(\(\) => childExecGlobal\(childRewrite\(source, 'classic'\)\)\)/,
     'child inline executor must go through childRewrite, on the ordered queue');
 });

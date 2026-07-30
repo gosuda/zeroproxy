@@ -4291,6 +4291,18 @@
         try { (w.setTimeout || setTimeout)(() => { throw err; }, 0); } catch {}
       };
       const childSettle = () => { if (--childPending === 0) childTail = null; };
+      // Ordering must never become a liveness risk. A real parser blocks
+      // forever on a stalled `<script src>`, but a stall here is OUR failure
+      // (relay hiccup, wedged transport), not the site's, and it would silently
+      // strand every later script in this realm — an ad slot that never fills
+      // and no error anywhere. Stop WAITING after the cap; the stalled script
+      // still runs if it eventually lands, just out of order.
+      const childCapped = pending => new Promise(resolve => {
+        let settled = false;
+        const finish = () => { if (!settled) { settled = true; resolve(); } };
+        Promise.resolve(pending).then(finish, finish);
+        try { (w.setTimeout || setTimeout)(finish, 5000); } catch { finish(); }
+      });
       const childRunDeferred = work => {
         deferredScriptDepth++;
         try { return work(); } finally { deferredScriptDepth--; }
@@ -4305,7 +4317,7 @@
           return result;
         }
         childPending++;
-        childTail = childTail.then(() => childRunDeferred(work)).catch(childReportError).then(childSettle);
+        childTail = childCapped(childTail).then(() => childRunDeferred(work)).catch(childReportError).then(childSettle);
         return childTail;
       };
       const childExecInline = source => childEnqueue(() => childExecGlobal(childRewrite(source, 'classic')));
