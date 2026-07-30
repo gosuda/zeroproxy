@@ -309,6 +309,36 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
   assert.equal(/transformed = html;\s*\/\/ Fail-open/.test(sw), false, 'fail-open comment must be gone');
 });
 
+// The child-realm script executors must not reach for `installPhase2Membrane`
+// locals — they live in a different function scope.
+//
+// Regression (2026-07-30): `installNetworkContainment` called
+// `rewriteWithPageRewriter(decodeInlineEntities(...))` directly. Both are
+// locals of `installPhase2Membrane`, so every child-realm classic/module script
+// threw `ReferenceError: rewriteWithPageRewriter is not defined`. A minifier
+// cannot catch this (a free variable is a legal global reference), and it stayed
+// hidden until NAVER's ad SDK could load and write scripts into its friendly
+// iframes. The shared `pageRewriteHooks` holder is the seam.
+test('child-realm executors reach the page rewriter only through pageRewriteHooks', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /let pageRewriteHooks = null;/, 'pageRewriteHooks holder missing');
+  assert.match(rt, /pageRewriteHooks = \{\s*rewrite: rewriteWithPageRewriter,\s*decodeEntities: decodeInlineEntities\s*\}/,
+    'installPhase2Membrane must publish its rewriter helpers');
+  // Slice out installNetworkContainment and assert it never names the locals.
+  const start = rt.indexOf('\n  function installNetworkContainment');
+  assert.ok(start > 0, 'installNetworkContainment not found');
+  const rest = rt.slice(start + 3);
+  const end = rest.indexOf('\n  function ');
+  const body = end > 0 ? rest.slice(0, end) : rest;
+  for (const local of ['rewriteWithPageRewriter', 'decodeInlineEntities']) {
+    assert.ok(!body.includes(local),
+      `installNetworkContainment must not reference installPhase2Membrane's ${local} — it is out of scope`);
+  }
+  assert.match(body, /const hooks = pageRewriteHooks;/, 'child rewrite must read the shared holder');
+  assert.match(body, /const childExecInline = source => childExecGlobal\(childRewrite\(source, 'classic'\)\)/,
+    'child inline executor must go through childRewrite');
+});
+
 // Resource-timing entry names must not leak proxy URLs.
 //
 // Regression (2026-07-30): `PerformanceEntry.name` was the one URL surface the

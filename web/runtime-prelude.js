@@ -118,6 +118,15 @@
   const serviceWorkerFacades = new WeakMap();
   const storageMaps = new Map();
   const storageWindows = new Set();
+  // The page-rewriter helpers live inside `installPhase2Membrane`'s scope, but
+  // `installNetworkContainment` — a sibling top-level function — needs them to
+  // build the child-realm script executors. Referencing them directly from
+  // there is a guaranteed ReferenceError; it stayed hidden for a long time
+  // because the child-realm classic-script path only runs when target code
+  // writes a script into a friendly iframe (NAVER's ad SDK `insertAdm`, which
+  // could not even load until static module specifiers were rewritten).
+  // Published here so both scopes share one implementation.
+  let pageRewriteHooks = null;
 
   // Diagnostic ring buffer: capture target-script errors so we can introspect
   // hydration / runtime failures without instrumenting the page after-the-fact.
@@ -1165,6 +1174,11 @@
     function rewriteWithPageRewriter(source, kind) {
       return callPageRewriter(String(source || ''), kind);
     }
+    // Share with `installNetworkContainment` (see `pageRewriteHooks`).
+    pageRewriteHooks = {
+      rewrite: rewriteWithPageRewriter,
+      decodeEntities: decodeInlineEntities
+    };
     // 인라인 <script> 본문은 브라우저가 raw text mode 로 토크나이즈하여 HTML
     // 엔티티를 디코딩하지 않는다. React `dangerouslySetInnerHTML` 가 JS 연산자
     // (`=>`/`&&`)를 `=&gt;`/`&amp;&amp;` 로 엔티티 인코딩해 박은 케이스는 우리가
@@ -4165,8 +4179,15 @@
       // parent's scoped variant (below).
       const childEval = w.eval;
       const childExecGlobal = code => childEval ? childEval(code) : (new childFunction(code)).call(w);
-      const childExecInline = source => childExecGlobal(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic'));
-      const childExecModule = source => (new childFunction(rewriteWithPageRewriter(decodeInlineEntities(source), 'module'))).call(w);
+      // `pageRewriteHooks` rather than the bare helpers: they are locals of
+      // `installPhase2Membrane`, invisible from this function's scope.
+      const childRewrite = (source, kind) => {
+        const hooks = pageRewriteHooks;
+        if (!hooks) throw normalizedError('InvalidStateError');
+        return hooks.rewrite(hooks.decodeEntities(source), kind);
+      };
+      const childExecInline = source => childExecGlobal(childRewrite(source, 'classic'));
+      const childExecModule = source => (new childFunction(childRewrite(source, 'module'))).call(w);
       // `_REWRITTEN` variants: code already rewritten by zp-htmltx — execute
       // directly in the child realm without going through the page rewriter.
       const childExecRewritten = code => childExecGlobal(String(code || ''));
