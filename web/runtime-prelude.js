@@ -1409,7 +1409,24 @@
         constructor: ZPXMLHttpRequest,
         UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
         open(method, url, async = true, user, password) {
-          if (async === false) throw normalizedError('NotSupportedError');
+          if (async === false) {
+            // Synchronous XHR cannot be proxied at all: the Service Worker does
+            // not intercept it (measured — the same URL returns 403 from the Go
+            // server for sync XHR and 503 from the SW for `fetch`), so allowing
+            // it would send the request outside the jail. Blocking is correct,
+            // but the denial is otherwise invisible: target code that catches it
+            // just degrades, and the damage surfaces far away (NAVER's captcha
+            // token comes back as `error1|ReferenceError|…`). Record who asked.
+            try {
+              const diag = root.__zp_diagnostics;
+              if (diag && diag.length < 200) diag.push({
+                t: 'sync-xhr-blocked',
+                url: String(url || '').slice(0, 160),
+                stack: String((new Error()).stack || '').slice(0, 600)
+              });
+            } catch {}
+            throw normalizedError('NotSupportedError');
+          }
           this.abort();
           this._method = String(method || 'GET').toUpperCase();
           const target = new URL(requestTargetURL(url));
