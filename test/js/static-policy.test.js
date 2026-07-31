@@ -407,8 +407,12 @@ test('child-realm executors reach the page rewriter only through pageRewriteHook
     'the cap must wrap the item, not the wait for the tail');
   assert.match(body, /const CHILD_STALL_MS = 30000;/,
     'the cap is a stall detector, not a slowness budget');
-  assert.match(body, /const childExecInline = source => childEnqueue\(\(\) => childExecGlobal\(childRewrite\(source, 'classic'\)\)\)/,
+  assert.match(body, /const childExecInline = source => childEnqueue\(\(\) => \{[\s\S]{0,200}?childExecGlobal\(childRewrite\(source, 'classic'\)\)/,
     'child inline executor must go through childRewrite, on the ordered queue');
+  // A failing creative must be identifiable: the console stack only points at
+  // the prelude's eval, so the source has to be recorded.
+  assert.match(body, /childRecordFailure\(err, source\)/,
+    'a throwing child script must record its source');
 });
 
 // Regression (2026-07-30): making child inline scripts async (the ordered
@@ -522,7 +526,7 @@ test('inline classic scripts execute in global scope, not a Function scope', () 
   assert.match(rt, /const childEval = w\.eval;/, 'child realm must capture its own eval');
   assert.match(rt, /const childExecGlobal = code => childEval \? childEval\(code\)/,
     'child realm needs a global-scope executor');
-  assert.match(rt, /const childExecInline = source => childEnqueue\(\(\) => childExecGlobal\(/,
+  assert.match(rt, /const childExecInline = source => childEnqueue\(\(\) => \{[\s\S]{0,200}?childExecGlobal\(/,
     'child inline classic executor must use childExecGlobal');
   assert.match(rt, /const childExecRewritten = code => childEnqueue\(\(\) => childExecGlobal\(/,
     'child pre-rewritten executor must use childExecGlobal');

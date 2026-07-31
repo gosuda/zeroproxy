@@ -4393,7 +4393,24 @@
         childTail = childTail.then(() => childCapped(childRunDeferred(work))).catch(childReportError).then(childSettle);
         return childTail;
       };
-      const childExecInline = source => childEnqueue(() => childExecGlobal(childRewrite(source, 'classic')));
+      // Record the offending source when a child script throws. These run in an
+      // ad iframe's realm, so the console stack points at the prelude's eval and
+      // nothing identifies WHICH creative failed — without this, diagnosing one
+      // means guessing.
+      const childRecordFailure = (err, source) => {
+        try {
+          const diag = root.__zp_diagnostics;
+          if (diag && diag.length < 200) diag.push({
+            t: 'child-script-error',
+            msg: String(err && err.message || err).slice(0, 160),
+            src: String(source || '').slice(0, 400)
+          });
+        } catch {}
+      };
+      const childExecInline = source => childEnqueue(() => {
+        try { return childExecGlobal(childRewrite(source, 'classic')); }
+        catch (err) { childRecordFailure(err, source); throw err; }
+      });
       const childExecModule = source => childEnqueue(() => (new childFunction(childRewrite(source, 'module'))).call(w));
       // `_REWRITTEN` variants: code already rewritten by zp-htmltx — execute
       // directly in the child realm without going through the page rewriter.

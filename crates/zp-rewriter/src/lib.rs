@@ -1186,8 +1186,26 @@ impl<'a> Visit<'a> for RewriteVisitor {
             if matches!(member.object, Expression::Super(_)) {
                 return;
             }
-            if is_dangerous_method(method) {
+            // A dangerous PROP in callee position is a method call, not a get.
+            // `s.search(re)` rewritten as `__zp_get(s,"search")(re)` drops the
+            // receiver, and `String.prototype.search` then throws "called on
+            // null or undefined" — NAVER's ad creative does exactly
+            // `navigator.userAgent.search("Trident")`, and `indexOf` on the same
+            // expression works, which is the fingerprint of an intercepted name
+            // rather than a broken member chain. `search` is in DANGEROUS_PROPS
+            // for `location.search`, so every string's `.search()` was hit.
+            // `__zp_call` keeps the receiver and falls through to native for
+            // unrelated objects.
+            if is_dangerous_method(method) || is_dangerous_member(method) {
                 use oxc_span::GetSpan;
+                // Drop the callee's own MEMBER_GET patch first: it spans
+                // `obj.prop`, which straddles the METHOD_CALL's object range,
+                // and two overlapping patches cannot both be rendered.
+                if is_dangerous_member(method) {
+                    let callee_span = member.span();
+                    self.patches
+                        .retain(|p| !(p.start == callee_span.start && p.end == callee_span.end));
+                }
                 let obj_span = member.object.span();
                 let args_span = if expr.arguments.is_empty() {
                     None
@@ -2390,6 +2408,45 @@ mod tests {
             r.code
                 .contains("__zp_call(__zp_get(globalThis,\"location\"),\"assign\","),
             "location.assign() not routed: {}",
+            r.code
+        );
+    }
+
+    // Regression (2026-07-31): `search` is in DANGEROUS_PROPS for
+    // `location.search`, so EVERY string's `.search()` was rewritten as
+    // `__zp_get(s,"search")(re)` — receiver dropped, and String.prototype.search
+    // throws "called on null or undefined". NAVER's ad creative does
+    // `navigator.userAgent.search("Trident")`.
+    #[test]
+    fn dangerous_prop_in_callee_position_keeps_its_receiver() {
+        let r = rewrite_script("navigator.userAgent.search('Trident');", &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_call(") && r.code.contains("\"search\","),
+            "prop-named method call not routed through __zp_call: {}",
+            r.code
+        );
+        // The callee's own MEMBER_GET must be gone, or the receiver is lost
+        // again and the two patches overlap.
+        assert!(
+            !r.code.contains("__zp_get(navigator.userAgent,\"search\")("),
+            "callee still wrapped as a get: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn dangerous_prop_read_is_still_a_get() {
+        // Only the CALLEE position changes: reading `location.search` must keep
+        // going through the membrane get.
+        let r = rewrite_script("var q = location.search;", &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(") && r.code.contains("\"search\""),
+            "plain read must still be wrapped: {}",
+            r.code
+        );
+        assert!(
+            !r.code.contains("__zp_call("),
+            "a read must not become a call: {}",
             r.code
         );
     }
