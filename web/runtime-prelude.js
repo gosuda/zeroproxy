@@ -451,6 +451,27 @@
       return true;
     } catch { return false; }
   }
+  // Web IDL puts interface members on the PROTOTYPE; a native singleton like
+  // `navigator` / `history` / `performance` has zero own property names. When
+  // we defined an accessor on both the prototype and the instance "to be
+  // safe", the instance copy was pure fingerprint:
+  // `Object.getOwnPropertyNames(navigator)` came back with our 6 names where
+  // every real browser returns []. Define on the prototype, then verify the
+  // instance actually reads through it, and only fall back to shadowing the
+  // instance if something else is in the way. Normal case: no own props.
+  function defineOnProto(instance, proto, key, get, set) {
+    if (proto && defineAccessor(proto, key, get, set)) {
+      try { if (!instance || instance[key] === get.call(instance)) return true; } catch {}
+    }
+    return defineAccessor(instance, key, get, set);
+  }
+  // Same idea for methods (navigator.sendBeacon, history.pushState/replaceState).
+  function defineMethodOnProto(instance, proto, key, value) {
+    if (proto && define(proto, key, value)) {
+      try { if (!instance || instance[key] === value) return true; } catch {}
+    }
+    return define(instance, key, value);
+  }
   function installToStringMasking(w) {
     const proto = w && w.Function && w.Function.prototype;
     if (!proto || toStringMaskedPrototypes.has(proto)) return;
@@ -2050,7 +2071,7 @@
     define(root, 'WebSocketStream', ZPWebSocketStream);
   }
 
-  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; define(navigator, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
+  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; defineMethodOnProto(navigator, root.Navigator && root.Navigator.prototype, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
 
   function installNavigationTraps() {
     // D1: javascript: URL delegated handler. htmltx transforms target
@@ -2099,8 +2120,9 @@
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { setVirtualLocation(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { setVirtualLocation(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload(); });
-    define(history, 'pushState', function(state, title, url) { return commitVirtualHistory(state, title, url, false); });
-    define(history, 'replaceState', function(state, title, url) { return commitVirtualHistory(state, title, url, true); });
+    const histProto = root.History && root.History.prototype;
+    defineMethodOnProto(history, histProto, 'pushState', function pushState(state, title, url) { return commitVirtualHistory(state, title, url, false); });
+    defineMethodOnProto(history, histProto, 'replaceState', function replaceState(state, title, url) { return commitVirtualHistory(state, title, url, true); });
     window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: activeProxyPath }).then(reply => { activeEntryId = reply.entryId || activeEntryId; virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: activeEntryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
@@ -2235,18 +2257,14 @@
     const nav = w.navigator;
     if (!nav) return;
     const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
-    defineAccessor(proto, 'userAgent', () => TARGET_USER_AGENT);
-    defineAccessor(nav, 'userAgent', () => TARGET_USER_AGENT);
-    defineAccessor(proto, 'appVersion', () => TARGET_APP_VERSION);
-    defineAccessor(nav, 'appVersion', () => TARGET_APP_VERSION);
-    defineAccessor(proto, 'platform', () => TARGET_PLATFORM);
-    defineAccessor(nav, 'platform', () => TARGET_PLATFORM);
+    defineOnProto(nav, proto, 'userAgent', () => TARGET_USER_AGENT);
+    defineOnProto(nav, proto, 'appVersion', () => TARGET_APP_VERSION);
+    defineOnProto(nav, proto, 'platform', () => TARGET_PLATFORM);
     // navigator.webdriver: real Chrome 148 returns `false`. WebView2
     // and CDP-controlled instances return `true`, which every modern
     // anti-bot WAF flags as a robot signal. Pin to `false` so target
     // pages can't distinguish ZeroProxy from a hand-driven Chrome.
-    defineAccessor(proto, 'webdriver', () => false);
-    defineAccessor(nav, 'webdriver', () => false);
+    defineOnProto(nav, proto, 'webdriver', () => false);
     installChromeFingerprintFacade(w);
   }
 
@@ -2650,17 +2668,22 @@
     }
     // window.origin / self.origin getters — point at virtual target origin.
     try { Object.defineProperty(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
-    // D7: performance.timeOrigin should reflect target navigation, not proxy
-    // origin navigation, so target code timing target-relative events sees
-    // the expected baseline. Cannot fully fake the underlying clock; we
-    // simply mask the property if the host exposes it as writeable; if
-    // non-configurable we leave native to avoid throwing.
-    try {
-      if (w.performance) {
-        const baseline = boot.navigationStart || Date.now();
-        try { Object.defineProperty(w.performance, 'timeOrigin', { get() { return baseline; }, configurable: true, enumerable: true }); } catch {}
-      }
-    } catch {}
+    // D7 (removed): we used to redefine `performance.timeOrigin` to a
+    // "target navigation" baseline. `boot.navigationStart` is never assigned
+    // anywhere in the tree, so the baseline was always `Date.now()` at prelude
+    // time — it virtualized nothing and bought us three fingerprints:
+    //   1. timeOrigin + performance.now() - Date.now() = +388ms measured.
+    //      Natively that skew is sub-millisecond; it is the cheapest clock
+    //      consistency check there is.
+    //   2. timeOrigin !== performance.timing.navigationStart. Those two are
+    //      the same instant in every real browser; ours disagreed by exactly
+    //      the prelude's startup cost.
+    //   3. `timeOrigin` became an OWN property of the performance instance.
+    //      Natively it is an accessor on Performance.prototype and the
+    //      instance has no own names at all.
+    // Native timeOrigin leaks nothing a target could not already get from
+    // Date.now(): it is when the proxy page navigated, which is when the user
+    // opened the target. Keeping native is strictly better on every axis.
     // Performance Resource Timing leaked raw proxy URLs. Entry names were the
     // only URL surface the membrane never virtualized, so
     // `performance.getEntriesByType('resource')[i].name` came back as
@@ -3864,8 +3887,7 @@
     }
     serviceWorkerFacades.set(w, facade);
     const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
-    defineAccessor(proto, 'serviceWorker', () => facade);
-    defineAccessor(nav, 'serviceWorker', () => facade);
+    defineOnProto(nav, proto, 'serviceWorker', () => facade);
   }
   function workerBootstrapURL(url) {
     const raw = String(url);

@@ -1781,13 +1781,25 @@ test('fingerprint hardening: navigator.webdriver + window.chrome facade', () => 
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   assert.match(
     rt,
-    /defineAccessor\(proto, 'webdriver', \(\) => false\)/,
-    'navigator.webdriver must be pinned to false on Navigator.prototype',
+    /defineOnProto\(nav, proto, 'webdriver', \(\) => false\)/,
+    'navigator.webdriver must be pinned to false via Navigator.prototype',
+  );
+  // We used to define webdriver (and userAgent/appVersion/platform/
+  // serviceWorker) on the prototype AND on the navigator instance. The
+  // instance copy was redundant — reads already resolved through the
+  // prototype — and it made `Object.getOwnPropertyNames(navigator)` return
+  // our 6 names where every real browser returns []. defineOnProto keeps the
+  // instance-shadow only as a verified fallback, so the normal path leaves
+  // no own properties behind.
+  assert.doesNotMatch(
+    rt,
+    /defineAccessor\(nav, '(?:webdriver|userAgent|appVersion|platform|serviceWorker)'/,
+    'navigator members must not be unconditionally shadowed onto the instance',
   );
   assert.match(
     rt,
-    /defineAccessor\(nav, 'webdriver', \(\) => false\)/,
-    'navigator.webdriver must be pinned to false on the navigator instance',
+    /function defineOnProto\(instance, proto, key, get, set\)/,
+    'defineOnProto helper must exist',
   );
   assert.match(
     rt,
