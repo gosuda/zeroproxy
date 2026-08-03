@@ -38,6 +38,28 @@
   // instead. `enumerable: false` does NOT help here: getOwnPropertyNames and
   // Reflect.ownKeys report non-enumerable own properties by spec.
   const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  // ...but `for (k in window)` is a THIRD enumeration surface, and it is the one
+  // the scrubbing above cannot reach: for-in is a language construct, not a
+  // method we can wrap. It walks enumerable own+inherited keys directly.
+  // Measured: getOwnPropertyNames(window) was correctly clean while
+  // `for (k in window)` still handed out ZPPageBundleWBG, __zp_diagnostics,
+  // __zp_trace and __zp_trace_clear — plain `root.x = y` assignments create
+  // ENUMERABLE properties, so they bypassed both `define()` and the scrub.
+  // enumerable:false is exactly the right tool for this surface (and useless for
+  // the other two), so the two mechanisms are complements, not alternatives.
+  const hideZPGlobalsFromForIn = () => {
+    try {
+      for (const name of Object.getOwnPropertyNames(root)) {
+        if (!ZP_HIDDEN_RE.test(name)) continue;
+        const d = Object.getOwnPropertyDescriptor(root, name);
+        if (!d || !d.enumerable || !d.configurable) continue;
+        try { Object.defineProperty(root, name, Object.assign({}, d, { enumerable: false })); } catch {}
+      }
+    } catch {}
+  };
+  // zp-core.js and zp-page-bundle.js both load BEFORE this prelude, so their
+  // globals already exist and this first pass catches them.
+  hideZPGlobalsFromForIn();
   try {
     const isGlobalObj = o => o === globalThis || o === root || (typeof self !== 'undefined' && o === self);
     // Real Chrome exposes exactly `["constructor"]` on Location.prototype — every
@@ -222,7 +244,8 @@
     if (!root.__zp_diagnostics) {
       const diag = [];
       const push = e => { if (diag.length < 200) diag.push(e); };
-      root.__zp_diagnostics = diag;
+      // non-enumerable: keeps it out of `for (k in window)` (see ZP_HIDDEN_RE).
+      Object.defineProperty(root, '__zp_diagnostics', { value: diag, writable: true, enumerable: false, configurable: true });
       root.addEventListener('error', e => {
         const ent = {
           t: 'error',
@@ -281,7 +304,11 @@
       __zpNativeStorage.setItem(key, JSON.stringify(log));
     } catch {}
   }
-  try { root.__zp_trace = zpTrace; root.__zp_trace_clear = () => { try { __zpNativeStorage && __zpNativeStorage.removeItem('__zp_trace_log'); __zpNativeStorage && __zpNativeStorage.removeItem('__zp_hb'); } catch {} }; } catch {}
+  try {
+    const hidden = (name, value) => Object.defineProperty(root, name, { value, writable: true, enumerable: false, configurable: true });
+    hidden('__zp_trace', zpTrace);
+    hidden('__zp_trace_clear', () => { try { __zpNativeStorage && __zpNativeStorage.removeItem('__zp_trace_log'); __zpNativeStorage && __zpNativeStorage.removeItem('__zp_hb'); } catch {} });
+  } catch {}
   try {
     let __zpBeats = 0;
     setInterval(() => {
@@ -427,9 +454,28 @@
   function maskMethods(obj, keys) {
     for (const key of keys) maskNativeFunction(obj && obj[key], key);
   }
+  // Web IDL members are enumerable; ours were not, so every property the
+  // membrane touched flipped a bit the page can read. Measured on
+  // Navigator.prototype: 76 members enumerable, and exactly the 6 we replaced
+  // were not — `Object.keys(Navigator.prototype).includes('userAgent')` and
+  // `for (k in navigator)` both disagreed with every real browser.
+  //
+  // A blanket `enumerable: true` would be wrong in the other direction: our own
+  // `__zp_*` helpers must stay invisible, and for-in is NOT covered by the
+  // getOwnPropertyNames/keys/ownKeys scrubbing. So inherit the flag from
+  // whatever we are replacing — native members keep their enumerability,
+  // membrane-only additions stay hidden. `configurable` stays false either way:
+  // that is the E1 lock that stops a page deleting our accessor to reach the
+  // native one, and it is the one axis we knowingly trade for the jail.
+  function nativeEnumerability(obj, key) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(obj, key);
+      return !!(d && d.enumerable);
+    } catch { return false; }
+  }
   function define(obj, key, value) {
     try {
-      Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
+      Object.defineProperty(obj, key, { value, enumerable: nativeEnumerability(obj, key), configurable: false, writable: true });
       // A native method's `.name` equals its property key. Ours came out of the
       // minifier as "" or a one-letter token, so `setTimeout.name`,
       // `window.addEventListener.name` and `navigator.serviceWorker.register
@@ -443,9 +489,14 @@
       return true;
     } catch { return false; }
   }
-  function defineAccessor(obj, key, get, set) {
+  // `enumSrc` names the object to copy enumerability FROM when `obj` itself has
+  // nothing to inherit — the replaced classes (XHR/WebSocket/EventSource) build
+  // a fresh prototype, so their only reference for the native flag is the
+  // native prototype we are standing in for. `configurable: false` means the
+  // flag cannot be corrected after the fact, so it has to be right here.
+  function defineAccessor(obj, key, get, set, enumSrc) {
     try {
-      Object.defineProperty(obj, key, { get, set, enumerable: false, configurable: false });
+      Object.defineProperty(obj, key, { get, set, enumerable: nativeEnumerability(enumSrc || obj, key), configurable: false });
       if (typeof get === 'function') toStringMap.set(get, nativeAccessorSource('get', key));
       if (typeof set === 'function') toStringMap.set(set, nativeAccessorSource('set', key));
       return true;
@@ -495,13 +546,14 @@
   //     wraps `WebSocket.prototype.send` / patches an accessor silently no-ops;
   //   * the prototype name count differs from a real browser (measured
   //     2026-08-03: WebSocket 12 vs 17, EventSource 8 vs 11), a free proxy tell.
-  function mirrorNativeProto(proto, names) {
+  function mirrorNativeProto(proto, names, nativeProto) {
     if (!proto) return;
     for (const name of names) {
       const key = '_zp' + name;
       defineAccessor(proto, name,
         function () { return this[key]; },
-        function (v) { this[key] = v; });
+        function (v) { this[key] = v; },
+        nativeProto);
     }
   }
   // Native XHR / WebSocket / EventSource INHERIT addEventListener,
@@ -1595,7 +1647,8 @@
         const _k = '_zp' + _n;
         defineAccessor(ZPXMLHttpRequest.prototype, _n,
           function () { return this[_k]; },
-          function (v) { this[_k] = v; });
+          function (v) { this[_k] = v; },
+          Native.XMLHttpRequest && Native.XMLHttpRequest.prototype);
       }
       Object.assign(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
@@ -1722,7 +1775,8 @@
       });
       maskMethods(ZPEventSource.prototype, ['close']);
       mirrorNativeProto(ZPEventSource.prototype,
-        ['url', 'withCredentials', 'readyState', 'onopen', 'onmessage', 'onerror']);
+        ['url', 'withCredentials', 'readyState', 'onopen', 'onmessage', 'onerror'],
+        Native.EventSource && Native.EventSource.prototype);
       brandLikeNative(ZPEventSource, ZPEventSource.prototype, 'EventSource');
       define(root, 'EventSource', ZPEventSource);
 
@@ -2007,8 +2061,17 @@
     });
     // bufferedAmount: read-only per IDL.
     try {
+      // ZPWebSocket.prototype is a fresh object literal, so unlike XHR/EventSource
+      // (which reuse a function's default .prototype) it has no inherited
+      // non-enumerable `constructor` slot — Object.assign created an enumerable
+      // one, putting `constructor` into Object.keys where no browser has it.
+      Object.defineProperty(ZPWebSocket.prototype, 'constructor', {
+        value: ZPWebSocket, writable: true, enumerable: false, configurable: true,
+      });
       Object.defineProperty(ZPWebSocket.prototype, 'bufferedAmount', {
         configurable: false,
+        enumerable: true, // Web IDL attributes are enumerable; these two were the
+                          // only members of the replaced classes still hiding.
         get() { return this._bufferedAmount | 0; },
       });
     } catch {}
@@ -2016,6 +2079,7 @@
     try {
       Object.defineProperty(ZPWebSocket.prototype, 'binaryType', {
         configurable: false,
+        enumerable: true,
         get() { return this._binaryType; },
         set(v) {
           const s = String(v);
@@ -2024,7 +2088,8 @@
       });
     } catch {}
     mirrorNativeProto(ZPWebSocket.prototype,
-      ['url', 'readyState', 'onopen', 'onerror', 'onclose', 'onmessage', 'extensions', 'protocol']);
+      ['url', 'readyState', 'onopen', 'onerror', 'onclose', 'onmessage', 'extensions', 'protocol'],
+      Native.WebSocket && Native.WebSocket.prototype);
     brandLikeNative(ZPWebSocket, ZPWebSocket.prototype, 'WebSocket');
     define(root, 'WebSocket', ZPWebSocket);
   }

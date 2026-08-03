@@ -1770,6 +1770,43 @@ test('D2 follow-on: sourcemap chain (rewriter_map ∘ original_map)', () => {
   );
 });
 
+test('fingerprint hardening: descriptor flags + for-in enumeration surface', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  // Web IDL members are enumerable. Ours were not, so every property the
+  // membrane replaced flipped a readable bit: Object.keys(Navigator.prototype)
+  // was 76 where the browser reports 82, and `for (k in navigator)` could not
+  // see userAgent. A blanket enumerable:true would be wrong the other way —
+  // our own __zp_* helpers must stay hidden — so enumerability is INHERITED
+  // from whatever we replace.
+  assert.match(
+    rt,
+    /function nativeEnumerability\(obj, key\)/,
+    'define/defineAccessor must inherit enumerability from the replaced member',
+  );
+  assert.doesNotMatch(
+    rt,
+    /Object\.defineProperty\(obj, key, \{ (?:value|get)[^}]*enumerable: false/,
+    'define/defineAccessor must not hardcode enumerable:false',
+  );
+  // configurable:false is the E1 lock (a page must not be able to delete our
+  // accessor to reach the native one). It is a knowing trade, not an oversight.
+  assert.match(rt, /configurable: false/, 'membrane accessors must stay non-configurable');
+  // for-in is a third enumeration surface: it is a language construct, so the
+  // getOwnPropertyNames/keys/ownKeys scrubbing cannot reach it. Plain
+  // `root.x = y` assignments are enumerable and leaked ZPPageBundleWBG,
+  // __zp_diagnostics, __zp_trace, __zp_trace_clear out of `for (k in window)`.
+  assert.match(
+    rt,
+    /const hideZPGlobalsFromForIn = \(\) =>/,
+    'membrane globals must be hidden from for-in, not just from ownKeys',
+  );
+  assert.doesNotMatch(
+    rt,
+    /root\.__zp_(?:trace|diagnostics)\s*=/,
+    'ZP globals must be defined non-enumerable, never plain-assigned',
+  );
+});
+
 test('fingerprint hardening: navigator.webdriver + window.chrome facade', () => {
   // Real Chrome 148 has window.chrome.csi() / .loadTimes() / .app and
   // returns navigator.webdriver === false outside CDP. WebView2 +
