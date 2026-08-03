@@ -1943,12 +1943,31 @@ test('anchor escape vector: zp-htmltx + prelude + launcher ?via= handler', () =>
   );
   // Page-side prelude mirror: proxyViaURL helper.
   assert.ok(rt.includes('function proxyViaURL'), 'runtime-prelude must define proxyViaURL');
-  // installURLProp setter must write the proxy URL (not raw target) to
-  // the DOM attribute.
-  assert.ok(
-    /setAttribute\(attrName,\s*proxyViaURL\(t\)\)/.test(rt),
-    'installURLProp setter must route raw attribute through proxyViaURL'
+  // installURLProp's setter must DELEGATE the raw value to the hooked
+  // Element.prototype.setAttribute rather than pre-proxying it. Handing the
+  // hook an already-proxied URL made it rewrite a second time: the raw
+  // attribute came out double-wrapped (?via=...%3Fvia%3D...) and urlMeta was
+  // overwritten with our own origin, so `a.href` returned the proxy URL to
+  // page code. The "?via=" form is still enforced — by the hook's usesRaw
+  // branch, pinned just below.
+  assert.match(
+    rt,
+    /function \(v\) \{\s*this\.setAttribute\(attrName, v\);\s*\}/,
+    'installURLProp setter must delegate the raw value to the setAttribute hook'
   );
+  // Every HTMLHyperlinkElementUtils component must derive from the virtualized
+  // href; reading the raw attribute leaks the proxy origin (a.hostname ->
+  // "proxy.localhost") and breaks the `a.href = u; a.hostname` parsing idiom.
+  assert.ok(
+    /function installURLComponents\(proto, prop\)/.test(rt),
+    'runtime-prelude must virtualize anchor URL components, not just href'
+  );
+  for (const part of ['protocol', 'hostname', 'pathname', 'search', 'hash']) {
+    assert.ok(
+      new RegExp(`'${part}'`).test(rt),
+      `installURLComponents must cover ${part}`
+    );
+  }
   // setAttribute wrap usesRaw branch must also route through proxyViaURL.
   assert.ok(
     /usesRaw \? proxyViaURL\(t\) : t/.test(rt),

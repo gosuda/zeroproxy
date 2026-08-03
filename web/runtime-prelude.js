@@ -2424,6 +2424,50 @@
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');
     installURLProp(w.HTMLInputElement && w.HTMLInputElement.prototype, 'formAction');
     installURLProp(w.HTMLButtonElement && w.HTMLButtonElement.prototype, 'formAction');
+    // HTMLHyperlinkElementUtils: protocol/host/hostname/port/pathname/search/
+    // hash/origin/username/password. Virtualizing only `href` left every one of
+    // these reading the RAW attribute, which since the 2026-06-06 escape fix is
+    // a proxy-origin "?via=" launcher. Measured: `a.href='https://example.com/
+    // x?q=1#f'` then `a.hostname` -> "proxy.localhost", `.pathname` -> "/zp/",
+    // `.search` -> "?via=...", `.protocol` -> "http:".
+    //
+    // Two costs. It breaks the single most common URL-parsing idiom in the wild
+    // (`a.href = u; a.hostname`) — target code reads a hostname that is not the
+    // one it just wrote. And it hands page code our origin through a surface the
+    // membrane exists to close, which is the same leak the `href` getter fixed.
+    // Derive every component from the already-virtualized href instead.
+    installURLComponents(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
+    installURLComponents(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');
+    function installURLComponents(proto, prop) {
+      if (!proto) return;
+      const virt = (el) => {
+        try {
+          const h = el[prop];
+          return h ? new Native.URL(h) : null;
+        } catch { return null; }
+      };
+      // With no URL the components are all '' except `protocol`, which reads
+      // ':' — a Web IDL quirk worth matching exactly, since it is trivially
+      // checkable and a wrong answer here is a fingerprint of its own.
+      for (const name of ['protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'hash']) {
+        defineAccessor(
+          proto,
+          name,
+          function () { const u = virt(this); return u ? u[name] : (name === 'protocol' ? ':' : ''); },
+          function (v) {
+            const u = virt(this);
+            if (!u) return;
+            try { u[name] = v; } catch { return; }
+            // Route back through the href setter so the raw attribute keeps its
+            // "?via=" form and the blocked-scheme checks still run.
+            this[prop] = u.href;
+          }
+        );
+      }
+      // `origin` is readonly in Web IDL; `toString()` mirrors href.
+      defineAccessor(proto, 'origin', function () { const u = virt(this); return u ? u.origin : 'null'; });
+      define(proto, 'toString', function toString() { return this[prop]; });
+    }
     function installURLProp(proto, prop) {
       if (!proto) return;
       const attrName = prop === 'formAction' ? 'formaction' : prop;
@@ -2431,23 +2475,41 @@
         proto,
         prop,
         function () {
-          return urlMeta.get(this)
-            || Native.getAttribute.call(this, 'data-zp-target-url')
-            || targetURL(this.getAttribute(attrName) || virtualURL.href);
+          const known = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
+          if (known) return known;
+          const raw = this.getAttribute(attrName);
+          // An ABSENT attribute reads '' natively; an EMPTY one (`<a href="">`)
+          // really does resolve to the document URL. The old `getAttribute() ||
+          // virtualURL.href` collapsed those two cases, so a bare
+          // `document.createElement('a').href` returned the page URL where every
+          // browser returns '' — and each component getter inherited it.
+          if (raw === null || raw === undefined) return '';
+          return targetURL(raw || virtualURL.href);
         },
+        // Delegate the RAW value to the hooked Element.prototype.setAttribute.
+        //
+        // This setter used to duplicate that hook's work and then hand it the
+        // already-proxied result (`this.setAttribute(attrName, proxyViaURL(t))`).
+        // Because `this.setAttribute` IS the membrane hook, the proxy URL went
+        // through URL rewriting a second time, which broke both halves of the
+        // round trip (measured in the page realm on naver.com):
+        //   a.href = '/probe'
+        //   a.href              -> http://<proxy>/zp/?via=...   (want the target)
+        //   a.getAttribute()    -> ?via=...%3Fvia%3D...         (wrapped twice)
+        // The hook re-derives `targetURLForElement(this, <proxy url>)` from the
+        // proxy URL and overwrites `urlMeta` with it, which is why the getter —
+        // whose first source is `urlMeta` — started returning our own origin to
+        // page code. One re-entrancy bug, both symptoms.
+        //
+        // Delegating is also strictly safer than calling Native.setAttribute
+        // here: the hook owns the javascript:/blocked-scheme checks
+        // (shouldBlockURLAttribute / hasContextBlockedScheme), resolves via the
+        // element-aware targetURLForElement, stashes data-zp-target-url, and
+        // applies the same "?via=" raw-attribute rewrite that keeps the target
+        // out of browser-native UI (hover / middle-click / copy-link). Bypassing
+        // it to fix the double-wrap would have opened an E1 escape instead.
         function (v) {
-          const t = targetURL(v);
-          urlMeta.set(this, t);
-          Native.setAttribute.call(this, 'data-zp-target-url', t);
-          // 2026-06-06 escape vector fix: previously
-          // `this.setAttribute(attrName, t)` put the absolute target URL on
-          // the DOM attribute, leaking it to browser-native UI
-          // (hover/middle-click/copy-link/target=_blank/right-click). Mirror
-          // the server-side zp-htmltx rewrite by writing a proxy-origin
-          // "?via=" URL on the raw attribute. The absolute target stays
-          // recoverable via `urlMeta` + `data-zp-target-url` for the prelude
-          // click handler's fast path.
-          this.setAttribute(attrName, proxyViaURL(t));
+          this.setAttribute(attrName, v);
         }
       );
     }
