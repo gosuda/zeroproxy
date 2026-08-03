@@ -24,6 +24,86 @@
   try { delete globalThis.ZP; } catch {}
   try { delete globalThis.ZeroProxyRT; } catch {}
 
+  // Fingerprint hardening (2026-08-02). The rewriter emits BARE calls to
+  // `__zp_get` / `__zp_call` / `__ZP_EXEC_INLINE_SCRIPT` …, so unlike `ZP`
+  // above these must stay resolvable as globals — capture-and-delete is not an
+  // option. They were therefore still fully visible to
+  // `Object.getOwnPropertyNames(window)`: 25 names, measured 2026-08-02, on top
+  // of a 1298-name baseline. That is precisely the enumeration the 2026-06-05
+  // note identified as NAVER's anti-bot tell, and the WTM bundle
+  // (wtm.pstatic.net/fce46da/*.js) still busy-loops the renderer when it is
+  // allowed to run — see the ZP_TRACKER_BLOCKED block in web/sw.js.
+  //
+  // Since the bindings cannot go away, hide them from the enumeration surfaces
+  // instead. `enumerable: false` does NOT help here: getOwnPropertyNames and
+  // Reflect.ownKeys report non-enumerable own properties by spec.
+  const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  try {
+    const isGlobalObj = o => o === globalThis || o === root || (typeof self !== 'undefined' && o === self);
+    // Real Chrome exposes exactly `["constructor"]` on Location.prototype — every
+    // Location member is an own, non-configurable property of the `location`
+    // INSTANCE. Our virtual accessors therefore never fire (the own properties
+    // shadow them; verified 2026-08-02: un-rewritten `location.href` still reads
+    // the raw proxy URL) — they are pure fingerprint: 14 names vs 1. Rather than
+    // delete membrane code late, hide them from enumeration; behaviour is
+    // untouched because nothing ever reached them.
+    const LOC_PROTO_OK = new Set(['constructor']);
+    const isLocProto = o => { try { return typeof Location === 'function' && o === Location.prototype; } catch { return false; } };
+    const scrub = (list, target) => list.filter(n => {
+      if (typeof n !== 'string') return true;
+      if (isLocProto(target)) return LOC_PROTO_OK.has(n);
+      return !ZP_HIDDEN_RE.test(n);
+    });
+    const hideFrom = (owner, name) => {
+      const orig = owner && owner[name];
+      if (typeof orig !== 'function') return;
+      const patched = function (target) {
+        const out = orig.apply(this, arguments);
+        if (!Array.isArray(out)) return out;
+        return (isGlobalObj(target) || isLocProto(target)) ? scrub(out, target) : out;
+      };
+      // Keep `fn.toString()` / `fn.name` / `fn.length` indistinguishable from
+      // native — a probe that diffs those would otherwise see the wrapper.
+      try {
+        Object.defineProperty(patched, 'name', { value: name, configurable: true });
+        Object.defineProperty(patched, 'length', { value: orig.length, configurable: true });
+      } catch {}
+      nativeToStringSources.set(patched, orig);
+      try { Object.defineProperty(owner, name, { value: patched, writable: true, configurable: true }); } catch {}
+    };
+    const nativeToStringSources = new WeakMap();
+    const origToString = Function.prototype.toString;
+    try {
+      Object.defineProperty(Function.prototype, 'toString', {
+        value: function () {
+          const src = nativeToStringSources.get(this);
+          return origToString.call(src || this);
+        },
+        writable: true, configurable: true
+      });
+    } catch {}
+    hideFrom(Object, 'getOwnPropertyNames');
+    hideFrom(Object, 'keys');
+    hideFrom(Reflect, 'ownKeys');
+    // A real `window` carries no own symbols (measured 2026-08-02: direct load
+    // 0, proxied 4 — our install marker plus wasm-bindgen's). The count alone
+    // is a one-line proxy check, so drop ours from the symbol surface too.
+    // Only symbols we could have created are removed: no description at all
+    // (the `Symbol()` install marker) or an explicitly ZeroProxy-ish one.
+    const ours = s => { const d = s && s.description; return d === undefined || ZP_HIDDEN_RE.test(String(d)); };
+    const origSyms = Object.getOwnPropertySymbols;
+    const patchedSyms = function (target) {
+      const out = origSyms.apply(this, arguments);
+      return isGlobalObj(target) ? out.filter(s => !ours(s)) : out;
+    };
+    try {
+      Object.defineProperty(patchedSyms, 'name', { value: 'getOwnPropertySymbols', configurable: true });
+      Object.defineProperty(patchedSyms, 'length', { value: origSyms.length, configurable: true });
+    } catch {}
+    nativeToStringSources.set(patchedSyms, origSyms);
+    try { Object.defineProperty(Object, 'getOwnPropertySymbols', { value: patchedSyms, writable: true, configurable: true }); } catch {}
+  } catch {}
+
   const boot = Object.assign({ tabId: '', entryId: '', targetUrl: location.href, documentCookie: '' }, readBootConfig());
   const runtimeToken = String(boot.runtimeToken || '');
   // Single source of truth lives in zp-core (web/zp-core.js); the SW smuggles
@@ -350,6 +430,15 @@
   function define(obj, key, value) {
     try {
       Object.defineProperty(obj, key, { value, enumerable: false, configurable: false, writable: true });
+      // A native method's `.name` equals its property key. Ours came out of the
+      // minifier as "" or a one-letter token, so `setTimeout.name`,
+      // `window.addEventListener.name` and `navigator.serviceWorker.register
+      // .name` all read "" where a browser reports the method name (measured
+      // 2026-08-03). maskNativeFunction already fixes `.toString()`, which is
+      // why this stayed invisible — the two are separate surfaces.
+      if (typeof value === 'function' && value.name !== key) {
+        try { Object.defineProperty(value, 'name', { value: key, configurable: true }); } catch {}
+      }
       maskNativeFunction(value, key);
       return true;
     } catch { return false; }
@@ -377,10 +466,68 @@
       toStringMaskedPrototypes.add(proto);
     } catch {}
   }
+  // Move replaced-class state from instance data properties onto PROTOTYPE
+  // accessors, the shape every native counterpart has. Writing `this.readyState
+  // = …` in a constructor then routes through the setter instead of creating an
+  // own property, so no call site changes. Two things break without this:
+  //   * `'readyState' in WebSocket.prototype` is false, and any library that
+  //     wraps `WebSocket.prototype.send` / patches an accessor silently no-ops;
+  //   * the prototype name count differs from a real browser (measured
+  //     2026-08-03: WebSocket 12 vs 17, EventSource 8 vs 11), a free proxy tell.
+  function mirrorNativeProto(proto, names) {
+    if (!proto) return;
+    for (const name of names) {
+      const key = '_zp' + name;
+      defineAccessor(proto, name,
+        function () { return this[key]; },
+        function (v) { this[key] = v; });
+    }
+  }
+  // Native XHR / WebSocket / EventSource INHERIT addEventListener,
+  // removeEventListener and dispatchEvent from EventTarget — they are not own
+  // properties of the class prototype. Defining them directly on each class
+  // prototype pushed every one of ours 3 names past the native count (measured
+  // 2026-08-03: XHR 28 vs 27, WebSocket 20 vs 17, EventSource 14 vs 11). Hang
+  // them off a single shared intermediate prototype and splice that into each
+  // class's chain instead: same lookup, same behaviour, and the own-property
+  // count now matches a real browser.
+  //
+  // `class X extends EventTarget` would be the exact native shape, but native
+  // dispatchEvent needs a branded EventTarget instance — that means
+  // Reflect.construct inside three constructors, a refactor with real breakage
+  // risk. This gets the observable shape right without touching event delivery.
+  // Give each replaced class the two brands a real Web IDL interface carries:
+  //   * `Ctor.name` — the build minifier renamed our constructors, so
+  //     `XMLHttpRequest.name` read "c" (WebSocket "f", EventSource "o",
+  //     Worker "t") where every browser reports the interface name. A one-token
+  //     equality check catches that; `String(ctor)` was already masked, which
+  //     made the mismatch easy to miss.
+  //   * `Symbol.toStringTag` — without it `Object.prototype.toString.call(xhr)`
+  //     returned "[object Object]" instead of "[object XMLHttpRequest]". That
+  //     is a fingerprint AND a functional break: type-dispatch helpers in the
+  //     wild switch on exactly this string.
+  function brandLikeNative(ctor, proto, name) {
+    try { if (ctor) Object.defineProperty(ctor, 'name', { value: name, configurable: true }); } catch {}
+    try { if (proto) Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch {}
+  }
+  let sharedEventTargetProto = null;
+  function eventTargetProto() {
+    if (sharedEventTargetProto) return sharedEventTargetProto;
+    // Rooted at EventTarget.prototype so `xhr instanceof EventTarget` is true,
+    // as it is natively (it was false). Our own methods below shadow the native
+    // ones, so nothing reaches the branded native implementations.
+    let base = Object.prototype;
+    try { if (typeof EventTarget === 'function' && EventTarget.prototype) base = EventTarget.prototype; } catch {}
+    const p = Object.create(base);
+    define(p, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = new Map(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
+    define(p, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
+    define(p, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
+    sharedEventTargetProto = p;
+    return p;
+  }
   function installEventMethods(proto) {
-    define(proto, 'addEventListener', function(type, fn) { if (!fn) return; const key = String(type); if (!this[listenersKey]) this[listenersKey] = new Map(); const list = this[listenersKey].get(key) || []; list.push(fn); this[listenersKey].set(key, list); });
-    define(proto, 'removeEventListener', function(type, fn) { const list = this[listenersKey] && this[listenersKey].get(String(type)); if (!list) return; const i = list.indexOf(fn); if (i >= 0) list.splice(i, 1); });
-    define(proto, 'dispatchEvent', function(event) { const list = this[listenersKey] && this[listenersKey].get(event.type) || []; try { if (!event.target) Object.defineProperty(event, 'target', { value: this, configurable: true }); } catch {} const handler = this['on' + event.type]; if (typeof handler === 'function') handler.call(this, event); for (const fn of list.slice()) fn.call(this, event); return !event.defaultPrevented; });
+    if (!proto) return;
+    try { Object.setPrototypeOf(proto, eventTargetProto()); } catch {}
   }
   function preservedShareFragment(hash) {
     if (!hash) return '';
@@ -1378,6 +1525,10 @@
       function ZPXMLHttpRequest() {
         this.readyState = UNSENT;
         this.response = this.responseText = '';
+        // Native defaults are null, not undefined — the accessors added below
+        // would otherwise report `undefined` for an untouched request.
+        this.responseXML = null;
+        this.onreadystatechange = null;
         this.responseType = '';
         this.responseURL = '';
         this.status = 0;
@@ -1405,9 +1556,37 @@
         fireEvent(xhr, 'loadend');
       }
       installEventMethods(ZPXMLHttpRequest.prototype);
+      // Native XHR exposes its state as PROTOTYPE accessors, not instance data
+      // properties. We wrote them straight onto the instance, so
+      // `XMLHttpRequest.prototype` carried 16 names where Chrome has 27
+      // (measured 2026-08-02) — both a loud proxy tell and a real compat break:
+      // `'readyState' in XMLHttpRequest.prototype` was false, and any library
+      // that wraps `XMLHttpRequest.prototype.responseText` (analytics shims,
+      // mocking libs) saw nothing to wrap.
+      //
+      // Backing them with `_zp`-prefixed fields keeps every existing
+      // `this.readyState = …` write working — the assignment now routes through
+      // the setter instead of creating an own property, so instance shape gets
+      // closer to native too. defineAccessor masks the pair's toString.
+      for (const _n of ['readyState', 'response', 'responseText', 'responseXML', 'responseType',
+        'responseURL', 'status', 'statusText', 'timeout', 'withCredentials', 'upload',
+        'onreadystatechange']) {
+        const _k = '_zp' + _n;
+        defineAccessor(ZPXMLHttpRequest.prototype, _n,
+          function () { return this[_k]; },
+          function (v) { this[_k] = v; });
+      }
       Object.assign(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
         UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
+        // Chrome-only Privacy Sandbox hooks. We do not implement either — the
+        // proxy never forwards attribution or private-token material — but
+        // their ABSENCE is itself a fingerprint (XHR.prototype 25 vs 27), and
+        // `xhr.setPrivateToken` throwing "not a function" reads differently
+        // from a browser that has the method. Accept-and-ignore matches what a
+        // browser does when the feature is disabled by policy.
+        setAttributionReporting() {},
+        setPrivateToken() {},
         open(method, url, async = true, user, password) {
           if (async === false) {
             // Synchronous XHR cannot be proxied at all: the Service Worker does
@@ -1487,6 +1666,7 @@
         overrideMimeType() {}
       });
       maskMethods(ZPXMLHttpRequest.prototype, ['open','setRequestHeader','send','abort','getResponseHeader','getAllResponseHeaders','overrideMimeType']);
+      brandLikeNative(ZPXMLHttpRequest, ZPXMLHttpRequest.prototype, 'XMLHttpRequest');
       define(root, 'XMLHttpRequest', ZPXMLHttpRequest);
     }
     if (Native.EventSource && Native.fetch && Native.Request && Native.Headers) {
@@ -1520,6 +1700,9 @@
         }
       });
       maskMethods(ZPEventSource.prototype, ['close']);
+      mirrorNativeProto(ZPEventSource.prototype,
+        ['url', 'withCredentials', 'readyState', 'onopen', 'onmessage', 'onerror']);
+      brandLikeNative(ZPEventSource, ZPEventSource.prototype, 'EventSource');
       define(root, 'EventSource', ZPEventSource);
 
       function scheduleReconnect(es) {
@@ -1819,6 +2002,9 @@
         },
       });
     } catch {}
+    mirrorNativeProto(ZPWebSocket.prototype,
+      ['url', 'readyState', 'onopen', 'onerror', 'onclose', 'onmessage', 'extensions', 'protocol']);
+    brandLikeNative(ZPWebSocket, ZPWebSocket.prototype, 'WebSocket');
     define(root, 'WebSocket', ZPWebSocket);
   }
 
@@ -2599,7 +2785,7 @@
     // Wrap native localStorage/sessionStorage with a fixed key prefix. All
     // reads/writes/iteration are scoped to the target origin namespace.
     if (!native) return null;
-    return Object.freeze({
+    const facade = {
       get length() {
         let n = 0;
         for (let i = 0; i < native.length; i++) {
@@ -2631,7 +2817,20 @@
         }
         for (const k of toDelete) native.removeItem(k);
       },
-    });
+    };
+    // Root the facade at Storage.prototype BEFORE freezing: a frozen object is
+    // non-extensible, so a later setPrototypeOf throws (tried 2026-08-03 at the
+    // call sites — silently no-op). Safe because the facade owns all six
+    // Storage members, so the native implementations stay shadowed and never
+    // receive an unbranded `this`. Without this,
+    // `localStorage instanceof Storage` is false and
+    // `Object.prototype.toString.call(localStorage)` is "[object Object]"
+    // instead of "[object Storage]" — a fingerprint, and a break for code that
+    // type-checks a Storage argument.
+    try {
+      if (typeof Storage === 'function' && Storage.prototype) Object.setPrototypeOf(facade, Storage.prototype);
+    } catch {}
+    return Object.freeze(facade);
   }
   function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
     for (const rec of Array.from(storageWindows)) {
@@ -3567,7 +3766,22 @@
   }
 
   function installWorkerHooks() {
-    if (Native.Worker) define(root, 'Worker', function(url, opts) { try { zpTrace('Worker', String(url).slice(0,120)); } catch {} return new Native.Worker(workerBootstrapURL(url), opts); });
+    if (Native.Worker) {
+      // The wrapper returns a REAL Worker, so its own `.prototype` was never on
+      // the returned object's chain: `Worker.prototype` showed just
+      // `["constructor"]` (5 names natively) and — worse — `new Worker(u)
+      // instanceof Worker` was FALSE, since instanceof walks the wrapper's
+      // prototype. Point the wrapper at the native prototype to fix both.
+      const ZPWorker = function (url, opts) {
+        try { zpTrace('Worker', String(url).slice(0, 120)); } catch {}
+        return new Native.Worker(workerBootstrapURL(url), opts);
+      };
+      try { ZPWorker.prototype = Native.Worker.prototype; } catch {}
+      // Only the constructor name — the prototype is the native one, which
+      // already carries the correct Symbol.toStringTag.
+      brandLikeNative(ZPWorker, null, 'Worker');
+      define(root, 'Worker', ZPWorker);
+    }
     if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { try { zpTrace('SharedWorker', String(url).slice(0,120)); } catch {} return new Native.SharedWorker(workerBootstrapURL(url), opts); });
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.reject(normalizedError('NotSupportedError')); });
     if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/zp/assets/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' }); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });

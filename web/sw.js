@@ -730,15 +730,29 @@ async function runtimeAPI(req, url, clientId) {
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
     const tab = explicitTab || (scriptCtx && tabs.get(scriptCtx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
-    // DIAG: NAVER ships an anti-bot WASM tracker (508e018/58b3e8e539...js)
-    // from two CDNs — wtm.pstatic.net and ncpt.naver.com — both of which
-    // spin inside their WASM `$_start` when the proxy membrane is detected.
-    // Debugger pause confirms the page wedges on this exact frame. Return
-    // a noop body so the script tag resolves without executing the tracker.
-    // ntm.pstatic.net (ntm_<hex>.js) was investigated as a candidate: 121s
-    // load time looked similar, but blocking it actually breaks more ads
-    // than it fixes (premium-area, da_public_*, veta_* lose their inventory
-    // because GFP SDK uses ntm as a bid-token source). Leave ntm enabled.
+    // NAVER anti-bot WASM tracker (WTM). Served from wtm.pstatic.net and
+    // ncpt.naver.com; its WASM `$_start` busy-loops when it detects the proxy
+    // membrane, wedging the renderer. We return a noop body so the script tag
+    // resolves without executing it.
+    //
+    // 2026-07-31 — THIS IS THE REASON THE NAVER CAPTCHA CAN NEVER PASS, and
+    // the cost is now measured, not assumed:
+    //   * stub ON  → page loads; wtm bundle arrives as a 40-byte
+    //     `/* ZP_TRACKER_BLOCKED … */`, so `window.nhomz` is never defined,
+    //     ncaptcha gives up after 5 s (`err-112 nCaptcha not initialized
+    //     after timeout`) and every submit carries
+    //     `wtoken=error1|ReferenceError|wtmncapt is not defined` → the answer
+    //     is irrelevant, the server rejects it.
+    //   * stub OFF → the real 389 KB `fce46da/*.js` + its 408 KB `.wasm` run
+    //     and the renderer goes unresponsive (exec-js, console-dump and
+    //     network-log all time out; `pause` reports renderer hung).
+    // Removing the stub was tried on 2026-07-31 and reverted for exactly that
+    // reason. Lifting it requires fixing whatever membrane trace the WASM
+    // detects — not deleting this block.
+    //
+    // ntm.pstatic.net (ntm_<hex>.js) is deliberately NOT blocked: it looked
+    // like the same 121 s symptom, but stubbing it removes more ad inventory
+    // than it fixes (GFP SDK uses ntm as a bid-token source).
     try {
       const tu = new URL(target);
       if (tu.host === 'wtm.pstatic.net' || tu.host === 'ncpt.naver.com') {

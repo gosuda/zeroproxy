@@ -638,6 +638,27 @@ fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Percent-encoding set for the `url=` / `via=` query values.
+///
+/// `NON_ALPHANUMERIC` also escapes the RFC 3986 *unreserved* bytes `-._~`.
+/// That is legal but self-defeating: an SDK that locates its own `<script>`
+/// tag with a CSS attribute selector (`script[src*="ncaptcha-api.js"]`) is
+/// matched by the engine against the RAW attribute, and CSS selectors sit
+/// BELOW the membrane — our `getAttribute`/`.src` masking cannot reach them.
+/// With `.`/`-` escaped the attribute reads `ncaptcha%2Dapi%2Ejs`, the
+/// selector never matches, and the SDK silently never boots. Observed on
+/// NAVER's WTM captcha: `ncaptcha-onload` was never invoked, so `wtmncapt`
+/// stayed undefined and every submit carried
+/// `wtoken=error1|ReferenceError|wtmncapt is not defined`.
+///
+/// Leaving unreserved bytes raw is parse-neutral — none of `-._~` can
+/// terminate a query value or introduce a parameter, so no escape hatch opens.
+const URL_PARAM_ENCODE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 /// Convert a subresource URL to the SW-routable `/zp/api/fetch?url=<encoded>`
 /// form. Relative URLs are first resolved against `target_url` so the browser
 /// doesn't end up fetching `/_next/image?...` from the proxy origin (which is
@@ -650,7 +671,7 @@ fn proxied_subresource_url(
     control_prefix: &str,
     target_url: &str,
 ) -> Option<String> {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::utf8_percent_encode;
     let s = raw.trim();
     if s.is_empty() || s.starts_with('#') {
         return None;
@@ -690,7 +711,7 @@ fn proxied_subresource_url(
     // collecting into an intermediate String via `.to_string()`. Saves one
     // allocation per subresource URL — the dominant hot path on
     // resource-heavy pages.
-    for chunk in utf8_percent_encode(&absolute, NON_ALPHANUMERIC) {
+    for chunk in utf8_percent_encode(&absolute, URL_PARAM_ENCODE) {
         out.push_str(chunk);
     }
     Some(out)
@@ -741,7 +762,7 @@ fn proxied_navigation_url(
     proxy_origin: &str,
     control_prefix: &str,
 ) -> Option<String> {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::utf8_percent_encode;
     if proxy_origin.is_empty() {
         return None;
     }
@@ -753,7 +774,7 @@ fn proxied_navigation_url(
         out.push('/');
     }
     out.push_str("?via=");
-    for chunk in utf8_percent_encode(absolute, NON_ALPHANUMERIC) {
+    for chunk in utf8_percent_encode(absolute, URL_PARAM_ENCODE) {
         out.push_str(chunk);
     }
     Some(out)
@@ -1247,7 +1268,7 @@ mod tests {
         let r = transform(html, &opts).unwrap();
         eprintln!("NAVER reproducer output:\n{}", r.html);
         assert!(
-            r.html.contains("?via=https%3A%2F%2Fwhale%2Enaver%2Ecom"),
+            r.html.contains("?via=https%3A%2F%2Fwhale.naver.com"),
             "whale.naver.com anchor must rewrite: {}",
             r.html
         );
@@ -1349,7 +1370,7 @@ mod tests {
         // (we expect the absolute URL to be percent-encoded into the proxy fetch query).
         assert!(
             r.html
-                .contains("shopsquare%2Enaver%2Ecom%2F%5Fnext%2Fimage"),
+                .contains("shopsquare.naver.com%2F_next%2Fimage"),
             "host-relative img src must be resolved against target URL: {}",
             r.html
         );
@@ -1406,6 +1427,26 @@ mod tests {
     }
 
     #[test]
+    fn unreserved_bytes_stay_raw_so_css_attribute_selectors_still_match() {
+        // An SDK that finds its own tag via `script[src*="ncaptcha-api.js"]`
+        // is matched by the engine against the RAW attribute — CSS selectors
+        // sit below the membrane, so `.`/`-`/`_`/`~` must survive encoding or
+        // self-discovery silently fails (NAVER WTM captcha: `ncaptcha-onload`
+        // never fired → `wtmncapt is not defined` in every submitted token).
+        let html = "<script src=\"https://ncpt.naver.com/static/ncaptcha-api.js?k=1\"></script>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(r.html.contains("ncaptcha-api.js?k=1") || r.html.contains("ncaptcha-api.js%3Fk"));
+        assert!(
+            r.html.contains("static%2Fncaptcha-api.js"),
+            "unreserved bytes must stay raw inside url=: {}",
+            r.html
+        );
+        // …but reserved delimiters stay escaped — no new escape hatch.
+        assert!(r.html.contains("url=https%3A%2F%2Fncpt.naver.com"), "got: {}", r.html);
+        assert!(r.html.contains("%3Fk%3D1"), "query delimiters must stay encoded: {}", r.html);
+    }
+
+    #[test]
     fn relative_subresource_resolved_against_target() {
         // Earlier this test claimed the SW classifier would pick relative URLs
         // up via VIRTUAL_SUBRESOURCE — but classify() only routes paths under
@@ -1417,13 +1458,13 @@ mod tests {
         let r = transform(html, &opts()).unwrap();
         // Host-relative against https://example.com/ → https://example.com/static/a.css
         assert!(
-            r.html.contains("example%2Ecom%2Fstatic%2Fa%2Ecss"),
+            r.html.contains("example.com%2Fstatic%2Fa.css"),
             "host-relative link must resolve against target: {}",
             r.html
         );
         // Path-relative against https://example.com/ → https://example.com/./b.js
         assert!(
-            r.html.contains("example%2Ecom%2F%2E%2Fb%2Ejs"),
+            r.html.contains("example.com%2F.%2Fb.js"),
             "path-relative script must resolve against target: {}",
             r.html
         );
