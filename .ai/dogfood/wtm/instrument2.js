@@ -1,0 +1,256 @@
+// v2: 모든 루프 형태(`for(A;B;C)`, `while(X)`, `do..while(X)`)에 카운터를 건다.
+// v1(`for(;;)` 19개)은 최대 3회만 돌았으므로 폭주 루프는 다른 형태에 있거나 없다.
+//
+// 텍스트 변환이지만 문자열/정규식 리터럴을 건너뛰는 스캐너로 괄호를 맞추고,
+// 최종적으로 `node --check` 로 문법을 검증한다.
+const fs = require('fs');
+const src = fs.readFileSync(__dirname + '/wtm-raw.js', 'utf8');
+
+const ID = /[A-Za-z0-9_$]/;
+
+// `/` 가 나눗셈인지 정규식 시작인지 판별하기 위한 직전 유의미 문자.
+function regexAllowedAfter(prev) {
+  if (!prev) return true;
+  if (ID.test(prev)) return false;
+  return !')]}'.includes(prev);
+}
+
+// pos = '(' 의 인덱스. 짝이 맞는 ')' 인덱스를 반환.
+function matchParen(s, pos) {
+  let depth = 0, prev = '';
+  for (let i = pos; i < s.length; i++) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') {
+      i = skipString(s, i);
+      prev = c;
+      continue;
+    }
+    if (c === '/' && regexAllowedAfter(prev)) {
+      const end = skipRegex(s, i);
+      if (end > i) { i = end; prev = '/'; continue; }
+    }
+    if (c === '(') depth++;
+    else if (c === ')') { depth--; if (depth === 0) return i; }
+    if (!/\s/.test(c)) prev = c;
+  }
+  return -1;
+}
+
+function skipString(s, i) {
+  const q = s[i];
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') { j++; continue; }
+    if (s[j] === q) return j;
+  }
+  return s.length;
+}
+
+function skipRegex(s, i) {
+  let inClass = false;
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j];
+    if (c === '\\') { j++; continue; }
+    if (c === '\n') return i; // 정규식이 아니었다
+    if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) {
+      let k = j + 1;
+      while (k < s.length && ID.test(s[k])) k++;
+      return k - 1;
+    }
+  }
+  return i;
+}
+
+// for 헤더의 top-level `;` 두 개를 찾는다.
+function forSemis(s, open, close) {
+  const out = [];
+  let depth = 0, prev = '';
+  for (let i = open; i < close; i++) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') { i = skipString(s, i); prev = c; continue; }
+    if (c === '/' && regexAllowedAfter(prev)) {
+      const end = skipRegex(s, i);
+      if (end > i) { i = end; prev = '/'; continue; }
+    }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ';' && depth === 1) out.push(i);
+    if (!/\s/.test(c)) prev = c;
+  }
+  return out;
+}
+
+const edits = [];
+let id = 0;
+const kinds = [];
+
+for (let i = 0; i < src.length; i++) {
+  const c = src[i];
+  if (c === '"' || c === "'" || c === '`') { i = skipString(src, i); continue; }
+  if (!ID.test(c)) continue;
+  let j = i;
+  while (j < src.length && ID.test(src[j])) j++;
+  const word = src.slice(i, j);
+  const before = i > 0 ? src[i - 1] : '';
+  i = j - 1;
+  if (word !== 'for' && word !== 'while') continue;
+  if (ID.test(before) || before === '.') continue;
+  let k = j;
+  while (k < src.length && /\s/.test(src[k])) k++;
+  if (src[k] !== '(') continue;
+  const close = matchParen(src, k);
+  if (close < 0) continue;
+
+  if (word === 'while') {
+    // while(X) → while(__ZPW(id)&&(X))
+    edits.push({ at: k + 1, text: `__ZPW(${id})&&(` });
+    edits.push({ at: close, text: ')' });
+    kinds.push('while');
+    id++;
+  } else {
+    const semis = forSemis(src, k, close);
+    if (semis.length !== 2) continue; // for-of / for-in 은 건너뛴다
+    // for(A;B;C) → for(A;__ZPW(id)&&(B||1===1&&false||true),__ZPW2:  단순화
+    // B 가 비어 있으면(=for(;;)) 그냥 __ZPW(id) 로, 아니면 __ZPW(id)&&(B).
+    const bodyStart = semis[0] + 1, bodyEnd = semis[1];
+    const cond = src.slice(bodyStart, bodyEnd).trim();
+    if (cond === '') {
+      edits.push({ at: bodyStart, text: `__ZPW(${id})` });
+    } else {
+      edits.push({ at: bodyStart, text: `__ZPW(${id})&&(` });
+      edits.push({ at: bodyEnd, text: ')' });
+    }
+    kinds.push('for');
+    id++;
+  }
+}
+
+edits.sort((a, b) => b.at - a.at);
+let out = src;
+for (const e of edits) out = out.slice(0, e.at) + e.text + out.slice(e.at);
+
+const LIMIT = Number(process.env.ZP_LOOP_LIMIT || 2e6);
+const prelude = `/*ZP_INSTRUMENTED_V2*/
+var __ZPN=${id},__ZPC=new Array(__ZPN).fill(0),__ZPS=new Array(__ZPN).fill(null),__ZPLIM=${LIMIT},__ZPT0=Date.now(),__ZPLAST=-1;
+function __ZPSINK(m){ try{ var u='http://127.0.0.1:18099/m?'+encodeURIComponent(m); if(typeof fetch==='function') fetch(u,{mode:'no-cors',keepalive:true}).catch(function(){}); else new Image().src=u; }catch(e){} }
+function __ZPFLUSH(tag){
+  __ZPSINK('F|'+(tag||'')+'|t='+(Date.now()-__ZPT0)+'|last='+__ZPLAST);
+}
+function __ZPW(i){
+  __ZPLAST=i;
+  var c=++__ZPC[i];
+  if(c===1){ __ZPSINK('E|'+i+'|t='+(Date.now()-__ZPT0)); }
+  if(c%50000===0){ __ZPFLUSH('tick'+i); }
+  if(c>__ZPLIM){ __ZPC[i]=0; __ZPFLUSH('CAP'+i); throw new Error('ZP_LOOP_CAP#'+i); }
+  return true;
+}
+setInterval(function(){ __ZPFLUSH('hb'); },250);
+// v3: 루프가 아니라 **동기 블로킹**이 의심된다(하트비트조차 안 뜀).
+// 메인 스레드를 멈출 수 있는 API 를 호출 직전/직후로 감싸 마지막 흔적을 남긴다.
+var __ZPMARKS=[];
+function __ZPM(m){ __ZPMARKS.push(m); if(__ZPMARKS.length>80) __ZPMARKS.shift();
+  __ZPSINK('M|'+(Date.now()-__ZPT0)+'|'+m); }
+(function(){
+  var g=globalThis;
+  function wrap(obj,name,tag){
+    try{
+      var f=obj[name]; if(typeof f!=='function') return;
+      obj[name]=function(){
+        var d=''; try{ d=Array.prototype.slice.call(arguments,0,3).map(function(a){return String(a).slice(0,60)}).join('|'); }catch(e){}
+        __ZPM('>'+tag+'('+d+')');
+        try{ var r=f.apply(this,arguments); __ZPM('<'+tag); return r; }
+        catch(e){ __ZPM('!'+tag+':'+String(e&&e.message).slice(0,80)); throw e; }
+      };
+    }catch(e){}
+  }
+  ['alert','confirm','prompt','print'].forEach(function(n){ wrap(g,n,n); });
+  try{ wrap(g.XMLHttpRequest.prototype,'open','xhr.open'); wrap(g.XMLHttpRequest.prototype,'send','xhr.send'); }catch(e){}
+  try{ wrap(g.document,'write','doc.write'); wrap(g.document,'writeln','doc.writeln'); }catch(e){}
+  try{ ['compile','compileStreaming','instantiate','instantiateStreaming','validate'].forEach(function(n){ wrap(g.WebAssembly,n,'wasm.'+n); }); }catch(e){}
+  try{ wrap(g.Atomics,'wait','atomics.wait'); }catch(e){}
+  try{ wrap(g,'importScripts','importScripts'); }catch(e){}
+  try{ wrap(g.navigator,'sendBeacon','beacon'); }catch(e){}
+  try{ wrap(g.Worker&&g.Worker.prototype,'postMessage','worker.post'); }catch(e){}
+  try{ wrap(g.crypto&&g.crypto.subtle,'digest','subtle.digest'); }catch(e){}
+
+  // v5: 렌더러가 풀코어로 스핀하는데 231개 JS 루프 카운터가 전혀 안 움직인다.
+  // JS 루프 밖에서 CPU 를 태우는 대표적 경로가 **정규식 파국적 백트래킹**이다
+  // (V8 regex 엔진 = 네이티브 코드라 JS 계측에 안 잡힌다).
+  // 프록시에서만 길이/모양이 달라지는 입력(프록시 URL, toString 결과 등)을
+  // 물면 직접 로드에서는 멀쩡하고 프록시에서만 터진다 — 증상과 정확히 맞는다.
+  try{
+    var reExec=RegExp.prototype.exec, reTest=RegExp.prototype.test, __ren=0;
+    function reMark(self,input){
+      var id=++__ren;
+      __ZPM('>re#'+id+'|'+String(self.source).slice(0,70)+'|len='+String(input).length);
+      return id;
+    }
+    RegExp.prototype.exec=function(s){ var id=reMark(this,s); var r=reExec.call(this,s); __ZPM('<re#'+id); return r; };
+    RegExp.prototype.test=function(s){ var id=reMark(this,s); var r=reTest.call(this,s); __ZPM('<re#'+id); return r; };
+    ['match','matchAll','replace','replaceAll','search','split'].forEach(function(n){
+      var f=String.prototype[n]; if(typeof f!=='function') return;
+      String.prototype[n]=function(){
+        var p=arguments[0];
+        var id=++__ren;
+        __ZPM('>str.'+n+'#'+id+'|'+String(p&&p.source||p).slice(0,70)+'|len='+this.length);
+        var r=f.apply(this,arguments);
+        __ZPM('<str.'+n+'#'+id);
+        return r;
+      };
+    });
+  }catch(e){}
+
+  // v4: JS 루프도, 위 블로킹 API 도 아니었다. 남은 동기 블로킹 지점은
+  // WASM export 호출이다(2026-06-01 debugger 스냅샷의 \`$_start\`).
+  // \`exports\` 는 WebAssembly.Instance.prototype 의 접근자라 인스턴스에
+  // own 데이터 프로퍼티를 심으면 가려진다.
+  function wrapInstance(inst){
+    try{
+      var ex=inst&&inst.exports; if(!ex) return inst;
+      var proxied={};
+      Object.keys(ex).forEach(function(k){
+        var v=ex[k];
+        if(typeof v==='function'){
+          proxied[k]=function(){
+            __ZPM('>wasm:'+k);
+            try{ var r=v.apply(this,arguments); __ZPM('<wasm:'+k); return r; }
+            catch(e){ __ZPM('!wasm:'+k+':'+String(e&&e.message).slice(0,60)); throw e; }
+          };
+        } else proxied[k]=v;
+      });
+      Object.defineProperty(inst,'exports',{value:proxied,configurable:true});
+      __ZPM('wasm:wrapped:'+Object.keys(ex).length);
+    }catch(e){ __ZPM('wasm:wrapfail:'+String(e&&e.message).slice(0,60)); }
+    return inst;
+  }
+  function hookResult(r){
+    try{
+      if(!r) return r;
+      if(r.instance) wrapInstance(r.instance);
+      else if(r.exports) wrapInstance(r);
+    }catch(e){}
+    return r;
+  }
+  try{
+    ['instantiate','instantiateStreaming'].forEach(function(n){
+      var f=g.WebAssembly[n];
+      g.WebAssembly[n]=function(){
+        var p=f.apply(this,arguments);
+        return (p&&typeof p.then==='function')?p.then(hookResult):hookResult(p);
+      };
+    });
+    var NI=g.WebAssembly.Instance;
+    g.WebAssembly.Instance=function(){
+      var inst=Reflect.construct(NI,arguments,g.WebAssembly.Instance);
+      return wrapInstance(inst);
+    };
+    g.WebAssembly.Instance.prototype=NI.prototype;
+  }catch(e){}
+})();
+try{localStorage.removeItem('__zp_wtm2');}catch(e){}
+__ZPFLUSH('boot');
+`;
+
+fs.writeFileSync(__dirname + '/wtm-instrumented.js', prelude + out);
+console.log('loops=' + id + ' for=' + kinds.filter(k => k === 'for').length + ' while=' + kinds.filter(k => k === 'while').length + ' bytes=' + (prelude.length + out.length));
