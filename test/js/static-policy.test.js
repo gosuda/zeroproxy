@@ -56,7 +56,10 @@ test('runtime installs required escape-vector hooks', () => {
     'ZP_RESOLVE_ENTRY',
     'ZP_SCROLL_UPDATE',
     'runtimeToken',
-    "define(w.document, 'createElement'",
+    // Lives on Document.prototype now, not the document instance: an instance
+    // own-property is a fingerprint AND left a second document (DOMParser /
+    // createHTMLDocument) with the uninstrumented native.
+    "defineMethodOnProto(w.document, docProtoForCreate, 'createElement'",
     "define(w, 'open'",
     "'appendChild'",
     "'insertBefore'",
@@ -941,8 +944,11 @@ test('D7: per-target-origin storage isolation surfaces', () => {
   assert.match(rt, /BroadcastChannel.+bcPrefix/s, 'BroadcastChannel must be prefixed');
   assert.match(rt, /SharedWorker.+sharedWorkerPrefix/s, 'SharedWorker must be prefixed');
   // document.origin / document.domain / window.origin virtualised.
-  assert.match(rt, /Document\.prototype, 'origin'/, 'Document.prototype.origin getter missing');
-  assert.match(rt, /document, 'domain'/, 'document.domain getter/setter missing');
+  // origin/domain go on Document.prototype (where Web IDL puts them) via
+  // defineOnProto, which only shadows the instance if the prototype define
+  // does not take effect. A native document's only own name is `location`.
+  assert.match(rt, /defineOnProto\(w\.document, docProto, 'origin'/, 'document.origin must be virtualised on Document.prototype');
+  assert.match(rt, /defineOnProto\(\s*w\.document,\s*docProto,\s*'domain'/, 'document.domain must be virtualised on Document.prototype');
   assert.match(rt, /w, 'origin'/, 'window.origin getter missing');
 });
 

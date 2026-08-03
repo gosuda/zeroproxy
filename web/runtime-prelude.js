@@ -2771,27 +2771,29 @@
     }
     // D7: document.origin getter returns the virtual target origin so
     // target code identifying its own origin sees its world, not the proxy.
-    if (w.Document && w.Document.prototype) {
-      try { Object.defineProperty(w.Document.prototype, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
-    }
+    // `origin` was defined on Document.prototype AND on the document instance —
+    // the same redundant double-define we removed from navigator/history. Only
+    // `location` is genuinely an own property of a native document
+    // ([LegacyUnforgeable]); origin/domain/createElement/createElementNS all
+    // live on Document.prototype, so instance copies are pure fingerprint.
     if (w.document) {
-      try { Object.defineProperty(w.document, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+      const docProto = w.Document && w.Document.prototype;
+      defineOnProto(w.document, docProto, 'origin', () => virtualURL.origin);
       // document.domain getter/setter — setter accepts only target eTLD+1.
       let virtualDomain = virtualURL.hostname.toLowerCase();
-      try {
-        Object.defineProperty(w.document, 'domain', {
-          get() { return virtualDomain; },
-          set(v) {
-            const d = String(v).replace(/^\./, '').toLowerCase();
-            const host = virtualURL.hostname.toLowerCase();
-            // Allow only setting to a suffix of target host (mirror native semantics).
-            if (host === d || host.endsWith('.' + d)) virtualDomain = d;
-            else throw normalizedError('SecurityError');
-          },
-          configurable: true,
-          enumerable: true,
-        });
-      } catch {}
+      defineOnProto(
+        w.document,
+        docProto,
+        'domain',
+        () => virtualDomain,
+        (v) => {
+          const d = String(v).replace(/^\./, '').toLowerCase();
+          const host = virtualURL.hostname.toLowerCase();
+          // Allow only setting to a suffix of target host (mirror native semantics).
+          if (host === d || host.endsWith('.' + d)) virtualDomain = d;
+          else throw normalizedError('SecurityError');
+        }
+      );
     }
     // window.origin / self.origin getters — point at virtual target origin.
     try { Object.defineProperty(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
@@ -4104,16 +4106,31 @@
     installFrameAccessors(w.HTMLIFrameElement && w.HTMLIFrameElement.prototype);
     installFrameAccessors(w.HTMLFrameElement && w.HTMLFrameElement.prototype);
 
-    define(w.document, 'createElement', function(name, opts) {
+    // Natively these live on Document.prototype, so defining them on the
+    // document INSTANCE was both a fingerprint (own names a real document does
+    // not have) and a coverage hole: a second document — from
+    // document.implementation.createHTMLDocument() or DOMParser — kept the
+    // untouched native and created script/iframe nodes with no instrumentation.
+    //
+    // Relocating needs `this`-correct dispatch. `nativeCreateElement` is BOUND
+    // to w.document, so calling it for another document would put the element in
+    // the wrong one; use the unbound prototype method with the real receiver
+    // instead. Captured before we overwrite it.
+    const docProtoForCreate = w.Document && w.Document.prototype;
+    const rawCreateElement = docProtoForCreate && docProtoForCreate.createElement;
+    const rawCreateElementNS = docProtoForCreate && docProtoForCreate.createElementNS;
+    defineMethodOnProto(w.document, docProtoForCreate, 'createElement', function createElement(name, opts) {
       const n = String(name);
       if (/^(i?frame|script|worker|object|embed)$/i.test(n)) { try { zpTrace('createElement', n); } catch {} }
-      const el = nativeCreateElement(n, opts);
+      const el = rawCreateElement ? rawCreateElement.call(this, n, opts) : nativeCreateElement(n, opts);
       if (/^i?frame$/i.test(n)) instrumentDescendantIframes(el);
       if (/^script$/i.test(n)) instrumentScriptElement(el);
       return el;
     });
-    if (nativeCreateElementNS) define(w.document, 'createElementNS', function(ns, name, opts) {
-      const el = nativeCreateElementNS(String(ns), String(name), opts);
+    if (nativeCreateElementNS) defineMethodOnProto(w.document, docProtoForCreate, 'createElementNS', function createElementNS(ns, name, opts) {
+      const el = rawCreateElementNS
+        ? rawCreateElementNS.call(this, String(ns), String(name), opts)
+        : nativeCreateElementNS(String(ns), String(name), opts);
       if (/^script$/i.test(String(name))) instrumentScriptElement(el);
       return el;
     });
