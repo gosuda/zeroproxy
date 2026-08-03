@@ -2756,6 +2756,56 @@
           });
         }
       }
+      // De-proxying a name only helps entries that HAVE a target behind them.
+      // Our own infrastructure — /zp/assets/zp-core.js, zp-page-bundle.js,
+      // runtime-prelude.js, /__zp/zp_page_rt.wasm — has none, so those four fell
+      // through `return s` and sat in the list under their real names. Measured
+      // on naver.com: 4 of 250 resource entries spelled out the membrane. That
+      // is not a statistical tell a fingerprinter has to reason about; it is our
+      // product name, readable in one call to getEntriesByType('resource').
+      //
+      // The right shape is absence, not renaming: a browser loading naver.com
+      // directly has no such entries. Rule — if a name STILL points at the proxy
+      // after de-proxying, it is infrastructure and gets dropped. That stays
+      // correct as new internal routes appear, because anything we can map to a
+      // target survives on its own.
+      const isInfraEntry = (e) => {
+        try {
+          const n = e && e.name;
+          return typeof n === 'string' && n.lastIndexOf(proxyOrigin, 0) === 0;
+        } catch { return false; }
+      };
+      const perfProtoForList = w.Performance && w.Performance.prototype;
+      if (perfProtoForList) {
+        for (const method of ['getEntries', 'getEntriesByType', 'getEntriesByName']) {
+          const native = perfProtoForList[method];
+          if (typeof native !== 'function') continue;
+          define(perfProtoForList, method, function (...args) {
+            const out = native.apply(this, args);
+            try { return Array.prototype.filter.call(out, e => !isInfraEntry(e)); } catch { return out; }
+          });
+        }
+      }
+      // PerformanceObserver is the push-based twin of the same list; without
+      // this it re-leaks every name the pull path now hides.
+      const NativePO = w.PerformanceObserver;
+      if (typeof NativePO === 'function') {
+        const ZPPerformanceObserver = function PerformanceObserver(cb) {
+          const wrapped = typeof cb !== 'function' ? cb : function (list, obs) {
+            const filtered = {
+              getEntries: () => Array.prototype.filter.call(list.getEntries(), e => !isInfraEntry(e)),
+              getEntriesByType: (t) => Array.prototype.filter.call(list.getEntriesByType(t), e => !isInfraEntry(e)),
+              getEntriesByName: (n, t) => Array.prototype.filter.call(list.getEntriesByName(n, t), e => !isInfraEntry(e)),
+            };
+            try { Object.setPrototypeOf(filtered, Object.getPrototypeOf(list)); } catch {}
+            return cb.call(this, filtered, obs);
+          };
+          return Reflect.construct(NativePO, [wrapped], new.target || ZPPerformanceObserver);
+        };
+        try { ZPPerformanceObserver.prototype = NativePO.prototype; } catch {}
+        try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get: () => NativePO.supportedEntryTypes, configurable: true }); } catch {}
+        define(w, 'PerformanceObserver', ZPPerformanceObserver);
+      }
     } catch {}
     // D7: Notification permission state must be per-target-origin. Wrap the
     // static permission getter; granting is still gated by the native browser
