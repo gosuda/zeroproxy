@@ -110,7 +110,7 @@ for (let i = 0; i < src.length; i++) {
     id++;
   } else {
     const semis = forSemis(src, k, close);
-    if (semis.length !== 2) continue; // for-of / for-in 은 건너뛴다
+    if (semis.length !== 2) continue; // for-of 1개뿐 — 변환 위험 대비 이득 없음
     // for(A;B;C) → for(A;__ZPW(id)&&(B||1===1&&false||true),__ZPW2:  단순화
     // B 가 비어 있으면(=for(;;)) 그냥 __ZPW(id) 로, 아니면 __ZPW(id)&&(B).
     const bodyStart = semis[0] + 1, bodyEnd = semis[1];
@@ -137,6 +137,7 @@ function __ZPSINK(m){ try{ var u='http://127.0.0.1:18099/m?'+encodeURIComponent(
 function __ZPFLUSH(tag){
   __ZPSINK('F|'+(tag||'')+'|t='+(Date.now()-__ZPT0)+'|last='+__ZPLAST);
 }
+function __ZPG(i,it){ return { [Symbol.iterator]: function(){ var inner = (it && it[Symbol.iterator]) ? it[Symbol.iterator]() : it; return { next: function(){ __ZPW(i); return inner.next(); }, return: function(v){ return inner.return ? inner.return(v) : {done:true,value:v}; } }; } }; }
 function __ZPW(i){
   __ZPLAST=i;
   var c=++__ZPC[i]; __ZPTICK();
@@ -151,7 +152,10 @@ var __zprafn=0;(function raf(){ try{ requestAnimationFrame(function(){ __ZPSINK(
 // 메인 스레드를 멈출 수 있는 API 를 호출 직전/직후로 감싸 마지막 흔적을 남긴다.
 var __ZPMARKS=[],__ZPOPS=0,__ZPTHEN=0;
 function __ZPTICK(){ if((++__ZPOPS)%20000===0) __ZPSINK('OPS|'+__ZPOPS+'|then='+__ZPTHEN+'|t='+(Date.now()-__ZPT0)+'|last='+__ZPLAST); }
-function __ZPM(m){ __ZPTICK(); if(/iframe|wasm|xhr|alert|atomics|doc.write|beacon/.test(m)) __ZPSINK('M|'+(Date.now()-__ZPT0)+'|'+m); }
+function __ZPM(m){ __ZPTICK();
+  // 정규식을 쓰면 안 된다: RegExp.prototype.test 가 계측 대상이라 무한 재귀한다.
+  var keep=['iframe','wasm','xhr','alert','atomics','write','beacon'];
+  for(var q=0;q<keep.length;q++){ if(m.indexOf(keep[q])>=0){ __ZPSINK('M|'+(Date.now()-__ZPT0)+'|'+m); return; } } }
 (function(){
   var g=globalThis;
   function wrap(obj,name,tag){
@@ -174,6 +178,49 @@ function __ZPM(m){ __ZPTICK(); if(/iframe|wasm|xhr|alert|atomics|doc.write|beaco
   try{ wrap(g.navigator,'sendBeacon','beacon'); }catch(e){}
   try{ wrap(g.Worker&&g.Worker.prototype,'postMessage','worker.post'); }catch(e){}
   try{ wrap(g.crypto&&g.crypto.subtle,'digest','subtle.digest'); }catch(e){}
+
+
+
+  // v8: JS/WASM 이 전부 반환했는데 네이티브가 스핀한다. JS 없이 CPU 를 태우는
+  // Blink 경로 중 anti-bot 이 반드시 쓰는 것: canvas 래스터화 / 텍스트 측정 /
+  // 폰트 로딩. 크기 인자를 같이 찍어 비정상 값(가상화된 screen/DPR 유래)을 본다.
+  try{
+    var cproto=g.HTMLCanvasElement && g.HTMLCanvasElement.prototype;
+    if(cproto){
+      ["toDataURL","toBlob","getContext"].forEach(function(n){
+        var f=cproto[n]; if(typeof f!=="function") return;
+        cproto[n]=function(){ __ZPSINK("CV>"+n+"|"+this.width+"x"+this.height+"|t="+(Date.now()-__ZPT0));
+          var r=f.apply(this,arguments); __ZPSINK("CV<"+n+"|t="+(Date.now()-__ZPT0)); return r; };
+      });
+    }
+    var ctxp=g.CanvasRenderingContext2D && g.CanvasRenderingContext2D.prototype;
+    if(ctxp){
+      ["getImageData","putImageData","measureText","fillText","strokeText","drawImage"].forEach(function(n){
+        var f=ctxp[n]; if(typeof f!=="function") return;
+        ctxp[n]=function(){ var a=arguments;
+          __ZPSINK("CV>"+n+"|"+(a[2]||0)+"x"+(a[3]||0)+"|t="+(Date.now()-__ZPT0));
+          var r=f.apply(this,a); __ZPSINK("CV<"+n+"|t="+(Date.now()-__ZPT0)); return r; };
+      });
+    }
+    if(g.document.fonts && g.document.fonts.load){
+      var fl=g.document.fonts.load;
+      g.document.fonts.load=function(){ __ZPSINK("FONT>"+String(arguments[0]).slice(0,50)+"|t="+(Date.now()-__ZPT0)); return fl.apply(this,arguments); };
+    }
+  }catch(e){}
+
+  // v7: 이 번들은 __table.get(ptr) 로 WASM 함수를 꺼내 DOM 이벤트 리스너로
+  // 등록한다 — exports 를 안 거치므로 위 래퍼가 못 본다. 유일하게 남은 구멍.
+  try{
+    var tget=g.WebAssembly.Table.prototype.get;
+    g.WebAssembly.Table.prototype.get=function(i){
+      var f=tget.call(this,i);
+      if(typeof f!=='function') return f;
+      var w=function(){ __ZPSINK('TBL>'+i+'|t='+(Date.now()-__ZPT0));
+        try{ var r=f.apply(this,arguments); __ZPSINK('TBL<'+i+'|t='+(Date.now()-__ZPT0)); return r; }
+        catch(e){ __ZPSINK('TBL!'+i+'|'+String(e&&e.message).slice(0,60)); throw e; } };
+      return w;
+    };
+  }catch(e){}
 
   // v6: minidump 3샘플의 스택 공통 프레임이 0개 = 한 루프가 아니라 계속 다른
   // 코드를 실행 중이다. 우리 계측이 닿지 않는 realm 이 있다면 iframe 뿐이다
@@ -276,4 +323,4 @@ __ZPFLUSH('boot');
 `;
 
 fs.writeFileSync(__dirname + '/wtm-instrumented.js', prelude + out);
-console.log('loops=' + id + ' for=' + kinds.filter(k => k === 'for').length + ' while=' + kinds.filter(k => k === 'while').length + ' bytes=' + (prelude.length + out.length));
+console.log('forof=' + kinds.filter(k=>k==='forof').length + ' loops=' + id + ' for=' + kinds.filter(k => k === 'for').length + ' while=' + kinds.filter(k => k === 'while').length + ' bytes=' + (prelude.length + out.length));
