@@ -139,18 +139,19 @@ function __ZPFLUSH(tag){
 }
 function __ZPW(i){
   __ZPLAST=i;
-  var c=++__ZPC[i];
+  var c=++__ZPC[i]; __ZPTICK();
   if(c===1){ __ZPSINK('E|'+i+'|t='+(Date.now()-__ZPT0)); }
   if(c%50000===0){ __ZPFLUSH('tick'+i); }
   if(c>__ZPLIM){ __ZPC[i]=0; __ZPFLUSH('CAP'+i); throw new Error('ZP_LOOP_CAP#'+i); }
   return true;
 }
-setInterval(function(){ __ZPFLUSH('hb'); },250);
+setInterval(function(){ __ZPFLUSH('hb'); },20);
+var __zprafn=0;(function raf(){ try{ requestAnimationFrame(function(){ __ZPSINK('RAF|'+(++__zprafn)+'|t='+(Date.now()-__ZPT0)); raf(); }); }catch(e){} })();
 // v3: 루프가 아니라 **동기 블로킹**이 의심된다(하트비트조차 안 뜀).
 // 메인 스레드를 멈출 수 있는 API 를 호출 직전/직후로 감싸 마지막 흔적을 남긴다.
-var __ZPMARKS=[];
-function __ZPM(m){ __ZPMARKS.push(m); if(__ZPMARKS.length>80) __ZPMARKS.shift();
-  __ZPSINK('M|'+(Date.now()-__ZPT0)+'|'+m); }
+var __ZPMARKS=[],__ZPOPS=0,__ZPTHEN=0;
+function __ZPTICK(){ if((++__ZPOPS)%20000===0) __ZPSINK('OPS|'+__ZPOPS+'|then='+__ZPTHEN+'|t='+(Date.now()-__ZPT0)+'|last='+__ZPLAST); }
+function __ZPM(m){ __ZPTICK(); if(/iframe|wasm|xhr|alert|atomics|doc.write|beacon/.test(m)) __ZPSINK('M|'+(Date.now()-__ZPT0)+'|'+m); }
 (function(){
   var g=globalThis;
   function wrap(obj,name,tag){
@@ -173,6 +174,28 @@ function __ZPM(m){ __ZPMARKS.push(m); if(__ZPMARKS.length>80) __ZPMARKS.shift();
   try{ wrap(g.navigator,'sendBeacon','beacon'); }catch(e){}
   try{ wrap(g.Worker&&g.Worker.prototype,'postMessage','worker.post'); }catch(e){}
   try{ wrap(g.crypto&&g.crypto.subtle,'digest','subtle.digest'); }catch(e){}
+
+  // v6: minidump 3샘플의 스택 공통 프레임이 0개 = 한 루프가 아니라 계속 다른
+  // 코드를 실행 중이다. 우리 계측이 닿지 않는 realm 이 있다면 iframe 뿐이다
+  // (직접 로드 체인: 3e66…js → .wasm → iframe.html).
+  try{
+    var ce=g.document.createElement;
+    g.document.createElement=function(n){
+      var el=ce.apply(this,arguments);
+      try{ if(/^i?frame$/i.test(String(n))) __ZPM('iframe:create'); }catch(e){}
+      return el;
+    };
+    var sa=g.Element.prototype.setAttribute;
+    g.Element.prototype.setAttribute=function(k,v){
+      try{ if(/^i?frame$/i.test(this.tagName)&&/^src$/i.test(String(k))) __ZPM('iframe:src='+String(v).slice(0,90)); }catch(e){}
+      return sa.apply(this,arguments);
+    };
+    var ac=g.Node.prototype.appendChild;
+    g.Node.prototype.appendChild=function(c){
+      try{ if(c&&/^i?frame$/i.test(c.tagName||'')) __ZPM('iframe:append='+String(c.src||'').slice(0,90)); }catch(e){}
+      return ac.apply(this,arguments);
+    };
+  }catch(e){}
 
   // v5: 렌더러가 풀코어로 스핀하는데 231개 JS 루프 카운터가 전혀 안 움직인다.
   // JS 루프 밖에서 CPU 를 태우는 대표적 경로가 **정규식 파국적 백트래킹**이다
