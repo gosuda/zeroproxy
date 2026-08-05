@@ -182,6 +182,25 @@ function __ZPM(m){ __ZPTICK();
 
 
 
+
+  // v11: WASM 경계도 아니었다. 리라이트된 코드의 **모든** 프로퍼티 접근이
+  // 지나는 멤브레인 헬퍼(__zp_get/__zp_set/__zp_call/...)의 호출 깊이를 센다.
+  try{
+    var __zpHD=0, __zpHMax=0, __zpHRep=false;
+    ["__zp_get","__zp_set","__zp_call","__zp_assign","__zp_update","__zp_construct","__zp_has"].forEach(function(n){
+      var f=g[n]; if(typeof f!=="function") return;
+      g[n]=function(){
+        var d=++__zpHD;
+        if(d>__zpHMax){ __zpHMax=d;
+          if(d===50||d===200||d===600) __ZPSINK("HD|"+d+"|"+n+"|t="+(Date.now()-__ZPT0));
+          if(d>900 && !__zpHRep){ __zpHRep=true;
+            var st=""; try{ st=String(new Error("deep").stack).slice(0,900); }catch(e){}
+            __ZPSINK("HDEEP|"+d+"|"+n+"|"+st); } }
+        try{ return f.apply(this,arguments); } finally { __zpHD--; }
+      };
+    });
+  }catch(e){}
+
   // v9: 스핀 프로필이 StackFrameIterator/CaptureSimpleStackTrace/AddDataProperty/
   // young GC = **Error 폭풍**이다. 누가 만드는지 잡는다.
   // 주의: 엔진이 던지는 TypeError(Proxy 불변식 위반 등)는 전역 생성자를 안 거치므로
@@ -344,10 +363,37 @@ function __ZPM(m){ __ZPTICK();
     }catch(e){}
     return r;
   }
+    // v10: 재귀 지점 특정. 이 번들은 asdom 바인딩이라 WASM import 로
+    // location 의 href/protocol/host/... 를 직접 호출한다. JS<->WASM 경계의
+    // 호출 깊이를 세서 폭주 재귀가 이 경계를 지나는지 본다.
+    var __zpImpDepth=0, __zpImpMax=0, __zpImpRep=false;
+    function wrapImports(io){
+      try{
+        if(!io||typeof io!=="object") return io;
+        Object.keys(io).forEach(function(ns){
+          var m=io[ns]; if(!m||typeof m!=="object") return;
+          Object.keys(m).forEach(function(k){
+            var f=m[k]; if(typeof f!=="function") return;
+            m[k]=function(){
+              var d=++__zpImpDepth;
+              if(d>__zpImpMax){ __zpImpMax=d;
+                if(d===50||d===200||d===600){ __ZPSINK("IMPD|"+d+"|"+ns+"."+k+"|t="+(Date.now()-__ZPT0)); }
+                if(d>800 && !__zpImpRep){ __zpImpRep=true;
+                  var st=""; try{ st=String(new Error("deep").stack).slice(0,700); }catch(e){}
+                  __ZPSINK("IMPDEEP|"+d+"|"+ns+"."+k+"|"+st); }
+              }
+              try{ return f.apply(this,arguments); } finally { __zpImpDepth--; }
+            };
+          });
+        });
+      }catch(e){}
+      return io;
+    }
   try{
     ['instantiate','instantiateStreaming'].forEach(function(n){
       var f=g.WebAssembly[n];
       g.WebAssembly[n]=function(){
+        try{ if(arguments[1]) wrapImports(arguments[1]); }catch(e){}
         var p=f.apply(this,arguments);
         return (p&&typeof p.then==='function')?p.then(hookResult):hookResult(p);
       };
