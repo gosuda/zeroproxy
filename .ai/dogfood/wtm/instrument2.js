@@ -147,7 +147,15 @@ function __ZPW(i){
   if(c>__ZPLIM){ __ZPC[i]=0; __ZPFLUSH('CAP'+i); throw new Error('ZP_LOOP_CAP#'+i); }
   return true;
 }
-setInterval(function(){ __ZPFLUSH('hb'); },20);
+function __ZPDOM(){
+  try{
+    var all=document.getElementsByTagName('*'), n=all.length, dmax=0;
+    for(var i=0;i<n;i+=Math.max(1,Math.floor(n/300))){ var e=all[i],d=0; while(e&&d<500){ e=e.parentNode; d++; } if(d>dmax) dmax=d; }
+    return 'nodes='+n+'|depth='+dmax+'|style='+document.getElementsByTagName('style').length+'|link='+document.getElementsByTagName('link').length+'|ifr='+document.getElementsByTagName('iframe').length+'|svg='+document.getElementsByTagName('svg').length;
+  }catch(e){ return 'err'; }
+}
+var __hbN=0;
+setInterval(function(){ __ZPFLUSH('hb'); if((++__hbN)%5===0) __ZPSINK('DOM|t='+(Date.now()-__ZPT0)+'|'+__ZPDOM()); },20);
 var __zprafn=0;(function raf(){ try{ requestAnimationFrame(function(){ __ZPSINK('RAF|'+(++__zprafn)+'|t='+(Date.now()-__ZPT0)); raf(); }); }catch(e){} })();
 // v3: 루프가 아니라 **동기 블로킹**이 의심된다(하트비트조차 안 뜀).
 // 메인 스레드를 멈출 수 있는 API 를 호출 직전/직후로 감싸 마지막 흔적을 남긴다.
