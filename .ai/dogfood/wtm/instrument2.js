@@ -133,7 +133,8 @@ for (const e of edits) out = out.slice(0, e.at) + e.text + out.slice(e.at);
 const LIMIT = Number(process.env.ZP_LOOP_LIMIT || 2e6);
 const prelude = `/*ZP_INSTRUMENTED_V2*/
 var __ZPN=${id},__ZPC=new Array(__ZPN).fill(0),__ZPS=new Array(__ZPN).fill(null),__ZPLIM=${LIMIT},__ZPT0=Date.now(),__ZPLAST=-1;
-function __ZPSINK(m){ try{ var u='http://127.0.0.1:18099/m?'+encodeURIComponent(m); if(typeof fetch==='function') fetch(u,{mode:'no-cors',keepalive:true}).catch(function(){}); else new Image().src=u; }catch(e){} }
+var __ZPnThen=Promise.prototype.then;
+function __ZPSINK(m){ try{ var u='http://127.0.0.1:18099/m?'+encodeURIComponent(m); if(typeof fetch==='function') __ZPnThen.call(fetch(u,{mode:'no-cors',keepalive:true}),function(){},function(){}); else new Image().src=u; }catch(e){} }
 function __ZPFLUSH(tag){
   __ZPSINK('F|'+(tag||'')+'|t='+(Date.now()-__ZPT0)+'|last='+__ZPLAST);
 }
@@ -182,6 +183,27 @@ function __ZPM(m){ __ZPTICK();
 
 
 
+
+
+  // v12: 마지막 미측정 축 = 마이크로태스크 체인. 루프 카운터에도 재귀 깊이에도
+  // 안 잡히면서 이벤트 루프를 굶긴다. 이전 시도는 sink 의 .catch 가 이 래퍼를
+  // 다시 타서 무한재귀했다 — 이번엔 __ZPnThen(네이티브)만 쓴다.
+  try{
+    var __zpThenN=0, __zpQN=0;
+    Promise.prototype.then=function(){
+      var c=++__zpThenN;
+      if(c===1||c%20000===0) __ZPSINK("THEN|n="+c+"|q="+__zpQN+"|t="+(Date.now()-__ZPT0));
+      return __ZPnThen.apply(this,arguments);
+    };
+    if(typeof g.queueMicrotask==="function"){
+      var qm=g.queueMicrotask;
+      g.queueMicrotask=function(f){
+        var c=++__zpQN;
+        if(c===1||c%20000===0) __ZPSINK("QMT|n="+c+"|t="+(Date.now()-__ZPT0));
+        return qm.apply(this,arguments);
+      };
+    }
+  }catch(e){}
 
   // v11: WASM 경계도 아니었다. 리라이트된 코드의 **모든** 프로퍼티 접근이
   // 지나는 멤브레인 헬퍼(__zp_get/__zp_set/__zp_call/...)의 호출 깊이를 센다.
