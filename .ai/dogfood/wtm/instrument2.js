@@ -181,6 +181,48 @@ function __ZPM(m){ __ZPTICK();
 
 
 
+
+  // v9: 스핀 프로필이 StackFrameIterator/CaptureSimpleStackTrace/AddDataProperty/
+  // young GC = **Error 폭풍**이다. 누가 만드는지 잡는다.
+  // 주의: 엔진이 던지는 TypeError(Proxy 불변식 위반 등)는 전역 생성자를 안 거치므로
+  // Error.prepareStackTrace 로 .stack 접근도 따로 센다(모든 에러에 대해 호출됨).
+  try{
+    var __zpErrN=0, __zpErrSample=null, __zpErrBusy=false;
+    function __zpErrTick(){
+      var c=++__zpErrN;
+      if(c===1||c%20000===0){
+        if(__zpErrBusy) return; __zpErrBusy=true;
+        var st=""; try{ st=String(__zpNativeErr.prototype.stack||""); }catch(e){}
+        try{ st=__zpErrSample||""; }catch(e){}
+        __ZPSINK("ERR|n="+c+"|t="+(Date.now()-__ZPT0)+"|"+String(st).slice(0,600));
+        __zpErrBusy=false;
+      }
+    }
+    var __zpNativeErr=g.Error;
+    ["Error","TypeError","RangeError","ReferenceError","SyntaxError","EvalError","URIError"].forEach(function(n){
+      var N=g[n]; if(typeof N!=="function") return;
+      function W(){
+        var e=Reflect.construct(N, arguments, new.target||W);
+        try{ if(__zpErrN===0||(__zpErrN+1)%20000===0) __zpErrSample=n+": "+String(arguments[0]).slice(0,80)+" @ "+String(e.stack).slice(0,300); }catch(x){}
+        __zpErrTick();
+        return e;
+      }
+      W.prototype=N.prototype; try{ Object.setPrototypeOf(W,N); }catch(x){}
+      g[n]=W;
+    });
+    // .stack 접근 계수 (엔진 throw 포함). 반환값은 기본 포맷을 흉내낸다.
+    var __zpPrepN=0;
+    g.Error.prepareStackTrace=function(err,frames){
+      var c=++__zpPrepN;
+      if(c===1||c%20000===0){
+        var top=""; try{ top=frames.slice(0,4).map(function(f){return String(f)}).join(" | "); }catch(e){}
+        __ZPSINK("STK|n="+c+"|t="+(Date.now()-__ZPT0)+"|"+String(err).slice(0,60)+" @ "+top.slice(0,500));
+      }
+      var out=String(err); try{ for(var i=0;i<frames.length;i++) out+=String.fromCharCode(10)+"    at "+frames[i]; }catch(e){}
+      return out;
+    };
+  }catch(e){}
+
   // v8: JS/WASM 이 전부 반환했는데 네이티브가 스핀한다. JS 없이 CPU 를 태우는
   // Blink 경로 중 anti-bot 이 반드시 쓰는 것: canvas 래스터화 / 텍스트 측정 /
   // 폰트 로딩. 크기 인자를 같이 찍어 비정상 값(가상화된 screen/DPR 유래)을 본다.
