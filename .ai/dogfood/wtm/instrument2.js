@@ -185,6 +185,46 @@ function __ZPM(m){ __ZPTICK();
 
 
 
+
+  // v13: RIP 히스토그램이 LayoutNG PhysicalFragment 삽입 + major GC 를 짚었다.
+  // 레이아웃 축을 집계형으로 계측한다: 관찰자 콜백, resize/scroll 발화,
+  // 강제 동기 레이아웃 유발자(offsetWidth/gBCR/getComputedStyle).
+  try{
+    var LC={ro:0,io:0,rz:0,sc:0,fl:0};
+    var __lcBusy=false;
+    function lcTick(k){
+      LC[k]++;
+      var tot=LC.ro+LC.io+LC.rz+LC.sc+LC.fl;
+      if(tot===1||tot%20000===0){ if(__lcBusy) return; __lcBusy=true;
+        __ZPSINK("LAY|ro="+LC.ro+"|io="+LC.io+"|rz="+LC.rz+"|sc="+LC.sc+"|fl="+LC.fl+"|t="+(Date.now()-__ZPT0));
+        __lcBusy=false; }
+    }
+    [["ResizeObserver","ro"],["IntersectionObserver","io"]].forEach(function(pair){
+      var N=g[pair[0]], key=pair[1]; if(typeof N!=="function") return;
+      function W(cb,opt){ return Reflect.construct(N,[function(){ lcTick(key); return cb.apply(this,arguments); },opt], new.target||W); }
+      W.prototype=N.prototype; try{ Object.setPrototypeOf(W,N); }catch(e){}
+      g[pair[0]]=W;
+    });
+    var ael=g.EventTarget.prototype.addEventListener;
+    g.EventTarget.prototype.addEventListener=function(t,f,o){
+      if((t==="resize"||t==="scroll") && typeof f==="function"){
+        var key=(t==="resize")?"rz":"sc";
+        return ael.call(this,t,function(){ lcTick(key); return f.apply(this,arguments); },o);
+      }
+      return ael.apply(this,arguments);
+    };
+    // 강제 동기 레이아웃 유발자
+    var ep=g.Element.prototype, gb=ep.getBoundingClientRect;
+    if(gb) ep.getBoundingClientRect=function(){ lcTick("fl"); return gb.apply(this,arguments); };
+    var gcs=g.getComputedStyle;
+    if(gcs) g.getComputedStyle=function(){ lcTick("fl"); return gcs.apply(this,arguments); };
+    ["offsetWidth","offsetHeight","clientWidth","clientHeight"].forEach(function(n){
+      var hp=g.HTMLElement.prototype, d=Object.getOwnPropertyDescriptor(hp,n)||Object.getOwnPropertyDescriptor(g.Element.prototype,n);
+      if(!d||!d.get) return; var og=d.get;
+      try{ Object.defineProperty(hp,n,{configurable:true,enumerable:d.enumerable,get:function(){ lcTick("fl"); return og.call(this); }}); }catch(e){}
+    });
+  }catch(e){}
+
   // v12: 마지막 미측정 축 = 마이크로태스크 체인. 루프 카운터에도 재귀 깊이에도
   // 안 잡히면서 이벤트 루프를 굶긴다. 이전 시도는 sink 의 .catch 가 이 래퍼를
   // 다시 타서 무한재귀했다 — 이번엔 __ZPnThen(네이티브)만 쓴다.
