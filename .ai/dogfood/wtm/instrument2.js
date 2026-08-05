@@ -154,8 +154,15 @@ function __ZPDOM(){
     return 'nodes='+n+'|depth='+dmax+'|style='+document.getElementsByTagName('style').length+'|link='+document.getElementsByTagName('link').length+'|ifr='+document.getElementsByTagName('iframe').length+'|svg='+document.getElementsByTagName('svg').length;
   }catch(e){ return 'err'; }
 }
-var __hbN=0;
-setInterval(function(){ __ZPFLUSH('hb'); if((++__hbN)%5===0) __ZPSINK('DOM|t='+(Date.now()-__ZPT0)+'|'+__ZPDOM()); },20);
+var __hbN=0,__dumped=false;
+function __ZPDUMP(){
+  if(__dumped) return; __dumped=true;
+  try{ var h=document.documentElement.outerHTML; 
+    __ZPSINK('HTMLLEN|'+h.length);
+    for(var i=0,k=0;i<h.length;i+=1200,k++){ __ZPSINK('HTML|'+k+'|'+h.substr(i,1200)); }
+  }catch(e){ __ZPSINK('HTML|err'); }
+}
+setInterval(function(){ __ZPFLUSH('hb'); if((++__hbN)%5===0){ __ZPSINK('DOM|t='+(Date.now()-__ZPT0)+'|'+__ZPDOM()); __ZPDUMP(); } },20);
 var __zprafn=0;(function raf(){ try{ requestAnimationFrame(function(){ __ZPSINK('RAF|'+(++__zprafn)+'|t='+(Date.now()-__ZPT0)); raf(); }); }catch(e){} })();
 // v3: 루프가 아니라 **동기 블로킹**이 의심된다(하트비트조차 안 뜀).
 // 메인 스레드를 멈출 수 있는 API 를 호출 직전/직후로 감싸 마지막 흔적을 남긴다.
