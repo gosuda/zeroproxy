@@ -4,7 +4,7 @@ const fs = require('fs');
 const d = process.env.TEMP + '/taskweaver-zp-pause/';
 const files = fs.readdirSync(d).filter(f => f.endsWith('.dmp'))
   .map(f => ({ f, t: fs.statSync(d + f).mtimeMs })).sort((a, b) => b.t - a.t)
-  .slice(0, 60).map(x => x.f);
+  .slice(0, 200).map(x => x.f);
 
 function parse(fp) {
   const b = fs.readFileSync(fp);
