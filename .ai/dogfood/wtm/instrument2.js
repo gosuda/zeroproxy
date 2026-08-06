@@ -155,6 +155,20 @@ function __ZPDOM(){
   }catch(e){ return 'err'; }
 }
 var __hbN=0,__dumped=false;
+function __ZPCSSOM(){
+  try{
+    var sh=document.styleSheets, out=[], total=0, rules=0;
+    for(var i=0;i<sh.length;i++){
+      var h='?', n=-1, len=0;
+      try{ h=String(sh[i].href||'inline').slice(-60); }catch(e){}
+      try{ var r=sh[i].cssRules; n=r.length; for(var j=0;j<r.length;j++) len+=r[j].cssText.length; }
+      catch(e){ n=-1; }
+      rules+=(n>0?n:0); total+=len;
+      out.push(h+'#'+n+'/'+len);
+    }
+    return 'sheets='+sh.length+'|rules='+rules+'|css='+total+'|'+out.join(',');
+  }catch(e){ return 'err'; }
+}
 function __ZPDUMP(){
   if(__dumped) return; __dumped=true;
   try{ var h=document.documentElement.outerHTML; 
@@ -162,7 +176,7 @@ function __ZPDUMP(){
     for(var i=0,k=0;i<h.length;i+=1200,k++){ __ZPSINK('HTML|'+k+'|'+h.substr(i,1200)); }
   }catch(e){ __ZPSINK('HTML|err'); }
 }
-setInterval(function(){ __ZPFLUSH('hb'); if((++__hbN)%5===0){ __ZPSINK('DOM|t='+(Date.now()-__ZPT0)+'|'+__ZPDOM()); __ZPDUMP(); } },20);
+setInterval(function(){ __ZPFLUSH('hb'); if((++__hbN)%5===0){ __ZPSINK('DOM|t='+(Date.now()-__ZPT0)+'|'+__ZPDOM()); __ZPSINK('CSSOM|'+__ZPCSSOM()); __ZPDUMP(); } },20);
 var __zprafn=0;(function raf(){ try{ requestAnimationFrame(function(){ __ZPSINK('RAF|'+(++__zprafn)+'|t='+(Date.now()-__ZPT0)); raf(); }); }catch(e){} })();
 // v3: 루프가 아니라 **동기 블로킹**이 의심된다(하트비트조차 안 뜀).
 // 메인 스레드를 멈출 수 있는 API 를 호출 직전/직후로 감싸 마지막 흔적을 남긴다.
