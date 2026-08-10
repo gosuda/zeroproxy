@@ -8,7 +8,7 @@ const marks = D + 'marks.log';
 
 const FILES = {
   '/main': 'wtm-raw.js',            // 3e66f2… 원본
-  '/second': 'wtm2-raw.js',         // 27b3366… 원본
+  '/second': 'bvsd-instrumented.js',         // 27b3366… 원본
   '/ncap.js': 'ncap-instrumented.js',
   '/zp-dev-wtm.js': 'wtm-instrumented.js',
 };
