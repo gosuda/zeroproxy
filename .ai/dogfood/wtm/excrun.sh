@@ -18,7 +18,7 @@ taskweaver clear-site-data -i zp --origin "http://proxy.localhost:18080" --types
 taskweaver reload -i zp --hard >/dev/null 2>&1
 sleep 12
 # 예외 폭풍이 예상되므로 샘플링. seen_total 로 실제 건수를 따로 본다.
-taskweaver debugger-arm -i zp --strategy exceptions --sample-every 1 --max-frames 24 >/dev/null 2>&1
+taskweaver debugger-arm -i zp --strategy exceptions --sample-every 500 --max-frames 24 >/dev/null 2>&1
 taskweaver exec-js -i zp --script "document.getElementById('url').value='https://nid.naver.com/nidlogin.login'; document.querySelector('form').requestSubmit(); return 'sent'" >/dev/null 2>&1
 sleep 45
 taskweaver debugger-snapshot -i zp > "$1" 2>&1
