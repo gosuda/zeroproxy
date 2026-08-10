@@ -3587,9 +3587,24 @@
     if (!d || !d.get) return;
     try {
       Object.defineProperty(proto, 'src', {
-        get() { return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || d.get.call(this); },
+        get() {
+          const masked = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
+          if (!masked) return d.get.call(this);
+          // NAVER anti-bot(WTM/NCPT) 은 자기 `script.src` 를 읽어 정합성을 검사하고,
+          // 값이 기대와 다르면 재시도한다 — 그 재시도가 재귀라 스택을 넘기고,
+          // 이를 반복하며 렌더러가 굳는다(2026-08-08 확정: 이 마스킹 하나를 끄면
+          // wedge 가 사라지고 389KB 번들이 완주). `configurable: true` 로 풀어줘도
+          // 그대로 굳으므로 **잠금이 아니라 마스킹된 값 자체가 원인**이다.
+          // 이 호스트에 한해 네이티브 값(프록시 URL)을 통과시킨다. 프록시 URL 노출은
+          // 이미 같은 origin 안의 정보라 새 탈출면을 만들지 않는다(E1 무영향).
+          try {
+            const h = new Native.URL(masked).host;
+            if (h === 'wtm.pstatic.net' || h === 'ncpt.naver.com') return d.get.call(this);
+          } catch {}
+          return masked;
+        },
         set(v) { setScriptSource(this, v); },
-        configurable: false
+        configurable: true
       });
     } catch {}
   }
