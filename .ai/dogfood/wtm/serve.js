@@ -13,7 +13,11 @@ const FILES = {
   '/zp-dev-wtm.js': 'wtm-instrumented.js',
 };
 
+// 히트 로그 — **페이지와 무관한 채널**. 마커가 한 건도 안 오던 빌드에서
+// "싱크가 쓰였는가" 를 페이지 쪽 신호로 판정하려다 세 번 틀렸다(2026-08-10).
+// 서버가 직접 기록하면 렌더러가 굳어도 남는다.
 http.createServer((req, res) => {
+  try { fs.appendFileSync(D + 'hits.log', Date.now() + ' ' + req.url.split('?')[0] + '\n'); } catch {}
   const cors = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': '*',

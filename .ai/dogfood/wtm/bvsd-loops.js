@@ -100,11 +100,12 @@ const LIMIT = Number(process.env.BVSD_LIMIT || 300000);
 const prelude = `/*ZP_BVSD_LOOPS*/
 var __BN=${id},__BC=new Array(__BN).fill(0),__BT0=Date.now(),__Bbusy=false;
 var __BnThen=Promise.prototype.then;
-function __BS(m){
-  if(__Bbusy) return; __Bbusy=true;
-  try{ __BnThen.call(fetch('http://127.0.0.1:18099/m?BL|'+encodeURIComponent(m),{mode:'no-cors',keepalive:true}),function(){},function(){}); }catch(e){}
-  __Bbusy=false;
-}
+// 마커 네트워크 전송은 **원리적으로 불가능**하다 — 우리 CSP 가
+// \`connect-src 'self'\` 라 127.0.0.1:18099 로 나가는 fetch 를 막는다.
+// (세 세션 동안 "마커가 안 온다" 를 전달 버그로 오해했다. 2026-08-10)
+// 차단당할 fetch 를 계속 쏘면 그 자체가 관측 교란이므로 no-op 으로 둔다.
+// 회수는 DOM 속성(__BDOM) 하나로 통일한다 — DOM 은 realm 을 넘어 공유된다.
+function __BS(m){}
 function __BW(i){
   var c=++__BC[i];
   if(c===1){ try{ __BVSD.enters.push(i); if(__BVSD.enters.length%10===0) __BDOM(); }catch(e){} __BS('enter|'+i+'|t='+(Date.now()-__BT0)); }

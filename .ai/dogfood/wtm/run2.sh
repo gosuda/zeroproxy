@@ -13,6 +13,12 @@ sleep 3
 sleep 40
 taskweaver navigate -i zp --url "http://proxy.localhost:18080/zp/" >/dev/null 2>&1
 sleep 10
+# 브라우저 프로필이 kill/start 를 넘어 살아남으므로 **낡은 SW 가 계속 돈다**.
+# 이걸 안 지우면 sw.js 를 아무리 고쳐도 반영되지 않는다 — 실제로 계측본이
+# 한 번도 로드되지 않은 채 WEDGE 를 관측했다(2026-08-10).
+taskweaver clear-site-data -i zp --origin "http://proxy.localhost:18080" --types all >/dev/null 2>&1
+taskweaver reload -i zp --hard >/dev/null 2>&1
+sleep 12
 taskweaver exec-js -i zp --script "document.getElementById('url').value='https://nid.naver.com/nidlogin.login'; document.querySelector('form').requestSubmit(); return 'sent'" >/dev/null 2>&1
 sleep 30
 OUT=$(timeout 45 taskweaver exec-js -i zp --script "
