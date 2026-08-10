@@ -755,7 +755,18 @@ async function runtimeAPI(req, url, clientId) {
     // than it fixes (GFP SDK uses ntm as a bid-token source).
     try {
       const tu = new URL(target);
-      if (tu.host === 'wtm.pstatic.net' || tu.host === 'ncpt.naver.com') {
+      // 2026-08-10 — 차단 범위를 좁혔다. 예전에는 wtm/ncpt 의 **모든** 스크립트를
+      // 막았는데, 실측 결과 wedge 를 부르는 건 두 갈래뿐이다:
+      //   ① wtm.pstatic.net/<build>/27b3366….js — 메인 번들과 별개인 두 번째 스크립트
+      //   ② ncpt.naver.com 의 스크립트 전부
+      // 둘은 **독립 트리거**다(하나만 막으면 여전히 wedge).
+      // **389KB 메인 번들(3e66f2….js)은 무죄**다 — 이것만 실행시키면 렌더러가
+      // 살아 있고(콘솔 에러 0, `__zp_diagnostics` 0) `window.homz` 도 정의된다.
+      // 세 세션 동안 이 번들을 계측했으나 범인이 아니었다(함정노트 2026-08-10).
+      // 좁힌 이득: `homz` 가 생겨 캡차 초기화에 한 걸음 더 간다.
+      // (`nhomz` 는 아직 미정의 — ②를 풀어야 하는데 그게 wedge 를 부른다.)
+      if (tu.host === 'ncpt.naver.com'
+        || (tu.host === 'wtm.pstatic.net' && tu.pathname.indexOf('27b3366') >= 0)) {
         return new Response('/* ZP_TRACKER_BLOCKED ' + tu.host + ' */',
           { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
       }
