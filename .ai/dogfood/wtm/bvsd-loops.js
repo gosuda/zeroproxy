@@ -107,11 +107,14 @@ function __BS(m){
 }
 function __BW(i){
   var c=++__BC[i];
-  if(c===1) __BS('enter|'+i+'|t='+(Date.now()-__BT0));
+  if(c===1){ try{ __BVSD.enters.push(i); if(__BVSD.enters.length%10===0) __BDOM(); }catch(e){} __BS('enter|'+i+'|t='+(Date.now()-__BT0)); }
   else if(c%20000===0) __BS('tick|'+i+'|n='+c+'|t='+(Date.now()-__BT0));
-  if(c>${LIMIT}){ __BC[i]=0; __BS('CAP|'+i+'|t='+(Date.now()-__BT0)); throw new Error('BVSD_CAP#'+i); }
+  if(c>${LIMIT}){ __BC[i]=0; try{ __BVSD.caps.push(i+'@'+(Date.now()-__BT0)); __BDOM(); }catch(e){} __BS('CAP|'+i+'|t='+(Date.now()-__BT0)); throw new Error('BVSD_CAP#'+i); }
   return true;
 }
+var __BVSD={loops:__BN,counts:__BC,caps:[],enters:[],t0:__BT0};
+// exec-js 는 멤브레인 밖이라 페이지 전역이 안 보인다 → DOM 속성에 남긴다(DOM 은 공유).
+function __BDOM(){ try{ document.documentElement.setAttribute('data-bvsd', JSON.stringify({caps:__BVSD.caps,enters:__BVSD.enters.length,top:__BC.map(function(v,i){return [i,v]}).filter(function(p){return p[1]>0}).sort(function(a,b){return b[1]-a[1]}).slice(0,8)})); }catch(e){} }
 __BS('boot|loops=${id}');
 `;
 

@@ -21,10 +21,10 @@ return JSON.stringify(performance.getEntriesByType('resource')
   .map(function(r){ return r.name.replace(/^.*\//,'').slice(0,26) + ':' + r.encodedBodySize; }))" 2>&1)
 LIST=$(echo "$OUT" | grep -o '\[.*\]' | head -1)
 if echo "$OUT" | grep -q '"status": "completed"'; then
-  if echo "$LIST" | grep -q 27b3366; then
-    echo "ALIVE(27b3366 ran) $LIST"
+  if echo "$LIST" | grep -qE "27b3366[^:]*:[0-9]{6,}"; then
+    echo "ALIVE(27b3366 REALLY ran) $LIST"
   else
-    echo "INVALID(27b3366 never requested) $LIST"
+    echo "INVALID(27b3366 stubbed or absent) $LIST"
   fi
 else
   echo "WEDGE"
