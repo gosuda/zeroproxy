@@ -12,7 +12,7 @@ taskweaver exec-js -i zp --script "document.getElementById('url').value='$URL'; 
 sleep 30
 OUT=$(timeout 45 taskweaver exec-js -i zp --script "
 return JSON.stringify({
-  wtm: performance.getEntriesByType('resource').filter(function(r){return /3e66f2|wtm\.pstatic/.test(r.name)}).map(function(r){return r.encodedBodySize}).slice(0,4),
+  wtm: performance.getEntriesByType('resource').filter(function(r){return /3e66f2|wtm\.pstatic/.test(r.name)}).map(function(r){return r.encodedBodySize}),
   nhomz: typeof window.nhomz,
   homz: typeof window.homz,
   body: document.body ? document.body.innerHTML.length : 0,
