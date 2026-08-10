@@ -1,12 +1,17 @@
-// 계측본 정적 제공 + 마커 수집.
-// localStorage 는 멤브레인 facade 가 비동기라 wedge 를 못 넘기고,
-// taskweaver 의 dump-recording 은 counts=0 으로 여전히 비어 있다.
-// 네트워크 요청은 렌더러가 굳기 전에 이미 브라우저 프로세스로 넘어가므로
-// 유일하게 신뢰할 수 있는 wedge-proof 채널이다.
+// 계측/원본 파일 제공 + 마커 수집.
+// 경로별로 다른 파일을 준다 — 예전엔 어떤 경로든 같은 파일을 줘서
+// "wtm 의 모든 .js 가 같은 번들로 대체" 되는 치명적 혼선을 만들었다(2026-08-10).
 const http = require('http');
 const fs = require('fs');
-const bundle = __dirname + '/wtm-instrumented.js';
-const marks = __dirname + '/marks.log';
+const D = __dirname + '/';
+const marks = D + 'marks.log';
+
+const FILES = {
+  '/main': 'wtm-raw.js',            // 3e66f2… 원본
+  '/second': 'wtm2-raw.js',         // 27b3366… 원본
+  '/ncap.js': 'ncap-instrumented.js',
+  '/zp-dev-wtm.js': 'wtm-instrumented.js',
+};
 
 http.createServer((req, res) => {
   const cors = {
@@ -15,12 +20,20 @@ http.createServer((req, res) => {
     'Cache-Control': 'no-store',
   };
   if (req.url.startsWith('/m?')) {
-    try {
-      fs.appendFileSync(marks, Date.now() + ' ' + decodeURIComponent(req.url.slice(3)) + '\n');
-    } catch {}
+    try { fs.appendFileSync(marks, Date.now() + ' ' + decodeURIComponent(req.url.slice(3)) + '\n'); } catch {}
     res.writeHead(200, Object.assign({ 'Content-Type': 'text/plain' }, cors));
     return res.end('ok');
   }
-  res.writeHead(200, Object.assign({ 'Content-Type': 'text/javascript; charset=utf-8' }, cors));
-  res.end(fs.readFileSync(bundle));
-}).listen(18099, '127.0.0.1', () => console.log('wtm-instr on 18099'));
+  const path = req.url.split('?')[0];
+  const file = FILES[path];
+  if (!file || !fs.existsSync(D + file)) {
+    res.writeHead(404, cors);
+    return res.end('no mapping for ' + path);
+  }
+  const body = fs.readFileSync(D + file);
+  res.writeHead(200, Object.assign({
+    'Content-Type': 'text/javascript; charset=utf-8',
+    'Content-Length': String(body.length),
+  }, cors));
+  res.end(body);
+}).listen(18099, '127.0.0.1', () => console.log('wtm sink on 18099'));
