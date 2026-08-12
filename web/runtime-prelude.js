@@ -2948,10 +2948,25 @@
       // native (browser UI consent gate).
       try {
         const permKey = '__zp_notif_perm';
+        // 2026-08-12 — **네이티브 게터를 먼저 잡아 둔다.**
+        // 예전 코드는 폴백으로 `NativeN.permission` 을 읽었는데, `NativeN` 이
+        // 바로 이 프로퍼티를 정의하는 객체라 **자기 자신을 무한 재귀 호출**했다.
+        // 저장값이 없을 때(= 권한을 건드린 적 없는 보통 경우)만 터지므로 오래
+        // 숨어 있었고, 실제로 NAVER anti-bot 이 `Notification.permission` 을 읽는
+        // 순간 스택 오버플로 폭풍(`Maximum call stack size exceeded` 3,2xx건)이
+        // 나면서 렌더러가 수십 초 멈췄다. `clear-site-data` 로 저장값이 지워지면
+        // 재현되고 남아 있으면 안 나서, 증상이 간헐적으로 보였다.
+        const nativePermDesc = Object.getOwnPropertyDescriptor(NativeN, 'permission');
+        const nativePerm = nativePermDesc && nativePermDesc.get
+          ? nativePermDesc.get.bind(NativeN)
+          : () => (nativePermDesc ? nativePermDesc.value : 'default');
         Object.defineProperty(NativeN, 'permission', {
           get() {
-            try { return prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey) || NativeN.permission; }
-            catch { return NativeN.permission; }
+            try {
+              const stored = prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey);
+              if (stored) return stored;
+            } catch {}
+            try { return nativePerm(); } catch { return 'default'; }
           },
           configurable: true,
         });

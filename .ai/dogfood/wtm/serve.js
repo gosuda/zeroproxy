@@ -93,6 +93,24 @@ http.createServer((req, res) => {
       + '  parentBody: parentLen(document.body),'
       + '  frames: (function(){ try{ return window.frames.length; }catch(e){ return -1; } })(),'
       + '  frame0IsSelf: (function(){ try{ return window.frames.length>0 && window.frames[0]===window; }catch(e){ return "ERR"; } })() };'
+      // navigator.permissions 표적 테스트.
+      // wasm 이 ["navigator.permissi… 를 읽으라고 넘긴 호출에서 JS 가 돌아오지 않았다.
+      // 결과는 console 로 흘린다(push) — 멈추면 exec-js 로는 아무것도 못 건진다.
+      + 'try{ console.log("ZPPERM start"); }catch(e){}'
+      + 'try{ var __p = navigator.permissions; console.log("ZPPERM get=" + (typeof __p)); }'
+      + 'catch(e){ console.log("ZPPERM get.threw " + (e && e.message)); }'
+      + 'try{ console.log("ZPPERM query=" + (__p && typeof __p.query)); }catch(e){ console.log("ZPPERM q.threw " + (e && e.message)); }'
+      + 'try{ var __r = __p.query({name:"notifications"});'
+      + '  console.log("ZPPERM called thenable=" + (!!(__r && __r.then)));'
+      + '  __r.then(function(s){ console.log("ZPPERM resolved " + (s && s.state)); },'
+      + '           function(e){ console.log("ZPPERM rejected " + (e && e.message)); }); }'
+      + 'catch(e){ console.log("ZPPERM call.threw " + (e && e.message)); }'
+      + 'try{ console.log("ZPPERM done"); }catch(e){}'
+      // Notification.permission — x3 목록의 두 번째 항목. 첫 항목(permissions.query)은
+      // 이미 정상 확인됐으므로 남은 후보는 이것이다.
+      + 'try{ console.log("ZPNOTI typeof=" + (typeof Notification)); }catch(e){ console.log("ZPNOTI typeof.threw " + (e && e.message)); }'
+      + 'try{ console.log("ZPNOTI perm=" + Notification.permission); }catch(e){ console.log("ZPNOTI perm.threw " + (e && e.message)); }'
+      + 'try{ console.log("ZPNOTI after"); }catch(e){}'
       + 'var membrane = { loc: String(location.href).slice(0,60),'
       + '  isVirtual: String(location.href).indexOf("127.0.0.1:18099")>=0,'
       + '  isProxy: String(location.href).indexOf("/zp/p/")>=0 };'
