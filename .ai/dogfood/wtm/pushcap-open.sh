@@ -4,6 +4,7 @@ set -e
 cd /f/git/zeroproxy
 cp web/sw.js dist/web/sw.js
 cp web/runtime-prelude.js dist/web/runtime-prelude.js
+node .ai/dogfood/wtm/disableblocks.js >/dev/null
 node .ai/dogfood/wtm/installdev2.js >/dev/null
 cd .ai/dogfood/wtm
 # PREPEND 모드(3번째 인자 없음) — 원본 번들은 그대로 두고 앞에만 덧댄다.
