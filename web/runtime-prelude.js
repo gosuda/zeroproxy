@@ -3590,17 +3590,21 @@
         get() {
           const masked = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
           if (!masked) return d.get.call(this);
-          // NAVER anti-bot(WTM/NCPT) 은 자기 `script.src` 를 읽어 정합성을 검사하고,
-          // 값이 기대와 다르면 재시도한다 — 그 재시도가 재귀라 스택을 넘기고,
-          // 이를 반복하며 렌더러가 굳는다(2026-08-08 확정: 이 마스킹 하나를 끄면
-          // wedge 가 사라지고 389KB 번들이 완주). `configurable: true` 로 풀어줘도
-          // 그대로 굳으므로 **잠금이 아니라 마스킹된 값 자체가 원인**이다.
-          // 이 호스트에 한해 네이티브 값(프록시 URL)을 통과시킨다. 프록시 URL 노출은
-          // 이미 같은 origin 안의 정보라 새 탈출면을 만들지 않는다(E1 무영향).
-          try {
-            const h = new Native.URL(masked).host;
-            if (h === 'wtm.pstatic.net' || h === 'ncpt.naver.com') return d.get.call(this);
-          } catch {}
+          // 2026-08-12 — wtm/ncpt 예외를 **제거**했다. 그 예외는 `.src` 로 프록시
+          // URL 을 그대로 흘렸고, 그게 NAVER SDK 를 오작동시키는 실제 원인이었다:
+          //   webpack 의 publicPath 유도부가 `currentScript.src` 의 디렉터리를 쓴다
+          //   → `http://proxy.localhost:18080/zp/api/`
+          //   → wasm 을 `<target>/zp/api/<hash>.wasm` 에서 찾아 404
+          //   → SDK 가 순수 JS 프로버(두 번째 wtm 스크립트)로 폴백하고
+          //     `ncpt/errorLog` 를 쏟아낸다.
+          // 실브라우저는 wasm 을 받고 그 두 번째 스크립트를 **요청조차 하지 않는다**.
+          // 예외를 없애면 프록시도 같은 시그니처가 된다 — 직접/프록시를 한 런에
+          // 찍는 페어 런 2/2 에서 두 번째 스크립트 0건, errorLog 0건, wasm 은
+          // 올바른 CDN 경로(`wtm.pstatic.net/<build>/…wasm`)로 로드(2026-08-12).
+          //
+          // 이 예외를 정당화하던 2026-08-08 `__zpStep` 이분탐색은 함정노트에서 이미
+          // 무효화됐다(훅을 빼면 SDK 가 더 일찍 실패해 트리거가 로드되지 않았다).
+          // 마스킹 값을 돌려주는 건 원래의 strict 동작이라 E1 상 탈출면도 줄어든다.
           return masked;
         },
         set(v) { setScriptSource(this, v); },

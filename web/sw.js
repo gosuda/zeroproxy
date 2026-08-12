@@ -755,18 +755,25 @@ async function runtimeAPI(req, url, clientId) {
     // than it fixes (GFP SDK uses ntm as a bid-token source).
     try {
       const tu = new URL(target);
-      // 2026-08-10 — 차단 범위를 좁혔다. 예전에는 wtm/ncpt 의 **모든** 스크립트를
-      // 막았는데, 실측 결과 wedge 를 부르는 건 두 갈래뿐이다:
-      //   ① wtm.pstatic.net/<build>/27b3366….js — 메인 번들과 별개인 두 번째 스크립트
-      //   ② ncpt.naver.com 의 스크립트 전부
-      // 둘은 **독립 트리거**다(하나만 막으면 여전히 wedge).
-      // **389KB 메인 번들(3e66f2….js)은 무죄**다 — 이것만 실행시키면 렌더러가
-      // 살아 있고(콘솔 에러 0, `__zp_diagnostics` 0) `window.homz` 도 정의된다.
-      // 세 세션 동안 이 번들을 계측했으나 범인이 아니었다(함정노트 2026-08-10).
-      // 좁힌 이득: `homz` 가 생겨 캡차 초기화에 한 걸음 더 간다.
-      // (`nhomz` 는 아직 미정의 — ②를 풀어야 하는데 그게 wedge 를 부른다.)
-      if (tu.host === 'ncpt.naver.com'
-        || (tu.host === 'wtm.pstatic.net' && tu.pathname.indexOf('27b3366') >= 0)) {
+      // 2026-08-12 — wtm 두 번째 스크립트를 **해시로 핀한 차단을 제거**했다.
+      //
+      // 그 조건(`indexOf('27b3366')`)은 NAVER 가 빌드를 갈면서(`fce46da` →
+      // `1baa7f7`) 조용히 죽었다. 해시 핀 차단은 만료를 알려주지 않으므로,
+      // "차단 중" 이라고 믿는 동안 실제로는 아무것도 막지 않는다.
+      //
+      // 더 중요한 건, 애초에 막을 이유가 사라졌다는 것이다. 그 스크립트는
+      // 정상 경로가 아니라 **우리가 유발한 에스컬레이션 페이로드**였다:
+      //   `currentScript.src` 가 프록시 URL 을 흘림
+      //   → 번들의 webpack publicPath 가 `/zp/api/` 가 됨
+      //   → wasm 을 `<target>/zp/api/<hash>.wasm` 에서 찾아 404
+      //   → SDK 가 순수 JS 프로버(두 번째 스크립트)로 폴백 + `ncpt/errorLog` 폭주.
+      // `runtime-prelude.js` 의 `.src` 마스킹을 원복해 publicPath 를 고치면
+      // 실브라우저와 같아진다 — 페어 런 2/2 에서 두 번째 스크립트 요청 0건,
+      // errorLog 0건, wasm 은 올바른 CDN 경로로 로드된다(함정노트 2026-08-12).
+      //
+      // ncpt.naver.com 은 그대로 둔다. 이번 측정은 전부 이 차단이 켜진 상태에서
+      // 했으므로, 푸는 것은 별도 근거가 필요하다.
+      if (tu.host === 'ncpt.naver.com') {
         return new Response('/* ZP_TRACKER_BLOCKED ' + tu.host + ' */',
           { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
       }

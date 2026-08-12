@@ -47,8 +47,16 @@ if [ -n "$WEDGE" ]; then
 else
   echo -n "PROXY: ALIVE "
   taskweaver exec-js -i zp --script "
-  var rs=performance.getEntriesByType('resource').map(function(r){return r.name;});
-  return JSON.stringify({total:rs.length, body:document.body?document.body.innerHTML.length:-1});" 2>&1 | grep -o '{[^}]*}' | head -1
+  var rs=performance.getEntriesByType('resource');
+  var sz=function(p){return rs.filter(function(r){return r.name.indexOf(p)>=0;}).map(function(r){return r.encodedBodySize;});};
+  return JSON.stringify({ total:rs.length, body:document.body?document.body.innerHTML.length:-1,
+    homz:typeof window.homz, nhomz:typeof window.nhomz,
+    main:sz('75b49359'), wasm:sz('8fbcc8a6'), second:sz('a3d739e9'),
+    diag:(window.__zp_diagnostics||[]).length });" > "$OUT-proxy-state.json" 2>&1 || true
+  node -e '
+    const fs=require("fs");let j;
+    try{ j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); }catch(e){ console.log("(state unreadable)"); process.exit(0); }
+    console.log(j.status==="completed" ? j.result : "(state failed)");' "$OUT-proxy-state.json"
 fi
 taskweaver dump-recording -i zp --filter network > "$OUT-proxy-tape.json" 2>&1 || true
 echo "wrote $OUT-direct.json / $OUT-proxy-tape.json"
