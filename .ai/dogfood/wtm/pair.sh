@@ -36,6 +36,15 @@ taskweaver exec-js -i zp --script "document.getElementById('url').value='https:/
 WEDGE=""
 for t in 10 20 30 40 50 60; do
   sleep 10
+  # 30초 시점에 **가볍게** 상태를 건진다. 끝까지 기다리면 wedge 가 먼저 와서
+  # 아무것도 못 건지는 런이 많다 — 살아 있을 때 건져 두는 게 낫다.
+  if [ "$t" = "30" ]; then
+    timeout 45 taskweaver exec-js -i zp --script "return typeof window.homz + \",\" + typeof window.nhomz" > "$OUT-at30.json" 2>&1 || true
+    node -e '
+      const fs=require("fs");let j;
+      try{ j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); }catch(e){ console.log("at30: NO-OUTPUT"); process.exit(0); }
+      console.log("at30: " + (j.status==="completed" ? j.result : "unavailable"));' "$OUT-at30.json"
+  fi
   # exec-js 내부 타임아웃이 30초이므로 timeout 은 그보다 길게 준다.
   if ! timeout 40 taskweaver exec-js -i zp --script "return 1" >/dev/null 2>&1; then
     WEDGE="$t"; break
