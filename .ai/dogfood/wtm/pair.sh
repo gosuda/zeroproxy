@@ -49,7 +49,7 @@ else
   taskweaver exec-js -i zp --script "
   var rs=performance.getEntriesByType('resource');
   var sz=function(p){return rs.filter(function(r){return r.name.indexOf(p)>=0;}).map(function(r){return r.encodedBodySize;});};
-  return JSON.stringify({ total:rs.length, body:document.body?document.body.innerHTML.length:-1,
+  return JSON.stringify({ total:rs.length, bodyKids:document.body?document.body.children.length:-1,
     homz:typeof window.homz, nhomz:typeof window.nhomz,
     main:sz('75b49359'), wasm:sz('8fbcc8a6'), second:sz('a3d739e9'),
     diag:(window.__zp_diagnostics||[]).length });" > "$OUT-proxy-state.json" 2>&1 || true
