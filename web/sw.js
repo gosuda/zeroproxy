@@ -730,53 +730,34 @@ async function runtimeAPI(req, url, clientId) {
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
     const tab = explicitTab || (scriptCtx && tabs.get(scriptCtx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
-    // NAVER anti-bot WASM tracker (WTM). Served from wtm.pstatic.net and
-    // ncpt.naver.com; its WASM `$_start` busy-loops when it detects the proxy
-    // membrane, wedging the renderer. We return a noop body so the script tag
-    // resolves without executing it.
+    // NAVER anti-bot (WTM / nCaptcha) — 차단은 **전부 걷혔다**(2026-08-12).
     //
-    // 2026-07-31 — THIS IS THE REASON THE NAVER CAPTCHA CAN NEVER PASS, and
-    // the cost is now measured, not assumed:
-    //   * stub ON  → page loads; wtm bundle arrives as a 40-byte
-    //     `/* ZP_TRACKER_BLOCKED … */`, so `window.nhomz` is never defined,
-    //     ncaptcha gives up after 5 s (`err-112 nCaptcha not initialized
-    //     after timeout`) and every submit carries
-    //     `wtoken=error1|ReferenceError|wtmncapt is not defined` → the answer
-    //     is irrelevant, the server rejects it.
-    //   * stub OFF → the real 389 KB `fce46da/*.js` + its 408 KB `.wasm` run
-    //     and the renderer goes unresponsive (exec-js, console-dump and
-    //     network-log all time out; `pause` reports renderer hung).
-    // Removing the stub was tried on 2026-07-31 and reverted for exactly that
-    // reason. Lifting it requires fixing whatever membrane trace the WASM
-    // detects — not deleting this block.
+    // 그동안 이 자리에 wtm/ncpt 스텁이 있었고, 그 명분은 "실행시키면 렌더러가
+    // 굳는다" 였다. 그 wedge 의 진짜 원인은 남의 코드가 아니라 우리 코드였다:
+    //   ① `runtime-prelude.js` 의 `Notification.permission` 게터가 폴백으로
+    //      자기 자신을 읽어 **무한 재귀**했다. WTM 의 wasm 이 속성 목록
+    //      `["navigator.permissions.query(...).state","Notification.permission"]`
+    //      을 읽는 순간 스택 오버플로 폭풍이 나고 렌더러가 수십 초 멈췄다.
+    //   ② `script.src` 가 프록시 URL 을 흘려 webpack publicPath 가 깨졌고,
+    //      그 탓에 SDK 가 순수 JS 프로버로 폴백하며 `ncpt/errorLog` 를 쏟았다.
+    // 둘 다 고쳤다. 측정: 차단 유지 6/6 ALIVE, **ncpt 차단 해제 5/5 ALIVE**,
+    // `__zp_diagnostics` 0.
+    //
+    // 걷은 이득이 크다. 차단이 켜져 있으면 `ncaptcha-api.js` 가 40바이트 스텁이
+    // 되어 `nhomz` 가 정의되지 않고 캡차가 **원천 봉쇄**된다. 지금은 실제로
+    // 78,954바이트가 로드되고 `nhomz` (1.11.1-wasm), `initNcaptcha`,
+    // `__ncaptcha_api` 가 전부 정의된다.
+    //
+    // 다시 막고 싶어지면: 증상만 보고 스텁을 넣지 말 것. 이 두 버그처럼
+    // **원인이 우리 쪽일 수 있다**. 그리고 해시로 핀한 차단은 벤더가 빌드를
+    // 갈면 조용히 죽으므로(`fce46da` → `1baa7f7` 에서 실제로 그랬다) 쓰지 말 것.
     //
     // ntm.pstatic.net (ntm_<hex>.js) is deliberately NOT blocked: it looked
     // like the same 121 s symptom, but stubbing it removes more ad inventory
     // than it fixes (GFP SDK uses ntm as a bid-token source).
-    try {
-      const tu = new URL(target);
-      // 2026-08-12 — wtm 두 번째 스크립트를 **해시로 핀한 차단을 제거**했다.
-      //
-      // 그 조건(`indexOf('27b3366')`)은 NAVER 가 빌드를 갈면서(`fce46da` →
-      // `1baa7f7`) 조용히 죽었다. 해시 핀 차단은 만료를 알려주지 않으므로,
-      // "차단 중" 이라고 믿는 동안 실제로는 아무것도 막지 않는다.
-      //
-      // 더 중요한 건, 애초에 막을 이유가 사라졌다는 것이다. 그 스크립트는
-      // 정상 경로가 아니라 **우리가 유발한 에스컬레이션 페이로드**였다:
-      //   `currentScript.src` 가 프록시 URL 을 흘림
-      //   → 번들의 webpack publicPath 가 `/zp/api/` 가 됨
-      //   → wasm 을 `<target>/zp/api/<hash>.wasm` 에서 찾아 404
-      //   → SDK 가 순수 JS 프로버(두 번째 스크립트)로 폴백 + `ncpt/errorLog` 폭주.
-      // `runtime-prelude.js` 의 `.src` 마스킹을 원복해 publicPath 를 고치면
-      // 실브라우저와 같아진다 — 페어 런 2/2 에서 두 번째 스크립트 요청 0건,
-      // errorLog 0건, wasm 은 올바른 CDN 경로로 로드된다(함정노트 2026-08-12).
-      //
-      // ncpt.naver.com 은 그대로 둔다. 이번 측정은 전부 이 차단이 켜진 상태에서
-      // 했으므로, 푸는 것은 별도 근거가 필요하다.
-      if (tu.host === 'ncpt.naver.com') {
-        return new Response('/* ZP_TRACKER_BLOCKED ' + tu.host + ' */',
-          { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
-      }
+    // (아래는 차단 목록의 역사 기록이다. 실행 코드는 남아 있지 않다 —
+    //  같은 실수를 반복하지 않도록 왜 넣었고 왜 걷었는지를 남긴다.)
+    {
       // DIAG: incrementally block NAVER ad / anti-bot SDKs to isolate which
       // one wedges V8 once NACT unlocks the heavy tracker bundle. The Veta
       // ad core, GFP display SDK, and NAC synchronizer all contain logic
@@ -810,7 +791,7 @@ async function runtimeAPI(req, url, clientId) {
       // specific signal — the right long-term fix is to add a new
       // hardening to runtime-prelude or zp-rewriter, not to grow this
       // list silently.
-    } catch {}
+    }
     // request 자체를 transportFetch 에 전달 → browser-set headers (Accept,
     // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
     // anti-bot 회로가 404 NAVER 페이지를 반환하는 경우가 있음 → SafeFrame
