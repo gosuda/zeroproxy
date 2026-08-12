@@ -19,14 +19,18 @@ if (!A.test(s)) throw new Error('anchor (script transportFetch) not found');
 s = s.replace(A,
   '$1$2const resp = await transportFetch(target, { request: req, tab, entryId: tab.activeEntryId });'
   + '$1$2// ZP_DEV_PATCH — 응답 본문 앞에만 프렐류드를 덧댄다. 상태/헤더는 원본 유지.'
-  + '$1$2if (ZP_DEV_PRELUDE && target.indexOf(ZP_DEV_TARGET2) >= 0) {'
+  + '$1$2if (ZP_DEV_PRELUDE && ZP_DEV_TARGET2 && target.indexOf(ZP_DEV_TARGET2) >= 0) {'
   + '$1$2  const src = await resp.text();'
-  + '$1$2  const patched = new Response(ZP_DEV_PRELUDE + src, { status: resp.status, headers: resp.headers });'
+  + '$1$2  // REPLACE 모드: 본문을 통째로 갈아끼운다. 그래도 upstream 요청은 **실제로**'
+  + '$1$2  // 했으므로 쿠키/타이밍/헤더는 정상 경로 그대로다 — 합성 Response 로'
+  + '$1$2  // 대체하던 옛 방식이 거동을 바꾼 지점이 바로 거기였다.'
+  + '$1$2  const body = ZP_DEV_REPLACE ? ZP_DEV_PRELUDE : (ZP_DEV_PRELUDE + src);'
+  + '$1$2  const patched = new Response(body, { status: resp.status, headers: resp.headers });'
   + '$1$2  return rewriteScriptResponse(patched, { targetUrl: target, kind });'
   + '$1$2}'
   + '$3$4return rewriteScriptResponse(resp, { targetUrl: target, kind });');
 
 // 상수는 파일 끝에 붙인다(주입기가 갱신한다).
-s += '\n/*ZP_DEV_PATCH_CONST*/\nconst ZP_DEV_TARGET2 = "";\nconst ZP_DEV_PRELUDE = "";\n';
+s += '\n/*ZP_DEV_PATCH_CONST*/\nconst ZP_DEV_TARGET2 = "";\nconst ZP_DEV_REPLACE = false;\nconst ZP_DEV_PRELUDE = "";\n';
 fs.writeFileSync(p, s);
 console.log('header-preserving dev patch installed');
