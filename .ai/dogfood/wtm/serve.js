@@ -29,6 +29,22 @@ http.createServer((req, res) => {
     return res.end('ok');
   }
   const path = req.url.split('?')[0];
+  // 리라이트 배수 측정용 페이지. 프록시로 이걸 열면 inline script 가
+  // zp-htmltx → zp-rewriter 를 타므로, "리라이트된 코드가 쓸 수 있는 재귀 깊이" 를
+  // NAVER 와 무관하게 잴 수 있다. 같은 코드를 exec-js(리라이트 없음)로도 재서 비교.
+  if (path === '/probe.html') {
+    // 두 형태를 잰다. plain 은 리라이터가 손대지 않아 배수가 1이고,
+    // member 는 `o.g()` → `__zp_call(__zp_get(...))` 로 프레임이 늘어난다.
+    // 실제 SDK 코드는 거의 전부 member 형태다.
+    const html = '<!doctype html><meta charset=utf-8><title>zp depth probe</title><body><script>'
+      + 'var dp=0; function gp(){ dp++; gp(); } try{ gp(); }catch(e){}'
+      + 'var o={}; var dm=0; o.g=function(){ dm++; o.g(); }; try{ o.g(); }catch(e){}'
+      + 'window.__ZPDEPTH = { plain: dp, member: dm };'
+      + 'document.title = "plain=" + dp + " member=" + dm;'
+      + '</' + 'script>';
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
+    return res.end(html);
+  }
   const file = FILES[path];
   if (!file || !fs.existsSync(D + file)) {
     res.writeHead(404, cors);

@@ -193,3 +193,46 @@ CDP `Network.requestWillBeSent` 의 `initiator` 를 그대로 흘려주기만 �
 | `symbolize.ps1` | dbghelp P/Invoke 심볼 해석 (②) |
 | `inject-payload.js` | 계측본을 SW 에 base64 인라인 — CSP `connect-src 'self'` 우회 |
 | `mainprobe.js` | 페이지 realm 값을 DOM 속성으로 밀반출 (①) |
+
+---
+
+## 0.12.0 확인 결과 (2026-08-12)
+
+| 요청 | 상태 |
+|---|---|
+| ① `exec-js --world main` | **반영, 동작 확인.** main=`42` / isolated=`undefined` 로 검증. DOM 밀반출을 걷어냈다 |
+| ② `pause --symbolize` | 반영. 바쁜 스레드 선별(`waiting_threads`)도 들어갔다. **다만 아래 버그** |
+| ③ `--browser-arg` | 문서화됨(전용 user data folder). 여전히 `--js-flags` 는 렌더러를 못 쓰게 만든다 |
+| ④ `sw-console` | 미반영 (`SW_ATTACH_UNAVAILABLE` 그대로) |
+| ⑤ `pause --samples/--interval-ms` | **반영, 동작 확인.** 8샘플 히스토그램을 한 번에 얻었다 |
+| ⑥ `get-requests --include-initiator` | 미반영 |
+
+### 버그 — `--symbolize` 가 pdb 없이 "그럴듯한 쓰레기" 를 낸다
+
+```
+symsrv_loaded: false      symbols_downloaded: false
+symbol_errors: ["SymFromAddrW(...) failed: win32 error 487"]
+```
+
+pdb 를 못 받아 **export 심볼로만** 해석한 결과가 이렇다:
+
+```
+IsSandboxedProcess+0x783149                                  ← 7.8MB 오프셋
+Microsoft::Applications::Telemetry::LogConfiguration+0x1ae6b8
+```
+
+같은 RVA 를 우리 `symbolize.ps1`(pdb 캐시 보유)로 풀면 진짜 이름이 나온다:
+
+```
+0x1db6109 => v8::internal::CallSiteInfo::ComputeSourcePosition+0x89
+0x6928b28 => v8::internal::Script::IsSubjectToDebugging+0x8
+```
+
+두 가지 부탁:
+
+1. **symsrv 를 못 올리면 심볼을 내지 말 것.** `symbol: null` + `frame: "msedge.dll+0x…"` 로 두는 편이
+   훨씬 낫다. 지금은 오프셋이 메가바이트 단위여도 함수 이름이 붙어 나와서, 그대로 믿으면 틀린 결론이 된다.
+   (실제로 `IsSandboxedProcess` 를 보고 "샌드박스 관련인가" 하고 잠깐 헤맸다.)
+2. **`dbghelp` 를 Windows Kits 경로에서 LoadLibrary 할 것.** System32 의 dbghelp 에는 symsrv 가 없어
+   심볼 서버를 못 쓴다. 우리 `symbolize.ps1` 이 겪고 해결한 것과 같은 함정이다
+   (`symsrv.dll` → `dbgcore.dll` → `dbghelp.dll` 순으로 Kits 경로에서 먼저 로드).
