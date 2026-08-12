@@ -36,11 +36,50 @@ http.createServer((req, res) => {
     // 두 형태를 잰다. plain 은 리라이터가 손대지 않아 배수가 1이고,
     // member 는 `o.g()` → `__zp_call(__zp_get(...))` 로 프레임이 늘어난다.
     // 실제 SDK 코드는 거의 전부 member 형태다.
-    const html = '<!doctype html><meta charset=utf-8><title>zp depth probe</title><body><script>'
+    // (a) 재귀 깊이 (b) **identity 안정성**.
+    // (b) 가 핵심 가설: 같은 객체를 읽을 때마다 다른 래퍼가 나오면, 객체 그래프를
+    // 재귀 순회하는 코드의 `seen` 집합이 무력화돼 종료하지 못하고 스택을 넘긴다.
+    // 그러면 "스택 오버플로 3,228회 vs 직접 2회" 가 설명된다.
+    // inline script 라서 zp-htmltx→zp-rewriter 를 타고, 그래야 __zp_get 이 돈다.
+    const html = '<!doctype html><meta charset=utf-8><title>zp probe</title><body><script>'
       + 'var dp=0; function gp(){ dp++; gp(); } try{ gp(); }catch(e){}'
       + 'var o={}; var dm=0; o.g=function(){ dm++; o.g(); }; try{ o.g(); }catch(e){}'
-      + 'window.__ZPDEPTH = { plain: dp, member: dm };'
-      + 'document.title = "plain=" + dp + " member=" + dm;'
+      + 'function id(f){ try{ return f()===f(); }catch(e){ return "ERR:"+e.message; } }'
+      + 'var ids = {'
+      + '  top:        id(function(){ return window.top; }),'
+      + '  parent:     id(function(){ return window.parent; }),'
+      + '  self:       id(function(){ return window.self; }),'
+      + '  location:   id(function(){ return window.location; }),'
+      + '  defaultView:id(function(){ return document.defaultView; }),'
+      + '  docLoc:     id(function(){ return document.location; }),'
+      + '  body:       id(function(){ return document.body; }),'
+      + '  navigator:  id(function(){ return window.navigator; }),'
+      + '  history:    id(function(){ return window.history; }),'
+      + '  storage:    id(function(){ return window.localStorage; })'
+      + '};'
+      + 'var selfEq = { winIsSelf: (window===window.self), topIsWin: (window.top===window),'
+      + '  docWin: (document.defaultView===window) };'
+      // `get()` 은 postMessage 를 매번 bind 하고 constructor 를 dynamicWrapperFor 로 감싼다.
+      // 새 객체가 매번 나오면 `.constructor` 체인을 도는 코드가 종료하지 못한다 —
+      // 실브라우저에서는 Object→Function→Function 으로 2~3 스텝에 닫힌다.
+      + 'var fnId = { postMessage: id(function(){ return window.postMessage; }),'
+      + '  ctorObj: id(function(){ return ({}).constructor; }),'
+      + '  ctorWin: id(function(){ return window.constructor; }),'
+      + '  createElement: id(function(){ return document.createElement; }) };'
+      + 'function chain(start){ var seen=[]; var c=start; var n=0;'
+      + '  while(c && n<5000){ var dup=false;'
+      + '    for(var i=0;i<seen.length;i++){ if(seen[i]===c){ dup=true; break; } }'
+      + '    if(dup) break; seen.push(c); c=c.constructor; n++; }'
+      + '  return n; }'
+      + 'var chains = { fromObj: chain({}), fromWin: chain(window), fromDoc: chain(document) };'
+      // **멤브레인이 실제로 도는가**를 이 한 줄로 판정한다. 리라이트를 타면
+      // location.href 는 가상 URL(원본 타깃)이고, 안 타면 프록시 URL 이다.
+      // 이걸 확인 안 하고 잰 값은 전부 무의미하다(실제로 두 번 당했다).
+      + 'var membrane = { loc: String(location.href).slice(0,60),'
+      + '  isVirtual: String(location.href).indexOf("127.0.0.1:18099")>=0,'
+      + '  isProxy: String(location.href).indexOf("/zp/p/")>=0 };'
+      + 'window.__ZPDEPTH = { plain: dp, member: dm, ids: ids, selfEq: selfEq, fnId: fnId, chains: chains, membrane: membrane };'
+      + 'document.title = "probe done";'
       + '</' + 'script>';
     res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
     return res.end(html);
