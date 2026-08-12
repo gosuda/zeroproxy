@@ -9,7 +9,9 @@
 // 256회마다 'ZPCATCH#<id>#<count>#<msg>' 문자열을 만들어 배열에 붙잡아 두면
 // 풀메모리 덤프 문자열 스캔으로 잡힌다(heapcount.js 와 같은 방식).
 const fs = require('fs');
-const src = fs.readFileSync(__dirname + '/wtm-raw.js', 'utf8');
+const SRC = process.argv[2] || "wtm-new-main.js";
+const OUT = process.argv[3] || "main-catch.js";
+const src = fs.readFileSync(__dirname + "/" + SRC, "utf8");
 
 const ID = /[A-Za-z0-9_$]/;
 const skipString = (s, i) => {
@@ -96,5 +98,5 @@ function __ZPC1(i, e) {
 }
 `;
 
-fs.writeFileSync(__dirname + '/main-catch.js', prelude + out);
-console.log('catch sites instrumented: ' + id + ' (binding ' + withBinding + ', bare ' + without + ')');
+fs.writeFileSync(__dirname + "/" + OUT, prelude + out);
+console.log(SRC + " -> " + OUT + ": catch " + id + " (binding " + withBinding + ", bare " + without + ")");

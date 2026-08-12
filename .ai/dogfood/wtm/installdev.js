@@ -16,17 +16,17 @@ if (!A.test(s)) throw new Error('anchor A (try/const tu) not found');
 s = s.replace(A, '$1$2let __zpDevSink = false;$1$2try {$3$4const tu = new URL(target);');
 
 // ② 차단 조건 → dev 타깃이면 페이로드로, 아니면 원래대로 차단
-// `disableblocks.js` 가 먼저 돌면 조건 앞에 `false && ` 가 붙는다. 그 상태도 받아야
-// 한다 — 안 그러면 앵커가 깨져 주입이 실패하고, 그걸 "계측 결과 0" 으로 오독한다.
-const B = /if \((false && )?tu\.host === 'ncpt\.naver\.com'(\r?\n)\s*\|\| \(tu\.host === 'wtm\.pstatic\.net' && tu\.pathname\.indexOf\('27b3366'\) >= 0\)\) \{/;
+// 앵커는 **현재 출하 형태**를 따라간다. 예전엔 해시 조건이 붙어 있었는데
+// 2026-08-12 에 그걸 지웠고, 그 순간 이 앵커가 깨져 주입이 조용히 실패했다.
+// `disableblocks.js` 가 먼저 돌면 `false && ` 가 붙으므로 그것도 받는다.
+const B = /if \((false && )?tu\.host === 'ncpt\.naver\.com'\) \{/;
 const mB = s.match(B);
-if (!mB) throw new Error('anchor B (block condition) not found');
+if (!mB) throw new Error('anchor B (ncpt block condition) not found');
 const disabled = mB[1] || '';   // 차단 해제 상태를 그대로 보존한다
 s = s.replace(B,
   "if (tu.host === 'wtm.pstatic.net' && tu.pathname.indexOf(ZP_DEV_TARGET) >= 0) {\n"
   + '        __zpDevSink = true;\n'
-  + '      } else if (' + disabled + '\'ncpt.naver.com\' === tu.host\n'
-  + "        || (tu.host === 'wtm.pstatic.net' && tu.pathname.indexOf('27b3366') >= 0)) {");
+  + '      } else if (' + disabled + "tu.host === 'ncpt.naver.com') {");
 
 // ③ try/catch **밖**에서 페이로드를 돌려준다. 안에서 하면 실패가 삼켜져
 //    진짜 CDN 으로 폴백하고 "계측본을 쟀다" 고 착각하게 된다(2026-08-10).

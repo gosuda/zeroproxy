@@ -75,10 +75,18 @@ http.createServer((req, res) => {
       // **멤브레인이 실제로 도는가**를 이 한 줄로 판정한다. 리라이트를 타면
       // location.href 는 가상 URL(원본 타깃)이고, 안 타면 프록시 URL 이다.
       // 이걸 확인 안 하고 잰 값은 전부 무의미하다(실제로 두 번 당했다).
+      // 전역 표면 크기. 오버플로가 3,220회(직접 2회)인데, 이런 수는 보통
+      // "무언가마다 한 번" 이다. SDK 가 전역을 훑으며 프로브를 돌린다면
+      // 우리 realm 의 전역 수가 곧 배수가 된다. 직접 로드와 비교한다.
+      + 'function names(o){ try{ return Object.getOwnPropertyNames(o); }catch(e){ return []; } }'
+      + 'var wn = names(window);'
+      + 'var surface = { win: wn.length, doc: names(document).length,'
+      + '  proto: names(Object.getPrototypeOf(window)||{}).length,'
+      + '  zp: wn.filter(function(n){ return n.indexOf("__zp")===0 || n.indexOf("ZP")===0 || n.indexOf("__ZP")===0; }) };'
       + 'var membrane = { loc: String(location.href).slice(0,60),'
       + '  isVirtual: String(location.href).indexOf("127.0.0.1:18099")>=0,'
       + '  isProxy: String(location.href).indexOf("/zp/p/")>=0 };'
-      + 'window.__ZPDEPTH = { plain: dp, member: dm, ids: ids, selfEq: selfEq, fnId: fnId, chains: chains, membrane: membrane };'
+      + 'window.__ZPDEPTH = { plain: dp, member: dm, ids: ids, selfEq: selfEq, fnId: fnId, chains: chains, membrane: membrane, surface: surface };'
       + 'document.title = "probe done";'
       + '</' + 'script>';
     res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
