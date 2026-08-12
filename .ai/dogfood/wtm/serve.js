@@ -83,10 +83,20 @@ http.createServer((req, res) => {
       + 'var surface = { win: wn.length, doc: names(document).length,'
       + '  proto: names(Object.getPrototypeOf(window)||{}).length,'
       + '  zp: wn.filter(function(n){ return n.indexOf("__zp")===0 || n.indexOf("ZP")===0 || n.indexOf("__ZP")===0; }) };'
+      // 체인 길이. 오버플로 3,220 ≈ 스택의 LoadIC 반복 2,961 이므로,
+      // "한 번의 재귀가 ~3,000 깊이로 들어간다" 로 읽는 게 자연스럽다.
+      // 끝나지 않는 순회의 단골은 프로토타입/부모/프레임 체인이다.
+      + 'function protoLen(o){ var n=0; try{ while(o && n<20000){ o=Object.getPrototypeOf(o); n++; } }catch(e){} return n; }'
+      + 'function parentLen(o){ var n=0; try{ while(o && n<20000){ o=o.parentNode; n++; } }catch(e){} return n; }'
+      + 'var walk = { protoWin: protoLen(window), protoDoc: protoLen(document),'
+      + '  protoBody: protoLen(document.body), protoFn: protoLen(function(){}),'
+      + '  parentBody: parentLen(document.body),'
+      + '  frames: (function(){ try{ return window.frames.length; }catch(e){ return -1; } })(),'
+      + '  frame0IsSelf: (function(){ try{ return window.frames.length>0 && window.frames[0]===window; }catch(e){ return "ERR"; } })() };'
       + 'var membrane = { loc: String(location.href).slice(0,60),'
       + '  isVirtual: String(location.href).indexOf("127.0.0.1:18099")>=0,'
       + '  isProxy: String(location.href).indexOf("/zp/p/")>=0 };'
-      + 'window.__ZPDEPTH = { plain: dp, member: dm, ids: ids, selfEq: selfEq, fnId: fnId, chains: chains, membrane: membrane, surface: surface };'
+      + 'window.__ZPDEPTH = { plain: dp, member: dm, ids: ids, selfEq: selfEq, fnId: fnId, chains: chains, membrane: membrane, surface: surface, walk: walk };'
       + 'document.title = "probe done";'
       + '</' + 'script>';
     res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
