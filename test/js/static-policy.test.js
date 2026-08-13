@@ -2413,3 +2413,42 @@ test('puppeteer real-site harness: random port + bind fail-fast + subtest isolat
   assert.match(harness, /browser\.createBrowserContext\(\)/, 'harness must create a fresh BrowserContext per subtest');
   assert.match(harness, /Execution context was destroyed\|Target closed/, 'title-retry loop must tolerate context destruction');
 });
+
+// 2026-08-13 — 쿠키 jar 키는 origin 이 아니라 등록가능 도메인(eTLD+1)이어야
+// 한다. origin 키는 nid.naver.com 에서 로그인한 세션을 www.naver.com 새 탭에서
+// 못 보게 만들었다. 키를 넓힌 대신 `Domain=<공개 접미사>` 는 거부해야 하므로
+// 두 규칙을 같은 함수로 묶었다 — 여기서 **동작**으로 고정한다.
+test('cookie jar is keyed by registrable domain, and public-suffix Domain is rejected', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const start = sw.indexOf('const SECOND_LEVEL_SUFFIX');
+  const endMark = 'function originKeyForURL';
+  const end = sw.indexOf(endMark);
+  assert.ok(start > 0 && end > start, 'registrable-domain helpers must exist in sw.js');
+  const sandbox = {};
+  new Function('exports', sw.slice(start, end) + '\nexports.registrableDomain = registrableDomain;'
+    + '\nexports.isPublicSuffixDomain = isPublicSuffixDomain;')(sandbox);
+  const { registrableDomain, isPublicSuffixDomain } = sandbox;
+
+  // 서브도메인은 하나의 jar 로 모인다 — 이게 로그인 유지의 핵심.
+  assert.equal(registrableDomain('nid.naver.com'), 'naver.com');
+  assert.equal(registrableDomain('www.naver.com'), 'naver.com');
+  assert.equal(registrableDomain('mail.naver.com'), 'naver.com');
+  // 다단계 접미사는 한 단계 더 내려간다.
+  assert.equal(registrableDomain('shop.example.co.kr'), 'example.co.kr');
+  assert.equal(registrableDomain('example.co.kr'), 'example.co.kr');
+  // 무관한 사이트는 절대 합쳐지지 않는다.
+  assert.notEqual(registrableDomain('a.example.com'), registrableDomain('a.example.net'));
+  // IP literal 은 그대로.
+  assert.equal(registrableDomain('127.0.0.1'), '127.0.0.1');
+
+  // 공개 접미사를 Domain 으로 쓰는 쿠키는 거부 — 넓힌 키가 구멍이 되지 않게.
+  assert.equal(isPublicSuffixDomain('com'), true);
+  assert.equal(isPublicSuffixDomain('co.kr'), true);
+  assert.equal(isPublicSuffixDomain('naver.com'), false);
+  assert.equal(isPublicSuffixDomain('example.co.kr'), false);
+
+  // jar 키 자체가 registrableDomain 을 쓰는지, Domain 검사가 파서에 걸려 있는지.
+  assert.match(sw, /function originKeyForURL[\s\S]{0,160}registrableDomain\(new URL\(targetUrl\)\.hostname\)/,
+    'cookie jar key must be the registrable domain, not the origin');
+  assert.match(sw, /isPublicSuffixDomain\(dom\)/, 'cookie parser must reject public-suffix Domain attributes');
+});

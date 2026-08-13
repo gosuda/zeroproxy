@@ -2366,8 +2366,51 @@ self.addEventListener('message', evt => {
   }
 });
 
+// 2026-08-13 — 쿠키 jar 키를 origin 이 아니라 **등록가능 도메인(eTLD+1)** 으로
+// 잡는다. origin 키는 서브도메인마다 jar 를 갈라 놓아서, `nid.naver.com` 으로
+// 시작한 탭에서 로그인한 뒤 `www.naver.com` 을 새 탭으로 열면 NID_AUT/NID_SES
+// 가 없는 빈 jar 를 받아 **로그아웃 상태로 보였다**. 브라우저는 쿠키를 Domain
+// 속성 기준으로 서브도메인끼리 공유하므로, 우리도 그 경계에 맞춰야 한다.
+// jar 내부의 RFC 6265 domainMatch 가 여전히 호스트별 스코핑을 강제하므로
+// 키를 넓혀도 엉뚱한 호스트로 쿠키가 새지 않는다.
+//
+// 공개 접미사 목록(PSL)은 번들에 없다. 아래 휴리스틱은 `naver.com` →
+// naver.com, `example.co.kr` → example.co.kr 처럼 실제로 마주치는 형태를
+// 커버한다. **중요**: 같은 함수를 쿠키 파서의 "Domain 이 공개 접미사면 거부"
+// 검사에도 쓴다. 두 곳이 같은 경계를 보게 해서, 넓힌 키가 `Domain=co.kr`
+// 같은 초광역 쿠키를 받아들이는 구멍으로 이어지지 않게 한다.
+const SECOND_LEVEL_SUFFIX = new Set([
+  'co', 'ne', 'or', 'ac', 'go', 're', 'pe', 'kg', 'seoul', 'busan',
+  'com', 'net', 'org', 'gov', 'edu', 'mil', 'int', 'info', 'biz', 'nom',
+]);
+function registrableDomain(host) {
+  const h = String(host || '').toLowerCase().replace(/\.$/, '');
+  if (!h || /^\d+(\.\d+)*$/.test(h) || h.indexOf(':') >= 0) return h; // IP / IPv6 literal
+  const parts = h.split('.');
+  if (parts.length <= 2) return h;
+  // `example.co.kr` 형태: 마지막이 2글자 ccTLD 이고 그 앞이 알려진
+  // 2단계 접미사면 세 라벨을 잡는다. 그 외에는 두 라벨.
+  const tld = parts[parts.length - 1];
+  const sld = parts[parts.length - 2];
+  if (tld.length === 2 && SECOND_LEVEL_SUFFIX.has(sld)) return parts.slice(-3).join('.');
+  return parts.slice(-2).join('.');
+}
+// A cookie whose Domain attribute IS the public suffix (`com`, `co.kr`) must be
+// rejected — otherwise one site could write a cookie every sibling under that
+// suffix would carry. `registrableDomain` defines where that boundary is.
+function isPublicSuffixDomain(dom) {
+  const d = String(dom || '').toLowerCase().replace(/\.$/, '');
+  if (!d) return true;
+  if (/^\d+(\.\d+)*$/.test(d) || d.indexOf(':') >= 0) return false; // IP literal
+  const parts = d.split('.');
+  if (parts.length < 2) return true;                       // `com`
+  // `co.kr` 자체도 공개 접미사다. registrableDomain 은 두 라벨짜리를 그대로
+  // 돌려주므로 여기서 따로 잡아야 한다.
+  if (parts.length === 2 && parts[1].length === 2 && SECOND_LEVEL_SUFFIX.has(parts[0])) return true;
+  return registrableDomain(d) !== d;
+}
 function originKeyForURL(targetUrl) {
-  try { return new URL(targetUrl).origin; } catch { return ''; }
+  try { return registrableDomain(new URL(targetUrl).hostname); } catch { return ''; }
 }
 function getOrCreateJarForOrigin(originKey, initialRecords) {
   let jar = sharedJars.get(originKey);
@@ -2433,7 +2476,10 @@ function createCookieJar(initialRecords) {
       const v = aeq >= 0 ? attr.slice(aeq + 1).trim() : '';
       if (k === 'domain' && v) {
         const dom = canonHost(v.replace(/^\./, ''));
-        if (!dom || !domainMatch(host, dom, false)) continue;
+        // jar 를 등록가능 도메인 단위로 공유하게 되면서, `Domain=co.kr` 같은
+        // 공개 접미사 쿠키를 받아 주면 그 아래 모든 사이트가 그걸 물고 나가는
+        // 구멍이 된다. 브라우저와 같은 규칙으로 거부한다.
+        if (!dom || isPublicSuffixDomain(dom) || !domainMatch(host, dom, false)) continue;
         rec.domain = dom;
         rec.hostOnly = false;
       } else if (k === 'path' && v && v[0] === '/') {
