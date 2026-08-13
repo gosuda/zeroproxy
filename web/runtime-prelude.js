@@ -816,6 +816,34 @@
     }, 15000);
   }
   startSWKeepAlive();
+  // 2026-08-13 — 이 문서의 clientId 를 SW 의 탭 컨텍스트에 등록한다.
+  //
+  // 최상위 문서는 내비게이션 요청 자체가 바인딩을 만들어 주지만, `srcdoc` /
+  // `blob:` / `about:blank` 문서는 내비게이션이 없어 SW 가 그 클라이언트를
+  // 어느 탭 소속인지 알 수 없다. 그러면 **최상위에서는 잘 나가는 URL 이**
+  // 그 문서에서만 거절당한다. 프렐류드는 이런 문서에도 주입되므로 여기서
+  // 한 번 등록해 두면 그 계층 차이가 사라진다.
+  // controller 는 부팅 직후 아직 null 일 수 있으므로 몇 번 재시도한다 —
+  // 한 번 실패하고 마는 것과 달리, 여기서 놓치면 그 문서의 서브리소스가
+  // 전부 거절당하므로 조용한 실패의 대가가 크다.
+  (function bindClientToTab(attempt) {
+    if (!boot.tabId) return;
+    postMessageToSW({ type: 'ZP_BIND_CLIENT', tabId: boot.tabId, entryId: boot.entryId })
+      .catch(() => { if (attempt < 10) setTimeout(() => bindClientToTab(attempt + 1), 200); });
+  })(0);
+  // SW 가 거절한 요청 목록. 서브리소스 실패는 페이지 콘솔에 아무 흔적을
+  // 남기지 않으므로, 프록시가 못 살려 준 것을 눈이 아니라 목록으로 본다.
+  define(root, '__zp_refusals', function __zp_refusals() {
+    return new Promise((resolve) => {
+      const controller = Native.serviceWorkerController || (Native.serviceWorker && Native.serviceWorker.controller);
+      if (!controller) { resolve([]); return; }
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => resolve([]), 3000);
+      channel.port1.onmessage = ev => { clearTimeout(timer); resolve((ev.data && ev.data.refusals) || []); };
+      try { controller.postMessage({ type: '__zpRefusalDump' }, [channel.port2]); }
+      catch { clearTimeout(timer); resolve([]); }
+    });
+  });
   function updateVirtualBase(raw) {
     try {
       const next = targetURL(raw, baseURL);

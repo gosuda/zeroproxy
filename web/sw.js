@@ -67,6 +67,28 @@ const rewriteStats = {
 // MAX_HEADER_LOG to avoid unbounded memory growth.
 const MAX_HEADER_LOG = 16;
 const outgoingHeaderLog = [];
+
+// 2026-08-13 — 거절당한 요청을 스스로 신고하게 만든다.
+//
+// SW 가 단일 관문이므로, 프록시가 무언가를 못 살려 준 순간은 **전부** 여기를
+// 지난다. 그런데 서브리소스 실패는 페이지 콘솔에 아무것도 남기지 않아서,
+// 지금까지는 "화면이 이상하다" → 스크린샷 분석 → DOM 뒤지기 순서로 눈으로
+// 찾아야 했다 (NAVER 장바구니의 Braze 오버레이가 그랬다). 거절 사유를 URL·
+// 클라이언트와 함께 남겨 두면 그 과정이 목록 조회 한 번으로 끝난다.
+// 페이지에서는 `__zp_refusals()` 로 읽는다.
+const MAX_REFUSAL_LOG = 64;
+const refusalLog = [];
+function logRefusal(code, status, targetUrl, extra) {
+  try {
+    refusalLog.push(Object.assign({
+      ts: Date.now(),
+      code: String(code || ''),
+      status: status | 0,
+      url: String(targetUrl || '').slice(0, 300),
+    }, extra || {}));
+    while (refusalLog.length > MAX_REFUSAL_LOG) refusalLog.shift();
+  } catch {}
+}
 function logOutgoingHeaders(targetUrl, method, entries) {
   outgoingHeaderLog.push({
     ts: Date.now(),
@@ -496,7 +518,14 @@ async function handleFetch(event) {
       // 204 rather than a 1x1 image: "no icon", stated once and cached, so the
       // browser stops asking and nothing is logged.
       case 'BLANK_ICON': return new Response(null, { status: 204, headers: { 'cache-control': 'max-age=86400' } });
-      default: return req.mode === 'navigate' ? safeError('POLICY_BLOCKED', 403) : Response.error();
+      // 여기가 "프록시가 못 살려 준" 요청이 실제로 죽는 자리다. 서브리소스는
+      // `Response.error()` 라 페이지 콘솔에 사유가 남지 않으므로 반드시 남긴다
+      // — 이 한 줄이 "화면이 이상하다" 를 URL 목록으로 바꾼다.
+      default:
+        logRefusal('UNCLASSIFIED', req.mode === 'navigate' ? 403 : 0, url.href, {
+          mode: req.mode, dest: req.destination, client: clientId || '', ref: req.headers.get('Referer') || '',
+        });
+        return req.mode === 'navigate' ? safeError('POLICY_BLOCKED', 403) : Response.error();
     }
   } catch (e) {
     return safeError(e && e.code || e && e.message || 'POLICY_BLOCKED', 400);
@@ -1942,6 +1971,12 @@ async function handleMessage(event) {
     if (reply) reply.postMessage({ ok: true, trace: (self.__zpRustTrace || []).slice(-400), streamStats: self.__zpStreamStats || null });
     return;
   }
+  // 거절 로그 덤프 — 페이지의 `__zp_refusals()` 가 읽는다. 커널을 건드리지
+  // 않으므로 wasm 이 죽어 있어도 답한다.
+  if (msg && msg.type === '__zpRefusalDump') {
+    if (reply) reply.postMessage({ ok: true, refusals: refusalLog.slice(-MAX_REFUSAL_LOG) });
+    return;
+  }
   if (msg && msg.type === '__zpKernelEchoTest') {
     // 2026-06-08 split-bundle (c.3): echoSync is a kernel-half export now.
     // Probe through initKernel() — initBundle() doesn't carry kernel*.
@@ -2075,6 +2110,30 @@ async function handleMessage(event) {
       tab.activeEntryId = entry.entryId;
       if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId });
       ok();
+      return;
+    }
+    // 2026-08-13 — 클라이언트가 자기 탭을 명시적으로 등록한다.
+    //
+    // `contextFor` 는 (a) Referer 로 share 경로를 되짚거나 (b) 이미 바인딩된
+    // clientId 로만 탭을 찾는다. 그런데 `srcdoc` / `blob:` / `about:blank`
+    // 문서는 내비게이션 요청이 없어 (b) 가 채워질 일이 없고, 그 문서의
+    // 서브리소스는 Referer 도 우리 origin 이 아니라 (a) 도 실패한다. 결과:
+    // **최상위 문서에서는 정상 로드되는 바로 그 URL 이** srcdoc iframe 에서
+    // 오면 거절당했다 (NAVER 장바구니 위 Braze 오버레이가 이미지 전부 실패).
+    //
+    // 프렐류드는 이런 문서에도 주입되고 boot 설정으로 자기 tabId/entryId 를
+    // 안다. 부팅 직후 이 메시지를 보내 clientId 를 묶어 준다. A2 불변식은
+    // 그대로다 — runtimeTabForMessage 가 per-tab capability token 을 요구하므로
+    // 토큰 없는 클라이언트는 자기를 아무 탭에나 붙일 수 없다. srcdoc 은 부모의
+    // entry 를 물려받는데, 그게 명세상 맞다 (srcdoc 은 부모의 URL/base 를 쓴다).
+    if (msg.type === 'ZP_BIND_CLIENT') {
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
+      if (!entry) { fail('SW_NOT_READY'); return; }
+      const sourceId = event.source && event.source.id;
+      if (sourceId) bindClientContext(sourceId, tab, entry);
+      ok({ bound: !!sourceId });
       return;
     }
     if (msg.type === 'ZP_BASE_UPDATE') {
@@ -2640,6 +2699,7 @@ function addCSP(resp, req, servers, tab) {
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 function safeError(code, status = 400, targetUrl = '') {
+  logRefusal(code, status, targetUrl);
   if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED';
   const info = ZP.errorInfo(code);
   let host = '';
