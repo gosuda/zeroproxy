@@ -51,6 +51,7 @@ type syncFetchResult struct {
 	Status     int        `json:"status"`
 	StatusText string     `json:"statusText"`
 	Headers    [][]string `json:"headers"`
+	V          string     `json:"v"`
 	BodyB64    string     `json:"bodyB64"`
 	Err        string     `json:"err"`
 }
@@ -97,22 +98,22 @@ func sameOriginOnly(r *http.Request) bool {
 // 여기서 응답을 park 하고 SW 가 결과를 돌려줄 때까지 기다린다.
 func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusMethodNotAllowed)
+		s.safeError(w, r, "SYNC_BAD_METHOD", http.StatusMethodNotAllowed)
 		return
 	}
 	if !sameOriginOnly(r) {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
+		s.safeError(w, r, "SYNC_BAD_ORIGIN", http.StatusForbidden)
 		return
 	}
 	q := r.URL.Query()
 	target := q.Get("u")
 	if target == "" {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusBadRequest)
+		s.safeError(w, r, "SYNC_NO_TARGET", http.StatusBadRequest)
 		return
 	}
 	tu, err := url.Parse(target)
 	if err != nil || (tu.Scheme != "http" && tu.Scheme != "https") {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusBadRequest)
+		s.safeError(w, r, "SYNC_BAD_SCHEME", http.StatusBadRequest)
 		return
 	}
 
@@ -125,7 +126,7 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 		result: make(chan *syncFetchResult, 1),
 	}
 	if job.ID == "" || job.Method == "" {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusBadRequest)
+		s.safeError(w, r, "SYNC_BAD_ARGS", http.StatusBadRequest)
 		return
 	}
 	// 페이지가 보낸 헤더 중 안전한 것만 넘긴다. Cookie/Authorization 은
@@ -141,14 +142,19 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 	case s.syncHub.queue <- job:
 	default:
 		s.syncHub.take(job.ID)
-		s.safeError(w, r, "TARGET_HTTP_FAILED", http.StatusServiceUnavailable)
+		s.safeError(w, r, "SYNC_QUEUE_FULL", http.StatusServiceUnavailable)
 		return
 	}
 
 	select {
 	case res := <-job.result:
+		w.Header().Set("X-ZP-Sync-Relay", sanitizeHeaderValue(res.V))
 		if res.Err != "" {
-			s.safeError(w, r, "TARGET_HTTP_FAILED", http.StatusBadGateway)
+			// 상류 실패 이유를 헤더로 넘긴다. 본문에 넣으면 페이지가 그대로
+			// DOM 에 꽂아 버리고(캡차가 실제로 그랬다), SW 콘솔은 이 환경에서
+			// 회수가 안 된다. 헤더면 프렐류드가 진단 버퍼에 남길 수 있다.
+			w.Header().Set("X-ZP-Sync-Err", sanitizeHeaderValue(res.Err))
+			s.safeError(w, r, "SYNC_UPSTREAM_FAILED", http.StatusBadGateway)
 			return
 		}
 		for _, kv := range res.Headers {
@@ -164,7 +170,7 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 		}
 	case <-time.After(syncFetchWait):
 		s.syncHub.take(job.ID)
-		s.safeError(w, r, "TARGET_HTTP_FAILED", http.StatusGatewayTimeout)
+		s.safeError(w, r, "SYNC_NO_WORKER", http.StatusGatewayTimeout)
 	case <-r.Context().Done():
 		s.syncHub.take(job.ID)
 	}
@@ -174,7 +180,7 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 // 빈손으로 돌아가면 SW 가 즉시 다시 연다.
 func (s *server) handleSyncFetchPoll(w http.ResponseWriter, r *http.Request) {
 	if !sameOriginOnly(r) {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
+		s.safeError(w, r, "SYNC_BAD_ORIGIN", http.StatusForbidden)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -191,11 +197,11 @@ func (s *server) handleSyncFetchPoll(w http.ResponseWriter, r *http.Request) {
 // handleSyncFetchResult — SW 가 결과를 돌려주는 자리.
 func (s *server) handleSyncFetchResult(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusMethodNotAllowed)
+		s.safeError(w, r, "SYNC_BAD_METHOD", http.StatusMethodNotAllowed)
 		return
 	}
 	if !sameOriginOnly(r) {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusForbidden)
+		s.safeError(w, r, "SYNC_BAD_ORIGIN", http.StatusForbidden)
 		return
 	}
 	var payload struct {
@@ -203,7 +209,7 @@ func (s *server) handleSyncFetchResult(w http.ResponseWriter, r *http.Request) {
 		syncFetchResult
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&payload); err != nil {
-		s.safeError(w, r, "POLICY_BLOCKED", http.StatusBadRequest)
+		s.safeError(w, r, "SYNC_BAD_RESULT", http.StatusBadRequest)
 		return
 	}
 	job := s.syncHub.take(payload.ID)
@@ -218,6 +224,16 @@ func (s *server) handleSyncFetchResult(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// sanitizeHeaderValue — 헤더에 넣어도 안전한 형태로 줄인다.
+// 개행이 섞이면 헤더 인젝션이 되므로 제거하고, 길이도 자른다.
+func sanitizeHeaderValue(v string) string {
+	v = strings.NewReplacer("\r", " ", "\n", " ").Replace(v)
+	if len(v) > 200 {
+		v = v[:200]
+	}
+	return v
 }
 
 // decodeB64 — 본문은 base64 로 실어 나른다(바이너리 안전).

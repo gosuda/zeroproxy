@@ -192,11 +192,28 @@ async function syncFetchRelayLoop() {
   }
 }
 
+// 탭 등록은 페이지 로드와 **경쟁**한다. 인라인 스크립트가 아주 이른 시점에
+// 동기 XHR 을 던지면 그 탭이 아직 `tabs` 에 없을 수 있다(실측: 같은 하네스에서
+// 어떤 런은 성공, 어떤 런은 SW_NOT_READY). 짧게 기다렸다 다시 보고,
+// 그래도 없으면 탭이 하나뿐일 때는 그것을 쓴다.
+async function resolveSyncTab(tabId) {
+  for (let i = 0; i < 20; i++) {
+    const t = tabId && tabs.get(tabId);
+    if (t) return t;
+    if (!tabId && tabs.size === 1) return tabs.values().next().value;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  if (tabs.size === 1) return tabs.values().next().value;
+  return null;
+}
+
 async function handleSyncFetchJob(job) {
-  const out = { id: job.id, status: 0, statusText: '', headers: [], bodyB64: '', err: '' };
+  // 릴레이 버전. 브라우저가 낡은 SW 를 물고 있는지 응답만 보고 가리기 위한 것 —
+  // 이걸 안 실으면 "내 코드가 틀렸나" 와 "SW 가 낡았나" 를 구분할 수 없다.
+  const out = { id: job.id, v: 'r3', status: 0, statusText: '', headers: [], bodyB64: '', err: '' };
   try {
-    const tab = job.tab && tabs.get(job.tab);
-    if (!tab) throw new Error('SW_NOT_READY');
+    const tab = await resolveSyncTab(job.tab);
+    if (!tab) throw new Error('SW_NOT_READY tab=' + (job.tab || '(none)') + ' known=' + tabs.size);
     const resp = await transportFetch(job.target, {
       method: job.method || 'GET',
       headers: Array.isArray(job.headers) ? job.headers : [],
@@ -215,6 +232,9 @@ async function handleSyncFetchJob(job) {
     out.bodyB64 = btoa(bin);
   } catch (e) {
     out.err = String((e && e.message) || e || 'error');
+    // 상류 실패 이유는 Go 가 버리므로 여기서 흘려 둔다. SW 콘솔은
+    // `dump-recording --filter console` 로 회수되고, 렌더러가 굳어도 남는다.
+    try { console.log('ZPSYNC-SW fail target=' + job.target + ' err=' + out.err); } catch {}
   }
   try {
     await nativeFetch(ZP.apiPath('sync-fetch/result'), {
@@ -226,9 +246,14 @@ async function handleSyncFetchJob(job) {
   } catch {}
 }
 
+// 스크립트 평가 시점에도 시작한다. Service Worker 는 유휴 시 종료됐다가 이벤트로
+// 되살아나는데, 그때 `activate` 는 다시 발생하지 않는다. activate 에서만 걸어두면
+// 되살아난 SW 는 폴링을 하지 않아 동기 XHR 이 전부 타임아웃된다.
+syncFetchRelayLoop();
+
 self.addEventListener('activate', event => event.waitUntil((async () => {
   await self.clients.claim();
-  syncFetchRelayLoop();   // 의도적으로 await 하지 않는다 — 영구 루프다.
+  syncFetchRelayLoop();   // 의도적으로 await 하지 않는다 — 영구 루프다(중복 호출은 플래그로 막힌다).
   const BUNDLE_BOOT_TIMEOUT_MS = 30000;
   await Promise.race([
     initBundle().catch(() => null),

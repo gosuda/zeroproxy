@@ -128,7 +128,10 @@ http.createServer((req, res) => {
       + '  x.send(null);'
       + '  console.log("ZPSYNC status=" + x.status + " len=" + String(x.responseText||"").length'
       + '    + " states=" + seen.join(",")'
-      + '    + " head=" + String(x.responseText||"").slice(0,60).replace(/\\s+/g," "));'
+      + '    + " head=" + String(x.responseText||"").slice(0,40).replace(/\\s+/g," ")'
+      // 상류 실패 이유는 Go 가 헤더로 넘긴다 — 본문은 에러 페이지라 쓸모가 없다.
+      + '    + " relay=" + (x.getResponseHeader ? x.getResponseHeader("X-ZP-Sync-Relay") : "n/a")'
+      + '    + " syncErr=" + (x.getResponseHeader ? x.getResponseHeader("X-ZP-Sync-Err") : "n/a"));'
       + '}catch(e){ console.log("ZPSYNC threw " + (e && e.message)); }'
       + 'var membrane = { loc: String(location.href).slice(0,60),'
       + '  isVirtual: String(location.href).indexOf("127.0.0.1:18099")>=0,'
