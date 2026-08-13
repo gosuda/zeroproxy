@@ -2538,7 +2538,7 @@
     defineAccessor(w.Document && w.Document.prototype, 'documentURI', () => virtualURL.href);
     defineAccessor(w.Document && w.Document.prototype, 'baseURI', () => baseURL);
     defineAccessor(w.Document && w.Document.prototype, 'referrer', () => '');
-    defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(()=>{}); });
+    defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(err => { try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'cookie-set-failed', code: String((err && (err.code || err.message)) || err), ck: s.slice(0, 60) }); } catch {} }); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');

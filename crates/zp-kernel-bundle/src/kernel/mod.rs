@@ -247,6 +247,18 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     // side `X-ZP-Challenge-Compat: 1` marker when the response classifies as
     // a Cloudflare challenge. Mirrors `internal/headers/ApplyChallengeCompat`.
     let mut armed_challenge_compat = false;
+    // 2026-08-13 — Cookie 를 여기서 통째로 버리고 있었다. "framing-controlled"
+    // 목록에 들어 있었지만 Cookie 는 framing 이 아니고, 이 커널 아래에는 쿠키를
+    // 다시 채워 줄 계층이 없다 (Go 릴레이는 쿠키를 관리하지 않는다 — jarFor 는
+    // 이 경로에서 호출되지 않는다). 유일한 권위는 SW 의 RFC 6265 jar 이고,
+    // SW 는 페이지가 직접 넣은 cookie 헤더를 이미 제거한 뒤 자기 jar 의 값만
+    // 싣는다 (sw.js `kl === 'cookie'` skip). 따라서 여기서 살려 보내도 감옥
+    // 불변식은 그대로다. 증상: 모든 업스트림 요청이 쿠키 없이 나가 로그인
+    // 세션이 절대 유지되지 않았다 (NAVER "브라우저 설정 오류").
+    //
+    // 실제 Chrome 은 cookie 를 헤더 목록 맨 끝에 보낸다. promoted 헤더들이
+    // 뒤에 push 되므로, 여기서 뽑아 두었다가 마지막에 다시 붙여 순서를 맞춘다.
+    let mut promoted_cookie: Option<String> = None;
     headers_owned.retain(|(k, v)| {
         let kl = k.to_ascii_lowercase();
         match kl.as_str() {
@@ -277,7 +289,11 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
             // order pass). The old X-ZP-User-Agent promotion path
             // appended UA at the end of the list — visibly wrong in the
             // h2 frame at tls.peet.ws.
-            "host" | "cookie" | "origin" | "referer" | "accept-encoding"
+            "cookie" => {
+                promoted_cookie = Some(v.clone());
+                false
+            }
+            "host" | "origin" | "referer" | "accept-encoding"
             | "connection" | "content-length" | "transfer-encoding" => false,
             _ => true,
         }
@@ -306,6 +322,10 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
         "Accept-Encoding".to_string(),
         "gzip, deflate, br, zstd, identity;q=0.1".to_string(),
     ));
+    // Chrome 순서: cookie 가 맨 마지막.
+    if let Some(v) = promoted_cookie {
+        headers_owned.push(("Cookie".to_string(), v));
+    }
     push_trace(&format!(
         "kernel_fetch:hdr-promoted count={}",
         headers_owned.len()
