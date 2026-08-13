@@ -2452,3 +2452,40 @@ test('cookie jar is keyed by registrable domain, and public-suffix Domain is rej
     'cookie jar key must be the registrable domain, not the origin');
   assert.match(sw, /isPublicSuffixDomain\(dom\)/, 'cookie parser must reject public-suffix Domain attributes');
 });
+
+// 2026-08-13 — CSP 를 한 곳에서 제어한다.
+//
+// CSP 정의가 세 군데 있었다: Rust `zp-shared::build_csp`, Go
+// `internal/headers.BuildCSP`, JS `ZP.fixedCSP`. 앞의 둘은 골든 파일로 묶여
+// 있었지만, **실제로 프록시된 모든 문서를 지배하는 JS 만** 아무 데도 안 묶여
+// 있어서 조용히 흘렀다 (img-src: Rust 'self' vs JS *).
+//
+// 이제 두 표면의 정책이 모두 `crates/zp-shared/src/csp.rs` 에 있고, 프록시
+// 문서용 정책은 Rust 테스트와 이 테스트가 **같은 골든 파일**을 본다. 저장소
+// 안에 정책 문자열은 하나뿐이라, 어느 쪽을 고쳐도 반대편이 깨진다.
+test('proxied-document CSP is controlled from zp-shared (single golden, JS side)', () => {
+  const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8').trim();
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+
+  // zp-core 는 globalThis.ZP 에 붙는 IIFE — 골든과 같은 입력(호스트
+  // proxy.example, https)을 주기 위해 location 을 세운 샌드박스에서 돌린다.
+  const sandbox = {
+    location: { protocol: 'https:', host: 'proxy.example', href: 'https://proxy.example/zp/' },
+    crypto: globalThis.crypto,
+    URL, URLSearchParams, TextEncoder, TextDecoder, console, Object,
+  };
+  sandbox.globalThis = sandbox;
+  new Function('globalThis', 'location', 'crypto', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
+    core)(sandbox, sandbox.location, sandbox.crypto, URL, URLSearchParams, TextEncoder, TextDecoder);
+
+  assert.ok(sandbox.ZP && typeof sandbox.ZP.fixedCSP === 'function', 'zp-core must expose ZP.fixedCSP');
+  assert.equal(sandbox.ZP.fixedCSP(), golden,
+    'ZP.fixedCSP drifted from crates/zp-shared/testdata/csp_proxied.golden — edit csp.rs, regenerate the golden, and update zp-core together');
+
+  // 표면이 달라도 절대 흔들리면 안 되는 것들.
+  for (const invariant of ["default-src 'none'", "object-src 'none'", "base-uri 'none'", "form-action 'self'"]) {
+    assert.ok(golden.includes(invariant), 'proxied CSP lost ' + invariant);
+  }
+  assert.ok(!/connect-src [^;]*\*/.test(golden), 'connect-src must never wildcard');
+  assert.ok(!/script-src [^;]*\*/.test(golden), 'script-src must never wildcard');
+});

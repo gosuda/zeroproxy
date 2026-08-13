@@ -1,8 +1,24 @@
-//! CSP builder. Single source of truth for the browser side.
-//! Go server (`internal/headers/csp.go`) has an independent implementation;
-//! parity is enforced via `crates/zp-shared/testdata/csp.golden` (and
-//! `csp_challenge.golden` for the armed branch) consumed by both
-//! Rust (cargo test) and Go (go test).
+//! CSP builders. Single source of truth for **both** CSP surfaces.
+//!
+//! There are two, and they are deliberately different:
+//!
+//! 1. **Control surface** — [`build_csp`]. Our own origin: launcher, assets,
+//!    error pages (Go `securityHeaders` middleware). No third-party
+//!    subresources exist there, so everything locks to `'self'`.
+//! 2. **Proxied documents** — [`build_proxied_csp`]. The responses the Service
+//!    Worker synthesises for target pages. Passive sources must stay `*`
+//!    because passive subresource URLs are still the raw target URL in the DOM;
+//!    see that function's docs for the measurement and the prerequisite for
+//!    tightening them.
+//!
+//! Parity is enforced by golden files consumed from every language that emits
+//! a policy — Rust (cargo test), Go (`internal/headers/csp_test.go`), and JS
+//! (`test/js/static-policy.test.js` evaluates `web/zp-core.js`). There is one
+//! copy of each policy string in the repo; drift on any side fails the others.
+//!
+//! 2026-08-13: the proxied policy previously lived only in `web/zp-core.js`
+//! with nothing tying it to anything. Go and Rust stayed in step via golden
+//! while the policy that actually governs every proxied page drifted unseen.
 
 /// Options for [`build_csp_with`]. `Default` matches the historical
 /// `build_csp(ws_origin)` output byte-for-byte (golden-stable).
@@ -81,6 +97,75 @@ pub fn build_csp_with(ws_origin: &str, opts: &CspOptions) -> String {
     segments.join("; ")
 }
 
+/// Build the CSP for **proxied target documents** — the responses the Service
+/// Worker synthesises, not our own control surface.
+///
+/// 2026-08-13: this policy used to live only in `web/zp-core.js` (`ZP.fixedCSP`)
+/// with nothing tying it to anything. Go was golden-locked to [`build_csp`],
+/// so the two policies that *were* checked stayed in step while the one that
+/// actually governs every proxied page drifted unnoticed. Both now live here.
+///
+/// **Why it differs from [`build_csp`], deliberately:**
+/// - `img-src` / `style-src` / `font-src` / `media-src` are `*` because passive
+///   subresource URLs stay as the raw target URL in the DOM (measured: an
+///   `<img>` on a proxied page carries `https://ssl.pstatic.net/…`, while
+///   `<link>` is rewritten to `/zp/api/fetch?url=…`). The Service Worker
+///   controls the client and transports them, so nothing reaches the network
+///   directly — but CSP must let the request be *made* for the SW to see it.
+///   Tightening these to `'self'` requires rewriting passive URLs first;
+///   done alone it breaks every image on every page.
+/// - `base-uri 'none'` is *stricter* than the control surface: target pages
+///   must not be able to repoint relative URL resolution.
+/// - `frame-ancestors` is absent on purpose: proxied documents are loaded into
+///   our own nested iframes, which `'none'` would forbid.
+///
+/// `extra_connect` carries the relay server origins the JS builder derives from
+/// the share fragment. Order matters for golden stability: `'self'`, the ws
+/// origin, then extras in argument order, de-duplicated.
+pub fn build_proxied_csp(ws_origin: &str) -> String {
+    build_proxied_csp_with(ws_origin, &[], &CspOptions::default())
+}
+
+/// [`build_proxied_csp`] with relay origins and explicit options.
+pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &CspOptions) -> String {
+    const CF: &str = "https://challenges.cloudflare.com";
+    let cf_suffix = if opts.challenge_compat {
+        format!(" {}", CF)
+    } else {
+        String::new()
+    };
+    let mut connect: Vec<String> = vec!["'self'".to_string(), ws_origin.trim().to_string()];
+    for origin in extra_connect {
+        let o = origin.trim().to_string();
+        if !o.is_empty() && !connect.contains(&o) {
+            connect.push(o);
+        }
+    }
+    if opts.challenge_compat && !connect.iter().any(|c| c == CF) {
+        connect.push(CF.to_string());
+    }
+    let segments: Vec<String> = vec![
+        "default-src 'none'".to_string(),
+        format!(
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'{}",
+            cf_suffix
+        ),
+        "style-src * 'unsafe-inline' blob: data:".to_string(),
+        "img-src * blob: data:".to_string(),
+        "font-src * blob: data:".to_string(),
+        "media-src * blob: data:".to_string(),
+        format!("connect-src {}", connect.join(" ")),
+        format!("frame-src 'self' blob: data:{}", cf_suffix),
+        format!("child-src 'self' blob: data:{}", cf_suffix),
+        "worker-src 'self' blob:".to_string(),
+        "object-src 'none'".to_string(),
+        "base-uri 'none'".to_string(),
+        "form-action 'self'".to_string(),
+        "manifest-src 'self'".to_string(),
+    ];
+    segments.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +187,43 @@ mod tests {
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(!csp.contains("challenges.cloudflare.com"));
+    }
+
+    /// 이 골든은 `web/zp-core.js` 의 `ZP.fixedCSP()` 와 **같은 파일**을 본다
+    /// (`test/js/static-policy.test.js`). 저장소 안에 정책 문자열은 하나뿐이고,
+    /// 어느 쪽이 흘러도 반대편 테스트가 깨진다.
+    #[test]
+    fn build_proxied_csp_matches_golden() {
+        let golden = include_str!("../testdata/csp_proxied.golden").trim_end();
+        assert_eq!(build_proxied_csp("wss://proxy.example"), golden);
+    }
+
+    /// 두 표면의 차이는 **의도된 것만** 있어야 한다. 통제 표면이 수동 리소스에
+    /// 대해 더 엄격하다는 관계가 깨지면(예: 통제 표면에 `*` 가 들어오면)
+    /// 여기서 잡는다.
+    #[test]
+    fn control_surface_stays_stricter_on_passive_sources() {
+        let control = build_csp("wss://proxy.example");
+        let proxied = build_proxied_csp("wss://proxy.example");
+        for directive in ["style-src", "img-src", "font-src", "media-src"] {
+            assert!(
+                !control.contains(&format!("{} *", directive)),
+                "control surface must never wildcard {}",
+                directive
+            );
+            assert!(
+                proxied.contains(&format!("{} *", directive)),
+                "proxied surface needs {} * until passive URLs are rewritten",
+                directive
+            );
+        }
+        // 두 정책 모두에서 절대 흔들리면 안 되는 것들.
+        for invariant in ["default-src 'none'", "object-src 'none'", "form-action 'self'"] {
+            assert!(control.contains(invariant), "control lost {}", invariant);
+            assert!(proxied.contains(invariant), "proxied lost {}", invariant);
+        }
+        assert!(!proxied.contains("connect-src *"), "connect-src must never wildcard");
+        assert!(!proxied.contains("script-src *"), "script-src must never wildcard");
     }
 
     #[test]

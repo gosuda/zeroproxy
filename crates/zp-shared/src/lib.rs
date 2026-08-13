@@ -13,7 +13,7 @@ pub mod version;
 pub use challenge::{
     challenge_subresource_skip, is_challenge_document, CHALLENGE_HOST, CHALLENGE_PLATFORM_PREFIX,
 };
-pub use csp::{build_csp, build_csp_with, CspOptions};
+pub use csp::{build_csp, build_csp_with, build_proxied_csp, build_proxied_csp_with, CspOptions};
 pub use errors::ErrorCode;
 pub use shareurl::{parse_share_url, ShareUrl, ShareUrlError};
 pub use version::TRANSFORMER_VERSION;
