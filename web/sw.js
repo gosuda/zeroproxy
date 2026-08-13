@@ -1918,7 +1918,25 @@ function buildRuntimePrelude(tab, entry) {
   // per-hop wait re-encodes the remaining chain into the next URL's
   // fragment before calling location.assign on it.
   const prewarmInline = '(function(){try{var p=new URLSearchParams(location.hash.slice(1));var c=p.get("zp_chain");if(!c)return;var chain;try{chain=JSON.parse(atob(decodeURIComponent(c)));}catch(e){return;}if(!Array.isArray(chain)||!chain.length)return;var next=chain.shift();var wait=Math.max(0,Math.min(120000,Number(next.waitMs)||0));var u=new URL(next.path,location.origin);var np=new URLSearchParams(u.hash.startsWith("#")?u.hash.slice(1):u.hash);if(chain.length){np.set("zp_chain",encodeURIComponent(btoa(JSON.stringify(chain))));}else{np.delete("zp_chain");}u.hash="#"+np.toString();var assign=location.assign.bind(location);p.delete("zp_chain");try{history.replaceState(null,"","#"+p.toString());}catch(e){}setTimeout(function(){try{assign(u.toString());}catch(e){}},wait);}catch(e){}})();';
-  return '<script nonce=zp>' + prewarmInline + '</script>' +
+  // 2026-08-13 — CSP 를 **문서 안에도** 박는다.
+  //
+  // 실측: SW 가 합성한 응답이라도 non-streaming(`new Response(string, …)`)
+  // 이면 CSP 가 정상 강제된다(에러 페이지에서 외부 이미지 차단 확인).
+  // 그런데 스트리밍 문서(`new Response(ReadableStream, …)`)에서는 같은
+  // 헤더를 실어도 강제되지 않는다 — 리라이트 안 된 외부 이미지가 그대로
+  // 로드됐다. 헤더 경로가 왜 무시되는지는 별개로 파야 하지만, 문서에 직접
+  // 박은 meta 는 파서가 처리하므로 응답 합성 방식과 무관하다.
+  //
+  // 프렐류드는 문서 맨 앞에 주입되므로 이 meta 는 어떤 서브리소스보다 먼저
+  // 온다 — CSP meta 의 요구 조건이 그것이다. `frame-ancestors` 는 meta 에서
+  // 무시되지만 프록시 문서 정책은 그걸 쓰지 않는다(중첩 iframe 때문에 일부러
+  // 뺐다). 헤더도 그대로 둔다 — 둘 다 있으면 각각 강제되고 값이 같으므로
+  // 실효 정책은 변하지 않는다.
+  const cspMeta = '<meta http-equiv="Content-Security-Policy" content="'
+    + ZP.fixedCSP(tab.servers || [], { challengeCompat: !!tab.challengeCompat }).replace(/"/g, '&quot;')
+    + '">';
+  return cspMeta +
+    '<script nonce=zp>' + prewarmInline + '</script>' +
     '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
     // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js script
     // tag dropped. zp-page-bundle.js inlines the wasm + initSync's so
