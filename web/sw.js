@@ -163,8 +163,72 @@ self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
 // 가 보장됨 → 첫 fetch 가 cold-init latency 없이 즉시 ZPBundle 사용 가능. 30s
 // timeout 으로 wasm fetch 가 실패해도 activate 가 stuck 되지 않도록 보호.
 // 그래도 ZPBundle.ready 가 false 면 hot-path 가 `await initBundle()` 재시도.
+// 동기 XHR 중계 — SW 쪽 소비자.
+//
+// SW 는 동기 XHR 을 **가로채지 못한다**(실측: 같은 페이지·같은 URL 에서 동기
+// XHR 은 Go 까지 내려가 403, 비동기 fetch 는 SW 가 503). 그래서 페이지는
+// 동기 XHR 을 same-origin 엔드포인트로 던지고, Go 가 그 응답을 park 한 채
+// 여기로 작업을 넘긴다. 실제 전송은 기존 `transportFetch` 가 그대로 하므로
+// egress 경로도 TLS/HTTP 지문도 달라지지 않는다.
+//
+// 페이지 메인 스레드가 동기 XHR 로 막혀 있어도 SW 는 별도 스레드라 돌 수 있다 —
+// 그게 이 구조가 성립하는 이유다.
+let syncRelayRunning = false;
+async function syncFetchRelayLoop() {
+  if (syncRelayRunning) return;
+  syncRelayRunning = true;
+  for (;;) {
+    let job = null;
+    try {
+      const r = await nativeFetch(ZP.apiPath('sync-fetch/poll'), { cache: 'no-store' });
+      if (r.status === 200) job = await r.json();
+    } catch {
+      // 서버가 잠깐 없을 수 있다. 조금 쉬고 다시 연다.
+      await new Promise(res => setTimeout(res, 1000));
+      continue;
+    }
+    if (!job) continue;                        // 204 = 빈손, 즉시 재연결
+    handleSyncFetchJob(job).catch(() => {});   // 다음 폴을 막지 않는다
+  }
+}
+
+async function handleSyncFetchJob(job) {
+  const out = { id: job.id, status: 0, statusText: '', headers: [], bodyB64: '', err: '' };
+  try {
+    const tab = job.tab && tabs.get(job.tab);
+    if (!tab) throw new Error('SW_NOT_READY');
+    const resp = await transportFetch(job.target, {
+      method: job.method || 'GET',
+      headers: Array.isArray(job.headers) ? job.headers : [],
+      tab,
+      entryId: job.entry || tab.activeEntryId,
+    });
+    out.status = resp.status;
+    out.statusText = resp.statusText || '';
+    try { resp.headers.forEach((v, k) => out.headers.push([k, v])); } catch {}
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    // btoa 는 문자열만 받는다. 큰 본문에서 스택이 터지지 않게 청크로 자른다.
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    }
+    out.bodyB64 = btoa(bin);
+  } catch (e) {
+    out.err = String((e && e.message) || e || 'error');
+  }
+  try {
+    await nativeFetch(ZP.apiPath('sync-fetch/result'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(out),
+      cache: 'no-store',
+    });
+  } catch {}
+}
+
 self.addEventListener('activate', event => event.waitUntil((async () => {
   await self.clients.claim();
+  syncFetchRelayLoop();   // 의도적으로 await 하지 않는다 — 영구 루프다.
   const BUNDLE_BOOT_TIMEOUT_MS = 30000;
   await Promise.race([
     initBundle().catch(() => null),

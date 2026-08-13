@@ -116,15 +116,18 @@ http.createServer((req, res) => {
       // 나간다), 그 탓에 NAVER 캡차의 UI/이미지 요청이 JSONP 폴백으로 빠진다.
       // 우리 facade 가 아니라 **네이티브 XHR** 이 필요하므로 iframe 에서 꺼내 쓴 뒤,
       // 같은 origin 의 프록시 엔드포인트로 동기 GET 을 던져 본다.
+      // 페이지의 XHR(= 우리 facade)로 **진짜 동기 요청**을 던진다.
+      // 캡차가 쓰는 것과 같은 형태다: open(..., false) + withCredentials.
+      // 성공하면 감옥 안 중계가 동작한다는 뜻이고, readyState 콜백까지 확인한다.
       + 'try{'
-      + '  var __f = document.createElement("iframe"); __f.style.display="none";'
-      + '  document.documentElement.appendChild(__f);'
-      + '  var NX = __f.contentWindow.XMLHttpRequest;'
-      + '  console.log("ZPSYNC nativeXHR=" + (typeof NX));'
-      + '  var x = new NX();'
-      + '  x.open("GET", "/zp/api/fetch?url=" + encodeURIComponent("https://example.com/"), false);'
+      + '  var x = new XMLHttpRequest();'
+      + '  var seen = [];'
+      + '  x.onreadystatechange = function(){ seen.push(x.readyState); };'
+      + '  x.open("GET", "https://example.com/", false);'
+      + '  x.withCredentials = true;'
       + '  x.send(null);'
       + '  console.log("ZPSYNC status=" + x.status + " len=" + String(x.responseText||"").length'
+      + '    + " states=" + seen.join(",")'
       + '    + " head=" + String(x.responseText||"").slice(0,60).replace(/\\s+/g," "));'
       + '}catch(e){ console.log("ZPSYNC threw " + (e && e.message)); }'
       + 'var membrane = { loc: String(location.href).slice(0,60),'

@@ -1650,6 +1650,66 @@
           function (v) { this[_k] = v; },
           Native.XMLHttpRequest && Native.XMLHttpRequest.prototype);
       }
+      // 동기 XHR 을 same-origin 중계로 보낸다.
+      //
+      // 네이티브 XHR 을 쓰되 **목적지는 우리 origin** 이다. 타깃 URL 은 쿼리로
+      // 넘기고, Go 가 그 응답을 park 한 채 SW 에 일을 시킨다. 브라우저가 타깃으로
+      // 직접 나가는 일이 없으므로 IP 가 새지 않는다(그게 원래 차단의 이유였다).
+      // 쿠키는 여기서 다루지 않는다 — 기존 경로대로 커널의 jar 가 붙인다.
+      function sendSyncThroughRelay(xhr, body) {
+        xhr._sent = true;
+        try {
+          const rid = 'sx' + ZP.randomId();
+          let u = proxyOrigin + ZP.apiPath('sync-fetch')
+            + '?rid=' + encodeURIComponent(rid)
+            + '&u=' + encodeURIComponent(xhr._url)
+            + '&m=' + encodeURIComponent(xhr._method)
+            + '&tab=' + encodeURIComponent(boot.tabId || '')
+            + '&entry=' + encodeURIComponent(activeEntryId || '');
+          for (const kv of xhr._headers) u += '&h=' + encodeURIComponent(kv[0] + ':' + kv[1]);
+
+          const nx = new Native.XMLHttpRequest();
+          nx.open(xhr._method, u, false);
+          if (xhr.responseType === 'arraybuffer' || xhr.responseType === 'blob') {
+            // 동기 XHR 은 responseType 을 못 바꾼다(스펙). 텍스트로 받고 아래에서 변환.
+          }
+          nx.send(body != null && xhr._method !== 'GET' && xhr._method !== 'HEAD' ? body : null);
+
+          xhr.status = nx.status;
+          xhr.statusText = nx.statusText || '';
+          try {
+            const h = new Native.Headers();
+            String(nx.getAllResponseHeaders() || '').split(/\r?\n/).forEach(line => {
+              const i = line.indexOf(':');
+              if (i > 0) { try { h.append(line.slice(0, i).trim(), line.slice(i + 1).trim()); } catch {} }
+            });
+            xhr._responseHeaders = h;
+          } catch {}
+          xhrReady(xhr, HEADERS_RECEIVED);
+          xhrReady(xhr, LOADING);
+          xhr.responseText = nx.responseText || '';
+          if (xhr.responseType === 'json') {
+            try { xhr.response = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { xhr.response = null; }
+          } else {
+            xhr.response = xhr.responseText;
+          }
+          xhr._sent = false;
+          xhrDone(xhr, 'load');
+        } catch (e) {
+          xhr._sent = false;
+          xhr.status = 0;
+          xhr.statusText = '';
+          try {
+            const diag = root.__zp_diagnostics;
+            if (diag && diag.length < 200) diag.push({
+              t: 'sync-xhr-relay-failed',
+              url: String(xhr._url || '').slice(0, 160),
+              msg: String((e && e.message) || e).slice(0, 120),
+            });
+          } catch {}
+          xhrDone(xhr, 'error');
+        }
+      }
       Object.assign(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
         UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
@@ -1662,24 +1722,18 @@
         setAttributionReporting() {},
         setPrivateToken() {},
         open(method, url, async = true, user, password) {
-          if (async === false) {
-            // Synchronous XHR cannot be proxied at all: the Service Worker does
-            // not intercept it (measured — the same URL returns 403 from the Go
-            // server for sync XHR and 503 from the SW for `fetch`), so allowing
-            // it would send the request outside the jail. Blocking is correct,
-            // but the denial is otherwise invisible: target code that catches it
-            // just degrades, and the damage surfaces far away (NAVER's captcha
-            // token comes back as `error1|ReferenceError|…`). Record who asked.
-            try {
-              const diag = root.__zp_diagnostics;
-              if (diag && diag.length < 200) diag.push({
-                t: 'sync-xhr-blocked',
-                url: String(url || '').slice(0, 160),
-                stack: String((new Error()).stack || '').slice(0, 600)
-              });
-            } catch {}
-            throw normalizedError('NotSupportedError');
-          }
+          // 2026-08-13 — 동기 XHR 을 **감옥 안에서** 지원한다.
+          //
+          // Service Worker 는 동기 XHR 을 가로채지 못한다(실측: 같은 페이지·같은
+          // URL 에서 동기 XHR 은 Go 까지 내려가 403, 비동기 fetch 는 SW 가 503).
+          // 그래서 예전에는 그냥 막았는데, NAVER 캡차가 UI(`rcaptUi`)·문제
+          // (`question`)·**JS 토큰 검증**(`verifyJs`)을 전부 동기 XHR 로 가져오는
+          // 탓에 답이 맞아도 "틀렸다" 가 나왔다(진단 버퍼로 확인).
+          //
+          // 이제는 same-origin 중계 엔드포인트로 던진다. Go 는 그 응답을 park 한 채
+          // SW 에 작업을 넘기고, 실제 전송은 기존 `transportFetch` 가 한다 —
+          // 브라우저가 타깃으로 직접 나가지 않으므로 감옥은 그대로다.
+          this._sync = (async === false);
           this.abort();
           this._method = String(method || 'GET').toUpperCase();
           const target = new URL(requestTargetURL(url));
@@ -1700,6 +1754,7 @@
         },
         send(body = null) {
           if (this.readyState !== OPENED || this._sent) throw normalizedError('InvalidStateError');
+          if (this._sync) return sendSyncThroughRelay(this, body);
           this._sent = true;
           this._controller = new AbortController();
           const init = { method: this._method, headers: this._headers, credentials: this.withCredentials ? 'include' : 'same-origin', signal: this._controller.signal };

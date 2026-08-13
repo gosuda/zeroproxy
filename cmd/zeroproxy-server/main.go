@@ -36,6 +36,9 @@ type server struct {
 	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
 	jarsMu        sync.Mutex
 	jars          map[string]*cookiejar.Jar
+	// 동기 XHR 중계 허브. Go 는 요청을 park 만 하고 실제 전송은 SW 가 한다
+	// (syncfetch.go 의 주석 참고) — 새 egress 경로가 아니다.
+	syncHub *syncFetchHub
 }
 
 // jarFor returns the cookie jar for the given tabId, creating one on demand.
@@ -67,7 +70,7 @@ const (
 func main() {
 	var addr string
 	var wtAddr, wtCert, wtKey, wtPath string
-	s := &server{}
+	s := &server{syncHub: newSyncFetchHub()}
 	flag.StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	flag.StringVar(&s.webDir, "web", "dist/web", "built static web asset directory")
 	flag.StringVar(&s.socksAddr, "socks", "127.0.0.1:9050", "Tor SOCKS5 address with IsolateSOCKSAuth, or 'internal' for the built-in test SOCKS5 parser/direct dialer")
@@ -201,6 +204,15 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.serveAsset(w, r, strings.TrimPrefix(path, assetPrefix))
 	case path == controlPrefix+"worker-bootstrap.js":
 		s.workerBootstrap(w, r)
+	case path == controlPrefix+"api/sync-fetch":
+		// 동기 XHR 중계. SW 가 동기 XHR 을 가로채지 못하므로(실측), 페이지는
+		// 이 same-origin 엔드포인트로 던지고 Go 가 SW 에 일을 넘긴다.
+		// Go 는 타깃으로 직접 나가지 않는다 — syncfetch.go 주석 참고.
+		s.handleSyncFetch(w, r)
+	case path == controlPrefix+"api/sync-fetch/poll":
+		s.handleSyncFetchPoll(w, r)
+	case path == controlPrefix+"api/sync-fetch/result":
+		s.handleSyncFetchResult(w, r)
 	case path == controlPrefix+"api/config":
 		// D4/D5 client config — exposes the public WT gateway URL (if
 		// `-wt-public-url` is set) + RTC signaling URL (if

@@ -321,13 +321,39 @@ test('transformDocumentResponse fails closed on malformed HTML (no raw passthrou
 // server for sync XHR and 503 from the SW for `fetch`. Sync XHR bypasses the
 // transport entirely, so it can only ever fail — while looking like it works.
 // Pin the absence so nobody reintroduces it.
-test('no proxied resource is loaded with synchronous XHR (SW cannot intercept it)', () => {
-  for (const file of ['web/runtime-prelude.js', 'web/worker-prelude.js', 'web/sw.js']) {
+// 2026-08-13 — 불변식을 **더 좁게** 다시 세웠다.
+//
+// 예전에는 "동기 XHR 금지" 였다. 그 근거(SW 가 못 가로챈다)는 여전히 맞지만,
+// NAVER 캡차는 UI/문제/JS 토큰 검증을 전부 동기 XHR 로 가져오므로 전면 금지는
+// 캡차를 영구히 불가능하게 만들었다. 그래서 same-origin 중계를 도입했다:
+// 페이지는 우리 origin 의 `api/sync-fetch` 로 던지고, Go 가 응답을 park 한 채
+// SW 에 일을 넘긴다. 브라우저가 타깃으로 직접 나가는 일은 여전히 없다.
+//
+// 따라서 지켜야 할 것은 "동기 XHR 을 쓰지 마라" 가 아니라
+// **"동기 XHR 은 오직 우리 중계로만 나가라"** 다. 타깃 URL 로 직접 동기 요청을
+// 보내면 그게 곧 감옥 탈출(실제 IP 노출)이므로 그것을 못박는다.
+test('synchronous XHR only ever targets the same-origin relay (never a target URL)', () => {
+  // SW / worker 프렐류드에는 동기 XHR 이 있을 이유가 없다.
+  for (const file of ['web/worker-prelude.js', 'web/sw.js']) {
     const src = fs.readFileSync(file, 'utf8');
-    // `xhr.open(method, url, false)` — the third argument false means sync.
     assert.ok(!/\.open\([^)]*,\s*false\s*\)/.test(src),
-      `${file} must not use synchronous XHR — the SW never sees those requests`);
+      `${file} must not use synchronous XHR at all`);
   }
+
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const re = /\.open\([^)]*,\s*false\s*\)/g;
+  let m, found = 0;
+  while ((m = re.exec(rt)) !== null) {
+    found++;
+    // 호출 지점 앞쪽에서 중계 URL 을 만들고 있어야 한다.
+    const before = rt.slice(Math.max(0, m.index - 900), m.index);
+    assert.ok(before.includes("ZP.apiPath('sync-fetch')"),
+      'sync XHR must be sent to the same-origin relay, not to a target URL');
+    assert.ok(before.includes('proxyOrigin'),
+      'sync XHR relay URL must be built on the proxy origin');
+  }
+  // 0건이면 위 루프가 통째로 비어 무조건 통과한다 — 그건 검사가 아니다.
+  assert.ok(found > 0, 'expected the sync-XHR relay call site to exist in runtime-prelude.js');
 });
 
 // The destructuring write sink must stay write-only.
