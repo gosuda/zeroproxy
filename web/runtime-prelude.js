@@ -2222,9 +2222,17 @@
       const nav = clickNavigationTarget(ev);
       if (!nav) return;
       ev.preventDefault();
+      if (nav.hash != null) {
+        // 2026-08-13 — same-document hash 이동에서는 전파를 끊지 않는다.
+        // 실제 브라우저도 해시 이동과 페이지 핸들러 실행을 둘 다 한다.
+        // 여기서 stopImmediatePropagation 을 부르면 `<a href="#tab">` 을
+        // 탭/토글로 쓰는 흔한 React 패턴이 통째로 죽는다 (클릭이 문서까지
+        // 도달하지 못해 delegated onClick 이 안 걸린다).
+        updateVirtualHash(nav.hash);
+        return;
+      }
       ev.stopImmediatePropagation();
-      if (nav.hash != null) updateVirtualHash(nav.hash);
-      else if (nav.href) setVirtualLocation(nav.href);
+      if (nav.href) setVirtualLocation(nav.href);
     }, true);
     document.addEventListener('submit', ev => {
       const f = ev.target;
@@ -3420,6 +3428,22 @@
       }
       if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
       if (isURLBearing(this, key, localKey, ln)) {
+        // 2026-08-13 — fragment-only URL (`#`, `#tab`) 은 same-document 앵커다.
+        // 절대 URL 로 풀어 "?via=" launcher 로 바꾸면 두 가지가 깨진다:
+        // (a) 문서 내 이동이 전체 내비게이션처럼 보이고,
+        // (b) clickNavigationTarget 의 `raw === '#'` 위임 경로가 무력화된다 —
+        //     raw 가 더 이상 '#' 이 아니라 절대 URL 이므로. 그 결과 클릭이
+        //     preventDefault + stopImmediatePropagation 으로 삼켜져 페이지의
+        //     onClick 이 영영 실행되지 않는다. NAVER 로그인 후 MY 패널의
+        //     메일/카페 **탭**(`<a href="#" role="tab">`)이 정확히 이 케이스로
+        //     죽어 있었다. fragment 는 origin 을 벗어나지 않으므로 그대로
+        //     둬도 탈출 위험이 없다.
+        const rawURLValue = v == null ? '' : String(v);
+        if (rawURLValue.charCodeAt(0) === 35 /* '#' */) {
+          urlMeta.delete(this);
+          if (Native.removeAttribute) { try { Native.removeAttribute.call(this, 'data-zp-target-url'); } catch {} }
+          return Native.setAttribute.call(this, k, rawURLValue);
+        }
         if (shouldBlockURLAttribute(this, localKey, v, localKey, ln) || hasContextBlockedScheme(this, v)) return blockExecutableURL(this, localKey, v);
         const t = targetURLForElement(this, v);
         if (t) {
