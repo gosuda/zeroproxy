@@ -2607,6 +2607,23 @@
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');
     installURLProp(w.HTMLInputElement && w.HTMLInputElement.prototype, 'formAction');
     installURLProp(w.HTMLButtonElement && w.HTMLButtonElement.prototype, 'formAction');
+    // 2026-08-13 — 수동 서브리소스의 **프로퍼티 쓰기**도 훅한다.
+    //
+    // 여기에는 내비게이션 속성만 있었다. script 는 `installScriptProp`,
+    // iframe 은 `installFrameProp` 으로 프로퍼티까지 막혀 있었는데 수동
+    // 리소스만 비어 있었다 — `img.src = url` 은 setAttribute 훅을 타지 않고
+    // 네이티브로 바로 속성에 꽂히므로 리라이트가 통째로 건너뛰어졌다.
+    // `img-src *` 아래에서는 SW 가 받아 주니 겉으로는 멀쩡해서 안 보였다.
+    //
+    // 실제 사례: NAVER GNB(`gnb_utf8.nhn`)가
+    //   gnbGetElementsByClassName(...)[0].children[1].src = "https://ssl.pstatic.net/…/myInfo.gif"
+    // 로 넣는다. 장바구니에서 끝까지 원본 URL 로 남던 이미지 2장이 이것이었다.
+    // 원본 URL 이 하나라도 남으면 CSP 를 `img-src 'self'` 로 못 죈다.
+    installURLProp(w.HTMLImageElement && w.HTMLImageElement.prototype, 'src');
+    installURLProp(w.HTMLSourceElement && w.HTMLSourceElement.prototype, 'src');
+    installURLProp(w.HTMLTrackElement && w.HTMLTrackElement.prototype, 'src');
+    installURLProp(w.HTMLMediaElement && w.HTMLMediaElement.prototype, 'src');
+    installURLProp(w.HTMLVideoElement && w.HTMLVideoElement.prototype, 'poster');
     // HTMLHyperlinkElementUtils: protocol/host/hostname/port/pathname/search/
     // hash/origin/username/password. Virtualizing only `href` left every one of
     // these reading the RAW attribute, which since the 2026-06-06 escape fix is

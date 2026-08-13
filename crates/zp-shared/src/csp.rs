@@ -6,10 +6,9 @@
 //!    error pages (Go `securityHeaders` middleware). No third-party
 //!    subresources exist there, so everything locks to `'self'`.
 //! 2. **Proxied documents** — [`build_proxied_csp`]. The responses the Service
-//!    Worker synthesises for target pages. Passive sources must stay `*`
-//!    because passive subresource URLs are still the raw target URL in the DOM;
-//!    see that function's docs for the measurement and the prerequisite for
-//!    tightening them.
+//!    Worker synthesises for target pages. Also `'self'`-locked, plus
+//!    `blob:`/`data:` where target pages legitimately produce them; it differs
+//!    from the control surface in `base-uri` and `frame-ancestors` only.
 //!
 //! Parity is enforced by golden files consumed from every language that emits
 //! a policy — Rust (cargo test), Go (`internal/headers/csp_test.go`), and JS
@@ -106,14 +105,17 @@ pub fn build_csp_with(ws_origin: &str, opts: &CspOptions) -> String {
 /// actually governs every proxied page drifted unnoticed. Both now live here.
 ///
 /// **Why it differs from [`build_csp`], deliberately:**
-/// - `img-src` / `style-src` / `font-src` / `media-src` are `*` because passive
-///   subresource URLs stay as the raw target URL in the DOM (measured: an
-///   `<img>` on a proxied page carries `https://ssl.pstatic.net/…`, while
-///   `<link>` is rewritten to `/zp/api/fetch?url=…`). The Service Worker
-///   controls the client and transports them, so nothing reaches the network
-///   directly — but CSP must let the request be *made* for the SW to see it.
-///   Tightening these to `'self'` requires rewriting passive URLs first;
-///   done alone it breaks every image on every page.
+/// - `img-src` / `style-src` / `font-src` / `media-src` allow `blob:`/`data:`
+///   on top of `'self'` because target pages legitimately produce those and
+///   they cannot reach the network. These were `*` until 2026-08-13: passive
+///   subresource URLs written at runtime stayed as the raw target URL, so
+///   `'self'` would have blocked every image before the SW could intercept.
+///   Both halves emit `/zp/api/fetch?url=…` now — `zp-htmltx` for the initial
+///   HTML, and the prelude for DOM writes (including `img.src =` **property**
+///   writes, which bypassed the `setAttribute` hook entirely and were the last
+///   source of raw URLs). So `'self'` is a real wall again: a missed rewrite
+///   fails loudly and lands in `__zp_refusals()` instead of quietly relying on
+///   the SW to catch it.
 /// - `base-uri 'none'` is *stricter* than the control surface: target pages
 ///   must not be able to repoint relative URL resolution.
 /// - `frame-ancestors` is absent on purpose: proxied documents are loaded into
@@ -150,10 +152,10 @@ pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &Cs
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'{}",
             cf_suffix
         ),
-        "style-src * 'unsafe-inline' blob: data:".to_string(),
-        "img-src * blob: data:".to_string(),
-        "font-src * blob: data:".to_string(),
-        "media-src * blob: data:".to_string(),
+        "style-src 'self' 'unsafe-inline' blob: data:".to_string(),
+        "img-src 'self' blob: data:".to_string(),
+        "font-src 'self' blob: data:".to_string(),
+        "media-src 'self' blob: data:".to_string(),
         format!("connect-src {}", connect.join(" ")),
         format!("frame-src 'self' blob: data:{}", cf_suffix),
         format!("child-src 'self' blob: data:{}", cf_suffix),
@@ -212,8 +214,8 @@ mod tests {
                 directive
             );
             assert!(
-                proxied.contains(&format!("{} *", directive)),
-                "proxied surface needs {} * until passive URLs are rewritten",
+                !proxied.contains(&format!("{} *", directive)),
+                "proxied surface must not wildcard {} — passive URLs are rewritten to /zp/api/fetch now",
                 directive
             );
         }

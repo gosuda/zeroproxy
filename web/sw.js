@@ -1859,6 +1859,9 @@ function streamDocumentResponse(resp, opt, targetUrl) {
   headers.delete('Content-Length');     // decoded plaintext, unknown length
   headers.delete('X-ZP-Stream');        // strip the SW-internal marker
   headers.set('Content-Type', 'text/html; charset=utf-8');
+  // 스트리밍 문서에도 버퍼 경로(`addCSP`)와 **같은** 보안 헤더를 건다.
+  // 빠져 있던 동안 프록시 문서에는 CSP 가 없었다.
+  applyZPSecurityHeaders(headers, opt.request, opt.tab && opt.tab.servers, opt.tab);
   const out = new Response(resp.body.pipeThrough(ts), {
     status: resp.status,
     statusText: resp.statusText,
@@ -2684,18 +2687,31 @@ function applyCORS(h, req) {
 // Go server's ConstructorPolicy — this wrapper only fills in the no-store
 // default when upstream sent nothing, which is the correct floor for both
 // armed and disarmed paths.
-function addCSP(resp, req, servers, tab) {
-  const h = new Headers(resp.headers);
+// 2026-08-13 — addCSP 의 헤더 적용부를 분리했다.
+//
+// `addCSP` 는 `new Response(resp.body, …)` 를 만들어 돌려주는 형태라 이미
+// 파이프한 스트림에는 쓸 수 없었고, 그래서 `streamDocumentResponse` 는
+// 상류 헤더를 그대로 쓰고 **우리 CSP 를 아예 안 붙였다**. 스트리밍이 문서의
+// 기본 경로이므로 사실상 모든 프록시 문서에 CSP 가 없었다.
+// 실측(수정 전): 런처 페이지에서는 외부 이미지가 차단되는데, 같은 이미지가
+// 프록시 문서에서는 그대로 로드됐다.
+function applyZPSecurityHeaders(h, req, servers, tab) {
   // B4: read once, then delete unconditionally — defense in depth against a
   // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
   h.delete('X-ZP-Challenge-Compat');
-  const tabArmed = !!(tab && tab.challengeCompat);
-  const armedHere = tabArmed && responseSignalled;
+  const armedHere = !!(tab && tab.challengeCompat) && responseSignalled;
   h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { challengeCompat: armedHere }));
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
   applyCORS(h, req);
+  return h;
+}
+function addCSP(resp, req, servers, tab) {
+  const h = new Headers(resp.headers);
+  // B4: read once, then delete unconditionally — defense in depth against a
+  // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
+  applyZPSecurityHeaders(h, req, servers, tab);
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 function safeError(code, status = 400, targetUrl = '') {
