@@ -111,6 +111,22 @@ http.createServer((req, res) => {
       + 'try{ console.log("ZPNOTI typeof=" + (typeof Notification)); }catch(e){ console.log("ZPNOTI typeof.threw " + (e && e.message)); }'
       + 'try{ console.log("ZPNOTI perm=" + Notification.permission); }catch(e){ console.log("ZPNOTI perm.threw " + (e && e.message)); }'
       + 'try{ console.log("ZPNOTI after"); }catch(e){}'
+      // **동기 XHR 을 SW 가 가로채는가**를 직접 잰다.
+      // runtime-prelude 는 동기 XHR 을 막고 있고(주석: SW 가 못 가로채서 감옥 밖으로
+      // 나간다), 그 탓에 NAVER 캡차의 UI/이미지 요청이 JSONP 폴백으로 빠진다.
+      // 우리 facade 가 아니라 **네이티브 XHR** 이 필요하므로 iframe 에서 꺼내 쓴 뒤,
+      // 같은 origin 의 프록시 엔드포인트로 동기 GET 을 던져 본다.
+      + 'try{'
+      + '  var __f = document.createElement("iframe"); __f.style.display="none";'
+      + '  document.documentElement.appendChild(__f);'
+      + '  var NX = __f.contentWindow.XMLHttpRequest;'
+      + '  console.log("ZPSYNC nativeXHR=" + (typeof NX));'
+      + '  var x = new NX();'
+      + '  x.open("GET", "/zp/api/fetch?url=" + encodeURIComponent("https://example.com/"), false);'
+      + '  x.send(null);'
+      + '  console.log("ZPSYNC status=" + x.status + " len=" + String(x.responseText||"").length'
+      + '    + " head=" + String(x.responseText||"").slice(0,60).replace(/\\s+/g," "));'
+      + '}catch(e){ console.log("ZPSYNC threw " + (e && e.message)); }'
       + 'var membrane = { loc: String(location.href).slice(0,60),'
       + '  isVirtual: String(location.href).indexOf("127.0.0.1:18099")>=0,'
       + '  isProxy: String(location.href).indexOf("/zp/p/")>=0 };'
