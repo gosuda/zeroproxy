@@ -1009,7 +1009,7 @@
     }
     function scopedCallArgs(args) {
       const argv = new Array(args.length + 1);
-      argv[0] = scope;
+      argv[0] = withScope;
       for (let i = 0; i < args.length; i++) argv[i + 1] = args[i];
       return argv;
     }
@@ -1049,8 +1049,8 @@
       if (isEvalExpressionCandidate(text)) {
         try { expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + text + '\n);}']); } catch {}
       }
-      if (expr) return Reflect.apply(expr, root, [scope]);
-      return Reflect.apply(compileScoped(Native.FunctionCtor, [], text), root, [scope]);
+      if (expr) return Reflect.apply(expr, root, [withScope]);
+      return Reflect.apply(compileScoped(Native.FunctionCtor, [], text), root, [withScope]);
     }
     const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
     const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
@@ -1230,8 +1230,24 @@
       return scope;
     }
     maskNativeFunction(virtualLocation[Symbol.toPrimitive], Symbol.toPrimitive);
-    const scope = new Proxy(root, {
-      has(_target, prop) { return prop !== Symbol.unscopables; },
+    // 2026-08-13 — `has` 를 정직하게 만들었다. 예전에는 **모든 이름에 true** 를
+    // 돌려줬다. 그건 아래 `withScope` 의 요구사항이지 페이지에 보여 줄 `window`
+    // 의 동작이 아니다. 같은 프록시를 window/globalThis/self/frames 로 노출하고
+    // 있었으므로, 페이지 입장에서 `'아무거나' in window` 가 항상 true 였다.
+    //
+    // 실제 피해: NAVER 장바구니가 통째로 안 뜬다. 번들의 싱글턴 초기화가
+    //   var t = globalThis;
+    //   KEY in t || (t[KEY] = new Beacon());
+    //   return t[KEY];
+    // 인데, `KEY in t` 가 늘 true 라 **대입이 아예 실행되지 않고** 되읽기는
+    // undefined → `getInstance().recordExport` 에서 TypeError → 모듈 초기화가
+    // 끊겨 스켈레톤만 남았다. `A in obj || (obj[A]=…)` 는 흔한 관용구다.
+    // 부수적으로 `'__아무거나__' in window === true` 는 그 자체로 지문이었다.
+    const scopeTraps = {
+      has(target, prop) {
+        if (prop === Symbol.unscopables) return false;
+        return Reflect.has(target, prop);
+      },
       get(target, prop) {
         if (prop === Symbol.unscopables) return undefined;
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
@@ -1257,9 +1273,20 @@
         }
         return Reflect.getOwnPropertyDescriptor(target, prop);
       }
-    });
+    };
+    // 페이지에 window/globalThis/self/frames 로 노출되는 프록시.
+    const scope = new Proxy(root, scopeTraps);
+    // `with(__zp_scope){…}` 의 피연산자 전용. 여기서는 has 가 **반드시** 모든
+    // 이름에 true 여야 한다 — 그래야 블록 안의 모든 식별자가 이 객체를 거치고,
+    // 해석되지 않은 이름이 진짜 전역 스코프로 새어나가 멤브레인을 우회하지
+    // 못한다. 페이지 코드에 이 객체가 직접 새지는 않는다: get 트랩이
+    // window/globalThis/self/frames 에 대해 `scope` 를 돌려주기 때문이다.
+    const withScope = new Proxy(root, Object.assign({}, scopeTraps, {
+      has(_target, prop) { return prop !== Symbol.unscopables; },
+    }));
+    function isScopeProxy(value) { return value === scope || value === withScope; }
     function isWindowLike(value) {
-      try { return value === root || value === scope || value && value.window === value; } catch { return false; }
+      try { return value === root || value === scope || value === withScope || value && value.window === value; } catch { return false; }
     }
     function get(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
@@ -1267,13 +1294,13 @@
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return '';
       if (isWindowLike(base)) {
-        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return base === scope || base === root ? scope : base;
-        if (prop === 'top' || prop === 'parent' || prop === 'opener') return base === scope || base === root ? virtualWindowProperty(root, prop) : base;
+        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return isScopeProxy(base) || base === root ? scope : base;
+        if (prop === 'top' || prop === 'parent' || prop === 'opener') return isScopeProxy(base) || base === root ? virtualWindowProperty(root, prop) : base;
         if (prop === 'location') {
-          const baseWin = base === scope || base === root ? root : base;
+          const baseWin = isScopeProxy(base) || base === root ? root : base;
           try { const n = baseWin.location; return n ? wrappedLocationFor(n) : virtualLocation; } catch { return virtualLocation; }
         }
-        if (prop === 'postMessage') return postMessageWrapperFor(base === scope ? root : base);
+        if (prop === 'postMessage') return postMessageWrapperFor(isScopeProxy(base) ? root : base);
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
       }
@@ -1333,7 +1360,7 @@
     }
     function call(base, prop, args) {
       const fn = get(base, prop);
-      return Reflect.apply(fn, base === scope ? root : base, Array.isArray(args) ? args : []);
+      return Reflect.apply(fn, isScopeProxy(base) ? root : base, Array.isArray(args) ? args : []);
     }
     function construct(ctor, args) {
       const dynamic = dynamicWrapperFor(ctor);
@@ -1394,8 +1421,8 @@
     define(root, '__zp_module_url', moduleURL);
     define(root, '__zp_nav_assign', v => setVirtualLocation(v));
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
-    define(root, '__zp_runClassic', fn => fn.call(root, scope));
-    define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(scope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
+    define(root, '__zp_runClassic', fn => fn.call(root, withScope));
+    define(root, '__zp_runEvent', (selfValue, event, fn) => fn.call(selfValue, new Proxy(withScope, { get(t, p, r) { if (p === 'event') return event; return Reflect.get(t, p, r); } })));
     // 2026-06-08 split-bundle (c.1) Step 2.4: page-realm primary swap.
     // `globalThis.ZPBundle` (loaded by `zp-page-bundle.js` per Step 2.3) is
     // now the primary rewriter; legacy ZPRewriter (rewriter-rs/, OXC 0.60)
