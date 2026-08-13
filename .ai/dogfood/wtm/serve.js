@@ -29,6 +29,16 @@ http.createServer((req, res) => {
     return res.end('ok');
   }
   const path = req.url.split('?')[0];
+  // **머리 없는 문서** — 실제 장애 재현용.
+  // NAVER 로그인 결과가 이 모양(`<script>` 하나뿐, `<head>` 없음)으로 왔고,
+  // zp-htmltx 가 `<head>` 에만 프렐류드를 넣던 탓에 인라인은 rewrite 됐는데
+  // 헬퍼가 없어 ReferenceError → 흰 화면이 됐다.
+  if (path === '/mini.html') {
+    const html = '<script>console.log("ZPMINI helper=" + (typeof __ZP_EXEC_INLINE_REWRITTEN)'
+      + ' + " loc=" + location.href.slice(0,40));</' + 'script>';
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8' }, cors));
+    return res.end(html);
+  }
   // 리라이트 배수 측정용 페이지. 프록시로 이걸 열면 inline script 가
   // zp-htmltx → zp-rewriter 를 타므로, "리라이트된 코드가 쓸 수 있는 재귀 깊이" 를
   // NAVER 와 무관하게 잴 수 있다. 같은 코드를 exec-js(리라이트 없음)로도 재서 비교.

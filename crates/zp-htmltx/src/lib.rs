@@ -398,10 +398,33 @@ fn script_settings(
         // Prepend = insert as the FIRST child of <head> (right after the start
         // tag), matching the SW's regex `injectPrelude`. ContentType::Html →
         // emitted verbatim, never re-parsed by these script handlers.
-        handlers.push(element!("head", move |el| {
-            el.prepend(&prelude, ContentType::Html);
-            Ok(())
-        }));
+        //
+        // 2026-08-13 — `<head>` 하나만 앵커로 쓰면 **머리 없는 문서에서 통째로
+        // 안 들어간다.** 우리는 브라우저 파서가 아니라 원본 바이트를 스트리밍으로
+        // 보므로, 브라우저가 자동 생성해 주는 `<head>` 는 여기 없다.
+        // NAVER 로그인 결과처럼 `<script>location.replace(...)</script>` 만 든
+        // 미니 문서가 실제로 그랬다: 인라인 스크립트는 `__ZP_EXEC_INLINE_REWRITTEN`
+        // 호출로 바뀌는데 그 헬퍼를 정의할 프렐류드가 없어 흰 화면이 됐다.
+        //
+        // 그래서 앵커를 단계적으로 둔다 — `head` → `body` → 첫 `script` 앞.
+        // 마지막 것이 중요하다: 프렐류드가 **자기를 필요로 하는 첫 스크립트보다
+        // 먼저** 들어간다는 보장이 거기서 나온다.
+        let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for (selector, before_element) in [("head", false), ("body", false), ("script", true)] {
+            let prelude = prelude.clone();
+            let injected = injected.clone();
+            handlers.push(element!(selector, move |el| {
+                if injected.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(());
+                }
+                if before_element {
+                    el.before(&prelude, ContentType::Html);
+                } else {
+                    el.prepend(&prelude, ContentType::Html);
+                }
+                Ok(())
+            }));
+        }
     }
     Settings {
         element_content_handlers: handlers,
@@ -956,6 +979,37 @@ mod tests {
             html.contains("var __zp_boot = location.href;"),
             "prelude script was rewritten (must be verbatim): {html}"
         );
+    }
+
+    // Pin: `<head>` 가 없는 문서에도 프렐류드가 들어가야 한다.
+    //
+    // 실제 장애였다. NAVER 로그인 결과는 `<script>location.replace(...)</script>`
+    // 만 든 미니 문서로 오는데, 우리는 브라우저 파서가 아니라 원본 바이트를 보므로
+    // 브라우저가 자동 생성해 주는 `<head>` 가 여기엔 없다. 그런데 인라인 스크립트는
+    // `__ZP_EXEC_INLINE_REWRITTEN(...)` 호출로 바뀌므로, 프렐류드가 없으면
+    // `ReferenceError` 로 문서가 통째로 죽는다(흰 화면).
+    #[test]
+    fn prelude_is_injected_even_without_head() {
+        let prelude = "<script nonce=zp>window.__ZP_EXEC_INLINE_REWRITTEN = function(){};</script>";
+        for doc in [
+            "<html><body><script>location.replace('/x');</script></body></html>",
+            "<script>location.replace('/x');</script>",
+        ] {
+            let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+            let mut out: Vec<u8> = Vec::new();
+            out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+            let (tail, _d) = txn.end().unwrap();
+            out.extend_from_slice(&tail);
+            let html = String::from_utf8(out).unwrap();
+
+            assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc}: {html}");
+            // 그리고 자기를 필요로 하는 호출보다 **앞에** 있어야 한다.
+            let p = html.find(prelude).unwrap();
+            let call = html
+                .find("__ZP_EXEC_INLINE_REWRITTEN(")
+                .expect("inline script should have been rewritten");
+            assert!(p < call, "prelude must precede the call it defines: {html}");
+        }
     }
 
     #[test]
