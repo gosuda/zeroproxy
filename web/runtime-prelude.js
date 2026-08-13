@@ -2702,6 +2702,29 @@
   // never expose the target host to browser-native UI. Inert URL schemes
   // (#fragment / javascript: / data: / blob: / about: / mailto: /
   // vbscript:) pass through unchanged.
+  // 2026-08-13 — 런타임이 만드는 수동 서브리소스 URL 을 서버측 htmltx 와
+  // 같은 모양으로 맞춘다.
+  //
+  // htmltx 는 초기 HTML 의 `img/source/video/audio/track/link` URL 을
+  // `/zp/api/fetch?url=…` 로 리라이트한다("strict CSP would otherwise block
+  // external origins before the SW gets to intercept"). 그런데 프렐류드는
+  // 같은 속성에 **절대 타깃 URL 을 그대로** 써 왔다. 그래서 JS 가 만든
+  // 이미지만 원본 URL 로 남고(실측: React 가 만든 `<img>` 는
+  // `https://ssl.pstatic.net/…`, htmltx 가 처리한 `<link>` 는
+  // `/zp/api/fetch?url=…`), 그게 두 가지를 낳았다:
+  //   (a) CSP 를 `img-src 'self'` 로 못 죈다 — 죄면 전부 깨진다.
+  //   (b) srcdoc / blob 문서에서는 SW 가 클라이언트를 탭에 귀속시키지 못해
+  //       그 URL 이 통째로 거절된다 (UNCLASSIFIED).
+  // `tab` 을 URL 에 실어 두면 (b) 는 귀속 자체가 필요 없어진다 —
+  // `/zp/api/fetch` 는 이미 명시 `?tab=` 을 받는다.
+  function subresourceProxyPath(absolute) {
+    const s = String(absolute || '');
+    if (!s || s[0] === '#') return s;
+    if (!/^https?:/i.test(s)) return s;
+    let out = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURIComponent(s);
+    if (boot && boot.tabId) out += '&tab=' + encodeURIComponent(boot.tabId);
+    return out;
+  }
   function proxyViaURL(absolute) {
     const s = String(absolute || '');
     if (!s) return s;
@@ -3257,7 +3280,8 @@
         const alreadyMapped = urlMeta.get(el) === target && Native.getAttribute.call(el, 'data-zp-target-url') === target && Native.getAttribute.call(el, 'href') === target;
         urlMeta.set(el, target);
         if (Native.getAttribute.call(el, 'data-zp-target-url') !== target) Native.setAttribute.call(el, 'data-zp-target-url', target);
-        if (!alreadyMapped && Native.getAttribute.call(el, 'href') !== target) Native.setAttribute.call(el, 'href', target);
+        const proxied = subresourceProxyPath(target);
+        if (!alreadyMapped && Native.getAttribute.call(el, 'href') !== proxied) Native.setAttribute.call(el, 'href', proxied);
       }
     }
   }
@@ -3516,7 +3540,7 @@
             return;
           }
           if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
-          return Native.setAttribute.call(this, k, usesRaw ? proxyViaURL(t) : t);
+          return Native.setAttribute.call(this, k, usesRaw ? proxyViaURL(t) : subresourceProxyPath(t));
         }
       }
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
@@ -4118,7 +4142,9 @@
       return;
     }
     if (alreadyMapped) return;
-    if (!usesRaw) Native.setAttribute.call(el, key, target);
+    // 수동 서브리소스는 프록시 경로로 (htmltx 와 동일). navigation 속성은
+    // usesRaw 쪽에서 이미 '?via=' 형태로 처리된다.
+    if (!usesRaw) Native.setAttribute.call(el, key, subresourceProxyPath(target));
   }
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
