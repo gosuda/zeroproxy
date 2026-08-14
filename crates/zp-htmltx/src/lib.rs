@@ -125,8 +125,14 @@ fn attr_settings(
                         .filter_map(|a| {
                             let name = a.name();
                             let lower_view = name.as_str();
-                            let is_url_attr =
-                                matches!(lower_view, "href" | "src" | "action" | "formaction");
+                            // `srcset`/`imagesrcset` must be here too — the lazy
+                            // filter is what decides which attributes the rewrite
+                            // loop below can even see. Leaving them out is why
+                            // `<source srcset>` shipped raw target URLs.
+                            let is_url_attr = matches!(
+                                lower_view,
+                                "href" | "src" | "action" | "formaction" | "srcset" | "imagesrcset"
+                            );
                             let is_on_handler =
                                 lower_view.starts_with("on") && lower_view.len() > 2;
                             if is_url_attr || is_on_handler {
@@ -139,7 +145,12 @@ fn attr_settings(
                     for (name, value) in attrs_snapshot {
                         let lower = name.as_str();
                         let is_on_handler = lower.starts_with("on") && lower.len() > 2;
-                        let is_url_attr = matches!(lower, "href" | "src" | "action" | "formaction");
+                        // 위 lazy filter 와 **같은 목록**이어야 한다. 두 곳이
+                        // 갈라지면 스냅샷은 됐는데 여기서 걸러져 조용히 누락된다.
+                        let is_url_attr = matches!(
+                            lower,
+                            "href" | "src" | "action" | "formaction" | "srcset" | "imagesrcset"
+                        );
                         if !is_on_handler && !is_url_attr {
                             continue;
                         }
@@ -197,6 +208,31 @@ fn attr_settings(
                                         | ("input", "formaction")
                                         | ("button", "formaction")
                                 );
+                                // 2026-08-14 — `srcset` / `imagesrcset` 도 서브리소스다.
+                                //
+                                // 목록에 `("source","src")` 는 있는데 `srcset` 이 없었다.
+                                // NAVER 로그인의 소셜 아이콘이 정확히 이 형태다:
+                                //   <picture><source srcset="https://ssl.pstatic.net/…svg"
+                                //            media="(prefers-color-scheme: dark)">
+                                // 원본 URL 이 그대로 남아 CSP `img-src 'self'` 에 걸려
+                                // 차단됐다(`--enforce-csp` 로 처음 관측). 값이 콤마 구분
+                                // 후보 목록이라 단일 URL 리라이터를 그대로 못 쓴다.
+                                if matches!(
+                                    (tag.as_str(), lower),
+                                    ("img", "srcset")
+                                        | ("source", "srcset")
+                                        | ("link", "imagesrcset")
+                                ) {
+                                    if let Some(next) = proxied_srcset(
+                                        trimmed,
+                                        &proxy_origin,
+                                        "/zp/",
+                                        &target_for_attr,
+                                    ) {
+                                        let _ = el.set_attribute(&name, &next);
+                                    }
+                                    continue;
+                                }
                                 if is_subresource {
                                     if let Some(next) = proxied_subresource_url(
                                         trimmed,
@@ -719,6 +755,67 @@ const URL_PARAM_ENCODE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALP
 /// where it would resolve without a base — exactly the failure mode observed
 /// inside NAVER's `shopsquare.naver.com` iframe). Returns None for fragment-
 /// only refs and inert schemes (data:/blob:/about:/mailto:).
+/// Rewrite every candidate URL in a `srcset` / `imagesrcset` list, keeping the
+/// descriptors (`2x`, `640w`) and the list shape intact. Returns `None` when
+/// nothing changed, so the caller can skip the attribute write.
+///
+/// **Why a hand-rolled scanner instead of `split(',')`:** a candidate may be a
+/// `data:` URL, and those contain commas (`data:image/gif;base64,R0lGOD…`).
+/// Splitting on commas would cut them in half. A `srcset` URL cannot contain
+/// whitespace, so "read until whitespace" is the correct way to take a URL;
+/// only *after* the URL do commas act as separators.
+fn proxied_srcset(
+    raw: &str,
+    proxy_origin: &str,
+    control_prefix: &str,
+    target_url: &str,
+) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len() + 64);
+    let mut i = 0usize;
+    let mut changed = false;
+    while i < bytes.len() {
+        // Leading whitespace and stray commas between candidates.
+        let start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        out.push_str(&raw[start..i]);
+        if i >= bytes.len() {
+            break;
+        }
+        // URL: everything up to the next whitespace or comma. `data:` URLs may
+        // carry commas, so for those only whitespace terminates.
+        let url_start = i;
+        let is_data = raw[i..].len() >= 5 && raw[i..i + 5].eq_ignore_ascii_case("data:");
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && (is_data || bytes[i] != b',')
+        {
+            i += 1;
+        }
+        let url = &raw[url_start..i];
+        match proxied_subresource_url(url, proxy_origin, control_prefix, target_url) {
+            Some(next) => {
+                out.push_str(&next);
+                changed = true;
+            }
+            None => out.push_str(url),
+        }
+        // Descriptor (and anything else) up to the next comma.
+        let desc_start = i;
+        while i < bytes.len() && bytes[i] != b',' {
+            i += 1;
+        }
+        out.push_str(&raw[desc_start..i]);
+    }
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 fn proxied_subresource_url(
     raw: &str,
     proxy_origin: &str,
@@ -1026,6 +1123,42 @@ mod tests {
     // 스크립트("Executing inline script violates … 'nonce-…'")와 멤브레인의 eval
     // 경로("'unsafe-eval' is not an allowed source")를 둘 다 막았다. 우리는 그들의
     // nonce 를 재현할 수 없으므로 이 meta 는 반드시 죽여야 한다.
+    // 2026-08-14 — `srcset` / `imagesrcset` 도 리라이트한다.
+    //
+    // 목록에 `("source","src")` 는 있는데 `srcset` 이 없어서, NAVER 로그인의
+    // 소셜 아이콘(`<picture><source srcset="https://ssl.pstatic.net/…svg">`)이
+    // 원본 URL 로 남아 CSP `img-src 'self'` 에 걸려 차단됐다. taskweaver
+    // `--enforce-csp` 로 CSP 를 실제로 켜기 전까지는 SW 가 받아 주는 바람에
+    // 증상이 보이지 않았다.
+    #[test]
+    fn srcset_candidates_are_rewritten() {
+        let prelude = "<script nonce=zp></script>";
+        let doc = "<html><body>\
+<picture><source srcset=\"https://cdn.test/a.svg\" media=\"(prefers-color-scheme: dark)\"></picture>\
+<img srcset=\"https://cdn.test/1x.png 1x, https://cdn.test/2x.png 2x\" src=\"https://cdn.test/f.png\">\
+<img srcset=\"data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs= 1x\">\
+</body></html>";
+        let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+        let (tail, _d) = txn.end().unwrap();
+        out.extend_from_slice(&tail);
+        let html = String::from_utf8(out).unwrap();
+
+        // 후보 URL 이 하나도 원본으로 남아선 안 된다.
+        assert!(!html.contains("\"https://cdn.test/a.svg\""), "source srcset raw: {html}");
+        assert!(!html.contains("https://cdn.test/1x.png 1x"), "img srcset raw: {html}");
+        assert!(!html.contains("https://cdn.test/2x.png 2x"), "img srcset 2x raw: {html}");
+        // 디스크립터와 목록 모양은 보존된다.
+        assert!(html.contains(" 1x,"), "descriptor/comma lost: {html}");
+        assert!(html.contains(" 2x\""), "descriptor lost: {html}");
+        // `data:` 는 그대로 통과해야 하고, 내부 콤마 때문에 잘리면 안 된다.
+        assert!(
+            html.contains("data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs= 1x"),
+            "data: URL mangled: {html}"
+        );
+    }
+
     #[test]
     fn target_csp_meta_is_neutralised() {
         let prelude = "<script nonce=zp></script>";
