@@ -194,7 +194,9 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.equal(sw.includes("importScripts('/zp/assets/rust-rewriter.js')"), false, 'legacy rewriter importScripts must be gone');
   assert.equal(sw.includes("importScripts('/zp/assets/js-rewriter.js')"), false);
   assert.equal(sw.includes("importScripts('/zp/assets/oxc-parser.js')"), false);
-  assert.match(sw, /importScripts\('\/__zp\/zp_bundle_sw\.js'\)/, 'SW must import the modern bundle glue');
+  // 2026-08-14: 에셋 URL 에 `?v=<build id>` 가 붙는다(immutable 캐시). 핀은
+  // 경로만 보고 쿼리는 허용한다 — 쿼리까지 고정하면 빌드마다 테스트가 깨진다.
+  assert.match(sw, /importScripts\('\/__zp\/zp_bundle_sw\.js(\?[^']*)?'\)/, 'SW must import the modern bundle glue');
   assert.ok(sw.includes('/zp/api/script'));
   assert.ok(sw.includes('rewriteScriptResponse'));
   assert.equal(build.includes('rewriter-rs'), false, 'build must not reference deleted rewriter-rs/ crate');
@@ -992,7 +994,7 @@ test('SW wires Rust zp-bundle alongside JS rewriter', () => {
   // Lazy import: SW source references the bundle URL, loaded inside
   // initBundle() rather than at top level so registration stays fast and
   // SW eval doesn't fault on a missing artifact during dev iterations.
-  assert.ok(sw.includes("'/__zp/zp_bundle_sw.js'"), 'SW must reference Rust bundle no-modules glue URL');
+  assert.match(sw, /'\/__zp\/zp_bundle_sw\.js(\?[^']*)?'/, 'SW must reference Rust bundle no-modules glue URL');
   assert.ok(sw.includes('initBundle'), 'initBundle() helper missing');
   assert.ok(sw.includes('self.ZPBundle'), 'self.ZPBundle export missing');
   assert.ok(sw.includes('zp_bundle_sw_bg.wasm'), 'bundle wasm URL must be referenced');
@@ -1112,7 +1114,7 @@ test('split-bundle (c.3): SW kernel/transport wasm splits off into zp-kernel-bun
   assert.match(build, /zpKernelBundleWasm/, 'build must declare zp_kernel_bundle.wasm path constant');
   // SW imports kernel glue at top level (importScripts can only happen there).
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  assert.match(sw, /importScripts\('\/__zp\/zp_kernel_sw\.js'\)/, 'SW must importScripts the kernel glue at top level');
+  assert.match(sw, /importScripts\('\/__zp\/zp_kernel_sw\.js(\?[^']*)?'\)/, 'SW must importScripts the kernel glue at top level');
   // SW has a separate lazy `initKernel()` keyed on `self.ZPKernel.ready`.
   assert.match(sw, /async function initKernel\b/, 'SW must define async initKernel()');
   assert.match(sw, /self\.ZPKernel\s*=\s*Object\.freeze\(/, 'initKernel must freeze ZPKernel on self');

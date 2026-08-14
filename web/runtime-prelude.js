@@ -149,7 +149,7 @@
   let rt = null;
   if (typeof ZeroProxyRTGlobal === 'object' && ZeroProxyRTGlobal) {
     try {
-      ZeroProxyRTGlobal.load('/__zp/zp_page_rt.wasm')
+      ZeroProxyRTGlobal.load('/__zp/zp_page_rt.wasm?v=__ZP_BUILD_ID__')
         .then(instance => { rt = instance; })
         .catch(() => { /* fall back to JS path */ });
     } catch { /* defensive */ }

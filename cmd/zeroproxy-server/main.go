@@ -344,9 +344,17 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 	// 한다 — 코드/플랜/트랩노트 어디에도 그런 의도는 적혀 있지 않아
 	// 기본값으로 판단했다. 남는 것은 우리 자신의 에셋뿐이고(타깃 콘텐츠가
 	// 아니다), 방문한 사이트는 드러나지 않는다.
-	if name := st.Name(); name == "sw.js" || name == "index.html" {
+	//
+	// `?v=<build id>` 가 붙어 오면 `immutable` 로 준다. build id 는 소스+wasm
+	// 바이트 해시라 빌드가 바뀌면 URL 이 바뀐다 — 낡은 사본이 재사용될 수
+	// 없으므로 1년 캐시가 안전하고, 재검증 왕복까지 사라진다.
+	// 쿼리가 없으면(개발 중 dist 를 안 거치거나 직접 열었을 때) `no-cache`.
+	switch name := st.Name(); {
+	case name == "sw.js" || name == "index.html":
 		w.Header().Set("Cache-Control", "no-store")
-	} else {
+	case r.URL.Query().Get("v") != "":
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	default:
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 	http.ServeContent(w, r, st.Name(), st.ModTime(), f)

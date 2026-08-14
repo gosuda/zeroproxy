@@ -1,19 +1,19 @@
 /* ZeroProxy Service Worker: controlled network requests are routed through the Rust WASM kernel. */
-importScripts('/zp/assets/zp-core.js');
+importScripts('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__');
 // 2026-06-08 split-bundle (c.1) Step 4: legacy rewriter-rs/ deleted. Both
 // JS and CSS rewriters live on ZPBundle (modern, single source of truth).
 // Rust zp-bundle (no-modules variant). Must be imported at top-level: SW
 // `importScripts` only succeeds during initial script evaluation; lazy
 // import from inside an event handler is blocked by the worker spec and
 // fails with "failed to load" even if the URL is served correctly.
-importScripts('/__zp/zp_bundle_sw.js');
+importScripts('/__zp/zp_bundle_sw.js?v=__ZP_BUILD_ID__');
 // 2026-06-08 split-bundle (c.3): kernel/transport WASM glue is split into
 // its own bundle so the heavy stack (rustls + h2 + yamux + mlkem + tokio
 // + decoders + membrane/rtcgw/wtproxy) only instantiates on the first
 // upstream fetch. The JS *glue* (~tens of KB) is loaded eagerly here at
 // top level because importScripts is unavailable later; the actual wasm
 // (~MB) is fetched + instantiated lazily inside `initKernel()`.
-importScripts('/__zp/zp_kernel_sw.js');
+importScripts('/__zp/zp_kernel_sw.js?v=__ZP_BUILD_ID__');
 
 const nativeFetch = self.fetch.bind(self);
 const ORIGIN = self.location.origin;
@@ -387,7 +387,7 @@ async function initBundle() {
     throw new Error('REALM_INJECTION_FAILURE');
   }
   bundlePromise = (async () => {
-    await wbg({ module_or_path: '/__zp/zp_bundle_sw_bg.wasm' });
+    await wbg({ module_or_path: '/__zp/zp_bundle_sw_bg.wasm?v=__ZP_BUILD_ID__' });
     // CRITICAL: `wbg` (the wasm-bindgen factory function) carries the JS
     // glue wrappers as own properties (Object.assign(__wbg_init, {...exports}))
     // — those wrappers do addHeapObject/takeObject. The factory's return
@@ -452,7 +452,7 @@ async function initBundle() {
 
 // 2026-06-08 split-bundle (c.3): kernel/transport half — fetched +
 // instantiated lazily on first upstream fetch. The JS glue was already
-// loaded by the top-level `importScripts('/__zp/zp_kernel_sw.js')` (no
+// loaded by the top-level `importScripts('/__zp/zp_kernel_sw.js?v=__ZP_BUILD_ID__')` (no
 // way to importScripts later — worker spec forbids it), but the actual
 // `zp_kernel_sw_bg.wasm` (multi-MB rustls + h2 + yamux + mlkem +
 // decoders) only crosses the network when something actually needs to
@@ -466,7 +466,7 @@ async function initKernel() {
     throw new Error('KERNEL_REALM_INJECTION_FAILURE');
   }
   kernelPromise = (async () => {
-    await wbg({ module_or_path: '/__zp/zp_kernel_sw_bg.wasm' });
+    await wbg({ module_or_path: '/__zp/zp_kernel_sw_bg.wasm?v=__ZP_BUILD_ID__' });
     self.ZPKernel = Object.freeze({
       ready: true,
       kernelVersion: wbg.kernelVersion,
@@ -1947,14 +1947,14 @@ function buildRuntimePrelude(tab, entry) {
     + '">';
   return cspMeta +
     '<script nonce=zp>' + prewarmInline + '</script>' +
-    '<script nonce=zp src=' + ZP.assetPath('zp-core.js') + '></script>' +
+    '<script nonce=zp src=' + ZP.assetURL('zp-core.js') + '></script>' +
     // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js script
     // tag dropped. zp-page-bundle.js inlines the wasm + initSync's so
     // `globalThis.ZPBundle.ready === true` by the time runtime-prelude's
     // IIFE runs — the modern bundle covers both JS and CSS rewrite.
-    '<script nonce=zp src=' + ZP.assetPath('zp-page-bundle.js') + '></script>' +
+    '<script nonce=zp src=' + ZP.assetURL('zp-page-bundle.js') + '></script>' +
     '<script nonce=zp id=__zp-boot type=application/json>' + bootJSON + '</script>' +
-    '<script nonce=zp src=' + ZP.assetPath('runtime-prelude.js') + '></script>';
+    '<script nonce=zp src=' + ZP.assetURL('runtime-prelude.js') + '></script>';
 }
 function injectPrelude(html, prelude) {
   // Inject before the first <script>, falling back to <head>/document start.
@@ -2819,4 +2819,4 @@ function safeError(code, status = 400, targetUrl = '') {
   });
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
-function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }
+function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }

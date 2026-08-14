@@ -113,7 +113,22 @@
     const raw = String(path || '');
     return CONTROL_PREFIX + raw.replace(/^\/+/, '');
   }
+  // 2026-08-14 — 에셋 URL 에 build id 를 실어 `immutable` 캐시를 가능하게 한다.
+  //
+  // 빌드가 바뀌면 id 가 바뀌고 URL 이 바뀌므로 낡은 사본이 재사용될 수 없다.
+  // 빌드 스크립트가 `__ZP_BUILD_ID__` 를 치환한다 — 치환되지 않은 개발 환경
+  // (dist 를 거치지 않고 web/ 을 직접 서빙)에서는 플레이스홀더가 그대로 남는데,
+  // 그때는 쿼리를 아예 붙이지 않아 서버가 `no-cache` 로 응답하게 둔다.
+  // **`assetPath` 는 쿼리를 붙이지 않는다.** 이 함수는 URL 을 만드는 데도
+  // 쓰이지만 **경로 비교**에도 쓰인다(sw.js `internalPath`, prelude 의 자기
+  // 스크립트 판별). 여기에 `?v=` 를 붙였더니 `url.pathname` 과의 비교가 전부
+  // 어긋나 내부 에셋이 VIRTUAL_SUBRESOURCE 로 분류돼 404 가 났다.
+  // URL 을 emit 할 때만 `assetURL` 을 쓴다.
+  const BUILD_ID = '__ZP_BUILD_ID__';
+  const ASSET_VERSION_QUERY = /^[0-9a-f]{6,}$/.test(BUILD_ID) ? '?v=' + BUILD_ID : '';
   function assetPath(name) { return ASSET_PREFIX + String(name || '').replace(/^\/+/, ''); }
+  function assetURL(name) { return assetPath(name) + ASSET_VERSION_QUERY; }
+  function versionedAsset(absolutePath) { return String(absolutePath || '') + ASSET_VERSION_QUERY; }
   function apiPath(name) { return controlPath('api/' + String(name || '').replace(/^\/+/, '')); }
   function errorPath(code) { return controlPath('error/' + encodeURIComponent(String(code || 'POLICY_BLOCKED'))); }
   function makeSharePath(encrypted) { return controlPath('p/' + encrypted); }
@@ -217,7 +232,7 @@
     const h = String(host || '').toLowerCase();
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

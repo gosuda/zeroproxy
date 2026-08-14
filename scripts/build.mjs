@@ -5,6 +5,11 @@ import { access, copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// 함수 선언은 호이스팅되지만 `let` 은 TDZ 다. buildWeb() 이 이 파일의 최상위
+// 호출에서 먼저 실행되므로, 선언이 아래에 있으면 "Cannot access before
+// initialization" 으로 죽는다(실제로 밟았다). 최상위에서 선언한다.
+let buildId = '';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = parseArgs(process.argv.slice(2));
 const outRoot = path.resolve(repoRoot, args.out || 'dist');
@@ -122,6 +127,9 @@ async function cleanSelectedOutputs(selected) {
 
 async function buildWeb() {
   await mkdir(webOut, { recursive: true });
+  // wasm 이 이미 dist/web/__zp 에 있어야 id 에 반영된다 — buildWeb 은 Rust
+  // 단계 뒤에 돈다.
+  await computeBuildId();
 
   const zpBundlePage = await makeZPBundlePageClassic();
   const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
@@ -277,8 +285,44 @@ async function readSource(name) {
   return readFile(path.join(webSrc, name), 'utf8');
 }
 
+// 2026-08-14 — 콘텐츠 기반 build id.
+//
+// 에셋을 `no-cache` 로 바꿔 재검증 캐시는 살렸지만(1042KB → 0KB), 여전히 매
+// 로드마다 조건부 요청 왕복이 남는다. URL 에 build id 를 실으면 그 왕복도
+// 사라진다 — 빌드가 바뀌면 URL 이 바뀌므로 `immutable` 로 줘도 낡은 사본이
+// 남을 수 없다. 파일명을 해싱하는 대신 `?v=` 를 쓰는 이유는 참조 지점이
+// 여러 곳(sw.js 의 importScripts 리터럴, 프렐류드의 wasm 경로,
+// ZP.assetPath)이라 파일명 재작성이 그 전부를 건드려야 하기 때문이다.
+//
+// **소스 바이트**로 해싱한다. 산출물로 해싱하면 치환이 산출물을 바꿔
+// 순환이 된다.
+async function computeBuildId() {
+  const { createHash } = await import('node:crypto');
+  const h = createHash('sha256');
+  const names = (await readdir(webSrc)).filter(n => n.endsWith('.js') || n.endsWith('.html')).sort();
+  for (const n of names) {
+    h.update(n);
+    h.update(await readFile(path.join(webSrc, n)));
+  }
+  // wasm 도 포함해야 한다 — Rust 만 바뀐 빌드에서 id 가 그대로면 낡은 wasm 이
+  // immutable 로 굳는다.
+  for (const p of await listWasmArtifacts()) {
+    h.update(path.basename(p));
+    try { h.update(await readFile(p)); } catch {}
+  }
+  buildId = h.digest('hex').slice(0, 12);
+  return buildId;
+}
+async function listWasmArtifacts() {
+  const dir = path.join(webOut, '__zp');
+  try {
+    return (await readdir(dir)).filter(n => n.endsWith('.wasm')).sort().map(n => path.join(dir, n));
+  } catch { return []; }
+}
+
 async function writeBundled(fileName, parts) {
-  const source = parts.map(part => String(part).trimEnd()).join('\n;\n') + '\n';
+  const source = (parts.map(part => String(part).trimEnd()).join('\n;\n') + '\n')
+    .split('__ZP_BUILD_ID__').join(buildId);
   const result = await esbuild.transform(source, {
     charset: 'utf8',
     legalComments: 'none',
