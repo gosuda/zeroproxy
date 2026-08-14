@@ -131,7 +131,13 @@ fn attr_settings(
                             // `<source srcset>` shipped raw target URLs.
                             let is_url_attr = matches!(
                                 lower_view,
-                                "href" | "src" | "action" | "formaction" | "srcset" | "imagesrcset"
+                                "href"
+                                    | "src"
+                                    | "action"
+                                    | "formaction"
+                                    | "srcset"
+                                    | "imagesrcset"
+                                    | "style"
                             );
                             let is_on_handler =
                                 lower_view.starts_with("on") && lower_view.len() > 2;
@@ -149,7 +155,13 @@ fn attr_settings(
                         // 갈라지면 스냅샷은 됐는데 여기서 걸러져 조용히 누락된다.
                         let is_url_attr = matches!(
                             lower,
-                            "href" | "src" | "action" | "formaction" | "srcset" | "imagesrcset"
+                            "href"
+                                | "src"
+                                | "action"
+                                | "formaction"
+                                | "srcset"
+                                | "imagesrcset"
+                                | "style"
                         );
                         if !is_on_handler && !is_url_attr {
                             continue;
@@ -217,6 +229,38 @@ fn attr_settings(
                                 // 원본 URL 이 그대로 남아 CSP `img-src 'self'` 에 걸려
                                 // 차단됐다(`--enforce-csp` 로 처음 관측). 값이 콤마 구분
                                 // 후보 목록이라 단일 URL 리라이터를 그대로 못 쓴다.
+                                // 2026-08-14 — `style` **속성** 안의 `url()` 도 CSS 다.
+                                //
+                                // 인라인 `<style>` 요소는 앞서 닫았는데 속성 쪽은
+                                // 그대로였다. naver.com 실측: `<div style="…
+                                // background-image: url(https://s.pstatic.net/…)">`
+                                // 가 원본 URL 로 남아 `img-src 'self'` 에 걸렸다.
+                                //
+                                // 속성 값은 스타일시트가 아니라 **선언 목록**이라
+                                // 그대로 파싱되지 않는다. `a{…}` 로 감쌌다가 벗긴다.
+                                // `rewrite_css` 는 span 기반 치환이라 나머지 바이트를
+                                // 그대로 보존하므로 이 감쌌다 벗기기가 안전하다.
+                                if lower == "style" {
+                                    let wrapped = format!("a{{{}}}", trimmed);
+                                    let res = zp_css::rewrite_css(
+                                        &wrapped,
+                                        &target_for_attr,
+                                        "/zp/",
+                                        &proxy_origin,
+                                    );
+                                    if res.ok {
+                                        if let Some(inner) = res
+                                            .code
+                                            .strip_prefix("a{")
+                                            .and_then(|s| s.strip_suffix('}'))
+                                        {
+                                            if inner != trimmed {
+                                                let _ = el.set_attribute(&name, inner);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if matches!(
                                     (tag.as_str(), lower),
                                     ("img", "srcset")
@@ -1166,6 +1210,35 @@ mod tests {
     // 외부 스타일시트는 SW 의 rewriteCSSResponse 가 처리하는데 문서에 인라인으로
     // 박힌 CSS 는 아무도 안 건드리고 있었다. `--enforce-csp` 로 CSP 를 실제로
     // 켜자 `@font-face` 의 폰트 URL 이 `font-src 'self'` 에 걸려 드러났다.
+    // 2026-08-14 — `style` **속성** 안의 url() 도 CSS 다.
+    //
+    // 인라인 `<style>` 요소를 닫은 뒤에도 naver.com 에서 CSP 위반이 남았다:
+    // `<div style="… background-image: url(https://s.pstatic.net/…)">`.
+    // 속성 값은 스타일시트가 아니라 선언 목록이라 `a{…}` 로 감쌌다 벗긴다.
+    #[test]
+    fn style_attribute_urls_are_rewritten() {
+        let prelude = "<script nonce=zp></script>";
+        let doc = "<html><body>\
+<div style=\"position:absolute; background-image: url(https://cdn.test/bg.png)\">x</div>\
+<div style=\"background-image: url(data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=)\">y</div>\
+<div style=\"color: red\">z</div>\
+</body></html>";
+        let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+        let (tail, _d) = txn.end().unwrap();
+        out.extend_from_slice(&tail);
+        let html = String::from_utf8(out).unwrap();
+
+        assert!(!html.contains("url(https://cdn.test/bg.png)"), "style attr url raw: {html}");
+        assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
+        // 다른 선언은 그대로 남아야 한다 — 감쌌다 벗기기가 값을 갉아먹으면 안 된다.
+        assert!(html.contains("position:absolute"), "sibling declaration lost: {html}");
+        assert!(html.contains("color: red"), "unrelated style attr mangled: {html}");
+        // inert 스킴은 손대지 않는다.
+        assert!(html.contains("data:image/gif;base64,"), "data: url touched: {html}");
+    }
+
     #[test]
     fn inline_style_urls_are_rewritten() {
         let prelude = "<script nonce=zp></script>";

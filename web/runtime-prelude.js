@@ -2619,6 +2619,10 @@
     //   gnbGetElementsByClassName(...)[0].children[1].src = "https://ssl.pstatic.net/…/myInfo.gif"
     // 로 넣는다. 장바구니에서 끝까지 원본 URL 로 남던 이미지 2장이 이것이었다.
     // 원본 URL 이 하나라도 남으면 CSP 를 `img-src 'self'` 로 못 죈다.
+    // `link.href = url` 도 같은 구멍이다 — 2026-08-14 naver.com 실측:
+    // shopad 모듈이 스타일시트를 프로퍼티 대입으로 붙여 원본 URL 이 남고
+    // `style-src 'self'` 에 걸려 10건이 차단됐다. img.src 와 같은 계열.
+    installURLProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype, 'href');
     installURLProp(w.HTMLImageElement && w.HTMLImageElement.prototype, 'src');
     installURLProp(w.HTMLSourceElement && w.HTMLSourceElement.prototype, 'src');
     installURLProp(w.HTMLTrackElement && w.HTMLTrackElement.prototype, 'src');
