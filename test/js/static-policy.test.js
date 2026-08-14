@@ -2489,3 +2489,29 @@ test('proxied-document CSP is controlled from zp-shared (single golden, JS side)
   assert.ok(!/connect-src [^;]*\*/.test(golden), 'connect-src must never wildcard');
   assert.ok(!/script-src [^;]*\*/.test(golden), 'script-src must never wildcard');
 });
+
+// 2026-08-14 — 브라우저가 타깃에게 직접 보고하는 경로를 막는다.
+//
+// 실측(nid.naver.com): 응답에 Content-Security-Policy-Report-Only 가 실려 오고
+// 그 안에 report-uri https://nid.naver.com/login/api/csp.repo.naver.only 가 있다.
+// 이름이 Content-Security-Policy 와 달라 CSP 교체 로직이 건드리지 못했고, 위반
+// 하나마다 브라우저가 그 엔드포인트로 POST 한다. CSP 리포트는 Service Worker 가
+// 가로챌 수 없으므로 릴레이를 우회하는 직접 egress = 실제 IP 유출이다.
+test('service worker strips browser-to-target reporting headers', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const fn = sw.slice(sw.indexOf('function applyZPSecurityHeaders'));
+  // 주석 줄은 버린다. 안 그러면 `// h.delete('NEL');` 로 주석 처리해도 통과하는
+  // — 즉 절대 깨지지 않는 — 검사가 된다(실제로 그렇게 만들었다가 음성 테스트로 잡았다).
+  const body = fn.slice(0, fn.indexOf('\nfunction '))
+    .split('\n')
+    .filter(line => !line.trim().startsWith('//'))
+    .join('\n');
+  assert.ok(body.length > 0, 'applyZPSecurityHeaders must exist');
+  for (const header of ['Content-Security-Policy-Report-Only', 'Report-To', 'Reporting-Endpoints', 'NEL']) {
+    assert.ok(body.includes("h.delete('" + header + "')"),
+      header + ' must be stripped — it lets the browser reach the target directly, bypassing the relay');
+  }
+  // 그리고 우리 정책 자체는 절대 report-uri 를 갖지 않는다(같은 유출 경로가 된다).
+  const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8');
+  assert.ok(!/report-uri|report-to/i.test(golden), 'our own CSP must not carry a reporting endpoint');
+});

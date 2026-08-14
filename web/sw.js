@@ -1685,7 +1685,7 @@ async function transformDocumentResponse(resp, opt) {
   // END_STREAM (~60s) where the buffered `resp.text()` below would block. Falls
   // back to the buffered path (which keeps fail-closed MALFORMED_HTML + the
   // post-redirect CSS host-rewrite) on host mismatch or any failure.
-  const kernelStreamed = resp.headers && resp.headers.get('X-ZP-Stream') === '1';
+  const kernelStreamed = false && resp.headers && resp.headers.get('X-ZP-Stream') === '1'; // TEMP: streaming disabled for CSP causality test
   if (kernelStreamed && resp.body) {
     try {
       await initBundle();
@@ -2720,6 +2720,22 @@ function applyZPSecurityHeaders(h, req, servers, tab) {
   h.delete('X-ZP-Challenge-Compat');
   const armedHere = !!(tab && tab.challengeCompat) && responseSignalled;
   h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { challengeCompat: armedHere }));
+  // 2026-08-14 — 브라우저가 타깃에게 **직접** 보고하게 만드는 헤더를 전부 지운다.
+  //
+  // 실측(nid.naver.com): 응답에 `Content-Security-Policy-Report-Only` 가 실려
+  // 오고 그 안에 `report-uri https://nid.naver.com/login/api/csp.repo.naver.only`
+  // 가 있다. 이름이 `Content-Security-Policy` 와 달라서 위의 `set` 이 건드리지
+  // 못했고, 그대로 페이지에 적용되고 있었다. 위반이 하나 생길 때마다 브라우저가
+  // 그 엔드포인트로 POST 하는데 **CSP 리포트는 Service Worker 가 가로챌 수 없다**
+  // — 릴레이를 우회하는 직접 egress, 즉 실제 IP 유출 경로다.
+  //
+  // Report-To / Reporting-Endpoints / NEL 도 같은 부류(네트워크 오류·경고를
+  // 브라우저가 지정 엔드포인트로 직접 전송)라 함께 지운다. 우리 정책에는
+  // report-uri 가 없으므로 지우는 쪽이 기능 손실도 없다.
+  h.delete('Content-Security-Policy-Report-Only');
+  h.delete('Report-To');
+  h.delete('Reporting-Endpoints');
+  h.delete('NEL');
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
   applyCORS(h, req);

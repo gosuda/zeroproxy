@@ -82,6 +82,37 @@ fn attr_settings(
                     // (it normalizes element names). Cache once per element
                     // instead of recomputing inside the per-attribute loop.
                     let tag = el.tag_name();
+                    // 2026-08-14 — 타깃이 자기 CSP 를 `<meta http-equiv>` 로
+                    // 실어 보내면 그걸 무력화한다.
+                    //
+                    // 응답 헤더의 CSP 는 우리가 `h.set` 으로 교체하지만 meta 는
+                    // 그대로 통과하고 있었다. 그러면 **타깃의 정책이 우리 문서에
+                    // 그대로 적용된다.** NAVER 로그인 페이지에서 실측:
+                    //   Executing inline script violates … 'nonce-XI375…' *.nid.naver.com
+                    //   Evaluating a string as JavaScript violates … 'unsafe-eval' is not allowed
+                    // 즉 그들의 nonce 정책이 **우리가 리라이트한 인라인 스크립트와
+                    // 멤브레인의 eval 경로를 막는다.** 우리는 그들의 nonce 를
+                    // 재현할 수 없으므로 (그리고 재현해서도 안 된다) 이 meta 는
+                    // 반드시 죽여야 한다. 우리 정책이 그 자리를 대신한다.
+                    //
+                    // 삭제 대신 이름만 바꾼다: 페이지 JS 가 자기 CSP 를 읽어
+                    // 확인하는 경우가 있어 값은 남겨 둔다.
+                    if tag == "meta" {
+                        let equiv = el
+                            .get_attribute("http-equiv")
+                            .unwrap_or_default()
+                            .trim()
+                            .to_ascii_lowercase();
+                        if equiv == "content-security-policy"
+                            || equiv == "content-security-policy-report-only"
+                        {
+                            let content = el.get_attribute("content").unwrap_or_default();
+                            let _ = el.remove_attribute("http-equiv");
+                            let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
+                            let _ = el.set_attribute("data-zp-blocked-content", &content);
+                            let _ = el.remove_attribute("content");
+                        }
+                    }
                     // Lazy filter: only snapshot attributes we actually care about
                     // (URL-bearing href/src/action/formaction or on* handlers).
                     // Avoids cloning ALL attributes on the vast majority of
@@ -988,6 +1019,44 @@ mod tests {
     // 브라우저가 자동 생성해 주는 `<head>` 가 여기엔 없다. 그런데 인라인 스크립트는
     // `__ZP_EXEC_INLINE_REWRITTEN(...)` 호출로 바뀌므로, 프렐류드가 없으면
     // `ReferenceError` 로 문서가 통째로 죽는다(흰 화면).
+    // 2026-08-14 — 타깃이 `<meta http-equiv="Content-Security-Policy">` 로 실어
+    // 보내는 자기 CSP 는 무력화해야 한다. 응답 헤더의 CSP 는 SW 가 교체하지만
+    // meta 는 그대로 통과하고 있었고, 그러면 **그들의 정책이 우리 문서에 적용된다.**
+    // NAVER 로그인 페이지 실측: 그들의 nonce 정책이 우리가 리라이트한 인라인
+    // 스크립트("Executing inline script violates … 'nonce-…'")와 멤브레인의 eval
+    // 경로("'unsafe-eval' is not an allowed source")를 둘 다 막았다. 우리는 그들의
+    // nonce 를 재현할 수 없으므로 이 meta 는 반드시 죽여야 한다.
+    #[test]
+    fn target_csp_meta_is_neutralised() {
+        let prelude = "<script nonce=zp></script>";
+        let doc = "<html><head>\
+<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'nonce-abc'\">\
+<meta http-equiv=\"content-security-policy-report-only\" content=\"default-src 'none'\">\
+<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">\
+</head><body>x</body></html>";
+        let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+        let (tail, _d) = txn.end().unwrap();
+        out.extend_from_slice(&tail);
+        let html = String::from_utf8(out).unwrap();
+
+        // 브라우저가 정책으로 읽을 수 있는 형태가 하나도 남아선 안 된다.
+        // 앞의 공백이 중요하다: `data-zp-blocked-http-equiv=` 도 `http-equiv=` 를
+        // 부분 문자열로 포함하므로, 그냥 검사하면 무력화된 것까지 걸려 통과할 수 없다.
+        assert!(
+            !html
+                .to_ascii_lowercase()
+                .contains(" http-equiv=\"content-security-policy"),
+            "target CSP meta survived: {html}"
+        );
+        // 값은 남겨 둔다 — 페이지 JS 가 자기 정책을 읽어 확인하는 경우가 있다.
+        assert!(html.contains("data-zp-blocked-http-equiv"), "no marker: {html}");
+        assert!(html.contains("nonce-abc"), "policy value dropped: {html}");
+        // 무관한 http-equiv 는 건드리지 않는다.
+        assert!(html.contains("X-UA-Compatible"), "unrelated meta touched: {html}");
+    }
+
     #[test]
     fn prelude_is_injected_even_without_head() {
         let prelude = "<script nonce=zp>window.__ZP_EXEC_INLINE_REWRITTEN = function(){};</script>";
