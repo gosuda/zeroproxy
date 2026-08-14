@@ -2626,3 +2626,32 @@ test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주�
   const content = '#a::before{content:"url(https://cdn.example.com/x.png)"}';
   assert.equal(rewriteCSSText(content), content);
 });
+
+test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서드 동일성을 지킨다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('  function containStyleDeclaration(');
+  assert.ok(start >= 0, 'containStyleDeclaration 을 못 찾았다');
+  const next = rt.indexOf('\n  function ', start + 1);
+  const src = rt.slice(start, next < 0 ? undefined : next);
+  const contain = new Function(
+    'styleDeclProxies', 'styleDeclMethods', 'rewriteCSSText',
+    src + '\nreturn containStyleDeclaration;'
+  )(new WeakMap(), new WeakMap(), (v) => String(v).replace('https://cdn.example.com', '/zp/api/fetch'));
+
+  // CSS 프로퍼티는 이 엔진에서 **인스턴스의 own data property** 다. 프로토타입
+  // 훅으로는 못 잡아서 프록시로 간다 — 그래서 여기 테스트도 평범한 객체다.
+  const decl = { backgroundImage: '', setProperty(p, v) { this[p] = v; }, getPropertyValue(p) { return this[p]; } };
+  const p = contain(decl);
+  p.backgroundImage = 'url(https://cdn.example.com/x.png)';
+  assert.equal(decl.backgroundImage, 'url(/zp/api/fetch/x.png)', '프로퍼티 대입이 리라이트를 안 탔다');
+  p.setProperty('mask-image', 'url(https://cdn.example.com/m.png)');
+  assert.equal(decl['mask-image'], 'url(/zp/api/fetch/m.png)', 'setProperty 가 리라이트를 안 탔다');
+
+  // 같은 선언에는 같은 프록시 — `el.style === el.style` 가 깨지면 안 된다.
+  assert.equal(contain(decl), p, '같은 선언에 다른 프록시를 주면 동일성 비교가 깨진다');
+  // 바인딩된 메서드도 캐시돼야 한다 — 매번 새 함수면 기능 탐지가 깨진다.
+  assert.equal(p.getPropertyValue, p.getPropertyValue, '메서드 동일성이 깨졌다');
+  // 문자열이 아닌 값은 그대로 통과.
+  p.zIndex = 3;
+  assert.equal(decl.zIndex, 3);
+});

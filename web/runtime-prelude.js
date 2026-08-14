@@ -3873,9 +3873,57 @@
       "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n",
     ], { type: 'text/javascript' });
   }
+  // 인라인 style 선언 하나당 프록시 하나. 같은 선언에 늘 같은 프록시를 줘야
+  // `el.style === el.style` 같은 페이지 코드의 동일성 비교가 깨지지 않는다.
+  // `var` 다 — 이 파일에서 설치 시퀀스는 선언보다 **위**에서 돈다. `let`/`const`
+  // 로 두면 TDZ ReferenceError 가 나고 그게 멤브레인 설치를 통째로 중단시킨다
+  // (오늘 이 파일에서만 두 번 밟았다).
+  var styleHookState = 'not-run';
+  const styleDeclProxies = new WeakMap();
+  const styleDeclMethods = new WeakMap();
+  function containStyleDeclaration(decl) {
+    if (!decl || typeof decl !== 'object') return decl;
+    const cached = styleDeclProxies.get(decl);
+    if (cached) return cached;
+    let proxy;
+    try {
+      proxy = new Proxy(decl, {
+        get(t, k) {
+          const v = Reflect.get(t, k);
+          if (typeof v !== 'function') return v;
+          // 메서드는 네이티브 선언에 바인딩해야 한다 — 프록시를 receiver 로
+          // 부르면 `Illegal invocation` 이 난다. 바인딩 결과는 캐시한다:
+          // 매번 새 함수를 주면 `a.style.setProperty === a.style.setProperty`
+          // 가 false 가 되어 라이브러리의 기능 탐지가 깨진다.
+          let per = styleDeclMethods.get(t);
+          if (!per) { per = new Map(); styleDeclMethods.set(t, per); }
+          let bound = per.get(k);
+          if (!bound) {
+            bound = k === 'setProperty'
+              ? function (p, val, pr) { return v.call(t, p, rewriteCSSText(val), pr); }
+              : v.bind(t);
+            per.set(k, bound);
+          }
+          return bound;
+        },
+        set(t, k, v) {
+          try { t[k] = typeof v === 'string' ? rewriteCSSText(v) : v; } catch { return false; }
+          return true;
+        }
+      });
+    } catch { return decl; }
+    styleDeclProxies.set(decl, proxy);
+    return proxy;
+  }
   function installStyleHooks(w) {
     try { installStyleHooksInner(w); } catch (e) {
-      try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'style-hooks-failed', e: String(e && (e.message || e)) }); } catch {}
+      styleHookState = 'threw:' + String(e && (e.message || e)).slice(0, 60);
+    }
+    // 조용한 no-op 금지. 오늘 이 파일에서만 훅이 안 걸린 걸 모른 채 세 번
+    // 헛짚었다. 페이지에서 읽을 수 있는 전역은 남기지 않는다(지문이 된다) —
+    // 진단 링에만 남긴다.
+    if (styleHookState !== 'ok') {
+      try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'style-hooks', s: styleHookState }); } catch {}
     }
   }
   function installStyleHooksInner(w) {
@@ -3917,6 +3965,33 @@
         // insertRule 만 두 번째 인자(index)를 받는다 — 나머지는 무시된다.
         define(sheetProto, m, function (text, idx) { return native.call(this, rewriteCSSText(text), idx); });
       }
+    }
+    // `el.style.backgroundImage = 'url(…)'` 는 프로토타입 훅으로 못 잡는다.
+    // 이 엔진은 CSS 프로퍼티를 **인스턴스의 own data property** 로 노출한다
+    // (실측: `getOwnPropertyDescriptor(document.body.style,'backgroundImage')`
+    // → `own:true, set:없음`, prototype 에는 아예 없다). 그래서 350개를
+    // 프로토타입에서 훅하려던 시도는 조용한 no-op 였다.
+    //
+    // 대신 `style` 게터가 **containment proxy** 를 돌려주게 한다 — 프로퍼티
+    // 이름을 열거할 필요 없이 모든 쓰기가 set 트랩 하나를 지난다.
+    const styleGetterProto = (w.HTMLElement && w.HTMLElement.prototype)
+      || (w.Element && w.Element.prototype);
+    const styleDesc = styleGetterProto && propertyDescriptor(styleGetterProto, 'style');
+    if (styleDesc && styleDesc.get) {
+      try {
+        Object.defineProperty(styleGetterProto, 'style', {
+          get() { return containStyleDeclaration(styleDesc.get.call(this)); },
+          set: styleDesc.set ? function (v) { return styleDesc.set.call(this, rewriteCSSText(v)); } : undefined,
+          enumerable: styleDesc.enumerable,
+          configurable: false
+        });
+        styleHookState = 'ok';
+      } catch (e) {
+        styleHookState = 'failed:' + String(e && (e.message || e)).slice(0, 60);
+      }
+    } else {
+      styleHookState = 'no-desc:' + (styleDesc ? 'nogetter' : 'null')
+        + ':' + (styleGetterProto ? 'proto' : 'noproto');
     }
     const declProto = w.CSSStyleDeclaration && w.CSSStyleDeclaration.prototype;
     if (declProto) {
@@ -4173,6 +4248,25 @@
         continue;
       }
       if (tag === 'link') enforceLinkPolicy(node);
+      // CSS 도 URL 을 실어 나른다. 서버측 htmltx 는 `style` 속성과 `<style>`
+      // 본문을 모두 zp_css 로 통과시키는데 페이지 realm 의 이 walker 에는
+      // 그게 없었다 — naver.com 실측에서 innerHTML 로 들어온 DIV 의
+      // `style="background-image:url(https://s.pstatic.net/…)"` 가 원본
+      // URL 로 남아 `img-src 'self'` 에 걸렸다. (오늘 네 번째 서버/런타임
+      // 비대칭.)
+      if (Native.hasAttribute.call(node, 'style')) {
+        const raw = Native.getAttribute.call(node, 'style') || '';
+        const mapped = rewriteCSSText(raw);
+        if (mapped !== raw) Native.setAttribute.call(node, 'style', mapped);
+      }
+      if (tag === 'style') {
+        const raw = Native.nodeTextContent && Native.nodeTextContent.get
+          ? Native.nodeTextContent.get.call(node) : node.textContent;
+        const mapped = rewriteCSSText(raw || '');
+        if (mapped !== raw && Native.nodeTextContent && Native.nodeTextContent.set) {
+          Native.nodeTextContent.set.call(node, mapped);
+        }
+      }
       // 2026-06-06 follow-up: navigation URL attribute rewrite. The
       // server-side zp-htmltx pass handles the initial document, but
       // every page-side HTML ingestion (innerHTML/outerHTML/
