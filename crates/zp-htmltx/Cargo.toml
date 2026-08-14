@@ -9,6 +9,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 zp-shared = { workspace = true }
+zp-css = { workspace = true }
 zp-rewriter = { workspace = true }
 thiserror = { workspace = true }
 lol_html = { version = "2", default-features = false }

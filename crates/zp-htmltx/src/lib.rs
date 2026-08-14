@@ -383,6 +383,21 @@ fn script_settings(
     // (see RewriteOpts::proxy_origin) — the end handler rewrites those too.
     let origin_for_end = proxy_origin.clone();
     let diags_for_end = diags.clone();
+    // 2026-08-14 — 인라인 `<style>` 의 CSS 도 리라이트한다.
+    //
+    // 외부 스타일시트는 SW 의 `rewriteCSSResponse` 가 처리하는데 문서 안에
+    // 인라인으로 박힌 CSS 는 아무도 안 건드리고 있었다. `--enforce-csp` 로 CSP 를
+    // 실제로 켜자 드러났다: `@font-face { src: url(https://wtm.pstatic.net/fonts/
+    // ncap-probe-*.woff2) }` 가 원본 URL 로 남아 `font-src 'self'` 에 걸린다.
+    // (initiator 가 `parser` 인데 문서 HTML 에서 URL 이 안 나오면 인라인 CSS 를
+    // 의심할 것 — CSSOM 조회로는 다른 프레임의 것을 못 본다.)
+    //
+    // 스크립트와 같은 방식으로 텍스트 노드를 모았다가 `last_in_text_node` 에서
+    // 한 번에 리라이트한다. 청크 단위로 파싱하면 규칙이 중간에 잘린다.
+    let style_buffer: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let style_buf_for_text = style_buffer.clone();
+    let style_target = target.clone();
+    let style_origin = proxy_origin.clone();
 
     let mut handlers = vec![
                 element!("script", move |el| {
@@ -396,6 +411,22 @@ fn script_settings(
                         _ => Some(ScriptKind::Classic),
                     };
                     *kind_for_el.borrow_mut() = kind;
+                    Ok(())
+                }),
+                text!("style", move |chunk| {
+                    style_buf_for_text.borrow_mut().push_str(chunk.as_str());
+                    chunk.remove();
+                    if chunk.last_in_text_node() {
+                        let css = style_buf_for_text.borrow().clone();
+                        style_buf_for_text.borrow_mut().clear();
+                        // 파서가 실패하면 `rewrite_css` 가 원본을 그대로 돌려준다
+                        // (외부 스타일시트 경로와 동일한 fail-open). CSS 는 실행
+                        // 가능한 코드가 아니라 URL 참조만 문제이므로, 여기서
+                        // fail-closed 로 가면 멀쩡한 페이지의 스타일을 날린다.
+                        let res = zp_css::rewrite_css(&css, &style_target, "/zp/", &style_origin);
+                        let rewritten = if res.ok { res.code } else { css };
+                        chunk.after(&rewritten, ContentType::Text);
+                    }
                     Ok(())
                 }),
                 text!("script", move |chunk| {
@@ -1130,6 +1161,36 @@ mod tests {
     // 원본 URL 로 남아 CSP `img-src 'self'` 에 걸려 차단됐다. taskweaver
     // `--enforce-csp` 로 CSP 를 실제로 켜기 전까지는 SW 가 받아 주는 바람에
     // 증상이 보이지 않았다.
+    // 2026-08-14 — 인라인 `<style>` 안의 URL 도 리라이트한다.
+    //
+    // 외부 스타일시트는 SW 의 rewriteCSSResponse 가 처리하는데 문서에 인라인으로
+    // 박힌 CSS 는 아무도 안 건드리고 있었다. `--enforce-csp` 로 CSP 를 실제로
+    // 켜자 `@font-face` 의 폰트 URL 이 `font-src 'self'` 에 걸려 드러났다.
+    #[test]
+    fn inline_style_urls_are_rewritten() {
+        let prelude = "<script nonce=zp></script>";
+        let doc = "<html><head><style>\
+@font-face { font-family: probe; src: url(https://cdn.test/probe.woff2) format('woff2'); }\
+.hero { background-image: url('https://cdn.test/bg.png'); }\
+.inert { background-image: url(data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=); }\
+</style></head><body>x</body></html>";
+        let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+        let (tail, _d) = txn.end().unwrap();
+        out.extend_from_slice(&tail);
+        let html = String::from_utf8(out).unwrap();
+
+        assert!(!html.contains("https://cdn.test/probe.woff2"), "@font-face url raw: {html}");
+        assert!(!html.contains("https://cdn.test/bg.png"), "background url raw: {html}");
+        assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
+        // 선언 자체는 살아 있어야 한다 — CSS 를 통째로 날리면 페이지가 무너진다.
+        assert!(html.contains("@font-face"), "@font-face dropped: {html}");
+        assert!(html.contains("format("), "declaration mangled: {html}");
+        // inert 스킴은 그대로 — 네트워크로 나가지 않으므로 프록시할 이유가 없다.
+        assert!(html.contains("data:image/gif;base64,"), "data: url touched: {html}");
+    }
+
     #[test]
     fn srcset_candidates_are_rewritten() {
         let prelude = "<script nonce=zp></script>";

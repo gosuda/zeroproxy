@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 zp-shared = { workspace = true }
 zp-rewriter = { workspace = true }
+zp-css = { workspace = true }
 zp-htmltx = { workspace = true }
 
 # CSS rewriter (SWC + url) — ported from the deleted rewriter-rs/ in

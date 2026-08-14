@@ -19,7 +19,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-pub mod css;
+pub use zp_css as css;
 
 use wasm_bindgen::prelude::*;
 

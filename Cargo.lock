@@ -3696,9 +3696,21 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "web-sys",
+ "zp-css",
  "zp-htmltx",
  "zp-rewriter",
  "zp-shared",
+]
+
+[[package]]
+name = "zp-css"
+version = "0.1.0"
+dependencies = [
+ "swc_common",
+ "swc_css_ast",
+ "swc_css_parser",
+ "swc_css_visit",
+ "url",
 ]
 
 [[package]]
@@ -3709,6 +3721,7 @@ dependencies = [
  "lol_html",
  "percent-encoding",
  "thiserror",
+ "zp-css",
  "zp-rewriter",
  "zp-shared",
 ]

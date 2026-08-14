@@ -1,0 +1,19 @@
+[package]
+name = "zp-css"
+version = "0.1.0"
+edition = "2021"
+
+# 2026-08-14 — `zp-bundle::css` 에서 분리해 나온 크레이트.
+#
+# 인라인 `<style>` 의 `url(...)`/`@import` 도 리라이트해야 하는데, 그 처리는
+# `zp-htmltx` 안에서 일어난다. CSS 리라이터가 `zp-bundle` 에 있으면
+# `zp-bundle → zp-htmltx` 의존 때문에 역방향이 순환이 된다. 로직을 htmltx 쪽에
+# 복제하는 선택지도 있었지만, 같은 규칙을 두 곳에 두면 반드시 갈라진다는 것을
+# 이 저장소에서 하루에 세 번 확인했다(CSP 3중화, 서버/런타임 리라이트 비대칭,
+# htmltx 속성 목록 이중화). 그래서 **하나로 두고 양쪽이 의존**하게 했다.
+[dependencies]
+swc_common = { version = "23.0.0", default-features = false }
+swc_css_ast = { version = "23.0.0", default-features = false }
+swc_css_parser = { version = "23.0.0", default-features = false }
+swc_css_visit = { version = "23.0.0", default-features = false }
+url = { version = "2.5", default-features = false }

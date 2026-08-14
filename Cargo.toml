@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/zp-shared",
     "crates/zp-rewriter",
+    "crates/zp-css",
     "crates/zp-htmltx",
     "crates/zp-transport-codec",
     "crates/zp-bundle",
@@ -30,6 +31,7 @@ repository = "https://github.com/teamlitmus/zeroproxy"
 [workspace.dependencies]
 zp-shared = { path = "crates/zp-shared" }
 zp-rewriter = { path = "crates/zp-rewriter" }
+zp-css = { path = "crates/zp-css" }
 zp-htmltx = { path = "crates/zp-htmltx" }
 zp-transport-codec = { path = "crates/zp-transport-codec" }
 

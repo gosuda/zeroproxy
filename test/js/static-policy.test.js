@@ -1248,24 +1248,33 @@ test('rewriteScriptResponse must not call the removed initRewriter helper', () =
   );
 });
 
-// 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted. The
-// CSS rewriter is ported to crates/zp-bundle/src/css.rs and exposed via the
-// wasm-bindgen `rewriteCSS` export. SW + page realm both call
-// `ZPBundle.rewriteCSS`.
-test('rewriter-rs/ is deleted; CSS rewriter lives in zp-bundle (Step 4)', () => {
+// 2026-06-08 split-bundle (c.1) Step 4: rewriter-rs/ crate is deleted.
+// 2026-08-14: the CSS rewriter moved again — out of zp-bundle into its own
+// `zp-css` crate — because zp-htmltx needs it for inline <style> and
+// `zp-bundle -> zp-htmltx` made the reverse dependency a cycle. Duplicating the
+// rewriter into htmltx was the alternative and was rejected: the same rule in
+// two places always drifts (three separate instances of that were found in this
+// repo on 2026-08-13/14). zp-bundle re-exports it, so callers are unchanged.
+test('rewriter-rs/ is deleted; the CSS rewriter has exactly one home (zp-css)', () => {
   // Crate directory + workspace exclusion + asset name all gone.
   assert.equal(fs.existsSync('rewriter-rs'), false, 'rewriter-rs/ directory must be removed');
   const workspaceCargo = fs.readFileSync('Cargo.toml', 'utf8');
   assert.equal(workspaceCargo.includes('"rewriter-rs"'), false, 'workspace must not exclude (or include) rewriter-rs');
-  // zp-bundle has the CSS module + the SWC deps.
-  assert.ok(fs.existsSync('crates/zp-bundle/src/css.rs'), 'CSS module must live at crates/zp-bundle/src/css.rs');
+  // Exactly one home for the rewriter, and both consumers depend on it.
+  assert.ok(fs.existsSync('crates/zp-css/src/lib.rs'), 'CSS rewriter must live at crates/zp-css/src/lib.rs');
+  assert.equal(fs.existsSync('crates/zp-bundle/src/css.rs'), false,
+    'the old copy must be gone — two copies always drift');
+  const cssCargo = fs.readFileSync('crates/zp-css/Cargo.toml', 'utf8');
+  for (const dep of ['swc_css_ast', 'swc_css_parser', 'swc_css_visit']) {
+    assert.match(cssCargo, new RegExp('^' + dep + '\\b', 'm'), 'zp-css must declare ' + dep);
+  }
   const bundleCargo = fs.readFileSync('crates/zp-bundle/Cargo.toml', 'utf8');
-  assert.match(bundleCargo, /^swc_css_ast\b/m, 'zp-bundle must declare swc_css_ast');
-  assert.match(bundleCargo, /^swc_css_parser\b/m, 'zp-bundle must declare swc_css_parser');
-  assert.match(bundleCargo, /^swc_css_visit\b/m, 'zp-bundle must declare swc_css_visit');
+  assert.match(bundleCargo, /^zp-css\b/m, 'zp-bundle must depend on zp-css');
+  const htmltxCargo = fs.readFileSync('crates/zp-htmltx/Cargo.toml', 'utf8');
+  assert.match(htmltxCargo, /^zp-css\b/m, 'zp-htmltx must depend on zp-css (inline <style>)');
   // wasm-bindgen export wired in lib.rs.
   const bundleLib = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
-  assert.match(bundleLib, /pub mod css\b/, 'lib.rs must declare the css module');
+  assert.match(bundleLib, /pub use zp_css as css\b/, 'lib.rs must re-export zp-css so callers stay unchanged');
   assert.match(bundleLib, /js_name = rewriteCSS\b/, 'lib.rs must export rewriteCSS via wasm-bindgen');
   assert.match(bundleLib, /css::rewrite_css\(/, 'rewriteCSS export must delegate to css::rewrite_css');
   // SW + page bundle wrapper expose rewriteCSS.
