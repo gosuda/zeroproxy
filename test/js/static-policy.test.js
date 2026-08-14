@@ -2526,3 +2526,47 @@ test('service worker strips browser-to-target reporting headers', () => {
   const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8');
   assert.ok(!/report-uri|report-to/i.test(golden), 'our own CSP must not carry a reporting endpoint');
 });
+
+test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 타깃으로 매핑된다 (ctx 가 있을 때만)', () => {
+  // 정규식 핀이 아니라 실제로 실행한다. `style.textContent = 'url(/img/bg.png)'`
+  // 처럼 브라우저 CSS 엔진이 문서 URL 기준으로 푼 경로는 프록시 오리진의
+  // 평범한 `/img/bg.png` 로 도착하는데, 예전에는 `/zp/` 로 시작할 때만
+  // 받아 줘서 UNKNOWN → Response.error() 로 죽었다 (실측: insertRule /
+  // el.style / @font-face / adoptedStyleSheets / 루트상대 <style> 5종).
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const grab = (name) => {
+    const start = sw.indexOf('function ' + name + '(');
+    assert.ok(start >= 0, name + ' must exist in sw.js');
+    const next = sw.indexOf('\nfunction ', start + 1);
+    return sw.slice(start, next < 0 ? undefined : next);
+  };
+  const src = [grab('classify'), grab('internalPath'), grab('isRuntimeAPIPath')].join('\n');
+  const ZP = {
+    CONTROL_PREFIX: '/zp/',
+    controlPath: (p) => '/zp/' + p,
+    apiPath: (p) => '/zp/api/' + p,
+    assetPath: (n) => '/zp/' + n,
+  };
+  const ORIGIN = 'http://proxy.localhost:18080';
+  const classifyWith = (ctx) => new Function(
+    'ZP', 'ORIGIN', 'contextFor', 'parseSharePath', 'shareRoutes', 'self',
+    src + '\nreturn classify;'
+  )(ZP, ORIGIN, () => ctx, () => null, new Map(), {});
+  const req = { mode: 'no-cors', destination: 'image', headers: { get: () => null } };
+  const ctx = { tabId: 'tab-1', entryId: 'e1' };
+  const at = (path) => new URL(ORIGIN + path);
+
+  const mapped = classifyWith(ctx)(req, at('/img/bg.png'), 'client-1');
+  assert.equal(mapped.kind, 'VIRTUAL_SUBRESOURCE', '런타임 CSS 서브리소스는 타깃으로 매핑돼야 한다');
+  assert.equal(mapped.sameOriginURL.pathname, '/img/bg.png');
+
+  // ctx 가 없으면 탭을 추측하지 않는다 (A2: multi-tab leak). 여전히 거절이다.
+  assert.equal(classifyWith(null)(req, at('/img/bg.png'), '').kind, 'UNKNOWN',
+    'ctx 없이 타깃을 추측하면 다른 탭으로 새는 경로가 열린다');
+
+  // 넓힌 분기가 내부 에셋을 삼키면 안 된다 — 삼키는 순간 페이지가 통째로 죽는다.
+  for (const p of ['/__zp/zp_page_rt.wasm?v=abc', '/zp/zp-core.js', '/zp/runtime-prelude.js']) {
+    assert.equal(classifyWith(ctx)(req, at(p), 'client-1').kind, 'INTERNAL_ASSET', p + ' must stay internal');
+  }
+  assert.equal(classifyWith(ctx)(req, at('/zp/api/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
+});

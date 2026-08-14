@@ -543,19 +543,31 @@ function classify(req, url, clientId) {
     const ctx = contextFor(req, clientId);
     const p = parseSharePath(url.pathname);
     if (p && req.mode === 'navigate') return { kind: 'PROXY_DOCUMENT', ...p };
-    if (ctx && url.pathname.startsWith(ZP.CONTROL_PREFIX)) {
-      // A same-origin `/zp/…` path that is NOT one of our API paths means some
-      // target code resolved a relative URL against a proxy URL it got hold of
-      // (e.g. a module served from `/zp/api/script?u=…` resolving `./x.js`
-      // against `/zp/api/`). Mapping it onto the target host — which is what
-      // happens below — both leaks our internal path shape upstream and
-      // guarantees a 404 that DevTools attributes to the service worker.
-      // Record who asked so the emitter is identifiable.
-      try {
-        (self.__zpRustTrace = self.__zpRustTrace || []).push(
-          `sw:zp-path-as-subresource ${url.pathname} search=${String(url.search || '(none)').slice(0, 120)} dest=${req.destination || '?'} mode=${req.mode || '?'} initiator=${String(req.referrer || '(none)').slice(-160)} ref=${String(req.headers.get('Referer') || '(none)').slice(-160)}`
-        );
-      } catch {}
+    if (ctx) {
+      // 프록시 오리진의 "우리 것이 아닌" 경로 = 타깃 코드가 URL 을 **문서
+      // 기준**으로 해석한 결과다. 대표적으로 런타임에 주입된 CSS:
+      //   style.textContent = '#a{background:url(/img/bg.png)}'
+      // 브라우저 CSS 엔진이 문서 URL 기준으로 풀기 때문에 프록시 오리진의
+      // `/img/bg.png` 로 나온다. htmltx 는 네트워크에서 온 바이트만 고치고
+      // 멤브레인은 CSS 엔진의 URL 해석에 손댈 수 없으므로, 이 경로를 여기서
+      // 받아 주지 않으면 런타임 CSS 서브리소스는 전부 죽는다 (실측: 루트상대
+      // <style>/insertRule/el.style/@font-face/adoptedStyleSheets 5종).
+      //
+      // ctx 가 있으면 타깃이 이미 확정돼 있으므로 `api/fetch?url=` 로 도는
+      // 것과 권한이 같다 — 새로 열리는 문은 없다. ctx 가 없으면 아래 UNKNOWN
+      // 으로 떨어진다: 탭은 절대 추측하지 않는다 (A2).
+      if (url.pathname.startsWith(ZP.CONTROL_PREFIX)) {
+        // `/zp/…` 로 나온 건 위의 정상 경로와 달리 **증상**이다: 타깃 코드가
+        // 우리 내부 URL 을 손에 넣어 거기에 상대 경로를 풀었다는 뜻
+        // (예: `/zp/api/script?u=…` 로 서빙된 모듈이 `./x.js` 를 `/zp/api/`
+        // 기준으로 해석). 아래 매핑은 우리 내부 경로 모양을 업스트림에 흘리고
+        // 십중팔구 404 로 끝난다. 누가 쐈는지 남겨 두면 발신자를 특정할 수 있다.
+        try {
+          (self.__zpRustTrace = self.__zpRustTrace || []).push(
+            `sw:zp-path-as-subresource ${url.pathname} search=${String(url.search || '(none)').slice(0, 120)} dest=${req.destination || '?'} mode=${req.mode || '?'} initiator=${String(req.referrer || '(none)').slice(-160)} ref=${String(req.headers.get('Referer') || '(none)').slice(-160)}`
+          );
+        } catch {}
+      }
       return { kind: 'VIRTUAL_SUBRESOURCE', ctx, sameOriginURL: url };
     }
     if (p && shareRoutes.has(p.routeKey)) return { kind: 'PROXY_DOCUMENT', ...p };
