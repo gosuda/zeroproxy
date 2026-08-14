@@ -3856,6 +3856,23 @@
     }
     return out;
   }
+  // Worker 로 실행될 JS blob 은 정책상 차단한다. 차단 스텁 안에서 prelude 를
+  // **절대 URL** 로 가져오는 게 핵심: blob: worker 안의 상대 URL 은 blob URL
+  // 기준으로 풀려 그냥 invalid 다. 실제로 `SyntaxError: The URL
+  // '/zp/assets/worker-prelude.js' is invalid` 로 죽어서 그 뒤의 DOMException
+  // (= 의도한 차단 신호) 이 아예 실행되지 않았다 — 차단은 됐지만 이유가
+  // 엉뚱한 에러로 보고됐다.
+  //
+  // 같은 blob 을 만드는 곳이 두 군데였고 둘 다 같은 버그를 갖고 있었다.
+  // (오늘 srcset·isURLBearing 에 이어 세 번째 "목록/코드 복제" 사고다.)
+  function blockedWorkerBlob() {
+    return new Blob([
+      'self.__ZP_WORKER_TARGET=', JSON.stringify(virtualURL.href),
+      ';\nself.__ZP_WORKER_TAB_ID=', JSON.stringify(boot.tabId),
+      ';\nimportScripts(', JSON.stringify(proxyOrigin + '/zp/assets/worker-prelude.js'), ');\n',
+      "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n",
+    ], { type: 'text/javascript' });
+  }
   function installStyleHooks(w) {
     try { installStyleHooksInner(w); } catch (e) {
       try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'style-hooks-failed', e: String(e && (e.message || e)) }); } catch {}
@@ -4361,7 +4378,7 @@
     }
     if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { try { zpTrace('SharedWorker', String(url).slice(0,120)); } catch {} return new Native.SharedWorker(workerBootstrapURL(url), opts); });
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.reject(normalizedError('NotSupportedError')); });
-    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/zp/assets/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' }); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
+    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = blockedWorkerBlob(); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
   }
   // D3: virtual SW facade. The original behavior was a hard
@@ -4462,7 +4479,7 @@
   function dataWorkerURL(raw) {
     const comma = raw.indexOf(',');
     if (comma < 0) throw normalizedError('NotSupportedError');
-    const blocked = new Blob(["self.__ZP_WORKER_TARGET=", JSON.stringify(virtualURL.href), ";\nself.__ZP_WORKER_TAB_ID=", JSON.stringify(boot.tabId), ";\nimportScripts('/zp/assets/worker-prelude.js');\nthrow new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n"], { type: 'text/javascript' });
+    const blocked = blockedWorkerBlob();
     const safe = Native.createObjectURL(blocked);
     workerBlobURLs.add(safe);
     return safe;
