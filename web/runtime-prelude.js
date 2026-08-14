@@ -3539,6 +3539,9 @@
         return Native.setAttribute.call(this, k, v);
       }
       if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
+      // `style` 속성도 url() 을 실어 나른다 — CSSStyleDeclaration 훅은 프로퍼티
+      // 경로만 덮으므로 여기서 따로 잡는다.
+      if (localKey === 'style' && v != null) return Native.setAttribute.call(this, k, rewriteCSSText(v));
       if (isURLBearing(this, key, localKey, ln)) {
         // 2026-08-13 — fragment-only URL (`#`, `#tab`) 은 same-document 앵커다.
         // 절대 URL 로 풀어 "?via=" launcher 로 바꾸면 두 가지가 깨진다:
@@ -3659,6 +3662,7 @@
     installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     installScriptProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
     installScriptTextProps(w);
+    installStyleHooks(w);
     installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
@@ -3771,6 +3775,150 @@
     urlMeta.set(el, target);
     Native.setAttribute.call(el, 'data-zp-target-url', target);
     return Native.setAttribute.call(el, 'src', scriptProxyPath(target, kind));
+  }
+  // ── 런타임 CSS 의 url() / @import ────────────────────────────────────────
+  //
+  // **절대 http(s) URL 만 건드린다.** 상대 URL 은 브라우저가 문서(= 프록시 공유
+  // 경로) 기준으로 풀어 프록시 오리진으로 오고, SW 가 ctx 로 타깃에 매핑한다
+  // (3e76a32). 거기까지 손대면 이중 매핑이 된다 — 그래서 여기서 하는 일은
+  // "브라우저가 우리를 거치지 않고 직접 갈 수 있는 URL" 만 프록시 경로로
+  // 돌리는 것뿐이다.
+  function cssProxyURL(raw) {
+    const t = String(raw == null ? '' : raw).trim();
+    if (!/^https?:\/\//i.test(t)) return null;
+    if (t.startsWith(proxyOrigin)) return null;
+    return subresourceProxyPath(t);
+  }
+  // 정규식이 아니라 스캐너인 이유: `url(` 를 정규식으로 찾으면 주석과 문자열
+  // 안의 것까지 잡아 `content: "url(http://x)"` 같은 **페이지 텍스트를 조용히
+  // 바꾼다**. 보안 프록시가 페이지 내용을 변조하면 안 된다.
+  function rewriteCSSText(input) {
+    const s = String(input == null ? '' : input);
+    if (s.indexOf('(') < 0 && s.indexOf('@import') < 0) return s;
+    const isIdentChar = (ch) => ch !== undefined && /[A-Za-z0-9_$-]/.test(ch);
+    const n = s.length;
+    let out = '';
+    let i = 0;
+    // `@import "x.css"` 는 url() 없이 문자열만 오는 형태다. 그 문자열 하나만
+    // 리라이트 대상으로 표시해 둔다 — 다른 문자열은 건드리지 않는다.
+    let pendingImport = false;
+    while (i < n) {
+      const c = s[i];
+      if (c === '/' && s[i + 1] === '*') {
+        const e = s.indexOf('*/', i + 2);
+        const stop = e < 0 ? n : e + 2;
+        out += s.slice(i, stop);
+        i = stop;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < n) {
+          if (s[j] === '\\') { j += 2; continue; }
+          if (s[j] === c) break;
+          j++;
+        }
+        const mapped = pendingImport ? cssProxyURL(s.slice(i + 1, Math.min(j, n))) : null;
+        out += mapped ? c + mapped + c : s.slice(i, Math.min(j + 1, n));
+        i = Math.min(j + 1, n);
+        pendingImport = false;
+        continue;
+      }
+      if ((c === 'u' || c === 'U') && !isIdentChar(s[i - 1]) && /^url\(/i.test(s.slice(i, i + 4))) {
+        let j = i + 4;
+        while (j < n && /\s/.test(s[j])) j++;
+        const q = s[j] === '"' || s[j] === "'" ? s[j] : '';
+        let k = q ? j + 1 : j;
+        while (k < n) {
+          if (s[k] === '\\') { k += 2; continue; }
+          if (q ? s[k] === q : s[k] === ')') break;
+          k++;
+        }
+        const close = s.indexOf(')', k);
+        const stop = close < 0 ? n : close + 1;
+        const mapped = cssProxyURL(s.slice(q ? j + 1 : j, k));
+        // 따옴표 없는 url() 토큰에도 프록시 경로에는 `?`/`&`/`%` 가 들어가므로
+        // 항상 따옴표를 씌워 돌려준다.
+        out += mapped ? 'url(' + (q || '"') + mapped + (q || '"') + ')' : s.slice(i, stop);
+        i = stop;
+        pendingImport = false;
+        continue;
+      }
+      if (c === '@' && /^@import\b/i.test(s.slice(i, i + 8))) {
+        out += s.slice(i, i + 7);
+        i += 7;
+        pendingImport = true;
+        continue;
+      }
+      if (!/\s/.test(c)) pendingImport = false;
+      out += c;
+      i++;
+    }
+    return out;
+  }
+  function installStyleHooks(w) {
+    try { installStyleHooksInner(w); } catch (e) {
+      try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'style-hooks-failed', e: String(e && (e.message || e)) }); } catch {}
+    }
+  }
+  function installStyleHooksInner(w) {
+    // url() 을 실을 수 있는 CSS 프로퍼티만 훅한다 — CSSStyleDeclaration 의
+    // setter 는 350개가 넘어서 전수 훅은 부팅 비용이 크다.
+    //
+    // **함수 안에 두는 이유**: 모듈 스코프 `const` 로 두면 TDZ 에 걸린다.
+    // 이 함수는 설치 시퀀스(installGetterMasking 부근)에서 불리는데 그 지점은
+    // 선언보다 **위**라 `Cannot access 'X' before initialization` 이 나고,
+    // 그 예외가 뒤따르는 멤브레인 설치를 통째로 중단시킨다. 실제로 자식
+    // 프레임의 fetch/img 컨테인먼트가 깨졌다(매트릭스 e2/e3 회귀로 잡았다).
+    const CSS_URL_PROPS = [
+      'background', 'backgroundImage', 'borderImage', 'borderImageSource',
+      'listStyle', 'listStyleImage', 'content', 'cursor', 'src',
+      'mask', 'maskImage', 'webkitMask', 'webkitMaskImage', 'webkitMaskBoxImage',
+      'shapeOutside', 'clipPath', 'offsetPath', 'filter', 'backdropFilter',
+    ];
+    const styleProto = w.HTMLStyleElement && w.HTMLStyleElement.prototype;
+    if (styleProto) {
+      for (const prop of ['textContent', 'innerText', 'innerHTML']) {
+        const d = propertyDescriptor(styleProto, prop)
+          || propertyDescriptor(w.Element && w.Element.prototype, prop)
+          || propertyDescriptor(w.Node && w.Node.prototype, prop);
+        if (!d || !d.set) continue;
+        try {
+          Object.defineProperty(styleProto, prop, {
+            get() { return d.get ? d.get.call(this) : ''; },
+            set(v) { d.set.call(this, rewriteCSSText(v)); },
+            configurable: false
+          });
+        } catch {}
+      }
+    }
+    const sheetProto = w.CSSStyleSheet && w.CSSStyleSheet.prototype;
+    if (sheetProto) {
+      for (const m of ['insertRule', 'replaceSync', 'replace']) {
+        const native = sheetProto[m];
+        if (typeof native !== 'function') continue;
+        // insertRule 만 두 번째 인자(index)를 받는다 — 나머지는 무시된다.
+        define(sheetProto, m, function (text, idx) { return native.call(this, rewriteCSSText(text), idx); });
+      }
+    }
+    const declProto = w.CSSStyleDeclaration && w.CSSStyleDeclaration.prototype;
+    if (declProto) {
+      const nativeSet = declProto.setProperty;
+      if (typeof nativeSet === 'function') {
+        define(declProto, 'setProperty', function (p, v, pr) { return nativeSet.call(this, p, rewriteCSSText(v), pr); });
+      }
+      for (const prop of ['cssText'].concat(CSS_URL_PROPS)) {
+        const d = propertyDescriptor(declProto, prop);
+        if (!d || !d.set) continue;
+        try {
+          Object.defineProperty(declProto, prop, {
+            get() { return d.get ? d.get.call(this) : ''; },
+            set(v) { d.set.call(this, rewriteCSSText(v)); },
+            configurable: false
+          });
+        } catch {}
+      }
+    }
   }
   function installScriptTextProps(w) {
     const scriptProto = w.HTMLScriptElement && w.HTMLScriptElement.prototype;

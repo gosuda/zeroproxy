@@ -2593,3 +2593,36 @@ test('isURLBearing: object[data] / embed[src] 도 리라이트 대상이다 (프
   assert.ok(/installURLProp\(w\.HTMLObjectElement[^)]*'data'\)/.test(rt), 'HTMLObjectElement.data 프로퍼티 훅이 없다');
   assert.ok(/installURLProp\(w\.HTMLEmbedElement[^)]*'src'\)/.test(rt), 'HTMLEmbedElement.src 프로퍼티 훅이 없다');
 });
+
+test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주석/문자열은 건드리지 않는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const grab = (name) => {
+    const start = rt.indexOf('  function ' + name + '(');
+    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    const next = rt.indexOf('\n  function ', start + 1);
+    return rt.slice(start, next < 0 ? undefined : next);
+  };
+  const rewriteCSSText = new Function(
+    'proxyOrigin', 'subresourceProxyPath',
+    grab('cssProxyURL') + '\n' + grab('rewriteCSSText') + '\nreturn rewriteCSSText;'
+  )('http://proxy.localhost:18080', (u) => '/zp/api/fetch?url=' + encodeURIComponent(u));
+
+  // 절대 URL 은 프록시 경로로.
+  assert.match(rewriteCSSText('#a{background:url(https://cdn.example.com/x.png)}'), /url\("\/zp\/api\/fetch\?url=https%3A%2F%2Fcdn/);
+  assert.match(rewriteCSSText("@import 'https://cdn.example.com/a.css';"), /@import '\/zp\/api\/fetch/);
+  assert.match(rewriteCSSText('@import url("https://cdn.example.com/a.css");'), /@import url\("\/zp\/api\/fetch/);
+
+  // 상대 URL 은 그대로 — 문서(프록시 공유 경로) 기준으로 풀려 SW 가 매핑한다.
+  // 여기서 손대면 이중 매핑이 된다.
+  assert.equal(rewriteCSSText('#a{background:url(/img/x.png)}'), '#a{background:url(/img/x.png)}');
+  assert.equal(rewriteCSSText('#a{background:url("./x.png")}'), '#a{background:url("./x.png")}');
+  // 이미 우리 오리진인 것도 그대로 (재진입 방지).
+  const mine = '#a{background:url(http://proxy.localhost:18080/zp/api/fetch?url=x)}';
+  assert.equal(rewriteCSSText(mine), mine);
+
+  // ★주석과 문자열은 페이지 내용이다. 정규식으로 긁으면 여기가 조용히 바뀐다.
+  const comment = '/* url(https://cdn.example.com/x.png) */#a{color:red}';
+  assert.equal(rewriteCSSText(comment), comment);
+  const content = '#a::before{content:"url(https://cdn.example.com/x.png)"}';
+  assert.equal(rewriteCSSText(content), content);
+});
