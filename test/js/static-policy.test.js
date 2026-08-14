@@ -75,7 +75,7 @@ test('runtime installs required escape-vector hooks', () => {
     "'contentWindow'",
     "'contentDocument'",
     'new WeakSet',
-    "attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target']",
+    "attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'data']",
     'enforceObservedAttribute',
     'data-zp-integrity',
     'installIntegrityProp',
@@ -2569,4 +2569,27 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
     assert.equal(classifyWith(ctx)(req, at(p), 'client-1').kind, 'INTERNAL_ASSET', p + ' must stay internal');
   }
   assert.equal(classifyWith(ctx)(req, at('/zp/api/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
+});
+
+test('isURLBearing: object[data] / embed[src] 도 리라이트 대상이다 (프로퍼티 훅과 한 쌍)', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const line = rt.split('\n').find((l) => l.includes('function isURLBearing('));
+  assert.ok(line, 'isURLBearing 을 못 찾았다');
+  const isURLBearing = new Function(
+    'attrLocalName', 'isSVGURLBearing',
+    line.trim() + '\nreturn isURLBearing;'
+  )((k) => { const i = String(k).indexOf(':'); return i < 0 ? String(k) : String(k).slice(i + 1); }, () => false);
+
+  const el = (tag) => ({ localName: tag, namespaceURI: 'http://www.w3.org/1999/xhtml' });
+  assert.ok(isURLBearing(el('object'), 'data'), 'object[data] 가 빠지면 런타임 대입이 원본 URL 로 남는다');
+  assert.ok(isURLBearing(el('embed'), 'src'), 'embed[src] 가 빠지면 런타임 대입이 원본 URL 로 남는다');
+  // 오탐 방지: 같은 이름이라도 다른 태그에서는 URL 이 아니다.
+  assert.ok(!isURLBearing(el('div'), 'data'), 'div[data] 는 URL 이 아니다');
+  assert.ok(!isURLBearing(el('object'), 'type'), 'object[type] 는 URL 이 아니다');
+
+  // 프로퍼티 훅이 없으면 `o.data = url` 이 setAttribute 를 안 타므로 위 판정은
+  // 죽은 코드가 된다. 둘은 반드시 같이 있어야 한다 — 각각 따로 넣어 본 결과
+  // 둘 다 무증상 실패였다 (2026-08-14).
+  assert.ok(/installURLProp\(w\.HTMLObjectElement[^)]*'data'\)/.test(rt), 'HTMLObjectElement.data 프로퍼티 훅이 없다');
+  assert.ok(/installURLProp\(w\.HTMLEmbedElement[^)]*'src'\)/.test(rt), 'HTMLEmbedElement.src 프로퍼티 훅이 없다');
 });

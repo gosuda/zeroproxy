@@ -2628,6 +2628,18 @@
     installURLProp(w.HTMLTrackElement && w.HTMLTrackElement.prototype, 'src');
     installURLProp(w.HTMLMediaElement && w.HTMLMediaElement.prototype, 'src');
     installURLProp(w.HTMLVideoElement && w.HTMLVideoElement.prototype, 'poster');
+    // 2026-08-14 — object/embed. 서버측 htmltx 목록에는 ("object","data") /
+    // ("embed","src") 가 있는데 페이지 realm 에만 없었다(정적 HTML 은 통과,
+    // 런타임 대입만 샜다 — 오늘 세 번째 서버/런타임 비대칭).
+    //
+    // **주의: 이 두 줄만으로는 아무것도 안 고쳐진다.** 세터는 raw 값을
+    // 훅된 setAttribute 로 위임하는데, 그 훅의 판정자인 `isURLBearing` 에
+    // object/embed 가 없으면 그대로 통과한다. 반대로 isURLBearing 만 고치면
+    // `o.data = url` 은 프로퍼티 대입이라 setAttribute 를 아예 안 탄다.
+    // 두 곳을 **같이** 고쳐야 닫힌다 — 각각 따로 시도해 본 결과 둘 다 무증상
+    // 실패였다.
+    installURLProp(w.HTMLObjectElement && w.HTMLObjectElement.prototype, 'data');
+    installURLProp(w.HTMLEmbedElement && w.HTMLEmbedElement.prototype, 'src');
     // HTMLHyperlinkElementUtils: protocol/host/hostname/port/pathname/search/
     // hash/origin/username/password. Virtualizing only `href` left every one of
     // these reading the RAW attribute, which since the 2026-06-06 escape fix is
@@ -3890,7 +3902,7 @@
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
   function isSVGURLBearing(el, key, _localKey) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (_localKey != null ? _localKey === 'href' : attrLocalName(key) === 'href') && /^(a|image|use|script)$/.test(el.localName || ''); }
-  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input') || localKey === 'poster' && tag === 'video'; }
+  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input' || tag === 'embed') || localKey === 'data' && tag === 'object' || localKey === 'poster' && tag === 'video'; }
   function executableScriptDataType(el) {
     const kind = executableScriptKindForElement(el);
     if (kind) return kind;
@@ -4116,7 +4128,7 @@
         } finally {
           tickURLCache = null;
         }
-      }).observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target'] });
+      }).observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'data'] });
       observedDocuments.add(doc);
     } catch {}
   }
@@ -4170,7 +4182,7 @@
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
     if (node.nodeType === 1) enforceElementPolicy(node);
-    if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,svg a,svg image,svg use').forEach(enforceElementPolicy);
+    if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,object,embed,svg a,svg image,svg use').forEach(enforceElementPolicy);
   }
   function enforceElementPolicy(el) {
     if (!el || !el.localName) return;
