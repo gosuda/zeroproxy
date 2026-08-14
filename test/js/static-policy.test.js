@@ -2655,3 +2655,71 @@ test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서�
   p.zIndex = 3;
   assert.equal(decl.zIndex, 3);
 });
+
+test('compileNested: new Function 의 파라미터/arguments 가 with 스코프에 가려지지 않는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const grab = (name) => {
+    const start = rt.indexOf('    function ' + name + '(');
+    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    const next = rt.indexOf('\n    function ', start + 1);
+    return rt.slice(start, next < 0 ? undefined : next);
+  };
+  const compileNested = new Function(
+    'zpTrace', 'rewriteDynamicFunctionBody', 'Native',
+    grab('functionPrefix') + '\n' + grab('compileNested') + '\nreturn compileNested;'
+  )(() => {}, (params, body) => String(body), { FunctionCtor: Function });
+
+  // `withScope` 의 has 트랩은 모든 이름에 true 다. 파라미터를 with **바깥**에
+  // 선언하면 그 트랩이 파라미터까지 가려서 undefined 가 된다 — naver 메인의
+  // 광고 safeframe(doT 템플릿 `new Function('o,tmpl', …)`)이 이걸로 죽었다.
+  const scope = new Proxy({}, { has: () => true, get: () => undefined });
+  const call = (compiled, args) => compiled.apply(null, [scope, args]);
+
+  const params = compileNested(['o,tmpl'], 'return [typeof o, typeof tmpl].join()', 'function');
+  assert.equal(call(params, [1, {}]), 'number,object', '파라미터가 with 스코프에 가려졌다');
+
+  // `__zp_args` 도 결국 이름이라 with **안에서** 참조하면 같은 트랩에 걸린다.
+  // apply 는 반드시 with 바깥에서 해야 한다.
+  const args = compileNested([], 'return arguments.length + ":" + arguments[0]', 'function');
+  assert.equal(call(args, [9]), '1:9', 'arguments 가 비어 있다 — apply 가 with 안에서 돌고 있다');
+
+  // 자유 식별자는 여전히 with 를 거쳐야 한다(격리).
+  const free = compileNested([], 'return typeof somethingGlobal', 'function');
+  assert.equal(call(free, []), 'undefined');
+  const withIdx = rt.indexOf('with(__zp_scope){');
+  const innerIdx = rt.indexOf("return (' + inner + ');");
+  assert.ok(withIdx >= 0 && innerIdx > withIdx, 'inner 함수가 with 안에서 만들어져야 자유 식별자가 스코프를 거친다');
+  assert.ok(rt.indexOf('.apply(this, __zp_args);') > innerIdx, 'apply 는 with 바깥에서 해야 __zp_args 가 안 가려진다');
+
+  // 종류별 래퍼가 body 와 맞아야 `await`/`yield` 가 파싱된다.
+  assert.match(rt, /function rewriteDynamicFunctionBody\(params, body, kind\)/);
+  assert.match(rt, /const prefix = functionPrefix\(kind\) \+ ' __zp_dynamic__\('/);
+});
+
+test('SW 를 못 거치는 프레임: 프록시 경로를 먼저 박고 blob 으로 업그레이드한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // 판정은 "내 문서 URL 이 최상위와 같다" — document.write 프레임은 자기
+  // navigation 이 없어 부모 URL 을 상속한다. 프래그먼트(`#k=…`)는 떼고 본다.
+  assert.match(rt, /const bare = s => \{ const i = s\.indexOf\('#'\); return i < 0 \? s : s\.slice\(0, i\); \};/);
+  assert.match(rt, /bare\(url\) === bare\(topURL\)/);
+
+  // 오라클 주의: `doc.URL` 은 가상 URL 을 돌려주도록 훅돼 있다. 반드시
+  // 덮기 전에 캡처한 네이티브 게터를 써야 한다.
+  assert.match(rt, /documentURLDesc: Object\.getOwnPropertyDescriptor\(w\.Document && w\.Document\.prototype, 'URL'\)/);
+  assert.match(rt, /const desc = Native\.documentURLDesc;/);
+
+  // blob 이 늦거나 실패해도 원본 URL 이 남으면 안 된다 — 프록시 경로를 먼저
+  // 동기적으로 박는다.
+  const start = rt.indexOf('  function setSubresourceAttribute(');
+  assert.ok(start >= 0);
+  const src = rt.slice(start, rt.indexOf('\n  function ', start + 1));
+  const proxyFirst = src.indexOf('Native.setAttribute.call(el, key, proxied);', src.indexOf('documentIsSWLess'));
+  assert.ok(proxyFirst > 0, 'SW-less 경로에서 프록시 경로를 먼저 박지 않는다 — 실패하면 원본 URL 이 그대로 남는다');
+  assert.ok(proxyFirst < src.indexOf('swLessBlobURL'), 'blob 요청보다 프록시 경로 대입이 먼저여야 한다');
+
+  // 옵저버는 SW-less 로 판정된 문서에만 — 최상위에 달았다가 NAVER
+  // 하이드레이션 폭풍에 렌더러가 멎은 전례가 있다.
+  assert.match(rt, /if \(value\) installSWLessObserver\(doc\);/);
+  assert.ok(rt.indexOf('installSWLessObserver(document)') < 0, '최상위 문서에 옵저버를 달면 안 된다');
+});

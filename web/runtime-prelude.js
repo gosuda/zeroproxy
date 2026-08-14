@@ -352,6 +352,10 @@
     const d = w.document;
     return {
       fetch: w.fetch && w.fetch.bind(w),
+      // 가상 URL 로 덮기 **전**의 진짜 document.URL. 자식 프레임이 SW 를 거칠
+      // 수 있는지 판정하는 유일하게 정직한 신호다 — `doc.URL` 은 우리가
+      // 가상 URL 을 돌려주도록 훅해 놨으므로 오라클로 못 쓴다.
+      documentURLDesc: Object.getOwnPropertyDescriptor(w.Document && w.Document.prototype, 'URL'),
       XMLHttpRequest: w.XMLHttpRequest,
       WebSocket: w.WebSocket,
       // D4: native WebTransport for the virtual-class pass-through to
@@ -1035,34 +1039,64 @@
       argv[argv.length - 1] = scopedBody(rewriteDynamicFunctionBody(params, body));
       return Reflect.construct(ctor, argv);
     }
-    function scopedCallArgs(args) {
-      const argv = new Array(args.length + 1);
-      argv[0] = withScope;
-      for (let i = 0; i < args.length; i++) argv[i + 1] = args[i];
-      return argv;
+    function functionPrefix(kind) {
+      return kind === 'async' ? 'async function' : kind === 'generator' ? 'function*' : kind === 'asyncGenerator' ? 'async function*' : 'function';
     }
     function dynamicSource(kind, params, body) {
-      const prefix = kind === 'async' ? 'async function' : kind === 'generator' ? 'function*' : kind === 'asyncGenerator' ? 'async function*' : 'function';
-      return prefix + ' anonymous(' + params.join(',') + '\n) {\n' + body + '\n}';
+      return functionPrefix(kind) + ' anonymous(' + params.join(',') + '\n) {\n' + body + '\n}';
+    }
+    // `withScope` 의 has 트랩은 **모든** 이름에 true 다 (해석되지 않은 식별자가
+    // 진짜 전역으로 새지 않게 하려고). 그 대가로 컴파일된 함수의 파라미터와
+    // `arguments` 까지 with 객체가 가려버린다: `new Function('x','return x')(1)`
+    // 이 undefined 였다. naver 메인 광고 safeframe 이 정확히 여기서 죽었다 —
+    // doT 템플릿 엔진의 `new Function('o,tmpl', "var _e=tmpl.encode…")` 에서
+    // tmpl 이 undefined 라 "Failed to create ad markup" 으로 광고 프레임 전체가
+    // 빈 채로 남았다 (프레임의 `window.onerror = () => true` 가 이걸 삼켜서
+    // 콘솔에는 아무것도 안 뜬다).
+    //
+    // 파라미터를 with **안쪽** 중첩 함수에 선언하면 이름 파싱 없이 정확히
+    // 해결된다 — 안쪽 함수 스코프가 with 객체보다 가깝다. 파라미터 텍스트를
+    // 그대로 다시 쓰므로 디스트럭처링/기본값도 자동으로 따라온다. `arguments`
+    // 와 body 안 `var` 의 스코프도 같이 제자리를 찾는다 (전에는 `var` 가
+    // window 로 샜다). 자유 식별자는 여전히 with 를 거치므로 격리는 그대로다.
+    //
+    // 한계: body 안의 `new.target` 은 항상 undefined 다. 안쪽 함수를 apply 로
+    // 부르기 때문. 동적 Function body 에서 new.target 을 읽는 코드는 실측한 적
+    // 없어 이 대가를 받아들인다.
+    function compileNested(params, body, kind) {
+      try { zpTrace('compile', String(body || '').slice(0, 100)); } catch {}
+      const inner = functionPrefix(kind) + ' __zp_dyn__(' + params.join(',') + '\n) {\n'
+        + rewriteDynamicFunctionBody(params, body, kind) + '\n}';
+      // 안쪽 함수는 with **안에서** 만들어야 자유 식별자가 스코프 프록시를
+      // 거치고, `.apply` 는 with **바깥에서** 해야 한다: `__zp_args` 도 결국
+      // 이름이라 with 안에서는 has 트랩에 가려져 undefined 가 된다 (이 함정을
+      // 한 번 밟았다 — 파라미터는 살아났는데 arguments 가 비어 있었다).
+      // IIFE 가 클로저째로 with 스코프를 들고 나온다.
+      const src = 'return (function(){\nwith(__zp_scope){\nreturn (' + inner + ');\n}\n})().apply(this, __zp_args);';
+      return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', src]);
+    }
+    function nestedCall(compiled, thisArg, callArgs, newTarget) {
+      const argv = [withScope, callArgs];
+      return newTarget ? Reflect.construct(compiled, argv, newTarget) : Reflect.apply(compiled, thisArg, argv);
     }
     function compileDynamic(ctor, args, kind) {
       const parts = stringArgs(args);
       const body = parts.length ? parts[parts.length - 1] : '';
       const params = new Array(parts.length > 0 ? parts.length - 1 : 0);
       for (let i = 0; i < params.length; i++) params[i] = parts[i];
-      const compiled = compileScoped(ctor, params, body);
+      // 바깥 래퍼는 항상 plain function 이다 — 종류(async/generator)는 with
+      // 안쪽 중첩 함수가 들고 있고, 페이지에 노출되는 `fn` 이 같은 종류로
+      // 선언돼 있어 prototype 신원은 그대로 유지된다.
+      const compiled = compileNested(params, body, kind);
       let fn;
       if (kind === 'async') {
-        fn = async function anonymous(...callArgs) { return Reflect.apply(compiled, this, scopedCallArgs(callArgs)); };
+        fn = async function anonymous(...callArgs) { return nestedCall(compiled, this, callArgs); };
       } else if (kind === 'generator') {
-        fn = function* anonymous(...callArgs) { return yield* Reflect.apply(compiled, this, scopedCallArgs(callArgs)); };
+        fn = function* anonymous(...callArgs) { return yield* nestedCall(compiled, this, callArgs); };
       } else if (kind === 'asyncGenerator') {
-        fn = async function* anonymous(...callArgs) { return yield* Reflect.apply(compiled, this, scopedCallArgs(callArgs)); };
+        fn = async function* anonymous(...callArgs) { return yield* nestedCall(compiled, this, callArgs); };
       } else {
-        fn = function anonymous(...callArgs) {
-          const argv = scopedCallArgs(callArgs);
-          return new.target ? Reflect.construct(compiled, argv, new.target) : Reflect.apply(compiled, this, argv);
-        };
+        fn = function anonymous(...callArgs) { return nestedCall(compiled, this, callArgs, new.target); };
       }
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
@@ -1476,9 +1510,11 @@
       } catch (e) { /* fall through */ }
       throw normalizedError('NotSupportedError');
     }
-    function rewriteDynamicFunctionBody(params, body) {
+    function rewriteDynamicFunctionBody(params, body, kind) {
       const list = Array.isArray(params) ? params : [];
-      const prefix = 'function __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\n';
+      // 래퍼의 종류가 body 와 맞아야 한다 — `new AsyncFunction('await x')` 의
+      // body 를 plain function 으로 감싸면 파싱 자체가 실패한다.
+      const prefix = functionPrefix(kind) + ' __zp_dynamic__(' + list.map(value => String(value)).join(',') + '){\n';
       const suffix = '\n}';
       const wrapped = prefix + String(body || '') + suffix;
       const code = callPageRewriter(wrapped, 'classic');
@@ -2758,6 +2794,129 @@
     if (boot && boot.tabId) out += '&tab=' + encodeURIComponent(boot.tabId);
     return out;
   }
+  // ── SW 를 못 거치는 프레임의 서브리소스 (e1/e4) ────────────────────────
+  // `document.write` 로 만들어진 iframe 의 document 는 SW 클라이언트가 아니다.
+  // 그래서 그 안의 `/zp/api/fetch?url=…` 요청은 SW 를 지나쳐 Go 서버로 직행하고
+  // 403 POLICY_BLOCKED 로 죽는다. 실측(naver 메인): safeframe 광고 프레임 6개의
+  // 이미지 8건이 전부 403 인데 **같은 URL 이 최상위 문서에서는 200** 이다.
+  //
+  // 해결: 부모 realm 의 native fetch 로 받아서 blob URL 을 물려준다. 이미
+  // `__ZP_LOAD_EXTERNAL_SCRIPT` 가 자식 스크립트에 쓰는 것과 같은 수법이고,
+  // 나가는 요청은 여전히 부모의 SW 한 곳만 지난다 — 출구는 하나로 유지된다.
+  // (`img-src 'self' blob:` 이라 CSP 도 그대로 통과한다.)
+  const swLessDocs = new WeakMap();
+  function documentIsSWLess(doc) {
+    if (!doc || doc === document) return false;
+    let cached = swLessDocs.get(doc);
+    if (cached !== undefined) return cached;
+    let url = null;
+    const desc = Native.documentURLDesc;
+    if (desc && desc.get) { try { url = String(desc.get.call(doc) || ''); } catch { url = null; } }
+    // 판정할 수 없으면 기존 동작(직접 프록시 경로)을 쓴다 — 모르는 채로
+    // blob 경로에 태우면 멀쩡한 프레임까지 느려진다.
+    // 실측(naver 메인): `document.write` 로 만들어진 프레임의 document URL 은
+    // **최상위 문서의 URL 그대로**다 — 자기 navigation 이 없었으니 부모 URL 을
+    // 상속한다. 반대로 src 를 타고 실제로 내비게이션한 프레임은 각자 다른
+    // `/zp/p/<share>` 를 갖고, 그것들은 SW 클라이언트라 지금도 200 이 온다.
+    // 그래서 "내 URL 이 최상위와 같다"가 SW 클라이언트가 아니라는 신호다.
+    // 프래그먼트는 떼고 비교한다 — 최상위 문서 URL 에는 `#k=…&server=…` 가
+    // 붙어 있고 상속된 프레임 URL 에는 없다. 이걸 빼먹어서 한 번 헛짚었다.
+    const bare = s => { const i = s.indexOf('#'); return i < 0 ? s : s.slice(0, i); };
+    let topURL = null;
+    if (desc && desc.get) { try { topURL = String(desc.get.call(document) || ''); } catch {} }
+    const value = url === null ? false
+      : (!url || url === 'about:blank' || (!!topURL && bare(url) === bare(topURL)));
+    swLessDocs.set(doc, value);
+    if (value) installSWLessObserver(doc);
+    return value;
+  }
+  const swLessBlobs = new Map();
+  function swLessBlobURL(proxied) {
+    const hit = swLessBlobs.get(proxied);
+    if (hit) return hit;
+    const make = Native.createObjectURL || (blob => URL.createObjectURL(blob));
+    let p;
+    try {
+      p = Promise.resolve(Native.fetch(proxied))
+        .then(r => (r && r.ok) ? r.blob() : Promise.reject(new Error('status ' + (r && r.status))))
+        .then(b => make(b))
+        .catch(err => { swLessBlobError = String(err && err.message || err).slice(0, 120); reportSWLessError(); return null; });
+    } catch (err) {
+      swLessBlobError = 'sync ' + String(err && err.message || err).slice(0, 110);
+      p = Promise.resolve(null);
+    }
+    // 상한선 — 광고 프레임 몇 개가 만드는 양은 수십 건이다. 넘치면 캐시만
+    // 포기하고 계속 동작한다.
+    if (swLessBlobs.size < 400) swLessBlobs.set(proxied, p);
+    return p;
+  }
+  // 실패는 페이지가 볼 수 있는 곳에 남기지 않는다 — DOM 속성으로 찍으면
+  // 그 자체가 지문이다.
+  var swLessBlobError = null;
+  function reportSWLessError() {
+    if (!swLessBlobError) return;
+    try {
+      const diag = root.__zp_diagnostics;
+      if (diag && diag.length < 200) diag.push({ t: 'swless-blob', msg: swLessBlobError });
+    } catch {}
+  }
+  const swLessUpgraded = new WeakSet();
+  function upgradeSWLessURL(el, key, raw) {
+    if (raw.indexOf(ZP.apiPath('fetch')) < 0) return;
+    let doc = null;
+    try { doc = el.ownerDocument; } catch {}
+    if (!documentIsSWLess(doc)) return;
+    if (swLessUpgraded.has(el)) return;
+    swLessUpgraded.add(el);
+    swLessBlobURL(raw).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+  }
+  // `document.write` 로 만들어진 프레임 안의 서브리소스는 요소 훅도 서브트리
+  // 스윕도 안 탄다 — 그 문서에 우리 MutationObserver 가 없고, adm 은 HTML
+  // 문자열 단계에서 리라이트되므로 요소 경로를 아예 지나간다. 부모 쪽 백스톱
+  // 스윕이 같은 오리진 자식 문서까지 훑는 것이 이들을 만나는 유일한 지점이다.
+  function sweepSWLessFrames(w) {
+    let frames = null;
+    try { frames = (w || window).document.querySelectorAll('iframe,frame'); } catch { return; }
+    if (!frames) return;
+    for (const f of frames) {
+      let d = null;
+      try { d = f.contentDocument; } catch { continue; }
+      // 분류만 해 두면 된다 — SW-less 로 판정되는 순간 옵저버가 붙는다.
+      if (d) documentIsSWLess(d);
+    }
+  }
+  function sweepSWLessDoc(doc) {
+    let els = null;
+    try { els = doc.querySelectorAll('img[src],source[src],video[poster],input[src],embed[src]'); } catch { return; }
+    for (const el of els) {
+      const key = el.localName === 'video' ? 'poster' : 'src';
+      let raw = null;
+      try { raw = Native.getAttribute.call(el, key); } catch {}
+      if (raw) upgradeSWLessURL(el, key, String(raw));
+    }
+  }
+  // 광고 프레임은 **비어 있는 채로 먼저 생기고** 크리에이티브는 몇 초 뒤에
+  // 들어온다. 타이머 스윕(500/1500/3000ms)으로는 못 잡아서 옵저버가 필요했다.
+  // 최상위 문서에 MutationObserver 를 달았다가 NAVER 하이드레이션 폭풍에
+  // 렌더러가 멎은 전례가 있으므로(위 installNavigationBackstop 주석) **SW-less
+  // 로 판정된 문서에만** 단다 — 광고 프레임 몇 개, 노드 수십 개짜리다.
+  function installSWLessObserver(doc) {
+    try {
+      const target = doc.documentElement || doc;
+      const obs = new MutationObserver(() => sweepSWLessDoc(doc));
+      obs.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'poster'] });
+    } catch {}
+    sweepSWLessDoc(doc);
+  }
+  function setSubresourceAttribute(el, key, proxied) {
+    let doc = null;
+    try { doc = el.ownerDocument; } catch {}
+    if (!documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
+    // 원본 URL 을 그대로 두면 안 된다 — blob 이 늦거나 실패해도 최소한
+    // 프록시 경로가 박혀 있어야 브라우저가 타깃 오리진으로 직접 나가지 않는다.
+    Native.setAttribute.call(el, key, proxied);
+    swLessBlobURL(proxied).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+  }
   function proxyViaURL(absolute) {
     const s = String(absolute || '');
     if (!s) return s;
@@ -2834,7 +2993,10 @@
     // 스타일시트는 위 두 번으로 부족하다. GNB 처럼 **로드 이후** 큰 `<style>`
     // 을 주입하는 모듈이 흔해서, 문서 생애주기 이벤트에 한 번씩 더 건다.
     // 이미 프록시 URL 인 시트는 `cssProxyURL` 이 걸러내므로 재실행은 무해하다.
-    const sweepStyles = () => { try { docEl.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {} };
+    const sweepStyles = () => {
+      try { docEl.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {}
+      sweepSWLessFrames(w);
+    };
     try { w.document.addEventListener('DOMContentLoaded', sweepStyles); } catch {}
     try { w.addEventListener('load', sweepStyles); } catch {}
     if (typeof w.setTimeout === 'function') {
@@ -3593,7 +3755,8 @@
             return;
           }
           if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
-          return Native.setAttribute.call(this, k, usesRaw ? proxyViaURL(t) : subresourceProxyPath(t));
+          if (usesRaw) return Native.setAttribute.call(this, k, proxyViaURL(t));
+          return setSubresourceAttribute(this, k, subresourceProxyPath(t));
         }
       }
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
@@ -4437,7 +4600,12 @@
     if (!isURLBearing(el, key, localKey, tag)) return;
     const raw = Native.getAttribute.call(el, key);
     if (shouldBlockURLAttribute(el, localKey, raw, localKey, tag) || hasContextBlockedScheme(el, raw)) { blockExecutableURL(el, localKey, raw); return; }
-    if (!raw || String(raw).startsWith(proxyOrigin)) return;
+    if (!raw) return;
+    // 이미 프록시 경로인 값도 그냥 지나치면 안 된다: SW 를 못 거치는 프레임
+    // 안이면 그 경로가 Go 서버로 직행해 403 이 된다. HTML 워커가 문자열
+    // 단계에서 리라이트한 URL 은 요소 훅을 아예 안 타므로, 여기(서브트리
+    // 스윕)가 그것들을 만나는 유일한 지점이다.
+    if (String(raw).startsWith(proxyOrigin)) { upgradeSWLessURL(el, key, String(raw)); return; }
     const target = targetURLForElement(el, raw);
     if (!target) return;
     const usesRaw = usesRawURLAttribute(el, key, localKey);
@@ -4453,7 +4621,7 @@
     if (alreadyMapped) return;
     // 수동 서브리소스는 프록시 경로로 (htmltx 와 동일). navigation 속성은
     // usesRaw 쪽에서 이미 '?via=' 형태로 처리된다.
-    if (!usesRaw) Native.setAttribute.call(el, key, subresourceProxyPath(target));
+    if (!usesRaw) setSubresourceAttribute(el, key, subresourceProxyPath(target));
   }
   // `<style>` 의 텍스트가 **자식 텍스트 노드로** 들어오는 경로. prelude 의
   // textContent/innerHTML 훅은 프로퍼티 쓰기만 덮으므로

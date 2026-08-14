@@ -36,9 +36,12 @@
 - `c7-worker` / `c8-worker-cross` — JS blob 을 Worker 로 돌리는 것은 차단.
 - `c11-ping-attr` — 클릭 추적 비콘. 값이 공백 구분 URL **목록**이라 단일 URL
   훅으로 다룰 수 없고, 통과시키는 것 자체가 목적에 반한다.
-- `e1-adframe-img` / `e4-blank-iframe-img` — `document.write` / `about:blank`
-  iframe 은 **SW 클라이언트가 아니다**. 리라이트는 되지만 요청이 SW 를 거치지
-  않고 Go 서버로 직행해 403 이 된다. 구조적 제약이고 격리는 유지된다.
+`e1-adframe-img` / `e4-blank-iframe-img` 는 오래 이 목록에 있었지만
+**2026-08-14 에 해결됐다**. `document.write` / `about:blank` iframe 은 SW
+클라이언트가 아니라서 리라이트된 `/zp/api/fetch` 요청이 SW 를 지나쳐 Go 서버로
+직행해 403 이 됐다. 이제 부모 realm 이 대신 받아 blob URL 을 물려준다 — 나가는
+요청은 여전히 부모의 SW 한 곳만 지나므로 출구는 하나 그대로다. 실사이트에서
+naver 메인의 광고 크리에이티브가 정확히 이 경로로 안 뜨고 있었다.
 
 ## 실행
 
