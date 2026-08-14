@@ -299,12 +299,14 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
 /// - MEMBER_GET: obj_start, obj_end (positions 2, 3)
 /// - MEMBER_SET: obj_start, obj_end, val_start, val_end (positions 2, 3, 5, 6)
 /// - METHOD_CALL: obj_start, obj_end, args_start, args_end (positions 2, 3, 5, 6)
+/// - MODULE_URL: src_start, src_end (positions 2, 3)
 fn shift_marker_positions(replacement: &str, offset: u32) -> String {
     let prefixes: &[(&str, &[usize])] = &[
         ("\u{1}GLOBAL_GET\u{1}", &[]),
         ("\u{1}MEMBER_GET\u{1}", &[2, 3]),
         ("\u{1}MEMBER_SET\u{1}", &[2, 3, 5, 6]),
         ("\u{1}METHOD_CALL\u{1}", &[2, 3, 5, 6]),
+        ("\u{1}MODULE_URL\u{1}", &[2, 3]),
     ];
     for (prefix, shift_indices) in prefixes {
         if replacement.starts_with(*prefix) {
@@ -547,6 +549,31 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     } else {
                         out.push_str(&format!("__zp_set({},{:?},{})", obj_src, prop, val_src));
                     }
+                    cursor = end;
+                    continue;
+                }
+            }
+        } else if p.replacement.starts_with("\u{1}MODULE_URL\u{1}") {
+            // \u{1}MODULE_URL\u{1}<src_start>\u{1}<src_end>\u{1}<target_url>\u{1}
+            //
+            // 마커여야 하는 이유: 예전엔 zero-width 패치 두 개(여는 것 /
+            // 닫는 것)로 감쌌는데, 여는 패치가 인자 span 의 **첫 바이트**에
+            // 앉는다. 인자 자체가 리라이트 대상(`u.replace(...)`)이면 그
+            // METHOD_CALL 마커의 range 가 같은 바이트에서 시작하므로 여는
+            // 패치가 `rewrite_range` 의 inner 로 빨려 들어가 안팎이 뒤집혔다:
+            //   import(__zp_call(__zp_module_url(u,"replace",[…]), "<ref>"))
+            // 이러면 `__zp_module_url` 이 문자열이 아니라 **메서드 이름**을
+            // 받게 되어 specifier 매핑이 통째로 사라진다. 마커로 만들면
+            // 안쪽 리라이트는 `rewrite_range` 가 재귀로 처리하고 래퍼는
+            // 항상 바깥에 남는다 — MEMBER_GET/METHOD_CALL 과 같은 방식이다.
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 6 {
+                let src_start: usize = parts[2].parse().unwrap_or(0);
+                let src_end: usize = parts[3].parse().unwrap_or(0);
+                let target = parts[4];
+                if src_start < src_end && src_end <= bytes.len() {
+                    let src = rewrite_range(src_start, src_end);
+                    out.push_str(&format!("__zp_module_url({},\"{}\")", src, target));
                     cursor = end;
                     continue;
                 }
@@ -1062,12 +1089,6 @@ impl<'a> Visit<'a> for RewriteVisitor {
     }
 
     fn visit_import_expression(&mut self, expr: &ImportExpression<'a>) {
-        // Recurse first so any dangerous-global identifiers inside the
-        // argument expression still get patched (e.g. a computed source
-        // like `import(window.__cdn + '/mod.js')` — `window` here still
-        // routes through __zp_get).
-        walk::walk_import_expression(self, expr);
-
         // Computed sources (variable / template / concatenation) can't be
         // resolved at rewrite time, so wrap them in the runtime helper — it
         // performs the same target→proxy mapping on the evaluated value.
@@ -1077,24 +1098,35 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // `<proxy>/zp/api/script?…`, so `"./x.js"` became a request for
         // `/zp/api/x.js` → 404. That is how NAVER's ad SDK failed
         // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
-        // Wrapping with two zero-width patches keeps the inner expression —
-        // and any nested rewrites inside it — completely intact.
+        // 래퍼는 MODULE_URL **마커**로 emit 한다 (resolver 주석 참조) —
+        // zero-width 패치 두 개로 감싸면 인자가 리라이트 대상일 때 안팎이
+        // 뒤집힌다.
         let Expression::StringLiteral(lit) = &expr.source else {
             let span = expr.source.span();
             if !self.target_url.is_empty() {
+                // **walk 보다 먼저 push 한다.** apply_patches 의 정렬은 stable
+                // 이라, 같은 range 를 갖는 안쪽 마커(인자 전체가 하나의 호출인
+                // `import(u.replace(…))` 가 정확히 이 경우)와 tie 가 나면
+                // **먼저 들어간 쪽이 바깥**이 된다. 뒤에 push 하면 안쪽
+                // METHOD_CALL 이 이기고 래퍼가 인자 안으로 들어간다.
                 self.patches.push(Patch {
                     start: span.start,
-                    end: span.start,
-                    replacement: "__zp_module_url(".to_string(),
-                });
-                self.patches.push(Patch {
-                    start: span.end,
                     end: span.end,
-                    replacement: format!(", \"{}\")", js_quote_body(&self.target_url)),
+                    replacement: format!(
+                        "\u{1}MODULE_URL\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        span.start,
+                        span.end,
+                        js_quote_body(&self.target_url)
+                    ),
                 });
             }
+            // Recurse so any dangerous-global identifiers inside the argument
+            // expression still get patched (e.g. `import(window.__cdn +
+            // '/mod.js')` — `window` here still routes through __zp_get).
+            walk::walk_import_expression(self, expr);
             return;
         };
+        walk::walk_import_expression(self, expr);
         self.rewrite_module_specifier(lit);
     }
 
@@ -1633,7 +1665,6 @@ mod tests {
     // 밖이라 충돌하지 않는다. 대신 프렐류드에 `__zp_import` 전역이 하나 늘고,
     // 자식 realm 위임 목록(installNetworkContainment)과 E1 escape matrix 교차
     // 검증이 필요하다. 그래서 별도 작업으로 남긴다.
-    #[ignore = "동적 import 래퍼 중첩 버그 — 앵커를 괄호로 옮기는 수정 필요 (위 주석 참조)"]
     #[test]
     fn computed_dynamic_import_wraps_outside_nested_rewrite() {
         let o = RewriteOpts {
@@ -1660,7 +1691,8 @@ mod tests {
         // referrer 는 module_url 의 **두 번째 인자**여야 한다. 뒤집히면 메서드
         // 이름이 그 자리에 온다.
         assert!(
-            out.contains(", \"https://cdn.example.com/a/b.js\")"),
+            out.contains(",\"https://cdn.example.com/a/b.js\")")
+                || out.contains(", \"https://cdn.example.com/a/b.js\")"),
             "referrer must be module_url's last argument: {out}"
         );
         assert!(
