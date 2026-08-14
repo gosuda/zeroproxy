@@ -1607,6 +1607,68 @@ mod tests {
         );
     }
 
+    // Pin: specifier 가 **그 자체로 리라이트 대상**일 때의 중첩 순서.
+    //
+    // 위 테스트는 `base + '/mod.js'` (이항식) 이라 specifier 시작 오프셋에
+    // 다른 패치가 겹치지 않아, 안팎이 뒤집혀도 통과했다. 메서드 호출처럼
+    // 시작 오프셋을 공유하는 형태라야 잡힌다:
+    //
+    //   import(u.replace('.png','.js'))
+    //   뒤집히면 → import(__zp_call(__zp_module_url(u,"replace",[…]), "<ref>"))
+    //
+    // referrer 자리에 `"replace"` 가 들어가 `new URL(spec,"replace")` 가
+    // `Invalid base URL` 로 throw 한다. 실사이트에서는 번들러의 청크 로딩
+    // (`import(chunkPath(id))`) 이 통째로 죽는 증상으로 나온다.
+    //
+    // ── 미해결(2026-08-14). 이 테스트는 **현재 실패한다** ──────────────────
+    // 원인: 래퍼가 인자 span 의 **시작 오프셋에 zero-width 패치**로 붙는데,
+    // 호출 리라이트(`__zp_call` 마커)는 apply 시점에 `rewrite_range(obj_start,
+    // obj_end)` 로 객체 범위를 **재귀 렌더링**한다. 래퍼 패치가 그 범위의 첫
+    // 바이트에 앉아 있어 안쪽 렌더링에 빨려 들어간다. push 순서를 바꿔도(시도해
+    // 봤다) 결과는 같다 — 순서 문제가 아니라 **앵커 위치** 문제다.
+    //
+    // 고치려면 앵커를 인자 span 밖으로 빼야 한다. `import` 키워드 자체를
+    // `[expr.span.start, +6]` 패치로 `__zp_import` 로 바꾸고 referrer 는 닫는
+    // 괄호 `[expr.span.end-1, end]` 에 붙이는 방식이면 두 패치가 모두 인자
+    // 밖이라 충돌하지 않는다. 대신 프렐류드에 `__zp_import` 전역이 하나 늘고,
+    // 자식 realm 위임 목록(installNetworkContainment)과 E1 escape matrix 교차
+    // 검증이 필요하다. 그래서 별도 작업으로 남긴다.
+    #[ignore = "동적 import 래퍼 중첩 버그 — 앵커를 괄호로 옮기는 수정 필요 (위 주석 참조)"]
+    #[test]
+    fn computed_dynamic_import_wraps_outside_nested_rewrite() {
+        let o = RewriteOpts {
+            kind: ScriptKind::Classic,
+            target_url: "https://cdn.example.com/a/b.js".into(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".into(),
+        };
+        let out = rewrite_script("import(u.replace('.png','.js'));", &o)
+            .unwrap()
+            .code;
+        let m = out
+            .find("__zp_module_url(")
+            .unwrap_or_else(|| panic!("computed import must be wrapped: {out}"));
+        // 안쪽 리라이트가 실제로 일어난 경우에만 중첩 순서를 검사한다
+        // (리라이터 정책이 바뀌어 wrap 이 사라지면 이 검사는 조용히 무의미해지므로,
+        //  referrer 검사를 아래에 따로 둔다).
+        if let Some(inner) = out.find("__zp_call(") {
+            assert!(
+                m < inner,
+                "__zp_module_url 이 안쪽 리라이트보다 바깥이어야 한다: {out}"
+            );
+        }
+        // referrer 는 module_url 의 **두 번째 인자**여야 한다. 뒤집히면 메서드
+        // 이름이 그 자리에 온다.
+        assert!(
+            out.contains(", \"https://cdn.example.com/a/b.js\")"),
+            "referrer must be module_url's last argument: {out}"
+        );
+        assert!(
+            !out.contains("__zp_module_url(u,\"replace\""),
+            "referrer 자리에 메서드 이름이 오면 안 된다: {out}"
+        );
+    }
+
     // Literal imports stay statically resolved — no runtime helper needed.
     #[test]
     fn literal_dynamic_import_stays_static() {
