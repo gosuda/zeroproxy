@@ -2808,6 +2808,14 @@
         'a[href], area[href], form[action], input[formaction], button[formaction]'
       ).forEach(applyNavigationBackstop);
     } catch {}
+    // `<style>` 도 같은 백스톱이 필요하다. 두 가지가 새기 때문이다:
+    // (a) 파서가 넣은 style 은 MutationObserver 가 붙기 **전**에 이미 문서에
+    //     있어서 childList 로 안 잡힌다,
+    // (b) 서버측 htmltx 는 zp_css 파싱이 실패하면 **원본을 그대로** 돌려준다
+    //     (조용한 폴백) — 큰 시트 하나가 통째로 원본으로 남을 수 있다.
+    // 실제로 naver 장바구니의 GNB 시트(39 KB, 원본 URL 25개)가 이 상태로
+    // 남아 스프라이트가 `img-src 'self'` 에 걸렸다.
+    try { root.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {}
   }
   function installNavigationBackstop(w, docEl) {
     if (!w || !docEl) return;
@@ -2822,6 +2830,15 @@
       try { w.requestIdleCallback(() => scanNavigationBackstop(docEl), { timeout: 2000 }); } catch {}
     } else if (typeof w.setTimeout === 'function') {
       try { w.setTimeout(() => scanNavigationBackstop(docEl), 1000); } catch {}
+    }
+    // 스타일시트는 위 두 번으로 부족하다. GNB 처럼 **로드 이후** 큰 `<style>`
+    // 을 주입하는 모듈이 흔해서, 문서 생애주기 이벤트에 한 번씩 더 건다.
+    // 이미 프록시 URL 인 시트는 `cssProxyURL` 이 걸러내므로 재실행은 무해하다.
+    const sweepStyles = () => { try { docEl.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {} };
+    try { w.document.addEventListener('DOMContentLoaded', sweepStyles); } catch {}
+    try { w.addEventListener('load', sweepStyles); } catch {}
+    if (typeof w.setTimeout === 'function') {
+      for (const ms of [500, 1500, 3000]) { try { w.setTimeout(sweepStyles, ms); } catch {} }
     }
   }
   function initDocumentCookieRecords(cookieString) {
@@ -4438,13 +4455,40 @@
     // usesRaw 쪽에서 이미 '?via=' 형태로 처리된다.
     if (!usesRaw) Native.setAttribute.call(el, key, subresourceProxyPath(target));
   }
+  // `<style>` 의 텍스트가 **자식 텍스트 노드로** 들어오는 경로. prelude 의
+  // textContent/innerHTML 훅은 프로퍼티 쓰기만 덮으므로
+  //   s = createElement('style'); head.appendChild(s);
+  //   s.appendChild(document.createTextNode(css));
+  // 는 통째로 새어 나간다. jQuery 계열이 쓰는 아주 흔한 관용구다 —
+  // naver.com 장바구니의 GNB 스프라이트가 정확히 이 경로로 원본 URL 을
+  // 유지한 채 `img-src 'self'` 에 걸려 아이콘이 통째로 안 떴다.
+  function enforceStyleElementCSS(el) {
+    if (!el || el.localName !== 'style') return;
+    const get = Native.nodeTextContent && Native.nodeTextContent.get;
+    const raw = (get ? get.call(el) : el.textContent) || '';
+    if (!raw) return;
+    const mapped = rewriteCSSText(raw);
+    if (mapped === raw) return;
+    // 프로퍼티 훅(`HTMLStyleElement.prototype.textContent`)을 **일부러** 탄다.
+    // 네이티브 setter 를 직접 부르는 판이 실측에서 이 시트를 안 고쳤다.
+    // 훅 경로는 같은 시트를 25/25 고치는 것이 확인됐고, 이미 프록시 URL 인
+    // 값은 `cssProxyURL` 이 걸러내므로 재진입해도 idempotent 다.
+    try { el.textContent = mapped; } catch {}
+  }
   function enforceSubtreePolicies(node) {
     if (!node || typeof node !== 'object') return;
+    // 추가된 것이 텍스트 노드면 그 자체는 정책 대상이 아니지만, 부모가
+    // `<style>` 이면 방금 CSS 가 주입된 것이다.
+    if (node.nodeType === 3 && node.parentNode) enforceStyleElementCSS(node.parentNode);
     if (node.nodeType === 1) enforceElementPolicy(node);
-    if (node.querySelectorAll) node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,object,embed,svg a,svg image,svg use').forEach(enforceElementPolicy);
+    if (node.querySelectorAll) {
+      node.querySelectorAll('script,link,iframe,frame,a,area,form,input,button,img,source,audio,video,track,object,embed,svg a,svg image,svg use').forEach(enforceElementPolicy);
+      node.querySelectorAll('style').forEach(enforceStyleElementCSS);
+    }
   }
   function enforceElementPolicy(el) {
     if (!el || !el.localName) return;
+    if (el.localName === 'style') enforceStyleElementCSS(el);
     if (el.localName === 'script') instrumentScriptElement(el);
     if (el.localName === 'link') enforceLinkPolicy(el);
     if (el.localName === 'iframe' || el.localName === 'frame') instrumentIframe(el);
