@@ -604,7 +604,17 @@ async function internalAsset(req, url) {
   if (url.pathname === ZP.controlPath('worker-bootstrap.js')) return workerBootstrap(url);
   if (url.pathname === ZP.CONTROL_PREFIX || url.pathname === ZP.controlPath('index.html')) return addCSP(await nativeFetch(req, { cache: 'no-store' }), req);
   if (!internalPath(url.pathname) && url.pathname !== ZP.controlPath('sw.js')) return safeError('POLICY_BLOCKED', 403);
-  return addCSP(await nativeFetch(req, { cache: 'no-store' }), req);
+  // 2026-08-14 — 내부 에셋은 HTTP 캐시를 쓰게 둔다.
+  //
+  // 여기서 `cache: 'no-store'` 를 강제하면 Go 가 `no-cache` 를 줘도 소용이
+  // 없다 — SW 의 이 fetch 가 브라우저 캐시를 통째로 우회하므로 조건부 요청이
+  // 나가지 않는다. 실측: 서버 헤더만 고쳤을 때 2회차 로드도 여전히 200 × 9.
+  // 기본 모드로 두면 Last-Modified 기반 재검증이 살아나 304 로 끝난다.
+  // 신선도는 그대로다 — `no-cache` 는 매번 재검증을 강제한다.
+  //
+  // `sw.js` 는 Go 가 여전히 `no-store` 를 주므로 여기 분기가 필요 없다:
+  // 업데이트 방아쇠 경로는 서버 헤더로만 통제한다.
+  return addCSP(await nativeFetch(req), req);
 }
 
 function parseSharePath(path) {

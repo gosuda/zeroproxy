@@ -322,7 +322,33 @@ func (s *server) serveFile(w http.ResponseWriter, r *http.Request, path, content
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	w.Header().Set("Cache-Control", "no-store")
+	// 2026-08-14 — 정적 에셋을 `no-store` 에서 `no-cache` 로.
+	//
+	// 측정: 페이지 1회 로드에 우리 에셋만 **1,042 KB** 가 매번 다시 내려갔다
+	// (page bundle wasm 377KB + prelude 117KB + …). SW 시작 시엔 3,945 KB.
+	// 프록시를 상시로 쓰기엔 성립하지 않는 비용이다.
+	//
+	// 원인은 캐시 지원이 없어서가 아니었다. `http.ServeContent` 는 이미
+	// Last-Modified 를 붙이고 조건부 요청에 304 를 준다(실측 확인). 그런데
+	// `no-store` 는 브라우저가 응답을 **저장하는 것 자체**를 막으므로
+	// If-Modified-Since 가 영영 나가지 않는다. `no-cache` 는 저장은 하되
+	// **매번 재검증**을 강제한다 — 신선도 보장은 `no-store` 와 동일하고,
+	// 바뀌지 않았으면 본문 대신 304 만 오간다.
+	//
+	// `sw.js` 와 런처 문서는 그대로 `no-store` 로 둔다. 오늘 아침 확인한
+	// 업데이트 전파 경로(sw.js 재검사 → skipWaiting → clients.claim)의
+	// 방아쇠라, 그 경로는 건드리지 않는다.
+	//
+	// **주의**: `no-cache` 는 디스크 캐시에 본문이 남는 것을 허용한다. 로컬
+	// 포렌식에 흔적을 남기지 않는 것이 요구사항이라면 이 결정을 되돌려야
+	// 한다 — 코드/플랜/트랩노트 어디에도 그런 의도는 적혀 있지 않아
+	// 기본값으로 판단했다. 남는 것은 우리 자신의 에셋뿐이고(타깃 콘텐츠가
+	// 아니다), 방문한 사이트는 드러나지 않는다.
+	if name := st.Name(); name == "sw.js" || name == "index.html" {
+		w.Header().Set("Cache-Control", "no-store")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	http.ServeContent(w, r, st.Name(), st.ModTime(), f)
 }
 
