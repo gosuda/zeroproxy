@@ -2722,4 +2722,12 @@ test('SW 를 못 거치는 프레임: 프록시 경로를 먼저 박고 blob 으
   // 하이드레이션 폭풍에 렌더러가 멎은 전례가 있다.
   assert.match(rt, /if \(value\) installSWLessObserver\(doc\);/);
   assert.ok(rt.indexOf('installSWLessObserver(document)') < 0, '최상위 문서에 옵저버를 달면 안 된다');
+
+  // ★Document 노드를 관찰해야 한다. document.write 는 documentElement 를 통째로
+  // 갈아치우므로 초기 about:blank 의 <html> 에 붙이면 콜백이 한 번도 안 돈다.
+  assert.ok(rt.indexOf("obs.observe(doc, { childList: true, subtree: true") >= 0, "Document 노드를 관찰해야 write 이후 트리를 본다");
+  assert.ok(rt.indexOf("obs.observe(target") < 0, "documentElement 를 관찰하면 write 이후 트리를 못 본다");
+
+  // 발견은 멤브레인 설치 시점에 — 타이머 백스톱만으로는 뒤늦게 생기는 프레임을 놓친다.
+  assert.ok(rt.indexOf("documentIsSWLess(childWin.document)") >= 0, "자식 창 격리 시점에 SW-less 판정을 해야 한다");
 });

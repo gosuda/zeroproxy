@@ -2902,9 +2902,12 @@
   // 로 판정된 문서에만** 단다 — 광고 프레임 몇 개, 노드 수십 개짜리다.
   function installSWLessObserver(doc) {
     try {
-      const target = doc.documentElement || doc;
+      // ★반드시 Document 노드를 관찰한다. `document.write` 는 documentElement
+      // 를 **통째로 갈아치우므로** 초기 about:blank 의 `<html>` 에 붙여 두면
+      // 그 뒤 광고 마크업이 들어가는 새 트리를 하나도 못 본다 — 실측에서
+      // 옵저버 16개가 붙었는데 콜백은 한 번도 안 돌았다.
       const obs = new MutationObserver(() => sweepSWLessDoc(doc));
-      obs.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'poster'] });
+      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'poster'] });
     } catch {}
     sweepSWLessDoc(doc);
   }
@@ -4894,6 +4897,10 @@
         try { frame && frame.remove && frame.remove(); } catch {}
         throw e;
       }
+      // 여기가 SW-less 프레임을 발견하는 제자리다. 백스톱 타이머
+      // (500/1500/3000ms)에만 기대면 그 뒤에 만들어지는 광고 프레임을 통째로
+      // 놓친다 — 실측에서 같은 페이지가 로드마다 되기도 하고 안 되기도 했다.
+      try { documentIsSWLess(childWin.document); } catch {}
       return childWin;
     }
     function installFrameProp(proto, prop) {
