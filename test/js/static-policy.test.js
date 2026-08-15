@@ -2767,6 +2767,29 @@ test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리
   assert.ok(rt.indexOf('swLessBlobs.set(ck, p)') >= 0);
 });
 
+test('네이티브 객체를 감싼 Proxy 는 set 에서 receiver 를 target 으로 되돌린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // ★기본 set 트랩은 프로토타입의 네이티브 세터를 **프록시**를 receiver 로
+  // 호출한다. 프록시에는 내부 슬롯이 없어 `Illegal invocation` 으로 거부되고,
+  // 읽기는 get 트랩이 언랩해 주므로 멀쩡해 보여서 쓰기만 조용히 죽는다.
+  // Lit 이 `walker.currentNode = tpl.content` 를 쓰기 때문에 Lit 기반 사이트가
+  // 통째로 깨졌다(developer.mozilla.org 로드당 77건, 직접 로드 0건).
+  const start = rt.indexOf('function filteredTraversal(');
+  assert.ok(start >= 0);
+  const body = rt.slice(start, start + 1400);
+  assert.ok(
+    body.indexOf('set(target, prop, value) { return Reflect.set(target, prop, value, target); }') >= 0,
+    'filteredTraversal 에 receiver 를 되돌리는 set 트랩이 있어야 한다'
+  );
+
+  // 나머지 Proxy 들도 네이티브 객체를 감쌌다면 같은 규칙이 필요하다.
+  // scopeTraps 는 실제 window 를 감싸므로 반드시 target 으로 써야 한다.
+  assert.ok(rt.indexOf('      set(target, prop, value) {\r\n        if (prop === \'location\')') >= 0
+    || rt.indexOf("set(target, prop, value) {\n        if (prop === 'location')") >= 0,
+    'scopeTraps 에 set 트랩이 있어야 한다');
+});
+
 test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
 

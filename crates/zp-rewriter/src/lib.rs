@@ -1413,6 +1413,28 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if matches!(expr.object, Expression::Super(_)) {
             return;
         }
+        // `import.meta.url` — 모듈이 **자기 위치**를 읽는 자리. 리라이트하지
+        // 않으면 실제로 받아진 프록시 URL(`<proxy>/zp/api/script?…`)이 그대로
+        // 노출된다. 번들러(webpack / Vite / Rollup 공통)는 이 값의 디렉터리로
+        // publicPath 를 유도하므로 이후 청크가 `<proxy>/zp/api/<chunk>` 로
+        // 요청되고, 그게 다시 프록시를 타면서 타깃 자리에 프록시 오리진이
+        // 들어가 **이중 프록시**가 된다 → 502. github.com 에서 CSS 청크 13개가
+        // 정확히 이 경로로 죽었다. `script.src` 는 이미 타깃으로 마스킹돼
+        // 있는데 import.meta.url 만 빠져 있었다.
+        if let Expression::MetaProperty(meta) = &expr.object {
+            if meta.meta.name == "import"
+                && meta.property.name == "meta"
+                && expr.property.name == "url"
+                && !self.target_url.is_empty()
+            {
+                self.patches.push(Patch {
+                    start: expr.span.start,
+                    end: expr.span.end,
+                    replacement: format!("\"{}\"", js_quote_body(&self.target_url)),
+                });
+                return;
+            }
+        }
         // If the receiver is a bare identifier that's bound in the current
         // lexical scope (function param, destructured param, var/let/const,
         // catch parameter), the access is *local* and the membrane rewrite
@@ -2042,6 +2064,45 @@ mod tests {
                 r.code
             );
         }
+    }
+
+    #[test]
+    fn rewrites_import_meta_url_to_the_target_url() {
+        let opts = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: "https://github.githubassets.com/assets/app-runtime.js".to_string(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".to_string(),
+        };
+        // 번들러는 이 값의 디렉터리로 publicPath 를 유도한다. 프록시 URL 이
+        // 새어 나가면 이후 청크가 `<proxy>/zp/api/<chunk>` 로 요청되고 그게
+        // 다시 프록시를 타 타깃 자리에 프록시 오리진이 들어간다 → 502.
+        let r = rewrite_script("const p = import.meta.url;", &opts).unwrap();
+        assert!(
+            r.code.contains("\"https://github.githubassets.com/assets/app-runtime.js\""),
+            "import.meta.url 이 타깃 URL 로 안 바뀌었다: {}",
+            r.code
+        );
+        assert!(!r.code.contains("import.meta.url"), "원본이 남았다: {}", r.code);
+
+        // 상대 해석 관용구도 같은 자리를 쓴다.
+        let r2 = rewrite_script("new URL('./chunk.css', import.meta.url)", &opts).unwrap();
+        assert!(
+            r2.code.contains("\"https://github.githubassets.com/assets/app-runtime.js\""),
+            "{}",
+            r2.code
+        );
+
+        // target_url 이 없으면(호스트 테스트) 건드리지 않는다 — 빈 문자열을
+        // 박으면 상대 해석이 문서 base 로 떨어져 더 나빠진다.
+        let bare = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: String::new(),
+            strict: true,
+            proxy_origin: String::new(),
+        };
+        let r3 = rewrite_script("const p = import.meta.url;", &bare).unwrap();
+        assert!(r3.code.contains("import.meta.url"), "{}", r3.code);
     }
 
     #[test]

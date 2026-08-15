@@ -3746,7 +3746,16 @@
         };
         const value = target[prop];
         return typeof value === 'function' ? value.bind(target) : value;
-      }
+      },
+      // ★receiver 를 기본값(=이 프록시)으로 두면 안 된다. 기본 set 트랩은
+      // 프로토타입의 **네이티브 세터**를 receiver 로 호출하는데, 프록시에는
+      // 내부 슬롯이 없어 `Illegal invocation` 으로 거부된다. 읽기는 get 트랩이
+      // 언랩해 주므로 멀쩡해 보이고 쓰기만 조용히 죽는다.
+      // Lit 의 템플릿 생성 경로가 모듈 스코프 워커를 재사용하며
+      // `walker.currentNode = tpl.content` 를 쓴다 → Lit 기반 사이트가 통째로
+      // 깨진다(developer.mozilla.org 실측: 로드당 Illegal invocation 77건,
+      // 직접 로드에서는 0건).
+      set(target, prop, value) { return Reflect.set(target, prop, value, target); }
     });
   }
 
