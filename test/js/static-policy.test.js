@@ -2767,6 +2767,31 @@ test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리
   assert.ok(rt.indexOf('swLessBlobs.set(ck, p)') >= 0);
 });
 
+test('자기 prelude 를 기다리는 프레임도 postMessage 매핑은 미리 받는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // 프록시에서는 수신 창의 실제 오리진이 늘 프록시 오리진이라, 페이지가 진짜
+  // 타깃 오리진을 지정하면 브라우저가 메시지를 **조용히 버린다**. 래퍼가
+  // http(s) 를 프록시 오리진으로 바꿔 주는데, `data-zp-target-url` 이 붙은
+  // 프레임은 자식이 스스로 멤브레인을 깔도록 부모가 컨테인먼트를 건너뛰므로
+  // 그 사이 구간이 비어 있었다 — naver ndp-core 기준 로드당 9건.
+  assert.ok(rt.indexOf('function installEarlyPostMessage(childWin)') >= 0);
+  const contain = rt.indexOf('function containFrameWindow(');
+  assert.ok(contain >= 0);
+  const skip = rt.indexOf("Native.getAttribute.call(frame, 'data-zp-target-url')", contain);
+  assert.ok(skip >= 0);
+  const tail = rt.slice(skip, skip + 900);
+  assert.ok(tail.indexOf('installEarlyPostMessage(childWin);') >= 0, '컨테인먼트를 건너뛰는 분기에서도 매핑은 걸어야 한다');
+  assert.ok(tail.indexOf('installEarlyPostMessage(childWin);') < tail.indexOf('return childWin;'), 'return 보다 먼저 걸어야 한다');
+
+  // ★configurable: true 여야 자식 prelude 가 자기 래퍼로 갈아끼울 수 있다.
+  // 부모 래퍼는 부모 realm 의 함수라 자식의 incumbent realm 을 바꾼다.
+  const fn = rt.indexOf('function installEarlyPostMessage(');
+  const body = rt.slice(fn, fn + 700);
+  assert.ok(body.indexOf('configurable: true') >= 0, '자식이 덮어쓸 수 있어야 한다');
+  assert.ok(body.indexOf('if (cur && !cur.configurable) return;') >= 0, '이미 고정된 정의는 건드리지 않는다');
+});
+
 test('네이티브 객체를 감싼 Proxy 는 set 에서 receiver 를 target 으로 되돌린다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
 

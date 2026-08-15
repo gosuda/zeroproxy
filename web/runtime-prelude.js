@@ -884,6 +884,20 @@
     } catch {}
     return s;
   }
+  // 자식이 스스로 멤브레인을 깔기 전까지의 빈 구간을 메운다. `configurable:
+  // true` 로 두는 게 핵심 — 자식 prelude 가 자기 래퍼로 갈아끼울 수 있어야
+  // 한다(부모 래퍼는 부모 realm 의 함수라 자식의 incumbent realm 을 바꾼다).
+  function installEarlyPostMessage(childWin) {
+    if (!childWin) return;
+    try {
+      const wrapped = postMessageWrapperFor(childWin);
+      if (!wrapped) return;
+      const cur = Object.getOwnPropertyDescriptor(childWin, 'postMessage');
+      if (cur && !cur.configurable) return;
+      Object.defineProperty(childWin, 'postMessage', { value: wrapped, enumerable: true, configurable: true, writable: true });
+      maskNativeFunction(wrapped, 'postMessage');
+    } catch {}
+  }
   function postMessageWrapperFor(target) {
     if (!target || typeof target.postMessage !== 'function') return undefined;
     if (postMessageWrappers.has(target)) return postMessageWrappers.get(target);
@@ -4993,6 +5007,13 @@
       // its own membrane fresh after load is the correct path.
       try {
         if (frame && Native.getAttribute && Native.getAttribute.call(frame, 'data-zp-target-url')) {
+          // 이 프레임은 자기 prelude 가 붙을 때까지 부모가 손대지 않는다.
+          // 다만 그 **사이 구간**에 부모가 `iframe.contentWindow.postMessage(
+          // msg, 'https://<타깃>')` 를 쏘면 네이티브가 받는다 — 프록시에서는
+          // 수신 창의 실제 오리진이 프록시 오리진이라 타깃 오리진과 안 맞고
+          // 메시지가 **조용히 버려진다**. naver 의 ndp-core 가 광고 슬롯에
+          // 정확히 이걸 한다(로드당 9건). 매핑만은 미리 걸어 둔다.
+          installEarlyPostMessage(childWin);
           return childWin;
         }
       } catch {}
