@@ -2889,15 +2889,36 @@
       if (diag && diag.length < 200) diag.push({ t: 'swless-blob', msg: swLessBlobError });
     } catch {}
   }
-  const swLessUpgraded = new WeakSet();
+  // 한 요소가 src 와 srcset 을 동시에 갖는 게 정상이므로 요소 단위가 아니라
+  // (요소, 속성) 단위로 기억한다.
+  const swLessUpgraded = new WeakMap();
+  function markSWLessUpgraded(el, key) {
+    let keys = swLessUpgraded.get(el);
+    if (!keys) { keys = new Set(); swLessUpgraded.set(el, keys); }
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  }
   function upgradeSWLessURL(el, key, raw) {
     if (raw.indexOf(ZP.apiPath('fetch')) < 0) return;
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
     if (!documentIsSWLess(doc)) return;
-    if (swLessUpgraded.has(el)) return;
-    swLessUpgraded.add(el);
+    if (!markSWLessUpgraded(el, key)) return;
+    if (key === 'srcset' || key === 'imagesrcset') return upgradeSWLessSrcset(el, key, raw);
     swLessBlobURL(raw, key === 'href' ? 'style' : '').then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+  }
+  // srcset 은 URL 하나가 아니라 `url 1x, url 2x` 후보 목록이다. 후보마다
+  // 따로 blob 을 받아 URL 부분만 갈아끼운다 — 디스크립터(`1x`/`320w`)는
+  // 그대로 둬야 브라우저의 후보 선택이 원본과 같다. 프록시 URL 은 타깃을
+  // 퍼센트 인코딩해 담으므로 쉼표가 들어가지 않아 split(',') 이 안전하다.
+  function upgradeSWLessSrcset(el, key, raw) {
+    const jobs = String(raw).split(',').map(part => {
+      const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
+      if (!m || m[2].indexOf(ZP.apiPath('fetch')) < 0) return Promise.resolve(part);
+      return swLessBlobURL(m[2], '').then(u => (u ? m[1] + u + m[3] : part));
+    });
+    Promise.all(jobs).then(list => { try { Native.setAttribute.call(el, key, list.join(',')); } catch {} });
   }
   // `document.write` 로 만들어진 프레임 안의 서브리소스는 요소 훅도 서브트리
   // 스윕도 안 탄다 — 그 문서에 우리 MutationObserver 가 없고, adm 은 HTML
@@ -2916,14 +2937,22 @@
   }
   function sweepSWLessDoc(doc) {
     let els = null;
-    try { els = doc.querySelectorAll('img[src],source[src],video[poster],input[src],embed[src],link[rel~="stylesheet"][href]'); } catch { return; }
+    try { els = doc.querySelectorAll('img[src],img[srcset],source[src],source[srcset],video[poster],input[src],embed[src],link[rel~="stylesheet"][href]'); } catch { return; }
     for (const el of els) {
       // `<link>` 가 403 을 받으면 광고 프레임이 스타일 없이 남는다 — naver
       // 메인의 timeboard / rollingboard 크리에이티브가 정확히 이 경로였다.
-      const key = el.localName === 'video' ? 'poster' : el.localName === 'link' ? 'href' : 'src';
-      let raw = null;
-      try { raw = Native.getAttribute.call(el, key); } catch {}
-      if (raw) upgradeSWLessURL(el, key, String(raw));
+      // img/source 는 src 와 srcset 을 **동시에** 가질 수 있고, 반응형
+      // 크리에이티브는 srcset 만 쓰기도 한다.
+      const tag = el.localName;
+      const keys = tag === 'video' ? ['poster']
+        : tag === 'link' ? ['href']
+        : (tag === 'img' || tag === 'source') ? ['src', 'srcset']
+        : ['src'];
+      for (const key of keys) {
+        let raw = null;
+        try { raw = Native.getAttribute.call(el, key); } catch {}
+        if (raw) upgradeSWLessURL(el, key, String(raw));
+      }
     }
   }
   // 광고 프레임은 **비어 있는 채로 먼저 생기고** 크리에이티브는 몇 초 뒤에
@@ -2938,7 +2967,7 @@
       // 그 뒤 광고 마크업이 들어가는 새 트리를 하나도 못 본다 — 실측에서
       // 옵저버 16개가 붙었는데 콜백은 한 번도 안 돌았다.
       const obs = new MutationObserver(() => sweepSWLessDoc(doc));
-      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'poster', 'href'] });
+      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset', 'poster', 'href'] });
     } catch {}
     sweepSWLessDoc(doc);
   }
@@ -4359,7 +4388,28 @@
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
   function isSVGURLBearing(el, key, _localKey) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (_localKey != null ? _localKey === 'href' : attrLocalName(key) === 'href') && /^(a|image|use|script)$/.test(el.localName || ''); }
-  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input' || tag === 'embed') || localKey === 'data' && tag === 'object' || localKey === 'poster' && tag === 'video'; }
+  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input' || tag === 'embed') || localKey === 'data' && tag === 'object' || localKey === 'poster' && tag === 'video' || localKey === 'srcset' && (tag === 'img' || tag === 'source') || localKey === 'imagesrcset' && tag === 'link'; }
+  // srcset 은 URL 하나가 아니라 `url 1x, url 320w` 후보 목록이라 일반 경로로
+  // 넘기면 문자열 전체를 URL 로 보고 망가진다. 서버측 htmltx 에는 이미
+  // proxied_srcset 이 있는데 페이지 realm 워커에는 없어서, innerHTML /
+  // document.write 로 들어온 srcset 은 **원본 타깃 URL 이 그대로 남았다**
+  // (구멍 매트릭스 e5-adframe-srcset 이 csp-only 로 잡아냈다).
+  // 프록시 URL 은 타깃을 퍼센트 인코딩해 담으므로 쉼표가 없어 split 이 안전하다.
+  function enforceSrcsetAttribute(el, key, raw) {
+    let changed = false;
+    const out = String(raw).split(',').map(part => {
+      const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
+      if (!m || m[2].indexOf(ZP.apiPath('fetch')) >= 0) return part;
+      const t = targetURLForElement(el, m[2]);
+      if (!t) return part;
+      changed = true;
+      return m[1] + subresourceProxyPath(t) + m[3];
+    }).join(',');
+    if (!changed) return;
+    Native.setAttribute.call(el, key, out);
+    // SW 를 못 거치는 프레임이면 후보마다 blob 으로 올려야 한다.
+    upgradeSWLessURL(el, key, out);
+  }
   function executableScriptDataType(el) {
     const kind = executableScriptKindForElement(el);
     if (kind) return kind;
@@ -4635,6 +4685,11 @@
       return;
     }
     if (!isURLBearing(el, key, localKey, tag)) return;
+    if (localKey === 'srcset' || localKey === 'imagesrcset') {
+      const list = Native.getAttribute.call(el, key);
+      if (list) enforceSrcsetAttribute(el, key, String(list));
+      return;
+    }
     const raw = Native.getAttribute.call(el, key);
     if (shouldBlockURLAttribute(el, localKey, raw, localKey, tag) || hasContextBlockedScheme(el, raw)) { blockExecutableURL(el, localKey, raw); return; }
     if (!raw) return;

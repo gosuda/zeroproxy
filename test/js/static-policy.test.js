@@ -2751,8 +2751,9 @@ test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리
   // 스윕이 <link> 를 안 잡으면 광고 프레임이 스타일 없이 남는다 — 실측에서
   // naver 메인의 timeboard / rollingboard 스타일시트가 403 을 받고 거부됐다.
   assert.ok(rt.indexOf('link[rel~="stylesheet"][href]') >= 0, 'SW-less 스윕이 stylesheet link 를 포함해야 한다');
-  assert.ok(rt.indexOf("el.localName === 'link' ? 'href' : 'src'") >= 0, 'link 는 href 를 업그레이드해야 한다');
-  assert.ok(rt.indexOf("attributeFilter: ['src', 'poster', 'href']") >= 0, '늦게 바뀌는 href 도 관찰해야 한다');
+  assert.ok(rt.indexOf("tag === 'link' ? ['href']") >= 0, 'link 는 href 를 업그레이드해야 한다');
+  assert.ok(rt.indexOf("['src', 'srcset']") >= 0, 'img/source 는 src 와 srcset 을 함께 봐야 한다');
+  assert.ok(rt.indexOf("attributeFilter: ['src', 'srcset', 'poster', 'href']") >= 0, '늦게 바뀌는 href/srcset 도 관찰해야 한다');
 
   // ★부모가 대신 받는 fetch 는 destination 이 'empty' 라 SW 의 style 판정을
   // 못 탄다. 리라이트가 빠지면 url(...) 이 상대경로로 남고 blob: 을 base 로
@@ -2764,4 +2765,24 @@ test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리
   // 캐시 키에 kind 가 들어가야 같은 URL 의 style/비-style 응답이 안 섞인다.
   assert.ok(rt.indexOf("const ck = (kind || '') + '\\n' + proxied;") >= 0, 'blob 캐시 키는 kind 를 포함해야 한다');
   assert.ok(rt.indexOf('swLessBlobs.set(ck, p)') >= 0);
+});
+
+test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // ★서버측 htmltx 에는 proxied_srcset 이 있는데 페이지 realm 워커에는
+  // 없었다 — innerHTML / document.write / insertAdjacentHTML / DOMParser 로
+  // 들어온 `<img srcset>` 은 원본 타깃 URL 이 그대로 남아 CSP 만 막았다.
+  assert.ok(rt.indexOf("localKey === 'srcset' && (tag === 'img' || tag === 'source')") >= 0, 'srcset 이 URL 속성 목록에 있어야 한다');
+  assert.ok(rt.indexOf("localKey === 'imagesrcset' && tag === 'link'") >= 0);
+
+  // 후보 목록이라 문자열 전체를 URL 로 넘기면 망가진다 — 후보마다 URL 부분만
+  // 갈아끼우고 디스크립터(`1x`/`320w`)는 보존해야 브라우저 선택이 원본과 같다.
+  assert.ok(rt.indexOf('function enforceSrcsetAttribute(el, key, raw)') >= 0);
+  const start = rt.indexOf('function enforceSrcsetAttribute(');
+  const body = rt.slice(start, start + 900);
+  assert.ok(body.indexOf("String(raw).split(',')") >= 0, 'srcset 은 후보 단위로 쪼개야 한다');
+  assert.ok(body.indexOf('upgradeSWLessURL(el, key, out)') >= 0, 'SW-less 프레임이면 후보마다 blob 으로 올려야 한다');
+  // 이미 프록시 경로인 후보를 다시 감싸면 옵저버와 왕복한다.
+  assert.ok(body.indexOf("indexOf(ZP.apiPath('fetch')) >= 0) return part") >= 0);
 });
