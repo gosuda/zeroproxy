@@ -2767,6 +2767,33 @@ test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리
   assert.ok(rt.indexOf('swLessBlobs.set(ck, p)') >= 0);
 });
 
+test('storage 파사드는 이름 기반 접근과 키 열거를 진짜 Storage 처럼 지원한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // ★`localStorage.token = 'x'` 는 아주 흔한 관용구인데, 여섯 멤버만 가진
+  // frozen 평범한 객체는 그 쓰기를 **조용히 삼킨다**(비엄격 모드라 throw 도
+  // 없다) → 사이트의 저장이 통째로 사라진다. 실측(직접/프록시 대조):
+  // 직접은 'hello' 를 돌려주는데 프록시는 undefined 였다.
+  assert.ok(rt.indexOf('const namedStorage = new Proxy(') >= 0, '항목 접근은 Proxy 로 위임해야 한다');
+  assert.ok(rt.indexOf('return namedStorage;') >= 0, 'prefixedStorage 는 Proxy 를 돌려줘야 한다');
+
+  // 멤버는 프로토타입에 non-enumerable 로 — 그래야 `Object.keys(localStorage)`
+  // 가 메서드 이름이 아니라 **저장된 키**를 돌려준다(length 와 자기모순이던
+  // 것이 그 자체로 지문이었다).
+  assert.ok(rt.indexOf('const storageProto = Object.create(') >= 0);
+  assert.ok(rt.indexOf("Object.defineProperty(storageProto, name, { value: fn, enumerable: false") >= 0,
+    '멤버는 열거되면 안 된다');
+  assert.ok(rt.indexOf('ownKeys() { return storedKeys(); }') >= 0);
+
+  // ★target 에 own 속성이 없어야 한다 — frozen/non-configurable own 키가 있으면
+  // ownKeys 트랩이 그것을 반드시 포함해야 해서 불변식에 걸린다.
+  assert.ok(rt.indexOf('new Proxy(Object.create(storageProto), {') >= 0,
+    'Proxy target 은 own 속성이 없는 객체여야 한다');
+
+  // 없는 키는 null 이 아니라 undefined 로 — getItem 과 이름 접근의 계약이 다르다.
+  assert.ok(rt.indexOf('return v === null ? undefined : v;') >= 0);
+});
+
 test('자기 prelude 를 기다리는 프레임도 postMessage 매핑은 미리 받는다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
 

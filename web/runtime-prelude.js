@@ -3465,6 +3465,69 @@
         for (const k of toDelete) native.removeItem(k);
       },
     };
+    // ★진짜 Storage 는 **이름 기반 접근**을 지원한다: `localStorage.token = 'x'`
+    // 로 쓰고 `localStorage.token` 으로 읽으며 `'token' in localStorage` 가
+    // true 다. 아주 흔한 관용구인데, 여섯 멤버만 가진 frozen 평범한 객체는
+    // 그 쓰기를 **조용히 삼킨다**(비엄격 모드라 throw 도 없다) → 사이트의
+    // 저장이 통째로 사라진다. 게다가 `Object.keys(localStorage)` 가 저장된
+    // 키가 아니라 **메서드 이름**을 돌려줘서 그 자체로 지문이었다
+    // (length 는 4인데 키는 6개로 자기모순).
+    //
+    // 그래서 멤버는 프로토타입에 non-enumerable 로 두고(= 자체 own 속성 0),
+    // 항목 접근은 Proxy 로 위임한다. own 속성이 없어야 frozen target 의
+    // ownKeys 불변식에 걸리지 않는다.
+    const RESERVED = new Set(['length', 'key', 'getItem', 'setItem', 'removeItem', 'clear']);
+    const storageProto = Object.create(
+      (typeof Storage === 'function' && Storage.prototype) ? Storage.prototype : Object.prototype
+    );
+    Object.defineProperty(storageProto, 'length', {
+      get() { return facade.length; }, enumerable: false, configurable: true,
+    });
+    for (const name of ['key', 'getItem', 'setItem', 'removeItem', 'clear']) {
+      const fn = function() { return facade[name].apply(facade, arguments); };
+      maskNativeFunction(fn, name);
+      Object.defineProperty(storageProto, name, { value: fn, enumerable: false, writable: true, configurable: true });
+    }
+    const storedKeys = () => {
+      const out = [];
+      for (let i = 0; i < native.length; i++) {
+        const k = native.key(i);
+        if (k && k.startsWith(prefix)) out.push(k.slice(prefix.length));
+      }
+      return out;
+    };
+    const namedStorage = new Proxy(Object.create(storageProto), {
+      get(t, p, r) {
+        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.get(t, p, r);
+        const v = facade.getItem(p);
+        return v === null ? undefined : v;
+      },
+      set(t, p, v) {
+        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.set(t, p, v, t);
+        facade.setItem(p, v);
+        return true;
+      },
+      has(t, p) {
+        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.has(t, p);
+        return facade.getItem(p) !== null;
+      },
+      deleteProperty(t, p) {
+        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.deleteProperty(t, p);
+        facade.removeItem(p);
+        return true;
+      },
+      ownKeys() { return storedKeys(); },
+      getOwnPropertyDescriptor(t, p) {
+        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.getOwnPropertyDescriptor(t, p);
+        const v = facade.getItem(p);
+        return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true };
+      },
+      defineProperty(t, p, desc) {
+        if (typeof p === 'symbol' || RESERVED.has(p)) return Reflect.defineProperty(t, p, desc);
+        if ('value' in desc) facade.setItem(p, desc.value);
+        return true;
+      },
+    });
     // Root the facade at Storage.prototype BEFORE freezing: a frozen object is
     // non-extensible, so a later setPrototypeOf throws (tried 2026-08-03 at the
     // call sites — silently no-op). Safe because the facade owns all six
@@ -3477,7 +3540,8 @@
     try {
       if (typeof Storage === 'function' && Storage.prototype) Object.setPrototypeOf(facade, Storage.prototype);
     } catch {}
-    return Object.freeze(facade);
+    Object.freeze(facade);
+    return namedStorage;
   }
   function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
     for (const rec of Array.from(storageWindows)) {
