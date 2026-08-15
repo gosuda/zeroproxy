@@ -3721,6 +3721,9 @@
   function filteredNamedNodeMap(raw) {
     return filteredCollection(raw, attr => attr && !isZPAttrName(attr.name));
   }
+  function isIndexKey(prop) {
+    return typeof prop !== 'symbol' && /^(?:0|[1-9]\d*)$/.test(String(prop));
+  }
   function filteredCollection(raw, predicate) {
     const nth = index => {
       let seen = 0;
@@ -3738,7 +3741,7 @@
       for (let i = 0; raw && i < raw.length; i++) if (predicate(raw[i])) n++;
       return n;
     };
-    return new Proxy({}, {
+    const collection = new Proxy({}, {
       get(_target, prop) {
         if (prop === 'length') return length();
         if (prop === 'item') return index => nth(Number(index) || 0);
@@ -3749,15 +3752,55 @@
           return null;
         };
         if (prop === Symbol.iterator) return function*(){ for (let i = 0; i < length(); i++) yield nth(i); };
-        if (/^(?:0|[1-9]\d*)$/.test(String(prop))) {
+        if (isIndexKey(prop)) {
           const index = Number(prop);
           return index < length() ? nth(index) : undefined;
         }
+        // `forEach`/`values`/`keys`/`entries` 를 raw 에 그냥 바인딩하면 **필터를
+        // 우회한다** — `document.querySelectorAll('script').forEach(…)` 가 ZP 부트
+        // 스크립트를 그대로 넘겨줬다. 인덱싱만 막고 순회를 안 막으면 소용없다.
+        if (prop === 'forEach') return function(fn, thisArg) {
+          for (let i = 0, n = length(); i < n; i++) fn.call(thisArg, nth(i), i, collection);
+        };
+        if (prop === 'values') return function*(){ for (let i = 0; i < length(); i++) yield nth(i); };
+        if (prop === 'keys') return function*(){ for (let i = 0; i < length(); i++) yield i; };
+        if (prop === 'entries') return function*(){ for (let i = 0; i < length(); i++) yield [i, nth(i)]; };
         const value = raw && raw[prop];
         return typeof value === 'function' ? value.bind(raw) : value;
       },
-      has(_target, prop) { return prop === 'length' || (/^(?:0|[1-9]\\d*)$/.test(String(prop)) && Number(prop) < length()); }
+      // 2026-08-15 — `has` 의 인덱스 정규식이 `\\d` 로 이중 이스케이프되어 있었다.
+      // 정규식 리터럴 안에서 `\\d` 는 "역슬래시 + d" 라, `[1-9]` 뒤에 역슬래시를
+      // 요구하는 셈이 되어 **"0" 말고는 어떤 인덱스도 매치되지 않았다**.
+      // `get` 은 올바른 `\d` 를 쓰니 `list[3]` 은 멀쩡했고, 그래서 오래 안 보였다.
+      //
+      // 그런데 `Array.prototype.map/filter/forEach/…` 는 인덱스를 읽기 전에
+      // **HasProperty 로 hole 을 판정**한다. 그래서 `Array.prototype.map.call(
+      // nodeList, fn)` 이 0번만 돌고 나머지는 전부 hole 이 됐다 — 배열에는
+      // 구멍이 남고 사이트 코드는 `undefined` 를 집는다. wikipedia 포털이
+      // `l10n/undefined-<hash>.json` 을 8번 긁던 것이 바로 이것이다.
+      has(_target, prop) {
+        if (isIndexKey(prop)) return Number(prop) < length();
+        // 인덱스가 아닌 이름은 진짜 컬렉션의 판정을 그대로 쓴다. `'item' in list`,
+        // `'forEach' in list`, `Symbol.iterator in list` 가 전부 true 여야 한다.
+        try { return prop === 'length' || (!!raw && prop in raw); } catch { return prop === 'length'; }
+      },
+      // 진짜 NodeList/NamedNodeMap 은 인덱스를 **열거 가능한 own 속성**으로 가진다.
+      // 이 두 트랩이 없으면 `Object.keys(list)` 가 `[]` 라, 값이 있는데 키가 없는
+      // 자기모순이 그대로 지문이 된다. target 은 own 속성이 없는 `{}` 이므로
+      // 반드시 `configurable: true` 로 보고해야 불변식 위반이 나지 않는다.
+      ownKeys() {
+        const keys = [];
+        for (let i = 0, n = length(); i < n; i++) keys.push(String(i));
+        return keys;
+      },
+      getOwnPropertyDescriptor(_target, prop) {
+        if (isIndexKey(prop) && Number(prop) < length()) {
+          return { value: nth(Number(prop)), writable: false, enumerable: true, configurable: true };
+        }
+        return undefined;
+      }
     });
+    return collection;
   }
   function sanitizeSerializedHTML(html) {
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');

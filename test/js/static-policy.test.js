@@ -2861,3 +2861,44 @@ test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다'
   // 이미 프록시 경로인 후보를 다시 감싸면 옵저버와 왕복한다.
   assert.ok(body.indexOf("indexOf(ZP.apiPath('fetch')) >= 0) return part") >= 0);
 });
+
+test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // ★`has` 트랩의 인덱스 정규식이 `\\d` 로 이중 이스케이프돼 있었다. 정규식
+  // 리터럴에서 `\\d` 는 "역슬래시 + d" 라 `[1-9]` 뒤에 역슬래시를 요구하는
+  // 셈이고, 결국 **"0" 외의 어떤 인덱스도 매치되지 않았다**. `get` 은 올바른
+  // `\d` 를 써서 `list[3]` 은 멀쩡했기 때문에 오래 안 보였다.
+  assert.ok(rt.indexOf('[1-9]\\\\d*') < 0, '인덱스 정규식이 이중 이스케이프되면 안 된다');
+
+  // 실제 의미까지 고정한다 — 소스에서 두 함수를 뜯어 그대로 실행한다.
+  const helperStart = rt.indexOf('function isIndexKey(prop)');
+  assert.ok(helperStart > 0);
+  const helper = rt.slice(helperStart, rt.indexOf('function sanitizeSerializedHTML(', helperStart));
+  const make = new Function('isZPAttrName', helper + '; return filteredCollection;')(n => String(n || '').startsWith('data-zp-'));
+
+  const raw = [{ name: 'a' }, { name: 'data-zp-x' }, { name: 'b' }, { name: 'c' }];
+  const list = make(raw, item => !isZPName(item));
+  function isZPName(item) { return String(item.name).startsWith('data-zp-'); }
+
+  assert.strictEqual(list.length, 3, '필터된 항목은 길이에서 빠진다');
+  assert.strictEqual(list[2].name, 'c', '인덱싱은 필터를 건너뛴 순서를 따른다');
+
+  // ★핵심 회귀: `Array.prototype.map/filter/forEach` 는 인덱스를 읽기 전에
+  // HasProperty 로 hole 을 판정한다. `has` 가 false 면 콜백이 아예 안 불리고
+  // 배열에 구멍이 남아 사이트 코드는 `undefined` 를 집는다 — wikipedia 포털이
+  // `l10n/undefined-<hash>.json` 을 8번 긁던 원인이 정확히 이것이었다.
+  assert.strictEqual(1 in list, true);
+  assert.deepStrictEqual(Array.prototype.map.call(list, e => e.name), ['a', 'b', 'c']);
+
+  // 값은 있는데 키가 없으면 그 자기모순 자체가 지문이다.
+  assert.deepStrictEqual(Object.keys(list), ['0', '1', '2']);
+
+  // 순회 메서드를 raw 에 그냥 바인딩하면 **필터를 우회한다** —
+  // `document.querySelectorAll('script').forEach(…)` 가 ZP 부트 스크립트를
+  // 그대로 넘겨줬다. 인덱싱만 막고 순회를 안 막으면 소용없다.
+  const seen = [];
+  list.forEach(e => seen.push(e.name));
+  assert.deepStrictEqual(seen, ['a', 'b', 'c'], 'forEach 도 필터를 지켜야 한다');
+  assert.deepStrictEqual([...list].map(e => e.name), ['a', 'b', 'c']);
+});
