@@ -680,6 +680,11 @@ async function virtualSubresource(req, cls, clientId) {
 
 function shouldRewriteCSS(req, resp) {
   if (req.destination === 'style') return true;
+  // SW-less 프레임(document.write / about:blank)의 `<link>` 를 부모가 대신
+  // 받아 blob 으로 물려줄 때 쓰는 신호. 그 fetch 는 destination 이 'empty' 라
+  // 위 판정을 못 타는데, 리라이트가 빠지면 `url(...)` 이 상대경로로 남아
+  // blob: 을 base 로 해석돼 배경이 전부 깨진다.
+  if (req.headers.get('X-ZP-Style-Request') === '1') return true;
   const ct = resp && resp.headers && resp.headers.get('Content-Type') || '';
   return /\btext\/css\b/i.test(ct);
 }

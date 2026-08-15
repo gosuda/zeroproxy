@@ -2831,13 +2831,20 @@
     return value;
   }
   const swLessBlobs = new Map();
-  function swLessBlobURL(proxied) {
-    const hit = swLessBlobs.get(proxied);
+  // kind='style' 은 CSS 리라이트가 **반드시** 걸려야 한다. 부모가 대신 받는
+  // 이 fetch 는 destination 이 'empty' 라 SW 의 `req.destination === 'style'`
+  // 판정을 못 탄다 — 그대로 두면 `url(../../res/x.png)` 가 상대경로로 남고,
+  // blob: 을 base 로 해석돼 배경이 통째로 깨진다. 문서 요청의
+  // `X-ZP-Document-Request` 와 같은 방식으로 명시 신호를 준다.
+  function swLessBlobURL(proxied, kind) {
+    const ck = (kind || '') + '\n' + proxied;
+    const hit = swLessBlobs.get(ck);
     if (hit) return hit;
     const make = Native.createObjectURL || (blob => URL.createObjectURL(blob));
+    const init = kind === 'style' ? { headers: { 'X-ZP-Style-Request': '1' } } : undefined;
     let p;
     try {
-      p = Promise.resolve(Native.fetch(proxied))
+      p = Promise.resolve(init ? Native.fetch(proxied, init) : Native.fetch(proxied))
         .then(r => (r && r.ok) ? r.blob() : Promise.reject(new Error('status ' + (r && r.status))))
         .then(b => make(b))
         .catch(err => { swLessBlobError = String(err && err.message || err).slice(0, 120); reportSWLessError(); return null; });
@@ -2847,7 +2854,7 @@
     }
     // 상한선 — 광고 프레임 몇 개가 만드는 양은 수십 건이다. 넘치면 캐시만
     // 포기하고 계속 동작한다.
-    if (swLessBlobs.size < 400) swLessBlobs.set(proxied, p);
+    if (swLessBlobs.size < 400) swLessBlobs.set(ck, p);
     return p;
   }
   // 실패는 페이지가 볼 수 있는 곳에 남기지 않는다 — DOM 속성으로 찍으면
@@ -2868,7 +2875,7 @@
     if (!documentIsSWLess(doc)) return;
     if (swLessUpgraded.has(el)) return;
     swLessUpgraded.add(el);
-    swLessBlobURL(raw).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+    swLessBlobURL(raw, key === 'href' ? 'style' : '').then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
   }
   // `document.write` 로 만들어진 프레임 안의 서브리소스는 요소 훅도 서브트리
   // 스윕도 안 탄다 — 그 문서에 우리 MutationObserver 가 없고, adm 은 HTML
@@ -2887,9 +2894,11 @@
   }
   function sweepSWLessDoc(doc) {
     let els = null;
-    try { els = doc.querySelectorAll('img[src],source[src],video[poster],input[src],embed[src]'); } catch { return; }
+    try { els = doc.querySelectorAll('img[src],source[src],video[poster],input[src],embed[src],link[rel~="stylesheet"][href]'); } catch { return; }
     for (const el of els) {
-      const key = el.localName === 'video' ? 'poster' : 'src';
+      // `<link>` 가 403 을 받으면 광고 프레임이 스타일 없이 남는다 — naver
+      // 메인의 timeboard / rollingboard 크리에이티브가 정확히 이 경로였다.
+      const key = el.localName === 'video' ? 'poster' : el.localName === 'link' ? 'href' : 'src';
       let raw = null;
       try { raw = Native.getAttribute.call(el, key); } catch {}
       if (raw) upgradeSWLessURL(el, key, String(raw));
@@ -2907,7 +2916,7 @@
       // 그 뒤 광고 마크업이 들어가는 새 트리를 하나도 못 본다 — 실측에서
       // 옵저버 16개가 붙었는데 콜백은 한 번도 안 돌았다.
       const obs = new MutationObserver(() => sweepSWLessDoc(doc));
-      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'poster'] });
+      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'poster', 'href'] });
     } catch {}
     sweepSWLessDoc(doc);
   }

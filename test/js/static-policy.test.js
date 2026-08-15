@@ -2731,3 +2731,25 @@ test('SW 를 못 거치는 프레임: 프록시 경로를 먼저 박고 blob 으
   // 발견은 멤브레인 설치 시점에 — 타이머 백스톱만으로는 뒤늦게 생기는 프레임을 놓친다.
   assert.ok(rt.indexOf("documentIsSWLess(childWin.document)") >= 0, "자식 창 격리 시점에 SW-less 판정을 해야 한다");
 });
+
+test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리라이트를 강제한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+
+  // 스윕이 <link> 를 안 잡으면 광고 프레임이 스타일 없이 남는다 — 실측에서
+  // naver 메인의 timeboard / rollingboard 스타일시트가 403 을 받고 거부됐다.
+  assert.ok(rt.indexOf('link[rel~="stylesheet"][href]') >= 0, 'SW-less 스윕이 stylesheet link 를 포함해야 한다');
+  assert.ok(rt.indexOf("el.localName === 'link' ? 'href' : 'src'") >= 0, 'link 는 href 를 업그레이드해야 한다');
+  assert.ok(rt.indexOf("attributeFilter: ['src', 'poster', 'href']") >= 0, '늦게 바뀌는 href 도 관찰해야 한다');
+
+  // ★부모가 대신 받는 fetch 는 destination 이 'empty' 라 SW 의 style 판정을
+  // 못 탄다. 리라이트가 빠지면 url(...) 이 상대경로로 남고 blob: 을 base 로
+  // 해석돼 배경이 통째로 깨진다.
+  assert.ok(rt.indexOf("'X-ZP-Style-Request': '1'") >= 0, 'style blob fetch 는 리라이트 신호를 붙여야 한다');
+  assert.ok(rt.indexOf("swLessBlobURL(raw, key === 'href' ? 'style' : '')") >= 0, 'link 업그레이드는 style kind 로 요청해야 한다');
+  assert.ok(sw.indexOf("req.headers.get('X-ZP-Style-Request') === '1'") >= 0, 'SW 가 그 신호로 CSS 리라이트를 해야 한다');
+
+  // 캐시 키에 kind 가 들어가야 같은 URL 의 style/비-style 응답이 안 섞인다.
+  assert.ok(rt.indexOf("const ck = (kind || '') + '\\n' + proxied;") >= 0, 'blob 캐시 키는 kind 를 포함해야 한다');
+  assert.ok(rt.indexOf('swLessBlobs.set(ck, p)') >= 0);
+});
