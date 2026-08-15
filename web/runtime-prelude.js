@@ -185,6 +185,21 @@
   // content, so the "escape" the sandbox would have prevented cannot actually
   // happen here.
   const frameSandboxMeta = new WeakMap();
+  // ★여기서 선언해야 한다 — installBaseObserver 는 프레임 격리 시점에 불리는데,
+  // prelude 설치 시점에 이미 존재하던 iframe 은 이 파일 아래쪽(선언부 원위치)이
+  // 실행되기 **전에** 그 경로를 지난다. const 를 뒤에 두면 TDZ 로 던지고
+  // `catch { return }` 이 삼켜서 그 문서는 base 옵저버(속성 정책 강제 +
+  // base[href] 동기화)를 영영 못 받는다. 실측: 로드당 수백 회.
+  // 우리가 `configurable: false` 로 심는 자리들은 두 번째 시도가 **무조건**
+  // 던진다. 신원(WeakSet)으로 막으려 했더니 안 먹었다 — 멤브레인이 감싼 창은
+  // `w.HTMLLinkElement.prototype` 을 읽을 때마다 다른 래퍼를 주므로 WeakSet 이
+  // 매번 미스한다. 그래서 신원이 아니라 **디스크립터**로 판정한다.
+  function propertyLocked(obj, prop) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(obj, prop);
+      return !!d && !d.configurable;
+    } catch { return true; }
+  }
   const crossWindowProxyCache = new WeakMap();
   const postMessageWrappers = new WeakMap();
   const postMessageOriginals = new WeakMap();
@@ -1616,6 +1631,9 @@
     const constructorOverrides = new WeakMap();
     for (const [ctor, wrapper] of dynamicConstructorWrappers) {
       if (ctor && ctor.prototype) try {
+        // `configurable: false` 로 심으므로 같은 프로토타입에 두 번 오면 무조건
+        // 던진다. 삼켜지긴 하지만 실측에서 로드당 천 단위였다.
+        if (propertyLocked(ctor.prototype, 'constructor')) continue;
         Object.defineProperty(ctor.prototype, 'constructor', {
           get() { return constructorOverrides.get(this) || wrapper; },
           set(value) { try { constructorOverrides.set(this, value); } catch {} },
@@ -2494,6 +2512,10 @@
   // out the host shell). Build a plausible Chrome-148 chrome object
   // and replace whatever WebView2 dropped in.
   function installChromeFingerprintFacade(w) {
+    // 아래에서 `configurable: false` 로 심으므로 같은 창에 두 번 부르면
+    // delete 와 defineProperty 가 **매번 둘 다 던진다**. try/catch 가 삼켜서
+    // 조용하지만 공짜가 아니다 — 실측으로 로드당 수백 번 던지고 있었다.
+    if (propertyLocked(w, 'chrome')) return;
     let virtualChrome;
     try {
       virtualChrome = buildChromeFingerprint(w);
@@ -4252,6 +4274,9 @@
   }
   function installLinkProp(proto) {
     if (!proto) return;
+    // href / rel 둘 다 `configurable: false` 로 심는다 — 같은 프로토타입에
+    // 두 번 오면 매번 던지므로 한 번만 건다.
+    if (propertyLocked(proto, 'href')) return;
     const hrefDescriptor = propertyDescriptor(proto, 'href');
     if (hrefDescriptor && hrefDescriptor.get) try {
       Object.defineProperty(proto, 'href', {
@@ -4618,6 +4643,14 @@
     // 단계에서 리라이트한 URL 은 요소 훅을 아예 안 타므로, 여기(서브트리
     // 스윕)가 그것들을 만나는 유일한 지점이다.
     if (String(raw).startsWith(proxyOrigin)) { upgradeSWLessURL(el, key, String(raw)); return; }
+    // ★blob: 은 그냥 둔다. 위험한 태그(script/iframe/embed/object)는 바로 위
+    // hasContextBlockedScheme 이 이미 막았고, 남은 건 봉인된 값이다 — SW-less
+    // 프레임에 우리가 물려준 것이거나 페이지가 자기 Blob 으로 만든 것이고
+    // 어느 쪽이든 밖으로 못 나간다. 여기서 target 을 다시 계산해 프록시
+    // 경로로 덮으면 방금 넣은 blob 이 되돌려져 403 이 나고, 그 403 이 또
+    // blob 업그레이드를 불러 왕복이 된다. e4-blank-iframe-img 가 이것 때문에
+    // 간헐적으로 깨졌다.
+    if (/^blob:/i.test(String(raw))) return;
     const target = targetURLForElement(el, raw);
     if (!target) return;
     const usesRaw = usesRawURLAttribute(el, key, localKey);

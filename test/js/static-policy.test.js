@@ -2732,6 +2732,18 @@ test('SW 를 못 거치는 프레임: 프록시 경로를 먼저 박고 blob 으
   assert.ok(rt.indexOf("documentIsSWLess(childWin.document)") >= 0, "자식 창 격리 시점에 SW-less 판정을 해야 한다");
 });
 
+test('멤브레인이 스스로 재정의 예외를 쏟지 않는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // `configurable: false` 로 심는 자리는 두 번째 시도가 무조건 던진다. 신원
+  // (WeakSet)으로는 못 막는다 — 멤브레인이 감싼 창은 프로토타입을 읽을 때마다
+  // 다른 래퍼를 준다. 디스크립터로 판정해야 한다.
+  assert.ok(rt.indexOf('function propertyLocked(obj, prop)') >= 0);
+  assert.ok(rt.indexOf("propertyLocked(w, 'chrome')") >= 0, 'chrome 파사드는 잠김 여부를 먼저 봐야 한다');
+  assert.ok(rt.indexOf("propertyLocked(ctor.prototype, 'constructor')") >= 0, 'constructor 패치는 잠김 여부를 먼저 봐야 한다');
+  assert.ok(rt.indexOf("propertyLocked(proto, 'href')") >= 0, 'link href 패치는 잠김 여부를 먼저 봐야 한다');
+});
+
 test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리라이트를 강제한다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   const sw = fs.readFileSync('web/sw.js', 'utf8');
