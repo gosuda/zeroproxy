@@ -2722,12 +2722,31 @@
       messageListenerWrappers.set(listener, wrapped);
       return wrapped;
     }
-    define(w, 'addEventListener', function(type, listener, options) {
-      return Native.windowAddEventListener(String(type), String(type) === 'message' ? wrap(listener) : listener, options);
-    });
-    define(w, 'removeEventListener', function(type, listener, options) {
-      return Native.windowRemoveEventListener(String(type), String(type) === 'message' ? messageListenerWrappers.get(listener) || listener : listener, options);
-    });
+    // ★window 에 직접 심으면 안 된다 — 실제 브라우저의 `window` 에는
+    // addEventListener/removeEventListener 가 **own 프로퍼티로 없다**
+    // (EventTarget.prototype 에만 있다). 여기에 심었더니 프록시 realm 의
+    // `Object.getOwnPropertyNames(window)` 가 직접 로드와 딱 이 둘만 달랐다
+    // (실측 2026-08-16, 프록시된 example.com 대 직접 example.com: EXTRA =
+    // addEventListener, removeEventListener). own/inherited 대조는 안티봇이
+    // 실제로 보는 축이고, 이 프로젝트는 예전에도 여분 전역(`ZP`/`ZeroProxyRT`)
+    // 때문에 네이버 프로버에 걸린 적이 있다.
+    // 그래서 EventTarget.prototype 을 감싸고 **수신자가 이 창일 때만** message
+    // 리스너를 래핑한다. 그러면 own 프로퍼티 집합이 진짜 브라우저와 같아진다.
+    const ETProto = w.EventTarget && w.EventTarget.prototype;
+    if (ETProto && !propertyLocked(ETProto, 'addEventListener')) {
+      const rawAdd = ETProto.addEventListener;
+      const rawRemove = ETProto.removeEventListener;
+      if (typeof rawAdd === 'function' && typeof rawRemove === 'function') {
+        define(ETProto, 'addEventListener', function(type, listener, options) {
+          if (this === w && String(type) === 'message') return rawAdd.call(this, String(type), wrap(listener), options);
+          return rawAdd.apply(this, arguments);
+        });
+        define(ETProto, 'removeEventListener', function(type, listener, options) {
+          if (this === w && String(type) === 'message') return rawRemove.call(this, String(type), messageListenerWrappers.get(listener) || listener, options);
+          return rawRemove.apply(this, arguments);
+        });
+      }
+    }
     const wrappedPostMessage = postMessageWrapperFor(w);
     if (wrappedPostMessage) define(w, 'postMessage', wrappedPostMessage);
     let onmessage = null;
