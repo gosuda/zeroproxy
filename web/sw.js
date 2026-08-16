@@ -1731,7 +1731,25 @@ async function rewriteScriptResponse(resp, opt) {
 async function transformDocumentResponse(resp, opt) {
   // Only transform HTML payloads. Anything else (302 redirect, JSON, binary)
   // passes through unchanged — addCSP/streaming preserved.
-  if (!resp || resp.status >= 300 || !isHTMLResponse(resp)) return resp;
+  //
+  // The guard used to be `status >= 300`, which also let every 4xx/5xx HTML
+  // *body* through un-rewritten. That is not a redirect — it is a document the
+  // browser renders and executes. Cloudflare's managed challenge is exactly
+  // that shape (403 + `cf-mitigated: challenge` + a full HTML page), so the
+  // interstitial reached the page with no prelude, no membrane and no URL
+  // rewriting: its `/cdn-cgi/challenge-platform/...` script resolved against
+  // the PROXY origin, Go answered POLICY_BLOCKED, and the challenge could
+  // never run ("Just a moment..." forever). Worse in general — an error page
+  // carrying ABSOLUTE URLs would have loaded them straight from the browser,
+  // which is a containment escape, not just a fidelity bug.
+  // So: skip redirects only (3xx has no renderable body anyway) and keep every
+  // other HTML status on the rewrite path.
+  if (!resp || !isHTMLResponse(resp)) return resp;
+  if (resp.status >= 300 && resp.status < 400) return resp;
+  // Our own error pages (safeError) are already proxy-origin documents built
+  // from fixed markup — rewriting them against the target URL would inject a
+  // membrane into a page that has nothing to contain.
+  if (resp.headers && resp.headers.get('X-ZP-Error') === '1') return resp;
 
   // Phase C — progressive streaming render. Used ONLY when the kernel actually
   // streamed this document (X-ZP-Stream marker, set in build_streaming_js_response
@@ -2856,6 +2874,9 @@ function safeError(code, status = 400, targetUrl = '') {
       'Cache-Control': 'no-store',
       'Content-Security-Policy': ZP.fixedCSP(),
       'X-Content-Type-Options': 'nosniff',
+      // Marks this as OUR page, not the target's, so transformDocumentResponse
+      // (which now rewrites 4xx/5xx HTML bodies) leaves it alone.
+      'X-ZP-Error': '1',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS',
       'Access-Control-Allow-Headers': '*',

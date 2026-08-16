@@ -4849,6 +4849,21 @@
     if (node.localName === 'base' && Native.getAttribute.call(node, 'href')) updateVirtualBase(Native.getAttribute.call(node, 'href'));
     if (node.querySelectorAll) node.querySelectorAll('base[href]').forEach(el => updateVirtualBase(Native.getAttribute.call(el, 'href')));
   }
+  // ★★ 이 `const` 를 위(선언 블록)로 올리지 말 것 — "명백한 TDZ 버그" 처럼
+  // 보이지만, 올리면 더 크게 깨진다. 실제로 올려서 측정했다(2026-08-16):
+  //  - 지금은 prelude 초기화 중 installNetworkContainment → installBaseObserver
+  //    호출이 TDZ 로 던지고 아래 `catch { return }` 가 삼켜서, **최초 문서에는
+  //    이 옵저버가 안 걸린다**. (Cloudflare 인터스티셜에서 pause-on-exception
+  //    으로 `ReferenceError: Cannot access 'bn' before initialization` 확인.)
+  //  - 선언을 올려 그 호출이 성공하게 만들면 옵저버가 곧바로
+  //    enforceSubtreePolicies / instrumentDescendantIframes 를 돌리는데, 이미
+  //    계측된 창을 **두 번째로** 계측하면서 `TypeError: Cannot redefine
+  //    property: <userAgent|href|innerHTML|serviceWorker|…>` 가 로드당 85건
+  //    쏟아진다(= 위 "두 번째 시도는 무조건 던진다" 그 자리들).
+  //    구멍 매트릭스 회귀: c5-beacon, c6-beacon-cross, e4-blank-iframe-img 가
+  //    새로 깨진다(6건 → 9건). 나머지 축(진짜 유출 0)은 유지.
+  // 즉 TDZ 가 **이중 계측 버그를 가려 주고 있다**. 순서를 고치려면 계측
+  // 멱등성부터 고쳐야 한다 — 그건 별건이다.
   const observedDocuments = new WeakSet();
   function installBaseObserver(doc) {
     doc = doc || document;
