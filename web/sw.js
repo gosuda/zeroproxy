@@ -200,17 +200,20 @@ async function syncFetchRelayLoop() {
   if (syncRelayRunning) return;
   syncRelayRunning = true;
   for (;;) {
-    let job = null;
+    let batch = null;
     try {
       const r = await nativeFetch(ZP.apiPath('sync-fetch/poll'), { cache: 'no-store' });
-      if (r.status === 200) job = await r.json();
+      if (r.status === 200) batch = await r.json();
     } catch {
       // 서버가 잠깐 없을 수 있다. 조금 쉬고 다시 연다.
       await new Promise(res => setTimeout(res, 1000));
       continue;
     }
-    if (!job) continue;                        // 204 = 빈손, 즉시 재연결
-    handleSyncFetchJob(job).catch(() => {});   // 다음 폴을 막지 않는다
+    if (!batch) continue;                      // 204 = 빈손, 즉시 재연결
+    // 서버가 큐에 쌓인 잡을 묶어서 준다. 낡은 서버는 단일 객체를 주므로
+    // 양쪽 다 받는다.
+    const jobs = Array.isArray(batch) ? batch : [batch];
+    for (const job of jobs) handleSyncFetchJob(job).catch(() => {}); // 다음 폴을 막지 않는다
   }
 }
 
@@ -229,10 +232,21 @@ async function resolveSyncTab(tabId) {
   return null;
 }
 
+// HTTP 헤더 값에 넣어도 안전한 형태로 줄인다. 개행이 섞이면 헤더 인젝션이
+// 되고, 비ASCII 는 fetch 가 거부한다.
+function headerSafe(v) {
+  return String(v == null ? '' : v).replace(/[\r\n]+/g, ' ').replace(/[^\x20-\x7e]/g, '?').slice(0, 200);
+}
+function utf8Base64(s) {
+  const bytes = new TextEncoder().encode(String(s));
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 async function handleSyncFetchJob(job) {
   // 릴레이 버전. 브라우저가 낡은 SW 를 물고 있는지 응답만 보고 가리기 위한 것 —
   // 이걸 안 실으면 "내 코드가 틀렸나" 와 "SW 가 낡았나" 를 구분할 수 없다.
-  const out = { id: job.id, v: 'r3', status: 0, statusText: '', headers: [], bodyB64: '', err: '' };
+  const out = { id: job.id, v: 'r4', status: 0, statusText: '', headers: [], body: null, err: '' };
   try {
     const tab = await resolveSyncTab(job.tab);
     if (!tab) throw new Error('SW_NOT_READY tab=' + (job.tab || '(none)') + ' known=' + tabs.size);
@@ -252,13 +266,10 @@ async function handleSyncFetchJob(job) {
     out.status = resp.status;
     out.statusText = resp.statusText || '';
     try { resp.headers.forEach((v, k) => out.headers.push([k, v])); } catch {}
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    // btoa 는 문자열만 받는다. 큰 본문에서 스택이 터지지 않게 청크로 자른다.
-    let bin = '';
-    for (let i = 0; i < buf.length; i += 0x8000) {
-      bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
-    }
-    out.bodyB64 = btoa(bin);
+    // ★바이트를 그대로 넘긴다. 예전에는 여기서 base64 문자열을 만들었는데,
+    // 서브리소스를 전부 이 경로로 보내자 그 비용이 SW 스레드에 몰려 다른 잡이
+    // 밀렸다(실측: deadSheets 2~4). 본문 크기도 33% 줄어든다.
+    out.body = await resp.arrayBuffer();
   } catch (e) {
     out.err = String((e && e.message) || e || 'error');
     // 상류 실패 이유는 Go 가 버리므로 여기서 흘려 둔다. SW 콘솔은
@@ -268,8 +279,18 @@ async function handleSyncFetchJob(job) {
   try {
     await nativeFetch(ZP.apiPath('sync-fetch/result'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(out),
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-ZP-Sync-Id': String(out.id || ''),
+        'X-ZP-Sync-Status': String(out.status || 0),
+        'X-ZP-Sync-Statustext': headerSafe(out.statusText),
+        'X-ZP-Sync-V': out.v,
+        'X-ZP-Sync-Error': headerSafe(out.err),
+        // 응답 헤더는 작아서 한 줄에 실어도 된다. 다만 HTTP 헤더 값은 ASCII 만
+        // 안전하므로(Content-Language 등에 비ASCII 가 올 수 있다) base64 로 싣는다.
+        'X-ZP-Sync-Headers': utf8Base64(JSON.stringify(out.headers || [])),
+      },
+      body: out.body || new ArrayBuffer(0),
       cache: 'no-store',
     });
   } catch {}

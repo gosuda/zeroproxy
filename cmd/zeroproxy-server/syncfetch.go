@@ -3,12 +3,17 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+var errNoSyncID = errors.New("sync: missing result id")
 
 // 동기 XHR 지원 — **감옥 안에서**.
 //
@@ -31,9 +36,10 @@ import (
 // 별도 스레드/프로세스에서 돌기 때문에 작업을 수행할 수 있다.
 
 const (
-	syncFetchWait     = 20 * time.Second // 페이지가 기다려 주는 최대 시간
-	syncFetchPollWait = 25 * time.Second // SW long-poll 이 빈손으로 돌아가는 주기
-	syncFetchQueueCap = 64
+	syncFetchWait      = 20 * time.Second // 페이지가 기다려 주는 최대 시간
+	syncFetchPollWait  = 25 * time.Second // SW long-poll 이 빈손으로 돌아가는 주기
+	syncFetchQueueCap  = 64
+	syncFetchPollBatch = 16 // 한 번의 폴에 넘기는 최대 잡 수
 )
 
 type syncFetchJob struct {
@@ -52,7 +58,28 @@ type syncFetchJob struct {
 	result chan *syncFetchResult
 }
 
+// syncFetchResult — SW 가 돌려준 결과. Body 는 **원본 바이트**다.
+//
+// 예전에는 본문을 base64 JSON 으로 실어 날랐다. 동기 XHR 한 건에는 문제가
+// 없었지만, SW-less 프레임의 서브리소스를 전부 이 경로로 보내자 무너졌다 —
+// 이미지 수십 건을 base64 로 부풀려(33%) 문자열로 만들고 JSON 으로 감싸는
+// 비용이 SW 스레드에 몰려, 15초 안에 스타일시트가 못 붙었다(실측: naver
+// 19회 중 8회 deadSheets 2~4). 이제 바이트를 그대로 POST 하고 메타데이터만
+// 헤더로 넘긴다.
 type syncFetchResult struct {
+	Status     int
+	StatusText string
+	Headers    [][]string
+	V          string
+	Body       []byte
+	Err        string
+}
+
+// syncFetchLegacyResult — 낡은 SW 가 물려 있을 때를 위한 JSON 경로.
+// 브라우저가 이전 버전 SW 를 붙들고 있으면 바이너리 POST 를 안 보내므로,
+// 받아는 준다(이게 없으면 그 탭은 전부 타임아웃이다).
+type syncFetchLegacyResult struct {
+	ID         string     `json:"id"`
 	Status     int        `json:"status"`
 	StatusText string     `json:"statusText"`
 	Headers    [][]string `json:"headers"`
@@ -174,11 +201,10 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 				w.Header().Add(kv[0], kv[1])
 			}
 		}
-		body := decodeB64(res.BodyB64)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(res.Status)
 		if r.Method != http.MethodHead {
-			_, _ = w.Write(body)
+			_, _ = w.Write(res.Body)
 		}
 	case <-time.After(syncFetchWait):
 		s.syncHub.take(job.ID)
@@ -198,8 +224,21 @@ func (s *server) handleSyncFetchPoll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	select {
 	case job := <-s.syncHub.queue:
+		// ★한 번에 하나만 넘기면 잡 N 개에 왕복 N 번이 든다. 동기 XHR 은 한
+		// 번에 한 건이라 티가 안 났지만, SW-less 프레임의 서브리소스가 한꺼번에
+		// 몰리면 그 직렬화가 그대로 지연이 된다. 큐에 이미 쌓인 만큼은 같이 보낸다.
+		jobs := []*syncFetchJob{job}
+	drain:
+		for len(jobs) < syncFetchPollBatch {
+			select {
+			case j := <-s.syncHub.queue:
+				jobs = append(jobs, j)
+			default:
+				break drain
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(job)
+		_ = json.NewEncoder(w).Encode(jobs)
 	case <-time.After(syncFetchPollWait):
 		w.WriteHeader(http.StatusNoContent)
 	case <-r.Context().Done():
@@ -216,26 +255,62 @@ func (s *server) handleSyncFetchResult(w http.ResponseWriter, r *http.Request) {
 		s.safeError(w, r, "SYNC_BAD_ORIGIN", http.StatusForbidden)
 		return
 	}
-	var payload struct {
-		ID string `json:"id"`
-		syncFetchResult
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&payload); err != nil {
+	id, res, err := readSyncResult(w, r)
+	if err != nil {
 		s.safeError(w, r, "SYNC_BAD_RESULT", http.StatusBadRequest)
 		return
 	}
-	job := s.syncHub.take(payload.ID)
+	job := s.syncHub.take(id)
 	if job == nil {
 		// 이미 타임아웃됐거나 페이지가 떠난 경우. 조용히 성공 처리한다.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	res := payload.syncFetchResult
 	select {
-	case job.result <- &res:
+	case job.result <- res:
 	default:
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// readSyncResult — 바이너리 경로가 기본, JSON 은 낡은 SW 를 위한 폴백.
+// 바이너리에서는 본문이 곧 응답 바이트이고 메타데이터만 헤더로 온다.
+func readSyncResult(w http.ResponseWriter, r *http.Request) (string, *syncFetchResult, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 32<<20))
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var p syncFetchLegacyResult
+		if err := json.Unmarshal(body, &p); err != nil {
+			return "", nil, err
+		}
+		return p.ID, &syncFetchResult{
+			Status: p.Status, StatusText: p.StatusText, Headers: p.Headers,
+			V: p.V, Body: decodeB64(p.BodyB64), Err: p.Err,
+		}, nil
+	}
+	id := r.Header.Get("X-ZP-Sync-Id")
+	if id == "" {
+		return "", nil, errNoSyncID
+	}
+	status, _ := strconv.Atoi(r.Header.Get("X-ZP-Sync-Status"))
+	res := &syncFetchResult{
+		Status:     status,
+		StatusText: r.Header.Get("X-ZP-Sync-Statustext"),
+		V:          r.Header.Get("X-ZP-Sync-V"),
+		Err:        r.Header.Get("X-ZP-Sync-Error"),
+		Body:       body,
+	}
+	// 응답 헤더는 작아서 헤더 한 줄에 JSON 으로 실어도 된다. 실패해도
+	// 본문은 살아 있으므로 헤더만 비우고 지나간다.
+	if raw := r.Header.Get("X-ZP-Sync-Headers"); raw != "" {
+		var hs [][]string
+		if json.Unmarshal(decodeB64(raw), &hs) == nil {
+			res.Headers = hs
+		}
+	}
+	return id, res, nil
 }
 
 // sanitizeHeaderValue — 헤더에 넣어도 안전한 형태로 줄인다.
