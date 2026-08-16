@@ -2188,12 +2188,24 @@ test('NAVER anti-bot fix: SW force-overrides page-side User-Agent + sec-ch-ua be
   const idx = sw.search(/pushOnce\('user-agent',\s*ZP\.TARGET_USER_AGENT\);[\s\S]{0,400}?pushOnce\('sec-ch-ua',\s*ZP\.TARGET_SEC_CH_UA\);\s*\n\s*for \(const \[k, v\] of headers\.entries\(\)\) pushOnce/);
   assert.ok(idx > 0,
     'SW must pushOnce(user-agent) AND pushOnce(sec-ch-ua) immediately BEFORE the headers.entries() loop — otherwise WebView2 HeadlessChrome UA / Edge sec-ch-ua leak through and trip the NAVER WAF');
-  // The canonical sec-ch-ua must claim Chrome 148 (matching the UA), not Edge.
+  // The canonical sec-ch-ua must claim the SAME Chrome major as the UA, and
+  // must not be Edge. 2026-08-16: 버전을 리터럴로 박아 두었더니(148) Chrome 이
+  // 움직였을 때 테스트가 같이 썩었다 — 지킬 값은 "몇 번인가" 가 아니라
+  // **UA / sec-ch-ua / 워커 UA 셋이 같은 번호를 말하는가** 다. 그것만 검사한다.
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
-  assert.match(core, /TARGET_SEC_CH_UA\s*=\s*'[^']*"Google Chrome";v="148"[^']*'/,
-    'TARGET_SEC_CH_UA must brand as Google Chrome v148 to match the UA + TLS spec');
+  const uaMajor = (core.match(/TARGET_USER_AGENT\s*=\s*'[^']*Chrome\/(\d+)\./) || [])[1];
+  assert.ok(uaMajor, 'TARGET_USER_AGENT must carry a Chrome/<major> token');
+  assert.match(core, new RegExp(`TARGET_SEC_CH_UA\\s*=\\s*'[^']*"Google Chrome";v="${uaMajor}"[^']*'`),
+    `TARGET_SEC_CH_UA must brand as Google Chrome v${uaMajor} to match the UA + TLS spec`);
+  assert.match(core, new RegExp(`TARGET_SEC_CH_UA\\s*=\\s*'[^']*"Chromium";v="${uaMajor}"[^']*'`),
+    `TARGET_SEC_CH_UA's Chromium brand must also be v${uaMajor}`);
   assert.doesNotMatch(core, /TARGET_SEC_CH_UA\s*=\s*'[^']*Edge[^']*'/,
     'TARGET_SEC_CH_UA must NOT leak the Edge/WebView2 brand');
+  // 워커 realm 은 ZP 를 못 읽어 UA 를 따로 박는다 — 갈라지면 realm 간 불일치가
+  // 그 자체로 anti-bot 신호다.
+  const workerPrelude = fs.readFileSync('web/worker-prelude.js', 'utf8');
+  assert.match(workerPrelude, new RegExp(`TARGET_USER_AGENT\\s*=\\s*'[^']*Chrome\\/${uaMajor}\\.`),
+    `worker-prelude TARGET_USER_AGENT must claim the same Chrome major (${uaMajor}) as zp-core`);
 });
 
 // 2026-06-09 perf telemetry: SW exposes rewrite-cache hit ratio +

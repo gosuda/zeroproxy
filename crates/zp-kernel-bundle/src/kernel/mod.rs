@@ -318,14 +318,49 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     // the Chrome-shape header even if the body comes back gzipped and
     // unreadable. If the experiment confirms the WAF signal, the
     // follow-up commit adds gzip/br decoders.
+    // 2026-08-16: 꼬리의 `identity;q=0.1` 을 뗀다. 저건 디코더가 없던 시절의
+    // 보험이었는데 transport/decode.rs 가 gzip/deflate/br/zstd 를 전부 푸는
+    // 지금은 **Chrome 과 다른 값** 이라는 비용만 남는다(실측: 직접 Chrome 은
+    // `gzip, deflate, br, zstd`). identity 는 안 적어도 서버가 압축 없이 보낼
+    // 수 있으므로(`identity;q=0` 이 아닌 이상) 잃는 것도 없다.
     headers_owned.push((
         "Accept-Encoding".to_string(),
-        "gzip, deflate, br, zstd, identity;q=0.1".to_string(),
+        "gzip, deflate, br, zstd".to_string(),
     ));
     // Chrome 순서: cookie 가 맨 마지막.
     if let Some(v) = promoted_cookie {
         headers_owned.push(("Cookie".to_string(), v));
     }
+    // 2026-08-16: 위의 promote 들은 전부 **뒤에 붙이기만** 한다. SW 가 애써
+    // Chrome 순서로 정렬해 보내도 여기서 referer / accept-encoding 이 꼬리로
+    // 밀려 wire 순서가 깨졌다 — 실측(tls.peet.ws, 같은 머신 직접 Chrome 대조):
+    //   Chrome : … sec-fetch-dest, accept-encoding, accept-language, priority
+    //   ZP     : … sec-fetch-dest, accept-language, priority, referer, accept-encoding
+    // 헤더 순서는 Akamai/Cloudflare 계열이 실제로 보는 축이므로 마지막에 한 번
+    // 더 Chrome 순서로 stable sort 한다. 모르는 헤더는 원래 상대순서를 유지한
+    // 채 알려진 꼬리(cookie) 앞에 놓는다.
+    fn chrome_header_rank(name: &str) -> u16 {
+        match name.to_ascii_lowercase().as_str() {
+            "sec-ch-ua" => 0,
+            "sec-ch-ua-mobile" => 1,
+            "sec-ch-ua-platform" => 2,
+            "upgrade-insecure-requests" => 3,
+            "user-agent" => 4,
+            "accept" => 5,
+            "origin" => 6,
+            "sec-fetch-site" => 7,
+            "sec-fetch-mode" => 8,
+            "sec-fetch-user" => 9,
+            "sec-fetch-dest" => 10,
+            "referer" => 11,
+            "accept-encoding" => 12,
+            "accept-language" => 13,
+            "priority" => 14,
+            "cookie" => 900,
+            _ => 800,
+        }
+    }
+    headers_owned.sort_by_key(|(k, _)| chrome_header_rank(k));
     push_trace(&format!(
         "kernel_fetch:hdr-promoted count={}",
         headers_owned.len()

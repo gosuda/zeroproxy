@@ -19,7 +19,11 @@
   // (Chrome 148). Sec-CH-UA emitted by the page-side prelude pins v=148 on
   // the brand entries; mismatch with this UA string is a WAF signal
   // ("UA claims 148, sec-ch-ua claims 134" = bot).
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
+  // 2026-08-16: 148 → 151. sw.js 의 captured TLS spec 을 오늘의 Chrome 에 맞춰
+  // 갱신했으므로(ML-DSA sig algs) UA 도 같이 올린다 — TLS 는 151 인데 UA 가
+  // 148 이면 그 불일치 자체가 새로운 tell 이다. 셋(UA / sec-ch-ua / TLS)은
+  // 항상 같은 버전을 말해야 한다.
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
   // Wire `sec-ch-ua` MUST match the Chrome 148 UA above. The transport
   // previously forwarded the host browser's real header, which on Edge/WebView2
   // reads `"Microsoft Edge WebView2";v="149", "Microsoft Edge";v="149"` — a
@@ -28,7 +32,13 @@
   // so UA + sec-ch-ua + TLS spec all agree on Chrome 148. (GREASE brand mirrors
   // the Chromium 14x algorithm; the high-entropy hints stay dropped, as Chrome
   // only sends them on explicit server request.)
-  const TARGET_SEC_CH_UA = '"Not)A;Brand";v="24", "Chromium";v="148", "Google Chrome";v="148"';
+  // 2026-08-16: 브랜드 목록을 실제 브라우저가 오늘 보내는 모양으로 맞춘다.
+  // 같은 머신에서 직접 측정한 값은
+  //   "Chromium";v="151", "Not=A?Brand";v="99", "Microsoft Edge WebView2";v="151", "Microsoft Edge";v="151"
+  // 이다 — GREASE 브랜드의 **표기법도 위치도** 바뀌었다(`"Not)A;Brand";v="24"`
+  // 선두 → `"Not=A?Brand";v="99"` 두 번째). 우리는 Edge 가 아니라 순수 Chrome
+  // 페르소나를 유지하므로 Edge 두 항목만 "Google Chrome" 으로 바꿔 쓴다.
+  const TARGET_SEC_CH_UA = '"Chromium";v="151", "Not=A?Brand";v="99", "Google Chrome";v="151"';
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
   const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);

@@ -400,7 +400,21 @@ self.addEventListener('fetch', event => {
 //   - supportedCurves: [4588, 29, 23, 24] — 4588 = X25519MLKEM768 (Phase
 //     5.9 hybrid emit in mlkem_hybrid.rs).
 //   - record_size_limit (id 28) ABSENT (Firefox-specific).
-const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
+// 2026-08-16 갱신 — signatureSchemes 앞에 2308/2309/2310 (ML-DSA 44/65/87) 추가.
+// 측정 근거: tls.peet.ws/api/all 을 같은 브라우저로 프록시 경유 vs 직접 재보니
+// peetprint 8개 필드 중 **signature_algorithms 하나만** 달랐다.
+//   직접  : 2308-2309-2310-1027-2052-1025-1283-2053-1281-2054-1537
+//   프록시:                1027-2052-1025-1283-2053-1281-2054-1537
+// ja4 도 cipher 부분(8daaf6152771)은 같고 확장/시그 해시만 달랐다
+// (d8a2da3f94cd vs 806a8c22fdea). 즉 우리 wire 는 2026-07-03 에 "Chrome 완전
+// 일치" 를 찍은 그대로인데 **Chrome 이 그 사이에 움직였다** — 동결된 스펙은
+// 시간이 지나면 저절로 틀려진다는 뜻이고, 이 blob 은 주기적으로 재측정해야 한다.
+// ja3_hash 는 실행마다 다른데 그건 회귀가 아니다: Chrome 은 확장 순서를 매
+// 연결 섞으므로 ja3 는 원래 불안정하다(peetprint/ja4 는 정렬해서 해싱한다).
+// 리스크: 우리가 검증할 수 없는 서명 알고리즘을 광고한다. 서버가 실제로
+// ML-DSA 로 서명하면 검증에 실패하지만, 오늘 공개 CA 는 그런 인증서를 발급하지
+// 않는다(Chrome 도 같은 목록을 광고한다).
+const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
 function captureBrowserFingerprint() { return CAPTURED_FINGERPRINT_B64; }
 
 async function initBundle() {
@@ -1425,6 +1439,11 @@ async function transportFetch(targetUrl, opt) {
   if (!seen.has('sec-fetch-site')) pushOnce('sec-fetch-site', 'cross-site');
   if (opt.document && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
   if (!seen.has('accept-language')) pushOnce('accept-language', 'en-US,en;q=0.9,ko;q=0.8');
+  // RFC 9218 `priority`. 2026-08-16 실측: 같은 머신의 직접 Chrome 은 최상위
+  // 문서 요청에 `priority: u=0, i` 를 보내는데 우리는 아예 안 보냈다.
+  // HEADER_ORDER 에는 이미 자리(accept-language 다음)가 잡혀 있었는데 값이
+  // 없어서 비어 있던 것 — 헤더 "순서" 만 맞추고 "존재" 는 안 맞춘 셈이었다.
+  if (opt.document && !seen.has('priority')) pushOnce('priority', 'u=0, i');
   // Phase 5.8: emit User-Agent inline so the HEADER_ORDER sort positions
   // it correctly (real Chrome 148 sends user-agent right after
   // upgrade-insecure-requests). Previously promoted via X-ZP-User-Agent
