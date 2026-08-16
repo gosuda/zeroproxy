@@ -1833,9 +1833,17 @@
           xhrDone(xhr, 'error');
         }
       }
+      // readyState 상수는 실제 브라우저에서 **쓰기도 재정의도 불가**하다
+      // (`{value, enumerable: true, writable: false, configurable: false}`).
+      // Object.assign 으로 얹으면 writable+configurable 이 되어 실제보다 무르고,
+      // 디스크립터 모양 대조에 그대로 잡힌다(실측 2026-08-16: 직접 `D-e-` vs
+      // 프록시 `Dcew`). 상수만 따로 심는다.
+      for (const [k, v] of [['UNSENT', UNSENT], ['OPENED', OPENED], ['HEADERS_RECEIVED', HEADERS_RECEIVED], ['LOADING', LOADING], ['DONE', DONE]]) {
+        try { Object.defineProperty(ZPXMLHttpRequest.prototype, k, { value: v, enumerable: true, writable: false, configurable: false }); } catch {}
+        try { Object.defineProperty(ZPXMLHttpRequest, k, { value: v, enumerable: true, writable: false, configurable: false }); } catch {}
+      }
       Object.assign(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
-        UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE,
         // Chrome-only Privacy Sandbox hooks. We do not implement either — the
         // proxy never forwards attribution or private-token material — but
         // their ABSENCE is itself a fingerprint (XHR.prototype 25 vs 27), and
@@ -3322,22 +3330,28 @@
     });
     if (w.indexedDB) {
       const nativeIDB = w.indexedDB;
-      define(w, 'indexedDB', {
+      // 접근자로 심는다 — 실제 브라우저의 `window.indexedDB` 는 **접근자**이고
+      // 데이터 프로퍼티로 바꿔 놓으면 디스크립터 모양만 봐도 티가 난다
+      // (실측 2026-08-16: 직접 `Ace.` vs 프록시 `D-ew`).
+      const virtualIDB = {
         open(name, version) { return nativeIDB.open(idbPrefix + String(name), version); },
         deleteDatabase(name) { return nativeIDB.deleteDatabase(idbPrefix + String(name)); },
         cmp: nativeIDB.cmp ? nativeIDB.cmp.bind(nativeIDB) : undefined,
         databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
-      });
+      };
+      defineAccessor(w, 'indexedDB', () => virtualIDB);
     }
     if (w.caches) {
       const nativeCaches = w.caches;
-      define(w, 'caches', {
+      // indexedDB 와 같은 이유로 접근자 — 실제 `window.caches` 는 접근자다.
+      const virtualCaches = {
         open(name) { return nativeCaches.open(cachePrefix + String(name)); },
         delete(name) { return nativeCaches.delete(cachePrefix + String(name)); },
         has(name) { return nativeCaches.has(cachePrefix + String(name)); },
         keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix)).map(k => k.slice(cachePrefix.length))); },
         match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
-      });
+      };
+      defineAccessor(w, 'caches', () => virtualCaches);
     }
     // D7: BroadcastChannel must be origin-scoped. Wrap constructor to prefix
     // channel name with target origin hash; messages from another target
