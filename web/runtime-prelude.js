@@ -2516,7 +2516,59 @@
     // anti-bot WAF flags as a robot signal. Pin to `false` so target
     // pages can't distinguish ZeroProxy from a hand-driven Chrome.
     defineOnProto(nav, proto, 'webdriver', () => false);
+    // navigator.userAgentData — UA 는 Chrome 으로 가려 놓고 여기를 안 가려서
+    // **브랜드 목록이 호스트 셸을 그대로 불었다**. 실측(2026-08-16, 프록시된
+    // example.com):
+    //   navigator.userAgent      → …Chrome/151.0.0.0 Safari/537.36   (가려짐)
+    //   navigator.userAgentData  → Chromium 151, Not=A?Brand 99,
+    //                              Microsoft Edge WebView2 151, Microsoft Edge 151
+    // 게다가 HTTP 로는 sec-ch-ua 에 "Google Chrome" 을 보낸다. 헤더와 JS 가
+    // 서로 다른 브라우저를 말하는 것은 단일 신호보다 강한 tell 이다.
+    // ZP.TARGET_SEC_CH_UA 를 파싱해서 그 목록 그대로 되돌려 준다 — 값이 한
+    // 군데서만 나오므로 다음에 버전을 올려도 갈라지지 않는다.
+    defineOnProto(nav, proto, 'userAgentData', () => virtualUserAgentData(w));
     installChromeFingerprintFacade(w);
+  }
+  let cachedUADataBrands = null;
+  function targetBrandList() {
+    if (cachedUADataBrands) return cachedUADataBrands;
+    const out = [];
+    const re = /"([^"]+)";v="([^"]+)"/g;
+    let m;
+    while ((m = re.exec(String(ZP.TARGET_SEC_CH_UA || '')))) out.push({ brand: m[1], version: m[2] });
+    cachedUADataBrands = out;
+    return out;
+  }
+  function virtualUserAgentData(w) {
+    const real = w.navigator && Object.getPrototypeOf(w.navigator);
+    // 실제 NavigatorUAData 인스턴스를 감싸지 않고 새로 만든다 — 감싸면 getter
+    // 가 내부 슬롯을 요구해 Illegal invocation 이 난다.
+    const brands = targetBrandList().map(b => ({ brand: b.brand, version: b.version }));
+    const data = {
+      brands,
+      mobile: false,
+      platform: TARGET_PLATFORM === 'Win32' ? 'Windows' : TARGET_PLATFORM,
+      toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; },
+      getHighEntropyValues(hints) {
+        const full = {
+          brands,
+          mobile: false,
+          platform: data.platform,
+          platformVersion: '19.0.0',
+          architecture: 'x86',
+          bitness: '64',
+          model: '',
+          uaFullVersion: (brands.find(b => b.brand === 'Google Chrome') || brands[0] || {}).version + '.0.0.0',
+          fullVersionList: brands.map(b => ({ brand: b.brand, version: b.version + '.0.0.0' })),
+          wow64: false,
+        };
+        const picked = { brands: full.brands, mobile: full.mobile, platform: full.platform };
+        for (const h of (hints || [])) if (h in full) picked[h] = full[h];
+        return Promise.resolve(picked);
+      },
+    };
+    void real;
+    return data;
   }
 
   // chrome.* surface — present on real Chrome / Edge-Chromium and
@@ -2529,12 +2581,38 @@
     // 아래에서 `configurable: false` 로 심으므로 같은 창에 두 번 부르면
     // delete 와 defineProperty 가 **매번 둘 다 던진다**. try/catch 가 삼켜서
     // 조용하지만 공짜가 아니다 — 실측으로 로드당 수백 번 던지고 있었다.
-    if (propertyLocked(w, 'chrome')) return;
+    // ★2026-08-16: `propertyLocked` 만 보고 물러나면 **WebView2 에서는 영원히
+    // 설치가 안 된다**. 실측: 프록시된 페이지에서 `window.chrome` 의 디스크립터가
+    // `{value: object, configurable: false, writable: true}` 였고, 키는
+    // `app,csi,loadTimes,webview` — 즉 우리 퍼사드가 아니라 **WebView2 의 진짜
+    // 객체**가 그대로 남아 `chrome.webview` 로 호스트 셸을 불고 있었다.
+    // configurable:false 라 defineProperty 는 던지지만 writable:true 라
+    // **대입은 통한다**. 그래서 잠겨 있어도 쓰기 가능하면 대입으로 갈아끼운다.
+    // 이미 우리 것으로 갈아끼운 창이면 다시 만들지 않는다 — 잠긴 자리를 대입으로
+    // 덮는 경로는 던지지 않으므로 "던지면 멈춘다" 식 멱등성이 없다. 신원 대신
+    // **모양**으로 판정한다(퍼사드에는 webview 가 없다).
+    try {
+      const cur = w.chrome;
+      if (cur && typeof cur.csi === 'function' && !('webview' in cur)) return;
+    } catch {}
+    const locked = propertyLocked(w, 'chrome');
+    let writableWhenLocked = false;
+    if (locked) {
+      try {
+        const d = Object.getOwnPropertyDescriptor(w, 'chrome');
+        writableWhenLocked = !!(d && d.writable);
+      } catch {}
+      if (!writableWhenLocked) return;
+    }
     let virtualChrome;
     try {
       virtualChrome = buildChromeFingerprint(w);
     } catch { return; }
     if (!virtualChrome) return;
+    if (locked) {
+      try { w.chrome = virtualChrome; } catch {}
+      return;
+    }
     // Drop the existing object (Tauri / WebView2 may have planted
     // `chrome.webview`, `chrome.webview.hostObjects`, etc. which all
     // signal "not a real browser"). Reassign via accessor so a future
