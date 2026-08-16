@@ -43,6 +43,11 @@ type syncFetchJob struct {
 	Entry   string     `json:"entry"`
 	Method  string     `json:"method"`
 	Headers [][]string `json:"headers"`
+	// Kind — 응답에 어떤 후처리를 해야 하는지. 동기 XHR 은 원본 바이트를
+	// 원하므로 빈 값이다. SW-less 프레임의 서브리소스는 SW 의 `/zp/api/fetch`
+	// 핸들러가 해 주던 CSS/스크립트 리라이트를 여기서 받아야 한다 — 릴레이는
+	// `transportFetch` 를 직접 부르므로 그 단계를 건너뛰기 때문이다.
+	Kind string `json:"kind"`
 
 	result chan *syncFetchResult
 }
@@ -123,7 +128,14 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 		Tab:    q.Get("tab"),
 		Entry:  q.Get("entry"),
 		Method: strings.ToUpper(q.Get("m")),
+		Kind:   q.Get("kind"),
 		result: make(chan *syncFetchResult, 1),
+	}
+	switch job.Kind {
+	case "", "style", "script":
+	default:
+		s.safeError(w, r, "SYNC_BAD_KIND", http.StatusBadRequest)
+		return
 	}
 	if job.ID == "" || job.Method == "" {
 		s.safeError(w, r, "SYNC_BAD_ARGS", http.StatusBadRequest)

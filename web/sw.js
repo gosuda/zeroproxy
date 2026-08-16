@@ -236,12 +236,19 @@ async function handleSyncFetchJob(job) {
   try {
     const tab = await resolveSyncTab(job.tab);
     if (!tab) throw new Error('SW_NOT_READY tab=' + (job.tab || '(none)') + ' known=' + tabs.size);
-    const resp = await transportFetch(job.target, {
+    let resp = await transportFetch(job.target, {
       method: job.method || 'GET',
       headers: Array.isArray(job.headers) ? job.headers : [],
       tab,
       entryId: job.entry || tab.activeEntryId,
     });
+    // ★릴레이는 `transportFetch` 를 직접 부르므로 `/zp/api/fetch` 핸들러가
+    // 하던 후처리를 못 탄다. 동기 XHR 은 원본 바이트를 원해서 문제가 없었지만,
+    // SW-less 프레임의 `<link>`/`<script>` 가 이 경로로 오면서 필요해졌다 —
+    // 리라이트가 빠지면 CSS 의 `url(../img.png)` 이 릴레이 URL 을 base 로
+    // 해석돼 전부 깨진다.
+    if (job.kind === 'style') resp = await rewriteCSSResponse(resp, { targetUrl: job.target });
+    else if (job.kind === 'script') resp = await rewriteScriptResponse(resp, { targetUrl: job.target, kind: 'classic' });
     out.status = resp.status;
     out.statusText = resp.statusText || '';
     try { resp.headers.forEach((v, k) => out.headers.push([k, v])); } catch {}

@@ -2830,6 +2830,67 @@
     if (boot && boot.tabId) out += '&tab=' + encodeURIComponent(boot.tabId);
     return out;
   }
+  // ★SW-less 문서용 서브리소스 경로.
+  //
+  // `/zp/api/fetch` 는 **SW 안에서만 존재하는 가상 경로**다 — Go 에는 핸들러가
+  // 없어서 default 로 떨어져 403 이다. 그러니 SW 클라이언트가 아닌 문서에 그
+  // 경로를 박는 것은 애초에 잘못된 리라이트다. 없는 주소를 적어 주고 브라우저가
+  // 403 을 받아 오는 걸 지켜보는 셈이고, 지금까지는 그걸 blob 으로 뒤늦게
+  // 덮어써 왔다(그래서 로드마다 403 이 쌓였다).
+  //
+  // 대신 동기 XHR 이 쓰던 릴레이를 그대로 쓴다. 그 엔드포인트는 Go 가 응답을
+  // park 해 두고 **SW 에 일을 넘기는** 구조라, 실제 전송은 여전히 SW 의
+  // `transportFetch` 하나뿐이다 — 새 egress 도, 새 TLS 지문도 안 생긴다.
+  // 동기 XHR 도 "SW 가 가로채지 못하는 요청" 이라는 점에서 같은 범주였고,
+  // 그때 이미 blob 우회가 아니라 경로 교체로 푼 전례가 있다.
+  function swLessRelayURL(absolute, kind) {
+    const s = String(absolute || '');
+    if (!/^https?:/i.test(s)) return '';
+    let u = proxyOrigin + ZP.apiPath('sync-fetch')
+      + '?rid=' + encodeURIComponent('sr' + ZP.randomId())
+      + '&u=' + encodeURIComponent(s)
+      + '&m=GET'
+      + '&tab=' + encodeURIComponent((boot && boot.tabId) || '')
+      + '&entry=' + encodeURIComponent(activeEntryId || '');
+    if (kind) u += '&kind=' + encodeURIComponent(kind);
+    return u;
+  }
+  // 이미 `/zp/api/fetch?url=…` 로 리라이트된 값을 릴레이 경로로 옮긴다.
+  // 리라이트 단계에서 목적지 문서가 SW-less 임을 알 때만 부른다.
+  function relayFromProxyPath(proxied, kind) {
+    const s = String(proxied || '');
+    const at = s.indexOf(ZP.apiPath('fetch') + '?url=');
+    if (at < 0) return '';
+    let target = '';
+    try { target = new URL(s, proxyOrigin).searchParams.get('url') || ''; } catch { return ''; }
+    return target ? swLessRelayURL(target, kind) : '';
+  }
+  // ★릴레이로 보낼 수 있는 것은 **서브리소스뿐**이다. 내비게이션(`a`/`area`/
+  // `form`/`iframe`/`frame`)은 절대 여기 오면 안 된다 — 그것들은 share URL 로
+  // 항해해야 하고, 릴레이는 문서가 아니라 바이트를 돌려주는 자리다.
+  // `object`/`embed` 는 정책상 이미 막혀 있으므로 굳이 열지 않는다.
+  // ★이미지까지 릴레이로 보내면 안 된다 — 실측으로 확인했다. 릴레이는 본문을
+  // base64 로 실어 나르고 SW 가 잡을 하나씩 폴링해 처리하는 구조라, 이미지
+  // 수십 건을 태우면 15초 안에 스타일시트가 못 붙는다(naver 19회 중 8회에서
+  // `deadSheets` 2~4, 30초를 주면 0). blob 경로는 부모가 바이트를 바로 받아
+  // 넘기므로 대량 이미지에 훨씬 유리하다.
+  //
+  // 그래서 역할을 나눈다: **적고 치명적인 것(스타일시트)은 릴레이**,
+  // 많고 가벼운 것(이미지)은 기존 blob. 스타일시트는 403 이 text/html 본문을
+  // 돌려주는 탓에 "Refused to apply style" 까지 나서 blob 으로 덮기 전까지
+  // 사실상 깨진 시트였다.
+  function swLessRelayable(tag, localKey) {
+    return tag === 'link' && localKey === 'href';
+  }
+  function relayKindForElement(node, tag, localKey) {
+    if (tag === 'link' && localKey === 'href') {
+      const rel = String(Native.getAttribute.call(node, 'rel') || '').toLowerCase();
+      // stylesheet 일 때만 CSS 리라이트를 요구한다. icon/manifest 는 원본 바이트다.
+      return /(^|\s)stylesheet(\s|$)/.test(rel) ? 'style' : '';
+    }
+    if (tag === 'script' && localKey === 'src') return 'script';
+    return '';
+  }
   // ── SW 를 못 거치는 프레임의 서브리소스 (e1/e4) ────────────────────────
   // `document.write` 로 만들어진 iframe 의 document 는 SW 클라이언트가 아니다.
   // 그래서 그 안의 `/zp/api/fetch?url=…` 요청은 SW 를 지나쳐 Go 서버로 직행하고
@@ -3884,6 +3945,15 @@
   function installDOMHooks(w) {
     const inIframeRealm = (w !== root);
     const transformHTMLOpts = inIframeRealm ? { inIframe: true } : undefined;
+    // `document.write` 는 **목적지 문서를 인자로 들고 있는 유일한 지점**이다
+    // (`this`). 그 문서가 SW 클라이언트가 아니면 서브리소스 경로를 릴레이로
+    // 바꿔야 하는데, 그 판정을 할 수 있는 곳이 여기뿐이다.
+    const writeOptsFor = doc => {
+      let swLess = false;
+      try { swLess = documentIsSWLess(doc); } catch {}
+      if (!swLess) return transformHTMLOpts;
+      return inIframeRealm ? { inIframe: true, swLess: true } : { swLess: true };
+    };
     define(w.Element.prototype, 'setAttribute', function(k, v) {
       // Hot path: cache `this.localName` (10× read across branches → 1 DOM getter)
       // and inline `attrLocalName` since `key` is already lowercase (avoids
@@ -4051,7 +4121,7 @@
       if (docProto.write) {
         const protoWrite = docProto.write;
         define(docProto, 'write', function(...parts) {
-          const html = parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('');
+          const html = parts.map(p => transformHTML(String(p), writeOptsFor(this))).join('');
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
           return protoWrite.apply(this, [html]);
         });
@@ -4059,7 +4129,7 @@
       if (docProto.writeln) {
         const protoWriteln = docProto.writeln;
         define(docProto, 'writeln', function(...parts) {
-          const html = parts.map(p => transformHTML(String(p), transformHTMLOpts)).join('') + '\n';
+          const html = parts.map(p => transformHTML(String(p), writeOptsFor(this))).join('') + '\n';
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
           return protoWriteln.apply(this, [html]);
         });
@@ -4626,6 +4696,7 @@
     const html = String(value);
     if (!html) return html;
     const inIframe = !!(opts && opts.inIframe);
+    const swLessTarget = !!(opts && opts.swLess);
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
     const container = parserDoc.createElement('template');
     if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, html);
@@ -4723,8 +4794,43 @@
           if (isURLBearing(node, lowerAttr)) enforceObservedAttribute(node, lowerAttr);
         }
       }
+      // ★목적지 문서가 SW 클라이언트가 아니면 여기서 릴레이 경로로 옮긴다.
+      // **파싱 전인 지금이 유일한 기회**다 — 이 HTML 이 문서에 들어가는 순간
+      // 브라우저는 속성에 적힌 주소로 요청을 쏘고, 부모의 백스톱 스윕은 그
+      // 뒤에야 요소를 만난다. 요소 훅 자리에서 고치려던 시도가 전부 실패한
+      // 이유가 이것이다(파킹은 격리까지 퇴행시켰다).
+      if (swLessTarget) applySWLessRelay(node);
     }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
+  }
+  // 리라이트가 끝난 노드의 URL 속성을 릴레이 경로로 옮긴다. 이미
+  // `/zp/api/fetch?url=…` 형태가 된 값만 대상이라, 리라이트를 놓친 값이
+  // 여기서 새로 통과하는 일은 없다 — 감옥 판정은 앞 단계 그대로다.
+  function applySWLessRelay(node) {
+    if (!Native.getAttributeNames) return;
+    const tag = node.localName;
+    for (const attrName of Native.getAttributeNames.call(node)) {
+      const lowerAttr = String(attrName).toLowerCase();
+      const colon = lowerAttr.indexOf(':');
+      const localKey = colon < 0 ? lowerAttr : lowerAttr.slice(colon + 1);
+      if (!isURLBearing(node, lowerAttr) || !swLessRelayable(tag, localKey)) continue;
+      const raw = Native.getAttribute.call(node, attrName);
+      if (!raw) continue;
+      if (localKey === 'srcset' || localKey === 'imagesrcset') {
+        // 후보 목록은 후보마다 옮긴다. 디스크립터(`1x`/`320w`)는 그대로 둬야
+        // 브라우저의 후보 선택이 원본과 같다.
+        const out = String(raw).split(',').map(part => {
+          const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
+          if (!m) return part;
+          const relay = relayFromProxyPath(m[2], '');
+          return relay ? m[1] + relay + m[3] : part;
+        }).join(',');
+        if (out !== String(raw)) Native.setAttribute.call(node, attrName, out);
+        continue;
+      }
+      const relay = relayFromProxyPath(raw, relayKindForElement(node, tag, localKey));
+      if (relay) Native.setAttribute.call(node, attrName, relay);
+    }
   }
   function injectSrcdoc(s) { return '<script src="/zp/assets/zp-core.js"><\/script><script src="/zp/assets/zp-page-bundle.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
