@@ -430,6 +430,22 @@ self.addEventListener('fetch', event => {
 // **광고만 하고 못 지키는 확장은 지문 일치보다 나쁘다** — 그래서 이 줄을
 // 되돌리는 조건은 "구현" 하나였다. 가드 테스트가 그 조건을 강제한다.
 const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
+// 브라우저의 실제 언어 선호를 Chrome 이 쓰는 Accept-Language 문법으로 옮긴다.
+// 하드코딩하면 프록시 경유와 직접 접속이 서로 다른 언어 변종을 받게 되고,
+// 그 차이가 회귀 측정에 그대로 섞인다(NAVER 로그인 폼이 실제로 그랬다).
+function browserAcceptLanguage() {
+  try {
+    const raw = self.navigator && self.navigator.languages;
+    const list = [];
+    for (const l of (raw || [])) {
+      if (typeof l === 'string' && l && list.indexOf(l) < 0) list.push(l);
+      if (list.length >= 10) break;
+    }
+    if (!list.length) return 'en-US,en;q=0.9';
+    return list.map((l, i) => (i === 0 ? l : l + ';q=' + Math.max(1 - i * 0.1, 0.1).toFixed(1))).join(',');
+  } catch { return 'en-US,en;q=0.9'; }
+}
+
 function captureBrowserFingerprint() { return CAPTURED_FINGERPRINT_B64; }
 
 async function initBundle() {
@@ -1463,7 +1479,14 @@ async function transportFetch(targetUrl, opt) {
   if (!seen.has('sec-fetch-dest')) pushOnce('sec-fetch-dest', opt.document ? 'document' : 'empty');
   if (!seen.has('sec-fetch-site')) pushOnce('sec-fetch-site', 'cross-site');
   if (opt.document && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
-  if (!seen.has('accept-language')) pushOnce('accept-language', 'en-US,en;q=0.9,ko;q=0.8');
+  // Accept-Language 는 브라우저가 SW 로 넘겨준 게 있으면 그대로 쓰고, 없을 때만
+  // 여기서 만든다. 예전에는 `en-US,en;q=0.9,ko;q=0.8` 을 하드코딩했는데, 이
+  // 머신의 실제 브라우저는 `ko,en,en-US` 다 — 그래서 프록시로 연 NAVER 는
+  // 영어(lang=en) 변종을, 직접 연 NAVER 는 한국어 변종을 받았다. 같은 사이트의
+  // **다른 페이지를 보게 되므로** 회귀 비교 자체가 어긋난다(로그인 폼이 대표적).
+  // navigator.languages 는 SW 전역에도 있으니 사용자의 실제 선호를 그대로 쓴다.
+  // q 값은 Chrome 규칙: 첫 항목은 q 없이, 이후 0.1 씩 내린다.
+  if (!seen.has('accept-language')) pushOnce('accept-language', browserAcceptLanguage());
   // RFC 9218 `priority`. 2026-08-16 실측: 같은 머신의 직접 Chrome 은 최상위
   // 문서 요청에 `priority: u=0, i` 를 보내는데 우리는 아예 안 보냈다.
   // HEADER_ORDER 에는 이미 자리(accept-language 다음)가 잡혀 있었는데 값이
