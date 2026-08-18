@@ -420,6 +420,7 @@
       closest: w.Element.prototype.closest,
       querySelector: w.Document.prototype.querySelector,
       querySelectorAll: w.Document.prototype.querySelectorAll,
+      elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
       elementQuerySelector: w.Element.prototype.querySelector,
       elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
       documentGetElementsByTagName: w.Document.prototype.getElementsByTagName,
@@ -3299,12 +3300,43 @@
     try { Native.setAttribute.call(el, 'data-zp-target-url', abs); } catch {}
     try { Native.setAttribute.call(el, attrName, proxyViaURL(abs)); } catch {}
   }
+  // 서버측 htmltx 가 파싱 시점 `srcdoc` 을 `data-zp-srcdoc` 으로 옮겨 둔 것을
+  // 되돌린다. 되돌리는 순간 후킹된 경로가 프렐류드 주입 + URL 리라이트를 한다.
+  //
+  // ★왜 별도 스윕이 필요한가: 최초 파싱 문서에는 MutationObserver 가 안 걸린다
+  // (이 파일의 `observedDocuments` TDZ 주석 참조 — 고치면 이중 계측으로 더 크게
+  // 깨진다). 그리고 기존 즉시 스윕은 `a/form/input/button/style` 만 훑는다.
+  // 그래서 iframe 은 아무도 보지 않았고, 되돌리기가 영영 실행되지 않았다.
+  //
+  // 순서 주의: **먼저 만들고, 성공했을 때만 옮긴다.** 지우고 나서 만들면
+  // injectSrcdoc 이 던졌을 때 원본까지 사라져 iframe 이 통째로 빈다.
+  // 실패하면 data-zp-srcdoc 을 그대로 둔다 — 파싱되지 않으므로 fail-closed 다.
+  function restorePendingSrcdoc(el) {
+    if (!el || !Native.hasAttribute.call(el, 'data-zp-srcdoc')) return;
+    const pending = Native.getAttribute.call(el, 'data-zp-srcdoc') || '';
+    let injected = null;
+    try { injected = injectSrcdoc(pending); }
+    catch (e) { try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
+    if (injected == null) return;
+    Native.setAttribute.call(el, 'srcdoc', injected);
+    try { Native.removeAttribute.call(el, 'data-zp-srcdoc'); } catch {}
+  }
   function scanNavigationBackstop(root) {
     if (!root || !root.querySelectorAll) return;
     try {
       root.querySelectorAll(
         'a[href], area[href], form[action], input[formaction], button[formaction]'
       ).forEach(applyNavigationBackstop);
+    } catch {}
+    // iframe 은 위 목록에 없다 — 되돌리기를 여기서 같이 돈다.
+    try {
+      // ★우리 자신의 스텔스 멤브레인이 이 스윕을 가린다: 후킹된
+      // querySelectorAll 은 `data-zp-*` 를 페이지에서 숨기려고 걸러내므로
+      // 셀렉터가 **0개**를 돌려준다(실측: iframe 1개, 매칭 0). 내부 스윕은
+      // 반드시 네이티브 쪽으로 물어야 한다.
+      const qsa = Native.elementQuerySelectorAll || root.querySelectorAll;
+      const found = qsa.call(root, 'iframe[data-zp-srcdoc], frame[data-zp-srcdoc]');
+      Array.prototype.forEach.call(found, restorePendingSrcdoc);
     } catch {}
     // `<style>` 도 같은 백스톱이 필요하다. 두 가지가 새기 때문이다:
     // (a) 파서가 넣은 style 은 MutationObserver 가 붙기 **전**에 이미 문서에
@@ -4976,6 +5008,24 @@
       // SDK-injected fragments leave raw target hrefs on the DOM,
       // surfacing them to hover / middle-click / copy-link.
       applyNavigationBackstop(node);
+      // 서버측 htmltx 가 파싱 시점 `srcdoc` 을 `data-zp-srcdoc` 으로 옮겨 둔다
+      // (멤브레인 없는 문서가 파서에서 바로 생기는 것을 막기 위해서다).
+      // 여기서 되돌리면 아래 injectSrcdoc 분기가 프렐류드 주입 + URL 리라이트를
+      // 해 준다.
+      // 순서 주의: **먼저 만들고, 성공했을 때만 옮긴다.** 지우고 나서 만들면
+      // injectSrcdoc 이 던졌을 때 원본까지 사라져 iframe 이 통째로 빈다
+      // (한 번 밟았다). 실패하면 data-zp-srcdoc 을 그대로 둔다 — 내용은
+      // 파싱되지 않으므로 fail-closed 다.
+      if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'data-zp-srcdoc')) {
+        const pending = Native.getAttribute.call(node, 'data-zp-srcdoc') || '';
+        let injected = null;
+        try { injected = injectSrcdoc(pending); }
+        catch (e) { try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
+        if (injected != null) {
+          Native.setAttribute.call(node, 'srcdoc', injected);
+          try { Native.removeAttribute.call(node, 'data-zp-srcdoc'); } catch {}
+        }
+      }
       if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc')) {
         Native.setAttribute.call(node, 'srcdoc', injectSrcdoc(Native.getAttribute.call(node, 'srcdoc') || ''));
       }

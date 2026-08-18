@@ -113,6 +113,26 @@ fn attr_settings(
                             let _ = el.remove_attribute("content");
                         }
                     }
+                    // `srcdoc` 문서는 **파싱 시점에 멤브레인 없이** 만들어진다.
+                    // 우리는 여기(서버)에서 srcdoc 안을 변환하지 않았고, 페이지
+                    // realm 의 `injectSrcdoc` 은 JS 로 srcdoc 을 **대입할 때만**
+                    // 걸리므로, 타깃 HTML 에 그대로 박혀 온 srcdoc 은 프렐류드도
+                    // URL 리라이트도 없이 그냥 파싱됐다. 실측: 자식 문서에
+                    // script 0개, `<img src="/img/x.png">` 가 원본 그대로 남아
+                    // 프록시 오리진으로 요청 → SW 가 탭에 귀속시키지 못해
+                    // UNCLASSIFIED 거절(`ref:""`). 교차 오리진이면 CSP 만이
+                    // 유일한 방어선이 된다(실측: 브라우저 직접 요청 0 — 격리는
+                    // 버텼지만 리소스는 전부 실패).
+                    //
+                    // 이름만 옮겨 둔다. 페이지 realm 의 백스톱이 후킹된 `srcdoc`
+                    // 세터로 되돌리고, 그 경로가 이미 프렐류드 주입 +
+                    // transformHTML 을 한다 — 검증된 코드를 재사용하는 쪽이
+                    // Rust 에 HTML 변환을 한 벌 더 만드는 것보다 안전하다.
+                    if (tag == "iframe" || tag == "frame") && el.has_attribute("srcdoc") {
+                        let doc = el.get_attribute("srcdoc").unwrap_or_default();
+                        let _ = el.set_attribute("data-zp-srcdoc", &doc);
+                        let _ = el.remove_attribute("srcdoc");
+                    }
                     // Lazy filter: only snapshot attributes we actually care about
                     // (URL-bearing href/src/action/formaction or on* handlers).
                     // Avoids cloning ALL attributes on the vast majority of
@@ -1085,6 +1105,29 @@ mod tests {
         }
     }
 
+    // 파싱 시점 `srcdoc` 은 멤브레인 없는 문서를 만든다 — 이름을 옮겨 두고
+    // 페이지 realm 이 후킹된 세터로 되돌리게 한다. 옮기기만 하고 값을 잃으면
+    // iframe 이 통째로 비므로 **값 보존까지** 확인한다.
+    #[test]
+    fn srcdoc_is_moved_to_data_attribute() {
+        let html = r#"<html><body><iframe srcdoc="&lt;img src=&quot;/a.png&quot;&gt;"></iframe></body></html>"#;
+        let r = transform(html, &opts()).expect("transform");
+        assert!(
+            r.html.contains("data-zp-srcdoc"),
+            "srcdoc must be renamed, got: {}",
+            &r.html[..r.html.len().min(400)]
+        );
+        assert!(
+            !r.html.contains(" srcdoc="),
+            "raw srcdoc must not survive, got: {}",
+            &r.html[..r.html.len().min(400)]
+        );
+        assert!(
+            r.html.contains("/a.png"),
+            "srcdoc content must be preserved, got: {}",
+            &r.html[..r.html.len().min(400)]
+        );
+    }
     // A representative document exercising every Pass-1 / Pass-2 path: head,
     // inline classic + module scripts, external script (src), a stylesheet
     // link, an absolute anchor, an on* handler, and a javascript: URL — so
