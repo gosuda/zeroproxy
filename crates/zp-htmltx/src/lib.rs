@@ -133,6 +133,19 @@ fn attr_settings(
                         let _ = el.set_attribute("data-zp-srcdoc", &doc);
                         let _ = el.remove_attribute("srcdoc");
                     }
+                    // `ping` 은 클릭 시 브라우저가 **직접** POST 하는 추적 비콘
+                    // 목록이다(공백 구분 URL 여러 개). 우리는 이걸 지원하지
+                    // 않기로 했는데(README: 통과시키는 것 자체가 목적에 반한다),
+                    // 지금까지는 **리라이트가 놓치고 CSP 만 막고 있었다** —
+                    // 구멍 매트릭스에서 유일한 `csp-only` 칸이었다. CSP 는 2선
+                    // 방어지 1선이 아니므로, 속성 자체를 걷어내 브라우저가
+                    // 애초에 요청을 만들지 않게 한다. 값은 진단용으로 남긴다.
+                    if (tag == "a" || tag == "area") {
+                        if let Some(ping) = el.get_attribute("ping") {
+                            let _ = el.set_attribute("data-zp-blocked-ping", &ping);
+                            let _ = el.remove_attribute("ping");
+                        }
+                    }
                     // Lazy filter: only snapshot attributes we actually care about
                     // (URL-bearing href/src/action/formaction or on* handlers).
                     // Avoids cloning ALL attributes on the vast majority of
@@ -1125,6 +1138,23 @@ mod tests {
         assert!(
             r.html.contains("/a.png"),
             "srcdoc content must be preserved, got: {}",
+            &r.html[..r.html.len().min(400)]
+        );
+    }
+    // `ping` 은 브라우저가 클릭 시 직접 POST 하는 추적 비콘이다. CSP 2선
+    // 방어에 기대지 않고 속성 자체를 걷어낸다 — 값은 진단용으로 남긴다.
+    #[test]
+    fn ping_attribute_is_stripped() {
+        let html = r#"<html><body><a href="/x" ping="https://t.example/a https://t.example/b">x</a></body></html>"#;
+        let r = transform(html, &opts()).expect("transform");
+        assert!(
+            !r.html.contains(" ping="),
+            "ping must not survive, got: {}",
+            &r.html[..r.html.len().min(400)]
+        );
+        assert!(
+            r.html.contains("data-zp-blocked-ping"),
+            "ping value must be kept for diagnosis, got: {}",
             &r.html[..r.html.len().min(400)]
         );
     }

@@ -2870,6 +2870,24 @@
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');
+    // `ping` 은 클릭 시 브라우저가 **직접** POST 하는 추적 비콘 목록이다.
+    // 지원하지 않기로 한 표면인데(공백 구분 URL 목록이라 단일 URL 훅으로
+    // 다룰 수 없고, 통과시키는 것 자체가 목적에 반한다), 지금까지는 리라이트가
+    // 놓치고 **CSP 만** 막고 있었다 — 구멍 매트릭스의 유일한 `csp-only` 칸.
+    // CSP 는 2선 방어다. 값을 삼켜서 브라우저가 요청을 만들지 못하게 한다.
+    // 게터는 페이지가 되읽을 수 있게 저장값을 돌려준다(기능 감지 호환).
+    const pingValues = new WeakMap();
+    for (const Ctor of [w.HTMLAnchorElement, w.HTMLAreaElement]) {
+      const proto = Ctor && Ctor.prototype;
+      if (!proto || propertyLocked(proto, 'ping')) continue;
+      defineAccessor(proto, 'ping',
+        function () { return pingValues.get(this) || ''; },
+        function (v) {
+          pingValues.set(this, String(v));
+          try { Native.setAttribute.call(this, 'data-zp-blocked-ping', String(v)); } catch {}
+          try { Native.removeAttribute.call(this, 'ping'); } catch {}
+        });
+    }
     installURLProp(w.HTMLInputElement && w.HTMLInputElement.prototype, 'formAction');
     installURLProp(w.HTMLButtonElement && w.HTMLButtonElement.prototype, 'formAction');
     // 2026-08-13 — 수동 서브리소스의 **프로퍼티 쓰기**도 훅한다.
@@ -4201,7 +4219,13 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
-      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+      // `ping` 은 프로퍼티뿐 아니라 속성으로도 들어온다. 여기서도 삼킨다
+      // (위 프로퍼티 훅과 같은 이유 — CSP 가 아니라 우리가 막아야 한다).
+      if (localKey === 'ping' && (ln === 'a' || ln === 'area')) {
+        try { Native.setAttribute.call(this, 'data-zp-blocked-ping', String(v)); } catch {}
+        try { Native.removeAttribute.call(this, 'ping'); } catch {}
+        return;
+      }      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
       if (ln === 'link' && localKey === 'rel') {
