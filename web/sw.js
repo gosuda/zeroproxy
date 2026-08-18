@@ -1787,7 +1787,7 @@ async function transformDocumentResponse(resp, opt) {
   // END_STREAM (~60s) where the buffered `resp.text()` below would block. Falls
   // back to the buffered path (which keeps fail-closed MALFORMED_HTML + the
   // post-redirect CSS host-rewrite) on host mismatch or any failure.
-  const kernelStreamed = false && resp.headers && resp.headers.get('X-ZP-Stream') === '1'; // TEMP: streaming disabled for CSP causality test
+  const kernelStreamed = resp.headers && resp.headers.get('X-ZP-Stream') === '1';
   if (kernelStreamed && resp.body) {
     try {
       await initBundle();

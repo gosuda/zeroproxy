@@ -29,6 +29,22 @@ test('SW keeps itself alive until the streamed body is fully delivered', () => {
   assert.match(body, /cancel\([^)]*\)\s*\{[\s\S]{0,200}?markBodyDone\(\)/, 'cancel must mark the body done');
 });
 
+// 진단용 임시 플래그가 커밋되어 기능이 조용히 꺼지는 사고를 막는다.
+// 실제로 있었다: 106053f 가 `const kernelStreamed = false && …` 를 남겨
+// progressive streaming 이 통째로 꺼진 채 커밋됐다. 커밋 메시지에는 그런
+// 이야기가 없었고 테스트도 잡지 못했다 — NAVER 의 withheld END_STREAM
+// (~60s) 대응이 그동안 무력화돼 있었다.
+test('document streaming is not hard-disabled by a leftover debug flag', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // 주석은 걸러낸다 — 주석에 남은 문자열이 검사를 통과시켜 준 전례가 있다.
+  const code = sw.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n');
+  const m = code.match(/const\s+kernelStreamed\s*=([^;]*);/);
+  assert.ok(m, 'kernelStreamed must exist');
+  const expr = m[1];
+  assert.equal(/\bfalse\s*&&/.test(expr), false, 'streaming must not be short-circuited off');
+  assert.match(expr, /X-ZP-Stream/, 'streaming must be driven by the kernel stream marker');
+});
+
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   assert.ok(rt.includes('installToStringMasking'));
