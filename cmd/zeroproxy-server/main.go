@@ -213,6 +213,11 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleSyncFetchPoll(w, r)
 	case path == controlPrefix+"api/sync-fetch/result":
 		s.handleSyncFetchResult(w, r)
+	case path == controlPrefix+"api/csp-report":
+		// 프록시 문서 CSP 의 report-uri 수신처. 우리가 리라이트를 놓친 자리를
+		// 이름으로 알려 주는 유일한 통로다 — 막힌 요청은 SW 까지 오지 못하므로
+		// __zp_refusals() 에는 남지 않는다. cspreport.go 주석 참고.
+		s.handleCSPReport(w, r)
 	case path == controlPrefix+"api/config":
 		// D4/D5 client config — exposes the public WT gateway URL (if
 		// `-wt-public-url` is set) + RTC signaling URL (if

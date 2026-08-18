@@ -941,7 +941,7 @@ test('SW fetch handler passes through non-http(s) schemes (extension channels in
   // The scheme guard must sit in the fetch listener, before respondWith.
   assert.match(
     sw,
-    /addEventListener\('fetch'[\s\S]{0,600}?if \(!u\.startsWith\('http:'\) && !u\.startsWith\('https:'\)\) return;[\s\S]{0,200}?event\.respondWith\((?:handleFetch\(event\)|responded)\)/,
+    /addEventListener\('fetch'[\s\S]{0,600}?if \(!u\.startsWith\('http:'\) && !u\.startsWith\('https:'\)\) return;[\s\S]{0,1200}?event\.respondWith\((?:handleFetch\(event\)|responded)\)/,
     'fetch listener must skip respondWith for non-http(s) URLs'
   );
 });
@@ -2581,9 +2581,20 @@ test('service worker strips browser-to-target reporting headers', () => {
     assert.ok(body.includes("h.delete('" + header + "')"),
       header + ' must be stripped — it lets the browser reach the target directly, bypassing the relay');
   }
-  // 그리고 우리 정책 자체는 절대 report-uri 를 갖지 않는다(같은 유출 경로가 된다).
+  // 그리고 우리 정책의 리포트 엔드포인트는 **반드시 우리 자신**이어야 한다.
+  // 이 가드는 원래 "report-uri 자체 금지" 였는데, 금지의 이유는 "리포트는 SW 가
+  // 가로챌 수 없다" 였다. 그 이유가 겨누는 건 목적지이지 기능이 아니다 —
+  // 타깃(또는 임의의 절대 URL)로 가면 릴레이를 우회한 직접 egress 지만,
+  // 우리 컨트롤 경로로 가는 루트상대 경로는 페이지가 이미 말하고 있는 그
+  // 오리진이다. 그래서 "루트상대 + /zp/ 접두" 하나만 허용한다.
   const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8');
-  assert.ok(!/report-uri|report-to/i.test(golden), 'our own CSP must not carry a reporting endpoint');
+  assert.equal(/report-to/i.test(golden), false,
+    'Report-To/report-to must not appear — its endpoints are absolute URLs by construction');
+  const reportUris = [...golden.matchAll(/report-uri\s+([^;]+)/gi)].flatMap(m => m[1].trim().split(/\s+/));
+  for (const uri of reportUris) {
+    assert.match(uri, /^\/zp\/[A-Za-z0-9._~\/-]+$/,
+      'report-uri must be a root-relative path under our own control prefix, got: ' + uri);
+  }
 });
 
 test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 타깃으로 매핑된다 (ctx 가 있을 때만)', () => {

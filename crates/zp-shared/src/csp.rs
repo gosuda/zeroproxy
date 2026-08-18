@@ -164,6 +164,14 @@ pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &Cs
         "base-uri 'none'".to_string(),
         "form-action 'self'".to_string(),
         "manifest-src 'self'".to_string(),
+        // 리라이트를 놓친 자리를 **이름으로** 알려 주는 유일한 통로.
+        // 막힌 요청은 SW 까지 오지 못하므로 `__zp_refusals()` 에 안 남는다.
+        // 리포트에는 `blocked-uri` 와 함께 `source-file`/`line-number` 가 실려
+        // 온다 — 2026-08-18 에 naver 이미지 5건의 출처를 찾느라 브라우저를 30번
+        // 다시 띄우고도 못 찾은 적이 있는데, 그게 이 한 줄이면 끝나는 일이었다.
+        // meta 로 배달된 CSP 에서는 무시되지만 프록시 문서는 헤더로도 같은
+        // 정책을 받으므로 동작한다.
+        "report-uri /zp/api/csp-report".to_string(),
     ];
     segments.join("; ")
 }

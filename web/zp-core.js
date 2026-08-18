@@ -200,7 +200,7 @@
     const armed = !!(options && options.challengeCompat);
     const cf = ' https://challenges.cloudflare.com';
     if (armed) connect.add('https://challenges.cloudflare.com');
-    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'" + (armed ? cf : '') + "; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:" + (armed ? cf : '') + "; child-src 'self' blob: data:" + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'";
+    return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'" + (armed ? cf : '') + "; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src " + Array.from(connect).join(' ') + "; frame-src 'self' blob: data:" + (armed ? cf : '') + "; child-src 'self' blob: data:" + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'; report-uri /zp/api/csp-report";
   }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');

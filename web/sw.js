@@ -361,6 +361,20 @@ self.addEventListener('fetch', event => {
   // script channel"). Returning without respondWith = browser default fetch.
   const u = event.request.url;
   if (!u.startsWith('http:') && !u.startsWith('https:')) return;
+  // CSP 위반 리포트는 우리 자신에게 보내는 것이다 — 가로채면 안 된다.
+  //
+  // 브라우저는 report-uri 를 문서 기준으로 풀어 `/zp/api/csp-report` 로 POST
+  // 하는데, 이 요청도 SW 의 fetch 이벤트를 탄다. 그냥 두면 classify 가 이걸
+  // "프록시 오리진으로 온 알 수 없는 경로" = 타깃의 서브리소스로 보고 타깃
+  // 오리진으로 되던진다 — 실측: example.com 이 405 를 돌려줬고 리포트는 서버에
+  // 영영 도착하지 않았다. **우리 감옥이 우리 진단을 먹고 있었다.**
+  // 같은 오리진의 우리 엔드포인트이므로 네이티브 fetch 로 통과시킨다.
+  if (event.request.method === 'POST') {
+    try {
+      const p = new URL(u).pathname;
+      if (p === ZP.apiPath('csp-report')) return;
+    } catch {}
+  }
   const responded = handleFetch(event);
   event.respondWith(responded);
   // Keep the worker alive until the response BODY has been fully delivered.
@@ -2089,7 +2103,14 @@ function buildRuntimePrelude(tab, entry) {
   // 뺐다). 헤더도 그대로 둔다 — 둘 다 있으면 각각 강제되고 값이 같으므로
   // 실효 정책은 변하지 않는다.
   const cspMeta = '<meta http-equiv="Content-Security-Policy" content="'
-    + ZP.fixedCSP(tab.servers || [], { challengeCompat: !!tab.challengeCompat }).replace(/"/g, '&quot;')
+    // `report-uri` 는 meta 로 배달되면 무시되고, 브라우저는 그때마다 콘솔에
+    // "ignored when delivered via a <meta> element" 를 찍는다. 모든 프록시
+    // 문서에서 매번 나오는 잡음이자(감사 지표의 csp 카운트를 상시 1로 올린다)
+    // 남들에겐 없는 콘솔 메시지 하나다. 리포트는 헤더 쪽 정책이 처리하므로
+    // meta 사본에서만 뺀다 — 실효 정책은 그대로다.
+    + ZP.fixedCSP(tab.servers || [], { challengeCompat: !!tab.challengeCompat })
+        .split('; ').filter(d => !/^report-uri\b/i.test(d)).join('; ')
+        .replace(/"/g, '&quot;')
     + '">';
   return cspMeta +
     '<script nonce=zp>' + prewarmInline + '</script>' +
