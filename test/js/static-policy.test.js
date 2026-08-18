@@ -2090,11 +2090,16 @@ test('anchor escape vector: zp-htmltx + prelude + launcher ?via= handler', () =>
       `installURLComponents must cover ${part}`
     );
   }
-  // setAttribute wrap usesRaw branch must also route through proxyViaURL.
-  assert.ok(
-    /usesRaw \? proxyViaURL\(t\) : t/.test(rt),
-    'setAttribute wrap usesRaw branch must call proxyViaURL'
-  );
+  // 속성 훅은 두 갈래 다 프록시 오리진으로 써야 한다: raw 를 쓰는 자리
+  // (anchor href/form action)는 `?via=` 런처로, 서브리소스는 프록시 경로로.
+  // 예전 이 검사는 `usesRaw ? proxyViaURL(t) : t` 를 **글자 그대로** 고정했는데,
+  // 그 `: t` 가 바로 버그였다 — setAttributeNS 경로가 타깃 절대 URL 을 그대로
+  // 속성에 써서 원본 요청이 나갔다(CSP 만 막고 있었다). 가드가 깨진 모양을
+  // 얼려 버린 셈이라, 이제 **불변식**을 검사한다.
+  assert.ok(/usesRaw \? proxyViaURL\(t\)/.test(rt),
+    'attribute wrap usesRaw branch must call proxyViaURL');
+  assert.equal(/usesRaw \? proxyViaURL\(t\) : t\b/.test(rt), false,
+    'the non-raw branch must not write the bare target URL onto the attribute');
   // page-side transformHTML walker must process every node through the
   // navigation backstop — same-name silent-skip bug from the 2026-06-06
   // follow-up commit.

@@ -4310,6 +4310,19 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      // `setAttributeNS(null, name, v)` 는 명세상 HTML 요소에서 `setAttribute`
+      // 와 같은 속성을 만든다. 그런데 여기 로직은 위 setAttribute 훅의 **부분
+      // 집합**이라 같은 호출이 다른 결과를 냈다 — 실측: `img.setAttribute` 는
+      // 프록시 경로를 쓰는데 `img.setAttributeNS(null,'src',…)` 는 타깃 절대
+      // URL 을 그대로 써서 원본 요청이 그대로 나갔다(CSP 만 막고 있었다).
+      // ping/srcdoc/iframe/base/style/fragment 처리도 전부 여기엔 없다.
+      // 그래서 **같은 뜻이면 같은 코드로 보낸다**: 이름이 이미 소문자이고
+      // (setAttribute 는 HTML 요소에서 이름을 소문자화하므로 그때만 등가다)
+      // 네임스페이스가 없으면 setAttribute 훅에 위임한다. xlink:href 같은
+      // 진짜 네임스페이스 속성만 아래 경로로 남는다.
+      if ((ns === null || ns === undefined || ns === '') && String(k) === key) {
+        return this.setAttribute(k, v);
+      }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
@@ -4324,7 +4337,9 @@
           // path above — anchor/area href / form action / formaction must
           // not leak the absolute target URL through the raw DOM attribute.
           Native.setAttribute.call(this, 'data-zp-target-url', t);
-          return Native.setAttributeNS.call(this, ns, k, usesRaw ? proxyViaURL(t) : t);
+          // 서브리소스는 **프록시 경로**를 쓴다. 예전엔 `t`(타깃 절대 URL)를
+          // 그대로 썼는데, 그러면 브라우저가 타깃으로 직접 나간다.
+          return Native.setAttributeNS.call(this, ns, k, usesRaw ? proxyViaURL(t) : subresourceProxyPath(t));
         }
       }
       return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v);
