@@ -45,6 +45,25 @@ test('document streaming is not hard-disabled by a leftover debug flag', () => {
   assert.match(expr, /X-ZP-Stream/, 'streaming must be driven by the kernel stream marker');
 });
 
+// 광고만 하고 못 지키는 TLS 확장은 지문 일치보다 나쁘다 — 연결이 죽는다.
+// ALPS(17613)를 ClientHello 에 실으면 Google GFE 는 실제로 협상하고, 우리
+// TLS 스택은 ALPS 를 구현하지 않아 응답 도중 `unexpected_message` fatal
+// alert 로 연결이 끊긴다(googleapis / googletagmanager / doubleclick /
+// accounts.google 전부 502). 되살리려면 **먼저 ALPS 를 구현**할 것.
+test('ClientHello does not advertise TLS extensions we cannot honour', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const m = sw.match(/const CAPTURED_FINGERPRINT_B64 = '([^']*)';/);
+  assert.ok(m, 'captured fingerprint must exist');
+  const fp = JSON.parse(Buffer.from(m[1], 'base64').toString('utf8'));
+  assert.ok(Array.isArray(fp.extensions), 'fingerprint must carry an extension list');
+  const tls = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/tls.rs', 'utf8');
+  const alpsImplemented = /application_settings|ALPS_/.test(tls.replace(/\/\/.*$/gm, ''));
+  if (!alpsImplemented) {
+    assert.equal(fp.extensions.includes(17613), false,
+      'ALPS (17613) advertised but not implemented — Google GFE negotiates it and kills the connection');
+  }
+});
+
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
   assert.ok(rt.includes('installToStringMasking'));
