@@ -160,6 +160,7 @@
   const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
   const initialProxyURL = new URL(root.location.href);
   const proxyOrigin = initialProxyURL.origin;
+  const proxyHost = initialProxyURL.host;
   const activeServers = ZP.relayServersForShare(Array.isArray(boot.servers) ? boot.servers : [], { allowLoopbackWS: true });
   let activeProxyPath = initialProxyURL.pathname;
   let activeProxyFragment = preservedShareFragment(initialProxyURL.hash);
@@ -731,32 +732,73 @@
   function isIntegrityBearing(el) { const tag = el && el.localName; return tag === 'script' || tag === 'link'; }
   function backedIntegrity(el) { return isIntegrityBearing(el) ? Native.getAttribute.call(el, integrityBackupAttr) : null; }
   function setBackedIntegrity(el, value) { Native.setAttribute.call(el, integrityBackupAttr, String(value)); if (Native.removeAttribute) Native.removeAttribute.call(el, 'integrity'); }
-  // 페이지 스크립트가 **진짜** `location` 을 읽어 우리 프록시 경로를 도로
-  // 넘겨주는 경로가 있다. `location` 은 [LegacyUnforgeable] 이라 프로퍼티를
-  // 훅으로 가릴 수 없고, 난독화 코드는 `eval("this")` 로 진짜 window 를 잡은
-  // 뒤 computed access (`w[decode("location")]`) 로 읽어서 리라이터도 그 자리를
-  // 정적으로 못 본다. 즉 이 누출은 막을 수 없고, **소비되는 지점에서** 되돌려야
-  // 한다.
+  // ★프록시 정체가 페이지로 샌 값을 **소비 지점에서** 되돌리는 단일 게이트.
   //
-  // Cloudflare managed challenge 가 정확히 이 모양이었다: 챌린지를 통과한 직후
-  // 스스로 만든 form 에 `action = location.pathname` (= `/zp/p/<token>`) 을
-  // 심는다. 그게 타깃 오리진에 붙어 `https://<target>/zp/p/<token>` 을 POST
-  // 하게 되고 타깃은 404 를 준다 — 챌린지는 풀렸는데 착지에 실패한다.
+  // 왜 원천 차단이 아니라 게이트인가: `location` 의 프로퍼티는
+  // [LegacyUnforgeable] (own, `configurable:false`) 이라 멤브레인이 가릴 수
+  // 없다. 게다가 동적/난독화 코드는 `eval("this")` 로 진짜 window 를 잡은 뒤
+  // `w[decode("location")]` 같은 **computed access** 로 읽어서 리라이터도 그
+  // 자리를 정적으로 볼 수 없다. 즉 이 누출은 원천 차단이 불가능하고,
+  // **값이 타깃 URL 이 되는 지점**에서 되돌리는 것만이 가능하다.
   //
-  // 지금 프록시 경로와 **정확히 같을 때만** 되돌린다. 그 경로는 암호화된
-  // 토큰이라 타깃 사이트의 실제 경로와 우연히 겹칠 수 없다.
-  function unleakProxyPath(raw) {
+  // 페이지가 준 raw 가 타깃이 되는 입구는 딱 셋이다. 셋 다 여길 통과한다:
+  //   targetURL()        — DOM URL 속성 / 네비게이션 / form action
+  //   requestTargetURL() — fetch / XHR / EventSource
+  //   targetWSURL()      — WebSocket
+  //
+  // 인식 대상은 **우리 라우팅 어휘뿐**이다. `/zp/` 로 시작한다고 무조건
+  // 삼키면 타깃 사이트에 진짜 `/zp/…` 경로가 있을 때 그 사이트를 깨뜨린다.
+  //
+  // 반환값: 교체할 raw 문자열, 또는 `null` = "우리 것이다 — 현재 가상 문서
+  // URL 로 대체하라". ws/wss 로 바꿔야 하는 쪽이 있어서 문자열 하나로
+  // 뭉뚱그리지 않고 호출자가 스킴을 결정하게 둔다.
+  function proxyLocalPath(raw) {
     const s = String(raw == null ? '' : raw);
-    if (!s || !activeProxyPath) return s;
-    let path;
-    if (s[0] === '/') path = s;
-    else if (s.lastIndexOf(proxyOrigin, 0) === 0) { try { path = new Native.URL(s).pathname; } catch { return s; } }
-    else return s;
-    const bare = v => v.split('?')[0].split('#')[0];
-    return bare(path) === bare(activeProxyPath) ? virtualURL.href : s;
+    if (!s) return '';
+    // 루트 상대 경로. `//host/x` 는 프로토콜 상대라 아래에서 따로 본다.
+    if (s[0] === '/' && s[1] !== '/') { const h = s.indexOf('#'); return h < 0 ? s : s.slice(0, h); }
+    const abs = s.slice(0, 2) === '//' ? 'http:' + s : s;
+    // 스킴 없는 상대 경로(`foo.js`)를 프록시 오리진에 붙여 보면 안 된다 —
+    // 전부 우리 것으로 오인한다.
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(abs)) return '';
+    let u;
+    try { u = new URL(abs); } catch { return ''; }
+    return u.host === proxyHost ? u.pathname + u.search : '';
   }
-  function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(unleakProxyPath(raw)), base).href; }
-  function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
+  function unleakedTargetRaw(raw) {
+    const s = String(raw == null ? '' : raw);
+    // 이미 **타깃 오리진에 붙어 버린** 우리 경로도 잡는다. 페이지가
+    // `new URL(location.pathname, document.baseURI)` 로 만들면 호스트가
+    // 타깃이라 아래 프록시-호스트 검사에 안 걸린다. 지금 share 경로와
+    // **바이트가 같을 때만** 본다 — 그건 고엔트로피 암호 토큰이라 타깃
+    // 사이트의 실제 경로와 겹칠 수 없다.
+    if (activeProxyPath && s.indexOf(activeProxyPath) >= 0) {
+      try { if (new URL(s, baseURL).pathname === activeProxyPath) return null; } catch {}
+    }
+    const local = proxyLocalPath(s);
+    if (!local) return s;
+    const qi = local.indexOf('?');
+    const path = qi < 0 ? local : local.slice(0, qi);
+    const params = qi < 0 ? null : new URLSearchParams(local.slice(qi + 1));
+    // (a) 서브리소스 래퍼 — 진짜 타깃이 안에 들어 있다.
+    if (path === ZP.apiPath('fetch') && params && params.get('url')) return params.get('url');
+    // (b) 네비게이션 런처 — 마찬가지.
+    if (path === ZP.controlPath('') && params && params.get('via')) return params.get('via');
+    // (c) share 경로 — 암호화된 우리 라우팅 키다. 타깃에 실려 나가면 안 되고,
+    //     타깃 오리진에 붙여 dial 해도 언제나 오답이다.
+    //     Cloudflare 챌린지가 통과 직후 `form.action = location.pathname` 으로
+    //     정확히 이 값을 심어 `https://<target>/zp/p/<token>` 을 POST 했다.
+    if (ZP.isSharePath(path)) return null;
+    return s;
+  }
+  function targetURL(raw, base = baseURL) {
+    const g = unleakedTargetRaw(raw);
+    return ZP.canonicalTargetURL(g === null ? virtualURL.href : g, base).href;
+  }
+  function targetWSURL(raw, base = baseURL) {
+    const g = unleakedTargetRaw(raw);
+    return ZP.canonicalWebSocketURL(g === null ? virtualURL.href.replace(/^http/, 'ws') : g, base.replace(/^http/, 'ws')).href;
+  }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin, activeServers); }
   function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
   function commitVirtualHistory(state, title, url, replace = false) {
@@ -1707,7 +1749,9 @@
   }
   function requestTargetURL(input) {
     const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
-    const parsed = new URL(raw, baseURL);
+    const gated = unleakedTargetRaw(raw);
+    if (gated === null) return virtualURL.href;
+    const parsed = new URL(gated, baseURL);
     if (parsed.origin === proxyOrigin) return new URL(parsed.pathname + parsed.search + parsed.hash, baseURL).href;
     return ZP.canonicalTargetURL(parsed.href, baseURL).href;
   }
@@ -4378,7 +4422,10 @@
   function setScriptSource(el, raw) {
     try { zpTrace('scriptSrc', String(raw).slice(0,140)); } catch {}
     const kind = executableScriptKindForElement(el);
-    const value = String(raw);
+    // share 경로는 스크립트가 아니다 — 아래 CONTROL_PREFIX 분기가 이미
+    // 프록시 URL 이라고 착각하고 그대로 두면 우리 문서를 JS 로 로드한다.
+    // 여기서만 게이트를 태운다. 래퍼(/zp/api/script?…) 는 건드리지 않는다.
+    const value = unleakedTargetRaw(raw) === null ? virtualURL.href : String(raw);
     const trimmed = value.trim();
     if (trimmed.startsWith(ZP.CONTROL_PREFIX) || trimmed.startsWith(proxyOrigin + ZP.CONTROL_PREFIX)) {
       // Keep proxy-origin-absolute URLs absolute. The page's virtual baseURI
