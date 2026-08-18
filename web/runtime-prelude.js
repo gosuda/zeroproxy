@@ -731,7 +731,31 @@
   function isIntegrityBearing(el) { const tag = el && el.localName; return tag === 'script' || tag === 'link'; }
   function backedIntegrity(el) { return isIntegrityBearing(el) ? Native.getAttribute.call(el, integrityBackupAttr) : null; }
   function setBackedIntegrity(el, value) { Native.setAttribute.call(el, integrityBackupAttr, String(value)); if (Native.removeAttribute) Native.removeAttribute.call(el, 'integrity'); }
-  function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(raw), base).href; }
+  // 페이지 스크립트가 **진짜** `location` 을 읽어 우리 프록시 경로를 도로
+  // 넘겨주는 경로가 있다. `location` 은 [LegacyUnforgeable] 이라 프로퍼티를
+  // 훅으로 가릴 수 없고, 난독화 코드는 `eval("this")` 로 진짜 window 를 잡은
+  // 뒤 computed access (`w[decode("location")]`) 로 읽어서 리라이터도 그 자리를
+  // 정적으로 못 본다. 즉 이 누출은 막을 수 없고, **소비되는 지점에서** 되돌려야
+  // 한다.
+  //
+  // Cloudflare managed challenge 가 정확히 이 모양이었다: 챌린지를 통과한 직후
+  // 스스로 만든 form 에 `action = location.pathname` (= `/zp/p/<token>`) 을
+  // 심는다. 그게 타깃 오리진에 붙어 `https://<target>/zp/p/<token>` 을 POST
+  // 하게 되고 타깃은 404 를 준다 — 챌린지는 풀렸는데 착지에 실패한다.
+  //
+  // 지금 프록시 경로와 **정확히 같을 때만** 되돌린다. 그 경로는 암호화된
+  // 토큰이라 타깃 사이트의 실제 경로와 우연히 겹칠 수 없다.
+  function unleakProxyPath(raw) {
+    const s = String(raw == null ? '' : raw);
+    if (!s || !activeProxyPath) return s;
+    let path;
+    if (s[0] === '/') path = s;
+    else if (s.lastIndexOf(proxyOrigin, 0) === 0) { try { path = new Native.URL(s).pathname; } catch { return s; } }
+    else return s;
+    const bare = v => v.split('?')[0].split('#')[0];
+    return bare(path) === bare(activeProxyPath) ? virtualURL.href : s;
+  }
+  function targetURL(raw, base = baseURL) { return ZP.canonicalTargetURL(String(unleakProxyPath(raw)), base).href; }
   function targetWSURL(raw, base = baseURL) { return ZP.canonicalWebSocketURL(String(raw), base.replace(/^http/, 'ws')).href; }
   function shareNavURL(raw, base = baseURL) { return ZP.makeShareURL(targetURL(raw, base), proxyOrigin, activeServers); }
   function sameOriginHistoryURL(url) { const next = new URL(targetURL(url)); if (next.origin !== virtualURL.origin) throw normalizedError('SecurityError'); return next; }
@@ -1141,6 +1165,25 @@
         try { expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + text + '\n);}']); } catch {}
       }
       if (expr) return Reflect.apply(expr, root, [withScope]);
+      // 문(statement) 형태는 **전역 스코프**에서 실행해야 한다. indirect eval 의
+      // 최상위 `var`/`function` 선언은 전역 객체의 프로퍼티가 되는데, Function
+      // 래퍼 + `with` 로 감싸면 래퍼의 지역 선언이 되어 흔적 없이 사라진다.
+      //
+      // Cloudflare managed challenge 가 정확히 여기서 죽었다:
+      //   eval("function jcLw7(s){…XOR 디코더…}")   ← 전역 헬퍼를 심는 목적
+      // 뒤이어 난독화 VM 이 `window[<디코드된 이름>](…)` 로 그 헬퍼를 부르는데
+      // 우리 환경에서는 undefined 라 `undefined.call` TypeError 가 터졌다.
+      // 챌린지 스크립트가 죽으니 cf_clearance 를 영원히 못 받고 "Just a
+      // moment…" 만 반복 — 지문이 아니라 **eval 스코프 시맨틱**이 원인이었다.
+      //
+      // 리라이터는 그대로 통과시키므로 격리 posture 는 인라인 `<script>` 와
+      // 동일하다 (그쪽도 rewrite → globalEval 이다). `with` 스코프 프록시는
+      // 동적 Function body 경로에 그대로 남는다 — 거기선 본문이 진짜 함수
+      // 본문이라 전역 선언 시맨틱이 애초에 없다.
+      try {
+        const globalCode = callPageRewriter(text, 'classic');
+        if (typeof globalCode === 'string' && globalCode.length) return execGlobalScript(globalCode);
+      } catch {}
       return Reflect.apply(compileScoped(Native.FunctionCtor, [], text), root, [withScope]);
     }
     const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
