@@ -488,6 +488,23 @@
   // membrane-only additions stay hidden. `configurable` stays false either way:
   // that is the E1 lock that stops a page deleting our accessor to reach the
   // native one, and it is the one axis we knowingly trade for the jail.
+  //
+  // ── 2026-08-18 결정 (닫힘). 이 자리를 "지문이니까" 로 다시 열지 말 것 ──
+  // 실측: 후킹한 DOM 멤버 116곳이 `configurable:false` 이고 진짜 브라우저는
+  // 전부 `true` 다. 프로토타입을 한 번 훑어 세기만 해도 멤브레인이 드러난다.
+  // 그럼에도 이 값을 유지한다. 세 가지 선택지를 다 재 봤다:
+  //  (a) `true` 로 푼다 — **측정해 보니 얻는 게 0 이다**. Cloudflare 판정은
+  //      그대로였다(2026-08-16, stackoverflow 2회). 대신 페이지가 훅을 걷어낼
+  //      여지가 생긴다. 비용만 있고 이득이 없다.
+  //  (b) 디스크립터를 위장한다(`getOwnPropertyDescriptor` 가 true 로 보고) —
+  //      **우리 코드가 먼저 깨진다.** `propertyLocked()` 는 바로 이 비트로
+  //      "이미 설치됨" 을 판정한다(신원/WeakSet 은 멤브레인이 창을 감싸며 매번
+  //      새 래퍼를 주기 때문에 못 쓴다). 위장하면 재설치로 들어가 던진다.
+  //      게다가 `delete` 는 여전히 false 를 돌려주므로 **디스크립터와 실제
+  //      동작이 모순**되어, 수동적인 인구조사 신호를 능동적 탐침 신호로 바꿀
+  //      뿐이다.
+  //  (c) 유지한다 ← 선택. 지문은 남지만 감옥이 감옥으로 남는다.
+  // 되열려면 (a) 의 측정을 다시 해서 "이번엔 판정이 바뀐다" 를 먼저 보일 것.
   function nativeEnumerability(obj, key) {
     try {
       const d = Object.getOwnPropertyDescriptor(obj, key);

@@ -2956,3 +2956,19 @@ test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', 
   assert.deepStrictEqual(seen, ['a', 'b', 'c'], 'forEach 도 필터를 지켜야 한다');
   assert.deepStrictEqual([...list].map(e => e.name), ['a', 'b', 'c']);
 });
+
+// E1 자물쇠: 후킹 지점은 `configurable: false` 로 심는다. 이걸 `true` 로 풀면
+// 페이지가 우리 접근자를 delete 하고 네이티브로 갈 수 있고, 동시에
+// `propertyLocked()` 의 "이미 설치됨" 판정이 무너져 재설치로 던진다.
+// 지문(브라우저는 전부 configurable:true)과 정면으로 충돌하는 자리이고,
+// 2026-08-18 에 "유지" 로 닫은 결정이다 — 근거는 runtime-prelude 주석에 있다.
+test('membrane hooks stay non-configurable (E1 lock)', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const defs = rt.match(/Object\.defineProperty\(obj, key, \{[^}]*\}/g) || [];
+  assert.ok(defs.length >= 2, 'define()/defineAccessor() must exist');
+  for (const d of defs) {
+    assert.match(d, /configurable:\s*false/, 'membrane define must stay non-configurable: ' + d);
+  }
+  assert.match(rt, /return !!d && !d\.configurable;/,
+    'propertyLocked() must keep deciding re-installation from the configurable bit');
+});
