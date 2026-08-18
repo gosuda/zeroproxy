@@ -1674,6 +1674,21 @@ function applyScriptPatches(source, envelopeJson) {
 
 async function rewriteScriptResponse(resp, opt) {
   rewriteStats.invocations++;
+  // 우리 에러 페이지(safeError)는 HTML 이다. 그걸 스크립트 리라이터에 넣으면
+  // 당연히 파싱에 실패하고, fail-closed 스텁이 "Blocked by ZeroProxy rewrite
+  // policy" 를 던진다 — **네트워크 실패가 정책 차단으로 둔갑한다.**
+  // 실제로 이것 때문에 Google 호스트들의 TLS 실패
+  // (`h2: response: tls: … received fatal alert: UnexpectedMessage`) 가
+  // "리라이터 파싱 실패" 로 보였다. 원인 규명을 정반대로 보내는 종류의 버그다.
+  // 문서 경로(transformDocumentResponse)에는 이미 같은 가드가 있다.
+  if (resp && resp.headers && resp.headers.get('X-ZP-Error') === '1') {
+    const upstream = resp.headers.get('X-ZP-Error-Code') || 'TARGET_CONNECT_FAILED';
+    const h = scriptResponseHeaders(resp);
+    return new Response(
+      'throw new DOMException(' + JSON.stringify('ZeroProxy: upstream fetch failed (' + upstream + ')') + ", 'NetworkError');",
+      { status: resp.status, statusText: resp.statusText, headers: h }
+    );
+  }
   const h = scriptResponseHeaders(resp);
   let code = '';
   let cacheKey = '';
@@ -2852,7 +2867,17 @@ function addCSP(resp, req, servers, tab) {
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 function safeError(code, status = 400, targetUrl = '') {
-  logRefusal(code, status, targetUrl);
+  // 커널이 주는 에러는 `CODE: 상세` 꼴이다 (예:
+  // `TARGET_HTTP_FAILED: h2: response: tls: process: received fatal alert:
+  // UnexpectedMessage`). 통째로 ERRORS 대조를 하면 못 찾아서 전부
+  // POLICY_BLOCKED 로 뭉개졌다 — 네트워크/TLS 실패가 "정책 차단" 으로
+  // 둔갑해 원인 추적을 정반대 방향으로 보낸다. 앞 토큰을 먼저 본다.
+  const detail = String(code == null ? '' : code);
+  if (!ZP.ERRORS.includes(detail)) {
+    const head = detail.split(':', 1)[0].trim();
+    if (ZP.ERRORS.includes(head)) code = head;
+  }
+  logRefusal(detail, status, targetUrl);
   if (!ZP.ERRORS.includes(code)) code = 'POLICY_BLOCKED';
   const info = ZP.errorInfo(code);
   let host = '';
@@ -2907,6 +2932,7 @@ function safeError(code, status = 400, targetUrl = '') {
       // Marks this as OUR page, not the target's, so transformDocumentResponse
       // (which now rewrites 4xx/5xx HTML bodies) leaves it alone.
       'X-ZP-Error': '1',
+      'X-ZP-Error-Code': code,
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS',
       'Access-Control-Allow-Headers': '*',
