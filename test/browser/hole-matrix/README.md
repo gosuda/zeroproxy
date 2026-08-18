@@ -36,6 +36,12 @@
 - `c7-worker` / `c8-worker-cross` — JS blob 을 Worker 로 돌리는 것은 차단.
 - `c11-ping-attr` — 클릭 추적 비콘. 값이 공백 구분 URL **목록**이라 단일 URL
   훅으로 다룰 수 없고, 통과시키는 것 자체가 목적에 반한다.
+- **FedCM** (`navigator.credentials.get({identity})`, `accounts.google.com/gsi/
+  fedcm.json`) — 매트릭스 케이스는 없지만 같은 부류다. 브라우저가 IdP 와
+  **직접** 말하는 것이 프로토콜의 전제라, 지원하려면 그 통신을 우리 밖으로
+  내보내야 한다. 즉 "출구는 하나" 를 정면으로 깨야 지원되는 기능이다.
+  `connect-src` 가 막는 것이 맞고, 그래서 Google 로그인 위젯은 프록시에서
+  뜨지 않는다 (2026-08-18 stackoverflow 에서 관측).
 `e1-adframe-img` / `e4-blank-iframe-img` 는 오래 이 목록에 있었지만
 **2026-08-14 에 해결됐다**. `document.write` / `about:blank` iframe 은 SW
 클라이언트가 아니라서 리라이트된 `/zp/api/fetch` 요청이 SW 를 지나쳐 Go 서버로

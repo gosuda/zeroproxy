@@ -27,6 +27,11 @@ const U = (id, cross) => `${cross ? `http://127.0.0.1:${CDN}` : ''}/img/${id}__$
 // ── B. 런타임 DOM: 요소 생성 경로 ────────────────────────────────────────
 C('b1-img-prop', 0, `var i=new Image();i.src=U;document.body.appendChild(i)`);
 C('b2-img-setattr', 0, `var i=document.createElement('img');i.setAttribute('src',U);document.body.appendChild(i)`);
+// setAttributeNS(null,…) 는 명세상 setAttribute 와 같은 속성을 만드는데 훅이
+// 따로 있었고, 그쪽만 타깃 절대 URL 을 그대로 썼다(2026-08-18). 매트릭스에
+// setAttribute 만 있어서 못 잡았다 — **같은 뜻의 다른 문**은 별도 칸이 필요하다.
+C('b2b-img-setattrns', 0, `var i=document.createElement('img');i.setAttributeNS(null,'src',U);document.body.appendChild(i)`);
+C('b2c-svg-xlink', 0, `var s=document.createElementNS('http://www.w3.org/2000/svg','svg');var m=document.createElementNS('http://www.w3.org/2000/svg','image');m.setAttributeNS('http://www.w3.org/1999/xlink','xlink:href',U);s.appendChild(m);document.body.appendChild(s)`);
 C('b3-innerhtml', 0, `var d=document.createElement('div');d.innerHTML='<img src="'+U+'">';document.body.appendChild(d)`);
 C('b4-insertadjacent', 0, `document.body.insertAdjacentHTML('beforeend','<img src="'+U+'">')`);
 C('b5-srcset', 0, `var i=document.createElement('img');i.srcset=U+' 1x';document.body.appendChild(i)`);
