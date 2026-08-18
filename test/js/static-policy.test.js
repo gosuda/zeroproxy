@@ -45,23 +45,30 @@ test('document streaming is not hard-disabled by a leftover debug flag', () => {
   assert.match(expr, /X-ZP-Stream/, 'streaming must be driven by the kernel stream marker');
 });
 
+const RE_ALPS_ACK = /alps_negotiated\s*=\s*exts\.application_settings\.is_some\(\)/;
+const RE_ALPS_EMIT = /if cx\.data\.alps_negotiated \{[\s\S]*?HandshakePayload::EncryptedExtensions/;
 // 광고만 하고 못 지키는 TLS 확장은 지문 일치보다 나쁘다 — 연결이 죽는다.
-// ALPS(17613)를 ClientHello 에 실으면 Google GFE 는 실제로 협상하고, 우리
-// TLS 스택은 ALPS 를 구현하지 않아 응답 도중 `unexpected_message` fatal
-// alert 로 연결이 끊긴다(googleapis / googletagmanager / doubleclick /
-// accounts.google 전부 502). 되살리려면 **먼저 ALPS 를 구현**할 것.
+// ALPS(17613)를 ClientHello 에 실으면 Google GFE 는 실제로 협상하고, 그러면
+// 클라이언트는 두 번째 flight 를 EncryptedExtensions 메시지로 시작해야 한다
+// (draft-vvv-tls-alps §4). 그 메시지가 없으면 서버가 응답 도중
+// `unexpected_message` fatal alert 로 연결을 끊는다(googleapis /
+// googletagmanager / doubleclick / accounts.google 전부 502).
+// 검사 대상은 "구현했다" 는 주석이 아니라 **그 메시지를 실제로 보내는 코드**다 —
+// 예전 버전은 tls.rs 에서 문자열만 찾았는데, tls.rs 는 ALPS 를 한 번도 구현한
+// 적이 없는 파일이라 되살릴 때 통과해 버릴 수 있었다.
 test('ClientHello does not advertise TLS extensions we cannot honour', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
   const m = sw.match(/const CAPTURED_FINGERPRINT_B64 = '([^']*)';/);
   assert.ok(m, 'captured fingerprint must exist');
   const fp = JSON.parse(Buffer.from(m[1], 'base64').toString('utf8'));
   assert.ok(Array.isArray(fp.extensions), 'fingerprint must carry an extension list');
-  const tls = fs.readFileSync('crates/zp-kernel-bundle/src/kernel/transport/tls.rs', 'utf8');
-  const alpsImplemented = /application_settings|ALPS_/.test(tls.replace(/\/\/.*$/gm, ''));
-  if (!alpsImplemented) {
-    assert.equal(fp.extensions.includes(17613), false,
-      'ALPS (17613) advertised but not implemented — Google GFE negotiates it and kills the connection');
-  }
+  if (!fp.extensions.includes(17613)) return;
+
+  const tls13 = fs.readFileSync('third_party-rustls-fork/src/client/tls13.rs', 'utf8');
+  assert.match(tls13, RE_ALPS_ACK,
+    'ALPS (17613) advertised — the server ack must be parsed, not dropped into unknown_extensions');
+  assert.match(tls13, RE_ALPS_EMIT,
+    'ALPS (17613) advertised — the client must open its second flight with EncryptedExtensions');
 });
 
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {

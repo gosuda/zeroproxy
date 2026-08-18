@@ -1197,6 +1197,24 @@ extension_struct! {
         ExtensionType::ALProtocolNegotiation =>
             pub(crate) selected_protocol: Option<SingleProtocolName>,
 
+        /// ZeroProxy ALPS (draft-vvv-tls-alps): the server's application
+        /// settings for the negotiated ALPN protocol. Opaque to TLS — for
+        /// HTTP/2 it carries a SETTINGS payload the h2 layer may read.
+        ///
+        /// The same extension id means different things per message: in
+        /// ClientHello its body is a *list of protocol names*
+        /// (`ClientExtensions::application_settings`); here, and in the
+        /// client's own EncryptedExtensions, it is *opaque bytes*.
+        ///
+        /// Parsing it matters even though we ignore the value: its presence
+        /// is the only signal that the server negotiated ALPS, which obliges
+        /// the client to send an EncryptedExtensions message of its own.
+        /// Without this field it landed in `unknown_extensions` and the
+        /// obligation was invisible — the server then answered our Finished
+        /// with a fatal `unexpected_message`.
+        ExtensionType::ApplicationSettings =>
+            pub(crate) application_settings: Option<Payload<'a>>,
+
         /// Key exchange server share (RFC8446)
         ExtensionType::KeyShare =>
             pub(crate) key_share: Option<KeyShareEntry>,
@@ -1253,6 +1271,7 @@ impl ServerExtensions<'_> {
             session_ticket_ack,
             renegotiation_info,
             selected_protocol,
+            application_settings,
             key_share,
             preshared_key,
             client_certificate_type,
@@ -1272,6 +1291,7 @@ impl ServerExtensions<'_> {
             session_ticket_ack,
             renegotiation_info,
             selected_protocol,
+            application_settings: application_settings.map(|x| x.into_owned()),
             key_share,
             preshared_key,
             client_certificate_type,

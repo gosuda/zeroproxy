@@ -1054,6 +1054,13 @@ impl std::error::Error for EarlyDataError {}
 pub struct ClientConnectionData {
     pub(super) early_data: EarlyData,
     pub(super) ech_status: EchStatus,
+
+    /// ZeroProxy ALPS: the server echoed `application_settings` in its
+    /// EncryptedExtensions, so our second flight MUST open with an
+    /// EncryptedExtensions message of our own (draft-vvv-tls-alps §4).
+    /// Carried on the connection rather than threaded through the eight
+    /// `Expect*` states between EE and Finished.
+    pub(super) alps_negotiated: bool,
 }
 
 impl ClientConnectionData {
@@ -1061,6 +1068,7 @@ impl ClientConnectionData {
         Self {
             early_data: EarlyData::new(),
             ech_status: EchStatus::NotOffered,
+            alps_negotiated: false,
         }
     }
 }

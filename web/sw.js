@@ -414,22 +414,22 @@ self.addEventListener('fetch', event => {
 // 리스크: 우리가 검증할 수 없는 서명 알고리즘을 광고한다. 서버가 실제로
 // ML-DSA 로 서명하면 검증에 실패하지만, 오늘 공개 CA 는 그런 인증서를 발급하지
 // 않는다(Chrome 도 같은 목록을 광고한다).
-// 2026-08-18 — extensions 에서 **17613 (ALPS, application_settings) 제거**.
-// 이건 지문 정확도를 일부러 포기한 것이다. 이유:
-//   Chrome 은 ALPS 를 광고하고, 서버가 협상하면 TLS 1.3 EncryptedExtensions
-//   로 세팅을 주고받는다. 우리 TLS 스택은 ALPS 를 **구현하지 않았다**
-//   (transport/tls.rs 의 phase 2 는 아직 pending). 그런데 캡처한 Chrome
-//   ClientHello 를 그대로 재생하다 보니 "지원한다" 고 광고만 하고 있었다.
-//   대부분의 서버는 ALPS 를 모르고 무시하지만 **Google GFE 는 실제로 협상한다**
-//   — 그래서 핸드셰이크와 h2 SETTINGS 까지 멀쩡히 끝난 뒤, 응답을 읽는 도중
-//   서버가 `unexpected_message` fatal alert 를 보내고 연결이 죽었다.
-//   증상: ajax.googleapis.com / googletagmanager / doubleclick / accounts.google
-//   전부 502. 광고·분석·폰트·로그인 위젯이 걸린 사이트가 통째로 반쪽이 된다.
-// 이등분으로 확정했다: 17613 만 빼면 통과, 65037(ECH) 을 빼는 건 무관,
-// signatureSchemes 를 되돌리는 것도 무관.
-// **광고만 하고 못 지키는 확장은 지문 일치보다 나쁘다** — 연결 자체가 죽는다.
-// 제대로 된 해법은 ALPS 를 구현하는 것(rustls fork)이고, 그때 이 줄을 되돌린다.
-const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
+// 2026-08-18 — **17613 (ALPS, application_settings) 복원**.
+// 잠시 뺐던 확장이다. 뺀 이유와 되돌린 이유를 둘 다 남긴다.
+//   뺐던 이유: Chrome 은 ALPS 를 광고하고 서버가 협상하면 세팅을 주고받는데,
+//   우리는 광고만 하고 응답을 처리하지 않았다. 대부분의 서버는 ALPS 를 몰라
+//   무시하지만 **Google GFE 는 실제로 협상한다** — 핸드셰이크와 h2 SETTINGS
+//   까지 멀쩡히 끝난 뒤 응답을 읽는 도중 `unexpected_message` fatal alert 로
+//   연결이 죽었다(ajax.googleapis / googletagmanager / doubleclick /
+//   accounts.google 전부 502).
+//   되돌린 이유: rustls fork 에 ALPS 를 실제로 구현했다 —
+//   `ServerExtensions::application_settings` 로 서버 응답을 파싱하고,
+//   협상됐으면 클라이언트 두 번째 flight 를 **EncryptedExtensions 메시지로
+//   시작**한다(draft-vvv-tls-alps §4). 빠져 있던 건 바로 그 메시지였고,
+//   서버는 EncryptedExtensions 자리에서 Finished 를 보고 연결을 끊은 것이다.
+// **광고만 하고 못 지키는 확장은 지문 일치보다 나쁘다** — 그래서 이 줄을
+// 되돌리는 조건은 "구현" 하나였다. 가드 테스트가 그 조건을 강제한다.
+const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
 function captureBrowserFingerprint() { return CAPTURED_FINGERPRINT_B64; }
 
 async function initBundle() {

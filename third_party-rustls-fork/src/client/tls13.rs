@@ -500,6 +500,20 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
         self.transcript.add_message(&m);
 
         validate_encrypted_extensions(cx.common, &self.hello, exts)?;
+
+        // ZeroProxy ALPS (draft-vvv-tls-alps): the server answering with
+        // `application_settings` means it accepted ALPS for the negotiated
+        // ALPN protocol — and that turns our second flight into one that
+        // MUST begin with a client EncryptedExtensions message. Record it
+        // here; `ExpectFinished` is where the obligation is discharged.
+        //
+        // We deliberately ignore the settings *value*. For h2 it is a
+        // SETTINGS payload that would let the peer skip its own SETTINGS
+        // frame; our h2 layer doesn't consume it, and the protocol permits
+        // ignoring it. Advertising ALPS while silently dropping the reply
+        // is what broke Google GFE hosts before this commit — the fix is
+        // to answer the handshake correctly, not to read the settings.
+        cx.data.alps_negotiated = exts.application_settings.is_some();
         hs::process_alpn_protocol(
             cx.common,
             &self.hello.alpn_protocols,
@@ -1362,6 +1376,34 @@ impl State<ClientConnectionData> for ExpectFinished {
         }
 
         let mut flight = HandshakeFlightTls13::new(&mut st.transcript);
+
+        /* ZeroProxy ALPS: when the server negotiated ALPS, the client's
+         * second flight opens with an EncryptedExtensions message carrying
+         * `application_settings` — before Certificate/CertificateVerify.
+         * Chrome sends an empty settings body for h2 (BoringSSL
+         * `SSL_add_application_settings(ssl, "h2", nullptr, 0)`), so we do
+         * too; the bytes are opaque to TLS either way.
+         *
+         * This message is what was missing: the server, having negotiated
+         * ALPS, saw Finished where EncryptedExtensions was required and
+         * killed the connection with `unexpected_message` — after a
+         * *successful* handshake, which is why the failure surfaced as a
+         * mid-response h2 error rather than a TLS one.
+         *
+         * We reuse `ServerExtensions` as the payload type: rustls has no
+         * client-side EncryptedExtensions struct, and for a message with a
+         * single opaque extension the wire bytes are identical. Nothing
+         * parses a client EE, so the asymmetry stays local to this emit.
+         * It goes through `flight` so it lands in the transcript ahead of
+         * Finished, which is where both sides MAC it. */
+        if cx.data.alps_negotiated {
+            flight.add(HandshakeMessagePayload(
+                HandshakePayload::EncryptedExtensions(Box::new(ServerExtensions {
+                    application_settings: Some(Payload::new(Vec::new())),
+                    ..Default::default()
+                })),
+            ));
+        }
 
         /* Send our authentication/finished messages.  These are still encrypted
          * with our handshake keys. */
