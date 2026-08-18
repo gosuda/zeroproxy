@@ -912,6 +912,9 @@ async function runtimeAPI(req, url, clientId) {
   if (url.pathname === '/zp/api/script') {
     if (req.method !== 'GET') return safeError('POLICY_BLOCKED', 405);
     const target = url.searchParams.get('u');
+    // 페이지가 요청 시점의 가상 문서 URL 을 실어 보낸다 — entry.baseUrl 은
+    // history.replaceState 직후 같은 틱 요청에서 낡아 있을 수 있다.
+    const refOverride = url.searchParams.get('ref') || '';
     const kind = url.searchParams.get('kind') || 'classic';
     const scriptCtx = contextFor(req, clientId);
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
@@ -983,7 +986,7 @@ async function runtimeAPI(req, url, clientId) {
     // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
     // anti-bot 회로가 404 NAVER 페이지를 반환하는 경우가 있음 → SafeFrame
     // loader 미실행 → 광고 미렌더. virtualSubresource 경로와 동일 패턴 유지.
-    const resp = await transportFetch(target, { request: req, tab, entryId: tab.activeEntryId });
+    const resp = await transportFetch(target, { request: req, tab, entryId: tab.activeEntryId, refOverride });
     return rewriteScriptResponse(resp, { targetUrl: target, kind });
   }
   if (url.pathname === '/zp/api/worker-script') {
@@ -1289,14 +1292,21 @@ async function transportFetch(targetUrl, opt) {
   const virtualBase = (opt.document && entry && entry.parentTargetUrl)
     ? entry.parentTargetUrl
     : entry && (entry.baseUrl || entry.targetUrl);
-  if (virtualBase) {
+  // 페이지가 명시적으로 준 ref 가 있으면 그것을 쓴다. 타깃과 **같은 오리진**일
+  // 때만 받아들인다 — 아니면 페이지가 임의의 Referer 를 만들어 낼 수 있다.
+  let refFromPage = '';
+  try {
+    if (opt.refOverride && virtualBase && new URL(opt.refOverride).origin === new URL(virtualBase).origin) refFromPage = new URL(opt.refOverride).href;
+  } catch {}
+  const effectiveBase = refFromPage || virtualBase;
+  if (effectiveBase) {
     // Referer/Origin are forbidden headers — the Request constructor strips
     // them from `init.headers`. Smuggle them as X-ZP-Referer/X-ZP-Origin and
     // let the relay server promote them back to real Referer/Origin before
     // dispatching upstream. Without this, anti-CSRF endpoints 400.
-    headers.set('X-ZP-Referer', virtualBase);
+    headers.set('X-ZP-Referer', effectiveBase);
     let virtualOrigin = '';
-    try { virtualOrigin = new URL(virtualBase).origin; } catch {}
+    try { virtualOrigin = new URL(effectiveBase).origin; } catch {}
     if (virtualOrigin) {
       const m = (opt.method || (opt.request && opt.request.method) || 'GET').toUpperCase();
       if (m !== 'GET' && m !== 'HEAD') headers.set('X-ZP-Origin', virtualOrigin);
@@ -1879,6 +1889,7 @@ async function transformDocumentResponse(resp, opt) {
   // (see .ai/trap-notebook/INDEX.md 2026-05-31 diagnostic entry). HTML rewrite
   // already absolutized root-relative URLs against the final URL above, so
   // static resources resolve correctly without virtualURL surgery.
+
   const preludeHTML = buildRuntimePrelude(opt.tab, opt.entry);
   const injected = injectPrelude(transformed, preludeHTML);
   const headers = new Headers(resp.headers);

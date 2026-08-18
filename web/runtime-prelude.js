@@ -4312,7 +4312,25 @@
     // each one 404'd against naver.com — silent breakage of veta/N/jindo etc.
     // 또한 CSP `script-src 'self'` 가 cross-origin raw URL 차단 → 반드시
     // proxy-origin 으로 라우팅.
-    return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target);
+    // `ref` = 요청 시점의 **가상 문서 URL**. SW 는 이걸 Referer 로 쓴다.
+    // entry.baseUrl 만 쓰면 안 되는 이유(실측 2026-08-18, Cloudflare 챌린지):
+    // 페이지가 `history.replaceState` 로 URL 을 바꾸고 **같은 틱에** 스크립트를
+    // 붙이면, 우리 SW 통지는 postMessage 라 비동기여서 요청이 먼저 나간다.
+    // CF 인터스티셜이 정확히 그 패턴이다 — replaceState 로 `?__cf_chl_rt_tk=…`
+    // 를 심고 곧바로 챌린지 스크립트를 append 한 뒤 onload 에서 되돌린다.
+    // 토큰이 빠진 Referer 로 받아 온 스크립트는 페이지 상태와 어긋나 VM 이
+    // 엉뚱한 핸들러로 디스패치하고 `undefined.call` 로 죽는다.
+    return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href);
+  }
+  // 프록시 api URL 의 `ref` 파라미터를 현재 가상 URL 로 바꿔 준다.
+  function withCurrentRef(value) {
+    try {
+      const s = String(value);
+      if (s.indexOf(ZP.apiPath('script')) < 0 || s.indexOf('ref=') < 0) return s;
+      const u = new URL(s, proxyOrigin);
+      u.searchParams.set('ref', virtualURL.href);
+      return u.href;
+    } catch { return String(value); }
   }
   function setScriptSource(el, raw) {
     try { zpTrace('scriptSrc', String(raw).slice(0,140)); } catch {}
@@ -4325,8 +4343,12 @@
       // root-relative `/zp/...` path would resolve to the target host and the
       // request would miss our SW. zp-htmltx already emits absolute proxy
       // URLs for SW-routed subresources — preserve them here.
-      if (Native.getAttribute.call(el, 'src') === value) return;
-      return Native.setAttribute.call(el, 'src', value);
+      // 삽입 직전에 다시 불릴 때(prepareScriptElement) `ref` 를 **지금** 값으로
+      // 갱신한다. src 대입 시점과 DOM 삽입 시점 사이에 replaceState 가 끼면
+      // 대입 때 박아 둔 ref 는 이미 낡았다.
+      const refreshed = withCurrentRef(value);
+      if (Native.getAttribute.call(el, 'src') === refreshed) return;
+      return Native.setAttribute.call(el, 'src', refreshed);
     }
     if (!kind) {
       urlMeta.delete(el);
