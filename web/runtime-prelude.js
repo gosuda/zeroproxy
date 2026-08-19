@@ -3419,9 +3419,33 @@
     // 스타일시트는 위 두 번으로 부족하다. GNB 처럼 **로드 이후** 큰 `<style>`
     // 을 주입하는 모듈이 흔해서, 문서 생애주기 이벤트에 한 번씩 더 건다.
     // 이미 프록시 URL 인 시트는 `cssProxyURL` 이 걸러내므로 재실행은 무해하다.
+    // 파싱 시점에 이름만 옮겨 둔 프레임 속성(`data-zp-frame-src` /
+    // `data-zp-srcdoc`)을 되돌린다.
+    //
+    // 위의 백스톱은 "즉시 1회 + requestIdleCallback 1회" 인데 **스트리밍 문서에서
+    // 그 두 번으로는 부족하다**: 즉시 스윕은 프렐류드가 문서 맨 앞에서 도는
+    // 시점이라 body 가 아직 파싱되기 전이고, rIC 는 이 환경에서 안 도는 것으로
+    // 보였다(실측: readyState=complete 인데 pending 이 그대로 남고 실패 경고도
+    // 없다 = 아예 호출되지 않았다). 그래서 문서 생애주기 이벤트 + 타이머에
+    // 얹어 다섯 번 더 기회를 준다. 이미 되돌아간 요소는 속성이 없어 재실행이
+    // 무해하다.
+    const sweepPendingFrames = () => {
+      try {
+        const qsa = Native.elementQuerySelectorAll || docEl.querySelectorAll;
+        Array.prototype.forEach.call(
+          qsa.call(docEl, 'iframe[data-zp-frame-src], frame[data-zp-frame-src]'),
+          restorePendingFrameSrc,
+        );
+        Array.prototype.forEach.call(
+          qsa.call(docEl, 'iframe[data-zp-srcdoc], frame[data-zp-srcdoc]'),
+          restorePendingSrcdoc,
+        );
+      } catch {}
+    };
     const sweepStyles = () => {
       try { docEl.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {}
       sweepSWLessFrames(w);
+      sweepPendingFrames();
     };
     try { w.document.addEventListener('DOMContentLoaded', sweepStyles); } catch {}
     try { w.addEventListener('load', sweepStyles); } catch {}
