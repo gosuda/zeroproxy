@@ -3219,7 +3219,7 @@ impl DuplicateExtensionChecker {
     }
 }
 
-fn low_quality_integer_hash(mut x: u32) -> u32 {
+pub(crate) fn low_quality_integer_hash(mut x: u32) -> u32 {
     x = x
         .wrapping_add(0x7ed55d16)
         .wrapping_add(x << 12);

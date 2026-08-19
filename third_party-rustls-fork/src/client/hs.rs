@@ -718,6 +718,31 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         _ => chrome134_fallback_extension_order(),
     };
 
+    // 2026-08-19 — 순서를 **연결마다 섞는다**. 내용이 아니라 안정성이 지문이었다.
+    //
+    // 실측(browserleaks/json, 같은 브라우저로 3회씩): ja4 / ja4_r / ja3n /
+    // akamai 는 프록시와 직접이 전부 일치하는데, **확장 순서**만 달랐다.
+    // 직접 Chrome 은 3회 모두 다른 순서였고 우리는 3회 모두 같은 순서였다.
+    // 즉 한 번의 해시로는 안 걸리지만 두 번만 보면 걸린다 — "매 연결 같은
+    // 순서" 는 브라우저가 하지 않는 행동이다. Chrome/BoringSSL 은
+    // `ssl_setup_extension_permutation` 으로 SSL 객체마다 한 번 섞는다.
+    //
+    // 캡처한 스펙의 순서를 버리는 게 아깝지 않은 이유: 그 순서 자체가 사용자
+    // 브라우저가 그날 뽑은 **한 번의 무작위 순열**이었다. 고정해 두면 오히려
+    // 그 한 순열이 우리 서명이 된다.
+    //
+    // ★per-call 난수를 쓰면 안 된다. `encode()` 는 한 핸드셰이크에서 여러 번
+    // 돈다(PSK binder 를 ClientHello 직렬화 위에 MAC 하고, 그 뒤 wire 용으로
+    // 다시 직렬화한다). 그래서 **연결마다 한 번** 뽑히는 `order_seed` 로
+    // 결정적으로 정렬한다 — 같은 이유로 HelloRetryRequest 의 두 번째
+    // ClientHello 도 같은 순서가 되고, ECH 는 inner/outer 가 seed 를 공유하므로
+    // outer-extensions 압축도 어긋나지 않는다.
+    order.sort_by_cached_key(|ext| {
+        crate::msgs::handshake::low_quality_integer_hash(
+            ((exts.order_seed as u32) << 16) | (u16::from(*ext) as u32),
+        )
+    });
+
     // Phase 5.6: GREASE-inject the extension list. Chrome 134 always
     // brackets the wire layout with two distinct GREASE IDs (RFC 8701).
     // JA3 strips them so the hash doesn't change; we still need them
