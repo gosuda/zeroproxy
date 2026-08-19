@@ -133,6 +133,30 @@ fn attr_settings(
                         let _ = el.set_attribute("data-zp-srcdoc", &doc);
                         let _ = el.remove_attribute("srcdoc");
                     }
+                    // `<iframe src>` 도 같은 이유로 이름을 옮긴다.
+                    //
+                    // 서브리소스 리라이트 목록에 iframe/frame 이 없어서 마크업에
+                    // 박혀 온 절대 URL 이 **그대로 남았다**. 파서가 그걸 보고
+                    // 타깃 오리진으로 직접 프레임을 띄우려 하고, 지금까지는
+                    // `frame-src 'self'` 가 막아 줬을 뿐이다 — 구멍 매트릭스
+                    // 용어로 `csp-only`. (실측: CSP 를 켜면 frame-src 차단
+                    // 1건, 끄면 shopsquare.naver.com 으로 실제 요청이 나간다.)
+                    //
+                    // 서브리소스처럼 `/zp/api/fetch?url=` 로 바꾸면 안 된다.
+                    // 그 경로는 문서 파이프라인이 아니라 프렐류드가 주입되지
+                    // 않은 **멤브레인 없는 문서**를 만든다. 프레임은 share 경로로
+                    // 활성화해야 하는데 그건 세션 상태가 필요하므로 여기서는
+                    // 이름만 옮기고 페이지 realm 이 기존 세터 경로로 되돌린다 —
+                    // srcdoc 과 같은 전략이고, 검증된 코드를 재사용한다.
+                    if (tag == "iframe" || tag == "frame") {
+                        if let Some(src) = el.get_attribute("src") {
+                            let t = src.trim();
+                            if !t.is_empty() && !starts_with_ascii_ci(t, "about:") {
+                                let _ = el.set_attribute("data-zp-frame-src", &src);
+                                let _ = el.remove_attribute("src");
+                            }
+                        }
+                    }
                     // `ping` 은 클릭 시 브라우저가 **직접** POST 하는 추적 비콘
                     // 목록이다(공백 구분 URL 여러 개). 우리는 이걸 지원하지
                     // 않기로 했는데(README: 통과시키는 것 자체가 목적에 반한다),

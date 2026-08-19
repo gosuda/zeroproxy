@@ -24,6 +24,11 @@ const U = (id, cross) => `${cross ? `http://127.0.0.1:${CDN}` : ''}/img/${id}__$
 // ── A. 정적 HTML 속성 (htmltx 가 서빙 바이트에서 고쳐야 하는 것) ──────────
 // 이 그룹은 문서 HTML 에 직접 박아 넣는다 (아래 STATIC_HTML).
 
+// 마크업에 박혀 온 `<iframe src>`. 런타임 생성 프레임(e1/e4)과 달리 세터 훅을
+// 타지 않으므로 서버측 htmltx 가 잡아야 한다 — 2026-08-19 까지 htmltx 의
+// 서브리소스 목록에 iframe 이 없어 `csp-only` 였다(frame-src 가 막아 줬을 뿐).
+C('a10-static-iframe', 1, '');
+
 // ── B. 런타임 DOM: 요소 생성 경로 ────────────────────────────────────────
 C('b1-img-prop', 0, `var i=new Image();i.src=U;document.body.appendChild(i)`);
 C('b2-img-setattr', 0, `var i=document.createElement('img');i.setAttribute('src',U);document.body.appendChild(i)`);
@@ -84,6 +89,7 @@ const STATIC_HTML = `
 <link rel="stylesheet" href="/style/a7.css"><div class="a7"></div>
 <video poster="/img/a8-static-poster__same.png"></video>
 <object data="/img/a9-static-object__same.png"></object>
+<iframe src="http://127.0.0.1:${CDN}/frame/a10-static-iframe" width="10" height="10"></iframe>
 `;
 
 function page() {
@@ -122,6 +128,13 @@ function mk(port) {
     if (u.startsWith('/page')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end(page());
+    }
+    // 프레임 케이스용 문서. 안에서 자기 id 의 이미지를 부르므로 도착 판정은
+    // 기존 /img/<id>__<cross>.png 매처를 그대로 쓴다.
+    if (u.startsWith('/frame/')) {
+      const id = u.slice('/frame/'.length);
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end('<!doctype html><meta charset="utf-8"><img src="/img/' + id + '__cross.png">');
     }
     if (u.endsWith('.css')) {
       res.writeHead(200, { 'content-type': 'text/css', 'cache-control': 'no-store' });

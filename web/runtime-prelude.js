@@ -3346,6 +3346,24 @@
   // 순서 주의: **먼저 만들고, 성공했을 때만 옮긴다.** 지우고 나서 만들면
   // injectSrcdoc 이 던졌을 때 원본까지 사라져 iframe 이 통째로 빈다.
   // 실패하면 data-zp-srcdoc 을 그대로 둔다 — 파싱되지 않으므로 fail-closed 다.
+  // htmltx 가 이름만 옮겨 둔 `<iframe src>` 를 되돌린다.
+  //
+  // 되돌릴 때 네이티브 세터를 쓰면 안 된다 — 그러면 원본 URL 이 그대로 박혀
+  // 처음 문제로 돌아간다. **후킹된 setAttribute** 를 타야 iframe 전용 경로
+  // (about:blank 로 먼저 세우고 activatedFrameURL 로 share 경로를 물리는)가
+  // 돈다. 실패하면 data 속성을 남겨 둔다(fail-closed): 지우고 나서 던지면
+  // 프레임이 영영 빈 채로 남는다.
+  function restorePendingFrameSrc(el) {
+    if (!el || !Native.hasAttribute.call(el, 'data-zp-frame-src')) return;
+    const pending = Native.getAttribute.call(el, 'data-zp-frame-src') || '';
+    if (!pending) { try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {} return; }
+    try {
+      el.setAttribute('src', pending);
+      try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {}
+    } catch (e) {
+      try { console.warn('[ZP] frame src restore failed', String(e && (e.message || e))); } catch {}
+    }
+  }
   function restorePendingSrcdoc(el) {
     if (!el || !Native.hasAttribute.call(el, 'data-zp-srcdoc')) return;
     const pending = Native.getAttribute.call(el, 'data-zp-srcdoc') || '';
@@ -3372,6 +3390,8 @@
       const qsa = Native.elementQuerySelectorAll || root.querySelectorAll;
       const found = qsa.call(root, 'iframe[data-zp-srcdoc], frame[data-zp-srcdoc]');
       Array.prototype.forEach.call(found, restorePendingSrcdoc);
+      const pendingSrc = qsa.call(root, 'iframe[data-zp-frame-src], frame[data-zp-frame-src]');
+      Array.prototype.forEach.call(pendingSrc, restorePendingFrameSrc);
     } catch {}
     // `<style>` 도 같은 백스톱이 필요하다. 두 가지가 새기 때문이다:
     // (a) 파서가 넣은 style 은 MutationObserver 가 붙기 **전**에 이미 문서에
