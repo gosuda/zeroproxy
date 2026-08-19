@@ -2988,3 +2988,22 @@ test('membrane hooks stay non-configurable (E1 lock)', () => {
   assert.match(rt, /return !!d && !d\.configurable;/,
     'propertyLocked() must keep deciding re-installation from the configurable bit');
 });
+
+// 2026-08-20 — `frame-ancestors` 는 meta 로 배달되면 무시되고, 브라우저는 그때마다
+// 콘솔에 "ignored when delivered via a <meta> element" 를 찍는다. 런처 문서는
+// 프록시 경로(`/zp/p/…`)의 **최초 문서**이기도 해서 이 경고가 모든 프록시 페이지
+// 로드마다 나왔다 — 감사 지표의 csp 카운트를 상시 1로 올리는 잡음이다.
+// 실효 정책은 서버 헤더에 그대로 있다. 둘을 함께 고정한다: meta 에는 없어야 하고
+// 헤더 쪽에는 있어야 한다. 한쪽만 검사하면 "지웠더니 보호가 사라진" 회귀를 놓친다.
+test('frame-ancestors: 런처 meta 에는 없고 서버 헤더에는 있다', () => {
+  const launcher = fs.readFileSync('web/index.html', 'utf8');
+  const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]*)"/i.exec(launcher);
+  assert.ok(meta, 'launcher must still ship a meta CSP');
+  assert.equal(
+    /frame-ancestors/i.test(meta[1]),
+    false,
+    'meta 로 배달된 frame-ancestors 는 무시되고 콘솔 잡음만 남긴다'
+  );
+  const csp = fs.readFileSync('internal/headers/csp.go', 'utf8');
+  assert.match(csp, /"frame-ancestors 'none'"/, '헤더 쪽 정책에는 남아 있어야 한다');
+});
