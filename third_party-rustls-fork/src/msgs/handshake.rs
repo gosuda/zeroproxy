@@ -1049,7 +1049,16 @@ impl ClientExtensions<'_> {
         {
             exts.push(ExtensionType::EncryptedClientHelloOuterExtensions);
         }
-        if self.encrypted_client_hello.is_some() {
+        if self.encrypted_client_hello.is_some()
+            && !self
+                .contiguous_extensions
+                .contains(&ExtensionType::EncryptedClientHello)
+        {
+            // ZeroProxy: ECH 를 마지막에 붙이는 건 **호출자가 순서를 지정하지
+            // 않았을 때**의 기본값이다. `contiguous_extensions` 에 이미 들어
+            // 있으면 그 자리가 호출자의 의도이므로 여기서 또 붙이면 확장이
+            // 중복돼 `decode_error` 를 맞는다. (진짜 ECH 경로는 이 목록에
+            // ECH 를 넣지 않으므로 예전 동작 그대로다 — GREASE 경로만 바뀐다.)
             exts.push(ExtensionType::EncryptedClientHello);
         }
         if self.preshared_key_offer.is_some() {

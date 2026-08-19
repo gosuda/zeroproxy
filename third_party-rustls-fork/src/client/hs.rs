@@ -718,6 +718,17 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         _ => chrome134_fallback_extension_order(),
     };
 
+    // ECH GREASE(65037)도 셔플 대상에 포함시킨다. 캡처한 스펙에는 이미 들어
+    // 있지만 하드코딩 폴백 목록에는 없어서, 폴백 경로만 ECH 가 맨 뒤로 밀리는
+    // 비대칭이 생긴다. 여기서 채워 두 경로를 같게 만든다. (필드가 None 이면
+    // 인코더가 알아서 건너뛰므로 목록에 있는 것 자체는 무해하다.)
+    {
+        let ech = crate::msgs::enums::ExtensionType::EncryptedClientHello;
+        if !order.contains(&ech) {
+            order.push(ech);
+        }
+    }
+
     // 2026-08-19 — 순서를 **연결마다 섞는다**. 내용이 아니라 안정성이 지문이었다.
     //
     // 실측(browserleaks/json, 같은 브라우저로 3회씩): ja4 / ja4_r / ja3n /
@@ -873,16 +884,22 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
                 payload: PayloadU16::new(payload_bytes),
             },
         ));
-        // ECH ext goes near the end of the ClientHello (real Chrome
-        // 148 emits it second-to-last, immediately before
-        // pre_shared_key). `used_extensions_in_encoding_order`
-        // already places ECH after the contiguous block when the
-        // struct field is Some, so we MUST NOT also list it in
-        // `contiguous_extensions` (would double-emit). Strip if a
-        // captured spec listed 65037 there.
+        // ECH GREASE 는 **순서 섞기에 함께 참여**시킨다.
+        //
+        // 예전 주석은 "real Chrome 148 emits it second-to-last, immediately
+        // before pre_shared_key" 였고 그래서 `contiguous_extensions` 에서
+        // 65037 을 빼내 `used_extensions_in_encoding_order` 가 맨 뒤에 붙이게
+        // 뒀다. **2026-08-19 실측으로 그 전제가 깨졌다**: 같은 머신의 직접
+        // Chrome 151 은 fe0d 를 16개 중 9/12/8번째, 즉 **한가운데**에 놓는다
+        // (browserleaks ja4_ro, 3회). 우리만 항상 마지막이면 그 자체가 신호다.
+        //
+        // 우리가 보내는 ECH 는 GREASE 뿐이다(위의 무작위 enc/payload). 진짜
+        // ECH 의 inner/outer 압축 관계가 없으므로 위치를 옮겨도 프로토콜상
+        // 잃을 게 없다. PSK 는 여전히 맨 뒤다 — 그건 RFC 8446 이 요구한다.
         let ech_typ = crate::msgs::enums::ExtensionType::EncryptedClientHello;
-        exts.contiguous_extensions
-            .retain(|e| *e != ech_typ);
+        if !exts.contiguous_extensions.contains(&ech_typ) {
+            exts.contiguous_extensions.push(ech_typ);
+        }
     }
 
     // Phase 5.9: override named_groups (supported_groups extension body
