@@ -29,6 +29,24 @@ const U = (id, cross) => `${cross ? `http://127.0.0.1:${CDN}` : ''}/img/${id}__$
 // 서브리소스 목록에 iframe 이 없어 `csp-only` 였다(frame-src 가 막아 줬을 뿐).
 C('a10-static-iframe', 1, '');
 
+// 아래 a11~a20 은 2026-08-20 에 추가한 **파싱 시점** 칸이다.
+// a10(정적 iframe src)을 잡고 나서 매트릭스를 다시 보니, 정적 그룹은
+// img/srcset/source/style/link/poster/object 열 개뿐이고 나머지 표면은
+// 전부 런타임 경로로만 있었다. htmltx 의 (tag, attr) 서브리소스 목록과
+// 대조해서 **목록에 없는 조합**을 한 칸씩 만든 것이 이 묶음이다.
+// 전부 cross 로 둔다 — 원본 오리진으로 직접 나가는지가 유일한 판정이고,
+// same-origin 상대 URL 은 리라이트를 안 해도 어차피 SW 를 지나기 때문이다.
+C('a11-static-inputimage', 1, ''); // <input type=image src> — 진짜 이미지 요청을 낸다
+C('a12-static-poster-cross', 1, ''); // poster 는 URL 속성 필터에조차 없다
+C('a13-static-svgimage', 1, ''); // SVG <image href>
+C('a14-static-svgxlink', 1, ''); // SVG <image xlink:href>
+C('a15-static-legacy-image', 1, ''); // <image> — 파서는 img 로 만들지만 토큰 이름은 image
+C('a16-static-td-background', 1, ''); // 레거시 background 속성
+C('a17-static-srcdoc', 1, ''); // 마크업에 박힌 srcdoc (런타임 e3 만 있었다)
+C('a18-static-import', 1, ''); // 인라인 <style> 의 @import (런타임 d7 만 있었다)
+C('a19-static-script', 1, ''); // <script src> cross
+C('a20-static-use', 1, ''); // SVG <use href>
+
 // ── B. 런타임 DOM: 요소 생성 경로 ────────────────────────────────────────
 C('b1-img-prop', 0, `var i=new Image();i.src=U;document.body.appendChild(i)`);
 C('b2-img-setattr', 0, `var i=document.createElement('img');i.setAttribute('src',U);document.body.appendChild(i)`);
@@ -90,6 +108,16 @@ const STATIC_HTML = `
 <video poster="/img/a8-static-poster__same.png"></video>
 <object data="/img/a9-static-object__same.png"></object>
 <iframe src="http://127.0.0.1:${CDN}/frame/a10-static-iframe" width="10" height="10"></iframe>
+<input type="image" src="http://127.0.0.1:${CDN}/img/a11-static-inputimage__cross.png">
+<video poster="http://127.0.0.1:${CDN}/img/a12-static-poster-cross__cross.png"></video>
+<svg width="1" height="1"><image href="http://127.0.0.1:${CDN}/img/a13-static-svgimage__cross.png" width="1" height="1"></image></svg>
+<svg width="1" height="1"><image xlink:href="http://127.0.0.1:${CDN}/img/a14-static-svgxlink__cross.png" width="1" height="1"></image></svg>
+<image src="http://127.0.0.1:${CDN}/img/a15-static-legacy-image__cross.png">
+<table><tr><td background="http://127.0.0.1:${CDN}/img/a16-static-td-background__cross.png">x</td></tr></table>
+<iframe srcdoc="&lt;img src=&#34;http://127.0.0.1:${CDN}/img/a17-static-srcdoc__cross.png&#34;&gt;" width="10" height="10"></iframe>
+<style>@import url("http://127.0.0.1:${CDN}/img/a18-static-import__cross.css");</style>
+<script src="http://127.0.0.1:${CDN}/img/a19-static-script__cross.js"></script>
+<svg width="1" height="1"><use href="http://127.0.0.1:${CDN}/img/a20-static-use__cross.svg#i"></use></svg>
 `;
 
 function page() {

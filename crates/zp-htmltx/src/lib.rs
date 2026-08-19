@@ -189,11 +189,14 @@ fn attr_settings(
                             let is_url_attr = matches!(
                                 lower_view,
                                 "href"
+                                    | "xlink:href"
                                     | "src"
                                     | "action"
                                     | "formaction"
                                     | "srcset"
                                     | "imagesrcset"
+                                    | "poster"
+                                    | "background"
                                     | "style"
                             );
                             let is_on_handler =
@@ -213,11 +216,14 @@ fn attr_settings(
                         let is_url_attr = matches!(
                             lower,
                             "href"
+                                | "xlink:href"
                                 | "src"
                                 | "action"
                                 | "formaction"
                                 | "srcset"
                                 | "imagesrcset"
+                                | "poster"
+                                | "background"
                                 | "style"
                         );
                         if !is_on_handler && !is_url_attr {
@@ -252,6 +258,25 @@ fn attr_settings(
                                         | ("audio", "src")
                                         | ("track", "src")
                                         | ("embed", "src")
+                                        // 2026-08-20 — 매트릭스에 파싱 시점 칸을 채워
+                                        // 넣고 나서 드러난 자리들. 전부 이 (tag, attr)
+                                        // 목록에 조합이 없어 원본 URL 이 그대로 나갔다
+                                        // (CSP 만 막고 있던 자리 = csp-only).
+                                        // `<input type=image src>` 는 진짜 이미지 요청을
+                                        // 내고, `<image>` 는 파서가 img 로 만들지만
+                                        // 토크나이저가 보는 이름은 image 라 목록을 비껴갔다.
+                                        | ("input", "src")
+                                        | ("image", "src")
+                                        | ("image", "href")
+                                        | ("image", "xlink:href")
+                                        | ("use", "href")
+                                        | ("video", "poster")
+                                        // 레거시 background 속성 — 크롬이 아직 요청을 낸다.
+                                        | ("body", "background")
+                                        | ("table", "background")
+                                        | ("td", "background")
+                                        | ("th", "background")
+                                        | ("tr", "background")
                                 );
                                 // Anchor / form / input / button URL attributes.
                                 // Previously left raw because the runtime-prelude
@@ -976,6 +1001,18 @@ fn proxied_subresource_url(
     } else {
         return None;
     };
+    // SVG 스프라이트(`sprite.svg#icon`)와 `<use href>` 는 조각 식별자가 **의미**다.
+    // 통째로 퍼센트 인코딩하면 `#` 가 쿼리 안으로 들어가 브라우저가 조각을 못 고른다
+    // (외부 참조 `<use>` 가 통째로 빈 채로 렌더된다). 프래그먼트는 프록시 URL
+    // **바깥**에 그대로 붙인다 — 프래그먼트는 요청에 실리지 않으므로 SW 가 받는
+    // URL 은 그대로고, 조각 선택만 로컬에서 정상 동작한다.
+    let (absolute, fragment) = match absolute.find('#') {
+        Some(i) => (absolute[..i].to_string(), Some(absolute[i..].to_string())),
+        None => (absolute, None),
+    };
+    if absolute.is_empty() {
+        return None;
+    }
     // Emit a proxy-origin-absolute URL so the page's virtual baseURI override
     // does NOT shift the resolution to the target host. Falls back to a
     // root-relative path only if proxy_origin was not supplied.
@@ -996,6 +1033,9 @@ fn proxied_subresource_url(
     // resource-heavy pages.
     for chunk in utf8_percent_encode(&absolute, URL_PARAM_ENCODE) {
         out.push_str(chunk);
+    }
+    if let Some(f) = fragment {
+        out.push_str(&f);
     }
     Some(out)
 }
@@ -1145,6 +1185,67 @@ mod tests {
     // 파싱 시점 `srcdoc` 은 멤브레인 없는 문서를 만든다 — 이름을 옮겨 두고
     // 페이지 realm 이 후킹된 세터로 되돌리게 한다. 옮기기만 하고 값을 잃으면
     // iframe 이 통째로 비므로 **값 보존까지** 확인한다.
+    // 2026-08-20 — 파싱 시점 서브리소스 표면 전수. 여기 있는 조합은 전부
+    // htmltx 의 (tag, attr) 목록에 **없어서** 원본 URL 이 그대로 나가던 자리다.
+    // 브라우저 매트릭스에 정적 칸(a11~a20)을 채워 넣고 나서야 드러났다.
+    #[test]
+    fn parse_time_subresource_surfaces_are_rewritten() {
+        let cases: &[(&str, &str)] = &[
+            // <input type=image> 는 진짜 이미지 요청을 낸다.
+            ("input-image", "<input type=\"image\" src=\"http://t.example/a.png\">"),
+            ("video-poster", "<video poster=\"http://t.example/a.png\"></video>"),
+            ("svg-image-href", "<svg><image href=\"http://t.example/a.png\"></image></svg>"),
+            (
+                "svg-image-xlink",
+                "<svg><image xlink:href=\"http://t.example/a.png\"></image></svg>",
+            ),
+            // 파서는 img 로 만들지만 토크나이저가 보는 이름은 image 다.
+            ("legacy-image", "<image src=\"http://t.example/a.png\">"),
+            (
+                "td-background",
+                "<table><tr><td background=\"http://t.example/a.png\">x</td></tr></table>",
+            ),
+            ("body-background", "<body background=\"http://t.example/a.png\">"),
+        ];
+        for (name, html) in cases {
+            let r = transform(html, &opts()).unwrap();
+            assert!(
+                !r.html.contains("t.example/a.png"),
+                "{name}: 원본 URL 이 남았다 -> {}",
+                r.html
+            );
+            assert!(
+                r.html.contains("/zp/api/fetch?url="),
+                "{name}: 프록시 경로로 안 바뀌었다 -> {}",
+                r.html
+            );
+        }
+    }
+
+    // 스프라이트 참조는 프래그먼트가 의미다. 통째로 인코딩하면 브라우저가
+    // 조각을 못 골라 외부 <use> 가 빈 채로 렌더된다.
+    #[test]
+    fn subresource_fragment_survives_outside_the_proxy_url() {
+        let r = transform(
+            "<svg><use href=\"http://t.example/s.svg#icon\"></use></svg>",
+            &opts(),
+        )
+        .unwrap();
+        assert!(
+            r.html.contains("api/fetch?url=http%3A%2F%2Ft.example%2Fs.svg#icon"),
+            "프래그먼트가 프록시 URL 바깥에 남아야 한다 -> {}",
+            r.html
+        );
+    }
+
+    // object/embed 는 CSP `object-src 'none'` 으로 **의도적으로** 막는 표면이다.
+    // 리라이트해서 되살리지 않는다 — 이 칸이 깨지면 그건 정책 변경이다.
+    #[test]
+    fn plugin_surface_stays_unrewritten_by_design() {
+        let r = transform("<object data=\"http://t.example/a.png\"></object>", &opts()).unwrap();
+        assert!(r.html.contains("t.example"), "object data: {}", r.html);
+    }
+
     #[test]
     fn srcdoc_is_moved_to_data_attribute() {
         let html = r#"<html><body><iframe srcdoc="&lt;img src=&quot;/a.png&quot;&gt;"></iframe></body></html>"#;
