@@ -5170,7 +5170,12 @@
       if (relay) Native.setAttribute.call(node, attrName, relay);
     }
   }
-  function injectSrcdoc(s) { return '<script src="/zp/assets/zp-core.js"><\/script><script src="/zp/assets/zp-page-bundle.js"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="/zp/assets/runtime-prelude.js"><\/script>' + transformHTML(String(s)); }
+  // srcdoc 문서에도 **버전이 붙은** URL 을 쓴다. 예전엔 세 개를 전부 맨 경로로
+  // 박아서 (a) 로드마다 재검증 왕복이 남고, (b) 더 나쁘게는 부모가 immutable
+  // 사본을 쓰는 동안 이 프레임만 `no-cache` 사본을 받아 **다른 빌드의 프렐류드**를
+  // 실행할 여지가 있었다. `assetURL()` 이 emit 전용(쿼리 포함)이고
+  // `assetPath()` 는 경로 비교 전용이다 — 섞으면 internalPath 가 불일치한다.
+  function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + transformHTML(String(s)); }
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) { return 'return __ZP_EXEC_EVENT(this,event,' + JSON.stringify(String(source || '')).replace(/</g, '\\u003c') + ')'; }
   function syncBaseElement(node) {

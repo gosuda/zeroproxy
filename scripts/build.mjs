@@ -135,7 +135,14 @@ async function buildWeb() {
   const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
 
-  await copyFile(path.join(webSrc, 'index.html'), path.join(webOut, 'index.html'));
+  // index.html 도 build id 치환 대상이다. 그냥 복사하면 런처의
+  // `<script src="/zp/assets/zp-core.js">` 가 버전 없는 URL 로 남아 로드마다
+  // 재검증 왕복이 하나 남는다(측정: 웜 로드에서 유일하게 남던 요청).
+  await writeFile(
+    path.join(webOut, 'index.html'),
+    (await readFile(path.join(webSrc, 'index.html'), 'utf8'))
+      .split('__ZP_BUILD_ID__').join(buildId),
+  );
   await copyOptional(path.join(webSrc, 'favicon.ico'), path.join(webOut, 'favicon.ico'));
   await copyOptional(path.join(webSrc, 'manifest.webmanifest'), path.join(webOut, 'manifest.webmanifest'));
 
