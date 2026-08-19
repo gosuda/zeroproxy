@@ -413,3 +413,33 @@ for (const c of chunks) for (const id in (c[1]||{})) {
 - `https://news.ycombinator.com/` — 단순 HTML, JS 거의 없음 → baseline 보장
 - `https://github.com/` — React + 복잡한 dynamic import
 - `https://www.google.com/` — 적대적 anti-bot/fingerprinting 환경
+
+---
+
+## 2026-08-20 — naver shopad 잔여 건 닫음: 20회 무장 관측에서 원본 URL 0건
+
+**결론**: 재현되지 않는다. 관측기를 무장한 채 **20회 연속** 로드해 전부 깨끗했다.
+`setAttributeNS` 누락(08-18)과 정적 `<iframe src>` 누락(08-20) 중 하나가 원인이었을
+가능성이 높다 — 둘 다 이 증상과 같은 모양(서브리소스가 원본 URL 로 남음)이다.
+
+**측정 조건 (이걸 안 적으면 다음 세션이 또 못 믿는다)**:
+- 데몬: `--record --enforce-csp` (`list` 로 `csp_bypassed: false` 확인). 이걸
+  빠뜨려서 26회를 날린 게 바로 전 세션이다.
+- 관측기: `.ai/dogfood/wtm/zpraw-observer.js` 를 `inject-script --world isolated`
+  로 document-start 에 등록. 프레임마다 MutationObserver 로 원본 URL 속성을
+  `globalThis.__zpRaw` 에 쌓는다. 12/12 프레임에서 `__zpRawArmed === true` 확인.
+- 하네스: `.ai/dogfood/wtm/shopad-hunt.sh` — 매 회 CSP 위반 수 / 프레임 수 /
+  `__zpRaw` 적재량을 한 줄로 남기고, 0 이 아니면 그 자리에서 전체 덤프.
+
+**결과 (20/20)**: `shopad=1 csp=0 frames=12 raw_frames=0 raw_top=0`.
+격리 월드에서 최상위 문서의 `img` 57개 중 원본 URL **0개**.
+
+**★ 전제가 하나 틀려 있었다**: "shopad 모듈은 서버측 A/B 로 ~10% 만 붙는다" 고
+적혀 있었는데, 오늘은 **20/20 전부 붙었다**(`iframe[src="https://shopsquare.naver.com/"]`
+존재로 판정). 즉 예전의 "재현율 10%" 는 모듈 부착률이 아니라 **관측 실패율**이었을
+공산이 크다 — 그때는 CSP 위반으로만 보고 있었고 그 CSP 가 꺼져 있었다.
+**"간헐적" 이라는 딱지는 관측기를 고치고 나면 다시 붙여 볼 것.**
+
+**교훈**: 부착률 같은 전제는 판정 자체보다 오래 살아남아 다음 세션의 계획을
+바꾼다(우리는 이 전제 때문에 "기다린다" 를 선택했다). 관측 도구를 고쳤으면
+판정만 다시 하지 말고 **전제도 다시 잴 것.**
