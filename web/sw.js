@@ -1677,7 +1677,7 @@ async function transportFetch(targetUrl, opt) {
       }
     }
   }
-  return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab);
+  return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab, u);
 }
 
 function scriptKindFromRequest(req) {
@@ -2031,7 +2031,7 @@ function streamDocumentResponse(resp, opt, targetUrl) {
   headers.set('Content-Type', 'text/html; charset=utf-8');
   // 스트리밍 문서에도 버퍼 경로(`addCSP`)와 **같은** 보안 헤더를 건다.
   // 빠져 있던 동안 프록시 문서에는 CSP 가 없었다.
-  applyZPSecurityHeaders(headers, opt.request, opt.tab && opt.tab.servers, opt.tab);
+  applyZPSecurityHeaders(headers, opt.request, opt.tab && opt.tab.servers, opt.tab, targetUrl);
   const out = new Response(resp.body.pipeThrough(ts), {
     status: resp.status,
     statusText: resp.statusText,
@@ -2890,7 +2890,34 @@ function applyCORS(h, req) {
 // 기본 경로이므로 사실상 모든 프록시 문서에 CSP 가 없었다.
 // 실측(수정 전): 런처 페이지에서는 외부 이미지가 차단되는데, 같은 이미지가
 // 프록시 문서에서는 그대로 로드됐다.
-function applyZPSecurityHeaders(h, req, servers, tab) {
+// 타깃이 헤더로 브라우저를 조종하는 자리. Go 의 `internal/headers/policy.go`
+// `hidden` 과 **같은 목록**이어야 한다 — static-policy 가드가 둘을 대조한다.
+// `Refresh: <delay>[;url=<url>]` 를 **지우는 대신 옮긴다.** 지우기만 하면
+// 탈출은 막히지만 타깃이 의도한 리다이렉트가 통째로 사라진다(실측: 착지 실패).
+// htmltx 가 `<meta http-equiv=refresh>` 에 하는 것과 같은 처리 — url 부분만
+// 런처의 `?via=` 경로로 바꾼다. delay 만 있는 형태는 자기 자신 재로드라 그대로 둔다.
+function proxiedRefreshValue(raw, targetUrl) {
+  const s = String(raw || '');
+  if (!s) return '';
+  const at = s.toLowerCase().indexOf('url=');
+  if (at < 0) return s; // delay-only — 프록시 URL 을 다시 부르는 것이라 안전하다
+  const head = s.slice(0, at);
+  let v = s.slice(at + 4).trim();
+  if (v.length >= 2 && ((v[0] === '"' && v.endsWith('"')) || (v[0] === "'" && v.endsWith("'")))) v = v.slice(1, -1);
+  v = v.trim();
+  if (!v || /^javascript:/i.test(v)) return '';
+  let abs;
+  try { abs = new URL(v, targetUrl).toString(); } catch { return ''; }
+  if (!/^https?:/i.test(abs)) return '';
+  return head + 'url=' + ORIGIN + ZP.CONTROL_PREFIX + '?via=' + encodeURIComponent(abs);
+}
+const ZP_TARGET_POLICY_HEADERS = [
+  'Refresh', 'Link', 'Clear-Site-Data', 'Alt-Svc',
+  'Service-Worker-Allowed', 'SourceMap', 'X-SourceMap',
+  'Set-Cookie', 'Set-Cookie2',
+];
+function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
+  const rawRefresh = h.get('Refresh');
   // B4: read once, then delete unconditionally — defense in depth against a
   // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
@@ -2913,16 +2940,34 @@ function applyZPSecurityHeaders(h, req, servers, tab) {
   h.delete('Report-To');
   h.delete('Reporting-Endpoints');
   h.delete('NEL');
+  // 2026-08-20 — 타깃이 **헤더로** 지시하는 것들. Go 의 `ConstructorPolicy` 는
+  // 이 목록을 이미 걷어내는데, 문서 응답은 커널→SW 경로로 와서 여기를 안 지난다.
+  // 그래서 SW 쪽에도 같은 목록이 필요하다(두 곳이 갈라지지 않게 가드로 묶었다).
+  //
+  // ★`Refresh` 가 **진짜 탈출**이었다. 비표준이지만 크롬이 지원하는 헤더판
+  // meta refresh 다. 마크업이 아니라 응답 헤더라 htmltx 가 볼 수 없고, meta 쪽만
+  // 막아 둔 상태였다. 내비게이션 축 매트릭스 실측: 문서가 프록시 밖으로 나가고
+  // 브라우저가 착지 오리진으로 직접 요청 2건을 냈다 = IP 유출.
+  // `Link: <…>; rel=preload` 도 같은 부류다 — 브라우저가 헤더만 보고 타깃 URL 을
+  // 직접 가지러 간다. `Clear-Site-Data` 는 프록시 오리진의 저장소를 타깃이
+  // 지우게 하고, `Alt-Svc` 는 다음 연결을 타깃이 지정한 프로토콜/포트로 돌린다.
+  for (const name of ZP_TARGET_POLICY_HEADERS) h.delete(name);
+  // 지운 뒤에 **프록시 경로로 다시 심는다.** 목적지를 아는 경우에만 — 서브리소스
+  // 응답에는 targetUrl 이 없고, 거기 붙은 Refresh 는 어차피 의미가 없다.
+  if (rawRefresh && targetUrl) {
+    const next = proxiedRefreshValue(rawRefresh, targetUrl);
+    if (next) h.set('Refresh', next);
+  }
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
   applyCORS(h, req);
   return h;
 }
-function addCSP(resp, req, servers, tab) {
+function addCSP(resp, req, servers, tab, targetUrl) {
   const h = new Headers(resp.headers);
   // B4: read once, then delete unconditionally — defense in depth against a
   // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
-  applyZPSecurityHeaders(h, req, servers, tab);
+  applyZPSecurityHeaders(h, req, servers, tab, targetUrl);
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 function safeError(code, status = 400, targetUrl = '') {

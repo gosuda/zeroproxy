@@ -15,3 +15,4 @@ Cargo.lock.bak
 
 # 매트릭스 러너가 남기는 네트워크 테이프 스냅샷 (판정 근거, 실행마다 덮어씀)
 test/browser/hole-matrix/.last-tape.json
+test/browser/nav-matrix/.last-tape.json

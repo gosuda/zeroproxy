@@ -3220,3 +3220,40 @@ test('매트릭스 러너는 유실/판정불가를 조용히 넘기지 않는�
   assert.match(run, /판정불가/, '결말 미상은 별도 판정으로 남아야 한다');
   assert.match(run, /classifyTape/, '판정은 공유 모듈 한 곳에서만 나와야 한다');
 });
+
+// ── 타깃이 헤더로 브라우저를 조종하는 자리 (2026-08-20) ────────────────────
+//
+// Go 의 `ConstructorPolicy` 는 이 목록을 이미 걷어내는데, **문서 응답은
+// 커널→SW 경로로 와서 Go 를 안 지난다**. 그래서 SW 쪽에도 같은 목록이 필요하고,
+// 두 곳이 갈라지면 조용히 구멍이 난다 — `Refresh` 가 정확히 그랬다(진짜 탈출).
+test('타깃 제어 헤더: Go 의 hidden 목록을 SW 도 전부 처리한다', () => {
+  const go = fs.readFileSync('internal/headers/policy.go', 'utf8').split(String.fromCharCode(13,10)).join(String.fromCharCode(10));
+  const block = go.slice(go.indexOf('var hidden = map[string]struct{}{'), go.indexOf('}\n', go.indexOf('var hidden')));
+  const goNames = [...block.matchAll(/"([a-z0-9-]+)":/g)].map(m => m[1]);
+  assert.ok(goNames.length >= 10, `Go hidden 목록 파싱 실패 (${goNames.length}개) — 파서를 고칠 것`);
+
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const arr = sw.slice(sw.indexOf('const ZP_TARGET_POLICY_HEADERS = ['));
+  const swList = arr.slice(0, arr.indexOf(']')).toLowerCase();
+  // 목록 밖에서 명시적으로 처리하는 것들 — set 하거나 개별 delete 한다.
+  const explicit = sw.toLowerCase();
+
+  for (const name of goNames) {
+    const inList = swList.includes(`'${name}'`);
+    const deleted = explicit.includes(`h.delete('${name}')`);
+    const overwritten = explicit.includes(`h.set('${name}'`);
+    assert.ok(
+      inList || deleted || overwritten,
+      `${name}: Go 는 걷어내는데 SW 는 그대로 흘린다 — 문서 응답은 Go 를 안 지난다`
+    );
+  }
+});
+
+// Refresh 는 지우면 탈출은 막히지만 타깃이 의도한 리다이렉트가 사라진다(실측:
+// 착지 실패). 지우고 **프록시 경로로 다시 심는** 처리가 붙어 있어야 한다.
+test('Refresh 헤더는 지우는 게 아니라 프록시 경로로 옮긴다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(sw, /function proxiedRefreshValue\(/, 'Refresh 리라이트 헬퍼가 없다');
+  assert.match(sw, /h\.set\('Refresh', next\)/, '리라이트 결과를 다시 심지 않는다 — 착지가 사라진다');
+  assert.match(sw, /\?via=/, '런처 내비게이션 경로를 안 쓴다');
+});
