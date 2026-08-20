@@ -3007,3 +3007,125 @@ test('frame-ancestors: 런처 meta 에는 없고 서버 헤더에는 있다', ()
   const csp = fs.readFileSync('internal/headers/csp.go', 'utf8');
   assert.match(csp, /"frame-ancestors 'none'"/, '헤더 쪽 정책에는 남아 있어야 한다');
 });
+// ── URL 표면 인벤토리 대조 (2026-08-20) ─────────────────────────────────────
+//
+// 오늘 여섯 자리가 한 번에 나온 건 운이 아니라 **구현의 허용 목록을 소스에서
+// 읽어 와 브라우저가 실제로 요청을 내는 조합과 대조**했기 때문이다. 문제는 그
+// 대조가 사람이 기억해서 하는 일이었다는 것이다 — `csp-only` 는 증상이 없으므로
+// 기다려서는 영영 안 나온다.
+//
+// 그래서 대조를 여기에 고정한다. 아래 인벤토리는 **사람이 큐레이션**해야 하지만
+// (브라우저가 무슨 태그로 요청을 내는지는 코드에서 유도할 수 없다), 일단 한 줄이
+// 들어오면 그 다음부터는 강제된다:
+//   - `rewrite` 는 htmltx 의 (tag, attr) 목록에 **반드시 있어야** 한다.
+//   - htmltx 목록에 있는데 인벤토리에 없으면 실패한다 — 조용히 늘어나는 것을 막는다.
+//   - `deliberate` 는 목록에 **있으면 안 된다**(정책이 막는 표면). 이유를 적어야 한다.
+//   - 각 항목은 매트릭스 케이스 id 를 가리켜야 하고, 그 id 가 실제로 있어야 한다.
+//
+// 새 표면을 알게 되면 여기 한 줄을 먼저 추가할 것. 그러면 테스트가 나머지를 시킨다.
+const SURFACE_INVENTORY = [
+  // ── 서브리소스: htmltx 가 프록시 경로로 바꿔야 하는 것 ──
+  { pair: 'link:href', kind: 'rewrite', case: null, why: '정적 link href 는 /style/a7.css 라 id 태그가 없다 — 도착 판정은 a7-netcss-url 이 대신한다' },
+  { pair: 'script:src', kind: 'rewrite', case: 'a19-static-script' },
+  { pair: 'img:src', kind: 'rewrite', case: 'a1-static-img' },
+  { pair: 'source:src', kind: 'rewrite', case: 'a3-static-source' },
+  { pair: 'video:src', kind: 'rewrite', case: null, why: '같은 미디어 경로를 source:src 가 덮는다' },
+  { pair: 'audio:src', kind: 'rewrite', case: null, why: '같은 미디어 경로를 source:src 가 덮는다' },
+  { pair: 'track:src', kind: 'rewrite', case: null, why: '같은 미디어 경로를 source:src 가 덮는다' },
+  { pair: 'embed:src', kind: 'rewrite', case: 'b10-embed-src' },
+  { pair: 'input:src', kind: 'rewrite', case: 'a11-static-inputimage' },
+  { pair: 'image:src', kind: 'rewrite', case: 'a15-static-legacy-image' },
+  { pair: 'image:href', kind: 'rewrite', case: 'a13-static-svgimage' },
+  { pair: 'image:xlink:href', kind: 'rewrite', case: 'a14-static-svgxlink' },
+  { pair: 'use:href', kind: 'rewrite', case: 'a20-static-use' },
+  { pair: 'video:poster', kind: 'rewrite', case: 'a12-static-poster-cross' },
+  { pair: 'body:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
+  { pair: 'table:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
+  { pair: 'td:background', kind: 'rewrite', case: 'a16-static-td-background' },
+  { pair: 'th:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
+  { pair: 'tr:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
+
+  // ── 후보 목록(srcset): 단일 URL 리라이터를 못 쓰는 표면 ──
+  { pair: 'img:srcset', kind: 'srcset', case: 'a2-static-srcset' },
+  { pair: 'source:srcset', kind: 'srcset', case: 'b6-picture-source' },
+  { pair: 'link:imagesrcset', kind: 'srcset', case: null, why: 'preload 는 차단 목록이라 도착 케이스를 못 만든다' },
+
+  // ── 네비게이션: 브라우저 UI 로 새는 경로 (2026-06-06) ──
+  { pair: 'a:href', kind: 'navigation', case: null, why: '탈출 벡터 테스트가 별도로 있다' },
+  { pair: 'area:href', kind: 'navigation', case: null, why: 'a:href 와 같은 경로' },
+  { pair: 'form:action', kind: 'navigation', case: null, why: '탈출 벡터 테스트가 별도로 있다' },
+  { pair: 'input:formaction', kind: 'navigation', case: null, why: 'form:action 과 같은 경로' },
+  { pair: 'button:formaction', kind: 'navigation', case: null, why: 'form:action 과 같은 경로' },
+
+  // ── 정책상 일부러 막는 표면 — 리라이트하면 되살아난다 ──
+  { pair: 'object:data', kind: 'deliberate', case: 'b9-object-data', why: "object-src 'none' — plugin 표면 금지" },
+  { pair: 'a:ping', kind: 'deliberate', case: 'c11-ping-attr', why: '클릭 추적 비콘. 값이 URL 목록이고 통과가 목적에 반한다' },
+];
+
+test('URL 표면 인벤토리와 htmltx 허용 목록이 어긋나면 실패한다', () => {
+  const src = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  const block = (name) => {
+    const i = src.indexOf(`let ${name} = matches!(`);
+    assert.ok(i > 0, `htmltx 에서 ${name} 블록을 못 찾았다 — 파서를 고칠 것`);
+    const end = src.indexOf(');', i);
+    return src.slice(i, end);
+  };
+  const pairsIn = (text) =>
+    new Set([...text.matchAll(/\("([a-z]+)",\s*"([a-z:]+)"\)/g)].map(m => `${m[1]}:${m[2]}`));
+
+  const rewrite = pairsIn(block('is_subresource'));
+  const navigation = pairsIn(block('is_navigation'));
+  // srcset 블록은 이름 붙은 변수가 아니라 인라인 matches! 다.
+  const srcsetStart = src.indexOf('("img", "srcset")');
+  assert.ok(srcsetStart > 0, 'srcset 블록을 못 찾았다');
+  const srcset = pairsIn(src.slice(srcsetStart - 200, srcsetStart + 200));
+
+  const actual = { rewrite, navigation, srcset };
+  const matrix = fs.readFileSync('test/browser/hole-matrix/server.mjs', 'utf8');
+
+  const seen = new Set();
+  for (const entry of SURFACE_INVENTORY) {
+    seen.add(entry.pair);
+    if (entry.kind === 'deliberate') {
+      assert.ok(entry.why, `${entry.pair}: deliberate 는 이유를 적어야 한다`);
+      assert.equal(
+        rewrite.has(entry.pair) || srcset.has(entry.pair), false,
+        `${entry.pair} 는 정책상 막는 표면인데 htmltx 가 리라이트한다 — 되살아난다 (${entry.why})`
+      );
+    } else {
+      assert.ok(
+        actual[entry.kind].has(entry.pair),
+        `${entry.pair} 가 htmltx 의 ${entry.kind} 목록에서 빠졌다 — 원본 URL 이 그대로 나간다`
+      );
+    }
+    if (entry.case) {
+      assert.ok(
+        matrix.includes(entry.case),
+        `${entry.pair} 가 가리키는 매트릭스 케이스 ${entry.case} 가 없다`
+      );
+    } else {
+      assert.ok(entry.why, `${entry.pair}: 케이스가 없으면 이유를 적어야 한다`);
+    }
+  }
+
+  // 반대 방향 — 구현에만 있고 인벤토리에 없는 조합. 조용히 늘어나는 것을 막는다.
+  for (const [kind, set] of Object.entries(actual)) {
+    for (const pair of set) {
+      assert.ok(
+        seen.has(pair),
+        `htmltx 의 ${kind} 목록에 ${pair} 가 있는데 인벤토리에 없다 — 한 줄 추가하고 매트릭스 케이스를 가리킬 것`
+      );
+    }
+  }
+});
+
+// 이름만 옮기고 페이지 realm 이 되돌리는 두 자리는 matches! 목록에 없다.
+// 목록 대조로는 안 잡히므로 별도로 고정한다.
+test('프레임 속성 두 자리는 data 속성으로 옮겨진다 (목록 대조의 사각지대)', () => {
+  const src = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  assert.match(src, /data-zp-frame-src/, 'iframe/frame src 를 옮기는 경로가 사라졌다');
+  assert.match(src, /data-zp-srcdoc/, 'srcdoc 을 옮기는 경로가 사라졌다');
+  const matrix = fs.readFileSync('test/browser/hole-matrix/server.mjs', 'utf8');
+  assert.ok(matrix.includes("'a10-static-iframe'"), '정적 iframe src 케이스가 있어야 한다');
+  assert.ok(matrix.includes("'a17-static-srcdoc'"), '정적 srcdoc 케이스가 있어야 한다');
+});
