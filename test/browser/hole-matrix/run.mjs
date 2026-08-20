@@ -1,6 +1,7 @@
 // 매트릭스 드라이버: 직접 로드(대조군) → 프록시 로드 → 표.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { classifyTape } from './classify.cjs';
 
 const ID = 'zp';
 const PAGE = 'http://127.0.0.1:18099/page'; // server.mjs 가 띄우는 픽스처
@@ -45,27 +46,14 @@ async function loadProxy() {
   // 붙었으면 브라우저가 타깃과 실제로 말한 것(=유출), `failed` 만 있으면 막힌 것.
   const tapePath = 'test/browser/hole-matrix/.last-tape.json';
   tw('dump-recording', '-i', ID, '--filter', 'network', '--output', tapePath);
-  let events = [];
-  try { events = (JSON.parse(fs.readFileSync(tapePath, 'utf8')).network) || []; } catch {}
-  const idByReq = new Map();
-  for (const e of events) {
-    if (e.kind !== 'request' || !e.url) continue;
-    if (!/127.0.0.1:1809[89]/.test(e.url)) continue;
-    const i = idOf(e.url);
-    if (i) idByReq.set(e.request_id, i);
-  }
-  const attempted = new Set(idByReq.values());
-  const answered = new Set();
-  for (const e of events) {
-    if (e.kind !== 'response') continue;
-    const i = idByReq.get(e.request_id);
-    if (i) answered.add(i);
-  }
-  return { got, attempted, answered };
+  let tape = {};
+  try { tape = JSON.parse(fs.readFileSync(tapePath, 'utf8')); } catch {}
+  const verdicts = classifyTape(tape, idOf);
+  return { got, ...verdicts };
 }
 
 const control = await loadDirect();
-const { got, attempted, answered } = await loadProxy();
+const { got, attempted, answered, unknown, droppedNetwork } = await loadProxy();
 
 const rows = [];
 for (const c of cases) {
@@ -76,7 +64,11 @@ for (const c of cases) {
   //   시도 O + 응답 X = CSP 가 막았다 — 리라이트는 놓쳤고 2선 방어만 남았던 것
   //   시도 X          = 리라이트가 제대로 잡았다
   // 도착 축(arrived)은 재현성 지표로만 쓴다 — 우리 프록시가 대신 가져와도 켜진다.
-  const containment = tried ? (answered.has(c.id) ? 'LEAK' : 'csp-only') : 'ok';
+  const containment = !tried
+    ? 'ok'
+    : answered.has(c.id) ? 'LEAK'
+    : unknown.has(c.id) ? '판정불가'
+    : 'csp-only';
   rows.push({
     id: c.id,
     cross: c.cross ? 'cross' : 'same',
@@ -95,5 +87,17 @@ const cspOnly = rows.filter(r => r.containment === 'csp-only');
 console.log('\n[재현성] 대조군에서 되는데 프록시에서 안 되는 것:', broken.length ? broken.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 진짜 유출(바이트가 나감):', leaks.length ? leaks.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 리라이트는 놓쳤고 CSP 만 막은 것:', cspOnly.length ? cspOnly.map(r => r.id).join(', ') : '없음');
+// 판정이 테이프의 결말 이벤트에 걸려 있다. 이벤트가 유실되면 진짜 유출이
+// csp-only 로 내려앉을 수 있으므로(과소보고), 유실이 있으면 크게 알린다.
+if (droppedNetwork > 0) {
+  console.log(`
+[!!] 네트워크 테이프에서 ${droppedNetwork}건이 유실됐다 — 격리 판정을 믿지 말 것.`);
+  console.log('     링 버퍼가 넘쳤다는 뜻이다. 케이스를 줄이거나 로드 직전에 --clear 한 뒤 다시 잴 것.');
+}
+const undecided = rows.filter(r => r.containment === '판정불가');
+if (undecided.length) {
+  console.log('[!!] 직접 요청의 결말을 못 찾은 케이스:', undecided.map(r => r.id).join(', '));
+  console.log('     테이프에 request 만 있고 response/failed 가 없다. 유출일 수도 있으므로 재측정할 것.');
+}
 const notInControl = rows.filter(r => r.control === '-');
 if (notInControl.length) console.log('(대조군에서도 안 온 케이스 — 픽스처 자체 문제일 수 있음):', notInControl.map(r => r.id).join(', '));

@@ -3129,3 +3129,74 @@ test('프레임 속성 두 자리는 data 속성으로 옮겨진다 (목록 대�
   assert.ok(matrix.includes("'a10-static-iframe'"), '정적 iframe src 케이스가 있어야 한다');
   assert.ok(matrix.includes("'a17-static-srcdoc'"), '정적 srcdoc 케이스가 있어야 한다');
 });
+
+// ── 매트릭스 격리 판정기 (2026-08-20) ──────────────────────────────────────
+//
+// 판정 로직이 브라우저 안에만 있으면 그 로직 자체는 아무도 테스트하지 못한다.
+// 실제로 "테이프에 URL 이 보이면 직접 나갔다" 로 세던 버그가 그렇게 살아남았다.
+// 합성 테이프로 결말별 판정을 못 박는다.
+const { classifyTape } = require('../browser/hole-matrix/classify.cjs');
+const CASE_ID = url => { const m = /\/img\/([a-z0-9-]+)__(same|cross)\./.exec(url); return m && m[1]; };
+const DIRECT = 'http://127.0.0.1:18098/img/x1-case__cross.png';
+const req = (id, url) => ({ kind: 'request', request_id: id, url });
+
+test('판정기: 응답을 받았으면 진짜 유출', () => {
+  const v = classifyTape({ network: [req('1', DIRECT), { kind: 'response', request_id: '1', status: 200 }] }, CASE_ID);
+  assert.deepEqual([...v.answered], ['x1-case']);
+  assert.equal(v.blocked.size + v.unknown.size, 0);
+});
+
+test('판정기: failed 만 있으면 csp-only (차단됨)', () => {
+  const v = classifyTape({ network: [req('1', DIRECT), { kind: 'failed', request_id: '1' }] }, CASE_ID);
+  assert.deepEqual([...v.blocked], ['x1-case']);
+  assert.equal(v.answered.size, 0);
+});
+
+// 이것이 이번 수정으로 생긴 새 위험이다 — 결말 이벤트가 유실되면 진짜 유출이
+// 조용히 csp-only 로 내려앉는다(과소보고). 그래서 별도 버킷으로 남긴다.
+test('판정기: 결말 이벤트가 없으면 csp-only 가 아니라 판정불가', () => {
+  const v = classifyTape({ network: [req('1', DIRECT)] }, CASE_ID);
+  assert.deepEqual([...v.unknown], ['x1-case']);
+  assert.equal(v.blocked.size, 0, '결말을 모르는 것을 "막혔다" 로 세면 유출이 통과한다');
+  assert.equal(v.answered.size, 0);
+});
+
+test('판정기: 여러 번 시도했으면 하나라도 응답받은 쪽이 이긴다', () => {
+  const v = classifyTape({
+    network: [
+      req('1', DIRECT), { kind: 'failed', request_id: '1' },
+      req('2', DIRECT), { kind: 'response', request_id: '2', status: 200 },
+    ],
+  }, CASE_ID);
+  assert.deepEqual([...v.answered], ['x1-case']);
+  assert.equal(v.blocked.size, 0, '한 번이라도 타깃과 말했으면 유출이다 — 다른 시도가 막혔다고 지워지지 않는다');
+});
+
+test('판정기: 응답 뒤에 failed 가 붙어도 유출이다', () => {
+  const v = classifyTape({
+    network: [req('1', DIRECT), { kind: 'response', request_id: '1', status: 200 }, { kind: 'failed', request_id: '1' }],
+  }, CASE_ID);
+  assert.deepEqual([...v.answered], ['x1-case'], '응답을 받은 뒤 스트림이 끊긴 것은 이미 말한 것이다');
+});
+
+test('판정기: 프록시 경유 요청은 직접 요청으로 세지 않는다', () => {
+  const v = classifyTape({
+    network: [
+      { kind: 'request', request_id: '1', url: 'http://proxy.localhost:18080/zp/api/fetch?url=http%3A%2F%2F127.0.0.1%3A18098%2Fimg%2Fx1-case__cross.png' },
+      { kind: 'response', request_id: '1', status: 200 },
+    ],
+  }, CASE_ID);
+  assert.equal(v.attempted.size, 0, '우리가 대신 가져온 것은 유출이 아니다 — 이걸 세던 것이 원래 버그였다');
+});
+
+test('판정기: 테이프 유실 건수를 그대로 올려 보낸다', () => {
+  const v = classifyTape({ network: [], dropped: { network: 12 } }, CASE_ID);
+  assert.equal(v.droppedNetwork, 12, '유실이 있으면 러너가 판정을 믿지 말라고 알려야 한다');
+});
+
+test('매트릭스 러너는 유실/판정불가를 조용히 넘기지 않는다', () => {
+  const run = fs.readFileSync('test/browser/hole-matrix/run.mjs', 'utf8');
+  assert.match(run, /droppedNetwork > 0/, '테이프 유실 경고가 있어야 한다');
+  assert.match(run, /판정불가/, '결말 미상은 별도 판정으로 남아야 한다');
+  assert.match(run, /classifyTape/, '판정은 공유 모듈 한 곳에서만 나와야 한다');
+});
