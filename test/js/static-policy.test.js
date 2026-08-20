@@ -3038,6 +3038,8 @@ const SURFACE_INVENTORY = [
   { pair: 'image:href', kind: 'rewrite', case: 'a13-static-svgimage' },
   { pair: 'image:xlink:href', kind: 'rewrite', case: 'a14-static-svgxlink' },
   { pair: 'use:href', kind: 'rewrite', case: 'a20-static-use' },
+  { pair: 'feimage:href', kind: 'rewrite', case: 'a21-static-feimage' },
+  { pair: 'feimage:xlink:href', kind: 'rewrite', case: null, why: 'feimage:href 와 같은 경로' },
   { pair: 'video:poster', kind: 'rewrite', case: 'a12-static-poster-cross' },
   { pair: 'body:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
   { pair: 'table:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
@@ -3060,6 +3062,11 @@ const SURFACE_INVENTORY = [
   // ── 정책상 일부러 막는 표면 — 리라이트하면 되살아난다 ──
   { pair: 'object:data', kind: 'deliberate', case: 'b9-object-data', why: "object-src 'none' — plugin 표면 금지" },
   { pair: 'a:ping', kind: 'deliberate', case: 'c11-ping-attr', why: '클릭 추적 비콘. 값이 URL 목록이고 통과가 목적에 반한다' },
+  { pair: 'object:codebase', kind: 'deliberate', case: null, why: "object-src 'none' — plugin 표면 금지 (object:data 와 같은 이유)" },
+
+  // ── 아직 안 고친 자리. 여기 적어 두면 잊지 않고, 고치는 순간 이 테스트가
+  //    실패해 분류를 바꾸게 만든다(구현에 생겼는데 known-gap 으로 남아 있으면 실패).
+  { pair: 'script:importmap', kind: 'known-gap', case: null, why: '<script type=importmap> 의 JSON 본문이 모듈 지정자를 절대 URL 로 매핑한다. 리라이트하려면 JSON 파싱이 필요하다. 현재는 script-src 자기 자신만 허용이라 csp-only.' },
 ];
 
 test('URL 표면 인벤토리와 htmltx 허용 목록이 어긋나면 실패한다', () => {
@@ -3086,6 +3093,14 @@ test('URL 표면 인벤토리와 htmltx 허용 목록이 어긋나면 실패한�
   const seen = new Set();
   for (const entry of SURFACE_INVENTORY) {
     seen.add(entry.pair);
+    if (entry.kind === 'known-gap') {
+      assert.ok(entry.why, `${entry.pair}: known-gap 은 왜 안 고쳤는지 적어야 한다`);
+      assert.equal(
+        rewrite.has(entry.pair) || srcset.has(entry.pair) || navigation.has(entry.pair), false,
+        `${entry.pair} 가 이제 htmltx 에 있다 — known-gap 이 아니라 rewrite 로 분류를 바꾸고 매트릭스 케이스를 가리킬 것`
+      );
+      continue;
+    }
     if (entry.kind === 'deliberate') {
       assert.ok(entry.why, `${entry.pair}: deliberate 는 이유를 적어야 한다`);
       assert.equal(
@@ -3128,6 +3143,11 @@ test('프레임 속성 두 자리는 data 속성으로 옮겨진다 (목록 대�
   const matrix = fs.readFileSync('test/browser/hole-matrix/server.mjs', 'utf8');
   assert.ok(matrix.includes("'a10-static-iframe'"), '정적 iframe src 케이스가 있어야 한다');
   assert.ok(matrix.includes("'a17-static-srcdoc'"), '정적 srcdoc 케이스가 있어야 한다');
+  // ★meta refresh 는 서브리소스가 아니라 **최상위 내비게이션**이다. 놓치면
+  // 브라우저가 타깃 오리진으로 문서째 이동한다 = 진짜 탈출(2026-08-20 실측).
+  // CSP 로도 못 막는다 — navigate-to 는 표준에서 빠졌다.
+  assert.match(src, /fn proxied_meta_refresh/, 'meta refresh 리라이트가 사라졌다 — 탈출 벡터가 열린다');
+  assert.match(src, /http-equiv/, 'meta refresh 판정이 사라졌다');
 });
 
 // ── 매트릭스 격리 판정기 (2026-08-20) ──────────────────────────────────────

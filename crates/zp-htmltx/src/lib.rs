@@ -164,6 +164,37 @@ fn attr_settings(
                     // 구멍 매트릭스에서 유일한 `csp-only` 칸이었다. CSP 는 2선
                     // 방어지 1선이 아니므로, 속성 자체를 걷어내 브라우저가
                     // 애초에 요청을 만들지 않게 한다. 값은 진단용으로 남긴다.
+                    // ★`<meta http-equiv="refresh" content="0;url=…">` — 이건
+                    // 서브리소스가 아니라 **최상위 내비게이션**이다. 리라이트를
+                    // 놓치면 브라우저가 타깃 오리진으로 문서째 이동한다 = 감옥
+                    // 탈출(실제 IP 유출). CSP 로도 못 막는다 — `navigate-to` 는
+                    // 표준에서 빠졌고 `form-action` 은 폼에만 걸린다.
+                    //
+                    // 실측(2026-08-20, 픽스처): 프록시로 연 문서가 meta refresh
+                    // 하나로 `127.0.0.1:18098` 로 이동했고 타깃 서버에 요청이
+                    // 도착했다. 지금까지 매트릭스에 이 칸이 없어서 안 보였다.
+                    //
+                    // `content` 는 `<delay>[;[ ]url=<url>]` 문법이다. URL 부분만
+                    // share 경로(`?via=`)로 바꾼다 — 앵커/폼과 같은 처리다.
+                    if tag == "meta" {
+                        let is_refresh = el
+                            .get_attribute("http-equiv")
+                            .map(|v| v.trim().eq_ignore_ascii_case("refresh"))
+                            .unwrap_or(false);
+                        if is_refresh {
+                            if let Some(content) = el.get_attribute("content") {
+                                if let Some(next) = proxied_meta_refresh(
+                                    &content,
+                                    &proxy_origin,
+                                    "/zp/",
+                                    &target_for_attr,
+                                ) {
+                                    let _ = el.set_attribute("data-zp-target-url", &content);
+                                    let _ = el.set_attribute("content", &next);
+                                }
+                            }
+                        }
+                    }
                     if (tag == "a" || tag == "area") {
                         if let Some(ping) = el.get_attribute("ping") {
                             let _ = el.set_attribute("data-zp-blocked-ping", &ping);
@@ -270,6 +301,9 @@ fn attr_settings(
                                         | ("image", "href")
                                         | ("image", "xlink:href")
                                         | ("use", "href")
+                                        // SVG 필터의 이미지 입력. `<image>` 와 같은 부류다.
+                                        | ("feimage", "href")
+                                        | ("feimage", "xlink:href")
                                         | ("video", "poster")
                                         // 레거시 background 속성 — 크롬이 아직 요청을 낸다.
                                         | ("body", "background")
@@ -1080,6 +1114,35 @@ fn absolute_target_url(raw: &str, target_url: &str) -> Option<String> {
 /// a native navigation (new tab, etc.).
 ///
 /// Returns `None` if `proxy_origin` was not supplied (host-test fallback).
+/// `<meta http-equiv="refresh">` 의 `content` 에서 URL 부분만 프록시 내비게이션
+/// 경로로 바꾼다. 문법은 `<delay>[;[ ]url=<url>]` 이고 `url=` 는 대소문자 무시,
+/// 값에 따옴표가 붙을 수 있다. delay 만 있는 형태(`content="5"`)는 자기 자신을
+/// 다시 부르는 것이라 건드릴 필요가 없다.
+fn proxied_meta_refresh(
+    content: &str,
+    proxy_origin: &str,
+    control_prefix: &str,
+    target_url: &str,
+) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let at = lower.find("url=")?;
+    let head = &content[..at];
+    let mut raw = content[at + 4..].trim();
+    // 따옴표는 벗기고 나중에 다시 씌우지 않는다 — 우리 URL 에는 공백이 없다.
+    if (raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2)
+        || (raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2)
+    {
+        raw = &raw[1..raw.len() - 1];
+    }
+    let raw = raw.trim();
+    if raw.is_empty() || starts_with_ascii_ci(raw, "javascript:") {
+        return None;
+    }
+    let absolute = absolute_target_url(raw, target_url)?;
+    let next = proxied_navigation_url(&absolute, proxy_origin, control_prefix)?;
+    Some(format!("{head}url={next}"))
+}
+
 fn proxied_navigation_url(
     absolute: &str,
     proxy_origin: &str,
@@ -1244,6 +1307,62 @@ mod tests {
     fn plugin_surface_stays_unrewritten_by_design() {
         let r = transform("<object data=\"http://t.example/a.png\"></object>", &opts()).unwrap();
         assert!(r.html.contains("t.example"), "object data: {}", r.html);
+    }
+
+    // ★`<meta http-equiv=refresh>` 는 서브리소스가 아니라 최상위 내비게이션이다.
+    // 놓치면 브라우저가 타깃 오리진으로 문서째 이동한다 = 감옥 탈출. CSP 로도
+    // 못 막는다(`navigate-to` 는 표준에서 빠졌다). 2026-08-20 픽스처 실측으로
+    // 실제 탈출을 확인하고 넣은 자리다.
+    #[test]
+    fn meta_refresh_url_is_routed_through_proxy() {
+        let r = transform(
+            "<meta http-equiv=\"refresh\" content=\"0;url=http://t.example/next\">",
+            &opts(),
+        )
+        .unwrap();
+        assert!(
+            !r.html.contains("content=\"0;url=http://t.example"),
+            "원본 URL 이 content 에 남았다 -> {}",
+            r.html
+        );
+        assert!(r.html.contains("?via="), "프록시 내비게이션 경로가 아니다 -> {}", r.html);
+        assert!(
+            r.html.contains("data-zp-target-url"),
+            "원본 content 를 진단용으로 남겨야 한다 -> {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn meta_refresh_variants() {
+        // 대소문자 / 공백 / 따옴표 / 상대경로
+        for html in [
+            "<meta http-equiv=\"REFRESH\" content=\"3; URL='http://t.example/a'\">",
+            "<meta http-equiv=\"refresh\" content=\"0;url=/rel/path\">",
+        ] {
+            let r = transform(html, &opts()).unwrap();
+            assert!(r.html.contains("?via="), "리라이트 안 됨: {} -> {}", html, r.html);
+        }
+        // delay 만 있는 형태는 자기 자신 재로드다 — 건드리지 않는다.
+        let r = transform("<meta http-equiv=\"refresh\" content=\"5\">", &opts()).unwrap();
+        assert!(r.html.contains("content=\"5\""), "delay-only 를 건드렸다 -> {}", r.html);
+        // refresh 가 아닌 meta 는 그대로.
+        let r = transform(
+            "<meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\">",
+            &opts(),
+        )
+        .unwrap();
+        assert!(r.html.contains("charset=utf-8"), "무관한 meta 를 건드렸다 -> {}", r.html);
+    }
+
+    #[test]
+    fn svg_feimage_href_rewritten() {
+        let r = transform(
+            "<svg><filter><feImage href=\"http://t.example/a.png\"></feImage></filter></svg>",
+            &opts(),
+        )
+        .unwrap();
+        assert!(!r.html.contains("t.example/a.png"), "원본 URL 이 남았다 -> {}", r.html);
     }
 
     #[test]

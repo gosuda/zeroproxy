@@ -181,6 +181,27 @@ impl Visit for CssUrlCollector<'_> {
         }
     }
 
+    // `image-set()` 는 `url("…")` 없이 **맨 문자열**도 받는다:
+    //   background-image: image-set("a.png" 1x, "a@2x.png" 2x)
+    // 그 문자열은 AST 에서 `Url` 노드가 아니라 그냥 `Str` 이라 위 visit_url 이
+    // 못 본다 — 원본 URL 이 그대로 남아 `img-src 'self'` 에 걸린다(csp-only).
+    // 함수 이름이 image-set 계열일 때만 문자열 인자를 URL 로 취급한다.
+    fn visit_function(&mut self, node: &swc_css_ast::Function) {
+        let name = match &node.name {
+            swc_css_ast::FunctionName::Ident(i) => i.value.to_string(),
+            swc_css_ast::FunctionName::DashedIdent(i) => i.value.to_string(),
+        };
+        let lower = name.to_ascii_lowercase();
+        if lower == "image-set" || lower == "-webkit-image-set" {
+            for v in &node.value {
+                if let swc_css_ast::ComponentValue::Str(st) = v {
+                    self.add_string_replacement(st);
+                }
+            }
+        }
+        node.visit_children_with(self);
+    }
+
     fn visit_url(&mut self, node: &swc_css_ast::Url) {
         let Some(value) = node.value.as_ref() else { return; };
         match &**value {
@@ -266,5 +287,46 @@ mod tests {
         assert!(out.ok);
         assert!(out.code.contains("https://p.example/zp/api/fetch?url="), "got: {}", out.code);
         assert!(!out.code.contains("//zp/api"), "double slash: {}", out.code);
+    }
+}
+
+#[cfg(test)]
+mod image_set_tests {
+    use super::*;
+
+    // `image-set()` 의 맨 문자열 인자. `url()` 형태는 원래 되고 있었는데
+    // 문자열 형태만 새고 있었다(2026-08-20, 인벤토리 대조에서 발견).
+    #[test]
+    fn image_set_bare_strings_rewritten() {
+        let css = r#"#x{background-image:image-set("https://t.example/a.png" 1x, "https://t.example/a2.png" 2x)}"#;
+        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example");
+        assert!(out.ok, "rewrite 실패");
+        assert!(
+            !out.code.contains("t.example/a.png"),
+            "1x 후보가 원본으로 남았다 -> {}",
+            out.code
+        );
+        assert!(
+            !out.code.contains("t.example/a2.png"),
+            "2x 후보가 원본으로 남았다 -> {}",
+            out.code
+        );
+    }
+
+    #[test]
+    fn webkit_image_set_also_rewritten() {
+        let css = r#"#x{background-image:-webkit-image-set("https://t.example/a.png" 1x)}"#;
+        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example");
+        assert!(!out.code.contains("\"https://t.example"), "-webkit- 접두 형태 -> {}", out.code);
+        assert!(out.code.contains("api/fetch?url="), "프록시 경로가 아니다 -> {}", out.code);
+    }
+
+    // url() 형태는 원래대로 동작해야 한다 — 새 visitor 가 기존 경로를 밀어내면 안 된다.
+    #[test]
+    fn image_set_url_form_still_rewritten() {
+        let css = r#"#x{background-image:image-set(url(https://t.example/a.png) 1x)}"#;
+        let out = rewrite_css(css, "https://example.com/", "/zp/", "https://p.example");
+        assert!(!out.code.contains("(https://t.example"), "url() 형태 회귀 -> {}", out.code);
+        assert!(out.code.contains("api/fetch?url="), "프록시 경로가 아니다 -> {}", out.code);
     }
 }

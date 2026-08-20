@@ -3283,13 +3283,35 @@
     } catch {}
     sweepSWLessDoc(doc);
   }
+  // SW-less 문서의 이미지 자리끼우개. **네트워크 요청을 아예 안 내는** 1×1
+  // 투명 PNG 다 — 그래서 원본 오리진으로 나갈 길이 없다(fail-closed 유지).
+  const SWLESS_PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  // 자리끼우개를 써도 되는 자리 = **이미지뿐**이다. script/link 는 src 를 나중에
+  // 바꿔도 다시 실행/적용되지 않거나 별도 경로(릴레이, __ZP_LOAD_EXTERNAL_SCRIPT)
+  // 가 이미 담당하므로 건드리지 않는다.
+  function swLessPixelable(el, key) {
+    const tag = el && el.localName;
+    if (key === 'poster') return tag === 'video';
+    if (key !== 'src') return false;
+    return tag === 'img' || tag === 'image' || tag === 'input';
+  }
   function setSubresourceAttribute(el, key, proxied) {
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
     if (!documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
-    // 원본 URL 을 그대로 두면 안 된다 — blob 이 늦거나 실패해도 최소한
-    // 프록시 경로가 박혀 있어야 브라우저가 타깃 오리진으로 직접 나가지 않는다.
-    Native.setAttribute.call(el, key, proxied);
+    // ★2026-08-20 — 여기에 프록시 경로를 박으면 **반드시 403 이 한 번 난다.**
+    // `/zp/api/fetch` 는 SW 안에만 있는 가상 경로이고 이 문서는 SW 클라이언트가
+    // 아니다. 지금까지는 그 403 을 blob 으로 뒤늦게 덮어써 왔다 — 그림은 결국
+    // 뜨지만(실측: broken 0) 로드마다 헛왕복과 콘솔 에러가 쌓였다
+    // (naver 메인 1회에 6건).
+    //
+    // 원래 프록시 경로를 박아 둔 이유는 fail-closed 였다 — blob 이 늦거나
+    // 실패해도 브라우저가 타깃 오리진으로 직접 나가면 안 된다. 그 요구는
+    // **요청을 아예 안 내는 값**으로 더 강하게 만족된다. 그래서 이미지에는
+    // 1×1 투명 PNG 를 먼저 넣고 blob 이 오면 교체한다. 실패해도 1×1 로 남고,
+    // 어느 쪽이든 밖으로 나가는 요청은 0 이다.
+    const placeholder = swLessPixelable(el, key);
+    Native.setAttribute.call(el, key, placeholder ? SWLESS_PIXEL : proxied);
     swLessBlobURL(proxied).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
   }
   function proxyViaURL(absolute) {
@@ -5344,6 +5366,9 @@
     // blob 업그레이드를 불러 왕복이 된다. e4-blank-iframe-img 가 이것 때문에
     // 간헐적으로 깨졌다.
     if (/^blob:/i.test(String(raw))) return;
+    // 자리끼우개도 같은 이유로 그냥 둔다 — 여기서 프록시 경로로 되돌리면
+    // 방금 없앤 403 왕복이 그대로 되살아난다.
+    if (String(raw) === SWLESS_PIXEL) return;
     const target = targetURLForElement(el, raw);
     if (!target) return;
     const usesRaw = usesRawURLAttribute(el, key, localKey);

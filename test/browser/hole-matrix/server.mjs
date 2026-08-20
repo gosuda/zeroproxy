@@ -46,6 +46,8 @@ C('a17-static-srcdoc', 1, ''); // 마크업에 박힌 srcdoc (런타임 e3 만 �
 C('a18-static-import', 1, ''); // 인라인 <style> 의 @import (런타임 d7 만 있었다)
 C('a19-static-script', 1, ''); // <script src> cross
 C('a20-static-use', 1, ''); // SVG <use href>
+C('a21-static-feimage', 1, ''); // SVG 필터의 이미지 입력
+C('a22-static-imageset', 1, ''); // image-set() 의 맨 문자열 (url() 없는 형태)
 
 // ── B. 런타임 DOM: 요소 생성 경로 ────────────────────────────────────────
 C('b1-img-prop', 0, `var i=new Image();i.src=U;document.body.appendChild(i)`);
@@ -118,6 +120,8 @@ const STATIC_HTML = `
 <style>@import url("http://127.0.0.1:${CDN}/img/a18-static-import__cross.css");</style>
 <script src="http://127.0.0.1:${CDN}/img/a19-static-script__cross.js"></script>
 <svg width="1" height="1"><use href="http://127.0.0.1:${CDN}/img/a20-static-use__cross.svg#i"></use></svg>
+<svg width="1" height="1"><filter id="a21f"><feImage href="http://127.0.0.1:${CDN}/img/a21-static-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#a21f)"></rect></svg>
+<style>#a22{background-image:image-set("http://127.0.0.1:${CDN}/img/a22-static-imageset__cross.png" 1x)}</style><div id="a22" style="width:1px;height:1px"></div>
 `;
 
 function page() {
@@ -159,6 +163,13 @@ function mk(port) {
     }
     // 프레임 케이스용 문서. 안에서 자기 id 의 이미지를 부르므로 도착 판정은
     // 기존 /img/<id>__<cross>.png 매처를 그대로 쓴다.
+    // meta refresh 탈출 벡터 확인용 일회성 라우트. 서브리소스가 아니라
+    // **최상위 내비게이션**이라 매트릭스 본표(도착=바이트 수신)로는 못 잰다 —
+    // 브라우저가 타깃 오리진으로 이동해 버리는지를 URL 로 본다.
+    if (u === '/meta-refresh') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=http://127.0.0.1:' + CDN + '/img/mr-escape__cross.png"><title>mr</title>');
+    }
     if (u.startsWith('/frame/')) {
       const id = u.slice('/frame/'.length);
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
