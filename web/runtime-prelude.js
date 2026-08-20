@@ -5078,6 +5078,27 @@
       try { stale.replaceWith(fresh); } catch {}
     }
   }
+  // `<meta http-equiv=refresh>` 의 content 에서 URL 부분만 프록시 내비게이션
+  // 경로로 옮긴다. 같은 규칙이 세 곳에 있다 — Rust htmltx(문서 파싱 시점),
+  // SW(`Refresh` 응답 헤더), 그리고 여기(페이지 realm 이 만드는 HTML).
+  // **이 셋은 서로 다른 구현이고 실제로 갈라졌었다**: htmltx 에 넣었는데
+  // `transformHTML` 은 JS 로 따로 걸어서 srcdoc 프레임의 meta refresh 가
+  // 원본 URL 로 남아 있었다(2026-08-20, 프레임 축 매트릭스에서 csp-only 로 검출 —
+  // `frame-src 'self'` 가 막고 있었을 뿐이다).
+  function proxiedRefreshContent(content) {
+    const s = String(content || '');
+    if (!s) return '';
+    const at = s.toLowerCase().indexOf('url=');
+    if (at < 0) return ''; // delay-only — 자기 자신 재로드
+    const head = s.slice(0, at);
+    let v = s.slice(at + 4).trim();
+    if (v.length >= 2 && ((v[0] === '"' && v.endsWith('"')) || (v[0] === "'" && v.endsWith("'")))) v = v.slice(1, -1);
+    v = v.trim();
+    if (!v || /^javascript:/i.test(v)) return '';
+    const abs = targetURLIfHTTP(v);
+    if (!abs) return '';
+    return head + 'url=' + proxyViaURL(abs);
+  }
   function transformHTML(value, opts) {
     const html = String(value);
     if (!html) return html;
@@ -5093,6 +5114,13 @@
     for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
     for (const node of nodes) {
       const tag = node.localName;
+      if (tag === 'meta') {
+        const eq = String(Native.getAttribute.call(node, 'http-equiv') || '').trim().toLowerCase();
+        if (eq === 'refresh') {
+          const next = proxiedRefreshContent(Native.getAttribute.call(node, 'content') || '');
+          if (next) Native.setAttribute.call(node, 'content', next);
+        }
+      }
       if (tag === 'base' && Native.getAttribute.call(node, 'href')) {
         const href = Native.getAttribute.call(node, 'href') || '';
         updateVirtualBase(href);

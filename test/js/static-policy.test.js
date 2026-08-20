@@ -3257,3 +3257,25 @@ test('Refresh 헤더는 지우는 게 아니라 프록시 경로로 옮긴다', 
   assert.match(sw, /h\.set\('Refresh', next\)/, '리라이트 결과를 다시 심지 않는다 — 착지가 사라진다');
   assert.match(sw, /\?via=/, '런처 내비게이션 경로를 안 쓴다');
 });
+
+// ── meta refresh 규칙은 세 곳에 따로 구현돼 있다 (2026-08-20) ───────────────
+//
+// 같은 정책인데 전달 경로가 셋이라 구현도 셋이다:
+//   ① Rust htmltx        — 문서를 파싱 시점에 고칠 때
+//   ② SW                 — 타깃이 `Refresh` **응답 헤더**로 보낼 때
+//   ③ 프렐류드 transformHTML — 페이지 realm 이 HTML 을 만들 때(srcdoc 등)
+//
+// 실제로 갈라졌다: ①에 넣었는데 ③이 JS 로 따로 걸어서 srcdoc 프레임의 meta
+// refresh 가 원본 URL 로 남아 있었다. `frame-src 'self'` 가 막고 있었을 뿐이고,
+// 프레임 축 매트릭스를 세우고 나서야 보였다. 셋이 함께 있는지 묶어 둔다.
+test('meta refresh 리라이트가 세 경로에 모두 있다', () => {
+  const rust = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rust, /fn proxied_meta_refresh/, '① htmltx: 문서 파싱 시점 리라이트가 없다');
+  assert.match(sw, /function proxiedRefreshValue/, '② SW: Refresh 응답 헤더 리라이트가 없다');
+  assert.match(rt, /function proxiedRefreshContent/, '③ 프렐류드: 페이지가 만드는 HTML 리라이트가 없다');
+  // 셋 다 같은 목적지 형태(런처 ?via=)를 써야 한다.
+  assert.match(sw, /\?via=/, 'SW 가 런처 경로를 안 쓴다');
+  assert.match(rt, /proxyViaURL\(abs\)/, '프렐류드가 런처 경로를 안 쓴다');
+});

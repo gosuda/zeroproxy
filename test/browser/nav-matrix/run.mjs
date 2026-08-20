@@ -17,15 +17,40 @@ const tapePath = 'test/browser/nav-matrix/.last-tape.json';
 
 const rows = [];
 for (const c of cases) {
+  // ── 대조군: 프록시 없이 같은 픽스처를 그대로 연다 ──────────────────────
+  // 이게 없으면 "착지 실패" 가 우리 탓인지 브라우저 탓인지 구분이 안 된다.
+  // 실제로 `target=_blank` / `window.open` 은 사용자 제스처 없는 스크립트
+  // 호출이라 크롬이 팝업을 막는다 — 대조군에서도 똑같이 안 뜬다.
+  // (구멍 매트릭스가 같은 이유로 대조군을 먼저 돌린다. 2026-08-14 교훈.)
+  await fetch(FIX + '/reset');
+  tw('navigate', '-i', ID, '--url', FIX + (c.path || '/nav/' + c.id));
+  await sleep(5000);
+  const controlHits = await get(FIX + '/hits');
+  const controlLanded = Object.values(controlHits).flat().some(u => u.includes('/landed/' + c.id));
+
   await fetch(FIX + '/reset');
   tw('dump-recording', '-i', ID, '--clear');
   tw('navigate', '-i', ID, '--url', PROXY + '/zp/');
-  tw('fill-form', '-i', ID, '--selector', 'input', '--value', `${FIX}/nav/${c.id}`);
+  tw('fill-form', '-i', ID, '--selector', 'input', '--value', FIX + (c.path || '/nav/' + c.id));
   tw('click', '-i', ID, '--text', 'Open');
   await sleep(8000);
 
   const url = String(json(tw('get-url', '-i', ID)).url || '');
   const onProxy = url.startsWith(PROXY);
+
+  // 프레임 축: 자식 프레임이 프록시 밖으로 나갔는가. 최상위 URL 만 보면
+  // 프레임은 페이지가 안 떠나므로 **영영 안 잡힌다** — 축을 나눈 이유가 이것이다.
+  let framesOutside = 0;
+  if (c.axis === 'frame') {
+    const total = Number(json(tw('get-frames', '-i', ID)).total_count || 0);
+    for (let i = 0; i < total; i++) {
+      const r = json(tw('exec-js', '-i', ID, '--frame', String(i), '--world', 'isolated',
+        '--script', 'return String(location.href||"")'));
+      const href = String(r.result || '');
+      // about:blank / 부모 URL 상속은 프록시 안이다. 착지 오리진이면 밖이다.
+      if (/127.0.0.1:1808[67]/.test(href)) framesOutside++;
+    }
+  }
 
   // 두 번째 신호: 브라우저가 착지 오리진(18086)으로 **직접** 문서 요청을 냈는가.
   // 오리진만 보면 리다이렉트가 되돌아오는 경우를 놓칠 수 있다.
@@ -43,18 +68,24 @@ for (const c of cases) {
 
   rows.push({
     id: c.id,
+    axis: c.axis === 'frame' ? '프레임' : '최상위',
     where: onProxy ? '프록시' : '밖',
     direct: directDoc,
+    frames: framesOutside,
+    control: controlLanded ? 'O' : '-',
     landed: landed ? 'O' : '-',
-    verdict: !onProxy || directDoc > 0 ? '탈출' : 'ok',
+    verdict: !onProxy || directDoc > 0 || framesOutside > 0 ? '탈출' : 'ok',
   });
 }
 
 const pad = (s, n) => String(s).padEnd(n);
-console.log(pad('case', 24), pad('문서위치', 8), pad('직접', 5), pad('착지', 5), '판정');
-for (const r of rows) console.log(pad(r.id, 24), pad(r.where, 8), pad(r.direct, 5), pad(r.landed, 5), r.verdict);
+console.log(pad('case', 24), pad('축', 7), pad('대조군', 7), pad('문서위치', 8), pad('직접', 5), pad('밖프레임', 8), pad('착지', 5), '판정');
+for (const r of rows) console.log(pad(r.id, 24), pad(r.axis, 7), pad(r.control, 7), pad(r.where, 8), pad(r.direct, 5), pad(r.frames, 8), pad(r.landed, 5), r.verdict);
 
 const escapes = rows.filter(r => r.verdict === '탈출');
-const stuck = rows.filter(r => r.verdict === 'ok' && r.landed === '-');
+// 대조군에서도 안 되는 것은 우리 결함이 아니다(팝업 차단 등).
+const stuck = rows.filter(r => r.verdict === 'ok' && r.landed === '-' && r.control === 'O');
+const blockedByBrowser = rows.filter(r => r.control === '-');
 console.log('\n[격리] 문서째 프록시 밖으로 나간 것:', escapes.length ? escapes.map(r => r.id).join(', ') : '없음');
-console.log('[재현성] 프록시 안에는 있는데 목적지에 못 간 것:', stuck.length ? stuck.map(r => r.id).join(', ') : '없음');
+console.log('[재현성] 대조군에서 되는데 프록시에서 안 되는 것:', stuck.length ? stuck.map(r => r.id).join(', ') : '없음');
+if (blockedByBrowser.length) console.log('(대조군에서도 안 됨 — 브라우저가 막는 것이지 우리 결함이 아니다):', blockedByBrowser.map(r => r.id).join(', '));

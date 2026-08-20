@@ -35,6 +35,32 @@ C('n8-anchor-click', id => `<a id="go" href="${landURL(id)}">go</a><script>docum
 C('n9-form-submit', id => `<form id="f" method="GET" action="${landURL(id)}"></form><script>document.getElementById('f').submit()</script>`);
 C('n10-window-open', id => `<script>window.open(${JSON.stringify(landURL(id))},'_self')</script>`);
 
+// ── 프레임 내비게이션 축 ────────────────────────────────────────────────
+// 최상위 축과 판정이 다르다: **자식 프레임**이 프록시 밖으로 나가는가.
+// 프레임은 페이지가 안 떠나므로 최상위 표에서는 절대 안 잡힌다 — 또 하나의
+// "축이 없어서 칸도 없던" 자리다.
+//
+// `_top`/`_parent`/`_blank` 타겟은 자식이 **부모나 새 창**을 끌고 나가는
+// 경로다. 자식만 보면 놓치므로 테이프의 직접 요청도 함께 본다.
+const FRAME_CASES = [];
+const F = (id, html) => FRAME_CASES.push({ id, html });
+
+F('f1-iframe-src-prop', id => `<iframe id="t"></iframe><script>document.getElementById('t').src=${JSON.stringify(landURL(id))}</script>`);
+F('f2-iframe-src-static', id => `<iframe src="${landURL(id)}"></iframe>`);
+F('f3-iframe-setattr', id => `<iframe id="t"></iframe><script>document.getElementById('t').setAttribute('src',${JSON.stringify(landURL(id))})</script>`);
+F('f4-child-location', id => `<iframe id="t" src="about:blank"></iframe><script>setTimeout(function(){try{document.getElementById('t').contentWindow.location=${JSON.stringify(landURL(id))}}catch(e){}},300)</script>`);
+F('f5-anchor-target-blank', id => `<a id="go" target="_blank" href="${landURL(id)}">go</a><script>document.getElementById('go').click()</script>`);
+F('f6-anchor-target-top', id => `<a id="go" target="_top" href="${landURL(id)}">go</a><script>document.getElementById('go').click()</script>`);
+F('f7-form-target-top', id => `<form id="f" target="_top" method="GET" action="${landURL(id)}"></form><script>document.getElementById('f').submit()</script>`);
+F('f8-window-open-blank', id => `<script>window.open(${JSON.stringify(landURL(id))},'_blank')</script>`);
+F('f9-base-target', id => `<base target="_blank"><a id="go" href="${landURL(id)}">go</a><script>document.getElementById('go').click()</script>`);
+// 프레임 안의 meta refresh — 최상위에서 막혔다고 프레임에서도 막혔다는 보장은 없다.
+F('f10-frame-meta-refresh', id => `<iframe id="t" srcdoc='<meta http-equiv="refresh" content="0;url=${landURL(id)}">'></iframe>`);
+
+function framePage(c) {
+  return `<!doctype html><meta charset="utf-8"><title>fnav-${c.id}</title>${c.html(c.id)}<p>frame fixture ${c.id}</p>`;
+}
+
 function page(c) {
   return `<!doctype html><meta charset="utf-8"><title>nav-${c.id}</title>${c.html(c.id)}<p>nav fixture ${c.id}</p>`;
 }
@@ -49,7 +75,10 @@ function mk(port) {
     if (u === '/reset') { hits = { [ORIGIN]: [], [LAND]: [] }; res.writeHead(200); return res.end('ok'); }
     if (u === '/cases') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify(CASES.map(c => ({ id: c.id }))));
+      return res.end(JSON.stringify([
+        ...CASES.map(c => ({ id: c.id, axis: 'top', path: '/nav/' + c.id })),
+        ...FRAME_CASES.map(c => ({ id: c.id, axis: 'frame', path: '/fnav/' + c.id })),
+      ]));
     }
     hits[port].push(u);
     // ★`Refresh:` 는 비표준이지만 크롬이 지원하는 **헤더판 meta refresh** 다.
@@ -68,6 +97,12 @@ function mk(port) {
     if (u.startsWith('/nav/n12-server-redirect')) {
       res.writeHead(302, { location: landURL('n12-server-redirect'), 'cache-control': 'no-store' });
       return res.end('');
+    }
+    if (u.startsWith('/fnav/')) {
+      const id = u.slice('/fnav/'.length);
+      const c = FRAME_CASES.find(x => x.id === id);
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(c ? framePage(c) : '<!doctype html>unknown frame case');
     }
     if (u.startsWith('/nav/')) {
       const id = u.slice('/nav/'.length);
