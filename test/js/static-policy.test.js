@@ -3059,7 +3059,11 @@ const SURFACE_INVENTORY = [
   { pair: 'button:formaction', kind: 'navigation', case: null, why: 'form:action 과 같은 경로' },
 
   // ── 정책상 일부러 막는 표면 — 리라이트하면 되살아난다 ──
-  { pair: 'object:data', kind: 'deliberate', case: 'b9-object-data', why: "object-src 'none' — plugin 표면 금지" },
+  // ★2026-08-21 deliberate → rewrite. "로드를 허용하는가"(`object-src 'none'` 으로
+  // **금지**)와 "원본 URL 이 DOM 에 남아도 되는가"(**안 됨**)는 다른 질문이다.
+  // 리라이트해도 CSP 가 URL 과 무관하게 로드를 거부하므로 표면은 되살아나지 않는다.
+  // 안 고치면 정적 cross-origin object 가 csp-only 로 남는다(a23 으로 실측).
+  { pair: 'object:data', kind: 'rewrite', case: 'a23-static-object-cross' },
   { pair: 'a:ping', kind: 'deliberate', case: 'c11-ping-attr', why: '클릭 추적 비콘. 값이 URL 목록이고 통과가 목적에 반한다' },
   { pair: 'object:codebase', kind: 'deliberate', case: null, why: "object-src 'none' — plugin 표면 금지 (object:data 와 같은 이유)" },
 

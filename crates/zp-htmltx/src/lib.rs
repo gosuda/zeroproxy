@@ -228,6 +228,7 @@ fn attr_settings(
                                     | "imagesrcset"
                                     | "poster"
                                     | "background"
+                                    | "data"
                                     | "style"
                             );
                             let is_on_handler =
@@ -255,6 +256,7 @@ fn attr_settings(
                                 | "imagesrcset"
                                 | "poster"
                                 | "background"
+                                | "data"
                                 | "style"
                         );
                         if !is_on_handler && !is_url_attr {
@@ -289,6 +291,19 @@ fn attr_settings(
                                         | ("audio", "src")
                                         | ("track", "src")
                                         | ("embed", "src")
+                                        // ★2026-08-21 — `object[data]` 도 리라이트한다.
+                                        // "로드를 허용하는가"(정책: `object-src 'none'` 으로
+                                        // **금지**)와 "원본 URL 이 DOM 에 남아도 되는가"(위생:
+                                        // **안 된다**)는 다른 질문이다. 리라이트해도 plugin 표면은
+                                        // 그대로 막힌다 — CSP 는 URL 이 무엇이든 object 로드를
+                                        // 거부하므로, 바뀌는 것은 위반 메시지에 찍히는 URL 이
+                                        // 프록시 경로가 된다는 것뿐이다.
+                                        //
+                                        // 페이지 realm(`isURLBearing`)은 이미 이렇게 하고 있었고
+                                        // htmltx 만 안 하고 있었다. 정적 cross-origin 칸이 없어서
+                                        // 안 보였다 — 매트릭스에 `a23-static-object-cross` 를
+                                        // 넣자마자 `csp-only` 로 찍혔다.
+                                        | ("object", "data")
                                         // 2026-08-20 — 매트릭스에 파싱 시점 칸을 채워
                                         // 넣고 나서 드러난 자리들. 전부 이 (tag, attr)
                                         // 목록에 조합이 없어 원본 URL 이 그대로 나갔다
@@ -1301,13 +1316,31 @@ mod tests {
         );
     }
 
-    // object/embed 는 CSP `object-src 'none'` 으로 **의도적으로** 막는 표면이다.
-    // 리라이트해서 되살리지 않는다 — 이 칸이 깨지면 그건 정책 변경이다.
+    // ★2026-08-21 정책 정정 — plugin 표면은 **CSP 가** 막는다, 리라이트가 아니라.
+    //
+    // 예전엔 `object[data]` 를 일부러 리라이트하지 않았다. 그런데 그건 두 질문을
+    // 섞은 것이었다: "로드를 허용하는가"(금지)와 "원본 URL 이 DOM 에 남아도
+    // 되는가"(안 됨). 안 고치면 정적 cross-origin object 가 `csp-only` 로 남는다
+    // (매트릭스 `a23-static-object-cross` 로 실측). 리라이트해도 `object-src 'none'`
+    // 이 URL 과 무관하게 로드를 거부하므로 표면이 되살아나지 않는다.
     #[test]
-    fn plugin_surface_stays_unrewritten_by_design() {
+    fn plugin_surface_url_is_rewritten_but_load_stays_blocked() {
         let r = transform("<object data=\"http://t.example/a.png\"></object>", &opts()).unwrap();
-        assert!(r.html.contains("t.example"), "object data: {}", r.html);
+        assert!(
+            !r.html.contains("data=\"http://t.example"),
+            "원본 URL 이 data 속성에 그대로 남았다 -> {}",
+            r.html
+        );
+        assert!(
+            r.html.contains("/zp/api/fetch?url="),
+            "프록시 경로로 안 바뀌었다 -> {}",
+            r.html
+        );
+        // 정책은 CSP 가 지킨다 — 이 목록이 사라지면 표면이 되살아난다.
+        let csp = zp_shared::build_proxied_csp("");
+        assert!(csp.contains("object-src 'none'"), "object-src 'none' 이 사라졌다: {csp}");
     }
+
 
     // ★`<meta http-equiv=refresh>` 는 서브리소스가 아니라 최상위 내비게이션이다.
     // 놓치면 브라우저가 타깃 오리진으로 문서째 이동한다 = 감옥 탈출. CSP 로도

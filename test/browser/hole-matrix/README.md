@@ -31,8 +31,22 @@
 - `b8-preload-link` — `preload`/`prefetch`/`preconnect`/`dns-prefetch`/
   `prerender`/`manifest` 는 차단 목록. `preconnect` 는 타깃 호스트명을 DNS 로
   그대로 넘긴다.
-- `b9-object-data` / `b10-embed-src` — `object-src 'none'`. plugin 표면은 금지.
-  (리라이트 자체는 동작한다 — CSP 위반 메시지에 찍히는 URL 이 프록시 경로다.)
+- `b9-object-data` / `b10-embed-src` / `a23-static-object-cross` —
+  `object-src 'none'`. plugin 표면은 금지.
+
+  **2026-08-21 정정**: 예전에는 이 자리를 "리라이트하지 않는다" 로도 이해하고
+  있었는데, 그건 두 질문을 섞은 것이었다:
+
+  | 질문 | 답 | 누가 지키나 |
+  |---|---|---|
+  | 로드를 허용하는가 | **아니오** | CSP `object-src 'none'` |
+  | 원본 URL 이 DOM 에 남아도 되는가 | **아니오** | 리라이트 |
+
+  둘째를 놓치면 정적 cross-origin `<object data>` 가 `csp-only` 로 남는다.
+  실제로 그랬다 — 정적 칸이 없어서 안 보이다가 `a23` 을 넣자마자 드러났다.
+  리라이트해도 CSP 는 URL 과 무관하게 로드를 거부하므로 표면은 되살아나지 않는다.
+  (페이지 realm 의 `isURLBearing` 은 처음부터 이렇게 하고 있었고 htmltx 만
+  갈라져 있었다.)
 - `c7-worker` / `c8-worker-cross` — JS blob 을 Worker 로 돌리는 것은 차단.
 - `c11-ping-attr` — 클릭 추적 비콘. 값이 공백 구분 URL **목록**이라 단일 URL
   훅으로 다룰 수 없고, 통과시키는 것 자체가 목적에 반한다.

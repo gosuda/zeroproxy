@@ -48,6 +48,11 @@ C('a19-static-script', 1, ''); // <script src> cross
 C('a20-static-use', 1, ''); // SVG <use href>
 C('a21-static-feimage', 1, ''); // SVG 필터의 이미지 입력
 C('a22-static-imageset', 1, ''); // image-set() 의 맨 문자열 (url() 없는 형태)
+// object/embed 는 `object-src 'none'` 으로 **로드를 막는 것**이 정책이다. 그런데
+// 그것과 "원본 URL 이 DOM 에 남아도 되는가" 는 다른 질문이다. 프렐류드는 후자를
+// 아니라고 보고 리라이트하는데(isURLBearing 에 object[data] 있음) htmltx 는 안 한다.
+// 지금까지 **정적 cross-origin object 칸이 없어서** 그 상태가 안 드러났다.
+C('a23-static-object-cross', 1, '');
 
 // ── B. 런타임 DOM: 요소 생성 경로 ────────────────────────────────────────
 C('b1-img-prop', 0, `var i=new Image();i.src=U;document.body.appendChild(i)`);
@@ -137,6 +142,7 @@ const STATIC_HTML = `
 <svg width="1" height="1"><use href="http://127.0.0.1:${CDN}/img/a20-static-use__cross.svg#i"></use></svg>
 <svg width="1" height="1"><filter id="a21f"><feImage href="http://127.0.0.1:${CDN}/img/a21-static-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#a21f)"></rect></svg>
 <style>#a22{background-image:image-set("http://127.0.0.1:${CDN}/img/a22-static-imageset__cross.png" 1x)}</style><div id="a22" style="width:1px;height:1px"></div>
+<object data="http://127.0.0.1:${CDN}/img/a23-static-object-cross__cross.png"></object>
 `;
 
 function page() {
