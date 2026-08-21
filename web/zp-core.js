@@ -41,7 +41,7 @@
   const TARGET_SEC_CH_UA = '"Chromium";v="151", "Not=A?Brand";v="99", "Google Chrome";v="151"';
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
-  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','TARGET_HTTP_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
+  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','TARGET_HTTP_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','REDIRECT_LIMIT_EXCEEDED','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
   // Human-friendly title + description per error code. Parity with
   // crates/zp-shared/src/errors.rs ErrorCode::as_str.
   const ERROR_INFO = Object.freeze({
@@ -65,6 +65,10 @@
     REWRITE_FAILED: { title: 'JavaScript rewrite failed', desc: 'A target script could not be safely rewritten and was blocked in strict mode.' },
     SCRIPT_SRC_BLOCKED: { title: 'Script source blocked', desc: 'A script was loaded via a scheme that bypasses the ZeroProxy rewrite pipeline (blob:/data:).' },
     REDIRECT_BODY_NONREPLAYABLE: { title: 'Redirect body cannot be replayed', desc: 'A 307/308 redirect requires resending the request body, but the body is too large or not replayable.' },
+    // 리다이렉트 상한을 넘었다. 예전에는 마지막 3xx 를 그대로 브라우저에
+    // 넘겼는데, 그 Location 이 절대 URL 이면 **브라우저가 따라가 프록시 밖으로
+    // 나갔다**(2026-08-21 실측, 진짜 탈출). 이제 여기서 멈춘다.
+    REDIRECT_LIMIT_EXCEEDED: { title: 'Too many redirects', desc: 'The target redirected more times than the proxy will follow. The chain was stopped here rather than handing the last hop to the browser.' },
     WS_BLOCKED: { title: 'WebSocket blocked', desc: 'A WebSocket connection attempt did not go through the ZeroProxy bridge.' },
     RTC_GATEWAY_UNAVAILABLE: { title: 'WebRTC gateway unavailable', desc: 'WebRTC traffic must route through the ZeroProxy gateway, which is not yet provisioned.' },
     WT_UNSUPPORTED: { title: 'WebTransport unsupported', desc: 'WebTransport is not yet supported by this ZeroProxy server.' },

@@ -203,6 +203,40 @@ function mk(port) {
     }
     // e7 전용 시트 — 안에 cross-origin 이미지 하나만 둔다. 이 이미지가 도착하면
     // "릴레이로 받은 시트 안의 url() 이 실제로 동작한다" 가 증명된다.
+    // 응답 헤더 정책 관측용. 타깃이 브라우저를 조종하려 드는 헤더를 한꺼번에
+    // 실어 보낸다 — 프록시를 지난 뒤 무엇이 남는지 브라우저 쪽에서 확인한다.
+    // Go 의 ConstructorPolicy 는 이 목록을 걷어내지만 **문서 응답은 커널→SW
+    // 경로로 와서 Go 를 안 지난다**(2026-08-20 Refresh 탈출이 그 사고였다).
+    // 리다이렉트 깊이 상한(SW: MAX_REDIRECT_DEPTH=5)을 넘기면 마지막 3xx 가
+    // 그대로 브라우저로 간다. 그 응답에 Location 이 살아 있으면 **브라우저가
+    // 따라가서 프록시 밖으로 나간다**. Go 는 Location 을 리다이렉트 엔진 밖으로
+    // 안 흘리는데 SW 는 그대로 복사한다(2026-08-21 실측). 그 차이를 여기서 잰다.
+    if (u.startsWith('/redirloop')) {
+      const n = Number(u.split('/redirloop/')[1] || '0');
+      const next = n >= 5
+        ? 'http://127.0.0.1:' + CDN + '/img/redirloop-escape__cross.png'
+        : '/redirloop/' + (n + 1);
+      res.writeHead(302, { location: next, 'cache-control': 'no-store' });
+      return res.end('');
+    }
+    if (u.startsWith('/hdrprobe')) {
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        // hop-by-hop — Go 는 걷어내고 SW 는 안 걷어낸다(감사 지적)
+        connection: 'keep-alive',
+        'keep-alive': 'timeout=5',
+        trailer: 'X-Zp-Probe',
+        'proxy-authenticate': 'Basic realm="zp"',
+        // Go 는 Location 을 리다이렉트 엔진 밖으로 안 흘린다
+        location: 'http://127.0.0.1:' + CDN + '/img/hdrprobe-location__cross.png',
+        // 이미 막고 있는 것들 — 회귀 감시로 같이 싣는다
+        'clear-site-data': '"storage"',
+        'alt-svc': 'h3=":443"',
+        link: '<http://127.0.0.1:' + CDN + '/img/hdrprobe-link__cross.png>; rel=preload; as=image',
+      });
+      return res.end('<!doctype html><meta charset="utf-8"><title>hdrprobe</title><p>hdr</p>');
+    }
     if (u.startsWith('/style/e7')) {
       res.writeHead(200, { 'content-type': 'text/css', 'cache-control': 'no-store' });
       return res.end('.e7{background-image:url(http://127.0.0.1:' + CDN + '/img/e7-adframe-css-image__cross.png)}');

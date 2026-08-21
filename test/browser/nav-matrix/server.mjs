@@ -94,6 +94,24 @@ function mk(port) {
     }
     // 서버가 타깃 오리진으로 3xx 를 준다. 트랜스포트가 따라가되 결과는 여전히
     // 프록시 오리진이어야 한다.
+    // 6홉 체인. 마지막 홉의 Location 은 **절대 URL** 이라, 프록시가 상한에서
+    // 손을 떼고 그 3xx 를 넘기면 브라우저가 착지 오리진으로 나간다.
+    if (u.startsWith('/nav/n13-redirect-limit')) {
+      const hop = Number(u.split('?hop=')[1] || '0');
+      // 홉 수는 **양쪽 모두** 포기할 만큼 크게 둔다. 이 칸의 목적은 상한 값
+      // 비교가 아니라 "상한에서 손을 뗄 때 마지막 3xx 를 브라우저에 넘기지
+      // 않는가" 이기 때문이다(넘기면 절대 Location 을 따라가 탈출한다).
+      //
+      // 실측(2026-08-21): 25홉 체인을 **크롬은 끝까지 따라갔다** — 흔히 알려진
+      // 상한 20 보다 관대하다. 우리는 20 에서 멈추므로 21~26홉 구간은 크롬이
+      // 되고 프록시가 안 되는 구간이다. 실사이트에서 그렇게 긴 체인은 없다고
+      // 보고 받아들인 차이이고, 여기 적어 둔다(다음 세션이 다시 재지 않도록).
+      const next = hop >= 60
+        ? landURL('n13-redirect-limit')
+        : '/nav/n13-redirect-limit?hop=' + (hop + 1);
+      res.writeHead(302, { location: next, 'cache-control': 'no-store' });
+      return res.end('');
+    }
     if (u.startsWith('/nav/n12-server-redirect')) {
       res.writeHead(302, { location: landURL('n12-server-redirect'), 'cache-control': 'no-store' });
       return res.end('');
@@ -121,5 +139,9 @@ function mk(port) {
 // 헤더/리다이렉트 케이스는 CASES 에 마크업이 없으므로 따로 등록한다.
 CASES.push({ id: 'n11-refresh-header', html: () => '' });
 CASES.push({ id: 'n12-server-redirect', html: () => '' });
+// ★리다이렉트 상한을 넘겼을 때 마지막 3xx 를 브라우저에 넘기면, 그 Location 이
+// 절대 URL 인 순간 **문서째 프록시 밖으로 나간다**(2026-08-21 실측 — 진짜 탈출).
+// n12 는 한 홉짜리라 이걸 못 잡는다. 상한(5)을 넘기는 체인이 필요하다.
+CASES.push({ id: 'n13-redirect-limit', html: () => '' });
 mk(ORIGIN);
 mk(LAND);

@@ -1713,9 +1713,26 @@ async function transportFetch(targetUrl, opt) {
   //     rebuild (entry.targetUrl 이 이미 업데이트됨).
   // Method 처리: 301/302/303 은 GET 으로 강제 (RFC 7231 §6.4.4), 307/308 은
   // 원래 method 유지. Depth limit 5 — 무한 loop 차단.
-  const MAX_REDIRECT_DEPTH = 5;
+  // 2026-08-21 — 5 → 20. 크롬의 리다이렉트 상한이 20 이라 5 는 **우리만 더 일찍
+  // 포기하는** 값이었다. 예전에는 그 차이가 안 보였다 — 상한을 넘으면 마지막 3xx 를
+  // 브라우저에 넘겨 버려서 브라우저가 이어서 따라갔기 때문이다(그게 탈출이었다).
+  // 이제 상한에서 멈추므로 그 차이가 곧바로 "사이트가 안 열린다" 가 된다.
+  // 내비 매트릭스 n13 이 대조군과 비교해 이 값을 감시한다.
+  const MAX_REDIRECT_DEPTH = 20;
   if (resp && resp.status >= 300 && resp.status < 400) {
     const currentDepth = opt.__redirectDepth || 0;
+    // ★2026-08-21 — 상한을 넘으면 **여기서 멈춘다.**
+    //
+    // 예전에는 마지막 3xx 를 그대로 브라우저에 넘겼다. 그 응답의 Location 이
+    // 절대 URL 이면 브라우저가 그대로 따라가 **프록시 밖으로 나간다** — 실측:
+    // 6홉 리다이렉트 뒤 문서가 `127.0.0.1:18098` 로 이동했다. 타깃이 홉 수만
+    // 늘리면 되는 탈출이었다.
+    //
+    // 상대 Location 이어도 프록시 오리진의 **프록시 라우트가 아닌 경로**로
+    // 나가므로 share 컨텍스트를 잃는다. 어느 쪽이든 넘기면 안 된다.
+    if (currentDepth >= MAX_REDIRECT_DEPTH && resp.headers.get('Location')) {
+      return safeError('REDIRECT_LIMIT_EXCEEDED', 508, targetUrl);
+    }
     if (currentDepth < MAX_REDIRECT_DEPTH) {
       const loc = resp.headers.get('Location');
       if (loc) {
@@ -2975,6 +2992,13 @@ function proxiedRefreshValue(raw, targetUrl) {
   if (!/^https?:/i.test(abs)) return '';
   return head + 'url=' + ORIGIN + ZP.CONTROL_PREFIX + '?via=' + encodeURIComponent(abs);
 }
+// hop-by-hop + Location. Go `internal/headers/policy.go` 의 `isHopByHop` +
+// Location 제외 정책과 **같은 목록**이어야 한다 — static-policy 가 양방향으로 대조한다.
+const ZP_HOP_BY_HOP_HEADERS = [
+  'Connection', 'Keep-Alive', 'Proxy-Authenticate', 'Proxy-Authorization',
+  'TE', 'Trailer', 'Transfer-Encoding', 'Upgrade',
+  'Location',
+];
 const ZP_TARGET_POLICY_HEADERS = [
   'Refresh', 'Link', 'Clear-Site-Data', 'Alt-Svc',
   'Service-Worker-Allowed', 'SourceMap', 'X-SourceMap',
@@ -3016,6 +3040,14 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   // 직접 가지러 간다. `Clear-Site-Data` 는 프록시 오리진의 저장소를 타깃이
   // 지우게 하고, `Alt-Svc` 는 다음 연결을 타깃이 지정한 프로토콜/포트로 돌린다.
   for (const name of ZP_TARGET_POLICY_HEADERS) h.delete(name);
+  // ★hop-by-hop + Location. Go 의 ConstructorPolicy 는 이미 걷어내는데 문서
+  // 응답은 커널→SW 경로라 Go 를 안 지난다 — 실측(2026-08-21): connection /
+  // keep-alive / trailer / proxy-authenticate / location 이 브라우저까지 갔다.
+  //
+  // Location 이 특히 위험하다. 리다이렉트는 위에서 우리가 따라가므로 페이지로
+  // 나가는 응답에 남아 있을 이유가 없고, 남아 있으면 브라우저가 따라간다.
+  // hop-by-hop 은 합성 Response 에서 의미가 없고 상류 구현을 드러낸다.
+  for (const name of ZP_HOP_BY_HOP_HEADERS) h.delete(name);
   // 지운 뒤에 **프록시 경로로 다시 심는다.** 목적지를 아는 경우에만 — 서브리소스
   // 응답에는 targetUrl 이 없고, 거기 붙은 Refresh 는 어차피 의미가 없다.
   if (rawRefresh && targetUrl) {

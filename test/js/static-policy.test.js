@@ -3381,3 +3381,48 @@ test('에러 코드: SW 가 던지는 코드가 전부 목록에 있다', () => 
   const missing = [...thrown].filter((c) => !want.has(c));
   assert.deepEqual(missing, [], 'SW 가 던지는데 공유 목록에 없는 코드 (POLICY_BLOCKED 로 접힌다)');
 });
+
+// ── hop-by-hop + Location (2026-08-21) ────────────────────────────────────
+//
+// Go 의 `ConstructorPolicy` 는 hop-by-hop 을 걷어내고 `Location` 을 리다이렉트
+// 엔진 밖으로 안 흘린다. SW 는 둘 다 안 하고 있었다 — 실측: connection /
+// keep-alive / trailer / proxy-authenticate / location 이 브라우저까지 갔다.
+//
+// `Location` 이 특히 위험했다. 리다이렉트 상한을 넘으면 마지막 3xx 가 그대로
+// 페이지로 갔고, 그 Location 이 절대 URL 이면 **브라우저가 따라가 프록시 밖으로
+// 나갔다**(진짜 탈출, 내비 매트릭스 n13-redirect-limit).
+test('hop-by-hop + Location: Go 목록을 SW 도 전부 걷어낸다', () => {
+  const go = fs.readFileSync('internal/headers/policy.go', 'utf8').split(String.fromCharCode(13, 10)).join(String.fromCharCode(10));
+  const block = go.slice(go.indexOf('func isHopByHop'), go.indexOf('\n}', go.indexOf('func isHopByHop')));
+  const goNames = [...block.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
+  assert.ok(goNames.length >= 6, `Go hop-by-hop 목록 파싱 실패 (${goNames.length})`);
+
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const arr = sw.slice(sw.indexOf('const ZP_HOP_BY_HOP_HEADERS = ['));
+  const swList = arr.slice(0, arr.indexOf(']')).toLowerCase();
+  for (const name of goNames) {
+    assert.ok(swList.includes(`'${name}'`), `${name}: Go 는 hop-by-hop 으로 걷어내는데 SW 는 흘린다`);
+  }
+  assert.ok(swList.includes("'location'"), 'Location 이 빠지면 리다이렉트 상한에서 탈출한다');
+});
+
+// 가드를 양방향으로. 지금까지는 Go⊆SW 만 봤으므로 SW 에만 있는 것은 자유롭게
+// 갈라졌다 — 그 사각지대에서 hop-by-hop / Location 이 오래 남아 있었다.
+test('타깃 제어 헤더: SW 가 걷어내는 것을 Go 도 안다 (역방향)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const grab = (name) => {
+    const arr = sw.slice(sw.indexOf('const ' + name + ' = ['));
+    return arr.slice(0, arr.indexOf(']')).toLowerCase();
+  };
+  const swNames = [...(grab('ZP_TARGET_POLICY_HEADERS') + grab('ZP_HOP_BY_HOP_HEADERS')).matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+  assert.ok(swNames.length >= 12, `SW 목록 파싱 실패 (${swNames.length})`);
+
+  const go = fs.readFileSync('internal/headers/policy.go', 'utf8').toLowerCase();
+  // Go 가 이름을 아는 방법은 세 가지 — hidden 맵, isHopByHop, 명시적 Del/제외.
+  for (const name of swNames) {
+    assert.ok(
+      go.includes(`"${name}"`),
+      `${name}: SW 는 걷어내는데 Go 는 모른다 — 두 경로가 다른 정책을 쓴다`
+    );
+  }
+});
