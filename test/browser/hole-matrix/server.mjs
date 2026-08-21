@@ -211,6 +211,16 @@ function mk(port) {
     // 그대로 브라우저로 간다. 그 응답에 Location 이 살아 있으면 **브라우저가
     // 따라가서 프록시 밖으로 나간다**. Go 는 Location 을 리다이렉트 엔진 밖으로
     // 안 흘리는데 SW 는 그대로 복사한다(2026-08-21 실측). 그 차이를 여기서 잰다.
+    // 상대 URL 정규화 관측용. htmltx 의 resolve_against_base 는 손으로 쓴
+    // 문자열 결합이라 `..`/`.` 를 정규화하지 않는다(나머지 리졸버 넷은
+    // new URL()/Url::join 이라 정규화한다). 그 차이가 타깃에 도착하는 **경로**로
+    // 드러나는지 본다 — 서버가 받은 u 를 그대로 히트 로그에 남기므로 눈에 보인다.
+    if (u.startsWith('/deep/nest/page')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end('<!doctype html><meta charset="utf-8"><title>deep</title>'
+        + '<img src="../../img/a24-dotdot__same.png">'
+        + '<img src="./sibling/../../../img/a25-dotdot2__same.png">');
+    }
     if (u.startsWith('/redirloop')) {
       const n = Number(u.split('/redirloop/')[1] || '0');
       const next = n >= 5

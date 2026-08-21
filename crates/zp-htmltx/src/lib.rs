@@ -830,6 +830,53 @@ fn inline_script_payload(src: &str) -> String {
 /// path-relative) — enough for what we hit inside iframes. Returns None when
 /// the base is not http(s) absolute or when the relative form can't be
 /// interpreted (we'd rather emit nothing than a wrong URL).
+/// `..` / `.` 세그먼트를 RFC 3986 §5.2.4 대로 접는다.
+///
+/// 2026-08-21 — `resolve_against_base` 는 손으로 쓴 문자열 결합이라 이걸 안
+/// 했다. 나머지 리졸버 넷(`new URL()`, `url::Url::join`)은 전부 정규화하므로,
+/// 같은 상대 URL에서 **서로 다른 절대 URL**이 나왔다.
+///
+/// 실측(2026-08-21): 밖으로 나가는 요청은 SW 의 `canonicalTargetURL` 이 다시
+/// 정규화하므로 타깃은 정상 경로를 받는다 — 404 가 나거나 격리가 깨지지는
+/// 않는다. 문제는 `?url=` 파라미터 문자열이 페이지 realm 이 계산한 것과
+/// 달라진다는 것이다: 같은 리소스에 키가 둘 생겨 `alreadyMapped` 단축과
+/// 컨텍스트 키가 어긋난다.
+fn normalize_dot_segments(path: &str) -> String {
+    // 쿼리/프래그먼트는 건드리지 않는다 — 경로만 접는다.
+    let (path_part, tail) = match path.find(['?', '#']) {
+        Some(i) => (&path[..i], &path[i..]),
+        None => (path, ""),
+    };
+    if !path_part.contains("./") && !path_part.ends_with("/.") && !path_part.ends_with("/..") {
+        return path.to_string();
+    }
+    let absolute = path_part.starts_with('/');
+    let trailing_slash = path_part.ends_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path_part.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    let mut s = String::with_capacity(path.len());
+    if absolute {
+        s.push('/');
+    }
+    s.push_str(&out.join("/"));
+    // 원본이 `/` 로 끝났거나 마지막 세그먼트가 `.`/`..` 였으면 디렉터리다.
+    if (trailing_slash || path_part.ends_with("/.") || path_part.ends_with("/.."))
+        && !s.ends_with('/')
+    {
+        s.push('/');
+    }
+    s.push_str(tail);
+    s
+}
+
 fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
     // ASCII CI check on the scheme — saves the `base.to_ascii_lowercase()`
     // alloc on every URL resolve. Called ~N URL-bearing-elements per page.
@@ -864,7 +911,7 @@ fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
     if rel.starts_with('/') {
         let mut out = String::with_capacity(origin.len() + rel.len());
         out.push_str(origin);
-        out.push_str(rel);
+        out.push_str(&normalize_dot_segments(rel));
         return Some(out);
     }
     // Path-relative: drop the last segment of base_path, append rel.
@@ -872,10 +919,12 @@ fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
         Some(i) => &base_path[..=i],
         None => "/",
     };
-    let mut out = String::with_capacity(origin.len() + dir.len() + rel.len());
+    let mut joined = String::with_capacity(dir.len() + rel.len());
+    joined.push_str(dir);
+    joined.push_str(rel);
+    let mut out = String::with_capacity(origin.len() + joined.len());
     out.push_str(origin);
-    out.push_str(dir);
-    out.push_str(rel);
+    out.push_str(&normalize_dot_segments(&joined));
     Some(out)
 }
 
@@ -1396,6 +1445,27 @@ mod tests {
         )
         .unwrap();
         assert!(!r.html.contains("t.example/a.png"), "원본 URL 이 남았다 -> {}", r.html);
+    }
+
+// `..`/`.` 정규화. 나머지 리졸버 넷(new URL / Url::join)과 같은 결과를
+    // 내야 한다 — 다르면 같은 리소스에 `?url=` 키가 둘 생긴다.
+    #[test]
+    fn dot_segments_are_folded() {
+        let cases: &[(&str, &str, &str)] = &[
+            // (rel, base, 기대 절대 URL)
+            ("../../img/x.png", "https://h/a/b/c.html", "https://h/img/x.png"),
+            ("./sibling/../../y.png", "https://h/a/b/c.html", "https://h/a/y.png"),
+            ("/a/./b/../c.png", "https://h/deep/page", "https://h/a/c.png"),
+            ("../x.png?q=../keep", "https://h/a/b/c.html", "https://h/a/x.png?q=../keep"),
+            // 위로 더 올라가려 해도 루트를 넘지 않는다.
+            ("../../../../x.png", "https://h/a/b.html", "https://h/x.png"),
+            // 점이 없으면 그대로.
+            ("d/e.png", "https://h/a/b.html", "https://h/a/d/e.png"),
+        ];
+        for (rel, base, want) in cases {
+            let got = super::resolve_against_base(rel, base).expect("resolve");
+            assert_eq!(&got, want, "rel={rel} base={base}");
+        }
     }
 
     #[test]
@@ -2202,9 +2272,14 @@ mod tests {
             "host-relative link must resolve against target: {}",
             r.html
         );
-        // Path-relative against https://example.com/ → https://example.com/./b.js
+        // Path-relative against https://example.com/ → https://example.com/b.js
+        //
+        // 2026-08-21 — 이 단언은 예전에 `example.com%2F.%2Fb.js` 를 기대했다.
+        // 즉 **정규화하지 않는 동작을 고정**하고 있었다. `.`/`..` 를 접지 않으면
+        // 같은 리소스에 `?url=` 키가 둘 생겨(서버가 만든 것 / 페이지 realm 이
+        // 계산한 것) `alreadyMapped` 단축과 컨텍스트 키가 어긋난다.
         assert!(
-            r.html.contains("example.com%2F.%2Fb.js"),
+            r.html.contains("example.com%2Fb.js"),
             "path-relative script must resolve against target: {}",
             r.html
         );
