@@ -90,19 +90,32 @@ const cspOnly = rows.filter(r => r.containment === 'csp-only');
 console.log('\n[재현성] 대조군에서 되는데 프록시에서 안 되는 것:', broken.length ? broken.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 진짜 유출(바이트가 나감):', leaks.length ? leaks.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 리라이트는 놓쳤고 CSP 만 막은 것:', cspOnly.length ? cspOnly.map(r => r.id).join(', ') : '없음');
-// ★`preconnect` / `dns-prefetch` 는 HTTP 요청을 안 만들어 도착 축이 못 잡는다.
-// 유출의 정의가 "타깃과 연결이 열렸는가" 이므로 소켓 수로 잰다. 대조군은
-// 링크대로 CDN 에 붙고, 프록시는 0 이어야 한다 — 프록시에서 0 이 아니면
-// 브라우저가 타깃 오리진에 직접 붙은 것이다(바이트가 안 왔어도 IP 노출).
-const cdnControl = ((controlRun.conns || {}).idle || {})['18098'] || 0;
-const cdnProxy = ((conns || {}).idle || {})['18098'] || 0;
-console.log(`[격리] 타깃에 열어만 두고 안 쓴 소켓(preconnect/dns-prefetch): 대조군 ${cdnControl} / 프록시 ${cdnProxy}` + (cdnProxy > 0 ? '  ← 프록시에서 0 이 아니다' : ''));
-// ★이 계측은 **아직 자기 자신을 증명하지 못했다**. 대조군도 0 이 나온다 —
-// 크롬이 preconnect 로 연 소켓을 곧바로 이어지는 prefetch/preload 에 재사용해서
-// '안 쓴 소켓' 이 남지 않기 때문으로 보인다. 즉 양성 대조가 없으므로 프록시
-// 쪽 0 을 '깨끗하다' 로 읽으면 안 된다. 대조군이 0 이면 그렇게 크게 적는다.
-if (cdnControl === 0) {
-  console.log('     [!] 대조군도 0 이다 — 이 계측은 양성을 못 만든다. 프록시 0 은 증거가 아니다.');
+// ★`preconnect` 는 HTTP 요청을 안 만들어 도착 축이 못 잡는다. 유출의 정의가
+// "타깃과 연결이 열렸는가" 이므로 소켓으로 잰다 — 단 **요청 없이 열려만 있던**
+// 소켓만 센다(그냥 세면 우리 프록시 서버 자신의 다이얼과 섞인다: 실측 대조군 6 /
+// 프록시 7 이었는데 대부분이 우리 서버였다).
+//
+// 전용 오리진(18097)을 쓴다. CDN(18098)에 붙여 두면 곧이어 오는 prefetch/preload 가
+// 같은 오리진이라 그 소켓을 재사용해 '안 쓴 소켓' 이 안 남았고, 그래서 대조군이
+// 0 이 되는 실행이 있었다(= 양성을 못 만드는 계측). 아무도 요청을 안 보내는
+// 오리진이면 거기 열린 소켓은 preconnect 말고 나올 데가 없다.
+//
+// `dns-prefetch` 는 소켓을 아예 안 연다(게다가 대상이 숫자 IP 면 DNS 자체가 없다)
+// — 이 계측으로 못 잰다. 못 잰다는 사실을 적어 두는 것이 이 줄의 목적이다.
+const preControl = ((controlRun.conns || {}).idle || {})['18097'] || 0;
+const preProxy = ((conns || {}).idle || {})['18097'] || 0;
+// 총 소켓 수도 같이 찍는다. 대조군의 **total 이 0** 이면 크롬이 애초에
+// preconnect 를 안 한 것이고(힌트라 브라우저가 건너뛸 수 있다), 그건 계측
+// 결함이 아니라 브라우저 사정이다. total>0 인데 idle 이 0 이면 그때가
+// 계측을 의심할 자리다.
+const preControlTotal = ((controlRun.conns || {}).total || {})['18097'] || 0;
+const preProxyTotal = ((conns || {}).total || {})['18097'] || 0;
+console.log(`[격리] preconnect 로 타깃에 열린 소켓: 대조군 ${preControl}/${preControlTotal} / 프록시 ${preProxy}/${preProxyTotal} (미사용/전체)`
+  + (preProxy > 0 ? '  <- 프록시에서 0 이 아니다' : ''));
+if (preControlTotal === 0) {
+  console.log('     [-] 대조군에서 크롬이 preconnect 자체를 안 했다(힌트라 건너뛸 수 있다). 이 실행은 판정 불가.');
+} else if (preControl === 0) {
+  console.log('     [!] 대조군은 붙었는데 미사용으로 안 잡혔다 — 계측을 의심할 것.');
 }
 // 판정이 테이프의 결말 이벤트에 걸려 있다. 이벤트가 유실되면 진짜 유출이
 // csp-only 로 내려앉을 수 있으므로(과소보고), 유실이 있으면 크게 알린다.

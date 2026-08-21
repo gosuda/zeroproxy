@@ -16,7 +16,12 @@ const PNG = Buffer.from(
   'base64'
 );
 const ORIGIN = 18099, CDN = 18098;
-let hits = { [ORIGIN]: [], [CDN]: [] };
+// ★preconnect 전용 오리진. CDN(18098)에 붙여 두면 곧이어 오는 prefetch/preload 가
+// **같은 오리진이라 그 소켓을 재사용**해서 '안 쓴 소켓' 이 안 남는다 — 그래서
+// 계측이 간헐적이었다(대조군이 0 이 되는 실행이 있었다). 아무도 요청을 보내지
+// 않는 전용 오리진을 주면 여기 열린 소켓은 preconnect 말고 나올 데가 없다.
+const PRE = 18097;
+let hits = { [ORIGIN]: [], [CDN]: [], [PRE]: [] };
 // ★`preconnect` / `dns-prefetch` 는 **HTTP 요청을 만들지 않는다** — 연결만 연다.
 // 그래서 바이트 도착 축(hits)으로는 영영 판정불가다(실측: 대조군도 `-`).
 // 소켓 연결 수를 따로 센다. 케이스마다 리셋하므로 "이 케이스 동안 타깃에
@@ -26,8 +31,8 @@ let hits = { [ORIGIN]: [], [CDN]: [] };
 // 그 7 의 대부분이 우리 서버였다). 구분자는 이것이다: **preconnect 로 열린
 // 소켓은 아무 요청도 보내지 않는다.** 우리 프록시는 열자마자 요청을 보낸다.
 // 그래서 "요청 없이 열려만 있던 소켓" 만 센다 — 그게 preconnect 의 정의다.
-let conns = { [ORIGIN]: 0, [CDN]: 0 };
-let idleConns = { [ORIGIN]: 0, [CDN]: 0 };
+let conns = { [ORIGIN]: 0, [CDN]: 0, [PRE]: 0 };
+let idleConns = { [ORIGIN]: 0, [CDN]: 0, [PRE]: 0 };
 
 const CASES = [];
 const C = (id, cross, code) => CASES.push({ id, cross: !!cross, code });
@@ -193,8 +198,8 @@ const STATIC_HTML = `
 <svg width="1" height="1"><filter id="a21f"><feImage href="http://127.0.0.1:${CDN}/img/a21-static-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#a21f)"></rect></svg>
 <style>#a22{background-image:image-set("http://127.0.0.1:${CDN}/img/a22-static-imageset__cross.png" 1x)}</style><div id="a22" style="width:1px;height:1px"></div>
 <object data="http://127.0.0.1:${CDN}/img/a23-static-object-cross__cross.png"></object>
-<link rel="preconnect" href="http://127.0.0.1:${CDN}/img/a26-static-preconnect__cross.png">
-<link rel="dns-prefetch" href="http://127.0.0.1:${CDN}/img/a27-static-dns-prefetch__cross.png">
+<link rel="preconnect" href="http://127.0.0.1:${PRE}/">
+<link rel="dns-prefetch" href="http://127.0.0.1:${PRE}/">
 <link rel="prefetch" href="http://127.0.0.1:${CDN}/img/a28-static-prefetch__cross.png">
 <link rel="preload" as="image" href="http://127.0.0.1:${CDN}/img/a29-static-preload__cross.png">
 <link rel="modulepreload" href="http://127.0.0.1:${CDN}/img/a30-static-modulepreload__cross.js">
@@ -228,9 +233,9 @@ function mk(port) {
       return res.end(JSON.stringify(hits));
     }
     if (u === '/reset') {
-      hits = { [ORIGIN]: [], [CDN]: [] };
-      conns = { [ORIGIN]: 0, [CDN]: 0 };
-      idleConns = { [ORIGIN]: 0, [CDN]: 0 };
+      hits = { [ORIGIN]: [], [CDN]: [], [PRE]: [] };
+      conns = { [ORIGIN]: 0, [CDN]: 0, [PRE]: 0 };
+      idleConns = { [ORIGIN]: 0, [CDN]: 0, [PRE]: 0 };
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end('ok');
     }
@@ -366,11 +371,21 @@ function mk(port) {
   srv.on('connection', (sock) => {
     conns[port] += 1;
     sock.__zpUsed = false;
-    // 1.5초 안에 요청이 한 건도 안 오면 '열어만 두고 안 쓴 소켓' 이다.
-    const t = setTimeout(() => { if (!sock.__zpUsed) idleConns[port] += 1; }, 1500);
-    sock.on('close', () => clearTimeout(t));
+    // ★한 번만 센다. 예전에는 1.5초 타이머만 두고 **close 에서 타이머를 지웠는데**,
+    // 크롬은 안 쓴 preconnect 소켓을 그보다 빨리 닫는다 — 그러면 영영 안 세어졌다.
+    // 그게 이 계측이 간헐적이었던 진짜 이유다(대조군이 0 이 되는 실행). 지금은
+    // **타임아웃이든 조기 종료든 먼저 오는 쪽**에서 센다.
+    let counted = false;
+    const countIdle = () => {
+      if (counted || sock.__zpUsed) return;
+      counted = true;
+      idleConns[port] += 1;
+    };
+    const t = setTimeout(countIdle, 1500);
+    sock.on('close', () => { clearTimeout(t); countIdle(); });
   });
   srv.listen(port, '127.0.0.1', () => console.log('listening', port));
 }
 mk(ORIGIN);
 mk(CDN);
+mk(PRE);
