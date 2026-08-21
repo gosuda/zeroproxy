@@ -70,6 +70,17 @@ fn attr_settings(
 ) -> Settings<'static, 'static> {
     let diags_for_attr = diagnostics;
     let target_for_attr = target;
+    // ★`<base href>` 는 그 뒤에 파싱되는 모든 상대 URL 의 기준이 된다.
+    // 지금까지는 무시하고 항상 문서 URL(target)에 대고 풀었다. 실측
+    // (2026-08-21, `/basepage`): `<base href="http://cdn/deep/">` + 
+    // `<img src="rel.png">` 를 대조군은 `cdn/deep/rel.png` 로 가져오는데
+    // 프록시는 **문서 오리진의 `/rel.png`** 를 불렀다 — 오리진도 경로도 틀렸다.
+    // 유출은 아니지만(프록시를 통해 엉뚱한 곳으로 간다) 재현성 결함이다.
+    //
+    // lol_html 은 스트리밍이라 문서 순서대로 온다 — `<head>` 의 `<base>` 가
+    // 본문 서브리소스보다 먼저 도착한다. 명세도 "`<base>` 뒤에 파싱된 것" 에만
+    // 적용하므로 이 순서 의미가 맞다.
+    let base_for_attr = Rc::new(RefCell::new(target_for_attr.clone()));
     Settings {
         element_content_handlers: vec![
                 // on* event handler attributes + javascript: URL attributes.
@@ -82,6 +93,20 @@ fn attr_settings(
                     // (it normalizes element names). Cache once per element
                     // instead of recomputing inside the per-attribute loop.
                     let tag = el.tag_name();
+                    // `<base href>` 자체는 리라이트하지 않는다 — 페이지 realm 의
+                    // `updateVirtualBase` 가 원본 값을 읽어 가상 base 를 세운다.
+                    // 여기서는 **이후 상대 URL 의 해석 기준**으로만 기억한다.
+                    if tag == "base" {
+                        if let Some(href) = el.get_attribute("href") {
+                            let h = href.trim().to_string();
+                            if !h.is_empty() {
+                                if let Some(abs) = absolute_target_url(&h, &target_for_attr) {
+                                    *base_for_attr.borrow_mut() = abs;
+                                }
+                            }
+                        }
+                    }
+                    let attr_base = base_for_attr.borrow().clone();
                     // 2026-08-14 — 타깃이 자기 CSP 를 `<meta http-equiv>` 로
                     // 실어 보내면 그걸 무력화한다.
                     //
@@ -187,7 +212,7 @@ fn attr_settings(
                                     &content,
                                     &proxy_origin,
                                     "/zp/",
-                                    &target_for_attr,
+                                    &attr_base,
                                 ) {
                                     let _ = el.set_attribute("data-zp-target-url", &content);
                                     let _ = el.set_attribute("content", &next);
@@ -375,7 +400,7 @@ fn attr_settings(
                                     let wrapped = format!("a{{{}}}", trimmed);
                                     let res = zp_css::rewrite_css(
                                         &wrapped,
-                                        &target_for_attr,
+                                        &attr_base,
                                         "/zp/",
                                         &proxy_origin,
                                     );
@@ -402,7 +427,7 @@ fn attr_settings(
                                         trimmed,
                                         &proxy_origin,
                                         "/zp/",
-                                        &target_for_attr,
+                                        &attr_base,
                                     ) {
                                         let _ = el.set_attribute(&name, &next);
                                     }
@@ -413,7 +438,7 @@ fn attr_settings(
                                         trimmed,
                                         &proxy_origin,
                                         "/zp/",
-                                        &target_for_attr,
+                                        &attr_base,
                                     ) {
                                         let _ = el.set_attribute(&name, &next);
                                         // Stash the original absolute URL so the runtime-
@@ -425,7 +450,7 @@ fn attr_settings(
                                         // 404 — observed on github.com.
                                         if matches!(tag.as_str(), "script" | "link") {
                                             if let Some(abs) =
-                                                absolute_target_url(trimmed, &target_for_attr)
+                                                absolute_target_url(trimmed, &attr_base)
                                             {
                                                 let _ =
                                                     el.set_attribute("data-zp-target-url", &abs);
@@ -434,7 +459,7 @@ fn attr_settings(
                                     }
                                 } else if is_navigation {
                                     if let Some(abs) =
-                                        absolute_target_url(trimmed, &target_for_attr)
+                                        absolute_target_url(trimmed, &attr_base)
                                     {
                                         if let Some(next) =
                                             proxied_navigation_url(&abs, &proxy_origin, "/zp/")
@@ -2401,6 +2426,45 @@ mod surface_fixture {
     /// (`test/js/static-policy.test.js` 가 같은 파일을 읽는다). 여기서만 통과하는
     /// 것은 의미가 없다 — 이틀 동안 사고 넷이 전부 "서버에는 있는데 페이지
     /// realm 에는 없는" 형태였다.
+    /// `<base href>` 는 그 뒤에 파싱되는 상대 URL 의 기준이다. 무시하면
+    /// 서브리소스가 **다른 오리진의 다른 경로**로 간다(2026-08-21 실측).
+    #[test]
+    fn base_href_rebases_following_relative_urls() {
+        let html = concat!(
+            "<html><head><base href=\"http://cdn.example/deep/\"></head>",
+            "<body><img src=\"rel.png\"></body></html>"
+        );
+        let out = transform(html, &opts()).expect("transform").html;
+        assert!(
+            out.contains("url=http%3A%2F%2Fcdn.example%2Fdeep%2Frel.png"),
+            "base 기준으로 안 풀렸다: {out}"
+        );
+    }
+
+    /// `<base>` **앞**에 있는 것은 문서 URL 기준이다(명세도 그렇다).
+    #[test]
+    fn elements_before_base_use_the_document_url() {
+        let html = concat!(
+            "<html><head><img src=\"early.png\">",
+            "<base href=\"http://cdn.example/deep/\"><img src=\"late.png\"></head></html>"
+        );
+        let out = transform(html, &opts()).expect("transform").html;
+        assert!(out.contains("example.com%2Fearly.png"), "앞 요소가 base 를 탔다: {out}");
+        assert!(out.contains("cdn.example%2Fdeep%2Flate.png"), "뒤 요소가 base 를 안 탔다: {out}");
+    }
+
+    /// `<base href>` 자체는 리라이트하지 않는다 — 페이지 realm 이 원본을 읽어
+    /// 가상 base 를 세운다. 프록시 경로로 바꾸면 그 계산이 어긋난다.
+    #[test]
+    fn base_href_attribute_itself_is_left_alone() {
+        let html = "<html><head><base href=\"http://cdn.example/deep/\"></head></html>";
+        let out = transform(html, &opts()).expect("transform").html;
+        assert!(
+            out.contains("href=\"http://cdn.example/deep/\""),
+            "base href 가 바뀌었다: {out}"
+        );
+    }
+
     #[test]
     fn srcset_candidates_match_shared_fixture() {
         let raw = include_str!("../../zp-shared/testdata/srcset_cases.json");

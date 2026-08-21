@@ -23,7 +23,8 @@ async function loadDirect() {
   await fetch('http://127.0.0.1:18099/reset');
   tw('navigate', '-i', ID, '--url', PAGE);
   await sleep(6000);
-  return arrivals();
+  const c = await get('http://127.0.0.1:18099/conns');
+  return { got: await arrivals(), conns: c };
 }
 
 async function loadProxy() {
@@ -34,6 +35,7 @@ async function loadProxy() {
   tw('click', '-i', ID, '--text', 'Open');
   await sleep(11000);
   const got = await arrivals();
+  const conns = await get('http://127.0.0.1:18099/conns');
   // 격리 축: 브라우저가 외부 오리진(18098)으로 **직접** 간 요청
   // 2026-08-20 — "시도했다" 와 "성공했다" 를 구분하지 않아 csp-only 를 LEAK 으로
   // 올려 부르고 있었다. 테이프에는 CSP 가 막은 요청도 `request` 로 남고(뒤에
@@ -49,11 +51,12 @@ async function loadProxy() {
   let tape = {};
   try { tape = JSON.parse(fs.readFileSync(tapePath, 'utf8')); } catch {}
   const verdicts = classifyTape(tape, idOf);
-  return { got, ...verdicts };
+  return { got, conns, ...verdicts };
 }
 
-const control = await loadDirect();
-const { got, attempted, answered, unknown, droppedNetwork } = await loadProxy();
+const controlRun = await loadDirect();
+const control = controlRun.got;
+const { got, conns, attempted, answered, unknown, droppedNetwork } = await loadProxy();
 
 const rows = [];
 for (const c of cases) {
@@ -87,6 +90,20 @@ const cspOnly = rows.filter(r => r.containment === 'csp-only');
 console.log('\n[재현성] 대조군에서 되는데 프록시에서 안 되는 것:', broken.length ? broken.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 진짜 유출(바이트가 나감):', leaks.length ? leaks.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 리라이트는 놓쳤고 CSP 만 막은 것:', cspOnly.length ? cspOnly.map(r => r.id).join(', ') : '없음');
+// ★`preconnect` / `dns-prefetch` 는 HTTP 요청을 안 만들어 도착 축이 못 잡는다.
+// 유출의 정의가 "타깃과 연결이 열렸는가" 이므로 소켓 수로 잰다. 대조군은
+// 링크대로 CDN 에 붙고, 프록시는 0 이어야 한다 — 프록시에서 0 이 아니면
+// 브라우저가 타깃 오리진에 직접 붙은 것이다(바이트가 안 왔어도 IP 노출).
+const cdnControl = ((controlRun.conns || {}).idle || {})['18098'] || 0;
+const cdnProxy = ((conns || {}).idle || {})['18098'] || 0;
+console.log(`[격리] 타깃에 열어만 두고 안 쓴 소켓(preconnect/dns-prefetch): 대조군 ${cdnControl} / 프록시 ${cdnProxy}` + (cdnProxy > 0 ? '  ← 프록시에서 0 이 아니다' : ''));
+// ★이 계측은 **아직 자기 자신을 증명하지 못했다**. 대조군도 0 이 나온다 —
+// 크롬이 preconnect 로 연 소켓을 곧바로 이어지는 prefetch/preload 에 재사용해서
+// '안 쓴 소켓' 이 남지 않기 때문으로 보인다. 즉 양성 대조가 없으므로 프록시
+// 쪽 0 을 '깨끗하다' 로 읽으면 안 된다. 대조군이 0 이면 그렇게 크게 적는다.
+if (cdnControl === 0) {
+  console.log('     [!] 대조군도 0 이다 — 이 계측은 양성을 못 만든다. 프록시 0 은 증거가 아니다.');
+}
 // 판정이 테이프의 결말 이벤트에 걸려 있다. 이벤트가 유실되면 진짜 유출이
 // csp-only 로 내려앉을 수 있으므로(과소보고), 유실이 있으면 크게 알린다.
 if (droppedNetwork > 0) {

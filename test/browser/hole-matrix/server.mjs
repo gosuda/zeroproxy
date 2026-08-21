@@ -16,6 +16,17 @@ const PNG = Buffer.from(
 );
 const ORIGIN = 18099, CDN = 18098;
 let hits = { [ORIGIN]: [], [CDN]: [] };
+// ★`preconnect` / `dns-prefetch` 는 **HTTP 요청을 만들지 않는다** — 연결만 연다.
+// 그래서 바이트 도착 축(hits)으로는 영영 판정불가다(실측: 대조군도 `-`).
+// 소켓 연결 수를 따로 센다. 케이스마다 리셋하므로 "이 케이스 동안 타깃에
+// 연결이 열렸는가" 를 답할 수 있다 — preconnect 의 유출 정의가 정확히 그것이다.
+// ★단순히 소켓 수를 세면 **우리 프록시 서버의 다이얼과 섞인다** — 프록시도
+// 같은 머신에서 타깃에 직접 붙기 때문이다(실측: 대조군 6 / 프록시 7 이 나왔는데
+// 그 7 의 대부분이 우리 서버였다). 구분자는 이것이다: **preconnect 로 열린
+// 소켓은 아무 요청도 보내지 않는다.** 우리 프록시는 열자마자 요청을 보낸다.
+// 그래서 "요청 없이 열려만 있던 소켓" 만 센다 — 그게 preconnect 의 정의다.
+let conns = { [ORIGIN]: 0, [CDN]: 0 };
+let idleConns = { [ORIGIN]: 0, [CDN]: 0 };
 
 const CASES = [];
 const C = (id, cross, code) => CASES.push({ id, cross: !!cross, code });
@@ -97,6 +108,21 @@ C('d5-adopted', 0, `var sh=new CSSStyleSheet();sh.replaceSync('#d5{background-im
 C('d6-style-cross', 1, `var s=document.createElement('style');s.textContent='#d6{background-image:url('+U+')}';document.head.appendChild(s);var e=document.createElement('div');e.id='d6';document.body.appendChild(e)`);
 C('d7-import', 0, `var s=document.createElement('style');s.textContent='@import url('+U.replace('.png','.css')+');';document.head.appendChild(s)`);
 
+// 계획 10번 — 서버측 `link rel` 정책. 페이지 realm 은 preload/prefetch/preconnect/
+// dns-prefetch/prerender/manifest 를 **삼키는데**(rel 을 떼어 브라우저가 요청을
+// 못 만들게 한다) htmltx 에는 그런 분기가 없다. htmltx 는 `("link","href")` 를
+// 서브리소스로 보고 프록시 경로로 리라이트만 한다.
+//
+// 코드에서 유도한 "서버측 부재" 가 실제 유출인지는 재 봐야 안다 — 리라이트가
+// 되면 브라우저는 프록시 오리진으로 가므로 유출이 아닐 수 있다. 칸을 만든다.
+// a26 preconnect / a27 dns-prefetch 는 **칸으로 두지 않는다** — HTTP 요청을
+// 만들지 않으므로 바이트 도착 축이 영영 판정 못 한다(실측: 대조군도 `-`).
+// 마크업은 페이지에 그대로 두고, 러너가 **소켓 연결 수**로 따로 잰다.
+C('a28-static-prefetch', 1, '');
+C('a29-static-preload', 1, '');
+C('a30-static-modulepreload', 1, '');
+// (`<base href>` 는 이 공유 페이지에 못 넣는다 — 다른 모든 케이스의 상대 URL 을
+//  같이 재기준시킨다. 전용 라우트 `/basepage` 로 따로 잰다.)
 // ── E. 통제받지 않는 문서 (document.write 로 채운 srcless iframe) ─────────
 C('e1-adframe-img', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<img src="'+U+'">');d.close()`);
 C('e2-adframe-fetch', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<scr'+'ipt>fetch("'+U+'",{mode:"no-cors"}).catch(function(){})</scr'+'ipt>');d.close()`);
@@ -166,6 +192,11 @@ const STATIC_HTML = `
 <svg width="1" height="1"><filter id="a21f"><feImage href="http://127.0.0.1:${CDN}/img/a21-static-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#a21f)"></rect></svg>
 <style>#a22{background-image:image-set("http://127.0.0.1:${CDN}/img/a22-static-imageset__cross.png" 1x)}</style><div id="a22" style="width:1px;height:1px"></div>
 <object data="http://127.0.0.1:${CDN}/img/a23-static-object-cross__cross.png"></object>
+<link rel="preconnect" href="http://127.0.0.1:${CDN}/img/a26-static-preconnect__cross.png">
+<link rel="dns-prefetch" href="http://127.0.0.1:${CDN}/img/a27-static-dns-prefetch__cross.png">
+<link rel="prefetch" href="http://127.0.0.1:${CDN}/img/a28-static-prefetch__cross.png">
+<link rel="preload" as="image" href="http://127.0.0.1:${CDN}/img/a29-static-preload__cross.png">
+<link rel="modulepreload" href="http://127.0.0.1:${CDN}/img/a30-static-modulepreload__cross.js">
 `;
 
 function page() {
@@ -185,14 +216,20 @@ window.__matrixDone = true;
 }
 
 function mk(port) {
-  http.createServer((req, res) => {
+  const srv = http.createServer((req, res) => {
     const u = req.url;
+    if (u === '/conns') {
+      res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+      return res.end(JSON.stringify({ total: conns, idle: idleConns }));
+    }
     if (u === '/hits') {
       res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
       return res.end(JSON.stringify(hits));
     }
     if (u === '/reset') {
       hits = { [ORIGIN]: [], [CDN]: [] };
+      conns = { [ORIGIN]: 0, [CDN]: 0 };
+      idleConns = { [ORIGIN]: 0, [CDN]: 0 };
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end('ok');
     }
@@ -200,6 +237,7 @@ function mk(port) {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify(CASES.map(c => ({ id: c.id, cross: c.cross }))));
     }
+    if (req.socket) req.socket.__zpUsed = true;
     hits[port].push(u);
     if (u.startsWith('/page')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -210,6 +248,13 @@ function mk(port) {
     // meta refresh 탈출 벡터 확인용 일회성 라우트. 서브리소스가 아니라
     // **최상위 내비게이션**이라 매트릭스 본표(도착=바이트 수신)로는 못 잰다 —
     // 브라우저가 타깃 오리진으로 이동해 버리는지를 URL 로 본다.
+    // `<base href>` 가 초기 문서에 있을 때 상대 서브리소스가 어디로 풀리는가.
+    // 프렐류드의 syncBaseElement 는 TDZ 로 조용히 삼켜진 적이 있다(2026-05-30).
+    if (u === '/basepage') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end('<!doctype html><meta charset="utf-8"><base href="http://127.0.0.1:' + CDN + '/deep/">'
+        + '<title>basepage</title><img id="rel" src="base-rel__cross.png">');
+    }
     if (u === '/meta-refresh') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=http://127.0.0.1:' + CDN + '/img/mr-escape__cross.png"><title>mr</title>');
@@ -297,7 +342,15 @@ function mk(port) {
     }
     res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
     res.end(PNG);
-  }).listen(port, '127.0.0.1', () => console.log('listening', port));
+  });
+  srv.on('connection', (sock) => {
+    conns[port] += 1;
+    sock.__zpUsed = false;
+    // 1.5초 안에 요청이 한 건도 안 오면 '열어만 두고 안 쓴 소켓' 이다.
+    const t = setTimeout(() => { if (!sock.__zpUsed) idleConns[port] += 1; }, 1500);
+    sock.on('close', () => clearTimeout(t));
+  });
+  srv.listen(port, '127.0.0.1', () => console.log('listening', port));
 }
 mk(ORIGIN);
 mk(CDN);
