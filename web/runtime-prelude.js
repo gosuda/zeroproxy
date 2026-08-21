@@ -4978,8 +4978,34 @@
     }
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
-  function isSVGURLBearing(el, key, _localKey) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (_localKey != null ? _localKey === 'href' : attrLocalName(key) === 'href') && /^(a|image|use|script|feimage)$/i.test(el.localName || ''); }
-  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input' || tag === 'embed') || localKey === 'data' && tag === 'object' || localKey === 'poster' && tag === 'video' || localKey === 'srcset' && (tag === 'img' || tag === 'source') || localKey === 'imagesrcset' && tag === 'link' || localKey === 'background' && (tag === 'body' || tag === 'table' || tag === 'td' || tag === 'th' || tag === 'tr'); }
+  // ── URL 표면 판정 ────────────────────────────────────────────────────────
+  //
+  // 2026-08-21 — 손으로 쓴 목록을 걷어냈다. 이 목록은
+  // `crates/zp-shared/testdata/url_surfaces.json` 이 단일 소스이고, 빌드가
+  // `__ZP_URL_SURFACES__` 자리에 박아 넣는다. Rust htmltx 도 같은 파일과
+  // 대조하는 테스트를 갖는다.
+  //
+  // 왜 이렇게 했나: 이 목록이 여기와 htmltx 두 곳에 손으로 있던 동안
+  // `background` / SVG `feImage` / `image-set` 이 한쪽에만 들어가 csp-only 로
+  // 남아 있었다(구멍 매트릭스 g4·g5·g6). 목록이 두 벌이면 반드시 갈라진다.
+  //
+  // 네임스페이스 구분을 버린 것은 의도적이다. 예전 판정은 SVG 전용 태그
+  // (image/use/feImage/script)를 `namespaceURI` 로 걸렀는데, 평평한 집합으로
+  // 바꾸면 HTML 네임스페이스의 같은 이름도 URL 로 본다. 실제로는 무해하다 —
+  // HTML 파서는 `<image>` 를 `img` 로 만들고, HTML `<script href>` /
+  // `<use href>` 같은 속성은 존재하지 않는다. 반대로 네임스페이스를 보려면
+  // 판정마다 그 필드를 읽어야 하는데 이 함수는 속성 쓰기마다 불린다.
+  const URL_SURFACES = new Set(__ZP_URL_SURFACES__);
+  function isURLBearing(el, key, _localKey, _tag) {
+    const tag = _tag != null ? _tag : (el && el.localName);
+    if (!tag) return false;
+    const localKey = _localKey != null ? _localKey : attrLocalName(key);
+    // ★SVG 는 `localName` 의 대소문자가 보존된다 — `<feImage>` 는 그대로
+    // `feImage` 다. 픽스처 키는 소문자이므로 눕혀서 조회하지 않으면 SVG 전용
+    // 태그가 통째로 빠진다. 실제로 이 한 줄이 없어서 g5-realm-feimage 가
+    // csp-only 로 떨어졌다(2026-08-21, 매트릭스가 잡았다).
+    return URL_SURFACES.has(String(tag).toLowerCase() + ':' + localKey);
+  }
   // srcset 은 URL 하나가 아니라 `url 1x, url 320w` 후보 목록이라 일반 경로로
   // 넘기면 문자열 전체를 URL 로 보고 망가진다. 서버측 htmltx 에는 이미
   // proxied_srcset 이 있는데 페이지 realm 워커에는 없어서, innerHTML /

@@ -152,7 +152,11 @@ async function buildWeb() {
   // zp-rt.js (the raw-WASM glue) as a prefix so it self-registers on
   // globalThis before runtime-prelude.js runs. The async rt.load() call
   // inside runtime-prelude will fetch /__zp/zp_page_rt.wasm.
-  await writeBundled('runtime-prelude.js', [await readSource('zp-rt.js'), await readSource('runtime-prelude.js')]);
+  const surfaceTable = JSON.stringify(await urlSurfacePairs());
+  await writeBundled('runtime-prelude.js', [
+    await readSource('zp-rt.js'),
+    (await readSource('runtime-prelude.js')).split('__ZP_URL_SURFACES__').join(surfaceTable),
+  ]);
   // 2026-06-08 split-bundle (c.1) Step 4: classic-script wrapper that
   // inlines the SW-flavored ZPBundle wasm-bindgen glue + wasm bytes and
   // does an `initSync()` so the page realm has `globalThis.ZPBundle`
@@ -286,6 +290,34 @@ function tryRunOptional(cmd, argv) {
 
 function buildServer() {
   run('go', ['build', '-trimpath', '-o', serverOut, './cmd/zeroproxy-server']);
+}
+
+// URL 표면 테이블은 `crates/zp-shared/testdata/url_surfaces.json` 이 단일 소스다.
+// 프렐류드가 손목록을 들고 있으면 Rust 목록과 갈라진다 — 2026-08-20~21 에 그
+// 이유로 `background` / `feImage` / `image-set` 이 csp-only 로 남아 있었다.
+// 빌드 시점에 박아 넣어 목록이 한 곳에만 존재하게 한다.
+//
+// `deliberate` 은 제외한다 — 정책상 어느 realm 에서도 리라이트하지 않는 자리다.
+// 나머지(rewrite/srcset/navigation/special/known-gap)는 페이지 realm 이 다뤄야
+// 한다. `known-gap` 은 htmltx 에만 없는 것이지 페이지 realm 은 이미 다룬다.
+//
+// `xlink:href` 같은 접두 속성은 프렐류드가 `attrLocalName` 으로 접두를 떼고
+// 보므로 로컬 이름으로 눕힌다.
+async function urlSurfacePairs() {
+  const raw = await readFile(
+    path.join(repoRoot, 'crates', 'zp-shared', 'testdata', 'url_surfaces.json'),
+    'utf8',
+  );
+  const pairs = new Set();
+  for (const e of JSON.parse(raw)) {
+    if (!e || !e.pair || e.kind === 'deliberate') continue;
+    const bits = e.pair.split(':');
+    const tag = bits[0];
+    const attr = bits[bits.length - 1];
+    pairs.add(tag + ':' + attr);
+  }
+  if (pairs.size < 20) throw new Error('url_surfaces.json 에서 뽑은 표면이 너무 적다: ' + pairs.size);
+  return [...pairs].sort();
 }
 
 async function readSource(name) {

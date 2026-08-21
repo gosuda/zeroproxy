@@ -2367,6 +2367,16 @@ mod surface_fixture {
                     !out.contains("/zp/api/fetch?url="),
                     "{pair}: 이제 리라이트된다 — 픽스처에서 known-gap → rewrite 로 옮길 것\n  out: {out}"
                 ),
+                // 서브리소스가 아니라 **문서**를 만드는 자리. `/zp/api/fetch` 로
+                // 보내면 프렐류드 없는 문서가 생기므로, 이름만 data 속성으로
+                // 옮겨 두고 페이지 realm 이 share 경로로 되돌린다.
+                "special" => assert!(
+                    out.contains("data-zp-frame-src")
+                        || out.contains("data-zp-srcdoc")
+                        || !out.contains(TARGET),
+                    "{pair}: 옮겨지지도 않고 원본이 그대로 남았다
+  out: {out}"
+                ),
                 other => panic!("{pair}: 모르는 kind {other}"),
             }
         }

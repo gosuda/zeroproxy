@@ -191,5 +191,29 @@
     "kind": "known-gap",
     "case": null,
     "why": "<script type=importmap> 의 JSON 본문이 모듈 지정자를 절대 URL 로 매핑한다. 리라이트하려면 JSON 파싱이 필요하다. 현재는 script-src 자기 자신만 허용이라 csp-only."
+  },
+  {
+    "pair": "iframe:src",
+    "kind": "special",
+    "case": "a10-static-iframe",
+    "why": "서버는 data-zp-frame-src 로 옮겨 두고 페이지 realm 이 share 경로로 활성화한다 — 서브리소스가 아니라 문서라 /zp/api/fetch 로 보내면 프렐류드 없는 문서가 생긴다"
+  },
+  {
+    "pair": "frame:src",
+    "kind": "special",
+    "case": null,
+    "why": "iframe:src 와 같은 경로"
+  },
+  {
+    "pair": "iframe:srcdoc",
+    "kind": "special",
+    "case": "a17-static-srcdoc",
+    "why": "서버는 data-zp-srcdoc 로 옮기고 페이지 realm 이 프렐류드를 주입해 되돌린다"
+  },
+  {
+    "pair": "script:href",
+    "kind": "known-gap",
+    "case": null,
+    "why": "SVG <script href> 는 스크립트를 로드한다. 페이지 realm(isSVGURLBearing)은 이미 다루는데 htmltx 에는 없다 — 정적 SVG script 칸을 만들어 재 보고 분류를 정할 것"
   }
 ]

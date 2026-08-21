@@ -2640,21 +2640,20 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
   assert.equal(classifyWith(ctx)(req, at('/zp/api/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
 });
 
-test('isURLBearing: object[data] / embed[src] 도 리라이트 대상이다 (프로퍼티 훅과 한 쌍)', () => {
+// 2026-08-21 — 판정이 픽스처 구동으로 바뀌었다. 예전에는 프렐류드 소스에서
+// `isURLBearing` 한 줄을 뽑아 평가했는데, 이제 목록은 소스에 없고
+// `crates/zp-shared/testdata/url_surfaces.json` 이 단일 소스다.
+// 그래서 픽스처가 이 두 자리를 담고 있는지, 그리고 프로퍼티 훅이 함께 있는지를 본다.
+test('object[data] / embed[src] 는 픽스처에 있고 프로퍼티 훅과 한 쌍이다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const line = rt.split('\n').find((l) => l.includes('function isURLBearing('));
-  assert.ok(line, 'isURLBearing 을 못 찾았다');
-  const isURLBearing = new Function(
-    'attrLocalName', 'isSVGURLBearing',
-    line.trim() + '\nreturn isURLBearing;'
-  )((k) => { const i = String(k).indexOf(':'); return i < 0 ? String(k) : String(k).slice(i + 1); }, () => false);
-
-  const el = (tag) => ({ localName: tag, namespaceURI: 'http://www.w3.org/1999/xhtml' });
-  assert.ok(isURLBearing(el('object'), 'data'), 'object[data] 가 빠지면 런타임 대입이 원본 URL 로 남는다');
-  assert.ok(isURLBearing(el('embed'), 'src'), 'embed[src] 가 빠지면 런타임 대입이 원본 URL 로 남는다');
-  // 오탐 방지: 같은 이름이라도 다른 태그에서는 URL 이 아니다.
-  assert.ok(!isURLBearing(el('div'), 'data'), 'div[data] 는 URL 이 아니다');
-  assert.ok(!isURLBearing(el('object'), 'type'), 'object[type] 는 URL 이 아니다');
+  const pairs = new Set(SURFACE_INVENTORY.filter((e) => e.kind !== 'deliberate').map((e) => {
+    const bits = e.pair.split(':');
+    return bits[0] + ':' + bits[bits.length - 1];
+  }));
+  assert.ok(pairs.has('object:data'), 'object[data] 가 빠지면 런타임 대입이 원본 URL 로 남는다');
+  assert.ok(pairs.has('embed:src'), 'embed[src] 가 빠지면 런타임 대입이 원본 URL 로 남는다');
+  assert.equal(pairs.has('div:data'), false, 'div[data] 는 URL 이 아니다');
+  assert.equal(pairs.has('object:type'), false, 'object[type] 는 URL 이 아니다');
 
   // 프로퍼티 훅이 없으면 `o.data = url` 이 setAttribute 를 안 타므로 위 판정은
   // 죽은 코드가 된다. 둘은 반드시 같이 있어야 한다 — 각각 따로 넣어 본 결과
@@ -2662,6 +2661,7 @@ test('isURLBearing: object[data] / embed[src] 도 리라이트 대상이다 (프
   assert.ok(/installURLProp\(w\.HTMLObjectElement[^)]*'data'\)/.test(rt), 'HTMLObjectElement.data 프로퍼티 훅이 없다');
   assert.ok(/installURLProp\(w\.HTMLEmbedElement[^)]*'src'\)/.test(rt), 'HTMLEmbedElement.src 프로퍼티 훅이 없다');
 });
+
 
 test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주석/문자열은 건드리지 않는다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
@@ -2917,8 +2917,11 @@ test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다'
   // ★서버측 htmltx 에는 proxied_srcset 이 있는데 페이지 realm 워커에는
   // 없었다 — innerHTML / document.write / insertAdjacentHTML / DOMParser 로
   // 들어온 `<img srcset>` 은 원본 타깃 URL 이 그대로 남아 CSP 만 막았다.
-  assert.ok(rt.indexOf("localKey === 'srcset' && (tag === 'img' || tag === 'source')") >= 0, 'srcset 이 URL 속성 목록에 있어야 한다');
-  assert.ok(rt.indexOf("localKey === 'imagesrcset' && tag === 'link'") >= 0);
+  // 목록은 픽스처가 갖는다(2026-08-21). 프렐류드 소스에는 더 이상 없다.
+  const srcsetPairs = new Set(SURFACE_INVENTORY.filter((e) => e.kind === 'srcset').map((e) => e.pair));
+  assert.ok(srcsetPairs.has('img:srcset'), 'img:srcset 이 픽스처에 있어야 한다');
+  assert.ok(srcsetPairs.has('source:srcset'), 'source:srcset 이 픽스처에 있어야 한다');
+  assert.ok(srcsetPairs.has('link:imagesrcset'), 'link:imagesrcset 이 픽스처에 있어야 한다');
 
   // 후보 목록이라 문자열 전체를 URL 로 넘기면 망가진다 — 후보마다 URL 부분만
   // 갈아끼우고 디스크립터(`1x`/`320w`)는 보존해야 브라우저 선택이 원본과 같다.
@@ -3053,6 +3056,15 @@ test('URL 표면 인벤토리와 htmltx 허용 목록이 어긋나면 실패한�
   const seen = new Set();
   for (const entry of SURFACE_INVENTORY) {
     seen.add(entry.pair);
+    // 서브리소스가 아니라 **문서**를 만드는 자리(iframe/frame src, srcdoc).
+    // `matches!` 목록이 아니라 "이름만 옮기고 페이지 realm 이 되돌린다" 경로라
+    // 목록 대조로는 안 잡힌다 — 아래 사각지대 테스트가 별도로 못 박는다.
+    if (entry.kind === 'special') {
+      assert.ok(entry.case || entry.why, `${entry.pair}: special 은 케이스나 이유가 필요하다`);
+      const parked = /data-zp-(frame-src|srcdoc)/.test(src);
+      assert.ok(parked, `${entry.pair}: 옮겨 두는 경로가 htmltx 에서 사라졌다`);
+      continue;
+    }
     if (entry.kind === 'known-gap') {
       assert.ok(entry.why, `${entry.pair}: known-gap 은 왜 안 고쳤는지 적어야 한다`);
       assert.equal(
@@ -3240,40 +3252,48 @@ test('meta refresh 리라이트가 세 경로에 모두 있다', () => {
   assert.match(rt, /proxyViaURL\(abs\)/, '프렐류드가 런처 경로를 안 쓴다');
 });
 
-// ── HTML 리라이트는 구현이 두 벌이다 (2026-08-21) ──────────────────────────
+// ── 페이지 realm 목록은 이제 손으로 없다 (2026-08-21) ──────────────────────
 //
-//   ① Rust zp-htmltx      — 서버가 문서를 파싱 시점에 고친다
-//   ② 프렐류드 transformHTML — 페이지 realm 이 HTML 을 만들 때(srcdoc /
-//      innerHTML / document.write / DOMParser …)
+// 예전에는 프렐류드가 `isURLBearing` 안에 목록을 손으로 들고 있었고, 그래서
+// htmltx 목록과 갈라졌다(`background` / SVG `feImage` / `image-set` 이
+// 한쪽에만 있어 csp-only, 구멍 매트릭스 g4·g5·g6).
 //
-// 같은 정책인데 목록이 따로 있다(②는 `isURLBearing`). 실제로 갈라졌다:
-// `background` / SVG `feImage` / `image-set` 맨 문자열이 ①에만 들어가 있어
-// 구멍 매트릭스 g4·g5·g6 이 csp-only 로 잡혔다. 인벤토리 기준으로 둘을 묶는다.
-test('페이지 realm 리라이트 목록이 인벤토리에서 빠지지 않았다', () => {
+// 지금은 `crates/zp-shared/testdata/url_surfaces.json` 이 단일 소스이고 빌드가
+// `__ZP_URL_SURFACES__` 자리에 박아 넣는다. 그래서 검사할 것이 바뀐다:
+//   ① 소스에 손목록이 되살아나지 않았는가
+//   ② 빌드가 실제로 픽스처를 박아 넣었는가 (dist 산출물로 확인)
+test('페이지 realm 목록은 픽스처에서 온다 (손목록 부활 금지)', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const at = rt.indexOf('function isSVGURLBearing');
-  assert.ok(at > 0, 'isSVGURLBearing 을 못 찾았다 — 파서를 고칠 것');
-  const end = rt.indexOf('\n', rt.indexOf('function isURLBearing', at));
-  const predicate = rt.slice(at, end).toLowerCase();
+  assert.ok(rt.includes('__ZP_URL_SURFACES__'), '치환 자리가 사라졌다 — 목록이 손으로 돌아왔을 수 있다');
+  assert.equal(
+    /localKey === 'srcset' && \(tag === /.test(rt), false,
+    '손목록이 부활했다 — 목록은 url_surfaces.json 한 곳에만 있어야 한다'
+  );
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.ok(build.includes('url_surfaces.json'), '빌드가 픽스처를 안 읽는다');
+  assert.ok(build.includes('__ZP_URL_SURFACES__'), '빌드가 치환을 안 한다');
+});
 
-  // 인벤토리에서 페이지 realm 도 반드시 다뤄야 하는 것 = 서브리소스/후보목록/내비게이션.
-  // (deliberate / known-gap 은 제외 — 정책상 안 다루는 자리다.)
-  const mustCover = SURFACE_INVENTORY.filter(e => ['rewrite', 'srcset', 'navigation'].includes(e.kind));
-  assert.ok(mustCover.length >= 20, `인벤토리가 너무 작다 (${mustCover.length})`);
-
-  for (const entry of mustCover) {
-    const [tag, ...rest] = entry.pair.split(':');
-    const attr = rest[rest.length - 1]; // xlink:href → href (프렐류드는 localName 으로 본다)
-    assert.ok(
-      predicate.includes(`'${attr}'`) || predicate.includes(`${attr}'`),
-      `${entry.pair}: 속성 '${attr}' 이 프렐류드 목록에 없다 — 페이지가 만든 HTML 은 안 고쳐진다`
-    );
-    assert.ok(
-      predicate.includes(`'${tag}'`) || new RegExp('\\b' + tag + '\\b').test(predicate),
-      `${entry.pair}: 태그 '${tag}' 이 프렐류드 목록에 없다 — 페이지가 만든 HTML 은 안 고쳐진다`
-    );
+test('빌드 산출물의 표면 테이블이 픽스처와 일치한다', () => {
+  const built = fs.readFileSync('dist/web/runtime-prelude.js', 'utf8');
+  assert.equal(built.includes('__ZP_URL_SURFACES__'), false, 'dist 에 치환이 안 된 자리가 남았다 — 빌드가 낡았다');
+  const flat = (pair) => { const b = pair.split(':'); return b[0] + ':' + b[b.length - 1]; };
+  for (const e of SURFACE_INVENTORY) {
+    const needle = '"' + flat(e.pair) + '"';
+    if (e.kind === 'deliberate') {
+      assert.equal(
+        built.includes(needle), false,
+        e.pair + ': deliberate 인데 페이지 realm 테이블에 들어갔다 — 막아 둔 표면이 되살아난다'
+      );
+    } else {
+      assert.ok(
+        built.includes(needle),
+        e.pair + ': 픽스처에 있는데 빌드된 테이블에 없다 (dist 가 낡았으면 npm run build)'
+      );
+    }
   }
 });
+
 
 // CSS 도 구현이 두 벌이다: Rust zp-css 와 프렐류드의 손으로 쓴 스캐너
 // (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.
