@@ -41,7 +41,7 @@
   const TARGET_SEC_CH_UA = '"Chromium";v="151", "Not=A?Brand";v="99", "Google Chrome";v="151"';
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
-  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
+  const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','TARGET_HTTP_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
   // Human-friendly title + description per error code. Parity with
   // crates/zp-shared/src/errors.rs ErrorCode::as_str.
   const ERROR_INFO = Object.freeze({
@@ -53,6 +53,10 @@
     TLS_CERTIFICATE_INVALID: { title: 'TLS certificate rejected', desc: 'The target presented a TLS certificate that did not pass validation.' },
     TLS_HANDSHAKE_FAILED: { title: 'TLS handshake failed', desc: 'ZeroProxy could not establish a TLS connection with the target.' },
     TARGET_CONNECT_FAILED: { title: 'Could not reach target', desc: 'ZeroProxy could not connect to the target server.' },
+    // 상류가 4xx/5xx 를 주거나 HTTP/TLS 계층이 실패한 경우. 예전에는 목록에
+    // 없어서 POLICY_BLOCKED 로 접혔고, 네트워크 실패가 "정책 차단" 으로 둔갑해
+    // 원인 추적을 정반대로 보냈다.
+    TARGET_HTTP_FAILED: { title: 'Target returned an error', desc: 'The target server responded with an error, or the HTTP/TLS layer failed before a response arrived. Retry, or check the target URL.' },
     MALFORMED_HTML: { title: 'Malformed HTML', desc: 'The target response contained HTML that could not be safely parsed in strict mode.' },
     REALM_INJECTION_FAILURE: { title: 'Containment failed', desc: 'ZeroProxy could not inject the page containment runtime. Target code execution was blocked.' },
     REQUEST_BODY_TOO_LARGE: { title: 'Request body too large', desc: 'The uploaded body exceeded the ZeroProxy maximum size.' },

@@ -3371,3 +3371,36 @@ test('공유 URL 수용/거부: 살아 있는 JS 구현이 공유 픽스처와 �
   }
   assert.deepEqual(mismatches, [], '공유 픽스처와 JS 판정이 갈렸다:\n  ' + mismatches.join('\n  '));
 });
+
+// ── 에러 코드 단일 소스 (2026-08-21) ───────────────────────────────────────
+//
+// 목록이 세 곳에 있었고 셋 다 달랐다: JS 19 / Rust 18 / Go 12.
+// Rust 에는 `SUBMISSION_EXPIRED` 가 없었는데 `sw.js` 는 그걸 실제로 쓰고 있었고,
+// Go 는 **자기가 내는** `RTC_GATEWAY_UNAVAILABLE` 을 `POLICY_BLOCKED` 로 강등했다.
+// 이제 `crates/zp-shared/testdata/error_codes.json` 이 단일 소스다.
+test('에러 코드: JS 목록이 공유 픽스처와 순서까지 같다', () => {
+  const want = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/error_codes.json', 'utf8'));
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  const m = /const ERRORS = Object\.freeze\(\[([^\]]*)\]\)/.exec(core);
+  assert.ok(m, 'zp-core.js 에서 ERRORS 를 못 찾았다');
+  const got = m[1].split(',').map((x) => x.trim().replace(/^'|'$/g, ''));
+  assert.deepEqual(got, want, 'zp-core.js 의 ERRORS 가 error_codes.json 과 갈라졌다 — JSON 을 먼저 고칠 것');
+
+  // 코드마다 사용자에게 보여 줄 문구가 있어야 한다. 목록에만 있고 문구가 없으면
+  // 에러 페이지가 빈 채로 뜬다.
+  for (const code of want) {
+    assert.ok(core.includes(code + ':'), `${code}: ERROR_INFO 에 문구가 없다`);
+  }
+});
+
+// SW 가 실제로 던지는 코드가 목록에 없으면 safeError 가 POLICY_BLOCKED 로 접는다
+// — 원인 추적이 정반대 방향으로 간다. 실제로 TARGET_HTTP_FAILED 가 그랬다.
+test('에러 코드: SW 가 던지는 코드가 전부 목록에 있다', () => {
+  const want = new Set(JSON.parse(fs.readFileSync('crates/zp-shared/testdata/error_codes.json', 'utf8')));
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const thrown = new Set();
+  for (const m of sw.matchAll(/safeError\(\s*'([A-Z][A-Z_]+)'/g)) thrown.add(m[1]);
+  assert.ok(thrown.size >= 5, `safeError 호출을 너무 적게 찾았다 (${thrown.size}) — 파서를 고칠 것`);
+  const missing = [...thrown].filter((c) => !want.has(c));
+  assert.deepEqual(missing, [], 'SW 가 던지는데 공유 목록에 없는 코드 (POLICY_BLOCKED 로 접힌다)');
+});

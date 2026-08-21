@@ -411,7 +411,20 @@ func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, 
 func sanitizeCode(code string) string {
 	code = strings.TrimSpace(code)
 	switch code {
-	case "BAD_HMAC", "INVALID_SHARE_LINK", "MALFORMED_ROUTE", "SW_NOT_READY", "TARGET_PROTOCOL_BLOCKED", "TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED", "TARGET_CONNECT_FAILED", "MALFORMED_HTML", "REALM_INJECTION_FAILURE", "REQUEST_BODY_TOO_LARGE", "POLICY_BLOCKED":
+	// 2026-08-21 — 목록이 12개였다. 그래서 **이 서버가 스스로 내는**
+	// RTC_GATEWAY_UNAVAILABLE(위 rtcgw 분기)이 여기서 POLICY_BLOCKED 로
+	// 강등돼 나갔다. 한 파일 안에서 자기모순이었다. SW 가 통제 중이면
+	// 같은 URL 이 올바른 페이지를 내주고, 아니면 "정책 차단" 이 나온다 —
+	// 어느 쪽이 보일지가 SW 상태에 달려 있었다.
+	//
+	// 단일 소스는 crates/zp-shared/testdata/error_codes.json 이고,
+	// 이 목록이 그것과 같은지는 errors_test.go 가 대조한다.
+	case "BAD_HMAC", "INVALID_SHARE_LINK", "MALFORMED_ROUTE", "SW_NOT_READY",
+		"TARGET_PROTOCOL_BLOCKED", "TLS_CERTIFICATE_INVALID", "TLS_HANDSHAKE_FAILED",
+		"TARGET_CONNECT_FAILED", "TARGET_HTTP_FAILED", "MALFORMED_HTML", "REALM_INJECTION_FAILURE",
+		"REQUEST_BODY_TOO_LARGE", "SUBMISSION_EXPIRED", "POLICY_BLOCKED",
+		"REWRITE_FAILED", "SCRIPT_SRC_BLOCKED", "REDIRECT_BODY_NONREPLAYABLE",
+		"WS_BLOCKED", "RTC_GATEWAY_UNAVAILABLE", "WT_UNSUPPORTED":
 		return code
 	}
 	return "POLICY_BLOCKED"
