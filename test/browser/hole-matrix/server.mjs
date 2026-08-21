@@ -286,6 +286,12 @@ function mk(port) {
     // 프로퍼티 훅/스윕 셋 다) **htmltx 에는 그 처리가 없다** — 정적 HTML 의
     // integrity 는 파서가 스크립트를 가져올 때 이미 적용되므로 나중에 도는
     // 스윕으로는 못 막는다.
+    // SharedWorker 격리 측정용. 접속 순번을 돌려주므로 두 문서가 같은 인스턴스를
+    // 공유하면 1,2 가 나오고 격리돼 있으면 각자 1 이 나온다.
+    if (u === '/sharedworker.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
+      return res.end('let n=0;onconnect=function(e){const p=e.ports[0];n++;const mine=n;p.onmessage=function(){p.postMessage(mine)};p.start()};');
+    }
     if (u === '/sripage') {
       const body = 'window.__sri_ran = true;';
       const hash = crypto.createHash('sha384').update(body).digest('base64');
