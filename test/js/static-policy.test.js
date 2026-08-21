@@ -3279,3 +3279,49 @@ test('meta refresh 리라이트가 세 경로에 모두 있다', () => {
   assert.match(sw, /\?via=/, 'SW 가 런처 경로를 안 쓴다');
   assert.match(rt, /proxyViaURL\(abs\)/, '프렐류드가 런처 경로를 안 쓴다');
 });
+
+// ── HTML 리라이트는 구현이 두 벌이다 (2026-08-21) ──────────────────────────
+//
+//   ① Rust zp-htmltx      — 서버가 문서를 파싱 시점에 고친다
+//   ② 프렐류드 transformHTML — 페이지 realm 이 HTML 을 만들 때(srcdoc /
+//      innerHTML / document.write / DOMParser …)
+//
+// 같은 정책인데 목록이 따로 있다(②는 `isURLBearing`). 실제로 갈라졌다:
+// `background` / SVG `feImage` / `image-set` 맨 문자열이 ①에만 들어가 있어
+// 구멍 매트릭스 g4·g5·g6 이 csp-only 로 잡혔다. 인벤토리 기준으로 둘을 묶는다.
+test('페이지 realm 리라이트 목록이 인벤토리에서 빠지지 않았다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const at = rt.indexOf('function isSVGURLBearing');
+  assert.ok(at > 0, 'isSVGURLBearing 을 못 찾았다 — 파서를 고칠 것');
+  const end = rt.indexOf('\n', rt.indexOf('function isURLBearing', at));
+  const predicate = rt.slice(at, end).toLowerCase();
+
+  // 인벤토리에서 페이지 realm 도 반드시 다뤄야 하는 것 = 서브리소스/후보목록/내비게이션.
+  // (deliberate / known-gap 은 제외 — 정책상 안 다루는 자리다.)
+  const mustCover = SURFACE_INVENTORY.filter(e => ['rewrite', 'srcset', 'navigation'].includes(e.kind));
+  assert.ok(mustCover.length >= 20, `인벤토리가 너무 작다 (${mustCover.length})`);
+
+  for (const entry of mustCover) {
+    const [tag, ...rest] = entry.pair.split(':');
+    const attr = rest[rest.length - 1]; // xlink:href → href (프렐류드는 localName 으로 본다)
+    assert.ok(
+      predicate.includes(`'${attr}'`) || predicate.includes(`${attr}'`),
+      `${entry.pair}: 속성 '${attr}' 이 프렐류드 목록에 없다 — 페이지가 만든 HTML 은 안 고쳐진다`
+    );
+    assert.ok(
+      predicate.includes(`'${tag}'`) || new RegExp('\\b' + tag + '\\b').test(predicate),
+      `${entry.pair}: 태그 '${tag}' 이 프렐류드 목록에 없다 — 페이지가 만든 HTML 은 안 고쳐진다`
+    );
+  }
+});
+
+// CSS 도 구현이 두 벌이다: Rust zp-css 와 프렐류드의 손으로 쓴 스캐너
+// (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.
+test('CSS 리라이트도 두 구현이 같은 형태를 다룬다', () => {
+  const css = fs.readFileSync('crates/zp-css/src/lib.rs', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  for (const form of ['image-set', '@import']) {
+    assert.ok(css.toLowerCase().includes(form), `zp-css 가 ${form} 을 안 다룬다`);
+    assert.ok(rt.toLowerCase().includes(form), `프렐류드 스캐너가 ${form} 을 안 다룬다`);
+  }
+});

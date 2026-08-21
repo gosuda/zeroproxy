@@ -99,6 +99,21 @@ C('e4-blank-iframe-img', 1, `var f=document.createElement('iframe');f.src='about
 C('e5-adframe-srcset', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<img srcset="'+U+' 1x">');d.close()`);
 C('e6-adframe-css-link', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<link rel="stylesheet" href="'+U.replace('.png','.css')+'">');d.close()`);
 
+
+// ── G. 페이지 realm 이 만든 HTML (프렐류드 transformHTML 경로) ────────────
+// 정적 그룹(a*)이 **Rust htmltx** 를 전수한다면, 이 그룹은 같은 표면을
+// **JS transformHTML** 로 보낸다. 둘은 같은 정책의 서로 다른 구현이고 실제로
+// 갈라졌었다 — 2026-08-20 에 meta refresh 가 htmltx 에만 들어가 srcdoc 프레임이
+// csp-only 였다. 구현이 두 벌인 한 표도 두 벌이어야 한다.
+const G = (id, inner) => C(id, 1, `var f=document.createElement('iframe');f.srcdoc=${JSON.stringify(inner)};document.body.appendChild(f)`);
+G('g1-realm-inputimage', `<input type="image" src="http://127.0.0.1:${CDN}/img/g1-realm-inputimage__cross.png">`);
+G('g2-realm-poster', `<video poster="http://127.0.0.1:${CDN}/img/g2-realm-poster__cross.png"></video>`);
+G('g3-realm-svgimage', `<svg><image href="http://127.0.0.1:${CDN}/img/g3-realm-svgimage__cross.png"></image></svg>`);
+G('g4-realm-td-background', `<table><tr><td background="http://127.0.0.1:${CDN}/img/g4-realm-td-background__cross.png">x</td></tr></table>`);
+G('g5-realm-feimage', `<svg><filter id="g5f"><feImage href="http://127.0.0.1:${CDN}/img/g5-realm-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#g5f)"></rect></svg>`);
+G('g6-realm-imageset', `<style>#g6{background-image:image-set("http://127.0.0.1:${CDN}/img/g6-realm-imageset__cross.png" 1x)}</style><div id="g6" style="width:1px;height:1px"></div>`);
+G('g7-realm-use', `<svg><use href="http://127.0.0.1:${CDN}/img/g7-realm-use__cross.svg#i"></use></svg>`);
+G('g8-realm-legacy-image', `<image src="http://127.0.0.1:${CDN}/img/g8-realm-legacy-image__cross.png">`);
 const STATIC_HTML = `
 <img src="/img/a1-static-img__same.png">
 <img srcset="/img/a2-static-srcset__same.png 1x">

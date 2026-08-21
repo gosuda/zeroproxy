@@ -4631,6 +4631,8 @@
     // `@import "x.css"` 는 url() 없이 문자열만 오는 형태다. 그 문자열 하나만
     // 리라이트 대상으로 표시해 둔다 — 다른 문자열은 건드리지 않는다.
     let pendingImport = false;
+    // image-set(...) 안쪽인지. 0 이면 바깥이다.
+    let imageSetDepth = 0;
     while (i < n) {
       const c = s[i];
       if (c === '/' && s[i + 1] === '*') {
@@ -4647,7 +4649,7 @@
           if (s[j] === c) break;
           j++;
         }
-        const mapped = pendingImport ? cssProxyURL(s.slice(i + 1, Math.min(j, n))) : null;
+        const mapped = (pendingImport || imageSetDepth > 0) ? cssProxyURL(s.slice(i + 1, Math.min(j, n))) : null;
         out += mapped ? c + mapped + c : s.slice(i, Math.min(j + 1, n));
         i = Math.min(j + 1, n);
         pendingImport = false;
@@ -4672,6 +4674,22 @@
         i = stop;
         pendingImport = false;
         continue;
+      }
+      // `image-set("a.png" 1x, "a2.png" 2x)` — url() 없이 맨 문자열도 받는다.
+      // Rust zp-css 에는 넣었는데(2026-08-20) 이 스캐너는 손으로 쓴 별도 구현이라
+      // 갈라져 있었다. 구멍 매트릭스 g6-realm-imageset 이 csp-only 로 잡았다.
+      if ((c === 'i' || c === 'I' || c === '-') && !isIdentChar(s[i - 1])) {
+        const m = /^(-webkit-)?image-set\(/i.exec(s.slice(i, i + 18));
+        if (m) {
+          out += s.slice(i, i + m[0].length);
+          i += m[0].length;
+          imageSetDepth = 1;
+          continue;
+        }
+      }
+      if (imageSetDepth > 0) {
+        if (c === '(') imageSetDepth++;
+        else if (c === ')') imageSetDepth--;
       }
       if (c === '@' && /^@import\b/i.test(s.slice(i, i + 8))) {
         out += s.slice(i, i + 7);
@@ -4973,8 +4991,8 @@
     }
   }
   function instrumentScriptElement(el) { prepareScriptElement(el); }
-  function isSVGURLBearing(el, key, _localKey) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (_localKey != null ? _localKey === 'href' : attrLocalName(key) === 'href') && /^(a|image|use|script)$/.test(el.localName || ''); }
-  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input' || tag === 'embed') || localKey === 'data' && tag === 'object' || localKey === 'poster' && tag === 'video' || localKey === 'srcset' && (tag === 'img' || tag === 'source') || localKey === 'imagesrcset' && tag === 'link'; }
+  function isSVGURLBearing(el, key, _localKey) { return el && el.namespaceURI === 'http://www.w3.org/2000/svg' && (_localKey != null ? _localKey === 'href' : attrLocalName(key) === 'href') && /^(a|image|use|script|feimage)$/i.test(el.localName || ''); }
+  function isURLBearing(el, key, _localKey, _tag) { const tag = _tag != null ? _tag : el.localName; const localKey = _localKey != null ? _localKey : attrLocalName(key); return localKey === 'href' && (tag === 'a' || tag === 'area' || tag === 'link' || isSVGURLBearing(el, key, localKey)) || localKey === 'action' && tag === 'form' || localKey === 'formaction' && (tag === 'input' || tag === 'button') || localKey === 'src' && (tag === 'iframe' || tag === 'frame' || tag === 'script' || tag === 'img' || tag === 'source' || tag === 'audio' || tag === 'video' || tag === 'track' || tag === 'input' || tag === 'embed') || localKey === 'data' && tag === 'object' || localKey === 'poster' && tag === 'video' || localKey === 'srcset' && (tag === 'img' || tag === 'source') || localKey === 'imagesrcset' && tag === 'link' || localKey === 'background' && (tag === 'body' || tag === 'table' || tag === 'td' || tag === 'th' || tag === 'tr'); }
   // srcset 은 URL 하나가 아니라 `url 1x, url 320w` 후보 목록이라 일반 경로로
   // 넘기면 문자열 전체를 URL 로 보고 망가진다. 서버측 htmltx 에는 이미
   // proxied_srcset 이 있는데 페이지 realm 워커에는 없어서, innerHTML /
