@@ -4051,19 +4051,6 @@
       if (target) Native.setAttribute.call(node, 'href', target);
     }
   }
-  function sanitizeSerializedHTML(html) {
-    const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
-    const container = parserDoc.createElement('div');
-    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, String(html || ''));
-    else container.innerHTML = String(html || '');
-    const nodes = Array.from(container.querySelectorAll('*'));
-    for (const node of nodes) {
-      restoreVisibleLinkState(node);
-      if (isZPAssetNode(node)) { node.remove(); continue; }
-      if (Native.getAttributeNames) for (const name of Native.getAttributeNames.call(node)) if (isZPAttrName(name)) Native.removeAttribute.call(node, name);
-    }
-    return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
-  }
   function isNavigationTargetElement(el) {
     const tag = el && el.localName;
     return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
