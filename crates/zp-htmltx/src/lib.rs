@@ -1251,7 +1251,7 @@ pub use zp_rewriter::RewriteOpts as RewriteScriptOpts;
 mod tests {
     use super::*;
 
-    fn opts() -> TransformOptions {
+    pub(crate) fn opts() -> TransformOptions {
         TransformOptions {
             target_url: "https://example.com/".into(),
             strict: true,
@@ -2299,5 +2299,77 @@ mod naver_stream_perf {
             out += tail.len();
             println!("chunk={:>6}B chunks={:>4} -> {:>7} ms out={}B", cs, chunks, t.elapsed().as_millis(), out);
         }
+    }
+}
+
+/// URL 표면 픽스처 대조 — `crates/zp-shared/testdata/url_surfaces.json`.
+///
+/// 2026-08-20~21 에 같은 부류로 세 번 걸렸다: 표면이 한쪽 목록에만 있어서
+/// 다른 경로로 들어오면 원본 URL 이 그대로 나갔다. 목록을 눈으로 비교하는
+/// 대신 **픽스처의 모든 항목을 실제로 transform() 에 통과시킨다.**
+#[cfg(test)]
+mod surface_fixture {
+    use super::tests::opts;
+    use super::transform;
+
+    const TARGET: &str = "http://t.example/probe.bin";
+
+    fn markup(tag: &str, attr: &str, kind: &str) -> String {
+        let value = if kind == "srcset" {
+            format!("{TARGET} 1x")
+        } else {
+            TARGET.to_string()
+        };
+        // SVG 요소는 <svg> 안에 두어야 파서가 같은 이름으로 만든다.
+        if matches!(tag, "image" | "use" | "feimage") {
+            format!("<svg><{tag} {attr}=\"{value}\"></{tag}></svg>")
+        } else {
+            format!("<{tag} {attr}=\"{value}\"></{tag}>")
+        }
+    }
+
+    #[test]
+    fn every_fixture_surface_behaves_as_declared() {
+        let raw = include_str!("../../zp-shared/testdata/url_surfaces.json");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(raw).expect("parse url_surfaces.json");
+        let mut checked = 0usize;
+        for e in &entries {
+            let Some(pair) = e.get("pair").and_then(|v| v.as_str()) else { continue };
+            let kind = e.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let (tag, attr) = pair.split_once(':').expect("pair 는 tag:attr 형태여야 한다");
+            // `xlink:href` 처럼 접두가 붙은 것은 attr 에 콜론이 하나 더 있다.
+            let (tag, attr) = if let Some((t2, a2)) = attr.split_once(':') {
+                (tag, Box::leak(format!("{t2}:{a2}").into_boxed_str()) as &str)
+            } else {
+                (tag, attr)
+            };
+            let html = markup(tag, attr, kind);
+            let out = transform(&html, &opts()).expect("transform").html;
+            checked += 1;
+            match kind {
+                "rewrite" | "srcset" => assert!(
+                    out.contains("/zp/api/fetch?url="),
+                    "{pair}: 프록시 경로로 안 바뀌었다 (kind={kind})\n  in : {html}\n  out: {out}"
+                ),
+                "navigation" => assert!(
+                    out.contains("?via="),
+                    "{pair}: 내비게이션 경로로 안 바뀌었다\n  in : {html}\n  out: {out}"
+                ),
+                // 정책상 리라이트하지 않는 자리. 원본이 남거나(codebase) 속성이
+                // 통째로 걷히거나(ping) 둘 중 하나이고, **프록시 경로가 되면 안 된다**.
+                "deliberate" => assert!(
+                    !out.contains("/zp/api/fetch?url="),
+                    "{pair}: deliberate 인데 리라이트됐다 — 막아 둔 표면이 되살아난다\n  out: {out}"
+                ),
+                // 아직 안 고친 자리. 고치는 순간 이 단언이 실패해서 분류를 바꾸게 만든다.
+                "known-gap" => assert!(
+                    !out.contains("/zp/api/fetch?url="),
+                    "{pair}: 이제 리라이트된다 — 픽스처에서 known-gap → rewrite 로 옮길 것\n  out: {out}"
+                ),
+                other => panic!("{pair}: 모르는 kind {other}"),
+            }
+        }
+        assert!(checked >= 20, "픽스처 항목이 너무 적다 ({checked})");
     }
 }

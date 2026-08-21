@@ -3720,6 +3720,7 @@ dependencies = [
  "criterion",
  "lol_html",
  "percent-encoding",
+ "serde_json",
  "thiserror",
  "zp-css",
  "zp-rewriter",

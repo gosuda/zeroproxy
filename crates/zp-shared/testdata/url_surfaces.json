@@ -1,0 +1,195 @@
+[
+  {
+    "__doc": [
+      "브라우저가 URL 을 내보내는 (tag, attr) 표면의 단일 소스.",
+      "kind: rewrite=프록시 경로로 바꾼다 / srcset=후보 목록이라 별도 파서 / navigation=?via= 로",
+      "      / deliberate=정책상 리라이트하지 않는다(이유 필수) / known-gap=아직 안 고침(이유 필수)",
+      "case: 이 표면을 재는 구멍 매트릭스 케이스 id. null 이면 why 로 이유를 적을 것.",
+      "이 파일을 고친 뒤에는 Rust(zp-shared::surfaces), 프렐류드(isURLBearing),",
+      "static-policy 가 전부 이 파일과 대조하므로 어느 한쪽만 고치면 실패한다."
+    ]
+  },
+  {
+    "pair": "link:href",
+    "kind": "rewrite",
+    "case": null,
+    "why": "정적 link href 는 /style/a7.css 라 id 태그가 없다 — 도착 판정은 a7-netcss-url 이 대신한다"
+  },
+  {
+    "pair": "script:src",
+    "kind": "rewrite",
+    "case": "a19-static-script"
+  },
+  {
+    "pair": "img:src",
+    "kind": "rewrite",
+    "case": "a1-static-img"
+  },
+  {
+    "pair": "source:src",
+    "kind": "rewrite",
+    "case": "a3-static-source"
+  },
+  {
+    "pair": "video:src",
+    "kind": "rewrite",
+    "case": null,
+    "why": "같은 미디어 경로를 source:src 가 덮는다"
+  },
+  {
+    "pair": "audio:src",
+    "kind": "rewrite",
+    "case": null,
+    "why": "같은 미디어 경로를 source:src 가 덮는다"
+  },
+  {
+    "pair": "track:src",
+    "kind": "rewrite",
+    "case": null,
+    "why": "같은 미디어 경로를 source:src 가 덮는다"
+  },
+  {
+    "pair": "embed:src",
+    "kind": "rewrite",
+    "case": "b10-embed-src"
+  },
+  {
+    "pair": "input:src",
+    "kind": "rewrite",
+    "case": "a11-static-inputimage"
+  },
+  {
+    "pair": "image:src",
+    "kind": "rewrite",
+    "case": "a15-static-legacy-image"
+  },
+  {
+    "pair": "image:href",
+    "kind": "rewrite",
+    "case": "a13-static-svgimage"
+  },
+  {
+    "pair": "image:xlink:href",
+    "kind": "rewrite",
+    "case": "a14-static-svgxlink"
+  },
+  {
+    "pair": "use:href",
+    "kind": "rewrite",
+    "case": "a20-static-use"
+  },
+  {
+    "pair": "feimage:href",
+    "kind": "rewrite",
+    "case": "a21-static-feimage"
+  },
+  {
+    "pair": "feimage:xlink:href",
+    "kind": "rewrite",
+    "case": null,
+    "why": "feimage:href 와 같은 경로"
+  },
+  {
+    "pair": "video:poster",
+    "kind": "rewrite",
+    "case": "a12-static-poster-cross"
+  },
+  {
+    "pair": "body:background",
+    "kind": "rewrite",
+    "case": null,
+    "why": "td:background 와 같은 레거시 경로"
+  },
+  {
+    "pair": "table:background",
+    "kind": "rewrite",
+    "case": null,
+    "why": "td:background 와 같은 레거시 경로"
+  },
+  {
+    "pair": "td:background",
+    "kind": "rewrite",
+    "case": "a16-static-td-background"
+  },
+  {
+    "pair": "th:background",
+    "kind": "rewrite",
+    "case": null,
+    "why": "td:background 와 같은 레거시 경로"
+  },
+  {
+    "pair": "tr:background",
+    "kind": "rewrite",
+    "case": null,
+    "why": "td:background 와 같은 레거시 경로"
+  },
+  {
+    "pair": "img:srcset",
+    "kind": "srcset",
+    "case": "a2-static-srcset"
+  },
+  {
+    "pair": "source:srcset",
+    "kind": "srcset",
+    "case": "b6-picture-source"
+  },
+  {
+    "pair": "link:imagesrcset",
+    "kind": "srcset",
+    "case": null,
+    "why": "preload 는 차단 목록이라 도착 케이스를 못 만든다"
+  },
+  {
+    "pair": "a:href",
+    "kind": "navigation",
+    "case": null,
+    "why": "탈출 벡터 테스트가 별도로 있다"
+  },
+  {
+    "pair": "area:href",
+    "kind": "navigation",
+    "case": null,
+    "why": "a:href 와 같은 경로"
+  },
+  {
+    "pair": "form:action",
+    "kind": "navigation",
+    "case": null,
+    "why": "탈출 벡터 테스트가 별도로 있다"
+  },
+  {
+    "pair": "input:formaction",
+    "kind": "navigation",
+    "case": null,
+    "why": "form:action 과 같은 경로"
+  },
+  {
+    "pair": "button:formaction",
+    "kind": "navigation",
+    "case": null,
+    "why": "form:action 과 같은 경로"
+  },
+  {
+    "pair": "object:data",
+    "kind": "rewrite",
+    "case": "a23-static-object-cross"
+  },
+  {
+    "pair": "a:ping",
+    "kind": "deliberate",
+    "case": "c11-ping-attr",
+    "why": "클릭 추적 비콘. 값이 URL 목록이고 통과가 목적에 반한다"
+  },
+  {
+    "pair": "object:codebase",
+    "kind": "deliberate",
+    "case": null,
+    "why": "object-src 'none' — plugin 표면 금지 (object:data 와 같은 이유)"
+  },
+  {
+    "pair": "script:importmap",
+    "kind": "known-gap",
+    "case": null,
+    "why": "<script type=importmap> 의 JSON 본문이 모듈 지정자를 절대 URL 로 매핑한다. 리라이트하려면 JSON 파싱이 필요하다. 현재는 script-src 자기 자신만 허용이라 csp-only."
+  }
+]

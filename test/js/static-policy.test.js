@@ -3022,55 +3022,12 @@ test('frame-ancestors: 런처 meta 에는 없고 서버 헤더에는 있다', ()
 //   - 각 항목은 매트릭스 케이스 id 를 가리켜야 하고, 그 id 가 실제로 있어야 한다.
 //
 // 새 표면을 알게 되면 여기 한 줄을 먼저 추가할 것. 그러면 테스트가 나머지를 시킨다.
-const SURFACE_INVENTORY = [
-  // ── 서브리소스: htmltx 가 프록시 경로로 바꿔야 하는 것 ──
-  { pair: 'link:href', kind: 'rewrite', case: null, why: '정적 link href 는 /style/a7.css 라 id 태그가 없다 — 도착 판정은 a7-netcss-url 이 대신한다' },
-  { pair: 'script:src', kind: 'rewrite', case: 'a19-static-script' },
-  { pair: 'img:src', kind: 'rewrite', case: 'a1-static-img' },
-  { pair: 'source:src', kind: 'rewrite', case: 'a3-static-source' },
-  { pair: 'video:src', kind: 'rewrite', case: null, why: '같은 미디어 경로를 source:src 가 덮는다' },
-  { pair: 'audio:src', kind: 'rewrite', case: null, why: '같은 미디어 경로를 source:src 가 덮는다' },
-  { pair: 'track:src', kind: 'rewrite', case: null, why: '같은 미디어 경로를 source:src 가 덮는다' },
-  { pair: 'embed:src', kind: 'rewrite', case: 'b10-embed-src' },
-  { pair: 'input:src', kind: 'rewrite', case: 'a11-static-inputimage' },
-  { pair: 'image:src', kind: 'rewrite', case: 'a15-static-legacy-image' },
-  { pair: 'image:href', kind: 'rewrite', case: 'a13-static-svgimage' },
-  { pair: 'image:xlink:href', kind: 'rewrite', case: 'a14-static-svgxlink' },
-  { pair: 'use:href', kind: 'rewrite', case: 'a20-static-use' },
-  { pair: 'feimage:href', kind: 'rewrite', case: 'a21-static-feimage' },
-  { pair: 'feimage:xlink:href', kind: 'rewrite', case: null, why: 'feimage:href 와 같은 경로' },
-  { pair: 'video:poster', kind: 'rewrite', case: 'a12-static-poster-cross' },
-  { pair: 'body:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
-  { pair: 'table:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
-  { pair: 'td:background', kind: 'rewrite', case: 'a16-static-td-background' },
-  { pair: 'th:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
-  { pair: 'tr:background', kind: 'rewrite', case: null, why: 'td:background 와 같은 레거시 경로' },
-
-  // ── 후보 목록(srcset): 단일 URL 리라이터를 못 쓰는 표면 ──
-  { pair: 'img:srcset', kind: 'srcset', case: 'a2-static-srcset' },
-  { pair: 'source:srcset', kind: 'srcset', case: 'b6-picture-source' },
-  { pair: 'link:imagesrcset', kind: 'srcset', case: null, why: 'preload 는 차단 목록이라 도착 케이스를 못 만든다' },
-
-  // ── 네비게이션: 브라우저 UI 로 새는 경로 (2026-06-06) ──
-  { pair: 'a:href', kind: 'navigation', case: null, why: '탈출 벡터 테스트가 별도로 있다' },
-  { pair: 'area:href', kind: 'navigation', case: null, why: 'a:href 와 같은 경로' },
-  { pair: 'form:action', kind: 'navigation', case: null, why: '탈출 벡터 테스트가 별도로 있다' },
-  { pair: 'input:formaction', kind: 'navigation', case: null, why: 'form:action 과 같은 경로' },
-  { pair: 'button:formaction', kind: 'navigation', case: null, why: 'form:action 과 같은 경로' },
-
-  // ── 정책상 일부러 막는 표면 — 리라이트하면 되살아난다 ──
-  // ★2026-08-21 deliberate → rewrite. "로드를 허용하는가"(`object-src 'none'` 으로
-  // **금지**)와 "원본 URL 이 DOM 에 남아도 되는가"(**안 됨**)는 다른 질문이다.
-  // 리라이트해도 CSP 가 URL 과 무관하게 로드를 거부하므로 표면은 되살아나지 않는다.
-  // 안 고치면 정적 cross-origin object 가 csp-only 로 남는다(a23 으로 실측).
-  { pair: 'object:data', kind: 'rewrite', case: 'a23-static-object-cross' },
-  { pair: 'a:ping', kind: 'deliberate', case: 'c11-ping-attr', why: '클릭 추적 비콘. 값이 URL 목록이고 통과가 목적에 반한다' },
-  { pair: 'object:codebase', kind: 'deliberate', case: null, why: "object-src 'none' — plugin 표면 금지 (object:data 와 같은 이유)" },
-
-  // ── 아직 안 고친 자리. 여기 적어 두면 잊지 않고, 고치는 순간 이 테스트가
-  //    실패해 분류를 바꾸게 만든다(구현에 생겼는데 known-gap 으로 남아 있으면 실패).
-  { pair: 'script:importmap', kind: 'known-gap', case: null, why: '<script type=importmap> 의 JSON 본문이 모듈 지정자를 절대 URL 로 매핑한다. 리라이트하려면 JSON 파싱이 필요하다. 현재는 script-src 자기 자신만 허용이라 csp-only.' },
-];
+// 2026-08-21 — 인벤토리를 테스트 파일 밖으로 꺼냈다. 여기 손목록으로 두면
+// **세 번째 사본**이 된다(Rust 목록 / 프렐류드 목록 / 여기). 단일 소스는
+// `crates/zp-shared/testdata/url_surfaces.json` 이고, 새 표면은 거기에 먼저 적는다.
+const SURFACE_INVENTORY = JSON.parse(
+  fs.readFileSync('crates/zp-shared/testdata/url_surfaces.json', 'utf8')
+).filter((e) => e && e.pair);
 
 test('URL 표면 인벤토리와 htmltx 허용 목록이 어긋나면 실패한다', () => {
   const src = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
