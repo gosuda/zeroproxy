@@ -103,6 +103,11 @@ C('e4-blank-iframe-img', 1, `var f=document.createElement('iframe');f.src='about
 // srcset 은 URL 이 아니라 `url 1x, url 2x` 후보 목록이라 별도 처리가 필요하다.
 C('e5-adframe-srcset', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<img srcset="'+U+' 1x">');d.close()`);
 C('e6-adframe-css-link', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<link rel="stylesheet" href="'+U.replace('.png','.css')+'">');d.close()`);
+// ★e6 은 **스타일시트 자체**가 도착하는지만 본다. 그 안의 `url()` 이 도착하는지는
+// 아무도 안 봤고, 실제로 거기가 뚫려 있었다 — SW-less 문서는 릴레이로 시트를 받는데
+// 그 시트 안의 URL 이 `/zp/api/fetch`(SW 전용 경로)라 403 이 된다.
+// e7 은 시트가 아니라 **시트 안의 이미지**가 도착하는지를 본다.
+C('e7-adframe-css-image', 1, `var f=document.createElement('iframe');document.body.appendChild(f);var d=f.contentDocument;d.open();d.write('<link rel="stylesheet" href="http://127.0.0.1:${CDN}/style/e7.css"><div class="e7" style="width:2px;height:2px"></div>');d.close()`);
 
 
 // ── G. 페이지 realm 이 만든 HTML (프렐류드 transformHTML 경로) ────────────
@@ -195,6 +200,12 @@ function mk(port) {
       const id = u.slice('/frame/'.length);
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end('<!doctype html><meta charset="utf-8"><img src="/img/' + id + '__cross.png">');
+    }
+    // e7 전용 시트 — 안에 cross-origin 이미지 하나만 둔다. 이 이미지가 도착하면
+    // "릴레이로 받은 시트 안의 url() 이 실제로 동작한다" 가 증명된다.
+    if (u.startsWith('/style/e7')) {
+      res.writeHead(200, { 'content-type': 'text/css', 'cache-control': 'no-store' });
+      return res.end('.e7{background-image:url(http://127.0.0.1:' + CDN + '/img/e7-adframe-css-image__cross.png)}');
     }
     if (u.endsWith('.css')) {
       res.writeHead(200, { 'content-type': 'text/css', 'cache-control': 'no-store' });

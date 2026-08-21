@@ -243,6 +243,59 @@ function utf8Base64(s) {
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 }
+// SW-less 문서로 가는 CSS 안의 `/zp/api/fetch?url=…` 을 릴레이 URL 로 옮긴다.
+// 릴레이만이 SW 없이도 동작하는 경로다(Go 가 park 하고 SW 가 답한다).
+//
+// **상한을 둔다.** 릴레이 요청은 Go 가 붙잡고 있으므로 호스트당 ~6개인 HTTP/1.1
+// 커넥션을 점유한다. 예전에 페이지 이미지를 전부 릴레이로 보냈다가 스타일시트가
+// 큐에서 밀려 `deadSheets` 가 났다(그래서 이미지는 blob 경로로 갈라놨다).
+// 스타일시트 하나가 참조하는 이미지는 보통 몇 개지만 스프라이트가 많은 시트는
+// 수십 개일 수 있다 — 그런 경우 옮기지 않고 **몇 개를 남겼는지 로그로 남긴다**
+// (조용히 자르면 "전부 처리됨" 으로 읽힌다).
+//
+// 정규식 대신 스캐너를 쓴다 — 경계 문자(따옴표/괄호/공백)만 보면 되고,
+// 이스케이프가 얽힌 정규식은 이 파일에서 이미 여러 번 사고를 냈다.
+const MAX_RELAYED_CSS_URLS = 12;
+const CSS_URL_STOP = '"\') \t\r\n';
+async function relayifyCSSFetchURLs(resp, job) {
+  let css;
+  try { css = await resp.clone().text(); } catch { return resp; }
+  const marker = ZP.apiPath('fetch') + '?url=';
+  if (!css || css.indexOf(marker) < 0) return resp;
+  let out = '';
+  let i = 0;
+  let moved = 0;
+  let skipped = 0;
+  for (;;) {
+    const at = css.indexOf(marker, i);
+    if (at < 0) { out += css.slice(i); break; }
+    out += css.slice(i, at);
+    let j = at + marker.length;
+    while (j < css.length && CSS_URL_STOP.indexOf(css[j]) < 0) j++;
+    const enc = css.slice(at + marker.length, j);
+    let target = '';
+    // zp-css 는 form 인코딩이라 공백이 `+` 다. 되돌린 뒤 절대 URL 을 얻는다.
+    try { target = decodeURIComponent(enc.replace(/\+/g, '%20')); } catch { target = ''; }
+    if (!/^https?:/i.test(target) || moved >= MAX_RELAYED_CSS_URLS) {
+      if (moved >= MAX_RELAYED_CSS_URLS) skipped++;
+      out += css.slice(at, j);
+    } else {
+      moved++;
+      out += ZP.apiPath('sync-fetch')
+        + '?rid=' + encodeURIComponent('sr' + ZP.randomId())
+        + '&u=' + encodeURIComponent(target)
+        + '&m=GET'
+        + '&tab=' + encodeURIComponent(job.tab || '')
+        + '&entry=' + encodeURIComponent(job.entry || '');
+    }
+    i = j;
+  }
+  if (skipped) logRefusal('css-relay-cap', 0, job.target, MAX_RELAYED_CSS_URLS + '개까지만 릴레이로 옮겼다, ' + skipped + '개는 그대로 남겼다(403 예상)');
+  if (!moved) return resp;
+  const headers = new Headers(resp.headers);
+  headers.delete('Content-Length');
+  return new Response(out, { status: resp.status, statusText: resp.statusText, headers });
+}
 async function handleSyncFetchJob(job) {
   // 릴레이 버전. 브라우저가 낡은 SW 를 물고 있는지 응답만 보고 가리기 위한 것 —
   // 이걸 안 실으면 "내 코드가 틀렸나" 와 "SW 가 낡았나" 를 구분할 수 없다.
@@ -261,7 +314,18 @@ async function handleSyncFetchJob(job) {
     // SW-less 프레임의 `<link>`/`<script>` 가 이 경로로 오면서 필요해졌다 —
     // 리라이트가 빠지면 CSS 의 `url(../img.png)` 이 릴레이 URL 을 base 로
     // 해석돼 전부 깨진다.
-    if (job.kind === 'style') resp = await rewriteCSSResponse(resp, { targetUrl: job.target });
+    if (job.kind === 'style') {
+      resp = await rewriteCSSResponse(resp, { targetUrl: job.target });
+      // ★2026-08-21 — 리라이트된 CSS 안의 `/zp/api/fetch` 를 릴레이 경로로 한 번 더 옮긴다.
+      //
+      // 이 응답은 **SW 클라이언트가 아닌 문서**로 간다(그래서 릴레이를 탄 것이다).
+      // `/zp/api/fetch` 는 SW 안에만 있는 가상 경로라 그 문서에서는 Go 까지 내려가
+      // 403 이 된다. 실측(naver 광고 프레임): 릴레이로 받은 스타일시트의 `url()`
+      // 이미지 3건이 전부 403 이었고, 개시자가 `/zp/api/sync-fetch` 문서라는 것으로
+      // 경로를 특정했다. 요소 속성이었다면 프렐류드의 blob 업그레이드가 잡았을 텐데
+      // 운반체가 **CSS 텍스트**라 아무도 안 고친다. 여기가 마지막 지점이다.
+      resp = await relayifyCSSFetchURLs(resp, job);
+    }
     else if (job.kind === 'script') resp = await rewriteScriptResponse(resp, { targetUrl: job.target, kind: 'classic' });
     out.status = resp.status;
     out.statusText = resp.statusText || '';
