@@ -1,0 +1,51 @@
+{
+  "__doc": [
+    "타깃 응답 헤더 중 브라우저에 넘기면 안 되는 것들. **단일 소스**.",
+    "",
+    "예전에는 Go `internal/headers/policy.go` 의 `hidden`/`isHopByHop` 과",
+    "SW 의 `ZP_TARGET_POLICY_HEADERS`/`ZP_HOP_BY_HOP_HEADERS` 두 벌이었고,",
+    "가드로 양방향 일치만 확인하고 있었다. 2026-08-21 에 재 보니 **Go 쪽은",
+    "테스트 말고는 호출하는 곳이 하나도 없었다** — 죽은 코드였다. 즉 실효",
+    "구현은 SW 하나뿐인데 두 벌인 척하고 있었고, 그 착각이 실제 탈출을 낳았다",
+    "(2026-08-20 `Refresh`: Go 에 있으니 막혀 있다고 믿었다).",
+    "",
+    "그래서 Go 사본을 지우고 이 픽스처를 단일 소스로 두었다. 빌드가",
+    "`__ZP_*_HEADERS__` 자리에 박아 넣고, static-policy 가 산출물을 대조한다.",
+    "",
+    "카테고리",
+    "  reporting — 브라우저가 타깃 엔드포인트로 **직접** 보고서를 보내게 만드는",
+    "              헤더. SW 가 가로챌 수 없는 egress 라 IP 유출 경로다.",
+    "  directive — 타깃이 헤더로 브라우저를 조종하는 것(`Refresh` 는 헤더판",
+    "              meta refresh 로 실제 탈출이었다).",
+    "  hop_by_hop — 홉 단위 헤더. `Location` 은 리다이렉트 엔진 밖으로 흘리면",
+    "              브라우저가 따라가므로 여기 포함한다."
+  ],
+  "reporting": [
+    "Content-Security-Policy-Report-Only",
+    "Report-To",
+    "Reporting-Endpoints",
+    "NEL"
+  ],
+  "directive": [
+    "Refresh",
+    "Link",
+    "Clear-Site-Data",
+    "Alt-Svc",
+    "Service-Worker-Allowed",
+    "SourceMap",
+    "X-SourceMap",
+    "Set-Cookie",
+    "Set-Cookie2"
+  ],
+  "hop_by_hop": [
+    "Connection",
+    "Keep-Alive",
+    "Proxy-Authenticate",
+    "Proxy-Authorization",
+    "TE",
+    "Trailer",
+    "Transfer-Encoding",
+    "Upgrade",
+    "Location"
+  ]
+}

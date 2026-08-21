@@ -822,11 +822,11 @@ test('Rust kernel implements two-signal challenge gate', () => {
     /transport::fetch::fetch\([\s\S]*?armed_challenge_compat,[\s\S]*?\)/,
     'kernel_fetch must thread armed flag into transport::fetch::fetch',
   );
-
-  // Defense-in-depth Go helper still exists and is unit-tested for parity.
-  const goHelper = fs.readFileSync('internal/headers/challenge.go', 'utf8');
-  assert.match(goHelper, /func ApplyChallengeCompat\(header http\.Header, armed bool, finalURL \*url\.URL\)/);
-  assert.match(goHelper, /TargetIsChallengeDocument\(header, finalURL\)/);
+  // ★예전에는 여기서 Go `internal/headers/challenge.go` 를 읽고
+  // "Defense-in-depth Go helper still exists and is unit-tested for parity" 라고
+  // 적혀 있었다. 2026-08-21 실측: 그 헬퍼는 **테스트 말고 호출자가 없었다**.
+  // 유닛 테스트가 통과하니 방어가 하나 더 있는 것처럼 보였을 뿐이다.
+  // 실효 게이트는 Rust 커널의 위 경로 하나다.
 });
 
 // 2026-06-13 yamux transport throughput fix — NAVER 메인 같은 image-heavy
@@ -2578,8 +2578,13 @@ test('service worker strips browser-to-target reporting headers', () => {
     .filter(line => !line.trim().startsWith('//'))
     .join('\n');
   assert.ok(body.length > 0, 'applyZPSecurityHeaders must exist');
+  // 목록은 픽스처(response_header_policy.json)가 갖고 빌드가 박아 넣는다.
+  // 여기서는 **그 목록을 실제로 지우는 코드가 있는지**만 본다.
+  assert.ok(body.includes('for (const name of ZP_REPORTING_HEADERS) h.delete(name)'),
+    '리포팅 헤더를 지우는 루프가 없다 — 브라우저가 타깃으로 직접 보고서를 보낸다');
+  const policy = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/response_header_policy.json', 'utf8'));
   for (const header of ['Content-Security-Policy-Report-Only', 'Report-To', 'Reporting-Endpoints', 'NEL']) {
-    assert.ok(body.includes("h.delete('" + header + "')"),
+    assert.ok(policy.reporting.includes(header),
       header + ' must be stripped — it lets the browser reach the target directly, bypassing the relay');
   }
   // 그리고 우리 정책의 리포트 엔드포인트는 **반드시 우리 자신**이어야 한다.
@@ -3201,31 +3206,48 @@ test('매트릭스 러너는 유실/판정불가를 조용히 넘기지 않는�
   assert.match(run, /classifyTape/, '판정은 공유 모듈 한 곳에서만 나와야 한다');
 });
 
-// ── 타깃이 헤더로 브라우저를 조종하는 자리 (2026-08-20) ────────────────────
+// ── 타깃이 헤더로 브라우저를 조종하는 자리 (2026-08-20, 2026-08-21 재구성) ──
 //
-// Go 의 `ConstructorPolicy` 는 이 목록을 이미 걷어내는데, **문서 응답은
-// 커널→SW 경로로 와서 Go 를 안 지난다**. 그래서 SW 쪽에도 같은 목록이 필요하고,
-// 두 곳이 갈라지면 조용히 구멍이 난다 — `Refresh` 가 정확히 그랬다(진짜 탈출).
-test('타깃 제어 헤더: Go 의 hidden 목록을 SW 도 전부 처리한다', () => {
-  const go = fs.readFileSync('internal/headers/policy.go', 'utf8').split(String.fromCharCode(13,10)).join(String.fromCharCode(10));
-  const block = go.slice(go.indexOf('var hidden = map[string]struct{}{'), go.indexOf('}\n', go.indexOf('var hidden')));
-  const goNames = [...block.matchAll(/"([a-z0-9-]+)":/g)].map(m => m[1]);
-  assert.ok(goNames.length >= 10, `Go hidden 목록 파싱 실패 (${goNames.length}개) — 파서를 고칠 것`);
-
+// 예전에는 이 가드가 Go `internal/headers/policy.go` 의 `hidden` 목록을 읽어
+// SW 와 대조했다. 2026-08-21 실측: **Go 쪽은 테스트 말고 호출자가 하나도 없는
+// 죽은 코드**였다. 즉 두 벌인 척했을 뿐 실효 구현은 SW 하나였고, 그 착각이
+// 실제 탈출을 낳았다 — `Refresh` 는 "Go 에 있으니 막혀 있다" 고 믿었던 자리다.
+//
+// 그래서 Go 사본을 지우고 목록을 픽스처 한 곳으로 옮겼다. 이제 검사할 것은
+// "두 구현이 같은가" 가 아니라 **"빌드가 픽스처를 실제로 박아 넣었는가"** 다.
+test('응답 헤더 정책: 목록은 픽스처 하나이고 소스에 손목록이 없다', () => {
   const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const arr = sw.slice(sw.indexOf('const ZP_TARGET_POLICY_HEADERS = ['));
-  const swList = arr.slice(0, arr.indexOf(']')).toLowerCase();
-  // 목록 밖에서 명시적으로 처리하는 것들 — set 하거나 개별 delete 한다.
-  const explicit = sw.toLowerCase();
+  for (const slot of ['__ZP_REPORTING_HEADERS__', '__ZP_TARGET_POLICY_HEADERS__', '__ZP_HOP_BY_HOP_HEADERS__']) {
+    assert.ok(sw.includes(slot), `${slot} 치환 자리가 사라졌다 — 손목록이 돌아왔을 수 있다`);
+  }
+  const build = fs.readFileSync('scripts/build.mjs', 'utf8');
+  assert.ok(build.includes('response_header_policy.json'), '빌드가 픽스처를 안 읽는다');
+  assert.equal(
+    fs.existsSync('internal/headers/policy.go'), false,
+    'Go 사본이 되살아났다 — 호출자 없는 정책은 "막혀 있다" 는 착각만 만든다'
+  );
+});
 
-  for (const name of goNames) {
-    const inList = swList.includes(`'${name}'`);
-    const deleted = explicit.includes(`h.delete('${name}')`);
-    const overwritten = explicit.includes(`h.set('${name}'`);
+test('응답 헤더 정책: 빌드 산출물이 픽스처와 일치한다', () => {
+  const policy = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/response_header_policy.json', 'utf8'));
+  const built = fs.readFileSync('dist/web/sw.js', 'utf8');
+  for (const slot of ['__ZP_REPORTING_HEADERS__', '__ZP_TARGET_POLICY_HEADERS__', '__ZP_HOP_BY_HOP_HEADERS__']) {
+    assert.equal(built.includes(slot), false, `dist 에 치환 안 된 ${slot} 가 남았다 — 빌드가 낡았다`);
+  }
+  const all = [...policy.reporting, ...policy.directive, ...policy.hop_by_hop];
+  assert.ok(all.length >= 20, '픽스처가 비어 가면 정책이 사라진다');
+  for (const name of all) {
     assert.ok(
-      inList || deleted || overwritten,
-      `${name}: Go 는 걷어내는데 SW 는 그대로 흘린다 — 문서 응답은 Go 를 안 지난다`
+      built.includes(`"${name}"`),
+      `${name}: 픽스처에 있는데 빌드된 SW 목록에 없다 (dist 가 낡았으면 npm run build)`
     );
+  }
+  // `Location` 은 특별히 못 박는다 — 리다이렉트 상한을 넘긴 3xx 에 이게 남으면
+  // 브라우저가 따라가 프록시 밖으로 나간다(진짜 탈출, n13-redirect-limit).
+  assert.ok(policy.hop_by_hop.includes('Location'), 'Location 이 빠지면 리다이렉트 상한에서 탈출한다');
+  // 리포팅 계열은 SW 가 가로챌 수 없는 직접 egress 라 반드시 지워야 한다.
+  for (const name of ['Report-To', 'Reporting-Endpoints', 'NEL', 'Content-Security-Policy-Report-Only']) {
+    assert.ok(policy.reporting.includes(name), `${name}: 브라우저가 타깃으로 직접 보고서를 보낸다`);
   }
 });
 
@@ -3394,6 +3416,30 @@ test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
   }
 });
 
+// ── CORS: 구현은 SW 하나다 (2026-08-21) ────────────────────────────────────
+//
+// 계획은 "Go 의 ACAO:* 와 SW 의 Origin 되비추기 + credentials 가 서로 호환
+// 불가" 라고 적고 있었다. 실측하니 전제가 틀렸다 — Go 의 `ConstructorPolicy`
+// 는 **테스트 말고 호출자가 하나도 없었다**. 통일할 두 벌이 아니라, 지울 한
+// 벌과 남길 한 벌이었다.
+//
+// 남은 실제 결함은 하나: `*` 와 `Allow-Credentials: true` 는 명세상 함께 못
+// 쓰는데(브라우저가 응답 전체를 거부한다) 무조건 켜고 있었다.
+test('CORS: 와일드카드 오리진에는 credentials 를 켜지 않는다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const fn = sw.slice(sw.indexOf('function applyCORS(h, req) {'));
+  const body = fn.slice(0, fn.indexOf('\n}'))
+    .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  const credLine = body.indexOf("h.set('Access-Control-Allow-Credentials'");
+  assert.ok(credLine >= 0, 'credentials 방출이 사라졌다');
+  const guard = body.indexOf("if (origin !== '*')");
+  assert.ok(guard >= 0 && guard < credLine,
+    "`*` + Allow-Credentials 는 명세상 무효 조합이다 — 구체 오리진일 때만 켜야 한다");
+  // Go 사본이 되살아나면 다시 두 벌이 된다.
+  assert.equal(fs.existsSync('internal/headers/policy.go'), false,
+    'Go 쪽 CORS 사본이 되살아났다 — 호출자 없는 구현은 착각만 만든다');
+});
+
 // CSS 도 구현이 두 벌이다: Rust zp-css 와 프렐류드의 손으로 쓴 스캐너
 // (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.
 test('CSS 리라이트도 두 구현이 같은 형태를 다룬다', () => {
@@ -3481,47 +3527,3 @@ test('에러 코드: SW 가 던지는 코드가 전부 목록에 있다', () => 
   assert.deepEqual(missing, [], 'SW 가 던지는데 공유 목록에 없는 코드 (POLICY_BLOCKED 로 접힌다)');
 });
 
-// ── hop-by-hop + Location (2026-08-21) ────────────────────────────────────
-//
-// Go 의 `ConstructorPolicy` 는 hop-by-hop 을 걷어내고 `Location` 을 리다이렉트
-// 엔진 밖으로 안 흘린다. SW 는 둘 다 안 하고 있었다 — 실측: connection /
-// keep-alive / trailer / proxy-authenticate / location 이 브라우저까지 갔다.
-//
-// `Location` 이 특히 위험했다. 리다이렉트 상한을 넘으면 마지막 3xx 가 그대로
-// 페이지로 갔고, 그 Location 이 절대 URL 이면 **브라우저가 따라가 프록시 밖으로
-// 나갔다**(진짜 탈출, 내비 매트릭스 n13-redirect-limit).
-test('hop-by-hop + Location: Go 목록을 SW 도 전부 걷어낸다', () => {
-  const go = fs.readFileSync('internal/headers/policy.go', 'utf8').split(String.fromCharCode(13, 10)).join(String.fromCharCode(10));
-  const block = go.slice(go.indexOf('func isHopByHop'), go.indexOf('\n}', go.indexOf('func isHopByHop')));
-  const goNames = [...block.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
-  assert.ok(goNames.length >= 6, `Go hop-by-hop 목록 파싱 실패 (${goNames.length})`);
-
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const arr = sw.slice(sw.indexOf('const ZP_HOP_BY_HOP_HEADERS = ['));
-  const swList = arr.slice(0, arr.indexOf(']')).toLowerCase();
-  for (const name of goNames) {
-    assert.ok(swList.includes(`'${name}'`), `${name}: Go 는 hop-by-hop 으로 걷어내는데 SW 는 흘린다`);
-  }
-  assert.ok(swList.includes("'location'"), 'Location 이 빠지면 리다이렉트 상한에서 탈출한다');
-});
-
-// 가드를 양방향으로. 지금까지는 Go⊆SW 만 봤으므로 SW 에만 있는 것은 자유롭게
-// 갈라졌다 — 그 사각지대에서 hop-by-hop / Location 이 오래 남아 있었다.
-test('타깃 제어 헤더: SW 가 걷어내는 것을 Go 도 안다 (역방향)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const grab = (name) => {
-    const arr = sw.slice(sw.indexOf('const ' + name + ' = ['));
-    return arr.slice(0, arr.indexOf(']')).toLowerCase();
-  };
-  const swNames = [...(grab('ZP_TARGET_POLICY_HEADERS') + grab('ZP_HOP_BY_HOP_HEADERS')).matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
-  assert.ok(swNames.length >= 12, `SW 목록 파싱 실패 (${swNames.length})`);
-
-  const go = fs.readFileSync('internal/headers/policy.go', 'utf8').toLowerCase();
-  // Go 가 이름을 아는 방법은 세 가지 — hidden 맵, isHopByHop, 명시적 Del/제외.
-  for (const name of swNames) {
-    assert.ok(
-      go.includes(`"${name}"`),
-      `${name}: SW 는 걷어내는데 Go 는 모른다 — 두 경로가 다른 정책을 쓴다`
-    );
-  }
-});

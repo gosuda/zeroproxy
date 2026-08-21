@@ -132,7 +132,11 @@ async function buildWeb() {
   await computeBuildId();
 
   const zpBundlePage = await makeZPBundlePageClassic();
-  const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'));
+  const hdrPolicy = await responseHeaderPolicy();
+  const serviceWorker = stripServiceWorkerImports(await readSource('sw.js'))
+    .split('__ZP_REPORTING_HEADERS__').join(JSON.stringify(hdrPolicy.reporting))
+    .split('__ZP_TARGET_POLICY_HEADERS__').join(JSON.stringify(hdrPolicy.directive))
+    .split('__ZP_HOP_BY_HOP_HEADERS__').join(JSON.stringify(hdrPolicy.hop_by_hop));
   const workerPrelude = stripWorkerPreludeImports(await readSource('worker-prelude.js'));
 
   // index.html 도 build id 치환 대상이다. 그냥 복사하면 런처의
@@ -318,6 +322,23 @@ async function urlSurfacePairs() {
   }
   if (pairs.size < 20) throw new Error('url_surfaces.json 에서 뽑은 표면이 너무 적다: ' + pairs.size);
   return [...pairs].sort();
+}
+
+// 타깃 응답 헤더 정책도 픽스처가 단일 소스다. Go 사본이 있었지만 호출자가
+// 없는 죽은 코드였고(2026-08-21 확인), "Go 가 막고 있다" 는 믿음이 실제
+// 탈출을 낳았다. 이제 목록은 여기 하나이고 빌드가 SW 에 박아 넣는다.
+async function responseHeaderPolicy() {
+  const raw = await readFile(
+    path.join(repoRoot, 'crates', 'zp-shared', 'testdata', 'response_header_policy.json'),
+    'utf8',
+  );
+  const doc = JSON.parse(raw);
+  for (const key of ['reporting', 'directive', 'hop_by_hop']) {
+    if (!Array.isArray(doc[key]) || doc[key].length === 0) {
+      throw new Error('response_header_policy.json 의 ' + key + ' 가 비었다');
+    }
+  }
+  return doc;
 }
 
 async function readSource(name) {

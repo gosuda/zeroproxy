@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-08-21 — Go 의 응답 헤더 정책 전체가 죽은 코드였다: 호출자 0. "Go 가 막고 있다" 는 믿음이 실제 탈출을 낳았다
+
+**계획 9번(CORS)을 재려다 전제가 무너졌다.**
+
+계획은 이렇게 적고 있었다: *"Go 는 `ACAO:*` 를 credentials 없이 내고, SW 는 Origin 을
+되비추며 `Allow-Credentials: true` 를 켠다 — 명세상 호환 불가. 정책을 정하고 통일한다."*
+
+**Go 쪽은 통일할 구현이 아니었다.** `ConstructorPolicy` / `HiddenHeader` /
+`ApplyChallengeCompat` / `ChallengeSubresourceSkip` 전부 **테스트 말고 호출자가 하나도
+없다**. `main.go` 가 `internal/headers` 에서 쓰는 것은 `BuildCSP` 뿐이다.
+지워 보고 확인했다 — 372줄이 `go build` / `go test` 를 하나도 안 건드리고 사라진다.
+
+curl 로도 같은 결과였다: `/zp/`, `/zp/api/sync-fetch`, `/__zp/*.wasm` 어디에서도
+`Access-Control-*` 가 안 나온다.
+
+**이게 왜 위험한가 — 이미 한 번 피를 봤다.** 2026-08-20 의 `Refresh` 탈출이 정확히
+이 착각이었다. Go 의 `hidden` 에 `refresh` 가 있으니 막혀 있다고 믿었고, 실제로는
+아무도 그 함수를 부르지 않았다. 그때는 "문서 응답만 Go 를 안 지난다" 고 정리했는데
+**사실은 어떤 응답도 안 지났다.** 유닛 테스트가 통과하니 방어가 하나 더 있는 것처럼
+보였을 뿐이다. `challenge.go` 옆에는 아예 이렇게 적혀 있었다:
+
+> Defense-in-depth Go helper still exists and is unit-tested for parity.
+
+**호출되지 않는 코드는 defense 가 아니다. 착각을 만드는 비용일 뿐이다.**
+
+**Fix**
+- Go 사본 삭제(`policy.go`, `challenge.go` + 테스트, 372줄). `csp.go`(BuildCSP)는 살아 있어 유지.
+- 목록은 `crates/zp-shared/testdata/response_header_policy.json` 하나로:
+  `reporting`(4) / `directive`(9) / `hop_by_hop`(9). 빌드가 `__ZP_*_HEADERS__` 자리에 박아 넣는다.
+- SW 의 리포팅 헤더 개별 `h.delete` 4줄도 그 목록을 도는 루프로.
+- **CORS 실제 결함 하나**: `*` + `Allow-Credentials: true` 는 명세상 무효 조합이라
+  브라우저가 응답 전체를 거부한다. Origin 헤더가 없는 요청에서 그 조합이 나왔다.
+  피해는 관측되지 않았지만(Origin 이 없으면 CORS 요청이 아니라 브라우저가 헤더를
+  안 본다) 구체 오리진을 되비출 때만 켜도록 고쳤다.
+
+**측정**: 헤더 프로브(`/hdrprobe`)에 리포팅 계열 4종을 추가해 재측정 —
+`Report-To`/`Reporting-Endpoints`/`NEL`/`CSP-Report-Only`/`Link`/`Location`/`Clear-Site-Data`
+모두 프록시 문서에 **한 건도 안 남는다**. 구멍 63칸 무회귀, static 123, cargo 전체,
+`go test ./...`.
+
+**★가드 셋을 다시 겨눴다.** "Go 목록 ⟷ SW 목록" 비교는 죽은 파일을 기준으로 삼고
+있었으므로 통과해도 아무 의미가 없었다. 이제는 **"빌드가 픽스처를 실제로 박아
+넣었는가"** 와 **"Go 사본이 되살아나지 않았는가"** 를 본다.
+
+> 규칙: **가드가 읽는 파일이 실행되는지부터 확인한다.** 이 저장소에서 죽은 사본을
+> 기준으로 삼은 가드가 이번 통합 작업에서만 둘이었다(여기, 그리고 0단에서 지운
+> `internal/htmltx`).
+
 ## 2026-05-30 — iframe document Referer = parentTargetUrl (광고 iframe 차단 해소)
 
 **Site/Pattern**: NAVER 중앙 광고 iframe (`shopsquare.naver.com/...`) — upstream 가 `Referer` 헤더로 embedder host (`https://www.naver.com/`) 기대.

@@ -262,6 +262,13 @@ function mk(port) {
         'clear-site-data': '"storage"',
         'alt-svc': 'h3=":443"',
         link: '<http://127.0.0.1:' + CDN + '/img/hdrprobe-link__cross.png>; rel=preload; as=image',
+        // ★리포팅 계열 — Go 의 죽은 `hidden` 목록에는 있는데 SW 목록에는 없다.
+        // 타깃이 브라우저에게 **자기 수집기로 직접 보고서를 보내라**고 시키는
+        // 헤더라 격리 축의 문제다(우리 오리진의 동작을 타깃이 관측한다).
+        'report-to': '{"group":"zp","max_age":86400,"endpoints":[{"url":"http://127.0.0.1:' + CDN + '/img/hdrprobe-reportto__cross.png"}]}',
+        'reporting-endpoints': 'zp="http://127.0.0.1:' + CDN + '/img/hdrprobe-endpoints__cross.png"',
+        nel: '{"report_to":"zp","max_age":86400}',
+        'content-security-policy-report-only': "default-src 'self'; report-uri http://127.0.0.1:" + CDN + '/img/hdrprobe-cspro__cross.png',
       });
       return res.end('<!doctype html><meta charset="utf-8"><title>hdrprobe</title><p>hdr</p>');
     }

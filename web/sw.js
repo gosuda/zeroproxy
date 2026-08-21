@@ -2946,8 +2946,18 @@ function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set(
 function applyCORS(h, req) {
   const origin = req && req.headers.get('Origin') || '*';
   h.set('Access-Control-Allow-Origin', origin);
-  if (origin !== '*') h.set('Vary', h.get('Vary') ? h.get('Vary') + ', Origin' : 'Origin');
-  h.set('Access-Control-Allow-Credentials', 'true');
+  // ★`*` 와 `Allow-Credentials: true` 는 명세상 **함께 못 쓴다** — 브라우저가
+  // 응답 전체를 거부한다. 예전에는 무조건 credentials 를 켰고, Origin 헤더가
+  // 없는 요청에서 정확히 그 조합이 나왔다. 실제 피해는 관측되지 않았는데
+  // (Origin 이 없으면 CORS 요청이 아니라 브라우저가 헤더를 안 본다) 잘못된
+  // 조합을 내보낼 이유는 없다. 구체 오리진을 되비출 때만 켠다.
+  //
+  // 이게 CORS 의 **유일한** 구현이다. Go 쪽 `ConstructorPolicy` 에도 CORS
+  // 방출이 있었지만 2026-08-21 실측 결과 호출자가 없는 죽은 코드였다.
+  if (origin !== '*') {
+    h.set('Vary', h.get('Vary') ? h.get('Vary') + ', Origin' : 'Origin');
+    h.set('Access-Control-Allow-Credentials', 'true');
+  }
   h.set('Access-Control-Allow-Methods', req && req.headers.get('Access-Control-Request-Method') || 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS');
   h.set('Access-Control-Allow-Headers', req && req.headers.get('Access-Control-Request-Headers') || '*');
   h.set('Access-Control-Expose-Headers', '*');
@@ -2994,16 +3004,18 @@ function proxiedRefreshValue(raw, targetUrl) {
 }
 // hop-by-hop + Location. Go `internal/headers/policy.go` 의 `isHopByHop` +
 // Location 제외 정책과 **같은 목록**이어야 한다 — static-policy 가 양방향으로 대조한다.
-const ZP_HOP_BY_HOP_HEADERS = [
-  'Connection', 'Keep-Alive', 'Proxy-Authenticate', 'Proxy-Authorization',
-  'TE', 'Trailer', 'Transfer-Encoding', 'Upgrade',
-  'Location',
-];
-const ZP_TARGET_POLICY_HEADERS = [
-  'Refresh', 'Link', 'Clear-Site-Data', 'Alt-Svc',
-  'Service-Worker-Allowed', 'SourceMap', 'X-SourceMap',
-  'Set-Cookie', 'Set-Cookie2',
-];
+// ── 타깃 응답 헤더 정책 (빌드가 픽스처에서 박아 넣는다) ────────────────────
+//
+// 목록은 `crates/zp-shared/testdata/response_header_policy.json` 하나뿐이다.
+// 예전엔 Go `internal/headers/policy.go` 에도 같은 목록이 있었고 가드가 양쪽
+// 일치만 봤는데, 2026-08-21 에 재 보니 **Go 쪽은 테스트 말고 호출자가 없는
+// 죽은 코드**였다. "Go 가 막고 있다" 는 믿음이 실제 탈출을 낳았다
+// (2026-08-20 `Refresh`). 사본을 지우고 여기 하나만 남겼다.
+const ZP_HOP_BY_HOP_HEADERS = __ZP_HOP_BY_HOP_HEADERS__;
+const ZP_TARGET_POLICY_HEADERS = __ZP_TARGET_POLICY_HEADERS__;
+// 브라우저가 타깃 엔드포인트로 **직접** 보고서를 보내게 만드는 헤더.
+// CSP 리포트는 Service Worker 가 가로챌 수 없어 릴레이를 우회한다 = IP 유출.
+const ZP_REPORTING_HEADERS = __ZP_REPORTING_HEADERS__;
 function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   const rawRefresh = h.get('Refresh');
   // B4: read once, then delete unconditionally — defense in depth against a
@@ -3024,13 +3036,13 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   // Report-To / Reporting-Endpoints / NEL 도 같은 부류(네트워크 오류·경고를
   // 브라우저가 지정 엔드포인트로 직접 전송)라 함께 지운다. 우리 정책에는
   // report-uri 가 없으므로 지우는 쪽이 기능 손실도 없다.
-  h.delete('Content-Security-Policy-Report-Only');
-  h.delete('Report-To');
-  h.delete('Reporting-Endpoints');
-  h.delete('NEL');
-  // 2026-08-20 — 타깃이 **헤더로** 지시하는 것들. Go 의 `ConstructorPolicy` 는
-  // 이 목록을 이미 걷어내는데, 문서 응답은 커널→SW 경로로 와서 여기를 안 지난다.
-  // 그래서 SW 쪽에도 같은 목록이 필요하다(두 곳이 갈라지지 않게 가드로 묶었다).
+  for (const name of ZP_REPORTING_HEADERS) h.delete(name);
+  // 2026-08-20 — 타깃이 **헤더로** 지시하는 것들.
+  //
+  // 예전 주석은 "Go 의 ConstructorPolicy 가 이미 걷어내는데 문서 응답만
+  // 안 지난다" 고 적혀 있었다. 2026-08-21 실측: Go 쪽은 **테스트 말고
+  // 호출자가 하나도 없는 죽은 코드**라 어떤 응답도 안 지난다. 여기가
+  // 유일한 구현이다.
   //
   // ★`Refresh` 가 **진짜 탈출**이었다. 비표준이지만 크롬이 지원하는 헤더판
   // meta refresh 다. 마크업이 아니라 응답 헤더라 htmltx 가 볼 수 없고, meta 쪽만
