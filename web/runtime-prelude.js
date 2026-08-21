@@ -3612,7 +3612,6 @@
       return ('00000000' + (h >>> 0).toString(16)).slice(-8);
     })();
     const localPrefix = 'zp:l:' + originHash + ':';
-    const sessionPrefix = 'zp:s:' + boot.tabId + ':' + originHash + ':';
     const cachePrefix = 'zp:c:' + originHash + ':';
     const idbPrefix = 'zp:i:' + originHash + ':';
     const bcPrefix = 'zp:b:' + originHash + ':';
@@ -3624,6 +3623,27 @@
     // so repeated reads don't allocate a fresh proxy each access.
     const nativeLocalStorage = w.localStorage;
     const nativeSessionStorage = w.sessionStorage;
+    // ★sessionStorage 는 **브라우저 탭 세션**에 묶여야 한다.
+    //
+    // 예전 접두는 `boot.tabId` 를 썼는데 그건 런처에서 Open 할 때마다 새로
+    // 발급된다. 그래서 같은 탭에서 A → B → A 로 돌아오면 A 의 sessionStorage 가
+    // 사라졌다. 대조군(프록시 없이 같은 순서)은 **남는다** — 실측으로 확인한
+    // 재현성 결함이다(2026-08-22).
+    //
+    // 진짜 탭 세션의 수명을 가진 것은 **네이티브 sessionStorage 자신**이다
+    // (탭마다 다르고 탭 안 내비게이션에는 살아남는다). 거기 id 를 한 번 심어
+    // 두고 그걸 쓰면 브라우저 의미와 정확히 같아진다. 타깃별 격리는 originHash
+    // 가 계속 담당한다.
+    const tabSessionKey = '__zp_sid';
+    let tabSessionId = '';
+    try {
+      tabSessionId = nativeSessionStorage && nativeSessionStorage.getItem(tabSessionKey);
+      if (!tabSessionId) {
+        tabSessionId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        if (nativeSessionStorage) nativeSessionStorage.setItem(tabSessionKey, tabSessionId);
+      }
+    } catch { tabSessionId = boot.tabId; }
+    const sessionPrefix = 'zp:s:' + tabSessionId + ':' + originHash + ':';
     let wrappedLocalStorage = null;
     let wrappedSessionStorage = null;
     defineAccessor(w, 'localStorage', () => {
@@ -3919,12 +3939,24 @@
     // Wrap native localStorage/sessionStorage with a fixed key prefix. All
     // reads/writes/iteration are scoped to the target origin namespace.
     if (!native) return null;
+    // ★우리 진단 키(`__zp_hb`, `__zp_trace_log`)를 페이지에서 숨긴다.
+    //
+    // 실측(2026-08-22): 페이지가 `localStorage.key(i)` 로 열거하면 저 둘이
+    // 그대로 보였다 = **프록시라는 지문**. 네이티브 저장소를 보니 접두 없는
+    // 사본과 `zp:l:<hash>:` 접두가 붙은 사본이 **둘 다** 있었다 — 즉 어떤
+    // 경로는 네이티브로, 어떤 경로는 파사드를 타고 타깃 네임스페이스로 들어갔다
+    // (프렐류드가 자식 realm 에서 다시 평가될 때 캡처 순서가 뒤집힌다).
+    //
+    // 캡처 순서를 realm 마다 맞추는 것보다 **파사드에서 거르는 쪽**이 확실하다 —
+    // 어느 경로로 들어오든 페이지에는 안 보인다. 타깃이 `__zp_` 로 시작하는 키를
+    // 쓸 확률은 무시할 만하고, 쓴다면 어차피 우리와 충돌한다.
+    const hidden = (name) => String(name).startsWith('__zp_');
     const facade = {
       get length() {
         let n = 0;
         for (let i = 0; i < native.length; i++) {
           const k = native.key(i);
-          if (k && k.startsWith(prefix)) n++;
+          if (k && k.startsWith(prefix) && !hidden(k.slice(prefix.length))) n++;
         }
         return n;
       },
@@ -3933,14 +3965,14 @@
         let seen = 0;
         for (let j = 0; j < native.length; j++) {
           const k = native.key(j);
-          if (k && k.startsWith(prefix)) {
+          if (k && k.startsWith(prefix) && !hidden(k.slice(prefix.length))) {
             if (seen === i) return k.slice(prefix.length);
             seen++;
           }
         }
         return null;
       },
-      getItem(k) { return native.getItem(prefix + String(k)); },
+      getItem(k) { return hidden(k) ? null : native.getItem(prefix + String(k)); },
       setItem(k, v) { native.setItem(prefix + String(k), String(v)); },
       removeItem(k) { native.removeItem(prefix + String(k)); },
       clear() {
@@ -3979,7 +4011,7 @@
       const out = [];
       for (let i = 0; i < native.length; i++) {
         const k = native.key(i);
-        if (k && k.startsWith(prefix)) out.push(k.slice(prefix.length));
+        if (k && k.startsWith(prefix) && !hidden(k.slice(prefix.length))) out.push(k.slice(prefix.length));
       }
       return out;
     };
