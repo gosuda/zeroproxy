@@ -9,6 +9,7 @@
 //
 // 리소스 이름 규약:  <id>__<same|cross>.png   — 서버 로그만 보고 케이스를 역추적한다.
 import http from 'node:http';
+import crypto from 'node:crypto';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -250,6 +251,25 @@ function mk(port) {
     // 브라우저가 타깃 오리진으로 이동해 버리는지를 URL 로 본다.
     // `<base href>` 가 초기 문서에 있을 때 상대 서브리소스가 어디로 풀리는가.
     // 프렐류드의 syncBaseElement 는 TDZ 로 조용히 삼켜진 적이 있다(2026-05-30).
+    // 계획 10번 잔여 — SRI(`integrity`) 비대칭 측정용.
+    //
+    // 우리는 스크립트를 OXC 로 **리라이트해서** 내려주므로 본문이 원본과 다르다.
+    // 그러면 브라우저의 SRI 검증이 반드시 실패하고 스크립트가 통째로 안 돈다.
+    // 페이지 realm 프렐류드는 `integrity` 를 벗겨 백업 속성에 넣는데(속성 훅/
+    // 프로퍼티 훅/스윕 셋 다) **htmltx 에는 그 처리가 없다** — 정적 HTML 의
+    // integrity 는 파서가 스크립트를 가져올 때 이미 적용되므로 나중에 도는
+    // 스윕으로는 못 막는다.
+    if (u === '/sripage') {
+      const body = 'window.__sri_ran = true;';
+      const hash = crypto.createHash('sha384').update(body).digest('base64');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end('<!doctype html><meta charset="utf-8"><title>sri</title>'
+        + '<script src="/sri.js" integrity="sha384-' + hash + '"></script>');
+    }
+    if (u === '/sri.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
+      return res.end('window.__sri_ran = true;');
+    }
     if (u === '/basepage') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       return res.end('<!doctype html><meta charset="utf-8"><base href="http://127.0.0.1:' + CDN + '/deep/">'

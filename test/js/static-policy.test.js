@@ -3440,6 +3440,58 @@ test('CORS: 와일드카드 오리진에는 credentials 를 켜지 않는다', (
     'Go 쪽 CORS 사본이 되살아났다 — 호출자 없는 구현은 착각만 만든다');
 });
 
+// ── integrity / CSP-meta: 두 구현이 서로의 구멍을 하나씩 갖고 있었다 ────────
+//
+// 2026-08-21 실측으로 확인한 **상호 결손**:
+//   htmltx   — CSP-meta 는 무력화하는데 `integrity` 처리가 **아예 없었다**
+//   프렐류드 — `integrity` 는 세 경로로 벗기는데 CSP-meta 는 **안 봤다**
+//
+// ① SRI: 우리는 본문을 리라이트하므로 해시가 절대 안 맞는다. 벗기지 않으면
+//    크롬이 "Failed to find a valid digest … The resource has been blocked" 로
+//    리소스를 통째로 막는다(대조군 RAN / 프록시 BLOCKED). 정적 HTML 은 파서가
+//    스크립트를 가져오는 시점이 프렐류드 스윕보다 앞서므로 **서버에서** 벗겨야 한다.
+// ② meta CSP: 페이지 realm 이 꽂으면 실제로 적용된다(주입 전 LOADED → 후 BLOCKED).
+//    탈출은 아니다 — 정책은 교집합이라 느슨해질 수 없고, `report-uri` 는 브라우저가
+//    meta 전달 시 무시한다(크롬이 직접 그렇게 찍는다). 문제는 우리 런타임을
+//    죽일 수 있다는 것과 지문이 된다는 것.
+test('integrity: htmltx 와 프렐류드가 같은 백업 속성을 쓴다', () => {
+  const rust = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rust, /remove_attribute\("integrity"\)/,
+    'htmltx 가 integrity 를 안 벗긴다 — SRI 가 리라이트된 본문과 안 맞아 리소스가 차단된다');
+  assert.match(rust, /set_attribute\("data-zp-integrity"/, 'htmltx 가 원본을 백업 안 한다');
+  assert.match(rt, /integrityBackupAttr = 'data-zp-integrity'/,
+    '두 구현의 백업 속성 이름이 갈라졌다 — 페이지가 되읽으면 값이 사라진다');
+});
+
+test('meta CSP: 서버·페이지 realm 양쪽이 같은 방식으로 무력화한다', () => {
+  const rust = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rust, /data-zp-blocked-http-equiv/, 'htmltx 가 meta CSP 를 안 막는다');
+  assert.match(rt, /function neutralizeCSPMeta\(/, '페이지 realm 이 meta CSP 를 안 막는다');
+  assert.match(rt, /data-zp-blocked-http-equiv/, '백업 속성 이름이 갈라졌다');
+  // 세 경로 전부 — setAttribute / 프로퍼티 / transformHTML.
+  // (항목 7 에서 배운 것: 프로퍼티 대입은 setAttribute 훅을 안 탄다.)
+  const body = rt.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.ok(
+    /localKey === 'http-equiv' && isCSPHttpEquiv\(v\)/.test(body),
+    'setAttribute 훅에 meta CSP 분기가 없다'
+  );
+  assert.ok(
+    /HTMLMetaElement\.prototype, 'httpEquiv'/.test(body),
+    "프로퍼티 훅이 없다 — m.httpEquiv = 'Content-Security-Policy' 가 그대로 통과한다"
+  );
+  assert.ok(
+    /if \(isCSPHttpEquiv\(eq\)\)/.test(body),
+    'transformHTML(HTML 주입) 경로에 meta CSP 분기가 없다'
+  );
+  // 우리 자신의 정책은 살아 있어야 한다 — meta 를 통째로 지우면 안 된다.
+  assert.ok(
+    !/removeAttribute\.call\(el, 'content'\)/.test(body),
+    'content 까지 지우면 우리 정책 meta 도 같이 죽는다'
+  );
+});
+
 // CSS 도 구현이 두 벌이다: Rust zp-css 와 프렐류드의 손으로 쓴 스캐너
 // (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.
 test('CSS 리라이트도 두 구현이 같은 형태를 다룬다', () => {

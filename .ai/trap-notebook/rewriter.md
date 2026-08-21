@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-08-21 — SRI 를 안 벗겨서 스크립트가 통째로 차단되고 있었다 + meta CSP 는 페이지 realm 에서 그대로 먹혔다 (상호 결손)
+
+**계획 10번의 마지막 갈래.** 두 구현이 **서로의 구멍을 하나씩** 갖고 있었다:
+
+| | `integrity` | meta CSP |
+|---|---|---|
+| htmltx (서버) | **처리 없음** ✗ | 무력화 ✓ |
+| 프렐류드 (페이지 realm) | 세 경로로 벗김 ✓ | **안 봄** ✗ |
+
+### ① SRI — 조용한 전면 차단이었다
+
+우리는 스크립트를 OXC 로 리라이트해 내려주므로 본문이 원본과 다르다. 그러면
+브라우저의 SRI 검증이 **반드시** 실패한다. 실측(`/sripage`):
+
+```
+대조군 : RAN
+프록시 : BLOCKED
+크롬   : "Failed to find a valid digest in the 'integrity' attribute
+          for resource … The resource has been blocked."
+```
+
+**정적 HTML 은 스윕으로 못 막는다** — 파서가 `<script src>` 를 가져오는 시점이
+프렐류드 스윕보다 앞선다. 그래서 반드시 **서버(htmltx)에서** 벗겨야 한다.
+CDN 라이브러리에 SRI 를 다는 사이트가 흔하므로 영향 범위가 넓다.
+
+**Fix**: htmltx 가 `script`/`link` 의 `integrity` 를 벗기고 원본을
+**프렐류드와 같은 백업 속성**(`data-zp-integrity`)에 넣는다. 그래야 페이지가
+`el.integrity` 로 되읽었을 때 자기가 쓴 값이 나온다(실측: attr/prop 모두 원본,
+`hasAttribute` true). 고친 뒤 프록시에서도 RAN.
+
+### ② meta CSP — 페이지 realm 이 꽂으면 실제로 적용된다
+
+`document.head.appendChild(meta[http-equiv=CSP])` 로 `img-src 'none'` 을 넣고 쟀다:
+주입 전 **LOADED** → 주입 후 **BLOCKED**. 이 엔진은 파싱 이후 삽입된 meta CSP 도
+적용한다(명세상 무시될 거라 예상했는데 아니었다 — 그래서 쟀다).
+
+**탈출은 아니다.** 정책은 교집합이라 타깃이 느슨하게 만들 수 없다. 더 무서운
+쪽(`report-uri` 로 릴레이 우회 egress)도 **브라우저가 막는다** — 크롬이 직접
+이렇게 찍는다: *"'report-uri' is ignored when delivered via a `<meta>` element"*.
+실측으로도 타깃 오리진 히트 0.
+
+남는 실제 피해는 **우리 런타임을 죽일 수 있다는 것**이다 — `script-src 'none'`
+이면 멤브레인이 붙인 스크립트가, `connect-src 'none'` 이면 릴레이 트랜스포트가
+막힌다. 그리고 "정책이 먹히는가" 자체가 지문이다.
+
+**Fix**: 프렐류드가 htmltx 와 같은 방식으로(`data-zp-blocked-http-equiv`) 무력화.
+**세 경로 전부** — `setAttribute` 훅 / `HTMLMetaElement.httpEquiv` 프로퍼티 훅 /
+`transformHTML`(HTML 주입). 항목 7 에서 배운 그대로다: 프로퍼티 대입은
+`setAttribute` 훅을 안 탄다. 셋 다 안 넣었으면 `m.httpEquiv = …` 로 그냥 통과했다.
+
+**주의**: 우리 자신의 정책 meta 는 살아 있어야 한다. 실측으로 확인 —
+주입 3건은 전부 `data-zp-blocked-http-equiv` 로 내려앉고 살아 있는 `http-equiv` 는
+우리 것 하나뿐이며, 그 뒤 이미지가 다시 LOADED 로 돌아온다.
+
+**측정**: 구멍 66칸 진짜 유출 0 / csp-only 0, static 125(새 가드 둘 변이 확인),
+cargo 전체(zp-htmltx 54), `go test ./...`, 실사이트 3종 raw=0 csp=0 err=0.
+
+> **이번 항목의 교훈**: "두 구현이 갈라졌다" 를 볼 때 **한쪽만 보면 안 된다.**
+> 여기서는 A 가 가진 것을 B 가, B 가 가진 것을 A 가 각각 빠뜨리고 있었다.
+> 한 방향만 검사하는 가드였다면 둘 다 통과했을 것이다(항목 5 의 Go⊆SW 단방향
+> 가드가 정확히 그 사각지대를 만들었다).
+
 ## 2026-08-21 — `<base href>` 를 리라이터가 무시하고 있었다. 그리고 `link rel` "서버측 부재" 는 재 보니 결함이 아니었다
 
 **계획 10번.** 네 갈래를 각각 재고 갈렸다 — **하나는 진짜 결함, 하나는 비결함,

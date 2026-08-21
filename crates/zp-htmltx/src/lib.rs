@@ -106,6 +106,29 @@ fn attr_settings(
                             }
                         }
                     }
+                    // ★SRI(`integrity`) 는 반드시 벗겨야 한다.
+                    //
+                    // 우리는 스크립트를 OXC 로 리라이트하고 CSS 도 다시 쓰므로
+                    // 본문이 원본과 다르다. 그러면 브라우저의 SRI 검증이 **항상**
+                    // 실패하고 리소스가 통째로 차단된다. 실측(2026-08-21,
+                    // `/sripage`): 대조군은 실행되는데 프록시에서는 크롬이
+                    // "Failed to find a valid digest in the 'integrity' attribute
+                    // … The resource has been blocked." 를 찍고 스크립트가 안 돌았다.
+                    // CDN 라이브러리에 SRI 를 다는 사이트가 흔해서 영향이 크다.
+                    //
+                    // 페이지 realm 프렐류드는 속성 훅·프로퍼티 훅·스윕 셋 다
+                    // 이 처리를 갖고 있는데 htmltx 에만 없었다 — 그리고 **정적
+                    // HTML 은 스윕으로 못 막는다**: 파서가 스크립트를 가져오는
+                    // 시점이 프렐류드 스윕보다 먼저다.
+                    //
+                    // 원본 값은 프렐류드와 **같은 백업 속성**에 넣는다. 그래야
+                    // 페이지가 `el.integrity` 로 되읽었을 때 자기가 쓴 값이 나온다.
+                    if matches!(tag.as_str(), "script" | "link") {
+                        if let Some(integrity) = el.get_attribute("integrity") {
+                            let _ = el.set_attribute("data-zp-integrity", &integrity);
+                            let _ = el.remove_attribute("integrity");
+                        }
+                    }
                     let attr_base = base_for_attr.borrow().clone();
                     // 2026-08-14 — 타깃이 자기 CSP 를 `<meta http-equiv>` 로
                     // 실어 보내면 그걸 무력화한다.
@@ -2426,6 +2449,33 @@ mod surface_fixture {
     /// (`test/js/static-policy.test.js` 가 같은 파일을 읽는다). 여기서만 통과하는
     /// 것은 의미가 없다 — 이틀 동안 사고 넷이 전부 "서버에는 있는데 페이지
     /// realm 에는 없는" 형태였다.
+    /// SRI 는 리라이트한 본문과 절대 안 맞는다 — 벗기지 않으면 리소스가
+    /// 통째로 차단된다(2026-08-21 실측: 대조군 실행 / 프록시 차단).
+    #[test]
+    fn integrity_is_stripped_and_backed_up() {
+        for tag in ["script", "link"] {
+            let html = format!(
+                "<{tag} src=\"/a.js\" href=\"/a.css\" integrity=\"sha384-AAA\"></{tag}>"
+            );
+            let out = transform(&html, &opts()).expect("transform").html;
+            assert!(
+                !out.contains(" integrity=\""),
+                "{tag}: integrity 가 남았다 — 브라우저가 리소스를 차단한다: {out}"
+            );
+            assert!(
+                out.contains("data-zp-integrity=\"sha384-AAA\""),
+                "{tag}: 원본 값이 백업 안 됐다 — 페이지가 되읽으면 거짓말이 된다: {out}"
+            );
+        }
+    }
+
+    /// integrity 가 없으면 백업 속성도 만들지 않는다(빈 속성이 늘면 지문이 된다).
+    #[test]
+    fn integrity_backup_is_absent_when_there_was_none() {
+        let out = transform("<script src=\"/a.js\"></script>", &opts()).expect("transform").html;
+        assert!(!out.contains("data-zp-integrity"), "없던 백업 속성이 생겼다: {out}");
+    }
+
     /// `<base href>` 는 그 뒤에 파싱되는 상대 URL 의 기준이다. 무시하면
     /// 서브리소스가 **다른 오리진의 다른 경로**로 간다(2026-08-21 실측).
     #[test]

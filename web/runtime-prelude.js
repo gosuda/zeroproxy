@@ -751,6 +751,27 @@
   }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
   function blockExecutableURL(el, key, raw) { urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw).trim()); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el); }
+  // ★타깃이 페이지 realm 에서 `<meta http-equiv="Content-Security-Policy">` 를
+  // 꽂으면 그 정책이 **우리 문서에 실제로 적용된다**(2026-08-21 실측: 주입 전
+  // 이미지 LOADED → `img-src 'none'` 주입 후 BLOCKED). 서버측 htmltx 는 정적
+  // HTML 의 같은 표면을 이미 무력화하는데 페이지 realm 에만 없었다.
+  //
+  // **탈출은 아니다** — 정책은 교집합이라 타깃이 느슨하게 만들 수 없고,
+  // `report-uri` 는 브라우저가 meta 전달 시 무시한다(크롬이 직접 그렇게 찍는다:
+  // "'report-uri' is ignored when delivered via a <meta> element"). 즉 릴레이를
+  // 우회하는 보고 egress 도 안 열린다. 문제는 **우리 런타임을 죽일 수 있다는 것**
+  // 이다 — `script-src 'none'` 이면 멤브레인이 붙인 스크립트가, `connect-src 'none'`
+  // 이면 릴레이 트랜스포트가 막힌다. 그리고 정책이 먹히는지 여부 자체가 지문이다.
+  //
+  // htmltx 와 **같은 백업 속성**을 쓴다.
+  const CSP_EQUIV = ['content-security-policy', 'content-security-policy-report-only'];
+  function isCSPHttpEquiv(value) {
+    return CSP_EQUIV.indexOf(String(value || '').trim().toLowerCase()) >= 0;
+  }
+  function neutralizeCSPMeta(el, value) {
+    Native.setAttribute.call(el, 'data-zp-blocked-http-equiv', String(value));
+    if (Native.removeAttribute) { try { Native.removeAttribute.call(el, 'http-equiv'); } catch {} }
+  }
   function isIntegrityBearing(el) { const tag = el && el.localName; return tag === 'script' || tag === 'link'; }
   function backedIntegrity(el) { return isIntegrityBearing(el) ? Native.getAttribute.call(el, integrityBackupAttr) : null; }
   function setBackedIntegrity(el, value) { Native.setAttribute.call(el, integrityBackupAttr, String(value)); if (Native.removeAttribute) Native.removeAttribute.call(el, 'integrity'); }
@@ -2960,6 +2981,20 @@
     installSrcsetProp(w.HTMLImageElement && w.HTMLImageElement.prototype, 'srcset', 'srcset');
     installSrcsetProp(w.HTMLSourceElement && w.HTMLSourceElement.prototype, 'srcset', 'srcset');
     installSrcsetProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype, 'imageSrcset', 'imagesrcset');
+    // ★`meta.httpEquiv = 'Content-Security-Policy'` — 프로퍼티 경로.
+    //
+    // 항목 7(srcset)에서 배운 것과 같은 자리다: 프로퍼티 대입은 setAttribute
+    // 훅을 안 탄다. 위 분기만 두면 `m.setAttribute(...)` 는 막히는데
+    // `m.httpEquiv = ...` 는 그대로 통과한다. 게터는 페이지가 쓴 값을 돌려준다.
+    if (w.HTMLMetaElement && !propertyLocked(w.HTMLMetaElement.prototype, 'httpEquiv')) {
+      defineAccessor(w.HTMLMetaElement.prototype, 'httpEquiv',
+        function () {
+          const blocked = Native.getAttribute.call(this, 'data-zp-blocked-http-equiv');
+          if (blocked !== null && blocked !== undefined) return blocked;
+          return Native.getAttribute.call(this, 'http-equiv') || '';
+        },
+        function (v) { this.setAttribute('http-equiv', v == null ? '' : String(v)); });
+    }
     // 2026-08-14 — object/embed. 서버측 htmltx 목록에는 ("object","data") /
     // ("embed","src") 가 있는데 페이지 realm 에만 없었다(정적 HTML 은 통과,
     // 런타임 대입만 샜다 — 오늘 세 번째 서버/런타임 비대칭).
@@ -4346,7 +4381,10 @@
         try { Native.setAttribute.call(this, 'data-zp-blocked-ping', String(v)); } catch {}
         try { Native.removeAttribute.call(this, 'ping'); } catch {}
         return;
-      }      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
+      }
+      // meta 로 실려 온 CSP 는 무력화한다(htmltx 와 같은 처리).
+      if (ln === 'meta' && localKey === 'http-equiv' && isCSPHttpEquiv(v)) return neutralizeCSPMeta(this, v);
+      if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
       if (ln === 'link' && localKey === 'rel') {
@@ -5276,6 +5314,7 @@
       const tag = node.localName;
       if (tag === 'meta') {
         const eq = String(Native.getAttribute.call(node, 'http-equiv') || '').trim().toLowerCase();
+        if (isCSPHttpEquiv(eq)) { neutralizeCSPMeta(node, eq); continue; }
         if (eq === 'refresh') {
           const next = proxiedRefreshContent(Native.getAttribute.call(node, 'content') || '');
           if (next) Native.setAttribute.call(node, 'content', next);
