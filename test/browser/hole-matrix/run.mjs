@@ -88,6 +88,22 @@ const broken = rows.filter(r => r.control === 'O' && r.proxy === 'X');
 const leaks = rows.filter(r => r.containment === 'LEAK');
 const cspOnly = rows.filter(r => r.containment === 'csp-only');
 console.log('\n[재현성] 대조군에서 되는데 프록시에서 안 되는 것:', broken.length ? broken.map(r => r.id).join(', ') : '없음');
+// 재현성 축을 **선언 대비**로 본다. 그냥 나열하면 늘 앉아 있는 7칸 옆에 새 회귀가
+// 끼어도 구분이 안 된다 — 격리 축에는 `deliberate` 개념이 있는데 여기엔 없었다.
+const declared = new Map(cases.map(c => [c.id, c.blockedWhy]).filter(([, w]) => w));
+const regressed = broken.filter(r => !declared.has(r.id));
+const stale = rows.filter(r => declared.has(r.id) && r.control === 'O' && r.proxy === 'O');
+console.log('\n[재현성] 의도적으로 막은 것(선언됨):', declared.size ? [...declared.keys()].join(', ') : '없음');
+if (regressed.length) {
+  console.log(`[!!] [재현성] 선언에 없는데 깨졌다 — 회귀다: ${regressed.map(r => r.id).join(', ')}`);
+  console.log('     의도한 것이면 server.mjs 의 EXPECT_BLOCKED 에 **이유와 함께** 넣을 것.');
+} else {
+  console.log('[재현성] 선언에 없는 깨짐: 없음');
+}
+if (stale.length) {
+  console.log(`[!] [재현성] 막혔다고 선언했는데 이제 동작한다 — 선언이 낡았다: ${stale.map(r => r.id).join(', ')}`);
+  console.log('     EXPECT_BLOCKED 에서 지울 것. (옛 동작을 박제한 기대 목록은 가드가 아니라 거짓말이다.)');
+}
 console.log('[격리] 진짜 유출(바이트가 나감):', leaks.length ? leaks.map(r => r.id).join(', ') : '없음');
 console.log('[격리] 리라이트는 놓쳤고 CSP 만 막은 것:', cspOnly.length ? cspOnly.map(r => r.id).join(', ') : '없음');
 // ★`preconnect` 는 HTTP 요청을 안 만들어 도착 축이 못 잡는다. 유출의 정의가

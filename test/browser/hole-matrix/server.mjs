@@ -38,6 +38,28 @@ const CASES = [];
 const C = (id, cross, code) => CASES.push({ id, cross: !!cross, code });
 const U = (id, cross) => `${cross ? `http://127.0.0.1:${CDN}` : ''}/img/${id}__${cross ? 'cross' : 'same'}.png`;
 
+// ── 재현성 축의 '의도적 차단' 선언 ────────────────────────────────────────
+//
+// 격리 축에는 `deliberate` 라는 개념이 있고 이유(`why`)까지 픽스처가 강제하는데,
+// **재현성 축에는 그게 없었다.** 러너는 "대조군은 되는데 프록시는 안 되는 것" 을
+// 그냥 나열만 했고, 거기 7칸이 늘 앉아 있었다. 그러면 **새 재현성 회귀가 그
+// 목록에 끼어도 원래 있던 것들과 구분이 안 된다** — 조용히 묻힌다.
+//
+// 그래서 여기 선언한다. 러너는 양방향으로 문다:
+//   ① 선언에 없는데 깨졌다      → 회귀 (크게 알린다)
+//   ② 선언했는데 이제 동작한다   → 선언이 낡았다 (역시 크게 알린다)
+// ②를 같이 보는 이유: 이번 통합 작업에서 "가드가 옛 동작을 박제한" 사고를 넷
+// 봤다. 기대 목록도 똑같이 썩는다.
+const EXPECT_BLOCKED = {
+  'a23-static-object-cross': "plugin 표면. CSP `object-src 'none'` 이 로드를 금지한다 — URL 은 리라이트하되(위생) 로드는 막는 게 정책이다.",
+  'b9-object-data': "위와 같은 표면의 런타임 생성판. `object-src 'none'`.",
+  'b10-embed-src': "위와 같음 — `<embed>` 도 plugin 표면이라 `object-src 'none'` 에 걸린다.",
+  'b8-preload-link': '`link rel=preload` 등 프리로드 계열은 페이지 realm 이 rel 을 삼킨다(브라우저가 요청 자체를 못 만들게). 정적 HTML 은 htmltx 가 href 를 리라이트해 프록시로 보내므로 동작한다 — 그 비대칭은 알고 남긴 것이다.',
+  'c7-worker': '페이지가 만든 JS Blob 은 `URL.createObjectURL` 훅이 차단 스텁으로 갈아끼운다. 리라이트를 안 거친 코드를 워커에서 돌리면 멤브레인 밖이 되기 때문 — 막는 것이 목적이다.',
+  'c8-worker-cross': '위와 같음(cross-origin fetch 를 하는 blob 워커).',
+  'c11-ping-attr': '`ping` 은 브라우저가 직접 POST 하는 추적 비콘이라 값을 삼킨다. 통과시키는 것 자체가 목적에 반한다.',
+};
+
 // ── A. 정적 HTML 속성 (htmltx 가 서빙 바이트에서 고쳐야 하는 것) ──────────
 // 이 그룹은 문서 HTML 에 직접 박아 넣는다 (아래 STATIC_HTML).
 
@@ -241,7 +263,7 @@ function mk(port) {
     }
     if (u === '/cases') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      return res.end(JSON.stringify(CASES.map(c => ({ id: c.id, cross: c.cross }))));
+      return res.end(JSON.stringify(CASES.map(c => ({ id: c.id, cross: c.cross, blockedWhy: EXPECT_BLOCKED[c.id] || null }))));
     }
     if (req.socket) req.socket.__zpUsed = true;
     hits[port].push(u);

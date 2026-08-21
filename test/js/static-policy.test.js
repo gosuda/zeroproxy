@@ -3492,6 +3492,35 @@ test('meta CSP: 서버·페이지 realm 양쪽이 같은 방식으로 무력화�
   );
 });
 
+// ── 재현성 축에도 '의도적'이라는 개념을 준다 (2026-08-21) ──────────────────
+//
+// 격리 축에는 `deliberate` + `why` 가 픽스처에 강제되는데 **재현성 축에는 그게
+// 없었다.** 러너가 "대조군은 되는데 프록시는 안 되는 것" 을 그냥 나열만 했고
+// 거기 7칸이 늘 앉아 있었다 — 새 재현성 회귀가 그 옆에 끼면 **원래 있던 것들과
+// 구분이 안 돼 조용히 묻힌다.** 이번 계획에서 반복된 "0 을 못 뒤집는 계측" 과
+// 같은 모양이다(목록이 늘 같은 모양이라 아무도 안 읽는다).
+//
+// 이제 server.mjs 의 `EXPECT_BLOCKED` 가 선언이고, 러너가 **양방향**으로 문다:
+//   ① 선언에 없는데 깨졌다     → 회귀
+//   ② 선언했는데 이제 동작한다  → 선언이 낡았다
+// ②가 없으면 기대 목록이 옛 동작을 박제한다 — 이번 작업에서 넷 본 그 사고다.
+test('재현성 축: 의도적 차단은 이유와 함께 선언돼 있다', () => {
+  const srv = fs.readFileSync('test/browser/hole-matrix/server.mjs', 'utf8');
+  const start = srv.indexOf('const EXPECT_BLOCKED = {');
+  assert.ok(start >= 0, 'EXPECT_BLOCKED 선언이 사라졌다 — 재현성 축의 의도/결함 구분이 없어진다');
+  const block = srv.slice(start, srv.indexOf('\n};', start));
+  const entries = [...block.matchAll(/'([a-z0-9-]+)':\s*(['"])([\s\S]*?)\2,/g)];
+  assert.ok(entries.length >= 5, `선언 파싱 실패 또는 목록이 비었다 (${entries.length})`);
+  for (const [, id, , why] of entries) {
+    assert.ok(why.trim().length >= 20,
+      `${id}: 이유가 너무 짧다 — "왜 막는가" 를 적지 않은 선언은 다음 세션에 결함으로 읽힌다`);
+  }
+  // 러너가 양방향으로 무는지.
+  const run = fs.readFileSync('test/browser/hole-matrix/run.mjs', 'utf8');
+  assert.match(run, /선언에 없는데 깨졌다/, '회귀 방향 검사가 없다');
+  assert.match(run, /선언이 낡았다/, '선언이 낡는 방향 검사가 없다 — 기대 목록이 옛 동작을 박제한다');
+});
+
 // CSS 도 구현이 두 벌이다: Rust zp-css 와 프렐류드의 손으로 쓴 스캐너
 // (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.
 test('CSS 리라이트도 두 구현이 같은 형태를 다룬다', () => {
