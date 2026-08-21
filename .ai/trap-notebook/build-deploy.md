@@ -156,3 +156,31 @@ static-policy 108 pass — 0.16.1 에서 하네스가 그대로 돈다.
 넘겼다(CLI 종료 아님 / stderr 무관 / WebView2 자식 아님 / graceful stop 정상).
 받는 쪽이 이미 판명난 곳을 다시 파지 않았다. 다음에도 이 형식을 쓸 것 —
 증상 / 최소 재현 3종 / 결정적 증거 / 측정 / 가설(명시) / 배제 목록 / 제안.
+
+---
+
+## 2026-08-21 — "keep in sync" 는 부탁이지 강제가 아니다
+
+`crates/zp-shared/src/errors.rs` 헤더에 이렇게 적혀 있었다:
+
+> Keep this list, the JS list, and the Go list (if added) in sync.
+
+그 주석이 붙은 채로 **세 목록이 전부 갈라져 있었다** — JS 19 / Rust 18 / Go 12.
+게다가 같은 파일 안에서 테스트가 자기 배열을 따로 들고 있어 실은 네 벌이었다.
+
+**드러난 것**:
+- Rust 에 `SUBMISSION_EXPIRED` 누락 (JS/`sw.js` 는 쓰고 있었다)
+- **Go 의 자기모순**: `main.go:233` 이 내는 `RTC_GATEWAY_UNAVAILABLE` 을 같은 파일의
+  `sanitizeCode` 가 `POLICY_BLOCKED` 로 강등. SW 통제 여부에 따라 다른 페이지가 뜬다
+- **가드를 걸자마자 새 건**: `TARGET_HTTP_FAILED` 가 어느 목록에도 없어
+  `safeError` 가 접고 있었다 — 네트워크/TLS 실패가 "정책 차단" 으로 둔갑한다.
+  `sw.js` 주석이 정확히 그 위험을 경고하는데 정작 코드가 목록에 없었다
+
+**Fix**: `testdata/error_codes.json` 이 단일 소스, 세 곳이 전부 그 파일과 대조.
+Rust 는 **순서까지** 본다 — 순서가 흔들렸다는 건 어느 한쪽이 손으로 편집됐다는
+뜻이고, 그게 갈라지기 시작하는 지점이다.
+
+**교훈**: 소스에서 "keep in sync" / "must match" / "parity with …" 같은 **부탁 문구**를
+보면 그 자리에서 **픽스처로 바꿀 것.** 이 저장소에서 그 문구가 붙은 목록은
+지금까지 예외 없이 갈라져 있었다(errors, shareurl, worker UA). 반대로 픽스처가
+붙은 것(challenge, CSP)은 갈라지지 않았다.
