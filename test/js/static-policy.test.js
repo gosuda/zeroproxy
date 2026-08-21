@@ -299,7 +299,6 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
   assert.ok(sw.includes('ZP_SUBMIT_PREPARE'));
   assert.ok(sw.includes('zp_submit'));
   assert.ok(sw.includes('REQUEST_BODY_TOO_LARGE'));
-  assert.ok(fs.readFileSync('internal/shareurl/shareurl.go', 'utf8').includes('unsupported target URL'));
   assert.ok(server.includes('closeBoth'));
 });
 
@@ -3324,4 +3323,47 @@ test('CSS 리라이트도 두 구현이 같은 형태를 다룬다', () => {
     assert.ok(css.toLowerCase().includes(form), `zp-css 가 ${form} 을 안 다룬다`);
     assert.ok(rt.toLowerCase().includes(form), `프렐류드 스캐너가 ${form} 을 안 다룬다`);
   }
+});
+
+// ── 공유 URL 수용/거부 파리티 (2026-08-21) ─────────────────────────────────
+//
+// `crates/zp-shared/testdata/shareurl_cases.json` 은 원래 Rust `parse_share_url`
+// ↔ Go `internal/shareurl` 파리티용이었다. 그런데 **둘 다 아무도 안 부른다** —
+// Rust 쪽은 재export 만 돼 있고, Go 는 `/zp/p/…` 가 index.html 을 그대로 내주므로
+// 도달하지 않는다. 실제로 "이 URL 을 프록시할 수 있는가" 를 판정하는 것은
+// 브라우저의 `ZP.canonicalTargetURL` 이다.
+//
+// 즉 파리티 장치가 **죽은 쌍**을 지키고 있었다. 픽스처를 살아 있는 구현에 겨눈다.
+test('공유 URL 수용/거부: 살아 있는 JS 구현이 공유 픽스처와 일치한다', () => {
+  const cases = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/shareurl_cases.json', 'utf8'));
+  assert.ok(cases.length >= 20, `케이스가 너무 적다 (${cases.length})`);
+
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  const sandbox = {
+    location: { protocol: 'https:', host: 'proxy.example', href: 'https://proxy.example/zp/' },
+    crypto: globalThis.crypto,
+    URL, URLSearchParams, TextEncoder, TextDecoder, console, Object,
+  };
+  sandbox.globalThis = sandbox;
+  new Function('globalThis', 'location', 'crypto', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
+    core)(sandbox, sandbox.location, sandbox.crypto, URL, URLSearchParams, TextEncoder, TextDecoder);
+  assert.ok(sandbox.ZP && typeof sandbox.ZP.canonicalTargetURL === 'function', 'ZP.canonicalTargetURL 이 없다');
+
+  // 의도된 차이 하나. 픽스처는 Rust 의 엄격한 파서 기준이라 `https:/x` 를
+  // Malformed 로 거부하는데, WHATWG URL 은 special scheme 의 슬래시 하나를
+  // 허용한다. 실측: `new URL('https:/single-slash')` → `https://single-slash/`,
+  // host=`single-slash` — **명시적 호스트로 풀리고** 프록시 오리진 기준 상대
+  // 해석이 아니다. 즉 오리진 모호성이 없고, 사용자가 주소창에 같은 문자열을
+  // 넣었을 때 브라우저가 하는 것과 동일하다. 격리에 영향이 없으므로 JS 의
+  // 관대한 쪽을 유지하고 여기 이유와 함께 못 박는다.
+  const INTENDED = new Map([['https:/single-slash', true]]);
+
+  const mismatches = [];
+  for (const c of cases) {
+    let ok = true;
+    try { sandbox.ZP.canonicalTargetURL(c.input); } catch { ok = false; }
+    const want = INTENDED.has(c.input) ? INTENDED.get(c.input) : c.ok;
+    if (ok !== want) mismatches.push(`${JSON.stringify(c.input)}: 기대 ok=${want}, JS ok=${ok}`);
+  }
+  assert.deepEqual(mismatches, [], '공유 픽스처와 JS 판정이 갈렸다:\n  ' + mismatches.join('\n  '));
 });
