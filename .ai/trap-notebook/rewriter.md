@@ -4,6 +4,162 @@
 
 ---
 
+## 2026-08-21 — `?url=` 빌더가 넷이었다: 프래그먼트를 삼키면 `<use href="sprite.svg#i">` 가 빈 채로 렌더된다
+
+**계획 8번.** 빌더가 넷이고 셋의 출력이 달랐다:
+
+| | 프래그먼트 | `&tab=` | 인코딩 |
+|---|---|---|---|
+| `zp-htmltx` | 파라미터 **밖**에 보존 | 없음 | `NON_ALPHANUMERIC - -._~` |
+| `zp-css` | 파라미터 **안**으로 삼킴 | 없음 | `form_urlencoded` (공백 → `+`) |
+| 프렐류드 | 파라미터 **안**으로 삼킴 | 붙임 | `encodeURIComponent` |
+| 프렐류드(fetch 라벨) | — | 없음 | `encodeURIComponent` |
+
+**브라우저에서 직접 쟀다 — 프래그먼트가 진짜 결함이다.** 같은 스프라이트를 두 형태로
+꽂고 `getBBox().width` 를 봤다:
+
+```
+?url=…%2Fs.svg&tab=…#i     → bbox 4   (심볼 해석됨)
+?url=…%2Fs.svg%23i         → bbox 0   (빈 채로 렌더)
+```
+
+`#` 가 `%23` 이 되면 브라우저가 조각을 못 고른다. 외부 SVG 스프라이트를 참조하는
+`<use>` 와 CSS `url(sprite.svg#id)` 가 통째로 사라진다. htmltx 만 맞고 나머지가 틀렸다.
+
+인코딩 차이(`!'()*`, 공백 `+` vs `%20`)는 **관측되지 않았다** — SW 가 `URLSearchParams`
+로 읽어 둘 다 풀린다. 그래도 통일했다: 다르면 같은 리소스에 캐시 키가 둘 생기고,
+다음 소비자가 `decodeURIComponent` 를 쓰는 순간 `+` 가 공백이 안 된다.
+
+**Fix**: `crates/zp-shared/src/proxyurl.rs` 단일 빌더 → htmltx·zp-css 가 호출.
+JS 는 같은 규칙으로 다시 쓰고(`encodeURLParam` + 프래그먼트 분리),
+픽스처 `proxy_url_cases.json` 11케이스가 **바이트 단위 파리티**를 잡는다(양쪽 변이 확인).
+
+**★부수 발견 1 — `<use>` 칸이 처음부터 판정불가였다.** 구멍 매트릭스의
+`a20-static-use` / `g7-realm-use` 는 **대조군에서도** 아무 요청이 안 나갔다. 이유 둘:
+(a) 크롬은 **cross-origin 외부 `<use>` 를 아예 거부**한다, (b) 픽스처 서버가 `.svg` 를
+PNG 로 내주고 있었다. 즉 이 두 칸은 오래 `-` 로 앉아 있었고 아무것도 재지 않았다.
+same-origin + 진짜 SVG 스프라이트로 바꿔 이제 둘 다 측정된다(63칸, 판정불가 0).
+
+**★부수 발견 2 — 내비게이션 매트릭스의 대조군이 통째로 죽어 있었다.**
+23칸 **전부** 대조군 `-` 였다. 손으로 재현해 보니 같은 케이스도 정상 착지한다.
+원인은 러너의 경합이다: 앞 케이스의 프록시 단계 내비게이션이 아직 진행 중인데
+`/reset` 후 바로 대조군을 열어서, 히트 로그에 **앞 케이스의 id** 가 찍혔다.
+그러면 지금 id 를 찾는 검사는 항상 빗나가고, `stuck`(대조군은 되는데 프록시는
+안 되는 것)이 **구조적으로 빌 수밖에 없다** — 재현성 축이 통째로 무의미했다.
+`about:blank` 로 비우고 열도록 고쳤다. 지금은 23칸 중 18칸 대조군 `O`, 탈출 0,
+재현성 결함 0 — **비어서 0** 이 아니라 **재서 0** 이다.
+
+> 이번 통합 작업에서 나온 **세 번째 계측 결함**이다(구멍 매트릭스 러너의
+> LEAK 오분류 → 판정불가 버킷 → 여기). 규칙: **0 을 보면 먼저 "이 0 이 나올 수
+> 있는 경로가 있는가" 를 묻는다.** 대조군이 전부 `-` 인 표는 통과가 아니라 고장이다.
+
+**측정**: 63칸 진짜 유출 0 / csp-only 0 / 판정불가 0, nav 23칸 탈출 0 / 재현성 0,
+static-policy 123, cargo 전체, `go test ./...`, naver·wikipedia·github raw=0 csp=0 err=0.
+
+## 2026-08-21 — `resolve_against_base` 가 `..`/`.` 를 안 접었다 — 그런데 감사 보고의 심각도는 과장돼 있었다
+
+**계획 6번. "착수 전에 브라우저로 재현부터" 가 이번엔 반대 방향으로 작동했다 — 결함을 줄여 잡았다.**
+
+감사는 이걸 "가장 날카로운 차이"로 꼽았다(404 가능성, 캐시 키 깨짐). `htmltx` 의
+`resolve_against_base` 는 손으로 쓴 문자열 결합이라 dot-segment 를 정규화하지 않고,
+나머지 리졸버 넷은 `new URL()` / `url::Url::join` 이라 정규화한다 — 즉 **구현 다섯 중 하나만
+다르다** 는 것까지는 사실이었다.
+
+**재 보니 404 는 안 났다.** 대조군/프록시 양쪽으로 `/deep/nest/page` (안에
+`<img src="../../img/a24…png">`) 를 띄우고 타깃이 받은 경로를 봤더니 **둘 다 정규화된
+`/img/a24…png`** 였다. SW 의 `canonicalTargetURL` 이 나가기 전에 다시 정규화하기 때문이다.
+
+관측되는 차이는 `?url=` 파라미터 **문자열 하나**였다:
+
+```
+서버가 만든 것      : …%2Fdeep%2Fnest%2F..%2F..%2Fimg%2Fa24…png
+페이지 realm 계산값 : …%2Fimg%2Fa24…png
+```
+
+**격리 문제가 아니라 일관성 문제**다 — 같은 리소스에 키가 둘 생겨 `alreadyMapped` 단축과
+컨텍스트 키가 어긋난다. 고칠 값은 있지만 **감사가 적어 둔 심각도는 아니었다.**
+
+**Fix**: RFC 3986 §5.2.4 `normalize_dot_segments` 를 `resolve_against_base` 의 경로 생성
+두 자리에 넣었다. 쿼리/프래그먼트 꼬리는 보존한다(쿼리 안의 `../` 는 경로가 아니다).
+단위 테스트 6케이스.
+
+**★기존 테스트가 정규화 안 된 동작을 고정하고 있었다.**
+`relative_subresource_resolved_against_target` 이 `example.com%2F.%2Fb.js` 를 기대하고 있었다.
+즉 **버그를 정답으로 박제**한 가드다. 이 통합 작업에서 같은 형태를 세 번 봤다
+(여기 / `usesRaw ? proxyViaURL(t) : t` / srcset 의 `split(',')` 단언).
+
+**교훈 둘**
+1. **감사에서 유도한 심각도는 측정 전까지 가설이다.** 코드에서 "정규화를 안 한다" 는 사실이
+   맞아도, 그 아래 층이 이미 정규화하고 있으면 영향은 전혀 다른 곳에 남는다.
+   고치되 **무엇이 실제로 관측됐는지로** 기록한다.
+2. 기대값을 "현재 출력"으로 채운 테스트는 다음 사람에게 **의도로 읽힌다.**
+
+**측정**: cargo 전체, static-policy 통과, 매트릭스 무회귀, 고친 뒤 브라우저에서 `?url=` 가
+페이지 realm 값과 바이트 일치 확인.
+
+**미해결(간헐)**: 이 작업 도중 wikipedia 에서 `err=6` 이 한 번 나왔고 이후 4회 연속 깨끗했다.
+재현 안 됨. 예전부터 남아 있는 "wikipedia l10n 404, 재현 안 됨" 과 같은 것일 수 있다.
+
+## 2026-08-21 — srcset 후보 분해기가 넷이었고, 셋이 `split(',')` 이었다 + 요소 훅 두 경로에 srcset 분기가 아예 없었다
+
+**계획 7번. "착수 전에 브라우저로 재현부터" 가 예측보다 큰 것을 꺼냈다.**
+
+계획은 "`data:` 후보가 쉼표 분할에 깨진다" 하나만 예상했다. 실제로 재 보니 **넷**이었다.
+프록시된 페이지에서 세 경로로 srcset 을 넣고, 멤브레인이 없는 **isolated world** 에서
+진짜 속성값을 읽었다(main world 의 `getAttribute` 는 가상값을 돌려주므로 여기서는 못 잰다).
+
+| 경로 | 입력 `/img/one.png 1x, /img/two.png 2x` | 판정 |
+|---|---|---|
+| `setAttribute('srcset', …)` | `?url=…%2Fone.png%25201x%2C%2520%2Ftwo.png%25202x` | 목록 전체를 URL **하나**로 삼킴 → 후보 둘 다 사망 |
+| `img.srcset = …` | `/img/one.png 1x, /img/two.png 2x` (그대로) | 리라이트 **통째로 건너뜀** → 원본 URL 이 DOM 에 남음(csp-only) |
+| `innerHTML` / 스윕 | 후보마다 프록시 경로 | 유일하게 맞았음 |
+
+거기에 `data:` 후보를 섞으면 마지막 하나까지 깨졌다:
+
+```
+입력 : data:image/svg+xml;utf8,<svg …></svg> 1x, /img/real.png 2x
+결과 : data:image/svg+xml;utf8,http://…/zp/api/fetch?url=…%253Csvg xmlns=… 1x, …
+```
+
+`split(',')` 이 데이터 URL 을 반토막 내고, 뒷조각 `<svg` 가 **상대 URL 로 오인**돼
+프록시 경로로 치환된 것이다.
+
+**왜 이렇게 됐나 — 주석이 틀린 전제를 들고 있었다.** 세 사본 위에 이렇게 적혀 있었다:
+
+> 프록시 URL 은 타깃을 퍼센트 인코딩해 담으므로 쉼표가 들어가지 않아 `split(',')` 이 안전하다.
+
+전제가 반쪽이다. **아직 리라이트 안 된** 입력에는 쉼표가 있다. 셋 다 같은 주석을
+달고 같은 방식으로 틀렸다 — 사본이 늘 때 근거까지 같이 복사된 것이다.
+
+**Fix**
+- `split_srcset_candidates`(Rust, 기존 스캐너를 함수로 추출) / `splitSrcsetCandidates`(JS, 신규) 한 벌씩.
+  `lead + url + tail` 을 이어 붙이면 입력이 **바이트 단위로 복원**된다 — 그래야 디스크립터를 안 건드린다.
+- JS 사본 3벌(`enforceSrcsetAttribute` / `upgradeSWLessSrcset` / `applySWLessRelay`)이 전부 이걸 쓴다.
+- `setAttribute` 훅에 srcset 분기 추가(스윕에만 있었다), `installSrcsetProp` 으로
+  `img.srcset` / `source.srcset` / `link.imageSrcset` 프로퍼티 훅 추가.
+- 게터용 저장소는 **(요소, 속성) 단위**로 따로 뒀다. `urlMeta` 는 요소당 값 하나라
+  `src` 와 `srcset` 을 동시에 가진 img 에서 서로를 덮는다.
+- 픽스처 `crates/zp-shared/testdata/srcset_cases.json` 13케이스 — Rust 테스트와
+  `static-policy.test.js` 가 **같은 파일**을 읽는다. 양쪽 변이 확인(`is_data=false` → 양쪽 다 실패).
+- 구멍 매트릭스 g9~g12 (setattr / prop / imageSrcset prop / data 이웃) 추가. 63칸.
+
+**★가드가 버그를 얼려 두고 있었다 (오늘 두 번째, 이 통합 작업 전체로는 세 번째).**
+`static-policy.test.js` 가 이렇게 단언하고 있었다:
+
+```js
+assert.ok(body.indexOf("String(raw).split(',')") >= 0, 'srcset 은 후보 단위로 쪼개야 한다');
+```
+
+**틀린 구현을 있어야 한다고 단언**하고 있었다. 메시지("후보 단위로 쪼개야 한다")는 옳은데
+검사식이 그 의도를 재지 않고 **당시 소스 문자열**을 박제했다. 같은 파일에 한 줄 더 있었다
+(`indexOf(ZP.apiPath('fetch')) >= 0) return part`). 둘 다 의도 수준으로 고쳤다.
+
+교훈은 6번(`relative_subresource_resolved_against_target` 이 정규화 안 된 출력을 고정)과 같다:
+**소스 문자열을 그대로 단언하는 가드는 검증이 아니라 박제다.** 무엇을 재는지 한 번 더 묻는다.
+
+**측정**: 63칸 진짜 유출 0 / csp-only 0 / 의도적 7, nav 23칸 무회귀, static 122,
+cargo 전체, `go test ./...`, naver·wikipedia·github raw=0 csp=0 err=0.
+
 ## 2026-07-30 — shorthand 객체 프로퍼티가 keyless 로 붕괴 → 파일 전체 SyntaxError
 
 **Symptoms**:

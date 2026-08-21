@@ -46,23 +46,20 @@ fn proxied_css_url(
     if abs.scheme() != "http" && abs.scheme() != "https" {
         return None;
     }
-    // Absolute (proxy-origin) URL, not root-relative. A bare
-    // `/zp/api/fetch?url=…` resolves against whatever base the consuming
-    // context has — and the membrane virtualises the document base to the
-    // TARGET origin. Inside a proxied iframe that turned NAVER's font and
-    // sprite requests into `https://spastatic.naver.com/zp/api/fetch?url=…`
-    // (404: the target host has no such path), so webfonts and shopping
-    // sprites silently vanished. The HTML rewriter already takes
-    // `proxy_origin` for exactly this reason; CSS needs the same. Empty
-    // `proxy_origin` keeps the legacy root-relative form (tests / callers
-    // that render into a non-virtualised base).
-    let mut out = String::new();
-    out.push_str(proxy_origin.trim_end_matches('/'));
-    out.push_str(control_prefix);
-    if !out.ends_with('/') { out.push('/'); }
-    out.push_str("api/fetch?url=");
-    out.extend(url::form_urlencoded::byte_serialize(abs.as_str().as_bytes()));
-    Some(out)
+    // 프록시 오리진 절대 URL 을 낸다. 맨 `/zp/api/fetch?url=…` 는 소비 컨텍스트의
+    // base 로 풀리는데 멤브레인이 문서 base 를 **타깃 오리진**으로 가상화하므로,
+    // 프록시된 iframe 안에서 NAVER 의 웹폰트/스프라이트가
+    // `https://spastatic.naver.com/zp/api/fetch?url=…`(404) 이 돼 조용히 사라졌다.
+    //
+    // 빌더 자체는 zp-shared 단일 소스다. 예전에는 여기서 `form_urlencoded` 로
+    // 직접 만들었고, 그래서 (a) 공백이 `+` 가 되고 (b) **프래그먼트를 파라미터
+    // 안으로 삼켰다** — `url(sprite.svg#icon)` 이 조각을 잃는다.
+    Some(zp_shared::subresource_proxy_url(
+        abs.as_str(),
+        proxy_origin,
+        control_prefix,
+        None,
+    ))
 }
 
 fn css_escape_string(s: &str, quote: u8) -> String {

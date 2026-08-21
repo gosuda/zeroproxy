@@ -7,6 +7,7 @@
 pub mod challenge;
 pub mod csp;
 pub mod errors;
+pub mod proxyurl;
 pub mod shareurl;
 pub mod version;
 
@@ -15,5 +16,6 @@ pub use challenge::{
 };
 pub use csp::{build_csp, build_csp_with, build_proxied_csp, build_proxied_csp_with, CspOptions};
 pub use errors::ErrorCode;
+pub use proxyurl::{split_fragment, subresource_proxy_url, URL_PARAM_ENCODE};
 pub use shareurl::{parse_share_url, ShareUrl, ShareUrlError};
 pub use version::TRANSFORMER_VERSION;

@@ -998,11 +998,8 @@ fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
 ///
 /// Leaving unreserved bytes raw is parse-neutral — none of `-._~` can
 /// terminate a query value or introduce a parameter, so no escape hatch opens.
-const URL_PARAM_ENCODE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
+// 인코딩 집합도 zp-shared 단일 소스. `?via=` 빌더가 아직 여기 있어서 필요하다.
+use zp_shared::URL_PARAM_ENCODE;
 
 /// Convert a subresource URL to the SW-routable `/zp/api/fetch?url=<encoded>`
 /// form. Relative URLs are first resolved against `target_url` so the browser
@@ -1025,44 +1022,18 @@ fn proxied_srcset(
     control_prefix: &str,
     target_url: &str,
 ) -> Option<String> {
-    let bytes = raw.as_bytes();
     let mut out = String::with_capacity(raw.len() + 64);
-    let mut i = 0usize;
     let mut changed = false;
-    while i < bytes.len() {
-        // Leading whitespace and stray commas between candidates.
-        let start = i;
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
-            i += 1;
-        }
-        out.push_str(&raw[start..i]);
-        if i >= bytes.len() {
-            break;
-        }
-        // URL: everything up to the next whitespace or comma. `data:` URLs may
-        // carry commas, so for those only whitespace terminates.
-        let url_start = i;
-        let is_data = raw[i..].len() >= 5 && raw[i..i + 5].eq_ignore_ascii_case("data:");
-        while i < bytes.len()
-            && !bytes[i].is_ascii_whitespace()
-            && (is_data || bytes[i] != b',')
-        {
-            i += 1;
-        }
-        let url = &raw[url_start..i];
-        match proxied_subresource_url(url, proxy_origin, control_prefix, target_url) {
+    for c in split_srcset_candidates(raw) {
+        out.push_str(c.lead);
+        match proxied_subresource_url(c.url, proxy_origin, control_prefix, target_url) {
             Some(next) => {
                 out.push_str(&next);
                 changed = true;
             }
-            None => out.push_str(url),
+            None => out.push_str(c.url),
         }
-        // Descriptor (and anything else) up to the next comma.
-        let desc_start = i;
-        while i < bytes.len() && bytes[i] != b',' {
-            i += 1;
-        }
-        out.push_str(&raw[desc_start..i]);
+        out.push_str(c.tail);
     }
     if changed {
         Some(out)
@@ -1071,13 +1042,61 @@ fn proxied_srcset(
     }
 }
 
+/// One `srcset` candidate, split so the URL can be replaced without disturbing
+/// a single byte of the surrounding text. `lead` is the separator run before
+/// the URL (whitespace and stray commas), `tail` is the descriptor (`1x` /
+/// `320w`) up to the next candidate. Concatenating `lead + url + tail` over
+/// every candidate reproduces the input exactly — the parity fixture asserts it.
+pub(crate) struct SrcsetCandidate<'a> {
+    pub lead: &'a str,
+    pub url: &'a str,
+    pub tail: &'a str,
+}
+
+/// 쉼표로 자르면 안 된다. `data:` URL 은 본문에 쉼표를 담는다
+/// (`data:image/svg+xml;utf8,<svg …>`, `;base64,`). 그래서 `data:` 후보는
+/// 공백만이 URL 을 끝낸다 — 이 조건이 없으면 데이터 URL 이 두 조각으로 갈리고
+/// 뒷조각(`<svg …`)이 상대 URL 로 오인돼 프록시 경로로 치환된다. 페이지 realm
+/// 의 JS 사본 셋이 정확히 그렇게 깨져 있었다(2026-08-21 실측).
+pub(crate) fn split_srcset_candidates(raw: &str) -> Vec<SrcsetCandidate<'_>> {
+    let bytes = raw.as_bytes();
+    let mut list = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let lead_start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        let lead = &raw[lead_start..i];
+        if i >= bytes.len() {
+            // Trailing separator run: emit it as an empty-URL candidate so the
+            // round trip stays byte-exact.
+            if !lead.is_empty() {
+                list.push(SrcsetCandidate { lead, url: "", tail: "" });
+            }
+            break;
+        }
+        let url_start = i;
+        let is_data = raw[i..].len() >= 5 && raw[i..i + 5].eq_ignore_ascii_case("data:");
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && (is_data || bytes[i] != b',') {
+            i += 1;
+        }
+        let url = &raw[url_start..i];
+        let desc_start = i;
+        while i < bytes.len() && bytes[i] != b',' {
+            i += 1;
+        }
+        list.push(SrcsetCandidate { lead, url, tail: &raw[desc_start..i] });
+    }
+    list
+}
+
 fn proxied_subresource_url(
     raw: &str,
     proxy_origin: &str,
     control_prefix: &str,
     target_url: &str,
 ) -> Option<String> {
-    use percent_encoding::utf8_percent_encode;
     let s = raw.trim();
     if s.is_empty() || s.starts_with('#') {
         return None;
@@ -1099,43 +1118,17 @@ fn proxied_subresource_url(
     } else {
         return None;
     };
-    // SVG 스프라이트(`sprite.svg#icon`)와 `<use href>` 는 조각 식별자가 **의미**다.
-    // 통째로 퍼센트 인코딩하면 `#` 가 쿼리 안으로 들어가 브라우저가 조각을 못 고른다
-    // (외부 참조 `<use>` 가 통째로 빈 채로 렌더된다). 프래그먼트는 프록시 URL
-    // **바깥**에 그대로 붙인다 — 프래그먼트는 요청에 실리지 않으므로 SW 가 받는
-    // URL 은 그대로고, 조각 선택만 로컬에서 정상 동작한다.
-    let (absolute, fragment) = match absolute.find('#') {
-        Some(i) => (absolute[..i].to_string(), Some(absolute[i..].to_string())),
-        None => (absolute, None),
-    };
-    if absolute.is_empty() {
+    // 프래그먼트/인코딩/`&tab=` 규칙은 zp-shared 가 단일 소스다 —
+    // 예전에는 htmltx·zp-css·프렐류드가 각자 만들었고 셋의 출력이 달랐다.
+    if zp_shared::split_fragment(&absolute).0.is_empty() {
         return None;
     }
-    // Emit a proxy-origin-absolute URL so the page's virtual baseURI override
-    // does NOT shift the resolution to the target host. Falls back to a
-    // root-relative path only if proxy_origin was not supplied.
-    //
-    // Reserve generously (~3× absolute) — percent-encoding `NON_ALPHANUMERIC`
-    // expands every non-alphanumeric byte to `%XX`. Worst-case 3x for ASCII.
-    let mut out =
-        String::with_capacity(proxy_origin.len() + control_prefix.len() + absolute.len() * 3 + 32);
-    out.push_str(proxy_origin.trim_end_matches('/'));
-    out.push_str(control_prefix);
-    if !out.ends_with('/') {
-        out.push('/');
-    }
-    out.push_str("api/fetch?url=");
-    // Stream percent-encoded chunks directly into `out` instead of
-    // collecting into an intermediate String via `.to_string()`. Saves one
-    // allocation per subresource URL — the dominant hot path on
-    // resource-heavy pages.
-    for chunk in utf8_percent_encode(&absolute, URL_PARAM_ENCODE) {
-        out.push_str(chunk);
-    }
-    if let Some(f) = fragment {
-        out.push_str(&f);
-    }
-    Some(out)
+    Some(zp_shared::subresource_proxy_url(
+        &absolute,
+        proxy_origin,
+        control_prefix,
+        None,
+    ))
 }
 
 /// Return the absolute http(s) form of a subresource URL, resolving relative
@@ -2386,6 +2379,7 @@ mod naver_stream_perf {
 mod surface_fixture {
     use super::tests::opts;
     use super::transform;
+    use super::{proxied_srcset, split_srcset_candidates};
 
     const TARGET: &str = "http://t.example/probe.bin";
 
@@ -2401,6 +2395,54 @@ mod surface_fixture {
         } else {
             format!("<{tag} {attr}=\"{value}\"></{tag}>")
         }
+    }
+
+    /// 픽스처는 페이지 realm 의 JS 구현과 **공유**한다
+    /// (`test/js/static-policy.test.js` 가 같은 파일을 읽는다). 여기서만 통과하는
+    /// 것은 의미가 없다 — 이틀 동안 사고 넷이 전부 "서버에는 있는데 페이지
+    /// realm 에는 없는" 형태였다.
+    #[test]
+    fn srcset_candidates_match_shared_fixture() {
+        let raw = include_str!("../../zp-shared/testdata/srcset_cases.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).expect("parse srcset_cases.json");
+        let cases = doc["cases"].as_array().expect("cases 배열");
+        assert!(cases.len() >= 10, "픽스처가 비어 가면 파리티가 무의미해진다");
+        for case in cases {
+            let id = case["id"].as_str().unwrap_or("?");
+            let input = case["input"].as_str().expect("input");
+            let want = case["candidates"].as_array().expect("candidates");
+            let got = split_srcset_candidates(input);
+            assert_eq!(got.len(), want.len(), "{id}: 후보 개수");
+            for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+                let w = w.as_array().expect("[lead, url, tail]");
+                assert_eq!(g.lead, w[0].as_str().unwrap(), "{id}[{i}] lead");
+                assert_eq!(g.url, w[1].as_str().unwrap(), "{id}[{i}] url");
+                assert_eq!(g.tail, w[2].as_str().unwrap(), "{id}[{i}] tail");
+            }
+            // 분해가 무손실이어야 URL 만 갈아끼울 수 있다.
+            let round: String = got
+                .iter()
+                .map(|c| format!("{}{}{}", c.lead, c.url, c.tail))
+                .collect();
+            assert_eq!(round, input, "{id}: 왕복이 입력과 달라졌다");
+        }
+    }
+
+    /// data: 후보가 섞인 목록에서 **다른** 후보가 그대로 살아 나가면 안 된다.
+    /// 쉼표 분할 구현은 여기서 정확히 실패한다.
+    #[test]
+    fn data_candidate_does_not_swallow_its_neighbour() {
+        let raw = "data:image/svg+xml;utf8,<svg/> 1x, /b.png 2x";
+        let out = proxied_srcset(raw, "http://proxy.example", "/zp/", "https://t.example/x/")
+            .expect("이웃 후보가 있으니 반드시 바뀐다");
+        assert!(
+            out.starts_with("data:image/svg+xml;utf8,<svg/> 1x,"),
+            "data: 후보는 한 글자도 건드리면 안 된다: {out}"
+        );
+        assert!(
+            out.contains("/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fb.png"),
+            "이웃 후보는 프록시 경로가 돼야 한다: {out}"
+        );
     }
 
     #[test]

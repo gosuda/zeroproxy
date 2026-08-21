@@ -1,0 +1,95 @@
+{
+  "__doc": [
+    "srcset 후보 분해 파리티 픽스처. Rust split_srcset_candidates (zp-htmltx) 와",
+    "페이지 realm 의 splitSrcsetCandidates (runtime-prelude) 가 같은 입력에 같은",
+    "분해를 내는지 잰다.",
+    "",
+    "왜 이게 픽스처여야 하나: srcset 은 'URL 하나'가 아니라 후보 목록이고, 이걸",
+    "쉼표로 자르는 구현이 JS 에 셋 있었다. data: URL 은 본문에 쉼표를 담으므로",
+    "(`;base64,`, `utf8,<svg …>`) 쉼표 분할은 데이터 URL 을 반토막 낸다. 실측:",
+    "뒷조각 `<svg`가 상대 URL 로 오인돼 프록시 경로로 치환됐다(2026-08-21).",
+    "",
+    "candidates 는 [lead, url, tail]. lead 는 URL 앞의 구분자 런(공백/여분 쉼표),",
+    "tail 은 디스크립터(`1x`/`320w`)를 다음 쉼표 직전까지. 이어 붙이면 입력이",
+    "바이트 단위로 복원돼야 한다 — 양쪽 테스트가 그 왕복도 함께 단언한다."
+  ],
+  "cases": [
+    {
+      "id": "plain-2",
+      "input": "/img/one.png 1x, /img/two.png 2x",
+      "candidates": [["", "/img/one.png", " 1x"], [", ", "/img/two.png", " 2x"]]
+    },
+    {
+      "id": "single-no-descriptor",
+      "input": "a.png",
+      "candidates": [["", "a.png", ""]]
+    },
+    {
+      "id": "width-descriptors",
+      "input": "s.png 320w,m.png 640w,l.png 1280w",
+      "candidates": [["", "s.png", " 320w"], [",", "m.png", " 640w"], [",", "l.png", " 1280w"]]
+    },
+    {
+      "id": "data-svg-with-commas",
+      "input": "data:image/svg+xml;utf8,<svg width=\"2\"></svg> 1x, /img/real.png 2x",
+      "candidates": [
+        ["", "data:image/svg+xml;utf8,<svg", " width=\"2\"></svg> 1x"],
+        [", ", "/img/real.png", " 2x"]
+      ]
+    },
+    {
+      "id": "data-base64",
+      "input": "data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x, b.png 2x",
+      "candidates": [
+        ["", "data:image/gif;base64,R0lGODlhAQABAAAAACw=", " 1x"],
+        [", ", "b.png", " 2x"]
+      ]
+    },
+    {
+      "id": "data-only",
+      "input": "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+      "candidates": [["", "data:image/gif;base64,R0lGODlhAQABAAAAACw=", ""]]
+    },
+    {
+      "id": "data-uppercase-scheme",
+      "input": "DATA:image/gif;base64,AAA= 1x, b.png 2x",
+      "candidates": [
+        ["", "DATA:image/gif;base64,AAA=", " 1x"],
+        [", ", "b.png", " 2x"]
+      ]
+    },
+    {
+      "id": "leading-and-stray-commas",
+      "input": "  ,, a.png 1x ,, b.png 2x",
+      "candidates": [["  ,, ", "a.png", " 1x "], [",, ", "b.png", " 2x"]]
+    },
+    {
+      "id": "newline-separated",
+      "input": "a.png 1x,\n  b.png 2x",
+      "candidates": [["", "a.png", " 1x"], [",\n  ", "b.png", " 2x"]]
+    },
+    {
+      "id": "trailing-comma",
+      "input": "a.png 1x,",
+      "candidates": [["", "a.png", " 1x"], [",", "", ""]]
+    },
+    {
+      "id": "empty",
+      "input": "",
+      "candidates": []
+    },
+    {
+      "id": "whitespace-only",
+      "input": "   ",
+      "candidates": [["   ", "", ""]]
+    },
+    {
+      "id": "absolute-cross-origin",
+      "input": "https://cdn.example/a.png 1x, //cdn.example/b.png 2x",
+      "candidates": [
+        ["", "https://cdn.example/a.png", " 1x"],
+        [", ", "//cdn.example/b.png", " 2x"]
+      ]
+    }
+  ]
+}

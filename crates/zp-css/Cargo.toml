@@ -17,3 +17,4 @@ swc_css_ast = { version = "23.0.0", default-features = false }
 swc_css_parser = { version = "23.0.0", default-features = false }
 swc_css_visit = { version = "23.0.0", default-features = false }
 url = { version = "2.5", default-features = false }
+zp-shared = { workspace = true }

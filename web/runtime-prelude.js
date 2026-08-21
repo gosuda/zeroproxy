@@ -174,6 +174,10 @@
   const documentCookieRecords = [];
   initDocumentCookieRecords(documentCookie);
   const urlMeta = new WeakMap();
+  // 페이지가 되읽는 값은 자기가 쓴 원본이어야 한다. `urlMeta` 는 요소당 값
+  // 하나라서 못 쓴다 — img 는 `src` 와 `srcset` 을 동시에 갖는 게 정상이고,
+  // 그러면 둘이 서로를 덮는다. 그래서 (요소, 속성) 단위로 따로 기억한다.
+  const srcsetMeta = new WeakMap();
   const messageListenerWrappers = new WeakMap();
   const frameWindowOrigins = new WeakMap();
   // Sandbox-virt backing store. Target sites that test for `iframe.sandbox`
@@ -1811,7 +1815,10 @@
     // `./gfp-display-sdk.js` against that bare path — producing a 404 on
     // `<proxy>/zp/api/gfp-display-sdk.js`. Routing is unaffected: the SW
     // matches on `url.pathname` only.
-    const apiURL = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURIComponent(target);
+    // 인코더는 subresourceProxyPath 와 공유한다. 프래그먼트/`&tab=` 은 여기에
+    // 없는 게 맞다 — 이 URL 은 **라벨**이고(SW 는 pathname 으로만 라우팅하고
+    // 타깃은 JSON 바디에서 읽는다) fetch 는 프래그먼트를 어차피 버린다.
+    const apiURL = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURLParam(target);
     return Native.fetch(apiURL, apiInit).then(r => { try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {} return r; }, e => { try { zpTrace('fetch:err', target.slice(0,80) + ' ' + String(e).slice(0,60)); } catch {} throw e; });
   }
   function fireEvent(target, type) {
@@ -2928,6 +2935,31 @@
     installURLProp(w.HTMLTrackElement && w.HTMLTrackElement.prototype, 'src');
     installURLProp(w.HTMLMediaElement && w.HTMLMediaElement.prototype, 'src');
     installURLProp(w.HTMLVideoElement && w.HTMLVideoElement.prototype, 'poster');
+    // ★`img.srcset = …` / `link.imageSrcset = …` 프로퍼티 쓰기.
+    //
+    // 위 installURLProp 계열과 같은 구멍인데 srcset 만 빠져 있었다 — 프로퍼티
+    // 대입은 setAttribute 훅을 안 타므로 리라이트가 통째로 건너뛰어지고,
+    // **원본 타깃 URL 이 그대로 DOM 에 남는다**(2026-08-21 실측: 상대 후보는
+    // 프록시 오리진으로 잘못 풀리고, 절대 후보는 원본 그대로 남아 CSP 만이
+    // 방어였다). 반응형 이미지를 JS 로 붙이는 사이트에서는 이쪽이 주경로다.
+    //
+    // 세터는 훅된 setAttribute 에 위임한다 — 거기 srcset 분기가 후보 단위
+    // 리라이트와 SW-less 업그레이드를 이미 한다. 게터는 페이지가 쓴 원본을
+    // 돌려준다(없으면 실제 속성).
+    function installSrcsetProp(proto, prop, attrName) {
+      if (!proto || propertyLocked(proto, prop)) return;
+      defineAccessor(proto, prop,
+        function () {
+          const recalled = recalledSrcset(this, attrName);
+          if (recalled !== undefined) return recalled;
+          const raw = Native.getAttribute.call(this, attrName);
+          return raw == null ? '' : raw;
+        },
+        function (v) { this.setAttribute(attrName, v == null ? '' : String(v)); });
+    }
+    installSrcsetProp(w.HTMLImageElement && w.HTMLImageElement.prototype, 'srcset', 'srcset');
+    installSrcsetProp(w.HTMLSourceElement && w.HTMLSourceElement.prototype, 'srcset', 'srcset');
+    installSrcsetProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype, 'imageSrcset', 'imagesrcset');
     // 2026-08-14 — object/embed. 서버측 htmltx 목록에는 ("object","data") /
     // ("embed","src") 가 있는데 페이지 realm 에만 없었다(정적 HTML 은 통과,
     // 런타임 대입만 샜다 — 오늘 세 번째 서버/런타임 비대칭).
@@ -3050,13 +3082,30 @@
   //       그 URL 이 통째로 거절된다 (UNCLASSIFIED).
   // `tab` 을 URL 에 실어 두면 (b) 는 귀속 자체가 필요 없어진다 —
   // `/zp/api/fetch` 는 이미 명시 `?tab=` 을 받는다.
+  // ★`?url=` 파라미터 인코딩은 Rust `URL_PARAM_ENCODE` 와 **바이트 단위로**
+  // 같아야 한다. `encodeURIComponent` 는 `!'()*` 를 남기는데 Rust 쪽은
+  // (RFC 3986 unreserved 만 남기므로) 인코딩한다. SW 는 `URLSearchParams` 로
+  // 읽어서 둘 다 풀리지만, 출력이 다르면 **같은 리소스에 캐시 키가 둘** 생기고
+  // `alreadyMapped` 단축이 어긋난다. 그래서 남는 다섯 글자를 마저 인코딩한다.
+  function encodeURLParam(s) {
+    return encodeURIComponent(String(s)).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  }
   function subresourceProxyPath(absolute) {
     const s = String(absolute || '');
     if (!s || s[0] === '#') return s;
     if (!/^https?:/i.test(s)) return s;
-    let out = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURIComponent(s);
-    if (boot && boot.tabId) out += '&tab=' + encodeURIComponent(boot.tabId);
-    return out;
+    // ★프래그먼트는 파라미터 **밖**에 둔다. 안으로 넣으면 `#` 가 `%23` 이 돼
+    // 브라우저가 조각을 못 고르고, 외부 SVG 스프라이트를 참조하는 `<use>` 와
+    // CSS `url(sprite.svg#icon)` 이 빈 채로 렌더된다. 서버측 htmltx 는 이미
+    // 이렇게 하고 있었는데 페이지 realm 만 삼키고 있었다 — 같은 규칙의
+    // 구현이 갈라진 자리다. 프래그먼트는 요청에 실리지 않으므로 SW 가 받는
+    // URL 은 그대로다.
+    const hash = s.indexOf('#');
+    const head = hash < 0 ? s : s.slice(0, hash);
+    const frag = hash < 0 ? '' : s.slice(hash);
+    let out = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURLParam(head);
+    if (boot && boot.tabId) out += '&tab=' + encodeURLParam(boot.tabId);
+    return out + frag;
   }
   // ★SW-less 문서용 서브리소스 경로.
   //
@@ -3223,14 +3272,16 @@
   // srcset 은 URL 하나가 아니라 `url 1x, url 2x` 후보 목록이다. 후보마다
   // 따로 blob 을 받아 URL 부분만 갈아끼운다 — 디스크립터(`1x`/`320w`)는
   // 그대로 둬야 브라우저의 후보 선택이 원본과 같다. 프록시 URL 은 타깃을
-  // 퍼센트 인코딩해 담으므로 쉼표가 들어가지 않아 split(',') 이 안전하다.
+  // (예전 주석은 "프록시 URL 에는 쉼표가 없으니 split(',') 이 안전하다" 고
+  //  적혀 있었다. 전제가 틀렸다 — 쉼표는 **아직 리라이트 안 된** data: 후보에
+  //  들어 있다. splitSrcsetCandidates 를 쓴다.)
   function upgradeSWLessSrcset(el, key, raw) {
-    const jobs = String(raw).split(',').map(part => {
-      const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
-      if (!m || m[2].indexOf(ZP.apiPath('fetch')) < 0) return Promise.resolve(part);
-      return swLessBlobURL(m[2], '').then(u => (u ? m[1] + u + m[3] : part));
+    const parts = splitSrcsetCandidates(raw);
+    const jobs = parts.map(c => {
+      if (!c.url || c.url.indexOf(ZP.apiPath('fetch')) < 0) return Promise.resolve(c.lead + c.url + c.tail);
+      return swLessBlobURL(c.url, '').then(u => c.lead + (u || c.url) + c.tail);
     });
-    Promise.all(jobs).then(list => { try { Native.setAttribute.call(el, key, list.join(',')); } catch {} });
+    Promise.all(jobs).then(list => { try { Native.setAttribute.call(el, key, list.join('')); } catch {} });
   }
   // `document.write` 로 만들어진 프레임 안의 서브리소스는 요소 훅도 서브트리
   // 스윕도 안 탄다 — 그 문서에 우리 MutationObserver 가 없고, adm 은 HTML
@@ -4318,6 +4369,17 @@
       // 경로만 덮으므로 여기서 따로 잡는다.
       if (localKey === 'style' && v != null) return Native.setAttribute.call(this, k, rewriteCSSText(v));
       if (isURLBearing(this, key, localKey, ln)) {
+        // ★srcset 은 URL 하나가 아니다 — 여기 분기가 **없어서** 아래 단일 URL
+        // 경로가 후보 목록 전체를 한 덩어리 URL 로 삼켰다. 2026-08-21 실측:
+        //   img.setAttribute('srcset', '/a.png 1x, /b.png 2x')
+        //   → ?url=…%2Fa.png%25201x%2C%2520%2Fb.png%25202x  (후보 둘 다 사망)
+        // 서브트리 스윕에는 이 분기가 있었는데 요소 훅에는 없었다 — 또 같은
+        // "한쪽 경로에만 넣은" 사고다.
+        if (localKey === 'srcset' || localKey === 'imagesrcset') {
+          Native.setAttribute.call(this, k, v == null ? '' : String(v));
+          enforceSrcsetAttribute(this, k, String(v == null ? '' : v));
+          return;
+        }
         // 2026-08-13 — fragment-only URL (`#`, `#tab`) 은 same-document 앵커다.
         // 절대 URL 로 풀어 "?via=" launcher 로 바꾸면 두 가지가 깨진다:
         // (a) 문서 내 이동이 전체 내비게이션처럼 보이고,
@@ -4410,6 +4472,10 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      if (localKey === 'srcset' || localKey === 'imagesrcset') {
+        const recalled = recalledSrcset(this, key);
+        return recalled !== undefined ? recalled : Native.getAttribute.call(this, k);
+      }
       if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
       return Native.getAttribute.call(this, k);
     });
@@ -5011,18 +5077,81 @@
   // proxied_srcset 이 있는데 페이지 realm 워커에는 없어서, innerHTML /
   // document.write 로 들어온 srcset 은 **원본 타깃 URL 이 그대로 남았다**
   // (구멍 매트릭스 e5-adframe-srcset 이 csp-only 로 잡아냈다).
-  // 프록시 URL 은 타깃을 퍼센트 인코딩해 담으므로 쉼표가 없어 split 이 안전하다.
-  function enforceSrcsetAttribute(el, key, raw) {
+  // (예전 주석은 "프록시 URL 에는 쉼표가 없으니 split(',') 이 안전하다" 고
+  //  적혀 있었다. 전제가 틀렸다 — 쉼표는 **아직 리라이트 안 된** data: 후보에
+  //  들어 있다. splitSrcsetCandidates 를 쓴다.)
+  // ★srcset 후보를 `split(',')` 로 자르면 안 된다.
+  //
+  // `data:` URL 은 본문에 쉼표를 담는다 — `data:image/svg+xml;utf8,<svg …>`,
+  // `;base64,`. 쉼표로 자르면 데이터 URL 이 반토막 나고, 뒷조각(`<svg`)이
+  // **상대 URL 로 오인돼** 프록시 경로로 치환된다. 2026-08-21 실측:
+  //   입력 : data:image/svg+xml;utf8,<svg …></svg> 1x, /img/real.png 2x
+  //   결과 : data:image/svg+xml;utf8,http://…/zp/api/fetch?url=…%253Csvg xmlns=…
+  // 이 스캐너가 그 셋(enforceSrcsetAttribute / upgradeSWLessSrcset /
+  // applySWLessRelay)의 유일한 분해기다. srcset URL 에는 공백이 못 들어가므로
+  // "공백까지 읽는다" 가 URL 을 취하는 올바른 방법이고, 쉼표는 URL **뒤에서만**
+  // 구분자로 동작한다. Rust `split_srcset_candidates` 와 같은 알고리즘이고
+  // `crates/zp-shared/testdata/srcset_cases.json` 이 둘의 파리티를 잡는다.
+  //
+  // 반환: [{lead, url, tail}]. lead+url+tail 을 이어 붙이면 입력이 바이트
+  // 단위로 복원된다 — 그래야 디스크립터(`1x`/`320w`)를 한 글자도 안 건드리고
+  // URL 만 갈아끼울 수 있다.
+  function splitSrcsetCandidates(raw) {
+    const s = String(raw == null ? '' : raw);
+    const list = [];
+    let i = 0;
+    const isSep = c => c === ',' || c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+    const isWS = c => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+    while (i < s.length) {
+      const leadStart = i;
+      while (i < s.length && isSep(s[i])) i++;
+      const lead = s.slice(leadStart, i);
+      if (i >= s.length) {
+        // 끝의 구분자 런도 후보로 남겨야 왕복이 바이트 단위로 맞는다.
+        if (lead) list.push({ lead, url: '', tail: '' });
+        break;
+      }
+      const urlStart = i;
+      const isData = s.slice(i, i + 5).toLowerCase() === 'data:';
+      while (i < s.length && !isWS(s[i]) && (isData || s[i] !== ',')) i++;
+      const url = s.slice(urlStart, i);
+      const descStart = i;
+      while (i < s.length && s[i] !== ',') i++;
+      list.push({ lead, url, tail: s.slice(descStart, i) });
+    }
+    return list;
+  }
+  // 후보마다 URL 만 바꿔 다시 조립한다. `map` 이 원래 문자열을 그대로 돌려주면
+  // 그 후보는 손대지 않은 것이다.
+  function mapSrcsetCandidates(raw, fn) {
     let changed = false;
-    const out = String(raw).split(',').map(part => {
-      const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
-      if (!m || m[2].indexOf(ZP.apiPath('fetch')) >= 0) return part;
-      const t = targetURLForElement(el, m[2]);
-      if (!t) return part;
-      changed = true;
-      return m[1] + subresourceProxyPath(t) + m[3];
-    }).join(',');
-    if (!changed) return;
+    const out = splitSrcsetCandidates(raw).map(c => {
+      if (!c.url) return c.lead + c.tail;
+      const next = fn(c.url);
+      if (next != null && next !== c.url) { changed = true; return c.lead + next + c.tail; }
+      return c.lead + c.url + c.tail;
+    }).join('');
+    return changed ? out : null;
+  }
+  function rememberSrcset(el, key, raw) {
+    let m = srcsetMeta.get(el);
+    if (!m) { m = new Map(); srcsetMeta.set(el, m); }
+    m.set(String(key).toLowerCase(), String(raw));
+  }
+  function recalledSrcset(el, key) {
+    const m = srcsetMeta.get(el);
+    return m ? m.get(String(key).toLowerCase()) : undefined;
+  }
+  function enforceSrcsetAttribute(el, key, raw) {
+    rememberSrcset(el, key, raw);
+    // 후보 URL 은 요소 캐시(targetURLForElement)를 쓰지 않는다 — 그 캐시는
+    // 요소당 마지막 raw 하나만 기억해서 후보가 여럿이면 서로를 밀어낸다.
+    const out = mapSrcsetCandidates(raw, url => {
+      if (url.indexOf(ZP.apiPath('fetch')) >= 0) return null;
+      const t = targetURLIfHTTP(url);
+      return t ? subresourceProxyPath(t) : null;
+    });
+    if (out == null) return;
     Native.setAttribute.call(el, key, out);
     // SW 를 못 거치는 프레임이면 후보마다 blob 으로 올려야 한다.
     upgradeSWLessURL(el, key, out);
@@ -5282,13 +5411,8 @@
       if (localKey === 'srcset' || localKey === 'imagesrcset') {
         // 후보 목록은 후보마다 옮긴다. 디스크립터(`1x`/`320w`)는 그대로 둬야
         // 브라우저의 후보 선택이 원본과 같다.
-        const out = String(raw).split(',').map(part => {
-          const m = /^(\s*)(\S+)([\s\S]*)$/.exec(part);
-          if (!m) return part;
-          const relay = relayFromProxyPath(m[2], '');
-          return relay ? m[1] + relay + m[3] : part;
-        }).join(',');
-        if (out !== String(raw)) Native.setAttribute.call(node, attrName, out);
+        const out = mapSrcsetCandidates(raw, url => relayFromProxyPath(url, ''));
+        if (out != null) Native.setAttribute.call(node, attrName, out);
         continue;
       }
       const relay = relayFromProxyPath(raw, relayKindForElement(node, tag, localKey));

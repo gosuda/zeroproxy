@@ -1,0 +1,85 @@
+{
+  "__doc": [
+    "`/zp/api/fetch?url=…` 빌더 파리티 픽스처.",
+    "",
+    "Rust zp_shared::subresource_proxy_url 과 페이지 realm 의 subresourceProxyPath",
+    "가 같은 입력에 **바이트 단위로 같은** 출력을 내야 한다.",
+    "",
+    "왜: 이 문자열을 만드는 곳이 넷이었고 셋이 서로 달랐다.",
+    "  htmltx  — 프래그먼트를 파라미터 밖에 보존, tab 없음, NON_ALPHANUMERIC-(-._~)",
+    "  zp-css  — 프래그먼트를 파라미터 안으로 삼킴, form_urlencoded(공백→'+')",
+    "  프렐류드 — 프래그먼트를 파라미터 안으로 삼킴, encodeURIComponent, &tab= 붙임",
+    "프래그먼트를 삼키면 `<use href=\"sprite.svg#icon\">` 과 CSS url(...#id) 이",
+    "조각을 잃어 빈 채로 렌더된다.",
+    "",
+    "origin 은 항상 http://proxy.example, prefix 는 /zp/."
+  ],
+  "cases": [
+    {
+      "id": "plain",
+      "url": "https://t.example/a.png",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
+    },
+    {
+      "id": "with-tab",
+      "url": "https://t.example/a.png",
+      "tab": "t7",
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png&tab=t7"
+    },
+    {
+      "id": "fragment-outside",
+      "url": "https://t.example/sprite.svg#icon",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fsprite.svg#icon"
+    },
+    {
+      "id": "fragment-after-tab",
+      "url": "https://t.example/sprite.svg#icon",
+      "tab": "t7",
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fsprite.svg&tab=t7#icon"
+    },
+    {
+      "id": "query-preserved",
+      "url": "https://t.example/a?x=1&y=2",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%3Fx%3D1%26y%3D2"
+    },
+    {
+      "id": "space-is-percent-twenty",
+      "url": "https://t.example/a b.png",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%20b.png"
+    },
+    {
+      "id": "plus-is-encoded",
+      "url": "https://t.example/a+b.png",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%2Bb.png"
+    },
+    {
+      "id": "sub-delims-encoded",
+      "url": "https://t.example/a!'()*.png",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa%21%27%28%29%2A.png"
+    },
+    {
+      "id": "unreserved-kept",
+      "url": "https://t.example/a-b_c.d~e",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa-b_c.d~e"
+    },
+    {
+      "id": "non-ascii",
+      "url": "https://t.example/한글.png",
+      "tab": null,
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2F%ED%95%9C%EA%B8%80.png"
+    },
+    {
+      "id": "empty-tab-not-emitted",
+      "url": "https://t.example/a.png",
+      "tab": "",
+      "want": "http://proxy.example/zp/api/fetch?url=https%3A%2F%2Ft.example%2Fa.png"
+    }
+  ]
+}

@@ -565,7 +565,9 @@ test('performance entry names are de-proxied back to target URLs', () => {
   // otherwise every entry is named a bare `/zp/api/fetch` with no recoverable
   // target — which is what let NAVER's ad SDK resolve `./gfp-display-sdk.js`
   // against `/zp/api/` and 404.
-  assert.match(rt, /const apiURL = proxyOrigin \+ ZP\.apiPath\('fetch'\) \+ '\?url=' \+ encodeURIComponent\(target\)/,
+  // (검사식은 **의도**를 재야 한다. 예전에는 소스 한 줄을 정규식으로 그대로
+  //  박제해서, 인코더를 공유 함수로 바꾸는 것만으로 깨졌다 — 동작은 그대로인데.)
+  assert.match(rt, /const apiURL = proxyOrigin \+ ZP\.apiPath\('fetch'\) \+ '\?url=' \+ encode\w+\(target\)/,
     'membrane POST fetch must put the target in the query string');
 });
 
@@ -2925,13 +2927,19 @@ test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다'
 
   // 후보 목록이라 문자열 전체를 URL 로 넘기면 망가진다 — 후보마다 URL 부분만
   // 갈아끼우고 디스크립터(`1x`/`320w`)는 보존해야 브라우저 선택이 원본과 같다.
+  //
+  // ★2026-08-21: 이 줄은 원래 `String(raw).split(',')` 가 **있어야 한다**고
+  // 단언했다. 그게 곧 버그였다 — `data:` URL 은 본문에 쉼표를 담으므로 쉼표
+  // 분할은 데이터 URL 을 반토막 낸다. 가드가 틀린 구현을 얼려 두고 있었고,
+  // 브라우저로 재현하고 나서야 보였다. 이제는 공유 분해기를 쓰는지 본다.
   assert.ok(rt.indexOf('function enforceSrcsetAttribute(el, key, raw)') >= 0);
   const start = rt.indexOf('function enforceSrcsetAttribute(');
   const body = rt.slice(start, start + 900);
-  assert.ok(body.indexOf("String(raw).split(',')") >= 0, 'srcset 은 후보 단위로 쪼개야 한다');
+  assert.ok(body.indexOf('mapSrcsetCandidates(') >= 0, 'srcset 은 공유 분해기로 후보 단위로 쪼개야 한다');
   assert.ok(body.indexOf('upgradeSWLessURL(el, key, out)') >= 0, 'SW-less 프레임이면 후보마다 blob 으로 올려야 한다');
   // 이미 프록시 경로인 후보를 다시 감싸면 옵저버와 왕복한다.
-  assert.ok(body.indexOf("indexOf(ZP.apiPath('fetch')) >= 0) return part") >= 0);
+  assert.ok(body.indexOf("indexOf(ZP.apiPath('fetch')) >= 0") >= 0,
+    '이미 프록시 경로인 후보를 건너뛰지 않으면 옵저버와 왕복한다');
 });
 
 test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', () => {
@@ -3294,6 +3302,97 @@ test('빌드 산출물의 표면 테이블이 픽스처와 일치한다', () => 
   }
 });
 
+
+// ── srcset 후보 분해: Rust 와 페이지 realm 이 같은 픽스처를 읽는다 ──────────
+//
+// srcset 은 URL 하나가 아니라 후보 목록이라 분해기가 필요하고, 페이지 realm 에
+// 그 분해기가 셋 있었다(enforceSrcsetAttribute / upgradeSWLessSrcset /
+// applySWLessRelay). 셋 다 `split(',')` 이었는데 **`data:` URL 은 본문에 쉼표를
+// 담는다** — 그래서 데이터 URL 이 반토막 나고 뒷조각이 상대 URL 로 오인돼
+// 프록시 경로로 치환됐다(2026-08-21 브라우저 실측).
+//
+// 이제 분해기는 양쪽에 하나씩이고 이 픽스처가 둘을 묶는다.
+// (Rust 쪽: crates/zp-htmltx/src/lib.rs :: srcset_candidates_match_shared_fixture)
+test('srcset 후보 분해가 Rust 와 같다 (data: 쉼표 포함)', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const grab = (name) => {
+    const start = rt.indexOf('\n  function ' + name + '(');
+    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    const next = rt.indexOf('\n  function ', start + 1);
+    return rt.slice(start, next < 0 ? undefined : next);
+  };
+  const split = new Function(grab('splitSrcsetCandidates') + '\nreturn splitSrcsetCandidates;')();
+  const fixture = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/srcset_cases.json', 'utf8'));
+  assert.ok(fixture.cases.length >= 10, '픽스처가 비어 가면 파리티가 무의미해진다');
+  for (const c of fixture.cases) {
+    const got = split(c.input).map(x => [x.lead, x.url, x.tail]);
+    assert.deepEqual(got, c.candidates, c.id + ': 분해가 Rust 픽스처와 다르다');
+    assert.equal(got.map(x => x.join('')).join(''), c.input, c.id + ': 왕복이 입력과 달라졌다');
+  }
+});
+
+// 분해기가 하나인지도 검사한다 — 사고는 "또 한 벌 생겼다" 로 시작했다.
+test('srcset 을 쉼표로 자르는 사본이 되살아나지 않았다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const body = rt.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.equal(
+    /srcset[\s\S]{0,200}?\.split\(','\)/.test(body), false,
+    'srcset 을 split(\',\') 로 자르는 코드가 돌아왔다 — data: 후보가 반토막 난다'
+  );
+  assert.equal(
+    (body.match(/function splitSrcsetCandidates\(/g) || []).length, 1,
+    '분해기가 한 벌이 아니다'
+  );
+});
+
+// srcset 은 setAttribute / 프로퍼티 / 서브트리 스윕 **세 경로** 전부에서
+// 후보 단위로 처리돼야 한다. 2026-08-21 실측 당시 스윕에만 있었고, 그래서
+// `img.setAttribute('srcset', …)` 는 목록 전체를 URL 하나로 삼켰고
+// `img.srcset = …` 는 아예 리라이트를 건너뛰어 원본 URL 이 DOM 에 남았다.
+test('srcset 이 setAttribute·프로퍼티·스윕 세 경로에 모두 걸린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /function installSrcsetProp\(/, '프로퍼티 훅이 없다 — img.srcset = … 가 샌다');
+  for (const proto of ['HTMLImageElement', 'HTMLSourceElement', 'HTMLLinkElement']) {
+    assert.ok(
+      rt.includes('installSrcsetProp(w.' + proto),
+      proto + ' 에 srcset 프로퍼티 훅이 안 걸렸다'
+    );
+  }
+  // setAttribute 훅 안에 분기가 있어야 한다 (스윕 쪽 분기와 별개).
+  const setAttr = rt.slice(rt.indexOf("define(w.Element.prototype, 'setAttribute'"));
+  const upto = setAttr.slice(0, setAttr.indexOf("define(w.Element.prototype, 'getAttribute'"));
+  assert.ok(
+    upto.includes('enforceSrcsetAttribute'),
+    'setAttribute 훅에 srcset 분기가 없다 — 후보 목록이 URL 하나로 삼켜진다'
+  );
+});
+
+// ── `?url=` 빌더: Rust 와 페이지 realm 이 같은 픽스처를 읽는다 ──────────────
+//
+// 이 문자열을 만드는 곳이 넷이었고 셋의 출력이 달랐다. 가장 아픈 차이는
+// **프래그먼트**다 — 파라미터 안으로 삼키면 `#` 가 `%23` 이 돼 브라우저가
+// 조각을 못 고르고, 외부 SVG 스프라이트를 참조하는 `<use href="s.svg#i">` 와
+// CSS `url(s.svg#i)` 가 빈 채로 렌더된다. htmltx 만 밖에 두고 있었다.
+// 인코딩 차이(`!'()*`, 공백 `+` vs `%20`)는 SW 가 URLSearchParams 로 읽어
+// 관측되지 않았지만, 다른 채로 두면 같은 리소스에 캐시 키가 둘 생긴다.
+test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const grab = (name) => {
+    const start = rt.indexOf('\n  function ' + name + '(');
+    assert.ok(start >= 0, name + ' 을 못 찾았다');
+    const next = rt.indexOf('\n  function ', start + 1);
+    return rt.slice(start, next < 0 ? undefined : next);
+  };
+  const fixture = JSON.parse(fs.readFileSync('crates/zp-shared/testdata/proxy_url_cases.json', 'utf8'));
+  assert.ok(fixture.cases.length >= 8, '픽스처가 비어 가면 파리티가 무의미해진다');
+  for (const c of fixture.cases) {
+    const build = new Function(
+      'proxyOrigin', 'ZP', 'boot',
+      grab('encodeURLParam') + '\n' + grab('subresourceProxyPath') + '\nreturn subresourceProxyPath;'
+    )('http://proxy.example', { apiPath: (n) => '/zp/api/' + n }, c.tab ? { tabId: c.tab } : null);
+    assert.equal(build(c.url), c.want, c.id + ': 페이지 realm 출력이 Rust 와 다르다');
+  }
+});
 
 // CSS 도 구현이 두 벌이다: Rust zp-css 와 프렐류드의 손으로 쓴 스캐너
 // (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.

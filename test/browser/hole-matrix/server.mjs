@@ -45,7 +45,11 @@ C('a16-static-td-background', 1, ''); // 레거시 background 속성
 C('a17-static-srcdoc', 1, ''); // 마크업에 박힌 srcdoc (런타임 e3 만 있었다)
 C('a18-static-import', 1, ''); // 인라인 <style> 의 @import (런타임 d7 만 있었다)
 C('a19-static-script', 1, ''); // <script src> cross
-C('a20-static-use', 1, ''); // SVG <use href>
+// ★<use> 는 **same-origin 으로만** 잰다. 크롬은 cross-origin 외부 참조 `<use>` 를
+// 아예 거부해서(보안) 대조군에서도 요청이 안 나가고, 그러면 이 칸은 영영
+// '판정불가' 다 — 실제로 오래 그 상태로 있었다. 조각 식별자(`#i`)가 살아서
+// 넘어가는지를 재는 게 이 칸의 목적이므로 same-origin 이면 충분하다.
+C('a20-static-use', 0, ''); // SVG <use href> (same-origin: 크롬이 cross 를 거부)
 C('a21-static-feimage', 1, ''); // SVG 필터의 이미지 입력
 C('a22-static-imageset', 1, ''); // image-set() 의 맨 문자열 (url() 없는 형태)
 // object/embed 는 `object-src 'none'` 으로 **로드를 막는 것**이 정책이다. 그런데
@@ -122,8 +126,22 @@ G('g3-realm-svgimage', `<svg><image href="http://127.0.0.1:${CDN}/img/g3-realm-s
 G('g4-realm-td-background', `<table><tr><td background="http://127.0.0.1:${CDN}/img/g4-realm-td-background__cross.png">x</td></tr></table>`);
 G('g5-realm-feimage', `<svg><filter id="g5f"><feImage href="http://127.0.0.1:${CDN}/img/g5-realm-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#g5f)"></rect></svg>`);
 G('g6-realm-imageset', `<style>#g6{background-image:image-set("http://127.0.0.1:${CDN}/img/g6-realm-imageset__cross.png" 1x)}</style><div id="g6" style="width:1px;height:1px"></div>`);
-G('g7-realm-use', `<svg><use href="http://127.0.0.1:${CDN}/img/g7-realm-use__cross.svg#i"></use></svg>`);
+// g7 도 같은 이유로 same-origin. srcdoc 프레임의 base 는 프록시 오리진이라
+// 루트 상대 경로가 픽스처 서버로 안 간다 — 절대 URL 로 준다.
+C('g7-realm-use', 0, `var f=document.createElement('iframe');f.srcdoc='<svg width="4" height="4"><use href="http://127.0.0.1:${ORIGIN}/img/g7-realm-use__same.svg#i"></use></svg>';document.body.appendChild(f)`);
 G('g8-realm-legacy-image', `<image src="http://127.0.0.1:${CDN}/img/g8-realm-legacy-image__cross.png">`);
+// srcset 은 요소 훅 세 경로(setAttribute / 프로퍼티 / 서브트리 스윕)로 들어오는데
+// 2026-08-21 실측 시점에 **스윕에만** 후보 분해가 있었다. 나머지 둘은
+//   setAttribute → 목록 전체를 URL 하나로 삼킴(후보 둘 다 사망)
+//   프로퍼티     → 리라이트를 통째로 건너뜀(원본 URL 이 DOM 에 남음)
+// 이었고, `img-src` CSP 만이 방어였다. 경로마다 칸을 둔다.
+C('g9-realm-srcset-setattr', 1, `var i=document.createElement('img');i.setAttribute('srcset',U+' 1x');document.body.appendChild(i)`);
+C('g10-realm-srcset-prop', 1, `var i=document.createElement('img');i.srcset=U+' 1x';document.body.appendChild(i)`);
+C('g11-realm-imagesrcset-prop', 1, `var l=document.createElement('link');l.rel='preload';l.as='image';l.imageSrcset=U+' 1x';document.head.appendChild(l)`);
+// `data:` 후보는 본문에 쉼표를 담는다. 쉼표로 자르는 구현은 여기서 **이웃 후보**를
+// 통째로 놓친다 — 데이터 URL 뒷조각이 URL 로 오인되면서 진짜 후보가 밀려난다.
+C('g12-realm-srcset-data-neighbour', 1, `var i=document.createElement('img');i.setAttribute('srcset','data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg> 2x, '+U+' 1x');document.body.appendChild(i)`);
+
 const STATIC_HTML = `
 <img src="/img/a1-static-img__same.png">
 <img srcset="/img/a2-static-srcset__same.png 1x">
@@ -144,7 +162,7 @@ const STATIC_HTML = `
 <iframe srcdoc="&lt;img src=&#34;http://127.0.0.1:${CDN}/img/a17-static-srcdoc__cross.png&#34;&gt;" width="10" height="10"></iframe>
 <style>@import url("http://127.0.0.1:${CDN}/img/a18-static-import__cross.css");</style>
 <script src="http://127.0.0.1:${CDN}/img/a19-static-script__cross.js"></script>
-<svg width="1" height="1"><use href="http://127.0.0.1:${CDN}/img/a20-static-use__cross.svg#i"></use></svg>
+<svg width="4" height="4"><use href="/img/a20-static-use__same.svg#i"></use></svg>
 <svg width="1" height="1"><filter id="a21f"><feImage href="http://127.0.0.1:${CDN}/img/a21-static-feimage__cross.png"></feImage></filter><rect width="1" height="1" filter="url(#a21f)"></rect></svg>
 <style>#a22{background-image:image-set("http://127.0.0.1:${CDN}/img/a22-static-imageset__cross.png" 1x)}</style><div id="a22" style="width:1px;height:1px"></div>
 <object data="http://127.0.0.1:${CDN}/img/a23-static-object-cross__cross.png"></object>
@@ -254,6 +272,17 @@ function mk(port) {
     if (u.endsWith('.css')) {
       res.writeHead(200, { 'content-type': 'text/css', 'cache-control': 'no-store' });
       return res.end('.a7{background-image:url(/img/a7-netcss-url__same.png)}\n.a7x{background-image:url(http://127.0.0.1:' + CDN + '/img/a7x-netcss-cross__cross.png)}');
+    }
+    // 외부 참조 `<use>` / CSS `url(sprite.svg#id)` 용 스프라이트.
+    // **조각 식별자가 의미**인 유일한 서브리소스라 진짜 SVG 여야 한다 —
+    // 예전엔 `.svg` 도 PNG 로 내주고 있어서 `<use>` 케이스가 대조군에서도
+    // 아무것도 안 불러 영영 판정불가였다.
+    if (u.endsWith('.svg')) {
+      res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'no-store' });
+      return res.end('<svg xmlns="http://www.w3.org/2000/svg">'
+        + '<symbol id="i" viewBox="0 0 4 4"><rect width="4" height="4" fill="#0f0"></rect></symbol>'
+        + '<symbol id="other" viewBox="0 0 4 4"><rect width="4" height="4" fill="#f00"></rect></symbol>'
+        + '</svg>');
     }
     if (u.endsWith('.js')) {
       res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
