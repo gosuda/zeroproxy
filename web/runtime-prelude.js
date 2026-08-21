@@ -61,7 +61,29 @@
   // globals already exist and this first pass catches them.
   hideZPGlobalsFromForIn();
   try {
-    const isGlobalObj = o => o === globalThis || o === root || (typeof self !== 'undefined' && o === self);
+    // ★"전역 객체" 판정에 **가상 window 도** 포함해야 한다.
+    //
+    // 예전에는 `globalThis`/`root`/`self` 만 봤다. 그런데 리라이트된 타깃 코드가
+    // 받는 `window` 는 **그 셋 중 무엇도 아니다** — 멤브레인이 주는 스코프
+    // 프록시다. 그래서 스크러빙이 안 걸렸고, 실측(2026-08-22):
+    //
+    //   exec-js 로 그냥 실행 : getOwnPropertyNames(window) 에 __zp_* 0개
+    //   eval 로 리라이트 경유 : 같은 코드가 **24개**
+    //
+    // 즉 방어는 **적이 서지 않는 자리**에 있었다. 원래 이 스크러버를 넣을 때
+    // "measured clean" 이라고 적었는데, 그 측정이 리라이트를 안 거친 프로브였다.
+    // 타깃 코드는 예외 없이 리라이트를 거치므로 사실상 아무도 못 막고 있었다.
+    //
+    // 스코프 프록시는 이 블록보다 **나중에** 만들어지므로 이름으로 참조할 수 없다.
+    // 멤브레인 자신이 쓰는 오리 검사(`o.window === o`)를 쓴다 — 진짜 window 와
+    // 가상 window 둘 다 이 성질을 만족하고, 다른 객체는 거의 만족하지 않는다.
+    const isGlobalObj = o => {
+      try {
+        if (o === globalThis || o === root) return true;
+        if (typeof self !== 'undefined' && o === self) return true;
+        return !!o && typeof o === 'object' && o.window === o;
+      } catch { return false; }
+    };
     // Real Chrome exposes exactly `["constructor"]` on Location.prototype — every
     // Location member is an own, non-configurable property of the `location`
     // INSTANCE. Our virtual accessors therefore never fire (the own properties
