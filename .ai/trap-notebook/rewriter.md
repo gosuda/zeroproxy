@@ -63,6 +63,42 @@ const isGlobalObj = o => o === globalThis || o === root || o === self;
 
 **측정**: static-policy 126, 구멍 66칸 유출 0 / csp-only 0 / 선언 밖 깨짐 0,
 실사이트 3종 raw=0 csp=0 err=0.
+### 후속(2026-08-22) — 직렬화 세정이 `<html>` 껍데기를 벗기고 있었다 + 낡은 주석 정정
+
+**(a) 주석부터 고쳤다.** 앞 항목에서 문제가 된 *"Measured: getOwnPropertyNames(window)
+was correctly clean"* 이 그대로 남아 있었다. 그걸 지우지 않으면 다음 사람이 **똑같이
+안심한다** — 이번 사고의 본체가 코드가 아니라 그 문장이었다. 정정문에 "어느 시점에서
+잰 clean 인지" 를 반드시 같이 적으라고 남겼다.
+
+같은 부류가 더 있는지 `navigator` / `Location.prototype` / window 심볼도 **적의
+시점(리라이트 경유)** 으로 재봤다 — 셋 다 두 시점이 일치하고 깨끗하다(각각 0 / 1 /
+0, 크롬과 같은 값). 그 버그는 window 전역 스크럽에 한정된 것이었다.
+
+**(b) `documentElement.outerHTML` 이 `<html` 로 시작하지 않았다.**
+
+```
+대조군(프록시 없이) : <html><head><meta charset="utf-8"><title…
+프록시              : (html 껍데기 없음)
+```
+
+원인: 세정기가 문자열을 `div.innerHTML` 에 넣고 다시 뽑는 **문자열 왕복**이었다.
+HTML 파서는 `div` 안에서 `<html>/<head>/<body>` 를 벗긴다. 재현성 결함이면서
+`/^<html/.test(...)` 한 줄로 끝나는 지문이다.
+
+**Fix**: 문자열 왕복 대신 **복제본을 세정**한다 — `cloneNode(true)` → 우리 속성만
+제거 → 네이티브 게터로 직렬화. 구조가 그대로 보존되고 재파싱이 없어 더 싸다.
+고친 뒤 `startsWithHtml: true`(대조군과 일치).
+
+**남은 것 — 정확히 어디인지 짚었다**: `data-zp-target-url` 9건이 아직 보이는데,
+`hasEl: false` 였다(그런 속성을 가진 **요소는 DOM 에 없다**). 실제 위치는
+**`<iframe srcdoc="…">` 속성 값 안의 중첩 마크업**이다(`&quot;` 로 이스케이프됨).
+세정기는 살아 있는 속성을 훑지 **속성 값 안의 HTML** 까지는 안 들어간다.
+그리고 `XMLSerializer().serializeToString(document.documentElement)` 은 아예
+훅이 없어 **38건**이 나온다 — 별도 표면이다.
+
+**측정**: static-policy 126, 구멍 66칸 유출 0 / csp-only 0 / 선언 밖 깨짐 0,
+실사이트 3종 raw=0 csp=0 err=0.
+
 
 ## 2026-08-22 — 스토리지/쿠키 격리 축을 처음 세웠다: 결함 둘 + **내 측정이 만든 가짜 누출 하나**
 

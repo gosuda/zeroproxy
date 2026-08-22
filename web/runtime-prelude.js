@@ -41,12 +41,21 @@
   // ...but `for (k in window)` is a THIRD enumeration surface, and it is the one
   // the scrubbing above cannot reach: for-in is a language construct, not a
   // method we can wrap. It walks enumerable own+inherited keys directly.
-  // Measured: getOwnPropertyNames(window) was correctly clean while
-  // `for (k in window)` still handed out ZPPageBundleWBG, __zp_diagnostics,
-  // __zp_trace and __zp_trace_clear — plain `root.x = y` assignments create
-  // ENUMERABLE properties, so they bypassed both `define()` and the scrub.
-  // enumerable:false is exactly the right tool for this surface (and useless for
-  // the other two), so the two mechanisms are complements, not alternatives.
+  // 측정 당시: `for (k in window)` 가 ZPPageBundleWBG / __zp_diagnostics /
+  // __zp_trace / __zp_trace_clear 를 그대로 내놨다 — 맨 `root.x = y` 대입은
+  // ENUMERABLE 속성을 만들어 `define()` 도 스크럽도 안 탔기 때문이다.
+  // enumerable:false 는 이 표면에만 맞는 도구이고(다른 둘에는 무용지물),
+  // 그래서 두 장치는 대안이 아니라 보완이다.
+  //
+  // ★2026-08-22 정정 — 여기 원래 "getOwnPropertyNames(window) was correctly
+  // clean" 이라고 적혀 있었다. **그 측정이 틀린 자리에서 이뤄졌다.** 리라이트를
+  // 안 거친 프로브(devtools/exec-js)로 재면 깨끗한데, 리라이트된 타깃 코드가
+  // 받는 것은 **가상 window(스코프 프록시)** 라 `isGlobalObj` 에 안 걸려
+  // 스크럽이 통째로 비껴갔다. 실측: 같은 코드가 `eval()` 안에서 24개를 봤다.
+  // 아래 isGlobalObj 의 오리 검사(`o.window === o`)가 그 구멍을 막는다.
+  //
+  // 그러니 이 근처의 "clean" 이라는 문장을 다시 쓰게 되거든, **어느 시점에서
+  // 잰 clean 인지**를 같이 적을 것. 틀린 안심은 없는 방어보다 비싸다.
   const hideZPGlobalsFromForIn = () => {
     try {
       for (const name of Object.getOwnPropertyNames(root)) {
@@ -4330,6 +4339,40 @@
     });
     return collection;
   }
+  // ★직렬화 세정은 **복제본**에 한다. 예전에는 문자열을 `div.innerHTML` 에 넣고
+  // 다시 뽑았는데, HTML 파서가 `<html>/<head>/<body>` 껍데기를 벗긴다. 그래서
+  // `document.documentElement.outerHTML` 이 `<html …>` 로 **시작하지 않았다** —
+  // 대조군(프록시 없이)은 시작한다(2026-08-22 실측). 재현성 결함이면서 동시에
+  // 한 줄로 끝나는 지문이다(`/^<html/.test(...)`).
+  //
+  // 복제본을 훑어 우리 속성만 떼고 네이티브 게터로 직렬화하면 구조가 그대로다.
+  // 재파싱도 없어져 긴 문서에서 더 싸다.
+  function sanitizeSerializedNode(node, wantOuter) {
+    let clone;
+    try { clone = node.cloneNode(true); } catch { clone = null; }
+    if (!clone) return '';
+    const scrub = (el) => {
+      restoreVisibleLinkState(el);
+      if (isZPAssetNode(el)) { try { el.remove(); } catch {} return; }
+      if (Native.getAttributeNames) {
+        for (const name of Native.getAttributeNames.call(el)) {
+          if (isZPAttrName(name)) { try { Native.removeAttribute.call(el, name); } catch {} }
+        }
+      }
+    };
+    try {
+      if (clone.nodeType === 1) scrub(clone);
+      for (const el of clone.querySelectorAll('*')) scrub(el);
+    } catch {}
+    try {
+      if (wantOuter) {
+        return Native.elementOuterHTML && Native.elementOuterHTML.get
+          ? Native.elementOuterHTML.get.call(clone) : clone.outerHTML;
+      }
+      return Native.elementInnerHTML && Native.elementInnerHTML.get
+        ? Native.elementInnerHTML.get.call(clone) : clone.innerHTML;
+    } catch { return ''; }
+  }
   function sanitizeSerializedHTML(html) {
     const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
     const container = parserDoc.createElement('div');
@@ -4649,7 +4692,7 @@
       if (!d || !d.set) return;
       try {
         Object.defineProperty(proto, prop, {
-          get() { return d.get ? sanitizeSerializedHTML(d.get.call(this)) : ''; },
+          get() { return d.get ? sanitizeSerializedNode(this, prop === 'outerHTML') : ''; },
           set(v) {
             if (this && this.localName === 'template' && prop === 'innerHTML') {
               d.set.call(this, String(v));
