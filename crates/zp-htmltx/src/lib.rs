@@ -683,7 +683,28 @@ fn script_settings(
                                 strict,
                                 proxy_origin: origin_for_end.clone(),
                             };
-                            let replacement = match rewrite_script(&src, &opts) {
+                            // ★2026-08-22 — 서버가 미리 리라이트하면 **원본이 사라진다**.
+                            // 래퍼 페이로드가 리라이트된 코드라 페이지가 자기 인라인
+                            // 스크립트를 다시 읽으면 `__zp_get(…)` 가 그대로 보인다
+                            // (자기 소스를 읽는 건 흔한 anti-debug 관용구다).
+                            //
+                            // 이 경로가 생긴 이유는 "두 번 리라이트하면 메인 스레드가
+                            // 수십 초 멈춘다" 였는데, **오늘 재보니 사실이 아니다**:
+                            // NAVER 메인의 실제 최대 인라인(178KB)을 페이지측 리라이터로
+                            // 돌리면 **6.7ms** 다(2026-08-22, 브라우저에서 직접 측정).
+                            // 그 숫자는 옛 리라이터 시절 것이 주석으로 굳은 것이었다.
+                            //
+                            // 그래서 기본은 **원본을 그대로 실어 보내고 페이지가
+                            // 리라이트하는 경로**(`__ZP_EXEC_INLINE_SCRIPT`, 동적 주입이 쓰는
+                            // 것과 같은 경로)다. 병적으로 큰 입력에서만 서버측 단일
+                            // 리라이트로 돌아간다 — 그때는 재현성보다 멈춤이 더 나쁘다.
+                            let replacement = if src.len() <= MAX_PAGE_REWRITE_INLINE_BYTES {
+                                let wrapper_name = match kind {
+                                    ScriptKind::Module => "__ZP_EXEC_INLINE_MODULE",
+                                    _ => "__ZP_EXEC_INLINE_SCRIPT",
+                                };
+                                format!("{}({});", wrapper_name, inline_script_payload(&src))
+                            } else { match rewrite_script(&src, &opts) {
                                 Ok(r) => {
                                     let payload = inline_script_payload(&r.code);
                                     let wrapper_name = match kind {
@@ -702,7 +723,7 @@ fn script_settings(
                                         src
                                     }
                                 }
-                            };
+                            } };
                             // ContentType::Html → raw passthrough (no HTML
                             // escaping). The browser parses <script> bodies as
                             // raw text and does NOT entity-decode them, so any
@@ -850,6 +871,13 @@ impl HtmlTxn {
 /// Serialise a script body as a JSON string literal suitable for embedding as
 /// the argument to `__ZP_EXEC_INLINE_SCRIPT(...)`. Escapes `</` to prevent
 /// the closing `</script>` sequence from terminating the wrapper.
+/// 이 크기 이하의 인라인 스크립트는 **원본 그대로** 내려보내고 페이지가
+/// 리라이트한다 — 그래야 페이지가 자기 소스를 다시 읽을 때 우리 흔적이
+/// 안 보인다. 256KB 는 실측 근거로 잡은 값이다: 현재 최악의 실사이트
+/// 사례(NAVER 메인 178KB)가 페이지측에서 6.7ms 였고, 그보다 큰 것은
+/// 현실 문서에서 본 적이 없다. 넘으면 서버측 단일 리라이트로 돌아간다.
+const MAX_PAGE_REWRITE_INLINE_BYTES: usize = 256 * 1024;
+
 fn inline_script_payload(src: &str) -> String {
     let mut out = String::with_capacity(src.len() + 2);
     out.push('"');
@@ -1611,7 +1639,14 @@ mod tests {
         assert!(r.is_ok(), "CrossStorage remote_frame failed to transform: {:?}", r.err());
         let out = r.unwrap().html;
         // Inline scripts must be rewritten (membrane), external src proxied.
-        assert!(out.contains("/zp/api/script") || out.contains("__zp"), "remote_frame not rewritten: {out}");
+        // 외부 스크립트는 프록시 경로로, 인라인은 실행 래퍼로 — 둘 중 하나는
+        // 있어야 이 문서가 멤브레인을 거친 것이다. (예전에는 소문자 `__zp` 를
+        // 찾았는데, 그건 서버측 리라이트 결과물에만 있는 모양이라 원본
+        // 보존 경로로 바뀌자 바로 깨졌다.)
+        assert!(
+            out.contains("/zp/api/script") || out.contains("__ZP_EXEC_INLINE"),
+            "remote_frame not contained: {out}"
+        );
     }
 
     // Pin: a non-empty prelude is injected exactly once, right after <head>,
@@ -1802,9 +1837,12 @@ mod tests {
             assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc}: {html}");
             // 그리고 자기를 필요로 하는 호출보다 **앞에** 있어야 한다.
             let p = html.find(prelude).unwrap();
+            // 래퍼는 둘 중 하나다 — 작은 입력은 원본 보존 경로,
+            // 병적으로 큰 입력만 서버측 단일 리라이트다.
             let call = html
-                .find("__ZP_EXEC_INLINE_REWRITTEN(")
-                .expect("inline script should have been rewritten");
+                .find("__ZP_EXEC_INLINE_SCRIPT(")
+                .or_else(|| html.find("__ZP_EXEC_INLINE_REWRITTEN("))
+                .expect("inline script must go through an exec wrapper");
             assert!(p < call, "prelude must precede the call it defines: {html}");
         }
     }
@@ -1813,27 +1851,28 @@ mod tests {
     fn inline_script_rewrites_location() {
         let html = "<html><body><script>var u = location.href;</script></body></html>";
         let r = transform(html, &opts()).unwrap();
-        // zp-htmltx now wraps the *rewritten* inline body in
-        // __ZP_EXEC_INLINE_REWRITTEN(<rewritten>) — prelude executes without
-        // re-rewriting. Verify the wrapper is present and the payload contains
-        // membrane calls, not the raw `location.href` access.
+        // ★2026-08-22 — 작은 인라인은 **원본 그대로** 실어 보내고 페이지가
+        // 리라이트한다. 그래야 페이지가 자기 소스를 다시 읽을 때 우리
+        // 흔적이 안 보인다. 봉쇄는 그대로다 — 래퍼를 거치지 않고는 실행될
+        // 수 없고, 래퍼 안에서 페이지 리라이터가 멤브레인을 입힌다.
         assert!(
-            r.html.contains("__ZP_EXEC_INLINE_REWRITTEN("),
+            r.html.contains("__ZP_EXEC_INLINE_SCRIPT("),
             "wrap missing: {}",
             r.html
         );
+        // 원본이 그대로 들어 있어야 한다(페이로드 = 원본).
         assert!(
-            r.html.contains("__zp_get"),
-            "rewritten payload missing: {}",
+            r.html.contains("var u = location.href;"),
+            "원본이 보존되지 않았다: {}",
             r.html
         );
+        // 다만 **래퍼 밖**에서 맨머리로 실행되면 안 된다.
         assert!(
-            !r.html.contains("var u = location.href"),
-            "raw source must not survive — leak: {}",
+            !r.html.contains("<script>var u = location.href;</script>"),
+            "래퍼 없이 그대로 남았다: {}",
             r.html
         );
     }
-
     #[test]
     fn event_handler_rewrites_window() {
         let html = "<button onclick=\"f(window)\">x</button>";
@@ -1882,15 +1921,15 @@ mod tests {
     fn module_script_rewrites_window() {
         let html = "<script type=\"module\">import x from './m.js'; use(window);</script>";
         let r = transform(html, &opts()).unwrap();
-        // Wrap in __ZP_EXEC_INLINE_REWRITTEN_MODULE with the rewritten body.
+        // 작은 모듈도 원본 보존 경로로 간다(페이지가 리라이트).
         assert!(
-            r.html.contains("__ZP_EXEC_INLINE_REWRITTEN_MODULE("),
+            r.html.contains("__ZP_EXEC_INLINE_MODULE("),
             "module wrap missing: {}",
             r.html
         );
         assert!(
-            r.html.contains("__zp_get"),
-            "rewritten payload missing: {}",
+            r.html.contains("use(window);"),
+            "원본이 보존되지 않았다: {}",
             r.html
         );
     }

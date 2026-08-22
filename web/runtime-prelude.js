@@ -4454,6 +4454,36 @@
     proxyURLScanCache.lastIndex = 0;
     return proxyURLScanCache;
   }
+  // ★2026-08-22 — `<style>` 와 인라인 `<script>` 의 **텍스트**는 우리가
+  // 덮어쓴다(CSS URL 리라이트 / 실행 래퍼). 그런데 읽기를 안 고쳤어서
+  // 페이지가 자기 스타일/스크립트를 다시 읽으면 그대로 보였다. 실측:
+  // 픽스처에서 style 8개 중 4개가 `zp/api` 를, script 2개 중 1개가
+  // 래퍼를 노출했다 — 직렬화만의 문제가 아니다.
+  //
+  // 우리가 덮어쓸 때 원본을 붙들어 둔다. srcdoc 과 같은 방식이고, 마찬가지로
+  // 재현성도 같이 맞는다(페이지가 쓴 값을 그대로 돌려주는 게 원래 옴다).
+  const originalTextMeta = new WeakMap();
+  // 서버측 htmltx 가 고친 것은 WeakMap 이 없다 — 그때는 값 안의 프록시
+  // URL 만이라도 푸는다(CSS 는 URL 만 바뀌므로 사실상 원본이 된다).
+  function originalStyleText(el, raw) {
+    if (originalTextMeta.has(el)) return originalTextMeta.get(el);
+    return deproxyURL(raw, { scan: true });
+  }
+  // 페이지가 만든 인라인 스크립트는 래퍼 페이로드가 **원본 그대로**라
+  // 되돌리기가 정확하다. 서버가 미리 리라이트한 것
+  // (`__ZP_EXEC_INLINE_REWRITTEN`)은 페이로드가 **리라이트된 코드**라 원본을
+  // 복구할 수 없다 — 그 경계는 함정노트에 측정값과 함께 적어 됀다.
+  const INLINE_WRAPPERS = ['__ZP_EXEC_INLINE_SCRIPT', '__ZP_EXEC_INLINE_MODULE'];
+  function originalScriptText(el, raw) {
+    if (originalTextMeta.has(el)) return originalTextMeta.get(el);
+    const s = String(raw == null ? '' : raw);
+    for (const name of INLINE_WRAPPERS) {
+      if (s.lastIndexOf(name + '(', 0) !== 0) continue;
+      const body = s.slice(name.length + 1, s.lastIndexOf(')'));
+      try { return String(JSON.parse(body)); } catch { return s; }
+    }
+    return s;
+  }
   function scrubbedClone(node) {
     let clone;
     try { clone = node.cloneNode(true); } catch { clone = null; }
@@ -4464,6 +4494,14 @@
     const scrub = (el, origin) => {
       restoreVisibleLinkState(el);
       if (isZPAssetNode(el)) { try { el.remove(); } catch {} return; }
+      // 직렬화도 같은 복구를 거친다 — 게터만 고치면 `outerHTML` 과
+      // `getAttribute` 가 서로 다른 말을 하고, 그 불일치가 다시 탐지기다.
+      const ln = el.localName;
+      if (origin && (ln === 'style' || ln === 'script') && Native.nodeTextContent && Native.nodeTextContent.get) {
+        const raw = String(Native.nodeTextContent.get.call(el) || '');
+        const want = ln === 'style' ? originalStyleText(origin, raw) : originalScriptText(origin, raw);
+        if (want !== raw && Native.nodeTextContent.set) { try { Native.nodeTextContent.set.call(el, want); } catch {} }
+      }
       if (origin && srcdocMeta.has(origin)) {
         try { Native.setAttribute.call(el, 'srcdoc', srcdocMeta.get(origin)); } catch {}
       }
@@ -4486,12 +4524,14 @@
             const recalled = (localKey === 'srcset' || localKey === 'imagesrcset') ? recalledSrcset(origin, name) : undefined;
             want = recalled !== undefined ? recalled : (urlMeta.get(origin) || Native.getAttribute.call(origin, 'data-zp-target-url') || undefined);
           }
-          if (want === undefined) {
-            const raw = Native.getAttribute.call(el, name);
-            const d = deproxyURL(raw, { scan: true });
-            if (d !== raw) want = d;
-          }
-          if (want !== undefined && want !== null) { try { Native.setAttribute.call(el, name, want); } catch {} }
+          // ★되돌리기는 **마지막에 항상** 태운다. 기억해 둔 ‘원본’ 이 이미
+          // 프록시 URL 일 수 있기 때문이다 — 서버가 고쳐 내려보낸 정적 srcset 을
+          // 멤브레인이 나중에 스윗하면 그 순간의 값(=프록시 URL)을 원본으로
+          // 기억한다. 그걸 그대로 돌려주면 원본을 복원한 것처럼 보이면서 샐다.
+          const raw = Native.getAttribute.call(el, name);
+          const base = want !== undefined && want !== null ? String(want) : raw;
+          const out = deproxyURL(base, { scan: true });
+          if (out !== raw) { try { Native.setAttribute.call(el, name, out); } catch {} }
         }
       }
       if (Native.getAttributeNames) {
@@ -4755,8 +4795,9 @@
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
       if (localKey === 'srcset' || localKey === 'imagesrcset') {
+        // 기억한 값이 이미 프록시 URL 일 수 있다(위 주석과 같은 이유).
         const recalled = recalledSrcset(this, key);
-        return recalled !== undefined ? recalled : Native.getAttribute.call(this, k);
+        return deproxyURL(recalled !== undefined ? recalled : Native.getAttribute.call(this, k), { scan: true });
       }
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc' && srcdocMeta.has(this)) return srcdocMeta.get(this);
       if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
@@ -5145,8 +5186,8 @@
         if (!d || !d.set) continue;
         try {
           Object.defineProperty(styleProto, prop, {
-            get() { return d.get ? d.get.call(this) : ''; },
-            set(v) { d.set.call(this, rewriteCSSText(v)); },
+            get() { return d.get ? originalStyleText(this, d.get.call(this)) : ''; },
+            set(v) { originalTextMeta.set(this, String(v == null ? '' : v)); d.set.call(this, rewriteCSSText(v)); },
             configurable: false
           });
         } catch {}
@@ -5215,7 +5256,7 @@
       if (!d || !d.set) continue;
       try {
         Object.defineProperty(scriptProto, prop, {
-          get() { return d.get ? d.get.call(this) : ''; },
+          get() { return d.get ? originalScriptText(this, d.get.call(this)) : ''; },
           set(v) { d.set.call(this, v); if (this.isConnected) prepareScriptElement(this); },
           configurable: false
         });
@@ -5335,6 +5376,7 @@
       const text = getScriptText(el);
       if (!text) return;
       if (isPreparedInlineScript(text)) return;
+      originalTextMeta.set(el, text);
       setScriptText(el, inlineScriptWrapper(text, dataType));
     }
   }
