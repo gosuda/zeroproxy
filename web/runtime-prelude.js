@@ -4465,9 +4465,13 @@
   const originalTextMeta = new WeakMap();
   // 서버측 htmltx 가 고친 것은 WeakMap 이 없다 — 그때는 값 안의 프록시
   // URL 만이라도 푸는다(CSS 는 URL 만 바뀌므로 사실상 원본이 된다).
+  // ★되돌리기는 **보관한 값에도** 태운다. 기억해 둔 ‘원본’ 이 이미 프록시
+  // URL 일 수 있기 때문이다 — 서버가 고쳐 내려보낸 CSS 를 멤브레인이
+  // 나중에 다시 심으면 그 순간의 값을 원본으로 기억한다. 위키피디아의
+  // 120KB 스타일 하나가 정확히 그랬다(2026-08-22 실측, 픽스처는 재현 못 함).
+  // srcset 에서 같은 함정을 밟았다 — 규칙은 하나다: **마지막에 항상 한 번 더.**
   function originalStyleText(el, raw) {
-    if (originalTextMeta.has(el)) return originalTextMeta.get(el);
-    return deproxyURL(raw, { scan: true });
+    return deproxyURL(originalTextMeta.has(el) ? originalTextMeta.get(el) : raw, { scan: true });
   }
   // 페이지가 만든 인라인 스크립트는 래퍼 페이로드가 **원본 그대로**라
   // 되돌리기가 정확하다. 서버가 미리 리라이트한 것
@@ -4475,12 +4479,14 @@
   // 복구할 수 없다 — 그 경계는 함정노트에 측정값과 함께 적어 됀다.
   const INLINE_WRAPPERS = ['__ZP_EXEC_INLINE_SCRIPT', '__ZP_EXEC_INLINE_MODULE'];
   function originalScriptText(el, raw) {
-    if (originalTextMeta.has(el)) return originalTextMeta.get(el);
+    // 위와 같은 이유로 보관한 값에도 되돌리기를 태운다. 원본 소스에",
+    // 우리 프록시 URL 이 들어 있다면 그건 우리가 넣은 것이다.",
+    if (originalTextMeta.has(el)) return deproxyURL(originalTextMeta.get(el), { scan: true });
     const s = String(raw == null ? '' : raw);
     for (const name of INLINE_WRAPPERS) {
       if (s.lastIndexOf(name + '(', 0) !== 0) continue;
       const body = s.slice(name.length + 1, s.lastIndexOf(')'));
-      try { return String(JSON.parse(body)); } catch { return s; }
+      try { return deproxyURL(String(JSON.parse(body)), { scan: true }); } catch { return s; }
     }
     return s;
   }

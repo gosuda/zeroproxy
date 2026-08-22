@@ -52,13 +52,26 @@
       ['getAttribute', Element.prototype.getAttribute], ['appendChild', Node.prototype.appendChild],
       ['createObjectURL', URL.createObjectURL], ['Worker', window.Worker],
     ];
+    // ★2026-08-22 — 예전에는 "네이티브가 아니면 우리 탓" 으로 셌다. 그건
+    // 틀렸다 — **페이지가 자기 API 를 감싸는 건 정상**이다. github.com 은 자기
+    // `fetch` 를 감싸고(`X-Fetch-Nonce` 처리), 그걸 우리 흔적으로 올려 불렀다.
+    // 대조군(프록시 없이 직접 로드)에서 바이트 단위로 같은 문자열이 나오는 것을
+    // 확인했다.
+    //
+    // 안에서는 '누가 감쌌는가' 를 알 수 없으므로, 우리 식별자가 드러난 때만
+    // 센다. 그게 실제로 적에게 보이는 tell 이기도 하다.
+    const OURS = /__zp|__ZP|ZeroProxy|ZPBundle|proxy\.localhost|\/zp\//;
     for (const [name, fn] of fns) {
       if (typeof fn !== 'function') continue;
       const s = Function.prototype.toString.call(fn);
-      if (!/\{\s*\[native code\]\s*\}/.test(s)) add('toString', name + ' => ' + s.slice(0, 60));
+      if (/\{\s*\[native code\]\s*\}/.test(s)) continue;
+      if (OURS.test(s)) add('toString', name + ' => ' + s.slice(0, 60));
     }
     const d = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
-    if (d && d.get && !/\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(d.get))) add('toString', 'cookie getter');
+    if (d && d.get) {
+      const g = Function.prototype.toString.call(d.get);
+      if (!/\{\s*\[native code\]\s*\}/.test(g) && OURS.test(g)) add('toString', 'cookie getter');
+    }
   } catch (e) { add('toString', 'err:' + e.name); }
 
   // ⑦ 리소스 타이밍 — 우리 에셋 이름이 남는가
