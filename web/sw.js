@@ -2192,9 +2192,13 @@ function buildRuntimePrelude(tab, entry) {
     + ZP.fixedCSP(tab.servers || [], { challengeCompat: !!tab.challengeCompat })
         .split('; ').filter(d => !/^report-uri\b/i.test(d)).join('; ')
         .replace(/"/g, '&quot;')
-    + '">';
+    + '" data-zp-internal>';
   return cspMeta +
-    '<script nonce=zp>' + prewarmInline + '</script>' +
+    // `data-zp-internal` 은 직렬화 세정기가 "이건 우리 것" 을 알아보는 표식이다.
+    // 외부 에셋 스크립트는 src 로 판별되지만 **인라인**은 그럴 수 없어
+    // `outerHTML` 에 그대로 남아 있었다. data-zp-* 는 어차피 페이지에게
+    // 가려진다(getAttributeNames / attributes 필터).
+    '<script nonce=zp data-zp-internal>' + prewarmInline + '</script>' +
     '<script nonce=zp src=' + ZP.assetURL('zp-core.js') + '></script>' +
     // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js script
     // tag dropped. zp-page-bundle.js inlines the wasm + initSync's so

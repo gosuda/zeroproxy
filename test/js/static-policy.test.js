@@ -3608,3 +3608,105 @@ test('에러 코드: SW 가 던지는 코드가 전부 목록에 있다', () => 
   assert.deepEqual(missing, [], 'SW 가 던지는데 공유 목록에 없는 코드 (POLICY_BLOCKED 로 접힌다)');
 });
 
+
+// ── 지문 축: 불투명 오리진 프레임 / 직렬화 표면 ────────────────────────────
+// 2026-08-22. 셋 다 "방어가 어느 시점에서 성립하는가" 가 쟁점이었던 자리다.
+
+// `about:srcdoc` / `about:blank` 프레임에서 `new URL(location.href).origin` 은
+// 문자열 `"null"` 이다. 그 프레임에도 프렐류드가 들어가므로 거기서 만든 프록시
+// URL 이 전부 `null/zp/api/fetch?…` 라는 상대 경로가 됐고(가상 base 기준으로
+// 풀려 타깃 오리진으로 갔다), 덤으로 "이미 프록시면 건드리지 않는다" 판정이
+// `startsWith("null")` 이 되면서 **이중 프록시**까지 났다.
+test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 않는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('function resolveProxyOrigin(');
+  assert.ok(start > 0, 'resolveProxyOrigin 이 없다');
+  const end = rt.indexOf('\n  const toStringMap', start);
+  const fn = new Function(rt.slice(start, end) + '; return resolveProxyOrigin;')();
+
+  const opaque = new URL('about:srcdoc');
+  const real = new URL('http://proxy.localhost:18080/zp/p/tok');
+
+  // 1) 정상 문서는 그대로.
+  assert.strictEqual(fn(real, {}, {}), 'http://proxy.localhost:18080');
+
+  // 2) 부팅 설정이 있으면 그걸 쓴다 (부모가 실어 보낸다).
+  assert.strictEqual(fn(opaque, { proxyOrigin: 'http://proxy.localhost:18080' }, {}),
+    'http://proxy.localhost:18080');
+
+  // 3) 부팅 설정이 없으면 조상 프레임을 타고 올라가 읽는다. 중첩 srcdoc 이라
+  //    한 단계 위도 "null" 일 수 있으므로 **끝까지** 올라가야 한다.
+  const top = { location: { origin: 'http://proxy.localhost:18080' } };
+  const mid = { location: { origin: 'null' } };
+  mid.parent = top; top.parent = top;
+  const leaf = { parent: mid, location: { origin: 'null' } };
+  assert.strictEqual(fn(opaque, {}, leaf), 'http://proxy.localhost:18080');
+
+  // 4) 아무 데서도 못 얻으면 "null" 을 그대로 돌려주되(무한루프 금지),
+  //    적어도 조상 순회가 발산하지 않아야 한다.
+  const lone = { parent: null };
+  assert.strictEqual(fn(opaque, {}, lone), 'null');
+
+  // 자식이 자기 힘으로 알 수 없으니 부모가 실어 보내야 한다.
+  assert.ok(/bootJSON\(\)[^\n]*proxyOrigin/.test(rt),
+    'bootJSON 이 proxyOrigin 을 안 실으면 srcdoc 자식은 조상 순회에만 의존하게 된다');
+});
+
+// `iframe.srcdoc` 은 우리가 프렐류드 주입 + URL 리라이트로 **덮어쓴다**. 읽기
+// 표면(getAttribute / 프로퍼티 / 직렬화)이 그 값을 그대로 돌려주면 우리
+// 스크립트 태그와 data-zp-* 가 통째로 노출된다.
+test('srcdoc 은 페이지가 준 원본을 붙들어 두고 읽기 표면이 그걸 돌려준다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.indexOf('const srcdocMeta = new WeakMap()') >= 0, 'srcdoc 원본 보관소가 없다');
+  assert.ok(rt.indexOf('function setInjectedSrcdoc(') >= 0);
+
+  // 주입은 전부 setInjectedSrcdoc 을 지나야 한다 — 한 군데라도 직접 쓰면
+  // 그 경로로 들어온 프레임만 원본을 잃는다(정확히 그렇게 갈라졌던 자리다).
+  // ★이 가드는 처음에 `setAttribute.call(…, 'srcdoc', injectSrcdoc(` 를 찾는
+  // 정규식이었는데, 실제로 되돌려 보니 **안 물었다** — 원래 코드는 속성 이름을
+  // 리터럴이 아니라 변수 `k` 로 넘긴다. 호출부를 훑는 대신 `injectSrcdoc(` 가
+  // 나타나도 되는 자리를 통째로 못박는다.
+  const allowed = (line) =>
+    line.includes('function injectSrcdoc(') ||
+    line.includes('injected = injectSrcdoc(s)') ||
+    line.includes("startsWith(injectSrcdoc(''))");
+  const stray = rt.split(String.fromCharCode(10)).filter((x) => x.includes('injectSrcdoc(') && !allowed(x));
+  assert.deepEqual(stray, [],
+    'injectSrcdoc 결과를 setInjectedSrcdoc 밖에서 직접 심으면 그 경로로 들어온 프레임만 원본을 잃는다');
+
+  // 읽기 세 표면.
+  assert.ok(/localKey === 'srcdoc' && srcdocMeta\.has\(this\)/.test(rt), 'getAttribute 가 원본을 안 돌려준다');
+  assert.ok(/prop === 'srcdoc'\s*\n?\s*\?\s*function \(\) \{ return srcdocMeta\.has\(this\)/.test(rt),
+    'srcdoc 프로퍼티 게터가 원본을 안 돌려준다');
+  assert.ok(rt.indexOf("srcdocMeta.has(origin)") >= 0, '직렬화 세정이 srcdoc 원본을 안 되돌린다');
+});
+
+// 직렬화 표면은 innerHTML/outerHTML 하나가 아니다. XMLSerializer 는 훅이 아예
+// 없어 같은 문서에서 흔적 38건이 그대로 나왔다(2026-08-22 실측).
+test('XMLSerializer.serializeToString 도 같은 세정을 지난다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.indexOf('function scrubbedClone(node)') >= 0, '세정된 복제본을 만드는 함수가 없다');
+  const start = rt.indexOf("define(w.XMLSerializer.prototype, 'serializeToString'");
+  assert.ok(start > 0, 'XMLSerializer 훅이 없다');
+  const body = rt.slice(start, start + 400);
+  assert.ok(body.indexOf('scrubbedClone(node)') >= 0, '훅이 세정을 안 거치면 훅만 있고 막는 건 없다');
+  // Document 를 받을 수 있으므로 outerHTML 경로를 재사용하면 안 된다.
+  assert.ok(body.indexOf('outerHTML') < 0, 'XMLSerializer 는 Document 도 받는다 — outerHTML 경로 재사용 금지');
+});
+
+// 부모가 먼저 계측한 realm 에서는 `captureNative` 가 잡는 게 네이티브가 아니라
+// 부모 멤브레인의 래퍼다. rt wasm 을 그 fetch 로 가져가면 프록시 오리진 URL 이
+// 가상 오리진으로 다시 매핑돼 **타깃 서버가 우리 내부 에셋 요청을 받는다**.
+// 실측(2026-08-22): 프록시 로드 한 번에 픽스처 서버가 9번 받았다.
+test('rt wasm 부팅은 진짜 네이티브 fetch 를 못 잡은 realm 에서는 건너뛴다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.ok(rt.indexOf("const realmPreInstrumented = typeof root.__zp_get === 'function'") >= 0,
+    '선계측 판정이 없다');
+  assert.ok(rt.indexOf('if (!realmPreInstrumented && typeof ZeroProxyRTGlobal') >= 0,
+    'rt 부팅이 선계측 realm 에서 막히지 않는다');
+
+  // URL 은 반드시 프록시 오리진 절대 URL 이어야 한다. 루트 상대 경로는 가상
+  // base(=타깃) 기준으로 풀려 타깃 서버로 나간다.
+  const m = /fetch\(\s*proxyOrigin \+ '\/__zp\/zp_page_rt\.wasm/.exec(rt);
+  assert.ok(m, 'rt wasm URL 이 프록시 오리진 절대 URL 이 아니다');
+});

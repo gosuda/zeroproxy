@@ -1290,3 +1290,58 @@ React 의 `dangerouslySetInnerHTML` 는 string 을 element 의 innerHTML 로 set
 - proxy_origin 절대 URL 발행 누락
 - script kind 분류 오류 (module/classic 오인식)
 - sourcemap composition 회귀
+
+---
+
+## 2026-08-22 — 지문 축 2회차: **직렬화는 표면이 하나가 아니다**, 그리고 세정기가 자기 은폐에 눈멀었다
+
+앞 항목이 남긴 28건을 좁혔다. 넷 다 별개 원인이었고, 셋은 "방어는 있는데 다른
+문으로 들어오면 안 걸린다" 는 같은 모양이다.
+
+### 1. `iframe.srcdoc` — 값을 덮어써 놓고 읽기 표면을 안 고쳤다 (9건)
+
+`srcdoc` 은 우리가 프렐류드 주입 + URL 리라이트를 해서 **통째로 덮어쓴다**.
+살아 있는 속성은 세정기가 훑지만 **속성 값 안의 중첩 마크업**까지는 안 들어가서,
+`outerHTML` 에 우리 스크립트 태그와 `data-zp-*` 가 그대로 나왔다.
+
+값을 사후에 문자열로 씻는 대신 **페이지가 준 원본을 붙들어 둔다**(`srcdocMeta`
+WeakMap). 주입 경로를 `setInjectedSrcdoc` 하나로 모으고 읽기 세 표면
+(`getAttribute` / `srcdoc` 프로퍼티 / 직렬화)이 원본을 돌려준다. 재현성도
+같이 맞는다 — 페이지가 쓴 값을 그대로 돌려주는 게 원래 옳다.
+
+**가드가 안 물었던 이야기**: 처음 건 가드는
+`setAttribute.call(…, 'srcdoc', injectSrcdoc(` 를 찾는 정규식이었는데, 실제로
+되돌려 보니 **안 물었다** — 원래 코드는 속성 이름을 리터럴이 아니라 변수 `k` 로
+넘긴다. 호출부를 훑는 대신 `injectSrcdoc(` 가 나타나도 되는 자리를 통째로
+못박는 형태로 바꿨다. (변이 5종 전부 무는 것 확인.)
+
+### 2. `XMLSerializer.serializeToString` — 훅이 아예 없었다 (38건)
+
+`innerHTML`/`outerHTML` 만 세정하고 있었다. 같은 문서를 `XMLSerializer` 로
+뽑으면 38건이 그대로 나온다. 세정을 게터가 아니라 **복제본**(`scrubbedClone`)에
+걸어 둔 덕에 재사용은 쉬웠다. 단, `XMLSerializer` 는 **Document 도 받는다** —
+`outerHTML` 경로를 재사용하면 안 되고, 트리 순회도 Document(9)/Element(1) 를
+갈라 써야 한다(틀리면 던져서 세정이 통째로 생략된다).
+
+### 3. ★세정기가 **자기 은폐에 눈멀었다** — `outerHTML` 에 우리 스크립트 태그
+
+`isZPAssetNode` 판정은 멀쩡했는데도 `zp-core.js`/`zp-page-bundle.js` 태그가
+남아 있었다. 원인: 세정기가 복제본을 `clone.querySelectorAll('*')` 로 훑는데
+**그 `querySelectorAll` 이 멤브레인 것**이고, 멤브레인은 우리 에셋 스크립트를
+숨긴다. 세정기가 지워야 할 노드를 **볼 수 없었다**. 네이티브로 훑도록 고쳤다.
+
+같은 자리에서 SW 가 문서 앞에 박는 **인라인** 스크립트(`zp_chain` prewarm)와
+CSP meta 도 드러났다 — src 가 없어 URL 로는 판별이 안 된다. `data-zp-internal`
+표식을 달아 세정기가 알아보게 했다.
+
+### 4. 남은 하나: 직렬화가 **프록시 URL** 을 보여 준다
+
+`getAttribute('src')` 는 타깃 URL 을 돌려주는데 `outerHTML` 은 프록시 URL 을
+그대로 보여 줬다. **그 불일치 자체가 한 줄짜리 탐지기다.** 복제본에서 URL 지는
+속성을 타깃 값으로 되돌린다(srcset 은 `recalledSrcset`).
+
+### 교훈
+
+`innerHTML` 을 고쳤다고 "직렬화를 고쳤다" 가 아니다. 그리고 **은폐 계층과 세정
+계층이 서로를 못 보면 은폐가 세정을 무력화한다** — 세정기는 언제나 네이티브
+시점에서 훑어야 한다.

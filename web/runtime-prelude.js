@@ -168,6 +168,69 @@
   clearBootConfig();
   const Native = captureNative(root);
 
+
+  // ★2026-08-22 — `new URL(location.href).origin` 을 그냥 쓰면 **`about:srcdoc`
+  // / `about:blank` 프레임에서 문자열 `"null"` 이 된다**(불투명 오리진). 그
+  // 프레임에도 프렐류드가 주입되므로(injectSrcdoc) 거기서 만든 프록시 URL 이
+  // 전부 `null/zp/api/fetch?url=…` 이라는 **상대 경로**가 됐고, 문서 base 가
+  // 가상 base(=타깃)라 `http://<target>/null/zp/api/fetch?…` 로 풀렸다.
+  // 게다가 `cssProxyURL` 의 "이미 프록시 URL 이면 건드리지 않는다" 판정이
+  // `startsWith(proxyOrigin)` 이라 `"null"` 로는 절대 안 맞아 **이중 프록시**까지
+  // 났다(g6-realm-imageset 테이프에서 확인: `?url=` 안에 또 프록시 URL).
+  // 구멍 매트릭스는 이걸 못 봤다 — 멤브레인이 나중에 원본 URL 을 주워 다시
+  // 부르므로 **도착 축은 켜지기 때문**이다. 지문 축에서만 보였다.
+  //
+  // 이 엔진은 `location.origin` 도 srcdoc/blank 에서 `"null"` 을 준다(대조군
+  // 직접 로드로 확인), 그래서 그쪽으로 갈아타는 것으로는 안 고쳐진다.
+  // 부팅 설정에 부모가 자기 오리진을 실어 보내고(bootJSON), 그것도 없으면
+  // 조상 프레임을 타고 올라가 읽는다.
+  function resolveProxyOrigin(u, bootCfg, w) {
+    const direct = u && u.origin;
+    if (direct && direct !== 'null') return direct;
+    const fromBoot = bootCfg && bootCfg.proxyOrigin;
+    if (fromBoot && fromBoot !== 'null') return String(fromBoot);
+    // 지금 실행 중인 스크립트가 바로 우리 프렉루드다 — 그 src 는 항상
+    // 프록시 오리진이고, 이 시점에는 아직 가상 base 를 안 깔았으므로
+    // 해석 결과도 진짜다(훅도 아직 안 깔렸다).
+    try {
+      const cs = w && w.document && w.document.currentScript;
+      const src = cs && cs.src;
+      if (src) {
+        const o = new URL(String(src)).origin;
+        if (o && o !== 'null') return o;
+      }
+    } catch {}
+    // ★마지막 수단. 조상의 `location` 은 **멤브레인이 가상화해 둔 값**일 수
+    // 있다 — 실측으로 부모 프레임에서 `location.origin` 이 타깃 오리진을
+    // 돌려준다. 그래서 앞의 두 경로가 전부 실패했을 때만 쓴다.
+    try {
+      let f = w;
+      for (let i = 0; i < 32 && f && f.parent && f.parent !== f; i++) {
+        f = f.parent;
+        const o = f.location && f.location.origin;
+        if (o && o !== 'null') return String(o);
+      }
+    } catch { /* cross-origin 조상은 못 읽는다 */ }
+    return direct;
+  }
+
+  const toStringMap = new WeakMap();
+  const toStringMaskedPrototypes = new WeakSet();
+  const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
+  const initialProxyURL = new URL(root.location.href);
+  const proxyOrigin = resolveProxyOrigin(initialProxyURL, boot, root);
+  const proxyHost = proxyOrigin ? proxyOrigin.replace(/^[a-z]+:\/\//i, '') : initialProxyURL.host;
+
+  // ★2026-08-22 — 이 블록은 원래 proxyOrigin 보다 **위에** 있었고, 그래서
+  // wasm URL 이 루트 상대 경로(`/__zp/…`)였다. 문서의 base 는 **가상
+  // base(=타깃)** 라, SW 가 잡지 못하는 문서(srcdoc / blob 프레임)에서는
+  // 그 요청이 그대로 **타깃 서버로** 나갔다. 실측: 프록시 로드 한 번에
+  // 픽스처 서버가 `GET /__zp/zp_page_rt.wasm?v=<빌드 id>` 를 **18번** 받았다.
+  // 타깃은 (a) 프록시를 쓰는다는 사실과 (b) 우리 빌드 id 를 공짜로 얻고,
+  // 우린 그 프레임마다 rt 가속 경로를 통째로 잃었다(404 → JS 폴백).
+  // 구멍 매트릭스는 이걸 못 봤다 — 도착 축이 `/img/<id>` 만 센다.
+  // 그래서 반드시 **프록시 오리진 절대 URL** 이어야 하고, 그러려면 이 블록이
+  // proxyOrigin 보다 아래에 있어야 한다.
   // zp-page-rt (raw WASM, shared memory) — async boot. Once loaded, hot
   // paths can use rt.classifyBatch (MutationObserver batch) and handle-only
   // classifications (urlMeta cache). Until loaded, code paths fall through
@@ -178,20 +241,30 @@
   // before this IIFE runs. The wasm fetch is async; rt stays null until
   // instantiation completes (~10-50ms after page load on warm cache).
   let rt = null;
-  if (typeof ZeroProxyRTGlobal === 'object' && ZeroProxyRTGlobal) {
+  // ★부모가 **이 realm 을 먼저 계측했는지** 를 본다. 그런 프레임에서는
+  // `captureNative` 가 잡은 `Native.fetch` 가 사실 **부모 멤브레인의 래퍼**라,
+  // 프록시 오리진 URL 을 넘겨도 가상 오리진(=타깃)으로 다시 매핑된다.
+  // 실측(2026-08-22): 프록시 로드 한 번에 픽스처 서버가
+  // `GET /__zp/zp_page_rt.wasm?v=<빌드 id>` 를 9번 받았다 — 그 9개가 정확히
+  // 이 부류의 프레임이었다. rt 는 **분류 가속용 최적화**일 뿐이므로,
+  // 진짜 네이티브 fetch 를 못 잡은 realm 에서는 그냥 JS 경로로 간다 —
+  // 타깃에게 우리 존재와 빌드 id 를 알려 주는 것보다 그 편이 싸다.
+  // (`__zp_get` 은 부모가 자식 창에 직접 심는 헬퍼라, 자기 프렉루드가
+  // 돌기 전에 있다면 부모가 먼저 계측했다는 뜻이다.)
+  const realmPreInstrumented = typeof root.__zp_get === 'function';
+  if (!realmPreInstrumented && typeof ZeroProxyRTGlobal === 'object' && ZeroProxyRTGlobal) {
     try {
-      ZeroProxyRTGlobal.load('/__zp/zp_page_rt.wasm?v=__ZP_BUILD_ID__')
+      // ★글루의 `load(url)` 은 **전역 `fetch`** 를 쓴다. 그 fetch 가 불리는 시점에는
+      // 이미 멤브레인이 갈아끼운 버전이라, 프록시 오리진 절대 URL 을 넘겨도
+      // 가상 오리진(=타깃)으로 다시 매핑돼 타깃 서버로 나간다. 바이트를 직접
+      // 당겨 넘기면 멤브레인이 경로에서 아예 빠진다.
+      Native.fetch(proxyOrigin + '/__zp/zp_page_rt.wasm?v=__ZP_BUILD_ID__')
+        .then(r => r.arrayBuffer())
+        .then(buf => ZeroProxyRTGlobal.load(buf))
         .then(instance => { rt = instance; })
         .catch(() => { /* fall back to JS path */ });
     } catch { /* defensive */ }
   }
-
-  const toStringMap = new WeakMap();
-  const toStringMaskedPrototypes = new WeakSet();
-  const origToString = root.Function && root.Function.prototype && root.Function.prototype.toString;
-  const initialProxyURL = new URL(root.location.href);
-  const proxyOrigin = initialProxyURL.origin;
-  const proxyHost = initialProxyURL.host;
   const activeServers = ZP.relayServersForShare(Array.isArray(boot.servers) ? boot.servers : [], { allowLoopbackWS: true });
   let activeProxyPath = initialProxyURL.pathname;
   let activeProxyFragment = preservedShareFragment(initialProxyURL.hash);
@@ -457,7 +530,6 @@
       querySelectorAll: w.Document.prototype.querySelectorAll,
       elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
       elementQuerySelector: w.Element.prototype.querySelector,
-      elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
       documentGetElementsByTagName: w.Document.prototype.getElementsByTagName,
       elementGetElementsByTagName: w.Element.prototype.getElementsByTagName,
       documentScripts: Object.getOwnPropertyDescriptor(w.Document.prototype, 'scripts'),
@@ -3506,11 +3578,7 @@
   function restorePendingSrcdoc(el) {
     if (!el || !Native.hasAttribute.call(el, 'data-zp-srcdoc')) return;
     const pending = Native.getAttribute.call(el, 'data-zp-srcdoc') || '';
-    let injected = null;
-    try { injected = injectSrcdoc(pending); }
-    catch (e) { try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
-    if (injected == null) return;
-    Native.setAttribute.call(el, 'srcdoc', injected);
+    if (!setInjectedSrcdoc(el, pending)) return;
     try { Native.removeAttribute.call(el, 'data-zp-srcdoc'); } catch {}
   }
   function scanNavigationBackstop(root) {
@@ -4250,9 +4318,29 @@
       return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('zp-page-bundle.js'));
     } catch { return false; }
   }
+  // ★2026-08-22 — `iframe.srcdoc` 은 우리가 프렐류드 주입 + URL 리라이트를 한
+  // 결과로 **덮어쓴다**. 그래서 페이지가 그 값을 다시 읽으면(속성 / 프로퍼티 /
+  // 직렬화) 주입한 스크립트 태그와 `data-zp-*` 가 통째로 보인다. 지문 측정에서
+  // 남은 9건이 전부 여기였다 — 살아 있는 속성은 세정기가 훑지만 **속성 값 안의
+  // 중첩 마크업**까지는 안 들어갔다. 값을 사후에 문자열로 씻는 대신 페이지가
+  // 준 원본을 붙들어 두고 읽기 표면이 그것을 돌려주게 한다(재현성도 같이 맞다).
+  const srcdocMeta = new WeakMap();
+  function setInjectedSrcdoc(el, raw) {
+    const s = String(raw == null ? '' : raw);
+    let injected = null;
+    try { injected = injectSrcdoc(s); }
+    catch (e) { try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
+    if (injected == null) return false;
+    srcdocMeta.set(el, s);
+    Native.setAttribute.call(el, 'srcdoc', injected);
+    return true;
+  }
   function isZPAssetNode(node) {
     if (!node || node.nodeType !== 1) return false;
     if (node.id === '__zp-boot') return true;
+    // SW 가 문서 앞에 박는 인라인 스크립트 / CSP meta 는 src 가 없어
+    // URL 로 못 알아본다 — 표식을 보고 떼어낸다.
+    if (Native.hasAttribute && Native.hasAttribute.call(node, 'data-zp-internal')) return true;
     return node.localName === 'script' && isZeroProxyAssetURL(Native.getAttribute.call(node, 'src'));
   }
   function filteredNamedNodeMap(raw) {
@@ -4347,13 +4435,73 @@
   //
   // 복제본을 훑어 우리 속성만 떼고 네이티브 게터로 직렬화하면 구조가 그대로다.
   // 재파싱도 없어져 긴 문서에서 더 싸다.
-  function sanitizeSerializedNode(node, wantOuter) {
+  // 복제 + 세정만 떼어 둔다 — `XMLSerializer.serializeToString` 도 같은
+  // 복제본이 필요한데 거기엔 outerHTML 이 없다(Document 를 받는다).
+  // 프록시 URL 을 그 안에 실린 타깃으로 되돌린다. 한 값에 여럿이 들어있을 수
+  // 있으므로(style 의 url(…), srcset 목록) 전역 치환이다.
+  function deproxySerializedValue(raw) {
+    const s = String(raw == null ? '' : raw);
+    if (!s || s.indexOf(proxyOrigin) < 0) return s;
+    return s.replace(proxyURLScanRE(), (m) => {
+      let u;
+      try { u = new Native.URL(m); } catch { return m; }
+      const p = u.pathname;
+      if (p === ZP.apiPath('fetch')) return u.searchParams.get('url') || m;
+      if (p === ZP.apiPath('script') || p === ZP.apiPath('worker-script') || p === ZP.apiPath('sourcemap')) return u.searchParams.get('u') || m;
+      return m;
+    });
+  }
+  let proxyURLScanCache = null;
+  function proxyURLScanRE() {
+    if (!proxyURLScanCache) {
+      const esc = proxyOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // URL 로 허용되는 문자만 이어 붙인다. 따옴표/공백/괄호로 끊는 방식보다
+      // 이쪽이 `style` 안의 `url("…")` 같은 자리에서 덜 위험하다.
+      proxyURLScanCache = new RegExp(esc + '[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%]*', 'g');
+    }
+    proxyURLScanCache.lastIndex = 0;
+    return proxyURLScanCache;
+  }
+  function scrubbedClone(node) {
     let clone;
     try { clone = node.cloneNode(true); } catch { clone = null; }
-    if (!clone) return '';
-    const scrub = (el) => {
+    if (!clone) return null;
+    // `origin` 은 복제본에 대응하는 **원본** 요소다. WeakMap 에 매달아 둔 것
+    // (srcdoc 원본)은 복제본으로는 못 찾으므로 두 트리를 나란히 걷는다 —
+    // cloneNode(true) 는 순서를 보존하므로 인덱스가 그대로 맞는다.
+    const scrub = (el, origin) => {
       restoreVisibleLinkState(el);
       if (isZPAssetNode(el)) { try { el.remove(); } catch {} return; }
+      if (origin && srcdocMeta.has(origin)) {
+        try { Native.setAttribute.call(el, 'srcdoc', srcdocMeta.get(origin)); } catch {}
+      }
+      // ★직렬화는 URL 도 되돌려야 한다. `getAttribute('src')` 는 타깃 URL 을
+      // 돌려주는데 `outerHTML` 은 프록시 URL 을 그대로 보여 줬다 — 그
+      // 불일치 자체가 한 줄짜리 탐지기다(둘을 비교하면 끝).
+      //
+      // 서버측 htmltx 가 고친 값에는 `data-zp-target-url` 이 **없다**(실측: 41개
+      // 전부 null). 그래서 원본을 기억해 둔 것이 있으면 그걸 쓰고, 없으면
+      // **값 안에 박힌 프록시 URL 을 그자리에서 푸는다** — `?url=` 에 타깃이
+      // 들어 있으므로 별도 장부가 필요 없다. `style` 의 url(…) 과 srcset
+      // 목록처럼 한 값에 여럿이 들어있는 경우까지 같은 규칙으로 덩는다.
+      if (Native.getAttributeNames) {
+        const tag = el.localName;
+        for (const name of Native.getAttributeNames.call(el)) {
+          if (isZPAttrName(name)) continue;
+          const localKey = attrLocalName(name);
+          let want;
+          if (origin && isURLBearing(el, name, localKey, tag) && !usesRawURLAttribute(el, name, localKey)) {
+            const recalled = (localKey === 'srcset' || localKey === 'imagesrcset') ? recalledSrcset(origin, name) : undefined;
+            want = recalled !== undefined ? recalled : (urlMeta.get(origin) || Native.getAttribute.call(origin, 'data-zp-target-url') || undefined);
+          }
+          if (want === undefined) {
+            const raw = Native.getAttribute.call(el, name);
+            const d = deproxySerializedValue(raw);
+            if (d !== raw) want = d;
+          }
+          if (want !== undefined && want !== null) { try { Native.setAttribute.call(el, name, want); } catch {} }
+        }
+      }
       if (Native.getAttributeNames) {
         for (const name of Native.getAttributeNames.call(el)) {
           if (isZPAttrName(name)) { try { Native.removeAttribute.call(el, name); } catch {} }
@@ -4361,9 +4509,29 @@
       }
     };
     try {
-      if (clone.nodeType === 1) scrub(clone);
-      for (const el of clone.querySelectorAll('*')) scrub(el);
+      if (clone.nodeType === 1) scrub(clone, node);
+      // ★말려든 자리: 멤브레인의 `querySelectorAll` 은 **우리 에셋
+      // 스크립트를 숨긴다**. 그걸 그대로 쓰면 세정기가 그 노드를
+      // 못 보고 복제본에 그대로 남긴다 — 즉 자기 은폐에 자기가 눈이
+      // 멀었다. 실측: `outerHTML` 에 zp-core.js / zp-page-bundle.js 태그가
+      // 그대로 남아 있었다. 네이티브로 훑어야 한다.
+      // Document(9) 와 Element(1) 은 같은 메서드가 아니다 — XMLSerializer 는
+      // Document 를 받을 수 있으므로 틀리면 던져서 세정이 통째로 생략된다.
+      const all = (n) => {
+        const native = n && n.nodeType === 9 ? Native.querySelectorAll : Native.elementQuerySelectorAll;
+        if (native) { try { return native.call(n, '*'); } catch {} }
+        return n && n.querySelectorAll ? n.querySelectorAll('*') : [];
+      };
+      const cloned = all(clone);
+      const origins = all(node);
+      const paired = origins.length === cloned.length;
+      for (let i = 0; i < cloned.length; i++) scrub(cloned[i], paired ? origins[i] : null);
     } catch {}
+    return clone;
+  }
+  function sanitizeSerializedNode(node, wantOuter) {
+    const clone = scrubbedClone(node);
+    if (!clone) return '';
     try {
       if (wantOuter) {
         return Native.elementOuterHTML && Native.elementOuterHTML.get
@@ -4552,7 +4720,7 @@
           return setSubresourceAttribute(this, k, subresourceProxyPath(t));
         }
       }
-      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') return Native.setAttribute.call(this, k, injectSrcdoc(String(v)));
+      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') { setInjectedSrcdoc(this, v); return undefined; }
       return Native.setAttribute.call(this, k, v);
     });
     if (Native.setAttributeNS) define(w.Element.prototype, 'setAttributeNS', function(ns, k, v) {
@@ -4611,6 +4779,7 @@
         const recalled = recalledSrcset(this, key);
         return recalled !== undefined ? recalled : Native.getAttribute.call(this, k);
       }
+      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc' && srcdocMeta.has(this)) return srcdocMeta.get(this);
       if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
       return Native.getAttribute.call(this, k);
     });
@@ -4658,6 +4827,18 @@
     installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
+    // ★2026-08-22 — `innerHTML`/`outerHTML` 만 세정하고 있었다.
+    // `new XMLSerializer().serializeToString(document.documentElement)` 은 훅이
+    // 아예 없어서 같은 문서에서 **38건**의 흔적이 그대로 나왔다(실측). 직렬화는
+    // 표면이 하나가 아니다 — 세정을 게터가 아니라 **복제본**에 걸어 둔 덕에
+    // 여기서는 그 복제본을 그대로 재사용하면 된다.
+    if (w.XMLSerializer && w.XMLSerializer.prototype && typeof w.XMLSerializer.prototype.serializeToString === 'function') {
+      const nativeSerialize = w.XMLSerializer.prototype.serializeToString;
+      define(w.XMLSerializer.prototype, 'serializeToString', function(node) {
+        const clone = node && typeof node.cloneNode === 'function' ? scrubbedClone(node) : null;
+        return nativeSerialize.call(this, clone || node);
+      });
+    }
     define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
     // Document.prototype.write / writeln wrap. 인스턴스 레벨이 아니라 proto
     // 레벨이라 같은 realm 의 모든 Document 인스턴스에 적용. 부모 install 시
@@ -5464,16 +5645,12 @@
       // 파싱되지 않으므로 fail-closed 다.
       if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'data-zp-srcdoc')) {
         const pending = Native.getAttribute.call(node, 'data-zp-srcdoc') || '';
-        let injected = null;
-        try { injected = injectSrcdoc(pending); }
-        catch (e) { try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
-        if (injected != null) {
-          Native.setAttribute.call(node, 'srcdoc', injected);
+        if (setInjectedSrcdoc(node, pending)) {
           try { Native.removeAttribute.call(node, 'data-zp-srcdoc'); } catch {}
         }
       }
-      if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc')) {
-        Native.setAttribute.call(node, 'srcdoc', injectSrcdoc(Native.getAttribute.call(node, 'srcdoc') || ''));
+      if ((tag === 'iframe' || tag === 'frame') && Native.hasAttribute.call(node, 'srcdoc') && !srcdocMeta.has(node)) {
+        setInjectedSrcdoc(node, Native.getAttribute.call(node, 'srcdoc') || '');
       }
       if (tag === 'script') {
         const dtype = executableScriptDataType(node);
@@ -5561,7 +5738,9 @@
   // 실행할 여지가 있었다. `assetURL()` 이 emit 전용(쿼리 포함)이고
   // `assetPath()` 는 경로 비교 전용이다 — 섞으면 internalPath 가 불일치한다.
   function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + transformHTML(String(s)); }
-  function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
+  // `proxyOrigin` 을 실어 보내는 이유는 resolveProxyOrigin 주석에 있다 —
+  // 자식이 `about:srcdoc` 이면 자기 힘으로는 오리진을 알 수 없다.
+  function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }
   function rewriteEventAttribute(source) { return 'return __ZP_EXEC_EVENT(this,event,' + JSON.stringify(String(source || '')).replace(/</g, '\\u003c') + ')'; }
   function syncBaseElement(node) {
     if (!node) return;
@@ -5659,7 +5838,9 @@
     }
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'srcdoc') {
       const raw = Native.getAttribute.call(el, 'srcdoc');
-      if (raw && !raw.startsWith(injectSrcdoc(''))) Native.setAttribute.call(el, 'srcdoc', injectSrcdoc(String(raw)));
+      // 재주입 방지는 이제 WeakMap 이 본다. 문자열 접두 비교는 `?v=` 버전
+      // 쿼리를 달고 다녀서 늘 아슬아슬했다 — 뒤의 비교는 남은 안전망이다.
+      if (raw && !srcdocMeta.has(el) && !raw.startsWith(injectSrcdoc(''))) setInjectedSrcdoc(el, raw);
       instrumentIframe(el);
       return;
     }
@@ -5994,9 +6175,11 @@
       if (!d || !d.set) return;
       try {
         Object.defineProperty(proto, prop, {
-          get: d.get,
+          get: prop === 'srcdoc'
+            ? function () { return srcdocMeta.has(this) ? srcdocMeta.get(this) : d.get.call(this); }
+            : d.get,
           set(v) {
-            if (prop === 'srcdoc') d.set.call(this, injectSrcdoc(String(v)));
+            if (prop === 'srcdoc') setInjectedSrcdoc(this, v);
             else {
               const t = String(v).startsWith(proxyOrigin) ? null : targetURLForElement(this, v);
               if (t) {
@@ -6010,6 +6193,11 @@
           },
           configurable: false
         });
+        // srcdoc 게터를 JS 함수로 갈아끼웠으므로 toString 위장을 같이 건다 —
+        // 안 하면 "게터 소스를 읽어 본다" 는 흔한 검사에 우리만 튄다.
+        const installed = Object.getOwnPropertyDescriptor(proto, prop);
+        if (installed && typeof installed.get === 'function' && installed.get !== d.get) toStringMap.set(installed.get, nativeAccessorSource('get', prop));
+        if (installed && typeof installed.set === 'function') toStringMap.set(installed.set, nativeAccessorSource('set', prop));
       } catch {}
     }
   }

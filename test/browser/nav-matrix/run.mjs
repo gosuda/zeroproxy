@@ -38,6 +38,14 @@ for (const c of cases) {
   const controlHits = await get(FIX + '/hits');
   const controlLanded = Object.values(controlHits).flat().some(u => u.includes('/landed/' + c.id));
 
+  // ★대조군을 **멈춰 놓고** 테이프를 비운다. 이게 없으면 대조군이 진행 중이던
+  // 리다이렉트 체인의 나머지 홉이 `--clear` **이후**에 도착해, 프록시 단계의
+  // "직접 문서 요청" 으로 잡힌다. 60홉짜리 n13 에서 정확히 그러서
+  // **없는 탈출이 한 번 찍혔다**(손으로 재현하면 직접 요청 0). 구멍/내비게이션
+  // 매트릭스에서 반복된 계측 결함과 같은 부류다 — **측정은 앞 단계가 끝난
+  // 다음에 시작해야 한다.**
+  tw('navigate', '-i', ID, '--url', 'about:blank');
+  await sleep(1500);
   await fetch(FIX + '/reset');
   tw('dump-recording', '-i', ID, '--clear');
   tw('navigate', '-i', ID, '--url', PROXY + '/zp/');
