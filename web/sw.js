@@ -755,8 +755,8 @@ function internalPath(path) {
   // page-rt fails to instantiate → URL classification falls back → some
   // sites (GitHub) hit subtle membrane bugs that surface as React
   // hydration errors → "Looks like something went wrong" SSR fallback.
-  if (path.startsWith('/__zp/')) return true;
-  return path === ZP.assetPath('zp-core.js') || path === ZP.assetPath('zp-page-bundle.js') || path === ZP.assetPath('runtime-prelude.js') || path === ZP.assetPath('worker-prelude.js') || path === ZP.controlPath('worker-bootstrap.js') || path === ZP.assetPath('favicon.ico') || path === ZP.assetPath('manifest.webmanifest');
+  // ★목록은 zp-core 가 갖는다(세 벌이었고 집합이 갈라져 있었다).
+  return ZP.isInternalPath(path);
 }
 function isRuntimeAPIPath(path) {
   return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';

@@ -2643,32 +2643,18 @@
     // `<proxy>/zp/?via=<login url>` with no stash. Handing that back makes
     // `targetURL()` faithfully dial `proxy.localhost:18080` and the submit dies
     // as TARGET_CONNECT_FAILED — i.e. logging in was impossible. So unwrap the
-    // launcher back to its target, the same shapes `deproxyEntryName` handles
-    // for resource-timing names.
-    function deproxyNavigationURL(raw) {
-      const s = String(raw == null ? '' : raw);
-      if (!s || s.lastIndexOf(proxyOrigin, 0) !== 0) return s;
-      let u;
-      try { u = new Native.URL(s); } catch { return s; }
-      const via = u.searchParams.get('via');
-      if (via) return via;
-      // `/zp/p/<token>` is encrypted — nothing to decode client-side. The current
-      // document's target is the only sane guess and is right for the common
-      // case (a form posting back to its own page). Any other proxy-origin
-      // action gets the same treatment: it is certainly not a dialable host.
-      return virtualURL.href;
-    }
+    // launcher back to its target. 되돌리기 규칙은 `deproxyURL` 한 곳에 있다.
     function submissionActionURL(form, submitter) {
       if (submitter && submitter.hasAttribute && submitter.hasAttribute('formaction')) {
         const fa = urlMeta.get(submitter)
           || Native.getAttribute.call(submitter, 'data-zp-target-url')
           || submitter.getAttribute('formaction');
-        if (fa) return deproxyNavigationURL(fa);
+        if (fa) return deproxyURL(fa, { fallback: 'any' });
       }
       const action = urlMeta.get(form)
         || Native.getAttribute.call(form, 'data-zp-target-url')
         || (form.getAttribute && form.getAttribute('action'));
-      return (action && deproxyNavigationURL(action)) || virtualURL.href;
+      return (action && deproxyURL(action, { fallback: 'any' })) || virtualURL.href;
     }
     async function submitFormNavigation(form, submitter) {
       const raw = submissionActionURL(form, submitter);
@@ -3869,29 +3855,12 @@
     // in the query string (`?url=` / `?u=`), and `/zp/p/<token>` documents map
     // to the virtual URL.
     try {
-      const deproxyEntryName = (raw) => {
-        const s = String(raw == null ? '' : raw);
-        if (!s || s.lastIndexOf(proxyOrigin, 0) !== 0) return s;
-        let u;
-        try { u = new Native.URL(s); } catch { return s; }
-        const p = u.pathname;
-        if (p === ZP.apiPath('fetch')) return u.searchParams.get('url') || s;
-        if (p === ZP.apiPath('script') || p === ZP.apiPath('worker-script') || p === ZP.apiPath('sourcemap')) {
-          return u.searchParams.get('u') || s;
-        }
-        // Navigation launcher (`/zp/?via=<target>`) and the document route
-        // (`/zp/p/<token>`) both stand in for a page URL.
-        const via = u.searchParams.get('via');
-        if (via) return via;
-        if (/^\/zp\/p\//.test(p)) return virtualURL.href;
-        return s;
-      };
       const entryProto = w.PerformanceEntry && w.PerformanceEntry.prototype;
       const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
       if (nameDesc && typeof nameDesc.get === 'function') {
         const nativeName = nameDesc.get;
         Object.defineProperty(entryProto, 'name', {
-          get() { return deproxyEntryName(nativeName.call(this)); },
+          get() { return deproxyURL(nativeName.call(this), { fallback: 'share' }); },
           configurable: true,
           enumerable: nameDesc.enumerable
         });
@@ -3901,7 +3870,7 @@
         if (typeof nativeToJSON === 'function') {
           define(entryProto, 'toJSON', function toJSON() {
             const out = nativeToJSON.call(this);
-            try { if (out && typeof out === 'object' && 'name' in out) out.name = deproxyEntryName(out.name); } catch {}
+            try { if (out && typeof out === 'object' && 'name' in out) out.name = deproxyURL(out.name, { fallback: 'share' }); } catch {}
             return out;
           });
         }
@@ -4315,7 +4284,9 @@
     if (!raw) return false;
     try {
       const u = new URL(String(raw), proxyOrigin);
-      return u.origin === proxyOrigin && (u.pathname === ZP.assetPath('zp-core.js') || u.pathname === ZP.assetPath('runtime-prelude.js') || u.pathname === ZP.assetPath('zp-page-bundle.js'));
+      // 목록은 zp-core 단일 소스다. 예전에는 여기가 sw.js 목록의
+      // **부분집합**(3/7)이라 빠진 자산은 직렬화 세정에서 안 지워졌다.
+      return u.origin === proxyOrigin && ZP.isInternalAssetScriptPath(u.pathname);
     } catch { return false; }
   }
   // ★2026-08-22 — `iframe.srcdoc` 은 우리가 프렐류드 주입 + URL 리라이트를 한
@@ -4439,17 +4410,38 @@
   // 복제본이 필요한데 거기엔 outerHTML 이 없다(Document 를 받는다).
   // 프록시 URL 을 그 안에 실린 타깃으로 되돌린다. 한 값에 여럿이 들어있을 수
   // 있으므로(style 의 url(…), srcset 목록) 전역 치환이다.
-  function deproxySerializedValue(raw) {
+  // ★프록시 URL → 타깃 되돌리기는 **구현이 세 벌이었고 표가 서로 달랐다**
+  // (2026-08-22 정리). 내비게이션판은 `?url=`/`&u=` 를 몰라서 'virtualURL'
+  // 을 돌려줬다 — 틀렸는데 그럴듯한 값이라 조용히 지나간다. 한 벌로 묶고
+  // 호출자별 차이를 **옵션으로만** 남긴다.
+  //
+  //   scan     : 한 값 안에 여럿이 들어 있을 수 있다(style 의 url(…), srcset 목록).
+  //   fallback : 모르는 모양을 만났을 때 무엇을 돌려줄 것인가.
+  //              'none'  — 원본 그대로(직렬화: 없는 값을 지어내지 않는다)
+  //              'share' — 공유 문서 경로면 현재 가상 URL(리소스 타이밍)
+  //              'any'   — 프록시 오리진이면 무조건 현재 가상 URL(폼 액션)
+  function deproxyURL(raw, opts) {
     const s = String(raw == null ? '' : raw);
     if (!s || s.indexOf(proxyOrigin) < 0) return s;
-    return s.replace(proxyURLScanRE(), (m) => {
+    const scan = !!(opts && opts.scan);
+    const fallback = (opts && opts.fallback) || 'none';
+    const one = (m) => {
       let u;
       try { u = new Native.URL(m); } catch { return m; }
+      if (u.origin !== proxyOrigin) return m;
       const p = u.pathname;
       if (p === ZP.apiPath('fetch')) return u.searchParams.get('url') || m;
       if (p === ZP.apiPath('script') || p === ZP.apiPath('worker-script') || p === ZP.apiPath('sourcemap')) return u.searchParams.get('u') || m;
+      // 런처(`/zp/?via=<target>`) 와 문서 경로(`/zp/p/<token>`) 는 둘 다 페이지 URL
+      // 을 대신한다. 토큰은 암호화돼 있어 클라이언트에서 풀 수 없다.
+      const via = u.searchParams.get('via');
+      if (via) return via;
+      if (fallback === 'any') return virtualURL.href;
+      if (fallback === 'share' && ZP.isSharePath(p)) return virtualURL.href;
       return m;
-    });
+    };
+    if (scan) return s.replace(proxyURLScanRE(), one);
+    return s.lastIndexOf(proxyOrigin, 0) === 0 ? one(s) : s;
   }
   let proxyURLScanCache = null;
   function proxyURLScanRE() {
@@ -4496,7 +4488,7 @@
           }
           if (want === undefined) {
             const raw = Native.getAttribute.call(el, name);
-            const d = deproxySerializedValue(raw);
+            const d = deproxyURL(raw, { scan: true });
             if (d !== raw) want = d;
           }
           if (want !== undefined && want !== null) { try { Native.setAttribute.call(el, name, want); } catch {} }
@@ -4540,19 +4532,6 @@
       return Native.elementInnerHTML && Native.elementInnerHTML.get
         ? Native.elementInnerHTML.get.call(clone) : clone.innerHTML;
     } catch { return ''; }
-  }
-  function sanitizeSerializedHTML(html) {
-    const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
-    const container = parserDoc.createElement('div');
-    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, String(html || ''));
-    else container.innerHTML = String(html || '');
-    const nodes = Array.from(container.querySelectorAll('*'));
-    for (const node of nodes) {
-      restoreVisibleLinkState(node);
-      if (isZPAssetNode(node)) { node.remove(); continue; }
-      if (Native.getAttributeNames) for (const name of Native.getAttributeNames.call(node)) if (isZPAttrName(name)) Native.removeAttribute.call(node, name);
-    }
-    return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }
 
   function installStealthMembrane(w) {

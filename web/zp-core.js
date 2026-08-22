@@ -147,6 +147,28 @@
   function assetPath(name) { return ASSET_PREFIX + String(name || '').replace(/^\/+/, ''); }
   function assetURL(name) { return assetPath(name) + ASSET_VERSION_QUERY; }
   function versionedAsset(absolutePath) { return String(absolutePath || '') + ASSET_VERSION_QUERY; }
+  // ★2026-08-22 — "우리 자산" 목록이 세 벌이었고 집합이 서로 달랐다.
+  // sw.js `internalPath` 는 7개, prelude 의 자기 스크립트 판별은 3개(부분집합),
+  // Go 는 `/__zp/` 파일명을 따로 하드코딩. 프렐류드가 못 알아보는 자산은
+  // **직렬화 세정에서 안 지워진다** — 이번 세션에 같은 부류를 한 번 밟았다.
+  // 새 자산을 추가할 자리는 이제 여기 하나다.
+  //
+  // 둘로 나눠 두는 이유: 페이지가 스크립트 태그로 만날 수 있는 것(SCRIPTS)과,
+  // SW 가 "내부 경로라 타깃으로 보내면 안 되는 것"(전체)은 범위가 다르다.
+  // favicon/manifest 는 문서에 링크로 실려 살아 있어야 하므로 스크립트 판별에
+  // 넣지 않는다.
+  const INTERNAL_ASSET_SCRIPTS = Object.freeze(['zp-core.js', 'zp-page-bundle.js', 'runtime-prelude.js', 'worker-prelude.js']);
+  const INTERNAL_ASSET_OTHER = Object.freeze(['favicon.ico', 'manifest.webmanifest']);
+  function isInternalAssetScriptPath(path) { return INTERNAL_ASSET_SCRIPTS.some(n => path === assetPath(n)); }
+  function isInternalPath(path) {
+    const p = String(path || '');
+    // `/__zp/*` 는 wasm-bindgen 산출물 접두다. 여기서 claim 하지 않으면 SW 가
+    // VIRTUAL_SUBRESOURCE 로 분류해 가상 base(=타깃) 기준으로 리라이트한다.
+    if (p.startsWith('/__zp/')) return true;
+    if (isInternalAssetScriptPath(p)) return true;
+    if (INTERNAL_ASSET_OTHER.some(n => p === assetPath(n))) return true;
+    return p === controlPath('worker-bootstrap.js');
+  }
   function apiPath(name) { return controlPath('api/' + String(name || '').replace(/^\/+/, '')); }
   function errorPath(code) { return controlPath('error/' + encodeURIComponent(String(code || 'POLICY_BLOCKED'))); }
   function makeSharePath(encrypted) { return controlPath('p/' + encrypted); }
@@ -250,7 +272,7 @@
     const h = String(host || '').toLowerCase();
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

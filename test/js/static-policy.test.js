@@ -547,7 +547,8 @@ test('client-less /favicon.ico is answered locally, never from the target', () =
 // internal API paths.
 test('performance entry names are de-proxied back to target URLs', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.match(rt, /const deproxyEntryName = \(raw\) =>/, 'deproxyEntryName helper missing');
+  // 되돌리기 규칙 자체는 아래 '프록시 URL 되돌리기는 한 벌이다' 가 실행으로 잡는다.
+  assert.match(rt, /function deproxyURL\(raw, opts\)/, '되돌리기 구현이 없다');
   // Recovers the target from our own proxy URL shapes.
   assert.match(rt, /p === ZP\.apiPath\('fetch'\)[\s\S]{0,80}searchParams\.get\('url'\)/,
     'fetch API path must map back via ?url=');
@@ -638,12 +639,10 @@ test('form submit resolves target from urlMeta, not the rewritten action attribu
   // carries `action="<proxy>/zp/?via=…"` with no `data-zp-target-url`, so the
   // raw-attribute fallback handed our own origin back and the submit died as
   // TARGET_CONNECT_FAILED against proxy.localhost — login was impossible.
-  assert.match(body, /deproxyNavigationURL\(fa\)/, 'formaction fallback must be unwrapped');
-  assert.match(body, /deproxyNavigationURL\(action\)/, 'action fallback must be unwrapped');
-  assert.match(rt, /function deproxyNavigationURL\(raw\)[\s\S]{0,700}?searchParams\.get\('via'\)/,
-    'the unwrapper must decode the ?via= launcher');
-  assert.match(rt, /function deproxyNavigationURL\(raw\)[\s\S]{0,900}?return virtualURL\.href;\s*\}/,
-    'a proxy-origin action with no via must fall back to the document target, never the proxy origin');
+  // 폼은 모르는 모양을 만나면 문서의 타깃으로 떨어져야 한다(fallback: 'any').
+  // 아니면 프록시 오리진을 그대로 다이얼해 TARGET_CONNECT_FAILED 로 죽는다.
+  assert.match(body, /deproxyURL\(fa, \{ fallback: 'any' \}\)/, 'formaction fallback must be unwrapped');
+  assert.match(body, /deproxyURL\(action, \{ fallback: 'any' \}\)/, 'action fallback must be unwrapped');
 });
 
 // B4: EventSource fidelity. WHATWG SSE §9.2 — auto-reconnect after a soft
@@ -1363,7 +1362,10 @@ test('page-realm prelude routes JS through ZPBundle only (Step 2.3 + 2.4 + 3)', 
   // Go server allowlists the new asset on both legacy + canonical paths.
   assert.match(mainGo, /"zp-page-bundle\.js"/, 'Go server must allow the new asset name');
   // SW injects the bundle <script> tag alongside the legacy rewriter.
-  assert.match(sw, /assetPath\('zp-page-bundle\.js'\)/, "SW must inject zp-page-bundle.js script tag");
+  // ★주입은 `assetURL`(= `?v=` 붙는 쪽)로 한다. 예전 가드는 `assetPath` 를
+  // 찾았고, 그건 주입이 아니라 **`internalPath` 목록**에 매치하고 있었다 —
+  // 목록을 zp-core 로 옮기자마자 드러났다. 재는 것과 말하는 것이 달랐다.
+  assert.match(sw, /assetURL\('zp-page-bundle\.js'\)/, "SW must inject zp-page-bundle.js script tag");
   // Prelude: callPageRewriter routes ONLY through ZPBundle.
   assert.match(rt, /function callPageRewriter\b/, 'prelude must define callPageRewriter helper');
   const fnMatch = rt.match(/function callPageRewriter\([\s\S]*?^    \}/m);
@@ -2623,6 +2625,14 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
     apiPath: (p) => '/zp/api/' + p,
     assetPath: (n) => '/zp/' + n,
   };
+  // 내부 경로 판정은 zp-core 가 단일 소스다 — 스텁을 따로 쓰면 그 순간
+  // **또 하나의 사본**이 된다. 진짜 구현을 뜯어 실행한다.
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  ZP.isInternalPath = new Function(
+    'assetPath', 'controlPath',
+    core.slice(core.indexOf('  const INTERNAL_ASSET_SCRIPTS'), core.indexOf('  function apiPath('))
+      + '\nreturn isInternalPath;'
+  )(ZP.assetPath, ZP.controlPath);
   const ORIGIN = 'http://proxy.localhost:18080';
   const classifyWith = (ctx) => new Function(
     'ZP', 'ORIGIN', 'contextFor', 'parseSharePath', 'shareRoutes', 'self',
@@ -2959,8 +2969,13 @@ test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', 
   // 실제 의미까지 고정한다 — 소스에서 두 함수를 뜯어 그대로 실행한다.
   const helperStart = rt.indexOf('function isIndexKey(prop)');
   assert.ok(helperStart > 0);
-  const helper = rt.slice(helperStart, rt.indexOf('function sanitizeSerializedHTML(', helperStart));
-  const make = new Function('isZPAttrName', helper + '; return filteredCollection;')(n => String(n || '').startsWith('data-zp-'));
+  // 경계는 다음 함수 선언이다. 예전에는 `sanitizeSerializedHTML` 을 경계로
+  // 썼는데, 그 함수는 호출자가 0이 되어 지웠다 — 죽은 코드를 슬라이스 경계로
+  // 쓰면 정리할 때마다 가드가 같이 깨진다.
+  const helper = rt.slice(helperStart, rt.indexOf('\n  function deproxyURL(', helperStart));
+  // 개행이 필수다 — 슬라이스가 `//` 주석 줄에서 끝나면 뒤에 붙인 `return` 이
+  // 통째로 그 주석에 먹혀 `new Function` 이 undefined 를 돌려준다(한 번 밟았다).
+  const make = new Function('isZPAttrName', helper + '\n; return filteredCollection;')(n => String(n || '').startsWith('data-zp-'));
 
   const raw = [{ name: 'a' }, { name: 'data-zp-x' }, { name: 'b' }, { name: 'c' }];
   const list = make(raw, item => !isZPName(item));
@@ -3709,4 +3724,96 @@ test('rt wasm 부팅은 진짜 네이티브 fetch 를 못 잡은 realm 에서는
   // base(=타깃) 기준으로 풀려 타깃 서버로 나간다.
   const m = /fetch\(\s*proxyOrigin \+ '\/__zp\/zp_page_rt\.wasm/.exec(rt);
   assert.ok(m, 'rt wasm URL 이 프록시 오리진 절대 URL 이 아니다');
+});
+
+// ── 프록시 URL 되돌리기는 한 벌이다 (2026-08-22) ───────────────────────────
+//
+// 세 벌이었다: 내비게이션(`deproxyNavigationURL`) / 리소스 타이밍
+// (`deproxyEntryName`) / 직렬화(`deproxySerializedValue`). 표가 서로 달랐고,
+// 내비게이션판은 `?url=`/`&u=` 를 아예 몰라서 **모르는 모양이면 현재 문서 URL**
+// 을 돌려줬다 — 틀렸는데 그럴듯한 값이라 조용히 지나간다.
+//
+// 이제 하나이고, 호출자별 차이는 옵션 두 개뿐이다. 여기서는 그 표를 **실행해서**
+// 고정한다 — "함수가 있는가" 가 아니라 "같은 입력에 같은 출력인가".
+test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 실행으로 고정', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const grab = (head) => {
+    const start = rt.indexOf(head);
+    assert.ok(start >= 0, head + ' 을 못 찾았다');
+    const next = rt.indexOf('\n  function ', start + 1);
+    return rt.slice(start, next < 0 ? undefined : next);
+  };
+  // deproxyURL 바로 뒤에 스캔 정규식 헬퍼가 붙어 있어 한 번에 딸려 온다.
+  const src = rt.slice(rt.indexOf('  function deproxyURL(raw, opts) {'), rt.indexOf('  function scrubbedClone(node) {'));
+
+  const PROXY = 'http://proxy.example';
+  const VIRT = 'https://target.example/page';
+  const make = () => new Function('proxyOrigin', 'ZP', 'Native', 'virtualURL',
+    src + '\nreturn deproxyURL;'
+  )(PROXY, {
+    apiPath: (n) => '/zp/api/' + n,
+    isSharePath: (p) => p.startsWith('/zp/p/'),
+  }, { URL }, new URL(VIRT));
+  const f = make();
+
+  const T = 'https://t.example/a.png';
+  const enc = encodeURIComponent(T);
+
+  // 1) 세 호출자 **모두** 알아야 하는 모양 — 예전에 내비게이션판만 몰랐다.
+  for (const opts of [{ fallback: 'any' }, { fallback: 'share' }, { scan: true }]) {
+    assert.equal(f(PROXY + '/zp/api/fetch?url=' + enc + '&tab=x', opts), T,
+      JSON.stringify(opts) + ': ?url= 를 못 푼다');
+    assert.equal(f(PROXY + '/zp/api/script?kind=classic&u=' + enc, opts), T,
+      JSON.stringify(opts) + ': &u= 를 못 푼다');
+    assert.equal(f(PROXY + '/zp/?via=' + enc, opts), T,
+      JSON.stringify(opts) + ': ?via= 를 못 푼다');
+    // 우리 오리진이 아니면 손대지 않는다.
+    assert.equal(f('https://other.example/x', opts), 'https://other.example/x');
+  }
+
+  // 2) 호출자별로 **달라야** 하는 것: 모르는 모양의 처리.
+  //    폼 액션은 문서 타깃으로 떨어져야 하고(프록시를 다이얼하면 죽는다),
+  //    타이밍은 공유 문서 경로일 때만, 직렬화는 없는 값을 지어내지 않는다.
+  const unknown = PROXY + '/zp/whatever';
+  assert.equal(f(unknown, { fallback: 'any' }), VIRT, "폼: 모르면 문서 타깃");
+  assert.equal(f(unknown, { fallback: 'share' }), unknown, '타이밍: 공유 경로가 아니면 그대로');
+  assert.equal(f(PROXY + '/zp/p/tok', { fallback: 'share' }), VIRT, '타이밍: 공유 경로는 문서 타깃');
+  assert.equal(f(unknown, { scan: true }), unknown, '직렬화: 없는 값을 지어내지 않는다');
+
+  // 3) scan 모드만 한 값 안의 **여럿**을 푼다 (style 의 url(…), srcset 목록).
+  const two = 'url("' + PROXY + '/zp/api/fetch?url=' + enc + '"), url(\'' + PROXY + '/zp/api/fetch?url=' + encodeURIComponent('https://t.example/b.png') + '\')';
+  assert.equal(f(two, { scan: true }), 'url("' + T + '"), url(\'https://t.example/b.png\')');
+  // scan 이 아니면 값 전체가 하나의 URL 일 때만 푼다 — 중간에 박힌 건 안 건드린다.
+  assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
+});
+
+// ── "우리 자산" 목록은 zp-core 한 곳이다 (2026-08-22) ──────────────────────
+//
+// 세 벌이었고 집합이 달랐다: sw.js `internalPath` 7개, prelude 의 자기 스크립트
+// 판별 3개(부분집합), Go 는 `/__zp/` 파일명 하드코딩. 프렐류드가 못 알아보는
+// 자산은 **직렬화 세정에서 안 지워진다** — 같은 부류를 이번 세션에 밟았다.
+test('내부 자산 목록은 zp-core 단일 소스다', () => {
+  const core = fs.readFileSync('web/zp-core.js', 'utf8');
+  const m = /const INTERNAL_ASSET_SCRIPTS = Object\.freeze\(\[([^\]]*)\]\)/.exec(core);
+  assert.ok(m, 'INTERNAL_ASSET_SCRIPTS 를 못 찾았다');
+  const names = m[1].split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  // 페이지가 스크립트 태그로 만날 수 있는 것 전부. 하나라도 빠지면 그 자산은
+  // `document.scripts` / `querySelectorAll` / 직렬화에서 그대로 보인다.
+  assert.deepEqual(names.slice().sort(),
+    ['runtime-prelude.js', 'worker-prelude.js', 'zp-core.js', 'zp-page-bundle.js'],
+    '자산 목록이 갈라졌다 — 새 자산은 zp-core 에 먼저 적을 것');
+
+  // 소비자는 목록을 다시 세지 않는다. 예전에는 각자 세었고 그래서 갈라졌다.
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const enumerates = (src) => /assetPath\('[^']+'\)[^\n]*\|\|[^\n]*assetPath\('/.test(src);
+  assert.ok(!enumerates(sw), 'sw.js 가 자산 목록을 다시 세고 있다');
+  assert.ok(!enumerates(rt), 'runtime-prelude.js 가 자산 목록을 다시 세고 있다');
+  assert.ok(sw.includes('ZP.isInternalPath(path)'), 'sw.js 가 공유 판정을 안 쓴다');
+  assert.ok(rt.includes('ZP.isInternalAssetScriptPath('), 'prelude 가 공유 판정을 안 쓴다');
+
+  // Go 는 파일을 서빙하는 별개 관심사라 목록을 따로 갖는다 — 다만 페이지가
+  // 스크립트로 부르는 자산은 반드시 서빙 가능해야 한다.
+  const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
+  for (const n of names) assert.ok(mainGo.includes('"' + n + '"'), n + ': Go 가 서빙 목록에 안 갖고 있다');
 });
