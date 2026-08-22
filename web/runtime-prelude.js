@@ -3890,6 +3890,78 @@
           });
         }
       }
+      // ★이름만 고치고 **타이밍 필드는 그대로 둔** 것이 모순이 됐다
+      // (2026-08-22 타이밍 축 신설, github 대조군 대비 실측).
+      //
+      //   대조군(직접) : workerStart>0  0/140,  nextHopProtocol h2/h3
+      //   프록시        : workerStart>0  **196/196**, nextHopProtocol 전부 ''
+      //
+      // 명세상 `workerStart` 는 **서비스 워커를 지난 요청에만** 붙는다.
+      // 그런데 우리는 페이지에게 `navigator.serviceWorker.controller === null` 을
+      // 말해 둔다(실측 확인). 즉 **우리가 하는 말과 타이밍이 서로 모순**이고,
+      // 그 모순은 한 줄로 검사된다:
+      //   !navigator.serviceWorker.controller &&
+      //   performance.getEntriesByType('resource').every(e => e.workerStart > 0)
+      //
+      // 그래서 타이밍을 우리가 이미 하고 있는 말에 맞춘다. 지어내는 게 아니라
+      // **이미 한 진술과 일치시키는** 것이다 — 어긋난 값을 지어내면 새 tell 이 된다.
+      const resProto = w.PerformanceResourceTiming && w.PerformanceResourceTiming.prototype;
+      const timingOverrides = {
+        // SW 가 없다고 말했으므로 워커 단계도 없어야 한다.
+        workerStart: () => 0,
+        // SW 합성 응답은 빈 문자열이 된다. 이름의 스킴으로 그럴듯한 값을 넣는다.
+        nextHopProtocol: (e, raw) => {
+          if (raw) return raw;
+          try { return new Native.URL(e.name).protocol === 'https:' ? 'h2' : 'http/1.1'; }
+          catch { return 'h2'; }
+        },
+        // 'cache' 는 우리 SW 가 준 것이라는 뜻이다. 페이지에겐 SW 가 없다.
+        deliveryType: () => '',
+        // transferSize 0 + 큰 encodedBodySize = 캡시 적중이라는 주장이다.
+        // deliveryType 을 비우기로 했으니 전송량도 그에 맞춰야 한다
+        // (헤더 분을 더하는 것이 브라우저의 셀셈이다).
+        transferSize: (e, raw) => (raw || !e.encodedBodySize ? raw : e.encodedBodySize + 300),
+        // https 리소스인데 TLS 피그가 아예 없으면 — 우리 오리진이 http 라서다.
+        // 대조군은 140개 중 136개가 0 이 아니다. 재사용된 연결의 명세 모양은
+        // connectStart == secureConnectionStart == connectEnd 이므로 그 값을 쓴다 —
+        // 없는 숫자를 지어내는 게 아니라 **이미 있는 타임라인과 일치시킨다**.
+        // http 타깃은 0 이 맞다(진짜로 TLS 가 없다).
+        secureConnectionStart: (e, raw) => {
+          if (raw) return raw;
+          try { if (new Native.URL(e.name).protocol !== 'https:') return raw; } catch { return raw; }
+          return e.connectStart || raw;
+        },
+      };
+      if (resProto) {
+        for (const key of Object.keys(timingOverrides)) {
+          const desc = Object.getOwnPropertyDescriptor(resProto, key);
+          if (!desc || typeof desc.get !== 'function') continue;
+          const nativeGet = desc.get;
+          const fix = timingOverrides[key];
+          try {
+            Object.defineProperty(resProto, key, {
+              get() { try { return fix(this, nativeGet.call(this)); } catch { return nativeGet.call(this); } },
+              configurable: true,
+              enumerable: desc.enumerable,
+            });
+            toStringMap.set(Object.getOwnPropertyDescriptor(resProto, key).get, nativeAccessorSource('get', key));
+          } catch {}
+        }
+        // toJSON 은 내부 슬롯에서 직렬화해 게터를 건너뛴다 — 이름과 같은 문제다.
+        const nativeResToJSON = resProto.toJSON;
+        if (typeof nativeResToJSON === 'function') {
+          define(resProto, 'toJSON', function toJSON() {
+            const out = nativeResToJSON.call(this);
+            try {
+              for (const key of Object.keys(timingOverrides)) {
+                if (out && typeof out === 'object' && key in out) out[key] = this[key];
+              }
+            } catch {}
+            return out;
+          });
+        }
+      }
+
       // De-proxying a name only helps entries that HAVE a target behind them.
       // Our own infrastructure — /zp/assets/zp-core.js, zp-page-bundle.js,
       // runtime-prelude.js, /__zp/zp_page_rt.wasm — has none, so those four fell

@@ -1501,3 +1501,59 @@ toString 축: 가짜 래퍼를 심으니 즉시 잡았다 — 살아 있다.
 ### 결과
 
 naver / wikipedia / github **전부 0건**, 픽스처 0건.
+
+---
+
+## 2026-08-22 — 타이밍 축 신설: **우리가 하는 말과 타이밍이 서로 모순이었다**
+
+이름은 디프록시해 뒀는데 **타이밍 필드는 손대지 않았다.** github 을 대조군과
+나란히 재니 네 가지가 갈렸다.
+
+| | 대조군(직접) | 프록시(전) |
+|---|---|---|
+| `workerStart > 0` | 0/140 | **196/196** |
+| `nextHopProtocol` | h2 / h3 | 전부 `''` |
+| `secureConnectionStart > 0` | 136/140 | 0 |
+| nav `deliveryType` / `transferSize` | `''` / 117731 | `cache` / **0** |
+
+### 핵심은 값이 다르다는 게 아니라 **자기모순**이다
+
+명세상 `workerStart` 는 서비스 워커를 지난 요청에만 붙는다. 그런데 우리는
+페이지에게 `navigator.serviceWorker.controller === null` 을 말해 둔다(실측 확인).
+즉 **없다고 한 워커가 모든 리소스의 타이밍에 찍혀 있었다.** 한 줄이면 끝난다:
+
+```js
+!navigator.serviceWorker.controller &&
+performance.getEntriesByType('resource').every(e => e.workerStart > 0)
+```
+
+같은 논리로 `nextHopProtocol: ''` 도, `deliveryType: 'cache'` + `transferSize: 0`
+(= 캐시 적중 주장) 도 우리 진술과 어긋난다.
+
+### 원칙: 지어내지 않고 **이미 한 진술과 일치시킨다**
+
+- `workerStart` → 0 (워커가 없다고 했으니)
+- `nextHopProtocol` → 이름의 스킴대로 `h2` / `http/1.1`
+- `deliveryType` → `''`, `transferSize` → `encodedBodySize + 300`(헤더분)
+- `secureConnectionStart` → **https 일 때만** `connectStart`
+  (재사용된 연결의 명세 모양이 `connectStart == secureConnectionStart == connectEnd`)
+
+고친 뒤 프록시 모양이 대조군과 일치한다(workerStart 0/204, TLS 204/204,
+proto h2, nav transferSize 612711, deliveryType `''`).
+
+### 프로브 자신의 결함 하나
+
+처음 프로브는 connect 는 **지속시간**(`end-start>0`), TLS 는 **타임스탬프**
+(`>0`)로 재고 있었다. 둘을 나란히 놓으면 "connect 0인데 TLS 는 있다" 가
+이상해 보이는데, 실은 서로 다른 걸 재고 있었을 뿐이다. 재사용 연결에서는
+지속시간 0 + 타임스탬프 유의미가 정상이다.
+
+### 남은 것 (측정값과 함께)
+
+**우리 응답은 전부 "압축 안 됨" 으로 보인다.** SW 가 합성한 본문이라 브라우저가
+`encodedBodySize == decodedBodySize` 로 잰다. 실측(github): 대조군 **118/135**
+가 압축, 프록시 **0/200**. naver 도 117건 전부.
+
+이건 **지어내면 안 되는 값**이다 — 진짜 압축 크기는 트랜스포트만 안다. 고치려면
+SW 가 상류 응답의 실제 encoded 크기를 헤더로 넘겨 프렐류드가 그 값을 보고해야
+한다. 지문 탐지기에 `known open item` 으로 넣어 뒀으니 잊히지는 않는다.

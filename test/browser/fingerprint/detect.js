@@ -81,6 +81,48 @@
     }
   } catch (e) { add('resource timing', 'err:' + e.name); }
 
+  // ⑦-b 타이밍이 우리가 하는 말과 모순되는가 (2026-08-22 신설)
+  //
+  // 이름은 디프록시했는데 타이밍 필드는 그대로 둬서, `controller === null` 이라
+  // 말해 놓고 모든 리소스가 `workerStart > 0` 이었다. 명세상 그건 불가능한
+  // 조합이라 한 줄로 검사된다. 여기서는 "값이 뭐냐" 가 아니라 **우리 진술과
+  // 어긋나는가**만 본다 — 절대값은 사이트마다 다르고 판정 근거가 못 된다.
+  try {
+    var es = performance.getEntriesByType('resource');
+    var controlled = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+    if (!controlled && es.length) {
+      var worker = 0, emptyProto = 0;
+      for (var i = 0; i < es.length; i++) {
+        if (es[i].workerStart > 0) worker++;
+        if (es[i].nextHopProtocol === '') emptyProto++;
+      }
+      if (worker) add('timing', 'workerStart>0 on ' + worker + '/' + es.length + ' with no controller');
+      // SW 도 없는데 프로토콜이 전부 비어 있으면 누군가 응답을 합성한 것이다.
+      if (emptyProto === es.length) add('timing', 'nextHopProtocol empty on all ' + es.length);
+    }
+    var nav = performance.getEntriesByType('navigation')[0];
+    if (nav && !controlled) {
+      if (nav.workerStart > 0) add('timing', 'navigation workerStart>0 with no controller');
+      if (nav.deliveryType === 'cache' && !nav.transferSize && nav.encodedBodySize > 0) {
+        add('timing', 'navigation claims cache but was not cached');
+      }
+    }
+    // ★알려진 미해결: 우리 응답은 전부 "압축 안 됨" 으로 보인다.
+    // SW 가 합성한 본문이라 브라우저가 encoded == decoded 로 잰다.
+    // 실측(github): 대조군 118/135 가 압축, 프록시는 0/200.
+    // 지어내면 안 되는 값이다 — 진짜 압축 크기는 트랜스포트만 안다.
+    // 고치려면 SW 가 상류의 실제 encoded 크기를 헤더로 넘겨야 한다.
+    var sized = 0, compressed = 0;
+    for (var j = 0; j < es.length; j++) {
+      if (!es[j].decodedBodySize) continue;
+      sized++;
+      if (es[j].encodedBodySize < es[j].decodedBodySize) compressed++;
+    }
+    if (sized >= 20 && compressed === 0) {
+      add('timing', 'no response compressed (' + sized + ' sized entries) — known open item');
+    }
+  } catch (e) { add('timing', 'err:' + e.name); }
+
   // ⑧ 프레임/문서 정체
   try {
     if (/proxy\.localhost|\/zp\/p\//.test(document.baseURI)) add('baseURI', document.baseURI);
