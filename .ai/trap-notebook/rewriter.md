@@ -4,6 +4,71 @@
 
 ---
 
+## 세정기가 못 걷는 곳을 직렬화기는 걷는다 — `<template>` (2026-08-24, reddit)
+
+### 무엇이 샜나
+
+reddit 을 처음 대자 탐지기가 2건을 물었다.
+
+```
+outerHTML attr | data-zp-target-url
+outerHTML url  | /zp/api/fetch?url=https%3A%2F%2Fexternal-preview…
+```
+
+라이트 DOM 은 멀쩡했다. 실측(격리 월드에서 진짜 DOM 을 셈):
+
+| | zp 속성 | 프록시 URL |
+|---|---|---|
+| 라이트 DOM | 241 | 293 → **전부 세정됨** |
+| `<template>` 14개 안 | 1 | 2 → **그대로 나감** |
+
+### 원인
+
+`<template>` 의 내용은 문서 트리의 자식이 **아니다** — 별도 `DocumentFragment`
+(`template.content`)다. 그래서 **어떤 `querySelectorAll` 로도 도달하지 않는다.**
+`scrubbedClone` 은 `qSA('*')` 로 두 트리를 나란히 걸으므로 템플릿 안을 통째로
+못 본다. 그런데 **HTML 직렬화는 그 안을 그대로 뱉는다.**
+
+즉 **세정기가 못 걷는 곳을 직렬화기는 걷는다.** 이 함수의 안전 조건은
+"무엇을 걷는가" 가 아니라 **"직렬화기가 걷는 것을 빠짐없이 걷는가"** 이다.
+
+### 같은 부류를 이미 밟았다
+
+앞 세션의 "멤브레인 qSA 가 우리 자산을 숨겨서 세정기가 자기 은폐에 눈이 멀었다"
+와 정확히 같은 모양이다. 그때는 **훅** 때문에 못 봤고 이번엔 **DOM 구조** 때문에
+못 봤다. 두 번 다 증상은 "라이트 DOM 은 깨끗한데 직렬화에만 남는다" 였다.
+
+### 고친 것
+
+- `Native.fragmentQuerySelectorAll` (= `DocumentFragment.prototype.querySelectorAll`)
+  를 새로 붙들었다. `DocumentFragment` 는 Element 도 Document 도 아니라서 둘 중
+  하나로 부르면 **던지고**, 던지면 `catch` 가 세정을 통째로 삼킨다(조용히 원본이
+  나간다). nodeType 11 분기를 명시적으로 뒀다.
+- `Native.templateContent` (= `HTMLTemplateElement.prototype.content` 게터).
+  `el.content` 는 페이지가 갈아끼울 수 있다.
+- walk 을 재귀로 바꿔 중첩 template 까지 내려간다(깊이 8 상한). 루트 자체가
+  `<template>` 인 경우(`serializeToString(tpl)`)도 처리한다.
+
+### 검증 — 양성 대조로
+
+고친 뒤에도 **진짜 DOM 에는 그대로 있어야** 한다(우리가 페이지를 바꾸면 안 된다).
+
+| | 진짜 DOM (격리 월드) | 세정된 직렬화 (메인 월드) |
+|---|---|---|
+| 템플릿 안 zp 속성 | 1 | **0** |
+| 템플릿 안 프록시 URL | 2 | **0** |
+| `<template>` 개수 | 4 | 4 (구조 보존) |
+
+탐지기 reddit 2건 → **0건**. 회귀: naver / wikipedia / github / HN / stackoverflow
+전부 0건. static-policy 134 pass, 새 가드 변이 5/5 뭄.
+
+### 규칙
+
+**직렬화 세정을 고칠 때는 "직렬화기가 보는 노드 집합" 과 "내가 걷는 노드 집합"
+을 명시적으로 맞춰 볼 것.** `querySelectorAll` 로는 안 걸리는데 직렬화에는 나오는
+자리가 최소 둘이다 — `template.content`, 그리고 (선언적) shadow root.
+후자는 reddit 에서 `shadowrootmode` 0개라 이번엔 안 밟았지만 **미확인으로 남는다.**
+
 ## 2026-08-22 — 지문 축: 전역 스크러버가 **적이 서지 않는 자리**에 걸려 있었다 (리라이트 경유로 보면 24개가 그대로 보인다)
 
 지문 축을 세웠다(`test/browser/fingerprint/detect.js`). 방식이 핵심이다 — **우리

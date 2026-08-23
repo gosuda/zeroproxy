@@ -3787,6 +3787,46 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
 });
 
+// ── 세정기는 <template> 안으로 내려간다 (2026-08-24) ──────────────────
+//
+// `<template>` 의 내용은 문서 트리의 자식이 아니라 **별도 DocumentFragment**
+// 라서 어떤 querySelectorAll 로도 안 걸린다. 그런데 **직렬화는 그 안을 그대로
+// 뱉는다** — 세정기가 못 보는 곳을 직렬화기는 본다.
+//
+// reddit 실측(2026-08-24): 라이트 DOM 의 zp 속성 241 / 프록시 URL 293 은 전부
+// 세정됐는데 템플릿 14개 안의 1 / 2 가 그대로 `outerHTML` 로 나갔다. 탐지기가
+// 2건을 물었다. 고친 뒤 진짜 DOM 에는 그대로 있고(1/2) 직렬화는 0/0 이다.
+//
+// 같은 부류를 이미 한 번 밟았다 — 멤브레인의 qSA 가 우리 자산을 숨겨서
+// 세정기가 자기 은폐에 눈이 멀었던 자리. **"무엇을 못 걷는가" 를 직렬화기와
+// 맞춰 보는 것**이 이 함수의 유일한 안전 조건이다.
+test('직렬화 세정은 template.content 로 재귀한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('  function scrubbedClone(node) {');
+  assert.ok(start >= 0, 'scrubbedClone 을 못 찾았다');
+  const body = rt.slice(start, rt.indexOf('\n  function sanitizeSerializedNode('));
+
+  // DocumentFragment 는 Element 도 Document 도 아니다 — 둘 중 하나로 부르면
+  // 던지고, 던지면 catch 가 세정을 통째로 삼킨다(조용히 원본이 나간다).
+  assert.match(body, /nt === 11 \? Native\.fragmentQuerySelectorAll/,
+    'DocumentFragment 전용 querySelectorAll 을 안 쓴다');
+  assert.match(rt, /fragmentQuerySelectorAll: w\.DocumentFragment && w\.DocumentFragment\.prototype\.querySelectorAll/,
+    'fragmentQuerySelectorAll 를 네이티브로 안 붙들어 뒀다');
+
+  // 내용 게터도 네이티브여야 한다. `el.content` 는 페이지가 갈아끼울 수 있다.
+  assert.match(rt, /templateContent: w\.HTMLTemplateElement/,
+    'template.content 게터를 네이티브로 안 붙들어 뒀다');
+  assert.match(body, /Native\.templateContent && Native\.templateContent\.get/,
+    'contentOf 가 네이티브 게터를 안 쓴다');
+
+  // 템플릿은 중첩된다 — 한 겹만 벗기면 안 된다.
+  assert.match(body, /walk\(cc, contentOf\(origin\), depth \+ 1\)/,
+    '중첩 template 으로 재귀하지 않는다');
+  // 루트 자체가 <template> 인 경우(serializeToString(tpl))도 걷는다.
+  assert.match(body, /if \(cc\) walk\(cc, contentOf\(node\), 1\);/,
+    '루트가 template 이면 그 내용을 안 걷는다');
+});
+
 // ── script src 읽기/쓰기 표면 세 자리 (2026-08-23) ────────────────────
 //
 // stackoverflow 에서 `document.scripts` 가 `/zp/api/script?u=…` 를 그대로

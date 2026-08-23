@@ -530,6 +530,12 @@
       querySelectorAll: w.Document.prototype.querySelectorAll,
       elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
       elementQuerySelector: w.Element.prototype.querySelector,
+      // `<template>` 의 내용은 **별도의 DocumentFragment** 라 어떤
+      // querySelectorAll 로도 도달하지 않는다. 그런데 HTML 직렬화는 그 안을
+      // 그대로 뱉는다 — 세정기가 못 걷는 곳을 직렬화기는 걷는다(reddit 실측).
+      fragmentQuerySelectorAll: w.DocumentFragment && w.DocumentFragment.prototype.querySelectorAll,
+      templateContent: w.HTMLTemplateElement
+        && Object.getOwnPropertyDescriptor(w.HTMLTemplateElement.prototype, 'content'),
       documentGetElementsByTagName: w.Document.prototype.getElementsByTagName,
       elementGetElementsByTagName: w.Element.prototype.getElementsByTagName,
       documentScripts: Object.getOwnPropertyDescriptor(w.Document.prototype, 'scripts'),
@@ -4666,14 +4672,44 @@
       // Document(9) 와 Element(1) 은 같은 메서드가 아니다 — XMLSerializer 는
       // Document 를 받을 수 있으므로 틀리면 던져서 세정이 통째로 생략된다.
       const all = (n) => {
-        const native = n && n.nodeType === 9 ? Native.querySelectorAll : Native.elementQuerySelectorAll;
+        const nt = n && n.nodeType;
+        const native = nt === 9 ? Native.querySelectorAll
+          : nt === 11 ? Native.fragmentQuerySelectorAll
+          : Native.elementQuerySelectorAll;
         if (native) { try { return native.call(n, '*'); } catch {} }
         return n && n.querySelectorAll ? n.querySelectorAll('*') : [];
       };
-      const cloned = all(clone);
-      const origins = all(node);
-      const paired = origins.length === cloned.length;
-      for (let i = 0; i < cloned.length; i++) scrub(cloned[i], paired ? origins[i] : null);
+      // ★`<template>` 안은 어떤 querySelectorAll 로도 안 걸린다 — 내용이
+      // 문서 트리의 자식이 아니라 별도 DocumentFragment 이기 때문이다.
+      // 그런데 **직렬화는 그 안을 그대로 뱉는다.** 즉 세정기가 못 보는 곳을
+      // 직렬화기는 본다. reddit 실측: 라이트 DOM 의 zp 속성 241 / 프록시 URL
+      // 293 은 전부 세정됐는데, 템플릿 14개 안의 1 / 2 가 그대로 나갔다.
+      // 템플릿은 중첩될 수 있으므로 재귀한다.
+      const contentOf = (el) => {
+        if (!el || el.localName !== 'template') return null;
+        try {
+          return Native.templateContent && Native.templateContent.get
+            ? Native.templateContent.get.call(el) : el.content;
+        } catch { return null; }
+      };
+      const walk = (cloneRoot, originRoot, depth) => {
+        const cloned = all(cloneRoot);
+        const origins = all(originRoot);
+        const paired = origins.length === cloned.length;
+        for (let i = 0; i < cloned.length; i++) {
+          const origin = paired ? origins[i] : null;
+          scrub(cloned[i], origin);
+          if (depth < 8) {
+            const cc = contentOf(cloned[i]);
+            if (cc) walk(cc, contentOf(origin), depth + 1);
+          }
+        }
+      };
+      if (clone.nodeType === 1) {
+        const cc = contentOf(clone);
+        if (cc) walk(cc, contentOf(node), 1);
+      }
+      walk(clone, node, 0);
     } catch {}
     return clone;
   }
