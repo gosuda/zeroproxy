@@ -3787,6 +3787,49 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
 });
 
+// ── script src 읽기/쓰기 표면 세 자리 (2026-08-23) ────────────────────
+//
+// stackoverflow 에서 `document.scripts` 가 `/zp/api/script?u=…` 를 그대로
+// 보여줬다. 원인은 이 세 자리가 **각각** 비어 있었던 것이다.
+//
+// 기록 정정: 그때 "게터에 되돌리기가 있는데 안 탄다" 고 적었는데 **틀렸다**.
+// 그 되돌리기는 사실 같은 커밋(6b4612e)에서 처음 들어갔고, 그 전 코드는
+// `return d.get.call(this)` 였다. deproxyURL 이 img/style 에서 도는 걸 보고
+// 이 자리에도 이미 걸려 있다고 착각한 채 원인을 엉뚱한 데서 찾았다.
+//
+// 셋은 중복이 아니다 — 스태시는 멤브레인을 탄 대입만 덮고, 네이티브로 속성에
+// 직접 꽂힌 값은 읽기 쪽 되돌리기만이 받아 낸다. 실측(2026-08-23, SO 실페이지):
+// 격리 월드에서 스태시 없는 프록시 src 를 심으면 메인 월드가 타깃을 돌려준다.
+test('script src 은 쓸 때 스태시하고 읽는 두 곳에서 되돌린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const fn = (head) => {
+    const start = rt.indexOf(head);
+    assert.ok(start >= 0, head + ' 을 못 찾았다');
+    const next = rt.indexOf('\n  function ', start + 1);
+    return rt.slice(start, next < 0 ? undefined : next);
+  };
+
+  // ① 쓰기 — 이미 프록시 URL 로 들어온 src 도 장부를 남긴다.
+  const setSrc = fn('  function setScriptSource(el, raw) {');
+  assert.match(setSrc, /const recovered = deproxyURL\(refreshed, \{\}\);/,
+    'CONTROL_PREFIX 분기가 타깃을 복구하지 않는다');
+  assert.match(setSrc, /urlMeta\.set\(el, recovered\)/, '복구한 타깃이 urlMeta 에 안 남는다');
+  assert.match(setSrc, /setAttribute\.call\(el, 'data-zp-target-url', recovered\)/,
+    '복구한 타깃이 data-zp-target-url 에 안 남는다');
+
+  // ② 읽기 A — 프로퍼티 게터. 장부가 없으면 값 안에서 푼다.
+  const getSrc = fn('  function installScriptProp(proto) {');
+  assert.match(getSrc, /if \(!masked\) return deproxyURL\(d\.get\.call\(this\), \{ scan: true \}\);/,
+    'script 의 .src 게터가 장부 없는 값을 그대로 흘린다');
+
+  // ③ 읽기 B — getAttribute. `script:src` 는 URL 표면 목록에 없어서(전용 경로로
+  //    다룬다) 전용 분기가 없으면 isURLBearing 이 안 먹고 원시 값이 나간다.
+  //    프로퍼티는 가려지는데 속성은 안 가려지는 비대칭은 이미 한 번 밟았다.
+  assert.match(rt,
+    /if \(ln === 'script' && localKey === 'src'\) \{[\s\S]{0,400}?return deproxyURL\(Native\.getAttribute\.call\(this, k\), \{ scan: true \}\);/,
+    'getAttribute 에 script/src 전용 되돌리기 분기가 없다');
+});
+
 // ── "우리 자산" 목록은 zp-core 한 곳이다 (2026-08-22) ──────────────────────
 //
 // 세 벌이었고 집합이 달랐다: sw.js `internalPath` 7개, prelude 의 자기 스크립트
