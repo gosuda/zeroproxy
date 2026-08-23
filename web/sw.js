@@ -2093,6 +2093,10 @@ function streamDocumentResponse(resp, opt, targetUrl) {
         const tail = txn.end();
         if (tail && tail.byteLength) { stats.out += tail.byteLength; controller.enqueue(tail); }
         stats.state = 'closed';
+        // ★스트리밍 문서의 압축 크기는 **여기서야** 알 수 있다 — 커널이
+        // 펌프를 마치면서 전역에 썬기 때문이다. 헤더로는 못 실는다(헤더가
+        // 먼저 나간다). 이게 없으면 문서만 encoded == decoded 로 남아 드러난다.
+        deliverStreamEncoded(streamIdForReport);
       } catch (e) {
         stats.state = 'flush-error';
         stats.err = (e && (e.message || e.code)) || String(e);
@@ -2107,6 +2111,9 @@ function streamDocumentResponse(resp, opt, targetUrl) {
     },
   });
   const headers = new Headers(resp.headers);
+  // 커널이 달아 준 스트림 id. 헤더 자체는 fetch 리스너가 지우며
+  // 클라이언트/목적지와 짝지어 둔다.
+  const streamIdForReport = resp.headers.get('X-ZP-Stream-Id') || '';
   headers.delete('Content-Length');     // decoded plaintext, unknown length
   headers.delete('X-ZP-Stream');        // strip the SW-internal marker
   headers.set('Content-Type', 'text/html; charset=utf-8');
@@ -2245,6 +2252,12 @@ async function handleMessage(event) {
   // fetch-quiet gaps (notably the ~60s streamed-document withhold). No reply,
   // no work; just return so we never touch the kernel for a heartbeat.
   if (msg && msg.type === '__zpKeepAlive') return;
+  if (msg && msg.type === 'ZP_ENCODED_SIZE_QUERY') {
+    const size = streamEncodedByUrl.get(String(msg.url || '')) || 0;
+    if (size) streamEncodedByUrl.delete(String(msg.url));
+    if (reply) reply.postMessage({ ok: true, size });
+    return;
+  }
   // Diagnostic: dump the kernel trace ring WITHOUT touching the kernel. The
   // full __zpKernelProbe awaits initKernel(), which hangs once the kernel wasm
   // has trapped (poisoned instance) — exactly when we most need the panic line
@@ -3024,7 +3037,7 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   // 문서 응답은 `/zp/p/<token>` 으로 오는데 페이지가 보는 내비게이션
   // 타이밍 이름은 **가상 URL** 이다. 요청 URL 로는 둘을 이을 수 없으므로
   // 목적지를 아는 이 자리에서 함께 실어 보낸다(둘 다 직후에 지워진다).
-  try { if (targetUrl && h.get('X-ZP-Encoded-Size')) h.set('X-ZP-Encoded-For', targetUrl); } catch {}
+  try { if (targetUrl && (h.get('X-ZP-Encoded-Size') || h.get('X-ZP-Stream-Id'))) h.set('X-ZP-Encoded-For', targetUrl); } catch {}
   const rawRefresh = h.get('Refresh');
   // B4: read once, then delete unconditionally — defense in depth against a
   // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
@@ -3087,9 +3100,47 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
 //
 // 브로드캐스트하지 않는 이유: 메시지에 타깃 URL 이 들어 있어 다른 탭에
 // 뿌리면 그 자체가 탭 간 유출이다. 함정노트 A2(multi-tab leak) 와 같은 부류.
+// 스트리밍 문서는 크기가 **나중에** 생기므로, 응답 시점에는 누구에게
+// 보내야 하는지만 적어 둔다. 배달은 transform 의 flush 가 부른다.
+const pendingStreamReports = new Map();
+// 밀어 보내기가 실패한 것만 남는다. 키는 **페이지가 이미 아는 자기 URL** 이라
+// 질의응답으로 새로 알려주는 것은 없다(탭 간 노출 없음).
+const streamEncodedByUrl = new Map();
+function deliverStreamEncoded(streamId) {
+  if (!streamId) return;
+  const pending = pendingStreamReports.get(streamId);
+  pendingStreamReports.delete(streamId);
+  if (!pending) return;
+  const table = self.__zpStreamEncoded;
+  const size = table && Number(table[streamId]);
+  if (!size) return;
+  try { delete table[streamId]; } catch {}
+  // ★내비게이션은 `resultingClientId` 라 **flush 시점에 아직 잡힐 수 없다**
+  // (실측: register/flush 는 둘 다 돈는데 clients.get 이 undefined 다).
+  // 그래서 밀어 보내는 걸 시도하되, 안 되면 URL 로 남겨 둔다 —
+  // 페이지가 자기 URL 로 물어보면 그때 돌려준다(경쟁 없음).
+  streamEncodedByUrl.set(pending.url, size);
+  if (streamEncodedByUrl.size > 32) streamEncodedByUrl.delete(streamEncodedByUrl.keys().next().value);
+  self.clients.get(pending.clientId).then(client => {
+    if (client) {
+      client.postMessage({ type: 'ZP_ENCODED_SIZE', url: pending.url, size });
+      streamEncodedByUrl.delete(pending.url);
+    }
+  }).catch(() => {});
+}
 async function reportEncodedSize(event, resp) {
   try {
     if (!resp || !resp.headers) return resp;
+    const streamId = resp.headers.get('X-ZP-Stream-Id');
+    const encFor0 = resp.headers.get('X-ZP-Encoded-For');
+    if (streamId) {
+      const id = event.clientId || event.resultingClientId;
+      if (id && encFor0) pendingStreamReports.set(streamId, { clientId: id, url: encFor0 });
+      const h2 = new Headers(resp.headers);
+      h2.delete('X-ZP-Stream-Id');
+      h2.delete('X-ZP-Encoded-For');
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h2 });
+    }
     const enc = resp.headers.get('X-ZP-Encoded-Size');
     if (!enc) return resp;
     const headers = new Headers(resp.headers);

@@ -1061,6 +1061,20 @@
       });
     }
   } catch {}
+  // ★문서는 밀려오지 않는다 — 내비게이션은 `resultingClientId` 라 SW 가
+  // 스트림이 끝나는 시점에 아직 클라이언트를 잡지 못한다(실측).
+  // 그래서 페이지가 **자기 URL 로** 물어본다 — 경쟁도 없고 새로 알려주는
+  // 정보도 없다(자기 URL 은 이미 안다).
+  function askDocumentEncodedSize(attempt) {
+    postMessageToSW({ type: 'ZP_ENCODED_SIZE_QUERY', url: virtualURL.href })
+      .then(reply => {
+        const size = reply && Number(reply.size);
+        if (size) { encodedSizes.set(virtualURL.href, size); return; }
+        if (attempt < 6) setTimeout(() => askDocumentEncodedSize(attempt + 1), 400);
+      })
+      .catch(() => { if (attempt < 6) setTimeout(() => askDocumentEncodedSize(attempt + 1), 400); });
+  }
+  try { setTimeout(() => askDocumentEncodedSize(0), 300); } catch {}
   // 2026-08-13 — 이 문서의 clientId 를 SW 의 탭 컨텍스트에 등록한다.
   //
   // 최상위 문서는 내비게이션 요청 자체가 바인딩을 만들어 주지만, `srcdoc` /

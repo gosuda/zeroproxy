@@ -311,26 +311,21 @@ pub(crate) async fn send_request(
             })
             .collect();
         // ★2026-08-23 — 서브리소스는 전부 압축된 것으로 보이는데 **문서만
-        // 비압축**이면 그 하나로 드러난다. 상류가 길이를 알려 준 경우에만
-        // 실는다 — 지어내지 않는다.
+        // 비압축**이면 그 하나로 드러난다. 그런데 여기서는 진짜 수를 모른다 —
+        // 스트림을 끝까지 읽어야 알 수 있고, 그때는 헤더가 이미 나간 뒤다.
+        // (상류의 Content-Length 로 대신하려 했다가 실패했다: 스트리밍 대상
+        // 오리진은 대개 안 보낸다 — github.com 문서가 그렇다.)
         //
-        // ⚠ 이걸로 **문서가 닫히지는 않는다**(실측 2026-08-23):
-        // 스트리밍 대상 오리진은 대개 Content-Length 를 안 보낸다
-        // (github.com 문서: content-encoding: gzip 은 있고 content-length 는 없다).
-        // 진짜 수는 스트림을 끝까지 읽어야 알 수 있고, 그때는 **헤더가
-        // 이미 나간 뒤**다. 닫으려면 커널이 인코딩 바이트를 세서
-        // 스트림 종료 시점에 SW 로 올려 보내야 한다 — 별건이고, 지문
-        // 탐지기에 known open item 으로 박아 둔다.
-        if let Some(cl) = content_length {
-            if !ce_lower.is_empty() && ce_lower != "identity" {
-                stream_headers.push(("X-ZP-Encoded-Size".to_string(), cl.to_string()));
-            }
-        }
+        // 그래서 응답에는 **id 만** 실고, 펌프가 끝나는 순간 그 id 로 수를
+        // SW 전역에 썬다. SW 의 transform `flush()` 가 그걸 집어 페이지로 보낸다.
+        let stream_id = next_stream_id();
+        stream_headers.push(("X-ZP-Stream-Id".to_string(), stream_id.to_string()));
         let body_stream = response.into_body();
         let stream = build_body_readable_stream(
             body_stream,
             content_encoding.clone(),
             host_header.to_string(),
+            stream_id,
         )
         .map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("h2: readable stream: {e:?}"))
@@ -453,17 +448,51 @@ pub(crate) async fn send_request(
 /// synchronously with the controller; we `spawn_local` the async pump there.
 /// The pump owns the `RecvStream`, so dropping the stream (page cancels) tears
 /// down the upstream stream cleanly.
+/// ★2026-08-23 — 스트리밍 문서의 **인코딩된 바이트 수**를 페이지까지 보낸다.
+///
+/// 헤더로는 못 실는다 — 진짜 수는 스트림을 끝까지 읽어야 알고 그때는 헤더가
+/// 이미 나간 뒤다. 그래서 **끝나는 순간에** SW 전역에 썬다 — 응답 헤더로는
+/// 스트림 id 만 보내고(`X-ZP-Stream-Id`), SW 의 transform `flush()` 가 그 id 로
+/// 값을 집어 페이지에 한 번 보낸다. 페이지는 그걸 `encodedBodySize` 로 쓴다.
+///
+/// 이게 없으면 서브리소스는 전부 압축으로 보이는데 **문서만 비압축**이라
+/// 그 하나로 드러난다(실측 2026-08-23).
+static ZP_STREAM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_stream_id() -> u64 {
+    ZP_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn record_stream_encoded(id: u64, encoded: usize) {
+    let global = js_sys::global();
+    let key = JsValue::from_str("__zpStreamEncoded");
+    let map = match js_sys::Reflect::get(&global, &key) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            let o = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&global, &key, &o);
+            o.into()
+        }
+    };
+    let _ = js_sys::Reflect::set(
+        &map,
+        &JsValue::from_str(&id.to_string()),
+        &JsValue::from_f64(encoded as f64),
+    );
+}
+
 fn build_body_readable_stream(
     body_stream: h2::RecvStream,
     content_encoding: Option<String>,
     host: String,
+    stream_id: u64,
 ) -> Result<web_sys::ReadableStream, JsValue> {
     let source = js_sys::Object::new();
     // `once_into_js` yields a JS function callable exactly once — which is the
     // ReadableStream `start` contract. It also owns/leaks the closure for us.
     let start = Closure::once_into_js(
         move |controller: web_sys::ReadableStreamDefaultController| {
-            spawn_local(pump_body(body_stream, controller, content_encoding, host));
+            spawn_local(pump_body(body_stream, controller, content_encoding, host, stream_id));
         },
     );
     js_sys::Reflect::set(&source, &JsValue::from_str("start"), &start)?;
@@ -478,6 +507,7 @@ async fn pump_body(
     controller: web_sys::ReadableStreamDefaultController,
     content_encoding: Option<String>,
     host: String,
+    stream_id: u64,
 ) {
     let is_gzip = content_encoding
         .as_deref()
@@ -551,6 +581,7 @@ async fn pump_body(
                         "tx:h2-stream-deflate-end host={} in={} out={}",
                         host, total_in, total_out
                     ));
+                    record_stream_encoded(stream_id, total_in);
                     let _ = controller.close();
                     return;
                 }
@@ -572,6 +603,7 @@ async fn pump_body(
         "tx:h2-stream-close host={} in={} out={}",
         host, total_in, total_out
     ));
+    record_stream_encoded(stream_id, total_in);
     let _ = controller.close();
 }
 
