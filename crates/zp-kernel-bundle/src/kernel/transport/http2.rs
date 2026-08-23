@@ -303,13 +303,29 @@ pub(crate) async fn send_request(
     if (200..300).contains(&status) && is_html && coding_streamable {
         // Plaintext after the kernel-side gunzip → drop the now-false
         // Content-Encoding and the now-unknown Content-Length.
-        let stream_headers: Vec<(String, String)> = resp_headers
+        let mut stream_headers: Vec<(String, String)> = resp_headers
             .into_iter()
             .filter(|(k, _)| {
                 let lk = k.to_ascii_lowercase();
                 lk != "content-encoding" && lk != "content-length"
             })
             .collect();
+        // ★2026-08-23 — 서브리소스는 전부 압축된 것으로 보이는데 **문서만
+        // 비압축**이면 그 하나로 드러난다. 상류가 길이를 알려 준 경우에만
+        // 실는다 — 지어내지 않는다.
+        //
+        // ⚠ 이걸로 **문서가 닫히지는 않는다**(실측 2026-08-23):
+        // 스트리밍 대상 오리진은 대개 Content-Length 를 안 보낸다
+        // (github.com 문서: content-encoding: gzip 은 있고 content-length 는 없다).
+        // 진짜 수는 스트림을 끝까지 읽어야 알 수 있고, 그때는 **헤더가
+        // 이미 나간 뒤**다. 닫으려면 커널이 인코딩 바이트를 세서
+        // 스트림 종료 시점에 SW 로 올려 보내야 한다 — 별건이고, 지문
+        // 탐지기에 known open item 으로 박아 둔다.
+        if let Some(cl) = content_length {
+            if !ce_lower.is_empty() && ce_lower != "identity" {
+                stream_headers.push(("X-ZP-Encoded-Size".to_string(), cl.to_string()));
+            }
+        }
         let body_stream = response.into_body();
         let stream = build_body_readable_stream(
             body_stream,
@@ -583,6 +599,11 @@ fn unwrap_response_body(
     let Some(ce_value) = ce_value else {
         return (body, headers);
     };
+    // ★2026-08-23 — 디코드 직전의 **와이어 바이트 수**를 붙잡아 둔다.
+    // 이걸 안 넘기면 페이지의 `encodedBodySize` 가 항상 decoded 와 같아져
+    // **모든 응답이 비압축처럼 보인다**(실측: github 대조군 118/135 압축,
+    // 프록시 0/200). 진짜 압축 크기를 아는 자리는 여기뿐이다.
+    let encoded_len = body.len();
     let (decoded, residual) = crate::kernel::transport::decode::decode_body(&ce_value, body);
     // Rebuild header list. The order is preserved except the
     // Content-Encoding entry which we rewrite (or drop) and the
@@ -603,6 +624,10 @@ fn unwrap_response_body(
         } else {
             new_headers.push((k, v));
         }
+    }
+    if coding_changed {
+        // SW 가 읽고 **브라우저에 넘기기 전에 지운다** — 이건 내부 신호다.
+        new_headers.push(("X-ZP-Encoded-Size".to_string(), encoded_len.to_string()));
     }
     (decoded, new_headers)
 }

@@ -169,6 +169,11 @@ fn unwrap_response_body(
     let Some(ce_value) = ce_value else {
         return (body, headers);
     };
+    // ★2026-08-23 — 디코드 직전의 **와이어 바이트 수**를 붙잡아 둔다.
+    // 이걸 안 넘기면 페이지의 `encodedBodySize` 가 항상 decoded 와 같아져
+    // **모든 응답이 비압축처럼 보인다**(실측: github 대조군 118/135 압축,
+    // 프록시 0/200). 진짜 압축 크기를 아는 자리는 여기뿐이다.
+    let encoded_len = body.len();
     let (decoded, residual) = crate::kernel::transport::decode::decode_body(&ce_value, body);
     let decoded_len = decoded.len().to_string();
     let mut new_headers: Vec<(String, String)> = Vec::with_capacity(headers.len());
@@ -184,6 +189,10 @@ fn unwrap_response_body(
         } else {
             new_headers.push((k, v));
         }
+    }
+    if coding_changed {
+        // SW 가 읽고 **브라우저에 넘기기 전에 지운다** — 이건 내부 신호다.
+        new_headers.push(("X-ZP-Encoded-Size".to_string(), encoded_len.to_string()));
     }
     (decoded, new_headers)
 }

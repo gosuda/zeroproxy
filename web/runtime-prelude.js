@@ -1047,6 +1047,20 @@
     }, 15000);
   }
   startSWKeepAlive();
+  // ★2026-08-23 — 압축 크기 수신. SW 가 응답마다 **요청한 클라이언트에게만**
+  // 상류의 와이어 바이트 수를 보낸다. 이게 없으면 `encodedBodySize` 가 항상
+  // decoded 와 같아져 모든 응답이 비압축처럼 보인다(타이밍 축 참조).
+  const encodedSizes = new Map();
+  try {
+    const sw = Native.serviceWorker || (root.navigator && root.navigator.serviceWorker);
+    if (sw && sw.addEventListener) {
+      sw.addEventListener('message', (ev) => {
+        const d = ev && ev.data;
+        if (!d || d.type !== 'ZP_ENCODED_SIZE' || !d.url) return;
+        encodedSizes.set(String(d.url), Number(d.size) || 0);
+      });
+    }
+  } catch {}
   // 2026-08-13 — 이 문서의 clientId 를 SW 의 탭 컨텍스트에 등록한다.
   //
   // 최상위 문서는 내비게이션 요청 자체가 바인딩을 만들어 주지만, `srcdoc` /
@@ -3920,7 +3934,17 @@
         // transferSize 0 + 큰 encodedBodySize = 캡시 적중이라는 주장이다.
         // deliveryType 을 비우기로 했으니 전송량도 그에 맞춰야 한다
         // (헤더 분을 더하는 것이 브라우저의 셀셈이다).
-        transferSize: (e, raw) => (raw || !e.encodedBodySize ? raw : e.encodedBodySize + 300),
+        // 압축 크기를 아는 것만 바꿀다 — 모르면 손대지 않는다(지어내기 금지).
+        encodedBodySize: (e, raw) => {
+          const known = encodedSizes.get(e.name);
+          return known && known < raw ? known : raw;
+        },
+        transferSize: (e, raw) => {
+          if (raw) return raw;
+          const known = encodedSizes.get(e.name);
+          if (known) return known + 300;
+          return e.encodedBodySize ? e.encodedBodySize + 300 : raw;
+        },
         // https 리소스인데 TLS 피그가 아예 없으면 — 우리 오리진이 http 라서다.
         // 대조군은 140개 중 136개가 0 이 아니다. 재사용된 연결의 명세 모양은
         // connectStart == secureConnectionStart == connectEnd 이므로 그 값을 쓴다 —

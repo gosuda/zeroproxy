@@ -121,6 +121,12 @@
     if (sized >= 20 && compressed === 0) {
       add('timing', 'no response compressed (' + sized + ' sized entries) — known open item');
     }
+    // 문서 하나는 아직 남아 있다. 스트리밍 경로가 상류의 Content-Encoding/Length 를
+    // 떨구고 평문을 흘려보내므로 커널이 인코딩 크기를 실을 자리가 없고,
+    // `/zp/p/<token>` 요청을 페이지가 보는 이름(가상 URL)으로 잇는 매핑도 없다.
+    if (nav && nav.decodedBodySize > 50000 && nav.encodedBodySize === nav.decodedBodySize) {
+      add('timing', 'navigation body uncompressed — known open item (streaming path)');
+    }
   } catch (e) { add('timing', 'err:' + e.name); }
 
   // ⑧ 프레임/문서 정체

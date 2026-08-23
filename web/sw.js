@@ -439,7 +439,7 @@ self.addEventListener('fetch', event => {
       if (p === ZP.apiPath('csp-report')) return;
     } catch {}
   }
-  const responded = handleFetch(event);
+  const responded = handleFetch(event).then(resp => reportEncodedSize(event, resp));
   event.respondWith(responded);
   // Keep the worker alive until the response BODY has been fully delivered.
   // `respondWith` only extends the lifetime until the response PROMISE
@@ -3021,6 +3021,10 @@ const ZP_TARGET_POLICY_HEADERS = __ZP_TARGET_POLICY_HEADERS__;
 // CSP 리포트는 Service Worker 가 가로챌 수 없어 릴레이를 우회한다 = IP 유출.
 const ZP_REPORTING_HEADERS = __ZP_REPORTING_HEADERS__;
 function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
+  // 문서 응답은 `/zp/p/<token>` 으로 오는데 페이지가 보는 내비게이션
+  // 타이밍 이름은 **가상 URL** 이다. 요청 URL 로는 둘을 이을 수 없으므로
+  // 목적지를 아는 이 자리에서 함께 실어 보낸다(둘 다 직후에 지워진다).
+  try { if (targetUrl && h.get('X-ZP-Encoded-Size')) h.set('X-ZP-Encoded-For', targetUrl); } catch {}
   const rawRefresh = h.get('Refresh');
   // B4: read once, then delete unconditionally — defense in depth against a
   // disarmed tab somehow seeing the header (e.g. server bug, racing reload).
@@ -3074,6 +3078,43 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   h.set('Cache-Control', h.get('Cache-Control') || 'no-store');
   applyCORS(h, req);
   return h;
+}
+// ★2026-08-23 — 페이지가 자기 리소스의 **압축 크기**를 알 길이 없었다.
+// SW 가 합성한 응답은 encodedBodySize == decodedBodySize 로 측정돼
+// **모든 응답이 비압축처럼 보였다**(github 대조군 118/135 압축, 프록시 0/200).
+// 커널이 디코드 직전 와이어 바이트 수를 `X-ZP-Encoded-Size` 로 실어 주므로,
+// 여기서 그걸 **요청한 클라이언트에게만** 넘기고 헤더는 지운다.
+//
+// 브로드캐스트하지 않는 이유: 메시지에 타깃 URL 이 들어 있어 다른 탭에
+// 뿌리면 그 자체가 탭 간 유출이다. 함정노트 A2(multi-tab leak) 와 같은 부류.
+async function reportEncodedSize(event, resp) {
+  try {
+    if (!resp || !resp.headers) return resp;
+    const enc = resp.headers.get('X-ZP-Encoded-Size');
+    if (!enc) return resp;
+    const headers = new Headers(resp.headers);
+    const encFor = resp.headers.get('X-ZP-Encoded-For');
+    headers.delete('X-ZP-Encoded-Size');
+    headers.delete('X-ZP-Encoded-For');
+    const out = new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+    const id = event.clientId || event.resultingClientId;
+    if (id) {
+      const client = await self.clients.get(id);
+      // 페이지는 타임을 **리라이트된 타깃 URL** 로 색인하므로 같은 이름으로 보낸다.
+      if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
+    }
+    return out;
+  } catch { return resp; }
+}
+function encodedSizeKey(rawURL) {
+  try {
+    const u = new URL(rawURL);
+    if (u.pathname === ZP.apiPath('fetch')) return u.searchParams.get('url') || rawURL;
+    if (u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script') || u.pathname === ZP.apiPath('sourcemap')) {
+      return u.searchParams.get('u') || rawURL;
+    }
+    return rawURL;
+  } catch { return rawURL; }
 }
 function addCSP(resp, req, servers, tab, targetUrl) {
   const h = new Headers(resp.headers);
