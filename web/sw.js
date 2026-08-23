@@ -3122,10 +3122,10 @@ function deliverStreamEncoded(streamId) {
   streamEncodedByUrl.set(pending.url, size);
   if (streamEncodedByUrl.size > 32) streamEncodedByUrl.delete(streamEncodedByUrl.keys().next().value);
   self.clients.get(pending.clientId).then(client => {
-    if (client) {
-      client.postMessage({ type: 'ZP_ENCODED_SIZE', url: pending.url, size });
-      streamEncodedByUrl.delete(pending.url);
-    }
+    // 밀어 보낸 뒤에도 **지우지 않는다** — 페이지의 메시지 리스너가 아직
+    // 안 붙었을 수 있고, 그러면 메시지도 잃고 질의할 것도 없어진다.
+    // 지우는 건 질의에 답할 때 하나만(상한 32개로 묶여 있다).
+    if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: pending.url, size });
   }).catch(() => {});
 }
 async function reportEncodedSize(event, resp) {
@@ -3153,6 +3153,13 @@ async function reportEncodedSize(event, resp) {
       const client = await self.clients.get(id);
       // 페이지는 타임을 **리라이트된 타깃 URL** 로 색인하므로 같은 이름으로 보낸다.
       if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
+    }
+    // 내비게이션은 `resultingClientId` 라 이 시점에 클라이언트가 없을 수 있고,
+    // 있더라도 페이지의 리스너가 아직 안 붙었을 수 있다. 버퍼 경로 문서가
+    // 그러서 번번이 새다(MDN 에서 실측). URL 로도 남겨 두면 페이지가 당길 수 있다.
+    if (encFor) {
+      streamEncodedByUrl.set(encFor, Number(enc) || 0);
+      if (streamEncodedByUrl.size > 32) streamEncodedByUrl.delete(streamEncodedByUrl.keys().next().value);
     }
     return out;
   } catch { return resp; }

@@ -4916,7 +4916,17 @@
         return deproxyURL(recalled !== undefined ? recalled : Native.getAttribute.call(this, k), { scan: true });
       }
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc' && srcdocMeta.has(this)) return srcdocMeta.get(this);
-      if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || Native.getAttribute.call(this, k);
+      // `script:src` 는 URL 표면 목록에 없다(전용 경로로 다룬다) — 그래서
+      // 아래 isURLBearing 분기가 안 먹고 원시 값이 나간다. 프로퍼티는 가려지는데
+      // 속성은 안 가려지는 비대칭은 이 저장소가 이미 한 번 밟은 함정이다
+      // (NAVER 폼 제출, real-site-compat 2026-06-xx).
+      if (ln === 'script' && localKey === 'src') {
+        const stashed = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
+        if (stashed) return stashed;
+        return deproxyURL(Native.getAttribute.call(this, k), { scan: true });
+      }
+      // 같은 이유로 여기도 마지막에 한 번 더 되돌린다(이 세션 네 번째 같은 부류).
+      if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || deproxyURL(Native.getAttribute.call(this, k), { scan: true });
       return Native.getAttribute.call(this, k);
     });
     if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) {
@@ -5096,6 +5106,17 @@
       // 갱신한다. src 대입 시점과 DOM 삽입 시점 사이에 replaceState 가 끼면
       // 대입 때 박아 둔 ref 는 이미 낡았다.
       const refreshed = withCurrentRef(value);
+      // ★이 분기는 **스태시 없이** 통과하고 있었다. 서버측 htmltx 가 고쳐 내려보낸
+      // 정적 스크립트나 페이지가 복사해 재대입한 값이 여기로 들어오는데,
+      // 그러면 `src` / `getAttribute('src')` 가 되돌릴 근거를 잃어 **프록시 URL 이
+      // 그대로 보인다** — stackoverflow 에서 실측됐다(`/zp/api/script?u=…`).
+      // 값 안에 타깃이 들어 있으므로 여기서 복구해 다른 모든 표면과 같은
+      // 자리(`urlMeta` + `data-zp-target-url`)에 남긴다.
+      const recovered = deproxyURL(refreshed, {});
+      if (recovered && recovered !== refreshed) {
+        urlMeta.set(el, recovered);
+        Native.setAttribute.call(el, 'data-zp-target-url', recovered);
+      }
       if (Native.getAttribute.call(el, 'src') === refreshed) return;
       return Native.setAttribute.call(el, 'src', refreshed);
     }
@@ -5386,8 +5407,13 @@
     try {
       Object.defineProperty(proto, 'src', {
         get() {
+          // ★이미 프록시 URL 로 들어온 src 는 `setScriptSource` 의 CONTROL_PREFIX
+          // 분기를 타며 **스태시 없이** 통과한다(서버측 htmltx 가 고쳐 내려보낸
+          // 정적 태그가 그렇다). 그러면 되돌릴 근거가 없어 프록시 URL 이 그대로
+          // 보인다 — stackoverflow 에서 실측됐다(`/zp/api/script?u=…`).
+          // 값 안에 타깃이 들어 있으므로 장부 없이도 푸는다.
           const masked = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
-          if (!masked) return d.get.call(this);
+          if (!masked) return deproxyURL(d.get.call(this), { scan: true });
           // 2026-08-12 — wtm/ncpt 예외를 **제거**했다. 그 예외는 `.src` 로 프록시
           // URL 을 그대로 흘렸고, 그게 NAVER SDK 를 오작동시키는 실제 원인이었다:
           //   webpack 의 publicPath 유도부가 `currentScript.src` 의 디렉터리를 쓴다
