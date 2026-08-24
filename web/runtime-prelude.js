@@ -5767,10 +5767,19 @@
         if (lead) list.push({ lead, url: '', tail: '' });
         break;
       }
+      // ★URL 은 **공백까지의 비공백 런**이다. 쉼표는 URL **뒤에 붙었을 때만**
+      // 구분자다(HTML srcset 문법). 예전에는 첫 쉼표에서 끊고 `data:` 만
+      // 예외로 뒀는데, 그러면 **쿼리에 쉼표가 든 평범한 URL 이 반토막 난다.**
+      // CNN 실측(2026-08-24): 이미지가 `?c=16x9&q=h_1080,w_1920,c_fill` 를
+      // 달고 있어 URL 이 `…h_1080` 에서 잘렸고, 남은 조각이 다음 후보로
+      // 오인돼 두 URL 이 이어 붙은 요청이 나갔다 — 이미지 **56건이 400**.
+      // 위 주석은 이미 올바른 규칙을 적어 뒀는데 코드가 그걸 구현하지 않았다.
       const urlStart = i;
-      const isData = s.slice(i, i + 5).toLowerCase() === 'data:';
-      while (i < s.length && !isWS(s[i]) && (isData || s[i] !== ',')) i++;
-      const url = s.slice(urlStart, i);
+      while (i < s.length && !isWS(s[i])) i++;
+      let urlEnd = i;
+      while (urlEnd > urlStart && s[urlEnd - 1] === ',') urlEnd--;
+      const url = s.slice(urlStart, urlEnd);
+      i = urlEnd;
       const descStart = i;
       while (i < s.length && s[i] !== ',') i++;
       list.push({ lead, url, tail: s.slice(descStart, i) });

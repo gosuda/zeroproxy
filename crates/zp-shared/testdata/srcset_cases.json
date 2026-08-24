@@ -17,61 +17,157 @@
     {
       "id": "plain-2",
       "input": "/img/one.png 1x, /img/two.png 2x",
-      "candidates": [["", "/img/one.png", " 1x"], [", ", "/img/two.png", " 2x"]]
+      "candidates": [
+        [
+          "",
+          "/img/one.png",
+          " 1x"
+        ],
+        [
+          ", ",
+          "/img/two.png",
+          " 2x"
+        ]
+      ]
     },
     {
       "id": "single-no-descriptor",
       "input": "a.png",
-      "candidates": [["", "a.png", ""]]
+      "candidates": [
+        [
+          "",
+          "a.png",
+          ""
+        ]
+      ]
     },
     {
       "id": "width-descriptors",
       "input": "s.png 320w,m.png 640w,l.png 1280w",
-      "candidates": [["", "s.png", " 320w"], [",", "m.png", " 640w"], [",", "l.png", " 1280w"]]
+      "candidates": [
+        [
+          "",
+          "s.png",
+          " 320w"
+        ],
+        [
+          ",",
+          "m.png",
+          " 640w"
+        ],
+        [
+          ",",
+          "l.png",
+          " 1280w"
+        ]
+      ]
     },
     {
       "id": "data-svg-with-commas",
       "input": "data:image/svg+xml;utf8,<svg width=\"2\"></svg> 1x, /img/real.png 2x",
       "candidates": [
-        ["", "data:image/svg+xml;utf8,<svg", " width=\"2\"></svg> 1x"],
-        [", ", "/img/real.png", " 2x"]
+        [
+          "",
+          "data:image/svg+xml;utf8,<svg",
+          " width=\"2\"></svg> 1x"
+        ],
+        [
+          ", ",
+          "/img/real.png",
+          " 2x"
+        ]
       ]
     },
     {
       "id": "data-base64",
       "input": "data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x, b.png 2x",
       "candidates": [
-        ["", "data:image/gif;base64,R0lGODlhAQABAAAAACw=", " 1x"],
-        [", ", "b.png", " 2x"]
+        [
+          "",
+          "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+          " 1x"
+        ],
+        [
+          ", ",
+          "b.png",
+          " 2x"
+        ]
       ]
     },
     {
       "id": "data-only",
       "input": "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
-      "candidates": [["", "data:image/gif;base64,R0lGODlhAQABAAAAACw=", ""]]
+      "candidates": [
+        [
+          "",
+          "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+          ""
+        ]
+      ]
     },
     {
       "id": "data-uppercase-scheme",
       "input": "DATA:image/gif;base64,AAA= 1x, b.png 2x",
       "candidates": [
-        ["", "DATA:image/gif;base64,AAA=", " 1x"],
-        [", ", "b.png", " 2x"]
+        [
+          "",
+          "DATA:image/gif;base64,AAA=",
+          " 1x"
+        ],
+        [
+          ", ",
+          "b.png",
+          " 2x"
+        ]
       ]
     },
     {
       "id": "leading-and-stray-commas",
       "input": "  ,, a.png 1x ,, b.png 2x",
-      "candidates": [["  ,, ", "a.png", " 1x "], [",, ", "b.png", " 2x"]]
+      "candidates": [
+        [
+          "  ,, ",
+          "a.png",
+          " 1x "
+        ],
+        [
+          ",, ",
+          "b.png",
+          " 2x"
+        ]
+      ]
     },
     {
       "id": "newline-separated",
       "input": "a.png 1x,\n  b.png 2x",
-      "candidates": [["", "a.png", " 1x"], [",\n  ", "b.png", " 2x"]]
+      "candidates": [
+        [
+          "",
+          "a.png",
+          " 1x"
+        ],
+        [
+          ",\n  ",
+          "b.png",
+          " 2x"
+        ]
+      ]
     },
     {
       "id": "trailing-comma",
       "input": "a.png 1x,",
-      "candidates": [["", "a.png", " 1x"], [",", "", ""]]
+      "candidates": [
+        [
+          "",
+          "a.png",
+          " 1x"
+        ],
+        [
+          ",",
+          "",
+          ""
+        ]
+      ]
     },
     {
       "id": "empty",
@@ -81,14 +177,74 @@
     {
       "id": "whitespace-only",
       "input": "   ",
-      "candidates": [["   ", "", ""]]
+      "candidates": [
+        [
+          "   ",
+          "",
+          ""
+        ]
+      ]
     },
     {
       "id": "absolute-cross-origin",
       "input": "https://cdn.example/a.png 1x, //cdn.example/b.png 2x",
       "candidates": [
-        ["", "https://cdn.example/a.png", " 1x"],
-        [", ", "//cdn.example/b.png", " 2x"]
+        [
+          "",
+          "https://cdn.example/a.png",
+          " 1x"
+        ],
+        [
+          ", ",
+          "//cdn.example/b.png",
+          " 2x"
+        ]
+      ]
+    },
+    {
+      "id": "query-commas-cnn",
+      "__why": "CNN 실측: 이미지 쿼리에 쉼표가 들어 있다(q=h_1080,w_1920,c_fill). 첫 쉼표에서 끊으면 URL 이 반토막 나고 다음 후보와 이어 붙는다 — 400 56건.",
+      "input": "https://media.cnn.com/a.jpg?c=16x9&q=h_1080,w_1920,c_fill 1x, https://media.cnn.com/b.jpg?c=16x9&q=h_2160,w_3840,c_fill 2x",
+      "candidates": [
+        [
+          "",
+          "https://media.cnn.com/a.jpg?c=16x9&q=h_1080,w_1920,c_fill",
+          " 1x"
+        ],
+        [
+          ", ",
+          "https://media.cnn.com/b.jpg?c=16x9&q=h_2160,w_3840,c_fill",
+          " 2x"
+        ]
+      ]
+    },
+    {
+      "id": "trailing-comma-no-space",
+      "__why": "쉼표가 URL 뒤에 붙었을 때만 구분자다. 붙은 쉼표는 URL 이 아니라 구분자 쪽으로 간다.",
+      "input": "a.png,b.png 2x",
+      "candidates": [
+        [
+          "",
+          "a.png,b.png",
+          " 2x"
+        ]
+      ]
+    },
+    {
+      "id": "comma-then-space",
+      "__why": "공백이 뒤따르면 그 쉼표는 후보 구분자다.",
+      "input": "a.png, b.png 2x",
+      "candidates": [
+        [
+          "",
+          "a.png",
+          ""
+        ],
+        [
+          ", ",
+          "b.png",
+          " 2x"
+        ]
       ]
     }
   ]

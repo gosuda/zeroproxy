@@ -1013,6 +1013,20 @@ fn resolve_against_base(rel: &str, base: &str) -> Option<String> {
 /// Returns `Cow::Borrowed` for the common case (no `&` in URL) so the caller
 /// doesn't pay an allocation on every URL attribute. The slow path only fires
 /// on Wikipedia-style entity-bearing URLs (~few per page).
+/// `&#61;` / `&#x3D;` 같은 숫자 엔티티. 이름 있는 엔티티는 표로 두더라도
+/// 숫자 쪽은 무한하므로 표로 따라갈 수 없다.
+fn numeric_entity_char(entity: &str) -> Option<char> {
+    let body = entity.strip_prefix("&#")?.strip_suffix(';')?;
+    if body.is_empty() {
+        return None;
+    }
+    let code = match body.strip_prefix('x').or_else(|| body.strip_prefix('X')) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => body.parse::<u32>().ok()?,
+    };
+    char::from_u32(code)
+}
+
 fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('&') {
         return std::borrow::Cow::Borrowed(src);
@@ -1048,6 +1062,17 @@ fn decode_url_html_entities(src: &str) -> std::borrow::Cow<'_, str> {
             };
             if let Some(r) = replacement {
                 out.push_str(r);
+                rest = &tail[off + 1..];
+                continue;
+            }
+            // ★손으로 적은 표는 반드시 뚫린다 — 숫자 엔티티는 **규칙**으로 푼다.
+            // CNN 실측(2026-08-24): `<source src="…mp4?c&#x3D;original">` 의
+            // `&#x3D;`(=)가 표에 없어서 엔티티가 안 풀렸고, 그 상태로 URL 을
+            // 인코딩하니 `&` 는 %26 이 되고 남은 `#x3D;original` 이
+            // **프래그먼트로** 흘러 `…mp4%3Fc%26#x3D;original` 이 나갔다.
+            // 대조군에는 그런 요청이 0건이고 프록시에서만 5건이 400 이었다.
+            if let Some(ch) = numeric_entity_char(entity) {
+                out.push(ch);
                 rest = &tail[off + 1..];
                 continue;
             }
@@ -1152,12 +1177,21 @@ pub(crate) fn split_srcset_candidates(raw: &str) -> Vec<SrcsetCandidate<'_>> {
             }
             break;
         }
+        // ★URL 은 **공백까지의 비공백 런**이고, 쉼표는 URL **뒤에 붙었을 때만**
+        // 구분자다(HTML srcset 문법). 예전에는 첫 쉼표에서 끊고 `data:` 만
+        // 예외로 뒀는데, 그러면 쿼리에 쉼표가 든 평범한 URL 이 반토막 난다.
+        // CNN 실측(2026-08-24): `?c=16x9&q=h_1080,w_1920,c_fill` 가 잘려
+        // 이미지 56건이 400 이었다. JS 쪽 splitSrcsetCandidates 와 같은 규칙.
         let url_start = i;
-        let is_data = raw[i..].len() >= 5 && raw[i..i + 5].eq_ignore_ascii_case("data:");
-        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && (is_data || bytes[i] != b',') {
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
             i += 1;
         }
-        let url = &raw[url_start..i];
+        let mut url_end = i;
+        while url_end > url_start && bytes[url_end - 1] == b',' {
+            url_end -= 1;
+        }
+        let url = &raw[url_start..url_end];
+        i = url_end;
         let desc_start = i;
         while i < bytes.len() && bytes[i] != b',' {
             i += 1;
@@ -2189,6 +2223,25 @@ mod tests {
             "blank proxy_origin must leave raw href: {}",
             r.html
         );
+    }
+
+    #[test]
+    fn numeric_html_entity_in_url_is_decoded() {
+        // CNN 실측: `<source src="…mp4?c&#x3D;original">`.
+        // `&#x3D;` 는 `=` 다. 표에 없으면 엔티티가 안 풀린 채 URL 인코딩을
+        // 거치고, 남은 `#x3D;original` 이 프래그먼트로 새어 400 이 난다.
+        for raw in ["&#x3D;", "&#X3D;", "&#61;"] {
+            let src = format!("https://media.example/a.mp4?c{}original", raw);
+            let decoded = decode_url_html_entities(&src);
+            assert_eq!(
+                &*decoded, "https://media.example/a.mp4?c=original",
+                "숫자 엔티티({})가 안 풀렸다: {}",
+                raw, decoded
+            );
+        }
+        // 숫자 엔티티가 아닌 것은 그대로 둔다(공격면을 넓히지 않는다).
+        let untouched = decode_url_html_entities("https://a/b?x&#zz;y");
+        assert_eq!(&*untouched, "https://a/b?x&#zz;y");
     }
 
     #[test]
