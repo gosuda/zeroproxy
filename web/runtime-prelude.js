@@ -2017,6 +2017,11 @@
         credentials: req.credentials,
         mode: req.mode,
         referrer: req.referrer,
+        // 페이지가 `fetch(u, { referrerPolicy })` 로 명시한 값. SW 는
+        // /zp/api/fetch 요청에 대해 브라우저가 계산한 정책을 볼 수 없으므로
+        // (그 요청의 정책은 프록시 문서의 것이다) 여기서 넘겨준다. 명시가
+        // 없으면 빈 문자열이고, SW 는 문서 정책 → 브라우저 기본 순으로 떨어진다.
+        referrerPolicy: req.referrerPolicy,
         redirect: req.redirect,
         cache: req.cache,
         integrity: req.integrity

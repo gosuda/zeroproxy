@@ -571,3 +571,68 @@ if (entry) { entry.targetUrl = resolvedUrl; entry.baseUrl = resolvedUrl; }
   교차 출처 서브리소스에 대해 브라우저는 **오리진만**(`http://host:port/`) 보내는데
   우리는 **전체 URL**(`…/page`)을 보낸다 — 기본 referrer policy
   (`strict-origin-when-cross-origin`)와 다르다. **아직 안 고쳤다.**
+
+---
+
+## Referrer-Policy 를 아예 안 보고 있었다 — 타깃이 금지한 것을 우리가 대신 흘렸다 (2026-08-25) {#referrer-policy}
+
+앞 항목(리다이렉트 entry)을 고치며 만든 픽스처가 곁가지로 보여 준 것이다:
+교차 출처 서브리소스에 브라우저는 **오리진만** 보내는데 우리는 **전체 URL** 을
+보내고 있었다. 재 보니 더 나빴다 — **정책을 전혀 안 보고 있었다.**
+
+### 대조군 vs 프록시 (고치기 전)
+
+문서 `http://127.0.0.1:18202/page?tag=…` 가 선언한 정책별로, 교차 출처
+서브리소스가 받은 Referer:
+
+| 문서 정책 | 대조군 | 프록시(전) |
+|---|---|---|
+| (없음 = 기본) | `http://…18202/` (오리진만) | **전체 URL** |
+| `no-referrer` | 없음 | **전체 URL** |
+| `origin` | 오리진만 | **전체 URL** |
+| `same-origin` | 없음 | **전체 URL** |
+| `unsafe-url` | 전체 URL | 전체 URL |
+| 요소 `referrerpolicy="no-referrer"` | 없음 | **전체 URL** |
+
+**타깃이 명시적으로 금지한 것을 우리가 대신 흘렸다.** 기본값과도 달라서 그
+자체가 지문이기도 하다(쿼리스트링이 통째로 제3자에게 간다).
+
+### 정책은 지어낼 필요가 없었다
+
+브라우저가 요청마다 계산해서 `Request.referrerPolicy` 로 넘겨준다 — **문서
+정책과 요소의 `referrerpolicy` 속성이 이미 반영된 값**이다. 측정으로 확인:
+같은 문서 안에서 `pol=no-referrer` 와 `pol=unsafe-url` 이 요청별로 따로 나오고,
+정책이 "보내지 말라" 로 계산되면 `req.referrer` 가 빈 문자열이다.
+
+우리 프록시 문서에 붙는 Go 쪽 `Referrer-Policy: no-referrer` 가 이 값을 오염시킬까
+걱정했는데, 타깃이 `unsafe-url` 을 선언하면 그대로 `unsafe-url` 이 나온다 —
+**타깃 정책이 흐른다.** (안 재고 넘어갔으면 모든 Referer 를 지울 뻔했다.)
+
+고침:
+
+- `refererForPolicy(base, target, policy)` — 8개 정책 전부. 강등(https→http)은
+  빈 값, 전체 URL 이라도 자격증명·프래그먼트는 제거(명세).
+- 정책 출처 우선순위: 페이지가 명시한 값 → **브라우저가 계산한 값** → 문서 응답의
+  `Referrer-Policy` 헤더(entry 에 기억) → 브라우저 기본.
+- 페이지의 `fetch()` 는 `/zp/api/fetch` 로 오므로 브라우저 계산값이 없다(그
+  요청의 정책은 *프록시 문서* 의 것이다) — 프렐류드가 `init.referrerPolicy` 를
+  실어 보낸다.
+
+### 실측 (고친 뒤, 정책마다 7개 서브리소스 종류)
+
+기본 / `no-referrer` / `origin` / `same-origin` / `unsafe-url` **전부 대조군과
+같은 값**. 요소 단위 `referrerpolicy` 예외도 양방향으로 일치한다
+(`no-referrer` 문서 안의 `unsafe-url` 요소만 전체 URL, `unsafe-url` 문서 안의
+`no-referrer` 요소만 없음).
+
+CNN 회귀: prebid v11.18.5 / 이벤트 79 / 입찰 6 / 프레임 21 — 그대로다(오리진만
+보내도 rubicon 이 v11 을 준다).
+
+### 남은 것
+
+- `<meta name="referrer">` 로만 정책을 선언한 페이지는 **페이지가 부른 fetch()**
+  경로에서 기본값으로 떨어진다. 브라우저가 내는 요청은 전부 정확하다(브라우저가
+  meta 를 이미 반영해서 준다).
+- 최상위 문서 요청의 Referer 가 **자기 자신의 URL** 이다. 대조군은 주소창에
+  입력한 내비게이션에 Referer 를 안 보낸다. 앞 세션에서 링크 클릭 내비게이션의
+  진짜 referrer(직전 페이지)를 SW 가 모른다는 구조 문제라 함께 봐야 한다.

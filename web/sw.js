@@ -1016,7 +1016,7 @@ async function runtimeAPI(req, url, clientId) {
     let body;
     if (payload.init && payload.init.body) body = ZP.base64UrlToBytes(payload.init.body);
     const entryId = (ctx && ctx.entryId) || (explicitTab && explicitTab.activeEntryId) || tab.activeEntryId;
-    return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab, entryId });
+    return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab, entryId, referrerPolicy: (payload.init && payload.init.referrerPolicy) || '' });
   }
   if (url.pathname === '/zp/api/script') {
     if (req.method !== 'GET') return safeError('POLICY_BLOCKED', 405);
@@ -1310,6 +1310,41 @@ async function tryRespCachePut(url, response) {
   } catch {}
 }
 
+// Referrer-Policy 를 우리도 지킨다. 예전에는 정책을 **전혀 안 봤고** 언제나
+// 문서의 전체 URL(쿼리 포함)을 Referer 로 실었다. 실측(2026-08-25 픽스처):
+// 타깃이 `Referrer-Policy: no-referrer` 를 선언해도 우리는 전체 URL 을 보냈다 —
+// 타깃이 명시적으로 금지한 것을 우리가 대신 흘린 것이고, 브라우저 기본
+// (strict-origin-when-cross-origin) 과도 달라 그 자체가 지문이다.
+//
+// 정책 자체는 지어낼 필요가 없다: 브라우저가 요청마다 계산해서
+// `Request.referrerPolicy` 로 넘겨준다 — **문서 정책과 요소의
+// `referrerpolicy` 속성이 이미 반영된 값**이다(측정: 같은 문서 안에서
+// `no-referrer` 와 `unsafe-url` 이 요청별로 따로 나온다).
+function refererForPolicy(base, targetUrl, policy) {
+  let b, tgt;
+  try { b = new URL(base); tgt = new URL(targetUrl); } catch { return ''; }
+  if (b.protocol !== 'http:' && b.protocol !== 'https:') return '';
+  const sameOrigin = b.origin === tgt.origin;
+  // "downgrade" 는 https → http 뿐이다(http → https 는 업그레이드다).
+  const downgrade = b.protocol === 'https:' && tgt.protocol === 'http:';
+  // 전체 URL 이라도 자격증명과 프래그먼트는 절대 싣지 않는다(명세).
+  const full = () => { try { const c = new URL(b.href); c.username = ''; c.password = ''; c.hash = ''; return c.href; } catch { return ''; } };
+  const originOnly = () => b.origin + '/';
+  switch (String(policy || '').toLowerCase()) {
+    case 'no-referrer': return '';
+    case 'unsafe-url': return full();
+    case 'origin': return originOnly();
+    case 'origin-when-cross-origin': return sameOrigin ? full() : originOnly();
+    case 'same-origin': return sameOrigin ? full() : '';
+    case 'strict-origin': return downgrade ? '' : originOnly();
+    case 'no-referrer-when-downgrade': return downgrade ? '' : full();
+    // 빈 문자열이면 브라우저 기본과 같게 판단한다.
+    case 'strict-origin-when-cross-origin':
+    default:
+      if (downgrade) return '';
+      return sameOrigin ? full() : originOnly();
+  }
+}
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
@@ -1430,7 +1465,18 @@ async function transportFetch(targetUrl, opt) {
     // them from `init.headers`. Smuggle them as X-ZP-Referer/X-ZP-Origin and
     // let the relay server promote them back to real Referer/Origin before
     // dispatching upstream. Without this, anti-CSRF endpoints 400.
-    headers.set('X-ZP-Referer', effectiveBase);
+    // 정책 출처 우선순위: (1) 페이지 fetch 가 명시한 값(프렐류드가 실어 보냄),
+    // (2) 브라우저가 이 요청에 대해 계산한 값, (3) 문서 응답의 Referrer-Policy
+    // 헤더, (4) 브라우저 기본. (2) 가 대부분을 덮는다 — 요소 속성까지 반영된
+    // 값이라 가장 정확하다.
+    const referrerPolicy = opt.referrerPolicy
+      || (opt.request && opt.request.referrerPolicy)
+      || (entry && entry.referrerPolicy)
+      || '';
+    const refValue = refererForPolicy(effectiveBase, u, referrerPolicy);
+    if (refValue) headers.set('X-ZP-Referer', refValue);
+    // Origin 은 Referrer-Policy 의 대상이 아니다 — 교차 출처 non-GET 이면
+    // 브라우저는 정책과 무관하게 오리진을 보낸다. 그래서 effectiveBase 기준.
     let virtualOrigin = '';
     try { virtualOrigin = new URL(effectiveBase).origin; } catch {}
     if (virtualOrigin) {
@@ -1938,6 +1984,16 @@ async function rewriteScriptResponse(resp, opt) {
   return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 async function transformDocumentResponse(resp, opt) {
+  // 타깃 문서가 선언한 정책을 기억해 둔다 — 페이지가 부른 `fetch()` 는
+  // /zp/api/fetch 로 오므로 브라우저가 계산한 요청별 정책이 없다. 여러 값이면
+  // 마지막 유효 토큰이 이긴다(명세).
+  try {
+    const declared = resp.headers.get('Referrer-Policy');
+    if (declared && opt && opt.entry) {
+      const token = declared.split(',').map(s => s.trim().toLowerCase()).filter(Boolean).pop();
+      if (token) opt.entry.referrerPolicy = token;
+    }
+  } catch {}
   // Only transform HTML payloads. Anything else (302 redirect, JSON, binary)
   // passes through unchanged — addCSP/streaming preserved.
   //

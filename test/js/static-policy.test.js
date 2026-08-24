@@ -2395,6 +2395,67 @@ test('cross-host 3xx redirect: SW swallows upstream redirect and recurses (no cl
   assert.match(sw, /headers: undefined/, 'recursive call must clear opt.headers so transportFetch rebuilds for new host');
 });
 
+// 2026-08-25 — Referrer-Policy 를 우리도 지킨다. 예전에는 정책을 **전혀 안 보고**
+// 언제나 문서의 전체 URL(쿼리 포함)을 Referer 로 실었다. 픽스처 실측: 타깃이
+// `Referrer-Policy: no-referrer` 를 선언해도 우리는 전체 URL 을 보냈다 — 타깃이
+// 명시적으로 금지한 것을 우리가 대신 흘렸고, 브라우저 기본과도 달라 지문이 된다.
+// 아래 기대값은 **대조군(직접 로드) 실측**이다.
+test('Referer follows the referrer policy (values pinned to a measured control run)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const start = sw.indexOf('function refererForPolicy(');
+  assert.ok(start > 0, 'refererForPolicy 가 sw.js 에 있어야 한다');
+  const end = sw.indexOf('async function transportFetch', start);
+  assert.ok(end > start, 'refererForPolicy 뒤에 transportFetch 가 와야 한다');
+  const sandbox = {};
+  new Function('exports', sw.slice(start, end) + '\nexports.refererForPolicy = refererForPolicy;')(sandbox);
+  const f = sandbox.refererForPolicy;
+
+  const doc = 'http://127.0.0.1:18202/page?tag=t';
+  const same = 'http://127.0.0.1:18202/same.js';
+  const cross = 'http://127.0.0.1:18203/static.js';
+  // 대조군: same-origin 은 전체 URL, cross-origin 은 오리진만.
+  assert.equal(f(doc, same, ''), doc);
+  assert.equal(f(doc, cross, ''), 'http://127.0.0.1:18202/');
+  assert.equal(f(doc, cross, 'strict-origin-when-cross-origin'), 'http://127.0.0.1:18202/');
+  // 대조군: 정책별.
+  assert.equal(f(doc, same, 'no-referrer'), '');
+  assert.equal(f(doc, cross, 'no-referrer'), '');
+  assert.equal(f(doc, same, 'origin'), 'http://127.0.0.1:18202/');
+  assert.equal(f(doc, cross, 'origin'), 'http://127.0.0.1:18202/');
+  assert.equal(f(doc, same, 'unsafe-url'), doc);
+  assert.equal(f(doc, cross, 'unsafe-url'), doc);
+  assert.equal(f(doc, same, 'same-origin'), doc);
+  assert.equal(f(doc, cross, 'same-origin'), '');
+  assert.equal(f(doc, cross, 'origin-when-cross-origin'), 'http://127.0.0.1:18202/');
+  assert.equal(f(doc, same, 'origin-when-cross-origin'), doc);
+  // https → http 는 강등이다. http → https 는 강등이 아니다.
+  assert.equal(f('https://a.example/p?q=1', 'http://b.example/x', ''), '');
+  assert.equal(f('https://a.example/p?q=1', 'http://b.example/x', 'strict-origin'), '');
+  assert.equal(f('https://a.example/p?q=1', 'http://a.example/x', 'no-referrer-when-downgrade'), '');
+  assert.equal(f('http://a.example/p?q=1', 'https://b.example/x', ''), 'http://a.example/');
+  // 전체 URL 이라도 프래그먼트와 자격증명은 절대 싣지 않는다(명세).
+  assert.equal(f('https://u:pw@a.example/p?q=1#frag', 'https://a.example/x', ''), 'https://a.example/p?q=1');
+  // 비 HTTP(S) 출처는 Referer 를 만들지 않는다.
+  assert.equal(f('data:text/html,x', 'https://a.example/x', 'unsafe-url'), '');
+});
+
+// 2026-08-25 — 정책을 실제로 **쓰는지**까지 본다. 헬퍼만 있고 호출부가 예전처럼
+// effectiveBase 를 그대로 실으면 아무것도 고쳐지지 않는다.
+test('transportFetch sets X-ZP-Referer through the policy, from the browser-computed value', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const tx = sw.match(/async function transportFetch[\s\S]*?\r?\n}\r?\n/);
+  assert.ok(tx, 'transportFetch 본문을 찾을 수 있어야 한다');
+  assert.match(tx[0], /const refValue = refererForPolicy\(effectiveBase, u, referrerPolicy\);/, '정책을 태워야 한다');
+  assert.match(tx[0], /if \(refValue\) headers\.set\('X-ZP-Referer', refValue\);/, '정책이 빈 값을 주면 헤더를 아예 안 실어야 한다');
+  assert.doesNotMatch(tx[0], /headers\.set\('X-ZP-Referer', effectiveBase\)/, 'effectiveBase 를 그대로 싣던 옛 경로가 남아 있으면 안 된다');
+  // 정책 출처: 페이지 명시 → 브라우저 계산 → 문서 헤더 → 기본.
+  assert.match(tx[0], /opt\.referrerPolicy[\s\S]{0,120}opt\.request && opt\.request\.referrerPolicy[\s\S]{0,120}entry && entry\.referrerPolicy/, '정책 출처 우선순위가 유지되어야 한다');
+  // 페이지 fetch 경로는 브라우저 계산값이 없으므로 프렐류드가 실어 보낸다.
+  const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(prelude, /referrerPolicy: req\.referrerPolicy,/, '프렐류드가 fetch init 의 referrerPolicy 를 넘겨야 한다');
+  assert.match(sw, /referrerPolicy: \(payload\.init && payload\.init\.referrerPolicy\) \|\| ''/, '/zp/api/fetch 가 그 값을 transportFetch 로 넘겨야 한다');
+});
+
 // 2026-08-25 — 리다이렉트로 entry 를 옮기는 건 **내비게이션** 얘기다. 이 갱신이
 // 서브리소스 리다이렉트에도 걸리면, 302 를 뱉는 추적 픽셀 하나가 문서 entry 의
 // targetUrl 을 자기 주소로 바꾼다(entry 는 `opt.entryId || tab.activeEntryId`).
