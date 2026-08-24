@@ -165,6 +165,22 @@
   const TARGET_USER_AGENT = ZP.TARGET_USER_AGENT;
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
+  // ★여기 있어야 한다 — `targetBrandList()` 아래가 아니라(2026-08-24).
+  //
+  // `defineOnProto` 는 설치 직후 **그 게터를 읽어** 프로토타입 설치가 먹었는지
+  // 확인한다(`instance[key] === get.call(instance)`). 그래서
+  // `installNavigatorIdentity` 가 `userAgentData` 를 설치하는 순간
+  // `virtualUserAgentData` → `targetBrandList()` 가 즉시 불린다. 이 선언이
+  // 함수 옆(모듈 본문 뒤쪽)에 있으면 그 시점엔 아직 초기화 전이라 **TDZ**
+  // (`ReferenceError: Cannot access ... before initialization`)가 난다.
+  //
+  // `try/catch` 가 그 예외를 삼켜서 조용히 폴백으로 빠졌고, 그 결과
+  // `userAgentData` 만 **navigator 인스턴스에도** 정의됐다. 실측(대조군 대비):
+  //   Object.getOwnPropertyNames(navigator).includes('userAgentData')
+  //     직접 로드 false / 프록시 true   ← 한 줄짜리 탐지기
+  // 같은 블록의 userAgent·appVersion·platform·languages 는 전부 정상이었다.
+  // 던지는 게터 하나가 그 속성만 다른 경로로 보낸 것이다.
+  let cachedUADataBrands = null;
   clearBootConfig();
   const Native = captureNative(root);
 
@@ -663,7 +679,27 @@
   // instance if something else is in the way. Normal case: no own props.
   function defineOnProto(instance, proto, key, get, set) {
     if (proto && defineAccessor(proto, key, get, set)) {
-      try { if (!instance || instance[key] === get.call(instance)) return true; } catch {}
+      // ★확인은 **게터를 부르지 않고** 한다(2026-08-24).
+      //
+      // 예전에는 `instance[key] === get.call(instance)` 로 값을 비교했다.
+      // 그런데 게터가 **객체를 돌려주면** 두 호출이 서로 다른 객체라 이 비교는
+      // 영원히 false 다 — `userAgentData` 가 정확히 그랬고, 그래서 매번
+      // 폴백으로 빠져 **그 속성만 navigator 인스턴스에 정의**됐다. 실측:
+      //   Object.getOwnPropertyNames(navigator).includes('userAgentData')
+      //     직접 로드 false / 프록시 true   ← 한 줄짜리 탐지기
+      // (같은 블록의 userAgent·platform 등은 문자열을 돌려주니 멀쩡했다.
+      //  즉 "대부분 맞으니 맞겠지" 가 통하지 않는 자리였다.)
+      //
+      // 게터를 부르는 것 자체도 부작용이었다 — 설치 시점에 게터가 참조하는
+      // 모듈 변수가 아직 초기화 전이면 TDZ 가 나고, `catch` 가 그걸 삼켰다.
+      //
+      // 우리가 확인하려는 것은 "프로토타입에 우리 접근자가 놓였고, 인스턴스에
+      // 그걸 가리는 own 속성이 없다" 뿐이다. 둘 다 서술자로 알 수 있다.
+      try {
+        const own = instance && Object.getOwnPropertyDescriptor(instance, key);
+        const onProto = Object.getOwnPropertyDescriptor(proto, key);
+        if (!instance || (!own && onProto && onProto.get === get)) return true;
+      } catch {}
     }
     return defineAccessor(instance, key, get, set);
   }
@@ -2793,7 +2829,6 @@
     defineOnProto(nav, proto, 'userAgentData', () => virtualUserAgentData(w));
     installChromeFingerprintFacade(w);
   }
-  let cachedUADataBrands = null;
   function targetBrandList() {
     if (cachedUADataBrands) return cachedUADataBrands;
     const out = [];
@@ -2808,7 +2843,21 @@
     // 실제 NavigatorUAData 인스턴스를 감싸지 않고 새로 만든다 — 감싸면 getter
     // 가 내부 슬롯을 요구해 Illegal invocation 이 난다.
     const brands = targetBrandList().map(b => ({ brand: b.brand, version: b.version }));
-    const data = {
+    // ★진짜 NavigatorUAData.prototype 을 상속시킨다(2026-08-24).
+    // 값은 own 속성으로 덮으므로 내부 슬롯을 요구하는 프로토타입 게터는
+    // 한 번도 불리지 않는다(그게 예전에 Illegal invocation 을 냈던 이유다).
+    // 실측 — 대조군 대비 세 가지가 한 번에 맞는다:
+    //   navigator.userAgentData instanceof NavigatorUAData   false → true
+    //   .constructor.name                     Object → NavigatorUAData
+    //   Object.prototype.toString.call(...)   [object Object] → [object NavigatorUAData]
+    // 값은 **중간 프로토타입**에 접근자로 올린다. 인스턴스에 직접 얹으면
+    // 실제 프로토타입의 읽기전용 접근자와 충돌해 던지고(측정: 'Cannot set
+    // property brands of #<NavigatorUAData> which has only a getter'),
+    // 무엇보다 진짜 인스턴스는 own 속성이 **0개**다(대조군 실측).
+    const uaProto = (w.NavigatorUAData && w.NavigatorUAData.prototype) || Object.prototype;
+    const shim = Object.create(uaProto);
+    const data = Object.create(shim);
+    const shimValues = {
       brands,
       mobile: false,
       platform: TARGET_PLATFORM === 'Win32' ? 'Windows' : TARGET_PLATFORM,
@@ -2831,6 +2880,13 @@
         return Promise.resolve(picked);
       },
     };
+    for (const k of Object.keys(shimValues)) {
+      const v = shimValues[k];
+      const desc = typeof v === 'function'
+        ? { value: v, writable: true, enumerable: false, configurable: true }
+        : { get: () => v, enumerable: true, configurable: true };
+      try { Object.defineProperty(shim, k, desc); } catch {}
+    }
     void real;
     return data;
   }

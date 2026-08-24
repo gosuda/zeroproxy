@@ -3787,6 +3787,57 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
 });
 
+// ── 게터를 설치하는 순간 그 게터가 불린다 (2026-08-24) ────────────────
+//
+// `defineOnProto` 는 프로토타입에 심은 뒤 **그 게터를 즉시 읽어** 설치가 먹었는지
+// 확인한다(`instance[key] === get.call(instance)`). 그래서 게터가 참조하는 모듈
+// 변수는 **설치 시점에 이미 초기화돼 있어야** 한다.
+//
+// `cachedUADataBrands` 가 `targetBrandList()` 바로 위(모듈 본문 뒤쪽)에 있었다.
+// `installNavigatorIdentity` 는 그보다 먼저 불리므로 `userAgentData` 를 심는
+// 순간 TDZ 가 났다: `ReferenceError: Cannot access 'Sr' before initialization`.
+// `try/catch` 가 삼켜 조용히 폴백으로 빠졌고, 그 결과 **그 속성만** navigator
+// 인스턴스에도 정의됐다. 대조군 대비 실측:
+//   Object.getOwnPropertyNames(navigator).includes('userAgentData')
+//     직접 로드 false / 프록시 true      ← 한 줄짜리 탐지기
+// 같은 블록의 userAgent·appVersion·platform·languages 는 전부 정상이었다 —
+// **던지는 게터 하나가 그 속성만 다른 경로로 보냈다.**
+//
+// 이 예외는 페이지의 `Error` 를 감싸서는 절대 안 보인다(엔진이 던진다).
+// `debugger-arm --strategy exceptions` 로만 잡혔다.
+test('navigator 게터가 참조하는 모듈 변수는 설치 시점에 초기화돼 있다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // ① 선언이 설치보다 **앞**에 있어야 한다. 줄 번호를 실제로 비교한다.
+  const decl = rt.indexOf('let cachedUADataBrands = null;');
+  const install = rt.indexOf("defineOnProto(nav, proto, 'userAgentData'");
+  assert.ok(decl >= 0, 'cachedUADataBrands 선언을 못 찾았다');
+  assert.ok(install >= 0, 'userAgentData 설치를 못 찾았다');
+  assert.ok(decl < install,
+    'cachedUADataBrands 가 userAgentData 설치보다 뒤에 선언됐다 — 설치 시점에 TDZ 가 난다');
+
+  // ② `defineOnProto` 가 설치 직후 게터를 읽는다는 전제 자체를 고정한다.
+  //    이 확인 읽기가 사라지면 위 순서 요구도 근거를 잃는다.
+  const dop = rt.slice(rt.indexOf('  function defineOnProto(instance, proto, key, get, set) {'),
+                       rt.indexOf('\n  function defineMethodOnProto('));
+  assert.match(dop, /instance\[key\] === get\.call\(instance\)/,
+    'defineOnProto 가 설치 직후 게터를 읽지 않는다 — 이 가드의 전제가 바뀌었다');
+
+  // ③ 실행으로 재현한다 — 선언이 뒤에 있으면 TDZ 가 나는가.
+  //    (이 케이스가 무는지 확인하려고 일부러 반대 순서를 만들어 본다.)
+  const tdz = new Function(`
+    let threw = null;
+    try {
+      const get = () => cache;   // 아래 let 을 참조한다
+      get();                     // 설치 직후의 확인 읽기에 해당
+    } catch (e) { threw = e.name; }
+    let cache = null;
+    return threw;
+  `)();
+  assert.equal(tdz, 'ReferenceError',
+    '이 엔진에서 TDZ 가 안 난다면 위 순서 요구의 근거가 없다 — 가드를 다시 생각할 것');
+});
+
 // ── 필터 컬렉션의 표면은 감싼 대상을 따라간다 (2026-08-24) ──────────────
 //
 // 실브라우저 실측(example.com, 프록시 없음):

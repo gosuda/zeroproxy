@@ -4,6 +4,91 @@
 
 ---
 
+## 설치 검증이 값 비교라 객체 게터에서 영원히 실패했다 — navigator.userAgentData (2026-08-24)
+
+### 어떻게 찾았나 — 엔진이 던지는 예외
+
+CNN 정지 원인을 쫓다가 `debugger-arm --strategy exceptions` 를 걸었더니 예외
+1,476건이 잡혔고, 그중 **우리 것**이 있었다:
+
+```
+ReferenceError: Cannot access 'Sr' before initialization
+    at Wo (runtime-prelude.js)         ← targetBrandList
+    at Ho (runtime-prelude.js)         ← virtualUserAgentData
+    at Navigator.userAgentData (runtime-prelude.js)
+```
+
+**이 예외는 페이지의 `Error` 를 감싸서는 절대 안 보인다**(엔진이 던진다).
+`debugger-arm --strategy exceptions` 가 유일한 통로였다.
+
+### 첫 진단은 절반만 맞았다
+
+TDZ 는 진짜였다 — `defineOnProto` 가 설치 직후 **게터를 부르는데**
+(`instance[key] === get.call(instance)`), 그 게터가 참조하는
+`let cachedUADataBrands` 가 모듈 본문 뒤쪽에 있어 아직 초기화 전이었다.
+선언을 위로 올렸다.
+
+**그런데 고쳐도 증상이 그대로였다.** 그래서 다시 봤고 진짜 원인이 나왔다:
+
+`virtualUserAgentData` 는 **호출마다 새 객체**를 만든다. 그러니
+`instance[key] === get.call(instance)` 는 두 개의 다른 객체를 비교하는 셈이라
+**영원히 false** 다. 매번 폴백으로 빠져 그 속성만 navigator **인스턴스에도**
+정의됐다.
+
+같은 블록의 `userAgent`·`appVersion`·`platform`·`languages` 는 문자열을
+돌려주므로 멀쩡했다 — **"대부분 맞으니 맞겠지" 가 통하지 않는 자리**였고,
+그래서 오래 안 보였다.
+
+### 대조군이 판정했다
+
+| | 직접 로드 | 프록시(고치기 전) |
+|---|---|---|
+| `getOwnPropertyNames(navigator)` 에 `userAgentData` | **false** | **true** |
+| `navigator` own 속성 개수 | 0 | 1 |
+
+한 줄짜리 탐지기다.
+
+### 고친 것
+
+1. **설치 확인을 서술자로 한다 — 게터를 부르지 않는다.**
+   확인하려는 것은 "프로토타입에 우리 접근자가 놓였고, 인스턴스에 그걸 가리는
+   own 속성이 없다" 뿐이고 둘 다 `getOwnPropertyDescriptor` 로 알 수 있다.
+   부작용(TDZ)도 같이 사라진다.
+2. **가상 UAData 가 진짜 `NavigatorUAData.prototype` 을 상속한다.**
+   값은 **중간 프로토타입**에 접근자로 올린다 — 인스턴스에 직접 얹으면
+   실제 프로토타입의 읽기전용 접근자와 충돌해 던지고(측정: `Cannot set property
+   brands of #<NavigatorUAData> which has only a getter`), 무엇보다 진짜
+   인스턴스는 own 속성이 **0개**다.
+
+### 최종 실측 — 열 항목이 대조군과 일치
+
+| | 직접 | 프록시 |
+|---|---|---|
+| `navigator` own 에 노출 | false | false |
+| `navigator` own 개수 | 0 | 0 |
+| `instanceof NavigatorUAData` | true | true |
+| `constructor.name` | NavigatorUAData | NavigatorUAData |
+| `Object.prototype.toString` | `[object NavigatorUAData]` | 같음 |
+| UAData 자신의 own 속성 개수 | 0 | 0 |
+| `mobile` / `platform` / `getHighEntropyValues` | false / Windows / function | 같음 |
+
+### 재 보길 잘한 것
+
+`navigator.userAgentData === navigator.userAgentData` 를 "동일성이 흔들리면
+지문" 이라고 고치려다 **대조군을 먼저 쟀다 — 실제 브라우저도 false 다.**
+안 쟀으면 실제와 **다르게** 만들어 놓고 고쳤다고 적을 뻔했다.
+
+### 아직 안 닫혔다
+
+CNN 정지의 진짜 원인은 이게 아니다. 트레이스상 마지막 메인 스레드 이벤트는
+`v8.run` 의 **시작만 있고 끝이 없다** — 즉 우리가 실행시킨 인라인 스크립트가
+돌아오지 않는다. 계측으로 범인을 특정했다: **PubMatic 광고 스크립트(인라인
+22,198자)**. `__ZP_EXEC_INLINE_SCRIPT` 에 임시 로그를 넣어 `[ZPINLINE]` 은
+찍히고 `[ZPINLINE-DONE]` 이 안 찍히는 것으로 확인했다(계측은 걷어냈다).
+
+프레임 사슬 가설(`ap.top||ap` 상승 루프)은 **반증됐다** — 합성 픽스처에서
+`top`/`parent` 동일성과 수렴을 재니 정상이었다(walkSteps 0/1, converged true).
+
 ## "잉여니까 지우자" 가 진짜 결함 하나를 꺼냈다 — 컬렉션 표면 (2026-08-24)
 
 ### 출발점
