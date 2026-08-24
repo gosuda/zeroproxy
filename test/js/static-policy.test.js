@@ -3787,6 +3787,58 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
 });
 
+// ── 문서 인코딩 크기는 서브리소스에 밀려나면 안 된다 (2026-08-24) ──────
+//
+// 문서와 서브리소스를 **한 FIFO(상한 32)** 에 넣고 있었다. 그래서 서브리소스가
+// 많은 페이지는 **자기 문서 기록을 스스로 밀어낸다.** MDN 실측: 텔레메트리
+// 비컨이 쏟아져 맵이 상한에 걸리고 문서 키가 축출됐다(`totalKeys: 32`, 전부
+// 비컨). 부팅이 느린 첫 방문에서는 질의가 축출보다 늦어 **2/2 결정적으로**
+// 놓쳤고, 문서가 `encoded === decoded` = "압축 안 됨" 으로 보였다. 웜 로드는
+// 질의가 이겨서 통과했다 — **레이스처럼 보였지만 원인은 용량이었다.**
+//
+// "가끔 된다" 를 레이스로 단정하면 이 자리를 못 찾는다. 되는 쪽과 안 되는 쪽의
+// **상태**(맵 크기/키)를 재야 보인다.
+//
+// 여기서는 축출 규칙을 **실행해서** 고정한다.
+test('문서 인코딩 크기는 서브리소스 폭주에 축출되지 않는다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const start = sw.indexOf('const docEncodedByUrl = new Map();');
+  assert.ok(start >= 0, 'docEncodedByUrl 을 못 찾았다 — 문서 칸이 없다');
+  const end = sw.indexOf('function deliverStreamEncoded(');
+  assert.ok(end > start, 'recordEncoded 구간을 못 찾았다');
+  const src = 'const streamEncodedByUrl = new Map();\n' + sw.slice(start, end);
+  const { recordEncoded, docEncodedByUrl, streamEncodedByUrl } =
+    new Function(src + '\nreturn { recordEncoded, docEncodedByUrl, streamEncodedByUrl };')();
+
+  const DOC = 'https://target.example/page';
+  recordEncoded(DOC, 14010, true);
+  // 문서 하나 뒤로 서브리소스 200개가 쏟아진다 (MDN 의 텔레메트리 비컨 패턴).
+  for (let i = 0; i < 200; i++) recordEncoded('https://target.example/beacon/' + i, 20, false);
+
+  assert.equal(docEncodedByUrl.get(DOC), 14010,
+    '서브리소스 200개에 문서 기록이 밀려났다 — 첫 방문마다 "압축 안 됨" 으로 보인다');
+  assert.ok(streamEncodedByUrl.size <= 32, '서브리소스 칸의 상한이 안 먹는다');
+  // 문서 칸도 무한히 자라면 안 된다.
+  for (let i = 0; i < 50; i++) recordEncoded('https://target.example/doc/' + i, 1, true);
+  assert.ok(docEncodedByUrl.size <= 8, '문서 칸에 상한이 없다');
+
+  // 질의는 문서 칸을 먼저 본다 — 페이지가 묻는 것은 언제나 자기 문서다.
+  assert.match(sw, /const size = docEncodedByUrl\.get\(key\) \|\| streamEncodedByUrl\.get\(key\) \|\| 0;/,
+    '질의가 문서 칸을 먼저 보지 않는다');
+  // 내비게이션 판별이 있어야 문서가 문서 칸으로 간다.
+  assert.match(sw, /function isNavigationRequest\(req\)/, '내비게이션 판별이 없다');
+  assert.match(sw, /recordEncoded\(encFor, Number\(enc\) \|\| 0, isNavigationRequest\(event\.request\)\)/,
+    '버퍼 경로가 문서 여부를 안 넘긴다');
+  assert.match(sw, /recordEncoded\(pending\.url, size, !!pending\.isDoc\)/,
+    '스트리밍 경로가 문서 여부를 안 넘긴다');
+
+  // ★이 맵의 안전 근거는 "키는 페이지가 이미 아는 자기 URL" 이다. 조사 중에
+  //   키 목록을 통째로 뱉는 진단을 넣었다가 되돌렸다 — 그건 **다른 탭의 타깃
+  //   URL 까지** 내주므로 A2(multi-tab leak) 와 같은 부류가 된다.
+  assert.ok(!/encodedKeys/.test(sw),
+    '키 목록을 밖으로 내주면 안 된다 — 다른 탭의 타깃 URL 이 샌다');
+});
+
 // ── 세정기는 <template> 안으로 내려간다 (2026-08-24) ──────────────────
 //
 // `<template>` 의 내용은 문서 트리의 자식이 아니라 **별도 DocumentFragment**

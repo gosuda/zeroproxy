@@ -2253,8 +2253,10 @@ async function handleMessage(event) {
   // no work; just return so we never touch the kernel for a heartbeat.
   if (msg && msg.type === '__zpKeepAlive') return;
   if (msg && msg.type === 'ZP_ENCODED_SIZE_QUERY') {
-    const size = streamEncodedByUrl.get(String(msg.url || '')) || 0;
-    if (size) streamEncodedByUrl.delete(String(msg.url));
+    const key = String(msg.url || '');
+    // 문서 칸이 먼저다 — 페이지가 묻는 것은 언제나 자기 문서다.
+    const size = docEncodedByUrl.get(key) || streamEncodedByUrl.get(key) || 0;
+    if (size) { docEncodedByUrl.delete(key); streamEncodedByUrl.delete(key); }
     if (reply) reply.postMessage({ ok: true, size });
     return;
   }
@@ -3106,6 +3108,24 @@ const pendingStreamReports = new Map();
 // 밀어 보내기가 실패한 것만 남는다. 키는 **페이지가 이미 아는 자기 URL** 이라
 // 질의응답으로 새로 알려주는 것은 없다(탭 간 노출 없음).
 const streamEncodedByUrl = new Map();
+// ★문서는 **별도 칸**에 넣는다. 둘을 한 FIFO 에 섞으면 서브리소스가 많은
+// 페이지가 **자기 문서 기록을 스스로 밀어낸다** — MDN 실측(2026-08-24):
+// 텔레메트리 비컨이 쏟아져 맵이 상한 32에 걸리고 문서 키가 축출됐다.
+// 페이지 부팅이 느린 첫 방문에서는 질의가 축출보다 늦어 **항상** 놓쳤고,
+// 그 결과 문서가 "압축 안 됨"(encoded == decoded)으로 보였다. 웜 로드에서는
+// 질의가 이겨서 통과했다 — 그래서 레이스처럼 보였지만 원인은 용량이다.
+// 내비게이션은 탭당 하나뿐이라 작은 칸으로 충분하다.
+const docEncodedByUrl = new Map();
+const DOC_ENCODED_CAP = 8;
+function isNavigationRequest(req) {
+  try { return req.mode === "navigate" || req.destination === "document" || req.destination === "iframe"; } catch { return false; }
+}
+function recordEncoded(url, size, isDoc) {
+  const m = isDoc ? docEncodedByUrl : streamEncodedByUrl;
+  m.set(url, size);
+  const cap = isDoc ? DOC_ENCODED_CAP : 32;
+  if (m.size > cap) m.delete(m.keys().next().value);
+}
 function deliverStreamEncoded(streamId) {
   if (!streamId) return;
   const pending = pendingStreamReports.get(streamId);
@@ -3119,8 +3139,7 @@ function deliverStreamEncoded(streamId) {
   // (실측: register/flush 는 둘 다 돈는데 clients.get 이 undefined 다).
   // 그래서 밀어 보내는 걸 시도하되, 안 되면 URL 로 남겨 둔다 —
   // 페이지가 자기 URL 로 물어보면 그때 돌려준다(경쟁 없음).
-  streamEncodedByUrl.set(pending.url, size);
-  if (streamEncodedByUrl.size > 32) streamEncodedByUrl.delete(streamEncodedByUrl.keys().next().value);
+  recordEncoded(pending.url, size, !!pending.isDoc);
   self.clients.get(pending.clientId).then(client => {
     // 밀어 보낸 뒤에도 **지우지 않는다** — 페이지의 메시지 리스너가 아직
     // 안 붙었을 수 있고, 그러면 메시지도 잃고 질의할 것도 없어진다.
@@ -3135,7 +3154,7 @@ async function reportEncodedSize(event, resp) {
     const encFor0 = resp.headers.get('X-ZP-Encoded-For');
     if (streamId) {
       const id = event.clientId || event.resultingClientId;
-      if (id && encFor0) pendingStreamReports.set(streamId, { clientId: id, url: encFor0 });
+      if (id && encFor0) pendingStreamReports.set(streamId, { clientId: id, url: encFor0, isDoc: isNavigationRequest(event.request) });
       const h2 = new Headers(resp.headers);
       h2.delete('X-ZP-Stream-Id');
       h2.delete('X-ZP-Encoded-For');
@@ -3158,8 +3177,7 @@ async function reportEncodedSize(event, resp) {
     // 있더라도 페이지의 리스너가 아직 안 붙었을 수 있다. 버퍼 경로 문서가
     // 그러서 번번이 새다(MDN 에서 실측). URL 로도 남겨 두면 페이지가 당길 수 있다.
     if (encFor) {
-      streamEncodedByUrl.set(encFor, Number(enc) || 0);
-      if (streamEncodedByUrl.size > 32) streamEncodedByUrl.delete(streamEncodedByUrl.keys().next().value);
+      recordEncoded(encFor, Number(enc) || 0, isNavigationRequest(event.request));
     }
     return out;
   } catch { return resp; }
