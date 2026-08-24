@@ -2386,12 +2386,50 @@ test('cross-host 3xx redirect: SW swallows upstream redirect and recurses (no cl
   assert.match(sw, /__redirectDepth/, 'depth counter must be threaded through recursive opt');
   // 301/302/303 → GET, 307/308 → preserve method (RFC 7231 §6.4.4)
   assert.match(sw, /preserveMethod = resp\.status === 307 \|\| resp\.status === 308/, 'method preservation must follow RFC 7231');
-  // entry.targetUrl 업데이트 (virtual location state 동기화)
+  // entry.targetUrl 업데이트 (virtual location state 동기화).
+  // ★단 **문서 요청일 때만** — 바로 아래 테스트가 그 조건을 지킨다.
   assert.match(sw, /entry\.targetUrl = resolvedUrl/, 'entry.targetUrl must update on redirect');
   assert.match(sw, /entry\.baseUrl = resolvedUrl/, 'entry.baseUrl must update on redirect');
   // recursive call 시 headers undefined 로 비워서 transportFetch 가 새 host
   // 기준 Cookie/Referer/Origin 재빌드 (cross-host 라면 cookie scope 바뀜)
   assert.match(sw, /headers: undefined/, 'recursive call must clear opt.headers so transportFetch rebuilds for new host');
+});
+
+// 2026-08-25 — 리다이렉트로 entry 를 옮기는 건 **내비게이션** 얘기다. 이 갱신이
+// 서브리소스 리다이렉트에도 걸리면, 302 를 뱉는 추적 픽셀 하나가 문서 entry 의
+// targetUrl 을 자기 주소로 바꾼다(entry 는 `opt.entryId || tab.activeEntryId`).
+// 광고/동기화 픽셀은 302 도미노가 정상 동작이라 CNN 에서는 로드마다 수십 번
+// 일어났다. 결과: 이후 업스트림 요청의 Referer 가 남의 트래커 주소로 나가고
+// (다른 임베드 URL 이 제3자에게 새는 것이기도 하다), 페이지가 실어 보낸 정확한
+// `ref` 는 same-origin 가드에 걸려 버려졌다. 실측: rubicon 이 Referer 로 prebid
+// 빌드를 고르는 탓에 v11.18.5 대신 레거시 v4.43.0 을 받아 **경매가 아예 안
+// 돌았다** (pbjs 이벤트 0 → 75, 프레임 11 → 22, 대조군 66~73 / 29~31).
+test('redirect entry update is document-only (a subresource 302 must not repoint the document entry)', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  // 조건과 대입 사이에 아무것도 끼지 못하도록 블록 모양째 고정한다.
+  assert.match(
+    sw,
+    /if \(entry && opt\.document\) \{\s*\r?\n\s*entry\.targetUrl = resolvedUrl;\s*\r?\n\s*entry\.baseUrl = resolvedUrl;\s*\r?\n\s*\}/,
+    'entry 갱신은 `if (entry && opt.document)` 블록 안에 있어야 한다'
+  );
+  // 조건 없는 갱신이 하나라도 더 있으면 위 가드는 무의미하다.
+  assert.equal((sw.match(/entry\.targetUrl = resolvedUrl/g) || []).length, 1, '리다이렉트 시 entry 갱신 지점은 하나뿐이어야 한다');
+});
+
+// 2026-08-25 — 스크립트/워커 요청의 entry 는 **요청한 프레임의 것**이어야 한다.
+// `tab.activeEntryId` 는 탭에서 가장 최근에 만들어진 문서라, iframe 이 하나라도
+// 뜨면 최상위 문서의 스크립트 요청이 남의 프레임 entry 를 물고 나간다.
+// /zp/api/fetch 경로는 이미 ctx 를 먼저 봤는데 이 두 자리만 빠져 있었다.
+test('script/worker fetches resolve the entry from the requesting client context', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const script = sw.match(/url\.pathname === '\/zp\/api\/script'[\s\S]*?return rewriteScriptResponse\(resp[^\n]*\n/);
+  assert.ok(script, '/zp/api/script 핸들러를 찾을 수 있어야 한다');
+  assert.match(script[0], /const scriptEntryId = \(scriptCtx && scriptCtx\.entryId\) \|\| tab\.activeEntryId;/, '/zp/api/script 는 요청 클라이언트의 entry 를 먼저 골라야 한다');
+  // 골라 놓고 안 쓰면 소용없다 — 실제 호출이 그 값을 넘기는지까지 본다.
+  assert.match(script[0], /transportFetch\(target, \{ request: req, tab, entryId: scriptEntryId, refOverride \}\)/, '/zp/api/script 의 transportFetch 호출이 그 entry 를 써야 한다');
+  const worker = sw.match(/url\.pathname === '\/zp\/api\/worker-script'[\s\S]*?kind: 'worker' \}\);/);
+  assert.ok(worker, '/zp/api/worker-script 핸들러를 찾을 수 있어야 한다');
+  assert.match(worker[0], /\(ctx && ctx\.entryId\) \|\| tab\.activeEntryId/, 'worker-script 도 같은 규칙이어야 한다');
 });
 
 // 2026-06-09 transport-stage perf telemetry. With rewriter at ~1% of

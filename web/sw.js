@@ -1095,7 +1095,23 @@ async function runtimeAPI(req, url, clientId) {
     // sec-ch-ua-* 등) 가 upstream 으로 전달됨. 명시 headers 만 보내면 upstream
     // anti-bot 회로가 404 NAVER 페이지를 반환하는 경우가 있음 → SafeFrame
     // loader 미실행 → 광고 미렌더. virtualSubresource 경로와 동일 패턴 유지.
-    const resp = await transportFetch(target, { request: req, tab, entryId: tab.activeEntryId, refOverride });
+    // ★entry 는 **요청한 프레임의 것**이어야 한다. `tab.activeEntryId` 는
+    // 탭에서 가장 최근에 만들어진 문서를 가리키므로, iframe 이 하나라도 뜨면
+    // 최상위 문서의 스크립트 요청이 **남의 프레임 entry** 를 물고 나간다.
+    // 그러면 (a) 업스트림이 받는 Referer 가 엉뚱한 프레임의 URL 이 되고
+    // (다른 임베드 프레임의 주소가 제3자에게 새는 것이기도 하다),
+    // (b) 페이지가 실어 보낸 `ref` 는 same-origin 가드에 걸려 **버려진다** —
+    // 정확히 그 가드가 고쳐 줬어야 할 상황에서.
+    // CNN 실측(2026-08-25): prebid 를 받는
+    // `micro.rubiconproject.com/prebid/dynamic/11016.js` 요청이
+    // `ref=https://edition.cnn.com/` 를 정확히 실어 보냈는데도 entry 가
+    // optimizely iframe 이라 Referer 가 그 iframe URL 로 나갔고, rubicon 은
+    // Referer 로 빌드를 고르므로 **v11.18.5 대신 레거시 v4.43.0** 을 줬다.
+    // CNN 의 adfuel 은 v11 API 를 기대하므로 경매가 아예 안 돌았다
+    // (pbjs.getEvents() 대조군 73 vs 프록시 0, 프레임 31 vs 11).
+    // 아래 /zp/api/fetch 경로는 이미 ctx 를 먼저 본다 — 여기만 빠져 있었다.
+    const scriptEntryId = (scriptCtx && scriptCtx.entryId) || tab.activeEntryId;
+    const resp = await transportFetch(target, { request: req, tab, entryId: scriptEntryId, refOverride });
     return rewriteScriptResponse(resp, { targetUrl: target, kind });
   }
   if (url.pathname === '/zp/api/worker-script') {
@@ -1104,7 +1120,8 @@ async function runtimeAPI(req, url, clientId) {
     const ctx = contextFor(req, clientId);
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
-    return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId }), { targetUrl: target, kind: 'worker' });
+    // entry 는 요청한 프레임의 것 — /zp/api/script 와 같은 이유(위 주석).
+    return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: (ctx && ctx.entryId) || tab.activeEntryId }), { targetUrl: target, kind: 'worker' });
   }
   if (url.pathname === ZP.apiPath('sourcemap')) {
     // D2: serve the composed Source Map v3 JSON for a previously-rewritten
@@ -1123,7 +1140,7 @@ async function runtimeAPI(req, url, clientId) {
       if (!self.ZPBundle || !self.ZPBundle.ready || typeof self.ZPBundle.composeSourceMap !== 'function') {
         return safeError('SW_NOT_READY', 503);
       }
-      const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: tab.activeEntryId });
+      const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: (ctx && ctx.entryId) || tab.activeEntryId });
       if (!upstream || upstream.status >= 400) return safeError('TARGET_HTTP_FAILED', 502, target);
       const source = await upstream.text();
       // D2 follow-on: chain with the target site's *original* `.map`
@@ -1739,7 +1756,22 @@ async function transportFetch(targetUrl, opt) {
         let resolvedUrl = null;
         try { resolvedUrl = new URL(loc, u).href; } catch {}
         if (resolvedUrl) {
-          if (entry) {
+          // ★**문서 요청일 때만** entry 를 옮긴다.
+          // 리다이렉트를 따라가면서 entry 의 URL 을 갱신하는 건 내비게이션
+          // 얘기다. 그런데 이 자리는 서브리소스 리다이렉트에도 똑같이 걸렸고,
+          // entry 는 `opt.entryId || tab.activeEntryId` 로 잡히므로 **추적
+          // 픽셀 하나가 302 를 뱉을 때마다 문서 entry 의 targetUrl 이 그
+          // 픽셀 주소로 바뀌었다.** 광고/동기화 픽셀은 302 로 도미노를 치는 게
+          // 정상 동작이라 CNN 에서는 수십 번 일어난다.
+          // 결과: 그 뒤의 모든 업스트림 요청이 **엉뚱한 Referer** 를 달고 나가고
+          // (= 남의 트래커 주소가 제3자에게 새는 것이기도 하다), 페이지가 실어
+          // 보낸 정확한 `ref` 는 same-origin 가드에 걸려 버려졌다.
+          // CNN 실측(2026-08-25): prebid 를 받는 rubicon 요청의 Referer 가
+          // scorecardresearch/quantserve 로 나갔고, rubicon 은 Referer 로 빌드를
+          // 고르므로 v11.18.5 대신 레거시 v4.43.0 을 줬다 — adfuel 은 v11 API 를
+          // 기대하므로 **경매가 아예 안 돌았다**(pbjs 이벤트 대조군 73 vs 0,
+          // 프레임 31 vs 11).
+          if (entry && opt.document) {
             entry.targetUrl = resolvedUrl;
             entry.baseUrl = resolvedUrl;
           }

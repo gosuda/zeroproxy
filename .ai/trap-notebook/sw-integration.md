@@ -483,3 +483,91 @@ Go 의 `ConstructorPolicy` 는 이 목록을 이미 걷어낸다. 그런데 **�
 알려진 상한 20 보다 관대하다. 우리는 20 에서 멈추므로 21~26홉 구간은 크롬이
 되고 프록시가 안 된다. 실사이트에 그런 체인은 없다고 보고 받아들인 차이다
 (다음 세션이 다시 재지 않도록 여기 적는다).
+
+---
+
+## 리다이렉트가 문서 entry 를 옮기는데, 서브리소스에도 걸렸다 — CNN 광고가 통째로 죽었다 (2026-08-25) {#리다이렉트-entry}
+
+CNN 은 400 을 다 잡은 뒤에도 프레임이 **대조군 29~31 vs 프록시 11** 이었다.
+요소 수는 이미 대조군을 넘었으니 "본문은 뜨는데 광고 iframe 만 안 뜬다" 였다.
+
+### 좁힌 길
+
+`document-start` 주입 MutationObserver 로 **iframe 이 만들어지는 순간**을
+대조군/프록시 양쪽에서 셌다(31 vs 16). 없어진 쪽을 보니 전부 prebid 의
+**user-sync 프레임**(`eus.rubiconproject.com/usync.html`,
+`ads.pubmatic.com/…/user_sync.html` …) 이었다. 그것들은 **경매가 끝나야** 생긴다.
+
+그래서 경매를 직접 봤다:
+
+| | pbjs 버전 | `getEvents()` | 응답 |
+|---|---|---|---|
+| 대조군 | v11.18.5 | 66~73 | 4~5 |
+| 프록시 | **v4.43.0** | **0** | 0 |
+
+**같은 URL 인데 다른 파일**을 받고 있었다. `micro.rubiconproject.com` 은
+**Referer 로 빌드를 고른다**(측정: `Referer: https://edition.cnn.com/` → 184,186B
+v11.18.5, 없거나 `https://www.cnn.com/` → 47,219B v4.43.0. HTTP/1.1 에서도 같다).
+CNN 의 adfuel 은 v11 API 를 기대하므로 v4 를 받으면 **경매가 아예 안 돈다.**
+
+### 원인
+
+SW 에 임시 로그를 넣어 나가는 Referer 를 봤다:
+
+```
+ZPREF url=https://micro.rubiconproject.com/prebid/dynamic/11016.js
+      ref=https://sb.scorecardresearch.com/b2?c1=2&c2=6035748&…   ← 나가는 Referer
+      over=https://edition.cnn.com/                               ← 페이지가 준 ref (정확)
+```
+
+페이지는 정확한 `ref` 를 실어 보냈는데 **버려졌다.** `transportFetch` 는
+`opt.refOverride` 를 **entry 와 same-origin 일 때만** 받아들이는데, 그 entry 가
+scorecardresearch 였기 때문이다.
+
+entry 가 왜 트래커가 됐나 — 리다이렉트 처리에 있었다:
+
+```js
+if (entry) { entry.targetUrl = resolvedUrl; entry.baseUrl = resolvedUrl; }
+```
+
+**리다이렉트를 따라가며 entry 를 옮기는 건 내비게이션 얘기다.** 그런데 이 자리는
+`transportFetch` 공통 경로라 **서브리소스 리다이렉트에도 똑같이 걸렸고**, entry 는
+`opt.entryId || tab.activeEntryId` 로 잡힌다. 즉 **302 를 뱉는 추적 픽셀 하나가
+문서 entry 의 URL 을 자기 주소로 바꿔 놓는다.** 광고/쿠키 동기화 픽셀은 302 로
+도미노를 치는 게 정상 동작이라 CNN 에서는 로드마다 수십 번 일어난다.
+
+고침: `if (entry && opt.document)`. 한 줄이다.
+
+같이 고친 것 — `/zp/api/script`, `/zp/api/worker-script` 는 entry 를
+`tab.activeEntryId`(= 탭에서 **가장 최근에 만들어진 문서**)로 잡고 있었다. iframe
+이 하나라도 뜨면 최상위 문서의 스크립트 요청이 남의 프레임 entry 를 문다.
+`/zp/api/fetch` 는 이미 요청 클라이언트의 ctx 를 먼저 봤는데 이 둘만 빠져 있었다.
+**단, 정직하게: CNN 을 되살린 건 리다이렉트 한 줄이다** — entry 선택만 고쳤을
+때는 v4.43.0 그대로였다(측정).
+
+### 실측
+
+| | pbjs | 이벤트 | 입찰응답 | 프레임 | 요소 |
+|---|---|---|---|---|---|
+| 고치기 전 | v4.43.0 | 0 | 0 | 11 | 4,033 |
+| 고친 뒤 | **v11.18.5** | **86** | **7** | **20** | 4,041 |
+| 대조군(같은 시각) | v11.18.5 | 72 | 4 | 31 | 4,055 |
+
+### 이건 유출이기도 하다
+
+엉뚱한 Referer 가 나간다는 건 **그 페이지에 박힌 다른 임베드의 URL 이 제3자에게
+간다**는 뜻이다. 위 예에서 rubicon 은 이 사용자가 scorecardresearch 비컨을 어떤
+파라미터로 쐈는지 알게 된다. 기능 버그로 보이지만 격리 위반이다.
+
+### 교훈
+
+- **공통 경로에 "내비게이션 전용" 상태 갱신을 놓지 말 것.** 이 자리는 문서
+  리다이렉트만 생각하고 쓰였고, 주석도 문서 얘기만 했다. 조건 한 줄이 빠지면
+  같은 코드가 서브리소스 수백 건에 대해 돈다.
+- **가드가 정확한 정보를 버리고 있으면 가드를 의심하기 전에 가드가 기대는 상태를
+  의심할 것.** 여기서 same-origin 가드는 제 일을 했다 — 기대는 entry 가 오염됐다.
+- 재현 픽스처(`scratchpad/redir2.mjs`, 포트 18201/18202/18203)로 **문서 리다이렉트
+  뒤 서브리소스 Referer** 를 대조군과 나란히 볼 수 있다. 그 김에 하나 더 보였다:
+  교차 출처 서브리소스에 대해 브라우저는 **오리진만**(`http://host:port/`) 보내는데
+  우리는 **전체 URL**(`…/page`)을 보낸다 — 기본 referrer policy
+  (`strict-origin-when-cross-origin`)와 다르다. **아직 안 고쳤다.**
