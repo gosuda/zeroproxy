@@ -4437,22 +4437,39 @@
     return typeof prop !== 'symbol' && /^(?:0|[1-9]\d*)$/.test(String(prop));
   }
   function filteredCollection(raw, predicate) {
-    const nth = index => {
-      let seen = 0;
-      for (let i = 0; raw && i < raw.length; i++) {
+    // ★2026-08-24 — 예전에는 `nth`/`length` 가 **호출될 때마다 원본 전체를
+    // 다시 훑었다.** 그리고 순회는 `for (i = 0; i < length(); i++) yield nth(i)`
+    // 라 걸음마다 두 번씩 훑었다 — 즉 **한 번 순회가 O(N²)** 이고, 술어
+    // (`isZPAssetNode`)는 script 마다 `getAttribute` 를 부른다.
+    //
+    // CNN 에서 렌더러가 통째로 멎었다. GPT(`pubads_impl.js`)가
+    // `querySelectorAll('script')` 결과를 for-of 로 도는데, 스크립트가 ~900개라
+    // 900 × 1800 ≈ 1.6M 번의 술어 평가 = **getAttribute 1,733,614회**(실측).
+    // 대조군(직접 로드)의 같은 계수기는 **2,087** 이었다 — 830배. 페이지 코드가
+    // 아니라 **우리가 만든 호출**이다.
+    //
+    // 한 번만 훑어 배열로 만들어 둔다. 원본 길이가 변하면 다시 만든다 —
+    // `querySelectorAll` 결과는 정적이라 한 번으로 끝나고, live 컬렉션
+    // (`attributes`/`document.scripts`)은 항목이 늘거나 줄 때 길이가 바뀐다.
+    let cache = null;
+    let cacheLen = -1;
+    const items = () => {
+      const rawLen = raw ? raw.length : 0;
+      if (cache && cacheLen === rawLen) return cache;
+      const out = [];
+      for (let i = 0; i < rawLen; i++) {
         const item = raw[i];
-        if (predicate(item)) {
-          if (seen === index) return item;
-          seen++;
-        }
+        if (predicate(item)) out.push(item);
       }
-      return null;
+      cache = out;
+      cacheLen = rawLen;
+      return out;
     };
-    const length = () => {
-      let n = 0;
-      for (let i = 0; raw && i < raw.length; i++) if (predicate(raw[i])) n++;
-      return n;
+    const nth = index => {
+      const arr = items();
+      return index >= 0 && index < arr.length ? arr[index] : null;
     };
+    const length = () => items().length;
     const collection = new Proxy({}, {
       get(_target, prop) {
         if (prop === 'length') return length();
@@ -4463,20 +4480,22 @@
           for (let i = 0; raw && i < raw.length; i++) if (raw[i] && String(raw[i].name).toLowerCase() === lower && predicate(raw[i])) return raw[i];
           return null;
         };
-        if (prop === Symbol.iterator) return function*(){ for (let i = 0; i < length(); i++) yield nth(i); };
+        if (prop === Symbol.iterator) return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield arr[i]; };
         if (isIndexKey(prop)) {
+          const arr = items();
           const index = Number(prop);
-          return index < length() ? nth(index) : undefined;
+          return index < arr.length ? arr[index] : undefined;
         }
         // `forEach`/`values`/`keys`/`entries` 를 raw 에 그냥 바인딩하면 **필터를
         // 우회한다** — `document.querySelectorAll('script').forEach(…)` 가 ZP 부트
         // 스크립트를 그대로 넘겨줬다. 인덱싱만 막고 순회를 안 막으면 소용없다.
         if (prop === 'forEach') return function(fn, thisArg) {
-          for (let i = 0, n = length(); i < n; i++) fn.call(thisArg, nth(i), i, collection);
+          const arr = items();
+          for (let i = 0; i < arr.length; i++) fn.call(thisArg, arr[i], i, collection);
         };
-        if (prop === 'values') return function*(){ for (let i = 0; i < length(); i++) yield nth(i); };
-        if (prop === 'keys') return function*(){ for (let i = 0; i < length(); i++) yield i; };
-        if (prop === 'entries') return function*(){ for (let i = 0; i < length(); i++) yield [i, nth(i)]; };
+        if (prop === 'values') return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield arr[i]; };
+        if (prop === 'keys') return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield i; };
+        if (prop === 'entries') return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield [i, arr[i]]; };
         const value = raw && raw[prop];
         return typeof value === 'function' ? value.bind(raw) : value;
       },

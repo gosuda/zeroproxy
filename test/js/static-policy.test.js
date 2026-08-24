@@ -3787,6 +3787,74 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
 });
 
+// ── 필터 컬렉션 순회는 O(N) 이어야 한다 (2026-08-24) ──────────────────
+//
+// `querySelectorAll` 결과는 우리 자산 스크립트를 숨기려고 필터 Proxy 로 감싼다.
+// 그 Proxy 의 `nth`/`length` 가 **부를 때마다 원본 전체를 다시 훑었고**, 순회는
+// `for (i = 0; i < length(); i++) yield nth(i)` 라 걸음마다 두 번씩 훑었다 —
+// 한 번 순회가 **O(N²)**. 술어(`isZPAssetNode`)는 script 마다 `getAttribute` 를
+// 부르므로 그대로 DOM 호출 폭주가 된다.
+//
+// 실측(CNN, 2026-08-24): GPT(`pubads_impl.js`)가 script 목록을 for-of 로 돌자
+// **getAttribute 1,733,614회** → 렌더러 정지. 대조군(직접 로드) 같은 계수기는
+// **2,087**(830배). 고친 뒤 **4,768**(364배 감소).
+//
+// 여기서는 술어 호출 횟수를 **실행해서** 잰다. "함수가 있는가" 가 아니라
+// "몇 번 부르는가" 가 이 버그의 전부였다.
+test('필터 컬렉션 순회는 O(N) 이다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('  function isIndexKey(prop) {');
+  assert.ok(start >= 0, 'isIndexKey 를 못 찾았다');
+  const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
+  assert.ok(end > start, 'filteredCollection 구간을 못 찾았다');
+  const src = rt.slice(start, end);
+  const make = new Function('isZPAttrName',
+    src + '\nreturn filteredCollection;')(() => false);
+
+  const N = 500;
+  const raw = [];
+  for (let i = 0; i < N; i++) raw.push({ name: 'a' + i, nodeType: 1 });
+  let calls = 0;
+  const list = make(raw, () => { calls++; return true; });
+
+  // ① for-of — 이게 CNN 을 세운 경로다.
+  calls = 0;
+  let seen = 0;
+  for (const _ of list) seen++;
+  assert.equal(seen, N, '순회가 전부를 안 돌려준다');
+  assert.ok(calls <= N * 2, 'for-of 가 O(N) 이 아니다 — 술어 ' + calls + '회 (N=' + N + ')');
+
+  // ② forEach / values / entries 도 같은 자리다.
+  for (const how of ['forEach', 'values', 'entries']) {
+    const l2 = make(raw, () => { calls++; return true; });
+    calls = 0;
+    if (how === 'forEach') l2.forEach(() => {});
+    else { let c = 0; for (const _ of l2[how]()) c++; assert.equal(c, N, how + ' 가 전부를 안 돈다'); }
+    assert.ok(calls <= N * 2, how + ' 가 O(N) 이 아니다 — 술어 ' + calls + '회');
+  }
+
+  // ③ 인덱스 접근 한 번이 전체를 두 번 훑으면 안 된다
+  //    (`Array.prototype.map.call(list, …)` 이 정확히 이 경로다).
+  const l3 = make(raw, () => { calls++; return true; });
+  calls = 0;
+  for (let i = 0; i < N; i++) void l3[i];
+  assert.ok(calls <= N * 2, '인덱스 접근이 O(N) 이 아니다 — 술어 ' + calls + '회');
+
+  // ④ 그래도 **필터는 살아 있어야** 한다 — 숨기는 게 이 Proxy 의 존재 이유다.
+  const mixed = [{ name: 'keep1' }, { name: 'drop' }, { name: 'keep2' }];
+  const filtered = make(mixed, (x) => x && x.name !== 'drop');
+  assert.equal(filtered.length, 2, '필터가 안 먹는다');
+  assert.deepEqual([...filtered].map((x) => x.name), ['keep1', 'keep2'], '순회가 필터를 우회한다');
+  assert.equal(filtered[1] && filtered[1].name, 'keep2', '인덱스가 필터를 우회한다');
+
+  // ⑤ live 컬렉션에서 항목이 늘면 캐시를 다시 만든다.
+  const live = [{ name: 'a' }];
+  const lv = make(live, () => true);
+  assert.equal(lv.length, 1);
+  live.push({ name: 'b' });
+  assert.equal(lv.length, 2, '원본이 자랐는데 캐시가 안 갱신된다');
+});
+
 // ── 문서 인코딩 크기는 서브리소스에 밀려나면 안 된다 (2026-08-24) ──────
 //
 // 문서와 서브리소스를 **한 FIFO(상한 32)** 에 넣고 있었다. 그래서 서브리소스가
