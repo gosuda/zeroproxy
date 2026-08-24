@@ -3838,6 +3838,78 @@ test('navigator 게터가 참조하는 모듈 변수는 설치 시점에 초기�
     '이 엔진에서 TDZ 가 안 난다면 위 순서 요구의 근거가 없다 — 가드를 다시 생각할 것');
 });
 
+// ── 프레임 사슬은 올라가면 top 에 닿아야 한다 (2026-08-24) ──────────────
+//
+// 광고/동의(CMP) 코드는 거의 예외 없이 이렇게 조상을 훑는다:
+//
+//   while (!found) {
+//     try { if (w.frames.__cmpLocator) found = w; } catch {}
+//     if (w === window.top) break;      // ← 유일한 탈출구
+//     w = w.parent;
+//   }
+//
+// `safeCrossWindow` 가 만드는 교차창 프록시의 `top`/`parent` 가 **자기 자신**을
+// 돌려주고 있었다. 손자 프레임(깊이 2+)에서는 `window.top` 과 `window.parent` 가
+// 서로 다른 프록시이므로, `w` 는 부모에서 영원히 멈추고 `w === window.top` 은
+// 영원히 false 다 — **무한 루프**. CNN 에서 렌더러가 통째로 멎었다.
+//
+// 실측 경로: 트레이스의 마지막 메인 스레드 이벤트가 `v8.run` **시작만** 있고
+// 끝이 없었고, CPU 샘플러가 `get top` 4,181 / 우리 접근자 5,682 를 찍었다.
+// 범인은 PubMatic 인라인 스크립트(22,198자) — 그 안에 같은 모양의 루프가 6개다.
+//
+// 깊이 1(부모가 곧 top)에서는 우연히 수렴한다. **그래서 얕은 픽스처로는
+// 재현되지 않았다** — 재현에는 깊이 2 이상이 필요하다.
+test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('    function climbCrossWindow(targetWindow, prop, fallback) {');
+  assert.ok(start >= 0, 'climbCrossWindow 를 못 찾았다');
+  const end = rt.indexOf('\n    function ', rt.indexOf('    function safeCrossWindow(targetWindow) {') + 1);
+  assert.ok(end > start, 'safeCrossWindow 구간을 못 찾았다');
+
+  // 실제 구현을 뜯어 실행한다 — 창 3단을 흉내 내고 그 위에서 CMP 루프를 돈다.
+  const src = rt.slice(start, end);
+  const make = new Function('root', 'scope', 'virtualLocation', 'postMessageWrapperFor', 'crossWindowProxyCache',
+    src + '\nreturn safeCrossWindow;');
+
+  const top = { name: 'top' };
+  const mid = { name: 'mid' };
+  const leaf = { name: 'leaf' };
+  top.top = top; top.parent = top;
+  mid.top = top; mid.parent = top;
+  leaf.top = top; leaf.parent = mid;
+
+  // leaf 실행 컨텍스트: root=leaf, scope=leaf 의 가상 window
+  const scope = { name: 'scope(leaf)' };
+  const safeCrossWindow = make(leaf, scope, {}, () => () => {}, new WeakMap());
+
+  const windowTop = safeCrossWindow(top);
+  let w = scope;
+  let steps = 0;
+  let reached = false;
+  while (steps < 30) {
+    if (w === windowTop) { reached = true; break; }
+    w = w === scope ? safeCrossWindow(leaf.parent) : w.parent;
+    steps++;
+  }
+  assert.ok(reached,
+    '손자 프레임에서 parent 를 타고 올라가도 window.top 에 못 닿는다 — CMP 루프가 무한히 돈다');
+  assert.ok(steps <= 3, '사슬이 필요 이상으로 길다: ' + steps);
+
+  // 같은 실제 창에는 **같은 프록시**가 나와야 한다. 이게 아니면 `===` 비교가
+  // 성립하지 않아 위 루프는 영원히 안 끝난다.
+  assert.equal(safeCrossWindow(top), safeCrossWindow(top), '교차창 프록시가 캐시되지 않는다');
+  assert.equal(safeCrossWindow(mid).parent, safeCrossWindow(top), 'mid.parent 가 top 프록시가 아니다');
+  assert.equal(safeCrossWindow(mid).top, safeCrossWindow(top), 'mid.top 이 top 프록시가 아니다');
+
+  // 끝(자기 자신을 가리키는 창)에서는 제자리에 머문다 — 무한 재귀가 아니라 종료다.
+  assert.equal(safeCrossWindow(top).parent, safeCrossWindow(top), 'top 의 parent 는 자기 자신이어야 한다');
+
+  // 못 읽는 조상(교차 출처로 던지는 경우)에서도 던지지 않고 제자리에 머문다.
+  const hostile = { get parent() { throw new Error('cross-origin'); }, get top() { throw new Error('cross-origin'); } };
+  const hp = safeCrossWindow(hostile);
+  assert.equal(hp.parent, hp, '읽기가 던지면 제자리에 머물러야 한다');
+});
+
 // ── 필터 컬렉션의 표면은 감싼 대상을 따라간다 (2026-08-24) ──────────────
 //
 // 실브라우저 실측(example.com, 프록시 없음):

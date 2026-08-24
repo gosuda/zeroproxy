@@ -1595,6 +1595,14 @@
       wrappedLocationCache.set(nativeLoc, proxy);
       return proxy;
     }
+    // 사슬 한 칸 위로. 못 읽거나 자기 자신이면 제자리에 머문다(끝에 도달한 것).
+    function climbCrossWindow(targetWindow, prop, fallback) {
+      try {
+        const next = targetWindow[prop];
+        if (next && next !== targetWindow) return safeCrossWindow(next);
+      } catch {}
+      return fallback;
+    }
     function safeCrossWindow(targetWindow) {
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
@@ -1603,8 +1611,26 @@
         window: { get() { return proxy; }, enumerable: true },
         self: { get() { return proxy; }, enumerable: true },
         globalThis: { get() { return proxy; }, enumerable: true },
-        top: { get() { return proxy; }, enumerable: true },
-        parent: { get() { return proxy; }, enumerable: true },
+        // ★`top`/`parent` 가 **자기 자신**을 돌려주면 프레임 사슬이 끊긴다
+        // (2026-08-24). 광고/동의(CMP) 코드는 거의 예외 없이 이렇게 올라간다:
+        //
+        //   while (!found) {
+        //     try { if (w.frames.__cmpLocator) found = w; } catch {}
+        //     if (w === window.top) break;      // ← 유일한 탈출구
+        //     w = w.parent;
+        //   }
+        //
+        // 손자 프레임(깊이 2 이상)에서는 `window.top` 과 `window.parent` 가
+        // **서로 다른** 프록시다. 그런데 부모 프록시의 `.parent` 가 자기 자신을
+        // 돌려주니 `w` 는 거기서 영원히 멈추고, `w === window.top` 은 영원히
+        // false 다 — **무한 루프**. CNN 에서 렌더러가 통째로 멎은 원인이 이것이다
+        // (CPU 샘플 실측: `get top` 4,181 / 우리 접근자 5,682).
+        //
+        // 진짜 사슬을 따라간다. `top`/`parent` 는 교차 출처에서도 읽을 수 있는
+        // 몇 안 되는 속성이라 이 접근 자체는 막히지 않는다. 캐시가 실제 창을
+        // 키로 쓰므로 위로 올라가면 결국 `window.top` 과 **같은 객체**에 닿는다.
+        top: { get() { return climbCrossWindow(targetWindow, 'top', proxy); }, enumerable: true },
+        parent: { get() { return climbCrossWindow(targetWindow, 'parent', proxy); }, enumerable: true },
         frames: { get() { return proxy; }, enumerable: true },
         location: { get() { return virtualLocation; }, enumerable: true },
         postMessage: { value: postMessageWrapperFor(targetWindow), enumerable: true }
