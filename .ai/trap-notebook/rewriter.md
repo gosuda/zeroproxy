@@ -4,6 +4,75 @@
 
 ---
 
+## "잉여니까 지우자" 가 진짜 결함 하나를 꺼냈다 — 컬렉션 표면 (2026-08-24)
+
+### 출발점
+
+CNN 의 O(N²) 를 고치며 넣은 스냅샷 루프 5벌이 변이 시험에서 **잉여**로 판정됐다
+(메모이제이션만 load-bearing). 지우려고 **실제 DOM 이 뭘 노출하는지 먼저 쟀다.**
+
+### 측정 (example.com, 프록시 없음)
+
+| | `forEach`/`values`/`keys`/`entries` | `@@iterator` |
+|---|---|---|
+| `NodeList` (`querySelectorAll`) | **있음** | `Array.prototype.values` |
+| `HTMLCollection` (`document.scripts`, `getElementsByTagName`) | **없음** | `Array.prototype.values` |
+| `NamedNodeMap` (`attributes`) | **없음** | `Array.prototype.values` |
+
+그리고:
+
+- `NodeList.prototype.forEach === Array.prototype.forEach` → **true**.
+  `values`/`keys`/`entries` 도 전부 `Array.prototype.*` 와 같은 객체.
+- **브랜드 체크가 없다** — `NodeList.prototype.forEach.call({length:0}, f)` 가 돈다.
+  ⇒ 우리 프록시를 `this` 로 넘기면 `length`/인덱스 트랩을 타므로 **필터가 유지된다**.
+- 메서드는 접근할 때마다 **같은 객체**(`nl.forEach === nl.forEach`).
+- live 컬렉션은 순회 중 원본이 자라면 **그걸 본다**(측정: 순회 중 append → 2개).
+
+### 드러난 결함
+
+우리 필터 Proxy 는 **여섯 호출처(그중 넷이 live)에 한 벌의 가짜 표면**을 씌우고
+있었다. 그래서 `'forEach' in c === false` 인데 `typeof c.forEach === 'function'` 인
+**자기모순**이 났다. 탐지기에 축을 넣어 재니 **사이트와 무관하게 매번 15건**
+(naver / wikipedia / HN 전부 15). 고친 뒤 **0건**, 7개 사이트 전부.
+
+15건의 내역: `document.scripts`·`attributes` 의 네 메서드 ×2 = 8,
+`@@iterator` 동일성 ×3, `NodeList.forEach` 동일성 1, 접근마다 흔들리는 동일성 3.
+
+### 고친 것 — 규칙 하나로
+
+**표면은 raw 가 실제로 가진 것만 노출한다**(`prop in raw`). 유지할 목록이 따로
+없다 — 감싼 대상이 곧 명세다. 순회 메서드는 흉내 내지 않고 `Array.prototype.*`
+**그 자체**를 돌려준다. 결과:
+
+- 스냅샷 루프 5벌 → 규칙 2줄. **지우고 싶던 잉여가 실제로 사라졌다.**
+- live/static 구분이 저절로 맞는다.
+- 동일성이 맞는다(`c[Symbol.iterator] === Array.prototype.values`).
+- live 순회가 원본 변화를 다시 본다(스냅샷은 못 봤다).
+- `item`/`getNamedItem` 과 폴백 bind 를 인스턴스마다 캐시해 **동일성 안정화**.
+- 빈 결과에 배열 대신 **진짜 빈 NodeList** 를 쓴다(분리된 요소에 네이티브 qSA).
+  안 그러면 `item` 없고 `forEach` 있는 잡종이 된다.
+
+### 재현 안 된 것은 고치지 않았다 — 이름 기반 접근
+
+`get` 폴백이 `raw[prop]` 이라 HTMLCollection 의 **named getter** 로 숨긴 노드가
+되돌아 나올 수 있다고 코드에서 유도했다(`isZPAssetNode` 가 `id === '__zp-boot'` 를
+숨김 근거로 쓴다). **브라우저에서 재현되지 않았다**: `clearBootConfig()` 가 그
+노드를 제거하고(runtime-prelude.js), 숨기는 나머지 노드에는 id/name 이 없다
+(격리 월드 실측: script 5개, id 0개). named getter 는 id/name 으로만 찾으므로
+**도달 가능한 대상이 없다.**
+
+**잠재 조건은 남는다**: 숨기는 노드가 언젠가 id 나 name 을 갖게 되면 그 폴백이
+필터를 우회한다. 지금 고치면 재현도 안 되는 것에 코드를 더하는 셈이라 두었다.
+
+### 변이 시험 — 이번엔 8/8
+
+지난번 3/6 때 "안 무는 변이" 셋은 가드 약점이 아니라 **그 변경이 무해하다는
+증거**였다. 이번에도 하나 나왔다: `@@iterator` 에 걸어 둔 `inRaw` 게이트를 떼도
+아무 가드가 안 물었다 — 셋 다 @@iterator 를 가지므로 **한 번도 발화하지 않는
+조건**이었다. 그래서 가드를 늘리는 대신 **그 게이트를 지웠다.** 나머지 miss 하나
+(폴백 bind 동일성)는 진짜 가드 구멍이라 케이스를 추가했다. **miss 를 만나면 먼저
+"이 변이가 실제로 해로운가" 를 묻는다** — 아니면 지울 코드를 찾은 것이다.
+
 ## 우리 필터 컬렉션이 O(N²) 이라 CNN 이 렌더러를 세웠다 (2026-08-24)
 
 ### 증상

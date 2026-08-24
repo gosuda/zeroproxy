@@ -4470,34 +4470,62 @@
       return index >= 0 && index < arr.length ? arr[index] : null;
     };
     const length = () => items().length;
+    // ★표면은 **raw 가 실제로 가진 것만** 노출한다(2026-08-24).
+    //
+    // 예전에는 여섯 호출처에 한 벌의 가짜 표면을 씌웠다. 실브라우저 실측:
+    //   NodeList        forEach/values/keys/entries 있음
+    //   HTMLCollection  넷 다 undefined   (document.scripts, getElementsByTagName)
+    //   NamedNodeMap    넷 다 undefined   (attributes)
+    // 그래서 `'forEach' in c === false` 인데 `typeof c.forEach === 'function'` 인
+    // **자기모순**이 났다 — 사이트와 무관한 한 줄짜리 탐지기다(실측: 어느 사이트든
+    // 똑같이 15건).
+    //
+    // `prop in raw` 로 게이트하면 live/static 구분이 저절로 맞고, 유지할 목록이
+    // 따로 없다 — 감싼 대상이 곧 명세다.
+    const inRaw = (prop) => { try { return !!raw && prop in raw; } catch { return false; } };
+    // 실제 DOM 은 `nl.forEach === nl.forEach`, `hc.item === hc.item` 이 true 다.
+    // `get` 트랩에서 매번 새로 만들면 그 자체가 후킹을 드러낸다.
+    let itemFn = null;
+    let getNamedItemFn = null;
+    const boundFns = new Map();
     const collection = new Proxy({}, {
       get(_target, prop) {
         if (prop === 'length') return length();
-        if (prop === 'item') return index => nth(Number(index) || 0);
-        if (prop === 'getNamedItem') return name => {
+        if (prop === 'item' && inRaw('item')) return itemFn || (itemFn = index => nth(Number(index) || 0));
+        if (prop === 'getNamedItem' && inRaw('getNamedItem')) return getNamedItemFn || (getNamedItemFn = name => {
           const lower = String(name || '').toLowerCase();
           if (isZPAttrName(lower)) return null;
           for (let i = 0; raw && i < raw.length; i++) if (raw[i] && String(raw[i].name).toLowerCase() === lower && predicate(raw[i])) return raw[i];
           return null;
-        };
-        if (prop === Symbol.iterator) return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield arr[i]; };
+        });
+        // 순회는 **실제 DOM 이 쓰는 바로 그 함수**를 돌려준다. 셋 다 @@iterator 가
+        // `Array.prototype.values` 이고(측정), 그 함수들에는 브랜드 체크가 없어
+        // `this` 의 `length`/인덱스만 읽는다 — 즉 프록시를 `this` 로 받으면
+        // 우리 트랩을 타므로 **필터가 그대로 유지된다**(측정 확인).
+        // 덤으로 live 컬렉션이 순회 중 원본 변화를 다시 본다(스냅샷은 못 봤다).
+        // @@iterator 만은 게이트하지 않는다 — NodeList·HTMLCollection·NamedNodeMap
+        // **셋 다** 가지고 있고(측정), 빈 결과로 쓰는 배열도 가진다. 게이트를 달아
+        // 뒀더니 변이로 떼어도 아무 가드가 안 물었다 = 한 번도 발화하지 않는
+        // 조건이었다. 안 쓰이는 분기는 남기지 않는다.
+        if (prop === Symbol.iterator) return Array.prototype.values;
         if (isIndexKey(prop)) {
           const arr = items();
           const index = Number(prop);
           return index < arr.length ? arr[index] : undefined;
         }
-        // `forEach`/`values`/`keys`/`entries` 를 raw 에 그냥 바인딩하면 **필터를
-        // 우회한다** — `document.querySelectorAll('script').forEach(…)` 가 ZP 부트
-        // 스크립트를 그대로 넘겨줬다. 인덱싱만 막고 순회를 안 막으면 소용없다.
-        if (prop === 'forEach') return function(fn, thisArg) {
-          const arr = items();
-          for (let i = 0; i < arr.length; i++) fn.call(thisArg, arr[i], i, collection);
-        };
-        if (prop === 'values') return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield arr[i]; };
-        if (prop === 'keys') return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield i; };
-        if (prop === 'entries') return function*(){ const arr = items(); for (let i = 0; i < arr.length; i++) yield [i, arr[i]]; };
+        // 이것들을 raw 에 **바인딩**하면 필터를 우회한다 —
+        // `document.querySelectorAll('script').forEach(…)` 가 ZP 부트 스크립트를
+        // 그대로 넘겨줬다. 바인딩하지 않고 `Array.prototype.*` 를 그대로 주면
+        // `this` 가 프록시라 필터를 지나면서 동일성까지 맞는다.
+        if (prop === 'forEach' || prop === 'values' || prop === 'keys' || prop === 'entries') {
+          return inRaw(prop) ? Array.prototype[prop] : undefined;
+        }
         const value = raw && raw[prop];
-        return typeof value === 'function' ? value.bind(raw) : value;
+        if (typeof value !== 'function') return value;
+        // 바인딩한 것도 접근마다 같은 객체여야 한다.
+        let bound = boundFns.get(prop);
+        if (!bound) { bound = value.bind(raw); boundFns.set(prop, bound); }
+        return bound;
       },
       // 2026-08-15 — `has` 의 인덱스 정규식이 `\\d` 로 이중 이스케이프되어 있었다.
       // 정규식 리터럴 안에서 `\\d` 는 "역슬래시 + d" 라, `[1-9]` 뒤에 역슬래시를
@@ -4766,8 +4794,20 @@
     const elemQSA = w.Element.prototype.querySelectorAll;
     if (typeof docQS === 'function') define(w.Document.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(docQS.apply(this, arguments)); });
     if (typeof elemQS === 'function') define(w.Element.prototype, 'querySelector', function(sel) { return selectorTargetsZP(sel) ? null : filterSelectorOne(elemQS.apply(this, arguments)); });
-    if (typeof docQSA === 'function') define(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
-    if (typeof elemQSA === 'function') define(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection([], () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    // ★표면이 raw 를 따라가므로 **빈 결과에도 진짜 NodeList** 를 줘야 한다.
+    // 빈 배열을 감싸면 `item` 이 없고 `forEach` 는 있는, NodeList 도
+    // HTMLCollection 도 아닌 잡종이 나온다. 분리된 요소에 네이티브 qSA 를 걸면
+    // 언제나 비어 있는 진짜 NodeList 다.
+    let emptyList = null;
+    const emptyNodeList = () => {
+      if (!emptyList) {
+        try { emptyList = Native.elementQuerySelectorAll.call(w.document.createElement('i'), '*'); }
+        catch { emptyList = []; }
+      }
+      return emptyList;
+    };
+    if (typeof docQSA === 'function') define(w.Document.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNodeList(), () => false) : filteredCollection(docQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
+    if (typeof elemQSA === 'function') define(w.Element.prototype, 'querySelectorAll', function(sel) { return selectorTargetsZP(sel) ? filteredCollection(emptyNodeList(), () => false) : filteredCollection(elemQSA.apply(this, arguments), node => !isZPAssetNode(node)); });
     const matches = w.Element.prototype.matches;
     const closest = w.Element.prototype.closest;
     if (typeof matches === 'function') define(w.Element.prototype, 'matches', function(sel) { return selectorTargetsZP(sel) ? false : matches.apply(this, arguments); });

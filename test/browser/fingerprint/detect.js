@@ -129,6 +129,53 @@
     }
   } catch (e) { add('timing', 'err:' + e.name); }
 
+  // ⑦-c 컬렉션 표면이 실제 인터페이스와 다른가 (2026-08-24 신설)
+  //
+  // 우리는 `querySelectorAll` / `getElementsByTagName` / `document.scripts` /
+  // `attributes` 를 필터 Proxy 로 감싸 우리 자산을 숨긴다. 그 Proxy 가 여섯
+  // 자리에 **한 벌의 가짜 표면**을 씌우고 있었다. 실브라우저 실측(example.com):
+  //   NodeList        forEach/values/keys/entries 있음, @@iterator === Array.prototype.values
+  //   HTMLCollection  넷 다 undefined,               @@iterator === Array.prototype.values
+  //   NamedNodeMap    넷 다 undefined,               @@iterator === Array.prototype.values
+  // 그리고 실제 메서드는 접근할 때마다 **같은 객체**다.
+  //
+  // 여기서는 "값이 뭐냐" 가 아니라 **자기모순과 동일성**만 본다 — 사이트마다
+  // 다를 수 없는 것들이라 대조군 없이도 판정이 선다.
+  try {
+    var hc = document.scripts;
+    var nl = document.querySelectorAll('*');
+    var nn = document.body && document.body.attributes;
+    // (a) `in` 은 없다는데 값은 있다 — 한 줄짜리 탐지기다.
+    var pairs = [['document.scripts', hc], ['attributes', nn]];
+    for (var pi = 0; pi < pairs.length; pi++) {
+      var nm = pairs[pi][0], c = pairs[pi][1];
+      if (!c) continue;
+      var meth = ['forEach', 'values', 'keys', 'entries'];
+      for (var mi = 0; mi < meth.length; mi++) {
+        var k = meth[mi];
+        if (typeof c[k] === 'function' && !(k in c)) add('collection', nm + '.' + k + ' exists but not `in`');
+        // HTMLCollection/NamedNodeMap 에는 애초에 없어야 한다.
+        else if (typeof c[k] === 'function') add('collection', nm + '.' + k + ' should be undefined');
+      }
+    }
+    // (b) @@iterator 동일성 — 셋 다 Array.prototype.values 여야 한다.
+    var iters = [['document.scripts', hc], ['querySelectorAll', nl], ['attributes', nn]];
+    for (var ii = 0; ii < iters.length; ii++) {
+      var inm = iters[ii][0], ic = iters[ii][1];
+      if (!ic) continue;
+      if (ic[Symbol.iterator] !== Array.prototype.values) add('collection', inm + ' @@iterator is not Array.prototype.values');
+    }
+    // (c) NodeList 의 순회 메서드도 Array.prototype.* 와 같은 객체여야 한다.
+    if (nl.forEach !== Array.prototype.forEach) add('collection', 'NodeList.forEach is not Array.prototype.forEach');
+    // (d) 메서드 동일성이 접근마다 흔들리면 그것만으로 후킹이 드러난다.
+    if (nl.forEach !== nl.forEach) add('collection', 'NodeList.forEach identity unstable');
+    if (hc.item !== hc.item) add('collection', 'HTMLCollection.item identity unstable');
+    if (nn && nn.getNamedItem !== nn.getNamedItem) add('collection', 'NamedNodeMap.getNamedItem identity unstable');
+    // (e) 이름 기반 접근으로 숨긴 것이 되돌아 나오는가.
+    var named = hc['__zp-boot'] || (hc.namedItem && hc.namedItem('__zp-boot'));
+    if (named) add('collection', 'named access returns a hidden node: ' + (named.id || named.src || '?'));
+  } catch (e) { add('collection', 'err:' + e.name); }
+
   // ⑧ 프레임/문서 정체
   try {
     if (/proxy\.localhost|\/zp\/p\//.test(document.baseURI)) add('baseURI', document.baseURI);

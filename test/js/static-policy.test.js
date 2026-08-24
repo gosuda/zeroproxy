@@ -3787,6 +3787,92 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   assert.equal(f(two, { fallback: 'share' }), two, 'scan 없이 값 안을 훑으면 안 된다');
 });
 
+// ── 필터 컬렉션의 표면은 감싼 대상을 따라간다 (2026-08-24) ──────────────
+//
+// 실브라우저 실측(example.com, 프록시 없음):
+//   NodeList        forEach/values/keys/entries 있음, @@iterator === Array.prototype.values
+//   HTMLCollection  넷 다 undefined,                @@iterator === Array.prototype.values
+//   NamedNodeMap    넷 다 undefined,                @@iterator === Array.prototype.values
+//   그리고 `NodeList.prototype.forEach === Array.prototype.forEach` 이며
+//   그 함수들에는 **브랜드 체크가 없다**(`{length:0}` 로도 돈다).
+//   메서드는 접근할 때마다 **같은 객체**다.
+//
+// 예전 우리 Proxy 는 여섯 호출처에 한 벌의 가짜 표면을 씌웠다. `'forEach' in c`
+// 는 false 인데 `typeof c.forEach === 'function'` 인 자기모순이 사이트와 무관하게
+// **매번 15건** 잡혔다(고치기 전 실측: naver/wikipedia/HN 전부 15).
+test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('  function isIndexKey(prop) {');
+  const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
+  assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
+  const make = new Function('isZPAttrName',
+    rt.slice(start, end) + '\nreturn filteredCollection;')(() => false);
+
+  // NodeList 흉내 — 순회 메서드와 item 을 가진 대상.
+  const nlRaw = [{ name: 'a' }, { name: 'b' }];
+  nlRaw.item = (i) => nlRaw[i] || null;
+  const nl = make(nlRaw, () => true);
+  // HTMLCollection 흉내 — @@iterator 는 있고(=Array.prototype.values)
+  // forEach/values/keys/entries 는 **없는** 대상. 실측한 모양 그대로다.
+  const bare = { length: 2, 0: { name: 'a' }, 1: { name: 'b' }, item(i) { return this[i] || null; } };
+  bare[Symbol.iterator] = Array.prototype.values;
+  const hc = make(bare, () => true);
+
+  // ① 있으면 노출, 없으면 undefined — 두 방향 다.
+  for (const k of ['forEach', 'values', 'keys', 'entries']) {
+    assert.equal(nl[k], Array.prototype[k], 'NodeList 쪽 ' + k + ' 는 Array.prototype.' + k + ' 여야 한다');
+    assert.equal(typeof hc[k], 'undefined', 'HTMLCollection 쪽에 ' + k + ' 가 있으면 안 된다');
+  }
+  assert.equal(nl[Symbol.iterator], Array.prototype.values, '@@iterator 가 Array.prototype.values 가 아니다');
+  assert.equal(hc[Symbol.iterator], Array.prototype.values, 'raw 에 @@iterator 가 있으면 그대로 줘야 한다');
+
+  // ② `in` 과 값이 어긋나면 그 자체가 탐지기다.
+  for (const k of ['forEach', 'values', 'keys', 'entries']) {
+    assert.equal(typeof hc[k] === 'function', (k in bare), 'HTMLCollection: `in` 과 값이 어긋난다 — ' + k);
+    assert.equal(typeof nl[k] === 'function', (k in nlRaw), 'NodeList: `in` 과 값이 어긋난다 — ' + k);
+  }
+
+  // ③ 메서드 동일성이 접근마다 흔들리면 안 된다. 실제 DOM 은
+  //    `hc.item === hc.item`, `hc.namedItem === hc.namedItem` 이 전부 true 다.
+  assert.equal(nl.item, nl.item, 'item 이 접근마다 새 함수다');
+  assert.equal(hc.item, hc.item, 'item 이 접근마다 새 함수다(bare)');
+  //    우리가 따로 안 다루고 raw 로 넘기는 메서드(`namedItem` 등)도 마찬가지다 —
+  //    폴백에서 매번 새로 bind 하면 그 자리만 동일성이 깨진다.
+  const withNamed = { length: 0, item() { return null; }, namedItem() { return null; } };
+  withNamed[Symbol.iterator] = Array.prototype.values;
+  const wn = make(withNamed, () => true);
+  assert.equal(typeof wn.namedItem, 'function', '폴백 메서드가 사라졌다');
+  assert.equal(wn.namedItem, wn.namedItem, '폴백 메서드가 접근마다 새 함수다');
+
+  // ④ ★그래도 필터는 살아 있어야 한다 — Array.prototype.* 는 this=프록시로
+  //    length/인덱스를 읽으므로 우리 트랩을 지난다. 이게 이 설계의 전제다.
+  const mixRaw = [{ name: 'keep1' }, { name: 'drop' }, { name: 'keep2' }];
+  mixRaw.item = (i) => mixRaw[i] || null;
+  const mixed = make(mixRaw, (x) => x && x.name !== 'drop');
+  assert.equal(mixed.length, 2, '필터가 안 먹는다');
+  assert.deepEqual([...mixed].map((x) => x.name), ['keep1', 'keep2'], '@@iterator 가 필터를 우회한다');
+  const viaForEach = [];
+  mixed.forEach((x) => viaForEach.push(x.name));
+  assert.deepEqual(viaForEach, ['keep1', 'keep2'], 'forEach 가 필터를 우회한다');
+  assert.deepEqual([...mixed.values()].map((x) => x.name), ['keep1', 'keep2'], 'values 가 필터를 우회한다');
+  assert.deepEqual(Array.prototype.map.call(mixed, (x) => x.name), ['keep1', 'keep2'], 'map 이 필터를 우회한다');
+  assert.deepEqual(Object.keys(mixed), ['0', '1'], '키가 필터를 안 따른다');
+
+  // ⑤ live 컬렉션은 순회 중 원본이 자라면 **그걸 본다**(실브라우저 측정과 같게).
+  //    스냅샷 순회는 못 봤다 — Array.prototype.values 는 매 next() 마다 length 를
+  //    읽으므로 우리 length 트랩(원본 길이 변화 시 캐시 재생성)을 다시 탄다.
+  const liveRaw = [{ name: 'x' }];
+  liveRaw.item = (i) => liveRaw[i] || null;
+  const live = make(liveRaw, () => true);
+  const walked = [];
+  for (const it of live) {
+    walked.push(it.name);
+    if (walked.length === 1) liveRaw.push({ name: 'y' });
+    if (walked.length > 4) break;
+  }
+  assert.deepEqual(walked, ['x', 'y'], 'live 순회가 원본 변화를 못 본다');
+});
+
 // ── 필터 컬렉션 순회는 O(N) 이어야 한다 (2026-08-24) ──────────────────
 //
 // `querySelectorAll` 결과는 우리 자산 스크립트를 숨기려고 필터 Proxy 로 감싼다.
