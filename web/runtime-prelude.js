@@ -3170,8 +3170,29 @@
         });
       }
     }
-    const wrappedPostMessage = postMessageWrapperFor(w);
-    if (wrappedPostMessage) define(w, 'postMessage', wrappedPostMessage);
+    // ★창 자신의 `postMessage` 를 **소유 속성으로 갈아끼우면 안 된다.**
+    //
+    // 그 래퍼는 이 창의 realm 함수다. 자식 프레임이 `parent.postMessage(...)` 를
+    // 부르면 마지막으로 실행된 사용자 함수가 그 래퍼이므로 V8 이 incumbent realm
+    // 을 **부모**로 잡고, 도착한 이벤트의 `e.source` 가 자식이 아니라 **부모 자신**
+    // 이 된다. 그러면 `frameWindowOrigins.get(e.source)` 도 실패해서 `e.origin`
+    // 까지 부모의 타깃 오리진으로 뒤집힌다.
+    //
+    // 실측(2026-08-25, CNN): 대조군은 20개 프레임에서 부모로 오는 메시지 **59건**
+    // (bcx_local_storage_frame → https://assets.bounceexchange.com 포함).
+    // 프록시는 **0건** — 4,700여 건 전부 `source === window` 로 도착했다.
+    // 최소 재현으로도 확인: 부모 realm 래퍼를 끼우면 source 가 부모가 되고,
+    // 네이티브를 자식 realm 에서 apply 하면 자식이 된다.
+    //
+    // 이것이 bounce 의 저장소 프레임 핸드셰이크를 죽이고 있었다 —
+    // `e.origin === "https://" + bouncex.website.biu` 가 영영 거짓이라
+    // bouncex.cookie(did/vid) 가 안 생기고 state/js → sspConfig → APS 가 막힌다.
+    // SafeFrame 의 `e.source === iframe.contentWindow` 식별도 같은 이유로 깨진다.
+    //
+    // 페이지 코드가 보는 `postMessage` 는 멤브레인 get 트랩이 계속 래퍼를
+    // 돌려주므로 targetOrigin 매핑은 그대로 산다. 부수로 지문 하나도 사라진다 —
+    // 래퍼는 `length: 3` / `configurable: false` 였고 진짜는 `1` / `true` 다.
+    void postMessageWrapperFor(w);
     let onmessage = null;
     defineAccessor(w, 'onmessage', () => onmessage, value => {
       if (onmessage) Native.windowRemoveEventListener('message', messageListenerWrappers.get(onmessage) || onmessage);

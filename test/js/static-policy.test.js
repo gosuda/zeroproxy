@@ -4504,3 +4504,24 @@ test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => 
     assert.deepEqual(reported, [['https://t/doc', 1234]], 'pull 경로(recordEncoded)는 그대로 남아야 한다');
   });
 });
+
+// 2026-08-25 — 창 자신의 postMessage 를 소유 속성으로 갈아끼우면, 자식이
+// `parent.postMessage(...)` 를 부를 때 마지막 사용자 함수가 **부모 realm 의**
+// 래퍼라 V8 이 incumbent realm 을 부모로 잡는다. 도착한 이벤트의 e.source 가
+// 자식이 아니라 부모 자신이 되고, source 로 오리진을 찾는 가상화까지 뒤집힌다.
+// 실측: 대조군 CNN 은 프레임→부모 메시지 59건(20개 프레임), 프록시는 0건 —
+// 4,700여 건 전부 source === window. 고친 뒤 bcx 프레임에서만 300건(버퍼 상한)이
+// `https://assets.bounceexchange.com` 오리진으로 정상 도착하고, bouncex.cookie
+// (did/vid) → state/js → sspConfig(aps/criteo/index/magnite/…) 까지 이어졌다.
+test('창 자신의 postMessage 를 소유 속성으로 갈아끼우지 않는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.doesNotMatch(
+    rt,
+    /define\(w, 'postMessage',/,
+    "부모 realm 래퍼를 창에 심으면 자식→부모 메시지의 e.source 가 부모로 뒤집힌다"
+  );
+  // 페이지가 보는 경로(멤브레인 get 트랩)는 그대로 래퍼여야 targetOrigin 매핑이 산다.
+  assert.match(rt, /if \(prop === 'postMessage'\) return postMessageWrapperFor\(/, '멤브레인 트랩의 래퍼는 남아 있어야 한다');
+  // 자식 부팅 전 구간의 조기 설치는 별개 경로다(부모가 자식에게 쏘는 방향).
+  assert.match(rt, /function installEarlyPostMessage\(childWin\)/, '자식 조기 설치 경로는 유지된다');
+});
