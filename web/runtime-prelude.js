@@ -1722,12 +1722,27 @@
     // 진짜 native Location 인스턴스인가. `instanceof` 로 보면 페이지가
     // `Symbol.hasInstance` 를 갈아 끼워 속일 수 있으므로, **네이티브 게터를
     // 직접 불러 보는 브랜드 체크**를 쓴다(Location 이 아니면 던진다).
+    // ★1차 판정은 **던지지 않아야 한다.** 처음엔 네이티브 게터를 바로 불러
+    // 성공/예외로 갈랐는데, 그러면 Location 이 **아닌** base 마다 예외가 하나씩
+    // 난다. `href`/`origin`/`host`/… 는 앵커·URL·설정객체에서 흔한 이름이라
+    // 이 경로가 통째로 뜨거워진다. 실측(200k 회): 진짜 Location 34ms vs
+    // 앵커 734ms / 평범한 객체 796ms — 호출당 ~3.7µs. CNN 광고 스택에서
+    // 렌더러가 굳었다.
+    // 그래서 위조 불가능한 [[Class]] 태그로 먼저 값싸게 거른 뒤, 통과한 것만
+    // 네이티브 게터로 확증한다. 페이지가 `Symbol.toStringTag` 로 태그를
+    // 위조하면 확증 단계에서 걸러진다(그 경우에만 예외 비용을 낸다).
+    const nativeObjToString = Object.prototype.toString;
+    const knownLocations = new WeakSet();
     function isNativeLocation(value) {
       if (!value || typeof value !== 'object') return false;
       if (value === virtualLocation) return false;
+      if (knownLocations.has(value)) return true;
+      let tag;
+      try { tag = nativeObjToString.call(value); } catch { return false; }
+      if (tag !== '[object Location]') return false;
       const d = Native.locationHref;
       if (!d || !d.get) return false;
-      try { d.get.call(value); return true; } catch { return false; }
+      try { d.get.call(value); knownLocations.add(value); return true; } catch { return false; }
     }
     function get(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);

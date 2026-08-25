@@ -1455,13 +1455,35 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // FAVE/APS 광고 체인 중단.
         // 지역 이름이라도 감싸는 것은 의미상 안전하다 — 멤브레인 트랩은
         // window/Location/document 가 아닌 base 는 Reflect 로 그대로 흘린다.
+        let prop = expr.property.name.as_str();
+        // ★가려진 지역 수신자에서 무엇을 감쌀 것인가.
+        //
+        // 예전에는 지역 수신자면 **전부** 건너뛰었고, 그래서 별칭 한 번이면
+        // (`var u = n.location; u.protocol`) 멤브레인이 꺼졌다 — 프록시 스킴이
+        // 새어 CNN 광고 체인이 끊긴 원인이다.
+        //
+        // 그렇다고 전부 감싸면 **창 사슬**(top/parent/frames/opener/
+        // contentWindow/…)까지 지역 별칭에서 프록시를 타는데, 그 자리는 광고/
+        // 동의(CMP) 코드의 상승 루프가 도는 뜨거운 경로다(2026-08-24 에 여기서
+        // 렌더러가 굳었다). 실측으로도 CNN 이 간헐 정지했다.
+        //
+        // 그래서 **URL 성분만** 지역 별칭에서도 감싼다. 창 사슬은 예전 규칙을
+        // 유지한다 — 그쪽은 `window` 식별자가 이미 스코프 프록시를 돌려주므로
+        // (`var w = window; w.parent` 는 프록시의 get 트랩을 탄다) 별칭 우회가
+        // 성립하지 않는다. 즉 이 좁힘은 구멍을 남기지 않는다.
+        const URL_SHAPE_MEMBERS: &[&str] = &[
+            "href", "protocol", "host", "hostname", "port", "pathname", "search", "hash",
+            "origin", "location",
+        ];
         if let Expression::Identifier(recv) = &expr.object {
             let recv_name = recv.name.as_str();
-            if is_dangerous_global(recv_name) && self.is_shadowed(recv_name) {
+            let url_shape = URL_SHAPE_MEMBERS.contains(&prop);
+            if self.is_shadowed(recv_name)
+                && (!url_shape || is_dangerous_global(recv_name))
+            {
                 return;
             }
         }
-        let prop = expr.property.name.as_str();
         if is_dangerous_member(prop) {
             // Note: we intentionally keep the inner identifier patch that
             // visit_identifier_reference may have emitted for the receiver.
