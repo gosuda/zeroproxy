@@ -1345,6 +1345,35 @@ function refererForPolicy(base, targetUrl, policy) {
       return sameOrigin ? full() : originOnly();
   }
 }
+// 상류가 헤더 한 줄도 주지 않은 채 멈추면 `kernelFetch` 의 promise 는
+// **영영 settle 되지 않는다**. 그 위에 데드라인이 하나도 없어서 (Rust 쪽
+// 주석은 "caller does this on a deadline timeout" 이라고 적어 두었지만 그
+// caller 가 없었다) 브라우저는 무한히 기다린다. iframe 내비게이션이 이렇게
+// 되면 프레임은 `about:blank` 인 채 load 도 error 도 안 오고, 콘솔에도
+// 아무것도 안 남는다 — 화면만 비고 원인은 어디에도 없다.
+//
+// CNN 실측(2026-08-25, 계측 없는 클린 빌드): 한 번의 로드에서 요청 492건 중
+// 485건은 정상 응답, **문서 내비게이션 6건만** 끝까지 응답이 없었다. 그
+// 6프레임이 광고/동의 체인(bounce → APS)을 통째로 끊고 있었다.
+//
+// 데드라인은 원인 치료가 아니라 **경계**다. 멈춘 상류를 "보이는 실패"로
+// 바꿔서 (a) 브라우저가 프레임을 포기하고 error 문서를 커밋하게 하고,
+// (b) refusal 로그에 어느 타깃이 멈췄는지 이름을 남긴다.
+const TRANSPORT_DEADLINE_MS = 20000;
+function withTransportDeadline(promise, targetUrl, method) {
+  let timer = null;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error('TARGET_CONNECT_FAILED: transport deadline ' + TRANSPORT_DEADLINE_MS + 'ms');
+      e.zpTransportTimeout = true;
+      logRefusal('TRANSPORT_DEADLINE', 504, targetUrl, { method: String(method || '') });
+      reject(e);
+    }, TRANSPORT_DEADLINE_MS);
+  });
+  // clearTimeout 을 빼먹으면 정상 응답마다 타이머가 20초씩 살아남는다.
+  return Promise.race([promise, deadline]).finally(() => { if (timer !== null) clearTimeout(timer); });
+}
+
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
@@ -1703,7 +1732,7 @@ async function transportFetch(targetUrl, opt) {
   let resp;
   const txT0 = performance.now();
   try {
-    resp = await self.kernelFetch(reqLike);
+    resp = await withTransportDeadline(self.kernelFetch(reqLike), u, method);
   } catch (e) {
     logTransportEvent(u, method, 0, performance.now() - txT0, 0);
     // Record WHY. The page only ever sees "502 (Bad Gateway)", which tells us
@@ -1717,6 +1746,9 @@ async function transportFetch(targetUrl, opt) {
         `sw:transport-fail ${method} ${String(u).slice(0, 120)} after=${Math.round(performance.now() - txT0)}ms err=${reason}`
       );
     } catch {}
+    // 타임아웃은 게이트웨이 타임아웃이다 — 502(연결 실패)와 구분해야
+    // 로그만 보고도 "상류가 멈췄다" 와 "연결이 거절됐다" 를 가른다.
+    if (e && e.zpTransportTimeout) return safeError(e.message, 504, u);
     return safeError(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 502, u);
   }
   // body length signal — Content-Length is upstream-authoritative when
@@ -3256,10 +3288,28 @@ async function reportEncodedSize(event, resp) {
     headers.delete('X-ZP-Encoded-For');
     const out = new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
     const id = event.clientId || event.resultingClientId;
+    // ★`clients.get(resultingClientId)` 를 **await 하면 안 된다.**
+    //
+    // 내비게이션의 resulting client 는 **응답이 커밋돼야** 생긴다. 그런데 이
+    // await 는 응답 경로 위에 있다 — 응답이 클라이언트를 기다리고, 클라이언트는
+    // 응답을 기다리는 교착이다. Chrome 은 예약된 id 에 대해 이 promise 를
+    // 그냥 붙들고 있으므로 respondWith 가 영영 settle 되지 않는다.
+    //
+    // 증상이 지독하게 조용하다: SW 는 200 을 만들어 냈고(실측 92~210ms),
+    // 커널도 상류도 멀쩡하다. 브라우저만 커밋을 못 해서 iframe 이 영원히
+    // `about:blank` 로 남고 load 도 error 도 콘솔도 없다. CNN 실측
+    // (2026-08-25): 한 로드에서 문서 요청 6건이 이렇게 죽었고, 그중 하나가
+    // bounce 의 저장소 프레임이라 device_id → state/js → sspConfig → APS
+    // 광고 체인이 통째로 끊겼다.
+    //
+    // 이 메시지는 **진단용 텔레메트리**다. 페이지가 못 받아도 되고, 그래서
+    // 아래 recordEncoded 로 pull 경로가 이미 있다. 응답을 볼모로 잡을 값이
+    // 아니다 — 보내되 기다리지 않는다.
     if (id) {
-      const client = await self.clients.get(id);
-      // 페이지는 타임을 **리라이트된 타깃 URL** 로 색인하므로 같은 이름으로 보낸다.
-      if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
+      self.clients.get(id).then((client) => {
+        // 페이지는 타임을 **리라이트된 타깃 URL** 로 색인하므로 같은 이름으로 보낸다.
+        if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
+      }).catch(() => {});
     }
     // 내비게이션은 `resultingClientId` 라 이 시점에 클라이언트가 없을 수 있고,
     // 있더라도 페이지의 리스너가 아직 안 붙었을 수 있다. 버퍼 경로 문서가

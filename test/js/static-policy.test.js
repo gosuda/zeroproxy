@@ -4431,3 +4431,76 @@ test('membrane virtualizes location reads whose base is a real Location or the d
   const gopd = rt.slice(rt.indexOf('function getOwnPropertyDescriptor(base, prop)'), rt.indexOf('function ownKeys(base)'));
   assert.match(gopd, /base === document/, '서술자로 진짜 게터를 꺼내 가는 길도 막아야 한다');
 });
+
+// 2026-08-25 — 상류가 멈추면 `kernelFetch` 의 promise 는 영영 settle 되지
+// 않는다. 그 위에 데드라인이 없으면 iframe 내비게이션이 무한 대기로 끝나고
+// load/error/콘솔 어디에도 흔적이 없다. CNN 실측: 492건 중 6건의 **문서**
+// 요청만 끝까지 응답이 없었고 그 6프레임이 광고 체인을 끊었다.
+// 이 가드는 (1) 데드라인이 kernelFetch 를 실제로 감싸는지, (2) 타이머를
+// 반드시 해제하는지(정상 응답마다 20초 타이머가 남으면 안 된다),
+// (3) 타임아웃이 502 가 아니라 504 로 구분되는지를 고정한다.
+test('transportFetch 는 kernelFetch 에 데드라인을 건다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(
+    sw,
+    /resp = await withTransportDeadline\(self\.kernelFetch\(reqLike\), u, method\);/,
+    'kernelFetch 호출이 데드라인 안에서 일어나야 한다'
+  );
+  const fn = sw.slice(sw.indexOf('function withTransportDeadline('), sw.indexOf('async function transportFetch('));
+  assert.match(fn, /clearTimeout\(timer\)/, '정상 응답 시 타이머를 해제해야 한다');
+  assert.match(fn, /logRefusal\('TRANSPORT_DEADLINE', 504/, '어느 타깃이 멈췄는지 로그에 이름이 남아야 한다');
+  assert.match(sw, /if \(e && e\.zpTransportTimeout\) return safeError\(e\.message, 504, u\);/, '타임아웃은 504 로 구분한다');
+
+  // 동작으로도 확인한다 — 문자열만 보면 상수만 바꿔도 통과한다.
+  const src = fn.replace('const TRANSPORT_DEADLINE_MS = 20000;', '');
+  const make = new Function('TRANSPORT_DEADLINE_MS', 'logRefusal', src + '; return withTransportDeadline;');
+  const seen = [];
+  const withDeadline = make(20, (code, status, url) => seen.push([code, status, url]));
+  return (async () => {
+    // ① 영영 안 끝나는 promise 는 데드라인에 걸려 거절된다.
+    let err = null;
+    try { await withDeadline(new Promise(() => {}), 'https://t/x', 'GET'); } catch (e) { err = e; }
+    assert.ok(err && err.zpTransportTimeout, '멈춘 요청은 타임아웃으로 거절돼야 한다');
+    assert.deepEqual(seen[0], ['TRANSPORT_DEADLINE', 504, 'https://t/x']);
+    // ② 제때 온 응답은 그대로 통과하고 거절 로그를 남기지 않는다.
+    const ok = await withDeadline(Promise.resolve('resp'), 'https://t/y', 'GET');
+    assert.equal(ok, 'resp');
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(seen.length, 1, '성공한 요청의 타이머가 뒤늦게 발화하면 안 된다');
+  })();
+});
+
+// 2026-08-25 — 응답 경로에서 `clients.get()` 을 await 하면 내비게이션이 교착한다.
+// 내비게이션의 resulting client 는 **응답이 커밋돼야** 생기므로, 응답을 만드는
+// 쪽이 그 클라이언트를 기다리면 서로를 기다린다. respondWith 는 영영 settle 되지
+// 않고 iframe 은 `about:blank` 로 남는다 — load/error/콘솔 어디에도 흔적이 없다.
+// CNN 실측: 한 로드에서 문서 요청 6건이 이렇게 죽었다.
+test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.doesNotMatch(sw, /await\s+self\.clients\.get\(/, '응답 경로의 clients.get await 는 내비게이션을 교착시킨다');
+
+  // 동작으로도 고정한다: 절대 resolve 하지 않는 clients.get 을 물려도
+  // 응답은 제때 나와야 한다.
+  const src = sw.slice(sw.indexOf('async function reportEncodedSize('), sw.indexOf('function encodedSizeKey('));
+  const make = new Function(
+    'self', 'pendingStreamReports', 'isNavigationRequest', 'recordEncoded', 'encodedSizeKey', 'Response', 'Headers',
+    src + '; return reportEncodedSize;'
+  );
+  const never = new Promise(() => {});
+  const fakeSelf = { clients: { get: () => never } };
+  const reported = [];
+  const reportEncodedSize = make(
+    fakeSelf, new Map(), () => true, (url, size) => reported.push([url, size]),
+    (u) => u, Response, Headers
+  );
+  const resp = new Response('body', { headers: { 'X-ZP-Encoded-Size': '1234', 'X-ZP-Encoded-For': 'https://t/doc' } });
+  const event = { clientId: '', resultingClientId: 'reserved-id', request: { url: 'http://proxy.localhost/zp/p/x' } };
+  return Promise.race([
+    reportEncodedSize(event, resp),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('응답이 clients.get 을 기다리다 멈췄다')), 500)),
+  ]).then((out) => {
+    assert.equal(out.status, 200, '응답은 클라이언트와 무관하게 돌아와야 한다');
+    assert.equal(out.headers.get('X-ZP-Encoded-Size'), null, '내부 헤더는 제거된다');
+    assert.deepEqual(reported, [['https://t/doc', 1234]], 'pull 경로(recordEncoded)는 그대로 남아야 한다');
+  });
+});
