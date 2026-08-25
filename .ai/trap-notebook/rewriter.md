@@ -2228,7 +2228,7 @@ naver / wikipedia / github / MDN / HN **탐지 0건**.
 프로브로 확인했다: 프록시 URL 을 `setAttribute('src')` 로 넣은 스크립트의
 `.src` 가 이제 타깃을 돌려준다(고치기 전에는 프록시 URL 이었다).
 
-### stackoverflow 재확인 — 했다 (2026-08-23 추가)
+### stackoverflow 재확인 — 했다 (2026-08-23 추가) {#stackoverflow-재확인}
 
 앞 절에 "재확인 못 했다" 고 적어 뒀는데, 하루 뒤 SO 는 정상 로드된다(에러
 페이지는 일시적인 것이었다). **실제 페이지로 재확인: 누출 0.**

@@ -10,11 +10,15 @@ ZeroProxy 는 target 사이트의 JS 를 OXC AST 로 리라이트하여 가상 `
 
 새 작업 (특히 SW / runtime-prelude / zp-htmltx / zp-rewriter / membrane 관련) 시작 전:
 ```
-cat .ai/trap-notebook/INDEX.md   # 최근 함정 1분 스캔
+head -40 .ai/trap-notebook/INDEX.md            # 최근 함정 1분 스캔
+grep -i "<지금 건드리는 것>" .ai/trap-notebook/INDEX.md   # 이미 밟은 적 있나
 ```
-관련 카테고리 .md 도 빠르게 훑기. 같은 함정을 두 번 밟지 않기 위해.
+INDEX 는 **한 항목 = 한 줄**이고 각 줄이 상세 파일의 앵커를 가리킨다. 걸리는 게 있으면
+그 링크만 열어 본다 — 인덱스를 통째로 읽지 않는다.
 
-**새 함정 발견 시 fix 직후 .ai/trap-notebook/\<category\>.md 에 항목 추가.** 이 약속이 약해지면 시스템 무용지물.
+**새 함정 발견 시 fix 직후 .ai/trap-notebook/\<category\>.md 에 항목(앵커 포함) 추가 + INDEX 에 한 줄.**
+인덱스 줄에 본문을 넣지 말 것 — `static-policy.test.js` 가 160자 상한과 링크 실재를 강제한다.
+이 약속이 약해지면 시스템 무용지물.
 
 상세 정책: [.ai/trap-notebook/README.md](.ai/trap-notebook/README.md)
 

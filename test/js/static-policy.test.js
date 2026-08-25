@@ -4328,3 +4328,40 @@ test('내부 자산 목록은 zp-core 단일 소스다', () => {
   const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   for (const n of names) assert.ok(mainGo.includes('"' + n + '"'), n + ': Go 가 서빙 목록에 안 갖고 있다');
 });
+
+// 2026-08-25 — 함정노트 INDEX 는 **한 항목 = 한 줄**이다. 이 가드가 없으면 다시
+// 무너진다: 원래 정책도 "한 줄" 이었는데 세션마다 본문을 통째로 넣어 357행
+// 769KB(중앙값 1,332자/행)가 됐고, 세션 시작에 그걸 읽는 규칙 때문에 매번
+// 컨텍스트를 태웠다. 그러면 결국 아무도 안 읽고 함정노트 자체가 무용지물이 된다.
+// 링크를 필수로 두는 이유도 같다 — 정리 전 357행 중 348행이 링크가 없어서 그
+// 한 줄이 유일한 기록이었고, 다음 세션이 검증할 방법이 없었다.
+test('trap notebook INDEX stays one line per entry, with a link that resolves', () => {
+  const dir = '.ai/trap-notebook/';
+  const lines = fs.readFileSync(dir + 'INDEX.md', 'utf8').split(/\r?\n/);
+  const headers = lines.filter(l => /^\|\s*Date\s*\|/.test(l));
+  assert.equal(headers.length, 1, '표 헤더는 파일에 하나뿐이어야 한다(정리 전에는 행들이 헤더 위에 쌓여 있었다)');
+  const headerAt = lines.findIndex(l => /^\|\s*Date\s*\|/.test(l));
+  const rows = lines.filter((l, i) => l.startsWith('|') && i > headerAt && !/^\|\s*-+/.test(l));
+  assert.ok(rows.length > 100, '항목이 실제로 있어야 한다');
+
+  const seenDates = [];
+  for (const row of rows) {
+    const cells = row.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map(s => s.trim());
+    assert.equal(cells.length, 4, `4칸(날짜/분류/요약/링크)이어야 한다: ${row.slice(0, 80)}`);
+    const [date, cat, summary, link] = cells;
+    assert.match(date, /^\d{4}-\d{2}-\d{2}$/, `날짜 형식: ${row.slice(0, 60)}`);
+    assert.ok(cat.length > 0 && cat.length <= 60, `분류 칸: ${row.slice(0, 60)}`);
+    // ★상한을 넘기면 그건 본문이다. 본문은 카테고리 .md 로.
+    assert.ok(summary.length <= 160, `요약이 160자를 넘는다(${summary.length}자) — 본문은 상세 파일로: ${summary.slice(0, 60)}…`);
+    assert.match(link, /^[A-Za-z0-9-]+\.md#\S+$/, `링크 칸이 <파일>.md#<앵커> 여야 한다: ${row.slice(0, 80)}`);
+    const [file, anchor] = link.split('#');
+    let detail;
+    try { detail = fs.readFileSync(dir + file, 'utf8'); } catch { detail = null; }
+    assert.ok(detail, `링크 대상 파일이 없다: ${file}`);
+    assert.ok(detail.includes(anchor), `앵커가 실재하지 않는다: ${link} (절 제목 끝에 {#${anchor}} 를 달아라)`);
+    seenDates.push(date);
+  }
+  // 최신이 위 — 훑을 때 head 만 봐도 되게.
+  const sorted = [...seenDates].sort().reverse();
+  assert.deepEqual(seenDates, sorted, 'INDEX 는 최신 항목이 위에 오도록 정렬되어 있어야 한다');
+});

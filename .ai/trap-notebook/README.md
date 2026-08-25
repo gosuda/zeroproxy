@@ -8,8 +8,9 @@ ZeroProxy 의 영속 함정 기록소. 매 작업에서 발견한 버그/회귀/
 ### 1. 시작 시 — 무조건 한 번 훑는다
 새 작업 (특히 SW / runtime-prelude / zp-htmltx / zp-rewriter / membrane 관련) 시작 시:
 ```
-ls .ai/trap-notebook/             # 카테고리 확인
-cat .ai/trap-notebook/INDEX.md    # 최근 추가 항목 빠르게 스캔
+ls .ai/trap-notebook/                          # 카테고리 확인
+head -40 .ai/trap-notebook/INDEX.md            # 최근 항목 스캔 (전체 320행)
+grep -i "<키워드>" .ai/trap-notebook/INDEX.md   # 지금 건드리는 곳이 이미 밟힌 적 있나
 ```
 관련 카테고리 .md 를 1분 안에 훑어 "비슷한 함정이 있는가" 확인.
 
@@ -24,13 +25,13 @@ cat .ai/trap-notebook/INDEX.md    # 최근 추가 항목 빠르게 스캔
 
 | 파일 | 범위 |
 |---|---|
-| [membrane.md](membrane.md) | runtime-prelude / worker-prelude 의 멤브레인 hook (storage, location, document, etc.) |
-| [rewriter.md](rewriter.md) | zp-rewriter / zp-htmltx AST 변환 + URL 리라이트 |
+| [rewriter.md](rewriter.md) | zp-rewriter / zp-htmltx AST 변환 + URL 리라이트 + runtime-prelude 멤브레인 |
 | [sw-integration.md](sw-integration.md) | SW classify / handleFetch / runtimeAPI / transport |
 | [transport-regression.md](transport-regression.md) | WASM kernel ↔ relay ↔ target transport layer 보안/성능 회귀 (특히 client-TLS invariant) |
 | [real-site-compat.md](real-site-compat.md) | 특정 실사이트 (naver, gosuda 등) 호환성 패턴 |
 | [build-deploy.md](build-deploy.md) | build.mjs / cargo / wasm-bindgen / 서버 배포 함정 |
 | [wasm-page-rt.md](wasm-page-rt.md) | `crates/zp-page-rt` + `web/zp-rt.js` raw WASM + 공유 메모리 패턴 함정 |
+| [tls-fingerprint.md](tls-fingerprint.md) | ClientHello / h2 프레임 지문 — 업스트림이 우리를 봇으로 보는 문제 |
 
 각 카테고리 .md 는 같은 entry 포맷:
 
@@ -44,10 +45,33 @@ cat .ai/trap-notebook/INDEX.md    # 최근 추가 항목 빠르게 스캔
 **See also**: 관련 항목 / PR / commit.
 ```
 
-## 인덱스
+## 인덱스 — **한 항목 = 한 줄**. 예외 없다.
 
-[INDEX.md](INDEX.md) — 모든 항목의 timeline + 한 줄 요약.
-새 항목 추가 시 INDEX.md 맨 위에 한 줄 추가 (날짜 + 카테고리 + 요약).
+[INDEX.md](INDEX.md) 는 세션 시작에 통째로 읽는 **스캔용**이다. 본문을 여기 넣으면
+읽는 비용이 항목 수에 비례해 커지고, 결국 아무도 안 읽는다. 실제로 그렇게 됐다 —
+2026-08-25 정리 전 이 파일은 **357행 769KB**(중앙값 1,332자/행) 였다.
+
+형식(맨 위에 추가, 최신이 위):
+
+```
+| YYYY-MM-DD | 분류 | 한 문장 요약 (≤160자) | <파일>.md#<앵커> |
+```
+
+규칙:
+
+1. **요약 칸은 160자 이하 한 문장.** 측정값·회귀 목록·조사 과정은 넣지 않는다.
+   그건 커밋 메시지와 카테고리 `.md` 의 몫이다.
+2. **링크 칸은 필수이고 실재하는 앵커**여야 한다. 카테고리 `.md` 의 절 제목 끝에
+   `{#앵커}` 를 달고 그걸 가리킨다. 상세를 안 쓸 거면 인덱스에도 쓰지 마라 —
+   한 줄만 남은 항목은 다음 세션이 검증할 수 없다(정리 전 357행 중 348행이 그랬다).
+3. 같은 조사의 연작은 **접는다.** 결론이 나면 한 줄로 합치고 소거한 가설은 상세
+   파일에 목록으로 남긴다 (2026-08-25 에 WTM wedge 38행을 그렇게 접었다).
+
+`test/js/static-policy.test.js` 가 이 규칙들을 강제한다 — 어기면 테스트가 깨진다.
+
+[LOG.md](LOG.md) — 정리 이전에 INDEX 본문으로 쌓여 있던 원문. **편집하지 않고 그대로**
+옮겼다. 인덱스 줄이 `LOG.md#<날짜>-<n>` 으로 가리킨다. 새 항목은 여기 말고
+카테고리 `.md` 에 쓴다.
 
 ## 카테고리 .md 가 비어있어도 OK
 
