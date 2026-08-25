@@ -2996,10 +2996,11 @@ test('자기 prelude 를 기다리는 프레임도 postMessage 매핑은 미리 
   assert.ok(tail.indexOf('installEarlyPostMessage(childWin);') >= 0, '컨테인먼트를 건너뛰는 분기에서도 매핑은 걸어야 한다');
   assert.ok(tail.indexOf('installEarlyPostMessage(childWin);') < tail.indexOf('return childWin;'), 'return 보다 먼저 걸어야 한다');
 
-  // ★configurable: true 여야 자식 prelude 가 자기 래퍼로 갈아끼울 수 있다.
-  // 부모 래퍼는 부모 realm 의 함수라 자식의 incumbent realm 을 바꾼다.
+  // ★configurable: true 여야 자식 prelude 가 부팅 뒤 **네이티브로 되돌릴** 수
+  // 있다(2026-08-25). 부모 래퍼는 부모 realm 함수라, 남아 있는 동안 그 창을
+  // 거치는 메시지의 incumbent realm 이 부모가 되어 e.source 가 뒤집힌다.
   const fn = rt.indexOf('function installEarlyPostMessage(');
-  const body = rt.slice(fn, fn + 700);
+  const body = rt.slice(fn, rt.indexOf('function restoreNativePostMessage(', fn));
   assert.ok(body.indexOf('configurable: true') >= 0, '자식이 덮어쓸 수 있어야 한다');
   assert.ok(body.indexOf('if (cur && !cur.configurable) return;') >= 0, '이미 고정된 정의는 건드리지 않는다');
 });
@@ -4524,4 +4525,48 @@ test('창 자신의 postMessage 를 소유 속성으로 갈아끼우지 않는�
   assert.match(rt, /if \(prop === 'postMessage'\) return postMessageWrapperFor\(/, '멤브레인 트랩의 래퍼는 남아 있어야 한다');
   // 자식 부팅 전 구간의 조기 설치는 별개 경로다(부모가 자식에게 쏘는 방향).
   assert.match(rt, /function installEarlyPostMessage\(childWin\)/, '자식 조기 설치 경로는 유지된다');
+});
+
+// 2026-08-25 — 부모가 자식 창에 심는 **조기** postMessage 래퍼는 부모 realm
+// 함수다. 붙어 있는 동안 그 창을 거치는 모든 postMessage 의 incumbent realm 이
+// 부모가 되어(자식의 self-post, 손자→자식) e.source 가 뒤집힌다. 자식 prelude 가
+// 뜨는 즉시 네이티브로 되돌려야 한다. 삭제로는 못 되돌린다 — postMessage 는
+// Window 인스턴스의 소유 속성이라(측정: Window.prototype.postMessage 는
+// undefined) 지우면 네이티브까지 같이 사라진다.
+test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 되돌린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(rt, /restoreNativePostMessage\(w\);/, '창 계측 시 조기 래퍼를 걷어 내야 한다');
+
+  // 두 함수만 정확히 떼어 낸다 — 뒤 코드를 같이 물면 엉뚱한 참조로 터진다.
+  const from = rt.indexOf('  const earlyNativeKey =');
+  const restoreAt = rt.indexOf('  function restoreNativePostMessage(w) {', from);
+  assert.ok(from >= 0 && restoreAt > from, '두 함수가 있어야 한다');
+  const endMark = '\n  }\n';
+  const to = rt.indexOf(endMark, restoreAt) + endMark.length;
+  const body = rt.slice(from, to);
+  assert.match(body, /earlyNativeKey/, '되돌릴 수 있도록 원본을 래퍼에 달아 둬야 한다');
+  const make = new Function('postMessageWrapperFor', 'maskNativeFunction',
+    body + '; return { installEarlyPostMessage, restoreNativePostMessage };');
+
+  const nativePm = function postMessage(m, t) { return [m, t]; };
+  const wrapper = function postMessage(m, t, x) { return nativePm(m, t, x); };
+  const api = make(() => wrapper, () => {});
+
+  const fakeWin = {};
+  Object.defineProperty(fakeWin, 'postMessage', { value: nativePm, enumerable: true, configurable: true, writable: true });
+  api.installEarlyPostMessage(fakeWin);
+  // 이미 자기 멤브레인을 깐 창에는 심지 않는다 — 덮으면 걷어 낼 사람이 없다.
+  const booted = { __zp_get() {} };
+  Object.defineProperty(booted, 'postMessage', { value: nativePm, enumerable: true, configurable: true, writable: true });
+  api.installEarlyPostMessage(booted);
+  assert.equal(booted.postMessage, nativePm, '부팅이 끝난 창에는 조기 래퍼를 심지 않는다');
+  assert.equal(fakeWin.postMessage, wrapper, '부팅 전에는 래퍼가 걸린다');
+  api.restoreNativePostMessage(fakeWin);
+  assert.equal(fakeWin.postMessage, nativePm, '부팅 뒤에는 네이티브가 돌아와야 한다');
+
+  // 원본을 못 찾으면 손대지 않는다(엉뚱한 창을 망가뜨리지 않는다).
+  const untouched = {};
+  Object.defineProperty(untouched, 'postMessage', { value: nativePm, enumerable: true, configurable: true, writable: true });
+  api.restoreNativePostMessage(untouched);
+  assert.equal(untouched.postMessage, nativePm);
 });

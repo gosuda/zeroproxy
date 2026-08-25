@@ -1179,15 +1179,43 @@
   // 자식이 스스로 멤브레인을 깔기 전까지의 빈 구간을 메운다. `configurable:
   // true` 로 두는 게 핵심 — 자식 prelude 가 자기 래퍼로 갈아끼울 수 있어야
   // 한다(부모 래퍼는 부모 realm 의 함수라 자식의 incumbent realm 을 바꾼다).
+  // ★이 래퍼는 **부모 realm 함수**라, 붙어 있는 동안은 그 창을 거치는 모든
+  // postMessage 의 incumbent realm 이 부모가 된다(자식의 self-post 는 source 가
+  // 부모로, 손자→자식 메시지도 마찬가지). 그래서 **자식 prelude 가 뜨는 즉시
+  // 네이티브로 되돌린다** — 되돌릴 수 있도록 원본을 래퍼에 달아 둔다.
+  // 삭제로는 못 되돌린다: postMessage 는 Window **인스턴스의 소유 속성**이고
+  // (측정: `Window.prototype.postMessage` 는 undefined) 지우면 네이티브까지
+  // 같이 사라진다.
+  const earlyNativeKey = '__zpEarlyNativePostMessage';
   function installEarlyPostMessage(childWin) {
     if (!childWin) return;
     try {
+      // 자식이 **이미 자기 멤브레인을 깔았으면 손대지 않는다.** 이 래퍼는 부모
+      // realm 함수라, 부팅이 끝난 창에 뒤늦게 덮으면 그 창의 self-post 와
+      // 손자→자식 메시지의 e.source 가 부모로 뒤집힌 채 영영 남는다 — 자식은
+      // 이미 복구 단계를 지났으므로 걷어 낼 사람이 없다. 실측(CNN): 프레임
+      // 25개 중 2개가 이 순서로 걸려 postMessage.length 가 3 으로 남았다.
+      // __zp_get 은 문자열 키 전역이라 교차 realm 에서도 보인다.
+      if (typeof childWin.__zp_get === "function") return;
       const wrapped = postMessageWrapperFor(childWin);
       if (!wrapped) return;
       const cur = Object.getOwnPropertyDescriptor(childWin, 'postMessage');
       if (cur && !cur.configurable) return;
+      if (cur && typeof cur.value === 'function') {
+        try { Object.defineProperty(wrapped, earlyNativeKey, { value: cur.value, enumerable: false, configurable: true, writable: false }); } catch {}
+      }
       Object.defineProperty(childWin, 'postMessage', { value: wrapped, enumerable: true, configurable: true, writable: true });
       maskNativeFunction(wrapped, 'postMessage');
+    } catch {}
+  }
+  // 부모가 남긴 조기 래퍼를 걷어 낸다. 자기 realm 이 뜬 뒤에는 멤브레인 get
+  // 트랩이 targetOrigin 매핑을 맡으므로 창 자신은 네이티브여야 한다.
+  function restoreNativePostMessage(w) {
+    try {
+      const cur = Object.getOwnPropertyDescriptor(w, 'postMessage');
+      const native = cur && typeof cur.value === 'function' ? cur.value[earlyNativeKey] : null;
+      if (!native || !cur.configurable) return;
+      Object.defineProperty(w, 'postMessage', { value: native, enumerable: true, configurable: true, writable: true });
     } catch {}
   }
   function postMessageWrapperFor(target) {
@@ -3182,6 +3210,7 @@
     // 돌려주므로 targetOrigin 매핑은 그대로 산다. 부수로 지문 하나도 사라진다 —
     // 래퍼는 `length: 3` / `configurable: false` 였고 진짜는 `1` / `true` 다.
     void postMessageWrapperFor(w);
+    restoreNativePostMessage(w);
     let onmessage = null;
     defineAccessor(w, 'onmessage', () => onmessage, value => {
       if (onmessage) Native.windowRemoveEventListener('message', messageListenerWrappers.get(onmessage) || onmessage);

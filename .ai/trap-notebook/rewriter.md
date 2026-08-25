@@ -2510,3 +2510,30 @@ get 트랩이 래퍼를 돌려주므로 targetOrigin 매핑은 그대로 산다.
 리스너**가 되어 가상화 **전**의 이벤트를 본다 — 그러면 자기 자신이 보낸 것도
 프록시 오리진으로 보이고, 위 표의 결론이 정반대로 나온다. 멤브레인이 올라온
 신호는 `window.addEventListener !== <document-start 에 붙든 것>` 으로 본다.
+
+### 후속 (2026-08-25) — 조기 래퍼가 자식에 눌러앉는 문제
+
+위 수정으로 **최상위** 창은 네이티브가 됐지만, 부모가 자식 창에 미리 심는
+`installEarlyPostMessage` 래퍼는 그대로 남아 있었다. 그것도 부모 realm 함수라,
+붙어 있는 동안 그 창의 self-post 와 **손자→자식** 메시지의 `e.source` 가 부모로
+뒤집힌다. 실측: 프레임 25개 중 2개가 `postMessage.length === 3` 인 채였다.
+
+두 방향으로 막았다:
+
+1. **부팅 뒤 되돌린다.** 조기 설치 때 원본을 래퍼에 달아 두고(`earlyNativeKey`),
+   자식 prelude 가 창을 계측할 때 `restoreNativePostMessage(w)` 로 네이티브를
+   복구한다. **삭제로는 못 되돌린다** — `postMessage` 는 Window **인스턴스의
+   소유 속성**이라(측정: `Window.prototype.postMessage === undefined`) 지우면
+   네이티브까지 같이 사라진다.
+2. **이미 부팅한 창에는 심지 않는다.** 순서가 뒤집혀 부팅 뒤에 덮이면 걷어 낼
+   사람이 없다. `typeof childWin.__zp_get === 'function'` 으로 판별한다
+   (문자열 키 전역이라 교차 realm 에서도 보인다).
+
+측정(CNN): 프록시 문서 자식 **16개 전부 네이티브, 래퍼 0개**.
+
+**남겨 둔 경계**: prelude 가 없는 자식(`about:blank` / `srcdoc` 광고 프레임 등)
+11개는 래퍼를 그대로 유지한다. 그 창들은 되돌려 줄 주체가 없고, 래퍼를 빼면
+`postMessage(msg, 'https://<타깃>')` 이 조용히 버려진다(naver ndp-core 로드당
+9건). 대신 그 창의 **self-post** 와 그 창으로 들어가는 손자 메시지의 source 는
+여전히 부모로 뒤집힌다 — 의도한 절충이고, 광고 코드가 자기 자신에게 쏘는
+경우는 드물어 지금까지 실측으로 걸린 적은 없다.
