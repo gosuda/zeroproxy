@@ -800,6 +800,18 @@
   }
   function shareFragmentForKey(key) { return ZP.makeShareFragment(String(key), activeServers); }
   function proxyHistoryURL() { return activeProxyPath + activeProxyFragment; }
+  // ★프록시 경로를 **상대 경로 그대로** 브라우저에 넘기면 안 된다.
+  // `location.assign` / `location.replace` / `history.pushState` 는 인자를
+  // **문서의 base URL** 로 푼다. 타깃이 `<base href="http://other/">` 를 두면
+  // 우리 `/zp/p/<토큰>` 이 **그 오리진**에 붙어 문서째 프록시 밖으로 나간다.
+  // nav-matrix `n3-base-href` 실측: 착지 주소가
+  // `http://127.0.0.1:18086/zp/p/23YKGo…` — 우리 경로인데 오리진이 타깃이다.
+  // 프레임 경로(`activatedFrameURL`)는 이미 절대 URL 을 쓰고 있었다. 여기만
+  // 빠져 있었고, 그래서 이 탈출은 `<base href>` 한 줄이면 성립했다.
+  function proxyAbsoluteURL(pathAndFragment) {
+    const raw = String(pathAndFragment || '');
+    try { return new URL(raw, proxyOrigin).href; } catch { return proxyOrigin + raw; }
+  }
   function nativeLocationURL() {
     try {
       const href = Native.locationHref && Native.locationHref.get && Native.locationHref.get.call(root.location);
@@ -816,7 +828,7 @@
   function replaceVisibleProxyURL() {
     const next = proxyHistoryURL();
     if (visibleProxyURL() !== next) {
-      try { Native.historyReplace(root.history.state, '', next); } catch {}
+      try { Native.historyReplace(root.history.state, '', proxyAbsoluteURL(next)); } catch {}
     }
   }
   function refreshVisibleShareRoute(entryId, target, base) {
@@ -996,7 +1008,7 @@
     const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();
     activeEntryId = entryId;
     postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
-    const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyHistoryURL());
+    const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyAbsoluteURL(proxyHistoryURL()));
     refreshVisibleShareRoute(entryId, virtualURL.href, baseURL);
     return out;
   }
@@ -1044,10 +1056,11 @@
   }
   function navigateToTarget(raw, replace = false, base = baseURL) {
     activatedNavPath(raw, replace, base).then(path => {
-      if (replace && Native.locationReplace) Native.locationReplace(path);
-      else if (!replace && Native.locationAssign) Native.locationAssign(path);
-      else if (replace) location.replace(path);
-      else location.href = path;
+      const href = proxyAbsoluteURL(path);
+      if (replace && Native.locationReplace) Native.locationReplace(href);
+      else if (!replace && Native.locationAssign) Native.locationAssign(href);
+      else if (replace) location.replace(href);
+      else location.href = href;
     }).catch(() => shareNavURL(raw, base).then(u => {
       if (replace && Native.locationReplace) Native.locationReplace(u);
       else if (!replace && Native.locationAssign) Native.locationAssign(u);
@@ -2722,7 +2735,7 @@
     window.addEventListener('popstate', () => { postMessageToSW({ type: 'ZP_RESOLVE_ENTRY', path: activeProxyPath }).then(reply => { activeEntryId = reply.entryId || activeEntryId; virtualURL = new URL(reply.targetUrl); baseURL = reply.baseUrl || virtualURL.href; explicitBaseURL = baseURL !== virtualURL.href ? baseURL : ''; if (typeof reply.scrollX === 'number' && typeof reply.scrollY === 'number') window.scrollTo(reply.scrollX, reply.scrollY); }).catch(()=>{}); }, true);
     let scrollTimer = 0;
     window.addEventListener('scroll', () => { clearTimeout(scrollTimer); scrollTimer = setTimeout(() => postMessageToSW({ type: 'ZP_SCROLL_UPDATE', tabId: boot.tabId, entryId: activeEntryId, scrollX: window.scrollX, scrollY: window.scrollY }).catch(()=>{}), 100); }, { passive: true });
-    function submitForm(form, submitter) { submitFormNavigation(form, submitter).catch(err => { const code = err && (err.code || err.message); if (code === 'REQUEST_BODY_TOO_LARGE') Native.locationAssign && Native.locationAssign(ZP.errorPath('REQUEST_BODY_TOO_LARGE')); }); }
+    function submitForm(form, submitter) { submitFormNavigation(form, submitter).catch(err => { const code = err && (err.code || err.message); if (code === 'REQUEST_BODY_TOO_LARGE') Native.locationAssign && Native.locationAssign(proxyAbsoluteURL(ZP.errorPath('REQUEST_BODY_TOO_LARGE'))); }); }
     // Resolve the form's real absolute target, NOT the rewritten attribute.
     //
     // htmltx rewrites `action` / `formaction` to the proxy-origin launcher
@@ -2782,7 +2795,9 @@
       activeProxyPath = ZP.makeSharePath(share.encrypted);
       activeRouteKey = share.encrypted;
       activeProxyFragment = shareFragmentForKey(share.key);
-      const submittedPath = activeProxyPath + '?zp_submit=' + encodeURIComponent(reply.submitId) + activeProxyFragment;
+      // 같은 이유로 절대 URL 이어야 한다 — `<base href>` 가 있으면 폼 제출이
+      // 프록시 밖으로 나간다.
+      const submittedPath = proxyAbsoluteURL(activeProxyPath + '?zp_submit=' + encodeURIComponent(reply.submitId) + activeProxyFragment);
       if (Native.locationAssign) Native.locationAssign(submittedPath);
       else location.href = submittedPath;
     }

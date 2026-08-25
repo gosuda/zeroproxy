@@ -4365,3 +4365,39 @@ test('trap notebook INDEX stays one line per entry, with a link that resolves', 
   const sorted = [...seenDates].sort().reverse();
   assert.deepEqual(seenDates, sorted, 'INDEX 는 최신 항목이 위에 오도록 정렬되어 있어야 한다');
 });
+
+// 2026-08-25 — 프록시 경로를 **상대 경로로** 브라우저에 넘기면 안 된다.
+// `location.assign` / `location.replace` / `history.pushState` 는 인자를 문서의
+// base URL 로 푼다. 타깃이 `<base href="http://other/">` 한 줄만 두면 우리
+// `/zp/p/<토큰>` 이 **그 오리진**에 붙어 문서째 프록시 밖으로 나간다 — 링크는
+// 프록시로 리라이트해 놓고 내비게이션 실행 단계에서 탈출하는 모양이다.
+// nav-matrix `n3-base-href` 실측: 착지가 `http://127.0.0.1:18086/zp/p/23YKGo…`
+// (우리 경로인데 오리진이 타깃). 프레임 경로는 이미 절대 URL 을 쓰고 있었고
+// 내비게이션·히스토리·폼 경로만 빠져 있었다.
+test('proxy navigation URLs are absolute so a target <base href> cannot retarget them', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  // ① 헬퍼가 프록시 오리진 기준으로 푼다 — 동작으로 확인한다.
+  const start = rt.indexOf('function proxyAbsoluteURL(');
+  assert.ok(start > 0, 'proxyAbsoluteURL 이 있어야 한다');
+  const end = rt.indexOf('\n  }', start) + 4;
+  const make = new Function('proxyOrigin', rt.slice(start, end) + '\nreturn proxyAbsoluteURL;');
+  const f = make('http://proxy.localhost:18080');
+  assert.equal(f('/zp/p/tok#k=1'), 'http://proxy.localhost:18080/zp/p/tok#k=1');
+  assert.equal(f('/zp/p/tok?zp_submit=9#k=1'), 'http://proxy.localhost:18080/zp/p/tok?zp_submit=9#k=1');
+  // 이미 절대면 그대로. (프레임 경로가 절대 URL 을 만들어 넘겨도 안전해야 한다.)
+  assert.equal(f('http://proxy.localhost:18080/zp/p/tok'), 'http://proxy.localhost:18080/zp/p/tok');
+
+  // ② 실제 sink 들이 그 헬퍼를 지난다. 하나라도 상대 경로를 그대로 넘기면 탈출이다.
+  const sinks = [
+    [/const href = proxyAbsoluteURL\(path\);/, '내비게이션이 절대 URL 을 만들어야 한다'],
+    [/Native\.locationReplace\(href\)/, 'location.replace 는 절대 URL 을 받아야 한다'],
+    [/Native\.locationAssign\(href\)/, 'location.assign 은 절대 URL 을 받아야 한다'],
+    [/\(replace \? Native\.historyReplace : Native\.historyPush\)\(state, title, proxyAbsoluteURL\(proxyHistoryURL\(\)\)\)/, 'push/replaceState 도 마찬가지'],
+    [/Native\.historyReplace\(root\.history\.state, '', proxyAbsoluteURL\(next\)\)/, '보이는 URL 동기화도 마찬가지'],
+    [/const submittedPath = proxyAbsoluteURL\(activeProxyPath \+ '\?zp_submit='/, '폼 제출도 마찬가지'],
+  ];
+  for (const [re, why] of sinks) assert.match(rt, re, why);
+  // ③ 옛 모양이 남아 있으면 안 된다.
+  assert.doesNotMatch(rt, /Native\.locationAssign\(path\)/, '상대 path 를 그대로 넘기던 옛 경로가 남아 있으면 안 된다');
+  assert.doesNotMatch(rt, /Native\.locationReplace\(path\)/, '상대 path 를 그대로 넘기던 옛 경로가 남아 있으면 안 된다');
+});

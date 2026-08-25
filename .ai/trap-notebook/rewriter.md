@@ -2281,3 +2281,61 @@ outerHTML    → 같음
 **"N개 사이트에서 0건" 은 "0건" 이 아니다.** 사이트마다 다른 코드 경로를 밟는다 —
 여기서는 (a) 이미 프록시 URL 인 script src, (b) br 인코딩 문서라는 두 경로가
 앞선 3개 사이트에서는 한 번도 안 나왔다.
+
+---
+
+## `<base href>` 한 줄이면 문서째 프록시 밖으로 나갔다 (2026-08-25) {#base-href-탈출}
+
+nav-matrix `n3-base-href` 가 오래 "탈출" 로 떠 있었다. 계획 항목 10(`<base href>`
+초기 문서 미처리)의 기존 갭으로 짐작만 하고 파지 않았는데, 대조군이 정상인 상태로
+다시 재니 **계측 착시가 아니라 진짜**였다.
+
+### 착지 주소가 원인을 말해 준다
+
+```
+http://127.0.0.1:18086/zp/p/23YKGo5m…#k=…&server=ws://proxy.localhost:18080/…
+         ^^^^^ 타깃 오리진      ^^^^^^^ 우리 프록시 경로
+```
+
+**우리 경로인데 오리진이 타깃이다.** 링크 리라이트는 제대로 됐고(합성 픽스처로
+확인: 상대/루트상대/절대 href 전부 `http://proxy.localhost:18080/zp/?via=…` 로
+바뀐다), **내비게이션을 실행하는 단계**에서 나갔다.
+
+`location.assign` / `location.replace` / `history.pushState` 는 인자를 **문서의
+base URL** 로 푼다. 프렐류드는 프록시 경로를 **루트 상대**(`/zp/p/<토큰>`)로
+넘기고 있었고, 타깃이 `<base href="http://other/">` 를 두면 그게 그 오리진에
+붙는다. 타깃이 한 줄만 쓰면 성립하는 탈출이다.
+
+### 같은 파일 안에서 한쪽만 배운 교훈이었다
+
+`activatedFrameURL` 은 이미 `proxyOrigin + ZP.makeSharePath(...)` 로 **절대 URL**
+을 만들고 있었다. 프레임 경로는 이 함정을 이미 알고 있었고, 내비게이션·히스토리·
+폼 경로만 몰랐다. 고침은 규칙 하나(`proxyAbsoluteURL()`)를 다섯 자리에 적용:
+
+- `navigateToTarget` (assign / replace / `location.href`)
+- `commitVirtualHistory` (push/replaceState)
+- `replaceVisibleProxyURL` (replaceState)
+- 폼 제출 (`?zp_submit=`)
+- `REQUEST_BODY_TOO_LARGE` 에러 페이지 이동
+
+곁들여 닫힌 것: `<base href>` 문서에서는 히스토리 동기화도 **조용히** 깨지고
+있었다 — cross-origin 으로 풀린 `pushState` 는 SecurityError 를 던지고 `catch` 가
+삼킨다. 증상이 없어서 안 보였을 뿐이다.
+
+### 실측
+
+| | 전 | 후 |
+|---|---|---|
+| n3-base-href | **밖** (착지 `-`) | 프록시 (착지 O) |
+| nav-matrix 탈출 | 1 | **0** |
+| 나머지 22칸 | ok | ok (변화 없음) |
+
+회귀: static 145(새 가드 **변이 5/5**), 홀 매트릭스 유출 0/csp-only 0/선언 밖 0,
+렌더체크 3사이트 raw=0 csp=0 err=0, 탐지기 기존 known-open 1건뿐.
+
+### 교훈
+
+**같은 저장소 안에서 이미 배운 교훈이 다른 경로에 안 옮겨졌는지 본다.** 오늘만
+두 번째다(srcset 은 주석이 규칙을 적어 뒀는데 코드가 안 따랐고, 여기는 프레임
+경로가 절대 URL 을 쓰는데 내비게이션 경로가 안 썼다). "이 파일 어딘가에 이미
+맞게 한 자리가 있는가" 를 먼저 찾는 편이 빠르다.
