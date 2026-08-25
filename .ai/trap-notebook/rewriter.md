@@ -2456,3 +2456,55 @@ URL 성분 쪽만 별칭 경로가 열려 있었다.
 
 `apstag-iframe` 은 여전히 안 뜬다(프레임 23~25 vs 대조군 34). turner 전역은
 살아났으므로 다음 갈래는 APS 초기화 경로다.
+
+## <a id="postmessage-incumbent"></a>창의 postMessage 를 갈아끼우면 자식→부모 e.source 가 부모로 뒤집힌다 (2026-08-25, CNN)
+
+멤브레인이 창 자신의 `postMessage` 를 **소유 속성**으로 교체하고 있었다
+(`define(w, 'postMessage', wrapper)`). 그 래퍼는 그 창의 realm 함수다. 자식이
+`parent.postMessage(...)` 를 부르면 마지막으로 실행된 사용자 함수가 그 래퍼라
+V8 이 incumbent realm 을 **부모**로 잡고, 도착한 이벤트의 `e.source` 가 자식이
+아니라 **부모 자신**이 된다. `frameWindowOrigins.get(e.source)` 도 당연히 실패해
+`e.origin` 까지 부모의 타깃 오리진으로 뒤집힌다.
+
+### 대조군이 아니었으면 못 봤다
+
+프록시만 보면 "메시지가 4,700건이나 오는데?" 로 정상처럼 보인다. 전부 자기
+자신이 보낸 것으로 집계된다는 걸 알려면 **원래 몇 건이 어디서 와야 하는지**를
+알아야 한다:
+
+| | 프레임→부모 메시지 | 프레임 수 |
+|---|---|---|
+| 대조군(직접) | **59건 / 20개 프레임** | 28 |
+| 프록시(고치기 전) | **0건** (4,741건 전부 `source === window`) | 25 |
+| 프록시(고친 뒤) | 300+ (버퍼 상한), 전부 올바른 오리진 | 28 |
+
+최소 재현으로 기전도 못 박았다 — 부모 realm 래퍼를 끼우면 source 가 부모,
+네이티브를 **자식 realm 함수에서** `Reflect.apply` 하면 자식이다.
+
+### 이게 막고 있던 것
+
+bounce 의 저장소 프레임 핸드셰이크가 `e.origin === "https://" + bouncex.website.biu`
+로 오리진을 검사한다. 영영 거짓이라 `bouncex.cookie`(did/vid) 가 안 생기고
+device_id → `state/js` → `sspConfig` → APS 가 통째로 막혀 있었다. 고친 뒤
+`sspConfig` 가 `{aps, criteo, equativ, index, magnite, openpath, pbm}` 로 채워졌다.
+SafeFrame 의 `e.source === iframe.contentWindow` 식별도 같은 이유로 깨져 있었다.
+
+### 규칙
+
+**창 자신의 `postMessage` 는 네이티브로 둔다.** 페이지가 보는 경로는 멤브레인
+get 트랩이 래퍼를 돌려주므로 targetOrigin 매핑은 그대로 산다. 지문도 같이
+사라진다 — 래퍼는 `length: 3` / `configurable: false`, 진짜는 `1` / `true` 였다.
+
+곁가지: `installParentSenderRedirect` + `parentPostMessageSenderQueue` 는 이
+문제를 보정하려던 장치인데 **아무 데서도 호출되지 않는 죽은 코드**였다
+(`parentRedirectFacades` 도 쓰기만 하고 읽지 않는다). 보정이 필요 없어졌으니
+그대로 두면 다음 사람이 또 "이미 처리돼 있네" 로 오해한다 — 정리 대상.
+
+### 계측 함정
+
+주입 스크립트는 리라이트되지 않으므로 그 안의 `window.location.origin` 은
+**언제나 날 값**이다. 이걸 "멤브레인이 떴는지" 신호로 쓰면 영영 안 뜬다.
+그리고 `window.addEventListener` 를 document-start 에 붙들어 등록하면 **네이티브
+리스너**가 되어 가상화 **전**의 이벤트를 본다 — 그러면 자기 자신이 보낸 것도
+프록시 오리진으로 보이고, 위 표의 결론이 정반대로 나온다. 멤브레인이 올라온
+신호는 `window.addEventListener !== <document-start 에 붙든 것>` 으로 본다.
