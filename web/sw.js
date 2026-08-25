@@ -1374,6 +1374,26 @@ function withTransportDeadline(promise, targetUrl, method) {
   return Promise.race([promise, deadline]).finally(() => { if (timer !== null) clearTimeout(timer); });
 }
 
+// 브라우저가 실어 보낸 Referer 를 타깃 세계의 URL 로 되돌린다. 프록시 URL 이면
+// 그 라우트의 타깃을, 프록시 밖 주소면 그대로. 못 풀면 빈 문자열 — 그 경우
+// Referer 를 아예 보내지 않는 것이 대조군과 같은 동작이다.
+function referrerFromBrowserHeader(req) {
+  try {
+    // ★내비게이션 요청에서 Referer 는 **헤더로 읽히지 않는다** — 브라우저가
+    // 관리하는 금지 헤더라 `request.headers` 에 없다. 실측: 링크 클릭으로
+    // 넘어간 문서 요청도 헤더는 '(none)' 이었다. 값은 `request.referrer` 에
+    // 있다('about:client' 는 "기본값"이라는 뜻이라 URL 이 아니다).
+    let ref = '';
+    try { const r = req && req.referrer; if (r && r !== 'about:client') ref = r; } catch {}
+    if (!ref) { try { ref = (req && req.headers && req.headers.get('Referer')) || ''; } catch {} }
+    if (!ref) return '';
+    const u = new URL(ref);
+    if (u.origin !== ORIGIN) return ref;
+    const ctx = contextFromURL(u);
+    return (ctx && (ctx.baseUrl || ctx.targetUrl)) || '';
+  } catch { return ''; }
+}
+
 async function transportFetch(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
@@ -1479,8 +1499,18 @@ async function transportFetch(targetUrl, opt) {
   // For iframe document loads use the embedder's URL as Referer (mirrors
   // browser behaviour); for subresources inside an iframe use the iframe's
   // own virtual URL.
-  const virtualBase = (opt.document && entry && entry.parentTargetUrl)
-    ? entry.parentTargetUrl
+  // ★최상위 문서는 **자기 자신을 Referer 로 보내면 안 된다.**
+  //
+  // 예전에는 부모가 없으면 entry.targetUrl(= 그 문서 자신)을 base 로 삼았다.
+  // 그래서 주소창에 URL 을 찍어 연 첫 로드에도 Referer: <그 페이지 자신> 이
+  // 나갔다 — 대조군은 아무것도 안 보낸다. 타깃 입장에서 "자기 페이지에서
+  // 넘어온 방문" 으로 보이는, 실제 브라우저에는 없는 신호다.
+  //
+  // 브라우저는 이미 정답을 알고 있다: 링크로 왔으면 Referer 헤더에 그 문서의
+  // 프록시 URL 이 실려 온다. 그것을 우리 라우트로 되돌려 타깃 URL 로 바꿔 쓰고,
+  // 헤더가 없으면(주소창/북마크/첫 로드) **우리도 보내지 않는다.**
+  const virtualBase = opt.document
+    ? ((entry && entry.parentTargetUrl) || referrerFromBrowserHeader(opt.request))
     : entry && (entry.baseUrl || entry.targetUrl);
   // 페이지가 명시적으로 준 ref 가 있으면 그것을 쓴다. 타깃과 **같은 오리진**일
   // 때만 받아들인다 — 아니면 페이지가 임의의 Referer 를 만들어 낼 수 있다.

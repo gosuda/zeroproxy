@@ -4570,3 +4570,41 @@ test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 �
   api.restoreNativePostMessage(untouched);
   assert.equal(untouched.postMessage, nativePm);
 });
+
+// 2026-08-25 — 최상위 문서가 **자기 자신을 Referer 로** 보내고 있었다.
+// 부모가 없으면 entry.targetUrl(= 그 문서 자신)을 base 로 삼았기 때문에,
+// 주소창에 찍어 연 첫 로드에도 Referer: <그 페이지 자신> 이 나갔다 —
+// 대조군은 아무것도 보내지 않는다. 타깃 입장에서는 실제 브라우저에 없는 신호다.
+// 브라우저가 준 Referer 를 우리 라우트로 되돌려 쓰고, 없으면 보내지 않는다.
+test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  assert.match(
+    sw,
+    /const virtualBase = opt\.document\r?\n\s*\? \(\(entry && entry\.parentTargetUrl\) \|\| referrerFromBrowserHeader\(opt\.request\)\)/,
+    '문서 요청의 base 는 부모 URL 또는 브라우저가 준 Referer 여야 한다'
+  );
+
+  const from = sw.indexOf('function referrerFromBrowserHeader(req) {');
+  assert.ok(from >= 0);
+  const endMark = '\n}\n';
+  const to = sw.indexOf(endMark, from) + endMark.length;
+  const make = new Function('ORIGIN', 'contextFromURL', sw.slice(from, to) + '; return referrerFromBrowserHeader;');
+  const ORIGIN = 'http://proxy.localhost:18080';
+  const routes = new Map([['/zp/p/AAA', { targetUrl: 'https://news.example/article', baseUrl: '' }]]);
+  const fn = make(ORIGIN, (u) => routes.get(u.pathname) || null);
+  // 내비게이션은 헤더가 아니라 request.referrer 로 온다. 둘 다 재현한다.
+  const req = (ref) => ({ referrer: ref || '', headers: { get: () => null } });
+  const reqHeaderOnly = (ref) => ({ referrer: 'about:client', headers: { get: (n) => (n === 'Referer' ? ref : null) } });
+
+  // ① 브라우저가 아무것도 안 줬으면 우리도 없다 — 주소창/북마크/첫 로드.
+  assert.equal(fn(req(null)), '', '브라우저가 안 보냈으면 우리도 보내지 않는다');
+  // ② 프록시 URL 은 그 라우트의 타깃으로 되돌린다.
+  assert.equal(fn(req(ORIGIN + '/zp/p/AAA')), 'https://news.example/article');
+  // ③ 못 푸는 프록시 경로(우리 랜딩 페이지 등)는 아무것도 보내지 않는다.
+  assert.equal(fn(req(ORIGIN + '/zp/')), '', '라우트가 아니면 프록시 주소를 흘리면 안 된다');
+  // ④ 프록시 밖에서 온 참조는 그대로 쓴다.
+  assert.equal(fn(req('https://other.example/page')), 'https://other.example/page');
+  // ⑤ 'about:client' 는 URL 이 아니라 "기본값" 이라는 뜻이다 — 헤더로 넘어간다.
+  assert.equal(fn(reqHeaderOnly(ORIGIN + '/zp/p/AAA')), 'https://news.example/article');
+  assert.equal(fn(reqHeaderOnly(null)), '');
+});
