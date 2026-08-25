@@ -1166,6 +1166,40 @@
       return baseURL;
     }
   }
+  // <meta name="referrer"> 를 SW 에 알린다.
+  //
+  // 문서의 참조 정책은 응답 헤더로도, 이 meta 로도 선언된다. 우리는 헤더만
+  // 보고 있었다 — 페이지가 부른 fetch 의 `Request.referrerPolicy` 는 빈
+  // 문자열이라(문서 정책은 요청 객체에 반영되지 않는다) meta 로만 정책을
+  // 선언한 페이지는 우리 쪽에서 기본값으로 떨어졌다. 브라우저가 직접 내는
+  // 요청(이미지/스크립트)은 정확한데 페이지 fetch 만 어긋나는 비대칭이었다.
+  //
+  // 파싱 중에 늦게 나타나거나 나중에 바뀔 수 있으므로 부팅 시 한 번 + 문서가
+  // 준비되면 한 번 더 읽는다. 마지막에 선언된 것이 이긴다(HTML 파싱 순서).
+  // 문서에 선언된 참조 정책(`<meta name=referrer>`). 마지막 선언이 이긴다.
+  // 요청마다 읽는다 — meta 는 파싱 도중 나타나거나 나중에 바뀔 수 있고,
+  // fetch 는 그렇게 잦은 호출이 아니다.
+  function documentReferrerPolicy() {
+    try {
+      const metas = Native.querySelectorAll.call(document, 'meta[name="referrer" i]');
+      let policy = '';
+      for (const m of metas) {
+        const v = String(Native.getAttribute.call(m, 'content') || '').trim().toLowerCase();
+        if (v) policy = v;
+      }
+      return policy;
+    } catch { return ''; }
+  }
+  let lastReportedReferrerPolicy = null;
+  function reportMetaReferrerPolicy() {
+    try {
+      const policy = documentReferrerPolicy();
+      if (!policy || policy === lastReportedReferrerPolicy) return;
+      lastReportedReferrerPolicy = policy;
+      postMessageToSW({ type: 'ZP_REFERRER_POLICY', tabId: boot.tabId, entryId: activeEntryId, policy }).catch(() => {});
+    } catch {}
+  }
+
   function normalizePostMessageTargetOrigin(targetOrigin) {
     if (targetOrigin == null) return targetOrigin;
     const s = String(targetOrigin);
@@ -2107,9 +2141,17 @@
         referrer: req.referrer,
         // 페이지가 `fetch(u, { referrerPolicy })` 로 명시한 값. SW 는
         // /zp/api/fetch 요청에 대해 브라우저가 계산한 정책을 볼 수 없으므로
-        // (그 요청의 정책은 프록시 문서의 것이다) 여기서 넘겨준다. 명시가
-        // 없으면 빈 문자열이고, SW 는 문서 정책 → 브라우저 기본 순으로 떨어진다.
-        referrerPolicy: req.referrerPolicy,
+        // (그 요청의 정책은 프록시 문서의 것이다) 여기서 넘겨준다.
+        //
+        // 명시가 없으면 **문서의 정책**을 여기서 읽어 채운다. `<meta
+        // name=referrer>` 로만 선언한 문서가 그렇다 — 문서 정책은 Request
+        // 객체에 반영되지 않으므로(`req.referrerPolicy` 가 빈 문자열) 이 자리를
+        // 비워 두면 SW 는 기본값으로 떨어진다. 실측(로컬 픽스처): meta 가
+        // no-referrer/origin 이어도 프록시만 전체 URL 을 보냈다.
+        //
+        // 메시지로 미리 알려 주는 경로(ZP_REFERRER_POLICY)만으로는 부족하다 —
+        // 페이지의 첫 fetch 는 파싱 도중에 나가서 그 메시지보다 **빠르다.**
+        referrerPolicy: req.referrerPolicy || documentReferrerPolicy(),
         redirect: req.redirect,
         cache: req.cache,
         integrity: req.integrity
@@ -3871,6 +3913,8 @@
       try { docEl.querySelectorAll('style').forEach(enforceStyleElementCSS); } catch {}
       sweepSWLessFrames(w);
       sweepPendingFrames();
+      // meta 는 파싱 도중에 늦게 나타날 수 있다 — 같은 청소 주기에 얹는다.
+      reportMetaReferrerPolicy();
     };
     try { w.document.addEventListener('DOMContentLoaded', sweepStyles); } catch {}
     try { w.addEventListener('load', sweepStyles); } catch {}

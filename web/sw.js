@@ -2595,6 +2595,22 @@ async function handleMessage(event) {
       ok({ baseUrl: entry.baseUrl });
       return;
     }
+    // <meta name="referrer"> 는 응답 헤더와 **같은 자격**의 정책 선언이고,
+    // 나중에 파싱된 쪽이 이긴다. 헤더만 보던 동안 meta 로만 정책을 선언한
+    // 페이지는 우리 쪽에서 기본값으로 떨어졌다 — 페이지가 부른 fetch 는
+    // Request.referrerPolicy 가 빈 문자열이라(문서 정책은 객체에 반영되지
+    // 않는다) 그 자리를 메울 것이 없었다. 프렐류드가 읽어서 알려 준다.
+    if (msg.type === 'ZP_REFERRER_POLICY') {
+      const tab = runtimeTabForMessage(event, msg, fail);
+      if (!tab) return;
+      const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
+      if (!entry) { fail('SW_NOT_READY'); return; }
+      const token = String(msg.policy || '').trim().toLowerCase();
+      // 알 수 없는 토큰은 무시한다(정책 이름을 임의 문자열로 밀어 넣지 못하게).
+      if (['', 'no-referrer', 'no-referrer-when-downgrade', 'origin', 'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url'].includes(token)) entry.referrerPolicy = token;
+      ok({ referrerPolicy: entry.referrerPolicy || '' });
+      return;
+    }
     if (msg.type === 'ZP_RESOLVE_ENTRY') {
       const ctx = contextFromPath(new URL(msg.path, ORIGIN).pathname);
       const tab = ctx && tabs.get(ctx.tabId);

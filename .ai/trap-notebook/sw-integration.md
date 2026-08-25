@@ -758,3 +758,31 @@ dist SW 에 래퍼를 씌워 단계를 찍었더니 **transportFetch 91건이 �
 
 고치기 전 프록시는 주소창 케이스에서 **자기 URL** 을 보냈고, 헤더만 보고
 고쳤던 중간 버전은 링크 케이스에서 **아무것도** 안 보냈다(둘 다 대조군과 다름).
+
+## <a id="meta-referrer"></a>`<meta name=referrer>` 는 페이지 fetch 에만 안 먹었다 (2026-08-26)
+
+문서의 참조 정책은 응답 헤더로도, `<meta name="referrer">` 로도 선언된다.
+우리는 헤더만 보고 있었다. 브라우저가 직접 내는 요청(이미지/스크립트)은
+브라우저가 계산한 정책이 그대로 실려 오므로 정확했는데, **페이지가 부른
+fetch 만** 어긋났다 — 그 경로는 프렐류드가 `Request.referrerPolicy` 를 실어
+보내는데 **문서 정책은 Request 객체에 반영되지 않아** 언제나 빈 문자열이다.
+
+### 메시지로 알려 주는 것만으로는 부족하다
+
+처음엔 프렐류드가 meta 를 읽어 SW 에 알려 주도록(`ZP_REFERRER_POLICY`) 만들고
+문서 정리 주기(`DOMContentLoaded`/load/타이머)에 얹었다. **여전히 안 먹었다** —
+페이지의 첫 fetch 는 파싱 도중에 나가서 그 메시지보다 빠르다. 그래서
+**요청을 만드는 그 자리에서** 문서를 읽어 채운다
+(`referrerPolicy: req.referrerPolicy || documentReferrerPolicy()`).
+메시지 경로는 XHR 등 정책을 실어 보내지 못하는 경로를 위한 보조로 남긴다.
+
+### 실측 (로컬 픽스처: meta 로만 정책 선언 + 페이지가 `/api` 를 fetch)
+
+| meta 정책 | 프록시(고치기 전) | 프록시(후) | 대조군 |
+|---|---|---|---|
+| `no-referrer` | 전체 URL | `(none)` | `(none)` |
+| `origin` | 전체 URL | `http://127.0.0.1:18211/` | `http://127.0.0.1:18211/` |
+| `unsafe-url` | 전체 URL | 전체 URL | 전체 URL |
+
+SW 는 알려진 토큰일 때만 받는다 — 임의 문자열이 들어오면 `refererForPolicy`
+의 default 분기로 조용히 떨어져 "정책을 지켰다" 는 착각만 남는다.

@@ -2452,7 +2452,7 @@ test('transportFetch sets X-ZP-Referer through the policy, from the browser-comp
   assert.match(tx[0], /opt\.referrerPolicy[\s\S]{0,120}opt\.request && opt\.request\.referrerPolicy[\s\S]{0,120}entry && entry\.referrerPolicy/, '정책 출처 우선순위가 유지되어야 한다');
   // 페이지 fetch 경로는 브라우저 계산값이 없으므로 프렐류드가 실어 보낸다.
   const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  assert.match(prelude, /referrerPolicy: req\.referrerPolicy,/, '프렐류드가 fetch init 의 referrerPolicy 를 넘겨야 한다');
+  assert.match(prelude, /referrerPolicy: req\.referrerPolicy \|\| documentReferrerPolicy\(\),/, '프렐류드가 fetch init 의 referrerPolicy 를 넘겨야 한다');
   assert.match(sw, /referrerPolicy: \(payload\.init && payload\.init\.referrerPolicy\) \|\| ''/, '/zp/api/fetch 가 그 값을 transportFetch 로 넘겨야 한다');
 });
 
@@ -4607,4 +4607,54 @@ test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () 
   // ⑤ 'about:client' 는 URL 이 아니라 "기본값" 이라는 뜻이다 — 헤더로 넘어간다.
   assert.equal(fn(reqHeaderOnly(ORIGIN + '/zp/p/AAA')), 'https://news.example/article');
   assert.equal(fn(reqHeaderOnly(null)), '');
+});
+
+// 2026-08-26 — `<meta name=referrer>` 로만 정책을 선언한 문서에서, 페이지가 부른
+// fetch 가 그 정책을 무시하고 있었다. 문서 정책은 Request 객체에 반영되지 않아
+// (`req.referrerPolicy` 가 빈 문자열) 채울 것이 없었기 때문이다. 브라우저가 직접
+// 내는 요청은 정확한데 페이지 fetch 만 어긋나는 비대칭이었다.
+// 메시지로 미리 알려 주는 경로만으로는 부족하다 — 첫 fetch 는 파싱 도중에 나가
+// 그 메시지보다 빠르다. 그래서 **요청 시점에** 문서에서 읽는다.
+test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 읽는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  assert.match(
+    rt,
+    /referrerPolicy: req\.referrerPolicy \|\| documentReferrerPolicy\(\),/,
+    '명시가 없으면 문서 정책으로 채워야 한다'
+  );
+
+  // 동작: 마지막에 선언된 meta 가 이기고, 빈 content 는 무시한다.
+  const from = rt.indexOf('  function documentReferrerPolicy() {');
+  assert.ok(from >= 0);
+  const endMark = '\n  }\n';
+  const to = rt.indexOf(endMark, from) + endMark.length;
+  const make = new Function('Native', 'document', rt.slice(from, to) + '; return documentReferrerPolicy;');
+  const metas = (...vals) => vals.map((v) => ({ content: v }));
+  const Native = {
+    querySelectorAll: { call: (_d, sel) => (/meta\[name="referrer" i\]/.test(sel) ? _d.__metas : []) },
+    getAttribute: { call: (el, n) => (n === 'content' ? el.content : null) },
+  };
+  const fn = make(Native, { __metas: [] });
+  assert.equal(fn(), '', '선언이 없으면 빈 문자열');
+
+  const fn2 = new Function('Native', 'document', rt.slice(from, to) + '; return documentReferrerPolicy;')(
+    Native, { __metas: metas('origin', '  NO-REFERRER  ') }
+  );
+  assert.equal(fn2(), 'no-referrer', '마지막 선언이 이기고 공백/대소문자는 정규화한다');
+
+  const fn3 = new Function('Native', 'document', rt.slice(from, to) + '; return documentReferrerPolicy;')(
+    Native, { __metas: metas('same-origin', '') }
+  );
+  assert.equal(fn3(), 'same-origin', '빈 content 는 앞선 선언을 지우지 않는다');
+});
+
+// SW 쪽: 프렐류드가 알려 준 정책은 **알려진 토큰일 때만** 받는다. 임의 문자열을
+// entry 에 밀어 넣으면 refererForPolicy 의 default 분기로 조용히 떨어진다.
+test('SW 는 알 수 없는 참조 정책 토큰을 받지 않는다', () => {
+  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const at = sw.indexOf("if (msg.type === 'ZP_REFERRER_POLICY') {");
+  assert.ok(at >= 0, 'meta 정책을 받는 경로가 있어야 한다');
+  const block = sw.slice(at, at + 900);
+  assert.match(block, /includes\(token\)\) entry\.referrerPolicy = token;/, '알려진 토큰일 때만 반영한다');
+  assert.match(block, /'strict-origin-when-cross-origin'/, '정책 목록이 실려 있어야 한다');
 });

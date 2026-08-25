@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-26 | SW / Referer | **meta 로만 선언한 참조 정책이 페이지 fetch 에만 안 먹었다(문서 정책은 Request 객체에 없다). 메시지로 알려 주는 건 첫 fetch 보다 느리다.** | sw-integration.md#meta-referrer |
 | 2026-08-26 | SW / Referer | **최상위 문서가 자기 자신을 Referer 로 보냈다. 고칠 때 함정: 내비게이션의 Referer 는 헤더에 없고 request.referrer 에 있다.** | sw-integration.md#자기-referer |
 | 2026-08-25 | membrane / 프레임 | **창의 postMessage 를 소유 속성으로 갈아끼워 자식→부모 e.source 가 전부 부모로 뒤집혀 있었다(대조군 59건 vs 0건). bounce/SafeFrame 핸드셰이크가 이걸로 죽었다.** | rewriter.md#postmessage-incumbent |
 | 2026-08-25 | SW / 내비게이션 | **응답 경로에서 `clients.get(resultingClientId)` 를 await 해 내비게이션이 교착했다 — SW 는 200 을 만드는데 브라우저가 영영 커밋 못 한다. CNN 문서 6→0.** | sw-integration.md#clients-get-교착 |
