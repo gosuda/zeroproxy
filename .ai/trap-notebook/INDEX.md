@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-25 | membrane / 리라이터 | `document.location` 이 프록시 주소를 흘렸다 — 별칭 한 번이면(`var u=n.location`) 리라이터의 지역-수신자 skip 규칙으로 멤브레인이 꺼졌다. | rewriter.md#document-location-유출 |
 | 2026-08-25 | membrane / 내비게이션 | `<base href>` 한 줄이면 문서째 프록시 밖으로 나갔다 — 프록시 경로를 상대로 넘겨 타깃 base 가 재조준했다. | rewriter.md#base-href-탈출 |
 | 2026-08-25 | 방법론 / 계측 | 정정 — nav-matrix 대조군 열이 빈 건 러너 결함이 아니라 내가 같은 taskweaver 데몬으로 동시에 프로브를 돌린 탓이었다. | sw-integration.md#nav-matrix-대조군 |
 | 2026-08-25 | sw / 격리·지문 | Referrer-Policy 를 아예 안 보고 있었다 — 타깃이 금지한 것을 우리가 대신 흘렸다. | sw-integration.md#referrer-policy |

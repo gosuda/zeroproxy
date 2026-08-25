@@ -4401,3 +4401,33 @@ test('proxy navigation URLs are absolute so a target <base href> cannot retarget
   assert.doesNotMatch(rt, /Native\.locationAssign\(path\)/, '상대 path 를 그대로 넘기던 옛 경로가 남아 있으면 안 된다');
   assert.doesNotMatch(rt, /Native\.locationReplace\(path\)/, '상대 path 를 그대로 넘기던 옛 경로가 남아 있으면 안 된다');
 });
+
+// 2026-08-25 — `document.location` 과 Location 멤버는 **인스턴스 own +
+// non-configurable(unforgeable)** 이라 프로토타입 마스킹으로 절대 못 막는다.
+// 측정: `Object.getOwnPropertyDescriptor(document,'location').configurable === false`,
+// Location 인스턴스의 `href/protocol/…` 도 같다. 그래서 방어선은 두 겹이다 —
+// (1) 리라이터가 위험 멤버 읽기를 `__zp_get` 으로 감싸고(별칭을 거쳐도),
+// (2) 멤브레인 트랩이 base 가 진짜 Location/document 일 때 가상값을 준다.
+// 하나라도 빠지면 페이지가 `document.location.href` 한 줄로 프록시 주소·오리진·
+// 스킴을 읽는다. CNN 실측: 벤더가 그 스킴으로 URL 을 만들어 http:// 로 요청 →
+// 502 → `turner_getGuid` 부재 → 광고 체인 중단.
+test('membrane virtualizes location reads whose base is a real Location or the document', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  // ① 진짜 Location 을 base 로 받았을 때의 방어선.
+  assert.match(rt, /function isNativeLocation\(value\)/, 'Location 브랜드 체크가 있어야 한다');
+  assert.match(
+    rt,
+    /if \(typeof prop === 'string' && LOC_ALL_URL_PROPS\.has\(prop\) && isNativeLocation\(base\)\) return virtualURL\[prop\];/,
+    'get 트랩이 Location base 의 URL 성분을 가상값으로 돌려줘야 한다'
+  );
+  // 브랜드 체크는 instanceof 가 아니라 **네이티브 게터 호출**이어야 한다 —
+  // 페이지가 Symbol.hasInstance 를 갈아 끼우면 instanceof 는 속는다.
+  const brand = rt.slice(rt.indexOf('function isNativeLocation('), rt.indexOf('function get(base, prop)'));
+  assert.match(brand, /d\.get\.call\(value\)/, '브랜드 체크는 네이티브 게터를 직접 호출해 판정해야 한다');
+  assert.doesNotMatch(brand, /instanceof/, 'instanceof 브랜드 체크는 페이지가 위조할 수 있다');
+  // ② document.location 은 트랩의 네 표면(get/set/has/gopd) 모두에서 가상이어야 한다.
+  assert.match(rt, /if \(base === document && prop === 'location'\) return virtualLocation;/, 'get');
+  assert.match(rt, /\(\(isWindowLike\(base\) \|\| base === document\) && prop === 'location'\)/, 'set/has/gopd');
+  const gopd = rt.slice(rt.indexOf('function getOwnPropertyDescriptor(base, prop)'), rt.indexOf('function ownKeys(base)'));
+  assert.match(gopd, /base === document/, '서술자로 진짜 게터를 꺼내 가는 길도 막아야 한다');
+});

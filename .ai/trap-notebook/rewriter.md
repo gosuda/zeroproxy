@@ -2339,3 +2339,89 @@ base URL** 로 푼다. 프렐류드는 프록시 경로를 **루트 상대**(`/z
 두 번째다(srcset 은 주석이 규칙을 적어 뒀는데 코드가 안 따랐고, 여기는 프레임
 경로가 절대 URL 을 쓰는데 내비게이션 경로가 안 썼다). "이 파일 어딘가에 이미
 맞게 한 자리가 있는가" 를 먼저 찾는 편이 빠르다.
+
+---
+
+## `document.location` 이 프록시 주소를 그대로 흘렸다 — 별칭 한 번이면 멤브레인이 꺼졌기 때문 (2026-08-25) {#document-location-유출}
+
+CNN 프레임이 대조군 34 vs 프록시 21 로 남아 있었다. 빠진 것은 **APS(Amazon) 계열과
+OMID 검증 프레임**이었고, 콘솔에 `__zp_get(...).turner_getGuid is not a function`
+이 5건 있었다.
+
+### 사슬
+
+```
+document.location.protocol → "http:"          ← 프록시 스킴이 샜다
+   ↓ 벤더 코드(loadScriptFromUrl):
+     (protocol === "https:" ? "https://" : "http://") + "www.ugdturner.com/xd.sjs"
+http://www.ugdturner.com/xd.sjs → 502          ← 그 호스트는 http 로는 응답하지 않는다
+   ↓ 그 스크립트가 정의하는 전역
+turner_getGuid → undefined (대조군: function)
+   ↓
+FAVE/APS 체인 중단 → apstag-iframe · OMID · 동기화 프레임 다수 미생성
+```
+
+대조군에서 같은 스크립트는 **https** 로 로드된다. 즉 우리가 흘린 스킴 하나가
+광고 스택 전체를 끌어내렸다.
+
+### 왜 마스킹으로는 못 막나
+
+실측: `Object.getOwnPropertyDescriptor(document,'location').configurable === false`,
+Location 인스턴스의 `href/protocol/host/…` 도 전부 **own + non-configurable**
+(unforgeable). 프로토타입을 덮어 봐야 **인스턴스 own 이 그걸 가린다** — 실제로
+프로토타입 게터는 `https:` 를 주는데 페이지가 읽는 own 게터는 `http:` 를 줬다.
+
+### 왜 트랩도 안 탔나 — **이게 본체다**
+
+리라이터의 위험 멤버 래핑에 이런 규칙이 있었다:
+
+```rust
+if let Expression::Identifier(recv) = &expr.object {
+    if self.is_shadowed(recv.name.as_str()) { return; }   // 지역 수신자면 통째로 skip
+}
+```
+
+주석의 의도는 `function f(location){ location.href }`(가려진 전역은 지역 값) 하나인데,
+실제로는 **모든 지역 수신자**에서 멤브레인이 꺼진다. 즉 **별칭 한 번이면 우회**다:
+
+```js
+var u = n.location;  u.protocol      // 우회
+n.location?.protocol                 // 디슈가하면 위와 같은 모양 — 벤더 코드가 이것
+```
+
+### 고침 (세 겹)
+
+1. 트랩에 `document.location` 추가 — get/set/has/**getOwnPropertyDescriptor** 네 표면
+   전부. 마지막이 빠지면 `gopd(document,'location').get.call(document)` 한 줄로 다시 샌다.
+2. **base 가 진짜 Location 이면** URL 성분을 가상값으로. 브랜드 체크는 `instanceof`
+   가 아니라 **네이티브 게터 직접 호출**이다 — 페이지가 `Symbol.hasInstance` 를 갈아
+   끼우면 `instanceof` 는 속는다.
+3. 리라이터 shadow 규칙을 **의도대로** 좁힘: 수신자 **이름 자체가** 가려진 위험
+   전역일 때만 skip. 지역 이름을 감싸는 것은 의미상 안전하다 — 트랩은
+   window/Location/document 가 아닌 base 를 Reflect 로 그대로 흘린다.
+
+### 실측
+
+| | 전 | 후 | 대조군 |
+|---|---|---|---|
+| `turner_getGuid` | undefined | **function** | function |
+| 프레임 | 21 | 21 | 34 |
+| iframe 생성 | 23 | 25 | 36 |
+| pbjs 이벤트 | 83 | **95** | 72 |
+
+회귀: static 146(새 가드 **변이 5/5**), cargo workspace ok(zp-rewriter 84),
+nav-matrix 탈출 0/재현성 결함 0, 홀 매트릭스 유출 0, 렌더체크 3사이트
+raw=0 csp=0 err=0, 탐지기 기존 known-open 1건뿐.
+
+### 함정 둘
+
+- **측정 창이 짧으면 회귀로 오인한다.** 리라이터를 고친 직후 프레임 14 / 이벤트 10
+  이 나와 회귀인 줄 알았는데, CNN 광고 스택은 60초 이상 걸린다. 안정 후 21 / 95.
+  **"고친 뒤 나빠졌다" 는 먼저 같은 시점에서 쟀는지 확인할 것.**
+- 두 스위트를 겹쳐 돌리지 말 것(같은 taskweaver 데몬). 그리고 rendercheck 은 `zp`
+  데몬을 **직접 띄우지 않는다** — 내가 정리하려고 kill 해 놓고 실행해 전부 `?` 가 나왔다.
+
+### 남은 것
+
+`apstag-iframe` 은 여전히 안 뜬다(프레임 21 vs 34). turner 전역은 살아났으므로
+다음 갈래는 APS 초기화 경로다.

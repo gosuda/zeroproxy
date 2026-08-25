@@ -1719,8 +1719,44 @@
     function isWindowLike(value) {
       try { return value === root || value === scope || value === withScope || value && value.window === value; } catch { return false; }
     }
+    // 진짜 native Location 인스턴스인가. `instanceof` 로 보면 페이지가
+    // `Symbol.hasInstance` 를 갈아 끼워 속일 수 있으므로, **네이티브 게터를
+    // 직접 불러 보는 브랜드 체크**를 쓴다(Location 이 아니면 던진다).
+    function isNativeLocation(value) {
+      if (!value || typeof value !== 'object') return false;
+      if (value === virtualLocation) return false;
+      const d = Native.locationHref;
+      if (!d || !d.get) return false;
+      try { d.get.call(value); return true; } catch { return false; }
+    }
     function get(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
+      // ★base 가 **진짜 Location** 이면 URL 성분은 가상값을 준다.
+      // 리라이터는 `n.location.protocol` 에서 바깥 `.protocol` 만 감싸고
+      // 안쪽 `n.location` 은 (수신자가 지역 변수라) 그대로 두므로, 멤브레인이
+      // **진짜 Location 을 base 로** 받는 경로가 실제로 존재한다. 그때
+      // Reflect.get 으로 떨어지면 own + non-configurable(unforgeable) 접근자가
+      // 프록시 주소를 그대로 돌려준다 — 마스킹으로는 절대 못 막는 자리다.
+      // CNN 실측(2026-08-25): 벤더 코드
+      // `(n.location.protocol === "https:" ? "https://" : "http://") + host`
+      // 가 `http:` 를 받아 `http://www.ugdturner.com/xd.sjs` 를 요청 → 502 →
+      // 그 스크립트가 정의하는 `turner_getGuid` 부재 → FAVE/APS 체인 중단 →
+      // 광고 프레임 다수 미생성. 기능 파손이자 격리 위반이다.
+      if (typeof prop === 'string' && LOC_ALL_URL_PROPS.has(prop) && isNativeLocation(base)) return virtualURL[prop];
+      // ★`document.location` 은 **실제 객체에 마스킹이 안 걸린다.** 측정(2026-08-25):
+      // `document` 의 own `location` 접근자와 Location 인스턴스의 own
+      // `href/protocol/host/…` 접근자가 전부 `configurable: false`(unforgeable)라
+      // 프로토타입을 아무리 덮어도 인스턴스 own 이 그걸 가린다. 그래서 페이지가
+      // `document.location.href` 한 줄만 읽으면 **프록시 주소·오리진·스킴이
+      // 그대로 나갔다** — 격리 위반이면서 동시에 기능 파손이다.
+      // CNN 실측: 벤더 코드가
+      // `(document.location.protocol === "https:" ? "https://" : "http://") + host`
+      // 로 URL 을 만든다. 우리가 `http:` 를 흘려서 `http://www.ugdturner.com/xd.sjs`
+      // 를 받아 502 가 났고, 그 스크립트가 정의하는 `turner_getGuid` 가 없어져
+      // FAVE/APS 체인이 통째로 끊겼다(광고 프레임 다수 미생성).
+      // `URL`/`documentURI`/`baseURI`/`referrer` 는 이미 여기 있었는데
+      // `location` 만 빠져 있었다 — 형제 표면 하나를 빠뜨린 전형이다.
+      if (base === document && prop === 'location') return virtualLocation;
       if (base === document && (prop === 'URL' || prop === 'documentURI')) return virtualURL.href;
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return '';
@@ -1753,7 +1789,7 @@
     }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
-      if ((isWindowLike(base) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
+      if (((isWindowLike(base) || base === document) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
       Reflect.set(Object(base), prop, value);
       return value;
@@ -1797,8 +1833,14 @@
       const dynamic = dynamicWrapperFor(ctor);
       return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
     }
-    function has(base, prop) { if (isWindowLike(base) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
-    function getOwnPropertyDescriptor(base, prop) { if (isWindowLike(base) && prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false }; return Reflect.getOwnPropertyDescriptor(Object(base), prop); }
+    function has(base, prop) { if ((isWindowLike(base) || base === document) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
+    function getOwnPropertyDescriptor(base, prop) {
+      // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
+      // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
+      // 주소가 새어 나간다.
+      if ((isWindowLike(base) || base === document) && prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false };
+      return Reflect.getOwnPropertyDescriptor(Object(base), prop);
+    }
     function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
     function moduleURL(specifier, referrer) {
       const spec = String(specifier);

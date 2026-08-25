@@ -1443,8 +1443,21 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // the param shadows the global. The visit_identifier_reference path
         // already honours `is_shadowed` for the receiver; mirror that here
         // so the dangerous-member detection doesn't override the shadowing.
+        // ★수신자 **이름 자체가 위험 전역인데 가려진** 경우에만 건드리지 않는다.
+        // 예전에는 **모든 지역 수신자**에서 건너뛰었다. 그러면 별칭 한 번만
+        // 거쳐도 멤브레인이 통째로 꺼진다 — `var u = n.location; u.protocol`,
+        // 즉 옵셔널 체이닝 디슈가(`n.location?.protocol`)가 정확히 그 모양이다.
+        // CNN 실측(2026-08-25): 벤더의 `loadScriptFromUrl` 이
+        // `((u = n.location) == null ? void 0 : u.protocol) === "https:"` 로
+        // 스킴을 고르는데, `u` 가 지역이라 리라이트가 꺼지고 **진짜 Location 의
+        // own(unforgeable) 접근자**가 프록시 스킴 `http:` 를 그대로 줬다 →
+        // `http://www.ugdturner.com/xd.sjs` 502 → `turner_getGuid` 부재 →
+        // FAVE/APS 광고 체인 중단.
+        // 지역 이름이라도 감싸는 것은 의미상 안전하다 — 멤브레인 트랩은
+        // window/Location/document 가 아닌 base 는 Reflect 로 그대로 흘린다.
         if let Expression::Identifier(recv) = &expr.object {
-            if self.is_shadowed(recv.name.as_str()) {
+            let recv_name = recv.name.as_str();
+            if is_dangerous_global(recv_name) && self.is_shadowed(recv_name) {
                 return;
             }
         }
@@ -1639,6 +1652,46 @@ mod tests {
     // proxy URL (`<proxy>/zp/api/script?…`), so "./x.js" was requested as
     // /zp/api/x.js and 404'd — NAVER's ad SDK died exactly this way
     // (`/zp/api/gfp-display-sdk.js`, then `initAd is not defined`).
+    // 2026-08-25 — **별칭 한 번으로 멤브레인이 꺼지면 안 된다.**
+    // 예전 규칙은 수신자가 지역 식별자이기만 하면 위험 멤버 래핑을 통째로
+    // 건너뛰었다. 그러면 `var u = n.location; u.protocol` 한 줄이면 우회다 —
+    // 옵셔널 체이닝 디슈가(`n.location?.protocol`)가 정확히 그 모양이고,
+    // CNN 벤더 코드가 그걸로 스킴을 골랐다. 진짜 Location 의 접근자는 own +
+    // non-configurable(unforgeable) 이라 마스킹으로는 막을 수 없어서, 프록시
+    // 스킴 `http:` 가 그대로 새고 `http://www.ugdturner.com/xd.sjs` 가 502 나며
+    // `turner_getGuid` 가 정의되지 않아 광고 체인이 끊겼다.
+    #[test]
+    fn dangerous_member_survives_local_aliasing() {
+        let o = opts();
+        // ① 지역 수신자여도 감싼다(안팎 모두).
+        let out = rewrite_script("function f(n){ return n.location.protocol; }", &o).unwrap();
+        assert!(
+            out.code.contains("__zp_get(n,\"location\")"),
+            "지역 수신자의 .location 도 감싸야 한다: {}",
+            out.code
+        );
+        assert!(
+            out.code.contains("\"protocol\")"),
+            "바깥 URL 성분도 감싸야 한다: {}",
+            out.code
+        );
+        // ② 별칭 변수를 거친 읽기(옵셔널 체이닝 디슈가 모양).
+        let aliased =
+            rewrite_script("function f(n){ var u = n.location; return u.protocol; }", &o).unwrap();
+        assert!(
+            aliased.code.contains("__zp_get(u,\"protocol\")"),
+            "별칭을 거쳐도 멤브레인을 타야 한다: {}",
+            aliased.code
+        );
+        // ③ 수신자 **이름 자체**가 가려진 위험 전역이면 그건 지역 값이므로 그대로.
+        let shadowed = rewrite_script("function f(location){ return location.href; }", &o).unwrap();
+        assert!(
+            !shadowed.code.contains("__zp_get(location,"),
+            "가려진 전역 이름은 지역 값이다 — 건드리면 의미가 바뀐다: {}",
+            shadowed.code
+        );
+    }
+
     #[test]
     fn computed_dynamic_import_is_wrapped_at_runtime() {
         let o = RewriteOpts {
