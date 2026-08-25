@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-25 | 방법론 / 계측 | 정정 — nav-matrix 대조군 열이 빈 건 러너 결함이 아니라 내가 같은 taskweaver 데몬으로 동시에 프로브를 돌린 탓이었다. | sw-integration.md#nav-matrix-대조군 |
 | 2026-08-25 | sw / 격리·지문 | Referrer-Policy 를 아예 안 보고 있었다 — 타깃이 금지한 것을 우리가 대신 흘렸다. | sw-integration.md#referrer-policy |
 | 2026-08-25 | sw / 프레임·격리 | 리다이렉트가 문서 entry 를 옮기는 코드가 서브리소스에도 걸려, CNN 광고가 통째로 죽었다. | sw-integration.md#리다이렉트-entry |
 | 2026-08-24 | membrane / 프레임 | CNN 이 렌더러를 세운 진짜 원인 — 교차창 프록시의 `parent` 가 자기 자신이었다. | LOG.md#2026-08-24-1 |
