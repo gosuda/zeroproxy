@@ -327,7 +327,6 @@
   }
   const crossWindowProxyCache = new WeakMap();
   const postMessageWrappers = new WeakMap();
-  const postMessageOriginals = new WeakMap();
   // V8 incumbent realm leak — cross-realm postMessage wrap function call 시 message
   // event 의 `e.source` 가 incumbent (caller realm 의 contentWindow) 가 아닌 wrap
   // function 의 realm (parent) 으로 corrupt 됨. NAVER GFP SafeFrame SDK 의 resize
@@ -335,8 +334,6 @@
   // resize 메시지 왔는지 식별 → source 가 parent 로 corrupt 되어 모든 광고 iframe
   // height=0 으로 collapse. Fix: 각 iframe 의 `parent`/`top` accessor 를 sender-aware
   // proxy 로 override + sender queue 로 message dispatch 시 source 정정.
-  const parentPostMessageSenderQueue = [];
-  const parentRedirectFacades = new WeakMap();
   // Description-less Symbols: `Object.getOwnPropertySymbols(obj)` still
   // returns these, but `symbol.description === undefined` so anti-bot
   // probes don't see the "zeroproxy.*" prefix that used to be embedded
@@ -1205,7 +1202,6 @@
     // .bind 대신 Reflect.apply 로 native 직접 호출하면 caller realm (child) 이
     // incumbent 로 보존되어 source 가 정확히 dispatched 됨.
     const originalPm = target.postMessage;
-    postMessageOriginals.set(target, originalPm);
     // mapped === '*' (caller 가 '*' 또는 변환 필요 없는 케이스) 면 source 보존을
     // 위해 wrap 우회 — caller 가 native postMessage 직접 호출하도록 return
     // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
@@ -1227,30 +1223,24 @@
       return '';
     }
   }
-  function virtualizeMessageEvent(ev, isRootRealm) {
-    // Sender queue 로 source 정정 — wrap function 의 V8 incumbent realm leak 보정.
-    // wrap 호출 시점에 sender (iframe.contentWindow) 가 queue 에 push 됨. dispatch
-    // 가 동일 task 내 FIFO 라 queue.shift() 가 해당 메시지의 실제 sender. 단 sender
-    // 가 root (self-postMessage) 인 경우엔 정정 안 함. isRootRealm 만 queue pop —
-    // child realm 의 listener 가 부모→자식 메시지 처리 시 queue 잘못 소비 방지.
-    let actualSource = ev.source;
-    if (isRootRealm && actualSource === root && parentPostMessageSenderQueue.length > 0) {
-      const candidate = parentPostMessageSenderQueue.shift();
-      if (candidate && candidate !== root) actualSource = candidate;
-    }
-    // Hot path fast-exit: source 안 바뀌고 origin 이 proxyOrigin 아니면
-    // virtualOriginForMessage 가 어차피 '' 반환. 함수 호출 + 객체 alloc 회피.
-    // 대부분의 cross-frame postMessage 가 여기로 빠짐.
-    if (actualSource === ev.source && ev.origin !== proxyOrigin) return ev;
-    const origin = virtualOriginForMessage(ev.source === actualSource ? ev : { origin: ev.origin, source: actualSource });
-    if (!origin && actualSource === ev.source) return ev;
+  // source 는 **엔진이 준 것을 그대로 쓴다.** 예전에는 sender 큐로 정정했는데,
+  // 그 정정이 필요했던 이유는 우리가 창의 postMessage 를 부모 realm 래퍼로
+  // 갈아끼워 incumbent realm 을 망가뜨렸기 때문이다. 그 원인을 없앴으므로
+  // (rewriter.md#postmessage-incumbent) 정정 장치도 함께 지운다 — 남겨 두면
+  // 다음 사람이 "이미 처리돼 있네" 로 오해한다. 여기서 하는 일은 오리진
+  // 가상화 하나뿐이다.
+  function virtualizeMessageEvent(ev) {
+    // Hot path fast-exit: 프록시 오리진이 아니면 virtualOriginForMessage 가
+    // 어차피 '' 를 준다. 함수 호출 + 객체 alloc 회피.
+    if (ev.origin !== proxyOrigin) return ev;
+    const origin = virtualOriginForMessage(ev);
+    if (!origin) return ev;
     try {
-      return new MessageEvent(ev.type, { data: ev.data, origin: origin || ev.origin, lastEventId: ev.lastEventId || '', source: actualSource, ports: ev.ports || [] });
+      return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: ev.source, ports: ev.ports || [] });
     } catch {
       try {
         const clone = Object.create(ev);
-        if (origin) Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
-        if (actualSource !== ev.source) Object.defineProperty(clone, 'source', { value: actualSource, configurable: true });
+        Object.defineProperty(clone, 'origin', { value: origin, configurable: true });
         return clone;
       } catch {
         return ev;
@@ -3134,12 +3124,11 @@
 
   function installPostMessageHooks(w) {
     if (!Native.windowAddEventListener || !Native.windowRemoveEventListener) return;
-    const isRootRealm = (w === root);
     function wrap(listener) {
       if (!listener || (typeof listener !== 'function' && typeof listener.handleEvent !== 'function')) return listener;
       if (messageListenerWrappers.has(listener)) return messageListenerWrappers.get(listener);
       const wrapped = function(ev) {
-        const next = virtualizeMessageEvent(ev, isRootRealm);
+        const next = virtualizeMessageEvent(ev);
         return typeof listener === 'function' ? listener.call(this, next) : listener.handleEvent.call(listener, next);
       };
       messageListenerWrappers.set(listener, wrapped);
@@ -6647,50 +6636,6 @@
         if (installed && typeof installed.set === 'function') toStringMap.set(installed.set, nativeAccessorSource('set', prop));
       } catch {}
     }
-  }
-  function installParentSenderRedirect(w) {
-    if (!w || w === root) return;
-    if (parentRedirectFacades.has(w)) return;
-    const originalRootPm = postMessageOriginals.get(root);
-    if (!originalRootPm) return;
-    // Sender-aware postMessage for child→parent direction. Pushes sender (w)
-    // onto queue before invoking native parent.postMessage so that
-    // virtualizeMessageEvent at root realm can rewrite ev.source from root
-    // (corrupted by V8 incumbent realm leak across our wrap function call)
-    // back to w. NAVER GFP SafeFrame SDK 의 resize handler 가
-    // `e.source === iframe.contentWindow` 으로 어느 광고 iframe 인지 식별 →
-    // source 정정 없으면 모든 광고 iframe height=0 으로 collapse.
-    const senderAwarePm = function postMessage(message, targetOrigin, transfer) {
-      const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
-      parentPostMessageSenderQueue.push(w);
-      try {
-        return arguments.length > 2
-          ? Reflect.apply(originalRootPm, root, [message, mapped, transfer])
-          : Reflect.apply(originalRootPm, root, [message, mapped]);
-      } catch (e) {
-        const idx = parentPostMessageSenderQueue.lastIndexOf(w);
-        if (idx >= 0) parentPostMessageSenderQueue.splice(idx, 1);
-        throw e;
-      }
-    };
-    maskNativeFunction(senderAwarePm, 'postMessage');
-    // Window 객체에 대한 Proxy 는 Chromium 보안 모델 제약 (cross-realm, IDL
-    // bindings) 으로 get trap 이 작동 안 함 — facade.postMessage access 시
-    // senderAwarePm 가 아닌 native postMessage 반환 → queue push 안 됨. 대신
-    // null-prototype 객체에 우리 senderAwarePm + 주요 Window properties 수동
-    // delegate 한 facade 사용.
-    const facade = Object.create(null);
-    Object.defineProperty(facade, 'postMessage', { value: senderAwarePm, enumerable: true, configurable: false, writable: false });
-    // Forward common Window properties / methods used by ad code
-    const FWD_PROPS = ['top','parent','self','window','globalThis','opener','frames','length','name','closed','origin','location','document','history','navigator','screen','localStorage','sessionStorage','indexedDB','caches','crypto','performance','console','frameElement','innerWidth','innerHeight','outerWidth','outerHeight','devicePixelRatio'];
-    for (const p of FWD_PROPS) {
-      try {
-        Object.defineProperty(facade, p, { get: () => root[p], enumerable: true, configurable: false });
-      } catch {}
-    }
-    parentRedirectFacades.set(w, facade);
-    try { defineAccessor(w, 'parent', () => facade); } catch {}
-    try { defineAccessor(w, 'top', () => facade); } catch {}
   }
   function prepareActivatingNodes(args) {
     for (const node of args || []) prepareActivatingNode(node);
