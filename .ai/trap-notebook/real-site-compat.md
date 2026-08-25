@@ -443,3 +443,58 @@ for (const c of chunks) for (const id in (c[1]||{})) {
 **교훈**: 부착률 같은 전제는 판정 자체보다 오래 살아남아 다음 세션의 계획을
 바꾼다(우리는 이 전제 때문에 "기다린다" 를 선택했다). 관측 도구를 고쳤으면
 판정만 다시 하지 말고 **전제도 다시 잴 것.**
+
+---
+
+## CNN 광고 프레임 21~25 vs 대조군 34 — APS 갈래를 어디까지 좁혔나 (2026-08-25, 미해결) {#cnn-aps-프레임}
+
+`document.location` 유출을 고쳐 `turner_getGuid` 가 살아난 뒤에도 프레임 수가
+대조군에 못 미친다. 빠진 것 중 대표가 `apstag-iframe` 이다. **아직 못 고쳤고,
+어디까지 좁혔는지와 무엇을 반증했는지를 남긴다.**
+
+### 좁힌 것
+
+1. `apstag-iframe` 을 만드는 것은 **Amazon 이 아니라 BounceExchange** 다.
+   문서시작 주입으로 `Document.prototype.createElement` 를 감싸 스택을 잡았다:
+   `injectAPSTagScriptInsideIframe`(bounce `ads-v2` 번들) → `createIframe`
+   (`main-v2`) → `createElement`. **인스턴스 own 래퍼로는 안 잡힌다** —
+   프렐류드가 프로토타입 메서드를 붙들어 두므로 프로토타입에 걸어야 한다.
+2. 그 함수의 게이트는 `canRun()` 이고 조건은
+   `bouncex.website.sspConfig.aps` 가 truthy 인 것이다(소스 확인).
+3. 실측 비교:
+
+   | | 프록시 | 대조군 |
+   |---|---|---|
+   | `bouncex.website` 키 수 | **76** | **84** |
+   | `sspConfig` | **없음** | `aps, criteo, equativ, index, magnite, openpath, pbm` |
+   | `bouncex.state` | **null** | `device_id, gdpr, geo, request_token, …` |
+   | `api.bounceexchange.com/state/js?...&device_id=…` 로드 | **안 함** | 함 |
+
+   즉 **설정이 채워지지 않아 APS 단계 자체가 안 돈다.**
+4. `bcx_local_storage_frame`(bounce 의 저장소 프레임)이 프록시에서는 **문서가
+   비어 있다**(`about:blank`, 요소 3, 스크립트 0). 그 프레임의 share URL 을
+   **격리 월드에서 새 iframe 으로** 열어도 이동하지 않는다(같은 방법으로 다른
+   프레임의 src 를 열면 정상 이동하므로 **프로브 방법은 유효**하다).
+5. 페이지가 받는 `message` 이벤트: 대조군 **109건**(6개 오리진) vs 프록시 **6건**
+   (전부 프록시 오리진 — 프록시에서는 모든 프레임이 같은 오리진이라 그 자체는 정상).
+
+### 반증한 가설 (다시 파지 말 것)
+
+- **"타깃 URL 의 프래그먼트(`#7291`) 때문"** — 픽스처로 프래그먼트 있는/없는
+  자식 프레임을 나란히 열었다. 프록시에서 **둘 다 정상 로드**.
+- **"자식 프레임이 자기 URL/해시를 잘못 본다"** — 자식 안에서 읽은
+  `location.href/hash/search` 가 **대조군과 완전히 동일**했다(부모에서 읽은
+  `contentWindow.location` 은 부모 URL 로 보이지만, 그건 별개 표면이다).
+- **"apstag 가 로드 안 됨"** — apstag 객체의 키 20개와 로드된 스크립트 3개가
+  대조군과 동일하다.
+- **"CSP 가 프레임을 막음"** — 문서 응답에 CSP 헤더가 실리고 `frame-src 'self'`
+  가 허용한다. 콘솔의 CSP 메시지는 **meta CSP 가 `<head>` 밖에 박혀 무시됐다**는
+  다른 얘기다(헤더가 있으므로 정책 자체는 유효 — 다만 meta 를 왜 넣는지 재검토할 것).
+
+### 다음 갈래
+
+`bouncex.website` 가 76 vs 84 키로 **애초에 다르다**. 그 설정을 주는
+`cache/7291/website-<hash>.js` 응답을 프록시/대조군에서 바이트로 비교하는 것이
+다음 한 걸음이다. 같은 파일이라면 조립 단계(다른 요청)가 다른 것이고, 다르다면
+업스트림이 요청 특성(쿠키/헤더)에 따라 다른 설정을 주는 것이다 — rubicon 이
+Referer 로 prebid 빌드를 고르던 것과 같은 부류일 수 있다.
