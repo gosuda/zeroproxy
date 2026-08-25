@@ -519,3 +519,32 @@ for (const c of chunks) for (const id in (c[1]||{})) {
 것인지(입양 후에는 src 재설정 없이는 로드가 시작되지 않는 경우가 있다),
 (2) 우리 멤브레인이 삽입 경로에서 src 를 **같은 값으로 다시 쓰는지**,
 (3) 프레임 생성이 문서 스트리밍 중이라 브라우징 컨텍스트가 아직 없는 시점인지.
+
+### 후속 (2026-08-25) — 프레임이 안 뜬 이유는 우리 SW 의 교착이었다
+
+위에서 "완전한 src 를 단 연결된 iframe 이 왜 내비게이션을 시작하지 않는가" 로
+좁혀 둔 질문의 답: **브라우저는 내비게이션을 시작했다.** 요청도 나갔다. SW 가
+200 을 만들어 놓고도 `respondWith` 가 settle 되지 않아 커밋이 안 된 것이다 —
+응답 경로에서 `await clients.get(resultingClientId)` 를 한 교착.
+상세: [sw-integration.md#clients-get-교착](sw-integration.md#clients-get-교착).
+
+여기 적어 둔 확인 항목 세 개(입양 / 삽입 경로의 src 재작성 / 스트리밍 중 생성)는
+**전부 아니었다.** 측정으로 배제된 것:
+
+- `ownerDocument === document`, `isConnected: true`, `contentWindow` 존재,
+  `sandbox: null`, `srcdoc` 없음 — 삽입 시점부터 정상.
+- 네이티브 접근자로 본 진짜 `src` 속성은 삽입 100ms 뒤 프록시 URL 로 바뀐다
+  (`about:blank` → 372자). 멤브레인이 값을 망가뜨리지 않았다.
+- 브라우저는 그 URL 로 Document 요청을 **실제로 보냈다**(CDP 테이프에 `request`
+  이벤트는 있고 `response`/`finished` 가 없다).
+
+**함정 하나 더**: 프레임의 `getAttribute('src')` / `.src` 를 페이지 문맥에서
+읽으면 **멤브레인이 가상화한 값**이다(원본 타깃 URL). 브라우저가 무엇을 보고
+있는지는 document-start 에 붙들어 둔 **네이티브 접근자**로만 알 수 있다 —
+exec-js 시점에 잡은 디스크립터는 이미 prelude 래퍼다. 이걸 모르고 한 첫 측정은
+"속성은 bounce URL 인데 프로퍼티는 프록시 URL" 이라는 모순으로 보였다.
+
+남은 것: 프레임이 뜬 뒤에도 `sspConfig` 는 여전히 없고 `state/js` 요청도 안
+나간다(실측: `bouncex.website` 76키, `apstag` object, `turner_getGuid` function,
+`sspConfig` undefined). 프레임 수는 대조군 30~34 에 대해 23~26. APS 갈래는
+계속 열려 있다.

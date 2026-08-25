@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-25 | SW / 내비게이션 | **응답 경로에서 `clients.get(resultingClientId)` 를 await 해 내비게이션이 교착했다 — SW 는 200 을 만드는데 브라우저가 영영 커밋 못 한다. CNN 문서 6→0.** | sw-integration.md#clients-get-교착 |
 | 2026-08-25 | real-site / 광고 | CNN 프레임 21~25 vs 34 — apstag-iframe 은 bounce 가 만들고 sspConfig 가 비어 게이트에서 막힌다(미해결, 반증 가설 4개 기록). | real-site-compat.md#cnn-aps-프레임 |
 | 2026-08-25 | membrane / 성능 | 멤브레인을 넓게 감쌌더니 CNN 렌더러가 굳었다 — 브랜드 체크의 예외 비용 + 창 사슬(CMP 상승 루프)까지 감싼 탓. URL 성분만 감싸도록 좁혔다. | rewriter.md#document-location-유출 |
 | 2026-08-25 | membrane / 리라이터 | `document.location` 이 프록시 주소를 흘렸다 — 별칭 한 번이면(`var u=n.location`) 리라이터의 지역-수신자 skip 규칙으로 멤브레인이 꺼졌다. | rewriter.md#document-location-유출 |

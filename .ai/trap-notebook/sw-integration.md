@@ -669,3 +669,64 @@ url : http://127.0.0.1:18086/landed/n4-location-href
    돌린다. 백그라운드로 띄워 놓고 그 사이에 다른 브라우저 작업을 하지 말 것.
    (`nohup … &` 로 띄우면 부모와 함께 죽는다는 것도 같이 적어 둔다 — 빈 로그가
    "통과" 처럼 보인다.)
+
+## <a id="clients-get-교착"></a>응답 경로의 `clients.get` 이 내비게이션을 교착시킨다 (2026-08-25, CNN)
+
+`reportEncodedSize` 가 이렇게 돼 있었다:
+
+```js
+const id = event.clientId || event.resultingClientId;
+if (id) {
+  const client = await self.clients.get(id);   // ★
+  if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', … });
+}
+```
+
+내비게이션의 **resulting client 는 응답이 커밋돼야 생긴다.** 그런데 이 await 가
+응답 경로 위에 있다 — 응답이 클라이언트를 기다리고, 클라이언트는 응답을
+기다린다. Chrome 은 예약된 id 의 promise 를 그냥 붙들고 있어서 `respondWith`
+가 **영영 settle 되지 않는다.**
+
+### 왜 이걸 찾는 데 오래 걸렸나
+
+증상이 모든 층에서 "정상" 으로 보인다:
+
+- SW 는 200 을 **92~210ms** 만에 만들어 냈다(계측). 커널도 상류도 멀쩡하다.
+- 브라우저만 커밋을 못 하니 iframe 은 영원히 `about:blank`. **load 도 error 도
+  콘솔도 없다.** 프레임은 연결돼 있고 `src` 도 완전하다.
+- 스트리밍 문서는 그 분기(`X-ZP-Stream-Id`)가 await 를 안 타서 멀쩡했고 **버퍼
+  경로 문서만** 죽었다 → "어떤 프레임은 되고 어떤 건 안 된다" 로 보였다.
+
+CNN 실측(클린 빌드, 계측 없음): 요청 **492건 중 485건 정상, 문서 6건만** 끝까지
+응답 없음. 그 6개가 bounce 저장소 프레임을 포함해서 device_id → state/js →
+sspConfig → APS 광고 체인을 통째로 끊고 있었다. 고친 뒤 2회 연속 **6 → 0**
+(525/525, 558/558).
+
+### 규칙
+
+**응답을 만드는 경로에서 `clients.get()` 을 await 하지 않는다.** 그 메시지는
+진단용 텔레메트리고 pull 경로(`recordEncoded`)가 이미 있다 — 응답을 볼모로
+잡을 값이 아니다. 보내되 기다리지 않는다(`.then().catch(()=>{})`).
+`static-policy.test.js` 가 `await self.clients.get(` 을 금지하고, 절대 resolve
+하지 않는 `clients.get` 을 물려도 응답이 나오는지 **동작으로** 확인한다.
+
+### 방법 교훈 — 계측이 결과를 바꿨다
+
+dist SW 에 래퍼를 씌워 단계를 찍었더니 **transportFetch 91건이 매다는** 전혀
+다른 그림이 나왔다(원본은 6건). 계측이 타이밍을 밀어 훨씬 나쁜 상태를 만든
+것이다. 게다가 단계 표시를 **전역 하나**(`self.__ZPNAV_REC`)로 공유해서 동시
+요청끼리 서로의 레코드를 덮어썼다 — "tf-pre-kernelFetch 에서 멈췄다" 는 두 번
+연속 **오답**이었다. 레코드를 인자로 직접 흘려보낸 뒤에야 "SW 는 DONE 200,
+브라우저는 커밋 안 함" 이 드러났다.
+
+- 계측판을 붙였으면 **원본과 같은 지표를 먼저 비교**한다(여기선 테이프의
+  미응답 수). 다르면 그 판으로 얻은 결론은 전부 보류다.
+- 동시성이 있는 코드에 단계 표시를 넣을 때 **전역 슬롯을 쓰지 않는다.**
+
+### 곁가지 — 데드라인은 왜 안 물렸나
+
+같은 커밋에서 `transportFetch` 에 20초 데드라인을 넣었다(상류가 헤더 한 줄도
+안 주면 `kernelFetch` promise 는 영영 settle 되지 않는데 경계가 없었다. Rust
+주석은 "caller does this on a deadline timeout" 이라 적어 두었지만 **그 caller
+가 없었다**). 이번 6건에서는 **한 번도 발화하지 않았고**, 그게 원인이 커널
+바깥이라는 결정적 증거였다 — 데드라인은 진단 도구로도 값을 했다.
