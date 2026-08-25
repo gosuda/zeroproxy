@@ -548,3 +548,24 @@ exec-js 시점에 잡은 디스크립터는 이미 prelude 래퍼다. 이걸 모
 나간다(실측: `bouncex.website` 76키, `apstag` object, `turner_getGuid` function,
 `sspConfig` undefined). 프레임 수는 대조군 30~34 에 대해 23~26. APS 갈래는
 계속 열려 있다.
+
+### 2026-08-25 — CNN 광고 스택은 대조군과 동률이 됐다
+
+`postMessage` incumbent 수정([rewriter.md#postmessage-incumbent](rewriter.md#postmessage-incumbent))
+뒤 같은 프로브로 나란히 잰 값:
+
+| | 프록시 | 대조군 |
+|---|---|---|
+| `sspConfig` 키 | 7 | 7 |
+| device_id | 있음 | 있음 |
+| `apstag` | object | object |
+| prebid | v11.18.5 | v11.18.5 |
+| 입찰 응답 수 | 10 | 6 |
+| 입찰자 | appnexus, criteo, ttd, pubmatic, ix, rubicon | appnexus, ttd, ix, rubicon, criteo |
+| GPT 슬롯 | 1 | 1 |
+| 보이는 프레임 | 1 | 1 |
+| 프레임 / 요소 | 26 / 4,105 | 30 / 4,095 |
+
+즉 **"광고 경매가 아예 안 돈다" 는 갈래는 닫혔다.** 남은 것은 프레임 수 차이
+26 vs 30 뿐인데, 대조군도 회차마다 28~34 로 흔들리므로 이 정도 차이를 쫓기
+전에 **여러 회차의 분포**부터 잡아야 한다(한 회차 비교로 결론 내지 말 것).

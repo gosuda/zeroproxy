@@ -2497,8 +2497,10 @@ get 트랩이 래퍼를 돌려주므로 targetOrigin 매핑은 그대로 산다.
 
 곁가지: `installParentSenderRedirect` + `parentPostMessageSenderQueue` 는 이
 문제를 보정하려던 장치인데 **아무 데서도 호출되지 않는 죽은 코드**였다
-(`parentRedirectFacades` 도 쓰기만 하고 읽지 않는다). 보정이 필요 없어졌으니
-그대로 두면 다음 사람이 또 "이미 처리돼 있네" 로 오해한다 — 정리 대상.
+(`parentRedirectFacades` 도 쓰기만 하고 읽지 않았다). 즉 보정은 한 번도 동작한
+적이 없다. 원인을 없앴으므로 **삭제했다**(331c67e, 70줄). 실제로 이번에 그 코드를
+읽고 한동안 "이미 처리돼 있네" 로 잘못 판단했다 — 죽은 방어 코드는 다음 사람의
+시간을 먹는다.
 
 ### 계측 함정
 
