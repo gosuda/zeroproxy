@@ -2328,12 +2328,20 @@ function buildRuntimePrelude(tab, entry) {
   const prewarmInline = '(function(){try{var p=new URLSearchParams(location.hash.slice(1));var c=p.get("zp_chain");if(!c)return;var chain;try{chain=JSON.parse(atob(decodeURIComponent(c)));}catch(e){return;}if(!Array.isArray(chain)||!chain.length)return;var next=chain.shift();var wait=Math.max(0,Math.min(120000,Number(next.waitMs)||0));var u=new URL(next.path,location.origin);var np=new URLSearchParams(u.hash.startsWith("#")?u.hash.slice(1):u.hash);if(chain.length){np.set("zp_chain",encodeURIComponent(btoa(JSON.stringify(chain))));}else{np.delete("zp_chain");}u.hash="#"+np.toString();var assign=location.assign.bind(location);p.delete("zp_chain");try{history.replaceState(null,"","#"+p.toString());}catch(e){}setTimeout(function(){try{assign(u.toString());}catch(e){}},wait);}catch(e){}})();';
   // 2026-08-13 — CSP 를 **문서 안에도** 박는다.
   //
-  // 실측: SW 가 합성한 응답이라도 non-streaming(`new Response(string, …)`)
-  // 이면 CSP 가 정상 강제된다(에러 페이지에서 외부 이미지 차단 확인).
-  // 그런데 스트리밍 문서(`new Response(ReadableStream, …)`)에서는 같은
-  // 헤더를 실어도 강제되지 않는다 — 리라이트 안 된 외부 이미지가 그대로
-  // 로드됐다. 헤더 경로가 왜 무시되는지는 별개로 파야 하지만, 문서에 직접
-  // 박은 meta 는 파서가 처리하므로 응답 합성 방식과 무관하다.
+  // ★2026-08-26 정정 — "스트리밍 응답에서는 CSP 헤더가 강제되지 않는다" 는
+  // 이 자리의 옛 설명은 **틀렸다.** 그때 쓰던 브라우저 데몬이 CSP 를 통째로
+  // 꺼 두고 있었을 뿐이다(taskweaver 는 기본값이 `Page.setBypassCSP` 라
+  // `list` 의 `csp_bypassed: true` 다). 아무것도 강제되지 않는 상태에서
+  // 외부 이미지가 로드된 것을 "헤더가 무시된다" 로 읽은 것이다.
+  //
+  // meta 를 빼고 헤더만 남긴 채 `--enforce-csp` 데몬으로 다시 재 보면
+  // 스트리밍 문서에서도 그대로 막힌다 — 외부 오리진 fetch 차단, 외부
+  // 이미지 차단, 버퍼 경로(404 문서)도 동일. 반대로 기본 데몬에서는 같은
+  // 요청이 200 으로 통과한다. 즉 판정한 것은 우리 코드가 아니라 도구였다.
+  //
+  // 그래서 이 meta 는 "헤더가 안 먹으니 대신" 이 아니라 **두 겹**이다.
+  // 헤더가 정본이고 meta 는 보조다. 지우는 것도 검토 대상이지만(주입 노드가
+  // 하나 줄고 report-uri 예외도 없어진다) 지금은 남겨 둔다.
   //
   // 프렐류드는 문서 맨 앞에 주입되므로 이 meta 는 어떤 서브리소스보다 먼저
   // 온다 — CSP meta 의 요구 조건이 그것이다. `frame-ancestors` 는 meta 에서
