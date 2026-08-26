@@ -4658,3 +4658,111 @@ test('SW 는 알 수 없는 참조 정책 토큰을 받지 않는다', () => {
   assert.match(block, /includes\(token\)\) entry\.referrerPolicy = token;/, '알려진 토큰일 때만 반영한다');
   assert.match(block, /'strict-origin-when-cross-origin'/, '정책 목록이 실려 있어야 한다');
 });
+
+// ── data-zp-* 는 닫힌 이름공간이다 (2026-08-26) ────────────────────────
+//
+// 고치기 전 실측(example.com, 프록시). 훅이 getAttribute/hasAttribute/
+// getAttributeNames/attributes **넷뿐**이라 나머지 속성 표면이 전부 뚫려 있었다:
+//
+//   읽기  attributes['data-zp-target-url'] → Attr,  'x' in attributes → true,
+//         getAttributeNode(NS) → Attr,  getAttributeNS/hasAttributeNS → 값/true,
+//         dataset.zpTargetUrl → 값
+//   쓰기  setAttribute / setAttributeNS / toggleAttribute / setAttributeNode /
+//         attributes.setNamedItem / dataset — 전부 실제 DOM 에 박혔다
+//   삭제  removeAttribute(NS) 로 우리 스태시가 진짜 지워졌다
+//
+// 그 결과 링크의 진짜 타깃 URL 이 새고, `data-zp-internal` 을 심으면 페이지가
+// **자기 노드를 자기 querySelectorAll 에서** 지울 수 있었다(1건 → 0건).
+// 진짜 브라우저는 재현 못 하는 한 줄짜리 탐지기다.
+test('data-zp-* 는 모든 속성 표면에서 읽기 없음 / 쓰기 no-op 이다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+
+  // ① 쓰기 훅 — 이름을 보고 곧장 빠져나가야 한다.
+  // 훅 **본문만** 잘라 본다 — 주석 길이에 가드가 흔들리면 안 된다.
+  const hookBody = (needle) => { const rest = rt.slice(rt.indexOf(needle)); return rest.slice(0, rest.indexOf('\n    });')); };
+  const guard = 'if (isZPAttrName(key)) return undefined;';
+  const setAttr = hookBody("define(w.Element.prototype, 'setAttribute'");
+  assert.ok(setAttr.includes(guard), 'setAttribute 가 data-zp-* 쓰기를 막지 않는다');
+  const rmAttr = hookBody("define(w.Element.prototype, 'removeAttribute'");
+  assert.ok(rmAttr.includes(guard), 'removeAttribute 가 우리 스태시 삭제를 막지 않는다');
+  assert.ok(rt.includes("'setNamedItem', function(attr) { if (attr && isZPAttrName(attr.name)) return null;"),
+    'NamedNodeMap.setNamedItem 이 data-zp-* 를 통과시킨다');
+
+  // ② 나머지 표면은 한 함수가 통째로 닫는다. 목록이 아니라 규칙이라도,
+  //    **어느 표면을 닫았는지**는 고정해 둬야 하나가 빠졌을 때 여기서 걸린다.
+  const nsStart = rt.indexOf('  function installZPAttrNamespace(w) {');
+  assert.ok(nsStart > 0, 'installZPAttrNamespace 가 없다');
+  const ns = rt.slice(nsStart, rt.indexOf('\n  function ', nsStart + 1));
+  for (const api of ['getAttributeNS', 'hasAttributeNS', 'removeAttributeNS',
+    'getAttributeNode', 'getAttributeNodeNS', 'setAttributeNode', 'setAttributeNodeNS',
+    'removeAttributeNode', 'toggleAttribute', 'removeNamedItem']) {
+    assert.ok(ns.includes("'" + api + "'"), api + ' 표면이 안 닫혀 있다');
+  }
+  assert.match(ns, /isZPAttrName/, '규칙(isZPAttrName)을 안 쓴다');
+  assert.ok(rt.includes('installZPAttrNamespace(w);'), 'installZPAttrNamespace 를 아무도 안 부른다');
+
+  // ③ dataset 필터는 동작으로 고정한다.
+  const dsStart = rt.indexOf('  function datasetKeyToAttrName(key) {');
+  const dsEnd = rt.indexOf('  function installZPAttrNamespace(w) {');
+  assert.ok(dsStart > 0 && dsEnd > dsStart, 'dataset 필터 구간을 못 찾았다');
+  const filteredDataset = new Function('isZPAttrName',
+    rt.slice(dsStart, dsEnd) + '\nreturn filteredDataset;')(n => String(n || '').startsWith('data-zp-'));
+  const rawDs = { zpTargetUrl: 'https://target.example/', zpInternal: '1', pageOwn: 'keep' };
+  const ds = filteredDataset(rawDs);
+  assert.equal(ds.zpTargetUrl, undefined, 'dataset 으로 타깃 URL 이 샌다');
+  assert.equal('zpInternal' in ds, false, 'dataset 의 in 이 우리 키를 인정한다');
+  assert.deepEqual(Object.keys(ds), ['pageOwn'], 'dataset 키 열거가 우리 것을 보여 준다');
+  assert.equal(ds.pageOwn, 'keep', '페이지 자신의 dataset 을 망가뜨렸다');
+  ds.zpInternal = 'forged';
+  assert.equal(rawDs.zpInternal, '1', 'dataset 쓰기가 실제 DOM 에 박힌다');
+  delete ds.zpTargetUrl;
+  assert.equal(rawDs.zpTargetUrl, 'https://target.example/', 'dataset 삭제가 우리 스태시를 지운다');
+  ds.pageOwn = 'changed';
+  assert.equal(rawDs.pageOwn, 'changed', '페이지 자신의 dataset 쓰기가 막혔다');
+  // 접근마다 같은 객체여야 한다(진짜 DOM 은 el.dataset === el.dataset).
+  assert.equal(filteredDataset(rawDs), ds, 'dataset 프록시가 접근마다 새로 만들어진다');
+});
+
+// ── 이름 기반 접근(named getter)도 술어를 지난다 (2026-08-26) ──────────
+//
+// 인덱스 경로만 걸렀지 `raw[prop]` 폴백은 안 걸렀다. WebIDL named getter 는
+// **항목을 그대로 돌려주므로** `el.attributes['data-zp-target-url']` 이 Attr 를
+// 내줬고, `has` 도 raw 에 위임해 `in` 만 true 인 자기모순을 만들었다.
+test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const start = rt.indexOf('  function isIndexKey(prop) {');
+  const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
+  assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
+  const make = new Function('isZPAttrName',
+    rt.slice(start, end) + '\nreturn filteredCollection;')(n => String(n || '').startsWith('data-zp-'));
+
+  // NamedNodeMap 흉내 — named getter 가 이름으로 Attr 를 돌려준다.
+  const hidden = { name: 'data-zp-target-url', value: 'https://target.example/', ownerElement: {} };
+  const shown = { name: 'href', value: '/x', ownerElement: {} };
+  const raw = { length: 2, 0: shown, 1: hidden, 'href': shown, 'data-zp-target-url': hidden,
+    getNamedItem(n) { return this[n] || null; } };
+  raw[Symbol.iterator] = Array.prototype.values;
+  const nn = make(raw, attr => attr && !String(attr.name).startsWith('data-zp-'));
+
+  assert.equal(nn['data-zp-target-url'], undefined, '이름 접근으로 숨긴 항목이 되돌아 나온다');
+  assert.equal('data-zp-target-url' in nn, false, '`in` 이 숨긴 항목을 인정한다');
+  assert.equal(nn['href'], shown, '보이는 항목까지 이름 접근에서 사라졌다');
+  assert.equal('href' in nn, true, '보이는 항목이 `in` 에서 사라졌다');
+  // 항목이 아닌 폴백(스칼라/함수)은 그대로여야 한다.
+  raw.someScalar = 7;
+  assert.equal(nn.someScalar, 7, '항목이 아닌 폴백까지 걸렀다');
+  assert.equal(typeof nn.getNamedItem, 'function', '메서드 폴백이 사라졌다');
+  // 열거/길이는 여전히 필터를 따른다.
+  assert.equal(nn.length, 1);
+  assert.deepEqual(Array.prototype.map.call(nn, a => a.name), ['href']);
+
+  // 진짜 DOM 은 `el.attributes === el.attributes` 다. 접근마다 새 프록시를
+  // 만들면 그 자체가 후킹을 드러낸다(메서드 동일성과 같은 이유).
+  const nnmStart = rt.indexOf('  const namedNodeMapCache = new WeakMap();');
+  assert.ok(nnmStart > 0, 'attributes 캐시가 없다');
+  const nnmEnd = rt.indexOf('\n  function ', rt.indexOf('  function filteredNamedNodeMap(raw) {', nnmStart) + 1);
+  const wrap = new Function('isZPAttrName',
+    rt.slice(nnmStart, nnmEnd) + '\n' + rt.slice(start, end) + '\nreturn filteredNamedNodeMap;')(
+    n => String(n || '').startsWith('data-zp-'));
+  assert.equal(wrap(raw), wrap(raw), 'el.attributes 가 접근마다 새 객체다');
+});

@@ -176,7 +176,72 @@
     if (named) add('collection', 'named access returns a hidden node: ' + (named.id || named.src || '?'));
   } catch (e) { add('collection', 'err:' + e.name); }
 
-  // ⑧ 프레임/문서 정체
+  // ⑧ data-zp-* 이름공간이 정말 닫혀 있는가 — 읽기·쓰기·삭제 표면 전부.
+  //    2026-08-26 실측: 훅이 getAttribute/hasAttribute/getAttributeNames/
+  //    attributes **넷뿐**이라 NS 변종·Attr 노드·dataset·named getter 가 전부
+  //    뚫려 있었다. 목록이 아니라 **규칙**으로 닫혔는지 여기서 매번 확인한다.
+  try {
+    // ★한 노드만 고르면 안 된다 — 문서 순서상 맨 앞은 우리 자산 script 이고
+    // 거기엔 표식이 없어서 축이 통째로 조용해진다(실측으로 밟았다). 적이 실제로
+    // 하듯 **문서를 훑으며** 알려진 표식 이름을 찔러 본다.
+    var ZPNAMES = ['data-zp-target-url', 'data-zp-internal', 'data-zp-blocked-ping', 'data-zp-blocked-rel'];
+    var ZPN = ZPNAMES[0];
+    var els = document.querySelectorAll('*');
+    var probeEls = [];
+    for (var pi = 0; pi < els.length && pi < 300; pi++) probeEls.push(els[pi]);
+    probeEls.push(document.documentElement);
+    var host = probeEls[0] || document.documentElement;
+    // 'data-zp-target-url' → 'zpTargetUrl'
+    var zpDatasetKey = function () { return ZPN.replace(/^data-/, '').replace(/-([a-z])/g, function (_, c2) { return c2.toUpperCase(); }); };
+    var reads = [
+      ['getAttribute', function () { return host.getAttribute(ZPN); }],
+      ['hasAttribute', function () { return host.hasAttribute(ZPN) || null; }],
+      ['getAttributeNS', function () { return host.getAttributeNS(null, ZPN); }],
+      ['hasAttributeNS', function () { return host.hasAttributeNS(null, ZPN) || null; }],
+      ['getAttributeNode', function () { return host.getAttributeNode(ZPN); }],
+      ['getAttributeNodeNS', function () { return host.getAttributeNodeNS(null, ZPN); }],
+      ['attributes[name]', function () { return host.attributes[ZPN]; }],
+      ['attributes in', function () { return (ZPN in host.attributes) || null; }],
+      ['attributes.getNamedItem', function () { return host.attributes.getNamedItem(ZPN); }],
+      ['dataset', function () { var k = zpDatasetKey(); return (host.dataset && host.dataset[k]) || null; }],
+      ['dataset in', function () { var k = zpDatasetKey(); return (host.dataset && (k in host.dataset)) || null; }],
+      ['dataset keys', function () { var k = Object.keys(host.dataset || {}).filter(function (x) { return /^zp[A-Z]/.test(x); }); return k.length ? k.join(',') : null; }]
+    ];
+    for (var ri = 0; ri < reads.length; ri++) {
+      var got = null;
+      for (var hi = 0; hi < probeEls.length && !got; hi++) {
+        host = probeEls[hi];
+        for (var ni = 0; ni < ZPNAMES.length && !got; ni++) {
+          ZPN = ZPNAMES[ni];
+          try { got = reads[ri][1](); } catch (e) { got = null; }
+        }
+      }
+      if (got) add('zp-namespace read', reads[ri][0] + ' -> ' + (got && got.value !== undefined ? got.value : got));
+    }
+    host = probeEls[0] || document.documentElement;
+    // 쓰기가 통하면 페이지가 `data-zp-internal` 로 **자기 노드를 자기 눈에서**
+    // 지울 수 있다 — 진짜 브라우저는 절대 재현 못 하는 신호다.
+    var probe = document.createElement('div');
+    probe.className = '__zpns';
+    (document.body || document.documentElement).appendChild(probe);
+    var writes = [
+      ['setAttribute', function () { probe.setAttribute('data-zp-internal', '1'); }],
+      ['setAttributeNS', function () { probe.setAttributeNS(null, 'data-zp-internal', '1'); }],
+      ['toggleAttribute', function () { probe.toggleAttribute('data-zp-internal', true); }],
+      ['dataset', function () { probe.dataset.zpInternal = '1'; }],
+      ['setAttributeNode', function () { var a = document.createAttribute('data-zp-internal'); a.value = '1'; probe.setAttributeNode(a); }],
+      ['setNamedItem', function () { var a = document.createAttribute('data-zp-internal'); a.value = '1'; probe.attributes.setNamedItem(a); }]
+    ];
+    for (var wi = 0; wi < writes.length; wi++) {
+      try { writes[wi][1](); } catch (e) {}
+      if (document.querySelectorAll('.__zpns').length === 0) add('zp-namespace write', writes[wi][0] + " hid the page's own node");
+    }
+    try { probe.remove(); } catch (e) {}
+    if (host.attributes !== host.attributes) add('zp-namespace', 'el.attributes identity unstable');
+    if (host.dataset !== host.dataset) add('zp-namespace', 'el.dataset identity unstable');
+  } catch (e) { add('zp-namespace', 'err:' + e.name); }
+
+  // ⑨ 프레임/문서 정체
   try {
     if (/proxy\.localhost|\/zp\/p\//.test(document.baseURI)) add('baseURI', document.baseURI);
     if (/proxy\.localhost|\/zp\/p\//.test(document.referrer)) add('referrer', document.referrer);

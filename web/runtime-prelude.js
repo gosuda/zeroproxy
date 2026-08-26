@@ -535,6 +535,18 @@
       elementOuterHTML: Object.getOwnPropertyDescriptor(w.Element.prototype, 'outerHTML'),
       elementAttributes: Object.getOwnPropertyDescriptor(w.Element.prototype, 'attributes'),
       setAttributeNS: w.Element.prototype.setAttributeNS,
+      getAttributeNS: w.Element.prototype.getAttributeNS,
+      hasAttributeNS: w.Element.prototype.hasAttributeNS,
+      removeAttributeNS: w.Element.prototype.removeAttributeNS,
+      getAttributeNode: w.Element.prototype.getAttributeNode,
+      getAttributeNodeNS: w.Element.prototype.getAttributeNodeNS,
+      setAttributeNode: w.Element.prototype.setAttributeNode,
+      setAttributeNodeNS: w.Element.prototype.setAttributeNodeNS,
+      removeAttributeNode: w.Element.prototype.removeAttributeNode,
+      toggleAttribute: w.Element.prototype.toggleAttribute,
+      namedRemoveNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.removeNamedItem,
+      htmlDataset: w.HTMLElement && Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, 'dataset'),
+      svgDataset: w.SVGElement && Object.getOwnPropertyDescriptor(w.SVGElement.prototype, 'dataset'),
       namedSetNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItem,
       attrValue: w.Attr && Object.getOwnPropertyDescriptor(w.Attr.prototype, 'value'),
       matches: w.Element.prototype.matches,
@@ -4672,11 +4684,128 @@
     if (Native.hasAttribute && Native.hasAttribute.call(node, 'data-zp-internal')) return true;
     return node.localName === 'script' && isZeroProxyAssetURL(Native.getAttribute.call(node, 'src'));
   }
+  // 진짜 DOM 은 `el.attributes === el.attributes` 가 true 다. 접근마다 새
+  // 프록시를 만들면 그 자체가 후킹을 드러낸다(컬렉션 메서드 동일성과 같은 이유).
+  const namedNodeMapCache = new WeakMap();
   function filteredNamedNodeMap(raw) {
-    return filteredCollection(raw, attr => attr && !isZPAttrName(attr.name));
+    if (!raw) return raw;
+    const hit = namedNodeMapCache.get(raw);
+    if (hit) return hit;
+    const wrapped = filteredCollection(raw, attr => attr && !isZPAttrName(attr.name));
+    namedNodeMapCache.set(raw, wrapped);
+    return wrapped;
+  }
+  // ★`data-zp-*` 이름공간을 **규칙으로** 닫는다(2026-08-26).
+  //
+  // 예전에는 훅이 `getAttribute`/`hasAttribute`/`getAttributeNames`/
+  // `attributes` **네 개뿐**이었다. 손으로 고른 목록이라 나머지가 전부
+  // 뚫려 있었다 — 실측(example.com, 프록시):
+  //
+  //   읽기  el.attributes['data-zp-target-url']   → Attr (named getter 폴백)
+  //         'data-zp-target-url' in el.attributes → true
+  //         el.getAttributeNode / getAttributeNodeNS → Attr
+  //         el.getAttributeNS / hasAttributeNS       → 값 / true
+  //         el.dataset.zpTargetUrl                   → 값
+  //   쓰기  setAttribute / setAttributeNS / toggleAttribute /
+  //         setAttributeNode / attributes.setNamedItem / dataset → 전부 씀
+  //   삭제  removeAttribute / removeAttributeNS → 우리 스태시가 실제로 지워졌다
+  //
+  // 링크의 진짜 타깃 URL 이 그대로 새어 나오고, `data-zp-internal` 을 심으면
+  // 자기 노드를 컬렉션에서 지울 수 있었다(1건 → 0건) — 진짜 브라우저가
+  // 재현하지 못하는 **한 줄짜리 ZeroProxy 탐지기**다.
+  //
+  // 그래서 표면을 나열하지 않고 **한 규칙**으로 닫는다: 이름이 `data-zp-` 로
+  // 시작하면 읽기는 "없음", 쓰기·삭제는 no-op. 이 저장소가 srcset·엔티티·
+  // 컬렉션에서 이미 세 번 배운 것과 같은 교훈이다 — 목록으로 따라가는 자리는
+  // 결국 뚫린다.
+  function datasetKeyToAttrName(key) {
+    return 'data-' + String(key).replace(/[A-Z]/g, c => '-' + c.toLowerCase());
+  }
+  function isZPDatasetKey(key) {
+    // dataset 은 사이트가 초당 수백 번 읽는 자리다 — 우리 접두사가 아니면
+    // 문자열을 만들기 전에 두 글자 비교로 빠져나간다.
+    if (typeof key !== 'string' || key.charCodeAt(0) !== 122 || key.charCodeAt(1) !== 112) return false;
+    return isZPAttrName(datasetKeyToAttrName(key));
+  }
+  const datasetCache = new WeakMap();
+  function filteredDataset(raw) {
+    if (!raw) return raw;
+    const hit = datasetCache.get(raw);
+    if (hit) return hit;
+    const proxied = new Proxy(raw, {
+      get(t, prop) { if (isZPDatasetKey(prop)) return undefined; const v = t[prop]; return typeof v === 'function' ? v.bind(t) : v; },
+      has(t, prop) { return isZPDatasetKey(prop) ? false : prop in t; },
+      set(t, prop, v) { if (isZPDatasetKey(prop)) return true; t[prop] = v; return true; },
+      deleteProperty(t, prop) { if (isZPDatasetKey(prop)) return true; delete t[prop]; return true; },
+      ownKeys(t) { return Reflect.ownKeys(t).filter(k => !isZPDatasetKey(k)); },
+      getOwnPropertyDescriptor(t, prop) { return isZPDatasetKey(prop) ? undefined : Reflect.getOwnPropertyDescriptor(t, prop); },
+    });
+    datasetCache.set(raw, proxied);
+    return proxied;
+  }
+  function installZPAttrNamespace(w) {
+    const E = w.Element && w.Element.prototype;
+    if (!E) return;
+    // NS 변종은 `setAttributeNS` 훅이 이미 그러듯 **같은 뜻이면 같은 코드로**
+    // 보낸다 — 부분집합 훅이 다시 생기지 않게.
+    const plainNS = (ns, k, key) => (ns === null || ns === undefined || ns === '') && String(k) === key;
+    if (Native.getAttributeNS) define(E, 'getAttributeNS', function(ns, k) {
+      const key = String(k).toLowerCase();
+      if (isZPAttrName(key)) return null;
+      if (plainNS(ns, k, key)) return this.getAttribute(k);
+      return Native.getAttributeNS.call(this, ns, k);
+    });
+    if (Native.hasAttributeNS) define(E, 'hasAttributeNS', function(ns, k) {
+      const key = String(k).toLowerCase();
+      if (isZPAttrName(key)) return false;
+      if (plainNS(ns, k, key)) return this.hasAttribute(k);
+      return Native.hasAttributeNS.call(this, ns, k);
+    });
+    if (Native.removeAttributeNS) define(E, 'removeAttributeNS', function(ns, k) {
+      const key = String(k).toLowerCase();
+      if (isZPAttrName(key)) return undefined;
+      if (plainNS(ns, k, key)) return this.removeAttribute(k);
+      return Native.removeAttributeNS.call(this, ns, k);
+    });
+    if (Native.getAttributeNode) define(E, 'getAttributeNode', function(k) {
+      return isZPAttrName(k) ? null : Native.getAttributeNode.call(this, k);
+    });
+    if (Native.getAttributeNodeNS) define(E, 'getAttributeNodeNS', function(ns, k) {
+      return isZPAttrName(k) ? null : Native.getAttributeNodeNS.call(this, ns, k);
+    });
+    // Attr 노드를 통한 쓰기도 같은 규칙. 진짜 브라우저는 교체된 Attr 이나 null
+    // 을 돌려주므로 null 이 정직한 "없었다" 다.
+    if (Native.setAttributeNode) define(E, 'setAttributeNode', function(attr) {
+      return attr && isZPAttrName(attr.name) ? null : Native.setAttributeNode.call(this, attr);
+    });
+    if (Native.setAttributeNodeNS) define(E, 'setAttributeNodeNS', function(attr) {
+      return attr && isZPAttrName(attr.name) ? null : Native.setAttributeNodeNS.call(this, attr);
+    });
+    if (Native.removeAttributeNode) define(E, 'removeAttributeNode', function(attr) {
+      return attr && isZPAttrName(attr.name) ? attr : Native.removeAttributeNode.call(this, attr);
+    });
+    if (Native.toggleAttribute) define(E, 'toggleAttribute', function(k, force) {
+      // 읽기가 "없음" 이므로 토글 결과도 "없음"(false)이어야 한다.
+      return isZPAttrName(k) ? false : Native.toggleAttribute.call(this, k, force);
+    });
+    if (Native.namedRemoveNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'removeNamedItem', function(k) {
+      // 진짜 브라우저는 없는 이름에 NotFoundError 를 던진다 — 읽기와 같은
+      // 그림을 유지하려면 여기서도 던져야 한다.
+      if (isZPAttrName(k)) throw new w.DOMException("Failed to execute 'removeNamedItem' on 'NamedNodeMap': No item with name '" + String(k) + "' was found.", 'NotFoundError');
+      return Native.namedRemoveNamedItem.call(this, k);
+    });
+    if (Native.htmlDataset && Native.htmlDataset.get && w.HTMLElement) installDatasetHook(w.HTMLElement.prototype, Native.htmlDataset);
+    if (Native.svgDataset && Native.svgDataset.get && w.SVGElement) installDatasetHook(w.SVGElement.prototype, Native.svgDataset);
+  }
+  function installDatasetHook(proto, desc) {
+    try { Object.defineProperty(proto, 'dataset', { get() { return filteredDataset(desc.get.call(this)); }, enumerable: desc.enumerable, configurable: false }); } catch {}
   }
   function isIndexKey(prop) {
     return typeof prop !== 'symbol' && /^(?:0|[1-9]\d*)$/.test(String(prop));
+  }
+  // 컬렉션의 **항목**인가 (Node 이거나 Attr). 술어는 항목에만 뜻이 있다.
+  function isFilterableItem(value) {
+    return !!value && typeof value === 'object' && (value.nodeType !== undefined || value.ownerElement !== undefined);
   }
   function filteredCollection(raw, predicate) {
     // ★2026-08-24 — 예전에는 `nth`/`length` 가 **호출될 때마다 원본 전체를
@@ -4763,6 +4892,13 @@
           return inRaw(prop) ? Array.prototype[prop] : undefined;
         }
         const value = raw && raw[prop];
+        // ★이름 기반 접근(WebIDL named getter)도 **항목을 돌려준다** —
+        // `el.attributes['data-zp-target-url']` 이 Attr 를 그대로 내줬다.
+        // 인덱스 경로만 거르고 여기를 안 걸렀던 것이라, 값이 노드면 술어를
+        // 지나게 한다. 함수/스칼라 폴백은 그대로 둔다.
+        if (isFilterableItem(value)) {
+          try { return predicate(value) ? value : undefined; } catch { return undefined; }
+        }
         if (typeof value !== 'function') return value;
         // 바인딩한 것도 접근마다 같은 객체여야 한다.
         let bound = boundFns.get(prop);
@@ -4783,7 +4919,14 @@
         if (isIndexKey(prop)) return Number(prop) < length();
         // 인덱스가 아닌 이름은 진짜 컬렉션의 판정을 그대로 쓴다. `'item' in list`,
         // `'forEach' in list`, `Symbol.iterator in list` 가 전부 true 여야 한다.
-        try { return prop === 'length' || (!!raw && prop in raw); } catch { return prop === 'length'; }
+        try {
+          if (prop === 'length') return true;
+          if (!raw || !(prop in raw)) return false;
+          // `in` 도 named getter 를 본다 — 걸러 낸 항목이 여기서 true 로
+          // 되살아나면 이름 목록에 없는 것이 `in` 만 true 인 자기모순이 된다.
+          const value = raw[prop];
+          return isFilterableItem(value) ? !!predicate(value) : true;
+        } catch { return prop === 'length'; }
       },
       // 진짜 NodeList/NamedNodeMap 은 인덱스를 **열거 가능한 own 속성**으로 가진다.
       // 이 두 트랩이 없으면 `Object.keys(list)` 가 `[]` 라, 값이 있는데 키가 없는
@@ -5112,6 +5255,11 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      // ★`data-zp-*` 는 **닫힌 이름공간**이다 — 읽기가 이미 null 이므로 쓰기도
+      // 없던 일로 해야 앞뒤가 맞는다. 안 막았더니 페이지가 `data-zp-internal`
+      // 을 자기 노드에 심어 **자기 자신을 querySelectorAll 에서 지울 수** 있었다
+      // (실측: 1건 → 0건).
+      if (isZPAttrName(key)) return undefined;
       // `ping` 은 프로퍼티뿐 아니라 속성으로도 들어온다. 여기서도 삼킨다
       // (위 프로퍼티 훅과 같은 이유 — CSP 가 아니라 우리가 막아야 한다).
       if (localKey === 'ping' && (ln === 'a' || ln === 'area')) {
@@ -5234,7 +5382,7 @@
       }
       return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v);
     });
-    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { if (attr && String(attr.name || '').toLowerCase().startsWith('on')) attr.value = rewriteEventAttribute(String(attr.value || '')); return Native.namedSetNamedItem.call(this, attr); });
+    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { if (attr && isZPAttrName(attr.name)) return null; if (attr && String(attr.name || '').toLowerCase().startsWith('on')) attr.value = rewriteEventAttribute(String(attr.value || '')); return Native.namedSetNamedItem.call(this, attr); });
     if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get() { const masked = visibleIconAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; }, set(v) { Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? rewriteEventAttribute(String(v)) : v); }, configurable: false }); } catch {}
     define(w.Element.prototype, 'getAttribute', function(k) {
       const key = String(k).toLowerCase();
@@ -5278,6 +5426,10 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      // 없는 속성을 지우는 것은 진짜 브라우저에서도 no-op 이다. 읽기가 null 인
+      // 이상 여기서도 no-op 이어야 한다 — 안 막았을 때 페이지가 앵커의
+      // `data-zp-target-url` 스태시를 실제로 **지워** 버렸다(실측).
+      if (isZPAttrName(key)) return undefined;
       if (key === 'integrity' && isIntegrityBearing(this)) {
         Native.removeAttribute.call(this, integrityBackupAttr);
         return Native.removeAttribute.call(this, k);
@@ -5302,6 +5454,7 @@
       return names;
     });
     if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this)); }, configurable: false }); } catch {}
+    installZPAttrNamespace(w);
     installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
     installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     installScriptProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);

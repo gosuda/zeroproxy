@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-26 | membrane | **`data-zp-*` 은폐가 훅 4개에만 걸려 있었다 — NS 변종·Attr 노드·dataset·named getter 로 읽기/쓰기/삭제가 전부 뚫렸다. 규칙 하나로 닫음.** | rewriter.md#data-zp-이름공간 |
 | 2026-08-26 | SW / transport | **데드라인 실측: 침묵하는 상류는 504 로 잘리지만, h1 은 본문까지 한 예산이라 20초는 느린 전송을 죽였다 → 90초.** | sw-integration.md#transport-데드라인-실측 |
 | 2026-08-26 | SW / CSP | **정정: "스트리밍 응답은 CSP 헤더가 강제되지 않는다" 는 틀렸다 — 데몬이 CSP 를 꺼 둔 것이었다(csp_bypassed). meta 없이도 막힌다.** | sw-integration.md#csp-스트리밍-정정 |
 | 2026-08-26 | htmltx / CSP | **머리 없는 문서에서 프렐류드가 body 안으로 들어가 그 안의 CSP meta 가 무시됐다 — 앵커를 html 로 앞당겼다.** | rewriter.md#csp-meta-body |

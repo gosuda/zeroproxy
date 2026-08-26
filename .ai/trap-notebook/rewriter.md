@@ -2561,3 +2561,89 @@ get 트랩이 래퍼를 돌려주므로 targetOrigin 매핑은 그대로 산다.
 
 기존 가드가 "head 의 첫 자식" 을 못박고 있었는데, 이제 고정할 불변식은
 **"문서 요소 맨 앞, head 와 body 보다 먼저"** 다 — 그렇게 바꿨다(변이 물림).
+
+## <a id="data-zp-이름공간"></a>`data-zp-*` 는 닫힌 이름공간이 아니었다 — 훅 네 개 말고 전부 뚫려 있었다 (2026-08-26)
+
+멤브레인은 우리 표식(`data-zp-target-url`, `data-zp-internal`, …)을 페이지에서
+가린다. 그 은폐가 `getAttribute` / `hasAttribute` / `getAttributeNames` /
+`attributes` **네 자리에만** 걸려 있었다. **손으로 고른 목록**이라 나머지 속성
+표면은 읽기도 쓰기도 삭제도 전부 열려 있었다.
+
+### 실측 (example.com, 프록시, 고치기 전)
+
+`<a href>` 하나에 `data-zp-target-url="https://iana.org/domains/example"` 이
+달려 있는 상태에서:
+
+| 경로 | 결과 |
+|---|---|
+| `getAttribute` / `hasAttribute` / `getAttributeNames` / `outerHTML` | 가려짐 ✅ |
+| `el.attributes['data-zp-target-url']` | **Attr 반환** (WebIDL named getter) |
+| `'data-zp-target-url' in el.attributes` | **true** (이름 목록엔 없다 — 자기모순) |
+| `el.getAttributeNode` / `getAttributeNodeNS` | **Attr 반환** |
+| `el.getAttributeNS(null, …)` / `hasAttributeNS` | **값** / **true** |
+| `el.dataset.zpTargetUrl`, `Object.keys(el.dataset)` | **값** / **키 노출** |
+
+쓰기·삭제도 같았다. `setAttribute` / `setAttributeNS` / `toggleAttribute` /
+`setAttributeNode` / `attributes.setNamedItem` / `dataset` **여섯 경로 전부**가
+실제 DOM 에 박혔고(격리 월드로 확인), `removeAttribute` / `removeAttributeNS`
+로 **우리 스태시가 진짜 지워졌다**(앵커의 `data-zp-target-url` 이 사라졌다).
+
+두 가지가 나온다:
+
+1. **링크의 진짜 타깃 URL 이 그대로 샌다.** 은폐의 목적 자체가 무너진다.
+2. `el.dataset.zpInternal = '1'` 한 줄로 페이지가 **자기 노드를 자기
+   `querySelectorAll` 에서** 지울 수 있었다(실측 1건 → 0건). 진짜 브라우저는
+   절대 재현하지 못하는 신호 — **한 줄짜리 ZeroProxy 탐지기**다.
+
+### 왜 안 보였나
+
+훅 목록이 "우리가 쓰는 API" 를 따라 자랐기 때문이다. 우리는 `getAttribute` 를
+쓰니까 그것만 막았다. 적은 우리가 안 쓰는 API 를 쓴다. `setAttributeNS` 훅이
+2026-06 에 **같은 이유로** 한 번 고쳐졌는데(그때는 URL 리라이트가 부분집합이라
+원본 요청이 그대로 나갔다), 은폐 축에서는 그 교훈이 적용되지 않았다.
+
+### 고침 — 목록이 아니라 규칙
+
+이름이 `data-zp-` 로 시작하면 **읽기는 "없음", 쓰기·삭제는 no-op**. 한 술어
+(`isZPAttrName`)를 모든 표면이 공유한다:
+
+- `setAttribute` / `removeAttribute` 맨 앞에 가드 (NS 변종은 이미 null-ns 를
+  이쪽으로 위임하므로 자동으로 닫힌다)
+- `installZPAttrNamespace(w)` 가 `getAttributeNS`/`hasAttributeNS`/
+  `removeAttributeNS`/`getAttributeNode(NS)`/`setAttributeNode(NS)`/
+  `removeAttributeNode`/`toggleAttribute`/`NamedNodeMap.removeNamedItem` 을
+  한 자리에서 닫는다
+- `dataset` 은 필터 Proxy — 키를 속성 이름으로 되돌려 같은 술어에 물린다
+- `filteredCollection` 의 **이름 기반 폴백**(`raw[prop]`)과 `has` 트랩도 값이
+  항목(Node/Attr)이면 술어를 지나게 했다 — 인덱스 경로만 걸렀던 자리다
+
+부수적으로 두 동일성도 맞췄다: `el.attributes === el.attributes`,
+`el.dataset === el.dataset` (진짜 DOM 은 true. 접근마다 새 프록시를 만들면
+그것만으로 후킹이 드러난다).
+
+`dataset` 은 사이트가 초당 수백 번 읽는 자리라, 접두사가 아니면 문자열을 만들기
+전에 두 글자 비교로 빠져나가게 했다.
+
+### 고친 뒤
+
+읽기 12경로 전부 "없음", 쓰기 6경로 전부 no-op, 스태시 삭제 불가,
+자기 은폐 재현 안 됨(1건 → 1건). 회귀: static 155, cargo workspace 전부 통과,
+naver/wikipedia/github 렌더 정상(raw 0 / csp 0 / err 0), 탐지기 0건.
+
+### 남긴 가드
+
+`test/browser/fingerprint/detect.js` 에 `zp-namespace` 축을 넣었다 — 읽기 12개
+표면 × 알려진 표식 이름을 문서를 훑으며 찔러 보고, 쓰기 6개는 "쓰고 나서 내
+노드가 사라지는가" 로 판정한다. **양성 대조**: 격리 월드(멤브레인 밖)에서
+읽기 12/12 가 전부 발화한다. 정적 가드는 변이 11/11 가 문다.
+
+### 그 과정에서 밟은 것 둘
+
+- **`return` 뒤 줄바꿈은 ASI 로 `return;` 이다.** 탐지기(IIFE)를
+  `printf 'return ' && cat detect.js` 로 이어 붙여 돌렸더니 **죽은 코드**가 되어
+  세 사이트가 전부 `hits=0` 으로 나왔다. 0 을 보고 좋아하기 전에 **양성 대조**를
+  먼저 돌려야 한다. 지금은 `return (…)` 로 감싼다.
+- **축의 대상 노드를 하나만 고르면 축이 통째로 조용해진다.** 처음엔
+  `querySelector('a[href],img[src],script[src]')` 로 골랐는데 문서 순서상 맨 앞은
+  **우리 자산 `<script>`** 이고 거기엔 표식이 없다 — 격리 월드 양성 대조에서도
+  0 이 나왔다. 적이 하듯 문서를 훑는 것으로 바꿨다.
