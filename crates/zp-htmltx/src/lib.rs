@@ -748,11 +748,23 @@ fn script_settings(
         // 미니 문서가 실제로 그랬다: 인라인 스크립트는 `__ZP_EXEC_INLINE_REWRITTEN`
         // 호출로 바뀌는데 그 헬퍼를 정의할 프렐류드가 없어 흰 화면이 됐다.
         //
-        // 그래서 앵커를 단계적으로 둔다 — `head` → `body` → 첫 `script` 앞.
+        // 그래서 앵커를 단계적으로 둔다 — `html` → `head` → `body` → 첫 `script` 앞.
         // 마지막 것이 중요하다: 프렐류드가 **자기를 필요로 하는 첫 스크립트보다
         // 먼저** 들어간다는 보장이 거기서 나온다.
+        //
+        // 2026-08-26 — `html` 을 맨 앞에 넣었다. `head` 가 없는 문서에서는
+        // 프렐류드가 `<body>` 안으로 들어갔는데, 프렐류드에는 **CSP meta 가
+        // 들어 있고 body 안의 CSP meta 는 브라우저가 무시한다.** 스트리밍
+        // 응답에서는 CSP 헤더도 강제되지 않는다는 것을 이미 측정해 뒀으므로
+        // (그래서 meta 를 박기 시작했다) 그 조합에서는 정책이 **하나도**
+        // 안 걸린다.
+        //
+        // `<html>` 바로 뒤는 언제나 유효한 자리다: 파서는 "before head" 상태에서
+        // meta/script 를 만나면 head 를 암묵적으로 만들어 거기 넣는다. 뒤따라
+        // 오는 진짜 `<head>` 시작 태그는 무시되고 속성만 병합된다. 즉 head 가
+        // 있든 없든 결과는 "head 안" 으로 같고, 오히려 더 이르다.
         let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        for (selector, before_element) in [("head", false), ("body", false), ("script", true)] {
+        for (selector, before_element) in [("html", false), ("head", false), ("body", false), ("script", true)] {
             let prelude = prelude.clone();
             let injected = injected.clone();
             handlers.push(element!(selector, move |el| {
@@ -1699,13 +1711,19 @@ mod tests {
         let html = String::from_utf8(out).unwrap();
         // Injected exactly once.
         assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1: {html}");
-        // Right after the <head> start tag.
-        let head_open = html.find("<head").map(|i| html[i..].find('>').unwrap() + i + 1).unwrap();
-        assert!(
-            html[head_open..].trim_start().starts_with(prelude),
-            "prelude not first child of <head>: {}",
-            &html[head_open..head_open + 120.min(html.len() - head_open)]
-        );
+        // 2026-08-26 — 앵커가 `head` 에서 `html` 로 앞당겨졌다(머리 없는 문서에서
+        // 프렐류드가 body 안으로 들어가면 그 안의 CSP meta 가 무시되기 때문이다).
+        // 그래서 고정할 불변식은 "head 의 첫 자식" 이 아니라 **"문서 요소 맨 앞,
+        // head 와 body 보다 먼저"** 다. 파서는 `<html>` 직후의 meta/script 를
+        // 암묵적 head 에 넣으므로 결과는 같고 더 이르다.
+        let p_at = html.find(prelude).unwrap();
+        let html_open = html.to_lowercase().find("<html").expect("html start");
+        assert!(p_at > html_open, "prelude must be inside <html>: {html}");
+        for later in ["<head", "<body"] {
+            if let Some(i) = html.to_lowercase().find(later) {
+                assert!(p_at < i, "prelude must precede {later}: {html}");
+            }
+        }
         // The prelude's own `location.href` must remain raw (NOT wrapped in
         // __ZP_EXEC_INLINE_REWRITTEN / membrane calls) — it bypassed Pass 2.
         assert!(
@@ -1878,6 +1896,32 @@ mod tests {
                 .or_else(|| html.find("__ZP_EXEC_INLINE_REWRITTEN("))
                 .expect("inline script must go through an exec wrapper");
             assert!(p < call, "prelude must precede the call it defines: {html}");
+        }
+    }
+
+    #[test]
+    fn prelude_lands_in_head_not_body() {
+        // 프렐류드에는 **CSP meta 가 들어 있다.** body 안의 CSP meta 는 브라우저가
+        // 무시하고, 스트리밍 응답에서는 CSP 헤더도 강제되지 않는다(측정 완료) —
+        // 그 조합이면 정책이 하나도 안 걸린다. 그래서 head 가 없는 문서에서도
+        // `<body>` **앞**에 들어가야 한다.
+        let prelude = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\">";
+        for doc in [
+            "<html><body><p>x</p></body></html>",
+            "<html><head><title>t</title></head><body><p>x</p></body></html>",
+            "<!doctype html><html lang=\"en\"><body>x</body></html>",
+        ] {
+            let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+            let mut out: Vec<u8> = Vec::new();
+            out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+            let (tail, _d) = txn.end().unwrap();
+            out.extend_from_slice(&tail);
+            let html = String::from_utf8(out).unwrap();
+
+            assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc}: {html}");
+            let p = html.find(prelude).unwrap();
+            let body = html.to_lowercase().find("<body").expect("body start");
+            assert!(p < body, "프렐류드가 <body> 뒤로 갔다 — CSP meta 가 무시된다: {html}");
         }
     }
 

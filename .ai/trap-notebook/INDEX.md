@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-26 | htmltx / CSP | **머리 없는 문서에서 프렐류드가 body 안으로 들어가 그 안의 CSP meta 가 무시됐다 — 앵커를 html 로 앞당겼다.** | rewriter.md#csp-meta-body |
 | 2026-08-26 | 측정 도구 | **`taskweaver wait` 는 `--id` 없이 부르면 인자 오류로 0초 잔다(stderr 를 버려서 조용하다). 러너의 150초 대기가 전부 no-op 이었다.** | build-deploy.md#execjs-문맥 |
 | 2026-08-26 | SW / Referer | **meta 로만 선언한 참조 정책이 페이지 fetch 에만 안 먹었다(문서 정책은 Request 객체에 없다). 메시지로 알려 주는 건 첫 fetch 보다 느리다.** | sw-integration.md#meta-referrer |
 | 2026-08-26 | SW / Referer | **최상위 문서가 자기 자신을 Referer 로 보냈다. 고칠 때 함정: 내비게이션의 Referer 는 헤더에 없고 request.referrer 에 있다.** | sw-integration.md#자기-referer |

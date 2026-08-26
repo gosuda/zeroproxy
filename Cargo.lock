@@ -3711,6 +3711,7 @@ dependencies = [
  "swc_css_parser",
  "swc_css_visit",
  "url",
+ "zp-shared",
 ]
 
 [[package]]
@@ -3804,6 +3805,7 @@ dependencies = [
 name = "zp-shared"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror",
