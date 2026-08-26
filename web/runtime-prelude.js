@@ -352,6 +352,10 @@
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
   const workerBlobURLs = new Set();
+  // 페이지가 만든 blob URL 중 **스크립트가 될 수 있는** 것들. 워커 경로에서만
+  // 본다 — 만드는 순간에는 아무것도 하지 않는다(아래 createObjectURL 참고).
+  const scriptishBlobURLs = new Set();
+  const SCRIPTISH_BLOB_TYPE = /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i;
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
   const serviceWorkerFacades = new WeakMap();
@@ -853,6 +857,29 @@
   function isHTTPURL(raw) { try { const u = new URL(String(raw), baseURL); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; } }
   function hasExecutableURLScheme(raw) { return /^(?:javascript|data|vbscript):/i.test(String(raw).trim()); }
   function hasDangerousURLScheme(raw) { return /^(?:javascript|vbscript):/i.test(String(raw).trim()); }
+  // ★스킴이 http(s) 가 아닌 **절대** URL 은 그대로 돌려준다 (2026-08-26).
+  //
+  // URL 프로퍼티 게터가 값을 무조건 `targetURL()` 에 넣고 있었다. 그건
+  // http(s) 만 받으므로 `blob:` / `data:` / `about:` / `mailto:` / `tel:` 은
+  // 전부 **읽는 순간 TARGET_PROTOCOL_BLOCKED 를 던졌다**. 쓰기는 멀쩡히
+  // 저장되므로(속성엔 원본이 그대로 있다) 증상이 "쓰고 나서 읽으면 폭발" 이다.
+  //
+  // CNN 실측: Max 플레이어가 `video.src = URL.createObjectURL(mediaSource)`
+  // 뒤 `video.src` 를 읽다가 죽어 **비디오 세그먼트가 한 건도 안 나갔다**
+  // (대조군 115건 vs 프록시 0건). `a.href` 가 `mailto:` 에서 던지는 것도
+  // 같은 한 줄이다 — CNN 만의 문제가 아니다.
+  //
+  // 진짜 브라우저는 스킴이 있는 절대 URL 을 base 로 풀지 않고 파서 정규화만
+  // 해서 돌려준다. 상대 URL(`/x`)과 조각(`#x`)은 여전히 타깃 기준으로
+  // 풀어야 하므로 **스킴이 있을 때만** 이 경로를 탄다.
+  function nonHTTPAbsoluteURL(raw) {
+    const s = String(raw).trim();
+    const m = /^([a-z][a-z0-9+.\-]*):/i.exec(s);
+    if (!m) return null;
+    const scheme = m[1].toLowerCase();
+    if (scheme === 'http' || scheme === 'https') return null;
+    try { return new URL(s).href; } catch { return s; }
+  }
   // Single-parse equivalent of `isHTTPURL(v) && targetURL(v)` — the previous
   // pattern parsed the URL twice (once for scheme check, once for canonical
   // form). For long URLs (signed CDN, encoded query) `new URL()` is ~1300ns
@@ -2136,8 +2163,24 @@
     const ab = await req.clone().arrayBuffer();
     return ZP.bytesToBase64Url(new Uint8Array(ab));
   }
+  // blob: / data: 는 브라우저가 그 자리에서 푸는 **인라인 리소스**다. 타깃이
+  // 없으니 프록시로 보낼 것도 없고, 보내면 페이지가 넣은 내용 대신 우리 응답이
+  // 돌아온다 — 실측(2026-08-26): fetch(URL.createObjectURL(new Blob(["HELLO"])))
+  // 이 HELLO 대신 프록시 HTML 을 돌려줬다. 페이지가 자기가 만든 데이터를 다시
+  // 읽는 흔한 패턴(파일 미리보기, 워커 없는 파서, 캔버스 내보내기)이 통째로
+  // 깨진다. 둘 다 인라인이라 우회 통로가 되지 않는다.
+  function inlineSchemeFetchURL(input) {
+    try {
+      const href = typeof input === 'string' ? input
+        : (input && typeof input === 'object' && typeof input.url === 'string') ? input.url
+        : String(input);
+      return /^(?:blob|data):/i.test(String(href).trim()) ? String(href).trim() : null;
+    } catch { return null; }
+  }
   async function fetchThroughRuntime(input, init = {}) {
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
+    // 인라인 스킴은 브라우저에게 그대로 넘긴다 (위 주석 참고).
+    if (inlineSchemeFetchURL(input)) return Native.fetch(input, init);
     const target = requestTargetURL(input);
     try { zpTrace('fetch', target.slice(0, 180)); } catch {}
     const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
@@ -3442,6 +3485,9 @@
           // `document.createElement('a').href` returned the page URL where every
           // browser returns '' — and each component getter inherited it.
           if (raw === null || raw === undefined) return '';
+          // http(s) 가 아닌 절대 URL 은 브라우저처럼 그대로 (위 주석 참고).
+          const inert = nonHTTPAbsoluteURL(raw);
+          if (inert !== null) return inert;
           return targetURL(raw || virtualURL.href);
         },
         // Delegate the RAW value to the hooked Element.prototype.setAttribute.
@@ -6609,7 +6655,32 @@
     }
     if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { try { zpTrace('SharedWorker', String(url).slice(0,120)); } catch {} return new Native.SharedWorker(workerBootstrapURL(url), opts); });
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.reject(normalizedError('NotSupportedError')); });
-    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) { if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i.test(blob.type || '')) { const blocked = blockedWorkerBlob(); const raw = Native.createObjectURL(blocked); workerBlobURLs.add(raw); return raw; } return Native.createObjectURL(blob); });
+    // 갈아치우기는 **쓸 때** 한다 — 만들 때가 아니다 (2026-08-26).
+    //
+    // 예전에는 여기서 MIME 을 보고 스크립트성이면 그 자리에서 차단 blob 으로
+    // 바꿔 URL 을 돌려줬다. 그런데 new MediaSource() 에는 type 이 아예 없어서
+    // 빈 문자열이 되고 정규식의 ^$ 에 걸린다. 즉 **MSE 핸들이 HTML 한 조각으로
+    // 바뀌었고**, 붙이는 순간 DEMUXER_ERROR_COULD_NOT_OPEN 이 났다.
+    // CNN 실측: Max 플레이어가 통째로 죽어 비디오 세그먼트가 0건이었다
+    // (대조군 akm.*.media.max.com 115건 vs 프록시 0건). text/plain 이나 타입
+    // 없는 평범한 Blob 도 같이 죽었다 — fetch(blobURL) 이 페이지가 넣은 내용
+    // 대신 우리 HTML 을 돌려줬다.
+    //
+    // 보안 경계는 여기가 아니라 workerBootstrapURL 이다: 우리가 만든 것이
+    // 아닌 blob URL 을 워커로 쓰면 이미 거부한다. 그러니 만드는 것은 그대로
+    // 두고 **워커로 쓰려 할 때만** 차단 blob 으로 바꾼다 — 페이지가 보는
+    // 모양은 예전과 같고(생성자에서 안 던진다), 무관한 blob 은 산다.
+    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) {
+      const url = Native.createObjectURL(blob);
+      try { if (blob && SCRIPTISH_BLOB_TYPE.test(blob.type || '')) scriptishBlobURLs.add(String(url)); } catch {}
+      return url;
+    });
+    if (Native.revokeObjectURL) define(URL, 'revokeObjectURL', function(url) {
+      const key = String(url);
+      scriptishBlobURLs.delete(key);
+      workerBlobURLs.delete(key);
+      return Native.revokeObjectURL(url);
+    });
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
   }
   // D3: virtual SW facade. The original behavior was a hard
@@ -6695,8 +6766,16 @@
     const raw = String(url);
     const parsed = new URL(raw, virtualURL.href);
     if (parsed.protocol === 'blob:') {
-      if (!workerBlobURLs.has(parsed.href)) throw normalizedError('NotSupportedError');
-      return parsed.href;
+      // 우리가 이미 만들어 둔 차단 blob 이면 그대로 쓴다.
+      if (workerBlobURLs.has(parsed.href)) return parsed.href;
+      // 페이지가 만든 스크립트성 blob 을 워커로 쓰려는 **바로 그 순간**에만
+      // 갈아치운다. 리라이터를 안 거친 코드가 워커로 도는 일은 없다.
+      if (scriptishBlobURLs.has(parsed.href) && Native.createObjectURL) {
+        const raw = String(Native.createObjectURL(blockedWorkerBlob()));
+        workerBlobURLs.add(raw);
+        return raw;
+      }
+      throw normalizedError('NotSupportedError');
     }
     if (parsed.protocol === 'data:') return dataWorkerURL(parsed.href);
     const params = new URLSearchParams();

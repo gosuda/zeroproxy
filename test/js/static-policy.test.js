@@ -4766,3 +4766,128 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
     n => String(n || '').startsWith('data-zp-'));
   assert.equal(wrap(raw), wrap(raw), 'el.attributes 가 접근마다 새 객체다');
 });
+
+// ── http(s) 가 아닌 절대 URL 은 읽어도 던지면 안 된다 (2026-08-26) ─────
+//
+// URL 프로퍼티 게터가 값을 무조건 targetURL() 에 넣었다. targetURL 은 http(s)
+// 만 받으므로 blob:/data:/about:/mailto:/tel: 은 **읽는 순간** 예외였다.
+// 쓰기는 멀쩡히 저장되므로 증상이 "쓰고 나서 읽으면 폭발" 이다 — 실측
+// (프록시, CNN): video.src / a.href / img.src 전부 TARGET_PROTOCOL_BLOCKED.
+// Max 플레이어가 video.src = createObjectURL(MediaSource) 뒤 그 값을 읽다가
+// 죽어서 비디오 세그먼트가 0건이었다(대조군 115건).
+test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function nonHTTPAbsoluteURL(raw) {');
+  assert.ok(from > 0, 'nonHTTPAbsoluteURL 이 없다');
+  const to = rt.indexOf('\n  }', from) + 4;
+  const fn = new Function(rt.slice(from, to) + '\nreturn nonHTTPAbsoluteURL;')();
+
+  // ① 스킴이 있는 비-HTTP 는 그대로(파서 정규화만) 돌려준다.
+  for (const v of ['blob:http://proxy.localhost:18080/abc-123', 'data:video/mp4;base64,AAAA',
+    'about:blank', 'mailto:a@b.c', 'tel:+1', 'javascript:void 0', 'ws://x/y']) {
+    const got = fn(v);
+    assert.ok(got !== null, v + ' 를 게터가 여전히 targetURL 로 보낸다 — 읽으면 던진다');
+    assert.equal(typeof got, 'string');
+  }
+  assert.equal(fn('mailto:a@b.c'), 'mailto:a@b.c');
+  assert.equal(fn('about:blank'), 'about:blank');
+  assert.equal(fn('blob:http://p/1'), 'blob:http://p/1');
+
+  // ② http(s) 와 상대 URL·조각은 **반드시** 기존 경로로 가야 한다 —
+  //    그래야 타깃 기준 해석과 디프록시가 유지된다.
+  for (const v of ['https://x/y', 'HTTP://x/y', '//x/y', '/rel', 'rel', '#frag', '', '?q=1']) {
+    assert.equal(fn(v), null, v + ' 가 통과 경로로 새면 리라이트를 건너뛴다');
+  }
+
+  // ③ 게터가 실제로 이 규칙을 쓰는지 — 헬퍼만 있고 안 부르면 소용없다.
+  const g = rt.slice(rt.indexOf('    function installURLProp(proto, prop) {'));
+  const body = g.slice(0, g.indexOf('\n    }'));
+  assert.ok(body.includes('nonHTTPAbsoluteURL(raw)'), 'URL 프로퍼티 게터가 규칙을 안 쓴다');
+  assert.ok(body.indexOf('nonHTTPAbsoluteURL(raw)') < body.indexOf('targetURL(raw'),
+    '규칙이 targetURL 뒤에 있으면 이미 던진 뒤다');
+});
+
+// ── blob 갈아치우기는 만들 때가 아니라 쓸 때 (2026-08-26) ──────────────
+//
+// createObjectURL 이 MIME 을 보고 스크립트성이면 그 자리에서 차단 blob 으로
+// 바꿔치기했다. new MediaSource() 에는 type 이 없어 빈 문자열이 되고 정규식의
+// ^$ 에 걸린다 — MSE 핸들이 HTML 조각으로 바뀌어 붙이는 순간
+// DEMUXER_ERROR_COULD_NOT_OPEN. CNN 의 Max 플레이어가 통째로 죽어 비디오
+// 세그먼트가 0건이었다(대조군 115건). 보안 경계는 workerBootstrapURL 이므로
+// 만드는 것은 그대로 두고 워커로 쓸 때만 바꾼다.
+test('blob URL 은 만들 때 갈아치우지 않고, 워커로 쓸 때만 막는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+
+  // ① 생성 훅은 원본 URL 을 그대로 돌려줘야 한다.
+  const ci = rt.indexOf("define(URL, 'createObjectURL'");
+  assert.ok(ci > 0, 'createObjectURL 훅이 없다');
+  const create = rt.slice(ci, rt.indexOf("\n    });", ci));
+  assert.ok(!create.includes('blockedWorkerBlob'),
+    'createObjectURL 이 만드는 시점에 갈아치운다 — MediaSource 가 HTML 로 바뀐다');
+  assert.ok(create.includes('Native.createObjectURL(blob)'), '원본 blob 의 URL 을 안 만든다');
+  assert.ok(create.includes('scriptishBlobURLs.add'), '스크립트성 blob URL 을 기억하지 않는다');
+
+  // ② 워커 경로가 **보안 경계**다. 셋 다 지켜져야 한다:
+  //    우리 차단 blob 은 통과 / 페이지의 스크립트성 blob 은 차단본으로 교체 /
+  //    그 외 blob 은 여전히 거부.
+  const wi = rt.indexOf('  function workerBootstrapURL(');
+  assert.ok(wi > 0, 'workerBootstrapURL 이 없다');
+  const worker = rt.slice(wi, rt.indexOf('\n  }', wi));
+  const blob = worker.slice(worker.indexOf("parsed.protocol === 'blob:'"));
+  assert.ok(blob.includes('workerBlobURLs.has(parsed.href)'), '우리 차단 blob 통과 경로가 없다');
+  assert.ok(blob.includes('scriptishBlobURLs.has(parsed.href)'),
+    '페이지가 만든 스크립트성 blob 을 워커로 쓸 때 안 막는다 — 리라이터를 건너뛴 코드가 돈다');
+  assert.ok(blob.includes('blockedWorkerBlob()'), '차단 blob 으로 교체하지 않는다');
+  assert.ok(/throw normalizedError\(.NotSupportedError.\)/.test(blob),
+    '알 수 없는 blob 을 워커로 쓰는 것을 여전히 거부해야 한다');
+
+  // ③ revoke 는 두 집합을 다 비워야 한다 — 안 그러면 재사용된 URL 이
+  //    옛 판정을 물려받는다.
+  const ri = rt.indexOf("define(URL, 'revokeObjectURL'");
+  assert.ok(ri > 0, 'revokeObjectURL 훅이 없다');
+  const revoke = rt.slice(ri, rt.indexOf("\n    });", ri));
+  assert.ok(revoke.includes('scriptishBlobURLs.delete'), 'revoke 가 스크립트성 표시를 안 지운다');
+  assert.ok(revoke.includes('workerBlobURLs.delete'), 'revoke 가 차단 표시를 안 지운다');
+
+  // ④ 규칙 자체는 그대로여야 한다 — 타입 없는 blob 도 스크립트가 될 수 있다.
+  const reStr = /const SCRIPTISH_BLOB_TYPE = (\/.+\/i);/.exec(rt);
+  assert.ok(reStr, 'SCRIPTISH_BLOB_TYPE 규칙이 없다');
+  const re = new Function('return ' + reStr[1])();
+  for (const t of ['', 'text/javascript', 'application/ecmascript', 'text/plain', 'application/octet-stream']) {
+    assert.equal(re.test(t), true, JSON.stringify(t) + ' 는 스크립트성으로 봐야 한다');
+  }
+  for (const t of ['video/mp4', 'image/png', 'application/json']) {
+    assert.equal(re.test(t), false, t + ' 까지 스크립트성으로 보면 과잉이다');
+  }
+});
+
+// ── fetch 는 blob:/data: 를 프록시로 보내면 안 된다 (2026-08-26) ───────
+//
+// 인라인 리소스는 브라우저가 그 자리에서 푼다 — 타깃이 없다. 프록시로
+// 보냈더니 fetch(URL.createObjectURL(new Blob(["HELLO"]))) 이 HELLO 대신
+// 우리 HTML 을 돌려줬다(실측). 파일 미리보기·캔버스 내보내기처럼 페이지가
+// 자기가 만든 데이터를 다시 읽는 패턴이 통째로 깨진다.
+test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function inlineSchemeFetchURL(input) {');
+  assert.ok(from > 0, 'inlineSchemeFetchURL 이 없다');
+  const fn = new Function(rt.slice(from, rt.indexOf('\n  }', from) + 4) + '\nreturn inlineSchemeFetchURL;')();
+
+  for (const v of ['blob:http://p/1', 'data:text/plain,x', 'BLOB:http://p/2', '  data:x,y  ']) {
+    assert.ok(fn(v), v + ' 를 프록시로 보내고 있다');
+  }
+  for (const v of ['https://x/y', '/rel', 'about:blank', 'mailto:a@b']) {
+    assert.equal(fn(v), null, v + ' 까지 인라인으로 보면 프록시를 건너뛴다');
+  }
+  // Request 객체로 와도 알아봐야 한다.
+  assert.ok(fn({ url: 'blob:http://p/3' }), 'Request 형태의 blob 을 놓친다');
+  assert.equal(fn({ url: 'https://x/y' }), null);
+
+  // 실제 fetch 경로가 이 규칙을 **타깃 계산 전에** 써야 한다.
+  const fi = rt.indexOf('  async function fetchThroughRuntime(input, init = {}) {');
+  const body = rt.slice(fi, rt.indexOf('\n  }', fi));
+  const guard = body.indexOf('inlineSchemeFetchURL(input)');
+  const target = body.indexOf('requestTargetURL(input)');
+  assert.ok(guard > 0, 'fetch 가 인라인 규칙을 안 쓴다');
+  assert.ok(guard < target, '규칙이 타깃 계산 뒤에 있으면 이미 프록시로 갔다');
+});

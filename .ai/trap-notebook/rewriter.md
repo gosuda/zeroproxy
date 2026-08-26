@@ -2647,3 +2647,92 @@ naver/wikipedia/github 렌더 정상(raw 0 / csp 0 / err 0), 탐지기 0건.
   `querySelector('a[href],img[src],script[src]')` 로 골랐는데 문서 순서상 맨 앞은
   **우리 자산 `<script>`** 이고 거기엔 표식이 없다 — 격리 월드 양성 대조에서도
   0 이 나왔다. 적이 하듯 문서를 훑는 것으로 바꿨다.
+
+## <a id="비-http-스킴-세-겹"></a>비-HTTP 스킴이 세 군데에서 죽었다 — CNN 비디오가 통째로 안 돌던 이유 (2026-08-26)
+
+프레임 수 차이를 쫓다가 나온 것. 시작은 "프록시 25~29 vs 대조군 33~34" 였는데
+**그 전제부터 틀렸다**(아래 정정). 진짜 차이는 개수가 아니라 네트워크였다:
+대조군 534 URL vs 프록시 309. 호스트로 쪼개니 한 덩어리가 통째로 없었다.
+
+| 호스트 | 대조군 | 프록시 |
+|---|---|---|
+| `akm.apac-free.prd.media.max.com` | 66 | **0** |
+| `akm.live.cnn.asia.prd.media.max.com` | 49 | **0** |
+| `bea4.v.fwmrm.net` (FreeWheel 비디오 광고) | 8 | **0** |
+
+CNN 홈의 Max 플레이어가 **세그먼트를 한 건도 안 받고 있었다.** 원인은 세 겹이고
+전부 같은 부류다 — **"모든 URL 은 http(s) 타깃" 이라고 가정한 자리들**.
+
+### ① URL 프로퍼티 게터가 읽는 순간 던졌다
+
+`installURLProp` 의 게터가 값을 무조건 `targetURL()` 에 넣었다. `targetURL` 은
+http(s) 만 받으므로 `blob:` / `data:` / `about:` / `mailto:` / `tel:` 은 **읽기만
+해도 TARGET_PROTOCOL_BLOCKED** 였다. 쓰기는 멀쩡히 저장되니 증상이 "쓰고 나서
+읽으면 폭발" 이라 더 안 보였다. `<video>` 뿐 아니라 `<a>`·`<img>` 전부.
+
+`a.href` 가 `mailto:` 에서 던지는 건 CNN 만의 문제가 아니다.
+
+고침: 스킴이 있는 **절대** URL 이 http(s) 가 아니면 브라우저처럼 그대로 돌려준다
+(`nonHTTPAbsoluteURL`). 상대 URL 과 `#조각` 은 기존대로 타깃 기준으로 푼다.
+
+### ② createObjectURL 이 만드는 시점에 갈아치웠다
+
+```js
+if (blob && /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i
+      .test(blob.type || '')) { …차단 blob 으로 교체… }
+```
+
+목적은 `new Worker(URL.createObjectURL(jsBlob))` 로 리라이터를 우회하는 것을
+막는 것이었다. 그런데 **`new MediaSource()` 에는 `.type` 이 아예 없다** → `''`
+→ `^$` 에 걸린다. 즉 **MSE 핸들이 HTML 한 조각으로 바뀌었고**, 붙이는 순간
+`DEMUXER_ERROR_COULD_NOT_OPEN` 이 났다. `text/plain` 이나 타입 없는 평범한
+Blob 도 같이 죽었다.
+
+**보안 경계는 거기가 아니다** — `workerBootstrapURL` 이 우리 것이 아닌 `blob:`
+을 워커로 쓰는 것을 이미 거부한다. 그러니 만드는 것은 그대로 두고 **워커로
+쓰려는 순간에만** 차단 blob 으로 바꾼다. 페이지가 보는 모양은 예전과 같고
+(생성자에서 안 던진다) 무관한 blob 은 산다.
+
+### ③ fetch 가 blob:/data: 를 프록시로 보냈다
+
+`fetch(URL.createObjectURL(new Blob(['HELLO-ZP'])))` 가 **HELLO-ZP 대신 우리
+HTML** 을 돌려줬다. 인라인 리소스는 브라우저가 그 자리에서 푸는 것이라 보낼
+타깃이 없다. 파일 미리보기·캔버스 내보내기처럼 페이지가 자기가 만든 데이터를
+다시 읽는 패턴이 통째로 깨진다. 타깃 계산 **전에** 인라인 스킴이면
+`Native.fetch` 로 넘긴다.
+
+### 실측
+
+| | 고치기 전 | ① 후 | ①②③ 후 | 대조군 |
+|---|---|---|---|---|
+| 비디오 CDN 세그먼트 요청 | **1** | 1 | **48** | 119 |
+| `<video>` 에러 | 1건(DEMUXER) | 1건 | **0건** | 0건 |
+| 총 URL | 309 | 389 | 362 | 534 |
+| `fetch(plainBlobURL)` | 우리 HTML | 우리 HTML | **HELLO-ZP** | HELLO-ZP |
+
+세그먼트가 아직 대조군의 절반이다(48 vs 119). 대조군은 `akm.*.media.max.com`
+(라이브), 프록시는 `cf.apac-free.prd.media.cnn.com`(VOD)로 **CDN 자체가 다르다**
+— 아직 안 쫓았다.
+
+회귀: static 158, cargo workspace 전부 통과, naver/wikipedia/github 렌더 정상
+(raw 0 / err 0), 탐지기 0건. 변이는 ①3/3 ②5/5 ③3/3.
+
+### 이 판정을 어떻게 세웠나 (도구 순서)
+
+1. **월드 교차** — 같은 문서에서 격리 월드(훅 없음)는 `sourceopen`, 메인 월드는
+   죽었다. 한 번에 "우리 훅이다" 가 확정된다. 문서·오리진·브라우저가 전부 같으니
+   다른 변수가 없다.
+2. **만들기/붙이기 분리** — 메인에서 만든 MediaSource 를 격리에서 붙여도 죽었다
+   → 붙이는 쪽이 아니라 **만드는 쪽**.
+3. **"이건 원래 안 되는 게 정상" 을 오라클로** — MSE blob URL 은 원래 `fetch`
+   되지 않는다. 그게 **fetch 되는** 순간 누가 Blob 으로 바꿔친 것이 확정된다.
+
+### 정정 — 프레임 갭은 없었다
+
+앞선 보고에서 "프록시 25~29 vs 대조군 33~34" 라고 했는데, 그건 **짝을 안 맞춘**
+비교였다. 같은 대기 시간으로 3+3 쌍을 재니 대조군 25~26, 프록시 25~27 로
+**총 프레임은 같다.** 남는 건 구성 차이다: 대조군엔 OMID(가시성 검증) 프레임이
+매번 3~4개 있고 프록시엔 0인데, 그건 프레임이 막혀서가 아니라 **광고 자체가
+다르기 때문**이다 — 대조군은 매번 DV360(`dbm/ad` + `dv3.js` + IAS 30~46건),
+프록시는 매번 2mdn express_html + IAS 5건. 3자 쿠키/식별자가 없으니 경매 결과가
+갈린다. 프록시 쪽 쿠키싱크 프레임은 오히려 **더 많다**(18~20 vs 15~16).

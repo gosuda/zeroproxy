@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-26 | membrane | **비-HTTP 스킴이 세 군데서 죽었다: URL 게터가 읽자마자 throw / createObjectURL 이 MediaSource 를 HTML 로 교체 / fetch 가 blob 을 프록시로. CNN 비디오 세그먼트 1→48.** | rewriter.md#비-http-스킴-세-겹 |
 | 2026-08-26 | real-site-compat | **CNN 2차 정지는 9회/4변종 재현 실패. 유력 후보(clients.get 교착)는 변이로 반증 — 서명이 "로드 미완" 이지 "먹통" 이 아니다. 남은 차이는 프레임 25~29 vs 33.** | real-site-compat.md#cnn-2차정지-재현불가 |
 | 2026-08-26 | membrane | **`data-zp-*` 은폐가 훅 4개에만 걸려 있었다 — NS 변종·Attr 노드·dataset·named getter 로 읽기/쓰기/삭제가 전부 뚫렸다. 규칙 하나로 닫음.** | rewriter.md#data-zp-이름공간 |
 | 2026-08-26 | SW / transport | **데드라인 실측: 침묵하는 상류는 504 로 잘리지만, h1 은 본문까지 한 예산이라 20초는 느린 전송을 죽였다 → 90초.** | sw-integration.md#transport-데드라인-실측 |
