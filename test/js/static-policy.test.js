@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 test('service worker has no unclassified native fetch fallback', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.equal(/return\s+fetch\s*\(\s*event\.request\s*\)/.test(sw), false);
   // handleFetch's result is respondWith'd (it may be held in a local first so
   // the same promise can also anchor event.waitUntil — see the streaming
@@ -18,7 +18,7 @@ test('service worker has no unclassified native fetch fallback', () => {
 // the page most of the HTML — the document freezes mid-parse at zero CPU.
 // This was the real cause of the long-misattributed "NAVER 60s anti-bot" stall.
 test('SW keeps itself alive until the streamed body is fully delivered', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /event\.waitUntil\(/, 'fetch listener must anchor a waitUntil');
   assert.match(sw, /__zpBodyDone/, 'streaming response must expose a body-completion promise');
   // The promise must resolve on every terminal path, or waitUntil would pin
@@ -35,7 +35,7 @@ test('SW keeps itself alive until the streamed body is fully delivered', () => {
 // 이야기가 없었고 테스트도 잡지 못했다 — NAVER 의 withheld END_STREAM
 // (~60s) 대응이 그동안 무력화돼 있었다.
 test('document streaming is not hard-disabled by a leftover debug flag', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // 주석은 걸러낸다 — 주석에 남은 문자열이 검사를 통과시켜 준 전례가 있다.
   const code = sw.split(/\r?\n/).filter(l => !/^\s*\/\//.test(l)).join('\n');
   const m = code.match(/const\s+kernelStreamed\s*=([^;]*);/);
@@ -57,7 +57,7 @@ const RE_ALPS_EMIT = /if cx\.data\.alps_negotiated \{[\s\S]*?HandshakePayload::E
 // 예전 버전은 tls.rs 에서 문자열만 찾았는데, tls.rs 는 ALPS 를 한 번도 구현한
 // 적이 없는 파일이라 되살릴 때 통과해 버릴 수 있었다.
 test('ClientHello does not advertise TLS extensions we cannot honour', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const m = sw.match(/const CAPTURED_FINGERPRINT_B64 = '([^']*)';/);
   assert.ok(m, 'captured fingerprint must exist');
   const fp = JSON.parse(Buffer.from(m[1], 'base64').toString('utf8'));
@@ -72,7 +72,7 @@ test('ClientHello does not advertise TLS extensions we cannot honour', () => {
 });
 
 test('runtime avoids stale escape gaps and forbidden harness markers', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.includes('installToStringMasking'));
   assert.equal(rt.includes('Object.getOwnPropertyDescriptor ='), false);
   assert.equal(rt.includes('window.__zp'), false);
@@ -81,7 +81,7 @@ test('runtime avoids stale escape gaps and forbidden harness markers', () => {
 });
 
 test('runtime reads boot config from inert JSON script', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.includes("getElementById('__zp-boot')"));
   assert.ok(rt.includes('JSON.parse(el.textContent'));
   assert.ok(rt.includes('type="application/json"'));
@@ -89,7 +89,7 @@ test('runtime reads boot config from inert JSON script', () => {
 });
 
 test('runtime installs required escape-vector hooks', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   for (const needle of [
     "document.addEventListener('click'",
     "document.addEventListener('submit'",
@@ -167,7 +167,7 @@ test('runtime installs required escape-vector hooks', () => {
 });
 
 test('service worker uses Rust kernel transport and cookie bridge', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Step 13: HTTP transport is Rust kernelFetch only; legacy Go __zp_kernel_init/wasm_exec.js removed.
   assert.ok(sw.includes('self.kernelFetch'), 'service worker must expose Rust kernelFetch transport');
   assert.ok(sw.includes('self.kernelStream'), 'service worker must expose Rust kernelStream for WebSocket bridging');
@@ -218,14 +218,14 @@ test('Go WASM kernel is fully removed from the tree (Step 13)', () => {
 });
 
 test('service worker response wrappers force nosniff', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /h\.set\('X-Content-Type-Options', 'nosniff'\)/);
   assert.match(sw, /'X-Content-Type-Options': 'nosniff'/);
 });
 
 test('phase 3 script rewriting pipeline is fail-closed', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const core = fs.readFileSync('web/zp-core.js', 'utf8');
   const server = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   const csp = fs.readFileSync('internal/headers/csp.go', 'utf8');
@@ -313,7 +313,7 @@ test('phase 3 script rewriting pipeline is fail-closed', () => {
 //      the success branch only)
 //   4. entry / byte caps exist and LRU eviction is in place
 test('service worker rewrite cache enforces strict invariants', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.ok(sw.includes('REWRITE_CACHE_MAX_ENTRIES'), 'entry cap constant missing');
   assert.ok(sw.includes('REWRITE_CACHE_MAX_BYTES'), 'byte cap constant missing');
   assert.ok(sw.includes('rewriteCacheGet'), 'cache get helper missing');
@@ -342,7 +342,7 @@ test('service worker rewrite cache enforces strict invariants', () => {
 // inline scripts execute UN-rewritten — exactly the strict-mode escape
 // the "no-escape jail" design forbids.
 test('transformDocumentResponse fails closed on malformed HTML (no raw passthrough)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Success tracking exists.
   assert.ok(sw.includes('transformOk'), 'transformOk success flag missing');
   assert.ok(sw.includes('transformFailure'), 'transformFailure diagnostic field missing');
@@ -383,7 +383,7 @@ test('synchronous XHR only ever targets the same-origin relay (never a target UR
       `${file} must not use synchronous XHR at all`);
   }
 
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const re = /\.open\([^)]*,\s*false\s*\)/g;
   let m, found = 0;
   while ((m = re.exec(rt)) !== null) {
@@ -408,7 +408,7 @@ test('synchronous XHR only ever targets the same-origin relay (never a target UR
 // `with(__zp_scope)` proxy instead would be an escape — its `get` falls through
 // to `target[prop]` and hands out raw natives.
 test('destructuring write sink routes writes to the membrane and exposes no reads', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('const globalWriteSink = new Proxy(');
   assert.ok(start > 0, 'globalWriteSink missing');
   const body = rt.slice(start, start + 900);
@@ -437,7 +437,7 @@ test('destructuring write sink routes writes to the membrane and exposes no read
 // hidden until NAVER's ad SDK could load and write scripts into its friendly
 // iframes. The shared `pageRewriteHooks` holder is the seam.
 test('child-realm executors reach the page rewriter only through pageRewriteHooks', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /let pageRewriteHooks = null;/, 'pageRewriteHooks holder missing');
   assert.match(rt, /pageRewriteHooks = \{\s*rewrite: rewriteWithPageRewriter,\s*decodeEntities: decodeInlineEntities\s*\}/,
     'installPhase2Membrane must publish its rewriter helpers');
@@ -493,7 +493,7 @@ test('child-realm executors reach the page rewriter only through pageRewriteHook
 // Guarded — but ONLY while a deferred script runs, because a genuinely late
 // `document.write` is supposed to wipe the document in a real browser too.
 test('closed-document document.write appends instead of wiping, only when deferred', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /let deferredScriptDepth = 0;/, 'deferred-script depth counter missing');
   assert.match(rt, /const childRunDeferred = work => \{\s*deferredScriptDepth\+\+;/,
     'queue must mark deferred runs');
@@ -523,7 +523,7 @@ test('closed-document document.write appends instead of wiping, only when deferr
 // Answered locally and empty, because icon links are deliberately stripped so
 // the tab cannot identify the site: asking the target would undo that.
 test('client-less /favicon.ico is answered locally, never from the target', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /if \(url\.pathname === '\/favicon\.ico' && !ctx\) return \{ kind: 'BLANK_ICON' \};/,
     'client-less favicon must be claimed before the UNKNOWN fallthrough');
   assert.match(sw, /case 'BLANK_ICON': return new Response\(null, \{ status: 204/,
@@ -546,7 +546,7 @@ test('client-less /favicon.ico is answered locally, never from the target', () =
 // resource timing is a standard idiom, and it handed page code our origin and
 // internal API paths.
 test('performance entry names are de-proxied back to target URLs', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // 되돌리기 규칙 자체는 아래 '프록시 URL 되돌리기는 한 벌이다' 가 실행으로 잡는다.
   assert.match(rt, /function deproxyURL\(raw, opts\)/, '되돌리기 구현이 없다');
   // Recovers the target from our own proxy URL shapes.
@@ -582,7 +582,7 @@ test('performance entry names are de-proxied back to target URLs', () => {
 // from another → ReferenceError storm + broken search-option widgets.
 // Indirect eval is the only executor with global-scope semantics.
 test('inline classic scripts execute in global scope, not a Function scope', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // Native eval is captured before the scoped `dynamicEval` replaces it.
   assert.match(rt, /globalEval:\s*w\.eval/, 'native eval must be captured for global-scope execution');
   assert.match(rt, /function execGlobalScript\(code\)/, 'execGlobalScript helper missing');
@@ -620,7 +620,7 @@ test('inline classic scripts execute in global scope, not a Function scope', () 
 // navigation target. NAVER's search box navigated to `<proxy>/zp/?query=...`
 // and died with TARGET_CONNECT_FAILED against proxy.localhost.
 test('form submit resolves target from urlMeta, not the rewritten action attribute', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /function submissionActionURL\(form, submitter\)/,
     'submissionActionURL helper missing');
   // The GET/POST submit path must go through the helper, not a raw getAttribute.
@@ -650,7 +650,7 @@ test('form submit resolves target from urlMeta, not the rewritten action attribu
 // server-supplied `retry:` interval applied. Wrong Content-Type / non-2xx
 // is a hard fail (no reconnect). HTTP 204 closes cleanly.
 test('EventSource wrapper enforces SSE auto-reconnect + Last-Event-ID fidelity', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // Reconnect plumbing exists.
   assert.ok(rt.includes('scheduleReconnect'), 'scheduleReconnect helper missing');
   assert.ok(rt.includes('DEFAULT_RECONNECT_MS'), 'default reconnect interval constant missing');
@@ -683,8 +683,8 @@ test('EventSource wrapper enforces SSE auto-reconnect + Last-Event-ID fidelity',
 //   5. fail() preserves a user-requested close code instead of always
 //      clobbering with 1006
 test('WebSocket wrapper enforces RFC 6455 close + protocol fidelity', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // 1. Close code/reason validation helpers exist and are invoked.
   assert.ok(rt.includes('validateCloseCode'), 'validateCloseCode helper missing');
   assert.ok(rt.includes('validateReason'), 'validateReason helper missing');
@@ -775,7 +775,7 @@ test('fixedCSP options.challengeCompat adds CF host only to four directives', ()
 // proxied page sees it, and the request-side X-ZP-Arm-Challenge-Compat header
 // must be sent when the tab is armed.
 test('service worker plumbs challenge-compat arm + strips response marker', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /tab\.challengeCompat/, 'SW must persist per-tab challengeCompat flag');
   assert.match(sw, /createTab\(.*challengeCompat\)/, 'createTab must accept challengeCompat from ZP_OPEN_SHARE');
   assert.match(sw, /X-ZP-Arm-Challenge-Compat/, 'SW must emit per-tab arm request header');
@@ -937,7 +937,7 @@ test('htmltx exposes a streaming HtmlTxn { write, end } and exports it to JS', (
 // respondWith on a chrome-extension: request returns Response.error() and
 // breaks browser extensions' injected-script channels (observed on NAVER).
 test('SW fetch handler passes through non-http(s) schemes (extension channels intact)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // The scheme guard must sit in the fetch listener, before respondWith.
   assert.match(
     sw,
@@ -951,7 +951,7 @@ test('SW fetch handler passes through non-http(s) schemes (extension channels in
 // ZPBundle.HtmlTxn for a progressive render, with a buffered fallback that
 // preserves fail-closed + the post-redirect CSS host rewrite.
 test('SW streams the document through HtmlTxn behind the X-ZP-Stream gate, with buffered fallback', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // The kernel marker gates streaming.
   assert.match(sw, /X-ZP-Stream/, 'SW must consult the kernel X-ZP-Stream marker');
   assert.match(sw, /function streamDocumentResponse/, 'streaming document helper must exist');
@@ -989,7 +989,7 @@ test('decode detects DEFLATE end (footer-independent) and inflates footer-less g
 // the virtualized value while the real DOM has no sandbox attribute (membrane
 // already isolates the iframe).
 test('runtime virtualizes dangerous sandbox attribute combinations on iframes', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /const\s+frameSandboxMeta\s*=\s*new\s+WeakMap\(\)/);
   assert.match(rt, /function\s+frameSandboxAllowsEscape\(/);
   assert.match(rt, /tokens\.has\('allow-scripts'\)\s*&&\s*tokens\.has\('allow-same-origin'\)/);
@@ -1005,7 +1005,7 @@ test('runtime virtualizes dangerous sandbox attribute combinations on iframes', 
 });
 
 test('D7: per-target-origin storage isolation surfaces', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // localStorage/sessionStorage wrap native storage with origin-hashed prefix.
   assert.match(rt, /function prefixedStorage\(native, prefix\)/, 'prefixedStorage helper missing');
   assert.match(rt, /localPrefix = 'zp:l:'/, 'localStorage prefix missing');
@@ -1023,7 +1023,7 @@ test('D7: per-target-origin storage isolation surfaces', () => {
 });
 
 test('A5: styled ZeroProxy error page in safeError', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.ok(sw.includes('zp-shell'), 'styled error page wrapper missing');
   assert.ok(sw.includes('zp-title'), 'styled error page title element missing');
   assert.ok(sw.includes('zp-code'), 'styled error page code badge missing');
@@ -1032,7 +1032,7 @@ test('A5: styled ZeroProxy error page in safeError', () => {
 });
 
 test('SW wires Rust zp-bundle alongside JS rewriter', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Lazy import: SW source references the bundle URL, loaded inside
   // initBundle() rather than at top level so registration stays fast and
   // SW eval doesn't fault on a missing artifact during dev iterations.
@@ -1155,7 +1155,7 @@ test('split-bundle (c.3): SW kernel/transport wasm splits off into zp-kernel-bun
   assert.match(build, /ZPKernelWBG/, 'build must wrap kernel glue to expose ZPKernelWBG');
   assert.match(build, /zpKernelBundleWasm/, 'build must declare zp_kernel_bundle.wasm path constant');
   // SW imports kernel glue at top level (importScripts can only happen there).
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /importScripts\('\/__zp\/zp_kernel_sw\.js(\?[^']*)?'\)/, 'SW must importScripts the kernel glue at top level');
   // SW has a separate lazy `initKernel()` keyed on `self.ZPKernel.ready`.
   assert.match(sw, /async function initKernel\b/, 'SW must define async initKernel()');
@@ -1211,7 +1211,7 @@ test('D4 client: virtual WebTransport routes through ZeroProxy gateway when enab
   const listener = fs.readFileSync('internal/wtproxy/listener.go', 'utf8');
   assert.match(listener, /r\.URL\.Query\(\)\.Get\("target"\)/, 'listener must accept target via ?target= query string');
 
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /async function refreshRuntimeConfig\b/, 'SW must define refreshRuntimeConfig()');
   assert.match(sw, /api\/config/, 'SW must fetch the /zp/api/config endpoint');
   assert.match(sw, /wtGateway:\s*runtimeConfig\.wtGateway/, 'SW buildRuntimePrelude must inject wtGateway into boot JSON');
@@ -1247,7 +1247,7 @@ test('D5 client: virtual RTCPeerConnection routes signaling through ZeroProxy ga
   assert.match(mainGo, /controlPrefix\+"api\/rtc\/signal"/, 'Go server must route /zp/api/rtc/signal');
   assert.match(mainGo, /"rtcGateway":/, 'serveConfig must emit the rtcGateway field');
 
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /rtcGateway:\s*runtimeConfig\.rtcGateway/, 'SW buildRuntimePrelude must inject rtcGateway into boot JSON');
 
   const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
@@ -1276,7 +1276,7 @@ test('D5 client: virtual RTCPeerConnection routes signaling through ZeroProxy ga
 // `NotSupportedError` console message on `load.php?modules=startup`.
 // Pin the call site to never reintroduce the dead helper.
 test('rewriteScriptResponse must not call the removed initRewriter helper', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.equal(
     /\binitRewriter\s*\(/.test(sw),
     false,
@@ -1322,7 +1322,7 @@ test('rewriter-rs/ is deleted; the CSS rewriter has exactly one home (zp-css)', 
   assert.match(bundleLib, /js_name = rewriteCSS\b/, 'lib.rs must export rewriteCSS via wasm-bindgen');
   assert.match(bundleLib, /css::rewrite_css\(/, 'rewriteCSS export must delegate to css::rewrite_css');
   // SW + page bundle wrapper expose rewriteCSS.
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /rewriteCSS:\s*\(source,\s*baseUrl,\s*controlPrefix(?:,\s*proxyOrigin)?\)\s*=>\s*wbg\.rewriteCSS\(/, 'SW initBundle must expose rewriteCSS on ZPBundle');
   // The emitted /zp/api/fetch references must be ABSOLUTE against the proxy's
   // own runtime origin. Root-relative ones resolve against the consuming
@@ -1340,7 +1340,7 @@ test('rewriter-rs/ is deleted; the CSS rewriter has exactly one home (zp-css)', 
   assert.equal(build.includes("writeBundled('rust-rewriter.js'"), false, 'rust-rewriter.js artifact must not be generated');
   // ZPRewriter (legacy) is gone from SW + prelude.
   assert.equal(sw.includes('self.ZPRewriter'), false, 'SW must no longer reference self.ZPRewriter');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.equal(rt.includes('root.ZPRewriter'), false, 'prelude must no longer reference root.ZPRewriter');
 });
 
@@ -1352,8 +1352,8 @@ test('rewriter-rs/ is deleted; the CSS rewriter has exactly one home (zp-css)', 
 // calls ZPBundle exclusively — there is no legacy script-rewriter to fall
 // back to (rewriter-rs/ is CSS-only after Step 3).
 test('page-realm prelude routes JS through ZPBundle only (Step 2.3 + 2.4 + 3)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const build = fs.readFileSync('scripts/build.mjs', 'utf8');
   const mainGo = fs.readFileSync('cmd/zeroproxy-server/main.go', 'utf8');
   // Build produces the page bundle artifact.
@@ -1386,7 +1386,7 @@ test('page-realm prelude routes JS through ZPBundle only (Step 2.3 + 2.4 + 3)', 
 // uses ZPBundle exclusively. The legacy ZPRewriter.rewriteScript fallback
 // was removed when Step 3 dropped the OXC-based JS rewriter from rewriter-rs/.
 test('SW rewriteScriptResponse routes JS through ZPBundle only (Step 2.2 + 3)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const fnMatch = sw.match(/async function rewriteScriptResponse\b[\s\S]*?return new Response\(code,/);
   assert.ok(fnMatch, 'rewriteScriptResponse body must be locatable');
   const body = fnMatch[0];
@@ -1405,7 +1405,7 @@ test('SW rewriteScriptResponse routes JS through ZPBundle only (Step 2.2 + 3)', 
 // rewriter, there is nothing to compare against — the recorder + buffer +
 // debug endpoint are all gone.
 test('SW shadow-compare infrastructure is removed after Step 3', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.equal(sw.includes('SHADOW_LOG_CAP'), false, 'SHADOW_LOG_CAP constant must be gone');
   assert.equal(sw.includes('function recordShadowDivergence'), false, 'recordShadowDivergence helper must be gone');
   assert.equal(sw.includes('function shadowCompareRewriters'), false, 'shadowCompareRewriters helper must be gone');
@@ -1419,7 +1419,7 @@ test('SW shadow-compare infrastructure is removed after Step 3', () => {
 // paid the full cold-init latency, a hypothesis on the NAVER hydration wedge
 // observed during the Step 2a abort — see trap-notebook 2026-06-07).
 test('SW activate event awaits initBundle with bounded timeout (Step 2.0)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // The activate handler MUST `await` either `initBundle()` itself or a
   // Promise.race wrapping it. Pure fire-and-forget (`initBundle().catch`)
   // must NOT be the terminal expression of the waitUntil promise.
@@ -1448,7 +1448,7 @@ test('SW activate event awaits initBundle with bounded timeout (Step 2.0)', () =
 // still exists (kept for the future marker-resolver port + still required by
 // the behavior test below), but rewriteScriptResponse must NOT call them.
 test('SW does not use patch-mode in rewriteScriptResponse (Step 2.1.5 marker hazard)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // wbg wrapper still exposes the API for future use.
   assert.ok(sw.includes('rewriteScriptPatches'), 'ZPBundle wrapper still exposes rewriteScriptPatches');
   assert.ok(sw.includes('applyScriptPatches'), 'applier helper kept for future marker resolver port');
@@ -1469,7 +1469,7 @@ test('SW does not use patch-mode in rewriteScriptResponse (Step 2.1.5 marker haz
 });
 
 test('applyScriptPatches behavior: empty patches, splice, malformed envelopes', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Extract the applier verbatim so behavior is exercised, not just shape.
   // `\n}` (no trailing newline) tolerates both LF and CRLF line endings.
   const m = sw.match(/function applyScriptPatches\(source, envelopeJson\) \{[\s\S]*?\n\}/);
@@ -1520,7 +1520,7 @@ test('Anti-fingerprint: ZP + ZeroProxyRT hide from getOwnPropertyNames', () => {
   // bindings and deletes them from globalThis before any target script
   // executes. The Symbol.for('zeroproxy.runtime.installed') marker stays
   // — Symbol-keyed props don't appear in getOwnPropertyNames.
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /const ZP = globalThis\.ZP;/, 'runtime-prelude must capture ZP into closure');
   assert.match(rt, /const ZeroProxyRTGlobal = globalThis\.ZeroProxyRT;/, 'runtime-prelude must capture ZeroProxyRT into closure');
   assert.match(rt, /try \{ delete globalThis\.ZP; \} catch \{\}/, 'runtime-prelude must delete window.ZP');
@@ -1578,7 +1578,7 @@ test('D2: sourcemap composer + SW /zp/api/sourcemap route are wired', () => {
 
   // SW must append a fresh `//# sourceMappingURL=` pointing to the proxy
   // route on successful rewrites — DevTools loads the composed map.
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /sourceMappingURL=' \+ mapURL/);
   assert.match(sw, /ZP\.apiPath\('sourcemap'\)/);
   // Pragma emission must be gated to script kinds with a fetchable origin
@@ -1783,7 +1783,7 @@ test('D2 follow-on: sourcemap chain (rewriter_map ∘ original_map)', () => {
   // rewritten → original.ts in one hop. Best-effort — when the upstream
   // map is missing / malformed, the chained path silently falls back
   // to the unchained composer.
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const bundleLib = fs.readFileSync('crates/zp-bundle/src/lib.rs', 'utf8');
   const rewriterLib = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
 
@@ -1859,7 +1859,7 @@ test('D2 follow-on: sourcemap chain (rewriter_map ∘ original_map)', () => {
 });
 
 test('fingerprint hardening: descriptor flags + for-in enumeration surface', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // Web IDL members are enumerable. Ours were not, so every property the
   // membrane replaced flipped a readable bit: Object.keys(Navigator.prototype)
   // was 76 where the browser reports 82, and `for (k in navigator)` could not
@@ -1903,7 +1903,7 @@ test('fingerprint hardening: navigator.webdriver + window.chrome facade', () => 
   // ipc shape). Anti-bot WAFs probe these shapes — install a plausible
   // facade so target pages can't distinguish ZeroProxy from a real
   // Chrome.
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(
     rt,
     /defineOnProto\(nav, proto, 'webdriver', \(\) => false\)/,
@@ -1993,8 +1993,8 @@ test('fingerprint hardening: navigator.webdriver + window.chrome facade', () => 
 });
 
 test('C1: WS closing handshake defers finish until port ack (RFC 6455 §7.1.6)', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Prelude no longer carries the pre-C1 TODO marker — the deferred
   // finish() is the close-handshake landing.
   assert.equal(rt.includes('TODO(C1-transport)'), false, 'pre-C1 close-handshake TODO must be retired');
@@ -2046,7 +2046,7 @@ test('zp-bundle WASM export uses patch-mode under the hood', () => {
 });
 
 test('D1: javascript: URL routing client-side handler', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.includes('data-zp-jsurl'), 'runtime must dispatch data-zp-jsurl attribute');
   assert.ok(rt.includes('runJSURL'), 'runJSURL helper missing');
   assert.ok(rt.includes('Native.FunctionCtor'), 'rewritten body must use prelude-private FunctionCtor');
@@ -2054,7 +2054,7 @@ test('D1: javascript: URL routing client-side handler', () => {
 
 test('anchor escape vector: zp-htmltx + prelude + launcher ?via= handler', () => {
   const htmltx = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const launcher = fs.readFileSync('web/index.html', 'utf8');
   // Rust SSR rewrite: anchor/area/form/input/button URL attributes
   // produce proxy-origin `?via=` URLs + data-zp-target-url stash.
@@ -2123,8 +2123,8 @@ test('anchor escape vector: zp-htmltx + prelude + launcher ?via= handler', () =>
 });
 
 test('active browsing emits only encrypted prefixed p routes', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.equal(sw.includes('/v/'), false, 'service worker must not produce legacy /v routes');
   assert.equal(rt.includes('/v/'), false, 'runtime must not produce legacy /v routes');
   assert.ok(sw.includes('PROXY_DOCUMENT'), 'service worker must handle /zp/p documents');
@@ -2208,7 +2208,7 @@ test('D5 embedded TURN: pion/turn server + short-term creds + page-realm iceServ
   assert.match(mainGo, /rtcgw\.NewTURNServer\(/, 'main.go must call rtcgw.NewTURNServer when -rtc-turn-addr set');
   assert.match(mainGo, /s\.rtcTURN/, 'main.go server struct must carry rtcTURN field');
   assert.match(mainGo, /"rtcICEServers":/, 'serveConfig must emit rtcICEServers field');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /rtcICEServers:\s*Array\.isArray\(cfg\.rtcICEServers\)/, 'SW refreshRuntimeConfig must parse rtcICEServers array');
   assert.match(sw, /rtcICEServers:\s*Array\.isArray\(runtimeConfig\.rtcICEServers\)/, 'SW boot JSON must thread rtcICEServers');
   const prelude = fs.readFileSync('web/runtime-prelude.js', 'utf8');
@@ -2229,7 +2229,7 @@ test('D5 embedded TURN: pion/turn server + short-term creds + page-realm iceServ
 // CSP `frame-ancestors` warning + one stray 403 deeper in the ad SDK
 // chain).
 test('NAVER anti-bot fix: SW force-overrides page-side User-Agent + sec-ch-ua before forward', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Both the canonical UA and the canonical sec-ch-ua must be pushOnce'd
   // BEFORE the headers.entries() loop so the browser's real values (Edge/
   // WebView2: HeadlessChrome UA, "Microsoft Edge";v="149" sec-ch-ua) lose the
@@ -2264,7 +2264,7 @@ test('NAVER anti-bot fix: SW force-overrides page-side User-Agent + sec-ch-ua be
 // can't silently drop the counters (cache hit rate is the single
 // most important perf signal in trap notebook entries).
 test('perf telemetry: SW exposes rewrite cache hit/miss + latency counters', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /const rewriteStats = \{/, 'rewriteStats counter object must exist');
   for (const field of ['hits', 'misses', 'rewriteLatencyMs', 'cacheKeyLatencyMs', 'invocations']) {
     assert.match(sw, new RegExp(`${field}:\\s*[\\d.+\\-/* ]`), `rewriteStats must declare ${field}`);
@@ -2295,7 +2295,7 @@ test('perf telemetry: SW exposes rewrite cache hit/miss + latency counters', () 
 // only damage the page: `{}` bodies render as empty panels in NAVER's own UI.
 // The machinery stays so a regression can be bisected by re-adding one host.
 test('NAVER 광고/트래커 instant-stub 은 비활성 (60s 의 진짜 원인은 우리 TLS lost wakeup 이었음)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // Only the LIST matters: an empty Set means nothing is short-circuited. (The
   // host names still appear in the response-shape branch and in the history
   // comment, which is intentional — the machinery is kept for bisecting.)
@@ -2312,7 +2312,7 @@ test('NAVER 광고/트래커 instant-stub 은 비활성 (60s 의 진짜 원인�
 // 가 광고 SDK init chain hang 시켜서 메뉴 binding 함수가 attach 안 되는
 // 회귀 (사용자 보고 햄버거 메뉴 무동작).
 test('NAVER ad SDK module stub list 존재 (현재 비활성 — stub 회귀로 empty)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /const NAVER_AD_MODULE_STUB_PATTERNS = \[\];/, 'module stub list 는 현재 empty (회귀 방지 — glog-logger stub 이 "t is not a constructor" 유발)');
   assert.match(sw, /NAVER_AD_MODULE_STUB_PATTERNS/, 'transportFetch 진입점에 pattern list 분기는 유지 (향후 재활성화)');
 });
@@ -2336,7 +2336,7 @@ test('launcher ready boundary: bundleReady + kernelReady + kernelFetch === funct
 // it worked around was the same TLS read lost wakeup, and stubbing blanked
 // every news/card thumbnail on the page.
 test('NAVER dthumb.phinf image stub 은 비활성 (썸네일이 통째로 비던 원인)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /const NAVER_IMAGE_STUB_PATHS = \[\s*\]/, 'image stub list must ship empty');
   assert.equal(sw.includes("pathPrefix: '/dthumb.phinf'"), false, 'dthumb must not be stubbed — it blanked real thumbnails');
   // Machinery kept for bisecting a future regression.
@@ -2349,7 +2349,7 @@ test('NAVER dthumb.phinf image stub 은 비활성 (썸네일이 통째로 비던
 // path 가 module realm 과 호환 안 됨. dogfood UX 우선으로 cache 제거.
 // helper 와 cache version key 는 향후 재활성화 위해 코드에 유지.
 test('SW response cache: helpers + version key 유지, hit/put path 는 임시 비활성화', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /const RESPONSE_CACHE_NAME = 'zp-resp-v1'/, 'cache version key 유지 (재활성화 위해)');
   assert.match(sw, /async function tryRespCacheGet\(/, 'cache helper 유지');
   assert.match(sw, /async function tryRespCachePut\(/, 'cache helper 유지');
@@ -2364,7 +2364,7 @@ test('SW response cache: helpers + version key 유지, hit/put path 는 임시 �
 // 아니고 .arrayBuffer() 메서드도 없어서 TypeError 발생 → NAVER preload.js
 // 첫 POST 에서 hydration 전체 중단.
 test('transportFetch body extraction handles Uint8Array + ArrayBuffer + Blob-like', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /body instanceof Uint8Array/, 'must short-circuit Uint8Array');
   assert.match(sw, /body instanceof ArrayBuffer/, 'must handle ArrayBuffer');
   assert.match(sw, /typeof body\.arrayBuffer === 'function'/, 'must guard .arrayBuffer() call with typeof check');
@@ -2379,7 +2379,7 @@ test('transportFetch body extraction handles Uint8Array + ArrayBuffer + Blob-lik
 // (a) URL bar = share URL 유지, (b) fragment (k=…&server=…) 보존,
 // (c) virtual location state 정확.
 test('cross-host 3xx redirect: SW swallows upstream redirect and recurses (no client-side rewrap)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // 3xx 감지 후 recursive transportFetch 호출
   assert.match(sw, /resp\.status >= 300 && resp\.status < 400/, 'transportFetch must detect 3xx');
   assert.match(sw, /MAX_REDIRECT_DEPTH/, 'depth limit must exist to prevent infinite loops');
@@ -2401,7 +2401,7 @@ test('cross-host 3xx redirect: SW swallows upstream redirect and recurses (no cl
 // 명시적으로 금지한 것을 우리가 대신 흘렸고, 브라우저 기본과도 달라 지문이 된다.
 // 아래 기대값은 **대조군(직접 로드) 실측**이다.
 test('Referer follows the referrer policy (values pinned to a measured control run)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const start = sw.indexOf('function refererForPolicy(');
   assert.ok(start > 0, 'refererForPolicy 가 sw.js 에 있어야 한다');
   const end = sw.indexOf('async function transportFetch', start);
@@ -2442,7 +2442,7 @@ test('Referer follows the referrer policy (values pinned to a measured control r
 // 2026-08-25 — 정책을 실제로 **쓰는지**까지 본다. 헬퍼만 있고 호출부가 예전처럼
 // effectiveBase 를 그대로 실으면 아무것도 고쳐지지 않는다.
 test('transportFetch sets X-ZP-Referer through the policy, from the browser-computed value', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const tx = sw.match(/async function transportFetch[\s\S]*?\r?\n}\r?\n/);
   assert.ok(tx, 'transportFetch 본문을 찾을 수 있어야 한다');
   assert.match(tx[0], /const refValue = refererForPolicy\(effectiveBase, u, referrerPolicy\);/, '정책을 태워야 한다');
@@ -2466,7 +2466,7 @@ test('transportFetch sets X-ZP-Referer through the policy, from the browser-comp
 // 빌드를 고르는 탓에 v11.18.5 대신 레거시 v4.43.0 을 받아 **경매가 아예 안
 // 돌았다** (pbjs 이벤트 0 → 75, 프레임 11 → 22, 대조군 66~73 / 29~31).
 test('redirect entry update is document-only (a subresource 302 must not repoint the document entry)', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   // 조건과 대입 사이에 아무것도 끼지 못하도록 블록 모양째 고정한다.
   assert.match(
     sw,
@@ -2482,7 +2482,7 @@ test('redirect entry update is document-only (a subresource 302 must not repoint
 // 뜨면 최상위 문서의 스크립트 요청이 남의 프레임 entry 를 물고 나간다.
 // /zp/api/fetch 경로는 이미 ctx 를 먼저 봤는데 이 두 자리만 빠져 있었다.
 test('script/worker fetches resolve the entry from the requesting client context', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const script = sw.match(/url\.pathname === '\/zp\/api\/script'[\s\S]*?return rewriteScriptResponse\(resp[^\n]*\n/);
   assert.ok(script, '/zp/api/script 핸들러를 찾을 수 있어야 한다');
   assert.match(script[0], /const scriptEntryId = \(scriptCtx && scriptCtx\.entryId\) \|\| tab\.activeEntryId;/, '/zp/api/script 는 요청 클라이언트의 entry 를 먼저 골라야 한다');
@@ -2501,7 +2501,7 @@ test('script/worker fetches resolve the entry from the requesting client context
 // entries can cite specific outliers (e.g. "naver.com /commercial:
 // 4200 ms / 200 / 18 KB" → the slow lane is the analytics endpoint).
 test('perf telemetry: SW exposes transport latency counters + ring buffer', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /const transportStats = \{/, 'transportStats counter object must exist');
   for (const field of ['requests', 'totalLatencyMs', 'totalBytes', 'errors']) {
     assert.match(sw, new RegExp(`${field}:\\s*0`), `transportStats must declare ${field}`);
@@ -2591,7 +2591,7 @@ test('puppeteer real-site harness: random port + bind fail-fast + subtest isolat
 // 못 보게 만들었다. 키를 넓힌 대신 `Domain=<공개 접미사>` 는 거부해야 하므로
 // 두 규칙을 같은 함수로 묶었다 — 여기서 **동작**으로 고정한다.
 test('cookie jar is keyed by registrable domain, and public-suffix Domain is rejected', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const start = sw.indexOf('const SECOND_LEVEL_SUFFIX');
   const endMark = 'function originKeyForURL';
   const end = sw.indexOf(endMark);
@@ -2670,7 +2670,7 @@ test('proxied-document CSP is controlled from zp-shared (single golden, JS side)
 // 하나마다 브라우저가 그 엔드포인트로 POST 한다. CSP 리포트는 Service Worker 가
 // 가로챌 수 없으므로 릴레이를 우회하는 직접 egress = 실제 IP 유출이다.
 test('service worker strips browser-to-target reporting headers', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const fn = sw.slice(sw.indexOf('function applyZPSecurityHeaders'));
   // 주석 줄은 버린다. 안 그러면 `// h.delete('NEL');` 로 주석 처리해도 통과하는
   // — 즉 절대 깨지지 않는 — 검사가 된다(실제로 그렇게 만들었다가 음성 테스트로 잡았다).
@@ -2710,7 +2710,7 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
   // 평범한 `/img/bg.png` 로 도착하는데, 예전에는 `/zp/` 로 시작할 때만
   // 받아 줘서 UNKNOWN → Response.error() 로 죽었다 (실측: insertRule /
   // el.style / @font-face / adoptedStyleSheets / 루트상대 <style> 5종).
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const grab = (name) => {
     const start = sw.indexOf('function ' + name + '(');
     assert.ok(start >= 0, name + ' must exist in sw.js');
@@ -2761,7 +2761,7 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
 // `crates/zp-shared/testdata/url_surfaces.json` 이 단일 소스다.
 // 그래서 픽스처가 이 두 자리를 담고 있는지, 그리고 프로퍼티 훅이 함께 있는지를 본다.
 test('object[data] / embed[src] 는 픽스처에 있고 프로퍼티 훅과 한 쌍이다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const pairs = new Set(SURFACE_INVENTORY.filter((e) => e.kind !== 'deliberate').map((e) => {
     const bits = e.pair.split(':');
     return bits[0] + ':' + bits[bits.length - 1];
@@ -2780,7 +2780,7 @@ test('object[data] / embed[src] 는 픽스처에 있고 프로퍼티 훅과 한 
 
 
 test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주석/문자열은 건드리지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('  function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -2813,7 +2813,7 @@ test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주�
 });
 
 test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서드 동일성을 지킨다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('  function containStyleDeclaration(');
   assert.ok(start >= 0, 'containStyleDeclaration 을 못 찾았다');
   const next = rt.indexOf('\n  function ', start + 1);
@@ -2842,7 +2842,7 @@ test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서�
 });
 
 test('compileNested: new Function 의 파라미터/arguments 가 with 스코프에 가려지지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('    function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -2882,7 +2882,7 @@ test('compileNested: new Function 의 파라미터/arguments 가 with 스코프�
 });
 
 test('SW 를 못 거치는 프레임: 프록시 경로를 먼저 박고 blob 으로 업그레이드한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // 판정은 "내 문서 URL 이 최상위와 같다" — document.write 프레임은 자기
   // navigation 이 없어 부모 URL 을 상속한다. 프래그먼트(`#k=…`)는 떼고 본다.
@@ -2918,7 +2918,7 @@ test('SW 를 못 거치는 프레임: 프록시 경로를 먼저 박고 blob 으
 });
 
 test('멤브레인이 스스로 재정의 예외를 쏟지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // `configurable: false` 로 심는 자리는 두 번째 시도가 무조건 던진다. 신원
   // (WeakSet)으로는 못 막는다 — 멤브레인이 감싼 창은 프로토타입을 읽을 때마다
@@ -2930,8 +2930,8 @@ test('멤브레인이 스스로 재정의 예외를 쏟지 않는다', () => {
 });
 
 test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리라이트를 강제한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
 
   // 스윕이 <link> 를 안 잡으면 광고 프레임이 스타일 없이 남는다 — 실측에서
   // naver 메인의 timeboard / rollingboard 스타일시트가 403 을 받고 거부됐다.
@@ -2953,7 +2953,7 @@ test('SW-less 프레임: <link rel=stylesheet> 도 blob 으로 올리고 CSS 리
 });
 
 test('storage 파사드는 이름 기반 접근과 키 열거를 진짜 Storage 처럼 지원한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // ★`localStorage.token = 'x'` 는 아주 흔한 관용구인데, 여섯 멤버만 가진
   // frozen 평범한 객체는 그 쓰기를 **조용히 삼킨다**(비엄격 모드라 throw 도
@@ -2980,7 +2980,7 @@ test('storage 파사드는 이름 기반 접근과 키 열거를 진짜 Storage 
 });
 
 test('자기 prelude 를 기다리는 프레임도 postMessage 매핑은 미리 받는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // 프록시에서는 수신 창의 실제 오리진이 늘 프록시 오리진이라, 페이지가 진짜
   // 타깃 오리진을 지정하면 브라우저가 메시지를 **조용히 버린다**. 래퍼가
@@ -3006,7 +3006,7 @@ test('자기 prelude 를 기다리는 프레임도 postMessage 매핑은 미리 
 });
 
 test('네이티브 객체를 감싼 Proxy 는 set 에서 receiver 를 target 으로 되돌린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // ★기본 set 트랩은 프로토타입의 네이티브 세터를 **프록시**를 receiver 로
   // 호출한다. 프록시에는 내부 슬롯이 없어 `Illegal invocation` 으로 거부되고,
@@ -3029,7 +3029,7 @@ test('네이티브 객체를 감싼 Proxy 는 set 에서 receiver 를 target 으
 });
 
 test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // ★서버측 htmltx 에는 proxied_srcset 이 있는데 페이지 realm 워커에는
   // 없었다 — innerHTML / document.write / insertAdjacentHTML / DOMParser 로
@@ -3058,7 +3058,7 @@ test('srcset 은 페이지 realm HTML 주입 경로에서도 리라이트된다'
 });
 
 test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // ★`has` 트랩의 인덱스 정규식이 `\\d` 로 이중 이스케이프돼 있었다. 정규식
   // 리터럴에서 `\\d` 는 "역슬래시 + d" 라 `[1-9]` 뒤에 역슬래시를 요구하는
@@ -3109,7 +3109,7 @@ test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', 
 // 지문(브라우저는 전부 configurable:true)과 정면으로 충돌하는 자리이고,
 // 2026-08-18 에 "유지" 로 닫은 결정이다 — 근거는 runtime-prelude 주석에 있다.
 test('membrane hooks stay non-configurable (E1 lock)', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const defs = rt.match(/Object\.defineProperty\(obj, key, \{[^}]*\}/g) || [];
   assert.ok(defs.length >= 2, 'define()/defineAccessor() must exist');
   for (const d of defs) {
@@ -3331,7 +3331,7 @@ test('매트릭스 러너는 유실/판정불가를 조용히 넘기지 않는�
 // 그래서 Go 사본을 지우고 목록을 픽스처 한 곳으로 옮겼다. 이제 검사할 것은
 // "두 구현이 같은가" 가 아니라 **"빌드가 픽스처를 실제로 박아 넣었는가"** 다.
 test('응답 헤더 정책: 목록은 픽스처 하나이고 소스에 손목록이 없다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   for (const slot of ['__ZP_REPORTING_HEADERS__', '__ZP_TARGET_POLICY_HEADERS__', '__ZP_HOP_BY_HOP_HEADERS__']) {
     assert.ok(sw.includes(slot), `${slot} 치환 자리가 사라졌다 — 손목록이 돌아왔을 수 있다`);
   }
@@ -3369,7 +3369,7 @@ test('응답 헤더 정책: 빌드 산출물이 픽스처와 일치한다', () =
 // Refresh 는 지우면 탈출은 막히지만 타깃이 의도한 리다이렉트가 사라진다(실측:
 // 착지 실패). 지우고 **프록시 경로로 다시 심는** 처리가 붙어 있어야 한다.
 test('Refresh 헤더는 지우는 게 아니라 프록시 경로로 옮긴다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(sw, /function proxiedRefreshValue\(/, 'Refresh 리라이트 헬퍼가 없다');
   assert.match(sw, /h\.set\('Refresh', next\)/, '리라이트 결과를 다시 심지 않는다 — 착지가 사라진다');
   assert.match(sw, /\?via=/, '런처 내비게이션 경로를 안 쓴다');
@@ -3387,8 +3387,8 @@ test('Refresh 헤더는 지우는 게 아니라 프록시 경로로 옮긴다', 
 // 프레임 축 매트릭스를 세우고 나서야 보였다. 셋이 함께 있는지 묶어 둔다.
 test('meta refresh 리라이트가 세 경로에 모두 있다', () => {
   const rust = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rust, /fn proxied_meta_refresh/, '① htmltx: 문서 파싱 시점 리라이트가 없다');
   assert.match(sw, /function proxiedRefreshValue/, '② SW: Refresh 응답 헤더 리라이트가 없다');
   assert.match(rt, /function proxiedRefreshContent/, '③ 프렐류드: 페이지가 만드는 HTML 리라이트가 없다');
@@ -3408,7 +3408,7 @@ test('meta refresh 리라이트가 세 경로에 모두 있다', () => {
 //   ① 소스에 손목록이 되살아나지 않았는가
 //   ② 빌드가 실제로 픽스처를 박아 넣었는가 (dist 산출물로 확인)
 test('페이지 realm 목록은 픽스처에서 온다 (손목록 부활 금지)', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.includes('__ZP_URL_SURFACES__'), '치환 자리가 사라졌다 — 목록이 손으로 돌아왔을 수 있다');
   assert.equal(
     /localKey === 'srcset' && \(tag === /.test(rt), false,
@@ -3451,7 +3451,7 @@ test('빌드 산출물의 표면 테이블이 픽스처와 일치한다', () => 
 // 이제 분해기는 양쪽에 하나씩이고 이 픽스처가 둘을 묶는다.
 // (Rust 쪽: crates/zp-htmltx/src/lib.rs :: srcset_candidates_match_shared_fixture)
 test('srcset 후보 분해가 Rust 와 같다 (data: 쉼표 포함)', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('\n  function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -3487,7 +3487,7 @@ test('srcset 을 쉼표로 자르는 사본이 되살아나지 않았다', () =>
 // `img.setAttribute('srcset', …)` 는 목록 전체를 URL 하나로 삼켰고
 // `img.srcset = …` 는 아예 리라이트를 건너뛰어 원본 URL 이 DOM 에 남았다.
 test('srcset 이 setAttribute·프로퍼티·스윕 세 경로에 모두 걸린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /function installSrcsetProp\(/, '프로퍼티 훅이 없다 — img.srcset = … 가 샌다');
   for (const proto of ['HTMLImageElement', 'HTMLSourceElement', 'HTMLLinkElement']) {
     assert.ok(
@@ -3513,7 +3513,7 @@ test('srcset 이 setAttribute·프로퍼티·스윕 세 경로에 모두 걸린�
 // 인코딩 차이(`!'()*`, 공백 `+` vs `%20`)는 SW 가 URLSearchParams 로 읽어
 // 관측되지 않았지만, 다른 채로 두면 같은 리소스에 캐시 키가 둘 생긴다.
 test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('\n  function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -3541,7 +3541,7 @@ test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
 // 남은 실제 결함은 하나: `*` 와 `Allow-Credentials: true` 는 명세상 함께 못
 // 쓰는데(브라우저가 응답 전체를 거부한다) 무조건 켜고 있었다.
 test('CORS: 와일드카드 오리진에는 credentials 를 켜지 않는다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const fn = sw.slice(sw.indexOf('function applyCORS(h, req) {'));
   const body = fn.slice(0, fn.indexOf('\n}'))
     .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
@@ -3571,7 +3571,7 @@ test('CORS: 와일드카드 오리진에는 credentials 를 켜지 않는다', (
 //    죽일 수 있다는 것과 지문이 된다는 것.
 test('integrity: htmltx 와 프렐류드가 같은 백업 속성을 쓴다', () => {
   const rust = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rust, /remove_attribute\("integrity"\)/,
     'htmltx 가 integrity 를 안 벗긴다 — SRI 가 리라이트된 본문과 안 맞아 리소스가 차단된다');
   assert.match(rust, /set_attribute\("data-zp-integrity"/, 'htmltx 가 원본을 백업 안 한다');
@@ -3581,7 +3581,7 @@ test('integrity: htmltx 와 프렐류드가 같은 백업 속성을 쓴다', () 
 
 test('meta CSP: 서버·페이지 realm 양쪽이 같은 방식으로 무력화한다', () => {
   const rust = fs.readFileSync('crates/zp-htmltx/src/lib.rs', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rust, /data-zp-blocked-http-equiv/, 'htmltx 가 meta CSP 를 안 막는다');
   assert.match(rt, /function neutralizeCSPMeta\(/, '페이지 realm 이 meta CSP 를 안 막는다');
   assert.match(rt, /data-zp-blocked-http-equiv/, '백업 속성 이름이 갈라졌다');
@@ -3640,7 +3640,7 @@ test('재현성 축: 의도적 차단은 이유와 함께 선언돼 있다', () 
 // (`rewriteCSSText`). image-set 맨 문자열이 전자에만 있었다.
 test('CSS 리라이트도 두 구현이 같은 형태를 다룬다', () => {
   const css = fs.readFileSync('crates/zp-css/src/lib.rs', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   for (const form of ['image-set', '@import']) {
     assert.ok(css.toLowerCase().includes(form), `zp-css 가 ${form} 을 안 다룬다`);
     assert.ok(rt.toLowerCase().includes(form), `프렐류드 스캐너가 ${form} 을 안 다룬다`);
@@ -3715,7 +3715,7 @@ test('에러 코드: JS 목록이 공유 픽스처와 순서까지 같다', () =
 // — 원인 추적이 정반대 방향으로 간다. 실제로 TARGET_HTTP_FAILED 가 그랬다.
 test('에러 코드: SW 가 던지는 코드가 전부 목록에 있다', () => {
   const want = new Set(JSON.parse(fs.readFileSync('crates/zp-shared/testdata/error_codes.json', 'utf8')));
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const thrown = new Set();
   for (const m of sw.matchAll(/safeError\(\s*'([A-Z][A-Z_]+)'/g)) thrown.add(m[1]);
   assert.ok(thrown.size >= 5, `safeError 호출을 너무 적게 찾았다 (${thrown.size}) — 파서를 고칠 것`);
@@ -3733,7 +3733,7 @@ test('에러 코드: SW 가 던지는 코드가 전부 목록에 있다', () => 
 // 풀려 타깃 오리진으로 갔다), 덤으로 "이미 프록시면 건드리지 않는다" 판정이
 // `startsWith("null")` 이 되면서 **이중 프록시**까지 났다.
 test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('function resolveProxyOrigin(');
   assert.ok(start > 0, 'resolveProxyOrigin 이 없다');
   const end = rt.indexOf('\n  const toStringMap', start);
@@ -3771,7 +3771,7 @@ test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 �
 // 표면(getAttribute / 프로퍼티 / 직렬화)이 그 값을 그대로 돌려주면 우리
 // 스크립트 태그와 data-zp-* 가 통째로 노출된다.
 test('srcdoc 은 페이지가 준 원본을 붙들어 두고 읽기 표면이 그걸 돌려준다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.indexOf('const srcdocMeta = new WeakMap()') >= 0, 'srcdoc 원본 보관소가 없다');
   assert.ok(rt.indexOf('function setInjectedSrcdoc(') >= 0);
 
@@ -3799,7 +3799,7 @@ test('srcdoc 은 페이지가 준 원본을 붙들어 두고 읽기 표면이 �
 // 직렬화 표면은 innerHTML/outerHTML 하나가 아니다. XMLSerializer 는 훅이 아예
 // 없어 같은 문서에서 흔적 38건이 그대로 나왔다(2026-08-22 실측).
 test('XMLSerializer.serializeToString 도 같은 세정을 지난다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.indexOf('function scrubbedClone(node)') >= 0, '세정된 복제본을 만드는 함수가 없다');
   const start = rt.indexOf("define(w.XMLSerializer.prototype, 'serializeToString'");
   assert.ok(start > 0, 'XMLSerializer 훅이 없다');
@@ -3814,7 +3814,7 @@ test('XMLSerializer.serializeToString 도 같은 세정을 지난다', () => {
 // 가상 오리진으로 다시 매핑돼 **타깃 서버가 우리 내부 에셋 요청을 받는다**.
 // 실측(2026-08-22): 프록시 로드 한 번에 픽스처 서버가 9번 받았다.
 test('rt wasm 부팅은 진짜 네이티브 fetch 를 못 잡은 realm 에서는 건너뛴다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.ok(rt.indexOf("const realmPreInstrumented = typeof root.__zp_get === 'function'") >= 0,
     '선계측 판정이 없다');
   assert.ok(rt.indexOf('if (!realmPreInstrumented && typeof ZeroProxyRTGlobal') >= 0,
@@ -3836,7 +3836,7 @@ test('rt wasm 부팅은 진짜 네이티브 fetch 를 못 잡은 realm 에서는
 // 이제 하나이고, 호출자별 차이는 옵션 두 개뿐이다. 여기서는 그 표를 **실행해서**
 // 고정한다 — "함수가 있는가" 가 아니라 "같은 입력에 같은 출력인가".
 test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 실행으로 고정', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const grab = (head) => {
     const start = rt.indexOf(head);
     assert.ok(start >= 0, head + ' 을 못 찾았다');
@@ -3906,7 +3906,7 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
 // 이 예외는 페이지의 `Error` 를 감싸서는 절대 안 보인다(엔진이 던진다).
 // `debugger-arm --strategy exceptions` 로만 잡혔다.
 test('navigator 게터가 참조하는 모듈 변수는 설치 시점에 초기화돼 있다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // ① 선언이 설치보다 **앞**에 있어야 한다. 줄 번호를 실제로 비교한다.
   const decl = rt.indexOf('let cachedUADataBrands = null;');
@@ -3960,7 +3960,7 @@ test('navigator 게터가 참조하는 모듈 변수는 설치 시점에 초기�
 // 깊이 1(부모가 곧 top)에서는 우연히 수렴한다. **그래서 얕은 픽스처로는
 // 재현되지 않았다** — 재현에는 깊이 2 이상이 필요하다.
 test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('    function climbCrossWindow(targetWindow, prop, fallback) {');
   assert.ok(start >= 0, 'climbCrossWindow 를 못 찾았다');
   const end = rt.indexOf('\n    function ', rt.indexOf('    function safeCrossWindow(targetWindow) {') + 1);
@@ -4024,7 +4024,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
 // 는 false 인데 `typeof c.forEach === 'function'` 인 자기모순이 사이트와 무관하게
 // **매번 15건** 잡혔다(고치기 전 실측: naver/wikipedia/HN 전부 15).
 test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
   assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
@@ -4111,7 +4111,7 @@ test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', (
 // 여기서는 술어 호출 횟수를 **실행해서** 잰다. "함수가 있는가" 가 아니라
 // "몇 번 부르는가" 가 이 버그의 전부였다.
 test('필터 컬렉션 순회는 O(N) 이다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   assert.ok(start >= 0, 'isIndexKey 를 못 찾았다');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
@@ -4178,7 +4178,7 @@ test('필터 컬렉션 순회는 O(N) 이다', () => {
 //
 // 여기서는 축출 규칙을 **실행해서** 고정한다.
 test('문서 인코딩 크기는 서브리소스 폭주에 축출되지 않는다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const start = sw.indexOf('const docEncodedByUrl = new Map();');
   assert.ok(start >= 0, 'docEncodedByUrl 을 못 찾았다 — 문서 칸이 없다');
   const end = sw.indexOf('function deliverStreamEncoded(');
@@ -4230,7 +4230,7 @@ test('문서 인코딩 크기는 서브리소스 폭주에 축출되지 않는�
 // 세정기가 자기 은폐에 눈이 멀었던 자리. **"무엇을 못 걷는가" 를 직렬화기와
 // 맞춰 보는 것**이 이 함수의 유일한 안전 조건이다.
 test('직렬화 세정은 template.content 로 재귀한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('  function scrubbedClone(node) {');
   assert.ok(start >= 0, 'scrubbedClone 을 못 찾았다');
   const body = rt.slice(start, rt.indexOf('\n  function sanitizeSerializedNode('));
@@ -4270,7 +4270,7 @@ test('직렬화 세정은 template.content 로 재귀한다', () => {
 // 직접 꽂힌 값은 읽기 쪽 되돌리기만이 받아 낸다. 실측(2026-08-23, SO 실페이지):
 // 격리 월드에서 스태시 없는 프록시 src 를 심으면 메인 월드가 타깃을 돌려준다.
 test('script src 은 쓸 때 스태시하고 읽는 두 곳에서 되돌린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const fn = (head) => {
     const start = rt.indexOf(head);
     assert.ok(start >= 0, head + ' 을 못 찾았다');
@@ -4316,8 +4316,8 @@ test('내부 자산 목록은 zp-core 단일 소스다', () => {
     '자산 목록이 갈라졌다 — 새 자산은 zp-core 에 먼저 적을 것');
 
   // 소비자는 목록을 다시 세지 않는다. 예전에는 각자 세었고 그래서 갈라졌다.
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const enumerates = (src) => /assetPath\('[^']+'\)[^\n]*\|\|[^\n]*assetPath\('/.test(src);
   assert.ok(!enumerates(sw), 'sw.js 가 자산 목록을 다시 세고 있다');
   assert.ok(!enumerates(rt), 'runtime-prelude.js 가 자산 목록을 다시 세고 있다');
@@ -4376,7 +4376,7 @@ test('trap notebook INDEX stays one line per entry, with a link that resolves', 
 // (우리 경로인데 오리진이 타깃). 프레임 경로는 이미 절대 URL 을 쓰고 있었고
 // 내비게이션·히스토리·폼 경로만 빠져 있었다.
 test('proxy navigation URLs are absolute so a target <base href> cannot retarget them', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // ① 헬퍼가 프록시 오리진 기준으로 푼다 — 동작으로 확인한다.
   const start = rt.indexOf('function proxyAbsoluteURL(');
   assert.ok(start > 0, 'proxyAbsoluteURL 이 있어야 한다');
@@ -4413,7 +4413,7 @@ test('proxy navigation URLs are absolute so a target <base href> cannot retarget
 // 스킴을 읽는다. CNN 실측: 벤더가 그 스킴으로 URL 을 만들어 http:// 로 요청 →
 // 502 → `turner_getGuid` 부재 → 광고 체인 중단.
 test('membrane virtualizes location reads whose base is a real Location or the document', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   // ① 진짜 Location 을 base 로 받았을 때의 방어선.
   assert.match(rt, /function isNativeLocation\(value\)/, 'Location 브랜드 체크가 있어야 한다');
   assert.match(
@@ -4441,7 +4441,7 @@ test('membrane virtualizes location reads whose base is a real Location or the d
 // 반드시 해제하는지(정상 응답마다 20초 타이머가 남으면 안 된다),
 // (3) 타임아웃이 502 가 아니라 504 로 구분되는지를 고정한다.
 test('transportFetch 는 kernelFetch 에 데드라인을 건다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(
     sw,
     /resp = await withTransportDeadline\(self\.kernelFetch\(reqLike\), u, method\);/,
@@ -4477,7 +4477,7 @@ test('transportFetch 는 kernelFetch 에 데드라인을 건다', () => {
 // 않고 iframe 은 `about:blank` 로 남는다 — load/error/콘솔 어디에도 흔적이 없다.
 // CNN 실측: 한 로드에서 문서 요청 6건이 이렇게 죽었다.
 test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.doesNotMatch(sw, /await\s+self\.clients\.get\(/, '응답 경로의 clients.get await 는 내비게이션을 교착시킨다');
 
   // 동작으로도 고정한다: 절대 resolve 하지 않는 clients.get 을 물려도
@@ -4515,7 +4515,7 @@ test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => 
 // `https://assets.bounceexchange.com` 오리진으로 정상 도착하고, bouncex.cookie
 // (did/vid) → state/js → sspConfig(aps/criteo/index/magnite/…) 까지 이어졌다.
 test('창 자신의 postMessage 를 소유 속성으로 갈아끼우지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.doesNotMatch(
     rt,
     /define\(w, 'postMessage',/,
@@ -4534,7 +4534,7 @@ test('창 자신의 postMessage 를 소유 속성으로 갈아끼우지 않는�
 // Window 인스턴스의 소유 속성이라(측정: Window.prototype.postMessage 는
 // undefined) 지우면 네이티브까지 같이 사라진다.
 test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 되돌린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(rt, /restoreNativePostMessage\(w\);/, '창 계측 시 조기 래퍼를 걷어 내야 한다');
 
   // 두 함수만 정확히 떼어 낸다 — 뒤 코드를 같이 물면 엉뚱한 참조로 터진다.
@@ -4577,7 +4577,7 @@ test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 �
 // 대조군은 아무것도 보내지 않는다. 타깃 입장에서는 실제 브라우저에 없는 신호다.
 // 브라우저가 준 Referer 를 우리 라우트로 되돌려 쓰고, 없으면 보내지 않는다.
 test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   assert.match(
     sw,
     /const virtualBase = opt\.document\r?\n\s*\? \(\(entry && entry\.parentTargetUrl\) \|\| referrerFromBrowserHeader\(opt\.request\)\)/,
@@ -4616,7 +4616,7 @@ test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () 
 // 메시지로 미리 알려 주는 경로만으로는 부족하다 — 첫 fetch 는 파싱 도중에 나가
 // 그 메시지보다 빠르다. 그래서 **요청 시점에** 문서에서 읽는다.
 test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 읽는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   assert.match(
     rt,
     /referrerPolicy: req\.referrerPolicy \|\| documentReferrerPolicy\(\),/,
@@ -4651,7 +4651,7 @@ test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 �
 // SW 쪽: 프렐류드가 알려 준 정책은 **알려진 토큰일 때만** 받는다. 임의 문자열을
 // entry 에 밀어 넣으면 refererForPolicy 의 default 분기로 조용히 떨어진다.
 test('SW 는 알 수 없는 참조 정책 토큰을 받지 않는다', () => {
-  const sw = fs.readFileSync('web/sw.js', 'utf8');
+  const sw = fs.readFileSync('web/sw.js', 'utf8').split('\r\n').join('\n');
   const at = sw.indexOf("if (msg.type === 'ZP_REFERRER_POLICY') {");
   assert.ok(at >= 0, 'meta 정책을 받는 경로가 있어야 한다');
   const block = sw.slice(at, at + 900);
@@ -4675,7 +4675,7 @@ test('SW 는 알 수 없는 참조 정책 토큰을 받지 않는다', () => {
 // **자기 노드를 자기 querySelectorAll 에서** 지울 수 있었다(1건 → 0건).
 // 진짜 브라우저는 재현 못 하는 한 줄짜리 탐지기다.
 test('data-zp-* 는 모든 속성 표면에서 읽기 없음 / 쓰기 no-op 이다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
   // ① 쓰기 훅 — 이름을 보고 곧장 빠져나가야 한다.
   // 훅 **본문만** 잘라 본다 — 주석 길이에 가드가 흔들리면 안 된다.
@@ -4729,7 +4729,7 @@ test('data-zp-* 는 모든 속성 표면에서 읽기 없음 / 쓰기 no-op 이�
 // **항목을 그대로 돌려주므로** `el.attributes['data-zp-target-url']` 이 Attr 를
 // 내줬고, `has` 도 raw 에 위임해 `in` 만 true 인 자기모순을 만들었다.
 test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
   assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
