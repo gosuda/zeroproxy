@@ -1359,7 +1359,22 @@ function refererForPolicy(base, targetUrl, policy) {
 // 데드라인은 원인 치료가 아니라 **경계**다. 멈춘 상류를 "보이는 실패"로
 // 바꿔서 (a) 브라우저가 프레임을 포기하고 error 문서를 커밋하게 하고,
 // (b) refusal 로그에 어느 타깃이 멈췄는지 이름을 남긴다.
-const TRANSPORT_DEADLINE_MS = 20000;
+// ★이 예산은 "헤더까지" 가 아니라 **응답 전체**를 덮는다.
+//
+// 커널의 스트리밍 응답(헤더가 오면 곧바로 resolve)은 **HTTP/2 경로에만** 있다
+// (`finish_h2_response` 의 Streaming 분기). HTTP/1.1 상류는 본문을 끝까지 읽은
+// 뒤에야 `kernelFetch` 가 resolve 하므로, 여기 건 타이머는 곧 전송 전체의
+// 제한 시간이 된다.
+//
+// 실측(2026-08-26, 로컬 픽스처): 헤더를 10초 늦춘 h1 문서는 정상 로드되고,
+// 헤더는 즉시 주되 본문을 35초에 걸쳐 흘리는 h1 문서는 20초 예산에서 잘려
+// 에러 페이지가 됐다 — 대조군 브라우저는 점진적으로 렌더한다. 그래서 예산을
+// 90초로 둔다. 목적은 "느린 전송을 자르는 것" 이 아니라 **영원한 대기를
+// 없애는 것**이다.
+//
+// 남은 숙제: 커널이 "헤더 받음" 을 h1 에서도 알려 주면 이 값을 TTFB 기준으로
+// 바꿀 수 있고, 그때는 훨씬 짧게(20초) 잡아도 안전하다.
+const TRANSPORT_DEADLINE_MS = 90000;
 function withTransportDeadline(promise, targetUrl, method) {
   let timer = null;
   const deadline = new Promise((_, reject) => {

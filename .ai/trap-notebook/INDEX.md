@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-08-26 | SW / transport | **데드라인 실측: 침묵하는 상류는 504 로 잘리지만, h1 은 본문까지 한 예산이라 20초는 느린 전송을 죽였다 → 90초.** | sw-integration.md#transport-데드라인-실측 |
 | 2026-08-26 | SW / CSP | **정정: "스트리밍 응답은 CSP 헤더가 강제되지 않는다" 는 틀렸다 — 데몬이 CSP 를 꺼 둔 것이었다(csp_bypassed). meta 없이도 막힌다.** | sw-integration.md#csp-스트리밍-정정 |
 | 2026-08-26 | htmltx / CSP | **머리 없는 문서에서 프렐류드가 body 안으로 들어가 그 안의 CSP meta 가 무시됐다 — 앵커를 html 로 앞당겼다.** | rewriter.md#csp-meta-body |
 | 2026-08-26 | 측정 도구 | **`taskweaver wait` 는 `--id` 없이 부르면 인자 오류로 0초 잔다(stderr 를 버려서 조용하다). 러너의 150초 대기가 전부 no-op 이었다.** | build-deploy.md#execjs-문맥 |
