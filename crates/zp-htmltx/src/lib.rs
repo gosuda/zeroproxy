@@ -648,7 +648,18 @@ fn script_settings(
                         // fail-closed 로 가면 멀쩡한 페이지의 스타일을 날린다.
                         let res = zp_css::rewrite_css(&css, &style_target, "/zp/", &style_origin);
                         let rewritten = if res.ok { res.code } else { css };
-                        chunk.after(&rewritten, ContentType::Text);
+                        // ★`<style>` 은 raw text 다 — `ContentType::Text` 로
+                        // 내보내면 lol_html 이 HTML 이스케이프를 건다.
+                        // 실측(CNN, 2026-08-26): 자식 결합자 `>` 가 전부
+                        // `&gt;` 로 바뀌었다(671건). `<style>` 안에서는 엔티티가
+                        // 풀리지 않으므로 그 선택자를 쓴 규칙이 통째로 파싱
+                        // 실패로 버려졌다 — 4,644 → 4,546 (98개). 하필 그것이
+                        // 폭을 주는 규칙(`…&gt;div:nth-child(3){width:calc(...)}`)
+                        // 이라 3열 그리드가 세로로 쌓이고 홈 화면 높이가
+                        // 7,760 → 22,590px 이 됐다. 그 결과 라이브 플레이어가
+                        // 화면 밖(y=5073)으로 밀려 **재생이 시작되지 않았다.**
+                        // 스크립트 경로가 이미 같은 이유로 Html 을 쓴다.
+                        chunk.after(&rewritten, ContentType::Html);
                     }
                     Ok(())
                 }),
@@ -2286,6 +2297,22 @@ mod tests {
         // 숫자 엔티티가 아닌 것은 그대로 둔다(공격면을 넓히지 않는다).
         let untouched = decode_url_html_entities("https://a/b?x&#zz;y");
         assert_eq!(&*untouched, "https://a/b?x&#zz;y");
+    }
+
+    #[test]
+    fn inline_style_keeps_child_combinator_unescaped() {
+        // `<style>` 은 raw text — 이스케이프하면 엔티티가 안 풀려 규칙이 죽는다.
+        // CNN 실측: `>` 671건이 전부 `&gt;` 가 되어 규칙 98개가 사라졌다.
+        let html = "<style>.a>div:nth-child(3){width:calc(33.33% - 16px)}</style>";
+        let out = transform(html, &opts()).unwrap().html;
+        assert!(
+            out.contains(".a>div:nth-child(3)"),
+            "자식 결합자가 이스케이프됐다: {out}"
+        );
+        assert!(!out.contains("&gt;"), "스타일 안에 &gt; 가 새어 들어갔다: {out}");
+        // `<` 도 마찬가지다 (미디어 쿼리 range 문법).
+        let ranged = transform("<style>@media (400px<width<800px){.b{color:red}}</style>", &opts()).unwrap().html;
+        assert!(!ranged.contains("&lt;"), "미디어 쿼리 range 가 이스케이프됐다: {ranged}");
     }
 
     #[test]
