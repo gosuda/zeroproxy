@@ -2829,3 +2829,75 @@ naver/wikipedia/github 렌더 정상, 탐지기 0건. 변이 1/1.
 - 같은 파일 안에 이미 올바른 선례가 있는데 새 경로가 그걸 안 따라가는 사고가
   이 저장소에서 반복된다(오늘만 `setAttributeNS` 부분집합, 속성 표면 목록,
   그리고 이것). **"옆에 있는 같은 종류의 코드는 무엇을 하나" 를 먼저 본다.**
+
+## <a id="모듈-url-두-벌"></a>같은 모듈이 두 URL 로 로드돼 React 가 두 개가 됐다 (2026-09-04, GitHub)
+
+`rendercheck` 에 레이아웃 축을 넣자마자 GitHub 이 걸렸다(height 15%). 들여다보니
+레이아웃이 아니라 **GitHub 이 자기 에러 페이지를 그리고 있었다** — 문서는 200,
+`<title>` 은 마케팅 문구 그대로, `raw=0/csp=0/err=0`.
+
+### 찾아가는 길
+
+1. **문서 응답은 200 이고 HTML 에 마케팅 내용이 다 들어 있다**(`marketing: true`).
+   즉 서버가 에러를 준 게 아니라 **클라이언트가 갈아치웠다.** 에러 UI 의 조상은
+   `react-app.loaded` 안의 `ErrorPage-module__Heading__…` — React 에러 경계다.
+2. 콘솔에는 예외가 없다(경계가 삼킨다). `debugger-arm --strategy exceptions` 로
+   **엔진이 던지는** 예외를 잡았다: 501건.
+
+```
+  205  Error
+  138  Error: Minified React error #321        ← 훅 규칙 위반
+  112  TypeError: Illegal invocation
+   12  TypeError: Cannot destructure property 'routeContext' of 'undefined'
+    6  Cannot destructure property 'client' of 'undefined'
+```
+
+3. `Illegal invocation` 112건은 **우리 것이지만 정상**이다 — `isNativeLocation`
+   의 브랜드 체크가 일부러 네이티브 게터를 불러 보고 `catch` 한다. 디버거는
+   **잡힌 예외까지** 보여 주므로 노이즈다. (`href`/`origin`/`host` 는 평범한
+   객체에도 흔한 이름이라 이 경로가 자주 발화한다.)
+4. 진짜 신호는 **React #321 + 컨텍스트가 `undefined`** — React 가 두 벌일 때의
+   전형이다. 네트워크 테이프에서 확인:
+
+```
+같은 자산이 서로 다른 쿼리로 = 15건
+  react-core-…js   [kind=module]   [kind=module&ref=https%3A%2F%2Fgithub.com%2F]
+  react-lib-…js    [kind=module]   [kind=module&ref=https%3A%2F%2Fgithub.com%2F]
+  …
+```
+
+### 원인
+
+모듈 URL 을 만드는 곳이 **두 층**인데 모양이 달랐다:
+
+| 층 | 모양 |
+|---|---|
+| Rust 리라이터 (정적 `import`) | `?u=<타깃>&kind=module` — ref 없음, `u`→`kind` |
+| JS 프렐류드 (동적 로드) | `?kind=module&u=<타깃>&ref=<가상 URL>` |
+
+ES 모듈은 **URL 이 곧 정체성**이라 같은 모듈이 모듈 맵에 두 벌 올라간다.
+게다가 `withCurrentRef` 가 `ref` 를 **현재 가상 URL 로 계속 갱신**하므로,
+문서 URL 이 바뀌면 또 새 URL 이 된다 — 시간에 따라 변하는 값이 식별자에 들어가
+있었다.
+
+### 고침
+
+`kind === 'module'` 이면 프렐류드도 Rust 와 **바이트 단위로 같은** 정규형
+(`?u=…&kind=module`)을 쓴다. classic 은 모듈 맵이 없어 URL 정체성 문제가 없으므로
+`ref` 를 유지한다(CF 챌린지 타이밍 때문에 필요하다).
+
+실측: GitHub 로드에서 **중복 모듈 15건 → 0건**, module URL 의 `ref` 0건.
+
+### ★그런데 GitHub 은 아직 안 고쳐졌다
+
+고친 직후 한 번은 정상 페이지가 나왔다(h1 = "The future of building happens
+together", 본문 5,675자, 높이 10,778 — 대조군 6,045 / 10,996). **그 한 번을 보고
+"고쳐졌다" 고 판단한 것이 성급했다.** 같은 절차로 3회 반복하니 **3/3 모두** 다시
+에러 페이지였다(본문 1,085자, 높이 1,718).
+
+즉 모듈 URL 분열은 **진짜 결함이고 고쳤지만**(중복 15→0 으로 측정됨) GitHub
+에러 페이지의 **원인은 아니었다**. 남은 후보는 React #321 을 만드는 다른 경로다.
+
+**교훈**: 한 번의 성공은 수정의 증거가 못 된다. 특히 이 세션에서 "관측 창"
+아티팩트로 두 번 속은 뒤였는데도 또 밟았다. 고친 뒤에는 **최소 3회 반복**하고
+그 결과를 보고한다.

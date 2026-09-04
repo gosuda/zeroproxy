@@ -5612,6 +5612,27 @@
     // 를 심고 곧바로 챌린지 스크립트를 append 한 뒤 onload 에서 되돌린다.
     // 토큰이 빠진 Referer 로 받아 온 스크립트는 페이지 상태와 어긋나 VM 이
     // 엉뚱한 핸들러로 디스패치하고 `undefined.call` 로 죽는다.
+    // ★모듈은 **URL 이 곧 정체성**이다 — `ref` 를 넣으면 안 된다 (2026-09-04).
+    //
+    // 정적 `import` 는 Rust 리라이터가 `?u=<타깃>&kind=module` 로 바꾸고(ref 없음,
+    // 순서도 u→kind), 동적 경로는 여기서 `?kind=…&u=…&ref=<가상 URL>` 로 만들었다.
+    // 같은 모듈이 **두 URL** 이 되니 모듈 맵에 두 벌이 올라간다.
+    //
+    // GitHub 실측: react-core / react-lib 을 포함해 15개 모듈이 두 벌씩 로드됐다.
+    // React 가 두 개면 훅이 깨진다 — `Minified React error #321` 138건,
+    // `Cannot destructure property 'routeContext' of 'undefined'` 12건이 뒤따르고,
+    // 마지막에 GitHub 자신의 에러 경계가 ErrorPage 를 그린다. 문서 자체는 200 이고
+    // `<title>` 도 그대로라 title/raw/csp/err 축이 전부 통과했다.
+    //
+    // `ref` 는 그대로 둘 값이 아니다: `withCurrentRef` 가 이걸 **현재 가상 URL 로
+    // 계속 갱신**하므로, 문서 URL 이 바뀌면 같은 모듈이 또 새 URL 이 된다.
+    // 시간에 따라 변하는 값은 모듈 식별자에 들어갈 수 없다.
+    //
+    // classic 스크립트는 모듈 맵이 없어 URL 정체성 문제가 없으므로 ref 를 유지한다
+    // (CF 챌린지 타이밍 때문에 필요하다 — 아래 주석 참고). 모듈은 Rust 쪽과
+    // **바이트 단위로 같은** 정규형을 쓰고, Referer 는 SW 가 요청의
+    // `request.referrer` 에서 유도한다(referrerFromBrowserHeader).
+    if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + encodeURIComponent(target) + '&kind=module';
     return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href);
   }
   // 프록시 api URL 의 `ref` 파라미터를 현재 가상 URL 로 바꿔 준다.

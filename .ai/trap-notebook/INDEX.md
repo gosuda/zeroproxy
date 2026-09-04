@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-04 | rewriter / module | **모듈 URL 을 두 층이 다르게 만들어(ref 유무·순서) 같은 모듈이 두 벌 로드 → React 두 개. 15→0 으로 고쳤으나 GitHub 에러 페이지는 3/3 잔존.** | rewriter.md#모듈-url-두-벌 |
 | 2026-09-04 | real-site-compat | **회귀 축에 레이아웃이 없어 GitHub 이 내내 에러 페이지였다 — title 은 그대로라 통과. height/aboveFold/styleEntities 축 신설(양성 대조 303%/837).** | real-site-compat.md#레이아웃-축-없음 |
 | 2026-09-04 | build-deploy | **`npm run build` 의 clean 이 dist 를 먼저 비운다 — 툴체인이 없으면 멀쩡하던 서버 바이너리까지 잃는다. 빌드 전 `command -v` 로 확인할 것.** | build-deploy.md#빌드-clean-이-유일본을-지운다 |
 | 2026-08-26 | htmltx / CSS | **`<style>` 을 ContentType::Text 로 내보내 `>` 671건이 `&gt;` 가 됐다 — 규칙 98개 파싱 실패, 페이지 높이 3배, 라이브 플레이어가 화면 밖으로 밀려 정지.** | rewriter.md#style-raw-text-이스케이프 |

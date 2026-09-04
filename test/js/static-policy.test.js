@@ -4891,3 +4891,38 @@ test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => 
   assert.ok(guard > 0, 'fetch 가 인라인 규칙을 안 쓴다');
   assert.ok(guard < target, '규칙이 타깃 계산 뒤에 있으면 이미 프록시로 갔다');
 });
+
+// ── 모듈 URL 은 두 층이 같은 정규형을 써야 한다 (2026-09-04) ──────────
+//
+// ES 모듈은 URL 이 곧 정체성이다. 정적 import 는 Rust 리라이터가,
+// 동적 로드는 프렐류드가 URL 을 만드는데 모양이 달랐다:
+//   Rust     ?u=<타깃>&kind=module            (ref 없음, u→kind)
+//   프렐류드  ?kind=module&u=<타깃>&ref=<가상 URL>
+// 같은 모듈이 두 URL 이 되어 모듈 맵에 두 벌 올라간다. GitHub 실측:
+// react-core/react-lib 포함 15개가 두 벌씩 로드 → React 두 개 →
+// Minified React error #321 138건 → 에러 경계가 ErrorPage 를 그렸다.
+// 문서는 200 이고 <title> 도 그대로라 기존 축이 전부 통과했다.
+test('모듈 URL 은 두 층이 같은 정규형을 쓴다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rs = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8').split('\r\n').join('\n');
+
+  // ① 프렐류드는 module 을 ref 없이, u→kind 순서로 만든다.
+  const i = rt.indexOf('  function scriptProxyPath(target, kind) {');
+  assert.ok(i > 0, 'scriptProxyPath 가 없다');
+  const body = rt.slice(i, rt.indexOf('\n  }', i));
+  const modLine = body.split('\n').find((l) => l.includes("kind === 'module'"));
+  assert.ok(modLine, '모듈 전용 분기가 없다 — ref 가 모듈 URL 에 섞인다');
+  assert.ok(!modLine.includes('ref'), '모듈 URL 에 ref 가 들어간다 — 모듈 맵이 갈라진다');
+  assert.ok(modLine.indexOf("'?u='") < modLine.indexOf("&kind=module"),
+    '모듈 URL 의 파라미터 순서가 Rust 쪽과 다르다');
+
+  // ② classic 은 ref 를 유지해야 한다 (CF 챌린지 타이밍).
+  assert.ok(body.includes("'&ref=' + encodeURIComponent(virtualURL.href)"),
+    'classic 스크립트의 ref 가 사라졌다');
+
+  // ③ 두 층의 문자열이 실제로 같은 모양인가 — 한쪽만 바뀌면 여기서 걸린다.
+  const rustLine = rs.split('\n').find((l) => l.includes('/zp/api/script?u=') && l.includes('kind=module') && l.includes('format!'));
+  assert.ok(rustLine, 'Rust 쪽 모듈 URL 생성부를 못 찾았다');
+  assert.ok(rustLine.includes('?u={encoded}&kind=module'),
+    'Rust 쪽 모듈 URL 모양이 바뀌었다 — 프렐류드와 맞춰야 한다: ' + rustLine.trim());
+});
