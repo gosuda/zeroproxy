@@ -2901,3 +2901,89 @@ together", 본문 5,675자, 높이 10,778 — 대조군 6,045 / 10,996). **그 �
 **교훈**: 한 번의 성공은 수정의 증거가 못 된다. 특히 이 세션에서 "관측 창"
 아티팩트로 두 번 속은 뒤였는데도 또 밟았다. 고친 뒤에는 **최소 3회 반복**하고
 그 결과를 보고한다.
+
+## <a id="window-메서드-바인딩-목록"></a>`globalThis.structuredClone(x)` 한 줄이 GitHub 홈을 통째로 죽였다 (2026-09-04)
+
+스코프 프록시가 **손수 고른 목록**(`WINDOW_BOUND_METHODS`)에 든 window 메서드만
+`root` 에 바인딩했다. 목록에 없는 것은 그대로 나가므로, 페이지가
+
+```js
+globalThis.structuredClone(e)
+```
+
+처럼 부르면 수신자가 **프록시**가 되어 네이티브 브랜드 체크가 실패한다 —
+`TypeError: Illegal invocation`.
+
+실측으로 뚫려 있던 것: `structuredClone` / 마이크로태스크 큐 API / `reportError`
+/ `getSelection`. 목록에 든 `matchMedia`·`getComputedStyle`·`atob`·`setTimeout`·
+`requestAnimationFrame`·`scrollTo` 등은 정상이었다 — **통과/실패가 목록과 정확히
+일치**했다.
+
+### 어디까지 갔나
+
+GitHub 홈이 자기 `ErrorPage` 를 그리고 있었다. 문서는 **200**, HTML 에 마케팅
+내용이 다 있고, `<title>` 도 그대로다. `raw=0 / csp=0 / err=0` 이라 기존 회귀
+축이 전부 통과했다(그래서 이 세션에서 "github 정상" 을 세 번 잘못 보고했다).
+
+콘솔에는 예외가 없다 — React 에러 경계가 삼킨다. `debugger-arm --strategy
+exceptions` 로만 보인다:
+
+```
+501건 중  138  Minified React error #321      ← 훅 규칙 위반(연쇄)
+          112  TypeError: Illegal invocation
+           24  컨텍스트가 undefined 계열
+```
+
+`#321` 첫 발생 **바로 직전**(index 82)이 진짜 원인이었다:
+
+```
+TypeError: Illegal invocation
+  s  @ sg-2a07a18513145f3b.js:2:10964     ← GitHub 코드, 우리 프렐류드를 안 지난다
+  r  @ sg-…
+  aj @ landing-pages-…                     ← 컴포넌트
+  l5 @ react-lib-…                         ← 렌더 중
+```
+
+원본 자산을 직접 받아(`curl`) 그 함수를 보니 한 줄이었다:
+
+```js
+let t = "function" == typeof globalThis.structuredClone
+      ? globalThis.structuredClone(e) : JSON.parse(JSON.stringify(e));
+```
+
+### 함정: `Illegal invocation` 112건 중 대부분은 **정상**이다
+
+`isNativeLocation` 이 브랜드 체크로 네이티브 게터를 일부러 불러 보고 `catch`
+한다. `debugger-arm` 은 **잡힌 예외까지** 보여 주므로 이게 노이즈로 쌓인다
+(`href`/`origin`/`host` 는 평범한 객체에도 흔한 이름이라 자주 발화한다).
+한동안 이걸 범인으로 쫓았다 — **잡힌 예외와 안 잡힌 예외를 먼저 갈라야 한다.**
+
+### 고침 — 목록이 아니라 규칙
+
+**`prototype` 이 없는 네이티브 함수만** 바인딩한다.
+
+- 네이티브 메서드(`structuredClone`, `matchMedia`, `getSelection` …)는 `prototype` 이 없다
+- 생성자/클래스(`URL`, `Promise`, `Worker` …)는 `prototype` 이 있다 — 바인딩하면 `new` 가 깨진다
+- 페이지가 window 에 얹은 자기 함수는 `[native code]` 가 아니므로 건드리지 않는다
+  (바인딩하면 `obj.f = window.f; obj.f()` 의 `this` 가 바뀐다)
+
+### 실측 (3회 반복)
+
+| | 고치기 전 | 고친 뒤 | 대조군 |
+|---|---|---|---|
+| `h1` | ErrorLooks like something went wrong! | The future of building happens together | 동일 |
+| 본문 | 1,085자 | **6,045자** | 6,045자 |
+| 높이 | 1,718 | **10,996** | 10,996 |
+| 스코프 프록시 호출 실패 | 4/13 | **0/13** | — |
+
+`rendercheck` 4개 사이트 전부 OK(github height 100%, els 1788/1791).
+static 160, cargo workspace 전부 통과. 변이 3/3.
+
+### 교훈 — 이 저장소에서 **네 번째** 같은 사고다
+
+srcset 후보 분리, HTML 엔티티 표, `data-zp-*` 속성 표면, 그리고 이번 window
+메서드 바인딩. 전부 "손으로 고른 목록" 이 시간이 지나며 뚫렸다. **명세가 열려
+있는 표면(전역 메서드, 속성 이름, 엔티티)은 목록으로 따라갈 수 없다.**
+
+그리고 `<title>` 은 페이지가 살아 있다는 증거가 못 된다 — SPA 는 타이틀을
+유지한 채 본문만 에러 화면으로 갈아치운다.

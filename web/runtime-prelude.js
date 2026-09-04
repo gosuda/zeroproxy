@@ -1427,6 +1427,30 @@
 
 
   function installPhase2Membrane() {
+    // ★네이티브 **메서드**는 window 수신자가 필요하다 — 목록이 아니라 규칙으로.
+    //
+    // 예전에는 WINDOW_BOUND_METHODS 라는 손수 고른 목록만 바인딩했다. 목록에
+    // 없는 것은 스코프 프록시가 그대로 돌려주므로, 페이지가
+    // `globalThis.structuredClone(x)` 처럼 부르면 수신자가 **프록시**가 되어
+    // 브랜드 체크가 실패한다 → TypeError: Illegal invocation.
+    //
+    // GitHub 실측(2026-09-04): `sg-*.js` 의
+    //   let t = "function" == typeof globalThis.structuredClone
+    //         ? globalThis.structuredClone(e) : JSON.parse(JSON.stringify(e));
+    // 이 렌더 도중 던져 React 가 에러 경계로 떨어졌고, GitHub 홈이 통째로
+    // 자기 ErrorPage 를 그렸다. 목록에 없어서 뚫린 것이 structuredClone /
+    // 마이크로태스크 큐 API / reportError / getSelection 넷이었다(실측).
+    //
+    // 판별 규칙: **prototype 이 없는 네이티브 함수**만 바인딩한다.
+    //  - 네이티브 메서드(structuredClone, matchMedia, getSelection…)는 prototype 이 없다
+    //  - 생성자/클래스(URL, Promise, Worker…)는 prototype 이 있다 — 바인딩하면 new 가 깨진다
+    //  - 페이지가 window 에 얹은 자기 함수는 [native code] 가 아니므로 건드리지 않는다
+    //    (그걸 바인딩하면 `obj.f = window.f; obj.f()` 의 this 가 바뀐다)
+    function needsWindowReceiver(fn) {
+      if (typeof fn !== 'function') return false;
+      try { if (fn.prototype) return false; } catch { return false; }
+      try { return /\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(fn)); } catch { return false; }
+    }
     function boundWindowMethod(target, prop) {
       const fn = target[prop];
       if (typeof fn !== 'function') return fn;
@@ -1780,7 +1804,7 @@
         if (prop === 'postMessage') return postMessageWrapperFor(target);
         const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
         if (dynamic) return dynamic;
-        if (WINDOW_BOUND_METHODS.has(prop)) return boundWindowMethod(target, prop);
+        if (WINDOW_BOUND_METHODS.has(prop) || needsWindowReceiver(target[prop])) return boundWindowMethod(target, prop);
         return target[prop];
       },
       set(target, prop, value) {
