@@ -243,3 +243,36 @@ wait
 5초 뒤 이미 사라져 있었고 URL 도 `/zp/p/…` 였다. 앞서 "20~30초 걸린다" 고 적은
 것은 대기가 0초로 돌던 러너에서 나온 값이라 틀렸다 — 그 러너는 클릭 직후를
 재고 있었을 뿐이다.
+
+## <a id="빌드-clean-이-유일본을-지운다"></a>`npm run build` 의 clean 이 `dist/` 를 먼저 비운다 — 툴체인이 없으면 되돌릴 수 없다 (2026-09-04)
+
+머신의 사용자 프로필이 바뀌면서(`PIPE_TAIL_USER` → `hsng9`) 이전 프로필이 통째로
+사라졌고, 거기 있던 개발 툴체인이 같이 없어졌다:
+
+| | 상태 | 복구 |
+|---|---|---|
+| `taskweaver` | 없음 | 빌드본을 현재 프로필 `~/.cargo/bin` 에 복사 |
+| `wasm-bindgen` | 없음 | `cargo install wasm-bindgen-cli --version 0.2.122 --locked` (Cargo.lock 의 `wasm-bindgen` 버전과 **반드시** 일치) |
+| Go 툴체인 | 없음 | 사용자가 설치(go1.27.0) |
+
+**여기서 밟은 것**: 그 상태로 `npm run build` 를 돌렸더니 clean 단계가 `dist/` 를
+먼저 비우고 Go 단계에서 죽었다. 그래서 **멀쩡히 돌던 `dist/zeroproxy-server.exe`
+까지 사라졌다** — 빌드가 실패했는데 실행 가능한 산출물은 이미 없어진 뒤다.
+Go 를 설치하기 전까지 프록시를 아예 못 띄웠고 그 사이 모든 브라우저 검증이 막혔다.
+
+**규칙**: 툴체인이 온전한지 **먼저** 확인하고 빌드한다. 한 줄이면 된다.
+
+```sh
+for t in go wasm-bindgen cargo node; do command -v $t >/dev/null || echo "MISSING: $t"; done
+```
+
+**또 하나**: 새 셸의 PATH 는 세션 시작 시점 환경을 물려받는다. 사용자가 방금 Go 를
+깔아도 `which go` 는 계속 실패한다 — 설치는 됐는데 안 잡히는 것이다. 레지스트리
+머신 PATH 를 보거나(`[Environment]::GetEnvironmentVariable("Path","Machine")`)
+그냥 절대 경로를 앞에 붙인다(`export PATH="/c/Program Files/Go/bin:$PATH"`).
+"없다" 로 단정하기 전에 파일시스템을 직접 봐야 한다.
+
+**세 번째**: 백그라운드 빌드가 도는 동안 `until [ -f dist/... ]` 로 폴링하면
+**이전 빌드가 남긴 파일**을 보고 통과해 버린다. 그 상태로 서버를 띄웠다가 clean
+단계가 dist 를 지워 러너가 통째로 헛돌았다. 파일 존재가 아니라 **작업 완료 알림**을
+기다릴 것.

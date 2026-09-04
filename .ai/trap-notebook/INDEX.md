@@ -9,6 +9,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-04 | real-site-compat | **회귀 축에 레이아웃이 없어 GitHub 이 내내 에러 페이지였다 — title 은 그대로라 통과. height/aboveFold/styleEntities 축 신설(양성 대조 303%/837).** | real-site-compat.md#레이아웃-축-없음 |
+| 2026-09-04 | build-deploy | **`npm run build` 의 clean 이 dist 를 먼저 비운다 — 툴체인이 없으면 멀쩡하던 서버 바이너리까지 잃는다. 빌드 전 `command -v` 로 확인할 것.** | build-deploy.md#빌드-clean-이-유일본을-지운다 |
 | 2026-08-26 | htmltx / CSS | **`<style>` 을 ContentType::Text 로 내보내 `>` 671건이 `&gt;` 가 됐다 — 규칙 98개 파싱 실패, 페이지 높이 3배, 라이브 플레이어가 화면 밖으로 밀려 정지.** | rewriter.md#style-raw-text-이스케이프 |
 | 2026-08-26 | membrane | **비-HTTP 스킴이 세 군데서 죽었다: URL 게터가 읽자마자 throw / createObjectURL 이 MediaSource 를 HTML 로 교체 / fetch 가 blob 을 프록시로. CNN 비디오 세그먼트 1→48.** | rewriter.md#비-http-스킴-세-겹 |
 | 2026-08-26 | real-site-compat | **CNN 2차 정지는 9회/4변종 재현 실패. 유력 후보(clients.get 교착)는 변이로 반증 — 서명이 "로드 미완" 이지 "먹통" 이 아니다. 남은 차이는 프레임 25~29 vs 33.** | real-site-compat.md#cnn-2차정지-재현불가 |
