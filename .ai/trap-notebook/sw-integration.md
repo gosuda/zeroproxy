@@ -160,3 +160,4 @@
 - **수정:** SW가 검증된 entry의 Origin·고정 browser persona·목적지 jar 쿠키를 초기화 전에 캡처해 커널로 전달한다. 커널은 지정된 헤더만 허용하고 CR/LF/NUL을 거절한다.
 - **검증:** 실제 E2E handshake의 UA·Origin·쿠키와 subprotocol echo/명시 close 결과를 확인한다. 헤더 신원 수정은 원격 anti-bot 통과 보장이 아니다.
 - **Close 경계:** Close frame 직후 yamux FIN을 보내면 Go relay의 양방향 종료가 peer echo를 잘라 1006이 된다. frame을 flush한 뒤 실제 peer Close를 받고 종료한다. peer code/reason만 보고하며 실패·조기 취소는 1006/unclean이다.
+- **검증:** [a484e7b CI](https://github.com/gosuda/zeroproxy/actions/runs/34025734224)에서 WS echo/UA/Origin/Cookie, 정상 1000·명시 3001/finished 종료, 조기 취소 1006/unclean 통과. 같은 run의 H1 첫 chunk는 3.3ms였고 framing·압축 오류·idle cancel 검사도 통과했다.
