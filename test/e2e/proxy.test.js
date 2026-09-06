@@ -363,17 +363,29 @@ function createTargetServer(requests) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Srcdoc Probe</title><button id="navigate">Navigate top</button><script>
         const child = document.createElement('iframe');
+        window.__srcdocProgress = [];
         window.addEventListener('message', event => {
           if (event.data && event.data.type === 'srcdoc-ready') window.__srcdocProbe = event.data;
+          if (event.data && event.data.type === 'srcdoc-navigation') window.__srcdocProgress.push(event.data);
         });
         child.srcdoc = ${JSON.stringify(`<script>
           parent.postMessage({ type: 'srcdoc-ready', href: top.location.href, origin: top.location.origin }, '*');
           window.addEventListener('message', event => {
-            if (event.data === 'navigate-top') top.location.href = 'http://127.0.0.1:${server.address().port}/next';
+            if (event.data !== 'navigate-top') return;
+            parent.postMessage({ type: 'srcdoc-navigation', stage: 'received' }, '*');
+            try {
+              top.location.href = 'http://127.0.0.1:${server.address().port}/next';
+              parent.postMessage({ type: 'srcdoc-navigation', stage: 'requested' }, '*');
+            } catch (error) {
+              parent.postMessage({ type: 'srcdoc-navigation', stage: 'error', error: error.stack || String(error) }, '*');
+            }
           });
         </script>`).replace(/</g, '\\u003c')};
         document.body.appendChild(child);
-        document.querySelector('#navigate').addEventListener('click', () => child.contentWindow.postMessage('navigate-top', '*'));
+        document.querySelector('#navigate').addEventListener('click', () => {
+          window.__srcdocSent = true;
+          child.contentWindow.postMessage('navigate-top', '*');
+        });
       </script>`);
       return;
     }
@@ -1779,6 +1791,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(virtualHref, `http://127.0.0.1:${targetPort}/next`);
       assert.ok(requests.some(r => r.url === '/next' && r.host === `127.0.0.1:${targetPort}` && r.userAgent === TARGET_UA));
     } finally {
+      try {
+        const progress = await probePage.evaluate(() => ({ sent: window.__srcdocSent, progress: window.__srcdocProgress }));
+        fs.writeFileSync(path.join(artifacts, 'srcdoc-progress.json'), JSON.stringify(progress, null, 2));
+      } catch {}
       await saveArtifacts('srcdoc', probePage);
       await context.close();
     }
