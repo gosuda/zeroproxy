@@ -1311,8 +1311,14 @@
     // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
     // 케이스만 wrap 통해 변환 + native call.
     const wrapped = function postMessage(message, targetOrigin, transfer) {
+      // WindowProxy survives about:blank -> srcdoc/navigation, but its native
+      // postMessage belongs to the current inner Window. A cached old method
+      // can silently deliver to the discarded document instead.
+      const currentPm = target.postMessage;
+      const currentNative = currentPm && currentPm[earlyNativeKey] || currentPm;
+      const invoke = currentNative === wrapped ? originalPm : currentNative;
       const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
-      return arguments.length > 2 ? Reflect.apply(originalPm, target, [message, mapped, transfer]) : Reflect.apply(originalPm, target, [message, mapped]);
+      return arguments.length > 2 ? Reflect.apply(invoke, target, [message, mapped, transfer]) : Reflect.apply(invoke, target, [message, mapped]);
     };
     maskNativeFunction(wrapped, 'postMessage');
     postMessageWrappers.set(target, wrapped);
