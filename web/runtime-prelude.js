@@ -553,6 +553,7 @@
       htmlDataset: w.HTMLElement && Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, 'dataset'),
       svgDataset: w.SVGElement && Object.getOwnPropertyDescriptor(w.SVGElement.prototype, 'dataset'),
       namedSetNamedItem: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItem,
+      namedSetNamedItemNS: w.NamedNodeMap && w.NamedNodeMap.prototype.setNamedItemNS,
       attrValue: w.Attr && Object.getOwnPropertyDescriptor(w.Attr.prototype, 'value'),
       matches: w.Element.prototype.matches,
       closest: w.Element.prototype.closest,
@@ -2682,7 +2683,7 @@
       this._closingReason = '';
       const plist = protocolList(protocols);
       this._requestedProtocols = plist;
-      postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId }).then(reply => {
+      postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId, entryId: activeEntryId }).then(reply => {
         if (this._closed) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
         const negotiated = String(reply.protocol || '');
         // RFC 6455 §4.2.2: server must pick from the offered list.
@@ -2816,43 +2817,88 @@
 
   function installWebSocketStream() {
     if (!root.WebSocket || !root.ReadableStream || !root.WritableStream) return;
+    const states = new WeakMap();
+    const stateOf = receiver => {
+      const state = states.get(receiver);
+      if (!state) throw new TypeError('Illegal invocation');
+      return state;
+    };
     function ZPWebSocketStream(url, options = {}) {
-      if (!(this instanceof ZPWebSocketStream)) throw new TypeError("Failed to construct 'WebSocketStream': Please use the 'new' operator.");
-      let closeResolve;
-      this.closed = new Promise(resolve => { closeResolve = resolve; });
-      this.opened = new Promise((resolve, reject) => {
-        let ws;
-        let settled = false;
-        let controllerReadable = null;
-        const failOpen = err => { if (!settled) { settled = true; reject(err); } };
-        try {
-          ws = new root.WebSocket(url, options && options.protocols);
-          ws.binaryType = 'arraybuffer';
-          const readable = new root.ReadableStream({
-            start(controller) { controllerReadable = controller; },
-            cancel() { try { ws.close(); } catch {} }
-          });
-          const writable = new root.WritableStream({
-            write(chunk) { ws.send(chunk); },
-            close() { ws.close(); },
-            abort() { ws.close(); }
-          });
-          ws.onopen = () => { settled = true; resolve({ readable, writable, protocol: ws.protocol, extensions: ws.extensions || '' }); };
-          ws.onmessage = event => { if (controllerReadable) controllerReadable.enqueue(event.data); };
-          ws.onerror = err => { if (!settled) failOpen(err); else if (controllerReadable) { try { controllerReadable.error(err); } catch {} } };
-          ws.onclose = event => {
-            if (!settled) failOpen(normalizedError('NetworkError'));
-            try { controllerReadable && controllerReadable.close(); } catch {}
-            closeResolve({ closeCode: event.code, reason: event.reason });
-          };
-        } catch (err) {
-          failOpen(err);
-        }
+      if (!new.target) throw new TypeError("Failed to construct 'WebSocketStream': Please use the 'new' operator.");
+      if (!arguments.length) throw new TypeError('WebSocketStream requires a URL');
+      options = options || {};
+      const ws = new root.WebSocket(url, options.protocols);
+      ws.binaryType = 'arraybuffer';
+      let openResolve, openReject, closeResolve, closeReject;
+      let readableController, writableController;
+      let opened = false, finished = false, canceled = false;
+      const state = {
+        ws,
+        opened: new Promise((resolve, reject) => { openResolve = resolve; openReject = reject; }),
+        closed: new Promise((resolve, reject) => { closeResolve = resolve; closeReject = reject; })
+      };
+      states.set(this, state);
+      // Both promises remain rejectable for consumers; an unused lifecycle
+      // promise must not create an unrelated unhandled rejection.
+      state.opened.catch(() => {});
+      state.closed.catch(() => {});
+      const signal = options.signal;
+      const cleanup = () => { if (signal) signal.removeEventListener('abort', abort); };
+      const fail = error => {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        if (!opened) openReject(error);
+        closeReject(error);
+        if (!canceled) readableController.error(error);
+        writableController.error(error);
+      };
+      const readable = new root.ReadableStream({
+        start(controller) { readableController = controller; },
+        cancel() { canceled = true; ws.close(); return state.closed.then(() => undefined); }
       });
+      const writable = new root.WritableStream({
+        start(controller) { writableController = controller; },
+        write(chunk) {
+          if (ws.readyState !== 1) throw normalizedError('InvalidStateError');
+          ws.send(chunk);
+        },
+        close() { ws.close(); return state.closed.then(() => undefined); },
+        abort() { ws.close(); return state.closed.then(() => undefined); }
+      });
+      function abort() { fail(signal.reason || normalizedError('AbortError')); ws.close(); }
+      ws.onopen = () => {
+        if (finished) return;
+        opened = true;
+        cleanup();
+        openResolve({ readable, writable, protocol: ws.protocol, extensions: ws.extensions || '' });
+      };
+      ws.onmessage = event => { if (!finished && !canceled) readableController.enqueue(event.data); };
+      ws.onerror = () => fail(normalizedError('NetworkError'));
+      ws.onclose = event => {
+        if (finished) return;
+        if (!opened || !event.wasClean) { fail(normalizedError('NetworkError')); return; }
+        finished = true;
+        cleanup();
+        if (!canceled) readableController.close();
+        closeResolve({ closeCode: event.code, reason: event.reason });
+      };
+      if (signal) {
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+      }
     }
-    try { Object.defineProperty(ZPWebSocketStream, 'name', { value: 'WebSocketStream', configurable: true }); } catch {}
-    ZPWebSocketStream.prototype.constructor = ZPWebSocketStream;
-    maskNativeFunction(ZPWebSocketStream, 'WebSocketStream');
+    Object.defineProperties(ZPWebSocketStream.prototype, {
+      url: { get() { return stateOf(this).ws.url; }, enumerable: true },
+      opened: { get() { return stateOf(this).opened; }, enumerable: true },
+      closed: { get() { return stateOf(this).closed; }, enumerable: true }
+    });
+    define(ZPWebSocketStream.prototype, 'close', function close(options = {}) {
+      const ws = stateOf(this).ws;
+      options = options || {};
+      ws.close(options.closeCode, options.reason);
+    });
+    brandLikeNative(ZPWebSocketStream, ZPWebSocketStream.prototype, 'WebSocketStream');
     define(root, 'WebSocketStream', ZPWebSocketStream);
   }
 
@@ -2909,7 +2955,7 @@
       submitForm(f, ev.submitter);
     }, true);
     if (Native.formSubmit) define(HTMLFormElement.prototype, 'submit', function() { submitForm(this); });
-    if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { submitForm(this, submitter); });
+    if (Native.formRequestSubmit) define(HTMLFormElement.prototype, 'requestSubmit', function(submitter) { return Native.formRequestSubmit.apply(this, arguments); });
     if (Native.locationAssign) define(Location.prototype, 'assign', function(u) { setVirtualLocation(u); });
     if (Native.locationReplace) define(Location.prototype, 'replace', function(u) { setVirtualLocation(u, true); });
     if (Native.locationReload) define(Location.prototype, 'reload', function() { Native.locationReload(); });
@@ -3008,8 +3054,9 @@
       return raw === 'multipart/form-data' || raw === 'text/plain' ? raw : 'application/x-www-form-urlencoded';
     }
     function formEntryValue(v) { return v && typeof v === 'object' && typeof v.name === 'string' && typeof v.size === 'number' ? v.name : String(v); }
-    function urlEncodedFormBody(data) { const qs = new URLSearchParams(); for (const [k, v] of data) qs.append(k, formEntryValue(v)); return qs.toString(); }
-    function plainFormBody(data) { const out = []; for (const [k, v] of data) out.push(String(k) + '=' + formEntryValue(v)); return out.join('\r\n'); }
+    function formLineEndings(value) { return String(value).replace(/\r\n|\r|\n/g, '\r\n'); }
+    function urlEncodedFormBody(data) { const qs = new URLSearchParams(); for (const [k, v] of data) qs.append(formLineEndings(k), formLineEndings(formEntryValue(v))); return qs.toString(); }
+    function plainFormBody(data) { const out = []; for (const [k, v] of data) out.push(formLineEndings(k) + '=' + formLineEndings(formEntryValue(v)) + '\r\n'); return out.join(''); }
     function clickNavigationTarget(ev) {
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
@@ -4745,13 +4792,36 @@
   // 진짜 DOM 은 `el.attributes === el.attributes` 가 true 다. 접근마다 새
   // 프록시를 만들면 그 자체가 후킹을 드러낸다(컬렉션 메서드 동일성과 같은 이유).
   const namedNodeMapCache = new WeakMap();
-  function filteredNamedNodeMap(raw) {
+  const namedNodeMapOwners = new WeakMap();
+  function filteredNamedNodeMap(raw, owner) {
     if (!raw) return raw;
+    namedNodeMapOwners.set(raw, owner);
     const hit = namedNodeMapCache.get(raw);
     if (hit) return hit;
     const wrapped = filteredCollection(raw, attr => attr && !isZPAttrName(attr.name));
+    namedNodeMapOwners.set(wrapped, owner);
     namedNodeMapCache.set(raw, wrapped);
     return wrapped;
+  }
+  function attachAttributeNode(el, attr, namespaced) {
+    const attach = namespaced ? Native.setAttributeNodeNS : Native.setAttributeNode;
+    if (!attr || attr.nodeType !== 2 || (attr.ownerElement && attr.ownerElement !== el)) return attach.call(el, attr);
+    if (isZPAttrName(attr.name)) return null;
+    const ns = attr.namespaceURI;
+    const previous = namespaced ? Native.getAttributeNodeNS.call(el, ns, attr.localName) : Native.getAttributeNode.call(el, attr.name);
+    if (previous === attr) return attr;
+    const previousValue = previous && Native.attrValue.get.call(previous);
+    // Never attach a raw executable URL, even briefly. The existing setter
+    // owns URL activation, srcdoc, CSS, handlers and private metadata policy.
+    const value = Native.attrValue.get.call(attr);
+    if (ns) el.setAttributeNS(ns, attr.name, value);
+    else el.setAttribute(attr.name, value);
+    const mapped = Native.getAttributeNodeNS.call(el, ns, attr.localName);
+    if (!mapped) return previous;
+    Native.attrValue.set.call(attr, Native.attrValue.get.call(mapped));
+    attach.call(el, attr);
+    if (previous && previous.ownerElement === null) Native.attrValue.set.call(previous, previousValue);
+    return previous;
   }
   // ★`data-zp-*` 이름공간을 **규칙으로** 닫는다(2026-08-26).
   //
@@ -4834,10 +4904,10 @@
     // Attr 노드를 통한 쓰기도 같은 규칙. 진짜 브라우저는 교체된 Attr 이나 null
     // 을 돌려주므로 null 이 정직한 "없었다" 다.
     if (Native.setAttributeNode) define(E, 'setAttributeNode', function(attr) {
-      return attr && isZPAttrName(attr.name) ? null : Native.setAttributeNode.call(this, attr);
+      return attachAttributeNode(this, attr, false);
     });
     if (Native.setAttributeNodeNS) define(E, 'setAttributeNodeNS', function(attr) {
-      return attr && isZPAttrName(attr.name) ? null : Native.setAttributeNodeNS.call(this, attr);
+      return attachAttributeNode(this, attr, true);
     });
     if (Native.removeAttributeNode) define(E, 'removeAttributeNode', function(attr) {
       return attr && isZPAttrName(attr.name) ? attr : Native.removeAttributeNode.call(this, attr);
@@ -5440,8 +5510,24 @@
       }
       return Native.setAttributeNS.call(this, ns, k, key.startsWith('on') && key.length > 2 ? rewriteEventAttribute(String(v)) : v);
     });
-    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) { if (attr && isZPAttrName(attr.name)) return null; if (attr && String(attr.name || '').toLowerCase().startsWith('on')) attr.value = rewriteEventAttribute(String(attr.value || '')); return Native.namedSetNamedItem.call(this, attr); });
-    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', { get() { const masked = visibleIconAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; }, set(v) { Native.attrValue.set.call(this, String(this.name || '').toLowerCase().startsWith('on') ? rewriteEventAttribute(String(v)) : v); }, configurable: false }); } catch {}
+    if (Native.namedSetNamedItem && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItem', function(attr) {
+      const owner = namedNodeMapOwners.get(this);
+      return owner ? attachAttributeNode(owner, attr, false) : Native.namedSetNamedItem.call(this, attr);
+    });
+    if (Native.namedSetNamedItemNS && w.NamedNodeMap) define(w.NamedNodeMap.prototype, 'setNamedItemNS', function(attr) {
+      const owner = namedNodeMapOwners.get(this);
+      return owner ? attachAttributeNode(owner, attr, true) : Native.namedSetNamedItemNS.call(this, attr);
+    });
+    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', {
+      get() { const masked = visibleIconAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; },
+      set(v) {
+        const owner = this.ownerElement;
+        if (!owner) return Native.attrValue.set.call(this, v);
+        if (this.namespaceURI) return owner.setAttributeNS(this.namespaceURI, this.name, v);
+        return owner.setAttribute(this.name, v);
+      },
+      configurable: false
+    }); } catch {}
     define(w.Element.prototype, 'getAttribute', function(k) {
       const key = String(k).toLowerCase();
       if (isZPAttrName(key)) return null;
@@ -5515,7 +5601,7 @@
       if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
       return names;
     });
-    if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this)); }, configurable: false }); } catch {}
+    if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
     installZPAttrNamespace(w);
     installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
     installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
@@ -7126,7 +7212,7 @@
   // When `boot.wtGateway` is empty (operator hasn't set `-wt-public-url`)
   // or the browser lacks native WT, we fall back to the rejected-
   // promise stub so target code's `.ready.catch(...)` branch fires
-  // cleanly. The stub path also covers the legacy WebSocketStream slot.
+  // cleanly.
   function makeWebTransportConstructor() {
     const NativeWT = Native.WebTransport;
     const gateway = (boot && typeof boot.wtGateway === 'string' && boot.wtGateway) ? boot.wtGateway : '';
@@ -7630,6 +7716,7 @@
     if (root.XMLHttpRequest && !define(w, 'XMLHttpRequest', root.XMLHttpRequest)) throw normalizedError('SecurityError');
     if (root.EventSource && !define(w, 'EventSource', root.EventSource)) throw normalizedError('SecurityError');
     if (root.WebSocket && !define(w, 'WebSocket', root.WebSocket)) throw normalizedError('SecurityError');
+    if (root.WebSocketStream && !define(w, 'WebSocketStream', root.WebSocketStream)) throw normalizedError('SecurityError');
     if (w.navigator && navigator.sendBeacon) define(w.navigator, 'sendBeacon', navigator.sendBeacon.bind(navigator));
     installDOMHooks(w);
     installStealthMembrane(w);
@@ -7659,7 +7746,6 @@
       // signaling routed via `boot.rtcGateway` when set, else legacy
       // stub.
       'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport', ctor: makeWebTransportConstructor },
-      'WebSocketStream': { code: 'WT_UNSUPPORTED', kind: 'WebSocketStream' },
       'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor('RTCPeerConnection') },
       'webkitRTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor('webkitRTCPeerConnection') },
       // RTCDataChannel is not user-constructible; it's returned by

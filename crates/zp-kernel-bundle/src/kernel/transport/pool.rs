@@ -18,8 +18,8 @@
 //! * **Take**: pop the most-recently-used conn for the key (LIFO so the
 //!   warmest TCP/TLS window stays warm). Miss → `None`; caller opens a
 //!   fresh conn.
-//! * **Put**: only if the response says we can keep going — see
-//!   [`http1::response_is_keepalive`]. Otherwise drop the conn.
+//! * **Put**: only after complete body framing and content decoding, when
+//!   `codec::response_keepalive` permits reuse. Errors/cancellation drop it.
 //! * **Stale recovery**: if the kept conn's next request errors at
 //!   write/read time (typical: upstream silently dropped the idle
 //!   socket), the caller opens a fresh conn and retries. We don't proactively

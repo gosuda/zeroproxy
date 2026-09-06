@@ -1009,7 +1009,7 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
   // 만들면 그 자체가 후킹을 드러낸다(메서드 동일성과 같은 이유).
   const nnmStart = rt.indexOf('  const namedNodeMapCache = new WeakMap();');
   assert.ok(nnmStart > 0, 'attributes 캐시가 없다');
-  const nnmEnd = rt.indexOf('\n  function ', rt.indexOf('  function filteredNamedNodeMap(raw) {', nnmStart) + 1);
+  const nnmEnd = rt.indexOf('\n  function ', rt.indexOf('  function filteredNamedNodeMap(', nnmStart) + 1);
   const wrap = new Function('isZPAttrName',
     rt.slice(nnmStart, nnmEnd) + '\n' + rt.slice(start, end) + '\nreturn filteredNamedNodeMap;')(
     n => String(n || '').startsWith('data-zp-'));
