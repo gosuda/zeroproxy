@@ -153,8 +153,10 @@
 - **원인:** H1 전체 buffering으로 첫 chunk가 늦었다. H2 codec 종료를 HTTP 종료로 취급하는 우회는 무결성 검증을 생략했고, SW 응답 재생성은 HTML의 완료 promise를 잃었다.
 - **수정:** H1/H2 pull stream·backpressure·Abortable 취소를 공유한다. framing과 압축 검증 완료 후에만 H1 연결을 풀에 반환한다. gzip/deflate는 증분 검증, br/zstd·실행 코드는 bounded buffering. SW 최종 응답 경계에서 EOF/error/cancel까지 waitUntil을 유지한다.
 - **계약:** `X-ZP-Body-Stream`은 본문 수명, `X-ZP-Stream`은 HTML 변환 선택에만 사용하고 모두 페이지 전달 전에 지운다. HEAD/204/304·trailer·잘린 본문·idle cancel 회귀를 CI에서 확인한다.
+- **Response 재생성:** 브라우저가 빈 stream을 노출하더라도 204/205/304를 새 Response로 만들 때는 body를 null로 전달해야 한다.
 
 ## <a id="websocket-request-identity"></a>WebSocket handshake의 문서 신원 (2026-09-06)
 - **원인:** WS handshake에 User-Agent/Cookie가 없고 Origin은 요청 문서 대신 WS 서버 기준이었다.
 - **수정:** SW가 검증된 entry의 Origin·고정 browser persona·목적지 jar 쿠키를 초기화 전에 캡처해 커널로 전달한다. 커널은 지정된 헤더만 허용하고 CR/LF/NUL을 거절한다.
 - **검증:** 실제 E2E handshake의 UA·Origin·쿠키와 subprotocol echo/명시 close 결과를 확인한다. 헤더 신원 수정은 원격 anti-bot 통과 보장이 아니다.
+- **Close 경계:** Close frame 직후 yamux FIN을 보내면 Go relay의 양방향 종료가 peer echo를 잘라 1006이 된다. frame을 flush한 뒤 실제 peer Close를 받고 종료한다. peer code/reason만 보고하며 실패·조기 취소는 1006/unclean이다.
