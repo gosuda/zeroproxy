@@ -165,7 +165,7 @@ jobs:
       ZP_E2E_PREBUILT: '1'
       ZP_E2E_DIST: dist
       ZP_E2E_ARTIFACTS: artifacts/e2e
-      PUPPETEER_CACHE_DIR: ${{ runner.temp }}/puppeteer
+      PUPPETEER_CACHE_DIR: /tmp/zeroproxy-puppeteer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
