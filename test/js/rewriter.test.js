@@ -28,13 +28,14 @@ function executionContext() {
   window.WebSocket = WebSocket;
   const ctx = { window, location: rawLocation, document: { defaultView: window }, WebSocket };
   ctx.globalThis = ctx;
+  let realmGlobal;
   ctx.__zp_get = (base, key) => {
-    if ((base === ctx || base === window) && key === 'location') return location;
+    if ((base === ctx || base === realmGlobal || base === window) && key === 'location') return location;
     if (base === rawLocation) return location[key];
     return base[key];
   };
   ctx.__zp_set = (base, key, value) => {
-    if ((base === ctx || base === window) && key === 'location') location.href = String(value);
+    if ((base === ctx || base === realmGlobal || base === window) && key === 'location') location.href = String(value);
     else if ((base === location || base === rawLocation) && key === 'href') location.href = String(value);
     else base[key] = value;
     return value;
@@ -51,7 +52,11 @@ function executionContext() {
   };
   ctx.__zp_get.d = new Proxy({}, { set: (_, key, value) => { ctx.__zp_set(ctx, key, value); return true; } });
   ctx.__zp_call = (base, key, args) => Reflect.apply(base[key], base, args);
-  return { ctx: vm.createContext(ctx), location };
+  vm.createContext(ctx);
+  // Node contextifies the global object: code inside the VM sees a distinct
+  // identity from the host sandbox, unlike ordinary objects passed through it.
+  realmGlobal = vm.runInContext('globalThis', ctx);
+  return { ctx, location };
 }
 
 function rewrite(source, kind = 'classic', target = 'https://target.example/app.js') {
