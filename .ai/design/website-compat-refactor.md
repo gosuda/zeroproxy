@@ -23,6 +23,7 @@
 - 이것은 R1/R2의 첫 요청 경계 변경이다. 문서 registry 전체, SW 재시작 복구, PSL/SameSite/partition, 완전한 타깃 CORS, AST semantic 교체, realm 재설계, streaming 취소는 아직 이 변경에 포함하지 않았다. R1~R5 전체가 완료됐다고 표시하지 않는다.
 - 수정 전 HEAD의 실제 SW를 사용한 회귀 실행에서 PUT body view가 `!payload?` 전체로 전송되고 302 다음 hop이 GET/빈 본문으로 바뀌는 것을 확인했다. 수정 후 경량 Node suite는 46 passed / 0 failed / 0 skipped(약 0.94초). Rust나 브라우저를 로컬에서 띄우지 않았다.
 - `.github/workflows/ci.yml`: Rust/Go/경량 JS/build 병렬 job, build artifact를 받은 직렬 Chromium E2E, 로그·스크린샷 업로드. E2E는 실제 upstream HTML 버튼 클릭으로 요청 계약을 검사하고 기존 E1도 실행한다. 원격 결과는 해당 커밋의 Actions run을 기준으로 한다.
+- 원격 [run 34020783071](https://github.com/gosuda/zeroproxy/actions/runs/34020783071), commit `654563a`: Rust workspace·Go·경량 JS·WASM/server build 통과. 실제 Chromium의 요청 계약 4그룹과 전체 browser/worker 직접 egress 검사는 통과했다. 같은 run의 WASM 대입 의미 2건 및 기존 E1 속성 검사는 실패했으므로 전체 CI green으로 보고하지 않는다. CI가 드러낸 이 오류들도 수정 대상이다.
 - 이후 §3의 파일:행과 현재 근거는 최초 정적 조사 snapshot이다. 구현된 부분은 이 진행 기록과 현재 코드를 우선한다.
 
 ## 2. 현재 프로젝트 구조

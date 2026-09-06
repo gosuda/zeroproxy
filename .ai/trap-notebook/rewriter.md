@@ -2901,3 +2901,23 @@ together", 본문 5,675자, 높이 10,778 — 대조군 6,045 / 10,996). **그 �
 **교훈**: 한 번의 성공은 수정의 증거가 못 된다. 특히 이 세션에서 "관측 창"
 아티팩트로 두 번 속은 뒤였는데도 또 밟았다. 고친 뒤에는 **최소 3회 반복**하고
 그 결과를 보고한다.
+
+## <a id="ci-write-reference"></a>실행한 WASM이 대입 참조를 읽기 호출로 바꾸고 있었다 (2026-09-06)
+
+**Symptoms**: [CI run 34020783071](https://github.com/gosuda/zeroproxy/actions/runs/34020783071)의 실제 page WASM 검사에서 `location.href += ...`는 `__zp_get(...) += ...`, 구조분해의 `this.parent`도 `__zp_get(...)`이 되어 Invalid left-hand side/Invalid destructuring assignment target으로 실패했다. Rust unit 통과만으로 출력 JS의 의미를 증명할 수 없었다.
+
+**Root cause**: OXC assignment target walker가 static member를 일반 read visitor로 넘겼다. 복합 대입·update·구조분해는 호출식이 아니라 settable reference를 필요로 한다. `__zp_assign`에 RHS를 먼저 넘기는 방식은 getter/RHS 평가 순서를 바꾸고 기존 update helper는 native ToNumeric/BigInt와도 다르다.
+
+**Fix**: private `visit_simple_assignment_target`에서 receiver만 read로 방문한다. 민감 member target은 receiver를 한 번 저장하는 accessor reference로 바꾸고 원래 JS 연산자가 단락 평가·await/yield·prefix/postfix를 수행하게 한다. 단순 대입은 기존 allocation-free setter 경로를 유지한다. 중첩 marker offset과 ASI 경계도 함께 처리한다.
+
+**Regression guard**: `test/js/rewriter.test.js`의 실제 prebuilt WASM 실행. 기존 실패 두 건을 유지하고 평가 순서·BigInt·logical assignment·nested destructuring/loop target/ASI 결과를 추가했다. 로컬 컴파일은 생략하고 수정 후 실행은 해당 CI 커밋 결과로 확인한다.
+
+## <a id="absent-url-attribute"></a>URL 마스킹이 없는 DOM 속성을 빈 문자열로 바꿨다 (2026-09-06)
+
+**Symptoms**: 같은 CI의 E1에서 template link `getAttribute('href')`가 null 대신 빈 문자열이었다. 최초 assertion이 뒤의 E1 관측도 가리고 있었다.
+
+**Root cause**: 문자열 전용 deproxyURL에 native getter의 null을 넘겼다. URL stash가 현재 DOM 상태보다 우선해 속성 삭제 후에도 이전 URL이 재노출될 수 있었다.
+
+**Fix**: native raw attribute를 한 번 읽고 null/빈 문자열을 metadata보다 먼저 반환한다. E1은 독립 subtest로 결과를 수집하고 템플릿·URL 속성의 absent/empty/removed/설정 후 삭제 전이를 검사한다. 기대값을 빈 문자열로 낮추지 않는다.
+
+**Regression guard**: `test/e2e/proxy.test.js`의 template와 link href/img srcset/script src 전이 검사. `getAttributeNS(null, ...)`와 `hasAttribute`도 같은 관측에 포함한다.

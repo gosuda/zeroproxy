@@ -303,7 +303,11 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
 fn shift_marker_positions(replacement: &str, offset: u32) -> String {
     let prefixes: &[(&str, &[usize])] = &[
         ("\u{1}GLOBAL_GET\u{1}", &[]),
+        ("\u{1}GLOBAL_SET\u{1}", &[3, 4]),
+        ("\u{1}GLOBAL_ASSIGN\u{1}", &[4, 5]),
         ("\u{1}MEMBER_GET\u{1}", &[2, 3]),
+        ("\u{1}MEMBER_REF\u{1}", &[2, 3]),
+        ("\u{1}MEMBER_REF_STMT\u{1}", &[2, 3]),
         ("\u{1}MEMBER_SET\u{1}", &[2, 3, 5, 6]),
         ("\u{1}METHOD_CALL\u{1}", &[2, 3, 5, 6]),
         ("\u{1}MODULE_URL\u{1}", &[2, 3]),
@@ -528,6 +532,32 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     } else {
                         out.push_str(&format!("__zp_get({},{:?})", obj_src, prop));
                     }
+                    cursor = end;
+                    continue;
+                }
+            }
+        } else if p.replacement.starts_with("\u{1}MEMBER_REF\u{1}")
+            || p.replacement.starts_with("\u{1}MEMBER_REF_STMT\u{1}")
+        {
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            if parts.len() >= 6 {
+                let obj_start: usize = parts[2].parse().unwrap_or(0);
+                let obj_end: usize = parts[3].parse().unwrap_or(0);
+                let prop = parts[4];
+                if obj_start < obj_end && obj_end <= bytes.len() {
+                    let obj_src = rewrite_range(obj_start, obj_end);
+                    // Keep a Reference, not a call result. Native operators then
+                    // own GetValue-before-RHS, short circuiting and ToNumeric;
+                    // await/yield and defaults stay in their original scope.
+                    // The adapter retains the receiver once without a closure.
+                    if parts[1] == "MEMBER_REF_STMT" {
+                        // A leading '(' would join a preceding ASI statement.
+                        out.push_str("0,");
+                    }
+                    out.push_str(&format!(
+                        "({{b:({}),get v(){{return __zp_get(this.b,{:?})}},set v(v){{__zp_set(this.b,{:?},v)}}}}).v",
+                        obj_src, prop, prop
+                    ));
                     cursor = end;
                     continue;
                 }
@@ -1274,11 +1304,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
 
     fn visit_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
         walk::walk_assignment_expression(self, expr);
-        // Detect simple assignments like `obj.<dangerous> = value` and rewrite
-        // them to `__zp_set(obj, 'dangerous', value)`. Compound assignments
-        // (`+=`, `-=`, etc.) are intentionally left as native — they have
-        // read-then-write semantics that the membrane setter still observes
-        // because the read goes through __zp_get.
+        // Plain writes use the allocation-free setter fast path. Other member
+        // targets remain References through visit_simple_assignment_target.
         // A bare dangerous global as the assignment TARGET (`location = url`).
         // The identifier visitor patches it to `__zp_get(globalThis,"location")`,
         // which is not a valid assignment target: V8 accepts the parse but
@@ -1369,6 +1396,43 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 });
             }
         }
+    }
+
+    fn visit_expression_statement(&mut self, stmt: &ExpressionStatement<'a>) {
+        let first_patch = self.patches.len();
+        walk::walk_expression_statement(self, stmt);
+        for patch in &mut self.patches[first_patch..] {
+            if patch.start == stmt.span.start
+                && patch.replacement.starts_with("\u{1}MEMBER_REF\u{1}")
+            {
+                patch.replacement = patch.replacement.replacen(
+                    "\u{1}MEMBER_REF\u{1}", "\u{1}MEMBER_REF_STMT\u{1}", 1,
+                );
+            }
+        }
+    }
+
+    fn visit_simple_assignment_target(&mut self, target: &SimpleAssignmentTarget<'a>) {
+        if let SimpleAssignmentTarget::StaticMemberExpression(member) = target {
+            // Only the receiver is a read. Walking the whole member would
+            // replace the write target with __zp_get(...), invalid in compound
+            // assignments, updates and nested destructuring/for-in/of targets.
+            self.visit_expression(&member.object);
+            let prop = member.property.name.as_str();
+            if !matches!(member.object, Expression::Super(_)) && is_dangerous_member(prop) {
+                let obj_span = member.object.span();
+                self.patches.push(Patch {
+                    start: member.span.start,
+                    end: member.span.end,
+                    replacement: format!(
+                        "\u{1}MEMBER_REF\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                        obj_span.start, obj_span.end, prop
+                    ),
+                });
+            }
+            return;
+        }
+        walk::walk_simple_assignment_target(self, target);
     }
 
     fn visit_assignment_target_property_identifier(
@@ -2730,18 +2794,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compound_assignment_not_rewritten() {
-        // Compound `+=` etc. preserved as native; the read goes through __zp_get
-        // and the membrane setter handles the write side effect.
-        let src = "obj.location += 'x';";
-        let r = rewrite_script(src, &opts()).unwrap();
-        assert!(
-            !r.code.contains("__zp_set"),
-            "compound assignment must not use __zp_set: {}",
-            r.code
-        );
-    }
 
     #[test]
     fn reflect_get_window_location_routed() {
