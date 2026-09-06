@@ -1016,7 +1016,14 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
   assert.equal(wrap(raw), wrap(raw), 'el.attributes 가 접근마다 새 객체다');
 });
 
-test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () => {
+test('runtime virtualizes dangerous sandbox attribute combinations on iframes', () => {
+    const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8');
+    assert.match(rt, /frameSandboxMeta/);
+    assert.match(rt, /frameSandboxAllowsEscape/);
+    assert.match(rt, /allow-same-origin/);
+  });
+
+  test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
   const from = rt.indexOf('  function nonHTTPAbsoluteURL(raw) {');
   assert.ok(from > 0, 'nonHTTPAbsoluteURL 이 없다');
