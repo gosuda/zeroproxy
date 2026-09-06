@@ -1,6 +1,7 @@
 (() => {
   'use strict';
   const root = window;
+  const nativeOwnKeys = Reflect.ownKeys;
   // Description-less Symbol so getOwnPropertySymbols(window) leaks no
   // "zeroproxy.*" tells. `Symbol.for` re-keys cross-realm, but each
   // realm gets its own prelude run anyway, so dropping the registry
@@ -1637,21 +1638,36 @@
     // Hoist the 4 fixed Location methods outside wrappedLocationFor so each
     // call doesn't allocate a fresh closure set. They only capture
     // virtualURL/setVirtualLocation/Native (closure-scope invariants).
-    const locToString = function(){ return virtualURL.href; };
-    const locAssign = function(v){ setVirtualLocation(v); };
-    const locReplace = function(v){ setVirtualLocation(v, true); };
-    const locReload = function(){ Native.locationReload && Native.locationReload(); };
+    const locToString = virtualLocation.toString;
+    const locAssign = virtualLocation.assign;
+    const locReplace = virtualLocation.replace;
+    const locReload = virtualLocation.reload;
     function wrappedLocationFor(nativeLoc) {
       const cached = wrappedLocationCache.get(nativeLoc);
       if (cached) return cached;
+      // about:blank children share these helpers until their own prelude runs,
+      // but their navigation must still target the child's native Location.
+      const local = nativeLoc === root.location;
+      const assignLocation = local ? locAssign : function assign(value) {
+        activatedFrameURL(value).then(url => nativeLoc.assign(url));
+      };
+      const replaceLocation = local ? locReplace : function replace(value) {
+        activatedFrameURL(value).then(url => nativeLoc.replace(url));
+      };
+      const reloadLocation = local ? locReload : function reload() { nativeLoc.reload(); };
+      if (!local) {
+        maskNativeFunction(assignLocation, 'assign');
+        maskNativeFunction(replaceLocation, 'replace');
+        maskNativeFunction(reloadLocation, 'reload');
+      }
       const methodCache = new Map();
       const handler = {
         get(target, prop) {
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) return virtualURL[prop];
           if (prop === 'toString') return locToString;
-          if (prop === 'assign') return locAssign;
-          if (prop === 'replace') return locReplace;
-          if (prop === 'reload') return locReload;
+          if (prop === 'assign') return assignLocation;
+          if (prop === 'replace') return replaceLocation;
+          if (prop === 'reload') return reloadLocation;
           if (typeof prop === 'string' && methodCache.has(prop)) return methodCache.get(prop);
           const value = Reflect.get(nativeLoc, prop, nativeLoc);
           if (typeof value === 'function') {
@@ -1662,10 +1678,10 @@
           return value;
         },
         set(target, prop, value) {
-          if (prop === 'href') { setVirtualLocation(value); return true; }
-          if (prop === 'hash') { updateVirtualHash(value); return true; }
+          if (prop === 'href') { assignLocation(value); return true; }
+          if (prop === 'hash' && local) { updateVirtualHash(value); return true; }
           if (typeof prop === 'string' && LOC_ALL_URL_PROPS.has(prop)) {
-            try { const u = new URL(virtualURL.href); u[prop] = value; setVirtualLocation(u.href); } catch {}
+            try { const u = new URL(virtualURL.href); u[prop] = value; assignLocation(u.href); } catch {}
             return true;
           }
           return Reflect.set(nativeLoc, prop, value, nativeLoc);
@@ -1700,6 +1716,44 @@
       const proxy = new Proxy(Object.create(nativeLoc), handler);
       wrappedLocationCache.set(nativeLoc, proxy);
       return proxy;
+    }
+    const crossWindowTargets = new WeakMap();
+    const crossOriginLocations = new WeakMap();
+    function crossWindowLocation(targetWindow) {
+      // Location belongs to the destination realm: using this frame's facade
+      // turns top.location writes into self-navigation (notably in srcdoc).
+      const ownerGet = targetWindow.__zp_get;
+      if (ownerGet === get) return wrappedLocationFor(targetWindow.location);
+      if (typeof ownerGet !== 'function') throw normalizedError('SecurityError');
+      const location = ownerGet(targetWindow, 'location');
+      if (location.origin === virtualURL.origin) return location;
+      // Same physical proxy origin is not permission to read another site's
+      // Location. Cross-origin href writes/replace remain usable for navigation.
+      let restricted = crossOriginLocations.get(targetWindow);
+      if (!restricted) {
+        const navigate = (value, replace) => {
+          const owner = targetWindow.__zp_get(targetWindow, 'location');
+          const absolute = targetURL(value);
+          if (replace) owner.replace(absolute);
+          else owner.href = absolute;
+        };
+        const replace = function replace(value) { navigate(value, true); };
+        maskNativeFunction(replace, 'replace');
+        restricted = new Proxy(Object.create(null), {
+          get(_target, prop) {
+            if (prop === 'replace') return replace;
+            if (prop === 'then' || typeof prop === 'symbol') return undefined;
+            throw normalizedError('SecurityError');
+          },
+          set(_target, prop, value) {
+            if (prop !== 'href') throw normalizedError('SecurityError');
+            navigate(value, false);
+            return true;
+          }
+        });
+        crossOriginLocations.set(targetWindow, restricted);
+      }
+      return restricted;
     }
     // 사슬 한 칸 위로. 못 읽거나 자기 자신이면 제자리에 머문다(끝에 도달한 것).
     function climbCrossWindow(targetWindow, prop, fallback) {
@@ -1738,16 +1792,18 @@
         top: { get() { return climbCrossWindow(targetWindow, 'top', proxy); }, enumerable: true },
         parent: { get() { return climbCrossWindow(targetWindow, 'parent', proxy); }, enumerable: true },
         frames: { get() { return proxy; }, enumerable: true },
-        location: { get() { return virtualLocation; }, enumerable: true },
+        location: { get() { return crossWindowLocation(targetWindow); }, set(value) { crossWindowLocation(targetWindow).href = value; }, enumerable: true },
         postMessage: { value: postMessageWrapperFor(targetWindow), enumerable: true }
       });
       crossWindowProxyCache.set(targetWindow, proxy);
+      crossWindowTargets.set(proxy, targetWindow);
       return proxy;
     }
     function virtualWindowProperty(target, prop) {
       if (prop === 'top' || prop === 'parent' || prop === 'opener') {
         try {
           const child = target[prop];
+          if (prop === 'opener' && !isWindowLike(child)) return child;
           if (child && child !== target) return safeCrossWindow(child);
         } catch {}
       }
@@ -1767,45 +1823,80 @@
     // undefined → `getInstance().recordExport` 에서 TypeError → 모듈 초기화가
     // 끊겨 스켈레톤만 남았다. `A in obj || (obj[A]=…)` 는 흔한 관용구다.
     // 부수적으로 `'__아무거나__' in window === true` 는 그 자체로 지문이었다.
+    // A native Window's unforgeable location accessor cannot be replaced by a
+    // Proxy descriptor trap. Keep the virtual accessor on the actual shadow
+    // target, with the native flags; all other properties still live on root.
+    const scopeTarget = Object.create(Object.getPrototypeOf(root));
+    const nativeWindowLocation = Reflect.getOwnPropertyDescriptor(root, 'location');
+    const scopeLocationGet = function () {
+      if (this !== root && !isScopeProxy(this)) throw new TypeError('Illegal invocation');
+      return wrappedLocationFor(root.location);
+    };
+    const scopeLocationSet = function (value) {
+      if (this !== root && !isScopeProxy(this)) throw new TypeError('Illegal invocation');
+      setVirtualLocation(value);
+    };
+    toStringMap.set(scopeLocationGet, nativeAccessorSource('get', 'location'));
+    toStringMap.set(scopeLocationSet, nativeAccessorSource('set', 'location'));
+    Object.defineProperty(scopeTarget, 'location', {
+      get: scopeLocationGet, set: scopeLocationSet,
+      enumerable: nativeWindowLocation.enumerable,
+      configurable: nativeWindowLocation.configurable
+    });
     const scopeTraps = {
-      has(target, prop) {
+      has(_target, prop) {
         if (prop === Symbol.unscopables) return false;
-        return Reflect.has(target, prop);
+        return Reflect.has(root, prop);
       },
-      get(target, prop) {
+      get(_target, prop) {
         if (prop === Symbol.unscopables) return undefined;
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
-        if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(target, prop);
+        if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(root, prop);
         if (prop === 'location') {
-          try { const n = target.location; return n ? wrappedLocationFor(n) : virtualLocation; } catch { return virtualLocation; }
+          return wrappedLocationFor(root.location);
         }
-        if (prop === 'postMessage') return postMessageWrapperFor(target);
+        if (prop === 'postMessage') return postMessageWrapperFor(root);
         const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
         if (dynamic) return dynamic;
-        if (WINDOW_BOUND_METHODS.has(prop)) return boundWindowMethod(target, prop);
-        return target[prop];
+        if (WINDOW_BOUND_METHODS.has(prop)) return boundWindowMethod(root, prop);
+        return root[prop];
       },
-      set(target, prop, value) {
+      set(_target, prop, value) {
         if (prop === 'location') { setVirtualLocation(value); return true; }
-        target[prop] = value;
-        return true;
+        return Reflect.set(root, prop, value);
       },
       getOwnPropertyDescriptor(target, prop) {
-        if (prop === 'location') {
-          try { return Reflect.getOwnPropertyDescriptor(target, prop); }
-          catch { return { value: virtualLocation, configurable: true, enumerable: true, writable: false }; }
-        }
-        return Reflect.getOwnPropertyDescriptor(target, prop);
-      }
+        if (prop === 'location') return Reflect.getOwnPropertyDescriptor(target, prop);
+        const desc = Reflect.getOwnPropertyDescriptor(root, prop);
+        // Preserve locked descriptors, not a blanket configurable:true mask.
+        if (desc && !desc.configurable) Reflect.defineProperty(target, prop, desc);
+        return desc;
+      },
+      ownKeys() { return nativeOwnKeys(root); },
+      defineProperty(target, prop, desc) {
+        if (prop === 'location') return Reflect.defineProperty(target, prop, desc);
+        if (!Reflect.defineProperty(root, prop, desc)) return false;
+        const installed = Reflect.getOwnPropertyDescriptor(root, prop);
+        if (installed && !installed.configurable) Reflect.defineProperty(target, prop, installed);
+        return true;
+      },
+      deleteProperty(target, prop) {
+        if (prop === 'location') return false;
+        if (!Reflect.deleteProperty(root, prop)) return false;
+        return Reflect.deleteProperty(target, prop);
+      },
+      getPrototypeOf() { return Reflect.getPrototypeOf(root); },
+      setPrototypeOf(_target, proto) { return Reflect.setPrototypeOf(root, proto); },
+      preventExtensions() { return false; }
     };
     // 페이지에 window/globalThis/self/frames 로 노출되는 프록시.
-    const scope = new Proxy(root, scopeTraps);
+    const scope = new Proxy(scopeTarget, scopeTraps);
     // `with(__zp_scope){…}` 의 피연산자 전용. 여기서는 has 가 **반드시** 모든
     // 이름에 true 여야 한다 — 그래야 블록 안의 모든 식별자가 이 객체를 거치고,
     // 해석되지 않은 이름이 진짜 전역 스코프로 새어나가 멤브레인을 우회하지
     // 못한다. 페이지 코드에 이 객체가 직접 새지는 않는다: get 트랩이
     // window/globalThis/self/frames 에 대해 `scope` 를 돌려주기 때문이다.
-    const withScope = new Proxy(root, Object.assign({}, scopeTraps, {
+    const withScope = new Proxy(scopeTarget, Object.assign({}, scopeTraps, {
       has(_target, prop) { return prop !== Symbol.unscopables; },
     }));
     function isScopeProxy(value) { return value === scope || value === withScope; }
@@ -1870,12 +1961,13 @@
       if (base === document && prop === 'referrer') return '';
       if (isWindowLike(base)) {
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return isScopeProxy(base) || base === root ? scope : base;
-        if (prop === 'top' || prop === 'parent' || prop === 'opener') return isScopeProxy(base) || base === root ? virtualWindowProperty(root, prop) : base;
+        if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base), prop);
         if (prop === 'location') {
-          const baseWin = isScopeProxy(base) || base === root ? root : base;
+          const baseWin = crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base);
+          if (baseWin !== root) return crossWindowLocation(baseWin);
           try { const n = baseWin.location; return n ? wrappedLocationFor(n) : virtualLocation; } catch { return virtualLocation; }
         }
-        if (prop === 'postMessage') return postMessageWrapperFor(isScopeProxy(base) ? root : base);
+        if (prop === 'postMessage') return postMessageWrapperFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
       }
@@ -1897,6 +1989,10 @@
     }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
+      if (prop === 'location' && isWindowLike(base) && !isScopeProxy(base) && base !== root) {
+        crossWindowLocation(crossWindowTargets.get(base) || base).href = value;
+        return value;
+      }
       if (((isWindowLike(base) || base === document) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
       Reflect.set(Object(base), prop, value);
@@ -1946,7 +2042,14 @@
       // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
       // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
       // 주소가 새어 나간다.
-      if ((isWindowLike(base) || base === document) && prop === 'location') return { value: virtualLocation, configurable: true, enumerable: true, writable: false };
+      if (prop === 'location') {
+        if (base === root || isScopeProxy(base)) return Reflect.getOwnPropertyDescriptor(scopeTarget, prop);
+        if (base === document || isWindowLike(base)) {
+          const receiver = crossWindowTargets.get(base) || base;
+          const native = Reflect.getOwnPropertyDescriptor(receiver, prop);
+          return { get() { return get(base, prop); }, set(value) { set(base, prop, value); }, enumerable: native ? native.enumerable : true, configurable: native ? native.configurable : false };
+        }
+      }
       return Reflect.getOwnPropertyDescriptor(Object(base), prop);
     }
     function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
@@ -2602,10 +2705,8 @@
     // C1: WebSocket boundary fidelity (RFC 6455). Sub-protocol selection
     // §4.2.2, close code/reason validation §7.4 (code: 1000 or [3000,4999];
     // reason ≤ 123 UTF-8 bytes), binaryType setter validation,
-    // bufferedAmount accounting. The kernel transport is currently a stub
-    // (TARGET_WS_NOT_REWIRED) so end-to-end can't be exercised, but
-    // boundary-correct behavior prevents target scripts from tripping on
-    // validation throws browsers would do.
+    // bufferedAmount accounting. Close events report the peer's handshake,
+    // never a requested status disguised as a successful transport close.
     const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
     const tokenRE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
     function protocolList(protocols) {
@@ -2659,15 +2760,12 @@
       ws._closed = true;
       ws.readyState = CLOSED;
       if (ws._closeGuard) { try { clearTimeout(ws._closeGuard); } catch {} ws._closeGuard = null; }
-      ws.dispatchEvent(closeEvent(code || 1000, reason || '', wasClean !== false));
+      ws.dispatchEvent(closeEvent(code, reason, wasClean));
     }
     function fail(ws) {
       if (ws._closed) return;
       ws.dispatchEvent(new Event('error'));
-      // Preserve user-requested close code if they were mid-handshake.
-      const code = ws._closingCode || 1006;
-      const reason = ws._closingReason || '';
-      finish(ws, code, reason, false);
+      finish(ws, 1006, '', false);
     }
     function ZPWebSocket(url, protocols) {
       if (arguments.length < 1) throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
@@ -2679,12 +2777,10 @@
       this._closed = false;
       this._bufferedAmount = 0;
       this._binaryType = 'blob';
-      this._closingCode = 0;
-      this._closingReason = '';
       const plist = protocolList(protocols);
       this._requestedProtocols = plist;
       postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId, entryId: activeEntryId }).then(reply => {
-        if (this._closed) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
+        if (this._closed || this.readyState === CLOSING) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
         const negotiated = String(reply.protocol || '');
         // RFC 6455 §4.2.2: server must pick from the offered list.
         if (negotiated && plist.length > 0 && plist.indexOf(negotiated) < 0) {
@@ -2710,9 +2806,9 @@
           } else if (m.type === 'error') {
             fail(this);
           } else if (m.type === 'close') {
-            finish(this, m.code || 1000, m.reason || '', true);
+            finish(this, m.code, m.reason || '', m.code !== 1006);
           } else if (m.type === 'senddrained' && typeof m.bytes === 'number') {
-            // Best-effort backpressure (kernel emits once Rust WS lands).
+            // The kernel acknowledges bytes consumed from the send queue.
             this._bufferedAmount = Math.max(0, this._bufferedAmount - m.bytes);
           }
         };
@@ -2753,22 +2849,14 @@
         if (this._closed || this.readyState === CLOSING || this.readyState === CLOSED) return;
         const finalCode = code === undefined ? 1000 : Number(code);
         const finalReason = reason === undefined ? '' : String(reason);
-        this._closingCode = finalCode;
-        this._closingReason = finalReason;
         this.readyState = CLOSING;
         if (!this._port) {
-          // Mid-handshake close: no port yet, so the SW side will get a
-          // close on the port from the open() resolve path. Settle now.
-          finish(this, finalCode, finalReason, true);
+          // A canceled opening handshake has no peer close status. Dispatch
+          // asynchronously so handlers installed after close() still observe it.
+          this._closeGuard = Native.setTimeout(() => fail(this), 0);
           return;
         }
-        // RFC 6455 §7.1.6: closing handshake — wait for the peer's close
-        // echo before transitioning to CLOSED so in-flight messages drain
-        // first. The port's {type:'close'} ack (line ~1531 above) calls
-        // finish() with the remote-supplied code/reason once the Rust
-        // ws_client surfaces it. As a defense against a hung transport
-        // (e.g. server never echoes per §7.1.6 timeout window), fail
-        // closed with 1006 after 30 s.
+        // Wait for the peer's close frame; a missing echo is an abnormal close.
         this._port.postMessage({ type: 'close', code: finalCode, reason: finalReason });
         const ws = this;
         const guardMs = 30000;
@@ -4700,11 +4788,6 @@
       }
     }
   }
-  function visibleIconAttrValue(attr) {
-    const owner = attr && attr.ownerElement;
-    if (!owner || owner.localName !== 'link' || String(attr.name || '').toLowerCase() !== 'href' || !isIconLinkRelValue(Native.getAttribute.call(owner, 'rel') || '')) return null;
-    return visibleLinkTarget(owner) || Native.getAttribute.call(owner, 'href') || '';
-  }
   function restoreVisibleLinkState(node) {
     if (!node || node.nodeType !== 1) return;
     if (node.localName === 'link' && isIconLinkRelValue(Native.getAttribute.call(node, 'rel') || '')) {
@@ -4810,7 +4893,7 @@
     const ns = attr.namespaceURI;
     const previous = namespaced ? Native.getAttributeNodeNS.call(el, ns, attr.localName) : Native.getAttributeNode.call(el, attr.name);
     if (previous === attr) return attr;
-    const previousValue = previous && Native.attrValue.get.call(previous);
+    const previousValue = previous && previous.value;
     // Never attach a raw executable URL, even briefly. The existing setter
     // owns URL activation, srcdoc, CSS, handlers and private metadata policy.
     const value = Native.attrValue.get.call(attr);
@@ -5519,7 +5602,11 @@
       return owner ? attachAttributeNode(owner, attr, true) : Native.namedSetNamedItemNS.call(this, attr);
     });
     if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', {
-      get() { const masked = visibleIconAttrValue(this); return masked === null ? Native.attrValue.get.call(this) : masked; },
+      get() {
+        const owner = this.ownerElement;
+        if (!owner) return Native.attrValue.get.call(this);
+        return this.namespaceURI ? owner.getAttributeNS(this.namespaceURI, this.localName) : owner.getAttribute(this.name);
+      },
       set(v) {
         const owner = this.ownerElement;
         if (!owner) return Native.attrValue.set.call(this, v);
@@ -7041,18 +7128,15 @@
         Object.defineProperty(proto, prop, {
           get: prop === 'srcdoc'
             ? function () { return srcdocMeta.has(this) ? srcdocMeta.get(this) : d.get.call(this); }
-            : d.get,
+            : function () {
+              const raw = Native.getAttribute.call(this, prop);
+              if (raw === null) return '';
+              const known = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
+              return known || deproxyURL(d.get.call(this));
+            },
           set(v) {
             if (prop === 'srcdoc') setInjectedSrcdoc(this, v);
-            else {
-              const t = String(v).startsWith(proxyOrigin) ? null : targetURLForElement(this, v);
-              if (t) {
-                urlMeta.set(this, t);
-                Native.setAttribute.call(this, 'data-zp-target-url', t);
-                d.set.call(this, 'about:blank');
-                activatedFrameURL(t).then(u => { d.set.call(this, u); rememberFrameOrigin(this); }).catch(()=>{});
-              } else d.set.call(this, v);
-            }
+            else this.setAttribute(prop, v);
             instrumentIframe(this);
           },
           configurable: false

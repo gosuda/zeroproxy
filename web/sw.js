@@ -2735,15 +2735,28 @@ async function openRuntimeStream(event, msg, ok, fail) {
   const channel = new MessageChannel();
   const id = ZP.randomId('s');
   streams.set(id, stream);
-  // C1: forward page-supplied close code/reason so the WS close frame on
-  // the wire carries the caller's choice (RFC 6455 §7.1.4 / §5.5.1).
-  // streams.delete(id) is deferred until the Rust client surfaces the
-  // server's close echo, so the close handler below can still drain a
-  // race where the server's close arrives before our send completes.
-  channel.port1.onmessage = ev => { const m = ev.data || {}; if (m.type === 'send') stream.send(m.data); if (m.type === 'close') { try { stream.close(m.code, m.reason); } catch {} } };
-  // C1: propagate upstream close code/reason if the kernel surfaces them
-  // (today the transport is a stub so the page sees default 1000/'').
-  stream.setHandlers({ message: data => channel.port1.postMessage({ type: 'message', data }), close: (code, reason) => { channel.port1.postMessage({ type: 'close', code: code || 1000, reason: reason || '' }); streams.delete(id); }, error: () => channel.port1.postMessage({ type: 'error' }) });
+  // Keep the stream registered until the kernel completes the actual close
+  // handshake. A caller's requested status is not evidence of a peer Close.
+  channel.port1.onmessage = ev => {
+    const m = ev.data || {};
+    try {
+      if (m.type === 'send') stream.send(m.data);
+      if (m.type === 'close') stream.close(m.code, m.reason);
+    } catch {
+      channel.port1.postMessage({ type: 'error' });
+    }
+  };
+  stream.setHandlers({
+    message: data => channel.port1.postMessage({ type: 'message', data }),
+    close: (code, reason) => {
+      channel.port1.postMessage({ type: 'close', code, reason });
+      streams.delete(id);
+      channel.port1.onmessage = null;
+      channel.port1.close();
+      stream.setHandlers({});
+    },
+    error: () => channel.port1.postMessage({ type: 'error' }),
+  });
   event.ports[0].postMessage({ ok: true, id, protocol: negotiated, port: channel.port2 }, [channel.port2]);
 }
 

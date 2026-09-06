@@ -411,8 +411,10 @@
 - **원인:** `installBlockers`가 실제 WebSocketStream 생성자를 스텁으로 덮었다. NamedNodeMap/Attr 노드 쓰기는 `setAttribute` URL 정책을 우회했다.
 - **수정:** 실제 stream 생성자·opened/closed/close 수명을 유지하고 자식 realm에도 전달한다. Attr는 기존 setter 정책을 먼저 적용한 뒤 원래 노드 identity와 교체 반환값을 보존해 붙인다.
 - **검증:** `test/e2e/proxy.test.js`의 stream echo/close 및 Attr iframe 탐색·노드 교체 회귀. 로컬 브라우저 실행 없이 CI로 검증한다.
+- **후속 경계:** Window location descriptor는 non-configurable shadow accessor로 보존한다. 부모 Location은 소유 realm으로 전달하되 다른 가상 origin의 읽기는 거절한다. iframe/Attr getter는 타깃 URL, opener는 원래 null/값 의미를 유지한다.
 
 ## <a id="destructive-navigation-probes"></a>탐색 검사가 후속 폼 검사를 오염 (2026-09-06)
 - **원인:** srcdoc 코드가 실제로 허용된 프록시 내부 top 탐색을 시작했는데, 검사는 원문서 불변을 기대했다. 이후 폼 실패도 같은 페이지에서 연쇄 발생했다.
 - **수정:** 파괴적 탐색은 별도 context의 타깃 스크립트로 실행하고 가상 목적지·프록시 경유를 검증한다. 폼 종류마다 정상 문서에서 시작하며 native requestSubmit 검증·submitter와 CRLF 직렬화 의미를 보존한다.
 - **금지:** 탐색 자체를 차단하거나 오염된 검사 기대값을 낮추어 통과시키지 않는다. 실행 결과는 커밋별 CI로 확인한다.
+- **문법 구별:** Range의 contextual fragment는 삽입 시 스크립트 실행이 가능하다. blanket 차단 대신 타깃 스크립트가 가상 URL을 보고 프록시로만 통신하는지 검사한다. DOMParser/innerHTML의 inert 의미와 혼동하지 않는다.
