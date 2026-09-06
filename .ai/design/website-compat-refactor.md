@@ -13,7 +13,7 @@
 - 함정노트의 실측은 **과거 기록**이지 이번 세션의 재현 결과가 아니다.
 - 옛 Go WASM 구조를 기술한 `ARCHITECTURE.md`, 낡은 완료 근거의 `PHASE2_STATUS.md`, superseded `PHASE3_PLAN.md`, 구현 전 page-rt/streaming 설계 문서는 제거했다. 현재 구조는 README와 실제 코드, 구현 순서는 이 문서를 기준으로 한다. 과거 함정노트는 보존했다.
 - 외부 Phase 2 마스터 플랜은 이 환경에서 찾을 수 없었다. 아래 Phase 2 gate 명칭은 이전 저장소 문서의 역사적 매핑이며, 외부 원문의 최신 acceptance나 현재 통과 상태를 의미하지 않는다.
-- `.npm-cache/`, `.puppeteer-cache/`는 변경하지 않는다.
+- 후속 정리에서 `.npm-cache/`, `.puppeteer-cache/`, 과거 dogfood 산출물·일회성 실험·랜딩 초안·벤치 보고서를 제거했다. 캐시와 새 진단 산출물은 `.gitignore`로 제외하며, 재사용하는 레이아웃 검사 도구는 `test/browser/`에 보존한다.
 
 ### 구현 진행 — 첫 변경 단위
 
@@ -235,7 +235,7 @@ AST 트랙의 첫 단위는 `RewriteVisitor` binding 분석 교체다. 이후 Re
 - Phase 2 매핑: A/B는 A2·B5/B6·D7, D/E는 A3/A4·B1-B3·C2·D1/D2, F는 B4/B7·C1·E3에 관련된다. 공통 게이트는 E1(non-escape), E2(사용자 동작), E3(비용)다.
 - 작은 결정적 fixture는 요청 method/body, module identity, cookie 경계, frame message, 취소처럼 실제 결과를 비교한다. 소스 문자열이나 내부 helper 이름 존재는 호환성 증거로 사용하지 않는다.
 - source-presence만 검사하던 `compat-pipeline.test.js`와 정적 문자열 핀을 제거했다. 실행 가능한 정책 회귀는 유지하고, rewriter 검사는 실제 prebuilt WASM을 실행하도록 옮겼다. 삭제된 파일명이나 Chrome 버전을 새 값으로 재고정하지 않았다.
-- `.ai/dogfood/wtm/rendercheck.sh`의 기존 layout probe를 정식 audit 경로에 통합한다. 미측정값 `?`가 있어도 `OK`가 될 수 있는 현재 분기(`66-73`)를 `inconclusive`로 구분한다. 원본에도 있을 수 있는 문자열·CSS 에러를 단독으로 프록시 결함이라고 판정하지 않는다.
+- `test/browser/rendercheck.sh`와 `layout-probe.js`는 일회성 dogfood 파일에서 분리해 보존했다. 미측정값 `?`가 있어도 `OK`가 될 수 있는 현재 분기(`66-73`)를 `inconclusive`로 구분하는 후속 개선은 유지한다. 원본에도 있을 수 있는 문자열·CSS 에러를 단독으로 프록시 결함이라고 판정하지 않는다.
 - 단순 title/console 성공은 불충분하다. **본문·에러 경계·첫 화면 레이아웃·검색/클릭/로그인 흐름·미디어 진행**을 본다. 높이 비율은 경보이지 모든 사이트에 적용할 절대 통과 규칙이 아니다.
 - 격리 실패(직접 egress), CSP가 막은 변환 누락, 사이트 원래 오류, 프록시 유발 오류를 서로 다른 결과로 기록한다. raw DevTools 값과 리라이트된 타깃 코드가 보는 값을 구별한다.
 - 실사이트는 자원이 있는 환경에서 직접/프록시를 같은 조건으로 순차 비교한다. NAVER(폼·세션·iframe), GitHub(React·모듈·에러 경계), Wikipedia(동적 자산), CNN(프레임·CSS·미디어)을 대표로 삼고 필요한 사이트만 선택한다. 알려진 변동 사례는 반복 확인하되 같은 taskweaver `zp` 인스턴스에서 동시 프로브를 돌리지 않는다.

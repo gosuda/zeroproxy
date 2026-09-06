@@ -11,7 +11,7 @@
 # 요소 수·raw·csp·err 를 **전부 통과**했고 오직 대조군 대비 높이 3배로만 보였다.
 # 자세한 것: .ai/trap-notebook/rewriter.md#style-raw-text-이스케이프
 #
-# 사용: sh .ai/dogfood/wtm/rendercheck.sh "https://a/" "https://b/" …
+# 사용: sh test/browser/rendercheck.sh "https://a/" "https://b/" …
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 PROBE="$SELF_DIR/layout-probe.js"

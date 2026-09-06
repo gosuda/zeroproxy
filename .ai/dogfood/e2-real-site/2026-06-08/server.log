@@ -1,3 +1,0 @@
-2026/06/09 00:45:07 zeroproxy listening on 127.0.0.1:42345
-2026/06/09 00:45:14 [ERR] yamux: Failed to read header: websocket: close 1001 (going away)
-2026/06/09 00:45:14 [ERR] yamux: Failed to write header: websocket: close sent

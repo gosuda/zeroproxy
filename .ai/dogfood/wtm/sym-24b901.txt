@@ -1,3 +1,0 @@
-loading symbols for C:\Program Files (x86)\Microsoft\EdgeWebView\Application\151.0.4129.72\msedge.dll (this downloads msedge.pdb, ~GB) ...
-module loaded at 0x180000000
-0x24b901     => v8::internal::Factory::AllocateRaw+0xf1
