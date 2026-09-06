@@ -1,7 +1,7 @@
 /* ZeroProxy page runtime (raw WASM glue, no wasm-bindgen).
  *
  * Loads crates/zp-page-rt cdylib and exposes a thin handle-based API to
- * runtime-prelude.js. See .ai/zp-page-rt-design.md for the contract.
+ * runtime-prelude.js. The ABI is defined in crates/zp-page-rt/src/lib.rs.
  *
  * Exposes `globalThis.ZeroProxyRT.load(urlOrBuffer)` → Promise<RT>.
  * The returned RT object is callable like:

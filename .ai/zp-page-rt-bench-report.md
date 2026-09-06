@@ -1,5 +1,7 @@
 # zp-page-rt PoC — Bench Report (확장판 + wasm-opt + Browser + Scheme-only + ASCII fast-path)
 
+> 역사 기록: 2026-05-30 당시의 측정과 후속 최적화 보고를 보존한다. 아래의 수치·완료 표현·소스 행 번호는 현재 빌드의 측정이나 acceptance가 아니다. 현재 구현은 [Rust ABI](../crates/zp-page-rt/src/lib.rs)와 [JS glue](../web/zp-rt.js), 작업 범위는 [compatibility refactor plan](design/website-compat-refactor.md)을 참조한다.
+
 > 2026-05-30, **5차 측정** (production code 갱신 포함). PoC v0.1.0 + B1(HashMap O(1)) + T2(batch ABI) + F(wasm-opt -Oz + browser via puppeteer headless Chrome 148) + D(scheme-only fast path) + **P(encoder isolation + ASCII fast-path production)**. 코퍼스 1000 URL × 100k iter, warmup 10k.
 
 ## 🎯 5차 TL;DR — Production schemeOnly 가 두 환경 모두에서 JS regex 압도

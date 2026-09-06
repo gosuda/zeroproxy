@@ -118,21 +118,23 @@
     }
   }
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
-  async function bodyToBase64(body) {
-    if (body == null) return null;
-    let ab;
-    if (typeof body === 'string') ab = new TextEncoder().encode(body).buffer;
-    else if (body instanceof ArrayBuffer) ab = body;
-    else if (ArrayBuffer.isView(body)) ab = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
-    else if (body instanceof Blob) ab = await body.arrayBuffer();
-    else if (body instanceof URLSearchParams) ab = new TextEncoder().encode(body.toString()).buffer;
-    else ab = new TextEncoder().encode(String(body)).buffer;
-    return ZP.bytesToBase64Url(new Uint8Array(ab));
-  }
-  self.fetch = async (input, init={}) => {
-    const headers = new Headers(init.headers || input.headers || {});
-    const body = init.body != null ? init.body : (input instanceof Request && input.method !== 'GET' && input.method !== 'HEAD' ? await input.clone().arrayBuffer() : null);
-    return nativeFetch('/zp/api/fetch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tabId, url: ZP.canonicalTargetURL(input.url || input, base.href).href, init:{ method:init.method || input.method || 'GET', headers: Array.from(headers.entries()), body: await bodyToBase64(body), credentials: init.credentials, mode: init.mode, referrer: init.referrer, redirect: init.redirect, cache: init.cache, integrity: init.integrity } }) });
+  const NativeRequest = self.Request;
+  const decodeFetchResponse = ZP.createFetchResponseAdapter(self.Response, self.Headers);
+  self.fetch = async (input, init = {}) => {
+    const raw = input && typeof input.url === 'string' ? input.url : String(input);
+    if (/^(?:blob|data):/i.test(raw.trim())) return nativeFetch(input, init);
+    const target = ZP.canonicalTargetURL(raw, base.href).href;
+    const req = input instanceof NativeRequest ? new NativeRequest(input, init) : new NativeRequest(target, init);
+    const body = req.method === 'GET' || req.method === 'HEAD' ? null : ZP.bytesToBase64Url(new Uint8Array(await req.clone().arrayBuffer()));
+    const response = await nativeFetch('/zp/api/fetch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: req.signal,
+      body: JSON.stringify({ tabId, documentURL: base.href, url: target, init: {
+        method: req.method, headers: Array.from(req.headers.entries()), body,
+        credentials: req.credentials, mode: req.mode, referrer: req.referrer,
+        referrerPolicy: req.referrerPolicy, redirect: req.redirect,
+      } }),
+    });
+    return decodeFetchResponse(response);
   };
   self.XMLHttpRequest = undefined;
   self.WebSocket = function(){ blocked(); };

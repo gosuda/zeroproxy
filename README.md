@@ -1,148 +1,119 @@
 # ZeroProxy
 
-**Phase 2 strict default** — all P0/P1/P2/D/E gates closed in [`PHASE2_STATUS.md`](PHASE2_STATUS.md). Continuous real-site regression: [`test/e2e/real-site-regression.test.js`](test/e2e/real-site-regression.test.js) (`npm run dogfood:matrix`).
+ZeroProxy is a client-owned virtual browsing prototype that runs target pages on the proxy origin without a browser extension. **Compatibility refactoring is in progress; this is not a production-acceptance declaration.** The current scope, known gaps, and planned behavior are in the [website compatibility refactor plan](.ai/design/website-compat-refactor.md).
 
-ZeroProxy is a client-owned virtual browsing prototype that runs target pages on the proxy origin without a browser extension. Its design goal is that target-site HTTP, TLS, and WebSocket traffic leaves only through this path:
+## Architecture and security boundary
+
+Target HTTP, HTTPS, and WebSocket requests use the browser-side transport path:
 
 ```text
-Service Worker -> Go WASM kernel -> WebSocket/yamux -> SOCKS5 CONNECT -> uTLS -> HTTP/2 or HTTP/1.1
+Service Worker -> Rust WASM kernel -> WebSocket/yamux -> SOCKS5 CONNECT
+                                                       -> rustls for HTTPS -> HTTP/2 or HTTP/1.1
 ```
 
-The relay server terminates only the browser WebSocket/yamux pipe. In production it byte-bridges each yamux stream to a Tor SOCKS5 listener; for local compatibility tests `-socks internal` makes the relay parse the kernel's SOCKS5 CONNECT itself and dial the requested target directly. Target HTTP parsing, redirects, cookies, header policy, HTML rewriting, and target WebSocket framing are owned by the Go WASM kernel and browser-side runtime.
+The Go relay serves built assets and terminates the browser WebSocket/yamux pipe. With an external SOCKS5 listener it bridges each stream to that listener; with `-socks internal` it parses SOCKS5 CONNECT and dials the target directly. Target HTTP parsing, HTTPS TLS, cookies, redirects, and content rewriting remain browser-side responsibilities, not a server-side HTTP proxy. Optional WebTransport and WebRTC gateways are separate, explicitly configured Go services; their configuration is defined in [`cmd/zeroproxy-server/main.go`](cmd/zeroproxy-server/main.go).
 
-## Status
+Keep these boundaries when changing compatibility behavior:
 
-Status: **Prototype / partial implementation**.
+- Target documents use encrypted `/zp/p/<encrypted>#k=<key>&server=...` routes. The fragment key stays client-side. URL envelopes use AES-256-CBC, HMAC-SHA256, and HKDF-separated keys, with MAC verification before decryption.
+- Service Worker-controlled requests must be classified; unknown traffic must not fall back to native target fetches.
+- Privileged runtime bridge operations require the document/tab capability context. Target code must not gain native networking or an uncontained clean realm.
+- Executable target JavaScript goes through the Rust OXC rewriter and runtime membrane. Rewrite failures must fail closed, not execute the original source or relax CSP.
+- `-socks internal` is **not an anonymity mode**. Target connections originate directly from the relay process. Tor egress and isolation need separate deployment verification.
 
-Implemented core spine:
+These are design constraints, not proof that every browser API and website currently preserves native semantics. Fetch/redirect/credential behavior, document state, cookies, realm installation, AST semantics, and streaming lifetime are the active refactor areas. A historical test count or screenshot does not establish current acceptance.
 
-- Encrypted active/share route format: `/zp/p/<encrypted>#k=<key>&server=...`.
-- AES-256-CBC + HMAC-SHA256 URL envelope with HKDF-separated encryption/MAC keys and HMAC verification before decryption.
-- Service Worker request classifier that handles every controlled request, blocks unknown requests instead of falling back to native `fetch(event.request)`, and requires a per-tab runtime capability token on privileged runtime bridge messages.
-- Go WASM exports: `__go_jshttp`, `__zp_stream`, `__zp_kernel_init`, and `__zp_cookie_set`.
-- A single browser WebSocket pipe carrying yamux streams to the relay server, then SOCKS5 DOMAINNAME CONNECT, uTLS for HTTPS, HTTP/2 when ALPN selects `h2`, and HTTP/1.1 fallback/direct handling. `-socks 127.0.0.1:9050` preserves the Tor bridge; `-socks internal` is a Tor-free development/test mode that parses SOCKS5 on the relay and dials targets directly from the relay process.
-- Tokenizer-based HTML transform that injects the runtime prelude, launders executable external scripts through `/zp/api/script?u=...`, rewrites iframe/frame document URLs to encrypted `/zp/p` routes with inherited `server=` relay fragments, preserves author-visible anchor/form attributes for runtime navigation interception, removes or neutralizes preload/preconnect/manifest hints, drops dangerous tags and headers, routes executable event attributes through the Rust WASM rewriter, and handles `srcdoc`.
-- Runtime containment for main-window `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, navigation, forms, history/location masking, storage facades, workers, iframes, and high-risk device/network APIs. Main-window and worker `fetch` paths are bridged through `/zp/api/fetch` so strict `connect-src 'self'` does not block target API calls before the Service Worker can route them. Runtime-to-Service-Worker control messages carry a closure-held per-tab capability token. The runtime also applies basic self-fingerprint masking for patched function source strings, Canvas/Audio extraction jitter, and speech voice lists; broad anti-bot spoofing is not a project goal.
-- Rust WASM JavaScript rewriting is the only script rewrite engine: target-response CSP no longer permits `connect-src *`, external, module, worker, imported, inline, event-handler, and synchronous dynamic-function bodies are parsed before execution, dangerous global/window/location access is rewritten to runtime membrane helpers, parse/transform failures fail closed, constructor-constructor escapes are routed through runtime helpers instead of blocked, and blob/data worker scripts remain blocked when they cannot be rewritten synchronously.
-- Relay server static asset service and `/zp/ws-pipe` WebSocket endpoint.
-- Go and JavaScript share URL implementations that use the same envelope format.
+## Repository map
 
-Not complete enough for production or high-assurance acceptance:
-
-- Browser E2E tests cover internal SOCKS5 relay mode, dynamic script laundering, module-script worker bootstrap, inert dynamic preload/preconnect link handling, compound location assignments, iframe postMessage delivery, iframe clean-realm containment, forms, cookies, streaming responses, and basic fingerprint-masking checks, but do not yet prove every worker, direct navigation, device API, and unclassified subresource non-escape path.
-- Dynamic iframe containment is synchronous for `contentWindow`/`contentDocument` reads and common insertion APIs, but remains prototype-level and should keep gaining adversarial browser coverage.
-- Main-window runtime API compatibility is prototype-level for `fetch`, XHR, EventSource, WebSocket, `sendBeacon`, forms, uploads, descriptor edge cases, and fingerprinting surface fidelity. The wrappers preserve the ZeroProxy transport boundary, but they are not browser-native semantic clones for every option, event, redirect, credential, cache, progress, or close/error edge case.
-- Response bodies are streamed into JavaScript `Response` objects, but request/upload bodies are buffered through the Service Worker/WASM bridge with an explicit size cap. Streaming uploads, large multipart/file uploads, request cancellation, and browser backpressure behavior are still prototype-level.
-- Form navigation compatibility is limited: GET submissions become ZeroProxy navigations, while non-GET submissions are replayed through the runtime fetch path and write the transformed response back into the current document rather than following the browser's native navigation algorithm.
-- Worker compatibility is partial: Worker/SharedWorker constructors bootstrap through ZeroProxy, dedicated worker `fetch` and `importScripts` are bridged, rewritten worker code receives the runtime membrane helpers it may reference, and worker XHR, WebSocket, EventSource, native device/network APIs, full worklet/module-worker parity, and unrewritable blob/data worker scripts are blocked or prototype-level rather than fully emulated.
-- Cookie, storage, and history semantics are not yet reconciled across runtime state, Service Worker state, and the Go kernel cookie jar. Encrypted IndexedDB persistence is not implemented.
-- Tor daemon deployment and real Tor-egress E2E validation are not included in this repository.
-
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the implementation map and acceptance boundary. See [`PHASE3_PLAN.md`](./PHASE3_PLAN.md) for the current cutover plan.
+| Path | Responsibility |
+|---|---|
+| [`Cargo.toml`](Cargo.toml) | Current Rust workspace and dependencies. |
+| [`crates/zp-bundle`](crates/zp-bundle) | Service Worker rewriting/HTML/CSS/shared-policy WASM exports. |
+| [`crates/zp-kernel-bundle`](crates/zp-kernel-bundle) | Lazily loaded browser-side transport kernel: yamux, SOCKS5, rustls, HTTP, and target WebSocket handling. |
+| [`crates/zp-rewriter`](crates/zp-rewriter), [`crates/zp-htmltx`](crates/zp-htmltx), [`crates/zp-css`](crates/zp-css) | JavaScript AST, HTML, and CSS transformations. |
+| [`crates/zp-shared`](crates/zp-shared), [`crates/zp-transport-codec`](crates/zp-transport-codec) | Shared policy/URL contracts and transport codecs. |
+| [`crates/zp-page-bundle`](crates/zp-page-bundle), [`crates/zp-page-rt`](crates/zp-page-rt), [`web/zp-rt.js`](web/zp-rt.js) | Page-realm rewriting bundle and raw-WASM URL-policy runtime/glue. |
+| [`web/index.html`](web/index.html), [`web/zp-core.js`](web/zp-core.js) | Launcher and shared browser URL/policy helpers. |
+| [`web/sw.js`](web/sw.js) | Request classification, document/tab state, runtime bridge, transformation, and kernel integration. |
+| [`web/runtime-prelude.js`](web/runtime-prelude.js), [`web/worker-prelude.js`](web/worker-prelude.js) | Page/worker containment and browser API compatibility. |
+| [`cmd/zeroproxy-server`](cmd/zeroproxy-server), [`internal`](internal) | Go host, relay, optional gateways, and supporting packages. |
+| [`scripts/build.mjs`](scripts/build.mjs), [`scripts/test.mjs`](scripts/test.mjs) | Build and test entry points. |
+| [`test/js`](test/js), [`test/e2e`](test/e2e) | JavaScript contract/policy checks and real-browser E2E scenarios, including the E1 escape matrix. |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Remote build and verification workflow; use its current steps rather than historical command lists. |
 
 ## Requirements
 
-- Go 1.26 or the Go toolchain version required by `go.mod`.
-- Node.js LTS and npm for the JavaScript and Puppeteer E2E tests.
-- A browser with Service Worker and WebAssembly support. CI uses Puppeteer's pinned Chrome for Testing.
-- A Tor SOCKS5 listener configured with stream isolation for anonymized manual target browsing. Tor is not required for the automated Puppeteer suite or local compatibility checks that run the relay with `-socks internal`.
+- Rust and the `wasm32-unknown-unknown` target specified by [`rust-toolchain.toml`](rust-toolchain.toml).
+- `wasm-bindgen-cli` matching the `wasm-bindgen` version resolved in [`Cargo.lock`](Cargo.lock); the CI workflow records its installation procedure.
+- Go matching [`go.mod`](go.mod), Node.js LTS, and npm. npm dependencies provide the JavaScript build tools and Puppeteer.
+- A browser with Service Worker and WebAssembly support. Browser E2E uses Puppeteer's Chrome for Testing.
+- For anonymous target browsing, a Tor SOCKS5 listener with stream isolation. Tor is not required for internal-relay compatibility tests.
 
-Example Tor setting:
+## Remote verification first
+
+On memory-constrained machines, keep local work to editing and lightweight inspection. Push the working branch and use the [CI workflow](.github/workflows/ci.yml) for compilation and actual browser E2E instead of starting parallel local Rust builds, browser processes, or language servers. Do not run a local build merely to duplicate an in-flight CI run.
+
+CI builds deployable assets once and reuses them for WASM checks and serial Chromium E2E, including the E1 escape matrix. The workflow runs on branch pushes, pull requests, and manual dispatch. Relevant entry points in [`package.json`](package.json):
+
+- `npm run test:js`: lightweight Node behavior checks without compiling or starting a browser.
+- `npm run test:wasm:ci`: WASM checks against already-built `dist/` assets; does not build.
+- `npm run test:e2e:ci`: actual browser proxy/E1/request-contract scenarios against built assets; does not build. `ZP_E2E_DIST` and `ZP_E2E_ARTIFACTS` select the build and evidence directories.
+
+The real-site runner, [`test/e2e/real-site-regression.test.js`](test/e2e/real-site-regression.test.js) (`npm run dogfood:real-site`), is a **separate opt-in run**, not part of deterministic CI. For the exact commit under review, inspect both the CI/browser result and any separately collected real-site evidence. A launcher title, successful build, or old green run is not evidence that the target page rendered correctly. Review screenshots and reported failures, and keep missing evidence explicit.
+
+Internal-relay tests do not start Tor or prove Tor anonymity, production deployment safety, or compatibility with every site. Operational dogfood guidance is in [`PRODUCTION_ROLLOUT.md`](PRODUCTION_ROLLOUT.md).
+
+## Build and run locally
+
+When local resources permit, build from the repository root:
+
+```sh
+npm ci
+npm run build
+```
+
+The build writes the Go server and browser assets under `dist/`:
+
+```text
+dist/zeroproxy-server                  relay server (.exe on Windows)
+dist/web/                              built browser assets
+dist/web/__zp/zp_bundle_sw_bg.wasm      Service Worker rewrite bundle
+dist/web/__zp/zp_kernel_sw_bg.wasm      lazy transport kernel
+dist/web/__zp/zp_page_bundle_bg.wasm    page-realm bundle
+dist/web/__zp/zp_page_rt.wasm           raw page runtime
+```
+
+The build can clean existing artifacts before compiling. Confirm toolchain availability first if `dist/` contains your only runnable build. Always serve **`dist/web`**, not the source `web/` directory: the source directory lacks generated WASM/glue assets.
+
+For Tor-free compatibility testing:
+
+```sh
+./dist/zeroproxy-server -web dist/web -addr :8080 -socks internal
+```
+
+For Tor egress, configure a listener with stream isolation, for example:
 
 ```text
 SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
 ```
 
-Start a local Tor listener for development:
+A development listener can be started separately:
 
 ```sh
 mkdir -p /tmp/zeroproxy-tor
 tor --SocksPort "127.0.0.1:9050 IsolateSOCKSAuth" --DataDirectory /tmp/zeroproxy-tor
 ```
 
-Keep that process running and wait until Tor logs `Bootstrapped 100% (done)` before expecting target browsing to work. If Tor is managed by your OS service manager instead, use the same `SocksPort` setting in `torrc` and start the service before starting ZeroProxy.
-
-For Tor-free local compatibility testing, start ZeroProxy with the internal relay SOCKS5 parser instead of starting Tor:
+Wait for Tor to report `Bootstrapped 100% (done)`, then start the relay:
 
 ```sh
-./dist/zeroproxy-server -addr :8080 -socks internal
+./dist/zeroproxy-server -web dist/web -addr :8080 -socks 127.0.0.1:9050
 ```
 
-Internal mode is not an anonymity mode: target TCP connections are direct dials from the relay process. It exists so CI and local browser compatibility tests can exercise the browser → Service Worker → WASM → WebSocket/yamux → SOCKS5 parsing pipeline without an external proxy daemon.
+After building browser assets, `go run ./cmd/zeroproxy-server` accepts the same server flags. Core defaults are `-addr :8080`, `-web dist/web`, and `-socks 127.0.0.1:9050`; see the server source for optional gateway flags.
 
-## Build and run locally
+Open **`http://proxy.localhost:8080/zp/`** from the start so launcher, Service Worker, and encrypted target routes share one origin. The server can start without Tor being reachable; browsing still requires the selected SOCKS5 transport.
 
-Build the browser bundle, Go WASM kernel, and relay server from the repository root:
+## Historical records
 
-```sh
-npm ci
-npm run build
-```
-
-The build writes deployable artifacts under `dist/`:
-
-```text
-dist/web/                 built browser assets
-dist/kernel.wasm          Go WASM transport kernel
-dist/zeroproxy-server     relay server binary
-```
-
-Start the relay server in another terminal:
-
-```sh
-./dist/zeroproxy-server -addr :8080 -socks 127.0.0.1:9050
-```
-
-Equivalent `go run` form after `npm run build`:
-
-```sh
-go run ./cmd/zeroproxy-server -addr :8080 -socks 127.0.0.1:9050
-```
-
-Server flags:
-
-- `-addr`: HTTP listen address. Default: `:8080`.
-- `-web`: built static web asset directory containing `index.html`, `sw.js`, and `/__zp/*` assets. Default: `dist/web`.
-- `-kernel`: compiled Go WASM kernel served at `/__zp/kernel.wasm`. Default: `dist/kernel.wasm`.
-- `-socks`: Tor SOCKS5 address, or `internal` for the relay's built-in SOCKS5 CONNECT parser/direct dialer used by tests. Default: `127.0.0.1:9050`.
-
-Open the browser shell on the proxy origin:
-
-```text
-http://proxy.localhost:8080/
-```
-
-Use `proxy.localhost` from the start so the shell, Service Worker, and encrypted `/zp/p/<encrypted>#k=<key>&server=...` routes share one origin. The server starts even if Tor is not reachable. Target browsing needs either a configured Tor SOCKS5 listener or the explicit non-anonymous `-socks internal` test mode.
-
-## Verification commands
-
-The local verification surface matches the GitHub Actions CI workflow:
-
-```sh
-npm ci
-go test ./...
-npm test
-npm run build
-```
-
-`npm test` runs both JavaScript source-policy tests and the Puppeteer E2E suite. The E2E test builds temporary ZeroProxy artifacts with `scripts/build.mjs`, starts a local target HTTP server, starts the relay with `-socks internal`, launches Puppeteer's Chrome, and verifies browser traffic through the ZeroProxy server without requiring Tor.
-
-CI is defined in `.github/workflows/ci.yml` and runs on pushes to `main`, pull requests, and manual dispatch. It uses an Ubuntu 24.04 LTS runner, installs Go from `go.mod`, installs the current Node.js LTS release, runs `npm ci`, runs the Go and full JavaScript/Puppeteer test suites, and builds deployable `dist/` artifacts.
-
-These checks cover source/unit policy invariants, buildability, and a local-browser E2E path through the relay's internal SOCKS5 parser/direct dialer. They do not start Tor, validate real Tor deployment behavior, or prove production traffic compatibility.
-
-## Repository map
-
-| Path | Purpose |
-|---|---|
-| `web/index.html`, `web/zp-core.js` | Browser shell, shared URL encryption/decryption, and ZeroProxy CSP helper. |
-| `web/sw.js` | Service Worker classifier, in-memory tab state, runtime API bridge, WASM kernel calls. |
-| `web/runtime-prelude.js`, `web/worker-prelude.js` | Target-realm containment hooks, dynamic HTML/link/script policy, and worker bootstrap/membrane helpers. |
-| `scripts/build.mjs` | Full build pipeline for browser bundles, generated WASM support assets, Go WASM kernel, and relay server. |
-| `scripts/test.mjs` | Stable local/CI test runner that executes JavaScript policy tests and the Puppeteer E2E suite in sequence. |
-| `cmd/wasm-kernel` | Go WASM transport kernel exposed to the Service Worker. |
-| `cmd/zeroproxy-server` | Static asset server and Gorilla WebSocket/yamux relay to Tor SOCKS5 or the `-socks internal` direct-dial SOCKS5 parser. |
-| `internal/zphttp`, `internal/socks5`, `internal/utlskernel`, `internal/wsproto`, `internal/yamuxconn`, `internal/wsconn` | Target transport path. |
-| `internal/htmltx`, `internal/headers`, `internal/cookiejar`, `internal/shareurl`, `internal/zpiso` | HTML rewriting, response header policy, cookie handling, share URL envelope, Tor isolation tokens. |
-| `test/js`, `test/e2e`, `internal/*/*_test.go` | JavaScript source-policy tests, Puppeteer browser E2E tests, and Go unit tests. |
-| `.github/workflows/ci.yml` | GitHub Actions CI for Go tests, JavaScript/Puppeteer tests, WASM build, and relay server build. |
+[`.ai/trap-notebook`](.ai/trap-notebook) preserves past failures, fixes, and later corrections. Its old paths and measurements are historical references, not the current architecture or acceptance checklist. Retired specifications are available in repository history; current work is tracked by the [compatibility refactor plan](.ai/design/website-compat-refactor.md).

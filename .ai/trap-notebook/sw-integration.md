@@ -865,3 +865,15 @@ refusalLog: TRANSPORT_DEADLINE 504 http://127.0.0.1:18212/hang
 그 요청은 커널 안에 남는다(누수). 사용자에게 보이는 코드도 `TARGET_CONNECT_FAILED`
 라 "연결 거절" 과 구분되지 않는다 — 구분은 refusalLog 의 `TRANSPORT_DEADLINE`
 로만 된다.
+
+## <a id="request-context-redirect"></a>Fetch 요청 문맥과 body view가 redirect 경계에서 소실됨 (2026-09-06)
+
+**Symptoms**: 커널 경계를 대체한 경량 회귀에서 수정 전 SW는 PUT body의 subarray 밖 바이트까지 전송하고, 302 후에는 GET/빈 본문으로 바꿨다. 브라우저 실사이트 재현을 주장하는 기록은 아니다.
+
+**Root cause**: `bodyU8.buffer`가 view 범위를 무시했다. redirect 재귀는 307/308 이외 메서드를 모두 GET으로 바꾸고, 새 options 객체를 수동 조립하며 header/referrer 정책을 잃었다. runtime fetch POST는 이미 보내온 credentials/redirect/mode를 소비하지 않았다. 문서 문맥은 비동기 초기화 뒤 가변 active entry에서 읽었다.
+
+**Fix**: `transportFetch`가 entry/referrer snapshot과 body를 먼저 정규화하고 `transportFetchHop`이 같은 문맥으로 hop을 처리한다. 301/302의 POST 및 303의 GET/HEAD 예외, entity header 제거, cross-origin Authorization 제거, credential별 Cookie/Set-Cookie 처리, manual/error redirect를 명시했다. page/worker 응답의 URL·type·redirected·clone은 native Response를 유지하며 내부 metadata로 복구한다. 응답 decoder 상태는 top-level 설치 호출보다 먼저 선언해야 한다(기존 prelude의 TDZ 설치 함정).
+
+**Closed by**: `test/js/request-policy.test.js`. 수정 전 HEAD SW의 PUT 회귀는 실패했고 수정 후 전체 경량 JS 46건 통과. `test/e2e/request-contract.js`는 실제 타깃 HTML → 클릭 → SW/커널 → DOM 결과를 검사하도록 추가했으며, 실행 결과는 CI 커밋별 증거를 확인한다.
+
+**Boundary**: 로컬 Rust/Go 컴파일과 Chromium은 메모리 부족 정책에 따라 실행하지 않았다. SW 재시작 복구, PSL/SameSite/partition 및 완전한 CORS는 별도 로드맵이다. 타깃 direct egress나 CSP 완화로 우회하지 않는다.

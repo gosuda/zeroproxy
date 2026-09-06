@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -10,57 +10,191 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_BUILD_JOBS: '2'
+  RUST_TEST_THREADS: '2'
+  GOFLAGS: '-p=2'
+  GOMAXPROCS: '2'
+  PUPPETEER_SKIP_DOWNLOAD: 'true'
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  test:
-    name: Go, Rust, JavaScript, Puppeteer, and build checks
+  rust:
+    name: Rust workspace tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: workspace-tests
+      - name: Run workspace tests
+        run: |
+          mkdir -p artifacts
+          cargo test --locked --workspace --jobs 2 -- --test-threads=2 2>&1 | tee artifacts/rust.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-logs
+          path: artifacts/
+          retention-days: 7
+
+  go:
+    name: Go tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Run Go tests
+        run: |
+          mkdir -p artifacts
+          go test -p 2 ./... 2>&1 | tee artifacts/go.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: go-logs
+          path: artifacts/
+          retention-days: 7
+
+  javascript:
+    name: Lightweight JavaScript behavior tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run JavaScript without compilation or browsers
+        run: |
+          mkdir -p artifacts
+          npm run test:js 2>&1 | tee artifacts/javascript.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: javascript-logs
+          path: artifacts/
+          retention-days: 7
+
+  build:
+    name: Build WASM and server once
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: lts/*
+          key: wasm-release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
           cache: npm
-      - name: Print toolchain versions
+      - name: Read exact wasm-bindgen version from Cargo.lock
+        id: bindgen
         run: |
-          go version
-          rustc --version
-          cargo --version
-          node --version
-          npm --version
-
-      - name: Install wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
-
-      - name: Install Node dependencies
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.lock', 'rb') as lock:
+              versions = {p['version'] for p in tomllib.load(lock)['package'] if p['name'] == 'wasm-bindgen'}
+          if len(versions) != 1:
+              raise SystemExit(f'Expected one wasm-bindgen version, found {versions}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={versions.pop()}\n')
+          PY
+      - name: Cache matching wasm-bindgen CLI
+        id: bindgen-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-${{ runner.os }}-${{ runner.arch }}-${{ steps.bindgen.outputs.version }}
+      - name: Install matching wasm-bindgen CLI
+        if: steps.bindgen-cache.outputs.cache-hit != 'true'
+        env:
+          WASM_BINDGEN_VERSION: ${{ steps.bindgen.outputs.version }}
+        run: cargo install wasm-bindgen-cli --version "=$WASM_BINDGEN_VERSION" --locked --jobs 2
+      - name: Verify wasm-bindgen CLI version
+        env:
+          WASM_BINDGEN_VERSION: ${{ steps.bindgen.outputs.version }}
+        run: test "$(wasm-bindgen --version)" = "wasm-bindgen $WASM_BINDGEN_VERSION"
+      - name: Install build dependencies without browser downloads
         run: npm ci
-
-      - name: Run Rust rewriter tests
-        run: cargo test --manifest-path rewriter-rs/Cargo.toml
-
-      - name: Run Go tests
-        run: go test ./...
-
-      - name: Run JavaScript and Puppeteer tests
-        run: npm test
-
       - name: Build deployable artifacts
-        run: npm run build
+        run: |
+          mkdir -p artifacts
+          npm run build 2>&1 | tee artifacts/build.log
+      - name: Package distribution preserving executable permissions
+        run: tar -czf artifacts/dist.tar.gz dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distribution
+          path: artifacts/dist.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: artifacts/*.log
+          retention-days: 7
+
+  e2e:
+    name: Prebuilt WASM behavior and Chromium E2E
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ZP_E2E_PREBUILT: '1'
+      ZP_E2E_DIST: dist
+      ZP_E2E_ARTIFACTS: artifacts/e2e
+      PUPPETEER_CACHE_DIR: ${{ runner.temp }}/puppeteer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution
+          path: artifacts
+      - name: Unpack prebuilt distribution
+        run: tar -xzf artifacts/dist.tar.gz
+      - name: Install test dependencies without implicit browser downloads
+        run: npm ci
+      - name: Install Chrome and system dependencies in CI
+        id: browser-install
+        run: |
+          sudo apt-get update
+          sudo env "PATH=$PATH" "PUPPETEER_CACHE_DIR=$PUPPETEER_CACHE_DIR" npx --no-install puppeteer browsers install chrome --install-deps
+      - name: Exercise built WASM behavior without rebuilding
+        run: npm run test:wasm:ci 2>&1 | tee artifacts/wasm-tests.log
+      - name: Run actual Chromium E2E serially without rebuilding
+        if: ${{ !cancelled() && steps.browser-install.outcome == 'success' }}
+        run: npm run test:e2e:ci 2>&1 | tee artifacts/e2e.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-e2e-evidence
+          path: |
+            artifacts/*.log
+            artifacts/e2e/
+          retention-days: 14
