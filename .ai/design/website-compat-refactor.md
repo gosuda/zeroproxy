@@ -24,6 +24,8 @@
 - 수정 전 HEAD의 실제 SW를 사용한 회귀 실행에서 PUT body view가 `!payload?` 전체로 전송되고 302 다음 hop이 GET/빈 본문으로 바뀌는 것을 확인했다. 수정 후 경량 Node suite는 46 passed / 0 failed / 0 skipped(약 0.94초). Rust나 브라우저를 로컬에서 띄우지 않았다.
 - `.github/workflows/ci.yml`: Rust/Go/경량 JS/build 병렬 job, build artifact를 받은 직렬 Chromium E2E, 로그·스크린샷 업로드. E2E는 실제 upstream HTML 버튼 클릭으로 요청 계약을 검사하고 기존 E1도 실행한다. 원격 결과는 해당 커밋의 Actions run을 기준으로 한다.
 - 원격 [run 34020783071](https://github.com/gosuda/zeroproxy/actions/runs/34020783071), commit `654563a`: Rust workspace·Go·경량 JS·WASM/server build 통과. 실제 Chromium의 요청 계약 4그룹과 전체 browser/worker 직접 egress 검사는 통과했다. 같은 run의 WASM 대입 의미 2건 및 기존 E1 속성 검사는 실패했으므로 전체 CI green으로 보고하지 않는다. CI가 드러낸 이 오류들도 수정 대상이다.
+- 후속 [run 34021421554](https://github.com/gosuda/zeroproxy/actions/runs/34021421554), commit `396cf51`: 요청 계약 4그룹과 DOM 속성 absent/empty/removed 회귀 통과. AST member 대입·BigInt·short-circuit·await/yield·destructuring·ASI 출력이 실행됐다. WASM 12건 중 남은 2건은 Node VM의 contextified global과 호스트 sandbox identity를 같은 것으로 본 harness를 수정했다(별도 Node 관찰에서 두 객체는 다르고 realm identity는 안정적이었다).
+- 독립 실행으로 드러난 E1 잔여 acceptance: HTTP/1 첫 chunk buffering/지연, WebSocket handshake identity/WebSocketStream, iframe probe timeout, srcdoc 탐색 중 execution context 소멸 및 이후 폼 시나리오 실패. 이것들을 skip/continue-on-error로 숨기지 않는다. 특히 뒤의 폼 실패는 앞 탐색으로 인한 오염 가능성도 있어 전부 독립 제품 결함으로 세지 않는다. 첫 요청 계약 변경은 통과했지만 전체 E1/CI acceptance가 완료된 상태는 아니다.
 - 이후 §3의 파일:행과 현재 근거는 최초 정적 조사 snapshot이다. 구현된 부분은 이 진행 기록과 현재 코드를 우선한다.
 
 ## 2. 현재 프로젝트 구조
