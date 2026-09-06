@@ -7615,8 +7615,7 @@
       // `execGlobalScript` — classic script declarations must land on the
       // child's global object, not inside a Function-constructor scope, or
       // one inline script's `function foo(){}` is invisible to the next.
-      // Captured before this function swaps the child's `eval` for the
-      // parent's scoped variant (below).
+      // Capture the child executor before installing its own rewrite gate.
       const childEval = w.eval;
       const childExecGlobal = code => childEval ? childEval(code) : (new childFunction(code)).call(w);
       // `pageRewriteHooks` rather than the bare helpers: they are locals of
@@ -7799,8 +7798,7 @@
     if (root.__ZP_EXEC_EVENT && !define(w, '__ZP_EXEC_EVENT', root.__ZP_EXEC_EVENT)) throw normalizedError('SecurityError');
     if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');
     if (childFunction && childFunction.prototype) try {
-      // iframe child Function — root.Function 은 우리 dynamicFunction wrapper.
-      // 메인 realm 과 동일한 WeakMap 정책 적용.
+      // Constructor-chain compilation must use the same child-owned gate.
       const childConstructorOverrides = new WeakMap();
       Object.defineProperty(childFunction.prototype, 'constructor', {
         get() { return childConstructorOverrides.get(this) || childFunctionFacade; },

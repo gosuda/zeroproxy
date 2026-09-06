@@ -419,3 +419,4 @@
 - **금지:** 탐색 자체를 차단하거나 오염된 검사 기대값을 낮추어 통과시키지 않는다. 실행 결과는 커밋별 CI로 확인한다.
 - **문법 구별:** Range의 contextual fragment는 삽입 시 스크립트 실행이 가능하다. blanket 차단 대신 타깃 스크립트가 가상 URL을 보고 프록시로만 통신하는지 검사한다. DOMParser/innerHTML의 inert 의미와 혼동하지 않는다.
 - **컴파일 realm:** 부모가 about:blank를 보호할 때 eval/Function도 자식의 native 실행기를 감싸야 한다. 부모 실행기를 복사하면 이후 srcdoc 프렐류드가 그것을 캡처해 자식의 전역·리스너까지 부모에 설치한다. postMessage 메서드 새로고침 가설은 수신을 회복하지 못해 되돌렸다.
+- **검증:** [a484e7b CI](https://github.com/gosuda/zeroproxy/actions/runs/34025734224)에서 전체 E2E 109/109 통과. srcdoc 수신·부모 탐색·목적지 렌더, 다른 가상 origin의 Location 읽기 거절, 폼 3종도 포함한다.
