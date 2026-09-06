@@ -418,4 +418,4 @@
 - **수정:** 파괴적 탐색은 별도 context의 타깃 스크립트로 실행하고 가상 목적지·프록시 경유를 검증한다. 폼 종류마다 정상 문서에서 시작하며 native requestSubmit 검증·submitter와 CRLF 직렬화 의미를 보존한다.
 - **금지:** 탐색 자체를 차단하거나 오염된 검사 기대값을 낮추어 통과시키지 않는다. 실행 결과는 커밋별 CI로 확인한다.
 - **문법 구별:** Range의 contextual fragment는 삽입 시 스크립트 실행이 가능하다. blanket 차단 대신 타깃 스크립트가 가상 URL을 보고 프록시로만 통신하는지 검사한다. DOMParser/innerHTML의 inert 의미와 혼동하지 않는다.
-- **Window 수명:** WindowProxy는 탐색 뒤에도 같지만 내부 Window의 native postMessage는 바뀐다. 래퍼 identity는 캐시하되 실제 호출 메서드는 현재 Window에서 얻고 조기 래퍼는 벗긴다. srcdoc 진행 기록으로 송신과 수신을 구별한다.
+- **컴파일 realm:** 부모가 about:blank를 보호할 때 eval/Function도 자식의 native 실행기를 감싸야 한다. 부모 실행기를 복사하면 이후 srcdoc 프렐류드가 그것을 캡처해 자식의 전역·리스너까지 부모에 설치한다. postMessage 메서드 새로고침 가설은 수신을 회복하지 못해 되돌렸다.
