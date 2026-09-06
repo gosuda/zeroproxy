@@ -307,22 +307,8 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     if let Some(v) = promoted_ua {
         headers_owned.push(("User-Agent".to_string(), v));
     }
-    // 2026-06-03 hypothesis test (Accept-Encoding fingerprint): the
-    // previous `identity` value is one of the strongest curl/python-
-    // requests bot tells — no real browser asks for an uncompressed body.
-    // Chrome 148 ships `gzip, deflate, br, zstd`. We don't yet have a
-    // decompression layer in the WASM kernel, so until that lands the
-    // hypothesis is only testable for upstreams that honour our
-    // `q=`-ranked preference for identity. A WAF that lock-steps on
-    // `Accept-Encoding == identity` will release the lock once it sees
-    // the Chrome-shape header even if the body comes back gzipped and
-    // unreadable. If the experiment confirms the WAF signal, the
-    // follow-up commit adds gzip/br decoders.
-    // 2026-08-16: 꼬리의 `identity;q=0.1` 을 뗀다. 저건 디코더가 없던 시절의
-    // 보험이었는데 transport/decode.rs 가 gzip/deflate/br/zstd 를 전부 푸는
-    // 지금은 **Chrome 과 다른 값** 이라는 비용만 남는다(실측: 직접 Chrome 은
-    // `gzip, deflate, br, zstd`). identity 는 안 적어도 서버가 압축 없이 보낼
-    // 수 있으므로(`identity;q=0` 이 아닌 이상) 잃는 것도 없다.
+    // Keep the advertised codings aligned with the decoder contract: live
+    // gzip/deflate use DecompressionStream; br/zstd use bounded Rust decoding.
     headers_owned.push((
         "Accept-Encoding".to_string(),
         "gzip, deflate, br, zstd".to_string(),
@@ -418,11 +404,8 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = kernelStream)]
 pub fn kernel_stream(arg: JsValue) -> js_sys::Promise {
     wasm_bindgen_futures::future_to_promise(async move {
-        // SW passes `{url, protocols, tabId, streamIsolationKey, servers}`.
-        // tabId / streamIsolationKey / servers aren't consumed yet — the
-        // per-tab isolation key flows through yamux's session keying when
-        // we land per-tab mux sessions; for now `pick_relay_url` returns
-        // the loopback relay and yamux multiplexes shared.
+        // Identity is selected by the SW from the authorized initiating document.
+        // Keep it explicit: the target WebSocket origin is not the page origin.
         let url = js_sys::Reflect::get(&arg, &JsValue::from_str("url"))
             .ok()
             .and_then(|v| v.as_string())
@@ -436,7 +419,15 @@ pub fn kernel_stream(arg: JsValue) -> js_sys::Promise {
                     .collect()
             })
             .unwrap_or_default();
-        transport::ws_client::open(&url, &protocols).await
+        let user_agent = get_string_prop(&arg, "userAgent")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| JsValue::from_str("MALFORMED_ROUTE: kernel_stream missing userAgent"))?;
+        let origin = get_string_prop(&arg, "origin")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| JsValue::from_str("MALFORMED_ROUTE: kernel_stream missing origin"))?;
+        let cookie = get_string_prop(&arg, "cookie").unwrap_or_default();
+        let headers = [("Origin", origin.as_str()), ("User-Agent", user_agent.as_str()), ("Cookie", cookie.as_str())];
+        transport::ws_client::open(&url, &protocols, &headers).await
     })
 }
 
