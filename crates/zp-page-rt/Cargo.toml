@@ -6,7 +6,7 @@ license.workspace = true
 
 # Raw extern "C" exports only. No wasm-bindgen, no js-sys, no serde.
 # Builds a separate cdylib loaded directly by web/zp-rt.js via
-# WebAssembly.instantiateStreaming. See .ai/zp-page-rt-design.md.
+# WebAssembly.instantiateStreaming. The ABI is defined in src/lib.rs.
 
 [lib]
 crate-type = ["cdylib"]

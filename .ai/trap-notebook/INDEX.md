@@ -9,6 +9,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-06 | SW / Fetch | 요청 snapshot과 redirect 정책 분리 — PUT 메서드·body view·credentials가 경계에서 소실되던 회귀를 수정. | sw-integration.md#request-context-redirect |
 | 2026-09-04 | membrane | **스코프 프록시가 목록에 든 window 메서드만 바인딩 — `globalThis.structuredClone(x)` 이 Illegal invocation 으로 GitHub 홈을 ErrorPage 로 만들었다. 규칙으로 교체.** | rewriter.md#window-메서드-바인딩-목록 |
 | 2026-09-04 | rewriter / module | **모듈 URL 을 두 층이 다르게 만들어(ref 유무·순서) 같은 모듈이 두 벌 로드 → React 두 개. 15→0 으로 고쳤으나 GitHub 에러 페이지는 3/3 잔존.** | rewriter.md#모듈-url-두-벌 |
 | 2026-09-04 | real-site-compat | **회귀 축에 레이아웃이 없어 GitHub 이 내내 에러 페이지였다 — title 은 그대로라 통과. height/aboveFold/styleEntities 축 신설(양성 대조 303%/837).** | real-site-compat.md#레이아웃-축-없음 |

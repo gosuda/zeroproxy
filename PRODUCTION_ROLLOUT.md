@@ -1,111 +1,61 @@
-# ZeroProxy Production Rollout (Phase 2 → strict default)
+# ZeroProxy Operational Dogfood and Rollout
 
-Operational record for activating strict mode as the only production
-mode after Phase 2 acceptance. References [`PHASE2_STATUS.md`](PHASE2_STATUS.md)
-for the gate checklist.
+This is an operator checklist, **not a declaration of production acceptance**. The old Phase 2 gate table, historical test counts, and claim that automated regression substitutes for a week of dogfood have been retired. Current implementation work and known gaps are tracked in the [website compatibility refactor plan](.ai/design/website-compat-refactor.md).
 
----
+## Before starting
 
-## Pre-rollout invariants
+- Review remote CI and browser E2E results for the exact candidate commit, including the E1 escape matrix. Do not infer present readiness from historical green runs.
+- Preserve a known-good deployable build and its commit identifier before replacing it. [`scripts/build.mjs`](scripts/build.mjs) may clean `dist/` before compilation; do not destroy the only runnable build to discover a missing toolchain.
+- Serve built `dist/web` assets, not source `web/`. Follow the [README build/run instructions](README.md#build-and-run-locally).
+- Record whether the relay uses Tor SOCKS5 or `-socks internal`. Internal mode is direct relay egress, not an anonymity test. Optional WebTransport/WebRTC gateways need their own configuration and validation; do not assume they are enabled or validated.
+- Keep CSP and fail-closed routing/rewrite behavior intact. An escape or disabled security boundary is a rollout blocker, not a compatibility workaround.
 
-| Invariant | How to verify | Status |
-|---|---|---|
-| No `compatMode` / `defaultMode` toggle in user-facing code | `grep -rnE 'defaultMode\|compatMode\|STRICT_MODE_DEFAULT' web/ internal/ cmd/` returns no user-facing switches (only `installBlockers(w, strict)` internal parameter — defense-in-depth layering, not a mode) | ✅ |
-| Server CLI exposes no compat flag | `cmd/zeroproxy-server/main.go` flags: `addr` / `web` / `socks` — no mode switch (Server-side TLS listener removed 2026-06-08 in commit `50f6667`; target TLS handshake lives in the Rust kernel client.) | ✅ |
-| All P0 + P1 + P2 strict-mode gates closed | [`PHASE2_STATUS.md`](PHASE2_STATUS.md) checklist | ✅ (`C1` boundary done, transport carry-over; `D2/D4/D5` stubs with explicit error pages) |
-| Build artifacts identical between dev + prod (no `--release` only branches) | `cargo build --release` produces the same artifact layout as dev | ✅ |
-| Test suites green | `cargo test --workspace` (180+ Rust unit, all pass), `go test ./...`, `node test/js/static-policy.test.js` (41/41 pass post split-bundle c.1→c.3) | ✅ |
+## Stage 1 — Operator dogfood (5–7 days)
 
----
+Record the candidate commit, browser version, target URL, transport mode, screenshots, and observed failures at each checkpoint. These are prospective checks; none is marked complete here.
 
-## Rollout sequence
+- **Day 0:** capture a baseline with `npm run dogfood:baseline`, or `node scripts/dogfood-baseline.mjs https://gosuda.org`. The helper expects a relay at `127.0.0.1:18080`, drives the shared taskweaver `zp` instance, and writes `.ai/dogfood/<YYYY-MM-DD>/` artifacts. Check the encrypted `/zp/p/` route **and the target content/layout**, not only the title.
+- **Days 1–5:** exercise login, an SPA navigation flow, and a media site. Record what actually succeeds or fails; an error page is not proof of media compatibility. Capture `MALFORMED_HTML`, `REALM_INJECTION_FAILURE`, and `REWRITE_FAILED` errors with the action that triggered them.
+- **Day 6:** review regressions and containment failures. Halt if a new network/realm escape appears.
+- **Day 7:** explicitly exercise cookie/storage persistence across browser restart. Record the result instead of assuming persistence or login semantics are complete.
 
-### Stage 1 — Dogfood (5–7 days)
+For this optional local manual workflow, use only the existing taskweaver `zp` instance. Avoid adding browser processes on a memory-constrained host; prefer remote browser evidence until resources permit manual dogfood.
 
-Operator runs ZeroProxy on their primary browsing profile. Daily journal:
+## Stage 2 — Test cohort (3 users, 1 week)
 
-- [ ] **Day 0** baseline capture via `npm run dogfood:baseline` (or `node scripts/dogfood-baseline.mjs https://gosuda.org`). The helper drives the shared `taskweaver --id zp` instance through the launcher, opens the target, screenshots the result, dumps console errors, and writes `.ai/dogfood/<YYYY-MM-DD>/{baseline.png,console-errors.json,summary.md}`. Pre-req: `./dist/zeroproxy-server.exe -web "$(realpath dist/web)" -addr 127.0.0.1:18080 -socks internal` running. Confirm `/zp/p/` route + home cards render in `baseline.png`.
-- [ ] **Day 1–5** daily browsing checkpoint:
-  - Login to one webmail (NAVER / Gmail)
-  - Navigate one SPA (single React dashboard or doc site)
-  - Open one media site (YouTube → fail-gateway page expected; D5 stub)
-  - Track any `MALFORMED_HTML` / `REALM_INJECTION_FAILURE` / `REWRITE_FAILED` page appearances in trap notebook
-- [ ] **Day 6** review `.ai/trap-notebook/` entries → if any new "탈출 없는 감옥" violation surfaced, halt and treat as P0 regression
-- [ ] **Day 7** confirm `cookieJar` IDB persistence: close all browser windows, reopen, NAVER NACT cookie survives → no 60s anti-credential-stuffing replay
-
-### Stage 2 — Test-cohort production (3 users, 1 week)
-
-- [ ] Each operator runs ZeroProxy as their only proxy for the cohort week
-- [ ] Daily check: server logs (`zeroproxy listening on ...` + `[ERR]` lines), browser console errors (per-tab via `taskweaver console-logs -i <id> --level error`)
-- [ ] Weekly summary: any user-visible regression → file as trap-notebook entry, otherwise advance
-
-### Stage 3 — Strict default activation
-
-- [ ] Tag the release: `git tag phase2-strict-default`
-- [ ] Update `README.md`'s status badge to "Phase 2 strict default"
-- [ ] Push trap-notebook entries upstream for future cycle visibility
-- [ ] Sweep `[~]` partial gates in [`PHASE2_STATUS.md`](PHASE2_STATUS.md) — if any have shifted to `[x]`, mark closed
-
----
+- Each participant records the candidate version and actual browsing outcomes throughout the week.
+- Review server logs and browser errors daily, including failures that do not change the page title.
+- Preserve evidence of user-visible regressions and resolve rollout blockers before advancing.
+- Automated real-site regression supplements this observation window; it does not establish that the calendar window or cohort ran.
 
 ## Monitoring signals
 
-| Signal | Source | Threshold for rollback |
-|---|---|---|
-| `MALFORMED_HTML` error page count | SW `safeError('MALFORMED_HTML', ...)` invocations | > 1% of document-class responses → rollback |
-| `REALM_INJECTION_FAILURE` count | foreground OXC bootstrap timeout / version mismatch | any sustained occurrence → investigate before continuing |
-| `SW_NOT_READY` count | SW boot failure | > 0.1% of `/zp/` loads → halt rollout, inspect SW boot path |
-| Cookie jar IDB write latency | `flushDirtyJarsToIDB()` p95 | > 200 ms p95 → quota pressure; review eviction policy |
-| Rewrite cache hit ratio | `rewriteCache` LRU + size | < 30% on warm session → key derivation may be over-specific, investigate |
-| WASM bundle size | `dist/web/__zp/zp_bundle_bg.wasm` | regression > +10% triggers a size-track review |
+| Signal | What to inspect |
+|---|---|
+| Malformed/rewrite error documents | Failing URL, content type, triggering action, and whether failure remains contained. |
+| Realm injection failures | Bootstrap ordering, bundle/version mismatch, and target script execution before containment. |
+| `SW_NOT_READY` | Service Worker activation, generated asset availability, and initialization errors. |
+| Cookies/storage | Login continuity, persistence, write failures, and cross-origin/tab isolation. |
+| Rewrite cache | Warm-session behavior and cache invalidation; do not substitute an old hit-ratio target for measurement. |
+| WASM/renderer memory | Built artifacts under `dist/web/__zp/`, cold-load cost, and browser memory against the same baseline. |
+| Visible compatibility | Layout, navigation, media, and console/network errors in addition to title and HTTP status. |
 
-### Per-tab quick check (taskweaver)
+Per-tab diagnostic commands for an already-running taskweaver `zp` instance:
 
-```bash
+```sh
 taskweaver console-logs -i zp --level error --max 50
-taskweaver pause -i zp                 # if a page wedges
+taskweaver pause -i zp
 taskweaver network-log -i zp --since-ms 30000 --url-pattern '/zp/'
 ```
 
----
+## Rollback
 
-## Known carry-over (Phase 3 candidates)
+1. Halt rollout and preserve the failing commit, logs, and browser artifacts.
+2. Redeploy the identified known-good build; do not rely on an obsolete branch name or rebuild over the only good artifact.
+3. Restart the managed server with the same documented asset path and transport configuration.
+4. Retest with an isolated test profile or deliberately reset test state after preserving needed evidence. Do not clear an operator's browsing profile as a routine shortcut.
+5. Repeat the failing scenario and baseline before resuming. Document the regression and the missing coverage.
 
-These are documented in [`PHASE2_STATUS.md`](PHASE2_STATUS.md) `Phase 2 follow-up` and do NOT block strict-default activation — each has a graceful fail surface (error page + stub `code:` error):
+## Release decision
 
-- ~~**C1 WS transport**~~ — landed. RFC 6455 handshake + frame codec + JS surface in [`crates/zp-kernel-bundle/src/kernel/transport/ws_client.rs`](crates/zp-kernel-bundle/src/kernel/transport/ws_client.rs) (moved from `zp-bundle` in split-bundle c.3); `kernel_stream` no longer returns the `TARGET_WS_NOT_REWIRED` stub.
-- ~~**D2 sourcemap composition**~~ — landed. Rewriter map composer in [`crates/zp-rewriter/src/sourcemap.rs`](crates/zp-rewriter/src/sourcemap.rs) + SW `/zp/api/sourcemap` route + rewriter pragma append; DevTools breakpoints land on the original identifier. Chained map (rewriter_map ∘ original_map) wired via `composeSourceMapChained` export.
-- ~~**Patch-mode wire-up in SW**~~ — landed. SW prefers `rewriteScriptPatches` + `applyScriptPatches` over the full re-emit path. (Note: post split-bundle c.1 the JS-side patch envelope was retired in favour of full re-emit on the SW hot path — see PHASE2_STATUS.md E3 (c.1) entry — because patch-mode markers can't be resolved JS-side. Rust-side patch API stays for host-side benchmarks.)
-- ~~**split-bundle (c.1 / c.2 / c.3)**~~ — landed 2026-06-08. (c.1) deleted legacy rewriter-rs/ + ported CSS rewriter to zp-bundle. (c.2) split page realm into `crates/zp-page-bundle` (~0.81 MB wasm). (c.3) split SW kernel/transport into `crates/zp-kernel-bundle` (~2.37 MB) loaded lazily on first `transportFetch`. SW activate-path footprint **3.84 MB → 1.45 MB** (-64%).
-- **wasm-opt bundle ceiling** — `zp_bundle_sw_bg.wasm` 1.34 MB / `zp_kernel_sw_bg.wasm` 2.37 MB (lazy) / `zp_page_bundle_bg.wasm` 0.81 MB. Hard target ≤ 500 KB still requires a Phase 3 streaming-parse architecture (split-bundle already exhausted).
-- ~~**D4 WebTransport**~~ — landed. quic-go 0.59 + webtransport-go 0.10 HTTP/3 listener + per-session bidi/datagram bridge; browser-side virtual `WebTransport` routes through the gateway.
-- ~~**D5 WebRTC**~~ — landed end-to-end. pion/webrtc v4 SFU bridge + per-session PC pair + browser-side virtual `RTCPeerConnection`. D5 polish (2026-06-08 → 2026-06-09): SDP candidate munging + RTCP/NACK/PLI/REMB interceptors + embedded pion/turn/v4 server with RFC 7635 short-term TURN-REST credentials threaded through `/zp/api/config` → page-realm `iceServers`. Remaining: per-tab session attribution gated on `X-ZP-Runtime-Token` (Phase 3).
-
----
-
-## Rollback procedure
-
-If a P0 / P1 regression surfaces during dogfood or cohort week:
-
-1. Revert the last commit on `feat/riir-wasm` that introduced the regression
-2. `npm run build` → confirm artifacts rebuild
-3. Restart server: `pkill zeroproxy-server`, then re-launch with the same `-web dist/web` path
-4. Clear the test browser profile (taskweaver `--id zp` daemon retains Chromium state across kill/start — see trap-notebook `taskweaver-profile-state` entry)
-5. Re-run the dogfood baseline (gosuda.org screenshot) before resuming the rollout
-6. File a trap-notebook entry documenting the regression vector + the gate that should have caught it
-
----
-
-## Acceptance signal
-
-Strict default is **production-active** when all three are true:
-
-- ✅ Stage 1 dogfood complete with 0 user-visible "탈출 없는 감옥" violations
-- ✅ Stage 2 cohort week complete with no rollback triggered
-- ✅ [`PHASE2_STATUS.md`](PHASE2_STATUS.md) E4 row updated to `[x]` and a release tag pushed
-
-## Status (2026-06-08)
-
-**E4 closed.** Wikipedia auto-regression repeatedly green (`npm run dogfood:matrix`, ~2 s per cycle). example.com transport regression captured in trap notebook for Phase 3; not a strict-mode escape, so does not block. Release tag `phase2-strict-default` ready to push at operator's signal (`git tag phase2-strict-default && git push --tags`); README badge updated to reflect strict default.
-
-Calendar dogfood window ("operator week without escape violation") is satisfied by the automated matrix + trap-notebook discipline: every cycle exercises the SW → transport → rewriter → page-realm path on a fresh user-data-dir against a real site, any regression surfaces as a failing matrix run instead of a missed manual journal entry.
+Record an explicit operator decision against the exact candidate commit and its evidence. Passing CI, strict mode being the only mode, a release tag, or historical checkmarks alone does not prove production readiness. Any untested Tor behavior, site compatibility, persistence, or gateway configuration remains an explicit gap.
