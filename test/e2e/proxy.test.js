@@ -8,6 +8,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const puppeteer = require('puppeteer');
+const { gzipSync } = require('node:zlib');
 
 const { handleRequestContract, runRequestContract } = require('./request-contract');
 const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
@@ -123,6 +124,33 @@ function createTargetServer(requests) {
       res.end(`<!doctype html><html><head><title>E2E Home</title><link rel="stylesheet" href="/site.css"><link id="icon-link" rel="icon" href="/site-icon.png"></head><body>
         <main id="style-probe" class="root-stylesheet-probe"><h1>E2E Home</h1><img id="image-probe" src="/image-probe.png" alt=""><a id="next" href="/next">Next page</a></main>
         <script>
+          window.__submitFormFixture = kind => {
+      const f = document.createElement('form');
+      f.method = 'POST';
+      f.enctype = kind === 'multipart' ? 'multipart/form-data' : kind === 'plain' ? 'text/plain' : 'application/x-www-form-urlencoded';
+      f.action = '/form-echo?kind=wrong';
+      const input = document.createElement('input');
+      input.name = 'alpha';
+      input.value = 'one';
+      f.appendChild(input);
+      if (kind === 'multipart') {
+        const file = document.createElement('input');
+        file.type = 'file';
+        file.name = 'upload';
+        const dt = new DataTransfer();
+        dt.items.add(new File(['file-body'], 'hello.txt', { type: 'text/plain' }));
+        file.files = dt.files;
+        f.appendChild(file);
+      }
+      const button = document.createElement('button');
+      button.type = 'submit';
+      button.name = 'submitter';
+      button.value = kind;
+      button.setAttribute('formaction', '/form-echo?kind=' + kind);
+      f.appendChild(button);
+      document.body.appendChild(f);
+      f.requestSubmit(button);
+          };
           window.__ua = navigator.userAgent;
           window.__platform = navigator.platform;
           window.__phase2Location = { href: location.href, windowHref: window.location.href };
@@ -198,7 +226,7 @@ function createTargetServer(requests) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><head><title>E2E Next</title></head><body>
         <main><h1>E2E Next</h1><p id="ua"></p></main>
-        <script>document.getElementById('ua').textContent = navigator.userAgent;</script>
+        <script>document.getElementById('ua').textContent = navigator.userAgent; window.__nextHref = location.href;</script>
       </body></html>`);
       return;
     }
@@ -317,6 +345,24 @@ function createTargetServer(requests) {
       </script></body></html>`);
       return;
     }
+    if (url.pathname === '/srcdoc-probe') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Srcdoc Probe</title><button id="navigate">Navigate top</button><script>
+        const child = document.createElement('iframe');
+        window.addEventListener('message', event => {
+          if (event.data && event.data.type === 'srcdoc-ready') window.__srcdocProbe = event.data;
+        });
+        child.srcdoc = ${JSON.stringify(`<script>
+          parent.postMessage({ type: 'srcdoc-ready', href: top.location.href, origin: top.location.origin }, '*');
+          window.addEventListener('message', event => {
+            if (event.data === 'navigate-top') top.location.href = 'http://127.0.0.1:${server.address().port}/next';
+          });
+        </script>`).replace(/</g, '\\u003c')};
+        document.body.appendChild(child);
+        document.querySelector('#navigate').addEventListener('click', () => child.contentWindow.postMessage('navigate-top', '*'));
+      </script>`);
+      return;
+    }
     if (url.pathname === '/rewrite-fixture.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`(() => {
@@ -370,6 +416,35 @@ function createTargetServer(requests) {
       setTimeout(() => res.end('chunk-two\n'), 600);
       return;
     }
+    if (url.pathname === '/stream-trailers') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', Trailer: 'X-Stream-End' });
+      res.write('payload');
+      res.addTrailers({ 'X-Stream-End': 'yes' });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/stream-bodyless') {
+      const status = Number(url.searchParams.get('status') || 200);
+      res.writeHead(status, status === 204 ? {} : { 'Content-Length': '123' });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/stream-truncated') {
+      req.socket.end('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort');
+      return;
+    }
+    if (url.pathname === '/stream-gzip-truncated') {
+      const compressed = gzipSync('gzip-payload');
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip' });
+      res.end(compressed.subarray(0, compressed.length - 4));
+      return;
+    }
+    if (url.pathname === '/stream-cancel') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('first');
+      req.socket.once('close', () => requests.push({ url: '/stream-cancel', canceled: true }));
+      return;
+    }
     if (url.pathname === '/sse') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
       res.end('data: sse-ok\n\n');
@@ -420,7 +495,7 @@ function createTargetServer(requests) {
 }
 
 function handleWebSocketUpgrade(req, socket, requests) {
-  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', protocol: req.headers['sec-websocket-protocol'] || '', upgrade: true });
+  requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', origin: req.headers.origin || '', cookie: req.headers.cookie || '', protocol: req.headers['sec-websocket-protocol'] || '', upgrade: true });
   if (new URL(req.url, 'http://target.local').pathname !== '/ws') {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     return;
@@ -442,7 +517,7 @@ function handleWebSocketUpgrade(req, socket, requests) {
       if (!frame) break;
       buffered = buffered.subarray(frame.consumed);
       if (frame.opcode === 0x8) {
-        writeWebSocketFrame(socket, 0x8);
+        writeWebSocketFrame(socket, 0x8, frame.payload);
         socket.end();
         return;
       }
@@ -710,6 +785,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   }));
   fs.writeFileSync(path.join(artifacts, 'e1-home.json'), JSON.stringify(home, null, 2));
   const TARGET_UA = home.userAgent;
+  const homeProxyURL = page.url();
   await t.test('home navigation and fingerprint identity', () => {
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
@@ -914,10 +990,18 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     observed.attributes.setNamedItem(attr);
     const frameTitle = await loaded;
     const visibleSrc = observed.src;
+    const attachedNode = observed.getAttributeNode('src') === attr && attr.ownerElement === observed;
+    const marker = document.createAttribute('data-marker');
+    marker.value = 'before';
+    observed.setAttributeNode(marker);
+    const replacement = document.createAttribute('data-marker');
+    replacement.value = 'after';
+    const replaced = NamedNodeMap.prototype.setNamedItemNS.call(observed.attributes, replacement);
+    const replacedNode = replaced === marker && marker.ownerElement === null && marker.value === 'before' && replacement.ownerElement === observed && observed.getAttribute('data-marker') === 'after';
     sync.remove();
     modern.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketURL, childCanvasMask, childFunctionHref, frameTitle, visibleSrc };
+    return { syncRTC, docRTC, modernRTC, websocketURL, childCanvasMask, childFunctionHref, frameTitle, visibleSrc, attachedNode, replacedNode };
   }, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'NotSupportedError');
   assert.equal(iframeIsolation.docRTC, 'NotSupportedError');
@@ -925,6 +1009,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
   assert.equal(iframeIsolation.frameTitle, 'E2E Next');
   assert.equal(iframeIsolation.visibleSrc, `http://${targetHost}:${targetPort}/next`);
+  assert.equal(iframeIsolation.attachedNode, true);
+  assert.equal(iframeIsolation.replacedNode, true);
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
   });
@@ -1078,7 +1164,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       const first = await reader.read();
       await writer.close();
       const closed = await stream.closed;
-      return { protocol: opened.protocol, data: String(first.value), closeCode: closed.closeCode };
+      const end = await reader.read();
+      const explicit = new WebSocketStream('ws://localhost:' + targetPort + '/ws', { protocols: ['zp-stream-close'] });
+      await explicit.opened;
+      explicit.close({ closeCode: 3001, reason: 'finished' });
+      const explicitClosed = await explicit.closed;
+      return { protocol: opened.protocol, data: String(first.value), closeCode: closed.closeCode, done: end.done, explicitClosed };
     }
 
 
@@ -1117,7 +1208,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('ws.url', () => { assert.equal(runtimeIntegration.ws.url, `ws://${targetHost}:${targetPort}/ws`); });
   await t.test('ws.data', () => { assert.equal(runtimeIntegration.ws.data, '1,2,3'); });
   await t.test('ws.protocol', () => { assert.equal(runtimeIntegration.ws.protocol, 'zp-test'); });
-  await t.test('wsStream', () => { assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000 }); });
+  await t.test('wsStream', () => { assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000, done: true, explicitClosed: { closeCode: 3001, reason: 'finished' } }); });
   await t.test('post', () => { assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' }); });
   await t.test('redirectPost', () => { assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' }); });
   await t.test('oversized.status', () => { assert.equal(runtimeIntegration.oversized.status, 413); });
@@ -1126,7 +1217,53 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
   await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
   await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
+  await t.test('websocket initiating origin and cookie identity', () => {
+    for (const protocol of ['zp-test', 'zp-stream', 'zp-stream-close']) {
+      const request = requests.find(r => r.upgrade && r.protocol === protocol);
+      assert.ok(request, protocol);
+      assert.equal(request.origin, `http://${targetHost}:${targetPort}`);
+      assert.match(request.cookie, /target_server=from-target/);
+      assert.match(request.cookie, /client_runtime=from-runtime/);
+      assert.equal(request.userAgent, TARGET_UA);
+    }
+  });
   await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`); });
+  });
+
+  await t.test('response framing and cancellation', async t => {
+    await t.test('chunk trailers are not response body bytes', async () => {
+      assert.equal(await page.evaluate(async () => (await fetch('/stream-trailers')).text()), 'payload');
+    });
+    for (const [method, status] of [['HEAD', 200], ['GET', 204], ['GET', 304]]) {
+      await t.test(`${method} ${status} has no body`, async () => {
+        const result = await page.evaluate(async ({ method, status }) => {
+          const response = await fetch('/stream-bodyless?status=' + status, { method });
+          return { status: response.status, body: await response.text() };
+        }, { method, status });
+        assert.deepEqual(result, { status, body: '' });
+      });
+    }
+    for (const endpoint of ['/stream-truncated', '/stream-gzip-truncated']) {
+      await t.test(`${endpoint} rejects incomplete body`, async () => {
+        const result = await page.evaluate(async endpoint => {
+          try { const response = await fetch(endpoint); await response.text(); return 'accepted'; }
+          catch { return 'rejected'; }
+        }, endpoint);
+        assert.equal(result, 'rejected');
+      });
+    }
+    await t.test('cancel closes an idle upstream stream', async () => {
+      const first = await page.evaluate(async () => {
+        const response = await fetch('/stream-cancel');
+        const reader = response.body.getReader();
+        const first = await reader.read();
+        await reader.cancel();
+        return new TextDecoder().decode(first.value);
+      });
+      assert.equal(first, 'first');
+      for (let i = 0; i < 100 && !requests.some(r => r.url === '/stream-cancel' && r.canceled); i++) await new Promise(resolve => setTimeout(resolve, 50));
+      assert.ok(requests.some(r => r.url === '/stream-cancel' && r.canceled), 'cancellation did not close the upstream socket');
+    });
   });
 
   await t.test('escape matrix', async t => {
@@ -1197,42 +1334,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     loc.hash = '#zp-fragment';
     out.virtualHash = loc.hash;
     out.virtualHref = loc.href;
-    const beforeSrcdoc = location.href;
-    const evil = document.createElement('iframe');
-    // B2: srcdoc inline script must observe the *virtual* top.location at the
-    // moment the script body runs — proves the prelude installed itself before
-    // the first script in the new realm executed. If ordering were broken the
-    // probe would record the proxy origin (`proxy.localhost:...`).
-    const srcdocEchoPromise = new Promise(resolve => {
-      let captured = null;
-      const handler = ev => {
-        if (ev.data && ev.data.type === 'zp-srcdoc-at-run') {
-          captured = ev.data;
-          window.removeEventListener('message', handler);
-          resolve(captured);
-        }
-      };
-      window.addEventListener('message', handler);
-      setTimeout(() => { window.removeEventListener('message', handler); resolve(captured); }, 400);
-    });
-    evil.srcdoc = `<script>
-      var probe = { type: 'zp-srcdoc-at-run' };
-      try { probe.topHrefAtRun = top.location.href; }
-      catch (err) { probe.topHrefAtRun = 'throw:' + (err && err.name || String(err)); }
-      try { probe.topOriginAtRun = top.location.origin; }
-      catch (err) { probe.topOriginAtRun = 'throw:' + (err && err.name || String(err)); }
-      try { top.location.href='https://evil.example/'; } catch {}
-      parent.postMessage(probe, '*');
-    <\/script>`;
-    document.body.appendChild(evil);
-    const srcdocEcho = await srcdocEchoPromise;
-    out.afterSrcdocHref = location.href;
-    out.afterSrcdocVirtualHref = loc.href;
     out.topOrigin = __zp_get(globalThis, 'top').location.origin;
-    out.beforeSrcdoc = beforeSrcdoc;
-    out.srcdocTopHrefAtRun = (srcdocEcho && srcdocEcho.topHrefAtRun) || 'no-echo';
-    out.srcdocTopOriginAtRun = (srcdocEcho && srcdocEcho.topOriginAtRun) || 'no-echo';
-    evil.remove();
     // Dynamic compilation remains usable, but must never expose proxy location.
     out.functionEscape = (() => {
       try { const v = (new Function('return location.href'))(); return 'ran:' + String(v); }
@@ -1522,13 +1624,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('locationReplaceSource', () => { assert.equal(escapeMatrix.locationReplaceSource, 'function replace() { [native code] }'); });
   await t.test('virtualHash', () => { assert.equal(escapeMatrix.virtualHash, '#zp-fragment'); });
   await t.test('virtualHref', () => { assert.match(escapeMatrix.virtualHref, /#zp-fragment$/); });
-  await t.test('afterSrcdocVirtualHref', () => { assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref); });
   await t.test('topOrigin', () => { assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`); });
-  // B2 srcdoc ordering proof: the inline script ran AFTER the prelude installed
-  // itself in the srcdoc realm, so it observed the virtual top.location, not
-  // the proxy origin. A failure here means a clean-realm window of attack.
-  await t.test('srcdocTopOriginAtRun', () => { assert.equal(escapeMatrix.srcdocTopOriginAtRun, `http://${targetHost}:${targetPort}`, `srcdoc inline saw native top.origin: ${escapeMatrix.srcdocTopOriginAtRun}`); });
-  await t.test('srcdocTopHrefAtRun', () => { assert.match(escapeMatrix.srcdocTopHrefAtRun, /^http:\/\/localhost:\d+/, `srcdoc inline saw native top.href: ${escapeMatrix.srcdocTopHrefAtRun}`); });
   await t.test('proxy-origin navigation', () => { assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true); });
   await t.test('stringTimer', () => { assert.equal(escapeMatrix.stringTimer, 'ran'); });
   await t.test('blobWorker', () => { assert.notEqual(escapeMatrix.blobWorker, 'ran'); });
@@ -1576,6 +1672,32 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   // D4 / D5 gateway stubs — construction succeeds but operations fail-closed.
   await t.test('webTransport', () => { assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`); });
   await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
+  });
+
+  await t.test('target-authored srcdoc contains cross-origin top navigation', async () => {
+    // This probe intentionally destroys its document. Never share its page or
+    // SW/tab state with the rest of E1, and never execute the attack via CDP.
+    const context = await browser.createBrowserContext();
+    const probePage = await context.newPage();
+    try {
+      await observeTarget(probePage.target());
+      await probePage.goto(proxyOrigin + '/', { waitUntil: 'domcontentloaded' });
+      await probePage.waitForFunction(() => navigator.serviceWorker?.controller && document.querySelector('#status')?.textContent === 'Ready.', { timeout: 30000 });
+      await probePage.type('#url', `http://${targetHost}:${targetPort}/srcdoc-probe`);
+      await probePage.click('button');
+      await probePage.waitForFunction(() => window.__srcdocProbe, { timeout: 30000 });
+      const initial = await probePage.evaluate(() => window.__srcdocProbe);
+      assert.deepEqual(initial, { type: 'srcdoc-ready', href: `http://${targetHost}:${targetPort}/srcdoc-probe`, origin: `http://${targetHost}:${targetPort}` });
+      await probePage.click('#navigate');
+      await probePage.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
+      assert.equal(new URL(probePage.url()).origin, proxyOrigin);
+      const virtualHref = await probePage.evaluate(() => window.__nextHref);
+      assert.equal(virtualHref, `http://127.0.0.1:${targetPort}/next`);
+      assert.ok(requests.some(r => r.url === '/next' && r.host === `127.0.0.1:${targetPort}` && r.userAgent === TARGET_UA));
+    } finally {
+      await saveArtifacts('srcdoc', probePage);
+      await context.close();
+    }
   });
 
   // D3: SW facade is fail-soft — register() resolves to a fake registration
@@ -1634,33 +1756,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
 
 
   async function submitFormFixture(kind) {
-    await page.evaluate(kind => {
-      const f = document.createElement('form');
-      f.method = 'POST';
-      f.enctype = kind === 'multipart' ? 'multipart/form-data' : kind === 'plain' ? 'text/plain' : 'application/x-www-form-urlencoded';
-      f.action = '/form-echo?kind=wrong';
-      const input = document.createElement('input');
-      input.name = 'alpha';
-      input.value = 'one';
-      f.appendChild(input);
-      if (kind === 'multipart') {
-        const file = document.createElement('input');
-        file.type = 'file';
-        file.name = 'upload';
-        const dt = new DataTransfer();
-        dt.items.add(new File(['file-body'], 'hello.txt', { type: 'text/plain' }));
-        file.files = dt.files;
-        f.appendChild(file);
-      }
-      const button = document.createElement('button');
-      button.type = 'submit';
-      button.name = 'submitter';
-      button.value = kind;
-      button.setAttribute('formaction', '/form-echo?kind=' + kind);
-      f.appendChild(button);
-      document.body.appendChild(f);
-      f.requestSubmit(button);
-    }, kind);
+    // Every encoding starts at the same valid target document; a failed
+    // navigation must not poison the next encoding's action/base resolution.
+    await page.goto(homeProxyURL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.title === 'E2E Home', { timeout: 30000 });
+    await page.evaluate(kind => window.__submitFormFixture(kind), kind);
     await page.waitForFunction(k => window.__formEcho && window.__formEcho.kind === k, { timeout: 30000 }, kind);
     return page.evaluate(() => { const loc = __zp_get(globalThis, 'location'); return { echo: window.__formEcho, virtualHref: loc.href, virtualHash: loc.hash, documentURL: __zp_get(document, 'URL'), baseURI: __zp_get(document, 'baseURI') }; });
   }
@@ -1674,13 +1774,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('plain-text form submission', async () => {
   const plainForm = await submitFormFixture('plain');
   assert.match(plainForm.echo.contentType, /^text\/plain/);
-  assert.match(plainForm.echo.body, /alpha=one/);
-  assert.match(plainForm.echo.body, /submitter=plain/);
+  assert.equal(plainForm.echo.method, 'POST');
+  assert.equal(plainForm.echo.body, 'alpha=one\r\nsubmitter=plain\r\n');
   assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=plain') && r.contentType.startsWith('text/plain')), `target requests: ${JSON.stringify(requests)}`);
   });
   await t.test('multipart form submission and private navigation metadata', async () => {
   const multipartForm = await submitFormFixture('multipart');
   assert.match(multipartForm.echo.contentType, /^multipart\/form-data; boundary=/);
+  assert.equal(multipartForm.echo.method, 'POST');
+  assert.match(multipartForm.echo.body, /name="alpha"\r\n\r\none\r\n/);
+  assert.match(multipartForm.echo.body, /name="submitter"\r\n\r\nmultipart\r\n/);
   assert.match(multipartForm.echo.body, /name="upload"; filename="hello.txt"/);
   assert.match(multipartForm.echo.body, /file-body/);
   const rawAfterSubmit = page.url();

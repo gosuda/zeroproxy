@@ -259,7 +259,7 @@ pub fn header_content_length(headers: &[(String, String)]) -> io::Result<Option<
 }
 
 /// Status codes that MUST NOT carry a body (RFC 9112 §6.3 / §15.4):
-/// 1xx, 204, 304. Used by `response_is_keepalive` to decide whether a
+/// 1xx, 204, 304. Used by `response_keepalive` to decide whether a
 /// missing framing header is fine.
 pub fn no_body_status(status: u16) -> bool {
     matches!(status, 100..=199 | 204 | 304)
@@ -325,15 +325,14 @@ pub const MAX_CHUNK_LINE: usize = MAX_HEAD_BYTES;
 /// line) are recognised but the trailer content is discarded — every
 /// caller today only consumes the body bytes.
 ///
-/// On a mid-body / mid-trailer EOF the caller invokes `finish()` to get
-/// whatever's already been accumulated; matches the wasm wrapper's
-/// "WAF-cut-the-socket tolerance" semantics (a partial body renders
-/// better than an empty error page).
+/// Consumers may drain bytes before completion, but must require `Done` before
+/// treating EOF as success or returning a connection to the keep-alive pool.
 pub struct ChunkedDecoder {
     state: ChunkedState,
     input: Vec<u8>,
     body: Vec<u8>,
     body_cap: usize,
+    received: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,14 +365,15 @@ pub enum ChunkedStep {
 }
 
 impl ChunkedDecoder {
-    /// Create a fresh decoder. `body_cap` caps the buffered body; an
-    /// overrun surfaces as `InvalidData`.
+    /// Create a fresh decoder. `body_cap` caps the cumulative body, including
+    /// bytes already drained by a streaming consumer.
     pub fn new(body_cap: usize) -> Self {
         Self {
             state: ChunkedState::WaitingForSize,
             input: Vec::with_capacity(8192),
             body: Vec::new(),
             body_cap,
+            received: 0,
         }
     }
 
@@ -385,6 +385,11 @@ impl ChunkedDecoder {
     /// Advance the state machine by one transition. Returns `NeedMore`
     /// when the next transition needs bytes not yet pushed.
     pub fn step(&mut self) -> io::Result<ChunkedStep> {
+        if matches!(self.state, ChunkedState::WaitingForSize | ChunkedState::DrainingTrailers)
+            && self.input.windows(2).position(|w| w == b"\r\n").unwrap_or(self.input.len()) > MAX_CHUNK_LINE
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "http1: chunk line exceeded cap"));
+        }
         match self.state {
             ChunkedState::WaitingForSize => {
                 let Some(line) = self.consume_line() else {
@@ -394,12 +399,13 @@ impl ChunkedDecoder {
                 if cs.is_terminal {
                     self.state = ChunkedState::DrainingTrailers;
                 } else {
-                    if self.body.len() as u64 + cs.size > self.body_cap as u64 {
+                    if cs.size > (self.body_cap as u64).saturating_sub(self.received) {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "http1: chunked body exceeded cap",
                         ));
                     }
+                    self.received += cs.size;
                     self.state = ChunkedState::ReadingBody { remaining: cs.size };
                 }
                 Ok(ChunkedStep::Progress)
@@ -471,10 +477,8 @@ impl ChunkedDecoder {
         self.state == ChunkedState::Done
     }
 
-    /// Consume the decoder and return whatever body has accumulated so
-    /// far. Safe to call mid-stream — matches the wasm wrapper's
-    /// WAF-cut-the-socket tolerance, returning a partial body instead
-    /// of dropping the response.
+    /// Consume the decoder and return bytes still buffered. This does not
+    /// imply the framing is complete; callers must check `is_done` separately.
     pub fn into_body(self) -> Vec<u8> {
         self.body
     }
@@ -484,6 +488,16 @@ impl ChunkedDecoder {
         &self.body
     }
 
+    /// Drain decoded bytes without resetting framing or the cumulative body cap.
+    pub fn take_body(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.body)
+    }
+
+    /// Unconsumed bytes after Done cannot belong to this response.
+    pub fn has_remaining_input(&self) -> bool {
+        !self.input.is_empty()
+    }
+
     fn consume_line(&mut self) -> Option<String> {
         let pos = self.input.windows(2).position(|w| w == b"\r\n")?;
         let bytes: Vec<u8> = self.input.drain(..pos + 2).collect();
@@ -491,7 +505,7 @@ impl ChunkedDecoder {
     }
 }
 
-/// Predicate matching the wasm wrapper's `response_is_keepalive`: an
+/// A response permits connection reuse after its body has completed:
 /// HTTP/1.1 connection survives the response only when (a) no
 /// `Connection: close` was sent, AND (b) the body was bounded
 /// (Content-Length, terminal chunked, or no-body status). A
@@ -862,10 +876,6 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    #[test]
-    fn chunk_terminator_is_crlf() {
-        assert_eq!(CHUNK_TERMINATOR, b"\r\n");
-    }
 
     // -- ChunkedDecoder ---
 
@@ -955,11 +965,34 @@ mod tests {
     }
 
     #[test]
+    fn decoder_drain_preserves_partial_chunk_and_trailer_state() {
+        let mut d = ChunkedDecoder::new(5);
+        d.push(b"5\r\nhe");
+        assert_eq!(d.step_until_blocked().unwrap(), ChunkedStep::NeedMore);
+        assert_eq!(d.take_body(), b"he");
+        d.push(b"llo\r\n0\r\nX-Trailer: value\r\n");
+        assert_eq!(d.step_until_blocked().unwrap(), ChunkedStep::NeedMore);
+        assert_eq!(d.take_body(), b"llo");
+        d.push(b"\r\nextra");
+        assert_eq!(d.step_until_blocked().unwrap(), ChunkedStep::Done);
+        assert!(d.has_remaining_input());
+        assert!(d.take_body().is_empty());
+    }
+
+    #[test]
+    fn decoder_drain_does_not_reset_cumulative_cap() {
+        let mut d = ChunkedDecoder::new(5);
+        d.push(b"3\r\nabc\r\n");
+        assert_eq!(d.step_until_blocked().unwrap(), ChunkedStep::NeedMore);
+        assert_eq!(d.take_body(), b"abc");
+        d.push(b"3\r\ndef\r\n0\r\n\r\n");
+        assert_eq!(d.step_until_blocked().unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn decoder_finish_mid_stream_returns_partial_body() {
-        // Server closed the socket mid-chunk after delivering the first
-        // 4 bytes of a 5-byte chunk. Caller invokes into_body() and
-        // gets the partial — matches the wasm wrapper's WAF-cut-socket
-        // tolerance.
+        // The codec exposes partial bytes, but EOF is not success until Done.
+        // A transport may deliver these early and still error its body later.
         let mut d = ChunkedDecoder::new(1 << 20);
         d.push(b"5\r\nhell");
         // Drive until blocked.

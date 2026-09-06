@@ -1,61 +1,19 @@
 # Transport Regressions
 
-ZeroProxy 의 transport 계층 (WASM 커널 ↔ relay 서버 ↔ target) 에서 발견한 보안/성능 회귀 기록.
+WASM 커널 ↔ relay ↔ target의 보안 회귀 역사. 당시 경로·검증 공백은 현재 구현 목록이 아니다.
+보안 invariant: HTTPS의 TLS는 client WASM이 소유하고 Go는 byte-pipe다. 서버에 타깃 HTTP 헤더·쿠키·본문을 평문 envelope로 넘기지 않는다.
 
-특히 "**서버가 평문 트래픽을 보면 안 된다**" 라는 ARCHITECTURE.md 핵심 invariant 가 침해된 경우를 우선 기록.
+## 2026-06-01 — client-TLS를 server-TLS로 바꾼 cutover {#client-tls-cutover}
 
----
+- 원인: `291db00`의 Rust 이관이 `kernel_fetch`에서 URL/method/headers/body를 `/zp/relay` JSON으로 보냈다. `cmd/zeroproxy-server/relay.go`의 `http.Transport`·cookie jar·`followRedirects`가 TLS를 종료하여 서버가 모든 평문을 보게 됐다. 빌드·렌더 성공으로는 드러나지 않았다.
+- 당시 수정(Step 14): `crates/zp-bundle/src/kernel/transport/`에 `ws_stream.rs`, `socks5.rs`, `tls.rs`, `http1.rs`, `fetch.rs`로 WS→SOCKS5→client TLS→HTTP 스택을 복구했다. `kernel_fetch`가 이 경로를 호출하며 JSON-envelope의 `relay_fetch*`, `relay_round_trip`, `RelayRequest/Head`와 옛 mux를 제거했다.
+- 서버: target HTTP/TLS를 소유하던 `relay.go`, `/zp/relay`, `/zp/relay-mux`, `/zp/ws-bridge`를 제거하고 `/zp/ws-tcp`의 TCP+SOCKS5 byte-pipe로 전환했다. 이후 아키텍처 변화의 존재와 별개로 TLS 소유권을 서버에 돌리는 회귀는 금지한다.
+- 당시 상태: HTTP/HTTPS client-TLS는 복구로 기록. target WebSocket stub, H2·yamux·Tor auth 미연결은 **그 시점의 공백**이며 현재 미구현 선언이 아니다. 현재 커널 위치는 `crates/zp-kernel-bundle`이고 남은 CI acceptance는 [계획](../design/website-compat-refactor.md)을 본다.
+- 검증 공백: 당시 서버 라우트 부재 검사·옛 식별자 grep·패킷 캡처 제안은 실행 증거가 없었다. 이름 부재만으로 보안 모델을 증명하지 말고 실제 `kernel_fetch` 전송 경계와 HTTPS wire를 확인해야 한다. 이번 문서 정리에서는 실행하지 않았다.
+- 근거: commit `291db00`, 원문 Step 14 복구 기록. 삭제된 `ARCHITECTURE.md`의 core invariant와 외부 PHASE2 E1 언급은 역사적 참조이지 현재 문서의 존재·검증 증거가 아니다.
 
-## 2026-06-01 — Step 13 cutover 가 client-TLS → server-TLS 로 보안 모델을 silently downgrade
+## 후속 전송 정정
 
-**Symptoms**:
-- 외부에서 관찰 불가능. 빌드 통과, 페이지 정상 렌더링.
-- 사용자 보고: "트래픽 처리가 서버로 넘어간 것 같다"
-
-**Root cause**:
-- Step 13 (commit `291db00` Rust workspace 통합) 이 Go WASM kernel (`cmd/wasm-kernel/`, SOCKS5+yamux+uTLS+HTTP 풀스택 클라) 을 Rust WASM kernel (`crates/zp-bundle/src/kernel/`) 로 "교체" 라고 라벨링.
-- 그러나 Rust 신규 kernel 의 `kernel_fetch` 는 **JSON envelope 을 `/zp/relay` WebSocket 으로 평문 송신**:
-  ```rust
-  struct RelayRequest<'a> {
-      url: &'a str,          // ← 평문 target URL (https://...)
-      method: &'a str,
-      headers: &'a [(String, String)],  // ← Cookie, Authorization 포함
-      has_body: bool,
-  }
-  ```
-- 서버 `cmd/zeroproxy-server/relay.go` 가 `http.Transport` (with `TLSClientConfig`, `ForceAttemptHTTP2: true`) + cookie jar + `followRedirects` 를 직접 운영 → **서버가 TLS 종료, 모든 헤더/쿠키/바디 평문 관측**.
-- ARCHITECTURE.md 의 "relay does not parse target HTTP, TLS, redirects, cookies, or HTML" invariant 정면 위반.
-- 같은 commit 의 코멘트 (`crates/zp-bundle/src/kernel/mod.rs:9-11`): *"The Go kernel is still in the tree (`cmd/wasm-kernel/`) and can be removed after this kernel reaches feature parity."* — feature parity 가 client-TLS 까지 포함한다는 점이 누락.
-
-**Fix** (Step 14, this PR):
-- `crates/zp-bundle/src/kernel/transport/` 신규 모듈로 client-side stack 재구축:
-  - `ws_stream.rs` — `web_sys::WebSocket` → `futures::io::AsyncRead+AsyncWrite` 어댑터
-  - `socks5.rs` — RFC 1928 + 1929 (DOMAINNAME ATYP, `IsolateSOCKSAuth` 호환)
-  - `tls.rs` — rustls 0.23 + `rustls-rustcrypto` provider (WASM 호환). 명시적 sync↔async state-machine pump.
-  - `http1.rs` — origin-form 요청, `httparse` 응답, chunked/Content-Length/EOF body framing
-  - `fetch.rs` — entry: WS → SOCKS5 → TLS(https) → HTTP/1.1 → JS `Response`
-- `kernel_fetch` → `transport::fetch::fetch(url, method, headers, body)`. JSON-envelope 코드 (`relay_fetch*`, `relay_round_trip`, `RelayRequest/Head`, mux 모듈) 완전 삭제.
-- 서버: `/zp/relay`, `/zp/relay-mux`, `/zp/ws-bridge` endpoints 삭제. `relay.go` (`http.Transport` + `followRedirects` + cookie jar) 전체 삭제. 신규 `/zp/ws-tcp` endpoint 추가 — 1 WS = 1 TCP+SOCKS5 byte-pipe (`bridgeTargetStream(net.Conn)` 재사용).
-
-**Status**:
-- ✅ HTTP/HTTPS fetch — client-TLS
-- ❌ Target WebSocket (`wss://`) — `kernel_stream` 은 deferred stub (`TARGET_WS_NOT_REWIRED`). client-side WS framing on SOCKS5+TLS 가 follow-up.
-- ❌ HTTP/2 — ALPN 강제 `http/1.1`. `h2` crate + tokio↔futures adapter 가 follow-up perf.
-- ❌ yamux multiplex — 1 WS = 1 request. yamux client (WASM) 가 follow-up perf.
-- ❌ Tor mode (`-socks` flag) — `Auth::None` hardcoded. `IsolateSOCKSAuth` username 라우팅이 follow-up.
-
-**Regression guard**:
-- TODO: 서버 단위 테스트 — `/zp/relay`, `/zp/relay-mux`, `/zp/ws-bridge` 가 라우팅 테이블에 부재하는지 assert (회귀 시 즉시 빨간불).
-- TODO: cargo grep guard — `RelayRequest`, `RelayResponseHead`, `pick_relay_url` 같은 식별자가 워크스페이스에 재등장 시 lint 실패.
-- TODO: E2E — taskweaver 로 `https://example.com` 페치 + 서버 `Wireshark` 캡처에 평문 HTTP request line 미존재 확인.
-
-**Lessons**:
-- "Go → Rust 포팅" 으로 라벨링된 PR 이 실은 **transport architecture 자체를 바꾸는** 경우가 있음. PR 리뷰 시 "kernel_fetch 가 어떤 endpoint 에 접속하는가?" 를 단일 줄 grep 으로 항상 검증.
-- ARCHITECTURE.md 의 invariant 가 코드 변경의 acceptance criteria 인지 명시되어야 PR 리뷰어가 잡을 수 있음.
-- WASM 에서 TLS 가 까다롭다고 server 로 미루고 싶은 유혹이 항상 있음. 이건 ZeroProxy 의 존재 이유 (client-owned virtual browsing) 자체를 무효화함.
-
-**See also**:
-- ARCHITECTURE.md §"Core invariants" (이 invariant 들이 깨졌었음)
-- PHASE2 plan E1 escape matrix (관련)
-- commit `291db00` (Step 13: regression 도입)
-- 이번 PR (Step 14: 복구)
+- [2026-07-28 lost wakeup](LOG.md#2026-07-28-2): NAVER가 END_STREAM/deflate 종료를 지연시킨다는 과거 anti-bot 서사는 직접 H2 대조와 yamux 드라이버 조사로 철회됐다. 비슷한 시간 지연을 곧바로 같은 원인으로 묶지 않는다.
+- [WASM timer/cancel](LOG.md#2026-06-16-2), [h2 reset/Instant trap](LOG.md#2026-06-19-1): 정상 응답뿐 아니라 취소·오류 경로의 타깃 런타임 동작도 필요하다. 새 timer future로 과거 취소 경합을 되살리지 않는다.
+- [body 없는 Response](LOG.md#2026-07-30-10), [H1 deadline](sw-integration.md#transport-데드라인-실측): framing·HEAD/204/304·헤더 대기와 본문 수명을 구별한다. 전체 CI green 또는 스트림 취소 완료는 이 역사에서 주장하지 않는다.

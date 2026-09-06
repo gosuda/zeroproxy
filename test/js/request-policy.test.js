@@ -156,3 +156,42 @@ test('Fetch responses retain native identity, filtered metadata, clone and opaqu
   assert.equal(opaque.headers.get('Location'), null);
   assert.equal(opaque.clone().type, 'opaqueredirect');
 });
+
+test('streamed responses pull on demand and release their lifetime when cancelled', async () => {
+  const worker = loadWorker(async () => response(200));
+  let pulls = 0;
+  let cancelled;
+  const upstream = new ReadableStream({
+    pull(controller) { pulls++; controller.enqueue(new Uint8Array([42])); },
+    cancel(reason) { cancelled = reason; },
+  }, { highWaterMark: 0 });
+  const streamed = worker.completeBodyResponse(new Response(upstream, { headers: { 'X-ZP-Body-Stream': '1' } }));
+  let finished = false;
+  streamed.__zpBodyDone.then(() => { finished = true; });
+  await Promise.resolve();
+  assert.equal(pulls, 0);
+  const reader = streamed.body.getReader();
+  assert.deepEqual(Array.from((await reader.read()).value), [42]);
+  assert.equal(pulls, 1);
+  assert.equal(finished, false);
+  await reader.cancel('navigation');
+  await streamed.__zpBodyDone;
+  assert.equal(cancelled, 'navigation');
+  assert.equal(finished, true);
+  assert.equal(streamed.headers.get('X-ZP-Body-Stream'), null);
+});
+
+test('stream completion and upstream failure settle lifetime without truncating success', async () => {
+  const worker = loadWorker(async () => response(200));
+  const bytes = new Uint8Array([1, 2, 3]);
+  const normal = worker.completeBodyResponse(new Response(new ReadableStream({
+    start(controller) { controller.enqueue(bytes); controller.close(); },
+  }), { headers: { 'X-ZP-Body-Stream': '1' } }));
+  assert.deepEqual(Array.from(new Uint8Array(await normal.arrayBuffer())), [1, 2, 3]);
+  await normal.__zpBodyDone;
+  const failed = worker.completeBodyResponse(new Response(new ReadableStream({
+    pull(controller) { controller.error(new Error('upstream reset')); },
+  }), { headers: { 'X-ZP-Body-Stream': '1' } }));
+  await assert.rejects(failed.text(), /upstream reset/);
+  await failed.__zpBodyDone;
+});

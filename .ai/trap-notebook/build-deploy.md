@@ -1,278 +1,65 @@
 # Build & Deploy Regressions
 
-`scripts/build.mjs`, Cargo workspace, wasm-bindgen, 서버 시작 시 자주 깔리는 함정.
+역사적 범주별 요약이며 현재 승인 사양이 아니다. 측정·통과 기록은 당시 결과이며 새 실행은 없었다. 과거 제안 테스트·구현 공백은 미검증 이력이지 현재 TODO가 아니다.
 
----
+<a id="2026-05-30--wasm-opt--oz-가-feature-flags-없으면-validation-실패"></a>
+## 2026-05-30 — `wasm-opt` feature flags 누락
 
-## 2026-05-30 — `wasm-opt -Oz` 가 feature flags 없으면 validation 실패
+- 원인: rustc 1.82+의 wasm 기본 기능을 보수적인 binaryen이 거부해 `-Oz` validation 실패, 출력 없이 최적화만 skip.
+- 수정: [scripts/build.mjs](../../scripts/build.mjs) `buildRustBundle`에 `--enable-bulk-memory`, `--enable-bulk-memory-opt`, `--enable-nontrapping-float-to-int`, `--enable-sign-ext`, `--enable-mutable-globals`, `--enable-multivalue`, `--enable-reference-types` 명시. rustc 기본값 변경 시 flags 재검토.
+- 당시 두 wasm 모두 통과; 크기·wrapper hot path 개선, Rust LTO 내부 경로 변화는 미미. `npm i -D binaryen` 설치 권장; 미설치는 `tryRunOptional`로 빌드 유지.
 
-**Symptoms**:
-```
-[wasm-validator error in function 11] unexpected false:
-  memory.copy operations require bulk memory operations [--enable-bulk-memory-opt]
-[wasm-validator error in function 16] unexpected false:
-  memory.fill operations require bulk memory [--enable-bulk-memory-opt]
-Fatal: error validating input
-```
-`wasm-opt` 가 즉시 abort, 출력 파일 미생성. 빌드는 graceful skip 으로 진행되지만 size 최적화 누락.
+<a id="2026-05-29--upstream-connection-pool-누락"></a>
+## 2026-05-29 — Upstream pool 누락
 
-**Root cause**:
-rustc 1.82+ 가 `wasm32-unknown-unknown` 에 대해 **default 로 bulk-memory / sign-ext / nontrapping-fptoint / multivalue / reference-types / mutable-globals 사용**. wasm-opt (binaryen) 는 conservative — 명시적으로 enable 안 하면 validation 실패.
+- 원인: [cmd/zeroproxy-server/relay.go](../../cmd/zeroproxy-server/relay.go) `bridgeRelayWS`의 수동 HTTP write/read가 WS마다 TCP/TLS/SOCKS5 연결을 새로 생성.
+- 수정: `poolForDial(dial)`로 direct/Tor별 `http.Transport` 캐시, `RoundTrip` 사용. 설정은 `MaxIdleConnsPerHost=16`, `MaxIdleConns=200`, `IdleConnTimeout=90s`, `ForceAttemptHTTP2=true`, `DisableCompression=true`(SW가 encoding 처리).
+- 당시 서버측만 pool, client→server는 1 WS=1 HTTP. dial counter 재사용 테스트는 당시 제안·미검증; client multiplex는 별개였다.
 
-**Fix** ([scripts/build.mjs](../../scripts/build.mjs) `buildRustBundle`):
-```js
-const WASM_OPT_FLAGS = [
-  '--enable-bulk-memory',
-  '--enable-bulk-memory-opt',
-  '--enable-nontrapping-float-to-int',
-  '--enable-sign-ext',
-  '--enable-mutable-globals',
-  '--enable-multivalue',
-  '--enable-reference-types',
-];
-tryRunOptional('wasm-opt', ['-Oz', ...WASM_OPT_FLAGS, src, '-o', dst]);
-```
-이제 zp_bundle_bg.wasm 과 zp_page_rt.wasm 둘 다 정상 통과.
+<a id="2026-05-29--서버--web-인자-함정"></a>
+## 2026-05-29 — 서버 `-web` 오지정
 
-설치: `npm i -D binaryen` (cross-platform, node_modules/.bin/wasm-opt 자동 link). chocolatey/brew 도 가능하지만 npm 이 일관됨.
+- 원인: `-web web`은 소스를 가리켜 `dist/web/__zp/`의 wasm-bindgen 산출물을 못 찾음. `os.Open` 실패→503→SW controller 부재.
+- 규칙: `-web dist/web` 또는 절대 경로 사용; Windows/한글 경로 혼동에는 `-web "$(realpath dist/web)"`.
+- 시작 시 `__zp/zp_bundle_sw.js` 확인 assertion은 당시 제안·미검증.
 
-**효과 측정** (zp-page-rt 기준):
-- 크기: 18,764 B → 15,273 B (**-18.6%**)
-- wrapper 경로 hot path: 514.9 → 316.6 ns/op (**-38.5%**)
-- Rust LTO 가 이미 최적화한 wasm-internal 경로는 변동 미미
+<a id="2026-05-29--windows-좀비-zeroproxy-serverexe"></a>
+## 2026-05-29 — Windows 좀비 서버
 
-**Regression guard**: build.mjs 가 flags 박혀 있어 영구. wasm-opt 미설치 시 `tryRunOptional` 가 graceful skip → 빌드 자체는 안 깨짐.
+- 원인: bash `pkill`이 nohup 자식 등을 남겨 새 서버 bind 실패.
+- 회피: `tasklist | grep zeroproxy-server` 확인 후 `taskkill //F //IM zeroproxy-server.exe`; 명시적 `//PID <pid>` 종료가 가장 안전.
+- 상태: 환경 함정으로 기록, 자동 회귀 가드 없음.
 
-**Pattern**: rustc 새 release 가 wasm feature default 변경할 때마다 flags 추가 필요. `wasm-opt --help | grep enable-` 로 후보 확인.
+<a id="2026-05-29--두-개의-zeroproxy-serverexe-가-같은-포트-listen"></a>
+## 2026-05-29 — 같은 포트 이중 listen
 
----
+- 원인: Windows에서 옛 `127.0.0.1:18080` 서버와 새 `0.0.0.0:18080` 서버가 함께 bind되어 응답 혼재.
+- 회피: 재시작 전 `taskkill //F //IM zeroproxy-server.exe`, 구체적 IP `127.0.0.1:18080` 사용.
+- 증거: 당시 `netstat`에 두 LISTENING 항목, curl 응답 불일치.
 
-## 2026-05-29 — Upstream connection pool 누락
+<a id="2026-08-20--닫음-taskweaver-start-가-파이프-호출자에게-안-끝나던-문제-0161"></a>
+## 2026-08-20 — taskweaver `start` 파이프 종료 수정
 
-**Symptoms**:
-- 사용자가 page 로딩이 느리다고 보고 ("멀티플렉싱이 안 되는 것 같다").
-- 서버 log 에 `relay: WS upgrade request from ...` 와 `relay: target=...` 가 페이지당 200+ 개 (s.pstatic.net 같은 image CDN 으로만 100+).
-- 각 fetch 가 새 TCP 연결 + (https 일 때) 새 TLS handshake + (Tor SOCKS5 일 때) 새 SOCKS5 CONNECT.
+- 원인: Windows `CreateProcessW(bInheritHandles=TRUE)`가 부모의 상속 가능 핸들을 데몬에 복제해 stdout 파이프 EOF를 막음(rust-lang/rust#38227).
+- 수정: 0.16.1 (`c99f09e`)에서 spawn 직전 CLI std 핸들 3개의 `HANDLE_FLAG_INHERIT` 해제. CLI 종료·stderr·WebView2 자식 원인은 배제, graceful stop은 정상이었다.
+- 당시 `start | cat`, `OUT=$(start …)` 정상 종료, 매트릭스 전체·static-policy 통과, 테이프 유실 없음. 리다이렉션 백그라운드+`list` 우회는 폐기; `.ai/dogfood/wtm/*.sh`에는 잔존. 핸드오프에서는 관측과 가설을 구분했다.
 
-**Root cause**:
-[cmd/zeroproxy-server/relay.go](../../cmd/zeroproxy-server/relay.go) 의 `bridgeRelayWS` 가 manual HTTP 1.1 로 요청 전송: `dial()` + (TLS) + `httpReq.Write(conn)` + `bufio.NewReader(conn)` + `http.ReadResponse`. 매 WS 마다 새 connection. Keep-alive 0.
+<a id="2026-08-21--keep-in-sync-는-부탁이지-강제가-아니다"></a>
+## 2026-08-21 — 오류 코드 목록 불일치
 
-페이지당 cost 추정 (이전 측정):
-- TCP handshake ~50-100ms (LAN 외)
-- TLS handshake ~100-300ms (CDN edge)
-- SOCKS5 핸드셰이크 (Tor 모드): ~수백 ms
-- 합계 페이지당 ~30+ 초 (200 requests × 평균 150ms handshake)
+- 원인: `crates/zp-shared/src/errors.rs`의 “keep in sync” 주석과 달리 JS/Rust/Go 및 별도 테스트 배열이 분기. Rust `SUBMISSION_EXPIRED` 누락, `main.go:233`의 `RTC_GATEWAY_UNAVAILABLE`을 `sanitizeCode`가 `POLICY_BLOCKED`로 강등해 SW 통제 여부별 페이지 차이 발생.
+- 수정: `testdata/error_codes.json`을 단일 소스로 세 언어 대조, Rust는 순서도 검사. 동기화 부탁 대신 fixture로 강제.
+- 가드 도입 때 `TARGET_HTTP_FAILED`도 전 목록에서 빠져 `safeError`가 네트워크/TLS 실패를 정책 차단으로 바꾸던 문제 발견; `sw.js` 주석만으로는 방지되지 않았다.
 
-**Fix**:
-- `relay.go` 의 manual transport 코드를 제거하고 `http.Transport` 로 교체.
-- `poolForDial(dial)` 헬퍼가 dial closure 별로 `http.Transport` 를 캐시 (direct dial / Tor SOCKS5 모드 분리).
-- 설정: `MaxIdleConnsPerHost=16`, `MaxIdleConns=200`, `IdleConnTimeout=90s`, `ForceAttemptHTTP2=true`, `DisableCompression=true` (SW 가 content-encoding 처리).
-- `transport.RoundTrip(httpReq)` 로 호출. 같은 target host 로 가는 후속 요청이 자동으로 keep-alive connection 재사용.
+## <a id="execjs-문맥"></a>`taskweaver wait` 인자 누락 (2026-08-26)
 
-**Regression guard**: TODO
-- 단위테스트: relay_test 에 같은 target 으로 2회 RoundTrip 후 같은 conn 재사용 검증 (counter on dial 함수 = 1 회).
+- 원인: 필수 `--id` 없는 `wait`가 즉시 오류 종료하고 stderr 폐기로 숨겨짐. CNN 프레임 차이는 실제 대기 없는 러너 관측이므로 광고 회귀나 exec-js 문맥 규칙의 증거가 아니다; CNN 자체 해결을 뜻하지 않는다.
+- 규칙: 호출에 `-i zp`, elapsed·종료 코드 확인, stderr 보존. SW 삭제 직후 제출도 controller 부재로 무효였으므로 `navigate → clear-site-data → navigate → 대기`.
+- 후속 정정: 0.17 `wait-navigation`은 같은 URL 재탐색도 센티널 소멸로 감지. **클릭 전에** 실행해 센티널 설치를 기다려야 하며, 클릭 후에는 `SENTINEL_PLANT_FAILED`. 0.17.0의 `--to`는 URL이 맞아도 실패해 사용 금지로 기록.
+- 당시 문서 교체 실측은 3~5초. 종전 20~30초 추정은 잘못된 러너 결과로 폐기; exec-js A/B 역시 독립 검증되지 않았다.
 
-**Patterns to watch**:
-- `net.Conn` 위에 manual HTTP write/read 는 keep-alive 안 됨. 항상 `http.Transport.RoundTrip` 또는 `http.Client.Do` 사용.
-- WebSocket 위에서 HTTP 를 tunneling 할 때도 server 측은 target HTTP 와는 별개 — pool 가능.
+## <a id="빌드-clean-이-유일본을-지운다"></a>build clean이 유일 산출물 삭제 (2026-09-04)
 
-**See also**: 차후 yamux 같은 client→server multiplex 까지 추가 가능 (현재는 1 WS = 1 HTTP, 서버측만 pool). 추가 작업은 별개 트랙.
-
----
-
-## 2026-05-29 — 서버 `-web` 인자 함정
-
-**Symptoms**:
-- `./dist/zeroproxy-server.exe -web web -addr 127.0.0.1:18080` 실행 시 SW 가 `/__zp/zp_bundle_sw.js` 등에서 503 응답.
-- 페이지가 SW 등록 실패 → controller 없음 → "Transport not ready" 에러.
-
-**Root cause**:
-build artifact 는 `dist/web/__zp/` 에 emit 되는데 서버 `-web web` 으로 띄우면 소스 디렉토리 `web/` 을 가리킴 → `__zp/` 하위 wasm-bindgen artifact 가 없음. `serveFile` 의 `os.Open` 실패 → 503.
-
-**Fix / 회피**:
-- 서버는 항상 `-web dist/web` (또는 절대 경로) 로 띄운다.
-- Korean 경로 마운트 / Windows POSIX 경로 헷갈림 회피: `-web "$(realpath dist/web)"` 권장.
-
-**Regression guard**: TODO — 서버 시작 시 webDir 안에 `__zp/zp_bundle_sw.js` 존재 확인하는 startup assertion 추가.
-
----
-
-## 2026-05-29 — Windows 좀비 zeroproxy-server.exe
-
-**Symptoms**:
-- `pkill -f zeroproxy-server` 실행 후에도 `tasklist` 에 zeroproxy-server.exe 가 남아있음.
-- 새 서버 띄우면 "bind: Only one usage of each socket address" 에러.
-
-**Root cause**:
-Windows 환경에서 bash `pkill` 이 일부 process 만 보냄 (nohup 으로 띄운 자식). `taskkill //F //IM zeroproxy-server.exe` 가 더 확실. `taskkill //F //PID <pid>` 로 명시적 PID 종료가 가장 안전.
-
-**Regression guard**: N/A — 환경 함정. 작업 자동화에서 항상 `tasklist | grep zeroproxy-server` 로 확인 후 `taskkill //F //IM` 사용.
-
----
-
-## 2026-05-29 — 두 개의 zeroproxy-server.exe 가 같은 포트 listen
-
-**Symptoms**:
-- `netstat -ano | grep 18080.*LISTENING` 결과에 2개 LISTENING 라인 (`0.0.0.0:18080` 와 `127.0.0.1:18080`).
-- curl 결과가 일관성 없음 (옛 서버 / 새 서버 둘 다 응답).
-
-**Root cause**:
-Windows 가 `0.0.0.0:port` 와 `127.0.0.1:port` 동시 바인딩 허용. 옛 서버 (127.0.0.1) + 새 서버 (0.0.0.0) 둘 다 살아서 race.
-
-**Fix / 회피**:
-- 새 서버 띄우기 전 `taskkill //F //IM zeroproxy-server.exe` 강제.
-- 항상 `127.0.0.1:18080` (구체적 IP) 사용. `0.0.0.0` 은 공유 binding 함정.
-
----
-
----
-
-## 2026-08-20 — 닫음: taskweaver `start` 가 파이프 호출자에게 안 끝나던 문제 (0.16.1)
-
-**무엇이었나**: `taskweaver start` 의 JSON 은 나오고 데몬도 뜨는데, **stdout 이 파이프면
-명령이 안 끝났다**. 사람이 터미널에서 치면 안 보이고, `$( )` / `execSync` / CI 처럼
-**프로그램에서 부를 때만** 걸린다 — "성공했는데 안 끝나는" 최악의 모양이었다.
-
-**원인**: Rust `std::process::Command` 는 Windows 에서 `CreateProcessW(bInheritHandles=TRUE)`
-를 쓰고, 이때 `Command` 에 지정한 세 핸들뿐 아니라 **부모의 상속 가능한 핸들 전부**가
-자식에 복제된다(rust-lang/rust#38227). CLI 의 stdout(= 호출자의 셸 파이프)이 데몬으로
-딸려 들어가 데몬이 사는 동안 EOF 가 안 왔다.
-
-**수정**: taskweaver 0.16.1 (`c99f09e`) — 데몬 spawn 직전에 CLI std 핸들 3개의
-`HANDLE_FLAG_INHERIT` 를 내린다.
-
-**우리 쪽 실측 재확인**: `start | cat` → exit=0 / **1,764ms** (전에는 30s 타임아웃),
-`OUT=$(start …)` → exit=0 / **1,447ms**. 매트릭스 47칸 전부 `ok`, 테이프 유실 0,
-static-policy 108 pass — 0.16.1 에서 하네스가 그대로 돈다.
-
-**우회책 폐기**: `</dev/null >/dev/null 2>&1 &` + 별도 `list` 확인은 더 이상 필요 없다.
-그냥 부르면 된다. (`.ai/dogfood/wtm/*.sh` 의 옛 스크래치 스크립트에는 아직 남아 있는데,
-스크래치라 손대지 않았다 — 복사해 쓸 때 주의.)
-
-**★교훈 — 도구 버그를 남에게 넘길 때**:
-이번 핸드오프가 그대로 수정으로 이어진 이유는 **측정과 가설을 분리해서 적었기**
-때문이다. "데몬 프로세스만 죽이면 파이프가 닫힌다" 는 **측정**이고,
-"`bInheritHandles` 때문이다" 는 **가설**이라고 명시했다. 그리고 **배제 목록**을 같이
-넘겼다(CLI 종료 아님 / stderr 무관 / WebView2 자식 아님 / graceful stop 정상).
-받는 쪽이 이미 판명난 곳을 다시 파지 않았다. 다음에도 이 형식을 쓸 것 —
-증상 / 최소 재현 3종 / 결정적 증거 / 측정 / 가설(명시) / 배제 목록 / 제안.
-
----
-
-## 2026-08-21 — "keep in sync" 는 부탁이지 강제가 아니다
-
-`crates/zp-shared/src/errors.rs` 헤더에 이렇게 적혀 있었다:
-
-> Keep this list, the JS list, and the Go list (if added) in sync.
-
-그 주석이 붙은 채로 **세 목록이 전부 갈라져 있었다** — JS 19 / Rust 18 / Go 12.
-게다가 같은 파일 안에서 테스트가 자기 배열을 따로 들고 있어 실은 네 벌이었다.
-
-**드러난 것**:
-- Rust 에 `SUBMISSION_EXPIRED` 누락 (JS/`sw.js` 는 쓰고 있었다)
-- **Go 의 자기모순**: `main.go:233` 이 내는 `RTC_GATEWAY_UNAVAILABLE` 을 같은 파일의
-  `sanitizeCode` 가 `POLICY_BLOCKED` 로 강등. SW 통제 여부에 따라 다른 페이지가 뜬다
-- **가드를 걸자마자 새 건**: `TARGET_HTTP_FAILED` 가 어느 목록에도 없어
-  `safeError` 가 접고 있었다 — 네트워크/TLS 실패가 "정책 차단" 으로 둔갑한다.
-  `sw.js` 주석이 정확히 그 위험을 경고하는데 정작 코드가 목록에 없었다
-
-**Fix**: `testdata/error_codes.json` 이 단일 소스, 세 곳이 전부 그 파일과 대조.
-Rust 는 **순서까지** 본다 — 순서가 흔들렸다는 건 어느 한쪽이 손으로 편집됐다는
-뜻이고, 그게 갈라지기 시작하는 지점이다.
-
-**교훈**: 소스에서 "keep in sync" / "must match" / "parity with …" 같은 **부탁 문구**를
-보면 그 자리에서 **픽스처로 바꿀 것.** 이 저장소에서 그 문구가 붙은 목록은
-지금까지 예외 없이 갈라져 있었다(errors, shareurl, worker UA). 반대로 픽스처가
-붙은 것(challenge, CSP)은 갈라지지 않았다.
-
-## <a id="execjs-문맥"></a>`taskweaver wait` 는 `--id` 없이 부르면 **0초 잔다** (2026-08-26)
-
-측정 러너가 CNN 프레임 수를 3회 연속 `3` 으로 보고했다. 같은 시점에 손으로
-재면 `26` 이었다. 하마터면 "최근 커밋이 광고를 깼다" 로 멀쩡한 수정 세 개를
-되돌릴 뻔했다.
-
-원인은 제품이 아니라 **러너의 한 줄**이다:
-
-```sh
-taskweaver wait --ms 150000 >/dev/null 2>&1   # ← --id 가 없다
-```
-
-`wait` 는 `--id` 가 **필수**다. 없으면 인자 오류로 즉시 죽는데, stderr 를
-`/dev/null` 로 버리고 있으니 아무 표시도 없이 **0초** 자고 다음 줄로 간다.
-그래서 "클릭 후 150초 대기" 가 실제로는 "클릭 직후"였다. 실측: `--ms 45000`
-이 `elapsed=1s`.
-
-**규칙**:
-
-- 러너에서 `taskweaver`  호출은 `-i zp` 를 빠뜨리지 않는다. 한 번 스크립트를
-  쓰면 `elapsed` 를 한 번 재서 **대기가 진짜 도는지 확인**한다.
-- `2>/dev/null` 로 stderr 를 버리는 순간, 오타 난 호출은 "조용한 no-op" 이
-  된다. 측정 러너에서는 stderr 를 남기거나 최소한 종료 코드를 본다.
-
-같은 러너에서 밟은 두 번째 함정: `clear-site-data` 로 SW 등록을 지운 직후
-곧바로 폼을 제출하면 아직 SW 가 페이지를 제어하지 않아 클릭이 아무 데도 가지
-않는다(랜딩에 그대로 남는다 — 요소 81개). `navigate → clear-site-data →
-navigate → 대기` 순서로 SW 가 붙을 시간을 준다.
-
-덧붙임: "클릭 직후 exec-js 를 던지면 랜딩(81 els), 안 던지면 부팅 문서(5 els)"
-라는 A/B 도 **이 0초 대기 상태에서 얻은 것**이라, 그 자체로는 exec-js 의 문맥
-규칙을 말해 주지 않는다. 대기를 고친 뒤 다시 볼 것.
-
-### 후속 (2026-08-26) — 이제 `wait-navigation` 을 쓴다, 그리고 교체는 3~5초다
-
-taskweaver 0.17 에 `wait-navigation` 이 생겼다. 폼 제출/클릭 뒤 문서가 실제로
-교체될 때까지 기다린다(옛 문서에 심은 센티널이 사라지는 것으로 감지하므로
-같은 URL 로의 재내비게이션도 잡는다). 러너에서 "몇 초 기다리면 되나" 를
-추측하지 않아도 된다:
-
-```sh
-( taskweaver wait-navigation -i zp --timeout-ms 45000 > nr.json 2>&1 ) &
-sleep 2                      # 센티널을 먼저 심게 한다
-taskweaver click -i zp --text "Open"
-wait
-```
-
-**클릭 뒤에 부르면 실패한다** — 그 시점엔 이미 내비게이션이 시작돼 센티널을
-심는 2초 JS 평가가 타임아웃난다(`SENTINEL_PLANT_FAILED`). 먼저 띄우고 클릭한다.
-
-**`--to` 는 현재(0.17.0) 쓰지 말 것** — 실측: `--to /zp/p/` 를 주면 45초를
-다 쓰고 `navigated:false` 로 실패하는데, 같은 응답의 `current_url` 에는 이미
-`/zp/p/` 가 들어 있다. `--to` 없이 부르면 같은 내비게이션을 **3.2초**에 잡는다.
-
-덤으로 얻은 사실: **프록시 문서 교체는 3~5초**다. 손으로 심은 센티널이 클릭
-5초 뒤 이미 사라져 있었고 URL 도 `/zp/p/…` 였다. 앞서 "20~30초 걸린다" 고 적은
-것은 대기가 0초로 돌던 러너에서 나온 값이라 틀렸다 — 그 러너는 클릭 직후를
-재고 있었을 뿐이다.
-
-## <a id="빌드-clean-이-유일본을-지운다"></a>`npm run build` 의 clean 이 `dist/` 를 먼저 비운다 — 툴체인이 없으면 되돌릴 수 없다 (2026-09-04)
-
-머신의 사용자 프로필이 바뀌면서(`PIPE_TAIL_USER` → `hsng9`) 이전 프로필이 통째로
-사라졌고, 거기 있던 개발 툴체인이 같이 없어졌다:
-
-| | 상태 | 복구 |
-|---|---|---|
-| `taskweaver` | 없음 | 빌드본을 현재 프로필 `~/.cargo/bin` 에 복사 |
-| `wasm-bindgen` | 없음 | `cargo install wasm-bindgen-cli --version 0.2.122 --locked` (Cargo.lock 의 `wasm-bindgen` 버전과 **반드시** 일치) |
-| Go 툴체인 | 없음 | 사용자가 설치(go1.27.0) |
-
-**여기서 밟은 것**: 그 상태로 `npm run build` 를 돌렸더니 clean 단계가 `dist/` 를
-먼저 비우고 Go 단계에서 죽었다. 그래서 **멀쩡히 돌던 `dist/zeroproxy-server.exe`
-까지 사라졌다** — 빌드가 실패했는데 실행 가능한 산출물은 이미 없어진 뒤다.
-Go 를 설치하기 전까지 프록시를 아예 못 띄웠고 그 사이 모든 브라우저 검증이 막혔다.
-
-**규칙**: 툴체인이 온전한지 **먼저** 확인하고 빌드한다. 한 줄이면 된다.
-
-```sh
-for t in go wasm-bindgen cargo node; do command -v $t >/dev/null || echo "MISSING: $t"; done
-```
-
-**또 하나**: 새 셸의 PATH 는 세션 시작 시점 환경을 물려받는다. 사용자가 방금 Go 를
-깔아도 `which go` 는 계속 실패한다 — 설치는 됐는데 안 잡히는 것이다. 레지스트리
-머신 PATH 를 보거나(`[Environment]::GetEnvironmentVariable("Path","Machine")`)
-그냥 절대 경로를 앞에 붙인다(`export PATH="/c/Program Files/Go/bin:$PATH"`).
-"없다" 로 단정하기 전에 파일시스템을 직접 봐야 한다.
-
-**세 번째**: 백그라운드 빌드가 도는 동안 `until [ -f dist/... ]` 로 폴링하면
-**이전 빌드가 남긴 파일**을 보고 통과해 버린다. 그 상태로 서버를 띄웠다가 clean
-단계가 dist 를 지워 러너가 통째로 헛돌았다. 파일 존재가 아니라 **작업 완료 알림**을
-기다릴 것.
+- 원인: 프로필 `PIPE_TAIL_USER`→`hsng9` 변경으로 툴체인 소실. `npm run build`가 `dist/`를 먼저 지운 뒤 Go 단계에서 실패해 `dist/zeroproxy-server.exe`와 브라우저 검증 수단까지 잃음.
+- 규칙: clean 전에 `go`, `wasm-bindgen`, `cargo`, `node` 확인. 당시 taskweaver는 `~/.cargo/bin`에 복사, Go는 사용자 설치; `wasm-bindgen-cli --version 0.2.122 --locked`는 Cargo.lock 버전과 반드시 일치.
+- 별도 함정: 설치 후에도 셸 PATH는 낡을 수 있음. 파일시스템·`[Environment]::GetEnvironmentVariable("Path","Machine")` 확인 또는 `/c/Program Files/Go/bin` 추가. 백그라운드 빌드는 기존 파일 존재로 완료 판단하면 이후 clean에 지워지므로 **작업 완료 알림**을 기다린다.

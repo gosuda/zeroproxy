@@ -148,6 +148,7 @@ async fn handshake(
     conn: &mut PooledConn,
     url: &WsUrl,
     protocols: &[String],
+    identity_headers: &[(&str, &str)],
 ) -> Result<String, JsValue> {
     let client_key = fresh_key().map_err(jserr_str)?;
     let expected = expected_accept(&client_key);
@@ -157,7 +158,6 @@ async fn handshake(
     } else {
         format!("{}:{}", url.host, url.port)
     };
-    let origin_scheme = if url.secure { "https" } else { "http" };
 
     let mut req = String::with_capacity(256);
     req.push_str("GET ");
@@ -172,9 +172,19 @@ async fn handshake(
     req.push_str("Sec-WebSocket-Key: ");
     req.push_str(&client_key);
     req.push_str("\r\n");
-    // Origin: send the canonical https/http origin matching the WS scheme.
-    // Some target endpoints reject upgrades without an Origin (CSRF posture).
-    req.push_str(&format!("Origin: {origin_scheme}://{host_header}\r\n"));
+    for (name, value) in identity_headers {
+        if !matches!(*name, "Origin" | "User-Agent" | "Cookie")
+            || value.bytes().any(|byte| byte == b'\r' || byte == b'\n' || byte == 0)
+        {
+            return Err(jserr_str("WS_BLOCKED: invalid handshake identity header"));
+        }
+        if !value.is_empty() {
+            req.push_str(name);
+            req.push_str(": ");
+            req.push_str(value);
+            req.push_str("\r\n");
+        }
+    }
     if !protocols.is_empty() {
         req.push_str("Sec-WebSocket-Protocol: ");
         req.push_str(&protocols.join(", "));
@@ -463,10 +473,10 @@ impl WsClient {
 
 /// Public entry point — opens the transport, performs the handshake,
 /// spawns the reader/writer drivers, and returns the JS-facing client.
-pub async fn open(url: &str, protocols: &[String]) -> Result<JsValue, JsValue> {
+pub async fn open(url: &str, protocols: &[String], identity_headers: &[(&str, &str)]) -> Result<JsValue, JsValue> {
     let parsed = WsUrl::parse(url).map_err(jserr_str)?;
     let mut conn = open_target_stream(&parsed.host, parsed.port, parsed.secure).await?;
-    let negotiated = handshake(&mut conn, &parsed, protocols).await?;
+    let negotiated = handshake(&mut conn, &parsed, protocols, identity_headers).await?;
 
     let shared = Rc::new(Shared {
         on_message: RefCell::new(None),

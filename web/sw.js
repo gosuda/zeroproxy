@@ -439,19 +439,51 @@ self.addEventListener('fetch', event => {
       if (p === ZP.apiPath('csp-report')) return;
     } catch {}
   }
-  const responded = handleFetch(event).then(resp => reportEncodedSize(event, resp));
+  const responded = handleFetch(event)
+    .then(resp => reportEncodedSize(event, resp))
+    .then(completeBodyResponse);
   event.respondWith(responded);
-  // Keep the worker alive until the response BODY has been fully delivered.
-  // `respondWith` only extends the lifetime until the response PROMISE
-  // settles; for a streaming document that is immediate (headers + an unread
-  // ReadableStream), after which Chrome is free to terminate the worker while
-  // the wasm pump still owes the page most of the HTML. Symptom: document
-  // frozen mid-parse (NAVER at ~33 KB, readyState never reaching complete),
-  // zero CPU, and CDP unable to attach to the worker — the stall that looked
-  // for many sessions like NAVER anti-bot but was ours. `streamDocumentResponse`
-  // attaches `__zpBodyDone`; non-streaming responses have none and resolve now.
+  // Attach lifetime after all header/HTML wrappers: recreating a Response
+  // otherwise loses its completion promise. Cancellation must reach the kernel.
   event.waitUntil(responded.then(r => (r && r.__zpBodyDone) || undefined).catch(() => undefined));
 });
+
+function completeBodyResponse(resp) {
+  if (!resp || !resp.headers || resp.headers.get('X-ZP-Body-Stream') !== '1') return resp;
+  const headers = new Headers(resp.headers);
+  headers.delete('X-ZP-Body-Stream');
+  headers.delete('X-ZP-Stream');
+  if (!resp.body) return new Response(null, { status: resp.status, statusText: resp.statusText, headers });
+  const reader = resp.body.getReader();
+  let resolveDone;
+  const bodyDone = new Promise(resolve => { resolveDone = resolve; });
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    try { reader.releaseLock(); } catch {}
+    resolveDone();
+  };
+  const body = new ReadableStream({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) { finish(); controller.close(); }
+        else controller.enqueue(next.value);
+      } catch (error) {
+        finish();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); }
+      finally { finish(); }
+    },
+  }, { highWaterMark: 0 });
+  const result = new Response(body, { status: resp.status, statusText: resp.statusText, headers });
+  Object.defineProperty(result, '__zpBodyDone', { value: bodyDone });
+  return result;
+}
 
 // Rust zp-bundle (OXC native crate). Initializes lazily and exposes
 // self.ZPBundle.{rewriteScript, transformHtml, buildCSP, bundleVersion}.
@@ -2208,11 +2240,6 @@ function streamDocumentResponse(resp, opt, targetUrl) {
   let txn;
   try { txn = new self.ZPBundle.HtmlTxn(targetUrl, ORIGIN, preludeHTML); }
   catch { return null; }
-  // Lifetime anchor for `event.waitUntil` (see the fetch listener). Resolves
-  // when the body stream is fully delivered — normally, on error, or on
-  // consumer cancel — so the Service Worker cannot be terminated mid-stream.
-  let markBodyDone;
-  const bodyDone = new Promise(res => { markBodyDone = res; });
   // Diagnostics for the document pipe. The kernel reports how many decoded
   // bytes it enqueued (`tx:h2-stream-deflate-end out=…`); these counters say
   // how many of them actually reached the page. A gap between the two localises
@@ -2233,7 +2260,6 @@ function streamDocumentResponse(resp, opt, targetUrl) {
       } catch (e) {
         stats.state = 'error';
         stats.err = (e && (e.message || e.code)) || String(e);
-        markBodyDone();
         controller.error(e);
       }
     },
@@ -2251,12 +2277,6 @@ function streamDocumentResponse(resp, opt, targetUrl) {
         stats.err = (e && (e.message || e.code)) || String(e);
         controller.error(e);
       }
-      markBodyDone();
-    },
-    cancel(reason) {
-      stats.state = 'cancelled';
-      stats.err = String(reason || '');
-      markBodyDone();
     },
   });
   const headers = new Headers(resp.headers);
@@ -2274,14 +2294,6 @@ function streamDocumentResponse(resp, opt, targetUrl) {
     statusText: resp.statusText,
     headers,
   });
-  // Hand the completion promise to the fetch listener. `respondWith` only
-  // extends the worker's life until the RESPONSE promise settles — which is
-  // immediately, since we return headers + an unread ReadableStream. Without
-  // a `waitUntil` on this, Chrome may terminate the worker while the wasm
-  // pump is still feeding the stream: CPU goes idle, the document freezes
-  // mid-parse (NAVER stalled at ~33 KB, readyState stuck), and CDP can't even
-  // attach to the dead worker. That was the real "NAVER 60s" — not anti-bot.
-  try { Object.defineProperty(out, '__zpBodyDone', { value: bodyDone }); } catch {}
   return out;
 }
 function isHTMLResponse(resp) {
@@ -2676,6 +2688,18 @@ async function handleMessage(event) {
 async function openRuntimeStream(event, msg, ok, fail) {
   const tab = runtimeTabForMessage(event, msg, fail);
   if (!tab) return;
+  // Bind identity before lazy kernel initialization can yield to a navigation.
+  const client = event.source && clientContext.get(event.source.id);
+  const entryId = client && client.tabId === tab.tabId ? client.entryId : msg.entryId || tab.activeEntryId;
+  const entry = tab.entries.get(entryId);
+  if (!entry) { fail('SW_NOT_READY'); return; }
+  let target;
+  try { target = ZP.canonicalWebSocketURL(msg.url); }
+  catch { fail('WS_BLOCKED'); return; }
+  const origin = new URL(entry.targetUrl).origin;
+  const cookieURL = new URL(target.href);
+  cookieURL.protocol = target.protocol === 'wss:' ? 'https:' : 'http:';
+  const cookie = tab.cookieJar ? tab.cookieJar.cookieHeader(cookieURL.href) : '';
   // Step 13: Rust kernelStream (crates/zp-kernel-bundle).
   // 2026-06-08 split-bundle (c.3): kernel wasm is lazy — first ZP_WS_OPEN
   // is what actually triggers the multi-MB kernel wasm instantiation.
@@ -2694,7 +2718,7 @@ async function openRuntimeStream(event, msg, ok, fail) {
   }
   let stream;
   try {
-    stream = await self.kernelStream({ url: msg.url, protocols: requestedProtocols, tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
+    stream = await self.kernelStream({ url: target.href, protocols: requestedProtocols, userAgent: ZP.TARGET_USER_AGENT, origin, cookie, tabId: tab.tabId, streamIsolationKey: tab.streamIsolationKey, servers: tab.servers || [] });
   } catch (e) {
     fail(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED');
     return;

@@ -11,21 +11,19 @@
 //!   │     ├─ socks5::connect(host:port)      (relay-side dialer)
 //!   │     └─ if https: TlsStream::connect()  (rustls handshake)
 //!   ├─ http1::send_request()                 (HTTP/1.1 origin-form)
-//!   ├─ pool::put(...) if response_is_keepalive
-//!   └─ build_js_response()                   (web_sys::Response with bytes)
+//!   └─ build_js_response()                   (buffered or pull-driven body)
 //! ```
 //!
-//! ## Status (Step 14 PoC + keep-alive pool)
+//! ## Response contract
 //!
 //! * No redirect follow — surfaces 3xx to the caller. `kernel_fetch`'s
 //!   higher layer is the right place for that so the cookie jar / virtual
 //!   URL state stays consistent.
-//! * No HTTP/2: ALPN is forced to `http/1.1`. Deferred perf follow-up.
 //! * Auth::None: assumes the relay is launched with `-socks internal`.
 //!   Tor mode needs `Auth::UserPassword { user: isolation_token, pass: "x" }`
 //!   wiring through from the SW; deferred until end-to-end verified.
-//! * Response body fully buffered into a Vec<u8> before the JS `Response`
-//!   is built — streaming via ReadableStream lands in a follow-up.
+//! * H1 body consumption owns the connection; only complete framing and
+//!   successful decoding return it to the pool. Both HTTP versions stream.
 
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
@@ -118,27 +116,23 @@ pub(crate) async fn fetch(
 
     // Fast path: warm conn from the per-origin HTTP/1.1 pool. On stale
     // (write or read fails on the cached conn), fall through to fresh.
-    if let Some(mut conn) = pool::take(&key) {
+    if let Some(conn) = pool::take(&key) {
         crate::kernel::push_trace(&format!(
             "tx:pool-hit host={} t={}ms",
             parsed.host,
             delta_ms(t0)
         ));
         let t_req = now_ms();
-        match http1::send_request(&mut conn, method, &host_h, &parsed.path, headers, body).await {
+        match http1::send_request(conn, key.clone(), method, &host_h, &parsed.path, headers, body).await {
             Ok(resp) => {
                 crate::kernel::push_trace(&format!(
-                    "tx:pool-reuse-ok host={} status={} http={}ms total={}ms keepalive={}",
+                    "tx:pool-reuse-ok host={} status={} http={}ms total={}ms",
                     parsed.host,
-                    resp.status,
+                    resp.status(),
                     delta_ms(t_req),
-                    delta_ms(t0),
-                    http1::response_is_keepalive(&resp)
+                    delta_ms(t0)
                 ));
-                if http1::response_is_keepalive(&resp) {
-                    pool::put(key, conn);
-                }
-                return build_js_response(resp, target_url, armed_challenge_compat);
+                return finish_h2_response(resp, target_url, armed_challenge_compat);
             }
             Err(e) => {
                 crate::kernel::push_trace(&format!(
@@ -153,11 +147,7 @@ pub(crate) async fn fetch(
     }
 
     // Cold path: open a fresh connection (yamux + SOCKS5 + TLS) and send.
-    // The NAVER "withheld END_STREAM" stall is handled structurally in
-    // http2.rs (finish at Content-Length or the compressed body's own end
-    // marker), so no request-level timer/retry is needed here — and we
-    // deliberately avoid one: a setTimeout-race that cancelled the in-flight
-    // request future trapped the wasm under real concurrent load.
+    // Header completion returns the live body; no timer fabricates body EOF.
     cold_request(
         &parsed,
         &relay_url,
@@ -227,9 +217,9 @@ async fn cold_request(
             ));
             finish_h2_response(resp, target_url, armed_challenge_compat)
         }
-        FreshConn::Http1(mut conn) => {
+        FreshConn::Http1(conn) => {
             let t_req = now_ms();
-            let resp = http1::send_request(&mut conn, method, host_h, &parsed.path, headers, body)
+            let resp = http1::send_request(conn, key.clone(), method, host_h, &parsed.path, headers, body)
                 .await
                 .map_err(|e| {
                     crate::kernel::push_trace(&format!(
@@ -241,17 +231,13 @@ async fn cold_request(
                     jserr("TARGET_HTTP_FAILED", &e)
                 })?;
             crate::kernel::push_trace(&format!(
-                "tx:http-ok host={} status={} http={}ms total={}ms keepalive={}",
+                "tx:http-ok host={} status={} http={}ms total={}ms",
                 parsed.host,
-                resp.status,
+                resp.status(),
                 delta_ms(t_req),
-                delta_ms(t0),
-                http1::response_is_keepalive(&resp)
+                delta_ms(t0)
             ));
-            if http1::response_is_keepalive(&resp) {
-                pool::put(key.clone(), conn);
-            }
-            build_js_response(resp, target_url, armed_challenge_compat)
+            finish_h2_response(resp, target_url, armed_challenge_compat)
         }
     }
 }
@@ -547,7 +533,7 @@ fn build_js_response(
     // 502. NAVER's analytics beacon `POST https://nlog.naver.com/n` answers
     // 204, so every beacon 502'd; conditional requests answering 304 hit the
     // same path.
-    let response = if is_null_body_status(resp.status) {
+    let response = if resp.null_body {
         Response::new_with_opt_buffer_source_and_init(None, &init)?
     } else {
         Response::new_with_opt_buffer_source_and_init(Some(&body_array.buffer()), &init)?
@@ -626,9 +612,7 @@ fn build_response_headers(
     Ok(headers)
 }
 
-/// Dispatch a [`http2::H2Response`] to the matching JS Response builder:
-/// buffered bodies go through `build_js_response`, the streaming HTML arm
-/// through `build_streaming_js_response`.
+/// Both HTTP versions use the same buffered / streaming response contract.
 fn finish_h2_response(
     resp: http2::H2Response,
     final_url: &str,
@@ -642,10 +626,8 @@ fn finish_h2_response(
     }
 }
 
-/// Convert a kernel streaming HTML response into a `web_sys::Response` whose
-/// body is the decoded-plaintext `ReadableStream`. The page receives bytes as
-/// the pump enqueues them → progressive render. Content-Encoding/Length were
-/// already stripped in `http2::send_request`.
+/// Convert a live decoded kernel body into a JS Response. The generic body
+/// marker controls lifetime; the HTML-only marker selects HtmlTxn rewriting.
 fn build_streaming_js_response(
     resp: http2::StreamingResponse,
     final_url: &str,
@@ -662,10 +644,14 @@ fn build_streaming_js_response(
             .unwrap_or("(none)")
     ));
     let headers = build_response_headers(&resp.headers, final_url, armed_challenge_compat)?;
-    // SW-internal marker: tells `transformDocumentResponse` this body is a live
-    // kernel stream, so it pipes it through the streaming HtmlTxn for a
-    // progressive render. The SW reads + DELETES it before the page sees it.
-    let _ = headers.append("X-ZP-Stream", "1");
+    let _ = headers.append("X-ZP-Body-Stream", "1");
+    let is_html = resp.headers.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html"))
+        .unwrap_or(false);
+    if is_html {
+        let _ = headers.append("X-ZP-Stream", "1");
+    }
     let init = ResponseInit::new();
     init.set_status(resp.status);
     init.set_status_text(&resp.reason);
