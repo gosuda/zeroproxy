@@ -1311,14 +1311,8 @@
     // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
     // 케이스만 wrap 통해 변환 + native call.
     const wrapped = function postMessage(message, targetOrigin, transfer) {
-      // WindowProxy survives about:blank -> srcdoc/navigation, but its native
-      // postMessage belongs to the current inner Window. A cached old method
-      // can silently deliver to the discarded document instead.
-      const currentPm = target.postMessage;
-      const currentNative = currentPm && currentPm[earlyNativeKey] || currentPm;
-      const invoke = currentNative === wrapped ? originalPm : currentNative;
       const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
-      return arguments.length > 2 ? Reflect.apply(invoke, target, [message, mapped, transfer]) : Reflect.apply(invoke, target, [message, mapped]);
+      return arguments.length > 2 ? Reflect.apply(originalPm, target, [message, mapped, transfer]) : Reflect.apply(originalPm, target, [message, mapped]);
     };
     maskNativeFunction(wrapped, 'postMessage');
     postMessageWrappers.set(target, wrapped);
@@ -7639,6 +7633,7 @@
     // realm 분리가 깨지면 절대 안 됨. 자식 realm 의 native Function (overwrite 전
     // 캡처) 으로 새 함수를 만들어 child window 에서 실행하면 realm 보존.
     const childFunction = w.Function;
+    let childFunctionFacade;
     if (childFunction) {
       // Same global-scope requirement as the parent realm's
       // `execGlobalScript` — classic script declarations must land on the
@@ -7655,6 +7650,26 @@
         if (!hooks) throw normalizedError('InvalidStateError');
         return hooks.rewrite(hooks.decodeEntities(source), kind);
       };
+      // A self-bootstrapping srcdoc may capture these guarded intrinsics before
+      // installing its own runtime. They must still compile/execute in this
+      // child: copying root.eval/Function moves listeners and globals to root.
+      const childDynamicEval = function dynamicEval(value) {
+        return typeof value === 'string' ? childExecGlobal(pageRewriteHooks.rewrite(value, 'eval')) : value;
+      };
+      childFunctionFacade = function Function(...args) {
+        // The native constructor validates/converts parameters exactly once;
+        // creating the function does not execute its unrewritten body.
+        const original = Reflect.construct(childFunction, args);
+        const source = origToString.call(original);
+        const compiled = childExecGlobal(pageRewriteHooks.rewrite('(' + source + ')', 'classic'));
+        toStringMap.set(compiled, source);
+        return compiled;
+      };
+      Object.defineProperty(childFunctionFacade, 'prototype', { value: childFunction.prototype });
+      Object.defineProperty(childFunctionFacade, 'length', { value: 1 });
+      maskNativeFunction(childDynamicEval, 'eval');
+      maskNativeFunction(childFunctionFacade, 'Function');
+      if (!define(w, 'eval', childDynamicEval) || !define(w, 'Function', childFunctionFacade)) throw normalizedError('SecurityError');
       // Ordered script pipeline for this child realm.
       //
       // A `<script src>` written by `document.write` is PARSER-BLOCKING: the
@@ -7803,21 +7818,16 @@
       if (!define(w, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', childExecRewrittenModule)) throw normalizedError('SecurityError');
       if (!define(w, '__ZP_LOAD_EXTERNAL_SCRIPT', childLoadExternal)) throw normalizedError('SecurityError');
     } else {
-      if (root.__ZP_EXEC_INLINE_SCRIPT && !define(w, '__ZP_EXEC_INLINE_SCRIPT', root.__ZP_EXEC_INLINE_SCRIPT)) throw normalizedError('SecurityError');
-      if (root.__ZP_EXEC_INLINE_MODULE && !define(w, '__ZP_EXEC_INLINE_MODULE', root.__ZP_EXEC_INLINE_MODULE)) throw normalizedError('SecurityError');
-      if (root.__ZP_EXEC_INLINE_REWRITTEN && !define(w, '__ZP_EXEC_INLINE_REWRITTEN', root.__ZP_EXEC_INLINE_REWRITTEN)) throw normalizedError('SecurityError');
-      if (root.__ZP_EXEC_INLINE_REWRITTEN_MODULE && !define(w, '__ZP_EXEC_INLINE_REWRITTEN_MODULE', root.__ZP_EXEC_INLINE_REWRITTEN_MODULE)) throw normalizedError('SecurityError');
+      throw normalizedError('SecurityError');
     }
     if (root.__ZP_EXEC_EVENT && !define(w, '__ZP_EXEC_EVENT', root.__ZP_EXEC_EVENT)) throw normalizedError('SecurityError');
     if (root.__ZP_SET_BASE && !define(w, '__ZP_SET_BASE', root.__ZP_SET_BASE)) throw normalizedError('SecurityError');
-    if (root.eval && !define(w, 'eval', root.eval)) throw normalizedError('SecurityError');
-    if (root.Function && !define(w, 'Function', root.Function)) throw normalizedError('SecurityError');
     if (childFunction && childFunction.prototype) try {
       // iframe child Function — root.Function 은 우리 dynamicFunction wrapper.
       // 메인 realm 과 동일한 WeakMap 정책 적용.
       const childConstructorOverrides = new WeakMap();
       Object.defineProperty(childFunction.prototype, 'constructor', {
-        get() { return childConstructorOverrides.get(this) || root.Function; },
+        get() { return childConstructorOverrides.get(this) || childFunctionFacade; },
         set(value) { try { childConstructorOverrides.set(this, value); } catch {} },
         enumerable: false, configurable: false
       });
