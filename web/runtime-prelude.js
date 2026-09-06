@@ -5477,12 +5477,16 @@
       const colon = key.indexOf(':');
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
+      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc' && srcdocMeta.has(this)) return srcdocMeta.get(this);
+      const raw = Native.getAttribute.call(this, k);
+      // URL decoding consumes strings; DOM absence must stay null, and an empty
+      // attribute must not pick up a stale URL stash from an earlier value.
+      if (raw === null || raw === '') return raw;
       if (localKey === 'srcset' || localKey === 'imagesrcset') {
         // 기억한 값이 이미 프록시 URL 일 수 있다(위 주석과 같은 이유).
         const recalled = recalledSrcset(this, key);
-        return deproxyURL(recalled !== undefined ? recalled : Native.getAttribute.call(this, k), { scan: true });
+        return deproxyURL(recalled !== undefined ? recalled : raw, { scan: true });
       }
-      if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc' && srcdocMeta.has(this)) return srcdocMeta.get(this);
       // `script:src` 는 URL 표면 목록에 없다(전용 경로로 다룬다) — 그래서
       // 아래 isURLBearing 분기가 안 먹고 원시 값이 나간다. 프로퍼티는 가려지는데
       // 속성은 안 가려지는 비대칭은 이 저장소가 이미 한 번 밟은 함정이다
@@ -5490,11 +5494,11 @@
       if (ln === 'script' && localKey === 'src') {
         const stashed = urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url');
         if (stashed) return stashed;
-        return deproxyURL(Native.getAttribute.call(this, k), { scan: true });
+        return deproxyURL(raw, { scan: true });
       }
       // 같은 이유로 여기도 마지막에 한 번 더 되돌린다(이 세션 네 번째 같은 부류).
-      if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? Native.getAttribute.call(this, k) : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || deproxyURL(Native.getAttribute.call(this, k), { scan: true });
-      return Native.getAttribute.call(this, k);
+      if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? raw : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || deproxyURL(raw, { scan: true });
+      return raw;
     });
     if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) {
       const key = String(k).toLowerCase();

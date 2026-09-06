@@ -169,6 +169,23 @@ function createTargetServer(requests) {
           } catch (err) {
             window.__templateLinkFixture = { error: err && err.message || String(err) };
           }
+          window.__urlAttributeFixture = [['link', 'href'], ['img', 'srcset'], ['script', 'src']].map(([tag, key]) => {
+            try {
+              const el = document.createElement(tag);
+              const snapshot = () => [el.getAttribute(key), el.getAttributeNS(null, key), el.hasAttribute(key)];
+              const absent = snapshot();
+              el.toggleAttribute(key, true);
+              const empty = snapshot();
+              el.removeAttribute(key);
+              const removed = snapshot();
+              el.setAttribute(key, '/image-probe.png');
+              el.removeAttribute(key);
+              const removedAfterURL = snapshot();
+              el.toggleAttribute(key, true);
+              const emptyAfterURL = snapshot();
+              return { absent, empty, removed, removedAfterURL, emptyAfterURL };
+            } catch (err) { return { error: err && err.message || String(err) }; }
+          });
         </script>
         <script src="/jquery.js"></script>
         <script src="/jquery-fixture.js"></script>
@@ -666,6 +683,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     appVersion: navigator.appVersion,
     platform: navigator.platform,
     templateLink: window.__templateLinkFixture,
+    urlAttributes: window.__urlAttributeFixture,
     phase2Location: window.__phase2Location,
     phase2DynamicFunction: window.__phase2DynamicFunction,
     phase2EvalLocation: window.__phase2EvalLocation,
@@ -690,13 +708,19 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       };
     })(),
   }));
+  fs.writeFileSync(path.join(artifacts, 'e1-home.json'), JSON.stringify(home, null, 2));
+  const TARGET_UA = home.userAgent;
+  await t.test('home navigation and fingerprint identity', () => {
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
   assert.equal(home.shellVisible, false);
-  const TARGET_UA = home.userAgent;
   assert.match(TARGET_UA, /^Mozilla\/5\.0 .*Chrome\/\d+\.0\.0\.0 Safari\//);
   assert.doesNotMatch(TARGET_UA, /HeadlessChrome|proxy\.localhost/);
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
+  assert.equal(home.platform, 'Win32');
+  assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
+  });
+  await t.test('template link suppression preserves DOM absence', () => {
   assert.deepEqual(home.templateLink, {
     childCount: 1,
     firstNode: 'link',
@@ -709,6 +733,19 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     tableRowNode: 'TR',
     tableRowText: 'cell',
   });
+  });
+  for (const [index, name] of ['link href', 'image srcset', 'script src'].entries()) {
+    await t.test(name + ' distinguishes absent, empty and removed attributes', () => {
+      assert.deepEqual(home.urlAttributes[index], {
+        absent: [null, null, false],
+        empty: ['', '', true],
+        removed: [null, null, false],
+        removedAfterURL: [null, null, false],
+        emptyAfterURL: ['', '', true],
+      });
+    });
+  }
+  await t.test('favicon masking without upstream fetch', () => {
   assert.deepEqual(home.faviconProbe && {
     rel: home.faviconProbe.rel,
     href: home.faviconProbe.href,
@@ -721,21 +758,27 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     hrefAttrValue: `http://${targetHost}:${targetPort}/site-icon.png`,
   });
   assert.doesNotMatch(home.faviconProbe.outerHTML, /x-zeroproxy-icon|data-zp-target-url/);
-  assert.equal(home.platform, 'Win32');
-  assert.match(home.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
+  assert.equal(requests.some(r => r.url === '/site-icon.png'), false, `favicon must not be fetched: ${JSON.stringify(requests)}`);
+  });
+  await t.test('target-authored virtual location and dynamic compilation', () => {
   assert.deepEqual(home.phase2Location, { href: `http://${targetHost}:${targetPort}/`, windowHref: `http://${targetHost}:${targetPort}/` });
   assert.equal(home.phase2DynamicFunction, `http://${targetHost}:${targetPort}/`);
   assert.equal(home.phase2EvalLocation, `http://${targetHost}:${targetPort}/`);
+  });
+  await t.test('stylesheet rendering and upstream identity', () => {
   assert.deepEqual(home.styleProbe, { borderTopWidth: '7px', borderTopColor: 'rgb(12, 34, 56)', paddingLeft: '13px' });
   assert.ok(requests.some(r => r.url === '/site.css' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.equal(requests.some(r => r.url === '/site-icon.png'), false, `favicon must not be fetched: ${JSON.stringify(requests)}`);
+  });
+  await t.test('image rendering and upstream identity', () => {
   assert.equal(home.imageProbe.complete, true);
   assert.equal(home.imageProbe.naturalWidth, 1);
   assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
   assert.ok(requests.some(r => r.url === '/image-probe.png' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
   const addressBarShare = page.url();
   const relayServerParam = new RegExp(`server=ws%3A%2F%2Fproxy\\.localhost%3A${proxyPort}%2Fzp%2Fws-pipe`);
+  await t.test('share URL round-trip in a fresh browser context', async () => {
   assert.match(addressBarShare, /#k=/);
   assert.match(addressBarShare, relayServerParam);
   const staticNextHref = await page.$eval('#next', el => el.href);
@@ -750,6 +793,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   } finally {
     await externalContext.close();
   }
+  });
+  await t.test('rewritten assignment and WebSocket integration', async () => {
   await page.waitForFunction(() => window.__rewriteAdvanced && window.__rewriteAdvanced.wsMessage === 'echo:rewrite-script', { timeout: 30000 });
   const rewriteAdvanced = await page.evaluate(() => window.__rewriteAdvanced);
   assert.equal(rewriteAdvanced.initialHref, `http://${targetHost}:${targetPort}/`);
@@ -762,6 +807,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(rewriteAdvanced.compoundHash, '#compound-tail');
   assert.equal(rewriteAdvanced.compoundHref, `http://${targetHost}:${targetPort}/#compound-tail`);
   assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-rewrite' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('dynamic scripts and module worker integration', async () => {
   try {
     await page.waitForFunction(() => window.__gtmFixture && window.__gtmFixture.loaded && window.__dynamicScriptLoaded && window.__dynamicScriptLoaded.loaded && window.__moduleWorkerFixture && window.__moduleWorkerFixture.loaded, { timeout: 30000 });
   } catch (err) {
@@ -792,6 +839,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.ok(requests.some(r => r.url.startsWith('/dynamic-script.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/module-worker.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/worker-fixture.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('jQuery integration', async () => {
 
   try {
     await page.waitForFunction(() => window.__jqueryFixture && window.__jqueryFixture.ready, { timeout: 30000 });
@@ -825,7 +874,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.ok(requests.some(r => r.url.startsWith('/jquery-fixture.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/jquery-ajax.json') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/jquery-plugin.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
 
+  await t.test('synchronous and navigated iframe isolation', async () => {
   const iframeIsolation = await page.evaluate(async target => {
     const blockedChannel = win => {
       let pc;
@@ -876,7 +927,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(iframeIsolation.visibleSrc, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
   assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
+  });
 
+  await t.test('child frame messaging preserves parent navigation', async () => {
   const frameMessage = await page.evaluate(async target => {
     const before = location.href;
     const got = new Promise((resolve, reject) => {
@@ -899,7 +952,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(frameMessage.message.origin, `http://${targetHost}:${targetPort}`);
   assert.equal(frameMessage.message.href, `http://${targetHost}:${targetPort}/frame-child`);
   assert.equal(frameMessage.message.topOrigin, `http://${targetHost}:${targetPort}`);
+  });
 
+  await t.test('canvas audio and speech fingerprint masking', async () => {
   const fingerprintMasking = await page.evaluate(() => {
     const canvasMask = HTMLCanvasElement.prototype.toDataURL.toString();
     const voicesMask = speechSynthesis.getVoices.toString();
@@ -955,7 +1010,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.ok(fingerprintMasking.audioDelta === null || Math.abs(fingerprintMasking.audioDelta) > 0);
   assert.equal(fingerprintMasking.voiceCount, 2);
   assert.deepEqual(fingerprintMasking.voiceNames, ['Google US English', 'Microsoft David - English (United States)']);
+  });
 
+  await t.test('runtime transport integration', async t => {
   const runtimeIntegration = await page.evaluate(async targetPort => {
     async function readText(path) {
       const resp = await fetch(path, { cache: 'no-store' });
@@ -1025,43 +1082,54 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     }
 
 
-    const setCookieBody = await readText('/set-cookie?ts=' + Date.now());
-    const serverCookie = await waitForCookieHeader('target_server=from-target');
-    document.cookie = 'client_runtime=from-runtime; Path=/';
-    const visibleCookie = document.cookie;
-    const clientCookie = await waitForCookieHeader('client_runtime=from-runtime');
-    const stream = await readStream();
-    const post = await postText('/post-echo', 'small-upload');
-    const redirectPost = await postText('/redirect307', 'redirect-body');
-    const oversized = await postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1));
-    const ws = await websocketEcho();
-    const wsStream = await websocketStreamEcho();
+    // Keep a failed transport visible in its own assertion without preventing
+    // the remaining independent transports from being exercised.
+    async function observe(run) {
+      try { return await run(); }
+      catch (error) { return { error: error && error.stack || String(error) }; }
+    }
+    const setCookieBody = await observe(() => readText('/set-cookie?ts=' + Date.now()));
+    const serverCookie = await observe(() => waitForCookieHeader('target_server=from-target'));
+    const visibleCookie = await observe(() => {
+      document.cookie = 'client_runtime=from-runtime; Path=/';
+      return document.cookie;
+    });
+    const clientCookie = await observe(() => waitForCookieHeader('client_runtime=from-runtime'));
+    const stream = await observe(readStream);
+    const post = await observe(() => postText('/post-echo', 'small-upload'));
+    const redirectPost = await observe(() => postText('/redirect307', 'redirect-body'));
+    const oversized = await observe(() => postText('/post-echo', 'x'.repeat(8 * 1024 * 1024 + 1)));
+    const ws = await observe(websocketEcho);
+    const wsStream = await observe(websocketStreamEcho);
     return { setCookieBody, serverCookie, visibleCookie, clientCookie, stream, ws, wsStream, post, redirectPost, oversized };
   }, targetPort);
-  assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok');
-  assert.match(runtimeIntegration.serverCookie, /target_server=from-target/);
-  assert.match(runtimeIntegration.visibleCookie, /client_runtime=from-runtime/);
-  assert.match(runtimeIntegration.clientCookie, /target_server=from-target/);
-  assert.match(runtimeIntegration.clientCookie, /client_runtime=from-runtime/);
-  assert.equal(runtimeIntegration.stream.status, 200);
-  assert.match(runtimeIntegration.stream.contentType, /^text\/plain/);
-  assert.equal(runtimeIntegration.stream.firstText, 'chunk-one\n');
-  assert.equal(runtimeIntegration.stream.body, 'chunk-one\nchunk-two\n');
-  assert.ok(runtimeIntegration.stream.firstMs < 500, `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`);
-  assert.equal(runtimeIntegration.ws.url, `ws://${targetHost}:${targetPort}/ws`);
-  assert.equal(runtimeIntegration.ws.data, '1,2,3');
-  assert.equal(runtimeIntegration.ws.protocol, 'zp-test');
-  assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000 });
-  assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' });
-  assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' });
-  assert.equal(runtimeIntegration.oversized.status, 413);
-  assert.match(runtimeIntegration.oversized.text, /REQUEST_BODY_TOO_LARGE/);
-  assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`);
+  fs.writeFileSync(path.join(artifacts, 'e1-runtime.json'), JSON.stringify(runtimeIntegration, null, 2));
+  await t.test('setCookieBody', () => { assert.equal(runtimeIntegration.setCookieBody, 'set-cookie-ok'); });
+  await t.test('serverCookie', () => { assert.match(runtimeIntegration.serverCookie, /target_server=from-target/); });
+  await t.test('visibleCookie', () => { assert.match(runtimeIntegration.visibleCookie, /client_runtime=from-runtime/); });
+  await t.test('clientCookie', () => { assert.match(runtimeIntegration.clientCookie, /target_server=from-target/); });
+  await t.test('clientCookie', () => { assert.match(runtimeIntegration.clientCookie, /client_runtime=from-runtime/); });
+  await t.test('stream.status', () => { assert.equal(runtimeIntegration.stream.status, 200); });
+  await t.test('stream.contentType', () => { assert.match(runtimeIntegration.stream.contentType, /^text\/plain/); });
+  await t.test('stream.firstText', () => { assert.equal(runtimeIntegration.stream.firstText, 'chunk-one\n'); });
+  await t.test('stream.body', () => { assert.equal(runtimeIntegration.stream.body, 'chunk-one\nchunk-two\n'); });
+  await t.test('stream.firstMs', () => { assert.ok(runtimeIntegration.stream.firstMs < 500, `stream first chunk was buffered for ${runtimeIntegration.stream.firstMs}ms`); });
+  await t.test('ws.url', () => { assert.equal(runtimeIntegration.ws.url, `ws://${targetHost}:${targetPort}/ws`); });
+  await t.test('ws.data', () => { assert.equal(runtimeIntegration.ws.data, '1,2,3'); });
+  await t.test('ws.protocol', () => { assert.equal(runtimeIntegration.ws.protocol, 'zp-test'); });
+  await t.test('wsStream', () => { assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000 }); });
+  await t.test('post', () => { assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' }); });
+  await t.test('redirectPost', () => { assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' }); });
+  await t.test('oversized.status', () => { assert.equal(runtimeIntegration.oversized.status, 413); });
+  await t.test('oversized.text', () => { assert.match(runtimeIntegration.oversized.text, /REQUEST_BODY_TOO_LARGE/); });
+  await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/set-cookie') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
+  await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/stream') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
+  await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
+  await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.upgrade && r.url === '/ws' && r.protocol === 'zp-stream' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
+  await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/cookie-echo') && r.cookie.includes('target_server=from-target') && r.cookie.includes('client_runtime=from-runtime')), `target requests: ${JSON.stringify(requests)}`); });
+  });
 
+  await t.test('escape matrix', async t => {
   const escapeMatrix = await page.evaluate(async targetPort => {
     const directBase = 'http://localhost:' + targetPort;
     const out = {};
@@ -1089,7 +1157,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       ws.onerror = () => { clearTimeout(timer); reject(new Error('internal-mode websocket failed')); };
       ws.onopen = () => ws.send('direct');
       ws.onmessage = ev => { clearTimeout(timer); const value = String(ev.data); try { ws.close(); } catch {} resolve(value); };
-    });
+    }).catch(err => 'blocked:' + (err && err.message || String(err)));
     out.stringTimer = await new Promise(resolve => {
       try {
         window.__timerRan = 0;
@@ -1446,67 +1514,69 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
 
     return out;
   }, targetPort);
-  assert.equal(escapeMatrix.fetch, 'ok:404');
-  assert.equal(escapeMatrix.xhr, 'ok:404');
-  assert.equal(escapeMatrix.eventSource, 'ok:sse-ok');
-  assert.equal(escapeMatrix.websocket, 'echo:direct');
-  assert.equal(escapeMatrix.locationReplaceSource, 'function replace() { [native code] }');
-  assert.equal(escapeMatrix.virtualHash, '#zp-fragment');
-  assert.match(escapeMatrix.virtualHref, /#zp-fragment$/);
-  assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref);
-  assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`);
+  fs.writeFileSync(path.join(artifacts, 'e1-escape.json'), JSON.stringify(escapeMatrix, null, 2));
+  await t.test('fetch', () => { assert.equal(escapeMatrix.fetch, 'ok:404'); });
+  await t.test('xhr', () => { assert.equal(escapeMatrix.xhr, 'ok:404'); });
+  await t.test('eventSource', () => { assert.equal(escapeMatrix.eventSource, 'ok:sse-ok'); });
+  await t.test('websocket', () => { assert.equal(escapeMatrix.websocket, 'echo:direct'); });
+  await t.test('locationReplaceSource', () => { assert.equal(escapeMatrix.locationReplaceSource, 'function replace() { [native code] }'); });
+  await t.test('virtualHash', () => { assert.equal(escapeMatrix.virtualHash, '#zp-fragment'); });
+  await t.test('virtualHref', () => { assert.match(escapeMatrix.virtualHref, /#zp-fragment$/); });
+  await t.test('afterSrcdocVirtualHref', () => { assert.equal(escapeMatrix.afterSrcdocVirtualHref, escapeMatrix.virtualHref); });
+  await t.test('topOrigin', () => { assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`); });
   // B2 srcdoc ordering proof: the inline script ran AFTER the prelude installed
   // itself in the srcdoc realm, so it observed the virtual top.location, not
   // the proxy origin. A failure here means a clean-realm window of attack.
-  assert.equal(escapeMatrix.srcdocTopOriginAtRun, `http://${targetHost}:${targetPort}`, `srcdoc inline saw native top.origin: ${escapeMatrix.srcdocTopOriginAtRun}`);
-  assert.match(escapeMatrix.srcdocTopHrefAtRun, /^http:\/\/localhost:\d+/, `srcdoc inline saw native top.href: ${escapeMatrix.srcdocTopHrefAtRun}`);
-  assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true);
-  assert.equal(escapeMatrix.stringTimer, 'ran');
-  assert.notEqual(escapeMatrix.blobWorker, 'ran');
-  assert.notEqual(escapeMatrix.dataWorker, 'ran');
-  assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
-  assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  await t.test('srcdocTopOriginAtRun', () => { assert.equal(escapeMatrix.srcdocTopOriginAtRun, `http://${targetHost}:${targetPort}`, `srcdoc inline saw native top.origin: ${escapeMatrix.srcdocTopOriginAtRun}`); });
+  await t.test('srcdocTopHrefAtRun', () => { assert.match(escapeMatrix.srcdocTopHrefAtRun, /^http:\/\/localhost:\d+/, `srcdoc inline saw native top.href: ${escapeMatrix.srcdocTopHrefAtRun}`); });
+  await t.test('proxy-origin navigation', () => { assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true); });
+  await t.test('stringTimer', () => { assert.equal(escapeMatrix.stringTimer, 'ran'); });
+  await t.test('blobWorker', () => { assert.notEqual(escapeMatrix.blobWorker, 'ran'); });
+  await t.test('dataWorker', () => { assert.notEqual(escapeMatrix.dataWorker, 'ran'); });
+  await t.test('eventHandlerLocation', () => { assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`); });
+  await t.test('upstream request identity', () => { assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`); });
+  await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
   // Successful dynamic compilation must still execute in the virtual realm.
-  assert.equal(escapeMatrix.functionEscape, 'ran:' + escapeMatrix.virtualHref);
-  assert.equal(escapeMatrix.constructorEscape, 'ran:' + escapeMatrix.virtualHref);
-  assert.equal(escapeMatrix.asyncFunctionEscape, 'ran:' + escapeMatrix.virtualHref);
+  await t.test('functionEscape', () => { assert.equal(escapeMatrix.functionEscape, 'ran:' + escapeMatrix.virtualHref); });
+  await t.test('constructorEscape', () => { assert.equal(escapeMatrix.constructorEscape, 'ran:' + escapeMatrix.virtualHref); });
+  await t.test('asyncFunctionEscape', () => { assert.equal(escapeMatrix.asyncFunctionEscape, 'ran:' + escapeMatrix.virtualHref); });
   // A3 hardening: <script src=blob:...> must be neutralised.
-  assert.equal(escapeMatrix.scriptBlobSrc, 'blocked', `<script src=blob:...> must not execute, got: ${escapeMatrix.scriptBlobSrc}`);
+  await t.test('scriptBlobSrc', () => { assert.equal(escapeMatrix.scriptBlobSrc, 'blocked', `<script src=blob:...> must not execute, got: ${escapeMatrix.scriptBlobSrc}`); });
   // B-extra: Reflect.get(window,'location') routed through membrane.
-  assert.equal(escapeMatrix.reflectGetLocation, 'virtual', `Reflect.get must hit membrane, got: ${escapeMatrix.reflectGetLocation}`);
+  await t.test('reflectGetLocation', () => { assert.equal(escapeMatrix.reflectGetLocation, 'virtual', `Reflect.get must hit membrane, got: ${escapeMatrix.reflectGetLocation}`); });
   // top/parent must not leak the proxy realm.
-  assert.equal(escapeMatrix.topLocation, 'virtual', `top.location escape: ${escapeMatrix.topLocation}`);
-  assert.equal(escapeMatrix.parentLocation, 'virtual', `parent.location escape: ${escapeMatrix.parentLocation}`);
-  assert.equal(escapeMatrix.opener, 'empty', `opener leak: ${escapeMatrix.opener}`);
+  await t.test('topLocation', () => { assert.equal(escapeMatrix.topLocation, 'virtual', `top.location escape: ${escapeMatrix.topLocation}`); });
+  await t.test('parentLocation', () => { assert.equal(escapeMatrix.parentLocation, 'virtual', `parent.location escape: ${escapeMatrix.parentLocation}`); });
+  await t.test('opener', () => { assert.equal(escapeMatrix.opener, 'empty', `opener leak: ${escapeMatrix.opener}`); });
   // D7 storage isolation must hold (no raw target key on proxy origin).
-  assert.equal(escapeMatrix.storagePrefix, 'isolated', `storage prefix leak: ${escapeMatrix.storagePrefix}`);
+  await t.test('storagePrefix', () => { assert.equal(escapeMatrix.storagePrefix, 'isolated', `storage prefix leak: ${escapeMatrix.storagePrefix}`); });
   // D7 document.domain setter is virtualised (no real native change).
-  assert.match(escapeMatrix.documentDomainSetter, /^unchanged:/, `document.domain leak: ${escapeMatrix.documentDomainSetter}`);
+  await t.test('documentDomainSetter', () => { assert.match(escapeMatrix.documentDomainSetter, /^unchanged:/, `document.domain leak: ${escapeMatrix.documentDomainSetter}`); });
   // D7 document.origin reports the virtual target origin.
-  assert.match(escapeMatrix.documentOrigin, /^virtual:/, `document.origin leak: ${escapeMatrix.documentOrigin}`);
+  await t.test('documentOrigin', () => { assert.match(escapeMatrix.documentOrigin, /^virtual:/, `document.origin leak: ${escapeMatrix.documentOrigin}`); });
   // D7 BroadcastChannel facade returns un-prefixed name (target-visible truth).
-  assert.equal(escapeMatrix.broadcastChannelName, 'unprefixed-facade', `BroadcastChannel: ${escapeMatrix.broadcastChannelName}`);
+  await t.test('broadcastChannelName', () => { assert.equal(escapeMatrix.broadcastChannelName, 'unprefixed-facade', `BroadcastChannel: ${escapeMatrix.broadcastChannelName}`); });
   // E1 indirect eval / globalThis.eval / computed / destructuring / optional
   // chaining / descriptor — every location read path lands on the virtual surface.
-  assert.match(escapeMatrix.indirectEval, /^virtual:/, `indirect eval: ${escapeMatrix.indirectEval}`);
-  assert.match(escapeMatrix.globalThisEval, /^virtual:/, `globalThis.eval: ${escapeMatrix.globalThisEval}`);
-  assert.equal(escapeMatrix.computedAccess, 'virtual', `computed access: ${escapeMatrix.computedAccess}`);
-  assert.equal(escapeMatrix.destructuringAccess, 'virtual', `destructuring: ${escapeMatrix.destructuringAccess}`);
-  assert.equal(escapeMatrix.optionalChainAccess, 'virtual', `optional chain: ${escapeMatrix.optionalChainAccess}`);
-  assert.equal(escapeMatrix.locationDescriptor, 'virtual', `descriptor leak: ${escapeMatrix.locationDescriptor}`);
+  await t.test('indirectEval', () => { assert.match(escapeMatrix.indirectEval, /^virtual:/, `indirect eval: ${escapeMatrix.indirectEval}`); });
+  await t.test('globalThisEval', () => { assert.match(escapeMatrix.globalThisEval, /^virtual:/, `globalThis.eval: ${escapeMatrix.globalThisEval}`); });
+  await t.test('computedAccess', () => { assert.equal(escapeMatrix.computedAccess, 'virtual', `computed access: ${escapeMatrix.computedAccess}`); });
+  await t.test('destructuringAccess', () => { assert.equal(escapeMatrix.destructuringAccess, 'virtual', `destructuring: ${escapeMatrix.destructuringAccess}`); });
+  await t.test('optionalChainAccess', () => { assert.equal(escapeMatrix.optionalChainAccess, 'virtual', `optional chain: ${escapeMatrix.optionalChainAccess}`); });
+  await t.test('locationDescriptor', () => { assert.equal(escapeMatrix.locationDescriptor, 'virtual', `descriptor leak: ${escapeMatrix.locationDescriptor}`); });
   // E1 HTML compilation paths — DOMParser / Range fragment / innerHTML
   // never run their inline <script> bodies in the current realm.
-  assert.equal(escapeMatrix.domParserScript, 'blocked', `DOMParser script: ${escapeMatrix.domParserScript}`);
-  assert.equal(escapeMatrix.rangeFragmentScript, 'blocked', `range fragment script: ${escapeMatrix.rangeFragmentScript}`);
-  assert.equal(escapeMatrix.innerHTMLScript, 'blocked', `innerHTML script: ${escapeMatrix.innerHTMLScript}`);
+  await t.test('domParserScript', () => { assert.equal(escapeMatrix.domParserScript, 'blocked', `DOMParser script: ${escapeMatrix.domParserScript}`); });
+  await t.test('rangeFragmentScript', () => { assert.equal(escapeMatrix.rangeFragmentScript, 'blocked', `range fragment script: ${escapeMatrix.rangeFragmentScript}`); });
+  await t.test('innerHTMLScript', () => { assert.equal(escapeMatrix.innerHTMLScript, 'blocked', `innerHTML script: ${escapeMatrix.innerHTMLScript}`); });
   // D7 parity: sessionStorage / caches / performance.timeOrigin virtualized.
-  assert.equal(escapeMatrix.sessionStoragePrefix, 'isolated', `sessionStorage leak: ${escapeMatrix.sessionStoragePrefix}`);
-  assert.equal(escapeMatrix.cachesAPI, 'isolated', `caches leak: ${escapeMatrix.cachesAPI}`);
-  assert.equal(escapeMatrix.performanceTimeOrigin, 'numeric', `timeOrigin: ${escapeMatrix.performanceTimeOrigin}`);
+  await t.test('sessionStoragePrefix', () => { assert.equal(escapeMatrix.sessionStoragePrefix, 'isolated', `sessionStorage leak: ${escapeMatrix.sessionStoragePrefix}`); });
+  await t.test('cachesAPI', () => { assert.equal(escapeMatrix.cachesAPI, 'isolated', `caches leak: ${escapeMatrix.cachesAPI}`); });
+  await t.test('performanceTimeOrigin', () => { assert.equal(escapeMatrix.performanceTimeOrigin, 'numeric', `timeOrigin: ${escapeMatrix.performanceTimeOrigin}`); });
   // D4 / D5 gateway stubs — construction succeeds but operations fail-closed.
-  assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`);
-  assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`);
+  await t.test('webTransport', () => { assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`); });
+  await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
+  });
 
   // D3: SW facade is fail-soft — register() resolves to a fake registration
   // so target init code doesn't crash, but the security invariant holds:
@@ -1514,6 +1584,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   // registration's .active is null (no actual worker bound). Sync /
   // periodicSync register cleanly (no event ever fires; matches native
   // throttling). Push subscribe rejects NotAllowedError (graceful denial).
+  await t.test('service worker and push isolation', async () => {
   const serviceWorkerPolicy = await page.evaluate(async () => {
     const out = {
       exposed: 'serviceWorker' in navigator,
@@ -1551,12 +1622,15 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.match(serviceWorkerPolicy.registeredScope, /^https?:\/\//, 'registration.scope should be the virtual origin');
   assert.equal(serviceWorkerPolicy.pushSubscribeError, 'NotAllowedError', 'PushManager.subscribe must reject NotAllowedError');
   assert.equal(serviceWorkerPolicy.pushSubscription, 'null', 'PushManager.getSubscription must resolve null');
+  });
+  await t.test('bootstrap secrets stay hidden', async () => {
   const bootLeak = await page.evaluate(() => ({
     bootType: typeof window.__ZP_BOOT,
     scriptContainsRuntimeToken: Array.from(document.scripts).some(s => s.textContent.includes('runtimeToken')),
   }));
   assert.equal(bootLeak.bootType, 'undefined');
   assert.equal(bootLeak.scriptContainsRuntimeToken, false);
+  });
 
 
   async function submitFormFixture(kind) {
@@ -1590,14 +1664,21 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     await page.waitForFunction(k => window.__formEcho && window.__formEcho.kind === k, { timeout: 30000 }, kind);
     return page.evaluate(() => { const loc = __zp_get(globalThis, 'location'); return { echo: window.__formEcho, virtualHref: loc.href, virtualHash: loc.hash, documentURL: __zp_get(document, 'URL'), baseURI: __zp_get(document, 'baseURI') }; });
   }
+  await t.test('URL-encoded form submission', async () => {
   const urlencodedForm = await submitFormFixture('urlencoded');
   assert.equal(urlencodedForm.echo.method, 'POST');
   assert.match(urlencodedForm.echo.contentType, /^application\/x-www-form-urlencoded/);
   assert.equal(urlencodedForm.echo.body, 'alpha=one&submitter=urlencoded');
+  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=urlencoded') && r.contentType.startsWith('application/x-www-form-urlencoded')), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('plain-text form submission', async () => {
   const plainForm = await submitFormFixture('plain');
   assert.match(plainForm.echo.contentType, /^text\/plain/);
   assert.match(plainForm.echo.body, /alpha=one/);
   assert.match(plainForm.echo.body, /submitter=plain/);
+  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=plain') && r.contentType.startsWith('text/plain')), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('multipart form submission and private navigation metadata', async () => {
   const multipartForm = await submitFormFixture('multipart');
   assert.match(multipartForm.echo.contentType, /^multipart\/form-data; boundary=/);
   assert.match(multipartForm.echo.body, /name="upload"; filename="hello.txt"/);
@@ -1610,9 +1691,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     assert.equal(surface.includes('zp_submit='), false, surface);
     if (rawKey) assert.equal(surface.includes(rawKey), false, surface);
   }
-  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=urlencoded') && r.contentType.startsWith('application/x-www-form-urlencoded')), `target requests: ${JSON.stringify(requests)}`);
-  assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=plain') && r.contentType.startsWith('text/plain')), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/form-echo?kind=multipart') && r.contentType.startsWith('multipart/form-data')), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('link navigation after form submissions', async () => {
   await page.click('#next');
   await page.waitForFunction(() => document.title === 'E2E Next', { timeout: 30000 });
   const next = await page.evaluate(() => ({
@@ -1628,6 +1709,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(next.userAgent, TARGET_UA);
   assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.ok(requests.some(r => r.url === '/next' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
   });
   await t.test('all browser and worker network stays on the proxy origin', () => {
     assert.deepEqual(wireRequests.filter(url => /^https?:|^wss?:/.test(url) && new URL(url).host !== new URL(proxyOrigin).host), []);

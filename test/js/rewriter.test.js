@@ -150,3 +150,119 @@ test('class fields, destructuring assignments, local loops and prefix/postfix up
   assert.equal(ctx.window.result.post, 1);
   assert.equal(ctx.window.result.pre, 3);
 });
+
+test('nested member writes retain global assignment RHS patches', () => {
+  const { ctx, location } = executionContext();
+  vm.runInContext(rewrite(`
+    const receiver = { href: '' };
+    receiver.href = (location = '/nested');
+    window.result = receiver.href;
+  `), ctx);
+  assert.equal(location.href, '/nested');
+  assert.equal(ctx.window.result, '/nested');
+});
+
+test('member references evaluate once, read before the RHS, and retain native numeric updates', () => {
+  const { ctx } = executionContext();
+  vm.runInContext(rewrite(`
+    const trace = [];
+    let value = '2';
+    const receiver = {
+      get href() { trace.push(['get', this === receiver]); return value; },
+      set href(next) { trace.push(['set', this === receiver, next]); value = next; }
+    };
+    function base() { trace.push(['base']); return receiver; }
+    function rhs() { trace.push(['rhs']); value = 'changed'; return '3'; }
+    const assigned = (base().href += rhs());
+    const post = base().href++;
+    const pre = --base().href;
+    value = 7n;
+    const bigPost = base().href++;
+    const bigPre = ++base().href;
+    window.result = { assigned, post, pre, bigPost, bigPre, value, trace };
+  `), ctx);
+  const result = ctx.window.result;
+  assert.equal(result.assigned, '23');
+  assert.equal(result.post, 23);
+  assert.equal(result.pre, 23);
+  assert.equal(result.bigPost, 7n);
+  assert.equal(result.bigPre, 9n);
+  assert.equal(result.value, 9n);
+  assert.deepEqual(Array.from(result.trace, row => Array.from(row)), [
+    ['base'], ['get', true], ['rhs'], ['set', true, '23'],
+    ['base'], ['get', true], ['set', true, 24],
+    ['base'], ['get', true], ['set', true, 23],
+    ['base'], ['get', true], ['set', true, 8n],
+    ['base'], ['get', true], ['set', true, 9n]
+  ]);
+});
+
+test('member logical writes preserve short circuiting and await/yield in the enclosing scope', async () => {
+  const { ctx } = executionContext();
+  await vm.runInContext(rewrite(`
+    window.result = (async () => {
+      const trace = [];
+      let value = 0;
+      const receiver = {
+        get href() { trace.push('get'); return value; },
+        set href(next) { trace.push('set'); value = next; }
+      };
+      function rhs() { trace.push('rhs'); return 5; }
+      const skippedAnd = (receiver.href &&= rhs());
+      const skippedNullish = (receiver.href ??= rhs());
+      const assigned = (receiver.href ||= await rhs());
+      const skippedOr = (receiver.href ||= rhs());
+      function* update() { return receiver.href += yield 'pause'; }
+      const iterator = update();
+      const suspended = iterator.next();
+      value = 100;
+      const resumed = iterator.next(2);
+      return { skippedAnd, skippedNullish, assigned, skippedOr, suspended, resumed, value, trace };
+    })();
+  `), ctx);
+  const result = await ctx.window.result;
+  assert.deepEqual([result.skippedAnd, result.skippedNullish, result.assigned, result.skippedOr], [0, 0, 5, 5]);
+  assert.equal(result.suspended.value, 'pause');
+  assert.equal(result.suspended.done, false);
+  assert.equal(result.resumed.value, 7);
+  assert.equal(result.resumed.done, true);
+  assert.equal(result.value, 7);
+  assert.deepEqual(Array.from(result.trace), ['get', 'get', 'get', 'rhs', 'set', 'get', 'get', 'set']);
+});
+
+test('nested member destructuring, defaults and loop targets keep write order without target reads', () => {
+  const { ctx } = executionContext();
+  vm.runInContext(rewrite(`
+    const trace = [];
+    const receiver = {
+      get parent() { throw new Error('write-only target was read'); },
+      set parent(value) { trace.push(['set', this === receiver, value]); }
+    };
+    function base() { trace.push(['base']); return receiver; }
+    const source = { get nested() { trace.push(['source']); return [undefined, 'rest']; } };
+    function fallback() { trace.push(['default']); return 'fallback'; }
+    const assigned = ({ nested: [base().parent = fallback(), ...base().parent] } = source);
+    for (base().parent of ['loop']) {}
+    for (base().parent in { entry: true }) {}
+    window.result = { sameSource: assigned === source, trace };
+  `), ctx);
+  assert.equal(ctx.window.result.sameSource, true);
+  assert.deepEqual(Array.from(ctx.window.result.trace, row =>
+    Array.from(row, value => Array.isArray(value) ? Array.from(value) : value)), [
+    ['source'], ['base'], ['default'], ['set', true, 'fallback'],
+    ['base'], ['set', true, ['rest']],
+    ['base'], ['set', true, 'loop'], ['base'], ['set', true, 'entry']
+  ]);
+});
+
+test('member target wrappers retain automatic semicolon insertion and conditional statement boundaries', () => {
+  const { ctx } = executionContext();
+  vm.runInContext(rewrite(`
+    const receiver = { href: 1 }
+    receiver.href += 2
+    if (false) receiver.href++
+    else receiver.href *= 3
+    window.result = receiver.href
+  `), ctx);
+  assert.equal(ctx.window.result, 9);
+});

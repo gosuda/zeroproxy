@@ -9,6 +9,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-06 | rewriter / CI | 실제 WASM 검사에서 복합·구조분해 대입이 읽기 호출로 변해 실패 — 쓰기 참조와 native 연산자 의미를 보존. | rewriter.md#ci-write-reference |
+| 2026-09-06 | membrane / CI | URL 마스킹이 없는 속성의 null을 빈 문자열로 바꿨다 — DOM absence/empty가 URL stash보다 우선해야 한다. | rewriter.md#absent-url-attribute |
 | 2026-09-06 | SW / Fetch | 요청 snapshot과 redirect 정책 분리 — PUT 메서드·body view·credentials가 경계에서 소실되던 회귀를 수정. | sw-integration.md#request-context-redirect |
 | 2026-09-04 | membrane | **스코프 프록시가 목록에 든 window 메서드만 바인딩 — `globalThis.structuredClone(x)` 이 Illegal invocation 으로 GitHub 홈을 ErrorPage 로 만들었다. 규칙으로 교체.** | rewriter.md#window-메서드-바인딩-목록 |
 | 2026-09-04 | rewriter / module | **모듈 URL 을 두 층이 다르게 만들어(ref 유무·순서) 같은 모듈이 두 벌 로드 → React 두 개. 15→0 으로 고쳤으나 GitHub 에러 페이지는 3/3 잔존.** | rewriter.md#모듈-url-두-벌 |

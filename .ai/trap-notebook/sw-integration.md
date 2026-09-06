@@ -874,6 +874,6 @@ refusalLog: TRANSPORT_DEADLINE 504 http://127.0.0.1:18212/hang
 
 **Fix**: `transportFetch`가 entry/referrer snapshot과 body를 먼저 정규화하고 `transportFetchHop`이 같은 문맥으로 hop을 처리한다. 301/302의 POST 및 303의 GET/HEAD 예외, entity header 제거, cross-origin Authorization 제거, credential별 Cookie/Set-Cookie 처리, manual/error redirect를 명시했다. page/worker 응답의 URL·type·redirected·clone은 native Response를 유지하며 내부 metadata로 복구한다. 응답 decoder 상태는 top-level 설치 호출보다 먼저 선언해야 한다(기존 prelude의 TDZ 설치 함정).
 
-**Closed by**: `test/js/request-policy.test.js`. 수정 전 HEAD SW의 PUT 회귀는 실패했고 수정 후 전체 경량 JS 46건 통과. `test/e2e/request-contract.js`는 실제 타깃 HTML → 클릭 → SW/커널 → DOM 결과를 검사하도록 추가했으며, 실행 결과는 CI 커밋별 증거를 확인한다.
+**Closed by**: `test/js/request-policy.test.js`. 수정 전 HEAD SW의 PUT 회귀는 실패했고 수정 후 전체 경량 JS 46건 통과. [CI run 34020783071](https://github.com/gosuda/zeroproxy/actions/runs/34020783071)의 실제 Chromium에서도 `test/e2e/request-contract.js` 요청 계약 4그룹(method/body, credentials, error/manual, history/referrer) 및 직접 egress 검사는 통과했다. 단, 같은 run의 다른 WASM/E1 실패 때문에 전체 CI는 실패 상태였다.
 
 **Boundary**: 로컬 Rust/Go 컴파일과 Chromium은 메모리 부족 정책에 따라 실행하지 않았다. SW 재시작 복구, PSL/SameSite/partition 및 완전한 CORS는 별도 로드맵이다. 타깃 direct egress나 CSP 완화로 우회하지 않는다.
