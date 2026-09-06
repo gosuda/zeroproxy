@@ -1,17 +1,15 @@
 # 웹사이트 호환성 리팩터링
 
-2026-09-06 · `refactor/website-compat-ci`. 첫 요청 계약 변경과 잔여 CI 호환성 수정 코드를 통합했다. **최종 통과 여부는 해당 커밋의 CI로 판단하며 전체 로드맵 완료를 뜻하지 않는다.**
+2026-09-06 · `refactor/website-compat-ci`. 남아 있던 CI 호환성 회귀를 수정했고 `a484e7b`에서 전체 CI가 통과했다. **아래 전체 로드맵이나 모든 실사이트의 호환성 완료를 뜻하지 않는다.**
 기존 함정노트의 실측은 역사다. 아래 CI 링크는 해당 run의 증거이며 후속 수정의 통과를 보장하지 않는다.
 
 ## 첫 변경과 현재 acceptance
 - `web/sw.js`의 `transportFetch`에서 문서/entry/referrer와 body view를 snapshot하고 `transportFetchHop`으로 hop을 분리했다. redirect method/body/header 및 쿠키 송수신 자격을 보존한다.
 - page/worker Fetch가 entry·문서 URL·credentials·mode·redirect·referrerPolicy를 전달한다. manual/error redirect와 final URL/clone/opaque 정보는 native Response identity를 유지한다.
 - 실제 SW의 수정 전 회귀에서 PUT body view 범위 손실과 302의 PUT→GET 전환을 관찰했고 수정했다. 당시 경량 Node 회귀는 통과했다. 로컬 Rust/브라우저 검증으로 기록하지 않는다.
-- [34020783071 / 654563a](https://github.com/gosuda/zeroproxy/actions/runs/34020783071): Rust·Go·경량 JS·build와 요청 계약·direct-egress 검사 통과, WASM 대입 및 E1 속성 검사 실패.
-- [34021421554 / 396cf51](https://github.com/gosuda/zeroproxy/actions/runs/34021421554): 요청 계약·DOM absence 회귀 통과. 잔여 WASM 항목은 Node VM contextified global과 host sandbox identity를 혼동한 harness를 수정했다.
-- [34021763068](https://github.com/gosuda/zeroproxy/actions/runs/34021763068): 요청 계약 E2E 4/4, WASM 12/12 통과. 전체 E1은 실패했다.
-- [34022243702](https://github.com/gosuda/zeroproxy/actions/runs/34022243702): cleanup CI도 실패. 현재 기준 HEAD `db3a895` 이후 잔여 오류 수정 진행 중이며 green으로 표시하지 않는다.
-- 잔여 E1 수정: H1/H2 pull streaming·framing/decoder 검증·취소·SW 최종 body lifetime, WebSocket handshake identity와 실제 WebSocketStream 수명, Attr-node URL ingress, 별도 context의 srcdoc 탐색과 폼별 출발점/직렬화. 이전 실패를 skip/기대값 완화로 숨기지 않고 원격에서 재검증한다.
+- **현재 증거:** [CI 34025734224 / a484e7b](https://github.com/gosuda/zeroproxy/actions/runs/34025734224) — Rust·Go·경량 JS·build 모두 통과, 실제 WASM 12/12 및 Chromium E2E 109/109 통과, skipped 0.
+- **관측:** 같은 지연 본문 fixture에서 H1 첫 chunk는 이전 603ms에서 3.3ms로 개선됐다. WS 정상 종료 1000, 명시 종료 3001/finished, idle cancel, 부모 srcdoc 탐색과 폼 3종을 검증했다. 이전 실패·반증은 해당 함정노트에 남긴다.
+- 검증된 변경: H1/H2 pull streaming·framing/decoder 검증·취소·SW body lifetime, WS handshake identity와 close 수명, Attr-node URL ingress, 가상 Window descriptor·origin 격리, 자식 realm의 guarded eval/Function, srcdoc 탐색 및 폼 직렬화. 실패를 skip/기대값 완화로 숨기지 않았다.
 - 첫 변경에 문서 registry 전체·SW 복구·PSL/SameSite/partition·완전한 타깃 CORS·AST semantic 교체·realm 재설계 전체가 포함된 것은 아니다.
 
 ## 유지할 책임 경계
