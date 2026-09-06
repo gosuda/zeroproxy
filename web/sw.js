@@ -1927,7 +1927,7 @@ async function transportFetchHop(targetUrl, opt) {
   const result = addCSP(resp, opt.request, opt.tab.servers, opt.tab, u);
   result.__zpFetchMeta = {
     url: u, redirected: opt.redirectDepth > 0,
-    type: opt.mode === 'no-cors' && new URL(u).origin !== context.origin ? 'opaque' : 'basic',
+    type: new URL(u).origin !== context.origin ? (opt.mode === 'no-cors' ? 'opaque' : opt.mode === 'cors' ? 'cors' : 'basic') : 'basic',
   };
   return result;
 }
