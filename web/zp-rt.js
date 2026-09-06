@@ -107,7 +107,7 @@
     // almost always ASCII (RFC 3986) so a charCodeAt loop wins big in the
     // common case. The non-ASCII fallback uses encodeInto since a manual
     // UTF-8 encoder would lose to V8's native implementation on real
-    // multi-byte input. See .ai/zp-page-rt-bench-report.md §encoder-isolation.
+    // multi-byte input, so those inputs use the native TextEncoder.
     function writeScratch(str) {
       const len = str.length;
       if (len > SCRATCH_CAP) {

@@ -6559,7 +6559,7 @@
         // a single-mutation tick benefits when the URL turns out to be
         // non-HTTP (saves the 1300 ns new URL throw cost). For HTTP URLs
         // the ~120 ns is overhead but dwarfed by the main loop's parse.
-        // See .ai/zp-page-rt-bench-report.md §3.7.
+        // Keep this cache scoped to one mutation batch; DOM bases may change later.
         tickURLCache = new Map();
         try {
           if (rt) {
