@@ -317,7 +317,11 @@
         headers.delete('X-ZP-Fetch-Meta');
         headers.delete('X-ZP-Set-Cookie');
         headers.delete('X-ZP-Final-URL');
-        result = new ResponseCtor(response.body, { status: response.status, statusText: response.statusText, headers });
+        // Chromium may expose an empty stream for a synthetic SW response,
+        // but reconstructing 204/205/304 requires an actual null body.
+        const nullBody = response.status === 204 || response.status === 205 || response.status === 304;
+        if (nullBody && response.body) response.body.cancel().catch(() => {});
+        result = new ResponseCtor(nullBody ? null : response.body, { status: response.status, statusText: response.statusText, headers });
       }
       metadata.set(result, Object.freeze(record));
       return result;

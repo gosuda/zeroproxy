@@ -576,7 +576,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
 
   // 실제 구현을 뜯어 실행한다 — 창 3단을 흉내 내고 그 위에서 CMP 루프를 돈다.
   const src = rt.slice(start, end);
-  const make = new Function('root', 'scope', 'virtualLocation', 'postMessageWrapperFor', 'crossWindowProxyCache',
+  const make = new Function('root', 'scope', 'postMessageWrapperFor', 'crossWindowProxyCache', 'crossWindowTargets',
     src + '\nreturn safeCrossWindow;');
 
   const top = { name: 'top' };
@@ -588,7 +588,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
 
   // leaf 실행 컨텍스트: root=leaf, scope=leaf 의 가상 window
   const scope = { name: 'scope(leaf)' };
-  const safeCrossWindow = make(leaf, scope, {}, () => () => {}, new WeakMap());
+  const safeCrossWindow = make(leaf, scope, () => () => {}, new WeakMap(), new WeakMap());
 
   const windowTop = safeCrossWindow(top);
   let w = scope;

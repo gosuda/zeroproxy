@@ -26,6 +26,7 @@ use std::io;
 use std::rc::Rc;
 
 use base64::Engine;
+use futures_util::future::{AbortHandle, Abortable};
 use futures_util::io::{AsyncReadExt, AsyncWriteExt};
 use js_sys::{Function, Reflect, Uint8Array};
 use sha1::{Digest, Sha1};
@@ -353,13 +354,14 @@ enum OutMsg {
     Text(String),
     Binary(Vec<u8>),
     Pong(Vec<u8>),
-    Close { code: u16, reason: String },
+    Close(Vec<u8>),
 }
 
 struct WriterShared {
     queue: std::collections::VecDeque<OutMsg>,
     waker: Option<std::task::Waker>,
     closed_local: bool,
+    peer_close: Option<(u16, String)>,
     /// Sum of pending payload bytes (queued but not yet handed to the
     /// transport). Matches the WHATWG WebSocket `bufferedAmount` semantics
     /// closely enough for backpressure heuristics.
@@ -371,6 +373,8 @@ struct Shared {
     on_close: RefCell<Option<Function>>,
     on_error: RefCell<Option<Function>>,
     writer: RefCell<WriterShared>,
+    reader_abort: AbortHandle,
+    writer_abort: AbortHandle,
     protocol: String,
     /// Set when the writer or reader has torn down the transport. Used by
     /// `send` to fast-fail without enqueuing.
@@ -416,6 +420,15 @@ impl WsClient {
         *self.shared.on_message.borrow_mut() = take("message");
         *self.shared.on_close.borrow_mut() = take("close");
         *self.shared.on_error.borrow_mut() = take("error");
+        // A peer can finish before JS resumes after kernelStream's promise.
+        if *self.shared.closed.borrow() {
+            let code = *self.shared.close_code.borrow();
+            let reason = self.shared.close_reason.borrow().clone();
+            let cb_opt = self.shared.on_close.borrow().clone();
+            if let Some(cb) = cb_opt {
+                let _ = cb.call2(&JsValue::NULL, &JsValue::from(code as f64), &JsValue::from_str(&reason));
+            }
+        }
         Ok(())
     }
 
@@ -427,6 +440,9 @@ impl WsClient {
             return Err(JsValue::from_str("WS_BLOCKED: send after close"));
         }
         let mut w = self.shared.writer.borrow_mut();
+        if w.closed_local {
+            return Err(JsValue::from_str("WS_BLOCKED: send after close"));
+        }
         if let Some(s) = data.as_string() {
             w.buffered = w.buffered.saturating_add(s.len());
             w.queue.push_back(OutMsg::Text(s));
@@ -459,12 +475,19 @@ impl WsClient {
         }
         let code = code.unwrap_or(1000);
         let reason = reason.unwrap_or_default();
+        if (code != 1000 && !(3000..=4999).contains(&code)) || reason.len() > 123 {
+            fail_connection(&self.shared, "invalid local close code or reason");
+            return;
+        }
         let mut w = self.shared.writer.borrow_mut();
         if w.closed_local {
             return;
         }
         w.closed_local = true;
-        w.queue.push_back(OutMsg::Close { code, reason });
+        let mut payload = Vec::with_capacity(2 + reason.len());
+        payload.extend_from_slice(&code.to_be_bytes());
+        payload.extend_from_slice(reason.as_bytes());
+        w.queue.push_back(OutMsg::Close(payload));
         if let Some(waker) = w.waker.take() {
             waker.wake();
         }
@@ -478,6 +501,8 @@ pub async fn open(url: &str, protocols: &[String], identity_headers: &[(&str, &s
     let mut conn = open_target_stream(&parsed.host, parsed.port, parsed.secure).await?;
     let negotiated = handshake(&mut conn, &parsed, protocols, identity_headers).await?;
 
+    let (reader_abort, reader_registration) = AbortHandle::new_pair();
+    let (writer_abort, writer_registration) = AbortHandle::new_pair();
     let shared = Rc::new(Shared {
         on_message: RefCell::new(None),
         on_close: RefCell::new(None),
@@ -486,8 +511,11 @@ pub async fn open(url: &str, protocols: &[String], identity_headers: &[(&str, &s
             queue: std::collections::VecDeque::new(),
             waker: None,
             closed_local: false,
+            peer_close: None,
             buffered: 0,
         }),
+        reader_abort,
+        writer_abort,
         protocol: negotiated,
         closed: RefCell::new(false),
         close_code: RefCell::new(1006),
@@ -499,8 +527,14 @@ pub async fn open(url: &str, protocols: &[String], identity_headers: &[(&str, &s
     // / `AsyncWriteExt` provide `.split()`.
     let (reader_half, writer_half) = futures_util::AsyncReadExt::split(conn);
 
-    spawn_local(reader_task(reader_half, shared.clone()));
-    spawn_local(writer_task(writer_half, shared.clone()));
+    let reader_shared = shared.clone();
+    spawn_local(async move {
+        let _ = Abortable::new(reader_task(reader_half, reader_shared), reader_registration).await;
+    });
+    let writer_shared = shared.clone();
+    spawn_local(async move {
+        let _ = Abortable::new(writer_task(writer_half, writer_shared), writer_registration).await;
+    });
 
     let client = WsClient { shared };
     Ok(JsValue::from(client))
@@ -516,18 +550,21 @@ async fn reader_task(
     let mut frag_buf: Vec<u8> = Vec::new();
 
     loop {
+        if *shared.closed.borrow() {
+            return;
+        }
         // Read one frame.
         let frame = match read_frame_split(&mut conn).await {
             Ok(f) => f,
             Err(_e) => {
-                surface_close(&shared, 1006, String::new());
+                fail_connection(&shared, "WebSocket transport ended without a Close frame");
                 return;
             }
         };
         match frame.op {
             Opcode::Continuation => {
                 if frag_op.is_none() {
-                    surface_close(&shared, 1002, "continuation without start".into());
+                    fail_connection(&shared, "continuation without start");
                     return;
                 }
                 frag_buf.extend_from_slice(&frame.payload);
@@ -539,7 +576,7 @@ async fn reader_task(
             }
             Opcode::Text | Opcode::Binary => {
                 if frag_op.is_some() {
-                    surface_close(&shared, 1002, "new data frame mid-fragment".into());
+                    fail_connection(&shared, "new data frame mid-fragment");
                     return;
                 }
                 if frame.fin {
@@ -563,8 +600,28 @@ async fn reader_task(
                 // We don't initiate pings yet; ignore.
             }
             Opcode::Close => {
-                let (code, reason) = decode_close_payload(&frame.payload);
-                surface_close(&shared, code, reason);
+                let (code, reason) = match decode_close_payload(&frame.payload) {
+                    Ok(close) => close,
+                    Err(error) => {
+                        fail_connection(&shared, error);
+                        return;
+                    }
+                };
+                let mut w = shared.writer.borrow_mut();
+                w.peer_close = Some((code, reason));
+                // Do not send queued data after receiving Close. Preserve a
+                // local Close already queued, or reply below if none exists.
+                w.queue.retain(|msg| matches!(msg, OutMsg::Close(_)));
+                w.buffered = 0;
+                if !w.closed_local {
+                    // A peer close ends data delivery; echo its exact payload,
+                    // including the valid empty (no status code) form (§5.5.1).
+                    w.closed_local = true;
+                    w.queue.push_back(OutMsg::Close(frame.payload));
+                }
+                if let Some(waker) = w.waker.take() {
+                    waker.wake();
+                }
                 return;
             }
         }
@@ -649,30 +706,32 @@ async fn writer_task(
     shared: Rc<Shared>,
 ) {
     loop {
-        // Wait until a message is queued or the local side closes.
+        // A local close stops sends, not reads: wait for the peer handshake.
         let msg_opt = WriterPoll {
             shared: shared.clone(),
         }
         .await;
         let msg = match msg_opt {
             Some(m) => m,
-            None => return,
-        };
-        let (op, payload, is_close) = match msg {
-            OutMsg::Text(s) => (Opcode::Text, s.into_bytes(), false),
-            OutMsg::Binary(b) => (Opcode::Binary, b, false),
-            OutMsg::Pong(b) => (Opcode::Pong, b, false),
-            OutMsg::Close { code, reason } => {
-                let mut payload = Vec::with_capacity(2 + reason.len());
-                payload.extend_from_slice(&code.to_be_bytes());
-                payload.extend_from_slice(reason.as_bytes());
-                (Opcode::Close, payload, true)
+            None => {
+                let peer_close = shared.writer.borrow_mut().peer_close.take();
+                let _ = conn.close().await;
+                if let Some((code, reason)) = peer_close {
+                    surface_close(&shared, code, reason);
+                }
+                return;
             }
+        };
+        let (op, payload) = match msg {
+            OutMsg::Text(s) => (Opcode::Text, s.into_bytes()),
+            OutMsg::Binary(b) => (Opcode::Binary, b),
+            OutMsg::Pong(b) => (Opcode::Pong, b),
+            OutMsg::Close(payload) => (Opcode::Close, payload),
         };
         let encoded = match encode_frame(op, &payload) {
             Ok(b) => b,
             Err(e) => {
-                surface_close(&shared, 1011, e);
+                fail_connection(&shared, &e);
                 return;
             }
         };
@@ -683,16 +742,12 @@ async fn writer_task(
             let mut w = shared.writer.borrow_mut();
             w.buffered = w.buffered.saturating_sub(payload.len());
         }
-        if conn.write_all(&encoded).await.is_err() {
-            surface_close(&shared, 1006, String::new());
+        if conn.write_all(&encoded).await.is_err() || conn.flush().await.is_err() {
+            fail_connection(&shared, "WebSocket frame write failed");
             return;
         }
-        if is_close {
-            // Best-effort close of the transport; the reader task will
-            // observe EOF and surface the final close to JS.
-            let _ = conn.close().await;
-            return;
-        }
+        // Do not send transport FIN after a Close: the relay would tear down
+        // both directions before the peer can echo. WriterPoll waits for it.
     }
 }
 
@@ -706,11 +761,14 @@ impl std::future::Future for WriterPoll {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
+        if *self.shared.closed.borrow() {
+            return std::task::Poll::Ready(None);
+        }
         let mut w = self.shared.writer.borrow_mut();
         if let Some(m) = w.queue.pop_front() {
             return std::task::Poll::Ready(Some(m));
         }
-        if w.closed_local {
+        if w.peer_close.is_some() {
             return std::task::Poll::Ready(None);
         }
         w.waker = Some(cx.waker().clone());
@@ -718,16 +776,19 @@ impl std::future::Future for WriterPoll {
     }
 }
 
-fn decode_close_payload(payload: &[u8]) -> (u16, String) {
+fn decode_close_payload(payload: &[u8]) -> Result<(u16, String), &'static str> {
     if payload.is_empty() {
-        return (1005, String::new());
+        return Ok((1005, String::new()));
     }
     if payload.len() == 1 {
-        return (1002, "malformed close payload".into());
+        return Err("malformed close payload");
     }
     let code = u16::from_be_bytes([payload[0], payload[1]]);
-    let reason = String::from_utf8_lossy(&payload[2..]).into_owned();
-    (code, reason)
+    if !matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999) {
+        return Err("invalid close status code");
+    }
+    let reason = std::str::from_utf8(&payload[2..]).map_err(|_| "invalid close reason UTF-8")?;
+    Ok((code, reason.to_owned()))
 }
 
 fn deliver_message(shared: &Rc<Shared>, op: Opcode, payload: Vec<u8>) {
@@ -737,9 +798,8 @@ fn deliver_message(shared: &Rc<Shared>, op: Opcode, payload: Vec<u8>) {
         Opcode::Text => match String::from_utf8(payload) {
             Ok(s) => JsValue::from_str(&s),
             Err(_) => {
-                // §8.1: invalid UTF-8 in a Text frame fails the connection
-                // with code 1007.
-                surface_close(shared, 1007, "invalid UTF-8 in text frame".into());
+                // §8.1: invalid UTF-8 fails the connection, not a clean close.
+                fail_connection(shared, "invalid UTF-8 in text frame");
                 return;
             }
         },
@@ -753,6 +813,17 @@ fn deliver_message(shared: &Rc<Shared>, op: Opcode, payload: Vec<u8>) {
     let _ = cb.call1(&JsValue::NULL, &arg);
 }
 
+fn fail_connection(shared: &Rc<Shared>, error: &str) {
+    if *shared.closed.borrow() {
+        return;
+    }
+    let cb_opt = shared.on_error.borrow().clone();
+    if let Some(cb) = cb_opt {
+        let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(error));
+    }
+    surface_close(shared, 1006, String::new());
+}
+
 fn surface_close(shared: &Rc<Shared>, code: u16, reason: String) {
     {
         let mut closed = shared.closed.borrow_mut();
@@ -763,6 +834,18 @@ fn surface_close(shared: &Rc<Shared>, code: u16, reason: String) {
     }
     *shared.close_code.borrow_mut() = code;
     *shared.close_reason.borrow_mut() = reason.clone();
+    // Stop either blocked driver, including a writer waiting on an empty
+    // queue after peer EOF, so no task retains a transport half indefinitely.
+    shared.reader_abort.abort();
+    shared.writer_abort.abort();
+    {
+        let mut w = shared.writer.borrow_mut();
+        w.queue.clear();
+        w.buffered = 0;
+        if let Some(waker) = w.waker.take() {
+            waker.wake();
+        }
+    }
     let cb_opt = shared.on_close.borrow().clone();
     if let Some(cb) = cb_opt {
         let code_js = JsValue::from(code as f64);
@@ -823,22 +906,21 @@ mod tests {
     fn close_payload_round_trips_code_and_reason() {
         let (code, reason) = decode_close_payload(&[
             0x03, 0xE8, b'b', b'y', b'e',
-        ]);
+        ]).unwrap();
         assert_eq!(code, 1000);
         assert_eq!(reason, "bye");
     }
 
     #[test]
     fn close_payload_empty_returns_1005() {
-        let (code, reason) = decode_close_payload(&[]);
+        let (code, reason) = decode_close_payload(&[]).unwrap();
         assert_eq!(code, 1005);
         assert_eq!(reason, "");
     }
 
     #[test]
     fn close_payload_single_byte_is_malformed() {
-        let (code, _) = decode_close_payload(&[0x03]);
-        assert_eq!(code, 1002);
+        assert!(decode_close_payload(&[0x03]).is_err());
     }
 
     // Note: `WsUrl::parse` calls `web_sys::Url::new` which requires a

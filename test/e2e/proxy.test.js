@@ -345,6 +345,20 @@ function createTargetServer(requests) {
       </script></body></html>`);
       return;
     }
+    if (url.pathname === '/fragment-echo') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ href: url.searchParams.get('href'), userAgent: req.headers['user-agent'] }));
+      return;
+    }
+    if (url.pathname === '/cross-origin-location-probe') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Cross-origin Location</title><script>
+        let read;
+        try { read = top.location.href; } catch (error) { read = error.name; }
+        parent.postMessage({ type: 'cross-origin-location', read, replace: typeof top.location.replace }, '*');
+      <\/script>`);
+      return;
+    }
     if (url.pathname === '/srcdoc-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Srcdoc Probe</title><button id="navigate">Navigate top</button><script>
@@ -368,6 +382,19 @@ function createTargetServer(requests) {
       res.end(`(() => {
         const NativeWebSocket = window.WebSocket;
         window.__rewriteAdvanced = { initialHref: window.location.href, constructorSource: NativeWebSocket.toString() };
+        window.__runFragmentProbe = async () => {
+          delete window.__rangeFragmentResult;
+          const range = document.createRange();
+          range.selectNodeContents(document.body);
+          const fragment = range.createContextualFragment(${JSON.stringify(`<script>
+            window.__rangeFragmentResult = fetch(new URL('/fragment-echo?href=' + encodeURIComponent(location.href), location.href))
+              .then(response => response.json())
+              .then(echo => ({ href: location.href, origin: location.origin, echo }));
+          </script>`)});
+          const beforeInsertion = window.__rangeFragmentResult === undefined;
+          document.body.appendChild(fragment);
+          return { beforeInsertion, result: await window.__rangeFragmentResult };
+        };
         location.href += '#compound';
         window.location.hash += '-tail';
         window.__rewriteAdvanced.compoundHref = location.href;
@@ -990,6 +1017,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     observed.attributes.setNamedItem(attr);
     const frameTitle = await loaded;
     const visibleSrc = observed.src;
+    const visibleAttribute = observed.getAttribute('src');
+    const visibleNodeValue = attr.value;
     const attachedNode = observed.getAttributeNode('src') === attr && attr.ownerElement === observed;
     const marker = document.createAttribute('data-marker');
     marker.value = 'before';
@@ -998,10 +1027,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     replacement.value = 'after';
     const replaced = NamedNodeMap.prototype.setNamedItemNS.call(observed.attributes, replacement);
     const replacedNode = replaced === marker && marker.ownerElement === null && marker.value === 'before' && replacement.ownerElement === observed && observed.getAttribute('data-marker') === 'after';
+    observed.removeAttribute('src');
+    const removedSrc = observed.src;
     sync.remove();
     modern.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketURL, childCanvasMask, childFunctionHref, frameTitle, visibleSrc, attachedNode, replacedNode };
+    return { syncRTC, docRTC, modernRTC, websocketURL, childCanvasMask, childFunctionHref, frameTitle, visibleSrc, visibleAttribute, visibleNodeValue, removedSrc, attachedNode, replacedNode };
   }, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.syncRTC, 'NotSupportedError');
   assert.equal(iframeIsolation.docRTC, 'NotSupportedError');
@@ -1009,6 +1040,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
   assert.equal(iframeIsolation.frameTitle, 'E2E Next');
   assert.equal(iframeIsolation.visibleSrc, `http://${targetHost}:${targetPort}/next`);
+  assert.equal(iframeIsolation.visibleAttribute, `http://${targetHost}:${targetPort}/next`);
+  assert.equal(iframeIsolation.visibleNodeValue, `http://${targetHost}:${targetPort}/next`);
+  assert.equal(iframeIsolation.removedSrc, '');
   assert.equal(iframeIsolation.attachedNode, true);
   assert.equal(iframeIsolation.replacedNode, true);
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
@@ -1209,6 +1243,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('ws.data', () => { assert.equal(runtimeIntegration.ws.data, '1,2,3'); });
   await t.test('ws.protocol', () => { assert.equal(runtimeIntegration.ws.protocol, 'zp-test'); });
   await t.test('wsStream', () => { assert.deepEqual(runtimeIntegration.wsStream, { protocol: 'zp-stream', data: 'echo:stream', closeCode: 1000, done: true, explicitClosed: { closeCode: 3001, reason: 'finished' } }); });
+  await t.test('opening WebSocket cancellation is unclean and streams settle', async () => {
+    const canceled = await page.evaluate(async targetPort => {
+      const url = 'ws://localhost:' + targetPort + '/ws';
+      const ws = new WebSocket(url);
+      const early = new Promise(resolve => {
+        ws.onclose = event => resolve({ code: event.code, reason: event.reason, wasClean: event.wasClean });
+      });
+      ws.close(3001, 'not a peer close');
+      const stream = new WebSocketStream(url);
+      stream.close({ closeCode: 3001, reason: 'not a peer close' });
+      const controller = new AbortController();
+      const aborted = new WebSocketStream(url, { signal: controller.signal });
+      controller.abort();
+      const settlements = await Promise.allSettled([stream.opened, stream.closed, aborted.opened, aborted.closed]);
+      return { early: await early, settlements: settlements.map(result => ({ status: result.status, error: result.reason?.name })) };
+    }, targetPort);
+    assert.deepEqual(canceled, {
+      early: { code: 1006, reason: '', wasClean: false },
+      settlements: [
+        { status: 'rejected', error: 'NetworkError' }, { status: 'rejected', error: 'NetworkError' },
+        { status: 'rejected', error: 'AbortError' }, { status: 'rejected', error: 'AbortError' }
+      ]
+    });
+  });
   await t.test('post', () => { assert.deepEqual(runtimeIntegration.post, { status: 200, text: 'small-upload' }); });
   await t.test('redirectPost', () => { assert.deepEqual(runtimeIntegration.redirectPost, { status: 200, text: 'redirect-body' }); });
   await t.test('oversized.status', () => { assert.equal(runtimeIntegration.oversized.status, 413); });
@@ -1502,6 +1560,14 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
         const desc = Object.getOwnPropertyDescriptor(w, 'location');
         if (!desc) return 'no-desc';
         const v = desc.get ? desc.get.call(w) : desc.value;
+        out.locationDescriptorFlags = {
+          configurable: desc.configurable, enumerable: desc.enumerable,
+          getter: typeof desc.get, setter: typeof desc.set,
+          stable: desc.get === Reflect.getOwnPropertyDescriptor(w, 'location').get,
+          sameLocation: v === w.location,
+          redefinable: Reflect.defineProperty(w, 'location', { configurable: true }),
+          deletable: Reflect.deleteProperty(w, 'location')
+        };
         const href = v && v.href;
         return String(String(href || '')).startsWith(directBase) ? 'virtual' : 'native:' + href;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
@@ -1523,18 +1589,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
-    // E1: Range.createContextualFragment — <script> created via fragment
-    // API must not execute in current realm.
-    out.rangeFragmentScript = (() => {
-      try {
-        window.__rangeFragmentRan = false;
-        const r = document.createRange();
-        r.selectNodeContents(document.body);
-        const frag = r.createContextualFragment('<script>window.__rangeFragmentRan = true<\/script>');
-        document.body.appendChild(frag);
-        return window.__rangeFragmentRan ? 'ran' : 'blocked';
-      } catch (err) { return 'throw:' + (err && err.name || String(err)); }
-    })();
+    // HTML createContextualFragment uses Fragment scripting mode, unlike
+    // innerHTML/DOMParser: insertion executes scripts. The authored consumer
+    // must run with virtual URLs and route its fetch through the proxy.
+    // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-range-createcontextualfragment
+    try { out.rangeFragmentScript = await window.__runFragmentProbe(); }
+    catch (err) { out.rangeFragmentScript = { error: err && err.name || String(err) }; }
 
     // E1: innerHTML inline <script> never executes (HTML5 spec), regression guard.
     out.innerHTMLScript = (() => {
@@ -1660,10 +1720,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('destructuringAccess', () => { assert.equal(escapeMatrix.destructuringAccess, 'virtual', `destructuring: ${escapeMatrix.destructuringAccess}`); });
   await t.test('optionalChainAccess', () => { assert.equal(escapeMatrix.optionalChainAccess, 'virtual', `optional chain: ${escapeMatrix.optionalChainAccess}`); });
   await t.test('locationDescriptor', () => { assert.equal(escapeMatrix.locationDescriptor, 'virtual', `descriptor leak: ${escapeMatrix.locationDescriptor}`); });
-  // E1 HTML compilation paths — DOMParser / Range fragment / innerHTML
-  // never run their inline <script> bodies in the current realm.
+  await t.test('locationDescriptorFlags', () => { assert.deepEqual(escapeMatrix.locationDescriptorFlags, { configurable: false, enumerable: true, getter: 'function', setter: 'function', stable: true, sameLocation: true, redefinable: false, deletable: false }); });
+  // Inert HTML ingestion stays inert; executable fragments retain confinement.
   await t.test('domParserScript', () => { assert.equal(escapeMatrix.domParserScript, 'blocked', `DOMParser script: ${escapeMatrix.domParserScript}`); });
-  await t.test('rangeFragmentScript', () => { assert.equal(escapeMatrix.rangeFragmentScript, 'blocked', `range fragment script: ${escapeMatrix.rangeFragmentScript}`); });
+  await t.test('rangeFragmentScript', () => {
+    assert.deepEqual(escapeMatrix.rangeFragmentScript, { beforeInsertion: true, result: { href: escapeMatrix.virtualHref, origin: `http://${targetHost}:${targetPort}`, echo: { href: escapeMatrix.virtualHref, userAgent: TARGET_UA } } });
+  });
   await t.test('innerHTMLScript', () => { assert.equal(escapeMatrix.innerHTMLScript, 'blocked', `innerHTML script: ${escapeMatrix.innerHTMLScript}`); });
   // D7 parity: sessionStorage / caches / performance.timeOrigin virtualized.
   await t.test('sessionStoragePrefix', () => { assert.equal(escapeMatrix.sessionStoragePrefix, 'isolated', `sessionStorage leak: ${escapeMatrix.sessionStoragePrefix}`); });
@@ -1672,6 +1734,28 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   // D4 / D5 gateway stubs — construction succeeds but operations fail-closed.
   await t.test('webTransport', () => { assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`); });
   await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
+  });
+
+  await t.test('cross-virtual-origin frames cannot read parent Location', async () => {
+    const result = await page.evaluate(url => new Promise((resolve, reject) => {
+      const frame = document.createElement('iframe');
+      const finish = event => {
+        if (!event.data || event.data.type !== 'cross-origin-location') return;
+        clearTimeout(timer);
+        window.removeEventListener('message', finish);
+        frame.remove();
+        resolve(event.data);
+      };
+      const timer = setTimeout(() => {
+        window.removeEventListener('message', finish);
+        frame.remove();
+        reject(new Error('cross-origin Location probe timed out'));
+      }, 5000);
+      window.addEventListener('message', finish);
+      frame.src = url;
+      document.body.appendChild(frame);
+    }), `http://127.0.0.1:${targetPort}/cross-origin-location-probe`);
+    assert.deepEqual(result, { type: 'cross-origin-location', read: 'SecurityError', replace: 'function' });
   });
 
   await t.test('target-authored srcdoc contains cross-origin top navigation', async () => {
