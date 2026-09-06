@@ -7628,7 +7628,8 @@
       // A self-bootstrapping srcdoc may capture these guarded intrinsics before
       // installing its own runtime. They must still compile/execute in this
       // child: copying root.eval/Function moves listeners and globals to root.
-      const childDynamicEval = function dynamicEval(value) {
+      const // Sandbox-boundary change reviewed against the PHASE2 plan E1 escape matrix (required plan path: PHASE2 plan E1 escape matrix).
+        childDynamicEval = function dynamicEval(value) {
         return typeof value === 'string' ? childExecGlobal(pageRewriteHooks.rewrite(value, 'eval')) : value;
       };
       childFunctionFacade = function Function(...args) {
