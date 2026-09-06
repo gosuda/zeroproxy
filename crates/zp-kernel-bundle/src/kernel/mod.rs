@@ -10,7 +10,7 @@
 //! Step 13 shipped a JSON-envelope relay over `/zp/relay` where the
 //! browser sent plaintext `(url, method, headers, body)` to the server
 //! and the server did the TLS handshake. That broke the security
-//! invariant in ARCHITECTURE.md ("the relay does not parse target HTTP,
+//! invariant documented in README.md ("the relay does not parse target HTTP,
 //! TLS, redirects, cookies, or HTML"). Step 14 restored it: the WASM
 //! kernel speaks SOCKS5 + TLS + HTTP/1.1 itself, and the relay only sees
 //! encrypted bytes. See `.ai/trap-notebook/transport-regression.md`.

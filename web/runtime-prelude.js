@@ -183,6 +183,7 @@
   let cachedUADataBrands = null;
   clearBootConfig();
   const Native = captureNative(root);
+  let decodeFetchResponse;
 
 
   // ★2026-08-22 — `new URL(location.href).origin` 을 그냥 쓰면 **`about:srcdoc`
@@ -2183,9 +2184,15 @@
     if (inlineSchemeFetchURL(input)) return Native.fetch(input, init);
     const target = requestTargetURL(input);
     try { zpTrace('fetch', target.slice(0, 180)); } catch {}
-    const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(String(input), init);
+    const req = input && typeof input === 'object' && typeof input.url === 'string' && typeof input.clone === 'function' ? new Native.Request(input, init) : new Native.Request(target, init);
+    // Capture before reading a body: history/base may change while that read awaits.
+    const requestEntryId = activeEntryId;
+    const documentURL = virtualURL.href;
+    const referrerPolicy = req.referrerPolicy || documentReferrerPolicy();
     const payload = {
       tabId: boot.tabId,
+      entryId: requestEntryId,
+      documentURL,
       url: target,
       init: {
         method: req.method,
@@ -2206,7 +2213,7 @@
         //
         // 메시지로 미리 알려 주는 경로(ZP_REFERRER_POLICY)만으로는 부족하다 —
         // 페이지의 첫 fetch 는 파싱 도중에 나가서 그 메시지보다 **빠르다.**
-        referrerPolicy: req.referrerPolicy || documentReferrerPolicy(),
+        referrerPolicy,
         redirect: req.redirect,
         cache: req.cache,
         integrity: req.integrity
@@ -2229,7 +2236,10 @@
     // 없는 게 맞다 — 이 URL 은 **라벨**이고(SW 는 pathname 으로만 라우팅하고
     // 타깃은 JSON 바디에서 읽는다) fetch 는 프래그먼트를 어차피 버린다.
     const apiURL = proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURLParam(target);
-    return Native.fetch(apiURL, apiInit).then(r => { try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {} return r; }, e => { try { zpTrace('fetch:err', target.slice(0,80) + ' ' + String(e).slice(0,60)); } catch {} throw e; });
+    return Native.fetch(apiURL, apiInit).then(r => {
+      try { zpTrace('fetch:ok', target.slice(0,80) + ' s=' + r.status); } catch {}
+      return decodeFetchResponse(r);
+    }, e => { try { zpTrace('fetch:err', target.slice(0,80) + ' ' + String(e).slice(0,60)); } catch {} throw e; });
   }
   function fireEvent(target, type) {
     let ev;
@@ -2237,6 +2247,7 @@
     return target.dispatchEvent(ev);
   }
   function installHTTPAPIs() {
+    if (Native.Response) decodeFetchResponse = ZP.createFetchResponseAdapter(Native.Response, Native.Headers, defineAccessor, define);
     if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
@@ -2417,6 +2428,7 @@
             if (!this._sent) return;
             this.status = resp.status;
             this.statusText = resp.statusText;
+            this.responseURL = resp.url || this._url;
             this._responseHeaders = resp.headers;
             xhrReady(this, HEADERS_RECEIVED);
             xhrReady(this, LOADING);

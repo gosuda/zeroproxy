@@ -16,9 +16,13 @@ const outRoot = path.resolve(repoRoot, args.out || 'dist');
 const webSrc = path.join(repoRoot, 'web');
 const webOut = path.join(outRoot, 'web');
 const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
-const cargoHome = process.env.CARGO_HOME || path.join(process.env.HOME || '', '.cargo');
-const cargoBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
-const wasmBindgenBinPath = path.join(cargoHome, 'bin', process.platform === 'win32' ? 'wasm-bindgen.exe' : 'wasm-bindgen');
+// Default to a small local footprint; explicit caller limits still win.
+const buildEnv = {
+  ...process.env,
+  CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || '2',
+  BINARYEN_CORES: process.env.BINARYEN_CORES || '2',
+  GOFLAGS: process.env.GOFLAGS ?? '-p=2',
+};
 // Minify by default — produces the artifact shipped to clients. Opt out
 // with `--no-minify` for readable dist output when chasing a bug.
 // Explicit `--minify` still works (no-op when default is already true)
@@ -175,20 +179,20 @@ async function buildWeb() {
 }
 
 async function buildRustBundle() {
-  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
+  run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-bundle']);
   // 2026-06-08 split-bundle (c.3): zp-kernel-bundle holds the SW
   // transport/kernel half (rustls + h2 + yamux + mlkem + tokio +
   // flate2/brotli/ruzstd + membrane/rtcgw/wtproxy). Its wasm is fetched +
   // instantiated lazily — only on first `transportFetch` — instead of
   // blocking SW `activate`.
-  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-kernel-bundle']);
+  run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-kernel-bundle']);
   // 2026-06-08 split-bundle (c.2): zp-page-bundle is the page-realm wasm —
   // strict subset (rewriter + sourcemap + CSS + html-tx) without the SW
   // kernel/transport stack.
-  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-bundle']);
+  run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-bundle']);
   // zp-page-rt: raw extern "C" cdylib loaded by web/zp-rt.js. No wasm-bindgen
   // glue; the .wasm is copied as-is and JS instantiates it directly.
-  run('cargo', ['build', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-rt']);
+  run('cargo', ['build', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '-p', 'zp-page-rt']);
   await mkdir(zpBundleOutDir, { recursive: true });
   // SW bundle (zp-bundle, full transport stack). No-modules glue loadable
   // via importScripts(); wrapped in an IIFE so top-level `let wasm_bindgen`
@@ -285,7 +289,7 @@ function tryRunOptional(cmd, argv) {
     // for `.cmd` shims because Node won't auto-resolve PATHEXT unless
     // `shell:true` is set. That's why the page-bundle wasm-opt step
     // silently no-op'd — Linux/macOS hit the binary, Windows fell through.
-    const result = spawnSync(cmd, argv, { cwd: repoRoot, stdio: 'inherit', shell: process.platform === 'win32' });
+    const result = spawnSync(cmd, argv, { cwd: repoRoot, env: buildEnv, stdio: 'inherit', shell: process.platform === 'win32' });
     return result.status === 0;
   } catch {
     return false;
@@ -424,7 +428,7 @@ function run(cmd, argv, extraEnv = {}) {
   process.stdout.write(`${cmd} ${argv.join(' ')}\n`);
   const result = spawnSync(cmd, argv, {
     cwd: repoRoot,
-    env: { ...process.env, ...extraEnv },
+    env: { ...buildEnv, ...extraEnv },
     stdio: 'inherit',
   });
   if (result.status !== 0) throw new Error(`${cmd} ${argv.join(' ')} failed with exit code ${result.status}`);

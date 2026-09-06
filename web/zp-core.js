@@ -272,7 +272,58 @@
     const h = String(host || '').toLowerCase();
     return h === 'localhost' || h.endsWith('.localhost') || h === '127.0.0.1' || h === '::1' || h === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(h);
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, ERRORS, errorInfo });
+  function redirectMethod(status, method) {
+    if ((status === 301 || status === 302) && method === 'POST') return 'GET';
+    if (status === 303 && method !== 'GET' && method !== 'HEAD') return 'GET';
+    return method;
+  }
+  // Keep native Response identity and brand checks; metadata belongs to the
+  // response, not own properties or a Proxy that breaks borrowed methods.
+  function createFetchResponseAdapter(ResponseCtor, HeadersCtor, installAccessor, installMethod) {
+    const metadata = new WeakMap();
+    const proto = ResponseCtor.prototype;
+    const nativeClone = proto.clone;
+    const nativeError = ResponseCtor.error.bind(ResponseCtor);
+    for (const key of ['url', 'redirected', 'type']) {
+      const descriptor = Object.getOwnPropertyDescriptor(proto, key);
+      const get = function () {
+        const native = descriptor.get.call(this);
+        const record = metadata.get(this);
+        return record ? record[key] : native;
+      };
+      if (installAccessor) installAccessor(proto, key, get, undefined);
+      else Object.defineProperty(proto, key, Object.assign({}, descriptor, { get }));
+    }
+    const clone = function clone() {
+      const result = nativeClone.call(this);
+      const record = metadata.get(this);
+      if (record) metadata.set(result, record);
+      return result;
+    };
+    if (installMethod) installMethod(proto, 'clone', clone);
+    else Object.defineProperty(proto, 'clone', Object.assign({}, Object.getOwnPropertyDescriptor(proto, 'clone'), { value: clone }));
+    return function decodeFetchResponse(response) {
+      const encoded = response.headers.get('X-ZP-Fetch-Meta');
+      if (!encoded) return response;
+      const record = JSON.parse(encoded);
+      let result;
+      if (record.type === 'opaque' || record.type === 'opaqueredirect') {
+        if (response.body) response.body.cancel().catch(() => {});
+        result = nativeError();
+        if (record.type === 'opaque') record.url = '';
+        record.redirected = false;
+      } else {
+        const headers = new HeadersCtor(response.headers);
+        headers.delete('X-ZP-Fetch-Meta');
+        headers.delete('X-ZP-Set-Cookie');
+        headers.delete('X-ZP-Final-URL');
+        result = new ResponseCtor(response.body, { status: response.status, statusText: response.statusText, headers });
+      }
+      metadata.set(result, Object.freeze(record));
+      return result;
+    };
+  }
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

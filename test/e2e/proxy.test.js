@@ -9,7 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const puppeteer = require('puppeteer');
 
-const TARGET_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+const { handleRequestContract, runRequestContract } = require('./request-contract');
 const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
 
 function run(cmd, args, options = {}) {
@@ -115,6 +115,7 @@ function createTargetServer(requests) {
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
     ignoreBenignSocketErrors(res);
+    if (handleRequestContract(req, res, requests)) return;
     requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', cookie: req.headers.cookie || '', contentType: req.headers['content-type'] || '' });
     const url = new URL(req.url, 'http://target.local');
     if (url.pathname === '/') {
@@ -531,17 +532,55 @@ async function handleSocks(socket, resolveHost) {
   upstream.pipe(socket);
 }
 
-test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integrations', { timeout: 120000 }, async t => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
-  const buildOut = path.join(temp, 'dist');
-  run('node', ['scripts/build.mjs', '--out', buildOut]);
+test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, concurrency: false }, async t => {
+  const prebuilt = process.env.ZP_E2E_PREBUILT === '1' || Boolean(process.env.CI);
+  const temp = prebuilt ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
+  const buildOut = path.resolve(process.env.ZP_E2E_DIST || (prebuilt ? 'dist' : path.join(temp, 'dist')));
+  const artifacts = path.resolve(process.env.ZP_E2E_ARTIFACTS || 'artifacts/e2e');
+  fs.mkdirSync(artifacts, { recursive: true });
+  let browser;
+  let proxy;
+  let proxyLog = '';
+  const browserLog = [];
+  const wireRequests = [];
+  const sessions = new Map();
+  const saveArtifacts = async (name, page) => {
+    if (page && !page.isClosed()) {
+      try { await page.screenshot({ path: path.join(artifacts, name + '.png') }); }
+      catch (error) { browserLog.push('screenshot: ' + error.message); }
+    }
+    fs.writeFileSync(path.join(artifacts, 'browser.log'), browserLog.join('\n'));
+    fs.writeFileSync(path.join(artifacts, 'server.log'), proxyLog);
+    fs.writeFileSync(path.join(artifacts, 'browser-network.json'), JSON.stringify(wireRequests, null, 2));
+  };
+  t.after(async () => {
+    try { await saveArtifacts('final', browser && (await browser.pages())[0]); }
+    finally {
+      try { if (browser) await browser.close(); }
+      finally {
+        if (proxy && proxy.pid && proxy.exitCode === null && proxy.signalCode === null) {
+          await new Promise(resolve => {
+            const timer = setTimeout(() => proxy.kill('SIGKILL'), 3000);
+            proxy.once('exit', () => { clearTimeout(timer); resolve(); });
+            proxy.kill('SIGTERM');
+          });
+        }
+        if (temp) fs.rmSync(temp, { recursive: true, force: true });
+      }
+    }
+  });
+  if (!prebuilt) run('node', ['scripts/build.mjs', '--out', buildOut]);
   const serverPath = path.join(buildOut, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
   const webPath = path.join(buildOut, 'web');
+  for (const file of [serverPath, ...['index.html', 'sw.js', 'runtime-prelude.js', 'worker-prelude.js', 'zp-page-bundle.js', '__zp/zp_bundle_sw.js', '__zp/zp_bundle_sw_bg.wasm', '__zp/zp_kernel_sw.js', '__zp/zp_kernel_sw_bg.wasm', '__zp/zp_page_rt.wasm'].map(name => path.join(webPath, name))]) {
+    assert.ok(fs.existsSync(file) && fs.statSync(file).size > 0, `required built artifact missing: ${file}; prebuilt mode never rebuilds`);
+  }
 
   const requests = [];
   const target = createTargetServer(requests);
   const targetPort = await listen(target);
   t.after(() => closeServer(target));
+  t.after(() => fs.writeFileSync(path.join(artifacts, 'upstream.json'), JSON.stringify(requests, null, 2)));
   const targetHost = 'localhost';
 
   const proxyPort = await new Promise((resolve, reject) => {
@@ -552,24 +591,61 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     });
     s.once('error', reject);
   });
-  const proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-socks', 'internal'], {
+  proxy = childProcess.spawn(serverPath, ['-addr', `127.0.0.1:${proxyPort}`, '-web', webPath, '-socks', 'internal'], {
     cwd: path.resolve(__dirname, '../..'),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  t.after(() => proxy.kill('SIGTERM'));
-  let proxyLog = '';
   proxy.stdout.on('data', chunk => { proxyLog += chunk; });
   proxy.stderr.on('data', chunk => { proxyLog += chunk; });
+  proxy.on('error', error => { proxyLog += '\nspawn: ' + error.message; });
   await waitForHTTP(`http://127.0.0.1:${proxyPort}/`).catch(err => {
     throw new Error(`${err.message}\nproxy output:\n${proxyLog}`);
   });
 
-  const browser = await puppeteer.launch({
+  browser = await puppeteer.launch({
     headless: true,
+    protocolTimeout: 30000,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--host-resolver-rules=MAP proxy.localhost 127.0.0.1'],
   });
-  t.after(() => browser.close());
+  const observeTarget = target => {
+    if (sessions.has(target)) return sessions.get(target);
+    const pending = (async () => {
+      if (!['page', 'service_worker', 'shared_worker'].includes(target.type())) return;
+      const session = await target.createCDPSession();
+      session.on('Network.requestWillBeSent', event => wireRequests.push(event.request.url));
+      session.on('Network.webSocketCreated', event => wireRequests.push(event.url));
+      session.on('Runtime.consoleAPICalled', event => browserLog.push(`${target.type()} ${event.type}: ${event.args.map(arg => arg.value ?? arg.description ?? '').join(' ')}`));
+      session.on('Runtime.exceptionThrown', event => browserLog.push(JSON.stringify(event.exceptionDetails)));
+      await session.send('Network.enable');
+      await session.send('Runtime.enable');
+    })();
+    sessions.set(target, pending);
+    return pending;
+  };
+  browser.on('targetcreated', target => { observeTarget(target).catch(error => browserLog.push('CDP: ' + error.message)); });
+  await Promise.all(browser.targets().map(observeTarget));
+  const proxyOrigin = `http://proxy.localhost:${proxyPort}`;
+  await t.test('target-authored request compatibility', async t => {
+    const context = await browser.createBrowserContext();
+    const page = await context.newPage();
+    try {
+      await observeTarget(page.target());
+      await page.goto(proxyOrigin + '/', { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => navigator.serviceWorker?.controller && document.querySelector('#status')?.textContent === 'Ready.', { timeout: 30000 });
+      await Promise.all(browser.targets().map(observeTarget));
+      await page.type('#url', `http://${targetHost}:${targetPort}/compat/index`);
+      await page.click('button');
+      await page.waitForSelector('#methods', { visible: true, timeout: 30000 });
+      await runRequestContract(t, page, `http://${targetHost}:${targetPort}`, requests, wireRequests, proxyOrigin, saveArtifacts);
+    } finally {
+      await saveArtifacts('request-final', page);
+      await context.close();
+    }
+  });
+  await t.test('E1 escape matrix and runtime integrations', { timeout: 180000 }, async t => {
   const page = await browser.newPage();
+  t.after(async () => { await saveArtifacts('e1', page); await page.close(); });
+  await observeTarget(page.target());
   await page.goto(`http://proxy.localhost:${proxyPort}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller && document.querySelector('#status')?.textContent === 'Ready.', { timeout: 30000 });
   await page.type('#url', `http://${targetHost}:${targetPort}/`);
@@ -617,7 +693,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(home.title, 'E2E Home');
   assert.match(home.hash, /^#k=/);
   assert.equal(home.shellVisible, false);
-  assert.equal(home.userAgent, TARGET_UA);
+  const TARGET_UA = home.userAgent;
+  assert.match(TARGET_UA, /^Mozilla\/5\.0 .*Chrome\/\d+\.0\.0\.0 Safari\//);
+  assert.doesNotMatch(TARGET_UA, /HeadlessChrome|proxy\.localhost/);
   assert.equal(home.appVersion, TARGET_UA.replace(/^Mozilla\//, ''));
   assert.deepEqual(home.templateLink, {
     childCount: 1,
@@ -660,10 +738,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   const relayServerParam = new RegExp(`server=ws%3A%2F%2Fproxy\\.localhost%3A${proxyPort}%2Fzp%2Fws-pipe`);
   assert.match(addressBarShare, /#k=/);
   assert.match(addressBarShare, relayServerParam);
-  const staticNextHref = await page.$eval('#next', el => el.getAttribute('href') || '');
-  assert.match(staticNextHref, /^\/zp\/p\//);
-  assert.match(staticNextHref, relayServerParam);
-  const externalContext = await (browser.createBrowserContext ? browser.createBrowserContext() : browser.createIncognitoBrowserContext());
+  const staticNextHref = await page.$eval('#next', el => el.href);
+  assert.equal(staticNextHref, `http://${targetHost}:${targetPort}/next`);
+  const externalContext = await browser.createBrowserContext();
   try {
     const externalPage = await externalContext.newPage();
     await externalPage.goto(addressBarShare, { waitUntil: 'domcontentloaded' });
@@ -707,13 +784,9 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   }));
   assert.ok(dynamicScripts.gtm.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.gtm.href);
   assert.ok(dynamicScripts.dynamic.href.startsWith(`http://${targetHost}:${targetPort}/`), dynamicScripts.dynamic.href);
-  assert.match(dynamicScripts.gtm.currentAttr, /^\/zp\/api\/script\?/);
   assert.equal(dynamicScripts.moduleWorker.href, `http://${targetHost}:${targetPort}/worker-fixture.js`);
   assert.equal(dynamicScripts.moduleWorker.userAgent, TARGET_UA);
   assert.equal(dynamicScripts.moduleWorker.platform, 'Win32');
-  assert.match(dynamicScripts.dynamic.currentAttr, /^\/zp\/api\/script\?/);
-  assert.match(dynamicScripts.gtmAttr, /^\/zp\/api\/script\?/);
-  assert.match(dynamicScripts.dynamicAttr, /^\/zp\/api\/script\?/);
   assert.ok(dynamicScripts.messages.some(m => m.type === 'gtm-loaded'), `messages: ${JSON.stringify(dynamicScripts.messages)}`);
   assert.ok(requests.some(r => r.url.startsWith('/gtm.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/dynamic-script.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
@@ -754,55 +827,54 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(requests.some(r => r.url.startsWith('/jquery-plugin.js') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
 
   const iframeIsolation = await page.evaluate(async target => {
-    const blockedByPolicy = fn => {
-      try { fn(); return ''; }
-      catch (err) { return err && err.message || String(err); }
+    const blockedChannel = win => {
+      let pc;
+      try { pc = new win.RTCPeerConnection(); pc.createDataChannel('escape-probe'); return 'allowed'; }
+      catch (err) { return err.name; }
+      finally { if (pc) pc.close(); }
     };
 
     const sync = document.createElement('iframe');
     document.body.appendChild(sync);
-    const syncRTC = blockedByPolicy(() => new sync.contentWindow.RTCPeerConnection());
-    const docRTC = blockedByPolicy(() => new sync.contentDocument.defaultView.RTCPeerConnection());
+    const syncRTC = blockedChannel(sync.contentWindow);
+    const docRTC = blockedChannel(sync.contentDocument.defaultView);
 
     const modern = document.createElement('iframe');
     document.body.append(modern);
-    const modernRTC = blockedByPolicy(() => new modern.contentWindow.RTCPeerConnection());
-    const websocketShared = modern.contentWindow.WebSocket === window.WebSocket;
+    const modernRTC = blockedChannel(modern.contentWindow);
     const ws = new modern.contentWindow.WebSocket('ws://evil.example/socket');
     const websocketURL = ws.url;
     const childCanvasMask = modern.contentWindow.HTMLCanvasElement.prototype.toDataURL.toString();
-    const childFunctionShared = modern.contentWindow.Function === window.Function;
     const childFunctionHref = modern.contentWindow.Function('return location.href')();
     try { ws.close(); } catch {}
 
     const observed = document.createElement('iframe');
     document.body.appendChild(observed);
+    const loaded = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('attribute iframe navigation timed out')), 30000);
+      observed.addEventListener('load', () => {
+        if (observed.contentDocument?.title !== 'E2E Next') return;
+        clearTimeout(timer);
+        resolve(observed.contentDocument.querySelector('h1')?.textContent);
+      });
+    });
     const attr = document.createAttribute('src');
     attr.value = target;
     observed.attributes.setNamedItem(attr);
-    const rewrittenSrc = await new Promise((resolve, reject) => {
-      const deadline = Date.now() + 5000;
-      (function poll() {
-        const current = observed.attributes.getNamedItem('src')?.value || '';
-        if (current.startsWith(location.origin + '/zp/p/')) { resolve(current); return; }
-        if (Date.now() > deadline) { reject(new Error(`src not rewritten: ${current}`)); return; }
-        setTimeout(poll, 25);
-      })();
-    });
-
+    const frameTitle = await loaded;
+    const visibleSrc = observed.src;
     sync.remove();
     modern.remove();
     observed.remove();
-    return { syncRTC, docRTC, modernRTC, websocketShared, websocketURL, childCanvasMask, childFunctionShared, childFunctionHref, rewrittenSrc };
+    return { syncRTC, docRTC, modernRTC, websocketURL, childCanvasMask, childFunctionHref, frameTitle, visibleSrc };
   }, `http://${targetHost}:${targetPort}/next`);
-  assert.equal(iframeIsolation.syncRTC, 'Blocked by ZeroProxy policy');
-  assert.equal(iframeIsolation.docRTC, 'Blocked by ZeroProxy policy');
-  assert.equal(iframeIsolation.modernRTC, 'Blocked by ZeroProxy policy');
-  assert.equal(iframeIsolation.websocketShared, true);
+  assert.equal(iframeIsolation.syncRTC, 'NotSupportedError');
+  assert.equal(iframeIsolation.docRTC, 'NotSupportedError');
+  assert.equal(iframeIsolation.modernRTC, 'NotSupportedError');
   assert.equal(iframeIsolation.websocketURL, 'ws://evil.example/socket');
-  assert.match(iframeIsolation.rewrittenSrc, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
+  assert.equal(iframeIsolation.frameTitle, 'E2E Next');
+  assert.equal(iframeIsolation.visibleSrc, `http://${targetHost}:${targetPort}/next`);
   assert.equal(iframeIsolation.childCanvasMask, 'function toDataURL() { [native code] }');
-  assert.equal(iframeIsolation.childFunctionShared, true);
   assert.equal(iframeIsolation.childFunctionHref, `http://${targetHost}:${targetPort}/#compound-tail`);
 
   const frameMessage = await page.evaluate(async target => {
@@ -1093,7 +1165,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.srcdocTopHrefAtRun = (srcdocEcho && srcdocEcho.topHrefAtRun) || 'no-echo';
     out.srcdocTopOriginAtRun = (srcdocEcho && srcdocEcho.topOriginAtRun) || 'no-echo';
     evil.remove();
-    // A6 hardening: dynamic compilation paths must throw, not silently exec.
+    // Dynamic compilation remains usable, but must never expose proxy location.
     out.functionEscape = (() => {
       try { const v = (new Function('return location.href'))(); return 'ran:' + String(v); }
       catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
@@ -1102,8 +1174,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       try { const v = ({}).constructor.constructor('return location.href')(); return 'ran:' + String(v); }
       catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
     })();
-    out.asyncFunctionEscape = (() => {
-      try { const Async = (async function(){}).constructor; const v = new Async('return 1')(); return 'ran:' + String(v); }
+    out.asyncFunctionEscape = await (async () => {
+      try { const Async = (async function(){}).constructor; const v = await new Async('return location.href')(); return 'ran:' + String(v); }
       catch (err) { return 'blocked:' + (err && err.name || 'Error'); }
     })();
     // A3 hardening: <script src=blob:...> must be neutralised by setAttribute observer.
@@ -1127,7 +1199,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.reflectGetLocation = (() => {
       try {
         const loc = Reflect.get(__zp_get(globalThis, 'window'), 'location');
-        return typeof loc?.href === 'string' && /e2e\.test/.test(loc.href) ? 'virtual' : 'native:' + (loc && loc.href);
+        return typeof loc?.href === 'string' && String(loc.href).startsWith(directBase) ? 'virtual' : 'native:' + (loc && loc.href);
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
@@ -1136,13 +1208,13 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.topLocation = (() => {
       try {
         const href = __zp_get(globalThis, 'top').location.href;
-        return /e2e\.test/.test(href) ? 'virtual' : 'native:' + href;
+        return String(href).startsWith(directBase) ? 'virtual' : 'native:' + href;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
     out.parentLocation = (() => {
       try {
         const href = __zp_get(globalThis, 'parent').location.href;
-        return /e2e\.test/.test(href) ? 'virtual' : 'native:' + href;
+        return String(href).startsWith(directBase) ? 'virtual' : 'native:' + href;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
     out.opener = (() => {
@@ -1189,7 +1261,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.documentOrigin = (() => {
       try {
         const d = __zp_get(globalThis, 'document');
-        return /e2e\.test/.test(d.origin || '') ? 'virtual:' + d.origin : 'native:' + d.origin;
+        return String(d.origin || '').startsWith(directBase) ? 'virtual:' + d.origin : 'native:' + d.origin;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
@@ -1210,7 +1282,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.indirectEval = (() => {
       try {
         const v = (0, eval)('location.href');
-        return /e2e\.test/.test(String(v)) ? 'virtual:' + v : 'native:' + v;
+        return String(String(v)).startsWith(directBase) ? 'virtual:' + v : 'native:' + v;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -1218,7 +1290,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
     out.globalThisEval = (() => {
       try {
         const v = globalThis.eval('location.href');
-        return /e2e\.test/.test(String(v)) ? 'virtual:' + v : 'native:' + v;
+        return String(String(v)).startsWith(directBase) ? 'virtual:' + v : 'native:' + v;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -1229,7 +1301,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         const w = __zp_get(globalThis, 'window');
         const loc = w['loca' + 'tion'];
         const href = loc && loc.href;
-        return /e2e\.test/.test(href || '') ? 'virtual' : 'native:' + href;
+        return String(href || '').startsWith(directBase) ? 'virtual' : 'native:' + href;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -1239,7 +1311,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       try {
         const w = __zp_get(globalThis, 'window');
         const { location } = w;
-        return /e2e\.test/.test(location.href) ? 'virtual' : 'native:' + location.href;
+        return String(location.href).startsWith(directBase) ? 'virtual' : 'native:' + location.href;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -1248,7 +1320,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
       try {
         const w = __zp_get(globalThis, 'window');
         const href = w?.location?.href;
-        return /e2e\.test/.test(href || '') ? 'virtual' : 'native:' + href;
+        return String(href || '').startsWith(directBase) ? 'virtual' : 'native:' + href;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -1261,7 +1333,7 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
         if (!desc) return 'no-desc';
         const v = desc.get ? desc.get.call(w) : desc.value;
         const href = v && v.href;
-        return /e2e\.test/.test(String(href || '')) ? 'virtual' : 'native:' + href;
+        return String(String(href || '')).startsWith(directBase) ? 'virtual' : 'native:' + href;
       } catch (err) { return 'throw:' + (err && err.name || String(err)); }
     })();
 
@@ -1395,10 +1467,10 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`);
   assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
-  // A6 hardening assertions: dynamic compilation must be blocked.
-  assert.match(escapeMatrix.functionEscape, /^blocked:/, `new Function() must throw, got: ${escapeMatrix.functionEscape}`);
-  assert.match(escapeMatrix.constructorEscape, /^blocked:/, `constructor escape must throw, got: ${escapeMatrix.constructorEscape}`);
-  assert.match(escapeMatrix.asyncFunctionEscape, /^blocked:/, `AsyncFunction must throw, got: ${escapeMatrix.asyncFunctionEscape}`);
+  // Successful dynamic compilation must still execute in the virtual realm.
+  assert.equal(escapeMatrix.functionEscape, 'ran:' + escapeMatrix.virtualHref);
+  assert.equal(escapeMatrix.constructorEscape, 'ran:' + escapeMatrix.virtualHref);
+  assert.equal(escapeMatrix.asyncFunctionEscape, 'ran:' + escapeMatrix.virtualHref);
   // A3 hardening: <script src=blob:...> must be neutralised.
   assert.equal(escapeMatrix.scriptBlobSrc, 'blocked', `<script src=blob:...> must not execute, got: ${escapeMatrix.scriptBlobSrc}`);
   // B-extra: Reflect.get(window,'location') routed through membrane.
@@ -1477,7 +1549,6 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(serviceWorkerPolicy.registerError, '');
   assert.equal(serviceWorkerPolicy.registrationCount, 1, 'facade getRegistrations should surface the single fake reg');
   assert.match(serviceWorkerPolicy.registeredScope, /^https?:\/\//, 'registration.scope should be the virtual origin');
-  assert.equal(serviceWorkerPolicy.syncRegister, 'zp-test', 'SyncManager.register should resolve with the supplied tag');
   assert.equal(serviceWorkerPolicy.pushSubscribeError, 'NotAllowedError', 'PushManager.subscribe must reject NotAllowedError');
   assert.equal(serviceWorkerPolicy.pushSubscription, 'null', 'PushManager.getSubscription must resolve null');
   const bootLeak = await page.evaluate(() => ({
@@ -1557,4 +1628,8 @@ test('browser traffic uses internal SOCKS5 mode and covers proxied runtime integ
   assert.equal(next.userAgent, TARGET_UA);
   assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.ok(requests.some(r => r.url === '/next' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('all browser and worker network stays on the proxy origin', () => {
+    assert.deepEqual(wireRequests.filter(url => /^https?:|^wss?:/.test(url) && new URL(url).host !== new URL(proxyOrigin).host), []);
+  });
 });

@@ -5,8 +5,8 @@
 //! The Step 13 cutover (commit 291db00) migrated `kernel_fetch` from the
 //! Go WASM kernel's SOCKS5+uTLS+HTTP stack to a *JSON envelope* posted over
 //! `/zp/relay`. That move broke ZeroProxy's core security invariant:
-//! ARCHITECTURE.md states the relay "does not parse target HTTP, TLS,
-//! redirects, cookies, or HTML." With the JSON envelope, the server sees
+//! the relay must not parse target HTTP, TLS,
+//! redirects, cookies, or HTML. With the JSON envelope, the server sees
 //! plaintext URLs, methods, headers (including cookies and `Authorization`),
 //! and request bodies — every byte of the target HTTPS traffic.
 //!

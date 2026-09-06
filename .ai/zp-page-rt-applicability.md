@@ -1,4 +1,6 @@
-# zp-page-rt — 적용 가능성 분석 (현재 코드 기반)
+# zp-page-rt — 적용 가능성 분석 (2026-05-30 기록)
+
+> 역사 기록: 아래의 코드 행 번호, 적용 후보, 성능 수치는 당시 분석이다. 현재 구현 계약은 [Rust ABI](../crates/zp-page-rt/src/lib.rs)와 [JS glue](../web/zp-rt.js), 현재 작업 범위는 [compatibility refactor plan](design/website-compat-refactor.md)을 기준으로 한다. 이 문서는 최신 성능 또는 완료 판정이 아니다.
 
 > 2026-05-30. 벤치 결과(`.ai/zp-page-rt-bench-report.md`) 와 현재 [web/runtime-prelude.js](../web/runtime-prelude.js) / [crates/zp-htmltx](../crates/zp-htmltx) / [crates/zp-rewriter](../crates/zp-rewriter) 코드 audit.
 

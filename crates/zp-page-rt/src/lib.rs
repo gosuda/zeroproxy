@@ -1,8 +1,8 @@
 //! zp-page-rt — page runtime hot-path policies, shared-memory ABI.
 //!
 //! Loaded by `web/zp-rt.js` as a raw WASM module (no wasm-bindgen glue).
-//! All ABI surface is `#[no_mangle] pub extern "C"`. See
-//! `.ai/zp-page-rt-design.md` for the full contract.
+//! All ABI surface is `#[no_mangle] pub extern "C"`; `web/zp-rt.js`
+//! implements its handle and shared-memory calling contract.
 //!
 //! Hard rules:
 //! - Never panic — input is untrusted, `panic = "abort"` would kill the page.

@@ -1011,12 +1011,23 @@ async function runtimeAPI(req, url, clientId) {
     if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
     const payload = await req.json();
     const explicitTab = payload.tabId && tabs.get(payload.tabId);
+    if (explicitTab && ctx && explicitTab.tabId !== ctx.tabId) return Response.error();
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!tab) return safeError('SW_NOT_READY', 503);
-    let body;
-    if (payload.init && payload.init.body) body = ZP.base64UrlToBytes(payload.init.body);
-    const entryId = (ctx && ctx.entryId) || (explicitTab && explicitTab.activeEntryId) || tab.activeEntryId;
-    return transportFetch(payload.url, { method: payload.init && payload.init.method || 'GET', headers: payload.init && payload.init.headers || [], body, tab, entryId, referrerPolicy: (payload.init && payload.init.referrerPolicy) || '' });
+    const init = payload.init || {};
+    const entryId = tab.entries.has(payload.entryId) ? payload.entryId : (ctx && ctx.entryId) || tab.activeEntryId;
+    const resp = await transportFetch(payload.url, {
+      method: init.method || 'GET', headers: init.headers || [],
+      body: init.body == null ? null : ZP.base64UrlToBytes(init.body),
+      tab, entryId, runtimeFetch: true, refOverride: payload.documentURL,
+      credentials: init.credentials || 'same-origin', mode: init.mode || 'cors',
+      redirect: init.redirect || 'follow', referrer: init.referrer,
+      referrerPolicy: init.referrerPolicy || '',
+    });
+    if (resp.type === 'error') return resp;
+    const headers = new Headers(resp.headers);
+    headers.set('X-ZP-Fetch-Meta', JSON.stringify(resp.__zpFetchMeta || { url: payload.url, type: 'basic', redirected: false }));
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
   if (url.pathname === '/zp/api/script') {
     if (req.method !== 'GET') return safeError('POLICY_BLOCKED', 405);
@@ -1410,8 +1421,52 @@ function referrerFromBrowserHeader(req) {
 }
 
 async function transportFetch(targetUrl, opt) {
+  let target;
+  try { target = ZP.canonicalTargetURL(targetUrl).href; }
+  catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
+  const entryId = opt.entryId || opt.tab.activeEntryId;
+  const entry = opt.tab.entries && opt.tab.entries.get(entryId);
+  const documentUrl = entry && entry.targetUrl || target;
+  let referrer = opt.document ? (entry && entry.parentTargetUrl || referrerFromBrowserHeader(opt.request)) : documentUrl;
+  if (opt.refOverride) {
+    try {
+      const proposed = new URL(opt.refOverride);
+      if (proposed.origin === new URL(documentUrl).origin) referrer = proposed.href;
+    } catch {}
+  }
+  const context = Object.freeze({
+    entryId, documentUrl, origin: new URL(documentUrl).origin, referrer,
+    referrerPolicy: opt.referrerPolicy || (opt.request && opt.request.referrerPolicy) || (entry && entry.referrerPolicy) || '',
+  });
+  const method = String(opt.method || (opt.request && opt.request.method) || 'GET');
+  let body = null;
+  if (method !== 'GET' && method !== 'HEAD') {
+    try {
+      const input = opt.body != null ? opt.body : opt.request ? await opt.request.clone().arrayBuffer() : null;
+      if (input != null) {
+        if (input instanceof ArrayBuffer) body = new Uint8Array(input);
+        else if (ArrayBuffer.isView(input)) body = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        else if (typeof input.arrayBuffer === 'function') body = new Uint8Array(await input.arrayBuffer());
+        else return Response.error();
+        if (body.byteLength > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, target);
+        // The kernel consumes an ArrayBuffer; do not expose bytes outside a view.
+        if (body.byteOffset !== 0 || body.byteLength !== body.buffer.byteLength) body = body.slice();
+      }
+    } catch { return Response.error(); }
+  }
+  const state = Object.assign({}, opt, {
+    entryId, context, method, body,
+    headers: new Headers(opt.headers || (opt.request && opt.request.headers) || undefined),
+    credentials: opt.credentials || 'include', redirect: opt.redirect || 'follow',
+    redirectDepth: 0,
+  });
+  return transportFetchHop(target, state);
+}
+
+async function transportFetchHop(targetUrl, opt) {
   let u;
   try { u = ZP.canonicalTargetURL(targetUrl).href; } catch (e) { return safeError(e.code || 'TARGET_PROTOCOL_BLOCKED', 403, targetUrl); }
+  if (opt.mode === 'same-origin' && new URL(u).origin !== opt.context.origin) return Response.error();
   const txMethod = opt.method || (opt.request && opt.request.method) || 'GET';
   // NAVER 광고/트래커 instant-stub — see NAVER_AD_BID_STUB_HOSTS doc.
   // ntm.pstatic.net 은 트래커 WASM script 로 응답해야 하므로 빈 .js content,
@@ -1510,7 +1565,7 @@ async function transportFetch(targetUrl, opt) {
   // them (e.g. NAVER /api/v1/collect/exlogcr, Wikipedia anti-scraping) don't
   // reject us. The relay server promotes the X-ZP-* sidechannel to real
   // headers before dispatching upstream.
-  const entry = opt.tab.entries && opt.tab.entries.get(opt.entryId || opt.tab.activeEntryId);
+  const context = opt.context;
   // For iframe document loads use the embedder's URL as Referer (mirrors
   // browser behaviour); for subresources inside an iframe use the iframe's
   // own virtual URL.
@@ -1524,16 +1579,16 @@ async function transportFetch(targetUrl, opt) {
   // 브라우저는 이미 정답을 알고 있다: 링크로 왔으면 Referer 헤더에 그 문서의
   // 프록시 URL 이 실려 온다. 그것을 우리 라우트로 되돌려 타깃 URL 로 바꿔 쓰고,
   // 헤더가 없으면(주소창/북마크/첫 로드) **우리도 보내지 않는다.**
-  const virtualBase = opt.document
-    ? ((entry && entry.parentTargetUrl) || referrerFromBrowserHeader(opt.request))
-    : entry && (entry.baseUrl || entry.targetUrl);
-  // 페이지가 명시적으로 준 ref 가 있으면 그것을 쓴다. 타깃과 **같은 오리진**일
-  // 때만 받아들인다 — 아니면 페이지가 임의의 Referer 를 만들어 낼 수 있다.
-  let refFromPage = '';
-  try {
-    if (opt.refOverride && virtualBase && new URL(opt.refOverride).origin === new URL(virtualBase).origin) refFromPage = new URL(opt.refOverride).href;
-  } catch {}
-  const effectiveBase = refFromPage || virtualBase;
+  let effectiveBase = context.referrer;
+  if (opt.referrer === '') effectiveBase = '';
+  else if (opt.referrer && opt.referrer !== 'about:client') {
+    try {
+      const explicit = new URL(opt.referrer);
+      if (explicit.origin === context.origin) effectiveBase = explicit.href;
+    } catch {}
+  }
+  headers.delete('X-ZP-Referer');
+  headers.delete('X-ZP-Origin');
   if (effectiveBase) {
     // Referer/Origin are forbidden headers — the Request constructor strips
     // them from `init.headers`. Smuggle them as X-ZP-Referer/X-ZP-Origin and
@@ -1543,20 +1598,14 @@ async function transportFetch(targetUrl, opt) {
     // (2) 브라우저가 이 요청에 대해 계산한 값, (3) 문서 응답의 Referrer-Policy
     // 헤더, (4) 브라우저 기본. (2) 가 대부분을 덮는다 — 요소 속성까지 반영된
     // 값이라 가장 정확하다.
-    const referrerPolicy = opt.referrerPolicy
-      || (opt.request && opt.request.referrerPolicy)
-      || (entry && entry.referrerPolicy)
-      || '';
+    const referrerPolicy = context.referrerPolicy;
     const refValue = refererForPolicy(effectiveBase, u, referrerPolicy);
     if (refValue) headers.set('X-ZP-Referer', refValue);
-    // Origin 은 Referrer-Policy 의 대상이 아니다 — 교차 출처 non-GET 이면
-    // 브라우저는 정책과 무관하게 오리진을 보낸다. 그래서 effectiveBase 기준.
-    let virtualOrigin = '';
-    try { virtualOrigin = new URL(effectiveBase).origin; } catch {}
-    if (virtualOrigin) {
-      const m = (opt.method || (opt.request && opt.request.method) || 'GET').toUpperCase();
-      if (m !== 'GET' && m !== 'HEAD') headers.set('X-ZP-Origin', virtualOrigin);
-    }
+  }
+  // Origin is independent of Referrer-Policy and an explicit empty referrer.
+  if ((opt.method !== 'GET' && opt.method !== 'HEAD')
+      || (opt.runtimeFetch && opt.mode === 'cors' && new URL(u).origin !== context.origin)) {
+    headers.set('X-ZP-Origin', context.origin);
   }
   // User-Agent is a forbidden header for fetch() — same smuggle pattern.
   // Without a UA, sites like Wikipedia reject requests as suspicious bots.
@@ -1570,7 +1619,7 @@ async function transportFetch(targetUrl, opt) {
     if (v && v.includes(ORIGIN)) headers.delete(name);
   }
   headers.set('X-ZP-Tab-Id', opt.tab.tabId);
-  headers.set('X-ZP-Entry-Id', opt.entryId || opt.tab.activeEntryId || '');
+  headers.set('X-ZP-Entry-Id', context.entryId || '');
   headers.set('X-ZP-Stream-Isolation-Key', opt.tab.streamIsolationKey);
   headers.set('X-ZP-Runtime-Token', opt.tab.runtimeToken || '');
   headers.set('X-ZP-Relay-Servers', JSON.stringify(opt.tab.servers || []));
@@ -1589,13 +1638,10 @@ async function transportFetch(targetUrl, opt) {
   // login state between mail.naver.com / pay.naver.com / nid.naver.com /
   // www.naver.com). The Rust kernel passes Cookie through unchanged to
   // the relay.
-  if (opt.tab.cookieJar) {
-    // BUG FIX (2026-06-02): used to read `opt.url` which is undefined here —
-    // transportFetch takes `targetUrl` as the first positional arg, never as
-    // `opt.url`. Result: the cookie jar silently shipped zero cookies on
-    // every outgoing request, including NAVER NACT/NID anti-bot tokens. Every
-    // nid.naver.com / mail.naver.com / pay.naver.com nav was therefore cold
-    // session → 60s anti-credential-stuffing slow lane.
+  const credentialsAllowed = opt.credentials === 'include'
+    || (opt.credentials === 'same-origin' && new URL(u).origin === context.origin);
+  headers.delete('Cookie');
+  if (credentialsAllowed && opt.tab.cookieJar) {
     const cookieStr = opt.tab.cookieJar.cookieHeader(u);
     if (cookieStr) headers.set('Cookie', cookieStr);
   }
@@ -1669,7 +1715,7 @@ async function transportFetch(targetUrl, opt) {
   // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,
   // upgrade-insecure-requests). `request.headers.entries()` from the
   // SW-intercepted request DOES include these in Chromium.
-  if (opt.request && opt.request.headers) {
+  if (opt.redirectDepth === 0 && opt.request && opt.request.headers) {
     for (const [k, v] of opt.request.headers.entries()) {
       const kl = k.toLowerCase();
       // Skip ones we explicitly own (Referer/UA/Cookie were promoted via
@@ -1746,23 +1792,8 @@ async function transportFetch(targetUrl, opt) {
     // Stable for entries beyond the known order (X-ZP-* sidechannel etc).
     return 0;
   });
-  const method = opt.method || (opt.request && opt.request.method) || 'GET';
-  let bodyU8 = null;
-  if (method !== 'GET' && method !== 'HEAD') {
-    const body = opt.body || (opt.request && await opt.request.clone().arrayBuffer());
-    const n = body && (body.byteLength || body.size || 0) || 0;
-    if (n > MAX_REQUEST_BODY_BYTES) return safeError('REQUEST_BODY_TOO_LARGE', 413, u);
-    // Body 타입은 caller 마다 다름: runtimeAPI 의 /zp/api/fetch path 는
-    // `ZP.base64UrlToBytes` 결과인 Uint8Array, opt.request.clone()
-    // .arrayBuffer() 는 ArrayBuffer, Blob/FormData 같은 표준 body 는
-    // .arrayBuffer() 메서드 보유. 이 분기 빠지면 NAVER preload.js 의 첫
-    // POST 호출에서 `body.arrayBuffer is not a function` 으로 hydration
-    // 전체 멈춤 (2026-06-10 trap notebook).
-    if (body instanceof Uint8Array) bodyU8 = body;
-    else if (body instanceof ArrayBuffer) bodyU8 = new Uint8Array(body);
-    else if (body && typeof body.arrayBuffer === 'function') bodyU8 = new Uint8Array(await body.arrayBuffer());
-    else bodyU8 = null;
-  }
+  const method = opt.method;
+  const bodyU8 = opt.body;
   logOutgoingHeaders(u, method, headerEntries);
   // Plain object — no Request constructor, so forbidden headers survive.
   // The kernel reads `headerEntries` first (preferred) and `arrayBuffer`
@@ -1811,14 +1842,8 @@ async function transportFetch(targetUrl, opt) {
   try {
     const getSetCookie = resp && resp.headers && resp.headers.getSetCookie;
     const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
-    if (opt.tab.cookieJar) {
-      // Same fix as the outgoing read above — `opt.url` was undefined, so
-      // every Set-Cookie header from upstream silently dropped on the floor.
-      // Now scopes the cookie to `u` (the canonical target URL we actually
-      // fetched), which is the response URL for jar bookkeeping. Redirects
-      // are followed server-side and the final URL would technically be
-      // more accurate for Domain/Path defaults, but the kernel doesn't
-      // surface it here yet; the request URL is close enough for now.
+    if (credentialsAllowed && opt.tab.cookieJar) {
+      // Cookies belong to this hop's response URL, never to the final document.
       for (const line of setCookies) opt.tab.cookieJar.setCookieLine(u, line);
       // Upstream Set-Cookie is also stripped by the Go server's
       // ConstructorPolicy (otherwise target-site auth cookies would be
@@ -1836,84 +1861,43 @@ async function transportFetch(targetUrl, opt) {
       }
     }
   } catch {}
-  // 2026-06-11 SW response cache write 비활성화 (cache hit path 와 같이
-  // disable). 자세한 이유는 cache_first 분기 주석 참조.
-  // 2026-06-09 cross-host 3xx redirect rewrap.
-  // 함정: Rust kernel 는 redirect-follow 안 함 (fetch.rs 의 `No redirect
-  // follow` policy) — 3xx 를 그대로 SW 로 surface. 우리가 그걸 다시 그대로
-  // 클라이언트로 forward 하면 브라우저는 raw Location URL 로 native nav
-  // → URL bar = `https://nid.naver.com/...`, 우리 share URL escape.
-  // NAVER 페이 link 시나리오 (pay.naver.com 302 → nid.naver.com/nidlogin.login)
-  // 가 정확히 이 경로로 escape 했음 (2026-06-09 trap notebook).
-  //
-  // Fix: SW 가 3xx 를 swallow 하고 같은 transportFetch 안에서 재귀 follow.
-  // (a) entry.targetUrl 을 새 URL 로 업데이트 → virtual location state 동기화,
-  // (b) URL bar 는 share URL 그대로 유지 → fragment (k=…&server=…) 보존,
-  // (c) 다음 transportFetch 호출이 새 host 기준 Cookie / Referer / Origin
-  //     rebuild (entry.targetUrl 이 이미 업데이트됨).
-  // Method 처리: 301/302/303 은 GET 으로 강제 (RFC 7231 §6.4.4), 307/308 은
-  // 원래 method 유지. Depth limit 5 — 무한 loop 차단.
-  // 2026-08-21 — 5 → 20. 크롬의 리다이렉트 상한이 20 이라 5 는 **우리만 더 일찍
-  // 포기하는** 값이었다. 예전에는 그 차이가 안 보였다 — 상한을 넘으면 마지막 3xx 를
-  // 브라우저에 넘겨 버려서 브라우저가 이어서 따라갔기 때문이다(그게 탈출이었다).
-  // 이제 상한에서 멈추므로 그 차이가 곧바로 "사이트가 안 열린다" 가 된다.
-  // 내비 매트릭스 n13 이 대조군과 비교해 이 값을 감시한다.
-  const MAX_REDIRECT_DEPTH = 20;
-  if (resp && resp.status >= 300 && resp.status < 400) {
-    const currentDepth = opt.__redirectDepth || 0;
-    // ★2026-08-21 — 상한을 넘으면 **여기서 멈춘다.**
-    //
-    // 예전에는 마지막 3xx 를 그대로 브라우저에 넘겼다. 그 응답의 Location 이
-    // 절대 URL 이면 브라우저가 그대로 따라가 **프록시 밖으로 나간다** — 실측:
-    // 6홉 리다이렉트 뒤 문서가 `127.0.0.1:18098` 로 이동했다. 타깃이 홉 수만
-    // 늘리면 되는 탈출이었다.
-    //
-    // 상대 Location 이어도 프록시 오리진의 **프록시 라우트가 아닌 경로**로
-    // 나가므로 share 컨텍스트를 잃는다. 어느 쪽이든 넘기면 안 된다.
-    if (currentDepth >= MAX_REDIRECT_DEPTH && resp.headers.get('Location')) {
-      return safeError('REDIRECT_LIMIT_EXCEEDED', 508, targetUrl);
+  const location = resp && resp.headers.get('Location');
+  if (location && [301, 302, 303, 307, 308].includes(resp.status)) {
+    if (resp.body) resp.body.cancel().catch(() => {});
+    if (opt.redirect === 'error') return Response.error();
+    if (opt.redirect === 'manual') {
+      const opaque = new Response(null, { status: 204 });
+      opaque.__zpFetchMeta = { type: 'opaqueredirect', url: targetUrl, redirected: false };
+      return opaque;
     }
-    if (currentDepth < MAX_REDIRECT_DEPTH) {
-      const loc = resp.headers.get('Location');
-      if (loc) {
-        let resolvedUrl = null;
-        try { resolvedUrl = new URL(loc, u).href; } catch {}
-        if (resolvedUrl) {
-          // ★**문서 요청일 때만** entry 를 옮긴다.
-          // 리다이렉트를 따라가면서 entry 의 URL 을 갱신하는 건 내비게이션
-          // 얘기다. 그런데 이 자리는 서브리소스 리다이렉트에도 똑같이 걸렸고,
-          // entry 는 `opt.entryId || tab.activeEntryId` 로 잡히므로 **추적
-          // 픽셀 하나가 302 를 뱉을 때마다 문서 entry 의 targetUrl 이 그
-          // 픽셀 주소로 바뀌었다.** 광고/동기화 픽셀은 302 로 도미노를 치는 게
-          // 정상 동작이라 CNN 에서는 수십 번 일어난다.
-          // 결과: 그 뒤의 모든 업스트림 요청이 **엉뚱한 Referer** 를 달고 나가고
-          // (= 남의 트래커 주소가 제3자에게 새는 것이기도 하다), 페이지가 실어
-          // 보낸 정확한 `ref` 는 same-origin 가드에 걸려 버려졌다.
-          // CNN 실측(2026-08-25): prebid 를 받는 rubicon 요청의 Referer 가
-          // scorecardresearch/quantserve 로 나갔고, rubicon 은 Referer 로 빌드를
-          // 고르므로 v11.18.5 대신 레거시 v4.43.0 을 줬다 — adfuel 은 v11 API 를
-          // 기대하므로 **경매가 아예 안 돌았다**(pbjs 이벤트 대조군 73 vs 0,
-          // 프레임 31 vs 11).
-          if (entry && opt.document) {
-            entry.targetUrl = resolvedUrl;
-            entry.baseUrl = resolvedUrl;
-          }
-          const preserveMethod = resp.status === 307 || resp.status === 308;
-          return transportFetch(resolvedUrl, {
-            request: opt.request,
-            document: opt.document,
-            tab: opt.tab,
-            entryId: opt.entryId,
-            method: preserveMethod ? method : 'GET',
-            headers: undefined, // rebuilt by transportFetch for the new host
-            body: preserveMethod ? opt.body : null,
-            __redirectDepth: currentDepth + 1,
-          });
-        }
-      }
+    if (opt.redirectDepth >= 20) return opt.runtimeFetch ? Response.error() : safeError('REDIRECT_LIMIT_EXCEEDED', 508, targetUrl);
+    let nextURL;
+    try { nextURL = ZP.canonicalTargetURL(new URL(location, u).href).href; }
+    catch { return Response.error(); }
+    const nextMethod = ZP.redirectMethod(resp.status, method);
+    const nextHeaders = new Headers(opt.headers);
+    if (nextMethod !== method) {
+      for (const name of ['content-encoding', 'content-language', 'content-location', 'content-type', 'content-length']) nextHeaders.delete(name);
     }
+    if (new URL(nextURL).origin !== new URL(u).origin) nextHeaders.delete('Authorization');
+    const policy = resp.headers.get('Referrer-Policy');
+    const nextContext = policy ? Object.freeze(Object.assign({}, context, { referrerPolicy: policy })) : context;
+    return transportFetchHop(nextURL, Object.assign({}, opt, {
+      method: nextMethod, body: nextMethod === method ? bodyU8 : null,
+      headers: nextHeaders, context: nextContext, redirectDepth: opt.redirectDepth + 1,
+    }));
   }
-  return addCSP(resp, opt.request, opt.tab && opt.tab.servers, opt.tab, u);
+  // Commit navigation only after its final response. Subresources never mutate it.
+  if (opt.document) {
+    const entry = opt.tab.entries && opt.tab.entries.get(context.entryId);
+    if (entry && entry.targetUrl === context.documentUrl) { entry.targetUrl = u; entry.baseUrl = u; }
+  }
+  const result = addCSP(resp, opt.request, opt.tab.servers, opt.tab, u);
+  result.__zpFetchMeta = {
+    url: u, redirected: opt.redirectDepth > 0,
+    type: opt.mode === 'no-cors' && new URL(u).origin !== context.origin ? 'opaque' : 'basic',
+  };
+  return result;
 }
 
 function scriptKindFromRequest(req) {
