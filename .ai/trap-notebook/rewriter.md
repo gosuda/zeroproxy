@@ -413,7 +413,7 @@
 | 수정 직후 정상 렌더 1회 | 본문 5,675자 / 높이 10,778; 직접 6,045자 / 10,996 | 단발 성공, 사이트 회복 판정 불가 |
 | 같은 절차 후속 3회 | 3/3 ErrorPage; 본문 1,085자 / 높이 1,718 | 모듈 수정만으로 GitHub 미해결 |
 
-- **후속·현재 구분:** 이후 [`5f951c6`](https://github.com/gosuda/zeroproxy/commit/5f951c6)의 [window receiver 수정 기록](#window-메서드-바인딩-목록)은 `globalThis.structuredClone` 실패를 특정하고 GitHub 3회 회복을 보고한다. 따라서 위 “미해결”은 모듈 수정 직후의 역사다. 2026-09-08 rebase는 그 수정을 포함하지만 통합된 현재 상태의 원격 검증은 대기 중이다.
+- **후속·현재 구분:** 이후 [`5f951c6`](https://github.com/gosuda/zeroproxy/commit/5f951c6)의 [window receiver 수정 기록](#window-메서드-바인딩-목록)은 `globalThis.structuredClone` 실패를 특정하고 GitHub 3회 회복을 보고한다. 따라서 위 “미해결”은 모듈 수정 직후의 역사다. 이를 포함한 rebase의 [cef5e7d CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912)에서 모듈 singleton과 native receiver의 실제 Chromium 회귀가 통과했다. GitHub 실사이트를 다시 측정한 결과는 아니다.
 - **원문:** [압축 전 측정·가설 철회 기록 (`7f49a9d0f23990e46690a183fdebb04962727b19`)](https://github.com/gosuda/zeroproxy/blob/7f49a9d0f23990e46690a183fdebb04962727b19/.ai/trap-notebook/rewriter.md#모듈-url-두-벌). 이후 receiver 결론과 혼합해 모듈 정규화를 GitHub 회복 원인으로 기록하지 않는다.
 
 ## <a id="ci-write-reference"></a>WASM이 대입 참조를 읽기 호출로 변환 (2026-09-06)
@@ -444,7 +444,7 @@
 
 ## <a id="window-메서드-바인딩-목록"></a>`globalThis.structuredClone(x)` 한 줄이 GitHub 홈을 통째로 죽였다 (2026-09-04)
 
-**기록 범위:** 아래 측정·통과 보고는 [`5f951c6`](https://github.com/gosuda/zeroproxy/commit/5f951c6)에 포함된 후속 receiver 수정의 역사적 근거다. 2026-09-08 rebase에서 receiver 규칙과 shadow `scopeTarget`을 함께 보존했으며, 통합 후 R3 receiver/WS 수명 및 R4 모듈 acceptance의 원격 검증은 대기 중이다. 아래 결과를 rebase 이후 CI 통과로 읽지 않는다.
+**기록 범위:** 아래 측정·통과 보고는 [`5f951c6`](https://github.com/gosuda/zeroproxy/commit/5f951c6)에 포함된 후속 receiver 수정의 역사적 근거다. 2026-09-08 rebase에서 receiver 규칙과 shadow `scopeTarget`을 함께 보존했으며, [cef5e7d CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912)의 native receiver·WS 수명·모듈 singleton 회귀가 통과했다. 아래 실사이트 측정을 rebase 이후 재측정으로 읽지 않는다.
 
 스코프 프록시가 **손수 고른 목록**(`WINDOW_BOUND_METHODS`)에 든 window 메서드만
 `root` 에 바인딩했다. 목록에 없는 것은 그대로 나가므로, 페이지가
