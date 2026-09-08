@@ -18,6 +18,7 @@
 - **R4 module:** 정적 import와 동적으로 삽입한 module script가 같은 모듈을 한 번만 평가하는지 실제 실행으로 검사한다. history 변경 후에도 referrer/쿼리 순서 차이로 singleton이 두 번 평가되지 않아야 한다. 모듈 중복 제거와 GitHub 사이트 회복은 별개의 판정이다. 추가 회귀의 원격 결과가 나오기 전에는 완료로 세지 않는다.
 - **R5 stream marker:** 상류의 `X-ZP-Body-Stream`/`X-ZP-Stream`을 거절하고 커널만 실제 모드의 표식을 설정한다. buffered·raw streaming·잘린 본문·progressive HTML의 헤더 은폐/완료 회귀를 추가했으며 실제 WASM·Chromium 실행은 원격 대기다.
 - **로컬 검증:** 256 MiB Node에서 경량 JS 58/58 통과, skipped 0. 실제 SW의 Close 전후 smoke는 유지되던 kernel 대체 drivers가 abort 1회와 1006으로 정리됨을 확인했다. 변경한 runtime/E2E/rewriter JS 구문 검사도 통과했다. Rust/Go 빌드·실제 WASM·Chromium은 로컬에서 실행하지 않았다.
+- **첫 통합 CI:** [ec307ee / 34200315989](https://github.com/gosuda/zeroproxy/actions/runs/34200315989)는 Rust·Go·JS·build와 실제 WASM 12/12 통과. Chromium의 모듈·receiver·표식 회귀도 통과했으나 WS 물리 종료 fixture가 실패했다. [Node upgrade의 half-open EOF 관측을 보정](../trap-notebook/sw-integration.md#upgraded-socket-eof)했으며 전체 통과 여부는 후속 CI로 확인한다.
 
 ## 유지할 책임 경계
 - Rust/WASM: `zp-shared` 정책, `zp-rewriter` OXC, `zp-htmltx`/`zp-css` 변환, `zp-kernel-bundle` SOCKS5/TLS/HTTP, `zp-transport-codec` 코덱.

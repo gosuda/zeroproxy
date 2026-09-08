@@ -688,7 +688,15 @@ function handleWebSocketUpgrade(req, socket, requests) {
   ignoreBenignSocketErrors(socket);
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + (requestedProtocol ? '\r\nSec-WebSocket-Protocol: ' + requestedProtocol : '') + '\r\n\r\n');
   const silentClose = url.searchParams.get('silent-close') === '1';
-  if (silentClose) socket.once('close', () => requests.push({ url: req.url, socketClosed: true, at: Date.now() }));
+  if (silentClose) {
+    // Upgraded HTTP sockets allow half-open TCP. Receiving FIN alone cannot
+    // emit close until this peer also ends its writable half.
+    socket.once('end', () => {
+      requests.push({ url: req.url, socketEnded: true, at: Date.now() });
+      socket.end();
+    });
+    socket.once('close', () => requests.push({ url: req.url, socketClosed: true, at: Date.now() }));
+  }
   let buffered = Buffer.alloc(0);
   socket.on('data', chunk => {
     buffered = Buffer.concat([buffered, chunk]);
@@ -980,6 +988,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
         assert.equal(peerCloses.length, 1);
         assert.equal(peerCloses[0].closeCode, 3001);
         assert.equal(peerCloses[0].closeReason, 'unanswered');
+        const peerEOFs = requests.filter(request => request.url === '/ws?silent-close=1' && request.socketEnded);
+        assert.equal(peerEOFs.length, 1, 'the proxy must deliver TCP EOF before the fixture closes its half');
+        assert.ok(peerEOFs[0].at - peerCloses[0].at >= 29000, 'upstream EOF arrived before the close-handshake deadline');
         const physicalCloses = requests.filter(request => request.url === '/ws?silent-close=1' && request.socketClosed);
         assert.equal(physicalCloses.length, 1, 'deadline must close the upstream socket, not only the page facade');
         assert.ok(physicalCloses[0].at - peerCloses[0].at >= 29000, 'upstream closed before allowing the peer its close-handshake deadline');
