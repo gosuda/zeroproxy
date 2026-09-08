@@ -543,7 +543,7 @@ fn build_js_response(
 
 use zp_transport_codec::http1::is_null_body_status;
 
-/// Build the `web_sys::Headers` for a response: append every upstream header,
+/// Build the `web_sys::Headers` for a response: copy permitted upstream headers,
 /// mirror Set-Cookie into the `X-ZP-Set-Cookie` sidechannel, and emit the
 /// challenge-compat marker when armed. Shared by the buffered and streaming
 /// response builders so both paths carry identical SW-facing header semantics.
@@ -564,6 +564,12 @@ fn build_response_headers(
     // header line shape (no newlines) and the SW splits on it.
     let mut set_cookies: Vec<&str> = Vec::new();
     for (k, v) in resp_headers {
+        // Only the kernel may select HTML streaming or body lifetime tracking.
+        // Reject upstream markers even on buffered responses, where no trusted
+        // marker would otherwise overwrite a forged value.
+        if k.eq_ignore_ascii_case("x-zp-body-stream") || k.eq_ignore_ascii_case("x-zp-stream") {
+            continue;
+        }
         if k.eq_ignore_ascii_case("set-cookie") {
             set_cookies.push(v.as_str());
         }
@@ -644,13 +650,13 @@ fn build_streaming_js_response(
             .unwrap_or("(none)")
     ));
     let headers = build_response_headers(&resp.headers, final_url, armed_challenge_compat)?;
-    let _ = headers.append("X-ZP-Body-Stream", "1");
+    headers.set("X-ZP-Body-Stream", "1")?;
     let is_html = resp.headers.iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         .map(|(_, v)| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html"))
         .unwrap_or(false);
     if is_html {
-        let _ = headers.append("X-ZP-Stream", "1");
+        headers.set("X-ZP-Stream", "1")?;
     }
     let init = ResponseInit::new();
     init.set_status(resp.status);

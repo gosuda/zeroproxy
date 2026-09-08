@@ -8,7 +8,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const puppeteer = require('puppeteer');
-const { gzipSync } = require('node:zlib');
+const { brotliCompressSync, gzipSync } = require('node:zlib');
 
 const { handleRequestContract, runRequestContract } = require('./request-contract');
 const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
@@ -112,7 +112,7 @@ class SocketReader {
   }
 }
 
-function createTargetServer(requests) {
+function createTargetServer(requests, pendingResponses) {
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
     ignoreBenignSocketErrors(res);
@@ -220,6 +220,144 @@ function createTargetServer(requests) {
         <script src="/rewrite-fixture.js"></script>
         <script type="module" src="/module-worker.js"></script>
       </body></html>`);
+      return;
+    }
+    if (url.pathname === '/regressions') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><html><head><title>Compatibility Regressions</title></head><body>
+        <h1 id="regressions">Compatibility Regressions</h1>
+        <script src="/regression-fixture.js"></script>
+        <script type="module" src="/module-identity-entry.js"></script>
+      </body></html>`);
+      return;
+    }
+    if (url.pathname === '/module-singleton.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`export const evaluationCount = window.__moduleEvaluations = (window.__moduleEvaluations || 0) + 1;
+        export const singleton = { evaluationCount };
+        window.__moduleSingleton = singleton;`);
+      return;
+    }
+    if (url.pathname === '/module-identity-entry.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`import { singleton, evaluationCount } from './module-singleton.js';
+        const snapshot = () => ({ evaluations: window.__moduleEvaluations, evaluationCount,
+          sameSingleton: singleton === window.__moduleSingleton, href: location.href });
+        const load = (src, type) => new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.type = type;
+          script.src = src;
+          script.onload = () => { script.remove(); resolve(); };
+          script.onerror = () => { script.remove(); reject(new Error('script load failed: ' + src)); };
+          document.head.appendChild(script);
+        });
+        (async () => {
+          const initial = snapshot();
+          await load('/module-singleton.js', 'module');
+          const dynamic = snapshot();
+          await load('/classic-ref.js', 'text/javascript');
+          history.pushState({}, '', '/regressions/changed?view=2');
+          await load('/module-singleton.js', 'module');
+          const afterHistory = snapshot();
+          await load('/module-singleton.js', 'module');
+          const repeated = snapshot();
+          await load('/classic-ref.js', 'text/javascript');
+          window.__moduleIdentityFixture = { initial, dynamic, afterHistory, repeated, classic: window.__classicRefs };
+        })().catch(error => { window.__moduleIdentityFixture = { error: error.stack || String(error) }; });`);
+      return;
+    }
+    if (url.pathname === '/classic-ref.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`(window.__classicRefs || (window.__classicRefs = [])).push(location.href);`);
+      return;
+    }
+    if (url.pathname === '/regression-fixture.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`(async () => {
+          const original = { nested: { value: 7 } };
+          original.self = original;
+          const cloned = globalThis.structuredClone(original);
+          const order = [];
+          globalThis.queueMicrotask(() => order.push('microtask'));
+          order.push('sync');
+          await Promise.resolve();
+          const pageMethod = { method() { return this.value; } }.method;
+          globalThis.pageReceiverFixture = pageMethod;
+          class PageConstructor { constructor(value) { this.value = value; } }
+          globalThis.PageConstructorFixture = PageConstructor;
+          const instance = new globalThis.PageConstructorFixture(11);
+          const nativeURL = new globalThis.URL('/receiver-child', location.href);
+          window.__receiverFixture = {
+            clonedValue: cloned.nested.value, cycle: cloned.self === cloned,
+            independent: cloned !== original && cloned.nested !== original.nested, order,
+            pageFunctionSame: globalThis.pageReceiverFixture === pageMethod,
+            pageReceiver: globalThis.pageReceiverFixture.call({ value: 'custom-receiver' }),
+            constructorSame: globalThis.PageConstructorFixture === PageConstructor,
+            constructed: instance instanceof PageConstructor && Object.getPrototypeOf(instance) === PageConstructor.prototype,
+            constructedValue: instance.value, nativeURL: nativeURL.href, nativeInstance: nativeURL instanceof globalThis.URL
+          };
+        })().catch(error => { window.__receiverFixture = { error: error.stack || String(error) }; });
+        window.__startSilentCloseFixture = () => {
+          const ws = new WebSocket('/ws?silent-close=1', ['zp-silent-close']);
+          const result = window.__silentCloseFixture = { opened: false, closes: [] };
+          let closingAt;
+          ws.onopen = () => {
+            result.opened = true;
+            closingAt = performance.now();
+            ws.close(3001, 'unanswered');
+            result.closingState = ws.readyState;
+          };
+          ws.onclose = event => result.closes.push({ code: event.code, reason: event.reason,
+            wasClean: event.wasClean, readyState: ws.readyState, elapsed: performance.now() - closingAt });
+        };
+        window.__startReservedFetchFixture = mode => {
+          const result = window.__reservedFetchFixture = { body: '', done: false };
+          (async () => {
+            const response = await fetch('/reserved-headers?mode=' + mode, { cache: 'no-store' });
+            result.status = response.status;
+            result.headers = Array.from(response.headers.entries());
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            for (;;) {
+              const next = await reader.read();
+              if (next.done) break;
+              result.body += decoder.decode(next.value, { stream: true });
+            }
+            result.body += decoder.decode();
+            result.done = true;
+          })().catch(error => { result.error = error && error.name || String(error); });
+        };
+        window.__startReservedHTMLFixture = () => {
+          const frame = document.createElement('iframe');
+          frame.id = 'reserved-frame';
+          frame.src = '/reserved-headers?mode=html';
+          document.body.appendChild(frame);
+        };`);
+      return;
+    }
+    if (url.pathname === '/reserved-headers') {
+      const mode = url.searchParams.get('mode');
+      const headers = {
+        'Content-Type': mode === 'html' ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-zP-BodY-StReAm': '0',
+        'x-Zp-sTrEaM': mode === 'html' ? '0' : '1',
+        'X-Fixture': 'preserved',
+      };
+      if (mode === 'buffered') {
+        // Brotli uses the real bounded-buffering path, without changing kernel policy.
+        res.writeHead(200, { ...headers, 'Content-Encoding': 'br' });
+        res.end(brotliCompressSync('buffered-complete\n'));
+      } else if (mode === 'truncated') {
+        req.socket.end('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 20\r\nX-zP-BodY-StReAm: 0\r\nx-Zp-sTrEaM: 1\r\nConnection: close\r\n\r\nshort');
+      } else {
+        pendingResponses.set(mode, res);
+        res.once('close', () => pendingResponses.delete(mode));
+        res.writeHead(200, headers);
+        res.write(mode === 'html'
+          ? '<!doctype html><html><head><title>Reserved Header HTML</title></head><body><p id="reserved-first">html-first</p>'
+          : '<!doctype html><p>raw-first</p>\n');
+      }
       return;
     }
     if (url.pathname === '/next') {
@@ -535,7 +673,8 @@ function createTargetServer(requests) {
 
 function handleWebSocketUpgrade(req, socket, requests) {
   requests.push({ url: req.url, method: req.method, host: req.headers.host || '', userAgent: req.headers['user-agent'] || '', origin: req.headers.origin || '', cookie: req.headers.cookie || '', protocol: req.headers['sec-websocket-protocol'] || '', upgrade: true });
-  if (new URL(req.url, 'http://target.local').pathname !== '/ws') {
+  const url = new URL(req.url, 'http://target.local');
+  if (url.pathname !== '/ws') {
     socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     return;
   }
@@ -548,6 +687,8 @@ function handleWebSocketUpgrade(req, socket, requests) {
   const requestedProtocol = String(req.headers['sec-websocket-protocol'] || '').split(',').map(s => s.trim()).filter(Boolean)[0] || '';
   ignoreBenignSocketErrors(socket);
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + (requestedProtocol ? '\r\nSec-WebSocket-Protocol: ' + requestedProtocol : '') + '\r\n\r\n');
+  const silentClose = url.searchParams.get('silent-close') === '1';
+  if (silentClose) socket.once('close', () => requests.push({ url: req.url, socketClosed: true, at: Date.now() }));
   let buffered = Buffer.alloc(0);
   socket.on('data', chunk => {
     buffered = Buffer.concat([buffered, chunk]);
@@ -556,6 +697,10 @@ function handleWebSocketUpgrade(req, socket, requests) {
       if (!frame) break;
       buffered = buffered.subarray(frame.consumed);
       if (frame.opcode === 0x8) {
+        if (silentClose) {
+          requests.push({ url: req.url, closeCode: frame.payload.readUInt16BE(0), closeReason: frame.payload.subarray(2).toString('utf8'), at: Date.now() });
+          return;
+        }
         writeWebSocketFrame(socket, 0x8, frame.payload);
         socket.end();
         return;
@@ -708,7 +853,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   }
 
   const requests = [];
-  const target = createTargetServer(requests);
+  const pendingResponses = new Map();
+  const target = createTargetServer(requests, pendingResponses);
   const targetPort = await listen(target);
   t.after(() => closeServer(target));
   t.after(() => fs.writeFileSync(path.join(artifacts, 'upstream.json'), JSON.stringify(requests, null, 2)));
@@ -770,6 +916,147 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       await runRequestContract(t, page, `http://${targetHost}:${targetPort}`, requests, wireRequests, proxyOrigin, saveArtifacts);
     } finally {
       await saveArtifacts('request-final', page);
+      await context.close();
+    }
+  });
+  await t.test('rewritten module, receiver and transport regressions', { timeout: 150000 }, async t => {
+    const context = await browser.createBrowserContext();
+    const page = await context.newPage();
+    const targetOrigin = `http://${targetHost}:${targetPort}`;
+    const assertPublicHeaders = headers => {
+      assert.equal(headers['x-zp-body-stream'], undefined);
+      assert.equal(headers['x-zp-stream'], undefined);
+      assert.equal(headers['x-fixture'], 'preserved');
+    };
+    try {
+      await observeTarget(page.target());
+      await page.goto(proxyOrigin + '/', { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => navigator.serviceWorker?.controller && document.querySelector('#status')?.textContent === 'Ready.', { timeout: 30000 });
+      await page.type('#url', targetOrigin + '/regressions');
+      await page.click('button');
+      await page.waitForSelector('#regressions', { timeout: 30000 });
+
+      await t.test('static imports and inserted modules share one evaluation across history changes', async () => {
+        await page.waitForFunction(() => window.__moduleIdentityFixture, { timeout: 30000 });
+        const result = await page.evaluate(() => window.__moduleIdentityFixture);
+        const initial = { evaluations: 1, evaluationCount: 1, sameSingleton: true, href: targetOrigin + '/regressions' };
+        const changed = { ...initial, href: targetOrigin + '/regressions/changed?view=2' };
+        assert.deepEqual(result, { initial, dynamic: initial, afterHistory: changed, repeated: changed, classic: [initial.href, changed.href] });
+        const scripts = wireRequests.map(value => new URL(value)).filter(url => url.pathname === '/zp/api/script');
+        const dependencyURLs = scripts.filter(url => url.searchParams.get('u') === targetOrigin + '/module-singleton.js');
+        assert.deepEqual([...new Set(dependencyURLs.map(url => url.href))], [proxyOrigin + '/zp/api/script?u=' + encodeURIComponent(targetOrigin + '/module-singleton.js') + '&kind=module']);
+        assert.equal(requests.filter(request => request.url === '/module-singleton.js').length, 1);
+        const classicURLs = scripts.filter(url => url.searchParams.get('u') === targetOrigin + '/classic-ref.js');
+        assert.deepEqual([...new Set(classicURLs.map(url => url.searchParams.get('ref')))], [initial.href, changed.href]);
+      });
+
+      await t.test('native Window receivers work without binding page functions or constructors', async () => {
+        await page.waitForFunction(() => window.__receiverFixture, { timeout: 30000 });
+        assert.deepEqual(await page.evaluate(() => window.__receiverFixture), {
+          clonedValue: 7, cycle: true, independent: true, order: ['sync', 'microtask'],
+          pageFunctionSame: true, pageReceiver: 'custom-receiver', constructorSame: true,
+          constructed: true, constructedValue: 11, nativeURL: targetOrigin + '/receiver-child', nativeInstance: true,
+        });
+      });
+
+      await t.test('silent peer close deadline closes the upstream socket exactly once', { timeout: 70000 }, async () => {
+        // Invoke target-authored, rewritten code; polling never holds a CDP call
+        // across the real 30-second SW deadline or changes the production timer.
+        await page.evaluate(() => window.__startSilentCloseFixture());
+        const deadline = Date.now() + 60000;
+        let result;
+        do {
+          result = await page.evaluate(() => window.__silentCloseFixture);
+          if (result.closes.length && requests.some(request => request.url === '/ws?silent-close=1' && request.socketClosed)) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } while (Date.now() < deadline);
+        assert.equal(result.opened, true);
+        assert.equal(result.closingState, 2);
+        assert.equal(result.closes.length, 1, JSON.stringify(result));
+        const { elapsed, ...closed } = result.closes[0];
+        assert.deepEqual(closed, { code: 1006, reason: '', wasClean: false, readyState: 3 });
+        assert.ok(elapsed >= 29000 && elapsed < 60000, `close deadline elapsed ${elapsed}ms`);
+        const peerCloses = requests.filter(request => request.url === '/ws?silent-close=1' && request.closeCode);
+        assert.equal(peerCloses.length, 1);
+        assert.equal(peerCloses[0].closeCode, 3001);
+        assert.equal(peerCloses[0].closeReason, 'unanswered');
+        const physicalCloses = requests.filter(request => request.url === '/ws?silent-close=1' && request.socketClosed);
+        assert.equal(physicalCloses.length, 1, 'deadline must close the upstream socket, not only the page facade');
+        assert.ok(physicalCloses[0].at - peerCloses[0].at >= 29000, 'upstream closed before allowing the peer its close-handshake deadline');
+        await new Promise(resolve => setTimeout(resolve, 250));
+        assert.equal((await page.evaluate(() => window.__silentCloseFixture.closes)).length, 1);
+      });
+
+      await t.test('hostile markers cannot escape a buffered non-HTML response', async () => {
+        await page.evaluate(() => window.__startReservedFetchFixture('buffered'));
+        await page.waitForFunction(() => window.__reservedFetchFixture.done || window.__reservedFetchFixture.error, { timeout: 30000 });
+        const result = await page.evaluate(() => window.__reservedFetchFixture);
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, 200);
+        assert.equal(result.done, true);
+        assert.equal(result.body, 'buffered-complete\n');
+        assertPublicHeaders(Object.fromEntries(result.headers));
+      });
+
+      await t.test('hostile markers preserve progressive raw bytes and terminal EOF', async () => {
+        try {
+          await page.evaluate(() => window.__startReservedFetchFixture('raw'));
+          await page.waitForFunction(() => window.__reservedFetchFixture.body.endsWith('</p>\n') || window.__reservedFetchFixture.error, { timeout: 30000 });
+          const first = await page.evaluate(() => window.__reservedFetchFixture);
+          assert.equal(first.error, undefined);
+          assert.equal(first.status, 200);
+          assert.equal(first.body, '<!doctype html><p>raw-first</p>\n');
+          assert.equal(first.done, false, 'first bytes must arrive while the upstream body is still open');
+          assertPublicHeaders(Object.fromEntries(first.headers));
+          assert.ok(pendingResponses.has('raw'));
+          pendingResponses.get('raw').end('raw-last\n');
+          await page.waitForFunction(() => window.__reservedFetchFixture.done || window.__reservedFetchFixture.error, { timeout: 30000 });
+          const finished = await page.evaluate(() => window.__reservedFetchFixture);
+          assert.equal(finished.error, undefined);
+          assert.equal(finished.done, true);
+          assert.equal(finished.body, '<!doctype html><p>raw-first</p>\nraw-last\n');
+        } finally {
+          pendingResponses.get('raw')?.destroy();
+        }
+      });
+
+      await t.test('hostile markers do not turn a truncated body into successful EOF', async () => {
+        await page.evaluate(() => window.__startReservedFetchFixture('truncated'));
+        await page.waitForFunction(() => window.__reservedFetchFixture.done || window.__reservedFetchFixture.error, { timeout: 30000 });
+        const result = await page.evaluate(() => window.__reservedFetchFixture);
+        assert.equal(result.done, false);
+        assert.ok(result.error, 'truncated body must reject its reader');
+      });
+
+      await t.test('hostile markers preserve progressive HTML rendering and completion', async () => {
+        try {
+          const responsePromise = page.waitForResponse(response => response.request().isNavigationRequest() && response.frame()?.parentFrame() === page.mainFrame(), { timeout: 30000 });
+          await page.evaluate(() => window.__startReservedHTMLFixture());
+          const response = await responsePromise;
+          assert.equal(response.status(), 200);
+          assertPublicHeaders(response.headers());
+          await page.waitForFunction(() => {
+            const first = document.querySelector('#reserved-frame')?.contentDocument?.getElementById('reserved-first');
+            return first?.textContent === 'html-first' && first.getBoundingClientRect().height > 0;
+          }, { timeout: 30000 });
+          const first = await page.evaluate(() => {
+            const doc = document.querySelector('#reserved-frame').contentDocument;
+            return { last: doc.getElementById('reserved-last')?.textContent || null, readyState: doc.readyState };
+          });
+          assert.deepEqual(first, { last: null, readyState: 'loading' });
+          assert.ok(pendingResponses.has('html'));
+          pendingResponses.get('html').end('<p id="reserved-last">html-last</p></body></html>');
+          await page.waitForFunction(() => document.querySelector('#reserved-frame')?.contentDocument?.readyState === 'complete', { timeout: 30000 });
+          assert.deepEqual(await page.evaluate(() => {
+            const doc = document.querySelector('#reserved-frame').contentDocument;
+            return [doc.getElementById('reserved-first')?.textContent, doc.getElementById('reserved-last')?.textContent];
+          }), ['html-first', 'html-last']);
+        } finally {
+          pendingResponses.get('html')?.destroy();
+        }
+      });
+    } finally {
+      await saveArtifacts('compatibility-regressions', page);
       await context.close();
     }
   });

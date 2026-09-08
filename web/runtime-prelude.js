@@ -2783,11 +2783,20 @@
       if (ws._closed) return;
       ws._closed = true;
       ws.readyState = CLOSED;
-      if (ws._closeGuard) { try { clearTimeout(ws._closeGuard); } catch {} ws._closeGuard = null; }
+      if (ws._closeGuard != null) { try { Native.clearTimeout(ws._closeGuard); } catch {} ws._closeGuard = null; }
+      if (ws._port) {
+        ws._port.onmessage = null;
+        try { ws._port.close(); } catch {}
+        ws._port = null;
+      }
       ws.dispatchEvent(closeEvent(code, reason, wasClean));
+    }
+    function abort(ws) {
+      try { if (ws._port) ws._port.postMessage({ type: 'abort' }); } catch {}
     }
     function fail(ws) {
       if (ws._closed) return;
+      abort(ws);
       ws.dispatchEvent(new Event('error'));
       finish(ws, 1006, '', false);
     }
@@ -2799,21 +2808,29 @@
       this.readyState = CONNECTING;
       this._port = null;
       this._closed = false;
+      this._closeGuard = null;
       this._bufferedAmount = 0;
       this._binaryType = 'blob';
       const plist = protocolList(protocols);
       this._requestedProtocols = plist;
       postMessageToSW({ type: 'ZP_WS_OPEN', url: this.url, protocols: plist, tabId: boot.tabId, entryId: activeEntryId }).then(reply => {
-        if (this._closed || this.readyState === CLOSING) { try { reply.port && reply.port.postMessage({ type: 'close' }); } catch {} return; }
+        if (this._closed || this.readyState === CLOSING) {
+          // close() canceled the opening handshake; do not leave the late
+          // kernel stream waiting for an echo or dispatch a second close.
+          try { if (reply.port) reply.port.postMessage({ type: 'abort' }); }
+          finally { if (reply.port) reply.port.close(); }
+          return;
+        }
+        this._port = reply.port;
         const negotiated = String(reply.protocol || '');
         // RFC 6455 §4.2.2: server must pick from the offered list.
-        if (negotiated && plist.length > 0 && plist.indexOf(negotiated) < 0) {
+        if (negotiated && plist.indexOf(negotiated) < 0) {
           fail(this);
           return;
         }
         this.protocol = negotiated;
-        this._port = reply.port;
         this._port.onmessage = ev => {
+          if (this._closed) return;
           const m = ev.data || {};
           if (m.type === 'message') {
             let data = m.data;
@@ -2881,15 +2898,13 @@
           return;
         }
         // Wait for the peer's close frame; a missing echo is an abnormal close.
-        this._port.postMessage({ type: 'close', code: finalCode, reason: finalReason });
-        const ws = this;
-        const guardMs = 30000;
-        const guard = setTimeout(() => {
-          if (!ws._closed) finish(ws, 1006, '', false);
-        }, guardMs);
-        // Browsers don't expose unref on setTimeout from JS; we just let
-        // the guard fire if close never resolves. Caller cannot cancel.
-        this._closeGuard = guard;
+        this._closeGuard = Native.setTimeout(() => {
+          if (this._closed) return;
+          abort(this);
+          finish(this, 1006, '', false);
+        }, 30000);
+        try { this._port.postMessage({ type: 'close', code: finalCode, reason: finalReason }); }
+        catch { fail(this); }
       }
     });
     // bufferedAmount: read-only per IDL.

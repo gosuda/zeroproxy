@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
+const { MessageChannel } = require('node:worker_threads');
 
 function loadWorker(kernelFetch) {
   const context = {
@@ -194,4 +195,205 @@ test('stream completion and upstream failure settle lifetime without truncating 
   }), { headers: { 'X-ZP-Body-Stream': '1' } }));
   await assert.rejects(failed.text(), /upstream reset/);
   await failed.__zpBodyDone;
+});
+
+function websocketWorker(t, options = {}) {
+  const worker = loadWorker();
+  const { tab } = tabWithEntry();
+  tab.runtimeToken = 'runtime-token';
+  worker.wsTab = tab;
+  vm.runInContext('tabs.set(wsTab.tabId, wsTab)', worker);
+  const timers = new Map();
+  let now = 0, nextTimer = 0;
+  worker.setTimeout = (callback, delay) => {
+    const id = ++nextTimer;
+    timers.set(id, { callback, due: now + delay });
+    return id;
+  };
+  worker.clearTimeout = id => timers.delete(id);
+  const advance = ms => {
+    const until = now + ms;
+    while (true) {
+      let next;
+      for (const timer of timers) {
+        if (timer[1].due <= until && (!next || timer[1].due < next[1].due)) next = timer;
+      }
+      if (!next) break;
+      now = next[1].due;
+      timers.delete(next[0]);
+      next[1].callback();
+    }
+    now = until;
+  };
+  const channels = [];
+  let portCloses = 0;
+  worker.MessageChannel = class extends MessageChannel {
+    constructor() {
+      super();
+      channels.push(this);
+      const close = this.port1.close.bind(this.port1);
+      this.port1.close = () => { portCloses++; close(); };
+    }
+  };
+  const state = { handlers: {}, liveDrivers: true, aborts: 0 };
+  const complete = (code, reason) => {
+    state.liveDrivers = false;
+    if (state.handlers.close) state.handlers.close(code, reason);
+  };
+  const stream = {
+    protocol: options.protocol || '',
+    setHandlers(handlers) {
+      state.handlers = handlers;
+      if (handlers.close && options.setupError) throw new Error('handler setup failed');
+      if (handlers.close && options.earlyClose) complete(...options.earlyClose);
+    },
+    send() {},
+    close() {
+      if (options.closeError) throw new Error('close failed');
+    },
+    abort() {
+      state.aborts++;
+      state.liveDrivers = false;
+      if (options.abortError) throw new Error('abort failed after cancellation');
+      complete(1006, '');
+    },
+  };
+  worker.kernelStream = async () => stream;
+  const replies = [], failures = [];
+  const open = async (protocols = []) => {
+    await worker.openRuntimeStream({
+      source: { id: 'client' },
+      ports: [{ postMessage(message, transfer) {
+        if (options.replyError) throw new Error('reply transfer failed');
+        replies.push(structuredClone(message, { transfer }));
+      } }],
+    }, { tabId: tab.tabId, runtimeToken: tab.runtimeToken, url: 'wss://site.example/socket', protocols },
+    () => {}, error => failures.push(error));
+    return replies[0];
+  };
+  t.after(() => {
+    for (const channel of channels) { channel.port1.close(); channel.port2.close(); }
+    for (const reply of replies) reply.port.close();
+  });
+  return {
+    state, timers, channels, failures, open, complete, advance,
+    command: data => channels[0].port1.onmessage({ data }),
+    assertReleased() {
+      assert.equal(state.liveDrivers, false);
+      assert.equal(vm.runInContext('streams.size', worker), 0);
+      assert.equal(timers.size, 0);
+      assert.deepEqual(Object.keys(state.handlers), []);
+      if (channels.length) {
+        assert.equal(channels[0].port1.onmessage, null);
+        assert.equal(portCloses, 1);
+      }
+    },
+  };
+}
+
+function websocketCloseMessages(port) {
+  return new Promise(resolve => {
+    const messages = [];
+    port.onmessage = event => {
+      messages.push(event.data);
+      if (event.data.type === 'close') resolve(messages);
+    };
+  });
+}
+
+test('WebSocket close deadline aborts a silent peer without timing out an open socket', { timeout: 5000 }, async t => {
+  const ws = websocketWorker(t);
+  const reply = await ws.open();
+  const closed = websocketCloseMessages(reply.port);
+  ws.advance(60000);
+  assert.equal(ws.state.liveDrivers, true);
+  assert.equal(ws.state.aborts, 0);
+  ws.command({ type: 'close', code: 3001, reason: 'requested' });
+  const lateClose = ws.state.handlers.close;
+  ws.advance(29999);
+  assert.equal(ws.state.liveDrivers, true);
+  ws.advance(1);
+  assert.equal(ws.state.aborts, 1);
+  ws.assertReleased();
+  lateClose(3001, 'late echo');
+  ws.assertReleased();
+  assert.deepEqual(await closed, [{ type: 'close', code: 1006, reason: '' }]);
+});
+
+test('WebSocket peer close preserves its status and cancels the deadline', { timeout: 5000 }, async t => {
+  const ws = websocketWorker(t);
+  const reply = await ws.open();
+  const closed = websocketCloseMessages(reply.port);
+  ws.command({ type: 'close', code: 3001, reason: 'requested' });
+  ws.advance(29999);
+  const lateClose = ws.state.handlers.close;
+  ws.complete(3002, 'peer status');
+  ws.assertReleased();
+  ws.advance(60000);
+  lateClose(1006, '');
+  assert.equal(ws.state.aborts, 0);
+  ws.assertReleased();
+  assert.deepEqual(await closed, [{ type: 'close', code: 3002, reason: 'peer status' }]);
+});
+
+test('WebSocket repeated close requests cannot extend the first deadline', { timeout: 5000 }, async t => {
+  const ws = websocketWorker(t);
+  const reply = await ws.open();
+  const closed = websocketCloseMessages(reply.port);
+  ws.command({ type: 'close', code: 1000 });
+  ws.advance(29999);
+  ws.command({ type: 'close', code: 3001 });
+  ws.advance(1);
+  assert.equal(ws.state.aborts, 1);
+  ws.assertReleased();
+  assert.deepEqual(await closed, [{ type: 'close', code: 1006, reason: '' }]);
+});
+
+test('WebSocket early kernel completion survives MessagePort transfer and releases handlers', { timeout: 5000 }, async t => {
+  const ws = websocketWorker(t, { earlyClose: [1000, 'already finished'] });
+  const reply = await ws.open();
+  ws.assertReleased();
+  assert.equal(ws.state.aborts, 0);
+  assert.deepEqual(ws.failures, []);
+  assert.deepEqual(await websocketCloseMessages(reply.port), [{ type: 'close', code: 1000, reason: 'already finished' }]);
+});
+
+test('WebSocket explicit abort releases the stream once even with a queued close callback', { timeout: 5000 }, async t => {
+  const ws = websocketWorker(t);
+  const reply = await ws.open();
+  const closed = websocketCloseMessages(reply.port);
+  const queuedMessage = ws.channels[0].port1.onmessage;
+  const queuedClose = ws.state.handlers.close;
+  ws.command({ type: 'close', code: 1000 });
+  ws.command({ type: 'abort' });
+  queuedMessage({ data: { type: 'abort' } });
+  queuedClose(1000, 'too late');
+  ws.advance(60000);
+  assert.equal(ws.state.aborts, 1);
+  ws.assertReleased();
+  assert.deepEqual(await closed, [{ type: 'close', code: 1006, reason: '' }]);
+});
+
+test('WebSocket close and abort exceptions still settle the port and remove the stream', { timeout: 5000 }, async t => {
+  const ws = websocketWorker(t, { closeError: true, abortError: true });
+  const reply = await ws.open();
+  const closed = websocketCloseMessages(reply.port);
+  ws.command({ type: 'close', code: 1000 });
+  assert.equal(ws.state.aborts, 1);
+  ws.assertReleased();
+  const messages = await closed;
+  assert.ok(messages.some(message => message.type === 'error'));
+  assert.deepEqual(messages.filter(message => message.type === 'close'), [{ type: 'close', code: 1006, reason: '' }]);
+});
+
+test('WebSocket rejected protocols and failed setup abort allocated kernel drivers', async t => {
+  for (const options of [{ protocol: 'unoffered' }, { setupError: true }, { replyError: true }]) {
+    await t.test(Object.keys(options)[0], async t => {
+      const ws = websocketWorker(t, options);
+      assert.equal(await ws.open(), undefined);
+      assert.equal(ws.state.aborts, 1);
+      assert.equal(ws.failures.length, 1);
+      ws.assertReleased();
+    });
+  }
 });

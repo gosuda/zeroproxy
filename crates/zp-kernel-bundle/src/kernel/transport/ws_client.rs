@@ -12,8 +12,8 @@
 //!   Fragmentation across continuation frames is supported on read; we
 //!   never fragment on write (message bodies fit in one frame).
 //! * **JS surface** — `WsClient` is exposed to JS via `wasm_bindgen` with
-//!   `protocol()`, `send_text` / `send_bytes`, `set_handlers`, `close()`,
-//!   and `buffered_amount()` — the methods the SW `openRuntimeStream`
+//!   `protocol`, `send`, `setHandlers`, `close`, `abort`, and `bufferedAmount`
+//!   — the methods and properties the SW `openRuntimeStream`
 //!   calls (web/sw.js).
 //!
 //! Out of scope for this landing (would meaningfully increase LOC without
@@ -491,6 +491,12 @@ impl WsClient {
         if let Some(waker) = w.waker.take() {
             waker.wake();
         }
+    }
+
+    /// Stop both drivers without waiting for a peer Close. The SW owns the
+    /// close-handshake deadline; an open socket has no idle timeout.
+    pub fn abort(&self) {
+        surface_close(&self.shared, 1006, String::new());
     }
 }
 

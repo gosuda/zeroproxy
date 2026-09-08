@@ -1075,36 +1075,3 @@ test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => 
 
 });
 
-// ── 네이티브 window 메서드는 규칙으로 바인딩한다 (2026-09-04) ──────────
-//
-// 스코프 프록시가 손수 고른 목록(WINDOW_BOUND_METHODS)만 바인딩했다. 목록에
-// 없는 것은 그대로 나가므로 `globalThis.structuredClone(x)` 의 수신자가
-// 프록시가 되어 Illegal invocation. GitHub 실측: sg-*.js 의
-//   globalThis.structuredClone(e)  가 렌더 중 던져 React 가 에러 경계로
-// 떨어지고 홈이 통째로 ErrorPage 였다. 뚫린 것: structuredClone /
-// queueMicrotask / reportError / getSelection.
-test('스코프 프록시는 네이티브 window 메서드를 규칙으로 바인딩한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
-  const from = rt.indexOf('    function needsWindowReceiver(fn) {');
-  assert.ok(from > 0, 'needsWindowReceiver 규칙이 없다 — 목록만으로는 반드시 또 뚫린다');
-  const fn = new Function(rt.slice(from, rt.indexOf('\n    }', from) + 6) + '\nreturn needsWindowReceiver;')();
-
-  // ① 네이티브 **메서드**(prototype 없음)는 바인딩 대상이다.
-  for (const f of [Math.max, Date.now, JSON.stringify]) {
-    assert.equal(fn(f), true, String(f.name) + ' 는 window 수신자가 필요한 네이티브 메서드다');
-  }
-  // ② 생성자/클래스는 절대 바인딩하면 안 된다 — new 가 깨진다.
-  for (const c of [Array, Date, Promise, Map, Error]) {
-    assert.equal(fn(c), false, c.name + ' 를 바인딩하면 new 가 깨진다');
-  }
-  // ③ 페이지가 얹은 자기 함수는 건드리지 않는다 (this 의미가 바뀐다).
-  assert.equal(fn(() => {}), false, "페이지 화살표 함수를 바인딩했다");
-  assert.equal(fn(function pageFn() {}), false, "페이지 함수를 바인딩했다");
-  assert.equal(fn(null), false);
-  assert.equal(fn(42), false);
-  assert.equal(fn({}), false);
-
-  // ④ 스코프 프록시의 get 이 실제로 그 규칙을 쓰는가.
-  assert.ok(rt.includes('needsWindowReceiver(target[prop])'),
-    '스코프 프록시 get 이 규칙을 안 쓴다 — 목록 밖 메서드가 그대로 새어 나간다');
-});

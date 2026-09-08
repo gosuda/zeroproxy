@@ -161,3 +161,16 @@
 - **검증:** 실제 E2E handshake의 UA·Origin·쿠키와 subprotocol echo/명시 close 결과를 확인한다. 헤더 신원 수정은 원격 anti-bot 통과 보장이 아니다.
 - **Close 경계:** Close frame 직후 yamux FIN을 보내면 Go relay의 양방향 종료가 peer echo를 잘라 1006이 된다. frame을 flush한 뒤 실제 peer Close를 받고 종료한다. peer code/reason만 보고하며 실패·조기 취소는 1006/unclean이다.
 - **검증:** [a484e7b CI](https://github.com/gosuda/zeroproxy/actions/runs/34025734224)에서 WS echo/UA/Origin/Cookie, 정상 1000·명시 3001/finished 종료, 조기 취소 1006/unclean 통과. 같은 run의 H1 첫 chunk는 3.3ms였고 framing·압축 오류·idle cancel 검사도 통과했다.
+
+## <a id="stream-marker-ownership"></a>상류 헤더가 커널 스트림 표식을 오염 (2026-09-08)
+
+- **원인·재현:** 상류 `X-ZP-Body-Stream`을 복사한 뒤 커널이 `1`을 append하면 `untrusted, 1`이 된다. 실제 SW와 공유 응답 정책을 실행한 경량 Node 재현에서 `completeBodyResponse`가 완료 promise 생성과 표식 삭제를 건너뛰었다. 이는 실제 SW 종료·본문 절단을 측정한 결과는 아니다.
+- **수정:** 공통 커널 응답 헤더 복사 경계에서 `X-ZP-Body-Stream`과 `X-ZP-Stream`을 대소문자 무관하게 거절한다. buffered 응답도 위조 표식을 받지 않으며, streaming 응답에는 실제 본문 수명·HTML 여부에 맞춰 커널이 표식을 설정한다.
+- **구별·금지:** HTML 표식만 충돌하면 progressive 분기를 잃지만 정상 body 표식의 완료 추적까지 사라지는 것은 아니다. `includes('1')` 같은 느슨한 판정이나 SW 소비 전 무조건 삭제로 우회하지 않는다. 수정 후 실제 WASM·브라우저 검증은 해당 후속 CI 결과로 확인한다.
+
+## <a id="websocket-close-deadline"></a>페이지 Close guard가 실제 연결을 닫지 않았다 (2026-09-08)
+
+- **원인:** Close frame 뒤 peer 응답을 기다리도록 바꾸면서 무응답 peer의 유한 종료 경로가 사라졌다. 페이지의 30초 guard는 이벤트만 보내고 Rust reader/writer와 SW `streams` 등록을 남겼다.
+- **수정:** SW가 첫 Close부터 30초만 기다린 뒤 `WsClient.abort()`로 기존 `surface_close(1006)`·두 abort handle·terminal callback을 실행한다. 반복 Close는 상한을 연장하지 않으며 정상 peer 응답은 deadline을 지우고 실제 code/reason을 보존한다. page guard와 늦게 도착한 취소된 opening도 abort를 요청한다.
+- **검증:** 실제 SW 코드의 경량 Node 실행에서 수정 전 30초 뒤 drivers 유지/abort 0회, 수정 후 해제/abort 1회/1006 이벤트를 확인했다. 커널은 대체했으므로 실제 Rust socket 종료 증거와 구별한다. `test/js/request-policy.test.js`의 무응답·정상 응답·반복 Close·동기 조기 종료·경합·설정 실패 검사를 포함해 경량 JS 58/58 통과. 실제 upstream socket 종료는 추가한 Chromium E2E의 원격 실행 대기다.
+- **금지:** 열린 소켓의 idle timeout, Close 직후 FIN, 공유 yamux 세션 종료, Rust timer Future race로 대체하지 않는다. SW 중단·타이머 throttling이 있는 환경에서 벽시계 30초 보장을 주장하지 않는다.
