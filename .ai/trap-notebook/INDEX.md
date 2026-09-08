@@ -1,12 +1,13 @@
 # 함정노트 인덱스
 
 최신·미해결·재발방지 핵심만 선택한다. 상태는 해당 기록 시점 기준이며 현재 전체 통과를 뜻하지 않는다.
-전체 역사·철회된 실험은 [LOG.md](LOG.md), 진행 중 E1은 [계획](../design/website-compat-refactor.md)을 본다.
+[LOG.md](LOG.md)는 2026-08-25 INDEX 본문 아카이브다. 이후 원문은 상세의 고정 커밋 링크, 보존 규칙은 [README](README.md), 진행 중 E1은 [계획](../design/website-compat-refactor.md)을 본다.
 요약은 한 줄·160자 이하, 상세는 실재 앵커. 새 항목은 표 맨 위에 추가한다.
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
-| 2026-09-04 | membrane | **스코프 프록시가 목록에 든 window 메서드만 바인딩 — `globalThis.structuredClone(x)` 이 Illegal invocation 으로 GitHub 홈을 ErrorPage 로 만들었다. 규칙으로 교체.** | rewriter.md#window-메서드-바인딩-목록 |
+| 2026-09-08 | WebSocket / 수정 | Close 상한은 페이지 이벤트만 끝내지 않고 커널 abort·SW 등록 해제까지 연결한다. 열린 소켓은 제한하지 않는다. | sw-integration.md#websocket-close-deadline |
+| 2026-09-08 | stream / 수정 | 상류의 내부 표식을 거절하고 실제 응답 방식에 맞춰 설정해야 본문 완료 추적·표식 은폐를 보존한다. | sw-integration.md#stream-marker-ownership |
 | 2026-09-06 | stream / 구현 | HTTP framing·압축 검증·취소와 최종 SW waitUntil 수명을 함께 보존한다. | sw-integration.md#pull-stream-lifetime |
 | 2026-09-06 | WebSocket / 구현 | handshake UA·Origin·Cookie는 WS 서버가 아닌 검증된 요청 문서와 jar에서 결정한다. | sw-integration.md#websocket-request-identity |
 | 2026-09-06 | runtime / 구현 | 동작하는 WebSocketStream을 스텁으로 덮지 않고 Attr 쓰기도 공통 URL 정책에 연결한다. | rewriter.md#runtime-entrypoints |
@@ -14,7 +15,8 @@
 | 2026-09-06 | rewriter / 수정 | WASM 대입을 읽기 호출로 바꾸지 말고 쓰기 참조·연산자·평가 순서를 보존한다. | rewriter.md#ci-write-reference |
 | 2026-09-06 | membrane / 수정 | URL stash보다 native 속성의 absent/null·empty·removed 상태가 우선한다. | rewriter.md#absent-url-attribute |
 | 2026-09-06 | Fetch / 수정 | 요청 snapshot·body view·credentials와 hop별 redirect 정책을 보존한다. 전체 E1 완료와 별개다. | sw-integration.md#request-context-redirect |
-| 2026-09-04 | GitHub / 미해결 | 모듈 URL 중복은 수정했지만 React 에러 페이지는 남았다. 모듈 identity와 사이트 회복을 구별한다. | rewriter.md#모듈-url-두-벌 |
+| 2026-09-04 | membrane | **스코프 프록시가 목록에 든 window 메서드만 바인딩 — `globalThis.structuredClone(x)` 이 Illegal invocation 으로 GitHub 홈을 ErrorPage 로 만들었다. 규칙으로 교체.** | rewriter.md#window-메서드-바인딩-목록 |
+| 2026-09-04 | GitHub / 역사·후속 | 모듈 중복 15→0은 사이트 회복 증거가 아니었다. 후속 receiver 수정의 회복 보고와 현재 검증을 구별한다. | rewriter.md#모듈-url-두-벌 |
 | 2026-09-04 | 검증 / 규칙 | title 성공만으로 레이아웃·에러 경계를 판정하지 않는다. 직접/프록시를 짝지어 비교한다. | real-site-compat.md#레이아웃-축-없음 |
 | 2026-09-04 | build / 금지 | build clean은 dist를 먼저 지운다. 툴체인 확인 없이 유일한 배포 산출물에 빌드를 걸지 않는다. | build-deploy.md#빌드-clean-이-유일본을-지운다 |
 | 2026-08-26 | htmltx / 수정 | style raw text를 HTML escape하면 CSS가 깨진다. attribute와 raw-text 출력 계약을 구별한다. | rewriter.md#style-raw-text-이스케이프 |

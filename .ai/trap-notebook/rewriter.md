@@ -387,13 +387,34 @@
 
 - **원인·가설 정정:** “라이브 중단/세그먼트 절반”은 부팅 지연과 관측 창 때문에 성급했던 판단이다. 실제로는 `<style>`의 `ContentType::Text`가 `>`를 `&gt;`로 바꿨고 raw text에서는 엔티티가 풀리지 않아 그리드 CSS가 폐기됐다. 플레이어가 화면 밖으로 밀려 정상 가시성 로직에 의해 paused였다.
 - **수정·안전 근거:** `chunk.after`를 인접 script 경로처럼 `ContentType::Html` raw passthrough로 변경했다. 원본 `</style`은 파서가 요소를 끝내 버퍼에 들어올 수 없고, `rewrite_css`의 퍼센트 인코딩 URL은 `<`를 만들지 않는다.
+- **최소 재현·추적:** `<style>.parent>div{width:10px}</style>`을 변환해 생 `>`와 파싱된 `cssRules`를 비교한다. 당시 CNN 직접/프록시를 같은 뷰포트·충분한 관측 창으로 열어 스타일 텍스트와 CSSOM, 조상/플레이어 rect, 페이지 높이, `paused`와 `currentTime`/실시간을 함께 쟀다. 폭 규칙은 텍스트에 50번 있지만 CSSOM에는 0번인 것이 원인 추적의 단서였다.
+
+| 2026-08-26 측정 | 직접 대조군 | 프록시 수정 전 | 프록시 수정 후 |
+|---|---|---|---|
+| 생 `>` / `&gt;` | 671 / 0 | 0 / 671 | 671 / 0 |
+| CSSOM 규칙 수 | 4,644 | 4,546 (98개 탈락) | 4,644 |
+| 페이지 높이 | 7,760px | 22,590px | 7,795px |
+| 라이브 플레이어 rect | (836, 403) 289×163 | (16, 5073) 1127×634 | (836, 403) 289×163 |
+| `paused` / 재생 진행÷실시간 | false / 1.00 | true / — | false / 1.00 |
+
 - **당시 검증·공백:** CSSOM 규칙·플레이어 위치·재생 진행이 대조군과 맞아졌고 zp-htmltx/cargo/static/렌더/탐지·변이 회귀 통과. 텍스트에는 있는데 CSSOM에는 없는 규칙이 파싱 실패의 단서였다. 기존 요소 수/raw/CSP/콘솔 검사는 레이아웃 붕괴를 놓쳤으며 `rendercheck.sh` 높이/뷰포트 축은 당시 제안이었다.
+- **원문:** [압축 전 측정·추적 기록 (`7f49a9d0f23990e46690a183fdebb04962727b19`)](https://github.com/gosuda/zeroproxy/blob/7f49a9d0f23990e46690a183fdebb04962727b19/.ai/trap-notebook/rewriter.md#style-raw-text-이스케이프). 위 수치는 당시 관측이며 현재 빌드의 재측정이 아니다.
 
-## <a id="모듈-url-두-벌"></a>모듈 URL 분열과 미해결 GitHub (2026-09-04)
+## <a id="모듈-url-두-벌"></a>모듈 URL 분열: GitHub 원인 가설 철회와 후속 수정 (2026-09-04)
 
-- **원인:** 이후 레이아웃 검사가 GitHub의 클라이언트 React 에러 페이지를 발견했다. Rust 정적 import는 `?u=…&kind=module`, JS 동적 경로는 순서와 `ref`가 달랐고 `withCurrentRef`는 시간에 따라 ref도 갱신했다. URL 정체성 때문에 같은 모듈이 두 벌 로드됐다. `debugger-arm --strategy exceptions`의 잡힌 `Illegal invocation`은 브랜드 체크 노이즈였고 React #321·컨텍스트 부재가 조사 신호였다.
+- **원인:** 이후 레이아웃 검사가 GitHub의 클라이언트 React 에러 페이지를 발견했다. Rust 정적 import는 `?u=…&kind=module`, JS 동적 경로는 순서와 `ref`가 달랐고 `withCurrentRef`는 시간에 따라 ref도 갱신했다. URL 정체성 때문에 같은 모듈이 두 벌 로드됐다. 당시 React #321·컨텍스트 부재를 조사 신호로 삼았지만, 모든 `Illegal invocation`을 브랜드 체크 노이즈로 취급한 판단은 아래 후속 receiver 조사로 정정됐다.
 - **수정·경계:** module URL을 Rust와 바이트 단위로 동일하게 정규화하고 ref를 제거했다. classic은 CF 챌린지 타이밍 때문에 ref를 유지한다. 당시 중복 모듈 소멸은 확인됐지만 CF 해결을 입증한 것은 아니다.
-- **최종 정정:** 한 번 정상 렌더 후 같은 절차 반복에서 모두 에러 페이지였다. **모듈 분열은 수정된 실제 결함이지만 GitHub 에러 페이지 원인이라는 결론은 철회됐다.** 다른 React #321 경로는 미해결이다. 한 번 성공으로 닫지 않고 반복 결과를 보고한다는 교훈이 남았다.
+- **당시 정정:** 한 번 정상 렌더 후 같은 절차 3회 반복에서 3/3 모두 에러 페이지였다. **모듈 분열은 수정된 실제 결함이지만 GitHub 에러 페이지 원인이라는 결론은 철회됐다.** 한 번 성공으로 닫지 않고 반복 결과를 보고한다.
+- **최소 추적:** 200/마케팅 title과 실제 본문·`react-app.loaded` 안의 ErrorPage를 대조한다. `debugger-arm --strategy exceptions`로 콘솔에 나타나지 않는 caught 예외까지 수집하고, 의도적인 `isNativeLocation` 브랜드 체크와 앱 스택의 실패를 구별한다. 네트워크 테이프에서 같은 upstream 모듈의 실제 proxy URL을 묶어 쿼리 순서·`ref`로 갈라지는지 비교한다. 첫 React #321 직전 예외를 원본 자산 위치로 추적하는 단계가 이후 receiver 원인을 밝혔다.
+
+| 당시 관측 | 결과 | 해석 |
+|---|---|---|
+| 같은 자산의 중복 모듈 URL | 15건 → 0건; 수정 후 module URL의 `ref` 0건 | 모듈 identity 결함 수정 |
+| 수정 직후 정상 렌더 1회 | 본문 5,675자 / 높이 10,778; 직접 6,045자 / 10,996 | 단발 성공, 사이트 회복 판정 불가 |
+| 같은 절차 후속 3회 | 3/3 ErrorPage; 본문 1,085자 / 높이 1,718 | 모듈 수정만으로 GitHub 미해결 |
+
+- **후속·현재 구분:** 이후 [`5f951c6`](https://github.com/gosuda/zeroproxy/commit/5f951c6)의 [window receiver 수정 기록](#window-메서드-바인딩-목록)은 `globalThis.structuredClone` 실패를 특정하고 GitHub 3회 회복을 보고한다. 따라서 위 “미해결”은 모듈 수정 직후의 역사다. 2026-09-08 rebase는 그 수정을 포함하지만 통합된 현재 상태의 원격 검증은 대기 중이다.
+- **원문:** [압축 전 측정·가설 철회 기록 (`7f49a9d0f23990e46690a183fdebb04962727b19`)](https://github.com/gosuda/zeroproxy/blob/7f49a9d0f23990e46690a183fdebb04962727b19/.ai/trap-notebook/rewriter.md#모듈-url-두-벌). 이후 receiver 결론과 혼합해 모듈 정규화를 GitHub 회복 원인으로 기록하지 않는다.
 
 ## <a id="ci-write-reference"></a>WASM이 대입 참조를 읽기 호출로 변환 (2026-09-06)
 
@@ -422,6 +443,8 @@
 - **검증:** [a484e7b CI](https://github.com/gosuda/zeroproxy/actions/runs/34025734224)에서 전체 E2E 109/109 통과. srcdoc 수신·부모 탐색·목적지 렌더, 다른 가상 origin의 Location 읽기 거절, 폼 3종도 포함한다.
 
 ## <a id="window-메서드-바인딩-목록"></a>`globalThis.structuredClone(x)` 한 줄이 GitHub 홈을 통째로 죽였다 (2026-09-04)
+
+**기록 범위:** 아래 측정·통과 보고는 [`5f951c6`](https://github.com/gosuda/zeroproxy/commit/5f951c6)에 포함된 후속 receiver 수정의 역사적 근거다. 2026-09-08 rebase에서 receiver 규칙과 shadow `scopeTarget`을 함께 보존했으며, 통합 후 R3 receiver/WS 수명 및 R4 모듈 acceptance의 원격 검증은 대기 중이다. 아래 결과를 rebase 이후 CI 통과로 읽지 않는다.
 
 스코프 프록시가 **손수 고른 목록**(`WINDOW_BOUND_METHODS`)에 든 window 메서드만
 `root` 에 바인딩했다. 목록에 없는 것은 그대로 나가므로, 페이지가

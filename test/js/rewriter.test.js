@@ -95,14 +95,11 @@ test('module imports are canonical same-origin proxy URLs and import.meta retain
   const imported = [];
   const mod = new vm.SourceTextModule(rewrite('import value from "./dep.js"; window.result = [value, import.meta.url];', 'module', target), { context: ctx });
   await mod.link(async specifier => {
-    imported.push(new URL(specifier));
+    imported.push(specifier);
     return new vm.SyntheticModule(['default'], function() { this.setExport('default', 'dependency'); }, { context: ctx });
   });
   await mod.evaluate();
-  assert.equal(imported[0].origin, 'https://proxy.example');
-  assert.equal(imported[0].pathname, '/zp/api/script');
-  assert.equal(imported[0].searchParams.get('u'), 'https://target.example/assets/dep.js');
-  assert.equal(imported[0].searchParams.get('kind'), 'module');
+  assert.deepEqual(imported, ['https://proxy.example/zp/api/script?u=' + encodeURIComponent('https://target.example/assets/dep.js') + '&kind=module']);
   assert.deepEqual(Array.from(ctx.window.result), ['dependency', target]);
 });
 

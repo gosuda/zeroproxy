@@ -398,7 +398,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
 /// Target-side WebSocket bridge. Opens a yamux → SOCKS5 → optional TLS
 /// → RFC 6455 client handshake to `arg.url`, then returns a JS object
 /// (`WsClient`) with `protocol`, `bufferedAmount`, `send`, `setHandlers`,
-/// `close`. The SW (`web/sw.js` `openRuntimeStream`) drives it. Returns
+/// `close`, and `abort`. The SW (`web/sw.js` `openRuntimeStream`) drives it. Returns
 /// a `Promise<WsClient>` — the resolved value is the same JS class
 /// instance regardless of how `Promise` unwraps it.
 #[wasm_bindgen(js_name = kernelStream)]

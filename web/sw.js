@@ -2723,41 +2723,72 @@ async function openRuntimeStream(event, msg, ok, fail) {
     fail(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED');
     return;
   }
-  // C1: server-selected sub-protocol must come from the offered list
-  // (RFC 6455 §4.2.2). Never propagate a non-offered protocol back to
-  // the page — matches native browser fail-the-connection.
-  const negotiated = String((stream && stream.protocol) || '');
-  if (negotiated && requestedProtocols.length > 0 && requestedProtocols.indexOf(negotiated) < 0) {
-    try { stream.close(); } catch {}
-    fail('WS_BLOCKED');
-    return;
-  }
-  const channel = new MessageChannel();
-  const id = ZP.randomId('s');
-  streams.set(id, stream);
-  // Keep the stream registered until the kernel completes the actual close
-  // handshake. A caller's requested status is not evidence of a peer Close.
-  channel.port1.onmessage = ev => {
-    const m = ev.data || {};
-    try {
-      if (m.type === 'send') stream.send(m.data);
-      if (m.type === 'close') stream.close(m.code, m.reason);
-    } catch {
-      channel.port1.postMessage({ type: 'error' });
-    }
+  let channel = null;
+  let id = null;
+  let done = false;
+  let closeDeadline = null;
+  const post = message => {
+    try { if (channel) channel.port1.postMessage(message); } catch {}
   };
-  stream.setHandlers({
-    message: data => channel.port1.postMessage({ type: 'message', data }),
-    close: (code, reason) => {
-      channel.port1.postMessage({ type: 'close', code, reason });
-      streams.delete(id);
+  const finish = (code, reason) => {
+    if (done) return;
+    done = true;
+    if (closeDeadline !== null) {
+      clearTimeout(closeDeadline);
+      closeDeadline = null;
+    }
+    if (id !== null) streams.delete(id);
+    post({ type: 'close', code, reason });
+    if (channel) {
       channel.port1.onmessage = null;
-      channel.port1.close();
-      stream.setHandlers({});
-    },
-    error: () => channel.port1.postMessage({ type: 'error' }),
-  });
-  event.ports[0].postMessage({ ok: true, id, protocol: negotiated, port: channel.port2 }, [channel.port2]);
+      try { channel.port1.close(); } catch {}
+    }
+    try { stream.setHandlers({}); } catch {}
+  };
+  const abort = () => {
+    if (done) return;
+    try { stream.abort(); }
+    catch { post({ type: 'error' }); }
+    finally { finish(1006, ''); }
+  };
+  try {
+    // A rejected handshake still owns kernel drivers: abort, do not wait for
+    // a peer that may never echo Close. This also covers channel/setup errors.
+    const negotiated = String((stream && stream.protocol) || '');
+    if (negotiated && requestedProtocols.indexOf(negotiated) < 0) throw new Error('WS_BLOCKED');
+    channel = new MessageChannel();
+    id = ZP.randomId('s');
+    streams.set(id, stream);
+    channel.port1.onmessage = ev => {
+      if (done) return;
+      const m = ev.data || {};
+      try {
+        if (m.type === 'send') stream.send(m.data);
+        if (m.type === 'close' && closeDeadline === null) {
+          // Bound only the close handshake, never an idle open connection.
+          // Arm first: close() can synchronously deliver its terminal callback.
+          closeDeadline = setTimeout(abort, 30000);
+          stream.close(m.code, m.reason);
+        }
+        if (m.type === 'abort') abort();
+      } catch {
+        post({ type: 'error' });
+        abort();
+      }
+    };
+    stream.setHandlers({
+      message: data => { if (!done) post({ type: 'message', data }); },
+      close: finish,
+      error: () => { if (!done) post({ type: 'error' }); },
+    });
+    // setHandlers may finish synchronously. Keep port2 available for transfer:
+    // its queued terminal message survives closing the sending endpoint.
+    event.ports[0].postMessage({ ok: true, id, protocol: negotiated, port: channel.port2 }, [channel.port2]);
+  } catch (e) {
+    abort();
+    if (channel) { try { channel.port2.close(); } catch {} }
+    fail(e && (e.message || e.code) || 'WS_BLOCKED');
+  }
 }
 
 function runtimeTabForMessage(event, msg, fail) {
