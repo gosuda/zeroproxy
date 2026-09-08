@@ -174,3 +174,9 @@
 - **수정:** SW가 첫 Close부터 30초만 기다린 뒤 `WsClient.abort()`로 기존 `surface_close(1006)`·두 abort handle·terminal callback을 실행한다. 반복 Close는 상한을 연장하지 않으며 정상 peer 응답은 deadline을 지우고 실제 code/reason을 보존한다. page guard와 늦게 도착한 취소된 opening도 abort를 요청한다.
 - **검증:** 실제 SW 코드의 경량 Node 실행에서 수정 전 30초 뒤 drivers 유지/abort 0회, 수정 후 해제/abort 1회/1006 이벤트를 확인했다. 커널은 대체했으므로 실제 Rust socket 종료 증거와 구별한다. `test/js/request-policy.test.js`의 무응답·정상 응답·반복 Close·동기 조기 종료·경합·설정 실패 검사를 포함해 경량 JS 58/58 통과. 실제 upstream socket 종료는 추가한 Chromium E2E의 원격 실행 대기다.
 - **금지:** 열린 소켓의 idle timeout, Close 직후 FIN, 공유 yamux 세션 종료, Rust timer Future race로 대체하지 않는다. SW 중단·타이머 throttling이 있는 환경에서 벽시계 30초 보장을 주장하지 않는다.
+
+## <a id="upgraded-socket-eof"></a>무응답 WS fixture가 TCP EOF를 종료로 관측하지 않았다 (2026-09-08)
+
+- **실패:** [ec307ee CI](https://github.com/gosuda/zeroproxy/actions/runs/34200315989)의 실제 WASM 12/12와 모듈·receiver·표식 회귀는 통과했으나, WS 검사는 페이지 1006 이후 upstream `close`가 없어 실패했다. 이 결과만으로 커널 취소 실패를 확정하지 않는다.
+- **원인·대조:** Node HTTP upgrade socket은 `allowHalfOpen=true`이며 HTTP의 자동 EOF 정리가 제거된다. 기존 fixture를 직접 실행해 클라이언트 TCP FIN을 보낸 Node probe에서 `readableEnded=true`, `writableEnded=false`, `close=false`였다. close 이벤트만 기록하면 상대가 이미 EOF를 보냈어도 자기 쓰기 half 때문에 실패한다.
+- **수정·검증:** fixture가 `end`를 먼저 기록한 뒤 `socket.end()`로 자기 half를 종료한다. 같은 probe는 `writableEnded=true`, `close=true`로 바뀌었다. E2E의 실제 소켓 종료·30초 대기·한 번 종료 assertion은 유지하고 **상대 TCP EOF 수신** assertion도 추가했다. Close frame에는 계속 응답하지 않으며 타이머나 context teardown으로 성공을 만들지 않는다. 보정 후 실제 WS 종료는 후속 원격 CI로 확인한다.

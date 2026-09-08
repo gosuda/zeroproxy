@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-08 | E2E / 수정 | Node upgrade socket의 EOF와 close는 다르다. 상대 EOF를 기록한 뒤 fixture의 쓰기 half를 종료한다. | sw-integration.md#upgraded-socket-eof |
 | 2026-09-08 | WebSocket / 수정 | Close 상한은 페이지 이벤트만 끝내지 않고 커널 abort·SW 등록 해제까지 연결한다. 열린 소켓은 제한하지 않는다. | sw-integration.md#websocket-close-deadline |
 | 2026-09-08 | stream / 수정 | 상류의 내부 표식을 거절하고 실제 응답 방식에 맞춰 설정해야 본문 완료 추적·표식 은폐를 보존한다. | sw-integration.md#stream-marker-ownership |
 | 2026-09-06 | stream / 구현 | HTTP framing·압축 검증·취소와 최종 SW waitUntil 수명을 함께 보존한다. | sw-integration.md#pull-stream-lifetime |
