@@ -1,6 +1,6 @@
 # 웹사이트 호환성 리팩터링
 
-2026-09-08 · `refactor/website-compat-ci`. `origin/main`의 `5f951c6` 위로 rebase해 후속 window receiver 수정과 shadow `scopeTarget`을 함께 보존했다. **통합 후 원격 CI는 검증 대기 중이며, 전체 로드맵·실사이트 호환성·타깃 origin 격리 완료를 선언하지 않는다.**
+2026-09-08 · `refactor/website-compat-ci`. `origin/main`의 `5f951c6` 위로 rebase해 후속 window receiver 수정과 shadow `scopeTarget`을 함께 보존했다. **`cef5e7d`의 [원격 CI](https://github.com/gosuda/zeroproxy/actions/runs/34201550912)는 전체 통과했다. 전체 로드맵·실사이트 호환성·타깃 origin 격리 완료를 뜻하지 않는다.**
 기존 함정노트의 실측과 아래 `a484e7b` CI 결과는 각각 당시 커밋의 역사적 증거다. 현재 rebase 및 PR feedback 수정의 통과를 보장하지 않는다.
 
 ## 첫 변경과 현재 acceptance
@@ -12,13 +12,14 @@
 - 그 CI가 다룬 범위: H1/H2 pull streaming·framing/decoder 검증·취소·SW body lifetime, WS handshake identity와 close 수명, Attr-node URL ingress, 가상 Window descriptor와 일부 origin 경계, 자식 realm의 guarded eval/Function, srcdoc 탐색 및 폼 직렬화. 일부 경계 검사는 완전한 타깃 origin 격리의 증거가 아니다. 실패를 skip/기대값 완화로 숨기지 않는다.
 - 첫 변경에 문서 registry 전체·SW 복구·PSL/SameSite/partition·완전한 타깃 CORS·AST semantic 교체·realm 재설계 전체가 포함된 것은 아니다.
 
-### PR feedback acceptance — 원격 검증 대기
+### PR feedback acceptance — cef5e7d 검증
 - **R3 receiver:** native window 메서드는 올바른 receiver로 실행하고 생성자·페이지 함수의 identity/receiver 의미는 보존한다. shadow `scopeTarget`과 결합된 실제 리라이트 경로를 검사한다. [`5f951c6`의 GitHub 회복 보고](../trap-notebook/rewriter.md#window-메서드-바인딩-목록)는 후속 근거지만 현재 rebase의 재검증을 대신하지 않는다.
 - **R3 WS lifecycle:** 열린 소켓에는 idle timeout을 두지 않는다. close handshake만 SW 소유 30초 상한을 적용하고 만료 시 kernel `WsClient.abort()`의 기존 `surface_close(1006)`/abort handle 경로로 실제 전송을 중단한다. page의 30초 guard도 파사드 종료만 하지 않고 abort를 요청한다. peer 정상 close code/reason 보존, cleanup 정확히 한 번, page 소실·닫기 경합·무응답 peer를 acceptance에 포함한다. Rust timer Future는 추가하지 않는다.
-- **R4 module:** 정적 import와 동적으로 삽입한 module script가 같은 모듈을 한 번만 평가하는지 실제 실행으로 검사한다. history 변경 후에도 referrer/쿼리 순서 차이로 singleton이 두 번 평가되지 않아야 한다. 모듈 중복 제거와 GitHub 사이트 회복은 별개의 판정이다. 추가 회귀의 원격 결과가 나오기 전에는 완료로 세지 않는다.
-- **R5 stream marker:** 상류의 `X-ZP-Body-Stream`/`X-ZP-Stream`을 거절하고 커널만 실제 모드의 표식을 설정한다. buffered·raw streaming·잘린 본문·progressive HTML의 헤더 은폐/완료 회귀를 추가했으며 실제 WASM·Chromium 실행은 원격 대기다.
+- **R4 module:** 정적 import와 동적으로 삽입한 module script가 같은 모듈을 한 번만 평가하고 history 변경 후에도 singleton identity를 유지하는 실제 Chromium 회귀가 통과했다. 모듈 중복 제거와 GitHub 실사이트 회복은 별개의 판정이다.
+- **R5 stream marker:** 상류의 `X-ZP-Body-Stream`/`X-ZP-Stream`을 거절하고 커널만 실제 모드의 표식을 설정한다. buffered·raw streaming·잘린 본문·progressive HTML의 헤더 은폐/완료 회귀가 실제 WASM·Chromium 경로에서 통과했다.
 - **로컬 검증:** 256 MiB Node에서 경량 JS 58/58 통과, skipped 0. 실제 SW의 Close 전후 smoke는 유지되던 kernel 대체 drivers가 abort 1회와 1006으로 정리됨을 확인했다. 변경한 runtime/E2E/rewriter JS 구문 검사도 통과했다. Rust/Go 빌드·실제 WASM·Chromium은 로컬에서 실행하지 않았다.
-- **첫 통합 CI:** [ec307ee / 34200315989](https://github.com/gosuda/zeroproxy/actions/runs/34200315989)는 Rust·Go·JS·build와 실제 WASM 12/12 통과. Chromium의 모듈·receiver·표식 회귀도 통과했으나 WS 물리 종료 fixture가 실패했다. [Node upgrade의 half-open EOF 관측을 보정](../trap-notebook/sw-integration.md#upgraded-socket-eof)했으며 전체 통과 여부는 후속 CI로 확인한다.
+- **첫 통합 CI:** [ec307ee / 34200315989](https://github.com/gosuda/zeroproxy/actions/runs/34200315989)는 Rust·Go·JS·build와 실제 WASM 12/12 통과. Chromium의 모듈·receiver·표식 회귀도 통과했으나 WS 물리 종료 fixture가 실패했다. [Node upgrade의 half-open EOF 관측을 보정](../trap-notebook/sw-integration.md#upgraded-socket-eof)한 다음 run에서 전체 통과했다.
+- **최종 코드 검증:** [cef5e7d / 34201550912](https://github.com/gosuda/zeroproxy/actions/runs/34201550912) — Rust·Go·JS·WASM/server build 전체 통과, 실제 WASM **12/12**, Chromium E2E/E1 **117/117**, skipped 0. 무응답 WS의 Close(3001/unanswered) 수신 뒤 **30,001ms**에 upstream EOF·socket close가 각각 한 번 기록됐고 페이지는 1006/unclean으로 종료했다. 이 결과는 해당 커밋·fixture 범위에만 적용한다.
 
 ## 유지할 책임 경계
 - Rust/WASM: `zp-shared` 정책, `zp-rewriter` OXC, `zp-htmltx`/`zp-css` 변환, `zp-kernel-bundle` SOCKS5/TLS/HTTP, `zp-transport-codec` 코덱.
@@ -34,8 +35,8 @@
 | R1 | 문서 identity/generation·history URL·effective base·요청 snapshot 분리. 동일 자산의 두 탭, frame, SW 재시작 후에도 올바른 문서에 귀속. URL-only Map으로 권한을 대신하지 않는다. |
 | R1-S | OXC semantic scope/reference와 typed lowering. 선언/hoisting/TDZ·receiver·평가 횟수·short-circuit·Reflect·classic/module/eval 의미 보존. 네트워크 트랙과 독립 진행. |
 | R2 | 요청 정책/redirect와 cookie 정책을 기존 Rust 공유 계층으로 통합. method/body view/replay·credentials·manual/error·target CORS·PSL/SameSite/partition·cookie revision을 보존. |
-| R3 | canonical native realm의 설치 상태와 Document generation 분리. 첫 실행 전 격리, 중복 설치/누락 없음, native identity/brand/receiver/message source 보존. WS close/abort 수명과 classic/module worker·SharedWorker identity 포함. 위 추가 acceptance는 원격 검증 대기. |
-| R4 | URL 해석과 proxy 인코딩, first-base, module/importmap identity, 정적/동적 변환 정책 통합. raw text·entity·SVG/srcset·charset 계약은 각각 유지. 모듈 singleton 추가 acceptance는 원격 검증 대기. |
+| R3 | canonical native realm의 설치 상태와 Document generation 분리. 첫 실행 전 격리, 중복 설치/누락 없음, native identity/brand/receiver/message source 보존. WS close/abort 수명과 classic/module worker·SharedWorker identity 포함. 이번 receiver/WS 회귀 통과는 전체 R3 완료가 아니다. |
+| R4 | URL 해석과 proxy 인코딩, first-base, module/importmap identity, 정적/동적 변환 정책 통합. raw text·entity·SVG/srcset·charset 계약은 각각 유지. 모듈 singleton 회귀 통과는 전체 R4 완료가 아니다. |
 | R5 | H1/H2 headers→body→complete/cancel/error 수명 통일. SSE/미디어 첫 바이트·bounded backpressure·즉시 취소·디코더/handle/SW lifetime 정리. |
 
 - 한 실제 호출 경로를 끝까지 옮긴 뒤 obsolete 분기를 제거한다. 파일 이동과 동작 변경을 분리하며 신규 crate부터 늘리지 않는다.
@@ -55,7 +56,7 @@
 - `.github/workflows/ci.yml`: Rust/Go/경량 JS/build 병렬 job, artifact 기반 직렬 Chromium E2E, 로그·스크린샷 보존. 해당 commit/run 결과만 완료 근거로 삼는다.
 - 기존 E1/E2 및 `test/browser/{hole-matrix,nav-matrix,storage-matrix}`, `rendercheck.sh`/`layout-probe.js`를 재사용한다. 미측정은 inconclusive이며 title/console만으로 통과시키지 않는다.
 - 본문·에러 경계·첫 화면·검색/클릭/로그인·미디어 진행을 확인한다. 높이 비율은 경보이지 보편적인 절대 합격선이 아니다. 원래 사이트 오류와 proxy 오류, CSP-only 차단과 direct egress를 구별한다.
-- 실사이트 직접/프록시는 같은 조건으로 순차 비교하며 taskweaver `zp` 인스턴스를 공유한다. raw DevTools 값과 리라이트된 타깃이 보는 값은 다르다. GitHub의 과거 모듈 수정 직후 실패·후속 receiver 회복 보고·현재 rebase 검증 대기를 구별하고, CF/CNN 잔여도 별도로 유지한다.
+- 실사이트 직접/프록시는 같은 조건으로 순차 비교하며 taskweaver `zp` 인스턴스를 공유한다. raw DevTools 값과 리라이트된 타깃이 보는 값은 다르다. GitHub의 과거 모듈 수정 직후 실패·후속 receiver 회복 보고·현재 CI fixture 통과를 구별하고, CF/CNN 잔여도 별도로 유지한다.
 - source-presence 핀은 동작 근거가 아니다. 정책 fixture와 실제 prebuilt WASM, browser/wire 관찰로 판단한다. source-only 검사는 재고정하지 않는다.
 - 외부 Phase 2 마스터 플랜은 이 환경에 없었다. 과거 게이트 매핑(A/B→A2·B5/B6·D7, D/E→A3/A4·B1-B3·C2·D1/D2, F→B4/B7·C1·E3)은 역사이며 최신 acceptance/통과 선언이 아니다.
 
