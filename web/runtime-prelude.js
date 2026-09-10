@@ -5670,6 +5670,13 @@
       // URL decoding consumes strings; DOM absence must stay null, and an empty
       // attribute must not pick up a stale URL stash from an earlier value.
       if (raw === null || raw === '') return raw;
+      // ★`style` 은 URL 표면 목록에 없다. 그런데 우리가 그 안의 url() 을
+      // 프록시 URL 로 바꿔 **쓴다** — 되돌려 주지 않으면 페이지가 자기
+      // 스타일을 다시 읽는 것만으로 프록시 오리진과 /zp/api 경로를 읽어 낸다.
+      // 실측(2026-09-10): style 을 읽는 표면 16개가 전부 샜다.
+      // `Attr.prototype.value` 와 NS 변종이 이 훅에 위임하므로 여기 한 곳이
+      // getAttributeNode / attributes[i] / getNamedItem 까지 함께 덮는다.
+      if (localKey === 'style') return deproxyURL(raw, { scan: true });
       if (localKey === 'srcset' || localKey === 'imagesrcset') {
         // 기억한 값이 이미 프록시 URL 일 수 있다(위 주석과 같은 이유).
         const recalled = recalledSrcset(this, key);
@@ -6048,6 +6055,11 @@
       proxy = new Proxy(decl, {
         get(t, k) {
           const v = Reflect.get(t, k);
+          // 쓰기에서 url() 을 프록시 URL 로 바꿨으니 읽기에서 되돌린다.
+          // 이 트랩이 **모든** 프로퍼티를 지나므로 이름 목록이 필요 없다 —
+          // 350개 IDL 세터는 인스턴스의 own data property 라 프로토타입
+          // 훅으로는 애초에 닿지 않는다(실측).
+          if (typeof v === 'string') return deproxyURL(v, { scan: true });
           if (typeof v !== 'function') return v;
           // 메서드는 네이티브 선언에 바인딩해야 한다 — 프록시를 receiver 로
           // 부르면 `Illegal invocation` 이 난다. 바인딩 결과는 캐시한다:
@@ -6059,7 +6071,9 @@
           if (!bound) {
             bound = k === 'setProperty'
               ? function (p, val, pr) { return v.call(t, p, rewriteCSSText(val), pr); }
-              : v.bind(t);
+              : k === 'getPropertyValue'
+                ? function (p) { return deproxyURL(v.call(t, p), { scan: true }); }
+                : v.bind(t);
             per.set(k, bound);
           }
           return bound;
@@ -6073,6 +6087,39 @@
     styleDeclProxies.set(decl, proxy);
     return proxy;
   }
+  // `style` 접근자를 가진 **모든** 인터페이스를 감싼다. 이름을 손으로 적지
+  // 않는 것이 요점이라 순회는 이 함수 하나로 모아 둔다(테스트가 이 규칙을
+  // 그대로 실행한다).
+  function containEveryStyleAccessor(w) {
+    let count = 0;
+    let names = null;
+    try { names = Object.getOwnPropertyNames(w); } catch { return 0; }
+    for (const name of names) {
+      // WebIDL 인터페이스는 대문자로 시작한다. 소문자 전역까지 읽으면 게터
+      // 부작용을 건드릴 수 있어 좁힌다 — 이건 목록이 아니라 명명 규칙이다.
+      const c0 = name.charCodeAt(0);
+      if (c0 < 65 || c0 > 90) continue;
+      let proto = null;
+      try {
+        const iface = w[name];
+        if (typeof iface !== 'function') continue;
+        proto = iface.prototype;
+      } catch { continue; }
+      if (!proto || typeof proto !== 'object') continue;
+      const sd = propertyDescriptor(proto, 'style');
+      if (!sd || !sd.get) continue;
+      try {
+        Object.defineProperty(proto, 'style', {
+          get() { return containStyleDeclaration(sd.get.call(this)); },
+          set: sd.set ? function (v) { return sd.set.call(this, rewriteCSSText(v)); } : undefined,
+          enumerable: sd.enumerable,
+          configurable: false
+        });
+        count++;
+      } catch {}
+    }
+    return count;
+  }
   function installStyleHooks(w) {
     try { installStyleHooksInner(w); } catch (e) {
       styleHookState = 'threw:' + String(e && (e.message || e)).slice(0, 60);
@@ -6085,20 +6132,18 @@
     }
   }
   function installStyleHooksInner(w) {
-    // url() 을 실을 수 있는 CSS 프로퍼티만 훅한다 — CSSStyleDeclaration 의
-    // setter 는 350개가 넘어서 전수 훅은 부팅 비용이 크다.
+    // ★프로퍼티 이름 목록은 없다. 예전에는 url() 을 실을 수 있는 CSS 프로퍼티
+    // 19개를 손으로 골라 CSSStyleDeclaration.prototype 에 훅하려 했는데,
+    // 이 엔진은 CSS 프로퍼티를 **인스턴스의 own data property** 로 노출하므로
+    // 그 루프는 조용한 no-op 였다(실측: prototype 의 own 이름은 10개뿐).
+    // 실제로 잡아 주는 것은 아래 containStyleDeclaration 프록시이고, 그것은
+    // 이름을 열거하지 않으므로 목록이 필요 없다.
     //
     // **함수 안에 두는 이유**: 모듈 스코프 `const` 로 두면 TDZ 에 걸린다.
     // 이 함수는 설치 시퀀스(installGetterMasking 부근)에서 불리는데 그 지점은
     // 선언보다 **위**라 `Cannot access 'X' before initialization` 이 나고,
     // 그 예외가 뒤따르는 멤브레인 설치를 통째로 중단시킨다. 실제로 자식
     // 프레임의 fetch/img 컨테인먼트가 깨졌다(매트릭스 e2/e3 회귀로 잡았다).
-    const CSS_URL_PROPS = [
-      'background', 'backgroundImage', 'borderImage', 'borderImageSource',
-      'listStyle', 'listStyleImage', 'content', 'cursor', 'src',
-      'mask', 'maskImage', 'webkitMask', 'webkitMaskImage', 'webkitMaskBoxImage',
-      'shapeOutside', 'clipPath', 'offsetPath', 'filter', 'backdropFilter',
-    ];
     const styleProto = w.HTMLStyleElement && w.HTMLStyleElement.prototype;
     if (styleProto) {
       for (const prop of ['textContent', 'innerText', 'innerHTML']) {
@@ -6132,42 +6177,56 @@
     //
     // 대신 `style` 게터가 **containment proxy** 를 돌려주게 한다 — 프로퍼티
     // 이름을 열거할 필요 없이 모든 쓰기가 set 트랩 하나를 지난다.
-    const styleGetterProto = (w.HTMLElement && w.HTMLElement.prototype)
-      || (w.Element && w.Element.prototype);
-    const styleDesc = styleGetterProto && propertyDescriptor(styleGetterProto, 'style');
-    if (styleDesc && styleDesc.get) {
+    // ★`style` 접근자는 HTMLElement 에만 있는 게 아니다. SVGElement /
+    // MathMLElement / CSSStyleRule / CSSKeyframeRule / CSSPageRule 이 각자
+    // 자기 프로토타입에 갖고 있고, 그중 하나라도 놓치면 그 경로의 쓰기가
+    // 컨테인먼트를 통째로 우회한다. 실측(2026-09-10): SVG / MathML /
+    // CSSStyleRule / CSSKeyframeRule 네 경로가 url() 을 원본 그대로 실었다.
+    //
+    // 인터페이스를 **훑어서** 찾는다 — 이름을 손으로 적으면 반드시 또 뚫린다
+    // (이 저장소에서 다섯 번째다: srcset 후보 / HTML 엔티티 / data-zp-* /
+    // window 메서드, 그리고 이것).
+    // 하나도 못 걸었으면 컨테인먼트가 없는 것과 같다 — 조용한 no-op 금지.
+    styleHookState = containEveryStyleAccessor(w) > 0 ? 'ok' : 'no-style-accessor';
+
+    // getComputedStyle 은 **해결된** 값을 돌려주므로 프록시 URL 이 그대로
+    // 보인다. 읽기 전용이라 되돌리기만 필요하고, 같은 프록시가 해 준다.
+    if (typeof w.getComputedStyle === 'function') {
+      const nativeGCS = w.getComputedStyle;
       try {
-        Object.defineProperty(styleGetterProto, 'style', {
-          get() { return containStyleDeclaration(styleDesc.get.call(this)); },
-          set: styleDesc.set ? function (v) { return styleDesc.set.call(this, rewriteCSSText(v)); } : undefined,
-          enumerable: styleDesc.enumerable,
-          configurable: false
+        define(w, 'getComputedStyle', function (el, pe) {
+          return containStyleDeclaration(nativeGCS.call(w, el, pe));
         });
-        styleHookState = 'ok';
-      } catch (e) {
-        styleHookState = 'failed:' + String(e && (e.message || e)).slice(0, 60);
-      }
-    } else {
-      styleHookState = 'no-desc:' + (styleDesc ? 'nogetter' : 'null')
-        + ':' + (styleGetterProto ? 'proto' : 'noproto');
+      } catch {}
     }
+    // `sheet.cssRules[0].cssText` 는 선언을 안 거치고 규칙 텍스트를 통째로
+    // 돌려준다 — 여기도 되돌리지 않으면 프록시 URL 이 그대로 보인다.
+    const ruleProto = w.CSSRule && w.CSSRule.prototype;
+    const dRuleText = ruleProto && propertyDescriptor(ruleProto, 'cssText');
+    if (dRuleText && dRuleText.get) try {
+      Object.defineProperty(ruleProto, 'cssText', {
+        get() { return deproxyURL(dRuleText.get.call(this), { scan: true }); },
+        set: dRuleText.set ? function (v) { return dRuleText.set.call(this, rewriteCSSText(v)); } : undefined,
+        enumerable: dRuleText.enumerable,
+        configurable: false
+      });
+    } catch {}
     const declProto = w.CSSStyleDeclaration && w.CSSStyleDeclaration.prototype;
     if (declProto) {
       const nativeSet = declProto.setProperty;
       if (typeof nativeSet === 'function') {
         define(declProto, 'setProperty', function (p, v, pr) { return nativeSet.call(this, p, rewriteCSSText(v), pr); });
       }
-      for (const prop of ['cssText'].concat(CSS_URL_PROPS)) {
-        const d = propertyDescriptor(declProto, prop);
-        if (!d || !d.set) continue;
-        try {
-          Object.defineProperty(declProto, prop, {
-            get() { return d.get ? d.get.call(this) : ''; },
-            set(v) { d.set.call(this, rewriteCSSText(v)); },
-            configurable: false
-          });
-        } catch {}
-      }
+      // cssText 는 프로토타입 접근자라 여기서 잡는다. 나머지 프로퍼티는
+      // 인스턴스 own 이라 프록시가 맡는다(위 주석).
+      const dText = propertyDescriptor(declProto, 'cssText');
+      if (dText && dText.set) try {
+        Object.defineProperty(declProto, 'cssText', {
+          get() { return deproxyURL(dText.get ? dText.get.call(this) : '', { scan: true }); },
+          set(v) { dText.set.call(this, rewriteCSSText(v)); },
+          configurable: false
+        });
+      } catch {}
     }
   }
   function installScriptTextProps(w) {

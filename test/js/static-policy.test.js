@@ -1075,3 +1075,97 @@ test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => 
 
 });
 
+// containEveryStyleAccessor 를 격리 실행하기 위한 스텁. 규칙이 어디로
+// 흐르는지 보려고 호출을 기록한다.
+const L_STUB = [
+  'const log = { contained: [], rewrote: [] };',
+  'function propertyDescriptor(o, k) { return Object.getOwnPropertyDescriptor(o, k); }',
+  'function containStyleDeclaration(d) { log.contained.push(d); return { contained: d }; }',
+  'function rewriteCSSText(v) { log.rewrote.push(v); return \'REWROTE:\' + v; }',
+].join('\n');
+// ── CSS 는 목록이 아니라 규칙으로 감싼다 + 읽기에서 되돌린다 (2026-09-10) ──
+//
+// 두 결함이 같은 함수에 있었다.
+//
+// ① 쓰기 우회: `style` 접근자는 HTMLElement 에만 있는 게 아니다.
+//    SVGElement / MathMLElement / CSSStyleRule / CSSKeyframeRule 이 각자
+//    갖고 있어서 그 네 경로의 url() 이 컨테인먼트를 통째로 우회했다(실측).
+// ② 읽기 누출: 쓰기에서 url() 을 프록시 URL 로 바꿔 놓고 읽기에서
+//    되돌리지 않아, 페이지가 자기 스타일을 다시 읽는 것만으로
+//    프록시 오리진과 /zp/api 경로를 알아낼 수 있었다. 실측 16개 표면.
+//
+// ②가 있으면 ①을 고치는 순간 누출이 늘어난다 — 둘은 같이 가야 한다.
+test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감싼다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function containEveryStyleAccessor(w) {');
+  assert.ok(from > 0, 'containEveryStyleAccessor 규칙이 없다 — 목록으로 돌아가면 반드시 또 뚫린다');
+  const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
+
+  // 규칙을 그대로 실행한다. 의존물은 스텁으로 주입해 어디로 흐르는지 본다.
+  const mk = () => new Function(L_STUB + src + '\nreturn { containEveryStyleAccessor, log };')();
+  const { containEveryStyleAccessor, log } = mk();
+
+  // 가짜 window: 대문자 인터페이스 4개 + 소문자 전역 + 폭탄 게터.
+  const styleDesc = (withSetter) => ({
+    get() { return this.__decl; },
+    set: withSetter ? function (v) { this.__written = v; } : undefined,
+    enumerable: false, configurable: true,
+  });
+  function HTMLElementish() {} Object.defineProperty(HTMLElementish.prototype, 'style', styleDesc(true));
+  function CSSRuleish() {} Object.defineProperty(CSSRuleish.prototype, 'style', styleDesc(false));
+  // ★이름을 모르는 미래 인터페이스도 잡혀야 한다 — 이게 목록과의 차이다.
+  function FutureStyledThing() {} Object.defineProperty(FutureStyledThing.prototype, 'style', styleDesc(true));
+  function NoStyle() {}
+  // style 이 접근자가 아니라 **데이터 프로퍼티**인 인터페이스는 건너뛴다.
+  // 감싸면 sd.get 이 없어 읽는 순간 TypeError 가 난다.
+  function DataStyle() {}
+  DataStyle.prototype.style = 'plain-value';
+  const w = { HTMLElementish, CSSRuleish, FutureStyledThing, NoStyle, DataStyle, NotAFunction: 42 };
+  // 소문자 전역은 읽지도 말아야 한다(게터 부작용).
+  let lowerRead = 0;
+  Object.defineProperty(w, 'documentish', { get() { lowerRead++; return {}; }, enumerable: true, configurable: true });
+  // 값을 읽는 순간 던지는 전역이 있어도 전체가 멈추면 안 된다.
+  Object.defineProperty(w, 'Boom', { get() { throw new Error('boom'); }, enumerable: true, configurable: true });
+
+  const count = containEveryStyleAccessor(w);
+  assert.equal(count, 3, 'style 접근자를 가진 인터페이스 3개를 모두 감싸야 한다 (미래 이름 포함)');
+  assert.equal(lowerRead, 0, '소문자 전역을 읽었다 — 게터 부작용을 건드린다');
+  assert.equal(DataStyle.prototype.style, 'plain-value', '접근자가 아닌 style 을 감쌌다 — 읽는 순간 던진다');
+
+  // 읽기는 containStyleDeclaration 을 지난다.
+  const el = new HTMLElementish();
+  el.__decl = 'DECL';
+  assert.deepEqual(el.style, { contained: 'DECL' }, 'style 읽기가 컨테인먼트를 안 지난다');
+  // 쓰기는 rewriteCSSText 를 지난다.
+  el.style = 'url(x)';
+  assert.equal(el.__written, 'REWROTE:url(x)', 'style 쓰기가 CSS 리라이트를 안 지난다');
+  // 게터만 있던 인터페이스에 세터를 만들어 주면 안 된다.
+  assert.equal(Object.getOwnPropertyDescriptor(CSSRuleish.prototype, 'style').set, undefined,
+    '읽기 전용 style 에 세터가 생겼다');
+  assert.ok(log.contained.includes('DECL') && log.rewrote.includes('url(x)'));
+});
+
+test('CSS: 프로퍼티 이름 목록이 돌아오지 않았다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  // 이 엔진은 CSS 프로퍼티를 인스턴스의 own data property 로 노출하므로
+  // CSSStyleDeclaration.prototype 에 이름을 걸어 봐야 조용한 no-op 다.
+  assert.ok(!rt.includes('CSS_URL_PROPS'),
+    '손으로 고른 CSS 프로퍼티 목록이 돌아왔다 — 프록시가 이름 없이 전부 잡는다');
+});
+
+test('CSS: 우리가 바꿔 쓴 값은 모든 읽기 경로에서 되돌린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  // 되돌리기가 빠지면 페이지가 자기 스타일을 다시 읽는 것만으로 우리 정체를
+  // 읽어 낸다. 실측으로 샜던 자리마다 하나씩 고정한다.
+  const must = [
+    ['인라인 style 속성', "if (localKey === 'style') return deproxyURL(raw, { scan: true });"],
+    ['선언 프록시의 문자열 읽기', "if (typeof v === 'string') return deproxyURL(v, { scan: true });"],
+    ['getPropertyValue', "function (p) { return deproxyURL(v.call(t, p), { scan: true }); }"],
+    ['CSSStyleDeclaration.cssText', "get() { return deproxyURL(dText.get ? dText.get.call(this) : '', { scan: true }); },"],
+    ['CSSRule.cssText', 'get() { return deproxyURL(dRuleText.get.call(this), { scan: true }); },'],
+    ['getComputedStyle', 'return containStyleDeclaration(nativeGCS.call(w, el, pe));'],
+  ];
+  for (const [what, needle] of must) {
+    assert.ok(rt.includes(needle), what + ' 읽기 경로의 되돌리기가 사라졌다');
+  }
+});

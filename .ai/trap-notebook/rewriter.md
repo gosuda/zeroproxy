@@ -529,3 +529,110 @@ srcset 후보 분리, HTML 엔티티 표, `data-zp-*` 속성 표면, 그리고 �
 
 그리고 `<title>` 은 페이지가 살아 있다는 증거가 못 된다 — SPA 는 타이틀을
 유지한 채 본문만 에러 화면으로 갈아치운다.
+## <a id="css-정체-되읽기"></a>CSS 는 바꿔 쓰고 되돌리지 않아 프록시 정체가 16곳으로 샜다 (2026-09-10)
+
+`CSS_URL_PROPS`(손으로 고른 19개 프로퍼티)를 규칙으로 바꾸려고 들어갔다가 **같은
+함수 안의 더 큰 결함**을 만났다. 두 개가 얽혀 있어서 따로 고칠 수 없다.
+
+### ① 읽기 누출 — 이게 본체다
+
+우리는 CSS 안의 `url()` 을 프록시 URL 로 **바꿔 쓴다**. 그런데 되돌려 주는 곳이
+직렬화 경로(`outerHTML` / `cloneNode` / `XMLSerializer` / `<style>.textContent`)
+뿐이었다. **직접 프로퍼티·속성 읽기는 통째로 빠져 있었다** — 2026-08-22 에
+`<style>` 텍스트만 고치고 나머지를 안 본 자리다.
+
+실측(프록시 위 example.com, 전수 훑기): **16개 표면이 샜다.**
+
+```
+style.backgroundImage   style.cssText        style.getPropertyValue
+style.item+getPV        style[0]             getAttribute
+getAttributeNS          getAttributeNode     attributes.style
+attributes[i]           getNamedItem         getComputedStyle × 2
+CSSRule.cssText         CSSRule.style.*      (인라인 IDL 세터 전부)
+```
+
+새어 나온 값:
+
+```js
+el.style.backgroundImage = 'url("https://cdn.example.org/pic.png")';
+el.style.backgroundImage
+// → url("http://proxy.localhost:18080/zp/api/fetch?url=https%3A%2F%2F…&tab=…")
+```
+
+페이지가 **자기가 쓴 값을 다시 읽는 것만으로** 프록시 오리진 · 내부 API 경로 ·
+탭 토큰을 전부 얻는다. `img.src` 는 가상 URL 로 되돌려 주는데 CSS 만 안 했다.
+
+고침: `deproxyURL(v, {scan:true})` 를 읽기 경계마다 태운다. `Attr.prototype.value`
+와 `getAttributeNS` 는 이미 `getAttribute` 로 위임하므로 **거기 한 줄이
+getAttributeNode / attributes[i] / getNamedItem 까지 함께 덮는다.**
+
+### ② 쓰기 우회 — `style` 접근자는 HTMLElement 에만 있는 게 아니다
+
+컨테인먼트 프록시를 `HTMLElement.prototype.style` 에만 걸어 뒀다. 실측으로 네
+경로가 url() 을 **원본 그대로** 실었다: `SVGElement` / `MathMLElement` /
+`CSSStyleRule.style` / `CSSKeyframeRule.style`.
+
+고침: 인터페이스를 **훑어서** `style` 접근자를 가진 프로토타입을 전부 감싼다
+(`containEveryStyleAccessor`). 대문자로 시작하는 전역만 본다 — 소문자까지 읽으면
+게터 부작용을 건드린다. 이건 목록이 아니라 명명 규칙이다.
+
+★①이 없는 채로 ②만 고치면 **누출이 늘어난다** — 새로 감싼 경로가 이제 프록시
+URL 을 저장하는데 되돌리는 곳이 없기 때문이다. 둘은 한 커밋이어야 한다.
+
+### `CSS_URL_PROPS` 는 애초에 죽은 코드였다
+
+19개 목록을 `CSSStyleDeclaration.prototype` 에 걸고 있었는데, 이 엔진은 CSS
+프로퍼티를 **인스턴스의 own data property** 로 노출한다(실측: prototype 의 own
+이름은 10개뿐, 전부 메서드). 즉 그 루프는 **조용한 no-op** 였고, 실제로 잡아 준
+것은 언제나 컨테인먼트 프록시였다. 목록을 지우는 것이 곧 고침이었다.
+
+### 판정 기준을 세 번 틀렸다 — 이게 이 항목의 진짜 교훈
+
+1. **메인 월드에서 되읽어 판정했다.** `img.src` 까지 "새는" 것으로 나왔다.
+   멤브레인은 메인 월드에 **가상 URL 을 보여 주는 게 정상**이다. 저장값은
+   `exec-js --world isolated` 로 봐야 한다.
+2. **마커 호스트가 남아 있는지로 판정했다.** 프록시 경로가 대상 URL 을
+   percent-encoding 으로 담으므로 `evil.example` 은 **그대로 남는다**
+   (`.` 과 영문자는 인코딩되지 않는다). 전부 LEAK 로 보였다. 올바른 기준은
+   "프록시 오리진이 붙었나" 다.
+3. **상대 URL 로 판별하려 했다.** `cssProxyURL` 은 `^https?://` 만 다루므로
+   상대 URL 은 설계상 재작성 대상이 아니다 — 판별에 못 쓴다.
+
+### 탈옥은 아니다 (측정으로 확인)
+
+공개 DNS 에 없는 호스트로 재 보니 새는 경로도 **502**(프록시 응답)였다.
+`ERR_NAME_NOT_RESOLVED` 가 아니다 — SW 가 원시 절대 URL 도 잡는다. 즉 ②는
+네트워크 탈출이 아니라 정확성·일관성 결함이고, ①이 보안 결함이다.
+
+### 남긴 것 — `attributeStyleMap` (CSS Typed OM)
+
+`el.attributeStyleMap.set('background-image', 'url(…)')` 는 여전히 재작성을
+지나지 않는다(실측). 일부러 남겼다: 쓰기만 훅하면 `StylePropertyMap.get()` 이
+돌려주는 `CSSStyleValue` 에서 프록시 URL 이 그대로 보여 **①을 새로 만든다.**
+지금은 쓰기·읽기가 모두 원본이라 페이지가 쓴 값과 읽는 값이 일치하고, 요청은
+SW 가 잡는다. 고치려면 `StylePropertyMap` 의 읽기·쓰기를 같이 해야 한다.
+
+### 실측
+
+| | 고치기 전 | 고친 뒤 |
+|---|---|---|
+| 누출 읽기 표면 | 16 | **0** |
+| 컨테인먼트 우회 쓰기 경로 | 5 | **1** (Typed OM, 의도적) |
+| 탐지기 `css-identity` (naver/wikipedia/github) | — | 0 / 0 / 0 |
+
+탐지기 양성 대조: `/zp/assets/` 형태(=`deproxyURL` 이 되돌릴 수 없는 모양)를
+격리 월드에서 심으면 8개 표면이 즉시 잡힌다. 변이 11/11.
+
+### 곁가지 — 훅이 자기 소스를 노출한다
+
+`define()` 으로 건 함수는 `toString` 이 가려지는데, `Object.defineProperty` 로
+직접 건 **접근자**는 안 가려진다. 실측:
+
+```js
+String(Object.getOwnPropertyDescriptor(HTMLElement.prototype,'style').get)
+// → "get(){return Bi(c.get.call(this))}"   ← 우리 코드가 그대로 보인다
+```
+
+`style` / `cssText` / `<style>.textContent` 세터가 전부 이 상태다. 이번 변경이
+만든 것이 아니라 전부터 그랬고, 별도 항목으로 다뤄야 한다.
+

@@ -247,5 +247,62 @@
     if (/proxy\.localhost|\/zp\/p\//.test(document.referrer)) add('referrer', document.referrer);
   } catch (e) { add('identity', 'err:' + e.name); }
 
+  // ⑩ CSS 를 통한 정체 노출 — 우리가 url() 을 프록시 URL 로 바꿔 **쓰므로**,
+  // 되돌려 주지 않는 읽기 표면이 하나라도 있으면 페이지가 자기 스타일을 다시
+  // 읽는 것만으로 프록시 오리진과 내부 API 경로를 알아낸다. 2026-09-10 실측:
+  // 이런 표면이 16개였다(인라인 프로퍼티 / cssText / getPropertyValue /
+  // getAttribute 일가 / getComputedStyle / CSSRule.cssText).
+  //
+  // 목록으로 적지 않는다 — 페이지에 실제로 있는 스타일을 통째로 훑는다.
+  try {
+    var OURS = /\/zp\/(api|assets|p)\/|proxy\.localhost/;
+    var say = function (where, v) { if (v && OURS.test(String(v))) add(where, String(v).match(OURS)[0]); };
+
+    // (a) 페이지의 인라인 style 을 모든 읽기 경로로 훑는다.
+    var styled = document.querySelectorAll('[style]');
+    for (var i = 0; i < styled.length && i < 200; i++) {
+      var e = styled[i];
+      say('style attr', e.getAttribute('style'));
+      say('style attrNS', e.getAttributeNS(null, 'style'));
+      try { say('style attrNode', e.getAttributeNode('style').value); } catch (er) {}
+      try { say('style attributes[]', e.attributes.style.value); } catch (er) {}
+      say('style.cssText', e.style.cssText);
+      for (var k = 0; k < e.style.length && k < 40; k++) {
+        say('style.getPropertyValue', e.style.getPropertyValue(e.style[k]));
+        try { say('style[prop]', e.style[e.style[k].replace(/-([a-z])/g, function (m, c) { return c.toUpperCase(); })]); } catch (er) {}
+      }
+    }
+
+    // (b) 스타일시트 규칙 — 선언을 안 거치고 텍스트를 통째로 돌려주는 경로.
+    var sheets = document.styleSheets;
+    for (var si = 0; si < sheets.length && si < 40; si++) {
+      var rules = null;
+      try { rules = sheets[si].cssRules; } catch (er) { continue; }
+      for (var ri = 0; rules && ri < rules.length && ri < 300; ri++) {
+        say('CSSRule.cssText', rules[ri].cssText);
+        try { say('CSSRule.style.cssText', rules[ri].style.cssText); } catch (er) {}
+      }
+    }
+
+    // (c) getComputedStyle — **해결된** 값이라 리라이트 결과가 그대로 보인다.
+    var probes = document.querySelectorAll('body, body *');
+    for (var ci = 0; ci < probes.length && ci < 120; ci++) {
+      var cs = null;
+      try { cs = getComputedStyle(probes[ci]); } catch (er) { continue; }
+      var props = ['background-image', 'border-image-source', 'list-style-image', 'mask-image', 'content', 'cursor', 'filter'];
+      for (var pi = 0; pi < props.length; pi++) say('getComputedStyle', cs.getPropertyValue(props[pi]));
+    }
+
+    // (d) 왕복 — 페이지가 쓴 값을 그대로 돌려주는가. 다른 값이 나오면
+    // 그 차이 자체가 멤브레인의 존재를 알려 준다.
+    var rt = document.createElement('div');
+    var mark = 'url("https://example.invalid/zp-roundtrip.png")';
+    rt.style.backgroundImage = mark;
+    if (rt.style.backgroundImage.indexOf('example.invalid') < 0) {
+      add('css roundtrip', 'backgroundImage came back as ' + rt.style.backgroundImage);
+    }
+    say('css roundtrip', rt.style.backgroundImage);
+    say('css roundtrip attr', rt.getAttribute('style'));
+  } catch (e) { add('css-identity', 'err:' + e.name); }
   return JSON.stringify(hits);
 })()
