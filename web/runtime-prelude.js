@@ -685,6 +685,50 @@
       return true;
     } catch { return false; }
   }
+  // ★훅의 **소스**를 가린다. `define`/`defineAccessor` 는 이미 가리는데, 날
+  // `Object.defineProperty` 로 접근자를 심은 자리가 31곳 남아 있었다.
+  // 실측(2026-09-10): 그 자리들 때문에 74개 함수의 소스가 페이지에 그대로
+  // 보였다 — `HTMLScriptElement.src` 게터는 `data-zp-target-url` 이라는
+  // 내부 속성 이름까지 노출했다.
+  //
+  // 전수 스윕으로 뒤늦게 가리는 방법도 재 봤지만 창마다 5~7ms 라 프레임이
+  // 많은 페이지에서 100ms 를 넘는다. 설치 지점에서 가리는 것이 맞다.
+  //
+  // defineAccessor 와 달리 디스크립터를 **그대로** 넘긴다 — configurable 이나
+  // enumerable 을 일부러 다르게 둔 자리가 있어서 의미를 바꾸면 안 된다.
+  function defineMasked(obj, key, desc) {
+    try { Object.defineProperty(obj, key, desc); } catch { return false; }
+    if (typeof desc.get === 'function') toStringMap.set(desc.get, nativeAccessorSource('get', key));
+    if (typeof desc.set === 'function') toStringMap.set(desc.set, nativeAccessorSource('set', key));
+    return true;
+  }
+  // 복수형도 같은 규칙이다 — 한 번에 여러 접근자를 심는 자리가 다섯 곳 있다.
+  function definePropertiesMasked(obj, descs) {
+    try { Object.defineProperties(obj, descs); } catch { return false; }
+    for (const key of Object.getOwnPropertyNames(descs)) {
+      const d = descs[key];
+      if (!d) continue;
+      if (typeof d.get === 'function') toStringMap.set(d.get, nativeAccessorSource('get', key));
+      if (typeof d.set === 'function') toStringMap.set(d.set, nativeAccessorSource('set', key));
+      if (typeof d.value === 'function') maskNativeFunction(d.value, key);
+    }
+    return true;
+  }
+  // 대체 클래스는 프로토타입을 Object.assign 으로 채운다. 그 멤버들도 전부
+  // 네이티브인 척해야 한다 — `WebSocket.prototype.send` 의 소스가 그대로
+  // 보이면 우리 구현이 통째로 읽힌다(실측).
+  function assignMasked(proto, members) {
+    Object.assign(proto, members);
+    for (const key of Object.getOwnPropertyNames(members)) {
+      if (key === 'constructor') continue;
+      const d = Object.getOwnPropertyDescriptor(proto, key);
+      if (!d) continue;
+      if (typeof d.value === 'function') maskNativeFunction(d.value, key);
+      if (typeof d.get === 'function') toStringMap.set(d.get, nativeAccessorSource('get', key));
+      if (typeof d.set === 'function') toStringMap.set(d.set, nativeAccessorSource('set', key));
+    }
+    return proto;
+  }
   // Web IDL puts interface members on the PROTOTYPE; a native singleton like
   // `navigator` / `history` / `performance` has zero own property names. When
   // we defined an accessor on both the prototype and the instance "to be
@@ -1361,7 +1405,7 @@
       if (child) frameWindowOrigins.set(child, new URL(target).origin);
     } catch {}
   }
-  try { Object.defineProperty(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
+  try { defineMasked(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
   function __zpStep(name, fn) {
     zpTrace('install:' + name + ':start');
     try { fn(); zpTrace('install:' + name + ':done'); }
@@ -1618,7 +1662,7 @@
     // NAVER) don't notice because they don't do this specific check.
     const LocationProtoBase = (root.Location && root.Location.prototype) || null;
     const virtualLocation = LocationProtoBase ? Object.create(LocationProtoBase) : {};
-    Object.defineProperties(virtualLocation, {
+    definePropertiesMasked(virtualLocation, {
       href: { get: () => virtualURL.href, set: (v) => setVirtualLocation(v), enumerable: true, configurable: false },
       protocol: { get: () => virtualURL.protocol, enumerable: true, configurable: false },
       host: { get: () => virtualURL.host, enumerable: true, configurable: false },
@@ -1791,7 +1835,7 @@
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
       const proxy = {};
-      Object.defineProperties(proxy, {
+      definePropertiesMasked(proxy, {
         window: { get() { return proxy; }, enumerable: true },
         self: { get() { return proxy; }, enumerable: true },
         globalThis: { get() { return proxy; }, enumerable: true },
@@ -1862,7 +1906,7 @@
     };
     toStringMap.set(scopeLocationGet, nativeAccessorSource('get', 'location'));
     toStringMap.set(scopeLocationSet, nativeAccessorSource('set', 'location'));
-    Object.defineProperty(scopeTarget, 'location', {
+    defineMasked(scopeTarget, 'location', {
       get: scopeLocationGet, set: scopeLocationSet,
       enumerable: nativeWindowLocation.enumerable,
       configurable: nativeWindowLocation.configurable
@@ -2265,7 +2309,7 @@
         // `configurable: false` 로 심으므로 같은 프로토타입에 두 번 오면 무조건
         // 던진다. 삼켜지긴 하지만 실측에서 로드당 천 단위였다.
         if (propertyLocked(ctor.prototype, 'constructor')) continue;
-        Object.defineProperty(ctor.prototype, 'constructor', {
+        defineMasked(ctor.prototype, 'constructor', {
           get() { return constructorOverrides.get(this) || wrapper; },
           set(value) { try { constructorOverrides.set(this, value); } catch {} },
           enumerable: false, configurable: false
@@ -2503,7 +2547,7 @@
         try { Object.defineProperty(ZPXMLHttpRequest.prototype, k, { value: v, enumerable: true, writable: false, configurable: false }); } catch {}
         try { Object.defineProperty(ZPXMLHttpRequest, k, { value: v, enumerable: true, writable: false, configurable: false }); } catch {}
       }
-      Object.assign(ZPXMLHttpRequest.prototype, {
+      assignMasked(ZPXMLHttpRequest.prototype, {
         constructor: ZPXMLHttpRequest,
         // Chrome-only Privacy Sandbox hooks. We do not implement either — the
         // proxy never forwards attribution or private-token material — but
@@ -2611,7 +2655,7 @@
         runEventSource(this);
       }
       installEventMethods(ZPEventSource.prototype);
-      Object.assign(ZPEventSource.prototype, {
+      assignMasked(ZPEventSource.prototype, {
         constructor: ZPEventSource,
         CONNECTING, OPEN, CLOSED,
         close() {
@@ -2861,7 +2905,7 @@
     ZPWebSocket.CONNECTING = CONNECTING; ZPWebSocket.OPEN = OPEN; ZPWebSocket.CLOSING = CLOSING; ZPWebSocket.CLOSED = CLOSED;
     ZPWebSocket.prototype = { CONNECTING, OPEN, CLOSING, CLOSED };
     installEventMethods(ZPWebSocket.prototype);
-    Object.assign(ZPWebSocket.prototype, {
+    assignMasked(ZPWebSocket.prototype, {
       constructor: ZPWebSocket,
       send(data) {
         if (this.readyState === CONNECTING) throw normalizedError('InvalidStateError');
@@ -2916,7 +2960,7 @@
       Object.defineProperty(ZPWebSocket.prototype, 'constructor', {
         value: ZPWebSocket, writable: true, enumerable: false, configurable: true,
       });
-      Object.defineProperty(ZPWebSocket.prototype, 'bufferedAmount', {
+      defineMasked(ZPWebSocket.prototype, 'bufferedAmount', {
         configurable: false,
         enumerable: true, // Web IDL attributes are enumerable; these two were the
                           // only members of the replaced classes still hiding.
@@ -2925,7 +2969,7 @@
     } catch {}
     // binaryType: strict enum; invalid assignments silently dropped (browser-equivalent).
     try {
-      Object.defineProperty(ZPWebSocket.prototype, 'binaryType', {
+      defineMasked(ZPWebSocket.prototype, 'binaryType', {
         configurable: false,
         enumerable: true,
         get() { return this._binaryType; },
@@ -3015,7 +3059,7 @@
         else signal.addEventListener('abort', abort, { once: true });
       }
     }
-    Object.defineProperties(ZPWebSocketStream.prototype, {
+    definePropertiesMasked(ZPWebSocketStream.prototype, {
       url: { get() { return stateOf(this).ws.url; }, enumerable: true },
       opened: { get() { return stateOf(this).opened; }, enumerable: true },
       closed: { get() { return stateOf(this).closed; }, enumerable: true }
@@ -3343,7 +3387,7 @@
     // delete attempt doesn't unwedge our installation.
     try { delete w.chrome; } catch {}
     try {
-      Object.defineProperty(w, 'chrome', {
+      defineMasked(w, 'chrome', {
         get() { return virtualChrome; },
         set() { /* swallow */ },
         enumerable: true, // real Chrome's window.chrome is enumerable
@@ -4338,7 +4382,7 @@
       );
     }
     // window.origin / self.origin getters — point at virtual target origin.
-    try { Object.defineProperty(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+    try { defineMasked(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
     // D7 (removed): we used to redefine `performance.timeOrigin` to a
     // "target navigation" baseline. `boot.navigationStart` is never assigned
     // anywhere in the tree, so the baseline was always `Date.now()` at prelude
@@ -4379,7 +4423,7 @@
       const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
       if (nameDesc && typeof nameDesc.get === 'function') {
         const nativeName = nameDesc.get;
-        Object.defineProperty(entryProto, 'name', {
+        defineMasked(entryProto, 'name', {
           get() { return deproxyURL(nativeName.call(this), { fallback: 'share' }); },
           configurable: true,
           enumerable: nameDesc.enumerable
@@ -4469,7 +4513,7 @@
           const nativeGet = desc.get;
           const fix = timingOverrides[key];
           try {
-            Object.defineProperty(resProto, key, {
+            defineMasked(resProto, key, {
               get() { try { return fix(this, nativeGet.call(this)); } catch { return nativeGet.call(this); } },
               configurable: true,
               enumerable: desc.enumerable,
@@ -4539,7 +4583,7 @@
           return Reflect.construct(NativePO, [wrapped], new.target || ZPPerformanceObserver);
         };
         try { ZPPerformanceObserver.prototype = NativePO.prototype; } catch {}
-        try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', { get: () => NativePO.supportedEntryTypes, configurable: true }); } catch {}
+        try { defineMasked(ZPPerformanceObserver, 'supportedEntryTypes', { get: () => NativePO.supportedEntryTypes, configurable: true }); } catch {}
         define(w, 'PerformanceObserver', ZPPerformanceObserver);
       }
     } catch {}
@@ -4567,7 +4611,7 @@
         const nativePerm = nativePermDesc && nativePermDesc.get
           ? nativePermDesc.get.bind(NativeN)
           : () => (nativePermDesc ? nativePermDesc.value : 'default');
-        Object.defineProperty(NativeN, 'permission', {
+        defineMasked(NativeN, 'permission', {
           get() {
             try {
               const stored = prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey);
@@ -4669,7 +4713,7 @@
     const storageProto = Object.create(
       (typeof Storage === 'function' && Storage.prototype) ? Storage.prototype : Object.prototype
     );
-    Object.defineProperty(storageProto, 'length', {
+    defineMasked(storageProto, 'length', {
       get() { return facade.length; }, enumerable: false, configurable: true,
     });
     for (const name of ['key', 'getItem', 'setItem', 'removeItem', 'clear']) {
@@ -5048,7 +5092,7 @@
     if (Native.svgDataset && Native.svgDataset.get && w.SVGElement) installDatasetHook(w.SVGElement.prototype, Native.svgDataset);
   }
   function installDatasetHook(proto, desc) {
-    try { Object.defineProperty(proto, 'dataset', { get() { return filteredDataset(desc.get.call(this)); }, enumerable: desc.enumerable, configurable: false }); } catch {}
+    try { defineMasked(proto, 'dataset', { get() { return filteredDataset(desc.get.call(this)); }, enumerable: desc.enumerable, configurable: false }); } catch {}
   }
   function isIndexKey(prop) {
     return typeof prop !== 'symbol' && /^(?:0|[1-9]\d*)$/.test(String(prop));
@@ -5056,6 +5100,11 @@
   // 컬렉션의 **항목**인가 (Node 이거나 Attr). 술어는 항목에만 뜻이 있다.
   function isFilterableItem(value) {
     return !!value && typeof value === 'object' && (value.nodeType !== undefined || value.ownerElement !== undefined);
+  }
+  // 프록시 트랩이 즉석에서 만드는 메서드에 네이티브 소스를 입힌다.
+  function maskedBound(fn, key) {
+    maskNativeFunction(fn, key);
+    return fn;
   }
   function filteredCollection(raw, predicate) {
     // ★2026-08-24 — 예전에는 `nth`/`length` 가 **호출될 때마다 원본 전체를
@@ -5112,13 +5161,15 @@
     const collection = new Proxy({}, {
       get(_target, prop) {
         if (prop === 'length') return length();
-        if (prop === 'item' && inRaw('item')) return itemFn || (itemFn = index => nth(Number(index) || 0));
-        if (prop === 'getNamedItem' && inRaw('getNamedItem')) return getNamedItemFn || (getNamedItemFn = name => {
+        // 프록시 트랩이 만드는 함수는 설치 시점 마스킹이 못 닿는다 —
+        // 만들 때 가린다(캐시하므로 한 번뿐이다).
+        if (prop === 'item' && inRaw('item')) return itemFn || (itemFn = maskedBound(index => nth(Number(index) || 0), 'item'));
+        if (prop === 'getNamedItem' && inRaw('getNamedItem')) return getNamedItemFn || (getNamedItemFn = maskedBound(name => {
           const lower = String(name || '').toLowerCase();
           if (isZPAttrName(lower)) return null;
           for (let i = 0; raw && i < raw.length; i++) if (raw[i] && String(raw[i].name).toLowerCase() === lower && predicate(raw[i])) return raw[i];
           return null;
-        });
+        }, 'getNamedItem'));
         // 순회는 **실제 DOM 이 쓰는 바로 그 함수**를 돌려준다. 셋 다 @@iterator 가
         // `Array.prototype.values` 이고(측정), 그 함수들에는 브랜드 체크가 없어
         // `this` 의 `length`/인덱스만 읽는다 — 즉 프록시를 `this` 로 받으면
@@ -5422,7 +5473,7 @@
       return shouldFilterTag(tag) ? filteredCollection(raw, node => !isZPAssetNode(node)) : raw;
     });
     const scriptsDesc = Object.getOwnPropertyDescriptor(w.Document.prototype, 'scripts') || Native.documentScripts;
-    if (scriptsDesc && scriptsDesc.get) try { Object.defineProperty(w.Document.prototype, 'scripts', { get() { return filteredCollection(scriptsDesc.get.call(this), node => !isZPAssetNode(node)); }, configurable: false }); } catch {}
+    if (scriptsDesc && scriptsDesc.get) try { defineMasked(w.Document.prototype, 'scripts', { get() { return filteredCollection(scriptsDesc.get.call(this), node => !isZPAssetNode(node)); }, configurable: false }); } catch {}
     const docQS = w.Document.prototype.querySelector;
     const docQSA = w.Document.prototype.querySelectorAll;
     const elemQS = w.Element.prototype.querySelector;
@@ -5640,7 +5691,7 @@
       const owner = namedNodeMapOwners.get(this);
       return owner ? attachAttributeNode(owner, attr, true) : Native.namedSetNamedItemNS.call(this, attr);
     });
-    if (Native.attrValue && Native.attrValue.set && w.Attr) try { Object.defineProperty(w.Attr.prototype, 'value', {
+    if (Native.attrValue && Native.attrValue.set && w.Attr) try { defineMasked(w.Attr.prototype, 'value', {
       get() {
         const owner = this.ownerElement;
         if (!owner) return Native.attrValue.get.call(this);
@@ -5734,7 +5785,7 @@
       if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
       return names;
     });
-    if (Native.elementAttributes && Native.elementAttributes.get) try { Object.defineProperty(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
+    if (Native.elementAttributes && Native.elementAttributes.get) try { defineMasked(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
     installZPAttrNamespace(w);
     installIntegrityProp(w.HTMLScriptElement && w.HTMLScriptElement.prototype);
     installIntegrityProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
@@ -5789,7 +5840,7 @@
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
       try {
-        Object.defineProperty(proto, prop, {
+        defineMasked(proto, prop, {
           get() { return d.get ? sanitizeSerializedNode(this, prop === 'outerHTML') : ''; },
           set(v) {
             if (this && this.localName === 'template' && prop === 'innerHTML') {
@@ -6074,6 +6125,8 @@
               : k === 'getPropertyValue'
                 ? function (p) { return deproxyURL(v.call(t, p), { scan: true }); }
                 : v.bind(t);
+            // 프록시 트랩이 만드는 함수라 설치 시점 마스킹이 못 닿는다.
+            maskNativeFunction(bound, k);
             per.set(k, bound);
           }
           return bound;
@@ -6106,10 +6159,15 @@
         proto = iface.prototype;
       } catch { continue; }
       if (!proto || typeof proto !== 'object') continue;
-      const sd = propertyDescriptor(proto, 'style');
+      // ★**own** 디스크립터만 본다. propertyDescriptor 는 프로토타입 체인을
+      // 타므로 그걸 쓰면 상속된 style 을 서브클래스마다 own 으로 새로 만든다 —
+      // 실측(2026-09-10): own style 을 가진 프로토타입이 대조군 13개 vs 우리
+      // 157개가 되어, 고치려던 지문보다 훨씬 큰 지문을 만든다. 네이티브가
+      // 선언한 13개만 감싸도 서브클래스는 상속으로 전부 덮인다.
+      const sd = Object.getOwnPropertyDescriptor(proto, 'style');
       if (!sd || !sd.get) continue;
       try {
-        Object.defineProperty(proto, 'style', {
+        defineMasked(proto, 'style', {
           get() { return containStyleDeclaration(sd.get.call(this)); },
           set: sd.set ? function (v) { return sd.set.call(this, rewriteCSSText(v)); } : undefined,
           enumerable: sd.enumerable,
@@ -6152,7 +6210,7 @@
           || propertyDescriptor(w.Node && w.Node.prototype, prop);
         if (!d || !d.set) continue;
         try {
-          Object.defineProperty(styleProto, prop, {
+          defineMasked(styleProto, prop, {
             get() { return d.get ? originalStyleText(this, d.get.call(this)) : ''; },
             set(v) { originalTextMeta.set(this, String(v == null ? '' : v)); d.set.call(this, rewriteCSSText(v)); },
             configurable: false
@@ -6204,7 +6262,7 @@
     const ruleProto = w.CSSRule && w.CSSRule.prototype;
     const dRuleText = ruleProto && propertyDescriptor(ruleProto, 'cssText');
     if (dRuleText && dRuleText.get) try {
-      Object.defineProperty(ruleProto, 'cssText', {
+      defineMasked(ruleProto, 'cssText', {
         get() { return deproxyURL(dRuleText.get.call(this), { scan: true }); },
         set: dRuleText.set ? function (v) { return dRuleText.set.call(this, rewriteCSSText(v)); } : undefined,
         enumerable: dRuleText.enumerable,
@@ -6221,7 +6279,7 @@
       // 인스턴스 own 이라 프록시가 맡는다(위 주석).
       const dText = propertyDescriptor(declProto, 'cssText');
       if (dText && dText.set) try {
-        Object.defineProperty(declProto, 'cssText', {
+        defineMasked(declProto, 'cssText', {
           get() { return deproxyURL(dText.get ? dText.get.call(this) : '', { scan: true }); },
           set(v) { dText.set.call(this, rewriteCSSText(v)); },
           configurable: false
@@ -6236,7 +6294,7 @@
       const d = propertyDescriptor(scriptProto, prop) || propertyDescriptor(w.Node && w.Node.prototype, prop);
       if (!d || !d.set) continue;
       try {
-        Object.defineProperty(scriptProto, prop, {
+        defineMasked(scriptProto, prop, {
           get() { return d.get ? originalScriptText(this, d.get.call(this)) : ''; },
           set(v) { d.set.call(this, v); if (this.isConnected) prepareScriptElement(this); },
           configurable: false
@@ -6249,7 +6307,7 @@
     const d = propertyDescriptor(proto, 'src');
     if (!d || !d.get) return;
     try {
-      Object.defineProperty(proto, 'src', {
+      defineMasked(proto, 'src', {
         get() {
           // ★이미 프록시 URL 로 들어온 src 는 `setScriptSource` 의 CONTROL_PREFIX
           // 분기를 타며 **스태시 없이** 통과한다(서버측 htmltx 가 고쳐 내려보낸
@@ -6287,7 +6345,7 @@
     if (propertyLocked(proto, 'href')) return;
     const hrefDescriptor = propertyDescriptor(proto, 'href');
     if (hrefDescriptor && hrefDescriptor.get) try {
-      Object.defineProperty(proto, 'href', {
+      defineMasked(proto, 'href', {
         get() { return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || hrefDescriptor.get.call(this); },
         set(v) {
           if (isBlockedLink(this) || hasSuppressedBlockedLinkRel(this)) return blockLinkURL(this, v);
@@ -6307,7 +6365,7 @@
     } catch {}
     const relDescriptor = propertyDescriptor(proto, 'rel');
     if (relDescriptor && relDescriptor.get) try {
-      Object.defineProperty(proto, 'rel', {
+      defineMasked(proto, 'rel', {
         get() { return relDescriptor.get.call(this); },
         set(v) {
           const value = String(v);
@@ -7169,11 +7227,11 @@
       if (!proto) return;
       const win = frameDescriptor(proto, 'contentWindow');
       if (win && win.get) {
-        try { Object.defineProperty(proto, 'contentWindow', { get() { return containFrameWindow(win.get.call(this), this); }, configurable: false, enumerable: true }); } catch {}
+        try { defineMasked(proto, 'contentWindow', { get() { return containFrameWindow(win.get.call(this), this); }, configurable: false, enumerable: true }); } catch {}
       }
       const doc = frameDescriptor(proto, 'contentDocument');
       if (doc && doc.get) {
-        try { Object.defineProperty(proto, 'contentDocument', { get() { const childDoc = doc.get.call(this); if (childDoc && childDoc.defaultView) containFrameWindow(childDoc.defaultView, this); return childDoc; }, configurable: false, enumerable: true }); } catch {}
+        try { defineMasked(proto, 'contentDocument', { get() { const childDoc = doc.get.call(this); if (childDoc && childDoc.defaultView) containFrameWindow(childDoc.defaultView, this); return childDoc; }, configurable: false, enumerable: true }); } catch {}
       }
     }
     function frameDescriptor(proto, prop) {
@@ -7223,7 +7281,7 @@
       const d = Object.getOwnPropertyDescriptor(proto, prop);
       if (!d || !d.set) return;
       try {
-        Object.defineProperty(proto, prop, {
+        defineMasked(proto, prop, {
           get: prop === 'srcdoc'
             ? function () { return srcdocMeta.has(this) ? srcdocMeta.get(this) : d.get.call(this); }
             : function () {
@@ -7433,7 +7491,7 @@
     // class identity (target code may do `wt instanceof WebTransport`
     // against our class object), so we define instance accessors.
     function forward(name) {
-      Object.defineProperty(ZPWebTransport.prototype, name, {
+      defineMasked(ZPWebTransport.prototype, name, {
         configurable: true,
         get() { try { return this._native[name]; } catch { return undefined; } },
       });
@@ -7563,7 +7621,7 @@
     // Forward every spec method/getter; intercept SDP-bearing ones so we
     // can route them through the gateway in addition to the native PC.
     function delegate(name) {
-      Object.defineProperty(ZPRTCPeerConnection.prototype, name, {
+      defineMasked(ZPRTCPeerConnection.prototype, name, {
         configurable: true,
         get() { try { return this._native[name]; } catch { return undefined; } },
       });
@@ -7898,7 +7956,7 @@
     if (childFunction && childFunction.prototype) try {
       // Constructor-chain compilation must use the same child-owned gate.
       const childConstructorOverrides = new WeakMap();
-      Object.defineProperty(childFunction.prototype, 'constructor', {
+      defineMasked(childFunction.prototype, 'constructor', {
         get() { return childConstructorOverrides.get(this) || childFunctionFacade; },
         set(value) { try { childConstructorOverrides.set(this, value); } catch {} },
         enumerable: false, configurable: false
@@ -7970,7 +8028,7 @@
       for (const name of /* intentionally empty — see D6 in PHASE2 plan */ []) {
         const deny = function(){ throw normalizedError('NotSupportedError'); };
         toStringMap.set(deny, nativeAccessorSource('get', name));
-        try { Object.defineProperty(nav, name, { get: deny, configurable: false }); } catch {}
+        try { defineMasked(nav, name, { get: deny, configurable: false }); } catch {}
       }
       // D6: getUserMedia / getDisplayMedia / enumerateDevices pass through to
       // native. Browser permission prompt is the consent boundary, and these

@@ -635,4 +635,102 @@ String(Object.getOwnPropertyDescriptor(HTMLElement.prototype,'style').get)
 
 `style` / `cssText` / `<style>.textContent` 세터가 전부 이 상태다. 이번 변경이
 만든 것이 아니라 전부터 그랬고, 별도 항목으로 다뤄야 한다.
+## <a id="훅-소스-노출"></a>훅이 자기 소스를 보여 줬고, 그걸 고치러 가다 내가 만든 회귀를 먼저 찾았다 (2026-09-10)
+
+`Function.prototype.toString` 은 이미 가려져 있다. 다만 그 마스킹은
+`define` / `defineAccessor` 를 **지날 때만** 등록된다. 날 `Object.defineProperty`
+로 접근자를 심으면 등록이 안 되고, 그러면
+
+```js
+String(Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style').get)
+// → "get(){return eo(s.get.call(this))}"          ← 우리 코드가 그대로
+String(Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src').get)
+// → "...i.getAttribute.call(this,\"data-zp-target-url\")..."  ← 내부 속성 이름까지
+```
+
+한 줄이면 잡히는 지문이고, 두 번째 것은 우리 내부 속성 이름을 **알려 준다**.
+
+### ★먼저 나온 것: 내가 만든 회귀 (같은 날 앞 커밋)
+
+전수 스윕을 돌리자 `SVGViewElement.style` / `Option.style` / `Image.style` … 이
+**own 프로퍼티**로 잡혔다. 진짜 브라우저에는 없다. 원인은 앞 커밋(`9a02be9`)의
+
+```js
+const sd = propertyDescriptor(proto, 'style');   // ← 이 헬퍼는 체인을 탄다
+```
+
+`propertyDescriptor` 는 프로토타입 체인을 올라가며 찾는다. 그래서 `SVGElement`
+에서 상속받은 `style` 을 서브클래스마다 발견하고, `defineProperty` 로 **거기에
+새로 own 을 만들었다.**
+
+| own `style` 을 가진 프로토타입 | |
+|---|---|
+| 대조군(직접 로드) | **13** |
+| 프록시 (회귀 상태) | **157** |
+
+고치려던 지문(soure 노출)보다 훨씬 큰 지문을 만든 셈이다. `Object.
+getOwnPropertyDescriptor`(own 전용)로 바꾸니 13 으로 돌아왔다. 네이티브가 선언한
+13개만 감싸도 서브클래스는 상속으로 전부 덮인다.
+
+**규칙**: "X 를 가진 인터페이스를 전부 감싼다" 를 구현할 때는 **own 디스크립터**를
+봐야 한다. 체인을 타는 헬퍼를 쓰면 감싸는 게 아니라 **새로 만든다.**
+
+### 노출 범위 (실측)
+
+| | 소스가 보이는 함수 |
+|---|---|
+| 처음 (회귀 포함) | 368 |
+| own 회귀를 고친 뒤 | 74 |
+| 마스킹을 고친 뒤 | **1** (taskweaver 자신, 대조군에도 있음) |
+
+74건의 출처는 날 `Object.defineProperty` 31곳, 날 `Object.defineProperties`
+3곳, 대체 클래스의 `Object.assign` 3곳, 프록시 트랩이 만드는 바인딩 메서드였다.
+
+### 왜 부팅 스윕이 아니라 설치 지점인가
+
+"설치 후 한 번 훑어서 비네이티브를 전부 가린다" 를 재 봤다. 창마다 **5~7ms**
+(인터페이스 955개, 함수 9,431개). 프레임이 25개면 100ms 를 넘는다. 그래서
+설치 지점에서 가린다: `defineMasked` / `definePropertiesMasked` / `assignMasked`.
+
+`defineAccessor` 로 통째로 바꾸지 않은 이유는 그것이 `configurable:false` 를
+강제하기 때문이다 — `window.origin` 처럼 일부러 `true` 로 둔 자리가 있다.
+새 헬퍼는 디스크립터를 **그대로** 넘기고 마스킹만 더한다.
+
+### 가드 세 겹, 그리고 각각이 놓친 것
+
+1. 정적 스캐너 — 날 `defineProperty`/`defineProperties` 접근자를 금지한다.
+   **처음 판은 주석 뒤의 접근자를 놓쳤다.**
+   ```js
+   Object.defineProperty(ZPWebSocket.prototype, 'bufferedAmount', {
+     enumerable: true, // Web IDL attributes are enumerable; …
+     get() { … },      // ← 앞 토큰이 `,` 가 아니라 주석 텍스트가 된다
+   ```
+   줄을 이어 붙이기 전에 `//` 를 지워야 한다. 또 창을 **다음 define 호출 앞에서**
+   끊어야 한다 — 안 끊으면 앞 자리가 뒤 자리의 `get` 을 빌려 거짓 양성이 난다.
+2. 헬퍼 동작 테스트 — 스캐너는 "헬퍼를 **부르는가**" 만 본다. 헬퍼가 마스킹을
+   그만두는 변이는 안 물었다(실측). 그래서 헬퍼 셋을 뜯어 실행하고 실제로
+   toStringMap 에 등록되는지 본다.
+3. 브라우저 탐지기 축 — 프로토타입을 통째로 훑는다.
+
+변이 6/6.
+
+### 탐지기가 페이지 코드를 우리 것으로 오인했다
+
+첫 실행에서 naver 27건. 전부 **naver 자신의 대문자 전역**(`Agent`, `Flash` …)
+이었다. 대문자로 시작하는 전역이라고 다 WebIDL 인터페이스가 아니다.
+
+관문: **생성자 자신이 네이티브인 것만 본다**(`Function.prototype.toString.call
+(iface)` 가 `[native code]`). 우리 대체 클래스는 `define` 이 이미 가리므로
+관문을 통과한다. 고친 뒤 naver 0 / wikipedia 0 / github 2.
+
+github 2건은 **GitHub 자신이** `Node.insertBefore` / `removeChild` 를 덮어쓴
+것이다(소스에 `BROWSER_EXTENSION`). 우리 것이 아니고, 축이 그걸 보고하는 것은
+정상이다 — 이제 0 이 아닌 건수는 "페이지가 네이티브를 갈아끼웠다" 는 뜻이다.
+
+### 남은 한계 — 리라이트된 페이지 코드는 자기 소스에 `__zp_get` 이 보인다
+
+naver 의 `Agent.dump` 를 읽으면 `__zp_get(globalThis,"document").write(…)` 가
+그대로 나온다. AST 리라이트의 본질적 결과이고 이 커밋의 범위가 아니다.
+`new Function` 본문은 `dynamicSource` 로 이미 원본을 돌려주지만, 정적으로
+리라이트된 함수는 복구할 원본이 없다. 별도 항목으로 다뤄야 한다.
 

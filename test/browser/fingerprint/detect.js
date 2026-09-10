@@ -304,5 +304,77 @@
     say('css roundtrip', rt.style.backgroundImage);
     say('css roundtrip attr', rt.getAttribute('style'));
   } catch (e) { add('css-identity', 'err:' + e.name); }
+  // ⑪ 훅의 소스 — 가장 값싼 탐지다. 네이티브 자리에 있는 함수의 toString 이
+  // `[native code]` 가 아니면 누가 갈아 끼운 것이다. 목록 없이 인터페이스
+  // 프로토타입을 통째로 훑는다. 2026-09-10 실측: 74개가 소스를 노출했고,
+  // HTMLScriptElement.src 게터는 data-zp-target-url 까지 보여 줬다.
+  try {
+    var NATIVE = /\{\s*\[native code\]\s*\}/;
+    var seenFn = 0;
+    var look = function (where, kind, fn) {
+      if (typeof fn !== 'function') return;
+      seenFn++;
+      var src;
+      try { src = Function.prototype.toString.call(fn); } catch (e) { return; }
+      if (NATIVE.test(src)) return;
+      // ★측정 도구 자신은 뺀다. taskweaver 가 페이지에 주입하는 리스너 브리지로,
+      // **대조군(직접 로드)에도 똑같이 있다**(실측 2026-09-10). 우리 흔적이
+      // 아니므로 세면 매번 1건이 상수로 깔려 0 을 못 본다.
+      if (where.indexOf('__internal_unstable_') >= 0) return;
+      add('hook source', where + ' [' + kind + '] ' + src.replace(/\s+/g, ' ').slice(0, 80));
+    };
+    var names = Object.getOwnPropertyNames(window);
+    for (var i = 0; i < names.length; i++) {
+      var c0 = names[i].charCodeAt(0);
+      if (c0 < 65 || c0 > 90) continue;
+      var proto;
+      try {
+        var iface = window[names[i]];
+        if (typeof iface !== 'function') continue;
+        // ★생성자 자신이 네이티브인 것만 본다. 페이지가 만든 대문자 생성자의
+        // 메서드는 당연히 비네이티브라 세면 거짓 양성이 쏟아진다
+        // (naver 실측 2026-09-10: Agent/Flash 등 27건).
+        if (!NATIVE.test(Function.prototype.toString.call(iface))) continue;
+        proto = iface.prototype;
+      } catch (e) { continue; }
+      if (!proto || typeof proto !== 'object') continue;
+      var keys;
+      try { keys = Object.getOwnPropertyNames(proto); } catch (e) { continue; }
+      for (var k = 0; k < keys.length; k++) {
+        var d;
+        try { d = Object.getOwnPropertyDescriptor(proto, keys[k]); } catch (e) { continue; }
+        if (!d) continue;
+        look(names[i] + '.' + keys[k], 'method', d.value);
+        look(names[i] + '.' + keys[k], 'getter', d.get);
+        look(names[i] + '.' + keys[k], 'setter', d.set);
+      }
+    }
+    // 프록시 트랩이 만들어 주는 인스턴스 메서드는 프로토타입에 없다.
+    try {
+      var probe = document.createElement('div');
+      look('el.style.setProperty', 'bound', probe.style.setProperty);
+      look('el.style.getPropertyValue', 'bound', probe.style.getPropertyValue);
+      look('el.attributes.getNamedItem', 'bound', probe.attributes.getNamedItem);
+    } catch (e) {}
+    // 프로토타입 모양 자체도 본다 — style 을 own 으로 가진 인터페이스 수가
+    // 진짜 브라우저(13)와 다르면 그 차이만으로 프록시가 드러난다.
+    var ownStyle = 0;
+    var seenProto = [];
+    for (var j = 0; j < names.length; j++) {
+      var c = names[j].charCodeAt(0);
+      if (c < 65 || c > 90) continue;
+      var pr;
+      try {
+        var f2 = window[names[j]];
+        if (typeof f2 !== 'function') continue;
+        if (!NATIVE.test(Function.prototype.toString.call(f2))) continue;
+        pr = f2.prototype;
+      } catch (e) { continue; }
+      if (!pr || typeof pr !== 'object' || seenProto.indexOf(pr) >= 0) continue;
+      seenProto.push(pr);
+      if (Object.getOwnPropertyDescriptor(pr, 'style')) ownStyle++;
+    }
+    if (ownStyle > 40) add('prototype shape', 'own style accessors: ' + ownStyle + ' (browser has ~13)');
+  } catch (e) { add('hook source', 'err:' + e.name); }
   return JSON.stringify(hits);
 })()

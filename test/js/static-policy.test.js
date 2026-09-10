@@ -275,9 +275,10 @@ test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서�
   const next = rt.indexOf('\n  function ', start + 1);
   const src = rt.slice(start, next < 0 ? undefined : next);
   const contain = new Function(
-    'styleDeclProxies', 'styleDeclMethods', 'rewriteCSSText',
+    'styleDeclProxies', 'styleDeclMethods', 'rewriteCSSText', 'deproxyURL', 'maskNativeFunction',
     src + '\nreturn containStyleDeclaration;'
-  )(new WeakMap(), new WeakMap(), (v) => String(v).replace('https://cdn.example.com', '/zp/api/fetch'));
+  )(new WeakMap(), new WeakMap(), (v) => String(v).replace('https://cdn.example.com', '/zp/api/fetch'),
+    (v) => String(v).replace('/zp/api/fetch', 'https://cdn.example.com'), () => {});
 
   // CSS 프로퍼티는 이 엔진에서 **인스턴스의 own data property** 다. 프로토타입
   // 훅으로는 못 잡아서 프록시로 간다 — 그래서 여기 테스트도 평범한 객체다.
@@ -577,6 +578,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
   // 실제 구현을 뜯어 실행한다 — 창 3단을 흉내 내고 그 위에서 CMP 루프를 돈다.
   const src = rt.slice(start, end);
   const make = new Function('root', 'scope', 'postMessageWrapperFor', 'crossWindowProxyCache', 'crossWindowTargets',
+    'definePropertiesMasked',
     src + '\nreturn safeCrossWindow;');
 
   const top = { name: 'top' };
@@ -588,7 +590,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
 
   // leaf 실행 컨텍스트: root=leaf, scope=leaf 의 가상 window
   const scope = { name: 'scope(leaf)' };
-  const safeCrossWindow = make(leaf, scope, () => () => {}, new WeakMap(), new WeakMap());
+  const safeCrossWindow = make(leaf, scope, () => () => {}, new WeakMap(), new WeakMap(), Object.defineProperties);
 
   const windowTop = safeCrossWindow(top);
   let w = scope;
@@ -623,8 +625,8 @@ test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', (
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
   assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
-  const make = new Function('isZPAttrName',
-    rt.slice(start, end) + '\nreturn filteredCollection;')(() => false);
+  const make = new Function('isZPAttrName', 'maskNativeFunction',
+    rt.slice(start, end) + '\nreturn filteredCollection;')(() => false, () => {});
 
   // NodeList 흉내 — 순회 메서드와 item 을 가진 대상.
   const nlRaw = [{ name: 'a' }, { name: 'b' }];
@@ -982,8 +984,8 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
   assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
-  const make = new Function('isZPAttrName',
-    rt.slice(start, end) + '\nreturn filteredCollection;')(n => String(n || '').startsWith('data-zp-'));
+  const make = new Function('isZPAttrName', 'maskNativeFunction',
+    rt.slice(start, end) + '\nreturn filteredCollection;')(n => String(n || '').startsWith('data-zp-'), () => {});
 
   // NamedNodeMap 흉내 — named getter 가 이름으로 Attr 를 돌려준다.
   const hidden = { name: 'data-zp-target-url', value: 'https://target.example/', ownerElement: {} };
@@ -1078,10 +1080,16 @@ test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => 
 // containEveryStyleAccessor 를 격리 실행하기 위한 스텁. 규칙이 어디로
 // 흐르는지 보려고 호출을 기록한다.
 const L_STUB = [
-  'const log = { contained: [], rewrote: [] };',
-  'function propertyDescriptor(o, k) { return Object.getOwnPropertyDescriptor(o, k); }',
+  'const log = { contained: [], rewrote: [], masked: [] };',
+  'function propertyDescriptor(o, k) { for (let p = o; p; p = Object.getPrototypeOf(p)) { const d = Object.getOwnPropertyDescriptor(p, k); if (d) return d; } return null; }',
   'function containStyleDeclaration(d) { log.contained.push(d); return { contained: d }; }',
   'function rewriteCSSText(v) { log.rewrote.push(v); return \'REWROTE:\' + v; }',
+  'function defineMasked(obj, key, desc) {',
+  '  try { Object.defineProperty(obj, key, desc); } catch (e) { return false; }',
+  '  if (typeof desc.get === \'function\') log.masked.push(\'get \' + key);',
+  '  if (typeof desc.set === \'function\') log.masked.push(\'set \' + key);',
+  '  return true;',
+  '}',
 ].join('\n');
 // ── CSS 는 목록이 아니라 규칙으로 감싼다 + 읽기에서 되돌린다 (2026-09-10) ──
 //
@@ -1120,7 +1128,11 @@ test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감�
   // 감싸면 sd.get 이 없어 읽는 순간 TypeError 가 난다.
   function DataStyle() {}
   DataStyle.prototype.style = 'plain-value';
-  const w = { HTMLElementish, CSSRuleish, FutureStyledThing, NoStyle, DataStyle, NotAFunction: 42 };
+  // style 을 **상속만** 하는 서브클래스는 감싸면 안 된다 — own 프로퍼티가
+  // 새로 생겨 진짜 브라우저와 프로토타입 모양이 달라진다(실측 13 vs 157).
+  function Subclassish() {}
+  Subclassish.prototype = Object.create(HTMLElementish.prototype);
+  const w = { HTMLElementish, CSSRuleish, FutureStyledThing, NoStyle, DataStyle, Subclassish, NotAFunction: 42 };
   // 소문자 전역은 읽지도 말아야 한다(게터 부작용).
   let lowerRead = 0;
   Object.defineProperty(w, 'documentish', { get() { lowerRead++; return {}; }, enumerable: true, configurable: true });
@@ -1131,6 +1143,8 @@ test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감�
   assert.equal(count, 3, 'style 접근자를 가진 인터페이스 3개를 모두 감싸야 한다 (미래 이름 포함)');
   assert.equal(lowerRead, 0, '소문자 전역을 읽었다 — 게터 부작용을 건드린다');
   assert.equal(DataStyle.prototype.style, 'plain-value', '접근자가 아닌 style 을 감쌌다 — 읽는 순간 던진다');
+  assert.equal(Object.getOwnPropertyDescriptor(Subclassish.prototype, 'style'), undefined,
+    '상속만 하는 프로토타입에 own style 을 만들었다 — 프로토타입 모양이 브라우저와 달라진다');
 
   // 읽기는 containStyleDeclaration 을 지난다.
   const el = new HTMLElementish();
@@ -1143,6 +1157,8 @@ test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감�
   assert.equal(Object.getOwnPropertyDescriptor(CSSRuleish.prototype, 'style').set, undefined,
     '읽기 전용 style 에 세터가 생겼다');
   assert.ok(log.contained.includes('DECL') && log.rewrote.includes('url(x)'));
+  // 설치가 마스킹 헬퍼를 지나야 훅 소스가 페이지에 안 보인다.
+  assert.ok(log.masked.includes('get style'), 'style 접근자를 마스킹 없이 심었다 — 훅 소스가 그대로 보인다');
 });
 
 test('CSS: 프로퍼티 이름 목록이 돌아오지 않았다', () => {
@@ -1186,4 +1202,101 @@ test('E3 크기 가드: zp_page_bundle_bg.wasm 은 500 KB 이하', (t) => {
   const size = fs.statSync(wasmPath).size;
   assert.ok(size <= 500 * 1024,
     'zp_page_bundle_bg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 500 KB');
+});
+
+// ── 훅의 소스는 페이지에 보이면 안 된다 (2026-09-10) ────────────────────
+//
+// `Function.prototype.toString` 은 이미 가려져 있는데, 그 마스킹은
+// `define`/`defineAccessor`/`defineMasked` 를 지날 때만 등록된다. 날
+// `Object.defineProperty` 로 접근자를 심으면 등록이 안 되고, 그러면
+//   Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'style').get.toString()
+// 이 우리 코드를 그대로 돌려준다. 실측(2026-09-10): 그렇게 노출된 함수가
+// 74개였고, HTMLScriptElement.src 게터는 data-zp-target-url 이라는 내부
+// 속성 이름까지 보여 줬다.
+//
+// 뒤늦게 전수 스윕으로 가리는 방법은 창마다 5~7ms 라 프레임 많은 페이지에서
+// 못 쓴다(실측). 그래서 설치 지점을 강제한다 — 이 가드가 그 강제다.
+test('훅은 설치 지점에서 소스를 가린다 (날 defineProperty 접근자 금지)', () => {
+  const lines = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n').split('\n');
+  // ★주석을 지우고 본다. `enumerable: true, // …설명…` 다음 줄에 오는
+  // `get()` 은 주석을 남겨 두면 앞 토큰이 `,` 가 아니게 되어 안 잡힌다 —
+  // 실제로 ZPWebSocket.bufferedAmount 가 그렇게 빠져나갔다.
+  const strip = (l) => l.replace(/\/\/.*$/, '');
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/Object\.defineProperty\(|Object\.defineProperties\(/.test(lines[i])) continue;
+    // 디스크립터는 여러 줄에 걸친다. 다만 **다음 define 호출 앞에서 끊는다** —
+    // 안 끊으면 앞 자리가 뒤 자리의 get 을 빌려 거짓 양성이 난다.
+    const rest = [];
+    for (let j = i; j < Math.min(i + 10, lines.length); j++) {
+      if (j > i && /Object\.definePropert|defineMasked\(|definePropertiesMasked\(/.test(lines[j])) break;
+      rest.push(strip(lines[j]));
+    }
+    const win = rest.join(' ');
+    if (!/[{,]\s*(get|set)\s*[(:]/.test(win)) continue;
+    // 헬퍼 본체 자신은 예외다 — 마스킹을 **하는** 쪽이다.
+    if (win.includes('toStringMap.set(')) continue;
+    offenders.push((i + 1) + ': ' + lines[i].trim().slice(0, 90));
+  }
+  assert.deepEqual(offenders, [],
+    '접근자를 날 defineProperty/defineProperties 로 심었다 — defineMasked / definePropertiesMasked 를 쓰지 않으면 훅 소스가 페이지에 보인다:\n  ' + offenders.join('\n  '));
+});
+
+test('대체 클래스 프로토타입도 소스를 가린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  // Object.assign 으로 채운 멤버는 define 을 안 지나므로 따로 가려야 한다.
+  for (const cls of ['ZPXMLHttpRequest', 'ZPEventSource', 'ZPWebSocket']) {
+    assert.ok(rt.includes('assignMasked(' + cls + '.prototype, {'),
+      cls + '.prototype 을 날 Object.assign 으로 채웠다 — send/close 소스가 그대로 보인다');
+  }
+  assert.ok(!/Object\.assign\([A-Za-z_$][\w$]*\.prototype,/.test(rt),
+    '가리지 않는 Object.assign(...prototype) 이 남아 있다');
+});
+
+// 위 두 가드는 "헬퍼를 **부르는가**" 만 본다. 헬퍼가 마스킹을 그만두면 둘 다
+// 통과한다(변이로 확인). 그래서 헬퍼 자체를 뜯어 실행한다.
+test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function defineMasked(obj, key, desc) {');
+  const to = rt.indexOf('  function defineOnProto(', from);
+  assert.ok(from > 0 && to > from, '마스킹 헬퍼 구간을 못 찾았다');
+  const masked = new Map();
+  const api = new Function(
+    'toStringMap', 'nativeAccessorSource', 'maskNativeFunction',
+    rt.slice(from, to) + '\nreturn { defineMasked, definePropertiesMasked, assignMasked };')(
+    masked,
+    (kind, key) => 'function ' + kind + ' ' + String(key) + '() { [native code] }',
+    (fn, key) => { if (typeof fn === 'function') masked.set(fn, 'function ' + String(key) + '() { [native code] }'); },
+  );
+
+  const NATIVE = /\{\s*\[native code\]\s*\}/;
+  const src = (fn) => masked.get(fn) || 'NOT MASKED: ' + String(fn);
+
+  // ① defineMasked — get/set 둘 다.
+  const o1 = {};
+  const g = function () { return 1; };
+  const st = function (v) { void v; };
+  api.defineMasked(o1, 'thing', { get: g, set: st, configurable: true });
+  assert.equal(o1.thing, 1, 'defineMasked 가 접근자를 안 심었다');
+  assert.match(src(g), NATIVE, 'defineMasked 가 게터 소스를 안 가렸다');
+  assert.match(src(st), NATIVE, 'defineMasked 가 세터 소스를 안 가렸다');
+
+  // ② definePropertiesMasked — 여러 개를 한 번에.
+  const o2 = {};
+  const g2 = function () { return 2; };
+  const v2 = function m() {};
+  api.definePropertiesMasked(o2, { a: { get: g2, configurable: true }, b: { value: v2, configurable: true } });
+  assert.equal(o2.a, 2);
+  assert.match(src(g2), NATIVE, 'definePropertiesMasked 가 게터 소스를 안 가렸다');
+  assert.match(src(v2), NATIVE, 'definePropertiesMasked 가 메서드 소스를 안 가렸다');
+
+  // ③ assignMasked — 대체 클래스 프로토타입.
+  const proto = {};
+  function ctor() {}
+  const send = function send() {};
+  api.assignMasked(proto, { constructor: ctor, send });
+  assert.equal(proto.send, send, 'assignMasked 가 멤버를 안 옮겼다');
+  assert.match(src(send), NATIVE, 'assignMasked 가 메서드 소스를 안 가렸다');
+  // constructor 는 이름이 달라 잘못 가리면 오히려 티가 난다 — 건드리지 않는다.
+  assert.equal(masked.has(ctor), false, 'constructor 를 가렸다 — 이름이 어긋나 더 눈에 띈다');
 });
