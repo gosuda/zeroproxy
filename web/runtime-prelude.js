@@ -6381,6 +6381,126 @@
     }
     return count;
   }
+  // ★CSS Typed OM 은 별도 인터페이스 계열이라 style/cssText 훅이 전혀 닿지
+  // 않는다. 실측(2026-09-10):
+  //   ① 훅이 걸린 경로로 쓰고 Typed OM 으로 읽으면 **프록시 URL 이 그대로**
+  //      보였다 — attributeStyleMap.get 과 computedStyleMap().get 둘 다.
+  //   ② attributeStyleMap.set 으로 쓴 url() 은 재작성을 안 지났다.
+  //
+  // 읽기 메서드는 전부 StylePropertyMapReadOnly.prototype 에 있고
+  // StylePropertyMap 이 그것을 상속한다(실측) — 한 곳만 훅하면 인라인
+  // 스타일맵과 계산 스타일맵이 함께 덮인다.
+  //
+  // 되돌리기는 CSSStyleValue 를 문자열로 만들어 고친 뒤 다시 파싱한다.
+  // `CSSStyleValue.parse(prop, String(v))` 왕복이 정확하고(실측), 네이티브도
+  // 호출마다 **새 객체**를 주므로(get(x) !== get(x), 실측) 우리가 새로 만든
+  // 값을 돌려줘도 동일성 지문이 생기지 않는다.
+  //
+  // ★읽기와 쓰기는 같이 가야 한다. 쓰기만 고치면 저장된 값이 프록시 URL 이
+  // 되는데 읽기가 안 되돌리므로 ①번 누출이 오히려 늘어난다.
+  function installTypedOM(w) {
+    const RO = w.StylePropertyMapReadOnly && w.StylePropertyMapReadOnly.prototype;
+    if (!RO) return 0;
+    const SM = w.StylePropertyMap && w.StylePropertyMap.prototype;
+    const CSV = w.CSSStyleValue;
+    const canParse = CSV && typeof CSV.parse === 'function';
+    let hooked = 0;
+
+    // CSSStyleValue 하나를 되돌린다. 바뀐 게 없으면 **원래 객체 그대로** 준다.
+    const back = (prop, v) => {
+      if (!v || typeof v !== 'object' || !canParse) return v;
+      let text;
+      try { text = String(v); } catch { return v; }
+      const fixed = deproxyURL(text, { scan: true });
+      if (fixed === text) return v;
+      try { return CSV.parse(String(prop), fixed); } catch { return v; }
+    };
+    const backAll = (prop, list) => {
+      if (!list || typeof list.length !== 'number') return list;
+      let changed = false;
+      const out = [];
+      for (let i = 0; i < list.length; i++) {
+        const next = back(prop, list[i]);
+        if (next !== list[i]) changed = true;
+        out.push(next);
+      }
+      return changed ? out : list;
+    };
+    // 쓰기 쪽: 문자열이면 그대로 재작성하고, CSSStyleValue 면 문자열로 만들어
+    // 재작성한 뒤 다시 파싱한다.
+    const fwd = (prop, v) => {
+      if (typeof v === 'string') return rewriteCSSText(v);
+      if (!v || typeof v !== 'object' || !canParse) return v;
+      let text;
+      try { text = String(v); } catch { return v; }
+      const rewritten = rewriteCSSText(text);
+      if (rewritten === text) return v;
+      try { return CSV.parse(String(prop), rewritten); } catch { return v; }
+    };
+
+    const nativeGet = RO.get;
+    if (typeof nativeGet === 'function') {
+      define(RO, 'get', function get(prop) { return back(prop, nativeGet.call(this, prop)); });
+      hooked++;
+    }
+    const nativeGetAll = RO.getAll;
+    if (typeof nativeGetAll === 'function') {
+      define(RO, 'getAll', function getAll(prop) { return backAll(prop, nativeGetAll.call(this, prop)); });
+      hooked++;
+    }
+    const nativeEntries = RO.entries;
+    const nativeIter = RO[Symbol.iterator];
+    if (typeof nativeEntries === 'function') {
+      const entries = function entries() {
+        const src = nativeEntries.call(this);
+        const pairs = [];
+        for (const pair of src) pairs.push([pair[0], backAll(pair[0], pair[1])]);
+        return pairs[Symbol.iterator]();
+      };
+      define(RO, 'entries', entries);
+      hooked++;
+      // `values()` 는 키를 안 주므로 되돌릴 때 프로퍼티 이름을 알 수 없다.
+      // 명세대로 entries 에서 값만 떼어 낸다.
+      if (typeof RO.values === 'function') {
+        define(RO, 'values', function values() {
+          const out = [];
+          for (const pair of entries.call(this)) out.push(pair[1]);
+          return out[Symbol.iterator]();
+        });
+        hooked++;
+      }
+      // maplike 는 @@iterator 가 entries 와 **같은 함수**다. 네이티브가
+      // 그랬다면 우리도 같은 함수를 줘야 동일성이 맞는다.
+      if (nativeIter === nativeEntries) {
+        try { Object.defineProperty(RO, Symbol.iterator, { value: RO.entries, writable: true, enumerable: false, configurable: true }); } catch {}
+      }
+    }
+    const nativeForEach = RO.forEach;
+    if (typeof nativeForEach === 'function') {
+      define(RO, 'forEach', function forEach(cb, thisArg) {
+        if (typeof cb !== 'function') return nativeForEach.call(this, cb, thisArg);
+        const map = this;
+        return nativeForEach.call(this, function (values, prop, self) {
+          return cb.call(thisArg, backAll(prop, values), prop, self || map);
+        });
+      });
+      hooked++;
+    }
+
+    if (SM) {
+      for (const m of ['set', 'append']) {
+        const native = SM[m];
+        if (typeof native !== 'function') continue;
+        define(SM, m, function (prop) {
+          const args = [prop];
+          for (let i = 1; i < arguments.length; i++) args.push(fwd(prop, arguments[i]));
+          return native.apply(this, args);
+        });
+        hooked++;
+      }
+    }
+    return hooked;
+  }
   function installStyleHooks(w) {
     try { installStyleHooksInner(w); } catch (e) {
       styleHookState = 'threw:' + String(e && (e.message || e)).slice(0, 60);
@@ -6472,6 +6592,7 @@
         configurable: false
       });
     } catch {}
+    installTypedOM(w);
     const declProto = w.CSSStyleDeclaration && w.CSSStyleDeclaration.prototype;
     if (declProto) {
       const nativeSet = declProto.setProperty;

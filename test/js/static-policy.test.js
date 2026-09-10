@@ -1402,3 +1402,96 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
   assert.ok(rt.includes('return unrewriteSourceText(orig.call(this));'),
     'toString 이 되돌리기를 안 지난다 — 함수가 있어도 아무 데도 안 걸린다');
 });
+
+// ── CSS Typed OM 도 같은 규칙을 받는다 (2026-09-10) ────────────────────
+//
+// style/cssText 훅은 Typed OM 에 전혀 닿지 않는다. 실측:
+//   ① 훅이 걸린 경로로 쓰고 attributeStyleMap.get / computedStyleMap().get
+//      으로 읽으면 프록시 URL 이 그대로 보였다.
+//   ② attributeStyleMap.set 으로 쓴 url() 은 재작성을 안 지났다.
+// 읽기 메서드는 전부 StylePropertyMapReadOnly.prototype 에 있고
+// StylePropertyMap 이 상속한다(실측: RO 는 size,get,getAll,has,entries,
+// forEach,keys,values / SM 은 append,clear,delete,set). 그래서 한 곳만
+// 훅하면 인라인 스타일맵과 계산 스타일맵이 함께 덮인다.
+test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function installTypedOM(w) {');
+  assert.ok(from > 0, 'installTypedOM 이 없다 — Typed OM 은 style 훅이 안 닿는다');
+  const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
+
+  const install = new Function(
+    'deproxyURL', 'rewriteCSSText', 'define',
+    src + '\nreturn installTypedOM;')(
+    (t) => String(t).split('PROXY/').join('TARGET/'),
+    (t) => String(t).split('TARGET/').join('PROXY/'),
+    (o, k, v) => { Object.defineProperty(o, k, { value: v, writable: true, configurable: true }); return true; },
+  );
+
+  // 가짜 Typed OM. 실제 모양대로 읽기는 RO 에, 쓰기는 SM 에 둔다.
+  function FakeValue(text) { this.text = String(text); }
+  FakeValue.prototype.toString = function () { return this.text; };
+  const CSSStyleValue = { parse: (prop, text) => new FakeValue(text) };
+  function RO() {}
+  RO.prototype.get = function (p) { return this._d[p] ? this._d[p][0] : null; };
+  RO.prototype.getAll = function (p) { return this._d[p] || []; };
+  RO.prototype.entries = function () {
+    return Object.keys(this._d).map((k) => [k, this._d[k]])[Symbol.iterator]();
+  };
+  RO.prototype.values = function () {
+    return Object.keys(this._d).map((k) => this._d[k])[Symbol.iterator]();
+  };
+  RO.prototype.forEach = function (cb) { for (const k of Object.keys(this._d)) cb(this._d[k], k, this); };
+  RO.prototype[Symbol.iterator] = RO.prototype.entries;
+  function SM() {}
+  SM.prototype = Object.create(RO.prototype);
+  // ★네이티브 set/append 는 문자열을 **파싱해서** CSSStyleValue 로 저장한다.
+  // 가짜가 문자열을 그대로 담으면 왕복 검사가 실제와 다른 것을 잰다.
+  const store = (v) => (v && typeof v === 'object' ? v : new FakeValue(v));
+  SM.prototype.set = function (p) { this._d[p] = Array.prototype.slice.call(arguments, 1).map(store); };
+  SM.prototype.append = function (p) { this._d[p] = (this._d[p] || []).concat(Array.prototype.slice.call(arguments, 1).map(store)); };
+
+  // 함수가 있어도 설치 시퀀스가 안 부르면 아무 데도 안 걸린다.
+  assert.ok(rt.includes('installTypedOM(w);'),
+    'installTypedOM 을 아무도 호출하지 않는다');
+
+  const hooked = install({ StylePropertyMapReadOnly: RO, StylePropertyMap: SM, CSSStyleValue });
+  assert.ok(hooked >= 6, '훅을 못 걸었다 (걸린 수: ' + hooked + ')');
+
+  // ── 읽기: 저장된 프록시 URL 을 되돌려 준다.
+  const map = new SM();
+  map._d = { 'background-image': [new FakeValue('url(PROXY/x.png)')], color: [new FakeValue('red')] };
+  assert.equal(String(map.get('background-image')), 'url(TARGET/x.png)', 'get 이 프록시 URL 을 그대로 준다');
+  assert.equal(String(map.getAll('background-image')[0]), 'url(TARGET/x.png)', 'getAll 이 안 되돌린다');
+  // 바뀔 게 없으면 **원래 객체 그대로** 준다 — 쓸데없이 새 객체를 만들지 않는다.
+  assert.equal(map.get('color'), map._d.color[0], '바뀐 게 없는데 새 객체를 만들었다');
+
+  const seen = {};
+  for (const [prop, vals] of map.entries()) seen[prop] = String(vals[0]);
+  assert.equal(seen['background-image'], 'url(TARGET/x.png)', 'entries 가 안 되돌린다');
+  const viaValues = [];
+  for (const vals of map.values()) viaValues.push(String(vals[0]));
+  assert.ok(viaValues.includes('url(TARGET/x.png)'), 'values 가 안 되돌린다');
+  const viaForEach = {};
+  map.forEach((vals, prop) => { viaForEach[prop] = String(vals[0]); });
+  assert.equal(viaForEach['background-image'], 'url(TARGET/x.png)', 'forEach 가 안 되돌린다');
+  // maplike 는 @@iterator 가 entries 와 같은 함수다 — 훅 뒤에도 같아야 한다.
+  assert.equal(RO.prototype[Symbol.iterator], RO.prototype.entries,
+    '@@iterator 와 entries 가 갈라졌다 — 동일성이 지문이 된다');
+
+  // ── 쓰기: 문자열도 CSSStyleValue 도 재작성을 지난다.
+  const w1 = new SM(); w1._d = {};
+  w1.set('background-image', 'url(TARGET/y.png)');
+  assert.equal(String(w1._d['background-image'][0]), 'url(PROXY/y.png)', 'set(문자열) 이 재작성을 안 탔다');
+  const w2 = new SM(); w2._d = {};
+  w2.set('background-image', new FakeValue('url(TARGET/z.png)'));
+  assert.equal(String(w2._d['background-image'][0]), 'url(PROXY/z.png)', 'set(CSSStyleValue) 가 재작성을 안 탔다');
+  const w3 = new SM(); w3._d = {};
+  w3.append('background-image', 'url(TARGET/a.png)');
+  assert.equal(String(w3._d['background-image'][0]), 'url(PROXY/a.png)', 'append 가 재작성을 안 탔다');
+
+  // ── 읽기와 쓰기는 같이 가야 한다. 쓴 값을 읽으면 원래 쓴 것이 나와야 한다.
+  const rt2 = new SM(); rt2._d = {};
+  rt2.set('background-image', 'url(TARGET/round.png)');
+  assert.equal(String(rt2.get('background-image')), 'url(TARGET/round.png)',
+    '왕복이 안 맞는다 — 페이지가 쓴 값과 읽는 값이 다르면 그 차이가 곧 지문이다');
+});

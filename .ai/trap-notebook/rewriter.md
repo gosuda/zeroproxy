@@ -812,4 +812,66 @@ String(window.openURL)
 호출이라 원본 문법(`import … from …`)으로 되돌리면 **문법이 안 맞는 자리**가
 생긴다(식 위치에 문장을 넣게 된다). 실사이트 측정에서는 이 둘이 페이지가
 도달하는 함수 소스에 나타나지 않았다.
+## <a id="typed-om"></a>CSS Typed OM 은 style 훅이 전혀 안 닿는 별도 인터페이스였다 (2026-09-10)
+
+`attributeStyleMap` 은 앞선 CSS 작업에서 **유일하게 남긴 컨테인먼트 우회**였다.
+당시 판단은 "쓰기만 훅하면 읽기에서 새므로 같이 가야 한다" 였고, 그건 맞았다.
+그런데 다시 재 보니 **읽기 누출은 그때 이미 살아 있었다.**
+
+### 실측 — 읽기 누출 두 개가 이미 있었다
+
+훅이 걸린 경로(`style.cssText`)로 쓰고 Typed OM 으로 읽으면:
+
+```
+attributeStyleMap.get('background-image')   → PROXY-URL
+computedStyleMap().get('background-image')  → PROXY-URL
+```
+
+앞서 고친 16개 읽기 표면과 **같은 부류인데 다른 인터페이스**라 안 걸렸다.
+`getComputedStyle` 은 고쳤는데 `computedStyleMap()` 은 그 옆에 그대로 있었다.
+
+### 인터페이스 모양 (실측)
+
+| | own 멤버 |
+|---|---|
+| `StylePropertyMapReadOnly.prototype` | `size, get, getAll, has, entries, forEach, keys, values` |
+| `StylePropertyMap.prototype` | `append, clear, delete, set` |
+
+`StylePropertyMap` 이 RO 를 **상속**하고 `computedStyleMap()` 도 RO 인스턴스다.
+그래서 **RO 한 곳만 훅하면 인라인 스타일맵과 계산 스타일맵이 함께 덮인다.**
+
+### 되돌리기가 가능한 이유 (전부 실측)
+
+- `CSSStyleValue.parse(prop, String(v))` 왕복이 **정확하다**.
+- 네이티브도 호출마다 **새 객체**를 준다(`get(x) !== get(x)`). 우리가 새로 만든
+  값을 돌려줘도 동일성 지문이 안 생긴다. 다만 **바뀐 게 없으면 원래 객체를
+  그대로** 돌려준다 — 쓸데없이 새 객체를 만들 이유가 없다.
+- maplike 는 `@@iterator === entries` 다. 훅 뒤에도 같은 함수를 줘야 한다.
+- `values()` 는 키를 안 주므로 되돌릴 때 프로퍼티 이름을 알 수 없다 — 명세대로
+  `entries()` 에서 값만 떼어 낸다.
+
+### 실측 결과
+
+| | 전 | 후 |
+|---|---|---|
+| Typed OM 읽기 누출 | 2 | **0** |
+| CSS 컨테인먼트 우회(전체 15경로) | 1 | **0** |
+
+쓰기는 문자열·`CSSStyleValue`·`append` 전부 컨테인된다.
+
+### 프로브가 자기 발을 밟았다
+
+`append('mask-image', …)` 가 네이티브에서 거절된다 — "Property does not support
+multiple value". try/catch 없이 한 스크립트에 이어 붙였더니 **그 예외가 뒤따르는
+두 검사를 통째로 건너뛰게 했고**, 결과가 `MISSING` 으로 나와 "쓰기가 안 걸린다"
+로 잘못 읽었다. 여러 경로를 한 번에 재는 프로브는 **경로마다 try/catch** 를
+둔다. (`append` 는 `background-image` 처럼 다중값 프로퍼티에서만 쓴다.)
+
+### 가드
+
+가짜 Typed OM(RO/SM/CSSStyleValue)을 만들어 규칙을 그대로 실행한다. 변이 9/9.
+그중 하나는 **`installTypedOM(w);` 호출 지점을 지우는 것**이었는데 처음엔 안
+물었다 — 테스트가 함수만 뜯어 실행하고 설치 시퀀스를 안 봤기 때문이다.
+이 저장소에서 같은 부류를 세 번째로 밟았다: **함수를 실행하는 테스트는 그
+함수가 실제로 불리는지도 같이 단언해야 한다.**
 
