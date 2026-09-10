@@ -24,9 +24,17 @@ INDEX 는 **한 항목 = 한 줄**이고 각 줄이 상세 파일의 앵커를 �
 
 ### 2. Phase 2 마스터 플랜
 
-PHASE2 strict mode 작업 시: `C:\Users\PIPE_TAIL_USER\.claude\plans\phase2-plan-md-smooth-knuth.md`
+PHASE2 strict mode 작업 시: [PHASE2_STATUS.md](PHASE2_STATUS.md)
 
-핵심 갭/우선순위/acceptance criteria 가 plan 에 있음. 작업이 plan 의 어느 phase/step 에 해당하는지 명시.
+A1~E2 게이트와 각 게이트를 닫은 **근거(코드/테스트 링크)** 가 있다. 작업이 어느
+게이트에 해당하는지 명시하고, 게이트를 새로 닫으면 Evidence 열을 갱신한다.
+
+**★2026-09-10 정정**: 이 자리는 원래
+`C:\Users\PIPE_TAIL_USER\.claude\plans\phase2-plan-md-smooth-knuth.md` 를
+가리키고 있었는데 **그 파일은 유실됐다** (프로필이 `PIPE_TAIL_USER` → `hsng9`
+로 바뀌며 사라짐; 새 프로필·저장소·git 히스토리 어디에도 없다). 게이트 정의가
+남아 있는 곳은 `PHASE2_STATUS.md` 뿐이다 — 그것도 2026-09-06 리팩터에서
+삭제됐다가 되살린 것이다. **저장소 밖 경로를 문서에 적지 말 것.**
 
 ## 아키텍처 요약
 
