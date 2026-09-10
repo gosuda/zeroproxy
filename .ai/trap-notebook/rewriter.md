@@ -874,4 +874,65 @@ multiple value". try/catch 없이 한 스크립트에 이어 붙였더니 **그 
 물었다 — 테스트가 함수만 뜯어 실행하고 설치 시퀀스를 안 봤기 때문이다.
 이 저장소에서 같은 부류를 세 번째로 밟았다: **함수를 실행하는 테스트는 그
 함수가 실제로 불리는지도 같이 단언해야 한다.**
+## <a id="프로토타입-모양-축"></a>프로토타입 모양 축을 만들자마자 6개가 걸렸다 (2026-09-10)
+
+같은 날 내가 만든 회귀(own `style` 13 → 157)를 **기존 축이 전부 통과**시켰다.
+raw/csp/err/height 어느 것도 프로토타입 모양을 안 본다. 그래서 상설 축으로
+만들었다: `test/browser/protoshape.sh`.
+
+### 만들면서 같은 실수를 또 했다
+
+회귀를 확인할 때 나는 **손으로 고른 24개 인터페이스**로 쟀고 차이가 1개
+(`Document`)라고 보고했다. 전수로 훑는 축을 만들자 **6개**가 나왔다. 내가 고른
+목록에 `RTCPeerConnection`·`RTCDataChannel`·`WebTransport`·`SharedWorker`·
+`HTMLStyleElement` 가 없었을 뿐이다.
+
+**측정 도구에도 같은 규칙이 적용된다 — 열린 표면은 목록으로 따라갈 수 없다.**
+
+### 걸린 것 (example.com, 인터페이스 955개 중)
+
+두 부류다.
+
+**(a) 섀도잉 — 조상에 있는 멤버를 서브클래스에 새로 만든다**
+
+| 인터페이스 | 프록시에만 |
+|---|---|
+| `Document` | `baseURI`, `origin` |
+| `HTMLStyleElement` | `innerHTML`, `innerText`, `textContent` |
+
+브라우저는 `baseURI` 를 `Node.prototype` 에, `innerHTML`/`textContent` 를
+`Element`/`Node` 에 둔다. `origin` 은 `Document.prototype` 에 아예 없다.
+우리가 `<style>` 텍스트를 훅하려고 `HTMLStyleElement.prototype` 에 심은 것이
+그대로 모양 차이가 됐다.
+
+**(b) 대체 클래스의 얇은 프로토타입 — 지문이자 호환성 버그**
+
+| 인터페이스 | 대조군에만 (개수) |
+|---|---|
+| `RTCPeerConnection` | 45 |
+| `RTCDataChannel` | 20 |
+| `WebTransport` | 9 |
+| `SharedWorker` | `onerror`, `port` |
+
+`XMLHttpRequest.prototype` 16 vs 27 과 **정확히 같은 부류**다(그건 2026-08 에
+프로토타입 접근자로 옮겨 닫혔고, 이번 측정에서 대조군과 일치 확인). 라이브러리가
+`'port' in SharedWorker.prototype` 이나 `RTCPeerConnection.prototype.addTrack`
+패치를 하면 조용히 깨진다.
+
+### 축 자체의 설계
+
+- 검사 대상을 손으로 고르지 않는다. 대문자로 시작하고 **생성자 자신이 네이티브**
+  인 전역을 전수로 훑는다(`Function.prototype.toString` 이 `[native code]`).
+  페이지가 만든 대문자 생성자(naver 의 `Agent`/`Flash`)가 그 관문에서 걸러진다.
+  우리 대체 클래스는 `define` 이 toString 을 가려 두므로 관문을 통과한다 —
+  **의도한 대로 검사 대상이 된다.**
+- 대조군과 쌍으로 잰다. 프록시 단독 수치는 의미가 없다.
+- 판정 맨 앞에 "쟀는가" 를 둔다(`NO_MEASUREMENT`). 브라우저가 죽으면 차이가
+  0 으로 나와 통과처럼 보인다 — 같은 날 rendercheck 에서 실제로 당했다.
+
+### 만들면서 밟은 것 둘
+
+- `exec-js --file` 은 파일을 **함수 본문**으로 감싼다. IIFE 로 쓰면 값이 안
+  나오고 프로브가 조용히 빈 결과를 준다. 반드시 `return` 으로 끝낸다.
+- 또 `cmd | tail` 로 종료 코드를 가렸다(같은 날 두 번째다).
 
