@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-10 | 지문 / 규칙 | 페이지가 자기 함수를 문자열로 만들면 리라이트가 보였다(naver 17, github 89). toString 에서 되돌려 돌려준다. | rewriter.md#리라이트-소스-노출 |
+| 2026-09-10 | 계측 / 금지 | 브라우저가 죽어도 rendercheck 가 4/4 OK 를 찍었다. 측정 판정기에는 반드시 "안 쟀음" 상태를 둔다. | build-deploy.md#죽은-브라우저가-전항목-통과 |
 | 2026-09-10 | 지문 / 규칙 | 훅 소스가 368곳 노출. 접근자는 설치 지점에서 가린다. `propertyDescriptor` 로 훑으면 상속에 own 을 새로 만든다(13→157). | rewriter.md#훅-소스-노출 |
 | 2026-09-10 | CSS / 보안 | CSS url() 을 바꿔 쓰고 되돌리지 않아 읽기 표면 16곳으로 프록시 정체가 샜다. style 접근자는 훑어서 전부 감싼다. | rewriter.md#css-정체-되읽기 |
 | 2026-09-08 | E2E / 수정 | Node upgrade socket의 EOF와 close는 다르다. 상대 EOF를 기록한 뒤 fixture의 쓰기 half를 종료한다. | sw-integration.md#upgraded-socket-eof |

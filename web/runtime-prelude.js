@@ -770,6 +770,208 @@
     }
     return define(instance, key, value);
   }
+  // ★리라이트된 **페이지 코드**가 자기 소스를 문자열로 만들면 우리 호출이
+  // 그대로 보인다. 실측(2026-09-10): naver 8,490개 중 17개, github 8,655개
+  // 중 89개가 `__zp_get(globalThis,"window")` 같은 텍스트를 노출했다.
+  // 전역 **이름** 노출은 예전에 스크러버로 막았지만(LOG.md) 함수 **소스**는
+  // 아무도 안 보고 있었다.
+  //
+  // 그래서 우리 호출을 되돌려서 돌려준다. 목적은 완벽한 원본 복구가 아니라
+  // `__zp_` 라는 표식을 없애는 것이고, **되돌릴 수 없는 모양은 손대지 않는다**
+  // — 망친 소스가 더 큰 티다.
+  //
+  // 감옥은 유지된다: 되돌린 소스를 페이지가 다시 컴파일해도
+  // (`new Function(String(fn))`) 그 경로는 compileNested 의 `with(scope)` 를
+  // 지나므로 자유 식별자가 스코프 프록시로 해석된다. 리라이트가 아니라
+  // 스코프가 컨테인먼트를 지고 있다.
+  function unrewriteSourceText(src) {
+    // 빠른 탈출 — 대부분의 호출은 우리와 무관하다. 아래 정의를 만들기 전에 끊는다.
+    if (typeof src !== 'string') return src;
+    if (src.indexOf('__zp_') < 0 && src.indexOf('__ZP_EXEC_EVENT') < 0) return src;
+    const ZP_SRC_IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+    const ZP_SRC_SIMPLE = /^(this|[A-Za-z_$][A-Za-z0-9_$]*)(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/;
+    // ★리라이터가 **합성해 넣은** 기본형만 생략한다. 자유 식별자를 감쌀 때
+    // 쓰는 이름은 globalThis 하나다(리라이터 소스 확인). window/self 를 여기
+    // 넣으면 페이지가 직접 쓴 `window.open(x)` 이 `open(x)` 으로 줄어
+    // **원본과 다른 텍스트**가 된다 — 되돌리기의 목적에 어긋난다.
+    const ZP_SRC_GLOBALS = new Set(['globalThis']);
+
+    // 균형 잡힌 인자 목록을 자른다. 문자열 안의 괄호는 세지 않는다.
+    function zpSrcSplitArgs(s, i) {
+      const args = [];
+      let depth = 0, start = i + 1, j = i;
+      for (; j < s.length; j++) {
+        const c = s[j];
+        if (c === '"' || c === "'" || c === '`') {
+          const q = c;
+          j++;
+          while (j < s.length) {
+            if (s[j] === '\\') { j += 2; continue; }
+            if (s[j] === q) break;
+            j++;
+          }
+          if (j >= s.length) return null;
+          continue;
+        }
+        if (c === '(' || c === '[' || c === '{') { depth++; continue; }
+        if (c === ')' || c === ']' || c === '}') {
+          depth--;
+          if (depth === 0) { args.push(s.slice(start, j)); return [args, j]; }
+          continue;
+        }
+        if (c === ',' && depth === 1) { args.push(s.slice(start, j)); start = j + 1; }
+      }
+      return null;
+    }
+
+    // "abc" / 'abc' 리터럴이면 그 값을, 아니면 null.
+    function zpSrcLiteral(a) {
+      const t = a.trim();
+      if (t.length < 2) return null;
+      const q = t[0];
+      if ((q !== '"' && q !== "'") || t[t.length - 1] !== q) return null;
+      const body = t.slice(1, -1);
+      if (body.indexOf(q) >= 0 || body.indexOf('\\') >= 0) return null;
+      return body;
+    }
+
+    // 단순한 기본형이 아니면 괄호로 감싼다. 안 감싸면
+    // `__zp_get(a||b,"k")` 가 `a||b.k` 가 되어 뜻이 바뀐다.
+    function zpSrcBaseText(src) {
+      const t = unrewriteSource(src).trim();
+      if (ZP_SRC_SIMPLE.test(t)) return t;
+      if (t[0] === '(' && t[t.length - 1] === ')') return t;
+      return '(' + t + ')';
+    }
+
+    function zpSrcMember(baseSrc, keyArg) {
+      const base = zpSrcBaseText(baseSrc);
+      const key = zpSrcLiteral(keyArg);
+      const isGlobal = ZP_SRC_GLOBALS.has(base);
+      if (key !== null && ZP_SRC_IDENT.test(key)) return isGlobal ? key : base + '.' + key;
+      const k = unrewriteSource(keyArg).trim();
+      return isGlobal ? 'globalThis[' + k + ']' : base + '[' + k + ']';
+    }
+
+    function unrewriteSource(src) {
+      const s = String(src == null ? '' : src);
+      if (s.indexOf('__zp_') < 0 && s.indexOf('__ZP_EXEC_EVENT') < 0) return s;
+      let out = '';
+      let i = 0;
+      while (i < s.length) {
+        const c = s[i];
+        // 보통 문자열은 통째로 넘긴다 — 안의 `__zp_` 는 페이지 자신의 텍스트일 수 있다.
+        if (c === '"' || c === "'") {
+          const q = c;
+          let j = i + 1;
+          while (j < s.length) {
+            if (s[j] === '\\') { j += 2; continue; }
+            if (s[j] === q) break;
+            j++;
+          }
+          out += s.slice(i, Math.min(j + 1, s.length));
+          i = Math.min(j + 1, s.length);
+          continue;
+        }
+        // ★템플릿 리터럴은 통째로 넘기면 안 된다. `${…}` 안은 **코드**라
+        // 리라이트가 그대로 들어 있다 — github 실측에서 남은 8건이 전부 여기였다
+        // (`` `${__zp_get(globalThis,"window").innerWidth}px` ``). 리터럴 텍스트는
+        // 건드리지 않고 치환식 안쪽만 재귀로 되돌린다.
+        if (c === '`') {
+          let j = i + 1;
+          let buf = '`';
+          while (j < s.length) {
+            if (s[j] === '\\') { buf += s.slice(j, j + 2); j += 2; continue; }
+            if (s[j] === '`') { buf += '`'; j++; break; }
+            if (s[j] === '$' && s[j + 1] === '{') {
+              const sub = zpSrcSplitArgs(s, j + 1);
+              if (!sub) { buf += s[j]; j++; continue; }
+              buf += '${' + unrewriteSource(sub[0].join(',')) + '}';
+              j = sub[1] + 1;
+              continue;
+            }
+            buf += s[j];
+            j++;
+          }
+          out += buf;
+          i = j;
+          continue;
+        }
+        if (c !== '_') { out += c; i++; continue; }
+        const prev = i > 0 ? s[i - 1] : '';
+        if (prev && /[A-Za-z0-9_$.]/.test(prev)) { out += c; i++; continue; }
+        // ★인라인 이벤트 핸들러(`<a onclick="…">`)는 래퍼로 감싸 두는데, 그
+        // 래퍼의 세 번째 인자가 **원본 속성 본문 그대로**다(리라이트는 호출
+        // 시점에 한다). 그래서 여기서는 정확한 복구가 된다. 래퍼가 붙인
+        // `return ` 도 같이 걷어낸다 — 브라우저가 보여 주는 본문에는 없다.
+        const ev = /^__ZP_EXEC_EVENT\(/.exec(s.slice(i));
+        if (ev) {
+          const sub = zpSrcSplitArgs(s, i + ev[0].length - 1);
+          let body = null;
+          if (sub && sub[0].length === 3) {
+            try { body = JSON.parse(sub[0][2].trim()); } catch { body = null; }
+          }
+          if (typeof body === 'string') {
+            out = out.replace(/return[ \t]+$/, '');
+            out += body;
+            i = sub[1] + 1;
+            continue;
+          }
+        }
+        // ★루프 캡. `for(;;)` 와 `while(true)` 는 **둘 다** 계수기 붙은 for 로
+        // 바뀌므로 어느 쪽이 원본이었는지 알 수 없다. `for(;;)` 로 되돌린다 —
+        // 뜻은 같고, 표식은 사라진다. do-while 은 계수기 선언이 `do` 앞에
+        // 붙고 test 가 계수기 검사로 바뀌므로 그 둘을 각각 되돌린다.
+        const lcFor = /^__zp_lc_(\d+)=0;__zp_lc_\1\+\+<10000000;\)/.exec(s.slice(i));
+        if (lcFor && /for\(let $/.test(out)) {
+          out = out.replace(/for\(let $/, 'for(;;)');
+          i += lcFor[0].length;
+          continue;
+        }
+        const lcDecl = /^__zp_lc_\d+=0;/.exec(s.slice(i));
+        if (lcDecl && /let $/.test(out)) {
+          out = out.replace(/let $/, '');
+          i += lcDecl[0].length;
+          continue;
+        }
+        const lcTest = /^__zp_lc_\d+\+\+<10000000/.exec(s.slice(i));
+        if (lcTest) {
+          out += 'true';
+          i += lcTest[0].length;
+          continue;
+        }
+        const m = /^__zp_(get|set|call|assign|update)\(/.exec(s.slice(i));
+        if (!m) { out += c; i++; continue; }
+        const kind = m[1];
+        const parsed = zpSrcSplitArgs(s, i + m[0].length - 1);
+        if (!parsed) { out += c; i++; continue; }
+        const args = parsed[0];
+        const end = parsed[1];
+        let rep = null;
+        if (kind === 'get' && args.length === 2) rep = zpSrcMember(args[0], args[1]);
+        else if (kind === 'set' && args.length === 3) rep = zpSrcMember(args[0], args[1]) + '=' + unrewriteSource(args[2]).trim();
+        else if (kind === 'call' && args.length === 3) {
+          const inner = args[2].trim();
+          if (inner[0] === '[' && inner[inner.length - 1] === ']') {
+            rep = zpSrcMember(args[0], args[1]) + '(' + unrewriteSource(inner.slice(1, -1)).trim() + ')';
+          }
+        } else if (kind === 'assign' && args.length === 4) {
+          const op = zpSrcLiteral(args[2]);
+          if (op) rep = zpSrcMember(args[0], args[1]) + op + unrewriteSource(args[3]).trim();
+        } else if (kind === 'update' && args.length === 4) {
+          const op = zpSrcLiteral(args[2]);
+          const pre = args[3].trim();
+          if (op && (pre === 'true' || pre === '!0')) rep = op + zpSrcMember(args[0], args[1]);
+          else if (op && (pre === 'false' || pre === '!1')) rep = zpSrcMember(args[0], args[1]) + op;
+        }
+        if (rep === null) { out += c; i++; continue; }
+        out += rep;
+        i = end + 1;
+      }
+      return out;
+    }
+    return unrewriteSource(src);
+  }
   function installToStringMasking(w) {
     const proto = w && w.Function && w.Function.prototype;
     if (!proto || toStringMaskedPrototypes.has(proto)) return;
@@ -777,7 +979,8 @@
     if (typeof orig !== 'function') return;
     const maskedToString = function toString() {
       if (typeof this === 'function' && toStringMap.has(this)) return toStringMap.get(this);
-      return orig.call(this);
+      // 우리가 가린 훅이 아니면 페이지 자신의 코드다 — 리라이트 흔적을 되돌린다.
+      return unrewriteSourceText(orig.call(this));
     };
     toStringMap.set(maskedToString, 'function toString() { [native code] }');
     try {

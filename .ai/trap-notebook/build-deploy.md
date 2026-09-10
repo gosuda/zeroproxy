@@ -65,3 +65,41 @@
 - 별도 함정: 설치 후에도 셸 PATH는 낡을 수 있음. 파일시스템·`[Environment]::GetEnvironmentVariable("Path","Machine")` 확인 또는 `/c/Program Files/Go/bin` 추가. 백그라운드 빌드는 기존 파일 존재로 완료 판단하면 이후 clean에 지워지므로 **작업 완료 알림**을 기다린다.
 - 변종 (2026-09-10): 툴체인이 다 있어도 **실행 중인 서버가 exe 를 잠그면** 같은 사고가 난다. clean 이 `dist/web/*` 를 먼저 지우고 `dist/zeroproxy-server.exe` unlink 에서 `EPERM` 으로 죽어, dist 가 반만 남는다. 빌드 전에 `Get-Process zeroproxy-server | Stop-Process`.
 - 별도 함정: `npm run build 2>&1 | tail` 은 **tail 의 종료 코드**를 돌려주므로 실패한 빌드가 `exit 0` 으로 보인다. `set -o pipefail` 을 쓰거나 파이프 없이 실행한다. 이번에 실제로 실패를 성공으로 한 번 보고했다.
+## <a id="죽은-브라우저가-전항목-통과"></a>브라우저가 죽은 채로 13분을 돌렸고 rendercheck 는 4/4 OK 라고 했다 (2026-09-10)
+
+taskweaver 데몬이 사라진 줄 모르고(`taskweaver list` → `count: 0`) 빌드 →
+측정 → rendercheck 배치를 13분 돌렸다. 결과:
+
+```
+https://www.naver.com/ | title=? | raw=? csp=? err=?
+    height ? / ? = ?%   els ? / ?   aboveFold ? / ?   styleEntities ?  => OK
+```
+
+**네 사이트 전부 `=> OK`.** 판정 로직이 `?` 값을 전부 건너뛰게 되어 있어서
+어떤 플래그도 발화하지 않았고, 마지막에 `[ -z "$FLAG" ] && FLAG=" OK"` 가
+붙었다. 즉 **아무것도 못 잰 것이 전부 통과로 읽혔다.**
+
+이 저장소에서 같은 부류를 이미 두 번 적어 뒀는데(빈 탐지기 결과를 성공으로 읽음,
+`dump-recording` 이 안 armed 인데 빈 테이프를 조용한 페이지로 읽음) 오라클
+쪽에는 안 걸려 있었다.
+
+### 고침
+
+판정 맨 앞에 "쟀는가" 를 둔다. 측정값 중 하나라도 비었으면 `NO_MEASUREMENT`.
+
+```sh
+for V in "$PH" "$CH" "$PE" "$CE" "$PA" "$CA"; do
+  case "$V" in ''|'?') FLAG="$FLAG NO_MEASUREMENT"; break;; esac
+done
+```
+
+양성 대조로 확인했다: 데몬을 내리고 돌리면 `=> NO_MEASUREMENT`, 올리고 돌리면
+`=> OK`.
+
+### 규칙
+
+- 긴 배치를 걸기 전에 `taskweaver list` 로 `id: "zp"` 와 `renderer_ok` 를
+  **먼저** 확인한다. 데몬은 조용히 사라진다.
+- 측정 기반 판정기에는 반드시 **"안 쟀음" 상태**를 둔다. `OK` 와 `모름` 을
+  같은 값으로 접으면 그 도구는 고장난 순간부터 영원히 통과를 보고한다.
+

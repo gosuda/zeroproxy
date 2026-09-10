@@ -1300,3 +1300,105 @@ test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
   // constructor 는 이름이 달라 잘못 가리면 오히려 티가 난다 — 건드리지 않는다.
   assert.equal(masked.has(ctor), false, 'constructor 를 가렸다 — 이름이 어긋나 더 눈에 띈다');
 });
+
+// ── 리라이트된 페이지 코드의 소스 (2026-09-10) ─────────────────────────
+//
+// 페이지가 자기 함수를 문자열로 만들면 우리 호출이 그대로 보였다. 실측:
+// naver 8,490개 중 17개, github 8,655개 중 89개가 `__zp_get(globalThis,
+// "window")` 같은 텍스트를 노출했다. 전역 **이름** 노출은 예전에 스크러버로
+// 막았지만 함수 **소스**는 아무도 안 보고 있었다.
+//
+// 되돌리기는 의미를 바꾸면 안 된다. 특히 괄호 — `__zp_get(a||b,"k")` 를
+// `a||b.k` 로 되돌리면 뜻이 달라진다.
+test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function unrewriteSourceText(src) {');
+  assert.ok(from > 0, 'unrewriteSourceText 가 없다 — 페이지가 자기 소스에서 우리를 읽는다');
+  const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
+  const unrewrite = new Function(src + '\nreturn unrewriteSourceText;')();
+
+  // 리라이터가 내는 헬퍼를 그대로 정의해 두고, 되돌리기 전후의 **값**을 비교한다.
+  const helpers = () => ({
+    __zp_get: (b, k) => b[k],
+    __zp_set: (b, k, v) => (b[k] = v),
+    __zp_call: (b, k, a) => b[k](...a),
+    __zp_assign: (b, k, op, v) => (b[k] = op === '+=' ? b[k] + v : b[k]),
+    __zp_update: (b, k, op, pre) => { const p0 = b[k]; b[k] = op === '++' ? p0 + 1 : p0 - 1; return pre ? b[k] : p0; },
+  });
+  const cases = [
+    ['__zp_get(globalThis,"A")', 'A', () => ({ A: 7 })],
+    ['__zp_get(o,"k")', 'o.k', () => ({ o: { k: 3 } })],
+    ['__zp_get(o,"a-b")', 'o["a-b"]', () => ({ o: { 'a-b': 5 } })],
+    ['__zp_set(o,"k",9)', 'o.k=9', () => ({ o: {} })],
+    ['__zp_call(__zp_get(globalThis,"M"),"max",[1,4,2])', 'M.max(1,4,2)', () => ({ M: Math })],
+    ['__zp_assign(o,"k","+=",2)', 'o.k+=2', () => ({ o: { k: 1 } })],
+    ['__zp_update(o,"k","++",true)', '++o.k', () => ({ o: { k: 1 } })],
+    ['__zp_update(o,"k","++",false)', 'o.k++', () => ({ o: { k: 1 } })],
+    // ★우선순위. 여기가 틀리면 되돌린 코드의 뜻이 달라진다.
+    ['__zp_get(a||b,"k")', '(a||b).k', () => ({ a: null, b: { k: 42 } })],
+    ['__zp_call(a?b:c,"f",[])', '(a?b:c).f()', () => ({ a: 0, b: null, c: { f: () => 11 } })],
+    // 문자열 리터럴 안의 우리 이름은 페이지 자신의 텍스트일 수 있다 — 건드리지 않는다.
+    // ★따옴표를 섞어 **되돌릴 수 있는 모양**을 문자열 안에 넣는다. 이스케이프를
+    // 쓰면 스캐너가 어차피 포기해서 변별력이 없다(변이로 확인).
+    [`'__zp_get(o,"k")'`, `'__zp_get(o,"k")'`, () => ({})],
+    // 되돌릴 수 없는 모양은 그대로 둔다. 망친 소스가 더 큰 티다.
+    ['__zp_module("x")', '__zp_module("x")', () => ({})],
+    ['__zp_get(o)', '__zp_get(o)', () => ({})],
+  ];
+  // ★vm 컨텍스트를 쓴다. new Function 의 파라미터로 넣으면 리라이트된 쪽의
+  // globalThis 가 **진짜 전역**이라 env 를 못 봐서 값이 달라진다.
+  const vm = require('node:vm');
+  const run = (code, env) => {
+    const ctx = vm.createContext(Object.assign(env, helpers()));
+    try { return JSON.stringify(vm.runInContext('(' + code + ')', ctx)); }
+    catch (e) { return 'THREW:' + e.message; }
+  };
+  for (const [rew, want, mkEnv] of cases) {
+    const got = unrewrite(rew);
+    assert.equal(got, want, rew + ' 를 잘못 되돌렸다');
+    const envA = mkEnv();
+    const envB = mkEnv();
+    assert.equal(run(got, envB), run(rew, envA), rew + ' 되돌리기가 값을 바꿨다');
+  }
+
+  // ★템플릿 리터럴 — 안쪽 `${…}` 는 **코드**다. 통째로 건너뛰면 리라이트가
+  // 그대로 남는다(github 실측: 되돌리기를 넣은 뒤 남은 8건이 전부 여기였다).
+  // 반대로 리터럴 **텍스트**는 페이지 자신의 것이라 건드리면 안 된다.
+  const tpl = [
+    ['var x=`${__zp_get(globalThis,"window").innerWidth}px`', 'var x=`${window.innerWidth}px`'],
+    ['`${__zp_get(o,"k")}-${__zp_get(p,"q")}`', '`${o.k}-${p.q}`'],
+    // 리터럴 텍스트 안의 우리 이름은 그대로 둔다.
+    ['`a__zp_get b`', '`a__zp_get b`'],
+  ];
+  for (const [inp, want] of tpl) {
+    assert.equal(unrewrite(inp), want, '템플릿 리터럴 되돌리기: ' + inp);
+  }
+
+  // ★인라인 이벤트 핸들러. 래퍼의 셋째 인자가 원본 속성 본문 그대로라
+  // 여기서는 정확한 복구가 된다. 래퍼가 붙인 `return ` 도 걷어낸다.
+  assert.equal(
+    unrewrite('function onclick(event) { return __ZP_EXEC_EVENT(this,event,"return tCR(1);") }'),
+    'function onclick(event) { return tCR(1); }',
+    '인라인 핸들러 래퍼가 그대로 보인다');
+  // ★루프 캡. for(;;) 와 while(true) 가 둘 다 계수기 붙은 for 로 바뀌므로
+  // 원본을 구분할 수 없다 — for(;;) 로 되돌린다. 뜻은 같고 표식은 사라진다.
+  const lc = [
+    ['for(let __zp_lc_7=0;__zp_lc_7++<10000000;){x()}', 'for(;;){x()}'],
+    ['let __zp_lc_3=0;do{x()}while(__zp_lc_3++<10000000);', 'do{x()}while(true);'],
+    // 페이지 자신의 let 선언은 건드리지 않는다.
+    ['let a=0;for(let __zp_lc_1=0;__zp_lc_1++<10000000;)y()', 'let a=0;for(;;)y()'],
+  ];
+  for (const [inp, want] of lc) {
+    assert.equal(unrewrite(inp), want, '루프 캡 되돌리기: ' + inp);
+  }
+
+  // 되돌린 소스는 반드시 파싱돼야 한다.
+  const real = 'function f(a){return __zp_call(__zp_get(globalThis,"window"),"open",[a,"_blank"])}';
+  const out = unrewrite(real);
+  assert.equal(out, 'function f(a){return window.open(a,"_blank")}');
+  assert.doesNotThrow(() => new Function('return ' + out), '되돌린 소스가 파싱되지 않는다');
+
+  // toString 마스킹이 실제로 이걸 지나야 한다.
+  assert.ok(rt.includes('return unrewriteSourceText(orig.call(this));'),
+    'toString 이 되돌리기를 안 지난다 — 함수가 있어도 아무 데도 안 걸린다');
+});

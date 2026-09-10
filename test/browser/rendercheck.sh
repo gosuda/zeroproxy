@@ -62,7 +62,14 @@ for U in "$@"; do
   ERR=$(taskweaver console-logs -i zp --level error --max 100 2>/dev/null | json 'logs.length')
 
   # ── 판정 ────────────────────────────────────────────────────────────
+  #
+  # ★맨 먼저 "쟀는가" 를 본다. 2026-09-10 에 taskweaver 데몬이 죽은 채로 13분을
+  # 돌렸는데 네 사이트가 전부 `=> OK` 로 나왔다 — 모든 값이 `?` 라 어떤 플래그도
+  # 발화하지 않았기 때문이다. **안 잰 것과 통과한 것은 다르다.**
   FLAG=""
+  for V in "$PH" "$CH" "$PE" "$CE" "$PA" "$CA"; do
+    case "$V" in ''|'?') FLAG="$FLAG NO_MEASUREMENT"; break;; esac
+  done
   case "$PS" in ''|'?'|0) ;; *) FLAG="$FLAG STYLE_ENTITY($PS)";; esac
   R="?"
   if [ "$CH" != "?" ] && [ "$PH" != "?" ] && [ "$CH" -gt 0 ] 2>/dev/null; then
