@@ -63,3 +63,5 @@
 - 원인: 프로필 `PIPE_TAIL_USER`→`hsng9` 변경으로 툴체인 소실. `npm run build`가 `dist/`를 먼저 지운 뒤 Go 단계에서 실패해 `dist/zeroproxy-server.exe`와 브라우저 검증 수단까지 잃음.
 - 규칙: clean 전에 `go`, `wasm-bindgen`, `cargo`, `node` 확인. 당시 taskweaver는 `~/.cargo/bin`에 복사, Go는 사용자 설치; `wasm-bindgen-cli --version 0.2.122 --locked`는 Cargo.lock 버전과 반드시 일치.
 - 별도 함정: 설치 후에도 셸 PATH는 낡을 수 있음. 파일시스템·`[Environment]::GetEnvironmentVariable("Path","Machine")` 확인 또는 `/c/Program Files/Go/bin` 추가. 백그라운드 빌드는 기존 파일 존재로 완료 판단하면 이후 clean에 지워지므로 **작업 완료 알림**을 기다린다.
+- 변종 (2026-09-10): 툴체인이 다 있어도 **실행 중인 서버가 exe 를 잠그면** 같은 사고가 난다. clean 이 `dist/web/*` 를 먼저 지우고 `dist/zeroproxy-server.exe` unlink 에서 `EPERM` 으로 죽어, dist 가 반만 남는다. 빌드 전에 `Get-Process zeroproxy-server | Stop-Process`.
+- 별도 함정: `npm run build 2>&1 | tail` 은 **tail 의 종료 코드**를 돌려주므로 실패한 빌드가 `exit 0` 으로 보인다. `set -o pipefail` 을 쓰거나 파이프 없이 실행한다. 이번에 실제로 실패를 성공으로 한 번 보고했다.
