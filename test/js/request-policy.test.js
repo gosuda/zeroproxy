@@ -397,3 +397,36 @@ test('WebSocket rejected protocols and failed setup abort allocated kernel drive
     });
   }
 });
+
+// `*` 와 `Allow-Credentials: true` 는 명세상 함께 못 쓴다 — 브라우저가 응답
+// 전체를 거부한다. 예전에는 무조건 credentials 를 켰고 Origin 없는 요청에서
+// 정확히 그 조합이 나왔다. 이 가드는 소스 문자열을 보던 것을 대신하며,
+// SW 의 applyCORS 를 실제로 호출해 방출된 헤더를 검사한다.
+test('CORS: 와일드카드 오리진에는 credentials 를 켜지 않는다', () => {
+  const worker = loadWorker(() => new Response(null));
+  assert.equal(typeof worker.applyCORS, 'function', 'applyCORS 가 사라졌다 — CORS 방출부가 옮겨졌다면 이 가드도 옮겨야 한다');
+  // applyCORS 는 req.headers.get 만 쓴다. 실제 Request 는 Origin 을 금지
+  // 헤더로 걸러내므로 가짜 요청을 쓴다.
+  const req = (h) => ({ headers: new Headers(h || {}) });
+
+  // ① 구체 오리진을 되비출 때만 credentials 를 켠다.
+  const concrete = new Headers();
+  worker.applyCORS(concrete, req({ Origin: 'https://site.example' }));
+  assert.equal(concrete.get('access-control-allow-origin'), 'https://site.example');
+  assert.equal(concrete.get('access-control-allow-credentials'), 'true');
+  assert.match(concrete.get('vary') || '', /Origin/, '오리진을 되비추면 Vary: Origin 이 있어야 캐시가 섞이지 않는다');
+
+  // ② Origin 이 없으면 `*` 로 떨어지고, 그때는 credentials 를 켜면 안 된다.
+  const wildcard = new Headers();
+  worker.applyCORS(wildcard, req());
+  assert.equal(wildcard.get('access-control-allow-origin'), '*');
+  assert.equal(wildcard.get('access-control-allow-credentials'), null,
+    '`*` 와 credentials 를 함께 내보냈다 — 브라우저가 응답 전체를 거부한다');
+  assert.equal(wildcard.get('vary'), null, '`*` 는 오리진에 따라 달라지지 않으므로 Vary 도 없어야 한다');
+
+  // ③ req 자체가 없어도 같은 규칙이다 (내부 호출 경로).
+  const bare = new Headers();
+  worker.applyCORS(bare, null);
+  assert.equal(bare.get('access-control-allow-origin'), '*');
+  assert.equal(bare.get('access-control-allow-credentials'), null);
+});

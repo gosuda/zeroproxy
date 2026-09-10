@@ -1169,3 +1169,21 @@ test('CSS: 우리가 바꿔 쓴 값은 모든 읽기 경로에서 되돌린다',
     assert.ok(rt.includes(needle), what + ' 읽기 경로의 되돌리기가 사라졌다');
   }
 });
+
+// 페이지 realm wasm 은 **탐색마다** 실린다 — cold-load 비용의 지배항이다.
+// SW 쪽 산출물(zp_bundle_sw / zp_kernel_sw)은 오리진당 한 번이고 전송·CSS·
+// HTML 변환을 다 지고 있어 여기서 재지 않는다.
+//
+// 넘어가는 계기는 거의 항상 새 전이 의존성이다. 그때는 그 호출을 SW 로
+// 옮기거나 분할 로드할지 다시 판단한다.
+test('E3 크기 가드: zp_page_bundle_bg.wasm 은 500 KB 이하', (t) => {
+  const wasmPath = 'dist/web/__zp/zp_page_bundle_bg.wasm';
+  if (!fs.existsSync(wasmPath)) {
+    // 조용히 통과시키지 않는다 — 안 잰 것과 통과한 것은 다르다.
+    t.skip('dist 가 없다: `npm run build` 뒤에 다시 돌린다');
+    return;
+  }
+  const size = fs.statSync(wasmPath).size;
+  assert.ok(size <= 500 * 1024,
+    'zp_page_bundle_bg.wasm = ' + size + ' bytes (' + (size / 1024).toFixed(1) + ' KB) > 500 KB');
+});
