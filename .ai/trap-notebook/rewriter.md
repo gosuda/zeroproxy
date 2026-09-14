@@ -936,3 +936,79 @@ raw/csp/err/height 어느 것도 프로토타입 모양을 안 본다. 그래서
   나오고 프로브가 조용히 빈 결과를 준다. 반드시 `return` 으로 끝낸다.
 - 또 `cmd | tail` 로 종료 코드를 가렸다(같은 날 두 번째다).
 
+### 고친 것 (2026-09-14) — (a)는 5분, (b)는 목록을 규칙으로
+
+**(a) 섀도잉.** `baseURI` 를 `Document.prototype` → `Node.prototype` 으로
+옮겼다(값 로직은 그대로, this 를 안 봐도 되는 것도 그대로 — 문서당 값 하나).
+덤으로 **컨테인먼트 구멍 하나가 같이 닫혔다**: 예전엔 `document.baseURI` 만
+가상화되고 `아무엘리먼트.baseURI` 는 네이티브 `Node.prototype` 접근자를 그대로
+타서 실제 origin 이 샜다 — Document.prototype 에 심은 게 Element 인스턴스엔
+안 걸렸으니까. innerHTML/innerText/textContent 는 `HTMLStyleElement.prototype`
+own 훅을 지우고 각각 진짜 자리(Element/HTMLElement/Node prototype)에 심되,
+`this.localName === 'style'` 로 갈라 나머지 전 요소는 그대로 흘려보낸다.
+innerHTML 은 이미 `Element.prototype` 에 세정 훅(`patchHTMLSetter`)이 있어서
+그 함수 안에 `<style>` 분기 하나를 더 넣는 식으로 합쳤다(따로 심으면 나중
+설치가 이긴다).
+
+**`origin` 은 삭제했다 — 코드 안에 서로 모순되는 두 개의 "실측"이 있었다.**
+D7 훅 옆 주석은 "origin/domain/createElement/createElementNS 는 전부
+Document.prototype 에 산다" 고 적혀 있었다. 그런데 이번 축은 그 반대를 잡았다.
+**둘 다 실제로 재서** 풀었다: WebView2(Edge 153, taskweaver)와 puppeteer 로 띄운
+설치된 Chrome 152 헤드리스 — **둘 다** `document.origin` 이 own 도 아니고 값도
+`undefined`. 옛 주석이 스펙 문서/기억에서 나온 확인 안 된 가정이었던 것으로
+보인다(`self.origin`/`location.origin` 과 헷갈렸을 가능성). 가상화할 실체가
+없으므로 지웠다 — 실측 없이 "예전 주석이 맞겠지" 하고 넘어갔으면 못 잡았다.
+
+**`test/e2e/proxy.test.js` 의 escape-matrix 가 이 옛 가정 위에 서 있었다.**
+`documentOrigin` 테스트가 `document.origin` 이 가상 타깃 오리진으로
+읽혀야 한다고 단언했는데, 이제 그 속성 자체가 없으니 항상 실패할 판이었다.
+회귀 가드를 지우지 않고 **전제가 바뀐 것으로 갱신**했다 — `undefined` 를
+`'absent-natively:ok'` 로 받아들이되, 속성이 살아있는 엔진에서는 여전히
+"프록시 오리진이면 안 된다" 불변식을 검사한다. **회귀 테스트도 브라우저
+스펙 드리프트로 썩는다** — 통과한다고 전제가 아직 참이라는 뜻은 아니다.
+
+**(b) 대체 클래스의 얇은 프로토타입.** `makeVirtualGateway` (RTCPeerConnection
+게이트웨이 미설정 시 폴백 + RTCDataChannel + WebTransport 폴백)가 인스턴스
+리터럴에 손으로 고른 메서드 몇 개만 심고 있었다 — 오늘 CSS URL 프로퍼티
+손목록과 완전히 같은 병. 진짜 네이티브 프로토타입의 **own 이름을 실행 시점에
+그대로 베껴** 프로토타입에 심게 고쳤다: 메서드는 (동기/비동기, 몇 개 안 되는
+분류표로) reject 하거나 던지거나 no-op, 접근자는 `on*` 이면 로컬 핸들러
+백업, 아니면 스펙 초기값. 표에 없는 이름이 나와도 이름 자체는 여전히
+심긴다 — 값만 `null`/reject 로 떨어진다. 코드: `web/runtime-prelude.js` 의
+`makeVirtualGateway`.
+
+**SharedWorker: 프로토타입 문제인 줄 알고 갔다가 죽어 있던 격리 기능을
+찾았다.** `Worker` 는 이미 `ZPWorker.prototype = Native.Worker.prototype` 로
+고쳐져 있었는데(2026-08 대), 바로 3줄 아래 `SharedWorker` 형제 훅
+(`installWorkerHooks` 안, 부트 순서상 `installStorageFacades` **다음**에
+실행)은 이 fix 를 못 받은 채 매번 새 함수 리터럴로 정의되고 있었다. 그 결과
+둘이 같이 걸렸다:
+1. 모양 — `SharedWorker.prototype` 이 `constructor` 하나뿐이라 `onerror`/
+   `port` 등이 대조군에만 있었다(이번 축이 잡은 것).
+2. **격리** — `installStorageFacades` 가 타깃 오리진마다 다른 이름 접두어
+   (`zp:w:<hash>:`)를 심어 뒀는데, 부트 순서상 나중에 도는 이 훅이 접두어 없는
+   버전으로 **조용히 덮어썼다**. 접두어가 없으면 같은 프록시 오리진을 공유하는
+   서로 다른 두 타깃이 이름+URL 이 겹칠 때 **같은 SharedWorker 인스턴스**를
+   붙잡을 수 있다 — 프로토타입 모양을 쫓다가 찾은, 완전히 별개의 컨테인먼트
+   버그. 접두어 계산을 `sharedWorkerNamePrefix()` 로 뽑아 양쪽이 항상 같은
+   문자열을 내도록 하고, 늦게 도는 훅 쪽에 다시 심었다.
+
+**installEventMethods 를 잘못 쓸 뻔했다.** 공유 `eventTargetProto()` (XHR/
+WebSocket 이 own `addEventListener`/`removeEventListener`/`dispatchEvent` 3개
+초과 문제를 푼 방법, 2026-08-03)를 `ZPWebTransport`/`ZPRTCPeerConnection` 에도
+쓰면 모양이 좋아질 것 같아서 처음엔 그렇게 했는데, **이 둘은 XHR 과 다르다**
+— 진짜 native 인스턴스(`this._native`)를 감싸고 그 인스턴스가 스스로 이벤트를
+낸다. 가짜 리스너-맵으로 바꾸면 등록은 `this` 에 되고 발생은 `_native` 에서
+나서 이벤트가 영영 안 닿는다. 커밋 전에 되짚어 되돌렸다 — `makeVirtualGateway`
+스텁(감쌀 네이티브가 없음)에는 그대로 안전하게 썼다. **공유 헬퍼를 쓸지는
+"우리가 상태를 전부 재구현하는가, 진짜 객체를 감싸기만 하는가"로 갈린다.**
+
+**검증**: `protoshape.sh` 6개 diff → `OK (인터페이스 955개 일치)`(양성 대조
+확인 완료). 실제 프록시 페이지에서 `<style>` 세 경로(textContent/innerHTML/
+appendChild+텍스트노드) 재작성, 일반 엘리먼트 innerHTML/innerText/textContent
+무변화, document/element 양쪽 baseURI 동일 가상값, SharedWorker 생성 무크래시,
+RTCPeerConnection/WebTransport 스텁의 동기/비동기·동일성(`wt.ready === wt.ready`)
+확인. `static-policy.test.js` 46→51(신규 5개, mutation 확인), 실사이트
+rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
+(documentOrigin/webTransport/rtcPeerConnection 포함).
+

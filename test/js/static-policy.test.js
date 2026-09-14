@@ -1495,3 +1495,134 @@ test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
   assert.equal(String(rt2.get('background-image')), 'url(TARGET/round.png)',
     '왕복이 안 맞는다 — 페이지가 쓴 값과 읽는 값이 다르면 그 차이가 곧 지문이다');
 });
+
+// ── 프로토타입 모양 축(2026-09-14)이 처음 돌자마자 6개를 잡았다 ──────────
+//
+// Document/HTMLStyleElement: own 접근자를 브라우저가 두는 조상이 아니라
+// 서브클래스 프로토타입에 새로 정의해서, 그 own 자체가 대조군엔 없는 모양
+// 지문이었다(같은 날 겪은 own `style` 13→157 회귀와 같은 부류).
+test('baseURI 는 Document.prototype 이 아니라 Node.prototype 에 심는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  assert.ok(rt.includes("defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);"),
+    'baseURI 가 Node.prototype 에 없다 — 문서가 아닌 일반 요소에서 baseURI 가 실제 값을 샌다');
+  assert.ok(!/defineAccessor\(w\.Document && w\.Document\.prototype, 'baseURI'/.test(rt),
+    'baseURI 가 Document.prototype 에 남아 있다 — own 자체가 대조군엔 없는 모양 지문이다');
+});
+
+test('document.origin 가상화는 없다 — 이 속성 자체가 최신 브라우저에 없다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  // 실측(2026-09-14, Chrome 152 headless + Edge/WebView2 153): 둘 다
+  // document.origin 이 own 도 아니고 값도 undefined. 되살리면 그 own 자체가
+  // Document 모양 지문이 된다 — 되살리기 전에 반드시 실브라우저로 재확인할 것.
+  assert.ok(!/defineOnProto\(w\.document, docProto, 'origin'/.test(rt),
+    'document.origin 훅이 되살아났다 — 실브라우저에 없는 속성을 own 으로 만들면 그게 지문이다');
+});
+
+test('HTMLStyleElement 의 innerHTML/innerText/textContent 는 조상 프로토타입에서 <style> 만 가른다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  assert.ok(!/HTMLStyleElement.*\.prototype;[\s\S]{0,80}for \(const prop of \['textContent', 'innerText', 'innerHTML'\]/.test(rt),
+    'innerHTML/innerText/textContent 를 다시 HTMLStyleElement.prototype 에 own 으로 심었다');
+  assert.ok(rt.includes("['textContent', w.Node && w.Node.prototype]") && rt.includes("['innerText', w.HTMLElement && w.HTMLElement.prototype]"),
+    'textContent/innerText 를 브라우저가 실제로 두는 조상(Node/HTMLElement)에 심지 않는다');
+  assert.ok(/this\.localName === 'style'.*originalStyleText/.test(rt.replace(/\n\s*/g, ' ')),
+    '조상에 심으면서 <style> 인지 가르는 분기가 없다 — 전 요소에 CSS 재작성이 걸린다');
+});
+
+test('SharedWorker 교체는 네이티브 prototype 을 보존하고 타깃 접두어를 다시 심는다', () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  // Worker 는 이미 고쳐져 있었다(7340 대) — 형제인 SharedWorker 훅이
+  // installWorkerHooks 안에서 이 fix 를 안 받은 채 뒤늦게 실행되며
+  // installStorageFacades 가 심어 둔, 타깃마다 다른 접두어(sharedWorkerNamePrefix)
+  // 를 조용히 덮어썼다. 프로토타입 모양(own count)과 격리(같은 프록시 오리진
+  // 안에서 서로 다른 타깃이 SharedWorker 를 공유하면 안 된다) 두 가지가
+  // 같은 훅 하나에 걸려 있었다.
+  const from = rt.indexOf('  function installWorkerHooks() {');
+  assert.ok(from > 0, 'installWorkerHooks 가 없다');
+  const to = rt.indexOf('\n  // D3: virtual SW facade', from);
+  assert.ok(to > from, 'installWorkerHooks 끝을 못 찾았다');
+  const body = rt.slice(from, to);
+  assert.ok(/ZPSharedWorker\.prototype = Native\.SharedWorker\.prototype/.test(body),
+    'SharedWorker 교체가 네이티브 prototype 을 안 물려받는다 — onerror/port 등이 대조군에만 남는다');
+  assert.ok(/const prefix = sharedWorkerNamePrefix\(\);[\s\S]{0,400}new Native\.SharedWorker/.test(body),
+    'SharedWorker 생성이 타깃 접두어를 안 쓴다 — 서로 다른 타깃이 이름을 공유하면 같은 워커를 잡는다');
+});
+
+// ── makeVirtualGateway: 목록이 아니라 규칙이다 (2026-09-14) ────────────────
+//
+// 예전엔 인터페이스별로 손으로 고른 메서드 몇 개만 인스턴스 리터럴에 심었다
+// (프로토타입엔 아예 안 얹힘). 실측: RTCPeerConnection 45개, RTCDataChannel
+// 20개, WebTransport 9개가 대조군에만 있는 프로토타입이 됐다 — 오늘 CSS URL
+// 프로퍼티 손목록에서 이미 겪은 실수를 세 번 더 한 것. 이 테스트는 규칙을
+// 격리 실행해 (1) 이름이 net 프로토타입에서 그대로 베껴지는지, (2) 동기/비동기
+// 분류가 맞는지, (3) EventTarget 세 메서드가 own 으로 안 새는지를 확인한다.
+const GATEWAY_STUB = [
+  'function normalizedError(n) { const e = new Error(n); e.name = n; return e; }',
+  'function defineMasked(obj, key, desc) { try { Object.defineProperty(obj, key, desc); return true; } catch (e) { return false; } }',
+  'function installEventMethods(proto) {',
+  '  const et = Object.create(null);',
+  "  et.addEventListener = function () {};",
+  "  et.removeEventListener = function () {};",
+  "  et.dispatchEvent = function () { return true; };",
+  '  Object.setPrototypeOf(proto, et);',
+  '}',
+  'function brandLikeNative(ctor, proto, name) { try { Object.defineProperty(ctor, "name", { value: name, configurable: true }); } catch (e) {} }',
+  'function makeEmptyReadableStream() { return { __emptyStream: true }; }',
+  'function makeRejectedWritableStream(err) { return { __rejectedStream: true, err }; }',
+].join('\n');
+
+test('makeVirtualGateway: 네이티브 prototype 이름을 규칙으로 베끼고 동기/비동기를 가른다', async () => {
+  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function makeVirtualGateway(name, meta) {');
+  assert.ok(from > 0, 'makeVirtualGateway 규칙이 없다 — 손으로 고른 목록으로 돌아가면 반드시 또 뚫린다');
+  const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
+  assert.ok(!/proxy\.createOffer = |proxy\.getSenders = /.test(src),
+    '인터페이스별 손목록(proxy.xxx = ...) 이 되살아났다');
+
+  // 대표 네이티브 프로토타입 하나로 다섯 갈래(비동기/동기-throw/동기-array/
+  // 동기-object/동기-noop)와 두 종류 접근자(핸들러/일반 settable/get-only)를
+  // 모두 건드린다.
+  function FakeNative() {}
+  Object.defineProperties(FakeNative.prototype, {
+    createOffer: { value: function () { return this.__marker; }, configurable: true }, // ASYNC_REJECT
+    createDataChannel: { value: function () {}, configurable: true },                  // SYNC_THROW
+    getSenders: { value: function () {}, configurable: true },                         // SYNC_ARRAY
+    getConfiguration: { value: function () {}, configurable: true },                   // SYNC_OBJECT
+    close: { value: function () {}, configurable: true },                              // 나머지: no-op
+    signalingState: { get() { return 'REAL-NATIVE-LEAK'; }, configurable: true },       // get-only 상태
+    binaryType: { get() { return 'REAL'; }, set() {}, configurable: true },             // 일반 settable
+    onicecandidate: { get() { return this.__h; }, set(v) { this.__h = v; }, configurable: true }, // 핸들러
+  });
+  const root = { RTCPeerConnection: FakeNative };
+  const mk = () => new Function('root', GATEWAY_STUB + src + '\nreturn makeVirtualGateway;')(root);
+  const makeVirtualGateway = mk();
+
+  const Ctor = makeVirtualGateway('RTCPeerConnection', { code: 'X_UNAVAILABLE', kind: 'WebRTC' });
+  const names = Object.getOwnPropertyNames(Ctor.prototype).filter(n => n !== 'constructor').sort();
+  assert.deepEqual(names, [
+    'binaryType', 'close', 'createDataChannel', 'createOffer',
+    'getConfiguration', 'getSenders', 'onicecandidate', 'signalingState',
+  ], '네이티브 프로토타입의 own 이름을 그대로 못 베꼈다 — 이름=모양 규칙이 깨졌다');
+
+  const inst = new Ctor();
+  assert.ok(typeof inst.createOffer().then === 'function', '비동기 메서드가 Promise 를 안 돌려준다');
+  await inst.createOffer().catch(() => {}); // 미처리 reject 로 프로세스가 안 죽게.
+  let threw = false;
+  try { inst.createDataChannel(); } catch (e) { threw = true; }
+  assert.ok(threw, 'ZeroProxy 게이트웨이가 없을 때 동기 메서드는 던져야 한다');
+  assert.deepEqual(inst.getSenders(), [], '동기 배열 메서드가 빈 배열이 아니다');
+  assert.deepEqual(inst.getConfiguration(), {}, '동기 객체 메서드가 빈 객체가 아니다');
+  assert.equal(inst.close(), undefined, 'no-op 메서드가 조용히 지나가지 않는다');
+  assert.equal(inst.signalingState, 'stable',
+    '상태 접근자가 우리 초기값이 아니라 가짜 네이티브 값을 그대로 돌려준다 — 살아있는 참조를 잡고 있다는 뜻');
+
+  const f = () => {};
+  inst.onicecandidate = f;
+  assert.equal(inst.onicecandidate, f, '핸들러 왕복이 안 맞는다');
+  const inst2 = new Ctor();
+  assert.equal(inst2.onicecandidate, null, '핸들러 상태가 인스턴스 간에 샌다');
+
+  assert.equal(inst.binaryType, 'blob', '일반 settable 접근자의 초기값이 표의 기본값이 아니다');
+  inst.binaryType = 'arraybuffer';
+  assert.equal(inst.binaryType, 'arraybuffer', '일반 settable 접근자가 쓴 값을 그대로 반사하지 않는다');
+  assert.equal(inst2.binaryType, 'blob', 'settable 접근자 상태가 인스턴스 간에 샌다');
+});

@@ -1033,6 +1033,17 @@
     try { if (ctor) Object.defineProperty(ctor, 'name', { value: name, configurable: true }); } catch {}
     try { if (proto) Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch {}
   }
+  // D7: 타깃 오리진마다 SharedWorker 이름을 이 접두어로 스코프한다 — 없으면
+  // 프록시 오리진 하나를 공유하는 서로 다른 타깃 두 개가 **같은** SharedWorker
+  // 인스턴스를 붙잡는다(SharedWorker 는 realm 안에서 origin+name+url 로
+  // dedup). installStorageFacades 의 계산과 별개 함수지만 같은 FNV-1a 를
+  // virtualURL.origin 에 돌리므로 항상 같은 문자열이 나온다.
+  function sharedWorkerNamePrefix() {
+    const key = virtualURL.origin;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return 'zp:w:' + ('00000000' + (h >>> 0).toString(16)).slice(-8) + ':';
+  }
   let sharedEventTargetProto = null;
   function eventTargetProto() {
     if (sharedEventTargetProto) return sharedEventTargetProto;
@@ -3760,7 +3771,12 @@
     define(w.Location && w.Location.prototype, 'toString', function(){ return virtualURL.href; });
     defineAccessor(w.Document && w.Document.prototype, 'URL', () => virtualURL.href);
     defineAccessor(w.Document && w.Document.prototype, 'documentURI', () => virtualURL.href);
-    defineAccessor(w.Document && w.Document.prototype, 'baseURI', () => baseURL);
+    // ★Document.prototype 가 아니라 Node.prototype 이다 — 실측(2026-09-14,
+    // 프로토타입 모양 축): 브라우저는 baseURI 를 Node 인터페이스에 두고
+    // Document/Element/Text 등이 상속한다. Document.prototype 에 own 으로
+    // 심었더니 그 own 자체가 지문이었다(대조군엔 없음). 문서당 값 하나뿐이라
+    // this 를 안 봐도 되는 건 그대로다 — 어떤 노드에서 읽어도 같은 문서 기준.
+    defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);
     defineAccessor(w.Document && w.Document.prototype, 'referrer', () => '');
     defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(err => { try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'cookie-set-failed', code: String((err && (err.code || err.message)) || err), ck: s.slice(0, 60) }); } catch {} }); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
@@ -4558,16 +4574,15 @@
       try { SWWrap.prototype = NativeSW.prototype; } catch {}
       try { define(w, 'SharedWorker', SWWrap); } catch {}
     }
-    // D7: document.origin getter returns the virtual target origin so
-    // target code identifying its own origin sees its world, not the proxy.
-    // `origin` was defined on Document.prototype AND on the document instance —
-    // the same redundant double-define we removed from navigator/history. Only
-    // `location` is genuinely an own property of a native document
-    // ([LegacyUnforgeable]); origin/domain/createElement/createElementNS all
-    // live on Document.prototype, so instance copies are pure fingerprint.
+    // D7 (removed 2026-09-14): `document.origin` 가상화. 프로토타입 모양 축이
+    // 처음 돌자마자 "Document 프록시에만: origin" 을 잡았는데, 실측해 보니 이
+    // 엔진은 **document.origin 자체가 없다** — Document.prototype 도
+    // Node.prototype 도 Window.prototype 도 own 이 아니고 `typeof
+    // document.origin === 'undefined'`. 가상화할 실체가 없으니 지운다. 아래
+    // 주석("origin 은 Document.prototype 에 산다")은 이번 실측 전 가정이었고
+    // 틀렸다 — window.origin/location.origin 과 헷갈린 것으로 보인다.
     if (w.document) {
       const docProto = w.Document && w.Document.prototype;
-      defineOnProto(w.document, docProto, 'origin', () => virtualURL.origin);
       // document.domain getter/setter — setter accepts only target eTLD+1.
       let virtualDomain = virtualURL.hostname.toLowerCase();
       defineOnProto(
@@ -6044,12 +6059,27 @@
       if (!d || !d.set) return;
       try {
         defineMasked(proto, prop, {
-          get() { return d.get ? sanitizeSerializedNode(this, prop === 'outerHTML') : ''; },
+          get() {
+            // <style> 는 세정이 아니라 CSS 재작성 대상이다. 예전엔
+            // HTMLStyleElement.prototype 에 별도 own 훅이 있었는데, 프로토타입
+            // 모양 축(2026-09-10)이 그 own 자체를 지문으로 잡아서 여기로
+            // 합쳤다 — Element.prototype 은 어차피 브라우저가 innerHTML 을
+            // 두는 자리라 own 이 하나도 안 늘어난다.
+            if (prop === 'innerHTML' && this && this.localName === 'style') {
+              return d.get ? originalStyleText(this, d.get.call(this)) : '';
+            }
+            return d.get ? sanitizeSerializedNode(this, prop === 'outerHTML') : '';
+          },
           set(v) {
             if (this && this.localName === 'template' && prop === 'innerHTML') {
               d.set.call(this, String(v));
               enforceSubtreePolicies(this.content);
               instrumentDescendantIframes(this.content);
+              return;
+            }
+            if (prop === 'innerHTML' && this && this.localName === 'style') {
+              originalTextMeta.set(this, String(v == null ? '' : v));
+              d.set.call(this, rewriteCSSText(v));
               return;
             }
             d.set.call(this, transformHTML(String(v), transformHTMLOpts));
@@ -6525,21 +6555,37 @@
     // 선언보다 **위**라 `Cannot access 'X' before initialization` 이 나고,
     // 그 예외가 뒤따르는 멤브레인 설치를 통째로 중단시킨다. 실제로 자식
     // 프레임의 fetch/img 컨테인먼트가 깨졌다(매트릭스 e2/e3 회귀로 잡았다).
-    const styleProto = w.HTMLStyleElement && w.HTMLStyleElement.prototype;
-    if (styleProto) {
-      for (const prop of ['textContent', 'innerText', 'innerHTML']) {
-        const d = propertyDescriptor(styleProto, prop)
-          || propertyDescriptor(w.Element && w.Element.prototype, prop)
-          || propertyDescriptor(w.Node && w.Node.prototype, prop);
-        if (!d || !d.set) continue;
-        try {
-          defineMasked(styleProto, prop, {
-            get() { return d.get ? originalStyleText(this, d.get.call(this)) : ''; },
-            set(v) { originalTextMeta.set(this, String(v == null ? '' : v)); d.set.call(this, rewriteCSSText(v)); },
-            configurable: false
-          });
-        } catch {}
-      }
+    // ★HTMLStyleElement.prototype 가 아니라 브라우저가 실제로 두는 조상에
+    // 심는다 — 실측(2026-09-14, 프로토타입 모양 축): innerHTML 은
+    // Element.prototype, innerText 는 HTMLElement.prototype, textContent 는
+    // Node.prototype 에 own 이고 HTMLStyleElement.prototype 은 셋 다 없다.
+    // 예전엔 셋 다 HTMLStyleElement.prototype 에 own 으로 새로 정의해서, 그
+    // own 자체가 대조군엔 없는 모양 지문이었다(같은 날 겪은 own `style` 13→157
+    // 회귀와 동일한 부류). 조상에 심으면 전 요소가 대상이 되므로 훅 안에서
+    // `<style>` 인지 갈라 나머지는 그대로 흘려보낸다.
+    // innerHTML 은 `patchHTMLSetter` 가 Element.prototype 에 이미 세정용 훅을
+    // 두므로 거기서 같이 처리한다(여기서 또 훅하면 나중 설치가 이긴다).
+    for (const [prop, proto] of [
+      ['textContent', w.Node && w.Node.prototype],
+      ['innerText', w.HTMLElement && w.HTMLElement.prototype],
+    ]) {
+      if (!proto) continue;
+      const d = Native[prop === 'textContent' ? 'nodeTextContent' : 'htmlInnerText'];
+      if (!d || !d.set) continue;
+      try {
+        defineMasked(proto, prop, {
+          get() {
+            if (this.localName !== 'style') return d.get ? d.get.call(this) : undefined;
+            return d.get ? originalStyleText(this, d.get.call(this)) : '';
+          },
+          set(v) {
+            if (this.localName !== 'style') { d.set.call(this, v); return; }
+            originalTextMeta.set(this, String(v == null ? '' : v));
+            d.set.call(this, rewriteCSSText(v));
+          },
+          configurable: false
+        });
+      } catch {}
     }
     const sheetProto = w.CSSStyleSheet && w.CSSStyleSheet.prototype;
     if (sheetProto) {
@@ -7343,7 +7389,26 @@
       brandLikeNative(ZPWorker, null, 'Worker');
       define(root, 'Worker', ZPWorker);
     }
-    if (Native.SharedWorker) define(root, 'SharedWorker', function(url, opts) { try { zpTrace('SharedWorker', String(url).slice(0,120)); } catch {} return new Native.SharedWorker(workerBootstrapURL(url), opts); });
+    if (Native.SharedWorker) {
+      // ★Worker 세 줄 위(7340/7343)와 같은 병(own-count 불일치)인데 형제
+      // 훅이 빠뜨렸다 — 실측(2026-09-14, 프로토타입 모양 축): SharedWorker
+      // 프로토타입에 onerror/port 가 없었다. 게다가 이 훅은
+      // installStorageFacades(root) 가 먼저 심어 둔 타깃-스코프 name 접두어
+      // (sharedWorkerNamePrefix) 를 **부트 순서상 나중에 실행되며 조용히
+      // 지웠다** — 프로토타입 문제를 좇다가 발견한, 별개의 격리 회귀. 접두어가
+      // 없으면 같은 프록시 오리진을 쓰는 서로 다른 타깃 두 개가 이름+URL 이
+      // 겹칠 때 **같은 SharedWorker 인스턴스**를 공유한다.
+      const ZPSharedWorker = function(url, opts) {
+        try { zpTrace('SharedWorker', String(url).slice(0, 120)); } catch {}
+        const prefix = sharedWorkerNamePrefix();
+        const named = (opts && opts.name) ? Object.assign({}, opts, { name: prefix + String(opts.name) })
+                                           : Object.assign({}, opts || {}, { name: prefix + 'default' });
+        return new Native.SharedWorker(workerBootstrapURL(url), named);
+      };
+      try { ZPSharedWorker.prototype = Native.SharedWorker.prototype; } catch {}
+      brandLikeNative(ZPSharedWorker, null, 'SharedWorker');
+      define(root, 'SharedWorker', ZPSharedWorker);
+    }
     if (navigator.serviceWorker && navigator.serviceWorker.register) define(navigator.serviceWorker, 'register', function() { return Promise.reject(normalizedError('NotSupportedError')); });
     // 갈아치우기는 **쓸 때** 한다 — 만들 때가 아니다 (2026-08-26).
     //
@@ -7837,6 +7902,14 @@
     ZPWebTransport.prototype.close = function(closeInfo) {
       try { return this._native.close(closeInfo); } catch { return undefined; }
     };
+    // ★공유 eventTargetProto() (installEventMethods) 는 여기 안 맞는다 — 그건
+    // XHR/WebSocket 처럼 우리가 상태를 통째로 재구현한 클래스용 가짜
+    // 리스너-맵이다. ZPWebTransport 는 **진짜** 네이티브 인스턴스(_native)를
+    // 감싸고 그 인스턴스가 스스로 이벤트를 낸다 — addEventListener 를 가짜로
+    // 바꾸면 `_native` 가 내는 진짜 이벤트가 리스너에 영영 안 닿는다(등록은
+    // this 에, 발생은 _native 에 생기므로). own 3개가 대조군보다 많은 채로
+    // 둔다 — 이 클래스는 게이트웨이가 설정된 배포에서만 살아나므로 지금
+    // 측정되는 6개 모양차이에는 어차피 안 걸린다.
     ZPWebTransport.prototype.addEventListener = function(type, listener, opts) {
       try { return this._native.addEventListener(type, listener, opts); } catch {}
     };
@@ -7846,6 +7919,7 @@
     ZPWebTransport.prototype.dispatchEvent = function(ev) {
       try { return this._native.dispatchEvent(ev); } catch { return true; }
     };
+    brandLikeNative(ZPWebTransport, ZPWebTransport.prototype, 'WebTransport');
     return ZPWebTransport;
   }
 
@@ -7991,57 +8065,127 @@
     ZPRTCPeerConnection.prototype.dispatchEvent = function(ev) {
       try { return this._native.dispatchEvent(ev); } catch { return true; }
     };
+    // ★installEventMethods (공유 eventTargetProto) 는 여기 안 쓴다 — ZPWebTransport
+    // 와 같은 이유: 이 클래스는 진짜 native RTCPeerConnection(_native) 을
+    // 감싸고 그게 스스로 이벤트를 낸다. 가짜 리스너 맵으로 바꾸면 native 가
+    // 내는 icecandidate/track/datachannel 이벤트가 안 닿는다.
+    brandLikeNative(ZPRTCPeerConnection, ZPRTCPeerConnection.prototype, name);
     return ZPRTCPeerConnection;
   }
 
-  // D4/D5 virtual gateway constructor. Returns an object whose `.ready` /
-  // `.closed` promises reject with a structured ZeroProxy error so target
-  // code can fall back gracefully. Methods on the object also reject.
-  // When the real gateway (HTTP/3 for WT, pion SFU for RTC) lands, this
-  // wrapper will dispatch through SW message channels instead.
+  // D4/D5 virtual gateway constructor. `.ready`/`.closed` (WebTransport) and
+  // every async method reject with a structured ZeroProxy error so target
+  // code's fallback flow (e.g. `await wt.ready.catch(() => fallback())`)
+  // fires cleanly. When the real gateway (HTTP/3 for WT, pion SFU for RTC)
+  // lands, this wrapper will dispatch through SW message channels instead.
+  //
+  // ★목록이 아니라 규칙이다 (2026-09-14, 프로토타입 모양 축). 예전엔 인터페이스별로
+  // 손으로 고른 메서드 몇 개만 인스턴스에 심었다 — `proxy = {ready, closed,
+  // close, addEventListener, ...}` 리터럴이라 프로토타입에는 아예 안 얹혔다.
+  // 실측: RTCPeerConnection 45개, RTCDataChannel 20개, WebTransport 9개가
+  // 대조군에만 있는 프로토타입이 됐다 — 오늘 CSS URL 프로퍼티 손목록에서 이미
+  // 겪은 "손으로 고른 목록은 열린 표면을 못 따라간다" 를 세 번 더 한 것.
+  // 지금은 **진짜 네이티브 프로토타입의 own 이름을 그대로 베껴** 프로토타입에
+  // 심는다 — 이름(=모양)은 여기서 나오고, 동기/비동기 구분과 초기값만 아래
+  // 작은 표에서 나온다. 표에 없는 이름이 나와도(스펙이 늘어나도) 모양은
+  // 여전히 맞는다 — 값이 `null`/reject 로 떨어질 뿐 이름 자체가 빠지진 않는다.
   function makeVirtualGateway(name, meta) {
-    return function VirtualGateway() {
-      const reason = name + ' requires the ZeroProxy ' + meta.kind +
-        ' gateway, which is not yet provisioned (' + meta.code + ').';
+    // 비동기(Promise 반환) — 실측(2026-09-14, 각 인터페이스 스펙).
+    const ASYNC_REJECT = new Set([
+      'createOffer', 'createAnswer', 'setLocalDescription', 'setRemoteDescription',
+      'addIceCandidate', 'getStats', 'createBidirectionalStream', 'createUnidirectionalStream',
+    ]);
+    // 동기인데 실제 자원(트랙/채널/트랜시버/전송)을 만들어야 해서 던진다.
+    const SYNC_THROW = new Set(['createDataChannel', 'createDTMFSender', 'addTrack', 'addTransceiver', 'send']);
+    const SYNC_ARRAY = new Set(['getSenders', 'getReceivers', 'getTransceivers', 'getLocalStreams', 'getRemoteStreams']);
+    const SYNC_OBJECT = new Set(['getConfiguration']);
+    // 나머지 동기 메서드(close 포함)는 no-op — 실제로 아무 상태도 없으니
+    // undefined 반환이 스펙 위반이 아니다.
+    const STATE_DEFAULTS = {
+      signalingState: 'stable', iceConnectionState: 'new', iceGatheringState: 'new', connectionState: 'new',
+      readyState: 'closed', binaryType: 'blob', bufferedAmount: 0, bufferedAmountLowThreshold: 0,
+      negotiated: false, ordered: true, reliable: true, label: '', protocol: '',
+    };
+    const reason = name + ' requires the ZeroProxy ' + meta.kind +
+      ' gateway, which is not yet provisioned (' + meta.code + ').';
+    function gatewayError() {
       const err = normalizedError('NotSupportedError');
       try { err.zpCode = meta.code; err.zpReason = reason; } catch {}
-      const rejected = Promise.reject(err);
+      return err;
+    }
+    function rejected() {
+      const p = Promise.reject(gatewayError());
       // Swallow the unhandled-rejection by attaching a noop catch — target
       // code that awaits this will still observe the rejection.
-      try { rejected.catch(() => {}); } catch {}
-      const proxy = {
-        ready: rejected,
-        closed: rejected,
-        close() { return undefined; },
-        addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
-      };
-      // WebTransport-specific surface.
-      if (name === 'WebTransport') {
-        proxy.createBidirectionalStream = () => rejected;
-        proxy.createUnidirectionalStream = () => rejected;
-        proxy.incomingBidirectionalStreams = makeEmptyReadableStream();
-        proxy.incomingUnidirectionalStreams = makeEmptyReadableStream();
-        proxy.datagrams = {
-          readable: makeEmptyReadableStream(),
-          writable: makeRejectedWritableStream(err),
-          maxDatagramSize: 0,
-        };
+      try { p.catch(() => {}); } catch {}
+      return p;
+    }
+    function VirtualGateway() {
+      if (!(this instanceof VirtualGateway)) {
+        throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator.");
       }
-      // RTCPeerConnection-specific surface.
-      if (name === 'RTCPeerConnection' || name === 'webkitRTCPeerConnection') {
-        proxy.createOffer = () => rejected;
-        proxy.createAnswer = () => rejected;
-        proxy.setLocalDescription = () => rejected;
-        proxy.setRemoteDescription = () => rejected;
-        proxy.addIceCandidate = () => rejected;
-        proxy.createDataChannel = () => { throw err; };
-        proxy.addTrack = () => { throw err; };
-        proxy.getSenders = () => [];
-        proxy.getReceivers = () => [];
-        proxy.getStats = () => rejected;
+    }
+    // 진짜 EventTarget 상속 모양(own 3개 안 늘어남) — 이 스텁엔 감쌀 네이티브
+    // 인스턴스가 없으니(ZPWebTransport/ZPRTCPeerConnection 과 달리) XHR/WebSocket
+    // 과 같은 가짜 리스너-맵을 그대로 써도 안전하다.
+    installEventMethods(VirtualGateway.prototype);
+    const sourceProto = name === 'webkitRTCPeerConnection'
+      ? (root.RTCPeerConnection && root.RTCPeerConnection.prototype)
+      : (root[name] && root[name].prototype);
+    if (sourceProto) {
+      const backing = new WeakMap();
+      for (const propName of Object.getOwnPropertyNames(sourceProto)) {
+        if (propName === 'constructor') continue;
+        const d = Object.getOwnPropertyDescriptor(sourceProto, propName);
+        try {
+          if (typeof d.value === 'function') {
+            let impl;
+            if (ASYNC_REJECT.has(propName)) impl = rejected;
+            else if (SYNC_THROW.has(propName)) impl = function () { throw gatewayError(); };
+            else if (SYNC_ARRAY.has(propName)) impl = function () { return []; };
+            else if (SYNC_OBJECT.has(propName)) impl = function () { return {}; };
+            else impl = function () {};
+            defineMasked(VirtualGateway.prototype, propName, { configurable: true, value: impl });
+          } else if (/^on[a-z]/.test(propName) && d.get && d.set) {
+            // 이벤트 핸들러 IDL 속성 — 인스턴스별 로컬 백업.
+            defineMasked(VirtualGateway.prototype, propName, {
+              configurable: true,
+              get() { const m = backing.get(this); return (m && m.get(propName)) || null; },
+              set(v) { let m = backing.get(this); if (!m) backing.set(this, m = new Map()); m.set(propName, typeof v === 'function' ? v : null); },
+            });
+          } else if (d.get && d.set) {
+            // 일반 settable (예: RTCDataChannel.binaryType) — 쓴 값을 그대로 반사.
+            const initial = Object.prototype.hasOwnProperty.call(STATE_DEFAULTS, propName) ? STATE_DEFAULTS[propName] : null;
+            defineMasked(VirtualGateway.prototype, propName, {
+              configurable: true,
+              get() { const m = backing.get(this); return m && m.has(propName) ? m.get(propName) : initial; },
+              set(v) { let m = backing.get(this); if (!m) backing.set(this, m = new Map()); m.set(propName, v); },
+            });
+          } else if (d.get) {
+            const value = Object.prototype.hasOwnProperty.call(STATE_DEFAULTS, propName) ? STATE_DEFAULTS[propName] : null;
+            defineMasked(VirtualGateway.prototype, propName, { configurable: true, get() { return value; } });
+          }
+        } catch {}
       }
-      return proxy;
-    };
+    }
+    // WebTransport: `.ready`/`.closed` 는 그 자체가 reject 다(target 코드가
+    // `await wt.ready.catch(fallback)` 을 한다). 스트림/데이터그램은 비어
+    // 있어도 **진짜** 객체여야 `for await` 리더가 매달리지 않고 끝난다.
+    // 인스턴스당 동일 객체(네이티브 동일성: `wt.datagrams === wt.datagrams`).
+    if (name === 'WebTransport') {
+      const readyCache = new WeakMap(), closedCache = new WeakMap(), bidiCache = new WeakMap(), uniCache = new WeakMap(), dgCache = new WeakMap();
+      const cached = (map, build) => function () { if (!map.has(this)) map.set(this, build()); return map.get(this); };
+      defineMasked(VirtualGateway.prototype, 'ready', { configurable: true, get: cached(readyCache, rejected) });
+      defineMasked(VirtualGateway.prototype, 'closed', { configurable: true, get: cached(closedCache, rejected) });
+      defineMasked(VirtualGateway.prototype, 'incomingBidirectionalStreams', { configurable: true, get: cached(bidiCache, makeEmptyReadableStream) });
+      defineMasked(VirtualGateway.prototype, 'incomingUnidirectionalStreams', { configurable: true, get: cached(uniCache, makeEmptyReadableStream) });
+      defineMasked(VirtualGateway.prototype, 'datagrams', {
+        configurable: true,
+        get: cached(dgCache, () => ({ readable: makeEmptyReadableStream(), writable: makeRejectedWritableStream(gatewayError()), maxDatagramSize: 0 })),
+      });
+    }
+    brandLikeNative(VirtualGateway, VirtualGateway.prototype, name);
+    return VirtualGateway;
   }
   function makeEmptyReadableStream() {
     if (typeof ReadableStream !== 'function') return null;

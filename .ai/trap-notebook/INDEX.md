@@ -6,6 +6,9 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-14 | SharedWorker / 격리 | 부트 순서상 나중 훅이 타깃별 이름 접두어를 덮어써 SharedWorker 격리가 죽어 있었다 — 모양 축을 쫓다 발견. | rewriter.md#프로토타입-모양-축 |
+| 2026-09-14 | 회귀가드 / 드리프트 | document.origin 자체가 최신 Chrome/Edge에서 사라졌다. escape-matrix 테스트가 죽은 전제 위에 있었다 — 실측 후 전제를 갱신. | rewriter.md#프로토타입-모양-축 |
+| 2026-09-14 | 지문 / 컨테인먼트 | 모양 축 6개 전부 닫음. baseURI 를 Node.prototype 으로 옮기며 element.baseURI 실유출도 막힘. 대체 클래스는 네이티브 own 이름을 규칙으로 베낀다. | rewriter.md#프로토타입-모양-축 |
 | 2026-09-10 | 지문 / 계측 | 프로토타입 모양 축 신설. 만들자마자 6개가 걸렸고 그중 4개는 대체 클래스의 얇은 프로토타입이다. | rewriter.md#프로토타입-모양-축 |
 | 2026-09-10 | CSS / 보안 | Typed OM 은 style 훅이 안 닿는다. RO 프로토타입 한 곳에서 읽기 되돌리기와 쓰기 재작성을 같이 건다. | rewriter.md#typed-om |
 | 2026-09-10 | 지문 / 규칙 | 페이지가 자기 함수를 문자열로 만들면 리라이트가 보였다(naver 17, github 89). toString 에서 되돌려 돌려준다. | rewriter.md#리라이트-소스-노출 |

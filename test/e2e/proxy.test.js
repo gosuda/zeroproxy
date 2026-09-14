@@ -1795,10 +1795,19 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
-    // D7 document.origin must be the virtual target origin, never proxy.
+    // D7 document.origin must be the virtual target origin, never proxy —
+    // *if the property exists at all*. Real-browser control (2026-09-14,
+    // Chrome 152 + Edge/WebView2 153, both headless and headed): neither
+    // has `document.origin` any more (own on Document.prototype: false,
+    // value: undefined). It used to be a real non-standard Chromium
+    // property; this assertion predates its removal. Nothing to virtualize
+    // means nothing to leak, so `undefined` is the correct, safe outcome —
+    // but if some engine still has it, the old invariant (must read as the
+    // target origin, never the proxy's) still applies.
     out.documentOrigin = (() => {
       try {
         const d = __zp_get(globalThis, 'document');
+        if (d.origin === undefined) return 'absent-natively:ok';
         return String(d.origin || '').startsWith(directBase) ? 'virtual:' + d.origin : 'native:' + d.origin;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
@@ -2018,8 +2027,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('storagePrefix', () => { assert.equal(escapeMatrix.storagePrefix, 'isolated', `storage prefix leak: ${escapeMatrix.storagePrefix}`); });
   // D7 document.domain setter is virtualised (no real native change).
   await t.test('documentDomainSetter', () => { assert.match(escapeMatrix.documentDomainSetter, /^unchanged:/, `document.domain leak: ${escapeMatrix.documentDomainSetter}`); });
-  // D7 document.origin reports the virtual target origin.
-  await t.test('documentOrigin', () => { assert.match(escapeMatrix.documentOrigin, /^virtual:/, `document.origin leak: ${escapeMatrix.documentOrigin}`); });
+  // D7 document.origin reports the virtual target origin when the property
+  // exists at all; current real browsers no longer have it (measured), so
+  // 'absent-natively:ok' is the expected — not just tolerated — outcome.
+  await t.test('documentOrigin', () => { assert.match(escapeMatrix.documentOrigin, /^(virtual:|absent-natively:ok)/, `document.origin leak: ${escapeMatrix.documentOrigin}`); });
   // D7 BroadcastChannel facade returns un-prefixed name (target-visible truth).
   await t.test('broadcastChannelName', () => { assert.equal(escapeMatrix.broadcastChannelName, 'unprefixed-facade', `BroadcastChannel: ${escapeMatrix.broadcastChannelName}`); });
   // E1 indirect eval / globalThis.eval / computed / destructuring / optional
