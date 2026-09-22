@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | e2e / 규칙 | direct-vs-proxy 차분의 대조군은 별도 브라우저 인스턴스에서 — targetcreated 는 모든 컨텍스트를 잡는다. | rewriter.md#차분-측정-브라우저-격리 |
+| 2026-09-22 | membrane / 수정 | usesRaw 앵커의 getAttribute 가 raw share URL 을 페이지에 돌려줬다 — stash→deproxy 로 타깃 URL 을 돌려준다. | rewriter.md#getattribute-usesraw-누출 |
 | 2026-09-22 | e2e / 규칙 | 탈출 검증은 리라이트된 문서 안 프로브로 — page.evaluate 는 리라이터를 안 거쳐 다른 시스템을 잰다. | rewriter.md#e2e-리라이트-문서-프로브 |
 | 2026-09-22 | rewriter / 수정 | `x[k] op= v` 의 eager RHS 가 평가 순서를 깼다 — accessor-adapter 방출로 네이티브가 순서를 소유. sloppy 래퍼의 `call(null)` 도 this 탈출이었다. | rewriter.md#assign-평가순서 |
 | 2026-09-22 | worker / 수정 | worker 전역의 getter-only 접근자(indexedDB 등)에 strict 대입하면 부팅 사망 — defineProperty 로 심는다. | rewriter.md#worker-readonly-전역 |

@@ -6800,7 +6800,11 @@
         return deproxyURL(raw, { scan: true });
       }
       // 같은 이유로 여기도 마지막에 한 번 더 되돌린다(이 세션 네 번째 같은 부류).
-      if (isURLBearing(this, key, localKey, ln)) return usesRawURLAttribute(this, key, localKey) ? raw : urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || deproxyURL(raw, { scan: true });
+      // usesRaw(앵커 href 등)도 raw 공유 URL 을 페이지에 그대로 돌려주면 안 된다
+      // — direct-vs-proxy 차분이 `getAttribute('href')` 에서 /zp/?via= 누출을
+      // 잡았다. 스태시(절대 타깃)→deproxy 순으로 되돌린다. 리터럴 복원(상대 경로
+      // 그대로)은 htmltx 가 별도 stash 를 심어야 해서 잔여 호환 갭으로 남는다.
+      if (isURLBearing(this, key, localKey, ln)) return urlMeta.get(this) || Native.getAttribute.call(this, 'data-zp-target-url') || deproxyURL(raw, { scan: true });
       return raw;
     });
     if (Native.hasAttribute) define(w.Element.prototype, 'hasAttribute', function(k) {

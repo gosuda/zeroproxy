@@ -1057,3 +1057,16 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **방법:** 타깃 fixture 라우트(`/escape-probes`)에 `<script>` 로 프로브를 넣고 `window.__escapeProbes` 에 결과를 기록 → e2e 가 그 객체를 읽어 카테고리별 단언. 네비게이션 탈출은 `page.url()` 오리진이 proxy 인 것까지 확인한다.
 - **미묘한 지점:** `navigation.navigate('javascript:…')` 는 `NotSupportedError` 가 아니라 `TARGET_PROTOCOL_BLOCKED`(plain Error, name=`Error`)로 먼저 막힌다 — URL 분류기가 isHTTPURL 게이트보다 앞서 던진다. 둘 다 fail-closed 라 `blocked:` 접두만 단언한다.
 - **검증:** `test/e2e/proxy.test.js` `A-section escapes stay virtual or fail closed` 11개 subtest. e2e 129/129 (2026-09-22).
+
+## <a id="getattribute-usesraw-누출"></a>`usesRaw` getAttribute 가 share URL 을 페이지에 돌려줬다 (2026-09-22)
+
+- **원인:** `getAttribute` 훅의 `isURLBearing` 분기가 `usesRawURLAttribute`(a/area href, form action, formaction)면 **raw 속성을 그대로** 반환했다. raw 는 의도적으로 `/zp/?via=<enc>` 프록시 URL 라서, 페이지가 `a.getAttribute('href')` 만 읽어도 프록시 오리진과 공유 경로가 샜다 — 정적·동적 앵커 전부. O5 direct-vs-proxy 차분 픽스처가 잡았다.
+- **수정:** usesRaw 분기도 `urlMeta → data-zp-target-url → deproxyURL(raw)` 순으로 되돌린다. 페이지는 절대 타깃 URL 을 본다.
+- **잔여 갭:** 리터럴 복원은 안 된다 — `a.setAttribute('href','/r?x=1')` → getAttribute 는 네이티브면 `'/r?x=1'` 이지만 우리는 절대 타깃 `http://t/r?x=1` 을 돌려준다. 완전한 리터럴 왕복은 htmltx 가 `data-zp-literal-*` 스태시를 심고 런타임이 읽는 별도 작업. 차분 테스트의 `anchorAttr` 기대값이 이 경계를 고정한다(리터럴 스태시가 들어오면 "expected divergence but matched" 로 알려 준다).
+- **검증:** e2e `direct-vs-proxy compatibility differential` 133/133.
+
+## <a id="차분-측정-브라우저-격리"></a>direct-vs-proxy 차분은 별도 브라우저 인스턴스에서 — 컨텍스트 격리로는 안 된다 (2026-09-22)
+
+- **원인:** e2e 의 `browser.on('targetcreated')` 가 브라우저 내 **모든** 타깃의 wire request 를 `wireRequests` 에 적재한다. 차분 픽스처의 direct 실행을 같은 브라우저의 새 컨텍스트에서 돌리면 direct-target 요청이 전역 "모든 네트워크는 프록시 오리진" 단언에 걸린다.
+- **수정:** direct 실행은 `puppeteer.launch` 별도 인스턴스에서. 컨텍스트/페이지 수준의 선택적 관측으로는 못 막는다 — 핸들러가 세션을 만들기 전에 타깃을 이미 잡는다.
+- **교훈:** 측정 대상과 대조군을 같은 계측기에 붙일 때 "어느 쪽에서 온 이벤트인가"를 먼저 묻는다 — 이 노트의 nav-matrix 대조군 오염과 같은 부류.

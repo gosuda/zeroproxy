@@ -550,6 +550,72 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/compat-probes') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      // Same source served directly AND through the proxy — every probe must
+      // produce identical results unless ERRATA documents a divergence.
+      res.end(`<!doctype html><title>ZP Compat Probes</title><body><div id="compat-dom"><a id="ca" href="/x">x</a></div><script>
+        (async () => {
+          const out = {};
+          const P = (k, f) => { try { out[k] = 'v:' + String(f()); } catch (e) { out[k] = 'e:' + (e && e.name || e); } };
+          const PA = async (k, f) => { try { out[k] = 'v:' + String(await f()); } catch (e) { out[k] = 'e:' + (e && e.name || e); } };
+          // B — formerly syntax-killed assignment-target / catch / label forms
+          P('forOf', () => { var location; const s = []; for (location of [1, 2, 3]) s.push(location); return s.join(''); });
+          P('forIn', () => { var location; const s = []; for (location in { a: 1, b: 2 }) s.push(location); return s.join(''); });
+          P('arrayTarget', () => { var location; [location] = [42]; return location; });
+          P('objTarget', () => { var location; ({ a: location } = { a: 7 }); return location; });
+          P('nestedTarget', () => { var location; ({ a: { b: location } } = { a: { b: 9 } }); return location; });
+          P('forOfArr', () => { var location; for ([location] of [[5]]) return location; });
+          P('forOfObj', () => { var location; for ({ a: location } of [{ a: 6 }]) return location; });
+          P('defaultTarget', () => { var location; ({ location = 3 } = {}); return location; });
+          P('restTarget', () => { var location; var x; [x, ...location] = [1, 2, 3]; return location.join(''); });
+          P('memberTarget', () => { var location = { x: 0 }; [location.x] = [8]; return location.x; });
+          P('catchParam', () => { try { throw 11 } catch (location) { return location; } });
+          P('switchTarget', () => { var location; switch (1) { case 1: [location] = [8]; break; } return location; });
+          PA('forAwait', async () => { var location; const s = []; for await (location of [Promise.resolve(4), Promise.resolve(5)]) s.push(location); return s.join(''); });
+          P('labelLoop', () => { var n = 0; outer: for (;;) { n++; if (n > 2) break outer; } return 'label:' + n; });
+          // C — scope/binding semantics that must match native
+          P('superProp', () => new (class extends Object { m() { return super.location; } })().m());
+          P('optMemberNull', () => { var x = null; return x?.location; });
+          P('optChainNull', () => { var x = null; return x?.location?.href; });
+          P('optCallNull', () => { var x = null; return x?.location?.(); });
+          P('plainOptCall', () => { var x = { m() { return 3; } }; return x?.m(); });
+          P('computedKey', () => Object.keys({ [location]: 1 })[0] === String(location));
+          P('nullishAssign', () => { var y; y ??= 'k'; location ??= 'z'; return y + '|' + location.hostname; });
+          P('evalDirectLocal', function () { var y = 5; return eval('y'); });
+          P('evalDirectGlobal', () => eval('1+1'));
+          P('hoistedVar', function () { var r; try { r = String(location.href); } catch (e) { r = 'e:' + (e && e.name || e); } var location; return r; });
+          P('deleteMember', () => { var o = { location: 1 }; delete o.location; return 'location' in o; });
+          P('paramDefault', function () { function f(location = location) { return typeof location; } return f(); });
+          P('newTargetFn', () => new Function('return new.target')());
+          P('argumentsAlias', function () { return (function f(a) { arguments[0] = 2; return a; })(1); });
+          // I — URL / navigation semantics
+          P('locEqDocLoc', () => location === document.location);
+          P('locHrefEqDocURL', () => location.href === document.URL);
+          P('baseURI', () => document.baseURI);
+          P('locHashWrite', () => { location.hash = 'ch1'; return location.hash; });
+          P('urlCtorRel', () => new URL('p?q=1', location.href).href);
+          P('urlCtorAbs', () => new URL('https://ex.com/a').host);
+          P('urlStatics', () => (typeof URL.canParse) + '|' + (typeof URL.parse));
+          P('winName', () => { window.name = 'nm1'; return window.name; });
+          P('docCookie', () => { document.cookie = 'zpk=zpv'; return document.cookie.includes('zpk=zpv'); });
+          P('anchorProp', () => { var a = document.getElementById('ca'); a.href = '/r?x=1'; return a.href; });
+          P('anchorAttr', () => document.getElementById('ca').getAttribute('href'));
+          P('anchorPing', () => { var a = document.createElement('a'); a.ping = 'http://p.example/x'; return a.ping; });
+          P('domCount', () => document.getElementById('compat-dom').childElementCount);
+          PA('fetchEcho', async () => (await fetch('/compat-echo?n=1')).status);
+          // history.pushState last — it mutates the document URL
+          P('historyPush', () => { history.pushState({}, '', '?pq=1'); return location.search; });
+          window.__compatProbes = out;
+        })();
+      </script></body>`);
+      return;
+    }
+    if (url.pathname === '/compat-echo') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('echo');
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -2181,6 +2247,65 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.ok(await page.evaluate(() => Array.isArray(window.__zp_diagnostics)), '__zp_diagnostics missing on real window');
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // O5: direct-vs-proxy differential. The SAME fixture source runs once
+  // against the raw target server and once through the rewriter+membrane.
+  // Every probe must produce identical results; divergences are allowed only
+  // where ERRATA documents a semantic limit — each is pinned to the exact
+  // documented proxy-side value so a silent behavior change can't hide.
+  await t.test('direct-vs-proxy compatibility differential', async t => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    // Separate browser instance — `browser.on('targetcreated')` observes every
+    // target in `browser`, so a direct-target page there would poison the
+    // suite-wide "all network stays on proxy origin" assertion at the end.
+    const directBrowser = await puppeteer.launch({
+      headless: true,
+      protocolTimeout: 30000,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/compat-probes`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__compatProbes, { timeout: 15000 });
+      direct = await directPage.evaluate(() => window.__compatProbes);
+    } finally {
+      await directBrowser.close();
+    }
+    const expectedDivergences = {
+      // Documented limits — proxy value pinned so a silent change can't hide.
+      // Measured 2026-09-22: everything else matches native exactly
+      // (hoistedVar/optCallNull/deleteMember/paramDefault/catchParam all match).
+      evalDirectLocal: 'v:undefined',                   // indirect eval: caller scope unreachable → undefined
+      anchorAttr: `v:${targetBase}/r?x=1`,              // getAttribute returns absolute target; literal '/r?x=1' needs htmltx literal-stash (known gap)
+    };
+    const wireBefore = wireRequests.length;
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/compat-probes`);
+    await page.waitForFunction(() => window.__compatProbes, { timeout: 30000 });
+    const proxied = await page.evaluate(() => window.__compatProbes);
+    fs.writeFileSync(path.join(artifacts, 'compat-differential.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(Object.keys(proxied).sort(), Object.keys(direct).sort(), 'probe key sets differ between direct and proxied runs');
+    const divergent = Object.fromEntries(Object.entries(direct).filter(([k]) => proxied[k] !== direct[k]));
+    fs.writeFileSync(path.join(artifacts, 'compat-divergences.json'), JSON.stringify(divergent, null, 2));
+    await t.test('B/C/I positive cases match native exactly', () => {
+      const unexpected = Object.keys(divergent).filter(k => !(k in expectedDivergences));
+      assert.deepEqual(unexpected, [], `unexpected divergences: ${JSON.stringify(divergent)}`);
+    });
+    await t.test('documented divergences match ERRATA exactly', () => {
+      for (const [k, proxyValue] of Object.entries(expectedDivergences)) {
+        if (!(k in divergent)) {
+          assert.fail(`${k}: expected divergence but results matched — behavior changed, re-audit ERRATA (both=${direct[k]})`);
+        }
+        assert.equal(proxied[k], proxyValue, `${k}: proxy=${proxied[k]} direct=${direct[k]}`);
+      }
+    });
+    await t.test('proxied page used proxy transport for all target traffic', () => {
+      const newWire = wireRequests.slice(wireBefore);
+      assert.ok(newWire.some(u => u.startsWith(proxyOrigin + '/')), 'no proxy-origin wire request observed');
+      assert.ok(!newWire.some(u => u.startsWith(`${targetBase}/`)), `page issued direct-target requests: ${JSON.stringify(newWire.filter(u => u.startsWith(targetBase)))}`);
+      assert.ok(requests.some(r => r.url.startsWith('/compat-echo')), 'upstream never saw /compat-echo');
+    });
   });
 
   await t.test('cross-virtual-origin frames cannot read parent Location', async () => {
