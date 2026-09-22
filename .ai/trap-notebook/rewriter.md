@@ -1113,3 +1113,10 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **연계 함정:** `Error.prepareStackTrace` 를 페이지가 덮으면(userPrepare) 그 결과 문자열에도 같은 새니타이즈를 적용해야 한다 — 커스텀 포맷터가 raw CallSite 문자열을 그대로 쓸 수 있다. 프레임 래핑은 CallSite API 반환값까지만 책임지고 **최종 문자열은 별도로 한 번 더** 지나가야 닫힌다.
 - **실측 divergence 2건:** 파스 불가 eval 소스는 네이티브 SyntaxError 대신 `NotSupportedError`(리라이트 실패 → fail-closed, 설계 발화). `import('data:…')` 는 게이트 전에 네이티브 모듈 로더가 `TypeError` 로 거부 — 이름만 다르고 차단은 동일. `new eval()` 은 오버라이드가 일반 함수라 TypeError 대신 빈 객체 반환(탈출 아님).
 - **검증:** e2e `dynamic code suite` — leakDynStack/leakFnStack `v:clean` 포함 171/171.
+
+## <a id="loop-cap-경계-의미"></a>루프캡 경계는 루프 형태별로 ±1 다르다 — `for(init;;update)` 도 캡된다 (§L 예측 반증) (2026-09-22)
+
+- **실측:** ERRATA §L 은 `for(let i=0;;i++)` 를 "uncapped — loop-cap bypass" 로 예측했지만 실제로는 `FOR_CAP` 패치가 빈 test 슬롯에 `__zp_lc_N++<10000000` 을 스플라이스해 캡된다 — e2e 에서 정확히 10M 에서 종료 확인.
+- **경계 의미:** 카운터 검사 위치가 루프 형태를 따라간다 — `while(true)`/`for(;;)`(pre-test)는 바디가 정확히 10M 회, `do{}while(true)`(post-test)는 바디가 테스트보다 한 번 먼저 도니 **10M+1**. 경계 단언을 10M 고정으로 쓰면 do-while 에서 off-by-one 으로 걸린다.
+- **연계:** 캡 prefix `{let __zp_lc=0;…}` 가 붙은 async `while(true){await;break}` 도 break 시맨틱 유지. 일반 `for(i<n)`·`while(!flag)` 같은 non-truthy 조건엔 카운터가 안 끼운다(negative control).
+- **검증:** e2e `perf suite` — underCap/cappedWhile/cappedFor/cappedDo/normalLoop/nestedLoops + async-poll 수명 + bulk DOM 5k/19ms + iframe 5×211ms. 176/176.

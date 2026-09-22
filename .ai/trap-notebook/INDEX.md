@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | rewriter / 실측 | 루프캡 경계는 형태별로 ±1 — `for(init;;update)` 도 캡됨(§L 반증), do-while 은 post-test 라 10M+1. | rewriter.md#loop-cap-경계-의미 |
 | 2026-09-22 | membrane / 수정 | 스택 프레임은 URL·함수명 두 채널로 샌다 — V8 기본 포맷이 eval 기술 텍스트에 raw URL 을 박고 `__zp_*` 식별자가 함수명으로 샌다. 최종 문자열 재정리 필수. | rewriter.md#stack-프레임-이중누출 |
 | 2026-09-22 | e2e / 규칙 | `/zp/` 경로에 두 CSP 정책이 공존 — 문서 정책은 report-uri 유무로 식별. headless 는 manifest/prefetch 를 lazy-fetch 해 SPV 가 없다. | rewriter.md#csp-두-정책-구별 |
 | 2026-09-22 | worker / 수정 | module worker 의 `importScripts` 는 호출 시 던지는 스텁 — `typeof` 가드 무효, 부트스트랩 해시 mod=1 로 명시 판정. | rewriter.md#module-worker-importscripts-스텁 |

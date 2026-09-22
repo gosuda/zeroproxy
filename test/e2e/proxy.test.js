@@ -1117,6 +1117,119 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/perf-probes') {
+      // O10: perf suite — 10M 루프캡 경계, async-poll 수명, bulk DOM,
+      // iframe 수×로드시간. 시간은 계측해서 기록하고 단언은 상한만 잡는다
+      // (머신 분산 방어).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Perf Probes</title><body><script>
+        (async () => {
+          const out = window.__perfProbes = {};
+          const P = async (k, fn) => { try { out[k] = 'v:' + (await fn()); } catch (e) { out[k] = 'threw:' + (e && e.name || e); } };
+
+          // ── 10M 루프캡 경계 ──
+          // 미만 루프는 캡이 발화하지 않고 정상 완료돼야 한다.
+          await P('underCap', () => {
+            let i = 0;
+            while (true) { i++; if (i >= 5000000) break; }
+            return i;
+          });
+          // 초과 루프는 hang 이 아니라 캡(10M)에서 종료돼야 한다.
+          await P('cappedWhile', () => {
+            let j = 0;
+            while (true) { j++; }
+            return j;
+          });
+          // ERRATA §L: 'for(let i=0;;i++)' uncapped 예측 — 12M 에 break 를
+          // 걸어 두면 capped=10M, uncapped=12000001 로 판별된다.
+          await P('cappedFor', () => {
+            let m = 0;
+            for (m = 0;; m++) { if (m > 12000000) break; }
+            return m;
+          });
+          await P('cappedDo', () => {
+            let d = 0;
+            do { d++; } while (true);
+            return d;
+          });
+          // negative control — 일반 루프는 카운터가 끼면 안 된다.
+          await P('normalLoop', () => {
+            let n = 0;
+            for (n = 0; n < 3; n++) {}
+            return n;
+          });
+          // 중첩 루프 — 내부 캡이 외부 카운터와 충돌하면 안 된다.
+          await P('nestedLoops', () => {
+            let outer = 0, inner = 0;
+            while (true) { outer++; if (outer >= 100) break; while (true) { inner++; if (inner >= outer * 100) break; } }
+            return outer + '|' + inner;
+          });
+
+          // ── async-poll 수명 ──
+          // while(true){await;break} 는 캡 prefix 가 붙어도 break 가 살아야
+          // 하고, 종료 후 폴러가 정말 죽어야 한다.
+          await P('asyncPollBreak', async () => {
+            let ap = 0;
+            while (true) {
+              ap++;
+              await new Promise(r => setTimeout(r, 1));
+              if (ap >= 20) break;
+            }
+            return ap;
+          });
+          await P('asyncPollFlag', async () => {
+            let polls = 0, flag = false;
+            setTimeout(() => { flag = true; }, 30);
+            while (!flag) {
+              polls++;
+              await new Promise(r => setTimeout(r, 1));
+              if (polls > 5000) break;
+            }
+            const atExit = polls;
+            await new Promise(r => setTimeout(r, 20));
+            return flag + '|' + (atExit === polls) + '|' + (polls <= 5000);
+          });
+
+          // ── bulk DOM 삽입 ──
+          await P('bulkDom', () => {
+            const t = performance.now();
+            const frag = document.createDocumentFragment();
+            for (let i = 0; i < 5000; i++) {
+              const d = document.createElement('div');
+              d.textContent = 'x' + i;
+              frag.appendChild(d);
+            }
+            document.body.appendChild(frag);
+            const ms = performance.now() - t;
+            return document.querySelectorAll('div').length + '|' + Math.round(ms);
+          });
+
+          // ── iframe 수 × 로드시간 ──
+          await P('iframes', async () => {
+            const N = 5;
+            const t = performance.now();
+            const results = await Promise.all([...Array(N)].map((_, idx) => new Promise(res => {
+              const f = document.createElement('iframe');
+              f.srcdoc = '<p>f' + idx + '</p>';
+              document.body.appendChild(f);
+              const deadline = setTimeout(() => res('timeout'), 15000);
+              (function poll() {
+                try {
+                  if (f.contentDocument && f.contentDocument.body && f.contentDocument.body.textContent.includes('f' + idx)) {
+                    clearTimeout(deadline); res('loaded'); return;
+                  }
+                } catch {}
+                setTimeout(poll, 20);
+              })();
+            })));
+            const ms = performance.now() - t;
+            return results.join(',') + '|' + Math.round(ms);
+          });
+          out.done = true;
+        })().catch(e => { (window.__perfProbes = window.__perfProbes || {}).__fatal = String(e && (e.stack || e)); });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -3113,6 +3226,63 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       for (const k of ['leakFnToString', 'leakCallee', 'leakDynStack', 'leakFnStack']) {
         assert.equal(probes[k], 'v:clean', `${k}: ${probes[k]}`);
       }
+    });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // O10: perf suite — 10M 루프캡 경계, async-poll 수명, bulk DOM,
+  // iframe 수×로드시간 (`/perf-probes` fixture, window.__perfProbes).
+  await t.test('perf suite', async t => {
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/perf-probes`);
+    try {
+      await page.waitForFunction(() => window.__perfProbes && window.__perfProbes.done, { timeout: 60000 });
+    } catch (e) {
+      console.log('perf probes wait failed');
+      throw e;
+    }
+    const probes = await page.evaluate(() => window.__perfProbes);
+    fs.writeFileSync(path.join(artifacts, 'perf-probes.json'), JSON.stringify(probes, null, 2));
+    assert.ok(!probes.__fatal, `perf fixture died: ${probes.__fatal}`);
+
+    await t.test('10M loop-cap boundary', () => {
+      // 미만 루프는 캡 미발화로 정상 완료.
+      assert.equal(probes.underCap, 'v:5000000', `underCap: ${probes.underCap}`);
+      // 초과 루프는 hang 대신 캡에서 종료 — 카운터 값이 정확히 10M.
+      assert.equal(probes.cappedWhile, 'v:10000000', `cappedWhile: ${probes.cappedWhile}`);
+      // ERRATA §L 의 `for(i=0;;i++)` uncapped 예측 — 캡됨이면 10M,
+      // 우회면 12000001 에서 멈췄을 것이다.
+      assert.equal(probes.cappedFor, 'v:10000000', `cappedFor (uncapped 우회면 12000001): ${probes.cappedFor}`);
+      // do{}while 는 post-test — 바디가 카운터 검사보다 한 번 먼저 도니
+      // 경계는 10M+1 (캡 자체는 유효, hang 아님).
+      assert.equal(probes.cappedDo, 'v:10000001', `cappedDo: ${probes.cappedDo}`);
+      // negative control — 일반 루프에 카운터가 끼면 n>3 이 된다.
+      assert.equal(probes.normalLoop, 'v:3', `normalLoop: ${probes.normalLoop}`);
+      // outer=100 에서 break 가 inner 보다 먼저 발화 — inner 는 99×100.
+      assert.equal(probes.nestedLoops, 'v:100|9900', `nestedLoops: ${probes.nestedLoops}`);
+    });
+
+    await t.test('async-poll lifetime', () => {
+      // 캡 prefix 가 붙은 async while(true) 도 break 가 정상 발화.
+      assert.equal(probes.asyncPollBreak, 'v:20', `asyncPollBreak: ${probes.asyncPollBreak}`);
+      // 조건 폴러는 flag 설정까지 살아 있다가 break 후 완전히 죽는다
+      // (atExit === polls → 좀비 폴러 없음).
+      assert.equal(probes.asyncPollFlag, 'v:true|true|true', `asyncPollFlag: ${probes.asyncPollFlag}`);
+    });
+
+    await t.test('bulk DOM insertion', () => {
+      const m = /^v:(\d+)\|(\d+)$/.exec(probes.bulkDom || '');
+      assert.ok(m, `bulkDom: ${probes.bulkDom}`);
+      assert.ok(+m[1] >= 5000, `bulkDom count: ${probes.bulkDom}`);
+      // 상한만 잡는다 — 멤브레인 직렬화가 재앙급이면 여기서 걸린다.
+      assert.ok(+m[2] < 15000, `bulkDom ms: ${probes.bulkDom}`);
+    });
+
+    await t.test('iframe count x load time', () => {
+      const m = /^v:([^|]+)\|(\d+)$/.exec(probes.iframes || '');
+      assert.ok(m, `iframes: ${probes.iframes}`);
+      assert.equal(m[1], 'loaded,loaded,loaded,loaded,loaded', `iframe results: ${probes.iframes}`);
+      // 5개 srcdoc 프레임 병렬 — 프레임당 프렐루드 주입이 있어도 상한 안.
+      assert.ok(+m[2] < 30000, `iframe ms: ${probes.iframes}`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
