@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | e2e / 규칙 | 픽스처 스크립트 안의 `</script>` 리터럴은 주석도 절단한다 — 쪼개거나 textarea 에 담는다. | rewriter.md#fixture-script-종료태그 |
+| 2026-09-22 | membrane / 수정 | `contentDocument.location` 이 부모 URL 을 돌려줬다 — foreign Location 은 프레임의 data-zp-target-url 로 역조회. | rewriter.md#foreign-document-location |
 | 2026-09-22 | e2e / 규칙 | direct-vs-proxy 차분의 대조군은 별도 브라우저 인스턴스에서 — targetcreated 는 모든 컨텍스트를 잡는다. | rewriter.md#차분-측정-브라우저-격리 |
 | 2026-09-22 | membrane / 수정 | usesRaw 앵커의 getAttribute 가 raw share URL 을 페이지에 돌려줬다 — stash→deproxy 로 타깃 URL 을 돌려준다. | rewriter.md#getattribute-usesraw-누출 |
 | 2026-09-22 | e2e / 규칙 | 탈출 검증은 리라이트된 문서 안 프로브로 — page.evaluate 는 리라이터를 안 거쳐 다른 시스템을 잰다. | rewriter.md#e2e-리라이트-문서-프로브 |

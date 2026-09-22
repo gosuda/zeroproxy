@@ -499,6 +499,9 @@
   }
   function captureNative(w) {
     const d = w.document;
+    // sandboxed(opaque) 컨텍스트에서 navigator.serviceWorker 읽기는 SecurityError
+    // 를 던진다 — 읽다가 죽으면 prelude 전체가 무너져 자식 스크립트 전부가 죽는다.
+    const navGet = f => { try { return f(); } catch { return undefined; } };
     return {
       fetch: w.fetch && w.fetch.bind(w),
       // 가상 URL 로 덮기 **전**의 진짜 document.URL. 자식 프레임이 SW 를 거칠
@@ -528,10 +531,10 @@
       DOMException: w.DOMException,
       Request: w.Request,
       Response: w.Response,
-      serviceWorkerController: w.navigator && w.navigator.serviceWorker && w.navigator.serviceWorker.controller,
+      serviceWorkerController: navGet(() => w.navigator && w.navigator.serviceWorker && w.navigator.serviceWorker.controller),
       Headers: w.Headers,
-      navigatorSendBeacon: w.navigator && w.navigator.sendBeacon && w.navigator.sendBeacon.bind(w.navigator),
-      serviceWorker: w.navigator && w.navigator.serviceWorker,
+      navigatorSendBeacon: navGet(() => w.navigator && w.navigator.sendBeacon && w.navigator.sendBeacon.bind(w.navigator)),
+      serviceWorker: navGet(() => w.navigator && w.navigator.serviceWorker),
       createElement: d.createElement.bind(d),
       createElementNS: d.createElementNS && d.createElementNS.bind(d),
       appendChild: w.Node.prototype.appendChild,
@@ -2091,10 +2094,40 @@
         maskNativeFunction(replaceLocation, 'replace');
         maskNativeFunction(reloadLocation, 'reload');
       }
+      // 자식 프레임의 Location 은 자기 URL 을 가져야 한다 — 부모 virtualURL 을
+      // 그대로 돌려주면 `iframe.contentDocument.location.href` 가 부모 주소로
+      // 보인다. `/zp/p/<token>` 은 클라이언트에서 못 푸니 프레임 엘리먼트에
+      // 붙들어 둔 타깃(urlMeta/data-zp-target-url)을 역조회하고, `?via=` 같은
+      // 평문 경로는 deproxy 로 복원한다. about:*/알 수 없는 것은 부모 계약 유지.
+      function foreignVirtualURL() {
+        try {
+          const frames = document.querySelectorAll('iframe,frame');
+          for (const el of frames) {
+            try {
+              const cw = el.contentWindow;
+              if (cw && cw.location === nativeLoc) {
+                const t = urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url');
+                if (t && /^https?:/i.test(t)) return new URL(t);
+              }
+            } catch {}
+          }
+        } catch {}
+        try {
+          const raw = deproxyURL(nativeLoc.href, { scan: true });
+          if (/^https?:/i.test(raw) && new URL(raw).origin !== proxyOrigin) return new URL(raw);
+        } catch {}
+        return null;
+      }
       const methodCache = new Map();
       const handler = {
         get(target, prop) {
-          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) return virtualURL[prop];
+          if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
+            // about:blank/srcdoc 자식은 네이티브처럼 자기 주소가 아니라
+            // 삽입자의 가상 URL 을 보여 주는 기존 계약을 유지한다.
+            if (local) return virtualURL[prop];
+            const fv = foreignVirtualURL();
+            return (fv || virtualURL)[prop];
+          }
           if (prop === 'toString') return locToString;
           if (prop === 'assign') return assignLocation;
           if (prop === 'replace') return replaceLocation;
@@ -2113,7 +2146,10 @@
           if (prop === 'href') { assignLocation(value); return true; }
           if (prop === 'hash' && local) { updateVirtualHash(value); return true; }
           if (typeof prop === 'string' && LOC_ALL_URL_PROPS.has(prop)) {
-            try { const u = new URL(virtualURL.href); u[prop] = value; assignLocation(u.href); } catch {}
+            try {
+              const u = new URL((local ? virtualURL : foreignVirtualURL() || virtualURL).href);
+              u[prop] = value; assignLocation(u.href);
+            } catch {}
             return true;
           }
           return Reflect.set(nativeLoc, prop, value, nativeLoc);
@@ -2123,7 +2159,8 @@
         getOwnPropertyDescriptor(_t, prop) {
           // Virtualized URL props: live value, always configurable.
           if (typeof prop === 'string' && LOC_VIRT_PROPS.has(prop)) {
-            return { value: virtualURL[prop], writable: true, enumerable: true, configurable: true };
+            const fv = local ? virtualURL : foreignVirtualURL() || virtualURL;
+            return { value: fv[prop], writable: true, enumerable: true, configurable: true };
           }
           const d = Reflect.getOwnPropertyDescriptor(nativeLoc, prop);
           // Target is Object.create(nativeLoc) with NO own props, so the proxy
@@ -5986,7 +6023,7 @@
     const s = String(raw == null ? '' : raw);
     let injected = null;
     try { injected = injectSrcdoc(s); }
-    catch (e) { try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
+    catch (e) { try { let dg = root.__zp_diagnostics; try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {} if (dg && dg.length < 200) dg.push({ t: 'srcdoc-fail', msg: String(e && (e.name + ':' + (e.message || e))).slice(0, 200), stack: String(e && e.stack || '').slice(0, 400) }); } catch {} try { console.warn('[ZP] srcdoc restore failed', String(e && (e.message || e))); } catch {} }
     if (injected == null) return false;
     srcdocMeta.set(el, s);
     Native.setAttribute.call(el, 'srcdoc', injected);
@@ -8594,6 +8631,7 @@
       instrumentedWindows.add(childWin);
       try { installNetworkContainment(childWin); }
       catch (e) {
+        try { let dg = root.__zp_diagnostics; try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {} if (dg && dg.length < 200) dg.push({ t: 'contain-fail', msg: String(e && (e.name + ':' + (e.message || e))).slice(0, 200), stack: String(e && e.stack || '').slice(0, 400) }); } catch {}
         instrumentedWindows.delete(childWin);
         try { frame && frame.remove && frame.remove(); } catch {}
         throw e;

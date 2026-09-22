@@ -611,6 +611,146 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/iframe-probes') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>ZP Iframe Probes</title><body><script>
+        (async () => {
+          const out = { messages: [] };
+          window.addEventListener('message', ev => {
+            try {
+              const rec = { data: ev.data, origin: ev.origin };
+              // ev.source 는 직렬화 불가라 열거 불가 프로퍼티로 보관한다.
+              Object.defineProperty(rec, 'src', { value: ev.source, enumerable: false });
+              out.messages.push(rec);
+            } catch (e) { out.messages.push({ data: String(ev.data), origin: 'err' }); }
+          });
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const P = async (k, f) => { window.__probeStage = k; try { out[k] = 'v:' + String(await f()); } catch (e) { out[k] = 'e:' + (e && e.name || e); } };
+          const mk = () => { const f = document.createElement('iframe'); document.body.appendChild(f); window.__lastFrameCW = f.contentWindow; return f; };
+          const load = f => new Promise(r => { f.addEventListener('load', r, { once: true }); setTimeout(r, 5000); });
+          // creation/insertion + ownerDocument + identity
+          await P('createBlank', () => {
+            const f = mk();
+            return [!!f.contentWindow, !!f.contentDocument, f.ownerDocument === document].join(',');
+          });
+          await P('identityStable', () => {
+            const f = mk();
+            // 이전 프로브의 프레임이 body 에 남아 있으므로 frames[0] 가 f 가
+            // 아닐 수 있다 — 컬렉션 멤버십으로 확인한다.
+            let inFrames = false;
+            for (let i = 0; i < window.frames.length; i++) if (window.frames[i] === f.contentWindow) inFrames = true;
+            return [f.contentWindow === f.contentWindow, inFrames, f.contentWindow.parent === window].join(',');
+          });
+          // navigation through frame src — src is set to about:blank first,
+          // then swapped to the share URL async, so the first load event is
+          // about:blank. Poll for the real content instead.
+          const waitText = async (f, want, ms) => {
+            const end = Date.now() + (ms || 6000);
+            while (Date.now() < end) {
+              try { const t = (f.contentDocument && f.contentDocument.body && f.contentDocument.body.textContent || '').trim(); if (t.includes(want)) return t; } catch {}
+              await sleep(120);
+            }
+            return (f.contentDocument && f.contentDocument.body && f.contentDocument.body.textContent || '').trim();
+          };
+          await P('srcLoad', async () => {
+            const f = mk();
+            f.src = '/frame-child';
+            // textContent 는 script 요소의 리라이트된 소스까지 포함하므로
+            // 본문 마커 존재 여부만 본다.
+            return (await waitText(f, 'frame child')).includes('frame child');
+          });
+          await P('srcVirtual', async () => {
+            const f = mk();
+            f.src = '/frame-child';
+            await waitText(f, 'frame child');
+            return f.contentDocument.location.href;
+          });
+          // postMessage identity/origin (frame-child posts frame-child-ready)
+          await P('postMessage', async () => {
+            const f = mk();
+            f.src = '/frame-child';
+            await sleep(1500);
+            // 이전 프레임들도 같은 메시지를 보내므로 발신 창으로 식별한다.
+            const m = out.messages.find(m => m.data && m.data.type === 'frame-child-ready' && m.src === f.contentWindow);
+            return m ? [m.data.href, m.data.topOrigin, m.origin, true].join('|') : 'no-message';
+          });
+          // srcdoc — injected prelude + rewritten script
+          await P('srcdocLoad', async () => {
+            const f = mk(); const done = load(f);
+            f.srcdoc = '<p>inner sd</p>';
+            await done;
+            return (f.contentDocument.body.textContent || '').trim();
+          });
+          await P('srcdocScript', async () => {
+            const f = mk(); const done = load(f);
+            f.srcdoc = '<scr' + 'ipt>window.__sd = "sd-ran";</scr' + 'ipt>';
+            await done;
+            await sleep(300);
+            return f.contentWindow.__sd;
+          });
+          await P('srcdocLocation', async () => {
+            const f = mk(); const done = load(f);
+            f.srcdoc = '<p>x</p>';
+            await done;
+            return f.contentDocument.location.href;
+          });
+          // blob: src must be blocked (fail-closed)
+          await P('blobBlocked', async () => {
+            const f = mk();
+            f.src = URL.createObjectURL(new Blob(['<b>blobbed</b>'], { type: 'text/html' }));
+            await sleep(700);
+            const txt = f.contentDocument && f.contentDocument.body ? f.contentDocument.body.textContent : '';
+            return txt.includes('blobbed') ? 'LOADED-BLOB' : 'contained:' + f.contentDocument.location.href;
+          });
+          // sandbox allow-scripts → opaque origin, script still runs
+          await P('sandboxOpaque', async () => {
+            const f = mk();
+            f.setAttribute('sandbox', 'allow-scripts');
+            f.srcdoc = '<scr' + 'ipt>parent.postMessage("sb-ran","*");</scr' + 'ipt>';
+            let docAccess = 'ok';
+            await sleep(1200);
+            try { void f.contentDocument.body; } catch (e) { docAccess = 'e:' + (e && e.name || e); }
+            const ran = out.messages.some(m => m.data === 'sb-ran');
+            // sandbox opaque-origin 프레임은 네이티브에서 contentDocument 가
+            // null 을 돌려준다 — 던지는 게 아니라 null 이 정답.
+            const cd = (() => { try { return f.contentDocument === null ? 'null-doc' : (f.contentDocument ? 'doc' : String(f.contentDocument)); } catch (e) { return 'e:' + (e && e.name || e); } })();
+            return [ran ? 'ran' : 'silent', cd].join('|');
+          });
+          // nested srcdoc → grandchild prelude. 임의 프로퍼티는 cross-window
+          // 파사드가 삼키므로 마커는 postMessage 로 보낸다.
+          window.__probeStage = 'nested';
+          await P('nested', async () => {
+            const f = mk(); const done = load(f);
+            // 자식 srcdoc HTML 안에 script 종료 태그가 들어가면 파서가 조기
+            // 종료하므로 손자 페이로드는 textarea 에 담아 .value 로 꺼낸다.
+            const inner = '<scr' + 'ipt>top.postMessage("gc-ran","*");</scr' + 'ipt>';
+            f.srcdoc = '<textarea id=t hidden>' + inner + '</textarea><scr' + 'ipt>try{var n=document.createElement("iframe");n.srcdoc=document.getElementById("t").value;document.body.appendChild(n);parent.postMessage("child-did-set","*")}catch(e){parent.postMessage("child-err:"+(e&&(e.name+":"+e.message)||e),"*")}</scr' + 'ipt>';
+            await done;
+            await sleep(1500);
+            let nfo = '';
+            try {
+              const n = f.contentDocument && f.contentDocument.querySelector('iframe');
+              nfo = n ? 'n-scripts=' + (n.contentDocument ? n.contentDocument.scripts.length : 'nodoc') : 'n-absent';
+            } catch (e) { nfo = 'inspect-e:' + (e && e.name || e); }
+            const childMsg = out.messages.map(m => m.data).find(d => typeof d === 'string' && (d === 'child-did-set' || d.startsWith('child-err')));
+            return [out.messages.some(m => m.data === 'gc-ran') ? 'grandchild-ran' : 'no-mark', nfo, String(childMsg || 'no-child-msg')].join('|');
+          });
+          // insert→remove race then clean load
+          await P('removeRace', async () => {
+            const f = mk();
+            f.src = '/frame-child';
+            f.remove();
+            await sleep(300);
+            const f2 = mk();
+            f2.src = '/frame-child';
+            return (await waitText(f2, 'frame child')).includes('frame child');
+          });
+          window.__probeStage = 'done';
+          window.__iframeProbes = out;
+        })().catch(e => { window.__iframeProbes = { __fatal: String(e && (e.stack || e)), __stage: window.__probeStage }; });
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/compat-echo') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('echo');
@@ -2306,6 +2446,57 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.ok(!newWire.some(u => u.startsWith(`${targetBase}/`)), `page issued direct-target requests: ${JSON.stringify(newWire.filter(u => u.startsWith(targetBase)))}`);
       assert.ok(requests.some(r => r.url.startsWith('/compat-echo')), 'upstream never saw /compat-echo');
     });
+  });
+
+  // O6: iframe suite — creation/insertion/navigation/srcdoc/blob(blocked)/
+  // sandbox/nested/remove-race/postMessage/identity/ownerDocument, all in a
+  // rewritten document so the membrane + rewriter paths are what run.
+  await t.test('iframe suite', async t => {
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/iframe-probes`);
+    try {
+      await page.waitForFunction(() => window.__iframeProbes, { timeout: 45000 });
+    } catch (e) {
+      const stage = await page.evaluate(() => ({ stage: window.__probeStage, partial: window.__iframeProbes || null })).catch(() => null);
+      console.log('iframe probes wait failed; stage =', JSON.stringify(stage));
+      throw e;
+    }
+    const probes = await page.evaluate(() => window.__iframeProbes);
+    probes.__diag = await page.evaluate(() => window.__zp_diagnostics || null);
+    fs.writeFileSync(path.join(artifacts, 'iframe-probes.json'), JSON.stringify(probes, null, 2));
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    await t.test('creation/insertion/ownerDocument', () => {
+      assert.equal(probes.createBlank, 'v:true,true,true', `createBlank: ${probes.createBlank}`);
+    });
+    await t.test('identity surfaces', () => {
+      // contentWindow facade stability + frames[i]/parent mapping — pin exact.
+      assert.equal(probes.identityStable, 'v:true,true,true', `identityStable: ${probes.identityStable}`);
+    });
+    await t.test('navigation via src + virtual child location', () => {
+      assert.equal(probes.srcLoad, 'v:true', `srcLoad: ${probes.srcLoad}`);
+      assert.equal(probes.srcVirtual, `v:${targetBase}/frame-child`, `srcVirtual: ${probes.srcVirtual}`);
+    });
+    await t.test('postMessage carries virtual origin and stable source', () => {
+      assert.equal(probes.postMessage, `v:${targetBase}/frame-child|${targetBase}|${targetBase}|true`, `postMessage: ${probes.postMessage}`);
+    });
+    await t.test('srcdoc loads with injected prelude', () => {
+      assert.equal(probes.srcdocLoad, 'v:inner sd', `srcdocLoad: ${probes.srcdocLoad}`);
+      assert.equal(probes.srcdocScript, 'v:sd-ran', `srcdocScript: ${probes.srcdocScript}`);
+      assert.equal(probes.srcdocLocation, `v:${targetBase}/iframe-probes`, `srcdocLocation: ${probes.srcdocLocation}`);
+    });
+    await t.test('blob: iframe src is fail-closed', () => {
+      assert.match(probes.blobBlocked, /^v:contained:/, `blobBlocked: ${probes.blobBlocked}`);
+    });
+    await t.test('sandbox allow-scripts runs opaque-origin child', () => {
+      // opaque-origin 자식의 contentDocument 는 네이티브처럼 null 이어야 한다.
+      assert.match(probes.sandboxOpaque, /^v:ran\|(null-doc|e:)/, `sandboxOpaque: ${probes.sandboxOpaque}`);
+    });
+    await t.test('nested srcdoc grandchild gets prelude', () => {
+      assert.match(probes.nested, /^v:grandchild-ran\|/, `nested: ${probes.nested}`);
+    });
+    await t.test('insert/remove race stays clean', () => {
+      assert.equal(probes.removeRace, 'v:true', `removeRace: ${probes.removeRace}`);
+    });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
   await t.test('cross-virtual-origin frames cannot read parent Location', async () => {

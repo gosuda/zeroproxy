@@ -1070,3 +1070,17 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **원인:** e2e 의 `browser.on('targetcreated')` 가 브라우저 내 **모든** 타깃의 wire request 를 `wireRequests` 에 적재한다. 차분 픽스처의 direct 실행을 같은 브라우저의 새 컨텍스트에서 돌리면 direct-target 요청이 전역 "모든 네트워크는 프록시 오리진" 단언에 걸린다.
 - **수정:** direct 실행은 `puppeteer.launch` 별도 인스턴스에서. 컨텍스트/페이지 수준의 선택적 관측으로는 못 막는다 — 핸들러가 세션을 만들기 전에 타깃을 이미 잡는다.
 - **교훈:** 측정 대상과 대조군을 같은 계측기에 붙일 때 "어느 쪽에서 온 이벤트인가"를 먼저 묻는다 — 이 노트의 nav-matrix 대조군 오염과 같은 부류.
+
+## <a id="foreign-document-location"></a>`contentDocument.location` 이 부모 가상 URL 을 돌려줬다 — foreign Location 은 프레임 타깃 역조회 (2026-09-22)
+
+- **원인:** `wrappedLocationFor` 의 get 트랩이 `LOC_VIRT_PROPS` 를 무조건 realm 의 `virtualURL` 에서 읽었다 — `local` 구분은 메서드(assign/replace/reload)에만 적용돼 있고 읽기는 빠져 있었다. `iframe.contentDocument.location.href` 가 자식이 아니라 **부모** 주소를 보였다. O6 차분 픽스처의 `srcVirtual` 이 잡았다.
+- **수정:** 비로컬 Location 은 `foreignVirtualURL()` 로 자기 가상 URL 을 만든다 — (1) 프레임 엘리먼트의 `urlMeta`/`data-zp-target-url` 을 `el.contentWindow.location === nativeLoc` 로 역조회(`/zp/p/<token>` 은 클라이언트가 못 푸므로 이 경로가 실효), (2) `?via=` 류 평문은 `deproxyURL`, (3) `about:*`/불명은 기존 계약대로 부모 `virtualURL` 폴백. set/GOPD 도 같은 경로.
+- **연계 계약:** sandbox `allow-scripts`(opaque) 프레임의 `contentDocument` 는 네이티브처럼 **null** — `null.body` 의 TypeError 가 정답이지 SecurityError 가 아니다. `crossWindow` 파사드(safeCrossWindow)는 임의 프로퍼티 set 을 조용히 삼킨다 — 손자→최상위 마킹 같은 cross-window 통신은 postMessage 가 정규 채널.
+- **검증:** e2e `iframe suite` — srcVirtual/srcdocLocation/nested/sandboxOpaque 포함 143/143.
+
+## <a id="fixture-script-종료태그"></a>인라인 픽스처 안의 `</script>` 리터럴은 주석·문자열 가리지 않고 스크립트를 절단한다 (2026-09-22)
+
+- **원인:** `/iframe-probes` 픽스처 인라인 스크립트의 **주석**에 `</script>` 라고 적었다 — HTML 파서는 스크립트 raw-text 안에서 주석/문자열 구분 없이 `</script` 를 만나는 즉시 요소를 닫는다. 절단된 스크립트는 `EOF` 파스 오류 → 리라이트 실패 → fail-closed 스텁이 `NotSupportedError: Blocked by ZeroProxy policy` 를 던지고 픽스처 전체가 무음 사망(waitForFunction 타임아웃 + `__probeStage` 미설정으로 관측). 에러 문서가 아니라 **스텁 throw** 라 페이지는 살아 있고 스크립트만 죽어 원인 파악이 어려웠다.
+- **규칙:** 픽스처 인라인 스크립트 안에 `</script>` 리터럴이 필요하면 `'</scr' + 'ipt>'` 로 쪼갠다 — 주석도 예외 없다. 중첩 srcdoc 처럼 값에 진짜 `</script>` 가 필요하면 textarea(내용은 raw text)에 담아 `.value` 로 꺼낸다 — JSON.stringify 도 `/` 를 이스케이프 안 해서 안 못 넣는다.
+- **연계 함정:** 동적 `f.src = '/x'` 는 about:blank 로 먼저 붙고 share URL 로 비동기 교체되므로 첫 `load` 이벤트는 about:blank 다 — 내용 기준 폴링으로 기다려야 한다. `body.textContent` 는 script 요소의 **리라이트된** 소스를 포함한다 — 픽스처 단언은 마커 존재 여부만 본다.
+- **검증:** 픽스처 추출본을 `ZPBundle.rewriteScript` 에 직접 통과시켜 파스 실패를 재현·수정 확인. e2e 143/143.
