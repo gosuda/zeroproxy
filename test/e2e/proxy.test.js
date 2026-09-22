@@ -878,6 +878,119 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/csp-probes') {
+      // O8: CSP suite — §K two-sided matrix. Allowed resources must load,
+      // missed/intentional blocks must fire securitypolicyviolation (and land
+      // at /zp/api/csp-report). The inline <script type=module> marker is the
+      // top-priority check: it only executes if `blob:` is in script-src
+      // (the __ZP_EXEC_INLINE_MODULE path) — without it every inline module
+      // dies silently at CSP.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>ZP CSP Probes</title><body><script type="module">
+        // 클래식 프로브가 먼저 객체를 만들 수 있다 — 덮어쓰면 그쪽 수집이 날아가므로 머지.
+        (window.__cspProbes = window.__cspProbes || { violations: [] }).inlineModule = 'ran';
+      <\/script><script>
+        (async () => {
+          const out = window.__cspProbes = window.__cspProbes || { violations: [] };
+          const violations = out.violations;
+          document.addEventListener('securitypolicyviolation', e => {
+            violations.push(e.effectiveDirective + '|' + String(e.blockedURI).slice(0, 60));
+          });
+          const P = async (k, fn) => { try { out[k] = await fn(); } catch (e) { out[k] = 'e:' + (e && (e.name || e.message) || e); } };
+          const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+          const waitFor = (re, ms) => new Promise(r => setTimeout(() => {
+            const hit = violations.find(v => re.test(v));
+            r(hit ? 'spv:' + hit.split('|')[0] : 'no-spv');
+          }, ms));
+
+          // ── connect-src blob:/data: — CSP 통과 후 fetch 심이 실제 처리 ──
+          await P('fetchData', async () => { const r = await fetch('data:text/plain,hi'); return r.status + ':' + (await r.text()); });
+          await P('fetchBlob', async () => { const r = await fetch(URL.createObjectURL(new Blob(['bl']))); return r.status + ':' + (await r.text()); });
+
+          // ── img/style/font/media-src — data:/blob: 허용 (로드 시도 자체가 통과) ──
+          await P('imgData', () => new Promise(r => {
+            const i = new Image(); const t = setTimeout(() => r('timeout'), 3000);
+            i.onload = () => { clearTimeout(t); r('loaded'); };
+            i.onerror = () => { clearTimeout(t); r('load-err'); };
+            i.src = PNG;
+          }));
+          await P('styleData', () => new Promise(r => {
+            const l = document.createElement('link'); const t = setTimeout(() => r('timeout'), 3000);
+            l.rel = 'stylesheet'; l.onload = () => { clearTimeout(t); r('loaded'); };
+            l.onerror = () => { clearTimeout(t); r('err'); };
+            l.href = 'data:text/css,body%7B%7D'; document.head.appendChild(l);
+          }));
+          // 폰트/미디어는 디코드 실패가 정상 — CSP 통과 여부는 SPV 부재로 판정
+          await P('fontData', async () => {
+            try { const f = new FontFace('zpf', 'url(data:font/woff2;base64,AAAA)'); await f.load(); return 'loaded'; }
+            catch (e) { return 'font-err:' + (e && e.name || e); }
+          });
+          await P('mediaData', () => new Promise(r => {
+            const v = document.createElement('video'); const t = setTimeout(() => r('settled'), 1500);
+            v.onerror = () => { clearTimeout(t); r('media-err'); };
+            v.onloadeddata = () => { clearTimeout(t); r('loaded'); };
+            v.src = 'data:video/mp4;base64,AAAA';
+          }));
+
+          // ── 차단 측 — 각 디렉티브가 SPV 를 발사해야 한다 ──
+          await P('objectBlocked', () => {
+            const o = document.createElement('object');
+            o.data = '/csp-payload'; document.body.appendChild(o);
+            return waitFor(/^object-src/, 1200);
+          });
+          await P('baseBlocked', () => {
+            const b = document.createElement('base'); b.href = 'https://evil.invalid/';
+            document.head.appendChild(b); return waitFor(/^base-uri/, 800);
+          });
+          await P('prefetchBlocked', () => {
+            const l = document.createElement('link'); l.rel = 'prefetch'; l.href = '/x';
+            document.head.appendChild(l); return waitFor(/prefetch-src|default-src/, 800);
+          });
+          await P('manifestBlocked', () => {
+            const l = document.createElement('link'); l.rel = 'manifest'; l.href = 'data:application/json,%7B%7D';
+            document.head.appendChild(l); return waitFor(/manifest-src/, 800);
+          });
+
+          // ── CSP 는 허용하지만 속성 정책이 봉인하는 경로 — divergence 핀 ──
+          await P('frameDataSrc', () => {
+            const f = document.createElement('iframe');
+            try { f.src = 'data:text/html,<b>x</b>'; document.body.appendChild(f); return 'set:' + String(f.src).slice(0, 40); }
+            catch (e) { return 'blocked:' + (e && e.name || e); }
+          });
+          await P('workerBlob', () => {
+            try {
+              const w = new Worker(URL.createObjectURL(new Blob(['postMessage(1)'], { type: 'text/javascript' })));
+              return 'created';
+            } catch (e) { return 'blocked:' + (e && e.name || e); }
+          });
+
+          // ── 'unsafe-inline'/'unsafe-eval' 정면 경로 ──
+          await P('inlineHandler', () => new Promise(r => {
+            const b = document.createElement('button');
+            b.setAttribute('onclick', 'window.__cspHandlerRan = 1');
+            document.body.appendChild(b); b.click();
+            setTimeout(() => r(window.__cspHandlerRan ? 'ran' : 'silent'), 400);
+          }));
+          await P('evalPath', () => { try { return 'v:' + eval('40+2'); } catch (e) { return 'e:' + (e && e.name || e); } });
+
+          // ── CSP <meta> 주입은 무력화 — 이후 리소스가 계속 로드돼야 한다 ──
+          await P('metaNeutralized', () => {
+            const m = document.createElement('meta');
+            m.setAttribute('http-equiv', 'Content-Security-Policy');
+            m.setAttribute('content', "default-src 'none'");
+            document.head.appendChild(m);
+            return new Promise(r => {
+              const i = new Image(); const t = setTimeout(() => r('timeout'), 3000);
+              i.onload = () => { clearTimeout(t); r('img-loaded-after-meta'); };
+              i.onerror = () => { clearTimeout(t); r('img-blocked-after-meta'); };
+              i.src = PNG;
+            });
+          });
+          out.done = true;
+        })().catch(e => { (window.__cspProbes = window.__cspProbes || { violations: [] }).__fatal = String(e && (e.stack || e)); });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -1217,6 +1330,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   let proxyLog = '';
   const browserLog = [];
   const wireRequests = [];
+  const responseHeaders = new Map();
   const sessions = new Map();
   const saveArtifacts = async (name, page) => {
     if (page && !page.isClosed()) {
@@ -1289,6 +1403,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       const session = await target.createCDPSession();
       const reqUrls = new Map();
       session.on('Network.requestWillBeSent', event => { reqUrls.set(event.requestId, event.request.url); wireRequests.push(event.request.url); });
+      session.on('Network.responseReceived', event => { if (event.response && event.response.headers) responseHeaders.set(event.response.url, event.response.headers); });
       session.on('Network.webSocketCreated', event => wireRequests.push(event.url));
       session.on('Network.loadingFailed', event => browserLog.push(`${target.type()} netfail ${reqUrls.get(event.requestId) || event.requestId} ${event.errorText} blocked=${event.blockedReason || ''} cors=${event.corsErrorStatus ? JSON.stringify(event.corsErrorStatus) : ''}`));
       session.on('Runtime.consoleAPICalled', event => browserLog.push(`${target.type()} ${event.type}: ${event.args.map(arg => arg.value ?? arg.description ?? '').join(' ')}`));
@@ -2692,6 +2807,101 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // 이름 접두어로 두 타깃이 같은 SharedWorker 를 공유하지 않는다 — 접두어
       // 형태를 고정해 회귀를 잡는다(D7).
       assert.match(s.name, /^zp:w:[^:]+:swprobe$/, `name: ${s.name}`);
+    });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // O8: CSP suite — §K two-sided matrix in a real browser. The proxied
+  // document CSP (build_proxied_csp) is asserted on the response header,
+  // allowed resources must load, intentional blocks must fire
+  // securitypolicyviolation AND land at /zp/api/csp-report (server log).
+  await t.test('csp suite', async t => {
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/csp-probes`);
+    try {
+      await page.waitForFunction(() => window.__cspProbes && window.__cspProbes.done, { timeout: 30000 });
+    } catch (e) {
+      console.log('csp probes wait failed');
+      throw e;
+    }
+    const probes = await page.evaluate(() => window.__cspProbes);
+    fs.writeFileSync(path.join(artifacts, 'csp-probes.json'), JSON.stringify(probes, null, 2));
+    const v = probes.violations || [];
+    await t.test('inline module executes via blob: script-src', () => {
+      // §K top-priority: script-src 에 blob: 가 없으면 __ZP_EXEC_INLINE_MODULE
+      // 경로 전체가 죽어 모든 인라인 모듈이 무음 사망한다.
+      assert.equal(probes.inlineModule, 'ran', `inlineModule: ${probes.inlineModule}`);
+    });
+    await t.test('connect-src allows data: and blob: fetch', () => {
+      assert.equal(probes.fetchData, '200:hi', `fetchData: ${probes.fetchData}`);
+      assert.equal(probes.fetchBlob, '200:bl', `fetchBlob: ${probes.fetchBlob}`);
+    });
+    await t.test('img/style/font/media allow data: sources', () => {
+      assert.equal(probes.imgData, 'loaded', `imgData: ${probes.imgData}`);
+      assert.equal(probes.styleData, 'loaded', `styleData: ${probes.styleData}`);
+      // 디코드 실패는 허용 — CSP 통과의 판정은 해당 디렉티브 SPV 부재.
+      assert.ok(!v.some(x => /^font-src/.test(x)), `font-src violation: ${v}`);
+      assert.ok(!v.some(x => /^media-src/.test(x)), `media-src violation: ${v}`);
+    });
+    await t.test('blocked resources fire securitypolicyviolation', () => {
+      assert.equal(probes.objectBlocked, 'spv:object-src', `objectBlocked: ${probes.objectBlocked}`);
+      assert.equal(probes.baseBlocked, 'spv:base-uri', `baseBlocked: ${probes.baseBlocked}`);
+      // manifest 는 headless Chrome 이 삽입 시점에 fetch 하지 않는다 — 요청이
+      // 없으니 SPV 도 없다. 디렉티브 존재 자체는 응답 헤더 단언이 검증한다.
+      assert.equal(probes.manifestBlocked, 'no-spv', `manifestBlocked: ${probes.manifestBlocked}`);
+      // prefetch 도 headless 에서는 fetch 자체가 안 나간다 — §K 의 "prefetch
+      // 막힘" 손실은 유효하나 SPV 관측은 불가. 디렉티브 부재는 헤더 단언이 커버.
+      assert.equal(probes.prefetchBlocked, 'no-spv', `prefetchBlocked: ${probes.prefetchBlocked}`);
+    });
+    await t.test('sealed paths fail before CSP (divergence pins)', () => {
+      // frame-src data:/worker-src blob: 는 CSP 상 허용이지만 속성/훅 정책이
+      // 먼저 봉인한다 — 어느 쪽이든 네트워크 도달 없이 차단돼야 한다.
+      assert.match(probes.frameDataSrc, /^(blocked:|set:(about:|http:\/\/proxy))/,
+        `frameDataSrc: ${probes.frameDataSrc}`);
+      assert.ok(!v.some(x => /^frame-src|^child-src/.test(x)), `frame violation leaked: ${v}`);
+      assert.match(probes.workerBlob, /^(blocked:|created)/, `workerBlob: ${probes.workerBlob}`);
+    });
+    await t.test('unsafe-inline/unsafe-eval paths work', () => {
+      assert.equal(probes.inlineHandler, 'ran', `inlineHandler: ${probes.inlineHandler}`);
+      assert.equal(probes.evalPath, 'v:42', `evalPath: ${probes.evalPath}`);
+    });
+    await t.test('CSP meta injection is neutralized', () => {
+      assert.equal(probes.metaNeutralized, 'img-loaded-after-meta', `metaNeutralized: ${probes.metaNeutralized}`);
+    });
+    await t.test('response CSP matches proxied policy contract', () => {
+      // 네비게이션 응답 헤더 — share URL 응답의 CSP 를 CDP 로 읽는다.
+      // /zp/api/* 응답도 CSP 를 싣지만 그건 control-surface 정책(build_csp)
+      // 이라 문서 정책과 다르다 — pathname 이 정확히 share 경로인 것만 본다.
+      // 같은 /zp/ 경로라도 Go 서버의 공유-엔드포인트 응답은 control CSP 를 싣는다
+      // — 프록시드 문서 정책(build_proxied_csp)만 report-uri 를 포함하므로 그걸로 식별.
+      const docHeaders = [...responseHeaders.entries()]
+        .filter(([u]) => { try { const p = new URL(u); return p.origin === proxyOrigin && (p.pathname === '/zp/' || p.pathname.startsWith('/zp/p/')); } catch { return false; } })
+        .map(([, h]) => h['content-security-policy'] || h['Content-Security-Policy'])
+        .find(csp => csp && /report-uri/.test(String(csp)));
+      assert.ok(docHeaders, 'proxied document CSP header not captured');
+      const csp = String(docHeaders);
+      assert.match(csp, /default-src 'none'/, 'default-src');
+      assert.match(csp, /script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:/, 'script-src must carry blob: for inline modules');
+      assert.match(csp, /connect-src [^;]*blob: data:/, 'connect-src must carry blob:/data:');
+      assert.match(csp, /media-src 'self' blob: data:/, 'media-src');
+      assert.match(csp, /worker-src 'self' blob:/, 'worker-src');
+      assert.match(csp, /object-src 'none'/, 'object-src');
+      assert.match(csp, /base-uri 'none'/, 'base-uri');
+      assert.match(csp, /form-action 'self'/, 'form-action');
+      assert.match(csp, /manifest-src 'self'/, 'manifest-src');
+      assert.match(csp, /report-uri \/zp\/api\/csp-report/, 'report-uri');
+      // 프록시 문서에는 frame-ancestors 없음(우리가 프레임에 싣는다) +
+      // 모방 방지 지시어 부재 (§K correctly-absent 목록).
+      assert.ok(!/frame-ancestors/.test(csp), 'frame-ancestors must be absent on proxied docs');
+      for (const absent of ['trusted-types', 'require-trusted-types-for', 'sandbox', 'upgrade-insecure-requests', 'block-all-mixed-content']) {
+        assert.ok(!csp.includes(absent), `${absent} must be absent`);
+      }
+    });
+    await t.test('violation reports reach the server log', async () => {
+      // report-uri → /zp/api/csp-report → Go 서버 [CSP] 로그 라인.
+      // 브라우저 리포트는 비동기 — 잠깐 기다린 뒤 로그를 확인한다.
+      await new Promise(r => setTimeout(r, 1500));
+      assert.match(proxyLog, /\[CSP\] blocked=.*directive=object-src/, `no object-src report in server log`);
+      assert.match(proxyLog, /\[CSP\] blocked=.*directive=base-uri/, `no base-uri report in server log`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });

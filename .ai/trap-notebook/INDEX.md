@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | e2e / 규칙 | `/zp/` 경로에 두 CSP 정책이 공존 — 문서 정책은 report-uri 유무로 식별. headless 는 manifest/prefetch 를 lazy-fetch 해 SPV 가 없다. | rewriter.md#csp-두-정책-구별 |
 | 2026-09-22 | worker / 수정 | module worker 의 `importScripts` 는 호출 시 던지는 스텁 — `typeof` 가드 무효, 부트스트랩 해시 mod=1 로 명시 판정. | rewriter.md#module-worker-importscripts-스텁 |
 | 2026-09-22 | worker / 수정 | 워커 클라이언트엔 referrer ctx 가 없다 — `?tab=` worker-script 요청에서 bindClientContext. dep 실패는 top import() URL 로 기만 보고된다. | rewriter.md#worker-client-탭-바인딩 |
 | 2026-09-22 | e2e / 규칙 | 픽스처 스크립트 안의 `</script>` 리터럴은 주석도 절단한다 — 쪼개거나 textarea 에 담는다. | rewriter.md#fixture-script-종료태그 |

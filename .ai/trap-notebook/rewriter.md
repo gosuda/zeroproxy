@@ -1098,3 +1098,10 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** `/zp/api/worker-script` 는 언제나 `?tab=` 를 들고 온다 — 그 요청에서 `bindClientContext(clientId, tab, entry)` 로 워커 클라이언트를 탭에 묶는다. 심층 방어로 worker-prelude 의 `__zp_module_url` 도 `&tab=` 를 붙인다. classic 워커 바인딩도 동일 — 워커별 clientId 유일이라 다탭 누출 없음.
 - **연계 함정(CORS):** 모듈 로더의 `mode:'cors'` + `credentials:'same-origin'` 요청에 `ACAO:*` 는 명세상 무효 — 응답 전체 거부. `applyCORS` 는 Origin 헤더 없으면 요청 URL 오리진을 되비춘다(이 핸들러 응답은 어차피 같은 오리진 전용).
 - **검증:** 디버깅 경로 — bootstrap catch 로 `import()` 에러 문자열 확보 → SW `__zpRustTrace` 에 `sw:worker-script`(dest/mode/cred/origin/tab/결과) 기록 → CDP `worker` 타깃 + `Network.loadingFailed` 관측 추가(테스트에 잔류, 영구 진단 자산). e2e 152/152.
+
+## <a id="csp-두-정책-구별"></a>같은 `/zp/` 경로에 두 CSP 정책이 공존한다 — 문서 정책은 `report-uri` 유무로 식별 (2026-09-22)
+
+- **원인:** 프록시드 문서는 SW 가 `build_proxied_csp`/`ZP.fixedCSP`(script-src 에 `blob:` + `report-uri /zp/api/csp-report`)를 싣지만, Go 서버의 공유·컨트롤 엔드포인트 응답은 `build_csp`(blob: 없음, `frame-ancestors 'none'`, report-uri 없음)를 싣는다. CDP `Network.responseReceived` 로 CSP 를 읽을 때 URL 경로만으로 걸러면 Go 응답을 문서로 오인한다.
+- **규칙:** 문서 CSP 단언은 `pathname === '/zp/' || '/zp/p/'` + **`report-uri` 포함** 두 조건으로 식별한다. control CSP 에는 report-uri 가 없으므로 정확히 갈린다.
+- **연계 관측:** headless Chrome 은 `<link rel=manifest>` 와 `<link rel=prefetch>` 를 삽입 시점에 fetch 하지 않는다 — 요청이 없으니 `securitypolicyviolation` 도 없다(`no-spv` 가 정상). 디렉티브 존재/부재는 헤더 단언으로 검증한다. `<object>`/`<base>` 는 즉시 SPV 를 발사해 차단 검증에 쓸 수 있다.
+- **검증:** e2e `csp suite` — allowed×blocked×directive 매트릭스 9 subtests, 서버 로그 `[CSP] blocked=` end-to-end 리포트 확인. 162/162.
