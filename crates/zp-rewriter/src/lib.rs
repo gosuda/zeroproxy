@@ -3162,6 +3162,26 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 });
                 return;
             }
+            // `import.meta.resolve(spec)` — 네이티브는 모듈의 **실제 URL**(프록시
+            // `/zp/api/script?…`)을 base 로 해석한다. 성공하면 프록시 오리진이
+            // 새고, blob/non-hierarchical base 에서는 TypeError 로 죽는다(실측).
+            // 가상 타깃 URL 기준 해석으로 바꾼다. import-map bare specifier 는
+            // 여기서 못 푼다 — URL 상대해석까지만 보장하고 맵 조회는 미지원.
+            if meta.meta.name == "import"
+                && meta.property.name == "meta"
+                && expr.property.name == "resolve"
+                && !self.target_url.is_empty()
+            {
+                self.patches.push(Patch {
+                    start: expr.span.start,
+                    end: expr.span.end,
+                    replacement: format!(
+                        "(s=>new URL(s,\"{}\").href)",
+                        js_quote_body(&self.target_url)
+                    ),
+                });
+                return;
+            }
         }
         // If the receiver is a bare identifier that's bound in the current
         // lexical scope (function param, destructured param, var/let/const,
@@ -4280,6 +4300,36 @@ mod tests {
         };
         let r3 = rewrite_script("const p = import.meta.url;", &bare).unwrap();
         assert!(r3.code.contains("import.meta.url"), "{}", r3.code);
+    }
+
+    #[test]
+    fn rewrites_import_meta_resolve_against_the_target_url() {
+        let opts = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: "https://example.com/dir/app.js".to_string(),
+            strict: true,
+            proxy_origin: "http://proxy.localhost:18080".to_string(),
+        };
+        // 네이티브 resolve 는 모듈의 실제 URL(/zp/api/script?…)을 base 로 쓴다 —
+        // 성공하면 프록시 오리진이 새고, blob/non-hierarchical base 에서는
+        // TypeError. 가상 타깃 기준 해석 함수로 치환한다.
+        let r = rewrite_script("const u = import.meta.resolve('./x');", &opts).unwrap();
+        assert!(
+            r.code.contains("new URL(s,\"https://example.com/dir/app.js\").href"),
+            "resolve 치환이 없다: {}",
+            r.code
+        );
+        assert!(!r.code.contains("import.meta.resolve"), "원본이 남았다: {}", r.code);
+
+        // target_url 없으면 건드리지 않는다.
+        let bare = RewriteOpts {
+            kind: ScriptKind::Module,
+            target_url: String::new(),
+            strict: true,
+            proxy_origin: String::new(),
+        };
+        let r2 = rewrite_script("const u = import.meta.resolve('./x');", &bare).unwrap();
+        assert!(r2.code.contains("import.meta.resolve"), "{}", r2.code);
     }
 
     #[test]

@@ -1543,9 +1543,13 @@ test('SharedWorker 교체는 네이티브 prototype 을 보존하고 타깃 접�
   const to = rt.indexOf('\n  // D3: virtual SW facade', from);
   assert.ok(to > from, 'installWorkerHooks 끝을 못 찾았다');
   const body = rt.slice(from, to);
-  assert.ok(/ZPSharedWorker\.prototype = Native\.SharedWorker\.prototype/.test(body),
+  // RealSW 는 __zp_realSW 스태시 우선 — 부모 컨테인먼트가 먼저 심은 래퍼를
+  // 네이티브로 오인해 이중 래핑(부트스트랩 URL 자기재귀)하는 것을 막는다.
+  assert.ok(/const RealSW = root\.__zp_realSW \|\| Native\.SharedWorker/.test(body),
+    'SharedWorker 교체가 __zp_realSW 스태시를 안 쓴다 — 자식 realm 에서 이중 래핑으로 죽는다');
+  assert.ok(/ZPSharedWorker\.prototype = RealSW\.prototype/.test(body),
     'SharedWorker 교체가 네이티브 prototype 을 안 물려받는다 — onerror/port 등이 대조군에만 남는다');
-  assert.ok(/const prefix = sharedWorkerNamePrefix\(\);[\s\S]{0,400}new Native\.SharedWorker/.test(body),
+  assert.ok(/const prefix = sharedWorkerNamePrefix\(\);[\s\S]{0,400}new RealSW/.test(body),
     'SharedWorker 생성이 타깃 접두어를 안 쓴다 — 서로 다른 타깃이 이름을 공유하면 같은 워커를 잡는다');
 });
 

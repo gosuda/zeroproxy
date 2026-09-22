@@ -1230,6 +1230,239 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/surface-probes') {
+      // T1: 미검증 표면 실측 — transformer 잔여(importmap/speculationrules/
+      // shadow DOM/SVG), transferable 누출, 명명 프레임 접근, 레거시 접근자,
+      // 에러 이벤트 인자, a.ping, document.write 두 번째 문서, iframe 잔여.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Surface Probes</title><head>
+      <script type="importmap">{"imports":{"x-mod":"/dyn-mod.js"}}<\/script>
+      <script type="speculationrules">{"prefetch":[{"source":"list","urls":["/dyn-mod.js"]}]}<\/script>
+      </head><body>
+      <div id="sdhost"><template shadowrootmode="open"><img src="/dyn-mod.js" id="sdimg"><p>sd</p></template></div>
+      <svg><image id="svgimg" href="/dyn-mod.js"/><a id="svga" xlink:href="/dyn-mod.js"></a></svg>
+      <script>
+        window.__surfaceProbes = {};
+        window.__surfaceErrs = [];
+        window.addEventListener('error', e => { window.__surfaceErrs.push('err:' + e.filename + '|' + e.lineno + '|' + e.message); });
+        window.addEventListener('unhandledrejection', e => { window.__surfaceErrs.push('rej:' + String(e.reason && e.reason.stack || e.reason)); });
+      <\/script>
+      <script>
+        (async () => {
+          const out = window.__surfaceProbes;
+          const P = async (k, fn) => { try { out[k] = 'v:' + (await fn()); } catch (e) { out[k] = 'threw:' + (e && e.name || e) + ':' + String(e && e.message || '').slice(0, 80); } };
+          const tick = () => new Promise(r => setTimeout(r, 30));
+          const leaked = s => s.includes('__zp_') || s.includes('/zp/api') || s.includes('proxy.localhost') || s.includes('worker-script');
+
+          // ── T1-1: transformer 잔여 ──
+          await P('importmapText', () => {
+            const t = document.querySelector('script[type=importmap]').textContent;
+            return t.includes('/zp/') ? 'rewritten' : 'raw';
+          });
+          await P('specrulesText', () => {
+            const t = document.querySelector('script[type=speculationrules]').textContent;
+            return t.includes('/zp/') ? 'rewritten' : 'raw';
+          });
+          await P('shadowDom', () => {
+            const host = document.querySelector('#sdhost');
+            if (!host.shadowRoot) return 'no-shadowroot';
+            const img = host.shadowRoot.getElementById('sdimg');
+            return img ? 'shadow-img:' + (leaked(img.getAttribute('src') || '') ? 'LEAK' : 'clean') : 'no-img';
+          });
+          await P('svgImage', () => {
+            const a = document.querySelector('#svgimg').getAttribute('href');
+            return leaked(a || '') ? 'LEAK:' + a : 'clean:' + a;
+          });
+          await P('svgAnchor', () => {
+            const a = document.querySelector('#svga').getAttribute('xlink:href');
+            return leaked(a || '') ? 'LEAK:' + a : 'clean:' + a;
+          });
+
+          // ── T1-2: transferable/clone 누출 ──
+          await P('cloneLocation', () => {
+            try { const c = structuredClone(location); return 'cloned:' + String(c && c.href || c); }
+            catch (e) { return 'threw:' + e.name; }
+          });
+          await P('weakRefLocation', () => {
+            const w = new WeakRef(location);
+            const d = w.deref();
+            return d === location ? 'same-proxy' : 'other:' + String(d && d.href);
+          });
+          await P('portMsgLocation', async () => {
+            const c = new MessageChannel();
+            const got = new Promise(r => { c.port2.onmessage = e => r(e.data); });
+            try { c.port1.postMessage(location); } catch (e) { return 'threw:' + e.name; }
+            const v = await Promise.race([got, tick().then(() => 'timeout')]);
+            if (v === 'timeout') return 'timeout';
+            return v === location ? 'same-proxy' : 'other:' + (v && v.href ? String(v.href) : typeof v);
+          });
+          await P('cloneDocument', () => {
+            try { structuredClone(document); return 'cloned'; } catch (e) { return 'threw:' + e.name; }
+          });
+          await P('cloneWindow', () => {
+            try { structuredClone(window); return 'cloned'; } catch (e) { return 'threw:' + e.name; }
+          });
+
+          // ── T1-3: 명명/인덱스 프레임 접근 ──
+          const nf = document.createElement('iframe');
+          nf.name = 'nf'; nf.srcdoc = '<p>nfx</p>';
+          document.body.appendChild(nf);
+          await (async () => { for (let i = 0; i < 100; i++) { try { if (nf.contentDocument && nf.contentDocument.body && nf.contentDocument.body.textContent.includes('nfx')) return; } catch {} await new Promise(r => setTimeout(r, 20)); } })();
+          await P('framesByName', () => {
+            const d = '|attr:' + nf.getAttribute('name') + '|cw:' + (nf.contentWindow ? 'y' : 'n');
+            const w = frames['nf'];
+            if (!w) return 'undefined' + d;
+            return (leaked(String(w.location.href)) ? 'LEAK:' + w.location.href : 'clean:' + w.location.href) + d;
+          });
+          await P('framesItem', () => {
+            const w = frames.item(0);
+            if (!w) return 'undefined';
+            return leaked(String(w.location.href)) ? 'LEAK' : 'clean';
+          });
+          await P('selfIndex', () => {
+            const w = self[0];
+            if (!w) return 'undefined';
+            return leaked(String(w.location.href)) ? 'LEAK' : 'clean';
+          });
+          await P('thisIndex', () => {
+            const w = this[0];
+            if (!w) return 'undefined';
+            return leaked(String(w.location.href)) ? 'LEAK' : 'clean';
+          });
+          await P('windowByName', () => {
+            const w = window['nf'];
+            if (!w) return 'undefined';
+            return leaked(String(w.location.href)) ? 'LEAK:' + w.location.href : 'clean:' + w.location.href;
+          });
+
+          // ── T1-4: 레거시 접근자 ──
+          await P('defineGetterLoc', () => {
+            try { window.__defineGetter__('location', () => 'fake'); return 'installed|href:' + location.href.slice(0, 40); }
+            catch (e) { return 'threw:' + e.name; }
+          });
+          await P('defineSetterLoc', () => {
+            try { window.__defineSetter__('location', v => { window.__setterTrap = v; }); return 'installed'; }
+            catch (e) { return 'threw:' + e.name; }
+          });
+          await P('lookupGetterLoc', () => {
+            const g = window.__lookupGetter__('location');
+            if (g === undefined) return 'none';
+            return leaked(String(g)) ? 'LEAK' : 'fn';
+          });
+          await P('lookupSetterLoc', () => {
+            const s = window.__lookupSetter__('location');
+            if (s === undefined) return 'none';
+            return leaked(String(s)) ? 'LEAK' : 'fn';
+          });
+
+          // ── T1-5: 에러 인자/ownKeys ──
+          await P('ownKeysLeak', () => {
+            const ks = Object.getOwnPropertyNames(window);
+            const bad = ks.filter(k => k.indexOf('zp') === 0 || k.includes('__zp'));
+            return bad.length ? 'LEAK:' + bad.slice(0, 5).join(',') : 'clean:' + ks.length;
+          });
+          try { eval('nonexistent_xyz()'); } catch {}
+          Promise.reject(new Error('surf-rej'));
+          setTimeout(() => { throw new Error('surf-uncaught'); }, 10);
+          await new Promise(r => setTimeout(r, 120));
+
+          // ── T1-6: a.ping + import.meta.resolve ──
+          // ping setter 는 값을 WeakMap 에 삼키고 실속성을 지운다 — 클릭할
+          // 필요 없이 속성 상태로 검증한다 (클릭은 페이지를 네비게이션시킨다).
+          await P('anchorPing', () => {
+            const a = document.createElement('a');
+            a.href = '/ping-dest';
+            a.ping = 'https://evil.example/track';
+            document.body.appendChild(a);
+            const attr = a.getAttribute('ping');
+            const marker = a.getAttribute('data-zp-blocked-ping');
+            const prop = a.ping;
+            return 'attr:' + attr + '|marker:' + (marker || 'none') + '|prop:' + prop;
+          });
+
+          // ── T1-7: document.write 두 번째 문서 ──
+          await P('docWriteFrame', async () => {
+            const f = document.createElement('iframe');
+            document.body.appendChild(f);
+            await new Promise(r => setTimeout(r, 100));
+            f.contentDocument.open();
+            f.contentDocument.write('<scr' + 'ipt>window.__dwLoc = String(location.href); parent.__dwChild = window.__dwLoc;</scr' + 'ipt><p>dwx</p>');
+            f.contentDocument.close();
+            await new Promise(r => setTimeout(r, 200));
+            const v = window.__dwChild;
+            if (v === undefined) return 'script-inert';
+            return leaked(String(v)) ? 'LEAK:' + v : 'clean:' + v;
+          });
+
+          // ── T1-8: iframe 잔여 ──
+          await P('iframeCspAttr', () => {
+            const f = document.createElement('iframe');
+            f.setAttribute('csp', "default-src 'none'");
+            f.srcdoc = '<p>c</p>';
+            document.body.appendChild(f);
+            return 'attr:' + (f.getAttribute('csp') || 'stripped');
+          });
+          await P('iframeCredentialless', () => {
+            const f = document.createElement('iframe');
+            f.credentialless = true;
+            f.srcdoc = '<p>cl</p>';
+            document.body.appendChild(f);
+            return 'set';
+          });
+          await P('targetFramename', async () => {
+            const f = document.createElement('iframe');
+            f.name = 'tfn'; f.srcdoc = '<p>home</p>';
+            document.body.appendChild(f);
+            const a = document.createElement('a');
+            a.href = '/frame-dest'; a.target = 'tfn'; a.textContent = 'go';
+            document.body.appendChild(a);
+            a.click();
+            await new Promise(r => setTimeout(r, 800));
+            try {
+              const href = f.contentWindow && f.contentWindow.location ? String(f.contentWindow.location.href) : 'none';
+              return href.includes('/frame-dest') ? 'navigated:' + href : 'not-navigated:' + href;
+            } catch (e) { return 'threw:' + e.name; }
+          });
+          await P('childSharedWorker', async () => {
+            const f = document.createElement('iframe');
+            f.srcdoc = '<scr' + 'ipt>try{ parent.__childSW = "wrote"; const w = new SharedWorker("/sw-shared.js?name=child"); w.port.onmessage = e => parent.__childSW = String(e.data); w.onerror = e => parent.__childSW = "err:" + e.message; }catch(e){ parent.__childSW = "threw:" + e.name; }</scr' + 'ipt>';
+            document.body.appendChild(f);
+            await new Promise(r => setTimeout(r, 4000));
+            const v = window.__childSW;
+            return v === undefined ? 'silent' : (leaked(String(v)) ? 'LEAK:' + v : 'clean:' + v);
+          });
+          out.done = true;
+        })().catch(e => { (window.__surfaceProbes = window.__surfaceProbes || {}).__fatal = String(e && (e.stack || e)); });
+      <\/script>
+      <script type="module">
+        (window.__surfaceProbes = window.__surfaceProbes || {}).moduleRan = 'v:yes';
+        try { const m = await import('x-mod'); window.__surfaceProbes.importmapBare = 'v:' + m.m + '|' + m.meta; }
+        catch (e) { window.__surfaceProbes.importmapBare = 'threw:' + (e && e.name || e); }
+        try { window.__surfaceProbes.importMetaResolve = 'v:' + String(import.meta.resolve('./x')); }
+        catch (e) { window.__surfaceProbes.importMetaResolve = 'threw:' + (e && e.name || e) + ':' + String(e && e.message || '').slice(0, 80); }
+        window.__surfaceProbes.moduleDone = true;
+      <\/script>
+      </body>`);
+      return;
+    }
+    if (url.pathname === '/err-doc') {
+      // T1-9: 500 에러 문서도 transformer 가 적용돼야 한다 — 인라인 스크립트가
+      // 원문 그대로면 location 이 프록시를 찌른다.
+      res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>err</title><body><script>window.__errDoc = String(location.href);<\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/trunc-doc') {
+      // 잘린 HTML — 닫힘 태그 없이 끊겨도 transformer 결과여야 한다.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>trunc</title><body><script>window.__truncDoc = String(location.href);<\/script><div>`);
+      return;
+    }
+    if (url.pathname === '/sw-shared.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end(`self.onconnect = e => { e.ports[0].postMessage('sw:' + self.name + ':' + self.location.href); };`);
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -3284,6 +3517,83 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // 5개 srcdoc 프레임 병렬 — 프레임당 프렐루드 주입이 있어도 상한 안.
       assert.ok(+m[2] < 30000, `iframe ms: ${probes.iframes}`);
     });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // T1: 미검증 표면 실측 (`/surface-probes` fixture, window.__surfaceProbes).
+  // 첫 실행으로 실측값을 보고 divergence/누출을 핀한다.
+  await t.test('surface suite', async t => {
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/surface-probes`);
+    try {
+      await page.waitForFunction(() => window.__surfaceProbes && window.__surfaceProbes.done && window.__surfaceProbes.moduleDone, { timeout: 60000 });
+    } catch (e) {
+      console.log('surface probes wait failed');
+      throw e;
+    }
+    const probes = await page.evaluate(() => window.__surfaceProbes);
+    const errs = await page.evaluate(() => window.__surfaceErrs);
+    fs.writeFileSync(path.join(artifacts, 'surface-probes.json'), JSON.stringify({ probes, errs }, null, 2));
+    assert.ok(!probes.__fatal, `surface fixture died: ${probes.__fatal}`);
+    // T1-1: transformer 잔여 — 전부 리라이트/클린
+    assert.equal(probes.importmapText, 'v:rewritten');
+    assert.equal(probes.specrulesText, 'v:rewritten');
+    assert.match(probes.shadowDom, /^v:shadow-img:clean/);
+    assert.match(probes.svgImage, /^v:clean:/);
+    assert.match(probes.svgAnchor, /^v:clean:/);
+    assert.match(probes.importmapBare, /^v:1\|http:\/\/localhost/);
+    // T1-2: clone/transfer — 네이티브처럼 DataCloneError (전송 불가 = fail-closed)
+    for (const k of ['cloneLocation', 'portMsgLocation', 'cloneDocument', 'cloneWindow']) {
+      assert.match(probes[k], /DataCloneError/, `${k}: ${probes[k]}`);
+    }
+    assert.equal(probes.weakRefLocation, 'v:same-proxy');
+    // T1-3: 명명/인덱스 프레임 — frames['nf']/window['nf'] 는 contained 자식
+    assert.match(probes.framesByName, /^v:clean:/, `framesByName: ${probes.framesByName}`);
+    assert.match(probes.windowByName, /^v:clean:/, `windowByName: ${probes.windowByName}`);
+    assert.match(probes.selfIndex, /^v:clean/);
+    assert.match(probes.thisIndex, /^v:clean/);
+    // frames.item 은 네이티브에도 없다 (Chrome: "frames.item is not a function")
+    assert.match(probes.framesItem, /^threw:TypeError/);
+    // T1-4: 레거시 접근자 — location 재정의는 non-configurable 이라 TypeError (네이티브 parity)
+    assert.match(probes.defineGetterLoc, /threw:TypeError/);
+    assert.match(probes.defineSetterLoc, /threw:TypeError/);
+    assert.equal(probes.lookupGetterLoc, 'v:fn');
+    assert.equal(probes.lookupSetterLoc, 'v:fn');
+    // T1-5: getOwnPropertyNames(window) — 동작해야 하되 __zp_* 는 숨긴다
+    assert.match(probes.ownKeysLeak, /^v:clean:\d+$/, `ownKeysLeak: ${probes.ownKeysLeak}`);
+    // T1-6: ping 은 속성이 제거되고 요청이 안 나간다. marker 는 data-zp-* 라
+    // 페이지 getAttribute 에서 숨겨진다('none' 이 정상). prop 은 저장값을 돌린다.
+    assert.match(probes.anchorPing, /^v:attr:null\|marker:none\|prop:/);
+    // import.meta.resolve 는 가상 타깃 URL 기준 해석
+    assert.match(probes.importMetaResolve, /^v:http:\/\/localhost:\d+\/x$/, `importMetaResolve: ${probes.importMetaResolve}`);
+    // T1-7: document.write 두 번째 문서 — 스크립트가 가상 location 아래 실행
+    assert.match(probes.docWriteFrame, /^v:clean:/);
+    // T1-8: iframe 잔여
+    assert.match(probes.iframeCspAttr, /^v:attr:/);
+    assert.equal(probes.iframeCredentialless, 'v:set');
+    assert.match(probes.targetFramename, /^v:navigated:/, `targetFramename: ${probes.targetFramename}`);
+    assert.match(probes.childSharedWorker, /^v:clean:/, `childSharedWorker: ${probes.childSharedWorker}`);
+    // 에러/거부 이벤트 인자에 프록시 표식이 없어야 한다
+    for (const e of errs) {
+      assert.ok(!/__zp_|\/zp\/api|proxy\.localhost|worker-script/.test(e), `error arg leaked: ${e}`);
+    }
+    assert.ok(errs.some(e => e.startsWith('rej:')), 'unhandledrejection 인자가 관측되지 않았다');
+    assert.ok(errs.some(e => e.startsWith('err:')), 'window.onerror 인자가 관측되지 않았다');
+    // wire 수준 직접 egress 없음 — ping 도메인으로 나간 요청이 없어야 한다
+    const egress = wireRequests.filter(u => /evil\.example/.test(u));
+    assert.equal(egress.length, 0, `ping egress: ${JSON.stringify(egress)}`);
+  });
+
+  await t.test('error and truncated documents still transform', async () => {
+    // 500 에러 문서 — 인라인 스크립트가 리라이트되어 location 이 가상이어야 한다.
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/err-doc`);
+    await page.waitForFunction(() => window.__errDoc !== undefined, { timeout: 15000 });
+    const errDoc = await page.evaluate(() => window.__errDoc);
+    assert.ok(!String(errDoc).includes('proxy.localhost') && !String(errDoc).includes('/zp/'), `err-doc location leaked proxy: ${errDoc}`);
+    // 잘린 HTML — 닫힘 없는 문서도 변환 경로를 탄다.
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/trunc-doc`);
+    await page.waitForFunction(() => window.__truncDoc !== undefined, { timeout: 15000 });
+    const truncDoc = await page.evaluate(() => window.__truncDoc);
+    assert.ok(!String(truncDoc).includes('proxy.localhost') && !String(truncDoc).includes('/zp/'), `trunc-doc location leaked proxy: ${truncDoc}`);
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 

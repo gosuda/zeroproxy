@@ -1120,3 +1120,18 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **경계 의미:** 카운터 검사 위치가 루프 형태를 따라간다 — `while(true)`/`for(;;)`(pre-test)는 바디가 정확히 10M 회, `do{}while(true)`(post-test)는 바디가 테스트보다 한 번 먼저 도니 **10M+1**. 경계 단언을 10M 고정으로 쓰면 do-while 에서 off-by-one 으로 걸린다.
 - **연계:** 캡 prefix `{let __zp_lc=0;…}` 가 붙은 async `while(true){await;break}` 도 break 시맨틱 유지. 일반 `for(i<n)`·`while(!flag)` 같은 non-truthy 조건엔 카운터가 안 끼운다(negative control).
 - **검증:** e2e `perf suite` — underCap/cappedWhile/cappedFor/cappedDo/normalLoop/nestedLoops + async-poll 수명 + bulk DOM 5k/19ms + iframe 5×211ms. 176/176.
+
+## <a id="crosswindow-더미-흡수"></a>cross-window 파사드가 날것의 멤버 쓰기를 흡수한다 — `parent.x = v` 는 `__zp_set` 를 안 거친다 (2026-09-22)
+
+- **원인:** 리라이터는 멤버 **대입** 을 `__zp_get(base)` 결과에 대한 **raw 프로퍼티 쓰기**로 방출한다(`__zp_get(globalThis,"parent").__childSW = v` — `__zp_set` 호출 없음). `safeCrossWindow` 가 돌려주는 파사드는 **plain 객체**라서 자식의 `parent.foo = v` 가 더미 객체에만 쌓이고 진짜 부모 창에는 영영 닿지 않았다. 네이티브는 같은 오리진 프레임끼리 expando 가 그대로 보인다.
+- **실측 경로:** srcdoc 자식의 `new SharedWorker` 는 정상 송신(`/zp/api/worker-script?u=sw-shared.js`)됐는데 회신이 `silent` — 워커가 메시지를내도 `w.port.onmessage` 안의 `parent.__childSW = …` 쓰기가 더미에 소실. 즉시 쓰기 마커로 쓰기 경로 자체를 분리해 확정했다(메시지 채널이 아니라 파사드 문제).
+- **수정:** 파사드를 **진짜 Proxy** 로 바꾸고 `get/set/has/deleteProperty` 트랩에서 안전한 이름만 진짜 창으로 포워딩한다(`crossExpandoProp`). 읽기는 **own 프로퍼티 한정** — 프로토타입 멤버(`eval`/`Function`/`fetch` 같은 진짜 네이티브)를 넘기면 자식에 미리라이트 실행 경로가 열린다. 절대 넘기지 않는 이름: (1) `__zp_*`/`ZP*` — 부모 `scopeGet` 이 `root[prop]` 로 떨어지므로 `parent.__zp_set = evil` 이 헬퍼 탈취 통로, (2) `MEMBER_DANGER` — 가상화 표면 덮어쓰기, (3) 문자열 `on*` — 브라우저가 미리라이트 코드로 컴파일. `__zp_set` 경유 쓰기에도 같은 포워딩(`set()` fallthrough)을 둬 두 경로가 일치한다.
+- **연계 함정:** `getOwnPropertyNames` 헬퍼가 **`Reflect.getOwnPropertyNames`** 를 호출했다 — 없는 API(존재하는 건 `Object.getOwnPropertyNames`/`Reflect.ownKeys`)라 리라이트된 `Object.getOwnPropertyNames(window)` 전부 TypeError. `frames.item` 이 없는 건 네이티브 parity(대조군 Chrome 도 `frames.item is not a function`) — 구현하지 말고 핀한다.
+- **검증:** e2e `surface suite` — childSharedWorker `v:clean:sw:…` 포함 178/178.
+
+## <a id="자식-realm-부트-부작용"></a>자식 realm 부트가 자기 브라우징 컨텍스트를 파괴한다 — `w.name=''` 과 컨테인먼트 이중 래핑 (2026-09-22)
+
+- **원인 A(이름 삭제):** `installStorageFacades` 가 `w.name = ''` 로 실명을 지우는데 `w === root` 판정이 realm 로컬이라 **자식 iframe 의 prelude 도 자기 이름을 지웠다**. 프레임의 `window.name` 은 곧 **브라우징 컨텍스트 이름**이라 부모의 `window['nf']`/`frames['nf']`/`<a target=nf>` 명명 조회가 전부 undefined 로 깨졌다(네이티브는 동작). 수정: 최상위만 지우고, 자식은 초기 가상값을 실명으로 시드 + 쓰기를 실명에 반영해 타깃이 `window.name` 을 바꾸면 명명 조회가 따라가게 한다.
+- **원인 B(이중 래핑):** 부모 `containFrameWindow` → `installNetworkContainment(childWin)` → `installStorageFacades(childWin)` 가 자식에 `SharedWorker`/`BroadcastChannel` 래퍼를 **먼저** 심고, 자식 prelude 가 그 래퍼를 "네이티브" 로 잡아 한 번 더 감쌌다 — `workerBootstrapURL` 이 부트스트랩 URL 을 재래핑해 `u=<bootstrap URL>` 자기재귀 → NetworkError. 수정: 진짜 네이티브를 `__zp_realSW`/`__zp_realBC` 에 스태시하고 재설치는 스태시를 우선 사용 → 멱등.
+- **교훈:** 자식 realm 은 부모 컨테인먼트가 먼저 심은 것 위에서 부팅한다 — 자식에 심는 모든 래퍼는 **멱등**이어야 한다(설치 전 진짜 네이티브 스태시). `w === root` 체크는 "이 realm 의 최상위" 가 아니라 realm 로컬이라, realm 간 상태를 다루는 코드는 `w.top === w` 같은 **실제 트리 위치**로 판정해야 한다.
+- **검증:** e2e `surface suite` — framesByName/windowByName/targetFramename/childSharedWorker 포함 178/178.

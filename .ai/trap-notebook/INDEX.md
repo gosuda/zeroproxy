@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | membrane / 수정 | cross-window 파사드가 날것의 멤버 쓰기(`__zp_get(parent).x=v`)를 흡수 — Proxy 트랩으로 own-expando 만 포워딩. | rewriter.md#crosswindow-더미-흡수 |
+| 2026-09-22 | membrane / 수정 | 자식 realm 부트 부작용 — `w.name=''` 이 브라우징컨텍스트명 삭제 + 컨테인먼트 이중래핑. realm 판정은 `w.top===w`. | rewriter.md#자식-realm-부트-부작용 |
 | 2026-09-22 | rewriter / 실측 | 루프캡 경계는 형태별로 ±1 — `for(init;;update)` 도 캡됨(§L 반증), do-while 은 post-test 라 10M+1. | rewriter.md#loop-cap-경계-의미 |
 | 2026-09-22 | membrane / 수정 | 스택 프레임은 URL·함수명 두 채널로 샌다 — V8 기본 포맷이 eval 기술 텍스트에 raw URL 을 박고 `__zp_*` 식별자가 함수명으로 샌다. 최종 문자열 재정리 필수. | rewriter.md#stack-프레임-이중누출 |
 | 2026-09-22 | e2e / 규칙 | `/zp/` 경로에 두 CSP 정책이 공존 — 문서 정책은 report-uri 유무로 식별. headless 는 manifest/prefetch 를 lazy-fetch 해 SPV 가 없다. | rewriter.md#csp-두-정책-구별 |

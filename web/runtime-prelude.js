@@ -2392,11 +2392,61 @@
       } catch {}
       return fallback;
     }
+    // cross-window 파사드에 쓰기/읽기를 진짜 창으로 넘겨도 되는 이름인가.
+    // 네이티브 같은-오리진 expando 의미를 복원하되 세 부류는 절대 진짜 창에
+    // 심지 않는다: (1) __zp_* 내부명 — 부모 scopeGet 이 root[prop] 으로
+    // 떨어지므로 `parent.__zp_set = evil` 이 헬퍼 탈취 통로, (2) MEMBER_DANGER
+    // — 가상화 표면을 expando 로 덮어쓰는 우회, (3) 문자열 on* 핸들러 —
+    // 브라우저가 미리라이트 코드로 컴파일한다.
+    function crossExpandoProp(prop, value) {
+      return typeof prop !== 'string'
+        || (!ZP_HIDDEN_RE.test(prop) && !MEMBER_DANGER.has(prop)
+            && !(prop.startsWith('on') && typeof value === 'string'));
+    }
     function safeCrossWindow(targetWindow) {
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
-      const proxy = {};
-      definePropertiesMasked(proxy, {
+      const proxyTarget = {};
+      // ★이 파사드는 **진짜 Proxy** 여야 한다 — 리라이터가 멤버 대입을
+      // `__zp_get(parent).x = v` 같은 **날것의 프로퍼티 쓰기**로 방출한다
+      // (__zp_set 을 거치지 않는다). plain 객체이면 쓰기가 더미에 흡수돼
+      // `parent.__childSW = v` 류의 cross-frame 전달이 조용히 죽는다 — 실측:
+      // srcdoc 자식의 SharedWorker 회신이 silent 였다(요청은 정상 송신).
+      const proxy = new Proxy(proxyTarget, {
+        get(t, prop) {
+          if (Reflect.getOwnPropertyDescriptor(t, prop)) return Reflect.get(t, prop);
+          // own expando 만 넘긴다 — 프로토타입 멤버(eval/Function/fetch 같은
+          // 진짜 네이티브)를 돌려주면 자식에 미리라이트 실행 경로가 열린다.
+          if (crossExpandoProp(prop)) {
+            try {
+              if (Reflect.getOwnPropertyDescriptor(targetWindow, prop)) return Reflect.get(targetWindow, prop);
+            } catch {}
+          }
+          return undefined;
+        },
+        set(t, prop, value) {
+          if (crossExpandoProp(prop, value)) {
+            try { Reflect.set(targetWindow, prop, value); } catch {}
+            return true;
+          }
+          return Reflect.set(t, prop, value);
+        },
+        has(t, prop) {
+          if (Reflect.has(t, prop)) return true;
+          if (crossExpandoProp(prop)) {
+            try { return !!Reflect.getOwnPropertyDescriptor(targetWindow, prop); } catch { return false; }
+          }
+          return false;
+        },
+        deleteProperty(t, prop) {
+          if (crossExpandoProp(prop)) {
+            try { Reflect.deleteProperty(targetWindow, prop); } catch {}
+            return true;
+          }
+          return Reflect.deleteProperty(t, prop);
+        },
+      });
+      definePropertiesMasked(proxyTarget, {
         window: { get() { return proxy; }, enumerable: true },
         self: { get() { return proxy; }, enumerable: true },
         globalThis: { get() { return proxy; }, enumerable: true },
@@ -2709,6 +2759,20 @@
         const ctor = Reflect.get(Object(base), prop);
         return dynamicWrapperFor(ctor) || ctor;
       }
+      // ★cross-window 파사드의 own expando 읽기. `safeCrossWindow` 가 돌려주는
+      // 건 더미 객체이므로, 부모가 `window.data = …` 로 심어 둔 공유값을 자식이
+      // `parent.data` 로 못 읽는 역파손이 있었다(네이티브는 같은 오리진이라
+      // 당연히 보인다). own 프로퍼티만 넘긴다 — 프로토타입 멤버(eval/Function/
+      // fetch 같은 진짜 네이티브)를 넘기면 자식에 미리라이트 실행 경로가
+      // 열린다. 내부명(__zp_*)·위험명(MEMBER_DANGER)도 절대 넘기지 않는다.
+      {
+        const crossWin = crossWindowTargets.get(base);
+        if (crossWin && (typeof prop !== 'string' || (!ZP_HIDDEN_RE.test(prop) && !MEMBER_DANGER.has(prop)))) {
+          try {
+            if (Reflect.getOwnPropertyDescriptor(crossWin, prop)) return Reflect.get(crossWin, prop);
+          } catch {}
+        }
+      }
       return Reflect.get(Object(base), prop);
     }
     function set(base, prop, value) {
@@ -2729,6 +2793,22 @@
       }
       if (((isWindowLike(base) || base === document) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
+      // ★cross-window 파사드에 대한 일반 expando 쓰기는 네이티브 같은-오리진
+      // 의미 그대로 진짜 창에 기록한다. 더미 객체에 쓰면 `parent.__childSW = v`
+      // 류의 cross-frame 전달이 조용히 죽는다(실측: srcdoc 자식의 SharedWorker
+      // 회신 silent). 단 세 부류는 절대 진짜 창에 심지 않는다: (1) __zp_*
+      // 내부명 — 부모 scopeGet 이 root[prop] 로 떨어지므로 헬퍼 탈취 통로,
+      // (2) MEMBER_DANGER — 가상화 표면을 expando 로 덮어쓰는 우회,
+      // (3) 문자열 on* — 브라우저가 미리라이트 코드로 컴파일한다.
+      {
+        const crossWin = crossWindowTargets.get(base);
+        if (crossWin && (typeof prop !== 'string'
+            || (!ZP_HIDDEN_RE.test(prop) && !MEMBER_DANGER.has(prop)
+                && !(prop.startsWith('on') && typeof value === 'string')))) {
+          try { Reflect.set(crossWin, prop, value); } catch {}
+          return value;
+        }
+      }
       Reflect.set(Object(base), prop, value);
       return value;
     }
@@ -2867,7 +2947,10 @@
       for (const k of Reflect.ownKeys(Object(base))) out[k] = getOwnPropertyDescriptor(base, k);
       return out;
     }
-    function getOwnPropertyNames(base) { return Reflect.getOwnPropertyNames(Object(base)); }
+    // Reflect.getOwnPropertyNames 는 없는 API 다 — 네이티브 Object 쪽을 써야
+    // 한다. 패치된 Object.getOwnPropertyNames 는 전역 객체의 __zp_* 스크럽까지
+    // 해 주므로 그대로 위임하면 누출 필터도 유지된다.
+    function getOwnPropertyNames(base) { return Object.getOwnPropertyNames(Object(base)); }
     function okeys(base) { return Object.keys(Object(base)); }
     // `with(obj)` identifier resolution: the object's properties win over
     // outer scope unless the name is Symbol.unscopables-hidden. `fb` is the
@@ -5344,7 +5427,23 @@
         },
         set(v) { cachedName = String(v); try { nativeSessionStorage.setItem(nameKey, cachedName); } catch {} },
       };
-      try { w.name = ''; } catch {}
+      // ★실명 삭제는 최상위 문서에만 적용한다. 프레임의 `window.name` 은
+      // 곧 **브라우징 컨텍스트 이름**이라, 지우면 부모의 `window['nf']` /
+      // `frames['nf']` / `<a target=name>` 명명 조회가 전부 깨진다(실측:
+      // srcdoc 자식의 prelude 가 자기 이름을 지워 `frames['nf']` → undefined).
+      // 자식의 실명은 읽기 표면이 전부 가상 스토어를 거치므로 유지해도 페이지에
+      // 새지 않는다. 대신 초기 가상값을 실명으로 시드하고 쓰기도 실명에
+      // 반영해, 타깃이 `window.name` 을 바꾸면 명명 조회도 따라가게 한다.
+      const isTopFrame = (() => { try { return w.top === w; } catch { return true; } })();
+      if (isTopFrame) { try { w.name = ''; } catch {} }
+      else {
+        try {
+          const real = String(w.name || '');
+          if (real && !(nativeSessionStorage && nativeSessionStorage.getItem(nameKey))) rootWindowNameStore.set(real);
+        } catch {}
+        const innerSet = rootWindowNameStore.set;
+        rootWindowNameStore.set = v => { innerSet(v); try { w.name = String(v); } catch {} };
+      }
     }
     let wrappedLocalStorage = null;
     let wrappedSessionStorage = null;
@@ -5417,11 +5516,21 @@
       brandLikeNative(ZPURL, null, 'URL');
       define(w, 'URL', ZPURL);
     }
+    // ★컨테인먼트가 자식 창에 먼저 심은 래퍼 위에 자식 prelude 가 다시 심으면
+    // 이중 래핑이다 — SharedWorker 는 workerBootstrapURL 이 두 번 적용돼
+    // `u=<bootstrap URL>` 자기재귀로 죽고(실측: srcdoc 자식의 SharedWorker
+    // NetworkError), BroadcastChannel 은 접두어가 두 번 붙는다. 진짜 네이티브를
+    // __zp_real* 에 붙들어 두고 재설치는 항상 그것을 감싸게 한다.
+    function realCtor(w, stash, cur) {
+      const real = w[stash] || cur;
+      if (!w[stash]) { try { define(w, stash, real); } catch {} }
+      return real;
+    }
     // D7: BroadcastChannel must be origin-scoped. Wrap constructor to prefix
     // channel name with target origin hash; messages from another target
     // never reach this one.
     if (w.BroadcastChannel) {
-      const NativeBC = w.BroadcastChannel;
+      const NativeBC = realCtor(w, '__zp_realBC', w.BroadcastChannel);
       const BCWrap = function(name) {
         const requested = String(name);
         const native = new NativeBC(bcPrefix + requested);
@@ -5435,7 +5544,7 @@
     }
     // D7: SharedWorker — name + URL prefix so two targets never share a worker.
     if (w.SharedWorker) {
-      const NativeSW = w.SharedWorker;
+      const NativeSW = realCtor(w, '__zp_realSW', w.SharedWorker);
       const SWWrap = function(url, opts) {
         const named = (opts && opts.name) ? Object.assign({}, opts, { name: sharedWorkerPrefix + String(opts.name) })
                                           : Object.assign({}, opts || {}, { name: sharedWorkerPrefix + 'default' });
@@ -8381,14 +8490,17 @@
       // 지웠다** — 프로토타입 문제를 좇다가 발견한, 별개의 격리 회귀. 접두어가
       // 없으면 같은 프록시 오리진을 쓰는 서로 다른 타깃 두 개가 이름+URL 이
       // 겹칠 때 **같은 SharedWorker 인스턴스**를 공유한다.
+      // Native.SharedWorker 는 부모 컨테인먼트가 먼저 심은 래퍼일 수 있다 —
+      // installStorageFacades 가 스태시해 둔 진짜 네이티브를 우선 쓴다.
+      const RealSW = root.__zp_realSW || Native.SharedWorker;
       const ZPSharedWorker = function(url, opts) {
         try { zpTrace('SharedWorker', String(url).slice(0, 120)); } catch {}
         const prefix = sharedWorkerNamePrefix();
         const named = (opts && opts.name) ? Object.assign({}, opts, { name: prefix + String(opts.name) })
                                            : Object.assign({}, opts || {}, { name: prefix + 'default' });
-        return new Native.SharedWorker(workerBootstrapURL(url, opts), named);
+        return new RealSW(workerBootstrapURL(url, opts), named);
       };
-      try { ZPSharedWorker.prototype = Native.SharedWorker.prototype; } catch {}
+      try { ZPSharedWorker.prototype = RealSW.prototype; } catch {}
       brandLikeNative(ZPSharedWorker, null, 'SharedWorker');
       define(root, 'SharedWorker', ZPSharedWorker);
     }
@@ -8642,6 +8754,12 @@
         }
       } catch {}
       instrumentedWindows.add(childWin);
+      // 부모 쪽 `contentWindow.name` 은 iframe 의 name 속성이 초기값이다 —
+      // 자식 realm 의 가상 스토어와는 별개로 부모 측 읽기 경로를 시드한다.
+      try {
+        const fn = frame && Native.getAttribute && Native.getAttribute.call(frame, 'name');
+        if (fn) virtualFrameNames.set(childWin, fn);
+      } catch {}
       try { installNetworkContainment(childWin); }
       catch (e) {
         try { let dg = root.__zp_diagnostics; try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {} if (dg && dg.length < 200) dg.push({ t: 'contain-fail', msg: String(e && (e.name + ':' + (e.message || e))).slice(0, 200), stack: String(e && e.stack || '').slice(0, 400) }); } catch {}
