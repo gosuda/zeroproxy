@@ -5297,6 +5297,21 @@ mod tests {
     }
 
     #[test]
+    fn does_not_cap_for_with_nonconst_test() {
+        // T5-1 정책: `for(i=0;x();i++)` 같은 비상수 test 는 의도적으로
+        // uncapped. 네이티브도 test 가 거짓이 될 때까지 도는 게 맞고,
+        // 캡을 끼우면 합법적인 장루프(poller/스캐너)가 10M에서 조용히
+        // 죽는다. 캡은 상수-진 infinite form(while(true), for(;;))에만.
+        let src = "for(let i=0;keepGoing();i++){ step() }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("__zp_lc_"),
+            "nonconst-test for must not be capped: {}",
+            r.code
+        );
+    }
+
+    #[test]
     fn nested_infinite_loops_get_distinct_counters() {
         // Each infinite loop must allocate its own counter ID so the
         // inner cap doesn't shadow the outer one (which would let the
@@ -5357,13 +5372,13 @@ mod naver_js_perf {
 #[cfg(test)]
 mod dynamic_import_probe {
     use super::*;
-    // Does a RELATIVE dynamic import get routed through __zp_module_url in both
-    // classic and module scripts? If not, the browser resolves the specifier
-    // against the script's own proxy URL (/zp/api/script?…) and requests
-    // /zp/api/<name>.js — exactly the NAVER ad-SDK 404.
+    // Does a RELATIVE dynamic import get routed through the script-proxy URL
+    // in both classic and module scripts? If not, the browser resolves the
+    // specifier against the script's own proxy URL (/zp/api/script?…) and
+    // requests /zp/api/<name>.js — exactly the NAVER ad-SDK 404.
+    // (이전에는 #[ignore] 진단 — 실동작이 확인돼 회귀 어서션으로 승격.)
     #[test]
-    #[ignore]
-    fn probe_relative_dynamic_import() {
+    fn relative_dynamic_import_resolves_to_proxy_url() {
         for kind in [ScriptKind::Classic, ScriptKind::Module] {
             let opts = RewriteOpts {
                 kind,
@@ -5372,10 +5387,12 @@ mod dynamic_import_probe {
                 proxy_origin: "http://proxy.localhost:18080".into(),
             };
             let src = r#"async function f(){ const m = await import("./gfp-display-sdk.js"); return m; }"#;
-            match rewrite_script(src, &opts) {
-                Ok(out) => println!("{:?}: {}", kind, out.code),
-                Err(e) => println!("{:?}: ERROR {:?}", kind, e),
-            }
+            let out = rewrite_script(src, &opts).expect("rewrite");
+            assert!(
+                out.code.contains("/zp/api/script?u=https%3A%2F%2Fssl.pstatic.net%2Ftveta%2Flibs%2Fglad%2Fprod%2Fgfp-display-sdk.js"),
+                "{kind:?}: relative import not routed to proxy script URL: {}",
+                out.code
+            );
         }
     }
 }

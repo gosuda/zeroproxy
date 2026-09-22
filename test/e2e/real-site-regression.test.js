@@ -62,6 +62,12 @@ const ALL_TARGETS = {
   // protocolTimeout — they're closer to a manual dogfood check than
   // an automated regression.
   cloudflare: { host: 'gosuda.org', url: 'https://gosuda.org', titleMatches: /gosuda/i },
+  // CNN — 무거운 광고/프레임 표면. 역사적으로 두 번째 정지 + 프레임 갭
+  // 잔여가 관측됐던 사이트 (T6-2).
+  cnn: { host: 'edition.cnn.com', url: 'https://edition.cnn.com/', titleMatches: /CNN/i },
+  // Cloudflare Turnstile 데모 — per-tab origin arming 게이팅 검증 (T6-3).
+  // `challengeCompat: true` → 런처의 #challenge-compat 체크박스를 켠다.
+  turnstile: { host: 'turnstile.zeroclover.io', url: 'https://turnstile.zeroclover.io/', titleMatches: /turnstile|cloudflare|demo/i, challengeCompat: true },
 };
 // `ZP_TARGETS=matrix` expands to the auto-evidence matrix. Both
 // `wikipedia` and `example` (the latter after the rustls fork patch
@@ -202,10 +208,14 @@ test('E2 real-site regression — fresh profile, no stale SW', async (t) => {
         () => navigator.serviceWorker && navigator.serviceWorker.controller,
         { timeout: 30000 },
       );
-      await page.evaluate((url) => {
-        const input = document.querySelector('input');
+      await page.evaluate((url, arm) => {
+        const input = document.querySelector('input#url');
         if (input) { input.value = url; input.dispatchEvent(new Event('input', { bubbles: true })); }
-      }, target.url);
+        if (arm) {
+          const cc = document.getElementById('challenge-compat');
+          if (cc && !cc.checked) { cc.checked = true; cc.dispatchEvent(new Event('change', { bubbles: true })); }
+        }
+      }, target.url, !!target.challengeCompat);
       const openBtn = await page.$('button');
       if (openBtn) await openBtn.click();
 

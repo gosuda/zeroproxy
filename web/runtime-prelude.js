@@ -2963,11 +2963,23 @@
     function scopeHas(obj, prop) {
       return obj != null && prop in Object(obj) && !unscopablesHidden(obj, prop);
     }
+    // `with` 의 객체 우선 조회에서도 위험명은 멤브레인 표면으로 — raw
+    // `obj[prop]` 는 `with(document){location}` 에서 real Location(정체
+    // 노출 + identity 위반), `with(realChildWin){location}` 에서 부모
+    // 가상 URL 도 아닌 날 Location 을 내놓는다. `document.location = x` 는
+    // PutForwards 인데 unforgeable 세터가 없어 raw 대입은 네비게이션을
+    // 삼킨다 — membrane set 은 activatedFrameURL 로 보낸다.
     function withGet(obj, prop, fb) {
-      return scopeHas(obj, prop) ? obj[prop] : fb();
+      if (!scopeHas(obj, prop)) return fb();
+      if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(obj)) return get(obj, prop);
+      return obj[prop];
     }
     function withSet(obj, prop, value, fb) {
-      if (scopeHas(obj, prop)) { obj[prop] = value; return value; }
+      if (scopeHas(obj, prop)) {
+        if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(obj)) set(obj, prop, value);
+        else obj[prop] = value;
+        return value;
+      }
       return fb(value);
     }
     function withAssign(obj, prop, op, value, fb) {
@@ -2979,15 +2991,16 @@
       return fb();
     }
     function withDelete(obj, prop, fb) {
-      if (scopeHas(obj, prop)) return Reflect.deleteProperty(Object(obj), prop);
+      if (scopeHas(obj, prop)) return del(obj, prop);
       return fb();
     }
     // Assignment-target sink inside `with`: returns an accessor object whose
     // `.v` resolves like a `with` reference (object-first, then `sink`).
     function withD(obj, prop, sink) {
+      const viaMembrane = typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(obj);
       return {
-        get v() { return scopeHas(obj, prop) ? obj[prop] : sink[prop]; },
-        set v(x) { if (scopeHas(obj, prop)) obj[prop] = x; else sink[prop] = x; }
+        get v() { if (!scopeHas(obj, prop)) return sink[prop]; return viaMembrane ? get(obj, prop) : obj[prop]; },
+        set v(x) { if (scopeHas(obj, prop)) { if (viaMembrane) set(obj, prop, x); else obj[prop] = x; } else sink[prop] = x; }
       };
     }
     // Legacy accessor hooks — `document.__lookupGetter__('location')` handed
@@ -7632,6 +7645,18 @@
         define(sheetProto, m, function (text, idx) { return native.call(this, rewriteCSSText(text), idx); });
       }
     }
+    // `link.sheet.href` / `document.styleSheets[i].href` 는 StyleSheet
+    // 인터페이스의 getter 다 — 요소 href 훅과 무관하게 **프록시 절대 URL** 을
+    // 그대로 돌려준다. 가상 타깃으로 되돌린다.
+    const styleSheetProto = w.StyleSheet && w.StyleSheet.prototype;
+    const dSheetHref = styleSheetProto && propertyDescriptor(styleSheetProto, 'href');
+    if (dSheetHref && dSheetHref.get) try {
+      defineMasked(styleSheetProto, 'href', {
+        get() { return deproxyURL(dSheetHref.get.call(this), { scan: true }); },
+        enumerable: dSheetHref.enumerable,
+        configurable: false
+      });
+    } catch {}
     // `el.style.backgroundImage = 'url(…)'` 는 프로토타입 훅으로 못 잡는다.
     // 이 엔진은 CSS 프로퍼티를 **인스턴스의 own data property** 로 노출한다
     // (실측: `getOwnPropertyDescriptor(document.body.style,'backgroundImage')`

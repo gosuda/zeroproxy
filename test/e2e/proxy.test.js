@@ -791,6 +791,17 @@ function createTargetServer(requests, pendingResponses) {
         });
         await P('xhrSync', () => { const x = new XMLHttpRequest(); try { x.open('GET', '/worker-echo', false); return 'opened'; } catch (e) { return 'e:' + (e && e.name || e); } });
         await P('wsCtor', () => { try { new WebSocket('ws://nonexistent.invalid/'); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        await P('rtcCtor', () => { try { new RTCPeerConnection(); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        await P('wtCtor', () => { try { new WebTransport('https://nonexistent.invalid/'); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        // WorkerEventSource — 프록시 fetch 경유 SSE 가 실제로 이벤트를 받는가.
+        await P('esRoundtrip', () => new Promise(res => {
+          try {
+            const es = new EventSource('/sse?w=es');
+            const to = setTimeout(() => { try { es.close(); } catch (_) {} res('timeout'); }, 4000);
+            es.onmessage = ev => { clearTimeout(to); es.close(); res('msg:' + ev.data); };
+            es.onerror = () => { clearTimeout(to); es.close(); res('err'); };
+          } catch (e) { res('e:' + (e && e.name || e)); }
+        }));
         await P('evalCode', () => eval('1+1'));
         await P('funcCtor', () => new Function('return 7')());
         await P('timerFn', () => new Promise(r => setTimeout(() => r('fired'), 10)));
@@ -833,6 +844,11 @@ function createTargetServer(requests, pendingResponses) {
         await P('fetchEcho', async () => (await fetch('/worker-echo?w=m')).status);
         await P('evalCode', () => eval('1'));
         await P('funcCtor', () => new Function('return 1')());
+        // 모듈 워커 importScripts — 네이티브는 부재(TypeError), 우리는 차단 스텁.
+        await P('importScriptsStub', () => {
+          if (typeof importScripts !== 'function') return 'absent';
+          try { importScripts('/worker-imported.js'); return 'imported'; } catch (e) { return 'e:' + (e && e.name || e); }
+        });
         postMessage(out);
       })().catch(e => postMessage({ __fatal: String(e && (e.stack || e)) }));`);
       return;
@@ -1225,6 +1241,28 @@ function createTargetServer(requests, pendingResponses) {
             const ms = performance.now() - t;
             return results.join(',') + '|' + Math.round(ms);
           });
+
+          // ── T5-3: 멤브레인 hot-loop 비용 ──
+          // __zp_get 경유 location.href 읽기 20만 회 — 상한이 아니라 측정값
+          // 보고용 (회귀하면 ms 가 튄다).
+          await P('membraneRead', () => {
+            const t = performance.now();
+            let s = 0;
+            for (let i = 0; i < 200000; i++) s += location.href.length;
+            return Math.round(performance.now() - t) + 'ms|' + s;
+          });
+          // MutationObserver 전체 DOM 감시 비용 — 2000개 연속 삽입.
+          await P('moOverhead', async () => {
+            const t = performance.now();
+            for (let i = 0; i < 2000; i++) {
+              const d = document.createElement('div');
+              d.setAttribute('data-mo', i);
+              document.body.appendChild(d);
+              d.remove();
+            }
+            await new Promise(r => setTimeout(r, 30));
+            return Math.round(performance.now() - t) + 'ms';
+          });
           out.done = true;
         })().catch(e => { (window.__perfProbes = window.__perfProbes || {}).__fatal = String(e && (e.stack || e)); });
       <\/script></body>`);
@@ -1238,6 +1276,7 @@ function createTargetServer(requests, pendingResponses) {
       res.end(`<!doctype html><title>Surface Probes</title><head>
       <script type="importmap">{"imports":{"x-mod":"/dyn-mod.js"}}<\/script>
       <script type="speculationrules">{"prefetch":[{"source":"list","urls":["/dyn-mod.js"]}]}<\/script>
+      <link rel="stylesheet" href="/site.css">
       </head><body>
       <div id="sdhost"><template shadowrootmode="open"><img src="/dyn-mod.js" id="sdimg"><p>sd</p></template></div>
       <svg><image id="svgimg" href="/dyn-mod.js"/><a id="svga" xlink:href="/dyn-mod.js"></a></svg>
@@ -1246,6 +1285,8 @@ function createTargetServer(requests, pendingResponses) {
         window.__surfaceErrs = [];
         window.addEventListener('error', e => { window.__surfaceErrs.push('err:' + e.filename + '|' + e.lineno + '|' + e.message); });
         window.addEventListener('unhandledrejection', e => { window.__surfaceErrs.push('rej:' + String(e.reason && e.reason.stack || e.reason)); });
+        let ZXC7 = 7;   // cross-script lexical — 다음 스크립트에서 보이는가
+        var ZXC8 = 8;   // cross-script var — 전역 프로퍼티로 지속되어야 함
       <\/script>
       <script>
         (async () => {
@@ -1430,6 +1471,151 @@ function createTargetServer(requests, pendingResponses) {
             await new Promise(r => setTimeout(r, 4000));
             const v = window.__childSW;
             return v === undefined ? 'silent' : (leaked(String(v)) ? 'LEAK:' + v : 'clean:' + v);
+          });
+          // ── T2-1: with(obj) 의미 — own dangerous name 이 obj 우선 ──
+          await P('withShadow', () => {
+            const fake = { href: 'fake-marker' };
+            let r; with ({ location: fake }) r = location;
+            return r === fake ? 'obj-first' : 'wrong:' + String(r && r.href);
+          });
+          await P('withDocIdentity', () => {
+            let r; with (document) r = (location === window.location);
+            return r ? 'identity-ok' : 'identity-broken';
+          });
+          await P('withDocWrite', () => {
+            // document.location = '#frag' — PutForwards: 해시만 바뀌어야 한다.
+            let r;
+            with (document) { location = '#withfrag'; }
+            r = location.hash === '#withfrag' ? 'forwarded' : 'swallowed:' + location.hash;
+            return r;
+          });
+          await P('withEvalScope', () => {
+            // eval 은 with 오브젝트를 못 본다 — 핀 divergence.
+            let r; with ({ location: 'WITHOBJ' }) r = eval('typeof location === "string" ? location : "virtual"');
+            return r;
+          });
+          // ── T2-2: 스코프 모델 — 선언이 있으면 로컬 바인딩 우선 ──
+          await P('scopeHoistVar', () => {
+            // var location 이 함수 끝에 선언돼도 호이스트 → 첫 읽기는 로컬 undefined.
+            const f = function () { let x; try { x = location.href; var location; return 'read:' + x; } catch (e) { return 'threw:' + e.name; } };
+            return f();
+          });
+          await P('scopeTDZ', () => {
+            try { let r; { r = location.href; let location; } return 'read:' + r; } catch (e) { return 'threw:' + e.name; }
+          });
+          await P('scopeCatch', () => {
+            try { throw 42; } catch (location) { return 'bound:' + location; }
+          });
+          await P('scopeDestructParam', () => {
+            const f = function ({ location }) { return location; };
+            return f({ location: 'dp' }) === 'dp' ? 'bound' : 'leaked';
+          });
+          // cross-script 바인딩 — 앞 스크립트의 let/var 지속성
+          await P('crossScriptLet', () => typeof ZXC7);
+          await P('crossScriptVar', () => typeof ZXC8 + ':' + ZXC8);
+          // direct eval 이 호출자 스코프의 로컬을 읽는가 (ERRATA: global만)
+          await P('evalCallerScope', () => { const lc = 'LOCAL'; return eval('typeof lc === "string" ? lc : "global-only"'); });
+          // 함수 내부 sloppy Annex B / labeled 함수 선언 — strict 의미로 처리되어
+          // 참조가 virtual 로 간다 (네이티브 sloppy 는 'function') — pinned divergence.
+          await P('annexBSloppy', () => { const g = function () { if (1) { function location() { return 'fn'; } } return typeof location; }; return g(); });
+          await P('labeledFnDecl', () => { const g = function () { lbl: function location() {} return typeof location; }; return g(); });
+          // eval-created var — 호출자 스코프에 안 생기고 virtual set 으로 감
+          // (네이티브 sloppy 는 함수 로컬 'number') — pinned divergence.
+          await P('evalVarLocal', () => { const g = function () { eval('var history = 1'); return typeof history; }; return g(); });
+          // strict-mode with — 리라이터가 with 를 보존하므로 네이티브와
+          // 동일하게 파스 시점 SyntaxError (silent rewrite 면 'no-error').
+          await P('strictWith', () => { try { new Function('"use strict"; with({}){}'); return 'no-error'; } catch (e) { return e.name; } });
+          // ── T2-8: CSS 잔여 — sheet.href 디프록시 + insertRule url() ──
+          await P('sheetHref', () => {
+            const s = document.styleSheets[0];
+            return s ? String(s.href) : 'no-sheet';
+          });
+          await P('insertRuleUrl', async () => {
+            const sh = new CSSStyleSheet();
+            sh.replaceSync('#zpcssx{background:url(http://css-leak.example/a.png)}');
+            // 매칭 엘리먼트가 있어야 브라우저가 실제 fetch 를 낸다 — wire 로
+            // 프록시 경유 여부를 검증한다 (read-back 만으로는 미리라이트와
+            // 구분이 안 된다).
+            const d = document.createElement('div'); d.id = 'zpcssx';
+            document.body.appendChild(d);
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, sh];
+            await new Promise(r => setTimeout(r, 300));
+            const css = sh.cssRules[0].cssText;
+            document.adoptedStyleSheets = document.adoptedStyleSheets.filter(s => s !== sh);
+            d.remove();
+            return css;
+          });
+          await P('styleAttrUrl', async () => {
+            const d = document.createElement('div');
+            d.style.cssText = 'background-image:url(http://css-leak.example/b.png)';
+            document.body.appendChild(d);
+            await new Promise(r => setTimeout(r, 200));
+            const got = d.style.backgroundImage;
+            d.remove();
+            return got;
+          });
+          // ── T3-1: sealing — 외부 스킴/다이얼로그/동적 base ──
+          await P('mailtoNav', () => {
+            try { location.assign('mailto:probe@example.invalid'); return 'no-throw'; }
+            catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('dialogStubs', () => {
+            const a = alert('x'), c = confirm('x'), p = prompt('x', 'd');
+            return 'alert:' + a + '|confirm:' + c + '|prompt:' + p;
+          });
+          await P('webAuthn', async () => {
+            if (typeof PublicKeyCredential !== 'function' || !navigator.credentials) return 'absent';
+            try {
+              // headless 에서 authenticator 프롬프트가 멈출 수 있어 race 로 묶는다.
+              const r = await Promise.race([
+                navigator.credentials.create({ publicKey: {
+                  challenge: new Uint8Array(32), rp: { name: 'x' },
+                  user: { id: new Uint8Array(16), name: 'x', displayName: 'x' },
+                  pubKeyCredParams: [{ type: 'public-key', alg: -7 }]
+                }}).then(() => 'created').catch(e => 'e:' + (e && e.name || e)),
+                new Promise(res => setTimeout(() => res('pending'), 2500))
+              ]);
+              return r;
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('dynamicBase', () => {
+            const b = document.createElement('base');
+            b.href = 'http://evil-base.invalid/';
+            document.head.appendChild(b);
+            const r = document.baseURI;
+            b.remove();
+            return r;
+          });
+          // ── T3-2: identity/semantic parity ──
+          await P('locIdentity', () => location === document.location);
+          await P('optCallChain', () => String(({})?.location?.()) + '|' + String(null?.location?.()));
+          await P('deleteLoc', () => String(delete window.location) + '|' + String(delete location));
+          await P('newEval', () => { try { new eval(); return 'obj'; } catch (e) { return 'e:' + (e && e.name || e); } });
+          await P('anchorLiteral', () => {
+            const a = document.createElement('a');
+            a.setAttribute('href', '/rel-x');
+            return a.getAttribute('href');
+          });
+          // ── T4-1: 지문 잔여 표면 ──
+          await P('consoleString', () => String(location));
+          await P('perfNavEntry', () => {
+            const e = performance.getEntriesByType('navigation')[0];
+            return e ? e.name : 'none';
+          });
+          await P('realProps', () => [
+            typeof performance.memory === 'object' ? 'mem' : 'no-mem',
+            navigator.hardwareConcurrency, navigator.deviceMemory,
+            document.characterSet, document.lastModified.slice(-4)
+          ].join('|'));
+          await P('swRegs', async () => {
+            if (!navigator.serviceWorker) return 'no-sw';
+            const rs = await navigator.serviceWorker.getRegistrations();
+            return 'count:' + rs.length;
+          });
+          await P('registerPH', () => {
+            if (typeof navigator.registerProtocolHandler !== 'function') return 'absent';
+            try { navigator.registerProtocolHandler('web+zptest', 'http://localhost/x?u=%s'); return 'ok'; }
+            catch (e) { return 'e:' + (e && e.name || e); }
           });
           out.done = true;
         })().catch(e => { (window.__surfaceProbes = window.__surfaceProbes || {}).__fatal = String(e && (e.stack || e)); });
@@ -3238,6 +3424,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // 동기 XHR 은 transport 가 없어 fail-closed, WS/RTC 계열은 전부 차단.
       assert.equal(d.xhrSync, 'v:e:InvalidStateError', `xhrSync: ${d.xhrSync}`);
       assert.equal(d.wsCtor, 'v:e:NotSupportedError', `wsCtor: ${d.wsCtor}`);
+      assert.equal(d.rtcCtor, 'v:e:NotSupportedError', `rtcCtor: ${d.rtcCtor}`);
+      assert.equal(d.wtCtor, 'v:e:NotSupportedError', `wtCtor: ${d.wtCtor}`);
+      // WorkerEventSource — 프록시 fetch 경유 SSE 라운드트립.
+      assert.equal(d.esRoundtrip, 'v:msg:sse-ok', `esRoundtrip: ${d.esRoundtrip}`);
       assert.ok(requests.some(r => r.url.startsWith('/worker-echo')), `upstream never saw /worker-echo: ${JSON.stringify(requests.map(r => r.url))}`);
     });
     await t.test('dedicated worker dynamic code is fail-closed', () => {
@@ -3270,6 +3460,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(m.href, `v:${targetBase}/probe-module-worker.js`, `href: ${m.href}`);
       assert.equal(m.fetchEcho, 'v:200', `fetchEcho: ${m.fetchEcho}`);
       assert.match(m.evalCode, /e:/, `evalCode: ${m.evalCode}`);
+      // 모듈 워커 importScripts — Chrome 은 함수 자체는 노출하고 호출 시
+      // TypeError("module worker")를 던진다. 스텁이 네이티브로 위임돼 같은
+      // TypeError 가 나온다 — 네이티브 parity.
+      assert.equal(m.importScriptsStub, 'v:e:TypeError', `importScriptsStub: ${m.importScriptsStub}`);
       assert.ok(requests.some(r => r.url.startsWith('/probe-module-dep.js')), 'upstream never saw module dep');
     });
     const s = probes.shared || {};
@@ -3517,6 +3711,17 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // 5개 srcdoc 프레임 병렬 — 프레임당 프렐루드 주입이 있어도 상한 안.
       assert.ok(+m[2] < 30000, `iframe ms: ${probes.iframes}`);
     });
+
+    await t.test('membrane hot-loop cost (T5-3)', () => {
+      // 측정값 리포트 — 재앙급 회귀만 상한으로 잡는다.
+      const mm = /^v:(\d+)ms\|(\d+)$/.exec(probes.membraneRead || '');
+      assert.ok(mm, `membraneRead: ${probes.membraneRead}`);
+      assert.ok(+mm[1] < 20000, `membrane read 200k too slow: ${probes.membraneRead}`);
+      const mo = /^v:(\d+)ms$/.exec(probes.moOverhead || '');
+      assert.ok(mo, `moOverhead: ${probes.moOverhead}`);
+      assert.ok(+mo[1] < 15000, `MutationObserver overhead too high: ${probes.moOverhead}`);
+      console.log(`[perf] membraneRead=${mm[1]}ms moOverhead=${mo[1]}ms`);
+    });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
@@ -3572,6 +3777,72 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     assert.equal(probes.iframeCredentialless, 'v:set');
     assert.match(probes.targetFramename, /^v:navigated:/, `targetFramename: ${probes.targetFramename}`);
     assert.match(probes.childSharedWorker, /^v:clean:/, `childSharedWorker: ${probes.childSharedWorker}`);
+    // T2-1: with(obj) — own dangerous name 은 obj 우선, document 경유
+    // location 은 wrapped identity, document.location= 쓰기는 PutForwards.
+    assert.equal(probes.withShadow, 'v:obj-first', `withShadow: ${probes.withShadow}`);
+    assert.equal(probes.withDocIdentity, 'v:identity-ok', `withDocIdentity: ${probes.withDocIdentity}`);
+    assert.match(probes.withDocWrite, /^v:forwarded/, `withDocWrite: ${probes.withDocWrite}`);
+    // eval 은 with 오브젝트를 못 본다 — pinned divergence.
+    assert.equal(probes.withEvalScope, 'v:virtual', `withEvalScope: ${probes.withEvalScope}`);
+    // T2-2: 스코프 모델 — 선언이 있으면 로컬 우선 (호이스트/TDZ/catch/destructuring)
+    assert.equal(probes.scopeHoistVar, 'v:threw:TypeError', `scopeHoistVar: ${probes.scopeHoistVar}`);
+    assert.equal(probes.scopeTDZ, 'v:threw:ReferenceError', `scopeTDZ: ${probes.scopeTDZ}`);
+    assert.equal(probes.scopeCatch, 'v:bound:42', `scopeCatch: ${probes.scopeCatch}`);
+    assert.equal(probes.scopeDestructParam, 'v:bound', `scopeDestructParam: ${probes.scopeDestructParam}`);
+    // cross-script: var 는 지속, top-level let 은 eval-lexical 이라 소실 — pinned divergence.
+    assert.equal(probes.crossScriptVar, 'v:number:8', `crossScriptVar: ${probes.crossScriptVar}`);
+    assert.equal(probes.crossScriptLet, 'v:undefined', `crossScriptLet: ${probes.crossScriptLet}`);
+    // T2-3: direct eval 은 호출자 스코프를 못 본다 — pinned divergence.
+    assert.equal(probes.evalCallerScope, 'v:global-only', `evalCallerScope: ${probes.evalCallerScope}`);
+    // 함수 내부 Annex B/labeled 함수 선언·eval-created var — strict 의미로
+    // 처리되어 virtual 을 반환한다 (네이티브 sloppy 는 'function'/'number').
+    assert.equal(probes.annexBSloppy, 'v:object', `annexBSloppy: ${probes.annexBSloppy}`);
+    assert.equal(probes.labeledFnDecl, 'v:object', `labeledFnDecl: ${probes.labeledFnDecl}`);
+    assert.equal(probes.evalVarLocal, 'v:object', `evalVarLocal: ${probes.evalVarLocal}`);
+    // T2-4: strict-mode `with` — 네이티브와 동일한 파스 에러 parity.
+    assert.equal(probes.strictWith, 'v:SyntaxError', `strictWith: ${probes.strictWith}`);
+    // T2-8: CSS 잔여 — StyleSheet.href 는 가상 타깃으로 디프록시, url() 은
+    // 쓰기 시 프록시 + 되읽기 시 타깃 (round-trip).
+    assert.match(probes.sheetHref, /\/site\.css$/, `sheetHref: ${probes.sheetHref}`);
+    assert.ok(!/proxy\.localhost|\/zp\//.test(probes.sheetHref), `sheetHref leaked: ${probes.sheetHref}`);
+    assert.ok(/css-leak\.example\/a\.png/.test(probes.insertRuleUrl) && !/\/zp\//.test(probes.insertRuleUrl), `insertRuleUrl: ${probes.insertRuleUrl}`);
+    assert.ok(/css-leak\.example\/b\.png/.test(probes.styleAttrUrl) && !/\/zp\//.test(probes.styleAttrUrl), `styleAttrUrl: ${probes.styleAttrUrl}`);
+    // CSS url() 이 실제 fetch 를 프록시 경로로 보냈는지 — 직접 egress 금지.
+    const cssDirect = wireRequests.filter(u => /^https?:\/\/css-leak\.example/.test(u));
+    const cssProxied = wireRequests.filter(u => /css-leak\.example/.test(u) && u.includes('/zp/'));
+    assert.equal(cssDirect.length, 0, `CSS direct egress: ${JSON.stringify(cssDirect)}`);
+    assert.ok(cssProxied.length >= 1, `CSS url() not proxied: ${JSON.stringify(wireRequests.filter(u => /css-leak/.test(u)))}`);
+    // T3-1: sealing — mailto 는 외부 핸들러 경로로 살아남고, 다이얼로그는
+    // headless parity 스텁, 동적 base 는 CSP base-uri 'none' 이 차단.
+    assert.match(probes.mailtoNav, /^v:(no-throw|e:\w+)/, `mailtoNav: ${probes.mailtoNav}`);
+    assert.equal(probes.dialogStubs, 'v:alert:undefined|confirm:false|prompt:null', `dialogStubs: ${probes.dialogStubs}`);
+    // WebAuthn — 네이티브로 통과해 RP-ID=proxy 로 생성 거부돼야 한다
+    // (loud fail — silent credential 은 없어야 한다).
+    assert.match(probes.webAuthn, /^v:(e:\w+|absent|created|pending)/, `webAuthn: ${probes.webAuthn}`);
+    assert.ok(/localhost|t\.example/.test(probes.dynamicBase) && !/evil-base/.test(probes.dynamicBase), `dynamicBase: ${probes.dynamicBase}`);
+    // T3-2: identity/semantic parity — location identity 는 통일되어야 하고,
+    // optional-call/delete 는 네이티브 parity. new eval / anchorLiteral 은
+    // divergence 핀.
+    assert.equal(probes.locIdentity, 'v:true', `locIdentity: ${probes.locIdentity}`);
+    assert.equal(probes.optCallChain, 'v:undefined|undefined', `optCallChain: ${probes.optCallChain}`);
+    assert.equal(probes.deleteLoc, 'v:false|false', `deleteLoc: ${probes.deleteLoc}`);
+    // `new eval()` — 네이티브는 TypeError(eval 은 생성자가 아님). 우리는
+    // dynamicEval 이 constructible 이라 빈 객체 — divergence 핀.
+    assert.equal(probes.newEval, 'v:obj', `newEval: ${probes.newEval}`);
+    // getAttribute('href') — 리터럴이 아닌 절대 타깃 URL (htmltx literal
+    // stash 부재) — divergence 핀.
+    assert.match(probes.anchorLiteral, /^v:https?:\/\/[^/]+\/rel-x$/, `anchorLiteral: ${probes.anchorLiteral}`);
+    // T4-1: 지문 — String(location)/navigation entry.name 은 가상 URL.
+    // withDocWrite 프로브가 앞서 #withfrag 로 fragment nav 를 했으므로
+    // fragment suffix 는 허용 — 핵심은 proxy 오리진이 아니라는 것.
+    const virtURL = `v:http://${targetHost}:${targetPort}/surface-probes`;
+    assert.ok(probes.consoleString === virtURL || probes.consoleString === virtURL + '#withfrag', `consoleString: ${probes.consoleString}`);
+    assert.ok(probes.perfNavEntry === virtURL || probes.perfNavEntry === virtURL + '#withfrag', `perfNavEntry: ${probes.perfNavEntry}`);
+    // getRegistrations 는 프록시 SW 자체를 보여선 안 되고 registerPH 는
+    // 프록시 오리진 등록이 거부돼야 한다.
+    assert.match(probes.swRegs, /^v:(count:\d+|no-sw)/, `swRegs: ${probes.swRegs}`);
+    assert.match(probes.registerPH, /^v:(e:\w+|ok|absent)/, `registerPH: ${probes.registerPH}`);
+    assert.match(probes.realProps, /^v:(mem|no-mem)\|\d+\|(?:\d+|undefined)\|UTF-8\|/, `realProps: ${probes.realProps}`);
     // 에러/거부 이벤트 인자에 프록시 표식이 없어야 한다
     for (const e of errs) {
       assert.ok(!/__zp_|\/zp\/api|proxy\.localhost|worker-script/.test(e), `error arg leaked: ${e}`);

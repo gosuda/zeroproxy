@@ -2880,6 +2880,69 @@ mod surface_fixture {
         );
     }
 
+    /// ERRATA §J 속성 커버리지 열거 — fetch/navigation 을 만드는 모든
+    /// (tag, attr) 쌍에서 원본 타깃 URL 이 마크업에 그대로 남으면 안 된다.
+    /// 프록시 경로로 바뀌든(서브리소스/네비게이션), data-zp-* 로 옮겨지든
+    /// (iframe src), 제거되든(ping) 해야 한다.
+    #[test]
+    fn url_bearing_attribute_enumeration() {
+        // (tag, attr, 기대 형태): "rewrite" = 프록시 URL, "moved" = data-zp-* 로 이동
+        const CASES: &[(&str, &str, &str)] = &[
+            ("a", "href", "rewrite"),
+            ("area", "href", "rewrite"),
+            ("form", "action", "rewrite"),
+            ("input", "formaction", "rewrite"),
+            ("button", "formaction", "rewrite"),
+            ("script", "src", "rewrite"),
+            ("img", "src", "rewrite"),
+            ("img", "srcset", "rewrite"),
+            ("source", "srcset", "rewrite"),
+            ("link", "imagesrcset", "rewrite"),
+            ("video", "poster", "rewrite"),
+            ("video", "src", "rewrite"),
+            ("audio", "src", "rewrite"),
+            ("track", "src", "rewrite"),
+            ("input", "src", "rewrite"),
+            ("body", "background", "rewrite"),
+            ("object", "data", "rewrite"),
+            ("embed", "src", "rewrite"),
+            ("iframe", "src", "moved"),
+        ];
+        for &(tag, attr, mode) in CASES {
+            let html = markup(tag, attr, if attr == "srcset" || attr == "imagesrcset" { "srcset" } else { "url" });
+            let out = transform(&html, &opts()).expect("transform").html;
+            match mode {
+                "moved" => {
+                    assert!(
+                        out.contains("data-zp-frame-src="),
+                        "{tag}[{attr}] 원본이 그대로다: {out}"
+                    );
+                    assert!(
+                        !out.contains(&format!(" {attr}=\"{TARGET}\"")),
+                        "{tag}[{attr}] 원본 src 가 남았다: {out}"
+                    );
+                }
+                _ => {
+                    // 원본은 data-zp-target-url 백업에 남는 게 맞다 — 확인할 것은
+                    // 실제 속성 값이 프록시 경로로 바뀌었는지 뿐이다.
+                    assert!(
+                        !out.contains(&format!(" {attr}=\"{TARGET}\"")),
+                        "{tag}[{attr}] 원본 타깃 URL 이 남았다: {out}"
+                    );
+                    assert!(
+                        out.contains("/zp/"),
+                        "{tag}[{attr}] 프록시 경로로 안 바뀌었다: {out}"
+                    );
+                }
+            }
+        }
+        // cite/longdesc/usemap/profile 은 브라우저가 fetch 하지 않는 순수
+        // 메타데이터다 — 원본(타깃) URL 이 그대로 남는 게 의도된 동작이다.
+        let html = "<blockquote cite=\"http://t.example/q\"></blockquote>";
+        let out = transform(html, &opts()).expect("transform").html;
+        assert!(out.contains("cite=\"http://t.example/q\""), "cite 가 바뀌었다: {out}");
+    }
+
     #[test]
     fn srcset_candidates_match_shared_fixture() {
         let raw = include_str!("../../zp-shared/testdata/srcset_cases.json");

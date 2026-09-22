@@ -1135,3 +1135,15 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **원인 B(이중 래핑):** 부모 `containFrameWindow` → `installNetworkContainment(childWin)` → `installStorageFacades(childWin)` 가 자식에 `SharedWorker`/`BroadcastChannel` 래퍼를 **먼저** 심고, 자식 prelude 가 그 래퍼를 "네이티브" 로 잡아 한 번 더 감쌌다 — `workerBootstrapURL` 이 부트스트랩 URL 을 재래핑해 `u=<bootstrap URL>` 자기재귀 → NetworkError. 수정: 진짜 네이티브를 `__zp_realSW`/`__zp_realBC` 에 스태시하고 재설치는 스태시를 우선 사용 → 멱등.
 - **교훈:** 자식 realm 은 부모 컨테인먼트가 먼저 심은 것 위에서 부팅한다 — 자식에 심는 모든 래퍼는 **멱등**이어야 한다(설치 전 진짜 네이티브 스태시). `w === root` 체크는 "이 realm 의 최상위" 가 아니라 realm 로컬이라, realm 간 상태를 다루는 코드는 `w.top === w` 같은 **실제 트리 위치**로 판정해야 한다.
 - **검증:** e2e `surface suite` — framesByName/windowByName/targetFramename/childSharedWorker 포함 178/178.
+
+## <a id="stylesheet-href-디프록시"></a>`stylesheet.href` 가 프록시 URL 을 그대로 돌려줬다 — StyleSheet 인터페이스는 별도 후킹 (2026-09-22)
+
+- **원인:** `link.href`/`styleSheets[i].href` 의 인터페이스가 다르다 — `HTMLLinkElement.href` 는 훅으로 잡혀 있었지만 `StyleSheet.prototype.href` 는 미후킹이라 `link.sheet.href` 가 `/zp/api/…` 프록시 URL 을 그대로 노출했다. "속성 훅을 걸었다" 와 "읽기 표면이 전부 디프록시된다" 는 다른 명제 — DOM 요소 접근자와 CSSOM 인터페이스를 각각 확인해야 한다.
+- **수정:** `installCSSHooks` 안에서 `StyleSheet.prototype.href` 에도 deproxy getter 를 심는다. `insertRule`/`style` 속성 쓰기 경로는 기존 rewrite 후 read-back 디프록시로 정상.
+- **검증:** e2e `surface suite` — sheetHref/insertRuleUrl/styleAttrUrl 전부 타깃 URL read-back + wire 에 css-leak.example 직접 요청 없음.
+
+## <a id="loop-cap-비상수-정책"></a>비상수 test 루프는 의도적으로 uncapped — `while(true){await}` 의 silent death 만 잔여 divergence (2026-09-22)
+
+- **정책:** `for(i=0;x();i++)`·`while(running)` 같은 비상수 test 는 캡하지 않는다 — 네이티브도 test 가 거짓일 때까지 도는 게 맞고 캡을 끼우면 합법적인 장루프(poller·scanner)가 10M 에서 조용히 죽는다. 캡은 상수-진 infinite form(`while(true)`·`for(;;)`·`do{}while(true)`)에만. 유닛 핀: `does_not_cap_for_with_nonconst_test`.
+- **잔여 divergence (T5-2):** `while(true){ await poll(); }` 처럼 **break 없는** async 무한루프는 10M 에서 조용히 종료한다 — 카운터가 끼우는 건 test 슬롯이라 await·break 시맨틱은 온전하다. 다만 async 라 iteration 당 실시간이 걸려 10M 도달에 사실상 수 시간 — 실무 영향 없음으로 판정하고 핀만 둔다(조용한 사망 자체가 의도된 안티봇 완화).
+- **검증:** e2e `perf suite` — asyncPollBreak(break 발화)·asyncPollFlag(좀비 폴러 없음)·cappedWhile/For/Do 정확한 경계. 179/179.

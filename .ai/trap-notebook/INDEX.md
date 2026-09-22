@@ -6,6 +6,9 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | 실사이트 / 실측 | Turnstile arming 게이트는 정상(armed 문서만 CF CSP + 마커 비노출) — "browser not supported" 는 CF 측 환경 거부. | real-site-compat.md#turnstile-arming-검증 |
+| 2026-09-22 | membrane / 수정 | `stylesheet.href` 가 프록시 URL 을 돌려줬다 — CSSOM StyleSheet 접근자는 DOM 요소 훅과 별도로 디프록시. | rewriter.md#stylesheet-href-디프록시 |
+| 2026-09-22 | rewriter / 정책 | 비상수 test 루프는 의도적으로 uncapped — break 없는 async `while(true)` 만 10M silent death 잔여 divergence. | rewriter.md#loop-cap-비상수-정책 |
 | 2026-09-22 | membrane / 수정 | cross-window 파사드가 날것의 멤버 쓰기(`__zp_get(parent).x=v`)를 흡수 — Proxy 트랩으로 own-expando 만 포워딩. | rewriter.md#crosswindow-더미-흡수 |
 | 2026-09-22 | membrane / 수정 | 자식 realm 부트 부작용 — `w.name=''` 이 브라우징컨텍스트명 삭제 + 컨테인먼트 이중래핑. realm 판정은 `w.top===w`. | rewriter.md#자식-realm-부트-부작용 |
 | 2026-09-22 | rewriter / 실측 | 루프캡 경계는 형태별로 ±1 — `for(init;;update)` 도 캡됨(§L 반증), do-while 은 post-test 라 10M+1. | rewriter.md#loop-cap-경계-의미 |

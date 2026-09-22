@@ -115,3 +115,11 @@
 - **실제 검증**: 수정 빌드와 버그 한 줄을 되살린 양성 대조를 비교하여 새 style/height 축만 회귀를 잡음을 확인했다. 기존 요소·raw·CSP 축은 버그 빌드도 통과했다. 높이 경계 등 당시 판정값은 역사적 테스트 설정이지 현재 승인 사양이 아니다.
 - **GitHub 미해결·정정**: 첫 사이트 비교에서 GitHub는 레이아웃보다 본문이 ErrorPage로 대체된 상태였다. title·raw·CSP·console이 정상이어서 반복한 “GitHub 정상” 보고는 모두 오판이었다. title만으로 성공을 판정하지 말고 본문·높이·가시 영역을 대조해야 한다. 이 세션에서는 원인을 추적하지 않았으며, 5월 publicPath 부분 수정과 별개로 GitHub ErrorPage는 미해결이다.
 후속 정정: [비HTTP 스킴 조사](rewriter.md#비-http-스킴-세-겹)에서는 대기시간을 맞춘 반복 비교의 총 프레임 갭이 없었다. 앞선 프레임 부족 수치를 현재 고정 결함으로 재사용하지 않는다. 이것은 CNN 두 번째 정지의 원인·해결을 확정하지 않는다.
+
+<a id="turnstile-arming-검증"></a>
+## 2026-09-22 — Turnstile per-tab arming 게이팅 실측: 게이트 정상, CF verdict 는 환경 거부
+
+- **측정**: `turnstile.zeroclover.io` 를 armed(#challenge-compat)로 로드. 챌린지 문서(403 + cf-mitigated: challenge)만 `script/frame/child/connect-src` 에 `https://challenges.cloudflare.com` 을 얹은 ARMED CSP 를 받고, 같은 탭의 다른 응답은 전부 disarmed. `X-ZP-Challenge-Compat` 마커는 페이지에 도달하지 않는다(B4 strip 정상). `challenge_subresource_skip(armed && !is_doc && classifier)` 의 두 신호 게이트가 wire 에서 그대로 관측됐다.
+- **챌린지 진행**: `_cf_chl_opt` 32 키 세팅 + `orchestrate/chl_page/v1` 스크립트가 프록시 경유 200 로 로드·실행됐다. 그러나 `window._cf_chl`/`turnstile`/iframe 미생성 — CF 가 "Browser not supported" UI 를 렌더하고 종료. 이건 게이팅 결함이 아니라 **headless/멤브레인 환경에 대한 CF 측 환경 판정 거부**다. 과거 stackoverflow 기록과 같은 계열.
+- **규칙**: arming 의 검증 단위는 "챌린지 통과" 가 아니라 "armed 문서만 화이트리스트 CSP 를 받고 마커가 새지 않는다" 이다 — 그건 검증됐다. verdict 자체는 Phase 3 지문 강화 트랙이다.
+- **검증**: `scripts/turnstile-probe.cjs` (일회성 진단) + real-site-regression `turnstile` 타깃(arm 체크박스 자동 켬). CNN/gosuda/MDN 은 이번 멤브레인 수정군 이후 전부 그린 — 역사적 "CNN 두 번째 정지" 는 미재현.
