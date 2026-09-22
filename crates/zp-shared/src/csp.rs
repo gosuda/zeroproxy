@@ -148,15 +148,26 @@ pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &Cs
     }
     let segments: Vec<String> = vec![
         "default-src 'none'".to_string(),
+        // `blob:` in script-src: `__ZP_EXEC_INLINE_MODULE` executes rewritten
+        // inline module code via `import(blobURL)` — without it EVERY inline
+        // module script dies at CSP. Safe because blob: can only be reached
+        // through that path: page `import()` is gated by `__zp_module_url`
+        // (non-http throws) and `<script src>` blob: is blocked upstream by
+        // the URL-attribute policy, so no unrewritten code can ride it.
         format!(
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'{}",
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:{}",
             cf_suffix
         ),
         "style-src 'self' 'unsafe-inline' blob: data:".to_string(),
         "img-src 'self' blob: data:".to_string(),
         "font-src 'self' blob: data:".to_string(),
         "media-src 'self' blob: data:".to_string(),
-        format!("connect-src {}", connect.join(" ")),
+        // `blob:`/`data:` in connect-src: both are inert same-origin
+        // handles — no network path exists for either. Without them,
+        // `fetch('data:…')` and `fetch(blobURL)` (pdf.js / media libs /
+        // page-created object URLs) hit CSP before our fetch hook can
+        // even see the request — a compat break with zero egress value.
+        format!("connect-src {} blob: data:", connect.join(" ")),
         format!("frame-src 'self' blob: data:{}", cf_suffix),
         format!("child-src 'self' blob: data:{}", cf_suffix),
         "worker-src 'self' blob:".to_string(),

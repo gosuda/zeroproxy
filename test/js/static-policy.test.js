@@ -33,7 +33,7 @@ test('fixedCSP options.challengeCompat adds CF host only to four directives', ()
   assert.equal(off.includes('https://challenges.cloudflare.com'), false, 'off path must not contain CF host');
   const cfCount = (on.match(/https:\/\/challenges\.cloudflare\.com/g) || []).length;
   assert.equal(cfCount, 4, `armed CSP must mention CF host exactly 4 times, got ${cfCount}:\n${on}`);
-  assert.ok(on.includes("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://challenges.cloudflare.com"));
+  assert.ok(on.includes("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://challenges.cloudflare.com"));
   assert.ok(on.includes('frame-src \'self\' blob: data: https://challenges.cloudflare.com'));
   assert.ok(on.includes('child-src \'self\' blob: data: https://challenges.cloudflare.com'));
   assert.match(on, /connect-src [^;]*https:\/\/challenges\.cloudflare\.com/);
@@ -1625,4 +1625,217 @@ test('makeVirtualGateway: 네이티브 prototype 이름을 규칙으로 베끼�
   inst.binaryType = 'arraybuffer';
   assert.equal(inst.binaryType, 'arraybuffer', '일반 settable 접근자가 쓴 값을 그대로 반사하지 않는다');
   assert.equal(inst2.binaryType, 'blob', 'settable 접근자 상태가 인스턴스 간에 샌다');
+});
+
+// ── O3: CSP directive × scheme matrix ──────────────────────────────────
+//
+// 골든을 디렉티브→토큰 집합으로 파싱해, 스킴 소스마다 허용/거부를 명시적으로
+// 핀다. "와일드카드가 없다" 검사로는 못 잡는 회귀 — 예: `script-src` 에
+// `data:` 가 끼어들면 eval-급 인라인 주입 경로가 되고, `connect-src` 에
+// bare `https:` 가 오면 프록시를 안 거친 fetch 가 CSP 를 통과한다.
+function parseCSP(header) {
+  const map = new Map();
+  for (const seg of header.trim().split(';')) {
+    const toks = seg.trim().split(/\s+/).filter(Boolean);
+    if (!toks.length) continue;
+    map.set(toks[0], new Set(toks.slice(1)));
+  }
+  return map;
+}
+const KEYWORDS = new Set(["'self'", "'none'", "'unsafe-inline'", "'unsafe-eval'", "'wasm-unsafe-eval'"]);
+const SCHEMES = new Set(['http:', 'https:', 'ws:', 'wss:', 'data:', 'blob:', 'mediastream:', 'filesystem:', 'javascript:', 'file:', 'ftp:']);
+function cspTokens(map, directive) { return map.get(directive) || new Set(); }
+function schemeTokens(map, directive) {
+  return [...cspTokens(map, directive)].filter(t => SCHEMES.has(t));
+}
+function hostTokens(map, directive) {
+  return [...cspTokens(map, directive)].filter(t => !KEYWORDS.has(t) && !SCHEMES.has(t));
+}
+
+test('CSP matrix: proxied golden — every directive x every scheme is explicit', () => {
+  const golden = fs.readFileSync('crates/zp-shared/testdata/csp_proxied.golden', 'utf8').trim();
+  const m = parseCSP(golden);
+
+  // 스킴 소스는 정확히 이 표에 있는 디렉티브에만 존재한다.
+  const allowed = {
+    'script-src': new Set(['blob:']),
+    'style-src': new Set(['blob:', 'data:']),
+    'img-src': new Set(['blob:', 'data:']),
+    'font-src': new Set(['blob:', 'data:']),
+    'media-src': new Set(['blob:', 'data:']),
+    'connect-src': new Set(['blob:', 'data:']),
+    'frame-src': new Set(['blob:', 'data:']),
+    'child-src': new Set(['blob:', 'data:']),
+    'worker-src': new Set(['blob:']),
+  };
+  for (const [dir, sources] of m) {
+    if (dir === 'report-uri') continue;
+    const schemes = new Set(schemeTokens(m, dir));
+    assert.deepEqual(schemes, allowed[dir] || new Set(),
+      dir + ' 의 스킴 소스가 표와 다르다: ' + [...schemes].join(' '));
+  }
+  // 'none' 디렉티브는 토큰이 'none' 하나뿐이어야 한다.
+  for (const dir of ['default-src', 'object-src', 'base-uri']) {
+    assert.deepEqual(cspTokens(m, dir), new Set(["'none'"]), dir + ' 가 none 이 아니다');
+  }
+  // 'self' 디렉티브 — 스킴/호스트 외 소스가 붙으면 안 된다.
+  for (const dir of ['form-action', 'manifest-src']) {
+    assert.deepEqual(cspTokens(m, dir), new Set(["'self'"]), dir + ' 가 self 가 아니다');
+  }
+  // 'self' 를 가진 디렉티브 전체 집합.
+  const selfDirs = ['script-src', 'style-src', 'img-src', 'font-src', 'media-src', 'connect-src',
+    'frame-src', 'child-src', 'worker-src', 'form-action', 'manifest-src'];
+  for (const dir of selfDirs) assert.ok(cspTokens(m, dir).has("'self'"), dir + ' 에 self 가 없다');
+
+  // 키워드는 지정된 디렉티브에만.
+  assert.deepEqual([...m.keys()].filter(d => cspTokens(m, d).has("'unsafe-eval'")), ['script-src']);
+  assert.deepEqual([...m.keys()].filter(d => cspTokens(m, d).has("'wasm-unsafe-eval'")), ['script-src']);
+  assert.deepEqual([...m.keys()].filter(d => cspTokens(m, d).has("'unsafe-inline'")).sort(),
+    ['script-src', 'style-src']);
+  // 호스트 소스는 connect-src 의 ws 오리진 하나뿐.
+  for (const [dir] of m) {
+    const hosts = hostTokens(m, dir).filter(t => dir !== 'report-uri');
+    if (dir === 'connect-src') assert.deepEqual(hosts, ['wss://proxy.example'], 'connect-src 호스트 소스 이탈');
+    else assert.deepEqual(hosts, [], dir + ' 에 호스트 소스: ' + hosts.join(' '));
+  }
+  assert.deepEqual(cspTokens(m, 'report-uri'), new Set(['/zp/api/csp-report']));
+  // 절대 금지: 와일드카드/실행 스킴/bare ws 계열.
+  for (const tok of ['*', 'javascript:', 'file:', 'http:', 'https:', 'ws:', 'wss:']) {
+    for (const [dir] of m) {
+      assert.ok(!cspTokens(m, dir).has(tok), dir + ' 에 금지 토큰 ' + tok);
+    }
+  }
+});
+
+test('CSP matrix: control golden — stricter than proxied, framing forbids self', () => {
+  const golden = fs.readFileSync('crates/zp-shared/testdata/csp.golden', 'utf8').trim();
+  const m = parseCSP(golden);
+
+  const allowed = {
+    'img-src': new Set(['blob:', 'data:']),
+    'font-src': new Set(['data:']),
+    'media-src': new Set(['blob:']),
+    'frame-src': new Set(['blob:']),
+    'child-src': new Set(['blob:']),
+    'worker-src': new Set(['blob:']),
+  };
+  for (const [dir, sources] of m) {
+    const schemes = new Set(schemeTokens(m, dir));
+    assert.deepEqual(schemes, allowed[dir] || new Set(),
+      dir + ' 의 스킴 소스가 표와 다르다: ' + [...schemes].join(' '));
+  }
+  // 통제 표면은 타깃 문서보다 빡빡하다 — 스크립트에 blob:/data: 가 없다.
+  assert.deepEqual([...cspTokens(m, 'script-src')].sort(),
+    ["'self'", "'unsafe-eval'", "'unsafe-inline'", "'wasm-unsafe-eval'"].sort());
+  assert.deepEqual(schemeTokens(m, 'connect-src'), [], '통제 connect-src 에 blob:/data: 가 붙으면 안 된다');
+  assert.deepEqual([...hostTokens(m, 'connect-src')], ['wss://proxy.example']);
+  // 프록시가 직접 로드되는 표면이라 frame-ancestors 'none' 이 맞다 (proxied 는 부재).
+  assert.deepEqual(cspTokens(m, 'frame-ancestors'), new Set(["'none'"]));
+  assert.deepEqual(cspTokens(m, 'base-uri'), new Set(["'self'"]));
+  assert.ok(!m.has('report-uri'), '통제 표면에 report-uri 가 없어야 한다');
+  for (const tok of ['*', 'javascript:', 'http:', 'https:', 'ws:', 'wss:']) {
+    for (const [dir] of m) assert.ok(!cspTokens(m, dir).has(tok), dir + ' 에 금지 토큰 ' + tok);
+  }
+});
+
+// ── O3: dist 산출물 서명 ───────────────────────────────────────────────
+//
+// 2026-… 실사고: wasm-bindgen glue 가 `(function(){…self.ZPPageBundleWBG…})()`
+// 래퍼 없이 번들되면 부트 체크가 `ZP_PAGE_BUNDLE_BOOT_FAILED` 를 던진다.
+// glue 파일을 수동 재생성하면 래퍼가 날아간다 — 산출물 자체에 서명을 둔다.
+test('dist signature: zp-page-bundle carries the WBG self-registration', (t) => {
+  const p = 'dist/web/zp-page-bundle.js';
+  if (!fs.existsSync(p)) { t.skip('dist 가 없다: `npm run build` 뒤에 다시 돌린다'); return; }
+  const src = fs.readFileSync(p, 'utf8');
+  assert.ok(/ZPPageBundleWBG\s*=/.test(src),
+    'self.ZPPageBundleWBG=wasm_bindgen 등록이 없다 — glue 래퍼가 빠진 번들 (부트 실패)');
+  assert.ok(/ZP_PAGE_BUNDLE_BOOT_FAILED/.test(src), '부트 실패 가드가 없다');
+  assert.ok(/Object\.defineProperty\(globalThis,"?ZPBundle"?/.test(src), 'ZPBundle API 등록이 없다');
+});
+
+test('dist signature: sw bundle registers transport and runtime API', (t) => {
+  const p = 'dist/web/sw.js';
+  if (!fs.existsSync(p)) { t.skip('dist 가 없다: `npm run build` 뒤에 다시 돌린다'); return; }
+  const src = fs.readFileSync(p, 'utf8');
+  for (const marker of ['transportFetch', 'addEventListener']) {
+    assert.ok(src.includes(marker), 'sw.js 에 ' + marker + ' 가 없다');
+  }
+});
+
+// ── O3: prelude 금지 패턴 ─────────────────────────────────────────────
+//
+// prelude 자체가 탈출 수단을 들고 있으면 리라이트가 아무리 빡빡해도 소용없다.
+// 동적 코드는 compileNested/Native.FunctionCtor 경유, eval 은 geval/w.eval
+// 같은 명명된 참조로만, innerHTML 은 transformHTML 계열 파서 템플릿의
+// `else` 폴백에서만 허용한다.
+// 주석 속 백틱 언급(`eval()` 이런 식)이 패턴에 걸리지 않도록, 스캔 전에
+// 주석·문자열·정규식 리터럴을 벗긴다 — 줄 번호는 보존한다. 정규식은
+// `/"[^"]*"/` 같은 리터럴이 따옴표를 품을 수 있어 따로 상태를 둔다 —
+// 직전 유의 문자가 표현식을 끝낼 수 없는 문자(괄호/연산자/키워드)면
+// `/` 는 나눗셈이 아니라 정규식 시작이다.
+function stripNonCode(src) {
+  let out = '', state = 'code', quote = '', lastSig = '', lastWord = '';
+  const RE_PREV = /[([{,;:=!&|?+\-*%^~<>]/;
+  const RE_WORD = /^(?:return|typeof|case|in|of|new|delete|void|instanceof|throw|yield|await|do|else)$/;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i], d = src[i + 1];
+    if (state === 'code') {
+      if (c === '/' && d === '/') { state = 'line'; i++; continue; }
+      if (c === '/' && d === '*') { state = 'block'; i++; continue; }
+      if (c === '/' && (lastSig === '' || RE_PREV.test(lastSig) || RE_WORD.test(lastWord))) { state = 'regex'; lastWord = ''; continue; }
+      if (c === '"' || c === "'" || c === '`') { state = 'str'; quote = c; lastWord = ''; continue; }
+      out += c;
+      if (/\w/.test(c)) lastWord += c;
+      else lastWord = '';
+      if (!/\s/.test(c)) lastSig = c;
+    } else if (state === 'line') {
+      if (c === '\n') { state = 'code'; out += '\n'; }
+    } else if (state === 'block') {
+      if (c === '*' && d === '/') { state = 'code'; i++; }
+      else if (c === '\n') out += '\n';
+    } else if (state === 'str') {
+      if (c === '\\') i++;
+      else if (c === quote) { state = 'code'; lastSig = 'x'; lastWord = ''; }
+      else if (c === '\n') out += '\n';
+    } else if (state === 'regex') {
+      if (c === '\\') i++;
+      else if (c === '[') state = 'regexclass';
+      else if (c === '/') { state = 'code'; lastSig = 'x'; lastWord = ''; }
+      else if (c === '\n') { state = 'code'; out += '\n'; }
+    } else { // regexclass
+      if (c === '\\') i++;
+      else if (c === ']') state = 'regex';
+      else if (c === '\n') { state = 'code'; out += '\n'; }
+    }
+  }
+  return out;
+}
+test('prelude forbidden patterns: no raw eval/Function/string-timer/document.write', () => {
+  const files = ['web/runtime-prelude.js', 'web/worker-prelude.js', 'web/sw.js', 'web/zp-core.js'];
+  const rules = [
+    { re: /\bnew Function\s*\(/, why: 'new Function 직접 호출 — compileNested/Native.FunctionCtor 경유가 원칙' },
+    { re: /\bset(?:Timeout|Interval)\s*\(\s*['"`]/, why: '문자열 타이머 — 컴파일 경로를 우회한다' },
+    { re: /\bdocument\.write(?:ln)?\s*\(/, why: 'document.write 직접 호출 — appendWrittenHTML 경유가 원칙' },
+    { re: /(^|[^\w$.])eval\s*\(/, why: 'bare eval() — geval/w.eval 같은 명명 참조만 허용' },
+    { re: /\bFunction\.prototype\.constructor\s*\(/, why: 'ctor 직접 호출 — 리라이트 경유 우회' },
+  ];
+  for (const file of files) {
+    const src = stripNonCode(fs.readFileSync(file, 'utf8'));
+    for (const { re, why } of rules) {
+      assert.ok(!re.test(src), file + ' 금지 패턴: ' + why);
+    }
+  }
+});
+
+test('prelude forbidden patterns: every raw innerHTML assignment is a Native-setter fallback', () => {
+  const src = stripNonCode(fs.readFileSync('web/runtime-prelude.js', 'utf8'));
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!/\w+\.innerHTML\s*=/.test(lines[i])) continue;
+    // 허용 형태는 정확히 `else X.innerHTML = …` — 바로 위 줄의
+    // Native.elementInnerHTML 세터 시도에 대한 폴백이다. 다른 위치의 날
+    // innerHTML 대입은 transformHTML 을 우회하는 주입 경로다.
+    assert.ok(/^\s*else\s+\w+\.innerHTML\s*=/.test(lines[i]),
+      'web/runtime-prelude.js:' + (i + 1) + ' — else 폴백이 아닌 날 innerHTML 대입: ' + lines[i].trim());
+  }
 });

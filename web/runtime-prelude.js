@@ -184,6 +184,12 @@
   let cachedUADataBrands = null;
   clearBootConfig();
   const Native = captureNative(root);
+  // prelude 내부의 `new URL(...)` 은 항상 네이티브여야 한다 — 페이지-facing
+  // `root.URL` 은 ZPURL 래퍼(installStorageFacades)로 교체되는데, 그 래퍼는
+  // `/zp/p/<share>` 같은 우리 라우팅 어휘를 타깃으로 풀어 돌려준다. 그대로
+  // 타면 `proxyAbsoluteURL(sharePath)` 조차 타깃 URL 이 된다(2026-09-22,
+  // e2e `history.pushState` SecurityError 실측).
+  const URL = Native.URL || root.URL;
   let decodeFetchResponse;
 
 
@@ -1218,7 +1224,12 @@
   // 이면 릴레이 트랜스포트가 막힌다. 그리고 정책이 먹히는지 여부 자체가 지문이다.
   //
   // htmltx 와 **같은 백업 속성**을 쓴다.
-  const CSP_EQUIV = ['content-security-policy', 'content-security-policy-report-only'];
+  // `origin-trial` sits in the same bucket: a token is signed for ONE
+  // registered origin — but anyone can register a trial for any origin
+  // string, including our proxy origin. Left live, a target document could
+  // arm an origin trial on OUR realm. Renamed like CSP so page code
+  // reading its own meta still finds the value.
+  const CSP_EQUIV = ['content-security-policy', 'content-security-policy-report-only', 'origin-trial'];
   function isCSPHttpEquiv(value) {
     return CSP_EQUIV.indexOf(String(value || '').trim().toLowerCase()) >= 0;
   }
@@ -1305,7 +1316,8 @@
     const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();
     activeEntryId = entryId;
     postMessageToSW({ type: 'ZP_HISTORY_UPDATE', tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
-    const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, proxyAbsoluteURL(proxyHistoryURL()));
+    const pushURL = proxyAbsoluteURL(proxyHistoryURL());
+    const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, pushURL);
     refreshVisibleShareRoute(entryId, virtualURL.href, baseURL);
     return out;
   }
@@ -1320,8 +1332,29 @@
     try { window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: virtualURL.href })); } catch { try { window.dispatchEvent(new Event('hashchange')); } catch {} }
     return out;
   }
+  // Schemes that cannot load proxied web content — the browser hands them to
+  // an external handler (mail client, dialer, app store). Native
+  // `location.assign('mailto:…')` must NOT die on TARGET_PROTOCOL_BLOCKED.
+  // Deliberately absent: javascript:/data:/blob:/about: — those execute or
+  // inline content and must keep failing closed.
+  const NAV_EXTERNAL_SCHEMES = new Set(['mailto:', 'tel:', 'sms:', 'callto:', 'skype:', 'intent:', 'market:', 'webcal:', 'geo:', 'tg:', 'whatsapp:', 'zoommtg:', 'ms-teams:', 'slack:', 'discord:']);
+  function delegatableExternalScheme(raw) {
+    const m = /^([A-Za-z][A-Za-z0-9+.-]*:)/.exec(String(raw).trim());
+    return !!m && NAV_EXTERNAL_SCHEMES.has(m[1].toLowerCase());
+  }
   function setVirtualLocation(raw, replace = false) {
-    const next = new URL(targetURL(raw));
+    let next;
+    try {
+      next = new URL(targetURL(raw));
+    } catch (e) {
+      const g = unleakedTargetRaw(raw);
+      if (g !== null && delegatableExternalScheme(g)) {
+        const abs = String(g).trim();
+        if (replace && Native.locationReplace) { Native.locationReplace(abs); return; }
+        if (!replace && Native.locationAssign) { Native.locationAssign(abs); return; }
+      }
+      throw e;
+    }
     if (next.origin === virtualURL.origin && next.pathname === virtualURL.pathname && next.search === virtualURL.search) {
       updateVirtualHash(next.hash, replace);
       return;
@@ -1620,6 +1653,28 @@
     } catch {}
   }
   try { defineMasked(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
+
+  // ── virtual window.name ───────────────────────────────────────────────
+  // The real `window.name` persists across EVERY document this browsing
+  // context ever loads — cross-target and cross-proxy leaks in one slot.
+  // Page code sees a per-target virtual value instead: the root's is backed
+  // by native sessionStorage under the same tab+origin prefix as the
+  // session facade (name survives the target's own tab navigations, dies
+  // with the tab — native semantics). Child windows get in-memory names.
+  // NOTE: 이 블록은 install 시퀀스보다 먼저 있어야 한다 — scope 프록시의
+  // `name` 게터가 부팅 중에도 발사될 수 있어 `let` 을 아래로 내리면 TDZ.
+  const virtualFrameNames = new WeakMap();
+  let rootWindowNameStore = null;
+  function virtualWindowNameFor(win) {
+    if (win === root) return rootWindowNameStore ? rootWindowNameStore.get() : '';
+    try { return virtualFrameNames.get(win) || ''; } catch { return ''; }
+  }
+  function setVirtualWindowName(win, v) {
+    const s = String(v);
+    if (win === root) { if (rootWindowNameStore) rootWindowNameStore.set(s); return; }
+    try { virtualFrameNames.set(win, s); } catch {}
+  }
+
   function __zpStep(name, fn) {
     zpTrace('install:' + name + ':start');
     try { fn(); zpTrace('install:' + name + ':done'); }
@@ -1628,6 +1683,7 @@
   __zpStep('ToStringMasking', () => installToStringMasking(root));
   define(root, '__ZP_SET_BASE', updateVirtualBase);
   __zpStep('Phase2Membrane', installPhase2Membrane);
+  __zpStep('StackSanitizer', installStackSanitizer);
 
   __zpStep('WebSocket', installWebSocket);
   __zpStep('WebSocketStream', installWebSocketStream);
@@ -1686,6 +1742,50 @@
     }
   } catch {}
 
+
+  // ── Error.stack sanitizer ────────────────────────────────────────────
+  // V8 formats `.stack` lazily through Error.prepareStackTrace — the one
+  // interception point that exists for every error object. Without it,
+  // `new Error().stack` hands the page frames whose file names are our
+  // /zp/api/script / share-path URLs. Install a prepareStackTrace that
+  // routes every URL-bearing frame accessor through deproxyURL; a page-
+  // supplied prepareStackTrace still runs, but on SANITIZED frames so the
+  // custom formatter can't recover the raw URLs either.
+  function installStackSanitizer() {
+    const E = root.Error;
+    if (!E) return;
+    let userPrepare = null;
+    function sanitizeFrameText(v) { return v == null ? v : deproxyURL(String(v), { scan: true, fallback: 'share' }); }
+    function frameFacade(f) {
+      return new Proxy(f, {
+        get(t, p) {
+          const v = Reflect.get(t, p, t);
+          if (typeof v !== 'function') return v;
+          if (p === 'getFileName' || p === 'getScriptNameOrSourceURL' || p === 'getEvalOrigin') {
+            return function () { return sanitizeFrameText(v.apply(t, arguments)); };
+          }
+          if (p === 'toString') return function () { return sanitizeFrameText(v.apply(t, arguments)); };
+          return v.bind(t);
+        }
+      });
+    }
+    const zpPrepare = function (error, frames) {
+      const wrapped = frames.map(frameFacade);
+      if (userPrepare) return userPrepare(error, wrapped);
+      let head;
+      try { head = String(error); } catch { head = 'Error'; }
+      let out = head;
+      for (const f of wrapped) { try { out += '\n    at ' + f.toString(); } catch {} }
+      return out;
+    };
+    try {
+      defineMasked(E, 'prepareStackTrace', {
+        get() { return zpPrepare; },
+        set(v) { userPrepare = typeof v === 'function' ? v : null; },
+        configurable: true, enumerable: false
+      });
+    } catch {}
+  }
 
   function installPhase2Membrane() {
     // ★네이티브 **메서드**는 window 수신자가 필요하다 — 목록이 아니라 규칙으로.
@@ -1760,9 +1860,10 @@
     // 와 body 안 `var` 의 스코프도 같이 제자리를 찾는다 (전에는 `var` 가
     // window 로 샜다). 자유 식별자는 여전히 with 를 거치므로 격리는 그대로다.
     //
-    // 한계: body 안의 `new.target` 은 항상 undefined 다. 안쪽 함수를 apply 로
-    // 부르기 때문. 동적 Function body 에서 new.target 을 읽는 코드는 실측한 적
-    // 없어 이 대가를 받아들인다.
+    // `new.target` 도 살린다: 바깥 래퍼는 Reflect.construct 로 newTarget 을
+    // 받을 수 있으므로, 그걸 그대로 안쪽 함수의 construct 호출에 전달한다.
+    // `new (new Function('return new.target'))()` 가 자기 자신을 돌려주는
+    // 네이티브 동작이 그대로 재현된다.
     function compileNested(params, body, kind) {
       try { zpTrace('compile', String(body || '').slice(0, 100)); } catch {}
       const inner = functionPrefix(kind) + ' __zp_dyn__(' + params.join(',') + '\n) {\n'
@@ -1772,12 +1873,24 @@
       // 이름이라 with 안에서는 has 트랩에 가려져 undefined 가 된다 (이 함정을
       // 한 번 밟았다 — 파라미터는 살아났는데 arguments 가 비어 있었다).
       // IIFE 가 클로저째로 with 스코프를 들고 나온다.
-      const src = 'return (function(){\nwith(__zp_scope){\nreturn (' + inner + ');\n}\n})().apply(this, __zp_args);';
-      return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', src]);
+      // `this` 는 파라미터로 전달한다 — 바깥 래퍼도 sloppy 라 apply(this=undefined)
+      // 하면 래퍼 경계에서 진짜 globalThis 로 강제변환되어 strict inner 까지
+      // 오염된다. 파라미터는 강제변환을 타지 않으므로 의도한 thisArg 가 그대로 간다.
+      const src = 'var __zp_inner__ = (function(){\nwith(__zp_scope){\nreturn (' + inner + ');\n}\n})();\n'
+        + 'if (new.target) return Reflect.construct(__zp_inner__, __zp_args, new.target);\n'
+        + 'return __zp_inner__.apply(__zp_this, __zp_args);';
+      return Reflect.construct(Native.FunctionCtor, ['__zp_scope', '__zp_args', '__zp_this', src]);
     }
-    function nestedCall(compiled, thisArg, callArgs, newTarget) {
-      const argv = [withScope, callArgs];
-      return newTarget ? Reflect.construct(compiled, argv, newTarget) : Reflect.apply(compiled, thisArg, argv);
+    function nestedCall(compiled, thisArg, callArgs, newTarget, sloppy) {
+      // Sloppy bodies coerce nullish `this` to the global object — here the
+      // REAL window, which is an escape. Substitute the scope facade so
+      // `this.location` virtualizes. `thisArg === root` counts as the global
+      // too: a page-visible `window` facade is never the real root, so root
+      // can only arrive from an unwrapped call site. Primitives still box
+      // natively inside.
+      const t = sloppy && (thisArg == null || thisArg === root) ? scope : thisArg;
+      const argv = [withScope, callArgs, t];
+      return newTarget ? Reflect.construct(compiled, argv, newTarget) : Reflect.apply(compiled, scope, argv);
     }
     function compileDynamic(ctor, args, kind) {
       const parts = stringArgs(args);
@@ -1788,15 +1901,24 @@
       // 안쪽 중첩 함수가 들고 있고, 페이지에 노출되는 `fn` 이 같은 종류로
       // 선언돼 있어 prototype 신원은 그대로 유지된다.
       const compiled = compileNested(params, body, kind);
+      // Directive prologue decides the inner function's this-coercion —
+      // sloppy nullish `this` must land on the scope facade, strict keeps
+      // whatever was passed (including undefined).
+      const sloppy = !/^\s*['"]use strict['"]/.test(body);
       let fn;
+      // ★바깥 래퍼는 반드시 strict 여야 한다 — sloppy 래퍼는 `fn.call(null)` 의
+      // this 를 **래퍼 경계에서** 진짜 globalThis 로 강제변환해, nestedCall 의
+      // nullish 판정을 무력화하고 strict body 에도 real window 를 밀어 넣는다
+      // (escape). strict 래퍼는 call-site thisArg 를 있는 그대로 전달한다.
+      // rest 파라미터가 있으면 'use strict' 지시어가 불법이라 `arguments` 를 쓴다.
       if (kind === 'async') {
-        fn = async function anonymous(...callArgs) { return nestedCall(compiled, this, callArgs); };
+        fn = async function anonymous() { 'use strict'; return nestedCall(compiled, this, arguments, undefined, sloppy); };
       } else if (kind === 'generator') {
-        fn = function* anonymous(...callArgs) { return yield* nestedCall(compiled, this, callArgs); };
+        fn = function* anonymous() { 'use strict'; return yield* nestedCall(compiled, this, arguments, undefined, sloppy); };
       } else if (kind === 'asyncGenerator') {
-        fn = async function* anonymous(...callArgs) { return yield* nestedCall(compiled, this, callArgs); };
+        fn = async function* anonymous() { 'use strict'; return yield* nestedCall(compiled, this, arguments, undefined, sloppy); };
       } else {
-        fn = function anonymous(...callArgs) { return nestedCall(compiled, this, callArgs, new.target); };
+        fn = function anonymous() { 'use strict'; return nestedCall(compiled, this, arguments, new.target, sloppy); };
       }
       toStringMap.set(fn, dynamicSource(kind, params, body));
       return fn;
@@ -1809,7 +1931,15 @@
       const text = String(source);
       let expr = null;
       if (isEvalExpressionCandidate(text)) {
-        try { expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + text + '\n);}']); } catch {}
+        // 표현식도 리라이터를 거친다 — `with` 만 씌우면 computed member
+        // (`x['location']`) 같은 중재 경로가 통째로 빠진다. 리라이트가
+        // 실패하면 그대로 던져서 unrewritten 코드가 실행되지 않게 한다.
+        try {
+          const rewritten = callPageRewriter(text, 'classic');
+          expr = Reflect.construct(Native.FunctionCtor, ['__zp_scope', 'with(__zp_scope){return (' + rewritten + '\n);}']);
+        } catch (e) {
+          if (e && e.name === 'NotSupportedError') throw e;
+        }
       }
       if (expr) return Reflect.apply(expr, root, [withScope]);
       // 문(statement) 형태는 **전역 스코프**에서 실행해야 한다. indirect eval 의
@@ -1867,6 +1997,7 @@
       if (name === 'AsyncFunction') return dynamicAsyncFunction;
       if (name === 'GeneratorFunction') return dynamicGeneratorFunction;
       if (name === 'AsyncGeneratorFunction') return dynamicAsyncGeneratorFunction;
+      if (name === 'navigation') return virtualNavigationFor(root);
       return null;
     }
     // Inherit Location.prototype so `virtualLocation instanceof Location`
@@ -1892,6 +2023,7 @@
       toString: { value: function toString() { return virtualURL.href; }, enumerable: false, configurable: false, writable: false },
       valueOf: { value: function valueOf() { return virtualURL.href; }, enumerable: false, configurable: false, writable: false },
       [Symbol.toPrimitive]: { value: function() { return virtualURL.href; }, enumerable: false, configurable: false, writable: false },
+      ancestorOrigins: { get: () => ancestorOriginsList(true), enumerable: true, configurable: false },
     });
     Object.freeze(virtualLocation);
     maskMethods(virtualLocation, ['assign','replace','reload','toString','valueOf']);
@@ -1924,6 +2056,23 @@
     const locAssign = virtualLocation.assign;
     const locReplace = virtualLocation.replace;
     const locReload = virtualLocation.reload;
+    // `location.ancestorOrigins` — a DOMStringList of every ancestor frame's
+    // origin. The real one hands out PROXY origins (the actual ancestors).
+    // Root → empty list; a contained frame → its embedder's target origin.
+    function ancestorOriginsList(local) {
+      const origins = local ? [] : [virtualURL.origin];
+      const proto = (root.DOMStringList && root.DOMStringList.prototype) || null;
+      const list = proto ? Object.create(proto) : {};
+      for (let i = 0; i < origins.length; i++) {
+        const idx = i;
+        defineAccessor(list, idx, () => origins[idx]);
+      }
+      defineAccessor(list, 'length', () => origins.length);
+      define(list, 'item', function item(i) { return i >= 0 && i < origins.length ? origins[i] : null; });
+      define(list, 'contains', function contains(s) { return origins.indexOf(String(s)) >= 0; });
+      maskMethods(list, ['item', 'contains']);
+      return list;
+    }
     function wrappedLocationFor(nativeLoc) {
       const cached = wrappedLocationCache.get(nativeLoc);
       if (cached) return cached;
@@ -1950,6 +2099,7 @@
           if (prop === 'assign') return assignLocation;
           if (prop === 'replace') return replaceLocation;
           if (prop === 'reload') return reloadLocation;
+          if (prop === 'ancestorOrigins') return ancestorOriginsList(local);
           if (typeof prop === 'string' && methodCache.has(prop)) return methodCache.get(prop);
           const value = Reflect.get(nativeLoc, prop, nativeLoc);
           if (typeof value === 'function') {
@@ -2036,6 +2186,160 @@
         crossOriginLocations.set(targetWindow, restricted);
       }
       return restricted;
+    }
+    // ── VirtualNavigation facade ─────────────────────────────────────────
+    // `window.navigation` is a live Navigation object: `currentEntry.url` and
+    // `entries()` carry REAL proxy-origin URLs, and `navigate()` walks the
+    // real session directly — a read leak AND a navigation escape in one
+    // object. The facade reports virtualURL for every entry URL (real proxy
+    // URLs can't be decrypted synchronously, and no target URL is lost that
+    // way), routes navigate/reload through the virtual-location pipeline,
+    // delegates back/forward/traverseTo to native (real session entries are
+    // all proxy pages → contained), and wraps listener events so
+    // `event.destination.url` can't leak the real URL either.
+    const navFacadeCache = new WeakMap();
+    function virtualNavigationFor(win) {
+      if (!win) return null;
+      // A prelude-booted child builds its own facade against ITS virtualURL —
+      // delegate so `childWin.navigation.currentEntry.url` reports the
+      // child's target, not ours.
+      if (win !== root) {
+        const ownerGet = win.__zp_get;
+        if (typeof ownerGet === 'function' && ownerGet !== get) {
+          try { return ownerGet(win, 'navigation'); } catch {}
+        }
+      }
+      let cached = navFacadeCache.get(win);
+      if (cached !== undefined) return cached;
+      const native = win.navigation;
+      if (!native) { navFacadeCache.set(win, null); return null; }
+      const NavProtoBase = (win.Navigation && win.Navigation.prototype) || null;
+      const NavEntryProtoBase = (win.NavigationHistoryEntry && win.NavigationHistoryEntry.prototype) || null;
+      const entryFacades = new WeakMap();
+      const listenerWrappers = new WeakMap();
+      const handlerStore = Object.create(null);
+      // All props non-enumerable: IDL attributes live on the prototype, so a
+      // native `Object.keys(navigation)` is empty — ours must match.
+      function facadeEntry(real) {
+        if (!real) return null;
+        let e = entryFacades.get(real);
+        if (e) return e;
+        e = NavEntryProtoBase ? Object.create(NavEntryProtoBase) : {};
+        definePropertiesMasked(e, {
+          url: { get: () => virtualURL.href, enumerable: false, configurable: true },
+          key: { get: () => real.key, enumerable: false, configurable: true },
+          id: { get: () => real.id, enumerable: false, configurable: true },
+          index: { get: () => real.index, enumerable: false, configurable: true },
+          sameDocument: { get: () => real.sameDocument, enumerable: false, configurable: true },
+          getState: { value: function getState() { return real.getState(); }, enumerable: false, configurable: true, writable: true },
+        });
+        maskMethods(e, ['getState']);
+        entryFacades.set(real, e);
+        return e;
+      }
+      function navResult(real) {
+        return {
+          committed: real && real.committed ? real.committed.then(facadeEntry) : Promise.resolve(null),
+          finished: real && real.finished ? real.finished.then(facadeEntry) : Promise.resolve(null),
+        };
+      }
+      function navigate(raw, opts) {
+        const url = targetURL(String(raw), baseURL);
+        if (!isHTTPURL(url)) throw normalizedError('NotSupportedError');
+        // href-write on the location facade: root → setVirtualLocation,
+        // child → activatedFrameURL → proxied frame navigation.
+        wrappedLocationFor(win.location).href = url;
+        if (opts && typeof opts === 'object' && 'state' in opts && native.updateCurrentEntry) {
+          try { native.updateCurrentEntry({ state: opts.state }); } catch {}
+        }
+        const e = facadeEntry(native.currentEntry);
+        return { committed: Promise.resolve(e), finished: Promise.resolve(e) };
+      }
+      function reloadNav() {
+        try { wrappedLocationFor(win.location).reload(); } catch {}
+        const e = facadeEntry(native.currentEntry);
+        return { committed: Promise.resolve(e), finished: Promise.resolve(e) };
+      }
+      function destinationFacade(d) {
+        if (!d) return d;
+        return Object.freeze({
+          url: virtualURL.href, key: d.key, id: d.id, index: d.index,
+          sameDocument: d.sameDocument, getState: () => d.getState(),
+        });
+      }
+      function navEventFacade(ev) {
+        return new Proxy(ev, {
+          get(t, p) {
+            if (p === 'destination') return destinationFacade(ev.destination);
+            if (p === 'from') return facadeEntry(ev.from);
+            if (p === 'target' || p === 'currentTarget' || p === 'srcElement') return facade;
+            const v = Reflect.get(t, p, t);
+            return typeof v === 'function' ? v.bind(t) : v;
+          }
+        });
+      }
+      function addNavListener(type, listener, opts) {
+        if (listener && (typeof listener === 'function' || typeof listener.handleEvent === 'function')) {
+          let w = listenerWrappers.get(listener);
+          if (!w) {
+            w = function (ev) { return typeof listener === 'function' ? listener.call(this, navEventFacade(ev)) : listener.handleEvent.call(listener, navEventFacade(ev)); };
+            listenerWrappers.set(listener, w);
+          }
+          listener = w;
+        }
+        return native.addEventListener(type, listener, opts);
+      }
+      function removeNavListener(type, listener, opts) {
+        return native.removeEventListener(type, listenerWrappers.get(listener) || listener, opts);
+      }
+      const descs = {
+        currentEntry: { get: () => facadeEntry(native.currentEntry), enumerable: false, configurable: true },
+        canGoBack: { get: () => !!native.canGoBack, enumerable: false, configurable: true },
+        canGoForward: { get: () => !!native.canGoForward, enumerable: false, configurable: true },
+        entries: { value: function entries() { return native.entries().map(facadeEntry); }, enumerable: false, configurable: true, writable: true },
+        navigate: { value: navigate, enumerable: false, configurable: true, writable: true },
+        reload: { value: function reload() { return reloadNav(); }, enumerable: false, configurable: true, writable: true },
+        back: { value: function back() { return navResult(native.back()); }, enumerable: false, configurable: true, writable: true },
+        forward: { value: function forward() { return navResult(native.forward()); }, enumerable: false, configurable: true, writable: true },
+        traverseTo: { value: function traverseTo(key) { return navResult(native.traverseTo(key)); }, enumerable: false, configurable: true, writable: true },
+        updateCurrentEntry: { value: function updateCurrentEntry(o) { return native.updateCurrentEntry(o); }, enumerable: false, configurable: true, writable: true },
+        addEventListener: { value: addNavListener, enumerable: false, configurable: true, writable: true },
+        removeEventListener: { value: removeNavListener, enumerable: false, configurable: true, writable: true },
+        dispatchEvent: { value: function dispatchEvent(e) { return native.dispatchEvent(e); }, enumerable: false, configurable: true, writable: true },
+        transition: {
+          get: () => {
+            const t = native.transition;
+            return t ? Object.freeze({ from: facadeEntry(t.from), navigationType: t.navigationType }) : t;
+          }, enumerable: false, configurable: true
+        },
+        activation: {
+          get: () => {
+            const a = native.activation;
+            return a ? Object.freeze({ entry: facadeEntry(a.entry), from: facadeEntry(a.from), navigationType: a.navigationType }) : a;
+          }, enumerable: false, configurable: true
+        },
+      };
+      for (const t of ['navigate', 'navigatesuccess', 'navigateerror', 'currententrychange']) {
+        const key = 'on' + t;
+        descs[key] = {
+          get: () => handlerStore[key] || null,
+          set: (v) => {
+            handlerStore[key] = v;
+            let wrapped = null;
+            if (typeof v === 'function') {
+              wrapped = listenerWrappers.get(v);
+              if (!wrapped) { wrapped = function (ev) { return v.call(this, navEventFacade(ev)); }; listenerWrappers.set(v, wrapped); }
+            }
+            try { native[key] = wrapped; } catch {}
+          },
+          enumerable: false, configurable: true
+        };
+      }
+      const facade = NavProtoBase ? Object.create(NavProtoBase) : {};
+      definePropertiesMasked(facade, descs);
+      maskMethods(facade, ['entries','navigate','reload','back','forward','traverseTo','updateCurrentEntry','addEventListener','removeEventListener','dispatchEvent']);
+      navFacadeCache.set(win, facade);
+      return facade;
     }
     // 사슬 한 칸 위로. 못 읽거나 자기 자신이면 제자리에 머문다(끝에 도달한 것).
     function climbCrossWindow(targetWindow, prop, fallback) {
@@ -2125,36 +2429,98 @@
       enumerable: nativeWindowLocation.enumerable,
       configurable: nativeWindowLocation.configurable
     });
+    let scopeProtoOverride = null;
+    // `hide` = 페이지-facing scope 프록시용 내부 이름 차단. `with(__zp_scope)`
+    // 는 has 가 모든 이름을 잡으므로 `__zp_get` 같은 헬퍼까지 undefined 를
+    // 돌리면 리라이트된 코드가 전부 죽는다 — withScope 는 hide=false.
+    // Boot snapshot of native own accessors. Chrome keeps several built-ins
+    // (`performance`, `crypto`, `indexedDB`, ...) as OWN configurable getters
+    // on window — invoking them with the facade receiver throws
+    // Illegal invocation. Only accessors the PAGE installs later
+    // (defineProperty / __defineGetter__) run with `this` = scope, so
+    // `this.location` inside the getter virtualizes.
+    const bootOwnAccessors = new Map();
+    for (const name of nativeOwnKeys(root)) {
+      const d = Reflect.getOwnPropertyDescriptor(root, name);
+      if (d && d.configurable && (d.get || d.set)) bootOwnAccessors.set(name, d);
+    }
+    function isPageInstalledAccessor(prop, own) {
+      if (!own || !own.configurable || !(own.get || own.set)) return false;
+      const boot = bootOwnAccessors.get(prop);
+      return !boot || boot.get !== own.get || boot.set !== own.set;
+    }
+    function scopeGet(prop, hide) {
+      if (prop === Symbol.unscopables) return undefined;
+      if (hide && typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
+      if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
+      if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(root, prop);
+      if (prop === 'location') {
+        return wrappedLocationFor(root.location);
+      }
+      if (prop === 'postMessage') return postMessageWrapperFor(root);
+      if (prop === 'name') return virtualWindowNameFor(root);
+      const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
+      if (dynamic) return dynamic;
+      // Page-installed own accessor → run it with the facade as `this`:
+      // `this.location` inside the getter must virtualize, and
+      // `this === root` would hand the real Location straight back to
+      // page code. Native own accessors (unchanged since boot) fall
+      // through to `root[prop]` — they brand-check `this`.
+      const own = Reflect.getOwnPropertyDescriptor(root, prop);
+      if (isPageInstalledAccessor(prop, own)) return Reflect.get(root, prop, scope);
+      if (WINDOW_BOUND_METHODS.has(prop) || needsWindowReceiver(root[prop])) return boundWindowMethod(root, prop);
+      return root[prop];
+    }
     const scopeTraps = {
       has(_target, prop) {
         if (prop === Symbol.unscopables) return false;
+        // Runtime internals (__zp_*/ZP*) are own props of the real window —
+        // `'__zp_trace' in window` must not answer true for page code.
+        if (typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return false;
         return Reflect.has(root, prop);
       },
-      get(_target, prop) {
-        if (prop === Symbol.unscopables) return undefined;
-        if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
-        if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(root, prop);
-        if (prop === 'location') {
-          return wrappedLocationFor(root.location);
-        }
-        if (prop === 'postMessage') return postMessageWrapperFor(root);
-        const dynamic = typeof prop === 'symbol' ? null : dynamicGlobal(String(prop));
-        if (dynamic) return dynamic;
-        if (WINDOW_BOUND_METHODS.has(prop) || needsWindowReceiver(root[prop])) return boundWindowMethod(root, prop);
-        return root[prop];
-      },
+      get(_target, prop) { return scopeGet(prop, true); },
       set(_target, prop, value) {
         if (prop === 'location') { setVirtualLocation(value); return true; }
+        if (prop === 'name') { setVirtualWindowName(root, value); return true; }
+        // `window.onload = 'code'` — legacy string handlers compile through
+        // the event-handler gate, same as element on* properties. Only for
+        // props where a real on* setter exists (unknown on* names stay
+        // plain data properties, matching native).
+        if (typeof prop === 'string' && prop.length > 2 && prop.startsWith('on') && typeof value === 'string') {
+          const d = Reflect.getOwnPropertyDescriptor(root, prop) || Reflect.getOwnPropertyDescriptor(Object.getPrototypeOf(root), prop);
+          if (d && typeof d.set === 'function') {
+            const body = rewriteWithPageRewriter(String(value), 'event-handler');
+            const fn = Native.FunctionCtor('event', body);
+            toStringMap.set(fn, 'function ' + prop + '(event) {\n' + String(value) + '\n}');
+            return Reflect.set(root, prop, fn);
+          }
+        }
+        // Page-installed accessor setters likewise run with `this` = scope.
+        const own = Reflect.getOwnPropertyDescriptor(root, prop);
+        if (isPageInstalledAccessor(prop, own)) {
+          return Reflect.set(root, prop, value, scope);
+        }
         return Reflect.set(root, prop, value);
       },
       getOwnPropertyDescriptor(target, prop) {
         if (prop === 'location') return Reflect.getOwnPropertyDescriptor(target, prop);
+        if (typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
+        if (typeof prop === 'string' && MEMBER_DANGER.has(prop)) {
+          const native = Reflect.getOwnPropertyDescriptor(root, prop);
+          return {
+            get: membraneGetter(scope, prop),
+            set: membraneSetter(scope, prop),
+            enumerable: native ? native.enumerable : true,
+            configurable: native ? native.configurable : false,
+          };
+        }
         const desc = Reflect.getOwnPropertyDescriptor(root, prop);
         // Preserve locked descriptors, not a blanket configurable:true mask.
         if (desc && !desc.configurable) Reflect.defineProperty(target, prop, desc);
         return desc;
       },
-      ownKeys() { return nativeOwnKeys(root); },
+      ownKeys() { return nativeOwnKeys(root).filter(k => typeof k !== 'string' || !ZP_HIDDEN_RE.test(k)); },
       defineProperty(target, prop, desc) {
         if (prop === 'location') return Reflect.defineProperty(target, prop, desc);
         if (!Reflect.defineProperty(root, prop, desc)) return false;
@@ -2167,8 +2533,14 @@
         if (!Reflect.deleteProperty(root, prop)) return false;
         return Reflect.deleteProperty(target, prop);
       },
-      getPrototypeOf() { return Reflect.getPrototypeOf(root); },
-      setPrototypeOf(_target, proto) { return Reflect.setPrototypeOf(root, proto); },
+      getPrototypeOf() { return scopeProtoOverride || Reflect.getPrototypeOf(root); },
+      // `Reflect.setPrototypeOf(window, x)` must NOT mutate the real window's
+      // prototype — that is persistent corruption of the host realm. Record
+      // the override on the facade instead; traps already mediate every read.
+      setPrototypeOf(_target, proto) {
+        scopeProtoOverride = proto;
+        return Reflect.setPrototypeOf(scopeTarget, proto);
+      },
       preventExtensions() { return false; }
     };
     // 페이지에 window/globalThis/self/frames 로 노출되는 프록시.
@@ -2180,8 +2552,21 @@
     // window/globalThis/self/frames 에 대해 `scope` 를 돌려주기 때문이다.
     const withScope = new Proxy(scopeTarget, Object.assign({}, scopeTraps, {
       has(_target, prop) { return prop !== Symbol.unscopables; },
+      // has=true 와 짝을 이뤄야 하는 get — `__zp_*` 헬퍼가 with 본문에서
+      // 반드시 해석되어야 한다 (페이지-facing scope 와 달리 숨기지 않는다).
+      get(_target, prop) { return scopeGet(prop, false); },
     }));
     function isScopeProxy(value) { return value === scope || value === withScope; }
+    // Names the rewriter marks as dangerous members. `Reflect.get/set` route
+    // these through the membrane; any other name keeps native semantics.
+    const MEMBER_DANGER = new Set([
+      'location', 'contentWindow', 'contentDocument', 'defaultView',
+      'frameElement', 'parent', 'top', 'opener', 'frames',
+      'href', 'protocol', 'host', 'hostname', 'port', 'pathname',
+      'search', 'hash', 'origin',
+      'window', 'document', 'history', 'self', 'globalThis', 'navigation',
+      'assign', 'replace', 'open', 'postMessage', 'pushState', 'replaceState'
+    ]);
     function isWindowLike(value) {
       try { return value === root || value === scope || value === withScope || value && value.window === value; } catch { return false; }
     }
@@ -2237,7 +2622,19 @@
       // FAVE/APS 체인이 통째로 끊겼다(광고 프레임 다수 미생성).
       // `URL`/`documentURI`/`baseURI`/`referrer` 는 이미 여기 있었는데
       // `location` 만 빠져 있었다 — 형제 표면 하나를 빠뜨린 전형이다.
-      if (base === document && prop === 'location') return virtualLocation;
+      // Any Document, not just the root one: `iframe.contentDocument.location`,
+      // DOMParser/implementation documents all hand out a raw native Location
+      // otherwise — `childDoc.location.href = x` would navigate the frame
+      // straight to the target off-proxy. wrappedLocationFor routes
+      // assign/replace/href through activatedFrameURL.
+      if (prop === 'location' && isDocumentLike(base)) {
+        // Native invariant: `location === document.location`. Both must be
+        // the same wrapped proxy instance (WeakMap-cached), not the internal
+        // `virtualLocation` data object — React hydration checks and
+        // fingerprint comparisons observe the identity.
+        if (base === document) return wrappedLocationFor(root.location);
+        try { const loc = Reflect.get(base, 'location'); return loc ? wrappedLocationFor(loc) : loc; } catch { return virtualLocation; }
+      }
       if (base === document && (prop === 'URL' || prop === 'documentURI')) return virtualURL.href;
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return '';
@@ -2250,6 +2647,8 @@
           try { const n = baseWin.location; return n ? wrappedLocationFor(n) : virtualLocation; } catch { return virtualLocation; }
         }
         if (prop === 'postMessage') return postMessageWrapperFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
+        if (prop === 'navigation') return virtualNavigationFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
+        if (prop === 'name') return virtualWindowNameFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
       }
@@ -2275,6 +2674,16 @@
         crossWindowLocation(crossWindowTargets.get(base) || base).href = value;
         return value;
       }
+      if (prop === 'name' && isWindowLike(base)) {
+        setVirtualWindowName(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base), value);
+        return value;
+      }
+      // Non-root document: `doc.location = url` is PutForwards=href — forward
+      // through the facade so the frame navigates via activatedFrameURL.
+      if (prop === 'location' && isDocumentLike(base) && base !== document) {
+        try { const loc = Reflect.get(base, 'location'); if (loc) wrappedLocationFor(loc).href = value; } catch {}
+        return value;
+      }
       if (((isWindowLike(base) || base === document) && prop === 'location') || (base === virtualLocation && prop === 'href')) { setVirtualLocation(value); return value; }
       if (base === virtualLocation && prop === 'hash') { updateVirtualHash(value); return value; }
       Reflect.set(Object(base), prop, value);
@@ -2283,20 +2692,23 @@
     function assign(base, prop, operator, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
       const current = get(base, prop);
+      // `value` is ALWAYS a thunk (rewriter emits `()=>(rhs)`): evaluated only
+      // after the get — native get→RHS→set order — and only when the operator
+      // actually writes (logical short-circuit stays lazy).
       let next;
       switch (operator) {
-        case '+=': next = current + value; break;
-        case '-=': next = current - value; break;
-        case '*=': next = current * value; break;
-        case '/=': next = current / value; break;
-        case '%=': next = current % value; break;
-        case '**=': next = current ** value; break;
-        case '<<=': next = current << value; break;
-        case '>>=': next = current >> value; break;
-        case '>>>=': next = current >>> value; break;
-        case '&=': next = current & value; break;
-        case '^=': next = current ^ value; break;
-        case '|=': next = current | value; break;
+        case '+=': next = current + value(); break;
+        case '-=': next = current - value(); break;
+        case '*=': next = current * value(); break;
+        case '/=': next = current / value(); break;
+        case '%=': next = current % value(); break;
+        case '**=': next = current ** value(); break;
+        case '<<=': next = current << value(); break;
+        case '>>=': next = current >> value(); break;
+        case '>>>=': next = current >>> value(); break;
+        case '&=': next = current & value(); break;
+        case '^=': next = current ^ value(); break;
+        case '|=': next = current | value(); break;
         case '&&=': if (!current) return current; next = value(); break;
         case '||=': if (current) return current; next = value(); break;
         case '??=': if (current !== null && current !== undefined) return current; next = value(); break;
@@ -2319,22 +2731,206 @@
       const dynamic = dynamicWrapperFor(ctor);
       return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
     }
-    function has(base, prop) { if ((isWindowLike(base) || base === document) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
+    function has(base, prop) { if ((isWindowLike(base) || isDocumentLike(base)) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
+    // Document-ness by nodeType 9: covers root document, iframe
+    // contentDocument, DOMParser/implementation documents — including
+    // cross-realm documents where `instanceof Document` fails.
+    function isDocumentLike(base) {
+      try { return !!base && base.nodeType === 9 && typeof base.implementation === 'object'; } catch { return false; }
+    }
+    // Bases whose dangerous-named members are membrane-backed: window-like
+    // proxies, the document, native/wrapped Locations, and frame host
+    // elements (contentWindow/contentDocument accessors are already masked
+    // on their prototypes, so descriptor paths must match).
+    function dangerousBase(base) {
+      try {
+        return isWindowLike(base) || isDocumentLike(base) || isScopeProxy(base)
+          || isNativeLocation(base) || base === virtualLocation
+          || (typeof HTMLIFrameElement === 'function' && base instanceof HTMLIFrameElement)
+          || (typeof HTMLFrameElement === 'function' && base instanceof HTMLFrameElement)
+          || (typeof HTMLObjectElement === 'function' && base instanceof HTMLObjectElement)
+          || (typeof HTMLEmbedElement === 'function' && base instanceof HTMLEmbedElement);
+      } catch { return false; }
+    }
+    // Accessor pair that reads/writes through the membrane — what a
+    // virtualized descriptor hands out instead of the real native accessor.
+    function membraneGetter(base, prop) {
+      const g = function () { return get(base, prop); };
+      toStringMap.set(g, nativeAccessorSource('get', prop));
+      return g;
+    }
+    function membraneSetter(base, prop) {
+      const s = function (v) { set(base, prop, v); };
+      toStringMap.set(s, nativeAccessorSource('set', prop));
+      return s;
+    }
     function getOwnPropertyDescriptor(base, prop) {
       // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
       // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
       // 주소가 새어 나간다.
-      if (prop === 'location') {
-        if (base === root || isScopeProxy(base)) return Reflect.getOwnPropertyDescriptor(scopeTarget, prop);
-        if (base === document || isWindowLike(base)) {
-          const receiver = crossWindowTargets.get(base) || base;
-          const native = Reflect.getOwnPropertyDescriptor(receiver, prop);
-          return { get() { return get(base, prop); }, set(value) { set(base, prop, value); }, enumerable: native ? native.enumerable : true, configurable: native ? native.configurable : false };
+      if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(base)) {
+        if (prop === 'location' && (base === root || isScopeProxy(base))) {
+          return Reflect.getOwnPropertyDescriptor(scopeTarget, prop);
         }
+        const receiver = crossWindowTargets.get(base) || base;
+        const native = Reflect.getOwnPropertyDescriptor(receiver, prop);
+        return {
+          get: membraneGetter(base, prop),
+          set: membraneSetter(base, prop),
+          enumerable: native ? native.enumerable : true,
+          configurable: native ? native.configurable : false,
+        };
       }
       return Reflect.getOwnPropertyDescriptor(Object(base), prop);
     }
     function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
+    function del(base, prop) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      // `delete window.location` — unforgeable, silently refuses. Returning
+      // false mirrors native non-strict `delete` instead of a phantom success.
+      if (prop === 'location' && (isWindowLike(base) || isDocumentLike(base))) return false;
+      return Reflect.deleteProperty(Object(base), prop);
+    }
+    function odel(base, prop) { return base == null ? true : del(base, prop); }
+    function oget(base, prop) { return base == null ? undefined : get(base, prop); }
+    // `x?.m()` / `x?.m?.()` / `x.m?.()` — `flags` packs (baseOpt<<1)|callOpt:
+    // bit1 guards a nullish base, bit0 guards a nullish member. `x.m?.()`
+    // still throws when x is null — only the call is optional there. One
+    // `get` only (accessors must not run twice).
+    function ocall(base, prop, args, flags) {
+      if (base == null) {
+        if (flags & 2) return undefined;
+        throw new TypeError("Cannot read properties of " + base + " (reading '" + String(prop) + "')");
+      }
+      const fn = get(base, prop);
+      if (fn == null && (flags & 1)) return undefined;
+      return Reflect.apply(fn, isScopeProxy(base) ? root : base, Array.isArray(args) ? args : []);
+    }
+    // Reflect.get/set with a `receiver` arg: route dangerous names through
+    // the membrane, everything else through native Reflect with receiver
+    // semantics intact.
+    function rget(target, prop, receiver) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if (MEMBER_DANGER.has(prop)) return get(target, prop);
+      return Reflect.get(Object(target), prop, receiver === undefined ? target : receiver);
+    }
+    function rset(target, prop, value, receiver) {
+      if (typeof prop !== 'symbol') prop = String(prop);
+      if (MEMBER_DANGER.has(prop)) { set(target, prop, value); return true; }
+      return Reflect.set(Object(target), prop, value, receiver === undefined ? target : receiver);
+    }
+    function getOwnPropertyDescriptors(base) {
+      const out = {};
+      for (const k of Reflect.ownKeys(Object(base))) out[k] = getOwnPropertyDescriptor(base, k);
+      return out;
+    }
+    function getOwnPropertyNames(base) { return Reflect.getOwnPropertyNames(Object(base)); }
+    function okeys(base) { return Object.keys(Object(base)); }
+    // `with(obj)` identifier resolution: the object's properties win over
+    // outer scope unless the name is Symbol.unscopables-hidden. `fb` is the
+    // outer-scope thunk — the rewriter chains these for nested `with`s and
+    // threads values through so RHS side effects run exactly once.
+    function unscopablesHidden(obj, prop) {
+      const uns = obj == null ? null : obj[Symbol.unscopables];
+      return uns != null && !!uns[prop];
+    }
+    function scopeHas(obj, prop) {
+      return obj != null && prop in Object(obj) && !unscopablesHidden(obj, prop);
+    }
+    function withGet(obj, prop, fb) {
+      return scopeHas(obj, prop) ? obj[prop] : fb();
+    }
+    function withSet(obj, prop, value, fb) {
+      if (scopeHas(obj, prop)) { obj[prop] = value; return value; }
+      return fb(value);
+    }
+    function withAssign(obj, prop, op, value, fb) {
+      if (scopeHas(obj, prop)) return assign(obj, prop, op, value);
+      return fb();
+    }
+    function withUpdate(obj, prop, op, prefix, fb) {
+      if (scopeHas(obj, prop)) return update(obj, prop, op, prefix);
+      return fb();
+    }
+    function withDelete(obj, prop, fb) {
+      if (scopeHas(obj, prop)) return Reflect.deleteProperty(Object(obj), prop);
+      return fb();
+    }
+    // Assignment-target sink inside `with`: returns an accessor object whose
+    // `.v` resolves like a `with` reference (object-first, then `sink`).
+    function withD(obj, prop, sink) {
+      return {
+        get v() { return scopeHas(obj, prop) ? obj[prop] : sink[prop]; },
+        set v(x) { if (scopeHas(obj, prop)) obj[prop] = x; else sink[prop] = x; }
+      };
+    }
+    // Legacy accessor hooks — `document.__lookupGetter__('location')` handed
+    // out the REAL unforgeable accessor, and `.call(document)` then leaked the
+    // real Location (proxy origin + href). Dangerous names on membrane bases
+    // resolve to membrane-backed accessors; `__define*__` writes land on the
+    // facade (or the element itself) instead of corrupting host intrinsics.
+    const nativeLookupGetter = Object.prototype.__lookupGetter__;
+    const nativeLookupSetter = Object.prototype.__lookupSetter__;
+    const nativeDefineGetter = Object.prototype.__defineGetter__;
+    const nativeDefineSetter = Object.prototype.__defineSetter__;
+    if (nativeLookupGetter) {
+      defineMasked(Object.prototype, '__lookupGetter__', {
+        value: function __lookupGetter__(prop) {
+          if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(this)) {
+            return membraneGetter(this, prop);
+          }
+          return nativeLookupGetter.call(this, prop);
+        },
+        writable: true, enumerable: false, configurable: true
+      });
+    }
+    if (nativeLookupSetter) {
+      defineMasked(Object.prototype, '__lookupSetter__', {
+        value: function __lookupSetter__(prop) {
+          if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(this)) {
+            return membraneSetter(this, prop);
+          }
+          return nativeLookupSetter.call(this, prop);
+        },
+        writable: true, enumerable: false, configurable: true
+      });
+    }
+    // `window.__defineGetter__('x', fn)` === defineProperty(window,'x',{get:fn})
+    // — it must land where every other page definition lands (root via the
+    // proxy, the element itself otherwise), so `window.x` reads it back.
+    // Unforgeable names fail defineProperty → TypeError, same as native.
+    if (nativeDefineGetter) {
+      defineMasked(Object.prototype, '__defineGetter__', {
+        value: function __defineGetter__(prop, fn) {
+          if (typeof fn !== 'function') throw normalizedError('TypeError');
+          const host = isScopeProxy(this) || this === root ? root : this;
+          if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(this)) {
+            if (!Reflect.defineProperty(host, prop, { get: fn, enumerable: true, configurable: true })) {
+              throw normalizedError('TypeError');
+            }
+            return undefined;
+          }
+          return nativeDefineGetter.call(this, prop, fn);
+        },
+        writable: true, enumerable: false, configurable: true
+      });
+    }
+    if (nativeDefineSetter) {
+      defineMasked(Object.prototype, '__defineSetter__', {
+        value: function __defineSetter__(prop, fn) {
+          if (typeof fn !== 'function') throw normalizedError('TypeError');
+          const host = isScopeProxy(this) || this === root ? root : this;
+          if (typeof prop === 'string' && MEMBER_DANGER.has(prop) && dangerousBase(this)) {
+            if (!Reflect.defineProperty(host, prop, { set: fn, enumerable: true, configurable: true })) {
+              throw normalizedError('TypeError');
+            }
+            return undefined;
+          }
+          return nativeDefineSetter.call(this, prop, fn);
+        },
+        writable: true, enumerable: false, configurable: true
+      });
+    }
     function moduleURL(specifier, referrer) {
       const spec = String(specifier);
       if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw normalizedError('TypeError');
@@ -2385,6 +2981,21 @@
     define(root, '__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
     define(root, '__zp_ownKeys', ownKeys);
     define(root, '__zp_module_url', moduleURL);
+    define(root, '__zp_delete', del);
+    define(root, '__zp_odelete', odel);
+    define(root, '__zp_oget', oget);
+    define(root, '__zp_ocall', ocall);
+    define(root, '__zp_rget', rget);
+    define(root, '__zp_rset', rset);
+    define(root, '__zp_getOwnPropertyDescriptors', getOwnPropertyDescriptors);
+    define(root, '__zp_getOwnPropertyNames', getOwnPropertyNames);
+    define(root, '__zp_okeys', okeys);
+    define(root, '__zp_with_get', withGet);
+    define(root, '__zp_with_set', withSet);
+    define(root, '__zp_with_assign', withAssign);
+    define(root, '__zp_with_update', withUpdate);
+    define(root, '__zp_with_delete', withDelete);
+    define(root, '__zp_with_d', withD);
     define(root, '__zp_nav_assign', v => setVirtualLocation(v));
     define(root, '__zp_nav_replace', v => setVirtualLocation(v, true));
     define(root, '__zp_runClassic', fn => fn.call(root, withScope));
@@ -3684,7 +4295,12 @@
       if (raw === 'about:blank' || raw === '') child = Native.open('about:blank', target, features);
       else if (isHTTPURL(raw)) { child = Native.open('about:blank', target, features); if (child) shareNavURL(raw).then(u => { child.location.href = u; }).catch(() => { try { child.close(); } catch {} }); }
       else child = Native.open('about:blank', target, features);
-      if (child && (raw === 'about:blank' || raw === '')) {
+      // Every branch returns a live same-origin about:blank handle — without
+      // containment, `child.fetch`/`child.eval`/`child.document` are raw
+      // escape hatches until the share URL's own prelude boots. The http
+      // branch navigates via `child.location.href` which containment leaves
+      // untouched (it never masks `location`), so ordering is safe.
+      if (child) {
         try { installNetworkContainment(child); } catch { try { child.close(); } catch {} return null; }
       }
       return child;
@@ -3861,6 +4477,57 @@
           return Native.getAttribute.call(this, 'http-equiv') || '';
         },
         function (v) { this.setAttribute('http-equiv', v == null ? '' : String(v)); });
+    }
+    // `meta.content = '0;url=…'` — property writes bypass the setAttribute
+    // hook entirely (reflection writes the attr internally). Route refresh
+    // contents through the same proxied rewrite.
+    if (w.HTMLMetaElement && !propertyLocked(w.HTMLMetaElement.prototype, 'content')) {
+      defineAccessor(w.HTMLMetaElement.prototype, 'content',
+        function () { return Native.getAttribute.call(this, 'content') || ''; },
+        function (v) {
+          const s = String(v);
+          const eq = String(Native.getAttribute.call(this, 'http-equiv') || '').trim().toLowerCase();
+          if (eq === 'refresh') { const next = proxiedRefreshContent(s); Native.setAttribute.call(this, 'content', next || s); return; }
+          Native.setAttribute.call(this, 'content', s);
+        });
+    }
+    // `el.onclick = 'code'` — a string assigned to an on* IDL property is
+    // ignored by modern browsers, but legacy-authored code expects it to
+    // behave like the content attribute (compiled as a handler). Route the
+    // string through the event-handler rewriter and install the compiled
+    // function — the SAME compilation gate as `<a onclick="…">`, so no
+    // unrewritten source can ever run through this path either.
+    function compileEventHandlerString(src, name) {
+      const hooks = pageRewriteHooks;
+      if (!hooks) throw normalizedError('InvalidStateError');
+      const body = hooks.rewrite(String(src), 'event-handler');
+      const fn = Native.FunctionCtor('event', body);
+      // `el.onclick.toString()` must not surface the rewritten body — mask
+      // with the source-shaped signature native handlers report.
+      toStringMap.set(fn, 'function ' + name + '(event) {\n' + String(src) + '\n}');
+      return fn;
+    }
+    for (const proto of [
+      w.HTMLElement && w.HTMLElement.prototype,
+      w.SVGElement && w.SVGElement.prototype,
+      w.HTMLBodyElement && w.HTMLBodyElement.prototype,
+      w.HTMLFrameSetElement && w.HTMLFrameSetElement.prototype,
+      w.MathMLElement && w.MathMLElement.prototype,
+    ]) {
+      if (!proto) continue;
+      for (const name of Object.getOwnPropertyNames(proto)) {
+        if (name.length <= 2 || !name.startsWith('on')) continue;
+        const d = Object.getOwnPropertyDescriptor(proto, name);
+        if (!d || typeof d.set !== 'function' || !d.configurable) continue;
+        const nativeSet = d.set, nativeGet = d.get;
+        try {
+          defineMasked(proto, name, {
+            get: nativeGet,
+            set(v) { return nativeSet.call(this, typeof v === 'string' ? compileEventHandlerString(v, name) : v); },
+            enumerable: d.enumerable, configurable: true
+          });
+        } catch {}
+      }
     }
     // 2026-08-14 — object/embed. 서버측 htmltx 목록에는 ("object","data") /
     // ("embed","src") 가 있는데 페이지 realm 에만 없었다(정적 HTML 은 통과,
@@ -4205,8 +4872,11 @@
   }
   function sweepSWLessDoc(doc) {
     let els = null;
-    try { els = doc.querySelectorAll('img[src],img[srcset],source[src],source[srcset],video[poster],input[src],embed[src],link[rel~="stylesheet"][href]'); } catch { return; }
+    try { els = doc.querySelectorAll('img[src],img[srcset],source[src],source[srcset],video[poster],input[src],embed[src],link[rel~="stylesheet"][href],meta[http-equiv]'); } catch { return; }
     for (const el of els) {
+      // Meta refresh inside a SW-less frame must re-arm on the via-URL too —
+      // a raw target URL here is a same-origin refresh request the server 403s.
+      if (el.localName === 'meta') { try { enforceMetaPolicy(el); } catch {} continue; }
       // `<link>` 가 403 을 받으면 광고 프레임이 스타일 없이 남는다 — naver
       // 메인의 timeboard / rollingboard 크리에이티브가 정확히 이 경로였다.
       // img/source 는 src 와 srcset 을 **동시에** 가질 수 있고, 반응형
@@ -4235,7 +4905,7 @@
       // 그 뒤 광고 마크업이 들어가는 새 트리를 하나도 못 본다 — 실측에서
       // 옵저버 16개가 붙었는데 콜백은 한 번도 안 돌았다.
       const obs = new MutationObserver(() => sweepSWLessDoc(doc));
-      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset', 'poster', 'href'] });
+      obs.observe(doc, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'srcset', 'poster', 'href', 'http-equiv', 'content'] });
     } catch {}
     sweepSWLessDoc(doc);
   }
@@ -4449,22 +5119,128 @@
       if (k === 'domain' && v) { const d = v.replace(/^\./, '').toLowerCase(); if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; } }
       else if (k === 'path' && v && v[0] === '/') rec.path = v;
       else if (k === 'secure') rec.secure = true;
+      else if (k === 'samesite' && v) rec.sameSite = v.toLowerCase();
       else if (k === 'max-age') rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000;
       else if (k === 'expires') { const ts = Date.parse(v); if (!Number.isNaN(ts)) rec.expires = ts; }
     }
     const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
-    if (rec.expires <= Date.now()) { if (idx >= 0) documentCookieRecords.splice(idx, 1); }
+    const deleted = rec.expires <= Date.now();
+    if (deleted) { if (idx >= 0) documentCookieRecords.splice(idx, 1); }
     else if (idx >= 0) documentCookieRecords[idx] = rec;
     else documentCookieRecords.push(rec);
     documentCookie = documentCookieString();
+    // cookieStore's `change` event observes the same jar as document.cookie.
+    const item = cookieItemFromRec(rec);
+    fireCookieChange(deleted ? [] : [item], deleted ? [item] : []);
   }
-  function documentCookieString() {
+  function cookieRecordVisible(r, now, host, path) {
+    return r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith('.' + r.domain)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')));
+  }
+  function visibleCookieRecords() {
     const now = Date.now();
     const host = virtualURL.hostname.toLowerCase();
     const path = virtualURL.pathname || '/';
-    return documentCookieRecords.filter(r => r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith('.' + r.domain)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')))).sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
+    return documentCookieRecords.filter(r => cookieRecordVisible(r, now, host, path));
+  }
+  function documentCookieString() {
+    return visibleCookieRecords().sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
   }
   function defaultCookiePath() { const p = virtualURL.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
+
+  // ── virtual cookieStore ────────────────────────────────────────────────
+  // CookieStore and document.cookie share one cookie jar natively; the raw
+  // `window.cookieStore` would read/write REAL proxy-origin cookies (leak +
+  // cross-target pollution). The facade is backed by documentCookieRecords.
+  let virtualCookieStoreSingleton = null;
+  const cookieStoreListeners = new Set();
+  let cookieStoreOnChange = null;
+  function cookieItemFromRec(r) {
+    return Object.freeze({
+      name: r.name, value: r.value,
+      domain: r.hostOnly ? null : r.domain,
+      path: r.path,
+      expires: r.expires === Infinity ? null : r.expires,
+      secure: !!r.secure, sameSite: r.sameSite || 'lax', partitioned: false,
+    });
+  }
+  function fireCookieChange(changed, deleted) {
+    if (!cookieStoreListeners.size && !cookieStoreOnChange) return;
+    const ev = {
+      type: 'change',
+      changed: Object.freeze(changed.slice()),
+      deleted: Object.freeze(deleted.slice()),
+      target: virtualCookieStoreSingleton,
+      currentTarget: virtualCookieStoreSingleton,
+      srcElement: virtualCookieStoreSingleton,
+      timeStamp: Date.now(),
+    };
+    for (const l of cookieStoreListeners) {
+      try { typeof l === 'function' ? l.call(virtualCookieStoreSingleton, ev) : l.handleEvent.call(l, ev); } catch {}
+    }
+    if (cookieStoreOnChange) { try { cookieStoreOnChange.call(virtualCookieStoreSingleton, ev); } catch {} }
+  }
+  function virtualCookieStore() {
+    if (virtualCookieStoreSingleton) return virtualCookieStoreSingleton;
+    const CookieStoreProto = (root.CookieStore && root.CookieStore.prototype) || null;
+    const facade = CookieStoreProto ? Object.create(CookieStoreProto) : {};
+    function nameOf(arg) { return typeof arg === 'string' ? arg : (arg && arg.name); }
+    definePropertiesMasked(facade, {
+      get: { value: function get(arg) {
+        const name = nameOf(arg);
+        const rec = visibleCookieRecords().find(r => name == null || r.name === name);
+        return Promise.resolve(rec ? cookieItemFromRec(rec) : null);
+      }, enumerable: false, configurable: true, writable: true },
+      getAll: { value: function getAll(arg) {
+        const name = nameOf(arg);
+        return Promise.resolve(visibleCookieRecords().filter(r => name == null || r.name === name).map(cookieItemFromRec));
+      }, enumerable: false, configurable: true, writable: true },
+      set: { value: function set(arg, value) {
+        let name, val, opts = {};
+        if (typeof arg === 'string') { name = arg; val = String(value); }
+        else { opts = arg || {}; name = opts.name; val = String(opts.value); }
+        if (name == null || name === '') return Promise.reject(normalizedError('TypeError'));
+        let line = String(name) + '=' + val;
+        if (opts.expires != null) line += '; expires=' + new Date(Number(opts.expires)).toUTCString();
+        if (opts.domain) line += '; domain=' + String(opts.domain);
+        if (opts.path) line += '; path=' + String(opts.path);
+        if (opts.secure) line += '; secure';
+        if (opts.sameSite) line += '; samesite=' + String(opts.sameSite);
+        setDocumentCookie(line);
+        postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: line }).catch(() => {});
+        return Promise.resolve();
+      }, enumerable: false, configurable: true, writable: true },
+      delete: { value: function del(arg) {
+        const name = nameOf(arg);
+        if (name == null || name === '') return Promise.reject(normalizedError('TypeError'));
+        let line = String(name) + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+        if (arg && typeof arg === 'object' && arg.path) line += '; path=' + String(arg.path);
+        setDocumentCookie(line);
+        postMessageToSW({ type: 'ZP_COOKIE_SET', tabId: boot.tabId, targetUrl: virtualURL.href, cookie: line }).catch(() => {});
+        return Promise.resolve();
+      }, enumerable: false, configurable: true, writable: true },
+      addEventListener: { value: function addEventListener(type, listener) {
+        if (type === 'change' && listener) cookieStoreListeners.add(listener);
+      }, enumerable: false, configurable: true, writable: true },
+      removeEventListener: { value: function removeEventListener(type, listener) {
+        if (type === 'change') cookieStoreListeners.delete(listener);
+      }, enumerable: false, configurable: true, writable: true },
+      dispatchEvent: { value: function dispatchEvent(ev) {
+        if (ev && ev.type === 'change') {
+          for (const l of cookieStoreListeners) { try { typeof l === 'function' ? l.call(facade, ev) : l.handleEvent.call(l, ev); } catch {} }
+          if (cookieStoreOnChange) { try { cookieStoreOnChange.call(facade, ev); } catch {} }
+        }
+        return true;
+      }, enumerable: false, configurable: true, writable: true },
+      onchange: {
+        get() { return cookieStoreOnChange; },
+        set(v) { cookieStoreOnChange = typeof v === 'function' ? v : null; },
+        enumerable: false, configurable: true
+      },
+    });
+    maskMethods(facade, ['get', 'getAll', 'set', 'delete', 'addEventListener', 'removeEventListener', 'dispatchEvent']);
+    virtualCookieStoreSingleton = facade;
+    return facade;
+  }
 
   function installStorageFacades(w) {
     // D7 hardening: every target-origin gets an isolated namespace inside the
@@ -4512,6 +5288,21 @@
       }
     } catch { tabSessionId = boot.tabId; }
     const sessionPrefix = 'zp:s:' + tabSessionId + ':' + originHash + ':';
+    if (w === root) {
+      // window.name backing: same tab-session lifetime + origin scope as the
+      // session facade. The REAL name is emptied — it would leak whatever the
+      // launcher or a previous target wrote into every later document.
+      const nameKey = 'zp:n:' + tabSessionId + ':' + originHash;
+      let cachedName;
+      rootWindowNameStore = {
+        get() {
+          if (cachedName === undefined) { try { cachedName = nativeSessionStorage.getItem(nameKey) || ''; } catch { cachedName = ''; } }
+          return cachedName;
+        },
+        set(v) { cachedName = String(v); try { nativeSessionStorage.setItem(nameKey, cachedName); } catch {} },
+      };
+      try { w.name = ''; } catch {}
+    }
     let wrappedLocalStorage = null;
     let wrappedSessionStorage = null;
     defineAccessor(w, 'localStorage', () => {
@@ -4546,6 +5337,42 @@
         match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
       };
       defineAccessor(w, 'caches', () => virtualCaches);
+    }
+    // cookieStore: same jar as document.cookie (documentCookieRecords).
+    // The native object would expose REAL proxy-origin cookies.
+    if (w.cookieStore) defineAccessor(w, 'cookieStore', () => virtualCookieStore());
+    // URL constructor + canParse/parse: a base argument built from OUR
+    // routing vocabulary (share path, /zp/ api URL, proxy-origin string)
+    // must resolve against the VIRTUAL base — otherwise
+    // `new URL(rel, leakedBase).href` hands the proxy origin back. An
+    // absent base still throws natively (single-arg relative URLs are
+    // invalid) — only the vocabulary leak is normalized.
+    if (Native.URL) {
+      const wrapURLBase = b => {
+        const g = unleakedTargetRaw(String(b));
+        return g === null ? baseURL : g;
+      };
+      const ZPURL = function URL(input, base) {
+        const g = unleakedTargetRaw(String(input));
+        const inp = g === null ? baseURL : g;
+        // WebIDL: optional 인자의 `undefined` 는 **부재**와 같다 —
+        // `new URL(x, undefined)` 는 base 없는 생성과 동일해야 한다.
+        // `'undefined'` 문자열로 넘기면 절대 URL 에도 Invalid base URL 이 난다
+        // (zp-core canonicalTargetURL 이 `base || undefined` 를 항상 넘긴다).
+        return base !== undefined ? new Native.URL(inp, wrapURLBase(base)) : new Native.URL(inp);
+      };
+      try { ZPURL.prototype = Native.URL.prototype; } catch {}
+      for (const sm of ['createObjectURL', 'revokeObjectURL', 'canParse', 'parse']) {
+        const orig = Native.URL[sm];
+        if (typeof orig !== 'function') continue;
+        ZPURL[sm] = (sm === 'canParse' || sm === 'parse')
+          ? function (u, b) { return b !== undefined ? orig.call(Native.URL, u, wrapURLBase(b)) : orig.call(Native.URL, u); }
+          : orig.bind(Native.URL);
+        try { Object.defineProperty(ZPURL[sm], 'name', { value: sm, configurable: true }); } catch {}
+        maskNativeFunction(ZPURL[sm], sm);
+      }
+      brandLikeNative(ZPURL, null, 'URL');
+      define(w, 'URL', ZPURL);
     }
     // D7: BroadcastChannel must be origin-scoped. Wrap constructor to prefix
     // channel name with target origin hash; messages from another target
@@ -5788,6 +6615,18 @@
       }
       // meta 로 실려 온 CSP 는 무력화한다(htmltx 와 같은 처리).
       if (ln === 'meta' && localKey === 'http-equiv' && isCSPHttpEquiv(v)) return neutralizeCSPMeta(this, v);
+      // Dynamic meta refresh: `http-equiv=refresh` + `content` arming happens
+      // natively the moment both attrs exist — rewrite the URL arm before the
+      // browser can fire it, in whichever order the attrs are written.
+      if (ln === 'meta' && localKey === 'http-equiv' && String(v).trim().toLowerCase() === 'refresh') {
+        const cur = Native.getAttribute.call(this, 'content');
+        if (cur != null) { const next = proxiedRefreshContent(cur); if (next) Native.setAttribute.call(this, 'content', next); }
+        return Native.setAttribute.call(this, k, v);
+      }
+      if (ln === 'meta' && localKey === 'content' && String(Native.getAttribute.call(this, 'http-equiv') || '').trim().toLowerCase() === 'refresh') {
+        const next = proxiedRefreshContent(v);
+        return Native.setAttribute.call(this, k, next || v);
+      }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
@@ -6013,6 +6852,38 @@
     installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
+    // ShadowRoot.innerHTML is a SEPARATE IDL attribute — patch it too or
+    // `el.attachShadow(); shadow.innerHTML = '<img src=target>'` writes raw
+    // markup (and raw URLs) behind the membrane. Same treatment as
+    // Element: transformed on write, scrubbed on read.
+    if (w.ShadowRoot && w.ShadowRoot.prototype) {
+      patchHTMLSetter(w.ShadowRoot.prototype, 'innerHTML');
+      if (typeof w.ShadowRoot.prototype.setHTMLUnsafe === 'function') {
+        const nativeSetHTML = w.ShadowRoot.prototype.setHTMLUnsafe;
+        define(w.ShadowRoot.prototype, 'setHTMLUnsafe', function(html) {
+          return nativeSetHTML.call(this, transformHTML(String(html), transformHTMLOpts));
+        });
+      }
+      if (typeof w.ShadowRoot.prototype.getHTML === 'function') {
+        const nativeGetHTML = w.ShadowRoot.prototype.getHTML;
+        define(w.ShadowRoot.prototype, 'getHTML', function(opts) {
+          // cloneNode can't carry a shadow root, so scrub at string level:
+          // strip our backup attributes and de-proxy every URL in the
+          // serialized markup.
+          const out = nativeGetHTML.call(this, opts);
+          return typeof out === 'string'
+            ? deproxyURL(out.replace(/\sdata-zp-[a-z-]+="[^"]*"/g, ''), { scan: true, fallback: 'share' })
+            : out;
+        });
+      }
+    }
+    // Element.setHTMLUnsafe has the same bypass on the light-DOM side.
+    if (typeof w.Element.prototype.setHTMLUnsafe === 'function') {
+      const nativeElSetHTML = w.Element.prototype.setHTMLUnsafe;
+      define(w.Element.prototype, 'setHTMLUnsafe', function(html) {
+        return nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts));
+      });
+    }
     // ★2026-08-22 — `innerHTML`/`outerHTML` 만 세정하고 있었다.
     // `new XMLSerializer().serializeToString(document.documentElement)` 은 훅이
     // 아예 없어서 같은 문서에서 **38건**의 흔적이 그대로 나왔다(실측). 직렬화는
@@ -6067,6 +6938,11 @@
             // 두는 자리라 own 이 하나도 안 늘어난다.
             if (prop === 'innerHTML' && this && this.localName === 'style') {
               return d.get ? originalStyleText(this, d.get.call(this)) : '';
+            }
+            // ShadowRoot (nodeType 11) can't be cloned — scrub the string.
+            if (this && this.nodeType === 11) {
+              const out = d.get ? String(d.get.call(this)) : '';
+              return deproxyURL(out.replace(/\sdata-zp-[a-z-]+="[^"]*"/g, ''), { scan: true, fallback: 'share' });
             }
             return d.get ? sanitizeSerializedNode(this, prop === 'outerHTML') : '';
           },
@@ -6781,6 +7657,10 @@
       if (!Native.getAttribute.call(el, 'src')) setScriptText(el, rewriteImportMapText(getScriptText(el)));
       return;
     }
+    if (dataType === 'speculationrules') {
+      if (!Native.getAttribute.call(el, 'src')) setScriptText(el, rewriteSpeculationRulesText(getScriptText(el)));
+      return;
+    }
     const raw = Native.getAttribute.call(el, 'src') || Native.getAttribute.call(el, 'href');
     if (raw) {
       setScriptSource(el, raw);
@@ -6920,7 +7800,7 @@
     const kind = executableScriptKindForElement(el);
     if (kind) return kind;
     const t = String(Native.getAttribute.call(el, 'type') || '').trim().toLowerCase();
-    return t === 'importmap' ? 'importmap' : '';
+    return t === 'importmap' ? 'importmap' : t === 'speculationrules' ? 'speculationrules' : '';
   }
   function blockInlineScriptElement(el) {
     Native.setAttribute.call(el, 'type', 'application/x-zeroproxy-blocked');
@@ -6962,6 +7842,35 @@
       map.scopes = nextScopes;
     }
     return JSON.stringify(map).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026');
+  }
+  // `<script type="speculationrules">` — same shape as the Rust-side
+  // rewrite (zp-htmltx::rewrite_speculationrules_json): `prefetch` urls
+  // are subresource GETs → /zp/api/fetch, `prerender` urls are top
+  // navigations → the ?via= launcher. Without it the browser prefetches /
+  // prerenders straight from the target host.
+  function rewriteSpeculationRulesText(source) {
+    let doc;
+    try { doc = JSON.parse(String(source || '{}')); } catch { return '{}'; }
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return '{}';
+    const abs = v => {
+      try {
+        const u = new URL(v, baseURL);
+        return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : null;
+      } catch { return null; }
+    };
+    for (const pair of [['prefetch', false], ['prerender', true]]) {
+      const rules = doc[pair[0]];
+      if (!Array.isArray(rules)) continue;
+      for (const rule of rules) {
+        if (!rule || !Array.isArray(rule.urls)) continue;
+        rule.urls = rule.urls.map(v => {
+          const a = abs(v);
+          if (!a) return v;
+          return pair[1] ? proxyViaURL(a) : subresourceProxyPath(a);
+        });
+      }
+    }
+    return JSON.stringify(doc).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026');
   }
   // `document.write` on a CLOSED document triggers an implicit
   // `document.open()` that wipes everything already there. That is correct
@@ -7018,6 +7927,19 @@
     const abs = targetURLIfHTTP(v);
     if (!abs) return '';
     return head + 'url=' + proxyViaURL(abs);
+  }
+  // Post-write meta enforcement for paths that bypass the setAttribute hook:
+  // MutationObserver records, Attr.value assignment, innerHTML insertions.
+  // CSP equiv is neutralized; refresh rewrites `content` so the refresh timer
+  // re-arms on the proxied URL instead of the raw target.
+  function enforceMetaPolicy(el) {
+    const eq = String(Native.getAttribute.call(el, 'http-equiv') || '').trim().toLowerCase();
+    if (isCSPHttpEquiv(eq)) { neutralizeCSPMeta(el, eq); return; }
+    if (eq !== 'refresh') return;
+    const cur = Native.getAttribute.call(el, 'content');
+    if (cur == null) return;
+    const next = proxiedRefreshContent(cur);
+    if (next && next !== cur) Native.setAttribute.call(el, 'content', next);
   }
   function transformHTML(value, opts) {
     const html = String(value);
@@ -7256,7 +8178,7 @@
         } finally {
           tickURLCache = null;
         }
-      }).observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'data'] });
+      }).observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'xlink:href', 'src', 'srcdoc', 'action', 'formaction', 'poster', 'integrity', 'type', 'rel', 'target', 'data', 'http-equiv', 'content', 'ping'] });
       observedDocuments.add(doc);
     } catch {}
   }
@@ -7266,6 +8188,16 @@
     const tag = el.localName;
     if (tag === 'base' && localKey === 'href') { syncBaseElement(el); return; }
     if (tag === 'link' && (localKey === 'rel' || localKey === 'href')) { enforceLinkPolicy(el); return; }
+    // Meta mutations that bypassed the setAttribute hook (Attr.value writes,
+    // parser-inserted nodes): re-arm refresh on the proxied URL, neutralize CSP.
+    if (tag === 'meta' && (localKey === 'http-equiv' || localKey === 'content')) { enforceMetaPolicy(el); return; }
+    // `ping` on parser-inserted anchors — the browser POSTs this beacon list
+    // itself on click; CSP can't see it, only we can strip it.
+    if (localKey === 'ping' && (tag === 'a' || tag === 'area')) {
+      const raw = Native.getAttribute.call(el, key);
+      if (raw != null) { Native.setAttribute.call(el, 'data-zp-blocked-ping', raw); Native.removeAttribute.call(el, key); }
+      return;
+    }
     if (localKey === 'sandbox' && isFrameElement(el)) { sanitizeFrameSandbox(el); return; }
     if (localKey === 'target' && isNavigationTargetElement(el)) { const raw = Native.getAttribute.call(el, key); if (raw && raw !== '_self') setSafeNavigationTarget(el, key, raw); return; }
     if (tag === 'script' && (localKey === 'src' || localKey === 'href' || localKey === 'type')) {
@@ -7493,6 +8425,8 @@
 
     const readyPromise = Promise.resolve(fakeReg);
     let oncontrollerchange = null;
+    // 항상 fakeReg 하나 — 진짜 ZP SW 는 절대 노출하지 않으면서,
+    // "등록이 있다" 는 모양은 유지한다 (e2e 가 이 계약을 핀다).
     define(facade, 'register', function register() { return Promise.resolve(fakeReg); });
     define(facade, 'getRegistration', function getRegistration() { return Promise.resolve(fakeReg); });
     define(facade, 'getRegistrations', function getRegistrations() { return Promise.resolve([fakeReg]); });
@@ -8217,6 +9151,21 @@
     if (root.__zp_getOwnPropertyDescriptor && !define(w, '__zp_getOwnPropertyDescriptor', root.__zp_getOwnPropertyDescriptor)) throw normalizedError('SecurityError');
     if (root.__zp_ownKeys && !define(w, '__zp_ownKeys', root.__zp_ownKeys)) throw normalizedError('SecurityError');
     if (root.__zp_module_url && !define(w, '__zp_module_url', root.__zp_module_url)) throw normalizedError('SecurityError');
+    if (root.__zp_delete && !define(w, '__zp_delete', root.__zp_delete)) throw normalizedError('SecurityError');
+    if (root.__zp_odelete && !define(w, '__zp_odelete', root.__zp_odelete)) throw normalizedError('SecurityError');
+    if (root.__zp_oget && !define(w, '__zp_oget', root.__zp_oget)) throw normalizedError('SecurityError');
+    if (root.__zp_ocall && !define(w, '__zp_ocall', root.__zp_ocall)) throw normalizedError('SecurityError');
+    if (root.__zp_rget && !define(w, '__zp_rget', root.__zp_rget)) throw normalizedError('SecurityError');
+    if (root.__zp_rset && !define(w, '__zp_rset', root.__zp_rset)) throw normalizedError('SecurityError');
+    if (root.__zp_getOwnPropertyDescriptors && !define(w, '__zp_getOwnPropertyDescriptors', root.__zp_getOwnPropertyDescriptors)) throw normalizedError('SecurityError');
+    if (root.__zp_getOwnPropertyNames && !define(w, '__zp_getOwnPropertyNames', root.__zp_getOwnPropertyNames)) throw normalizedError('SecurityError');
+    if (root.__zp_okeys && !define(w, '__zp_okeys', root.__zp_okeys)) throw normalizedError('SecurityError');
+    if (root.__zp_with_get && !define(w, '__zp_with_get', root.__zp_with_get)) throw normalizedError('SecurityError');
+    if (root.__zp_with_set && !define(w, '__zp_with_set', root.__zp_with_set)) throw normalizedError('SecurityError');
+    if (root.__zp_with_assign && !define(w, '__zp_with_assign', root.__zp_with_assign)) throw normalizedError('SecurityError');
+    if (root.__zp_with_update && !define(w, '__zp_with_update', root.__zp_with_update)) throw normalizedError('SecurityError');
+    if (root.__zp_with_delete && !define(w, '__zp_with_delete', root.__zp_with_delete)) throw normalizedError('SecurityError');
+    if (root.__zp_with_d && !define(w, '__zp_with_d', root.__zp_with_d)) throw normalizedError('SecurityError');
     if (root.__zp_nav_assign && !define(w, '__zp_nav_assign', root.__zp_nav_assign)) throw normalizedError('SecurityError');
     if (root.__zp_nav_replace && !define(w, '__zp_nav_replace', root.__zp_nav_replace)) throw normalizedError('SecurityError');
     if (root.__zp_runClassic && !define(w, '__zp_runClassic', root.__zp_runClassic)) throw normalizedError('SecurityError');

@@ -153,6 +153,12 @@ fn attr_settings(
                             .to_ascii_lowercase();
                         if equiv == "content-security-policy"
                             || equiv == "content-security-policy-report-only"
+                            // `origin-trial`: 토큰은 등록 오리진에 서명된다 —
+                            // 그런데 오리진 트라이얼은 **누구든 아무 오리진이나**
+                            // 등록할 수 있다. 타깃이 proxy 오리진용 토큰을 실어
+                            // 오면 우리 realm 에서 기능이 켜진다. CSP 와 같은
+                            // 이유로 무력화.
+                            || equiv == "origin-trial"
                         {
                             let content = el.get_attribute("content").unwrap_or_default();
                             let _ = el.remove_attribute("http-equiv");
@@ -196,7 +202,7 @@ fn attr_settings(
                     // 활성화해야 하는데 그건 세션 상태가 필요하므로 여기서는
                     // 이름만 옮기고 페이지 realm 이 기존 세터 경로로 되돌린다 —
                     // srcdoc 과 같은 전략이고, 검증된 코드를 재사용한다.
-                    if (tag == "iframe" || tag == "frame") {
+                    if tag == "iframe" || tag == "frame" {
                         if let Some(src) = el.get_attribute("src") {
                             let t = src.trim();
                             if !t.is_empty() && !starts_with_ascii_ci(t, "about:") {
@@ -243,7 +249,7 @@ fn attr_settings(
                             }
                         }
                     }
-                    if (tag == "a" || tag == "area") {
+                    if tag == "a" || tag == "area" {
                         if let Some(ping) = el.get_attribute("ping") {
                             let _ = el.set_attribute("data-zp-blocked-ping", &ping);
                             let _ = el.remove_attribute("ping");
@@ -364,6 +370,13 @@ fn attr_settings(
                                         | ("image", "href")
                                         | ("image", "xlink:href")
                                         | ("use", "href")
+                                        | ("use", "xlink:href")
+                                        // SVG `<script href>`/`<script xlink:href>` —
+                                        // HTML script 와 달리 SVG 스크립트는 src 가 아니라
+                                        // href 로 로드된다. 이 쌍이 없으면 실행 가능한
+                                        // 외부 스크립트가 원본 URL 로 직접 나간다.
+                                        | ("script", "href")
+                                        | ("script", "xlink:href")
                                         // SVG 필터의 이미지 입력. `<image>` 와 같은 부류다.
                                         | ("feimage", "href")
                                         | ("feimage", "xlink:href")
@@ -394,6 +407,9 @@ fn attr_settings(
                                 let is_navigation = matches!(
                                     (tag.as_str(), lower),
                                     ("a", "href")
+                                        // SVG `<a xlink:href>` — 같은 앵커,
+                                        // 다른 속성 이름.
+                                        | ("a", "xlink:href")
                                         | ("area", "href")
                                         | ("form", "action")
                                         | ("input", "formaction")
@@ -594,7 +610,7 @@ fn script_settings(
     let target = target_url.clone();
     let diags = diagnostics.clone();
     // Per-element state for the current script: detect external src or non-JS type.
-    let current_kind: Rc<RefCell<Option<ScriptKind>>> = Rc::new(RefCell::new(None));
+    let current_kind: Rc<RefCell<Option<InlineKind>>> = Rc::new(RefCell::new(None));
     let current_buffer: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let kind_for_el = current_kind.clone();
     let kind_for_text = current_kind.clone();
@@ -629,9 +645,16 @@ fn script_settings(
                         return Ok(());
                     }
                     let kind = match el.get_attribute("type").as_deref() {
-                        Some(t) if t.eq_ignore_ascii_case("module") => Some(ScriptKind::Module),
+                        Some(t) if t.eq_ignore_ascii_case("module") => Some(InlineKind::Script(ScriptKind::Module)),
+                        // `<script type="importmap">` / `speculationrules` carry
+                        // JSON, not code — the JSON still embeds URLs that the
+                        // browser would fetch directly (module resolution,
+                        // prefetch/prerender), so they go through the JSON URL
+                        // rewriter instead of the script rewriter.
+                        Some(t) if t.trim().eq_ignore_ascii_case("importmap") => Some(InlineKind::Importmap),
+                        Some(t) if t.trim().eq_ignore_ascii_case("speculationrules") => Some(InlineKind::Speculationrules),
                         Some(t) if !t.is_empty() && !is_javascript_type(t) => None,
-                        _ => Some(ScriptKind::Classic),
+                        _ => Some(InlineKind::Script(ScriptKind::Classic)),
                     };
                     *kind_for_el.borrow_mut() = kind;
                     Ok(())
@@ -669,9 +692,33 @@ fn script_settings(
                         chunk.remove();
                     }
                     if chunk.last_in_text_node() {
-                        if let Some(kind) = *kind_for_end.borrow() {
+                        if let Some(inline_kind) = *kind_for_end.borrow() {
                             let src = buf_for_end.borrow().clone();
                             buf_for_end.borrow_mut().clear();
+                            // JSON-carrying script types are DATA, not code —
+                            // rewrite the embedded URLs and emit the JSON back
+                            // verbatim (raw text, no wrapper). A parse failure
+                            // leaves the source untouched — the browser then
+                            // ignores the malformed map the same as direct.
+                            match inline_kind {
+                                InlineKind::Importmap | InlineKind::Speculationrules => {
+                                    let next = match inline_kind {
+                                        InlineKind::Importmap => rewrite_importmap_json(&src, &target_for_end, &origin_for_end),
+                                        _ => rewrite_speculationrules_json(&src, &target_for_end, &origin_for_end),
+                                    };
+                                    if let Some(json) = next {
+                                        chunk.after(&json, ContentType::Html);
+                                    } else {
+                                        chunk.after(&src, ContentType::Html);
+                                    }
+                                    return Ok(());
+                                }
+                                _ => {}
+                            }
+                            let kind = match inline_kind {
+                                InlineKind::Script(k) => k,
+                                _ => unreachable!(),
+                            };
                             // Emit the rewriter's output directly, wrapped in
                             // `__ZP_EXEC_INLINE_REWRITTEN(<code>)` which the prelude
                             // executes WITHOUT going through the page-side rewriter
@@ -1131,6 +1178,106 @@ use zp_shared::URL_PARAM_ENCODE;
 /// where it would resolve without a base — exactly the failure mode observed
 /// inside NAVER's `shopsquare.naver.com` iframe). Returns None for fragment-
 /// only refs and inert schemes (data:/blob:/about:/mailto:).
+/// What an inline `<script>` element contains: executable JS of a given
+/// kind, or a JSON document type whose embedded URLs need rewriting but
+/// which never goes through the script rewriter.
+#[derive(Debug, Clone, Copy)]
+enum InlineKind {
+    Script(ScriptKind),
+    Importmap,
+    Speculationrules,
+}
+
+/// `<script type="importmap">` — every value in `imports` and in each
+/// `scopes` map is a module specifier the browser resolves + fetches
+/// natively. Left raw, the fetch would go straight to the target host —
+/// no SW, no transport, no rewrite. Values become the same
+/// `/zp/api/script?u=…&kind=module` form the JS rewriter emits for static
+/// `import` specifiers, so resolution lands in the rewritten-module
+/// pipeline. `integrity` values are SRI hashes and stay untouched.
+fn rewrite_importmap_json(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
+    let mut doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut changed = false;
+    let mut fix_map = |map: &mut serde_json::Map<String, serde_json::Value>| {
+        for (_key, value) in map.iter_mut() {
+            let Some(s) = value.as_str() else { continue };
+            let Some(next) = proxied_module_script_url(s, target_url, proxy_origin) else { continue };
+            *value = serde_json::Value::String(next);
+            changed = true;
+        }
+    };
+    if let Some(m) = doc.get_mut("imports").and_then(|v| v.as_object_mut()) {
+        fix_map(m);
+    }
+    if let Some(scopes) = doc.get_mut("scopes").and_then(|v| v.as_object_mut()) {
+        for (_scope, map) in scopes.iter_mut() {
+            if let Some(m) = map.as_object_mut() {
+                fix_map(m);
+            }
+        }
+    }
+    if changed {
+        serde_json::to_string(&doc).ok()
+    } else {
+        None
+    }
+}
+
+/// `<script type="speculationrules">` — `prefetch`/`prerender` `urls`
+/// lists make the browser fetch/navigate natively. `prefetch` entries are
+/// subresource GETs → `/zp/api/fetch?url=…`; `prerender` entries are top
+/// navigations → the `?via=` launcher form (the swap navigates the tab to
+/// a URL the SW then serves as the proxied document). Rules referencing
+/// documents (`"source": "document"`) carry no URL list to rewrite.
+fn rewrite_speculationrules_json(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
+    let mut doc: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut changed = false;
+    for (key, nav) in [("prefetch", false), ("prerender", true)] {
+        let Some(rules) = doc.get_mut(key).and_then(|v| v.as_array_mut()) else { continue };
+        for rule in rules.iter_mut() {
+            let Some(urls) = rule.get_mut("urls").and_then(|v| v.as_array_mut()) else { continue };
+            for u in urls.iter_mut() {
+                let Some(s) = u.as_str() else { continue };
+                let Some(abs) = absolute_target_url(s, target_url) else { continue };
+                let next = if nav {
+                    proxied_navigation_url(&abs, proxy_origin, "/zp/")
+                } else {
+                    Some(zp_shared::subresource_proxy_url(&abs, proxy_origin, "/zp/", None))
+                };
+                if let Some(n) = next {
+                    *u = serde_json::Value::String(n);
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        serde_json::to_string(&doc).ok()
+    } else {
+        None
+    }
+}
+
+/// Resolve an importmap value to the proxy script route — identical in
+/// shape to what the JS rewriter emits for static import specifiers, so a
+/// module fetched via the map and one fetched via `import` share the
+/// cache key and the rewritten-module path.
+fn proxied_module_script_url(raw: &str, target_url: &str, proxy_origin: &str) -> Option<String> {
+    if proxy_origin.is_empty() {
+        return None;
+    }
+    let abs = absolute_target_url(raw, target_url)?;
+    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+    // Same encode set as zp-rewriter::proxied_module_url — the two forms
+    // must produce identical URLs or the browser fetches the module twice.
+    const QUERY_ENC: &AsciiSet = &CONTROLS
+        .add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'&').add(b'=')
+        .add(b'+').add(b'%').add(b'?').add(b'/').add(b':').add(b';').add(b'\'')
+        .add(b'\\').add(b'`').add(b'{').add(b'}').add(b'[').add(b']').add(b'^').add(b'|');
+    let encoded = utf8_percent_encode(&abs, QUERY_ENC).to_string();
+    Some(format!("{}/zp/api/script?u={encoded}&kind=module", proxy_origin.trim_end_matches('/')))
+}
+
 /// Rewrite every candidate URL in a `srcset` / `imagesrcset` list, keeping the
 /// descriptors (`2x`, `640w`) and the list shape intact. Returns `None` when
 /// nothing changed, so the caller can skip the attribute write.
@@ -1561,6 +1708,61 @@ mod tests {
         )
         .unwrap();
         assert!(r.html.contains("charset=utf-8"), "무관한 meta 를 건드렸다 -> {}", r.html);
+    }
+
+    #[test]
+    fn importmap_urls_are_rewritten_to_script_route() {
+        let html = concat!(
+            "<script type=\"importmap\">",
+            "{\"imports\":{\"react\":\"https://cdn.example.com/react.js\",\"util\":\"/lib/util.js\"},",
+            "\"scopes\":{\"/app/\":{\"dep\":\"./dep.js\"}},",
+            "\"integrity\":{\"https://cdn.example.com/react.js\":\"sha384-abc\"}}",
+            "</script>"
+        );
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            r.html.contains("/zp/api/script?u="),
+            "importmap 값이 스크립트 경로로 안 갔다 -> {}",
+            r.html
+        );
+        assert!(r.html.contains("kind=module"), "module kind 가 빠졌다 -> {}", r.html);
+        // SRI 해시는 URL 이 아니다 — 건드리면 integrity 검증이 깨진다.
+        assert!(r.html.contains("sha384-abc"), "integrity 해시를 건드렸다 -> {}", r.html);
+        // 원본 타깃 URL 이 남으면 브라우저가 직접 fetch 한다.
+        assert!(
+            !r.html.contains("https://cdn.example.com/react.js") || r.html.contains("%3A%2F%2Fcdn.example.com"),
+            "raw target URL 이 남았다 -> {}",
+            r.html
+        );
+    }
+
+    #[test]
+    fn speculationrules_urls_are_rewritten() {
+        let html = concat!(
+            "<script type=\"speculationrules\">",
+            "{\"prefetch\":[{\"urls\":[\"/a\",\"https://t.example/b\"]}],",
+            "\"prerender\":[{\"urls\":[\"/next\"]}]}",
+            "</script>"
+        );
+        let r = transform(html, &opts()).unwrap();
+        assert!(
+            r.html.contains("/zp/api/fetch?url="),
+            "prefetch URL 이 fetch 경로로 안 갔다 -> {}",
+            r.html
+        );
+        assert!(r.html.contains("?via="), "prerender URL 이 내비게이션 경로로 안 갔다 -> {}", r.html);
+    }
+
+    #[test]
+    fn nonjson_script_types_still_pass_through() {
+        // 템플릿 스크립트는 예전처럼 원본 유지.
+        let html = "<script type=\"text/x-handlebars\">{{location}}</script>";
+        let r = transform(html, &opts()).unwrap();
+        assert!(r.html.contains("{{location}}"), "템플릿을 건드렸다 -> {}", r.html);
+        // 깨진 JSON 도 그대로 — 브라우저가 어차피 같은 파싱으로 무시한다.
+        let bad = "<script type=\"importmap\">{not json</script>";
+        let r = transform(bad, &opts()).unwrap();
+        assert!(r.html.contains("{not json"), "깨진 JSON 을 건드렸다 -> {}", r.html);
     }
 
     #[test]

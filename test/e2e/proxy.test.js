@@ -488,6 +488,68 @@ function createTargetServer(requests, pendingResponses) {
       res.end(JSON.stringify({ href: url.searchParams.get('href'), userAgent: req.headers['user-agent'] }));
       return;
     }
+    // O4: A-section escape probes executed in a REWRITTEN document — the
+    // inline script exercises real rewriter + membrane semantics (evaluate()
+    // would bypass the rewriter entirely).
+    if (url.pathname === '/escape-probes') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>E2E Escape Probes</title><body><script>
+        (async () => {
+          const out = {};
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          out.virtual = location.href;
+          out.varShadow = (function(){ var location = 'v-shadow'; return location; })();
+          out.letShadow = (function(){ let location = 'l-shadow'; return location; })();
+          out.fnDeclShadow = (function(){ function location(){ return 'f-shadow'; } return location(); })();
+          try { out.thisComputed = (function(){ return this['location'] && this['location'].href; }).call(undefined); }
+          catch (e) { out.thisComputed = 'throw:' + (e && e.name || e); }
+          try { out.globalComputed = globalThis['loc' + 'ation'].href; } catch (e) { out.globalComputed = 'throw:' + (e && e.name || e); }
+          try { out.fnThis = new Function('return this.location.href')(); } catch (e) { out.fnThis = 'throw:' + (e && e.name || e); }
+          try { out.fnThisNull = new Function('return this.location.href').call(null); } catch (e) { out.fnThisNull = 'throw:' + (e && e.name || e); }
+          try { out.evalHref = eval('location.href'); } catch (e) { out.evalHref = 'throw:' + (e && e.name || e); }
+          try { out.evalArith = eval('40+2'); } catch (e) { out.evalArith = 'throw:' + (e && e.name || e); }
+          try { const d = Object.getOwnPropertyDescriptor(window, 'location'); out.gopdHref = d && d.get ? d.get.call(window).href : 'no-getter'; }
+          catch (e) { out.gopdHref = 'throw:' + (e && e.name || e); }
+          try { const g = window.__lookupGetter__('location'); out.lookupGetter = g ? g.call(window).href : 'no-getter'; }
+          catch (e) { out.lookupGetter = 'throw:' + (e && e.name || e); }
+          try {
+            const f = document.createElement('iframe');
+            document.body.appendChild(f);
+            out.contentDocLocation = f.contentDocument.location.href;
+            f.remove();
+          } catch (e) { out.contentDocLocation = 'throw:' + (e && e.name || e); }
+          try { navigation.navigate('javascript:window.__navEsc=1'); out.navigationJs = 'returned'; }
+          catch (e) { out.navigationJs = 'blocked:' + (e && e.name || e); }
+          out.navEscaped = window.__navEsc === 1 ? 'escaped' : 'clean';
+          out.navCurrentEntry = navigation && navigation.currentEntry ? navigation.currentEntry.url : 'no-entry';
+          try {
+            const c = open('javascript:window.opener.__openEsc=1', '_blank');
+            if (!c) out.openJs = 'null-return';
+            else { try { out.openJs = String(c.location && c.location.href); } catch (e2) { out.openJs = 'inner:' + (e2 && e2.name || e2); } try { c.close(); } catch {} }
+          } catch (e) { out.openJs = 'throw:' + (e && e.name || e); }
+          out.openEscaped = window.__openEsc === 1 ? 'escaped' : 'clean';
+          try {
+            const f2 = document.createElement('iframe');
+            document.body.appendChild(f2);
+            await new Promise(r => { f2.addEventListener('load', r); setTimeout(r, 3000); });
+            try { out.framesIndex = frames[0].location.href; } catch (e) { out.framesIndex = 'throw:' + (e && e.name || e); }
+            f2.remove();
+          } catch (e) { out.framesIndex = 'outer:' + (e && e.name || e); }
+          try {
+            const m = document.createElement('meta');
+            m.setAttribute('http-equiv', 'refresh');
+            m.setAttribute('content', '0;url=javascript:window.__metaEsc=1');
+            document.head.appendChild(m);
+            await sleep(250);
+            out.metaRefresh = window.__metaEsc === 1 ? 'escaped' : 'neutralized';
+            m.remove();
+          } catch (e) { out.metaRefresh = 'throw:' + (e && e.name || e); }
+          out.diagnostics = Array.isArray(window.__zp_diagnostics) ? window.__zp_diagnostics.length : -1;
+          window.__escapeProbes = out;
+        })();
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -2055,6 +2117,70 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   // D4 / D5 gateway stubs — construction succeeds but operations fail-closed.
   await t.test('webTransport', () => { assert.match(escapeMatrix.webTransport, /^(?:gateway-stub|absent)/, `WebTransport leak: ${escapeMatrix.webTransport}`); });
   await t.test('rtcPeerConnection', () => { assert.match(escapeMatrix.rtcPeerConnection, /^(?:gateway-stub|absent)/, `RTCPeerConnection leak: ${escapeMatrix.rtcPeerConnection}`); });
+  });
+
+  // O4: A-section escape verification in a REWRITTEN document. Every probe
+  // must either return a virtual surface or fail closed — a proxy-origin URL
+  // or a real-global leak anywhere is a regression.
+  await t.test('A-section escapes stay virtual or fail closed', async t => {
+    await page.evaluate(target => { __zp_get(globalThis, 'location').href = target; }, `http://${targetHost}:${targetPort}/escape-probes`);
+    await page.waitForFunction(() => window.__escapeProbes, { timeout: 30000 });
+    const probes = await page.evaluate(() => window.__escapeProbes);
+    fs.writeFileSync(path.join(artifacts, 'e1-escape-probes.json'), JSON.stringify(probes, null, 2));
+    const virtual = probes.virtual;
+    const virtualURLRe = /^https?:\/\//;
+    const noProxy = v => typeof v === 'string' && !v.includes('proxy.localhost') && !v.includes('/zp/');
+    await t.test('var/function shadowing keeps local binding', () => {
+      assert.equal(probes.varShadow, 'v-shadow');
+      assert.equal(probes.letShadow, 'l-shadow');
+      assert.equal(probes.fnDeclShadow, 'f-shadow');
+    });
+    await t.test('computed members on this/globalThis virtualize', () => {
+      assert.equal(probes.thisComputed, virtual, `this['location']: ${probes.thisComputed}`);
+      assert.equal(probes.globalComputed, virtual, `globalThis['loc'+'ation']: ${probes.globalComputed}`);
+    });
+    await t.test('dynamic Function this maps to virtual global', () => {
+      assert.equal(probes.fnThis, virtual, `Function this: ${probes.fnThis}`);
+      assert.equal(probes.fnThisNull, virtual, `Function.call(null) this: ${probes.fnThisNull}`);
+    });
+    await t.test('eval expression resolves virtual location', () => {
+      assert.equal(probes.evalHref, virtual, `eval location.href: ${probes.evalHref}`);
+      assert.equal(probes.evalArith, 42);
+    });
+    await t.test('GOPD and __lookupGetter__ return membrane getters', () => {
+      assert.equal(probes.gopdHref, virtual, `GOPD get(): ${probes.gopdHref}`);
+      assert.equal(probes.lookupGetter, virtual, `__lookupGetter__: ${probes.lookupGetter}`);
+    });
+    await t.test('iframe contentDocument.location exposes no proxy URL', () => {
+      assert.match(probes.contentDocLocation, virtualURLRe, `contentDocument.location: ${probes.contentDocLocation}`);
+      assert.ok(noProxy(probes.contentDocLocation), `contentDocument.location leaked proxy: ${probes.contentDocLocation}`);
+    });
+    await t.test('navigation.navigate refuses javascript:', () => {
+      // Either the URL classifier (TARGET_PROTOCOL_BLOCKED → plain Error) or
+      // the facade's isHTTPURL gate (NotSupportedError DOMException) blocks —
+      // both are fail-closed; what matters is it threw and nothing executed.
+      assert.match(probes.navigationJs, /^blocked:/, `navigation.navigate: ${probes.navigationJs}`);
+      assert.equal(probes.navEscaped, 'clean');
+      assert.equal(probes.navCurrentEntry, virtual, `navigation.currentEntry.url: ${probes.navCurrentEntry}`);
+    });
+    await t.test('open() does not execute javascript: URLs', () => {
+      assert.equal(probes.openEscaped, 'clean');
+      assert.ok(noProxy(probes.openJs) || probes.openJs === 'null-return' || probes.openJs === 'throw:NotSupportedError', `open() child leak: ${probes.openJs}`);
+    });
+    await t.test('frames[i] surfaces a contained window', () => {
+      assert.ok(noProxy(probes.framesIndex) || probes.framesIndex === 'throw:SecurityError', `frames[0].location leak: ${probes.framesIndex}`);
+    });
+    await t.test('dynamic meta refresh with javascript: is neutralized', () => {
+      assert.equal(probes.metaRefresh, 'neutralized', `meta refresh: ${probes.metaRefresh}`);
+    });
+    await t.test('diagnostics surface exists but stays hidden from page scope', async () => {
+      // The fixture read returns -1 — `__zp_diagnostics` is ZP_HIDDEN_RE-
+      // filtered on the scope proxy, as intended. The real surface is on the
+      // real window, reachable from CDP but not from page code.
+      assert.equal(probes.diagnostics, -1);
+      assert.ok(await page.evaluate(() => Array.isArray(window.__zp_diagnostics)), '__zp_diagnostics missing on real window');
+    });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
 
   await t.test('cross-virtual-origin frames cannot read parent Location', async () => {

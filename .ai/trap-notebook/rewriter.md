@@ -1012,3 +1012,48 @@ RTCPeerConnection/WebTransport 스텁의 동기/비동기·동일성(`wt.ready =
 rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 (documentOrigin/webTransport/rtcPeerConnection 포함).
 
+
+## <a id="withscope-get-숨김"></a>withScope 의 get 이 `__zp_*` 를 숨겨 모든 리라이트 스크립트 사망 (2026-09-22)
+
+- **원인:** `withScope` 프록시는 `has` 가 모든 이름에 `true` 를 돌려 `with(withScope)` 안의 리라이트 코드가 실제 전역으로 새지 않게 한다 — 그런데 `get` 에 `ZP_HIDDEN_RE` 필터가 들어가면 `__zp_get`/`__zp_set` 도 undefined 를 돌려준다. 결과적으로 **모든** 리라이트 스크립트가 `Proxy.__zp_dyn__` 스택과 함께 즉사하고, e2e 는 원인 불명의 전면 타임아웃으로 보인다. `has`/`get` 불일치는 항상 이중 점검한다.
+- **수정:** `scopeGet(prop, hide)` 로 분리 — 페이지 대면 `scope` 는 `hide=true`(ZP_HIDDEN_RE 필터), 내부 실행 `withScope` 는 `hide=false`. 페이지 코드에서 `window.__zp_diagnostics` 가 `-1`/undefined 로 보이는 것은 버그가 아니라 의도된 숨김이다 — 진짜 window 의 own 프로퍼티에는 있고 CDP 에서만 읽힌다.
+- **검증:** `test/e2e/proxy.test.js` 의 `diagnostics surface exists but stays hidden from page scope` 가 양쪽을 고정. e2e 129/129 (2026-09-22).
+
+## <a id="네이티브-url-섀도잉"></a>`root.URL` 래퍼가 prelude 내부의 bare `new URL` 까지 가로챔 (2026-09-22)
+
+- **원인:** H-a(virtual URL 표면)가 `root.URL` 을 ZPURL 래퍼로 덮었다. prelude IIFE 내부의 `new URL(...)` 도 전역 조회라 래퍼를 타고, `unleakedTargetRaw('/zp/p/…')` 가 **share 경로를 타깃 URL 로 풀어** `proxyAbsoluteURL`/`proxyHistoryURL` 이 타깃 URL 을 반환 → 네이티브 `history.pushState` 에 타깃 URL 이 도달해 `SecurityError`/`History entry` 단언 실패.
+- **수정:** IIFE 상단에 `const URL = Native.URL || root.URL` 로 섀도잉해 내부 경로를 네이티브 생성자로 고정한다. `const` 는 TDZ 라 선언 지점보다 위의 `new URL` 사용을 반드시 먼저 확인한다. worker-prelude 도 동일 패턴.
+- **연계 함정:** 래퍼는 `arguments.length > 1` 대신 `base !== undefined` 로 판정해야 한다 — `zp-core.canonicalTargetURL` 이 항상 `new URL(input, base || undefined)` 로 2인자를 넘기는데, `undefined` 를 네이티브에 넘기면 `'undefined'` 문자열 base 로 파싱돼 `Invalid base URL`. WebIDL 에서 명시적 `undefined` 는 "없음"과 동일하다.
+- **검증:** history entry 단언 + 폼/프레임 share URL 경로가 e2e 129/129 에서 회복.
+
+## <a id="네이티브-own-접근자-오인"></a>Chrome 의 네이티브 own 접근자를 page-installed 로 오인 — `this=scope` 로 호출돼 Illegal invocation (2026-09-22)
+
+- **원인:** scope `get` 트랩의 page-installed-accessor 분기가 `own.configurable && own.get` 만으로 판정했다. Chrome 은 `performance`/`navigator` 등을 window 의 own configurable getter 로 노출하므로, 이 getter 를 `this=scope` 로 호출 → `Illegal invocation`/`TypeError: 'Ge' before initialization` 계열. `window.performance.timeOrigin` 읽기만으로 죽었다.
+- **수정:** 부팅 시점에 window own 프로퍼티 디스크립터를 스냅샷해 두고, getter/setter identity 가 스냅샷과 같으면 네이티브로 간주해 진짜 receiver(root)로 호출한다. 페이지가 나중에 덮어쓴(identity 변경) 접근자만 `this=scope` 로 실행 — `Object.defineProperty(window,'x',{get(){return this.location}})` 후 `window.x` 에서 가상 location 이 나오는 계약 유지.
+- **검증:** escape matrix `performanceTimeOrigin` 통과 + `GOPD and __lookupGetter__ return membrane getters` (A5b 계약) 동시 만족. e2e 129/129.
+
+## <a id="설치-순서-tdz"></a>멤브레인 설치 시퀀스보다 뒤의 `let` 선언이 TDZ ReferenceError (2026-09-22)
+
+- **원인:** `window.name` 백킹 accessor(`Ge`)가 `let` 으로 선언됐는데 설치 호출 지점보다 소스상 뒤에 있었다. 부팅 중 설치 단계가 그 accessor 를 발사 → `ReferenceError: 'Ge' before initialization` 로 prelude 전체가 죽고 e2e 전면 타임아웃.
+- **수정:** 설치 시퀀스가 참조하는 `let`/`const` 선언은 호출 지점보다 위에 둔다. 번들러가 순서를 보존하므로 소스 순서가 곧 실행 순서다.
+- **검증:** e2e 129/129. 같은 성격의 위험은 "install 스텝이 참조하는 후방 선언" 스캔으로 확인 가능.
+
+## <a id="worker-readonly-전역"></a>worker-prelude 의 strict 대입이 getter-only 전역에서 TypeError (2026-09-22)
+
+- **원인:** worker-prelude 상단이 `'use strict'` 인데 `self.indexedDB = …` 같은 대입을 했다. `indexedDB`/`caches`/`cookieStore` 는 WorkerGlobalScope 의 getter-only 접근자라 strict 컨텍스트에서 대입이 TypeError → 워커 부팅 사망 → `importScripts` 도 못 불러 `dynamic scripts and module worker integration` 타임아웃.
+- **수정:** 대입 대신 `Object.defineProperty(self, name, { value, configurable: true })`. 페이지 전역과 달리 worker 전역은 멤브레인 없이 직접 속성을 심으므로 이 규칙이 항상 적용된다.
+- **검증:** e2e `dynamic scripts and module worker integration` 복구, 129/129.
+
+## <a id="assign-평가순서"></a>`x[k] op= v` 의 eager RHS 평가가 네이티브 평가 순서를 깸 — accessor-adapter 방출로 수정 (2026-09-22)
+
+- **원인:** 대입류를 `__zp_assign(base, prop, () => rhs)` 형태로 방출하면 thunk 안의 RHS 가 호출 인자 평가 시점에 먼저 돌아 순서가 `base→rhs→get→set`. 네이티브는 `base→get→rhs→set` 이다. getter 부작용을 관찰하는 페이지 코드에서 순서 차이가 드러난다. `await`/`?.` 가 끼면 thunk 경로는 더 깨진다.
+- **수정:** `x[k]++` 에 이미 쓰이던 accessor-adapter 패턴으로 통일 — 네이티브가 평가 순서·short-circuit·await 를 전부 소유하고 우리는 `{get,set}` 어댑터만 넘긴다. GLOBAL_ASSIGN 은 `__zp_get`/`__zp_set` 인라인 조합(thunk 없음 → await 생존), WITH_ASSIGN 은 값을 항상 thunk 로(한 번만 평가; with+await 는 기존대로 fail-closed). prelude `assign` 은 논리/비논리 모두 `value()` 호출로 통일.
+- **연계 수정:** `new Function('return this').call(null)` — 바깥 `anonymous` 래퍼가 sloppy 면 call-site 의 `null` this 가 경계에서 실제 globalThis 로 강제변환돼 inner 가 real window 를 받는 탈출. 바깥 래퍼를 strict 로 하되 **`...callArgs` rest 파라미터가 있으면 `'use strict'` 지시어가 불법**이라 파라미터 없는 래퍼 + `arguments` 를 쓴다. `nestedCall` 은 `thisArg === root` 도 가상 전역으로 매핑.
+- **검증:** `crates/zp-rewriter/tests/matrix.rs` 17/17, `test/js/prelude-units.test.js`(신규 유닛 하니스) — 이 테스트가 실제 `this` 탈출을 잡아냈다. e2e 129/129.
+
+## <a id="e2e-리라이트-문서-프로브"></a>탈출 검증은 리라이트된 문서 안에서 해야 한다 — CDP evaluate 는 대상이 아니다 (2026-09-22)
+
+- **규칙:** A-섹션 탈출(var/function shadowing, `this['location']`, Function receiver, eval, GOPD/`__lookupGetter__`, `contentDocument.location`, `navigation.navigate`, `open`, `frames[i]`, 동적 meta refresh)을 검증하려면 프로브 코드 자체가 OXC 리라이터와 멤브레인을 통과해야 한다. `page.evaluate` 로 주입한 코드는 리라이트를 안 거치므로 다른 시스템을 측정하게 된다.
+- **방법:** 타깃 fixture 라우트(`/escape-probes`)에 `<script>` 로 프로브를 넣고 `window.__escapeProbes` 에 결과를 기록 → e2e 가 그 객체를 읽어 카테고리별 단언. 네비게이션 탈출은 `page.url()` 오리진이 proxy 인 것까지 확인한다.
+- **미묘한 지점:** `navigation.navigate('javascript:…')` 는 `NotSupportedError` 가 아니라 `TARGET_PROTOCOL_BLOCKED`(plain Error, name=`Error`)로 먼저 막힌다 — URL 분류기가 isHTTPURL 게이트보다 앞서 던진다. 둘 다 fail-closed 라 `blocked:` 접두만 단언한다.
+- **검증:** `test/e2e/proxy.test.js` `A-section escapes stay virtual or fail closed` 11개 subtest. e2e 129/129 (2026-09-22).

@@ -187,12 +187,6 @@
     "why": "object-src 'none' — plugin 표면 금지 (object:data 와 같은 이유)"
   },
   {
-    "pair": "script:importmap",
-    "kind": "known-gap",
-    "case": null,
-    "why": "<script type=importmap> 의 JSON 본문이 모듈 지정자를 절대 URL 로 매핑한다. 리라이트하려면 JSON 파싱이 필요하다. 현재는 script-src 자기 자신만 허용이라 csp-only."
-  },
-  {
     "pair": "iframe:src",
     "kind": "special",
     "case": "a10-static-iframe",
@@ -212,8 +206,26 @@
   },
   {
     "pair": "script:href",
-    "kind": "known-gap",
+    "kind": "rewrite",
     "case": null,
-    "why": "SVG <script href> 는 스크립트를 로드한다. 페이지 realm(isSVGURLBearing)은 이미 다루는데 htmltx 에는 없다 — 정적 SVG script 칸을 만들어 재 보고 분류를 정할 것"
+    "why": "SVG script 는 src 가 아니라 href 로 로드 — 서브리소스 리라이트로 해결"
+  },
+  {
+    "pair": "script:xlink:href",
+    "kind": "rewrite",
+    "case": null,
+    "why": "SVG script xlink:href — script:href 와 동일 표면"
+  },
+  {
+    "pair": "use:xlink:href",
+    "kind": "rewrite",
+    "case": null,
+    "why": "SVG use 의 xlink 변형 — use:href 와 동일"
+  },
+  {
+    "pair": "a:xlink:href",
+    "kind": "navigation",
+    "case": null,
+    "why": "SVG 앵커의 xlink 변형 — a:href 와 같은 내비게이션"
   }
 ]

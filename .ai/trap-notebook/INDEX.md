@@ -6,6 +6,13 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | e2e / 규칙 | 탈출 검증은 리라이트된 문서 안 프로브로 — page.evaluate 는 리라이터를 안 거쳐 다른 시스템을 잰다. | rewriter.md#e2e-리라이트-문서-프로브 |
+| 2026-09-22 | rewriter / 수정 | `x[k] op= v` 의 eager RHS 가 평가 순서를 깼다 — accessor-adapter 방출로 네이티브가 순서를 소유. sloppy 래퍼의 `call(null)` 도 this 탈출이었다. | rewriter.md#assign-평가순서 |
+| 2026-09-22 | worker / 수정 | worker 전역의 getter-only 접근자(indexedDB 등)에 strict 대입하면 부팅 사망 — defineProperty 로 심는다. | rewriter.md#worker-readonly-전역 |
+| 2026-09-22 | membrane / 수정 | 설치 시퀀스 뒤의 `let` 선언은 TDZ 로 prelude 전체를 죽인다 — 참조 선언은 호출 지점 위에. | rewriter.md#설치-순서-tdz |
+| 2026-09-22 | membrane / 수정 | Chrome 네이티브 own 접근자(performance 등)를 page-installed 로 오인해 `this=scope` 호출 → 부팅 스냅샷으로 구분. | rewriter.md#네이티브-own-접근자-오인 |
+| 2026-09-22 | membrane / 수정 | `root.URL` 래퍼가 prelude 내부 `new URL` 도 가로채 share→target 오해석 — IIFE 에 `const URL = Native.URL` 섀도잉. `undefined` base 도 누수. | rewriter.md#네이티브-url-섀도잉 |
+| 2026-09-22 | membrane / 수정 | `withScope.get` 이 `__zp_*` 를 숨기면 모든 리라이트 스크립트 즉사 — 페이지 대면 scope 만 숨긴다. | rewriter.md#withscope-get-숨김 |
 | 2026-09-14 | SharedWorker / 격리 | 부트 순서상 나중 훅이 타깃별 이름 접두어를 덮어써 SharedWorker 격리가 죽어 있었다 — 모양 축을 쫓다 발견. | rewriter.md#프로토타입-모양-축 |
 | 2026-09-14 | 회귀가드 / 드리프트 | document.origin 자체가 최신 Chrome/Edge에서 사라졌다. escape-matrix 테스트가 죽은 전제 위에 있었다 — 실측 후 전제를 갱신. | rewriter.md#프로토타입-모양-축 |
 | 2026-09-14 | 지문 / 컨테인먼트 | 모양 축 6개 전부 닫음. baseURI 를 Node.prototype 으로 옮기며 element.baseURI 실유출도 막힘. 대체 클래스는 네이티브 own 이름을 규칙으로 베낀다. | rewriter.md#프로토타입-모양-축 |
