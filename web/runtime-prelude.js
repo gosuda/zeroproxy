@@ -1758,7 +1758,13 @@
     const E = root.Error;
     if (!E) return;
     let userPrepare = null;
-    function sanitizeFrameText(v) { return v == null ? v : deproxyURL(String(v), { scan: true, fallback: 'share' }); }
+    // 프레임 텍스트에는 URL 만이 아니라 **우리 내부 식별자**도 섞인다 —
+    // `at Proxy.__zp_dyn__ (…)` 처럼. 페이지에는 원본 스크립트의 함수명만이
+    // 의미가 있으니 `__zp_*` 이름은 중립 식별자로 지운다.
+    function sanitizeFrameText(v) {
+      if (v == null) return v;
+      return deproxyURL(String(v), { scan: true, fallback: 'share' }).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
+    }
     function frameFacade(f) {
       return new Proxy(f, {
         get(t, p) {
@@ -6368,7 +6374,11 @@
       const via = u.searchParams.get('via');
       if (via) return via;
       if (fallback === 'any') return virtualURL.href;
-      if (fallback === 'share' && ZP.isSharePath(p)) return virtualURL.href;
+      // share 폴백은 `/zp/p/`·`?via=` 만이 아니라 **모든 `/zp/` 내부 경로**를
+      // 흡수한다 — `/zp/assets/*`·`/zp/control/*` 가 스택 프레임이나 속성
+      // 직렬화에 그대로 새어 나가는 것보다 페이지 가상 URL 로 매핑하는 쪽이
+      // 항상 안전하다(§L errorStack 지문 경로).
+      if (fallback === 'share' && (ZP.isSharePath(p) || p.startsWith('/zp/'))) return virtualURL.href;
       return m;
     };
     if (scan) return s.replace(proxyURLScanRE(), one);

@@ -557,7 +557,9 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
   //    타이밍은 공유 문서 경로일 때만, 직렬화는 없는 값을 지어내지 않는다.
   const unknown = PROXY + '/zp/whatever';
   assert.equal(f(unknown, { fallback: 'any' }), VIRT, "폼: 모르면 문서 타깃");
-  assert.equal(f(unknown, { fallback: 'share' }), unknown, '타이밍: 공유 경로가 아니면 그대로');
+  // share 폴백은 **모든** `/zp/` 내부 경로를 문서 타깃으로 흡수한다 —
+  // `/zp/assets/*`·`/zp/control/*` 가 스택·직렬화에 새는 것보다 가상 URL 이 안전.
+  assert.equal(f(unknown, { fallback: 'share' }), VIRT, '타이밍: /zp/ 내부 경로는 문서 타깃으로 흡수');
   assert.equal(f(PROXY + '/zp/p/tok', { fallback: 'share' }), VIRT, '타이밍: 공유 경로는 문서 타깃');
   assert.equal(f(unknown, { scan: true }), unknown, '직렬화: 없는 값을 지어내지 않는다');
 

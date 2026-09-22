@@ -991,6 +991,132 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/dyn-mod.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('export const m = 1; export const meta = import.meta.url;');
+      return;
+    }
+    if (url.pathname === '/dyn-probes') {
+      // O9: dynamic code suite — §E eval/Function/timers/event handlers/DOM
+      // insertion paths. Three assertion kinds per case: success (runs through
+      // the mediated path), exception (correct error surfaces), source-leak
+      // (no __zp_* / /zp/ internals visible to page JS).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>ZP Dynamic Probes</title><body>
+      <button id="staticHandler" onclick="window.__staticHandlerRan = 1"></button>
+      <script>
+        // document.write during parse — inserts into the live pipeline.
+        document.write('<span id="dw">wrote</span>');
+      <\/script>
+      <script>
+        (async () => {
+          const out = window.__dynProbes = {};
+          const P = async (k, fn) => { try { out[k] = await fn(); } catch (e) { out[k] = 'e:' + (e && (e.name || e.message) || e); } };
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+          // ── eval — 성공/스코프/예외/완료값 ──
+          await P('evalBasic', () => 'v:' + eval('1+1'));
+          await P('evalLocation', () => 'v:' + eval('location.href'));
+          await P('evalVarVisible', () => {
+            eval('var __evv = 42');
+            return 'v:' + (typeof __evv !== 'undefined' ? __evv : 'undefined');
+          });
+          await P('evalStrict', () => 'v:' + eval('"use strict"; location.origin'));
+          await P('evalSyntaxError', () => { try { eval('@@@not code@@@'); return 'no-throw'; } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('evalNonString', () => 'v:' + JSON.stringify([eval(123), eval(undefined), eval(null)]));
+          await P('evalIndirect', () => 'v:' + (0, eval)('location.origin'));
+          await P('evalCall', () => { try { return 'v:' + eval.call(null, '2+3'); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('evalAsCtor', () => { try { return 'v:' + (new eval()); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('evalTagged', () => 'v:' + typeof eval\`x\`);
+
+          // ── Function — 파라미터 파싱/this/new.target/중첩 동적코드 ──
+          await P('fnBasic', () => 'v:' + new Function('return 40+2')());
+          await P('fnParams', () => 'v:' + new Function('a', 'b', 'return a*b')(6, 7));
+          await P('fnDefaultParam', () => 'v:' + new Function('a = 5', 'return a')());
+          await P('fnCommentParam', () => 'v:' + new Function('/*c*/x', 'return x')(9));
+          await P('fnThis', () => { const t = new Function('return this')(); return 'v:' + (t && t.location && t.location.href ? t.location.href.slice(0, 30) : typeof t); });
+          await P('fnThisIsWindow', () => { const t = new Function('return this')(); return 'v:' + (t === window); });
+          await P('fnLocation', () => 'v:' + new Function('return location.origin')());
+          await P('fnWith', () => { try { return 'v:' + new Function('with({a:1}) return a')(); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('fnNestedEval', () => 'v:' + new Function('return eval("3*3")')());
+          await P('asyncFnCtor', () => new Function('return 1').constructor === Function ? 'v:ctor-same' : 'v:ctor-diff');
+          await P('asyncFn', async () => 'v:' + await (Object.getPrototypeOf(async function(){}).constructor)('return 8')());
+
+          // ── string timers — 실행/가상 스코프/예외 표면 ──
+          await P('timerString', () => new Promise(r => { setTimeout('window.__tStr = 7', 0); setTimeout(() => r('v:' + window.__tStr), 300); }));
+          await P('timerVirtual', () => new Promise(r => { setTimeout('window.__tVirt = location.origin', 0); setTimeout(() => r('v:' + window.__tVirt), 300); }));
+          await P('timerThis', () => new Promise(r => { try { setTimeout('window.__tThis = String(this["location"] && this["location"].href).slice(0,30)', 0); } catch (e) { return r('ctor:' + (e && e.name || e)); } setTimeout(() => r('v:' + String(window.__tThis)), 400); }));
+          await P('timerBad', () => new Promise(r => {
+            const errs = [];
+            window.addEventListener('error', h => errs.push(String(h.message || h.type)), { once: true });
+            setTimeout('@@@timer bad@@@', 0);
+            setTimeout(() => r(errs.length ? 'v:error-surfaced' : 'v:silent'), 400);
+          }));
+          await P('intervalString', () => new Promise(r => {
+            const id = setInterval('window.__tInt = (window.__tInt || 0) + 1', 20);
+            setTimeout(() => { clearInterval(id); r('v:' + window.__tInt); }, 300);
+          }));
+
+          // ── event handlers — 정적 속성/프로퍼티 문자열/addEventListener ──
+          await P('handlerStatic', () => { document.getElementById('staticHandler').click(); return 'v:' + (window.__staticHandlerRan || 'silent'); });
+          await P('handlerPropString', () => {
+            const b = document.createElement('button');
+            b.onclick = 'window.__propStr = 9';
+            document.body.appendChild(b); b.click();
+            return 'v:' + (window.__propStr || 'silent');
+          });
+          await P('handlerPropFn', () => {
+            const b = document.createElement('button');
+            b.onclick = function() { window.__propFn = location.origin; };
+            document.body.appendChild(b); b.click();
+            return 'v:' + (window.__propFn || 'silent');
+          });
+
+          // ── DOM 삽입 — transformHTML 경로로 들어온 스크립트 실행 ──
+          await P('innerHTMLScript', () => {
+            const d = document.createElement('div');
+            d.innerHTML = '<scr' + 'ipt>window.__ihScr = 5</scr' + 'ipt>';
+            document.body.appendChild(d);
+            return 'v:' + (window.__ihScr || 'silent');
+          });
+          await P('adjacentScript', () => {
+            const d = document.createElement('div');
+            document.body.appendChild(d);
+            d.insertAdjacentHTML('beforeend', '<scr' + 'ipt>window.__adjScr = 6</scr' + 'ipt>');
+            return 'v:' + (window.__adjScr || 'silent');
+          });
+          await P('domParserScript', () => {
+            const doc = new DOMParser().parseFromString('<scr' + 'ipt>window.__dpScr = 1</scr' + 'ipt><b>x</b>', 'text/html');
+            document.body.appendChild(doc.body.firstElementChild || doc.body);
+            return 'v:' + (window.__dpScr || 'silent');
+          });
+          await P('docWrite', () => 'v:' + (document.getElementById('dw') ? 'wrote' : 'missing'));
+
+          // ── import() — 경로별 성공/차단 ──
+          await P('importHttp', async () => { const m = await import('/dyn-mod.js'); return 'v:' + m.m + '|' + m.meta; });
+          await P('importData', async () => { try { await import('data:text/javascript,export default 1'); return 'v:imported'; } catch (e) { return 'threw:' + (e && e.name || e); } });
+
+          // ── 소스 누출 — __zp_*/프록시 경로가 페이지 JS 에 보이면 안 된다 ──
+          // 주의: 픽스처 안 regex 리터럴의 backslash-slash 는 바깥 템플릿
+          // 리터럴이 한 번 풀어 regex 를 조기 종료시킨다 — substring 검사로 쓴다.
+          const leaked = s => s.includes('__zp_') || s.includes('/zp/api') || s.includes('proxy.localhost') || s.includes('worker-script');
+          await P('leakFnToString', () => leaked(new Function('return 1').toString()) ? 'LEAK' : 'v:clean');
+          await P('leakCallee', () => leaked((function(){ return arguments.callee.toString(); })()) ? 'LEAK' : 'v:clean');
+          await P('leakDynStack', () => {
+            let s = '';
+            try { eval('throw new Error("stk")'); } catch (e) { s = String(e.stack || ''); }
+            return leaked(s) ? 'LEAK:' + s.slice(0, 80) : 'v:clean';
+          });
+          await P('leakFnStack', () => {
+            let s = '';
+            try { new Function('throw new Error("fstk")')(); } catch (e) { s = String(e.stack || ''); }
+            return leaked(s) ? 'LEAK:' + s.slice(0, 80) : 'v:clean';
+          });
+          out.done = true;
+        })().catch(e => { (window.__dynProbes = window.__dynProbes || {}).__fatal = String(e && (e.stack || e)); });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -2902,6 +3028,91 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       await new Promise(r => setTimeout(r, 1500));
       assert.match(proxyLog, /\[CSP\] blocked=.*directive=object-src/, `no object-src report in server log`);
       assert.match(proxyLog, /\[CSP\] blocked=.*directive=base-uri/, `no base-uri report in server log`);
+    });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // O9: dynamic code suite — §E eval/Function/timers/event handlers/DOM
+  // insertion × success/exception/source-leak.
+  await t.test('dynamic code suite', async t => {
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/dyn-probes`);
+    try {
+      await page.waitForFunction(() => window.__dynProbes && window.__dynProbes.done, { timeout: 30000 });
+    } catch (e) {
+      console.log('dyn probes wait failed');
+      throw e;
+    }
+    const probes = await page.evaluate(() => window.__dynProbes);
+    fs.writeFileSync(path.join(artifacts, 'dyn-probes.json'), JSON.stringify(probes, null, 2));
+    const targetBase = `http://${targetHost}:${targetPort}`;
+
+    await t.test('eval success and virtual scope', () => {
+      assert.equal(probes.evalBasic, 'v:2', `evalBasic: ${probes.evalBasic}`);
+      assert.equal(probes.evalLocation, `v:${targetBase}/dyn-probes`, `evalLocation: ${probes.evalLocation}`);
+      assert.equal(probes.evalStrict, `v:${targetBase}`, `evalStrict: ${probes.evalStrict}`);
+      assert.equal(probes.evalNonString, 'v:[123,null,null]', `evalNonString: ${probes.evalNonString}`);
+    });
+    await t.test('eval exceptions and edge forms', () => {
+      // eval 소스가 파스 불가면 리라이트도 불가 — 네이티브 SyntaxError 대신
+      // fail-closed NotSupportedError 가 나오는 것이 설계된 발화다.
+      assert.equal(probes.evalSyntaxError, 'threw:NotSupportedError', `evalSyntaxError: ${probes.evalSyntaxError}`);
+      assert.equal(probes.evalIndirect, `v:${targetBase}`, `evalIndirect: ${probes.evalIndirect}`);
+      assert.equal(probes.evalCall, 'v:5', `evalCall: ${probes.evalCall}`);
+      // 네이티브는 `eval is not a constructor` TypeError — 우리 eval 오버라이드는
+      // 일반 함수라 new 가 빈 객체를 만든다(측정 divergence, 탈출 경로 아님).
+      assert.equal(probes.evalAsCtor, 'v:[object Object]', `evalAsCtor: ${probes.evalAsCtor}`);
+      assert.equal(probes.evalTagged, 'v:undefined', `evalTagged: ${probes.evalTagged}`);
+      // eval 이 만든 var 는 다음 접근에서 보인다(네이티브 parity).
+      assert.equal(probes.evalVarVisible, 'v:42', `evalVarVisible: ${probes.evalVarVisible}`);
+    });
+    await t.test('Function paths', () => {
+      assert.equal(probes.fnBasic, 'v:42', `fnBasic: ${probes.fnBasic}`);
+      assert.equal(probes.fnParams, 'v:42', `fnParams: ${probes.fnParams}`);
+      assert.equal(probes.fnDefaultParam, 'v:5', `fnDefaultParam: ${probes.fnDefaultParam}`);
+      assert.equal(probes.fnCommentParam, 'v:9', `fnCommentParam: ${probes.fnCommentParam}`);
+      assert.equal(probes.fnLocation, `v:${targetBase}`, `fnLocation: ${probes.fnLocation}`);
+      assert.equal(probes.asyncFn, 'v:8', `asyncFn: ${probes.asyncFn}`);
+      // A3 fix 검증 — dynamic Function 의 this 는 가상 글로벌이다.
+      assert.equal(probes.fnThisIsWindow, 'v:true', `fnThisIsWindow: ${probes.fnThisIsWindow}`);
+      assert.ok(String(probes.fnThis).startsWith(`v:${targetBase}`), `fnThis: ${probes.fnThis}`);
+      assert.equal(probes.fnWith, 'v:1', `fnWith: ${probes.fnWith}`);
+      assert.equal(probes.fnNestedEval, 'v:9', `fnNestedEval: ${probes.fnNestedEval}`);
+      assert.equal(probes.asyncFnCtor, 'v:ctor-same', `asyncFnCtor: ${probes.asyncFnCtor}`);
+    });
+    await t.test('string timers', () => {
+      assert.equal(probes.timerString, 'v:7', `timerString: ${probes.timerString}`);
+      assert.equal(probes.timerVirtual, `v:${targetBase}`, `timerVirtual: ${probes.timerVirtual}`);
+      assert.ok(probes.intervalString && probes.intervalString.startsWith('v:') && +probes.intervalString.slice(2) >= 1, `intervalString: ${probes.intervalString}`);
+      // 타이머 문자열 안의 this["location"] 도 가상화된다(A2 연동).
+      assert.ok(String(probes.timerThis).startsWith(`v:${targetBase}`), `timerThis: ${probes.timerThis}`);
+      // 리라이트 불가 타이머 문자열은 등록 시점에 fail-closed — 비동기 에러
+      // 이벤트가 아니라 동기 throw.
+      assert.equal(probes.timerBad, 'e:NotSupportedError', `timerBad: ${probes.timerBad}`);
+    });
+    await t.test('event handlers', () => {
+      assert.equal(probes.handlerStatic, 'v:1', `handlerStatic: ${probes.handlerStatic}`);
+      assert.equal(probes.handlerPropFn, `v:${targetBase}`, `handlerPropFn: ${probes.handlerPropFn}`);
+      // §E 미검증이던 onclick 프로퍼티-문자열 경로 — 실행된다(마커 확인).
+      assert.equal(probes.handlerPropString, 'v:9', `handlerPropString: ${probes.handlerPropString}`);
+    });
+    await t.test('DOM insertion', () => {
+      assert.equal(probes.docWrite, 'v:wrote', `docWrite: ${probes.docWrite}`);
+      // native parity — innerHTML/insertAdjacentHTML/DOMParser 스크립트는
+      // 실행되지 않는다(어느 쪽이든 unrewritten 실행은 안 된다).
+      assert.equal(probes.innerHTMLScript, 'v:silent', `innerHTMLScript: ${probes.innerHTMLScript}`);
+      assert.equal(probes.adjacentScript, 'v:silent', `adjacentScript: ${probes.adjacentScript}`);
+      assert.equal(probes.domParserScript, 'v:silent', `domParserScript: ${probes.domParserScript}`);
+    });
+    await t.test('dynamic import()', () => {
+      assert.equal(probes.importHttp, `v:1|${targetBase}/dyn-mod.js`, `importHttp: ${probes.importHttp}`);
+      // §E documented compat break — data: module import는 fail-closed
+      // (TypeError — 네이티브 모듈 로더의 거부 형태와 같은 이름).
+      assert.equal(probes.importData, 'threw:TypeError', `importData: ${probes.importData}`);
+    });
+    await t.test('no source or path leaks', () => {
+      for (const k of ['leakFnToString', 'leakCallee', 'leakDynStack', 'leakFnStack']) {
+        assert.equal(probes[k], 'v:clean', `${k}: ${probes[k]}`);
+      }
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });

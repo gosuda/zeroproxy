@@ -428,7 +428,9 @@
       } catch {}
       return m;
     }
-    const sanitize = v => v == null ? v : String(v).replace(scanRE, deproxyOne);
+    // URL 만이 아니라 프레임 함수명(`at Proxy.__zp_dyn__`)도 `__zp_` 를 샌다 —
+    // 페이지 realm 과 같이 중립 식별자로 지운다.
+    const sanitize = v => v == null ? v : String(v).replace(scanRE, deproxyOne).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
     let userPrepare = null;
     const zpPrepare = function (error, frames) {
       const wrapped = frames.map(f => new Proxy(f, {

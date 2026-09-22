@@ -1105,3 +1105,11 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 문서 CSP 단언은 `pathname === '/zp/' || '/zp/p/'` + **`report-uri` 포함** 두 조건으로 식별한다. control CSP 에는 report-uri 가 없으므로 정확히 갈린다.
 - **연계 관측:** headless Chrome 은 `<link rel=manifest>` 와 `<link rel=prefetch>` 를 삽입 시점에 fetch 하지 않는다 — 요청이 없으니 `securitypolicyviolation` 도 없다(`no-spv` 가 정상). 디렉티브 존재/부재는 헤더 단언으로 검증한다. `<object>`/`<base>` 는 즉시 SPV 를 발사해 차단 검증에 쓸 수 있다.
 - **검증:** e2e `csp suite` — allowed×blocked×directive 매트릭스 9 subtests, 서버 로그 `[CSP] blocked=` end-to-end 리포트 확인. 162/162.
+
+## <a id="stack-프레임-이중누출"></a>스택 프레임은 URL·함수명 두 채널로 샌다 — CallSite 래핑만으론 V8 기본 포맷이 raw 텍스트를 남긴다 (2026-09-22)
+
+- **원인:** 페이지 스택 새니타이저가 `Error.prepareStackTrace` 안에서 CallSite 의 `getFileName`/`getEvalOrigin`/`toString` 만 래핑했지만, V8 기본 포맷터는 eval 프레임을 `eval at f (http://proxy.localhost/zp/assets/runtime-prelude.js)` 처럼 **평가-기술 텍스트 자체**에 raw URL 을 박아 넣는다 — 래핑한 접근자를 안 거치는 경로. 두 번째 채널은 함수명: `at Proxy.__zp_dyn__ (...)` 처럼 리라이터가 주입한 내부 식별자(`__zp_*`)가 그대로 노출.
+- **수정:** `deproxyURL` 의 `fallback:'share'` 계약을 `/zp/p/`·`?via=` 에서 **모든 `/zp/` 내부 경로**로 확장 — `/zp/assets/*`·`/zp/control/*` 도 페이지 가상 URL 로 흡수(스택·속성 직렬화에서 내부 경로가 새는 것보다 가상 URL 매핑이 항상 안전). `sanitizeFrameText` 가 URL 정리 후 `\b__zp_[A-Za-z0-9_$]*` 도 `<anonymous>` 로 지운다. worker-prelude `sanitize` 에도 동일 적용.
+- **연계 함정:** `Error.prepareStackTrace` 를 페이지가 덮으면(userPrepare) 그 결과 문자열에도 같은 새니타이즈를 적용해야 한다 — 커스텀 포맷터가 raw CallSite 문자열을 그대로 쓸 수 있다. 프레임 래핑은 CallSite API 반환값까지만 책임지고 **최종 문자열은 별도로 한 번 더** 지나가야 닫힌다.
+- **실측 divergence 2건:** 파스 불가 eval 소스는 네이티브 SyntaxError 대신 `NotSupportedError`(리라이트 실패 → fail-closed, 설계 발화). `import('data:…')` 는 게이트 전에 네이티브 모듈 로더가 `TypeError` 로 거부 — 이름만 다르고 차단은 동일. `new eval()` 은 오버라이드가 일반 함수라 TypeError 대신 빈 객체 반환(탈출 아님).
+- **검증:** e2e `dynamic code suite` — leakDynStack/leakFnStack `v:clean` 포함 171/171.
