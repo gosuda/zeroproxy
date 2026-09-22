@@ -2855,7 +2855,8 @@ function rememberResourceContext(requestURL, targetUrl, ctx) {
   resourceContext.set(targetUrl, next);
   while (resourceContext.size > 2048) resourceContext.delete(resourceContext.keys().next().value);
 }
-// RFC 6265 cookie jar (port of internal/cookiejar/jar.go).
+// RFC 6265 cookie jar (JS port; the Go-side jar was removed once the SW
+// became the sole cookie owner).
 // Replaces the prior flat tab.documentCookie string + name-only merge
 // helper which discarded every Set-Cookie attribute except name/value
 // (no Domain/Path/Secure/HttpOnly scoping). That caused cookie leakage

@@ -45,8 +45,8 @@ Marker key: `[x]` closed · `[~]` partial / explicit follow-up · `[ ]` open.
 | **B3** Foreground OXC dual delivery (bundle + `text/zp-pending` defer fallback) | `[x]` | `__ZP_EXEC_INLINE_REWRITTEN*` wrappers, [`web/runtime-prelude.js`](web/runtime-prelude.js) closure-private rewriter |
 | **B4** EventSource fidelity (auto-reconnect, `Last-Event-ID`, `retry:`, Content-Type) | `[x]` | [`web/runtime-prelude.js#ZPEventSource`](web/runtime-prelude.js), static-policy `SSE auto-reconnect + Last-Event-ID fidelity` |
 | **B5** Request body cap + `REQUEST_BODY_TOO_LARGE` | `[x]` | `MAX_REQUEST_BODY_BYTES = 8 MB` in sw.js, errors.rs `REQUEST_BODY_TOO_LARGE`, e2e oversized fixture |
-| **B6** 307/308 redirect body replay (`REDIRECT_BODY_NONREPLAYABLE` fail-closed) | `[x]` | [`internal/zphttp/redirect.go`](internal/zphttp/redirect.go) + `redirect_test.go` |
-| **B7** Bidirectional relay drain on ctx cancel (zero goroutine leak) | `[x]` | [`internal/wsconn/relay.go`](internal/wsconn/relay.go) drain-both, [`relay_test.go`](internal/wsconn/relay_test.go) (3 cases) |
+| **B6** 307/308 redirect body replay (`REDIRECT_BODY_NONREPLAYABLE` fail-closed) | `[x]` | [`web/sw.js#transportFetchHop`](web/sw.js) — request body is snapshotted (`bodyU8`) before the first hop so 307/308 method-preserving replay always has the bytes; error code retained in [`crates/zp-shared/src/errors.rs`](crates/zp-shared/src/errors.rs) + `web/zp-core.js` ERROR_INFO |
+| **B7** Bidirectional relay drain on ctx cancel (zero goroutine leak) | `[x]` | [`cmd/zeroproxy-server/main.go#bridgeConns`](cmd/zeroproxy-server/main.go) drain-both, [`relay_test.go`](cmd/zeroproxy-server/relay_test.go) (`TestBridgeToTorClosesBothEndsOnContextCancel`, `TestBridgeInternalSOCKSConnectsToTarget`) |
 
 ---
 
@@ -117,6 +117,6 @@ Marker key: `[x]` closed · `[~]` partial / explicit follow-up · `[ ]` open.
 ## Cumulative acceptance signal
 
 - `cargo test --workspace`: **86 pass / 0 fail** (zp-rewriter 50 incl. D2 composer + strip; zp-htmltx 20; zp-shared 16)
-- `go test ./...`: **all internal packages green**, including `wsconn.TestRelay*` (B7), `shareurl.TestParityWithRustShareURL` (C3)
+- `go test ./...`: **all internal packages green**, including `cmd.TestBridge*` (B7), `shareurl.TestParityWithRustShareURL` (C3)
 - `node test/js/static-policy.test.js`: **27 pass / 0 fail**. The cookie-jar test (`service worker uses Rust kernel transport and cookie bridge`) was stale on the `opt.url` → `u` variable rename (2026-06-02 bug fix); regex now accepts both forms so a future rename can't silently re-introduce the regression. The challenge-gate test was retargeted from the deleted `cmd/zeroproxy-server/relay.go` to the now-active Rust path: `transport::fetch::fetch` captures `X-ZP-Arm-Challenge-Compat` in `kernel/mod.rs` before the `x-zp-*` strip, threads `armed_challenge_compat: bool` into `build_js_response`, and emits `X-ZP-Challenge-Compat: 1` only when `zp_shared::is_challenge_document(cf, host, path)` (the shared predicate the Go `ApplyChallengeCompat` defense-in-depth helper uses) holds. The new `C1: Rust WebSocket client implements RFC 6455 handshake + codec` test pins the 12 invariants of the just-landed WS transport.
 - `npm run build`: success (Rust workspace + wasm-bindgen + Go server)

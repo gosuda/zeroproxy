@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/gosuda/zeroproxy/internal/cookiejar"
 	"github.com/gosuda/zeroproxy/internal/headers"
 	"github.com/gosuda/zeroproxy/internal/rtcgw"
 	"github.com/gosuda/zeroproxy/internal/wtproxy"
@@ -34,30 +33,9 @@ type server struct {
 	rtcGatewayURL string // D5 — public URL the browser uses to reach the RTC signaling endpoint; empty disables the virtual RTCPC pass-through
 	rtcGateway    *rtcgw.Gateway
 	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
-	jarsMu        sync.Mutex
-	jars          map[string]*cookiejar.Jar
 	// 동기 XHR 중계 허브. Go 는 요청을 park 만 하고 실제 전송은 SW 가 한다
 	// (syncfetch.go 의 주석 참고) — 새 egress 경로가 아니다.
 	syncHub *syncFetchHub
-}
-
-// jarFor returns the cookie jar for the given tabId, creating one on demand.
-// Empty tabId returns nil — callers should skip jar logic in that case.
-func (s *server) jarFor(tabID string) *cookiejar.Jar {
-	if tabID == "" {
-		return nil
-	}
-	s.jarsMu.Lock()
-	defer s.jarsMu.Unlock()
-	if s.jars == nil {
-		s.jars = make(map[string]*cookiejar.Jar)
-	}
-	j, ok := s.jars[tabID]
-	if !ok {
-		j = cookiejar.New()
-		s.jars[tabID] = j
-	}
-	return j
 }
 
 const internalSOCKSMode = "internal"
