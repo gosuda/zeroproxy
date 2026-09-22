@@ -858,7 +858,7 @@ async function virtualSubresource(req, cls, clientId) {
   const resp = await transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId });
   rememberResourceContext(cls.crossOriginURL || cls.sameOriginURL, targetUrl, ctx);
   if (shouldRewriteCSS(req, resp)) return rewriteCSSResponse(resp, { targetUrl });
-  return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req) }) : resp;
+  return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req), req }) : resp;
 }
 
 function shouldRewriteCSS(req, resp) {
@@ -1037,7 +1037,7 @@ async function runtimeAPI(req, url, clientId) {
           : [['Accept', '*/*']];
       const resp = await transportFetch(target, { request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest });
       if (isDocumentRequest && entry) return transformDocumentResponse(resp, { tab, entry });
-      if (isScriptRequest) return rewriteScriptResponse(resp, { targetUrl: target, kind: scriptKindFromRequest(req) });
+      if (isScriptRequest) return rewriteScriptResponse(resp, { targetUrl: target, kind: scriptKindFromRequest(req), req });
       return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
     }
     if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
@@ -1155,7 +1155,7 @@ async function runtimeAPI(req, url, clientId) {
     // 아래 /zp/api/fetch 경로는 이미 ctx 를 먼저 본다 — 여기만 빠져 있었다.
     const scriptEntryId = (scriptCtx && scriptCtx.entryId) || tab.activeEntryId;
     const resp = await transportFetch(target, { request: req, tab, entryId: scriptEntryId, refOverride });
-    return rewriteScriptResponse(resp, { targetUrl: target, kind });
+    return rewriteScriptResponse(resp, { targetUrl: target, kind, req });
   }
   if (url.pathname === '/zp/api/worker-script') {
     const target = url.searchParams.get('u');
@@ -1164,7 +1164,17 @@ async function runtimeAPI(req, url, clientId) {
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
     if (!target || !tab) return safeError('SW_NOT_READY', 503);
     // entry 는 요청한 프레임의 것 — /zp/api/script 와 같은 이유(위 주석).
-    return rewriteScriptResponse(await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: (ctx && ctx.entryId) || tab.activeEntryId }), { targetUrl: target, kind: 'worker' });
+    // module 워커 본문은 module kind 로 리라이트해야 import/export 문법이 산다.
+    const kind = url.searchParams.get('kind') === 'module' ? 'module' : 'worker';
+    const wsEntryId = (ctx && ctx.entryId) || tab.activeEntryId;
+    // 이 요청의 발신자는 **워커 클라이언트**다 — `?tab=` 을 명시로 들고 왔으니
+    // 여기서 탭에 바인딩해 둔다. 안 하면 이 워커의 후속 요청(모듈 dep 의
+    // `/zp/api/script?u=…` — Rust 방출 specifier 에는 tab 파라미터가 없다)이
+    // ctx 를 못 찾아 503 으로 죽는다.
+    bindClientContext(clientId, tab, tab.entries.get(wsEntryId) || { entryId: wsEntryId, targetUrl: target, baseUrl: target });
+    const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId });
+    const rewritten = await rewriteScriptResponse(upstream, { targetUrl: target, kind, req });
+    return rewritten;
   }
   if (url.pathname === ZP.apiPath('sourcemap')) {
     // D2: serve the composed Source Map v3 JSON for a previously-rewritten
@@ -1987,13 +1997,13 @@ async function rewriteScriptResponse(resp, opt) {
   // 문서 경로(transformDocumentResponse)에는 이미 같은 가드가 있다.
   if (resp && resp.headers && resp.headers.get('X-ZP-Error') === '1') {
     const upstream = resp.headers.get('X-ZP-Error-Code') || 'TARGET_CONNECT_FAILED';
-    const h = scriptResponseHeaders(resp);
+    const h = scriptResponseHeaders(resp, opt && opt.req);
     return new Response(
       'throw new DOMException(' + JSON.stringify('ZeroProxy: upstream fetch failed (' + upstream + ')') + ", 'NetworkError');",
       { status: resp.status, statusText: resp.statusText, headers: h }
     );
   }
-  const h = scriptResponseHeaders(resp);
+  const h = scriptResponseHeaders(resp, opt && opt.req);
   let code = '';
   let cacheKey = '';
   try {
@@ -2401,13 +2411,13 @@ function injectPrelude(html, prelude) {
   return prelude + html;
 }
 
-function scriptResponseHeaders(resp) {
+function scriptResponseHeaders(resp, req) {
   const h = new Headers(resp.headers);
   h.set('Content-Type', 'text/javascript; charset=utf-8');
   h.set('Cache-Control', 'no-store');
   h.set('X-Content-Type-Options', 'nosniff');
   h.set('Content-Security-Policy', ZP.fixedCSP());
-  applyCORS(h, null);
+  applyCORS(h, req);
   return h;
 }
 
@@ -3205,7 +3215,11 @@ function createCookieJar(initialRecords) {
 function isCORSPreflight(req) { return req.method === 'OPTIONS' && req.headers.has('Access-Control-Request-Method'); }
 function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set('Access-Control-Max-Age', '86400'); h.set('Cache-Control', 'no-store'); return new Response(null, { status: 204, headers: h }); }
 function applyCORS(h, req) {
-  const origin = req && req.headers.get('Origin') || '*';
+  // `mode:'cors'` + 자격증명 요청(모듈 워커 import(), 크리덴셜 fetch)에는
+  // `ACAO:*` 가 스펙상 무효 — 응답이 통째로 거부돼 "Failed to fetch" 가 된다.
+  // Origin 헤더가 없는 요청(일부 모듈 로더 경로)에는 요청 URL 의 오리진을
+  // 되비춘다 — 이 핸들러의 응답은 어차피 같은 오리진에만 간다.
+  const origin = req && (req.headers.get('Origin') || (req.url ? new URL(req.url).origin : '')) || '*';
   h.set('Access-Control-Allow-Origin', origin);
   // ★`*` 와 `Allow-Credentials: true` 는 명세상 **함께 못 쓴다** — 브라우저가
   // 응답 전체를 거부한다. 예전에는 무조건 credentials 를 켰고, Origin 헤더가
@@ -3534,4 +3548,14 @@ function safeError(code, status = 400, targetUrl = '') {
   });
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
-function workerBootstrap(url) { const body = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');importScripts('/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET));"; return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } }); }
+function workerBootstrap(url) {
+  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');";
+  // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
+  // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
+  const mod = url.hash && new URLSearchParams(url.hash.slice(1)).get('mod') === '1';
+  const scriptURL = "'/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET)" + (mod ? " + '&kind=module'" : "");
+  const body = mod
+    ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
+    : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');importScripts(" + scriptURL + ");";
+  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } });
+}

@@ -756,6 +756,128 @@ function createTargetServer(requests, pendingResponses) {
       res.end('echo');
       return;
     }
+    // O7: worker suite — dedicated/module/shared × fetch/importScripts/
+    // timers/eval(blocked)/location/storage isolation. The page collects
+    // each worker's postMessage into window.__workerProbes.
+    if (url.pathname === '/worker-echo') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('worker-echo');
+      return;
+    }
+    if (url.pathname === '/worker-imported.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`self.__imported = 'imp-ok';`);
+      return;
+    }
+    if (url.pathname === '/probe-module-dep.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`export const marker = 'dep-ok';`);
+      return;
+    }
+    if (url.pathname === '/probe-worker.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`(async () => {
+        const out = {};
+        const P = async (k, f) => { try { out[k] = 'v:' + String(await f()); } catch (e) { out[k] = 'e:' + (e && e.name || e); } };
+        await P('href', () => location.href);
+        await P('locProps', () => [location.protocol, location.host, location.pathname].join('|'));
+        await P('locMethods', () => [typeof location.assign, typeof location.reload, typeof location.toString].join(','));
+        await P('ua', () => navigator.userAgent);
+        await P('platform', () => navigator.platform);
+        await P('fetchEcho', async () => (await fetch('/worker-echo?w=d')).status);
+        await P('xhrShim', async () => {
+          const x = new XMLHttpRequest();
+          return await new Promise(res => { x.onload = () => res(x.status); x.onerror = () => res('xhr-err'); x.open('GET', '/worker-echo?w=x'); x.send(); });
+        });
+        await P('xhrSync', () => { const x = new XMLHttpRequest(); try { x.open('GET', '/worker-echo', false); return 'opened'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        await P('wsCtor', () => { try { new WebSocket('ws://nonexistent.invalid/'); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        await P('evalCode', () => eval('1+1'));
+        await P('funcCtor', () => new Function('return 7')());
+        await P('timerFn', () => new Promise(r => setTimeout(() => r('fired'), 10)));
+        await P('timerStr', () => new Promise(r => {
+          try { setTimeout('self.__st=7', 10); setTimeout(() => r(typeof self.__st === 'undefined' ? 'not-ran' : 'ran'), 120); }
+          catch (e) { r('e:' + (e && e.name || e)); }
+        }));
+        await P('importScriptsOK', () => { importScripts('/worker-imported.js'); return self.__imported; });
+        await P('importScriptsData', () => { importScripts('data:text/javascript,self.__di=1'); return 'imported'; });
+        await P('importScriptsBlob', () => { const u = URL.createObjectURL(new Blob(['self.__bi=1'], { type: 'text/javascript' })); importScripts(u); return 'imported'; });
+        await P('idb', () => typeof indexedDB);
+        await P('idbRoundtrip', async () => {
+          const db = await new Promise((res, rej) => { const r = indexedDB.open('wprobe'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+          const dbs = indexedDB.databases ? await indexedDB.databases() : [];
+          db.close();
+          return dbs.some(d => d.name === 'wprobe') ? 'listed-virtual' : 'list=' + JSON.stringify(dbs.map(d => d.name));
+        });
+        await P('cachesRoundtrip', async () => {
+          if (typeof caches === 'undefined') return 'no-caches';
+          const c = await caches.open('wc');
+          const keys = await caches.keys();
+          await caches.delete('wc');
+          return c ? 'open+keys=' + keys.length : 'no';
+        });
+        await P('cookieStore', () => typeof cookieStore);
+        await P('errorStack', () => { try { throw new Error('x'); } catch (e) { return /proxy\\.localhost|zp\\//i.test(e.stack || '') ? 'LEAK' : 'clean'; } });
+        postMessage(out);
+      })().catch(e => postMessage({ __fatal: String(e && (e.stack || e)) }));`);
+      return;
+    }
+    if (url.pathname === '/probe-module-worker.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`import { marker } from './probe-module-dep.js';
+      (async () => {
+        const out = {};
+        const P = async (k, f) => { try { out[k] = 'v:' + String(await f()); } catch (e) { out[k] = 'e:' + (e && e.name || e); } };
+        await P('href', () => location.href);
+        await P('importMetaUrl', () => import.meta.url);
+        await P('staticImport', () => marker);
+        await P('fetchEcho', async () => (await fetch('/worker-echo?w=m')).status);
+        await P('evalCode', () => eval('1'));
+        await P('funcCtor', () => new Function('return 1')());
+        postMessage(out);
+      })().catch(e => postMessage({ __fatal: String(e && (e.stack || e)) }));`);
+      return;
+    }
+    if (url.pathname === '/probe-shared-worker.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`self.onconnect = ev => {
+        const port = ev.ports[0];
+        const out = {};
+        try { out.name = String(self.name); out.href = location.href; out.ua = navigator.userAgent; }
+        catch (e) { out.err = String(e && (e.name + ':' + e.message) || e); }
+        port.postMessage(out);
+      };`);
+      return;
+    }
+    if (url.pathname === '/worker-probes') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>ZP Worker Probes</title><body><script>
+        (async () => {
+          const out = {};
+          const collect = mkw => new Promise(r => {
+            let w;
+            try { w = mkw(); } catch (e) { r({ __ctor: (e && e.name || '') + ':' + (e && e.message || '') }); return; }
+            const t = setTimeout(() => r({ __timeout: 1 }), 10000);
+            w.onmessage = ev => { clearTimeout(t); r(ev.data); };
+            // module 워커의 그래프 로드 실패는 빈 message 의 error 이벤트로만
+            // 표면한다 — 부팅 체인이 진단 postMessage 를 먼저 보낼 수 있도록
+            // 에러 해결을 조금 지연시킨다.
+            w.onerror = ev => { const em = String(ev && ev.message || 'err'); setTimeout(() => { clearTimeout(t); r({ __error: em }); }, 600); };
+          });
+          out.dedicated = await collect(() => new Worker('/probe-worker.js'));
+          out.module = await collect(() => new Worker('/probe-module-worker.js', { type: 'module' }));
+          out.shared = await new Promise(r => {
+            try {
+              const sw = new SharedWorker('/probe-shared-worker.js', { name: 'swprobe' });
+              const t = setTimeout(() => r({ __timeout: 1 }), 10000);
+              sw.port.onmessage = ev => { clearTimeout(t); r(ev.data); };
+              sw.port.start();
+            } catch (e) { r({ __error: (e && e.name || '') + ':' + (e && e.message || '') }); }
+          });
+          window.__workerProbes = out;
+        })().catch(e => { window.__workerProbes = { __fatal: String(e && (e.stack || e)) }; });
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/cross-origin-location-probe') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>Cross-origin Location</title><script>
@@ -1163,10 +1285,12 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   const observeTarget = target => {
     if (sessions.has(target)) return sessions.get(target);
     const pending = (async () => {
-      if (!['page', 'service_worker', 'shared_worker'].includes(target.type())) return;
+      if (!['page', 'service_worker', 'shared_worker', 'worker'].includes(target.type())) return;
       const session = await target.createCDPSession();
-      session.on('Network.requestWillBeSent', event => wireRequests.push(event.request.url));
+      const reqUrls = new Map();
+      session.on('Network.requestWillBeSent', event => { reqUrls.set(event.requestId, event.request.url); wireRequests.push(event.request.url); });
       session.on('Network.webSocketCreated', event => wireRequests.push(event.url));
+      session.on('Network.loadingFailed', event => browserLog.push(`${target.type()} netfail ${reqUrls.get(event.requestId) || event.requestId} ${event.errorText} blocked=${event.blockedReason || ''} cors=${event.corsErrorStatus ? JSON.stringify(event.corsErrorStatus) : ''}`));
       session.on('Runtime.consoleAPICalled', event => browserLog.push(`${target.type()} ${event.type}: ${event.args.map(arg => arg.value ?? arg.description ?? '').join(' ')}`));
       session.on('Runtime.exceptionThrown', event => browserLog.push(JSON.stringify(event.exceptionDetails)));
       await session.send('Network.enable');
@@ -2495,6 +2619,79 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     });
     await t.test('insert/remove race stays clean', () => {
       assert.equal(probes.removeRace, 'v:true', `removeRace: ${probes.removeRace}`);
+    });
+    assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // O7: worker suite — dedicated/module/shared × fetch/importScripts/timers/
+  // eval(blocked)/location/storage isolation. Worker scripts are served from
+  // the target and rewritten by the SW worker-script path, so the probes
+  // exercise real worker-prelude semantics.
+  await t.test('worker suite', async t => {
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `http://${targetHost}:${targetPort}/worker-probes`);
+    try {
+      await page.waitForFunction(() => window.__workerProbes, { timeout: 45000 });
+    } catch (e) {
+      console.log('worker probes wait failed');
+      throw e;
+    }
+    const probes = await page.evaluate(() => window.__workerProbes);
+    fs.writeFileSync(path.join(artifacts, 'worker-probes.json'), JSON.stringify(probes, null, 2));
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const d = probes.dedicated || {};
+    await t.test('dedicated worker location is virtual', () => {
+      assert.equal(d.href, `v:${targetBase}/probe-worker.js`, `href: ${d.href}`);
+      assert.equal(d.locProps, `v:http:|${targetHost}:${targetPort}|/probe-worker.js`, `locProps: ${d.locProps}`);
+      // WorkerLocation natively has no assign/replace — shape is pinned.
+      assert.match(d.locMethods, /^v:(undefined|function),(undefined|function),function$/, `locMethods: ${d.locMethods}`);
+    });
+    await t.test('dedicated worker network surface', () => {
+      assert.equal(d.fetchEcho, 'v:200', `fetchEcho: ${d.fetchEcho}`);
+      assert.equal(d.xhrShim, 'v:200', `xhrShim: ${d.xhrShim}`);
+      // 동기 XHR 은 transport 가 없어 fail-closed, WS/RTC 계열은 전부 차단.
+      assert.equal(d.xhrSync, 'v:e:InvalidStateError', `xhrSync: ${d.xhrSync}`);
+      assert.equal(d.wsCtor, 'v:e:NotSupportedError', `wsCtor: ${d.wsCtor}`);
+      assert.ok(requests.some(r => r.url.startsWith('/worker-echo')), `upstream never saw /worker-echo: ${JSON.stringify(requests.map(r => r.url))}`);
+    });
+    await t.test('dedicated worker dynamic code is fail-closed', () => {
+      assert.equal(d.evalCode, 'e:NotSupportedError', `evalCode: ${d.evalCode}`);
+      assert.equal(d.funcCtor, 'e:NotSupportedError', `funcCtor: ${d.funcCtor}`);
+    });
+    await t.test('dedicated worker timers', () => {
+      assert.equal(d.timerFn, 'v:fired', `timerFn: ${d.timerFn}`);
+      // 문자열 타이머는 리라이트 불가라 fail-closed(ERRATA G — 네이티브
+      // 컴파일로 두면 가상화를 우회한다).
+      assert.equal(d.timerStr, 'v:e:NotSupportedError', `timerStr: ${d.timerStr}`);
+    });
+    await t.test('dedicated worker importScripts', () => {
+      assert.equal(d.importScriptsOK, 'v:imp-ok', `importScriptsOK: ${d.importScriptsOK}`);
+      assert.match(d.importScriptsData, /e:/, `importScriptsData: ${d.importScriptsData}`);
+      assert.match(d.importScriptsBlob, /e:/, `importScriptsBlob: ${d.importScriptsBlob}`);
+      assert.ok(requests.some(r => r.url.startsWith('/worker-imported.js')), 'upstream never saw /worker-imported.js');
+    });
+    await t.test('dedicated worker storage isolation + fingerprint', () => {
+      assert.equal(d.ua, `v:${TARGET_UA}`, `ua: ${d.ua}`);
+      assert.equal(d.platform, 'v:Win32', `platform: ${d.platform}`);
+      assert.equal(d.idb, 'v:object', `idb: ${d.idb}`);
+      assert.equal(d.idbRoundtrip, 'v:listed-virtual', `idbRoundtrip: ${d.idbRoundtrip}`);
+      assert.equal(d.cachesRoundtrip, 'v:open+keys=1', `cachesRoundtrip: ${d.cachesRoundtrip}`);
+      assert.equal(d.errorStack, 'v:clean', `errorStack: ${d.errorStack}`);
+    });
+    const m = probes.module || {};
+    await t.test('module worker imports + meta', () => {
+      assert.equal(m.staticImport, 'v:dep-ok', `staticImport: ${m.staticImport}`);
+      assert.equal(m.href, `v:${targetBase}/probe-module-worker.js`, `href: ${m.href}`);
+      assert.equal(m.fetchEcho, 'v:200', `fetchEcho: ${m.fetchEcho}`);
+      assert.match(m.evalCode, /e:/, `evalCode: ${m.evalCode}`);
+      assert.ok(requests.some(r => r.url.startsWith('/probe-module-dep.js')), 'upstream never saw module dep');
+    });
+    const s = probes.shared || {};
+    await t.test('shared worker isolation + messaging', () => {
+      assert.equal(s.href, `${targetBase}/probe-shared-worker.js`, `href: ${s.href}`);
+      assert.equal(s.ua, TARGET_UA, `ua: ${s.ua}`);
+      // 이름 접두어로 두 타깃이 같은 SharedWorker 를 공유하지 않는다 — 접두어
+      // 형태를 고정해 회귀를 잡는다(D7).
+      assert.match(s.name, /^zp:w:[^:]+:swprobe$/, `name: ${s.name}`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });

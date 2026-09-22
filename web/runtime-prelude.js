@@ -8354,7 +8354,7 @@
       // prototype. Point the wrapper at the native prototype to fix both.
       const ZPWorker = function (url, opts) {
         try { zpTrace('Worker', String(url).slice(0, 120)); } catch {}
-        return new Native.Worker(workerBootstrapURL(url), opts);
+        return new Native.Worker(workerBootstrapURL(url, opts), opts);
       };
       try { ZPWorker.prototype = Native.Worker.prototype; } catch {}
       // Only the constructor name — the prototype is the native one, which
@@ -8376,7 +8376,7 @@
         const prefix = sharedWorkerNamePrefix();
         const named = (opts && opts.name) ? Object.assign({}, opts, { name: prefix + String(opts.name) })
                                            : Object.assign({}, opts || {}, { name: prefix + 'default' });
-        return new Native.SharedWorker(workerBootstrapURL(url), named);
+        return new Native.SharedWorker(workerBootstrapURL(url, opts), named);
       };
       try { ZPSharedWorker.prototype = Native.SharedWorker.prototype; } catch {}
       brandLikeNative(ZPSharedWorker, null, 'SharedWorker');
@@ -8409,7 +8409,7 @@
       workerBlobURLs.delete(key);
       return Native.revokeObjectURL(url);
     });
-    for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url), opts); }); }
+    for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url, { type: 'module' }), opts); }); }
   }
   // D3: virtual SW facade. The original behavior was a hard
   // `NotSupportedError` reject, which made every site gating feature init
@@ -8492,7 +8492,7 @@
     const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
     defineOnProto(nav, proto, 'serviceWorker', () => facade);
   }
-  function workerBootstrapURL(url) {
+  function workerBootstrapURL(url, opts) {
     const raw = String(url);
     const parsed = new URL(raw, virtualURL.href);
     if (parsed.protocol === 'blob:') {
@@ -8511,6 +8511,9 @@
     const params = new URLSearchParams();
     params.set('u', requestTargetURL(raw));
     params.set('tab', boot.tabId);
+    // module 워커는 importScripts 가 없다 — 부트스트랩을 import() 체인으로
+    // 바꿔야 하므로 SW 쪽에 표시를 남긴다(worklet addModule 도 module).
+    if (opts && opts.type === 'module') params.set('mod', '1');
     for (const server of activeServers) params.append('server', server);
     // Absolute proxy URL — Worker resolves the URL relative to the page's
     // baseURI, which is virtualised to the target host.

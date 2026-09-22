@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-22 | worker / 수정 | module worker 의 `importScripts` 는 호출 시 던지는 스텁 — `typeof` 가드 무효, 부트스트랩 해시 mod=1 로 명시 판정. | rewriter.md#module-worker-importscripts-스텁 |
+| 2026-09-22 | worker / 수정 | 워커 클라이언트엔 referrer ctx 가 없다 — `?tab=` worker-script 요청에서 bindClientContext. dep 실패는 top import() URL 로 기만 보고된다. | rewriter.md#worker-client-탭-바인딩 |
 | 2026-09-22 | e2e / 규칙 | 픽스처 스크립트 안의 `</script>` 리터럴은 주석도 절단한다 — 쪼개거나 textarea 에 담는다. | rewriter.md#fixture-script-종료태그 |
 | 2026-09-22 | membrane / 수정 | `contentDocument.location` 이 부모 URL 을 돌려줬다 — foreign Location 은 프레임의 data-zp-target-url 로 역조회. | rewriter.md#foreign-document-location |
 | 2026-09-22 | e2e / 규칙 | direct-vs-proxy 차분의 대조군은 별도 브라우저 인스턴스에서 — targetcreated 는 모든 컨텍스트를 잡는다. | rewriter.md#차분-측정-브라우저-격리 |

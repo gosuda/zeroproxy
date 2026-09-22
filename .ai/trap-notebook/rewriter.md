@@ -1084,3 +1084,17 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 픽스처 인라인 스크립트 안에 `</script>` 리터럴이 필요하면 `'</scr' + 'ipt>'` 로 쪼갠다 — 주석도 예외 없다. 중첩 srcdoc 처럼 값에 진짜 `</script>` 가 필요하면 textarea(내용은 raw text)에 담아 `.value` 로 꺼낸다 — JSON.stringify 도 `/` 를 이스케이프 안 해서 안 못 넣는다.
 - **연계 함정:** 동적 `f.src = '/x'` 는 about:blank 로 먼저 붙고 share URL 로 비동기 교체되므로 첫 `load` 이벤트는 about:blank 다 — 내용 기준 폴링으로 기다려야 한다. `body.textContent` 는 script 요소의 **리라이트된** 소스를 포함한다 — 픽스처 단언은 마커 존재 여부만 본다.
 - **검증:** 픽스처 추출본을 `ZPBundle.rewriteScript` 에 직접 통과시켜 파스 실패를 재현·수정 확인. e2e 143/143.
+
+## <a id="module-worker-importscripts-스텁"></a>module worker 에도 `importScripts` 가 "던지는 스텁"으로 존재한다 — `typeof` 가드는 무효 (2026-09-22)
+
+- **원인:** Chrome 은 module worker 전역에 `importScripts` 를 **함수**로 노출하되 호출 시 `TypeError: Module scripts don't support importScripts()` 를 던진다. worker-prelude 의 `typeof importScripts === 'function'` 가드는 통과하고 호출에서 사망 — `zp-core.js` 가 안 실려 멤브레인 전체 부재. 워커는 postMessage 없이 조용히 죽어 `__timeout` 만 관측됐다.
+- **수정:** 명시 신호로 판정한다 — `workerBootstrapURL(url, {type:'module'})` 이 부트스트랩 해시에 `mod=1` 을 싣고, prelude 는 `new URLSearchParams(self.location.hash.slice(1)).get('mod')` 로 본다. classic 만 `importScripts('/zp/assets/zp-core.js')` 한다.
+- **연계 설계:** module 부트스트랩은 `import()` 체인으로 zp-core → worker-prelude → `/zp/api/worker-script?…&kind=module` 순서 로드. catch 는 `setTimeout(throw)` 로 네이티브 error 이벤트에 parity. `self.importScripts` 자체도 `typeof` 가드 후 래핑한다.
+- **검증:** e2e `worker suite` — module worker imports + meta (152/152).
+
+## <a id="worker-client-탭-바인딩"></a>워커 클라이언트는 referrer ctx 가 없다 — `?tab=` 요청에서 `bindClientContext` 안 하면 후속 요청이 503 (2026-09-22)
+
+- **원인:** module worker 본문의 정적 dep specifier 는 Rust 가 `/zp/api/script?u=…&kind=module`(**`tab=` 없음**)로 방출한다. 페이지 요청은 clientId→clientContext 또는 referer 로 탭을 찾지만 **워커 클라이언트는 바인딩된 적이 없어** ctx 해석 실패 → A2 게이트가 503. 게다가 브라우저는 중첩 dep 실패를 **최상위 `import()` URL 에 귀속**시켜 "Failed to fetch dynamically imported module: <top URL>" 로 보고 — SW 트레이스엔 top 요청이 200 인데 import() 만 실패하는 기만적 형국이 됐다.
+- **수정:** `/zp/api/worker-script` 는 언제나 `?tab=` 를 들고 온다 — 그 요청에서 `bindClientContext(clientId, tab, entry)` 로 워커 클라이언트를 탭에 묶는다. 심층 방어로 worker-prelude 의 `__zp_module_url` 도 `&tab=` 를 붙인다. classic 워커 바인딩도 동일 — 워커별 clientId 유일이라 다탭 누출 없음.
+- **연계 함정(CORS):** 모듈 로더의 `mode:'cors'` + `credentials:'same-origin'` 요청에 `ACAO:*` 는 명세상 무효 — 응답 전체 거부. `applyCORS` 는 Origin 헤더 없으면 요청 URL 오리진을 되비춘다(이 핸들러 응답은 어차피 같은 오리진 전용).
+- **검증:** 디버깅 경로 — bootstrap catch 로 `import()` 에러 문자열 확보 → SW `__zpRustTrace` 에 `sw:worker-script`(dest/mode/cred/origin/tab/결과) 기록 → CDP `worker` 타깃 + `Network.loadingFailed` 관측 추가(테스트에 잔류, 영구 진단 자산). e2e 152/152.

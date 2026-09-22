@@ -2,7 +2,12 @@
   'use strict';
   if (self.__ZP_WORKER_PRELUDE) return;
   Object.defineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
-  importScripts('/zp/assets/zp-core.js');
+  // module 워커에서 importScripts 는 "없음"이 아니라 **던지는 스텁**으로
+  // 존재한다(Chrome: 호출 시 TypeError) — `typeof` 가드로는 못 걸러서
+  // bootstrap 해시의 mod=1 로 명시 판정한다. 그쪽 부트스트랩이 zp-core 를
+  // import() 로 먼저 싣고 온다(이 줄은 classic 경로 전용).
+  const isModuleWorker = new URLSearchParams(self.location.hash.slice(1)).get('mod') === '1';
+  if (!isModuleWorker) importScripts('/zp/assets/zp-core.js');
   const nativeFetch = self.fetch.bind(self);
   const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
@@ -97,7 +102,9 @@
     // worker's virtualized base (the target origin), so the request would be
     // sent to the target host and 404. `self.location` here is the real worker
     // script URL on the proxy origin — captured before any virtualization.
-    return self.location.origin + '/zp/api/script?kind=module&u=' + encodeURIComponent(u.href);
+    // `tab=` 도 싣는다 — 워커 클라이언트는 referrer 문맥이 없어 ctx 해석이
+    // 안 되므로, 바인딩이 어긴 경로에서도 명시 탭 파라미터로 탭을 찾게 한다.
+    return self.location.origin + '/zp/api/script?kind=module&tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(u.href);
   });
   try { self.eval = blockedDynamic; } catch {}
   try { self.Function = blockedDynamic; } catch {}
@@ -403,7 +410,59 @@
   self.EventSource = WorkerEventSource;
   self.WebSocket = function(){ blocked(); };
   self.RTCPeerConnection = self.webkitRTCPeerConnection = self.WebTransport = self.WebSocketStream = function(){ blocked(); };
-  const nativeImportScripts = self.importScripts.bind(self);
+  // ── Error.stack sanitizer ────────────────────────────────────────────
+  // 워커 에러 프레임의 파일명은 `/zp/api/worker-script?u=…`·bootstrap·prelude
+  // 라우트라 그대로 새어 나간다(ERRATA G). 페이지 realm 과 같은 방식으로
+  // prepareStackTrace 를 감싸 프레임 텍스트를 타깃 URL 로 되돌린다.
+  (function installStackSanitizer() {
+    const E = self.Error;
+    if (!E) return;
+    const proxyOrigin = self.location.origin;
+    const scanRE = new RegExp(proxyOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%]*', 'g');
+    function deproxyOne(m) {
+      try {
+        const u = new URL(m);
+        if (u.origin !== proxyOrigin) return m;
+        if (u.pathname === '/zp/api/worker-script' || u.pathname === '/zp/api/script') return u.searchParams.get('u') || m;
+        if (u.pathname.startsWith('/zp/')) return base.href;
+      } catch {}
+      return m;
+    }
+    const sanitize = v => v == null ? v : String(v).replace(scanRE, deproxyOne);
+    let userPrepare = null;
+    const zpPrepare = function (error, frames) {
+      const wrapped = frames.map(f => new Proxy(f, {
+        get(t, p) {
+          const v = Reflect.get(t, p, t);
+          if (typeof v !== 'function') return v;
+          if (p === 'getFileName' || p === 'getScriptNameOrSourceURL' || p === 'getEvalOrigin' || p === 'toString') {
+            return function () { return sanitize(v.apply(t, arguments)); };
+          }
+          return v.bind(t);
+        }
+      }));
+      if (userPrepare) return userPrepare(error, wrapped);
+      let head;
+      try { head = String(error); } catch { head = 'Error'; }
+      let out = head;
+      for (const f of wrapped) { try { out += '\n    at ' + f.toString(); } catch {} }
+      return out;
+    };
+    try {
+      Object.defineProperty(E, 'prepareStackTrace', {
+        get() { return zpPrepare; },
+        set(v) { userPrepare = typeof v === 'function' ? v : null; },
+        configurable: true, enumerable: false
+      });
+    } catch {}
+  })();
+
+  // module 워커에는 네이티브 importScripts 가 없다 — 대입 자체가
+  // WorkerGlobalScope 에 새 프로퍼티를 만들 뿐이니 가드 없이 두면 .bind 에서
+  // 부팅이 죽는다. 없는 환경에서는 프록시 경유 셈만 심어 둔다(호출하면 네이티브와
+  // 같이 모듈 워커 부재 오류가 아니라 우리 경로로 프록시된다 — importScripts 를
+  // 지원하지 않는 워커에서 호출돼도 fail-open 은 아니다).
+  const nativeImportScripts = typeof self.importScripts === 'function' ? self.importScripts.bind(self) : null;
   function importScriptURL(raw) {
     const value = String(raw);
     const internal = new URL(value, self.location.href);
@@ -411,5 +470,5 @@
     const parsed = new URL(value, base.href);
     return '/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
   }
-  self.importScripts = (...urls) => nativeImportScripts(...urls.map(importScriptURL));
+  self.importScripts = (...urls) => nativeImportScripts ? nativeImportScripts(...urls.map(importScriptURL)) : blocked();
 })();
