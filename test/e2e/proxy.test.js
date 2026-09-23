@@ -789,10 +789,20 @@ function createTargetServer(requests, pendingResponses) {
           const x = new XMLHttpRequest();
           return await new Promise(res => { x.onload = () => res(x.status); x.onerror = () => res('xhr-err'); x.open('GET', '/worker-echo?w=x'); x.send(); });
         });
-        await P('xhrSync', () => { const x = new XMLHttpRequest(); try { x.open('GET', '/worker-echo', false); return 'opened'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        await P('xhrSync', () => { const x = new XMLHttpRequest(); try { x.open('GET', '/worker-echo?w=sync', false); x.send(); return 'status:' + x.status + '|' + String(x.responseText).slice(0, 20); } catch (e) { return 'e:' + (e && e.name || e); } });
         await P('wsCtor', () => { try { new WebSocket('ws://nonexistent.invalid/'); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        // W4: 페이지 중계 SW 스트림 — 실제 WS 라운드트립.
+        await P('wsRoundtrip', () => new Promise(res => {
+          try {
+            const ws = new WebSocket('/ws?w=worker');
+            const to = setTimeout(() => { try { ws.close(); } catch (_) {} res('timeout'); }, 6000);
+            ws.onopen = () => { try { ws.send('ping'); } catch (e) { clearTimeout(to); res('send-e:' + (e && e.name || e)); } };
+            ws.onmessage = ev => { clearTimeout(to); try { ws.close(); } catch (_) {} res('msg:' + ev.data); };
+            ws.onerror = () => { clearTimeout(to); res('err'); };
+          } catch (e) { res('e:' + (e && e.name || e)); }
+        }));
         await P('rtcCtor', () => { try { new RTCPeerConnection(); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
-        await P('wtCtor', () => { try { new WebTransport('https://nonexistent.invalid/'); return 'constructed'; } catch (e) { return 'e:' + (e && e.name || e); } });
+        await P('wtCtor', () => { try { const w = new WebTransport('https://nonexistent.invalid/'); return 'constructed:' + String(w.readyState); } catch (e) { return 'e:' + (e && e.name || e); } });
         // WorkerEventSource — 프록시 fetch 경유 SSE 가 실제로 이벤트를 받는가.
         await P('esRoundtrip', () => new Promise(res => {
           try {
@@ -989,7 +999,7 @@ function createTargetServer(requests, pendingResponses) {
           }));
           await P('evalPath', () => { try { return 'v:' + eval('40+2'); } catch (e) { return 'e:' + (e && e.name || e); } });
 
-          // ── CSP <meta> 주입은 무력화 — 이후 리소스가 계속 로드돼야 한다 ──
+          // ── CSP <meta> 주입 — 교집합 적용: 배관은 유지, 엄격화는 존중 ──
           await P('metaNeutralized', () => {
             const m = document.createElement('meta');
             m.setAttribute('http-equiv', 'Content-Security-Policy');
@@ -999,6 +1009,21 @@ function createTargetServer(requests, pendingResponses) {
               const i = new Image(); const t = setTimeout(() => r('timeout'), 3000);
               i.onload = () => { clearTimeout(t); r('img-loaded-after-meta'); };
               i.onerror = () => { clearTimeout(t); r('img-blocked-after-meta'); };
+              i.src = PNG;
+            });
+          });
+          // E2: 타깃이 더 엄격한 리소스 지시어를 선언하면 그건 지켜진다 —
+          // img-src 'none' 은 배관을 안 건드리므로 verbatim 적용.
+          // (마지막에 놓는다 — meta CSP 는 지워지지 않고 이후 로드를 계속 묶는다.)
+          await P('metaStricter', () => {
+            const m = document.createElement('meta');
+            m.setAttribute('http-equiv', 'Content-Security-Policy');
+            m.setAttribute('content', "img-src 'none'");
+            document.head.appendChild(m);
+            return new Promise(r => {
+              const i = new Image(); const t = setTimeout(() => r('timeout'), 3000);
+              i.onload = () => { clearTimeout(t); r('img-loaded'); };
+              i.onerror = () => { clearTimeout(t); r('img-blocked'); };
               i.src = PNG;
             });
           });
@@ -1110,7 +1135,11 @@ function createTargetServer(requests, pendingResponses) {
 
           // ── import() — 경로별 성공/차단 ──
           await P('importHttp', async () => { const m = await import('/dyn-mod.js'); return 'v:' + m.m + '|' + m.meta; });
-          await P('importData', async () => { try { await import('data:text/javascript,export default 1'); return 'v:imported'; } catch (e) { return 'threw:' + (e && e.name || e); } });
+          // D2/D3: 재작성 코드는 import(__zp_module_url(spec,ref)) 로 번역된다 —
+          // evaluate 는 미리라이트라 여기서 그 경로를 그대로 흉낸다. 네이티브
+          // import('data:…') 자체는 CSP(script-src 에 data: 없음)가 막는다.
+          await P('importData', async () => { try { const m = await import(__zp_module_url('data:text/javascript,export%20default%201', location.href)); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('importBlob', async () => { try { const u = URL.createObjectURL(new Blob(['export default 3'], { type: 'text/javascript' })); const m = await import(__zp_module_url(u, location.href)); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
 
           // ── 소스 누출 — __zp_*/프록시 경로가 페이지 JS 에 보이면 안 된다 ──
           // 주의: 픽스처 안 regex 리터럴의 backslash-slash 는 바깥 템플릿
@@ -1287,6 +1316,8 @@ function createTargetServer(requests, pendingResponses) {
         window.addEventListener('unhandledrejection', e => { window.__surfaceErrs.push('rej:' + String(e.reason && e.reason.stack || e.reason)); });
         let ZXC7 = 7;   // cross-script lexical — 다음 스크립트에서 보이는가
         var ZXC8 = 8;   // cross-script var — 전역 프로퍼티로 지속되어야 함
+        const ZXC9 = 9; // cross-script const — 지속 + 쓰기 TypeError
+        class ZXC10 {}  // cross-script class — 지속
       <\/script>
       <script>
         (async () => {
@@ -1513,14 +1544,32 @@ function createTargetServer(requests, pendingResponses) {
           // cross-script 바인딩 — 앞 스크립트의 let/var 지속성
           await P('crossScriptLet', () => typeof ZXC7);
           await P('crossScriptVar', () => typeof ZXC8 + ':' + ZXC8);
+          // R1: let/const/class 도 공유 전역 렉시컬 환경에 지속된다.
+          await P('crossScriptConst', () => ZXC9);
+          await P('crossScriptClass', () => typeof ZXC10);
+          await P('crossScriptLetWrite', () => { ZXC7 = 42; return ZXC7; });
+          await P('crossScriptConstWrite', () => { ZXC9 = 1; return 'no-throw'; });
+          await P('lexRedeclare', () => __surfaceErrs.filter(e => e.includes('has already been declared')).length);
           // direct eval 이 호출자 스코프의 로컬을 읽는가 (ERRATA: global만)
           await P('evalCallerScope', () => { const lc = 'LOCAL'; return eval('typeof lc === "string" ? lc : "global-only"'); });
+          // R2 — direct eval 호출자 스코프 parity.
+          await P('evalCallerWrite', () => { let w = 1; eval('w = 7'); return w; });
+          await P('evalCallerVar', () => { const g = function () { var v = 'VV'; return eval('v'); }; return g(); });
+          await P('evalCallerConst', () => { const g = function () { const c = 'C'; try { eval('c = 9'); return 'no-throw:' + c; } catch (e) { return e.name + ':' + c; } }; return g(); });
+          await P('evalThis', () => { const o = { m: function () { return eval('this === this.__zp_sentinel ? "obj" : (this.marker || "other")'); }, marker: 'OBJMARK', __zp_sentinel: null }; o.__zp_sentinel = o; return o.m(); });
+          await P('evalArgs', () => { const g = function () { return eval('arguments.length'); }; return g(1, 2, 3); });
+          await P('evalNonString', () => JSON.stringify([eval(42), eval(null), eval({}) instanceof Object, eval()]));
+          await P('evalVirtual', () => { const g = function () { const location = 'LOCALLOC'; return eval('location'); }; return g(); });
+          await P('evalVirtualGlobal', () => eval('typeof location === "string" ? location : (location && location.hostname)'));
+          // indirect 형태는 여전히 전역 — 로컬 lc 가 보이면 안 된다.
+          await P('evalIndirectNoScope', () => { const lc = 'LOCAL'; const e = eval; return e('typeof lc === "string" ? lc : "global-only"'); });
+          await P('evalOptionalNoScope', () => { const lc = 'LOCAL'; return eval?.('typeof lc === "string" ? lc : "global-only"'); });
+          await P('evalShadowed', () => { const g = function () { const eval = s => 'shadow:' + s; return eval('x'); }; return g(); });
           // 함수 내부 sloppy Annex B / labeled 함수 선언 — strict 의미로 처리되어
           // 참조가 virtual 로 간다 (네이티브 sloppy 는 'function') — pinned divergence.
           await P('annexBSloppy', () => { const g = function () { if (1) { function location() { return 'fn'; } } return typeof location; }; return g(); });
           await P('labeledFnDecl', () => { const g = function () { lbl: function location() {} return typeof location; }; return g(); });
-          // eval-created var — 호출자 스코프에 안 생기고 virtual set 으로 감
-          // (네이티브 sloppy 는 함수 로컬 'number') — pinned divergence.
+          // R3: sloppy eval 의 var 는 호출자 varEnv 에 생긴다 — 'number'.
           await P('evalVarLocal', () => { const g = function () { eval('var history = 1'); return typeof history; }; return g(); });
           // strict-mode with — 리라이터가 with 를 보존하므로 네이티브와
           // 동일하게 파스 시점 SyntaxError (silent rewrite 면 'no-error').
@@ -1617,9 +1666,67 @@ function createTargetServer(requests, pendingResponses) {
             try { navigator.registerProtocolHandler('web+zptest', 'http://localhost/x?u=%s'); return 'ok'; }
             catch (e) { return 'e:' + (e && e.name || e); }
           });
+          // E4: 가상 오리진과 같은 URL 은 네이티브 검증을 통과한다 — 등록은
+          // 브라우저 프롬프트에 프록시 오리진을 노출하므로 silent-success.
+          await P('registerPHSameOrigin', () => {
+            if (typeof navigator.registerProtocolHandler !== 'function') return 'absent';
+            try { navigator.registerProtocolHandler('web+zptest', location.origin + '/x?u=%s'); return 'ok'; }
+            catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          // ── P0: 미감사 표면 — ShadowRealm/credentials/wasm/locks ──
+          await P('shadowRealmEval', () => {
+            if (typeof ShadowRealm !== 'function') return 'absent';
+            try {
+              const r = new ShadowRealm();
+              // evaluate 내부에서 가상 location 을 건드릴 수 있는지 — 리라이트
+              // 우회 여부가 핵심 (그냥 1+1 이 아니라 탈출 경로 실측).
+              const v = r.evaluate('typeof location');
+              return 'evaluated:' + v;
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('shadowRealmImport', async () => {
+            if (typeof ShadowRealm !== 'function') return 'absent';
+            try {
+              const r = new ShadowRealm();
+              const v = await Promise.race([
+                r.importValue('https://sr-leak.invalid/mod.js', 'x').then(() => 'imported').catch(e => 'e:' + (e && e.name || e)),
+                new Promise(res => setTimeout(() => res('timeout'), 2500))
+              ]);
+              return v;
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('credGet', async () => {
+            if (!navigator.credentials || typeof navigator.credentials.get !== 'function') return 'absent';
+            try {
+              const c = await Promise.race([
+                navigator.credentials.get({ password: true }),
+                new Promise(res => setTimeout(() => res('pending'), 2500))
+              ]);
+              return 'got:' + (c ? (c.type || 'cred') : 'null');
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('wasmStreamUrl', async () => {
+            if (typeof WebAssembly === 'undefined' || typeof WebAssembly.instantiateStreaming !== 'function') return 'absent';
+            try {
+              const v = await Promise.race([
+                WebAssembly.instantiateStreaming('https://wasm-leak.invalid/x.wasm').then(() => 'compiled').catch(e => 'e:' + (e && e.name || e)),
+                new Promise(res => setTimeout(() => res('timeout'), 2500))
+              ]);
+              return v;
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('navLocks', async () => {
+            if (!navigator.locks || typeof navigator.locks.request !== 'function') return 'absent';
+            try {
+              const r = await navigator.locks.request('zp-lock-probe', () => 'held');
+              return 'got:' + r;
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
           out.done = true;
         })().catch(e => { (window.__surfaceProbes = window.__surfaceProbes || {}).__fatal = String(e && (e.stack || e)); });
       <\/script>
+      <script>let ZXC7 = 99; window.__redecl1 = true;<\/script>
+      <script>var ZXC9 = 1; window.__redecl2 = true;<\/script>
       <script type="module">
         (window.__surfaceProbes = window.__surfaceProbes || {}).moduleRan = 'v:yes';
         try { const m = await import('x-mod'); window.__surfaceProbes.importmapBare = 'v:' + m.m + '|' + m.meta; }
@@ -2324,6 +2431,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     });
   }
   await t.test('favicon masking without upstream fetch', () => {
+  // R6 parity: getAttribute/Attr.value return the author-written literal;
+  // only the IDL property resolves to the absolute target URL.
   assert.deepEqual(home.faviconProbe && {
     rel: home.faviconProbe.rel,
     href: home.faviconProbe.href,
@@ -2331,9 +2440,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     hrefAttrValue: home.faviconProbe.hrefAttrValue,
   }, {
     rel: 'icon',
-    href: `http://${targetHost}:${targetPort}/site-icon.png`,
+    href: '/site-icon.png',
     hrefProp: `http://${targetHost}:${targetPort}/site-icon.png`,
-    hrefAttrValue: `http://${targetHost}:${targetPort}/site-icon.png`,
+    hrefAttrValue: '/site-icon.png',
   });
   assert.doesNotMatch(home.faviconProbe.outerHTML, /x-zeroproxy-icon|data-zp-target-url/);
   assert.equal(requests.some(r => r.url === '/site-icon.png'), false, `favicon must not be fetched: ${JSON.stringify(requests)}`);
@@ -2350,7 +2459,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('image rendering and upstream identity', () => {
   assert.equal(home.imageProbe.complete, true);
   assert.equal(home.imageProbe.naturalWidth, 1);
-  assert.equal(home.imageProbe.src, `http://${targetHost}:${targetPort}/image-probe.png`);
+  assert.equal(home.imageProbe.src, '/image-probe.png');
   assert.ok(requests.some(r => r.url === '/image-probe.png' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   assert.ok(requests.some(r => r.url === '/' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
   });
@@ -2837,12 +2946,15 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
         resolve(err && err.message || String(err));
       }
     });
+    // D5: blob:/data: 워커 소스는 재작성 후 실행된다 — 실행 자체는 네이티브
+    // parity, 검증 포인트는 워커의 location 이 blob:/data: 로 보이는 것
+    // (멤브레인 활성 + 가상 location) 과 코드가 돈다는 것이다.
     out.blobWorker = await new Promise(resolve => {
       let worker;
       try {
-        const url = URL.createObjectURL(new Blob([`postMessage('ran')`], { type: '' }));
+        const url = URL.createObjectURL(new Blob([`postMessage('ran:' + self.location.protocol)`], { type: '' }));
         worker = new Worker(url);
-        const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 500);
+        const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 1500);
         worker.onmessage = ev => { clearTimeout(timer); resolve(String(ev.data)); };
         worker.onerror = () => { clearTimeout(timer); resolve('error'); };
       } catch (err) { resolve('throw:' + (err && err.message || String(err))); }
@@ -2850,8 +2962,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     out.dataWorker = await new Promise(resolve => {
       let worker;
       try {
-        worker = new Worker('data:text/javascript,postMessage(%22ran%22)');
-        const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 500);
+        worker = new Worker('data:text/javascript,postMessage(%22ran:%22%2Bself.location.protocol)');
+        const timer = setTimeout(() => { try { worker.terminate(); } catch {} resolve('no-message'); }, 1500);
         worker.onmessage = ev => { clearTimeout(timer); resolve(String(ev.data)); };
         worker.onerror = () => { clearTimeout(timer); resolve('error'); };
       } catch (err) { resolve('throw:' + (err && err.message || String(err))); }
@@ -2956,7 +3068,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
         const initial = d.domain;
         try { d.domain = 'evil.example'; } catch {}
         const after = d.domain;
-        return after === initial ? 'unchanged:' + initial : 'changed:' + after;
+        // M109+ parity: setter 는 유효 suffix 에도 no-op 다.
+        try { d.domain = initial; } catch {}
+        const afterValid = d.domain;
+        return (after === initial && afterValid === initial) ? 'unchanged:' + initial : 'changed:' + after + '|' + afterValid;
       } catch (err) { return 'throw:' + (err && err.message || err); }
     })();
 
@@ -3171,8 +3286,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   await t.test('topOrigin', () => { assert.equal(escapeMatrix.topOrigin, `http://${targetHost}:${targetPort}`); });
   await t.test('proxy-origin navigation', () => { assert.equal(page.url().startsWith(`http://proxy.localhost:${proxyPort}/`), true); });
   await t.test('stringTimer', () => { assert.equal(escapeMatrix.stringTimer, 'ran'); });
-  await t.test('blobWorker', () => { assert.notEqual(escapeMatrix.blobWorker, 'ran'); });
-  await t.test('dataWorker', () => { assert.notEqual(escapeMatrix.dataWorker, 'ran'); });
+  // D5: blob:/data: 워커 소스는 rewrite-then-execute — 실행되되 워커의
+  // location.protocol 이 blob:/data: 로 보여야 한다(멤브레인 가상 location).
+  await t.test('blobWorker', () => { assert.equal(escapeMatrix.blobWorker, 'ran:blob:'); });
+  await t.test('dataWorker', () => { assert.equal(escapeMatrix.dataWorker, 'ran:data:'); });
   await t.test('eventHandlerLocation', () => { assert.ok(escapeMatrix.eventHandlerLocation === '' || escapeMatrix.eventHandlerLocation === `http://${targetHost}:${targetPort}/#compound-tail`, `event handler location: ${escapeMatrix.eventHandlerLocation}`); });
   await t.test('upstream request identity', () => { assert.equal(requests.filter(r => r.userAgent && r.userAgent !== TARGET_UA).length, 0, `target requests: ${JSON.stringify(requests)}`); });
   await t.test('upstream request identity', () => { assert.ok(requests.some(r => r.url.startsWith('/direct-fetch') && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`); });
@@ -3312,10 +3429,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     }
     const expectedDivergences = {
       // Documented limits — proxy value pinned so a silent change can't hide.
-      // Measured 2026-09-22: everything else matches native exactly
-      // (hoistedVar/optCallNull/deleteMember/paramDefault/catchParam all match).
-      evalDirectLocal: 'v:undefined',                   // indirect eval: caller scope unreachable → undefined
-      anchorAttr: `v:${targetBase}/r?x=1`,              // getAttribute returns absolute target; literal '/r?x=1' needs htmltx literal-stash (known gap)
+      // R2: direct eval caller scope is now native-parity (desc-accessor +
+      // real direct eval), so evalDirectLocal is no longer divergent.
     };
     const wireBefore = wireRequests.length;
     await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/compat-probes`);
@@ -3421,29 +3536,37 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     await t.test('dedicated worker network surface', () => {
       assert.equal(d.fetchEcho, 'v:200', `fetchEcho: ${d.fetchEcho}`);
       assert.equal(d.xhrShim, 'v:200', `xhrShim: ${d.xhrShim}`);
-      // 동기 XHR 은 transport 가 없어 fail-closed, WS/RTC 계열은 전부 차단.
-      assert.equal(d.xhrSync, 'v:e:InvalidStateError', `xhrSync: ${d.xhrSync}`);
-      assert.equal(d.wsCtor, 'v:e:NotSupportedError', `wsCtor: ${d.wsCtor}`);
-      assert.equal(d.rtcCtor, 'v:e:NotSupportedError', `rtcCtor: ${d.rtcCtor}`);
-      assert.equal(d.wtCtor, 'v:e:NotSupportedError', `wtCtor: ${d.wtCtor}`);
+      // W3: 동기 XHR 은 /zp/api/sync-fetch park-릴레이 — 진짜 블로킹 + 프록시 전송.
+      assert.equal(d.xhrSync, 'v:status:200|worker-echo', `xhrSync: ${d.xhrSync}`);
+      // W4: 워커 WebSocket — 페이지 중계 SW 스트림으로 실제 라운드트립.
+      // 생성자는 성공하고 연결 실패는 비동기로 표면한다(네이티브 parity).
+      assert.equal(d.wsCtor, 'v:constructed', `wsCtor: ${d.wsCtor}`);
+      assert.equal(d.wsRoundtrip, 'v:msg:echo:ping', `wsRoundtrip: ${d.wsRoundtrip}`);
+      assert.ok(requests.some(r => r.upgrade && String(r.url).startsWith('/ws?w=worker')), `upstream never saw worker /ws upgrade: ${JSON.stringify(requests.filter(r => r.upgrade).map(r => r.url))}`);
+      // W5: RTCPeerConnection 은 워커에 [Exposed=Window] — 네이티브 부재라
+      // ReferenceError parity. WebTransport 는 워커에 있지만 게이트웨이
+      // 미설정 → stub 생성 성공(메서드만 reject, 페이지와 같은 의미).
+      assert.equal(d.rtcCtor, 'v:e:ReferenceError', `rtcCtor: ${d.rtcCtor}`);
+      assert.equal(d.wtCtor, 'v:constructed:closed', `wtCtor: ${d.wtCtor}`);
       // WorkerEventSource — 프록시 fetch 경유 SSE 라운드트립.
       assert.equal(d.esRoundtrip, 'v:msg:sse-ok', `esRoundtrip: ${d.esRoundtrip}`);
       assert.ok(requests.some(r => r.url.startsWith('/worker-echo')), `upstream never saw /worker-echo: ${JSON.stringify(requests.map(r => r.url))}`);
     });
-    await t.test('dedicated worker dynamic code is fail-closed', () => {
-      assert.equal(d.evalCode, 'e:NotSupportedError', `evalCode: ${d.evalCode}`);
-      assert.equal(d.funcCtor, 'e:NotSupportedError', `funcCtor: ${d.funcCtor}`);
+    await t.test('dedicated worker dynamic code is rewrite-then-execute', () => {
+      // W1/W2: zp-page-bundle 이 워커에 실려 eval/Function 이 재작성 경유 실행된다.
+      assert.equal(d.evalCode, 'v:2', `evalCode: ${d.evalCode}`);
+      assert.equal(d.funcCtor, 'v:7', `funcCtor: ${d.funcCtor}`);
     });
     await t.test('dedicated worker timers', () => {
       assert.equal(d.timerFn, 'v:fired', `timerFn: ${d.timerFn}`);
-      // 문자열 타이머는 리라이트 불가라 fail-closed(ERRATA G — 네이티브
-      // 컴파일로 두면 가상화를 우회한다).
-      assert.equal(d.timerStr, 'v:e:NotSupportedError', `timerStr: ${d.timerStr}`);
+      // W6: 문자열 타이머는 재작성 후 전역 eval 로 스케줄된다.
+      assert.equal(d.timerStr, 'v:ran', `timerStr: ${d.timerStr}`);
     });
     await t.test('dedicated worker importScripts', () => {
       assert.equal(d.importScriptsOK, 'v:imp-ok', `importScriptsOK: ${d.importScriptsOK}`);
-      assert.match(d.importScriptsData, /e:/, `importScriptsData: ${d.importScriptsData}`);
-      assert.match(d.importScriptsBlob, /e:/, `importScriptsBlob: ${d.importScriptsBlob}`);
+      // W7: data:/blob: 소스는 읽어서 재작성 후 전역 실행한다.
+      assert.equal(d.importScriptsData, 'v:imported', `importScriptsData: ${d.importScriptsData}`);
+      assert.equal(d.importScriptsBlob, 'v:imported', `importScriptsBlob: ${d.importScriptsBlob}`);
       assert.ok(requests.some(r => r.url.startsWith('/worker-imported.js')), 'upstream never saw /worker-imported.js');
     });
     await t.test('dedicated worker storage isolation + fingerprint', () => {
@@ -3459,7 +3582,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(m.staticImport, 'v:dep-ok', `staticImport: ${m.staticImport}`);
       assert.equal(m.href, `v:${targetBase}/probe-module-worker.js`, `href: ${m.href}`);
       assert.equal(m.fetchEcho, 'v:200', `fetchEcho: ${m.fetchEcho}`);
-      assert.match(m.evalCode, /e:/, `evalCode: ${m.evalCode}`);
+      assert.equal(m.evalCode, 'v:1', `evalCode: ${m.evalCode}`);
+      assert.equal(m.funcCtor, 'v:1', `funcCtor: ${m.funcCtor}`);
       // 모듈 워커 importScripts — Chrome 은 함수 자체는 노출하고 호출 시
       // TypeError("module worker")를 던진다. 스텁이 네이티브로 위임돼 같은
       // TypeError 가 나온다 — 네이티브 parity.
@@ -3530,8 +3654,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(probes.inlineHandler, 'ran', `inlineHandler: ${probes.inlineHandler}`);
       assert.equal(probes.evalPath, 'v:42', `evalPath: ${probes.evalPath}`);
     });
-    await t.test('CSP meta injection is neutralized', () => {
+    await t.test('CSP meta injection is intersected, not dropped', () => {
+      // default-src 'none' meta — 필터 후 data: img 허용이 남아 로드된다.
       assert.equal(probes.metaNeutralized, 'img-loaded-after-meta', `metaNeutralized: ${probes.metaNeutralized}`);
+      // img-src 'none' — 배관과 무관한 순수 엄격화는 verbatim 으로 지켜진다.
+      assert.equal(probes.metaStricter, 'img-blocked', `metaStricter: ${probes.metaStricter}`);
     });
     await t.test('response CSP matches proxied policy contract', () => {
       // 네비게이션 응답 헤더 — share URL 응답의 CSP 를 CDP 로 읽는다.
@@ -3598,9 +3725,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(probes.evalSyntaxError, 'threw:NotSupportedError', `evalSyntaxError: ${probes.evalSyntaxError}`);
       assert.equal(probes.evalIndirect, `v:${targetBase}`, `evalIndirect: ${probes.evalIndirect}`);
       assert.equal(probes.evalCall, 'v:5', `evalCall: ${probes.evalCall}`);
-      // 네이티브는 `eval is not a constructor` TypeError — 우리 eval 오버라이드는
-      // 일반 함수라 new 가 빈 객체를 만든다(측정 divergence, 탈출 경로 아님).
-      assert.equal(probes.evalAsCtor, 'v:[object Object]', `evalAsCtor: ${probes.evalAsCtor}`);
+      // R5 parity — 네이티브 eval 은 non-constructor, `new eval()` 은 TypeError.
+      assert.equal(probes.evalAsCtor, 'threw:TypeError', `evalAsCtor: ${probes.evalAsCtor}`);
       assert.equal(probes.evalTagged, 'v:undefined', `evalTagged: ${probes.evalTagged}`);
       // eval 이 만든 var 는 다음 접근에서 보인다(네이티브 parity).
       assert.equal(probes.evalVarVisible, 'v:42', `evalVarVisible: ${probes.evalVarVisible}`);
@@ -3645,9 +3771,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     });
     await t.test('dynamic import()', () => {
       assert.equal(probes.importHttp, `v:1|${targetBase}/dyn-mod.js`, `importHttp: ${probes.importHttp}`);
-      // §E documented compat break — data: module import는 fail-closed
-      // (TypeError — 네이티브 모듈 로더의 거부 형태와 같은 이름).
-      assert.equal(probes.importData, 'threw:TypeError', `importData: ${probes.importData}`);
+      // D2/D3: data:/blob: 모듈은 디코드·읽기 → 페이지 재작성기 → 재작성된
+      // blob URL 로 import 한다 — 네이티브와 같이 모듈이 실행된다.
+      assert.equal(probes.importData, 'v:1', `importData: ${probes.importData}`);
+      assert.equal(probes.importBlob, 'v:3', `importBlob: ${probes.importBlob}`);
     });
     await t.test('no source or path leaks', () => {
       for (const k of ['leakFnToString', 'leakCallee', 'leakDynStack', 'leakFnStack']) {
@@ -3789,16 +3916,36 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     assert.equal(probes.scopeTDZ, 'v:threw:ReferenceError', `scopeTDZ: ${probes.scopeTDZ}`);
     assert.equal(probes.scopeCatch, 'v:bound:42', `scopeCatch: ${probes.scopeCatch}`);
     assert.equal(probes.scopeDestructParam, 'v:bound', `scopeDestructParam: ${probes.scopeDestructParam}`);
-    // cross-script: var 는 지속, top-level let 은 eval-lexical 이라 소실 — pinned divergence.
+    // cross-script: var 지속은 물론 let/const/class 도 공유 전역 렉시컬 환경에 지속 (R1).
     assert.equal(probes.crossScriptVar, 'v:number:8', `crossScriptVar: ${probes.crossScriptVar}`);
-    assert.equal(probes.crossScriptLet, 'v:undefined', `crossScriptLet: ${probes.crossScriptLet}`);
-    // T2-3: direct eval 은 호출자 스코프를 못 본다 — pinned divergence.
-    assert.equal(probes.evalCallerScope, 'v:global-only', `evalCallerScope: ${probes.evalCallerScope}`);
-    // 함수 내부 Annex B/labeled 함수 선언·eval-created var — strict 의미로
-    // 처리되어 virtual 을 반환한다 (네이티브 sloppy 는 'function'/'number').
-    assert.equal(probes.annexBSloppy, 'v:object', `annexBSloppy: ${probes.annexBSloppy}`);
-    assert.equal(probes.labeledFnDecl, 'v:object', `labeledFnDecl: ${probes.labeledFnDecl}`);
-    assert.equal(probes.evalVarLocal, 'v:object', `evalVarLocal: ${probes.evalVarLocal}`);
+    assert.equal(probes.crossScriptLet, 'v:number', `crossScriptLet: ${probes.crossScriptLet}`);
+    assert.equal(probes.crossScriptConst, 'v:9', `crossScriptConst: ${probes.crossScriptConst}`);
+    assert.equal(probes.crossScriptClass, 'v:function', `crossScriptClass: ${probes.crossScriptClass}`);
+    assert.equal(probes.crossScriptLetWrite, 'v:42', `crossScriptLetWrite: ${probes.crossScriptLetWrite}`);
+    assert.ok(probes.crossScriptConstWrite && probes.crossScriptConstWrite.startsWith('threw:TypeError'), `crossScriptConstWrite: ${probes.crossScriptConstWrite}`);
+    // let 재선언 + var-vs-const 충돌 — 둘 다 SyntaxError 로 죽어야 한다.
+    assert.equal(probes.lexRedeclare, 'v:2', `lexRedeclare: ${probes.lexRedeclare} errs=${JSON.stringify(errs.slice(0, 4))}`);
+    // R2: direct eval 이 호출자 스코프를 본다 — desc 접근자 + 진짜 direct
+    // eval(헬퍼 파라미터 intrinsic)로 네이티브 parity.
+    assert.equal(probes.evalCallerScope, 'v:LOCAL', `evalCallerScope: ${probes.evalCallerScope}`);
+    assert.equal(probes.evalCallerWrite, 'v:7', `evalCallerWrite: ${probes.evalCallerWrite}`);
+    assert.equal(probes.evalCallerVar, 'v:VV', `evalCallerVar: ${probes.evalCallerVar}`);
+    assert.equal(probes.evalCallerConst, 'v:TypeError:C', `evalCallerConst: ${probes.evalCallerConst}`);
+    assert.equal(probes.evalThis, 'v:obj', `evalThis: ${probes.evalThis}`);
+    assert.equal(probes.evalArgs, 'v:3', `evalArgs: ${probes.evalArgs}`);
+    assert.equal(probes.evalNonString, 'v:[42,null,true,null]', `evalNonString: ${probes.evalNonString}`);
+    assert.equal(probes.evalVirtual, 'v:LOCALLOC', `evalVirtual: ${probes.evalVirtual}`);
+    assert.equal(probes.evalVirtualGlobal, `v:${targetHost}`, `evalVirtualGlobal: ${probes.evalVirtualGlobal}`);
+    assert.equal(probes.evalIndirectNoScope, 'v:global-only', `evalIndirectNoScope: ${probes.evalIndirectNoScope}`);
+    assert.equal(probes.evalOptionalNoScope, 'v:global-only', `evalOptionalNoScope: ${probes.evalOptionalNoScope}`);
+    assert.equal(probes.evalShadowed, 'v:shadow:x', `evalShadowed: ${probes.evalShadowed}`);
+    // R4: sloppy Annex B — 블록/레이블 함수 선언의 varEnv 바인딩이
+    // `typeof` 에 'function' 으로 보여야 한다(구버전은 가상 location
+    // object 를 돌려줬다 — strict 식 열화).
+    assert.equal(probes.annexBSloppy, 'v:function', `annexBSloppy: ${probes.annexBSloppy}`);
+    assert.equal(probes.labeledFnDecl, 'v:function', `labeledFnDecl: ${probes.labeledFnDecl}`);
+    // R3: sloppy eval 의 `var` 는 호출자 varEnv 에 호이스트 — 'number'.
+    assert.equal(probes.evalVarLocal, 'v:number', `evalVarLocal: ${probes.evalVarLocal}`);
     // T2-4: strict-mode `with` — 네이티브와 동일한 파스 에러 parity.
     assert.equal(probes.strictWith, 'v:SyntaxError', `strictWith: ${probes.strictWith}`);
     // T2-8: CSS 잔여 — StyleSheet.href 는 가상 타깃으로 디프록시, url() 은
@@ -3826,22 +3973,41 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     assert.equal(probes.locIdentity, 'v:true', `locIdentity: ${probes.locIdentity}`);
     assert.equal(probes.optCallChain, 'v:undefined|undefined', `optCallChain: ${probes.optCallChain}`);
     assert.equal(probes.deleteLoc, 'v:false|false', `deleteLoc: ${probes.deleteLoc}`);
-    // `new eval()` — 네이티브는 TypeError(eval 은 생성자가 아님). 우리는
-    // dynamicEval 이 constructible 이라 빈 객체 — divergence 핀.
-    assert.equal(probes.newEval, 'v:obj', `newEval: ${probes.newEval}`);
-    // getAttribute('href') — 리터럴이 아닌 절대 타깃 URL (htmltx literal
-    // stash 부재) — divergence 핀.
-    assert.match(probes.anchorLiteral, /^v:https?:\/\/[^/]+\/rel-x$/, `anchorLiteral: ${probes.anchorLiteral}`);
+    // `new eval()` — 네이티브는 TypeError(eval 은 생성자가 아님). R5 수정으로
+    // parity — new.target 가드가 TypeError 를 던진다.
+    assert.equal(probes.newEval, 'v:e:TypeError', `newEval: ${probes.newEval}`);
+    // getAttribute('href') — R6 리터럴 stash 로 작성자 원문 parity.
+    assert.equal(probes.anchorLiteral, 'v:/rel-x', `anchorLiteral: ${probes.anchorLiteral}`);
     // T4-1: 지문 — String(location)/navigation entry.name 은 가상 URL.
     // withDocWrite 프로브가 앞서 #withfrag 로 fragment nav 를 했으므로
     // fragment suffix 는 허용 — 핵심은 proxy 오리진이 아니라는 것.
     const virtURL = `v:http://${targetHost}:${targetPort}/surface-probes`;
     assert.ok(probes.consoleString === virtURL || probes.consoleString === virtURL + '#withfrag', `consoleString: ${probes.consoleString}`);
+    // ── P0: 잔여 표면 가드 ──
+    // ShadowRealm — 이 Chrome 은 미탑재(absent). 탑재 브라우저에서는
+    // evaluate/importValue 가 fail-closed 여야 한다 — 어느 쪽이든 미리라이트
+    // 실행('evaluated:*')이나 직접 egress('imported')는 불허.
+    assert.match(probes.shadowRealmEval, /^v:(absent|e:NotSupportedError)|^threw:NotSupportedError/, `shadowRealmEval: ${probes.shadowRealmEval}`);
+    assert.match(probes.shadowRealmImport, /^v:(absent|e:|timeout)/, `shadowRealmImport: ${probes.shadowRealmImport}`);
+    // navigator.credentials — 저장소 접근은 NotAllowedError (프록시 오리진
+    // 공용 저장소 노출 방지). 'got:' 이 나오면 실제 저장소가 읽힌 것.
+    assert.equal(probes.credGet, 'v:e:NotAllowedError', `credGet: ${probes.credGet}`);
+    // instantiateStreaming(문자열) — 네이티브도 TypeError (Promise<Response>
+    // 아님). egress 없음 확인 = parity 핀.
+    assert.match(probes.wasmStreamUrl, /^v:(e:TypeError|absent)/, `wasmStreamUrl: ${probes.wasmStreamUrl}`);
+    // navigator.locks — 타깃 네임스페이스로 격리되며 정상 동작해야 한다.
+    assert.equal(probes.navLocks, 'v:got:held', `navLocks: ${probes.navLocks}`);
+    // ShadowRealm importValue / wasmStreamUrl 이 직접 egress 를 낳았는지 wire 확인.
+    const p0Direct = wireRequests.filter(u => /^https?:\/\/(sr-leak|wasm-leak)\.invalid/.test(u) && !u.includes('/zp/'));
+    assert.equal(p0Direct.length, 0, `P0 direct egress: ${JSON.stringify(p0Direct)}`);
     assert.ok(probes.perfNavEntry === virtURL || probes.perfNavEntry === virtURL + '#withfrag', `perfNavEntry: ${probes.perfNavEntry}`);
     // getRegistrations 는 프록시 SW 자체를 보여선 안 되고 registerPH 는
     // 프록시 오리진 등록이 거부돼야 한다.
     assert.match(probes.swRegs, /^v:(count:\d+|no-sw)/, `swRegs: ${probes.swRegs}`);
     assert.match(probes.registerPH, /^v:(e:\w+|ok|absent)/, `registerPH: ${probes.registerPH}`);
+    // E4: 가상 오리진 URL 등록은 silent-success — 브라우저 UI 에 프록시
+    // 오리진을 노출하지 않으면서 네이티브 검증(오리진 동일성)은 지킨다.
+    assert.match(probes.registerPHSameOrigin, /^v:(ok|absent)/, `registerPHSameOrigin: ${probes.registerPHSameOrigin}`);
     assert.match(probes.realProps, /^v:(mem|no-mem)\|\d+\|(?:\d+|undefined)\|UTF-8\|/, `realProps: ${probes.realProps}`);
     // 에러/거부 이벤트 인자에 프록시 표식이 없어야 한다
     for (const e of errs) {
@@ -4032,6 +4198,30 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
   assert.equal(next.userAgent, TARGET_UA);
   assert.match(next.href, new RegExp(`^http://proxy\\.localhost:${proxyPort}/zp/p/`));
   assert.ok(requests.some(r => r.url === '/next' && r.userAgent === TARGET_UA), `target requests: ${JSON.stringify(requests)}`);
+  });
+  await t.test('anchor ping fires through proxy transport', async () => {
+  // E1: `<a ping>` 은 브라우저의 직접 POST 를 끊고(data-zp-blocked-ping 스태시)
+  // 클릭 시 프록시 transport 로 POST 'PING' 을 발사한다 — upstream 이 봐야 한다.
+  await page.evaluate(base => {
+    const a = document.createElement('a');
+    a.href = base + '/ping-dest';
+    a.ping = base + '/ping-track';
+    a.textContent = 'go';
+    a.id = 'ping-a';
+    document.body.appendChild(a);
+  }, `http://${targetHost}:${targetPort}`);
+  await page.click('#ping-a');
+  // ping 은 fire-and-forget — 클릭 직후 네비게이션과 독립적으로 upstream 에 도착.
+  const deadline = Date.now() + 10000;
+  while (!requests.some(r => r.url === '/ping-track')) {
+    if (Date.now() > deadline) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  const ping = requests.find(r => r.url === '/ping-track');
+  assert.ok(ping, `ping 이 upstream 에 도착하지 않았다: ${JSON.stringify(requests.slice(-8))}`);
+  assert.equal(ping.method, 'POST');
+  assert.equal(ping.contentType, 'text/ping');
+  // 직접 egress 없음 — ping 도 프록시 오리진 wire 만 탄다(최종 단언이 커버).
   });
   });
   await t.test('all browser and worker network stays on the proxy origin', () => {

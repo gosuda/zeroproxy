@@ -302,6 +302,15 @@
   const documentCookieRecords = [];
   initDocumentCookieRecords(documentCookie);
   const urlMeta = new WeakMap();
+  // getAttribute 리터럴 parity — 네이티브는 작성자 원문을 그대로 돌려준다.
+  // 우리가 속성을 프록시 URL 로 바꿔 쓰므로 원문은 따로 기억한다.
+  // (요소 → Map(attrName → literal)). htmltx 가 심은 초기 마크업의 리터럴은
+  // `data-zp-lit-*` 속성으로 전달된다 — 둘 다 getAttribute 훅이 읽는다.
+  const urlLitMeta = new WeakMap();
+  function litAttrName(key) { return 'data-zp-lit-' + String(key).toLowerCase(); }
+  function litSet(el, key, value) { let m = urlLitMeta.get(el); if (!m) { m = new Map(); urlLitMeta.set(el, m); } m.set(String(key).toLowerCase(), String(value)); }
+  function litGet(el, key) { const m = urlLitMeta.get(el); const k = String(key).toLowerCase(); if (m && m.has(k)) return m.get(k); return undefined; }
+  function litDel(el, key) { const m = urlLitMeta.get(el); if (m) m.delete(String(key).toLowerCase()); }
   // 페이지가 되읽는 값은 자기가 쓴 원본이어야 한다. `urlMeta` 는 요소당 값
   // 하나라서 못 쓴다 — img 는 `src` 와 `srcset` 을 동시에 갖는 게 정상이고,
   // 그러면 둘이 서로를 덮는다. 그래서 (요소, 속성) 단위로 따로 기억한다.
@@ -359,11 +368,6 @@
   const integrityBackupAttr = 'data-zp-integrity';
   const hiddenIconHref = 'data:application/x-zeroproxy-icon,1';
   const WINDOW_BOUND_METHODS = new Set(['addEventListener','removeEventListener','dispatchEvent','setTimeout','setInterval','clearTimeout','clearInterval','requestAnimationFrame','cancelAnimationFrame','requestIdleCallback','cancelIdleCallback','matchMedia','getComputedStyle','postMessage','atob','btoa','focus','blur','close','print','alert','confirm','prompt','scroll','scrollTo','scrollBy']);
-  const workerBlobURLs = new Set();
-  // 페이지가 만든 blob URL 중 **스크립트가 될 수 있는** 것들. 워커 경로에서만
-  // 본다 — 만드는 순간에는 아무것도 하지 않는다(아래 createObjectURL 참고).
-  const scriptishBlobURLs = new Set();
-  const SCRIPTISH_BLOB_TYPE = /javascript|ecmascript|text\/plain|application\/octet-stream|^$/i;
   const canvasHookedWindows = new WeakSet();
   const audioHookedWindows = new WeakSet();
   const serviceWorkerFacades = new WeakMap();
@@ -1213,7 +1217,24 @@
     return tag === 'script' || tag === 'iframe' || tag === 'frame' || tag === 'embed' || tag === 'object';
   }
   function blockedURLValue(el, key) { const tag = el && el.localName; return key === 'src' && (tag === 'iframe' || tag === 'frame') ? 'about:blank' : key === 'src' && tag === 'script' ? ZP.errorPath('POLICY_BLOCKED') : '#'; }
-  function blockExecutableURL(el, key, raw) { urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', String(raw).trim()); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el); }
+  function blockExecutableURL(el, key, raw) {
+    // D4: 런타임이 꽂은 `a.href="javascript:…"` / `form action="javascript:…"`
+    // 도 정적 htmltx 와 같은 의미로 — 재작성된 본문을 data-zp-jsurl 에 stash
+    // 하고 속성은 void(0) 로 둔다. 위임 click/submit 핸들러가 실행한다.
+    const tag = el && el.localName;
+    const s = String(raw).trim();
+    const colon = s.indexOf(':');
+    if (/^javascript:/i.test(s) && ((key === 'href' && (tag === 'a' || tag === 'area')) || (key === 'action' && tag === 'form'))) {
+      try {
+        const code = callPageRewriter(s.slice(colon + 1), 'classic');
+        Native.setAttribute.call(el, 'data-zp-jsurl', code);
+        Native.setAttribute.call(el, 'data-zp-jsurl-kind', tag === 'form' ? 'form' : 'anchor');
+        Native.setAttribute.call(el, key, 'javascript:void(0)');
+        return;
+      } catch {}
+    }
+    urlMeta.delete(el); Native.setAttribute.call(el, 'data-zp-target-url', ''); Native.setAttribute.call(el, 'data-zp-blocked-url', s); Native.setAttribute.call(el, key, blockedURLValue(el, key)); if (key === 'src' && (el.localName === 'iframe' || el.localName === 'frame')) instrumentIframe(el);
+  }
   // ★타깃이 페이지 realm 에서 `<meta http-equiv="Content-Security-Policy">` 를
   // 꽂으면 그 정책이 **우리 문서에 실제로 적용된다**(2026-08-21 실측: 주입 전
   // 이미지 LOADED → `img-src 'none'` 주입 후 BLOCKED). 서버측 htmltx 는 정적
@@ -1236,8 +1257,30 @@
   function isCSPHttpEquiv(value) {
     return CSP_EQUIV.indexOf(String(value || '').trim().toLowerCase()) >= 0;
   }
+  // E2: meta CSP 는 헤더 CSP 와 합성 적용이라 살려 둬도 엄격화만 가능하다.
+  // filterMetaCSP(zp-shared::csp::filter_meta_csp 의 JS 미러)가 배관 필수
+  // 소스를 얹은 교집합을 만든다 — 남는 지시어가 없을 때만 무력화한다.
+  // origin-trial 은 토큰이지 CSP 가 아니다 — 무조건 무력화.
   function neutralizeCSPMeta(el, value) {
     Native.setAttribute.call(el, 'data-zp-blocked-http-equiv', String(value));
+    const eq = String(value || '').trim().toLowerCase();
+    if (eq === 'content-security-policy' || eq === 'content-security-policy-report-only') {
+      const content = Native.getAttribute ? Native.getAttribute.call(el, 'content') : null;
+      const filtered = content != null ? ZP.filterMetaCSP(content) : '';
+      if (filtered) {
+        // observer 가 이 setAttribute 를 다시 본다 — 이미 필터된 값이면
+        // (content === filtered) 스태시를 덮지 않고 쓰지도 않는다.
+        if (content !== filtered) {
+          try { Native.setAttribute.call(el, 'data-zp-blocked-content', String(content)); } catch {}
+          try { Native.setAttribute.call(el, 'content', filtered); } catch {}
+        }
+        // http-equiv 가 content 보다 먼저 처리돼 지워진 경우 되살린다.
+        if (Native.getAttribute.call(el, 'http-equiv') == null) {
+          try { Native.setAttribute.call(el, 'http-equiv', eq); } catch {}
+        }
+        return;
+      }
+    }
     if (Native.removeAttribute) { try { Native.removeAttribute.call(el, 'http-equiv'); } catch {} }
   }
   function isIntegrityBearing(el) { const tag = el && el.localName; return tag === 'script' || tag === 'link'; }
@@ -1346,6 +1389,15 @@
     return !!m && NAV_EXTERNAL_SCHEMES.has(m[1].toLowerCase());
   }
   function setVirtualLocation(raw, replace = false) {
+    // D4: `location.href='javascript:…'` — 네이티브는 코드를 현재 문서에서
+    // 평가한다(반환 문자열이면 문서 교체). 여기서는 재작성 후 페이지 realm 에서
+    // 실행하고, 문자열 반환의 문서 교체는 희소 경로라 생략한다.
+    const jsMatch = /^\s*javascript:/i.exec(String(raw));
+    if (jsMatch) {
+      const code = String(raw).slice(jsMatch[0].length);
+      try { execGlobalScript(callPageRewriter(code, 'classic')); } catch {}
+      return;
+    }
     let next;
     try {
       next = new URL(targetURL(raw));
@@ -1692,6 +1744,7 @@
   __zpStep('WebSocketStream', installWebSocketStream);
   __zpStep('HTTPAPIs', installHTTPAPIs);
   __zpStep('Beacon', installBeacon);
+  __zpStep('ProtocolHandlerFacade', installProtocolHandlerFacade);
   __zpStep('NavigationTraps', installNavigationTraps);
   __zpStep('PopupHooks', () => installPopupHooks(root));
   __zpStep('PostMessageHooks', () => installPostMessageHooks(root));
@@ -1707,6 +1760,7 @@
   __zpStep('CanvasAntiFingerprinting', () => installCanvasAntiFingerprinting(root));
   __zpStep('AudioAntiFingerprinting', () => installAudioAntiFingerprinting(root));
   __zpStep('NavigationBackstop', () => installNavigationBackstop(root, root.document && root.document.documentElement));
+  __zpStep('SurfaceGuards', () => installSurfaceGuards(root));
   zpTrace('install:all:done');
   // Modal-dialog override — synchronous alert/confirm/prompt block the
   // main thread until the browser shell dismisses them. In headless /
@@ -1936,6 +1990,8 @@
       return !/^(?:function|class|var|let|const|if|for|while|do|switch|try|throw|return|break|continue|with|import|export|debugger)\b/.test(text.trimStart());
     }
     function dynamicEval(source) {
+      // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
+      if (new.target) throw new TypeError('eval is not a constructor');
       if (arguments.length === 0) return undefined;
       const text = String(source);
       let expr = null;
@@ -1968,7 +2024,14 @@
       // 본문이라 전역 선언 시맨틱이 애초에 없다.
       try {
         const globalCode = callPageRewriter(text, 'classic');
-        if (typeof globalCode === 'string' && globalCode.length) return execGlobalScript(globalCode);
+        if (typeof globalCode === 'string' && globalCode.length) {
+          // R1: eval 의 let/const/class 는 eval 렉시컬 환경과 함께 버려진다 —
+          // 공유 zpLex 가 아닌 버리는 Map 에 등록한다.
+          const prevLexEnv = __zp_lex_env;
+          __zp_lex_env = new Map();
+          try { return execGlobalScript(globalCode); }
+          finally { __zp_lex_env = prevLexEnv; }
+        }
       } catch {}
       return Reflect.apply(compileScoped(Native.FunctionCtor, [], text), root, [withScope]);
     }
@@ -1989,6 +2052,83 @@
     try { Object.defineProperty(dynamicEval, 'name', { value: 'eval', configurable: true }); } catch {}
     try { Object.defineProperty(dynamicEval, 'length', { value: 1, configurable: true }); } catch {}
     maskNativeFunction(dynamicEval, 'eval');
+    // ── R2: direct `eval(x)` 호출자 스코프 ──
+    // 리라이터가 `eval(x)` 를 `__zp_eval.call(this, src, desc)` 로 방출한다.
+    // 문제: direct eval 은 "eval 이라는 이름으로 intrinsic 을 호출" 해야만
+    // 호출자 환경을 본다 — `Native.globalEval(src)` 는 indirect(전역). prelude
+    // 는 strict 라 `const eval` 바인딩도 불법. 탈출구: Function ctor 로 만든
+    // sloppy 헬퍼의 **파라미터명** eval — `f(neval, src)` 안에서 `eval(src)`
+    // 는 파라미터가 intrinsic 이라 진짜 direct eval 이 되고, eval 은 호출
+    // 컨텍스트(헬퍼)의 this·lexenv 를 계승한다. with(desc)/with(scope) 가
+    // eval 소스 안에서 그 헬퍼 파라미터로 해석된다.
+    // desc 접근자 본문은 call-site 어휘 위치에서 실행되어 호출자 지역을
+    // 읽고 쓴다; 호출자가 없는 이름은 scope 프록시로 떨어진다.
+    // `var` — 부팅 중 get/set/has/del 이 선언문 도달 전에 호출돼도 TDZ 로
+    // 죽지 않게 한다.
+    var __zp_eval_desc = null;
+    const zpDirectEvalRunner = Native.FunctionCtor(
+      'eval', '__zp_env', '__zp_src',
+      'return eval(__zp_src)');
+    function zpDirectEval(callee, args, desc, callerStrict) {
+      // 네이티브 eval 은 생성자가 아니다.
+      if (new.target) throw new TypeError('eval is not a constructor');
+      // `var eval = f` 등으로 eval 이름이 재바인딩됐으면 네이티브는 그 값을
+      // 호출한다 — intrinsic 이 아닌 callee 는 ordinary call 로 위임
+      // (thisValue undefined → sloppy 는 전역, strict 는 undefined).
+      if (callee !== dynamicEval) {
+        return Reflect.apply(callee, undefined, Array.isArray(args) ? args : []);
+      }
+      const src = args && args.length ? args[0] : undefined;
+      // 네이티브 parity: 비문자열 인자는 평가 없이 그대로 반환.
+      if (typeof src !== 'string') return src;
+      const rewritten = callPageRewriter(src, 'classic');
+      let d = {};
+      if (desc && typeof desc === 'object') {
+        // `delete x` 가 호출자 바인딩을 지우면 안 된다 — 접근자를
+        // non-configurable 로 재정의해 네이티브의 false 반환을 흉낸다.
+        const dd = Object.getOwnPropertyDescriptors(desc);
+        for (const k of Object.keys(dd)) { dd[k].configurable = false; dd[k].enumerable = true; }
+        d = Object.defineProperties({}, dd);
+      }
+      const prev = __zp_eval_desc;
+      __zp_eval_desc = d;
+      // R1: eval 의 let/const/class 는 eval 자체의 렉시컬 환경에 살고 함께
+      // 버려진다 — 공유 zpLex 에 새지 않게 eval 마다 버리는 Map 을 둔다.
+      const prevLexEnv = __zp_lex_env;
+      __zp_lex_env = new Map();
+      try {
+        // strict 는 소스 지시어로 전달한다 — sloppy 헬퍼의 direct eval 에
+        // `'use strict';` 프롤로그가 있으면 strict eval 이 된다 (strict
+        // 헬퍼는 `eval` 파라미터명이 불법이라 별도 헬퍼를 못 만든다).
+        // strict eval 소스는 `with` 를 못 쓰므로 raw 경로: plain 식별자는
+        // 어휘 사슬(→전역)로, dangerous 이름은 __zp_get 의 desc consult 로
+        // 호출자를 본다.
+        const strictSrc = !!callerStrict || /^\s*['"]use strict['"]/.test(src);
+        // 단일 합성 with: 스코프 프록시의 has 가 모든 이름에 true 라
+        // `with(__zp_desc)` 같은 이중 래핑은 파라미터명까지 삼켜버린다.
+        // desc 우선 → withScope 폴백을 한 프록시로 합성한다.
+        const env = new Proxy(d, {
+          has(_t, p) { return p !== Symbol.unscopables; },
+          get(_t, p) {
+            if (typeof p === 'string' && Object.prototype.hasOwnProperty.call(d, p)) return d[p];
+            return Reflect.get(withScope, p);
+          },
+          set(_t, p, v) {
+            if (typeof p === 'string' && Object.prototype.hasOwnProperty.call(d, p)) { d[p] = v; return true; }
+            return Reflect.set(withScope, p, v);
+          },
+        });
+        // sourceURL — eval 소스의 에러 filename 이 호출자 스크립트(가상
+        // 문서 URL)를 가리키게 — 네이티브는 eval 소스 에러도 호출 스크립트
+        // URL 을 reporting 한다.
+        const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + rewritten + '\n}';
+        return zpDirectEvalRunner.call(this, Native.globalEval, env, body + '\n//# sourceURL=' + virtualURL.href);
+      } finally {
+        __zp_eval_desc = prev;
+        __zp_lex_env = prevLexEnv;
+      }
+    }
+    define(root, '__zp_eval', zpDirectEval);
     const dynamicConstructorWrappers = new Map([
       [Native.FunctionCtor, dynamicFunction],
       [dynamicFunction, dynamicFunction],
@@ -2542,6 +2682,31 @@
       const boot = bootOwnAccessors.get(prop);
       return !boot || boot.get !== own.get || boot.set !== own.set;
     }
+    // R1: classic script 의 top-level let/const/class 는 **스크립트를 넘어
+    // 지속되는 공유 전역 렉시컬 환경**에 산다. 각 스크립트가 별도 indirect
+    // eval 로 실행되면 그 렉시컬 환경은 버려지므로, 리라이터가 심은
+    // `__zp_lex_decl`(등록+충돌검사)/`__zp_lex_bind`(accessor 클로저) 가
+    // 살아있는 바인딩을 여기 보존한다.
+    //   entry = { kind:'let'|'const'|'class', get, set } — set=null 이면
+    //   const 의미(쓰기 시 TypeError), get=null 이면 선언만 되고 bind 가
+    //   안 된 상태(초기화 throw 등) → 읽기 시 ReferenceError(TDZ parity).
+    const zpLex = new Map();
+    // 현재 렉시컬 환경 — 스크립트 실행 중엔 zpLex, eval/동적 코드 안에선
+    // 그 eval 의 버려지는 환경(네이티브 eval 렉시컬 환경 의미 그대로).
+    var __zp_lex_env = null;
+    __zp_lex_env = zpLex;
+    function zpLexGetEntry(prop) {
+      return typeof prop === 'string' ? zpLex.get(prop) : undefined;
+    }
+    function zpLexRead(e, prop) {
+      if (!e.get) throw new ReferenceError(`Cannot access '${prop}' before initialization`);
+      return e.get();
+    }
+    function zpLexWrite(e, prop, value) {
+      if (!e.set) throw new TypeError('Assignment to constant variable.');
+      e.set(value);
+      return value;
+    }
     function scopeGet(prop, hide) {
       if (prop === Symbol.unscopables) return undefined;
       if (hide && typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
@@ -2647,7 +2812,18 @@
       has(_target, prop) { return prop !== Symbol.unscopables; },
       // has=true 와 짝을 이뤄야 하는 get — `__zp_*` 헬퍼가 with 본문에서
       // 반드시 해석되어야 한다 (페이지-facing scope 와 달리 숨기지 않는다).
-      get(_target, prop) { return scopeGet(prop, false); },
+      // R1: 전역 렉시컬 바인딩은 전역 객체 프로퍼티보다 **먼저** 보인다 —
+      // 동적 코드의 bare 식별자도 다른 스크립트의 let/const 를 읽는다.
+      get(_target, prop) {
+        const le = zpLexGetEntry(prop);
+        if (le) return zpLexRead(le, prop);
+        return scopeGet(prop, false);
+      },
+      set(_target, prop, value) {
+        const le = zpLexGetEntry(prop);
+        if (le) { zpLexWrite(le, prop, value); return true; }
+        return scopeTraps.set(_target, prop, value);
+      },
     }));
     function isScopeProxy(value) { return value === scope || value === withScope; }
     // Names the rewriter marks as dangerous members. `Reflect.get/set` route
@@ -2732,6 +2908,21 @@
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return '';
       if (isWindowLike(base)) {
+        // R2: direct-eval 실행 중 desc(호출자 스코프)는 가상 전역보다
+        // 우선한다 — eval'd 코드의 `__zp_get(g,'x')` 도 호출자 지역을 본다.
+        {
+          const d = __zp_eval_desc;
+          if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
+              && Object.prototype.hasOwnProperty.call(d, prop)) return d[prop];
+        }
+        // R1: bare 식별자(`__zp_get(globalThis,"x")` — with 안에서
+        // `globalThis` 가 진짜 root 로 해석된다)는 전역 렉시컬 환경이 전역
+        // 객체보다 먼저다. 멤버 경로(base===scope 프록시)는 건너뛴다 —
+        // `window.x` 는 렉시컬 바인딩을 보지 않는다(네이티브 의미).
+        if (base === root) {
+          const le = zpLexGetEntry(prop);
+          if (le) return zpLexRead(le, prop);
+        }
         if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return isScopeProxy(base) || base === root ? scope : base;
         if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base), prop);
         if (prop === 'location') {
@@ -2777,6 +2968,19 @@
     }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
+      // R2: eval 실행 중 호출자 바인딩 우선 — setter 가 호출자 스코프에서
+      // 실행되어 const 쓰기 TypeError 도 네이티브 그대로 나온다.
+      {
+        const d = __zp_eval_desc;
+        if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
+            && Object.prototype.hasOwnProperty.call(d, prop)) { d[prop] = value; return value; }
+      }
+      // R1: bare 식별자 쓰기는 전역 렉시컬 바인딩으로 라우팅 —
+      // const 면 TypeError (zpLexWrite). 멤버 경로(scope 베이스)는 제외.
+      if (base === root) {
+        const le = zpLexGetEntry(prop);
+        if (le) return zpLexWrite(le, prop, value);
+      }
       if (prop === 'location' && isWindowLike(base) && !isScopeProxy(base) && base !== root) {
         crossWindowLocation(crossWindowTargets.get(base) || base).href = value;
         return value;
@@ -2854,7 +3058,13 @@
       const dynamic = dynamicWrapperFor(ctor);
       return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
     }
-    function has(base, prop) { if ((isWindowLike(base) || isDocumentLike(base)) && prop === 'location') return true; return Reflect.has(Object(base), prop); }
+    function has(base, prop) {
+      const d = __zp_eval_desc;
+      if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
+          && Object.prototype.hasOwnProperty.call(d, prop)) return true;
+      if ((isWindowLike(base) || isDocumentLike(base)) && prop === 'location') return true;
+      return Reflect.has(Object(base), prop);
+    }
     // Document-ness by nodeType 9: covers root document, iframe
     // contentDocument, DOMParser/implementation documents — including
     // cross-realm documents where `instanceof Document` fails.
@@ -2909,6 +3119,12 @@
     function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
     function del(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
+      // R2: eval 중 호출자 바인딩 delete → non-configurable 접근자라 false.
+      {
+        const d = __zp_eval_desc;
+        if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
+            && Object.prototype.hasOwnProperty.call(d, prop)) { delete d[prop]; return false; }
+      }
       // `delete window.location` — unforgeable, silently refuses. Returning
       // false mirrors native non-strict `delete` instead of a phantom success.
       if (prop === 'location' && (isWindowLike(base) || isDocumentLike(base))) return false;
@@ -3074,8 +3290,46 @@
       const spec = String(specifier);
       if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw normalizedError('TypeError');
       const u = new URL(spec, referrer || baseURL);
+      if (u.protocol === 'data:' || u.protocol === 'blob:') return virtualModuleURL(u);
       if (u.protocol !== 'http:' && u.protocol !== 'https:') throw normalizedError('NotSupportedError');
       return scriptProxyPath(u.href, 'module');
+    }
+    // `import('data:…')` / `import('blob:…')` — 소스를 읽어 이 realm 의
+    // 재작성기로 재작성한 뒤 **재작성된** blob URL 을 돌린다. 재작성 코드가
+    // 참조하는 `__zp_*` 는 같은 window 의 전역이라 그대로 풀린다. 읽기/
+    // 재작성 실패는 fail-closed(NotSupportedError).
+    //   - data: 는 동기 디코드.
+    //   - blob: 은 same-origin blob 이라 네이티브 sync XHR 로 읽는다 —
+    //     in-process 조회라 네트워크를 타지 않는다.
+    function virtualModuleURL(u) {
+      let src;
+      try {
+        if (u.protocol === 'data:') {
+          const href = u.href;
+          const comma = href.indexOf(',');
+          if (comma < 0) throw 0;
+          const meta = href.slice(5, comma), dataStr = href.slice(comma + 1);
+          if (/;base64/i.test(meta)) {
+            const bin = atob(dataStr);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            src = new TextDecoder().decode(bytes);
+          } else {
+            src = decodeURIComponent(dataStr);
+          }
+        } else {
+          const nx = new Native.XMLHttpRequest();
+          nx.open('GET', u.href, false);
+          nx.send();
+          if (nx.status !== 200 && nx.status !== 0) throw 0;
+          src = nx.responseText;
+        }
+      } catch { throw normalizedError('NotSupportedError'); }
+      if (typeof src !== 'string' || !src.length) throw normalizedError('NotSupportedError');
+      let code;
+      try { code = callPageRewriter(src, 'module'); } catch (e) { throw normalizedError('NotSupportedError'); }
+      const blob = new Blob([code], { type: 'text/javascript' });
+      return (Native.createObjectURL || URL.createObjectURL).call(URL, blob);
     }
     define(root, '__zp_get', get);
     define(root, '__zp_set', set);
@@ -3223,13 +3477,63 @@
     // did not install a `with(__zp_scope)` either — only the *lexical* home
     // of the declarations changes.
     //
-    // Known remaining gap: top-level `let`/`const`/`class` land in the eval's
-    // own lexical scope rather than the shared global lexical scope, so they
-    // stay invisible to later scripts. Legacy cross-script globals are
-    // `var`/`function`, which this covers.
+    // R1: 리라이터가 classic top-level let/const/class 에 심은 등록/바인딩
+    // 호출의 런타임 측. `__zp_lex_env` 는 현재 렉시컬 환경 — 스크립트 실행
+    // 중엔 zpLex, eval/동적 코드 안에선 그 eval 의 버려지는 Map(네이티브가
+    // eval 렉시컬 환경을 버리는 것과 같은 의미).
+    // 충돌 이름을 반환(throw 는 방출 코드가 한다 — prelude 에서 던지면
+    // 에러 이벤트 filename 이 prelude URL 을 새므로). 2-패스라 부분 등록
+    // 없이 instantiate 실패 의미를 보존한다.
+    define(root, '__zp_lex_decl', (lexMap, varNames) => {
+      const env = __zp_lex_env || zpLex;
+      for (const n of varNames) {
+        // var 는 전역 객체가 아니라 전역 varEnv 에 간다 — 충돌 검사는 항상
+        // 공유 zpLex(전역 렉시컬) 기준, eval 환경에도 같은 eval 안의
+        // 선언과는 충돌한다.
+        if (zpLex.has(n) || (env !== zpLex && env.has(n))) return n;
+      }
+      for (const n of Object.keys(lexMap)) {
+        if (env.has(n) || varNames.includes(n)) return n;
+        // 전역 렉시컬 선언은 비configurable 전역 프로퍼티(var 선언 결과물,
+        // location/document 같은 unforgeable)와도 충돌한다. eval 환경은
+        // 별도 선언 환경이라 이 검사를 건너뛴다.
+        if (env === zpLex) {
+          const d = Reflect.getOwnPropertyDescriptor(root, n);
+          if (d && !d.configurable) return n;
+        }
+      }
+      for (const n of Object.keys(lexMap)) env.set(n, { kind: lexMap[n], get: null, set: null });
+      return undefined;
+    });
+    define(root, '__zp_lex_bind', (name, get, set) => {
+      const env = __zp_lex_env || zpLex;
+      const e = env.get(name);
+      if (e) { e.get = get; e.set = typeof set === 'function' ? set : null; }
+    });
+    // sloppy classic script 실행용 식별자 환경 — has 가 **등록된 이름에만**
+    // true 라 나머지 식별자는 진짜 전역으로 그대로 통과한다.
+    const zpLexScope = new Proxy({}, {
+      has(_t, prop) { return zpLexGetEntry(prop) !== undefined; },
+      get(_t, prop) { const e = zpLexGetEntry(prop); return e ? zpLexRead(e, prop) : undefined; },
+      set(_t, prop, value) { const e = zpLexGetEntry(prop); if (!e) return false; zpLexWrite(e, prop, value); return true; },
+      deleteProperty() { return false; },
+    });
+    define(root, '__zp_lex_scope', zpLexScope);
+    const ZP_STRICT_DIRECTIVE_RE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
     function execGlobalScript(code) {
       const geval = Native.globalEval;
-      if (geval) return geval(code);
+      // sourceURL — eval'd 코드의 에러 filename 이 prelude URL 을 새지
+      // 않고 문서의 가상 URL 을 가리키게 한다 (네이티브 인라인 스크립트
+      // 에러는 문서 URL 을 reporting 한다).
+      const tagged = '\n//# sourceURL=' + virtualURL.href;
+      if (geval) {
+        // R1: sloppy classic 은 전역 렉시컬 환경을 with(lexScope) 로
+        // 에뮬레이션 — 등록되지 않은 식별자는 has=false 로 진짜 전역 통과.
+        // strict eval 에선 with 자체가 불법이라 지시자 소스는 래핑하지
+        // 않는다 (strict 잔여 gap — 등록은 되지만 bare 식별자 읽기 불가).
+        if (!ZP_STRICT_DIRECTIVE_RE.test(code)) return geval('with(__zp_lex_scope){' + code + '\n}' + tagged);
+        return geval(code + tagged);
+      }
       return Native.FunctionCtor(code).call(root);
     }
     define(root, '__ZP_EXEC_INLINE_SCRIPT', source => execGlobalScript(rewriteWithPageRewriter(decodeInlineEntities(source), 'classic')));
@@ -4038,6 +4342,49 @@
   }
 
   function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; defineMethodOnProto(navigator, root.Navigator && root.Navigator.prototype, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
+  // E4: registerProtocolHandler 계열. 실제로 네이티브에 넘기면 브라우저
+  // 등록 UI 에 **프록시 오리진**이 노출되고 OS 핸들러가 프록시를 가리킨다.
+  // 그렇다고 SecurityError 를 던지면 타깃이 같은 오리진 URL 로 등록하는
+  // 정상 경로까지 죽는다. 네이티브 검증 규칙(스킴 safelist/web+ 접두, %s
+  // 포함, 가상 오리진 동일성)은 그대로 적용하고, 통과하면 **아무 일 없이**
+  // 성공 반환한다 — 사용자가 브라우저 프롬프트를 아직 안 누른 상태와 같은
+  // 모양. isProtocolHandlerRegistered 는 영원히 'new' 를 돌린다.
+  function installProtocolHandlerFacade() {
+    const proto = root.Navigator && root.Navigator.prototype;
+    if (!proto || typeof navigator.registerProtocolHandler !== 'function') return;
+    const SAFELIST = new Set(['bitcoin','geo','im','irc','ircs','magnet','mailto','matrix','mms','news','nntp','openpgp4fpr','sip','sms','smsto','ssh','tel','urn','webcal','wtai','xmpp']);
+    const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
+    function validate(scheme, url) {
+      const s = String(scheme).toLowerCase();
+      if (!SCHEME_RE.test(s) || !(SAFELIST.has(s) || s.startsWith('web+'))) {
+        throw new DOMException(`The scheme '${scheme}' is not allowed`, 'SecurityError');
+      }
+      const raw = String(url);
+      if (!raw.includes('%s')) {
+        throw new DOMException("The url provided does not contain '%s'", 'SyntaxError');
+      }
+      let u;
+      try { u = new URL(raw, baseURL); } catch { throw new DOMException('Invalid URL', 'SyntaxError'); }
+      if (u.origin !== virtualURL.origin) throw new DOMException('The url must be same-origin', 'SecurityError');
+      return u;
+    }
+    defineMethodOnProto(navigator, proto, 'registerProtocolHandler', function registerProtocolHandler(scheme, url) {
+      if (arguments.length < 2) throw new TypeError("Failed to execute 'registerProtocolHandler' on 'Navigator': 2 arguments required");
+      validate(scheme, url);
+      // 등록하지 않는다 — 브라우저 프롬프트에 프록시 오리진이 뜨는 것을 막는다.
+    });
+    defineMethodOnProto(navigator, proto, 'unregisterProtocolHandler', function unregisterProtocolHandler(scheme, url) {
+      if (arguments.length < 2) throw new TypeError("Failed to execute 'unregisterProtocolHandler' on 'Navigator': 2 arguments required");
+      validate(scheme, url);
+    });
+    if (typeof navigator.isProtocolHandlerRegistered === 'function') {
+      defineMethodOnProto(navigator, proto, 'isProtocolHandlerRegistered', function isProtocolHandlerRegistered(scheme, url) {
+        if (arguments.length < 2) throw new TypeError("Failed to execute 'isProtocolHandlerRegistered' on 'Navigator': 2 arguments required");
+        validate(scheme, url);
+        return 'new';
+      });
+    }
+  }
 
   function installNavigationTraps() {
     // D1: javascript: URL delegated handler. htmltx transforms target
@@ -4059,6 +4406,32 @@
       if (ev) { ev.preventDefault(); ev.stopImmediatePropagation(); }
       return true;
     }
+    // E1: `<a ping>` hyperlink auditing. htmltx/속성 훅은 ping 목록을
+    // `data-zp-blocked-ping` 에 옮겨 브라우저의 직접 POST 를 끊는다 —
+    // 그러면 네이티브와 달리 ping 이 아예 안 날아간다. 네이티브 의미를
+    // 복원하되 transport 만 프록시로: 클릭 시 각 URL 로 POST 'PING'
+    // (Content-Type: text/ping, Ping-From/Ping-To 헤더, keepalive)을
+    // fetchThroughRuntime 으로 보낸다. 실패는 무시 — ping 은 fire-and-forget.
+    function firePing(el, navHref) {
+      const raw = el && Native.getAttribute.call(el, 'data-zp-blocked-ping');
+      if (!raw) return;
+      for (const tok of String(raw).split(/\s+/)) {
+        if (!tok) continue;
+        let u;
+        try { u = new URL(tok, baseURL); } catch { continue; }
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+        try {
+          fetchThroughRuntime(u.href, {
+            method: 'POST',
+            body: 'PING',
+            keepalive: true,
+            credentials: 'include',
+            referrerPolicy: 'no-referrer',
+            headers: { 'Content-Type': 'text/ping', 'Ping-From': virtualURL.href, 'Ping-To': navHref || '' },
+          }).catch(() => {});
+        } catch {}
+      }
+    }
     document.addEventListener('click', ev => {
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
         if (el.hasAttribute && el.hasAttribute('data-zp-jsurl')) {
@@ -4078,7 +4451,7 @@
         return;
       }
       ev.stopImmediatePropagation();
-      if (nav.href) setVirtualLocation(nav.href);
+      if (nav.href) { firePing(nav.element, nav.href); setVirtualLocation(nav.href); }
     }, true);
     document.addEventListener('submit', ev => {
       const f = ev.target;
@@ -4430,6 +4803,16 @@
     if (!Native.open) return;
     define(w, 'open', function(url = 'about:blank', target = '_blank', features) {
       const raw = String(url || 'about:blank');
+      // D4: `open('javascript:…')` — 네이티브는 새 창의 컨텍스트에서 평가한다.
+      // containment 가 걸린 about:blank 자식을 먼저 열고, 재작성된 코드를 그
+      // 창의 realm 에서 실행하는 것이 정확하지만, 자식 쪽 globalEval 핸들을
+      // 거기까지 끌고 가는 비용 대신 현재 realm 실행으로 근접시킨다 —
+      // 평가가 아예 안 되는 것보다 의미적으로 가깝다.
+      const jsMatch = /^\s*javascript:/i.exec(raw);
+      if (jsMatch) {
+        try { execGlobalScript(callPageRewriter(raw.slice(jsMatch[0].length), 'classic')); } catch {}
+        return null;
+      }
       let child;
       if (raw === 'about:blank' || raw === '') child = Native.open('about:blank', target, features);
       else if (isHTTPURL(raw)) { child = Native.open('about:blank', target, features); if (child) shareNavURL(raw).then(u => { child.location.href = u; }).catch(() => { try { child.close(); } catch {} }); }
@@ -5575,20 +5958,17 @@
     // 틀렸다 — window.origin/location.origin 과 헷갈린 것으로 보인다.
     if (w.document) {
       const docProto = w.Document && w.Document.prototype;
-      // document.domain getter/setter — setter accepts only target eTLD+1.
-      let virtualDomain = virtualURL.hostname.toLowerCase();
+      // document.domain getter/setter. Chrome M109+ 에서 setter 는 완전한
+      // no-op 이다 — 던지지도 바꾸지도 않는다(deprecation 경고만). 이전엔
+      // suffix 검사 후 virtualDomain 을 바꿨는데 그건 M109 이전 의미다.
+      // 게터는 가상 호스트를 돌린다.
+      const virtualDomain = virtualURL.hostname.toLowerCase();
       defineOnProto(
         w.document,
         docProto,
         'domain',
         () => virtualDomain,
-        (v) => {
-          const d = String(v).replace(/^\./, '').toLowerCase();
-          const host = virtualURL.hostname.toLowerCase();
-          // Allow only setting to a suffix of target host (mirror native semantics).
-          if (host === d || host.endsWith('.' + d)) virtualDomain = d;
-          else throw normalizedError('SecurityError');
-        }
+        () => {}
       );
     }
     // window.origin / self.origin getters — point at virtual target origin.
@@ -6796,6 +7176,20 @@
         const next = proxiedRefreshContent(v);
         return Native.setAttribute.call(this, k, next || v);
       }
+      // E2: http-equiv=CSP 가 먼저 stash 된 meta 에 content 가 뒤에 오는 순서.
+      // MutationObserver 의 비동기 재장전만 믿으면 그 사이 시작된 로드가
+      // 정책 없이 나간다(실측: append 직후 img.src 가 img-src 'none' 을 무시).
+      // content 를 쓰는 즉시 필터 + http-equiv 재장전으로 **동기적** 무장.
+      if (ln === 'meta' && localKey === 'content') {
+        const eqLive = String(Native.getAttribute.call(this, 'http-equiv') || '').trim().toLowerCase();
+        const eqStash = String(Native.getAttribute.call(this, 'data-zp-blocked-http-equiv') || '').trim().toLowerCase();
+        const cspEq = isCSPHttpEquiv(eqLive) ? eqLive : isCSPHttpEquiv(eqStash) ? eqStash : '';
+        if (cspEq) {
+          try { Native.setAttribute.call(this, k, v); } catch {}
+          neutralizeCSPMeta(this, cspEq);
+          return;
+        }
+      }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
       if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
@@ -6817,7 +7211,7 @@
       if (ln === 'script' && (localKey === 'src' || localKey === 'href')) return setScriptSource(this, v);
       // `style` 속성도 url() 을 실어 나른다 — CSSStyleDeclaration 훅은 프로퍼티
       // 경로만 덮으므로 여기서 따로 잡는다.
-      if (localKey === 'style' && v != null) return Native.setAttribute.call(this, k, rewriteCSSText(v));
+      if (localKey === 'style' && v != null) { litSet(this, 'style', v); return Native.setAttribute.call(this, k, rewriteCSSText(v)); }
       if (isURLBearing(this, key, localKey, ln)) {
         // ★srcset 은 URL 하나가 아니다 — 여기 분기가 **없어서** 아래 단일 URL
         // 경로가 후보 목록 전체를 한 덩어리 URL 로 삼켰다. 2026-08-21 실측:
@@ -6826,6 +7220,7 @@
         // 서브트리 스윕에는 이 분기가 있었는데 요소 훅에는 없었다 — 또 같은
         // "한쪽 경로에만 넣은" 사고다.
         if (localKey === 'srcset' || localKey === 'imagesrcset') {
+          litSet(this, localKey, v == null ? '' : v);
           Native.setAttribute.call(this, k, v == null ? '' : String(v));
           enforceSrcsetAttribute(this, k, String(v == null ? '' : v));
           return;
@@ -6843,6 +7238,7 @@
         const rawURLValue = v == null ? '' : String(v);
         if (rawURLValue.charCodeAt(0) === 35 /* '#' */) {
           urlMeta.delete(this);
+          litDel(this, localKey);
           if (Native.removeAttribute) { try { Native.removeAttribute.call(this, 'data-zp-target-url'); } catch {} }
           return Native.setAttribute.call(this, k, rawURLValue);
         }
@@ -6851,6 +7247,7 @@
         if (t) {
           const usesRaw = usesRawURLAttribute(this, key, localKey);
           urlMeta.set(this, t);
+          litSet(this, localKey, rawURLValue);
           // 2026-06-06 escape vector fix: always stash absolute target on
           // data-zp-target-url + write a proxy-origin "?via=" URL on the raw
           // attribute for anchor/area href / form action / formaction.
@@ -6898,6 +7295,7 @@
         if (t) {
           const usesRaw = usesRawURLAttribute(this, key, localKey);
           urlMeta.set(this, t);
+          litSet(this, localKey, v);
           // 2026-06-06 escape vector fix: same rationale as setAttribute
           // path above — anchor/area href / form action / formaction must
           // not leak the absolute target URL through the raw DOM attribute.
@@ -6947,6 +7345,17 @@
       // URL decoding consumes strings; DOM absence must stay null, and an empty
       // attribute must not pick up a stale URL stash from an earlier value.
       if (raw === null || raw === '') return raw;
+      // ★리터럴 parity — 네이티브 getAttribute 는 **작성자 원문**을 돌려준다.
+      // 우리가 리라이트한 URL/style 속성은 WeakMap(런타임 set) 또는
+      // `data-zp-lit-*`(htmltx 초기 마크업)에 원문이 남아 있다. 어느 쪽도
+      // 없으면 기존 절대-타깃 되돌리기로 떨어진다.
+      if (localKey === 'style' || localKey === 'srcset' || localKey === 'imagesrcset'
+          || isURLBearing(this, key, localKey, ln) || (ln === 'script' && localKey === 'src')) {
+        const lit = litGet(this, localKey);
+        if (lit !== undefined) return lit;
+        const stashed = Native.getAttribute.call(this, litAttrName(key)) ?? Native.getAttribute.call(this, litAttrName(localKey));
+        if (stashed !== null) return stashed;
+      }
       // ★`style` 은 URL 표면 목록에 없다. 그런데 우리가 그 안의 url() 을
       // 프록시 URL 로 바꿔 **쓴다** — 되돌려 주지 않으면 페이지가 자기
       // 스타일을 다시 읽는 것만으로 프록시 오리진과 /zp/api 경로를 읽어 낸다.
@@ -7007,6 +7416,12 @@
         enforceLinkPolicy(this);
         return ret;
       }
+      // 리터럴/타깃 스태시도 같이 지운다 — 속성을 지운 뒤 되읽기에서
+      // stale 값이 살아나면 안 된다.
+      litDel(this, localKey);
+      urlMeta.delete(this);
+      try { Native.removeAttribute.call(this, litAttrName(key)); } catch {}
+      try { Native.removeAttribute.call(this, litAttrName(localKey)); } catch {}
       return Native.removeAttribute.call(this, k);
     });
     if (Native.getAttributeNames) define(w.Element.prototype, 'getAttributeNames', function() {
@@ -7253,6 +7668,7 @@
     const target = targetURLForElement(el, value);
     if (!target) return blockExecutableURL(el, 'src', value);
     urlMeta.set(el, target);
+    litSet(el, 'src', raw);
     Native.setAttribute.call(el, 'data-zp-target-url', target);
     return Native.setAttribute.call(el, 'src', scriptProxyPath(target, kind));
   }
@@ -7354,25 +7770,7 @@
     }
     return out;
   }
-  // Worker 로 실행될 JS blob 은 정책상 차단한다. 차단 스텁 안에서 prelude 를
-  // **절대 URL** 로 가져오는 게 핵심: blob: worker 안의 상대 URL 은 blob URL
-  // 기준으로 풀려 그냥 invalid 다. 실제로 `SyntaxError: The URL
-  // '/zp/assets/worker-prelude.js' is invalid` 로 죽어서 그 뒤의 DOMException
-  // (= 의도한 차단 신호) 이 아예 실행되지 않았다 — 차단은 됐지만 이유가
-  // 엉뚱한 에러로 보고됐다.
-  //
-  // 같은 blob 을 만드는 곳이 두 군데였고 둘 다 같은 버그를 갖고 있었다.
-  // (오늘 srcset·isURLBearing 에 이어 세 번째 "목록/코드 복제" 사고다.)
-  function blockedWorkerBlob() {
-    return new Blob([
-      'self.__ZP_WORKER_TARGET=', JSON.stringify(virtualURL.href),
-      ';\nself.__ZP_WORKER_TAB_ID=', JSON.stringify(boot.tabId),
-      ';\nimportScripts(', JSON.stringify(proxyOrigin + '/zp/assets/worker-prelude.js'), ');\n',
-      "throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError');\n",
-    ], { type: 'text/javascript' });
-  }
   // 인라인 style 선언 하나당 프록시 하나. 같은 선언에 늘 같은 프록시를 줘야
-  // `el.style === el.style` 같은 페이지 코드의 동일성 비교가 깨지지 않는다.
   // `var` 다 — 이 파일에서 설치 시퀀스는 선언보다 **위**에서 돈다. `let`/`const`
   // 로 두면 TDZ ReferenceError 가 나고 그게 멤브레인 설치를 통째로 중단시킨다
   // (오늘 이 파일에서만 두 번 밟았다).
@@ -8119,7 +8517,11 @@
   // re-arms on the proxied URL instead of the raw target.
   function enforceMetaPolicy(el) {
     const eq = String(Native.getAttribute.call(el, 'http-equiv') || '').trim().toLowerCase();
-    if (isCSPHttpEquiv(eq)) { neutralizeCSPMeta(el, eq); return; }
+    // http-equiv 가 먼저 지워진(무력화된) meta 에 content 가 나중에 오면
+    // stash 마커로 원래 equiv 를 알아내 다시 건다 — 네이티브도 meta 는
+    // attr 쌍이 갖춰진 시점에 적용된다.
+    const blockedEq = String(Native.getAttribute.call(el, 'data-zp-blocked-http-equiv') || '').trim().toLowerCase();
+    if (isCSPHttpEquiv(eq) || (!eq && isCSPHttpEquiv(blockedEq))) { neutralizeCSPMeta(el, eq || blockedEq); return; }
     if (eq !== 'refresh') return;
     const cur = Native.getAttribute.call(el, 'content');
     if (cur == null) return;
@@ -8498,7 +8900,35 @@
       // prototype. Point the wrapper at the native prototype to fix both.
       const ZPWorker = function (url, opts) {
         try { zpTrace('Worker', String(url).slice(0, 120)); } catch {}
-        return new Native.Worker(workerBootstrapURL(url, opts), opts);
+        const w = new Native.Worker(workerBootstrapURL(url, opts), opts);
+        // W4: 워커에는 navigator.serviceWorker 가 없어 SW 스트림을 스스로 못
+        // 연다. 워커가 `__zp:'zp-broker'` 제어 메시지를내면 여기서 SW 에
+        // 중계하고 스트림 port 를 워커로 transfer 한다. 제어 메시지는 이
+        // 리스너(생성자에서 첫 등록)가 먼저 받아 stopImmediatePropagation 으로
+        // 타깃의 onmessage 에서 숨긴다.
+        try {
+          w.addEventListener('message', ev => {
+            const m = ev && ev.data;
+            if (!m || m.__zp !== 'zp-broker') return;
+            ev.stopImmediatePropagation();
+            if (m.op === 'ws-open') {
+              postMessageToSW({ type: 'ZP_WS_OPEN', url: m.url, protocols: Array.isArray(m.protocols) ? m.protocols : [], tabId: boot.tabId, entryId: activeEntryId }).then(reply => {
+                try { w.postMessage({ __zp: 'zp-broker-reply', reqId: m.reqId, ok: true, protocol: String(reply.protocol || '') }, [reply.port]); }
+                catch (e) { try { reply.port && reply.port.close(); } catch {} }
+              }).catch(e => {
+                try { w.postMessage({ __zp: 'zp-broker-reply', reqId: m.reqId, ok: false, error: String(e && (e.code || e.message) || 'NetworkError') }); } catch {}
+              });
+            } else if (m.op === 'stash') {
+              // D5: module 워커가 직접 읽은 blob: 소스를 SW stash 에 넣는다.
+              postMessageToSW({ type: 'ZP_WORKER_STASH', src: m.src }).then(reply => {
+                try { w.postMessage({ __zp: 'zp-broker-reply', reqId: m.reqId, ok: true, tok: String(reply && reply.tok || '') }); } catch {}
+              }).catch(e => {
+                try { w.postMessage({ __zp: 'zp-broker-reply', reqId: m.reqId, ok: false, error: String(e && (e.code || e.message) || 'NetworkError') }); } catch {}
+              });
+            }
+          });
+        } catch {}
+        return w;
       };
       try { ZPWorker.prototype = Native.Worker.prototype; } catch {}
       // Only the constructor name — the prototype is the native one, which
@@ -8541,21 +8971,9 @@
     // 없는 평범한 Blob 도 같이 죽었다 — fetch(blobURL) 이 페이지가 넣은 내용
     // 대신 우리 HTML 을 돌려줬다.
     //
-    // 보안 경계는 여기가 아니라 workerBootstrapURL 이다: 우리가 만든 것이
-    // 아닌 blob URL 을 워커로 쓰면 이미 거부한다. 그러니 만드는 것은 그대로
-    // 두고 **워커로 쓰려 할 때만** 차단 blob 으로 바꾼다 — 페이지가 보는
-    // 모양은 예전과 같고(생성자에서 안 던진다), 무관한 blob 은 산다.
-    if (Native.createObjectURL) define(URL, 'createObjectURL', function(blob) {
-      const url = Native.createObjectURL(blob);
-      try { if (blob && SCRIPTISH_BLOB_TYPE.test(blob.type || '')) scriptishBlobURLs.add(String(url)); } catch {}
-      return url;
-    });
-    if (Native.revokeObjectURL) define(URL, 'revokeObjectURL', function(url) {
-      const key = String(url);
-      scriptishBlobURLs.delete(key);
-      workerBlobURLs.delete(key);
-      return Native.revokeObjectURL(url);
-    });
+    // createObjectURL 은 감싸지 않는다 — 보안 경계는 URL 생성이 아니라
+    // workerBootstrapURL(워커 소스 srcu 재작성)과 import/module 경로다.
+    // 우리가 만들지 않은 blob 은 워커의 읽기 단계에서 자연히 fail-closed.
     for (const name of ['audioWorklet','paintWorklet','layoutWorklet','animationWorklet']) { const wk = root.CSS && root.CSS[name] || root[name]; if (wk && wk.addModule) define(wk, 'addModule', function(url, opts){ return wk.addModule(workerBootstrapURL(url, { type: 'module' }), opts); }); }
   }
   // D3: virtual SW facade. The original behavior was a hard
@@ -8643,36 +9061,52 @@
     const raw = String(url);
     const parsed = new URL(raw, virtualURL.href);
     if (parsed.protocol === 'blob:') {
-      // 우리가 이미 만들어 둔 차단 blob 이면 그대로 쓴다.
-      if (workerBlobURLs.has(parsed.href)) return parsed.href;
-      // 페이지가 만든 스크립트성 blob 을 워커로 쓰려는 **바로 그 순간**에만
-      // 갈아치운다. 리라이터를 안 거친 코드가 워커로 도는 일은 없다.
-      if (scriptishBlobURLs.has(parsed.href) && Native.createObjectURL) {
-        const raw = String(Native.createObjectURL(blockedWorkerBlob()));
-        workerBlobURLs.add(raw);
-        return raw;
-      }
-      throw normalizedError('NotSupportedError');
+      // D5: 페이지가 만든 blob 을 워커로 쓰는 경우 — 소스는 **워커가**
+      // 읽는다(페이지 sync XHR 은 blob: 에 동작하지 않는다). `srcu`
+      // 파라미터로 원본 URL 을 넘기면 워커 prelude 가 읽어서 재작성한다 —
+      // 리라이터를 안 거친 코드가 워커로 도는 일은 없다. MIME 게이트는 두지
+      // 않는다: Worker 생성자에 온 blob 은 이미 스크립트로 쓸 의도이고,
+      // 다른 오리진/미등록 blob 은 워커의 읽기 단계에서 자연히 fail-closed.
+      return srcWorkerBootstrapURL(parsed.href, opts);
     }
-    if (parsed.protocol === 'data:') return dataWorkerURL(parsed.href);
+    if (parsed.protocol === 'data:') {
+      // D5: data: 워커 소스 — 같은 srcu 경로(워커가 디코드한다).
+      return srcWorkerBootstrapURL(parsed.href, opts);
+    }
     const params = new URLSearchParams();
     params.set('u', requestTargetURL(raw));
     params.set('tab', boot.tabId);
     // module 워커는 importScripts 가 없다 — 부트스트랩을 import() 체인으로
     // 바꿔야 하므로 SW 쪽에 표시를 남긴다(worklet addModule 도 module).
     if (opts && opts.type === 'module') params.set('mod', '1');
+    workerGatewayParams(params);
     for (const server of activeServers) params.append('server', server);
     // Absolute proxy URL — Worker resolves the URL relative to the page's
     // baseURI, which is virtualised to the target host.
     return proxyOrigin + ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();
   }
-  function dataWorkerURL(raw) {
-    const comma = raw.indexOf(',');
-    if (comma < 0) throw normalizedError('NotSupportedError');
-    const blocked = blockedWorkerBlob();
-    const safe = Native.createObjectURL(blocked);
-    workerBlobURLs.add(safe);
-    return safe;
+  // D5: blob:/data: 워커 소스 부트스트랩. `u` 에 원본 URL 을 유지해 워커의
+  // location 이 네이티브와 같이 보인다. 소스는 워커가 직접 읽는다 —
+  // `srcu` 는 "워커가 읽을 가상 URL" 이고, prelude 가 data: 디코드/blob
+  // sync-XHR 을 거쳐 재작성 후 실행한다. module 워커는 import() 가 필요해
+  // prelude 가 fetch→브로커 stash→/zp/api/worker-script?srctok 로 돈다.
+  function srcWorkerBootstrapURL(srcu, opts) {
+    const params = new URLSearchParams();
+    params.set('u', srcu);
+    params.set('tab', boot.tabId);
+    params.set('srcu', srcu);
+    if (opts && opts.type === 'module') params.set('mod', '1');
+    workerGatewayParams(params);
+    for (const server of activeServers) params.append('server', server);
+    return proxyOrigin + ZP.controlPath('worker-bootstrap.js') + '#' + params.toString();
+  }
+  // W5: 워커의 WebTransport/RTCPeerConnection 게이트웨이 래핑은 페이지의
+  // boot 설정이 필요하다 — 부트스트랩 해시로 전달해 worker-prelude 가 같은
+  // 정책(게이트웨이 없으면 rejected stub)을 적용하게 한다.
+  function workerGatewayParams(params) {
+    if (boot && typeof boot.wtGateway === 'string' && boot.wtGateway) params.set('wtg', boot.wtGateway);
+    if (boot && typeof boot.rtcGateway === 'string' && boot.rtcGateway) params.set('rtcg', boot.rtcGateway);
+    if (boot && Array.isArray(boot.rtcICEServers) && boot.rtcICEServers.length) params.set('ice', JSON.stringify(boot.rtcICEServers));
   }
 
   function installIframeHooks(w) {
@@ -9400,6 +9834,7 @@
       // installing its own runtime. They must still compile/execute in this
       // child: copying root.eval/Function moves listeners and globals to root.
       const childDynamicEval = function dynamicEval(value) {
+        if (new.target) throw new TypeError('eval is not a constructor');
         return typeof value === 'string' ? childExecGlobal(pageRewriteHooks.rewrite(value, 'eval')) : value;
       };
       childFunctionFacade = function Function(...args) {
@@ -9659,6 +10094,156 @@
         try { define(Object.getPrototypeOf(w.speechSynthesis), 'getVoices', getVoices); } catch {}
       }
     }
+  }
+
+  // ── 잔여 표면 가드 (P0) ────────────────────────────────────────────
+  //
+  // audit 에서 드러난 미처리 표면을 한 곳에서 다룬다:
+  //
+  //   ShadowRealm        — evaluate()/importValue() 가 **미리라이트 JS** 를
+  //                        새 realm 에서 실행하고, importValue 의 절대 specifier
+  //                        는 프록시를 우회하는 직접 egress 가 된다. realm 안에는
+  //                        멤브레인이 없으므로 충실한 가상화는 별도 멤브레인을
+  //                        realm 에 이식해야 가능하다 — 미출시 API 에 그 공수를
+  //                        쓰기보다 실행 가능한 두 멤버를 fail-closed 한다.
+  //                        생성자/`typeof` parity 는 남겨 기능 감지 코드를 깨지
+  //                        않는다.
+  //   navigator.credentials — 자격증명 저장소는 **실제 오리진**(프록시) 키라
+  //                        모든 타깃이 한 저장소를 공유하고, WebAuthn 은 RP 가
+  //                        proxy 호스트에 묶여 타깃 간 credential 이 섞인다.
+  //                        get/store 는 NotAllowedError 로 거절한다 — 자격이
+  //                        없는 오리진에 대한 네이티브 응답과 같은 모양이다.
+  //   navigator.locks    — LockManager 는 실제 오리진 단위라 타깃 간 잠금 이름이
+  //                        충돌한다. 타깃 해시 프리픽스로 네임스페이스하고
+  //                        query() 결과에서는 프리픽스를 벗겨 돌려준다.
+  //   Notification/MediaSession — icon/badge/artwork URL 은 브라우저가 직접
+  //                        fetch 한다. 타깃 절대 URL 이 그대로 나가면 직접
+  //                        egress — 서브리소스 프록시 경로로 재작성한다.
+  function installSurfaceGuards(w) {
+    // ShadowRealm — 생성자는 살리고 실행 진입점만 봉인한다.
+    try {
+      const SR = w.ShadowRealm;
+      if (typeof SR === 'function' && SR.prototype) {
+        const denyEval = function evaluate() { throw normalizedError('NotSupportedError'); };
+        const denyImport = function importValue() { return Promise.reject(normalizedError('NotSupportedError')); };
+        define(SR.prototype, 'evaluate', denyEval);
+        define(SR.prototype, 'importValue', denyImport);
+      }
+    } catch {}
+    // navigator.credentials — 저장소 접근 자체를 거절한다. PublicKeyCredential
+    // 의 정적 가용성 질의는 "인증기 없음" 답으로 둬 기능 감지를 유지한다.
+    try {
+      const nav = w.navigator;
+      if (nav && nav.credentials) {
+        const CCProto = (w.CredentialsContainer && w.CredentialsContainer.prototype) || Object.getPrototypeOf(nav.credentials);
+        const denyGet = function get() { return Promise.reject(normalizedError('NotAllowedError')); };
+        const denyStore = function store() { return Promise.reject(normalizedError('NotAllowedError')); };
+        const denyCreate = function create() { return Promise.reject(normalizedError('NotAllowedError')); };
+        const allowPrevent = function preventSilentAccess() { return Promise.resolve(undefined); };
+        if (CCProto) {
+          define(CCProto, 'get', denyGet);
+          define(CCProto, 'store', denyStore);
+          define(CCProto, 'create', denyCreate);
+          define(CCProto, 'preventSilentAccess', allowPrevent);
+        } else {
+          define(nav.credentials, 'get', denyGet);
+          define(nav.credentials, 'store', denyStore);
+          define(nav.credentials, 'create', denyCreate);
+          define(nav.credentials, 'preventSilentAccess', allowPrevent);
+        }
+        const PKC = w.PublicKeyCredential;
+        if (typeof PKC === 'function') {
+          define(PKC, 'isUserVerifyingPlatformAuthenticator', function isUserVerifyingPlatformAuthenticator() { return Promise.resolve(false); });
+          define(PKC, 'isConditionalMediationAvailable', function isConditionalMediationAvailable() { return Promise.resolve(false); });
+        }
+      }
+    } catch {}
+    // navigator.locks — 타깃별 잠금 네임스페이스.
+    try {
+      const nav = w.navigator;
+      const lm = nav && nav.locks;
+      if (lm && typeof lm.request === 'function') {
+        const LMProto = (w.LockManager && w.LockManager.prototype) || Object.getPrototypeOf(lm);
+        const h = (() => { let x = 0x811c9dc5; const s = String(virtualURL.origin); for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619); } return ('00000000' + (x >>> 0).toString(16)).slice(-8); })();
+        const pfx = 'zp:lk:' + h + ':';
+        const nativeRequest = LMProto.request;
+        const nativeQuery = LMProto.query;
+        const stripInfo = info => (info && typeof info === 'object' && typeof info.name === 'string' && info.name.indexOf(pfx) === 0)
+          ? Object.assign({}, info, { name: info.name.slice(pfx.length) }) : info;
+        if (typeof nativeRequest === 'function') {
+          define(LMProto, 'request', function request(name, ...rest) {
+            return nativeRequest.call(this, pfx + String(name), ...rest);
+          });
+        }
+        if (typeof nativeQuery === 'function') {
+          define(LMProto, 'query', function query() {
+            return nativeQuery.call(this).then(r => ({
+              held: (r && r.held || []).map(stripInfo),
+              pending: (r && r.pending || []).map(stripInfo),
+            }));
+          });
+        }
+      }
+    } catch {}
+    // Notification — icon/badge/image/actions[].icon 은 브라우저가 직접
+    // fetch 한다. 타깃 URL 을 프록시 서브리소스 경로로 재작성해 egress 를 막는다.
+    try {
+      if (typeof w.Notification === 'function') {
+        const NativeNotification = w.Notification;
+        const rewriteIconOpts = o => {
+          if (!o || typeof o !== 'object') return o;
+          const out = Object.assign({}, o);
+          for (const k of ['icon', 'badge', 'image']) {
+            if (typeof out[k] === 'string' && /^https?:/i.test(out[k])) out[k] = subresourceProxyPath(targetURL(out[k]));
+          }
+          if (Array.isArray(out.actions)) {
+            out.actions = out.actions.map(a => (a && typeof a.icon === 'string' && /^https?:/i.test(a.icon))
+              ? Object.assign({}, a, { icon: subresourceProxyPath(targetURL(a.icon)) }) : a);
+          }
+          return out;
+        };
+        const ZPNotification = function Notification(title, opts) { return new NativeNotification(title, rewriteIconOpts(opts)); };
+        ZPNotification.prototype = NativeNotification.prototype;
+        try { Object.defineProperty(ZPNotification, 'name', { value: 'Notification', configurable: true }); } catch {}
+        try { Object.defineProperty(ZPNotification, 'length', { value: NativeNotification.length, configurable: true }); } catch {}
+        maskNativeFunction(ZPNotification, 'Notification');
+        for (const k of ['permission', 'maxActions']) {
+          try { defineAccessor(ZPNotification, k, () => NativeNotification[k]); } catch {}
+        }
+        if (typeof NativeNotification.requestPermission === 'function') {
+          define(ZPNotification, 'requestPermission', function requestPermission(cb) {
+            const p = NativeNotification.requestPermission(cb);
+            return p && typeof p.then === 'function' ? p : Promise.resolve(p);
+          });
+        }
+        define(w, 'Notification', ZPNotification);
+      }
+    } catch {}
+    // MediaSession — metadata.artwork[].src 재작성.
+    try {
+      const ms = w.navigator && w.navigator.mediaSession;
+      if (ms) {
+        const MSProto = (w.MediaSession && w.MediaSession.prototype) || Object.getPrototypeOf(ms);
+        const nativeSetMetadata = Object.getOwnPropertyDescriptor(MSProto, 'metadata');
+        if (nativeSetMetadata && nativeSetMetadata.set) {
+          defineMasked(MSProto, 'metadata', {
+            get: nativeSetMetadata.get ? function get() { return nativeSetMetadata.get.call(this); } : undefined,
+            set: function set(meta) {
+              try {
+                if (meta && meta.artwork && Array.isArray(meta.artwork)) {
+                  meta = Object.assign({}, meta, {
+                    artwork: meta.artwork.map(a => (a && typeof a.src === 'string' && /^https?:/i.test(a.src))
+                      ? Object.assign({}, a, { src: subresourceProxyPath(targetURL(a.src)) }) : a),
+                  });
+                }
+              } catch {}
+              return nativeSetMetadata.set.call(this, meta);
+            },
+            enumerable: true, configurable: false,
+          });
+        }
+      }
+    } catch {}
   }
 
   function installCanvasAntiFingerprinting(w) {

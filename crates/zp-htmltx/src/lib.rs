@@ -153,13 +153,27 @@ fn attr_settings(
                             .to_ascii_lowercase();
                         if equiv == "content-security-policy"
                             || equiv == "content-security-policy-report-only"
+                        {
+                            // E2: meta CSP 는 헤더 CSP 와 합성 적용이라 살려 둬도
+                            // 엄격화만 가능하다 — filter_meta_csp 가 배관 필수
+                            // 소스를 얹은 교집합을 만들고, 남는 지시어가 없으면
+                            // 예전처럼 무력화한다.
+                            let content = el.get_attribute("content").unwrap_or_default();
+                            let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
+                            let _ = el.set_attribute("data-zp-blocked-content", &content);
+                            let filtered = zp_shared::csp::filter_meta_csp(&content);
+                            if filtered.is_empty() {
+                                let _ = el.remove_attribute("http-equiv");
+                                let _ = el.remove_attribute("content");
+                            } else {
+                                let _ = el.set_attribute("content", &filtered);
+                            }
+                        } else if equiv == "origin-trial" {
                             // `origin-trial`: 토큰은 등록 오리진에 서명된다 —
                             // 그런데 오리진 트라이얼은 **누구든 아무 오리진이나**
                             // 등록할 수 있다. 타깃이 proxy 오리진용 토큰을 실어
                             // 오면 우리 realm 에서 기능이 켜진다. CSP 와 같은
                             // 이유로 무력화.
-                            || equiv == "origin-trial"
-                        {
                             let content = el.get_attribute("content").unwrap_or_default();
                             let _ = el.remove_attribute("http-equiv");
                             let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
@@ -450,6 +464,12 @@ fn attr_settings(
                                             .and_then(|s| s.strip_suffix('}'))
                                         {
                                             if inner != trimmed {
+                                                // 리터럴 stash — getAttribute('style')
+                                                // 은 작성자 원문을 돌려줘야 한다.
+                                                let _ = el.set_attribute(
+                                                    &format!("data-zp-lit-{lower}"),
+                                                    &decoded,
+                                                );
                                                 let _ = el.set_attribute(&name, inner);
                                             }
                                         }
@@ -468,6 +488,10 @@ fn attr_settings(
                                         "/zp/",
                                         &attr_base,
                                     ) {
+                                        let _ = el.set_attribute(
+                                            &format!("data-zp-lit-{lower}"),
+                                            &decoded,
+                                        );
                                         let _ = el.set_attribute(&name, &next);
                                     }
                                     continue;
@@ -480,6 +504,12 @@ fn attr_settings(
                                         &attr_base,
                                     ) {
                                         let _ = el.set_attribute(&name, &next);
+                                        // 리터럴 stash — getAttribute('src') 가
+                                        // 절대 URL 이 아니라 작성자 원문을 돌려주도록.
+                                        let _ = el.set_attribute(
+                                            &format!("data-zp-lit-{lower}"),
+                                            &decoded,
+                                        );
                                         // Stash the original absolute URL so the runtime-
                                         // prelude can return it when target code reads
                                         // `script.src` / `link.href` / etc. Without this,
@@ -505,6 +535,10 @@ fn attr_settings(
                                         {
                                             let _ = el.set_attribute(&name, &next);
                                             let _ = el.set_attribute("data-zp-target-url", &abs);
+                                            let _ = el.set_attribute(
+                                                &format!("data-zp-lit-{lower}"),
+                                                &decoded,
+                                            );
                                         }
                                     }
                                 }
@@ -1582,6 +1616,25 @@ mod tests {
         }
     }
 
+    /// R6: `data-zp-lit-*` 스태시는 getAttribute parity 를 위해 **작성된
+    /// 리터럴을 의도적으로 보존**한다. "원본 URL 이 출력에 남으면 안 된다"
+    /// 류 단언은 스태시를 제거한 뒤 검사해야 의도된 보존분에 걸리지 않는다.
+    /// lol_html 은 속성값의 `"` 를 `&quot;` 로 이스케이프하므로 첫 닫는
+    /// 따옴표까지가 스태시 범위다.
+    fn strip_lit(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(i) = rest.find("data-zp-lit-") {
+            let (head, tail) = rest.split_at(i);
+            out.push_str(head);
+            let Some(open) = tail.find('"') else { break };
+            let Some(close) = tail[open + 1..].find('"') else { break };
+            rest = &tail[open + 1 + close + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     // 파싱 시점 `srcdoc` 은 멤브레인 없는 문서를 만든다 — 이름을 옮겨 두고
     // 페이지 realm 이 후킹된 세터로 되돌리게 한다. 옮기기만 하고 값을 잃으면
     // iframe 이 통째로 비므로 **값 보존까지** 확인한다.
@@ -1610,7 +1663,7 @@ mod tests {
         for (name, html) in cases {
             let r = transform(html, &opts()).unwrap();
             assert!(
-                !r.html.contains("t.example/a.png"),
+                !strip_lit(&r.html).contains("t.example/a.png"),
                 "{name}: 원본 URL 이 남았다 -> {}",
                 r.html
             );
@@ -1649,7 +1702,7 @@ mod tests {
     fn plugin_surface_url_is_rewritten_but_load_stays_blocked() {
         let r = transform("<object data=\"http://t.example/a.png\"></object>", &opts()).unwrap();
         assert!(
-            !r.html.contains("data=\"http://t.example"),
+            !strip_lit(&r.html).contains("data=\"http://t.example"),
             "원본 URL 이 data 속성에 그대로 남았다 -> {}",
             r.html
         );
@@ -1772,7 +1825,7 @@ mod tests {
             &opts(),
         )
         .unwrap();
-        assert!(!r.html.contains("t.example/a.png"), "원본 URL 이 남았다 -> {}", r.html);
+        assert!(!strip_lit(&r.html).contains("t.example/a.png"), "원본 URL 이 남았다 -> {}", r.html);
     }
 
 // `..`/`.` 정규화. 나머지 리졸버 넷(new URL / Url::join)과 같은 결과를
@@ -1991,7 +2044,7 @@ mod tests {
         out.extend_from_slice(&tail);
         let html = String::from_utf8(out).unwrap();
 
-        assert!(!html.contains("url(https://cdn.test/bg.png)"), "style attr url raw: {html}");
+        assert!(!strip_lit(&html).contains("url(https://cdn.test/bg.png)"), "style attr url raw: {html}");
         assert!(html.contains("/zp/api/fetch?url="), "no proxied url emitted: {html}");
         // 다른 선언은 그대로 남아야 한다 — 감쌌다 벗기기가 값을 갉아먹으면 안 된다.
         assert!(html.contains("position:absolute"), "sibling declaration lost: {html}");
@@ -2041,9 +2094,9 @@ mod tests {
         let html = String::from_utf8(out).unwrap();
 
         // 후보 URL 이 하나도 원본으로 남아선 안 된다.
-        assert!(!html.contains("\"https://cdn.test/a.svg\""), "source srcset raw: {html}");
-        assert!(!html.contains("https://cdn.test/1x.png 1x"), "img srcset raw: {html}");
-        assert!(!html.contains("https://cdn.test/2x.png 2x"), "img srcset 2x raw: {html}");
+        assert!(!strip_lit(&html).contains("\"https://cdn.test/a.svg\""), "source srcset raw: {html}");
+        assert!(!strip_lit(&html).contains("https://cdn.test/1x.png 1x"), "img srcset raw: {html}");
+        assert!(!strip_lit(&html).contains("https://cdn.test/2x.png 2x"), "img srcset 2x raw: {html}");
         // 디스크립터와 목록 모양은 보존된다.
         assert!(html.contains(" 1x,"), "descriptor/comma lost: {html}");
         assert!(html.contains(" 2x\""), "descriptor lost: {html}");
@@ -2069,20 +2122,40 @@ mod tests {
         out.extend_from_slice(&tail);
         let html = String::from_utf8(out).unwrap();
 
-        // 브라우저가 정책으로 읽을 수 있는 형태가 하나도 남아선 안 된다.
-        // 앞의 공백이 중요하다: `data-zp-blocked-http-equiv=` 도 `http-equiv=` 를
-        // 부분 문자열로 포함하므로, 그냥 검사하면 무력화된 것까지 걸려 통과할 수 없다.
+        // E2: meta CSP 는 헤더 CSP 와 합성 적용이라 살려 둬도 엄격화만 가능하다 —
+        // http-equiv 는 남되 content 가 배관 소스를 얹은 교집합으로 바뀐다.
         assert!(
-            !html
-                .to_ascii_lowercase()
-                .contains(" http-equiv=\"content-security-policy"),
-            "target CSP meta survived: {html}"
+            html.to_ascii_lowercase()
+                .contains(" http-equiv=\"content-security-policy\""),
+            "CSP meta must survive filtered: {html}"
         );
-        // 값은 남겨 둔다 — 페이지 JS 가 자기 정책을 읽어 확인하는 경우가 있다.
+        // 배관 필수 소스가 얹혔다 — 'nonce-abc' 단독이면 인라인/eval 경로가 죽는다.
+        assert!(
+            html.contains("'nonce-abc' 'self' 'unsafe-inline' 'unsafe-eval'"),
+            "infra sources not merged: {html}"
+        );
+        // 원본 값은 진단 스태시에 남는다 — 페이지 JS 가 자기 정책을 읽는 경우 대비.
         assert!(html.contains("data-zp-blocked-http-equiv"), "no marker: {html}");
         assert!(html.contains("nonce-abc"), "policy value dropped: {html}");
         // 무관한 http-equiv 는 건드리지 않는다.
         assert!(html.contains("X-UA-Compatible"), "unrelated meta touched: {html}");
+    }
+
+    #[test]
+    fn filter_meta_csp_intersects() {
+        use zp_shared::csp::filter_meta_csp;
+        // INFRA 지시어: 타깃 소스 + 배관 최소치. 'none' 은 배관 위해 풀린다.
+        let out = filter_meta_csp("script-src 'none'; connect-src https://api.t");
+        assert!(out.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:"), "{out}");
+        assert!(out.contains("connect-src https://api.t 'self' blob: data:"), "{out}");
+        // 리소스 지시어: 'none' 존중, 아니면 'self' 얹기.
+        assert_eq!(filter_meta_csp("img-src 'none'"), "img-src 'none'");
+        assert_eq!(filter_meta_csp("img-src https:"), "img-src https: 'self'");
+        // DROP: 배관과 무관하게 위험/무의미한 지시어는 남지 않는다.
+        assert_eq!(filter_meta_csp("sandbox allow-scripts"), "");
+        assert_eq!(filter_meta_csp("report-uri /x; upgrade-insecure-requests; frame-ancestors *"), "");
+        // 모르는 지시어도 drop.
+        assert_eq!(filter_meta_csp("some-future-directive https:"), "");
     }
 
     #[test]
@@ -2295,7 +2368,7 @@ mod tests {
         let html = "<a href=\"https://example.com/x\">x</a>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            !r.html.contains("href=\"https://example.com/x\""),
+            !strip_lit(&r.html).contains("href=\"https://example.com/x\""),
             "raw target URL must not survive on <a href>: {}",
             r.html
         );
@@ -2331,7 +2404,7 @@ mod tests {
             r.html
         );
         assert!(
-            !r.html.contains("href=\"/news/topAside\""),
+            !strip_lit(&r.html).contains("href=\"/news/topAside\""),
             "raw relative href must not survive: {}",
             r.html
         );
@@ -2361,7 +2434,7 @@ mod tests {
         let html = "<area href=\"https://example.com/clickmap\" coords=\"0,0,10,10\">";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            !r.html.contains("href=\"https://example.com/clickmap\""),
+            !strip_lit(&r.html).contains("href=\"https://example.com/clickmap\""),
             "area raw href must not survive: {}",
             r.html
         );
@@ -2378,7 +2451,7 @@ mod tests {
         let html = "<form action=\"https://example.com/login\"><input></form>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            !r.html.contains("action=\"https://example.com/login\""),
+            !strip_lit(&r.html).contains("action=\"https://example.com/login\""),
             "form raw action must not survive: {}",
             r.html
         );
@@ -2401,7 +2474,7 @@ mod tests {
         let html = "<form><input type=\"submit\" formaction=\"https://example.com/submit\"></form>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            !r.html.contains("formaction=\"https://example.com/submit\""),
+            !strip_lit(&r.html).contains("formaction=\"https://example.com/submit\""),
             "input formaction raw must not survive: {}",
             r.html
         );
@@ -2418,7 +2491,7 @@ mod tests {
         let html = "<form><button type=\"submit\" formaction=\"https://example.com/go\">Go</button></form>";
         let r = transform(html, &opts()).unwrap();
         assert!(
-            !r.html.contains("formaction=\"https://example.com/go\""),
+            !strip_lit(&r.html).contains("formaction=\"https://example.com/go\""),
             "button formaction raw must not survive: {}",
             r.html
         );
@@ -2460,7 +2533,7 @@ mod tests {
             r.html
         );
         assert!(
-            !r.html.contains("href=\"https://whale.naver.com"),
+            !strip_lit(&r.html).contains("href=\"https://whale.naver.com"),
             "raw whale.naver.com href must not survive: {}",
             r.html
         );
@@ -2556,7 +2629,7 @@ mod tests {
             r.html
         );
         assert!(
-            !r.html.contains("href=\"https://cdn.example.com/main.css\""),
+            !strip_lit(&r.html).contains("href=\"https://cdn.example.com/main.css\""),
             "original absolute URL must not survive on <link href> attribute: {}",
             r.html
         );

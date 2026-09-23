@@ -187,6 +187,85 @@ pub fn build_proxied_csp_with(ws_origin: &str, extra_connect: &[&str], opts: &Cs
     segments.join("; ")
 }
 
+/// `<meta http-equiv="Content-Security-Policy">` 의 교집합 필터.
+///
+/// meta CSP 는 헤더 CSP 와 **합성 적용**(리소스는 모든 정책을 통과해야 함)이라
+/// meta 를 살려 둬도 우리 헤더 정책은 그대로다 — 즉 완화는 불가능하고 엄격화만
+/// 가능하다. 그러니 타깃이 더 엄격한 정책을 선언하면 네이티브 의미상 지켜야
+/// 한다(이전에는 통째로 무력화했다). 문제는 반대 방향: 타깃 정책이 우리 배관
+/// (재작성 스크립트의 eval/inline 실행, `/zp/api` 전송, 워커/프레임
+/// 부트스트랩)까지 막으면 페이지가 죽는다 — NAVER 로그인 실측(nonce 정책이
+/// 멤브레인 eval 경로를 차단). 그래서 지시어별로:
+///
+/// - **DROP**: 배관과 무관하게 위험하거나 프록시에서 무의미한 지시어 —
+///   `sandbox`(문서째 샌드박스), `report-uri`/`report-to`(타깃 엔드포인트로의
+///   직접 리포트), `frame-ancestors`(meta 에서는 원래 무시됨),
+///   `require-trusted-types-for`/`trusted-types`(DOM 쓰기 경로를 깸),
+///   `upgrade-insecure-requests`/`block-all-mixed-content`(프록시 오리진
+///   스킴을 깸/무의미), `navigate-to`. 모르는 지시어도 drop.
+/// - **INFRA 지시어**(script/connect/worker/child/frame/style 계열과
+///   `default-src`): 타깃 소스 ∪ 우리 최소 소스. meta 가 더 엄격한
+///   호스트/스킴 제한을 가하면 그 부분은 그대로 효력을 갖고, 배관이 필요한
+///   허용만 얹는다. `'none'` 은 union 대상에서 빼고 합성한다 — `script-src
+///   'none'` 을 verbatim 적용하면 감옥 자체가 죽는다.
+/// - **리소스 지시어**(img/media/font/object/manifest/prefetch/form-action/
+///   base-uri): `'none'` 을 명시했으면 verbatim(더 엄격한 의지 존중 — 리소스
+///   전면 차단은 배관을 안 건드린다), 아니면 ∪ `'self'`(재작성된 서브리소스는
+///   전부 프록시 오리진에서 로드되므로 self 가 없으면 타깃 호스트 제한이
+///   `self` 로딩을 통째로 막는다).
+///
+/// 빈 문자열이면 남은 지시어가 없다는 뜻 — 호출자가 meta 를 무력화한다.
+pub fn filter_meta_csp(content: &str) -> String {
+    // 배관 필수 소스 — 지시어별로 우리 헤더 정책의 최소치를 그대로 둔다.
+    fn infra_sources(name: &str) -> &'static str {
+        match name {
+            "script-src" | "script-src-elem" | "script-src-attr" =>
+                "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
+            "connect-src" => "'self' blob: data:",
+            "worker-src" => "'self' blob:",
+            "child-src" => "'self' blob: data:",
+            "frame-src" => "'self' blob: data:",
+            "style-src" | "style-src-elem" | "style-src-attr" =>
+                "'self' 'unsafe-inline' blob: data:",
+            "default-src" =>
+                "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data:",
+            _ => "",
+        }
+    }
+    fn is_infra(name: &str) -> bool { !infra_sources(name).is_empty() }
+    // 엄격화만 의미 있는 순수 리소스 지시어.
+    const RESOURCE: &[&str] = &[
+        "img-src", "media-src", "font-src", "object-src", "manifest-src",
+        "prefetch-src", "form-action", "base-uri",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for segment in content.split(';') {
+        let seg = segment.trim();
+        if seg.is_empty() { continue; }
+        let mut it = seg.split_whitespace();
+        let name = match it.next() { Some(n) => n.to_ascii_lowercase(), None => continue };
+        let mut sources: Vec<String> = it.map(|s| s.to_string()).collect();
+        if sources.is_empty() { continue; }
+        if is_infra(&name) {
+            // 'none' 은 다른 소스와 공존 불가 — 제거 후 인프라 소스를 합성.
+            sources.retain(|s| s != "'none'");
+            for extra in infra_sources(&name).split_whitespace() {
+                if !sources.iter().any(|s| s == extra) { sources.push(extra.to_string()); }
+            }
+            out.push(format!("{} {}", name, sources.join(" ")));
+        } else if RESOURCE.contains(&name.as_str()) {
+            if sources.iter().any(|s| s == "'none'") {
+                out.push(format!("{} 'none'", name));
+            } else {
+                if !sources.iter().any(|s| s == "'self'") { sources.push("'self'".to_string()); }
+                out.push(format!("{} {}", name, sources.join(" ")));
+            }
+        }
+        // 그 외(DROP 목록 + 미지지시어)는 버린다.
+    }
+    out.join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

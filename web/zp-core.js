@@ -232,6 +232,46 @@
     if (armed) connect.add('https://challenges.cloudflare.com');
     return "default-src 'none'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:" + (armed ? cf : '') + "; style-src 'self' 'unsafe-inline' blob: data:; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src " + Array.from(connect).join(' ') + " blob: data:; frame-src 'self' blob: data:" + (armed ? cf : '') + "; child-src 'self' blob: data:" + (armed ? cf : '') + "; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; manifest-src 'self'; report-uri /zp/api/csp-report";
   }
+  // E2: meta CSP 교집합 필터 — zp-shared::csp::filter_meta_csp 의 JS 미러.
+  // meta CSP 는 헤더 CSP 와 합성 적용(모든 정책 통과 필요)이라 살려 둬도
+  // 완화는 불가능하고 엄격화만 된다. 배관이 필요한 지시어(script/connect/
+  // worker/child/frame/style/default)는 우리 최소 소스를 얹고, 순수 리소스
+  // 지시어는 'none' 존중 아니면 'self' 를 얹는다. 그 외는 drop.
+  // 규칙이 Rust 와 1:1 이어야 한다 — 어느 쪽을 고쳐도 반대쪽을 같이 고칠 것.
+  const META_CSP_INFRA = {
+    'script-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
+    'script-src-elem': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
+    'script-src-attr': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
+    'connect-src': "'self' blob: data:",
+    'worker-src': "'self' blob:",
+    'child-src': "'self' blob: data:",
+    'frame-src': "'self' blob: data:",
+    'style-src': "'self' 'unsafe-inline' blob: data:",
+    'style-src-elem': "'self' 'unsafe-inline' blob: data:",
+    'style-src-attr': "'self' 'unsafe-inline' blob: data:",
+    'default-src': "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data:",
+  };
+  const META_CSP_RESOURCE = new Set(['img-src', 'media-src', 'font-src', 'object-src', 'manifest-src', 'prefetch-src', 'form-action', 'base-uri']);
+  function filterMetaCSP(content) {
+    const out = [];
+    for (const segment of String(content || '').split(';')) {
+      const seg = segment.trim();
+      if (!seg) continue;
+      const parts = seg.split(/\s+/);
+      const name = (parts.shift() || '').toLowerCase();
+      if (!parts.length) continue;
+      const infra = META_CSP_INFRA[name];
+      if (infra) {
+        const sources = parts.filter(s => s !== "'none'");
+        for (const extra of infra.split(/\s+/)) if (!sources.includes(extra)) sources.push(extra);
+        out.push(name + ' ' + sources.join(' '));
+      } else if (META_CSP_RESOURCE.has(name)) {
+        if (parts.includes("'none'")) out.push(name + " 'none'");
+        else { const sources = parts.slice(); if (!sources.includes("'self'")) sources.push("'self'"); out.push(name + ' ' + sources.join(' ')); }
+      }
+    }
+    return out.join('; ');
+  }
   function parseRelayServersFromFragment(fragment, options) {
     const raw = String(fragment || '');
     const params = new URLSearchParams(raw && raw[0] === '#' ? raw.slice(1) : raw);
@@ -327,7 +367,7 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

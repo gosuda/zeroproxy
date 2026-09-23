@@ -340,6 +340,7 @@ fn shift_marker_positions(replacement: &str, offset: u32) -> String {
         ("\u{1}OGET\u{1}", &[2, 3, 5, 6]),
         ("\u{1}OCALL\u{1}", &[2, 3, 6, 7, 8, 9]),
         ("\u{1}CCALL\u{1}", &[2, 3, 4, 5, 6, 7]),
+        ("\u{1}DEVAL\u{1}", &[2, 3]),
         ("\u{1}RGET\u{1}", &[2, 3, 4, 5, 7, 8]),
         ("\u{1}RSET\u{1}", &[2, 3, 4, 5, 6, 7, 9, 10]),
         ("\u{1}GOPD\u{1}", &[2, 3, 4, 5]),
@@ -464,7 +465,14 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
     // already wraps the inner receiver text verbatim, including any
     // dangerous identifier the inner pass also flagged.
     let mut sorted: Vec<&Patch> = patches.iter().collect();
-    sorted.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end))); // outer first
+    // 같은 start 의 zero-width 삽입(R3 var 호이스트)은 문 패치보다 먼저 —
+    // 그렇지 않으면 `p.start < last_end` 에 삼켜져 방출되지 않는다.
+    sorted.sort_by(|a, b| {
+        a.start
+            .cmp(&b.start)
+            .then_with(|| (b.end == b.start).cmp(&(a.end == a.start))) // insert first
+            .then_with(|| b.end.cmp(&a.end)) // 그 외는 outer first
+    });
     let mut chosen: Vec<&Patch> = Vec::with_capacity(sorted.len());
     let mut last_end: u32 = 0;
     for p in sorted {
@@ -1048,6 +1056,38 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     }
                 }
             }
+        } else if p.replacement.starts_with("\u{1}DEVAL\u{1}") {
+            // \u{1}DEVAL\u{1}<as>\u{1}<ae>\u{1}<strict>\u{1}<desc-object>
+            // R2: `eval(args)` → `__zp_eval.call(this, [args][0], desc, strict)`.
+            // `[args][0]` evaluates every argument in order (native eager
+            // evaluation) and yields the first — `eval(a,b)` semantics.
+            let parts: Vec<&str> = p.replacement.splitn(6, '\u{1}').collect();
+            if parts.len() >= 6 {
+                let as_: usize = parts[2].parse().unwrap_or(0);
+                let ae: usize = parts[3].parse().unwrap_or(0);
+                let args = if as_ < ae && ae <= bytes.len() {
+                    rewrite_range(as_, ae)
+                } else {
+                    String::new()
+                };
+                let strict = parts[4];
+                let desc = parts[5].trim_end_matches('\u{1}');
+                // `.call(this)` 로 호출자의 this 를 __zp_eval → 헬퍼 → eval
+                // thisEnv 까지 그대로 전달한다 (direct-eval this parity).
+                // callee 를 함께 넘긴다 — `var eval = f` 같이 eval 이름이
+                // 재바인딩된 경우 런타임이 intrinsic 이 아니면 그 함수를
+                // 부른다(네이티브는 eval 바인딩 값을 그대로 호출).
+                let e = format!(
+                    "__zp_eval.call(this,__zp_get(globalThis,\"eval\"),[{args}],{desc},{strict})"
+                );
+                if needs_paren_prefix(start) {
+                    out.push_str(&format!("({e})"));
+                } else {
+                    out.push_str(&e);
+                }
+                cursor = end;
+                continue;
+            }
         } else if p.replacement.starts_with("\u{1}RGET\u{1}") {
             // \u{1}RGET\u{1}<os>\u{1}<oe>\u{1}<ks>\u{1}<ke>\u{1}<has_r>\u{1}<rs>\u{1}<re>\u{1}
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
@@ -1213,7 +1253,7 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                     let mid = rewrite_range(rs, re);
                     if let Some(semi) = mid.find(';') {
                         out.push_str(&format!(
-                            "{}{}++<10000000{}",
+                            "{}{}++<10000000||(console.warn('[ZeroProxy] infinite-loop cap reached'),false){}",
                             &mid[..=semi],
                             counter,
                             &mid[semi + 1..]
@@ -1363,6 +1403,10 @@ struct RewriteVisitor {
     /// Stack of lexical scopes; each scope holds names that should NOT be
     /// rewritten because they shadow the dangerous globals.
     scopes: Vec<HashSet<String>>,
+    // R3: (varEnv 의 scopes 인덱스, `var` 삽입 위치) — 함수/화살표 진입 시
+    // push. `eval('var x=1')` 의 var 선언은 sloppy direct eval 에서 호출자
+    // varEnv 에 생기므로, 리터럴 소스의 var 이름을 미리 호이스트해 둔다.
+    var_env_stack: Vec<(usize, u32)>,
     /// Counts infinite-loop detections so the trap notebook can be
     /// updated with prevalence data after a real-site capture.
     infinite_loop_caps: u32,
@@ -1416,6 +1460,11 @@ struct RewriteVisitor {
     /// (source label, fresh label) rewrites active for `break`/`continue`
     /// inside a block-wrapped capped loop.
     label_renames: Vec<(String, String)>,
+    /// R4: 현재 탐색 위치가 sloppy 모드인가. Annex B.3.2/B.3.3/B.3.4 —
+    /// sloppy 에서 블록·레이블·단일문 위치의 함수 선언은 enclosing varEnv 에
+    /// var 바인딩을 올리므로 스코프 수집에 var-like 로 등록해야 한다.
+    /// `'use strict'` 지시어를 만나는 program/function/class 경계에서 꺼진다.
+    cur_sloppy: bool,
 }
 
 impl RewriteVisitor {
@@ -1424,6 +1473,7 @@ impl RewriteVisitor {
             patches: Vec::new(),
             diagnostics: Vec::new(),
             scopes: vec![HashSet::new()],
+            var_env_stack: Vec::new(),
             infinite_loop_caps: 0,
             target_url,
             proxy_origin,
@@ -1438,7 +1488,14 @@ impl RewriteVisitor {
             unbraced_body: 0,
             pending_labels: Vec::new(),
             label_renames: Vec::new(),
+            cur_sloppy: true,
         }
+    }
+
+    /// Directive prologue 에 `'use strict'` 가 있는지 — sloppy 판정은
+    /// program/function body 의 선두 지시어만 본다(블록 내 문자열은 무관).
+    fn has_use_strict<'a>(directives: &[Directive<'a>]) -> bool {
+        directives.iter().any(|d| d.directive.as_str() == "use strict")
     }
 
     /// A statement in single-statement body position. Blocks start a fresh
@@ -1454,8 +1511,174 @@ impl RewriteVisitor {
         }
     }
 
+    /// R2: direct-eval call-site 의 스코프 디스크립터 — 현재 가시한 모든
+    /// 선언명을 get/set 접근자로 방출한다. 접근자 본문의 식별자는 방출된
+    /// 텍스트라 리라이트를 거치지 않고 call-site 의 어휘 위치에서 해석된다
+    /// — 중첩 스코프의 같은 이름은 어차피 최내측 바인딩을 가리키므로
+    /// dedupe 만 하면 된다. const 쓰기는 setter 본문 `n=v` 가 네이티브로
+    /// TypeError 를 던진다. `arguments`/`this`/`new.target`/`super` 는
+    /// 스코프 목록에 없고, runner 화살표가 호출자 환경을 그대로 계승한다.
+    fn caller_desc_object(&self) -> String {
+        let mut seen = HashSet::new();
+        let mut parts: Vec<String> = Vec::new();
+        for scope in &self.scopes {
+            for name in scope {
+                if seen.insert(name.clone()) {
+                    parts.push(format!("get {0}(){{return {0}}},set {0}(v){{{0}=v}}", name));
+                }
+            }
+        }
+        // `arguments` 는 묵시적 바인딩이라 스코프 목록에 없다 — shorthand
+        // 데이터 프로퍼티로 호출자의 arguments 객체를 그대로 싣는다(getter
+        // 본문의 `arguments` 는 getter 자신의 것이라 쓸 수 없다). 화살표는
+        // 비함수라 nt_depth 제외. 탑레벨(비함수)에서는 scope 프록시가
+        // undefined 를 돌려 네이티브의 "바인딩 없음" 과 같다.
+        if self.nt_depth > 0 {
+            parts.push("arguments".to_string());
+        }
+        format!("{{{}}}", parts.join(","))
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashSet::new());
+    }
+
+    /// `var` 호이스트 삽입 위치: 지시어 프롤로그 뒤(그 앞에 `var` 를 넣으면
+    /// `'use strict'` 가 지시어로서 죽어 strict 가 sloppy 로 열화한다).
+    /// 본문이 비었으면 `{` 직후.
+    fn body_insert_pos(body: &FunctionBody) -> u32 {
+        if let Some(d) = body.directives.last() {
+            return d.span.end;
+        }
+        if let Some(s) = body.statements.first() {
+            return s.span().start;
+        }
+        body.span.start + 1
+    }
+
+    /// R3: sloppy direct eval 의 리터럴 소스가 선언하는 top-level
+    /// `var`/`function` 이름을 둘러싼 varEnv 에 호이스트한다.
+    /// eval'd 소스의 `var x=1` 은 재작성되면 `__zp_set(globalThis,"x",1)`
+    /// 가 되고, set() 의 desc consult 가 desc setter → 호출자 바인딩으로
+    /// 라우팅한다 — 그러려면 호출자 쪽에 바인딩이 미리 존재해야 한다.
+    /// (네이티브 sloppy direct eval 도 var 를 호출자 varEnv 에 만든다.)
+    /// strict eval/프로그램 레벨은 불필요: strict 는 누출 없고, 탑레벨은
+    /// varEnv 자체가 전역이라 `__zp_set` 이 그대로 네이티브 동작.
+    fn hoist_eval_var_decls(&mut self, src: &str) {
+        let Some(&(scope_idx, insert_pos)) = self.var_env_stack.last() else { return };
+        if insert_pos == u32::MAX {
+            return; // 표현식 본문 화살표 등 삽입 불가 컨텍스트
+        }
+        let alloc = Allocator::new();
+        let ret = Parser::new(&alloc, src, SourceType::cjs()).parse();
+        if !ret.errors.is_empty() {
+            return; // 런타임이 SyntaxError 를 던진다 — 추측 호이스트 금지
+        }
+        let mut names: Vec<String> = Vec::new();
+        collect_scope_decl_names(&ret.program.body, true, true, &mut |name, cat| {
+            if cat == BindCat::VarLike && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        });
+        let mut fresh: Vec<String> = Vec::new();
+        for n in names {
+            // 이미 같은 varEnv 스코프에 선언된 이름은 삽입 불필요 — desc
+            // 접근자가 기존 바인딩을 그대로 가리킨다.
+            if self.scopes[scope_idx].insert(n.clone()) {
+                fresh.push(n);
+            }
+        }
+        if !fresh.is_empty() {
+            self.patches.push(Patch {
+                start: insert_pos,
+                end: insert_pos,
+                replacement: format!("var {};", fresh.join(",")),
+            });
+        }
+    }
+
+    /// R1: classic top-level `let`/`const`/`class` 는 스크립트를 넘어 지속되는
+    /// 공유 전역 렉시컬 환경에 산다 — 하지만 각 스크립트가 별도 eval 로
+    /// 실행되면 그 렉시컬 환경은 버려진다. 프로그램 앞에 `__zp_lex_decl` 로
+    /// 이름을 등록(재선언/var 충돌 시 SyntaxError, 비configurable 전역
+    /// 프로퍼티 충돌 포함)하고, 각 선언문 뒤에 `__zp_lex_bind` accessor
+    /// 클로저를 심어 다음 스크립트가 살아있는 바인딩을 읽게 한다.
+    /// `varlikes` 는 같은 프로그램의 top-level var/function 이름 — 같은
+    /// 스크립트 안의 `var x; let x` 충돌도 decl 시점에 잡는다.
+    fn emit_lex_registry<'a>(&mut self, program: &Program<'a>, varlikes: &[String]) {
+        let mut lex: Vec<(String, &'static str)> = Vec::new();
+        let mut binds: Vec<(u32, String)> = Vec::new();
+        for stmt in &program.body {
+            match stmt {
+                Statement::VariableDeclaration(d) if d.kind != VariableDeclarationKind::Var => {
+                    let kind = if d.kind == VariableDeclarationKind::Const { "const" } else { "let" };
+                    let mut names: Vec<String> = Vec::new();
+                    for dec in &d.declarations {
+                        collect_binding_pattern(&dec.id, &mut |n| names.push(n.to_string()));
+                    }
+                    let mut calls = String::new();
+                    for n in &names {
+                        lex.push((n.clone(), kind));
+                        // const 의 setter 는 throw 하는 클로저 — prelude 쪽
+                        // set=null 분기(TypeError throw)는 throw 사이트가
+                        // prelude 라 에러 filename 을 새므로, eval 코드 안의
+                        // 화살표 함수가 던지게 해 sourceURL 이 잡히게 한다.
+                        calls += &if kind == "const" {
+                            format!("__zp_lex_bind({n:?},()=>{n},v=>{{throw new TypeError('Assignment to constant variable.')}});")
+                        } else {
+                            format!("__zp_lex_bind({n:?},()=>{n},v=>{{{n}=v}});")
+                        };
+                    }
+                    binds.push((d.span.end, calls));
+                }
+                Statement::ClassDeclaration(c) => {
+                    if let Some(id) = &c.id {
+                        let n = id.name.to_string();
+                        lex.push((n.clone(), "class"));
+                        binds.push((c.span.end, format!("__zp_lex_bind({n:?},()=>{n},v=>{{{n}=v}});")));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if lex.is_empty() && varlikes.is_empty() {
+            return;
+        }
+        // 삽입은 directive 뒤·첫 문 앞 — 'use strict' 지시자가 깨지면 안 된다.
+        let pos = program
+            .directives
+            .last()
+            .map(|d| d.span.end)
+            .or_else(|| program.body.first().map(|s| s.span().start))
+            .unwrap_or(program.span.end);
+        let lexmap = lex
+            .iter()
+            .map(|(n, k)| format!("{n:?}:{k:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let vararr = varlikes
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // throw 는 eval 코드 안에서 일어나야 한다 — prelude 헬퍼가 던지면
+        // 에러 이벤트 filename 이 prelude URL 을 샌다. `__zp_lex_decl` 은
+        // 충돌 이름을 반환하고 방출 코드가 던진다 (네이티브와 같은
+        // "Identifier 'x' has already been declared" 메시지).
+        self.patches.push(Patch {
+            start: pos,
+            end: pos,
+            replacement: format!(
+                ";{{const __zp_bad=__zp_lex_decl({{{lexmap}}},[{vararr}]);if(__zp_bad!==undefined)throw new SyntaxError(\"Identifier '\"+__zp_bad+\"' has already been declared\");}}"
+            ),
+        });
+        for (pos, calls) in binds {
+            self.patches.push(Patch {
+                start: pos,
+                end: pos,
+                replacement: calls,
+            });
+        }
     }
 
     fn pop_scope(&mut self) {
@@ -1541,6 +1764,35 @@ impl RewriteVisitor {
     fn next_loop_id(&mut self) -> u32 {
         self.infinite_loop_caps += 1;
         self.infinite_loop_caps
+    }
+
+    /// `await`/`yield` in a loop body means each iteration can suspend —
+    /// an infinite async poll loop is a legitimate pattern (not a V8
+    /// wedge vector), so those loops keep native uncapped semantics.
+    /// Nested functions are a different async context — their `await`
+    /// does not yield the outer loop — so the walk stops at function
+    /// boundaries. (R7)
+    fn body_yields<'b>(body: &Statement<'b>) -> bool {
+        struct Y { hit: bool }
+        impl<'b> Visit<'b> for Y {
+            fn visit_await_expression(&mut self, _: &AwaitExpression<'b>) { self.hit = true; }
+            fn visit_yield_expression(&mut self, _: &YieldExpression<'b>) { self.hit = true; }
+            fn visit_for_of_statement(&mut self, s: &ForOfStatement<'b>) {
+                if s.r#await { self.hit = true; return; }
+                walk::walk_for_of_statement(self, s);
+            }
+            fn visit_function(&mut self, _: &Function<'b>, _: oxc_syntax::scope::ScopeFlags) {}
+            fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'b>) {}
+        }
+        let mut y = Y { hit: false };
+        walk::walk_statement(&mut y, body);
+        y.hit
+    }
+
+    /// Cap-trip is observable now — silent death at 10M was a pinned
+    /// divergence (T5-2). Warn once, then exit the loop.
+    fn cap_test(counter: &str) -> String {
+        format!("{counter}++<10000000||(console.warn('[ZeroProxy] infinite-loop cap reached'),false)")
     }
 
     /// Fresh temporary name for transform-introduced bindings. `__zp_`
@@ -1846,15 +2098,22 @@ enum BindCat {
 /// - `fn_like` marks program/function bodies, where a top-level function
 ///   declaration is var-like; block-level function declarations are treated
 ///   as lexical (strict semantics; sloppy Annex B stays jail-safe).
+/// - `sloppy` (R4): sloppy 모드에서 중첩 블록·레이블·단일문 위치의 함수
+///   선언은 Annex B.3.2/3.3/3.4 에 따라 enclosing varEnv 에도 var 바인딩을
+///   올린다. 수집 스코프(함수/프로그램)에 VarLike 로 등록해야 블록 밖 참조가
+///   가상 전역으로 새지 않는다. 방출 코드 자체는 그대로라 실제 엔진이
+///   호이스트를 수행한다 — 우리는 참조 해석에만 개입한다.
 fn collect_scope_decl_names<'a>(
     stmts: &'a [Statement<'a>],
     fn_like: bool,
+    sloppy: bool,
     out: &mut dyn FnMut(&'a str, BindCat),
 ) {
     fn one<'a>(
         stmt: &'a Statement<'a>,
         top_level: bool,
         fn_like: bool,
+        sloppy: bool,
         out: &mut dyn FnMut(&'a str, BindCat),
     ) {
         match stmt {
@@ -1874,6 +2133,12 @@ fn collect_scope_decl_names<'a>(
                 if top_level {
                     if let Some(id) = &f.id {
                         out(id.name.as_str(), if fn_like { BindCat::VarLike } else { BindCat::Lexical });
+                    }
+                } else if sloppy {
+                    // Annex B — 블록/레이블/단일문 위치 함수 선언의 var 측면.
+                    // 블록 내부의 lexical 바인딩은 그 블록의 수집이 따로 잡는다.
+                    if let Some(id) = &f.id {
+                        out(id.name.as_str(), BindCat::VarLike);
                     }
                 }
             }
@@ -1929,13 +2194,13 @@ fn collect_scope_decl_names<'a>(
             }
             Statement::BlockStatement(b) => {
                 for s in &b.body {
-                    one(s, false, fn_like, out);
+                    one(s, false, fn_like, sloppy, out);
                 }
             }
             Statement::IfStatement(i) => {
-                one(&i.consequent, false, fn_like, out);
+                one(&i.consequent, false, fn_like, sloppy, out);
                 if let Some(alt) = &i.alternate {
-                    one(alt, false, fn_like, out);
+                    one(alt, false, fn_like, sloppy, out);
                 }
             }
             Statement::ForStatement(f) => {
@@ -1946,7 +2211,7 @@ fn collect_scope_decl_names<'a>(
                         }
                     }
                 }
-                one(&f.body, false, fn_like, out);
+                one(&f.body, false, fn_like, sloppy, out);
             }
             Statement::ForInStatement(_) | Statement::ForOfStatement(_) => {
                 // handled by shared arm below
@@ -1962,38 +2227,38 @@ fn collect_scope_decl_names<'a>(
                         }
                     }
                 }
-                one(body, false, fn_like, out);
+                one(body, false, fn_like, sloppy, out);
             }
-            Statement::WhileStatement(w) => one(&w.body, false, fn_like, out),
-            Statement::DoWhileStatement(w) => one(&w.body, false, fn_like, out),
+            Statement::WhileStatement(w) => one(&w.body, false, fn_like, sloppy, out),
+            Statement::DoWhileStatement(w) => one(&w.body, false, fn_like, sloppy, out),
             Statement::TryStatement(t) => {
                 for s in &t.block.body {
-                    one(s, false, fn_like, out);
+                    one(s, false, fn_like, sloppy, out);
                 }
                 if let Some(h) = &t.handler {
                     for s in &h.body.body {
-                        one(s, false, fn_like, out);
+                        one(s, false, fn_like, sloppy, out);
                     }
                 }
                 if let Some(f) = &t.finalizer {
                     for s in &f.body {
-                        one(s, false, fn_like, out);
+                        one(s, false, fn_like, sloppy, out);
                     }
                 }
             }
             Statement::SwitchStatement(s) => {
                 for case in &s.cases {
                     for st in &case.consequent {
-                        one(st, false, fn_like, out);
+                        one(st, false, fn_like, sloppy, out);
                     }
                 }
             }
-            Statement::LabeledStatement(l) => one(&l.body, false, fn_like, out),
+            Statement::LabeledStatement(l) => one(&l.body, false, fn_like, sloppy, out),
             _ => {}
         }
     }
     for stmt in stmts {
-        one(stmt, true, fn_like, out);
+        one(stmt, true, fn_like, sloppy, out);
     }
 }
 
@@ -2156,24 +2421,49 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // window.location. Recording them as shadowed emitted bare
         // references that bypassed the membrane entirely. Lexical/module/
         // function-local declarations shadow normally.
-        collect_scope_decl_names(&program.body, true, &mut |name, cat| {
+        self.cur_sloppy = self.kind != ScriptKind::Module && !Self::has_use_strict(&program.directives);
+        let mut top_varlikes: Vec<String> = Vec::new();
+        collect_scope_decl_names(&program.body, true, self.cur_sloppy, &mut |name, cat| {
+            // `__zp_dynamic__` 같은 내부 래퍼 함수명은 checkvar 대상이 아니다 —
+            // 방출된 접두가 래퍼 앞에 붙어 rewriteDynamicFunctionBody 의
+            // slice 가 decl 중간을 잘라내는 사고가 있었다.
+            if cat == BindCat::VarLike
+                && !name.starts_with("__zp_")
+                && !name.starts_with("__ZP_")
+                && !top_varlikes.iter().any(|n| n == name)
+            {
+                top_varlikes.push(name.to_string());
+            }
             if !(cat == BindCat::VarLike && self.global_classic() && is_dangerous_global(name)) {
                 self.declare(name);
             }
         });
+        // R1: classic top-level let/const/class 는 스크립트를 넘어 공유되는
+        // 전역 렉시컬 환경에 산다. eval 의 렉시컬 환경은 버려지므로, 이름을
+        // `__zp_lex` 레지스트리에 등록하고 각 선언 뒤에 accessor 클로저를
+        // 심어 다음 스크립트가 살아있는 바인딩을 읽게 한다.
+        if self.kind == ScriptKind::Classic {
+            self.emit_lex_registry(program, &top_varlikes);
+        }
         walk::walk_program(self, program);
     }
 
     fn visit_function(&mut self, func: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         self.push_scope();
+        self.var_env_stack.push(match &func.body {
+            Some(b) => (self.scopes.len() - 1, Self::body_insert_pos(b)),
+            None => (self.scopes.len() - 1, u32::MAX),
+        });
         for param in &func.params.items {
             collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
         }
         if let Some(id) = &func.id {
             self.declare(id.name.as_str());
         }
+        let prev_sloppy = self.cur_sloppy;
         if let Some(body) = &func.body {
-            collect_scope_decl_names(&body.statements, true, &mut |name, _cat| {
+            self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&body.directives);
+            collect_scope_decl_names(&body.statements, true, self.cur_sloppy, &mut |name, _cat| {
                 self.declare(name);
             });
         }
@@ -2182,15 +2472,25 @@ impl<'a> Visit<'a> for RewriteVisitor {
         walk::walk_function(self, func, flags);
         self.fn_depth -= 1;
         self.nt_depth -= 1;
+        self.cur_sloppy = prev_sloppy;
         self.pop_scope();
+        self.var_env_stack.pop();
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
         self.push_scope();
+        // 표현식 본문 화살표(`() => expr`)에는 `var` 를 삽입할 수 없다.
+        self.var_env_stack.push(if arrow.expression {
+            (self.scopes.len() - 1, u32::MAX)
+        } else {
+            (self.scopes.len() - 1, Self::body_insert_pos(&arrow.body))
+        });
         for param in &arrow.params.items {
             collect_binding_pattern(&param.pattern, &mut |a| self.declare(a));
         }
-        collect_scope_decl_names(&arrow.body.statements, true, &mut |name, _cat| {
+        let prev_sloppy = self.cur_sloppy;
+        self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&arrow.body.directives);
+        collect_scope_decl_names(&arrow.body.statements, true, self.cur_sloppy, &mut |name, _cat| {
             self.declare(name);
         });
         // Arrow bodies are real function scopes for `var` — the counter
@@ -2200,7 +2500,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.fn_depth += 1;
         walk::walk_arrow_function_expression(self, arrow);
         self.fn_depth -= 1;
+        self.cur_sloppy = prev_sloppy;
         self.pop_scope();
+        self.var_env_stack.pop();
     }
 
     fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
@@ -2210,7 +2512,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // shadowed (the engine throws ReferenceError — emitting __zp_get
         // would silently return a value). `var` names hoist past the block;
         // the fn_depth==0 classic filter drops the unforgeable ones.
-        collect_scope_decl_names(&block.body, false, &mut |name, cat| {
+        collect_scope_decl_names(&block.body, false, self.cur_sloppy, &mut |name, cat| {
             if !(cat == BindCat::VarLike && self.global_classic() && is_dangerous_global(name)) {
                 self.declare(name);
             }
@@ -2226,7 +2528,11 @@ impl<'a> Visit<'a> for RewriteVisitor {
         if let Some(id) = &class.id {
             self.declare(id.name.as_str());
         }
+        // R4: 클래스 본문·메서드는 선언 없이도 항상 strict — Annex B 불가.
+        let prev_sloppy = self.cur_sloppy;
+        self.cur_sloppy = false;
         walk::walk_class(self, class);
+        self.cur_sloppy = prev_sloppy;
         self.pop_scope();
     }
 
@@ -2409,31 +2715,42 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // patched normally. Then check if this is a dangerous method call.
         walk::walk_call_expression(self, expr);
 
-        // `eval('literal')` — a literal direct eval. Rewriting the *contents*
-        // with the same rules keeps caller-scope resolution (direct eval)
-        // while every dangerous identifier inside the string is mediated.
-        // `eval?.()`, `(0,eval)`, `e=eval;e()` stay indirect (dynamicEval).
+        // R2: unshadowed direct `eval(args)` — caller-scope parity.
+        // Emitted form: `__zp_eval.call(this, [args][0], desc, strict)` —
+        // the runtime turns it back into a real direct eval whose env chain
+        // is the helper's, while `with(desc)` (accessors evaluated in the
+        // caller's lexical position) exposes every in-scope binding and
+        // `.call(this)` forwards the caller's thisEnv. Literal strings take
+        // the same path — `__zp_eval` rewrites the source at runtime, so
+        // the old literal pre-rewrite (which silently became indirect via
+        // dynamicEval) is subsumed. `eval?.()` / `(0,eval)` / shadowed
+        // `eval` stay indirect — native gives those no caller scope either.
         if !expr.optional {
             if let Expression::Identifier(callee) = &expr.callee {
                 if callee.name.as_str() == "eval" && !self.is_shadowed("eval") {
-                    if let Some(Argument::StringLiteral(lit)) = expr.arguments.first() {
-                        let child = RewriteOpts {
-                            kind: ScriptKind::Classic,
-                            target_url: self.target_url.clone(),
-                            strict: true,
-                            proxy_origin: self.proxy_origin.clone(),
-                        };
-                        if let Ok(r) = rewrite_script(&lit.value, &child) {
-                            // Patch `eval(<lit>` — the call's own `)` stays,
-                            // so the replacement must not carry another.
-                            self.patches.push(Patch {
-                                start: expr.span.start,
-                                end: lit.span.end,
-                                replacement: format!("eval({:?}", r.code),
-                            });
+                    // R3: sloppy 리터럴 eval 의 `var`/`function` 선언을
+                    // 호출자 varEnv 에 호이스트 — desc 접근자가 그 바인딩을
+                    // 가리키고 eval'd `__zp_set` 가 desc consult 를 통해
+                    // 도달한다. desc 보다 먼저 호출해야 새 이름이 포함된다.
+                    if self.cur_sloppy {
+                        if let Some(Argument::StringLiteral(lit)) = expr.arguments.first() {
+                            self.hoist_eval_var_decls(&lit.value);
                         }
-                        // nested failure → leave the GLOBAL_GET/dynamicEval path.
                     }
+                    let desc = self.caller_desc_object();
+                    let (as_, ae) = call_args_span(expr);
+                    self.patches.push(Patch {
+                        start: expr.span.start,
+                        end: expr.span.end,
+                        // <strict> 는 call-site 의 strict 여부 — strict
+                        // 호출자의 eval 은 strict eval 이라 `with` 래퍼가
+                        // 불법 → 런타임이 raw 경로를 선택한다.
+                        replacement: format!(
+                            "\u{1}DEVAL\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                            as_, ae, !self.cur_sloppy as u8, desc
+                        ),
+                    });
+                    return;
                 }
             }
         }
@@ -3332,7 +3649,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
             .map(|t| is_truthy_constant(t))
             .unwrap_or(true);
         let needs_cap =
-            empty_loop || (truthy && !(stmt.init.is_none() && stmt.update.is_none()));
+            (empty_loop || (truthy && !(stmt.init.is_none() && stmt.update.is_none())))
+                && !Self::body_yields(&stmt.body);
         // `for(;;)` rewrites the header only — still a single statement —
         // but the `let counter` prefix forms must block-wrap in bare
         // position (`if(c) for…`, `outer: for…`).
@@ -3374,7 +3692,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 start: stmt.span.start,
                 end: body_start,
                 replacement: format!(
-                    "for(let __zp_lc_{id}=0;__zp_lc_{id}++<10000000;)"
+                    "for(let __zp_lc_{id}=0;{};)", Self::cap_test(&format!("__zp_lc_{id}"))
                 ),
             });
             return;
@@ -3410,7 +3728,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             self.patches.push(Patch {
                 start: ts.start,
                 end: ts.end,
-                replacement: format!("{counter}++<10000000"),
+                replacement: Self::cap_test(&counter),
             });
         } else {
             // Empty test slot — the FOR_CAP marker covers `;;` (or `for(;;`
@@ -3438,7 +3756,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
     /// rewrite stays a single statement, so bare bodies and labels need no
     /// extra handling — `outer:` keeps labeling the rewritten `for`.
     fn visit_while_statement(&mut self, stmt: &WhileStatement<'a>) {
-        let needs_cap = is_truthy_constant(&stmt.test);
+        let needs_cap = is_truthy_constant(&stmt.test) && !Self::body_yields(&stmt.body);
         self.pending_labels.clear();
         self.visit_expression(&stmt.test);
         self.visit_body_statement(&stmt.body);
@@ -3450,7 +3768,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 start: stmt.span.start,
                 end: body_start,
                 replacement: format!(
-                    "for(let __zp_lc_{id}=0;__zp_lc_{id}++<10000000;)"
+                    "for(let __zp_lc_{id}=0;{};)", Self::cap_test(&format!("__zp_lc_{id}"))
                 ),
             });
         }
@@ -3464,7 +3782,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
     /// (with the same inner-label trick as `for`).
     fn visit_do_while_statement(&mut self, stmt: &DoWhileStatement<'a>) {
         use oxc_span::GetSpan;
-        let needs_cap = is_truthy_constant(&stmt.test);
+        let needs_cap = is_truthy_constant(&stmt.test) && !Self::body_yields(&stmt.body);
         let needs_wrap = needs_cap && self.unbraced_body > 0;
         let labels = std::mem::take(&mut self.pending_labels);
         let inner_lbl = if needs_wrap && !labels.is_empty() {
@@ -3508,7 +3826,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             self.patches.push(Patch {
                 start: test_span.start,
                 end: test_span.end,
-                replacement: format!("{counter}++<10000000"),
+                replacement: Self::cap_test(&counter),
             });
         }
     }
@@ -4009,6 +4327,95 @@ mod tests {
         assert!(
             r.code.contains("__zp_get(globalThis,\"eval\")"),
             "eval global must route through membrane: {}",
+            r.code,
+        );
+    }
+
+    // ── R4: sloppy Annex B 블록/레이블/단일문 함수의 varEnv 호이스트 ──
+    // 방출 코드는 그대로 두고(실제 호이스트는 엔진이 한다) 참조 해석만
+    // 고친다 — 블록 밖의 dangerous 이름이 지역 바인딩이어야 `__zp_get` 이
+    // 가상 전역으로 새지 않는다.
+    #[test]
+    fn sloppy_block_function_binds_dangerous_name_in_fn_scope() {
+        let src = "function g(){ { function location(){ return 1; } } return location(); }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("__zp_get(globalThis,\"location\")"),
+            "Annex B sloppy block fn must shadow, not virtualize: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn strict_block_function_stays_block_scoped() {
+        let src = "function g(){ 'use strict'; { function location(){ return 1; } } return location; }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"location\")"),
+            "strict block fn must NOT hoist — outer ref stays virtual: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn sloppy_labeled_function_binds_dangerous_name() {
+        // Annex B.3.3 — `l: function document(){}` 도 varEnv 에 올라간다.
+        let src = "function g(){ l: function document(){ return 1; } return document(); }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("__zp_get(globalThis,\"document\")"),
+            "sloppy labeled fn must shadow document: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn sloppy_single_statement_function_binds() {
+        // Annex B.3.4 — `if (c) function f(){}` 단일문 위치.
+        let src = "function g(){ if (x) function history(){ return 1; } return history; }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            !r.code.contains("__zp_get(globalThis,\"history\")"),
+            "sloppy single-statement fn must shadow history: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn toplevel_sloppy_block_unforgeable_stays_virtual() {
+        // 전역 varEnv 의 unforgeable 이름은 Annex B 호이스트도 무시된다 —
+        // `var location` 과 같은 규칙으로 가상화 유지.
+        let src = "{ function location(){ return 1; } } location;";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"location\")"),
+            "top-level unforgeable must stay virtual: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn module_block_function_stays_lexical() {
+        let mut o = opts();
+        o.kind = ScriptKind::Module;
+        let src = "function g(){ { function location(){ return 1; } } return location; }";
+        let r = rewrite_script(src, &o).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"location\")"),
+            "module is strict — no Annex B hoisting: {}",
+            r.code,
+        );
+    }
+
+    #[test]
+    fn class_method_body_is_strict_for_annex_b() {
+        // 클래스 메서드 본문은 'use strict' 없이도 strict — 블록 함수가
+        // 호이스트되지 않아 밖의 참조는 가상 전역을 본다.
+        let src = "class C { m(){ { function location(){ return 1; } } return location; } }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"location\")"),
+            "class method body is strict — outer ref must virtualize: {}",
             r.code,
         );
     }
@@ -4827,9 +5234,11 @@ mod tests {
     fn patches_returned_for_post_processing() {
         let src = "var u = location;";
         let r = rewrite_script(src, &opts()).unwrap();
-        assert_eq!(r.patches.len(), 1, "expected 1 patch for one location ref");
-        assert_eq!(r.patches[0].start, 8);
-        assert_eq!(r.patches[0].end, 16);
+        // patch[0] = R1 `__zp_lex_decl` checkvar prefix (top-level `var u`),
+        // patch[1] = the `location` identifier rewrite.
+        assert_eq!(r.patches.len(), 2, "expected 2 patches for one location ref + lex prefix");
+        assert_eq!(r.patches[1].start, 8);
+        assert_eq!(r.patches[1].end, 16);
     }
 
     #[test]
@@ -4841,16 +5250,15 @@ mod tests {
         }
         src.push_str("var u = location.href;\n");
         let r = rewrite_script(&src, &opts()).unwrap();
-        // Exactly the two patches the changed region requires: the bare
-        // `location` identifier (global-get patch, recursively applied
-        // inside the receiver substring by apply_patches' `rewrite_range`)
-        // and the outer `location.href` member access (MEMBER_GET marker,
-        // chosen for emission). 200 unchanged `function a(){…}` lines
-        // contribute zero patches — exercise the patch-mode contract that
-        // the rewriter does not re-emit clean source.
+        // The changed region needs two patches — the bare `location`
+        // identifier (global-get patch, recursively applied inside the
+        // receiver substring by apply_patches' `rewrite_range`) and the
+        // outer `location.href` member access (MEMBER_GET marker) — plus
+        // one R1 `__zp_lex_decl` checkvar prefix covering the top-level
+        // `function a`/`var u` declarations (deduped to a single patch).
         assert_eq!(
             r.patches.len(),
-            2,
+            3,
             "patch-mode should emit only changed regions, got {} patches",
             r.patches.len()
         );

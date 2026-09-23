@@ -1046,19 +1046,21 @@ test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () =>
 
 });
 
-test('script-capable blob MIME types are distinguished from media and JSON', () => {
+test('blob:/data: 워커 소스는 MIME 무관하게 srcu 재작성 경로로만 간다', () => {
   const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const from = rt.indexOf('  function workerBootstrapURL(url, opts) {');
+  assert.ok(from > 0, 'workerBootstrapURL 이 없다');
+  const body = rt.slice(from, rt.indexOf('\n  function ', from + 10));
 
-  // ④ 규칙 자체는 그대로여야 한다 — 타입 없는 blob 도 스크립트가 될 수 있다.
-  const reStr = /const SCRIPTISH_BLOB_TYPE = (\/.+\/i);/.exec(rt);
-  assert.ok(reStr, 'SCRIPTISH_BLOB_TYPE 규칙이 없다');
-  const re = new Function('return ' + reStr[1])();
-  for (const t of ['', 'text/javascript', 'application/ecmascript', 'text/plain', 'application/octet-stream']) {
-    assert.equal(re.test(t), true, JSON.stringify(t) + ' 는 스크립트성으로 봐야 한다');
-  }
-  for (const t of ['video/mp4', 'image/png', 'application/json']) {
-    assert.equal(re.test(t), false, t + ' 까지 스크립트성으로 보면 과잉이다');
-  }
+  // blob:/data: 는 어떤 MIME 든 소스를 워커가 읽어 재작성하는 srcu 경로로만
+  // 나간다 — 생성된 URL 을 그대로 통과시키는 코드(raw passthrough)가 있으면
+  // 미리라이트 코드가 워커로 도는 탈출이다.
+  const blobIdx = body.indexOf("parsed.protocol === 'blob:'");
+  const dataIdx = body.indexOf("parsed.protocol === 'data:'");
+  assert.ok(blobIdx > 0 && dataIdx > blobIdx, 'blob:/data: 분기가 없다');
+  const segment = body.slice(blobIdx, body.indexOf('const params', blobIdx));
+  assert.ok(segment.includes('srcWorkerBootstrapURL'), 'blob:/data: 가 srcu 경로로 안 간다');
+  assert.ok(!/return\s+parsed\.href/.test(segment), 'blob:/data: 가 raw URL 을 그대로 돌린다 — 재작성 우회');
 });
 
 test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => {

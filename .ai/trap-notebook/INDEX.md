@@ -6,6 +6,14 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-23 | membrane / 수정 | prelude 헬퍼의 throw 는 에러 filename 으로 prelude URL 을 샌다 — throw 는 방출 코드 + `//# sourceURL` 태깅. | rewriter.md#에러-filename-누출 |
+| 2026-09-23 | rewriter / 수정 | apply_patches 가 same-start zero-width 삽입을 문 패치에 삼킨다 — 정렬에 insert-first 우선순위 필요. | rewriter.md#zero-width-패치-삼킴 |
+| 2026-09-23 | e2e / 규칙 | res.end 템플릿 픽스처 안 주석의 백틱/`${` 가 리터럴을 닫는다 — 파스 에러는 시작 줄만 가리킨다. | rewriter.md#픽스처-주석-백틱 |
+| 2026-09-23 | membrane / 수정 | 동적 meta CSP 는 MutationObserver 복원이 느려 그 사이 로드가 빠진다 — content set 경로에서 동기 필터+http-equiv 재장전. | rewriter.md#meta-csp-동기무장 |
+| 2026-09-23 | e2e / 규칙 | `data-zp-lit-href="X"` 는 `href="X"` 를 substring 으로 포함 — raw-URL 부재 단언은 strip_lit 후에. | rewriter.md#lit-stash-서브스트링-오탐 |
+| 2026-09-23 | worker / 수정 | 워커 importScripts 가 `/zp/*` 내부 자산을 타깃으로 해석해 번들 로드 실패 — 내부 프리픽스는 해석 전 통과. | rewriter.md#worker-내부경로-타깃해석 |
+| 2026-09-23 | worker / 수정 | `/zp/api/sync-fetch` 가 SW 디폴트 분류로 upstream 전달돼 404 — 신규 /zp/api 라우트는 분류표 명시 등록. | rewriter.md#worker-동기xhr-라우트 |
+| 2026-09-23 | worker / 수정 | 워커 WebSocket 상대 URL 은 http: 베이스 resolve 로 거부됨 — `^http→ws` 매핑 베이스가 선행. | rewriter.md#worker-ws-베이스-매핑 |
 | 2026-09-22 | 실사이트 / 실측 | Turnstile arming 게이트는 정상(armed 문서만 CF CSP + 마커 비노출) — "browser not supported" 는 CF 측 환경 거부. | real-site-compat.md#turnstile-arming-검증 |
 | 2026-09-22 | membrane / 수정 | `stylesheet.href` 가 프록시 URL 을 돌려줬다 — CSSOM StyleSheet 접근자는 DOM 요소 훅과 별도로 디프록시. | rewriter.md#stylesheet-href-디프록시 |
 | 2026-09-22 | rewriter / 정책 | 비상수 test 루프는 의도적으로 uncapped — break 없는 async `while(true)` 만 10M silent death 잔여 divergence. | rewriter.md#loop-cap-비상수-정책 |

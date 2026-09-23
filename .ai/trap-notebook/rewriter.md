@@ -2,6 +2,41 @@
 
 과거 원인·수정·검증 요약이며 현재 전체 accepted spec이 아니다. 검증은 당시 범위에 한정되고 이번 정리에서 새 실행은 없었다. 후속 정정이 앞 가설보다 우선하며 현재 E1은 [계획](../design/website-compat-refactor.md)을 본다.
 
+<a id="meta-csp-동기무장"></a>
+## 동적 meta CSP 무장 레이스 — MutationObserver 는 너무 느리다 (2026-09-23)
+
+- **원인:** `setAttribute('http-equiv','Content-Security-Policy')` 는 stash 만 하고 네이티브 속성을 안 쓰고, 뒤이은 `setAttribute('content',…)` 는 http-equiv 부재라 일반 경로로 raw 기록됐다. http-equiv 복원은 MutationObserver(마이크로태스크)에서 일어나므로 `appendChild` 직후 `img.src=` 로 시작된 로드는 정책 없이 나갔다 — `img-src 'none'` 인데도 img-loaded.
+- **수정:** content set 경로에서 live/stash 양쪽 http-equiv 를 검사해 CSP 계열이면 content 기록 → 필터 → http-equiv 복원을 **동기적**으로 수행한다(append 전 무장). observer 경로는 innerHTML 등 나머지 도달 경로만 보조.
+- **검증:** e2e `metaStricter` (createElement+setAttribute+append 후 즉시 Image 로드) 가 img-blocked 로 그린.
+
+<a id="lit-stash-서브스트링-오탐"></a>
+## `data-zp-lit-*` 가 "raw URL 부재" 단언을 오탐 (2026-09-23)
+
+- **원인:** R6 리터럴 스태시 `data-zp-lit-href="https://example.com/x"` 는 문자열로 `href="https://example.com/x"` 를 **포함**한다(`lit-` 접두 뒤 substring). zp-htmltx 의 13개 네거티브 단언이 전부 걸렸다.
+- **수정:** 테스트 헬퍼 `strip_lit` 가 `data-zp-lit-*="…"` 스팬을 제거한 뒤 단언한다. 속성값 `"` 는 `&quot;` 이스케이프라 첫 닫는 따옴표까지가 스팬.
+- **규칙:** "원본 URL 이 출력에 없어야 한다" 류 단언은 항상 lit 스태시를 제외하고 검사한다.
+
+<a id="worker-내부경로-타깃해석"></a>
+## 워커 `importScripts` 가 내부 `/zp/*` 자산을 타깃 URL 로 해석 (2026-09-23)
+
+- **원인:** W1 에서 `zp-page-bundle.js` 를 부트스트랩이 `importScripts('/zp/assets/…')` 로 싣는데, prelude 의 importScripts 오버라이드가 **모든** 인자를 가상 base 로 해석해 `/zp/assets/zp-page-bundle.js` → `https://target/zp/assets/…` 로 upstream fetch → 404 → ZPBundle 부재 → `__zp_runSrcu` 가 영영 안 떴다.
+- **수정:** 오버라이드가 `/zp/` 프리픽스는 타깃 해석 **전에** 통과시킨다.
+- **규칙:** 워커 realm 의 어떤 URL 재작성 지점도 내부 `/zp/*` 를 타깃으로 보면 안 된다 — 같은 실수가 `importScripts`/`fetch`/XHR 어디든 재발 가능.
+
+<a id="worker-동기xhr-라우트"></a>
+## 워커 sync XHR 릴레이가 SW 에서 타깃 요청으로 오분류 (2026-09-23)
+
+- **원인:** 워커의 네이티브 sync XHR 을 `/zp/api/sync-fetch` POST 로 릴레이하게 했는데, SW fetch 핸들러가 그 경로를 **타깃 요청으로 분류**해 upstream 에 `POST /zp/api/sync-fetch` 를 날려 404.
+- **수정:** SW classify 에서 `/zp/api/sync-fetch` 를 전용 릴레이로 먼저 처리. 워커 쪽은 `async=false` 면 `Native.XHR` 로 동기 POST, `xhr.getResponseHeader`/`responseText` 를 릴레이 응답으로 채운다.
+- **규칙:** `/zp/api/*` 신규 라우트는 SW 분류표에 **반드시** 명시 등록 — 디폴트 분류가 타깃 전달이라 누락은 조용한 upstream 누출이 된다.
+
+<a id="worker-ws-베이스-매핑"></a>
+## 워커 WebSocket 상대 URL — http: 베이스를 그대로 넘기면 안 된다 (2026-09-23)
+
+- **원인:** `new WebSocket('/ws?w=worker')` 를 `base.href`(http:) 로 resolve 한 뒤 `canonicalWebSocketURL` 에 넘겼더니 http: 스킴 거부로 Error. 페이지 측은 `base.href.replace(/^http/,'ws')` 로 ws: 베이스로 먼저 바꾼다.
+- **수정:** 워커도 같은 순서 — http/https 베이스를 ws/wss 로 매핑 후 resolve·검증.
+- **규칙:** ws/wss 정규화 함수는 **스킴 매핑된 베이스**를 요구한다 — 호출부가 책임.
+
 <a id="srcset-쉼표와-숫자-엔티티--이미지-400-이-56건이었다-2026-08-24-cnn"></a>
 ## srcset 쉼표·숫자 엔티티로 이미지 요청 손상 (2026-08-24, CNN)
 
@@ -1147,3 +1182,24 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **정책:** `for(i=0;x();i++)`·`while(running)` 같은 비상수 test 는 캡하지 않는다 — 네이티브도 test 가 거짓일 때까지 도는 게 맞고 캡을 끼우면 합법적인 장루프(poller·scanner)가 10M 에서 조용히 죽는다. 캡은 상수-진 infinite form(`while(true)`·`for(;;)`·`do{}while(true)`)에만. 유닛 핀: `does_not_cap_for_with_nonconst_test`.
 - **잔여 divergence (T5-2):** `while(true){ await poll(); }` 처럼 **break 없는** async 무한루프는 10M 에서 조용히 종료한다 — 카운터가 끼우는 건 test 슬롯이라 await·break 시맨틱은 온전하다. 다만 async 라 iteration 당 실시간이 걸려 10M 도달에 사실상 수 시간 — 실무 영향 없음으로 판정하고 핀만 둔다(조용한 사망 자체가 의도된 안티봇 완화).
 - **검증:** e2e `perf suite` — asyncPollBreak(break 발화)·asyncPollFlag(좀비 폴러 없음)·cappedWhile/For/Do 정확한 경계. 179/179.
+
+## <a id="zero-width-패치-삼킴"></a>apply_patches 의 same-start zero-width 삽입 패치가 문 패치에 삼켜진다 (2026-09-23)
+
+- **원인:** R3(eval var 호이스트)의 zero-width 삽입 패치(`start==end==삽입위치`)는 삽입 위치가 첫 문 시작과 같을 때, 정렬이 outer-first(같은 start면 end 큰 쪽 우선)라 문 패치 뒤로 밀리고 `p.start < last_end` 에 걸려 조용히 드롭된다. desc 접근자(스코프 삽입)는 나오는데 `var z;` 선언만 빠져 원인 추적이 어렵다.
+- **수정:** 정렬 기준을 `start asc → zero-width 우선 → end desc(outer-first)` 로 — 삽입이 먼저 방출되고 cursor 가 같은 위치라 문 패치가 이어서 적용된다.
+- **교훈:** 패치 기반 리라이터에서 삽입·치환이 같은 위치에서 충돌할 수 있다 — 최종 출력만 보지 말고 patches 벡터 자체를 단언하는 디버그 경로가 빠르다.
+- **검증:** `eval_var_decl_hoists_to_caller_varenv` — var/function 호이스트·strict·중첩·중복·directive 전부 커버.
+
+## <a id="픽스처-주석-백틱"></a>템플릿 리터럴 픽스처 안 주석의 백틱이 리터럴을 닫는다 (2026-09-23)
+
+- **원인:** e2e fixture 가 거대한 backtick 템플릿(`res.end(\`…\`)`)인데, 그 안의 JS 주석에 `` `var` `` 같은 백틱을 쓰면 템플릿이 거기서 닫혀 `missing ) after argument list` 파스 에러 — node --check 는 템플릿 시작 줄(1305)만 가리켜 실제 위치가 안 보인다.
+- **교훈:** res.end 픽스처 내부(주석 포함)에는 백틱·`${` 를 쓰지 않는다. 파스 에러가 템플릿 시작 줄을 가리키면 안쪽의 백틱/`${` 를 grep 한다.
+
+## <a id="에러-filename-누출"></a>prelude 안에서 throw 하면 에러 이벤트 filename 이 prelude URL 을 샌다 — throw 는 eval 코드가 하고 sourceURL 로 태깅한다 (2026-09-23)
+
+- **원인:** `__zp_lex_decl` 같은 prelude 헬퍼가 `throw new SyntaxError(...)` 하면, uncaught 에러의 `ErrorEvent.filename` 은 throw 사이트 스크립트(=`/zp/assets/runtime-prelude.js`)가 된다 — 재작성된 스크립트의 SyntaxError 조차 프록시 자산 URL 을 페이지에 노출한다. e2e `error arg leaked` 단언이 잡았다.
+- **수정 2단:**
+  1. `eval(...)` 로 실행하는 모든 재작성 소스에 `\n//# sourceURL=<가상 문서 URL>` 를 붙여 eval'd 코드의 에러 filename 을 가상 타깃으로 매핑한다 (execGlobalScript·zpDirectEval·workerExecGlobal·workerDirectEval).
+  2. 레지스트리 충돌 같은 "선언 시점 에러"는 헬퍼가 throw 하지 않고 **충돌 이름을 반환** — 방출 코드가 `{const __zp_bad=__zp_lex_decl(...);if(__zp_bad!==undefined)throw new SyntaxError(...)}` 형태로 eval 안에서 던져 filename 이 sourceURL 을 탄다. const 쓰기도 setter 를 `v=>{throw new TypeError(...)}` 클로저로 방출해 같은 효과.
+- **잔여:** TDZ `ReferenceError`(bind 미등록 entry 읽기)는 `zpLexRead` prelude 헬퍼가 던진다 — filename=prelude 잔여 누출. 실측 드묾으로 인지형 갭.
+- **교훈:** 페이지에 노출될 수 있는 에러는 "어디서 throw 됐나"가 filename 을 결정한다 — prelude 의 편의 throw 는 전부 잠재적 URL 누출이다.

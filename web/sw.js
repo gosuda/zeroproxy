@@ -439,6 +439,13 @@ self.addEventListener('fetch', event => {
       if (p === ZP.apiPath('csp-report')) return;
     } catch {}
   }
+  // 워커의 동기 XHR 릴레이 — 페이지 sync XHR 은 SW 를 우회하지만 워커
+  // 요청은 클라이언트 fetch 로 여기를 탄다. 응답하면 classify 가 이걸 타깃
+  // 서브리소스로 보고 upstream 에 붙여 404 가 되므로, Go 의 park 엔드포인트로
+  // 네트워크 통과시킨다(응답은 SW 가 sync-fetch/result 로 채운다).
+  try {
+    if (new URL(u).pathname === ZP.apiPath('sync-fetch')) return;
+  } catch {}
   const responded = handleFetch(event)
     .then(resp => reportEncodedSize(event, resp))
     .then(completeBodyResponse);
@@ -1172,7 +1179,19 @@ async function runtimeAPI(req, url, clientId) {
     // `/zp/api/script?u=…` — Rust 방출 specifier 에는 tab 파라미터가 없다)이
     // ctx 를 못 찾아 503 으로 죽는다.
     bindClientContext(clientId, tab, tab.entries.get(wsEntryId) || { entryId: wsEntryId, targetUrl: target, baseUrl: target });
-    const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId });
+    // D5: srctok 는 blob:/data: 소스 stash — transportFetch 대신 stash 소스를
+    // 같은 재작성 파이프라인으로 보낸다. target 은 이 경우 blob:/data: URL
+    // (워커 location parity)이고 내부 상대 specifier 는 그것을 base 로 풀린다.
+    const srcTok = url.searchParams.get('srctok');
+    let upstream;
+    if (srcTok) {
+      const stashed = workerSrcStash.get(srcTok);
+      workerSrcStash.delete(srcTok);
+      upstream = stashed == null ? null : new Response(stashed, { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
+    } else {
+      upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId });
+    }
+    if (!upstream) return safeError('SW_NOT_READY', 503);
     const rewritten = await rewriteScriptResponse(upstream, { targetUrl: target, kind, req });
     return rewritten;
   }
@@ -2691,6 +2710,16 @@ async function handleMessage(event) {
       return;
     }
     if (msg.type === 'ZP_WS_OPEN') { await openRuntimeStream(event, msg, ok, fail); return; }
+    // D5: module 워커가 직접 읽은 blob: 소스를 stash — 페이지가 브로커한
+    // 요청으로, 워커는 이어서 `/zp/api/worker-script?srctok=` 를 import 한다.
+    if (msg.type === 'ZP_WORKER_STASH') {
+      const src = typeof msg.src === 'string' ? msg.src : '';
+      if (!src || src.length > 4000000) { fail('POLICY_BLOCKED'); return; }
+      const tok = ZP.randomId('ws');
+      workerSrcStash.set(tok, src);
+      ok({ tok });
+      return;
+    }
     fail('POLICY_BLOCKED');
   } catch (e) { fail(e && e.code || e && e.message || 'POLICY_BLOCKED'); }
 }
@@ -3361,6 +3390,10 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
 // 스트리밍 문서는 크기가 **나중에** 생기므로, 응답 시점에는 누구에게
 // 보내야 하는지만 적어 둔다. 배달은 transform 의 flush 가 부른다.
 const pendingStreamReports = new Map();
+// D5: blob:/data: 워커 소스 — 페이지가 읽은 소스를 부트스트랩 해시로 받아
+// 여기 stash 하고, 워커가 `/zp/api/worker-script?srctok=…` 로 한 번 가져가면
+// 지운다. 해시는 HTTP 요청에 안 실리지만 SW 의 fetch 핸들러에는 보인다.
+const workerSrcStash = new Map();
 // 밀어 보내기가 실패한 것만 남는다. 키는 **페이지가 이미 아는 자기 URL** 이라
 // 질의응답으로 새로 알려주는 것은 없다(탭 간 노출 없음).
 const streamEncodedByUrl = new Map();
@@ -3549,13 +3582,35 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');";
+  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_RTC_GATEWAY=__zp_worker_params.get('rtcg')||'';try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
   // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
   // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
-  const mod = url.hash && new URLSearchParams(url.hash.slice(1)).get('mod') === '1';
-  const scriptURL = "'/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET)" + (mod ? " + '&kind=module'" : "");
-  const body = mod
-    ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
-    : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');importScripts(" + scriptURL + ");";
+  const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;
+  const mod = hashParams && hashParams.get('mod') === '1';
+  // D5: `src` 가 있으면 blob:/data: 워커 소스 — stash 해 두고 srctok 라우트로
+  // 서빙한다. 재작성은 worker-script 라우트가 한다.
+  const src = hashParams ? hashParams.get('src') : null;
+  // `srcu` 는 워커가 직접 읽는 소스 URL(blob:/data:) — prelude 가 맡는다.
+  const srcu = hashParams ? hashParams.get('srcu') : null;
+  let scriptURL = "'/zp/api/worker-script?tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET)" + (mod ? " + '&kind=module'" : "");
+  if (src != null) {
+    const tok = ZP.randomId('ws');
+    workerSrcStash.set(tok, src);
+    scriptURL = "'/zp/api/worker-script?srctok=" + tok + "&tab=' + encodeURIComponent(self.__ZP_WORKER_TAB_ID) + '&u=' + encodeURIComponent(self.__ZP_WORKER_TARGET)" + (mod ? " + '&kind=module'" : "");
+  }
+  // zp-page-bundle 은 self-contained(wasm 인라인 + initSync) 라 워커에서도
+  // importScripts/import() 만으로 `self.ZPBundle` 이 선다. 워커 realm 에
+  // 재작성기가 있어야 eval/Function/문자열 타이머/blob·data importScripts 를
+  // rewrite-then-execute 로 열 수 있다. 로드 실패는 치명적이지 않다 —
+  // worker-prelude 의 동적 코드 경로는 ZPBundle 부재 시 fail-closed 된다.
+  // srcu 워커는 타깃 스크립트 fetch 가 없다 — prelude 가 소스를 직접 읽어
+  // 실행(classic)하거나 fetch→브로커 stash→import(module) 한다.
+  const body = srcu != null
+    ? (mod
+      ? head + "import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).catch(function(e){setTimeout(function(){throw e},0)});"
+      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_runSrcu)self.__zp_runSrcu();")
+    : (mod
+      ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
+      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};importScripts(" + scriptURL + ");");
   return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } });
 }
