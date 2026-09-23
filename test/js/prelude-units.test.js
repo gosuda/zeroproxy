@@ -8,6 +8,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+// zp-core 는 globalThis.ZP 를 설치한다 — 추출된 prelude 코드 안의
+// `ZP.filterMetaCSP` 같은 free-var 참조가 실제 구현으로 해석되게 한다.
+require('../../web/zp-core.js');
 
 const SRC = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
 
@@ -62,6 +65,9 @@ function dynEnv(overrides = {}) {
       callPageRewriter: s => s,
       normalizedError,
       execGlobalScript: code => { calls.global.push(code); return { globalResult: code }; },
+      // R1: dynamicEval 이 eval 렉시컬 환경 분리를 위해 읽는 슬롯 —
+      // 추출 블록 밖 선언이라 dep 으로 주입해야 ReferenceError 가 안 난다.
+      __zp_lex_env: null,
     }, overrides));
   return { env, SCOPE, withScope, calls, toStringMap };
 }
@@ -320,9 +326,18 @@ test('enforceMetaPolicy handles CSP-equiv, refresh, and unrelated metas', () => 
   });
   const cspEl = fakeEl({ 'http-equiv': 'Content-Security-Policy', content: "default-src *" });
   enforceMetaPolicy(cspEl);
-  assert.equal(cspEl.attrs['http-equiv'], undefined);
+  // E2: 필터가 남길 지시어가 있으면 meta 는 무장 상태로 산다 — 교집합
+  // content 가 쓰이고 원문은 data-zp-blocked-content 에 stash.
+  assert.equal(cspEl.attrs['http-equiv'], 'Content-Security-Policy');
   // The backup records the normalized (lowercased) equiv name.
   assert.equal(cspEl.attrs['data-zp-blocked-http-equiv'], 'content-security-policy');
+  assert.equal(cspEl.attrs['data-zp-blocked-content'], 'default-src *');
+  assert.match(cspEl.attrs.content, /^default-src \* /, `intersected content: ${cspEl.attrs.content}`);
+  // 필터가 아무 지시어도 남기지 않는 meta 는 완전 무력화된다.
+  const deadEl = fakeEl({ 'http-equiv': 'Content-Security-Policy', content: "bogus-src 'none'" });
+  enforceMetaPolicy(deadEl);
+  assert.equal(deadEl.attrs['http-equiv'], undefined, 'empty intersection must neutralize');
+  assert.equal(deadEl.attrs['data-zp-blocked-http-equiv'], 'content-security-policy');
   const refreshEl = fakeEl({ 'http-equiv': 'refresh', content: '3; url=https://t/next' });
   enforceMetaPolicy(refreshEl);
   assert.equal(refreshEl.attrs.content, '3; url=VIA(https://t/next)');
