@@ -3582,7 +3582,7 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_RTC_GATEWAY=__zp_worker_params.get('rtcg')||'';try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
+  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_REF=__zp_worker_params.get('ref')||'';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_RTC_GATEWAY=__zp_worker_params.get('rtcg')||'';try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
   // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
   // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
   const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;

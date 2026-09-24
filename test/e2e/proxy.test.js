@@ -838,6 +838,25 @@ function createTargetServer(requests, pendingResponses) {
         });
         await P('cookieStore', () => typeof cookieStore);
         await P('errorStack', () => { try { throw new Error('x'); } catch (e) { return /proxy\\.localhost|zp\\//i.test(e.stack || '') ? 'LEAK' : 'clean'; } });
+        // ── W8–W12: WorkerGlobalScope 가상 표면 ──
+        await P('origin', () => self.origin);
+        await P('secureCtx', () => String(self.isSecureContext));
+        await P('urlResolve', () => new URL('/w-abs', location.href).href);
+        await P('webkitURLAlias', () => typeof webkitURL === 'function' ? new webkitURL('/wk', location.href).href : 'absent:' + typeof webkitURL);
+        await P('webkitIDB', () => typeof webkitIndexedDB !== 'undefined' && webkitIndexedDB === indexedDB ? 'alias' : 'not-alias:' + typeof webkitIndexedDB);
+        await P('bcName', () => { const c = new BroadcastChannel('wp1'); const n = c.name; c.close(); return n; });
+        await P('opfsName', async () => {
+          if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') return 'absent';
+          const d = await navigator.storage.getDirectory();
+          return 'name:' + d.name;
+        });
+        await P('webkitFS', () => {
+          const t = typeof self.webkitRequestFileSystem;
+          if (t !== 'function') return t;
+          try { self.webkitRequestFileSystem(0, 0, () => {}, () => {}); return 'fn:ran'; }
+          catch (e) { return 'fn:e:' + (e && e.name || e); }
+        });
+        await P('sharedStorageW', () => typeof self.sharedStorage);
         postMessage(out);
       })().catch(e => postMessage({ __fatal: String(e && (e.stack || e)) }));`);
       return;
@@ -1721,6 +1740,76 @@ function createTargetServer(requests, pendingResponses) {
               const r = await navigator.locks.request('zp-lock-probe', () => 'held');
               return 'got:' + r;
             } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          // ── P4–P13: 가상 표면 감사 항목 ──
+          await P('secureCtx', () => String(self.isSecureContext));
+          await P('webkitURLAlias', () => typeof webkitURL === 'function' ? new webkitURL('/wk-page', location.href).href : 'absent:' + typeof webkitURL);
+          await P('webkitIDB', () => typeof webkitIndexedDB !== 'undefined' && webkitIndexedDB === indexedDB ? 'alias' : 'not-alias:' + typeof webkitIndexedDB);
+          await P('webkitFS', () => [typeof self.webkitRequestFileSystem, typeof self.webkitResolveLocalFileSystemURL, typeof self.webkitPersistentStorage, typeof self.webkitTemporaryStorage].join('|'));
+          await P('fetchLaterType', () => typeof self.fetchLater);
+          await P('fetchLaterCall', async () => {
+            if (typeof self.fetchLater !== 'function') return 'absent';
+            try {
+              const r = await self.fetchLater('/compat-echo', { method: 'GET' });
+              return 'activated:' + String(r && r.activated);
+            } catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('opfsName', async () => {
+            if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') return 'absent';
+            const d = await navigator.storage.getDirectory();
+            return 'name:' + d.name;
+          });
+          await P('customEl', async () => {
+            if (typeof customElements === 'undefined') return 'absent';
+            class XProbeEl extends HTMLElement {}
+            customElements.define('x-probe-el', XProbeEl);
+            const el = document.createElement('x-probe-el');
+            document.body.appendChild(el);
+            const found = document.querySelector('x-probe-el');
+            const sameCtor = customElements.get('x-probe-el') === XProbeEl;
+            const upgraded = el instanceof XProbeEl;
+            const names = el.localName + '|' + el.tagName;
+            const byTag = document.getElementsByTagName('x-probe-el').length;
+            el.remove();
+            return 'ctor:' + sameCtor + '|up:' + upgraded + '|names:' + names + '|qs:' + (found === el) + '|tag:' + byTag;
+          });
+          await P('permGeo', async () => {
+            if (!navigator.permissions || typeof navigator.permissions.query !== 'function') return 'absent';
+            try { const s = await navigator.permissions.query({ name: 'geolocation' }); return 'state:' + s.state; }
+            catch (e) { return 'e:' + (e && e.name || e); }
+          });
+          await P('paSurfaces', async () => [
+            typeof self.sharedStorage,
+            // browsingTopics 는 존재해도 빈 배열로 게이트된다(비차단 + 무자료).
+            typeof document.browsingTopics === 'function' ? 'fn:' + JSON.stringify(await document.browsingTopics()) : typeof document.browsingTopics,
+            typeof self.runAdAuction,
+            typeof self.joinAdInterestGroup,
+            typeof self.privateToken,
+            typeof self.queryLocalFonts === 'function' ? 'fn-gated' : typeof self.queryLocalFonts
+          ].join('|'));
+          await P('setHTMLHook', () => {
+            // 기본 Sanitizer 가 img 를 지우므로 a[href] 로 검증 — .href 게터는
+            // 가상 베이스로 풀어야 변환이 먹힌 것.
+            if (typeof document.createElement('div').setHTML !== 'function') return 'absent';
+            const d = document.createElement('div');
+            d.setHTML('<a href="/set-html-probe.png">x</a>');
+            const a = d.querySelector('a');
+            return a ? String(a.href) : 'no-a';
+          });
+          await P('parseHTMLUnsafeHook', () => {
+            if (typeof Document.parseHTMLUnsafe !== 'function') return 'absent';
+            const doc2 = Document.parseHTMLUnsafe('<a href="/parse-unsafe.png">x</a>');
+            const a = doc2.querySelector('a');
+            return a ? String(a.href) : 'no-a';
+          });
+          await P('getHTMLClean', () => {
+            const d = document.createElement('div');
+            const a = document.createElement('a');
+            a.setAttribute('href', '/get-html-x');
+            d.appendChild(a);
+            if (typeof d.getHTML !== 'function') return 'absent';
+            const ser = d.getHTML();
+            return leaked(ser) ? 'LEAK:' + ser : 'clean:' + ser;
           });
           out.done = true;
         })().catch(e => { (window.__surfaceProbes = window.__surfaceProbes || {}).__fatal = String(e && (e.stack || e)); });
@@ -3577,6 +3666,29 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(d.cachesRoundtrip, 'v:open+keys=1', `cachesRoundtrip: ${d.cachesRoundtrip}`);
       assert.equal(d.errorStack, 'v:clean', `errorStack: ${d.errorStack}`);
     });
+    await t.test('worker virtual surfaces (W8-W12)', () => {
+      // self.origin 은 가상 타깃 오리진 — 프록시 오리진 누출 없음.
+      assert.equal(d.origin, `v:${targetBase}`, `origin: ${d.origin}`);
+      // http://localhost 타깃은 네이티브도 potentially-trustworthy → true.
+      // 비-localhost http 타깃이면 가상화 게터가 false 를 돌린다.
+      assert.equal(d.secureCtx, 'v:true', `secureCtx: ${d.secureCtx}`);
+      // new URL(rel, base) 의 명시 base 는 가상 URL 로 푼다 — 프록시
+      // bootstrap URL 이 아니다. 단일 인자 relative 는 네이티브도 TypeError.
+      assert.equal(d.urlResolve, `v:${targetBase}/w-abs`, `urlResolve: ${d.urlResolve}`);
+      // webkitURL/webkitIndexedDB 는 이 Chrome 워커에 네이티브로 없다 —
+      // absent 가 parity. 탑재 브라우저에서는 파사드 별칭이어야 한다.
+      assert.equal(d.webkitURLAlias, 'v:absent:undefined', `webkitURLAlias: ${d.webkitURLAlias}`);
+      assert.match(d.webkitIDB, /^v:(alias|not-alias:undefined)$/, `webkitIDB: ${d.webkitIDB}`);
+      // BroadcastChannel.name 은 페이지가 요청한 이름만 보인다(실제 채널은
+      // 타깃 해시 프리픽스로 격리).
+      assert.equal(d.bcName, 'v:wp1', `bcName: ${d.bcName}`);
+      // OPFS — 프록시 오리진 공유 대신 타깃 해시 서브디렉터리.
+      assert.match(d.opfsName, /^v:name:zp:o:[0-9a-f]{8}$/, `opfsName: ${d.opfsName}`);
+      // 레거시 FS — 이 Chrome 워커엔 webkitRequestFileSystem 이 실재한다 —
+      // 우리는 NotSupportedError 게이트로 fail-closed (프록시 오리진 FS 차단).
+      assert.match(d.webkitFS, /^v:(undefined|fn:e:NotSupportedError)$/, `webkitFS: ${d.webkitFS}`);
+      assert.equal(d.sharedStorageW, 'v:undefined', `sharedStorageW: ${d.sharedStorageW}`);
+    });
     const m = probes.module || {};
     await t.test('module worker imports + meta', () => {
       assert.equal(m.staticImport, 'v:dep-ok', `staticImport: ${m.staticImport}`);
@@ -3594,9 +3706,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     await t.test('shared worker isolation + messaging', () => {
       assert.equal(s.href, `${targetBase}/probe-shared-worker.js`, `href: ${s.href}`);
       assert.equal(s.ua, TARGET_UA, `ua: ${s.ua}`);
-      // 이름 접두어로 두 타깃이 같은 SharedWorker 를 공유하지 않는다 — 접두어
-      // 형태를 고정해 회귀를 잡는다(D7).
-      assert.match(s.name, /^zp:w:[^:]+:swprobe$/, `name: ${s.name}`);
+      // 실제 SharedWorker 이름은 `zp:w:<hash>:` 접두어로 타깃 격리되지만,
+      // 워커 안에서 보이는 self.name 은 페이지가 요청한 이름으로 마스킹된다
+      // (네이티브 parity — 네이티브도 인자 이름을 돌려준다).
+      assert.equal(s.name, 'swprobe', `name: ${s.name}`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
   });
@@ -3997,6 +4110,40 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     assert.match(probes.wasmStreamUrl, /^v:(e:TypeError|absent)/, `wasmStreamUrl: ${probes.wasmStreamUrl}`);
     // navigator.locks — 타깃 네임스페이스로 격리되며 정상 동작해야 한다.
     assert.equal(probes.navLocks, 'v:got:held', `navLocks: ${probes.navLocks}`);
+    // ── P4–P13: 가상 표면 감사 항목 ──
+    // P4: http://localhost 타깃은 네이티브도 potentially-trustworthy → true.
+    assert.equal(probes.secureCtx, 'v:true', `secureCtx: ${probes.secureCtx}`);
+    // P5: webkitURL 은 ZPURL 별칭 — 가상 베이스로 해석, 프록시 URL 미노출.
+    assert.equal(probes.webkitURLAlias, `v:http://${targetHost}:${targetPort}/wk-page`, `webkitURLAlias: ${probes.webkitURLAlias}`);
+    // P6: webkitIndexedDB — 이 Chrome 에는 네이티브 부재(not-alias)가 parity,
+    // 탑재 브라우저에서는 네임스페이스 파사드 별칭이어야 한다.
+    assert.match(probes.webkitIDB, /^v:(alias|not-alias:undefined)$/, `webkitIDB: ${probes.webkitIDB}`);
+    // P7: 레거시 FS/quota API — 전부 제거.
+    assert.equal(probes.webkitFS, 'v:undefined|undefined|undefined|undefined', `webkitFS: ${probes.webkitFS}`);
+    // P9: fetchLater — 프록시 봉투 keepalive 에뮬레이션.
+    if (probes.fetchLaterType !== 'v:absent') {
+      assert.equal(probes.fetchLaterType, 'v:function', `fetchLaterType: ${probes.fetchLaterType}`);
+      assert.match(probes.fetchLaterCall, /^v:activated:(true|false)/, `fetchLaterCall: ${probes.fetchLaterCall}`);
+    }
+    // P10: OPFS — 타깃 해시 서브디렉터리 (마커/오리진 문자열 미노출).
+    assert.match(probes.opfsName, /^v:name:zp:o:[0-9a-f]{8}$|^v:absent$/, `opfsName: ${probes.opfsName}`);
+    // P11: customElements — 프리픽스 레지스트리 + 이름 마스킹 + 쿼리 변환.
+    assert.equal(probes.customEl, 'v:ctor:true|up:true|names:x-probe-el|X-PROBE-EL|qs:true|tag:1', `customEl: ${probes.customEl}`);
+    // P12: permissions.query — 프록시 오리진 grant 미노출, 추적 권한은 prompt.
+    assert.match(probes.permGeo, /^v:(state:prompt|state:denied|e:\w+|absent)/, `permGeo: ${probes.permGeo}`);
+    // P13: Privacy Sandbox — fail-closed. browsingTopics 는 빈 배열 게이트.
+    assert.equal(probes.paSurfaces, 'v:undefined|fn:[]|undefined|undefined|undefined|fn-gated', `paSurfaces: ${probes.paSurfaces}`);
+    // P8: Sanitizer 경로도 transformHTML 경유 — href 게터는 가상 타깃으로 푼다.
+    if (probes.setHTMLHook !== 'v:absent') {
+      assert.equal(probes.setHTMLHook, `v:http://${targetHost}:${targetPort}/set-html-probe.png`, `setHTMLHook: ${probes.setHTMLHook}`);
+    }
+    if (probes.parseHTMLUnsafeHook !== 'v:absent') {
+      assert.equal(probes.parseHTMLUnsafeHook, `v:http://${targetHost}:${targetPort}/parse-unsafe.png`, `parseHTMLUnsafeHook: ${probes.parseHTMLUnsafeHook}`);
+    }
+    if (probes.getHTMLClean !== 'v:absent') {
+      assert.match(probes.getHTMLClean, /^v:clean:/, `getHTMLClean: ${probes.getHTMLClean}`);
+      assert.ok(!/data-zp-|\/zp\/|proxy\.localhost/.test(probes.getHTMLClean), `getHTML leaked internals: ${probes.getHTMLClean}`);
+    }
     // ShadowRealm importValue / wasmStreamUrl 이 직접 egress 를 낳았는지 wire 확인.
     const p0Direct = wireRequests.filter(u => /^https?:\/\/(sr-leak|wasm-leak)\.invalid/.test(u) && !u.includes('/zp/'));
     assert.equal(p0Direct.length, 0, `P0 direct egress: ${JSON.stringify(p0Direct)}`);

@@ -296,6 +296,10 @@
   let virtualURL = new URL(boot.targetUrl);
   let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
+  // customElements 네임스페이스가 설치되면 채워진다 — patchHTMLSetter·
+  // insertAdjacentHTML·createContextualFragment 등 "파스된 마크업" 경로가
+  // 삽입 후 정의된 커스텀 엘리먼트를 교체-업그레이 하는 데 쓴다.
+  let ceUpgradeSubtree = null;
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');
@@ -574,6 +578,7 @@
       querySelector: w.Document.prototype.querySelector,
       querySelectorAll: w.Document.prototype.querySelectorAll,
       elementQuerySelectorAll: w.Element.prototype.querySelectorAll,
+      fragmentQuerySelectorAll: w.DocumentFragment && w.DocumentFragment.prototype && w.DocumentFragment.prototype.querySelectorAll,
       elementQuerySelector: w.Element.prototype.querySelector,
       // `<template>` 의 내용은 **별도의 DocumentFragment** 라 어떤
       // querySelectorAll 로도 도달하지 않는다. 그런데 HTML 직렬화는 그 안을
@@ -3588,8 +3593,8 @@
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
     // `document.write` / `writeln` wrap 은 installDOMHooks(w) 에서 모든 realm
     // (parent + iframe Document.prototype) 에 일관 적용. 본 위치는 비워둠.
-    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
-    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
+    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { const out = Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); try { if (ceUpgradeSubtree && out && out.documentElement) ceUpgradeSubtree(out.documentElement); } catch {} return out; });
+    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { const out = Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); try { if (ceUpgradeSubtree) ceUpgradeSubtree(out); } catch {} return out; });
   }
   function requestTargetURL(input) {
     const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
@@ -5863,6 +5868,15 @@
         databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
       };
       defineAccessor(w, 'indexedDB', () => virtualIDB);
+      // `webkitIndexedDB` bypasses the namespace entirely — alias it to the
+      // facade. The rest of the webkitIDB* family are plain constructor
+      // aliases with no open path; map them onto the real IDB* so nothing
+      // reaches the un-namespaced factory.
+      if (w.webkitIndexedDB) try { defineAccessor(w, 'webkitIndexedDB', () => virtualIDB); } catch {}
+      for (const alias of ['IDBKeyRange','IDBRequest','IDBTransaction','IDBCursor','IDBCursorWithValue','IDBDatabase','IDBFactory','IDBObjectStore','IDBIndex','IDBOpenDBRequest','IDBVersionChangeEvent','IDBFileHandle','IDBMutableFile','IDBFileRequest','IDBLocaleAwareKeyRange']) {
+        const webkit = 'webkit' + alias;
+        if (w[webkit] !== undefined && w[alias] !== undefined) try { define(w, webkit, w[alias]); } catch {}
+      }
     }
     if (w.caches) {
       const nativeCaches = w.caches;
@@ -5879,6 +5893,90 @@
     // cookieStore: same jar as document.cookie (documentCookieRecords).
     // The native object would expose REAL proxy-origin cookies.
     if (w.cookieStore) defineAccessor(w, 'cookieStore', () => virtualCookieStore());
+    // OPFS — `navigator.storage.getDirectory()` returns the REAL proxy-origin
+    // root, shared across targets. Hand out a per-target subdirectory handle;
+    // every operation below it stays inside the namespace transparently.
+    try {
+      const storageMgr = w.navigator && w.navigator.storage;
+      if (storageMgr && typeof storageMgr.getDirectory === 'function' && typeof storageMgr.getDirectory.__zpWrapped !== 'boolean') {
+        const nativeGetDirectory = storageMgr.getDirectory.bind(storageMgr);
+        // handle.name 은 페이지에 노출되므로 마커+오리진 원문 대신 해시를 쓴다.
+        let oh = 0x811c9dc5;
+        for (let i = 0; i < virtualURL.origin.length; i++) { oh ^= virtualURL.origin.charCodeAt(i); oh = Math.imul(oh, 16777619); }
+        const opfsRoot = 'zp:o:' + ('00000000' + (oh >>> 0).toString(16)).slice(-8);
+        const wrapped = function getDirectory() {
+          return nativeGetDirectory().then(d => d.getDirectoryHandle(opfsRoot, { create: true }));
+        };
+        try { Object.defineProperty(wrapped, '__zpWrapped', { value: true }); } catch {}
+        maskNativeFunction(wrapped, 'getDirectory');
+        define(storageMgr, 'getDirectory', wrapped);
+        if (storageMgr.estimate) {
+          const nativeEstimate = storageMgr.estimate.bind(storageMgr);
+          define(storageMgr, 'estimate', function estimate() { return nativeEstimate(); });
+        }
+      }
+    } catch {}
+    // Legacy webkit filesystem/quota APIs — real proxy-origin FS, no clean
+    // virtualization. Remove the surface (feature detection falls back).
+    for (const legacy of ['webkitRequestFileSystem','webkitResolveLocalFileSystemURL','webkitPersistentStorage','webkitTemporaryStorage','webkitStorageInfo','webkitRequestFileSystemSync','webkitResolveLocalFileSystemURLSync']) {
+      try { if (w[legacy] !== undefined) define(w, legacy, undefined); } catch {}
+    }
+    // fetchLater — the real API schedules a fire-and-forget request at
+    // document teardown. The raw URL cannot go direct (that is a leak), so
+    // emulate over the /zp/api/fetch envelope with keepalive on
+    // pagehide/visibilitychange→hidden — the same path fetch() takes.
+    try {
+      if (typeof w.fetchLater === 'function' && Native.fetch && Native.Request) {
+        const fl = function fetchLater(input, init) {
+          const opts = init || {};
+          const result = { activated: false };
+          let canceled = false, fired = false;
+          const unlisten = [];
+          const fire = () => {
+            if (fired || canceled) return;
+            fired = true;
+            result.activated = true;
+            for (const u of unlisten) u();
+            try {
+              const raw = input && typeof input === 'object' && typeof input.url === 'string' ? input.url : String(input);
+              const target = requestTargetURL(raw);
+              // fetchThroughRuntime 과 같은 패턴 — Request 입력이면 그것의
+              // method/headers 를 유지하고 opts 로 덮어쓴다.
+              const req = (input && typeof input === 'object' && typeof input.clone === 'function') ? new Native.Request(input, opts) : new Native.Request(target, opts);
+              let body64 = null;
+              const b = opts.body;
+              if (typeof b === 'string') body64 = ZP.bytesToBase64Url(new TextEncoder().encode(b));
+              else if (b instanceof ArrayBuffer) body64 = ZP.bytesToBase64Url(new Uint8Array(b));
+              else if (ArrayBuffer.isView(b)) body64 = ZP.bytesToBase64Url(new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
+              else if (b instanceof URLSearchParams) body64 = ZP.bytesToBase64Url(new TextEncoder().encode(String(b)));
+              const payload = {
+                tabId: boot.tabId, entryId: activeEntryId, documentURL: virtualURL.href, url: target,
+                init: { method: req.method, headers: Array.from(req.headers.entries()), body: body64,
+                        credentials: req.credentials, mode: req.mode, referrer: req.referrer,
+                        referrerPolicy: req.referrerPolicy || documentReferrerPolicy(), redirect: req.redirect, cache: req.cache, integrity: req.integrity },
+              };
+              Native.fetch(proxyOrigin + ZP.apiPath('fetch') + '?url=' + encodeURLParam(target),
+                { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), keepalive: true }).catch(() => {});
+            } catch {}
+          };
+          const onHide = () => fire();
+          w.addEventListener('pagehide', onHide);
+          unlisten.push(() => w.removeEventListener('pagehide', onHide));
+          if (w.document) {
+            const onVis = () => { if (w.document.visibilityState === 'hidden') fire(); };
+            w.document.addEventListener('visibilitychange', onVis);
+            unlisten.push(() => w.document.removeEventListener('visibilitychange', onVis));
+          }
+          if (opts.signal && typeof opts.signal.addEventListener === 'function') {
+            const onAbort = () => { canceled = true; for (const u of unlisten) u(); };
+            if (opts.signal.aborted) canceled = true; else opts.signal.addEventListener('abort', onAbort, { once: true });
+          }
+          return result;
+        };
+        maskNativeFunction(fl, 'fetchLater');
+        define(w, 'fetchLater', fl);
+      }
+    } catch {}
     // URL constructor + canParse/parse: a base argument built from OUR
     // routing vocabulary (share path, /zp/ api URL, proxy-origin string)
     // must resolve against the VIRTUAL base — otherwise
@@ -5911,6 +6009,9 @@
       }
       brandLikeNative(ZPURL, null, 'URL');
       define(w, 'URL', ZPURL);
+      // `webkitURL` is a live alias of the native constructor — unwrapped it
+      // resolves relative input against the REAL document base (proxy URL).
+      if (w.webkitURL) define(w, 'webkitURL', ZPURL);
     }
     // ★컨테인먼트가 자식 창에 먼저 심은 래퍼 위에 자식 prelude 가 다시 심으면
     // 이중 래핑이다 — SharedWorker 는 workerBootstrapURL 이 두 번 적용돼
@@ -5973,6 +6074,14 @@
     }
     // window.origin / self.origin getters — point at virtual target origin.
     try { defineMasked(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+    // isSecureContext — the proxy is served from localhost so the REAL value
+    // is always `true`, but an http: target would be `false` natively.
+    // Potentially-trustworthy = https/wss/file + localhost-family hosts.
+    try {
+      const vsc = virtualURL.protocol === 'https:' || virtualURL.protocol === 'wss:' || virtualURL.protocol === 'file:'
+        || /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(virtualURL.hostname) || /\.localhost$/i.test(virtualURL.hostname);
+      defineMasked(w, 'isSecureContext', { get() { return vsc; }, configurable: true, enumerable: true });
+    } catch {}
     // D7 (removed): we used to redefine `performance.timeOrigin` to a
     // "target navigation" baseline. `boot.navigationStart` is never assigned
     // anywhere in the tree, so the baseline was always `Date.now()` at prelude
@@ -6223,21 +6332,233 @@
         }
       } catch {}
     }
-    // D7: navigator.permissions.query — record target-origin state, return
-    // virtualised state if known, else fall through to native (which still
-    // resolves against the proxy origin's grants).
+    // D7: navigator.permissions.query — the real query resolves against the
+    // PROXY origin's grants: a device permission granted to target A would
+    // show 'granted' to target B. Track per-target grants for the device
+    // permissions we can observe (camera/mic via getUserMedia, display via
+    // getDisplayMedia, geolocation via success callback) and answer 'prompt'
+    // for unrecorded names; other permission names fall through to native.
+    const grantedPerms = new Set();
+    try {
+      const storedGrants = prefixedStorage(nativeLocalStorage, localPrefix).getItem('__zp_grants');
+      if (storedGrants) for (const g of String(storedGrants).split(',')) if (g) grantedPerms.add(g);
+    } catch {}
+    const recordGrant = name => {
+      grantedPerms.add(name);
+      try { prefixedStorage(nativeLocalStorage, localPrefix).setItem('__zp_grants', Array.from(grantedPerms).join(',')); } catch {}
+    };
+    try {
+      const md = w.navigator && w.navigator.mediaDevices;
+      if (md && typeof md.getUserMedia === 'function') {
+        const nativeGUM = md.getUserMedia.bind(md);
+        const wrappedGUM = function getUserMedia(c) {
+          return nativeGUM(c).then(s => {
+            try { const kind = (s && s.getVideoTracks && s.getVideoTracks().length) ? 'camera' : 'microphone'; recordGrant(kind); if (s && s.getAudioTracks && s.getAudioTracks().length) recordGrant('microphone'); } catch {}
+            return s;
+          });
+        };
+        maskNativeFunction(wrappedGUM, 'getUserMedia');
+        define(md, 'getUserMedia', wrappedGUM);
+      }
+      if (md && typeof md.getDisplayMedia === 'function') {
+        const nativeGDM = md.getDisplayMedia.bind(md);
+        const wrappedGDM = function getDisplayMedia(c) { return nativeGDM(c).then(s => { recordGrant('display-capture'); return s; }); };
+        maskNativeFunction(wrappedGDM, 'getDisplayMedia');
+        define(md, 'getDisplayMedia', wrappedGDM);
+      }
+      const geo = w.navigator && w.navigator.geolocation;
+      if (geo && typeof geo.getCurrentPosition === 'function') {
+        const nativeGeo = geo.getCurrentPosition.bind(geo);
+        const wrappedGeo = function getCurrentPosition(ok, err, opts) { return nativeGeo(p => { recordGrant('geolocation'); if (ok) return ok(p); }, err, opts); };
+        maskNativeFunction(wrappedGeo, 'getCurrentPosition');
+        define(geo, 'getCurrentPosition', wrappedGeo);
+      }
+      if (geo && typeof geo.watchPosition === 'function') {
+        const nativeWatch = geo.watchPosition.bind(geo);
+        const wrappedWatch = function watchPosition(ok, err, opts) { return nativeWatch(p => { recordGrant('geolocation'); if (ok) return ok(p); }, err, opts); };
+        maskNativeFunction(wrappedWatch, 'watchPosition');
+        define(geo, 'watchPosition', wrappedWatch);
+      }
+    } catch {}
     if (w.navigator && w.navigator.permissions && w.navigator.permissions.query) {
       const nativeQuery = w.navigator.permissions.query.bind(w.navigator.permissions);
+      const trackedPerms = new Set(['camera', 'microphone', 'display-capture', 'geolocation', 'speaker-selection']);
       define(w.navigator.permissions, 'query', function(desc) {
-        return nativeQuery(desc).then(status => {
-          // Best-effort: target code observes the proxy-origin permission
-          // state but cross-target inference cannot tell who else has the
-          // grant (since SW + storage isolation hide it). Future phase:
-          // synthesize PermissionStatus from per-target storage namespace.
-          return status;
-        });
+        const name = desc && desc.name;
+        if (typeof name === 'string' && trackedPerms.has(name) && !grantedPerms.has(name)) {
+          // 타깃이 이 권한을 얻은 기록이 없으면 'prompt' — 다른 타깃이 실제로
+          // grant 받았어도 그 사실은 이 타깃에 새지 않는다.
+          const StatusProto = w.PermissionStatus && w.PermissionStatus.prototype;
+          const fake = StatusProto ? Object.create(StatusProto) : {};
+          try { Object.defineProperty(fake, 'name', { value: name, enumerable: true }); } catch {}
+          try { Object.defineProperty(fake, 'state', { value: 'prompt', enumerable: true }); } catch {}
+          try { Object.defineProperty(fake, 'onchange', { value: null, writable: true, enumerable: true }); } catch {}
+          return Promise.resolve(fake);
+        }
+        return nativeQuery(desc);
       });
     }
+    // Privacy Sandbox — sharedStorage / Protected-Audience / Topics /
+    // Private-State-Token are keyed to the REAL proxy origin, so data written
+    // by one target is readable by every other target in the tab. That is an
+    // isolation violation we cannot virtualise cheaply → fail closed.
+    try {
+      const nav = w.navigator;
+      for (const pa of ['joinAdInterestGroup','leaveAdInterestGroup','runAdAuction','updateAdInterestGroups','createAuctionNonce','getInterestGroupAdAuctionData','clearOriginJoinedAdInterestGroups','createAuctionNonce']) {
+        if (nav && typeof nav[pa] === 'function') {
+          const deny = function() { return Promise.reject(normalizedError('NotSupportedError')); };
+          maskNativeFunction(deny, pa);
+          define(nav, pa, deny);
+        }
+      }
+      if (w.sharedStorage !== undefined) try { define(w, 'sharedStorage', undefined); } catch {}
+      if (nav && nav.privateAttribution) {
+        for (const pa of ['measureImpression','saveImpression','measureConversion','saveConversion']) {
+          if (typeof nav.privateAttribution[pa] === 'function') {
+            const deny = function() { return Promise.reject(normalizedError('NotSupportedError')); };
+            maskNativeFunction(deny, pa);
+            try { define(nav.privateAttribution, pa, deny); } catch {}
+          }
+        }
+      }
+      // document.browsingTopics → empty topics (privacy-safe, non-throwing)
+      const docProto2 = w.Document && w.Document.prototype;
+      if (docProto2 && typeof docProto2.browsingTopics === 'function') {
+        const noTopics = function browsingTopics() { return Promise.resolve([]); };
+        maskNativeFunction(noTopics, 'browsingTopics');
+        define(docProto2, 'browsingTopics', noTopics);
+      }
+      // document.privateToken / PrivateStateToken — gate to inert values.
+      try {
+        if (docProto2) {
+          const dTok = Object.getOwnPropertyDescriptor(docProto2, 'privateToken');
+          if (dTok) defineMasked(docProto2, 'privateToken', { get() { return { hasPrivateToken: () => Promise.resolve(false), hasRedemptionRecord: () => Promise.resolve(false), sendPrivateToken: () => Promise.reject(normalizedError('NotSupportedError')) }; }, configurable: true });
+        }
+      } catch {}
+    } catch {}
+    // customElements — the registry is keyed to the REAL proxy origin, so two
+    // targets sharing one tab collide on names and observe each other's
+    // registrations. Namespace every defined name with a per-target prefix.
+    // createElement / `is` attribute / localName·tagName are translated so
+    // the prefix stays invisible to page code. Static markup written before
+    // define() is upgraded by element-replacement at define time (approximate
+    // — native upgrade timing differs, but constructor + attrs + children
+    // land in the right order).
+    try {
+      const registry = w.customElements;
+      if (registry && typeof registry.define === 'function') {
+        const cePrefix = 'zp' + originHash.replace(/[^a-z0-9]/g, '') + '-';
+        const zname = name => cePrefix + String(name);
+        const definedNames = new Set();
+        const nativeDefine = registry.define.bind(registry);
+        const nativeGet = registry.get && registry.get.bind(registry);
+        const nativeWhenDefined = registry.whenDefined && registry.whenDefined.bind(registry);
+        const nativeUpgrade = registry.upgrade && registry.upgrade.bind(registry);
+        const nativeGetName = registry.getName && registry.getName.bind(registry);
+        const doc = w.document;
+        // Upgrade parsed elements carrying the UNprefixed tag by replacing
+        // them with a prefixed element — constructor + attribute/connected
+        // callbacks then run natively on the replacement.
+        const upgradeElements = (rootEl, name) => {
+          const zn = zname(name);
+          // localName/tagName 게터가 접두어를 지워버리므로 "미접두 태그" 판정은
+          // 생성자 instanceof 로 한다 — 이미 업그레이드된 노드는 건너뛴다.
+          const ctor = nativeGet ? nativeGet(zn) : null;
+          const needsUpgrade = el => !(ctor && el instanceof ctor);
+          const list = [];
+          try { if (rootEl.localName === name && needsUpgrade(rootEl)) list.push(rootEl); } catch {}
+          // 파스된 미접두 태그를 찾아야 하므로 **네이티브** 탐색을 써야 한다 —
+          // 페이지 대면 querySelectorAll/getElementsByTagName 은 이름을 접두어로
+          // 번역해 이미 업그레이드된 노드만 찾는다.
+          const nativeQsa = rootEl.nodeType === 9 ? Native.querySelectorAll
+            : rootEl.nodeType === 11 ? (Native.fragmentQuerySelectorAll || null)
+            : Native.elementQuerySelectorAll;
+          try { if (nativeQsa) for (const el of Array.from(nativeQsa.call(rootEl, name))) if (!list.includes(el) && needsUpgrade(el)) list.push(el); } catch {}
+          try { if (typeof rootEl.getElementsByTagName === 'function') for (const el of Array.from(rootEl.getElementsByTagName(name))) if (!list.includes(el) && needsUpgrade(el)) list.push(el); } catch {}
+          for (const el of list) {
+            try {
+              const repl = doc.createElement(zn);
+              for (const a of Array.from(el.attributes)) { try { repl.setAttribute(a.name, a.value); } catch {} }
+              while (el.firstChild) repl.appendChild(el.firstChild);
+              el.replaceWith(repl);
+            } catch {}
+          }
+        };
+        // 삽입 경로(innerHTML 등)에서 파스된 미접두 태그를 찾아 업그레이드한다.
+        ceUpgradeSubtree = (rootEl) => {
+          if (!rootEl || !definedNames.size) return;
+          for (const n of definedNames) upgradeElements(rootEl, n);
+        };
+        define(registry, 'define', function(name, ctor, opts) {
+          const n = String(name).toLowerCase();
+          definedNames.add(n);
+          const zn = zname(n);
+          nativeDefine(zn, ctor, opts);
+          upgradeElements(doc.documentElement || doc, n);
+        });
+        if (nativeGet) define(registry, 'get', function(name) { return nativeGet(zname(String(name))); });
+        if (nativeGetName) define(registry, 'getName', function(ctor) { const n = nativeGetName(ctor); return n && n.startsWith(cePrefix) ? n.slice(cePrefix.length) : n; });
+        if (nativeWhenDefined) define(registry, 'whenDefined', function(name) { return nativeWhenDefined(zname(String(name))); });
+        if (nativeUpgrade) define(registry, 'upgrade', function(root2) { return nativeUpgrade(root2); });
+        // createElement / createElementNS translate tag names; `is` option too.
+        const docProto = w.Document && w.Document.prototype;
+        if (docProto) {
+          const nativeCreateElement = docProto.createElement;
+          if (typeof nativeCreateElement === 'function') define(docProto, 'createElement', function(tag, opts) {
+            const t = String(tag).toLowerCase();
+            const zn = definedNames.has(t) ? zname(t) : t;
+            const o = (opts && typeof opts === 'object' && opts.is && definedNames.has(String(opts.is).toLowerCase())) ? Object.assign({}, opts, { is: zname(String(opts.is).toLowerCase()) }) : opts;
+            return nativeCreateElement.call(this, zn, o);
+          });
+          const nativeCreateElementNS = docProto.createElementNS;
+          if (typeof nativeCreateElementNS === 'function') define(docProto, 'createElementNS', function(ns2, tag, opts) {
+            const t = String(tag).toLowerCase();
+            const zn = definedNames.has(t) ? zname(t) : tag;
+            return nativeCreateElementNS.call(this, ns2, zn, opts);
+          });
+          // querySelector(All)/getElementsByTagName — translate defined tag
+          // names inside selectors so `qsa('my-el')` finds the prefixed nodes.
+          const translateSelector = sel => {
+            if (!definedNames.size) return sel;
+            let out = String(sel);
+            for (const n of definedNames) {
+              out = out.replace(new RegExp('(^|[\\s,>+~]|^)' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=$|[\\s,>+~.\\[\\]#:)])', 'gi'), (m, p) => p + zname(n));
+            }
+            return out;
+          };
+          for (const m of ['querySelector', 'querySelectorAll']) {
+            if (typeof docProto[m] === 'function' && typeof Element !== 'undefined' && w.Element && w.Element.prototype) {
+              const nat = docProto[m];
+              define(docProto, m, function(sel) { return nat.call(this, translateSelector(sel)); });
+              const enat = w.Element.prototype[m];
+              if (typeof enat === 'function' && !enat.__zpQsaWrapped) {
+                const wrapped = function(sel) { return enat.call(this, translateSelector(sel)); };
+                try { Object.defineProperty(wrapped, '__zpQsaWrapped', { value: true }); } catch {}
+                define(w.Element.prototype, m, wrapped);
+              }
+            }
+          }
+          const nativeGetByTag = docProto.getElementsByTagName;
+          if (typeof nativeGetByTag === 'function') define(docProto, 'getElementsByTagName', function(tag) {
+            const t = String(tag).toLowerCase();
+            return nativeGetByTag.call(this, definedNames.has(t) ? zname(t) : tag);
+          });
+        }
+        // localName / tagName / nodeName — strip the prefix back off. The
+        // prefix is lowercase alnum+dash; tagName/nodeName return uppercase
+        // so a case-insensitive anchored strip covers all three.
+        const elProto = w.Element && w.Element.prototype;
+        if (elProto) {
+          const cePrefixRe = new RegExp('^' + cePrefix, 'i');
+          for (const prop of ['localName', 'tagName', 'nodeName']) {
+            const d = Object.getOwnPropertyDescriptor(elProto, prop) || (w.Node && Object.getOwnPropertyDescriptor(w.Node.prototype, prop));
+            if (!d || !d.get) continue;
+            const nativeGetProp = d.get;
+            try { defineMasked(elProto, prop, { get() { const v = nativeGetProp.call(this); return typeof v === 'string' ? v.replace(cePrefixRe, '') : v; }, configurable: true, enumerable: true }); } catch {}
+          }
+        }
+      }
+    } catch {}
   }
   function prefixedStorage(native, prefix) {
     // Wrap native localStorage/sessionStorage with a fixed key prefix. All
@@ -7472,6 +7793,44 @@
         return nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts));
       });
     }
+    // Element.setHTML / Document.parseHTMLUnsafe — the Sanitizer path. The
+    // sanitizer filters markup but does NOT rewrite URL attributes, so
+    // untransformed HTML would produce CSP-blocked raw-target requests.
+    // Transform first, then let the sanitizer see the already-rewritten DOM.
+    if (typeof w.Element.prototype.setHTML === 'function') {
+      const nativeElSetHTML = w.Element.prototype.setHTML;
+      define(w.Element.prototype, 'setHTML', function(html, opts) {
+        const ret = nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
+        try { if (ceUpgradeSubtree) ceUpgradeSubtree(this); } catch {}
+        return ret;
+      });
+    }
+    if (typeof w.ShadowRoot !== 'undefined' && w.ShadowRoot.prototype && typeof w.ShadowRoot.prototype.setHTML === 'function') {
+      const nativeShadowSetHTML = w.ShadowRoot.prototype.setHTML;
+      define(w.ShadowRoot.prototype, 'setHTML', function(html, opts) {
+        const ret = nativeShadowSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
+        try { if (ceUpgradeSubtree) ceUpgradeSubtree(this); } catch {}
+        return ret;
+      });
+    }
+    if (typeof w.Document.parseHTMLUnsafe === 'function') {
+      const nativeParseUnsafe = w.Document.parseHTMLUnsafe;
+      define(w.Document, 'parseHTMLUnsafe', function(html) {
+        const out = nativeParseUnsafe.call(w.Document, transformHTML(String(html), transformHTMLOpts));
+        try { if (ceUpgradeSubtree && out && out.documentElement) ceUpgradeSubtree(out.documentElement); } catch {}
+        return out;
+      });
+    }
+    // getHTML/getHTMLUnsafe serialize the RAW DOM — proxy URLs and our
+    // data-zp-* stash attributes leak verbatim. Scrub like getHTML above.
+    const scrubSerialized = out => typeof out === 'string'
+      ? deproxyURL(out.replace(/\sdata-zp-[a-z-]+="[^"]*"/g, ''), { scan: true, fallback: 'share' })
+      : out;
+    for (const [proto, m] of [[w.Element && w.Element.prototype, 'getHTML'], [w.Element && w.Element.prototype, 'getHTMLUnsafe'], [w.ShadowRoot && w.ShadowRoot.prototype, 'getHTMLUnsafe']]) {
+      if (!proto || typeof proto[m] !== 'function') continue;
+      const nativeGet = proto[m];
+      define(proto, m, function(opts) { return scrubSerialized(nativeGet.call(this, opts)); });
+    }
     // ★2026-08-22 — `innerHTML`/`outerHTML` 만 세정하고 있었다.
     // `new XMLSerializer().serializeToString(document.documentElement)` 은 훅이
     // 아예 없어서 같은 문서에서 **38건**의 흔적이 그대로 나왔다(실측). 직렬화는
@@ -7484,7 +7843,7 @@
         return nativeSerialize.call(this, clone || node);
       });
     }
-    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
+    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); try { if (ceUpgradeSubtree) ceUpgradeSubtree(this.parentNode || this); } catch {} return ret; });
     // Document.prototype.write / writeln wrap. 인스턴스 레벨이 아니라 proto
     // 레벨이라 같은 realm 의 모든 Document 인스턴스에 적용. 부모 install 시
     // 부모 Document.prototype, iframe install 시 iframe Document.prototype.
@@ -7546,10 +7905,13 @@
               d.set.call(this, rewriteCSSText(v));
               return;
             }
+            // outerHTML 은 `this` 자체가 교체된다 — 업그레이드 루트는 부모다.
+            const upRoot = prop === 'outerHTML' ? this.parentNode : this;
             d.set.call(this, transformHTML(String(v), transformHTMLOpts));
             syncBaseElement(this);
             instrumentDescendantIframes(this);
             enforceSubtreePolicies(this);
+            try { if (ceUpgradeSubtree) ceUpgradeSubtree(upRoot || this); } catch {}
           },
           configurable: false
         });
@@ -9075,6 +9437,7 @@
     }
     const params = new URLSearchParams();
     params.set('u', requestTargetURL(raw));
+    params.set('ref', virtualURL.href);
     params.set('tab', boot.tabId);
     // module 워커는 importScripts 가 없다 — 부트스트랩을 import() 체인으로
     // 바꿔야 하므로 SW 쪽에 표시를 남긴다(worklet addModule 도 module).
@@ -9093,6 +9456,7 @@
   function srcWorkerBootstrapURL(srcu, opts) {
     const params = new URLSearchParams();
     params.set('u', srcu);
+    params.set('ref', virtualURL.href);
     params.set('tab', boot.tabId);
     params.set('srcu', srcu);
     if (opts && opts.type === 'module') params.set('mod', '1');

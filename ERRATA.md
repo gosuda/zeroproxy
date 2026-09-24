@@ -620,3 +620,136 @@ CSP `data:` media · E eval/direct-scope
 **P2:**
 
 Fingerprint residuals · performance · legacy APIs
+
+---
+
+## Q. 2026-09-24 surface audit — remaining browser/compat differences
+
+Full inventory of residual divergences after the P0/R/W/D/E fix rounds.
+Statuses: **[gap]** confirmed divergence to fix · **[intentional]** security-driven
+fail-closed or scoped value · **[fingerprint]** Phase-3 track · **[stale]** the
+entry above claimed a gap that is already fixed · **[residual]** documented,
+not fixable without breaking the model · **[unverified]** needs a probe.
+
+### Q1. Worker realm surface — [gap]
+
+- `self.origin` returns the **proxy origin** (never virtualised). Leak + parity break.
+- `self.isSecureContext` is the real proxy value. An `http:` target must see `false`.
+- `self.crossOriginIsolated` is real (proxy COOP/COEP, not the target's). [residual — target header set not tracked]
+- `self.BroadcastChannel` is **real** — un-prefixed names shared across targets and inconsistent with the page's prefixed wrapper. [gap — cross-target bleed]
+- `self.name` — real `WorkerOptions.name`; the page wrapper already prefixes SharedWorker names but a dedicated worker's `name` option passes through. [unverified]
+- `self.indexedDB`/`caches`/`cookieStore`/`locks`/`credentials`/`ShadowRealm` — namespaced/gated. [fixed]
+- `navigator.userAgent`/`appVersion`/`platform` in workers — spoofed to the captured Chrome build. [fixed]
+- `navigator.storage.getDirectory()` (OPFS root) — **real**, shared proxy-origin FS across targets. [gap — namespace per target]
+- `self.webkitIndexedDB`, `self.webkitURL`, `self.webkitPersistentStorage`/`webkitTemporaryStorage`, `self.webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL` — real aliases that bypass the namespaced facades / URL wrapper. [gap]
+- `self.EventSource` — implemented over proxied fetch; reconnect/Last-Event-ID semantics approximate. [residual]
+- `self.XMLHttpRequest` (sync) — relayed through `/zp/api/sync-fetch`; readyState/event fidelity approximate. [residual]
+- `self.WebSocket` — brokered through the page; `WebSocketStream` blocked. [intentional]
+- `self.RTCPeerConnection`/`WebTransport` — gateway wrapper or `NotSupportedError` stub when the gateway is absent. [intentional]
+- `self.permissions`, `self.push`/PushManager, `self.Notification`, `self.BarcodeDetector`/`FaceDetector`/`TextDetector`, MediaCapabilities/WebCodecs/InsertableStreams/`ImageDecoder`, `self.USB`/`Serial`/`HID`/`Bluetooth` — **real**, proxy-origin keyed. [fingerprint/intentional]
+- Worker error stacks — sanitised + `//# sourceURL` tagged. [fixed]
+- `self.onmessage`/`postMessage` — wrapped; `MessageEvent.origin` virtualised. [fixed]
+
+### Q2. Page realm — isolation / origin leaks — [gap]
+
+- `isSecureContext` is the real proxy value (`true` on localhost) — an `http:` target must see `false`. [gap]
+- `webkitURL` — real `URL` constructor, bypasses the `ZPURL` base wrapper; `new webkitURL(rel, base)` resolves against the **real** document base. [gap]
+- `webkitIndexedDB`/`webkitIDBKeyRange`/`webkitIDBRequest`/`webkitIDBTransaction`/`webkitIDBCursor`/`webkitIDBCursorWithValue`/`webkitIDBDatabase`/`webkitIDBFactory`/`webkitIDBObjectStore`/`webkitIDBIndex`/`webkitIDBOpenDBRequest`/`webkitIDBVersionChangeEvent` — real aliases that bypass the target namespace. [gap]
+- `webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL`/`webkitPersistentStorage`/`webkitTemporaryStorage` — real proxy-origin filesystem/quota. [gap → fail-closed]
+- `navigator.storage.getDirectory()` (OPFS) — real, shared across targets. [gap — per-target subdir]
+- `customElements`/`CustomElementRegistry` — **real shared registry**: two targets in one tab collide on names, and `get`/`whenDefined` observe the other target's registrations. [gap — prefix names; `localName`/`tagName`/`is`/`createElement` need translation]
+- `permissions.query` — falls through to the real proxy-origin grant; a device permission granted to target A is visible as `granted` to target B. [gap — track grants per target]
+- `sharedStorage`, `joinAdInterestGroup`/`runAdAuction`/`leaveAdInterestGroup`/`updateAdInterestGroups`/`createAuctionNonce`/`getInterestGroupAdAuctionData`, `document.browsingTopics`, `document.privateToken`, `window.fence` — **real Privacy-Sandbox APIs keyed to the proxy origin** — cross-target data bleed. [gap → fail-closed]
+- `history.go/back/forward`/`history.length` — real session history; virtual navigations push real entries 1:1 so `length` stays coherent, but pre-boot entries and cross-target traversal are observable. [residual]
+- `window.open('javascript:…')` executes in the **current** realm, not the new window's. [residual]
+- `iframe.csp` / `credentialless` attributes pass through as inert data — a stricter `iframe.csp` is not applied to the child. [residual]
+- `fetchLater` — unhooked; the deferred request must go through proxy transport. [gap]
+- `document.implementation.createHTMLDocument()` — real document with no prelude; its `location` is `about:blank` (harmless) but descendant element hooks rely on the shared realm prototypes. [mostly-fine]
+- `XSLTProcessor` — real; `xsl:include`/`import` fetch directly → CSP blocks → fail-closed. [residual]
+
+### Q3. Sanitizer / serialization surface — [gap]
+
+- `Element.setHTML`, `Document.parseHTMLUnsafe`, `Element.getHTML`/`getHTMLUnsafe`, `ShadowRoot.getHTMLUnsafe` — unhooked. `setHTML`/`parseHTMLUnsafe` insert markup whose URL attributes are **not rewritten** (CSP-blocked); `getHTML*` serialises raw `data-zp-*` stash attributes and proxied URLs. (`Element.setHTMLUnsafe`, `ShadowRoot.setHTMLUnsafe`/`getHTML` already hooked.) [gap]
+- `XMLSerializer.serializeToString` — de-proxied. [fixed]
+- `document.scripts`, `getElementsByTagName`, `querySelector(All)`, `NodeIterator`/`TreeWalker`, `el.attributes`/`getAttributeNames` — filtered. [fixed]
+- `cloneNode`/`importNode` carry `data-zp-*` attributes onto the clone — the `attributes` map is filtered, but serialisers other than `XMLSerializer`/`getHTML` may expose them. [residual — covered by Q3 hooks]
+- `document.images`/`links`/`forms`/`anchors`/`embeds`/`plugins`/`applets`/`all`, `getElementsByClassName`/`getElementsByName` — real collections; no ZP nodes match those filters today. [fine]
+
+### Q4. Script scheduling / HTML transform — mostly [fixed] or [residual]
+
+- Inline `<script>` bodies are rewritten **in place** and execute natively — `nomodule`, `defer`, `async`, parser-blocking order, `onload`/`onerror` timing are all native. [fixed — earlier audit claim removed]
+- `<script nomodule>` — still skipped natively since the element/attribute is untouched. [fine]
+- `document.write` — transformed; second-document path probed. Split-tag fragments across `write()` calls remain [unverified].
+- `<script>`.text/`textContent`/`innerText` writes — descriptors captured; coverage [unverified].
+- `charset` transcoding — transformer assumes ASCII-compatible input; non-UTF-8 targets (EUC-KR, Shift_JIS) mojibake. [residual]
+- `iframe.csp` — see Q2.
+- CSS: `insertRule`/`replaceSync`/`replace`/`cssText`/Typed OM/`style` attribute are hooked; `adoptedStyleSheets` slot assignment and `new CSSStyleSheet()` rely on those hooks (replaceSync covered). [fixed-ish, monitor]
+- `<base>` dynamic writes — `base-uri 'none'` blocks the element; URL resolution falls back to the virtual base. [intentional divergence, pinned]
+- `link.disabled`/`media` switching — [unverified]
+- `MathML`/`annotation-xml` URLs, `<noscript>` raw text, exotic `http-equiv` values (`set-cookie`/`default-style`) — [unverified]
+- `srcset` with comma-containing data-URIs — historical trap fixed; exotic variants [unverified].
+- Double-rewrite (proxy URL fed back as input) — `unleakedTargetRaw` unwraps known paths; unknown shapes [unverified].
+
+### Q5. Language-semantics residuals — mostly [fixed]
+
+- Dangerous-name write targets: `for (location of x)`, `[location]=a`, `({p:location}=o)`, `location++/--`, `for await`, compound assignment, computed/static member targets — emitted through `__zp_get.d` sinks / `GLOBAL_UPDATE`. [fixed — B-section claims stale]
+- Cross-script `let`/`const`/`class` persistence, redeclaration `SyntaxError`, `const` write `TypeError`, error `filename` via `sourceURL` — fixed page+worker (R1).
+- Direct `eval` caller scope, `eval` var-hoisting, sloppy Annex B — fixed (R2–R4).
+- **TDZ residual**: an uninitialised-lexical read throws `ReferenceError` from inside the prelude — `ErrorEvent.filename`/`e.filename` shows the prelude URL, not the target. [residual — throw must originate in emitted code; per-read emission deemed too costly]
+- `with(obj)` — dangerous names are statically bound; `o`'s own `location`/`eval` properties are never consulted, and direct `eval` inside `with` sees only the lexical chain, not `o`. [residual]
+- Module-scope `eval` — a module's own lexical env is not reified for direct eval. [residual]
+- `arguments.callee` on a `new Function` result — callee is the emitted wrapper; `.name`/`toString` masked but identity/name parity is [unverified].
+- `eval\`x\`` tagged-template — callee gets a non-string → returns it (parity). [unverified]
+- `x?.location?.()` — optional-call chain on dangerous members. [unverified]
+- `function f(location=location)` — param defaults stay real → native TDZ parity. [fine]
+- `catch(location){}` — real local binding → parity. [fine]
+- `import location` module binding — declared → local → parity. [fine]
+- `new.target` through `Reflect.construct`/`new fn()` — propagates. [fixed]
+- `eval` completion values for non-strings/objects — parity pinned. [fixed]
+
+### Q6. Fingerprint / real-environment surfaces — [fingerprint] Phase-3 track
+
+- Screen/viewport: `screen.*`, `inner*`, `outer*`, `screenX/Y`, `devicePixelRatio`, `visualViewport`, `matchMedia` — real values (layout parity requires real metrics).
+- `Intl`/timezone/`Date`/`performance.timeOrigin`/`now()` — real.
+- `navigator.plugins`/`mimeTypes`/`pdfViewerEnabled`/`javaEnabled`/`maxTouchPoints`/`vendor*`/`product*`/`appName`/`appCodeName`/`languages`/`onLine`/`doNotTrack`/`globalPrivacyControl` — real.
+- `navigator.connection`, `getBattery`, `vibrate`, `getGamepads` — real.
+- Media devices: `mediaDevices`/`getUserMedia`/`getDisplayMedia`/`enumerateDevices`/`selectAudioOutput` — real (native consent boundary, D6).
+- `geolocation`, `clipboard`, `share`/`canShare`, `wakeLock`, `setAppBadge`, `getInstalledRelatedApps`, `contentIndex`, `launchQueue`, `windowControlsOverlay`, `virtualKeyboard`, `ink`, `login`, `managed`, `scheduling` — real.
+- File pickers/`getDirectory`/`getScreenDetails`/`queryLocalFonts`/`EyeDropper` — real (D6 consent-gated).
+- Generic Sensor API, `WebGL`/`WebGL2` `UNMASKED_VENDOR/RENDERER`, `WebGPU` adapter, `WebXR`, `usb`/`serial`/`hid`/`bluetooth`/`midi`/`nfc` — real hardware values.
+- `speechSynthesis.getVoices` — fixed 2-voice list (divergence from real systems). [intentional]
+- `performance.memory`/`hardwareConcurrency`/`deviceMemory`, canvas `getImageData`/`toDataURL`, `AudioBuffer.getChannelData` — spoofed/noised. [intentional]
+- `ReportingObserver`/`securitypolicyviolation` — report our build CSP, not the target's. [intentional]
+- `window.event`/`external`/`status`/`closed`/`defaultStatus`/`offscreenBuffering`/`styleMedia`/`chrome`(masked)/`sidebar` — real or absent.
+- `crossOriginIsolated`/`originAgentCluster`/`credentialless`/`prerendering` — real.
+- Copy/drag (`DataTransfer`, `text/uri-list`, `clipboardData`) expose the real DOM `href` = proxy URL string. [residual — the URL is functional, but the string shape leaks]
+- Sourcemap/`//# sourceURL` line mapping is approximate — devtools line numbers may not match the original. [residual]
+
+### Q7. Still intentional fail-closed — do not "fix" without a design
+
+- `credentials.*` (WebAuthn/FedCM/OTP), `ShadowRealm` evaluate/importValue, `serviceWorker.register`, Notification `showNotification`/`getNotifications`, worker `WebSocketStream`, `iframe.src` `blob:`/`data:`/`javascript:`, `<object>`/`<embed>`/`<portal>`/`<fencedframe>`, `frame-src data:`/`worker-src blob:` seal, non-http `location.assign` targets other than delegatable external schemes, `new Function`/`eval` rewrite failures, `PaymentRequest` (breaks by nature — RP is the proxy origin).
+- `alert`/`confirm`/`prompt`/`print` stubs, `document.domain` no-op, `registerProtocolHandler` silent-success facade, `window.name` virtual store, `navigation` facade, `cookieStore` jar — documented divergences, all pinned in `PHASE2_STATUS.md`.
+
+### Q8. Fix list spawned by this audit — **all landed 2026-09-24**
+
+Every item above marked [gap] is now closed. Evidence pins live in
+`test/e2e/proxy.test.js` (`worker virtual surfaces (W8-W12)` and the
+`P4–P13` block in `surface suite`) and `PHASE2_STATUS.md` divergence table:
+
+- **W8** worker `self.origin` → virtual target origin (`blob:`/`data:` inherit the creator's `ref`).
+- **W9** worker `self.isSecureContext` → virtual scheme/host rule.
+- **W10** worker `BroadcastChannel` → `zp:b:<hash>` prefix, `name` masked to the requested value.
+- **W11** worker `webkitIndexedDB`→namespaced facade, `webkitURL`→ZPWorkerURL (natively absent in Chrome workers — parity), legacy FS/quota removed.
+- **W12** worker `navigator.storage.getDirectory` → `zp:o:<hash>` subdir (handle `.name` shows hash only).
+- **W-extra** worker `new URL` → proxy-URL unwrap wrapper; internal parsing captured to `NativeURLCtor`; SharedWorker `self.name` masked to the requested name.
+- **P4** page `isSecureContext` → virtual rule.
+- **P5** `webkitURL` → `ZPURL` alias.
+- **P6** `webkitIndexedDB`/`webkitIDB*` → namespaced facade aliases.
+- **P7** legacy filesystem/quota APIs → removed.
+- **P8** `Element.setHTML`/`Document.parseHTMLUnsafe` → transform-first; `getHTML`/`getHTMLUnsafe`/`ShadowRoot.getHTML*` → deproxied serialization with `data-zp-*` scrub.
+- **P9** `fetchLater` → `/zp/api/fetch` keepalive envelope on pagehide/visibilitychange.
+- **P10** page `navigator.storage.getDirectory` → `zp:o:<hash>` subdir.
+- **P11** `customElements` → per-target prefixed registry; `define`/`get`/`whenDefined`/`getName`, `localName`/`tagName`/`nodeName` masks, `createElement`/tag-query translation, insertion-path upgrades (`innerHTML`/`insertAdjacentHTML`/`setHTML*`/`parseHTMLUnsafe`/`createContextualFragment`/`DOMParser`).
+- **P12** `permissions.query` → per-target grant tracking (`__zp_grants`); `getUserMedia`/`getDisplayMedia`/geolocation record grants.
+- **P13** Privacy Sandbox (`sharedStorage`, Protected Audience, `browsingTopics`, `privateToken`, `queryLocalFonts` et al.) → fail-closed/removed.
+- **P14** dynamic-function `.name`/`arguments.callee` → verified: emitted wrappers are anonymous; parity holds, no change needed.

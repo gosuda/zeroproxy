@@ -14,8 +14,20 @@
   const isModuleWorker = new URLSearchParams(realLocation.hash.slice(1)).get('mod') === '1';
   if (!isModuleWorker) importScripts('/zp/assets/zp-core.js');
   const nativeFetch = self.fetch.bind(self);
-  const base = new URL(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
+  // 내부 파싱용 네이티브 생성자 — 아래에서 self.URL 을 가상 래퍼로 갈아 끼우면
+  // bare `new URL` 이 그걸 타게 되므로, 내부 경로 해석은 이 캡처를 쓴다.
+  const NativeURLCtor = self.URL;
+  const base = new NativeURLCtor(self.__ZP_WORKER_TARGET || 'https://invalid.local/');
   const tabId = String(self.__ZP_WORKER_TAB_ID || '');
+  // W8: blob:/data: 워커의 origin·secure-context·네임스페이스는 **생성자
+  // 문서**의 것을 상속한다 — 부트스트랩이 실어 주는 `ref` = 생성자의 가상
+  // 타깃 URL. http(s) 만 인정한다 (내부/비-웹 스킴 방어).
+  const creatorRef = (() => { try { const r = new NativeURLCtor(String(self.__ZP_WORKER_REF || '')); return r.protocol === 'http:' || r.protocol === 'https:' ? r : null; } catch { return null; } })();
+  const contextURL = ((base.protocol === 'blob:' || base.protocol === 'data:') && creatorRef) ? creatorRef : base;
+  const workerOrigin = base.protocol === 'data:' ? 'null' : contextURL.origin;
+  // 스토리지/채널 네임스페이스용 오리진 — data: 워커의 'null' 은 모든 타깃이
+  // 공유하므로, 이 경우엔 생성자 타깃 오리진으로 네임스페이스를 잡는다.
+  const storageOrigin = (workerOrigin === 'null' && creatorRef) ? creatorRef.origin : workerOrigin;
   const blockedDynamic = function(){ try { throw new DOMException('Blocked by ZeroProxy rewrite policy','NotSupportedError'); } catch(e) { throw e; } };
   // ── 워커 재작성기 (W1/W2) ─────────────────────────────────────────────
   // 부트스트랩이 `/zp/assets/zp-page-bundle.js` 를 싣는다 — self-contained
@@ -317,7 +329,7 @@
   expose('__zp_module_url', (specifier, referrer) => {
     const spec = String(specifier);
     if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
-    const u = new URL(spec, referrer || base.href);
+    const u = new NativeURLCtor(spec, referrer || base.href);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw blockedDynamic();
     // Proxy-origin ABSOLUTE. A root-relative path resolves against the
     // worker's virtualized base (the target origin), so the request would be
@@ -403,7 +415,7 @@
     open(method, url, async = true, user = undefined, password = undefined) {
       this._sync = (async === false);
       this._method = String(method || 'GET').toUpperCase();
-      const parsed = new URL(String(url), base.href);
+      const parsed = new NativeURLCtor(String(url), base.href);
       if (user != null) parsed.username = String(user);
       if (password != null) parsed.password = String(password);
       this._url = ZP.canonicalTargetURL(parsed.href, base.href).href;
@@ -539,7 +551,7 @@
   // Real indexedDB/caches live on the PROXY origin — two targets would
   // read each other's databases. Namespace every key by the virtual
   // target origin so each target sees only its own store.
-  const ns = 'ZP|' + base.origin + '|';
+  const ns = 'ZP|' + storageOrigin + '|';
   const nsOf = name => ns + String(name);
   const unNs = name => name.startsWith(ns) ? name.slice(ns.length) : name;
   if (self.indexedDB) {
@@ -797,11 +809,11 @@
               } else if (this._binaryType === 'arraybuffer' && typeof Blob !== 'undefined' && data instanceof Blob) {
                 data.arrayBuffer().then(buf => {
                   if (this._closed) return;
-                  this._fire('message', new MessageEvent('message', { data: buf, origin: new URL(this._url.replace(/^ws/, 'http')).origin }));
+                  this._fire('message', new MessageEvent('message', { data: buf, origin: new NativeURLCtor(this._url.replace(/^ws/, 'http')).origin }));
                 }).catch(() => wsFail(this));
                 return;
               }
-              this._fire('message', new MessageEvent('message', { data, origin: new URL(this._url.replace(/^ws/, 'http')).origin }));
+              this._fire('message', new MessageEvent('message', { data, origin: new NativeURLCtor(this._url.replace(/^ws/, 'http')).origin }));
             } else if (m.type === 'error') {
               wsFail(this);
             } else if (m.type === 'close') {
@@ -920,9 +932,9 @@
         constructor(targetUrl, opts) {
           const target = String(targetUrl == null ? '' : targetUrl);
           let parsed;
-          try { parsed = new URL(target); } catch { throw new DOMException('Invalid URL', 'SyntaxError'); }
+          try { parsed = new NativeURLCtor(target); } catch { throw new DOMException('Invalid URL', 'SyntaxError'); }
           if (parsed.protocol !== 'https:' && parsed.protocol !== 'wt:') throw new DOMException('Invalid URL scheme', 'SyntaxError');
-          const gw = new URL(wtGateway);
+          const gw = new NativeURLCtor(wtGateway);
           gw.searchParams.set('target', target);
           if (tabId) gw.searchParams.set('tab', tabId);
           this._native = new NativeWT(gw.toString(), opts);
@@ -1108,7 +1120,7 @@
     const scanRE = new RegExp(proxyOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[A-Za-z0-9\\-._~:/?#\\[\\]@!$&*+,;=%]*', 'g');
     function deproxyOne(m) {
       try {
-        const u = new URL(m);
+        const u = new NativeURLCtor(m);
         if (u.origin !== proxyOrigin) return m;
         if (u.pathname === '/zp/api/worker-script' || u.pathname === '/zp/api/script') return u.searchParams.get('u') || m;
         if (u.pathname.startsWith('/zp/')) return base.href;
@@ -1162,7 +1174,7 @@
       Object.defineProperty(NativeURL, 'createObjectURL', {
         value: function createObjectURL(obj) {
           const u = nativeCreateObjectURL.call(NativeURL, obj);
-          try { blobURLObjects.set(new URL(u).href, obj); } catch {}
+          try { blobURLObjects.set(new NativeURLCtor(u).href, obj); } catch {}
           return u;
         },
         writable: true, enumerable: true, configurable: false,
@@ -1170,7 +1182,7 @@
       const nativeRevoke = NativeURL.revokeObjectURL;
       if (typeof nativeRevoke === 'function') {
         Object.defineProperty(NativeURL, 'revokeObjectURL', {
-          value: function revokeObjectURL(u) { try { blobURLObjects.delete(new URL(String(u)).href); } catch {} return nativeRevoke.call(NativeURL, u); },
+          value: function revokeObjectURL(u) { try { blobURLObjects.delete(new NativeURLCtor(String(u)).href); } catch {} return nativeRevoke.call(NativeURL, u); },
           writable: true, enumerable: true, configurable: false,
         });
       }
@@ -1210,9 +1222,9 @@
   }
   function importScriptURL(raw) {
     const value = String(raw);
-    const internal = new URL(value, realLocation.href);
+    const internal = new NativeURLCtor(value, realLocation.href);
     if (internal.origin === realProxyOrigin && internal.pathname === '/zp/api/worker-script') return internal.pathname + internal.search + internal.hash;
-    const parsed = new URL(value, base.href);
+    const parsed = new NativeURLCtor(value, base.href);
     return '/zp/api/worker-script?tab=' + encodeURIComponent(tabId) + '&u=' + encodeURIComponent(ZP.canonicalTargetURL(parsed.href, base.href).href);
   }
   self.importScripts = (...urls) => {
@@ -1223,14 +1235,14 @@
       // 가 이 경로를 탄다. srcu/src 워커는 base 가 blob:/data: 라 상대경로가
       // 그쪽으로 풀려 스크립트 라우트를 통째로 삼키는 함정이 있었다.
       let internal = null;
-      try { internal = new URL(String(raw), realLocation.href); } catch {}
+      try { internal = new NativeURLCtor(String(raw), realLocation.href); } catch {}
       if (internal && internal.origin === realProxyOrigin &&
           (internal.pathname === '/zp/api/worker-script' || internal.pathname === '/zp/api/script' ||
            internal.pathname.startsWith('/zp/assets/') || internal.pathname.startsWith('/__zp/'))) {
         nativeImportScripts(internal.pathname + internal.search + internal.hash);
         continue;
       }
-      const parsed = new URL(String(raw), base.href);
+      const parsed = new NativeURLCtor(String(raw), base.href);
       // module 워커는 네이티브가 TypeError 를 던진다 — 우회하지 않고 그대로 위임.
       if (!isModuleWorker && (parsed.protocol === 'data:' || parsed.protocol === 'blob:')) {
         workerExecGlobal(zpRewrite(readVirtualScriptSource(parsed)), false);
@@ -1246,6 +1258,117 @@
   try {
     Object.defineProperty(self, 'location', { value: base, writable: false, enumerable: true, configurable: true });
   } catch {}
+  // ── W8–W12: WorkerGlobalScope 가상 표면 ──────────────────────────────
+  // `origin`/`isSecureContext`/`new URL(rel)`/`BroadcastChannel`/`webkit*`
+  // 별칭/OPFS 는 전부 실 프록시 오리진 상태다 — 페이지 realm 과 같은
+  // 누출·격리 문제. blob:/data: 워커는 `u` 가 프록시 blob 이라 컨텍스트
+  // 판정이 틀어지므로 부트스트랩이 실어 주는 `ref`(생성자 가상 URL)로
+  // 판정한다 — 네이티브 blob: 워커의 origin·secure-context 도 생성자 문서의
+  // 것을 상속하므로 동일한 규칙이다.
+  // creatorRef/contextURL/workerOrigin 은 파일 상단(base 정의 직후)에서
+  // 계산된다 — 스토리지 네임스페이스(`ns`)가 여기보다 먼저 실행되기 때문.
+  const workerSecureContext = contextURL.protocol === 'https:' || contextURL.protocol === 'wss:' || contextURL.protocol === 'file:'
+    || /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(contextURL.hostname) || /\.localhost$/i.test(contextURL.hostname);
+  try { Object.defineProperty(self, 'origin', { get: () => workerOrigin, enumerable: true, configurable: true }); } catch {}
+  try { Object.defineProperty(self, 'isSecureContext', { get: () => workerSecureContext, enumerable: true, configurable: true }); } catch {}
+  // `self.name` — SharedWorker 이름은 `zp:w:<hash>:` 프리픽스가 붙어 온다.
+  // 페이지가 요청한 이름만 보여야 하니 벗긴다. 전용 워커는 opts.name 이
+  // 네이티브에 그대로 전달돼 이미 정답이고, 패턴이 안 맞으면 그대로다.
+  try {
+    const realName = self.name;
+    const stripped = /^zp:w:[0-9a-f]{8}:/.test(realName) ? realName.replace(/^zp:w:[0-9a-f]{8}:/, '') : realName;
+    if (stripped !== realName) Object.defineProperty(self, 'name', { value: stripped, writable: false, enumerable: true, configurable: true });
+  } catch {}
+  // `new URL(rel)` — 네이티브는 워커 스크립트 URL(우리 부트스트랩 = 프록시
+  // 오리진)을 base 로 쓴다. 페이지의 ZPURL 과 같은 규칙: base 미지정 상대
+  // 입력은 가상 베이스로 풀고, 내부 라우팅 URL 은 unwrap 한다. blob: 워커는
+  // `blob:<proxy>/<uuid>` 를 `blob:<target>/<uuid>` 로 바꿔서 base 로 쓴다
+  // (네이티브와 같은 문자열 형태). data: 는 네이티브가 어차피 base 로 못 쓴다.
+  try {
+    const NativeURLCtor = self.URL;
+    const urlBase = (() => {
+      if (base.protocol === 'blob:' && creatorRef) {
+        try { const inner = new NativeURLCtor(base.href.slice(5)); return 'blob:' + creatorRef.origin + inner.pathname; } catch {}
+      }
+      return base.href;
+    })();
+    const unleashed = raw => {
+      const s = String(raw);
+      let u = null; try { u = new NativeURLCtor(s, realLocation.href); } catch { return s; }
+      if (u.origin !== realProxyOrigin) return s;
+      if (u.pathname === '/zp/api/worker-script' || u.pathname === '/zp/api/script') { const t = u.searchParams.get('u'); if (t) return t; }
+      if (u.pathname.startsWith('/zp/')) return urlBase;
+      return s;
+    };
+    const ZPWorkerURL = function URL(input, b) {
+      const inp = unleashed(input);
+      // 네이티브 parity: base 인자 없는 상대 입력은 그대로 TypeError — URL
+      // 생성자에 암묵 베이스는 없다(페이지 ZPURL 과 같은 규칙). 프록시 URL
+      // 입력만 unwrap 하고 나머지는 네이티브 판정에 맡긴다.
+      return b !== undefined ? new NativeURLCtor(inp, unleashed(b)) : new NativeURLCtor(inp);
+    };
+    try { ZPWorkerURL.prototype = NativeURLCtor.prototype; } catch {}
+    for (const sm of ['createObjectURL', 'revokeObjectURL', 'canParse', 'parse']) {
+      const orig = NativeURLCtor[sm];
+      if (typeof orig !== 'function') continue;
+      ZPWorkerURL[sm] = (sm === 'canParse' || sm === 'parse')
+        ? function (u, b) { return b !== undefined ? orig.call(NativeURLCtor, unleashed(u), unleashed(b)) : orig.call(NativeURLCtor, unleashed(u)); }
+        : orig.bind(NativeURLCtor);
+      try { Object.defineProperty(ZPWorkerURL[sm], 'name', { value: sm, configurable: true }); } catch {}
+    }
+    Object.defineProperty(self, 'URL', { value: ZPWorkerURL, writable: true, enumerable: true, configurable: true });
+    if (self.webkitURL) try { Object.defineProperty(self, 'webkitURL', { value: ZPWorkerURL, writable: true, enumerable: true, configurable: true }); } catch {}
+  } catch {}
+  // BroadcastChannel — 페이지와 같은 `zp:b:<fnv(origin)>:` 프리픽스. 워커 쪽이
+  // 네이티브 그대로면 같은 프록시 오리진의 다른 타깃 채널이 보인다.
+  try {
+    const NativeBC = self.BroadcastChannel;
+    if (NativeBC) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < storageOrigin.length; i++) { h ^= storageOrigin.charCodeAt(i); h = Math.imul(h, 16777619); }
+      const bcPrefix = 'zp:b:' + ('00000000' + (h >>> 0).toString(16)).slice(-8) + ':';
+      const ZPWorkerBC = function BroadcastChannel(name) {
+        const requested = String(name);
+        const ch = new NativeBC(bcPrefix + requested);
+        try { Object.defineProperty(ch, 'name', { value: requested, configurable: true, enumerable: true }); } catch {}
+        return ch;
+      };
+      try { ZPWorkerBC.prototype = NativeBC.prototype; } catch {}
+      Object.defineProperty(self, 'BroadcastChannel', { value: ZPWorkerBC, writable: true, enumerable: true, configurable: true });
+    }
+  } catch {}
+  // webkit* 레거시 별칭 — `webkitIndexedDB` 만 열기 경로라 네임스페이스
+  // 파사드로, 나머지 IDB* 는 동작 동일한 실생성자에 그대로 매핑한다.
+  try {
+    if (self.webkitIndexedDB && self.indexedDB) {
+      Object.defineProperty(self, 'webkitIndexedDB', { value: self.indexedDB, writable: true, enumerable: true, configurable: true });
+    }
+  } catch {}
+  // OPFS — `navigator.storage.getDirectory()` 는 실 프록시 오리진 루트라
+  // 타깃 간 공유된다. 타깃별 서브디렉터리 핸들을 돌려준다 — 그 아래 모든
+  // getDirectoryHandle/getFileHandle/removeEntry 는 자연히 네임스페이스 안에서
+  // 동작한다.
+  try {
+    const storageMgr = self.navigator && self.navigator.storage;
+    if (storageMgr && typeof storageMgr.getDirectory === 'function') {
+      const nativeGetDirectory = storageMgr.getDirectory.bind(storageMgr);
+      // 핸들 `.name` 이 페이지에 보이므로 마커+오리진 원문 대신 해시를 쓴다.
+      let oh = 0x811c9dc5;
+      for (let i = 0; i < storageOrigin.length; i++) { oh ^= storageOrigin.charCodeAt(i); oh = Math.imul(oh, 16777619); }
+      const opfsRoot = 'zp:o:' + ('00000000' + (oh >>> 0).toString(16)).slice(-8);
+      storageMgr.getDirectory = function getDirectory() {
+        return nativeGetDirectory().then(d => d.getDirectoryHandle(opfsRoot, { create: true }));
+      };
+    }
+  } catch {}
+  // 레거시 웹킷 FS/quota — 프록시 오리진 파일시스템을 그대로 노출하므로
+  // fail-closed (페이지 realm 과 같은 답).
+  for (const legacy of ['webkitRequestFileSystem', 'webkitResolveLocalFileSystemURL', 'webkitRequestFileSystemSync', 'webkitResolveLocalFileSystemURLSync']) {
+    try { if (self[legacy]) Object.defineProperty(self, legacy, { value: function() { throw new DOMException('Blocked by ZeroProxy policy', 'NotSupportedError'); }, writable: true, enumerable: true, configurable: true }); } catch {}
+  }
+  for (const legacy of ['webkitPersistentStorage', 'webkitTemporaryStorage']) {
+    try { if (self[legacy]) Object.defineProperty(self, legacy, { value: undefined, writable: true, enumerable: true, configurable: true }); } catch {}
+  }
   // D5: srcu 워커 — blob:/data: 소스는 네트워크 요청이 없으므로 부트스트랩이
   // worker-script import 를 싣지 않는다. 여기서 소스를 읽어 재작성 후 실행한다.
   const srcuSource = String(self.__ZP_WORKER_SRC_URL || '');
@@ -1255,7 +1378,7 @@
       // importScripts 한다 — prelude 본문이 끝난 시점엔 번들이 아직 없다.
       // 실행 함수만 노출하고 부트스트랩의 후미 호출이 번들 로드 후 돌린다.
       self.__zp_runSrcu = function () {
-        try { workerExecGlobal(zpRewrite(readVirtualScriptSource(new URL(srcuSource))), false); }
+        try { workerExecGlobal(zpRewrite(readVirtualScriptSource(new NativeURLCtor(srcuSource))), false); }
         catch (e) { setTimeout(() => { throw e; }, 0); }
       };
     } else {

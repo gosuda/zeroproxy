@@ -6,6 +6,10 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-24 | worker / 수정 | `self.URL` 래퍼가 내부 `new URL` 을 삼켜 `/zp/*` 부트스트랩이 타깃으로 변질 — 캡처→내부전환→래핑 순서. | rewriter.md#worker-url-래퍼-내부흡수 |
+| 2026-09-24 | worker / 수정 | SharedWorker `self.name` 에 `zp:w:` 접두어 노출 — 요청 이름으로 마스킹이 네이티브 parity. | rewriter.md#sharedworker-이름-마스킹 |
+| 2026-09-24 | membrane / 수정 | OPFS `handle.name` 에 네임스페이스 오리진 원문 누출 — 서브디렉터리명은 해시로. | rewriter.md#opfs-name-마커누출 |
+| 2026-09-24 | e2e / 규칙 | `http://localhost` 는 potentially-trustworthy — `isSecureContext:false` 단언 금지, 네이티브도 true. | rewriter.md#localhost-secure-context-parity |
 | 2026-09-23 | membrane / 수정 | prelude 헬퍼의 throw 는 에러 filename 으로 prelude URL 을 샌다 — throw 는 방출 코드 + `//# sourceURL` 태깅. | rewriter.md#에러-filename-누출 |
 | 2026-09-23 | rewriter / 수정 | apply_patches 가 same-start zero-width 삽입을 문 패치에 삼킨다 — 정렬에 insert-first 우선순위 필요. | rewriter.md#zero-width-패치-삼킴 |
 | 2026-09-23 | e2e / 규칙 | res.end 템플릿 픽스처 안 주석의 백틱/`${` 가 리터럴을 닫는다 — 파스 에러는 시작 줄만 가리킨다. | rewriter.md#픽스처-주석-백틱 |

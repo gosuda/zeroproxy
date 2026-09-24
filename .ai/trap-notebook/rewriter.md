@@ -2,6 +2,34 @@
 
 과거 원인·수정·검증 요약이며 현재 전체 accepted spec이 아니다. 검증은 당시 범위에 한정되고 이번 정리에서 새 실행은 없었다. 후속 정정이 앞 가설보다 우선하며 현재 E1은 [계획](../design/website-compat-refactor.md)을 본다.
 
+<a id="worker-url-래퍼-내부흡수"></a>
+## 워커 `self.URL` 래퍼가 prelude 내부 `new URL` 도 가로챔 (2026-09-24)
+
+- **원인:** `self.URL` 을 가상 베이스 래퍼(ZPWorkerURL)로 교체했더니 prelude 내부의 `new URL(value, realLocation.href)` 전부가 래퍼를 탔다. 래퍼의 unleashed() 가 `/zp/*` 입력을 unwrap 해서 `importScripts('/zp/assets/zp-page-bundle.js')` 가 타깃 URL 로 변질 — 번들 로드 실패로 모든 동적 코드가 fail-closed 로 죽을 뻔했다.
+- **수정:** 파일 상단에서 `const NativeURLCtor = self.URL` 을 캡처하고, prelude 내부의 **모든** `new URL(` 을 `new NativeURLCtor(` 로 바꿨다. 페이지의 `const URL = Native.URL` 섀도잉(#네이티브-url-섀도잉)과 같은 함정의 워커 변형 — 단, 워커는 IIFE 스코프라 bare `URL` 가 그대로 글로벌을 탄다는 점이 다르다.
+- **규칙:** realm 전역 생성자를 래핑할 때는 **먼저 캡처 → 내부 호출 전환 → 래핑 설치** 순서. `perl` 일괄 치환 후엔 캡처 선언이 사용처보다 위에 있는지(TDZ) 확인 — `const` 선언 순서가 뒤바뀌면 부팅 사망.
+
+<a id="sharedworker-이름-마스킹"></a>
+## SharedWorker `self.name` 에 격리 접두어가 보였다 (2026-09-24)
+
+- **원인:** `zp:w:<hash>:` 접두어를 붙여 실제 SharedWorker 를 타깃별로 격리하는데, 워커 내부 `self.name` 이 접두어 포함 이름을 그대로 노출했다 — 네이티브는 페이지가 요청한 이름만 돌려준다.
+- **수정:** worker-prelude 가 부팅 시 `self.name` 에서 `^zp:w:[0-9a-f]{8}:` 접두어를 벗겨 재정의한다. e2e 핀도 `zp:w:*` 노출에서 `swprobe` 마스킹으로 갱신 — 접두어 격리 자체는 유지.
+- **규칙:** 격리 접두어는 전송 계층(실제 API 인자)에만 두고, 페이지/워커가 되읽는 표면은 항상 요청값으로 되돌린다 — BroadcastChannel.name, SharedWorker name, OPFS handle.name 모두 같은 규칙.
+
+<a id="opfs-name-마커누출"></a>
+## OPFS `handle.name` 에 네임스페이스 마커+오리진 원문 노출 (2026-09-24)
+
+- **원인:** `navigator.storage.getDirectory()` 를 `ZP|<origin>` 서브디렉터리로 네임스페이스했더니 반환 핸들의 `.name` 이 `ZP|http://target` 을 그대로 보였다 — 프록시 내부 스킴과 타깃 오리진 원문이 같이 샌다.
+- **수정:** 서브디렉터리 이름을 `zp:o:<fnv1a-8>` 해시로 바꿨다(페이지·워커 동일). `.name` 에서는 해시만 보이고 오리진 문자열은 안 샌다. 잔여: 네이티브 루트 `.name` 은 `''` — 우리는 해시 이름이 보이는 근사치.
+- **규칙:** 페이지가 되읽는 모든 표면(핸들 이름, 채널 이름, DB 이름 목록)은 네임스페이스 원문이 아니라 해시 또는 요청값을 노출한다.
+
+<a id="localhost-secure-context-parity"></a>
+## `http://localhost` 타깃의 `isSecureContext` 는 네이티브도 `true` (2026-09-24)
+
+- **원인:** `isSecureContext` 가상화를 검증하려고 http 타깃에 `false` 를 단언했더니 실패 — localhost/127.0.0.1/.localhost 는 "potentially trustworthy origin" 이라 http 여도 네이티브 `true` 다.
+- **수정:** e2e 단언을 `v:true` 로 고치고, 가상화 게터 자체는 scheme+호스트 규칙을 따르므로 비-localhost http 에서 `false` 를 돌린다는 점만 주석으로 핀.
+- **규칙:** secure-context 단언은 타깃 호스트의 potentially-trustworthy 판정을 먼저 확인한다 — `http://` 라고 무조건 `false` 가 아니다.
+
 <a id="meta-csp-동기무장"></a>
 ## 동적 meta CSP 무장 레이스 — MutationObserver 는 너무 느리다 (2026-09-23)
 
