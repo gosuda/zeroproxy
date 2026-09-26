@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { preludeSource } = require('./_prelude.cjs');
 
 const { classifyTape } = require('../browser/hole-matrix/classify.cjs');
 const CASE_ID = url => { const m = /\/img\/([a-z0-9-]+)__(same|cross)\./.exec(url); return m && m[1]; };
@@ -233,10 +234,34 @@ test('classify: 런타임 CSS 가 만든 프록시-오리진 서브리소스는 
     assert.equal(classifyWith(ctx)(req, at(p), 'client-1').kind, 'INTERNAL_ASSET', p + ' must stay internal');
   }
   assert.equal(classifyWith(ctx)(req, at('/zp/api/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
+  assert.equal(classifyWith(ctx)(req, at('/zp/api/v2/fetch?url=x'), 'client-1').kind, 'RUNTIME_API');
+});
+
+test('v2 fetch envelope codec: [u32le head][raw body] round-trip, 와이어 확장 없음', () => {
+  const code = fs.readFileSync('web/zp-core.js', 'utf8');
+  const vm = require('node:vm');
+  const sandbox = { URL, TextEncoder, TextDecoder, Set, Map, crypto: { getRandomValues: () => new Uint8Array(12) }, console };
+  sandbox.self = sandbox; sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(code + '\n;this.__zp = self.ZP;', sandbox);
+  const ZP = sandbox.__zp;
+  const head = { tabId: 't', url: 'https://t.example/x', init: { method: 'POST', body: null } };
+  const body = new Uint8Array([0, 159, 146, 150, 255, 60, 0]); // 비UTF-8 바이너리 포함
+  const env = ZP.encodeEnvelope(head, body);
+  const headLen = new TextEncoder().encode(JSON.stringify(head)).length;
+  assert.equal(env.length, 4 + headLen + body.length, 'base64 팽창이 없어야 한다');
+  const dec = ZP.decodeEnvelope(env.buffer);
+  // vm realm 경계 — deepEqual(strict) 은 prototype 까지 본다. JSON 비교로.
+  assert.equal(JSON.stringify(dec.head), JSON.stringify(head));
+  assert.deepEqual(Array.from(dec.body), Array.from(body));
+  const empty = ZP.decodeEnvelope(ZP.encodeEnvelope(head, null));
+  assert.equal(empty.body.length, 0);
+  assert.throws(() => ZP.decodeEnvelope(new Uint8Array([1, 2])), /BAD_ENVELOPE/);
+  assert.throws(() => ZP.decodeEnvelope(ZP.encodeEnvelope(head, null).subarray(0, 2)), /BAD_ENVELOPE/);
 });
 
 test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주석/문자열은 건드리지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('  function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -269,7 +294,7 @@ test('rewriteCSSText: 절대 cross-origin url() 만 프록시로 돌리고 주�
 });
 
 test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서드 동일성을 지킨다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function containStyleDeclaration(');
   assert.ok(start >= 0, 'containStyleDeclaration 을 못 찾았다');
   const next = rt.indexOf('\n  function ', start + 1);
@@ -299,7 +324,7 @@ test('containStyleDeclaration: 프로퍼티 대입을 리라이트하고 메서�
 });
 
 test('compileNested: new Function 의 파라미터/arguments 가 with 스코프에 가려지지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('    function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -331,7 +356,7 @@ test('compileNested: new Function 의 파라미터/arguments 가 with 스코프�
 });
 
 test('필터링된 컬렉션은 진짜 NodeList 처럼 인덱스를 가진다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
 
   // 실제 의미까지 고정한다 — 소스에서 두 함수를 뜯어 그대로 실행한다.
   const helperStart = rt.indexOf('function isIndexKey(prop)');
@@ -418,7 +443,7 @@ test('판정기: 프록시 경유 요청은 직접 요청으로 세지 않는다
 });
 
 test('srcset 후보 분해가 Rust 와 같다 (data: 쉼표 포함)', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('\n  function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -435,7 +460,7 @@ test('srcset 후보 분해가 Rust 와 같다 (data: 쉼표 포함)', () => {
 });
 
 test('?url= 빌더가 Rust 와 바이트 단위로 같다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const grab = (name) => {
     const start = rt.indexOf('\n  function ' + name + '(');
     assert.ok(start >= 0, name + ' 을 못 찾았다');
@@ -485,7 +510,7 @@ test('공유 URL 수용/거부: 살아 있는 JS 구현이 공유 픽스처와 �
 });
 
 test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('function resolveProxyOrigin(');
   assert.ok(start > 0, 'resolveProxyOrigin 이 없다');
   const end = rt.indexOf('\n  const toStringMap', start);
@@ -517,7 +542,7 @@ test('불투명 오리진 프레임에서도 proxyOrigin 이 "null" 이 되지 �
 });
 
 test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 실행으로 고정', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const grab = (head) => {
     const start = rt.indexOf(head);
     assert.ok(start >= 0, head + ' 을 못 찾았다');
@@ -571,7 +596,7 @@ test('프록시 URL 되돌리기는 한 벌이다 — 세 호출자의 표를 �
 });
 
 test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('    function climbCrossWindow(targetWindow, prop, fallback) {');
   assert.ok(start >= 0, 'climbCrossWindow 를 못 찾았다');
   const end = rt.indexOf('\n    function ', rt.indexOf('    function safeCrossWindow(targetWindow) {') + 1);
@@ -623,7 +648,7 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
 });
 
 test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
   assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
@@ -696,7 +721,7 @@ test('필터 컬렉션 표면은 감싼 대상이 가진 것만 노출한다', (
 });
 
 test('필터 컬렉션 순회는 O(N) 이다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   assert.ok(start >= 0, 'isIndexKey 를 못 찾았다');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
@@ -805,7 +830,7 @@ test('trap notebook INDEX stays one line per entry, with a link that resolves', 
 });
 
 test('proxy navigation URLs are absolute so a target <base href> cannot retarget them', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // ① 헬퍼가 프록시 오리진 기준으로 푼다 — 동작으로 확인한다.
   const start = rt.indexOf('function proxyAbsoluteURL(');
   assert.ok(start > 0, 'proxyAbsoluteURL 이 있어야 한다');
@@ -868,7 +893,7 @@ test('SW 는 응답 경로에서 clients.get 을 기다리지 않는다', () => 
 });
 
 test('자식 창의 조기 postMessage 래퍼는 부팅 즉시 네이티브로 되돌린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // 두 함수만 정확히 떼어 낸다 — 뒤 코드를 같이 물면 엉뚱한 참조로 터진다.
   const from = rt.indexOf('  const earlyNativeKey =');
   const restoreAt = rt.indexOf('  function restoreNativePostMessage(w) {', from);
@@ -930,7 +955,7 @@ test('최상위 문서는 자기 자신을 Referer 로 보내지 않는다', () 
 });
 
 test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 읽는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // 동작: 마지막에 선언된 meta 가 이기고, 빈 content 는 무시한다.
   const from = rt.indexOf('  function documentReferrerPolicy() {');
   assert.ok(from >= 0);
@@ -957,7 +982,7 @@ test('페이지 fetch 는 meta 로 선언된 참조 정책을 요청 시점에 �
 });
 
 test('dataset hides the data-zp namespace without blocking page-owned data', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
 
   // ③ dataset 필터는 동작으로 고정한다.
   const dsStart = rt.indexOf('  function datasetKeyToAttrName(key) {');
@@ -982,7 +1007,7 @@ test('dataset hides the data-zp namespace without blocking page-owned data', () 
 });
 
 test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('  function isIndexKey(prop) {');
   const end = rt.indexOf('\n  function ', rt.indexOf('  function filteredCollection(raw, predicate) {') + 1);
   assert.ok(start >= 0 && end > start, 'filteredCollection 구간을 못 찾았다');
@@ -1021,7 +1046,7 @@ test('필터 컬렉션은 이름 기반 접근에서도 필터를 유지한다',
 });
 
 test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function nonHTTPAbsoluteURL(raw) {');
   assert.ok(from > 0, 'nonHTTPAbsoluteURL 이 없다');
   const to = rt.indexOf('\n  }', from) + 4;
@@ -1047,7 +1072,7 @@ test('http(s) 가 아닌 절대 URL 은 게터가 그대로 돌려준다', () =>
 });
 
 test('blob:/data: 워커 소스는 MIME 무관하게 srcu 재작성 경로로만 간다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function workerBootstrapURL(url, opts) {');
   assert.ok(from > 0, 'workerBootstrapURL 이 없다');
   const body = rt.slice(from, rt.indexOf('\n  function ', from + 10));
@@ -1064,7 +1089,7 @@ test('blob:/data: 워커 소스는 MIME 무관하게 srcu 재작성 경로로만
 });
 
 test('fetch 는 인라인 스킴을 브라우저에 그대로 넘긴다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function inlineSchemeFetchURL(input) {');
   assert.ok(from > 0, 'inlineSchemeFetchURL 이 없다');
   const fn = new Function(rt.slice(from, rt.indexOf('\n  }', from) + 4) + '\nreturn inlineSchemeFetchURL;')();
@@ -1108,7 +1133,7 @@ const L_STUB = [
 //
 // ②가 있으면 ①을 고치는 순간 누출이 늘어난다 — 둘은 같이 가야 한다.
 test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감싼다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function containEveryStyleAccessor(w) {');
   assert.ok(from > 0, 'containEveryStyleAccessor 규칙이 없다 — 목록으로 돌아가면 반드시 또 뚫린다');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
@@ -1166,7 +1191,7 @@ test('CSS: style 접근자를 가진 모든 인터페이스를 규칙으로 감�
 });
 
 test('CSS: 프로퍼티 이름 목록이 돌아오지 않았다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // 이 엔진은 CSS 프로퍼티를 인스턴스의 own data property 로 노출하므로
   // CSSStyleDeclaration.prototype 에 이름을 걸어 봐야 조용한 no-op 다.
   assert.ok(!rt.includes('CSS_URL_PROPS'),
@@ -1174,7 +1199,7 @@ test('CSS: 프로퍼티 이름 목록이 돌아오지 않았다', () => {
 });
 
 test('CSS: 우리가 바꿔 쓴 값은 모든 읽기 경로에서 되돌린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // 되돌리기가 빠지면 페이지가 자기 스타일을 다시 읽는 것만으로 우리 정체를
   // 읽어 낸다. 실측으로 샜던 자리마다 하나씩 고정한다.
   const must = [
@@ -1221,7 +1246,7 @@ test('E3 크기 가드: zp_page_bundle_bg.wasm 은 500 KB 이하', (t) => {
 // 뒤늦게 전수 스윕으로 가리는 방법은 창마다 5~7ms 라 프레임 많은 페이지에서
 // 못 쓴다(실측). 그래서 설치 지점을 강제한다 — 이 가드가 그 강제다.
 test('훅은 설치 지점에서 소스를 가린다 (날 defineProperty 접근자 금지)', () => {
-  const lines = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n').split('\n');
+  const lines = preludeSource().split('\r\n').join('\n').split('\n');
   // ★주석을 지우고 본다. `enumerable: true, // …설명…` 다음 줄에 오는
   // `get()` 은 주석을 남겨 두면 앞 토큰이 `,` 가 아니게 되어 안 잡힌다 —
   // 실제로 ZPWebSocket.bufferedAmount 가 그렇게 빠져나갔다.
@@ -1247,7 +1272,7 @@ test('훅은 설치 지점에서 소스를 가린다 (날 defineProperty 접근�
 });
 
 test('대체 클래스 프로토타입도 소스를 가린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // Object.assign 으로 채운 멤버는 define 을 안 지나므로 따로 가려야 한다.
   for (const cls of ['ZPXMLHttpRequest', 'ZPEventSource', 'ZPWebSocket']) {
     assert.ok(rt.includes('assignMasked(' + cls + '.prototype, {'),
@@ -1260,7 +1285,7 @@ test('대체 클래스 프로토타입도 소스를 가린다', () => {
 // 위 두 가드는 "헬퍼를 **부르는가**" 만 본다. 헬퍼가 마스킹을 그만두면 둘 다
 // 통과한다(변이로 확인). 그래서 헬퍼 자체를 뜯어 실행한다.
 test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function defineMasked(obj, key, desc) {');
   const to = rt.indexOf('  function defineOnProto(', from);
   assert.ok(from > 0 && to > from, '마스킹 헬퍼 구간을 못 찾았다');
@@ -1315,7 +1340,7 @@ test('마스킹 헬퍼 셋은 실제로 소스를 가린다', () => {
 // 되돌리기는 의미를 바꾸면 안 된다. 특히 괄호 — `__zp_get(a||b,"k")` 를
 // `a||b.k` 로 되돌리면 뜻이 달라진다.
 test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function unrewriteSourceText(src) {');
   assert.ok(from > 0, 'unrewriteSourceText 가 없다 — 페이지가 자기 소스에서 우리를 읽는다');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
@@ -1418,7 +1443,7 @@ test('리라이트 흔적 되돌리기는 뜻을 바꾸지 않는다', () => {
 // forEach,keys,values / SM 은 append,clear,delete,set). 그래서 한 곳만
 // 훅하면 인라인 스타일맵과 계산 스타일맵이 함께 덮인다.
 test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function installTypedOM(w) {');
   assert.ok(from > 0, 'installTypedOM 이 없다 — Typed OM 은 style 훅이 안 닿는다');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
@@ -1506,7 +1531,7 @@ test('CSS Typed OM: 읽기는 되돌리고 쓰기는 재작성한다', () => {
 // 서브클래스 프로토타입에 새로 정의해서, 그 own 자체가 대조군엔 없는 모양
 // 지문이었다(같은 날 겪은 own `style` 13→157 회귀와 같은 부류).
 test('baseURI 는 Document.prototype 이 아니라 Node.prototype 에 심는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   assert.ok(rt.includes("defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);"),
     'baseURI 가 Node.prototype 에 없다 — 문서가 아닌 일반 요소에서 baseURI 가 실제 값을 샌다');
   assert.ok(!/defineAccessor\(w\.Document && w\.Document\.prototype, 'baseURI'/.test(rt),
@@ -1514,7 +1539,7 @@ test('baseURI 는 Document.prototype 이 아니라 Node.prototype 에 심는다'
 });
 
 test('document.origin 가상화는 없다 — 이 속성 자체가 최신 브라우저에 없다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // 실측(2026-09-14, Chrome 152 headless + Edge/WebView2 153): 둘 다
   // document.origin 이 own 도 아니고 값도 undefined. 되살리면 그 own 자체가
   // Document 모양 지문이 된다 — 되살리기 전에 반드시 실브라우저로 재확인할 것.
@@ -1523,7 +1548,7 @@ test('document.origin 가상화는 없다 — 이 속성 자체가 최신 브라
 });
 
 test('HTMLStyleElement 의 innerHTML/innerText/textContent 는 조상 프로토타입에서 <style> 만 가른다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   assert.ok(!/HTMLStyleElement.*\.prototype;[\s\S]{0,80}for \(const prop of \['textContent', 'innerText', 'innerHTML'\]/.test(rt),
     'innerHTML/innerText/textContent 를 다시 HTMLStyleElement.prototype 에 own 으로 심었다');
   assert.ok(rt.includes("['textContent', w.Node && w.Node.prototype]") && rt.includes("['innerText', w.HTMLElement && w.HTMLElement.prototype]"),
@@ -1533,7 +1558,7 @@ test('HTMLStyleElement 의 innerHTML/innerText/textContent 는 조상 프로토�
 });
 
 test('SharedWorker 교체는 네이티브 prototype 을 보존하고 타깃 접두어를 다시 심는다', () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   // Worker 는 이미 고쳐져 있었다(7340 대) — 형제인 SharedWorker 훅이
   // installWorkerHooks 안에서 이 fix 를 안 받은 채 뒤늦게 실행되며
   // installStorageFacades 가 심어 둔, 타깃마다 다른 접두어(sharedWorkerNamePrefix)
@@ -1579,7 +1604,7 @@ const GATEWAY_STUB = [
 ].join('\n');
 
 test('makeVirtualGateway: 네이티브 prototype 이름을 규칙으로 베끼고 동기/비동기를 가른다', async () => {
-  const rt = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+  const rt = preludeSource().split('\r\n').join('\n');
   const from = rt.indexOf('  function makeVirtualGateway(name, meta) {');
   assert.ok(from > 0, 'makeVirtualGateway 규칙이 없다 — 손으로 고른 목록으로 돌아가면 반드시 또 뚫린다');
   const src = rt.slice(from, rt.indexOf('\n  }', from) + 4);
@@ -1819,7 +1844,8 @@ function stripNonCode(src) {
   return out;
 }
 test('prelude forbidden patterns: no raw eval/Function/string-timer/document.write', () => {
-  const files = ['web/runtime-prelude.js', 'web/worker-prelude.js', 'web/sw.js', 'web/zp-core.js'];
+  // runtime-prelude 는 web/membrane/*.js concat 소스 — preludeSource() 로 읽는다.
+  const files = ['web/worker-prelude.js', 'web/sw.js', 'web/zp-core.js'];
   const rules = [
     { re: /\bnew Function\s*\(/, why: 'new Function 직접 호출 — compileNested/Native.FunctionCtor 경유가 원칙' },
     { re: /\bset(?:Timeout|Interval)\s*\(\s*['"`]/, why: '문자열 타이머 — 컴파일 경로를 우회한다' },
@@ -1827,8 +1853,8 @@ test('prelude forbidden patterns: no raw eval/Function/string-timer/document.wri
     { re: /(^|[^\w$.])eval\s*\(/, why: 'bare eval() — geval/w.eval 같은 명명 참조만 허용' },
     { re: /\bFunction\.prototype\.constructor\s*\(/, why: 'ctor 직접 호출 — 리라이트 경유 우회' },
   ];
-  for (const file of files) {
-    const src = stripNonCode(fs.readFileSync(file, 'utf8'));
+  for (const file of files.concat(['web/membrane/*'])) {
+    const src = stripNonCode(file === 'web/membrane/*' ? preludeSource() : fs.readFileSync(file, 'utf8'));
     for (const { re, why } of rules) {
       assert.ok(!re.test(src), file + ' 금지 패턴: ' + why);
     }
@@ -1836,7 +1862,7 @@ test('prelude forbidden patterns: no raw eval/Function/string-timer/document.wri
 });
 
 test('prelude forbidden patterns: every raw innerHTML assignment is a Native-setter fallback', () => {
-  const src = stripNonCode(fs.readFileSync('web/runtime-prelude.js', 'utf8'));
+  const src = stripNonCode(preludeSource());
   const lines = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (!/\w+\.innerHTML\s*=/.test(lines[i])) continue;

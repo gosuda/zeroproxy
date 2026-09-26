@@ -45,9 +45,9 @@ use std::task::{Context, Poll};
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 
+use super::dialer::AsyncIo;
 use super::http2::Http2Client;
 use super::tls::TlsStream;
-use super::yamux::MuxStream;
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct PoolKey {
@@ -56,12 +56,14 @@ pub(crate) struct PoolKey {
     pub port: u16,
 }
 
-/// One pooled HTTP/1.1 connection. Either plain over yamux (for `http://`
-/// targets) or wrapped in TLS over yamux (for `https://`). Both flavors
-/// implement `AsyncRead + AsyncWrite` so the HTTP layer is provider-blind.
+/// One pooled HTTP/1.1 connection. Either plain or TLS-wrapped. Both
+/// flavors implement `AsyncRead + AsyncWrite` so the HTTP layer is
+/// provider-blind — the byte stream itself is `Box<dyn AsyncIo>` from
+/// whatever `Dialer` produced it (REFACTOR.md §3.2), not hard-pinned to
+/// yamux.
 pub(crate) enum PooledConn {
-    Plain(MuxStream),
-    Tls(Box<TlsStream<MuxStream>>),
+    Plain(Box<dyn AsyncIo>),
+    Tls(Box<TlsStream<Box<dyn AsyncIo>>>),
 }
 
 impl AsyncRead for PooledConn {

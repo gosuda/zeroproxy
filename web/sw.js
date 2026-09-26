@@ -798,7 +798,7 @@ function internalPath(path) {
   return ZP.isInternalPath(path);
 }
 function isRuntimeAPIPath(path) {
-  return path === ZP.apiPath('fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';
+  return path === ZP.apiPath('fetch') || path === ZP.apiPath('v2/fetch') || path === ZP.apiPath('script') || path === ZP.apiPath('worker-script') || path === ZP.apiPath('sourcemap') || path === '/zp/api/diag/trace';
 }
 
 async function internalAsset(req, url) {
@@ -986,12 +986,13 @@ async function runtimeAPI(req, url, clientId) {
       namedGroups,
     }, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
-  if (url.pathname === '/zp/api/fetch') {
+  if (url.pathname === '/zp/api/fetch' || url.pathname === ZP.apiPath('v2/fetch')) {
     // GET ?url=<absolute> — issued by the CSS rewriter for url(...) / @import
     // subresources. Routes the same way as the POST form below but takes the
-    // target from the query string.
+    // target from the query string. v1 전용 — v2 는 POST 봉투 뿐이다.
     const ctx = contextFor(req, clientId);
     if (req.method === 'GET') {
+      if (url.pathname !== ZP.apiPath('fetch')) return safeError('POLICY_BLOCKED', 405);
       const target = url.searchParams.get('url');
       if (!target) return safeError('MALFORMED_ROUTE', 400);
       const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
@@ -1048,7 +1049,18 @@ async function runtimeAPI(req, url, clientId) {
       return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
     }
     if (req.method !== 'POST') return safeError('POLICY_BLOCKED', 405);
-    const payload = await req.json();
+    // v2 는 바이너리 봉투([u32le headLen][JSON head][raw body]) — v1 의
+    // base64-in-JSON 을 대체한다. head 모양은 v1 payload 와 동일하고
+    // 바디만 꼬리의 raw bytes 로 온다. v1 경로는 그대로 유지.
+    const isV2 = url.pathname === ZP.apiPath('v2/fetch');
+    let payload, bodyBytes;
+    if (isV2) {
+      try { const env = ZP.decodeEnvelope(await req.arrayBuffer()); payload = env.head; bodyBytes = env.body.length ? env.body : null; }
+      catch { return safeError('MALFORMED_ROUTE', 400); }
+    } else {
+      payload = await req.json();
+      bodyBytes = payload.init && payload.init.body != null ? ZP.base64UrlToBytes(payload.init.body) : null;
+    }
     const explicitTab = payload.tabId && tabs.get(payload.tabId);
     if (explicitTab && ctx && explicitTab.tabId !== ctx.tabId) return Response.error();
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
@@ -1057,7 +1069,7 @@ async function runtimeAPI(req, url, clientId) {
     const entryId = tab.entries.has(payload.entryId) ? payload.entryId : (ctx && ctx.entryId) || tab.activeEntryId;
     const resp = await transportFetch(payload.url, {
       method: init.method || 'GET', headers: init.headers || [],
-      body: init.body == null ? null : ZP.base64UrlToBytes(init.body),
+      body: bodyBytes,
       tab, entryId, runtimeFetch: true, refOverride: payload.documentURL,
       credentials: init.credentials || 'same-origin', mode: init.mode || 'cors',
       redirect: init.redirect || 'follow', referrer: init.referrer,
@@ -2450,7 +2462,7 @@ async function handleMessage(event) {
   // fetch-quiet gaps (notably the ~60s streamed-document withhold). No reply,
   // no work; just return so we never touch the kernel for a heartbeat.
   if (msg && msg.type === '__zpKeepAlive') return;
-  if (msg && msg.type === 'ZP_ENCODED_SIZE_QUERY') {
+  if (msg && msg.type === ZP.MSG.ENCODED_SIZE_QUERY) {
     const key = String(msg.url || '');
     // 문서 칸이 먼저다 — 페이지가 묻는 것은 언제나 자기 문서다.
     const size = docEncodedByUrl.get(key) || streamEncodedByUrl.get(key) || 0;
@@ -2551,7 +2563,7 @@ async function handleMessage(event) {
   const ok = data => reply && reply.postMessage(Object.assign({ ok: true }, data || {}));
   const fail = code => reply && reply.postMessage({ ok: false, error: code });
   try {
-    if (msg.type === 'ZP_OPEN_SHARE') {
+    if (msg.type === ZP.MSG.OPEN_SHARE) {
       const routeKey = String(msg.routeKey || '');
       if (!routeKey || /[^A-Za-z0-9_-]/.test(routeKey)) { fail('MALFORMED_ROUTE'); return; }
       // Launcher pre-nav: if `reuseTabId` names an existing tab, append a
@@ -2577,7 +2589,7 @@ async function handleMessage(event) {
       ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: false });
       return;
     }
-    if (msg.type === 'ZP_FRAME_ROUTE') {
+    if (msg.type === ZP.MSG.FRAME_ROUTE) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const routeKey = String(msg.routeKey || '');
@@ -2596,7 +2608,7 @@ async function handleMessage(event) {
       ok({ path: ZP.makeSharePath(routeKey) });
       return;
     }
-    if (msg.type === 'ZP_HISTORY_UPDATE') {
+    if (msg.type === ZP.MSG.HISTORY_UPDATE) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
@@ -2622,7 +2634,7 @@ async function handleMessage(event) {
     // 그대로다 — runtimeTabForMessage 가 per-tab capability token 을 요구하므로
     // 토큰 없는 클라이언트는 자기를 아무 탭에나 붙일 수 없다. srcdoc 은 부모의
     // entry 를 물려받는데, 그게 명세상 맞다 (srcdoc 은 부모의 URL/base 를 쓴다).
-    if (msg.type === 'ZP_BIND_CLIENT') {
+    if (msg.type === ZP.MSG.BIND_CLIENT) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
@@ -2632,7 +2644,7 @@ async function handleMessage(event) {
       ok({ bound: !!sourceId });
       return;
     }
-    if (msg.type === 'ZP_BASE_UPDATE') {
+    if (msg.type === ZP.MSG.BASE_UPDATE) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
@@ -2648,7 +2660,7 @@ async function handleMessage(event) {
     // 페이지는 우리 쪽에서 기본값으로 떨어졌다 — 페이지가 부른 fetch 는
     // Request.referrerPolicy 가 빈 문자열이라(문서 정책은 객체에 반영되지
     // 않는다) 그 자리를 메울 것이 없었다. 프렐류드가 읽어서 알려 준다.
-    if (msg.type === 'ZP_REFERRER_POLICY') {
+    if (msg.type === ZP.MSG.REFERRER_POLICY) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId || tab.activeEntryId);
@@ -2659,7 +2671,7 @@ async function handleMessage(event) {
       ok({ referrerPolicy: entry.referrerPolicy || '' });
       return;
     }
-    if (msg.type === 'ZP_RESOLVE_ENTRY') {
+    if (msg.type === ZP.MSG.RESOLVE_ENTRY) {
       const ctx = contextFromPath(new URL(msg.path, ORIGIN).pathname);
       const tab = ctx && tabs.get(ctx.tabId);
       const entry = tab && tab.entries.get(ctx.entryId);
@@ -2668,7 +2680,7 @@ async function handleMessage(event) {
       ok({ tabId: tab.tabId, entryId: entry.entryId, targetUrl: entry.targetUrl, baseUrl: entry.baseUrl || entry.targetUrl, scrollX: entry.scrollX || 0, scrollY: entry.scrollY || 0, servers: tab.servers || [] });
       return;
     }
-    if (msg.type === 'ZP_SCROLL_UPDATE') {
+    if (msg.type === ZP.MSG.SCROLL_UPDATE) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       const entry = tab.entries.get(msg.entryId);
@@ -2676,7 +2688,7 @@ async function handleMessage(event) {
       ok();
       return;
     }
-    if (msg.type === 'ZP_COOKIE_SET') {
+    if (msg.type === ZP.MSG.COOKIE_SET) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       // Page sends ZP_COOKIE_SET with the virtualURL it observed, so the
@@ -2688,7 +2700,7 @@ async function handleMessage(event) {
       ok();
       return;
     }
-    if (msg.type === 'ZP_SUBMIT_PREPARE') {
+    if (msg.type === ZP.MSG.SUBMIT_PREPARE) {
       const tab = runtimeTabForMessage(event, msg, fail);
       if (!tab) return;
       cleanupPendingSubmissions();
@@ -2709,10 +2721,10 @@ async function handleMessage(event) {
       ok({ submitId });
       return;
     }
-    if (msg.type === 'ZP_WS_OPEN') { await openRuntimeStream(event, msg, ok, fail); return; }
+    if (msg.type === ZP.MSG.WS_OPEN) { await openRuntimeStream(event, msg, ok, fail); return; }
     // D5: module 워커가 직접 읽은 blob: 소스를 stash — 페이지가 브로커한
     // 요청으로, 워커는 이어서 `/zp/api/worker-script?srctok=` 를 import 한다.
-    if (msg.type === 'ZP_WORKER_STASH') {
+    if (msg.type === ZP.MSG.WORKER_STASH) {
       const src = typeof msg.src === 'string' ? msg.src : '';
       if (!src || src.length > 4000000) { fail('POLICY_BLOCKED'); return; }
       const tok = ZP.randomId('ws');
@@ -2999,7 +3011,7 @@ const restorePromise = loadAllStoredJars();
 // `freeze`/`activate` happen at predictable points.
 setInterval(() => { flushDirtyJarsToIDB(); }, COOKIE_FLUSH_INTERVAL_MS);
 self.addEventListener('message', evt => {
-  if (evt.data && evt.data.type === 'ZP_FLUSH_COOKIES') {
+  if (evt.data && evt.data.type === ZP.MSG.FLUSH_COOKIES) {
     evt.waitUntil ? evt.waitUntil(flushDirtyJarsToIDB()) : flushDirtyJarsToIDB();
   }
 });
@@ -3433,7 +3445,7 @@ function deliverStreamEncoded(streamId) {
     // 밀어 보낸 뒤에도 **지우지 않는다** — 페이지의 메시지 리스너가 아직
     // 안 붙었을 수 있고, 그러면 메시지도 잃고 질의할 것도 없어진다.
     // 지우는 건 질의에 답할 때 하나만(상한 32개로 묶여 있다).
-    if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: pending.url, size });
+    if (client) client.postMessage({ type: ZP.MSG.ENCODED_SIZE, url: pending.url, size });
   }).catch(() => {});
 }
 async function reportEncodedSize(event, resp) {
@@ -3477,7 +3489,7 @@ async function reportEncodedSize(event, resp) {
     if (id) {
       self.clients.get(id).then((client) => {
         // 페이지는 타임을 **리라이트된 타깃 URL** 로 색인하므로 같은 이름으로 보낸다.
-        if (client) client.postMessage({ type: 'ZP_ENCODED_SIZE', url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
+        if (client) client.postMessage({ type: ZP.MSG.ENCODED_SIZE, url: encFor || encodedSizeKey(event.request.url), size: Number(enc) || 0 });
       }).catch(() => {});
     }
     // 내비게이션은 `resultingClientId` 라 이 시점에 클라이언트가 없을 수 있고,
@@ -3492,7 +3504,7 @@ async function reportEncodedSize(event, resp) {
 function encodedSizeKey(rawURL) {
   try {
     const u = new URL(rawURL);
-    if (u.pathname === ZP.apiPath('fetch')) return u.searchParams.get('url') || rawURL;
+    if (u.pathname === ZP.apiPath('fetch') || u.pathname === ZP.apiPath('v2/fetch')) return u.searchParams.get('url') || rawURL;
     if (u.pathname === ZP.apiPath('script') || u.pathname === ZP.apiPath('worker-script') || u.pathname === ZP.apiPath('sourcemap')) {
       return u.searchParams.get('u') || rawURL;
     }

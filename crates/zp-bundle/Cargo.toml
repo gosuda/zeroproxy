@@ -19,6 +19,7 @@ zp-shared = { workspace = true }
 zp-rewriter = { workspace = true }
 zp-css = { workspace = true }
 zp-htmltx = { workspace = true }
+zp-engine = { workspace = true }
 
 # CSS rewriter (SWC + url) — ported from the deleted rewriter-rs/ in
 # split-bundle (c.1) Step 4.

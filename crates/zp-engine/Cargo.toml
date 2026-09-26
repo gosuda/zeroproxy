@@ -1,0 +1,11 @@
+[package]
+name = "zp-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zp-shared = { workspace = true }
+zp-rewriter = { workspace = true }
+zp-css = { workspace = true }
+zp-htmltx = { workspace = true }

@@ -5,6 +5,7 @@ members = [
     "crates/zp-rewriter",
     "crates/zp-css",
     "crates/zp-htmltx",
+    "crates/zp-engine",
     "crates/zp-transport-codec",
     "crates/zp-bundle",
     "crates/zp-kernel-bundle",
@@ -33,6 +34,7 @@ zp-shared = { path = "crates/zp-shared" }
 zp-rewriter = { path = "crates/zp-rewriter" }
 zp-css = { path = "crates/zp-css" }
 zp-htmltx = { path = "crates/zp-htmltx" }
+zp-engine = { path = "crates/zp-engine" }
 zp-transport-codec = { path = "crates/zp-transport-codec" }
 
 wasm-bindgen = "0.2"

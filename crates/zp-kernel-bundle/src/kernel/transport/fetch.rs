@@ -29,12 +29,11 @@ use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use web_sys::{Headers, Response, ResponseInit, Url};
 
+use super::dialer::{dialer, TargetAddr};
 use super::http1::{self, HttpResponse};
 use super::http2::{self, Http2Client};
 use super::pool::{self, PoolKey, PooledConn};
-use super::socks5::{self, Auth};
 use super::tls::TlsStream;
-use super::yamux;
 
 /// Top-level entry. The caller (`kernel_fetch`) supplies a fully parsed
 /// JS Request as `(url, method, headers, body)`; this function does the
@@ -291,65 +290,13 @@ fn delta_ms(t0: f64) -> u32 {
 /// `t0` is the parent caller's start time; we report each stage as a
 /// delta off t0 so it's easy to spot which layer dominates total latency.
 async fn open_fresh(parsed: &ParsedUrl, relay_url: &str, t0: f64) -> Result<FreshConn, JsValue> {
-    let t_mux = now_ms();
-    let session = yamux::get_or_open(relay_url).await.map_err(|e| {
-        crate::kernel::push_trace(&format!(
-            "tx:mux-session-err err={} t={}ms",
-            e,
-            delta_ms(t0)
-        ));
-        jserr("TARGET_CONNECT_FAILED:mux-session", &e)
-    })?;
-    let mut stream = match session.open_stream().await {
-        Ok(s) => s,
-        Err(e) => {
-            crate::kernel::push_trace(&format!(
-                "tx:mux-open-err host={} err={} t={}ms (reopening)",
-                parsed.host,
-                e,
-                delta_ms(t0)
-            ));
-            yamux::invalidate();
-            pool::clear();
-            let session = yamux::get_or_open(relay_url)
-                .await
-                .map_err(|e| jserr("TARGET_CONNECT_FAILED:mux-reopen", &e))?;
-            session.open_stream().await.map_err(|e| {
-                crate::kernel::push_trace(&format!(
-                    "tx:mux-open-err2 host={} err={} t={}ms",
-                    parsed.host,
-                    e,
-                    delta_ms(t0)
-                ));
-                jserr("TARGET_CONNECT_FAILED:mux-open", &e)
-            })?
-        }
+    // REFACTOR.md §3.2 — raw-byte dial은 주입 가능한 Dialer 뒤에 있다.
+    // 기본 RelayDialer 가 기존 yamux→SOCKS5 경로를 그대로 수행한다.
+    let addr = TargetAddr {
+        host: parsed.host.clone(),
+        port: parsed.port,
     };
-    crate::kernel::push_trace(&format!(
-        "tx:mux-stream-ok host={} mux={}ms t={}ms",
-        parsed.host,
-        delta_ms(t_mux),
-        delta_ms(t0)
-    ));
-
-    let t_socks = now_ms();
-    socks5::connect(&mut stream, &parsed.host, parsed.port, &Auth::None)
-        .await
-        .map_err(|e| {
-            crate::kernel::push_trace(&format!(
-                "tx:socks5-err host={} err={} t={}ms",
-                parsed.host,
-                e,
-                delta_ms(t0)
-            ));
-            jserr("TARGET_CONNECT_FAILED:socks5", &e)
-        })?;
-    crate::kernel::push_trace(&format!(
-        "tx:socks5-ok host={} socks5={}ms t={}ms",
-        parsed.host,
-        delta_ms(t_socks),
-        delta_ms(t0)
-    ));
+    let stream = dialer().connect(&addr, relay_url, t0).await?;
 
     if parsed.scheme == "https" {
         let t_tls = now_ms();
@@ -676,6 +623,8 @@ fn jserr_str(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{e}"))
 }
 
-fn jserr(prefix: &str, e: &impl std::fmt::Display) -> JsValue {
+/// `pub(crate)` — `dialer::RelayDialer` 재사용해 TARGET_CONNECT_FAILED:*
+/// 코드와 메시지가 싱글 소스로 유지되게 한다.
+pub(crate) fn jserr(prefix: &str, e: &impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("{prefix}: {e}"))
 }

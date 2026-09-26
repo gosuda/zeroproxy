@@ -212,7 +212,7 @@
   }
   async function registerShare(targetUrl, servers, challengeCompat, reuseTabId) {
     const share = await ZP.encryptShareURL(targetUrl);
-    const msg = { type: 'ZP_OPEN_SHARE', routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat };
+    const msg = { type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: share.targetUrl, servers, challengeCompat };
     if (reuseTabId) msg.reuseTabId = reuseTabId;
     const result = await swRequest(msg);
     const finalServers = Array.isArray(result.servers) && result.servers.length ? result.servers : servers;
@@ -275,7 +275,7 @@
     if (!key) { location.replace(ZP.errorPath('INVALID_SHARE_LINK')); return true; }
     try {
       const targetUrl = await ZP.decryptShareURL(encrypted, key);
-      const result = await swRequest({ type: 'ZP_OPEN_SHARE', routeKey: encrypted, targetUrl, servers });
+      const result = await swRequest({ type: ZP.MSG.OPEN_SHARE, routeKey: encrypted, targetUrl, servers });
       if (Array.isArray(result.servers) && result.servers.length) servers = result.servers;
       const next = result.path + ZP.makeShareFragment(key, servers);
       if (location.pathname === result.path) {

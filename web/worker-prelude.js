@@ -362,20 +362,36 @@
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
   const NativeRequest = self.Request;
   const decodeFetchResponse = ZP.createFetchResponseAdapter(self.Response, self.Headers);
+  // `/zp/api/v2/fetch` 바이너리 봉투 우선, 구 SW(메타 헤더 없는 404)면
+  // v1 base64-in-JSON 으로 내려앉는다 — 페이지 postRuntimeEnvelope 와 같은 규칙.
+  let v2FetchOK = true;
   self.fetch = async (input, init = {}) => {
     const raw = input && typeof input.url === 'string' ? input.url : String(input);
     if (/^(?:blob|data):/i.test(raw.trim())) return nativeFetch(input, init);
     const target = ZP.canonicalTargetURL(raw, base.href).href;
     const req = input instanceof NativeRequest ? new NativeRequest(input, init) : new NativeRequest(target, init);
-    const body = req.method === 'GET' || req.method === 'HEAD' ? null : ZP.bytesToBase64Url(new Uint8Array(await req.clone().arrayBuffer()));
+    const bodyBytes = req.method === 'GET' || req.method === 'HEAD' ? null : new Uint8Array(await req.clone().arrayBuffer());
+    const payload = { tabId, documentURL: base.href, url: target, init: {
+      method: req.method, headers: Array.from(req.headers.entries()), body: null,
+      credentials: req.credentials, mode: req.mode, referrer: req.referrer,
+      referrerPolicy: req.referrerPolicy, redirect: req.redirect,
+    } };
+    if (v2FetchOK) {
+      try {
+        const r = await nativeFetch('/zp/api/v2/fetch', {
+          method: 'POST', headers: { 'Content-Type': ZP.ENVELOPE_MIME }, signal: req.signal,
+          body: ZP.encodeEnvelope(payload, bodyBytes),
+        });
+        if (r.status === 404 && !r.headers.get('X-ZP-Fetch-Meta')) { v2FetchOK = false; try { r.arrayBuffer().catch(() => {}); } catch {} }
+        else return decodeFetchResponse(r);
+      } catch (e) { /* v1 폴백 */ }
+    }
+    payload.init.body = bodyBytes ? ZP.bytesToBase64Url(bodyBytes) : null;
     const response = await nativeFetch('/zp/api/fetch', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: req.signal,
-      body: JSON.stringify({ tabId, documentURL: base.href, url: target, init: {
-        method: req.method, headers: Array.from(req.headers.entries()), body,
-        credentials: req.credentials, mode: req.mode, referrer: req.referrer,
-        referrerPolicy: req.referrerPolicy, redirect: req.redirect,
-      } }),
+      body: JSON.stringify(payload),
     });
+    v2FetchOK = false;
     return decodeFetchResponse(response);
   };
   // ── XHR-over-fetch shim ──────────────────────────────────────────────

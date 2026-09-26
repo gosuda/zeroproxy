@@ -45,6 +45,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod decode;
+pub(crate) mod dialer;
 pub(crate) mod fetch;
 pub(crate) mod http1;
 pub(crate) mod http2;

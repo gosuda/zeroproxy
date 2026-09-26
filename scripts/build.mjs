@@ -14,6 +14,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const args = parseArgs(process.argv.slice(2));
 const outRoot = path.resolve(repoRoot, args.out || 'dist');
 const webSrc = path.join(repoRoot, 'web');
+// REFACTOR.md §3.3 — runtime-prelude 소스는 web/membrane/*.js concat 조각.
+const membraneDir = path.join(webSrc, 'membrane');
 const webOut = path.join(outRoot, 'web');
 const serverOut = path.join(outRoot, process.platform === 'win32' ? 'zeroproxy-server.exe' : 'zeroproxy-server');
 // Default to a small local footprint; explicit caller limits still win.
@@ -163,7 +165,7 @@ async function buildWeb() {
   const surfaceTable = JSON.stringify(await urlSurfacePairs());
   await writeBundled('runtime-prelude.js', [
     await readSource('zp-rt.js'),
-    (await readSource('runtime-prelude.js')).split('__ZP_URL_SURFACES__').join(surfaceTable),
+    (await readMembraneSource()).split('__ZP_URL_SURFACES__').join(surfaceTable),
   ]);
   // 2026-06-08 split-bundle (c.1) Step 4: classic-script wrapper that
   // inlines the SW-flavored ZPBundle wasm-bindgen glue + wasm bytes and
@@ -349,6 +351,18 @@ async function readSource(name) {
   return readFile(path.join(webSrc, name), 'utf8');
 }
 
+// 사전순 파일명 순서로 '\n' join 한다 (test/js/_prelude.cjs 와 동일 규칙).
+async function membraneFragmentNames() {
+  return (await readdir(membraneDir)).filter(n => n.endsWith('.js')).sort();
+}
+async function readMembraneSource() {
+  const parts = [];
+  for (const n of await membraneFragmentNames()) {
+    parts.push(await readFile(path.join(membraneDir, n), 'utf8'));
+  }
+  return parts.join('\n');
+}
+
 // 2026-08-14 — 콘텐츠 기반 build id.
 //
 // 에셋을 `no-cache` 로 바꿔 재검증 캐시는 살렸지만(1042KB → 0KB), 여전히 매
@@ -367,6 +381,12 @@ async function computeBuildId() {
   for (const n of names) {
     h.update(n);
     h.update(await readFile(path.join(webSrc, n)));
+  }
+  // membrane 조각도 해시에 포함 — 안 그러면 조각만 바뀐 빌드가 같은 id 를
+  // 받아 immutable 에셋이 낡은 채로 굳는다.
+  for (const n of await membraneFragmentNames()) {
+    h.update('membrane/' + n);
+    h.update(await readFile(path.join(membraneDir, n)));
   }
   // wasm 도 포함해야 한다 — Rust 만 바뀐 빌드에서 id 가 그대로면 낡은 wasm 이
   // immutable 로 굳는다.

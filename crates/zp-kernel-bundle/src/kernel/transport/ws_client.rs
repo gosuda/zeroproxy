@@ -34,10 +34,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use super::dialer::{dialer, TargetAddr};
 use super::pool::PooledConn;
-use super::socks5::{self, Auth};
 use super::tls::TlsStream;
-use super::yamux;
 
 /// RFC 6455 §1.3 magic GUID.
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -121,16 +120,10 @@ async fn open_target_stream(
     secure: bool,
 ) -> Result<PooledConn, JsValue> {
     let relay_url = super::fetch::pick_relay_url().map_err(jserr_str)?;
-    let session = yamux::get_or_open(&relay_url)
-        .await
-        .map_err(|e| jserr_str(format!("TARGET_CONNECT_FAILED:mux-session: {e}")))?;
-    let mut stream = session
-        .open_stream()
-        .await
-        .map_err(|e| jserr_str(format!("TARGET_CONNECT_FAILED:mux-open: {e}")))?;
-    socks5::connect(&mut stream, host, port, &Auth::None)
-        .await
-        .map_err(|e| jserr_str(format!("TARGET_CONNECT_FAILED:socks5: {e}")))?;
+    // REFACTOR.md §3.2 — fetch 와 같은 Dialer seam. 기본 RelayDialer 가
+    // 기존 yamux→SOCKS5 경로(에러 코드 포함)를 그대로 수행한다.
+    let addr = TargetAddr { host: host.to_string(), port };
+    let stream = dialer().connect(&addr, &relay_url, 0.0).await?;
     if !secure {
         return Ok(PooledConn::Plain(stream));
     }

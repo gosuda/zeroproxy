@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-26 | build / 수정 | build.mjs top-level `await` 앞의 `const` 는 TDZ — 빌드용 경로 상수는 파일 상단 `webSrc` 옆에. | build-deploy.md#2026-09-26--build-mjs-top-level-await-tdz |
 | 2026-09-24 | worker / 수정 | `self.URL` 래퍼가 내부 `new URL` 을 삼켜 `/zp/*` 부트스트랩이 타깃으로 변질 — 캡처→내부전환→래핑 순서. | rewriter.md#worker-url-래퍼-내부흡수 |
 | 2026-09-24 | worker / 수정 | SharedWorker `self.name` 에 `zp:w:` 접두어 노출 — 요청 이름으로 마스킹이 네이티브 parity. | rewriter.md#sharedworker-이름-마스킹 |
 | 2026-09-24 | membrane / 수정 | OPFS `handle.name` 에 네임스페이스 오리진 원문 누출 — 서브디렉터리명은 해시로. | rewriter.md#opfs-name-마커누출 |

@@ -3697,6 +3697,7 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "zp-css",
+ "zp-engine",
  "zp-htmltx",
  "zp-rewriter",
  "zp-shared",
@@ -3711,6 +3712,16 @@ dependencies = [
  "swc_css_parser",
  "swc_css_visit",
  "url",
+ "zp-shared",
+]
+
+[[package]]
+name = "zp-engine"
+version = "0.1.0"
+dependencies = [
+ "zp-css",
+ "zp-htmltx",
+ "zp-rewriter",
  "zp-shared",
 ]
 

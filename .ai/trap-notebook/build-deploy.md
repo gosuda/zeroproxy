@@ -2,6 +2,13 @@
 
 역사적 범주별 요약이며 현재 승인 사양이 아니다. 측정·통과 기록은 당시 결과이며 새 실행은 없었다. 과거 제안 테스트·구현 공백은 미검증 이력이지 현재 TODO가 아니다.
 
+<a id="2026-09-26--build-mjs-top-level-await-tdz"></a>
+## 2026-09-26 — build.mjs top-level await 의 TDZ
+
+- 원인: `readMembraneSource()`가 참조하는 `const membraneDir` 을 파일 하단 헬퍼 구역에 선언 — `await buildWeb()`(line ~48)가 `const` 초기화 전에 실행돼 `Cannot access before initialization`.
+- 규칙: build.mjs 에서 top-level `await` (라인 ~48의 빌드 실행) **보다 아래에** `const/let` 을 두면 항상 TDZ. 빌드에 필요한 경로 상수는 `webSrc` 옆 파일 상단으로.
+- 검출: `node scripts/build.mjs --web-only` 가 즉시 ReferenceError.
+
 <a id="2026-05-30--wasm-opt--oz-가-feature-flags-없으면-validation-실패"></a>
 ## 2026-05-30 — `wasm-opt` feature flags 누락
 

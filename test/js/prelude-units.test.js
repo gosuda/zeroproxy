@@ -8,11 +8,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { preludeSource } = require('./_prelude.cjs');
 // zp-core 는 globalThis.ZP 를 설치한다 — 추출된 prelude 코드 안의
 // `ZP.filterMetaCSP` 같은 free-var 참조가 실제 구현으로 해석되게 한다.
 require('../../web/zp-core.js');
 
-const SRC = fs.readFileSync('web/runtime-prelude.js', 'utf8').split('\r\n').join('\n');
+const SRC = preludeSource().split('\r\n').join('\n');
 
 function slice(start, end) {
   const a = SRC.indexOf(start);

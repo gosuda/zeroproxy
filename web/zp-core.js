@@ -89,6 +89,29 @@
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
+  // v2 fetch envelope — `POST /zp/api/v2/fetch` 는 바디를 base64-in-JSON
+  // 이 아니라 이 바이너리 봉투로 싣는다: [u32le headLen][headJSON][rawBody].
+  // head 는 v1 payload 와 같은 모양이되 init.body 는 비운다(바이너리 꼬리가
+  // 그 자리다). v1 `/zp/api/fetch` 는 동결 유지 — 구 프렐류드/구 SW 조합이
+  // 계속 동작한다.
+  const ENVELOPE_MIME = 'application/zp-envelope';
+  function encodeEnvelope(headObj, bodyBytes) {
+    const head = te.encode(JSON.stringify(headObj));
+    const body = bodyBytes || new Uint8Array(0);
+    const out = new Uint8Array(4 + head.length + body.length);
+    new DataView(out.buffer).setUint32(0, head.length, true);
+    out.set(head, 4);
+    out.set(body, 4 + head.length);
+    return out;
+  }
+  function decodeEnvelope(buf) {
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    if (u8.length < 4) throw new Error('BAD_ENVELOPE');
+    const headLen = new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(0, true);
+    if (headLen > u8.length - 4) throw new Error('BAD_ENVELOPE');
+    const head = JSON.parse(td.decode(u8.subarray(4, 4 + headLen)));
+    return { head, body: u8.subarray(4 + headLen) };
+  }
   function concatBytes(...chunks) {
     let n = 0; for (const c of chunks) n += c.length;
     const out = new Uint8Array(n); let o = 0;
@@ -194,6 +217,25 @@
   }
   function isSharePath(path) { return String(path || '').startsWith(controlPath('p/')); }
   function shareRouteKey(path) { return isSharePath(path) ? String(path).slice(controlPath('p/').length) : ''; }
+  // ZP_* postMessage 프로토콜 — page/SW/launcher 간 유일한 단일 진실 소스.
+  // 값 자체는 wire contract 라 절대 바꾸지 않는다 (REFACTOR.md §5.1).
+  const MSG = Object.freeze({
+    BASE_UPDATE: 'ZP_BASE_UPDATE',
+    BIND_CLIENT: 'ZP_BIND_CLIENT',
+    COOKIE_SET: 'ZP_COOKIE_SET',
+    ENCODED_SIZE: 'ZP_ENCODED_SIZE',
+    ENCODED_SIZE_QUERY: 'ZP_ENCODED_SIZE_QUERY',
+    FLUSH_COOKIES: 'ZP_FLUSH_COOKIES',
+    FRAME_ROUTE: 'ZP_FRAME_ROUTE',
+    HISTORY_UPDATE: 'ZP_HISTORY_UPDATE',
+    OPEN_SHARE: 'ZP_OPEN_SHARE',
+    REFERRER_POLICY: 'ZP_REFERRER_POLICY',
+    RESOLVE_ENTRY: 'ZP_RESOLVE_ENTRY',
+    SCROLL_UPDATE: 'ZP_SCROLL_UPDATE',
+    SUBMIT_PREPARE: 'ZP_SUBMIT_PREPARE',
+    WORKER_STASH: 'ZP_WORKER_STASH',
+    WS_OPEN: 'ZP_WS_OPEN',
+  });
   function safeError(code) { const e = new Error(code); e.code = ERRORS.includes(code) ? code : 'POLICY_BLOCKED'; return e; }
   function canonicalTargetURL(input, base) {
     const u = new URL(String(input), base || undefined);
@@ -367,7 +409,7 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, ENVELOPE_MIME, encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

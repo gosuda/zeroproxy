@@ -21,7 +21,26 @@
 
 pub use zp_css as css;
 
+use std::cell::RefCell;
+
 use wasm_bindgen::prelude::*;
+use zp_engine::{DocCtx, TransformEngine};
+
+thread_local! {
+    /// REFACTOR.md §3.1 — 모든 wasm export 가 나눠 쓰는 단일 engine.
+    /// RewriterInstance 의 OXC arena 재사용으로 warm-path 비용이 줄어든다.
+    static ENGINE: RefCell<TransformEngine> = RefCell::new(TransformEngine::new());
+}
+
+/// Run `f` on the shared engine, mapping EngineError → JsError with the
+/// exact same message text the pre-facade code emitted.
+fn with_engine<R>(
+    f: impl FnOnce(&mut TransformEngine) -> Result<R, zp_engine::EngineError>,
+) -> Result<R, JsError> {
+    ENGINE
+        .with(|e| f(&mut e.borrow_mut()))
+        .map_err(|e| JsError::new(&e.to_string()))
+}
 
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -70,34 +89,14 @@ fn push_trace(line: &str) {
 /// Bundle version (mirrors zp-shared); used by SW↔prelude version verification (B3.d).
 #[wasm_bindgen(js_name = bundleVersion)]
 pub fn bundle_version() -> String {
-    zp_shared::TRANSFORMER_VERSION.to_string()
+    zp_engine::TransformEngine::new().version().to_string()
 }
 
 /// Rewrite a JS source. Strict mode. Returns code or throws.
-fn parse_script_kind(kind: &str) -> Result<zp_rewriter::ScriptKind, JsError> {
-    match kind {
-        "classic" => Ok(zp_rewriter::ScriptKind::Classic),
-        "module" => Ok(zp_rewriter::ScriptKind::Module),
-        "event-handler" => Ok(zp_rewriter::ScriptKind::EventHandler),
-        "eval" => Ok(zp_rewriter::ScriptKind::Eval),
-        "function" => Ok(zp_rewriter::ScriptKind::Function),
-        "worker" => Ok(zp_rewriter::ScriptKind::Worker),
-        other => Err(JsError::new(&format!("unknown script kind: {other}"))),
-    }
-}
-
 #[wasm_bindgen(js_name = rewriteScript)]
 pub fn rewrite_script_js(source: &str, kind: &str, target_url: &str, proxy_origin: &str) -> Result<String, JsError> {
-    let kind = parse_script_kind(kind)?;
-    let opts = zp_rewriter::RewriteOpts {
-        kind,
-        target_url: target_url.to_string(),
-        strict: true,
-        proxy_origin: proxy_origin.to_string(),
-    };
-    zp_rewriter::rewrite_script(source, &opts)
-        .map(|r| r.code)
-        .map_err(|e| JsError::new(&e.to_string()))
+    let ctx = DocCtx::new(target_url, proxy_origin);
+    with_engine(|e| e.rewrite_script(source, kind, &ctx))
 }
 
 /// Patch-mode emit (memory plan #3). Returns the patch list as a flat
@@ -117,59 +116,8 @@ pub fn rewrite_script_patches_js(
     target_url: &str,
     proxy_origin: &str,
 ) -> Result<String, JsError> {
-    let kind = parse_script_kind(kind)?;
-    let opts = zp_rewriter::RewriteOpts {
-        kind,
-        target_url: target_url.to_string(),
-        strict: true,
-        proxy_origin: proxy_origin.to_string(),
-    };
-    // Use the patch-only API: skips the O(n) `apply_patches` +
-    // `strip_sourcemap_pragma` string reconstruction. The JS caller already
-    // owns the original source buffer and applies patches against it.
-    let result = zp_rewriter::rewrite_script_patches(source, &opts)
-        .map_err(|e| JsError::new(&e.to_string()))?;
-    // Hand-rolled JSON (no serde_json dependency drag). Replacement
-    // strings can contain quotes / backslashes / control chars, so we
-    // escape them per JSON spec.
-    let mut out = String::with_capacity(source.len() / 4 + 64);
-    out.push_str("{\"len\":");
-    out.push_str(&source.len().to_string());
-    out.push_str(",\"patches\":[");
-    for (i, p) in result.patches.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"start\":");
-        out.push_str(&p.start.to_string());
-        out.push_str(",\"end\":");
-        out.push_str(&p.end.to_string());
-        out.push_str(",\"replacement\":");
-        json_escape_into(&p.replacement, &mut out);
-        out.push('}');
-    }
-    out.push_str("]}");
-    Ok(out)
-}
-
-fn json_escape_into(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+    let ctx = DocCtx::new(target_url, proxy_origin);
+    with_engine(|e| e.rewrite_script_patches_json(source, kind, &ctx))
 }
 
 /// D2 source-map composer: returns a Source Map v3 JSON document mapping
@@ -183,15 +131,8 @@ pub fn compose_source_map_js(
     target_url: &str,
     proxy_origin: &str,
 ) -> Result<String, JsError> {
-    let kind = parse_script_kind(kind)?;
-    let opts = zp_rewriter::RewriteOpts {
-        kind,
-        target_url: target_url.to_string(),
-        strict: true,
-        proxy_origin: proxy_origin.to_string(),
-    };
-    zp_rewriter::compose_source_map(source, &opts, target_url)
-        .map_err(|e| JsError::new(&e.to_string()))
+    let ctx = DocCtx::new(target_url, proxy_origin);
+    with_engine(|e| e.compose_source_map(source, kind, &ctx, target_url))
 }
 
 /// Same as `composeSourceMap` but additionally chains the resulting map
@@ -208,15 +149,10 @@ pub fn compose_source_map_chained_js(
     original_map_json: &str,
     proxy_origin: &str,
 ) -> Result<String, JsError> {
-    let kind = parse_script_kind(kind)?;
-    let opts = zp_rewriter::RewriteOpts {
-        kind,
-        target_url: target_url.to_string(),
-        strict: true,
-        proxy_origin: proxy_origin.to_string(),
-    };
-    zp_rewriter::compose_source_map_chained(source, &opts, target_url, original_map_json)
-        .map_err(|e| JsError::new(&e.to_string()))
+    let ctx = DocCtx::new(target_url, proxy_origin);
+    with_engine(|e| {
+        e.compose_source_map_chained(source, kind, &ctx, target_url, original_map_json)
+    })
 }
 
 /// Transform target HTML — calls zp-htmltx + zp-rewriter for inline scripts.
@@ -226,15 +162,8 @@ pub fn transform_html_js(
     target_url: &str,
     proxy_origin: &str,
 ) -> Result<String, JsError> {
-    let opts = zp_htmltx::TransformOptions {
-        target_url: target_url.to_string(),
-        strict: true,
-        pending_gate: true,
-        proxy_origin: proxy_origin.to_string(),
-    };
-    zp_htmltx::transform(html, &opts)
-        .map(|r| r.html)
-        .map_err(|e| JsError::new(&e.to_string()))
+    let ctx = DocCtx::new(target_url, proxy_origin);
+    with_engine(|e| e.transform_html(html, &ctx))
 }
 
 /// Streaming HTML transform for progressive document render. Construct once per
@@ -255,14 +184,9 @@ pub struct HtmlTxn {
 impl HtmlTxn {
     #[wasm_bindgen(constructor)]
     pub fn new(target_url: &str, proxy_origin: &str, prelude_html: &str) -> HtmlTxn {
-        let opts = zp_htmltx::TransformOptions {
-            target_url: target_url.to_string(),
-            strict: true,
-            pending_gate: true,
-            proxy_origin: proxy_origin.to_string(),
-        };
+        let ctx = DocCtx::new(target_url, proxy_origin);
         HtmlTxn {
-            inner: Some(zp_htmltx::HtmlTxn::new(&opts, prelude_html.to_string())),
+            inner: Some(TransformEngine::new().html_txn(&ctx, prelude_html)),
         }
     }
 
@@ -309,18 +233,14 @@ pub fn rewrite_css_js(
     control_prefix: &str,
     proxy_origin: &str,
 ) -> Result<String, JsError> {
-    let out = css::rewrite_css(source, base_url, control_prefix, proxy_origin);
-    if out.ok {
-        Ok(out.code)
-    } else {
-        Err(JsError::new(&out.error))
-    }
+    let ctx = DocCtx::new("", proxy_origin);
+    with_engine(|e| e.rewrite_css(source, base_url, control_prefix, &ctx))
 }
 
 /// Build the strict CSP for a given proxy WebSocket origin.
 #[wasm_bindgen(js_name = buildCSP)]
 pub fn build_csp_js(ws_origin: &str) -> String {
-    zp_shared::build_csp(ws_origin)
+    ENGINE.with(|e| e.borrow().build_csp(ws_origin))
 }
 
 /// Build the CSP for a given proxy WebSocket origin, with the armed
@@ -329,7 +249,7 @@ pub fn build_csp_js(ws_origin: &str) -> String {
 /// script/frame/child/connect-src (and nothing else) for Cloudflare Turnstile.
 #[wasm_bindgen(js_name = buildCSPWith)]
 pub fn build_csp_with_js(ws_origin: &str, challenge_compat: bool) -> String {
-    zp_shared::build_csp_with(ws_origin, &zp_shared::CspOptions { challenge_compat })
+    ENGINE.with(|e| e.borrow().build_csp_with(ws_origin, challenge_compat))
 }
 
 /// Pure predicate: does the response classify as a Cloudflare challenge
@@ -339,7 +259,7 @@ pub fn build_csp_with_js(ws_origin: &str, challenge_compat: bool) -> String {
 /// arm `buildCSPWith` and skip its own `no-store` overwrite.
 #[wasm_bindgen(js_name = isChallengeDocument)]
 pub fn is_challenge_document_js(cf_mitigated: &str, host: &str, path: &str) -> bool {
-    zp_shared::is_challenge_document(cf_mitigated, host, path)
+    ENGINE.with(|e| e.borrow().is_challenge_document(cf_mitigated, host, path))
 }
 
 // Kernel exports moved out in (c.3) — see `crates/zp-kernel-bundle/`.
