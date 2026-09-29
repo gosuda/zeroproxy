@@ -1576,8 +1576,28 @@ test('SharedWorker 교체는 네이티브 prototype 을 보존하고 타깃 접�
     'SharedWorker 교체가 __zp_realSW 스태시를 안 쓴다 — 자식 realm 에서 이중 래핑으로 죽는다');
   assert.ok(/ZPSharedWorker\.prototype = RealSW\.prototype/.test(body),
     'SharedWorker 교체가 네이티브 prototype 을 안 물려받는다 — onerror/port 등이 대조군에만 남는다');
-  assert.ok(/const prefix = sharedWorkerNamePrefix\(\);[\s\S]{0,400}new RealSW/.test(body),
+  assert.ok(/new RealSW\([^;]*prefixedSharedWorkerOptions\(sharedWorkerNamePrefix\(\), opts\)\)/.test(body),
     'SharedWorker 생성이 타깃 접두어를 안 쓴다 — 서로 다른 타깃이 이름을 공유하면 같은 워커를 잡는다');
+  // The frame-side wrapper (installStorageFacades) must take the same path.
+  assert.ok(/new NativeSW\([^;]*prefixedSharedWorkerOptions\(sharedWorkerPrefix, opts\)\)/.test(rt),
+    'frame-side SharedWorker wrapper no longer prefixes names');
+});
+
+test('prefixedSharedWorkerOptions: every WorkerOptions form keeps its name, namespaced', () => {
+  // `new SharedWorker(url, options)` — options is (DOMString or WorkerOptions)
+  // and the name defaults to ''. Both wrappers used to write prefix+'default'
+  // for a missing name and spread a string argument into character indices.
+  const rt = preludeSource().split('\r\n').join('\n');
+  const start = rt.indexOf('  function prefixedSharedWorkerOptions(prefix, opts) {');
+  assert.ok(start > 0, 'prefixedSharedWorkerOptions missing');
+  const f = new Function(rt.slice(start, rt.indexOf('\n  }', start) + 4) + '\nreturn prefixedSharedWorkerOptions;')();
+  const P = 'zp:w:0000beef:';
+  assert.deepEqual(f(P, undefined), { name: P }, 'no options → name must be the prefix + "" (native default "")');
+  assert.deepEqual(f(P, 'chat'), { name: P + 'chat' }, 'legacy string form lost its name');
+  assert.deepEqual(f(P, { type: 'module' }), { type: 'module', name: P }, 'options without a name');
+  assert.deepEqual(f(P, { name: 'n', credentials: 'omit' }), { name: P + 'n', credentials: 'omit' });
+  assert.deepEqual(f(P, { name: 0 }), { name: P + '0' }, 'name is ToString-ed natively');
+  assert.notDeepEqual(f(P, undefined), f(P, { name: 'default' }), 'no-name and "default" must stay distinct workers');
 });
 
 // ── makeVirtualGateway: 목록이 아니라 규칙이다 (2026-09-14) ────────────────
@@ -1872,4 +1892,60 @@ test('prelude forbidden patterns: every raw innerHTML assignment is a Native-set
     assert.ok(/^\s*else\s+\w+\.innerHTML\s*=/.test(lines[i]),
       'web/runtime-prelude.js:' + (i + 1) + ' — else 폴백이 아닌 날 innerHTML 대입: ' + lines[i].trim());
   }
+});
+
+test('getHTML string scrub restores literal attribute text and drops our stash', () => {
+  // Shadow-root serializations cannot use the clone scrub, so they scrub the
+  // string: each rewritten attribute takes its data-zp-lit-* author text back.
+  const rt = preludeSource().split('\r\n').join('\n');
+  const start = rt.indexOf('    const scrubSerialized = out => {');
+  assert.ok(start > 0, 'scrubSerialized missing');
+  const end = rt.indexOf('\n    };\n', start) + '\n    };\n'.length;
+  const f = new Function('deproxyURL', rt.slice(start, end) + '\nreturn scrubSerialized;')(s => s);
+  assert.equal(
+    f('<a href="http://p/zp/?via=x" data-zp-target-url="http://t/x" data-zp-lit-href="/x">t</a>'),
+    '<a href="/x">t</a>');
+  // Attribute order and escaping survive; unrelated attributes are untouched.
+  assert.equal(
+    f('<img data-zp-lit-src="i.png?a=1&amp;b=2" alt="k" src="http://p/zp/api/fetch?url=u">'),
+    '<img alt="k" src="i.png?a=1&amp;b=2">');
+  // Namespaced stash names are dropped too.
+  assert.equal(
+    f('<image href="http://p/x" data-zp-lit-xlink:href="/svg.png"></image>'),
+    '<image href="http://p/x"></image>');
+  // No stash → only our attributes go; raw-text `<` in a script is left alone.
+  assert.equal(
+    f('<div data-zp-internal="1" class="c"><script>if (a<b && b>c) x()</script></div>'),
+    '<div class="c"><script>if (a<b && b>c) x()</script></div>');
+});
+
+// 리라이터가 내는 런타임 헬퍼는 **모든 실행 realm** 에 있어야 한다.
+// b602610(2026-09-22)은 `__zp_okeys`·`__zp_delete`·`__zp_oget`·`__zp_rget` 등을
+// 페이지 멤브레인에만 정의했고, 워커에서는 `Object.keys(o)`·`delete o[k]`·
+// `o?.[k]` 같은 흔한 코드가 전부 ReferenceError 였다(2026-09-29 실측 11개 중 10개).
+// 리라이터 소스의 문자열 리터럴에서 호출 형태(`__zp_x(`)와 통째 이름
+// (`"__zp_odelete"`)을 모아, 페이지(define)와 워커(expose) 양쪽 정의를 강제한다.
+test('every helper the rewriter emits is defined in page and worker realms', () => {
+  const rs = fs.readFileSync('crates/zp-rewriter/src/lib.rs', 'utf8');
+  const names = new Set();
+  for (const lit of rs.match(/"(?:[^"\\\n]|\\.)*"/g) || []) {
+    for (const m of lit.matchAll(/__zp_([A-Za-z0-9_]+)\(/g)) names.add('__zp_' + m[1]);
+    const whole = /^"(__zp_[A-Za-z0-9_]+)"$/.exec(lit);
+    // `__zp_`, `__zp_lc_`, `__zp_lc_1` 은 임시 변수 이름(접두/순번)이고
+    // `__zp_oc` 는 OCHAIN 연속 화살표의 매개변수다 — 헬퍼가 아니다.
+    if (whole && !/(_|_\d+)$/.test(whole[1]) && whole[1] !== '__zp_oc') names.add(whole[1]);
+  }
+  assert.ok(names.size >= 20, `helper scan found too few names: ${[...names]}`);
+  const page = fs.readdirSync('web/membrane').map(f => fs.readFileSync(`web/membrane/${f}`, 'utf8')).join('\n');
+  const worker = fs.readFileSync('web/worker-prelude.js', 'utf8');
+  // 자식 창(같은 오리진 srcless iframe)은 20-containment.js 의 명시 목록으로만
+  // 헬퍼를 받는다 — 거기 빠지면 부모가 써 넣은 스크립트가 같은 식으로 죽는다.
+  const child = fs.readFileSync('web/membrane/20-containment.js', 'utf8');
+  const missing = [];
+  for (const n of [...names].sort()) {
+    if (!page.includes(`define(root, '${n}'`)) missing.push(`page:${n}`);
+    if (!worker.includes(`expose('${n}'`)) missing.push(`worker:${n}`);
+    if (!child.includes(`define(w, '${n}'`)) missing.push(`child:${n}`);
+  }
+  assert.deepEqual(missing, [], `rewriter emits helpers a realm does not define: ${missing.join(', ')}`);
 });

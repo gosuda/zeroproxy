@@ -188,8 +188,7 @@ pub fn rewrite_script_patches(
     opts: &RewriteOpts,
 ) -> Result<RewriteResult, RewriteError> {
     let allocator = Allocator::default();
-    let source_type = opts.kind.source_type();
-    let ret = Parser::new(&allocator, source, source_type).parse();
+    let (ret, kind) = parse_for_kind(&allocator, source, opts.kind);
 
     if !ret.errors.is_empty() && opts.strict {
         let msg = ret
@@ -202,7 +201,7 @@ pub fn rewrite_script_patches(
     }
 
     let mut visitor =
-        RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), opts.kind);
+        RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
     visitor.visit_program(&ret.program);
 
     let mut patches = visitor.patches;
@@ -268,10 +267,33 @@ pub fn compose_source_map_chained(
 }
 
 /// Rewrite a JavaScript source string per the strict-mode policy.
+/// Parse `source` for the requested kind, promoting a `Classic` request to
+/// module semantics when the program has static import/export (or
+/// import.meta). A classic script cannot contain them (natively a
+/// SyntaxError), so module semantics are right whichever way the browser
+/// loads it. The SW asks for `classic` when a module arrives without its
+/// script type (modulepreload → the generic fetch path), and classic-only
+/// emission — the R1 lexical registry — put every module-level const into the
+/// SHARED global registry: two modules reusing a name threw "Identifier 'R'
+/// has already been declared", and naver's main bundle died at line 0
+/// (2026-09-29). Re-parse as a module so module-only grammar (top-level
+/// await) holds. Dynamic `import()` is not module syntax.
+fn parse_for_kind<'a>(
+    allocator: &'a Allocator,
+    source: &'a str,
+    requested: ScriptKind,
+) -> (oxc_parser::ParserReturn<'a>, ScriptKind) {
+    let ret = Parser::new(allocator, source, requested.source_type()).parse();
+    if requested == ScriptKind::Classic && ret.module_record.has_module_syntax {
+        let module = Parser::new(allocator, source, ScriptKind::Module.source_type()).parse();
+        return (module, ScriptKind::Module);
+    }
+    (ret, requested)
+}
+
 pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult, RewriteError> {
     let allocator = Allocator::default();
-    let source_type = opts.kind.source_type();
-    let ret = Parser::new(&allocator, source, source_type).parse();
+    let (ret, kind) = parse_for_kind(&allocator, source, opts.kind);
 
     if !ret.errors.is_empty() && opts.strict {
         let msg = ret
@@ -284,7 +306,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
     }
 
     let mut visitor =
-        RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), opts.kind);
+        RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
     visitor.visit_program(&ret.program);
 
     // Apply patches to produce final code. Patches sorted by start ascending
@@ -310,6 +332,30 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
 /// - METHOD_CALL: obj_start, obj_end, args_start, args_end (positions 2, 3, 5, 6)
 /// - MODULE_URL: src_start, src_end (positions 2, 3)
 fn shift_marker_positions(replacement: &str, offset: u32) -> String {
+    // OCHAIN is variable-length: cs/ce at 2,3, then one comma-packed field
+    // per split whose numeric members are all positions (the split kind and
+    // a method name never parse as numbers).
+    if replacement.starts_with("\u{1}OCHAIN\u{1}") {
+        let shift = |s: &str| match s.parse::<u32>() {
+            Ok(v) => v.saturating_sub(offset).to_string(),
+            Err(_) => s.to_string(),
+        };
+        return replacement
+            .split('\u{1}')
+            .enumerate()
+            .map(|(i, s)| match i {
+                2 | 3 => shift(s),
+                _ if i >= 4 && s.contains(',') => s
+                    .split(',')
+                    .enumerate()
+                    .map(|(j, f)| if j == 0 { f.to_string() } else { shift(f) })
+                    .collect::<Vec<_>>()
+                    .join(","),
+                _ => s.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\u{1}");
+    }
     let prefixes: &[(&str, &[usize])] = &[
         ("\u{1}GLOBAL_GET\u{1}", &[]),
         ("\u{1}GLOBAL_SET\u{1}", &[3, 4]),
@@ -562,8 +608,102 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 apply_patches(sub, &inner)
             }
         };
+        // `rewrite_range` with the chain prefix `[os, oe)` standing for the
+        // OCHAIN continuation parameter. The synthetic patch goes first so
+        // the stable sort prefers it over same-span link patches, and nested
+        // marker resolvers inherit it through their own `rewrite_range`.
+        let rewrite_range_ov = |start: usize, end: usize, ov: Option<(usize, usize)>| -> String {
+            let Some((os, oe)) = ov.filter(|&(os, oe)| start <= os && os < oe && oe <= end) else {
+                return rewrite_range(start, end);
+            };
+            if end > bytes.len() {
+                return String::new();
+            }
+            let offset = start as u32;
+            let mut inner: Vec<Patch> = vec![Patch {
+                start: os as u32 - offset,
+                end: oe as u32 - offset,
+                replacement: "__zp_oc".to_string(),
+            }];
+            inner.extend(
+                patches
+                    .iter()
+                    .filter(|q| (q.start as usize) >= start && (q.end as usize) <= end)
+                    .filter(|q| !std::ptr::eq(*q, p))
+                    .map(|q| Patch {
+                        start: q.start - offset,
+                        end: q.end - offset,
+                        replacement: shift_marker_positions(&q.replacement, offset),
+                    }),
+            );
+            apply_patches(&source[start..end], &inner)
+        };
 
-        if p.replacement.starts_with("\u{1}GLOBAL_SET\u{1}") {
+        if p.replacement.starts_with("\u{1}OCHAIN\u{1}") {
+            // \u{1}OCHAIN\u{1}<cs>\u{1}<ce>\u{1}<split>\u{1}…  (visit_chain_expression)
+            //   M,<base_end> | P,<callee_end> | S,<obj_end>,<callee_end>,<name>
+            //   | K,<obj_end>,<callee_end>,<ks>,<ke>
+            // Built from the innermost continuation outward: the text after
+            // the last split, then each split's base wrapping it.
+            let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
+            let num = |f: &[&str], i: usize| -> Option<usize> { f.get(i)?.parse().ok() };
+            let cs = num(&parts, 2);
+            let ce = num(&parts, 3);
+            let splits: Vec<Vec<&str>> = parts
+                .iter()
+                .skip(4)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.split(',').collect())
+                .collect();
+            let ends: Option<Vec<usize>> = splits
+                .iter()
+                .map(|f| match f[0] {
+                    "M" | "P" => num(f, 1),
+                    "S" | "K" => num(f, 2),
+                    _ => None,
+                })
+                .collect();
+            let rendered = (|| {
+                let (cs, ce, ends) = (cs?, ce?, ends?);
+                if cs >= ce || ce > bytes.len() || ends.is_empty() {
+                    return None;
+                }
+                let n = ends.len();
+                let mut acc = rewrite_range_ov(cs, ce, Some((cs, ends[n - 1])));
+                for i in (0..n).rev() {
+                    let prev = if i == 0 { None } else { Some((cs, ends[i - 1])) };
+                    let f = &splits[i];
+                    let base = match (f[0], num(f, 1)) {
+                        ("M" | "P", _) => rewrite_range_ov(cs, ends[i], prev),
+                        ("S", Some(oe)) => {
+                            format!("__zp_ocallv(({}),{:?})", rewrite_range_ov(cs, oe, prev), f.get(3)?)
+                        }
+                        ("K", Some(oe)) => {
+                            let (ks, ke) = (num(f, 3)?, num(f, 4)?);
+                            if ks >= ke || ke > bytes.len() {
+                                return None;
+                            }
+                            format!(
+                                "__zp_ocallv(({}),({}))",
+                                rewrite_range_ov(cs, oe, prev),
+                                rewrite_range(ks, ke)
+                            )
+                        }
+                        _ => return None,
+                    };
+                    acc = format!("__zp_ochain(({base}),__zp_oc=>{acc})");
+                }
+                Some(acc)
+            })();
+            match rendered {
+                Some(acc) if needs_paren_prefix(start) => out.push_str(&format!("({acc})")),
+                Some(acc) => out.push_str(&acc),
+                // Malformed marker — the per-link rendering is still valid code.
+                None => out.push_str(&rewrite_range(start, end)),
+            }
+            cursor = end;
+            continue;
+        } else if p.replacement.starts_with("\u{1}GLOBAL_SET\u{1}") {
             // \u{1}GLOBAL_SET\u{1}<name>\u{1}<val_start>\u{1}<val_end>\u{1}
             let parts: Vec<&str> = p.replacement.split('\u{1}').collect();
             if parts.len() >= 6 {
@@ -1352,8 +1492,7 @@ impl RewriterInstance {
         // method so the AST (which borrows from `self.allocator`) never
         // escapes our scope. The final `reset()` reclaims the arena bytes
         // for the next call.
-        let source_type = opts.kind.source_type();
-        let ret = Parser::new(&self.allocator, source, source_type).parse();
+        let (ret, kind) = parse_for_kind(&self.allocator, source, opts.kind);
 
         if !ret.errors.is_empty() && opts.strict {
             let msg = ret
@@ -1367,7 +1506,7 @@ impl RewriterInstance {
         }
 
         let mut visitor =
-            RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), opts.kind);
+            RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
         visitor.visit_program(&ret.program);
 
         let mut patches = visitor.patches;
@@ -3613,6 +3752,95 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
     }
 
+    /// Optional chains whose rewritten links straddle a `?.` (2026-09-29).
+    ///
+    /// Links are rewritten one by one into helper calls (`__zp_oget(o,k)`,
+    /// `__zp_get(o,k)`, `__zp_call(o,k,[a])`), and a helper call evaluates
+    /// its arguments eagerly and returns into the rest of the chain. Native
+    /// `?.` does neither: `e.poster?.[!e.poster.mobile ? …]` never evaluates
+    /// the key when `e.poster` is nullish, and `a?.[k].b` short-circuits the
+    /// whole chain. GitHub's landing page died on exactly the first form
+    /// (image items carry no `poster`) and drew its error page.
+    ///
+    /// Each split becomes a continuation that only runs on a non-nullish
+    /// base: `__zp_ochain(a, __zp_oc => <rest with a := __zp_oc>)`. Inside,
+    /// the existing link patches are correct as they are — their base is
+    /// known non-nullish. Optional calls on a member callee keep their
+    /// receiver through `__zp_ocallv(obj, key)`.
+    fn visit_chain_expression(&mut self, chain: &ChainExpression<'a>) {
+        let before = self.patches.len();
+        walk::walk_chain_expression(self, chain);
+        let Some(splits) = chain_splits(chain) else { return };
+        let Some(first) = splits.first() else { return };
+        let (cs, ce) = (chain.span.start, chain.span.end);
+        let first_end = first.base_end();
+        // Only a patch that crosses the first `?.` breaks short-circuiting;
+        // patches inside keys/args still sit inside a native chain.
+        let crossing: Vec<&Patch> = self.patches[before..]
+            .iter()
+            .filter(|p| p.start == cs && p.end > first_end)
+            .collect();
+        if crossing.is_empty() {
+            return;
+        }
+        // `x?.location` alone: a literal key and nothing after it, so the
+        // per-link `__zp_oget((x),"location")` is already exact.
+        if let [only] = crossing.as_slice() {
+            if only.end == ce
+                && only.replacement.starts_with("\u{1}OGET\u{1}")
+                && only.replacement.split('\u{1}').nth(4) == Some("L")
+            {
+                return;
+            }
+        }
+        if chain_suspends_after(chain, first_end) {
+            return;
+        }
+        // The optional call itself renders as `__zp_oc?.(args)` inside its
+        // continuation, so its call patch must go — but only the generic
+        // call markers. `Reflect.get?.(o,'location')` style special forms
+        // carry the mediation themselves; dropping them would hand out the
+        // real Reflect.get, so such chains keep the per-link emission.
+        let calls: Vec<(u32, u32)> = splits
+            .iter()
+            .filter_map(|s| match s {
+                ChainSplit::Method { call, .. } => Some(*call),
+                _ => None,
+            })
+            .collect();
+        let generic = |r: &str| {
+            r.starts_with("\u{1}CCALL\u{1}")
+                || r.starts_with("\u{1}OCALL\u{1}")
+                || r.starts_with("\u{1}METHOD_CALL\u{1}")
+        };
+        if self.patches[before..]
+            .iter()
+            .any(|p| calls.contains(&(p.start, p.end)) && !generic(&p.replacement))
+        {
+            return;
+        }
+        let mut i = before;
+        while i < self.patches.len() {
+            let p = &self.patches[i];
+            if calls.contains(&(p.start, p.end)) {
+                self.patches.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        let enc: Vec<String> = splits.iter().map(ChainSplit::encode).collect();
+        // Inserted ahead of the link patches: the last link spans the whole
+        // chain too, and the stable sort must keep OCHAIN outermost.
+        self.patches.insert(
+            before,
+            Patch {
+                start: cs,
+                end: ce,
+                replacement: format!("\u{1}OCHAIN\u{1}{cs}\u{1}{ce}\u{1}{}\u{1}", enc.join("\u{1}")),
+            },
+        );
+    }
+
     fn visit_computed_member_expression(&mut self, expr: &ComputedMemberExpression<'a>) {
         // Computed member reads were entirely unmediated — `this['location']`
         // / `document['location']` / `frames[0]` sailed through and produced
@@ -4038,6 +4266,172 @@ impl RewriteVisitor {
             }
         }
     }
+}
+
+/// A `?.` along an optional chain's object/callee spine (see
+/// `visit_chain_expression`). Every split's base is the source prefix
+/// `[chain_start, base_end)` — chain links nest leftward.
+enum ChainSplit {
+    /// `base?.p` / `base?.[k]` / `base?.#p`.
+    Member { base_end: u32 },
+    /// `callee?.(args)` with a non-member callee — `this` is undefined anyway.
+    Plain { callee_end: u32 },
+    /// `obj.p?.(args)` / `obj[k]?.(args)` — the callee is read and bound to
+    /// `obj` by `__zp_ocallv`, so the continuation keeps the receiver.
+    Method { obj_end: u32, key: ChainKey, callee_end: u32, call: (u32, u32) },
+}
+
+enum ChainKey {
+    Name(String),
+    Expr(u32, u32),
+}
+
+impl ChainSplit {
+    /// End of the prefix the continuation receives as `__zp_oc`.
+    fn base_end(&self) -> u32 {
+        match self {
+            ChainSplit::Member { base_end } => *base_end,
+            ChainSplit::Plain { callee_end } | ChainSplit::Method { callee_end, .. } => *callee_end,
+        }
+    }
+
+    fn encode(&self) -> String {
+        match self {
+            ChainSplit::Member { base_end } => format!("M,{base_end}"),
+            ChainSplit::Plain { callee_end } => format!("P,{callee_end}"),
+            ChainSplit::Method { obj_end, key: ChainKey::Name(n), callee_end, .. } => {
+                format!("S,{obj_end},{callee_end},{n}")
+            }
+            ChainSplit::Method { obj_end, key: ChainKey::Expr(ks, ke), callee_end, .. } => {
+                format!("K,{obj_end},{callee_end},{ks},{ke}")
+            }
+        }
+    }
+}
+
+/// Optional links of a chain, innermost (leftmost) first. `None` when a `?.`
+/// cannot be split without losing semantics — `super.m?.()`, `o.#m?.()` and a
+/// parenthesized member callee cannot hand their receiver to `__zp_ocallv`.
+fn chain_splits<'a>(chain: &ChainExpression<'a>) -> Option<Vec<ChainSplit>> {
+    fn call<'a>(c: &CallExpression<'a>, out: &mut Vec<ChainSplit>) -> Option<()> {
+        if !c.optional {
+            return Some(());
+        }
+        let callee_end = c.callee.span().end;
+        let call = (c.span.start, c.span.end);
+        match &c.callee {
+            Expression::StaticMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
+                out.push(ChainSplit::Method {
+                    obj_end: m.object.span().end,
+                    key: ChainKey::Name(m.property.name.to_string()),
+                    callee_end,
+                    call,
+                });
+            }
+            Expression::ComputedMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
+                let k = m.expression.span();
+                out.push(ChainSplit::Method {
+                    obj_end: m.object.span().end,
+                    key: ChainKey::Expr(k.start, k.end),
+                    callee_end,
+                    call,
+                });
+            }
+            Expression::StaticMemberExpression(_)
+            | Expression::ComputedMemberExpression(_)
+            | Expression::PrivateFieldExpression(_) => return None,
+            Expression::ParenthesizedExpression(p)
+                if matches!(
+                    p.expression.without_parentheses(),
+                    Expression::StaticMemberExpression(_)
+                        | Expression::ComputedMemberExpression(_)
+                        | Expression::PrivateFieldExpression(_)
+                ) =>
+            {
+                return None
+            }
+            _ => out.push(ChainSplit::Plain { callee_end }),
+        }
+        Some(())
+    }
+    fn member(optional: bool, object: &Expression<'_>, out: &mut Vec<ChainSplit>) {
+        if optional {
+            out.push(ChainSplit::Member { base_end: object.span().end });
+        }
+    }
+    let mut out = Vec::new();
+    let mut cur: &Expression<'a> = match &chain.expression {
+        ChainElement::CallExpression(c) => {
+            call(c, &mut out)?;
+            &c.callee
+        }
+        ChainElement::ComputedMemberExpression(m) => {
+            member(m.optional, &m.object, &mut out);
+            &m.object
+        }
+        ChainElement::StaticMemberExpression(m) => {
+            member(m.optional, &m.object, &mut out);
+            &m.object
+        }
+        ChainElement::PrivateFieldExpression(m) => {
+            member(m.optional, &m.object, &mut out);
+            &m.object
+        }
+        ChainElement::TSNonNullExpression(t) => &t.expression,
+    };
+    loop {
+        cur = match cur {
+            Expression::CallExpression(c) => {
+                call(c, &mut out)?;
+                &c.callee
+            }
+            Expression::ComputedMemberExpression(m) => {
+                member(m.optional, &m.object, &mut out);
+                &m.object
+            }
+            Expression::StaticMemberExpression(m) => {
+                member(m.optional, &m.object, &mut out);
+                &m.object
+            }
+            Expression::PrivateFieldExpression(m) => {
+                member(m.optional, &m.object, &mut out);
+                &m.object
+            }
+            Expression::TSNonNullExpression(t) => &t.expression,
+            _ => break,
+        };
+    }
+    out.reverse();
+    Some(out)
+}
+
+/// Does the chain suspend (`await`/`yield`) at or after `from`? The
+/// continuation is an arrow, which can hold neither. Nested functions are
+/// their own context and are not searched.
+fn chain_suspends_after<'a>(chain: &ChainExpression<'a>, from: u32) -> bool {
+    struct S {
+        from: u32,
+        hit: bool,
+    }
+    impl<'b> Visit<'b> for S {
+        fn visit_await_expression(&mut self, e: &AwaitExpression<'b>) {
+            if e.span.start >= self.from {
+                self.hit = true;
+            }
+            walk::walk_await_expression(self, e);
+        }
+        fn visit_yield_expression(&mut self, e: &YieldExpression<'b>) {
+            if e.span.start >= self.from {
+                self.hit = true;
+            }
+            walk::walk_yield_expression(self, e);
+        }
+        fn visit_function(&mut self, _: &Function<'b>, _: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_arrow_function_expression(&mut self, _: &ArrowFunctionExpression<'b>) {}
+    }
+    let mut s = S { from, hit: false };
+    walk::walk_chain_expression(&mut s, chain);
+    s.hit
 }
 
 /// First..last argument span for a call — the resolver splices them into

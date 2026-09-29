@@ -553,11 +553,32 @@
       const body = s.slice(name.length + 1, s.lastIndexOf(')'));
       try { return deproxyURL(String(JSON.parse(body)), { scan: true }); } catch { return s; }
     }
-    return s;
+    // Server-rewritten script bodies (importmap / speculationrules JSON, and
+    // pre-rewritten classic code) carry OUR proxy URLs; reading them back
+    // handed page code the proxy origin and /zp/api paths (surface
+    // differential, Chrome 152 reads "raw"). Deproxy on the way out, like
+    // every other read surface. Relative literals come back absolute — the
+    // original text was not stashed by the server (ERRATA J residual).
+    return deproxyURL(s, { scan: true });
+  }
+  // The scrub copy is built in an INERT document (no browsing context), never
+  // with cloneNode in the live one. A live clone of <img>/<video>/<input
+  // type=image> fetches the URL the scrub writes back — merely reading
+  // innerHTML sent requests (CSP blocked the direct ones, so no egress, but
+  // every read produced attempts and violation reports; e2e wire, 2026-09-29).
+  // A live clone also runs custom-element constructors: page code executing
+  // because something serialized. Native serialization does neither.
+  let scrubDoc = null;
+  function inertScrubDocument() {
+    if (!scrubDoc && Native.createHTMLDocument) { try { scrubDoc = Native.createHTMLDocument(''); } catch { scrubDoc = null; } }
+    return scrubDoc;
   }
   function scrubbedClone(node) {
     let clone;
-    try { clone = node.cloneNode(true); } catch { clone = null; }
+    try {
+      const inert = node && node.nodeType !== 9 && typeof Native.importNode === 'function' ? inertScrubDocument() : null;
+      clone = inert ? Native.importNode.call(inert, node, true) : node.cloneNode(true);
+    } catch { clone = null; }
     if (!clone) return null;
     // `origin` 은 복제본에 대응하는 **원본** 요소다. WeakMap 에 매달아 둔 것
     // (srcdoc 원본)은 복제본으로는 못 찾으므로 두 트리를 나란히 걷는다 —
@@ -591,7 +612,18 @@
           if (isZPAttrName(name)) continue;
           const localKey = attrLocalName(name);
           let want;
-          if (origin && isURLBearing(el, name, localKey, tag) && !usesRawURLAttribute(el, name, localKey)) {
+          // Literal parity: serialize the author's original text, exactly as
+          // getAttribute does (14-dom.js). Restoring the absolute target URL
+          // here made `<a href="/x">` serialize as `href="http://t/x"` while
+          // getAttribute said "/x" — and native keeps the literal (Chrome 152,
+          // getHTML / innerHTML). Same attribute set as the getAttribute hook.
+          if (origin && (localKey === 'style' || localKey === 'srcset' || localKey === 'imagesrcset'
+              || isURLBearing(el, name, localKey, tag) || (tag === 'script' && localKey === 'src'))) {
+            const lit = litGet(origin, localKey);
+            want = lit !== undefined ? lit
+              : (Native.getAttribute.call(origin, litAttrName(name)) ?? Native.getAttribute.call(origin, litAttrName(localKey)) ?? undefined);
+          }
+          if (want === undefined && origin && isURLBearing(el, name, localKey, tag) && !usesRawURLAttribute(el, name, localKey)) {
             const recalled = (localKey === 'srcset' || localKey === 'imagesrcset') ? recalledSrcset(origin, name) : undefined;
             want = recalled !== undefined ? recalled : (urlMeta.get(origin) || Native.getAttribute.call(origin, 'data-zp-target-url') || undefined);
           }
@@ -604,6 +636,12 @@
           const out = deproxyURL(base, { scan: true });
           if (out !== raw) { try { Native.setAttribute.call(el, name, out); } catch {} }
         }
+      }
+      // `<a ping>` is stashed so the browser cannot ping on its own; natively
+      // outerHTML still shows it. The copy is inert, so restoring it is safe.
+      if (ln === 'a' || ln === 'area') {
+        const ping = Native.getAttribute.call(el, 'data-zp-blocked-ping');
+        if (ping !== null) { try { Native.setAttribute.call(el, 'ping', ping); } catch {} }
       }
       if (Native.getAttributeNames) {
         for (const name of Native.getAttributeNames.call(el)) {

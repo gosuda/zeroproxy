@@ -497,12 +497,45 @@ fn attr_settings(
                                     continue;
                                 }
                                 if is_subresource {
-                                    if let Some(next) = proxied_subresource_url(
-                                        trimmed,
-                                        &proxy_origin,
-                                        "/zp/",
-                                        &attr_base,
-                                    ) {
+                                    // ★2026-09-29 — 모듈 스크립트는 **URL 에 kind 를 싣는다.**
+                                    //
+                                    // SW 는 `destination: script` 요청이 classic 인지 module 인지
+                                    // 요청만 보고는 알 수 없다 — `crossorigin` 붙은 classic 과
+                                    // module 은 mode·credentials·헤더가 전부 같다. 그래서
+                                    // `/zp/api/fetch?url=` 로 온 스크립트는 전부 classic 으로
+                                    // 리라이트됐고, classic 전용 R1 렉시컬 레지스트리 프롤로그가
+                                    // 모듈에 붙었다. GitHub 실측: `high-contrast-cookie` 와
+                                    // `global-banner-disable` 은 둘 다 import/export 없이
+                                    // top-level `let e` 만 가진 모듈이다. 네이티브에선 모듈마다
+                                    // 스코프가 따로라 무해한데, 프록시에선 둘째가
+                                    // "Identifier 'e' has already been declared" 로 죽었다.
+                                    // `parse_for_kind` 는 import/export 가 있어야 모듈을 알아본다.
+                                    //
+                                    // 형태는 정적 `import` 와 importmap 이 쓰는 정규형 그대로다 —
+                                    // 한 모듈이 두 URL 이 되면 모듈 맵에 두 벌이 올라간다
+                                    // (15-scripts-css.js `scriptProxyPath` 주석의 React #321).
+                                    // `modulepreload` 도 같은 URL 이어야 import 가 그것을 쓴다.
+                                    let module_fetch = match (tag.as_str(), lower) {
+                                        ("script", "src") => el
+                                            .get_attribute("type")
+                                            .is_some_and(|t| is_module_type(&t)),
+                                        ("link", "href") => el.get_attribute("rel").is_some_and(|r| {
+                                            r.split_ascii_whitespace()
+                                                .any(|t| t.eq_ignore_ascii_case("modulepreload"))
+                                        }),
+                                        _ => false,
+                                    };
+                                    let next = if module_fetch {
+                                        proxied_module_script_url(trimmed, &attr_base, &proxy_origin)
+                                    } else {
+                                        proxied_subresource_url(
+                                            trimmed,
+                                            &proxy_origin,
+                                            "/zp/",
+                                            &attr_base,
+                                        )
+                                    };
+                                    if let Some(next) = next {
                                         let _ = el.set_attribute(&name, &next);
                                         // 리터럴 stash — getAttribute('src') 가
                                         // 절대 URL 이 아니라 작성자 원문을 돌려주도록.
@@ -679,7 +712,7 @@ fn script_settings(
                         return Ok(());
                     }
                     let kind = match el.get_attribute("type").as_deref() {
-                        Some(t) if t.eq_ignore_ascii_case("module") => Some(InlineKind::Script(ScriptKind::Module)),
+                        Some(t) if is_module_type(&t) => Some(InlineKind::Script(ScriptKind::Module)),
                         // `<script type="importmap">` / `speculationrules` carry
                         // JSON, not code — the JSON still embeds URLs that the
                         // browser would fetch directly (module resolution,
@@ -1585,6 +1618,12 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// HTML 은 `type` 을 ASCII 공백으로 트림한 뒤 대소문자 무시로 "module" 과 비교한다.
+/// `" module "` 을 classic 으로 보면 모듈에 classic 리라이트가 붙는다.
+fn is_module_type(t: &str) -> bool {
+    t.trim_matches(|c: char| c.is_ascii_whitespace()).eq_ignore_ascii_case("module")
 }
 
 fn is_javascript_type(t: &str) -> bool {
@@ -2702,6 +2741,40 @@ mod tests {
             "script src must include proxy_origin: {}",
             r.html
         );
+    }
+
+    #[test]
+    fn module_script_src_carries_module_kind() {
+        // GitHub 실측(2026-09-29): import/export 없는 모듈 두 개가 각각
+        // top-level `let e` 를 가진다. kind 없이 `/zp/api/fetch` 로 가면 SW 가
+        // classic 으로 리라이트하고, R1 레지스트리가 둘째를 "already declared"
+        // 로 죽인다. SW 가 모듈임을 알 수 있는 곳은 URL 뿐이다.
+        let html = "<link rel=\"preload modulepreload\" href=\"/assets/m.js\">\
+                    <link rel=\"preload\" as=\"script\" href=\"/assets/c.js\">\
+                    <script type=\" Module \" src=\"/assets/m.js\"></script>\
+                    <script src=\"/assets/c.js\"></script>\
+                    <script type=\" module \">let e = 1;</script>\
+                    <script>let f = 1;</script>";
+        let r = transform(html, &opts()).unwrap();
+        let out = r.html.replace("&amp;", "&");
+        let m = "http://proxy.localhost:18080/zp/api/script?u=https%3A%2F%2Fexample.com%2Fassets%2Fm.js&kind=module";
+        assert_eq!(out.matches(m).count(), 2, "modulepreload 과 module script 는 같은 정규형: {out}");
+        assert_eq!(out.matches("/zp/api/fetch?url=").count(), 2, "classic 과 preload as=script 는 그대로: {out}");
+        // 정적 `import` 가 내는 URL 과 **바이트 단위로** 같아야 모듈 맵에 한 벌만 올라간다.
+        let imported = rewrite_script(
+            "import './assets/m.js';",
+            &RewriteOpts {
+                kind: ScriptKind::Module,
+                target_url: "https://example.com/".into(),
+                strict: true,
+                proxy_origin: "http://proxy.localhost:18080".into(),
+            },
+        )
+        .unwrap();
+        assert!(imported.code.contains(m), "정적 import 정규형과 달라졌다: {}", imported.code);
+        // 트림된 `type` — 인라인 모듈은 module 래퍼로 가야 classic 리라이트를 피한다.
+        assert!(out.contains("__ZP_EXEC_INLINE_MODULE(\"let e = 1;\")"), "{out}");
+        assert!(out.contains("__ZP_EXEC_INLINE_SCRIPT(\"let f = 1;\")"), "{out}");
     }
 
     #[test]

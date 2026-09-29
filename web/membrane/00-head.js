@@ -296,10 +296,6 @@
   let virtualURL = new URL(boot.targetUrl);
   let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
-  // customElements 네임스페이스가 설치되면 채워진다 — patchHTMLSetter·
-  // insertAdjacentHTML·createContextualFragment 등 "파스된 마크업" 경로가
-  // 삽입 후 정의된 커스텀 엘리먼트를 교체-업그레이 하는 데 쓴다.
-  let ceUpgradeSubtree = null;
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');

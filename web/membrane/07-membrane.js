@@ -1287,6 +1287,19 @@
       if (fn == null && (flags & 1)) return undefined;
       return Reflect.apply(fn, isScopeProxy(base) ? root : base, Array.isArray(args) ? args : []);
     }
+    // 옵셔널 체인 연속(OCHAIN) — 리라이터는 `a?.[k].b` 를
+    // `__zp_ochain(a, __zp_oc => __zp_get(__zp_oc,k).b)` 로 낸다. 네이티브 `?.`
+    // 처럼 base 가 nullish 면 키·인자·나머지 체인을 하나도 평가하지 않는다.
+    function ochain(base, cont) { return base == null ? undefined : cont(base); }
+    // `obj.m?.(…)` — 피호출자를 한 번 읽어 obj 에 묶는다. 없으면 undefined 로
+    // 단락하고, obj 자체가 nullish 면(`?.` 는 호출에만 붙었다) 네이티브처럼 던진다.
+    function ocallv(base, prop) {
+      if (base == null) throw new TypeError("Cannot read properties of " + base + " (reading '" + String(prop) + "')");
+      const fn = get(base, prop);
+      if (fn == null) return undefined;
+      const self = isScopeProxy(base) ? root : base;
+      return function () { return Reflect.apply(fn, self, arguments); };
+    }
     // Reflect.get/set with a `receiver` arg: route dangerous names through
     // the membrane, everything else through native Reflect with receiver
     // semantics intact.
@@ -1520,6 +1533,8 @@
     define(root, '__zp_odelete', odel);
     define(root, '__zp_oget', oget);
     define(root, '__zp_ocall', ocall);
+    define(root, '__zp_ochain', ochain);
+    define(root, '__zp_ocallv', ocallv);
     define(root, '__zp_rget', rget);
     define(root, '__zp_rset', rset);
     define(root, '__zp_getOwnPropertyDescriptors', getOwnPropertyDescriptors);
@@ -1766,6 +1781,6 @@
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler), delay, ...args); });
     // `document.write` / `writeln` wrap 은 installDOMHooks(w) 에서 모든 realm
     // (parent + iframe Document.prototype) 에 일관 적용. 본 위치는 비워둠.
-    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { const out = Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); try { if (ceUpgradeSubtree && out && out.documentElement) ceUpgradeSubtree(out.documentElement); } catch {} return out; });
-    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { const out = Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); try { if (ceUpgradeSubtree) ceUpgradeSubtree(out); } catch {} return out; });
+    if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { return Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); });
+    if (Native.rangeCreateContextualFragment && root.Range) define(root.Range.prototype, 'createContextualFragment', function(markup) { return Native.rangeCreateContextualFragment.call(this, transformHTML(String(markup))); });
   }

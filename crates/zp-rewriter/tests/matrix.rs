@@ -118,8 +118,13 @@ fn computed_member_writes_and_calls() {
     );
     emits("x[k](1,2);", &["__zp_call((x),(k),[1,2])"]);
     emits("x['location']();", &["__zp_call((x),('location'),[])"]);
-    emits("x?.[k](a);", &["__zp_ocall((x),(k),[a],2)"]);
-    emits("x?.[k]?.();", &["__zp_ocall((x),(k),[],3)"]);
+    // A `?.` guards everything to its right: key and args run only on a
+    // non-nullish base, inside the continuation (2026-09-29).
+    emits("x?.[k](a);", &["__zp_ochain((x),__zp_oc=>__zp_ocall((__zp_oc),(k),[a],2))"]);
+    emits(
+        "x?.[k]?.();",
+        &["__zp_ochain((x),__zp_oc=>__zp_ochain((__zp_ocallv((__zp_oc),(k))),__zp_oc=>__zp_oc?.()))"],
+    );
     for src in [
         "x[k] = v;",
         "x['location'] = v;",
@@ -153,15 +158,32 @@ fn dangerous_method_calls_stay_bound() {
 
 #[test]
 fn optional_chain_flags_distinguish_base_and_call_nullish() {
-    // `x?.location?.()` — BOTH sides nullish → flag 3.
-    emits("x?.location?.();", &["__zp_ocall((x),\"location\",[],3)"]);
+    // `x?.location?.()` — both `?.` short-circuit; the method keeps its
+    // receiver through `__zp_ocallv` and runs as a native optional call.
+    emits(
+        "x?.location?.();",
+        &["__zp_ochain((x),__zp_oc=>__zp_ochain((__zp_ocallv((__zp_oc),\"location\")),__zp_oc=>__zp_oc?.()))"],
+    );
     // `x?.m()` — safe name, native optional preserved (negative control).
     emits("x?.m();", &["x?.m()"]);
+    // A lone literal-key link needs no continuation.
     emits("x?.location;", &["__zp_oget((x),\"location\")"]);
+    not_emits("x?.location;", &["__zp_ochain("]);
+    // `.href` after the `?.` belongs to the short-circuited chain: a nullish
+    // x must not reach `__zp_get(undefined,"href")`.
     emits(
         "x?.location.href;",
-        &["__zp_get(__zp_oget((x),\"location\"),\"href\")"],
+        &["__zp_ochain((x),__zp_oc=>__zp_get(__zp_oget((__zp_oc),\"location\"),\"href\"))"],
     );
+    // Rewrites inside a key/arg stay inside a native chain — no continuation.
+    not_emits("cb?.(a[k]);", &["__zp_ochain("]);
+    // Special forms carry their own mediation and are never unwrapped into a
+    // bare `__zp_ocallv(Reflect,"get")`.
+    not_emits("Reflect.get?.(o, 'location');", &["__zp_ocallv("]);
+    // A continuation arrow cannot hold `yield`.
+    not_emits("function* g() { x?.[yield k]; }", &["__zp_ochain("]);
+    reparses("x?.[k]?.();");
+    reparses("a?.[b?.[c]].d?.(e)[f];");
     emits("location?.reload();", &["__zp_get(globalThis,\"location\")?.reload()"]);
     reparses("x?.location?.();");
     reparses("x?.location.href;");
@@ -685,6 +707,29 @@ fn local_scope_bindings_not_mediated() {
 // ---------------------------------------------------------------------------
 // Misc: meta properties, global reads through computed base, export-goal.
 // ---------------------------------------------------------------------------
+
+/// A program with static import/export (or import.meta) IS a module — a
+/// classic script cannot contain them. The SW can request `classic` for a
+/// module that arrives without its script type (modulepreload → the generic
+/// fetch path); classic-only emission (the R1 lexical registry) then put every
+/// module-level const into the SHARED global registry, so two modules reusing
+/// a name threw "Identifier 'R' has already been declared" (naver's main
+/// bundle died at line 0, 2026-09-29).
+#[test]
+fn module_syntax_under_classic_request_gets_module_semantics() {
+    let src = "import x from './a.js'; const R = 1; export const y = R + x;";
+    let out = rewrite_script(src, &opts()).expect("classic request of a module rewrites").code;
+    assert!(!out.contains("__zp_lex"), "module must not get the classic lexical registry: {out}");
+    // Module-only grammar parses too (top-level await is a script-mode error).
+    let tla = rewrite_script("import a from './a.js'; await a; const R = 2;", &opts())
+        .expect("top-level await in a module");
+    assert!(!tla.code.contains("__zp_lex"), "{}", tla.code);
+    // Dynamic import() alone is NOT module syntax — a classic script keeps R1.
+    let classic = out_of("import('./m.js'); const z = 1;");
+    assert!(classic.contains("__zp_lex_decl("), "classic script lost its registry: {classic}");
+}
+
+fn out_of(src: &str) -> String { out(src) }
 
 /// Literal `data:`/`blob:` dynamic-import specifiers take the same runtime
 /// path as computed ones (`__zp_module_url` reads, rewrites and re-imports the

@@ -101,9 +101,19 @@
         }
       });
     }
+    // ★게터는 늘 zpPrepare 를 주므로 페이지가 "이전 값" 으로 저장하는 것도
+    // zpPrepare 다. React 의 describeNativeComponentFrame 은 저장 → undefined →
+    // 복원을 하고, 복원이 `userPrepare = zpPrepare` 가 되면 그 뒤 모든 `.stack`
+    // 이 자기 자신을 불러 스택을 터뜨렸다(GitHub react-partial 6개, 2026-09-29).
+    // 그래서 세터는 우리 값을 "훅 없음" 으로 받고, 이전 값을 부르는 체이닝 훅이
+    // 되돌아오면(inUserPrepare) 기본 포맷으로 답한다.
+    let inUserPrepare = false;
     const zpPrepare = function (error, frames) {
       const wrapped = frames.map(frameFacade);
-      if (userPrepare) return userPrepare(error, wrapped);
+      if (userPrepare && !inUserPrepare) {
+        inUserPrepare = true;
+        try { return userPrepare(error, wrapped); } finally { inUserPrepare = false; }
+      }
       let head;
       try { head = String(error); } catch { head = 'Error'; }
       let out = head;
@@ -113,7 +123,7 @@
     try {
       defineMasked(E, 'prepareStackTrace', {
         get() { return zpPrepare; },
-        set(v) { userPrepare = typeof v === 'function' ? v : null; },
+        set(v) { userPrepare = typeof v === 'function' && v !== zpPrepare ? v : null; },
         configurable: true, enumerable: false
       });
     } catch {}

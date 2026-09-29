@@ -1253,3 +1253,62 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **같이 고친 것:** `Reflect.setPrototypeOf(window, x)` 가 파사드에서 true(네이티브는 immutable prototype → false / `Object.setPrototypeOf` TypeError). `eval('')` 이 직접 경로에서 NotSupportedError 였다(빈 입력의 빈 출력을 실패로 봄).
 - **교훈:** 기대값은 **네이티브에서** 얻는다. 프록시에서 나온 값을 핀으로 적으면 그 순간 divergence 가 테스트로 보호된다. 픽스처가 프록시 내부 헬퍼(`__zp_*`)를 직접 부르면 그 프로브는 차분에서 빠진다 — 픽스처는 평범한 페이지 코드여야 한다.
 - **검증:** `dyn probes match native Chrome (direct-vs-proxy)` 49개 0 divergence, compat 차분 50개(A5 신규 7) 0 divergence, e2e 182/182, prelude-units 25(변이 3건 확인), matrix `dynamic_import_data_blob_literals_take_runtime_path`.
+
+## <a id="surface-차분"></a>surface 스위트에도 네이티브 차분을 붙이자 — innerHTML 을 읽기만 해도 요청이 나갔다 (2026-09-29)
+
+- **원인 1 — 직렬화 사본이 살아 있는 문서에 있었다:** `scrubbedClone` 이 `node.cloneNode(true)` 로 사본을 만들고 거기에 되돌린(절대 타깃) URL 을 써 넣었다. 떨어져 있어도 `<img>`/`<video>`/`<input type=image>` 는 src 를 **가져온다** — `innerHTML`/`outerHTML`/`getHTML`/`XMLSerializer` 를 읽기만 해도 타깃 오리진으로 요청이 나갔다(CSP 가 막아 유출은 없었지만 시도·위반 보고가 남았다). 같은 사본이 커스텀 엘리먼트 생성자를 돌려 **페이지 코드가 직렬화 때문에 실행**됐다. 비활성 문서(`createHTMLDocument`)에 `importNode` 로 만든다 — 브라우징 컨텍스트가 없으면 아무것도 로드·업그레이드되지 않는다.
+- **원인 2 — 목록 대 규칙, 또:** URL 속성 표는 `url_surfaces.json` 한 곳인데 IDL 프로퍼티 훅은 손목록이었다. 표의 쌍마다 크롬에서 "반영 세터가 속성을 쓰는가" 를 재자 `input.src`, `body.background`(평범한 문자열 반영 — URL 아님), SVG `href.baseVal` 셋이 비어 있었다. SVG 는 `SVGAnimatedString` 이 원소를 모르므로 원소별 Proxy 를 돌려준다(`el.href === el.href`, `instanceof` 유지).
+- **원인 3 — 런타임 transformHTML 은 리터럴을 안 남겼다:** 서버 htmltx 는 바꾼 URL 속성마다 `data-zp-lit-*` 를 남기는데 페이지 realm 워커는 안 남겨서, `innerHTML='<a href="/x">'` 가 `href="http://t/x"` 로 읽혔다(서버/런타임 비대칭의 또 한 사례). 걷기 전에 스냅샷, 걷은 뒤 바뀐 것만 stash.
+- **그 외:** SharedWorker 기본 이름 `default`(네이티브 `''`), OPFS 루트 `.name` 의 `zp:o:<hash>`, 내비게이션 엔트리가 이후 해시를 따라감, importmap 텍스트 되읽기의 프록시 URL, `<a ping>` 되읽기 null.
+- **측정 함정 둘:** ① 리소스 타이밍 엔트리는 **CSP 로 막힌 fetch 에도 생긴다** — 로드 여부 오라클로 못 쓴다. 타깃 서버 요청 로그(UA 로 네이티브/프록시 구분)가 오라클이다. ② 네이티브 참조 페이지에서 puppeteer `waitForFunction` 기본 `raf` 폴링이 백그라운드 헤드리스에서 굶어 140초가 걸렸다 — `polling: 100`. `alert()` 는 네이티브에서 페이지를 막으니 dialog 를 dismiss 한다(스텁 값과 같다).
+- **교훈:** 차분의 기준은 **네이티브**다. 네이티브 참조가 흔들리면 참조만 재시도하고(피시험 쪽은 절대), 의도된 divergence 는 이유와 함께 목록에 두되 "더 이상 갈리지 않으면 실패" 로 목록이 썩지 않게 한다.
+- **검증:** surface 차분 98개 중 13개만 이유 있는 목록, compat J 로드 12/12 parity, 프록시 페이지의 직접 요청 0.
+
+## <a id="module-kind-url"></a>import/export 없는 모듈이 classic 으로 리라이트됐다 — SW 는 요청만으로 kind 를 모른다 (2026-09-29)
+
+- **증상:** GitHub 콜드 로드에서 `global-banner-disable` 이 "Identifier 'e' has already been declared" 로 죽었다. `high-contrast-cookie` 와 둘 다 `<script type=module>` 인데 import/export 없이 top-level `let e` 만 가진다. 네이버의 높이 8% 도 같은 원인이었다(그쪽은 import 가 있어 `parse_for_kind` 로 먼저 막았다).
+- **원인:** htmltx 가 모든 `script[src]` 를 `/zp/api/fetch?url=` 로 보냈고, SW `scriptKindFromRequest` 는 destination `script` 를 전부 classic 으로 본다. `crossorigin` 이 붙은 classic 과 module 은 mode·credentials·헤더가 같아서 **요청만으로는 가를 수 없다.** classic 리라이트는 R1 렉시컬 레지스트리 프롤로그를 붙이고, 그것이 원래 스코프가 따로인 모듈끼리 이름을 부딪치게 했다.
+- **수정:** kind 는 URL 로 싣는다. `<script type=module src>` 와 `<link rel=modulepreload>` 는 정적 import·importmap 과 **바이트 단위로 같은** `/zp/api/script?u=…&kind=module` 로 간다(한 모듈이 두 URL 이 되면 모듈 맵에 두 벌 — React #321). 동적 스크립트는 `Object.assign(s,{src,type})` 처럼 `src` 가 `type` 보다 먼저 오는 순서가 있어서, 삽입 시점에 kind 를 다시 맞춘다(`withCurrentKind`). `parse_for_kind` 는 import/export 가 있는 경우의 안전망으로 남는다.
+- **잔여:** `<link rel=preload as=script>` 는 classic 경로 URL 이라 모듈이 그것을 소비하지 못하고 한 번 더 받는다(네이티브는 공유).
+- **검증:** htmltx `module_script_src_carries_module_kind`(로직을 되돌리면 실패 확인). dyn 차분 `staticModuleLex`/`dynModuleTypeAfterSrc` — 구 빌드는 `v:a|undefined`/`v:undefined|undefined`, 수정 후 네이티브와 같다.
+
+## <a id="ce-접두어-제거"></a>customElements 타깃별 접두어는 격리가 아니었다 — GitHub react-partial 전멸 (2026-09-29)
+
+- **증상:** GitHub react-partial 6개가 전부 "No embedded data provided for react element …".
+- **원인:** 09-24 감사가 "레지스트리가 진짜 프록시 오리진에 묶인다" 고 보고 `zp<hash>-x` 접두어와 교체 기반 업그레이드를 깔았다. catalyst `findTarget` 이 `el.closest(tag) === this` 인데 `closest`/`matches` 는 번역되지 않아 타깃을 못 찾았다. 교체라서 define 전에 잡아 둔 참조가 떨어져 나갔고, CSS 타입 선택자(`tool-tip{…}`)도 접두 이름에 맞지 않았다.
+- **전제가 틀렸다:** 레지스트리는 오리진이 아니라 **Window 마다** 있다. 크롬 152 실측 — 최초 about:blank 의 same-origin 내비게이션(프록시에서는 모든 타깃이 same-origin 이라 이것이 유일한 공유 후보)에서도 심어 둔 정의·전역이 사라지고 그 생성자는 새 문서의 요소에서 돌지 않는다. 격리 이득은 0 이고, 비용은 커스텀 엘리먼트를 쓰는 모든 사이트였다.
+- **수정:** 접두어·선택자 번역·교체 업그레이드를 전부 걷고 네이티브 레지스트리를 그대로 쓴다.
+- **교훈:** "공유된다" 는 전제를 측정한 뒤에 격리 장치를 깐다. 저장소처럼 보인다고 다 오리진 키가 아니다.
+- **검증:** surface `customElUpgrade` — 정체성·`closest` 타깃·`matches`·CSS 폭 네 축(구 빌드 `same:false|up:false|target:none|matches:false|w:auto`, 수정 후 네이티브와 같다).
+
+## <a id="prepare-stack-재귀"></a>`Error.prepareStackTrace` 저장/복원이 우리 훅을 자기 자신에 물렸다 — 이후 모든 `.stack` 이 스택 오버플로 (2026-09-29)
+
+- **증상:** 커스텀 엘리먼트를 고치자 GitHub react-partial 이 이번엔 "Maximum call stack size exceeded" 로 죽었다.
+- **원인:** 게터는 늘 `zpPrepare` 를 돌려준다. React `describeNativeComponentFrame` 은 `p = Error.prepareStackTrace; … = undefined; … = p` 로 저장/복원하는데, 복원이 `userPrepare = zpPrepare` 가 되어 자기 자신을 불렀다. 한 번 복원되면 그 뒤 **모든** `.stack` 이 터진다. 이전 값을 부르는 체이닝 훅도 같은 고리이고, 워커 사본도 같았다.
+- **수정:** 세터는 우리 값을 "훅 없음" 으로 받고, 페이지 훅이 되부른 호출(`inUserPrepare`)은 기본 포맷으로 답한다.
+- **진단 팁:** V8 은 스택 오버플로 자리에서 디버거를 세우지 못한다 — pause 에는 React 의 재throw 만 잡혔다. 원 위치는 `Runtime.exceptionThrown` 의 `exceptionDetails.stackTrace`(생성 시점, 최대 200프레임)에 있다. `.stack` 문자열은 우리 sanitizer 를 거치고, 미니파이된 prelude 함수명은 `node scripts/build.mjs --web-only --no-minify` 로 얻는다.
+- **검증:** prelude-units 페이지·워커 각 1 — React 관용구·체이닝 훅·일반 훅(수정 전 RangeError 확인).
+
+## <a id="워커-헬퍼-누락"></a>리라이터가 낸 헬퍼가 워커에는 없었다 — `Object.keys(o)` 가 ReferenceError (2026-09-29)
+
+- **증상:** 프록시된 워커에서 `Object.keys`·`Object.getOwnPropertyNames`·`Reflect.get`·`delete o[k]`·`o?.[k]` 가 전부 `__zp_* is not defined` 로 죽었다. 실측 11개 중 10개.
+- **원인:** b602610(09-22)이 `__zp_okeys`/`__zp_delete`/`__zp_oget`/`__zp_rget`/`__zp_with_*` 등을 페이지 멤브레인에만 정의했다. 리라이터는 워커에도 같은 헬퍼를 낸다.
+- **수정:** 워커에 15개를 포팅했다(대상 해석은 워커 규칙 `workerTarget`/`isWorkerGlobal`).
+- **가드:** static-policy 가 리라이터 소스의 문자열 리터럴에서 방출 헬퍼(호출형 `__zp_x(` 와 통째 이름)를 모아 페이지(`define(root`)·워커(`expose`)·자식 창(`define(w`) 셋 모두에 있는지 강제한다. 포팅을 되돌리면 정확히 그 15개를 지목하고, 자식 창 축은 곧바로 [자식-렉시컬](#자식-렉시컬) 을 찾아냈다.
+- **교훈:** 헬퍼를 새로 내게 하면 realm 셋을 같이 본다. 목록이 여럿이면 반드시 갈라진다 — 가드가 그 목록들을 대조한다.
+
+## <a id="옵셔널-체인-연속"></a>옵셔널 체인을 고리별 헬퍼 호출로 바꾸면 단락이 사라진다 — GitHub 랜딩이 에러 페이지를 그렸다 (2026-09-29)
+
+- **증상:** GitHub `landing-pages` 앱이 "Looks like something went wrong!". 원 에러는 `e.poster?.[!e.poster.mobile||er?"desktop":"mobile"]` 에서 났다 — 이미지 항목에는 poster 가 없다.
+- **원인:** `a?.[k]` → `__zp_oget(a,k)`. 함수 호출은 인자를 **먼저** 평가하므로 a 가 nullish 여도 k 가 돈다. `a?.[k].b` → `__zp_oget(a,k).b` 는 체인 전체 단락이 깨져 `undefined.b` 로 던진다. `x?.[k](args)`·`x.m?.(args)` 도 인자를 미리 평가했다.
+- **수정 (OCHAIN):** 체인 단위로, 다시 쓴 고리가 `?.` 를 가로지를 때만 `__zp_ochain(base, __zp_oc => <나머지>)` 로 감싼다. 나머지는 base 접두를 `__zp_oc` 로 덮어 기존 고리 패치를 그대로 렌더한다 — 연속 안에서 base 는 nullish 가 아니므로 고리 패치는 손대지 않아도 맞다. 멤버 피호출자의 옵셔널 호출은 `__zp_ocallv(obj,key)` 로 receiver 를 묶어 네이티브 `__zp_oc?.(args)` 로 부른다. `x?.location` 처럼 리터럴 키 한 고리는 연속 없이 그대로 둔다.
+- **포기하는 경우(잔여):** `Reflect.get?.(o,'location')` 같은 특수형이 분할점에 걸리면 — 그 패치를 떼면 진짜 `Reflect.get` 이 나간다 — 고리별 방출을 유지한다. 연속 화살표가 담을 수 없는 `await`/`yield` 가 첫 `?.` 뒤에 있어도 그렇다.
+- **함정 둘:** ① 마지막 고리 패치와 OCHAIN 이 **같은 span** 이다 — OCHAIN 을 고리 패치들보다 앞에 insert 해야 안정 정렬에서 바깥으로 남는다. ② 덮어쓰기(`__zp_oc`)는 합성 패치를 inner 목록 맨 앞에 넣어 같은 span 패치를 이기게 하고, 중첩 마커의 `rewrite_range` 가 그것을 물려받는다.
+- **검증:** rewriter.test.js 25케이스를 네이티브와 결과·평가 로그·에러 클래스까지 대조(구 빌드는 첫 케이스부터 실패). matrix 핀 갱신과 음성 대조 3(키 안쪽 패치·특수형·yield). 워커 `ogetLazy`/`ogetChain`. GitHub rendercheck 높이 15% → 100%, 요소 1811/1811.
+
+## <a id="자식-렉시컬"></a>about:blank 자식 창에 R1 렉시컬 헬퍼가 없었다 — top-level let 을 가진 스크립트가 첫 줄에서 죽었다 (2026-09-29)
+
+- **증상:** 부모가 about:blank iframe 에 써 넣은 스크립트(SafeFrame 모양)가 `__zp_lex_decl is not defined`. 다음 스크립트는 앞 스크립트의 `let` 을 보지 못했다.
+- **원인:** 자식 창은 자체 prelude 없이 containment 의 명시 목록으로 헬퍼를 받는데, R1 이 들어올 때 이 목록에 추가되지 않았다. 부모 것을 그대로 넘기면 안 된다 — 자식의 `let x` 가 부모 것과 충돌하고 부모 전역 조회에 샌다.
+- **수정:** 자식 전용 Map 과 `__zp_lex_scope` 를 깔고, 페이지 `execGlobalScript` 와 같은 `with(__zp_lex_scope)` 래핑을 쓴다(strict 소스는 그대로).
+- **검증:** 브라우저 차분 — 구 containment 로 빌드해 실패를 재현(`undefined | e:ReferenceError`)한 뒤, 수정 후 네이티브와 같다(`6 | number:3:function | 10 | no-throw`). static-policy 헬퍼 가드의 `child:` 축.

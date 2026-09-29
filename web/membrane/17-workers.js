@@ -58,10 +58,7 @@
       const RealSW = root.__zp_realSW || Native.SharedWorker;
       const ZPSharedWorker = function(url, opts) {
         try { zpTrace('SharedWorker', String(url).slice(0, 120)); } catch {}
-        const prefix = sharedWorkerNamePrefix();
-        const named = (opts && opts.name) ? Object.assign({}, opts, { name: prefix + String(opts.name) })
-                                           : Object.assign({}, opts || {}, { name: prefix + 'default' });
-        return new RealSW(workerBootstrapURL(url, opts), named);
+        return new RealSW(workerBootstrapURL(url, opts), prefixedSharedWorkerOptions(sharedWorkerNamePrefix(), opts));
       };
       try { ZPSharedWorker.prototype = RealSW.prototype; } catch {}
       brandLikeNative(ZPSharedWorker, null, 'SharedWorker');

@@ -24,6 +24,8 @@
     if (root.__zp_odelete && !define(w, '__zp_odelete', root.__zp_odelete)) throw normalizedError('SecurityError');
     if (root.__zp_oget && !define(w, '__zp_oget', root.__zp_oget)) throw normalizedError('SecurityError');
     if (root.__zp_ocall && !define(w, '__zp_ocall', root.__zp_ocall)) throw normalizedError('SecurityError');
+    if (root.__zp_ochain && !define(w, '__zp_ochain', root.__zp_ochain)) throw normalizedError('SecurityError');
+    if (root.__zp_ocallv && !define(w, '__zp_ocallv', root.__zp_ocallv)) throw normalizedError('SecurityError');
     if (root.__zp_rget && !define(w, '__zp_rget', root.__zp_rget)) throw normalizedError('SecurityError');
     if (root.__zp_rset && !define(w, '__zp_rset', root.__zp_rset)) throw normalizedError('SecurityError');
     if (root.__zp_getOwnPropertyDescriptors && !define(w, '__zp_getOwnPropertyDescriptors', root.__zp_getOwnPropertyDescriptors)) throw normalizedError('SecurityError');
@@ -59,7 +61,51 @@
       // one inline script's `function foo(){}` is invisible to the next.
       // Capture the child executor before installing its own rewrite gate.
       const childEval = w.eval;
-      const childExecGlobal = code => childEval ? childEval(code) : (new childFunction(code)).call(w);
+      // R1 — 자식도 스크립트마다 indirect eval 이라 top-level let/const/class
+      // 가 스크립트를 넘어 살아남지 못한다. 리라이터가 심은
+      // `__zp_lex_decl`/`__zp_lex_bind` 가 여기 없으면 그런 선언을 가진 스크립트는
+      // 첫 줄에서 ReferenceError 로 죽었다(2026-09-29, 헬퍼 커버리지 가드).
+      // 부모 레지스트리를 공유하면 안 된다 — 자식의 `let x` 가 부모 것과 충돌하고
+      // 부모 전역 조회에 새어 들어간다. 자식 전용 Map 과 스코프를 깐다.
+      const childLex = new Map();
+      const childLexEntry = prop => (typeof prop === 'string' ? childLex.get(prop) : undefined);
+      const childLexRead = (e, prop) => {
+        if (!e.get) throw new ReferenceError(`Cannot access '${prop}' before initialization`);
+        return e.get();
+      };
+      if (!define(w, '__zp_lex_decl', (lexMap, varNames) => {
+        for (const n of varNames) if (childLex.has(n)) return n;
+        for (const n of Object.keys(lexMap)) {
+          if (childLex.has(n) || varNames.includes(n)) return n;
+          const d = Reflect.getOwnPropertyDescriptor(w, n);
+          if (d && !d.configurable) return n;
+        }
+        for (const n of Object.keys(lexMap)) childLex.set(n, { kind: lexMap[n], get: null, set: null });
+        return undefined;
+      })) throw normalizedError('SecurityError');
+      if (!define(w, '__zp_lex_bind', (name, get, set) => {
+        const e = childLex.get(name);
+        if (e) { e.get = get; e.set = typeof set === 'function' ? set : null; }
+      })) throw normalizedError('SecurityError');
+      if (!define(w, '__zp_lex_scope', new Proxy({}, {
+        has(_t, prop) { return childLexEntry(prop) !== undefined; },
+        get(_t, prop) { const e = childLexEntry(prop); return e ? childLexRead(e, prop) : undefined; },
+        set(_t, prop, value) {
+          const e = childLexEntry(prop);
+          if (!e) return false;
+          if (!e.set) throw new TypeError('Assignment to constant variable.');
+          e.set(value);
+          return true;
+        },
+        deleteProperty() { return false; },
+      }))) throw normalizedError('SecurityError');
+      // 페이지 execGlobalScript 와 같다 — sloppy 는 with(__zp_lex_scope) 로 등록된
+      // 이름만 가로채고, strict 는 with 가 불법이라 그대로 둔다.
+      const childStrictRE = /^(\s|\/\*[^]*?\*\/|\/\/[^\n]*)*('use strict'|"use strict")/;
+      const childExecGlobal = code => {
+        if (!childEval) return (new childFunction(code)).call(w);
+        return childEval(childStrictRE.test(code) ? code : 'with(__zp_lex_scope){' + code + '\n}');
+      };
       // `pageRewriteHooks` rather than the bare helpers: they are locals of
       // `installPhase2Membrane`, invisible from this function's scope.
       const childRewrite = (source, kind) => {

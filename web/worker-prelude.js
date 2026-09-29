@@ -317,6 +317,86 @@
     return Reflect.getOwnPropertyDescriptor(Object(workerTarget(target)), prop);
   }
   function ownKeys(target) { return Reflect.ownKeys(Object(workerTarget(target))); }
+  // ★리라이터는 워커에도 페이지와 **같은 헬퍼**를 낸다 — `Object.keys(o)` 는
+  // `__zp_okeys(o)`, `delete o[k]` 는 `__zp_delete(o,k)`, `o?.[k]` 는
+  // `__zp_oget(o,k)`. b602610(2026-09-22)이 페이지에만 정의해서 워커에서는
+  // 이 흔한 코드가 전부 ReferenceError 였다(2026-09-29 실측, 11개 중 10개).
+  // 의미는 07-membrane.js 와 같고 대상 해석만 워커 규칙(workerTarget)을 쓴다.
+  function del(target, prop) {
+    if (typeof prop !== 'symbol') prop = String(prop);
+    {
+      const d = __zp_eval_desc;
+      if (d && isWorkerGlobal(target) && typeof prop === 'string'
+          && Object.prototype.hasOwnProperty.call(d, prop)) { delete d[prop]; return false; }
+    }
+    return Reflect.deleteProperty(Object(workerTarget(target)), prop);
+  }
+  function odel(target, prop) { return target == null ? true : del(target, prop); }
+  function oget(target, prop) { return target == null ? undefined : get(target, prop); }
+  function ocall(target, prop, args, flags) {
+    if (target == null) {
+      if (flags & 2) return undefined;
+      throw new TypeError("Cannot read properties of " + target + " (reading '" + String(prop) + "')");
+    }
+    const fn = get(target, prop);
+    if (fn == null && (flags & 1)) return undefined;
+    return Reflect.apply(fn, workerTarget(target), Array.isArray(args) ? args : []);
+  }
+  // 옵셔널 체인 연속 — 07-membrane.js 의 ochain/ocallv 와 같은 의미.
+  function ochain(target, cont) { return target == null ? undefined : cont(target); }
+  function ocallv(target, prop) {
+    if (target == null) throw new TypeError("Cannot read properties of " + target + " (reading '" + String(prop) + "')");
+    const fn = get(target, prop);
+    if (fn == null) return undefined;
+    const self = workerTarget(target);
+    return function () { return Reflect.apply(fn, self, arguments); };
+  }
+  // Reflect.get/set 의 receiver — 전역이 끼면 가상화 경로(get/set)로, 아니면
+  // 네이티브 receiver 의미 그대로.
+  function rget(target, prop, receiver) {
+    if (receiver === undefined || receiver === target) return get(target, prop);
+    if (isWorkerGlobal(receiver)) return get(receiver, prop);
+    return Reflect.get(Object(workerTarget(target)), prop, receiver);
+  }
+  function rset(target, prop, value, receiver) {
+    if (isWorkerGlobal(target) || isWorkerGlobal(receiver) || target === base) {
+      set(isWorkerGlobal(receiver) ? receiver : target, prop, value);
+      return true;
+    }
+    return Reflect.set(Object(target), prop, value, receiver === undefined ? target : receiver);
+  }
+  function okeys(target) { return Object.keys(Object(workerTarget(target))); }
+  function getOwnPropertyNames(target) { return Object.getOwnPropertyNames(Object(workerTarget(target))); }
+  function getOwnPropertyDescriptors(target) {
+    const out = {};
+    for (const k of Reflect.ownKeys(Object(workerTarget(target)))) out[k] = getOwnPropertyDescriptor(target, k);
+    return out;
+  }
+  // `with(obj)` — 객체 우선, 그다음 바깥(fb). 워커 전역이 obj 면 가상화 경로로.
+  function unscopablesHidden(obj, prop) {
+    const uns = obj == null ? null : obj[Symbol.unscopables];
+    return uns != null && !!uns[prop];
+  }
+  function scopeHas(obj, prop) { return obj != null && prop in Object(obj) && !unscopablesHidden(obj, prop); }
+  function withGet(obj, prop, fb) {
+    if (!scopeHas(obj, prop)) return fb();
+    return isWorkerGlobal(obj) ? get(obj, prop) : obj[prop];
+  }
+  function withSet(obj, prop, value, fb) {
+    if (!scopeHas(obj, prop)) return fb(value);
+    if (isWorkerGlobal(obj)) set(obj, prop, value); else obj[prop] = value;
+    return value;
+  }
+  function withAssign(obj, prop, op, value, fb) { return scopeHas(obj, prop) ? assign(obj, prop, op, value) : fb(); }
+  function withUpdate(obj, prop, op, prefix, fb) { return scopeHas(obj, prop) ? update(obj, prop, op, prefix) : fb(); }
+  function withDelete(obj, prop, fb) { return scopeHas(obj, prop) ? del(obj, prop) : fb(); }
+  function withD(obj, prop, sink) {
+    const viaGlobal = isWorkerGlobal(obj);
+    return {
+      get v() { if (!scopeHas(obj, prop)) return sink[prop]; return viaGlobal ? get(obj, prop) : obj[prop]; },
+      set v(x) { if (scopeHas(obj, prop)) { if (viaGlobal) set(obj, prop, x); else obj[prop] = x; } else sink[prop] = x; }
+    };
+  }
   expose('__zp_get', get);
   expose('__zp_set', set);
   expose('__zp_assign', assign);
@@ -326,6 +406,23 @@
   expose('__zp_has', has);
   expose('__zp_getOwnPropertyDescriptor', getOwnPropertyDescriptor);
   expose('__zp_ownKeys', ownKeys);
+  expose('__zp_delete', del);
+  expose('__zp_odelete', odel);
+  expose('__zp_oget', oget);
+  expose('__zp_ocall', ocall);
+  expose('__zp_ochain', ochain);
+  expose('__zp_ocallv', ocallv);
+  expose('__zp_rget', rget);
+  expose('__zp_rset', rset);
+  expose('__zp_okeys', okeys);
+  expose('__zp_getOwnPropertyNames', getOwnPropertyNames);
+  expose('__zp_getOwnPropertyDescriptors', getOwnPropertyDescriptors);
+  expose('__zp_with_get', withGet);
+  expose('__zp_with_set', withSet);
+  expose('__zp_with_assign', withAssign);
+  expose('__zp_with_update', withUpdate);
+  expose('__zp_with_delete', withDelete);
+  expose('__zp_with_d', withD);
   expose('__zp_module_url', (specifier, referrer) => {
     const spec = String(specifier);
     if (!spec.startsWith('/') && !spec.startsWith('./') && !spec.startsWith('../') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(spec)) throw new TypeError('Blocked by ZeroProxy rewrite policy');
@@ -1147,6 +1244,9 @@
     // 페이지 realm 과 같이 중립 식별자로 지운다.
     const sanitize = v => v == null ? v : String(v).replace(scanRE, deproxyOne).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
     let userPrepare = null;
+    // 저장/복원(`Error.prepareStackTrace = p`)과 체이닝 훅이 zpPrepare 로 되돌아와
+    // 자기 자신을 부르지 않게 — 페이지 realm(06-install.js)과 같은 가드.
+    let inUserPrepare = false;
     const zpPrepare = function (error, frames) {
       const wrapped = frames.map(f => new Proxy(f, {
         get(t, p) {
@@ -1158,7 +1258,10 @@
           return v.bind(t);
         }
       }));
-      if (userPrepare) return userPrepare(error, wrapped);
+      if (userPrepare && !inUserPrepare) {
+        inUserPrepare = true;
+        try { return userPrepare(error, wrapped); } finally { inUserPrepare = false; }
+      }
       let head;
       try { head = String(error); } catch { head = 'Error'; }
       let out = head;
@@ -1168,7 +1271,7 @@
     try {
       Object.defineProperty(E, 'prepareStackTrace', {
         get() { return zpPrepare; },
-        set(v) { userPrepare = typeof v === 'function' ? v : null; },
+        set(v) { userPrepare = typeof v === 'function' && v !== zpPrepare ? v : null; },
         configurable: true, enumerable: false
       });
     } catch {}
@@ -1375,6 +1478,17 @@
       storageMgr.getDirectory = function getDirectory() {
         return nativeGetDirectory().then(d => d.getDirectoryHandle(opfsRoot, { create: true }));
       };
+      // 루트 핸들 `.name` 은 네이티브에서 '' 다 — 서브디렉터리 이름
+      // 'zp:o:<hash>' 가 그대로 보였다(페이지 realm 과 같은 마스크).
+      const FSH = self.FileSystemHandle && self.FileSystemHandle.prototype;
+      const nameDesc = FSH && Object.getOwnPropertyDescriptor(FSH, 'name');
+      if (nameDesc && typeof nameDesc.get === 'function' && nameDesc.configurable) {
+        const nativeName = nameDesc.get;
+        Object.defineProperty(FSH, 'name', {
+          get: function name() { const n = nativeName.call(this); return n === opfsRoot ? '' : n; },
+          enumerable: nameDesc.enumerable, configurable: true,
+        });
+      }
     }
   } catch {}
   // 레거시 웹킷 FS/quota — 프록시 오리진 파일시스템을 그대로 노출하므로

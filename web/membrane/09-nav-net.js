@@ -584,14 +584,15 @@
     // 놓치고 **CSP 만** 막고 있었다 — 구멍 매트릭스의 유일한 `csp-only` 칸.
     // CSP 는 2선 방어다. 값을 삼켜서 브라우저가 요청을 만들지 못하게 한다.
     // 게터는 페이지가 되읽을 수 있게 저장값을 돌려준다(기능 감지 호환).
-    const pingValues = new WeakMap();
+    // The stash attribute is the single source of truth for both the
+    // property and setAttribute paths (a WeakMap here used to miss values
+    // written with setAttribute, so `a.ping` read '' after them).
     for (const Ctor of [w.HTMLAnchorElement, w.HTMLAreaElement]) {
       const proto = Ctor && Ctor.prototype;
       if (!proto || propertyLocked(proto, 'ping')) continue;
       defineAccessor(proto, 'ping',
-        function () { return pingValues.get(this) || ''; },
+        function () { const v = Native.getAttribute.call(this, 'data-zp-blocked-ping'); return v == null ? '' : v; },
         function (v) {
-          pingValues.set(this, String(v));
           try { Native.setAttribute.call(this, 'data-zp-blocked-ping', String(v)); } catch {}
           try { Native.removeAttribute.call(this, 'ping'); } catch {}
         });
@@ -644,6 +645,56 @@
     installSrcsetProp(w.HTMLImageElement && w.HTMLImageElement.prototype, 'srcset', 'srcset');
     installSrcsetProp(w.HTMLSourceElement && w.HTMLSourceElement.prototype, 'srcset', 'srcset');
     installSrcsetProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype, 'imageSrcset', 'imagesrcset');
+    // IDL writes that set a url_surfaces attribute WITHOUT going through the
+    // setAttribute hook. Measured against every url_surfaces.json pair in
+    // Chrome 152 (reflecting setter → content attribute); these three were the
+    // unhooked ones. `inp.src = url` reached the target directly (CSP blocked
+    // it, so the image just failed — e2e wire, 2026-09-29).
+    installURLProp(w.HTMLInputElement && w.HTMLInputElement.prototype, 'src');
+    // body.background is a PLAIN string reflection (not [URL]): natively it
+    // reads back the raw text, and null becomes '' ([LegacyNullToEmptyString]).
+    if (w.HTMLBodyElement && !propertyLocked(w.HTMLBodyElement.prototype, 'background')) {
+      defineAccessor(w.HTMLBodyElement.prototype, 'background',
+        function () { const v = this.getAttribute('background'); return v == null ? '' : v; },
+        function (v) { this.setAttribute('background', v == null ? '' : String(v)); });
+    }
+    // SVG `href` is an SVGAnimatedString: `el.href.baseVal = url` writes the
+    // attribute internally. Hand out a per-element Proxy of the real object
+    // whose baseVal/animVal go through the hooked attribute path; every other
+    // member reaches the real object as its own receiver, so brand checks,
+    // `instanceof SVGAnimatedString` and `el.href === el.href` all hold.
+    const svgHrefProxies = new WeakMap();
+    const XLINK_NS = 'http://www.w3.org/1999/xlink';
+    for (const Ctor of [w.SVGImageElement, w.SVGUseElement, w.SVGFEImageElement, w.SVGScriptElement, w.SVGAElement]) {
+      const proto = Ctor && Ctor.prototype;
+      const d = proto && Object.getOwnPropertyDescriptor(proto, 'href');
+      if (!d || typeof d.get !== 'function' || !d.configurable) continue;
+      const nativeHref = d.get;
+      defineMasked(proto, 'href', {
+        get() {
+          const real = nativeHref.call(this);
+          if (!real || typeof real !== 'object') return real;
+          let p = svgHrefProxies.get(real);
+          if (p) return p;
+          const el = this;
+          // SVG2: `href` wins over `xlink:href` for both reading and baseVal.
+          const read = () => {
+            const v = Native.hasAttribute.call(el, 'href') ? el.getAttribute('href') : el.getAttributeNS(XLINK_NS, 'href');
+            return v == null ? '' : v;
+          };
+          p = new Proxy(real, {
+            get(t, k) { return k === 'baseVal' || k === 'animVal' ? read() : Reflect.get(t, k, t); },
+            set(t, k, v) {
+              if (k === 'baseVal') { el.setAttribute('href', v); return true; }
+              return Reflect.set(t, k, v, t);
+            },
+          });
+          svgHrefProxies.set(real, p);
+          return p;
+        },
+        enumerable: d.enumerable, configurable: true,
+      });
+    }
     // ★`meta.httpEquiv = 'Content-Security-Policy'` — 프로퍼티 경로.
     //
     // 항목 7(srcset)에서 배운 것과 같은 자리다: 프로퍼티 대입은 setAttribute

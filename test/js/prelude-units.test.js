@@ -494,3 +494,53 @@ test('decodeInlineEntities decodes the raw-text entity set', () => {
   assert.equal(decodeInlineEntities('plain'), 'plain');
   assert.equal(decodeInlineEntities(''), '');
 });
+
+// ---------------------------------------------------------------------------
+// Error.stack sanitizer — page (06-install.js) and worker copies.
+//
+// GitHub 실측(2026-09-29): React 의 describeNativeComponentFrame 은
+// `const p = Error.prepareStackTrace; Error.prepareStackTrace = undefined; …;
+// Error.prepareStackTrace = p` 로 저장/복원한다. 게터가 준 값은 우리 zpPrepare
+// 라서 복원이 `userPrepare = zpPrepare` 가 되고, 그 뒤 모든 `.stack` 이
+// zpPrepare → zpPrepare → … 로 스택을 터뜨렸다. react-partial 6개가 전부
+// "Maximum call stack size exceeded" 로 죽었다. 이전 값을 부르는 체이닝 훅도
+// 같은 고리다. Node 는 V8 처럼 realm 의 `Error.prepareStackTrace` 를 부르므로
+// vm realm 에 설치해 실제 포맷 경로로 검증한다.
+// ---------------------------------------------------------------------------
+
+const vm = require('node:vm');
+const WORKER_SRC = fs.readFileSync(require.resolve('../../web/worker-prelude.js'), 'utf8').split('\r\n').join('\n');
+
+function sanitizerRealm(install) {
+  const ctx = vm.createContext({});
+  install(vm.runInContext('globalThis', ctx));
+  return code => vm.runInContext(code, ctx);
+}
+
+const STACK_SANITIZERS = {
+  page: realm => load(
+    slice('  function installStackSanitizer() {', '  function installPhase2Membrane() {'),
+    ['installStackSanitizer'],
+    { root: realm, deproxyURL: s => s, defineMasked: (o, p, d) => Object.defineProperty(o, p, d) },
+  ).installStackSanitizer(),
+  worker: realm => {
+    const a = WORKER_SRC.indexOf('  (function installStackSanitizer() {');
+    const b = WORKER_SRC.indexOf('  })();', a);
+    assert.ok(a >= 0 && b > a, 'worker stack sanitizer markers missing');
+    load(WORKER_SRC.slice(a, b + '  })();'.length), [], {
+      self: realm, realProxyOrigin: 'http://proxy.localhost:18080', NativeURLCtor: URL, base: new URL('https://t.example/'),
+    });
+  },
+};
+
+for (const [name, install] of Object.entries(STACK_SANITIZERS)) {
+  test(`${name} stack sanitizer survives save/restore and chaining of prepareStackTrace`, () => {
+    const run = sanitizerRealm(install);
+    // React describeNativeComponentFrame — 저장/비움/복원 뒤에도 기본 포맷.
+    assert.match(run("const p = Error.prepareStackTrace; Error.prepareStackTrace = undefined; Error.prepareStackTrace = p; new Error('x').stack"), /^Error: x\n    at /);
+    // 이전 값을 부르는 체이닝 훅 — 한 번 감싸고 기본 포맷으로 끝난다.
+    assert.match(run("{ const prev = Error.prepareStackTrace; Error.prepareStackTrace = (e, f) => 'W:' + prev(e, f); const s = new Error('y').stack; Error.prepareStackTrace = prev; s }"), /^W:Error: y\n    at /);
+    // 페이지 훅은 프레임을 받고 그 결과가 `.stack` 이 된다.
+    assert.equal(run("Error.prepareStackTrace = (e, f) => 'n:' + (f.length > 0); const s2 = new Error('z').stack; Error.prepareStackTrace = undefined; s2"), 'n:true');
+  });
+}

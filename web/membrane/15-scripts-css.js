@@ -60,6 +60,22 @@
     if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + encodeURIComponent(target) + '&kind=module';
     return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href);
   }
+  // 프록시 script URL 의 kind 를 요소의 **지금** `type` 에 맞춘다.
+  //
+  // 브라우저는 삽입(prepare) 시점의 `type` 으로 classic/module 을 가른다.
+  // `s.src = X; s.type = 'module'` — `Object.assign(s, {src, type})` 가 이
+  // 순서다 — 이면 src 대입 때 박힌 kind=classic 이 삽입 때 틀려 있고, SW 는
+  // 모듈에 classic 리라이트(R1 레지스트리 프롤로그)를 붙인다.
+  function withCurrentKind(value, kind) {
+    if (!kind) return value;
+    try {
+      const u = new URL(value, proxyOrigin);
+      if (u.pathname !== ZP.apiPath('script')) return value;
+      const target = u.searchParams.get('u');
+      if (!target || (u.searchParams.get('kind') || 'classic') === kind) return value;
+      return scriptProxyPath(target, kind);
+    } catch { return value; }
+  }
   // 프록시 api URL 의 `ref` 파라미터를 현재 가상 URL 로 바꿔 준다.
   function withCurrentRef(value) {
     try {
@@ -87,7 +103,7 @@
       // 삽입 직전에 다시 불릴 때(prepareScriptElement) `ref` 를 **지금** 값으로
       // 갱신한다. src 대입 시점과 DOM 삽입 시점 사이에 replaceState 가 끼면
       // 대입 때 박아 둔 ref 는 이미 낡았다.
-      const refreshed = withCurrentRef(value);
+      const refreshed = withCurrentRef(withCurrentKind(value, kind));
       // ★이 분기는 **스태시 없이** 통과하고 있었다. 서버측 htmltx 가 고쳐 내려보낸
       // 정적 스크립트나 페이지가 복사해 재대입한 값이 여기로 들어오는데,
       // 그러면 `src` / `getAttribute('src')` 가 되돌릴 근거를 잃어 **프록시 URL 이
@@ -983,6 +999,26 @@
     const walker = parserDoc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
     const nodes = [];
     for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+    // R6 literal parity for page-side HTML ingestion. The server htmltx stashes
+    // the author text of every URL attribute it rewrites as `data-zp-lit-*`;
+    // this walker did not, so `el.innerHTML = '<a href="/x">'` read back as
+    // `href="http://t/x"` through getAttribute, outerHTML, getHTML and
+    // XMLSerializer (compat differential, Chrome 152 keeps "/x"). Snapshot
+    // first; after the walk, stash only what it actually changed.
+    const literals = new Map();
+    if (Native.getAttributeNames) {
+      for (const node of nodes) {
+        let m = null;
+        for (const name of Native.getAttributeNames.call(node)) {
+          if (isZPAttrName(name)) continue;
+          const lk = attrLocalName(name);
+          if (lk === 'style' || lk === 'srcset' || lk === 'imagesrcset' || isURLBearing(node, name, lk, node.localName)) {
+            (m || (m = new Map())).set(name, Native.getAttribute.call(node, name));
+          }
+        }
+        if (m) literals.set(node, m);
+      }
+    }
     for (const node of nodes) {
       const tag = node.localName;
       if (tag === 'meta') {
@@ -1100,6 +1136,15 @@
       // 뒤에야 요소를 만난다. 요소 훅 자리에서 고치려던 시도가 전부 실패한
       // 이유가 이것이다(파킹은 격리까지 퇴행시켰다).
       if (swLessTarget) applySWLessRelay(node);
+    }
+    for (const [node, m] of literals) {
+      for (const [name, lit] of m) {
+        if (lit === null) continue;
+        let now;
+        try { now = Native.getAttribute.call(node, name); } catch { continue; }
+        if (now === lit || Native.hasAttribute.call(node, litAttrName(name))) continue;
+        try { Native.setAttribute.call(node, litAttrName(name), lit); } catch {}
+      }
     }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
   }

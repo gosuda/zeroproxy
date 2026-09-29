@@ -613,6 +613,64 @@ function createTargetServer(requests, pendingResponses) {
           P('anchorPing', () => { var a = document.createElement('a'); a.ping = 'http://p.example/x'; return a.ping; });
           P('domCount', () => document.getElementById('compat-dom').childElementCount);
           PA('fetchEcho', async () => (await fetch('/compat-echo?n=1')).status);
+          // J — every URL-bearing attribute / CSS form must LOAD through the
+          // proxy exactly when it loads natively. A missed rewrite is caught by
+          // CSP (no escape) but the resource silently fails — that is the
+          // divergence this measures. Evidence: resource-timing entries,
+          // which the membrane reports under target URLs.
+          {
+            const O = location.origin;
+            const img = k => O + '/image-probe.png?j=' + k;
+            const host = document.createElement('div');
+            host.style.cssText = 'position:absolute;left:0;top:0;width:40px;height:40px;overflow:hidden';
+            document.body.appendChild(host);
+            const add = h => { const d = document.createElement('div'); d.innerHTML = h; host.appendChild(d); return d.firstElementChild; };
+            const vid = document.createElement('video'); vid.poster = img('poster'); host.appendChild(vid);
+            const inp = document.createElement('input'); inp.type = 'image'; inp.src = img('inputsrc'); host.appendChild(inp);
+            add('<table><tr><td background="' + img('tdbg') + '">x</td></tr></table>');
+            const pre = document.createElement('link'); pre.rel = 'preload'; pre.as = 'image'; pre.imageSrcset = img('imagesrcset') + ' 1x'; document.head.appendChild(pre);
+            add('<svg width="4" height="4"><image href="' + img('svgimage') + '" width="4" height="4"></image></svg>');
+            const st = document.createElement('style');
+            st.textContent = '#jset{width:4px;height:4px;background-image:image-set(url("' + img('imageset') + '") 1x)}'
+              + '#jmask{width:4px;height:4px;-webkit-mask-image:url("' + img('mask') + '");mask-image:url("' + img('mask') + '")}'
+              + '#jbefore::before{content:url("' + img('before') + '")}'
+              + '#jshape{float:left;width:4px;height:4px;shape-outside:url("' + img('shape') + '")}';
+            document.head.appendChild(st);
+            add('<div id="jset"></div>'); add('<div id="jmask"></div>'); add('<div id="jbefore"></div>'); add('<div id="jshape"></div>');
+            const imp = document.createElement('style'); imp.textContent = '@import url("' + O + '/site.css?j=import");'; document.head.appendChild(imp);
+            const q = document.createElement('q'); q.cite = O + '/j/cite';
+            const btn = document.createElement('button'); btn.formAction = O + '/j/fa';
+            const area = document.createElement('area'); area.href = O + '/j/area';
+            // Serialization keeps the author's literal URL text natively.
+            P('serInner', () => { const d = document.createElement('div'); const a = document.createElement('a'); a.setAttribute('href', '/ser-a'); const i = document.createElement('img'); i.setAttribute('src', 'ser-i.png'); d.appendChild(a); d.appendChild(i); return d.innerHTML; });
+            P('serOuterProp', () => { const a = document.createElement('a'); a.href = 'ser-p'; return a.outerHTML; });
+            P('serParsed', () => { const d = document.createElement('div'); d.innerHTML = '<a href="/ser-x">x</a><img src="/image-probe.png?j=ser">'; return d.innerHTML; });
+            P('serXML', () => { const d = document.createElement('div'); d.innerHTML = '<a href="/ser-y">y</a>'; return new XMLSerializer().serializeToString(d.firstChild); });
+            P('serStyle', () => { const d = document.createElement('div'); d.setAttribute('style', 'background:url(/ser-s.png)'); return d.outerHTML; });
+            P('jCiteProp', () => q.cite + '|' + q.getAttribute('cite'));
+            P('jFormactionProp', () => btn.formAction + '|' + btn.getAttribute('formaction'));
+            P('jAreaProp', () => area.href + '|' + area.getAttribute('href'));
+            P('jPosterProp', () => vid.poster);
+            P('jInputSrcProp', () => inp.src);
+            // IDL write paths that skip the setAttribute hook (measured list).
+            const bodyBgBefore = document.body.getAttribute('background');
+            document.body.background = img('bodybg');
+            P('jBodyBgProp', () => document.body.background);
+            const svgNS = 'http://www.w3.org/2000/svg';
+            const svg2 = document.createElementNS(svgNS, 'svg');
+            const im2 = document.createElementNS(svgNS, 'image');
+            im2.setAttribute('width', '4'); im2.setAttribute('height', '4');
+            im2.href.baseVal = img('svgbaseval');
+            svg2.appendChild(im2); host.appendChild(svg2);
+            P('jSvgBaseVal', () => im2.href.baseVal + '|' + im2.href.animVal + '|' + im2.getAttribute('href'));
+            P('jSvgHrefShape', () => (im2.href === im2.href) + '|' + (im2.href instanceof SVGAnimatedString) + '|' + Object.prototype.toString.call(im2.href));
+            // Loads are judged server-side (the test compares the target's
+            // request log for the native and proxied runs): resource-timing
+            // entries exist even for CSP-blocked fetches, so they cannot tell.
+            await new Promise(r => setTimeout(r, 1500));
+            if (bodyBgBefore === null) document.body.removeAttribute('background'); else document.body.setAttribute('background', bodyBgBefore);
+            host.remove(); pre.remove(); st.remove(); imp.remove();
+          }
           // history.pushState last — it mutates the document URL
           P('historyPush', () => { history.pushState({}, '', '?pq=1'); return location.search; });
           window.__compatProbes = out;
@@ -1065,6 +1123,14 @@ function createTargetServer(requests, pendingResponses) {
       res.end('export const m = 1; export const meta = import.meta.url;');
       return;
     }
+    if (/^\/lex-mod-[abc]\.js$/.test(url.pathname)) {
+      // import/export 없는 모듈 — GitHub high-contrast-cookie /
+      // global-banner-disable 의 모양. 셋 다 top-level `let e` 를 갖는다.
+      const tag = url.pathname.charAt(9);
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`let e = '${tag}'; window.__lexMod${tag.toUpperCase()} = e;`);
+      return;
+    }
     if (url.pathname === '/dyn-probes') {
       // O9: dynamic code suite — §E eval/Function/timers/event handlers/DOM
       // insertion paths. Three assertion kinds per case: success (runs through
@@ -1073,6 +1139,8 @@ function createTargetServer(requests, pendingResponses) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(`<!doctype html><title>ZP Dynamic Probes</title><body>
       <button id="staticHandler" onclick="window.__staticHandlerRan = 1"></button>
+      <script type="module" src="/lex-mod-a.js"><\/script>
+      <script type="module" src="/lex-mod-b.js"><\/script>
       <script>
         // document.write during parse — inserts into the live pipeline.
         document.write('<span id="dw">wrote</span>');
@@ -1198,6 +1266,23 @@ function createTargetServer(requests, pendingResponses) {
           await P('fnSyntaxError', () => { try { new Function('if('); return 'no-throw'; } catch (e) { return 'threw:' + (e && e.name || e) + '|' + (e instanceof SyntaxError); } });
           await P('fnParamSyntax', () => { try { new Function('a b', 'return 1'); return 'no-throw'; } catch (e) { return 'threw:' + (e && e.name || e); } });
           await P('winHandlerString', () => { window.onmessageerror = 'window.__whs = 1'; const r = 'v:' + window.onmessageerror; window.onmessageerror = null; return r; });
+
+          // ── 모듈 kind — import/export 가 없어도 모듈이다 (2026-09-29, GitHub) ──
+          // 정적 모듈 둘이 각자 top-level let e 를 갖는다. 모듈 스코프는 따로라
+          // 네이티브에선 둘 다 돈다. classic 으로 리라이트되면 R1 레지스트리가
+          // 둘째를 "already declared" 로 죽였다.
+          await P('staticModuleLex', async () => { for (let i = 0; i < 60 && !(window.__lexModA && window.__lexModB); i++) await sleep(50); return 'v:' + window.__lexModA + '|' + window.__lexModB; });
+          // src 를 type 보다 먼저 넣는 순서 — kind 는 삽입 시점의 type 이 정한다.
+          // 뒤의 classic let e 는 모듈이 레지스트리에 잘못 올라갔을 때만 충돌한다.
+          await P('dynModuleTypeAfterSrc', async () => {
+            const s = document.createElement('script');
+            Object.assign(s, { src: '/lex-mod-c.js', type: 'module' });
+            await new Promise(res => { s.onload = s.onerror = res; document.head.appendChild(s); });
+            const k = document.createElement('script');
+            k.textContent = "let e = 'k'; window.__lexClassicE = e;";
+            document.head.appendChild(k);
+            return 'v:' + window.__lexModC + '|' + window.__lexClassicE;
+          });
           out.done = true;
         })().catch(e => { (window.__dynProbes = window.__dynProbes || {}).__fatal = String(e && (e.stack || e)); });
       <\/script></body>`);
@@ -1470,7 +1555,8 @@ function createTargetServer(requests, pendingResponses) {
 
           // ── T1-5: 에러 인자/ownKeys ──
           await P('ownKeysLeak', () => {
-            const ks = Object.getOwnPropertyNames(window);
+            // Harness bindings Puppeteer injects into the page it drives are not ours.
+            const ks = Object.getOwnPropertyNames(window).filter(k => !/^(__aria|puppeteer)/.test(k));
             const bad = ks.filter(k => k.indexOf('zp') === 0 || k.includes('__zp'));
             return bad.length ? 'LEAK:' + bad.slice(0, 5).join(',') : 'clean:' + ks.length;
           });
@@ -1801,6 +1887,29 @@ function createTargetServer(requests, pendingResponses) {
             const byTag = document.getElementsByTagName('x-probe-el').length;
             el.remove();
             return 'ctor:' + sameCtor + '|up:' + upgraded + '|names:' + names + '|qs:' + (found === el) + '|tag:' + byTag;
+          });
+          // P11b: 파스된 요소의 업그레이드 — GitHub catalyst 패턴 (2026-09-29).
+          // define 전에 잡아 둔 요소가 그 자리에서 업그레이드되고(정체성 유지),
+          // connectedCallback 의 closest(tag) 타깃 탐색·matches·CSS 타입 선택자가
+          // 네이티브처럼 맞아야 한다. 타깃별 접두 레지스트리는 넷 다 깼다.
+          await P('customElUpgrade', async () => {
+            if (typeof customElements === 'undefined') return 'absent';
+            const host = document.createElement('div');
+            host.innerHTML = '<style>x-cat-el{display:block;width:7px}</style><x-cat-el><scr' + 'ipt type="application/json" data-target="x-cat-el.embeddedData">{"ok":1}</scr' + 'ipt></x-cat-el>';
+            document.body.appendChild(host);
+            const pre = host.querySelector('x-cat-el');
+            let target = 'none';
+            class XCatEl extends HTMLElement {
+              connectedCallback() {
+                const tag = this.tagName.toLowerCase();
+                for (const t of this.querySelectorAll('[data-target~="' + tag + '.embeddedData"]')) if (t.closest(tag) === this) { target = t.textContent; break; }
+              }
+            }
+            customElements.define('x-cat-el', XCatEl);
+            const now = host.querySelector('x-cat-el');
+            const r = 'same:' + (pre === now) + '|up:' + (pre instanceof XCatEl) + '|target:' + target + '|matches:' + now.matches('x-cat-el') + '|w:' + getComputedStyle(now).width;
+            host.remove();
+            return r;
           });
           await P('permGeo', async () => {
             if (!navigator.permissions || typeof navigator.permissions.query !== 'function') return 'absent';
@@ -3576,6 +3685,20 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.ok(!newWire.some(u => u.startsWith(`${targetBase}/`)), `page issued direct-target requests: ${JSON.stringify(newWire.filter(u => u.startsWith(targetBase)))}`);
       assert.ok(requests.some(r => r.url.startsWith('/compat-echo')), 'upstream never saw /compat-echo');
     });
+    // ERRATA J: each URL-bearing attribute / IDL write / CSS form must load
+    // through the proxy exactly when it loads natively. Judged from the
+    // target's own request log — native requests carry the browser UA,
+    // proxied ones TARGET_UA. (A missed rewrite is CSP-blocked, so it shows
+    // up here as "native loaded, proxy never asked".)
+    await t.test('J: every URL form loads through the proxy exactly when it loads natively', () => {
+      const keys = ['poster', 'inputsrc', 'tdbg', 'imagesrcset', 'svgimage', 'imageset', 'mask', 'before', 'shape', 'import', 'bodybg', 'svgbaseval'];
+      const seen = (k, proxied) => requests.some(r => r.url.includes('j=' + k) && ((r.userAgent === TARGET_UA) === proxied));
+      const table = keys.map(k => [k, seen(k, false), seen(k, true)]);
+      fs.writeFileSync(path.join(artifacts, 'compat-j-loads.json'), JSON.stringify(table, null, 2));
+      const diverged = table.filter(([, nat, prox]) => nat !== prox).map(([k, nat, prox]) => `${k}: native=${nat} proxy=${prox}`);
+      assert.deepEqual(diverged, [], diverged.join('; '));
+      assert.ok(table.filter(([, nat]) => nat).length >= 8, `native run loaded too few probes to mean anything: ${JSON.stringify(table)}`);
+    });
   });
 
   // O6: iframe suite — creation/insertion/navigation/srcdoc/blob(blocked)/
@@ -3711,8 +3834,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // BroadcastChannel.name 은 페이지가 요청한 이름만 보인다(실제 채널은
       // 타깃 해시 프리픽스로 격리).
       assert.equal(d.bcName, 'v:wp1', `bcName: ${d.bcName}`);
-      // OPFS — 프록시 오리진 공유 대신 타깃 해시 서브디렉터리.
-      assert.match(d.opfsName, /^v:name:zp:o:[0-9a-f]{8}$/, `opfsName: ${d.opfsName}`);
+      // OPFS — a per-target subdirectory, but the root handle's name reads ''
+      // exactly like the native root (the namespace itself stays invisible).
+      assert.equal(d.opfsName, 'v:name:', `opfsName: ${d.opfsName}`);
       // 레거시 FS — 이 Chrome 워커엔 webkitRequestFileSystem 이 실재한다 —
       // 우리는 NotSupportedError 게이트로 fail-closed (프록시 오리진 FS 차단).
       assert.match(d.webkitFS, /^v:(undefined|fn:e:NotSupportedError)$/, `webkitFS: ${d.webkitFS}`);
@@ -3932,6 +4056,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // 컴파일/실행하지 않는다(content attribute 만 컴파일된다).
       assert.equal(probes.handlerPropString, 'v:silent', `handlerPropString: ${probes.handlerPropString}`);
     });
+    await t.test('module kind survives import/export-free modules', () => {
+      // 네이티브 값. classic 리라이트면 'v:a|undefined' / 'v:c|undefined'.
+      assert.equal(probes.staticModuleLex, 'v:a|b', `staticModuleLex: ${probes.staticModuleLex}`);
+      assert.equal(probes.dynModuleTypeAfterSrc, 'v:c|k', `dynModuleTypeAfterSrc: ${probes.dynModuleTypeAfterSrc}`);
+    });
     await t.test('DOM insertion', () => {
       assert.equal(probes.docWrite, 'v:wrote', `docWrite: ${probes.docWrite}`);
       // native parity — innerHTML/insertAdjacentHTML/DOMParser 스크립트는
@@ -4037,9 +4166,80 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     const errs = await page.evaluate(() => window.__surfaceErrs);
     fs.writeFileSync(path.join(artifacts, 'surface-probes.json'), JSON.stringify({ probes, errs }, null, 2));
     assert.ok(!probes.__fatal, `surface fixture died: ${probes.__fatal}`);
+    // The same fixture in plain Chrome. Every divergence below is deliberate
+    // (fail-closed by design) or a documented ERRATA residual, each with its
+    // reason; any other difference is a regression. Pins further down were
+    // once written from proxy-only runs — five of them encoded divergences.
+    await t.test('surface probes match native Chrome except documented divergences', async () => {
+      // The native reference occasionally stalls (this fixture drives mailto:,
+      // WebAuthn and protocol-handler UIs that headless Chrome may sit on). It
+      // is the REFERENCE, not the system under test, so bound each attempt
+      // (hard kill) and retry once with a fresh browser — never the proxy side.
+      const collectNative = async () => {
+        const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 20000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+        const killer = setTimeout(() => { try { directBrowser.process().kill('SIGKILL'); } catch {} }, 40000);
+        try {
+          const dp = await directBrowser.newPage();
+          // Native alert/confirm/prompt block the page; dismissing them yields
+          // exactly the stubs' values (undefined / false / null).
+          dp.on('dialog', d => { d.dismiss().catch(() => {}); });
+          // ★The fixture calls navigator.credentials.create({publicKey}). Natively
+          // on Windows that goes to the OS (Windows Security / passkey dialog,
+          // CredentialUIBroker.exe) — a system modal on the developer's desktop
+          // that a headless browser can never dismiss, and the stall behind the
+          // intermittent 140 s reference runs (2026-09-29). A CDP virtual
+          // authenticator keeps WebAuthn inside the browser. The proxied side
+          // never reaches native WebAuthn (the facade fails closed).
+          const cdp = await dp.target().createCDPSession();
+          await cdp.send('WebAuthn.enable', { enableUI: false });
+          await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true } });
+          await dp.goto(`http://${targetHost}:${targetPort}/surface-probes`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          // Default `raf` polling starved in the background headless page (140 s).
+          await dp.waitForFunction(() => window.__surfaceProbes && window.__surfaceProbes.done && window.__surfaceProbes.moduleDone, { timeout: 30000, polling: 100 });
+          return await dp.evaluate(() => window.__surfaceProbes);
+        } finally {
+          clearTimeout(killer);
+          await directBrowser.close().catch(() => {});
+        }
+      };
+      let direct;
+      try { direct = await collectNative(); } catch (e) {
+        console.log('native surface reference retried after:', e && e.message);
+        direct = await collectNative();
+      }
+      fs.writeFileSync(path.join(artifacts, 'surface-differential.json'), JSON.stringify({ direct, proxied: probes }, null, 2));
+      const expected = {
+        // Fail-closed by design (PHASE2_STATUS divergence table, ERRATA Q7).
+        webAuthn: 'credentials.create → NotAllowedError: the RP would be the proxy origin',
+        credGet: 'credentials.get → NotAllowedError, same reason',
+        webkitFS: 'legacy FS/quota removed: a proxy-origin filesystem shared across targets',
+        paSurfaces: 'Privacy Sandbox APIs removed: keyed to the proxy origin',
+        swRegs: 'the virtual SW facade always reports one fake registration (D3 fail-soft)',
+        dynamicBase: "base-uri 'none': a runtime <base> does not move the virtual base",
+        // Documented residuals (ERRATA).
+        framesByName: 'a srcdoc child reports the parent virtual URL, not about:srcdoc',
+        windowByName: 'same as framesByName',
+        framesItem: 'V8 names the rewritten callee in "is not a function" messages',
+        withEvalScope: 'direct eval inside with() does not see the with-object',
+        parseHTMLUnsafeHook: 'a base-less parsed document resolves anchor href against the virtual base',
+        ownKeysLeak: 'a var from a script rejected for redeclaration survives (eval instantiation)',
+        // Not a divergence: the probe folds in a clock reading.
+        realProps: 'includes a clock-derived field',
+      };
+      assert.deepEqual(Object.keys(probes).sort(), Object.keys(direct).sort(), 'surface probe key sets differ');
+      const unexpected = Object.keys(direct).filter(k => probes[k] !== direct[k] && !(k in expected))
+        .map(k => `${k}: native=${direct[k]} proxy=${probes[k]}`);
+      assert.deepEqual(unexpected, [], unexpected.join('\n'));
+      // A documented divergence that stops diverging means the behavior moved —
+      // re-audit ERRATA instead of letting the entry rot.
+      const healed = Object.keys(expected).filter(k => k !== 'realProps' && probes[k] === direct[k]);
+      assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
+    });
     // T1-1: transformer 잔여 — 전부 리라이트/클린
-    assert.equal(probes.importmapText, 'v:rewritten');
-    assert.equal(probes.specrulesText, 'v:rewritten');
+    // Read-back is deproxied like native text; the rewrite itself is proven by
+    // importmapBare (the module resolves through the proxy) and the wire check.
+    assert.equal(probes.importmapText, 'v:raw');
+    assert.equal(probes.specrulesText, 'v:raw');
     assert.match(probes.shadowDom, /^v:shadow-img:clean/);
     assert.match(probes.svgImage, /^v:clean:/);
     assert.match(probes.svgAnchor, /^v:clean:/);
@@ -4063,9 +4263,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     assert.equal(probes.lookupSetterLoc, 'v:fn');
     // T1-5: getOwnPropertyNames(window) — 동작해야 하되 __zp_* 는 숨긴다
     assert.match(probes.ownKeysLeak, /^v:clean:\d+$/, `ownKeysLeak: ${probes.ownKeysLeak}`);
-    // T1-6: ping 은 속성이 제거되고 요청이 안 나간다. marker 는 data-zp-* 라
-    // 페이지 getAttribute 에서 숨겨진다('none' 이 정상). prop 은 저장값을 돌린다.
-    assert.match(probes.anchorPing, /^v:attr:null\|marker:none\|prop:/);
+    // T1-6: the browser never pings on its own (the attribute is stashed and
+    // E1 fires it through the proxy), yet every read surface answers like
+    // native: getAttribute/prop show the value, the data-zp marker stays hidden.
+    assert.equal(probes.anchorPing, 'v:attr:https://evil.example/track|marker:none|prop:https://evil.example/track');
     // import.meta.resolve 는 가상 타깃 URL 기준 해석
     assert.match(probes.importMetaResolve, /^v:http:\/\/localhost:\d+\/x$/, `importMetaResolve: ${probes.importMetaResolve}`);
     // T1-7: document.write 두 번째 문서 — 스크립트가 가상 location 아래 실행
@@ -4184,9 +4385,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.match(probes.fetchLaterCall, /^v:activated:(true|false)/, `fetchLaterCall: ${probes.fetchLaterCall}`);
     }
     // P10: OPFS — 타깃 해시 서브디렉터리 (마커/오리진 문자열 미노출).
-    assert.match(probes.opfsName, /^v:name:zp:o:[0-9a-f]{8}$|^v:absent$/, `opfsName: ${probes.opfsName}`);
-    // P11: customElements — 프리픽스 레지스트리 + 이름 마스킹 + 쿼리 변환.
+    assert.match(probes.opfsName, /^v:name:$|^v:absent$/, `opfsName: ${probes.opfsName}`);
+    // P11: customElements — 네이티브 레지스트리 그대로. 레지스트리는 Window 마다
+    // 있고 문서를 넘지 않으므로(크롬 152 실측) 타깃별 접두어는 격리가 아니었다.
     assert.equal(probes.customEl, 'v:ctor:true|up:true|names:x-probe-el|X-PROBE-EL|qs:true|tag:1', `customEl: ${probes.customEl}`);
+    assert.equal(probes.customElUpgrade, 'v:same:true|up:true|target:{"ok":1}|matches:true|w:7px', `customElUpgrade: ${probes.customElUpgrade}`);
     // P12: permissions.query — 프록시 오리진 grant 미노출, 추적 권한은 prompt.
     assert.match(probes.permGeo, /^v:(state:prompt|state:denied|e:\w+|absent)/, `permGeo: ${probes.permGeo}`);
     // P13: Privacy Sandbox — fail-closed. browsingTopics 는 빈 배열 게이트.
@@ -4205,7 +4408,8 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     // ShadowRealm importValue / wasmStreamUrl 이 직접 egress 를 낳았는지 wire 확인.
     const p0Direct = wireRequests.filter(u => /^https?:\/\/(sr-leak|wasm-leak)\.invalid/.test(u) && !u.includes('/zp/'));
     assert.equal(p0Direct.length, 0, `P0 direct egress: ${JSON.stringify(p0Direct)}`);
-    assert.ok(probes.perfNavEntry === virtURL || probes.perfNavEntry === virtURL + '#withfrag', `perfNavEntry: ${probes.perfNavEntry}`);
+    // The navigation entry keeps the LOAD url — a later hash write doesn't move it.
+    assert.equal(probes.perfNavEntry, virtURL, `perfNavEntry: ${probes.perfNavEntry}`);
     // getRegistrations 는 프록시 SW 자체를 보여선 안 되고 registerPH 는
     // 프록시 오리진 등록이 거부돼야 한다.
     assert.match(probes.swRegs, /^v:(count:\d+|no-sw)/, `swRegs: ${probes.swRegs}`);

@@ -1,755 +1,544 @@
 # ZeroProxy — Compatibility & Containment Errata
 
-Comprehensive inventory of remaining JavaScript/iframe/eval/scope/rewriter/CSP
-issues, produced for building the long-tail test set. This is a **risk inventory**,
-not a fix record: every item states its evidence level, and nothing here is
-claimed fixed or verified-compatible until a current test proves it.
-
-Evidence grades:
-
-- **[confirmed-emit]** — verified in this audit by inspecting actual rewriter
-  output (`crates/zp-rewriter/tests/scratch.rs`, `cargo test -p zp-rewriter
-  --test scratch -- --nocapture`).
-- **[confirmed-trace]** — verified by tracing current source paths
-  (`web/runtime-prelude.js`, `web/worker-prelude.js`, `crates/*`).
-- **[analysis]** — strong code-path reasoning, not yet executed.
-- **[historical]** — recorded in `.ai/trap-notebook/`; may be fixed, regressed,
-  or stale. Never treat as current evidence.
-- **[unverified]** — plausible risk, needs a probe.
+Risk inventory for JavaScript / iframe / eval / scope / rewriter / CSP behavior,
+first produced to build the long-tail test set (commit `6633629` — the original
+analysis text for every item below is there). This is a **risk inventory, not a
+fix record**: an item counts as resolved only when a current test proves it.
 
 Security-critical means a path that can produce a **real, unproxied target
-navigation/request or a leaked real object** — i.e. an escape from the
-no-escape jail. Compatibility-only means site breakage without an escape.
+navigation/request or a leaked real object** — an escape from the no-escape
+jail. Compatibility-only means site breakage without an escape.
+
+---
+
+## Status — audit of 2026-09-29
+
+Every item below now carries a **status** and the **evidence** that backs it,
+re-verified on current `main`. Where native behavior is the question, the
+evidence is a **direct-vs-proxy differential**: the same fixture runs in plain
+Chrome and through the proxy, and every probe must match unless it is listed as
+an intended divergence with its reason. (Pins that were written from proxy-only
+runs turned out to certify divergences as "design" — see
+[trap-notebook rewriter.md#프록시-단독-핀](.ai/trap-notebook/rewriter.md#프록시-단독-핀).)
+
+| Differential (all in `test/e2e/proxy.test.js`) | Probes | Diverging |
+|---|---|---|
+| `direct-vs-proxy compatibility differential` (B, C, I, A5, J) | 63 | 0 |
+| `dyn probes match native Chrome (direct-vs-proxy)` (E) | 50 | 0 |
+| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 98 | 13, each listed with a reason |
+| `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
+
+Suite totals at the audit: e2e 185/185, `npm run test:js` 110, `test:wasm:ci` 13,
+`cargo test --workspace` 291, `go test ./...` green. Real sites (paired
+`test/browser/rendercheck.sh`, cold profile): GitHub height 100% / elements
+1811 of 1811 / err 0, Wikipedia 100% / err 0, NAVER 95% / err 1, Stack Overflow
+110% / err 6 (FedCM policy block, an ad partner's 502s, one sandboxed-frame
+notice).
+
+**Status vocabulary** — **fixed** (closed; evidence names the pin) · **parity**
+(measured identical to native Chrome) · **not a bug** (the original claim was
+wrong; reason given) · **intentional** (deliberate fail-closed or scoped
+divergence, pinned) · **residual** (known, documented, not fixed — reason given)
+· **unverified** (no current evidence either way).
+
+### Found and fixed during this audit
+
+1. Top-level `const x = {…}` written without a semicolon: the R1 `__zp_lex_bind`
+   call was glued onto the initializer (`{…}__zp_lex_bind(`), a SyntaxError that
+   killed the whole script. — `e96f1e9`, matrix `lex_registry_for_classic_toplevel`.
+2. `el.onclick = 'code'` / `window.onX = 'code'` were **compiled and executed**;
+   Chrome turns a string on an `on*` property into `null`. — `dc232a4`, dyn `handlerPropString`, `winHandlerString`.
+3. Indirect `eval` evaluated non-strings (`eval\`x\``, `(0,eval)(obj)` ran
+   `obj.toString()`). — `dc232a4`, dyn `evalTagged`, `evalObjectArg`.
+4. Indirect `eval` **re-executed** code that threw at runtime (a `catch {}` +
+   Function-body fallback); the same fallback made `eval('return 1')` return 1.
+   — `dc232a4`, dyn `evalRuntimeOnce`, `evalReturnStmt`, prelude-units.
+5. Parse failures in `eval`/`Function` threw `NotSupportedError` (native:
+   `SyntaxError`); `setTimeout('bad')` threw at registration (native: reported
+   when the timer fires); `eval('')` threw. — `dc232a4`.
+6. Literal `import('data:…')` / `import('blob:…')` bypassed the rewriter (only CSP
+   stopped it). — `dc232a4`, matrix `dynamic_import_data_blob_literals_take_runtime_path`.
+7. `Reflect.setPrototypeOf(window, x)` succeeded on the facade (native: immutable
+   prototype). — `dc232a4`, compat `setProto*`.
+8. Reading `innerHTML`/`outerHTML`/`getHTML`/`XMLSerializer` **fetched
+   resources** and **ran custom-element constructors**: the scrub copy was a live
+   `cloneNode`. Now an inert-document copy. — compat `serParsed` + wire check.
+9. Serialization turned relative URLs absolute, and runtime `transformHTML`
+   never stashed literals (the server htmltx did). — compat `ser*`, surface `getHTMLClean`.
+10. IDL writes that skip the `setAttribute` hook — `input.src`, `body.background`,
+    SVG `href.baseVal` — found by measuring every `url_surfaces.json` pair in
+    Chrome. — compat `jInputSrcProp`, `jBodyBgProp`, `jSvgBaseVal`, `jSvgHrefShape` + J loads.
+11. `new SharedWorker(u)` got the name `'default'` (native `''`, and it collided
+    with `{name:'default'}`); the legacy string form lost its name. — static-policy
+    `prefixedSharedWorkerOptions`, surface `childSharedWorker`.
+12. The OPFS root handle's `.name` read `zp:o:<hash>` (native `''`). — surface/worker `opfsName`.
+13. The navigation performance entry followed later hash writes (native: the load URL). — surface `perfNavEntry`.
+14. `<script type=importmap|speculationrules>` read-back returned the rewritten
+    JSON with proxy URLs. — surface `importmapText`, `specrulesText`.
+15. `<a ping>`: `getAttribute`/`hasAttribute`/`getAttributeNames`/serialization
+    read `null` (the value is stashed so the browser never pings on its own). — surface `anchorPing`.
+
+Found by the real-site pass that followed (a cold GitHub load showed eight
+errors; each fix exposed the next layer):
+
+16. `<script type=module>` was rewritten as **classic** — the SW cannot tell a
+    module fetch from a `crossorigin` classic one — so the R1 lexical prologue
+    made modules collide on their own top-level names (GitHub
+    `global-banner-disable`: "Identifier 'e' has already been declared"; NAVER at
+    8% height). The kind now travels in the URL, byte-identical to static
+    `import`; dynamic scripts re-derive it at insertion. — htmltx
+    `module_script_src_carries_module_kind`, dyn `staticModuleLex`,
+    `dynModuleTypeAfterSrc`, matrix `module_syntax_under_classic_request_gets_module_semantics`.
+17. `customElements` per-target prefixing (2026-09-24) was **removed**: the
+    registry is per Window and never outlives its document (measured in Chrome
+    152, including initial-`about:blank` reuse), so it isolated nothing — while
+    `closest`/`matches`, CSS type selectors and element identity broke, and all
+    six GitHub React partials died ("No embedded data provided"). — surface `customElUpgrade`.
+18. React's `Error.prepareStackTrace` save/restore bound our hook to itself:
+    after the first restore **every** `.stack` overflowed the stack (page and
+    worker copies). — prelude-units stack-sanitizer tests.
+19. The worker realm lacked 15 helpers the rewriter emits (`Object.keys(o)`,
+    `delete o[k]`, `Reflect.get`, `o?.[k]` all threw `ReferenceError`), and
+    about:blank child frames lacked the R1 lexical helpers. — static-policy
+    helper-coverage guard (page × worker × child), browser differentials.
+20. Optional chains lost short-circuiting: `a?.[k]` became `__zp_oget(a,k)`,
+    which evaluates `k` first, and `a?.[k].b` threw on a nullish `a`. GitHub's
+    landing app drew its error page on `e.poster?.[!e.poster.mobile …]`. Chains
+    now rewrite into continuations (`__zp_ochain`). — rewriter.test.js
+    optional-chain differential (25 cases vs native), matrix optional-chain pins.
+
+### Residuals (documented, not fixed)
+
+| Residual | Why it stays | Pin |
+|---|---|---|
+| A srcdoc child reports the parent's virtual URL, not `about:srcdoc` | Needs the document URL split from the origin identity that drives storage, cookies and `postMessage` (100+ uses of `virtualURL`). | surface `framesByName`, iframe `srcdocLocation` |
+| V8 names the rewritten callee in some messages (`__zp_get(...).item is not a function`) | V8 renders the call-site AST; matching it needs per-call emission changes. Only buggy call sites surface it. | surface `framesItem` |
+| Direct `eval` inside `with(o)` does not see `o` | The eval descriptor carries lexical bindings, not with-objects. Rare (legacy templating uses `new Function`). | surface `withEvalScope` |
+| A `var` from a script rejected for redeclaration survives as `undefined` | Eval declaration instantiation runs before the emitted conflict check; splitting the check trades this for registrations surviving a syntax error. | surface `ownKeysLeak` |
+| An uninitialized-lexical (TDZ) `ReferenceError` is thrown from the prelude, so `ErrorEvent.filename` is the prelude URL | Moving the throw into emitted code means emitting a check per read. | [trap 에러-filename-누출](.ai/trap-notebook/rewriter.md#에러-filename-누출) |
+| `Document.parseHTMLUnsafe` anchors resolve against the virtual base (native: no base, raw text) | Inert parsed documents share the realm's URL hooks. Minor. | surface `parseHTMLUnsafeHook` |
+| import-map / speculation-rules read-back returns relative URLs as absolute | The server does not stash the original JSON; read-back is deproxied. | surface `importmapText` (checks no proxy URL) |
+| Worker-realm hooks are not `toString`-masked | `worker-prelude.js` has no masking helper; hook sources are visible to worker code. | — |
+| CSS attribute selectors / XPath can detect `data-zp-*` stash attributes | Getters are filtered; selector matching is not. Fingerprint only. | — |
+| `while (true) { await … }` without `break` dies silently at 10M iterations | Deliberate hang protection; hours of wall time in practice. | [trap loop-cap-비상수-정책](.ai/trap-notebook/rewriter.md#loop-cap-비상수-정책) |
+| `navigator.storage.estimate()` reports proxy-origin-wide usage | Quota is per real origin; usage leaks only a byte count across targets. | — |
+| Storage Access API answers as first-party in every frame | All targets share the proxy origin. | — |
+| Optional chains with `await`/`yield` after the first `?.`, or with a `Reflect.get?.()`-style special form at a split, keep per-link emission (keys/args evaluated even when short-circuited) | A continuation arrow cannot hold `await`/`yield`; unwrapping a special form would hand out the unmediated native. | matrix optional-chain negative controls |
+| `<link rel=preload as=script>` for a module script is fetched again by the module | The preload goes to the classic route; the module needs `kind=module` in its URL. | [trap module-kind-url](.ai/trap-notebook/rewriter.md#module-kind-url) |
 
 ---
 
 ## A. Security-critical escape vectors
 
-### A1. Top-level `var`/`function` declarations shadow dangerous globals — [confirmed-emit, escape]
+Evidence for this section: e2e `A-section escapes stay virtual or fail closed`
+(browser, every probe reads virtual or fails closed), `escape matrix`, and the
+rewriter emission tests in `crates/zp-rewriter/tests/matrix.rs`.
 
-`var`/`function` declarations cannot create a binding over an unforgeable
-global property; the declaration is silently skipped at runtime. The rewriter
-still records the name as shadowed and emits every later reference **bare**:
+### A1. Top-level `var`/`function` shadowing a dangerous global — **fixed**
 
-```js
-var location; location.href = 'https://t/';   // → var location; __zp_set(location,"href",…)
-// bare `location` = real window.location → __zp_set(realLoc) → Reflect.set → real navigation
-```
+References to a dangerous name stay mediated even after a top-level `var` /
+`function` declaration of it: `var location = …` syncs through
+`__zp_set(globalThis,"location",…)`, `function location(){}` is renamed to a
+temp. Verified for every dangerous global (`location`, `document`, `window`,
+`top`, `parent`, `frames`, `self`, `globalThis`, `opener`, `history`, `eval`,
+`Function`). Pins: matrix `var_function_shadowing_neutralized`,
+`declaration_targets_sync_via_temp`; e2e `varShadow`/`letShadow`/`fnDeclShadow`.
+`class location {}` at top level now fails with the native SyntaxError (R1
+registry sees the unforgeable global).
 
-Confirmed variants:
+- Module goal (`function location(){}` in a module) — **not a bug**: top-level
+  module declarations are module-scoped, so `location` really is the local
+  binding (native semantics). Pin: matrix `var_function_shadowing_neutralized` (module case).
 
-- `var location = {…}` — the initializer itself performs `location = obj` → real navigation
-- `function location(){}; location.href = …` — same
-- `var document` → `document['location']` → real document → escape
-- `var window` / `var top` / `var parent` / `var frames` / `var self` / `var globalThis` / `var opener` / `var history` — bare references resolve to real objects
-- `var eval` → `eval('x')` bare → resolves to `root.eval` = dynamicEval (contained only by accident of the override, not by static guarantee)
-- `var Function` → `Function('x')()` bare → dynamicFunction (same caveat)
-- Module goal: `function location(){}` at module top level is also marked shadowed → bare emission → module `location` still resolves through the real global object
+### A2. Computed member access — **fixed**
 
-The escape works because top-level `var`/`function`/`class`(? check class) names in DANGEROUS_GLOBALS must never be treated as local bindings — the binding silently fails on unforgeable globals.
+`x[k]`, `x['location']`, `this['location']`, `frames[i]`, `x?.[k]` all route
+through `__zp_get`/`__zp_set`/`__zp_call`/`__zp_oget`/`__zp_ocall`. Pins: matrix
+`computed_member_reads`, `computed_member_writes_and_calls`,
+`dangerous_method_calls_stay_bound`; e2e `thisComputed`, `globalComputed`, `computedAccess`.
 
-### A2. Computed member access — `base["dangerous"]` is never mediated — [confirmed-emit, escape]
+### A3. `new Function('return this')()` — **fixed**
 
-There is no visitor for `ComputedMemberExpression`/`OptionalMemberExpression`
-computed access:
+Sloppy dynamic functions get the scope facade as `this`, never the real window;
+the Async/Generator constructors are gated the same way. Pins: e2e `fnThis`,
+`fnThisNull`, dyn `fnThis`, `fnThisIsWindow`, escape matrix `asyncFunctionEscape`.
 
-```js
-this['location']                          // emitted raw → real window.location
-document['location'].href = 'https://t/'; // → __zp_set(realDoc['location'],"href",…)
-iframe['contentDocument']                 // → real child document → .location → escape
-frames[0] / window[0] / window['name']    // → real child window → ['location'] → escape
-for (k in window) window[k]               // escapes on real objects (scope proxy covers only the facade)
-```
+### A4. eval-expression path — **fixed**
 
-`get()`'s `isNativeLocation` second line of defense only guards **reads of URL
-properties**. On a leaked real `Location`:
+Expression bodies go through the rewriter before the `with(__zp_scope)` wrapper.
+Pins: e2e `evalHref`, `evalArith`; dyn `evalLocation`, `evalStrict`, `evalIndirect`.
 
-- `.href =` / `.assign()` / `.replace()` / `.reload()` → `__zp_set`/`__zp_call` → `Reflect.set`/`Reflect.apply` → real navigation
-- `.toString()` / `String()` / `+loc` → real proxy URL string leak (identity/fingerprint)
-- `.constructor`, `==` identity, `Symbol.toPrimitive` → native surface
+### A5. Reflect / descriptor paths — **fixed**
 
-### A3. `new Function('return this')()` returns the real window — [confirmed-trace, escape]
+Computed `Reflect.get/set/has/deleteProperty/ownKeys`,
+`Object.getOwnPropertyDescriptor(s)`, `Reflect.getOwnPropertyDescriptor`,
+`__lookupGetter__`/`__defineGetter__` are mediated or return membrane getters.
+Pins: matrix `reflect_object_routing`; e2e `gopdHref`, `lookupGetter`,
+`locationDescriptor(Flags)`; surface `defineGetterLoc`, `lookupGetterLoc`.
+`Reflect.setPrototypeOf(window, x)` no longer touches the real window and now
+refuses like native (immutable prototype); `Reflect.defineProperty(window,
+'location', …)` returns false like native. Pins: compat `setProtoReflect`,
+`setProtoSame`, `setProtoObject`, `protoIsWindow`, `defPropLocReflect`,
+`defPropLocObject`, `preventExtWindow` — all **parity**.
 
-The prelude's anonymous wrapper is strict (prelude IIFE is strict), so
-`f()` → `this === undefined` → `nestedCall` → `Reflect.apply(compiled,
-undefined)` → `__zp_dyn__.apply(this)` — sloppy `__zp_dyn__` coerces
-undefined/null `this` to the real global object:
+### A6. `open()` returned window — **fixed**
 
-```js
-new Function('return this')()['location'].href = 'https://t/'  // escape
-new Function('return ()=>this')()()                            // arrow `this` same chain
-(async function(){}).constructor('return this')()              // Async/Generator variants same
-```
+The http branch gets network containment; `javascript:` URLs do not execute.
+Pins: e2e `openJs`, `openEscaped`.
 
-Native sloppy `Function('return this')()` also returns the global object, so
-semantics are correct but the returned object is real — chains into A2.
+### A7. Non-root `Document.location` — **fixed**
 
-### A4. eval-expression path — expression bodies are not rewritten — [confirmed-trace, escape]
+`contentDocument.location` / `ownerDocument.location` resolve to the child's
+virtual location, never a proxy URL. Pins: e2e `contentDocLocation`, iframe suite `srcVirtual`.
 
-`dynamicEval` wraps non-statement input as `with(__zp_scope){return (EXPR)}`
-and compiles it **without rewriting**. `this` inside is the real root window:
+### A8. `window.navigation` — **fixed**
 
-```js
-eval('this.location')                                    // → realLoc
-eval('document["location"]')                             // → realLoc
-eval('this["location"].href="https://t/"')               // → real navigation
-eval('({}).constructor.constructor("return this")()')    // → real window → chained escape
-```
+A `VirtualNavigation` facade: entry URLs read virtual, `navigate()` goes through
+the virtual-location pipeline, `javascript:` is refused. Pins: e2e
+`navigationJs`, `navEscaped`, `navCurrentEntry`.
 
-Only identifiers go through the with-scope; members/computed/`this` are raw.
+### A9. Dynamic `<meta http-equiv="refresh">` — **fixed**
 
-### A5. Reflect/Object descriptor paths — [confirmed-emit, escape]
+Both attribute orders are rewritten before the browser can arm the refresh.
+Pin: e2e `metaRefresh` (neutralized).
 
-- `Reflect.get(window,'location')` — literal → routed to `__zp_get` ✓
-- `Reflect.get(doc, k)` computed — `'get'` is not a dangerous method → raw `Reflect.get` → realLoc → escape
-- `Reflect.set(doc,k,v)` computed → raw → real set → escape
-- `Object.getOwnPropertyDescriptor(document,'location')` → **diagnostic only, passes through** (`lib.rs` ~1232) → real accessor → `.get.call(document)` → realLoc → escape
-- `Object.getOwnPropertyDescriptor(iframe,'contentDocument')` → only `'location'` is special-cased in `__zp_getOwnPropertyDescriptor` → real getter → real child doc → `.location` → escape
-- `Reflect.getOwnPropertyDescriptor` → not intercepted at all → same escape
-- `document.__lookupGetter__('location')` → not intercepted → real getter → `.call(document)` → escape
-- `Object.getOwnPropertyDescriptors` (plural) → not intercepted
-- `Reflect.setPrototypeOf(scope, x)` → forwarded to real root proto → mutates the real window prototype (corruption/DoS)
-- `Reflect.defineProperty(window,'location',{…})` → trap redirects to scopeTarget → silently "succeeds" where native throws (semantic edge, not escape)
+### A10. Other real-object leak paths — **fixed / parity**
 
-### A6. `open('https://t')` returns a raw real window — [confirmed-trace, escape]
-
-`open()` (runtime-prelude ~3681): http URL → `Native.open('about:blank')` →
-async `shareNavURL` → `child.location.href = proxyURL`. **The returned value is
-the real window** in the gap:
-
-```js
-const w = open('https://t/');
-w.document.write('<script>location="https://t"</script>');  // raw script in real doc → escape
-w['location']                                                // realLoc
-```
-
-Only the `about:blank` branch gets `installNetworkContainment`; the http branch
-does not.
-
-### A7. Non-root Document `.location` — [confirmed-trace, escape]
-
-`__zp_get`'s `base === document` special case covers only the **root document
-binding**:
-
-```js
-iframe.contentDocument.location.href = 'x'   // __zp_get(childDoc,'location') → realLoc → real child nav
-iframe.contentDocument.location.assign('x')  // __zp_call(realLoc,'assign') → real nav
-el.ownerDocument.location.href = 'x'         // 'ownerDocument' is not a dangerous member → real doc → escape
-event.target.ownerDocument.location          // same
-document.implementation.createHTMLDocument().location  // real (in-memory: no nav, but value/identity leak)
-document.write-created docs, DOMParser docs, xhr.responseXML, cloned/adopted docs — all real
-```
-
-`iframe.contentWindow.location` is wrapped (`wrappedLocationFor`), but
-`contentDocument.location` is asymmetrically raw.
-
-### A8. `window.navigation` (Navigation API) unhooked — [confirmed-trace, likely escape]
-
-Zero prelude hits for the `navigation` object. `'navigate'` is not a dangerous
-method:
-
-```js
-navigation.navigate('https://t/');   // real navigation → escape (Chrome/Edge)
-navigation.reload(); navigation.back(); navigation.traverseTo(key)  // real history ops
-```
-
-Needs browser verification but the hook is absent by construction.
-
-### A9. Dynamic `<meta http-equiv="refresh">` — [analysis, escape candidate]
-
-The MutationObserver backstop's `attributeFilter` is
-`['src','srcset','poster','href']` — `http-equiv`/`content` not watched.
-Static refresh metas are neutralized by htmltx, but a dynamically created
-`<meta http-equiv="refresh" content="0;url=https://t">` is unverified — if it
-fires, real navigation.
-
-### A10. Other real-object leak paths — [analysis/unverified]
-
-- `document.write`/`document.open()` → new document → raw scripts execute before hooks attach (historical trap — partial)
-- `window.name` — not virtualized → cross-target data bleed within a tab session (isolation)
-- `cookieStore` (CookieStore API) — unhooked → real proxy-origin cookies → bypasses the jar → cross-target bleed (isolation)
-- `<a ping="https://t">` → browser POST ping on click — whether connect-src blocks it is unverified
-- `structuredClone`, `WeakRef`, postMessage transfer of real objects — unverified
-- `frames['name']`, `frames.item(0)`, `self[0]`, `this[0]` — A2 pattern
-- `window.__lookupGetter__`, `__defineGetter__`, `__lookupSetter__`, `__defineSetter__` — legacy accessors unhooked
-- `Object.getOwnPropertyNames(window)` → `nativeOwnKeys(root)` — whether `__zp_*` names are filtered is unverified (comment claims 0 in an exec-js check)
+- `document.write`/`open()` second document — **fixed** (surface `docWriteFrame`).
+- `window.name` — **intentional** virtual store (compat `winName` parity).
+- `cookieStore` — **fixed**, backed by the jar.
+- `<a ping>` — **fixed**: fired through proxy transport, never by the browser;
+  read-back matches native (surface `anchorPing`, e2e `anchor ping fires through proxy transport`).
+- `structuredClone`/`WeakRef`/`MessagePort` transfer — **parity**: real objects
+  throw `DataCloneError` like native (surface `cloneLocation`, `portMsgLocation`).
+- `frames['name']`, `self[0]`, `this[0]` — **fixed** (surface `framesByName`, `selfIndex`, `thisIndex`).
+- `frames.item(0)` — **parity** (native has no `frames.item` either); the error
+  *message* names the rewritten callee — **residual** (see table).
+- Legacy `__lookup/__define*` accessors — **fixed** (surface `defineGetterLoc` …).
+- `Object.getOwnPropertyNames(window)` — **fixed**: no `__zp_*` names (surface `ownKeysLeak`).
 
 ---
 
-## B. Syntax-kill (whole script fails to parse → fail-closed death)
+## B. Syntax-kill (whole script fails to parse) — **fixed**
 
-Emitted code is invalid JS — confirmed by rewriter output:
+Dangerous-name assignment targets (`for (location of a)`, `[location] = arr`,
+`({a: location} = o)`, nested, rest, defaults, `for await`, catch, switch,
+labels) emit through the `__zp_get.d` write sinks. Pins: matrix
+`assignment_targets_route_through_write_facade` (re-parse checked); compat
+`forOf`, `forIn`, `arrayTarget`, `objTarget`, `nestedTarget`, `forOfArr`,
+`forOfObj`, `defaultTarget`, `restTarget`, `memberTarget`, `catchParam`,
+`switchTarget`, `labelLoop`, `forAwait` — all **parity**.
 
-```js
-for (location of a) {}      → for (__zp_get(globalThis,"location") of a) {}   ✗
-for (location in a) {}      → same                                          ✗
-[location] = arr;           → [__zp_get(...)] = arr                           ✗
-({a: location} = obj);      → ({a: __zp_get(...)} = obj)                     ✗
-```
-
-Only shorthand `({location} = obj)` is handled via the `__zp_get.d` write-sink.
-
-Uncovered target-position variants to test:
-
-- `({a: {b: location}} = o)` nested non-shorthand
-- `([location, x] = y)` array targets
-- `for ([location] of y)`, `for await (location of y)`, `for ({a: location} of y)`
-- `try{}catch(location){}` — if catch targets are patched as identifier references
-- Assignment targets inside `switch`/`case`/labels
-- `[location.x] = y` / `[...location] = y` spread/rest targets
-- `({location = d} = o)` default-in-target
+A new syntax-kill found in this audit — R1 bind calls glued to ASI declarations
+— is **fixed** (see the audit list, item 1).
 
 ---
 
-## C. Rewriter scope/binding semantic breaks — [confirmed-emit]
+## C. Rewriter scope/binding semantics — **fixed / parity**
 
-The scope stack is sequential — no hoisting, TDZ, or declaration-timing model:
-
-| Source | Emitted | Native | Result |
-|---|---|---|---|
-| `import location from 'x'` | binding not declared | module binding | later `location` → virtual location (wrong value) |
-| `import {x as location}` | same | | same |
-| `import * as location` | same | | same |
-| `class location {}` | not declared | class binding | later refs → virtual |
-| `f(){ location.x; var location; }` | `__zp_get` | var hoists → local undefined → TypeError | returns virtual (wrong) |
-| `f(){ location.x; function location(){} }` | `__zp_get` | function decl hoists → local | returns virtual (wrong) |
-| `{ location.x; let location; }` | `__zp_get` | TDZ ReferenceError | returns virtual (exception becomes a value) |
-| `eval('x')` direct call | `__zp_get(g,'eval')('x')` | caller scope | global scope only → local reads fail |
-| `delete obj.location` | `delete __zp_get(...)` | real delete / false / strict throw | always `true` |
-| `x?.location?.()` | `__zp_call` | nullish → undefined | TypeError |
-| `x?.location` | `__zp_get` | nullish → undefined | `Object(null)={}` → undefined (accidentally correct) |
-| `x?.location.href` | `__zp_get` twice | undefined | undefined (accidentally correct) |
-| `for(let i=0;;i++)` | uncapped | infinite | loop-cap bypass — hang-protection gap |
-| `while(true){await x()}` | capped 10M | permanent poll | silently exits after 10M |
-| `super.location` | skipped ✓ | | correct |
-| `new.target` (dynamic fns) | `__zp_new_target__`→undefined | real value | undefined (documented limit) |
-| `({[location]:1})` | `{[__zp_get…]:1}` | realLoc string key | virtual URL string key (subtle) |
-| `location?.reload()` | `__zp_get(...)?.reload()` | real reload | works (proxy trap supplies reload) ✓ |
-| `location ??= u` | `__zp_assign` | | eval-order preserved ✓ |
-| `x?.["location"]` | raw computed | | facade→virtual / real object→real (A2) |
-| `x?.m()` (non-dangerous) | untouched | | correct ✓ |
-
-Scope variants needing tests: `function f(location=location)`, `function
-f({location})`, `catch(location)` target, `for (const {location} of xs)`,
-`using location = r`, `await using`, labeled function declarations, Annex B
-block-level functions, `arguments`/parameter aliasing, eval-created bindings,
-`let`/`const` in `for` heads vs bodies, sibling-block shadowing, global `var`
-vs `let` cross-script interplay.
-
----
-
-## D. `with` statement — [confirmed-emit]
-
-`with(o){ location.href='x' }` → `with(o){ __zp_set(__zp_get(globalThis,"location"),"href",'x') }`
-
-Identifiers are bound **statically** to global — `o` is never consulted.
-Containment holds; semantics break whenever `o` owns (or shadows) the name.
-
-Required `with` matrix:
-
-- `with(obj)` where obj owns a dangerous name: `{location: fake}` → `location` must read `fake`, reads virtual instead
-- obj lacks the name → fall-through → accidentally correct
-- `Symbol.unscopables` — prelude's `withScope` honors it in `has`, but the **rewritten** `with` never reaches that proxy
-- `with` nested in functions, blocks, arrows, closures
-- `with` + `eval` (`with(o){eval('location')}` → dynamicEval cannot see `o`)
-- `with` + `this`, `with` + `delete`, `typeof`, `in`, `instanceof`
-- `with` + destructuring / default parameters / rest
-- `with(realWin)` — real window operand (obtainable via A2)
-- `with(document)` — `with(document){location}` → static virtual vs dynamic `doc.location`
-- strict mode `with` — must produce the native parse error, not a silent rewrite
-- `with` inside dynamically compiled bodies (Function/eval)
-- `with` + assignment to dangerous names (`with(o){location = x}`)
-- `with` + update operators (`with(o){location++}`)
-
----
-
-## E. eval / dynamic code coverage gaps
-
-| Case | Status | Note |
+| Case | Status | Evidence |
 |---|---|---|
-| `eval('x')` direct-call scope | [confirmed-emit] unimplemented | indirect only → caller scope lost |
-| `(0,eval)`, `e=eval;e()`, `eval?.()`, `eval.call(t,'x')` | same path | indirect is correct for these, but A4 expression path is raw |
-| `eval('var x=1')` visible in next script | [analysis] partial | top-level `let`/`const`/`class` don't land in shared global lexical scope (documented limit) |
-| `eval('"use strict";…')` strict eval | unverified | strict eval scope rules |
-| eval-thrown SyntaxError propagation | unverified | |
-| `Function` param parsing: default/rest/destructuring/comments/unicode | unverified | `new Function('a=1',…)`, `('{x,y}',…)`, `('/*c*/a',…)`, `('한',…)` |
-| `new Function` `new.target` | [historical] always undefined | documented limit |
-| `new Function` `this` | [confirmed-trace] real window | A3 |
-| `arguments.callee` on dynamic fn | unverified | exposes `__zp_dyn__` → possible toString source leak |
-| `setTimeout('…')`/`setInterval('…')` | hooked ✓ | but `this`/`["x"]` inside the string share A2/A3 holes |
-| event-handler attributes `onclick="…"` | `__ZP_EXEC_EVENT` ✓ | `el.onclick='code'` property-string path unverified |
-| `import()` dynamic: relative/absolute/data:/blob: | partial | `data:`/`blob:` → NotSupportedError; native allows `data:` module import → compat break |
-| `import.meta.url` | ✓ virtual | `.resolve` and other props unverified |
-| `import()` inside eval-expression | [analysis] raw | expression path → specifier unrewritten |
-| `new Function` containing `with`/`eval` | unverified | recursive dynamic code |
-| `AsyncFunction`/`GeneratorFunction`/`AsyncGeneratorFunction` ctor chains | mostly masked ✓ | `arguments`/`this`/`new.target` share A3 limits |
-| `eval` in module code | unverified | strict-eval + module scope |
-| `eval` returning completion values (objects, `undefined`, non-strings) | unverified | `eval(123)`, `eval(undefined)`, `eval({})` |
-| `new eval()` / `eval` as constructor/tag | unverified | `eval\`x\`` tagged template |
-| String timer `this` | unverified | `setTimeout('this["location"]…')` → A2 |
+| `import location from 'x'` / named / star | **parity** — module bindings are declared locals | surface Q5 notes |
+| `class location {}` | **parity** — native SyntaxError via the R1 registry | emission check above |
+| `f(){ location.x; var location; }` / function hoisting / block TDZ | **parity** | matrix `local_scope_bindings_not_mediated`; compat `hoistedVar`; surface `scopeHoistVar`, `scopeTDZ` |
+| direct `eval('x')` caller scope | **fixed** (R2) | compat `evalDirectLocal`; surface `evalCallerScope`, `evalCallerWrite`, `evalCallerVar` |
+| `delete obj.location` | **parity** | compat `deleteMember`; surface `deleteLoc` |
+| `x?.location?.()`, `x?.location`, `x?.location.href` | **parity** | compat `optCallNull`, `optMemberNull`, `optChainNull`; surface `optCallChain` |
+| `for(let i=0;;i++)` | **fixed** — capped | perf `cappedFor` |
+| `while(true){await x()}` | **residual** — silent stop at 10M (see table) | perf `asyncPollBreak`, `asyncPollFlag` |
+| `new.target` in dynamic functions | **parity** | compat `newTargetFn` |
+| `({[location]:1})` | **parity** | compat `computedKey` |
+| `location ??= u`, `super.location`, `x?.m()` | **parity** | compat `nullishAssign`, `superProp`, `plainOptCall` |
+
+Scope variants: `function f(location=location)` (compat `paramDefault`),
+`function f({location})` (surface `scopeDestructParam`), `catch(location)`
+(surface `scopeCatch`), labeled function declarations and Annex B (surface
+`labeledFnDecl`, `annexBSloppy`), `arguments` aliasing (compat
+`argumentsAlias`), eval-created bindings (dyn `evalVarVisible`), cross-script
+`let`/`const`/`class`/`var` (surface `crossScript*`, `lexRedeclare`) — all
+**parity**. `using` / `await using` — **unverified** (no fixture).
+
+---
+
+## D. `with` statement — **fixed**, one residual
+
+Dangerous names inside `with(o)` consult `o` first (innermost-first chain);
+`with(document)` keeps identity and PutForwards semantics; strict-mode `with` is
+the native SyntaxError. Pins: matrix `with_body_dangerous_names_chain_innermost_first`;
+surface `withShadow` (obj-first), `withDocIdentity`, `withDocWrite`,
+`strictWith`; dyn `fnWith`. Direct `eval` inside `with` not seeing `o` —
+**residual** (surface `withEvalScope`).
+
+---
+
+## E. eval / dynamic code — **fixed** (native differential: 49 probes, 0 diverging)
+
+The whole dyn fixture runs natively and through the proxy
+(`dyn probes match native Chrome (direct-vs-proxy)`). Covered: direct / indirect
+/ `eval.call` / optional / tagged eval, non-string completion values, strict
+eval, syntax errors (`SyntaxError`, `instanceof` holds), `new eval()`
+(TypeError), `Function` parameter forms (defaults, comments, bad params),
+`this`, nested eval, Async/Generator constructors, string timers (including a
+syntax error reported at fire time), `setInterval`, inline and property event
+handlers, DOM-insertion scripts (silent like native), `document.write`,
+`import()` of http / `data:` / `blob:`, and source/path leak checks
+(`leakFnToString`, `leakCallee`, `leakDynStack`, `leakFnStack`).
+Module-scope `eval` reifying the module environment — **residual** (Q5).
 
 ---
 
 ## F. iframe / child realm
 
-| Case | Status |
-|---|---|
-| `iframe.contentWindow.location` | ✓ `wrappedLocationFor` |
-| `iframe.contentDocument.location` | **A7 escape** |
-| `iframe['contentWindow']`/`['contentDocument']` | A2 computed escape |
-| `frames[0]`, `window[0]`, `window['name']`, `frames['name']`, `frames.item(0)` | A2 — real child → computed escape |
-| `iframe.src = blob:`/`data:`/`javascript:` | blocked ✓ → **legit blob/data frames break** (compat) |
-| `iframe.srcdoc` | `data-zp-srcdoc` pipeline ✓ |
-| `sandbox` attribute | `sanitizeFrameSandbox` ✓ |
-| dynamic iframe creation/insertion | `patchInsertion`+`instrumentDescendantIframes` ✓ — insert→script→remove race unverified |
-| `document.write` → new document | historical trap — partial |
-| `open()` returned window | A6 escape |
-| `postMessage` child↔parent | ✓ + early mapping — `ev.source`/`origin` virtualized |
-| `iframe.contentWindow === frames[0]` | identity unverified |
-| `top.location`/`parent.location`/`opener` | facade ✓ |
-| child `document.cookie`/storage isolation | unverified |
-| sandboxed frame `allow-same-origin`+`allow-scripts` | historical: naver shopad opaque-origin break — partial |
-| `<object>`/`<embed>`/`portal`/`fencedframe` | `object-src 'none'` + attr blocking — compat break (legacy sites) |
-| `iframe.csp` attribute | unverified |
-| `credentialless` | unverified |
-| `<a target=framename>` click navigation | unverified |
-| iframe `onload`/`onerror` + inline handlers | unverified |
-| child CSP inheritance | unverified |
-| SharedWorker created from child realm | unverified |
-| stale realm cleanup after child navigation | unverified |
-
----
-
-## G. Worker realm — thin containment — [confirmed-trace]
-
-```js
-self.XMLHttpRequest = undefined;          // XHR removed — axios fallback/pdf.js etc. break
-self.WebSocket = function(){blocked()};   // worker WS/ES/RTC/WebTransport all blocked
-eval/Function → blockedDynamic            // emscripten-style loaders using Function break
-```
-
-- `location` = plain `URL` object — no `assign`/`replace`/`reload` (native `WorkerLocation` has no methods either — close approximation; toString/enumerability shape needs verification)
-- `setTimeout('code')`/`setInterval('code')` — unhooked → natively compiled → runs against real globals → semantic break (egress contained by CSP — unverified)
-- `importScripts` → proxied ✓ — `importScripts('data:')`/`('blob:')` → non-http → throw → break
-- `indexedDB`/`caches`/`cookieStore` — no worker-side facade → real proxy-origin storage → cross-target bleed
-- `navigator` — real (fingerprint-consistent, but unvirtualized)
-- module worker `import.meta.url`, static import resolution — unverified
-- SharedWorker per-target prefix — restored 2026-09-14, needs regression test
-- Worker `onerror`/`error.stack` — may leak proxy URLs
-- `postMessage` + transferables — wrapped; port paths unverified
-- Worker termination mid-request, worker errors, uncaught exceptions — unverified
-- multiple workers with different targets/tabs — unverified
-
----
-
-## H. Unhooked / partially hooked API surface — [confirmed-trace/analysis]
-
-| API | Status | Risk |
+| Case | Status | Evidence |
 |---|---|---|
-| `window.navigation` | **unhooked** | A8 escape |
-| `window.name` | **not virtualized** | cross-target bleed |
-| `cookieStore` | **unhooked** | jar bypass + bleed |
-| `new URL('rel')` single-arg | **unverified — likely unhooked** | resolves against real document base (proxy URL) → wrong resolution → breakage |
-| `import.meta.resolve` | unhooked | proxy-relative resolution |
-| `alert`/`confirm`/`prompt`/`print` | stubs (confirm→false, prompt→null) | dialog-dependent flows break silently |
-| `navigator.serviceWorker.getRegistrations()` | real | exposes ZeroProxy's own SW → fingerprint |
-| `location.ancestorOrigins` | unverified | real value |
-| `history.go/back/forward`, `history.length` | real | session history — minor fingerprint |
-| `locationbar`/`menubar`/etc. bar props | real | minor |
-| `document.featurePolicy`/`policy` | real | minor |
-| `ElementInternals` | real | unverified |
-| `XMLSerializer.serializeToString` | unverified | needs de-proxy pass |
-| `Object.getOwnPropertyNames(window)` | `nativeOwnKeys(root)` | `__zp_*` leak unverified |
-| `el.onclick='code'` string setter | unverified | native compilation → real globals |
-| `document.write` second document | historical | partial |
-| `adoptedStyleSheets`, `CSSStyleSheet` ctor | CSS hooks partial | `url()` rewrite unverified |
-| `document.createExpression`/`evaluate` XPath | real | minor |
-| `webkitTemporaryStorage`/`webkitPersistentStorage` | real | proxy-origin shared |
-| `showOpenFilePicker`/`showDirectoryPicker`/`showSaveFilePicker` | real (intentional per D6) | consent-gated |
-| `WebAuthn`/`Credentials`/`PaymentRequest` | real | RP ID = proxy host → breaks by nature |
-| `document.hasStorageAccess`/`requestStorageAccess` | real | unverified |
-| `navigator.registerProtocolHandler` | real | registers proxy-origin handler |
+| `contentWindow.location`, `contentDocument.location` | **fixed** | iframe `srcVirtual`; e2e `contentDocLocation` |
+| `frames[i]`, `window[i]`, named frames, `iframe['contentWindow']` | **fixed** | e2e `framesIndex`; surface `framesByName`, `windowByName` |
+| `iframe.src = blob:/data:/javascript:` | **intentional** — sealed (legit blob/data frames break) | iframe `blobBlocked`; CSP suite sealed-path pins |
+| `srcdoc` | **fixed** (prelude injected, scripts run) | iframe `srcdocLoad`, `srcdocScript`, `nested` |
+| srcdoc `location.href` | **residual** — parent virtual URL instead of `about:srcdoc` | iframe `srcdocLocation` |
+| `sandbox` | **fixed** | iframe `sandboxOpaque` |
+| dynamic creation / insert-remove race | **fixed** | iframe `createBlank`, `removeRace` |
+| `document.write` second document | **fixed** | surface `docWriteFrame` |
+| `open()` window | **fixed** | A6 |
+| `postMessage` origin / source | **fixed** | iframe `postMessage` |
+| identity (`contentWindow === frames[0]`) | **fixed** | iframe `identityStable` |
+| `<object>/<embed>/<portal>/<fencedframe>` | **intentional** | Q7 |
+| `iframe.csp` | **residual** — passes through as inert data | surface `iframeCspAttr` |
+| `credentialless` | **parity** | surface `iframeCredentialless` |
+| `<a target=framename>` | **fixed** | surface `targetFramename` |
+| SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |
+| child cookie/storage isolation, iframe `onload` handlers, CSP inheritance, stale-realm cleanup | **unverified** | — |
 
 ---
 
-## I. URL / navigation semantics
+## G. Worker realm — **fixed**, residuals noted
 
-- `location === document.location` — `wrappedLocationFor` proxy vs `virtualLocation` object → **almost certainly `false`** (native `true`) [analysis]
-- `location.assign('mailto:')`/`'tel:'` → `targetURL` non-http → `TARGET_PROTOCOL_BLOCKED` throw — native navigates → minor break
-- `history.pushState` cross-origin → SecurityError — matches native ✓
-- `history.pushState(state,title)` no URL → keeps current virtual URL ✓
-- Dynamic `<base>` creation → `base-uri 'none'` + no JS hook → Angular-style `<base href>` apps: element blocked, resolution falls back to virtual baseURL — subtle breakage
-- `location.protocol/host/hostname/port/pathname/search` writes → URL merge → assign — needs per-prop regression
-- `location.ancestorOrigins` — real
-- `window.open(url,'name','features')` — features/window-reuse semantics lost
-- `form.requestSubmit()`/`form.submit()` — hooked; `submitter.formaction` override unverified
-- `<form>` + `enctype=multipart` + large body → `REQUEST_BODY_TOO_LARGE` path exists
-- `a.download`, `a.ping`, `a.referrerpolicy` — unverified
-- `window.event` (legacy), `external`, `showModalDialog` — absent/real
-- hash-only navigation (`#x`) → `updateVirtualHash` ✓
-- `location.reload()` → local `locReload` → virtual reload ✓
-- `location.replace` history semantics under proxy URL — unverified
-- `beforeunload`/`pagehide`/`visibilitychange` — real ✓
-- `location.hash` write → virtual ✓; `location.search`/`pathname`/`port`/`hostname`/`host`/`protocol` writes → merge→assign — per-prop tests needed
-- `new URL(rel, base)` explicit base → correct when base is virtual ✓; single-arg `new URL(rel)` → real doc base → **proxy path leak/break** [unverified]
-- `URL.createObjectURL` hooked; `URL.revokeObjectURL` hooked; `URL.canParse`/`URL.parse` statics — unverified
+The worker suite pins dedicated, module and shared workers: virtual `location`,
+`fetch`/XHR/sync-XHR relay, brokered WebSocket, EventSource, rewrite-then-execute
+`eval`/`Function`/string timers, `importScripts` (http, `data:`, `blob:`),
+namespaced storage (IndexedDB, Cache, cookieStore, OPFS, BroadcastChannel),
+sanitized error stacks, W8–W12 surfaces (`self.origin`, `isSecureContext`,
+BroadcastChannel prefix, `webkit*` aliases, OPFS). SharedWorker per-target name
+prefix — **fixed** (static-policy `prefixedSharedWorkerOptions`). Rewriter
+helpers missing from the worker realm (`__zp_okeys`, `__zp_delete`, `__zp_oget`,
+`__zp_rget`, `__zp_with_*` …) — **fixed** (item 19; static-policy guard).
+Residuals: worker hooks are not `toString`-masked; `navigator` is the spoofed
+build identity (intentional); termination mid-request and multi-target workers
+— **unverified**.
+
+---
+
+## H. Unhooked / partially hooked API surface
+
+| API | Status | Evidence |
+|---|---|---|
+| `window.navigation` | **fixed** | A8 |
+| `window.name` | **intentional** — virtual store | compat `winName` |
+| `cookieStore` | **fixed** — jar-backed | worker/page cookieStore pins |
+| `new URL(rel)` single-argument | **parity** | compat `urlCtorRel`, worker `urlResolve` |
+| `import.meta.resolve` | **fixed** | surface `importMetaResolve` |
+| `alert`/`confirm`/`prompt`/`print` | **intentional** — stubs (same values a dismissed dialog gives) | surface `dialogStubs` |
+| `navigator.serviceWorker.getRegistrations()` | **fixed** — ZeroProxy's own SW is never exposed; **intentional** — the facade always reports one fake registration | surface `swRegs` |
+| `location.ancestorOrigins` | **fixed** | membrane `07-membrane.js` |
+| `history` length / traversal | **residual** (Q2) | — |
+| bar props, `featurePolicy`, XPath, `ElementInternals` | **parity** — native, no URL or navigation surface | — |
+| `XMLSerializer` | **fixed** | compat `serXML` |
+| `Object.getOwnPropertyNames(window)` | **fixed** | surface `ownKeysLeak` |
+| `el.onclick = 'code'` | **fixed** — a string is null like native | dyn `handlerPropString` |
+| `adoptedStyleSheets`, `new CSSStyleSheet()` | **fixed-ish, monitor** (Q4) | — |
+| `webkitTemporaryStorage`/`webkitPersistentStorage` | **intentional** — removed | surface `webkitFS` |
+| file pickers, WebAuthn, PaymentRequest | **intentional** (D6 / Q7) | surface `webAuthn`, `credGet` |
+| `hasStorageAccess`/`requestStorageAccess` | **residual** — first-party everywhere | — |
+| `registerProtocolHandler` | **fixed** — virtual-origin facade | surface `registerPH`, `registerPHSameOrigin` |
+
+---
+
+## I. URL / navigation semantics — **parity**
+
+`location === document.location`, `location.href === document.URL`,
+`document.baseURI`, hash writes, `new URL` (relative / absolute / statics),
+`window.name`, `document.cookie`, anchor property vs attribute, `ping`,
+`history.pushState`, same-origin `fetch` — compat differential, all identical to
+native. `mailto:` delegation — **fixed** (surface `mailtoNav`). Dynamic `<base>`
+— **intentional** (`base-uri 'none'`; surface `dynamicBase`). `location.protocol/
+host/hostname/port/pathname/search` writes, `location.replace` history,
+`window.open` features, `submitter.formAction`, `a.download`/`referrerPolicy` —
+**unverified** (no fixture).
 
 ---
 
 ## J. HTML/CSS transformer residuals
 
-- `srcset` + data-URI (`data:…,AAA 1x` contains a comma) — historical trap; variants unverified
-- `<script type="importmap">` — URL JSON map — unverified (if unrewritten, specifier resolution breaks)
-- `<script type="speculationrules">` — prefetch/prerender URLs → potential direct loads — unverified
-- `<template>` contents — historical bug; current state needs verification
-- Declarative shadow DOM (`<template shadowrootmode>`) — unverified
-- `srcdoc` entity double-decoding — unverified
-- SVG `<script href>`, `<image href>`, `<use href>`, `xlink:href` — unverified
-- `button/input formaction`, `area href`, `q/blockquote/del/ins cite`, `body/table/td/th background`, `video poster`, `track src`, `input.src`, `link imagesrcset` — attribute coverage list needs enumeration
-- `<noscript>` — raw-text under scripting — unverified
-- `<meta http-equiv="refresh">` — static ✓ / dynamic A9
-- `<meta charset>`/transcoding — unverified
-- Other `http-equiv` (`set-cookie`, `origin-trial`, `default-style`) — unverified
-- MathML `href`/`annotation-xml` — unverified
-- Double-rewrite prevention (proxy URL fed back as input) — unverified
-- `document.write` fragment payloads (tags split across calls) — unverified
-- `<script>` `.text`/`.textContent`/`.innerText` assignment, `appendChild(textNode)` — descriptors captured (scriptText/textContent); hook coverage needs verification
-- CSS: `@import` in `<style>`/cssRules, `insertRule`/`deleteRule`, `cssText`, Typed OM ✓ (2026-09-10), `adoptedStyleSheets`, `style` attr on SVG, `image-set()`, `cursor: url()`, `-webkit-mask-image`, `shape-outside`, `content: url()`, `@font-face` src — each needs read/write round-trip tests
-- `<link rel=stylesheet disabled>`, `media` attribute switching — unverified
-- `nonce`/`integrity`/`crossorigin`/`referrerpolicy`/`fetchpriority` on scripts/links — integrity stripped ✓; rest unverified
-- `<html manifest>` (appcache, legacy), `<applet>` — dead platforms, skip
-- Error documents (4xx/5xx HTML), truncated/malformed HTML — transformer must still apply — unverified
-- `<base>` static handling — htmltx rebases; verify `document.baseURI` after strip
-- `xml:base`, `xmlns` — XML documents — likely out of scope
-- `itemprop`/`itemid` microdata URLs — passive, cosmetic
+Every `url_surfaces.json` pair (the single source of truth for URL-bearing
+attributes) was measured in Chrome for a reflecting IDL property — the property
+write that bypasses the `setAttribute` hook. The three unhooked ones
+(`input.src`, `body.background`, SVG `href.baseVal`) are **fixed**. Load parity
+is checked from the target server's own request log (native requests carry the
+browser UA, proxied ones the proxy's): `poster`, `input[type=image]`, table
+`background`, `link[imagesrcset]`, SVG `<image>` (attribute and `baseVal`),
+`image-set()`, `mask-image`, `content: url()`, `shape-outside`, `@import`,
+`body.background` — **parity**. Serialization keeps the author's literal text
+— **fixed** (compat `ser*`).
 
----
-
-## K. CSP over-restriction → legitimate-site breakage — [analysis]
-
-| Directive | Missing | Breakage |
+| Item | Status | Evidence |
 |---|---|---|
-| `media-src 'self' blob:` | **no `data:`** | `<audio/video src="data:…">`, `data:` VTT `<track>` → blocked |
-| `connect-src 'self' ws:` | **no `data:`/`blob:`** | `fetch('data:…')`, `fetch(blobURL)`, `XHR(data:)` → blocked (historical comment claims a blob fetch worked — browser behavior needs re-verification) |
-| `script-src` | **no `blob:`** | if `__ZP_EXEC_INLINE_MODULE` reaches `import(blob:)` → **all inline `<script type=module>` blocked** — top-priority verification |
-| `default-src 'none'` | prefetch-src fallback | `<link rel=prefetch>` blocked — perf loss |
-| `frame-src` + setter | `blob:`/`data:` in CSP but setter blocks | intentional sealing — legit blob/data frames break |
-| `worker-src blob:` | scriptish blob → blockedWorkerBlob | legit blob workers break |
-| `base-uri 'none'` | | runtime `<base>` creation breaks (Angular) |
-| `object-src 'none'` | | `<object>`/`<embed>` break (intentional) |
-| `form-action 'self'` | | rewritten actions pass; missed rewrites blocked (intentional loud fail) |
-| `manifest-src 'self'` | | `data:` manifests blocked — minor |
-| `img-src`/`font-src`/`style-src` | no `http(s):` | missed rewrites blocked (intentional loud fail) |
-
-Also:
-
-- CSP `<meta>` injection neutralized ✓
-- `frame-ancestors` correctly absent on proxied docs ✓, `'none'` on control surface ✓
-- `report-uri` → `/zp/api/csp-report` — verify the report itself isn't blocked by classification
-- Turnstile origin arming — per-tab gating correctness unverified
-- **Two-sided tests required**: legitimate resources (must load) × missed rewrites (must block + report) × every directive
-- `script-src-attr`/`script-src-elem` fall back to `script-src` — inline handlers rely on `'unsafe-inline'` — verify no regression if split
-- `trusted-types`, `require-trusted-types-for`, `sandbox`, `upgrade-insecure-requests`, `block-all-mixed-content` — correctly absent ✓
-- `webrtc-src`, `navigate-to` — not real directives, skip
+| `srcset` with comma-containing `data:` | **fixed** (historical trap) | static-policy srcset tests |
+| `importmap` / `speculationrules` | **fixed**; read-back relative-as-absolute is **residual** | surface `importmapBare`, `importmapText` |
+| `<template>` contents | **fixed** for serialization (the scrub walks template content) and `template.innerHTML` writes; URLs inside a template nested in inserted HTML are rewritten only when instantiated into the document — **unverified** | e2e `template link suppression preserves DOM absence` |
+| declarative shadow DOM | **fixed** | surface `shadowDom` |
+| SVG `href` / `xlink:href` | **fixed** | surface `svgImage`, `svgAnchor`; compat `jSvgBaseVal` |
+| `<meta http-equiv=refresh>` | **fixed** | A9 |
+| `origin-trial` http-equiv | **fixed** — neutralized | `b602610` |
+| `<script>` text read-back | **fixed** — deproxied | surface `importmapText` path |
+| CSS `insertRule`/`replaceSync`/`cssText`/Typed OM/`style` | **fixed** | surface `insertRuleUrl`, `styleAttrUrl`, `sheetHref` |
+| error / truncated documents | **fixed** | e2e `error and truncated documents still transform` |
+| `<base>` static | **parity** | compat `baseURI` |
+| `charset` transcoding (EUC-KR, Shift_JIS) | **residual** (Q4) | — |
+| `cursor: url()`, `@font-face src`, `<noscript>`, MathML `href`, `set-cookie`/`default-style` http-equiv, `link[disabled]`/`media`, `nonce`/`crossorigin`/`referrerpolicy`/`fetchpriority`, split-tag `document.write`, srcdoc entity decoding, double-rewrite of unknown shapes | **unverified** | — |
+| `xml:base`, microdata URLs, `<applet>`, appcache | out of scope | — |
 
 ---
 
-## L. Fingerprint / identity leakage residuals — [historical + analysis]
+## K. CSP over-restriction — **fixed**
 
-- `Error().stack` — `/zp/api/script?u=…` URLs + rewritten line/col → stack fingerprint — unverified
-- `window.onerror`/`unhandledrejection` filename/lineno — same
-- `arguments.callee`/`fn.toString()` on dynamic fns — `__zp_dyn__` source exposure possible (outside toStringMap coverage)
-- `console.log(location)` → proxy object printed — devtools fingerprint
-- `JSON.stringify(window)`/`Object.values` — virtualized values by design
-- `navigator.serviceWorker.getRegistrations` → exposes ZP SW
-- `performance.getEntriesByType('resource')` `.name` — masked (~4644); `navigation`/`paint`/`worker` entry types unverified
-- `document.scripts` — filtered ✓
-- `__zp_*` own-name leak — comment claims 0 via exec-js; `define()` mechanism unverified — needs regression guard
-- `new URL(rel)` base — proxy path exposure
-- Hook `.name`/`.length`/`.toString()` — `maskNativeFunction` covers most; dynamically generated wrappers unverified
-- `performance.memory`, `hardwareConcurrency`, `deviceMemory` — real (consistent fingerprint, acceptable)
-- `Intl`/timezone — real — verify persona consistency if applicable
-- `document.lastModified`, `characterSet` — real response values — verify consistency after transcoding
-- `window.chrome`, `speechSynthesis`, `fonts`, `WebGL`, canvas, `userAgentData` — masked per trap notes; keep regression coverage
+The CSP suite checks both directions in a real browser: legitimate resources
+load (inline `<script type=module>` via `blob:` — the top-priority check —
+`fetch('data:')`, `fetch(blob:)`, `data:` images/styles; `data:` fonts and media
+raise no violation), blocked ones raise `securitypolicyviolation`
+(`object-src`, `base-uri`), sealed paths fail before CSP (`frame-src data:`,
+`worker-src blob:` — **intentional**), `unsafe-inline`/`unsafe-eval` paths
+work, CSP `<meta>` is intersected rather than dropped, reports reach the server
+log. Prefetch/manifest raise no violation in headless Chrome (no fetch at
+insertion time; the directive's absence is pinned by the header check).
 
 ---
 
-## M. Performance / hang risks
+## L. Fingerprint / identity leakage — **fixed**, residuals listed above
 
-- `for(let i=0;;i++)`, `for(i=0;x();i++)` — loop cap not applied → real infinite loops possible
-- `while(true){await}` capped at 10M → long-lived polls die silently
-- `__zp_get`/`__zp_set` per-access proxy cost — `location.href` in hot loops
-- Prelude ~8.5k LOC — re-parsed per document/iframe → many-frame pages slow
-- MutationObserver whole-DOM watch + instrumentation — large DOM churn
-- Rewriter WASM per-script call latency — large bundles/many scripts
-- `tickURLCache`/`urlClassifyCache` miss patterns — needs measurement
-- SharedWorker/Worker double-bootstrap overhead
-- Ignored perf tests in zp-rewriter (4) — run them before any hot-path change
+Error stacks and `ErrorEvent.filename` (sanitized + `sourceURL` tagging — dyn
+`leak*`, surface error probes), `arguments.callee` / `fn.toString()` on dynamic
+functions, `console.log(location)` (surface `consoleString`), performance entry
+names (including the navigation entry's load URL — surface `perfNavEntry`),
+`document.scripts`, `__zp_*` own names, hook `.name`/`.length`/`.toString()`,
+prototype shapes (`test/browser/protoshape.sh`), SharedWorker and OPFS names —
+**fixed**. Real device/environment values are **intentional** (Q6). Residuals:
+V8 call-printer messages, worker-realm `toString`, `data-zp-*` selector
+oracles, TDZ filename (see the residual table).
+
+---
+
+## M. Performance / hang risks — measured
+
+Loop caps: `while(true)`/`for(;;)`/`for(init;;update)` capped at 10M,
+`do{}while(true)` at 10M+1, non-constant tests deliberately uncapped (perf
+`cappedWhile`, `cappedFor`, `cappedDo`, `normalLoop`, `nestedLoops`).
+Async polls keep `await`/`break` semantics (perf `asyncPollBreak`,
+`asyncPollFlag`). Membrane hot loop ~1.1 s per 6.8M reads, MutationObserver
+~40 ms per 2k nodes, bulk DOM 5k nodes ~30 ms, five iframes ~0.5 s (perf
+`membraneRead`, `moOverhead`, `bulkDom`, `iframes`). Prelude re-parse per frame
+and rewriter latency on large bundles — **residual** (performance track).
 
 ---
 
 ## N. Confirmed-correct behaviors (do not regress)
 
-Verified correct in this audit (emitted output or traced code):
-
-- `{ location }` object shorthand → explicit `{location: __zp_get(...)}`
-- `({location} = o)` → `__zp_get.d` write-sink
-- `location ??= u` → `__zp_assign` eval-order preserved
-- `obj.location ??= u` → accessor-object trick preserves receiver/eval-order
-- `import.meta.url` → marker → `__zp_module_url`
-- `super` member/call — correctly skipped
-- `import()` → `__zp_import` + specifier rewrite
-- `label: for(;;)` → loop cap applied
-- `for(let location of x)` → binding declared → correct shadow
-- `typeof`/`void`/`instanceof`/`switch`/`yield`/`await`/tagged-template on dangerous idents → all mediated
-- `this.location` (static member) → `__zp_get(this,'location')` → virtual (isWindowLike)
-- `location?.reload()` → virtual proxy supplies reload → works
-- `x?.location` on nullish → accidentally correct via `Object(null)={}`
-- `x ||= y`, `loc ||= y` (non-dangerous) → untouched
-- `new Function` body → rewritten + `with(__zp_scope)` nested scope (params/arguments not hidden)
-- `eval`/`Function` globals → dynamicEval/dynamicFunction overrides
-- `history.pushState`/`replaceState` → `commitVirtualHistory` (same-origin check matches native)
-- `document.URL`/`documentURI`/`baseURI`/`referrer`/`cookie` → `defineAccessor` on Document.prototype
-- `window.origin` → `defineMasked` → virtualURL.origin
-- `sendBeacon` → `fetchThroughRuntime`
-- `open('about:blank')`/`open('')` → containment installed
-- `open(http-url)` → proxied via shareNavURL (but see A6)
-- `iframe.src`/`srcdoc` → `installFrameProp` + `setInjectedSrcdoc`
-- iframe/frame `src` `data:`/`javascript:`/`blob:` → blocked (`hasExecutableURLScheme`/`hasContextBlockedScheme`)
-- `contentWindow`/`contentDocument` → `containFrameWindow` + `installNetworkContainment`
-- `postMessage` → wrapped incl. `MessageEvent.source`/`origin` virtualization
-- `Worker`/`SharedWorker` → ZPWorker/ZPSharedWorker
-- `audioWorklet`/`paintWorklet`/`layoutWorklet`/`animationWorklet` `addModule` → `workerBootstrapURL`
-- `createObjectURL` → scriptish-blob tracking → `blockedWorkerBlob`
-- CSP meta injection → `neutralizeCSPMeta`
-- `alert`/`confirm`/`prompt`/`print` → stubs (compat tradeoff)
-- `DOMParser.parseFromString`/`Range.createContextualFragment` → `transformHTML`
-- `innerHTML`/`outerHTML`/`insertAdjacentHTML` → `transformHTML` on write, de-proxy on read
-- `getComputedStyle`, `cssText`, Typed OM, `attributes`/`dataset`/Attr.value → de-proxy/filtered
-- `document.scripts` → filtered collection
-- `PerformanceObserver` entry `name` → masked
-- `chrome` object → masked
-- WebSocket/EventSource/XHR/fetch → runtime-mediated
-- WebTransport/RTCPeerConnection → fail-closed virtual gateways
-- `BroadcastChannel` → facade with target prefix
-- storage facades (local/session/IDB/Cache) → target-prefixed
-- `document.cookie` → jar + `ZP_COOKIE_SET` to SW
+All still hold on 2026-09-29 and are now pinned by the differentials above.
+(The list in `6633629` said `baseURI` lived on `Document.prototype`; it lives on
+`Node.prototype` — the prototype-shape axis caught it on 2026-09-14.)
 
 ---
 
-## O. Test-suite proposal
+## O. Test-suite proposal — **delivered**
 
-### 1. `crates/zp-rewriter/tests/` (cargo)
-
-- **Scope matrix**: every `var`/`let`/`const`/`function`/`class`/`import`/`catch`/param declaration × top-level/function/block/eval × each dangerous name × reference before/after declaration
-- **Assignment-target matrix**: `for-of`/`for-in`, `[]`, `{}` (shorthand, non-shorthand, nested, rest, defaults), `switch`, `case`, labels
-- **Operator matrix**: `?.`, `??`, `??=`, `||=`, `&&=`, `delete`, `typeof`, `void`, `in`, `instanceof`, `**`, unary, sequence, comma, conditional, labels
-- **Computed-member matrix**: `x["location"]`, `x?.["location"]`, `x["location"].href=`, `.assign()`, `.replace()`, `.reload()`, `.toString()`
-- **`with` matrix**: all of section D
-- **Reflect/Object matrix**: get/set/gopd/gopds/lookupGetter/lookupSetter/defineProperty/ownKeys/has × literal/computed × every dangerous prop
-- **import matrix**: default/named/star/alias bindings + `import.meta.*` + `import()` static/computed
-- **class matrix**: decl/expr/name/field/private/computed-key/static/super
-- **sourcemap**: multibyte chars, stripped pragmas, byte-vs-char offsets
-- **loop-cap matrix**: `for(;;)`, `for(i=0;;i++)`, `while(true)`, `do{}while(true)`, labels, async bodies, nested loops, `while(cond)` negative control
-- **`var`-shadowing matrix**: every dangerous name × `var`/`function` × module/classic goal
-
-### 2. `test/js/runtime` (node — prelude unit)
-
-- `dynamicEval` expression/statement classification
-- `compileDynamic` parameter parsing
-- `withScope` `has`/`get`/`set` traps
-- `targetURL`/`nonHTTPAbsoluteURL` classification
-- `isNativeLocation` spoofing (forged `Symbol.toStringTag`, revoked proxies, cross-realm Locations, objects with URL-shaped props)
-- `wrappedLocationFor` local/non-local methods, virtualLocation descriptor/freeze/prototype
-
-### 3. `test/js/static-policy` (extend)
-
-- CSP directive × scheme matrix (explicit allow/deny per scheme)
-- `dist/` artifact size/signature
-- forbidden patterns inside prelude source
-
-### 4. `test/e2e/escape` (E1 extension)
-
-Browser-verified, per section A: `var` shadowing, computed members, `this['location']`, dynamic-Function `this`, eval-expression, GOPD/lookupGetter, `contentDocument.location`, `navigation.navigate`, `open()` window, `frames[i]`, dynamic meta refresh.
-Each case: assert no navigation occurred + `__zp_diagnostics` recorded.
-
-### 5. `test/e2e/compat` (new — direct-vs-proxy differential)
-
-Local fixture executed directly and through the proxy; compare results, exceptions, DOM, network. Positive cases for sections B, C, I.
-
-### 6. `test/e2e/iframe`
-
-Creation/insertion/navigation/srcdoc/blob(blocked)/sandbox/nested/remove-race/postMessage/identity/ownerDocument.
-
-### 7. `test/e2e/worker`
-
-dedicated/module/shared × fetch/importScripts/timers/eval(blocked)/location/storage isolation.
-
-### 8. `test/e2e/csp`
-
-Allowed resources (must load) × blocked resources (must report) × every directive. Inline-module blob-import verification is top priority; `data:` media/fetch real-browser checks.
-
-### 9. `test/e2e/dynamic`
-
-eval/Function/timers/event handlers/DOM-insertion paths — success, exception, source-leak assertions.
-
-### 10. `test/e2e/perf`
-
-10M loop-cap boundary, async-poll lifetime, bulk DOM insertion, iframe count × load time.
+| Proposal | Delivered as |
+|---|---|
+| O1 rewriter matrix | `crates/zp-rewriter/tests/matrix.rs` |
+| O2 prelude units | `test/js/prelude-units.test.js` |
+| O3 static-policy extensions | `test/js/static-policy.test.js` (CSP matrix, forbidden patterns) |
+| O4 escape (E1 extension) | e2e `A-section escapes stay virtual or fail closed` |
+| O5 compat differential | e2e `direct-vs-proxy compatibility differential` (+ J loads) |
+| O6 iframe | e2e `iframe suite` |
+| O7 worker | e2e `worker suite` |
+| O8 CSP | e2e `csp suite` |
+| O9 dynamic | e2e `dynamic code suite` + native differential |
+| O10 perf | e2e `perf suite` |
 
 ---
 
-## P. Priority tiers
+## P. Priority tiers — closed
 
-**P0 — security (escapes confirmed in emitted code / traced paths):**
-
-A1 `var`/`function` shadowing · A2 computed members · A4 eval-expression ·
-A5 GOPD/Reflect-computed · A7 non-root `document.location` · A3 dynamic-Function
-`this` · A8 `navigation` API · A6 `open()` window · A9 dynamic meta refresh
-
-**P0 — compatibility (verify first):**
-
-`script-src` missing `blob:` × inline-module path · `new URL(rel)` base ·
-`location === document.location` · `connect-src` `data:` real-browser check
-
-**P1:**
-
-All of B (syntax-kill) · C scope semantics · D `with` · worker thinness ·
-CSP `data:` media · E eval/direct-scope
-
-**P2:**
-
-Fingerprint residuals · performance · legacy APIs
+Every P0 security item (A1–A9) is **fixed** with a browser pin; P0
+compatibility items (`script-src blob:` for inline modules, `new URL(rel)`,
+`location === document.location`, `connect-src data:`) are **parity**. P1/P2
+are statused in their sections.
 
 ---
 
-## Q. 2026-09-24 surface audit — remaining browser/compat differences
+## Q. 2026-09-24 surface audit
 
-Full inventory of residual divergences after the P0/R/W/D/E fix rounds.
-Statuses: **[gap]** confirmed divergence to fix · **[intentional]** security-driven
-fail-closed or scoped value · **[fingerprint]** Phase-3 track · **[stale]** the
-entry above claimed a gap that is already fixed · **[residual]** documented,
-not fixable without breaking the model · **[unverified]** needs a probe.
+Q1–Q4, Q6–Q8 as written below remain accurate, with these 2026-09-29 updates:
+Q1 `self.name` — **fixed** (SharedWorker requested name; dedicated workers pass
+through natively); Q4 script-text writes — **fixed**, `link.disabled`/`media`,
+MathML, `<noscript>`, exotic `http-equiv`, exotic `srcset`, double-rewrite —
+**unverified** (J table); Q5 `with(obj)` is no longer statically bound (D), the
+`eval\`x\`` tagged template was *not* parity until this audit (E, item 3),
+`x?.location?.()` — **parity**, `arguments.callee` — **fixed**.
 
-### Q1. Worker realm surface — [gap]
+### Q1. Worker realm surface
 
-- `self.origin` returns the **proxy origin** (never virtualised). Leak + parity break.
-- `self.isSecureContext` is the real proxy value. An `http:` target must see `false`.
-- `self.crossOriginIsolated` is real (proxy COOP/COEP, not the target's). [residual — target header set not tracked]
-- `self.BroadcastChannel` is **real** — un-prefixed names shared across targets and inconsistent with the page's prefixed wrapper. [gap — cross-target bleed]
-- `self.name` — real `WorkerOptions.name`; the page wrapper already prefixes SharedWorker names but a dedicated worker's `name` option passes through. [unverified]
-- `self.indexedDB`/`caches`/`cookieStore`/`locks`/`credentials`/`ShadowRealm` — namespaced/gated. [fixed]
-- `navigator.userAgent`/`appVersion`/`platform` in workers — spoofed to the captured Chrome build. [fixed]
-- `navigator.storage.getDirectory()` (OPFS root) — **real**, shared proxy-origin FS across targets. [gap — namespace per target]
-- `self.webkitIndexedDB`, `self.webkitURL`, `self.webkitPersistentStorage`/`webkitTemporaryStorage`, `self.webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL` — real aliases that bypass the namespaced facades / URL wrapper. [gap]
-- `self.EventSource` — implemented over proxied fetch; reconnect/Last-Event-ID semantics approximate. [residual]
-- `self.XMLHttpRequest` (sync) — relayed through `/zp/api/sync-fetch`; readyState/event fidelity approximate. [residual]
-- `self.WebSocket` — brokered through the page; `WebSocketStream` blocked. [intentional]
-- `self.RTCPeerConnection`/`WebTransport` — gateway wrapper or `NotSupportedError` stub when the gateway is absent. [intentional]
-- `self.permissions`, `self.push`/PushManager, `self.Notification`, `self.BarcodeDetector`/`FaceDetector`/`TextDetector`, MediaCapabilities/WebCodecs/InsertableStreams/`ImageDecoder`, `self.USB`/`Serial`/`HID`/`Bluetooth` — **real**, proxy-origin keyed. [fingerprint/intentional]
-- Worker error stacks — sanitised + `//# sourceURL` tagged. [fixed]
-- `self.onmessage`/`postMessage` — wrapped; `MessageEvent.origin` virtualised. [fixed]
+- `self.origin`, `self.isSecureContext`, `BroadcastChannel`, `webkit*` aliases, OPFS — fixed (W8–W12).
+- `self.crossOriginIsolated` — residual (target header set not tracked).
+- `self.indexedDB`/`caches`/`cookieStore`/`locks`/`credentials`/`ShadowRealm` — fixed.
+- `navigator.userAgent`/`appVersion`/`platform` — fixed (spoofed to the captured build).
+- `self.EventSource`, sync `XMLHttpRequest` — residual (reconnect / readyState fidelity approximate).
+- `self.WebSocket` brokered, `WebSocketStream` blocked; `RTCPeerConnection`/`WebTransport` gateway wrapper or `NotSupportedError` stub — intentional.
+- Permission-gated and hardware APIs — fingerprint / intentional.
 
-### Q2. Page realm — isolation / origin leaks — [gap]
+### Q2. Page realm — isolation / origin leaks
 
-- `isSecureContext` is the real proxy value (`true` on localhost) — an `http:` target must see `false`. [gap]
-- `webkitURL` — real `URL` constructor, bypasses the `ZPURL` base wrapper; `new webkitURL(rel, base)` resolves against the **real** document base. [gap]
-- `webkitIndexedDB`/`webkitIDBKeyRange`/`webkitIDBRequest`/`webkitIDBTransaction`/`webkitIDBCursor`/`webkitIDBCursorWithValue`/`webkitIDBDatabase`/`webkitIDBFactory`/`webkitIDBObjectStore`/`webkitIDBIndex`/`webkitIDBOpenDBRequest`/`webkitIDBVersionChangeEvent` — real aliases that bypass the target namespace. [gap]
-- `webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL`/`webkitPersistentStorage`/`webkitTemporaryStorage` — real proxy-origin filesystem/quota. [gap → fail-closed]
-- `navigator.storage.getDirectory()` (OPFS) — real, shared across targets. [gap — per-target subdir]
-- `customElements`/`CustomElementRegistry` — **real shared registry**: two targets in one tab collide on names, and `get`/`whenDefined` observe the other target's registrations. [gap — prefix names; `localName`/`tagName`/`is`/`createElement` need translation]
-- `permissions.query` — falls through to the real proxy-origin grant; a device permission granted to target A is visible as `granted` to target B. [gap — track grants per target]
-- `sharedStorage`, `joinAdInterestGroup`/`runAdAuction`/`leaveAdInterestGroup`/`updateAdInterestGroups`/`createAuctionNonce`/`getInterestGroupAdAuctionData`, `document.browsingTopics`, `document.privateToken`, `window.fence` — **real Privacy-Sandbox APIs keyed to the proxy origin** — cross-target data bleed. [gap → fail-closed]
-- `history.go/back/forward`/`history.length` — real session history; virtual navigations push real entries 1:1 so `length` stays coherent, but pre-boot entries and cross-target traversal are observable. [residual]
-- `window.open('javascript:…')` executes in the **current** realm, not the new window's. [residual]
-- `iframe.csp` / `credentialless` attributes pass through as inert data — a stricter `iframe.csp` is not applied to the child. [residual]
-- `fetchLater` — unhooked; the deferred request must go through proxy transport. [gap]
-- `document.implementation.createHTMLDocument()` — real document with no prelude; its `location` is `about:blank` (harmless) but descendant element hooks rely on the shared realm prototypes. [mostly-fine]
-- `XSLTProcessor` — real; `xsl:include`/`import` fetch directly → CSP blocks → fail-closed. [residual]
+`isSecureContext`, `webkitURL`, `webkitIndexedDB`/`webkitIDB*`, legacy
+filesystem/quota, OPFS, `permissions.query`, Privacy Sandbox, `fetchLater` —
+fixed (P4–P13). `customElements` — **not a bug** (the registry is per Window, not
+per origin; the P11 prefixing was removed, item 17). `history` traversal, `window.open('javascript:')`
+realm, `iframe.csp`/`credentialless`, `XSLTProcessor` — residual.
+`document.implementation.createHTMLDocument()` — fine.
 
-### Q3. Sanitizer / serialization surface — [gap]
+### Q3. Sanitizer / serialization surface
 
-- `Element.setHTML`, `Document.parseHTMLUnsafe`, `Element.getHTML`/`getHTMLUnsafe`, `ShadowRoot.getHTMLUnsafe` — unhooked. `setHTML`/`parseHTMLUnsafe` insert markup whose URL attributes are **not rewritten** (CSP-blocked); `getHTML*` serialises raw `data-zp-*` stash attributes and proxied URLs. (`Element.setHTMLUnsafe`, `ShadowRoot.setHTMLUnsafe`/`getHTML` already hooked.) [gap]
-- `XMLSerializer.serializeToString` — de-proxied. [fixed]
-- `document.scripts`, `getElementsByTagName`, `querySelector(All)`, `NodeIterator`/`TreeWalker`, `el.attributes`/`getAttributeNames` — filtered. [fixed]
-- `cloneNode`/`importNode` carry `data-zp-*` attributes onto the clone — the `attributes` map is filtered, but serialisers other than `XMLSerializer`/`getHTML` may expose them. [residual — covered by Q3 hooks]
-- `document.images`/`links`/`forms`/`anchors`/`embeds`/`plugins`/`applets`/`all`, `getElementsByClassName`/`getElementsByName` — real collections; no ZP nodes match those filters today. [fine]
+`setHTML`, `parseHTMLUnsafe`, `getHTML*`, `XMLSerializer`, filtered collections
+— fixed; serialization is now literal-exact and side-effect free (audit items 8, 9).
 
-### Q4. Script scheduling / HTML transform — mostly [fixed] or [residual]
+### Q4. Script scheduling / HTML transform
 
-- Inline `<script>` bodies are rewritten **in place** and execute natively — `nomodule`, `defer`, `async`, parser-blocking order, `onload`/`onerror` timing are all native. [fixed — earlier audit claim removed]
-- `<script nomodule>` — still skipped natively since the element/attribute is untouched. [fine]
-- `document.write` — transformed; second-document path probed. Split-tag fragments across `write()` calls remain [unverified].
-- `<script>`.text/`textContent`/`innerText` writes — descriptors captured; coverage [unverified].
-- `charset` transcoding — transformer assumes ASCII-compatible input; non-UTF-8 targets (EUC-KR, Shift_JIS) mojibake. [residual]
-- `iframe.csp` — see Q2.
-- CSS: `insertRule`/`replaceSync`/`replace`/`cssText`/Typed OM/`style` attribute are hooked; `adoptedStyleSheets` slot assignment and `new CSSStyleSheet()` rely on those hooks (replaceSync covered). [fixed-ish, monitor]
-- `<base>` dynamic writes — `base-uri 'none'` blocks the element; URL resolution falls back to the virtual base. [intentional divergence, pinned]
-- `link.disabled`/`media` switching — [unverified]
-- `MathML`/`annotation-xml` URLs, `<noscript>` raw text, exotic `http-equiv` values (`set-cookie`/`default-style`) — [unverified]
-- `srcset` with comma-containing data-URIs — historical trap fixed; exotic variants [unverified].
-- Double-rewrite (proxy URL fed back as input) — `unleakedTargetRaw` unwraps known paths; unknown shapes [unverified].
+Inline scripts execute natively in place; `nomodule` fine; `document.write`
+transformed (split tags unverified); `charset` transcoding residual; dynamic
+`<base>` intentional.
 
-### Q5. Language-semantics residuals — mostly [fixed]
+### Q5. Language-semantics residuals
 
-- Dangerous-name write targets: `for (location of x)`, `[location]=a`, `({p:location}=o)`, `location++/--`, `for await`, compound assignment, computed/static member targets — emitted through `__zp_get.d` sinks / `GLOBAL_UPDATE`. [fixed — B-section claims stale]
-- Cross-script `let`/`const`/`class` persistence, redeclaration `SyntaxError`, `const` write `TypeError`, error `filename` via `sourceURL` — fixed page+worker (R1).
-- Direct `eval` caller scope, `eval` var-hoisting, sloppy Annex B — fixed (R2–R4).
-- **TDZ residual**: an uninitialised-lexical read throws `ReferenceError` from inside the prelude — `ErrorEvent.filename`/`e.filename` shows the prelude URL, not the target. [residual — throw must originate in emitted code; per-read emission deemed too costly]
-- `with(obj)` — dangerous names are statically bound; `o`'s own `location`/`eval` properties are never consulted, and direct `eval` inside `with` sees only the lexical chain, not `o`. [residual]
-- Module-scope `eval` — a module's own lexical env is not reified for direct eval. [residual]
-- `arguments.callee` on a `new Function` result — callee is the emitted wrapper; `.name`/`toString` masked but identity/name parity is [unverified].
-- `eval\`x\`` tagged-template — callee gets a non-string → returns it (parity). [unverified]
-- `x?.location?.()` — optional-call chain on dangerous members. [unverified]
-- `function f(location=location)` — param defaults stay real → native TDZ parity. [fine]
-- `catch(location){}` — real local binding → parity. [fine]
-- `import location` module binding — declared → local → parity. [fine]
-- `new.target` through `Reflect.construct`/`new fn()` — propagates. [fixed]
-- `eval` completion values for non-strings/objects — parity pinned. [fixed]
+Dangerous-name write targets, cross-script lexicals, direct eval, Annex B,
+`new.target`, eval completion values — fixed. TDZ filename, module-scope eval,
+direct eval inside `with` — residual.
 
-### Q6. Fingerprint / real-environment surfaces — [fingerprint] Phase-3 track
+### Q6. Fingerprint / real-environment surfaces — Phase-3 track
 
-- Screen/viewport: `screen.*`, `inner*`, `outer*`, `screenX/Y`, `devicePixelRatio`, `visualViewport`, `matchMedia` — real values (layout parity requires real metrics).
-- `Intl`/timezone/`Date`/`performance.timeOrigin`/`now()` — real.
-- `navigator.plugins`/`mimeTypes`/`pdfViewerEnabled`/`javaEnabled`/`maxTouchPoints`/`vendor*`/`product*`/`appName`/`appCodeName`/`languages`/`onLine`/`doNotTrack`/`globalPrivacyControl` — real.
-- `navigator.connection`, `getBattery`, `vibrate`, `getGamepads` — real.
-- Media devices: `mediaDevices`/`getUserMedia`/`getDisplayMedia`/`enumerateDevices`/`selectAudioOutput` — real (native consent boundary, D6).
-- `geolocation`, `clipboard`, `share`/`canShare`, `wakeLock`, `setAppBadge`, `getInstalledRelatedApps`, `contentIndex`, `launchQueue`, `windowControlsOverlay`, `virtualKeyboard`, `ink`, `login`, `managed`, `scheduling` — real.
-- File pickers/`getDirectory`/`getScreenDetails`/`queryLocalFonts`/`EyeDropper` — real (D6 consent-gated).
-- Generic Sensor API, `WebGL`/`WebGL2` `UNMASKED_VENDOR/RENDERER`, `WebGPU` adapter, `WebXR`, `usb`/`serial`/`hid`/`bluetooth`/`midi`/`nfc` — real hardware values.
-- `speechSynthesis.getVoices` — fixed 2-voice list (divergence from real systems). [intentional]
-- `performance.memory`/`hardwareConcurrency`/`deviceMemory`, canvas `getImageData`/`toDataURL`, `AudioBuffer.getChannelData` — spoofed/noised. [intentional]
-- `ReportingObserver`/`securitypolicyviolation` — report our build CSP, not the target's. [intentional]
-- `window.event`/`external`/`status`/`closed`/`defaultStatus`/`offscreenBuffering`/`styleMedia`/`chrome`(masked)/`sidebar` — real or absent.
-- `crossOriginIsolated`/`originAgentCluster`/`credentialless`/`prerendering` — real.
-- Copy/drag (`DataTransfer`, `text/uri-list`, `clipboardData`) expose the real DOM `href` = proxy URL string. [residual — the URL is functional, but the string shape leaks]
-- Sourcemap/`//# sourceURL` line mapping is approximate — devtools line numbers may not match the original. [residual]
+Screen/viewport, `Intl`, device, media, sensors, hardware — real by design;
+`speechSynthesis` voices, memory/concurrency, canvas/audio — spoofed or noised
+(intentional); copy/drag `text/uri-list` shows the proxy URL string and
+sourcemap line mapping is approximate — residual.
 
 ### Q7. Still intentional fail-closed — do not "fix" without a design
 
-- `credentials.*` (WebAuthn/FedCM/OTP), `ShadowRealm` evaluate/importValue, `serviceWorker.register`, Notification `showNotification`/`getNotifications`, worker `WebSocketStream`, `iframe.src` `blob:`/`data:`/`javascript:`, `<object>`/`<embed>`/`<portal>`/`<fencedframe>`, `frame-src data:`/`worker-src blob:` seal, non-http `location.assign` targets other than delegatable external schemes, `new Function`/`eval` rewrite failures, `PaymentRequest` (breaks by nature — RP is the proxy origin).
-- `alert`/`confirm`/`prompt`/`print` stubs, `document.domain` no-op, `registerProtocolHandler` silent-success facade, `window.name` virtual store, `navigation` facade, `cookieStore` jar — documented divergences, all pinned in `PHASE2_STATUS.md`.
+`credentials.*`, `ShadowRealm`, `serviceWorker.register`, notifications,
+worker `WebSocketStream`, `iframe.src` `blob:`/`data:`/`javascript:`,
+`<object>`/`<embed>`/`<portal>`/`<fencedframe>`, `frame-src data:` /
+`worker-src blob:` seal, non-http `location.assign` targets other than
+delegatable schemes, `new Function`/`eval` rewrite failures, `PaymentRequest`,
+dialog stubs, `document.domain` no-op, `registerProtocolHandler` facade,
+`window.name` store, `navigation` facade, `cookieStore` jar — pinned in
+`PHASE2_STATUS.md`.
 
-### Q8. Fix list spawned by this audit — **all landed 2026-09-24**
+### Q8. Fix list spawned by the 2026-09-24 audit — all landed
 
-Every item above marked [gap] is now closed. Evidence pins live in
-`test/e2e/proxy.test.js` (`worker virtual surfaces (W8-W12)` and the
-`P4–P13` block in `surface suite`) and `PHASE2_STATUS.md` divergence table:
-
-- **W8** worker `self.origin` → virtual target origin (`blob:`/`data:` inherit the creator's `ref`).
-- **W9** worker `self.isSecureContext` → virtual scheme/host rule.
-- **W10** worker `BroadcastChannel` → `zp:b:<hash>` prefix, `name` masked to the requested value.
-- **W11** worker `webkitIndexedDB`→namespaced facade, `webkitURL`→ZPWorkerURL (natively absent in Chrome workers — parity), legacy FS/quota removed.
-- **W12** worker `navigator.storage.getDirectory` → `zp:o:<hash>` subdir (handle `.name` shows hash only).
-- **W-extra** worker `new URL` → proxy-URL unwrap wrapper; internal parsing captured to `NativeURLCtor`; SharedWorker `self.name` masked to the requested name.
-- **P4** page `isSecureContext` → virtual rule.
-- **P5** `webkitURL` → `ZPURL` alias.
-- **P6** `webkitIndexedDB`/`webkitIDB*` → namespaced facade aliases.
-- **P7** legacy filesystem/quota APIs → removed.
-- **P8** `Element.setHTML`/`Document.parseHTMLUnsafe` → transform-first; `getHTML`/`getHTMLUnsafe`/`ShadowRoot.getHTML*` → deproxied serialization with `data-zp-*` scrub.
-- **P9** `fetchLater` → `/zp/api/fetch` keepalive envelope on pagehide/visibilitychange.
-- **P10** page `navigator.storage.getDirectory` → `zp:o:<hash>` subdir.
-- **P11** `customElements` → per-target prefixed registry; `define`/`get`/`whenDefined`/`getName`, `localName`/`tagName`/`nodeName` masks, `createElement`/tag-query translation, insertion-path upgrades (`innerHTML`/`insertAdjacentHTML`/`setHTML*`/`parseHTMLUnsafe`/`createContextualFragment`/`DOMParser`).
-- **P12** `permissions.query` → per-target grant tracking (`__zp_grants`); `getUserMedia`/`getDisplayMedia`/geolocation record grants.
-- **P13** Privacy Sandbox (`sharedStorage`, Protected Audience, `browsingTopics`, `privateToken`, `queryLocalFonts` et al.) → fail-closed/removed.
-- **P14** dynamic-function `.name`/`arguments.callee` → verified: emitted wrappers are anonymous; parity holds, no change needed.
+W8–W12, P4–P14 — see `test/e2e/proxy.test.js` (`worker virtual surfaces
+(W8-W12)`, `surface suite`) and the `PHASE2_STATUS.md` divergence table.

@@ -275,9 +275,18 @@
       },
       configurable: false
     }); } catch {}
+    // `<a ping>` is swallowed (the browser must not ping on its own — E1 fires
+    // it through the proxy) and the value lives in `data-zp-blocked-ping`.
+    // Read surfaces answer from that stash, so the page sees its own value as
+    // natively: getAttribute/hasAttribute/getAttributeNames/serialization.
+    const blockedPing = el => {
+      const ln = el && el.localName;
+      return ln === 'a' || ln === 'area' ? Native.getAttribute.call(el, 'data-zp-blocked-ping') : null;
+    };
     define(w.Element.prototype, 'getAttribute', function(k) {
       const key = String(k).toLowerCase();
       if (isZPAttrName(key)) return null;
+      if (key === 'ping') { const p = blockedPing(this); if (p !== null) return p; }
       if (key === 'integrity' && isIntegrityBearing(this)) {
         const backed = backedIntegrity(this);
         return backed !== null ? backed : Native.getAttribute.call(this, k);
@@ -336,6 +345,7 @@
       if (isZPAttrName(key)) return false;
       if (key === 'integrity' && isIntegrityBearing(this)) return backedIntegrity(this) !== null || Native.hasAttribute.call(this, k);
       if (key === 'sandbox' && isFrameElement(this) && frameSandboxMeta.has(this)) return true;
+      if (key === 'ping' && blockedPing(this) !== null) return true;
       return Native.hasAttribute.call(this, k);
     });
     if (Native.removeAttribute) define(w.Element.prototype, 'removeAttribute', function(k) {
@@ -352,6 +362,7 @@
         return Native.removeAttribute.call(this, k);
       }
       if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
+      if (key === 'ping' && (ln === 'a' || ln === 'area')) Native.removeAttribute.call(this, 'data-zp-blocked-ping');
       if (ln === 'link' && localKey === 'href' && isIconLink(this)) {
         urlMeta.delete(this);
         if (Native.removeAttribute) Native.removeAttribute.call(this, 'data-zp-target-url');
@@ -374,6 +385,7 @@
       const names = Native.getAttributeNames.call(this).filter(name => !isZPAttrName(name));
       if (isIntegrityBearing(this) && backedIntegrity(this) !== null && !names.some(name => String(name).toLowerCase() === 'integrity')) names.push('integrity');
       if (isFrameElement(this) && frameSandboxMeta.has(this) && !names.some(name => String(name).toLowerCase() === 'sandbox')) names.push('sandbox');
+      if (blockedPing(this) !== null && !names.some(name => String(name).toLowerCase() === 'ping')) names.push('ping');
       return names;
     });
     if (Native.elementAttributes && Native.elementAttributes.get) try { defineMasked(w.Element.prototype, 'attributes', { get() { return filteredNamedNodeMap(Native.elementAttributes.get.call(this), this); }, configurable: false }); } catch {}
@@ -390,6 +402,27 @@
     // `el.attachShadow(); shadow.innerHTML = '<img src=target>'` writes raw
     // markup (and raw URLs) behind the membrane. Same treatment as
     // Element: transformed on write, scrubbed on read.
+    // String-level scrub for serializations a clone cannot reproduce (shadow
+    // roots). Restore each rewritten attribute's author text from its
+    // `data-zp-lit-<name>` stash in the same start tag — the literal that
+    // getAttribute / outerHTML return — then drop our attributes and deproxy
+    // the rest. Serializer output is canonical (double-quoted, `"`/`&`
+    // escaped), so the value patterns below are exact.
+    const scrubSerialized = out => {
+      if (typeof out !== 'string') return out;
+      const withLiterals = out.indexOf('data-zp-lit-') < 0 ? out
+        : out.replace(/<([a-zA-Z][^\s/>]*)((?:\s+[^\s"'>/=]+(?:="[^"]*")?)*)(\s*\/?)>/g, (tag, name, attrs, tail) => {
+          if (attrs.indexOf('data-zp-lit-') < 0) return tag;
+          const lits = Object.create(null);
+          attrs.replace(/\sdata-zp-lit-([^\s"'>/=]+)="([^"]*)"/g, (_, n, v) => { lits[n.toLowerCase()] = v; return ''; });
+          const next = attrs.replace(/(\s)([^\s"'>/=]+)="([^"]*)"/g, (m, sp, n, v) => {
+            const key = n.toLowerCase();
+            return key.indexOf('data-zp-') !== 0 && key in lits ? sp + n + '="' + lits[key] + '"' : m;
+          });
+          return '<' + name + next + tail + '>';
+        });
+      return deproxyURL(withLiterals.replace(/\sdata-zp-[a-z-]+(?::[a-z-]+)?="[^"]*"/g, ''), { scan: true, fallback: 'share' });
+    };
     if (w.ShadowRoot && w.ShadowRoot.prototype) {
       patchHTMLSetter(w.ShadowRoot.prototype, 'innerHTML');
       if (typeof w.ShadowRoot.prototype.setHTMLUnsafe === 'function') {
@@ -401,13 +434,8 @@
       if (typeof w.ShadowRoot.prototype.getHTML === 'function') {
         const nativeGetHTML = w.ShadowRoot.prototype.getHTML;
         define(w.ShadowRoot.prototype, 'getHTML', function(opts) {
-          // cloneNode can't carry a shadow root, so scrub at string level:
-          // strip our backup attributes and de-proxy every URL in the
-          // serialized markup.
-          const out = nativeGetHTML.call(this, opts);
-          return typeof out === 'string'
-            ? deproxyURL(out.replace(/\sdata-zp-[a-z-]+="[^"]*"/g, ''), { scan: true, fallback: 'share' })
-            : out;
+          // A shadow root cannot be cloned, so scrub at string level.
+          return scrubSerialized(nativeGetHTML.call(this, opts));
         });
       }
     }
@@ -425,36 +453,37 @@
     if (typeof w.Element.prototype.setHTML === 'function') {
       const nativeElSetHTML = w.Element.prototype.setHTML;
       define(w.Element.prototype, 'setHTML', function(html, opts) {
-        const ret = nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
-        try { if (ceUpgradeSubtree) ceUpgradeSubtree(this); } catch {}
-        return ret;
+        return nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
       });
     }
     if (typeof w.ShadowRoot !== 'undefined' && w.ShadowRoot.prototype && typeof w.ShadowRoot.prototype.setHTML === 'function') {
       const nativeShadowSetHTML = w.ShadowRoot.prototype.setHTML;
       define(w.ShadowRoot.prototype, 'setHTML', function(html, opts) {
-        const ret = nativeShadowSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
-        try { if (ceUpgradeSubtree) ceUpgradeSubtree(this); } catch {}
-        return ret;
+        return nativeShadowSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
       });
     }
     if (typeof w.Document.parseHTMLUnsafe === 'function') {
       const nativeParseUnsafe = w.Document.parseHTMLUnsafe;
       define(w.Document, 'parseHTMLUnsafe', function(html) {
-        const out = nativeParseUnsafe.call(w.Document, transformHTML(String(html), transformHTMLOpts));
-        try { if (ceUpgradeSubtree && out && out.documentElement) ceUpgradeSubtree(out.documentElement); } catch {}
-        return out;
+        return nativeParseUnsafe.call(w.Document, transformHTML(String(html), transformHTMLOpts));
       });
     }
     // getHTML/getHTMLUnsafe serialize the RAW DOM — proxy URLs and our
-    // data-zp-* stash attributes leak verbatim. Scrub like getHTML above.
-    const scrubSerialized = out => typeof out === 'string'
-      ? deproxyURL(out.replace(/\sdata-zp-[a-z-]+="[^"]*"/g, ''), { scan: true, fallback: 'share' })
-      : out;
+    // data-zp-* stash attributes leak verbatim. Without shadow-root options
+    // the inert clone scrub (same as innerHTML) gives exact parity — literal
+    // URLs, script/style text, srcdoc, ping. Shadow roots need the string scrub.
     for (const [proto, m] of [[w.Element && w.Element.prototype, 'getHTML'], [w.Element && w.Element.prototype, 'getHTMLUnsafe'], [w.ShadowRoot && w.ShadowRoot.prototype, 'getHTMLUnsafe']]) {
       if (!proto || typeof proto[m] !== 'function') continue;
       const nativeGet = proto[m];
-      define(proto, m, function(opts) { return scrubSerialized(nativeGet.call(this, opts)); });
+      define(proto, m, function(opts) {
+        const wantsShadow = !!opts && typeof opts === 'object'
+          && (opts.serializableShadowRoots || (opts.shadowRoots && opts.shadowRoots.length));
+        if (!wantsShadow && this && this.nodeType === 1) {
+          const clone = scrubbedClone(this);
+          if (clone) return nativeGet.call(clone, opts);
+        }
+        return scrubSerialized(nativeGet.call(this, opts));
+      });
     }
     // ★2026-08-22 — `innerHTML`/`outerHTML` 만 세정하고 있었다.
     // `new XMLSerializer().serializeToString(document.documentElement)` 은 훅이
@@ -468,7 +497,7 @@
         return nativeSerialize.call(this, clone || node);
       });
     }
-    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); try { if (ceUpgradeSubtree) ceUpgradeSubtree(this.parentNode || this); } catch {} return ret; });
+    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
     // Document.prototype.write / writeln wrap. 인스턴스 레벨이 아니라 proto
     // 레벨이라 같은 realm 의 모든 Document 인스턴스에 적용. 부모 install 시
     // 부모 Document.prototype, iframe install 시 iframe Document.prototype.
@@ -530,13 +559,10 @@
               d.set.call(this, rewriteCSSText(v));
               return;
             }
-            // outerHTML 은 `this` 자체가 교체된다 — 업그레이드 루트는 부모다.
-            const upRoot = prop === 'outerHTML' ? this.parentNode : this;
             d.set.call(this, transformHTML(String(v), transformHTMLOpts));
             syncBaseElement(this);
             instrumentDescendantIframes(this);
             enforceSubtreePolicies(this);
-            try { if (ceUpgradeSubtree) ceUpgradeSubtree(upRoot || this); } catch {}
           },
           configurable: false
         });

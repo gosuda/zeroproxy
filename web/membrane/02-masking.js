@@ -440,6 +440,17 @@
     for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619); }
     return 'zp:w:' + ('00000000' + (h >>> 0).toString(16)).slice(-8) + ':';
   }
+  // `new SharedWorker(url, options)` — options is `(DOMString or WorkerOptions)`
+  // and the name defaults to ''. Both wrappers used to write `prefix+'default'`
+  // for a missing name (so `new SharedWorker(u)` and `{name:'default'}` hit
+  // the SAME worker, and the worker saw self.name 'default' where Chrome shows
+  // ''), and spread a string argument into character indices, losing it.
+  function prefixedSharedWorkerOptions(prefix, opts) {
+    if (typeof opts === 'string') return { name: prefix + opts };
+    const o = opts && typeof opts === 'object' ? Object.assign({}, opts) : {};
+    o.name = prefix + (o.name === undefined ? '' : String(o.name));
+    return o;
+  }
   let sharedEventTargetProto = null;
   function eventTargetProto() {
     if (sharedEventTargetProto) return sharedEventTargetProto;

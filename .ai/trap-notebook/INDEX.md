@@ -6,6 +6,13 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-29 | rewriter / 수정 | `a?.[k]`→`__zp_oget(a,k)` 가 키를 먼저 평가하고 체인 단락을 깼다(GitHub 랜딩 에러 페이지). 체인 단위 연속 `__zp_ochain` 으로. | rewriter.md#옵셔널-체인-연속 |
+| 2026-09-29 | membrane / 수정 | about:blank 자식 창에 R1 `__zp_lex_*` 가 없어 top-level let 을 가진 스크립트가 첫 줄에서 죽었다 — 자식 전용 레지스트리. | rewriter.md#자식-렉시컬 |
+| 2026-09-29 | worker / 수정 | 워커에 `__zp_okeys`·`__zp_delete`·`__zp_oget` 등 15개가 없어 `Object.keys(o)` 가 ReferenceError. 방출 헬퍼 × realm 가드. | rewriter.md#워커-헬퍼-누락 |
+| 2026-09-29 | membrane / 수정 | React 의 `Error.prepareStackTrace` 저장/복원이 우리 훅을 자기 자신에 물려 이후 모든 `.stack` 이 스택 오버플로. | rewriter.md#prepare-stack-재귀 |
+| 2026-09-29 | membrane / 제거 | customElements 타깃 접두어는 격리가 아니었다(레지스트리는 Window 마다) — closest·CSS·정체성이 깨져 GitHub partial 전멸. | rewriter.md#ce-접두어-제거 |
+| 2026-09-29 | htmltx / 수정 | import/export 없는 `type=module` 이 classic 리라이트(R1 프롤로그)로 모듈끼리 이름 충돌 — kind 는 URL 로(`&kind=module`). | rewriter.md#module-kind-url |
+| 2026-09-29 | membrane / 수정 | innerHTML 을 읽기만 해도 요청이 나갔다(살아 있는 cloneNode 사본). IDL 우회 3개(input.src 등)는 url_surfaces 전수 측정으로 찾았다. | rewriter.md#surface-차분 |
 | 2026-09-29 | 검증 / 규칙 | 프록시 단독 기대값이 divergence 6건을 설계로 인증하고 있었다(on* 문자열 실행·eval 이중실행 등). 기대값은 네이티브 차분에서 얻는다. | rewriter.md#프록시-단독-핀 |
 | 2026-09-29 | rewriter / 수정 | ASI 선언 뒤 `__zp_lex_bind` 가 붙어 스크립트 전체가 SyntaxError. 하네스 실패 6건에 진짜 버그 1건이 묻혀 CI 가 빨간 채였다. | rewriter.md#lex-bind-asi |
 | 2026-09-26 | build / 수정 | build.mjs top-level `await` 앞의 `const` 는 TDZ — 빌드용 경로 상수는 파일 상단 `webSrc` 옆에. | build-deploy.md#2026-09-26--build-mjs-top-level-await-tdz |

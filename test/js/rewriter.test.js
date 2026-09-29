@@ -291,3 +291,66 @@ test('member target wrappers retain automatic semicolon insertion and conditiona
   `), ctx);
   assert.equal(ctx.window.result, 9);
 });
+
+// Optional chains: a `?.` short-circuits the WHOLE chain and never evaluates
+// keys/arguments to its right (2026-09-29). Link-by-link helper calls broke
+// both — `e.poster?.[!e.poster.mobile …]` evaluated its key on an undefined
+// poster and killed GitHub's landing page. Each case runs natively and
+// rewritten; result, evaluation log and error class must agree.
+test('optional chains keep native short-circuit and evaluation order', () => {
+  const cases = [
+    'let n = null; r = n?.[log("k")];',
+    'let n = null; r = n?.[log("k")].b;',
+    'let n = null; r = n?.[log("k")]?.[log("j")];',
+    'let o = { a: { b: 1 } }; r = o?.[log("a")].b;',
+    'let o = { a: null }; r = o?.[log("a")]?.[log("j")];',
+    'let o = { a: null }; r = o?.[log("a")].b;',
+    'let n = null; r = n?.b[log("k")];',
+    'let o = { b: { k: 2 } }; r = o?.b[log("k")];',
+    'let n = null; r = n?.[log("k")](log("arg"));',
+    'let o = { m(x) { return this === o && x; } }; r = o?.[log("m")](log("arg"));',
+    'let o = {}; r = o[log("m")]?.(log("arg"));',
+    'let o = { m(x) { return this === o && x; } }; r = o[log("m")]?.(log("arg"));',
+    'let o = { m() { return { k: 5 }; } }; r = o[log("m")]?.().k;',
+    'let o = {}; r = o[log("m")]?.().k[log("z")];',
+    'let n = null; r = n?.m?.(log("arg"))[log("z")];',
+    'let o = { m: null }; r = o.m?.(log("arg"))[log("z")];',
+    'let o = { location: { href: "L" } }; r = o?.location?.[log("href")];',
+    'let f = null; r = f?.(log("arg"))[log("k")];',
+    'let f = (x) => ({ k: x }); r = f?.(log("arg"))[log("k")];',
+    'let o = null; r = o?.m?.[log("k")];',
+    'let a = { b: null }; r = (a?.b)?.[log("k")];',
+    'r = [1, 2]?.[log(0)] + [3]?.[log(0)];',
+    'let x = null; r = x?.[log("k")] ?? log("dflt");',
+    'let x = null; r = typeof x?.[log("k")];',
+    // GitHub landing: image items carry no poster.
+    'r = [{ url: { desktop: "d" } }].map((e) => e.url[!e.url.mobile ? "desktop" : "mobile"] + "|" + e.poster?.[!e.poster.mobile ? "desktop" : "mobile"]).join();',
+  ];
+  const run = (ctx, code) => {
+    ctx.L = [];
+    ctx.log = (v) => { ctx.L.push(v); return v; };
+    try { vm.runInContext(code, ctx); return JSON.stringify([ctx.r === undefined ? '<undef>' : ctx.r, ctx.L]); }
+    catch (e) { return 'threw:' + (e && e.name) + ' ' + JSON.stringify(ctx.L); }
+  };
+  for (const src of cases) {
+    const native = run(vm.createContext({}), src);
+    const { ctx } = executionContext();
+    // Helper contracts (07-membrane.js / worker-prelude.js).
+    ctx.__zp_oget = (b, k) => (b == null ? undefined : ctx.__zp_get(b, k));
+    ctx.__zp_ocall = (b, k, args, flags) => {
+      if (b == null) { if (flags & 2) return undefined; throw new TypeError('nullish base'); }
+      const fn = ctx.__zp_get(b, k);
+      if (fn == null && (flags & 1)) return undefined;
+      return Reflect.apply(fn, b, args);
+    };
+    ctx.__zp_ochain = (b, cont) => (b == null ? undefined : cont(b));
+    ctx.__zp_ocallv = (b, k) => {
+      if (b == null) throw new TypeError('nullish base');
+      const fn = ctx.__zp_get(b, k);
+      if (fn == null) return undefined;
+      return function () { return Reflect.apply(fn, b, arguments); };
+    };
+    const code = rewrite(src);
+    assert.equal(run(ctx, code), native, `${src}\n  rewritten: ${code.replace(/;\{const __zp_bad[^}]*\}/, '')}`);
+  }
+});

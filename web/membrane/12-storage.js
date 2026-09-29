@@ -140,6 +140,20 @@
         try { Object.defineProperty(wrapped, '__zpWrapped', { value: true }); } catch {}
         maskNativeFunction(wrapped, 'getDirectory');
         define(storageMgr, 'getDirectory', wrapped);
+        // The OPFS root's `.name` is '' natively (Chrome 152). What we hand out
+        // is the per-target subdirectory, so `root.name` read 'zp:o:<hash>' —
+        // a fingerprint that also names the namespace. Mask exactly this
+        // target's root name (a structured-cloned copy of the handle is a new
+        // object, so match by name rather than identity).
+        const FSH = w.FileSystemHandle && w.FileSystemHandle.prototype;
+        const nameDesc = FSH && Object.getOwnPropertyDescriptor(FSH, 'name');
+        if (nameDesc && typeof nameDesc.get === 'function' && nameDesc.configurable) {
+          const nativeName = nameDesc.get;
+          defineMasked(FSH, 'name', {
+            get() { const n = nativeName.call(this); return n === opfsRoot ? '' : n; },
+            enumerable: nameDesc.enumerable, configurable: true,
+          });
+        }
         if (storageMgr.estimate) {
           const nativeEstimate = storageMgr.estimate.bind(storageMgr);
           define(storageMgr, 'estimate', function estimate() { return nativeEstimate(); });
@@ -274,9 +288,7 @@
     if (w.SharedWorker) {
       const NativeSW = realCtor(w, '__zp_realSW', w.SharedWorker);
       const SWWrap = function(url, opts) {
-        const named = (opts && opts.name) ? Object.assign({}, opts, { name: sharedWorkerPrefix + String(opts.name) })
-                                          : Object.assign({}, opts || {}, { name: sharedWorkerPrefix + 'default' });
-        return new NativeSW(workerBootstrapURL(url), named);
+        return new NativeSW(workerBootstrapURL(url), prefixedSharedWorkerOptions(sharedWorkerPrefix, opts));
       };
       try { SWWrap.prototype = NativeSW.prototype; } catch {}
       try { define(w, 'SharedWorker', SWWrap); } catch {}
@@ -353,8 +365,19 @@
       const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
       if (nameDesc && typeof nameDesc.get === 'function') {
         const nativeName = nameDesc.get;
+        // The navigation entry is named by the document URL **at load** — it
+        // does not follow later hash/pushState changes (Chrome 152). The share
+        // fallback maps `/zp/p/<token>` to the CURRENT virtual URL, so after a
+        // `location.hash` write the entry read `…#frag` where Chrome keeps the
+        // load URL. Capture it here, before page code runs.
+        const bootVirtualHref = virtualURL.href;
+        const typeDesc = Object.getOwnPropertyDescriptor(entryProto, 'entryType');
+        const isNavigationEntry = e => { try { return !!typeDesc && typeDesc.get.call(e) === 'navigation'; } catch { return false; } };
         defineMasked(entryProto, 'name', {
-          get() { return deproxyURL(nativeName.call(this), { fallback: 'share' }); },
+          get() {
+            if (isNavigationEntry(this)) return bootVirtualHref;
+            return deproxyURL(nativeName.call(this), { fallback: 'share' });
+          },
           configurable: true,
           enumerable: nameDesc.enumerable
         });
@@ -364,7 +387,7 @@
         if (typeof nativeToJSON === 'function') {
           define(entryProto, 'toJSON', function toJSON() {
             const out = nativeToJSON.call(this);
-            try { if (out && typeof out === 'object' && 'name' in out) out.name = deproxyURL(out.name, { fallback: 'share' }); } catch {}
+            try { if (out && typeof out === 'object' && 'name' in out) out.name = isNavigationEntry(this) ? bootVirtualHref : deproxyURL(out.name, { fallback: 'share' }); } catch {}
             return out;
           });
         }
@@ -667,129 +690,19 @@
         }
       } catch {}
     } catch {}
-    // customElements — the registry is keyed to the REAL proxy origin, so two
-    // targets sharing one tab collide on names and observe each other's
-    // registrations. Namespace every defined name with a per-target prefix.
-    // createElement / `is` attribute / localName·tagName are translated so
-    // the prefix stays invisible to page code. Static markup written before
-    // define() is upgraded by element-replacement at define time (approximate
-    // — native upgrade timing differs, but constructor + attrs + children
-    // land in the right order).
-    try {
-      const registry = w.customElements;
-      if (registry && typeof registry.define === 'function') {
-        const cePrefix = 'zp' + originHash.replace(/[^a-z0-9]/g, '') + '-';
-        const zname = name => cePrefix + String(name);
-        const definedNames = new Set();
-        const nativeDefine = registry.define.bind(registry);
-        const nativeGet = registry.get && registry.get.bind(registry);
-        const nativeWhenDefined = registry.whenDefined && registry.whenDefined.bind(registry);
-        const nativeUpgrade = registry.upgrade && registry.upgrade.bind(registry);
-        const nativeGetName = registry.getName && registry.getName.bind(registry);
-        const doc = w.document;
-        // Upgrade parsed elements carrying the UNprefixed tag by replacing
-        // them with a prefixed element — constructor + attribute/connected
-        // callbacks then run natively on the replacement.
-        const upgradeElements = (rootEl, name) => {
-          const zn = zname(name);
-          // localName/tagName 게터가 접두어를 지워버리므로 "미접두 태그" 판정은
-          // 생성자 instanceof 로 한다 — 이미 업그레이드된 노드는 건너뛴다.
-          const ctor = nativeGet ? nativeGet(zn) : null;
-          const needsUpgrade = el => !(ctor && el instanceof ctor);
-          const list = [];
-          try { if (rootEl.localName === name && needsUpgrade(rootEl)) list.push(rootEl); } catch {}
-          // 파스된 미접두 태그를 찾아야 하므로 **네이티브** 탐색을 써야 한다 —
-          // 페이지 대면 querySelectorAll/getElementsByTagName 은 이름을 접두어로
-          // 번역해 이미 업그레이드된 노드만 찾는다.
-          const nativeQsa = rootEl.nodeType === 9 ? Native.querySelectorAll
-            : rootEl.nodeType === 11 ? (Native.fragmentQuerySelectorAll || null)
-            : Native.elementQuerySelectorAll;
-          try { if (nativeQsa) for (const el of Array.from(nativeQsa.call(rootEl, name))) if (!list.includes(el) && needsUpgrade(el)) list.push(el); } catch {}
-          try { if (typeof rootEl.getElementsByTagName === 'function') for (const el of Array.from(rootEl.getElementsByTagName(name))) if (!list.includes(el) && needsUpgrade(el)) list.push(el); } catch {}
-          for (const el of list) {
-            try {
-              const repl = doc.createElement(zn);
-              for (const a of Array.from(el.attributes)) { try { repl.setAttribute(a.name, a.value); } catch {} }
-              while (el.firstChild) repl.appendChild(el.firstChild);
-              el.replaceWith(repl);
-            } catch {}
-          }
-        };
-        // 삽입 경로(innerHTML 등)에서 파스된 미접두 태그를 찾아 업그레이드한다.
-        ceUpgradeSubtree = (rootEl) => {
-          if (!rootEl || !definedNames.size) return;
-          for (const n of definedNames) upgradeElements(rootEl, n);
-        };
-        define(registry, 'define', function(name, ctor, opts) {
-          const n = String(name).toLowerCase();
-          definedNames.add(n);
-          const zn = zname(n);
-          nativeDefine(zn, ctor, opts);
-          upgradeElements(doc.documentElement || doc, n);
-        });
-        if (nativeGet) define(registry, 'get', function(name) { return nativeGet(zname(String(name))); });
-        if (nativeGetName) define(registry, 'getName', function(ctor) { const n = nativeGetName(ctor); return n && n.startsWith(cePrefix) ? n.slice(cePrefix.length) : n; });
-        if (nativeWhenDefined) define(registry, 'whenDefined', function(name) { return nativeWhenDefined(zname(String(name))); });
-        if (nativeUpgrade) define(registry, 'upgrade', function(root2) { return nativeUpgrade(root2); });
-        // createElement / createElementNS translate tag names; `is` option too.
-        const docProto = w.Document && w.Document.prototype;
-        if (docProto) {
-          const nativeCreateElement = docProto.createElement;
-          if (typeof nativeCreateElement === 'function') define(docProto, 'createElement', function(tag, opts) {
-            const t = String(tag).toLowerCase();
-            const zn = definedNames.has(t) ? zname(t) : t;
-            const o = (opts && typeof opts === 'object' && opts.is && definedNames.has(String(opts.is).toLowerCase())) ? Object.assign({}, opts, { is: zname(String(opts.is).toLowerCase()) }) : opts;
-            return nativeCreateElement.call(this, zn, o);
-          });
-          const nativeCreateElementNS = docProto.createElementNS;
-          if (typeof nativeCreateElementNS === 'function') define(docProto, 'createElementNS', function(ns2, tag, opts) {
-            const t = String(tag).toLowerCase();
-            const zn = definedNames.has(t) ? zname(t) : tag;
-            return nativeCreateElementNS.call(this, ns2, zn, opts);
-          });
-          // querySelector(All)/getElementsByTagName — translate defined tag
-          // names inside selectors so `qsa('my-el')` finds the prefixed nodes.
-          const translateSelector = sel => {
-            if (!definedNames.size) return sel;
-            let out = String(sel);
-            for (const n of definedNames) {
-              out = out.replace(new RegExp('(^|[\\s,>+~]|^)' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=$|[\\s,>+~.\\[\\]#:)])', 'gi'), (m, p) => p + zname(n));
-            }
-            return out;
-          };
-          for (const m of ['querySelector', 'querySelectorAll']) {
-            if (typeof docProto[m] === 'function' && typeof Element !== 'undefined' && w.Element && w.Element.prototype) {
-              const nat = docProto[m];
-              define(docProto, m, function(sel) { return nat.call(this, translateSelector(sel)); });
-              const enat = w.Element.prototype[m];
-              if (typeof enat === 'function' && !enat.__zpQsaWrapped) {
-                const wrapped = function(sel) { return enat.call(this, translateSelector(sel)); };
-                try { Object.defineProperty(wrapped, '__zpQsaWrapped', { value: true }); } catch {}
-                define(w.Element.prototype, m, wrapped);
-              }
-            }
-          }
-          const nativeGetByTag = docProto.getElementsByTagName;
-          if (typeof nativeGetByTag === 'function') define(docProto, 'getElementsByTagName', function(tag) {
-            const t = String(tag).toLowerCase();
-            return nativeGetByTag.call(this, definedNames.has(t) ? zname(t) : tag);
-          });
-        }
-        // localName / tagName / nodeName — strip the prefix back off. The
-        // prefix is lowercase alnum+dash; tagName/nodeName return uppercase
-        // so a case-insensitive anchored strip covers all three.
-        const elProto = w.Element && w.Element.prototype;
-        if (elProto) {
-          const cePrefixRe = new RegExp('^' + cePrefix, 'i');
-          for (const prop of ['localName', 'tagName', 'nodeName']) {
-            const d = Object.getOwnPropertyDescriptor(elProto, prop) || (w.Node && Object.getOwnPropertyDescriptor(w.Node.prototype, prop));
-            if (!d || !d.get) continue;
-            const nativeGetProp = d.get;
-            try { defineMasked(elProto, prop, { get() { const v = nativeGetProp.call(this); return typeof v === 'string' ? v.replace(cePrefixRe, '') : v; }, configurable: true, enumerable: true }); } catch {}
-          }
-        }
-      }
-    } catch {}
+    // customElements — **네이티브 레지스트리 그대로** 둔다 (2026-09-29).
+    //
+    // 2026-09-24 감사는 "레지스트리가 진짜 프록시 오리진에 묶여 타깃끼리 이름이
+    // 부딪힌다" 고 보고 타깃별 접두어(`zp<hash>-x`)를 붙였다. 전제가 틀렸다 —
+    // 레지스트리는 오리진이 아니라 **Window 마다** 있고 문서를 넘지 못한다.
+    // 크롬 152 실측: 최초 about:blank 의 same-origin 내비게이션(프록시에선 모든
+    // 타깃이 same-origin 이라 이것이 유일한 공유 후보)에서도 심어 둔 정의가
+    // 사라지고 그 생성자는 새 문서의 요소에서 돌지 않는다. 격리 이득은 0 이다.
+    //
+    // 비용은 컸다. 교체 기반 업그레이드라 define 전에 잡아 둔 요소 참조가 떨어져
+    // 나갔고, CSS 타입 선택자(`tool-tip{…}`)·`closest`·`matches` 가 접두 이름을
+    // 못 찾았다. GitHub catalyst 의 findTarget 이 `el.closest(tag) === this` 라
+    // react-partial 6개가 "No embedded data provided" 로 전부 죽었다.
   }
   function prefixedStorage(native, prefix) {
     // Wrap native localStorage/sessionStorage with a fixed key prefix. All
