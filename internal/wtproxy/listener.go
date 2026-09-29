@@ -78,6 +78,9 @@ type Listener struct {
 	logger   *log.Logger
 	mu       sync.Mutex
 	sessions map[*webtransport.Session]struct{}
+	// targetTLS overrides the outbound TLS config — tests only (a local echo
+	// target has a self-signed cert). Unexported so no deployment can set it.
+	targetTLS *tls.Config
 }
 
 // New builds a Listener but does not yet bind the socket — call Run().
@@ -206,9 +209,21 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Dial the real target. We trust quic-go's default tls config
 	// (system root store) for production targets. Cert pinning is a
 	// follow-up.
+	tlsCfg := &tls.Config{NextProtos: []string{"h3"}}
+	if l.targetTLS != nil {
+		tlsCfg = l.targetTLS
+	}
+	// ★webtransport-go 는 DATAGRAM 지원이 없는 QUIC 설정으로는 Dial 을
+	// 거부한다("DATAGRAM support required"). 이 두 필드가 빠져 있어서 게이트웨이는
+	// **어떤 타깃에도** 붙지 못했다 — 데이터 경로 테스트가 하나도 없어서 D4 가
+	// "end-to-end" 로 닫힌 채 몰랐다(2026-09-29, TestGatewayBridgesToRealTarget).
 	dialer := &webtransport.Dialer{
-		TLSClientConfig: &tls.Config{NextProtos: []string{"h3"}},
-		QUICConfig:      &quic.Config{KeepAlivePeriod: 25 * time.Second},
+		TLSClientConfig: tlsCfg,
+		QUICConfig: &quic.Config{
+			KeepAlivePeriod:                  25 * time.Second,
+			EnableDatagrams:                  true,
+			EnableStreamResetPartialDelivery: true,
+		},
 	}
 	defer dialer.Close()
 
@@ -297,15 +312,29 @@ func pumpBidi(ctx context.Context, src, dst *webtransport.Session, logger *log.L
 			logger.Printf("wtproxy %s: open: %v", tag, err)
 			return
 		}
+		// ★스트림은 방향별로 따로 닫힌다(half-close). 예전에는 먼저 끝난 방향을
+		// 보고 양쪽을 다 닫아서, 요청을 FIN 으로 끝낸 클라이언트는 타깃의 응답이
+		// 오기도 전에 EOF 를 받았다 — 에코가 빈 문자열이었다. 각 방향은 읽기 쪽
+		// EOF 에서 자기 쓰기 쪽만 닫고, 오류면 상대에게 리셋을 전한다.
 		go func() {
-			defer srcStream.Close()
-			defer dstStream.Close()
-			done := make(chan struct{}, 2)
-			go func() { _, _ = io.Copy(dstStream, srcStream); done <- struct{}{} }()
-			go func() { _, _ = io.Copy(srcStream, dstStream); done <- struct{}{} }()
-			<-done
+			var cwg sync.WaitGroup
+			cwg.Add(2)
+			go func() { defer cwg.Done(); relayHalf(dstStream, srcStream) }()
+			go func() { defer cwg.Done(); relayHalf(srcStream, dstStream) }()
+			cwg.Wait()
 		}()
 	}
+}
+
+// relayHalf copies one direction of a bidi stream: FIN on a clean EOF,
+// reset (and stop reading the source) on an error.
+func relayHalf(dst, src *webtransport.Stream) {
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.CancelWrite(0)
+		src.CancelRead(0)
+		return
+	}
+	_ = dst.Close()
 }
 
 func pumpUni(ctx context.Context, src, dst *webtransport.Session, logger *log.Logger, tag string) {

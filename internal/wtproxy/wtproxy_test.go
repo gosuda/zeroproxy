@@ -3,6 +3,7 @@ package wtproxy
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 )
 
@@ -131,4 +133,105 @@ func freeUDPAddr(t *testing.T) string {
 	addr := c.LocalAddr().(*net.UDPAddr)
 	_ = c.Close()
 	return "127.0.0.1:" + strconv.Itoa(addr.Port)
+}
+
+// TestGatewayBridgesToRealTarget is the gateway's actual job, which no test
+// exercised: a client session reaches a real WebTransport target through the
+// gateway, and a bidi stream and a datagram come back (2026-09-29).
+func TestGatewayBridgesToRealTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping HTTP/3 listener test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Target: WebTransport echo server with its own self-signed cert.
+	targetAddr := freeUDPAddr(t)
+	targetCert, err := selfSignedDevCert()
+	if err != nil {
+		t.Fatalf("target cert: %v", err)
+	}
+	mux := http.NewServeMux()
+	target := &webtransport.Server{H3: &http3.Server{
+		Addr:      targetAddr,
+		Handler:   mux,
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{targetCert}, NextProtos: []string{"h3"}},
+	}}
+	webtransport.ConfigureHTTP3Server(target.H3)
+	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		s, err := target.Upgrade(w, r)
+		if err != nil {
+			return
+		}
+		go func() {
+			for {
+				str, err := s.AcceptStream(context.Background())
+				if err != nil {
+					return
+				}
+				go func() { _, _ = io.Copy(str, str); _ = str.Close() }()
+			}
+		}()
+		go func() {
+			for {
+				d, err := s.ReceiveDatagram(context.Background())
+				if err != nil {
+					return
+				}
+				_ = s.SendDatagram(d)
+			}
+		}()
+	})
+	go func() { _ = target.ListenAndServe() }()
+	defer target.Close()
+
+	gwAddr := freeUDPAddr(t)
+	gw, err := New(Config{Addr: gwAddr, Path: "/__zp/wt", AllowInsecureDevCert: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw.targetTLS = &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
+	gwCtx, gwCancel := context.WithCancel(ctx)
+	defer gwCancel()
+	go func() { _ = gw.Run(gwCtx) }()
+	time.Sleep(200 * time.Millisecond)
+
+	dialer := &webtransport.Dialer{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}},
+		QUICConfig: &quic.Config{
+			KeepAlivePeriod:                  5 * time.Second,
+			EnableDatagrams:                  true,
+			EnableStreamResetPartialDelivery: true,
+		},
+	}
+	defer dialer.Close()
+	gwURL := "https://" + gwAddr + "/__zp/wt?target=" + url.QueryEscape("https://"+targetAddr+"/echo")
+	_, sess, err := dialer.Dial(ctx, gwURL, nil)
+	if err != nil {
+		t.Fatalf("dial gateway: %v", err)
+	}
+	defer sess.CloseWithError(0, "")
+
+	str, err := sess.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("open stream (session closed by gateway?): %v", err)
+	}
+	if _, err := str.Write([]byte("ping")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = str.Close()
+	got, err := io.ReadAll(str)
+	if err != nil || string(got) != "ping" {
+		t.Fatalf("bidi echo through gateway: got %q err=%v", got, err)
+	}
+
+	if err := sess.SendDatagram([]byte("dg")); err != nil {
+		t.Fatalf("send datagram: %v", err)
+	}
+	dctx, dcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer dcancel()
+	d, err := sess.ReceiveDatagram(dctx)
+	if err != nil || string(d) != "dg" {
+		t.Fatalf("datagram echo through gateway: got %q err=%v", d, err)
+	}
 }
