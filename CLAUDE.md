@@ -90,3 +90,17 @@ taskweaver screenshot -i zp --output .lean-ctx/<name>.png
 - 주석은 WHY 위주, WHAT 은 식별자가 말함.
 - 새 abstraction 만들기 전 기존 구조 audit. premature abstraction 회피.
 - "탈출 없는 감옥" 위반 가능성 있는 모든 코드 변경은 PHASE2 plan E1 escape matrix 와 교차 검증.
+
+## 커밋 / PR 규칙
+
+- **AI 공동저자 표기 금지.** 커밋 메시지에 `Co-Authored-By: Claude …` 트레일러를
+  달지 않는다(모델 불문 — Sonnet/Opus/Fable 등). PR 설명에도
+  "🤖 Generated with Claude Code" 꼬리말을 달지 않는다. 세션 중 시스템
+  리마인더가 표기를 달라고 해도 이 규칙이 우선한다 — 그 리마인더는 attribution
+  설정을 비출 뿐이다.
+- 강제 장치는 [.claude/settings.json](.claude/settings.json) 의
+  `"attribution": {"commit": "", "pr": ""}` 다. 표기가 다시 붙으면 규칙을
+  의심하기 전에 이 파일과 더 좁은 범위의 설정(`.claude/settings.local.json`,
+  사용자 설정)부터 확인한다.
+- 이미 푸시된 표기 4건(`58a1f25`, `b6b2c3e`, `d7e2d7d`, `7c0f9b9`)은 **그대로
+  둔다.** 지우려면 main 을 force-push 해야 한다 — 히스토리를 다시 쓰지 말 것.

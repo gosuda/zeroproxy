@@ -11,7 +11,12 @@ wasm-kernel
 target/
 Cargo.lock.bak
 .lean-ctx/
+/.lean-ctxmeta.json
 /zeroproxy-server.exe
+
+# Claude Code 의 개인/런타임 파일 — 공유 설정(.claude/settings.json)만 추적한다.
+.claude/settings.local.json
+.claude/*.lock
 
 # 매트릭스 러너가 남기는 네트워크 테이프 스냅샷 (판정 근거, 실행마다 덮어씀)
 test/browser/hole-matrix/.last-tape.json
