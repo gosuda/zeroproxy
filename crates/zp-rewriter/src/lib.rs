@@ -2667,7 +2667,23 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // 래퍼는 MODULE_URL **마커**로 emit 한다 (resolver 주석 참조) —
         // zero-width 패치 두 개로 감싸면 인자가 리라이트 대상일 때 안팎이
         // 뒤집힌다.
-        let Expression::StringLiteral(lit) = &expr.source else {
+        //
+        // `data:`/`blob:` **리터럴**도 런타임 경로로 보낸다 — 런타임이 모듈을
+        // 읽어 재작성한 blob 으로 다시 import 한다(computed 와 같은 길). 그대로
+        // 두면 리라이터를 통째로 건너뛰었다: CSP 만이 막았고, 크롬에서 되는
+        // 정상 `import('data:…')` 는 깨졌다. ERRATA §E, 2026-09-29.
+        let runtime_literal = match &expr.source {
+            Expression::StringLiteral(lit) => {
+                let l = lit.value.as_str().trim_start().to_ascii_lowercase();
+                l.starts_with("data:") || l.starts_with("blob:")
+            }
+            _ => false,
+        };
+        let static_literal = match &expr.source {
+            Expression::StringLiteral(lit) if !runtime_literal => Some(lit),
+            _ => None,
+        };
+        let Some(lit) = static_literal else {
             let span = expr.source.span();
             if !self.target_url.is_empty() {
                 // **walk 보다 먼저 push 한다.** apply_patches 의 정렬은 stable

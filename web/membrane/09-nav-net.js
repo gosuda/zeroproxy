@@ -671,44 +671,14 @@
           Native.setAttribute.call(this, 'content', s);
         });
     }
-    // `el.onclick = 'code'` — a string assigned to an on* IDL property is
-    // ignored by modern browsers, but legacy-authored code expects it to
-    // behave like the content attribute (compiled as a handler). Route the
-    // string through the event-handler rewriter and install the compiled
-    // function — the SAME compilation gate as `<a onclick="…">`, so no
-    // unrewritten source can ever run through this path either.
-    function compileEventHandlerString(src, name) {
-      const hooks = pageRewriteHooks;
-      if (!hooks) throw normalizedError('InvalidStateError');
-      const body = hooks.rewrite(String(src), 'event-handler');
-      const fn = Native.FunctionCtor('event', body);
-      // `el.onclick.toString()` must not surface the rewritten body — mask
-      // with the source-shaped signature native handlers report.
-      toStringMap.set(fn, 'function ' + name + '(event) {\n' + String(src) + '\n}');
-      return fn;
-    }
-    for (const proto of [
-      w.HTMLElement && w.HTMLElement.prototype,
-      w.SVGElement && w.SVGElement.prototype,
-      w.HTMLBodyElement && w.HTMLBodyElement.prototype,
-      w.HTMLFrameSetElement && w.HTMLFrameSetElement.prototype,
-      w.MathMLElement && w.MathMLElement.prototype,
-    ]) {
-      if (!proto) continue;
-      for (const name of Object.getOwnPropertyNames(proto)) {
-        if (name.length <= 2 || !name.startsWith('on')) continue;
-        const d = Object.getOwnPropertyDescriptor(proto, name);
-        if (!d || typeof d.set !== 'function' || !d.configurable) continue;
-        const nativeSet = d.set, nativeGet = d.get;
-        try {
-          defineMasked(proto, name, {
-            get: nativeGet,
-            set(v) { return nativeSet.call(this, typeof v === 'string' ? compileEventHandlerString(v, name) : v); },
-            enumerable: d.enumerable, configurable: true
-          });
-        } catch {}
-      }
-    }
+    // `el.onclick = 'code'` is deliberately NOT hooked. Modern browsers treat
+    // a string assigned to an on* IDL property as null ([LegacyTreatNonObjectAsNull])
+    // and never compile it — measured in Chrome 152: `d.onclick = 'x=9'` leaves
+    // `d.onclick === null` and nothing runs. A hook that compiled the string
+    // made the proxy run code no real browser runs (and was a one-line
+    // detector). The native setter already does the right thing. Only the
+    // content attribute (`setAttribute('onclick', …)`) compiles, and that path
+    // goes through `__ZP_EXEC_EVENT`. ERRATA §E, 2026-09-29.
     // 2026-08-14 — object/embed. 서버측 htmltx 목록에는 ("object","data") /
     // ("embed","src") 가 있는데 페이지 realm 에만 없었다(정적 HTML 은 통과,
     // 런타임 대입만 샜다 — 오늘 세 번째 서버/런타임 비대칭).

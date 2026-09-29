@@ -54,7 +54,7 @@ function dynEnv(overrides = {}) {
   const calls = { global: [] };
   const toStringMap = new Map();
   const env = load(DYN_BLOCK,
-    ['compileNested', 'nestedCall', 'compileDynamic', 'dynamicEval', 'isEvalExpressionCandidate', 'compileScoped', 'dynamicSource'],
+    ['compileNested', 'nestedCall', 'compileDynamic', 'dynamicEval', 'isEvalExpressionCandidate', 'dynamicSource'],
     Object.assign({
       zpTrace() {},
       rewriteDynamicFunctionBody: (_params, body) => String(body || ''),
@@ -167,31 +167,62 @@ test('dynamicEval: statement path goes through the global executor', () => {
   assert.deepEqual(calls.global, ['var q = 1; q']);
 });
 
-test('dynamicEval: expression rewrite failure fails closed only on NotSupported', () => {
-  // NotSupportedError propagates — unrewritten code must not run.
+test('dynamicEval: rewriter failures propagate — no silent fallback', () => {
+  // NotSupportedError propagates on both paths — unrewritten code must not run.
   const { env: envNS } = dynEnv({ callPageRewriter() { throw normalizedError('NotSupportedError'); } });
   assert.throws(() => envNS.dynamicEval('1 + 2'), /NotSupportedError/);
-  // A non-policy failure on the EXPRESSION path falls back toward the
-  // statement path (which retries the rewriter, then compileScoped).
-  const { env: envOther, calls } = dynEnv({
-    callPageRewriter(s) {
-      calls.global.push('attempt:' + s);
-      if (s === '1 + 2') throw new Error('transient');
-      return s;
-    },
-  });
-  // compileScoped body has no `return`, so the value is undefined — the
-  // invariant that matters: no raw '1 + 2' ever reached execGlobalScript.
-  assert.equal(envOther.dynamicEval('1 + 2'), undefined);
-  assert.ok(calls.global.every(c => c.startsWith('attempt:')), calls.global.join('|'));
+  assert.throws(() => envNS.dynamicEval('var a = 1;'), /NotSupportedError/);
+  // A parse failure surfaces as SyntaxError (native parity), and nothing runs.
+  const { env: envSyn, calls } = dynEnv({ callPageRewriter() { throw new SyntaxError('Unexpected token'); } });
+  assert.throws(() => envSyn.dynamicEval('if ('), SyntaxError);
+  assert.deepEqual(calls.global, [], 'unrewritten code reached the executor');
 });
 
-test('compileScoped: with-wrapped body sees scope names', () => {
-  const { env, withScope } = dynEnv();
-  // Note: parameters sit OUTSIDE the `with`, so scope-object names shadow
-  // them — the caller (dynamicEval fallback) compiles parameter-less bodies.
-  const compiled = env.compileScoped(Function, [], 'return (location ? 1 : 0) + 10');
-  assert.equal(compiled(withScope), 11);
+test('dynamicEval: a runtime throw propagates and the code runs exactly once', () => {
+  // A former `catch {}` + Function-body fallback re-ran statement code that
+  // threw at runtime: side effects before the throw happened twice.
+  let runs = 0;
+  const { env } = dynEnv({ execGlobalScript: () => { runs++; throw new Error('boom'); } });
+  assert.throws(() => env.dynamicEval('var n = 1; throw 1'), /boom/);
+  assert.equal(runs, 1, 'statement code executed more than once');
+});
+
+test('dynamicEval: non-string input is returned without evaluation (native parity)', () => {
+  const { env, calls } = dynEnv();
+  let toStringCalls = 0;
+  const o = { toString() { toStringCalls++; return '2+2'; } };
+  assert.equal(env.dynamicEval(o), o);
+  const strings = ['x'];
+  assert.equal(env.dynamicEval(strings), strings); // what eval`x` passes
+  assert.equal(env.dynamicEval(123), 123);
+  assert.equal(toStringCalls, 0, 'toString() ran — the object was evaluated as code');
+  assert.deepEqual(calls.global, []);
+});
+
+test('callPageRewriter: a parse failure is a SyntaxError built in virtual-URL-tagged code', () => {
+  const block = slice('    function parseSyntaxError(message) {', '    function rewriteDynamicFunctionBody(');
+  const parseErrors = new WeakSet();
+  const mk = rewriteScript => load(block, ['callPageRewriter'], {
+    Native: { globalEval: (0, eval) },
+    virtualURL: { href: 'https://target.example/page' },
+    root: { ZPBundle: { ready: true, rewriteScript } },
+    normalizedError,
+    parseErrors,
+  });
+  let err;
+  try { mk(() => { throw new Error('parse failed: Unexpected token'); }).callPageRewriter('if (', 'classic'); } catch (e) { err = e; }
+  assert.ok(err instanceof SyntaxError, `expected SyntaxError, got ${err && err.name}`);
+  assert.equal(err.message, 'Unexpected token');
+  assert.ok(parseErrors.has(err), 'parse error not tagged for the timer path');
+  // Built inside the tagged eval, so its stack names the virtual URL — an
+  // uncaught one must not report the prelude URL as ErrorEvent.filename.
+  assert.match(String(err.stack), /https:\/\/target\.example\/page/);
+  // Any other failure stays fail-closed NotSupportedError.
+  assert.throws(() => mk(() => { throw new Error('wasm trap'); }).callPageRewriter('x', 'classic'), /NotSupportedError/);
+  // Empty in, empty out is valid (native eval('') is undefined); empty out
+  // for non-empty input is still a broken rewrite.
+  assert.equal(mk(s => s).callPageRewriter('', 'classic'), '');
+  assert.throws(() => mk(() => '').callPageRewriter('x', 'classic'), /NotSupportedError/);
 });
 
 // ---------------------------------------------------------------------------

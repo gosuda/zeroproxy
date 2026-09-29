@@ -37,19 +37,14 @@
     const NativeAsyncFunction = (async function(){}).constructor;
     const NativeGeneratorFunction = (function*(){}).constructor;
     const NativeAsyncGeneratorFunction = (async function*(){}).constructor;
+    // Declared here, before any function that can reach them, so no install
+    // order can hit their TDZ (see callPageRewriter / timerHandler).
+    const NativeSyntaxError = root.SyntaxError;
+    const parseErrors = new WeakSet();
     function stringArgs(args) {
       const out = new Array(args.length);
       for (let i = 0; i < args.length; i++) out[i] = String(args[i]);
       return out;
-    }
-    function scopedBody(body) { return 'with(__zp_scope){\n' + body + '\n}'; }
-    function compileScoped(ctor, params, body) {
-      try { zpTrace('compile', String(body || '').slice(0, 100)); } catch {}
-      const argv = new Array(params.length + 2);
-      argv[0] = '__zp_scope';
-      for (let i = 0; i < params.length; i++) argv[i + 1] = params[i];
-      argv[argv.length - 1] = scopedBody(rewriteDynamicFunctionBody(params, body));
-      return Reflect.construct(ctor, argv);
     }
     function functionPrefix(kind) {
       return kind === 'async' ? 'async function' : kind === 'generator' ? 'function*' : kind === 'asyncGenerator' ? 'async function*' : 'function';
@@ -142,7 +137,12 @@
       // 네이티브 eval 은 생성자가 아니다 — `new eval()` 은 TypeError.
       if (new.target) throw new TypeError('eval is not a constructor');
       if (arguments.length === 0) return undefined;
-      const text = String(source);
+      // Native parity: a non-string is returned as-is, never evaluated
+      // (PerformEval step 1). `String(source)` used to evaluate eval`x` as the
+      // identifier x, and made `(0,eval)(obj)` call obj.toString() and run
+      // the result — code no real browser runs. ERRATA §E, 2026-09-29.
+      if (typeof source !== 'string') return source;
+      const text = source;
       let expr = null;
       if (isEvalExpressionCandidate(text)) {
         // 표현식도 리라이터를 거친다 — `with` 만 씌우면 computed member
@@ -171,18 +171,20 @@
       // 동일하다 (그쪽도 rewrite → globalEval 이다). `with` 스코프 프록시는
       // 동적 Function body 경로에 그대로 남는다 — 거기선 본문이 진짜 함수
       // 본문이라 전역 선언 시맨틱이 애초에 없다.
-      try {
-        const globalCode = callPageRewriter(text, 'classic');
-        if (typeof globalCode === 'string' && globalCode.length) {
-          // R1: eval 의 let/const/class 는 eval 렉시컬 환경과 함께 버려진다 —
-          // 공유 zpLex 가 아닌 버리는 Map 에 등록한다.
-          const prevLexEnv = __zp_lex_env;
-          __zp_lex_env = new Map();
-          try { return execGlobalScript(globalCode); }
-          finally { __zp_lex_env = prevLexEnv; }
-        }
-      } catch {}
-      return Reflect.apply(compileScoped(Native.FunctionCtor, [], text), root, [withScope]);
+      //
+      // ★실패는 그대로 던진다 — 폴백 없음. 예전엔 여기 `catch {}` + Function
+      // 본문 폴백이 있어서, 재작성된 코드가 **런타임에** 던지면 그 예외를
+      // 삼키고 같은 코드를 함수 본문으로 다시 컴파일해 **한 번 더 실행**했다
+      // (throw 전의 부작용이 두 번 일어남). `eval('return 1')` 이 SyntaxError
+      // 대신 1 을 돌려준 것도 이 폴백 때문이었다. 리라이트 실패는
+      // callPageRewriter 가 SyntaxError(파스 실패)/NotSupportedError 로 던진다.
+      const globalCode = callPageRewriter(text, 'classic');
+      // R1: eval 의 let/const/class 는 eval 렉시컬 환경과 함께 버려진다 —
+      // 공유 zpLex 가 아닌 버리는 Map 에 등록한다.
+      const prevLexEnv = __zp_lex_env;
+      __zp_lex_env = new Map();
+      try { return execGlobalScript(globalCode); }
+      finally { __zp_lex_env = prevLexEnv; }
     }
     const dynamicFunction = function Function(...args) { return compileDynamic(Native.FunctionCtor, args, 'function'); };
     const dynamicAsyncFunction = function AsyncFunction(...args) { return compileDynamic(NativeAsyncFunction, args, 'async'); };
@@ -811,7 +813,6 @@
       enumerable: nativeWindowLocation.enumerable,
       configurable: nativeWindowLocation.configurable
     });
-    let scopeProtoOverride = null;
     // `hide` = 페이지-facing scope 프록시용 내부 이름 차단. `with(__zp_scope)`
     // 는 has 가 모든 이름을 잡으므로 `__zp_get` 같은 헬퍼까지 undefined 를
     // 돌리면 리라이트된 코드가 전부 죽는다 — withScope 는 hide=false.
@@ -890,19 +891,9 @@
       set(_target, prop, value) {
         if (prop === 'location') { setVirtualLocation(value); return true; }
         if (prop === 'name') { setVirtualWindowName(root, value); return true; }
-        // `window.onload = 'code'` — legacy string handlers compile through
-        // the event-handler gate, same as element on* properties. Only for
-        // props where a real on* setter exists (unknown on* names stay
-        // plain data properties, matching native).
-        if (typeof prop === 'string' && prop.length > 2 && prop.startsWith('on') && typeof value === 'string') {
-          const d = Reflect.getOwnPropertyDescriptor(root, prop) || Reflect.getOwnPropertyDescriptor(Object.getPrototypeOf(root), prop);
-          if (d && typeof d.set === 'function') {
-            const body = rewriteWithPageRewriter(String(value), 'event-handler');
-            const fn = Native.FunctionCtor('event', body);
-            toStringMap.set(fn, 'function ' + prop + '(event) {\n' + String(value) + '\n}');
-            return Reflect.set(root, prop, fn);
-          }
-        }
+        // `window.onload = 'code'` falls through to the native setter, which
+        // turns a string into null — no real browser compiles it (see the
+        // element on* note in 09-nav-net.js).
         // Page-installed accessor setters likewise run with `this` = scope.
         const own = Reflect.getOwnPropertyDescriptor(root, prop);
         if (isPageInstalledAccessor(prop, own)) {
@@ -940,13 +931,15 @@
         if (!Reflect.deleteProperty(root, prop)) return false;
         return Reflect.deleteProperty(target, prop);
       },
-      getPrototypeOf() { return scopeProtoOverride || Reflect.getPrototypeOf(root); },
-      // `Reflect.setPrototypeOf(window, x)` must NOT mutate the real window's
-      // prototype — that is persistent corruption of the host realm. Record
-      // the override on the facade instead; traps already mediate every read.
+      getPrototypeOf() { return Reflect.getPrototypeOf(root); },
+      // Window is an immutable-prototype exotic object: natively
+      // `Reflect.setPrototypeOf(window, x)` is true only when x already IS the
+      // prototype, false otherwise (`Object.setPrototypeOf` then throws
+      // TypeError) — measured Chrome 152. The old trap recorded an override on
+      // the facade and returned true: the real window stayed safe, but the
+      // facade "succeeded" where every browser refuses — a one-line detector.
       setPrototypeOf(_target, proto) {
-        scopeProtoOverride = proto;
-        return Reflect.setPrototypeOf(scopeTarget, proto);
+        return proto === Reflect.getPrototypeOf(root);
       },
       preventExtensions() { return false; }
     };
@@ -1557,14 +1550,38 @@
     // is the single rewriter; on failure we surface NotSupportedError so
     // the calling __ZP_EXEC_* helper falls through to the strict-mode
     // block stub.
+    // A parse failure is a SyntaxError natively too, and in both cases nothing
+    // runs. Reporting every rewrite failure as NotSupportedError broke pages
+    // that detect syntax support with `e instanceof SyntaxError` (measured by
+    // the dyn differential, Chrome 152). The error is built by a factory that
+    // runs in eval'd code tagged with the virtual URL: built in the prelude,
+    // an uncaught one leaks the prelude URL through ErrorEvent.filename
+    // (trap-notebook 에러-filename-누출). The message is passed as an argument,
+    // never spliced into the eval'd source.
+    function parseSyntaxError(message) {
+      let err = null;
+      try {
+        const make = Native.globalEval('(function (m) { return new SyntaxError(m); })\n//# sourceURL=' + virtualURL.href);
+        err = make(String(message));
+      } catch {}
+      if (!err || typeof err !== 'object') err = normalizedError('NotSupportedError');
+      parseErrors.add(err);
+      return err;
+    }
     function callPageRewriter(source, kind) {
       if (!root.ZPBundle || !root.ZPBundle.ready || typeof root.ZPBundle.rewriteScript !== 'function') {
         throw normalizedError('NotSupportedError');
       }
+      let parseFailure = null;
       try {
         const out = root.ZPBundle.rewriteScript(source, kind, virtualURL.href);
-        if (typeof out === 'string' && out.length > 0) return out;
-      } catch (e) { /* fall through */ }
+        // Empty in, empty out is a valid rewrite: native `eval('')` is undefined.
+        if (typeof out === 'string' && (out.length > 0 || source === '')) return out;
+      } catch (e) {
+        const msg = String(e && e.message || '');
+        if (msg.startsWith('parse failed:')) parseFailure = msg.slice('parse failed:'.length).trim();
+      }
+      if (parseFailure !== null) throw parseSyntaxError(parseFailure || 'Invalid or unexpected token');
       throw normalizedError('NotSupportedError');
     }
     function rewriteDynamicFunctionBody(params, body, kind) {
@@ -1733,8 +1750,20 @@
         });
       } catch {}
     }
-    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
-    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(typeof handler === 'string' ? compileDynamic(Native.FunctionCtor, [handler], 'function') : handler, delay, ...args); });
+    // A string timer's syntax error is reported when the timer FIRES, not when
+    // it is registered: natively setTimeout returns an id and the SyntaxError
+    // surfaces as an uncaught error later (Chrome 152). Throwing synchronously
+    // at registration cut the caller's flow short. Non-syntax failures
+    // (rewriter unavailable → NotSupportedError) still fail closed at once.
+    function timerHandler(handler) {
+      if (typeof handler !== 'string') return handler;
+      try { return compileDynamic(Native.FunctionCtor, [handler], 'function'); } catch (e) {
+        if (!parseErrors.has(e) && !(NativeSyntaxError && e instanceof NativeSyntaxError)) throw e;
+        return function () { throw e; };
+      }
+    }
+    if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler), delay, ...args); });
+    if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler), delay, ...args); });
     // `document.write` / `writeln` wrap 은 installDOMHooks(w) 에서 모든 realm
     // (parent + iframe Document.prototype) 에 일관 적용. 본 위치는 비워둠.
     if (Native.DOMParserParseFromString && root.DOMParser) define(root.DOMParser.prototype, 'parseFromString', function(markup, type) { const out = Native.DOMParserParseFromString.call(this, String(type).toLowerCase() === 'text/html' ? transformHTML(String(markup)) : markup, type); try { if (ceUpgradeSubtree && out && out.documentElement) ceUpgradeSubtree(out.documentElement); } catch {} return out; });

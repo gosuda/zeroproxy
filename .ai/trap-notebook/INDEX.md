@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-29 | 검증 / 규칙 | 프록시 단독 기대값이 divergence 6건을 설계로 인증하고 있었다(on* 문자열 실행·eval 이중실행 등). 기대값은 네이티브 차분에서 얻는다. | rewriter.md#프록시-단독-핀 |
 | 2026-09-29 | rewriter / 수정 | ASI 선언 뒤 `__zp_lex_bind` 가 붙어 스크립트 전체가 SyntaxError. 하네스 실패 6건에 진짜 버그 1건이 묻혀 CI 가 빨간 채였다. | rewriter.md#lex-bind-asi |
 | 2026-09-26 | build / 수정 | build.mjs top-level `await` 앞의 `const` 는 TDZ — 빌드용 경로 상수는 파일 상단 `webSrc` 옆에. | build-deploy.md#2026-09-26--build-mjs-top-level-await-tdz |
 | 2026-09-24 | worker / 수정 | `self.URL` 래퍼가 내부 `new URL` 을 삼켜 `/zp/*` 부트스트랩이 타깃으로 변질 — 캡처→내부전환→래핑 순서. | rewriter.md#worker-url-래퍼-내부흡수 |

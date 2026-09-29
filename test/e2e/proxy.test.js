@@ -589,6 +589,15 @@ function createTargetServer(requests, pendingResponses) {
           P('paramDefault', function () { function f(location = location) { return typeof location; } return f(); });
           P('newTargetFn', () => new Function('return new.target')());
           P('argumentsAlias', function () { return (function f(a) { arguments[0] = 2; return a; })(1); });
+          // A5 — window object semantics (native: immutable prototype,
+          // unforgeable location). The facade used to "succeed" here.
+          P('setProtoReflect', () => Reflect.setPrototypeOf(window, {}));
+          P('setProtoSame', () => Reflect.setPrototypeOf(window, Object.getPrototypeOf(window)));
+          P('setProtoObject', () => { Object.setPrototypeOf(window, {}); return 'no-throw'; });
+          P('protoIsWindow', () => Object.getPrototypeOf(window) === Window.prototype);
+          P('defPropLocReflect', () => Reflect.defineProperty(window, 'location', { value: 1 }));
+          P('defPropLocObject', () => { Object.defineProperty(window, 'location', { value: 1 }); return 'no-throw'; });
+          P('preventExtWindow', () => Reflect.preventExtensions(window));
           // I — URL / navigation semantics
           P('locEqDocLoc', () => location === document.location);
           P('locHrefEqDocURL', () => location.href === document.URL);
@@ -1154,11 +1163,12 @@ function createTargetServer(requests, pendingResponses) {
 
           // ── import() — 경로별 성공/차단 ──
           await P('importHttp', async () => { const m = await import('/dyn-mod.js'); return 'v:' + m.m + '|' + m.meta; });
-          // D2/D3: 재작성 코드는 import(__zp_module_url(spec,ref)) 로 번역된다 —
-          // evaluate 는 미리라이트라 여기서 그 경로를 그대로 흉낸다. 네이티브
-          // import('data:…') 자체는 CSP(script-src 에 data: 없음)가 막는다.
-          await P('importData', async () => { try { const m = await import(__zp_module_url('data:text/javascript,export%20default%201', location.href)); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
-          await P('importBlob', async () => { try { const u = URL.createObjectURL(new Blob(['export default 3'], { type: 'text/javascript' })); const m = await import(__zp_module_url(u, location.href)); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          // D2/D3: plain page code — the rewriter turns these into
+          // import(__zp_module_url(…)). They used to call that helper by hand,
+          // which made the probe proxy-only (ReferenceError natively) and hid
+          // it from the direct-vs-proxy differential.
+          await P('importData', async () => { try { const m = await import('data:text/javascript,export%20default%201'); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('importBlob', async () => { try { const u = URL.createObjectURL(new Blob(['export default 3'], { type: 'text/javascript' })); const m = await import(u); return 'v:' + (m && m.default); } catch (e) { return 'threw:' + (e && e.name || e); } });
 
           // ── 소스 누출 — __zp_*/프록시 경로가 페이지 JS 에 보이면 안 된다 ──
           // 주의: 픽스처 안 regex 리터럴의 backslash-slash 는 바깥 템플릿
@@ -1176,6 +1186,18 @@ function createTargetServer(requests, pendingResponses) {
             try { new Function('throw new Error("fstk")')(); } catch (e) { s = String(e.stack || ''); }
             return leaked(s) ? 'LEAK:' + s.slice(0, 80) : 'v:clean';
           });
+
+          // ── ERRATA §E parity found by the native differential (2026-09-29) ──
+          // A runtime throw inside indirect eval must not re-run the code
+          // (an old Function-body fallback executed it twice).
+          await P('evalRuntimeOnce', () => { window.__ero = 0; try { (0, eval)('window.__ero++; throw new Error("x")'); } catch (e) {} return 'v:' + window.__ero; });
+          await P('evalReturnStmt', () => { try { return 'v:' + (0, eval)('return 1'); } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('evalObjectArg', () => { window.__ets = 0; const o = { toString() { window.__ets = 1; return '2+2'; } }; const r = (0, eval)(o); return 'v:' + (r === o) + '|' + window.__ets; });
+          await P('evalEmpty', () => 'v:' + typeof eval('') + '|' + typeof (0, eval)(''));
+          await P('evalSyntaxInstance', () => { try { eval('@@@'); return 'no-throw'; } catch (e) { return 'v:' + (e instanceof SyntaxError); } });
+          await P('fnSyntaxError', () => { try { new Function('if('); return 'no-throw'; } catch (e) { return 'threw:' + (e && e.name || e) + '|' + (e instanceof SyntaxError); } });
+          await P('fnParamSyntax', () => { try { new Function('a b', 'return 1'); return 'no-throw'; } catch (e) { return 'threw:' + (e && e.name || e); } });
+          await P('winHandlerString', () => { window.onmessageerror = 'window.__whs = 1'; const r = 'v:' + window.onmessageerror; window.onmessageerror = null; return r; });
           out.done = true;
         })().catch(e => { (window.__dynProbes = window.__dynProbes || {}).__fatal = String(e && (e.stack || e)); });
       <\/script></body>`);
@@ -1508,11 +1530,18 @@ function createTargetServer(requests, pendingResponses) {
             a.href = '/frame-dest'; a.target = 'tfn'; a.textContent = 'go';
             document.body.appendChild(a);
             a.click();
-            await new Promise(r => setTimeout(r, 800));
-            try {
-              const href = f.contentWindow && f.contentWindow.location ? String(f.contentWindow.location.href) : 'none';
-              return href.includes('/frame-dest') ? 'navigated:' + href : 'not-navigated:' + href;
-            } catch (e) { return 'threw:' + e.name; }
+            // Poll instead of one fixed 800 ms look: the proxied frame
+            // navigation (SW fetch + rewrite) outran it under load and the
+            // probe read the pre-navigation URL. Still fails if it never lands.
+            const t0 = Date.now();
+            let href = 'none';
+            while (Date.now() - t0 < 5000) {
+              try { href = f.contentWindow && f.contentWindow.location ? String(f.contentWindow.location.href) : 'none'; }
+              catch (e) { return 'threw:' + e.name; }
+              if (href.includes('/frame-dest')) { window.__tfnMs = Date.now() - t0; return 'navigated:' + href; }
+              await new Promise(r => setTimeout(r, 100));
+            }
+            return 'not-navigated:' + href;
           });
           await P('childSharedWorker', async () => {
             const f = document.createElement('iframe');
@@ -3826,6 +3855,33 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     fs.writeFileSync(path.join(artifacts, 'dyn-probes.json'), JSON.stringify(probes, null, 2));
     const targetBase = `http://${targetHost}:${targetPort}`;
 
+    // The pins below were once written from proxy-only runs, and four of them
+    // encoded divergences as "designed" (onclick strings executing, eval parse
+    // errors as NotSupportedError, …). Run the same fixture natively and hold
+    // the proxy to it — a pin that disagrees with Chrome is a bug, not a spec.
+    await t.test('dyn probes match native Chrome (direct-vs-proxy)', async () => {
+      const directBrowser = await puppeteer.launch({
+        headless: true,
+        protocolTimeout: 30000,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+      let direct;
+      try {
+        const directPage = await directBrowser.newPage();
+        await directPage.goto(`${targetBase}/dyn-probes`, { waitUntil: 'domcontentloaded' });
+        await directPage.waitForFunction(() => window.__dynProbes && window.__dynProbes.done, { timeout: 30000 });
+        direct = await directPage.evaluate(() => window.__dynProbes);
+      } finally {
+        await directBrowser.close();
+      }
+      fs.writeFileSync(path.join(artifacts, 'dyn-differential.json'), JSON.stringify({ direct, proxied: probes }, null, 2));
+      assert.deepEqual(Object.keys(probes).sort(), Object.keys(direct).sort(), 'dyn probe key sets differ');
+      const divergent = Object.fromEntries(Object.keys(direct)
+        .filter(k => probes[k] !== direct[k])
+        .map(k => [k, { direct: direct[k], proxied: probes[k] }]));
+      assert.deepEqual(divergent, {}, `dyn probes diverge from native: ${JSON.stringify(divergent)}`);
+    });
+
     await t.test('eval success and virtual scope', () => {
       assert.equal(probes.evalBasic, 'v:2', `evalBasic: ${probes.evalBasic}`);
       assert.equal(probes.evalLocation, `v:${targetBase}/dyn-probes`, `evalLocation: ${probes.evalLocation}`);
@@ -3833,14 +3889,15 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.equal(probes.evalNonString, 'v:[123,null,null]', `evalNonString: ${probes.evalNonString}`);
     });
     await t.test('eval exceptions and edge forms', () => {
-      // eval 소스가 파스 불가면 리라이트도 불가 — 네이티브 SyntaxError 대신
-      // fail-closed NotSupportedError 가 나오는 것이 설계된 발화다.
-      assert.equal(probes.evalSyntaxError, 'threw:NotSupportedError', `evalSyntaxError: ${probes.evalSyntaxError}`);
+      // 파스 불가 eval 은 네이티브처럼 SyntaxError — 어느 쪽이든 한 줄도 실행되지
+      // 않는다. (예전 NotSupportedError 핀은 네이티브 대조 없이 적은 것이었다.)
+      assert.equal(probes.evalSyntaxError, 'threw:SyntaxError', `evalSyntaxError: ${probes.evalSyntaxError}`);
       assert.equal(probes.evalIndirect, `v:${targetBase}`, `evalIndirect: ${probes.evalIndirect}`);
       assert.equal(probes.evalCall, 'v:5', `evalCall: ${probes.evalCall}`);
       // R5 parity — 네이티브 eval 은 non-constructor, `new eval()` 은 TypeError.
       assert.equal(probes.evalAsCtor, 'threw:TypeError', `evalAsCtor: ${probes.evalAsCtor}`);
-      assert.equal(probes.evalTagged, 'v:undefined', `evalTagged: ${probes.evalTagged}`);
+      // tagged eval`x` 는 문자열 배열(비문자열)을 받아 평가 없이 그대로 돌려준다.
+      assert.equal(probes.evalTagged, 'v:object', `evalTagged: ${probes.evalTagged}`);
       // eval 이 만든 var 는 다음 접근에서 보인다(네이티브 parity).
       assert.equal(probes.evalVarVisible, 'v:42', `evalVarVisible: ${probes.evalVarVisible}`);
     });
@@ -3864,15 +3921,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       assert.ok(probes.intervalString && probes.intervalString.startsWith('v:') && +probes.intervalString.slice(2) >= 1, `intervalString: ${probes.intervalString}`);
       // 타이머 문자열 안의 this["location"] 도 가상화된다(A2 연동).
       assert.ok(String(probes.timerThis).startsWith(`v:${targetBase}`), `timerThis: ${probes.timerThis}`);
-      // 리라이트 불가 타이머 문자열은 등록 시점에 fail-closed — 비동기 에러
-      // 이벤트가 아니라 동기 throw.
-      assert.equal(probes.timerBad, 'e:NotSupportedError', `timerBad: ${probes.timerBad}`);
+      // 타이머 문자열의 문법 오류는 네이티브처럼 발화 시점에 비동기 에러로
+      // 보고된다 — 등록(setTimeout)은 던지지 않는다.
+      assert.equal(probes.timerBad, 'v:error-surfaced', `timerBad: ${probes.timerBad}`);
     });
     await t.test('event handlers', () => {
       assert.equal(probes.handlerStatic, 'v:1', `handlerStatic: ${probes.handlerStatic}`);
       assert.equal(probes.handlerPropFn, `v:${targetBase}`, `handlerPropFn: ${probes.handlerPropFn}`);
-      // §E 미검증이던 onclick 프로퍼티-문자열 경로 — 실행된다(마커 확인).
-      assert.equal(probes.handlerPropString, 'v:9', `handlerPropString: ${probes.handlerPropString}`);
+      // onclick 프로퍼티에 문자열을 넣으면 네이티브는 null 로 무시한다 —
+      // 컴파일/실행하지 않는다(content attribute 만 컴파일된다).
+      assert.equal(probes.handlerPropString, 'v:silent', `handlerPropString: ${probes.handlerPropString}`);
     });
     await t.test('DOM insertion', () => {
       assert.equal(probes.docWrite, 'v:wrote', `docWrite: ${probes.docWrite}`);

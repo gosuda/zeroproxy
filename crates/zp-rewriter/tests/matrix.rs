@@ -647,6 +647,18 @@ fn var_function_shadowing_neutralized() {
     );
     reparses("var a = 1, location = 2, b = 3;");
     reparses("function location(){} location.href = 'https://t/';");
+    // Module goal is different: top-level declarations are MODULE-scoped, so
+    // `location` really is the local function (native semantics) — not the
+    // global. ERRATA A1 once listed this as an escape; it is correct as-is.
+    let m = rewrite_script("function location(){} location.href = 'u';", &RewriteOpts {
+        kind: ScriptKind::Module,
+        target_url: "https://example.com/".into(),
+        strict: true,
+        proxy_origin: "http://proxy.localhost:18080".into(),
+    })
+    .expect("module rewrite");
+    assert!(m.code.contains("function location(){}"), "module fn decl must stay local: {}", m.code);
+    assert!(!m.code.contains("__zp_get(globalThis,\"location\")"), "module local resolved globally: {}", m.code);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +685,25 @@ fn local_scope_bindings_not_mediated() {
 // ---------------------------------------------------------------------------
 // Misc: meta properties, global reads through computed base, export-goal.
 // ---------------------------------------------------------------------------
+
+/// Literal `data:`/`blob:` dynamic-import specifiers take the same runtime
+/// path as computed ones (`__zp_module_url` reads, rewrites and re-imports the
+/// module). Left raw, they bypassed the rewriter: only CSP stopped them, and a
+/// legitimate `import('data:…')` broke where Chrome runs it. ERRATA §E.
+#[test]
+fn dynamic_import_data_blob_literals_take_runtime_path() {
+    for src in [
+        "import('data:text/javascript,export%20default%201');",
+        "import(\"blob:https://t.example/0-1\");",
+        "import(' DATA:text/javascript,1');",
+    ] {
+        emits(src, &["__zp_module_url("]);
+        reparses(src);
+    }
+    // http(s)/relative literals keep the static proxy rewrite.
+    emits("import('./m.js');", &["/zp/api/"]);
+    not_emits("import('./m.js');", &["__zp_module_url("]);
+}
 
 #[test]
 fn misc_invariants() {

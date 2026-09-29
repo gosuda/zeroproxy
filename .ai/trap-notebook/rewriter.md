@@ -1239,3 +1239,17 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** bind 삽입 앞에 `;` 를 붙인다(이미 `;` 가 있으면 빈 문이라 무해). 나머지 span-end 삽입은 전부 블록을 닫는 `}` 라 ASI 가 `}` 앞에서 끊어 주므로 해당 없음 — 확인함. 하네스는 prelude 원문의 `__zp_lex_decl`/`__zp_lex_bind` 를 떼어 실행한다(흉내 낸 스텁 아님).
 - **교훈:** 문 뒤에 문을 **삽입**하는 패치는 앞 문이 `;` 로 끝난다고 가정하면 안 된다. 그리고 "N건 실패" 를 한 원인으로 뭉치지 말 것 — 메시지가 다른 한 건이 진짜일 수 있다.
 - **검증:** `lex_registry_for_classic_toplevel` 에 ASI 4케이스(수정 전 실패 확인), `npm run test:wasm:ci` 12/12, `npm run test:e2e:ci` 181/181.
+
+## <a id="프록시-단독-핀"></a>프록시 단독으로 적은 기대값은 divergence 를 "설계" 로 인증한다 — dyn 스위트에 네이티브 차분을 붙이자 6개가 나왔다 (2026-09-29)
+
+- **원인:** dyn/surface 스위트의 기대값은 프록시에서 나온 값을 그대로 적은 것이었다. 주석까지 "설계된 발화다", "실행된다(마커 확인)" 라고 달려 있었지만 크롬과 대조한 적이 없었다. `/dyn-probes` 를 compat 과 같은 방식(별도 브라우저로 직접 로드)으로 네이티브와 비교하자 즉시 6건이 나왔다.
+- **잡힌 것:**
+  1. `el.onclick = 'code'` / `window.onX = 'code'` 를 **컴파일해서 실행**했다 — 크롬은 문자열을 `null` 로 버린다([LegacyTreatNonObjectAsNull]). 크롬이 안 돌리는 코드를 프록시만 돌렸다. 훅을 지웠다(content attribute 만 컴파일된다).
+  2. indirect `eval` 이 비문자열을 `String()` 으로 강제해 **평가했다** — `eval\`x\`` 가 식별자 x 를, `(0,eval)(obj)` 가 `obj.toString()` 결과를 실행. 네이티브는 비문자열을 그대로 돌려준다.
+  3. indirect `eval` 의 문(statement) 경로가 `catch {}` 뒤에 Function 본문 폴백을 두어, 재작성 코드가 **런타임에** 던지면 같은 코드를 **한 번 더 실행**했다(throw 전 부작용 2회). `eval('return 1')` 이 SyntaxError 대신 1 을 돌려준 것도 이 폴백.
+  4. 파스 불가 `eval`/`Function` 이 `NotSupportedError` — 네이티브는 `SyntaxError`. 이제 가상 URL 로 태깅한 eval 팩토리에서 만든 `SyntaxError` 를 던진다(메시지는 인자로 넘김 — 코드에 이어 붙이면 페이지가 바꾼 `JSON.stringify` 로 주입 통로가 된다).
+  5. `setTimeout('bad')` 가 등록 시점에 동기로 던졌다 — 네이티브는 id 를 돌려주고 발화 시점에 비동기 SyntaxError.
+  6. 리터럴 `import('data:…')` 를 리라이터가 그대로 두었다(computed 만 `__zp_module_url` 로 감쌈) — CSP 만 막았고 크롬에서 되는 import 가 깨졌다. 픽스처가 헬퍼를 손으로 불러 이걸 가리고 있었다.
+- **같이 고친 것:** `Reflect.setPrototypeOf(window, x)` 가 파사드에서 true(네이티브는 immutable prototype → false / `Object.setPrototypeOf` TypeError). `eval('')` 이 직접 경로에서 NotSupportedError 였다(빈 입력의 빈 출력을 실패로 봄).
+- **교훈:** 기대값은 **네이티브에서** 얻는다. 프록시에서 나온 값을 핀으로 적으면 그 순간 divergence 가 테스트로 보호된다. 픽스처가 프록시 내부 헬퍼(`__zp_*`)를 직접 부르면 그 프로브는 차분에서 빠진다 — 픽스처는 평범한 페이지 코드여야 한다.
+- **검증:** `dyn probes match native Chrome (direct-vs-proxy)` 49개 0 divergence, compat 차분 50개(A5 신규 7) 0 divergence, e2e 182/182, prelude-units 25(변이 3건 확인), matrix `dynamic_import_data_blob_literals_take_runtime_path`.
