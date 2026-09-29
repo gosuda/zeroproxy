@@ -16,6 +16,8 @@
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 PROBE="$SELF_DIR/layout-probe.js"
 PROXY_HOME="http://proxy.localhost:18080/zp/"
+. "$SELF_DIR/_zp-session.sh"
+zp_ensure || { echo "NO_MEASUREMENT: taskweaver zp daemon is not usable (renderer not ok)"; exit 1; }
 
 # 페이지 높이 비율이 이 범위를 벗어나면 FLAG. CSS 가 통째로 빠지면 배 단위로
 # 벌어지므로 넉넉히 잡아도 잡힌다(이번 버그는 2.91배였다).
@@ -38,6 +40,7 @@ for U in "$@"; do
   CA=$(echo "$C" | json 'result.aboveFold')
 
   # ── 프록시 ──────────────────────────────────────────────────────────
+  zp_reset_proxy_state
   taskweaver console-logs -i zp --clear >/dev/null 2>&1
   taskweaver navigate -i zp --url "$PROXY_HOME" --timeout-ms 20000 >/dev/null 2>&1
   taskweaver fill-form -i zp --selector "input" --value "$U" >/dev/null 2>&1

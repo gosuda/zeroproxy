@@ -16,6 +16,8 @@
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 PROBE="$SELF_DIR/protoshape-probe.js"
 PROXY_HOME="http://proxy.localhost:18080/zp/"
+. "$SELF_DIR/_zp-session.sh"
+zp_ensure || { echo "NO_MEASUREMENT: taskweaver zp daemon is not usable (renderer not ok)"; exit 1; }
 OUT_DIR="${TMPDIR:-/tmp}/zp-protoshape"
 mkdir -p "$OUT_DIR"
 
@@ -41,6 +43,7 @@ for U in "$@"; do
   measure "$C"
 
   # ── 프록시 ──────────────────────────────────────────────────────────
+  zp_reset_proxy_state
   taskweaver navigate -i zp --url "$PROXY_HOME" --timeout-ms 20000 >/dev/null 2>&1
   taskweaver fill-form -i zp --selector "input" --value "$U" >/dev/null 2>&1
   # wait-navigation 은 **클릭 전에** 띄운다(rendercheck 와 같은 이유).
