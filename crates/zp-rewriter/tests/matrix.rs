@@ -770,3 +770,24 @@ fn misc_invariants() {
     emits("var open; open('u');", &["var open; open('u');"]);
     reparses("document['location'].href = 'https://t/';");
 }
+
+/// `x => expr` bodies are expressions, not statement starts: the `_STMT`
+/// forms' ASI guard `0,` ended the arrow and left `, (...)` as an invalid
+/// second declarator. CNN's Permutive SDK had `const E=(e,t)=>t[e]??=[]`
+/// and died whole with "Unexpected token '('" (2026-09-29).
+#[test]
+fn arrow_expression_body_is_not_a_statement_position() {
+    for src in [
+        "const E = (e, t) => t[e] ??= [];",
+        "const f = (o, k) => o[k]++;",
+        "const g = (o) => o.location += 1;",
+        "const h = (o, k) => o[k] ||= 1, z = 2;",
+        "call((o, k) => o[k] += 1, 3);",
+    ] {
+        not_emits(src, &["=>0,"]);
+        reparses(src);
+    }
+    // A real statement start keeps its ASI guard.
+    emits("x = 1\no[k] ??= [];", &["0,"]);
+    reparses("x = 1\no[k] ??= [];");
+}

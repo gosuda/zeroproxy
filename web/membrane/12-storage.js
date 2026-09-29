@@ -243,12 +243,25 @@
         return base !== undefined ? new Native.URL(inp, wrapURLBase(base)) : new Native.URL(inp);
       };
       try { ZPURL.prototype = Native.URL.prototype; } catch {}
+      // Blob 브랜드 검사 — MediaSource/MediaStream 은 기록하지 않는다(워커
+      // 소스가 될 수 없고, 복사본 URL 을 만들면 MSE 핸들이 하나 더 생긴다).
+      const blobSize = w.Blob && Object.getOwnPropertyDescriptor(w.Blob.prototype, 'size');
+      const isBlob = o => { try { blobSize.get.call(o); return true; } catch { return false; } };
       for (const sm of ['createObjectURL', 'revokeObjectURL', 'canParse', 'parse']) {
         const orig = Native.URL[sm];
         if (typeof orig !== 'function') continue;
         ZPURL[sm] = (sm === 'canParse' || sm === 'parse')
           ? function (u, b) { return b !== undefined ? orig.call(Native.URL, u, wrapURLBase(b)) : orig.call(Native.URL, u); }
-          : orig.bind(Native.URL);
+          : sm === 'createObjectURL'
+            ? function (obj) {
+              const u = orig.call(Native.URL, obj);
+              if (blobSize && isBlob(obj)) pageBlobURLs.set(u, obj);
+              return u;
+            }
+            : function (u) {
+              try { pageBlobURLs.delete(String(u)); } catch {}
+              return orig.call(Native.URL, u);
+            };
         try { Object.defineProperty(ZPURL[sm], 'name', { value: sm, configurable: true }); } catch {}
         maskNativeFunction(ZPURL[sm], sm);
       }

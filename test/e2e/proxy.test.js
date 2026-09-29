@@ -1283,6 +1283,27 @@ function createTargetServer(requests, pendingResponses) {
             document.head.appendChild(k);
             return 'v:' + window.__lexModC + '|' + window.__lexClassicE;
           });
+          // blob 워커 소스는 생성 시점에 확정된다 — 곧바로 해제해도 돈다
+          // (CNN Permutive SDK 의 순서). 워커 쪽 헬퍼(Object.keys)도 함께 본다.
+          await P('blobWorkerRevoked', () => new Promise((res) => {
+            const u = URL.createObjectURL(new Blob(['postMessage(self.location.protocol + Object.keys({ a: 1 }).join())'], { type: 'text/javascript' }));
+            const w = new Worker(u);
+            URL.revokeObjectURL(u);
+            const t = setTimeout(() => res('timeout'), 8000);
+            w.onmessage = (e) => { clearTimeout(t); w.terminate(); res('v:' + e.data); };
+            w.onerror = (e) => { clearTimeout(t); e.preventDefault(); res('error:' + e.message); };
+          }));
+          // 워커에서 self 로 부른 네이티브 메서드 — 수신자가 스코프 프록시면
+          // Illegal invocation 이었다(CNN Permutive 워커의 self.addEventListener).
+          // 래퍼 Function.prototype 이 빈 객체라 toString 판별도 어긋났었다.
+          await P('workerSelfMethods', () => new Promise((res) => {
+            const src = "self.addEventListener('message', function () { postMessage([self.atob('YQ=='), typeof self.setTimeout(function () {}, 1), self.addEventListener === self.addEventListener, Function.prototype.toString.call(self.atob).indexOf('native code') > 0].join()); });";
+            const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+            const t = setTimeout(() => res('timeout'), 8000);
+            w.onmessage = (e) => { clearTimeout(t); w.terminate(); res('v:' + e.data); };
+            w.onerror = (e) => { clearTimeout(t); e.preventDefault(); res('error:' + e.message); };
+            w.postMessage(1);
+          }));
           out.done = true;
         })().catch(e => { (window.__dynProbes = window.__dynProbes || {}).__fatal = String(e && (e.stack || e)); });
       <\/script></body>`);
@@ -4060,6 +4081,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       // 네이티브 값. classic 리라이트면 'v:a|undefined' / 'v:c|undefined'.
       assert.equal(probes.staticModuleLex, 'v:a|b', `staticModuleLex: ${probes.staticModuleLex}`);
       assert.equal(probes.dynModuleTypeAfterSrc, 'v:c|k', `dynModuleTypeAfterSrc: ${probes.dynModuleTypeAfterSrc}`);
+    });
+    await t.test('blob worker source is fixed at construction', () => {
+      // 네이티브 값. 구 빌드는 워커가 해제된 URL 을 읽다가 fail-closed 했다.
+      assert.equal(probes.blobWorkerRevoked, 'v:blob:a', `blobWorkerRevoked: ${probes.blobWorkerRevoked}`);
+      assert.equal(probes.workerSelfMethods, 'v:a,number,true,true', `workerSelfMethods: ${probes.workerSelfMethods}`);
     });
     await t.test('DOM insertion', () => {
       assert.equal(probes.docWrite, 'v:wrote', `docWrite: ${probes.docWrite}`);

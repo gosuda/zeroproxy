@@ -1580,6 +1580,9 @@ struct RewriteVisitor {
     /// identifier reads inside a `with` body must resolve against the object
     /// first (`__zp_with_get`), falling back to the next `with`/global.
     with_temps: Vec<String>,
+    /// Span starts of the synthetic `ExpressionStatement` OXC wraps an
+    /// expression-bodied arrow's body in — not a statement position.
+    arrow_expr_bodies: HashSet<u32>,
     /// Per `for-of`/`for-in` head: (dangerous name, temp it was renamed to)
     /// pairs whose sinks must run once per iteration inside the loop body.
     iter_sinks: Vec<Vec<(String, String)>>,
@@ -1622,6 +1625,7 @@ impl RewriteVisitor {
             in_target: 0,
             decl_seq: 0,
             with_temps: Vec::new(),
+            arrow_expr_bodies: HashSet::new(),
             iter_sinks: Vec::new(),
             for_iter_head: false,
             unbraced_body: 0,
@@ -2633,6 +2637,15 @@ impl<'a> Visit<'a> for RewriteVisitor {
         }
         let prev_sloppy = self.cur_sloppy;
         self.cur_sloppy = prev_sloppy && !Self::has_use_strict(&arrow.body.directives);
+        // `x => expr` 의 본문은 OXC 가 합성한 ExpressionStatement 다. 문
+        // 위치가 아니므로 `_STMT` 형(ASI 가드 `0,`)을 붙이면 안 된다 —
+        // `(e,t)=>t[e]??=[]` 가 `(e,t)=>0,(…).v??=…` 가 되어 선언 전체가
+        // SyntaxError 였다(CNN 의 Permutive SDK, 2026-09-29).
+        if arrow.expression {
+            if let Some(Statement::ExpressionStatement(s)) = arrow.body.statements.first() {
+                self.arrow_expr_bodies.insert(s.span.start);
+            }
+        }
         collect_scope_decl_names(&arrow.body.statements, true, self.cur_sloppy, &mut |name, _cat| {
             self.declare(name);
         });
@@ -3491,6 +3504,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
     fn visit_expression_statement(&mut self, stmt: &ExpressionStatement<'a>) {
         let first_patch = self.patches.len();
         walk::walk_expression_statement(self, stmt);
+        if self.arrow_expr_bodies.contains(&stmt.span.start) {
+            return;
+        }
         for patch in &mut self.patches[first_patch..] {
             if patch.start != stmt.span.start {
                 continue;

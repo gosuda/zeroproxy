@@ -6,6 +6,9 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-29 | worker / 수정 | 워커에서 `self.addEventListener` 등 네이티브 메서드가 Illegal invocation(스코프 프록시 수신자). 래퍼 `Function.prototype` 도 빈 객체였다. | rewriter.md#워커-self-수신자 |
+| 2026-09-29 | worker / 수정 | `new Worker(u); URL.revokeObjectURL(u)` 에서 워커가 나중에 소스를 읽다 fail-closed — 생성 시점에 우리 소유 복사본 URL 로. | rewriter.md#blob-워커-해제 |
+| 2026-09-29 | rewriter / 수정 | 화살표 표현식 본문에 `_STMT` ASI 가드 `0,` 가 붙어 화살표가 끊겼다 — SyntaxError(Permutive), 또는 조용히 ReferenceError(Rubicon). | rewriter.md#arrow-본문-stmt |
 | 2026-09-29 | rewriter / 수정 | `a?.[k]`→`__zp_oget(a,k)` 가 키를 먼저 평가하고 체인 단락을 깼다(GitHub 랜딩 에러 페이지). 체인 단위 연속 `__zp_ochain` 으로. | rewriter.md#옵셔널-체인-연속 |
 | 2026-09-29 | membrane / 수정 | about:blank 자식 창에 R1 `__zp_lex_*` 가 없어 top-level let 을 가진 스크립트가 첫 줄에서 죽었다 — 자식 전용 레지스트리. | rewriter.md#자식-렉시컬 |
 | 2026-09-29 | worker / 수정 | 워커에 `__zp_okeys`·`__zp_delete`·`__zp_oget` 등 15개가 없어 `Object.keys(o)` 가 ReferenceError. 방출 헬퍼 × realm 가드. | rewriter.md#워커-헬퍼-누락 |

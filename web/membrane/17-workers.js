@@ -172,7 +172,7 @@
       // 리라이터를 안 거친 코드가 워커로 도는 일은 없다. MIME 게이트는 두지
       // 않는다: Worker 생성자에 온 blob 은 이미 스크립트로 쓸 의도이고,
       // 다른 오리진/미등록 blob 은 워커의 읽기 단계에서 자연히 fail-closed.
-      return srcWorkerBootstrapURL(parsed.href, opts);
+      return srcWorkerBootstrapURL(parsed.href, opts, workerSourceCopy(parsed.href));
     }
     if (parsed.protocol === 'data:') {
       // D5: data: 워커 소스 — 같은 srcu 경로(워커가 디코드한다).
@@ -196,12 +196,24 @@
   // `srcu` 는 "워커가 읽을 가상 URL" 이고, prelude 가 data: 디코드/blob
   // sync-XHR 을 거쳐 재작성 후 실행한다. module 워커는 import() 가 필요해
   // prelude 가 fetch→브로커 stash→/zp/api/worker-script?srctok 로 돈다.
-  function srcWorkerBootstrapURL(srcu, opts) {
+  // 페이지 blob 의 **우리 소유** 복사본 URL — 페이지가 자기 URL 을 곧바로
+  // 해제해도 워커는 이것을 읽는다. 워커 정체성(`u` = self.location)은 페이지
+  // URL 그대로다. 부트스트랩이 읽을 시간을 두고 해제한다.
+  function workerSourceCopy(href) {
+    const blob = pageBlobURLs.get(href);
+    if (!blob || !Native.createObjectURL) return null;
+    try {
+      const own = Native.createObjectURL(blob);
+      setTimeout(() => { try { Native.revokeObjectURL(own); } catch {} }, 60000);
+      return own;
+    } catch { return null; }
+  }
+  function srcWorkerBootstrapURL(srcu, opts, readFrom) {
     const params = new URLSearchParams();
     params.set('u', srcu);
     params.set('ref', virtualURL.href);
     params.set('tab', boot.tabId);
-    params.set('srcu', srcu);
+    params.set('srcu', readFrom || srcu);
     if (opts && opts.type === 'module') params.set('mod', '1');
     workerGatewayParams(params);
     for (const server of activeServers) params.append('server', server);

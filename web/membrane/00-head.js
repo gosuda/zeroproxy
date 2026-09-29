@@ -296,6 +296,12 @@
   let virtualURL = new URL(boot.targetUrl);
   let activeEntryId = boot.entryId;
   let baseURL = virtualURL.href;
+  // 페이지가 만든 blob: URL → Blob. 워커 소스는 **생성 시점**에 확정돼야 한다 —
+  // 네이티브는 `new Worker(u); URL.revokeObjectURL(u)` 가 안전하지만, 우리
+  // 워커는 부트스트랩 뒤에 소스를 읽으므로 그 사이 해제되면 읽을 게 없다
+  // (CNN 의 Permutive SDK 가 정확히 이 순서, 2026-09-29). 기록만 한다 — URL 은
+  // 그대로이고, 해제하면 같이 지운다(네이티브 blob 수명보다 길게 잡지 않는다).
+  const pageBlobURLs = new Map();
   let explicitBaseURL = '';
   let activeShareVersion = 0;
   let documentCookie = String(boot.documentCookie || '');

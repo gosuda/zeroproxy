@@ -24,16 +24,18 @@ runs turned out to certify divergences as "design" — see
 | Differential (all in `test/e2e/proxy.test.js`) | Probes | Diverging |
 |---|---|---|
 | `direct-vs-proxy compatibility differential` (B, C, I, A5, J) | 63 | 0 |
-| `dyn probes match native Chrome (direct-vs-proxy)` (E) | 50 | 0 |
+| `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 98 | 13, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
 
-Suite totals at the audit: e2e 185/185, `npm run test:js` 110, `test:wasm:ci` 13,
-`cargo test --workspace` 291, `go test ./...` green. Real sites (paired
+Suite totals at the audit: e2e 186/186, `npm run test:js` 110, `test:wasm:ci` 13,
+`cargo test --workspace` 292, `go test ./...` green. Real sites (paired
 `test/browser/rendercheck.sh`, cold profile): GitHub height 100% / elements
 1811 of 1811 / err 0, Wikipedia 100% / err 0, NAVER 95% / err 1, Stack Overflow
 110% / err 6 (FedCM policy block, an ad partner's 502s, one sandboxed-frame
-notice).
+notice), CNN 100% / 4093 of 4095 / err 22 (ad and ID-sync hosts refusing proxied
+requests, strict-MIME refusals of those error bodies, sandboxed-frame notices —
+no script exceptions), Cloudflare-fronted gosuda.org and MDN 100% / err 0.
 
 **Status vocabulary** — **fixed** (closed; evidence names the pin) · **parity**
 (measured identical to native Chrome) · **not a bug** (the original claim was
@@ -107,6 +109,22 @@ errors; each fix exposed the next layer):
     now rewrite into continuations (`__zp_ochain`). — rewriter.test.js
     optional-chain differential (25 cases vs native), matrix optional-chain pins.
 
+Found on CNN (Permutive and Rubicon SDKs):
+
+21. An arrow's expression body got the statement-position ASI guard `0,`:
+    `(e,t)=>t[e]??=[]` became `(e,t)=>0,(…)` — a SyntaxError that killed the
+    script, or (`return(d="")=>e[d]||=…`) valid syntax that read the arrow's
+    parameter outside it (`d is not defined`). — matrix
+    `arrow_expression_body_is_not_a_statement_position`.
+22. `new Worker(u); URL.revokeObjectURL(u)` — natively safe, but our worker read
+    its source after the page had revoked it. The source is now fixed at
+    construction through a proxy-owned copy URL. — dyn `blobWorkerRevoked`.
+23. In workers, native methods reached through `self`/`globalThis`
+    (`self.addEventListener`, `self.setTimeout`, `self.atob`) threw `Illegal
+    invocation` — the scope proxy handed them out unbound — and the `Function`
+    facade's `prototype` was an empty object, so `Function.prototype.toString`
+    returned `[object Function]`. — dyn `workerSelfMethods`.
+
 ### Residuals (documented, not fixed)
 
 | Residual | Why it stays | Pin |
@@ -125,6 +143,8 @@ errors; each fix exposed the next layer):
 | Storage Access API answers as first-party in every frame | All targets share the proxy origin. | — |
 | Optional chains with `await`/`yield` after the first `?.`, or with a `Reflect.get?.()`-style special form at a split, keep per-link emission (keys/args evaluated even when short-circuited) | A continuation arrow cannot hold `await`/`yield`; unwrapping a special form would hand out the unmediated native. | matrix optional-chain negative controls |
 | `<link rel=preload as=script>` for a module script is fetched again by the module | The preload goes to the classic route; the module needs `kind=module` in its URL. | [trap module-kind-url](.ai/trap-notebook/rewriter.md#module-kind-url) |
+| Ad and ID-sync hosts (Google ads, Amazon, FreeWheel, Optimizely events, …) refuse proxied requests | Their decision, not request shape: `sendBeacon`/`fetch(keepalive)`/form POST bodies and content types arrive byte-identical to native (measured). IP reputation and fingerprint — Phase 3. | — |
+| The prelude logs "Blocked script execution in 'about:blank'" while touching sandboxed ad frames | Console noise only; the frame is sandboxed without `allow-scripts` either way. | — |
 
 ---
 
@@ -322,6 +342,8 @@ BroadcastChannel prefix, `webkit*` aliases, OPFS). SharedWorker per-target name
 prefix — **fixed** (static-policy `prefixedSharedWorkerOptions`). Rewriter
 helpers missing from the worker realm (`__zp_okeys`, `__zp_delete`, `__zp_oget`,
 `__zp_rget`, `__zp_with_*` …) — **fixed** (item 19; static-policy guard).
+Native methods through `self`, the `Function.prototype` facade, and blob
+sources revoked right after `new Worker()` — **fixed** (items 22, 23).
 Residuals: worker hooks are not `toString`-masked; `navigator` is the spoofed
 build identity (intentional); termination mid-request and multi-target workers
 — **unverified**.

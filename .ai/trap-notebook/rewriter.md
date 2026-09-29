@@ -1312,3 +1312,25 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **원인:** 자식 창은 자체 prelude 없이 containment 의 명시 목록으로 헬퍼를 받는데, R1 이 들어올 때 이 목록에 추가되지 않았다. 부모 것을 그대로 넘기면 안 된다 — 자식의 `let x` 가 부모 것과 충돌하고 부모 전역 조회에 샌다.
 - **수정:** 자식 전용 Map 과 `__zp_lex_scope` 를 깔고, 페이지 `execGlobalScript` 와 같은 `with(__zp_lex_scope)` 래핑을 쓴다(strict 소스는 그대로).
 - **검증:** 브라우저 차분 — 구 containment 로 빌드해 실패를 재현(`undefined | e:ReferenceError`)한 뒤, 수정 후 네이티브와 같다(`6 | number:3:function | 10 | no-throw`). static-policy 헬퍼 가드의 `child:` 축.
+
+## <a id="arrow-본문-stmt"></a>화살표 표현식 본문을 문 위치로 봤다 — ASI 가드 `0,` 가 화살표를 끊었다 (2026-09-29)
+
+- **증상 (CNN):** Permutive SDK 가 "Unexpected token '('" 로 통째로 죽었고, Rubicon prebid 는 "d is not defined" 를 던졌다. 둘 다 같은 원인이다.
+- **원인:** OXC 는 `x => expr` 의 본문을 **합성 ExpressionStatement** 로 감싼다. `visit_expression_statement` 는 문 시작에 걸친 패치를 `_STMT` 형(앞에 ASI 가드 `0,`)으로 바꾸는데, 화살표 본문에도 그랬다. `(e,t)=>t[e]??=[]` → `(e,t)=>0,({b:…}).v??=[]` — 화살표는 `0` 을 돌려주고 나머지는 **선언의 둘째 declarator** 가 되어 SyntaxError. `return(d="")=>e[d]||=…` 는 더 나빴다 — `return ((d="")=>0), (…)` 로 **문법은 맞게** 파싱돼, 화살표 매개변수 `d` 를 바깥에서 읽다가 ReferenceError. 조용히 의미가 바뀌는 쪽이 더 위험하다.
+- **수정:** 표현식 본문 화살표의 합성 문 시작 위치를 기록해 두고(`arrow_expr_bodies`), 그 문에서는 `_STMT` 승격을 하지 않는다. 화살표 본문은 `(` 로 시작해도 ASI 위험이 없다.
+- **검증:** matrix `arrow_expression_body_is_not_a_statement_position`(5형 + 진짜 문 시작은 가드 유지; 수정을 끄면 Permutive 형 그대로 실패). 실사이트 원본(Permutive·Rubicon)을 빌드 리라이터로 다시 써 파싱·형태 확인.
+
+## <a id="blob-워커-해제"></a>`new Worker(u); URL.revokeObjectURL(u)` — 워커 소스를 생성 시점에 확정하지 않았다 (2026-09-29)
+
+- **증상 (CNN):** Permutive 의 blob 워커가 "Blocked by ZeroProxy rewrite policy" 로 죽었다. 페이지 쪽에서는 스택이 없는 에러(`error: null`)만 보인다 — 처리되지 않은 워커 에러는 스펙상 소유자 전역에 **에러 객체 없이** 다시 보고된다. 원 위치는 워커 CDP 세션의 `Runtime.exceptionThrown` 에서 봤다.
+- **원인:** 네이티브는 blob URL 을 Worker **생성 시점**에 해석하므로 곧바로 해제해도 안전하다. 우리 워커는 부트스트랩(prelude + 번들) 뒤에 sync XHR 로 소스를 읽는데, 그 사이 페이지가 URL 을 해제하면 읽을 게 없어 fail-closed 했다.
+- **수정:** 페이지 realm 의 `URL.createObjectURL` 이 Blob 을 **기록만** 하고(`pageBlobURLs`, 해제 시 삭제 — 네이티브 수명보다 길게 잡지 않는다) Worker 생성 때 **우리 소유 복사본 URL** 을 `srcu` 로 넘긴다. 워커 정체성(`u` = `self.location`)은 페이지 URL 그대로다. createObjectURL 은 MediaSource 를 HTML 로 바꾼 전과(CNN 비디오)가 있어 **차단이 아닌 기록만**, Blob 브랜드 검사로 MSE 핸들은 제외.
+- **검증:** dyn 차분 `blobWorkerRevoked`(네이티브 `v:blob:a`), 브라우저 차분(구 빌드 `error:… rewrite policy`).
+
+## <a id="워커-self-수신자"></a>워커에서 `self.addEventListener(…)` 가 Illegal invocation — 스코프 프록시가 네이티브 메서드를 날것으로 돌려줬다 (2026-09-29)
+
+- **증상 (CNN, 이후 일반화):** blob 워커 수정 뒤 Permutive 워커가 `t.addEventListener("message", …)` 에서 Illegal invocation. 최소 재현에서 `self.addEventListener`·`globalThis.addEventListener`·`self.dispatchEvent`·`self.setTimeout`·`self.atob` **전부** 실패 — 가장 흔한 워커 관용구가 2026-05 부터 깨져 있었다.
+- **원인:** 워커 리라이트는 `self` 를 `__zp_get(globalThis,"self")` → 스코프 프록시로 돌린다. 프록시가 네이티브 메서드를 그대로 돌려주면 수신자가 프록시라 브랜드 체크에 걸린다. 페이지 멤브레인은 같은 문제를 규칙(`needsWindowReceiver`)으로 풀었는데 워커에는 없었다.
+- **수정:** 같은 규칙 — prototype 없는 네이티브 함수만 진짜 전역에 묶고, 함수별 캐시로 `self.f === self.f`, `name`/`length` 유지.
+- **숨은 함정:** 그 규칙의 "네이티브인가" 판별이 런타임 `Function.prototype.toString` 을 부르는데, 워커 prelude 는 전역 `Function` 을 래퍼로 바꿔 둔다 — 래퍼의 `prototype` 이 **빈 객체**라 `Function.prototype.toString.call(f)` 가 "[object Function]" 을 돌려줬다. 그래서 첫 수정이 아무것도 묶지 못했다. 캡처해 둔 네이티브 toString 을 쓰고, 래퍼들의 `prototype` 을 진짜 intrinsic 으로 맞췄다 — 페이지 코드의 네이티브 판별(`/\[native code\]/`)도 같이 고쳐졌다.
+- **검증:** dyn 차분 `workerSelfMethods`(네이티브 `v:a,number,true,true`), 워커 브라우저 차분 13항목 전부 네이티브와 같다.

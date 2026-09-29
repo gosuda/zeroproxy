@@ -152,6 +152,10 @@
   ]) {
     try { Object.defineProperty(ctor.prototype, 'constructor', { value: wrapper, enumerable: false, configurable: false, writable: true }); } catch {}
     try { Object.defineProperty(wrapper, 'name', { value: ctor.prototype.constructor.name || 'Function', configurable: true }); } catch {}
+    // `Function.prototype` 은 진짜 intrinsic 이어야 한다 — 래퍼의 기본 prototype
+    // (빈 객체)이 보이면 `Function.prototype.toString.call(f)` 가 "[object Function]"
+    // 이 되어 네이티브 판별(`/\[native code\]/`)이 전부 어긋났다.
+    try { Object.defineProperty(wrapper, 'prototype', { value: ctor.prototype, writable: false, enumerable: false, configurable: false }); } catch {}
   }
   // R1: 워커 스크립트의 top-level let/const/class 도 공유 전역 렉시컬
   // 환경에 산다 — 페이지 zpLex 와 동형. eval 렉시컬 환경은 버려지므로
@@ -214,6 +218,27 @@
       __zp_lex_env = prevLexEnv;
     }
   };
+  // ★`self`/`globalThis` 는 스코프 프록시다 — 거기서 꺼낸 네이티브 **메서드**를
+  // 그대로 돌려주면 수신자가 프록시가 되어 브랜드 체크가 실패한다:
+  // `self.addEventListener('message', …)`·`self.setTimeout`·`self.atob` 가 전부
+  // "Illegal invocation" 이었다(2026-09-29 실측, CNN 의 Permutive 워커). 페이지
+  // 멤브레인의 needsWindowReceiver 와 같은 규칙 — prototype 없는 네이티브
+  // 함수만 진짜 전역에 묶는다(생성자는 new 가 깨지고, 워커가 얹은 자기 함수는
+  // this 가 바뀌므로 건드리지 않는다). 함수별로 캐시해 `self.f === self.f`.
+  const globalMethodBindings = new WeakMap();
+  // 런타임의 전역 `Function` 은 우리 래퍼다 — 네이티브 toString 을 잡아 둔다.
+  const nativeFnToString = NativeFunctionCtor.prototype.toString;
+  function globalReceiverValue(value) {
+    if (typeof value !== 'function') return value;
+    const hit = globalMethodBindings.get(value);
+    if (hit) return hit;
+    try { if (value.prototype) return value; } catch { return value; }
+    try { if (!/\{\s*\[native code\]\s*\}/.test(nativeFnToString.call(value))) return value; } catch { return value; }
+    const bound = value.bind(self);
+    try { Object.defineProperty(bound, 'name', { value: value.name, configurable: true }); } catch {}
+    globalMethodBindings.set(value, bound);
+    return bound;
+  }
   const scope = new Proxy(self, {
     has(_target, prop) { return prop !== Symbol.unscopables; },
     get(target, prop) {
@@ -224,7 +249,7 @@
       if (prop === 'location') return base;
       if (prop === 'eval') return workerEval;
       if (prop === 'Function') return workerFunction;
-      return Reflect.get(target, prop);
+      return globalReceiverValue(Reflect.get(target, prop));
     },
     set(target, prop, value) {
       const le = zpLexEntry(prop);
@@ -255,6 +280,7 @@
     }
     const actual = workerTarget(target);
     const value = Reflect.get(Object(actual), prop);
+    if (isWorkerGlobal(target)) return globalReceiverValue(value);
     return prop === 'postMessage' && typeof value === 'function' ? value.bind(actual) : value;
   }
   function set(target, prop, value) {
