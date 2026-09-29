@@ -1672,11 +1672,15 @@ impl RewriteVisitor {
                 ";{{const __zp_bad=__zp_lex_decl({{{lexmap}}},[{vararr}]);if(__zp_bad!==undefined)throw new SyntaxError(\"Identifier '\"+__zp_bad+\"' has already been declared\");}}"
             ),
         });
+        // 앞의 `;` 는 필수다. 세미콜론이 있는 선언의 span 은 `;` 뒤에서
+        // 끝나지만, ASI 에 기대는 선언(`const a = { x: 1 }` 개행)은 초기화식
+        // 끝에서 끝난다 — 그대로 붙이면 `{ x: 1 }__zp_lex_bind(` 로 스크립트
+        // 전체가 SyntaxError 가 된다. 이미 `;` 가 있으면 빈 문이라 무해하다.
         for (pos, calls) in binds {
             self.patches.push(Patch {
                 start: pos,
                 end: pos,
-                replacement: calls,
+                replacement: format!(";{calls}"),
             });
         }
     }

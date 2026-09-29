@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-29 | rewriter / 수정 | ASI 선언 뒤 `__zp_lex_bind` 가 붙어 스크립트 전체가 SyntaxError. 하네스 실패 6건에 진짜 버그 1건이 묻혀 CI 가 빨간 채였다. | rewriter.md#lex-bind-asi |
 | 2026-09-26 | build / 수정 | build.mjs top-level `await` 앞의 `const` 는 TDZ — 빌드용 경로 상수는 파일 상단 `webSrc` 옆에. | build-deploy.md#2026-09-26--build-mjs-top-level-await-tdz |
 | 2026-09-24 | worker / 수정 | `self.URL` 래퍼가 내부 `new URL` 을 삼켜 `/zp/*` 부트스트랩이 타깃으로 변질 — 캡처→내부전환→래핑 순서. | rewriter.md#worker-url-래퍼-내부흡수 |
 | 2026-09-24 | worker / 수정 | SharedWorker `self.name` 에 `zp:w:` 접두어 노출 — 요청 이름으로 마스킹이 네이티브 parity. | rewriter.md#sharedworker-이름-마스킹 |

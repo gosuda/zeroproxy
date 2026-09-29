@@ -453,6 +453,15 @@ fn lex_registry_for_classic_toplevel() {
         ],
     );
     reparses("let x=1; const c=2; class K{} var v=3; function fn(){}");
+    // ASI: 세미콜론 없는 선언의 span 은 초기화식 끝에서 끝난다 — bind 를 그
+    // 자리에 그대로 붙이면 `{ href: 1 }__zp_lex_bind(` 가 되어 스크립트 전체가
+    // SyntaxError 로 죽는다(2026-09-29 CI rewriter.test.js 가 잡음). 세미콜론
+    // 없는 스타일은 실사이트에 흔하다.
+    emits("const receiver = { href: 1 }\nreceiver.href += 2", &["__zp_lex_bind(\"receiver\""]);
+    reparses("const receiver = { href: 1 }\nreceiver.href += 2");
+    reparses("let a\nlet b = 2\nclass C {}\nC");
+    reparses("const q = 1 // tail comment\nq");
+    reparses("const last = [1]");
     // 선언 없는 스크립트는 접두 없음.
     emits("foo();", &[]);
     let clean = rewrite_script("foo();", &RewriteOpts {

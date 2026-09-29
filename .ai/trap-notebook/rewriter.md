@@ -1231,3 +1231,11 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
   2. 레지스트리 충돌 같은 "선언 시점 에러"는 헬퍼가 throw 하지 않고 **충돌 이름을 반환** — 방출 코드가 `{const __zp_bad=__zp_lex_decl(...);if(__zp_bad!==undefined)throw new SyntaxError(...)}` 형태로 eval 안에서 던져 filename 이 sourceURL 을 탄다. const 쓰기도 setter 를 `v=>{throw new TypeError(...)}` 클로저로 방출해 같은 효과.
 - **잔여:** TDZ `ReferenceError`(bind 미등록 entry 읽기)는 `zpLexRead` prelude 헬퍼가 던진다 — filename=prelude 잔여 누출. 실측 드묾으로 인지형 갭.
 - **교훈:** 페이지에 노출될 수 있는 에러는 "어디서 throw 됐나"가 filename 을 결정한다 — prelude 의 편의 throw 는 전부 잠재적 URL 누출이다.
+
+## <a id="lex-bind-asi"></a>세미콜론 없는 top-level 선언 뒤에 `__zp_lex_bind` 가 붙어 스크립트 전체가 SyntaxError — 그리고 main CI 가 빨간 채였던 이유 (2026-09-29)
+
+- **원인:** R1 의 `emit_lex_registry` 가 bind 호출을 선언문의 `span.end` 에 그대로 삽입했다. 세미콜론이 있으면 span 이 `;` 뒤에서 끝나 무해하지만, ASI 에 기대는 선언(`const a = { x: 1 }` + 개행)은 초기화식 끝에서 끝나 `{ x: 1 }__zp_lex_bind(…)` 가 된다 → 스크립트 전체 파스 실패(fail-closed 사망). 세미콜론 없는 스타일(standard, prettier `semi: false`)로 빌드된 실사이트 번들이 통째로 죽는 경로다.
+- **왜 늦게 잡혔나:** `matrix.rs` 의 lex 테스트는 세미콜론 있는 입력만 썼다. CI 의 `rewriter.test.js` 는 이 버그를 실제로 잡았지만(ASI 전용 테스트가 있다), 같은 파일의 나머지 6건이 테스트 샌드박스에 `__zp_lex_decl` 이 없어 난 `ReferenceError` 였고 7번째만 진짜 `SyntaxError` 였다. 하네스 실패 더미에 진짜 버그가 묻혀, main CI 는 `7326d64` 부터 빨간 채로 Chromium E2E 단계에 아예 도달하지 못했다.
+- **수정:** bind 삽입 앞에 `;` 를 붙인다(이미 `;` 가 있으면 빈 문이라 무해). 나머지 span-end 삽입은 전부 블록을 닫는 `}` 라 ASI 가 `}` 앞에서 끊어 주므로 해당 없음 — 확인함. 하네스는 prelude 원문의 `__zp_lex_decl`/`__zp_lex_bind` 를 떼어 실행한다(흉내 낸 스텁 아님).
+- **교훈:** 문 뒤에 문을 **삽입**하는 패치는 앞 문이 `;` 로 끝난다고 가정하면 안 된다. 그리고 "N건 실패" 를 한 원인으로 뭉치지 말 것 — 메시지가 다른 한 건이 진짜일 수 있다.
+- **검증:** `lex_registry_for_classic_toplevel` 에 ASI 4케이스(수정 전 실패 확인), `npm run test:wasm:ci` 12/12, `npm run test:e2e:ci` 181/181.

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { preludeSource } = require('./_prelude.cjs');
 
 let bundle;
 function loadRewriter() {
@@ -18,6 +19,27 @@ function loadRewriter() {
     bundle = ctx.ZPBundle;
   }
   return bundle;
+}
+
+// R1: the rewriter plants `__zp_lex_decl`/`__zp_lex_bind` around classic
+// top-level let/const/class. Their runtime side lives in the prelude; run the
+// real source rather than a look-alike stub, injecting only its free variables.
+let lexHelpersSource;
+function installLexHelpers(ctx, realmGlobal) {
+  if (!lexHelpersSource) {
+    const src = preludeSource().split('\r\n').join('\n');
+    const start = src.indexOf("    define(root, '__zp_lex_decl', (lexMap, varNames) => {");
+    const end = src.indexOf("    define(root, '__zp_lex_scope', zpLexScope);", start);
+    assert.ok(start >= 0 && end > start, 'prelude __zp_lex_decl/__zp_lex_bind source not found');
+    // Keep the two defines only; the lex scope proxy between them and the end
+    // marker is the prelude's executor wrapper, which the rewriter never emits.
+    const bindEnd = src.indexOf('\n    });\n', src.indexOf("define(root, '__zp_lex_bind'", start)) + '\n    });\n'.length;
+    assert.ok(bindEnd > start && bindEnd <= end, 'prelude __zp_lex_bind end not found');
+    lexHelpersSource = src.slice(start, bindEnd);
+  }
+  const define = (_target, key, fn) => { ctx[key] = fn; return true; };
+  // eslint-disable-next-line no-new-func
+  new Function('define', 'root', 'zpLex', '__zp_lex_env', lexHelpersSource)(define, realmGlobal, new Map(), null);
 }
 
 function executionContext() {
@@ -56,6 +78,7 @@ function executionContext() {
   // Node contextifies the global object: code inside the VM sees a distinct
   // identity from the host sandbox, unlike ordinary objects passed through it.
   realmGlobal = vm.runInContext('globalThis', ctx);
+  installLexHelpers(ctx, realmGlobal);
   return { ctx, location };
 }
 
