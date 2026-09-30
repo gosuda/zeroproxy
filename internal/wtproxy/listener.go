@@ -43,6 +43,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gosuda/zeroproxy/internal/netguard"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
@@ -525,7 +526,7 @@ func (l *Listener) targetAddr(ctx context.Context, u *url.URL) (string, error) {
 	}
 	if !l.cfg.AllowPrivateTargets {
 		for _, ip := range ips {
-			if isNonPublic(ip.IP) {
+			if netguard.IsNonPublic(ip.IP) {
 				return "", fmt.Errorf("target %q resolves to a non-public address", host)
 			}
 		}
@@ -538,14 +539,6 @@ func (l *Listener) targetAddr(ctx context.Context, u *url.URL) (string, error) {
 		}
 	}
 	return net.JoinHostPort(pick.String(), port), nil
-}
-
-var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
-
-func isNonPublic(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || cgnat.Contains(ip)
 }
 
 // selfSignedDevCert returns an in-memory ECDSA P-256 leaf for local dev.

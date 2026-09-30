@@ -387,11 +387,11 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 // Refreshed on each activate (and lazily on demand if a navigation
 // arrives before activate completes). The endpoint is plain JSON
 // served from the Go control plane (`/zp/api/config`).
-let runtimeConfig = { wtGateway: '', wtGatewayCertHashes: [], rtcGateway: '', rtcICEServers: [] };
+let runtimeConfig = { wtGateway: '', wtGatewayCertHashes: [], rtcICEServers: [] };
 let runtimeConfigPromise = null;
 // ★activate 때 한 번 읽는 것으로는 부족했다. 브라우저는 유휴 SW 를 내렸다
 // 다시 띄우는데 그때 전역은 기본값으로 돌아가고 activate 는 다시 오지 않는다 —
-// 그 SW 가 사는 동안 wtGateway/rtcGateway 가 빈 값이라 페이지는 조용히 스텁을
+// 그 SW 가 사는 동안 wtGateway/rtcICEServers 가 빈 값이라 페이지는 조용히 스텁을
 // 받았다. 개발용 게이트웨이 인증서 핀은 서버를 재시작할 때마다 바뀐다. 그래서
 // 문서 내비게이션마다(짧은 TTL, 시간 상한) 다시 읽는다.
 const RUNTIME_CONFIG_TTL_MS = 10000;
@@ -418,7 +418,6 @@ async function refreshRuntimeConfig() {
             // config is re-read per navigation (ensureRuntimeConfig).
             wtGatewayCertHashes: Array.isArray(cfg.wtGatewayCertHashes)
               ? cfg.wtGatewayCertHashes.filter(h => typeof h === 'string' && h) : [],
-            rtcGateway: typeof cfg.rtcGateway === 'string' ? cfg.rtcGateway : '',
             // Each /zp/api/config response carries a fresh TURN-REST cred
             // tuple (when -rtc-turn-addr is set on the server). The
             // tuple is opaque to the SW — it's pasted into the boot JSON
@@ -2380,14 +2379,9 @@ function buildRuntimePrelude(tab, entry) {
     // path (WT_UNSUPPORTED) when this is empty.
     wtGateway: runtimeConfig.wtGateway || '',
     wtGatewayCertHashes: Array.isArray(runtimeConfig.wtGatewayCertHashes) ? runtimeConfig.wtGatewayCertHashes : [],
-    // D5 — empty string when the operator hasn't enabled `-rtc-enable +
-    // -rtc-public-url`; page-realm virtual `RTCPeerConnection` falls
-    // back to the rejected stub path (RTC_GATEWAY_UNAVAILABLE).
-    rtcGateway: runtimeConfig.rtcGateway || '',
-    // D5 embedded TURN: array of `{urls,username,credential}` cred
-    // tuples the page realm RTCPC passes verbatim to native. Empty
-    // means no embedded TURN — page realm forces iceServers=[] and
-    // gets host candidates only (existing behaviour).
+    // D5 embedded TURN: `{urls,username,credential}` tuples. The page's
+    // RTCPeerConnection runs relay-only through them; empty (no
+    // `-rtc-turn-addr`) leaves the RTC_GATEWAY_UNAVAILABLE stub.
     rtcICEServers: Array.isArray(runtimeConfig.rtcICEServers) ? runtimeConfig.rtcICEServers : [],
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
@@ -3626,7 +3620,7 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_REF=__zp_worker_params.get('ref')||'';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=__zp_worker_params.getAll('wtgh');self.__ZP_WORKER_RTC_GATEWAY=__zp_worker_params.get('rtcg')||'';try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
+  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_REF=__zp_worker_params.get('ref')||'';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=__zp_worker_params.getAll('wtgh');try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
   // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
   // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
   const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;

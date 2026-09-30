@@ -1,18 +1,15 @@
-// Package rtcgw is the server-side WebRTC signaling + media gateway that
-// relays target peer connections through a ZeroProxy-controlled SFU/TURN.
+// Package rtcgw is D5: WebRTC for proxied pages, relay-only through an
+// embedded TURN server (turn.go). The page keeps a native RTCPeerConnection
+// forced to these TURN credentials with `iceTransportPolicy: 'relay'`, so
+// the remote peer sees only the relay and the relay carries DTLS/SRTP
+// ciphertext.
 //
-// Status: scaffolding. The runtime client (zp-rtcgw-client and the
-// runtime-prelude blocker) currently throws RTC_GATEWAY_UNAVAILABLE when a
-// target constructs `new RTCPeerConnection(...)`. The full implementation
-// requires:
-//   - pion/webrtc server-side RTCPeerConnection
-//   - pion/turn embedded TURN server
-//   - SDP munging (strip target ICE candidates, inject ZeroProxy candidates)
-//   - Per-tab session attribution to keep peer streams isolated
-//   - Media gateway (SFU) for audio/video forwarding
-//
-// Until then this package exposes a placeholder Handler that returns 501
-// Not Implemented so target sites see a stable, attributable error.
+// 2026-09-30: this replaced a pion signaling bridge (page-side and
+// target-side PeerConnections with an SFU between them). Its target side was
+// never negotiated, and page code still received the native connection's own
+// SDP and candidates — with it enabled, a remote peer connected to the user
+// directly (measured). Handler stays as the 501 answer for the old
+// `/zp/api/rtc/signal` route.
 package rtcgw
 
 import (

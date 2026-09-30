@@ -41,49 +41,47 @@ func main() {
 	flag.StringVar(&cfg.WtGatewayURL, "wt-public-url", "", "Public URL of the WebTransport gateway (e.g. 'https://proxy.localhost:18443/__zp/wt'); empty hides the gateway from the page-side virtual class")
 	var wtPageHosts string
 	flag.StringVar(&wtPageHosts, "wt-page-hosts", "", "Comma-separated hostnames whose pages may open WebTransport sessions on the gateway (Origin check, any port). Default: the -wt-public-url hostname")
-	// D5 — WebRTC signaling gateway. The gateway runs in-process on the
-	// same HTTP listener (`/zp/api/rtc/signal`), so there's no separate
-	// addr flag; just an enable toggle + the public URL the page reads
-	// from `/zp/api/config`. Empty leaves the legacy stub Handler() up.
+	// D5 — WebRTC runs relay-only through the embedded TURN server: the
+	// page's native RTCPeerConnection is forced to its credentials with
+	// `iceTransportPolicy: 'relay'`, so the remote peer sees only the relay
+	// and the relay carries DTLS/SRTP ciphertext. The pion signaling bridge
+	// this replaced (`-rtc-public-url`) was bypassed by page code — peers
+	// connected to the user directly — and was removed 2026-09-30.
 	var rtcEnabled bool
-	var rtcAllowedIPs string
+	var rtcDeprecatedURL, rtcDeprecatedIPs string
 	var rtcTurnAddr, rtcTurnPublicAddr, rtcTurnExternalIP, rtcTurnRealm, rtcTurnSecret string
-	flag.BoolVar(&rtcEnabled, "rtc-enable", false, "Enable the D5 WebRTC signaling gateway (in-process pion/webrtc bridge)")
-	flag.StringVar(&cfg.RtcGatewayURL, "rtc-public-url", "", "Public URL of the RTC signaling endpoint (e.g. 'http://proxy.localhost:18080/zp/api/rtc/signal'); empty disables the page-side virtual RTCPeerConnection pass-through")
-	flag.StringVar(&rtcAllowedIPs, "rtc-allowed-ips", "", "Comma-separated list of IPs the gateway's own SDP candidates are allowed to advertise — used to strip host candidates that would leak the operator's LAN/NAT interfaces. Empty = no munging (public-IP-only deployments).")
-	flag.StringVar(&rtcTurnAddr, "rtc-turn-addr", "", "UDP listener for the embedded TURN server (e.g. '0.0.0.0:3478'). Empty disables embedded TURN — page realm falls back to host candidates only.")
+	flag.BoolVar(&rtcEnabled, "rtc-enable", false, "Enable D5 WebRTC: relay-only through the embedded TURN server (requires -rtc-turn-addr)")
+	flag.StringVar(&rtcDeprecatedURL, "rtc-public-url", "", "Deprecated, ignored: the signaling bridge was removed (WebRTC is relay-only through -rtc-turn-addr)")
+	flag.StringVar(&rtcDeprecatedIPs, "rtc-allowed-ips", "", "Deprecated, ignored: see -rtc-public-url")
+	flag.StringVar(&rtcTurnAddr, "rtc-turn-addr", "", "UDP listener for the embedded TURN server (e.g. '0.0.0.0:3478'); required by -rtc-enable. Must be routable — Chrome ignores TURN servers on loopback")
 	flag.StringVar(&rtcTurnPublicAddr, "rtc-turn-public-addr", "", "host:port clients reach the TURN server at (covers NAT / port-forwarding). Defaults to -rtc-turn-addr.")
 	flag.StringVar(&rtcTurnExternalIP, "rtc-turn-external-ip", "", "Relay address IP pion advertises in TURN allocation responses. For a port-forwarded box, the public IP. Defaults to listener IP — wrong for NAT'd deployments.")
 	flag.StringVar(&rtcTurnRealm, "rtc-turn-realm", "zeroproxy", "TURN realm string")
 	flag.StringVar(&rtcTurnSecret, "rtc-turn-secret", "", "Long-term TURN-REST shared secret (hex). Empty = random per-process secret (creds expire on restart).")
 	flag.Parse()
+	if rtcDeprecatedURL != "" || rtcDeprecatedIPs != "" {
+		log.Printf("rtcgw: -rtc-public-url / -rtc-allowed-ips are ignored — the signaling bridge was removed; WebRTC runs relay-only through -rtc-turn-addr")
+	}
 	if rtcEnabled {
-		var allowed []string
-		if rtcAllowedIPs != "" {
-			for _, p := range strings.Split(rtcAllowedIPs, ",") {
-				if p = strings.TrimSpace(p); p != "" {
-					allowed = append(allowed, p)
-				}
-			}
+		if rtcTurnAddr == "" {
+			log.Fatalf("rtcgw: -rtc-enable requires -rtc-turn-addr — WebRTC runs relay-only through the embedded TURN server")
 		}
-		gw, err := rtcgw.New(rtcgw.Config{AllowedExternalIPs: allowed})
+		turnSrv, err := rtcgw.NewTURNServer(rtcgw.TURNConfig{
+			Addr:         rtcTurnAddr,
+			PublicAddr:   rtcTurnPublicAddr,
+			ExternalIP:   rtcTurnExternalIP,
+			Realm:        rtcTurnRealm,
+			SharedSecret: rtcTurnSecret,
+			// Direct UDP egress may reach only what the HTTP path reaches.
+			AllowPrivatePeers: cfg.SocksAddr == "internal",
+		})
 		if err != nil {
-			log.Fatalf("rtcgw: %v", err)
+			log.Fatalf("rtcgw: embedded TURN: %v", err)
 		}
-		cfg.RtcGateway = gw
-		if rtcTurnAddr != "" {
-			turnSrv, err := rtcgw.NewTURNServer(rtcgw.TURNConfig{
-				Addr:         rtcTurnAddr,
-				PublicAddr:   rtcTurnPublicAddr,
-				ExternalIP:   rtcTurnExternalIP,
-				Realm:        rtcTurnRealm,
-				SharedSecret: rtcTurnSecret,
-			})
-			if err != nil {
-				log.Fatalf("rtcgw: embedded TURN: %v", err)
-			}
-			cfg.RtcTURN = turnSrv
-			log.Printf("rtcgw: embedded TURN listening on %s (public %s, realm %q)", rtcTurnAddr, turnSrv.PublicAddr(), rtcTurnRealm)
+		cfg.RtcTURN = turnSrv
+		log.Printf("rtcgw: embedded TURN listening on %s (public %s, realm %q)", rtcTurnAddr, turnSrv.PublicAddr(), rtcTurnRealm)
+		if cfg.SocksAddr != "internal" {
+			log.Printf("rtcgw: WARNING TURN relays UDP DIRECTLY (not via %s): remote peers see this server's address (media stays end-to-end encrypted)", cfg.SocksAddr)
 		}
 	}
 	// D4 listener runs on its own UDP socket — HTTP/3 + WebTransport

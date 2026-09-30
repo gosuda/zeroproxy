@@ -32,7 +32,7 @@ function runWasm() {
 }
 
 function runE2E() {
-  run(['--test', '--test-concurrency=1', 'test/e2e/proxy.test.js', 'test/e2e/wt-gateway.test.js'], {
+  run(['--test', '--test-concurrency=1', 'test/e2e/proxy.test.js', 'test/e2e/wt-gateway.test.js', 'test/e2e/rtc-relay.test.js'], {
     ZP_E2E_PREBUILT: '1', ZP_E2E_DIST: dist, ZP_E2E_ARTIFACTS: artifacts,
   });
 }

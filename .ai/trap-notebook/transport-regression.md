@@ -36,6 +36,17 @@ WASM 커널 ↔ relay ↔ target의 보안 회귀 역사. 당시 경로·검증 
 - **교훈:** Go 테스트 클라이언트에는 Origin 도 CSP 도 브라우저 인증서 정책도 없다. 브라우저가 쓰는 기능의 "end-to-end" 는 브라우저로 재야 한다.
 - **검증:** `test/e2e/wt-gateway.test.js`(페이지·워커가 네이티브와 동일 — 연결·bidi·datagram·잘못된 핀 거부, 게이트웨이 로그로 핀 Dial 확인), wtproxy Go 테스트 8개, prelude-units 2.
 
+
+## 2026-09-30 — D5 WebRTC: 켜면 사용자와 원격 피어가 직접 붙었다 — relay 전용 TURN 으로 교체 {#rtc-relay-only}
+
+- **측정:** 프록시된 페이지 A 와 네이티브 피어 B 가 타깃 자신의 시그널링으로 데이터 채널을 열게 했다. D5 를 켜자(`-rtc-enable -rtc-public-url`) 채널은 열렸지만 B 가 고른 후보 쌍이 **host↔host** — 게이트웨이를 거치지 않고 사용자에게 직접 붙었다. 게이트웨이 로그에는 세션이 하나도 없었다. 기본값(D5 꺼짐)은 스텁이라 안전했다.
+- **원인:** 페이지 래퍼가 `createOffer()`·`icecandidate` 를 **네이티브 연결 그대로** 페이지 코드에 넘겼다 — 페이지는 제 SDP·후보를 원격 피어에게 보냈고, 게이트웨이의 answer 는 같은 네이티브 연결에 덮어쓰려다 충돌했다. pion 브리지의 타깃 쪽 PeerConnection 은 **협상된 적이 없었다**(오퍼·후보를 내보내는 코드 자체가 없었다, "adapter 가 붙으면" 주석). `pc.ondatachannel = …` 같은 `on*` 속성은 래퍼 객체에 붙어 영영 불리지 않았다.
+- **TURN 도 죽어 있었다:** 설정 엔드포인트는 TURN-REST 형식(`<만료>:<라벨>`) 자격을 발급했는데 서버는 사용자 이름 전체를 정수로 읽는 `NewLongTermAuthHandler` 를 썼다 — 발급한 자격을 전부 거절("Invalid time-windowed username"). 짝은 `LongTermTURNRESTAuthHandler`.
+- **교체:** 페이지는 **진짜 네이티브** RTCPeerConnection 을 쓰고(`Reflect.construct` — 프로토타입·이벤트·서브클래싱 그대로), ICE 설정만 강제한다: `iceServers` = 서버가 발급한 TURN 자격, `iceTransportPolicy: 'relay'`(생성자와 `setConfiguration` 둘 다, `ZP.relayOnlyRTCConfiguration`). 브라우저는 relay 후보만 모으므로 사용자 주소에서는 패킷이 한 개도 나가지 않고, DTLS/SRTP 는 끝-끝이라 **relay 는 암호문만 본다** — WebTransport 게이트웨이와 달리 바이트-파이프 불변식이 지켜진다. TURN 자격이 없으면 스텁. pion 브리지·SDP 먼징·`-rtc-public-url`/`-rtc-allowed-ips`(이제 무시+경고)는 걷었다.
+- **운영 경계:** TURN 은 UDP 를 직접 보낸다 — 사설 피어로의 CreatePermission 은 `-socks internal` 일 때만(`netguard.IsNonPublic`, WT 게이트웨이와 같은 규칙), 그 밖에는 기동 경고. 크롬은 **루프백 TURN 서버를 무시**한다 — `-rtc-turn-addr` 는 라우팅 가능한 주소여야 한다.
+- **테스트 함정:** 헤드리스 크롬의 host 후보는 mDNS(`*.local`) 라 relay 전용 쪽이 퍼미션을 만들 주소가 없다 — 실제 원격 피어는 srflx/relay 를 광고하므로 테스트는 `--disable-features=WebRtcHideLocalIpsWithMdns` 로 그것을 흉내 낸다.
+- **검증:** `test/e2e/rtc-relay.test.js`(네이티브 host↔host, 프록시는 relay 후보만 + B 의 선택 원격 후보가 `relay`), `TestTURNServerAcceptsItsOwnCredentials`(수정 전 실패 확인), prelude-units.
+
 ## 후속 전송 정정
 
 - [2026-07-28 lost wakeup](LOG.md#2026-07-28-2): NAVER가 END_STREAM/deflate 종료를 지연시킨다는 과거 anti-bot 서사는 직접 H2 대조와 yamux 드라이버 조사로 철회됐다. 비슷한 시간 지연을 곧바로 같은 원인으로 묶지 않는다.

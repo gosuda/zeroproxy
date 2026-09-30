@@ -1021,7 +1021,6 @@
   // 오늘의 Chrome 에선 부재) 네이티브 parity 대로 undefined 를 둔다 —
   // undefined 표면에는 fail-close 할 것이 없다.
   const wtGateway = String(self.__ZP_WORKER_WT_GATEWAY || '');
-  const rtcGateway = String(self.__ZP_WORKER_RTC_GATEWAY || '');
   const rtcICEServers = Array.isArray(self.__ZP_WORKER_RTC_ICE) ? self.__ZP_WORKER_RTC_ICE : [];
   function workerGatewayStub(name, code, kind) {
     // 페이지 makeVirtualGateway 의 워커 축약판 — 생성은 되고 메서드는
@@ -1097,105 +1096,27 @@
       self.WebTransport = workerGatewayStub('WebTransport', 'WT_UNSUPPORTED', 'WebTransport');
     }
   }
-  // RTCPeerConnection: 네이티브가 있는 워커만 래핑 — 없으면 undefined.
+  // RTCPeerConnection: 네이티브가 있는 워커만(크롬은 [Exposed=Window] 라 보통
+  // 없다). 페이지와 같은 규칙 — TURN 자격이 있으면 relay 전용 네이티브, 없으면
+  // 스텁. 공통 규칙은 ZP.relayOnlyRTCConfiguration.
   if (typeof self.RTCPeerConnection === 'function') {
     const NativeRTC = self.RTCPeerConnection;
-    if (rtcGateway) {
-      let rtcSessionCounter = 0;
-      self.RTCPeerConnection = class ZPWorkerRTCPeerConnection {
-        constructor(config) {
-          const safeConfig = Object.assign({}, config || {});
-          safeConfig.iceServers = rtcICEServers;
-          safeConfig.iceTransportPolicy = 'all';
-          this._native = new NativeRTC(safeConfig);
-          const sid = (tabId || 'wsess') + '-' + (++rtcSessionCounter) + '-' + Date.now().toString(36);
-          this._sessionId = sid;
-          const postSignal = env => {
-            try { return nativeFetch(rtcGateway, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(env), credentials: 'same-origin' }); }
-            catch { return Promise.resolve(); }
-          };
-          this._postSignal = postSignal;
-          try {
-            this._native.addEventListener('icecandidate', ev => {
-              const cand = ev && ev.candidate;
-              if (!cand) return;
-              postSignal({ op: 'candidate', sessionId: sid, candidate: cand.toJSON ? cand.toJSON() : { candidate: cand.candidate, sdpMid: cand.sdpMid, sdpMLineIndex: cand.sdpMLineIndex } });
-            });
-          } catch {}
-          let stopped = false;
-          this._pollCtl = { stop() { stopped = true; } };
-          const self2 = this;
-          (async function loop() {
-            while (!stopped) {
-              try {
-                const r = await nativeFetch(rtcGateway + '?session=' + encodeURIComponent(sid), { credentials: 'same-origin' });
-                if (!r.ok) { await new Promise(res => setTimeout(res, 1000)); continue; }
-                const envs = await r.json();
-                if (!Array.isArray(envs)) continue;
-                for (const env of envs) {
-                  try {
-                    if (env && env.op === 'answer' && env.sdp) {
-                      await self2._native.setRemoteDescription(env.sdp);
-                    } else if (env && env.op === 'offer' && env.sdp) {
-                      await self2._native.setRemoteDescription(env.sdp);
-                      const ans = await self2._native.createAnswer();
-                      await self2._native.setLocalDescription(ans);
-                      postSignal({ op: 'answer', sessionId: sid, sdp: self2._native.localDescription });
-                    } else if (env && env.op === 'candidate' && env.candidate) {
-                      try { await self2._native.addIceCandidate(env.candidate); } catch {}
-                    } else if (env && env.op === 'close') {
-                      try { self2._native.close(); } catch {}
-                    }
-                  } catch {}
-                }
-              } catch { await new Promise(res => setTimeout(res, 1000)); }
-            }
-          })();
-        }
-        get localDescription() { try { return this._native.localDescription; } catch { return undefined; } }
-        get remoteDescription() { try { return this._native.remoteDescription; } catch { return undefined; } }
-        get pendingLocalDescription() { try { return this._native.pendingLocalDescription; } catch { return undefined; } }
-        get pendingRemoteDescription() { try { return this._native.pendingRemoteDescription; } catch { return undefined; } }
-        get currentLocalDescription() { try { return this._native.currentLocalDescription; } catch { return undefined; } }
-        get currentRemoteDescription() { try { return this._native.currentRemoteDescription; } catch { return undefined; } }
-        get signalingState() { try { return this._native.signalingState; } catch { return undefined; } }
-        get iceGatheringState() { try { return this._native.iceGatheringState; } catch { return undefined; } }
-        get iceConnectionState() { try { return this._native.iceConnectionState; } catch { return undefined; } }
-        get connectionState() { try { return this._native.connectionState; } catch { return undefined; } }
-        get canTrickleIceCandidates() { try { return this._native.canTrickleIceCandidates; } catch { return undefined; } }
-        get sctp() { try { return this._native.sctp; } catch { return undefined; } }
-        createOffer(opts) { return this._native.createOffer(opts); }
-        createAnswer(opts) { return this._native.createAnswer(opts); }
-        async setLocalDescription(desc) {
-          const r = await this._native.setLocalDescription(desc);
-          const local = this._native.localDescription;
-          if (local && local.sdp) this._postSignal({ op: local.type === 'offer' ? 'offer' : 'answer', sessionId: this._sessionId, sdp: { type: local.type, sdp: local.sdp } });
-          return r;
-        }
-        setRemoteDescription(desc) { return this._native.setRemoteDescription(desc); }
-        addIceCandidate(cand) { return this._native.addIceCandidate(cand); }
-        addTrack(track, ...streams) { return this._native.addTrack(track, ...streams); }
-        removeTrack(sender) { return this._native.removeTrack(sender); }
-        getSenders() { return this._native.getSenders(); }
-        getReceivers() { return this._native.getReceivers(); }
-        getTransceivers() { return this._native.getTransceivers(); }
-        addTransceiver(...args) { return this._native.addTransceiver(...args); }
-        getStats(selector) { return this._native.getStats(selector); }
-        createDataChannel(label, opts) { return this._native.createDataChannel(label, opts); }
-        close() {
-          try { this._pollCtl && this._pollCtl.stop(); } catch {}
-          this._postSignal({ op: 'close', sessionId: this._sessionId });
-          try { return this._native.close(); } catch { return undefined; }
-        }
-        addEventListener(type, listener, opts) { try { return this._native.addEventListener(type, listener, opts); } catch {} }
-        removeEventListener(type, listener, opts) { try { return this._native.removeEventListener(type, listener, opts); } catch {} }
-        dispatchEvent(ev) { try { return this._native.dispatchEvent(ev); } catch { return true; } }
+    const ice = rtcICEServers.filter(x => x && x.urls);
+    if (ice.length) {
+      const RTCPeerConnection = function RTCPeerConnection(config) {
+        if (!new.target) throw new TypeError("Failed to construct 'RTCPeerConnection': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+        return Reflect.construct(NativeRTC, [ZP.relayOnlyRTCConfiguration(config, ice)], new.target);
       };
-      if (typeof self.webkitRTCPeerConnection === 'function') self.webkitRTCPeerConnection = self.RTCPeerConnection;
+      try { Object.defineProperty(RTCPeerConnection, 'prototype', { value: NativeRTC.prototype, writable: false }); } catch {}
+      const nativeSet = NativeRTC.prototype.setConfiguration;
+      if (typeof nativeSet === 'function') {
+        try { Object.defineProperty(NativeRTC.prototype, 'setConfiguration', { value: function setConfiguration(config) { return nativeSet.call(this, ZP.relayOnlyRTCConfiguration(config, ice)); }, writable: true, configurable: true }); } catch {}
+      }
+      self.RTCPeerConnection = RTCPeerConnection;
     } else {
       self.RTCPeerConnection = workerGatewayStub('RTCPeerConnection', 'RTC_GATEWAY_UNAVAILABLE', 'WebRTC');
-      if (typeof self.webkitRTCPeerConnection === 'function') self.webkitRTCPeerConnection = self.RTCPeerConnection;
     }
+    if (typeof self.webkitRTCPeerConnection === 'function') self.webkitRTCPeerConnection = self.RTCPeerConnection;
   }
   // ── 잔여 표면 가드 (페이지 realm 의 installSurfaceGuards 와 같은 정책) ──
   // ShadowRealm: evaluate()/importValue() 가 미리라이트 JS 를 realm 에서

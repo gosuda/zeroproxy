@@ -1,7 +1,8 @@
 package rtcgw
 
-// Embedded TURN server — pion/turn/v4 spun in-process alongside the
-// WebRTC gateway so operators don't need to deploy coturn out-of-band.
+// Embedded TURN server — pion/turn/v4 spun in-process so operators don't
+// need to deploy coturn out-of-band. It is the whole D5 WebRTC path: the
+// page's native RTCPeerConnection runs relay-only through it (2026-09-30).
 // Uses long-term TURN-REST short-term credentials (RFC 7635): each
 // `IssueICEServerCreds` call returns a fresh username/password tuple
 // derived from `sharedSecret`, valid for `ttl`. The page realm reads
@@ -21,9 +22,11 @@ package rtcgw
 // listener's local IP (host) and connectivity will fail through NAT.
 //
 // **Disabled by default**: requires `-rtc-enable` AND
-// `-rtc-turn-addr <ip:port>`. Empty `-rtc-turn-addr` keeps the legacy
-// "no embedded TURN" mode (page-side iceServers stays empty, host
-// candidates only).
+// `-rtc-turn-addr <ip:port>` (a routable address — Chrome ignores TURN
+// servers on loopback). Without it the page keeps the
+// RTC_GATEWAY_UNAVAILABLE stub: host candidates would connect the user
+// to the remote peer directly. DTLS/SRTP stay end to end, so the relay
+// carries ciphertext only.
 
 import (
 	"crypto/rand"
@@ -33,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gosuda/zeroproxy/internal/netguard"
 	"github.com/pion/logging"
 	"github.com/pion/turn/v4"
 )
@@ -64,6 +68,11 @@ type TURNConfig struct {
 	Realm        string        // TURN realm
 	SharedSecret string        // long-term auth shared secret
 	DefaultTTL   time.Duration // default cred validity (e.g. 30 min)
+	// AllowPrivatePeers lets clients relay to loopback/private/link-local
+	// peers. The relay sends UDP directly (it cannot ride the SOCKS
+	// upstream), so like the WebTransport gateway it may reach only what the
+	// HTTP path reaches: the server sets this only with `-socks internal`.
+	AllowPrivatePeers bool
 }
 
 // NewTURNServer starts the TURN listener. The caller owns the
@@ -117,11 +126,20 @@ func NewTURNServer(cfg TURNConfig) (*TURNServer, error) {
 
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:         cfg.Realm,
-		AuthHandler:   turn.NewLongTermAuthHandler(cfg.SharedSecret, logging.NewDefaultLoggerFactory().NewLogger("turn")),
+		// ★IssueICEServerCreds mints TURN-REST usernames ("<expiry>:<label>").
+		// NewLongTermAuthHandler parses the whole username as an integer, so
+		// it refused every credential this server handed out — no browser
+		// ever allocated a relay (2026-09-30, TestTURNServerAcceptsItsOwnCredentials).
+		AuthHandler:   turn.LongTermTURNRESTAuthHandler(cfg.SharedSecret, logging.NewDefaultLoggerFactory().NewLogger("turn")),
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn:            conn,
 				RelayAddressGenerator: relayGen,
+				// CreatePermission / ChannelBind name the peer a client may
+				// reach — the operator's own networks stay out of reach.
+				PermissionHandler: func(_ net.Addr, peerIP net.IP) bool {
+					return cfg.AllowPrivatePeers || !netguard.IsNonPublic(peerIP)
+				},
 			},
 		},
 	})

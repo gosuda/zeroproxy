@@ -91,154 +91,80 @@
     return ZPWebTransport;
   }
 
-  // D5: virtual RTCPeerConnection that wraps the *native* RTCPC and
-  // routes all signaling (offer / answer / ICE candidates) through the
-  // ZeroProxy gateway (`boot.rtcGateway`). Native RTCPC handles the
-  // media/DTLS/SCTP stack locally; the gateway maintains a parallel
-  // PeerConnection on its side and SFU-forwards tracks + data channels
-  // to the target's real remote peer. The target never sees the page's
-  // real IP because all candidates that reach the remote peer originate
-  // from the gateway.
+  // D5 — WebRTC runs **relay-only through the operator's TURN server**
+  // (2026-09-30). The page keeps a genuine native RTCPeerConnection — native
+  // prototype, events, `on*` handlers, subclassing — and negotiates with its
+  // remote peer through its own signaling as usual. Only the ICE configuration
+  // is forced (ZP.relayOnlyRTCConfiguration): the TURN credentials the server
+  // minted (`boot.rtcICEServers`) and `iceTransportPolicy: 'relay'`. The
+  // browser gathers relay candidates only, so the remote peer sees the relay
+  // and never the user (measured: its selected remote candidate is `relay`),
+  // and DTLS/SRTP stay end to end — the relay carries ciphertext only.
   //
-  // When `boot.rtcGateway` is empty (operator hasn't enabled the D5
-  // gateway) or native RTCPC is absent, we fall back to the legacy
-  // rejected-promise stub (`makeVirtualGateway`).
-  function makeRTCPeerConnectionConstructor(name) {
-    const NativeRTC = root.RTCPeerConnection || root.webkitRTCPeerConnection;
-    const gateway = (boot && typeof boot.rtcGateway === 'string' && boot.rtcGateway) ? boot.rtcGateway : '';
-    if (!NativeRTC || !gateway) {
+  // The previous design routed signaling through a pion bridge, but page code
+  // still received the native connection's own SDP and candidates and handed
+  // them to its peer: with D5 enabled the peer connected to the user directly
+  // (host↔host, measured), and the bridge's target side was never negotiated.
+  // Without TURN credentials there is no safe way to connect — stub.
+  function makeRTCPeerConnectionConstructor(w, name) {
+    const NativeRTC = w.RTCPeerConnection || w.webkitRTCPeerConnection;
+    const ice = (boot && Array.isArray(boot.rtcICEServers)) ? boot.rtcICEServers.filter(s => s && s.urls) : [];
+    if (typeof NativeRTC !== 'function' || !ice.length) {
       return makeVirtualGateway(name, { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' });
     }
-    let sessionCounter = 0;
-    function ZPRTCPeerConnection(config) {
-      if (!(this instanceof ZPRTCPeerConnection)) {
-        throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator.");
+    // What the page asked for — getConfiguration() reads it back instead of
+    // our TURN credentials and relay policy.
+    const requested = new WeakMap();
+    const remember = (pc, config) => {
+      const c = config == null ? {} : config;
+      requested.set(pc, {
+        iceServers: c.iceServers === undefined ? [] : c.iceServers,
+        iceTransportPolicy: c.iceTransportPolicy === undefined ? 'all' : c.iceTransportPolicy,
+      });
+    };
+    const RTCPeerConnection = function RTCPeerConnection(config) {
+      if (!new.target) {
+        throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
       }
-      // We don't trust the page-supplied iceServers — they'd point at
-      // remote STUN/TURN that could leak IP. Replace with the
-      // operator's embedded TURN cred tuple (from `boot.rtcICEServers`)
-      // when present; otherwise force empty so the native PC only
-      // generates host candidates the gateway signaling can route.
-      const safeConfig = Object.assign({}, config || {});
-      const issuedICEServers = (boot && Array.isArray(boot.rtcICEServers))
-        ? boot.rtcICEServers
-        : [];
-      safeConfig.iceServers = issuedICEServers;
-      safeConfig.iceTransportPolicy = 'all';
-      const native = new NativeRTC(safeConfig);
-      this._native = native;
-      const sid = (boot && boot.tabId ? boot.tabId : 'sess') + '-' + (++sessionCounter) + '-' + Date.now().toString(36);
-      this._sessionId = sid;
-      // Forward locally-generated ICE candidates to the gateway.
-      try {
-        native.addEventListener('icecandidate', ev => {
-          const cand = ev && ev.candidate;
-          if (!cand) return;
-          postSignal({ op: 'candidate', sessionId: sid, candidate: cand.toJSON ? cand.toJSON() : { candidate: cand.candidate, sdpMid: cand.sdpMid, sdpMLineIndex: cand.sdpMLineIndex } });
-        });
-      } catch {}
-      // Start the long-poll loop to pull gateway-originated events.
-      this._pollCtl = startSignalPoll(this, sid);
+      // new.target keeps page subclasses (`class X extends RTCPeerConnection`).
+      const pc = Reflect.construct(NativeRTC, [ZP.relayOnlyRTCConfiguration(config, ice)], new.target);
+      remember(pc, config);
+      return pc;
+    };
+    const proto = NativeRTC.prototype;
+    try { Object.defineProperty(RTCPeerConnection, 'prototype', { value: proto, writable: false, enumerable: false, configurable: false }); } catch {}
+    try { Object.defineProperty(RTCPeerConnection, 'length', { value: 0, configurable: true }); } catch {}
+    try { Object.setPrototypeOf(RTCPeerConnection, Object.getPrototypeOf(NativeRTC)); } catch {}
+    for (const key of Reflect.ownKeys(NativeRTC)) {
+      if (key === 'prototype' || key === 'length' || key === 'name') continue;
+      try { Object.defineProperty(RTCPeerConnection, key, Object.getOwnPropertyDescriptor(NativeRTC, key)); } catch {}
     }
-    function postSignal(env) {
-      try {
-        return Native.fetch(gateway, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(env),
-          credentials: 'same-origin',
-        });
-      } catch { return Promise.resolve(); }
-    }
-    function startSignalPoll(self, sid) {
-      let stopped = false;
-      (async function loop() {
-        while (!stopped) {
-          try {
-            const r = await Native.fetch(gateway + '?session=' + encodeURIComponent(sid), { credentials: 'same-origin' });
-            if (!r.ok) { await new Promise(res => setTimeout(res, 1000)); continue; }
-            const envs = await r.json();
-            if (!Array.isArray(envs)) continue;
-            for (const env of envs) {
-              try { await applyEnvelope(self, env); } catch {}
-            }
-          } catch {
-            await new Promise(res => setTimeout(res, 1000));
-          }
-        }
-      })();
-      return { stop() { stopped = true; } };
-    }
-    async function applyEnvelope(self, env) {
-      if (!env || typeof env !== 'object') return;
-      if (env.op === 'answer' && env.sdp) {
-        await self._native.setRemoteDescription(env.sdp);
-      } else if (env.op === 'offer' && env.sdp) {
-        await self._native.setRemoteDescription(env.sdp);
-        const ans = await self._native.createAnswer();
-        await self._native.setLocalDescription(ans);
-        postSignal({ op: 'answer', sessionId: self._sessionId, sdp: self._native.localDescription });
-      } else if (env.op === 'candidate' && env.candidate) {
-        try { await self._native.addIceCandidate(env.candidate); } catch {}
-      } else if (env.op === 'close') {
-        try { self._native.close(); } catch {}
-      }
-    }
-    // Forward every spec method/getter; intercept SDP-bearing ones so we
-    // can route them through the gateway in addition to the native PC.
-    function delegate(name) {
-      defineMasked(ZPRTCPeerConnection.prototype, name, {
-        configurable: true,
-        get() { try { return this._native[name]; } catch { return undefined; } },
+    try { Object.defineProperty(proto, 'constructor', { value: RTCPeerConnection, writable: true, enumerable: false, configurable: true }); } catch {}
+    // setConfiguration is the other way in: the same forcing applies.
+    const nativeSet = proto.setConfiguration;
+    if (typeof nativeSet === 'function') {
+      defineMasked(proto, 'setConfiguration', {
+        value: function setConfiguration(config) {
+          const r = nativeSet.call(this, ZP.relayOnlyRTCConfiguration(config, ice));
+          remember(this, config);
+          return r;
+        },
+        writable: true, enumerable: true, configurable: true,
       });
     }
-    ['localDescription', 'remoteDescription', 'pendingLocalDescription', 'pendingRemoteDescription',
-     'currentLocalDescription', 'currentRemoteDescription',
-     'signalingState', 'iceGatheringState', 'iceConnectionState', 'connectionState',
-     'canTrickleIceCandidates', 'sctp']
-      .forEach(delegate);
-    ZPRTCPeerConnection.prototype.createOffer = function(opts) { return this._native.createOffer(opts); };
-    ZPRTCPeerConnection.prototype.createAnswer = function(opts) { return this._native.createAnswer(opts); };
-    ZPRTCPeerConnection.prototype.setLocalDescription = async function(desc) {
-      const r = await this._native.setLocalDescription(desc);
-      // After local SDP is finalized, forward it to the gateway so the
-      // gateway's target-side PC can complete its half of the handshake.
-      const local = this._native.localDescription;
-      if (local && local.sdp) {
-        postSignal({ op: local.type === 'offer' ? 'offer' : 'answer', sessionId: this._sessionId, sdp: { type: local.type, sdp: local.sdp } });
-      }
-      return r;
-    };
-    ZPRTCPeerConnection.prototype.setRemoteDescription = function(desc) { return this._native.setRemoteDescription(desc); };
-    ZPRTCPeerConnection.prototype.addIceCandidate = function(cand) { return this._native.addIceCandidate(cand); };
-    ZPRTCPeerConnection.prototype.addTrack = function(track, ...streams) { return this._native.addTrack(track, ...streams); };
-    ZPRTCPeerConnection.prototype.removeTrack = function(sender) { return this._native.removeTrack(sender); };
-    ZPRTCPeerConnection.prototype.getSenders = function() { return this._native.getSenders(); };
-    ZPRTCPeerConnection.prototype.getReceivers = function() { return this._native.getReceivers(); };
-    ZPRTCPeerConnection.prototype.getTransceivers = function() { return this._native.getTransceivers(); };
-    ZPRTCPeerConnection.prototype.addTransceiver = function(...args) { return this._native.addTransceiver(...args); };
-    ZPRTCPeerConnection.prototype.getStats = function(selector) { return this._native.getStats(selector); };
-    ZPRTCPeerConnection.prototype.createDataChannel = function(label, opts) { return this._native.createDataChannel(label, opts); };
-    ZPRTCPeerConnection.prototype.close = function() {
-      try { this._pollCtl && this._pollCtl.stop(); } catch {}
-      postSignal({ op: 'close', sessionId: this._sessionId });
-      try { return this._native.close(); } catch { return undefined; }
-    };
-    ZPRTCPeerConnection.prototype.addEventListener = function(type, listener, opts) {
-      try { return this._native.addEventListener(type, listener, opts); } catch {}
-    };
-    ZPRTCPeerConnection.prototype.removeEventListener = function(type, listener, opts) {
-      try { return this._native.removeEventListener(type, listener, opts); } catch {}
-    };
-    ZPRTCPeerConnection.prototype.dispatchEvent = function(ev) {
-      try { return this._native.dispatchEvent(ev); } catch { return true; }
-    };
-    // ★installEventMethods (공유 eventTargetProto) 는 여기 안 쓴다 — ZPWebTransport
-    // 와 같은 이유: 이 클래스는 진짜 native RTCPeerConnection(_native) 을
-    // 감싸고 그게 스스로 이벤트를 낸다. 가짜 리스너 맵으로 바꾸면 native 가
-    // 내는 icecandidate/track/datachannel 이벤트가 안 닿는다.
-    brandLikeNative(ZPRTCPeerConnection, ZPRTCPeerConnection.prototype, name);
-    return ZPRTCPeerConnection;
+    const nativeGet = proto.getConfiguration;
+    if (typeof nativeGet === 'function') {
+      defineMasked(proto, 'getConfiguration', {
+        value: function getConfiguration() {
+          const c = nativeGet.call(this);
+          const r = requested.get(this);
+          if (r && c) { c.iceServers = r.iceServers; c.iceTransportPolicy = r.iceTransportPolicy; }
+          return c;
+        },
+        writable: true, enumerable: true, configurable: true,
+      });
+    }
+    return RTCPeerConnection;
   }
 
   // D4/D5 virtual gateway constructor. `.ready`/`.closed` (WebTransport) and

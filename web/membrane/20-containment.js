@@ -328,18 +328,18 @@
       // D4: `WebTransport` slot prefers the real native-pass-through
       // virtual class when `boot.wtGateway` is set; otherwise the ctor
       // factory returns the legacy stub automatically.
-      // D5: same shape for `RTCPeerConnection` /
-      // `webkitRTCPeerConnection` — pass-through to a native PC with
-      // signaling routed via `boot.rtcGateway` when set, else legacy
-      // stub.
+      // D5: `RTCPeerConnection` is the native class forced relay-only through
+      // the operator's TURN server when `boot.rtcICEServers` carries
+      // credentials, else the stub. `webkitRTCPeerConnection` is the same
+      // function, as natively (aliased after this loop).
       'WebTransport': { code: 'WT_UNSUPPORTED', kind: 'WebTransport', ctor: makeWebTransportConstructor },
-      'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor('RTCPeerConnection') },
-      'webkitRTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor('webkitRTCPeerConnection') },
+      'RTCPeerConnection': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC', ctor: () => makeRTCPeerConnectionConstructor(w, 'RTCPeerConnection') },
       // RTCDataChannel is not user-constructible; it's returned by
       // createDataChannel on the (now-virtual) PC. Keep the legacy stub
       // for direct construction attempts.
       'RTCDataChannel': { code: 'RTC_GATEWAY_UNAVAILABLE', kind: 'WebRTC' },
     };
+    const hadWebkitRTC = 'webkitRTCPeerConnection' in w;
     for (const name of Object.keys(gatewayMeta)) {
       const meta = gatewayMeta[name];
       const blockCtor = typeof meta.ctor === 'function' ? meta.ctor() : makeVirtualGateway(name, meta);
@@ -348,6 +348,7 @@
       const ok = define(w, name, blockCtor);
       if (strict && name in w && !ok) throw normalizedError('SecurityError');
     }
+    if (hadWebkitRTC && !define(w, 'webkitRTCPeerConnection', w.RTCPeerConnection) && strict) throw normalizedError('SecurityError');
     // B4 / EventSource: intentionally NOT wrapped. The Service Worker
     // intercepts all controlled-origin fetches including SSE, so the native
     // EventSource implementation is safe. Wrapping it would change the

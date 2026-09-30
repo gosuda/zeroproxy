@@ -107,6 +107,17 @@
     arrayBufferByteLength.call(v); // brand check: TypeError for anything but an ArrayBuffer
     return new Uint8Array(v);
   }
+  // D5 — the only RTCConfiguration a proxied page's RTCPeerConnection gets:
+  // the page's own dictionary with its ICE servers replaced by the operator's
+  // TURN credentials and `iceTransportPolicy: 'relay'`. The browser then
+  // gathers relay candidates only and never sends a packet from the user's
+  // own address; DTLS/SRTP stay end to end, so the relay carries ciphertext.
+  function relayOnlyRTCConfiguration(config, iceServers) {
+    const c = Object.assign({}, config == null ? {} : config);
+    c.iceServers = iceServers;
+    c.iceTransportPolicy = 'relay';
+    return c;
+  }
   function webTransportGatewayRequest(gatewayURL, target, tabId, options, gatewayCertHashes) {
     const gw = new URL(gatewayURL);
     gw.searchParams.set('target', String(target));
@@ -459,7 +470,7 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest,ENVELOPE_MIME, encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

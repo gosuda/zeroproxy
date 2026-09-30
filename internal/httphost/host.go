@@ -38,9 +38,9 @@ type Config struct {
 	// (base64url SHA-256) — browsers reach it only through such a pin. Nil
 	// for an operator certificate the browser validates normally.
 	WtGatewayCertHashes []string
-	RtcGatewayURL string // public RTC signaling URL; empty disables pass-through
-	RtcGateway    *rtcgw.Gateway   // nil disables /zp/api/rtc/signal
-	RtcTURN       *rtcgw.TURNServer // nil disables embedded-TURN creds
+	// RtcTURN is D5: the page's RTCPeerConnection runs relay-only through
+	// it. Nil leaves the RTC_GATEWAY_UNAVAILABLE stub.
+	RtcTURN *rtcgw.TURNServer
 }
 
 // NewHandler builds the ZeroProxy HTTP handler: static assets, /zp/*
@@ -53,8 +53,6 @@ func NewHandler(cfg Config) http.Handler {
 		socksAddr:     cfg.SocksAddr,
 		wtGatewayURL:  cfg.WtGatewayURL,
 		wtCertHashes:  cfg.WtGatewayCertHashes,
-		rtcGatewayURL: cfg.RtcGatewayURL,
-		rtcGateway:    cfg.RtcGateway,
 		rtcTURN:       cfg.RtcTURN,
 		syncHub:       newSyncFetchHub(),
 	}
@@ -68,8 +66,6 @@ type server struct {
 	socksAddr     string
 	wtGatewayURL  string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
 	wtCertHashes  []string // D4 — dev-cert pins for the gateway connection
-	rtcGatewayURL string // D5 — public URL the browser uses to reach the RTC signaling endpoint; empty disables the virtual RTCPC pass-through
-	rtcGateway    *rtcgw.Gateway
 	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
 	// 동기 XHR 중계 허브. Go 는 요청을 park 만 하고 실제 전송은 SW 가 한다
 	// (syncfetch.go 의 주석 참고) — 새 egress 경로가 아니다.
@@ -125,21 +121,16 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		// __zp_refusals() 에는 남지 않는다. cspreport.go 주석 참고.
 		s.handleCSPReport(w, r)
 	case path == controlPrefix+"api/config":
-		// D4/D5 client config — exposes the public WT gateway URL (if
-		// `-wt-public-url` is set) + RTC signaling URL (if
-		// `-rtc-public-url` is set). SW fetches this once on activate
-		// and threads `wtGateway` / `rtcGateway` into the boot JSON the
-		// page realm reads.
+		// D4/D5 client config — the public WT gateway URL and its dev-cert
+		// pin, and fresh TURN credentials. The SW re-reads it per
+		// navigation (ensureRuntimeConfig) and threads it into the boot
+		// JSON the page realm reads.
 		s.serveConfig(w, r)
 	case path == controlPrefix+"api/rtc/signal":
-		// D5 — WebRTC signaling endpoint. Active only when
-		// `-rtc-enable` is set; otherwise the stub Handler() at
-		// `/__zp/rtc/` is still in place.
-		if s.rtcGateway == nil {
-			s.safeError(w, r, "RTC_GATEWAY_UNAVAILABLE", http.StatusServiceUnavailable)
-			return
-		}
-		s.rtcGateway.HandlerForAPI().ServeHTTP(w, r)
+		// The pion signaling bridge that served this was removed
+		// (2026-09-30) — WebRTC is relay-only through the embedded TURN
+		// server and needs no signaling of ours.
+		rtcgw.Handler().ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, "/__zp/__zp/"):
 		// Defensive: in case build pipeline emits a double-prefixed path.
 		s.safeError(w, r, "MALFORMED_ROUTE", http.StatusBadRequest)
@@ -279,7 +270,7 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveConfig emits the minimal client-facing runtime config the SW
-// reads on activate. D4 = wtGateway; D5 = rtcGateway + rtcICEServers.
+// reads per navigation. D4 = wtGateway (+ its dev-cert pin); D5 = rtcICEServers.
 // SW only ever does ONE fetch on boot.
 //
 // `rtcICEServers` is a fresh time-limited cred tuple from the
@@ -306,9 +297,8 @@ func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(struct {
 		WtGateway           string                `json:"wtGateway"`
 		WtGatewayCertHashes []string              `json:"wtGatewayCertHashes"`
-		RtcGateway          string                `json:"rtcGateway"`
 		RtcICEServers       []rtcgw.ICEServerCred `json:"rtcICEServers"`
-	}{s.wtGatewayURL, hashes, s.rtcGatewayURL, iceServers})
+	}{s.wtGatewayURL, hashes, iceServers})
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {

@@ -28,7 +28,9 @@ runs turned out to certify divergences as "design" — see
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 98 | 13, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
 
-Suite totals at the audit: e2e 186/186, `npm run test:js` 110, `test:wasm:ci` 13,
+Suite totals (2026-09-30): e2e 192/192 — including the WebTransport gateway
+(`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
+round trips in a real browser — `npm run test:js` 113, `test:wasm:ci` 13,
 `cargo test --workspace` 292, `go test ./...` green. Real sites (paired
 `test/browser/rendercheck.sh`, cold profile): GitHub height 100% / elements
 1811 of 1811 / err 0, Wikipedia 100% / err 0, NAVER 95% / err 1, Stack Overflow

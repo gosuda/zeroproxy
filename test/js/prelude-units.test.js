@@ -587,3 +587,15 @@ test('proxied CSP admits the WebTransport gateway only when one is configured', 
   assert.equal(connect(ZP.fixedCSP([])).includes('18443'), false);
   assert.equal(connect(ZP.fixedCSP([], { extraConnect: ['https://proxy.localhost:18443/__zp/wt'] })).includes(' https://proxy.localhost:18443 '), true);
 });
+
+// D5 — the only RTCConfiguration a proxied RTCPeerConnection gets.
+test('relay-only RTC configuration replaces the ICE servers and the policy', () => {
+  const ice = [{ urls: ['turn:192.0.2.1:3478'], username: 'u', credential: 'c' }];
+  const page = { iceServers: [{ urls: 'stun:stun.example:3478' }], iceTransportPolicy: 'all', bundlePolicy: 'max-bundle' };
+  const c = ZP.relayOnlyRTCConfiguration(page, ice);
+  assert.deepEqual(c.iceServers, ice);
+  assert.equal(c.iceTransportPolicy, 'relay');
+  assert.equal(c.bundlePolicy, 'max-bundle', 'other members pass through');
+  assert.equal(page.iceTransportPolicy, 'all', 'the page dictionary is not mutated');
+  assert.equal(ZP.relayOnlyRTCConfiguration(undefined, ice).iceTransportPolicy, 'relay');
+});
