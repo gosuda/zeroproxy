@@ -34,6 +34,10 @@ type Config struct {
 	WebDir        string // built static web asset directory (dist/web)
 	SocksAddr     string // Tor SOCKS5 addr, or "internal" for direct dial
 	WtGatewayURL  string // public WT gateway URL the page reads; empty hides it
+	// WtGatewayCertHashes pins a self-signed dev gateway certificate
+	// (base64url SHA-256) — browsers reach it only through such a pin. Nil
+	// for an operator certificate the browser validates normally.
+	WtGatewayCertHashes []string
 	RtcGatewayURL string // public RTC signaling URL; empty disables pass-through
 	RtcGateway    *rtcgw.Gateway   // nil disables /zp/api/rtc/signal
 	RtcTURN       *rtcgw.TURNServer // nil disables embedded-TURN creds
@@ -48,6 +52,7 @@ func NewHandler(cfg Config) http.Handler {
 		webDir:        cfg.WebDir,
 		socksAddr:     cfg.SocksAddr,
 		wtGatewayURL:  cfg.WtGatewayURL,
+		wtCertHashes:  cfg.WtGatewayCertHashes,
 		rtcGatewayURL: cfg.RtcGatewayURL,
 		rtcGateway:    cfg.RtcGateway,
 		rtcTURN:       cfg.RtcTURN,
@@ -62,6 +67,7 @@ type server struct {
 	webDir        string
 	socksAddr     string
 	wtGatewayURL  string // D4 — public URL the browser uses to reach the WT gateway; empty disables client-side virtual WebTransport
+	wtCertHashes  []string // D4 — dev-cert pins for the gateway connection
 	rtcGatewayURL string // D5 — public URL the browser uses to reach the RTC signaling endpoint; empty disables the virtual RTCPC pass-through
 	rtcGateway    *rtcgw.Gateway
 	rtcTURN       *rtcgw.TURNServer // D5 embedded TURN (optional) — issues short-term cred tuples via serveConfig
@@ -285,18 +291,24 @@ func (s *server) workerBootstrap(w http.ResponseWriter, r *http.Request) {
 func (s *server) serveConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	wt := strings.ReplaceAll(s.wtGatewayURL, `"`, `\"`)
-	rtc := strings.ReplaceAll(s.rtcGatewayURL, `"`, `\"`)
-	iceServers := "[]"
+	iceServers := []rtcgw.ICEServerCred{}
 	if s.rtcTURN != nil {
-		cred, err := s.rtcTURN.IssueICEServerCreds("")
-		if err == nil {
-			if buf, err := json.Marshal([]rtcgw.ICEServerCred{cred}); err == nil {
-				iceServers = string(buf)
-			}
+		if cred, err := s.rtcTURN.IssueICEServerCreds(""); err == nil {
+			iceServers = append(iceServers, cred)
 		}
 	}
-	_, _ = fmt.Fprintf(w, `{"wtGateway":"%s","rtcGateway":"%s","rtcICEServers":%s}`, wt, rtc, iceServers)
+	hashes := s.wtCertHashes
+	if hashes == nil {
+		hashes = []string{}
+	}
+	// encoding/json, not a format string: the hand-escaped `%s` quoted `"`
+	// but not `\`, so a URL with a backslash produced invalid JSON.
+	_ = json.NewEncoder(w).Encode(struct {
+		WtGateway           string                `json:"wtGateway"`
+		WtGatewayCertHashes []string              `json:"wtGatewayCertHashes"`
+		RtcGateway          string                `json:"rtcGateway"`
+		RtcICEServers       []rtcgw.ICEServerCred `json:"rtcICEServers"`
+	}{s.wtGatewayURL, hashes, s.rtcGatewayURL, iceServers})
 }
 
 func (s *server) safeError(w http.ResponseWriter, r *http.Request, code string, status int) {

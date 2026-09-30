@@ -544,3 +544,46 @@ for (const [name, install] of Object.entries(STACK_SANITIZERS)) {
     assert.equal(run("Error.prepareStackTrace = (e, f) => 'n:' + (f.length > 0); const s2 = new Error('z').stack; Error.prepareStackTrace = undefined; s2"), 'n:true');
   });
 }
+
+// ---------------------------------------------------------------------------
+// D4 — WebTransport through the gateway (ZP.webTransportGatewayRequest).
+// The page's `serverCertificateHashes` pin the TARGET: they must move to the
+// gateway (which pins its dial) — on the native connection they would pin the
+// gateway's certificate and fail. The gateway's own dev-cert pin comes from
+// the server config.
+// ---------------------------------------------------------------------------
+
+test('WebTransport gateway request moves target pins to the gateway', () => {
+  const hash = new Uint8Array(32).fill(7);
+  const gwPin = ZP.bytesToBase64Url(new Uint8Array(32).fill(9));
+  const { url, options } = ZP.webTransportGatewayRequest(
+    'https://proxy.localhost:18443/__zp/wt', 'https://t.example:4433/echo', 'tab1',
+    { serverCertificateHashes: [{ algorithm: 'SHA-256', value: hash.buffer }, { algorithm: 'md5', value: new Uint8Array(16) }], congestionControl: 'throughput', bogus: 1 },
+    [gwPin]);
+  const u = new URL(url);
+  assert.equal(u.searchParams.get('target'), 'https://t.example:4433/echo');
+  assert.equal(u.searchParams.get('tab'), 'tab1');
+  assert.equal(u.searchParams.get('pinned'), '1');
+  assert.deepEqual(u.searchParams.getAll('certhash'), [ZP.bytesToBase64Url(hash)]);
+  assert.equal(options.congestionControl, 'throughput');
+  assert.equal('bogus' in options, false);
+  assert.equal(options.serverCertificateHashes.length, 1);
+  assert.equal(options.serverCertificateHashes[0].algorithm, 'sha-256');
+  assert.deepEqual(Array.from(options.serverCertificateHashes[0].value), Array(32).fill(9));
+
+  // Present but empty still pins — the gateway must not fall back to CA roots.
+  const empty = new URL(ZP.webTransportGatewayRequest('https://gw/w', 'https://t/x', '', { serverCertificateHashes: [] }, []).url);
+  assert.equal(empty.searchParams.get('pinned'), '1');
+  // No pins at all → neither flag nor gateway pin.
+  const plain = ZP.webTransportGatewayRequest('https://gw/w', 'https://t/x', '', undefined, []);
+  assert.equal(new URL(plain.url).searchParams.has('pinned'), false);
+  assert.equal('serverCertificateHashes' in plain.options, false);
+  // A non-BufferSource value throws like the native constructor.
+  assert.throws(() => ZP.webTransportGatewayRequest('https://gw/w', 'https://t/x', '', { serverCertificateHashes: [{ algorithm: 'sha-256', value: 'x' }] }, []), TypeError);
+});
+
+test('proxied CSP admits the WebTransport gateway only when one is configured', () => {
+  const connect = csp => csp.match(/connect-src [^;]*/)[0];
+  assert.equal(connect(ZP.fixedCSP([])).includes('18443'), false);
+  assert.equal(connect(ZP.fixedCSP([], { extraConnect: ['https://proxy.localhost:18443/__zp/wt'] })).includes(' https://proxy.localhost:18443 '), true);
+});

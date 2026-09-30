@@ -10,6 +10,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gosuda/zeroproxy/internal/httphost"
@@ -38,6 +39,8 @@ func main() {
 	// `new WebTransport(...)` calls reject (Promise.ready). Operators set
 	// this to e.g. `https://proxy.localhost:18443/__zp/wt` for local dogfood.
 	flag.StringVar(&cfg.WtGatewayURL, "wt-public-url", "", "Public URL of the WebTransport gateway (e.g. 'https://proxy.localhost:18443/__zp/wt'); empty hides the gateway from the page-side virtual class")
+	var wtPageHosts string
+	flag.StringVar(&wtPageHosts, "wt-page-hosts", "", "Comma-separated hostnames whose pages may open WebTransport sessions on the gateway (Origin check, any port). Default: the -wt-public-url hostname")
 	// D5 — WebRTC signaling gateway. The gateway runs in-process on the
 	// same HTTP listener (`/zp/api/rtc/signal`), so there's no separate
 	// addr flag; just an enable toggle + the public URL the page reads
@@ -83,26 +86,52 @@ func main() {
 			log.Printf("rtcgw: embedded TURN listening on %s (public %s, realm %q)", rtcTurnAddr, turnSrv.PublicAddr(), rtcTurnRealm)
 		}
 	}
-	h := httphost.NewHandler(cfg)
-
 	// D4 listener runs on its own UDP socket — HTTP/3 + WebTransport
 	// extension. Disabled by default (empty addr); operator opts in
 	// during dogfood with `-wt-addr :18443`. Per-target relay happens
-	// inside internal/wtproxy/listener.go::handleUpgrade; the page-side
-	// virtual `WebTransport` surface that drives it is a separate
-	// follow-up — without it the listener is exercised only by host
-	// tests + direct webtransport-go clients.
+	// inside internal/wtproxy/listener.go::handleUpgrade. Built before the
+	// HTTP handler so `/zp/api/config` can publish the dev cert's pin.
+	var wtListener *wtproxy.Listener
 	if wtAddr != "" {
-		wtListener, err := wtproxy.New(wtproxy.Config{
+		// Pages are served by the proxy's HTTP origin — normally the same
+		// hostname as the gateway on another port.
+		var pageHosts []string
+		for _, h := range strings.Split(wtPageHosts, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				pageHosts = append(pageHosts, h)
+			}
+		}
+		if len(pageHosts) == 0 {
+			if u, err := url.Parse(cfg.WtGatewayURL); err == nil && u.Hostname() != "" {
+				pageHosts = []string{u.Hostname()}
+			}
+		}
+		var err error
+		wtListener, err = wtproxy.New(wtproxy.Config{
+			PageHosts:            pageHosts,
 			Addr:                 wtAddr,
 			Path:                 wtPath,
 			CertFile:             wtCert,
 			KeyFile:              wtKey,
 			AllowInsecureDevCert: true,
+			// Direct egress may reach only what the HTTP path reaches:
+			// `internal` dials directly (private networks included); a real
+			// SOCKS upstream (Tor) cannot reach them.
+			AllowPrivateTargets: cfg.SocksAddr == "internal",
 		})
 		if err != nil {
 			log.Fatalf("wtproxy: %v", err)
 		}
+		cfg.WtGatewayCertHashes = wtListener.CertHashes()
+		if cfg.SocksAddr != "internal" {
+			// QUIC cannot ride a SOCKS5/Tor upstream, and a WebTransport
+			// relay must terminate the browser's session. Both break the
+			// byte-pipe invariant the HTTP path keeps — say so at startup.
+			log.Printf("wtproxy: WARNING WebTransport egress is DIRECT (not via %s): targets see this server's address, and the gateway terminates WebTransport TLS (sees stream plaintext)", cfg.SocksAddr)
+		}
+	}
+	h := httphost.NewHandler(cfg)
+	if wtListener != nil {
 		go func() {
 			if err := wtListener.Run(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("wtproxy: listener exited: %v", err)

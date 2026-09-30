@@ -89,6 +89,49 @@
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
+  // D4 — the gateway request for `new WebTransport(target, options)`, shared
+  // by the page and worker wrappers.
+  //
+  // The browser only ever connects to the gateway, so an option that
+  // describes the TARGET cannot go to the native constructor:
+  // `serverCertificateHashes` pins the target's certificate — on the native
+  // connection it would pin the gateway's and fail. Those travel as
+  // `certhash` parameters and the gateway pins its own dial with them.
+  // `gatewayCertHashes` (base64url SHA-256 from `/zp/api/config`) pin a
+  // self-signed dev gateway certificate instead; empty for a CA-trusted one.
+  // Dictionary members are read with Get, as the native binding reads them.
+  const WT_OPTION_MEMBERS = Object.freeze(['allowPooling', 'requireUnreliable', 'congestionControl', 'protocols', 'anticipatedConcurrentIncomingUnidirectionalStreams', 'anticipatedConcurrentIncomingBidirectionalStreams', 'datagramsReadableType']);
+  const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
+  function bufferSourceBytes(v) {
+    if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    arrayBufferByteLength.call(v); // brand check: TypeError for anything but an ArrayBuffer
+    return new Uint8Array(v);
+  }
+  function webTransportGatewayRequest(gatewayURL, target, tabId, options, gatewayCertHashes) {
+    const gw = new URL(gatewayURL);
+    gw.searchParams.set('target', String(target));
+    if (tabId) gw.searchParams.set('tab', String(tabId));
+    const native = {};
+    if (options != null && typeof options === 'object') {
+      for (const k of WT_OPTION_MEMBERS) {
+        const v = options[k];
+        if (v !== undefined) native[k] = v;
+      }
+      const pins = options.serverCertificateHashes;
+      if (pins != null) {
+        // Present-but-empty still means "pinned" — the gateway must not fall
+        // back to CA validation where the browser would not.
+        gw.searchParams.set('pinned', '1');
+        for (const h of pins) {
+          if (!h || String(h.algorithm).toLowerCase() !== 'sha-256') continue;
+          gw.searchParams.append('certhash', bytesToBase64Url(bufferSourceBytes(h.value)));
+        }
+      }
+    }
+    const own = Array.isArray(gatewayCertHashes) ? gatewayCertHashes.filter(h => typeof h === 'string' && h) : [];
+    if (own.length) native.serverCertificateHashes = own.map(h => ({ algorithm: 'sha-256', value: base64UrlToBytes(h) }));
+    return { url: gw.toString(), options: native };
+  }
   // v2 fetch envelope — `POST /zp/api/v2/fetch` 는 바디를 base64-in-JSON
   // 이 아니라 이 바이너리 봉투로 싣는다: [u32le headLen][headJSON][rawBody].
   // head 는 v1 payload 와 같은 모양이되 init.body 는 비운다(바이너리 꼬리가
@@ -269,6 +312,13 @@
     for (const server of normalizeRelayServers(servers || [], { allowLoopbackWS: true })) {
       try { const u = new URL(server); connect.add(u.origin); } catch {}
     }
+    // D4: the WebTransport gateway listens on its own origin (another port).
+    // WebTransport is governed by connect-src, so without it the browser
+    // refused every gateway session before a packet left the page. Only our
+    // own gateway is added — page code reaching that origin reaches it too.
+    for (const extra of (options && options.extraConnect) || []) {
+      try { connect.add(new URL(extra).origin); } catch {}
+    }
     const armed = !!(options && options.challengeCompat);
     const cf = ' https://challenges.cloudflare.com';
     if (armed) connect.add('https://challenges.cloudflare.com');
@@ -409,7 +459,7 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, ENVELOPE_MIME, encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest,ENVELOPE_MIME, encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

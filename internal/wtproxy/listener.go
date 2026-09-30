@@ -20,21 +20,26 @@
 package wtproxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +72,19 @@ type Config struct {
 	// production hardening — leave empty in dev so dogfood can exercise
 	// arbitrary upstreams.
 	AllowedTargetOrigins map[string]struct{}
+	// AllowPrivateTargets permits targets that resolve to loopback, private,
+	// link-local or otherwise non-public addresses. The gateway dials
+	// directly — QUIC cannot ride the SOCKS upstream — so it must not reach
+	// more than the HTTP path does: the server enables this only with
+	// `-socks internal`, whose direct dialer reaches those networks too.
+	AllowPrivateTargets bool
+	// PageHosts are the hostnames whose pages may open sessions — the
+	// proxy's own page origin, compared without scheme or port.
+	// webtransport-go's default accepts an Origin only when its host equals
+	// the gateway's Host, which the proxy page (another port) never does:
+	// every browser CONNECT was refused. Requests without an Origin
+	// (non-browser clients) pass, as they did under that default.
+	PageHosts []string
 	// Logger receives one line per session lifecycle event. nil → log.Default.
 	Logger *log.Logger
 }
@@ -78,9 +96,11 @@ type Listener struct {
 	logger   *log.Logger
 	mu       sync.Mutex
 	sessions map[*webtransport.Session]struct{}
-	// targetTLS overrides the outbound TLS config — tests only (a local echo
-	// target has a self-signed cert). Unexported so no deployment can set it.
-	targetTLS *tls.Config
+	// devCert is the in-memory self-signed certificate used when no cert
+	// files are configured. Browsers accept it only through a
+	// `serverCertificateHashes` pin, so its hash is published (CertHashes).
+	devCert *tls.Certificate
+	devHash [sha256.Size]byte
 }
 
 // New builds a Listener but does not yet bind the socket — call Run().
@@ -97,6 +117,16 @@ func New(cfg Config) (*Listener, error) {
 		logger:   logger,
 		sessions: make(map[*webtransport.Session]struct{}),
 	}
+	// Generated here, not in Run, so the server can publish the hash in
+	// `/zp/api/config` before the first page asks for it.
+	if cfg.CertFile == "" && cfg.KeyFile == "" && cfg.AllowInsecureDevCert {
+		devCert, err := selfSignedDevCert()
+		if err != nil {
+			return nil, fmt.Errorf("wtproxy: dev cert gen: %w", err)
+		}
+		l.devCert = &devCert
+		l.devHash = sha256.Sum256(devCert.Certificate[0])
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle(cfg.Path, http.HandlerFunc(l.handleUpgrade))
@@ -112,10 +142,8 @@ func New(cfg Config) (*Listener, error) {
 	webtransport.ConfigureHTTP3Server(h3srv)
 
 	l.srv = &webtransport.Server{
-		H3: h3srv,
-		// CheckOrigin: leave default (accept any). Real origin pinning
-		// happens via the AllowedTargetOrigins allowlist below — the
-		// caller is the SW we ship, not arbitrary web pages.
+		H3:          h3srv,
+		CheckOrigin: l.pageOriginAllowed,
 	}
 	return l, nil
 }
@@ -125,15 +153,11 @@ func New(cfg Config) (*Listener, error) {
 // a self-signed ECDSA cert is generated in memory.
 func (l *Listener) Run(ctx context.Context) error {
 	if l.cfg.CertFile == "" && l.cfg.KeyFile == "" {
-		if !l.cfg.AllowInsecureDevCert {
+		if l.devCert == nil {
 			return errors.New("wtproxy: no cert/key configured and AllowInsecureDevCert is false")
 		}
-		devCert, err := selfSignedDevCert()
-		if err != nil {
-			return fmt.Errorf("wtproxy: dev cert gen: %w", err)
-		}
 		l.srv.H3.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{devCert},
+			Certificates: []tls.Certificate{*l.devCert},
 			NextProtos:   []string{"h3"},
 		}
 		l.logger.Printf("wtproxy: listening %s (path=%s, self-signed dev cert)", l.cfg.Addr, l.cfg.Path)
@@ -200,18 +224,31 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	clientSess, err := l.srv.Upgrade(w, r)
+	q := r.URL.Query()
+	// `pinned=1` means the page passed `serverCertificateHashes` at all — an
+	// empty or all-malformed list still pins (nothing matches), exactly as
+	// the browser treats it; it must not fall back to CA validation.
+	pinned := q.Get("pinned") == "1" || len(q["certhash"]) > 0
+	pins := parseCertHashes(q["certhash"])
+	dialTo, err := l.targetAddr(r.Context(), parsed)
 	if err != nil {
-		l.logger.Printf("wtproxy: client upgrade failed: %v", err)
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
-	// Dial the real target. We trust quic-go's default tls config
-	// (system root store) for production targets. Cert pinning is a
-	// follow-up.
-	tlsCfg := &tls.Config{NextProtos: []string{"h3"}}
-	if l.targetTLS != nil {
-		tlsCfg = l.targetTLS
+	// The target is dialed BEFORE the page's session is accepted: a target
+	// that cannot be reached fails the page's CONNECT, so its `ready`
+	// rejects as it would natively (it used to resolve and then close).
+	// The order also lets the target's choice of subprotocol ride back.
+	tlsCfg := &tls.Config{NextProtos: []string{"h3"}, ServerName: parsed.Hostname()}
+	if pinned {
+		// The page pinned the TARGET by hash. The browser would accept
+		// exactly that certificate — no chain, no name — so the gateway does
+		// the same; without pins the system roots verify as usual.
+		tlsCfg.InsecureSkipVerify = true
+		tlsCfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
+			return verifyPinned(raw, pins, time.Now())
+		}
 	}
 	// ★webtransport-go 는 DATAGRAM 지원이 없는 QUIC 설정으로는 Dial 을
 	// 거부한다("DATAGRAM support required"). 이 두 필드가 빠져 있어서 게이트웨이는
@@ -224,15 +261,36 @@ func (l *Listener) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			EnableDatagrams:                  true,
 			EnableStreamResetPartialDelivery: true,
 		},
+		// Dial the address that passed the private-target check — a second
+		// lookup inside the dialer could answer differently (DNS rebinding).
+		DialAddr: func(ctx context.Context, _ string, tc *tls.Config, qc *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddrEarly(ctx, dialTo, tc, qc)
+		},
 	}
 	defer dialer.Close()
 
+	reqHdr := http.Header{}
+	if p := r.Header.Get("Wt-Available-Protocols"); p != "" {
+		reqHdr.Set("Wt-Available-Protocols", p)
+	}
 	dialCtx, cancelDial := context.WithTimeout(r.Context(), 15*time.Second)
-	_, targetSess, err := dialer.Dial(dialCtx, parsed.String(), nil)
+	resp, targetSess, err := dialer.Dial(dialCtx, parsed.String(), reqHdr)
 	cancelDial()
 	if err != nil {
-		_ = clientSess.CloseWithError(1, fmt.Sprintf("target dial: %v", err))
 		l.logger.Printf("wtproxy: target dial %s failed: %v", parsed.String(), err)
+		http.Error(w, "target unreachable", http.StatusBadGateway)
+		return
+	}
+	if resp != nil {
+		if p := resp.Header.Get("Wt-Protocol"); p != "" {
+			w.Header().Set("Wt-Protocol", p)
+		}
+	}
+
+	clientSess, err := l.srv.Upgrade(w, r)
+	if err != nil {
+		_ = targetSess.CloseWithError(0, "client upgrade failed")
+		l.logger.Printf("wtproxy: client upgrade failed: %v", err)
 		return
 	}
 
@@ -374,9 +432,126 @@ func pumpDatagrams(ctx context.Context, src, dst *webtransport.Session, logger *
 	}
 }
 
-// selfSignedDevCert returns an in-memory ECDSA P-256 cert valid for
-// `localhost` + 127.0.0.1 + ::1, valid for 30 days. Suitable for
-// dev/dogfood when the operator doesn't bring their own cert.
+// CertHashes returns the base64url SHA-256 of the in-memory dev certificate —
+// the `serverCertificateHashes` pin a browser needs to reach this gateway —
+// or nil when the operator configured a real certificate, which browsers
+// validate against their roots as usual.
+func (l *Listener) CertHashes() []string {
+	if l.devCert == nil {
+		return nil
+	}
+	return []string{base64.RawURLEncoding.EncodeToString(l.devHash[:])}
+}
+
+// pageOriginAllowed admits the proxy's own pages (see Config.PageHosts) and
+// clients that send no Origin; other sites' pages cannot drive the gateway.
+func (l *Listener) pageOriginAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	for _, h := range l.cfg.PageHosts {
+		if strings.EqualFold(h, u.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxPinnedValidity is the browser's ceiling for a hash-pinned certificate.
+const maxPinnedValidity = 14 * 24 * time.Hour
+
+// parseCertHashes decodes the page's `serverCertificateHashes` (SHA-256,
+// base64url) that the page-side wrapper moved off the native connection.
+// A malformed entry is skipped, not fatal: in the browser it simply never
+// matches, and another entry may still pin the certificate.
+func parseCertHashes(vals []string) [][]byte {
+	var pins [][]byte
+	for _, v := range vals {
+		b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(v, "="))
+		if err != nil || len(b) != sha256.Size {
+			continue
+		}
+		pins = append(pins, b)
+	}
+	return pins
+}
+
+// verifyPinned is the browser's `serverCertificateHashes` rule: the leaf's
+// SHA-256 matches a pin, and its validity window is at most two weeks and
+// contains now. The pin replaces chain and name verification entirely.
+func verifyPinned(raw [][]byte, pins [][]byte, now time.Time) error {
+	if len(raw) == 0 {
+		return errors.New("wtproxy: target sent no certificate")
+	}
+	sum := sha256.Sum256(raw[0])
+	matched := false
+	for _, p := range pins {
+		if bytes.Equal(p, sum[:]) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return errors.New("wtproxy: target certificate matches no serverCertificateHashes")
+	}
+	cert, err := x509.ParseCertificate(raw[0])
+	if err != nil {
+		return fmt.Errorf("wtproxy: target certificate: %w", err)
+	}
+	if cert.NotAfter.Sub(cert.NotBefore) > maxPinnedValidity {
+		return errors.New("wtproxy: pinned certificate is valid for more than two weeks")
+	}
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return errors.New("wtproxy: pinned certificate is not currently valid")
+	}
+	return nil
+}
+
+// targetAddr resolves the target once and vets every address it resolves
+// to; the dial then goes to that vetted address.
+func (l *Listener) targetAddr(ctx context.Context, u *url.URL) (string, error) {
+	host, port := u.Hostname(), u.Port()
+	if port == "" {
+		port = "443"
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return "", fmt.Errorf("target %q does not resolve", host)
+	}
+	if !l.cfg.AllowPrivateTargets {
+		for _, ip := range ips {
+			if isNonPublic(ip.IP) {
+				return "", fmt.Errorf("target %q resolves to a non-public address", host)
+			}
+		}
+	}
+	pick := ips[0].IP
+	for _, ip := range ips {
+		if ip.IP.To4() != nil {
+			pick = ip.IP
+			break
+		}
+	}
+	return net.JoinHostPort(pick.String(), port), nil
+}
+
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+func isNonPublic(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || cgnat.Contains(ip)
+}
+
+// selfSignedDevCert returns an in-memory ECDSA P-256 leaf for local dev.
+// Browsers accept a self-signed WebTransport server only through a
+// `serverCertificateHashes` pin, and pin only certificates valid for at
+// most two weeks — so 13 days, and a plain leaf (it signs nothing).
 func selfSignedDevCert() (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -390,12 +565,10 @@ func selfSignedDevCert() (tls.Certificate, error) {
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "zeroproxy-dev"},
 		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(30 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		NotAfter:     time.Now().Add(13 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{"localhost", "proxy.localhost"},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
 	if err != nil {

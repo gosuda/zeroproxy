@@ -387,8 +387,22 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 // Refreshed on each activate (and lazily on demand if a navigation
 // arrives before activate completes). The endpoint is plain JSON
 // served from the Go control plane (`/zp/api/config`).
-let runtimeConfig = { wtGateway: '', rtcGateway: '', rtcICEServers: [] };
+let runtimeConfig = { wtGateway: '', wtGatewayCertHashes: [], rtcGateway: '', rtcICEServers: [] };
 let runtimeConfigPromise = null;
+// ★activate 때 한 번 읽는 것으로는 부족했다. 브라우저는 유휴 SW 를 내렸다
+// 다시 띄우는데 그때 전역은 기본값으로 돌아가고 activate 는 다시 오지 않는다 —
+// 그 SW 가 사는 동안 wtGateway/rtcGateway 가 빈 값이라 페이지는 조용히 스텁을
+// 받았다. 개발용 게이트웨이 인증서 핀은 서버를 재시작할 때마다 바뀐다. 그래서
+// 문서 내비게이션마다(짧은 TTL, 시간 상한) 다시 읽는다.
+const RUNTIME_CONFIG_TTL_MS = 10000;
+let runtimeConfigAt = 0;
+async function ensureRuntimeConfig() {
+  if (Date.now() - runtimeConfigAt < RUNTIME_CONFIG_TTL_MS) return;
+  await Promise.race([
+    refreshRuntimeConfig().catch(() => null),
+    new Promise(r => setTimeout(r, 1500)),
+  ]);
+}
 async function refreshRuntimeConfig() {
   if (runtimeConfigPromise) return runtimeConfigPromise;
   runtimeConfigPromise = (async () => {
@@ -399,6 +413,11 @@ async function refreshRuntimeConfig() {
         if (cfg && typeof cfg === 'object') {
           runtimeConfig = {
             wtGateway: typeof cfg.wtGateway === 'string' ? cfg.wtGateway : '',
+            // Pin for a self-signed dev gateway certificate. It is
+            // regenerated on every server start, which is one reason the
+            // config is re-read per navigation (ensureRuntimeConfig).
+            wtGatewayCertHashes: Array.isArray(cfg.wtGatewayCertHashes)
+              ? cfg.wtGatewayCertHashes.filter(h => typeof h === 'string' && h) : [],
             rtcGateway: typeof cfg.rtcGateway === 'string' ? cfg.rtcGateway : '',
             // Each /zp/api/config response carries a fresh TURN-REST cred
             // tuple (when -rtc-turn-addr is set on the server). The
@@ -406,6 +425,7 @@ async function refreshRuntimeConfig() {
             // and consumed by runtime-prelude's ZPRTCPeerConnection.
             rtcICEServers: Array.isArray(cfg.rtcICEServers) ? cfg.rtcICEServers : [],
           };
+          runtimeConfigAt = Date.now();
         }
       }
     } catch {}
@@ -2118,6 +2138,7 @@ async function rewriteScriptResponse(resp, opt) {
   return new Response(code, { status: resp.status, statusText: resp.statusText, headers: h });
 }
 async function transformDocumentResponse(resp, opt) {
+  await ensureRuntimeConfig();
   // 타깃 문서가 선언한 정책을 기억해 둔다 — 페이지가 부른 `fetch()` 는
   // /zp/api/fetch 로 오므로 브라우저가 계산한 요청별 정책이 없다. 여러 값이면
   // 마지막 유효 토큰이 이긴다(명세).
@@ -2358,6 +2379,7 @@ function buildRuntimePrelude(tab, entry) {
     // page-realm virtual `WebTransport` falls back to the rejected stub
     // path (WT_UNSUPPORTED) when this is empty.
     wtGateway: runtimeConfig.wtGateway || '',
+    wtGatewayCertHashes: Array.isArray(runtimeConfig.wtGatewayCertHashes) ? runtimeConfig.wtGatewayCertHashes : [],
     // D5 — empty string when the operator hasn't enabled `-rtc-enable +
     // -rtc-public-url`; page-realm virtual `RTCPeerConnection` falls
     // back to the rejected stub path (RTC_GATEWAY_UNAVAILABLE).
@@ -2406,7 +2428,7 @@ function buildRuntimePrelude(tab, entry) {
     // 문서에서 매번 나오는 잡음이자(감사 지표의 csp 카운트를 상시 1로 올린다)
     // 남들에겐 없는 콘솔 메시지 하나다. 리포트는 헤더 쪽 정책이 처리하므로
     // meta 사본에서만 뺀다 — 실효 정책은 그대로다.
-    + ZP.fixedCSP(tab.servers || [], { challengeCompat: !!tab.challengeCompat })
+    + proxiedCSP(tab.servers, tab.challengeCompat)
         .split('; ').filter(d => !/^report-uri\b/i.test(d)).join('; ')
         .replace(/"/g, '&quot;')
     + '" data-zp-internal>';
@@ -3332,6 +3354,16 @@ const ZP_TARGET_POLICY_HEADERS = __ZP_TARGET_POLICY_HEADERS__;
 // 브라우저가 타깃 엔드포인트로 **직접** 보고서를 보내게 만드는 헤더.
 // CSP 리포트는 Service Worker 가 가로챌 수 없어 릴레이를 우회한다 = IP 유출.
 const ZP_REPORTING_HEADERS = __ZP_REPORTING_HEADERS__;
+// The CSP every proxied realm runs under. The WebTransport gateway is its own
+// origin (a separate UDP port) and WebTransport is governed by connect-src —
+// so the document header, its meta copy and the worker bootstrap must all
+// admit it, or the wrapper's session is refused before it leaves the realm.
+function proxiedCSP(servers, challengeCompat) {
+  return ZP.fixedCSP(servers || [], {
+    challengeCompat: !!challengeCompat,
+    extraConnect: runtimeConfig.wtGateway ? [runtimeConfig.wtGateway] : [],
+  });
+}
 function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   // 문서 응답은 `/zp/p/<token>` 으로 오는데 페이지가 보는 내비게이션
   // 타이밍 이름은 **가상 URL** 이다. 요청 URL 로는 둘을 이을 수 없으므로
@@ -3343,7 +3375,7 @@ function applyZPSecurityHeaders(h, req, servers, tab, targetUrl) {
   const responseSignalled = h.get('X-ZP-Challenge-Compat') === '1';
   h.delete('X-ZP-Challenge-Compat');
   const armedHere = !!(tab && tab.challengeCompat) && responseSignalled;
-  h.set('Content-Security-Policy', ZP.fixedCSP(servers || [], { challengeCompat: armedHere }));
+  h.set('Content-Security-Policy', proxiedCSP(servers, armedHere));
   // 2026-08-14 — 브라우저가 타깃에게 **직접** 보고하게 만드는 헤더를 전부 지운다.
   //
   // 실측(nid.naver.com): 응답에 `Content-Security-Policy-Report-Only` 가 실려
@@ -3594,7 +3626,7 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_REF=__zp_worker_params.get('ref')||'';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_RTC_GATEWAY=__zp_worker_params.get('rtcg')||'';try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
+  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_REF=__zp_worker_params.get('ref')||'';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=__zp_worker_params.getAll('wtgh');self.__ZP_WORKER_RTC_GATEWAY=__zp_worker_params.get('rtcg')||'';try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
   // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
   // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
   const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;
@@ -3624,5 +3656,6 @@ function workerBootstrap(url) {
     : (mod
       ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
       : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};importScripts(" + scriptURL + ");");
-  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': ZP.fixedCSP(), 'X-Content-Type-Options': 'nosniff' } });
+  // The worker's policy comes from this, its main script — not the page's.
+  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': proxiedCSP([], false), 'X-Content-Type-Options': 'nosniff' } });
 }

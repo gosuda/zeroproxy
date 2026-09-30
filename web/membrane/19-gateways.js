@@ -31,13 +31,11 @@
       if (parsed.protocol !== 'https:' && parsed.protocol !== 'wt:') {
         throw normalizedError('SyntaxError');
       }
-      const gw = new URL(gateway);
-      const params = gw.searchParams;
-      params.set('target', target);
-      if (boot && boot.tabId) params.set('tab', String(boot.tabId));
-      // Build the gateway URL with our target injected. The native WT
-      // ctor will throw SyntaxError if the gw URL isn't https.
-      const native = new NativeWT(gw.toString(), opts);
+      // Target-side options (certificate pins) go to the gateway, the
+      // gateway's own pin comes from the server config — see
+      // ZP.webTransportGatewayRequest.
+      const req = ZP.webTransportGatewayRequest(gateway, target, boot && boot.tabId, opts, boot && boot.wtGatewayCertHashes);
+      const native = new NativeWT(req.url, req.options);
       // Delegate every property via a Proxy so target code that does
       // `wt.ready.then(...)` or `wt.createBidirectionalStream()` etc.
       // sees the native object's IDL surface byte-for-byte. We override

@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-09-30 | transport / 수정 | WT 브라우저 구간 다섯 겹(CSP·Origin 기본 검사·30일 CA 인증서·해시 전달·타깃 핀) — Go 테스트엔 Origin·CSP 가 없다. 브라우저 e2e 로 고정. | transport-regression.md#wt-브라우저-구간 |
 | 2026-09-29 | transport / 수정 | WT 게이트웨이는 타깃에 한 번도 닿지 못했다(DATAGRAM 미설정) + bidi 응답 유실(half-close). 데이터 경로 테스트가 없었다. | transport-regression.md#wt-게이트웨이-데이터경로 |
 | 2026-09-29 | worker / 수정 | 워커에서 `self.addEventListener` 등 네이티브 메서드가 Illegal invocation(스코프 프록시 수신자). 래퍼 `Function.prototype` 도 빈 객체였다. | rewriter.md#워커-self-수신자 |
 | 2026-09-29 | worker / 수정 | `new Worker(u); URL.revokeObjectURL(u)` 에서 워커가 나중에 소스를 읽다 fail-closed — 생성 시점에 우리 소유 복사본 URL 로. | rewriter.md#blob-워커-해제 |

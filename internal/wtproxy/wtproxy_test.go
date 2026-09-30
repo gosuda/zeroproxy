@@ -2,8 +2,15 @@ package wtproxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -186,11 +193,11 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 	defer target.Close()
 
 	gwAddr := freeUDPAddr(t)
-	gw, err := New(Config{Addr: gwAddr, Path: "/__zp/wt", AllowInsecureDevCert: true})
+	// The target is on loopback — allowed only as with `-socks internal`.
+	gw, err := New(Config{Addr: gwAddr, Path: "/__zp/wt", AllowInsecureDevCert: true, AllowPrivateTargets: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	gw.targetTLS = &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
 	gwCtx, gwCancel := context.WithCancel(ctx)
 	defer gwCancel()
 	go func() { _ = gw.Run(gwCtx) }()
@@ -205,7 +212,10 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 		},
 	}
 	defer dialer.Close()
-	gwURL := "https://" + gwAddr + "/__zp/wt?target=" + url.QueryEscape("https://"+targetAddr+"/echo")
+	// The self-signed target is reachable only through the page's pin, the
+	// way a browser reaches it with `serverCertificateHashes`.
+	gwURL := "https://" + gwAddr + "/__zp/wt?target=" + url.QueryEscape("https://"+targetAddr+"/echo") +
+		"&certhash=" + certHash(targetCert)
 	_, sess, err := dialer.Dial(ctx, gwURL, nil)
 	if err != nil {
 		t.Fatalf("dial gateway: %v", err)
@@ -233,5 +243,166 @@ func TestGatewayBridgesToRealTarget(t *testing.T) {
 	d, err := sess.ReceiveDatagram(dctx)
 	if err != nil || string(d) != "dg" {
 		t.Fatalf("datagram echo through gateway: got %q err=%v", d, err)
+	}
+}
+
+func certHash(c tls.Certificate) string {
+	sum := sha256.Sum256(c.Certificate[0])
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// The browser's `serverCertificateHashes` rule, applied by the gateway to the
+// target on the page's behalf.
+func TestVerifyPinnedFollowsBrowserRules(t *testing.T) {
+	c, err := selfSignedDevCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(c.Certificate[0])
+	now := time.Now()
+	if err := verifyPinned(c.Certificate, [][]byte{sum[:]}, now); err != nil {
+		t.Fatalf("matching pin rejected: %v", err)
+	}
+	other := sha256.Sum256([]byte("other"))
+	if err := verifyPinned(c.Certificate, [][]byte{other[:]}, now); err == nil {
+		t.Fatal("non-matching pin accepted")
+	}
+	if err := verifyPinned(c.Certificate, [][]byte{sum[:]}, now.Add(20*24*time.Hour)); err == nil {
+		t.Fatal("expired pinned certificate accepted")
+	}
+	long := selfSignedCertFor(t, 30*24*time.Hour)
+	longSum := sha256.Sum256(long.Certificate[0])
+	if err := verifyPinned(long.Certificate, [][]byte{longSum[:]}, now); err == nil {
+		t.Fatal("pinned certificate valid for 30 days accepted (browser limit is 14)")
+	}
+}
+
+// The dev certificate must be one a browser can pin: at most two weeks, and
+// its hash published for the page.
+func TestDevCertIsPinnable(t *testing.T) {
+	l, err := New(Config{Addr: "127.0.0.1:0", AllowInsecureDevCert: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := l.CertHashes()
+	if len(hashes) != 1 || hashes[0] != certHash(*l.devCert) {
+		t.Fatalf("CertHashes = %v", hashes)
+	}
+	leaf, err := x509.ParseCertificate(l.devCert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := leaf.NotAfter.Sub(leaf.NotBefore); d > maxPinnedValidity {
+		t.Fatalf("dev cert valid for %v", d)
+	}
+	if leaf.IsCA {
+		t.Fatal("dev cert is a CA")
+	}
+	withFiles, err := New(Config{Addr: "127.0.0.1:0", CertFile: "c.pem", KeyFile: "k.pem"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withFiles.CertHashes() != nil {
+		t.Fatal("an operator certificate must not publish a pin")
+	}
+}
+
+// Direct egress must not reach more than the HTTP path does.
+func TestTargetAddrRejectsNonPublicUnlessAllowed(t *testing.T) {
+	strict := &Listener{cfg: Config{}}
+	loose := &Listener{cfg: Config{AllowPrivateTargets: true}}
+	for _, h := range []string{"127.0.0.1", "10.1.2.3", "192.168.0.1", "169.254.169.254", "100.64.0.1", "[::1]", "0.0.0.0"} {
+		u, _ := url.Parse("https://" + h + ":4433/x")
+		if _, err := strict.targetAddr(context.Background(), u); err == nil {
+			t.Errorf("%s accepted without AllowPrivateTargets", h)
+		}
+		if _, err := loose.targetAddr(context.Background(), u); err != nil {
+			t.Errorf("%s rejected with AllowPrivateTargets: %v", h, err)
+		}
+	}
+	u, _ := url.Parse("https://1.1.1.1/x")
+	if addr, err := strict.targetAddr(context.Background(), u); err != nil || addr != "1.1.1.1:443" {
+		t.Errorf("public target: addr=%q err=%v", addr, err)
+	}
+}
+
+// A target that cannot be reached must fail the CONNECT (the page's `ready`
+// rejects), not hand out a session that closes a moment later.
+func TestGatewayFailsConnectOnUnreachableTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping HTTP/3 listener test in -short mode")
+	}
+	gwAddr := freeUDPAddr(t)
+	gw, err := New(Config{Addr: gwAddr, AllowInsecureDevCert: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go func() { _ = gw.Run(ctx) }()
+	time.Sleep(200 * time.Millisecond)
+	dialer := &webtransport.Dialer{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}},
+		QUICConfig:      &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true},
+	}
+	defer dialer.Close()
+	// Loopback without AllowPrivateTargets: refused before any dial.
+	resp, _, err := dialer.Dial(ctx, "https://"+gwAddr+"/__zp/wt?target="+url.QueryEscape("https://127.0.0.1:9/x"), nil)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("private target: want 403, got resp=%v err=%v", resp, err)
+	}
+
+	// Allowed, but nothing listens there: the dial fails and so must the
+	// CONNECT — previously the page got a session that then closed.
+	gw2Addr := freeUDPAddr(t)
+	gw2, err := New(Config{Addr: gw2Addr, AllowInsecureDevCert: true, AllowPrivateTargets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = gw2.Run(ctx) }()
+	time.Sleep(200 * time.Millisecond)
+	resp, sess, err := dialer.Dial(ctx, "https://"+gw2Addr+"/__zp/wt?target="+url.QueryEscape("https://"+freeUDPAddr(t)+"/x"), nil)
+	if err == nil || sess != nil || resp == nil || resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unreachable target: want 502 and no session, got resp=%v sess=%v err=%v", resp, sess, err)
+	}
+}
+
+func selfSignedCertFor(t *testing.T, validity time.Duration) tls.Certificate {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(validity),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}
+}
+
+// Browsers send the proxy page's Origin, whose port differs from the
+// gateway's — webtransport-go's same-host default refused every one of them.
+func TestGatewayAdmitsOnlyProxyPageOrigins(t *testing.T) {
+	l := &Listener{cfg: Config{PageHosts: []string{"proxy.localhost"}}}
+	for origin, want := range map[string]bool{
+		"":                             true, // non-browser client
+		"http://proxy.localhost:18080": true,
+		"https://PROXY.localhost":      true,
+		"https://evil.example":         false,
+		"http://proxy.localhost.evil":  false,
+		"null":                         false,
+	} {
+		r := httptest.NewRequest(http.MethodConnect, "https://proxy.localhost:18443/__zp/wt", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if got := l.pageOriginAllowed(r); got != want {
+			t.Errorf("Origin %q: allowed=%v, want %v", origin, got, want)
+		}
 	}
 }

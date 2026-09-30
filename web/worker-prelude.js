@@ -1073,10 +1073,10 @@
           let parsed;
           try { parsed = new NativeURLCtor(target); } catch { throw new DOMException('Invalid URL', 'SyntaxError'); }
           if (parsed.protocol !== 'https:' && parsed.protocol !== 'wt:') throw new DOMException('Invalid URL scheme', 'SyntaxError');
-          const gw = new NativeURLCtor(wtGateway);
-          gw.searchParams.set('target', target);
-          if (tabId) gw.searchParams.set('tab', tabId);
-          this._native = new NativeWT(gw.toString(), opts);
+          // Same request as the page realm (ZP.webTransportGatewayRequest):
+          // target pins go to the gateway, the gateway's pin from the boot.
+          const req = ZP.webTransportGatewayRequest(wtGateway, target, tabId, opts, self.__ZP_WORKER_WT_GATEWAY_HASHES || []);
+          this._native = new NativeWT(req.url, req.options);
         }
         get ready() { try { return this._native.ready; } catch { return undefined; } }
         get closed() { try { return this._native.closed; } catch { return undefined; } }

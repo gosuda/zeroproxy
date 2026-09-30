@@ -224,6 +224,7 @@
   // 정책(게이트웨이 없으면 rejected stub)을 적용하게 한다.
   function workerGatewayParams(params) {
     if (boot && typeof boot.wtGateway === 'string' && boot.wtGateway) params.set('wtg', boot.wtGateway);
+    if (boot && Array.isArray(boot.wtGatewayCertHashes)) for (const h of boot.wtGatewayCertHashes) params.append('wtgh', String(h));
     if (boot && typeof boot.rtcGateway === 'string' && boot.rtcGateway) params.set('rtcg', boot.rtcGateway);
     if (boot && Array.isArray(boot.rtcICEServers) && boot.rtcICEServers.length) params.set('ice', JSON.stringify(boot.rtcICEServers));
   }

@@ -172,6 +172,11 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      # test/e2e/wt-gateway.test.js builds its WebTransport echo target
+      # (test/wtecho) — Node cannot serve WebTransport.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - uses: actions/download-artifact@v4
         with:
           name: distribution
