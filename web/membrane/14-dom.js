@@ -138,7 +138,6 @@
       }
       if (key === 'integrity' && isIntegrityBearing(this)) return setBackedIntegrity(this, v);
       if (localKey === 'sandbox' && isFrameElement(this)) return setFrameSandboxAttribute(this, v);
-      if (localKey === 'target' && isNavigationTargetElement(this)) return setSafeNavigationTarget(this, k, v);
       if (ln === 'link' && localKey === 'rel') {
         const value = String(v);
         if (isBlockedLinkRelValue(value)) return suppressBlockedLinkRel(this, value);

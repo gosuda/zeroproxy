@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-01 | membrane / 수정 | target 을 전부 _self 로 고쳐 쓰고 있었다 — _blank 제자리·_top 은 프레임만·폼은 타깃 무시·팝업은 런처부터. 재작성 제거, 링크·폼·open 을 navigable 규칙으로. | rewriter.md#내비게이션-타깃 |
 | 2026-10-01 | membrane / 보안 | 라우팅 프레임의 세 창(대기 중 blank·about:blank 로 옮긴 프레임·앵커 없는 문서)에서 contentWindow.eval 이 프록시 오리진 날 코드였다 — 지금 문서 기준 containment. | rewriter.md#라우팅-프레임-탈출 |
 | 2026-10-01 | membrane / 보안 | 부모가 contentWindow 를 읽을 때마다 자식의 멤브레인을 자기 것으로 덮었다(define 은 writable 슬롯을 덮는다) — src 로 보낸 프레임만 무사했다. | rewriter.md#자식-멤브레인-덮어쓰기 |
 | 2026-10-01 | membrane / 수정 | `<a target=프레임>` 은 프레임에 ?via= 런처를 실었고 런처는 CSP 에 막혔다 — 표면 프로브는 런처 URL 을 읽고 통과. 프레임 라우트로. | rewriter.md#명명-타깃-프레임 |

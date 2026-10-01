@@ -25,7 +25,7 @@ runs turned out to certify divergences as "design" — see
 |---|---|---|
 | `direct-vs-proxy compatibility differential` (B, C, I, A5, J) | 63 | 0 |
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
-| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 106 | 15, each listed with a reason |
+| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 111 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
 
 Suite totals (2026-10-01): e2e 192/192 — including the WebTransport gateway
@@ -157,6 +157,21 @@ claimed:
     CSP meta). Containment is now decided by the current document; htmltx always
     injects. — surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval`;
     htmltx `prelude_is_injected_into_tagless_documents`.
+27. Navigation targets end to end. `target` was rewritten to `_self` on every
+    link and form (a May rule that predates the `?via=` launcher), so
+    `target=_blank` opened in place, `_top`/`_parent` inside a frame moved only
+    the frame, and `getAttribute('target')` read `_self`. Forms ignored
+    `target`/`formtarget` entirely — a POST into an iframe (3-D Secure, embedded
+    checkout) replaced the whole page. Popups ran the share launcher before
+    their document (raw to the opener's handle while it redirected), and a
+    `noopener` popup never navigated at all (it opened about:blank and got
+    `null` back). Now nothing rewrites `target`; links and forms resolve it per
+    "choosing a navigable" — frames take the frame route, ancestors navigate
+    through their own membrane, new windows open natively (`_blank` with
+    noopener); a POST carries its body into whichever window loads it; popups
+    are routed up front (OPEN_SHARE from the opener). — surface
+    `targetFramenameAttr`, `targetAttrReadback`, `parentTargetLink`,
+    `formTargetGet`, `formTargetPost`, `popupRouted` (all native-identical).
 
 ### Residuals (documented, not fixed)
 
@@ -178,10 +193,8 @@ claimed:
 | `<link rel=preload as=script>` for a module script is fetched again by the module | The preload goes to the classic route; the module needs `kind=module` in its URL. | [trap module-kind-url](.ai/trap-notebook/rewriter.md#module-kind-url) |
 | Ad and ID-sync hosts (Google ads, Amazon, FreeWheel, Optimizely events, …) refuse proxied requests | Their decision, not request shape: `sendBeacon`/`fetch(keepalive)`/form POST bodies and content types arrive byte-identical to native (measured). IP reputation and fingerprint — Phase 3. | — |
 | The prelude logs "Blocked script execution in 'about:blank'" while touching sandboxed ad frames | Console noise only; the frame is sandboxed without `allow-scripts` either way. | — |
-| A routed HTML document is uncontained between its commit and its prelude's first script | Containing it there leaves a pre-instrumented realm (the parent's `fetch`/XHR bound in, non-configurable accessors). Bounded: once loaded, a document that never booted is contained. | [trap 라우팅-프레임-탈출](.ai/trap-notebook/rewriter.md#라우팅-프레임-탈출) |
-| A `window.open` popup runs the share launcher before its document, and the opener's handle to it is not contained | The launcher registers the popup's tab; removing it needs a launcher-free popup route (OPEN_SHARE from the opener). | — |
-| `<form target=frame>` submits navigate the page itself | The submit handler ignores `target`; a POST into a frame needs a frame route that carries the body (3-D Secure-style flows). | — |
-| `getAttribute('target')` reads `_self` after `setAttribute('target', name)` | The attribute is neutralized with the name stashed; read-back is not unwrapped (`a.target = name` is untouched). Navigation honors the stash. | surface `targetFramenameAttr` |
+| **Escape window:** a routed HTML document (frame or popup) is unmembraned between its commit and its prelude's first script — tens of ms, at least one task boundary. A hostile page holding the window (`iframe.contentWindow`, an `open()` handle) and polling for the new document can call that realm's raw `eval`, or copy its natives out with `Object.values(w)`, in the gap. | No in-document fix exists: the gap opens before the first byte parses. Containing the window there leaves a pre-instrumented realm (the parent's `fetch`/XHR bound in, non-configurable prototype hooks over the child's), which breaks the child. Closing it means the membrane wraps every foreign window handle (`contentWindow`, `open()`, `opener`, `event.source`, `frames[i]`) — a redesign. Bounded: once loaded, a document that never booted is contained; the popup launcher's longer raw stretch is gone (item 27). | [trap 라우팅-프레임-탈출](.ai/trap-notebook/rewriter.md#라우팅-프레임-탈출) |
+| A frame that navigated itself (or was sent by a descendant) to a document with no prelude (text/plain, an image) reads back the URL it was first sent to | The parent maps only routes it opened; another realm's `/zp/p/` token is not decryptable here. HTML documents report their own URL. | — |
 
 ---
 
@@ -363,6 +376,7 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | `iframe.csp` | **residual** — passes through as inert data | surface `iframeCspAttr` |
 | `credentialless` | **parity** | surface `iframeCredentialless` |
 | `<a target=framename>`, `setAttribute('target')`, `<base target>`, `open(url, name)` | **fixed** 2026-10-01 — the 2026-09 "fixed" rested on a probe that read the launcher URL (item 24) | surface `targetFramename`, `targetFramenameAttr`, `baseTargetFrame`, `namedOpen` |
+| `target=_parent`/`_top` from a frame, `<form target>`/`formtarget` (GET and POST), popups | **fixed** 2026-10-01 (item 27) | surface `parentTargetLink`, `formTargetGet`, `formTargetPost`, `popupRouted`, `targetAttrReadback` |
 | a child's own membrane survives the parent's `contentWindow` reads | **fixed** 2026-10-01 (item 25) | surface `childLocAssign` |
 | blank / routed / prelude-less child windows are never raw | **fixed** 2026-10-01 (item 26) | surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval` |
 | SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |

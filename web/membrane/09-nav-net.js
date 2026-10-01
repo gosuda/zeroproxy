@@ -44,45 +44,51 @@
     }
   }
 
-  // HTML "get an element's target": its own `target`, else the first
-  // `<base target>` of its document (htmltx keeps `<base>`; only its href is
-  // neutralized, by CSP base-uri).
-  function linkTarget(el) {
-    let own = Native.getAttribute.call(el, 'target');
-    // `setAttribute('target', name)` is neutralized to `_self` with the name
-    // stashed (setSafeNavigationTarget). A frame name there still counts;
-    // stashed keywords keep their old self-navigation.
-    if (own === '_self') {
-      const stashed = Native.getAttribute.call(el, 'data-zp-blocked-target');
-      if (stashed && stashed[0] !== '_') own = stashed;
+  // HTML "get an element's target": a submitter's `formtarget`, else the
+  // element's own `target`, else the first `<base target>` of its document
+  // (htmltx keeps `<base>`; only its href is neutralized, by CSP base-uri).
+  // The attribute is read as written: nothing rewrites `target` any more.
+  function navigationTarget(el, submitter) {
+    let t = null;
+    if (submitter && Native.hasAttribute.call(submitter, 'formtarget')) t = Native.getAttribute.call(submitter, 'formtarget');
+    if (t === null) t = Native.getAttribute.call(el, 'target');
+    if (t === null) {
+      let base = null;
+      try { base = Native.querySelector.call(el.ownerDocument || document, 'base[target]'); } catch {}
+      t = base ? Native.getAttribute.call(base, 'target') : null;
     }
-    if (own !== null) return own;
-    let base = null;
-    try { base = Native.querySelector.call(el.ownerDocument || document, 'base[target]'); } catch {}
-    return base ? Native.getAttribute.call(base, 'target') || '' : '';
+    t = t || '';
+    // Dangling-markup mitigation, as the spec has it.
+    return /[\t\n\r]/.test(t) && t.includes('<') ? '_blank' : t;
   }
-  // "Choosing a navigable" by name, in Chromium's order
+  // HTML "choosing a navigable". Names are searched in Chromium's order
   // (FrameTree::FindFrameForNavigation): this frame, its subtree, then the
   // whole page from the top. Proxied frames are all physically same-origin,
-  // so the real tree is walkable; a window we cannot read is skipped. The
-  // name is the frame element's `name` attribute — a child's `window.name`
+  // so the real tree is walkable; a window we cannot read is skipped. A
+  // frame's name is its element's `name` attribute — a child's `window.name`
   // writes are virtual and never move the real browsing-context name.
-  // Returns `root` for this frame itself, else the frame element.
-  function navigableForTarget(target) {
-    const t = target.toLowerCase();
-    if (t === '_top' || t === '_parent') return root.parent === root ? root : null;
-    if (t[0] === '_') return null;
+  //   { self } · { frame: <iframe> } · { win: <ancestor> } · { open: name } (a new window)
+  function chooseNavigable(target) {
+    const t = String(target || '');
+    const lower = t.toLowerCase();
+    if (!t || lower === '_self') return { self: true };
+    if (lower === '_blank') return { open: '_blank' };
+    if (lower === '_top' || lower === '_parent') {
+      let w = null;
+      try { w = lower === '_top' ? root.top : root.parent; } catch {}
+      return !w || w === root ? { self: true } : { win: w };
+    }
     let own = null;
     try { own = root.name; } catch {}
-    if (own === target) return root;
-    const hit = frameNamed(document, target, 0);
-    if (hit) return hit;
-    let top = null;
-    try { top = root.top; } catch {}
-    if (!top || top === root) return null;
-    let topDoc = null;
-    try { topDoc = top.document; } catch {}
-    return frameNamed(topDoc, target, 0);
+    if (own === t) return { self: true };
+    let hit = frameNamed(document, t, 0);
+    if (!hit) {
+      let topDoc = null;
+      try { if (root.top !== root) topDoc = root.top.document; } catch {}
+      hit = frameNamed(topDoc, t, 0);
+    }
+    if (hit) return hit === root ? { self: true } : { frame: hit };
+    return { open: t };
   }
   function frameNamed(doc, name, depth) {
     if (!doc || depth > 16) return null;
@@ -113,6 +119,34 @@
       const win = nativeFrameWindow(frame);
       if (win) win.location.assign(url);
     }).catch(() => {});
+  }
+  // An ancestor navigates through ITS OWN membrane, exactly as page code's
+  // `top.location = url` does (crossWindowLocation) — its history and route
+  // land in its own state. The launcher at top level is the fallback.
+  function navigateWindowTo(win, href) {
+    const abs = targetURL(href);
+    let get = null;
+    try { get = win.__zp_get; } catch {}
+    if (typeof get === 'function') {
+      try { get(win, 'location').href = abs; return; } catch {}
+    }
+    try { win.location.assign(proxyViaURL(abs)); } catch {}
+  }
+  // A new window: `_blank` (with its implicit noopener) or a name no frame
+  // carries. The opening page gets no handle, so the URL may be the launcher.
+  function openNavigation(url, name) {
+    if (!Native.open) return;
+    try { Native.open(url, name, name === '_blank' ? 'noopener' : ''); } catch {}
+  }
+  // A popup's document, routed up front. OPEN_SHARE is what the launcher sends
+  // after decrypting a share link; sent from here, the popup loads its document
+  // directly — it used to run the launcher first, a page with no membrane that
+  // the opener's handle could reach while it redirected.
+  async function popupNavURL(raw, base = baseURL) {
+    const target = targetURL(raw, base);
+    const share = await ZP.encryptShareURL(target);
+    const reply = await ctx.bridge.send({ type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: target, servers: activeServers });
+    return proxyOrigin + reply.path + shareFragmentForKey(share.key);
   }
 
   function installNavigationTraps() {
@@ -179,11 +213,13 @@
         updateVirtualHash(nav.hash);
         return;
       }
-      if (nav.frame && nav.href) {
-        // Another frame of this page navigates and this document stays, so its
-        // own click handlers keep running, as they do natively.
+      if ((nav.frame || nav.win) && nav.href) {
+        // Another browsing context navigates and this document stays (an
+        // ancestor's: until that commits), so its own click handlers keep
+        // running, as they do natively.
         firePing(nav.element, nav.href);
-        navigateFrameTo(nav.frame, nav.href);
+        if (nav.frame) navigateFrameTo(nav.frame, nav.href);
+        else navigateWindowTo(nav.win, nav.href);
         return;
       }
       ev.stopImmediatePropagation();
@@ -250,6 +286,11 @@
       if (method === 'DIALOG') return;
       const target = new URL(targetURL(raw));
       urlMeta.set(form, target.href);
+      // Where the result loads: `formtarget`/`target`/`<base target>`. This
+      // used to be ignored — every submission replaced THIS document, so a
+      // form posting into an iframe (3-D Secure, embedded checkouts) took the
+      // whole page with it.
+      const dest = chooseNavigable(navigationTarget(form, submitter));
       if (method === 'GET') {
         try {
           const data = submitter ? new Native.FormData(form, submitter) : new Native.FormData(form);
@@ -258,13 +299,26 @@
           const encoded = qs.toString();
           if (encoded) target.search = target.search ? target.search + '&' + encoded : encoded;
         } catch {}
-        navigateToTarget(target.href);
+        if (dest.frame) navigateFrameTo(dest.frame, target.href);
+        else if (dest.win) navigateWindowTo(dest.win, target.href);
+        else if (dest.open) openNavigation(proxyViaURL(target.href), dest.open);
+        else navigateToTarget(target.href);
         return;
       }
       const serialized = await serializeFormSubmission(form, submitter, method, target.href);
       const share = await ZP.encryptShareURL(target.href);
       const entryId = 'e' + ZP.randomId();
       const reply = await ctx.bridge.send({ type: ZP.MSG.SUBMIT_PREPARE, tabId: boot.tabId, entryId, routeKey: share.encrypted, targetUrl: target.href, method, headers: serialized.headers, body: serialized.body, enctype: serialized.enctype, referrer: virtualURL.href });
+      if (!dest.self) {
+        // The body rides the same pending submission; only the window that
+        // loads `?zp_submit=` differs, and this document stays.
+        const sent = proxyAbsoluteURL(ZP.makeSharePath(share.encrypted) + '?zp_submit=' + encodeURIComponent(reply.submitId) + shareFragmentForKey(share.key));
+        if (dest.open) { openNavigation(sent, dest.open); return; }
+        rememberFrameRoute(share.encrypted, target.href);
+        const w = dest.frame ? nativeFrameWindow(dest.frame) : dest.win;
+        try { if (w) w.location.assign(sent); } catch {}
+        return;
+      }
       activeEntryId = entryId;
       activeProxyPath = ZP.makeSharePath(share.encrypted);
       activeRouteKey = share.encrypted;
@@ -305,26 +359,20 @@
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
         const isAnchor = el.matches && el.matches('a[href],area[href]');
-        let frame = null;
+        let frame = null, win = null;
         if (isAnchor) {
           if (el.hasAttribute('download')) return null;
-          const target = linkTarget(el);
-          if (target && target.toLowerCase() !== '_self') {
-            // ★The raw href is the `?via=` launcher. Left to the browser, a
-            // named frame loaded the LAUNCHER — and the parent's sweep then
-            // contained it, so its URL facade decoded `via=` and it redirected
-            // to `proxy.localhost:<target port>`: CSP-blocked, chrome-error.
-            // The frame never reached the target (2026-10-01; the surface
-            // probe only passed by reading the launcher URL mid-flight).
-            // Frames of this page take the proxied frame route instead.
-            // `_blank`, an ancestor, or a name no frame carries (a new named
-            // window) still go native: the launcher works at top level.
-            frame = navigableForTarget(target);
-            if (frame === root) frame = null;
-            // No such frame: the browser acts on the RAW attribute — unless the
-            // membrane neutralized it to `_self`, which stays ours to handle.
-            else if (!frame && Native.getAttribute.call(el, 'target') !== '_self') return null;
-          }
+          // ★The raw href is the `?via=` launcher. Left to the browser, a named
+          // frame loaded the LAUNCHER — the parent's sweep then contained it,
+          // its URL facade decoded `via=`, and it redirected to
+          // `proxy.localhost:<target port>`: CSP-blocked. The frame never
+          // reached the target (2026-10-01). Frames take the proxied frame
+          // route and ancestors navigate through their own membrane; only a
+          // NEW window is left to the browser — the launcher works at top level.
+          const dest = chooseNavigable(navigationTarget(el));
+          if (dest.open) return null;
+          frame = dest.frame || null;
+          win = dest.win || null;
         }
         const raw = isAnchor ? Native.getAttribute.call(el, 'data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
         if (!raw) continue;
@@ -334,9 +382,9 @@
         // 페이지가 처리하도록 위임. (실제 hash fragment 가 있는 `#section` 은
         // virtual hash update 유지.)
         if (raw === '#') continue;
-        if (raw[0] === '#' && !frame) return { hash: raw, element: el };
+        if (raw[0] === '#' && !frame && !win) return { hash: raw, element: el };
         if (hasExecutableURLScheme(raw)) return { href: '', element: el };
-        if (isHTTPURL(raw) || (frame && raw[0] === '#')) return { href: raw, element: el, frame };
+        if (isHTTPURL(raw)) return { href: raw, element: el, frame, win };
       }
       return null;
     }
@@ -565,27 +613,35 @@
         try { execGlobalScript(callPageRewriter(raw.slice(jsMatch[0].length), 'classic')); } catch {}
         return null;
       }
-      // A frame of this page by name takes the proxied frame route, as a link
-      // does (clickNavigationTarget): natively the frame navigates and open()
-      // returns its window. Native.open would park the share launcher in the
-      // frame. With noopener/noreferrer the browser picks a new window instead,
-      // so that stays native.
-      if (isHTTPURL(raw) && !/(^|[\s,])no(opener|referrer)\b/i.test(String(features || ''))) {
-        const frame = navigableForTarget(String(target));
-        const win = frame && frame !== root ? nativeFrameWindow(frame) : null;
+      const noopener = /(^|[\s,])no(opener|referrer)\b/i.test(String(features || ''));
+      // A frame of this page or an ancestor, by name: it navigates as a link's
+      // target does (clickNavigationTarget) and open() returns its window.
+      // Native.open would park the share launcher in it. With noopener the
+      // browser picks a new window instead.
+      if (isHTTPURL(raw) && !noopener) {
+        const dest = chooseNavigable(String(target));
+        const win = dest.frame ? nativeFrameWindow(dest.frame) : dest.win || null;
         if (win) {
-          navigateFrameTo(frame, raw);
+          if (dest.frame) navigateFrameTo(dest.frame, raw);
+          else navigateWindowTo(win, raw);
           try { installNetworkContainment(win); } catch { return null; }
           return win;
         }
       }
+      // noopener returns null natively and the page never holds the window, so
+      // the routed URL can be opened directly once it exists. (It used to open
+      // about:blank, get null back, and never navigate at all.)
+      if (isHTTPURL(raw) && noopener) {
+        popupNavURL(raw).then(u => { try { Native.open(u, target, features); } catch {} }).catch(() => {});
+        return null;
+      }
       let child;
       if (raw === 'about:blank' || raw === '') child = Native.open('about:blank', target, features);
-      else if (isHTTPURL(raw)) { child = Native.open('about:blank', target, features); if (child) shareNavURL(raw).then(u => { child.location.href = u; }).catch(() => { try { child.close(); } catch {} }); }
+      else if (isHTTPURL(raw)) { child = Native.open('about:blank', target, features); if (child) popupNavURL(raw).then(u => { child.location.href = u; }).catch(() => { try { child.close(); } catch {} }); }
       else child = Native.open('about:blank', target, features);
       // Every branch returns a live same-origin about:blank handle — without
       // containment, `child.fetch`/`child.eval`/`child.document` are raw
-      // escape hatches until the share URL's own prelude boots. The http
+      // escape hatches until the routed document's own prelude boots. The http
       // branch navigates via `child.location.href` which containment leaves
       // untouched (it never masks `location`), so ordering is safe.
       if (child) {

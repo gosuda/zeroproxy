@@ -80,11 +80,14 @@
   function frameRouteTarget(path) {
     return ZP.isSharePath(path) ? frameRouteTargets.get(ZP.shareRouteKey(path)) || '' : '';
   }
+  function rememberFrameRoute(routeKey, target) {
+    if (frameRouteTargets.size >= 4096) frameRouteTargets.delete(frameRouteTargets.keys().next().value);
+    frameRouteTargets.set(routeKey, target);
+  }
   async function activatedFrameURL(raw, base = baseURL) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
-    if (frameRouteTargets.size >= 4096) frameRouteTargets.delete(frameRouteTargets.keys().next().value);
-    frameRouteTargets.set(share.encrypted, target);
+    rememberFrameRoute(share.encrypted, target);
     const entryId = 'e' + ZP.randomId();
     // parentTargetUrl carries the embedding page's virtual URL so the SW can
     // send the right Referer when fetching the iframe document. Without it

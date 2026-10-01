@@ -84,7 +84,6 @@
       return;
     }
     if (localKey === 'sandbox' && isFrameElement(el)) { sanitizeFrameSandbox(el); return; }
-    if (localKey === 'target' && isNavigationTargetElement(el)) { const raw = Native.getAttribute.call(el, key); if (raw && raw !== '_self') setSafeNavigationTarget(el, key, raw); return; }
     if (tag === 'script' && (localKey === 'src' || localKey === 'href' || localKey === 'type')) {
       const target = urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url') || '';
       if (target && Native.getAttribute.call(el, 'src') === scriptProxyPath(target, executableScriptKindForElement(el) || 'classic')) return;

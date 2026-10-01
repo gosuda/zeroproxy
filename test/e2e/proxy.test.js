@@ -1451,6 +1451,13 @@ function createTargetServer(requests, pendingResponses) {
       res.end('<!doctype html><title>fh</title><script>parent.__fhSaw = String(location.href); setTimeout(function () { parent.__fhLate = String(location.href); }, 300);<\/script>');
       return;
     }
+    if (url.pathname === '/frame-outer') {
+      // A frame holding a frame: the inner link targets _parent, so the OUTER
+      // frame navigates — never the page around it.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>fo</title><iframe srcdoc="<a id=up href=\'/frame-plain\' target=_parent>up</a>"></iframe>');
+      return;
+    }
     if (url.pathname === '/frame-plain') {
       // None of html/head/body/script: the streaming transform had no anchor for
       // the prelude, so this document ran with no membrane at all.
@@ -1672,14 +1679,80 @@ function createTargetServer(requests, pendingResponses) {
             a.click();
             return landed(f, '/frame-dest');
           });
-          // setAttribute('target') is neutralized to '_self' with the name stashed.
+          // setAttribute('target') used to be rewritten to '_self' (name stashed):
+          // the link navigated the whole page and read back '_self'.
           await P('targetFramenameAttr', async () => {
             const f = namedFrame('tfn2');
             const a = document.createElement('a');
             a.setAttribute('href', '/frame-dest'); a.setAttribute('target', 'tfn2'); a.textContent = 'go';
             document.body.appendChild(a);
             a.click();
-            return landed(f, '/frame-dest');
+            return (await landed(f, '/frame-dest')) + '|' + a.getAttribute('target') + '|' + a.target;
+          });
+          await P('targetAttrReadback', () => {
+            const a = document.createElement('a');
+            a.setAttribute('target', '_blank');
+            const area = document.createElement('area');
+            area.setAttribute('target', '_top');
+            const form = document.createElement('form');
+            form.setAttribute('target', 'x');
+            return [a.getAttribute('target'), a.target, area.target, form.target].join('|');
+          });
+          // A link in a nested frame targeting _parent moves the OUTER frame
+          // (the inner frame's ancestor), through that frame's own membrane.
+          await P('parentTargetLink', async () => {
+            const outer = document.createElement('iframe');
+            outer.src = '/frame-outer';
+            document.body.appendChild(outer);
+            const t0 = Date.now();
+            let link = null;
+            while (Date.now() - t0 < 8000 && !link) {
+              try {
+                const inner = frameDoc(outer) && frameDoc(outer).querySelector('iframe');
+                const d = inner && inner.contentDocument;
+                link = d && d.readyState === 'complete' ? d.getElementById('up') : null;
+              } catch {}
+              if (!link) await new Promise(r => setTimeout(r, 50));
+            }
+            if (!link) return 'no-link';
+            link.click();
+            return landed(outer, '/frame-plain');
+          });
+          // Forms honor target too: the result loads in the frame and this page
+          // stays. They used to replace THIS document whatever the target.
+          const targetForm = (name, method, action, field, value) => {
+            const form = document.createElement('form');
+            form.method = method; form.action = action; form.target = name;
+            const i = document.createElement('input'); i.name = field; i.value = value;
+            form.appendChild(i); document.body.appendChild(form);
+            return form;
+          };
+          await P('formTargetGet', async () => {
+            const f = namedFrame('ftg');
+            targetForm('ftg', 'get', '/frame-plain', 'q', 'one two').submit();
+            return landed(f, '/frame-plain');
+          });
+          await P('formTargetPost', async () => {
+            const f = namedFrame('ftp');
+            targetForm('ftp', 'post', '/post-echo', 'a', 'b c').submit();
+            return landed(f, '/post-echo');
+          });
+          // A popup's final document matches native; the launcher it used to run
+          // first is gone (raw while it redirected — see ERRATA item 27).
+          await P('popupRouted', async () => {
+            const w = window.open('/frame-plain', 'zp-popup-probe');
+            if (!w) return 'blocked';
+            const t0 = Date.now();
+            let title = '';
+            while (Date.now() - t0 < 8000 && title !== 'fp') {
+              try { title = w.document && w.document.readyState === 'complete' ? w.document.title : ''; } catch (e) { title = 'threw:' + e.name; break; }
+              await new Promise(r => setTimeout(r, 50));
+            }
+            let href = '', ev = '';
+            try { href = String(w.location.href); } catch (e) { href = 'threw:' + e.name; }
+            try { ev = String(w.eval('location.href')); } catch (e) { ev = 'threw:' + e.name; }
+            try { w.close(); } catch {}
+            return title + '|' + href + '|' + (leaked(ev) ? 'LEAK:' + ev : ev);
           });
           await P('baseTargetFrame', async () => {
             const f = namedFrame('btf');
@@ -4396,9 +4469,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     // T1-8: iframe 잔여
     assert.match(probes.iframeCspAttr, /^v:attr:/);
     assert.equal(probes.iframeCredentialless, 'v:set');
-    for (const k of ['targetFramename', 'targetFramenameAttr', 'baseTargetFrame']) {
+    for (const k of ['targetFramename', 'baseTargetFrame']) {
       assert.match(probes[k], /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found$/, `${k}: ${probes[k]}`);
     }
+    // target is read back as written (it used to come back '_self').
+    assert.match(probes.targetFramenameAttr, /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found\|tfn2\|tfn2$/, `targetFramenameAttr: ${probes.targetFramenameAttr}`);
+    assert.equal(probes.targetAttrReadback, 'v:_blank|_blank|_top|x');
+    assert.match(probes.parentTargetLink, /^v:navigated:http:\/\/localhost:\d+\/frame-plain\|plain$/, `parentTargetLink: ${probes.parentTargetLink}`);
+    assert.match(probes.formTargetGet, /^v:navigated:http:\/\/localhost:\d+\/frame-plain\?q=one\+two\|plain$/, `formTargetGet: ${probes.formTargetGet}`);
+    assert.match(probes.formTargetPost, /^v:navigated:http:\/\/localhost:\d+\/post-echo\|a=b\+c$/, `formTargetPost: ${probes.formTargetPost}`);
+    assert.match(probes.popupRouted, /^v:fp\|(http:\/\/localhost:\d+\/frame-plain)\|\1$/, `popupRouted: ${probes.popupRouted}`);
     assert.match(probes.namedOpen, /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found\|true$/, `namedOpen: ${probes.namedOpen}`);
     // The child keeps its own membrane: both of its reads and the parent's.
     assert.match(probes.childLocAssign, /^v:(http:\/\/localhost:\d+\/frame-html)\|\1\|\1$/, `childLocAssign: ${probes.childLocAssign}`);

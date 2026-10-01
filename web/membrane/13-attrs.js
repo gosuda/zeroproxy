@@ -90,10 +90,6 @@
       if (target) Native.setAttribute.call(node, 'href', target);
     }
   }
-  function isNavigationTargetElement(el) {
-    const tag = el && el.localName;
-    return tag === 'a' || tag === 'area' || tag === 'form' || tag === 'button' || tag === 'input';
-  }
   function isFrameElement(el) {
     const tag = el && el.localName;
     return tag === 'iframe' || tag === 'frame';
@@ -127,11 +123,13 @@
       if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
     }
   }
-  function setSafeNavigationTarget(el, attrName, value) {
-    const raw = String(value || '');
-    if (raw && raw !== '_self') Native.setAttribute.call(el, 'data-zp-blocked-target', raw);
-    return Native.setAttribute.call(el, attrName, '_self');
-  }
+  // `target` is no longer rewritten to `_self` (2026-10-01). That predates the
+  // `?via=` launcher: every href is a proxy URL now, so a new window, an
+  // ancestor or a named frame reached natively still goes through the proxy —
+  // and the click/submit paths resolve frames and ancestors through the
+  // membrane (chooseNavigable). Rewriting broke `target=_blank` (opened in
+  // place), `_top` from a frame (navigated only the frame), named frames, and
+  // `getAttribute('target')` read-back.
   function isZPAttrName(name) { return String(name || '').toLowerCase().startsWith('data-zp-'); }
   function isZeroProxyAssetURL(raw) {
     if (!raw) return false;
