@@ -343,6 +343,13 @@
   const srcsetMeta = new WeakMap();
   const messageListenerWrappers = new WeakMap();
   const frameWindowOrigins = new WeakMap();
+  // Frames whose routed document has not loaded yet: the blank page in front of
+  // it must not reach the page as a `load` (routeFrameSrc / swallowPlaceholderLoad),
+  // and a counter per element keeps a slow earlier route from overwriting a
+  // newer navigation. Declared here, not beside the code: the install steps in
+  // 06-install.js run before the later files' constants are initialized.
+  const pendingFrameRoutes = new WeakSet();
+  const frameRouteSeq = new WeakMap();
   // Sandbox-virt backing store. Target sites that test for `iframe.sandbox`
   // containing both `allow-scripts` and `allow-same-origin` use that as a
   // detection-signal for hostile embedding (since browsers refuse to enforce

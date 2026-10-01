@@ -1451,6 +1451,55 @@ function createTargetServer(requests, pendingResponses) {
       res.end('<!doctype html><title>fh</title><script>parent.__fhSaw = String(location.href); setTimeout(function () { parent.__fhLate = String(location.href); }, 300);<\/script>');
       return;
     }
+    if (url.pathname === '/frame-loads') {
+      // Frame load events and joint history. The proxy parks a frame on a blank
+      // page while its route is prepared; the page must still see ONE load per
+      // navigation and ONE history entry per change, as natively (2026-10-01:
+      // an inline onload on a parsed iframe ran three times).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Frame Loads</title><body>
+      <iframe id="s1" src="/frame-plain" onload="window.__statOnload = (window.__statOnload || 0) + 1"></iframe>
+      <iframe id="s2" src="/frame-plain?two"></iframe>
+      <script>
+        window.__frameLoads = null;
+        var __l2 = 0;
+        document.getElementById('s2').addEventListener('load', function () { __l2++; });
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var title = function (f) { try { var d = f.contentDocument; return d && d.readyState === 'complete' ? d.title : ''; } catch (e) { return '?'; } };
+          // Wait for the destination, then a little longer: a stray late load is the bug.
+          var settle = async function (f, want) {
+            var t0 = Date.now();
+            while (Date.now() - t0 < 8000 && title(f) !== want) await sleep(50);
+            await sleep(500);
+          };
+          var counted = function () {
+            var ev = []; var f = document.createElement('iframe');
+            f.addEventListener('load', function () { ev.push('L'); });
+            f.onload = function () { ev.push('o'); };
+            return { f: f, ev: ev };
+          };
+          await settle(document.getElementById('s1'), 'fp');
+          await settle(document.getElementById('s2'), 'fp');
+          out.staticOnload = String(window.__statOnload || 0);
+          out.staticListener = String(__l2);
+          var a = counted(); a.f.src = '/frame-plain'; document.body.appendChild(a.f);
+          await settle(a.f, 'fp'); out.srcBeforeAppend = a.ev.join('');
+          var b = counted(); document.body.appendChild(b.f); b.f.src = '/frame-plain';
+          await settle(b.f, 'fp'); out.srcAfterAppend = b.ev.join('');
+          var c = counted(); document.body.appendChild(c.f); c.f.src = '/frame-plain'; c.f.src = '/frame-html';
+          await settle(c.f, 'fh'); out.rapidSwap = c.ev.join('') + '|' + title(c.f);
+          var d = counted(); d.f.src = '/frame-plain'; document.body.appendChild(d.f);
+          await settle(d.f, 'fp');
+          var h0 = history.length; d.f.src = '/frame-html';
+          await settle(d.f, 'fh');
+          out.srcChange = d.ev.join(''); out.historyDelta = String(history.length - h0);
+          window.__frameLoads = out;
+        })().catch(function (e) { window.__frameLoads = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/frame-outer') {
       // A frame holding a frame: the inner link targets _parent, so the OUTER
       // frame navigates — never the page around it.
@@ -4347,6 +4396,34 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       console.log(`[perf] membraneRead=${mm[1]}ms moOverhead=${mo[1]}ms`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // Frame load events and joint history against native (the /frame-loads fixture).
+  await t.test('frame load events and history match native', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/frame-loads`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__frameLoads, { timeout: 30000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__frameLoads);
+    } finally {
+      await directBrowser.close();
+    }
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/frame-loads`);
+    await page.waitForFunction(() => window.__frameLoads, { timeout: 45000, polling: 100 });
+    const proxied = await page.evaluate(() => window.__frameLoads);
+    fs.writeFileSync(path.join(artifacts, 'frame-loads.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: one load per navigation, one history entry per change.
+    assert.deepEqual(direct, {
+      staticOnload: '1', staticListener: '1',
+      srcBeforeAppend: 'Lo', srcAfterAppend: 'LoLo', rapidSwap: 'LoLo|fh',
+      srcChange: 'LoLo', historyDelta: '1',
+    }, 'the native reference changed — re-measure before trusting the comparison');
+    assert.deepEqual(proxied, direct);
   });
 
   // T1: 미검증 표면 실측 (`/surface-probes` fixture, window.__surfaceProbes).

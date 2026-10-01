@@ -136,8 +136,7 @@
     urlMeta.set(el, target);
     if (!usesRaw) Native.setAttribute.call(el, 'data-zp-target-url', target);
     if ((tag === 'iframe' || tag === 'frame') && localKey === 'src') {
-      Native.setAttribute.call(el, key, 'about:blank');
-      activatedFrameURL(target).then(u => { Native.setAttribute.call(el, key, u); rememberFrameOrigin(el); }).catch(()=>{});
+      routeFrameSrc(el, key, target, false);
       instrumentIframe(el);
       return;
     }

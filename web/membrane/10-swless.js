@@ -370,6 +370,9 @@
     const pending = Native.getAttribute.call(el, 'data-zp-frame-src') || '';
     if (!pending) { try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {} return; }
     try {
+      // The parser's blank page may report its `load` after this runs; it is
+      // not the frame's load (swallowPlaceholderLoad).
+      pendingFrameRoutes.add(el);
       el.setAttribute('src', pending);
       try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {}
     } catch (e) {

@@ -6,6 +6,11 @@
       Object.defineProperty(w, iframeHooksMarker, { value: true, enumerable: false, configurable: false });
     } catch {}
     const instrumentedWindows = new WeakSet();
+    // Document level, capture phase: it runs before every listener the page adds
+    // and before the element's own onload. NOT the window — a `load` event fired
+    // at an element never propagates to the Window (DOM: a Document's parent is
+    // null for `load`). Children have their own prelude.
+    if (w === root) { try { root.document.addEventListener('load', swallowPlaceholderLoad, true); } catch {} }
     const nativeCreateElement = w === root ? Native.createElement : w.document.createElement.bind(w.document);
     const nativeCreateElementNS = w === root ? Native.createElementNS : w.document.createElementNS && w.document.createElementNS.bind(w.document);
 
@@ -177,6 +182,70 @@
       }
     }
     return frames;
+  }
+  // ── routing a frame's `src` ─────────────────────────────────────────────
+  // A frame's `src` can never hold the target URL — the browser would load it
+  // directly — so it holds a proxy share route, and a route needs an async round
+  // trip (encrypt, register with the service worker). The old code parked the
+  // frame on an `about:blank` placeholder meanwhile, which cost the page one
+  // extra `load` event and, for a frame already showing a document, one extra
+  // joint-history entry per navigation (an inline onload on a parsed
+  // `<iframe src>` ran three times; native: once).
+  //
+  // Now a frame that is attached and already shows a routed document keeps it
+  // until the new route is ready — natively the old page stays until the new
+  // one commits, too. Every other frame gets the placeholder: a detached one
+  // may be inserted before the route is ready and must not load the raw URL,
+  // and the `src` attribute has to EXIST synchronously — attachAttributeNode,
+  // setAttributeNode and friends run the hooked setter and read the attribute
+  // back. The placeholder's `load` is swallowed (swallowPlaceholderLoad).
+  function frameShowsRoutedDocument(el, key) {
+    let cur = null;
+    try { cur = Native.getAttribute.call(el, key); } catch {}
+    if (!cur) return false;
+    try { const u = new Native.URL(cur, proxyOrigin); return u.origin === proxyOrigin && ZP.isSharePath(u.pathname); } catch { return false; }
+  }
+  // `keepDocument` is false for the mutation-observer backstop: there the
+  // attribute was written without our hook and may hold the raw URL right now.
+  function routeFrameSrc(el, key, target, keepDocument) {
+    const seq = (frameRouteSeq.get(el) || 0) + 1;
+    frameRouteSeq.set(el, seq);
+    if (!(keepDocument && el.isConnected && frameShowsRoutedDocument(el, key))) {
+      Native.setAttribute.call(el, key, 'about:blank');
+      pendingFrameRoutes.add(el);
+    }
+    activatedFrameURL(target).then(u => {
+      if (frameRouteSeq.get(el) !== seq) return;
+      Native.setAttribute.call(el, key, u);
+      rememberFrameOrigin(el);
+    }).catch(() => {
+      // No route, no document. Give the page the `load` it would have had so it
+      // is not left waiting on a frame that stays blank.
+      if (frameRouteSeq.get(el) !== seq) return;
+      pendingFrameRoutes.delete(el);
+      try { el.dispatchEvent(new Event('load')); } catch {}
+    });
+  }
+  // A later `src` that is not a routed target (about:blank, javascript:) wins
+  // over a route still in flight, as it does natively.
+  function cancelFrameRoute(el) {
+    frameRouteSeq.set(el, (frameRouteSeq.get(el) || 0) + 1);
+    pendingFrameRoutes.delete(el);
+  }
+  // The placeholder page's `load` is not the frame's load. Frames still waiting
+  // for their route — a placeholder set by routeFrameSrc, or a parsed frame
+  // whose `src` htmltx moved to data-zp-frame-src — report a blank document; the
+  // routed document's own load passes and ends the wait.
+  function swallowPlaceholderLoad(ev) {
+    const f = ev.target;
+    try { if (!f || f.nodeType !== 1 || (f.localName !== 'iframe' && f.localName !== 'frame')) return; } catch { return; }
+    let pending = pendingFrameRoutes.has(f);
+    if (!pending) { try { pending = Native.hasAttribute.call(f, 'data-zp-frame-src'); } catch {} }
+    if (!pending) return;
+    let blank = false;
+    try { const win = nativeFrameWindow(f); blank = !!win && String(Native.documentURLDesc.get.call(win.document)) === 'about:blank'; } catch {}
+    if (blank) ev.stopImmediatePropagation();
+    else pendingFrameRoutes.delete(f);
   }
   function instrumentFrameList(frames) { if (frames) for (const frame of frames) instrumentIframe(frame); }
   function instrumentDescendantIframes(node) { instrumentFrameList(collectIframes(node, null)); }

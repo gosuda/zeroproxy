@@ -200,8 +200,7 @@
           // attribute (leaking to hover/middle-click/copy-link).
           Native.setAttribute.call(this, 'data-zp-target-url', t);
           if ((ln === 'iframe' || ln === 'frame') && localKey === 'src') {
-            Native.setAttribute.call(this, k, 'about:blank');
-            activatedFrameURL(t).then(u => { Native.setAttribute.call(this, k, u); rememberFrameOrigin(this); }).catch(()=>{});
+            routeFrameSrc(this, k, t, true);
             return;
           }
           if (ln === 'link' && localKey === 'href' && isIconLink(this)) return suppressIconLinkHref(this, t);
@@ -212,6 +211,7 @@
         // describing the page it left — `iframe.src` and the parent's read of
         // its location reported the old target.
         if ((ln === 'iframe' || ln === 'frame') && localKey === 'src') {
+          cancelFrameRoute(this);
           urlMeta.delete(this);
           litDel(this, localKey);
           if (Native.removeAttribute) { try { Native.removeAttribute.call(this, 'data-zp-target-url'); } catch {} }

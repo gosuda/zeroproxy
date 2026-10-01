@@ -28,7 +28,7 @@ runs turned out to certify divergences as "design" — see
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 116 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
 
-Suite totals (2026-10-01): e2e 192/192 — including the WebTransport gateway
+Suite totals (2026-10-01): e2e 193/193 — including the WebTransport gateway
 (`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
 round trips in a real browser — `npm run test:js` 113, `test:wasm:ci` 13,
 `cargo test --workspace` 293, `go test ./...` green. Real sites (paired
@@ -172,6 +172,13 @@ claimed:
     are routed up front (OPEN_SHARE from the opener). — surface
     `targetFramenameAttr`, `targetAttrReadback`, `parentTargetLink`,
     `formTargetGet`, `formTargetPost`, `popupRouted` (all native-identical).
+28. Frame `load` events and history. A frame loaded through `src` ran its `load`
+    handlers once per placeholder page and once per routed document — an inline
+    `onload` on a parsed `<iframe src>` three times, native once — and every
+    placeholder navigation added a joint-history entry. A frame that already
+    shows a routed document now keeps it until the new route is ready; any other
+    frame keeps the placeholder, whose `load` is swallowed. — e2e `frame load
+    events and history match native` (native reference values pinned).
 
 ### Residuals (documented, not fixed)
 
@@ -383,7 +390,7 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | blank / routed / prelude-less child windows are never raw | **fixed** 2026-10-01 (item 26) | surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval` |
 | SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |
 | child cookie/storage between **same-site** frames, and a parent's own storage seen from a child | **parity** (measured 2026-10-01, one-off differential, not pinned) | — |
-| iframe `load` events and joint session history for a frame sent through `src` | **residual** — two `load` events (native: one) and two history entries (native: one) | The frame loads a placeholder `about:blank` first, then the routed document. Suppressing the placeholder's `load` and replacing instead of pushing needs a pending-route state on the frame element. Pages that count loads or use the back button see the extra step. See [trap 프레임-load-두-번](.ai/trap-notebook/rewriter.md#프레임-load-두-번). |
+| iframe `load` events and joint session history for a frame sent through `src` | **fixed** 2026-10-01 — one `load` per navigation and one history entry per change, as native; a parsed `<iframe src onload>` fires once (it fired three times) | e2e `frame load events and history match native`. See [trap 프레임-load-두-번](.ai/trap-notebook/rewriter.md#프레임-load-두-번). |
 | a detached frame's window | **parity** for `eval` and `closed`; `document.URL` reports the virtual URL where native reports `about:blank` | Same virtual-URL split as srcdoc (see Residuals). |
 | **frames of different sites** | **residual — security-relevant.** Every proxied frame shares the proxy's physical origin, so the browser's same-origin policy cannot separate them. The membrane virtualizes `Location` (cross-site reads throw) and gives a child only own-expando values of its parent, but a parent's reads of a cross-site child's document, globals and storage are **not** blocked (native Chrome throws `SecurityError`). | Closing it needs every window handle (`contentWindow`, `open()`, `frames[i]`, `opener`) wrapped in a per-virtual-origin facade — a design change, not a patch. Pinned today only for `Location`: e2e `cross-virtual-origin frames cannot read parent Location`. See [trap 교차-사이트-프레임](.ai/trap-notebook/rewriter.md#교차-사이트-프레임). |
 | CSP inheritance into child frames | **unverified** | — |
