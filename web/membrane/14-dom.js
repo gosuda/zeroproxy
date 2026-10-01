@@ -209,6 +209,14 @@
           if (usesRaw) return Native.setAttribute.call(this, k, proxyViaURL(t));
           return setSubresourceAttribute(this, k, subresourceProxyPath(t));
         }
+        // A frame sent to a non-target (about:blank): the stash would keep
+        // describing the page it left — `iframe.src` and the parent's read of
+        // its location reported the old target.
+        if ((ln === 'iframe' || ln === 'frame') && localKey === 'src') {
+          urlMeta.delete(this);
+          litDel(this, localKey);
+          if (Native.removeAttribute) { try { Native.removeAttribute.call(this, 'data-zp-target-url'); } catch {} }
+        }
       }
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc') { setInjectedSrcdoc(this, v); return undefined; }
       return Native.setAttribute.call(this, k, v);

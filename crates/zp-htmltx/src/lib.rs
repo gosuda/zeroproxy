@@ -10,7 +10,7 @@
 //!   with a safe `throw new DOMException(...)` (callable from the original
 //!   call sites), and event handler attributes are removed entirely.
 
-use lol_html::{element, html_content::ContentType, text, HtmlRewriter, Settings};
+use lol_html::{doc_text, element, end, html_content::ContentType, text, HtmlRewriter, Settings};
 use std::cell::RefCell;
 use std::rc::Rc;
 use zp_rewriter::{rewrite_script, RewriteOpts, ScriptKind};
@@ -705,6 +705,7 @@ fn script_settings(
     let style_target = target.clone();
     let style_origin = proxy_origin.clone();
 
+    let mut doc_handlers = Vec::new();
     let mut handlers = vec![
                 element!("script", move |el| {
                     if el.has_attribute("src") {
@@ -888,8 +889,16 @@ fn script_settings(
         // meta/script 를 만나면 head 를 암묵적으로 만들어 거기 넣는다. 뒤따라
         // 오는 진짜 `<head>` 시작 태그는 무시되고 속성만 병합된다. 즉 head 가
         // 있든 없든 결과는 "head 안" 으로 같고, 오히려 더 이르다.
+        //
+        // 2026-10-01 — 네 앵커 중 아무것도 없는 문서(`<title>t</title><p>x</p>`)
+        // 에는 **프렐류드가 아예 안 들어갔다.** 버퍼 경로(`injectPrelude`)는
+        // 문서 맨 앞으로 떨어지는데 스트리밍 경로만 빈손이었다. 그런 문서는
+        // 자기 멤브레인도 CSP meta 도 없이 떴고, `src` 로 보낸 프레임이면 부모가
+        // containment 도 건너뛰어 `iframe.contentWindow.eval` 이 프록시 오리진에서
+        // 날 코드를 돌렸다. 마지막 단계를 셋 더 둔다: 어떤 요소든 첫 요소 앞,
+        // (요소보다 먼저 오는) 공백 아닌 첫 텍스트 앞, 그래도 없으면 문서 끝.
         let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        for (selector, before_element) in [("html", false), ("head", false), ("body", false), ("script", true)] {
+        for (selector, before_element) in [("html", false), ("head", false), ("body", false), ("script", true), ("*", true)] {
             let prelude = prelude.clone();
             let injected = injected.clone();
             handlers.push(element!(selector, move |el| {
@@ -904,9 +913,26 @@ fn script_settings(
                 Ok(())
             }));
         }
+        let text_prelude = prelude.clone();
+        let text_injected = injected.clone();
+        doc_handlers.push(doc_text!(move |t| {
+            if t.as_str().trim().is_empty() || text_injected.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+            t.before(&text_prelude, ContentType::Html);
+            Ok(())
+        }));
+        let end_prelude = prelude.clone();
+        doc_handlers.push(end!(move |end| {
+            if !injected.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                end.append(&end_prelude, ContentType::Html);
+            }
+            Ok(())
+        }));
     }
     Settings {
         element_content_handlers: handlers,
+        document_content_handlers: doc_handlers,
         ..Settings::new()
     }
 }
@@ -2222,6 +2248,41 @@ mod tests {
                 .expect("inline script must go through an exec wrapper");
             assert!(p < call, "prelude must precede the call it defines: {html}");
         }
+    }
+
+    /// None of the four anchors (`html`/`head`/`body`/`script`) in the source:
+    /// the streaming path used to emit NO prelude at all — a document with no
+    /// membrane and no CSP meta (2026-10-01). It must land before the first
+    /// element, else before the first non-blank text, else at the end.
+    #[test]
+    fn prelude_is_injected_into_tagless_documents() {
+        let prelude = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\"><script nonce=zp></script>";
+        let run = |doc: &str| {
+            let mut txn = HtmlTxn::new(&opts(), prelude.to_string());
+            let mut out: Vec<u8> = Vec::new();
+            out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+            let (tail, _d) = txn.end().unwrap();
+            out.extend_from_slice(&tail);
+            String::from_utf8(out).unwrap()
+        };
+        for (doc, first) in [
+            ("<!doctype html><title>t</title><p>x</p>", "<title>"),
+            ("<p>x</p>", "<p>"),
+            ("hello <b>x</b>", "hello"),
+        ] {
+            let html = run(doc);
+            assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc}: {html}");
+            assert!(html.find(prelude).unwrap() < html.find(first).unwrap(), "prelude must precede {first}: {html}");
+        }
+        for doc in ["", "<!-- only a comment -->", "  \n "] {
+            let html = run(doc);
+            assert_eq!(html.matches(prelude).count(), 1, "prelude count != 1 for {doc:?}: {html}");
+        }
+        // Blank text before `<html>` is not content: the prelude still goes
+        // inside `<html>`, exactly where it went before.
+        let html = run("\n\n<html><head></head><body>x</body></html>");
+        assert_eq!(html.matches(prelude).count(), 1, "{html}");
+        assert!(html.find("<html>").unwrap() < html.find(prelude).unwrap(), "prelude left <html>: {html}");
     }
 
     #[test]

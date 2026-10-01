@@ -1444,6 +1444,20 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/frame-html') {
+      // A routed frame that reports what its OWN code sees, now and later — the
+      // late read catches a parent that installs its containment over it.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>fh</title><script>parent.__fhSaw = String(location.href); setTimeout(function () { parent.__fhLate = String(location.href); }, 300);<\/script>');
+      return;
+    }
+    if (url.pathname === '/frame-plain') {
+      // None of html/head/body/script: the streaming transform had no anchor for
+      // the prelude, so this document ran with no membrane at all.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>fp</title><p>plain</p>');
+      return;
+    }
     if (url.pathname === '/surface-probes') {
       // T1: 미검증 표면 실측 — transformer 잔여(importmap/speculationrules/
       // shadow DOM/SVG), transferable 누출, 명명 프레임 접근, 레거시 접근자,
@@ -1629,6 +1643,25 @@ function createTargetServer(requests, pendingResponses) {
             document.body.appendChild(f);
             return 'set';
           });
+          // ── 명명 타깃 내비게이션 (2026-10-01) ──
+          // A named target used to load the '?via=' LAUNCHER into the proxied
+          // frame, which never reached the target. Reading only the frame's URL
+          // passed anyway — 'via=' decodes to the target — so every probe here
+          // waits for the destination DOCUMENT (/frame-dest is a text/plain 404).
+          const frameDoc = f => { try { const d = f.contentDocument; return d && d.readyState === 'complete' && d.body ? d : null; } catch { return null; } };
+          const landed = async (f, path) => {
+            const t0 = Date.now();
+            let href = 'none';
+            while (Date.now() - t0 < 8000) {
+              try { href = f.contentWindow && f.contentWindow.location ? String(f.contentWindow.location.href) : 'none'; }
+              catch (e) { return 'threw:' + e.name; }
+              const d = href.includes(path) ? frameDoc(f) : null;
+              if (d) return 'navigated:' + href + '|' + d.body.textContent.trim();
+              await new Promise(r => setTimeout(r, 100));
+            }
+            return 'not-navigated:' + href;
+          };
+          const namedFrame = name => { const f = document.createElement('iframe'); f.name = name; document.body.appendChild(f); return f; };
           await P('targetFramename', async () => {
             const f = document.createElement('iframe');
             f.name = 'tfn'; f.srcdoc = '<p>home</p>';
@@ -1637,18 +1670,76 @@ function createTargetServer(requests, pendingResponses) {
             a.href = '/frame-dest'; a.target = 'tfn'; a.textContent = 'go';
             document.body.appendChild(a);
             a.click();
-            // Poll instead of one fixed 800 ms look: the proxied frame
-            // navigation (SW fetch + rewrite) outran it under load and the
-            // probe read the pre-navigation URL. Still fails if it never lands.
+            return landed(f, '/frame-dest');
+          });
+          // setAttribute('target') is neutralized to '_self' with the name stashed.
+          await P('targetFramenameAttr', async () => {
+            const f = namedFrame('tfn2');
+            const a = document.createElement('a');
+            a.setAttribute('href', '/frame-dest'); a.setAttribute('target', 'tfn2'); a.textContent = 'go';
+            document.body.appendChild(a);
+            a.click();
+            return landed(f, '/frame-dest');
+          });
+          await P('baseTargetFrame', async () => {
+            const f = namedFrame('btf');
+            const b = document.createElement('base');
+            b.setAttribute('target', 'btf');
+            document.head.appendChild(b);
+            const a = document.createElement('a');
+            a.href = '/frame-dest'; a.textContent = 'go';
+            document.body.appendChild(a);
+            a.click();
+            b.remove();
+            return landed(f, '/frame-dest');
+          });
+          await P('namedOpen', async () => {
+            const f = namedFrame('tfn3');
+            const w = window.open('/frame-dest', 'tfn3');
+            return (await landed(f, '/frame-dest')) + '|' + (w === f.contentWindow);
+          });
+          // A frame sent by contentWindow.location boots its own membrane. The
+          // parent's next contentWindow read used to install ITS containment over
+          // it, so the child's code read the parent's URL from then on.
+          await P('childLocAssign', async () => {
+            const f = document.createElement('iframe');
+            document.body.appendChild(f);
+            window.__fhSaw = ''; window.__fhLate = '';
+            f.contentWindow.location.href = '/frame-html';
             const t0 = Date.now();
-            let href = 'none';
-            while (Date.now() - t0 < 5000) {
-              try { href = f.contentWindow && f.contentWindow.location ? String(f.contentWindow.location.href) : 'none'; }
-              catch (e) { return 'threw:' + e.name; }
-              if (href.includes('/frame-dest')) { window.__tfnMs = Date.now() - t0; return 'navigated:' + href; }
-              await new Promise(r => setTimeout(r, 100));
-            }
-            return 'not-navigated:' + href;
+            while (!window.__fhLate && Date.now() - t0 < 8000) { void f.contentWindow; await new Promise(r => setTimeout(r, 50)); }
+            let seen = 'none';
+            try { seen = String(f.contentWindow.location.href); } catch (e) { seen = 'threw:' + e.name; }
+            return window.__fhSaw + '|' + window.__fhLate + '|' + seen;
+          });
+          // Escapes (2026-10-01): each of these child windows used to run page
+          // code RAW at the proxy origin — 'location' came back as the real
+          // /zp/p/ URL or a bare about:blank.
+          const plainFrame = async () => {
+            const f = document.createElement('iframe');
+            f.src = '/frame-plain';
+            document.body.appendChild(f);
+            const t0 = Date.now();
+            while (Date.now() - t0 < 8000 && !(frameDoc(f) && frameDoc(f).title === 'fp')) await new Promise(r => setTimeout(r, 50));
+            return f;
+          };
+          await P('routedPlainEval', async () => {
+            const f = await plainFrame();
+            const v = String(f.contentWindow.eval('location.href'));
+            return leaked(v) ? 'LEAK:' + v : v;
+          });
+          await P('staleBlankEval', async () => {
+            const f = await plainFrame();
+            f.src = 'about:blank';
+            const t0 = Date.now();
+            while (Date.now() - t0 < 8000 && (!frameDoc(f) || frameDoc(f).title === 'fp')) await new Promise(r => setTimeout(r, 50));
+            return String(f.contentWindow.eval('location.href'));
+          });
+          await P('pendingRouteEval', async () => {
+            const f = document.createElement('iframe');
+            f.src = '/frame-plain';
+            document.body.appendChild(f);
+            return String(f.contentWindow.eval('location.href'));
           });
           await P('childSharedWorker', async () => {
             const f = document.createElement('iframe');
@@ -4247,6 +4338,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
         windowByName: 'same as framesByName',
         framesItem: 'V8 names the rewritten callee in "is not a function" messages',
         withEvalScope: 'direct eval inside with() does not see the with-object',
+        // Contained blank pages run page code through the membrane, so they
+        // report a virtual URL instead of about:blank. Raw — equal to native —
+        // they ran unrewritten code at the proxy origin (2026-10-01).
+        staleBlankEval: 'a contained about:blank child reports the parent virtual URL, as framesByName',
+        pendingRouteEval: 'the blank page in front of a pending route is contained; it reports the destination',
         parseHTMLUnsafeHook: 'a base-less parsed document resolves anchor href against the virtual base',
         ownKeysLeak: 'a var from a script rejected for redeclaration survives (eval instantiation)',
         // Not a divergence: the probe folds in a clock reading.
@@ -4300,7 +4396,18 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
     // T1-8: iframe 잔여
     assert.match(probes.iframeCspAttr, /^v:attr:/);
     assert.equal(probes.iframeCredentialless, 'v:set');
-    assert.match(probes.targetFramename, /^v:navigated:/, `targetFramename: ${probes.targetFramename}`);
+    for (const k of ['targetFramename', 'targetFramenameAttr', 'baseTargetFrame']) {
+      assert.match(probes[k], /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found$/, `${k}: ${probes[k]}`);
+    }
+    assert.match(probes.namedOpen, /^v:navigated:http:\/\/localhost:\d+\/frame-dest\|not found\|true$/, `namedOpen: ${probes.namedOpen}`);
+    // The child keeps its own membrane: both of its reads and the parent's.
+    assert.match(probes.childLocAssign, /^v:(http:\/\/localhost:\d+\/frame-html)\|\1\|\1$/, `childLocAssign: ${probes.childLocAssign}`);
+    // Escapes: a routed page with no prelude anchor, a routed frame moved to
+    // about:blank, and the blank page in front of a pending route all ran page
+    // code raw at the proxy origin. Contained, `location` is virtual.
+    assert.match(probes.routedPlainEval, /^v:http:\/\/localhost:\d+\/frame-plain$/, `routedPlainEval: ${probes.routedPlainEval}`);
+    assert.match(probes.staleBlankEval, /^v:http:\/\/localhost:\d+\/surface-probes$/, `staleBlankEval: ${probes.staleBlankEval}`);
+    assert.match(probes.pendingRouteEval, /^v:http:\/\/localhost:\d+\/frame-plain$/, `pendingRouteEval: ${probes.pendingRouteEval}`);
     assert.match(probes.childSharedWorker, /^v:clean:/, `childSharedWorker: ${probes.childSharedWorker}`);
     // T2-1: with(obj) — own dangerous name 은 obj 우선, document 경유
     // location 은 wrapped identity, document.location= 쓰기는 PutForwards.

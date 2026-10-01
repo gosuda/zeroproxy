@@ -25,13 +25,13 @@ runs turned out to certify divergences as "design" — see
 |---|---|---|
 | `direct-vs-proxy compatibility differential` (B, C, I, A5, J) | 63 | 0 |
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
-| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 98 | 13, each listed with a reason |
+| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 106 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
 
-Suite totals (2026-09-30): e2e 192/192 — including the WebTransport gateway
+Suite totals (2026-10-01): e2e 192/192 — including the WebTransport gateway
 (`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
 round trips in a real browser — `npm run test:js` 113, `test:wasm:ci` 13,
-`cargo test --workspace` 292, `go test ./...` green. Real sites (paired
+`cargo test --workspace` 293, `go test ./...` green. Real sites (paired
 `test/browser/rendercheck.sh`, cold profile): GitHub height 100% / elements
 1811 of 1811 / err 0, Wikipedia 100% / err 0, NAVER 95% / err 1, Stack Overflow
 110% / err 6 (FedCM policy block, an ad partner's 502s, one sandboxed-frame
@@ -127,6 +127,37 @@ Found on CNN (Permutive and Rubicon SDKs):
     facade's `prototype` was an empty object, so `Function.prototype.toString`
     returned `[object Function]`. — dyn `workerSelfMethods`.
 
+Found chasing the one CI failure left after those (2026-10-01) — `targetFramename`
+passed locally and failed on GitHub's runner. It had never measured what it
+claimed:
+
+24. A link with `target=<frame name>` loaded the `?via=` **launcher** into the
+    frame. The parent's sweep then contained the launcher, its `URL` facade
+    decoded `via=`, and it redirected to `proxy.localhost:<target port>` —
+    CSP-blocked. The frame never reached the target; the probe passed by reading
+    the launcher URL, which decodes to the target. `setAttribute('target', name)`
+    (neutralized to `_self`) navigated the **whole page** instead, `<base target>`
+    was ignored, and `window.open(url, name)` also parked the launcher in the
+    frame. All four now take the proxied frame route. — surface `targetFramename`,
+    `targetFramenameAttr`, `baseTargetFrame`, `namedOpen` (each waits for the
+    destination document).
+25. The parent's containment **overwrote a child's own membrane** on the first
+    `contentWindow`/`contentDocument` read (or sweep) — `define` may overwrite a
+    writable slot. Only `src`-routed frames were spared, by their
+    `data-zp-target-url` stash; a frame sent by `contentWindow.location`, by
+    itself or by a named target ran the parent's helpers: its code read the
+    parent's location and storage partition, and the parent read the child's
+    location as its own URL. — surface `childLocAssign`.
+26. **Escapes**: `iframe.contentWindow.eval(…)` ran unrewritten code at the
+    proxy origin (raw storage of every target, the real `/zp/p/` URL) in three
+    windows — the blank page in front of a pending `src` route, a routed frame
+    later moved to `about:blank` (the stash exemption was sticky), and a routed
+    HTML document with none of `html`/`head`/`body`/`script` (the streaming
+    transform had no anchor, so it got **no prelude at all** — no membrane, no
+    CSP meta). Containment is now decided by the current document; htmltx always
+    injects. — surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval`;
+    htmltx `prelude_is_injected_into_tagless_documents`.
+
 ### Residuals (documented, not fixed)
 
 | Residual | Why it stays | Pin |
@@ -147,6 +178,10 @@ Found on CNN (Permutive and Rubicon SDKs):
 | `<link rel=preload as=script>` for a module script is fetched again by the module | The preload goes to the classic route; the module needs `kind=module` in its URL. | [trap module-kind-url](.ai/trap-notebook/rewriter.md#module-kind-url) |
 | Ad and ID-sync hosts (Google ads, Amazon, FreeWheel, Optimizely events, …) refuse proxied requests | Their decision, not request shape: `sendBeacon`/`fetch(keepalive)`/form POST bodies and content types arrive byte-identical to native (measured). IP reputation and fingerprint — Phase 3. | — |
 | The prelude logs "Blocked script execution in 'about:blank'" while touching sandboxed ad frames | Console noise only; the frame is sandboxed without `allow-scripts` either way. | — |
+| A routed HTML document is uncontained between its commit and its prelude's first script | Containing it there leaves a pre-instrumented realm (the parent's `fetch`/XHR bound in, non-configurable accessors). Bounded: once loaded, a document that never booted is contained. | [trap 라우팅-프레임-탈출](.ai/trap-notebook/rewriter.md#라우팅-프레임-탈출) |
+| A `window.open` popup runs the share launcher before its document, and the opener's handle to it is not contained | The launcher registers the popup's tab; removing it needs a launcher-free popup route (OPEN_SHARE from the opener). | — |
+| `<form target=frame>` submits navigate the page itself | The submit handler ignores `target`; a POST into a frame needs a frame route that carries the body (3-D Secure-style flows). | — |
+| `getAttribute('target')` reads `_self` after `setAttribute('target', name)` | The attribute is neutralized with the name stashed; read-back is not unwrapped (`a.target = name` is untouched). Navigation honors the stash. | surface `targetFramenameAttr` |
 
 ---
 
@@ -327,7 +362,9 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | `<object>/<embed>/<portal>/<fencedframe>` | **intentional** | Q7 |
 | `iframe.csp` | **residual** — passes through as inert data | surface `iframeCspAttr` |
 | `credentialless` | **parity** | surface `iframeCredentialless` |
-| `<a target=framename>` | **fixed** | surface `targetFramename` |
+| `<a target=framename>`, `setAttribute('target')`, `<base target>`, `open(url, name)` | **fixed** 2026-10-01 — the 2026-09 "fixed" rested on a probe that read the launcher URL (item 24) | surface `targetFramename`, `targetFramenameAttr`, `baseTargetFrame`, `namedOpen` |
+| a child's own membrane survives the parent's `contentWindow` reads | **fixed** 2026-10-01 (item 25) | surface `childLocAssign` |
+| blank / routed / prelude-less child windows are never raw | **fixed** 2026-10-01 (item 26) | surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval` |
 | SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |
 | child cookie/storage isolation, iframe `onload` handlers, CSP inheritance, stale-realm cleanup | **unverified** | — |
 

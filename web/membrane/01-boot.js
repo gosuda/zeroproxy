@@ -110,6 +110,11 @@
       scriptText: w.HTMLScriptElement && Object.getOwnPropertyDescriptor(w.HTMLScriptElement.prototype, 'text'),
       nodeTextContent: Object.getOwnPropertyDescriptor(w.Node.prototype, 'textContent'),
       htmlInnerText: w.HTMLElement && Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, 'innerText'),
+      // 프레임의 진짜 창. 훅된 contentWindow 게터는 containFrameWindow 를 거쳐
+      // 들여다본 문서에 containment 를 심으므로, 이름으로 프레임을 찾는 내부
+      // 코드는 이걸 쓴다.
+      iframeContentWindow: w.HTMLIFrameElement && Object.getOwnPropertyDescriptor(w.HTMLIFrameElement.prototype, 'contentWindow'),
+      frameContentWindow: w.HTMLFrameElement && Object.getOwnPropertyDescriptor(w.HTMLFrameElement.prototype, 'contentWindow'),
       formSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.submit,
       formRequestSubmit: w.HTMLFormElement && w.HTMLFormElement.prototype.requestSubmit,
       documentOpen: d.open && d.open.bind(d),

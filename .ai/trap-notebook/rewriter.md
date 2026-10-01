@@ -1334,3 +1334,28 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** 같은 규칙 — prototype 없는 네이티브 함수만 진짜 전역에 묶고, 함수별 캐시로 `self.f === self.f`, `name`/`length` 유지.
 - **숨은 함정:** 그 규칙의 "네이티브인가" 판별이 런타임 `Function.prototype.toString` 을 부르는데, 워커 prelude 는 전역 `Function` 을 래퍼로 바꿔 둔다 — 래퍼의 `prototype` 이 **빈 객체**라 `Function.prototype.toString.call(f)` 가 "[object Function]" 을 돌려줬다. 그래서 첫 수정이 아무것도 묶지 못했다. 캡처해 둔 네이티브 toString 을 쓰고, 래퍼들의 `prototype` 을 진짜 intrinsic 으로 맞췄다 — 페이지 코드의 네이티브 판별(`/\[native code\]/`)도 같이 고쳐졌다.
 - **검증:** dyn 차분 `workerSelfMethods`(네이티브 `v:a,number,true,true`), 워커 브라우저 차분 13항목 전부 네이티브와 같다.
+
+## <a id="명명-타깃-프레임"></a>`<a target=프레임이름>` 이 프레임에 **런처**를 실었다 — 표면 프로브는 런처 URL 을 읽고 통과했다 (2026-10-01)
+
+- **증상:** CI(ubuntu)에서만 `targetFramename` 이 `not-navigated:…/surface-probes`. 로컬은 통과.
+- **측정(CDP 프레임 이벤트):** 프레임 대상 링크는 멤브레인이 손대지 않아(`target !== '_self'` → null) 브라우저가 원시 href, 즉 `?via=` 런처를 프레임에 실었다. 부모 문서의 `load` 스윕(`sweepSWLessFrames` → 훅된 `contentDocument`)이 그 런처 창에 containment 를 깔고, 런처의 `proxyOrigin()` 이 `new URL(location.href)` — 이제 **우리 URL 파사드**라 `via=` 를 타깃으로 풀어 `proxy.localhost:<타깃 포트>` 로 리다이렉트했다 → `ERR_BLOCKED_BY_CSP` → chrome-error. **로컬에서도 프레임은 타깃에 한 번도 닿지 않았다**(업스트림 로그에 프록시 쪽 `/frame-dest` 0건). 프로브는 런처 단계의 URL(`?via=` → 타깃으로 디프록시)을 읽고 통과했고, 9-29 에 800ms 1회 확인을 폴링으로 바꾸자 타이밍이 갈려 CI 에서만 드러났다.
+- **같은 뿌리:** `setAttribute('target', name)` 은 `setSafeNavigationTarget` 이 원시값을 `_self` 로 바꾸고 이름을 `data-zp-blocked-target` 에 숨긴다 — 옛 클릭 핸들러는 그걸 자기 내비게이션으로 처리해 **페이지 전체가** 이동했다. `<base target>` 은 무시됐고, `window.open(url, name)` 도 프레임에 런처를 실었다.
+- **수정:** 이 페이지의 프레임을 이름으로 찾아(Chromium `FindFrameForNavigation` 순서: 자기, 하위, 꼭대기부터 전체) `iframe.src` 와 같은 프레임 라우트(`activatedFrameURL`)로 보내고 프레임의 Location 을 옮긴다(`src` 는 네이티브처럼 그대로). 숨긴 이름(`data-zp-blocked-target`)과 `<base target>` 을 읽는다. `_blank`·조상·없는 이름은 여전히 네이티브(최상위 런처는 동작한다).
+- **부모의 읽기:** 프렐루드가 없는 문서(text/plain 404 등)는 자기 위치를 말할 수 없고 `/zp/p/<token>` 은 여기서 복호화가 안 된다 — 이 realm 이 연 라우트를 routeKey→타깃으로 기억한다(`frameRouteTarget`). 위치 읽기와 `postMessage` 오리진이 이걸 먼저 본다(프레임이 **지금 있는** 경로 기준이라 낡지 않는다).
+- **검증:** surface `targetFramename`·`targetFramenameAttr`·`baseTargetFrame`·`namedOpen` — 전부 **목적지 문서 본문**(`not found`)까지 기다리고 네이티브와 같다. 옛 코드에 새 프로브를 돌리면 픽스처 페이지째 떠나 스위트가 무너진다.
+- **규칙:** 내비게이션 프로브는 URL 이 아니라 **도착한 문서**를 확인한다 — 런처의 `?via=` 는 디프록시하면 목적지 URL 이 된다.
+
+## <a id="자식-멤브레인-덮어쓰기"></a>부모가 `contentWindow` 를 읽을 때마다 자식의 멤브레인을 자기 것으로 **덮었다** (2026-10-01)
+
+- **측정:** `f.contentWindow.location.href = '/x'` 로 보낸 프레임에서 CDP 로 `window.__zp_get === parent.__zp_get` → **true**. 자식 코드의 `location.href` 가 부모 URL 을 읽었고, 부모의 `f.contentWindow.location.href` 도 부모 URL.
+- **원인:** `containFrameWindow` 는 부모 마커(realm 마다 다른 `Symbol`)만 본다 — 자기 prelude 로 부팅한 자식은 마커가 없어 보이고, `installNetworkContainment` 의 `define` 은 **쓰기 가능 슬롯을 덮어쓸 수 있다**(non-configurable 이어도 writable 이면 값 교체 허용). `src` 로 보낸 프레임만 `data-zp-target-url` 면제 덕에 무사했다. `contentWindow.location`·자기 내비게이션·명명 타깃으로 바뀐 프레임은 부모의 헬퍼·저장소 파사드로 돌았다 — 격리 위반.
+- **수정:** `ownsMembrane(w)` — 다른 realm 의 `__zp_get` 을 가진 창은 이미 자기 prelude 가 담았다. `containFrameWindow` 와 `installNetworkContainment` 둘 다 건너뛴다.
+- **검증:** surface `childLocAssign`(자식의 즉시·300ms 뒤 읽기 + 부모 읽기, 로드 중 `contentWindow` 를 계속 두드린다) — 네이티브와 같다.
+
+## <a id="라우팅-프레임-탈출"></a>탈출 — 라우팅된 프레임의 세 창에서 `contentWindow.eval` 이 프록시 오리진의 날 코드였다 (2026-10-01)
+
+- **측정:** 부모 페이지 코드의 `f.contentWindow.eval('typeof __zp_get + location.href')` 가 `undefined|about:blank` 또는 `undefined|http://proxy.localhost:…/zp/p/…` — 리라이트 없이 프록시 오리진에서 돌았다(모든 타깃의 저장소, 진짜 프록시 URL). 세 경우: (a) `src` 라우트가 대기 중인 앞의 blank 페이지, (b) 라우팅 뒤 `src = 'about:blank'` 로 옮긴 프레임(면제가 **끈적했다**), (c) `html`/`head`/`body`/`script` 태그가 하나도 없는 라우팅 HTML 문서 — 스트리밍 변환에 앵커가 없어 **프렐루드가 아예 없었다**(멤브레인도 CSP meta 도 없음; 버퍼 경로는 문서 맨 앞으로 떨어진다).
+- **면제의 근거가 사라졌다:** 2026-05-29 의 `data-zp-target-url` 면제는 "about:blank 의 Window 가 라우팅 문서에 재사용돼 부모 게터가 남는다" 였다. 실측: Chrome 은 재사용하지 않는다(문서 시작 시점 `__zp_get` 없음 — 포함된 초기 blank 를 `contentWindow.location` 으로 보내도). 그 증상의 실체는 위 [자식-멤브레인-덮어쓰기](#자식-멤브레인-덮어쓰기) 였다.
+- **수정:** containment 를 **지금 문서**로 정한다 — 자기 멤브레인(`ownsMembrane`) 이거나 로드 중인 프록시 HTML 문서(`bootingProxiedDocument`: 공유 경로 + `text/html` + `readyState !== 'complete'`, 자기 prelude 가 곧 담는다)만 건너뛰고 나머지는 전부 담는다. 끈적한 면제와 `instrumentIframe` 의 `willNavigate` 는 걷었다. `src` 를 타깃 아닌 값으로 바꾸면 스태시를 지운다. htmltx 는 앵커가 없으면 첫 요소 앞 → 첫 비공백 텍스트 앞 → 문서 끝.
+- **남은 틈(잔여):** 라우팅 HTML 문서가 커밋된 뒤 prelude 첫 스크립트까지 — 거기서 담으면 자식이 부모의 fetch/XHR 가 박힌 사전 계측 realm 이 된다. 로드가 끝나도 부팅 못 한 문서는 담긴다. 팝업(`window.open`)의 런처 단계도 열려 있다 — ERRATA 잔여.
+- **검증:** surface `pendingRouteEval`·`staleBlankEval`(가상 URL — 네이티브 `about:blank` 과 다른 것이 의도, 같아지면 탈출 재발) · `routedPlainEval`(네이티브와 같음) · htmltx `prelude_is_injected_into_tagless_documents`.

@@ -44,6 +44,77 @@
     }
   }
 
+  // HTML "get an element's target": its own `target`, else the first
+  // `<base target>` of its document (htmltx keeps `<base>`; only its href is
+  // neutralized, by CSP base-uri).
+  function linkTarget(el) {
+    let own = Native.getAttribute.call(el, 'target');
+    // `setAttribute('target', name)` is neutralized to `_self` with the name
+    // stashed (setSafeNavigationTarget). A frame name there still counts;
+    // stashed keywords keep their old self-navigation.
+    if (own === '_self') {
+      const stashed = Native.getAttribute.call(el, 'data-zp-blocked-target');
+      if (stashed && stashed[0] !== '_') own = stashed;
+    }
+    if (own !== null) return own;
+    let base = null;
+    try { base = Native.querySelector.call(el.ownerDocument || document, 'base[target]'); } catch {}
+    return base ? Native.getAttribute.call(base, 'target') || '' : '';
+  }
+  // "Choosing a navigable" by name, in Chromium's order
+  // (FrameTree::FindFrameForNavigation): this frame, its subtree, then the
+  // whole page from the top. Proxied frames are all physically same-origin,
+  // so the real tree is walkable; a window we cannot read is skipped. The
+  // name is the frame element's `name` attribute — a child's `window.name`
+  // writes are virtual and never move the real browsing-context name.
+  // Returns `root` for this frame itself, else the frame element.
+  function navigableForTarget(target) {
+    const t = target.toLowerCase();
+    if (t === '_top' || t === '_parent') return root.parent === root ? root : null;
+    if (t[0] === '_') return null;
+    let own = null;
+    try { own = root.name; } catch {}
+    if (own === target) return root;
+    const hit = frameNamed(document, target, 0);
+    if (hit) return hit;
+    let top = null;
+    try { top = root.top; } catch {}
+    if (!top || top === root) return null;
+    let topDoc = null;
+    try { topDoc = top.document; } catch {}
+    return frameNamed(topDoc, target, 0);
+  }
+  function frameNamed(doc, name, depth) {
+    if (!doc || depth > 16) return null;
+    let frames;
+    try { frames = Native.querySelectorAll.call(doc, 'iframe,frame'); } catch { return null; }
+    for (const f of frames) {
+      const win = nativeFrameWindow(f);
+      let n = null;
+      try { n = Native.getAttribute.call(f, 'name'); } catch {}
+      if (n === name) return win === root ? root : f;
+      let sub = null;
+      try { sub = win && win.document; } catch {}
+      const hit = frameNamed(sub, name, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  function nativeFrameWindow(f) {
+    const d = f.localName === 'frame' ? Native.frameContentWindow : Native.iframeContentWindow;
+    try { return d && d.get ? d.get.call(f) : null; } catch { return null; }
+  }
+  // The same route `iframe.src = url` takes (activatedFrameURL), but the
+  // frame's own Location moves, not its `src` attribute — natively a named
+  // navigation leaves `src` alone. The incoming document boots its own
+  // membrane; until then reads resolve through frameRouteTarget.
+  function navigateFrameTo(frame, href) {
+    activatedFrameURL(href).then(url => {
+      const win = nativeFrameWindow(frame);
+      if (win) win.location.assign(url);
+    }).catch(() => {});
+  }
+
   function installNavigationTraps() {
     // D1: javascript: URL delegated handler. htmltx transforms target
     // `<a href="javascript:CODE">` etc. into `<a href="javascript:void(0)"
@@ -106,6 +177,13 @@
         // 탭/토글로 쓰는 흔한 React 패턴이 통째로 죽는다 (클릭이 문서까지
         // 도달하지 못해 delegated onClick 이 안 걸린다).
         updateVirtualHash(nav.hash);
+        return;
+      }
+      if (nav.frame && nav.href) {
+        // Another frame of this page navigates and this document stays, so its
+        // own click handlers keep running, as they do natively.
+        firePing(nav.element, nav.href);
+        navigateFrameTo(nav.frame, nav.href);
         return;
       }
       ev.stopImmediatePropagation();
@@ -227,10 +305,26 @@
       if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return null;
       for (let el = ev.target; el && el !== document; el = el.parentElement) {
         const isAnchor = el.matches && el.matches('a[href],area[href]');
+        let frame = null;
         if (isAnchor) {
           if (el.hasAttribute('download')) return null;
-          const target = el.getAttribute('target');
-          if (target && target !== '_self') return null;
+          const target = linkTarget(el);
+          if (target && target.toLowerCase() !== '_self') {
+            // ★The raw href is the `?via=` launcher. Left to the browser, a
+            // named frame loaded the LAUNCHER — and the parent's sweep then
+            // contained it, so its URL facade decoded `via=` and it redirected
+            // to `proxy.localhost:<target port>`: CSP-blocked, chrome-error.
+            // The frame never reached the target (2026-10-01; the surface
+            // probe only passed by reading the launcher URL mid-flight).
+            // Frames of this page take the proxied frame route instead.
+            // `_blank`, an ancestor, or a name no frame carries (a new named
+            // window) still go native: the launcher works at top level.
+            frame = navigableForTarget(target);
+            if (frame === root) frame = null;
+            // No such frame: the browser acts on the RAW attribute — unless the
+            // membrane neutralized it to `_self`, which stays ours to handle.
+            else if (!frame && Native.getAttribute.call(el, 'target') !== '_self') return null;
+          }
         }
         const raw = isAnchor ? Native.getAttribute.call(el, 'data-zp-target-url') || el.getAttribute('href') : typeof el.href === 'string' ? el.href : '';
         if (!raw) continue;
@@ -240,9 +334,9 @@
         // 페이지가 처리하도록 위임. (실제 hash fragment 가 있는 `#section` 은
         // virtual hash update 유지.)
         if (raw === '#') continue;
-        if (raw[0] === '#') return { hash: raw, element: el };
+        if (raw[0] === '#' && !frame) return { hash: raw, element: el };
         if (hasExecutableURLScheme(raw)) return { href: '', element: el };
-        if (isHTTPURL(raw)) return { href: raw, element: el };
+        if (isHTTPURL(raw) || (frame && raw[0] === '#')) return { href: raw, element: el, frame };
       }
       return null;
     }
@@ -470,6 +564,20 @@
       if (jsMatch) {
         try { execGlobalScript(callPageRewriter(raw.slice(jsMatch[0].length), 'classic')); } catch {}
         return null;
+      }
+      // A frame of this page by name takes the proxied frame route, as a link
+      // does (clickNavigationTarget): natively the frame navigates and open()
+      // returns its window. Native.open would park the share launcher in the
+      // frame. With noopener/noreferrer the browser picks a new window instead,
+      // so that stays native.
+      if (isHTTPURL(raw) && !/(^|[\s,])no(opener|referrer)\b/i.test(String(features || ''))) {
+        const frame = navigableForTarget(String(target));
+        const win = frame && frame !== root ? nativeFrameWindow(frame) : null;
+        if (win) {
+          navigateFrameTo(frame, raw);
+          try { installNetworkContainment(win); } catch { return null; }
+          return win;
+        }
       }
       let child;
       if (raw === 'about:blank' || raw === '') child = Native.open('about:blank', target, features);

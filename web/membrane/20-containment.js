@@ -1,6 +1,43 @@
+  // A window whose own prelude already ran: its `__zp_get` is another realm's.
+  // Containment is for documents with no membrane of their own (about:blank,
+  // srcdoc, document.write, text/plain). Installing ours over a booted one
+  // REPLACED its helpers — `define` may overwrite a writable slot — so the
+  // child's code read OUR virtual location and storage, and the parent read the
+  // child's location as its own URL. Frames sent through `src` were spared only
+  // by their `data-zp-target-url` stash; one navigated by
+  // `contentWindow.location = …`, by itself or by a named link target was not
+  // (2026-10-01). The marker can't say this: it is a per-realm Symbol.
+  function ownsMembrane(w) {
+    try { const g = w.__zp_get; return typeof g === 'function' && g !== root.__zp_get; } catch { return false; }
+  }
+  // A proxied HTML document still loading: the SW injects a prelude into every
+  // HTML document it serves at a share path (htmltx guarantees a spot even with
+  // no html/head/body/script tag), and that prelude's first act contains the
+  // window. Installing ours in that gap would leave it a pre-instrumented realm
+  // — our fetch/XHR bound to the parent, our non-configurable accessors under
+  // its own. Only while it loads: a page parked at a share path that never
+  // boots (a failed prelude, a launcher) is contained once it completes.
+  //
+  // This replaces the old `data-zp-target-url` exemption, which was sticky: a
+  // routed frame that later showed about:blank, or a document that never got a
+  // prelude, stayed uncontained, and `iframe.contentWindow.eval` ran raw code
+  // at the proxy origin (measured 2026-10-01). Measured too: Chrome does not
+  // reuse the about:blank Window for the routed document, so containing the
+  // blank page in front of a pending route leaks nothing into it.
+  function bootingProxiedDocument(w) {
+    try {
+      const doc = w.document;
+      if (!doc || doc.readyState === 'complete') return false;
+      const u = new Native.URL(String(Native.documentURLDesc.get.call(doc)));
+      // The SW serves every document it transforms as text/html (XHTML too), so
+      // any other type here never got a prelude.
+      return u.origin === proxyOrigin && ZP.isSharePath(u.pathname) && String(doc.contentType || '') === 'text/html';
+    } catch { return false; }
+  }
   function installNetworkContainment(w) {
     if (!w) return;
     try { if (w[networkContainmentMarker]) return; } catch {}
+    if (w !== root && (ownsMembrane(w) || bootingProxiedDocument(w))) return;
     installToStringMasking(w);
     // OXC rewrite 결과는 `__zp_get/set/call/construct/...` 헬퍼를 호출한다.
     // about:blank ad iframe (NAVER GFP SafeFrame 등) 은 자체 prelude 가 안 돌고

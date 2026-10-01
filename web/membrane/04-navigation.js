@@ -70,9 +70,21 @@
     activeProxyFragment = shareFragmentForKey(share.key);
     return path + activeProxyFragment;
   }
+  // routeKey → target of every frame route this realm opened. `/zp/p/<token>`
+  // cannot be decrypted here, and a child that runs no prelude of its own
+  // (text/plain, an image, a failed boot) cannot say where it is — this is how
+  // the parent still reads that frame's location and message origin. Keyed by
+  // where the frame IS (its current document path), unlike the element stash,
+  // which records where it was first sent.
+  const frameRouteTargets = new Map();
+  function frameRouteTarget(path) {
+    return ZP.isSharePath(path) ? frameRouteTargets.get(ZP.shareRouteKey(path)) || '' : '';
+  }
   async function activatedFrameURL(raw, base = baseURL) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
+    if (frameRouteTargets.size >= 4096) frameRouteTargets.delete(frameRouteTargets.keys().next().value);
+    frameRouteTargets.set(share.encrypted, target);
     const entryId = 'e' + ZP.randomId();
     // parentTargetUrl carries the embedding page's virtual URL so the SW can
     // send the right Referer when fetching the iframe document. Without it

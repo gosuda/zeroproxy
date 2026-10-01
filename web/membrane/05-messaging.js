@@ -232,6 +232,13 @@
   }
   function virtualOriginForMessage(ev) {
     if (!ev || ev.origin !== proxyOrigin || !ev.source) return '';
+    // A frame this realm routed: its current document path names the target.
+    // The marker below is per-realm, so a child that booted its own prelude is
+    // invisible to it — without this its messages arrived from the proxy origin.
+    try {
+      const routed = frameRouteTarget(ev.source.location.pathname);
+      if (routed) return new URL(routed).origin;
+    } catch {}
     try {
       const origin = frameWindowOrigins.get(ev.source) || ev.source[frameTargetOriginMarker];
       return origin || '';

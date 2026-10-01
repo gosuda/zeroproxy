@@ -82,26 +82,6 @@
     function containFrameWindow(childWin, frame) {
       if (!childWin) return childWin;
       try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
-      // Skip parent's containment if the frame is queued to navigate to its
-      // own target URL. installNetworkContainment closes over the parent's
-      // `virtualURL`; same-origin navigation reuses the iframe Window object,
-      // so the installed origin/document.origin getters persist on
-      // iframe.Document.prototype AND the iframe.document instance. The
-      // iframe's own runtime-prelude can't override the document-instance
-      // wrap that was bound before navigation. Letting the iframe install
-      // its own membrane fresh after load is the correct path.
-      try {
-        if (frame && Native.getAttribute && Native.getAttribute.call(frame, 'data-zp-target-url')) {
-          // 이 프레임은 자기 prelude 가 붙을 때까지 부모가 손대지 않는다.
-          // 다만 그 **사이 구간**에 부모가 `iframe.contentWindow.postMessage(
-          // msg, 'https://<타깃>')` 를 쏘면 네이티브가 받는다 — 프록시에서는
-          // 수신 창의 실제 오리진이 프록시 오리진이라 타깃 오리진과 안 맞고
-          // 메시지가 **조용히 버려진다**. naver 의 ndp-core 가 광고 슬롯에
-          // 정확히 이걸 한다(로드당 9건). 매핑만은 미리 걸어 둔다.
-          installEarlyPostMessage(childWin);
-          return childWin;
-        }
-      } catch {}
       instrumentedWindows.add(childWin);
       // 부모 쪽 `contentWindow.name` 은 iframe 의 name 속성이 초기값이다 —
       // 자식 realm 의 가상 스토어와는 별개로 부모 측 읽기 경로를 시드한다.
@@ -109,6 +89,20 @@
         const fn = frame && Native.getAttribute && Native.getAttribute.call(frame, 'name');
         if (fn) virtualFrameNames.set(childWin, fn);
       } catch {}
+      // Its own prelude contains it, or is about to (ownsMembrane /
+      // bootingProxiedDocument). Everything else is contained — including a
+      // frame whose route is still pending: the old `data-zp-target-url`
+      // exemption left that window, and every later one in the frame, raw.
+      if (ownsMembrane(childWin)) return childWin;
+      if (bootingProxiedDocument(childWin)) {
+        // 자기 prelude 가 붙기 전 **사이 구간**에 부모가 `iframe.contentWindow
+        // .postMessage(msg, 'https://<타깃>')` 를 쏘면 네이티브가 받는다 —
+        // 수신 창의 실제 오리진이 프록시 오리진이라 타깃 오리진과 안 맞고
+        // 메시지가 **조용히 버려진다**. naver 의 ndp-core 가 광고 슬롯에
+        // 정확히 이걸 한다(로드당 9건). 매핑만은 미리 걸어 둔다.
+        installEarlyPostMessage(childWin);
+        return childWin;
+      }
       try { installNetworkContainment(childWin); }
       catch (e) {
         try { let dg = root.__zp_diagnostics; try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {} if (dg && dg.length < 200) dg.push({ t: 'contain-fail', msg: String(e && (e.name + ':' + (e.message || e))).slice(0, 200), stack: String(e && e.stack || '').slice(0, 400) }); } catch {}
@@ -192,17 +186,11 @@
       const src = Native.getAttribute.call(frame, 'src');
       try { zpTrace('iframe', (src || 'about:blank').slice(0, 160)); } catch {}
       rememberFrameOrigin(frame);
-      // If the frame already has a target URL queued (will navigate to a
-      // share URL momentarily via activatedFrameURL), do NOT install the
-      // parent's containment on the temporary about:blank window. The
-      // installation closes over the parent's `virtualURL`; when the iframe
-      // navigates same-origin, the Window object is reused and parent's
-      // getters (origin/document.origin/window.origin) persist on iframe's
-      // Document.prototype — making the iframe think its origin is the
-      // parent's URL. The iframe's own runtime-prelude installs the right
-      // membrane (with the iframe's virtualURL) after navigation.
-      const willNavigate = !!Native.getAttribute.call(frame, 'data-zp-target-url');
-      if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow && !willNavigate) installNetworkContainment(frame.contentWindow);
+      // The blank page in front of a pending route is contained too: Chrome
+      // gives the routed document a fresh Window (measured 2026-10-01), so
+      // nothing installed here reaches it — while skipping left the blank page
+      // itself raw (see bootingProxiedDocument).
+      if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow) installNetworkContainment(frame.contentWindow);
       installSafeFrameResizeShim(frame);
     } catch { try { frame.remove(); } catch {} }
   }

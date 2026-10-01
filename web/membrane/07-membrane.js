@@ -398,6 +398,10 @@
       // 평문 경로는 deproxy 로 복원한다. about:*/알 수 없는 것은 부모 계약 유지.
       function foreignVirtualURL() {
         try {
+          const routed = frameRouteTarget(nativeLoc.pathname);
+          if (routed) return new URL(routed);
+        } catch {}
+        try {
           const frames = document.querySelectorAll('iframe,frame');
           for (const el of frames) {
             try {
