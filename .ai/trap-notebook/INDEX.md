@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-01 | membrane / 미해결 | 서로 다른 사이트의 프레임이 격리되지 않는다 — 부모가 교차 사이트 자식의 문서·전역·저장소를 읽는다(네이티브는 SecurityError). 설계 변경 필요. | rewriter.md#교차-사이트-프레임 |
+| 2026-10-01 | membrane / 미해결 | src 로 라우팅한 프레임은 load 가 두 번·히스토리 두 칸(네이티브 1) — 플레이스홀더 about:blank 가 한 번 더 쏜다. 라우트 대기 상태가 필요. | rewriter.md#프레임-load-두-번 |
 | 2026-10-01 | membrane / 수정 | target 을 전부 _self 로 고쳐 쓰고 있었다 — _blank 제자리·_top 은 프레임만·폼은 타깃 무시·팝업은 런처부터. 재작성 제거, 링크·폼·open 을 navigable 규칙으로. | rewriter.md#내비게이션-타깃 |
 | 2026-10-01 | membrane / 보안 | 라우팅 프레임의 세 창(대기 중 blank·about:blank 로 옮긴 프레임·앵커 없는 문서)에서 contentWindow.eval 이 프록시 오리진 날 코드였다 — 지금 문서 기준 containment. | rewriter.md#라우팅-프레임-탈출 |
 | 2026-10-01 | membrane / 보안 | 부모가 contentWindow 를 읽을 때마다 자식의 멤브레인을 자기 것으로 덮었다(define 은 writable 슬롯을 덮는다) — src 로 보낸 프레임만 무사했다. | rewriter.md#자식-멤브레인-덮어쓰기 |

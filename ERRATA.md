@@ -25,7 +25,7 @@ runs turned out to certify divergences as "design" — see
 |---|---|---|
 | `direct-vs-proxy compatibility differential` (B, C, I, A5, J) | 63 | 0 |
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
-| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 111 | 15, each listed with a reason |
+| `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 116 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
 
 Suite totals (2026-10-01): e2e 192/192 — including the WebTransport gateway
@@ -326,7 +326,9 @@ Scope variants: `function f(location=location)` (compat `paramDefault`),
 `labeledFnDecl`, `annexBSloppy`), `arguments` aliasing (compat
 `argumentsAlias`), eval-created bindings (dyn `evalVarVisible`), cross-script
 `let`/`const`/`class`/`var` (surface `crossScript*`, `lexRedeclare`) — all
-**parity**. `using` / `await using` — **unverified** (no fixture).
+**parity**. `using` / `await using`, `eval`/`Function` bodies with `using`,
+`DisposableStack` — **parity** (surface `usingDecl`, `awaitUsing`, `usingEval`,
+`usingFunction`, `disposableStack`).
 
 ---
 
@@ -380,7 +382,11 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | a child's own membrane survives the parent's `contentWindow` reads | **fixed** 2026-10-01 (item 25) | surface `childLocAssign` |
 | blank / routed / prelude-less child windows are never raw | **fixed** 2026-10-01 (item 26) | surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval` |
 | SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |
-| child cookie/storage isolation, iframe `onload` handlers, CSP inheritance, stale-realm cleanup | **unverified** | — |
+| child cookie/storage between **same-site** frames, and a parent's own storage seen from a child | **parity** (measured 2026-10-01, one-off differential, not pinned) | — |
+| iframe `load` events and joint session history for a frame sent through `src` | **residual** — two `load` events (native: one) and two history entries (native: one) | The frame loads a placeholder `about:blank` first, then the routed document. Suppressing the placeholder's `load` and replacing instead of pushing needs a pending-route state on the frame element. Pages that count loads or use the back button see the extra step. See [trap 프레임-load-두-번](.ai/trap-notebook/rewriter.md#프레임-load-두-번). |
+| a detached frame's window | **parity** for `eval` and `closed`; `document.URL` reports the virtual URL where native reports `about:blank` | Same virtual-URL split as srcdoc (see Residuals). |
+| **frames of different sites** | **residual — security-relevant.** Every proxied frame shares the proxy's physical origin, so the browser's same-origin policy cannot separate them. The membrane virtualizes `Location` (cross-site reads throw) and gives a child only own-expando values of its parent, but a parent's reads of a cross-site child's document, globals and storage are **not** blocked (native Chrome throws `SecurityError`). | Closing it needs every window handle (`contentWindow`, `open()`, `frames[i]`, `opener`) wrapped in a per-virtual-origin facade — a design change, not a patch. Pinned today only for `Location`: e2e `cross-virtual-origin frames cannot read parent Location`. See [trap 교차-사이트-프레임](.ai/trap-notebook/rewriter.md#교차-사이트-프레임). |
+| CSP inheritance into child frames | **unverified** | — |
 
 ---
 
@@ -435,10 +441,20 @@ build identity (intentional); termination mid-request and multi-target workers
 `window.name`, `document.cookie`, anchor property vs attribute, `ping`,
 `history.pushState`, same-origin `fetch` — compat differential, all identical to
 native. `mailto:` delegation — **fixed** (surface `mailtoNav`). Dynamic `<base>`
-— **intentional** (`base-uri 'none'`; surface `dynamicBase`). `location.protocol/
-host/hostname/port/pathname/search` writes, `location.replace` history,
-`window.open` features, `submitter.formAction`, `a.download`/`referrerPolicy` —
-**unverified** (no fixture).
+— **intentional** (`base-uri 'none'`; surface `dynamicBase`).
+
+Measured against plain Chrome on 2026-10-01 with a one-off differential (not
+pinned — the probes need seconds of settling per case): `location.pathname` /
+`search` / `hash` writes in a child frame, `location.host` / `hostname` writes
+(`SecurityError` in both), `location.replace` and `assign` joint-history
+deltas, form `action` / `formAction` with an attribute set, `a.download` /
+`referrerPolicy`, `window.open(url, name, 'noopener')` (returns `null` in
+both) — **parity**. Two small residuals came out of the same run:
+
+| Residual | Native / proxy | Why it stays |
+|---|---|---|
+| `submitter.formAction` with no `formaction` attribute | document URL / `''` | The URL-property hook returns the attribute's absence as `''`; the native getter falls back to the document URL. Cosmetic. |
+| `window.open(url, name, features).opener === window` | `true` / `false` | The returned handle's `opener` is the membrane's window facade, which is not `===` the page's own `window` reference. Needs window-identity unification across facades. |
 
 ---
 

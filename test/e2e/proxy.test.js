@@ -1814,6 +1814,13 @@ function createTargetServer(requests, pendingResponses) {
             document.body.appendChild(f);
             return String(f.contentWindow.eval('location.href'));
           });
+          // ── explicit resource management: 'using' is a declaration the rewriter
+          // must keep intact (it was an unverified ERRATA row until 2026-10-01).
+          await P('usingDecl', () => { const log = []; { using r = { [Symbol.dispose]() { log.push('d'); } }; log.push('in'); } return log.join(','); });
+          await P('awaitUsing', async () => { const log = []; { await using r = { async [Symbol.asyncDispose]() { log.push('ad'); } }; log.push('in'); } return log.join(','); });
+          await P('usingEval', () => (0, eval)('{ const log = []; { using r = { [Symbol.dispose]() { log.push("d"); } }; log.push("in"); } log.join(","); }'));
+          await P('usingFunction', () => new Function('const log = []; { using r = { [Symbol.dispose]() { log.push("d"); } }; } return log.join(",");')());
+          await P('disposableStack', () => { const s = new DisposableStack(); const log = []; s.defer(() => log.push('x')); s.dispose(); return log.join(',') + '|' + s.disposed; });
           await P('childSharedWorker', async () => {
             const f = document.createElement('iframe');
             f.srcdoc = '<scr' + 'ipt>try{ parent.__childSW = "wrote"; const w = new SharedWorker("/sw-shared.js?name=child"); w.port.onmessage = e => parent.__childSW = String(e.data); w.onerror = e => parent.__childSW = "err:" + e.message; }catch(e){ parent.__childSW = "threw:" + e.name; }</scr' + 'ipt>';

@@ -1367,3 +1367,17 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** 재작성을 걷고 링크·폼 모두 "choosing a navigable" 로 푼다(`chooseNavigable`): 자기 → 멤브레인 자기 내비게이션, 프레임 → 프레임 라우트, 조상 → **그 창의 멤브레인**(`win.__zp_get(win, 'location').href =`, 페이지의 `top.location =` 과 같은 길), 새 창 → 네이티브(`_blank` 는 noopener). POST 는 같은 `SUBMIT_PREPARE` 의 본문을 싣고 불러올 창만 다르다. 팝업은 opener 가 `OPEN_SHARE` 를 직접 보내 문서 경로로 바로 보낸다 — 런처가 하던 일 그대로.
 - **검증:** surface `targetFramenameAttr`·`targetAttrReadback`·`parentTargetLink`(중첩 프레임의 `_parent`)·`formTargetGet`·`formTargetPost`·`popupRouted` — 전부 네이티브와 같다. 팝업을 5ms 로 샘플링하면 about:blank → 문서 바로, 런처 상태 없음. noopener 팝업은 목적지까지 간다.
 - **규칙:** 브라우저 의미를 "안전하게" 하려고 속성을 고쳐 쓰지 말 것 — 읽기 표면이 갈라지고, 고쳐 쓴 이유가 사라진 뒤에도 남는다. 내비게이션은 실행 지점(클릭·제출·open)에서 가로챈다.
+
+## <a id="교차-사이트-프레임"></a>서로 다른 사이트의 프레임을 브라우저가 격리하지 않는다 — 부모가 교차 사이트 자식의 문서·전역·저장소를 읽는다 (2026-10-01, 미해결)
+
+- **측정:** localhost 부모 + 127.0.0.1 자식(다른 사이트)을 네이티브와 프록시에서 같은 코드로 읽었다. 네이티브는 `contentWindow` 로 문서·전역·`localStorage`·`document.cookie`·`eval` 어느 것도 못 읽고(`SecurityError`, `contentDocument` 는 `null`) 프록시는 읽힌다. 같은 사이트 대조군은 네이티브와 같다.
+- **원인:** 프록시를 지나는 모든 프레임은 물리적으로 같은 오리진(프록시)이라 브라우저의 same-origin policy 가 가를 수 없다. 멤브레인이 가상 오리진별로 막는 것은 `Location` 뿐이고(교차 사이트 읽기는 던진다), 자식이 부모를 읽을 때는 own expando 값만 받는다. **부모→자식 방향은 열려 있다.**
+- **상태:** 고치지 않았다 — 패치가 아니라 설계 변경이다(`contentWindow`·`open()`·`frames[i]`·`opener` 로 나가는 모든 창 핸들을 가상 오리진별 파사드로 감싼다). ERRATA F 절에 보안 잔여로 기록.
+- **규칙:** 프레임 접근 코드를 만질 때 "같은 물리 오리진이라 읽힌다" 를 정상으로 취급하지 말 것 — 네이티브 기준은 오리진이 다르면 던진다. 새 읽기 경로를 만들면 교차 사이트 대조군부터 돌린다.
+
+## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번, 히스토리가 두 칸이다 (2026-10-01, 미해결)
+
+- **측정:** 같은 코드를 네이티브/프록시에서 — `src` 를 붙인 뒤 append: `load` 리스너+`onload` 가 네이티브 1회(`Lo`), 프록시 2회(`LoLo`). append 뒤 `src` 대입·`src` 교체도 +1회씩. 교체 시 조인트 히스토리 증가분이 네이티브 1, 프록시 2. `srcdoc`·빈 프레임·`contentWindow.location` 대입은 같다.
+- **원인:** `src` 훅이 먼저 `about:blank` 플레이스홀더를 싣고(`setAttribute('src', 'about:blank')`), 프레임 라우트가 준비되면 진짜 문서로 다시 `src` 를 쓴다. 플레이스홀더 로드가 `load` 를 한 번 쏘고 히스토리 칸을 하나 만든다.
+- **상태:** 고치지 않았다 — 프레임 엘리먼트에 "라우트 대기" 상태를 두고 그 사이의 `load` 를 캡처 단계에서 삼키며, 두 번째 이동은 push 가 아니라 replace 여야 한다. 사이트가 `load` 를 세거나 뒤로가기를 쓰면 한 단계가 더 보인다. ERRATA F 절 잔여.
+- **규칙:** 프레임 라우트 코드를 바꾸면 `load` 횟수와 히스토리 증가분을 네이티브와 세어 볼 것 — 둘 다 타이밍 의존이라 e2e 에는 못 넣었다(케이스당 수 초).
