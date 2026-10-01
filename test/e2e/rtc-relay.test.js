@@ -17,6 +17,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const puppeteer = require('puppeteer');
+const { openThroughLauncher } = require('./launcher');
 
 const freeTCP = () => new Promise((resolve, reject) => {
   const s = net.createServer();
@@ -180,12 +181,7 @@ test('D5: proxied WebRTC runs relay-only through the embedded TURN server', { ti
       if (mode === 'native') {
         await a.goto(`${base}/a?room=${room}`);
       } else {
-        await a.goto(`http://proxy.localhost:${proxyPort}/zp/`, { waitUntil: 'domcontentloaded' });
-        await a.type('input', `${base}/a?room=${room}`);
-        await Promise.all([
-          a.waitForNavigation({ timeout: 45000 }).catch(() => {}),
-          a.click('button, input[type=submit]').catch(() => a.keyboard.press('Enter')),
-        ]);
+        await openThroughLauncher(a, `http://proxy.localhost:${proxyPort}`, `${base}/a?room=${room}`);
       }
       await a.waitForFunction(() => window.__rtc, { timeout: 60000, polling: 200 }).catch(() => {});
       await b.waitForFunction(() => window.__rtcB, { timeout: 45000, polling: 200 }).catch(() => {});

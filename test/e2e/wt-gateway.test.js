@@ -18,6 +18,7 @@ const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const puppeteer = require('puppeteer');
+const { openThroughLauncher, pageText } = require('./launcher');
 
 const freeTCP = () => new Promise((resolve, reject) => {
   const s = net.createServer();
@@ -147,17 +148,20 @@ test('WebTransport through the D4 gateway matches native (page and worker)', { t
 
       const ctx = await browser.createBrowserContext();
       const page = await ctx.newPage();
-      await page.goto(`http://proxy.localhost:${proxyPort}/zp/`, { waitUntil: 'domcontentloaded' });
-      await page.type('input', url);
-      await Promise.all([
-        page.waitForNavigation({ timeout: 45000 }).catch(() => {}),
-        page.click('button, input[type=submit]').catch(() => page.keyboard.press('Enter')),
-      ]);
+      // Kept for the failure message only: "no result" alone cannot say whether
+      // the page never loaded, the worker never started or it started and hung.
+      const seen = [];
+      page.on('pageerror', e => seen.push(`pageerror: ${String(e.message).slice(0, 120)}`));
+      page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') seen.push(`${m.type()}: ${m.text().slice(0, 120)}`); });
+      page.on('requestfailed', r => seen.push(`requestfailed: ${r.url().slice(0, 90)} ${r.failure() && r.failure().errorText}`));
+      page.on('workercreated', w => seen.push(`worker created: ${w.url().slice(0, 60)}`));
+      const navigated = await openThroughLauncher(page, `http://proxy.localhost:${proxyPort}`, url);
       await page.waitForFunction(() => window.__wt, { timeout: 60000, polling: 100 }).catch(() => {});
       const proxied = await page.evaluate(() => window.__wt || '(no result)');
+      const state = proxied === '(no result)' ? { navigated, ...await pageText(page), seen: seen.slice(0, 8) } : null;
       await ctx.close();
       results[variant] = { native, proxied };
-      assert.equal(proxied, native, `${variant}: proxied WebTransport diverges from native`);
+      assert.equal(proxied, native, `${variant}: proxied WebTransport diverges from native${state ? ` — page state ${JSON.stringify(state)}` : ''}`);
     });
   }
   fs.writeFileSync(path.join(artifacts, 'wt-gateway.json'), JSON.stringify(results, null, 2));
