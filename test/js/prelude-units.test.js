@@ -599,3 +599,239 @@ test('relay-only RTC configuration replaces the ICE servers and the policy', () 
   assert.equal(page.iceTransportPolicy, 'all', 'the page dictionary is not mutated');
   assert.equal(ZP.relayOnlyRTCConfiguration(undefined, ice).iceTransportPolicy, 'relay');
 });
+
+// ---------------------------------------------------------------------------
+// postMessage: a message addressed to an origin the destination window does not
+// have is dropped — and both signatures work. Every proxied window shares one
+// physical origin, so the browser's filter never fires; the wrapper compares
+// VIRTUAL origins. Expected values are Chrome's (measured, native).
+// ---------------------------------------------------------------------------
+
+const PM_BLOCK = slice('  function postMessageTargetAccepts(target, wanted) {', '  function virtualOriginForMessage(ev) {');
+
+function pmEnv(destOrigin) {
+  const sent = [];
+  const diag = [];
+  const target = { postMessage: (...a) => { sent.push(a); } };
+  const env = load(PM_BLOCK, ['postMessageWrapperFor', 'postMessageTargetAccepts', 'normalizePostMessageTargetOrigin'], {
+    proxyOrigin: 'http://proxy.test:18080',
+    virtualURL: new URL('http://a.test:3000/page'),
+    windowHandles: { originOf: () => destOrigin },
+    root: { __zp_diagnostics: diag },
+    postMessageWrappers: new WeakMap(),
+    maskNativeFunction() {},
+    defineMasked() {},
+    restoreNativePostMessage() {},
+    installEarlyPostMessage() {},
+    URL,
+  });
+  return { env, target, sent, diag, wrapped: env.postMessageWrapperFor(target) };
+}
+
+test('postMessage target origin: a mismatch is dropped, a match is delivered', () => {
+  const { wrapped, sent, diag } = pmEnv('http://b.test:3000');
+  wrapped('m', 'http://b.test:3000');          // exact
+  wrapped('m', '*');                            // anything
+  assert.equal(sent.length, 2);
+  wrapped('m', 'http://example.invalid');      // wrong site
+  wrapped('m', 'http://a.test:3000');          // the sender's own origin, to another site's window
+  wrapped('m', '/');                            // "/" is the sender's origin too
+  wrapped('m');                                 // default target origin is "/"
+  assert.equal(sent.length, 2, 'every mismatch was dropped silently');
+  assert.deepEqual(diag.map(d => d.t), ['pm-drop', 'pm-drop', 'pm-drop', 'pm-drop'], 'and each one left a diagnostic');
+  assert.deepEqual({ t: diag[0].t, wanted: diag[0].wanted, dest: diag[0].dest, from: diag[0].from },
+    { t: 'pm-drop', wanted: 'http://example.invalid', dest: 'http://b.test:3000', from: 'http://a.test:3000' });
+  // The record also says which window the message was aimed at, and where it was sent from.
+  assert.match(diag[0].to, /^(self|parent|top|opener|child\d+|other)\b/, 'and names the destination by its role');
+  assert.equal(typeof diag[0].at, 'string', 'and the call site');
+  // Delivered messages carry the proxy origin the browser can match.
+  assert.deepEqual(sent.map(a => a[1]), ['http://proxy.test:18080', '*']);
+});
+
+test('postMessage target origin: "/" and the default reach a same-origin window', () => {
+  const { wrapped, sent } = pmEnv('http://a.test:3000');
+  wrapped('m', '/');
+  wrapped('m');
+  wrapped('m', 'http://a.test:3000');
+  wrapped('m', 'http://b.test:3000');
+  assert.equal(sent.length, 3);
+});
+
+test('postMessage target origin: an unknown destination is left to the browser', () => {
+  const { wrapped, sent } = pmEnv('');
+  wrapped('m', 'http://b.test:3000');
+  wrapped('m', '/');
+  assert.equal(sent.length, 2);
+});
+
+test('postMessage: the options form is honored, filtered and keeps transfer', () => {
+  const { wrapped, sent } = pmEnv('http://b.test:3000');
+  const transfer = [];
+  wrapped('m', { targetOrigin: '*' });
+  wrapped('m', { targetOrigin: 'http://b.test:3000', transfer });
+  assert.equal(sent.length, 2, 'the options form used to throw a SyntaxError (the object was stringified)');
+  assert.deepEqual(sent[0][1], { targetOrigin: '*' });
+  assert.equal(sent[1][1].targetOrigin, 'http://proxy.test:18080');
+  assert.equal(sent[1][1].transfer, transfer);
+  wrapped('m', { targetOrigin: 'http://example.invalid' });
+  wrapped('m', {});                              // targetOrigin defaults to "/" = the sender's
+  assert.equal(sent.length, 2);
+});
+
+test('postMessage wrapper looks like the native method', () => {
+  const { wrapped } = pmEnv('http://b.test:3000');
+  assert.equal(wrapped.length, 1);
+  assert.equal(wrapped.name, 'postMessage');
+});
+
+// ---------------------------------------------------------------------------
+// Which windows a page may hold. A window of another virtual origin is handed
+// out only as a stand-in that follows the HTML cross-origin rules; the facts
+// below were measured against Chrome 148.
+// ---------------------------------------------------------------------------
+
+const XORIGIN_BLOCK = slice('    const CROSS_ORIGIN_WINDOW_NAMES = [', '    function virtualWindowProperty(target, prop) {');
+
+function xoriginEnv() {
+  const get = () => {};
+  const scope = { __scope: true };
+  const safe = new WeakMap();
+  const ownerScope = { __ownerScope: true };
+  const root = { parent: null, opener: null, __zp_get: get };
+  root.parent = root;
+  const urlMeta = new Map();
+  const env = load(XORIGIN_BLOCK, ['windowHandleFor', 'crossOriginWindow', 'virtualOriginOfWindow'], {
+    get, root, scope,
+    virtualURL: new URL('http://a.test:3000/'),
+    urlMeta,
+    Native: { getAttribute: { call: () => null }, DOMException },
+    frameRouteTarget: () => '',
+    isScopeProxy: v => v === scope,
+    safeCrossWindow: w => { if (!safe.has(w)) safe.set(w, { safeFor: w }); return safe.get(w); },
+    crossWindowLocation: w => ({ locationOf: w }),
+    postMessageWrapperFor: w => function postMessage() {},
+    maskNativeFunction() {},
+    toStringMap: new Map(),
+    nativeAccessorSource: () => 'function () { [native code] }',
+    normalizedError,
+    crossWindowTargets: new WeakMap(),
+    URL,
+  });
+  const win = (origin, extra = {}) => Object.assign({
+    length: 0, closed: false, top: null, parent: null, opener: null,
+    close() {}, focus() {}, blur() {}, postMessage() {},
+    __zp_get: origin ? (w, prop) => (prop === 'location' ? { origin } : prop === 'window' ? ownerScope : undefined) : undefined,
+  }, extra);
+  return { env, root, scope, urlMeta, win, ownerScope };
+}
+const isSecurityError = e => e && e.name === 'SecurityError';
+
+test('window handles: own window → page-facing scope, same-origin window as it is, nothing else touched', () => {
+  const { env, root, scope, win } = xoriginEnv();
+  assert.equal(env.windowHandleFor(root), scope);
+  assert.equal(env.windowHandleFor(null), null);
+  const same = win('http://a.test:3000');
+  assert.equal(env.windowHandleFor(same), same, 'a same-origin window is handed out raw');
+  assert.equal(env.windowHandleFor('str'), 'str');
+});
+
+test('window handles: a window of another origin is a stand-in, stable per window', () => {
+  const { env, win } = xoriginEnv();
+  const other = win('http://b.test:3000');
+  const handle = env.windowHandleFor(other);
+  assert.notEqual(handle, other);
+  assert.equal(env.windowHandleFor(other), handle, 'natively `iframe.contentWindow === iframe.contentWindow`');
+  assert.equal(env.windowHandleFor(handle), handle, 'a handle passed through again is itself');
+});
+
+test('cross-origin window: the allowed names answer, everything else is SecurityError', () => {
+  const { env, win, root, scope } = xoriginEnv();
+  const w = win('http://b.test:3000', { top: root, parent: root });
+  const h = env.windowHandleFor(w);
+  assert.equal(h.closed, false);
+  assert.equal(h.length, 0);
+  assert.equal(h.window, h); assert.equal(h.self, h); assert.equal(h.frames, h);
+  assert.equal(typeof h.postMessage, 'function');
+  assert.equal(h.top, scope, 'the opener chain leads back to OUR window');
+  assert.equal(h.parent, scope);
+  assert.equal(h.opener, null);
+  assert.deepEqual(h.location, { locationOf: w });
+  for (const name of ['document', 'localStorage', 'eval', 'name', 'origin', 'navigator', 'constructor', 'zpExpando', 'frameElement']) {
+    assert.throws(() => h[name], isSecurityError, `reading ${name}`);
+  }
+  assert.equal(h.then, undefined, '`then` reads undefined, so a promise resolution does not throw');
+});
+
+test('cross-origin window: every mutation throws SecurityError (not false)', () => {
+  const { env, win } = xoriginEnv();
+  const h = env.windowHandleFor(win('http://b.test:3000'));
+  assert.throws(() => { h.x = 1; }, isSecurityError);
+  assert.throws(() => { h.postMessage = 1; }, isSecurityError);
+  assert.throws(() => { delete h.x; }, isSecurityError);
+  assert.throws(() => Reflect.deleteProperty(h, 'location'), isSecurityError);
+  assert.throws(() => Reflect.defineProperty(h, 'x', { value: 1 }), isSecurityError);
+  assert.throws(() => Reflect.setPrototypeOf(h, {}), isSecurityError);
+  assert.throws(() => Reflect.preventExtensions(h), isSecurityError);
+  assert.equal(Reflect.isExtensible(h), true);
+});
+
+test('cross-origin window: reflection matches Chrome', () => {
+  const { env, win } = xoriginEnv();
+  const h = env.windowHandleFor(win('http://b.test:3000'));
+  assert.deepEqual(Object.keys(h), [], 'nothing is enumerable');
+  assert.equal(Object.getPrototypeOf(h), null);
+  assert.deepEqual(Object.getOwnPropertyNames(h), ['window', 'self', 'location', 'closed', 'frames', 'length', 'top', 'opener', 'parent', 'blur', 'close', 'focus', 'postMessage', 'then']);
+  assert.equal('location' in h, true);
+  assert.equal('postMessage' in h, true);
+  assert.throws(() => 'document' in h, isSecurityError);
+  assert.throws(() => 'then' in h, isSecurityError, '`then` is a key but not "in"');
+  assert.equal(Object.prototype.toString.call(h), '[object Object]');
+  assert.throws(() => String(h), isSecurityError);
+  assert.throws(() => JSON.stringify(h), isSecurityError);
+  assert.equal(h instanceof Object, false, 'a null prototype: no `instanceof Window` either');
+  const pm = Object.getOwnPropertyDescriptor(h, 'postMessage');
+  assert.deepEqual({ w: pm.writable, e: pm.enumerable, c: pm.configurable, t: typeof pm.value }, { w: false, e: false, c: true, t: 'function' });
+  const loc = Object.getOwnPropertyDescriptor(h, 'location');
+  assert.equal(typeof loc.get, 'function'); assert.equal(typeof loc.set, 'function'); assert.equal(loc.enumerable, false);
+  const closed = Object.getOwnPropertyDescriptor(h, 'closed');
+  assert.equal(typeof closed.get, 'function'); assert.equal(closed.set, undefined);
+  assert.throws(() => Object.getOwnPropertyDescriptor(h, 'document'), isSecurityError);
+});
+
+test('cross-origin window: child frames are reachable by index only up to length', () => {
+  const { env, win } = xoriginEnv();
+  const grandSame = win('http://a.test:3000');
+  const grandCross = win('http://c.test:3000');
+  const w = win('http://b.test:3000', { length: 2, 0: grandSame, 1: grandCross });
+  const h = env.windowHandleFor(w);
+  assert.equal(h[0], grandSame, 'a child of the SAME origin as us is ours to use');
+  assert.notEqual(h[1], grandCross);
+  assert.throws(() => h[1].document, isSecurityError);
+  assert.throws(() => h[2], isSecurityError, 'past the last child natively throws');
+  assert.deepEqual(Object.keys(h), ['0', '1']);
+});
+
+test("window handles: a frame's intended origin speaks for a window with no membrane yet", () => {
+  const { env, win, urlMeta } = xoriginEnv();
+  const blank = win('');                     // not booted: no __zp_get of its own
+  const frame = {};
+  assert.equal(env.windowHandleFor(blank, frame), blank, 'no route known: it is ours');
+  urlMeta.set(frame, 'http://b.test:3000/page');
+  const handle = env.windowHandleFor(blank, frame);
+  assert.notEqual(handle, blank, 'sent to another site: restricted from the start');
+  assert.throws(() => handle.document, isSecurityError);
+});
+
+test('window handles: a same-origin ancestor gets the ancestor stand-in, a cross-origin one the restricted one', () => {
+  const { env, win, root } = xoriginEnv();
+  const parentSame = win('http://a.test:3000');
+  parentSame.parent = parentSame;
+  root.parent = parentSame;
+  const h = env.windowHandleFor(parentSame, 'ancestor');
+  assert.deepEqual(Object.keys(h), ['safeFor']);
+  const parentCross = win('http://b.test:3000');
+  parentCross.parent = parentCross;
+  root.parent = parentCross;
+  const c = env.windowHandleFor(parentCross, 'ancestor');
+  assert.throws(() => c.document, isSecurityError);
+});

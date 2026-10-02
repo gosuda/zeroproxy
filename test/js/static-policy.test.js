@@ -599,13 +599,14 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
   const rt = preludeSource().split('\r\n').join('\n');
   const start = rt.indexOf('    function climbCrossWindow(targetWindow, prop, fallback) {');
   assert.ok(start >= 0, 'climbCrossWindow 를 못 찾았다');
-  const end = rt.indexOf('\n    function ', rt.indexOf('    function safeCrossWindow(targetWindow) {') + 1);
-  assert.ok(end > start, 'safeCrossWindow 구간을 못 찾았다');
+  // The same-origin stand-in ends where the window-handle policy begins.
+  const end = rt.indexOf('    // ── which windows a page may hold, and in what form');
+  assert.ok(end > start && end > rt.indexOf('    function safeCrossWindow(targetWindow) {'), 'safeCrossWindow 구간을 못 찾았다');
 
   // 실제 구현을 뜯어 실행한다 — 창 3단을 흉내 내고 그 위에서 CMP 루프를 돈다.
   const src = rt.slice(start, end);
   const make = new Function('root', 'scope', 'postMessageWrapperFor', 'crossWindowProxyCache', 'crossWindowTargets',
-    'definePropertiesMasked',
+    'definePropertiesMasked', 'windowHandleFor', 'get', 'ZP_HIDDEN_RE', 'MEMBER_DANGER',
     src + '\nreturn safeCrossWindow;');
 
   const top = { name: 'top' };
@@ -617,7 +618,12 @@ test('교차창 프록시의 parent 를 타고 올라가면 top 에 닿는다', 
 
   // leaf 실행 컨텍스트: root=leaf, scope=leaf 의 가상 window
   const scope = { name: 'scope(leaf)' };
-  const safeCrossWindow = make(leaf, scope, () => () => {}, new WeakMap(), new WeakMap(), Object.defineProperties);
+  // climbCrossWindow asks the handle policy for each step; for same-origin
+  // windows the policy's answer IS this stand-in, so late-bind it.
+  let safeRef = null;
+  const safeCrossWindow = make(leaf, scope, () => () => {}, new WeakMap(), new WeakMap(), Object.defineProperties,
+    w => safeRef(w), () => {}, /^__zp_/, new Set());
+  safeRef = safeCrossWindow;
 
   const windowTop = safeCrossWindow(top);
   let w = scope;

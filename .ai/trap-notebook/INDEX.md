@@ -6,8 +6,10 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-02 | membrane / 보안 | 서로 다른 사이트의 프레임이 격리되지 않았다 — 가상 오리진별 창 핸들 정책(교차 사이트는 SecurityError 스탠드인). 이미 같은 오리진일 때 쥔 핸들은 잔여. | rewriter.md#교차-사이트-프레임 |
+| 2026-10-02 | membrane / 수정 | 부모가 보낸 메시지의 e.origin 이 프록시 주소였다 — 맨 addEventListener 는 래퍼를 건너뛰었다. 창이 자기 오리진을 말하고 진짜 이벤트를 꾸민다. | rewriter.md#메시지-이벤트-수신측 |
+| 2026-10-02 | membrane / 보안 | postMessage 타깃 오리진을 걸러 내지 않았다(틀린 사이트 프레임에 도착) + 옵션 형태 SyntaxError. 가상 오리진 비교로. | rewriter.md#postmessage-타깃오리진 |
 | 2026-10-01 | e2e / 플레이크 | WT 워커 e2e 가 CI 에서 한 번 105초 후 실패(같은 커밋 재실행은 통과) — 런처 Open 대기 누락 가설, 대기+진단 메시지 추가. 회귀 의심은 재실행부터. | build-deploy.md#e2e-런처-대기 |
-| 2026-10-01 | membrane / 미해결 | 서로 다른 사이트의 프레임이 격리되지 않는다 — 부모가 교차 사이트 자식의 문서·전역·저장소를 읽는다(네이티브는 SecurityError). 설계 변경 필요. | rewriter.md#교차-사이트-프레임 |
 | 2026-10-01 | membrane / 수정 | src 라우팅 프레임은 load 가 두 번·히스토리 두 칸(파싱된 onload 는 세 번) — 라우팅 문서는 유지하고 플레이스홀더 load 는 삼킨다. load 는 window 로 안 간다. | rewriter.md#프레임-load-두-번 |
 | 2026-10-01 | membrane / 수정 | target 을 전부 _self 로 고쳐 쓰고 있었다 — _blank 제자리·_top 은 프레임만·폼은 타깃 무시·팝업은 런처부터. 재작성 제거, 링크·폼·open 을 navigable 규칙으로. | rewriter.md#내비게이션-타깃 |
 | 2026-10-01 | membrane / 보안 | 라우팅 프레임의 세 창(대기 중 blank·about:blank 로 옮긴 프레임·앵커 없는 문서)에서 contentWindow.eval 이 프록시 오리진 날 코드였다 — 지금 문서 기준 containment. | rewriter.md#라우팅-프레임-탈출 |

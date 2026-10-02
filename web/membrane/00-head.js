@@ -415,6 +415,12 @@
   // could not even load until static module specifiers were rewritten).
   // Published here so both scopes share one implementation.
   let pageRewriteHooks = null;
+  // What a page is allowed to hold when it obtains another window — frame
+  // `contentWindow`, `frames[i]`, `window.open()`, `event.source`, `parent`,
+  // `top`, `opener`. Filled by installPhase2Membrane; the frame accessors
+  // (18-iframes), the message events (05-messaging) and the popup hook (09)
+  // live in files that cannot see its inner scope.
+  let windowHandles = null;
 
   // Non-zero while a child-realm script runs off the ordered pipeline instead of
   // straight off the parser (see `childEnqueue` in installNetworkContainment).

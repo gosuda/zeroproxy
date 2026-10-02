@@ -112,6 +112,28 @@ class SocketReader {
   }
 }
 
+// A page that reports — by postMessage to its embedder or opener — how ITS view
+// of that window behaves: a native Chrome frame of another site may use a short
+// fixed list and gets SecurityError for everything else.
+function xsiteReporter(kind, viaOpener) {
+  const w = viaOpener ? 'opener' : 'parent';
+  const prefix = viaOpener ? 'opener' : 'parent';
+  const ops = viaOpener
+    ? [['openerType', 'window.opener'], ['openerDocument', 'opener.document'], ['openerStorage', 'opener.localStorage'], ['openerEval', 'opener.eval'],
+       ['openerLocationHref', 'opener.location.href'], ['openerClosed', 'opener.closed'], ['openerSelf', 'opener.self === opener'], ['openerTop', 'opener.top === opener'],
+       ['openerIn', '"document" in opener'], ['frameElement', 'window.frameElement'], ['parentIsSelf', 'parent === window']]
+    : [['parentDocument', 'parent.document'], ['parentStorage', 'parent.localStorage'], ['parentEval', 'parent.eval'], ['parentName', 'parent.name'],
+       ['parentLocationHref', 'parent.location.href'], ['parentLocationType', 'parent.location'], ['topDocument', 'top.document'], ['frameElement', 'window.frameElement'],
+       ['parentIsTop', 'parent === top'], ['parentSelf', 'parent.self === parent'], ['parentLength', 'parent.length'], ['parentClosed', 'parent.closed'],
+       ['parentPostMessage', 'parent.postMessage'], ['parentFrames', 'parent.frames'], ['parentIn', '"document" in parent'],
+       ['parentProto', 'Object.getPrototypeOf(parent)'], ['parentSetProp', '(parent.zpProbe = 1, "set")'], ['opener', 'window.opener']];
+  let body = 'var R = {};' +
+    'function op(k, f) { try { var v = f(); R[k] = v === null ? "null" : (typeof v === "object" || typeof v === "function") ? typeof v : (typeof v === "string" ? "string" : String(v)); } catch (e) { R[k] = "threw:" + (e && e.name); } }';
+  for (const [k, expr] of ops) body += 'op(' + JSON.stringify(k) + ', function () { return ' + expr + '; });';
+  body += w + '.postMessage(JSON.stringify({ kind: ' + JSON.stringify(kind) + ', R: R }), "*");';
+  return '<!doctype html><title>x</title><script>' + body + '<\/script>';
+}
+
 function createTargetServer(requests, pendingResponses) {
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
@@ -1451,6 +1473,149 @@ function createTargetServer(requests, pendingResponses) {
       res.end('<!doctype html><title>fh</title><script>parent.__fhSaw = String(location.href); setTimeout(function () { parent.__fhLate = String(location.href); }, 300);<\/script>');
       return;
     }
+    if (url.pathname === '/xsite-echo') {
+      // Answers a ping from its embedder: the test counts what arrives.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      // A BARE addEventListener (undefined receiver) and a reply through e.source:
+      // the combination ad and widget SDKs use. The proxy used to hand such a
+      // listener its own origin as e.origin and a raw e.source.
+      res.end('<!doctype html><title>echo</title><script>addEventListener("message", function (e) { if (e.data === "ping") parent.postMessage("pong", "*"); else if (e.data === "who") e.source.postMessage("who:" + JSON.stringify({ srcIsParent: e.source === parent, srcIsTop: e.source === top, origin: e.origin, trusted: e.isTrusted }), "*"); });<\/script>');
+      return;
+    }
+    if (url.pathname === '/xsite-child' || url.pathname === '/xsite-same' || url.pathname === '/xsite-pop') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(xsiteReporter(url.pathname, url.pathname === '/xsite-pop'));
+      return;
+    }
+    if (url.pathname === '/xsite') {
+      // Window access across sites, both directions, frames and a popup. Every
+      // value is a type or an error name — never page content.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Cross-site access</title><body><script>
+        window.__xsite = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+          var got = {}, pop = null, cross = null, same = null;
+          window.addEventListener('message', function (e) {
+            try {
+              var d = JSON.parse(e.data);
+              var handle = d.kind === '/xsite-child' ? cross && cross.contentWindow : d.kind === '/xsite-same' ? same && same.contentWindow : pop;
+              got[d.kind] = { R: d.R, sourceIsHandle: !!handle && e.source === handle };
+            } catch (x) {}
+          });
+          var mk = function (src) { var f = document.createElement('iframe'); f.src = src; document.body.appendChild(f); return f; };
+          var op = function (f) {
+            try { var v = f(); return v === null ? 'null' : (typeof v === 'object' || typeof v === 'function') ? typeof v : (typeof v === 'string' ? 'string' : String(v)); }
+            catch (e) { return 'threw:' + (e && e.name); }
+          };
+          cross = mk('http://' + other + ':' + location.port + '/xsite-child');
+          same = mk('/xsite-same');
+          var t0 = Date.now();
+          while (Date.now() - t0 < 8000 && !(got['/xsite-child'] && got['/xsite-same'])) await sleep(50);
+          await sleep(300);
+          var frameTable = function (label, f, index) {
+            var w = f.contentWindow;
+            var T = {
+              document: function () { return w.document; }, localStorage: function () { return w.localStorage; }, eval: function () { return w.eval; },
+              name: function () { return w.name; }, origin: function () { return w.origin; }, navigator: function () { return w.navigator; },
+              expando: function () { return w.zpChildVar; }, window: function () { return w.window === w; }, self: function () { return w.self === w; },
+              postMessage: function () { return w.postMessage; }, close: function () { return w.close; }, focus: function () { return w.focus; },
+              closed: function () { return w.closed; }, length: function () { return w.length; }, frames: function () { return w.frames; },
+              top: function () { return w.top === top; }, parent: function () { return w.parent === window; }, opener: function () { return w.opener; },
+              locationType: function () { return w.location; }, locationHref: function () { return w.location.href; }, locationReplace: function () { return w.location.replace; },
+              inDocument: function () { return 'document' in w; }, inPostMessage: function () { return 'postMessage' in w; },
+              proto: function () { return Object.getPrototypeOf(w); }, gopdDocument: function () { return Object.getOwnPropertyDescriptor(w, 'document'); },
+              setProp: function () { w.zpParentSet = 1; return 'set'; }, deleteProp: function () { return delete w.zpParentSet; },
+              contentDocument: function () { return f.contentDocument; }, identity: function () { return f.contentWindow === f.contentWindow; },
+              framesIndex: function () { return window.frames[index] === f.contentWindow; }, windowIndex: function () { return window[index] === f.contentWindow; },
+              stringOf: function () { return String(w); }
+            };
+            for (var k in T) out['p2c.' + label + '.' + k] = op(T[k]);
+          };
+          frameTable('cross', cross, 0);
+          frameTable('same', same, 1);
+          for (var kind in got) {
+            var label = kind === '/xsite-child' ? 'cross' : 'same';
+            for (var k in got[kind].R) out['c2p.' + label + '.' + k] = got[kind].R[k];
+            out['source.' + label] = String(got[kind].sourceIsHandle);
+          }
+          // A popup on another site: its handle, and its view of this window.
+          pop = window.open('http://' + other + ':' + location.port + '/xsite-pop', 'xsitepop');
+          out['pop.opened'] = String(pop !== null);
+          t0 = Date.now();
+          while (pop && Date.now() - t0 < 8000 && !got['/xsite-pop']) await sleep(50);
+          await sleep(300);
+          if (pop) {
+            var PT = {
+              document: function () { return pop.document; }, localStorage: function () { return pop.localStorage; }, eval: function () { return pop.eval; },
+              name: function () { return pop.name; }, closed: function () { return pop.closed; }, postMessage: function () { return pop.postMessage; },
+              locationType: function () { return pop.location; }, locationHref: function () { return pop.location.href; }, inDocument: function () { return 'document' in pop; },
+              setProp: function () { pop.zpX = 1; return 'set'; }, opener: function () { return pop.opener; }, top: function () { return pop.top === pop; },
+              identity: function () { return pop === pop && pop.self === pop; }
+            };
+            for (var pk in PT) out['pop.handle.' + pk] = op(PT[pk]);
+            if (got['/xsite-pop']) {
+              for (var rk in got['/xsite-pop'].R) out['pop.opener.' + rk] = got['/xsite-pop'].R[rk];
+              out['pop.source'] = String(got['/xsite-pop'].sourceIsHandle);
+            }
+            try { pop.close(); } catch (x) {}
+          }
+          // postMessage: a message addressed to an origin the window does not have is
+          // dropped (the proxy rewrote every http(s) target origin to its own).
+          var pongs = 0;
+          window.addEventListener('message', function (e) { if (typeof e.data === 'string' && e.data.indexOf('pong') === 0) pongs++; });
+          var mkNamed = function (src, name) { var f = document.createElement('iframe'); f.name = name; f.src = src; document.body.appendChild(f); return f; };
+          var echoCross = mkNamed('http://' + other + ':' + location.port + '/xsite-echo', 'xechocross');
+          var echoSame = mkNamed('/xsite-echo', 'xechosame');
+          await sleep(1800);
+          var send = async function (w, fn) {
+            var before = pongs, err = '';
+            try { fn(w); } catch (e) { err = 'threw:' + (e && e.name); }
+            await sleep(450);
+            return err || (pongs > before ? 'delivered' : 'dropped');
+          };
+          var crossOrigin = 'http://' + other + ':' + location.port;
+          out['pm.cross.exact'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', crossOrigin); });
+          out['pm.cross.wrong'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', 'http://example.invalid'); });
+          out['pm.cross.ownOrigin'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', location.origin); });
+          out['pm.cross.slash'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', '/'); });
+          out['pm.cross.star'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', '*'); });
+          out['pm.cross.oneArg'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping'); });
+          out['pm.cross.invalid'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', 'not a url'); });
+          out['pm.cross.optionsStar'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', { targetOrigin: '*' }); });
+          out['pm.cross.optionsExact'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', { targetOrigin: crossOrigin }); });
+          out['pm.cross.optionsWrong'] = await send(echoCross.contentWindow, function (w) { w.postMessage('ping', { targetOrigin: 'http://example.invalid' }); });
+          out['pm.same.exact'] = await send(echoSame.contentWindow, function (w) { w.postMessage('ping', location.origin); });
+          out['pm.same.wrong'] = await send(echoSame.contentWindow, function (w) { w.postMessage('ping', crossOrigin); });
+          out['pm.same.optionsExact'] = await send(echoSame.contentWindow, function (w) { w.postMessage('ping', { targetOrigin: location.origin }); });
+          // The child's view of a message from its parent, and its reply through
+          // e.source; the parent sees the reply come from the very handle it holds.
+          var whoGot = {};
+          window.addEventListener('message', function (e) {
+            if (typeof e.data === 'string' && e.data.indexOf('who:') === 0) {
+              whoGot[e.source === echoCross.contentWindow ? 'cross' : e.source === echoSame.contentWindow ? 'same' : 'other'] = e.data.slice(4);
+            }
+          });
+          echoCross.contentWindow.postMessage('who', '*');
+          echoSame.contentWindow.postMessage('who', '*');
+          await sleep(800);
+          out['reply.cross'] = whoGot.cross || 'none';
+          out['reply.same'] = whoGot.same || 'none';
+          out['reply.sources'] = Object.keys(whoGot).sort().join(',');
+          // A frame reached by name is the same handle as its contentWindow.
+          out['named.cross.bracket'] = op(function () { return window.frames['xechocross'].document; });
+          out['named.cross.windowBracket'] = op(function () { return window['xechocross'].document; });
+          out['named.cross.dot'] = op(function () { return window.frames.xechocross.document; });
+          out['named.cross.identity'] = op(function () { return window.frames['xechocross'] === echoCross.contentWindow && window['xechocross'] === echoCross.contentWindow; });
+          out['named.same.identity'] = op(function () { return window.frames['xechosame'] === echoSame.contentWindow; });
+          out['named.same.document'] = op(function () { return window.frames['xechosame'].document; });
+          window.__xsite = out;
+        })().catch(function (e) { window.__xsite = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/frame-loads') {
       // Frame load events and joint history. The proxy parks a frame on a blank
       // page while its route is prepared; the page must still see ONE load per
@@ -2552,7 +2717,7 @@ async function handleSocks(socket, resolveHost) {
   upstream.pipe(socket);
 }
 
-test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, concurrency: false }, async t => {
+test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, concurrency: false }, async t => {
   const prebuilt = process.env.ZP_E2E_PREBUILT === '1' || Boolean(process.env.CI);
   const temp = prebuilt ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
   const buildOut = path.resolve(process.env.ZP_E2E_DIST || (prebuilt ? 'dist' : path.join(temp, 'dist')));
@@ -2811,7 +2976,10 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       await context.close();
     }
   });
-  await t.test('E1 escape matrix and runtime integrations', { timeout: 180000 }, async t => {
+  // The budget only caps a hang. It was 180 s while the matrix took ~110 s
+  // unloaded, so a busy machine (a toolchain upgrade running beside it took the
+  // suite 3-5x longer) failed the whole block on time alone.
+  await t.test('E1 escape matrix and runtime integrations', { timeout: 420000 }, async t => {
   const page = await browser.newPage();
   t.after(async () => { await saveArtifacts('e1', page); await page.close(); });
   await observeTarget(page.target());
@@ -4396,6 +4564,60 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 300000, co
       console.log(`[perf] membraneRead=${mm[1]}ms moOverhead=${mo[1]}ms`);
     });
     assert.equal(new URL(page.url()).origin, proxyOrigin, `page escaped proxy: ${page.url()}`);
+  });
+
+  // Windows of another site. Every proxied frame shares one physical origin, so
+  // the browser's same-origin policy cannot separate them; the membrane has to.
+  // Native Chrome lets a cross-origin window be used through a short fixed list
+  // (postMessage, closed, frames, location navigation, …) and throws
+  // SecurityError for everything else — in both directions, and for popups.
+  await t.test('cross-site frame and popup access matches native', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xsite`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xsite, { timeout: 45000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xsite);
+    } finally {
+      await directBrowser.close();
+    }
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/xsite`);
+    await page.waitForFunction(() => window.__xsite, { timeout: 60000, polling: 100 });
+    const proxied = await page.evaluate(() => window.__xsite);
+    fs.writeFileSync(path.join(artifacts, 'xsite-differential.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: the facts the comparison stands on.
+    assert.equal(direct['p2c.cross.document'], 'threw:SecurityError');
+    assert.equal(direct['p2c.cross.localStorage'], 'threw:SecurityError');
+    assert.equal(direct['p2c.cross.contentDocument'], 'null');
+    assert.equal(direct['p2c.cross.postMessage'], 'function');
+    assert.equal(direct['p2c.same.document'], 'object');
+    assert.equal(direct['c2p.cross.frameElement'], 'null');
+    assert.equal(direct['c2p.cross.parentDocument'], 'threw:SecurityError');
+    assert.equal(direct['c2p.same.parentDocument'], 'object');
+    assert.equal(direct['pop.handle.document'], 'threw:SecurityError');
+    assert.equal(direct['pop.opener.openerDocument'], 'threw:SecurityError');
+    assert.equal(direct['pm.cross.wrong'], 'dropped');
+    assert.equal(direct['pm.cross.ownOrigin'], 'dropped');
+    assert.equal(direct['pm.cross.optionsStar'], 'delivered');
+    assert.equal(direct['named.cross.bracket'], 'threw:SecurityError');
+    assert.equal(direct['reply.sources'], 'cross,same');
+    assert.match(direct['reply.cross'], /"srcIsParent":true,"srcIsTop":true,"origin":"http:\/\/[^"]+","trusted":true/);
+    assert.ok(Object.keys(direct).length >= 130, `too few probes ran natively: ${Object.keys(direct).length}`);
+    assert.deepEqual(Object.keys(proxied).sort(), Object.keys(direct).sort(), 'probe key sets differ');
+    // Documented divergence: a same-site child's `top`/`parent` read through a
+    // local alias are the raw windows (the rewriter leaves window-chain members
+    // on aliases unwrapped — hot path), so they are not identical to the page's
+    // own window object. ERRATA, cross-site frames section.
+    const expected = new Set(['p2c.same.top', 'p2c.same.parent']);
+    const unexpected = Object.keys(direct).filter(k => proxied[k] !== direct[k] && !expected.has(k))
+      .map(k => `${k}: native=${direct[k]} proxy=${proxied[k]}`);
+    assert.deepEqual(unexpected, [], unexpected.join('\n'));
+    const healed = [...expected].filter(k => proxied[k] === direct[k]);
+    assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
   });
 
   // Frame load events and joint history against native (the /frame-loads fixture).

@@ -154,6 +154,56 @@
     } catch {}
   }
 
+  // Natively a message addressed to an origin the destination window does not
+  // have is dropped — silently. Every proxied window shares ONE physical origin,
+  // so the browser's own filter never fires (normalizePostMessageTargetOrigin
+  // turns every http(s) origin into the proxy's): a message meant for one site
+  // reached any other site's frame. Compare VIRTUAL origins here instead.
+  // Unknown destination (no membrane, no route): leave it to the browser.
+  function postMessageTargetAccepts(target, wanted) {
+    if (wanted === undefined || wanted === null) return true;
+    const s = String(wanted);
+    if (s === '*') return true;
+    let dest = '';
+    try { dest = windowHandles ? windowHandles.originOf(target) : ''; } catch {}
+    if (!dest) return true;
+    // "/" is the SENDER's own origin.
+    if (s === '/') return dest === virtualURL.origin || notePostMessageDrop(s, dest, target);
+    try {
+      const u = new URL(s);
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin === dest || notePostMessageDrop(u.origin, dest, target);
+    } catch {}
+    return true;
+  }
+  // A dropped message leaves no trace in the page — natively too — so a site
+  // that loses one to a wrong origin is hard to see. Keep a bounded record where
+  // the other diagnostics live (the top document's `__zp_diagnostics`). Returns
+  // false so the caller can `return a || note(...)`.
+  function notePostMessageDrop(wanted, dest, target) {
+    try {
+      let dg = root.__zp_diagnostics;
+      try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {}
+      if (dg && dg.length < 200) {
+        const entry = { t: 'pm-drop', wanted: String(wanted).slice(0, 80), dest: String(dest).slice(0, 80), from: String(virtualURL.origin).slice(0, 80) };
+        // Which window it was aimed at and who aimed it: the drop itself says neither.
+        entry.to = postMessageTargetRole(target);
+        try { entry.to += ' ' + String(target.location.href).slice(0, 100); } catch {}
+        try { entry.at = String(new Error().stack).split('\n').slice(4, 7).map(l => l.trim()).join(' | ').slice(0, 300); } catch {}
+        dg.push(entry);
+      }
+    } catch {}
+    return false;
+  }
+  function postMessageTargetRole(target) {
+    try {
+      if (target === root) return 'self';
+      if (target === root.parent) return 'parent';
+      if (target === root.top) return 'top';
+      if (target === root.opener) return 'opener';
+      for (let i = 0; i < root.length; i++) if (root[i] === target) return 'child' + i;
+    } catch {}
+    return 'other';
+  }
   function normalizePostMessageTargetOrigin(targetOrigin) {
     if (targetOrigin == null) return targetOrigin;
     const s = String(targetOrigin);
@@ -223,15 +273,42 @@
     // origin pm 그대로. 단, mapped !== targetOrigin (virtual → real 변환됨)
     // 케이스만 wrap 통해 변환 + native call.
     const wrapped = function postMessage(message, targetOrigin, transfer) {
+      // Two overloads: (message, targetOrigin, transfer) and (message, { targetOrigin,
+      // transfer }) — the options form used to reach the browser as the string
+      // "[object Object]" and throw a SyntaxError.
+      const optionsForm = arguments.length >= 2 && targetOrigin !== null && typeof targetOrigin === 'object';
+      const wanted = optionsForm ? (targetOrigin.targetOrigin === undefined ? '/' : targetOrigin.targetOrigin) : (arguments.length < 2 ? '/' : targetOrigin);
+      // A message addressed to an origin the window does not have is not delivered.
+      if (!postMessageTargetAccepts(target, wanted)) return undefined;
+      if (optionsForm) {
+        const opts = { targetOrigin: arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(wanted) };
+        if (targetOrigin.transfer !== undefined) opts.transfer = targetOrigin.transfer;
+        return Reflect.apply(originalPm, target, [message, opts]);
+      }
       const mapped = arguments.length < 2 ? proxyOrigin : normalizePostMessageTargetOrigin(targetOrigin);
       return arguments.length > 2 ? Reflect.apply(originalPm, target, [message, mapped, transfer]) : Reflect.apply(originalPm, target, [message, mapped]);
     };
+    // Natively `postMessage.length` is 1 (the declared arity is 3 here), and the
+    // build minifies the declared name.
+    try {
+      Object.defineProperty(wrapped, 'length', { value: 1, configurable: true });
+      Object.defineProperty(wrapped, 'name', { value: 'postMessage', configurable: true });
+    } catch {}
     maskNativeFunction(wrapped, 'postMessage');
     postMessageWrappers.set(target, wrapped);
     return wrapped;
   }
   function virtualOriginForMessage(ev) {
     if (!ev || ev.origin !== proxyOrigin || !ev.source) return '';
+    // A window with a membrane of its own states its virtual origin itself, from
+    // any realm. The marker below is a per-realm Symbol, so a message from the
+    // PARENT (or a sibling, or a popup's opener) reached the page with the proxy's
+    // own origin as `e.origin`: widgets that check the embedder's origin rejected
+    // their parent's messages, and the proxy address leaked.
+    try {
+      const o = windowHandles ? windowHandles.originOf(ev.source) : '';
+      if (o) return o;
+    } catch {}
     // A frame this realm routed: its current document path names the target.
     // The marker below is per-realm, so a child that booted its own prelude is
     // invisible to it — without this its messages arrived from the proxy origin.
@@ -258,7 +335,29 @@
     if (ev.origin !== proxyOrigin) return ev;
     const origin = virtualOriginForMessage(ev);
     if (!origin) return ev;
+    // The sender is the very handle the page holds for that window: natively
+    // `e.source === iframe.contentWindow`. For another site's window that is the
+    // restricted stand-in, for an ancestor its own page-facing window.
+    let handle = ev.source;
+    try { if (windowHandles && ev.source && typeof ev.source === 'object') handle = windowHandles.forWindow(ev.source); } catch {}
+    // Decorate the REAL event rather than building a new one: a constructed
+    // MessageEvent is untrusted (`isTrusted` false), has no `target` /
+    // `currentTarget`, a new timestamp, and `stopImmediatePropagation` on it
+    // does nothing to the real dispatch. Own non-enumerable properties shadow the
+    // prototype getters, and `Object.keys(e)` stays what it is natively.
     try {
+      Object.defineProperty(ev, 'origin', { value: origin, enumerable: false, configurable: true });
+      if (handle !== ev.source) Object.defineProperty(ev, 'source', { value: handle, enumerable: false, configurable: true });
+      return ev;
+    } catch {}
+    try {
+      if (handle !== ev.source) {
+        // `source` in MessageEventInit accepts only real windows and ports, so
+        // the handle goes on as an own property that shadows the getter.
+        const e = new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: null, ports: ev.ports || [] });
+        Object.defineProperty(e, 'source', { value: handle, enumerable: true, configurable: true });
+        return e;
+      }
       return new MessageEvent(ev.type, { data: ev.data, origin, lastEventId: ev.lastEventId || '', source: ev.source, ports: ev.ports || [] });
     } catch {
       try {
@@ -276,7 +375,7 @@
     try { target = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url') || ''; } catch {}
     if (!target) return;
     try {
-      const child = frame.contentWindow;
+      const child = nativeFrameWindow(frame);
       if (child) frameWindowOrigins.set(child, new URL(target).origin);
     } catch {}
   }

@@ -229,7 +229,7 @@
     if (!frames) return;
     for (const f of frames) {
       let d = null;
-      try { d = f.contentDocument; } catch { continue; }
+      try { d = nativeFrameDocument(f); } catch { continue; }
       // 분류만 해 두면 된다 — SW-less 로 판정되는 순간 옵저버가 붙는다.
       if (d) documentIsSWLess(d);
     }

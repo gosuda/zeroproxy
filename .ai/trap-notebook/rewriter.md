@@ -1368,13 +1368,32 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **검증:** surface `targetFramenameAttr`·`targetAttrReadback`·`parentTargetLink`(중첩 프레임의 `_parent`)·`formTargetGet`·`formTargetPost`·`popupRouted` — 전부 네이티브와 같다. 팝업을 5ms 로 샘플링하면 about:blank → 문서 바로, 런처 상태 없음. noopener 팝업은 목적지까지 간다.
 - **규칙:** 브라우저 의미를 "안전하게" 하려고 속성을 고쳐 쓰지 말 것 — 읽기 표면이 갈라지고, 고쳐 쓴 이유가 사라진 뒤에도 남는다. 내비게이션은 실행 지점(클릭·제출·open)에서 가로챈다.
 
-## <a id="교차-사이트-프레임"></a>서로 다른 사이트의 프레임을 브라우저가 격리하지 않는다 — 부모가 교차 사이트 자식의 문서·전역·저장소를 읽는다 (2026-10-01, 미해결)
+## <a id="교차-사이트-프레임"></a>서로 다른 사이트의 프레임을 브라우저가 격리하지 않았다 — 가상 오리진별 창 핸들 정책 (2026-10-02)
 
-- **측정:** localhost 부모 + 127.0.0.1 자식(다른 사이트)을 네이티브와 프록시에서 같은 코드로 읽었다. 네이티브는 `contentWindow` 로 문서·전역·`localStorage`·`document.cookie`·`eval` 어느 것도 못 읽고(`SecurityError`, `contentDocument` 는 `null`) 프록시는 읽힌다. 같은 사이트 대조군은 네이티브와 같다.
-- **원인:** 프록시를 지나는 모든 프레임은 물리적으로 같은 오리진(프록시)이라 브라우저의 same-origin policy 가 가를 수 없다. 멤브레인이 가상 오리진별로 막는 것은 `Location` 뿐이고(교차 사이트 읽기는 던진다), 자식이 부모를 읽을 때는 own expando 값만 받는다. **부모→자식 방향은 열려 있다.**
-- **상태:** 고치지 않았다 — 패치가 아니라 설계 변경이다(`contentWindow`·`open()`·`frames[i]`·`opener` 로 나가는 모든 창 핸들을 가상 오리진별 파사드로 감싼다). ERRATA F 절에 보안 잔여로 기록.
-- **규칙:** 프레임 접근 코드를 만질 때 "같은 물리 오리진이라 읽힌다" 를 정상으로 취급하지 말 것 — 네이티브 기준은 오리진이 다르면 던진다. 새 읽기 경로를 만들면 교차 사이트 대조군부터 돌린다.
+- **측정:** localhost 부모 + 127.0.0.1 자식을 네이티브/프록시에서 같은 코드로(타입·에러 이름만 기록, 내용은 읽지 않는다) — 101개 중 28개가 달랐다. 네이티브는 교차 오리진 창에서 13개 이름 외 전부 `SecurityError`, `contentDocument` 는 `null`, `frameElement` 는 `null`. 프록시는 부모→자식(문서·저장소·`eval`·이름)과 자식→부모(저장소·`eval`·이름, `frameElement` 로 임베더 DOM)가 전부 열려 있었다. 같은 사이트 대조군에서는 `parent.document` 가 `undefined`(네이티브 `object`)였다.
+- **원인:** 프록시를 지나는 모든 프레임은 물리적으로 같은 오리진이라 브라우저 SOP 가 못 가른다. 멤브레인은 `Location` 만 가상 오리진별로 막았다. 리라이터는 `document`·`localStorage`·`eval` 같은 이름을 감싸지 않는다(원시 읽기) — 그래서 **건네는 객체 자체**가 제한돼야 했다.
+- **수정:** `windowHandleFor(win, hint)` 한 곳이 "페이지가 이 창을 어떤 형태로 쥐는가"를 정한다. 가상 오리진이 다르면 HTML 교차 오리진 창 규칙을 따르는 Proxy(`crossOriginWindow`: `window self location closed frames length top opener parent blur close focus postMessage` + 자식 인덱스, 나머지는 읽기·쓰기·`in`·`delete`·`defineProperty`·`setPrototypeOf`·`preventExtensions` 전부 `SecurityError`, `getPrototypeOf` null, `Object.keys` 빈 배열). 같은 오리진 조상은 그 realm 의 페이지-facing 창으로 **전달**하는 스탠드인(`ownerScopeOf`), 나머지 같은 오리진 창은 그대로. 모든 출처에 적용: `iframe.contentWindow`, `contentDocument`(null), `frames[i]`·`window[i]`·이름 조회, `window.open()`(향하는 URL 의 오리진으로 — 빈 창일 때부터), `event.source`, `parent`/`top`/`opener`, `frameElement`(임베더가 다른 사이트면 null). 프레임은 **보내진 곳**(`data-zp-target-url`)을 알아서, 아직 부팅 전인 빈 플레이스홀더도 처음부터 제한한다.
+- **네이티브 측정값(Chrome 148):** `delete`·`Reflect.defineProperty`·`setPrototypeOf`·`preventExtensions` 모두 `SecurityError`(false 가 아니다). `'then' in w`·마지막 자식 뒤 인덱스·`w[Symbol.iterator]` 는 던진다. `getOwnPropertyDescriptor`: `postMessage`/`close`/`focus`/`blur` 는 `{value, writable:false, enumerable:false, configurable:true}`, `location` 은 `{get,set}`, 나머지 허용 이름은 `{get}`, `then`·세 심볼은 값 undefined. `String(w)`·`JSON.stringify(w)` 는 던진다. 교차 오리진 `Location` 의 키는 `href replace then`.
+- **내부 코드는 진짜 창을 본다:** 훅된 `contentWindow`/`contentDocument` 는 이제 페이지용이라 멤브레인 내부(프레임 계측·origin 기억·SafeFrame 높이 shim·sweep)는 `nativeFrameWindow`/`nativeFrameDocument` 를 쓴다.
+- **검증:** e2e `cross-site frame and popup access matches native`(프레임·팝업 양방향, `postMessage` 표, 이름 조회, 답장 — 옛 멤브레인에서 빨갛다). 의도된 차이 2개(아래).
+- **남은 틈(ERRATA 잔여):** ① 창이 **같은 오리진일 때** 쥔 핸들은 나중에 다른 사이트로 이동해도 계속 열려 있다(진짜 창은 회수할 수 없다) — `src` 를 정하기 전에 읽은 빈 프레임 창, 빈 팝업을 나중에 이동. ② **맨 식별자**(`fname.document`)는 브라우저의 전역 조회라 훅이 못 본다. ③ 같은 사이트 자식 창의 **지역 별칭**에서 `w.top`/`w.parent` 는 원시 창이다(리라이터가 창 사슬을 별칭에서 안 감싼다 — CNN 렌더러 정지 이력).
+- **규칙:** 프레임 접근 코드를 만질 때 "같은 물리 오리진이라 읽힌다" 를 정상으로 취급하지 말 것 — 네이티브 기준은 오리진이 다르면 던진다. 새 창 출처를 만들면 `windowHandleFor` 를 거치게 하고, 교차 사이트 대조군부터 돌린다.
 
+## <a id="postmessage-타깃오리진"></a>`postMessage` 의 타깃 오리진을 한 번도 걸러 내지 않았다 — 옵션 형태는 SyntaxError (2026-10-02)
+
+- **측정:** 교차 사이트 프레임에 `postMessage('ping', 조건)` — 네이티브는 `*`·정확한 오리진만 도착, **틀린 오리진·내 오리진·`/`·인자 하나는 버려진다.** 프록시는 전부 도착했다. 같은 사이트 프레임에 교차 사이트 오리진을 지정해도 도착. `postMessage(msg, { targetOrigin: '*' })` 는 네이티브가 전달하는데 프록시는 `SyntaxError`.
+- **원인:** `normalizePostMessageTargetOrigin` 이 http(s) 오리진을 **전부 프록시 오리진으로** 바꿨다. 모든 프레임이 그 오리진을 공유하므로 브라우저의 오리진 필터가 영영 안 걸린다 — 한 사이트에 보낼 메시지가 다른 사이트의 프레임(광고)에 도착했다. 옵션 객체는 `String()` 으로 `"[object Object]"` 가 돼 네이티브가 던졌다.
+- **수정:** 래퍼가 두 시그니처를 구분하고, 목적지 창의 **가상 오리진**(`windowHandles.originOf`)과 요청한 오리진을 비교해 어긋나면 조용히 버린다. `/` 는 보내는 쪽의 오리진, 인자 없음은 `/`. 목적지를 모르면(멤브레인·라우트 없음) 브라우저에 맡긴다.
+- **검증:** e2e `pm.*` 표(교차·같은 사이트 × 정확/틀림/내 오리진/`/`/`*`/인자 하나/옵션 3종/잘못된 URL) — 네이티브와 같다.
+- **`pm-drop` 진단:** 버려진 메시지는 흔적이 없어서(네이티브도) 최상위 `__zp_diagnostics` 에 `{"t":"pm-drop","wanted","dest","from","to","at"}` 를 남긴다(최대 200개). `to` 는 목적지 창의 역할(`self`·`parent`·`top`·`opener`·`childN`·`other`)과 물리 URL, `at` 는 호출 스택 3줄. **NAVER 메인에서 두 건이 찍히는 것은 정상이다:** React `useEffect` 가 막 만든 iframe(shopsquare·recoshopping)에 `updateTheme` 을 마운트 직후 보내는데, 그때 그 창은 아직 `about:blank`(부모의 오리진을 물려받음)라 네이티브도 버린다 — 네이티브 자식의 수신 로그에 `updateTheme` 이 없고 `pid`·`setOuterPageInfo` 만 있다(프록시도 같다). 새 드롭이 보이면 먼저 "목적지가 아직 `about:blank` 인가"를 본다.
+
+## <a id="메시지-이벤트-수신측"></a>부모가 보낸 메시지의 `e.origin` 이 프록시 주소였다 — 맨 `addEventListener` 는 래퍼를 아예 건너뛰었다 (2026-10-02)
+
+- **측정:** 자식 프레임이 부모의 메시지를 받으면 `e.origin === "http://proxy.localhost:18080"`(네이티브: 부모의 오리진), `e.source === parent` 거짓. 같은 사이트·교차 사이트 모두. 리스너를 `window.addEventListener`/`self.`/`onmessage` 로 달면 오리진은 맞았고 **맨 `addEventListener("message", f)` 만** 날 이벤트를 받았다.
+- **원인(셋):** ① 오리진 조회가 **realm 별 `Symbol`** 마커(`ev.source[marker]`)라 부모·형제·opener 의 창은 읽지 못했다 → 가상화 없이 통과. ② `EventTarget.prototype.addEventListener` 래퍼가 `this === window` 일 때만 감쌌는데 맨 호출의 수신자는 `undefined`(브라우저는 전역으로 취급). ③ 가상화 이벤트를 `new MessageEvent` 로 **다시 만들어서** `isTrusted` 가 false, `target`/`currentTarget` 이 null, `stopImmediatePropagation` 이 진짜 디스패치에 무효였다.
+- **수정:** 창이 자기 가상 오리진을 직접 말한다(`windowHandles.originOf` — 어느 realm 에서든 `__zp_get(win,'location').origin`). 수신자가 nullish 면 그 realm 의 창으로 본다(각 realm 이 자기 프로토타입을 감싸므로 항상 맞다). 이벤트는 **진짜 이벤트**에 비열거 own `origin`/`source` 를 얹는다. `e.source` 는 `windowHandleFor` 가 준 핸들 — `=== iframe.contentWindow`, `=== parent`.
+- **같이 나온 지문:** `postMessage.name` 이 minify 된 `n`, `.length` 3(네이티브 1).
+- **검증:** e2e `reply.*`(자식이 맨 리스너로 받아 `e.source.postMessage` 로 답장 — 부모는 답장이 자기가 쥔 핸들에서 왔다고 본다), `source.*`.
 ## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번(파싱된 프레임은 세 번), 히스토리가 두 칸이었다 (2026-10-01)
 
 - **측정:** 같은 코드를 네이티브/프록시에서. `src` 를 붙인 뒤 append: `load` 리스너+`onload` 가 네이티브 1회(`Lo`), 프록시 2회(`LoLo`); append 뒤 `src` 대입·교체도 +1회씩; 교체 시 히스토리 증가분 네이티브 1, 프록시 2. **파싱된 `<iframe src onload=…>` 는 인라인 onload 가 3번**(파서의 빈 페이지 + 플레이스홀더 + 라우트된 문서).

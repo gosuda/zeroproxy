@@ -405,7 +405,7 @@
           const frames = document.querySelectorAll('iframe,frame');
           for (const el of frames) {
             try {
-              const cw = el.contentWindow;
+              const cw = nativeFrameWindow(el);
               if (cw && cw.location === nativeLoc) {
                 const t = urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url');
                 if (t && /^https?:/i.test(t)) return new URL(t);
@@ -494,21 +494,44 @@
       // turns top.location writes into self-navigation (notably in srcdoc).
       const ownerGet = targetWindow.__zp_get;
       if (ownerGet === get) return wrappedLocationFor(targetWindow.location);
-      if (typeof ownerGet !== 'function') throw normalizedError('SecurityError');
-      const location = ownerGet(targetWindow, 'location');
-      if (location.origin === virtualURL.origin) return location;
+      if (typeof ownerGet === 'function') {
+        const location = ownerGet(targetWindow, 'location');
+        if (location.origin === virtualURL.origin) return location;
+      } else if (virtualOriginOfWindow(targetWindow) === virtualURL.origin) {
+        // A same-site document that never booted a membrane (text, an image):
+        // the route map names its URL.
+        return wrappedLocationFor(targetWindow.location);
+      }
       // Same physical proxy origin is not permission to read another site's
       // Location. Cross-origin href writes/replace remain usable for navigation.
       let restricted = crossOriginLocations.get(targetWindow);
       if (!restricted) {
         const navigate = (value, replace) => {
-          const owner = targetWindow.__zp_get(targetWindow, 'location');
           const absolute = targetURL(value);
-          if (replace) owner.replace(absolute);
-          else owner.href = absolute;
+          const g = targetWindow.__zp_get;
+          if (typeof g === 'function') {
+            const owner = g(targetWindow, 'location');
+            if (replace) owner.replace(absolute);
+            else owner.href = absolute;
+            return;
+          }
+          // No membrane behind that window: take the frame route ourselves.
+          activatedFrameURL(absolute).then(u => {
+            if (replace) targetWindow.location.replace(u);
+            else targetWindow.location.assign(u);
+          }).catch(() => {});
         };
         const replace = function replace(value) { navigate(value, true); };
         maskNativeFunction(replace, 'replace');
+        const deny = () => { throw normalizedError('SecurityError'); };
+        const hrefAccessor = () => {
+          const g = function () { return deny(); };
+          const s = function (v) { navigate(v, false); };
+          toStringMap.set(g, nativeAccessorSource('get', 'href'));
+          toStringMap.set(s, nativeAccessorSource('set', 'href'));
+          return { get: g, set: s, enumerable: true, configurable: true };
+        };
+        // Names measured on a Chrome cross-origin Location: href, replace, then.
         restricted = new Proxy(Object.create(null), {
           get(_target, prop) {
             if (prop === 'replace') return replace;
@@ -519,7 +542,21 @@
             if (prop !== 'href') throw normalizedError('SecurityError');
             navigate(value, false);
             return true;
-          }
+          },
+          has(_target, prop) { if (prop === 'href' || prop === 'replace') return true; return deny(); },
+          ownKeys() { return ['href', 'replace', 'then', Symbol.toStringTag, Symbol.hasInstance, Symbol.isConcatSpreadable]; },
+          getOwnPropertyDescriptor(_target, prop) {
+            if (prop === 'href') return hrefAccessor();
+            if (prop === 'replace') return { value: replace, writable: false, enumerable: false, configurable: true };
+            if (prop === 'then' || prop === Symbol.toStringTag || prop === Symbol.hasInstance || prop === Symbol.isConcatSpreadable) {
+              return { value: undefined, writable: false, enumerable: false, configurable: true };
+            }
+            return deny();
+          },
+          deleteProperty: deny,
+          defineProperty: deny,
+          setPrototypeOf: deny,
+          preventExtensions: deny,
         });
         crossOriginLocations.set(targetWindow, restricted);
       }
@@ -683,7 +720,7 @@
     function climbCrossWindow(targetWindow, prop, fallback) {
       try {
         const next = targetWindow[prop];
-        if (next && next !== targetWindow) return safeCrossWindow(next);
+        if (next && next !== targetWindow) return windowHandleFor(next, 'ancestor');
       } catch {}
       return fallback;
     }
@@ -698,6 +735,17 @@
         || (!ZP_HIDDEN_RE.test(prop) && !MEMBER_DANGER.has(prop)
             && !(prop.startsWith('on') && typeof value === 'string'));
     }
+    // The page-facing window of another realm's booted membrane — what that
+    // realm's own code calls `window`. Asking it is how a same-origin ancestor's
+    // document, storage and timers become reachable, each already virtualized by
+    // the realm that owns it.
+    function ownerScopeOf(win) {
+      try {
+        const g = win.__zp_get;
+        if (typeof g === 'function' && g !== get) return g(win, 'window') || null;
+      } catch {}
+      return null;
+    }
     function safeCrossWindow(targetWindow) {
       if (!targetWindow || targetWindow === root) return scope;
       if (crossWindowProxyCache.has(targetWindow)) return crossWindowProxyCache.get(targetWindow);
@@ -710,6 +758,13 @@
       const proxy = new Proxy(proxyTarget, {
         get(t, prop) {
           if (Reflect.getOwnPropertyDescriptor(t, prop)) return Reflect.get(t, prop);
+          // A same-origin ancestor: whatever its own code sees on `window` (document,
+          // storage, timers, expandos) — `parent.document` is how legacy frames
+          // resize themselves, and it used to read undefined.
+          if (typeof prop !== 'string' || !ZP_HIDDEN_RE.test(prop)) {
+            const owner = ownerScopeOf(targetWindow);
+            if (owner) return Reflect.get(owner, prop);
+          }
           // own expando 만 넘긴다 — 프로토타입 멤버(eval/Function/fetch 같은
           // 진짜 네이티브)를 돌려주면 자식에 미리라이트 실행 경로가 열린다.
           if (crossExpandoProp(prop)) {
@@ -721,13 +776,18 @@
         },
         set(t, prop, value) {
           if (crossExpandoProp(prop, value)) {
-            try { Reflect.set(targetWindow, prop, value); } catch {}
+            const owner = ownerScopeOf(targetWindow);
+            try { Reflect.set(owner || targetWindow, prop, value); } catch {}
             return true;
           }
           return Reflect.set(t, prop, value);
         },
         has(t, prop) {
           if (Reflect.has(t, prop)) return true;
+          if (typeof prop !== 'string' || !ZP_HIDDEN_RE.test(prop)) {
+            const owner = ownerScopeOf(targetWindow);
+            if (owner) return Reflect.has(owner, prop);
+          }
           if (crossExpandoProp(prop)) {
             try { return !!Reflect.getOwnPropertyDescriptor(targetWindow, prop); } catch { return false; }
           }
@@ -735,7 +795,8 @@
         },
         deleteProperty(t, prop) {
           if (crossExpandoProp(prop)) {
-            try { Reflect.deleteProperty(targetWindow, prop); } catch {}
+            const owner = ownerScopeOf(targetWindow);
+            try { Reflect.deleteProperty(owner || targetWindow, prop); } catch {}
             return true;
           }
           return Reflect.deleteProperty(t, prop);
@@ -773,12 +834,193 @@
       crossWindowTargets.set(proxy, targetWindow);
       return proxy;
     }
+    // ── which windows a page may hold, and in what form ────────────────────
+    // Every proxied frame shares ONE physical origin, so the browser's own
+    // same-origin policy cannot tell two sites' windows apart: the membrane does
+    // it. A window whose VIRTUAL origin differs from ours is handed out only as
+    // a stand-in that follows the HTML cross-origin window rules — a short fixed
+    // property list, SecurityError for everything else — never as the real
+    // window, whose document, storage and globals would be wide open. A
+    // same-origin ancestor is handed out as its own page-facing window (so
+    // `parent.document` works and `parent === top` holds). Any other same-origin
+    // window is handed out as it is.
+    //
+    // Measured against Chrome 148, a cross-origin window: every read off the list
+    // throws SecurityError — `then` in `in`, indices past the last child and every
+    // mutation (delete / defineProperty / setPrototypeOf / preventExtensions)
+    // included; `Object.keys` is empty, `getPrototypeOf` is null, `String(w)` and
+    // `JSON.stringify(w)` throw, `Object.prototype.toString` says "[object Object]".
+    const CROSS_ORIGIN_WINDOW_NAMES = ['window', 'self', 'location', 'closed', 'frames', 'length', 'top', 'opener', 'parent', 'blur', 'close', 'focus', 'postMessage'];
+    const CROSS_ORIGIN_WINDOW_NAME_SET = new Set(CROSS_ORIGIN_WINDOW_NAMES);
+    const CROSS_ORIGIN_SYMBOLS = [Symbol.toStringTag, Symbol.hasInstance, Symbol.isConcatSpreadable];
+    const crossOriginFacadeSet = new WeakSet();
+    const crossOriginFacades = new WeakMap();
+    const crossOriginMethods = new WeakMap();
+    // The origin a window reports from its OWN membrane ('' when it has none).
+    function ownMembraneOrigin(win) {
+      try {
+        const g = win.__zp_get;
+        if (typeof g === 'function' && g !== get) {
+          const o = g(win, 'location').origin;
+          if (typeof o === 'string') return o;
+        }
+      } catch {}
+      return '';
+    }
+    function virtualOriginOfWindow(win) {
+      if (win === root) return virtualURL.origin;
+      const own = ownMembraneOrigin(win);
+      if (own) return own;
+      // Contained by us (a blank, srcdoc or document.write'd page): it inherits ours.
+      try { if (win.__zp_get === get) return virtualURL.origin; } catch {}
+      // No membrane of its own and not ours: the route we opened it with, if any.
+      try { const routed = frameRouteTarget(win.location.pathname); if (routed) return new URL(routed).origin; } catch {}
+      return '';
+    }
+    // Where a frame was SENT (not what it shows right now): a window that has not
+    // booted its own membrane yet — the blank page in front of a pending route, a
+    // routed text or image document — is still that site's.
+    function frameIntendedOrigin(frame) {
+      try {
+        const t = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url');
+        if (t && /^https?:/i.test(t)) return new URL(t).origin;
+      } catch {}
+      return '';
+    }
+    function isAncestorWindow(win) {
+      try {
+        let w = root;
+        for (let i = 0; i < 32; i++) {
+          const p = w.parent;
+          if (!p || p === w) break;
+          if (p === win) return true;
+          w = p;
+        }
+        const o = root.opener;
+        if (o && o === win) return true;
+      } catch {}
+      return false;
+    }
+    function sameOriginAncestor(win) {
+      return safeCrossWindow(win);
+    }
+    // `hint`: a frame element whose intended origin speaks for a window that has
+    // no membrane of its own yet, or 'ancestor' for parent / top / opener.
+    function windowHandleFor(win, hint) {
+      if (!win || typeof win !== 'object') return win;
+      if (win === root) return scope;
+      if (crossOriginFacadeSet.has(win) || isScopeProxy(win)) return win;
+      let origin = ownMembraneOrigin(win);
+      if (!origin && hint && typeof hint === 'object') origin = frameIntendedOrigin(hint);
+      if (!origin) origin = virtualOriginOfWindow(win);
+      if (origin && origin !== virtualURL.origin) return crossOriginWindow(win);
+      if (hint === 'ancestor' || (hint === undefined && isAncestorWindow(win))) return sameOriginAncestor(win);
+      return win;
+    }
+    function crossOriginDenied(verb, prop) {
+      const name = typeof prop === 'symbol' ? 'Symbol(' + (prop.description || '') + ')' : String(prop);
+      try {
+        return new Native.DOMException('Failed to ' + verb + " '" + name + "' on 'Window': Blocked a frame with origin \"" + virtualURL.origin + '" from accessing a cross-origin frame.', 'SecurityError');
+      } catch { return normalizedError('SecurityError'); }
+    }
+    // close / focus / blur: one stable function per window, as natively.
+    function crossOriginMethod(win, name) {
+      let m = crossOriginMethods.get(win);
+      if (!m) { m = Object.create(null); crossOriginMethods.set(win, m); }
+      if (!m[name]) {
+        const fn = function () { return Reflect.apply(win[name], win, []); };
+        try {
+          Object.defineProperty(fn, 'name', { value: name, configurable: true });
+          Object.defineProperty(fn, 'length', { value: 0, configurable: true });
+        } catch {}
+        maskNativeFunction(fn, name);
+        m[name] = fn;
+      }
+      return m[name];
+    }
+    function crossOriginWindow(win) {
+      let facade = crossOriginFacades.get(win);
+      if (facade) return facade;
+      const childCount = () => { try { return win.length >>> 0; } catch { return 0; } };
+      const isIndex = p => typeof p === 'string' && /^(?:0|[1-9]\d*)$/.test(p) && Number(p) < childCount();
+      const read = name => {
+        switch (name) {
+          case 'window': case 'self': case 'frames': return facade;
+          case 'location': return crossWindowLocation(win);
+          case 'closed': return win.closed;
+          case 'length': return win.length;
+          case 'top': case 'parent': case 'opener': { const h = win[name]; return h ? windowHandleFor(h, 'ancestor') : h; }
+          case 'postMessage': return postMessageWrapperFor(win);
+          default: return crossOriginMethod(win, name);
+        }
+      };
+      const accessor = (name, setter) => {
+        const g = function () { return read(name); };
+        toStringMap.set(g, nativeAccessorSource('get', name));
+        let s;
+        if (setter) { s = function (v) { setter(v); }; toStringMap.set(s, nativeAccessorSource('set', name)); }
+        return { get: g, set: s, enumerable: false, configurable: true };
+      };
+      const denyMutation = (verb, prop) => { throw crossOriginDenied(verb, prop); };
+      // An extensible, empty target: no invariant can bind the traps below.
+      facade = new Proxy(Object.create(null), {
+        get(_t, prop) {
+          if (typeof prop === 'symbol') {
+            if (CROSS_ORIGIN_SYMBOLS.includes(prop)) return undefined;
+            throw crossOriginDenied('read a named property', prop);
+          }
+          if (prop === 'then') return undefined;
+          if (CROSS_ORIGIN_WINDOW_NAME_SET.has(prop)) return read(prop);
+          if (isIndex(prop)) return windowHandleFor(win[prop]);
+          throw crossOriginDenied('read a named property', prop);
+        },
+        set(_t, prop, value) {
+          if (prop === 'location') { crossWindowLocation(win).href = value; return true; }
+          throw crossOriginDenied('set a named property', prop);
+        },
+        has(_t, prop) {
+          if (typeof prop === 'string' && (CROSS_ORIGIN_WINDOW_NAME_SET.has(prop) || isIndex(prop))) return true;
+          throw crossOriginDenied('check a named property', prop);
+        },
+        deleteProperty(_t, prop) { return denyMutation('delete a named property', prop); },
+        defineProperty(_t, prop) { return denyMutation('define a named property', prop); },
+        setPrototypeOf() { return denyMutation('set the prototype', 'prototype'); },
+        preventExtensions() { return denyMutation('prevent extensions', 'extensions'); },
+        isExtensible() { return true; },
+        getPrototypeOf() { return null; },
+        getOwnPropertyDescriptor(_t, prop) {
+          if (typeof prop === 'symbol') {
+            if (CROSS_ORIGIN_SYMBOLS.includes(prop)) return { value: undefined, writable: false, enumerable: false, configurable: true };
+            throw crossOriginDenied('read a named property', prop);
+          }
+          if (prop === 'then') return { value: undefined, writable: false, enumerable: false, configurable: true };
+          switch (prop) {
+            case 'location': return accessor('location', v => { crossWindowLocation(win).href = v; });
+            case 'blur': case 'close': case 'focus': case 'postMessage':
+              return { value: read(prop), writable: false, enumerable: false, configurable: true };
+            case 'window': case 'self': case 'closed': case 'frames': case 'length': case 'top': case 'opener': case 'parent':
+              return accessor(prop);
+          }
+          if (isIndex(prop)) return { value: windowHandleFor(win[prop]), writable: false, enumerable: true, configurable: true };
+          throw crossOriginDenied('read a named property', prop);
+        },
+        ownKeys() {
+          const keys = [];
+          for (let i = 0, n = childCount(); i < n; i++) keys.push(String(i));
+          return keys.concat(CROSS_ORIGIN_WINDOW_NAMES, ['then'], CROSS_ORIGIN_SYMBOLS);
+        },
+      });
+      crossOriginFacades.set(win, facade);
+      crossOriginFacadeSet.add(facade);
+      crossWindowTargets.set(facade, win);
+      return facade;
+    }
     function virtualWindowProperty(target, prop) {
       if (prop === 'top' || prop === 'parent' || prop === 'opener') {
         try {
           const child = target[prop];
           if (prop === 'opener' && !isWindowLike(child)) return child;
-          if (child && child !== target) return safeCrossWindow(child);
+          if (child && child !== target) return windowHandleFor(child, 'ancestor');
         } catch {}
       }
       return scope;
@@ -880,8 +1122,18 @@
       // through to `root[prop]` — they brand-check `this`.
       const own = Reflect.getOwnPropertyDescriptor(root, prop);
       if (isPageInstalledAccessor(prop, own)) return Reflect.get(root, prop, scope);
-      if (WINDOW_BOUND_METHODS.has(prop) || needsWindowReceiver(root[prop])) return boundWindowMethod(root, prop);
-      return root[prop];
+      const value = root[prop];
+      if (WINDOW_BOUND_METHODS.has(prop) || needsWindowReceiver(value)) return boundWindowMethod(root, prop);
+      // A frame reached by NAME (`window.frames.x`, `window.x`, a bare `x`): the
+      // rewriter emits those as plain reads, so they land here and not in `get`.
+      // Named frames are not own properties of the window — page globals are —
+      // which keeps this check off the hot path and away from page objects.
+      if (!own && typeof prop === 'string' && value !== null && typeof value === 'object') {
+        let isWindow = false;
+        try { isWindow = value.window === value; } catch {}
+        if (isWindow) return windowHandleFor(value);
+      }
+      return value;
     }
     const scopeTraps = {
       has(_target, prop) {
@@ -1054,6 +1306,8 @@
       if (base === document && prop === 'baseURI') return baseURL;
       if (base === document && prop === 'referrer') return '';
       if (isWindowLike(base)) {
+        // A window of another site answers by the HTML cross-origin rules only.
+        if (crossOriginFacadeSet.has(base)) return Reflect.get(base, prop);
         // R2: direct-eval 실행 중 desc(호출자 스코프)는 가상 전역보다
         // 우선한다 — eval'd 코드의 `__zp_get(g,'x')` 도 호출자 지역을 본다.
         {
@@ -1079,6 +1333,24 @@
         if (prop === 'postMessage') return postMessageWrapperFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         if (prop === 'navigation') return virtualNavigationFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         if (prop === 'name') return virtualWindowNameFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
+        if (prop === 'frameElement') {
+          // Natively null when the embedding document is another origin. Every
+          // proxied frame shares one physical origin, so the real element is
+          // always there — and it leads straight into the embedder's DOM.
+          const w = crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base);
+          let el = null;
+          try { el = w.frameElement; } catch {}
+          if (!el) return el;
+          try {
+            const up = w.parent;
+            if (up && up !== w) {
+              const mine = virtualOriginOfWindow(w);
+              const theirs = virtualOriginOfWindow(up);
+              if (mine && theirs && mine !== theirs) return null;
+            }
+          } catch {}
+          return el;
+        }
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
       }
@@ -1110,10 +1382,21 @@
           } catch {}
         }
       }
-      return Reflect.get(Object(base), prop);
+      const value = Reflect.get(Object(base), prop);
+      // A child window reached through the window object — `frames[i]`,
+      // `window[i]`, `window.someFrameName` — takes the same handle policy as
+      // `iframe.contentWindow`.
+      if (value !== null && typeof value === 'object' && value !== base && isWindowLike(base)) {
+        let isWindow = false;
+        try { isWindow = value.window === value; } catch {}
+        if (isWindow) return windowHandleFor(value);
+      }
+      return value;
     }
     function set(base, prop, value) {
       if (typeof prop !== 'symbol') prop = String(prop);
+      // A window of another site: `location` navigates, everything else throws.
+      if (crossOriginFacadeSet.has(base)) { Reflect.set(base, prop, value); return value; }
       // R2: eval 실행 중 호출자 바인딩 우선 — setter 가 호출자 스코프에서
       // 실행되어 const 쓰기 TypeError 도 네이티브 그대로 나온다.
       {
@@ -1205,6 +1488,7 @@
       return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
     }
     function has(base, prop) {
+      if (crossOriginFacadeSet.has(base)) return Reflect.has(base, prop);
       const d = __zp_eval_desc;
       if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
           && Object.prototype.hasOwnProperty.call(d, prop)) return true;
@@ -1244,6 +1528,7 @@
       return s;
     }
     function getOwnPropertyDescriptor(base, prop) {
+      if (crossOriginFacadeSet.has(base)) return Reflect.getOwnPropertyDescriptor(base, prop);
       // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
       // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
       // 주소가 새어 나간다.
@@ -1265,6 +1550,7 @@
     function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
     function del(base, prop) {
       if (typeof prop !== 'symbol') prop = String(prop);
+      if (crossOriginFacadeSet.has(base)) return Reflect.deleteProperty(base, prop);
       // R2: eval 중 호출자 바인딩 delete → non-configurable 접근자라 false.
       {
         const d = __zp_eval_desc;
@@ -1622,6 +1908,16 @@
     pageRewriteHooks = {
       rewrite: rewriteWithPageRewriter,
       decodeEntities: decodeInlineEntities
+    };
+    // Share with the frame accessors, message events and popup hook (see
+    // `windowHandles`). `hint` is a frame element for a window it holds, or
+    // 'ancestor' for parent / top / opener.
+    windowHandles = {
+      forWindow: (win, hint) => windowHandleFor(win, hint),
+      isCrossOrigin: (win, hint) => { try { return crossOriginFacadeSet.has(windowHandleFor(win, hint)); } catch { return false; } },
+      // For a window about to navigate to a known origin (a popup opened with a URL).
+      forOrigin: (win, origin) => (origin && origin !== virtualURL.origin ? crossOriginWindow(win) : windowHandleFor(win)),
+      originOf: win => virtualOriginOfWindow(win),
     };
     // 인라인 <script> 본문은 브라우저가 raw text mode 로 토크나이즈하여 HTML
     // 엔티티를 디코딩하지 않는다. React `dangerouslySetInnerHTML` 가 JS 연산자

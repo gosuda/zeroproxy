@@ -27,10 +27,11 @@ runs turned out to certify divergences as "design" — see
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 116 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
+| `cross-site frame and popup access matches native` (frames and a popup in both directions, `postMessage`, named lookups, replies) | 150 | 2 — a same-site child's `top`/`parent` read through a local alias (residual, below) |
 
-Suite totals (2026-10-01): e2e 193/193 — including the WebTransport gateway
+Suite totals (2026-10-02): e2e 194/194 — including the WebTransport gateway
 (`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
-round trips in a real browser — `npm run test:js` 113, `test:wasm:ci` 13,
+round trips in a real browser — `npm run test:js` 126, `test:wasm:ci` 13,
 `cargo test --workspace` 293, `go test ./...` green. Real sites (paired
 `test/browser/rendercheck.sh`, cold profile): GitHub height 100% / elements
 1811 of 1811 / err 0, Wikipedia 100% / err 0, NAVER 95% / err 1, Stack Overflow
@@ -38,6 +39,18 @@ round trips in a real browser — `npm run test:js` 113, `test:wasm:ci` 13,
 notice), CNN 100% / 4093 of 4095 / err 22 (ad and ID-sync hosts refusing proxied
 requests, strict-MIME refusals of those error bodies, sandboxed-frame notices —
 no script exceptions), Cloudflare-fronted gosuda.org and MDN 100% / err 0.
+Re-checked after the cross-site work (2026-10-02, items 29–32): GitHub 100% /
+1809 of 1809, Wikipedia 100% / 2410 of 2411, CNN 100% / about 4050 of 4050 in
+five rounds on an idle machine (three earlier rounds taken while a compile was
+running read about 3915 elements and 35 of 41 above the fold; twenty structure
+captures and six growth curves afterwards show no difference from the previous
+build, and the cause of those three was not isolated), NAVER 79–103% (the
+previous build 91–97%; native Chrome itself swings 2983–3606 px and 1060–1445
+elements between two loads, so only the spread says anything). The two
+`pm-drop` records NAVER leaves in `__zp_diagnostics` are native behaviour: its
+React effect posts `updateTheme` to an iframe it has just created, whose window
+is still the initial `about:blank` with the embedder's origin — native drops
+it too (the child's own receive log never sees it).
 
 **Status vocabulary** — **fixed** (closed; evidence names the pin) · **parity**
 (measured identical to native Chrome) · **not a bug** (the original claim was
@@ -179,6 +192,39 @@ claimed:
     shows a routed document now keeps it until the new route is ready; any other
     frame keeps the placeholder, whose `load` is swallowed. — e2e `frame load
     events and history match native` (native reference values pinned).
+29. **Windows of another site.** Every proxied frame shares one physical origin,
+    so the browser's same-origin policy cannot tell two sites apart. A parent could
+    read a cross-site child's `document`, storage, `eval` and name; the child could
+    read the same off its parent, and reach the embedder's DOM through
+    `frameElement` (native: `null`). The membrane now does what the browser cannot:
+    a window whose *virtual* origin differs is handed out only as a stand-in that
+    follows the HTML cross-origin rules — thirteen names, `SecurityError` for the
+    rest including every mutation, empty `Object.keys`, null prototype — from every
+    source: `iframe.contentWindow`, `contentDocument` (`null`), `frames[i]` and
+    named lookups, `window.open()`, `event.source`, and `parent`/`top`/`opener` seen
+    from the other side. — e2e `cross-site frame and popup access matches native`
+    (150 probes, both directions, frames and a popup).
+30. Same-site `parent.document` / `top.document` read `undefined` (the ancestor
+    stand-in returned own expandos only) and `'document' in parent` was false —
+    legacy frames resize themselves with `parent.document.getElementById(…)`. The
+    stand-in now forwards to that ancestor's own page-facing window. — `c2p.same.*`.
+31. **`postMessage` target origin.** Every http(s) target origin was rewritten to
+    the proxy's own, which every frame shares: a message addressed to one site
+    reached any other site's frame (your own origin, `'/'` and the one-argument
+    form sent to a cross-site frame all arrived; native drops them). The options
+    form `postMessage(msg, { targetOrigin, transfer })` threw a `SyntaxError`
+    (the object was stringified). Now compared with the destination's virtual
+    origin, and both signatures work. — `pm.*`.
+32. Message events as the receiver sees them. `e.origin` of a message from the
+    parent, a sibling or an opener was the proxy's own origin (the lookup used a
+    per-realm `Symbol`, invisible across realms): widgets that check their
+    embedder's origin rejected it, and the proxy address leaked. A bare
+    `addEventListener("message", f)` (undefined receiver) skipped the wrapper
+    altogether. The event was rebuilt — `isTrusted` false, no `target`,
+    `stopImmediatePropagation` inert — and is now the real event with
+    non-enumerable `origin`/`source` overrides; `e.source` is the very handle the
+    page holds (`=== iframe.contentWindow`, `=== parent`). `postMessage.name`
+    read a minified `n` and `.length` 3 (native 1). — `reply.*`, `source.*`.
 
 ### Residuals (documented, not fixed)
 
@@ -202,6 +248,10 @@ claimed:
 | The prelude logs "Blocked script execution in 'about:blank'" while touching sandboxed ad frames | Console noise only; the frame is sandboxed without `allow-scripts` either way. | — |
 | **Escape window:** a routed HTML document (frame or popup) is unmembraned between its commit and its prelude's first script — tens of ms, at least one task boundary. A hostile page holding the window (`iframe.contentWindow`, an `open()` handle) and polling for the new document can call that realm's raw `eval`, or copy its natives out with `Object.values(w)`, in the gap. | No in-document fix exists: the gap opens before the first byte parses. Containing the window there leaves a pre-instrumented realm (the parent's `fetch`/XHR bound in, non-configurable prototype hooks over the child's), which breaks the child. Closing it means the membrane wraps every foreign window handle (`contentWindow`, `open()`, `opener`, `event.source`, `frames[i]`) — a redesign. Bounded: once loaded, a document that never booted is contained; the popup launcher's longer raw stretch is gone (item 27). | [trap 라우팅-프레임-탈출](.ai/trap-notebook/rewriter.md#라우팅-프레임-탈출) |
 | A frame that navigated itself (or was sent by a descendant) to a document with no prelude (text/plain, an image) reads back the URL it was first sent to | The parent maps only routes it opened; another realm's `/zp/p/` token is not decryptable here. HTML documents report their own URL. | — |
+| A window handle read while the window was still **same-origin** keeps working after it navigates to another site | The raw window cannot be revoked; only handles the membrane gives out after the origin is known are restricted. Covered: a frame sent to another site (restricted from the start, its blank placeholder too) and a popup opened with a URL. Not covered: the blank page of a frame read BEFORE its `src` is set, or a popup opened blank and navigated later. | — |
+| A frame reached by a **bare identifier** (`fname.document`) is the raw window | A free identifier resolves through the browser's own global lookup, which no hook sees. Lookups through `window`, `self`, `top`, `frames` — bracket or dot — are covered. | — |
+| `w.top` / `w.parent` read through a **local alias** of a same-site child window are raw windows, not `=== window` | The rewriter leaves window-chain members unwrapped on local aliases: the ancestor-climbing loops of ad and consent code froze the renderer when they were wrapped (CNN, 2026-08-24). Same-site only; cross-site handles are stand-ins, so every read is intercepted. | e2e `cross-site frame and popup access matches native` (`p2c.same.top`, `p2c.same.parent`) |
+| A message event carries own `origin`/`source` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` and `currentTarget` match native. | — |
 
 ---
 
@@ -392,7 +442,7 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | child cookie/storage between **same-site** frames, and a parent's own storage seen from a child | **parity** (measured 2026-10-01, one-off differential, not pinned) | — |
 | iframe `load` events and joint session history for a frame sent through `src` | **fixed** 2026-10-01 — one `load` per navigation and one history entry per change, as native; a parsed `<iframe src onload>` fires once (it fired three times) | e2e `frame load events and history match native`. See [trap 프레임-load-두-번](.ai/trap-notebook/rewriter.md#프레임-load-두-번). |
 | a detached frame's window | **parity** for `eval` and `closed`; `document.URL` reports the virtual URL where native reports `about:blank` | Same virtual-URL split as srcdoc (see Residuals). |
-| **frames of different sites** | **residual — security-relevant.** Every proxied frame shares the proxy's physical origin, so the browser's same-origin policy cannot separate them. The membrane virtualizes `Location` (cross-site reads throw) and gives a child only own-expando values of its parent, but a parent's reads of a cross-site child's document, globals and storage are **not** blocked (native Chrome throws `SecurityError`). | Closing it needs every window handle (`contentWindow`, `open()`, `frames[i]`, `opener`) wrapped in a per-virtual-origin facade — a design change, not a patch. Pinned today only for `Location`: e2e `cross-virtual-origin frames cannot read parent Location`. See [trap 교차-사이트-프레임](.ai/trap-notebook/rewriter.md#교차-사이트-프레임). |
+| frames and popups of **different sites** | **fixed** 2026-10-02 (items 29–32) — a cross-site window is a stand-in that follows the HTML cross-origin rules, in both directions; `postMessage` honors the target origin; `e.origin`/`e.source` are right on the receiving side | e2e `cross-site frame and popup access matches native`. Residuals below. See [trap 교차-사이트-프레임](.ai/trap-notebook/rewriter.md#교차-사이트-프레임). |
 | CSP inheritance into child frames | **unverified** | — |
 
 ---

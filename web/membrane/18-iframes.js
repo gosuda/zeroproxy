@@ -70,11 +70,35 @@
       if (!proto) return;
       const win = frameDescriptor(proto, 'contentWindow');
       if (win && win.get) {
-        try { defineMasked(proto, 'contentWindow', { get() { return containFrameWindow(win.get.call(this), this); }, configurable: false, enumerable: true }); } catch {}
+        // The page gets a window handle, not the window: another site's frame
+        // is handed out as the restricted cross-origin stand-in (windowHandles).
+        try {
+          defineMasked(proto, 'contentWindow', {
+            get() {
+              const raw = containFrameWindow(win.get.call(this), this);
+              return windowHandles ? windowHandles.forWindow(raw, this) : raw;
+            },
+            configurable: false, enumerable: true
+          });
+        } catch {}
       }
       const doc = frameDescriptor(proto, 'contentDocument');
       if (doc && doc.get) {
-        try { defineMasked(proto, 'contentDocument', { get() { const childDoc = doc.get.call(this); if (childDoc && childDoc.defaultView) containFrameWindow(childDoc.defaultView, this); return childDoc; }, configurable: false, enumerable: true }); } catch {}
+        try {
+          defineMasked(proto, 'contentDocument', {
+            get() {
+              const childDoc = doc.get.call(this);
+              const childWin = childDoc && childDoc.defaultView;
+              if (childWin) {
+                containFrameWindow(childWin, this);
+                // Natively null for a frame of another origin.
+                if (windowHandles && windowHandles.isCrossOrigin(childWin, this)) return null;
+              }
+              return childDoc;
+            },
+            configurable: false, enumerable: true
+          });
+        } catch {}
       }
     }
     function frameDescriptor(proto, prop) {
@@ -259,7 +283,8 @@
       // gives the routed document a fresh Window (measured 2026-10-01), so
       // nothing installed here reaches it — while skipping left the blank page
       // itself raw (see bootingProxiedDocument).
-      if ((!src || /^about:blank$/i.test(src)) && frame.contentWindow) installNetworkContainment(frame.contentWindow);
+      const blankWin = (!src || /^about:blank$/i.test(src)) ? nativeFrameWindow(frame) : null;
+      if (blankWin) installNetworkContainment(blankWin);
       installSafeFrameResizeShim(frame);
     } catch { try { frame.remove(); } catch {} }
   }
@@ -287,7 +312,7 @@
     let lastH = 0;
     const apply = () => {
       try {
-        const doc = frame.contentDocument;
+        const doc = nativeFrameDocument(frame);
         if (!doc || !doc.body) return;
         // Body in non-SafeFrame iframe wraps a banner ad. Use max of common
         // height signals — images load late so we want largest stable size.
@@ -302,7 +327,7 @@
     let tries = 0;
     const start = () => {
       let doc = null;
-      try { doc = frame.contentDocument; } catch {}
+      try { doc = nativeFrameDocument(frame); } catch {}
       if (!doc || !doc.body) {
         if (tries++ < 100) try { root.setTimeout(start, 50); } catch {}
         return;

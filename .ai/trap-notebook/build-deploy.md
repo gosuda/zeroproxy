@@ -72,6 +72,7 @@
 - 별도 함정: 설치 후에도 셸 PATH는 낡을 수 있음. 파일시스템·`[Environment]::GetEnvironmentVariable("Path","Machine")` 확인 또는 `/c/Program Files/Go/bin` 추가. 백그라운드 빌드는 기존 파일 존재로 완료 판단하면 이후 clean에 지워지므로 **작업 완료 알림**을 기다린다.
 - 변종 (2026-09-10): 툴체인이 다 있어도 **실행 중인 서버가 exe 를 잠그면** 같은 사고가 난다. clean 이 `dist/web/*` 를 먼저 지우고 `dist/zeroproxy-server.exe` unlink 에서 `EPERM` 으로 죽어, dist 가 반만 남는다. 빌드 전에 `Get-Process zeroproxy-server | Stop-Process`.
 - 별도 함정: `npm run build 2>&1 | tail` 은 **tail 의 종료 코드**를 돌려주므로 실패한 빌드가 `exit 0` 으로 보인다. `set -o pipefail` 을 쓰거나 파이프 없이 실행한다. 이번에 실제로 실패를 성공으로 한 번 보고했다.
+- **재발 (2026-10-02):** 다른 터미널의 `rustup upgrade stable` 이 도는 동안 `cargo` 가 사라졌고(`the 'cargo.exe' binary … is not applicable`) `npm run build` 는 `dist` 를 지운 뒤 죽었다 — 서버·웹·WASM 이 한꺼번에 없어졌다. `target/` 의 컴파일된 WASM 은 Rust 소스가 안 바뀌어 유효했으므로, 아무것도 안 하는 `cargo.exe`(Go 로 5줄)를 PATH 앞에 두고 한 번 빌드해 복구했다 — **소스 신선도를 먼저 확인한 경우에만**. 툴체인이 돌아온 뒤 정식 빌드로 다시 만들었다. 규칙: 빌드 전에 `cargo --version` 이 응답하는지 본다.
 ## <a id="죽은-브라우저가-전항목-통과"></a>브라우저가 죽은 채로 13분을 돌렸고 rendercheck 는 4/4 OK 라고 했다 (2026-09-10)
 
 taskweaver 데몬이 사라진 줄 모르고(`taskweaver list` → `count: 0`) 빌드 →

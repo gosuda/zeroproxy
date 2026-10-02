@@ -110,6 +110,12 @@
     const d = f.localName === 'frame' ? Native.frameContentWindow : Native.iframeContentWindow;
     try { return d && d.get ? d.get.call(f) : null; } catch { return null; }
   }
+  // The frame's real document — for membrane code. The page-facing
+  // `contentDocument` is null for a frame of another site.
+  function nativeFrameDocument(f) {
+    const w = nativeFrameWindow(f);
+    try { return w ? w.document : null; } catch { return null; }
+  }
   // The same route `iframe.src = url` takes (activatedFrameURL), but the
   // frame's own Location moves, not its `src` attribute — natively a named
   // navigation leaves `src` alone. The incoming document boots its own
@@ -145,6 +151,7 @@
   async function popupNavURL(raw, base = baseURL) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
+    rememberFrameRoute(share.encrypted, target);
     const reply = await ctx.bridge.send({ type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: target, servers: activeServers });
     return proxyOrigin + reply.path + shareFragmentForKey(share.key);
   }
@@ -618,6 +625,10 @@
       // target does (clickNavigationTarget) and open() returns its window.
       // Native.open would park the share launcher in it. With noopener the
       // browser picks a new window instead.
+      // Where the window is going decides what the page may hold: another
+      // site's window is a restricted stand-in even while it is still blank.
+      const destOrigin = isHTTPURL(raw) ? (() => { try { return new URL(targetURL(raw)).origin; } catch { return ''; } })() : '';
+      const handleFor = win => (windowHandles ? windowHandles.forOrigin(win, destOrigin) : win);
       if (isHTTPURL(raw) && !noopener) {
         const dest = chooseNavigable(String(target));
         const win = dest.frame ? nativeFrameWindow(dest.frame) : dest.win || null;
@@ -625,7 +636,7 @@
           if (dest.frame) navigateFrameTo(dest.frame, raw);
           else navigateWindowTo(win, raw);
           try { installNetworkContainment(win); } catch { return null; }
-          return win;
+          return handleFor(win);
         }
       }
       // noopener returns null natively and the page never holds the window, so
@@ -647,7 +658,7 @@
       if (child) {
         try { installNetworkContainment(child); } catch { try { child.close(); } catch {} return null; }
       }
-      return child;
+      return child ? handleFor(child) : child;
     });
   }
 
@@ -678,12 +689,19 @@
       const rawAdd = ETProto.addEventListener;
       const rawRemove = ETProto.removeEventListener;
       if (typeof rawAdd === 'function' && typeof rawRemove === 'function') {
+        // A bare `addEventListener("message", f)` has an undefined receiver, which
+        // the browser takes to mean the window. It used to miss this wrapper, so
+        // the handler saw the proxy's own origin in `e.origin` (a widget checking
+        // its embedder's origin rejected every message) and a raw `e.source`.
+        // (Each realm wraps its own EventTarget.prototype, so an undefined receiver
+        // is always that realm's global.)
+        const forThisWindow = self => self === w || self === undefined || self === null;
         define(ETProto, 'addEventListener', function(type, listener, options) {
-          if (this === w && String(type) === 'message') return rawAdd.call(this, String(type), wrap(listener), options);
+          if (forThisWindow(this) && String(type) === 'message') return rawAdd.call(w, String(type), wrap(listener), options);
           return rawAdd.apply(this, arguments);
         });
         define(ETProto, 'removeEventListener', function(type, listener, options) {
-          if (this === w && String(type) === 'message') return rawRemove.call(this, String(type), messageListenerWrappers.get(listener) || listener, options);
+          if (forThisWindow(this) && String(type) === 'message') return rawRemove.call(w, String(type), messageListenerWrappers.get(listener) || listener, options);
           return rawRemove.apply(this, arguments);
         });
       }
