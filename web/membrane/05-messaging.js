@@ -169,7 +169,7 @@
     try { dest = windowHandles ? windowHandles.originOf(target) : ''; } catch {}
     if (!dest) return true;
     // "/" is the SENDER's own origin.
-    if (s === '/') return dest === virtualURL.origin || notePostMessageDrop(s, dest, target);
+    if (s === '/') return dest === securityOrigin() || notePostMessageDrop(s, dest, target);
     try {
       const u = new URL(s);
       if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin === dest || notePostMessageDrop(u.origin, dest, target);
@@ -185,7 +185,7 @@
       let dg = root.__zp_diagnostics;
       try { if (root.top && root.top.__zp_diagnostics) dg = root.top.__zp_diagnostics; } catch {}
       if (dg && dg.length < 200) {
-        const entry = { t: 'pm-drop', wanted: String(wanted).slice(0, 80), dest: String(dest).slice(0, 80), from: String(virtualURL.origin).slice(0, 80) };
+        const entry = { t: 'pm-drop', wanted: String(wanted).slice(0, 80), dest: String(displayOrigin(dest)).slice(0, 80), from: String(displayOrigin(securityOrigin())).slice(0, 80) };
         // Which window it was aimed at and who aimed it: the drop itself says neither.
         entry.to = postMessageTargetRole(target);
         try { entry.to += ' ' + String(target.location.href).slice(0, 100); } catch {}
@@ -308,7 +308,7 @@
     // their parent's messages, and the proxy address leaked.
     try {
       const o = windowHandles ? windowHandles.originOf(ev.source) : '';
-      if (o) return o;
+      if (o) return displayOrigin(o);
     } catch {}
     // A frame this realm routed: its current document path names the target.
     // The marker below is per-realm, so a child that booted its own prelude is
@@ -380,7 +380,7 @@
       if (child) frameWindowOrigins.set(child, new URL(target).origin);
     } catch {}
   }
-  try { defineMasked(root, frameTargetOriginMarker, { get() { return virtualURL.origin; }, enumerable: false, configurable: false }); } catch {}
+  try { defineMasked(root, frameTargetOriginMarker, { get() { return displayOrigin(securityOrigin()); }, enumerable: false, configurable: false }); } catch {}
 
   // ── virtual window.name ───────────────────────────────────────────────
   // The real `window.name` persists across EVERY document this browsing

@@ -58,6 +58,21 @@
   // script, a sibling frame, another tab. The jar is the truth; this document keeps a
   // copy that `document.cookie` and `cookieStore` read. HttpOnly changes never arrive.
   // The same change can come twice (response and push): each id is applied once.
+  // A request the page makes after writing a cookie carries it — natively the browser's jar is updated
+  // synchronously. Ours lives in the service worker, and the write (a message) and the request (a fetch)
+  // travel by different routes: either may get there first. So a runtime request waits for the
+  // acknowledgement of the writes still in flight.
+  const cookieWritesInFlight = new Set();
+  function sendCookieSet(line) {
+    const sent = ctx.bridge.send({ type: ZP.MSG.COOKIE_SET, tabId: boot.tabId, targetUrl: virtualURL.href, cookie: String(line) })
+      .catch(err => { try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'cookie-set-failed', code: String((err && (err.code || err.message)) || err), ck: String(line).slice(0, 60) }); } catch {} })
+      .then(() => { cookieWritesInFlight.delete(sent); });
+    cookieWritesInFlight.add(sent);
+    return sent;
+  }
+  function cookieWritesSettled() {
+    return cookieWritesInFlight.size ? Promise.all(Array.from(cookieWritesInFlight)) : null;
+  }
   const appliedCookieChanges = new Set();
   function applyCookieChanges(changes) {
     if (!Array.isArray(changes)) return;
@@ -142,7 +157,7 @@
         if (opts.secure) line += '; secure';
         if (opts.sameSite) line += '; samesite=' + String(opts.sameSite);
         setDocumentCookie(line);
-        ctx.bridge.send({ type: ZP.MSG.COOKIE_SET, tabId: boot.tabId, targetUrl: virtualURL.href, cookie: line }).catch(() => {});
+        sendCookieSet(line);
         return Promise.resolve();
       }, enumerable: false, configurable: true, writable: true },
       delete: { value: function del(arg) {
@@ -151,7 +166,7 @@
         let line = String(name) + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT';
         if (arg && typeof arg === 'object' && arg.path) line += '; path=' + String(arg.path);
         setDocumentCookie(line);
-        ctx.bridge.send({ type: ZP.MSG.COOKIE_SET, tabId: boot.tabId, targetUrl: virtualURL.href, cookie: line }).catch(() => {});
+        sendCookieSet(line);
         return Promise.resolve();
       }, enumerable: false, configurable: true, writable: true },
       addEventListener: { value: function addEventListener(type, listener) {

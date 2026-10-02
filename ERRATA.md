@@ -283,6 +283,74 @@ claimed:
     decision (rejected `Domain`, session cookies, deletion) is the only one. — e2e
     `cookies reach every document that can see them, and no other` and `a cookie reaches
     the other tab of the same site`; prelude unit tests for applying records.
+37. **Frames sandboxed without `allow-same-origin` were deleted at insertion; they now run as the
+    opaque-origin documents they are.** The browser gives such a frame (`sandbox="allow-scripts"`,
+    `sandbox=""`) an opaque origin: its document cannot be read or patched from the embedder, is not
+    controlled by the service worker — so the proxy cannot serve it — and cannot read `localStorage`, so the
+    prelude cannot boot in it. The membrane could not contain it and removed it as it was inserted (ad and
+    widget frames were simply missing); keeping it anyway gave a document that drew a 403 and a prelude that
+    died at `localStorage`, leaving page scripts running in a half-installed realm. The proxy needs the
+    opposite of what the page asked for, so the frame keeps the page's flags — the browser still refuses
+    scripts, forms, popups, modals and top navigation as asked — plus `allow-same-origin`, the element is
+    marked, and the frame's prelude, asking its embedder, behaves as the document the page described.
+    `self.origin`, `location.origin` and `e.origin` read `"null"` (underneath, a token per document: two
+    opaque documents are cross-origin to each other and to their embedder); `localStorage`,
+    `sessionStorage`, `document.cookie`, `indexedDB`, `caches`, `cookieStore`, `navigator.serviceWorker`,
+    OPFS and `locks.request` refuse as the browser does — a `SecurityError` with its message, or a rejection —
+    and `storage.estimate()` rejects with a `TypeError` and `document.domain` reads `""`, as natively;
+    `Notification.permission` and `permissions.query` read `denied`; `parent`, `top`, `frameElement` and
+    every sibling are cross-origin stand-ins; navigating the top window or the embedder is a
+    `SecurityError` without `allow-top-navigation*` (user activation honored), as is anything but itself and
+    its descendants; frames it creates are opaque too (measured natively); runtime `fetch`/XHR carry
+    `Origin: null` and send cookies only for `credentials: 'include'`. The page's own `sandbox` value reads
+    back as written — attribute, property, a real `DOMTokenList`, `outerHTML` — and the embedder's
+    `contentDocument` is `null`. The sandbox is rewritten before the frame's first navigation, which is when
+    the browser fixes its flags: before any `src`, and for markup before the string is inserted. Every
+    namespace of the frame is private to it, so a gap in the list above would still leave nothing of any
+    site's to read. — e2e `sandboxed frames are opaque to the page and to each other, as natively` (nine ways
+    of making the frame, about forty probes in each, siblings, navigation of the top window, and egress
+    attempts by every route a script has, checked by the suite's wire assertion); prelude unit tests for the
+    opaque primitives, the flag rules and window handles.
+38. **Frames made from markup never loaded.** `host.innerHTML = '<iframe src="/x">'` — and
+    `insertAdjacentHTML`, a `<template>` clone, `document.write`, `setHTMLUnsafe`, `outerHTML`, a fragment —
+    produced a frame that stayed `about:blank`: the page-side HTML walker rewrites markup in an inert copy
+    of the document, opened the frame's route there, and the route completed onto the copy, not onto the
+    frame the markup becomes. (Measured native-vs-proxy at the commit before this work for the first
+    three; the others share the walker.) A frame in an inert document — the walker's copy, a template's
+    content, a `DOMParser` document — is now **parked** as the server's rewriter parks one: the page's text
+    waits in `data-zp-frame-src` and `src` holds the blank placeholder in its place (removing it moved it to
+    the end of the element's attributes, which `innerHTML` shows). The paths that activate markup — the HTML
+    setters, `insertAdjacentHTML`, `document.write`, node insertion — restore parked frames through the
+    hooked `setAttribute`, after the sandbox rewrite; a `src` the page sets itself drops the parked text;
+    reads (`getAttribute`, `.src`, serialization) answer with the page's text meanwhile. The page's
+    `srcdoc` text was lost the same way (the walker kept it in a map on its copy): `frame.srcdoc` read the
+    document the proxy injects, prelude tags and boot JSON included; the stash that survives the
+    serialization puts it back. — e2e `frames made from markup load and read back as natively`; prelude unit
+    tests for parking and restoring.
+39. **A bare `frameElement` handed out the embedder's `<iframe>`.** `window.frameElement` and
+    `self.frameElement` were stand-ins (`null` across sites), but the free identifier resolved through the
+    browser's own global lookup: `frameElement.ownerDocument` was the embedder's DOM, from a cross-site
+    child as much as from a sandboxed one. It is a dangerous global now (the rewriter routes it through the
+    scope facade). — Rust `rewrites_bare_frame_element`; e2e `sandboxed frames are opaque…`
+    (`frameElement`, `typeof frameElement`, an aliased `window`).
+40. **A request made right after `document.cookie = x` could miss the cookie.** The jar is in the service
+    worker; the write (a message) and the request (a fetch) travel different routes and either may arrive
+    first — a window of milliseconds that the suite's `cookies set by fetch and XHR` test fell into on one
+    machine, repeatedly (natively the jar is synchronous and the request always carries the cookie). A
+    runtime request now waits for the acknowledgement of the writes still in flight; a failed write settles
+    too and never holds a request back. Synchronous XHR and navigations cannot wait (see the residual). —
+    prelude unit test `cookie writes: a runtime request waits…`; e2e as above.
+41. **Scripts put in by `replaceChildren`, `insertAdjacentElement` or `Range.insertNode` — or by
+    `before`/`after`/`replaceWith` on a text node — ran raw.** The insertion hooks (`appendChild`,
+    `insertBefore`, `replaceChild`, and `append`, `prepend`, `before`, `after`, `replaceWith` on elements)
+    prepare an inserted script — its text rewritten, its `src` routed — before the browser sees it. These
+    doors had no hook, so an inline script that came in through one reached the browser as the page wrote it
+    and ran outside the membrane (measured native-vs-proxy 2026-10-02: `location.href` read the proxy's URL
+    where it reads the page's own through `appendChild`); outside the membrane `location` is the real one,
+    and assigning it is a real navigation to the target. Every door a node can come through is hooked now,
+    and the wrappers report the native method's `length` (they read 0). — e2e `scripts put in by every
+    insertion door run through the membrane (matches native)` (nineteen doors, shadow roots and clones
+    included; three mutations checked).
 
 ### Residuals (documented, not fixed)
 
@@ -314,8 +382,13 @@ claimed:
 | `e.url` of a storage event is the **receiving** document's virtual URL, not the writer's | The physical URL of the writer is a share route the receiver cannot read. The origin is right. | — |
 | A storage event carries own `key`/`storageArea`/`url` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` match native. | — |
 | A cookie another document wrote or a response set reaches this one **after a service-worker round trip** (milliseconds), not within the same task | A write in one frame is readable from a sibling frame once the worker has pushed it; natively the shared jar answers at once. Code that writes a cookie and reads it back through another frame in the same task sees the old value. | — |
-| An iframe sandboxed **without `allow-same-origin`** (`sandbox="allow-scripts"`, `sandbox=""`) is **removed from the DOM** the moment it is inserted | Fail-closed, and old — the build before the 2026-10-02 work does the same. The parent can neither read nor patch an opaque-origin window; `instrumentIframe` takes that for a containment failure and removes the frame. Lifting the guard is not enough (measured 2026-10-02): the frame's own document drew a 403 from the proxy, and its prelude aborts at the first origin-restricted API (`localStorage` throws `SecurityError`), which would leave a half-installed document running page scripts. Supporting it needs an opaque-origin mode in the prelude (storage, cookies and `caches` throw, origin `null`) and a decision on the server's policy for `Origin: null` requests. Sandboxes that include `allow-same-origin` are virtualized and work. | — |
-| `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. | — |
+| A frame sandboxed without `allow-same-origin` is **same-origin with the proxy underneath**; its opacity is the prelude's | The proxy cannot serve a document that has a real opaque origin (no service worker, no `localStorage`). The browser keeps every other flag, the frame's namespaces are private to it, and every other window sees it as a cross-origin stand-in — but the denial list is code: a gap in it would let the frame read what any same-origin frame can read of its **own** namespace, never of a site's. | e2e `sandboxed frames are opaque to the page and to each other, as natively` |
+| A popup opened by a sandboxed frame (`allow-popups`) is not itself sandboxed | Natively it inherits the flags and the opaque origin. The popup path knows its opener's site, not its sandbox. | — |
+| A sandboxed frame's `<img>`, `<script>` and CSS loads carry the site's cookies; only runtime `fetch`/XHR send `Origin: null` and keep cookies back unless `credentials: 'include'` | Natively an opaque initiator is cross-site and sends none. The service worker attaches the tab's jar to every request it forwards. | — |
+| A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
+| A cookie written by `document.cookie` may miss a **synchronous XHR**, a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40); these cannot wait. | — |
+| A cross-origin `fetch`/XHR without `Access-Control-Allow-Origin` **resolves** (native: `TypeError: Failed to fetch`; the response type reads `basic`, not `cors`) | The proxy forwards what the upstream answers and never filters it by the page's origin. Measured 2026-10-02: cross-site `fetch` with and without credentials, and XHR; `mode: 'no-cors'` and same-origin match. Older than the sandbox work, but it shows more now that a sandboxed frame — whose every request is cross-origin natively — reads same-site responses. | — |
+| `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---
 

@@ -1066,6 +1066,14 @@
       // SDK-injected fragments leave raw target hrefs on the DOM,
       // surfacing them to hover / middle-click / copy-link.
       applyNavigationBackstop(node);
+      // A frame's sandbox is rewritten here: the browser fixes a navigation's sandbox flags when the
+      // frame is inserted — a srcdoc frame navigates then — before any hook sees the live element. (Only
+      // an opaque sandbox is: its stash survives this string. The escape combination is left for the
+      // insertion paths.) Its `src` is parked by the policy pass below (see parkFrameSrc).
+      if (tag === 'iframe' || tag === 'frame') {
+        const sandbox = Native.getAttribute.call(node, 'sandbox');
+        if (sandbox !== null && frameSandboxIsOpaque(sandbox)) sanitizeFrameSandbox(node);
+      }
       // 서버측 htmltx 가 파싱 시점 `srcdoc` 을 `data-zp-srcdoc` 으로 옮겨 둔다
       // (멤브레인 없는 문서가 파서에서 바로 생기는 것을 막기 위해서다).
       // 여기서 되돌리면 아래 injectSrcdoc 분기가 프렐류드 주입 + URL 리라이트를

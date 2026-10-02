@@ -10,7 +10,10 @@
 // Returns whether the click led to a navigation, so a caller that then finds no
 // result can say which stage stalled.
 async function openThroughLauncher(page, proxyOrigin, targetUrl, { navigationTimeout = 45000 } = {}) {
-  await page.goto(`${proxyOrigin}/zp/`, { waitUntil: 'domcontentloaded' });
+  // Not awaited: when the service worker has to start for this navigation, goto's own wait can hang
+  // (measured 2026-10-02: the page complete and controlled while goto still waited). The button says
+  // when the runtime is ready.
+  page.goto(`${proxyOrigin}/zp/`, { waitUntil: 'domcontentloaded' }).catch(() => {});
   try {
     await page.waitForFunction(() => { const b = document.querySelector('button'); return b && !b.disabled; }, { timeout: 90000, polling: 100 });
   } catch {

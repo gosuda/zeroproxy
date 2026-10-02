@@ -5,7 +5,7 @@
     // wrappers backed by native storage), and target A's keys are invisible
     // to target B. localStorage persists across reloads; sessionStorage is
     // per-tab session (additionally scoped by tabId).
-    const targetOriginKey = virtualURL.origin;
+    const targetOriginKey = securityOrigin();
     // sha1-ish short hash (FNV-1a) of origin to keep keys compact + collision-resistant for our scale.
     const originHash = (() => {
       let h = 0x811c9dc5;
@@ -83,10 +83,12 @@
     let wrappedLocalStorage = null;
     let wrappedSessionStorage = null;
     defineAccessor(w, 'localStorage', () => {
+      if (opaqueDocument) throw opaqueDenied("Failed to read the 'localStorage' property from 'Window'");
       if (!wrappedLocalStorage) wrappedLocalStorage = prefixedStorage(nativeLocalStorage, localPrefix);
       return wrappedLocalStorage;
     });
     defineAccessor(w, 'sessionStorage', () => {
+      if (opaqueDocument) throw opaqueDenied("Failed to read the 'sessionStorage' property from 'Window'");
       if (!wrappedSessionStorage) wrappedSessionStorage = prefixedStorage(nativeSessionStorage, sessionPrefix);
       return wrappedSessionStorage;
     });
@@ -105,6 +107,8 @@
       const hasOwn = Object.prototype.hasOwnProperty;
       w.addEventListener('storage', ev => {
         if (!ev.isTrusted || hasOwn.call(ev, 'storageArea')) return;
+        // An opaque document has no storage to hear about.
+        if (opaqueDocument) { ev.stopImmediatePropagation(); return; }
         const area = ev.storageArea;
         const key = ev.key;
         let prefix = null;
@@ -127,10 +131,16 @@
       // 데이터 프로퍼티로 바꿔 놓으면 디스크립터 모양만 봐도 티가 난다
       // (실측 2026-08-16: 직접 `Ace.` vs 프록시 `D-ew`).
       const virtualIDB = {
-        open(name, version) { return nativeIDB.open(idbPrefix + String(name), version); },
-        deleteDatabase(name) { return nativeIDB.deleteDatabase(idbPrefix + String(name)); },
+        open(name, version) {
+          if (opaqueDocument) throw opaqueDenied("Failed to execute 'open' on 'IDBFactory'", 'access to the Indexed Database API is denied in this context.');
+          return nativeIDB.open(idbPrefix + String(name), version);
+        },
+        deleteDatabase(name) {
+          if (opaqueDocument) throw opaqueDenied("Failed to execute 'deleteDatabase' on 'IDBFactory'", 'access to the Indexed Database API is denied in this context.');
+          return nativeIDB.deleteDatabase(idbPrefix + String(name));
+        },
         cmp: nativeIDB.cmp ? nativeIDB.cmp.bind(nativeIDB) : undefined,
-        databases: nativeIDB.databases ? () => nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
+        databases: nativeIDB.databases ? () => opaqueDocument ? Promise.reject(opaqueDenied("Failed to execute 'databases' on 'IDBFactory'", 'Access to the IndexedDB API is denied in this context.')) : nativeIDB.databases().then(list => list.filter(db => db.name && db.name.startsWith(idbPrefix)).map(db => Object.assign({}, db, { name: db.name.slice(idbPrefix.length) }))) : undefined
       };
       defineAccessor(w, 'indexedDB', () => virtualIDB);
       // `webkitIndexedDB` bypasses the namespace entirely — alias it to the
@@ -153,11 +163,28 @@
         keys() { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix)).map(k => k.slice(cachePrefix.length))); },
         match(request, opts) { return nativeCaches.keys().then(keys => keys.filter(k => k.startsWith(cachePrefix))).then(async keys => { for (const k of keys) { const hit = await (await nativeCaches.open(k)).match(request, opts); if (hit) return hit; } return undefined; }); }
       };
-      defineAccessor(w, 'caches', () => virtualCaches);
+      defineAccessor(w, 'caches', () => {
+        if (opaqueDocument) throw opaqueDenied("Failed to read the 'caches' property from 'Window'", "Cache storage is disabled because the document is sandboxed and lacks the 'allow-same-origin' flag.");
+        return virtualCaches;
+      });
     }
     // cookieStore: same jar as document.cookie (documentCookieRecords).
     // The native object would expose REAL proxy-origin cookies.
-    if (w.cookieStore) defineAccessor(w, 'cookieStore', () => virtualCookieStore());
+    if (w.cookieStore) {
+      // An opaque origin may hold the object but not use it.
+      let deniedCookieStore = null;
+      const denyCookieStore = () => {
+        if (deniedCookieStore) return deniedCookieStore;
+        deniedCookieStore = {};
+        for (const m of ['get', 'getAll', 'set', 'delete']) {
+          define(deniedCookieStore, m, function () { return Promise.reject(opaqueDenied("Failed to execute '" + m + "' on 'CookieStore'", 'Access to the CookieStore API is denied in this context.')); });
+        }
+        define(deniedCookieStore, 'addEventListener', function addEventListener() {});
+        define(deniedCookieStore, 'removeEventListener', function removeEventListener() {});
+        return deniedCookieStore;
+      };
+      defineAccessor(w, 'cookieStore', () => (opaqueDocument ? denyCookieStore() : virtualCookieStore()));
+    }
     // OPFS — `navigator.storage.getDirectory()` returns the REAL proxy-origin
     // root, shared across targets. Hand out a per-target subdirectory handle;
     // every operation below it stays inside the namespace transparently.
@@ -167,9 +194,11 @@
         const nativeGetDirectory = storageMgr.getDirectory.bind(storageMgr);
         // handle.name 은 페이지에 노출되므로 마커+오리진 원문 대신 해시를 쓴다.
         let oh = 0x811c9dc5;
-        for (let i = 0; i < virtualURL.origin.length; i++) { oh ^= virtualURL.origin.charCodeAt(i); oh = Math.imul(oh, 16777619); }
+        const opfsKey = securityOrigin();
+        for (let i = 0; i < opfsKey.length; i++) { oh ^= opfsKey.charCodeAt(i); oh = Math.imul(oh, 16777619); }
         const opfsRoot = 'zp:o:' + ('00000000' + (oh >>> 0).toString(16)).slice(-8);
         const wrapped = function getDirectory() {
+          if (opaqueDocument) return Promise.reject(opaqueDenied("Storage directory access is denied because the context is sandboxed and lacks the 'allow-same-origin' flag.", ''));
           return nativeGetDirectory().then(d => d.getDirectoryHandle(opfsRoot, { create: true }));
         };
         try { Object.defineProperty(wrapped, '__zpWrapped', { value: true }); } catch {}
@@ -191,7 +220,10 @@
         }
         if (storageMgr.estimate) {
           const nativeEstimate = storageMgr.estimate.bind(storageMgr);
-          define(storageMgr, 'estimate', function estimate() { return nativeEstimate(); });
+          define(storageMgr, 'estimate', function estimate() {
+            if (opaqueDocument) return Promise.reject(normalizedError('TypeError'));
+            return nativeEstimate();
+          });
         }
       }
     } catch {}
@@ -359,12 +391,12 @@
         w.document,
         docProto,
         'domain',
-        () => virtualDomain,
+        () => (opaqueDocument ? '' : virtualDomain),
         () => {}
       );
     }
     // window.origin / self.origin getters — point at virtual target origin.
-    try { defineMasked(w, 'origin', { get() { return virtualURL.origin; }, configurable: true, enumerable: true }); } catch {}
+    try { defineMasked(w, 'origin', { get() { return displayOrigin(securityOrigin()); }, configurable: true, enumerable: true }); } catch {}
     // isSecureContext — the proxy is served from localhost so the REAL value
     // is always `true`, but an http: target would be `false` natively.
     // Potentially-trustworthy = https/wss/file + localhost-family hosts.
@@ -614,6 +646,7 @@
           : () => (nativePermDesc ? nativePermDesc.value : 'default');
         defineMasked(NativeN, 'permission', {
           get() {
+            if (opaqueDocument) return 'denied';
             try {
               const stored = prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey);
               if (stored) return stored;
@@ -687,6 +720,15 @@
       const trackedPerms = new Set(['camera', 'microphone', 'display-capture', 'geolocation', 'speaker-selection']);
       define(w.navigator.permissions, 'query', function(desc) {
         const name = desc && desc.name;
+        // An opaque origin is granted nothing, and is told so.
+        if (opaqueDocument && typeof name === 'string') {
+          const StatusProto = w.PermissionStatus && w.PermissionStatus.prototype;
+          const fake = StatusProto ? Object.create(StatusProto) : {};
+          try { Object.defineProperty(fake, 'name', { value: name, enumerable: true }); } catch {}
+          try { Object.defineProperty(fake, 'state', { value: 'denied', enumerable: true }); } catch {}
+          try { Object.defineProperty(fake, 'onchange', { value: null, writable: true, enumerable: true }); } catch {}
+          return Promise.resolve(fake);
+        }
         if (typeof name === 'string' && trackedPerms.has(name) && !grantedPerms.has(name)) {
           // 타깃이 이 권한을 얻은 기록이 없으면 'prompt' — 다른 타깃이 실제로
           // grant 받았어도 그 사실은 이 타깃에 새지 않는다.

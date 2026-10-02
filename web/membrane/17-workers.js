@@ -160,7 +160,10 @@
     }
     serviceWorkerFacades.set(w, facade);
     const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
-    defineOnProto(nav, proto, 'serviceWorker', () => facade);
+    defineOnProto(nav, proto, 'serviceWorker', () => {
+      if (opaqueDocument) throw opaqueDenied("Failed to read the 'serviceWorker' property from 'Navigator'", "Service worker is disabled because the context is sandboxed and lacks the 'allow-same-origin' flag.");
+      return facade;
+    });
   }
   function workerBootstrapURL(url, opts) {
     const raw = String(url);

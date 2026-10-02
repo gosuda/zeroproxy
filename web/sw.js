@@ -1094,7 +1094,7 @@ async function runtimeAPI(req, url, clientId) {
     const resp = await transportFetch(payload.url, {
       method: init.method || 'GET', headers: init.headers || [],
       body: bodyBytes,
-      tab, entryId, runtimeFetch: true, refOverride: payload.documentURL,
+      tab, entryId, runtimeFetch: true, refOverride: payload.documentURL, opaqueOrigin: !!payload.opaque,
       credentials: init.credentials || 'same-origin', mode: init.mode || 'cors',
       redirect: init.redirect || 'follow', referrer: init.referrer,
       referrerPolicy: init.referrerPolicy || '',
@@ -1532,7 +1532,7 @@ async function transportFetch(targetUrl, opt) {
     } catch {}
   }
   const context = Object.freeze({
-    entryId, documentUrl, origin: new URL(documentUrl).origin, referrer,
+    entryId, documentUrl, origin: opt.opaqueOrigin ? 'null' : new URL(documentUrl).origin, referrer,
     referrerPolicy: opt.referrerPolicy || (opt.request && opt.request.referrerPolicy) || (entry && entry.referrerPolicy) || '',
   });
   const method = String(opt.method || (opt.request && opt.request.method) || 'GET');

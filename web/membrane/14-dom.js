@@ -303,6 +303,11 @@
       const localKey = colon < 0 ? key : key.slice(colon + 1);
       const ln = this.localName;
       if ((ln === 'iframe' || ln === 'frame') && localKey === 'srcdoc' && srcdocMeta.has(this)) return srcdocMeta.get(this);
+      // A frame whose src is parked (see parkFrameSrc) has the page's text there.
+      if (localKey === 'src' && (ln === 'iframe' || ln === 'frame')) {
+        const parked = Native.getAttribute.call(this, 'data-zp-frame-src');
+        if (parked !== null) return parked;
+      }
       const raw = Native.getAttribute.call(this, k);
       // URL decoding consumes strings; DOM absence must stay null, and an empty
       // attribute must not pick up a stale URL stash from an earlier value.
@@ -368,7 +373,7 @@
         Native.removeAttribute.call(this, integrityBackupAttr);
         return Native.removeAttribute.call(this, k);
       }
-      if (localKey === 'sandbox' && isFrameElement(this)) frameSandboxMeta.delete(this);
+      if (localKey === 'sandbox' && isFrameElement(this)) { frameSandboxMeta.delete(this); sandboxShadows.delete(this); clearFrameOpaque(this); }
       if (key === 'ping' && (ln === 'a' || ln === 'area')) Native.removeAttribute.call(this, 'data-zp-blocked-ping');
       if (ln === 'link' && localKey === 'href' && isIconLink(this)) {
         urlMeta.delete(this);
@@ -435,7 +440,10 @@
       if (typeof w.ShadowRoot.prototype.setHTMLUnsafe === 'function') {
         const nativeSetHTML = w.ShadowRoot.prototype.setHTMLUnsafe;
         define(w.ShadowRoot.prototype, 'setHTMLUnsafe', function(html) {
-          return nativeSetHTML.call(this, transformHTML(String(html), transformHTMLOpts));
+          const markup = transformHTML(String(html), transformHTMLOpts);
+          const ret = nativeSetHTML.call(this, markup);
+          if (markupHasFrames(markup)) restoreParkedFrames(this);
+          return ret;
         });
       }
       if (typeof w.ShadowRoot.prototype.getHTML === 'function') {
@@ -450,7 +458,10 @@
     if (typeof w.Element.prototype.setHTMLUnsafe === 'function') {
       const nativeElSetHTML = w.Element.prototype.setHTMLUnsafe;
       define(w.Element.prototype, 'setHTMLUnsafe', function(html) {
-        return nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts));
+        const markup = transformHTML(String(html), transformHTMLOpts);
+        const ret = nativeElSetHTML.call(this, markup);
+        if (markupHasFrames(markup)) restoreParkedFrames(this);
+        return ret;
       });
     }
     // Element.setHTML / Document.parseHTMLUnsafe — the Sanitizer path. The
@@ -460,13 +471,19 @@
     if (typeof w.Element.prototype.setHTML === 'function') {
       const nativeElSetHTML = w.Element.prototype.setHTML;
       define(w.Element.prototype, 'setHTML', function(html, opts) {
-        return nativeElSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
+        const markup = transformHTML(String(html), transformHTMLOpts);
+        const ret = nativeElSetHTML.call(this, markup, opts);
+        if (markupHasFrames(markup)) restoreParkedFrames(this);
+        return ret;
       });
     }
     if (typeof w.ShadowRoot !== 'undefined' && w.ShadowRoot.prototype && typeof w.ShadowRoot.prototype.setHTML === 'function') {
       const nativeShadowSetHTML = w.ShadowRoot.prototype.setHTML;
       define(w.ShadowRoot.prototype, 'setHTML', function(html, opts) {
-        return nativeShadowSetHTML.call(this, transformHTML(String(html), transformHTMLOpts), opts);
+        const markup = transformHTML(String(html), transformHTMLOpts);
+        const ret = nativeShadowSetHTML.call(this, markup, opts);
+        if (markupHasFrames(markup)) restoreParkedFrames(this);
+        return ret;
       });
     }
     if (typeof w.Document.parseHTMLUnsafe === 'function') {
@@ -504,7 +521,18 @@
         return nativeSerialize.call(this, clone || node);
       });
     }
-    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) { const ret = Native.insertAdjacentHTML.call(this, pos, transformHTML(String(html), transformHTMLOpts)); syncBaseElement(this); enforceSubtreePolicies(this); return ret; });
+    define(w.Element.prototype, 'insertAdjacentHTML', function(pos, html) {
+      const markup = transformHTML(String(html), transformHTMLOpts);
+      const ret = Native.insertAdjacentHTML.call(this, pos, markup);
+      syncBaseElement(this); enforceSubtreePolicies(this);
+      if (markupHasFrames(markup)) {
+        // beforebegin / afterend put the new nodes next to this element, not in it.
+        const holder = /^(beforebegin|afterend)$/i.test(String(pos)) ? this.parentNode : this;
+        restoreParkedFrames(holder);
+        instrumentDescendantIframes(holder);
+      }
+      return ret;
+    });
     // Document.prototype.write / writeln wrap. 인스턴스 레벨이 아니라 proto
     // 레벨이라 같은 realm 의 모든 Document 인스턴스에 적용. 부모 install 시
     // 부모 Document.prototype, iframe install 시 iframe Document.prototype.
@@ -518,7 +546,9 @@
         define(docProto, 'write', function(...parts) {
           const html = parts.map(p => transformHTML(String(p), writeOptsFor(this))).join('');
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
-          return protoWrite.apply(this, [html]);
+          const ret = protoWrite.apply(this, [html]);
+          if (html.indexOf('data-zp-frame-src') !== -1) restoreParkedFrames(this);
+          return ret;
         });
       }
       if (docProto.writeln) {
@@ -526,7 +556,9 @@
         define(docProto, 'writeln', function(...parts) {
           const html = parts.map(p => transformHTML(String(p), writeOptsFor(this))).join('') + '\n';
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
-          return protoWriteln.apply(this, [html]);
+          const ret = protoWriteln.apply(this, [html]);
+          if (html.indexOf('data-zp-frame-src') !== -1) restoreParkedFrames(this);
+          return ret;
         });
       }
     }
@@ -566,7 +598,11 @@
               d.set.call(this, rewriteCSSText(v));
               return;
             }
-            d.set.call(this, transformHTML(String(v), transformHTMLOpts));
+            // outerHTML puts the new nodes where this element was.
+            const holder = prop === 'outerHTML' ? this.parentNode : this;
+            const markup = transformHTML(String(v), transformHTMLOpts);
+            d.set.call(this, markup);
+            if (markupHasFrames(markup)) restoreParkedFrames(holder);
             syncBaseElement(this);
             instrumentDescendantIframes(this);
             enforceSubtreePolicies(this);

@@ -100,6 +100,10 @@ pub(crate) const DANGEROUS_GLOBALS: &[&str] = &[
     "parent",
     "opener",
     "frames",
+    // The embedding <iframe>: natively null when the embedder is another origin, but
+    // every proxied frame shares one physical origin, so the real element — and with
+    // it the embedder's whole DOM — is one bare identifier away.
+    "frameElement",
     "self",
     "globalThis",
     // Navigation API: bare `navigation` resolves to the real Navigation
@@ -5563,6 +5567,22 @@ mod tests {
         assert!(
             r.code.contains("__zp_get(globalThis,\"top\")"),
             "top not rewritten: {}",
+            r.code
+        );
+    }
+
+    #[test]
+    fn rewrites_bare_frame_element() {
+        let src = "var el = frameElement; if (frameElement) { frameElement.remove(); }";
+        let r = rewrite_script(src, &opts()).unwrap();
+        assert!(
+            r.code.contains("__zp_get(globalThis,\"frameElement\")"),
+            "a bare frameElement reaches the embedder's element: {}",
+            r.code
+        );
+        assert!(
+            !r.code.contains("(frameElement)") && !r.code.contains(" frameElement."),
+            "no raw read is left: {}",
             r.code
         );
     }

@@ -367,6 +367,9 @@
   // 프레임이 영영 빈 채로 남는다.
   function restorePendingFrameSrc(el) {
     if (!el || !Native.hasAttribute.call(el, 'data-zp-frame-src')) return;
+    // The browser fixes a navigation's sandbox flags when it starts: a sandbox the proxy has to
+    // rewrite (see OPAQUE_FRAME_ATTR) must be rewritten before the document is asked for.
+    sanitizeFrameSandbox(el);
     const pending = Native.getAttribute.call(el, 'data-zp-frame-src') || '';
     if (!pending) { try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {} return; }
     try {
@@ -381,9 +384,36 @@
   }
   function restorePendingSrcdoc(el) {
     if (!el || !Native.hasAttribute.call(el, 'data-zp-srcdoc')) return;
+    sanitizeFrameSandbox(el);
     const pending = Native.getAttribute.call(el, 'data-zp-srcdoc') || '';
     if (!setInjectedSrcdoc(el, pending)) return;
     try { Native.removeAttribute.call(el, 'data-zp-srcdoc'); } catch {}
+  }
+  // A frame in a document with no browsing context — the copy transformHTML parses into, a template's
+  // content, a DOMParser document — never loads. Frames made from markup are parked there (parkFrameSrc)
+  // and wait for the insertion that activates them.
+  function inertFrameDocument(el) {
+    try { const d = el.ownerDocument; return !!d && !d.defaultView; } catch { return false; }
+  }
+  function restoreParkedFrame(el) {
+    if (inertFrameDocument(el)) return;
+    restorePendingSrcdoc(el);
+    restorePendingFrameSrc(el);
+  }
+  // Frames only come out of frame markup: the sweeps for them run when the string has some.
+  function markupHasFrames(markup) { return /<i?frame\b/i.test(String(markup)); }
+  // Restores what is parked in `node` or below it, for the paths that put markup into a document without
+  // a sweep of their own: innerHTML and its kin, document.write, the insertion of a node that came from an
+  // inert document. The query is the native one: the membrane hides data-zp-* from the page's own.
+  function restoreParkedFrames(node) {
+    if (!node || typeof node !== 'object') return;
+    try {
+      const nt = node.nodeType;
+      if (nt === 1 && /^(IFRAME|FRAME)$/.test(node.nodeName || '')) restoreParkedFrame(node);
+      const qsa = nt === 9 ? Native.querySelectorAll : nt === 11 ? Native.fragmentQuerySelectorAll : nt === 1 ? Native.elementQuerySelectorAll : null;
+      if (!qsa) return;
+      Array.prototype.forEach.call(qsa.call(node, 'iframe[data-zp-srcdoc], frame[data-zp-srcdoc], iframe[data-zp-frame-src], frame[data-zp-frame-src]'), restoreParkedFrame);
+    } catch {}
   }
   function scanNavigationBackstop(root) {
     if (!root || !root.querySelectorAll) return;

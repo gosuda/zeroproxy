@@ -360,7 +360,7 @@
     // origin. The real one hands out PROXY origins (the actual ancestors).
     // Root → empty list; a contained frame → its embedder's target origin.
     function ancestorOriginsList(local) {
-      const origins = local ? [] : [virtualURL.origin];
+      const origins = local ? [] : [displayOrigin(securityOrigin())];
       const proto = (root.DOMStringList && root.DOMStringList.prototype) || null;
       const list = proto ? Object.create(proto) : {};
       for (let i = 0; i < origins.length; i++) {
@@ -489,6 +489,51 @@
     }
     const crossWindowTargets = new WeakMap();
     const crossOriginLocations = new WeakMap();
+    // The sandbox flags this document lives under: those the page gave every frame between
+    // it and the top window (a frame the proxy rewrote keeps the page's own text in a stash).
+    // null: not sandboxed.
+    let sandboxFlagsCache;
+    function sandboxFlags() {
+      if (sandboxFlagsCache !== undefined) return sandboxFlagsCache;
+      let flags = null;
+      try {
+        let w = root;
+        for (let i = 0; i < 32 && w !== w.parent; i++) {
+          const fe = w.frameElement;
+          if (!fe) break;
+          let text = Native.getAttribute.call(fe, litAttrName('sandbox'));
+          if (text === null) text = Native.getAttribute.call(fe, 'sandbox');
+          if (text !== null) {
+            const mine = new Set(String(text).toLowerCase().split(/\s+/).filter(Boolean));
+            flags = flags === null ? mine : new Set([...flags].filter(f => mine.has(f)));
+          }
+          w = w.parent;
+        }
+      } catch {}
+      sandboxFlagsCache = flags;
+      return flags;
+    }
+    // May a script in this document navigate `win`? Itself and its descendants always; an
+    // ancestor never, but for the top window with allow-top-navigation (or, during user
+    // activation, allow-top-navigation-by-user-activation). Otherwise the browser's own
+    // SecurityError, which `prefix` begins.
+    function sandboxNavigationDenied(win, prefix) {
+      const flags = opaqueDocument ? sandboxFlags() : null;
+      if (!flags) return null;
+      let text;
+      try {
+        if (win === root) return null;
+        for (let w = win, i = 0; i < 32 && w && w !== w.parent; i++) { w = w.parent; if (w === root) return null; }
+        const isTop = win === root.top;
+        if (isTop && (flags.has('allow-top-navigation')
+            || (flags.has('allow-top-navigation-by-user-activation') && root.navigator.userActivation && root.navigator.userActivation.isActive))) return null;
+        text = isTop
+          ? "The frame attempting navigation of the top-level window is sandboxed, but the flag of 'allow-top-navigation' or 'allow-top-navigation-by-user-activation' is not set."
+          : 'The frame attempting navigation is sandboxed, and is therefore disallowed from navigating its ancestors.';
+      } catch { text = 'The frame attempting navigation is sandboxed.'; }
+      try { root.console.error("Unsafe attempt to initiate navigation for frame from frame with URL '" + virtualURL.href + "'. " + text); } catch {}
+      return opaqueDenied(prefix, text);
+    }
     function crossWindowLocation(targetWindow) {
       // Location belongs to the destination realm: using this frame's facade
       // turns top.location writes into self-navigation (notably in srcdoc).
@@ -496,8 +541,8 @@
       if (ownerGet === get) return wrappedLocationFor(targetWindow.location);
       if (typeof ownerGet === 'function') {
         const location = ownerGet(targetWindow, 'location');
-        if (location.origin === virtualURL.origin) return location;
-      } else if (virtualOriginOfWindow(targetWindow) === virtualURL.origin) {
+        if (virtualOriginOfWindow(targetWindow) === securityOrigin()) return location;
+      } else if (virtualOriginOfWindow(targetWindow) === securityOrigin()) {
         // A same-site document that never booted a membrane (text, an image):
         // the route map names its URL.
         return wrappedLocationFor(targetWindow.location);
@@ -507,6 +552,8 @@
       let restricted = crossOriginLocations.get(targetWindow);
       if (!restricted) {
         const navigate = (value, replace) => {
+          const denied = sandboxNavigationDenied(targetWindow, replace ? "Failed to execute 'replace' on 'Location'" : "Failed to set the 'href' property on 'Location'");
+          if (denied) throw denied;
           const absolute = targetURL(value);
           const g = targetWindow.__zp_get;
           if (typeof g === 'function') {
@@ -859,6 +906,13 @@
     // The origin a window reports from its OWN membrane ('' when it has none).
     function ownMembraneOrigin(win) {
       try {
+        // The realm's SECURITY origin — a token of its own for an opaque document, whose
+        // `location.origin` is still its URL's.
+        const stated = win.__zp_origin;
+        if (typeof stated === 'function') {
+          const o = stated();
+          if (typeof o === 'string' && o) return o;
+        }
         const g = win.__zp_get;
         if (typeof g === 'function' && g !== get) {
           const o = g(win, 'location').origin;
@@ -868,12 +922,14 @@
       return '';
     }
     function virtualOriginOfWindow(win) {
-      if (win === root) return virtualURL.origin;
+      if (win === root) return securityOrigin();
       const own = ownMembraneOrigin(win);
       if (own) return own;
       // Contained by us (a blank, srcdoc or document.write'd page): it inherits ours.
-      try { if (win.__zp_get === get) return virtualURL.origin; } catch {}
-      // No membrane of its own and not ours: the route we opened it with, if any.
+      try { if (win.__zp_get === get) return securityOrigin(); } catch {}
+      // No membrane of its own and not ours: a frame that is opaque is, whatever it shows.
+      try { const fe = win.frameElement; if (fe && Native.hasAttribute.call(fe, OPAQUE_FRAME_ATTR)) return OPAQUE_PENDING_ORIGIN; } catch {}
+      // ...else the route we opened it with, if any.
       try { const routed = frameRouteTarget(win.location.pathname); if (routed) return new URL(routed).origin; } catch {}
       return '';
     }
@@ -881,6 +937,9 @@
     // booted its own membrane yet — the blank page in front of a pending route, a
     // routed text or image document — is still that site's.
     function frameIntendedOrigin(frame) {
+      // Sandboxed without allow-same-origin — or inside a document that is: whatever it shows, it
+      // has an opaque origin of its own.
+      try { if (Native.hasAttribute.call(frame, OPAQUE_FRAME_ATTR)) return OPAQUE_PENDING_ORIGIN; } catch {}
       try {
         const t = urlMeta.get(frame) || Native.getAttribute.call(frame, 'data-zp-target-url');
         if (t && /^https?:/i.test(t)) return new URL(t).origin;
@@ -913,14 +972,14 @@
       let origin = ownMembraneOrigin(win);
       if (!origin && hint && typeof hint === 'object') origin = frameIntendedOrigin(hint);
       if (!origin) origin = virtualOriginOfWindow(win);
-      if (origin && origin !== virtualURL.origin) return crossOriginWindow(win);
+      if (origin && origin !== securityOrigin()) return crossOriginWindow(win);
       if (hint === 'ancestor' || (hint === undefined && isAncestorWindow(win))) return sameOriginAncestor(win);
       return win;
     }
     function crossOriginDenied(verb, prop) {
       const name = typeof prop === 'symbol' ? 'Symbol(' + (prop.description || '') + ')' : String(prop);
       try {
-        return new Native.DOMException('Failed to ' + verb + " '" + name + "' on 'Window': Blocked a frame with origin \"" + virtualURL.origin + '" from accessing a cross-origin frame.', 'SecurityError');
+        return new Native.DOMException('Failed to ' + verb + " '" + name + "' on 'Window': Blocked a frame with origin \"" + displayOrigin(securityOrigin()) + '" from accessing a cross-origin frame.', 'SecurityError');
       } catch { return normalizedError('SecurityError'); }
     }
     // close / focus / blur: one stable function per window, as natively.
@@ -1015,6 +1074,24 @@
       crossWindowTargets.set(facade, win);
       return facade;
     }
+    // Natively null when the embedding document is another origin. Every proxied frame
+    // shares one physical origin, so the real element is always there — and it leads
+    // straight into the embedder's DOM. Read as `window.frameElement` (through `get`) and
+    // as a bare `frameElement` (through `scopeGet`).
+    function virtualFrameElement(w) {
+      let el = null;
+      try { el = w.frameElement; } catch {}
+      if (!el) return el;
+      try {
+        const up = w.parent;
+        if (up && up !== w) {
+          const mine = virtualOriginOfWindow(w);
+          const theirs = virtualOriginOfWindow(up);
+          if (mine && theirs && mine !== theirs) return null;
+        }
+      } catch {}
+      return el;
+    }
     function virtualWindowProperty(target, prop) {
       if (prop === 'top' || prop === 'parent' || prop === 'opener') {
         try {
@@ -1108,6 +1185,7 @@
       if (hide && typeof prop === 'string' && ZP_HIDDEN_RE.test(prop)) return undefined;
       if (prop === 'window' || prop === 'self' || prop === 'globalThis' || prop === 'frames') return scope;
       if (prop === 'top' || prop === 'parent' || prop === 'opener') return virtualWindowProperty(root, prop);
+      if (prop === 'frameElement') return virtualFrameElement(root);
       if (prop === 'location') {
         return wrappedLocationFor(root.location);
       }
@@ -1333,24 +1411,7 @@
         if (prop === 'postMessage') return postMessageWrapperFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         if (prop === 'navigation') return virtualNavigationFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         if (prop === 'name') return virtualWindowNameFor(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
-        if (prop === 'frameElement') {
-          // Natively null when the embedding document is another origin. Every
-          // proxied frame shares one physical origin, so the real element is
-          // always there — and it leads straight into the embedder's DOM.
-          const w = crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base);
-          let el = null;
-          try { el = w.frameElement; } catch {}
-          if (!el) return el;
-          try {
-            const up = w.parent;
-            if (up && up !== w) {
-              const mine = virtualOriginOfWindow(w);
-              const theirs = virtualOriginOfWindow(up);
-              if (mine && theirs && mine !== theirs) return null;
-            }
-          } catch {}
-          return el;
-        }
+        if (prop === 'frameElement') return virtualFrameElement(crossWindowTargets.get(base) || (isScopeProxy(base) ? root : base));
         const dynamic = dynamicGlobal(prop);
         if (dynamic) return dynamic;
       }
@@ -1778,6 +1839,10 @@
     }
     define(root, '__zp_get', get);
     define(root, '__zp_set', set);
+    // This document's security origin, for the embedder and for frames it contains.
+    define(root, '__zp_origin', function () { return securityOrigin(); });
+    // Is this frame element opaque (see OPAQUE_FRAME_ATTR)? For the frame's own prelude to ask.
+    define(root, '__zp_frame_opaque', function (frame) { try { return frameHasOpaqueMark(frame); } catch { return false; } });
     // Write-only sink for destructuring assignment targets.
     //
     // `({ location } = obj)` needs a *settable member expression*, not a call:
@@ -1916,7 +1981,7 @@
       forWindow: (win, hint) => windowHandleFor(win, hint),
       isCrossOrigin: (win, hint) => { try { return crossOriginFacadeSet.has(windowHandleFor(win, hint)); } catch { return false; } },
       // For a window about to navigate to a known origin (a popup opened with a URL).
-      forOrigin: (win, origin) => (origin && origin !== virtualURL.origin ? crossOriginWindow(win) : windowHandleFor(win)),
+      forOrigin: (win, origin) => (origin && origin !== securityOrigin() ? crossOriginWindow(win) : windowHandleFor(win)),
       originOf: win => virtualOriginOfWindow(win),
     };
     // 인라인 <script> 본문은 브라우저가 raw text mode 로 토크나이즈하여 HTML

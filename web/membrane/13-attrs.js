@@ -102,14 +102,48 @@
     const tokens = new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean));
     return tokens.has('allow-scripts') && tokens.has('allow-same-origin');
   }
+  // Without `allow-same-origin` the browser gives the document an opaque origin (see
+  // OPAQUE_FRAME_ATTR for what that costs the proxy).
+  function frameSandboxIsOpaque(raw) {
+    return !new Set(String(raw || '').toLowerCase().split(/\s+/).filter(Boolean)).has('allow-same-origin');
+  }
+  // The page's `frame.sandbox` list is a real DOMTokenList on a detached shadow frame whose
+  // attribute holds the page's value (the real frame's carries one flag more).
+  function syncSandboxShadow(el, value) {
+    const rec = sandboxShadows.get(el);
+    if (!rec) return;
+    if (value === null) { sandboxShadows.delete(el); return; }
+    try { if (Native.getAttribute.call(rec.shadow, 'sandbox') !== value) Native.setAttribute.call(rec.shadow, 'sandbox', value); } catch {}
+  }
+  // Keep every flag the page gave and add the one that lets the proxy serve and contain the
+  // frame; the mark tells its document, and this membrane, to behave as the opaque document the
+  // page described.
+  function markFrameOpaque(el, value) {
+    frameSandboxMeta.set(el, value);
+    syncSandboxShadow(el, value);
+    try { Native.setAttribute.call(el, OPAQUE_FRAME_ATTR, '1'); } catch {}
+    // The author's text comes back out of a serialization (see the data-zp-lit scrub).
+    try { Native.setAttribute.call(el, litAttrName('sandbox'), value); } catch {}
+    Native.setAttribute.call(el, 'sandbox', (value.trim() + ' allow-same-origin').trim());
+  }
+  function clearFrameOpaque(el) {
+    // (Inside an opaque document every frame is opaque whatever its own attribute says: the mark stays.)
+    try { if (!opaqueDocument && Native.hasAttribute.call(el, OPAQUE_FRAME_ATTR)) Native.removeAttribute.call(el, OPAQUE_FRAME_ATTR); } catch {}
+    try { Native.removeAttribute.call(el, litAttrName('sandbox')); } catch {}
+  }
   function setFrameSandboxAttribute(el, raw) {
     const value = String(raw == null ? '' : raw);
     if (frameSandboxAllowsEscape(value)) {
+      clearFrameOpaque(el);
       frameSandboxMeta.set(el, value);
+      syncSandboxShadow(el, value);
       if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
       return;
     }
+    if (frameSandboxIsOpaque(value)) { markFrameOpaque(el, value); return; }
+    clearFrameOpaque(el);
     frameSandboxMeta.delete(el);
+    sandboxShadows.delete(el);
     Native.setAttribute.call(el, 'sandbox', value);
   }
   // Called from insertion / srcdoc / src enforcement paths: if the element
@@ -117,10 +151,22 @@
   // virtualize it before the browser commits the sandbox enforcement.
   function sanitizeFrameSandbox(el) {
     if (!isFrameElement(el)) return;
+    // Ours already: its native value carries the flag we added, which would read as the
+    // escape combination below.
+    if (Native.hasAttribute.call(el, OPAQUE_FRAME_ATTR)) {
+      if (frameSandboxMeta.has(el)) return;
+      // A clone of one of ours (cloneNode, a template, innerHTML of its outerHTML): the page's
+      // own text is in the stash; put the frame back as the page made it.
+      const lit = Native.getAttribute.call(el, litAttrName('sandbox'));
+      if (lit !== null) { markFrameOpaque(el, lit); return; }
+    }
     const raw = Native.getAttribute.call(el, 'sandbox');
-    if (raw !== null && frameSandboxAllowsEscape(raw)) {
+    if (raw === null) return;
+    if (frameSandboxAllowsEscape(raw)) {
       frameSandboxMeta.set(el, raw);
       if (Native.removeAttribute) Native.removeAttribute.call(el, 'sandbox');
+    } else if (frameSandboxIsOpaque(raw)) {
+      markFrameOpaque(el, raw);
     }
   }
   // `target` is no longer rewritten to `_self` (2026-10-01). That predates the
@@ -595,6 +641,11 @@
       if (origin && srcdocMeta.has(origin)) {
         try { Native.setAttribute.call(el, 'srcdoc', srcdocMeta.get(origin)); } catch {}
       }
+      // The sandbox as the page wrote it (the real attribute carries a flag the proxy adds,
+      // or none at all). The copy is inert.
+      if (origin && (ln === 'iframe' || ln === 'frame') && frameSandboxMeta.has(origin)) {
+        try { Native.setAttribute.call(el, 'sandbox', frameSandboxMeta.get(origin)); } catch {}
+      }
       // ★직렬화는 URL 도 되돌려야 한다. `getAttribute('src')` 는 타깃 URL 을
       // 돌려주는데 `outerHTML` 은 프록시 URL 을 그대로 보여 줬다 — 그
       // 불일치 자체가 한 줄짜리 탐지기다(둘을 비교하면 끝).
@@ -620,6 +671,11 @@
             const lit = litGet(origin, localKey);
             want = lit !== undefined ? lit
               : (Native.getAttribute.call(origin, litAttrName(name)) ?? Native.getAttribute.call(origin, litAttrName(localKey)) ?? undefined);
+          }
+          // A frame whose src is still parked (see parkFrameSrc) serializes with the page's text, as natively.
+          if (origin && localKey === 'src' && (tag === 'iframe' || tag === 'frame')) {
+            const parked = Native.getAttribute.call(origin, 'data-zp-frame-src');
+            if (parked !== null) want = parked;
           }
           if (want === undefined && origin && isURLBearing(el, name, localKey, tag) && !usesRawURLAttribute(el, name, localKey)) {
             const recalled = (localKey === 'srcset' || localKey === 'imagesrcset') ? recalledSrcset(origin, name) : undefined;

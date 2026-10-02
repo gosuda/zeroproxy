@@ -617,6 +617,8 @@ function pmEnv(destOrigin) {
     proxyOrigin: 'http://proxy.test:18080',
     virtualURL: new URL('http://a.test:3000/page'),
     windowHandles: { originOf: () => destOrigin },
+    securityOrigin: () => 'http://a.test:3000',
+    displayOrigin: o => o,
     root: { __zp_diagnostics: diag },
     postMessageWrappers: new WeakMap(),
     maskNativeFunction() {},
@@ -692,7 +694,7 @@ test('postMessage wrapper looks like the native method', () => {
 
 const XORIGIN_BLOCK = slice('    const CROSS_ORIGIN_WINDOW_NAMES = [', '    function virtualWindowProperty(target, prop) {');
 
-function xoriginEnv() {
+function xoriginEnv(opts = {}) {
   const get = () => {};
   const scope = { __scope: true };
   const safe = new WeakMap();
@@ -704,7 +706,11 @@ function xoriginEnv() {
     get, root, scope,
     virtualURL: new URL('http://a.test:3000/'),
     urlMeta,
-    Native: { getAttribute: { call: () => null }, DOMException },
+    securityOrigin: opts.securityOrigin || (() => 'http://a.test:3000'),
+    displayOrigin: o => (String(o).indexOf('null#') === 0 ? 'null' : o),
+    OPAQUE_FRAME_ATTR: 'data-zp-opaque',
+    OPAQUE_PENDING_ORIGIN: 'null#pending',
+    Native: { getAttribute: { call: () => null }, hasAttribute: { call: (el, name) => !!(el && el.opaque && name === 'data-zp-opaque') }, DOMException },
     frameRouteTarget: () => '',
     isScopeProxy: v => v === scope,
     safeCrossWindow: w => { if (!safe.has(w)) safe.set(w, { safeFor: w }); return safe.get(w); },
@@ -901,4 +907,243 @@ test('cookie changes: junk is ignored, the document\'s own write is unaffected',
   assert.equal(env.documentCookieString(), 'noid=v1', 'a record without an id is still applied');
   env.setDocumentCookie('mine=1; Path=/');
   assert.match(env.documentCookieString(), /mine=1/);
+});
+
+// ---------------------------------------------------------------------------
+// Opaque-origin frames. A frame sandboxed without allow-same-origin gets a same-origin sandbox from the
+// proxy (the one thing it cannot serve a document under otherwise) and the membrane emulates the opacity.
+// Expected behavior is Chrome's, measured natively: the page only ever sees "null", every opaque document
+// is cross-origin to every other, and the storage-like APIs refuse.
+// ---------------------------------------------------------------------------
+
+const OPAQUE_BLOCK = slice('  const opaqueDocument = (() => {', '  // ★여기서 선언해야 한다');
+
+function opaqueEnv(embedderAnswer) {
+  const root = embedderAnswer === undefined
+    ? { frameElement: null }
+    : { frameElement: {}, parent: { __zp_frame_opaque: embedderAnswer } };
+  return load(OPAQUE_BLOCK, ['opaqueDocument', 'securityOrigin', 'displayOrigin', 'opaqueDenied', 'OPAQUE_PENDING_ORIGIN', 'OPAQUE_FLAG_TEXT'], {
+    root, virtualURL: new URL('http://a.test:3000/page'), Native: { DOMException }, normalizedError,
+  });
+}
+
+test('opaque documents: only a frame the embedder marks is opaque, and only on a strict yes', () => {
+  assert.equal(opaqueEnv().opaqueDocument, false, 'a top-level document is not');
+  assert.equal(opaqueEnv(() => true).opaqueDocument, true);
+  for (const answer of [() => false, () => 1, () => 'yes', () => undefined, () => { throw new Error('boom'); }]) {
+    assert.equal(opaqueEnv(answer).opaqueDocument, false);
+  }
+  // A real cross-site parent cannot be asked: reading its members throws, and the frame is not ours to treat as opaque.
+  const root = { frameElement: {}, get parent() { throw normalizedError('SecurityError'); } };
+  const env = load(OPAQUE_BLOCK, ['opaqueDocument'], { root, virtualURL: new URL('http://a.test:3000/'), Native: { DOMException }, normalizedError });
+  assert.equal(env.opaqueDocument, false);
+});
+
+test('opaque documents: an own token, shown as "null"', () => {
+  const plain = opaqueEnv();
+  assert.equal(plain.securityOrigin(), 'http://a.test:3000');
+  assert.equal(plain.displayOrigin('http://x.test'), 'http://x.test');
+  const a = opaqueEnv(() => true);
+  const b = opaqueEnv(() => true);
+  assert.match(a.securityOrigin(), /^null#/);
+  assert.equal(a.securityOrigin(), a.securityOrigin(), 'stable within a document');
+  assert.notEqual(a.securityOrigin(), b.securityOrigin(), 'an opaque origin equals nothing but itself');
+  assert.equal(a.displayOrigin(a.securityOrigin()), 'null');
+  assert.equal(a.displayOrigin(a.OPAQUE_PENDING_ORIGIN), 'null', 'a frame the embedder has not heard from yet is opaque too');
+  assert.equal(a.displayOrigin('null'), 'null');
+  assert.equal(a.displayOrigin(5), 5, 'only strings are mapped');
+  assert.notEqual(a.securityOrigin(), a.OPAQUE_PENDING_ORIGIN);
+});
+
+test('opaque documents: the denial is a SecurityError saying what the browser says', () => {
+  const { opaqueDenied, OPAQUE_FLAG_TEXT } = opaqueEnv(() => true);
+  const e = opaqueDenied("Failed to read the 'localStorage' property from 'Window'");
+  assert.equal(e.name, 'SecurityError');
+  assert.equal(e.message, "Failed to read the 'localStorage' property from 'Window': " + OPAQUE_FLAG_TEXT);
+  assert.equal(OPAQUE_FLAG_TEXT, "The document is sandboxed and lacks the 'allow-same-origin' flag.");
+  assert.equal(opaqueDenied('prefix only', '').message, 'prefix only', 'an empty text: the prefix is the whole message');
+  assert.equal(opaqueDenied('p', 'own text').message, 'p: own text');
+  assert.ok(e instanceof DOMException);
+});
+
+const SANDBOX_BLOCK = slice('  function frameSandboxAllowsEscape(raw) {', '  function syncSandboxShadow(el, value) {');
+
+test('sandbox flags: opaque means no allow-same-origin; the escape combination is scripts plus same-origin', () => {
+  const { frameSandboxIsOpaque, frameSandboxAllowsEscape } = load(SANDBOX_BLOCK, ['frameSandboxIsOpaque', 'frameSandboxAllowsEscape'], {});
+  for (const raw of ['', 'allow-scripts', 'allow-scripts allow-forms allow-popups', '  allow-top-navigation ', null, undefined]) {
+    assert.equal(frameSandboxIsOpaque(raw), true, JSON.stringify(raw));
+    assert.equal(frameSandboxAllowsEscape(raw), false, JSON.stringify(raw));
+  }
+  assert.equal(frameSandboxIsOpaque('allow-same-origin'), false);
+  assert.equal(frameSandboxAllowsEscape('allow-same-origin'), false, 'without scripts the frame cannot lift its own sandbox');
+  assert.equal(frameSandboxIsOpaque('allow-scripts allow-same-origin'), false);
+  assert.equal(frameSandboxAllowsEscape('allow-scripts allow-same-origin'), true);
+  assert.equal(frameSandboxAllowsEscape('ALLOW-SCRIPTS\n\tAllow-Same-Origin'), true, 'tokens are ASCII case-insensitive, any whitespace separates them');
+  assert.equal(frameSandboxIsOpaque('allow-same-origin-ish allow-scripts'), true, 'a token is a whole word');
+});
+
+// ---------------------------------------------------------------------------
+// Frames made from markup. The server's rewriter parks a frame's src (data-zp-frame-src) so the browser
+// never loads the raw URL; the page-side HTML walker does the same to markup it parses into an inert
+// copy, and the paths that put that markup into a live document restore it.
+// ---------------------------------------------------------------------------
+
+const PARK_BLOCK = slice('  function parkFrameSrc(el) {', '  // ' + String.fromCharCode(96) + 'keepDocument' + String.fromCharCode(96) + ' is false for the mutation-observer backstop');
+const RESTORE_BLOCK = slice('  function inertFrameDocument(el) {', '  function scanNavigationBackstop(root) {');
+
+function fakeFrame(attrs = {}, live = true) {
+  return { nodeType: 1, nodeName: 'IFRAME', attrs: new Map(Object.entries(attrs)), ownerDocument: { defaultView: live ? {} : null } };
+}
+const fakeAttrs = {
+  getAttribute: { call: (el, k) => (el.attrs.has(k) ? el.attrs.get(k) : null) },
+  setAttribute: { call: (el, k, v) => { el.attrs.set(k, String(v)); } },
+  removeAttribute: { call: (el, k) => { el.attrs.delete(k); } },
+  hasAttribute: { call: (el, k) => el.attrs.has(k) },
+};
+
+test('parking: a routable src waits in data-zp-frame-src untouched, in place; blank and empty ones stay', () => {
+  const { parkFrameSrc, dropParkedFrameSrc } = load(PARK_BLOCK, ['parkFrameSrc', 'dropParkedFrameSrc'], { Native: fakeAttrs });
+  const f = fakeFrame({ name: 'm', src: ' /a/b?q=1#h ', title: 't' });
+  parkFrameSrc(f);
+  assert.equal(f.attrs.get('src'), 'about:blank', 'the browser loads nothing of the page\'s');
+  assert.deepEqual([...f.attrs.keys()], ['name', 'src', 'title', 'data-zp-frame-src'], 'src keeps its place: innerHTML lists attributes in order');
+  assert.equal(f.attrs.get('data-zp-frame-src'), ' /a/b?q=1#h ', 'the author\'s text, whitespace and all');
+  dropParkedFrameSrc(f);
+  assert.equal(f.attrs.has('data-zp-frame-src'), false, 'a src the page sets itself makes the parked text stale');
+  assert.equal(f.attrs.get('src'), 'about:blank');
+  for (const keep of ['about:blank', '  ABOUT:blank', '', '   ']) {
+    const g = fakeFrame({ src: keep });
+    parkFrameSrc(g);
+    assert.equal(g.attrs.get('src'), keep, JSON.stringify(keep));
+    assert.equal(g.attrs.has('data-zp-frame-src'), false, JSON.stringify(keep));
+  }
+  const none = fakeFrame({});
+  parkFrameSrc(none);
+  assert.equal(none.attrs.size, 0);
+});
+
+function restoreEnv() {
+  const calls = [];
+  const natives = { qsa: [], fragment: [], element: [] };
+  const mkQsa = kind => ({ call: (node, selector) => { natives[kind].push(selector); return node.found || []; } });
+  const env = load(RESTORE_BLOCK, ['inertFrameDocument', 'restoreParkedFrame', 'restoreParkedFrames', 'markupHasFrames'], {
+    restorePendingSrcdoc: el => calls.push(['srcdoc', el]),
+    restorePendingFrameSrc: el => calls.push(['src', el]),
+    Native: { querySelectorAll: mkQsa('qsa'), fragmentQuerySelectorAll: mkQsa('fragment'), elementQuerySelectorAll: mkQsa('element') },
+  });
+  return { env, calls, natives };
+}
+
+test('parking: a frame waits while its document is inert and is restored once it is live', () => {
+  const { env, calls } = restoreEnv();
+  const inert = fakeFrame({ 'data-zp-frame-src': '/x' }, false);
+  assert.equal(env.inertFrameDocument(inert), true);
+  env.restoreParkedFrame(inert);
+  assert.deepEqual(calls, [], 'nothing loads in a template or a parser copy; the insertion that activates the frame restores it');
+  const live = fakeFrame({ 'data-zp-frame-src': '/x' }, true);
+  assert.equal(env.inertFrameDocument(live), false);
+  env.restoreParkedFrame(live);
+  assert.deepEqual(calls, [['srcdoc', live], ['src', live]], 'srcdoc first, as the backstop sweep does');
+  assert.equal(env.inertFrameDocument({}), false, 'no owner document: not known to be inert');
+});
+
+test('parking: restoring a subtree asks natively for what is parked, by the node kind', () => {
+  const { env, calls, natives } = restoreEnv();
+  const a = fakeFrame({ 'data-zp-frame-src': '/a' });
+  const b = fakeFrame({ 'data-zp-srcdoc': '<p>' });
+  const host = { nodeType: 1, nodeName: 'DIV', found: [a, b] };
+  env.restoreParkedFrames(host);
+  assert.deepEqual(calls.map(c => c[1]), [a, a, b, b]);
+  assert.equal(natives.element.length, 1);
+  const selector = natives.element[0];
+  assert.deepEqual(selector.split(',').map(part => part.trim()).sort(),
+    ['frame[data-zp-frame-src]', 'frame[data-zp-srcdoc]', 'iframe[data-zp-frame-src]', 'iframe[data-zp-srcdoc]'],
+    'both tags, both parked attributes ("frame" is not a substring match of "iframe")');
+  calls.length = 0;
+  env.restoreParkedFrames({ nodeType: 11, found: [a] });   // a fragment
+  env.restoreParkedFrames({ nodeType: 9, found: [b] });    // a document
+  assert.equal(natives.fragment.length, 1);
+  assert.equal(natives.qsa.length, 1);
+  assert.deepEqual(calls.map(c => c[1]), [a, a, b, b]);
+  calls.length = 0;
+  const self = fakeFrame({ 'data-zp-frame-src': '/self' });
+  self.found = [];
+  env.restoreParkedFrames(self);
+  assert.deepEqual(calls.map(c => c[0]), ['srcdoc', 'src'], 'a frame given itself is restored too');
+  for (const nothing of [null, undefined, 'str', 5, { nodeType: 3 }]) env.restoreParkedFrames(nothing);
+  assert.equal(calls.length, 2);
+});
+
+test('parking: a failing native query never throws into the page', () => {
+  const env = load(RESTORE_BLOCK, ['restoreParkedFrames'], {
+    restorePendingSrcdoc() {}, restorePendingFrameSrc() {},
+    Native: { querySelectorAll: null, fragmentQuerySelectorAll: null, elementQuerySelectorAll: { call() { throw new Error('detached realm'); } } },
+  });
+  assert.doesNotThrow(() => env.restoreParkedFrames({ nodeType: 1, nodeName: 'DIV' }));
+  assert.doesNotThrow(() => env.restoreParkedFrames({ nodeType: 11 }));
+});
+
+test('window handles: a window whose frame is marked opaque is a stand-in from the start, whatever it shows', () => {
+  const { env, win } = xoriginEnv();
+  const blank = win('');
+  assert.equal(env.virtualOriginOfWindow(blank), '', 'unmarked and unknown');
+  const marked = win('', { frameElement: { opaque: true } });
+  assert.equal(env.virtualOriginOfWindow(marked), 'null#pending');
+  const handle = env.windowHandleFor(marked);
+  assert.notEqual(handle, marked);
+  assert.throws(() => handle.document, isSecurityError);
+});
+
+test('window handles: opaque documents are cross-origin to each other and to the site that embeds them', () => {
+  const { env, win, root } = xoriginEnv();
+  const stated = token => win('', { __zp_origin: () => token });
+  const first = stated('null#aaa');
+  assert.equal(env.virtualOriginOfWindow(first), 'null#aaa', 'a window states its own security origin');
+  assert.notEqual(env.windowHandleFor(first), first, 'an opaque frame is a stand-in to its embedder');
+  assert.notEqual(env.virtualOriginOfWindow(first), env.virtualOriginOfWindow(stated('null#bbb')), 'each has its own');
+  assert.equal(env.virtualOriginOfWindow(root), 'http://a.test:3000');
+  // The document itself opaque: only the very same origin is "same", and nothing else ever is.
+  const inside = xoriginEnv({ securityOrigin: () => 'null#me' });
+  const sibling = inside.win('', { __zp_origin: () => 'null#other' });
+  assert.notEqual(inside.env.windowHandleFor(sibling), sibling, 'a sibling opaque frame is cross-origin');
+  const embedder = inside.win('http://a.test:3000');
+  assert.notEqual(inside.env.windowHandleFor(embedder), embedder, 'so is the site that embedded us');
+  assert.equal(inside.env.virtualOriginOfWindow(inside.root), 'null#me');
+  assert.equal(inside.env.windowHandleFor(inside.root), inside.scope, 'and our own window is ours');
+});
+
+test('cookie writes: a runtime request waits for the writes still in flight, and a failed write never holds it back', async () => {
+  const sent = [];
+  const acks = [];
+  const diag = [];
+  const ctx = { bridge: { send: message => new Promise((resolve, reject) => { sent.push(message); acks.push({ resolve, reject }); }) } };
+  const env = load('let documentCookie = "";\n' + COOKIE_BLOCK, ['sendCookieSet', 'cookieWritesSettled'], {
+    virtualURL: new URL('http://app.a.test:3000/dir/page'),
+    documentCookieRecords: [], fireCookieChange() {}, cookieItemFromRec: r => r,
+    ctx, boot: { tabId: 't1' }, root: { __zp_diagnostics: diag },
+  });
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(env.cookieWritesSettled(), null, 'nothing in flight: nothing to wait for');
+  env.sendCookieSet('a=1');
+  env.sendCookieSet('b=2');
+  assert.deepEqual(sent.map(m => [m.type, m.tabId, m.targetUrl, m.cookie]),
+    [[ZP.MSG.COOKIE_SET, 't1', 'http://app.a.test:3000/dir/page', 'a=1'], [ZP.MSG.COOKIE_SET, 't1', 'http://app.a.test:3000/dir/page', 'b=2']]);
+  let settled = false;
+  env.cookieWritesSettled().then(() => { settled = true; });
+  await flush();
+  assert.equal(settled, false, 'both acknowledgements are outstanding');
+  acks[0].resolve({ ok: true });
+  await flush();
+  assert.equal(settled, false, 'one is still out');
+  acks[1].reject(Object.assign(new Error('x'), { code: 'SW_NOT_READY' }));
+  await flush();
+  assert.equal(settled, true, 'a rejected write settles too: it must never hold a request back');
+  assert.equal(env.cookieWritesSettled(), null, 'and nothing is left to wait for');
+  assert.deepEqual(diag.map(d => [d.t, d.code, d.ck]), [['cookie-set-failed', 'SW_NOT_READY', 'b=2']]);
+});
+
+test('parking: only markup with a frame in it is swept for parked frames', () => {
+  const { env } = restoreEnv();
+  for (const yes of ['<iframe src=x></iframe>', '<IFRAME>', '<div><frame src=x>', 'a<iframe', '<p></p><iframe\n src=x>']) assert.equal(env.markupHasFrames(yes), true, yes);
+  for (const no of ['', '<i>x</i>', '<iframes>', '<frameset>', 'iframe', '<div data-x="iframe">', null, undefined]) assert.equal(env.markupHasFrames(no), false, String(no));
 });

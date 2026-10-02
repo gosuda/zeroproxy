@@ -67,7 +67,7 @@
       const lm = nav && nav.locks;
       if (lm && typeof lm.request === 'function') {
         const LMProto = (w.LockManager && w.LockManager.prototype) || Object.getPrototypeOf(lm);
-        const h = (() => { let x = 0x811c9dc5; const s = String(virtualURL.origin); for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619); } return ('00000000' + (x >>> 0).toString(16)).slice(-8); })();
+        const h = (() => { let x = 0x811c9dc5; const s = String(securityOrigin()); for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 16777619); } return ('00000000' + (x >>> 0).toString(16)).slice(-8); })();
         const pfx = 'zp:lk:' + h + ':';
         const nativeRequest = LMProto.request;
         const nativeQuery = LMProto.query;
@@ -75,6 +75,7 @@
           ? Object.assign({}, info, { name: info.name.slice(pfx.length) }) : info;
         if (typeof nativeRequest === 'function') {
           define(LMProto, 'request', function request(name, ...rest) {
+            if (opaqueDocument) return Promise.reject(opaqueDenied("Failed to execute 'request' on 'LockManager'", 'Access to the Locks API is denied in this context.'));
             return nativeRequest.call(this, pfx + String(name), ...rest);
           });
         }
@@ -83,6 +84,7 @@
           // ones this site took, under the names it gave them (natively: its own origin's).
           const ours = info => !!info && typeof info === 'object' && typeof info.name === 'string' && info.name.indexOf(pfx) === 0;
           define(LMProto, 'query', function query() {
+            if (opaqueDocument) return Promise.reject(opaqueDenied("Failed to execute 'query' on 'LockManager'", 'Access to the Locks API is denied in this context.'));
             return nativeQuery.call(this).then(r => ({
               held: (r && r.held || []).filter(ours).map(stripInfo),
               pending: (r && r.pending || []).filter(ours).map(stripInfo),

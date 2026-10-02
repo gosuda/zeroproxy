@@ -131,6 +131,13 @@
     if (String(raw) === SWLESS_PIXEL) return;
     const target = targetURLForElement(el, raw);
     if (!target) return;
+    // Nothing loads in an inert document, and a route opened for the frame would stay there.
+    if ((tag === 'iframe' || tag === 'frame') && localKey === 'src' && inertFrameDocument(el)) {
+      urlMeta.set(el, target);
+      Native.setAttribute.call(el, 'data-zp-target-url', target);
+      parkFrameSrc(el);
+      return;
+    }
     const usesRaw = usesRawURLAttribute(el, key, localKey);
     const alreadyMapped = urlMeta.get(el) === target && (!usesRaw ? Native.getAttribute.call(el, 'data-zp-target-url') === target : true);
     urlMeta.set(el, target);

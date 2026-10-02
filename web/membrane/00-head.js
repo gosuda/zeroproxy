@@ -360,6 +360,44 @@
   // content, so the "escape" the sandbox would have prevented cannot actually
   // happen here.
   const frameSandboxMeta = new WeakMap();
+  // frame → { shadow, list }: the `sandbox` DOMTokenList the page sees (see 18-iframes).
+  const sandboxShadows = new WeakMap();
+  // ── opaque-origin frames ──────────────────────────────────────────────────
+  // A frame sandboxed WITHOUT `allow-same-origin` gets an opaque origin from the browser:
+  // its document cannot be reached from the embedder, is not controlled by the service
+  // worker (so it cannot be proxied) and cannot even read `localStorage` (so this prelude
+  // cannot boot in it). The proxy needs the opposite, so the membrane gives such a frame a
+  // same-origin sandbox instead — the browser keeps every other restriction: scripts,
+  // forms, popups, top navigation — and marks the element. The document reads the mark
+  // here and behaves as the opaque document the page asked for: storage and cookies throw,
+  // `origin` is "null", its window is cross-origin to every other. Its namespaces are
+  // private to it, so a gap in the throwing below still leaves nothing of the site's to read.
+  // Natively every frame inside an opaque document — a blank or srcdoc one too — has an opaque
+  // origin of its own, so the mark goes on those as well.
+  const OPAQUE_FRAME_ATTR = 'data-zp-opaque';
+  // Asked of the embedder, whose natives are its own: this realm's may already be hooks of
+  // the embedder's (it contains blank and srcdoc windows before their prelude runs).
+  const opaqueDocument = (() => {
+    try {
+      const fe = root.frameElement;
+      if (!fe) return false;
+      const ask = root.parent.__zp_frame_opaque;
+      return typeof ask === 'function' && ask(fe) === true;
+    } catch { return false; }
+  })();
+  // An opaque origin equals nothing but itself: each opaque document has its own token
+  // (the page only ever sees "null"). A frame the embedder has not heard from yet is
+  // 'null#pending'.
+  const opaqueOriginToken = opaqueDocument ? 'null#' + Math.random().toString(36).slice(2) + Date.now().toString(36) : '';
+  const OPAQUE_PENDING_ORIGIN = 'null#pending';
+  function securityOrigin() { return opaqueDocument ? opaqueOriginToken : virtualURL.origin; }
+  function displayOrigin(o) { return typeof o === 'string' && o.indexOf('null#') === 0 ? 'null' : o; }
+  // What the browser throws where an opaque origin is not allowed a storage-like API.
+  const OPAQUE_FLAG_TEXT = "The document is sandboxed and lacks the 'allow-same-origin' flag.";
+  function opaqueDenied(prefix, text) {
+    // An empty `text`: `prefix` is the whole message.
+    try { return new Native.DOMException(text === '' ? prefix : prefix + ': ' + (text || OPAQUE_FLAG_TEXT), 'SecurityError'); } catch { return normalizedError('SecurityError'); }
+  }
   // ★여기서 선언해야 한다 — installBaseObserver 는 프레임 격리 시점에 불리는데,
   // prelude 설치 시점에 이미 존재하던 iframe 은 이 파일 아래쪽(선언부 원위치)이
   // 실행되기 **전에** 그 경로를 지난다. const 를 뒤에 두면 TDZ 로 던지고

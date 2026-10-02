@@ -1756,6 +1756,303 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xframe-title') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>frame ready</title><p>frame</p>');
+      return;
+    }
+    if (url.pathname === '/xmarkup') {
+      // Frames that come out of markup — innerHTML and its kin, a fragment, a template, a parsed
+      // document, document.write — load as frames made by script do, and read back as written.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Markup frames</title><body><script>
+        window.__xmarkup = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var title = function (f) { try { return f.contentDocument.title; } catch (e) { return 'threw:' + e.name; } };
+          var settle = async function (f) { for (var i = 0; i < 100 && title(f) !== 'frame ready'; i++) await sleep(100); return title(f); };
+          var holder = function () { var h = document.createElement('div'); document.body.appendChild(h); return h; };
+          var MARK = '<iframe src="/xframe-title" name="m"></iframe>';
+          var h = holder(); h.innerHTML = MARK;
+          out['innerHTML.title'] = await settle(h.firstChild);
+          out['innerHTML.src'] = h.firstChild.getAttribute('src');
+          out['innerHTML.read'] = h.innerHTML;
+          // The page's srcdoc text comes back as written, not as the document the proxy made of it.
+          h = holder(); h.innerHTML = '<iframe srcdoc="<p id=x>from srcdoc</p>"></iframe>';
+          var sd = h.firstChild;
+          out['innerHTML.srcdoc.prop'] = sd.srcdoc;
+          out['innerHTML.srcdoc.attr'] = sd.getAttribute('srcdoc');
+          await sleep(1500);
+          out['innerHTML.srcdoc.body'] = (function () { try { return sd.contentDocument.body.innerHTML; } catch (e) { return 'threw:' + e.name; } })();
+          h = holder(); h.insertAdjacentHTML('beforeend', MARK);
+          out['insertAdjacentHTML.beforeend'] = await settle(h.firstChild);
+          h = holder(); var mid = document.createElement('i'); h.appendChild(mid); mid.insertAdjacentHTML('afterend', MARK);
+          out['insertAdjacentHTML.afterend'] = await settle(h.lastChild);
+          h = holder(); mid = document.createElement('i'); h.appendChild(mid); mid.insertAdjacentHTML('beforebegin', MARK);
+          out['insertAdjacentHTML.beforebegin'] = await settle(h.firstChild);
+          h = holder(); h.setHTMLUnsafe(MARK);
+          out['setHTMLUnsafe'] = await settle(h.firstChild);
+          h = holder(); var old = document.createElement('i'); h.appendChild(old); old.outerHTML = MARK;
+          out['outerHTML'] = await settle(h.firstChild);
+          var tpl = document.createElement('template'); tpl.innerHTML = MARK;
+          h = holder(); h.appendChild(document.importNode(tpl.content, true));
+          out['template.import'] = await settle(h.firstChild);
+          out['template.src'] = tpl.content.firstChild.getAttribute('src');
+          h = holder(); var clone = tpl.content.firstChild.cloneNode(true); h.appendChild(clone);
+          out['template.clone'] = await settle(clone);
+          h = holder(); h.appendChild(document.createRange().createContextualFragment(MARK));
+          out['createContextualFragment'] = await settle(h.firstChild);
+          h = holder(); var doc = new DOMParser().parseFromString('<body>' + MARK + '</body>', 'text/html');
+          h.appendChild(document.adoptNode(doc.body.firstChild));
+          out['DOMParser.adopt'] = await settle(h.firstChild);
+          h = holder(); var blank = document.createElement('iframe'); h.appendChild(blank);
+          var bd = blank.contentDocument; bd.open(); bd.write('<body>' + MARK + '</body>'); bd.close();
+          out['document.write'] = await settle(bd.querySelector('iframe'));
+          // Late: the document's own sweeps for parked frames (the first seconds after load) are over, so only
+          // the hook on the setter itself can start this one.
+          await sleep(4000);
+          h = holder(); h.innerHTML = MARK;
+          out['innerHTML.late'] = await settle(h.firstChild);
+          window.__xmarkup = out;
+        })().catch(function (e) { window.__xmarkup = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xinsert') {
+      // A script put into the document by every door a node can come through asks where it runs. Through the
+      // membrane it reads the page's own URL; raw, the proxy's (and could assign the real location).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Insertion doors</title><body><script>
+        window.__xinsert = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var trial = async function (name, insert) {
+            window.__ins = undefined;
+            var s = document.createElement('script');
+            s.textContent = 'window.__ins = location.href;';
+            var h = document.createElement('div'); document.body.appendChild(h);
+            try { insert(h, s); } catch (e) { out[name] = 'threw:' + e.name; return; }
+            await sleep(250);
+            out[name] = window.__ins === undefined ? 'did not run' : window.__ins === location.href ? 'virtual' : 'raw';
+          };
+          var mid = function (h) { var m = document.createElement('i'); h.appendChild(m); return m; };
+          var text = function (h) { var t = document.createTextNode('t'); h.appendChild(t); return t; };
+          await trial('appendChild', function (h, s) { h.appendChild(s); });
+          await trial('insertBefore', function (h, s) { h.insertBefore(s, null); });
+          await trial('replaceChild', function (h, s) { h.replaceChild(s, mid(h)); });
+          await trial('append', function (h, s) { h.append(s); });
+          await trial('prepend', function (h, s) { h.prepend(s); });
+          await trial('replaceChildren', function (h, s) { h.replaceChildren(s); });
+          await trial('insertAdjacentElement', function (h, s) { h.insertAdjacentElement('beforeend', s); });
+          await trial('Range.insertNode', function (h, s) { var r = document.createRange(); r.selectNodeContents(h); r.insertNode(s); });
+          await trial('before', function (h, s) { mid(h).before(s); });
+          await trial('after', function (h, s) { mid(h).after(s); });
+          await trial('replaceWith', function (h, s) { mid(h).replaceWith(s); });
+          await trial('text.before', function (h, s) { text(h).before(s); });
+          await trial('text.after', function (h, s) { text(h).after(s); });
+          await trial('text.replaceWith', function (h, s) { text(h).replaceWith(s); });
+          await trial('DocumentFragment', function (h, s) { var f = document.createDocumentFragment(); f.appendChild(s); h.appendChild(f); });
+          await trial('ShadowRoot.append', function (h, s) { h.attachShadow({ mode: 'open' }).append(s); });
+          await trial('ShadowRoot.replaceChildren', function (h, s) { h.attachShadow({ mode: 'open' }).replaceChildren(s); });
+          await trial('importNode+append', function (h, s) { h.appendChild(document.importNode(s, true)); });
+          await trial('cloneNode+append', function (h, s) { h.appendChild(s.cloneNode(true)); });
+          window.__xinsert = out;
+        })().catch(function (e) { window.__xinsert = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xsbchild') {
+      // A sandboxed document (no allow-same-origin) tells what it can touch and what it can reach. One
+      // page for every way of making the frame; ?egress=1 also tries the network.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>sandbox child</title><body><script>
+        var R = {}, jobs = [];
+        var show = function (v) { return v === null ? 'null' : v === undefined ? 'undefined' : (typeof v === 'object' || typeof v === 'function') ? typeof v : String(v).slice(0, 60); };
+        var op = function (k, fn, into) {
+          var o = into || R;
+          try {
+            var v = fn();
+            if (v && typeof v.then === 'function') jobs.push(v.then(function (x) { o[k] = 'resolved:' + show(x); }, function (e) { o[k] = 'rejected:' + (e && e.name); }));
+            else o[k] = show(v);
+          } catch (e) { o[k] = 'threw:' + (e && e.name); }
+        };
+        op('self.origin', function () { return self.origin; });
+        op('location.origin', function () { return location.origin; });
+        op('location.pathname', function () { return location.pathname; });
+        op('isSecureContext', function () { return self.isSecureContext; });
+        op('localStorage', function () { return localStorage; });
+        op('sessionStorage', function () { return sessionStorage; });
+        op('document.cookie', function () { return document.cookie; });
+        op('document.cookie=', function () { document.cookie = 'sb=1'; return 'no throw'; });
+        op('indexedDB.open', function () { return indexedDB.open('x'); });
+        op('indexedDB.databases', function () { return indexedDB.databases(); });
+        op('caches', function () { return caches; });
+        op('cookieStore.getAll', function () { return cookieStore.getAll(); });
+        op('storage.estimate', function () { return navigator.storage.estimate(); });
+        op('storage.getDirectory', function () { return navigator.storage.getDirectory(); });
+        op('locks.request', function () { return navigator.locks.request('x', function () { return 1; }); });
+        op('locks.query', function () { return navigator.locks.query(); });
+        op('serviceWorker', function () { return navigator.serviceWorker; });
+        op('Notification.permission', function () { return Notification.permission; });
+        op('permissions.query', function () { return navigator.permissions.query({ name: 'geolocation' }).then(function (s) { return s.state; }); });
+        op('document.domain', function () { return document.domain; });
+        op('window.name', function () { return window.name; });
+        op('parent.document', function () { return parent.document; });
+        op('parent.location.href', function () { return parent.location.href; });
+        op('top.location.href', function () { return top.location.href; });
+        op('top.document', function () { return top.document; });
+        op('frameElement', function () { return frameElement; });
+        op('window.frameElement', function () { return window.frameElement; });
+        op('self.frameElement', function () { return self.frameElement; });
+        op('globalThis.frameElement', function () { return globalThis.frameElement; });
+        op('alias.frameElement', function () { var w = window; return w.frameElement; });
+        op('typeof frameElement', function () { return typeof frameElement; });
+        op('opener', function () { return opener; });
+        op('window.open', function () { var w = window.open('about:blank'); try { if (w) w.close(); } catch (e) {} return w; });
+        op('alert', function () { return alert('x'); });
+        op('top.location.assign', function () { top.location.assign('http://example.invalid/'); return 'no throw'; });
+        if (location.search.indexOf('egress=1') >= 0) op('history.pushState', function () { history.pushState({}, '', '#x'); return location.hash; });
+        op('createElement iframe sandbox length', function () { return document.createElement('iframe').sandbox.length; });
+        op('postMessage parent', function () { parent.postMessage('hello', '*'); return 'ok'; });
+        op('own blank frame contentDocument', function () { var f = document.createElement('iframe'); document.body.appendChild(f); return f.contentDocument === null ? 'null' : 'object'; });
+        op('own blank frame contentWindow.document', function () { var f = document.createElement('iframe'); document.body.appendChild(f); return typeof f.contentWindow.document; });
+        op('own srcdoc frame', function () { var f = document.createElement('iframe'); f.srcdoc = '<p>x</p>'; document.body.appendChild(f); return f.contentDocument === null ? 'null' : 'object'; });
+        op('sibling frame document', function () { var s = parent.frames[parent.frames.length - 1]; return s === window ? 'self' : typeof s.document; });
+        if (location.search.indexOf('egress=1') >= 0) {
+          jobs.push(new Promise(function (r) {
+            var i = new Image();
+            i.onload = function () { R['egress.img'] = 'load'; r(); };
+            i.onerror = function () { R['egress.img'] = 'error'; r(); };
+            i.src = '/image-probe.png?sb=' + Math.random().toString(36).slice(2);
+          }));
+          jobs.push(new Promise(function (r) {
+            try {
+              var w = new WebSocket('ws://' + location.host + '/ws?sb=1');
+              w.onopen = function () { R['egress.ws'] = 'open'; w.close(); r(); };
+              w.onerror = function () { R['egress.ws'] = 'error'; r(); };
+              setTimeout(function () { if (!R['egress.ws']) { R['egress.ws'] = 'timeout'; r(); } }, 6000);
+            } catch (e) { R['egress.ws'] = 'threw:' + e.name; r(); }
+          }));
+          op('egress.beacon', function () { return navigator.sendBeacon('/xsb-beacon', 'x'); });
+          // What the sandbox's own rules allow, tried by every route a script has. Natively several of these
+          // fail on CORS grounds (the origin is "null"); what matters here is where they go — the
+          // upstream sees each one only if it came through the proxy, and the suite's last test fails the
+          // run if anything left for another origin. Outcomes are not compared.
+          jobs.push(fetch('/xsb-egress-fetch').then(function () {}, function () {}));
+          jobs.push(new Promise(function (r) { try { var x = new XMLHttpRequest(); x.open('GET', '/xsb-egress-xhr'); x.onloadend = function () { r(); }; x.send(); } catch (e) { r(); } }));
+          jobs.push(new Promise(function (r) { var s = document.createElement('script'); s.onload = s.onerror = function () { r(); }; s.src = '/xsb-egress-script.js'; document.head.appendChild(s); }));
+          jobs.push(new Promise(function (r) { var l = document.createElement('link'); l.rel = 'stylesheet'; l.onload = l.onerror = function () { r(); }; l.href = '/xsb-egress-style.css'; document.head.appendChild(l); }));
+          jobs.push(import('/xsb-egress-module.js').then(function () {}, function () {}));
+          jobs.push(new Promise(function (r) {
+            try {
+              var wu = URL.createObjectURL(new Blob(['fetch("/xsb-egress-worker").then(function () {}, function () {}); postMessage("ran");']));
+              var wk = new Worker(wu);
+              wk.onmessage = function () { r(); };
+              wk.onerror = function () { r(); };
+              setTimeout(r, 6000);
+            } catch (e) { r(); }
+          }));
+        }
+        var send = function () { parent.postMessage('sb:' + JSON.stringify(R), '*'); };
+        Promise.all(jobs).then(function () { setTimeout(send, 400); });
+        addEventListener('message', function (m) {
+          if (m.data !== 'go') return;
+          var N = {};
+          op('top.location.href=', function () { top.location.href = '/xsb-nav-top'; return 'no throw'; }, N);
+          op('top.location.replace', function () { top.location.replace('/xsb-nav-top2'); return 'no throw'; }, N);
+          op('parent.location.href=', function () { parent.location.href = '/xsb-nav-parent'; return 'no throw'; }, N);
+          op('self.location.hash=', function () { location.hash = '#self'; return location.hash; }, N);
+          setTimeout(function () { parent.postMessage('sbnav:' + JSON.stringify(N), '*'); }, 600);
+        });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xsandbox') {
+      // Sandboxed frames, made every way a page can make one. Each reports from inside; the page
+      // reads what it can of them. Values are the fixture's own strings.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Sandboxed frames</title><body><script>
+        window.__xsandbox = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var got = [];
+          addEventListener('message', function (e) {
+            if (typeof e.data === 'string' && e.data.indexOf('sb:') === 0) got.push({ source: e.source, origin: e.origin, data: JSON.parse(e.data.slice(3)) });
+          });
+          var norm = function (o) { return Object.keys(o).sort().map(function (k) { return k + '=' + o[k]; }).join('\\n'); };
+          var reportOf = function (f) {
+            var r = got.filter(function (g) { try { return g.source === f.contentWindow; } catch (e) { return false; } })[0];
+            return r ? 'origin=' + r.origin + '\\n' + norm(r.data) : 'no report';
+          };
+          var wait = async function (f, ms) {
+            for (var t0 = Date.now(); Date.now() - t0 < ms && reportOf(f) === 'no report'; ) await sleep(100);
+            await sleep(300);
+          };
+          var variant = async function (name, build, ms) {
+            var h = document.createElement('div'); document.body.appendChild(h);
+            var f = build(h);
+            await wait(f, ms === undefined ? 15000 : ms);
+            out[name + '.connected'] = String(f.isConnected);
+            out[name + '.contentDocument'] = f.contentDocument === null ? 'null' : typeof f.contentDocument;
+            out[name + '.report'] = reportOf(f);
+            return f;
+          };
+          var mk = function (setup) { return function (h) { var f = document.createElement('iframe'); setup(f); h.appendChild(f); return f; }; };
+          var CHILD = '/xsbchild';
+          var a = await variant('attr', mk(function (f) { f.setAttribute('sandbox', 'allow-scripts'); f.src = CHILD + '?egress=1'; }));
+          out['attr.sandbox'] = a.getAttribute('sandbox') + '|' + a.sandbox.value + '|' + a.sandbox.length + '|' + a.sandbox.contains('allow-same-origin') + '|' + a.sandbox.contains('allow-scripts');
+          out['attr.outerHTML'] = a.outerHTML;
+          out['attr.contentWindow.document'] = (function () { try { return typeof a.contentWindow.document; } catch (e) { return 'threw:' + e.name; } })();
+          out['attr.contentWindow.location'] = (function () { try { return String(a.contentWindow.location.href); } catch (e) { return 'threw:' + e.name; } })();
+          out['attr.contentWindow.length'] = (function () { try { return String(a.contentWindow.length); } catch (e) { return 'threw:' + e.name; } })();
+          await variant('property', mk(function (f) { f.sandbox = 'allow-scripts'; f.src = CHILD; }));
+          await variant('tokens', mk(function (f) { f.sandbox.add('allow-scripts'); f.src = CHILD; }));
+          await variant('src first', mk(function (f) { f.src = CHILD; f.setAttribute('sandbox', 'allow-scripts'); }));
+          await variant('parsed', function (h) { h.innerHTML = '<iframe sandbox="allow-scripts" src="' + CHILD + '"></iframe>'; return h.firstChild; });
+          await variant('insertAdjacentHTML', function (h) { h.insertAdjacentHTML('beforeend', '<iframe sandbox="allow-scripts" src="' + CHILD + '"></iframe>'); return h.firstChild; });
+          await variant('srcdoc', mk(function (f) {
+            f.setAttribute('sandbox', 'allow-scripts');
+            f.srcdoc = '<script>parent.postMessage("sb:" + JSON.stringify({ ran: "srcdoc", origin: self.origin }), "*")<\\/script>';
+          }));
+          await variant('parsed srcdoc', function (h) {
+            // The attribute value is built, not written: an inline script's text is entity-decoded by the
+            // membrane (a documented trade-off), so no entity may stand in this source.
+            var inner = '<script>parent.postMessage("sb:" + JSON.stringify({ ran: "parsed srcdoc", origin: self.origin }), "*")<\\/script>';
+            var attr = inner.replace(/&/g, '&' + 'amp;').replace(/"/g, '&' + 'quot;');
+            h.innerHTML = '<iframe sandbox="allow-scripts" srcdoc="' + attr + '"></iframe>';
+            return h.firstChild;
+          });
+          await variant('inert', mk(function (f) { f.setAttribute('sandbox', ''); f.src = CHILD; }), 2500);
+          await variant('forms and popups', mk(function (f) { f.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups'); f.src = CHILD; }));
+          var h2 = document.createElement('div'); document.body.appendChild(h2);
+          var s1 = document.createElement('iframe'); s1.setAttribute('sandbox', 'allow-scripts'); s1.src = CHILD; h2.appendChild(s1);
+          var s2 = document.createElement('iframe'); s2.setAttribute('sandbox', 'allow-scripts'); s2.src = CHILD; h2.appendChild(s2);
+          await wait(s1, 15000); await wait(s2, 15000);
+          out['sibling.first'] = reportOf(s1);
+          out['sibling.second'] = reportOf(s2);
+          // Navigating the top window or the embedder is the sandbox's to refuse.
+          var run = async function (flags) {
+            var nf = document.createElement('iframe'); nf.setAttribute('sandbox', flags); nf.src = CHILD; document.body.appendChild(nf);
+            await wait(nf, 15000);
+            var navGot = null;
+            var onNav = function (e) { if (typeof e.data === 'string' && e.data.indexOf('sbnav:') === 0 && e.source === nf.contentWindow) navGot = e.data.slice(6); };
+            addEventListener('message', onNav);
+            nf.contentWindow.postMessage('go', '*');
+            for (var t1 = Date.now(); !navGot && Date.now() - t1 < 8000; ) await sleep(100);
+            removeEventListener('message', onNav);
+            return navGot ? norm(JSON.parse(navGot)) : 'none';
+          };
+          out['nav.scripts'] = await run('allow-scripts');
+          out['nav.userActivation'] = await run('allow-scripts allow-top-navigation-by-user-activation');
+          out['nav.pathAfter'] = location.pathname;
+          window.__xsandbox = out;
+        })().catch(function (e) { window.__xsandbox = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xsetcookie') {
       // Answers with a Set-Cookie for the name in ?n=: ?httponly=1, ?maxage=0 and
       // ?redirect=1 (the cookie rides on the redirect, the final page sets none).
@@ -5079,6 +5376,146 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct['child.cross.heard'], '', 'the other site hears nothing of this one');
     assert.match(direct['child.same.heard'], /k_parent\|null\|p1\|local\|true\|true/);
     assert.equal(direct['synthetic'], 'synthetic|x|null');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The two tests below build many frames — a joint-history entry each, which capped the shared page's
+  // history at 50 and made the history-counting test after them read a delta of 0 — and open popups.
+  // They get a page of their own.
+  const openProxiedPage = async url => {
+    const fresh = await browser.newPage();
+    await observeTarget(fresh.target());
+    assert.ok(await openThroughLauncher(fresh, proxyOrigin, url), `the launcher did not reach ${url}`);
+    return fresh;
+  };
+  // Frames that come out of markup. The page-side HTML walker used to route a frame on its inert
+  // parser copy, so a frame made by innerHTML, insertAdjacentHTML, a template or document.write stayed
+  // blank for ever.
+  await t.test('frames made from markup load and read back as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xmarkup`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xmarkup, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xmarkup);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xmarkup`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xmarkup, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xmarkup);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'markup-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: every way of making the frame ends with the document loaded.
+    for (const k of ['innerHTML.title', 'insertAdjacentHTML.beforeend', 'insertAdjacentHTML.afterend', 'insertAdjacentHTML.beforebegin', 'setHTMLUnsafe', 'outerHTML', 'template.import', 'template.clone', 'createContextualFragment', 'DOMParser.adopt', 'document.write', 'innerHTML.late']) {
+      assert.equal(direct[k], 'frame ready', `${k}: the native reference changed`);
+    }
+    assert.equal(direct['innerHTML.src'], '/xframe-title', 'the author\'s text, not the resolved URL');
+    assert.equal(direct['innerHTML.read'], '<iframe src="/xframe-title" name="m"></iframe>');
+    assert.equal(direct['template.src'], '/xframe-title');
+    assert.equal(direct['innerHTML.srcdoc.prop'], '<p id=x>from srcdoc</p>', 'the page\'s text, not the document the proxy made of it');
+    assert.equal(direct['innerHTML.srcdoc.attr'], '<p id=x>from srcdoc</p>');
+    assert.equal(direct['innerHTML.srcdoc.body'], '<p id="x">from srcdoc</p>', 'and the document it shows');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A script put into the document by an unhooked door reached the browser un-rewritten and ran raw —
+  // `location` read the proxy's URL and assigning it left for the real target. Every door a node can come
+  // through is hooked now.
+  await t.test('scripts put in by every insertion door run through the membrane (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xinsert`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xinsert, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xinsert);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xinsert`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xinsert, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xinsert);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'insertion-doors.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: every door runs the script, in the page's own URL.
+    assert.ok(Object.keys(direct).length >= 19, `the fixture lost doors: ${Object.keys(direct)}`);
+    for (const [door, where] of Object.entries(direct)) assert.equal(where, 'virtual', `${door}: the native reference changed`);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // Sandboxed frames without allow-same-origin have an opaque origin. Every proxied site shares one
+  // physical origin, so the browser cannot give such a frame one for free: the proxy keeps the real
+  // sandbox flags, adds the one that lets it serve the frame, and the membrane emulates the opacity.
+  // This used to delete the frame at insertion (it could not be contained); when kept, its document
+  // got a 403 and its prelude died at localStorage.
+  await t.test('sandboxed frames are opaque to the page and to each other, as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xsandbox`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xsandbox, { timeout: 180000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xsandbox);
+    } finally {
+      await directBrowser.close();
+    }
+    const wireBefore = wireRequests.length;
+    const fresh = await openProxiedPage(`${targetBase}/xsandbox`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xsandbox, { timeout: 240000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xsandbox);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'sandboxed-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: what the comparison stands on.
+    const attr = direct['attr.report'];
+    assert.match(attr, /^origin=null\n/, 'a sandboxed document speaks as "null"');
+    for (const line of ['self.origin=null', 'localStorage=threw:SecurityError', 'sessionStorage=threw:SecurityError', 'document.cookie=threw:SecurityError',
+      'indexedDB.open=threw:SecurityError', 'caches=threw:SecurityError', 'parent.document=threw:SecurityError', 'top.location.href=threw:SecurityError',
+      'top.location.assign=threw:SecurityError', 'frameElement=null', 'typeof frameElement=object', 'window.open=null', 'opener=null',
+      'egress.img=load', 'egress.ws=open']) {
+      assert.ok(attr.split('\n').includes(line), `native reference lost "${line}": ${attr}`);
+    }
+    for (const k of ['attr', 'property', 'tokens', 'src first', 'parsed', 'insertAdjacentHTML', 'srcdoc', 'parsed srcdoc', 'forms and popups']) {
+      assert.equal(direct[k + '.connected'], 'true', `${k}: the frame survives`);
+      assert.equal(direct[k + '.contentDocument'], 'null', `${k}: the embedder cannot read it`);
+      assert.match(direct[k + '.report'], /^origin=null\n/, `${k}: it ran and reported`);
+    }
+    assert.equal(direct['inert.report'], 'no report', 'a sandbox without allow-scripts runs nothing');
+    assert.equal(direct['attr.sandbox'], 'allow-scripts|allow-scripts|1|false|true', 'the page\'s own sandbox value');
+    assert.equal(direct['attr.contentWindow.document'], 'threw:SecurityError');
+    assert.match(direct['nav.scripts'], /top\.location\.href==threw:SecurityError/);
+    assert.equal(direct['nav.pathAfter'], '/xsandbox', 'the sandbox refused to navigate the top window');
+    // Every route a script has, tried from inside the sandbox, reached the upstream the way the page's own
+    // requests do — by the proxy, as the target's user agent — and nothing went anywhere else (the
+    // suite's last test checks every request the browser made).
+    assert.ok(wireRequests.slice(wireBefore).some(u => u.startsWith(proxyOrigin + '/')), 'no proxy-origin wire request observed');
+    for (const where of ['/xsb-egress-fetch', '/xsb-egress-xhr', '/xsb-egress-script.js', '/xsb-egress-style.css', '/xsb-egress-module.js', '/xsb-beacon']) {
+      assert.ok(requests.some(r => r.url === where && r.userAgent === TARGET_UA), `${where}: not seen through the proxy: ${JSON.stringify(requests.filter(r => r.url === where))}`);
+    }
+    assert.ok(requests.some(r => r.url.startsWith('/image-probe.png?sb=') && r.userAgent === TARGET_UA), 'the image load did not go through the proxy');
+    assert.ok(requests.some(r => r.upgrade && r.url === '/ws?sb=1' && r.userAgent === TARGET_UA), 'the WebSocket did not go through the proxy');
     assert.deepEqual(proxied, direct);
   });
 

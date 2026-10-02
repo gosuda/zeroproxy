@@ -6,10 +6,15 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-02 | e2e / 플레이크 | 새 페이지를 여는 e2e 헬퍼의 page.goto 가 간헐적으로 안 끝났다(페이지는 이미 complete+SW 제어). 런처 헬퍼가 goto 를 안 기다리고 버튼을 기다린다. | build-deploy.md#e2e-goto-대기 |
+| 2026-10-02 | membrane / 보안 | replaceChildren·insertAdjacentElement·Range.insertNode·텍스트노드 before/after 로 넣은 스크립트가 리라이트 없이 돌았다(감옥 밖). 삽입 훅 표를 완성. | rewriter.md#삽입-문-스크립트 |
+| 2026-10-02 | membrane / 수정 | 쓴 직후의 쿠키가 다음 fetch 에 안 실릴 수 있었다(쓰기와 요청이 SW 로 가는 길이 다름). 요청이 진행 중인 쓰기의 ack 를 기다린다. | rewriter.md#쿠키-쓰기-직후-요청 |
+| 2026-10-02 | membrane / 보안 | 맨 식별자 frameElement 가 임베더의 iframe 요소를 내줬다(교차 사이트·불투명 자식 포함). DANGEROUS_GLOBALS 에 넣어 스코프 퍼사드로. | rewriter.md#맨-frameelement-누출 |
+| 2026-10-02 | membrane / 수정 | innerHTML·insertAdjacentHTML·template·document.write 로 만든 iframe 이 영영 빈 채였다(inert 복사본에 라우트). src 를 파킹, 활성화 때 복원. | rewriter.md#마크업으로-만든-프레임-파킹 |
+| 2026-10-02 | membrane / 수정 | sandbox 에 allow-same-origin 이 없는 iframe 을 지우지 않고 불투명 오리진으로 에뮬레이트(null 오리진·저장소 거부·교차 오리진 창). 플래그 유지+같은 오리진 서빙. | rewriter.md#sandbox-불투명-프레임-에뮬레이션 |
 | 2026-10-02 | membrane / 수정 | 다른 문서·img·script·동기 XHR·형제 프레임·다른 탭이 건 쿠키가 document.cookie 에 안 보였다. SW jar 가 변경 레코드를 볼 수 있는 창에만 밀어 준다(비동기). | rewriter.md#쿠키-변경-푸시 |
 | 2026-10-02 | membrane / 보안 | 같은 사이트 자식의 window.name 이 부모 것이었고 navigator.locks.query() 가 모든 사이트의 잠금을 돌려줬다. 프레임은 진짜 name, query 는 자기 접두만. | rewriter.md#window-name-locks-오리진-공유 |
 | 2026-10-02 | build / 환경 | 옛 커밋 빌드용 git worktree 의 node_modules junction 을 worktree remove --force 하면 저장소의 node_modules 가 비워진다(복구: npm ci). 링크 해제를 확인할 것. | build-deploy.md#worktree-junction-node-modules |
-| 2026-10-02 | membrane / 미해결 | sandbox 에 allow-same-origin 이 없는 iframe 은 삽입 즉시 지워진다(옛 동작, fail-closed). 건너뛰게 하면 자식이 403+prelude 중단 — 설계 결정 필요, 미해결. | rewriter.md#sandbox-불투명-프레임-제거 |
 | 2026-10-02 | membrane / 수정 | 서버가 fetch/XHR 응답으로 건 쿠키가 document.cookie 에 안 보였다(페이지 사본은 로드 시점 스냅샷). SW 가 홉별 델타를 메타로 보내 응답 전에 적용. | rewriter.md#fetch-set-cookie-미러 |
 | 2026-10-02 | membrane / 보안 | 한 사이트의 localStorage 쓰기가 다른 사이트 프레임의 storage 이벤트로 새고 있었다(물리 키·값·내부 키). 창마다 캡처 첫 리스너로 번역·삼킨다. | rewriter.md#storage-이벤트-교차-사이트 |
 | 2026-10-02 | membrane / 보안 | 서로 다른 사이트의 프레임이 격리되지 않았다 — 가상 오리진별 창 핸들 정책(교차 사이트는 SecurityError 스탠드인). 이미 같은 오리진일 때 쥔 핸들은 잔여. | rewriter.md#교차-사이트-프레임 |

@@ -16,6 +16,9 @@
   // 진짜 업스트림 404 는 `X-ZP-Fetch-Meta` 를 달고 오므로 헷갈리지 않는다.
   let v2FetchOK = true;
   async function postRuntimeEnvelope(target, payload, bodyBytes, extraInit) {
+    // A cookie the page wrote a moment ago has to be in the jar before this request reads it.
+    const written = cookieWritesSettled();
+    if (written) await written;
     const label = '?url=' + encodeURLParam(target);
     if (v2FetchOK) {
       try {
@@ -62,6 +65,9 @@
       entryId: requestEntryId,
       documentURL,
       url: target,
+      // An opaque document's requests are cross-origin to everything, its own site included:
+      // `Origin: null`, and no cookies unless it asks for them.
+      ...(opaqueDocument ? { opaque: true } : null),
       init: {
         method: req.method,
         headers: Array.from(req.headers.entries()),

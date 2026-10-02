@@ -1427,14 +1427,49 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** 프레임은 저장소를 쓰지 않고 **진짜 `name`** 을 그대로 쓴다(iframe 의 `name` 속성값이고, 프레임이 이동해도 남고, `target=` 이 찾는 것이며, 우리는 거기에 아무것도 쓰지 않는다). 최상위 창만 세션 저장소 슬롯을 쓴다(탭 안 내비게이션을 가로질러 남아야 한다). `LockManager.query()` 는 자기 접두의 잠금만 남기고 접두를 뗀다.
 - **규칙:** `storage`·쿠키·이름·잠금처럼 "오리진마다 하나" 인 상태를 가상 오리진별로 가를 때 **읽기·쓰기 경로 모두** 갈랐는지, 그리고 **목록 API**(`query()`·`databases()`·`keys()`)가 남의 것을 걸러 내는지 네이티브와 같은 코드로 비교한다. 이름이 "오리진 기준" 인지 "창 기준" 인지부터 정한다.
 - **검증:** e2e `window.name stays with its own frame and lock queries stay inside the site`(이름 없는·교차 사이트·이름 있는 자식, 자식이 이름을 지은 뒤 부모, `locks.query()`). 고치기 전 코드에서 이 테스트만 빨갛다(2026-10-02, 변이 확인).
-## <a id="sandbox-불투명-프레임-제거"></a>`sandbox` 에 `allow-same-origin` 이 없는 iframe 은 삽입 즉시 DOM 에서 지워진다 — fail-closed 이고 옛 동작이다 (2026-10-02 측정, 미해결)
+## <a id="sandbox-불투명-프레임-에뮬레이션"></a>`sandbox` 에 `allow-same-origin` 이 없는 iframe — 지우던 것을 불투명 오리진 에뮬레이션으로 바꿨다 (2026-10-02)
 
-- **측정:** 네이티브/프록시에서 같은 코드로 `iframe.setAttribute("sandbox","allow-scripts"); iframe.src = …; body.appendChild(iframe)`. 네이티브는 프레임이 남고 `contentWindow` 가 WindowProxy 다. 프록시는 `appendChild` 안에서 프레임이 지워진다(`isConnected` false, `iframe` 0개, `contentWindow` null) — src·srcdoc·교차 사이트 모두. `Element.prototype.remove` 를 훅해 스택을 뽑으면 `appendChild → 삽입 훅 → instrumentIframe → remove` 다. 이 변경 전 빌드(`5239a4d`)도 똑같다 — 회귀가 아니다.
-- **원인:** 불투명 오리진 창은 부모가 읽지도(`win.document` 이 SecurityError) 패치하지도 못한다. `instrumentIframe` 의 `catch` 는 어떤 예외든 "가둘 수 없다" 로 보고 프레임을 지운다. (`allow-same-origin` 이 **있는** 값은 가상화돼 속성이 제거되므로 이 길을 안 탄다.)
-- **해 보고 되돌린 것:** 닿을 수 없는 창은 가두기를 건너뛰게 하면 프레임이 남는다. 하지만 그 프레임의 자기 문서가 프록시에서 403 을 받았고, prelude 가 첫 오리진 제한 API(`localStorage` 읽기, `installStorageFacades`)에서 중단돼 **절반만 설치된 문서**에서 페이지 스크립트가 돈다 — 지우는 쪽이 오히려 안전하다. 그래서 되돌렸다.
-- **필요한 것(설계 결정):** prelude 의 불투명 오리진 모드(저장소·쿠키·`caches` 는 SecurityError, 오리진 `null`)와 `Origin: null` 요청에 대한 서버 정책. 둘 다 보안 경계라 임의로 열지 않았다.
-- **규칙:** 이 구멍을 "예외를 삼키면 된다" 로 고치지 말 것 — 가두지 못한 문서가 살아남는다. `allow-scripts` 가 **없는** 불투명 프레임(`sandbox=""`, `allow-forms`)도 지워진다(측정). 스크립트가 못 도니 남겨도 되겠지만 아직 구분하지 않는다.
-- **관련 잔여:** `iframe.sandbox`(DOMTokenList)는 가상화된 값에서 비어 있다(네이티브 2, 프록시 0; `getAttribute` 는 맞다) — ERRATA 잔여.
+- **증상:** `sandbox="allow-scripts"`·`sandbox=""` iframe 이 삽입 즉시 DOM 에서 사라졌다(옛 동작, fail-closed; 이 작업 전 빌드 `5239a4d` 도 같다). 건너뛰게 하면 자식 문서가 프록시에서 403 을 받고 prelude 가 `localStorage` 에서 중단돼 **절반만 설치된 문서**에서 페이지 스크립트가 돌았다 — 그래서 한 번은 되돌렸다.
+- **원인:** 불투명 오리진 문서는 임베더가 읽지도 패치하지도 못하고, SW 가 제어하지 못해 프록시가 서빙할 수 없고, 오리진 제한 API 를 못 쓴다. 이 프록시는 모든 프레임이 물리 오리진 하나를 공유하는 설계라 진짜 불투명 오리진을 줄 수 없다.
+- **수정:** 페이지가 준 플래그는 그대로 두고 `allow-same-origin` 만 덧붙인다(스크립트·폼·팝업·모달·최상위 내비게이션은 브라우저가 그대로 막는다). 요소에 `data-zp-opaque` 표식과 페이지 값 스태시(`data-zp-lit-sandbox`). 자식 prelude 는 부팅 때 **임베더에게** 묻는다(`__zp_frame_opaque` — 자기 realm 의 natives 는 이미 임베더의 훅일 수 있다). 불투명 문서는 `self.origin`·`location.origin`·`e.origin` 이 `"null"`(밑에서는 문서마다 다른 `null#…` 토큰 — 서로 교차 오리진), 저장소·쿠키·`caches`·`cookieStore`·`serviceWorker`·OPFS·`locks.request` 는 네이티브와 같은 메시지의 SecurityError(또는 그 거부), `storage.estimate()` 는 TypeError 거부, `Notification.permission`·`permissions.query` 는 denied, `document.domain` 은 빈 값. `parent`·`top`·`frameElement`·형제는 교차 오리진 스탠드인, 최상위·임베더 내비게이션은 `allow-top-navigation*` 없이는 SecurityError(user activation 반영), 안에서 만든 프레임도 불투명(네이티브 실측). 런타임 fetch/XHR 은 `Origin: null`, 쿠키는 `credentials: 'include'` 일 때만.
+- **함정(순서):** 브라우저는 **내비게이션 시작 시점**에 sandbox 플래그를 고정한다 — `sandbox` 재작성은 `src`/`srcdoc` 보다 먼저여야 한다(`routeFrameSrc`·`restorePending*` 첫 줄, 마크업은 문자열을 넣기 **전에** HTML walker 가). 페이지 값은 직렬화를 건너야 하므로 스태시가 있어야 복제본·`innerHTML` 이 다시 세운다. `allow-scripts allow-same-origin`(탈출 조합)은 기존대로 속성을 지우고 값은 WeakMap 에 둔다.
+- **규칙:** 불투명 프레임을 "가둘 수 없다" 며 지우거나 건너뛰지 말 것 — 지우면 광고·위젯이 사라지고, 건너뛰면 절반 설치 문서가 돈다. 격리의 마지막 선은 자식 prelude 의 **네임스페이스 분리(fail-private)** 와 브라우저가 계속 강제하는 플래그다. 거부 목록은 코드이므로 새 오리진 제한 API 가 생기면 거기에 넣는다.
+- **검증:** e2e `sandboxed frames are opaque to the page and to each other, as natively`(생성 방식 9가지·프레임마다 약 40개 프로브·형제·최상위 내비게이션·모든 경로의 egress 시도 + 마지막 와이어 단언; 불투명 감지를 끄거나 sandbox 재작성을 빼면 빨갛다), prelude 단위 테스트(opaque 토큰·sandbox 플래그·창 핸들·변이 확인), 탐색 프로브 85/85 동일.
+- **잔여:** 불투명 프레임의 `<img>`·`<script>` 는 사이트 쿠키를 싣는다(런타임 fetch 만 `Origin: null`), 거기서 연 팝업은 불투명이 아니다, 복제한 프레임은 삽입 전에 재작성된 값을 보인다 — ERRATA 잔여.
+
+## <a id="마크업으로-만든-프레임-파킹"></a>`innerHTML`·`insertAdjacentHTML`·`<template>`·`document.write` 로 만든 iframe 이 영영 빈 채였다 (2026-10-02)
+
+- **측정:** 네이티브에서 뜨는 `host.innerHTML = '<iframe src="/x">'` 프레임이 프록시에서 `about:blank` 로 남는다(`insertAdjacentHTML`·`<template>` 복제도). `createElement` + `src` + `appendChild` 는 뜬다. 이 작업 전 커밋(`1bd3059`)에서도 같다 — 회귀가 아니다. `document.write`·`setHTMLUnsafe`·`outerHTML`·`DOMParser` 는 같은 경로(walker)를 타므로 같은 원인이다.
+- **원인:** 페이지 realm 의 HTML walker(`transformHTML`)는 문자열을 **죽은 파서 문서**의 `<template>` 에 파싱해 속성을 고친다. iframe `src` 도 거기서 `routeFrameSrc` 로 라우트를 열었는데 완료(`activatedFrameURL().then`)는 **그 죽은 요소**에 쓴다. 직렬화된 문자열에는 `src="about:blank"` 만 남고 진짜 프레임은 라우트를 받지 못한다. `<template>` 내용도 같다(라우트가 템플릿 요소에 닿고 복제본은 못 받는다).
+- **수정:** 서버 htmltx 처럼 **파킹**한다. inert 문서(`defaultView` 가 null: walker 복사본·템플릿 내용·DOMParser 문서)의 프레임은 라우트를 열지 않고 페이지 원문을 `data-zp-frame-src` 에 두며 `src` 는 `about:blank` 로 **제자리에서** 바꾼다 — 지우고 다시 달면 속성 순서가 뒤로 밀려 `innerHTML` 에 보인다. 활성화 시점(HTML 세터·`insertAdjacentHTML`·`setHTMLUnsafe`·`document.write` 뒤, 노드 삽입 훅 뒤)에 `restoreParkedFrames` 가 후킹된 `setAttribute` 로 되돌린다. 페이지가 직접 `src` 를 쓰면 파킹 값이 낡은 것이라 `routeFrameSrc`·`cancelFrameRoute` 가 지운다. `getAttribute('src')`·직렬화·`.src` 는 파킹 중에도 페이지 원문을 돌려준다. srcdoc 프레임은 walker 의 `data-zp-lit-srcdoc` 스태시로 페이지 텍스트를 되살린다 — 안 하면 `frame.srcdoc` 이 주입된 문서(prelude 태그와 boot JSON)를 읽는다.
+- **함정:** (1) inert 문서에서는 라우트를 열지 말 것 — 완료가 죽은 요소에 쓴다. (2) 인라인 `<script>` 는 `__ZP_EXEC_INLINE_SCRIPT` 가 **HTML 엔티티를 디코드**한다(React `dangerouslySetInnerHTML` 용 의도된 절충 — `decodeInlineEntities`). e2e 픽스처의 JS 문자열에 `&quot;` 를 쓰면 따옴표로 풀려 마크업이 깨지고 SyntaxError 가 자식 prelude 안에서 난다. 값을 코드로 조립할 것(`'&' + 'quot;'`).
+- **규칙:** 문서에 닿는 HTML 경로를 새로 만들면 **파킹된 프레임 복원**을 같이 건다. `MutationObserver` 백스톱은 최초 문서에 안 걸려 있다(`observedDocuments` TDZ 주석). 프레임을 많이 만드는 e2e 는 공유 페이지에서 돌리지 말 것 — 프레임마다 합동 히스토리가 한 칸씩 늘어 50칸 상한에서 뒤 테스트의 `history.length` 증분이 0 이 된다(2026-10-02, `frame load events and history`).
+- **검증:** e2e `frames made from markup load and read back as natively`(innerHTML·insertAdjacentHTML 3방향·setHTMLUnsafe·outerHTML·template import/clone·createContextualFragment·DOMParser adopt·document.write, `src`·`srcdoc` 읽기·직렬화), prelude 단위 테스트(파킹·복원·변이 확인).
+
+## <a id="맨-frameelement-누출"></a>맨 식별자 `frameElement` 가 임베더의 iframe 요소를 내줬다 (2026-10-02)
+
+- **측정:** 교차 사이트·불투명 자식에서 `window.frameElement`·`self.frameElement` 는 `null`(훅)인데 `frameElement` 맨 식별자는 요소를 돌려줬다 — 부모 DOM 으로 가는 길(`frameElement.ownerDocument`, `.parentNode`).
+- **원인:** 맨 식별자는 브라우저의 전역 조회로 풀려 어떤 훅도 안 본다. rewriter 의 `DANGEROUS_GLOBALS` 에 없었다(`window`·`self`·`globalThis` 경유 형태만 훅돼 있었다).
+- **수정:** `frameElement` 를 `DANGEROUS_GLOBALS` 에 추가(Rust `zp-rewriter`) — 스코프 퍼사드(`scopeGet`)를 거쳐 가상 프레임 요소 규칙을 탄다.
+- **규칙:** 창의 접근자를 훅할 때는 **맨 식별자 형태**도 `DANGEROUS_GLOBALS` 에 있는지 본다. 단위 테스트가 접근자별 4가지 형태(`window.x`·`self.x`·`globalThis.x`·맨 `x`)를 비교한다.
+- **검증:** Rust `rewrites_bare_frame_element`, e2e `sandboxed frames are opaque…`(`frameElement`·`typeof frameElement`·별칭 `window`).
+
+## <a id="쿠키-쓰기-직후-요청"></a>`document.cookie = x; fetch(…)` 의 요청이 방금 쓴 쿠키를 못 실을 수 있었다 (2026-10-02)
+
+- **측정:** e2e `cookies set by fetch and XHR…` 의 `sent.back` 이 `ck_script=1`(방금 `document.cookie` 로 쓴 것)을 못 받는 실행이 이어졌다. SW 로그를 심으면 통과하는 **하이젠버그**였다 — 로그를 심은 실행에서는 쓰기가 요청보다 2 ms 먼저, 심지 않은 실행에서는 뒤에 닿았다.
+- **원인:** jar 는 SW 에 있다. 쓰기(`postMessage`)와 요청(`fetch('/zp/api/v2/fetch')`)은 **다른 경로**로 가서 어느 쪽이 먼저 닿을지 정해져 있지 않다. 네이티브 jar 는 동기라 항상 실린다. 이 경쟁은 이 작업 전부터 있었다 — 이 작업이 확률을 바꿨을 뿐이다(베이스라인 2/2 통과, 이 작업 트리 3/3 실패).
+- **수정:** 쓰기의 ack 를 `cookieWritesInFlight` 에 모으고 `postRuntimeEnvelope` 가 진행 중인 쓰기를 기다린 뒤 보낸다. 실패한 쓰기도 settle 되므로 요청을 막지 않는다. 동기 XHR·내비게이션·`<img>` 는 기다릴 수 없다 — ERRATA 잔여.
+- **규칙:** 간헐 실패를 로그로 재현하려는데 로그를 심으면 통과한다면 **타이밍 경쟁**이다. 로그를 더 심지 말고 순서를 보장하는 쪽으로 고친다. 두 메시지가 서로 다른 경로로 같은 목적지(여기서는 SW)에 가면 도착 순서에 기대지 않는다.
+- **검증:** prelude 단위 테스트 `cookie writes: a runtime request waits…`, e2e `cookies set by fetch and XHR…` 를 같은 빌드에서 6회 연속 통과.
+
+## <a id="삽입-문-스크립트"></a>`replaceChildren`·`insertAdjacentElement`·`Range.insertNode` 로 넣은 스크립트가 리라이트 없이 돌았다 (2026-10-02)
+
+- **측정:** 같은 코드를 네이티브/프록시에서. 인라인 `window.__ins = location.href` 를 `host.replaceChildren(script)`·`insertAdjacentElement`·`Range.insertNode` 로 넣으면 프록시에서 **프록시 주소**를 읽는다(`appendChild`·네이티브는 페이지 URL). `before`/`after`/`replaceWith` 는 요소에는 훅이 있었고 **텍스트 노드**(`CharacterData`)에는 없었다.
+- **원인:** 삽입 훅(`patchInsertion`)은 노드를 넣기 **전에** 스크립트를 준비한다(본문 리라이트·`src` 라우트). 훅 표에 없는 문으로 들어간 스크립트는 페이지가 쓴 그대로 브라우저에 가고, CSP 가 `'unsafe-inline'` 을 허용하므로 **멤브레인 밖에서** 돈다 — 거기서 `location` 은 진짜 Location 이고 대입은 실제 내비게이션이다. 감옥 문제다.
+- **수정:** 표를 완성했다 — `append`·`prepend`·`replaceChildren`·`before`·`after`·`replaceWith`(Element·Document·DocumentFragment·CharacterData), `insertAdjacentElement`, `Range.insertNode`. 래퍼는 네이티브의 `length` 를 보고한다(`...args` 라 0 이었다).
+- **규칙:** 새 DOM 삽입 API 는 훅 표에 넣을 때까지 구멍이다 — `ParentNode`·`ChildNode` 믹스인과 `Range` 의 목록을 표준과 대조한다. `Range.surroundContents` 는 새 부모로 기존 내용을 옮기는 것이라 스크립트를 실행하지 않는다(네이티브도 실행 안 함, 측정).
+- **검증:** e2e `scripts put in by every insertion door run through the membrane (matches native)`(문 19개, 변이 3개 확인 — `replaceChildren`·`insertAdjacentElement`·텍스트 노드), 탐색 프로브 18/18 동일.
+
 ## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번(파싱된 프레임은 세 번), 히스토리가 두 칸이었다 (2026-10-01)
 
 - **측정:** 같은 코드를 네이티브/프록시에서. `src` 를 붙인 뒤 append: `load` 리스너+`onload` 가 네이티브 1회(`Lo`), 프록시 2회(`LoLo`); append 뒤 `src` 대입·교체도 +1회씩; 교체 시 히스토리 증가분 네이티브 1, 프록시 2. **파싱된 `<iframe src onload=…>` 는 인라인 onload 가 3번**(파서의 빈 페이지 + 플레이스홀더 + 라우트된 문서).

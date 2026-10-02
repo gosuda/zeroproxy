@@ -756,7 +756,7 @@
     // this 를 안 봐도 되는 건 그대로다 — 어떤 노드에서 읽어도 같은 문서 기준.
     defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);
     defineAccessor(w.Document && w.Document.prototype, 'referrer', () => '');
-    defineAccessor(w.Document && w.Document.prototype, 'cookie', () => documentCookieString(), v => { const s = String(v); setDocumentCookie(s); ctx.bridge.send({ type: ZP.MSG.COOKIE_SET, tabId: boot.tabId, targetUrl: virtualURL.href, cookie: s }).catch(err => { try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'cookie-set-failed', code: String((err && (err.code || err.message)) || err), ck: s.slice(0, 60) }); } catch {} }); });
+    defineAccessor(w.Document && w.Document.prototype, 'cookie', () => { if (opaqueDocument) throw opaqueDenied("Failed to read the 'cookie' property from 'Document'"); return documentCookieString(); }, v => { if (opaqueDocument) throw opaqueDenied("Failed to set the 'cookie' property on 'Document'"); const s = String(v); setDocumentCookie(s); sendCookieSet(s); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');
     installURLProp(w.HTMLFormElement && w.HTMLFormElement.prototype, 'action');

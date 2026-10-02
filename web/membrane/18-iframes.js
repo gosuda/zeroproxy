@@ -49,22 +49,32 @@
     patchInsertion(w.Node.prototype, 'appendChild', w.Node.prototype.appendChild);
     patchInsertion(w.Node.prototype, 'insertBefore', w.Node.prototype.insertBefore);
     patchInsertion(w.Node.prototype, 'replaceChild', w.Node.prototype.replaceChild);
-    for (const proto of [w.Element && w.Element.prototype, w.Document && w.Document.prototype, w.DocumentFragment && w.DocumentFragment.prototype]) {
-      for (const method of ['append', 'prepend', 'before', 'after', 'replaceWith']) patchInsertion(proto, method, proto && proto[method]);
+    // Every door a node can come through: a script put in by any of them has to reach the browser
+    // rewritten, or it runs raw (measured 2026-10-02: replaceChildren, insertAdjacentElement and
+    // Range.insertNode did — location read the proxy's URL, and assigning it left for the target).
+    for (const proto of [w.Element && w.Element.prototype, w.Document && w.Document.prototype, w.DocumentFragment && w.DocumentFragment.prototype, w.CharacterData && w.CharacterData.prototype]) {
+      for (const method of ['append', 'prepend', 'replaceChildren', 'before', 'after', 'replaceWith']) patchInsertion(proto, method, proto && proto[method]);
     }
+    if (w.Element) patchInsertion(w.Element.prototype, 'insertAdjacentElement', w.Element.prototype.insertAdjacentElement);
+    if (w.Range) patchInsertion(w.Range.prototype, 'insertNode', w.Range.prototype.insertNode);
 
-    if (w.HTMLIFrameElement) { installFrameProp(w.HTMLIFrameElement.prototype, 'src'); installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc'); }
+    if (w.HTMLIFrameElement) { installFrameProp(w.HTMLIFrameElement.prototype, 'src'); installFrameProp(w.HTMLIFrameElement.prototype, 'srcdoc'); installFrameSandboxProp(w.HTMLIFrameElement.prototype); }
     if (w.HTMLFrameElement) installFrameProp(w.HTMLFrameElement.prototype, 'src');
 
     function patchInsertion(proto, name, nativeFn) {
       if (!proto || typeof nativeFn !== 'function') return;
-      define(proto, name, function(...args) {
+      const hook = function(...args) {
         prepareActivatingNodes(args);
         const frames = collectIframesFromArgs(args);
         const ret = nativeFn.apply(this, args);
+        // Frames parked while their markup was inert load now, behind the sandbox rewrite above.
+        if (frames) for (const frame of frames) restoreParkedFrame(frame);
         instrumentFrameList(frames);
         return ret;
-      });
+      };
+      define(proto, name, hook);
+      // The native method's `length` (the wrapper takes ...args, which reads 0).
+      try { Object.defineProperty(hook, 'length', { value: nativeFn.length, configurable: true }); } catch {}
     }
     function installFrameAccessors(proto) {
       if (!proto) return;
@@ -110,6 +120,9 @@
     }
     function containFrameWindow(childWin, frame) {
       if (!childWin) return childWin;
+      // An opaque frame — one the page sandboxed, or one inside an opaque document: its own
+      // origin, not ours to contain (it boots its own prelude, or cannot run a script at all).
+      if (frame && frameHasOpaqueMark(frame)) return childWin;
       try { if (childWin[networkContainmentMarker]) return childWin; } catch { if (instrumentedWindows.has(childWin)) return childWin; }
       instrumentedWindows.add(childWin);
       // 부모 쪽 `contentWindow.name` 은 iframe 의 name 속성이 초기값이다 —
@@ -144,6 +157,44 @@
       // 놓친다 — 실측에서 같은 페이지가 로드마다 되기도 하고 안 되기도 했다.
       try { documentIsSWLess(childWin.document); } catch {}
       return childWin;
+    }
+    // `frame.sandbox`: the flags the PAGE gave (a frame we rewrote holds one more natively),
+    // as a live DOMTokenList — a real one, on a detached shadow frame; changes made through
+    // it flow back into the frame. A frame whose flags we did not touch keeps the native list.
+    function installFrameSandboxProp(proto) {
+      const d = Object.getOwnPropertyDescriptor(proto, 'sandbox');
+      if (!d || !d.get || !d.set) return;
+      const MO = root.MutationObserver;
+      try {
+        defineMasked(proto, 'sandbox', {
+          get() {
+            if (!frameSandboxMeta.has(this)) return d.get.call(this);
+            const value = frameSandboxMeta.get(this);
+            let rec = sandboxShadows.get(this);
+            if (!rec) {
+              const shadow = Native.createElement('iframe');
+              Native.setAttribute.call(shadow, 'sandbox', value);
+              rec = { shadow, list: d.get.call(shadow) };
+              const frame = this;
+              try {
+                new MO(() => {
+                  const now = Native.getAttribute.call(shadow, 'sandbox');
+                  if (now === null || sandboxShadows.get(frame) !== rec) return;
+                  if (frameSandboxMeta.get(frame) !== now) setFrameSandboxAttribute(frame, now);
+                }).observe(shadow, { attributes: true, attributeFilter: ['sandbox'] });
+              } catch {}
+              sandboxShadows.set(this, rec);
+            }
+            return rec.list;
+          },
+          set(v) { setFrameSandboxAttribute(this, v); },
+          enumerable: d.enumerable,
+          configurable: false,
+        });
+        const installed = Object.getOwnPropertyDescriptor(proto, 'sandbox');
+        if (installed && typeof installed.get === 'function') toStringMap.set(installed.get, nativeAccessorSource('get', 'sandbox'));
+        if (installed && typeof installed.set === 'function') toStringMap.set(installed.set, nativeAccessorSource('set', 'sandbox'));
+      } catch {}
     }
     function installFrameProp(proto, prop) {
       const d = Object.getOwnPropertyDescriptor(proto, prop);
@@ -229,9 +280,30 @@
     if (!cur) return false;
     try { const u = new Native.URL(cur, proxyOrigin); return u.origin === proxyOrigin && ZP.isSharePath(u.pathname); } catch { return false; }
   }
+  // The server's rewriter moves a frame's `src` out of the way (data-zp-frame-src) so the browser never
+  // loads the raw URL. The page-side policy pass does the same to a frame in an inert document — markup
+  // parsed into the HTML walker's copy, a template's content — where a route opened for the frame would
+  // stay on that element and never reach the frame the markup becomes. The page's text waits in the
+  // data attribute and `src` holds the blank page a routed frame shows until its route is ready; it
+  // is not removed, so it keeps its place in the element's attribute list, as it does natively.
+  function parkFrameSrc(el) {
+    const src = Native.getAttribute.call(el, 'src');
+    if (src === null) return;
+    const t = src.trim();
+    if (!t || /^about:/i.test(t)) return;
+    Native.setAttribute.call(el, 'data-zp-frame-src', src);
+    Native.setAttribute.call(el, 'src', 'about:blank');
+  }
+  // A frame's own `src` — set by the page, not restored from the parked text — makes that text stale.
+  function dropParkedFrameSrc(el) {
+    try { Native.removeAttribute.call(el, 'data-zp-frame-src'); } catch {}
+  }
   // `keepDocument` is false for the mutation-observer backstop: there the
   // attribute was written without our hook and may hold the raw URL right now.
   function routeFrameSrc(el, key, target, keepDocument) {
+    // Before any document is asked for: the navigation's sandbox flags are fixed when it starts.
+    sanitizeFrameSandbox(el);
+    dropParkedFrameSrc(el);
     const seq = (frameRouteSeq.get(el) || 0) + 1;
     frameRouteSeq.set(el, seq);
     if (!(keepDocument && el.isConnected && frameShowsRoutedDocument(el, key))) {
@@ -255,6 +327,7 @@
   function cancelFrameRoute(el) {
     frameRouteSeq.set(el, (frameRouteSeq.get(el) || 0) + 1);
     pendingFrameRoutes.delete(el);
+    dropParkedFrameSrc(el);
   }
   // The placeholder page's `load` is not the frame's load. Frames still waiting
   // for their route — a placeholder set by routeFrameSrc, or a parsed frame
@@ -271,6 +344,18 @@
     if (blank) ev.stopImmediatePropagation();
     else pendingFrameRoutes.delete(f);
   }
+  // A window of an opaque origin — the browser's, from a sandbox without allow-same-origin
+  // that this membrane has not rewritten — cannot be read from here, and nothing can be
+  // installed in it: containing it is impossible, so it is not allowed to stay. A frame
+  // the membrane DID rewrite is same-origin natively once it navigates; until then its
+  // blank first document is such a window, and holds nothing.
+  function windowReachable(win) {
+    try { void win.document; return true; } catch { return false; }
+  }
+  function frameHasOpaqueMark(frame) {
+    try { return Native.hasAttribute.call(frame, OPAQUE_FRAME_ATTR); } catch { return false; }
+  }
+
   function instrumentFrameList(frames) { if (frames) for (const frame of frames) instrumentIframe(frame); }
   function instrumentDescendantIframes(node) { instrumentFrameList(collectIframes(node, null)); }
   function instrumentIframe(frame) {
@@ -283,8 +368,25 @@
       // gives the routed document a fresh Window (measured 2026-10-01), so
       // nothing installed here reaches it — while skipping left the blank page
       // itself raw (see bootingProxiedDocument).
-      const blankWin = (!src || /^about:blank$/i.test(src)) ? nativeFrameWindow(frame) : null;
-      if (blankWin) installNetworkContainment(blankWin);
+      // Parsed, or made by innerHTML: no insertion hook has seen its sandbox yet.
+      sanitizeFrameSandbox(frame);
+      // ...nor its srcdoc: the page's text was kept on the walker's inert copy, and what survived the
+      // serialization is a stash. Put it back, or reads show the injected document.
+      if (!srcdocMeta.has(frame) && Native.hasAttribute.call(frame, 'srcdoc')) {
+        const kept = Native.getAttribute.call(frame, litAttrName('srcdoc'));
+        if (kept !== null) srcdocMeta.set(frame, kept);
+      }
+      // Inside an opaque document every frame it makes is opaque too (the sandbox's origin flag is
+      // inherited: measured natively, blank and srcdoc frames included).
+      if (opaqueDocument && !frameHasOpaqueMark(frame)) { try { Native.setAttribute.call(frame, OPAQUE_FRAME_ATTR, '1'); } catch {} }
+      // An opaque frame has an origin of its own: it is no more ours to contain than a
+      // cross-site one, and nothing of this document can write into it.
+      const opaque = frameHasOpaqueMark(frame);
+      const blankWin = (!src || /^about:blank$/i.test(src)) && !opaque ? nativeFrameWindow(frame) : null;
+      if (blankWin) {
+        if (windowReachable(blankWin)) installNetworkContainment(blankWin);
+        else throw new Error('frame window cannot be contained');
+      }
       installSafeFrameResizeShim(frame);
     } catch { try { frame.remove(); } catch {} }
   }
