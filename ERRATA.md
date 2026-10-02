@@ -27,11 +27,12 @@ runs turned out to certify divergences as "design" — see
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 116 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
+| `window.name stays with its own frame and lock queries stay inside the site` (an unnamed, a cross-site and a named frame; the parent's name before and after a child names itself; `navigator.locks.query()`) | 7 | 0 |
 | `cookies set by fetch and XHR responses are visible to the page and match native` (a plain response, HttpOnly, XHR, a redirect hop, `credentials: omit`, update, `Max-Age=0`, `cookieStore`, change events, what the next request carries) | 12 | 0 |
 | `storage events stay inside the writing site and match native` (cross-site and same-site writes, an unchanged value, update, remove, `onstorage`, the frames' own view, a synthetic event) | 9 | 0 |
 | `cross-site frame and popup access matches native` (frames and a popup in both directions, `postMessage`, named lookups, replies) | 150 | 2 — a same-site child's `top`/`parent` read through a local alias (residual, below) |
 
-Suite totals (2026-10-02): e2e 196/196 — including the WebTransport gateway
+Suite totals (2026-10-02): e2e 197/197 — including the WebTransport gateway
 (`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
 round trips in a real browser — `npm run test:js` 126, `test:wasm:ci` 13,
 `cargo test --workspace` 293, `go test ./...` green. Real sites (paired
@@ -252,6 +253,16 @@ claimed:
     change events included, cookies of another host not kept. Beacons go the same
     way. — e2e `cookies set by fetch and XHR responses are visible to the page and
     match native`.
+35. **A same-site frame's `window.name` was its parent's, and `navigator.locks.query()`
+    listed every site's locks.** Both are state keyed on the shared physical origin.
+    The name store was keyed by tab and origin hash, so a frame read its parent's
+    name instead of its own (and, in a tab that had already shown that site, a
+    stale name an earlier document left) — a name belongs to a browsing context, not
+    to an origin. A frame now uses its real `name` (the iframe's, as natively); only
+    the top window keeps the store. `LockManager.query()` filtered nothing: other
+    sites' locks came back under their raw `zp:lk:<hash>:` names (other sites' names,
+    and a prefix that names the proxy). Now only the site's own, unprefixed. — e2e
+    `window.name stays with its own frame and lock queries stay inside the site`.
 
 ### Residuals (documented, not fixed)
 

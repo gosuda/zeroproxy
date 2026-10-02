@@ -68,12 +68,16 @@
       const isTopFrame = (() => { try { return w.top === w; } catch { return true; } })();
       if (isTopFrame) { try { w.name = ''; } catch {} }
       else {
-        try {
-          const real = String(w.name || '');
-          if (real && !(nativeSessionStorage && nativeSessionStorage.getItem(nameKey))) rootWindowNameStore.set(real);
-        } catch {}
-        const innerSet = rootWindowNameStore.set;
-        rootWindowNameStore.set = v => { innerSet(v); try { w.name = String(v); } catch {} };
+        // A frame's name belongs to ITS browsing context, not to its origin: the real
+        // `name` already behaves as natively — it is the iframe's `name`, survives the
+        // frame's navigations and is what `target=` finds — and nothing of ours is ever
+        // written to it. The store above is the top window's, keyed by tab and origin:
+        // behind it a same-site frame read its parent's name (and, naming itself, wrote
+        // over it).
+        rootWindowNameStore = {
+          get() { try { return String(w.name || ''); } catch { return ''; } },
+          set(v) { try { w.name = String(v); } catch {} },
+        };
       }
     }
     let wrappedLocalStorage = null;

@@ -79,10 +79,13 @@
           });
         }
         if (typeof nativeQuery === 'function') {
+          // The manager is the PHYSICAL origin's: every site's locks come back. Only the
+          // ones this site took, under the names it gave them (natively: its own origin's).
+          const ours = info => !!info && typeof info === 'object' && typeof info.name === 'string' && info.name.indexOf(pfx) === 0;
           define(LMProto, 'query', function query() {
             return nativeQuery.call(this).then(r => ({
-              held: (r && r.held || []).map(stripInfo),
-              pending: (r && r.pending || []).map(stripInfo),
+              held: (r && r.held || []).filter(ours).map(stripInfo),
+              pending: (r && r.pending || []).filter(ours).map(stripInfo),
             }));
           });
         }

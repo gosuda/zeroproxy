@@ -1411,6 +1411,13 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **같이 바로잡은 것:** ERRATA 의 "same-site 프레임 사이 쿠키/스토리지 — parity" 는 자식이 뜨기 **전에** 쓴 쿠키만 읽은 측정이라 쿠키 쪽은 틀렸다(스토리지는 맞다) — 행을 둘로 나눴다.
 - **규칙:** "서버가 줬다" 와 "페이지가 읽는다" 는 다른 경로다. 쿠키를 만지는 변경은 응답 → `document.cookie` 방향도 네이티브와 비교한다(요청에 실리는지만 보면 이 구멍이 안 보인다).
 - **검증:** e2e `cookies set by fetch and XHR responses are visible to the page and match native`(일반·HttpOnly·XHR·리다이렉트 홉·`credentials: omit`·갱신·`Max-Age=0`·`cookieStore`·change 이벤트·다음 요청에 실리는 것). SW 가 쿠키를 보고하지 않게 하면 이 테스트만 빨갛다(2026-10-02, 변이 확인).
+## <a id="window-name-locks-오리진-공유"></a>같은 사이트 자식의 `window.name` 이 부모의 것이었고 `navigator.locks.query()` 가 모든 사이트의 잠금을 돌려줬다 (2026-10-02)
+
+- **측정:** 부모(localhost)가 `window.name = "parent_window_name"` 을 정하고 이름 없는 같은 사이트 iframe 의 `window.name` 을 읽게 했다 — 네이티브 `""`, 프록시 `"parent_window_name"`. 이름을 준 iframe(`child_named`)도 자기 이름이 아니라 부모의 이름을 읽었다(저장소에 값이 있으면 시드를 건너뛴다). 교차 사이트 자식은 같은 탭에서 앞서 뜬 그 사이트 문서가 남긴 이름(`xechocross`)을 읽었다 — 이름이 문서가 아니라 (탭, 오리진)에 붙어 있었다. 부모가 `zp_names_lock` 을 쥔 채 교차 사이트 자식이 `navigator.locks.query()` — 네이티브 `held: []`, 프록시 `held: ["zp:lk:<해시>:zp_names_lock"]`(다른 사이트의 이름 + 프록시를 가리키는 접두).
+- **원인:** 둘 다 **물리 오리진 하나** 위의 상태다. 창 이름 저장소는 (탭 세션, 오리진 해시) 키 하나라 같은 사이트의 모든 창이 한 슬롯을 공유했다 — 이름은 오리진이 아니라 browsing context 의 것이다. 자식이 스스로 이름을 지으면 같은 슬롯에 썼다(이름 있는 iframe 은 저장소가 비어 있을 때만 시드했다). 잠금은 이름에 접두를 붙여 가르면서 `query()` 결과는 **자기 접두의 접두 제거만** 하고 걸러 내지 않았다.
+- **수정:** 프레임은 저장소를 쓰지 않고 **진짜 `name`** 을 그대로 쓴다(iframe 의 `name` 속성값이고, 프레임이 이동해도 남고, `target=` 이 찾는 것이며, 우리는 거기에 아무것도 쓰지 않는다). 최상위 창만 세션 저장소 슬롯을 쓴다(탭 안 내비게이션을 가로질러 남아야 한다). `LockManager.query()` 는 자기 접두의 잠금만 남기고 접두를 뗀다.
+- **규칙:** `storage`·쿠키·이름·잠금처럼 "오리진마다 하나" 인 상태를 가상 오리진별로 가를 때 **읽기·쓰기 경로 모두** 갈랐는지, 그리고 **목록 API**(`query()`·`databases()`·`keys()`)가 남의 것을 걸러 내는지 네이티브와 같은 코드로 비교한다. 이름이 "오리진 기준" 인지 "창 기준" 인지부터 정한다.
+- **검증:** e2e `window.name stays with its own frame and lock queries stay inside the site`(이름 없는·교차 사이트·이름 있는 자식, 자식이 이름을 지은 뒤 부모, `locks.query()`). 고치기 전 코드에서 이 테스트만 빨갛다(2026-10-02, 변이 확인).
 ## <a id="sandbox-불투명-프레임-제거"></a>`sandbox` 에 `allow-same-origin` 이 없는 iframe 은 삽입 즉시 DOM 에서 지워진다 — fail-closed 이고 옛 동작이다 (2026-10-02 측정, 미해결)
 
 - **측정:** 네이티브/프록시에서 같은 코드로 `iframe.setAttribute("sandbox","allow-scripts"); iframe.src = …; body.appendChild(iframe)`. 네이티브는 프레임이 남고 `contentWindow` 가 WindowProxy 다. 프록시는 `appendChild` 안에서 프레임이 지워진다(`isConnected` false, `iframe` 0개, `contentWindow` null) — src·srcdoc·교차 사이트 모두. `Element.prototype.remove` 를 훅해 스택을 뽑으면 `appendChild → 삽입 훅 → instrumentIframe → remove` 다. 이 변경 전 빌드(`5239a4d`)도 똑같다 — 회귀가 아니다.

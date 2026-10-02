@@ -1616,6 +1616,64 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xnames-child') {
+      // A frame that reports its own window.name and the locks it can see, when asked.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>names child</title><script>' +
+        'addEventListener("message", function (m) {' +
+        '  if (m.data === "rename") { window.name = "renamed_by_child"; parent.postMessage("names:" + JSON.stringify({ renamed: window.name }), "*"); return; }' +
+        '  if (m.data !== "report") return;' +
+        '  var R = { name: window.name };' +
+        '  navigator.locks.query().then(function (q) { R.held = (q.held || []).map(function (l) { return l.name; }).sort().join(","); R.pending = (q.pending || []).length; })' +
+        '    .catch(function (e) { R.held = "threw:" + e.name; })' +
+        '    .then(function () { parent.postMessage("names:" + JSON.stringify(R), "*"); });' +
+        '});' +
+        '<\/script>');
+      return;
+    }
+    if (url.pathname === '/xnames') {
+      // window.name belongs to a browsing context, not to an origin; the lock manager
+      // lists an origin's locks, not every site's. Values are the fixture's own strings.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Names and locks</title><body><script>
+        window.__xnames = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+          var got = {}, plain = null, cross = null, named = null;
+          var who = function (e) { return plain && e.source === plain.contentWindow ? 'plain' : cross && e.source === cross.contentWindow ? 'cross' : named && e.source === named.contentWindow ? 'named' : 'other'; };
+          window.addEventListener('message', function (e) {
+            if (typeof e.data === 'string' && e.data.indexOf('names:') === 0) got[who(e)] = JSON.parse(e.data.slice(6));
+          });
+          window.name = 'parent_window_name';
+          var mk = function (src, name) { var f = document.createElement('iframe'); if (name) f.name = name; f.src = src; document.body.appendChild(f); return f; };
+          plain = mk('/xnames-child');
+          cross = mk('http://' + other + ':' + location.port + '/xnames-child');
+          named = mk('/xnames-child', 'child_named');
+          await sleep(2200);
+          var release, held = new Promise(function (r) { release = r; });
+          navigator.locks.request('zp_names_lock', function () { return held; });
+          await sleep(400);
+          [plain, cross, named].forEach(function (f) { f.contentWindow.postMessage('report', '*'); });
+          await sleep(1500);
+          var show = function (r) { return r ? 'name=' + r.name + ' held=' + r.held + ' pending=' + r.pending : 'none'; };
+          out['child.plain'] = show(got.plain);
+          out['child.cross'] = show(got.cross);
+          out['child.named'] = show(got.named);
+          out['parent.name'] = window.name;
+          out['parent.readsChildName'] = named.contentWindow.name;
+          // A frame that names itself does not rename its parent.
+          plain.contentWindow.postMessage('rename', '*');
+          await sleep(600);
+          out['afterChildRename.parent'] = window.name;
+          out['afterChildRename.child'] = got.plain && got.plain.renamed || 'none';
+          release();
+          window.__xnames = out;
+        })().catch(function (e) { window.__xnames = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xsetcookie') {
       // Answers with a Set-Cookie for the name in ?n=: ?httponly=1, ?maxage=0 and
       // ?redirect=1 (the cookie rides on the redirect, the final page sets none).
@@ -4764,6 +4822,37 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.deepEqual(unexpected, [], unexpected.join('\n'));
     const healed = [...expected].filter(k => proxied[k] === direct[k]);
     assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
+  });
+
+  // window.name belongs to a browsing context and the lock manager to an origin. Every
+  // proxied site shares one physical origin, and the name store was keyed by tab and
+  // origin: a same-site frame read its parent's name; lock queries listed every site's.
+  await t.test('window.name stays with its own frame and lock queries stay inside the site', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xnames`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xnames, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xnames);
+    } finally {
+      await directBrowser.close();
+    }
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/xnames`);
+    await page.waitForFunction(() => window.__xnames, { timeout: 90000, polling: 100 });
+    const proxied = await page.evaluate(() => window.__xnames);
+    fs.writeFileSync(path.join(artifacts, 'names-and-locks.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: what the comparison stands on.
+    assert.equal(direct['child.plain'], 'name= held=zp_names_lock pending=0', 'a frame starts unnamed and sees its own site\'s lock');
+    assert.equal(direct['child.cross'], 'name= held= pending=0', 'another site sees neither');
+    assert.equal(direct['child.named'], 'name=child_named held=zp_names_lock pending=0');
+    assert.equal(direct['parent.name'], 'parent_window_name');
+    assert.equal(direct['parent.readsChildName'], 'child_named');
+    assert.equal(direct['afterChildRename.parent'], 'parent_window_name', 'a frame naming itself does not rename its parent');
+    assert.deepEqual(proxied, direct);
   });
 
   // Cookies the server sets in answer to a page's fetch / XHR. The page's copy of the
