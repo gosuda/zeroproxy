@@ -422,7 +422,9 @@
   }
   // Keep native Response identity and brand checks; metadata belongs to the
   // response, not own properties or a Proxy that breaks borrowed methods.
-  function createFetchResponseAdapter(ResponseCtor, HeadersCtor, installAccessor, installMethod) {
+  // `onMeta(record)`, when given, sees the metadata before the response is handed
+  // out — the page applies the cookies the response set (`record.cookies`).
+  function createFetchResponseAdapter(ResponseCtor, HeadersCtor, installAccessor, installMethod, onMeta) {
     const metadata = new WeakMap();
     const proto = ResponseCtor.prototype;
     const nativeClone = proto.clone;
@@ -449,6 +451,8 @@
       const encoded = response.headers.get('X-ZP-Fetch-Meta');
       if (!encoded) return response;
       const record = JSON.parse(encoded);
+      if (onMeta) { try { onMeta(record); } catch {} }
+      delete record.cookies;
       let result;
       if (record.type === 'opaque' || record.type === 'opaqueredirect') {
         if (response.body) response.body.cancel().catch(() => {});

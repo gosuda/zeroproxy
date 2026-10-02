@@ -115,7 +115,7 @@
     return target.dispatchEvent(ev);
   }
   function installHTTPAPIs() {
-    if (Native.Response) decodeFetchResponse = ZP.createFetchResponseAdapter(Native.Response, Native.Headers, defineAccessor, define);
+    if (Native.Response) decodeFetchResponse = ZP.createFetchResponseAdapter(Native.Response, Native.Headers, defineAccessor, define, record => applyResponseCookies(record.cookies));
     if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;

@@ -1551,6 +1551,10 @@ async function transportFetch(targetUrl, opt) {
     headers: new Headers(opt.headers || (opt.request && opt.request.headers) || undefined),
     credentials: opt.credentials || 'include', redirect: opt.redirect || 'follow',
     redirectDepth: 0,
+    // Cookies a page's own fetch/XHR got set, hop by hop (see the Set-Cookie
+    // block below): its `document.cookie` must show them when the promise
+    // resolves, and the page's copy of the jar is only a snapshot.
+    cookieDelta: opt.runtimeFetch ? [] : null,
   });
   return transportFetchHop(target, state);
 }
@@ -1935,8 +1939,12 @@ async function transportFetchHop(targetUrl, opt) {
     const getSetCookie = resp && resp.headers && resp.headers.getSetCookie;
     const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
     if (credentialsAllowed && opt.tab.cookieJar) {
+      // A script cannot read an HttpOnly cookie, so the page never hears of one.
+      const noteForPage = line => {
+        if (opt.cookieDelta && !/;\s*httponly\s*(?:;|$)/i.test(line)) opt.cookieDelta.push({ line: String(line), url: u });
+      };
       // Cookies belong to this hop's response URL, never to the final document.
-      for (const line of setCookies) opt.tab.cookieJar.setCookieLine(u, line);
+      for (const line of setCookies) { opt.tab.cookieJar.setCookieLine(u, line); noteForPage(line); }
       // Upstream Set-Cookie is also stripped by the Go server's
       // ConstructorPolicy (otherwise target-site auth cookies would be
       // readable by any proxy-origin page) and re-emitted into the
@@ -1948,7 +1956,7 @@ async function transportFetchHop(targetUrl, opt) {
       const sidechannel = resp.headers.get('X-ZP-Set-Cookie');
       if (sidechannel) {
         for (const line of sidechannel.split('\t')) {
-          if (line) opt.tab.cookieJar.setCookieLine(u, line);
+          if (line) { opt.tab.cookieJar.setCookieLine(u, line); noteForPage(line); }
         }
       }
     }
@@ -1959,7 +1967,7 @@ async function transportFetchHop(targetUrl, opt) {
     if (opt.redirect === 'error') return Response.error();
     if (opt.redirect === 'manual') {
       const opaque = new Response(null, { status: 204 });
-      opaque.__zpFetchMeta = { type: 'opaqueredirect', url: targetUrl, redirected: false };
+      opaque.__zpFetchMeta = { type: 'opaqueredirect', url: targetUrl, redirected: false, cookies: opt.cookieDelta && opt.cookieDelta.length ? opt.cookieDelta : undefined };
       return opaque;
     }
     if (opt.redirectDepth >= 20) return opt.runtimeFetch ? Response.error() : safeError('REDIRECT_LIMIT_EXCEEDED', 508, targetUrl);
@@ -1988,6 +1996,7 @@ async function transportFetchHop(targetUrl, opt) {
   result.__zpFetchMeta = {
     url: u, redirected: opt.redirectDepth > 0,
     type: opt.mode === 'no-cors' && new URL(u).origin !== context.origin ? 'opaque' : 'basic',
+    cookies: opt.cookieDelta && opt.cookieDelta.length ? opt.cookieDelta : undefined,
   };
   return result;
 }

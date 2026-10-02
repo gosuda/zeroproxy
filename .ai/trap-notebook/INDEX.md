@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-02 | membrane / 수정 | 서버가 fetch/XHR 응답으로 건 쿠키가 document.cookie 에 안 보였다(페이지 사본은 로드 시점 스냅샷). SW 가 홉별 델타를 메타로 보내 응답 전에 적용. | rewriter.md#fetch-set-cookie-미러 |
+| 2026-10-02 | membrane / 보안 | 한 사이트의 localStorage 쓰기가 다른 사이트 프레임의 storage 이벤트로 새고 있었다(물리 키·값·내부 키). 창마다 캡처 첫 리스너로 번역·삼킨다. | rewriter.md#storage-이벤트-교차-사이트 |
 | 2026-10-02 | membrane / 보안 | 서로 다른 사이트의 프레임이 격리되지 않았다 — 가상 오리진별 창 핸들 정책(교차 사이트는 SecurityError 스탠드인). 이미 같은 오리진일 때 쥔 핸들은 잔여. | rewriter.md#교차-사이트-프레임 |
 | 2026-10-02 | membrane / 수정 | 부모가 보낸 메시지의 e.origin 이 프록시 주소였다 — 맨 addEventListener 는 래퍼를 건너뛰었다. 창이 자기 오리진을 말하고 진짜 이벤트를 꾸민다. | rewriter.md#메시지-이벤트-수신측 |
 | 2026-10-02 | membrane / 보안 | postMessage 타깃 오리진을 걸러 내지 않았다(틀린 사이트 프레임에 도착) + 옵션 형태 SyntaxError. 가상 오리진 비교로. | rewriter.md#postmessage-타깃오리진 |

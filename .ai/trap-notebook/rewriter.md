@@ -1394,6 +1394,23 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** 창이 자기 가상 오리진을 직접 말한다(`windowHandles.originOf` — 어느 realm 에서든 `__zp_get(win,'location').origin`). 수신자가 nullish 면 그 realm 의 창으로 본다(각 realm 이 자기 프로토타입을 감싸므로 항상 맞다). 이벤트는 **진짜 이벤트**에 비열거 own `origin`/`source` 를 얹는다. `e.source` 는 `windowHandleFor` 가 준 핸들 — `=== iframe.contentWindow`, `=== parent`.
 - **같이 나온 지문:** `postMessage.name` 이 minify 된 `n`, `.length` 3(네이티브 1).
 - **검증:** e2e `reply.*`(자식이 맨 리스너로 받아 `e.source.postMessage` 로 답장 — 부모는 답장이 자기가 쥔 핸들에서 왔다고 본다), `source.*`.
+## <a id="storage-이벤트-교차-사이트"></a>한 사이트의 localStorage 쓰기가 다른 사이트 프레임의 `storage` 이벤트로 새고 있었다 — 물리 키·값·내부 키까지 (2026-10-02)
+
+- **측정:** localhost 부모 + 127.0.0.1 자식(다른 사이트)을 네이티브/프록시에서 같은 코드로. 네이티브는 다른 오리진의 쓰기를 듣지 못한다(`[]`). 프록시는 부모가 자식의 쓰기를 **물리 키(`zp:l:<해시>:키`)와 새 값 그대로** 들었고, 아무도 쓰지 않은 `__zp_hb`(100ms 마다 창마다)·`__zp_trace_log`(6KB 내부 추적)·`zp:n:…`(창 이름 저장) 이벤트가 쉬지 않고 도착했다. 같은 사이트 이벤트도 키에 접두가 붙었고 `e.storageArea === localStorage` 가 거짓(진짜 Storage)이었다.
+- **원인:** 모든 프록시 사이트가 한 물리 오리진을 공유해서 브라우저가 `storage` 이벤트를 모든 프레임에 뿌린다. 파사드는 읽기·쓰기만 접두로 갈랐고 이벤트는 손대지 않았다. `dispatchStorageEvents`/`storageWindows` 는 호출하는 곳이 없는 죽은 코드였다 — 이벤트를 합성한다고 믿게 만드는 이름이라 더 오래 숨었다(지웠다).
+- **수정:** `installStorageFacades` 가 창마다 **캡처 단계 첫 리스너**를 단다. 신뢰된(native) 이벤트만 다룬다 — 자기 네임스페이스(`zp:l:<해시>:` / `zp:s:<탭>:<해시>:`, `__zp_` 숨김 키 제외)가 아니면 `stopImmediatePropagation` 으로 삼키고, 맞으면 진짜 이벤트에 비열거 own `key`(접두 제거)·`storageArea`(파사드)·`url`(가상 URL)을 얹는다. 페이지 리스너(`addEventListener`·`onstorage`·`<body onstorage>`)는 전부 그 뒤에 돈다. 페이지가 만들어 `dispatchEvent` 한 이벤트(`isTrusted` 거짓)는 건드리지 않는다. 이미 번역된 이벤트는 own `storageArea` 로 알아본다(임베더와 자기 prelude 가 둘 다 깐 창).
+- **남은 차이(ERRATA 잔여):** ① 파사드 `clear()` 는 자기 키를 하나씩 지워(진짜 `clear()` 는 다른 사이트 것까지 지운다) 같은 사이트 창이 키마다 이벤트 하나를 듣는다(네이티브: `key: null` 하나). ② `e.url` 은 쓴 문서가 아니라 받는 문서의 가상 URL 이다(오리진은 맞다). ③ `getOwnPropertyNames(e)` 에 `key`·`storageArea`·`url` 이 보인다.
+- **규칙:** "물리 오리진 하나를 공유한다" 는 읽기·쓰기만이 아니라 **브라우저가 모든 같은-오리진 창에 뿌리는 이벤트**로도 샌다. 새 격리 면을 만들 때는 그 면의 이벤트 쪽도 네이티브와 같은 코드를 돌려 비교한다(BroadcastChannel·locks 는 접두로 막혀 있다). 이름이 메커니즘을 약속하는 코드는 호출자를 확인한다.
+- **검증:** e2e `storage events stay inside the writing site and match native`(교차 사이트 쓰기·같은 사이트 쓰기·같은 값 다시 쓰기·갱신·삭제·`onstorage`·자식 쪽 수신·합성 이벤트). 리스너를 끄면 이 테스트만 빨갛다 — 모든 프로브가 `__zp_hb` 로 넘친다(2026-10-02, 변이 확인).
+## <a id="fetch-set-cookie-미러"></a>서버가 fetch/XHR 응답으로 건 쿠키가 `document.cookie` 에 안 보였다 — 페이지의 쿠키 사본은 로드 시점 스냅샷이었다 (2026-10-02)
+
+- **측정:** 같은 코드를 네이티브/프록시에서. `await fetch("/xsetcookie?n=ck")`(응답 `Set-Cookie: ck=tok; Path=/`) 뒤 `document.cookie` — 네이티브는 `ck` 가 있고 프록시는 없다. XHR·`cookieStore.get`·`cookieStore` change 이벤트도 같다. HttpOnly 는 둘 다 안 보인다. 다음 요청의 `Cookie` 헤더에는 실렸다(SW 의 jar 는 맞았다) — 그래서 서버 쪽 시험은 통과해 왔다.
+- **원인:** 쿠키의 진실은 SW 의 jar 인데, 페이지의 `documentCookieRecords` 는 부팅 때 받은 스냅샷(`boot.documentCookie`)에 자기 `document.cookie = …` 쓰기만 얹은 사본이다. 응답의 `Set-Cookie` 를 페이지에 알리는 길이 없었다. 흔한 패턴(API 응답이 CSRF 토큰 쿠키를 내리고 스크립트가 읽는다)이 문서를 다시 로드하기 전까지 안 보였다.
+- **수정:** SW 가 `transportFetch` 에 `cookieDelta` 를 두어 **홉마다**(리다이렉트 포함, `credentials` 가 허용한 것만) HttpOnly 가 아닌 `Set-Cookie` 줄을 `{line, url}` 로 모으고, 페이지가 이미 읽는 `X-ZP-Fetch-Meta` 에 `cookies` 로 싣는다. `createFetchResponseAdapter` 가 응답을 내주기 **전에** 콜백(`applyResponseCookies`)을 부른다 — Promise 가 풀릴 때 이미 보인다. `setDocumentCookie(line, from)` 은 응답의 URL 로 기본 domain/path 를 잡고, 이 문서가 읽을 수 없는 호스트의 쿠키는 보관하지 않는다. fetch·XHR·`sendBeacon`·EventSource 는 모두 `fetchThroughRuntime` 한 길이라 한 번에 붙는다.
+- **남은 틈(ERRATA 잔여):** 다른 문서의 응답(프레임 내비게이션·다른 탭)·`<img>`/`<script>`/동기 XHR 응답의 쿠키는 그 문서가 다시 뜰 때까지 사본에 없다. 같은 사이트 프레임끼리도 런타임에 쓴 쿠키를 서로 못 본다(부모↔자식 양쪽 측정; `localStorage` 는 공유). 공유하려면 SW 가 탭의 모든 클라이언트에 변경을 밀어 주고 경쟁 쓰기의 순서 규칙을 정해야 한다.
+- **같이 바로잡은 것:** ERRATA 의 "same-site 프레임 사이 쿠키/스토리지 — parity" 는 자식이 뜨기 **전에** 쓴 쿠키만 읽은 측정이라 쿠키 쪽은 틀렸다(스토리지는 맞다) — 행을 둘로 나눴다.
+- **규칙:** "서버가 줬다" 와 "페이지가 읽는다" 는 다른 경로다. 쿠키를 만지는 변경은 응답 → `document.cookie` 방향도 네이티브와 비교한다(요청에 실리는지만 보면 이 구멍이 안 보인다).
+- **검증:** e2e `cookies set by fetch and XHR responses are visible to the page and match native`(일반·HttpOnly·XHR·리다이렉트 홉·`credentials: omit`·갱신·`Max-Age=0`·`cookieStore`·change 이벤트·다음 요청에 실리는 것). SW 가 쿠키를 보고하지 않게 하면 이 테스트만 빨갛다(2026-10-02, 변이 확인).
 ## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번(파싱된 프레임은 세 번), 히스토리가 두 칸이었다 (2026-10-01)
 
 - **측정:** 같은 코드를 네이티브/프록시에서. `src` 를 붙인 뒤 append: `load` 리스너+`onload` 가 네이티브 1회(`Lo`), 프록시 2회(`LoLo`); append 뒤 `src` 대입·교체도 +1회씩; 교체 시 히스토리 증가분 네이티브 1, 프록시 2. **파싱된 `<iframe src onload=…>` 는 인라인 onload 가 3번**(파서의 빈 페이지 + 플레이스홀더 + 라우트된 문서).

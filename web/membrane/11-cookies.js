@@ -5,22 +5,31 @@
     }
     documentCookie = documentCookieString();
   }
-  function setDocumentCookie(line) {
+  // `from`: the URL a `Set-Cookie` response came from (a fetch the page made);
+  // absent for `document.cookie = …`, which is the document's own.
+  function setDocumentCookie(line, from) {
+    const scope = from || virtualURL;
     const parts = String(line).split(';').map(p => p.trim()).filter(Boolean);
     if (!parts.length) return;
     const eq = parts[0].indexOf('=');
     if (eq <= 0) return;
-    const rec = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: virtualURL.hostname.toLowerCase(), hostOnly: true, path: defaultCookiePath(), secure: false, expires: Infinity };
+    const rec = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: scope.hostname.toLowerCase(), hostOnly: true, path: defaultCookiePath(scope), secure: false, expires: Infinity };
     for (let i = 1; i < parts.length; i++) {
       const [rawK, ...rest] = parts[i].split('=');
       const k = rawK.toLowerCase();
       const v = rest.join('=');
-      if (k === 'domain' && v) { const d = v.replace(/^\./, '').toLowerCase(); if (virtualURL.hostname.toLowerCase() === d || virtualURL.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; } }
+      if (k === 'domain' && v) { const d = v.replace(/^\./, '').toLowerCase(); if (scope.hostname.toLowerCase() === d || scope.hostname.toLowerCase().endsWith('.' + d)) { rec.domain = d; rec.hostOnly = false; } }
       else if (k === 'path' && v && v[0] === '/') rec.path = v;
       else if (k === 'secure') rec.secure = true;
       else if (k === 'samesite' && v) rec.sameSite = v.toLowerCase();
       else if (k === 'max-age') rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000;
       else if (k === 'expires') { const ts = Date.parse(v); if (!Number.isNaN(ts)) rec.expires = ts; }
+    }
+    // A response may come from another host (a cross-origin API): this document
+    // never reads those cookies, so it does not keep them.
+    if (from) {
+      const host = virtualURL.hostname.toLowerCase();
+      if (!(rec.hostOnly ? rec.domain === host : host === rec.domain || host.endsWith('.' + rec.domain))) return;
     }
     const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
     const deleted = rec.expires <= Date.now();
@@ -44,7 +53,17 @@
   function documentCookieString() {
     return visibleCookieRecords().sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
   }
-  function defaultCookiePath() { const p = virtualURL.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
+  function defaultCookiePath(scope = virtualURL) { const p = scope.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
+  // Cookies a response to the page's own fetch / XHR set. The service worker already
+  // holds them in the jar (the next request carries them); this is the page's copy,
+  // which `document.cookie` and `cookieStore` read — natively they are there the moment
+  // the promise resolves. HttpOnly ones are never sent here.
+  function applyResponseCookies(list) {
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      try { setDocumentCookie(String(item.line), new Native.URL(String(item.url))); } catch {}
+    }
+  }
 
   // ── virtual cookieStore ────────────────────────────────────────────────
   // CookieStore and document.cookie share one cookie jar natively; the raw

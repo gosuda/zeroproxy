@@ -27,9 +27,11 @@ runs turned out to certify divergences as "design" — see
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 116 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
+| `cookies set by fetch and XHR responses are visible to the page and match native` (a plain response, HttpOnly, XHR, a redirect hop, `credentials: omit`, update, `Max-Age=0`, `cookieStore`, change events, what the next request carries) | 12 | 0 |
+| `storage events stay inside the writing site and match native` (cross-site and same-site writes, an unchanged value, update, remove, `onstorage`, the frames' own view, a synthetic event) | 9 | 0 |
 | `cross-site frame and popup access matches native` (frames and a popup in both directions, `postMessage`, named lookups, replies) | 150 | 2 — a same-site child's `top`/`parent` read through a local alias (residual, below) |
 
-Suite totals (2026-10-02): e2e 194/194 — including the WebTransport gateway
+Suite totals (2026-10-02): e2e 196/196 — including the WebTransport gateway
 (`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
 round trips in a real browser — `npm run test:js` 126, `test:wasm:ci` 13,
 `cargo test --workspace` 293, `go test ./...` green. Real sites (paired
@@ -225,6 +227,31 @@ claimed:
     non-enumerable `origin`/`source` overrides; `e.source` is the very handle the
     page holds (`=== iframe.contentWindow`, `=== parent`). `postMessage.name`
     read a minified `n` and `.length` 3 (native 1). — `reply.*`, `source.*`.
+33. **`storage` events crossed sites.** Every proxied site shares one physical
+    origin, so the browser fired its own `storage` event in every frame of every
+    site for any site's write: one site heard another's `localStorage` writes —
+    the physical key (our prefix) **and the new value** — and, ten times a second
+    per window, our own `__zp_hb` heartbeat and `__zp_trace_log` (a 6 KB internal
+    trace); events of its own site carried the prefixed key and a raw `Storage`
+    as `storageArea` (`e.storageArea === localStorage` was false). Every window
+    now registers a first, capture-phase listener that swallows what is not its
+    namespace's and presents what is under the page's own key with its own
+    `Storage` as `storageArea`; the page's `addEventListener`, `onstorage` and
+    `<body onstorage>` all run after it. `dispatchStorageEvents`, which looked like
+    the mechanism and had no caller, is gone. — e2e `storage events stay inside the
+    writing site and match native`.
+34. **Cookies a server set in answer to the page's own `fetch` / XHR were not in
+    `document.cookie` or `cookieStore`.** The page's copy of the jar is a snapshot
+    taken at load plus the document's own writes; the service worker kept the
+    response's cookies for the next request (they were sent) but never told the
+    page. A script that reads an anti-forgery token or a session marker the
+    server just issued saw nothing until the next load. The service worker now
+    returns, in the fetch metadata it already sends, the non-HttpOnly cookie
+    lines each hop set (every redirect hop, `credentials` honored); the page
+    applies them before the promise resolves — same domain/path rules, `cookieStore`
+    change events included, cookies of another host not kept. Beacons go the same
+    way. — e2e `cookies set by fetch and XHR responses are visible to the page and
+    match native`.
 
 ### Residuals (documented, not fixed)
 
@@ -252,6 +279,10 @@ claimed:
 | A frame reached by a **bare identifier** (`fname.document`) is the raw window | A free identifier resolves through the browser's own global lookup, which no hook sees. Lookups through `window`, `self`, `top`, `frames` — bracket or dot — are covered. | — |
 | `w.top` / `w.parent` read through a **local alias** of a same-site child window are raw windows, not `=== window` | The rewriter leaves window-chain members unwrapped on local aliases: the ancestor-climbing loops of ad and consent code froze the renderer when they were wrapped (CNN, 2026-08-24). Same-site only; cross-site handles are stand-ins, so every read is intercepted. | e2e `cross-site frame and popup access matches native` (`p2c.same.top`, `p2c.same.parent`) |
 | A message event carries own `origin`/`source` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` and `currentTarget` match native. | — |
+| `localStorage.clear()` of a same-site window arrives as **one event per removed key** (native: a single event with `key: null`) | The facade clears only its own namespace, key by key — the real `clear()` would wipe every site's. Visible only to a second same-site window that listens. | — |
+| `e.url` of a storage event is the **receiving** document's virtual URL, not the writer's | The physical URL of the writer is a share route the receiver cannot read. The origin is right. | — |
+| A storage event carries own `key`/`storageArea`/`url` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` match native. | — |
+| A cookie set by **another document's** response — a frame's navigation, another tab — or by an **`<img>` / `<script>` / synchronous XHR** response is not in a document's `document.cookie` until it reloads; same-site frames keep **separate copies** of what scripts write at runtime | The page's copy of the jar is a load-time snapshot plus its own writes and its own fetch / XHR responses (item 34); the service worker holds the real jar and sends it with every request, so requests are right. Sharing the copy needs the worker to push changes to every client of the tab and a rule for racing writers. Measured 2026-10-02: a parent does not see a same-site child's `document.cookie` write, nor the child the parent's; `localStorage` is shared. | — |
 
 ---
 
@@ -439,7 +470,8 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | a child's own membrane survives the parent's `contentWindow` reads | **fixed** 2026-10-01 (item 25) | surface `childLocAssign` |
 | blank / routed / prelude-less child windows are never raw | **fixed** 2026-10-01 (item 26) | surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval` |
 | SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |
-| child cookie/storage between **same-site** frames, and a parent's own storage seen from a child | **parity** (measured 2026-10-01, one-off differential, not pinned) | — |
+| child **storage** between same-site frames, and a parent's own storage seen from a child | **parity** (measured 2026-10-01 and again 2026-10-02: keys, quota names, IndexedDB and cache names, locks, `BroadcastChannel`, events — storage events are item 33) | e2e `storage events stay inside the writing site and match native` |
+| child **cookies** between same-site frames written after the other frame loaded | **residual** — each document keeps its own copy (the 2026-10-01 "parity" read cookies set before the child loaded) | See Residuals. |
 | iframe `load` events and joint session history for a frame sent through `src` | **fixed** 2026-10-01 — one `load` per navigation and one history entry per change, as native; a parsed `<iframe src onload>` fires once (it fired three times) | e2e `frame load events and history match native`. See [trap 프레임-load-두-번](.ai/trap-notebook/rewriter.md#프레임-load-두-번). |
 | a detached frame's window | **parity** for `eval` and `closed`; `document.URL` reports the virtual URL where native reports `about:blank` | Same virtual-URL split as srcdoc (see Residuals). |
 | frames and popups of **different sites** | **fixed** 2026-10-02 (items 29–32) — a cross-site window is a stand-in that follows the HTML cross-origin rules, in both directions; `postMessage` honors the target origin; `e.origin`/`e.source` are right on the receiving side | e2e `cross-site frame and popup access matches native`. Residuals below. See [trap 교차-사이트-프레임](.ai/trap-notebook/rewriter.md#교차-사이트-프레임). |

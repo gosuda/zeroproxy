@@ -86,6 +86,37 @@
       if (!wrappedSessionStorage) wrappedSessionStorage = prefixedStorage(nativeSessionStorage, sessionPrefix);
       return wrappedSessionStorage;
     });
+    // Native `storage` events speak PHYSICAL keys. Every proxied site shares one
+    // physical origin, so the browser fires one in every frame of every site for
+    // any site's write — carrying that site's prefixed key and its new value —
+    // and for our own bookkeeping keys (`__zp_trace_log`, `__zp_hb`, the window
+    // name store), constantly. Hand the page only what its OWN namespace wrote,
+    // under the key it used, with its own Storage as `storageArea`: what
+    // same-origin frames get natively. Registered first and in capture, so every
+    // page listener — `addEventListener`, `onstorage`, `<body onstorage>` — runs
+    // after it. Events the page builds and dispatches itself are not trusted and
+    // pass untouched; an own `storageArea` marks an event already translated (a
+    // window can be set up by both the embedder and its own prelude).
+    try {
+      const hasOwn = Object.prototype.hasOwnProperty;
+      w.addEventListener('storage', ev => {
+        if (!ev.isTrusted || hasOwn.call(ev, 'storageArea')) return;
+        const area = ev.storageArea;
+        const key = ev.key;
+        let prefix = null;
+        let pageArea = null;
+        if (nativeLocalStorage && area === nativeLocalStorage) { prefix = localPrefix; pageArea = w.localStorage; }
+        else if (nativeSessionStorage && area === nativeSessionStorage) { prefix = sessionPrefix; pageArea = w.sessionStorage; }
+        // A null key is a native `clear()`: the facade never issues one (it removes
+        // its own keys one by one), so it cannot belong to this namespace.
+        if (prefix === null || typeof key !== 'string' || !key.startsWith(prefix) || key.startsWith(prefix + '__zp_')) {
+          ev.stopImmediatePropagation();
+          return;
+        }
+        const view = { key: key.slice(prefix.length), storageArea: pageArea, url: deproxyURL(ev.url, { fallback: 'share' }) };
+        for (const name of Object.keys(view)) Object.defineProperty(ev, name, { value: view[name], enumerable: false, configurable: true, writable: false });
+      }, true);
+    } catch {}
     if (w.indexedDB) {
       const nativeIDB = w.indexedDB;
       // 접근자로 심는다 — 실제 브라우저의 `window.indexedDB` 는 **접근자**이고
@@ -843,14 +874,4 @@
     } catch {}
     Object.freeze(facade);
     return namedStorage;
-  }
-  function dispatchStorageEvents(namespaceKey, sourceWindow, key, oldValue, newValue) {
-    for (const rec of Array.from(storageWindows)) {
-      const w = rec.w;
-      if (!w || w === sourceWindow || (rec.localKey !== namespaceKey && rec.sessionKey !== namespaceKey)) continue;
-      try {
-        const ev = new w.StorageEvent('storage', { key, oldValue, newValue, url: virtualURL.href });
-        w.dispatchEvent(ev);
-      } catch { try { w.dispatchEvent(new Event('storage')); } catch {} }
-    }
   }

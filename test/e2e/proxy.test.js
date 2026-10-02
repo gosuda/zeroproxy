@@ -1616,6 +1616,152 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xsetcookie') {
+      // Answers with a Set-Cookie for the name in ?n=: ?httponly=1, ?maxage=0 and
+      // ?redirect=1 (the cookie rides on the redirect, the final page sets none).
+      const n = url.searchParams.get('n') || 'xsrf';
+      const attrs = 'Path=/' + (url.searchParams.get('httponly') ? '; HttpOnly' : '') + (url.searchParams.get('maxage') !== null ? '; Max-Age=' + url.searchParams.get('maxage') : '');
+      if (url.searchParams.get('redirect')) {
+        res.writeHead(302, { 'Location': '/xsetcookie-final', 'Set-Cookie': n + '=tok; ' + attrs, 'Cache-Control': 'no-store' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': n + '=' + (url.searchParams.get('v') || 'tok') + '; ' + attrs });
+      res.end('ok');
+      return;
+    }
+    if (url.pathname === '/xsetcookie-final') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('final');
+      return;
+    }
+    if (url.pathname === '/xcookie') {
+      // Cookies a SERVER sets in answer to the page's own fetch / XHR: a script reads
+      // them (an anti-forgery token, a session marker) the moment the promise
+      // resolves. Cookie names are the fixture's own; nothing else is read.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Server-set cookies</title><body><script>
+        window.__xcookie = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var names = function () { return document.cookie.split('; ').filter(Boolean).map(function (c) { return c.split('=')[0]; }).filter(function (n) { return n.indexOf('ck_') === 0; }).sort().join(','); };
+          var val = function (n) { var m = document.cookie.split('; ').filter(function (c) { return c.split('=')[0] === n; })[0]; return m ? m.slice(n.length + 1) : 'absent'; };
+          var changes = [];
+          if (self.cookieStore) cookieStore.addEventListener('change', function (e) { (e.changed || []).forEach(function (c) { changes.push('set:' + c.name); }); (e.deleted || []).forEach(function (c) { changes.push('del:' + c.name); }); });
+          // The browser starts delivering change events a moment after the first listener
+          // is added — a cookie set before that is not reported natively.
+          await sleep(500);
+          await fetch('/xsetcookie?n=ck_fetch');
+          out['fetch.visible'] = val('ck_fetch');
+          await fetch('/xsetcookie?n=ck_fetch_ho&httponly=1');
+          out['fetch.httpOnly.visible'] = val('ck_fetch_ho');
+          out['xhr.visible'] = await new Promise(function (res) { var x = new XMLHttpRequest(); x.open('GET', '/xsetcookie?n=ck_xhr'); x.onloadend = function () { res(val('ck_xhr')); }; x.send(); });
+          await fetch('/xsetcookie?n=ck_redirect&redirect=1');
+          out['redirect.visible'] = val('ck_redirect');
+          await fetch('/xsetcookie?n=ck_omit', { credentials: 'omit' });
+          out['omit.visible'] = val('ck_omit');
+          await fetch('/xsetcookie?n=ck_update&v=one');
+          await fetch('/xsetcookie?n=ck_update&v=two');
+          out['update.value'] = val('ck_update');
+          await fetch('/xsetcookie?n=ck_gone');
+          out['gone.before'] = val('ck_gone');
+          await fetch('/xsetcookie?n=ck_gone&maxage=0');
+          out['gone.after'] = val('ck_gone');
+          out['store.get'] = self.cookieStore ? ((await cookieStore.get('ck_fetch')) ? 'present' : 'absent') : 'n/a';
+          document.cookie = 'ck_script=1';
+          var echoed = await (await fetch('/cookie-echo')).text();
+          out['sent.back'] = ['ck_fetch', 'ck_xhr', 'ck_redirect', 'ck_update', 'ck_script'].every(function (n) { return echoed.indexOf(n + '=') >= 0; }) && echoed.indexOf('ck_omit=') < 0 && echoed.indexOf('ck_gone=') < 0 ? 'as expected' : 'unexpected';
+          await sleep(300);
+          out['names'] = names();
+          out['changes'] = changes.slice().sort().join(',');
+          window.__xcookie = out;
+        })().catch(function (e) { window.__xcookie = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xstore-child') {
+      // A frame that writes storage when asked and reports every storage event it hears.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>store child</title><script>' +
+        'var ev = [];' +
+        'addEventListener("storage", function (e) { ev.push({ k: e.key, o: e.oldValue, n: e.newValue, area: e.storageArea === localStorage ? "local" : e.storageArea === sessionStorage ? "session" : "other", trusted: e.isTrusted, sameSiteUrl: !!e.url && new URL(e.url).origin === location.origin }); });' +
+        'addEventListener("message", function (m) {' +
+        '  var d = m.data;' +
+        '  if (d === "write") { localStorage.setItem("k_child", "v1"); sessionStorage.setItem("s_child", "v1"); }' +
+        '  else if (d === "rewrite") { localStorage.setItem("k_child", "v1"); }' +
+        '  else if (d === "update") { localStorage.setItem("k_child", "v2"); }' +
+        '  else if (d === "remove") { localStorage.removeItem("k_child"); }' +
+        '  else if (d === "report") parent.postMessage("store:" + JSON.stringify(ev), "*");' +
+        '});' +
+        '<\/script>');
+      return;
+    }
+    if (url.pathname === '/xstore') {
+      // Storage events across sites. Every proxied site shares one physical origin,
+      // so the browser's own storage event reaches every frame of every site — with
+      // the physical (prefixed) key and the other site's value. Values here are the
+      // fixture's own keys and strings, nothing else.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Storage events</title><body><script>
+        window.__xstore = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+          var mine = [], viaHandler = [], got = {}, same = null, cross = null;
+          var describe = function (e) {
+            return [String(e.key), String(e.oldValue), String(e.newValue), e.storageArea === localStorage ? 'local' : e.storageArea === sessionStorage ? 'session' : 'other', String(e.isTrusted)].join('|');
+          };
+          window.addEventListener('storage', function (e) { mine.push(describe(e)); });
+          window.onstorage = function (e) { viaHandler.push(e.key); };
+          window.addEventListener('message', function (e) {
+            if (typeof e.data === 'string' && e.data.indexOf('store:') === 0) {
+              got[same && e.source === same.contentWindow ? 'same' : cross && e.source === cross.contentWindow ? 'cross' : 'other'] = e.data.slice(6);
+            }
+          });
+          var mk = function (src) { var f = document.createElement('iframe'); f.src = src; document.body.appendChild(f); return f; };
+          same = mk('/xstore-child');
+          cross = mk('http://' + other + ':' + location.port + '/xstore-child');
+          await sleep(1800);
+          // The two areas deliver in no fixed order: compare a sorted snapshot.
+          var snap = function () { var r = mine.slice().sort().join(','); mine.length = 0; return r; };
+          mine.length = 0; viaHandler.length = 0;
+          cross.contentWindow.postMessage('write', '*');
+          await sleep(800);
+          out['cross.write'] = snap();
+          same.contentWindow.postMessage('write', '*');
+          await sleep(800);
+          out['same.write'] = snap();
+          same.contentWindow.postMessage('rewrite', '*');
+          await sleep(800);
+          out['same.rewrite'] = snap();
+          same.contentWindow.postMessage('update', '*');
+          await sleep(800);
+          out['same.update'] = snap();
+          same.contentWindow.postMessage('remove', '*');
+          await sleep(800);
+          out['same.remove'] = snap();
+          out['onstorage.keys'] = viaHandler.slice().sort().join(',');
+          localStorage.setItem('k_parent', 'p1');
+          sessionStorage.setItem('s_parent', 'p1');
+          await sleep(800);
+          same.contentWindow.postMessage('report', '*');
+          cross.contentWindow.postMessage('report', '*');
+          await sleep(900);
+          var norm = function (json) { try { return JSON.parse(json).map(function (e) { return [String(e.k), String(e.o), String(e.n), e.area, String(e.trusted), String(e.sameSiteUrl)].join('|'); }).sort().join(','); } catch (x) { return 'none'; } };
+          out['child.same.heard'] = norm(got.same);
+          out['child.cross.heard'] = norm(got.cross);
+          // An event the page builds and dispatches itself is its own business.
+          var synth = '';
+          window.addEventListener('storage', function once(e) { if (!e.isTrusted) { synth = e.key + '|' + e.newValue + '|' + String(e.storageArea); window.removeEventListener('storage', once); } });
+          window.dispatchEvent(new StorageEvent('storage', { key: 'synthetic', newValue: 'x' }));
+          out['synthetic'] = synth;
+          window.__xstore = out;
+        })().catch(function (e) { window.__xstore = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/frame-loads') {
       // Frame load events and joint history. The proxy parks a frame on a blank
       // page while its route is prepared; the page must still see ONE load per
@@ -4618,6 +4764,74 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.deepEqual(unexpected, [], unexpected.join('\n'));
     const healed = [...expected].filter(k => proxied[k] === direct[k]);
     assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
+  });
+
+  // Cookies the server sets in answer to a page's fetch / XHR. The page's copy of the
+  // jar was a snapshot taken at load: document.cookie and cookieStore never saw them.
+  await t.test('cookies set by fetch and XHR responses are visible to the page and match native', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xcookie`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xcookie, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xcookie);
+    } finally {
+      await directBrowser.close();
+    }
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/xcookie`);
+    await page.waitForFunction(() => window.__xcookie, { timeout: 90000, polling: 100 });
+    const proxied = await page.evaluate(() => window.__xcookie);
+    fs.writeFileSync(path.join(artifacts, 'server-set-cookies.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: what the comparison stands on.
+    assert.equal(direct['fetch.visible'], 'tok');
+    assert.equal(direct['fetch.httpOnly.visible'], 'absent', 'a script never reads an HttpOnly cookie');
+    assert.equal(direct['xhr.visible'], 'tok');
+    assert.equal(direct['redirect.visible'], 'tok', 'a cookie set on a redirect hop is stored');
+    assert.equal(direct['omit.visible'], 'absent', 'credentials: omit stores nothing');
+    assert.equal(direct['update.value'], 'two');
+    assert.equal(direct['gone.before'], 'tok');
+    assert.equal(direct['gone.after'], 'absent', 'Max-Age=0 deletes');
+    assert.equal(direct['store.get'], 'present');
+    assert.equal(direct['sent.back'], 'as expected');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // Storage events across sites. The browser fires its own storage event in every
+  // frame of the shared physical origin — one site heard another's writes (key
+  // with our prefix, the other site's new value) and our own bookkeeping keys.
+  await t.test('storage events stay inside the writing site and match native', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xstore`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xstore, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xstore);
+    } finally {
+      await directBrowser.close();
+    }
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/xstore`);
+    await page.waitForFunction(() => window.__xstore, { timeout: 90000, polling: 100 });
+    const proxied = await page.evaluate(() => window.__xstore);
+    fs.writeFileSync(path.join(artifacts, 'storage-events.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: what the comparison stands on.
+    assert.equal(direct['cross.write'], '', 'another site writing is not heard natively');
+    assert.equal(direct['same.write'], 'k_child|null|v1|local|true,s_child|null|v1|session|true');
+    assert.equal(direct['same.rewrite'], '', 'an unchanged value fires nothing');
+    assert.equal(direct['same.update'], 'k_child|v1|v2|local|true');
+    assert.equal(direct['same.remove'], 'k_child|v2|null|local|true');
+    assert.equal(direct['onstorage.keys'], 'k_child,k_child,k_child,s_child', 'the onstorage handler hears the same-site events');
+    assert.equal(direct['child.cross.heard'], '', 'the other site hears nothing of this one');
+    assert.match(direct['child.same.heard'], /k_parent\|null\|p1\|local\|true\|true/);
+    assert.equal(direct['synthetic'], 'synthetic|x|null');
+    assert.deepEqual(proxied, direct);
   });
 
   // Frame load events and joint history against native (the /frame-loads fixture).

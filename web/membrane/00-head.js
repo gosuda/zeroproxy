@@ -405,7 +405,6 @@
   const audioHookedWindows = new WeakSet();
   const serviceWorkerFacades = new WeakMap();
   const storageMaps = new Map();
-  const storageWindows = new Set();
   // The page-rewriter helpers live inside `installPhase2Membrane`'s scope, but
   // `installNetworkContainment` — a sibling top-level function — needs them to
   // build the child-realm script executors. Referencing them directly from
