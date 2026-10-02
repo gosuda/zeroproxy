@@ -308,7 +308,11 @@ async function handleSyncFetchJob(job) {
       headers: Array.isArray(job.headers) ? job.headers : [],
       tab,
       entryId: job.entry || tab.activeEntryId,
+      // A synchronous XHR reads `document.cookie` the moment it returns: the cookies the
+      // response set ride back in a header (the page applies them before it returns).
+      collectCookies: !job.kind,
     });
+    const cookieChanges = resp && resp.__zpFetchMeta && resp.__zpFetchMeta.cookies;
     // ★릴레이는 `transportFetch` 를 직접 부르므로 `/zp/api/fetch` 핸들러가
     // 하던 후처리를 못 탄다. 동기 XHR 은 원본 바이트를 원해서 문제가 없었지만,
     // SW-less 프레임의 `<link>`/`<script>` 가 이 경로로 오면서 필요해졌다 —
@@ -330,6 +334,7 @@ async function handleSyncFetchJob(job) {
     out.status = resp.status;
     out.statusText = resp.statusText || '';
     try { resp.headers.forEach((v, k) => out.headers.push([k, v])); } catch {}
+    if (Array.isArray(cookieChanges) && cookieChanges.length) out.headers.push(['X-ZP-Cookie-Delta', utf8Base64(JSON.stringify(cookieChanges))]);
     // ★바이트를 그대로 넘긴다. 예전에는 여기서 base64 문자열을 만들었는데,
     // 서브리소스를 전부 이 경로로 보내자 그 비용이 SW 스레드에 몰려 다른 잡이
     // 밀렸다(실측: deadSheets 2~4). 본문 크기도 33% 줄어든다.
@@ -1554,7 +1559,7 @@ async function transportFetch(targetUrl, opt) {
     // Cookies a page's own fetch/XHR got set, hop by hop (see the Set-Cookie
     // block below): its `document.cookie` must show them when the promise
     // resolves, and the page's copy of the jar is only a snapshot.
-    cookieDelta: opt.runtimeFetch ? [] : null,
+    cookieDelta: opt.runtimeFetch || opt.collectCookies ? [] : null,
   });
   return transportFetchHop(target, state);
 }
@@ -1940,11 +1945,9 @@ async function transportFetchHop(targetUrl, opt) {
     const setCookies = typeof getSetCookie === 'function' ? resp.headers.getSetCookie() : (resp && resp.headers && resp.headers.get('set-cookie') ? [resp.headers.get('set-cookie')] : []);
     if (credentialsAllowed && opt.tab.cookieJar) {
       // A script cannot read an HttpOnly cookie, so the page never hears of one.
-      const noteForPage = line => {
-        if (opt.cookieDelta && !/;\s*httponly\s*(?:;|$)/i.test(line)) opt.cookieDelta.push({ line: String(line), url: u });
-      };
+      const noteForPage = change => { if (opt.cookieDelta && change && !change.httpOnly) opt.cookieDelta.push(change); };
       // Cookies belong to this hop's response URL, never to the final document.
-      for (const line of setCookies) { opt.tab.cookieJar.setCookieLine(u, line); noteForPage(line); }
+      for (const line of setCookies) noteForPage(opt.tab.cookieJar.setCookieLine(u, line));
       // Upstream Set-Cookie is also stripped by the Go server's
       // ConstructorPolicy (otherwise target-site auth cookies would be
       // readable by any proxy-origin page) and re-emitted into the
@@ -1956,7 +1959,7 @@ async function transportFetchHop(targetUrl, opt) {
       const sidechannel = resp.headers.get('X-ZP-Set-Cookie');
       if (sidechannel) {
         for (const line of sidechannel.split('\t')) {
-          if (line) { opt.tab.cookieJar.setCookieLine(u, line); noteForPage(line); }
+          if (line) noteForPage(opt.tab.cookieJar.setCookieLine(u, line));
         }
       }
     }
@@ -2720,7 +2723,7 @@ async function handleMessage(event) {
       // jar can scope the cookie by Domain/Path against the right host
       // (default Domain = the target host, not the SW origin).
       if (tab.cookieJar && msg.targetUrl && msg.cookie) {
-        tab.cookieJar.setCookieLine(String(msg.targetUrl), String(msg.cookie));
+        tab.cookieJar.setCookieLine(String(msg.targetUrl), String(msg.cookie), { sourceClientId: event.source && event.source.id });
       }
       ok();
       return;
@@ -3094,12 +3097,56 @@ function getOrCreateJarForOrigin(originKey, initialRecords) {
     if (Array.isArray(initialRecords) && initialRecords.length) jar.merge(initialRecords);
     return jar;
   }
-  jar = createCookieJar(initialRecords || []);
+  jar = createCookieJar(initialRecords || [], (change, meta) => queueCookiePush(jar, change, meta && meta.sourceClientId));
   sharedJars.set(originKey, jar);
   return jar;
 }
 
-function createCookieJar(initialRecords) {
+// ── cookie changes → every document that can see them ────────────────────────
+// A page keeps its own copy of the jar (what `document.cookie` and `cookieStore`
+// read); the jar here is the truth and every response, from any document, lands
+// in it. Each accepted change goes out, as a normalized record, to every window
+// client whose document is on a host that can see the cookie — in this tab and in
+// every other tab sharing the jar. Hosts that cannot see it never hear of it, so a
+// third-party frame is not handed another site's cookie value. HttpOnly changes
+// never leave the worker. A page that made the request also gets the change in the
+// response metadata (so it is there when the promise resolves); changes carry an id
+// and a page applies each once.
+const cookieEpoch = ZP.randomId('ck');
+let cookieChangeSeq = 0;
+const cookiePushQueue = new Map(); // jar → [{ change, sourceClientId }]
+function cookieChangeVisibleToHost(change, host) {
+  return change.hostOnly ? host === change.domain : (host === change.domain || host.endsWith('.' + change.domain));
+}
+function queueCookiePush(jar, change, sourceClientId) {
+  if (!change || change.httpOnly) return;
+  let queue = cookiePushQueue.get(jar);
+  if (!queue) {
+    queue = [];
+    cookiePushQueue.set(jar, queue);
+    // One microtask later: every Set-Cookie line of a response lands first.
+    Promise.resolve().then(() => flushCookiePush(jar)).catch(() => {});
+  }
+  queue.push({ change, sourceClientId: sourceClientId || '' });
+}
+async function flushCookiePush(jar) {
+  const batch = cookiePushQueue.get(jar) || [];
+  cookiePushQueue.delete(jar);
+  if (!batch.length) return;
+  let windows;
+  try { windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true }); } catch { return; }
+  for (const client of windows) {
+    const ctx = clientContext.get(client.id);
+    const tab = ctx && tabs.get(ctx.tabId);
+    if (!tab || tab.cookieJar !== jar) continue;
+    let host;
+    try { host = new URL(ctx.targetUrl).hostname.toLowerCase(); } catch { continue; }
+    const changes = batch.filter(b => b.sourceClientId !== client.id && cookieChangeVisibleToHost(b.change, host)).map(b => b.change);
+    if (changes.length) { try { client.postMessage({ type: ZP.MSG.COOKIE_CHANGE, changes }); } catch {} }
+  }
+}
+
+function createCookieJar(initialRecords, notify) {
   const records = Array.isArray(initialRecords) ? initialRecords.slice() : [];
   let dirty = false;
   function markDirty() { dirty = true; }
@@ -3171,19 +3218,33 @@ function createCookieJar(initialRecords) {
     }
     return rec;
   }
-  function setCookieLine(url, line) {
+  // What a `Set-Cookie` did, as a record a page can apply without parsing anything
+  // itself: the jar's decision (Domain accepted or not, session cookies, deletion) is
+  // the only one. `expires` is null for a session cookie.
+  function changeFor(rec, deleted) {
+    return {
+      id: cookieEpoch + ':' + (++cookieChangeSeq),
+      name: rec.name, value: rec.value, domain: rec.domain, hostOnly: !!rec.hostOnly, path: rec.path,
+      secure: !!rec.secure, httpOnly: !!rec.httpOnly, sameSite: rec.sameSite || '',
+      expires: rec.session ? null : (rec.maxAge != null ? rec.creation + rec.maxAge * 1000 : rec.expires),
+      deleted: !!deleted,
+    };
+  }
+  // `meta.sourceClientId`: the document that wrote it itself (it already has it).
+  function setCookieLine(url, line, meta) {
     const rec = parse(line, url);
-    if (!rec) return;
+    if (!rec) return null;
+    const report = deleted => { const change = changeFor(rec, deleted); if (notify) { try { notify(change, meta); } catch {} } return change; };
     if (rec.maxAge != null && rec.maxAge <= 0) {
       for (let i = 0; i < records.length; i++) {
         const r = records[i];
         if (r.name === rec.name && r.domain === rec.domain && r.path === rec.path) {
           records.splice(i, 1);
           markDirty();
-          return;
+          break;
         }
       }
-      return;
+      return report(true);
     }
     // Session cookies (neither Expires nor Max-Age) survive across SW
     // restarts via the IDB layer — without this synthetic TTL their
@@ -3201,11 +3262,12 @@ function createCookieJar(initialRecords) {
         rec.creation = r.creation;
         records[i] = rec;
         markDirty();
-        return;
+        return report(expired(rec, Date.now()));
       }
     }
     records.push(rec);
     markDirty();
+    return report(expired(rec, Date.now()));
   }
   function cookiesForURL(url, includeHttpOnly) {
     let u; try { u = new URL(url); } catch { return []; }

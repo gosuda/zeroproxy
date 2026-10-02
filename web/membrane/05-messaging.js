@@ -54,6 +54,7 @@
   // decoded 와 같아져 모든 응답이 비압축처럼 보인다(타이밍 축 참조).
   const encodedSizes = new Map();
   const onBridgeMessage = (d) => {
+    if (d && d.type === ZP.MSG.COOKIE_CHANGE) { applyCookieChanges(d.changes); return; }
     if (!d || d.type !== ZP.MSG.ENCODED_SIZE || !d.url) return;
     encodedSizes.set(String(d.url), Number(d.size) || 0);
   };

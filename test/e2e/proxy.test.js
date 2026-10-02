@@ -11,6 +11,7 @@ const puppeteer = require('puppeteer');
 const { brotliCompressSync, gzipSync } = require('node:zlib');
 
 const { handleRequestContract, runRequestContract } = require('./request-contract');
+const { openThroughLauncher } = require('./launcher');
 const JQUERY_SOURCE = fs.readFileSync(require.resolve('jquery'), 'utf8');
 
 function run(cmd, args, options = {}) {
@@ -1613,6 +1614,87 @@ function createTargetServer(requests, pendingResponses) {
           out['named.same.document'] = op(function () { return window.frames['xechosame'].document; });
           window.__xsite = out;
         })().catch(function (e) { window.__xsite = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xtab') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>tab</title><p>tab</p>');
+      return;
+    }
+    if (url.pathname === '/xcookie2-child') {
+      // A frame that writes a cookie when asked and reports the ck2_ cookies it can read.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>cookie child</title><script>' +
+        'function names() { return document.cookie.split("; ").filter(Boolean).map(function (c) { return c.split("=")[0]; }).filter(function (n) { return n.indexOf("ck2_") === 0; }).sort().join(","); }' +
+        'addEventListener("message", function (m) {' +
+        '  if (m.data === "set") { document.cookie = "ck2_child=1; Path=/"; parent.postMessage("cookie2:" + JSON.stringify({ set: names() }), "*"); }' +
+        '  else if (m.data === "read") parent.postMessage("cookie2:" + JSON.stringify({ read: names() }), "*");' +
+        '});' +
+        '<\/script>');
+      return;
+    }
+    if (url.pathname === '/xcookie2') {
+      // Cookies the page's copy of the jar learns from OTHER places: a frame's own
+      // navigation, an image, a script, a synchronous XHR, a sibling frame's write.
+      // The jar is shared; each document keeps a copy. Names are the fixture's own.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Cookies from elsewhere</title><body><script>
+        window.__xcookie2 = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+          var names = function () { return document.cookie.split('; ').filter(Boolean).map(function (c) { return c.split('=')[0]; }).filter(function (n) { return n.indexOf('ck2_') === 0; }).sort().join(','); };
+          var changes = [];
+          cookieStore.addEventListener('change', function (e) {
+            (e.changed || []).forEach(function (c) { if (c.name.indexOf('ck2_') === 0) changes.push('set:' + c.name); });
+            (e.deleted || []).forEach(function (c) { if (c.name.indexOf('ck2_') === 0) changes.push('del:' + c.name); });
+          });
+          var got = {}, same = null, cross = null;
+          window.addEventListener('message', function (e) {
+            if (typeof e.data === 'string' && e.data.indexOf('cookie2:') === 0) {
+              var who = same && e.source === same.contentWindow ? 'same' : cross && e.source === cross.contentWindow ? 'cross' : 'other';
+              got[who] = Object.assign(got[who] || {}, JSON.parse(e.data.slice(8)));
+            }
+          });
+          var mk = function (src) { var f = document.createElement('iframe'); f.src = src; document.body.appendChild(f); return f; };
+          same = mk('/xcookie2-child');
+          cross = mk('http://' + other + ':' + location.port + '/xcookie2-child');
+          await sleep(2200);
+          // The browser starts delivering change events a moment after the first listener
+          // is added — a cookie set before that is not reported natively.
+          await sleep(500);
+          // 1. a frame's own navigation (the response sets a cookie)
+          await new Promise(function (res) { var f = mk('/xsetcookie?n=ck2_frame'); f.addEventListener('load', function () { res(); }); });
+          await sleep(700);
+          out['frame.navigation'] = names();
+          // 2. an image whose response sets a cookie
+          await new Promise(function (res) { var i = new Image(); i.onload = i.onerror = function () { res(); }; i.src = '/xsetcookie?n=ck2_img'; });
+          await sleep(700);
+          out['image'] = names();
+          // 3. a script whose response sets a cookie
+          await new Promise(function (res) { var sc = document.createElement('script'); sc.onload = sc.onerror = function () { res(); }; sc.src = '/xsetcookie?n=ck2_script'; document.head.appendChild(sc); });
+          await sleep(700);
+          out['script'] = names();
+          // 4. a synchronous XHR: its caller reads document.cookie the moment it returns
+          var x = new XMLHttpRequest(); x.open('GET', '/xsetcookie?n=ck2_sync', false); x.send();
+          out['sync.xhr.immediately'] = names();
+          // 5. a same-site frame writes; this document and the other site's frame
+          same.contentWindow.postMessage('set', '*');
+          await sleep(900);
+          out['sibling.write.parent'] = names();
+          // 6. this document writes; the same-site frame reads it, the other site's frame does not
+          document.cookie = 'ck2_parent=1; Path=/';
+          await sleep(900);
+          same.contentWindow.postMessage('read', '*');
+          cross.contentWindow.postMessage('read', '*');
+          await sleep(900);
+          out['child.same.reads'] = got.same && got.same.read || 'none';
+          out['child.cross.reads'] = got.cross && got.cross.read !== undefined ? got.cross.read : 'none';
+          out['changes'] = changes.slice().sort().join(',');
+          window.__xcookie2 = out;
+        })().catch(function (e) { window.__xcookie2 = { __fatal: String(e && (e.stack || e)) }; });
       <\/script></body>`);
       return;
     }
@@ -4822,6 +4904,83 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.deepEqual(unexpected, [], unexpected.join('\n'));
     const healed = [...expected].filter(k => proxied[k] === direct[k]);
     assert.deepEqual(healed, [], `now match native — update ERRATA and this list: ${healed.join(', ')}`);
+  });
+
+  // The page's copy of the cookie jar must learn what happens elsewhere: another
+  // document's response, an image or script, a synchronous XHR, a sibling frame.
+  await t.test('cookies reach every document that can see them, and no other (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xcookie2`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xcookie2, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xcookie2);
+    } finally {
+      await directBrowser.close();
+    }
+    await page.evaluate(u => { __zp_get(globalThis, 'location').href = u; }, `${targetBase}/xcookie2`);
+    await page.waitForFunction(() => window.__xcookie2, { timeout: 90000, polling: 100 });
+    const proxied = await page.evaluate(() => window.__xcookie2);
+    fs.writeFileSync(path.join(artifacts, 'cookies-from-elsewhere.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: what the comparison stands on.
+    assert.equal(direct['frame.navigation'], 'ck2_frame');
+    assert.equal(direct['image'], 'ck2_frame,ck2_img');
+    assert.equal(direct['script'], 'ck2_frame,ck2_img,ck2_script');
+    assert.equal(direct['sync.xhr.immediately'], 'ck2_frame,ck2_img,ck2_script,ck2_sync', 'a synchronous XHR returns with its cookies already readable');
+    assert.equal(direct['sibling.write.parent'], 'ck2_child,ck2_frame,ck2_img,ck2_script,ck2_sync');
+    assert.equal(direct['child.same.reads'], 'ck2_child,ck2_frame,ck2_img,ck2_parent,ck2_script,ck2_sync');
+    assert.equal(direct['child.cross.reads'], '', 'another site reads none of them');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The jar is shared between tabs of one site, natively and here — so a cookie written
+  // in one tab, or set by a response to another, must reach the other tab's copy.
+  await t.test('a cookie reaches the other tab of the same site (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const names = p => p.evaluate(() => document.cookie.split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => n.indexOf('ck3_') === 0).sort().join(','));
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const scenario = async (a, b) => {
+      const out = {};
+      await a.evaluate(() => { document.cookie = 'ck3_written=1; Path=/'; });
+      await wait(900);
+      out['written in A: A'] = await names(a);
+      out['written in A: B'] = await names(b);
+      await b.evaluate(() => fetch('/xsetcookie?n=ck3_response').then(r => r.text()));
+      await wait(900);
+      out['set by a response in B: A'] = await names(a);
+      out['set by a response in B: B'] = await names(b);
+      return out;
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const a = await directBrowser.newPage();
+      const b = await directBrowser.newPage();
+      await a.goto(`${targetBase}/xtab`, { waitUntil: 'domcontentloaded' });
+      await b.goto(`${targetBase}/xtab`, { waitUntil: 'domcontentloaded' });
+      direct = await scenario(a, b);
+    } finally {
+      await directBrowser.close();
+    }
+    const a = await browser.newPage();
+    const b = await browser.newPage();
+    let proxied;
+    try {
+      assert.ok(await openThroughLauncher(a, proxyOrigin, `${targetBase}/xtab`), 'tab A reached the target');
+      assert.ok(await openThroughLauncher(b, proxyOrigin, `${targetBase}/xtab`), 'tab B reached the target');
+      proxied = await scenario(a, b);
+    } finally {
+      await a.close().catch(() => {});
+      await b.close().catch(() => {});
+    }
+    fs.writeFileSync(path.join(artifacts, 'cookies-across-tabs.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct['written in A: B'], 'ck3_written', 'natively the other tab reads it');
+    assert.equal(direct['set by a response in B: A'], 'ck3_response,ck3_written');
+    assert.deepEqual(proxied, direct);
   });
 
   // window.name belongs to a browsing context and the lock manager to an origin. Every

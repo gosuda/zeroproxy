@@ -5,10 +5,9 @@
     }
     documentCookie = documentCookieString();
   }
-  // `from`: the URL a `Set-Cookie` response came from (a fetch the page made);
-  // absent for `document.cookie = …`, which is the document's own.
-  function setDocumentCookie(line, from) {
-    const scope = from || virtualURL;
+  // The document's own write: `document.cookie = …`, `cookieStore.set`.
+  function setDocumentCookie(line) {
+    const scope = virtualURL;
     const parts = String(line).split(';').map(p => p.trim()).filter(Boolean);
     if (!parts.length) return;
     const eq = parts[0].indexOf('=');
@@ -25,12 +24,11 @@
       else if (k === 'max-age') rec.expires = Date.now() + Math.max(0, Number(v) || 0) * 1000;
       else if (k === 'expires') { const ts = Date.parse(v); if (!Number.isNaN(ts)) rec.expires = ts; }
     }
-    // A response may come from another host (a cross-origin API): this document
-    // never reads those cookies, so it does not keep them.
-    if (from) {
-      const host = virtualURL.hostname.toLowerCase();
-      if (!(rec.hostOnly ? rec.domain === host : host === rec.domain || host.endsWith('.' + rec.domain))) return;
-    }
+    storeCookieRecord(rec);
+  }
+  // One cookie in the page's copy, and what it means for `document.cookie` and
+  // `cookieStore`'s `change`. `expires` in the past is a deletion.
+  function storeCookieRecord(rec) {
     const idx = documentCookieRecords.findIndex(r => r.name === rec.name && r.domain === rec.domain && r.path === rec.path);
     const deleted = rec.expires <= Date.now();
     if (deleted) { if (idx >= 0) documentCookieRecords.splice(idx, 1); }
@@ -54,14 +52,34 @@
     return visibleCookieRecords().sort((a, b) => b.path.length - a.path.length).map(r => r.name + '=' + r.value).join('; ');
   }
   function defaultCookiePath(scope = virtualURL) { const p = scope.pathname || '/'; const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); }
-  // Cookies a response to the page's own fetch / XHR set. The service worker already
-  // holds them in the jar (the next request carries them); this is the page's copy,
-  // which `document.cookie` and `cookieStore` read — natively they are there the moment
-  // the promise resolves. HttpOnly ones are never sent here.
-  function applyResponseCookies(list) {
-    if (!Array.isArray(list)) return;
-    for (const item of list) {
-      try { setDocumentCookie(String(item.line), new Native.URL(String(item.url))); } catch {}
+  // Cookies the service worker's jar changed, as records (see `changeFor` there): from
+  // the response of the page's own fetch / XHR (applied before the promise resolves),
+  // and pushed to every document that can see them — a frame's navigation, an image or a
+  // script, a sibling frame, another tab. The jar is the truth; this document keeps a
+  // copy that `document.cookie` and `cookieStore` read. HttpOnly changes never arrive.
+  // The same change can come twice (response and push): each id is applied once.
+  const appliedCookieChanges = new Set();
+  function applyCookieChanges(changes) {
+    if (!Array.isArray(changes)) return;
+    const host = virtualURL.hostname.toLowerCase();
+    for (const c of changes) {
+      try {
+        if (!c || typeof c.name !== 'string' || typeof c.domain !== 'string') continue;
+        if (c.id) {
+          if (appliedCookieChanges.has(c.id)) continue;
+          appliedCookieChanges.add(c.id);
+          if (appliedCookieChanges.size > 512) appliedCookieChanges.delete(appliedCookieChanges.values().next().value);
+        }
+        // Only what this document could ever read: its own host, or a parent domain.
+        if (!(c.hostOnly ? c.domain === host : host === c.domain || host.endsWith('.' + c.domain))) continue;
+        const rec = {
+          name: c.name, value: String(c.value), domain: c.domain, hostOnly: !!c.hostOnly,
+          path: typeof c.path === 'string' && c.path[0] === '/' ? c.path : '/', secure: !!c.secure,
+          expires: c.deleted ? 0 : (c.expires == null ? Infinity : Number(c.expires)),
+        };
+        if (c.sameSite) rec.sameSite = String(c.sameSite);
+        storeCookieRecord(rec);
+      } catch {}
     }
   }
 

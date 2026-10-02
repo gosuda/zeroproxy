@@ -115,7 +115,7 @@
     return target.dispatchEvent(ev);
   }
   function installHTTPAPIs() {
-    if (Native.Response) decodeFetchResponse = ZP.createFetchResponseAdapter(Native.Response, Native.Headers, defineAccessor, define, record => applyResponseCookies(record.cookies));
+    if (Native.Response) decodeFetchResponse = ZP.createFetchResponseAdapter(Native.Response, Native.Headers, defineAccessor, define, record => applyCookieChanges(record.cookies));
     if (Native.fetch && Native.Request && Native.Headers) define(root, 'fetch', function fetch(input, init) { return fetchThroughRuntime(input, init); });
     if (Native.XMLHttpRequest && Native.fetch && Native.Request && Native.Headers) {
       const UNSENT = 0, OPENED = 1, HEADERS_RECEIVED = 2, LOADING = 3, DONE = 4;
@@ -198,6 +198,17 @@
             // 동기 XHR 은 responseType 을 못 바꾼다(스펙). 텍스트로 받고 아래에서 변환.
           }
           nx.send(body != null && xhr._method !== 'GET' && xhr._method !== 'HEAD' ? body : null);
+          // Cookies the response set: a synchronous caller reads `document.cookie` as soon as
+          // this returns, so they are applied now (the worker also pushes them, once).
+          try {
+            const delta = nx.getResponseHeader('X-ZP-Cookie-Delta');
+            if (delta) {
+              const bin = atob(delta);
+              const bytes = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+              applyCookieChanges(JSON.parse(new TextDecoder().decode(bytes)));
+            }
+          } catch {}
 
           xhr.status = nx.status;
           xhr.statusText = nx.statusText || '';
@@ -207,6 +218,7 @@
               const i = line.indexOf(':');
               if (i > 0) { try { h.append(line.slice(0, i).trim(), line.slice(i + 1).trim()); } catch {} }
             });
+            try { h.delete('X-ZP-Cookie-Delta'); } catch {}
             xhr._responseHeaders = h;
           } catch {}
           xhrReady(xhr, HEADERS_RECEIVED);

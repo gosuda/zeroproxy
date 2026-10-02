@@ -340,9 +340,13 @@ func decodeB64(s string) []byte {
 // safeSyncHeader — 응답에 그대로 실어도 되는 헤더만 통과시킨다.
 // Set-Cookie 는 절대 통과시키지 않는다: 쿠키는 프록시 origin 이 아니라
 // 타깃 origin 의 것이고, 기존 경로대로 커널의 jar 가 관리한다.
+//
+// X-ZP-Cookie-Delta 는 그 예외가 아니다 — SW 가 jar 에 넣은 **HttpOnly 가 아닌**
+// 쿠키 변경을 페이지의 사본에 알리는 사이드채널이다(동기 XHR 은 돌아오자마자
+// `document.cookie` 를 읽는다). 값은 SW 가 만든 JSON 이고 프렐류드가 읽고 지운다.
 func safeSyncHeader(name string) bool {
 	switch strings.ToLower(name) {
-	case "content-type", "content-language", "expires", "last-modified", "etag":
+	case "content-type", "content-language", "expires", "last-modified", "etag", "x-zp-cookie-delta":
 		return true
 	}
 	return false

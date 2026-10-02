@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-02 | membrane / 수정 | 다른 문서·img·script·동기 XHR·형제 프레임·다른 탭이 건 쿠키가 document.cookie 에 안 보였다. SW jar 가 변경 레코드를 볼 수 있는 창에만 밀어 준다(비동기). | rewriter.md#쿠키-변경-푸시 |
 | 2026-10-02 | membrane / 보안 | 같은 사이트 자식의 window.name 이 부모 것이었고 navigator.locks.query() 가 모든 사이트의 잠금을 돌려줬다. 프레임은 진짜 name, query 는 자기 접두만. | rewriter.md#window-name-locks-오리진-공유 |
 | 2026-10-02 | build / 환경 | 옛 커밋 빌드용 git worktree 의 node_modules junction 을 worktree remove --force 하면 저장소의 node_modules 가 비워진다(복구: npm ci). 링크 해제를 확인할 것. | build-deploy.md#worktree-junction-node-modules |
 | 2026-10-02 | membrane / 미해결 | sandbox 에 allow-same-origin 이 없는 iframe 은 삽입 즉시 지워진다(옛 동작, fail-closed). 건너뛰게 하면 자식이 403+prelude 중단 — 설계 결정 필요, 미해결. | rewriter.md#sandbox-불투명-프레임-제거 |

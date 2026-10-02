@@ -27,14 +27,16 @@ runs turned out to certify divergences as "design" — see
 | `dyn probes match native Chrome (direct-vs-proxy)` (E, G) | 52 | 0 |
 | `surface probes match native Chrome except documented divergences` (F, H, J, L, Q) | 116 | 15, each listed with a reason |
 | `J: every URL form loads through the proxy exactly when it loads natively` | 12 | 0 |
+| `cookies reach every document that can see them, and no other (matches native)` (another document's response, an image, a script, a synchronous XHR, a sibling frame's write, the other site's frame, `cookieStore` change events) | 8 | 0 |
+| `a cookie reaches the other tab of the same site (matches native)` (a script's write and a response, both directions) | 4 | 0 |
 | `window.name stays with its own frame and lock queries stay inside the site` (an unnamed, a cross-site and a named frame; the parent's name before and after a child names itself; `navigator.locks.query()`) | 7 | 0 |
 | `cookies set by fetch and XHR responses are visible to the page and match native` (a plain response, HttpOnly, XHR, a redirect hop, `credentials: omit`, update, `Max-Age=0`, `cookieStore`, change events, what the next request carries) | 12 | 0 |
 | `storage events stay inside the writing site and match native` (cross-site and same-site writes, an unchanged value, update, remove, `onstorage`, the frames' own view, a synthetic event) | 9 | 0 |
 | `cross-site frame and popup access matches native` (frames and a popup in both directions, `postMessage`, named lookups, replies) | 150 | 2 — a same-site child's `top`/`parent` read through a local alias (residual, below) |
 
-Suite totals (2026-10-02): e2e 197/197 — including the WebTransport gateway
+Suite totals (2026-10-02): e2e 199/199 — including the WebTransport gateway
 (`test/e2e/wt-gateway.test.js`) and relay-only WebRTC (`test/e2e/rtc-relay.test.js`)
-round trips in a real browser — `npm run test:js` 126, `test:wasm:ci` 13,
+round trips in a real browser — `npm run test:js` 130, `test:wasm:ci` 13,
 `cargo test --workspace` 293, `go test ./...` green. Real sites (paired
 `test/browser/rendercheck.sh`, cold profile): GitHub height 100% / elements
 1811 of 1811 / err 0, Wikipedia 100% / err 0, NAVER 95% / err 1, Stack Overflow
@@ -248,8 +250,8 @@ claimed:
     page. A script that reads an anti-forgery token or a session marker the
     server just issued saw nothing until the next load. The service worker now
     returns, in the fetch metadata it already sends, the non-HttpOnly cookie
-    lines each hop set (every redirect hop, `credentials` honored); the page
-    applies them before the promise resolves — same domain/path rules, `cookieStore`
+    changes each hop made (every redirect hop, `credentials` honored; item 36 says
+    what a change is); the page applies them before the promise resolves — same domain/path rules, `cookieStore`
     change events included, cookies of another host not kept. Beacons go the same
     way. — e2e `cookies set by fetch and XHR responses are visible to the page and
     match native`.
@@ -263,6 +265,24 @@ claimed:
     sites' locks came back under their raw `zp:lk:<hash>:` names (other sites' names,
     and a prefix that names the proxy). Now only the site's own, unprefixed. — e2e
     `window.name stays with its own frame and lock queries stay inside the site`.
+36. **The page's copy of the cookie jar learned only its own writes and its own
+    fetches.** A cookie set by another document's response (a frame's navigation),
+    by an `<img>` or `<script>` response, by a synchronous XHR, by a sibling frame's
+    `document.cookie`, or in another tab of the same site never reached a document's
+    `document.cookie` / `cookieStore` until it reloaded (the requests carried the
+    cookie — the service worker's jar was right). The jar now reports every change it
+    accepts as a **record** — name, value, domain, host-only, path, secure, expiry,
+    deleted, an id — and the worker pushes it to every window client whose host can see
+    the cookie: in this tab and in every tab sharing the jar. A third-party frame is
+    never handed another site's cookie, and HttpOnly changes never leave the worker.
+    A page applies each id once (the same change arrives with the response and as a
+    push), by the same domain/path rules; the document that wrote a cookie is not sent
+    its own write. A synchronous XHR gets its changes in a response header (the Go
+    relay lets `X-ZP-Cookie-Delta` through), because its caller reads the cookie as soon
+    as it returns. Records replace the raw `Set-Cookie` lines of item 34: the jar's
+    decision (rejected `Domain`, session cookies, deletion) is the only one. — e2e
+    `cookies reach every document that can see them, and no other` and `a cookie reaches
+    the other tab of the same site`; prelude unit tests for applying records.
 
 ### Residuals (documented, not fixed)
 
@@ -293,7 +313,7 @@ claimed:
 | `localStorage.clear()` of a same-site window arrives as **one event per removed key** (native: a single event with `key: null`) | The facade clears only its own namespace, key by key — the real `clear()` would wipe every site's. Visible only to a second same-site window that listens. | — |
 | `e.url` of a storage event is the **receiving** document's virtual URL, not the writer's | The physical URL of the writer is a share route the receiver cannot read. The origin is right. | — |
 | A storage event carries own `key`/`storageArea`/`url` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` match native. | — |
-| A cookie set by **another document's** response — a frame's navigation, another tab — or by an **`<img>` / `<script>` / synchronous XHR** response is not in a document's `document.cookie` until it reloads; same-site frames keep **separate copies** of what scripts write at runtime | The page's copy of the jar is a load-time snapshot plus its own writes and its own fetch / XHR responses (item 34); the service worker holds the real jar and sends it with every request, so requests are right. Sharing the copy needs the worker to push changes to every client of the tab and a rule for racing writers. Measured 2026-10-02: a parent does not see a same-site child's `document.cookie` write, nor the child the parent's; `localStorage` is shared. | — |
+| A cookie another document wrote or a response set reaches this one **after a service-worker round trip** (milliseconds), not within the same task | A write in one frame is readable from a sibling frame once the worker has pushed it; natively the shared jar answers at once. Code that writes a cookie and reads it back through another frame in the same task sees the old value. | — |
 | An iframe sandboxed **without `allow-same-origin`** (`sandbox="allow-scripts"`, `sandbox=""`) is **removed from the DOM** the moment it is inserted | Fail-closed, and old — the build before the 2026-10-02 work does the same. The parent can neither read nor patch an opaque-origin window; `instrumentIframe` takes that for a containment failure and removes the frame. Lifting the guard is not enough (measured 2026-10-02): the frame's own document drew a 403 from the proxy, and its prelude aborts at the first origin-restricted API (`localStorage` throws `SecurityError`), which would leave a half-installed document running page scripts. Supporting it needs an opaque-origin mode in the prelude (storage, cookies and `caches` throw, origin `null`) and a decision on the server's policy for `Origin: null` requests. Sandboxes that include `allow-same-origin` are virtualized and work. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. | — |
 
@@ -484,7 +504,7 @@ Module-scope `eval` reifying the module environment — **residual** (Q5).
 | blank / routed / prelude-less child windows are never raw | **fixed** 2026-10-01 (item 26) | surface `pendingRouteEval`, `staleBlankEval`, `routedPlainEval` |
 | SharedWorker from a child realm | **fixed** | surface `childSharedWorker` |
 | child **storage** between same-site frames, and a parent's own storage seen from a child | **parity** (measured 2026-10-01 and again 2026-10-02: keys, quota names, IndexedDB and cache names, locks, `BroadcastChannel`, events — storage events are item 33) | e2e `storage events stay inside the writing site and match native` |
-| child **cookies** between same-site frames written after the other frame loaded | **residual** — each document keeps its own copy (the 2026-10-01 "parity" read cookies set before the child loaded) | See Residuals. |
+| child **cookies** between same-site frames, written after the other frame loaded | **fixed** 2026-10-02 (item 36); delivery is asynchronous (Residuals) | e2e `cookies reach every document that can see them, and no other` |
 | iframe `load` events and joint session history for a frame sent through `src` | **fixed** 2026-10-01 — one `load` per navigation and one history entry per change, as native; a parsed `<iframe src onload>` fires once (it fired three times) | e2e `frame load events and history match native`. See [trap 프레임-load-두-번](.ai/trap-notebook/rewriter.md#프레임-load-두-번). |
 | a detached frame's window | **parity** for `eval` and `closed`; `document.URL` reports the virtual URL where native reports `about:blank` | Same virtual-URL split as srcdoc (see Residuals). |
 | frames and popups of **different sites** | **fixed** 2026-10-02 (items 29–32) — a cross-site window is a stand-in that follows the HTML cross-origin rules, in both directions; `postMessage` honors the target origin; `e.origin`/`e.source` are right on the receiving side | e2e `cross-site frame and popup access matches native`. Residuals below. See [trap 교차-사이트-프레임](.ai/trap-notebook/rewriter.md#교차-사이트-프레임). |

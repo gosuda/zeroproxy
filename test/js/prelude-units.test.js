@@ -835,3 +835,70 @@ test('window handles: a same-origin ancestor gets the ancestor stand-in, a cross
   const c = env.windowHandleFor(parentCross, 'ancestor');
   assert.throws(() => c.document, isSecurityError);
 });
+
+// ---------------------------------------------------------------------------
+// The page's copy of the cookie jar. The service worker's jar is the truth; what
+// it changes reaches each document as records (a response to the page's own fetch,
+// and a push to every document that can see the cookie). A record is applied once
+// per id, only if this document could read it, and a deletion removes.
+// ---------------------------------------------------------------------------
+
+const COOKIE_BLOCK = slice('  function initDocumentCookieRecords(cookieString) {', '  // ── virtual cookieStore');
+
+function cookieEnv(href = 'http://app.a.test:3000/dir/page') {
+  const events = [];
+  const records = [];
+  const env = load('let documentCookie = "";\n' + COOKIE_BLOCK,
+    ['applyCookieChanges', 'setDocumentCookie', 'documentCookieString'],
+    {
+      virtualURL: new URL(href),
+      documentCookieRecords: records,
+      fireCookieChange: (changed, deleted) => events.push({ changed: changed.map(c => c.name), deleted: deleted.map(c => c.name) }),
+      cookieItemFromRec: r => ({ name: r.name, value: r.value }),
+    });
+  return { env, events, records };
+}
+const change = (over = {}) => Object.assign({ id: 'e:1', name: 'tok', value: 'v1', domain: 'app.a.test', hostOnly: true, path: '/', secure: false, expires: null, deleted: false }, over);
+
+test('cookie changes: a record is applied once per id, whether it came with the response or by push', () => {
+  const { env, events } = cookieEnv();
+  env.applyCookieChanges([change()]);
+  env.applyCookieChanges([change()]);                      // the same change again (the push after the response)
+  assert.equal(env.documentCookieString(), 'tok=v1');
+  assert.equal(events.length, 1, 'one change event, not two');
+  env.applyCookieChanges([change({ id: 'e:2', value: 'v2' })]);
+  assert.equal(env.documentCookieString(), 'tok=v2', 'a new id updates');
+  assert.equal(events.length, 2);
+});
+
+test('cookie changes: only what this document could read is kept', () => {
+  const { env, records } = cookieEnv();
+  env.applyCookieChanges([
+    change({ id: 'x:1', name: 'other', domain: 'b.test' }),                                  // another site
+    change({ id: 'x:2', name: 'sibling', domain: 'www.a.test' }),                            // host-only for a sibling host
+    change({ id: 'x:3', name: 'wide', domain: 'a.test', hostOnly: false }),                  // Domain=a.test: this host reads it
+    change({ id: 'x:4', name: 'narrow', domain: 'deep.app.a.test', hostOnly: false }),       // a subdomain's
+  ]);
+  assert.deepEqual(records.map(r => r.name), ['wide']);
+  assert.equal(env.documentCookieString(), 'wide=v1');
+});
+
+test('cookie changes: a deletion removes, a session cookie never expires, a path scopes', () => {
+  const { env, events } = cookieEnv('http://app.a.test:3000/dir/page');
+  env.applyCookieChanges([change({ id: 'd:1', name: 'gone' }), change({ id: 'd:2', name: 'admin', path: '/admin' }), change({ id: 'd:3', name: 'dir', path: '/dir' })]);
+  assert.equal(env.documentCookieString(), 'dir=v1; gone=v1', 'the longer path first; /admin is not this page\'s');
+  env.applyCookieChanges([change({ id: 'd:4', name: 'gone', deleted: true, expires: 0 })]);
+  assert.equal(env.documentCookieString(), 'dir=v1');
+  assert.deepEqual(events.at(-1), { changed: [], deleted: ['gone'] }, 'cookieStore hears the deletion');
+  env.applyCookieChanges([change({ id: 'd:5', name: 'past', expires: Date.now() - 1000 })]);
+  assert.equal(env.documentCookieString(), 'dir=v1', 'an expiry in the past is not stored');
+});
+
+test('cookie changes: junk is ignored, the document\'s own write is unaffected', () => {
+  const { env } = cookieEnv();
+  env.applyCookieChanges(undefined);
+  env.applyCookieChanges([null, {}, { name: 5, domain: 'app.a.test' }, change({ id: undefined, name: 'noid' })]);
+  assert.equal(env.documentCookieString(), 'noid=v1', 'a record without an id is still applied');
+  env.setDocumentCookie('mine=1; Path=/');
+  assert.match(env.documentCookieString(), /mine=1/);
+});
