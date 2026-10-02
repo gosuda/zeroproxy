@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-02 | membrane / 미해결 | sandbox 에 allow-same-origin 이 없는 iframe 은 삽입 즉시 지워진다(옛 동작, fail-closed). 건너뛰게 하면 자식이 403+prelude 중단 — 설계 결정 필요, 미해결. | rewriter.md#sandbox-불투명-프레임-제거 |
 | 2026-10-02 | membrane / 수정 | 서버가 fetch/XHR 응답으로 건 쿠키가 document.cookie 에 안 보였다(페이지 사본은 로드 시점 스냅샷). SW 가 홉별 델타를 메타로 보내 응답 전에 적용. | rewriter.md#fetch-set-cookie-미러 |
 | 2026-10-02 | membrane / 보안 | 한 사이트의 localStorage 쓰기가 다른 사이트 프레임의 storage 이벤트로 새고 있었다(물리 키·값·내부 키). 창마다 캡처 첫 리스너로 번역·삼킨다. | rewriter.md#storage-이벤트-교차-사이트 |
 | 2026-10-02 | membrane / 보안 | 서로 다른 사이트의 프레임이 격리되지 않았다 — 가상 오리진별 창 핸들 정책(교차 사이트는 SecurityError 스탠드인). 이미 같은 오리진일 때 쥔 핸들은 잔여. | rewriter.md#교차-사이트-프레임 |

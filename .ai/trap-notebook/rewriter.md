@@ -1411,6 +1411,14 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **같이 바로잡은 것:** ERRATA 의 "same-site 프레임 사이 쿠키/스토리지 — parity" 는 자식이 뜨기 **전에** 쓴 쿠키만 읽은 측정이라 쿠키 쪽은 틀렸다(스토리지는 맞다) — 행을 둘로 나눴다.
 - **규칙:** "서버가 줬다" 와 "페이지가 읽는다" 는 다른 경로다. 쿠키를 만지는 변경은 응답 → `document.cookie` 방향도 네이티브와 비교한다(요청에 실리는지만 보면 이 구멍이 안 보인다).
 - **검증:** e2e `cookies set by fetch and XHR responses are visible to the page and match native`(일반·HttpOnly·XHR·리다이렉트 홉·`credentials: omit`·갱신·`Max-Age=0`·`cookieStore`·change 이벤트·다음 요청에 실리는 것). SW 가 쿠키를 보고하지 않게 하면 이 테스트만 빨갛다(2026-10-02, 변이 확인).
+## <a id="sandbox-불투명-프레임-제거"></a>`sandbox` 에 `allow-same-origin` 이 없는 iframe 은 삽입 즉시 DOM 에서 지워진다 — fail-closed 이고 옛 동작이다 (2026-10-02 측정, 미해결)
+
+- **측정:** 네이티브/프록시에서 같은 코드로 `iframe.setAttribute("sandbox","allow-scripts"); iframe.src = …; body.appendChild(iframe)`. 네이티브는 프레임이 남고 `contentWindow` 가 WindowProxy 다. 프록시는 `appendChild` 안에서 프레임이 지워진다(`isConnected` false, `iframe` 0개, `contentWindow` null) — src·srcdoc·교차 사이트 모두. `Element.prototype.remove` 를 훅해 스택을 뽑으면 `appendChild → 삽입 훅 → instrumentIframe → remove` 다. 이 변경 전 빌드(`5239a4d`)도 똑같다 — 회귀가 아니다.
+- **원인:** 불투명 오리진 창은 부모가 읽지도(`win.document` 이 SecurityError) 패치하지도 못한다. `instrumentIframe` 의 `catch` 는 어떤 예외든 "가둘 수 없다" 로 보고 프레임을 지운다. (`allow-same-origin` 이 **있는** 값은 가상화돼 속성이 제거되므로 이 길을 안 탄다.)
+- **해 보고 되돌린 것:** 닿을 수 없는 창은 가두기를 건너뛰게 하면 프레임이 남는다. 하지만 그 프레임의 자기 문서가 프록시에서 403 을 받았고, prelude 가 첫 오리진 제한 API(`localStorage` 읽기, `installStorageFacades`)에서 중단돼 **절반만 설치된 문서**에서 페이지 스크립트가 돈다 — 지우는 쪽이 오히려 안전하다. 그래서 되돌렸다.
+- **필요한 것(설계 결정):** prelude 의 불투명 오리진 모드(저장소·쿠키·`caches` 는 SecurityError, 오리진 `null`)와 `Origin: null` 요청에 대한 서버 정책. 둘 다 보안 경계라 임의로 열지 않았다.
+- **규칙:** 이 구멍을 "예외를 삼키면 된다" 로 고치지 말 것 — 가두지 못한 문서가 살아남는다. `allow-scripts` 가 **없는** 불투명 프레임(`sandbox=""`, `allow-forms`)도 지워진다(측정). 스크립트가 못 도니 남겨도 되겠지만 아직 구분하지 않는다.
+- **관련 잔여:** `iframe.sandbox`(DOMTokenList)는 가상화된 값에서 비어 있다(네이티브 2, 프록시 0; `getAttribute` 는 맞다) — ERRATA 잔여.
 ## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번(파싱된 프레임은 세 번), 히스토리가 두 칸이었다 (2026-10-01)
 
 - **측정:** 같은 코드를 네이티브/프록시에서. `src` 를 붙인 뒤 append: `load` 리스너+`onload` 가 네이티브 1회(`Lo`), 프록시 2회(`LoLo`); append 뒤 `src` 대입·교체도 +1회씩; 교체 시 히스토리 증가분 네이티브 1, 프록시 2. **파싱된 `<iframe src onload=…>` 는 인라인 onload 가 3번**(파서의 빈 페이지 + 플레이스홀더 + 라우트된 문서).
