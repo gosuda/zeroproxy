@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-02 | build / 환경 | 옛 커밋 빌드용 git worktree 의 node_modules junction 을 worktree remove --force 하면 저장소의 node_modules 가 비워진다(복구: npm ci). 링크 해제를 확인할 것. | build-deploy.md#worktree-junction-node-modules |
 | 2026-10-02 | membrane / 미해결 | sandbox 에 allow-same-origin 이 없는 iframe 은 삽입 즉시 지워진다(옛 동작, fail-closed). 건너뛰게 하면 자식이 403+prelude 중단 — 설계 결정 필요, 미해결. | rewriter.md#sandbox-불투명-프레임-제거 |
 | 2026-10-02 | membrane / 수정 | 서버가 fetch/XHR 응답으로 건 쿠키가 document.cookie 에 안 보였다(페이지 사본은 로드 시점 스냅샷). SW 가 홉별 델타를 메타로 보내 응답 전에 적용. | rewriter.md#fetch-set-cookie-미러 |
 | 2026-10-02 | membrane / 보안 | 한 사이트의 localStorage 쓰기가 다른 사이트 프레임의 storage 이벤트로 새고 있었다(물리 키·값·내부 키). 창마다 캡처 첫 리스너로 번역·삼킨다. | rewriter.md#storage-이벤트-교차-사이트 |

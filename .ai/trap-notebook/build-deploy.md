@@ -73,6 +73,11 @@
 - 변종 (2026-09-10): 툴체인이 다 있어도 **실행 중인 서버가 exe 를 잠그면** 같은 사고가 난다. clean 이 `dist/web/*` 를 먼저 지우고 `dist/zeroproxy-server.exe` unlink 에서 `EPERM` 으로 죽어, dist 가 반만 남는다. 빌드 전에 `Get-Process zeroproxy-server | Stop-Process`.
 - 별도 함정: `npm run build 2>&1 | tail` 은 **tail 의 종료 코드**를 돌려주므로 실패한 빌드가 `exit 0` 으로 보인다. `set -o pipefail` 을 쓰거나 파이프 없이 실행한다. 이번에 실제로 실패를 성공으로 한 번 보고했다.
 - **재발 (2026-10-02):** 다른 터미널의 `rustup upgrade stable` 이 도는 동안 `cargo` 가 사라졌고(`the 'cargo.exe' binary … is not applicable`) `npm run build` 는 `dist` 를 지운 뒤 죽었다 — 서버·웹·WASM 이 한꺼번에 없어졌다. `target/` 의 컴파일된 WASM 은 Rust 소스가 안 바뀌어 유효했으므로, 아무것도 안 하는 `cargo.exe`(Go 로 5줄)를 PATH 앞에 두고 한 번 빌드해 복구했다 — **소스 신선도를 먼저 확인한 경우에만**. 툴체인이 돌아온 뒤 정식 빌드로 다시 만들었다. 규칙: 빌드 전에 `cargo --version` 이 응답하는지 본다.
+## <a id="worktree-junction-node-modules"></a>옛 커밋을 빌드하려고 만든 worktree 의 node_modules junction 을 `worktree remove --force` 하면 저장소의 node_modules 가 비워진다 (2026-10-02)
+
+- **증상:** 이 변경 전 빌드와 비교하려고 `git worktree add <tmp> <sha>` 후 `node_modules` 를 저장소 것으로 **junction** 해 `scripts/build.mjs`(esbuild ESM import 라 `NODE_PATH` 가 안 먹는다)를 돌렸다. 정리하며 `git worktree remove --force` 를 했더니 junction 을 따라가 **저장소의 `node_modules` 내용이 지워졌다**(빈 디렉터리만 남음). 링크를 먼저 끊으려던 `cmd /c rmdir` 는 따옴표 때문에 조용히 실패했는데, 확인 없이 강제 삭제를 했다.
+- **복구:** `npm ci`(락파일 그대로 — 추적 파일은 잃지 않았다). 새 npm 이 `esbuild`·`puppeteer` 의 postinstall 을 막는다는 경고를 내지만 esbuild 는 플랫폼 패키지로, puppeteer 는 캐시된 Chrome 으로 그대로 돌았다(`test:js` 126, wasm 13, e2e 196/196 재확인).
+- **규칙:** 옛 빌드가 필요하면 `node_modules` 를 **링크하지 말고** 임시 디렉터리에서 `git archive <sha> | tar -x` 후 `npm ci`(또는 복사)로 따로 둔다. 어쩔 수 없이 junction 을 쓰면 `ls` 로 링크가 **사라진 것을 확인한 뒤**에야 worktree 를 지운다. `--force` 는 링크를 따라간다고 가정한다.
 ## <a id="죽은-브라우저가-전항목-통과"></a>브라우저가 죽은 채로 13분을 돌렸고 rendercheck 는 4/4 OK 라고 했다 (2026-09-10)
 
 taskweaver 데몬이 사라진 줄 모르고(`taskweaver list` → `count: 0`) 빌드 →
