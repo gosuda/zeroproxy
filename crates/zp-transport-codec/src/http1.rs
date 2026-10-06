@@ -68,6 +68,14 @@ pub struct ResponseHead {
 
 // --- Request side ---------------------------------------------------------
 
+/// Whether a request carries a `Content-Length`: always with a body, and `Content-Length: 0` for a POST or PUT
+/// without one — what Chrome sends (net's `HttpNetworkTransaction::BuildRequestHeaders`, over HTTP/1.1 and HTTP/2
+/// alike). Servers that frame a body by its length refuse a POST without it: Optimizely's event endpoint answers
+/// an HTTP/2 POST with no `content-length` `400` and the same body with one `204`.
+pub fn wants_content_length(method: &str, body_len: usize) -> bool {
+    body_len > 0 || method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT")
+}
+
 /// Build the HTTP/1.1 request head as bytes: request line + headers +
 /// terminating CRLF. The body is **not** appended — the wasm wrapper
 /// writes it separately to support streaming and large uploads.
@@ -79,8 +87,9 @@ pub struct ResponseHead {
 /// Auto-inserted headers (when not present in `headers`):
 /// * `Host:` — required (RFC 9112 §3.2.2). Errors if `host_header` is
 ///   empty.
-/// * `Content-Length:` — added when `body_len > 0` and the caller did
-///   not set either `Content-Length` or `Transfer-Encoding`.
+/// * `Content-Length:` — added when `wants_content_length` (a body, or a POST/PUT
+///   without one) and the caller did not set either `Content-Length` or
+///   `Transfer-Encoding`.
 /// * `Connection: keep-alive` — added when the caller did not set
 ///   `Connection`. We intentionally never force `close` because every
 ///   modern browser keeps the connection alive and WAFs treat
@@ -158,7 +167,7 @@ pub fn build_request_head(
         buf.extend_from_slice(host_header.as_bytes());
         buf.extend_from_slice(b"\r\n");
     }
-    if body_len > 0 && !have_content_length && !have_transfer_encoding {
+    if wants_content_length(method, body_len) && !have_content_length && !have_transfer_encoding {
         buf.extend_from_slice(b"Content-Length: ");
         buf.extend_from_slice(body_len.to_string().as_bytes());
         buf.extend_from_slice(b"\r\n");
@@ -1017,5 +1026,32 @@ mod tests {
         for sep in ["(", ")", ",", ";", ":", "<", ">", "@", "/", "?", "=", "{", "}"] {
             assert!(!is_token(sep), "{sep} must be rejected");
         }
+    }
+}
+
+#[cfg(test)]
+mod content_length_tests {
+    use super::*;
+
+    #[test]
+    fn a_body_or_a_post_or_put_states_its_length() {
+        assert!(wants_content_length("POST", 0));
+        assert!(wants_content_length("put", 0));
+        assert!(wants_content_length("PATCH", 5));
+        assert!(wants_content_length("GET", 1));
+        assert!(!wants_content_length("GET", 0));
+        assert!(!wants_content_length("HEAD", 0));
+        assert!(!wants_content_length("DELETE", 0));
+        assert!(!wants_content_length("OPTIONS", 0));
+    }
+
+    #[test]
+    fn http1_head_carries_the_length_chrome_sends() {
+        let head = |method: &str, body: usize| {
+            String::from_utf8(build_request_head(method, "example.test", "/p", &[], body).unwrap()).unwrap()
+        };
+        assert!(head("POST", 0).contains("Content-Length: 0\r\n"), "a bodiless POST says 0");
+        assert!(head("POST", 17).contains("Content-Length: 17\r\n"));
+        assert!(!head("GET", 0).contains("Content-Length"));
     }
 }

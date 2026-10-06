@@ -173,6 +173,7 @@ pub(crate) async fn send_request(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("h2: uri: {e}")))?;
 
     let is_head = method == Method::HEAD;
+    let wants_length = zp_transport_codec::http1::wants_content_length(method.as_str(), body.len());
     let mut req = Request::builder()
         .method(method)
         .uri(uri)
@@ -181,6 +182,13 @@ pub(crate) async fn send_request(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("h2: request: {e}")))?;
     {
         let h = req.headers_mut();
+        // Chrome states the body's length right after the pseudo-headers (the kernel strips the page's own
+        // `content-length` and leaves this to the transport).
+        if wants_length && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-length")) {
+            if let Ok(v) = HeaderValue::from_str(&body.len().to_string()) {
+                h.append(HeaderName::from_static("content-length"), v);
+            }
+        }
         for (k, v) in headers {
             let kl = k.to_ascii_lowercase();
             // HTTP/2 forbids hop-by-hop / connection-control headers.
