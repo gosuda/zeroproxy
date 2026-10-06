@@ -2335,6 +2335,31 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xdestr') {
+      // Dangerous globals that are only READ inside an assignment target: a member's receiver, a computed key, a default.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>destr</title><body><script>
+        window.__xdestr = null;
+        window.dotcom = { data: {} };
+        var out = {};
+        function run(name, fn) { try { out[name] = fn(); } catch (e) { out[name] = 'threw: ' + (e && e.name) + ': ' + (e && e.message); } }
+        run('array members', function () { [window.dotcom.data.a, window.dotcom.data.b] = ['x', 'y']; return window.dotcom.data.a + window.dotcom.data.b; });
+        run('array holes', function () { [,,, window.dotcom.data.c] = 'p/q/r/s'.split('/'); return window.dotcom.data.c; });
+        run('object member', function () { ({ k: window.dotcom.data.d } = { k: 'ok' }); return window.dotcom.data.d; });
+        run('rest member', function () { ({ ...window.dotcom.data.rest } = { m: 1, n: 2 }); return JSON.stringify(window.dotcom.data.rest); });
+        run('array default', function () { var v; [v = window.dotcom.data.a] = []; return v; });
+        run('member default', function () { [window.dotcom.data.dflt = document.title] = []; return window.dotcom.data.dflt; });
+        run('shorthand default', function () { var w; ({ w = document.title } = {}); return w; });
+        run('computed member key', function () { var t = {}; [t[location.pathname]] = ['z']; return Object.keys(t).join() + ':' + t[location.pathname]; });
+        run('computed pattern key', function () { var v; window.kk = 'p'; ({ [window.kk]: v } = { p: 7 }); return v; });
+        run('document member', function () { [document.title] = ['T2']; return document.title; });
+        run('for-of member', function () { for (window.dotcom.data.it of ['i1', 'i2']); return window.dotcom.data.it; });
+        run('for-in member', function () { for (window.dotcom.data.fk in { f: 1 }); return window.dotcom.data.fk; });
+        run('target and receiver', function () { var q; [window.dotcom.data.e, q] = ['E', 'Q']; return window.dotcom.data.e + q; });
+        window.__xdestr = out;
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xnullish') {
       // The rewritten member operations on a null or undefined receiver throw what the engine throws.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6612,6 +6637,37 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct.out['object / get location'], 'ok:undefined');
     assert.equal(direct.uncaught.length, 2);
     assert.deepEqual(direct.uncaught.map(u => u[1]), ['page', 'page']);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // Inside an assignment target only the identifier that IS the target is a write; a global used as a member's receiver, a
+  // computed key or a default is read. The rewriter sent all of them to the write-only sink, which reads back undefined:
+  // `[,,,window.dotcom.data.k] = v` became `undefined.dotcom` and killed BBC's ad script.
+  await t.test('globals read inside destructuring and for-of targets read through the membrane (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xdestr`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xdestr, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xdestr);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xdestr`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xdestr, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xdestr);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'destructuring-reads.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct['array holes'], 's');
+    assert.equal(direct['computed member key'], '/xdestr:z');
+    assert.equal(direct['for-of member'], 'i2');
+    assert.ok(Object.values(direct).every(v => !String(v).startsWith('threw')), JSON.stringify(direct));
     assert.deepEqual(proxied, direct);
   });
 

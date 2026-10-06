@@ -1503,6 +1503,14 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="target-읽기-싱크"></a>대입 대상 안의 전역 읽기가 쓰기 전용 싱크로 갔다 — `undefined.dotcom` (2026-10-06)
+
+- **측정:** BBC 콘솔에 메시지 없는 `[uncaught] Uncaught (in promise)` 둘. 메시지가 비어 있어 `taskweaver debugger-arm --strategy exceptions --uncaught-only` → `debugger-snapshot` 으로 던진 자리를 잡았다: `dotcom-ads.js` 의 `di` 에서 `Cannot read properties of undefined (reading 'dotcom')`. 원본 소스에서 `[,,,window.dotcom.data.newKeyValues.pillar, …] = …split("/")` 를 찾고, 리라이터를 노드에서 직접 돌려(`dist/web/zp-page-bundle.js` 의 `ZPBundle.rewriteScript(src, kind, target, proxyOrigin)`) `__zp_get.d.window.dotcom…` 를 확인했다.
+- **원인:** 구조분해/`for-of` 대상 안에서는 위험 전역이 `__zp_get.d.<name>`(쓰기 전용 싱크 — get 은 늘 undefined)으로 나간다. `in_target` 플래그가 대상 **식별자**가 아니라 대상 **하위 트리 전부**에 걸려 있어서, 멤버의 수신자·계산된 키·기본값 안의 *읽기*도 싱크로 갔다.
+- **수정:** `visit_read` — 대상 안에 중첩된 표현식(멤버 수신자, 계산된 키, 기본값, 계산된 패턴 키)을 `in_target = 0` 으로 방문한다. 대상 식별자 자체만 싱크를 쓴다.
+- **함정 둘:** (1) 이 버그는 **조용히 undefined 가 되는** 형태도 있다(`[t[location.href]] = q` 는 키가 `undefined`). 던지지 않아서 더 늦게 드러난다. (2) 고친 뒤에도 같은 에러가 한 번 더 났다 — taskweaver 의 SW 가 새 빌드로 바뀌기 전에 페이지를 열었기 때문. `clear-site-data --types all` 후 다시 열어 확인했다(재작성 캐시는 SW 인스턴스 메모리에만 있어 배포 후 낡은 사본이 남지 않는다).
+- **검증:** 리라이터 테스트 `globals_read_inside_assignment_targets_are_not_sunk`, e2e `globals read inside destructuring and for-of targets…`(수정을 빼면 BBC 와 같은 에러로 실패), 실사이트 말뭉치 11개 린트(`__zp_get.d.` 뒤에 읽기가 오는 경우 0건), BBC 콘솔 오류 0.
+
 ## <a id="h2-content-length"></a>HTTP/2 POST 에 `Content-Length` 가 없어 Optimizely 가 400 을 줬다 (2026-10-06)
 
 - **측정:** CNN 한 번 로드에 `logx.optimizely.com/v1/events` 가 400 열한 번(네이티브는 204). SW 가 보내는 본문(JSON 988바이트)은 온전했고, 같은 바이트를 curl 로 보내면 204.

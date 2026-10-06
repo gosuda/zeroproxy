@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-06 | rewriter / 수정 | 구조분해·for-of 대상 안의 전역 읽기(`[window.a.b]=x`, 기본값, 계산된 키)가 쓰기 전용 싱크로 가 undefined.a 를 던졌다. BBC 광고. | rewriter.md#target-읽기-싱크 |
 | 2026-10-06 | membrane / 수정 | 빈 프레임·srcdoc 안에서 스크립트가 만든 스크립트가 로드 안 됐다(403·503). srcdoc 은 URL 에 tab, 빈 프레임은 릴레이로. 광고 칸이 비던 원인. | rewriter.md#swless-동적-스크립트 |
 | 2026-10-06 | transport / 수정 | HTTP/2 POST 에 Content-Length 가 없어 Optimizely 가 400. 커널이 지우고 안 채웠다. 한 규칙으로 H1·H2 모두. e2e 로는 재현 안 됨. | rewriter.md#h2-content-length |
 | 2026-10-06 | membrane / 수정 | worker 가 직접 답 못 하는 프레임(document.write)의 crossorigin 요소가 CORS 판정을 못 받았다. 부모가 요소 모드를 헤더·릴레이 인자로 전한다. | rewriter.md#swless-요소-cors |

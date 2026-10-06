@@ -3515,8 +3515,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
             // `x[k]++`, `for (x[k] of y)`, `({a: x[k]} = o)` — keep a real
             // Reference through the accessor adapter, same as MEMBER_REF.
             if !matches!(member.object, Expression::Super(_)) {
-                self.visit_expression(&member.object);
-                self.visit_expression(&member.expression);
+                self.visit_read(&member.object);
+                self.visit_read(&member.expression);
                 use oxc_span::GetSpan;
                 let obj_span = member.object.span();
                 let key_span = member.expression.span();
@@ -3535,7 +3535,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
             // Only the receiver is a read. Walking the whole member would
             // replace the write target with __zp_get(...), invalid in compound
             // assignments, updates and nested destructuring/for-in/of targets.
-            self.visit_expression(&member.object);
+            self.visit_read(&member.object);
             let prop = member.property.name.as_str();
             if !matches!(member.object, Expression::Super(_)) && is_dangerous_member(prop) {
                 let obj_span = member.object.span();
@@ -3548,6 +3548,10 @@ impl<'a> Visit<'a> for RewriteVisitor {
                     ),
                 });
             }
+            return;
+        }
+        if let SimpleAssignmentTarget::PrivateFieldExpression(member) = target {
+            self.visit_read(&member.object);
             return;
         }
         walk::walk_simple_assignment_target(self, target);
@@ -3589,11 +3593,14 @@ impl<'a> Visit<'a> for RewriteVisitor {
             // Walk only the default expression — walking the binding would
             // re-emit the broken plain patch over the same span.
             if let Some(init) = &prop.init {
-                self.visit_expression(init);
+                self.visit_read(init);
             }
             return;
         }
-        walk::walk_assignment_target_property_identifier(self, prop);
+        // The binding is not dangerous (or is shadowed), so only the default needs a walk.
+        if let Some(init) = &prop.init {
+            self.visit_read(init);
+        }
     }
 
     fn visit_static_member_expression(&mut self, expr: &StaticMemberExpression<'a>) {
@@ -4192,7 +4199,7 @@ impl<'a> Visit<'a> for RewriteVisitor {
         self.in_target += 1;
         self.visit_assignment_target(&it.binding);
         self.in_target -= 1;
-        self.visit_expression(&it.init);
+        self.visit_read(&it.init);
     }
 
     /// `{key: TARGET}` — a computed key is evaluated as an expression; the
@@ -4202,7 +4209,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
         it: &AssignmentTargetPropertyProperty<'a>,
     ) {
         if it.computed {
+            let saved = std::mem::replace(&mut self.in_target, 0);
             walk::walk_property_key(self, &it.name);
+            self.in_target = saved;
         }
         self.in_target += 1;
         self.visit_assignment_target_maybe_default(&it.binding);
@@ -4217,6 +4226,18 @@ impl<'a> Visit<'a> for RewriteVisitor {
 }
 
 impl RewriteVisitor {
+    /// An expression nested in an assignment target — a member's receiver or
+    /// computed key, a default value, a computed pattern key — is *read*, even
+    /// though the pattern around it is written. Only the identifier that is
+    /// itself the target takes the write-only sink (`__zp_get.d.<name>`); a
+    /// read through that sink always yields `undefined`, so `[window.a.b] = x`
+    /// became `undefined.a` and threw (BBC's ad script died on exactly that).
+    fn visit_read<'a>(&mut self, expr: &Expression<'a>) {
+        let saved = std::mem::replace(&mut self.in_target, 0);
+        self.visit_expression(expr);
+        self.in_target = saved;
+    }
+
     /// Shared `for-of`/`for-in` walk: declaration heads get the var-decl
     /// pipeline (with per-iteration sinks at classic top level), bare
     /// targets get the write-target flag.
@@ -5287,6 +5308,57 @@ mod tests {
                 r.code
             );
         }
+    }
+
+    // The sink is *write-only*: a read through it is `undefined`. So a dangerous
+    // global that is only read inside a target — a member's receiver
+    // (`[window.a.b] = x`), a computed key, a default value — must take the
+    // ordinary read path. BBC's ad script died on `[,,,window.dotcom.d.k] = v`,
+    // rewritten to `__zp_get.d.window.dotcom…` = `undefined.dotcom`.
+    #[test]
+    fn globals_read_inside_assignment_targets_are_not_sunk() {
+        for src in [
+            "[window.dotcom.x] = a;",
+            "[,,,window.dotcom.data.k, window.dotcom.data.j] = a.split('/');",
+            "({ y: document.title } = o);",
+            "({ ...window.rest } = o);",
+            "[document.title = window.name] = q;",
+            "[a[location.href]] = q;",
+            "({ [window.k]: v } = o);",
+            "({ a = window.x } = o);",
+            "({ a: b = window.x } = o);",
+            "for (window.x of arr) {}",
+            "for (a[window.k] of arr) {}",
+            "for (document.title in o) {}",
+        ] {
+            let r = rewrite_script(src, &opts()).unwrap();
+            assert!(
+                !r.code.contains("__zp_get.d."),
+                "a global that is only read in a target must not use the write sink in {src:?}, got: {}",
+                r.code
+            );
+        }
+        let r = rewrite_script("[window.dotcom.x] = a;", &opts()).unwrap();
+        assert!(
+            r.code.contains("[__zp_get(globalThis,\"window\").dotcom.x] = a;"),
+            "the receiver is read through the membrane, got: {}",
+            r.code
+        );
+        // The identifier that IS the target keeps the sink, next to a read.
+        let r = rewrite_script("[location, window.a] = q;", &opts()).unwrap();
+        assert!(
+            r.code
+                .contains("[__zp_get.d.location, __zp_get(globalThis,\"window\").a] = q;"),
+            "target keeps the sink, receiver is read, got: {}",
+            r.code
+        );
+        let r = rewrite_script("({ location = window.name } = o);", &opts()).unwrap();
+        assert!(
+            r.code
+                .contains("({ location: __zp_get.d.location = __zp_get(globalThis,\"window\").name } = o);"),
+            "a default value is a read, got: {}",
+            r.code
+        );
     }
 
     #[test]

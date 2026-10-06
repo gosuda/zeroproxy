@@ -505,6 +505,17 @@ claimed:
     non-object`, `Reflect.set` answered the value instead of `true`, and the receiver argument was dropped. They go
     through `__zp_rget`/`__zp_rset` like a computed key does. — e2e `member operations on null and undefined throw as
     natively` (literal, computed and receiver forms on four receivers).
+55. **A global read inside an assignment target read as `undefined`.** In a destructuring or `for-of` target the rewriter
+    sends a dangerous global that *is* the target (`[location] = a`) to a write-only sink, which reads back
+    `undefined` by design. But it also sent the ones that are only read there — a member's receiver
+    (`[window.dotcom.k] = a`), a computed key (`[t[location.href]] = a`), a default value (`[v = document.title] = []`) —
+    so `[,,,window.dotcom.data.pillar] = path.split('/')` became `undefined.dotcom` and threw. BBC's ad script
+    (`dotcom-ads.js`) died on exactly that: no ad layer, plus an empty `Uncaught (in promise)` in the console. Only the
+    identifier that is itself the target takes the sink now; anything nested in it is a read. — rewriter test
+    `globals_read_inside_assignment_targets_are_not_sunk` (twelve forms, three emission checks); e2e `globals read inside
+    destructuring and for-of targets read through the membrane` (thirteen forms, proxied == native; reverts to the BBC
+    error with the fix removed). A corpus of 11 real scripts (3 MB of ad, analytics and library code) rewrites with no
+    read through the sink.
 
 ### Residuals (documented, not fixed)
 
