@@ -43,7 +43,7 @@
   function refreshVisibleShareRoute(entryId, target, base) {
     const version = ++activeShareVersion;
     ZP.encryptShareURL(target).then(share => {
-      return ctx.bridge.send({ type: ZP.MSG.HISTORY_UPDATE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: base, replace: true }).then(() => share);
+      return ctx.bridge.send({ type: ZP.MSG.HISTORY_UPDATE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: base, replace: true, ...(opaqueDocument ? { opaque: true } : null) }).then(() => share);
     }).then(share => {
       if (version !== activeShareVersion || entryId !== activeEntryId || target !== virtualURL.href) return;
       setActiveShareRoute(share);

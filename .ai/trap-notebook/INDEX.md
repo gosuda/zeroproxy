@@ -6,6 +6,10 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-06 | membrane / 보안 | CORS 미적용으로 허락 안 한 교차 오리진 읽기가 성공. SW 가 가상 오리진으로 판정·preflight. 거부를 Response.error 로 주면 페이지가 v1 로 재전송. | rewriter.md#cors-적용 |
+| 2026-10-06 | membrane / 수정 | document.cookie 쓰기 직후 동기 XHR 이 쿠키를 놓쳤다. 릴레이가 ack 안 된 쓰기를 싣는다(최신 32개) — Go 가 앞 16개만 받아 새 쓰기가 잘렸다. | rewriter.md#쿠키-동기-xhr |
+| 2026-10-06 | membrane / 수정 | 불투명 프레임이 연 팝업이 불투명하지 않았다. OPEN_SHARE 가 opaque 를 싣고 SW 부트 JSON 이 팝업 prelude 에 전한다. | rewriter.md#불투명-팝업 |
+| 2026-10-06 | membrane / 보안 | 불투명 프레임의 요청이 사이트 쿠키 전부를 실었고 Secure 쿠키는 http://localhost 로 안 갔다. SW 항목에 opaque, loopback 은 보안 문맥. | rewriter.md#불투명-쿠키-secure-loopback |
 | 2026-10-02 | e2e / 플레이크 | 새 페이지를 여는 e2e 헬퍼의 page.goto 가 간헐적으로 안 끝났다(페이지는 이미 complete+SW 제어). 런처 헬퍼가 goto 를 안 기다리고 버튼을 기다린다. | build-deploy.md#e2e-goto-대기 |
 | 2026-10-02 | membrane / 보안 | replaceChildren·insertAdjacentElement·Range.insertNode·텍스트노드 before/after 로 넣은 스크립트가 리라이트 없이 돌았다(감옥 밖). 삽입 훅 표를 완성. | rewriter.md#삽입-문-스크립트 |
 | 2026-10-02 | membrane / 수정 | 쓴 직후의 쿠키가 다음 fetch 에 안 실릴 수 있었다(쓰기와 요청이 SW 로 가는 길이 다름). 요청이 진행 중인 쓰기의 ack 를 기다린다. | rewriter.md#쿠키-쓰기-직후-요청 |

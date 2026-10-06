@@ -146,6 +146,30 @@
     sandboxShadows.delete(el);
     Native.setAttribute.call(el, 'sandbox', value);
   }
+  // The sandbox flags this document lives under: those the page gave every frame between
+  // it and the top window (a frame the proxy rewrote keeps the page's own text in a stash).
+  // null: not sandboxed.
+  let sandboxFlagsCache;
+  function sandboxFlags() {
+    if (sandboxFlagsCache !== undefined) return sandboxFlagsCache;
+    let flags = null;
+    try {
+      let w = root;
+      for (let i = 0; i < 32 && w !== w.parent; i++) {
+        const fe = w.frameElement;
+        if (!fe) break;
+        let text = Native.getAttribute.call(fe, litAttrName('sandbox'));
+        if (text === null) text = Native.getAttribute.call(fe, 'sandbox');
+        if (text !== null) {
+          const mine = new Set(String(text).toLowerCase().split(/\s+/).filter(Boolean));
+          flags = flags === null ? mine : new Set([...flags].filter(f => mine.has(f)));
+        }
+        w = w.parent;
+      }
+    } catch {}
+    sandboxFlagsCache = flags;
+    return flags;
+  }
   // Called from insertion / srcdoc / src enforcement paths: if the element
   // already carries a dangerous sandbox attribute when it appears in the DOM,
   // virtualize it before the browser commits the sandbox enforcement.

@@ -136,6 +136,10 @@ function xsiteReporter(kind, viaOpener) {
 }
 
 function createTargetServer(requests, pendingResponses) {
+  // tag → the names of the cookies the request that carried it had (see /xck-echo)
+  const xckSeen = new Map();
+  // tag → what each request the cross-origin API (/xcors-api) saw under it looked like
+  const corsLog = new Map();
   const server = http.createServer((req, res) => {
     ignoreBenignSocketErrors(req);
     ignoreBenignSocketErrors(res);
@@ -1860,6 +1864,413 @@ function createTargetServer(requests, pendingResponses) {
           await trial('cloneNode+append', function (h, s) { h.appendChild(s.cloneNode(true)); });
           window.__xinsert = out;
         })().catch(function (e) { window.__xinsert = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xsyncck') {
+      // A synchronous XHR blocks the thread: it cannot wait for the cookie write to reach the worker. Thirty
+      // rounds of write-then-send, with a cookie of its own each time and one overwritten each time.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Sync XHR cookies</title><body><script>
+        window.__xsyncck = null;
+        (function () {
+          var out = { rounds: 30, uniqueMissed: [], sharedWrong: [], heldSent: null, heldAfter: null };
+          var echo = function () { var x = new XMLHttpRequest(); x.open('GET', '/cookie-echo?n=' + Math.random(), false); x.send(); return x.responseText; };
+          for (var i = 0; i < out.rounds; i++) {
+            document.cookie = 'su_' + i + '=' + i;
+            if (echo().indexOf('su_' + i + '=' + i) < 0) out.uniqueMissed.push(i);
+            document.cookie = 'sshared=' + i;
+            if (echo().split('; ').indexOf('sshared=' + i) < 0) out.sharedWrong.push(i);
+          }
+          // The same, made certain: the worker is not told of the write until the request is gone. (Natively there
+          // is no worker and nothing to hold.)
+          var proto = typeof ServiceWorker === 'function' ? ServiceWorker.prototype : null;
+          var real = proto && proto.postMessage, held = [];
+          if (proto) proto.postMessage = function (m) { if (m && m.type === 'ZP_COOKIE_SET') { held.push([this, arguments]); return; } return real.apply(this, arguments); };
+          document.cookie = 'sheld=1';
+          out.heldSent = echo().split('; ').indexOf('sheld=1') >= 0;
+          if (proto) { proto.postMessage = real; held.forEach(function (h) { real.apply(h[0], h[1]); }); }
+          // ...and what the late message does to a cookie already sent: nothing.
+          out.heldAfter = document.cookie.split('; ').filter(function (c) { return c.indexOf('sheld=') === 0; }).join('|') + '/' + echo().split('; ').filter(function (c) { return c.indexOf('sheld=') === 0; }).join('|');
+          window.__xsyncck = out;
+        })();
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xsamesite' || url.pathname === '/xsamesite-img') {
+      // Sets the cookie n with the SameSite given (ss=None|Lax|Strict, absent: none stated) and Secure with secure=1.
+      const ss = url.searchParams.get('ss');
+      const cookie = url.searchParams.get('n') + '=1; Path=/' + (ss ? '; SameSite=' + ss : '') + (url.searchParams.get('secure') ? '; Secure' : '');
+      if (url.pathname === '/xsamesite-img') {
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store', 'Set-Cookie': cookie });
+        res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': cookie });
+        res.end('ok');
+      }
+      return;
+    }
+    if (url.pathname === '/xck-echo') {
+      // Remembers which cookies the request carried, under the tag it was given; answers an image (or the names, json=1).
+      // Only this test's own cookies: the proxied session's jar also holds what earlier subtests set.
+      const names = (req.headers.cookie || '').split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => /^(ss|op)_/.test(n)).sort().join(',');
+      xckSeen.set(url.searchParams.get('tag') || '', names);
+      if (url.searchParams.get('json')) {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(names);
+      } else {
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+        res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'));
+      }
+      return;
+    }
+    if (url.pathname === '/xck-seen') {
+      const out = {};
+      for (const tag of (url.searchParams.get('tags') || '').split(',')) out[tag] = xckSeen.has(tag) ? xckSeen.get(tag) : null;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (url.pathname === '/xopck-static') {
+      // A sandboxed document that cannot run a script: every subresource it loads is cross-site natively.
+      const rid = url.searchParams.get('rid');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>static</title><body>' +
+        '<img src="/xck-echo?tag=' + rid + ':img">' +
+        '<link rel="stylesheet" href="/xck-echo?tag=' + rid + ':css">' +
+        '<img src="/xsamesite-img?n=op_lax&ss=Lax">' +
+        '<img src="/xsamesite-img?n=op_none&ss=None&secure=1">' +
+        '<img src="/xsamesite-img?n=op_def">' +
+        '<img src="/xck-echo?tag=' + rid + ':last"></body>');
+      return;
+    }
+    if (url.pathname === '/xopck-child') {
+      const rid = url.searchParams.get('rid');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      // The <script src> is here, where scripts run: a scriptless document does not fetch it the same way in the proxy.
+      res.end('<!doctype html><title>script child</title><script src="/xck-echo?tag=' + rid + ':script"></script><script>' +
+        'var rid = ' + JSON.stringify(rid) + ';' +
+        'Promise.all([fetch("/xck-echo?tag=" + rid + ":fetch-default&json=1").catch(function () {}), fetch("/xck-echo?tag=" + rid + ":fetch-include&json=1", { credentials: "include" }).catch(function () {})])' +
+        '.then(function () { parent.postMessage("xopck-child-done", "*"); });' +
+        '<\/script>');
+      return;
+    }
+    if (url.pathname === '/xopck') {
+      // What an opaque document's requests carry and keep. Natively a sandboxed document without
+      // allow-same-origin is cross-site to everything: only SameSite=None cookies go with its requests,
+      // and only those may be set by its responses.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Opaque cookies</title><body><script>
+        window.__xopck = null;
+        (async function () {
+          var out = {};
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var rid = Math.random().toString(36).slice(2, 10);
+          await fetch('/xsamesite?n=ss_none&ss=None&secure=1');
+          await fetch('/xsamesite?n=ss_lax&ss=Lax');
+          await fetch('/xsamesite?n=ss_strict&ss=Strict');
+          await fetch('/xsamesite?n=ss_def');
+          out.jarHere = await (await fetch('/xck-echo?tag=' + rid + ':here&json=1')).text();
+          var childDone = false;
+          addEventListener('message', function (e) { if (e.data === 'xopck-child-done') childDone = true; });
+          var f1 = document.createElement('iframe'); f1.setAttribute('sandbox', ''); f1.src = '/xopck-static?rid=' + rid; document.body.appendChild(f1);
+          var f2 = document.createElement('iframe'); f2.setAttribute('sandbox', 'allow-scripts'); f2.src = '/xopck-child?rid=' + rid; document.body.appendChild(f2);
+          var tags = ['img', 'css', 'script', 'last', 'fetch-default', 'fetch-include'].map(function (t) { return rid + ':' + t; });
+          var seen = {};
+          for (var i = 0; i < 250; i++) {
+            seen = await (await fetch('/xck-seen?tags=' + tags.join(','))).json();
+            if (tags.every(function (t) { return seen[t] !== null; }) && childDone) break;
+            await sleep(100);
+          }
+          await sleep(1500);
+          for (var k in seen) out[k.split(':')[1]] = seen[k];
+          out.jarAfter = await (await fetch('/xck-echo?tag=' + rid + ':after&json=1')).text();
+          window.__xopck = out;
+        })().catch(function (e) { window.__xopck = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xcors-log') {
+      const prefix = url.searchParams.get('prefix') || '';
+      const out = {};
+      for (const [tag, entries] of corsLog) if (tag.startsWith(prefix)) out[tag.slice(prefix.length)] = entries;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (url.pathname === '/xcors-api') {
+      // A cross-origin API whose answer to the page is picked by `case`: what it allows (ACAO/ACAC/ACEH, and for the
+      // OPTIONS preflight ACAM/ACAH/Max-Age), what it redirects to. It logs what each request looked like.
+      const q = url.searchParams;
+      const tag = q.get('tag') || '';
+      const name = q.get('case') || '';
+      const po = q.get('po') || '';
+      const names = (req.headers.cookie || '').split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => n === 'xc').sort().join(',');
+      if (!corsLog.has(tag)) corsLog.set(tag, []);
+      corsLog.get(tag).push({
+        m: req.method,
+        origin: req.headers.origin || null,
+        acrm: req.headers['access-control-request-method'] || null,
+        acrh: req.headers['access-control-request-headers'] || null,
+        cookies: names,
+        custom: req.headers['x-custom'] || null,
+        auth: req.headers.authorization ? 'yes' : null,
+        ct: (req.headers['content-type'] || '').split(';')[0] || null,
+      });
+      const ACAO = 'Access-Control-Allow-Origin', ACAC = 'Access-Control-Allow-Credentials', ACEH = 'Access-Control-Expose-Headers';
+      const ACAM = 'Access-Control-Allow-Methods', ACAH = 'Access-Control-Allow-Headers', MAXAGE = 'Access-Control-Max-Age';
+      const plain = {
+        'acao-origin': { [ACAO]: po },
+        'acao-star': { [ACAO]: '*' },
+        'acao-null': { [ACAO]: 'null' },
+        'acao-other': { [ACAO]: 'http://example.invalid' },
+        'acao-missing': {},
+        'acao-origin-creds': { [ACAO]: po, [ACAC]: 'true' },
+        'acao-star-creds': { [ACAO]: '*', [ACAC]: 'true' },
+        'expose-none': { [ACAO]: po },
+        'expose-listed': { [ACAO]: po, [ACEH]: 'X-Secret, x-other' },
+        'expose-star': { [ACAO]: po, [ACEH]: '*' },
+        'expose-star-creds': { [ACAO]: po, [ACAC]: 'true', [ACEH]: '*' },
+        'setcookie': { [ACAO]: po, [ACAC]: 'true', 'Set-Cookie': 'xc=1; Path=/; SameSite=None; Secure' },
+        'same': {},
+      };
+      const preflight = {
+        'pf-put-ok': { [ACAO]: po, [ACAM]: 'PUT' },
+        'pf-put-no-acam': { [ACAO]: po },
+        'pf-put-wrong-method': { [ACAO]: po, [ACAM]: 'DELETE' },
+        'pf-put-lower': { [ACAO]: po, [ACAM]: 'put' },
+        'pf-header-ok': { [ACAO]: po, [ACAH]: 'X-Custom' },
+        'pf-header-list': { [ACAO]: po, [ACAH]: 'x-other, x-custom' },
+        'pf-header-missing': { [ACAO]: po, [ACAM]: 'GET' },
+        'pf-header-star': { [ACAO]: po, [ACAH]: '*' },
+        'pf-header-star-creds': { [ACAO]: po, [ACAC]: 'true', [ACAH]: '*' },
+        'pf-auth-star': { [ACAO]: po, [ACAH]: '*' },
+        'pf-auth-listed': { [ACAO]: po, [ACAH]: 'authorization' },
+        'pf-json-ok': { [ACAO]: po, [ACAH]: 'content-type' },
+        'pf-json-no': { [ACAO]: po },
+        'pf-status-403': { [ACAO]: po, [ACAM]: 'PUT' },
+        'pf-no-acao': { [ACAM]: 'PUT' },
+        'pf-methods-star': { [ACAO]: po, [ACAM]: '*' },
+        'pf-methods-star-creds': { [ACAO]: po, [ACAC]: 'true', [ACAM]: '*' },
+        'pf-maxage': { [ACAO]: po, [ACAM]: 'PUT', [MAXAGE]: '60' },
+      };
+      const base = { 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8', 'X-Secret': '1', 'X-Other': '2' };
+      if (req.method === 'OPTIONS' && req.headers['access-control-request-method']) {
+        if (name === 'pf-redirect') {
+          res.writeHead(302, Object.assign({}, base, { Location: q.get('loc') || '/', [ACAO]: po }));
+        } else {
+          res.writeHead(name === 'pf-status-403' ? 403 : 204, Object.assign({}, base, preflight[name] || {}));
+        }
+        res.end();
+        return;
+      }
+      if (name === 'redir') {
+        const headers = Object.assign({}, base, { Location: q.get('loc') || '/' });
+        if (!q.get('noacao')) Object.assign(headers, { [ACAO]: po, [ACAC]: 'true' });
+        res.writeHead(302, headers);
+        res.end();
+        return;
+      }
+      const allow = name.startsWith('pf-') ? { [ACAO]: po, [ACAC]: 'true' } : (plain[name] || {});
+      res.writeHead(200, Object.assign({}, base, allow));
+      res.end('ok:' + name + ':' + req.method);
+      return;
+    }
+    if (url.pathname === '/xcors') {
+      // What a page may do with a response from another origin, and when the browser even sends the request:
+      // fetch(), async XHR and sync XHR against /xcors-api on the other host (localhost <-> 127.0.0.1).
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>CORS</title><body><script>
+        window.__xcors = null;
+        (async function () {
+          var out = {};
+          var rid = Math.random().toString(36).slice(2, 10);
+          var po = location.origin;
+          var other = location.protocol + '//' + (location.hostname === 'localhost' ? '127.0.0.1' : 'localhost') + ':' + location.port;
+          var nl = String.fromCharCode(10);
+          function api(base, name, cs, extra) {
+            return base + '/xcors-api?tag=' + encodeURIComponent(rid + ':' + name) + '&case=' + cs + '&po=' + encodeURIComponent(po) + (extra || '');
+          }
+          function names(h) {
+            var a = [];
+            h.forEach(function (v, k) { if (['content-length', 'connection', 'keep-alive', 'transfer-encoding', 'date'].indexOf(k) < 0) a.push(k); });
+            return a.sort();
+          }
+          async function f(name, cs, init, extra, base) {
+            try {
+              var r = await fetch(api(base || other, name, cs, extra), init);
+              var text = await r.text();
+              out[name] = { type: r.type, status: r.status, redirected: r.redirected, text: text.slice(0, 40), hdr: r.type === 'cors' ? names(r.headers) : undefined };
+            } catch (e) { out[name] = 'threw:' + (e && e.name) + ':' + (e && e.message); }
+          }
+          function xhr(name, cs, opts) {
+            opts = opts || {};
+            return new Promise(function (resolve) {
+              var x = new XMLHttpRequest();
+              var done = function (kind) {
+                var all = x.getAllResponseHeaders().split(nl).map(function (l) { return l.split(':')[0].trim().toLowerCase(); }).filter(function (k) { return k && ['content-length', 'connection', 'keep-alive', 'transfer-encoding', 'date'].indexOf(k) < 0; }).sort();
+                out[name] = { kind: kind, status: x.status, text: kind === 'load' ? x.responseText.slice(0, 40) : '', secret: x.getResponseHeader('x-secret'), other: x.getResponseHeader('x-other'), all: all };
+                resolve();
+              };
+              x.onload = function () { done('load'); };
+              x.onerror = function () { done('error'); };
+              x.open(opts.method || 'GET', api(other, name, cs), true);
+              if (opts.wc) x.withCredentials = true;
+              if (opts.headers) for (var k in opts.headers) x.setRequestHeader(k, opts.headers[k]);
+              x.send(opts.body || null);
+            });
+          }
+          function xhrSync(name, cs, opts) {
+            opts = opts || {};
+            var x = new XMLHttpRequest();
+            try {
+              x.open(opts.method || 'GET', api(other, name, cs), false);
+              if (opts.wc) x.withCredentials = true;
+              if (opts.headers) for (var k in opts.headers) x.setRequestHeader(k, opts.headers[k]);
+              x.send(opts.body || null);
+              out[name] = { status: x.status, text: x.responseText.slice(0, 40), secret: x.getResponseHeader('x-secret'), state: x.readyState };
+            } catch (e) { out[name] = { threw: e && e.name, state: x.readyState, status: x.status }; }
+          }
+          // who may read what
+          await f('acao-origin', 'acao-origin');
+          await f('acao-star', 'acao-star');
+          await f('acao-null', 'acao-null');
+          await f('acao-other', 'acao-other');
+          await f('acao-missing', 'acao-missing');
+          await f('star-creds', 'acao-star', { credentials: 'include' });
+          await f('star-creds-acac', 'acao-star-creds', { credentials: 'include' });
+          await f('creds-ok', 'acao-origin-creds', { credentials: 'include' });
+          await f('creds-no-acac', 'acao-origin', { credentials: 'include' });
+          await f('set-cookie', 'setcookie', { credentials: 'include' });
+          await f('cookie-include', 'acao-origin-creds', { credentials: 'include' });
+          await f('cookie-default', 'acao-origin');
+          await f('cookie-omit', 'acao-origin', { credentials: 'omit' });
+          await f('expose-none', 'expose-none');
+          await f('expose-listed', 'expose-listed');
+          await f('expose-star', 'expose-star');
+          await f('expose-star-creds', 'expose-star-creds', { credentials: 'include' });
+          // when the browser asks first
+          await f('pf-put-ok', 'pf-put-ok', { method: 'PUT' });
+          await f('pf-put-no-acam', 'pf-put-no-acam', { method: 'PUT' });
+          await f('pf-put-wrong-method', 'pf-put-wrong-method', { method: 'PUT' });
+          await f('pf-put-lower', 'pf-put-lower', { method: 'PUT' });
+          await f('pf-header-ok', 'pf-header-ok', { headers: { 'X-Custom': '1' } });
+          await f('pf-header-list', 'pf-header-list', { headers: { 'X-Custom': '1' } });
+          await f('pf-header-missing', 'pf-header-missing', { headers: { 'X-Custom': '1' } });
+          await f('pf-header-star', 'pf-header-star', { headers: { 'X-Custom': '1' } });
+          await f('pf-header-star-creds', 'pf-header-star-creds', { headers: { 'X-Custom': '1' }, credentials: 'include' });
+          await f('pf-auth-star', 'pf-auth-star', { headers: { Authorization: 'Bearer x' } });
+          await f('pf-auth-listed', 'pf-auth-listed', { headers: { Authorization: 'Bearer x' } });
+          await f('pf-json-ok', 'pf-json-ok', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+          await f('pf-json-no', 'pf-json-no', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+          await f('pf-status-403', 'pf-status-403', { method: 'PUT' });
+          await f('pf-no-acao', 'pf-no-acao', { method: 'PUT' });
+          await f('pf-methods-star', 'pf-methods-star', { method: 'PUT' });
+          await f('pf-methods-star-creds', 'pf-methods-star-creds', { method: 'PUT', credentials: 'include' });
+          await f('pf-redirect', 'pf-redirect', { method: 'PUT' }, '&loc=' + encodeURIComponent(api(other, 'pf-redirect:b', 'acao-origin')));
+          await f('pf-maxage', 'pf-maxage', { method: 'PUT' });
+          await f('pf-maxage', 'pf-maxage', { method: 'PUT' });
+          await f('simple-text-plain', 'acao-origin', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: 'x' });
+          await f('simple-range', 'acao-origin', { headers: { Range: 'bytes=0-5' } });
+          // no preflight, and no check, for the document's own origin
+          await f('same-put', 'same', { method: 'PUT', headers: { 'X-Custom': '1' } }, '', po);
+          await f('same-origin-mode', 'acao-origin', { mode: 'same-origin' });
+          await f('no-cors-get', 'acao-missing', { mode: 'no-cors' });
+          await f('no-cors-post', 'acao-missing', { mode: 'no-cors', method: 'POST', body: 'x' });
+          // redirects: every hop is checked, and between two other origins the origin is no longer told
+          await f('redir-cross', 'redir', {}, '&loc=' + encodeURIComponent(api(other, 'redir-cross:b', 'acao-origin')));
+          await f('redir-no-acao', 'redir', {}, '&noacao=1&loc=' + encodeURIComponent(api(other, 'redir-no-acao:b', 'acao-origin')));
+          await f('redir-self-star', 'redir', {}, '&loc=' + encodeURIComponent(api(po, 'redir-self-star:b', 'acao-star')));
+          await f('redir-self-origin', 'redir', {}, '&loc=' + encodeURIComponent(api(po, 'redir-self-origin:b', 'acao-origin')));
+          await f('redir-self-null', 'redir', {}, '&loc=' + encodeURIComponent(api(po, 'redir-self-null:b', 'acao-null')));
+          await f('redir-from-same', 'redir', {}, '&loc=' + encodeURIComponent(api(other, 'redir-from-same:b', 'acao-origin')), po);
+          await f('redir-userinfo', 'redir', {}, '&loc=' + encodeURIComponent(api(other.replace('//', '//u:p@'), 'redir-userinfo:b', 'acao-origin')));
+          // XMLHttpRequest, async and sync
+          await xhr('x-ok', 'acao-origin');
+          await xhr('x-fail', 'acao-missing');
+          await xhr('x-expose', 'expose-listed');
+          await xhr('x-hidden', 'expose-none');
+          await xhr('x-creds', 'acao-origin-creds', { wc: true });
+          await xhr('x-nocreds', 'acao-origin-creds');
+          await xhr('x-preflight', 'pf-put-ok', { method: 'PUT', body: 'x' });
+          await xhr('x-preflight-fail', 'pf-put-no-acam', { method: 'PUT', body: 'x' });
+          xhrSync('sx-ok', 'expose-listed');
+          xhrSync('sx-fail', 'acao-missing');
+          xhrSync('sx-wc', 'acao-origin-creds', { wc: true });
+          xhrSync('sx-nowc', 'acao-origin-creds');
+          xhrSync('sx-preflight', 'pf-header-ok', { headers: { 'X-Custom': '1' } });
+          xhrSync('sx-preflight-fail', 'pf-header-missing', { headers: { 'X-Custom': '1' } });
+          out.__log = await (await fetch('/xcors-log?prefix=' + encodeURIComponent(rid + ':'))).json();
+          window.__xcors = out;
+        })().catch(function (e) { window.__xcors = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xpopop-popup') {
+      // A popup of a sandboxed frame says what it is.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>popup</title><script>' +
+        'var R = {};' +
+        'function op(k, f) { try { var v = f(); R[k] = v === null ? "null" : (typeof v === "object" || typeof v === "function") ? typeof v : String(v).slice(0, 60); } catch (e) { R[k] = "threw:" + (e && e.name); } }' +
+        'op("self.origin", function () { return self.origin; });' +
+        'op("location.pathname", function () { return location.pathname; });' +
+        'op("localStorage", function () { localStorage.setItem("zpop", "1"); return localStorage.getItem("zpop"); });' +
+        'op("sessionStorage", function () { return sessionStorage.length; });' +
+        'op("document.cookie", function () { return document.cookie.split("; ").filter(function (c) { return c.indexOf("xpopck=") === 0; }).join("; "); });' +
+        'op("indexedDB.open", function () { return indexedDB.open("x"); });' +
+        'op("caches", function () { return caches; });' +
+        'op("serviceWorker", function () { return navigator.serviceWorker; });' +
+        'op("document.domain", function () { return document.domain; });' +
+        'op("opener.document", function () { return opener.document; });' +
+        'op("opener.location.href", function () { return opener.location.href; });' +
+        'op("opener is parent", function () { return parent === window && top === window; });' +
+        'op("frameElement", function () { return frameElement; });' +
+        'try { opener.postMessage("xpop:" + JSON.stringify(R), "*"); } catch (e) {}' +
+        '<\/script>');
+      return;
+    }
+    if (url.pathname === '/xpopop-child') {
+      const flags = url.searchParams.get('flags') || '';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>popup opener</title><script>' +
+        'var got = null;' +
+        'addEventListener("message", function (e) { if (typeof e.data === "string" && e.data.indexOf("xpop:") === 0 && !got) { got = JSON.parse(e.data.slice(5)); } });' +
+        'var w = null; try { w = open("/xpopop-popup"); } catch (e) {}' +
+        'function after(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }' +
+        'function poll(n) { return got || n <= 0 ? Promise.resolve() : after(100).then(function () { return poll(n - 1); }); }' +
+        '(w ? poll(150) : Promise.resolve()).then(function () { return after(500); }).then(function () {' +
+        '  var H = {};' +
+        '  H.opened = w ? "yes" : "no";' +
+        '  try { H.handleDocument = typeof w.document; } catch (e) { H.handleDocument = "threw:" + e.name; }' +
+        '  try { H.handleLocation = w ? String(w.location.href).slice(0, 5) : "null"; } catch (e) { H.handleLocation = "threw:" + e.name; }' +
+        '  try { H.handleClosed = String(w.closed); } catch (e) { H.handleClosed = "threw:" + e.name; }' +
+        '  try { w.close(); } catch (e) {}' +
+        '  parent.postMessage("xpopop:" + JSON.stringify({ report: got, handle: H }), "*");' +
+        '});' +
+        '<\/script>');
+      return;
+    }
+    if (url.pathname === '/xpopop') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>Popups of sandboxed frames</title><body><script>
+        window.__xpopop = null;
+        (async function () {
+          var out = {};
+          document.cookie = 'xpopck=1; path=/';
+          var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+          var variants = [['opaque popup', 'allow-scripts allow-popups'], ['escaping popup', 'allow-scripts allow-popups allow-popups-to-escape-sandbox'], ['no popups', 'allow-scripts']];
+          for (var v = 0; v < variants.length; v++) {
+            var got = null;
+            var handler = function (e) { if (typeof e.data === 'string' && e.data.indexOf('xpopop:') === 0) got = JSON.parse(e.data.slice(7)); };
+            addEventListener('message', handler);
+            var f = document.createElement('iframe'); f.setAttribute('sandbox', variants[v][1]); f.src = '/xpopop-child'; document.body.appendChild(f);
+            for (var i = 0; i < 300 && !got; i++) await sleep(100);
+            removeEventListener('message', handler);
+            out[variants[v][0]] = got || 'no report';
+            f.remove();
+          }
+          window.__xpopop = out;
+        })().catch(function (e) { window.__xpopop = { __fatal: String(e && (e.stack || e)) }; });
       <\/script></body>`);
       return;
     }
@@ -5456,6 +5867,155 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     // The reference itself: every door runs the script, in the page's own URL.
     assert.ok(Object.keys(direct).length >= 19, `the fixture lost doors: ${Object.keys(direct)}`);
     for (const [door, where] of Object.entries(direct)) assert.equal(where, 'virtual', `${door}: the native reference changed`);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A synchronous XHR cannot wait for the acknowledgement of a cookie write: it carries the writes the
+  // worker has not confirmed, and the worker applies them before it sends.
+  await t.test('a cookie written just before a synchronous XHR goes out with it (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xsyncck`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xsyncck, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xsyncck);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xsyncck`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xsyncck, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xsyncck);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'sync-xhr-cookies.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The reference itself: natively the jar is synchronous and every request carries what was just written.
+    assert.deepEqual(direct, { rounds: 30, uniqueMissed: [], sharedWrong: [], heldSent: true, heldAfter: 'sheld=1/sheld=1' });
+    assert.deepEqual(proxied, direct);
+  });
+
+  // What an opaque document's requests carry and keep. The service worker attached the whole jar to
+  // everything it forwarded and kept whatever came back.
+  await t.test('a sandboxed frame sends and keeps only the cookies a cross-site context may (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xopck`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xopck, { timeout: 90000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xopck);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xopck`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xopck, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xopck);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'opaque-cookies.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: the page sees every cookie; the opaque documents' requests carry fewer.
+    assert.equal(direct.jarHere.split(',').includes('ss_lax'), true, 'the embedding page sends its Lax cookie');
+    for (const k of ['img', 'css', 'script', 'last', 'fetch-default']) {
+      assert.equal(direct[k].split(',').includes('ss_lax'), false, `${k}: a cross-site request carries no Lax cookie`);
+      assert.equal(direct[k].split(',').includes('ss_strict'), false, `${k}: ... nor a Strict one`);
+      assert.equal(direct[k].split(',').includes('ss_def'), false, `${k}: ... nor one with no SameSite`);
+    }
+    assert.equal(direct.jarAfter.split(',').includes('op_lax'), false, 'a cross-site response may not set a Lax cookie');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A popup of a sandboxed frame keeps the frame's sandbox — and its opaque origin — unless the page allowed
+  // popups to escape it. The browser applies the flags to the popup itself; the origin is the emulated part.
+  await t.test('a popup of a sandboxed frame is as opaque as the frame (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xpopop`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xpopop, { timeout: 120000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xpopop);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xpopop`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xpopop, { timeout: 180000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xpopop);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'opaque-popups.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself.
+    const opaque = direct['opaque popup'].report;
+    assert.equal(opaque['self.origin'], 'null', 'the popup is as opaque as the frame that opened it');
+    assert.equal(opaque.localStorage, 'threw:SecurityError');
+    assert.equal(opaque['document.cookie'], 'threw:SecurityError');
+    assert.equal(opaque['opener.document'], 'threw:SecurityError');
+    assert.notEqual(direct['escaping popup'].report['self.origin'], 'null', 'an escaping popup has the site\'s origin');
+    assert.equal(direct['escaping popup'].report.localStorage, '1');
+    assert.equal(direct['no popups'].handle.opened, 'no', 'no allow-popups: no popup');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A cross-origin fetch()/XHR the target did not allow cannot be read, and an "unsafe" one is asked about
+  // first (an OPTIONS preflight) — the request itself goes out only if that answer allows it. The proxy sends
+  // the page's requests itself, so these are its rules to apply; they used to be skipped, and a cross-origin
+  // read the target never allowed succeeded.
+  await t.test('cross-origin fetch and XHR obey CORS: who may read, when the browser asks first, redirects (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xcors`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xcors, { timeout: 120000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xcors);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xcors`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xcors, { timeout: 180000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xcors);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'cors.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference itself: the cases mean what their names say.
+    assert.equal(direct['acao-origin'].type, 'cors');
+    assert.match(String(direct['acao-missing']), /^threw:TypeError/);
+    assert.match(String(direct['star-creds-acac']), /^threw:TypeError/);
+    assert.deepEqual(direct['expose-listed'].hdr, ['cache-control', 'content-type', 'x-other', 'x-secret']);
+    assert.match(String(direct['pf-put-no-acam']), /^threw:TypeError/);
+    assert.deepEqual(direct.__log['pf-put-no-acam'].map(e => e.m), ['OPTIONS'], 'a failed preflight means the request is never sent');
+    assert.deepEqual(direct.__log['pf-put-ok'].map(e => e.m), ['OPTIONS', 'PUT']);
+    assert.deepEqual(direct.__log['pf-maxage'].map(e => e.m), ['OPTIONS', 'PUT', 'PUT'], 'a preflight answer is reused for its Max-Age');
+    assert.equal(direct['same-put'].type, 'basic');
+    assert.deepEqual(direct.__log['same-put'].map(e => e.m), ['PUT'], 'no preflight inside the document\'s own origin');
+    assert.equal(direct['no-cors-get'].type, 'opaque');
+    assert.equal(direct.__log['redir-self-star:b'][0].origin, 'null', 'after a trip through another origin the request\'s origin is null');
+    assert.match(String(direct['redir-self-origin']), /^threw:TypeError/);
+    assert.match(String(direct['redir-userinfo']), /^threw:TypeError/);
+    assert.equal(direct['sx-fail'].threw, 'NetworkError');
+    assert.equal(direct.__log['cookie-include'][0].cookies, 'xc');
+    assert.equal(direct.__log['cookie-default'][0].cookies, '');
     assert.deepEqual(proxied, direct);
   });
 

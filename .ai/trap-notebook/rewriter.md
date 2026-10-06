@@ -1458,7 +1458,7 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 
 - **측정:** e2e `cookies set by fetch and XHR…` 의 `sent.back` 이 `ck_script=1`(방금 `document.cookie` 로 쓴 것)을 못 받는 실행이 이어졌다. SW 로그를 심으면 통과하는 **하이젠버그**였다 — 로그를 심은 실행에서는 쓰기가 요청보다 2 ms 먼저, 심지 않은 실행에서는 뒤에 닿았다.
 - **원인:** jar 는 SW 에 있다. 쓰기(`postMessage`)와 요청(`fetch('/zp/api/v2/fetch')`)은 **다른 경로**로 가서 어느 쪽이 먼저 닿을지 정해져 있지 않다. 네이티브 jar 는 동기라 항상 실린다. 이 경쟁은 이 작업 전부터 있었다 — 이 작업이 확률을 바꿨을 뿐이다(베이스라인 2/2 통과, 이 작업 트리 3/3 실패).
-- **수정:** 쓰기의 ack 를 `cookieWritesInFlight` 에 모으고 `postRuntimeEnvelope` 가 진행 중인 쓰기를 기다린 뒤 보낸다. 실패한 쓰기도 settle 되므로 요청을 막지 않는다. 동기 XHR·내비게이션·`<img>` 는 기다릴 수 없다 — ERRATA 잔여.
+- **수정:** 쓰기의 ack 를 `cookieWritesInFlight` 에 모으고 `postRuntimeEnvelope` 가 진행 중인 쓰기를 기다린 뒤 보낸다. 실패한 쓰기도 settle 되므로 요청을 막지 않는다. 내비게이션·`<img>` 는 기다릴 수 없다 — ERRATA 잔여. 동기 XHR 은 나중에 쓰기를 직접 싣는 것으로 풀었다([쿠키-동기-xhr](#쿠키-동기-xhr)).
 - **규칙:** 간헐 실패를 로그로 재현하려는데 로그를 심으면 통과한다면 **타이밍 경쟁**이다. 로그를 더 심지 말고 순서를 보장하는 쪽으로 고친다. 두 메시지가 서로 다른 경로로 같은 목적지(여기서는 SW)에 가면 도착 순서에 기대지 않는다.
 - **검증:** prelude 단위 테스트 `cookie writes: a runtime request waits…`, e2e `cookies set by fetch and XHR…` 를 같은 빌드에서 6회 연속 통과.
 
@@ -1469,6 +1469,39 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **수정:** 표를 완성했다 — `append`·`prepend`·`replaceChildren`·`before`·`after`·`replaceWith`(Element·Document·DocumentFragment·CharacterData), `insertAdjacentElement`, `Range.insertNode`. 래퍼는 네이티브의 `length` 를 보고한다(`...args` 라 0 이었다).
 - **규칙:** 새 DOM 삽입 API 는 훅 표에 넣을 때까지 구멍이다 — `ParentNode`·`ChildNode` 믹스인과 `Range` 의 목록을 표준과 대조한다. `Range.surroundContents` 는 새 부모로 기존 내용을 옮기는 것이라 스크립트를 실행하지 않는다(네이티브도 실행 안 함, 측정).
 - **검증:** e2e `scripts put in by every insertion door run through the membrane (matches native)`(문 19개, 변이 3개 확인 — `replaceChildren`·`insertAdjacentElement`·텍스트 노드), 탐색 프로브 18/18 동일.
+
+## <a id="불투명-쿠키-secure-loopback"></a>불투명 프레임의 요청이 사이트 쿠키를 실었고, `Secure` 쿠키는 `http://localhost` 에서 안 갔다 (2026-10-06)
+
+- **측정:** 같은 픽스처를 네이티브/프록시에서. `sandbox` 에 `allow-same-origin` 이 없는 프레임의 `<img>`·CSS·`fetch` 요청이 네이티브에서는 `SameSite=None` 쿠키만 싣는다(불투명 오리진은 어느 사이트와도 교차 사이트). 프록시는 jar 전체를 실었고, 그 프레임의 응답이 건 `Lax`/기본 쿠키도 jar 에 남겼다. 고치다 보니 **같은 픽스처의 `SameSite=None; Secure` 쿠키가 프록시 jar 에서 아예 안 갔다** — 네이티브 Chrome 은 `Secure` 쿠키를 loopback(`localhost`·`*.localhost`·127/8·`::1`)의 http 로도 보낸다.
+- **원인:** SW 는 요청을 만든 문서가 불투명인지 몰랐다 — 경로가 항목(entry)에 그걸 적지 않았다. `cookiesForURL` 은 `r.secure && url.protocol !== 'https:'` 로 loopback 을 `https` 가 아니라고 걸렀고, 페이지 쪽 `cookieRecordVisible` 도 같았다.
+- **수정:** 라우트 등록(`FRAME_ROUTE`·`HISTORY_UPDATE`·`OPEN_SHARE`)이 `opaque` 를 싣고 항목이 보관한다. 전송 상태의 `initiatorOpaque` 가 jar 를 양방향으로 거른다(`cookiesForURL(…, crossSite)`·`setCookieLine(…, { crossSite })`). 보안 문맥 판정은 https 와 loopback(SW `secureForCookies`, 페이지 `cookieContextSecure`).
+- **규칙:** 네이티브와 다른 값은 **요청 단위로 대조하라** — 최종 jar 만 비교하면 보내는 쪽 차이가 가려진다(픽스처 서버가 요청마다 받은 쿠키 이름을 태그로 남긴다). 쿠키 판정을 새로 만들면 loopback 의 Secure 규칙도 같이 확인한다.
+- **검증:** e2e `a sandboxed frame sends and keeps only the cookies a cross-site context may (matches native)`, 변이 3개(요청 필터·응답 필터·loopback 보안 판정 되돌리기) 전부 실패로 잡힘.
+
+## <a id="불투명-팝업"></a>불투명 프레임이 연 팝업이 불투명하지 않았다 (2026-10-06)
+
+- **측정:** `allow-scripts allow-popups` 프레임의 `open()` 팝업이 네이티브에서는 `self.origin === 'null'`·저장소/쿠키/IDB/`caches`/`serviceWorker` 거부·`opener.document` SecurityError 다. 프록시 팝업은 사이트 오리진이었다.
+- **원인:** 브라우저는 팝업에 opener 의 sandbox 플래그를 그대로 적용한다 — 에뮬레이트하는 것은 **오리진**인데, 팝업 경로는 opener 의 사이트만 알고 불투명 여부를 몰랐다(`OPEN_SHARE` 에 없음).
+- **수정:** `OPEN_SHARE` 가 `opaque` 를 싣고(`allow-popups-to-escape-sandbox` 면 싣지 않는다) SW 항목이 부트 JSON 에 `opaque: true` 를 넣는다. 팝업의 prelude 는 `boot.opaque` 로 `opaqueDocument` 를 켠다. `sandboxFlags()` 는 팝업 경로도 쓰므로 `13-attrs.js` 로 올렸다.
+- **규칙:** 에뮬레이트한 속성이 **새 창을 만드는 경로**(팝업·프레임 이동·`target`)를 따라가는지 따로 확인한다 — 속성은 요소가 아니라 문서에 붙는다.
+- **검증:** e2e `a popup of a sandboxed frame is as opaque as the frame (matches native)`, 변이 2개 확인. 팝업이 쓰는 `document.cookie` 는 **그 테스트가 심은 쿠키 이름만** 비교한다 — 프록시 세션의 jar 는 앞선 서브테스트의 쿠키를 들고 있고 네이티브 브라우저는 새것이다.
+
+## <a id="쿠키-동기-xhr"></a>`document.cookie = x` 직후의 동기 XHR 이 쿠키를 놓칠 수 있었다 (2026-10-06)
+
+- **측정:** 쓰기를 SW 로 가는 `postMessage` 에 붙들어 두면(`ServiceWorker.prototype.postMessage` 를 감싼다) 동기 XHR 이 쓴 쿠키를 못 싣는다 — 경쟁을 결정적으로 만든 재현.
+- **원인:** 비동기 요청은 쓰기의 ack 를 기다린다([쿠키-쓰기-직후-요청](#쿠키-쓰기-직후-요청)). 동기 호출은 기다릴 수 없다.
+- **수정:** 동기 릴레이가 아직 ack 안 된 쓰기(최신 32개)를 `dv`(문서 URL) + `ck`(JSON `[id, line]`) 로 싣고, Go 가 모양과 크기를 검증해 잡에 넣고, SW 가 jar 를 읽기 전에 적용한다. 쓰기에 id(`wid`)가 있어 SW 는 어느 길이 먼저 와도 한 번만 적용하고 쓴 문서는 자기 쓰기의 푸시를 무시한다.
+- **함정:** 처음에는 e2e 의 "붙들어 둔" 단계가 통과 후 **실패**했다 — 동기 루프 안에서는 ack 가 올 수 없어 대기 목록이 계속 자라는데, Go 가 **앞에서부터** 16개만 받아 가장 새 쓰기가 잘렸다. 페이지는 최신 32개를 보내고 Go 상한도 32 로 맞췄다(단위 테스트 둘).
+- **검증:** e2e `a cookie written just before a synchronous XHR goes out with it (matches native)`(변이 확인), prelude 단위 테스트, Go `TestParsePendingCookies`.
+
+## <a id="cors-적용"></a>CORS 를 적용하지 않아 허락 안 한 교차 오리진 읽기가 성공했다 (2026-10-06)
+
+- **측정:** `localhost` 페이지가 `127.0.0.1` 에 `fetch` — 네이티브는 `Access-Control-Allow-Origin` 이 없으면 `TypeError: Failed to fetch`, 프록시는 `basic` 응답이 resolve. 사전 요청(preflight)·노출 헤더·리다이렉트·동기 XHR 도 전부 달랐다.
+- **원인:** 요청은 SW 가 대신 보내므로 브라우저의 CORS 규칙이 걸릴 자리가 없었다. 응답의 `Access-Control-*` 는 `applyCORS` 가 프록시 오리진으로 **덮어쓴다** — 확인은 그 전에 업스트림 헤더로 해야 한다.
+- **수정:** `transportFetchHop` 이 페이지의 cors 요청(`runtimeFetch && mode === 'cors'`)을 가상 오리진으로 판정한다 — 오리진을 벗어나면 오염(tainted)·"unsafe" 요청은 preflight·홉마다 CORS 확인·두 외부 오리진 사이 리다이렉트 뒤 `Origin: null`·URL 에 자격증명이 든 교차 오리진 리다이렉트 거부·노출 헤더 걸러내기(`__zpFetchMeta.expose`)·`type: 'cors'`. 거부는 `type: 'error'` 메타 응답으로 알려 페이지가 한 번만 reject 한다. 동기 XHR 은 `wc`(withCredentials)를 싣고 `ZP_NETWORK_ERROR` 로 `send()` 가 `NetworkError` 를 던진다.
+- **함정:** (1) 거부를 `Response.error()` 로 돌려주면 페이지의 `postRuntimeEnvelope` 가 "엔드포인트가 죽었다" 로 읽고 v1 로 **다시 보낸다** — 거부된 요청이 서버 로그에 두 번 찍혔다. 오류도 **타입이 있는 응답**이어야 한다. (2) 동기 XHR 릴레이는 응답 헤더 다섯 이름만 통과시켜 `getResponseHeader('x-…')` 가 원래 못 읽었다 — 읽을 수 있는 헤더를 `X-ZP-Sync-Visible` 한 값으로 실어 보낸다. (3) 리다이렉트의 자격증명 검사는 `canonicalTargetURL` 이 userinfo 를 지우기 **전** URL 로 해야 한다. (4) 표준은 `Access-Control-Allow-Headers: *` 가 `Authorization` 을 덮지 않게 하지만 기준 Chrome 148 은 덮는다 — 기준(네이티브)을 따른다. (5) `<a ping>` 은 CORS 요청이 아니다(타깃 응답과 무관하게 나간다) — `fetchThroughRuntime` 의 `internal.mode: 'no-cors'`. EventSource 가 붙이는 `Cache-Control: no-cache` 는 브라우저가 붙이는 헤더라 preflight 를 부르면 안 된다 — `implicitHeaders`. (6) 실사이트(GitHub·CNN·NAVER·Guardian·BBC·Wikipedia)에서 SW 거절 목록(`__zp_refusals()`)을 보면 거절은 전부 `sendBeacon` 텔레메트리(credentials + `ACAO: *` 또는 헤더 없음)였고 업스트림에 `curl -H Origin` 으로 확인했다 — 네이티브도 막는다.
+- **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
+- **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
 ## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번(파싱된 프레임은 세 번), 히스토리가 두 칸이었다 (2026-10-01)
 

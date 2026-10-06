@@ -4,7 +4,7 @@
     if (!explicitBaseURL) baseURL = virtualURL.href;
     const entryId = replace && activeEntryId ? activeEntryId : 'e' + ZP.randomId();
     activeEntryId = entryId;
-    ctx.bridge.send({ type: ZP.MSG.HISTORY_UPDATE, tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace }).catch(()=>{});
+    ctx.bridge.send({ type: ZP.MSG.HISTORY_UPDATE, tabId: boot.tabId, routeKey: activeRouteKey, entryId, targetUrl: virtualURL.href, baseUrl: baseURL, replace, ...(opaqueDocument ? { opaque: true } : null) }).catch(()=>{});
     const pushURL = proxyAbsoluteURL(proxyHistoryURL());
     const out = (replace ? Native.historyReplace : Native.historyPush)(state, title, pushURL);
     refreshVisibleShareRoute(entryId, virtualURL.href, baseURL);
@@ -64,7 +64,7 @@
     const share = await ZP.encryptShareURL(target);
     const path = ZP.makeSharePath(share.encrypted);
     const entryId = replace ? activeEntryId : 'e' + ZP.randomId();
-    await ctx.bridge.send({ type: ZP.MSG.HISTORY_UPDATE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, replace });
+    await ctx.bridge.send({ type: ZP.MSG.HISTORY_UPDATE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, replace, ...(opaqueDocument ? { opaque: true } : null) });
     activeProxyPath = path;
     activeRouteKey = share.encrypted;
     activeProxyFragment = shareFragmentForKey(share.key);
@@ -84,17 +84,21 @@
     if (frameRouteTargets.size >= 4096) frameRouteTargets.delete(frameRouteTargets.keys().next().value);
     frameRouteTargets.set(routeKey, target);
   }
-  async function activatedFrameURL(raw, base = baseURL) {
+  // `opaque`: is the frame this route is for opaque (a boolean, or a function asked as the route is sent —
+  // the frame's sandbox may be set while the route is being made). Default: the frames this document makes
+  // are opaque when it is.
+  async function activatedFrameURL(raw, base = baseURL, opaque) {
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     rememberFrameRoute(share.encrypted, target);
     const entryId = 'e' + ZP.randomId();
+    const isOpaque = typeof opaque === 'function' ? !!opaque() : opaque === undefined ? opaqueDocument : !!opaque;
     // parentTargetUrl carries the embedding page's virtual URL so the SW can
     // send the right Referer when fetching the iframe document. Without it
     // the iframe's own URL is used, and origin-aware endpoints (e.g. NAVER's
     // shopsquare.naver.com /newshopping) 404 because they expect the embedder
     // page's host in Referer.
-    await ctx.bridge.send({ type: ZP.MSG.FRAME_ROUTE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, parentTargetUrl: virtualURL.href });
+    await ctx.bridge.send({ type: ZP.MSG.FRAME_ROUTE, tabId: boot.tabId, routeKey: share.encrypted, entryId, targetUrl: target, baseUrl: target, parentTargetUrl: virtualURL.href, ...(isOpaque ? { opaque: true } : null) });
     return proxyOrigin + ZP.makeSharePath(share.encrypted) + shareFragmentForKey(share.key);
   }
   function navigateToTarget(raw, replace = false, base = baseURL) {

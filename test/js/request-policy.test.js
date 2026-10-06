@@ -430,3 +430,119 @@ test('CORS: 와일드카드 오리진에는 credentials 를 켜지 않는다', (
   assert.equal(bare.get('access-control-allow-origin'), '*');
   assert.equal(bare.get('access-control-allow-credentials'), null);
 });
+
+
+// A page's own cross-origin cors-mode request meets the browser's CORS rules in the worker (Fetch Standard:
+// tainting, preflight, CORS check, exposed headers). The e2e differential holds it to native Chrome; these pin
+// the decisions without a browser.
+function corsWorker(answer) {
+  const seen = [];
+  const worker = loadWorker(async request => {
+    const entry = { url: request.url, method: request.method, headers: new Headers(request.headerEntries) };
+    seen.push(entry);
+    return answer(entry, seen.length);
+  });
+  return { worker, seen };
+}
+const corsOptions = (tab, extra) => Object.assign({ tab, runtimeFetch: true, mode: 'cors', credentials: 'same-origin', method: 'GET' }, extra);
+const allowOrigin = (headers, extra) => new Response('body', { headers: Object.assign({ 'Access-Control-Allow-Origin': 'https://site.example' }, headers, extra) });
+const lastRefusal = worker => vm.runInContext('refusalLog[refusalLog.length - 1]', worker);
+
+test('CORS: a cross-origin cors request is a network error unless the response names the origin', async () => {
+  const { worker, seen } = corsWorker((req, n) => new Response('secret', { headers: n === 1 ? {} : n === 2 ? { 'Access-Control-Allow-Origin': 'https://elsewhere.example' } : { 'Access-Control-Allow-Origin': '*' } }));
+  const { tab } = tabWithEntry();
+  assert.equal((await worker.transportFetch('https://api.example/a', corsOptions(tab))).type, 'error', 'no header');
+  assert.equal((await worker.transportFetch('https://api.example/a', corsOptions(tab))).type, 'error', 'another origin');
+  const ok = await worker.transportFetch('https://api.example/a', corsOptions(tab));
+  assert.equal(ok.status, 200, '* without credentials');
+  assert.equal(ok.__zpFetchMeta.type, 'cors');
+  assert.equal(seen[0].headers.get('x-zp-origin'), 'https://site.example', 'the request says where it comes from');
+  // `*` does not do for a request with credentials
+  const creds = await worker.transportFetch('https://api.example/a', corsOptions(tab, { credentials: 'include' }));
+  assert.equal(creds.type, 'error');
+  assert.equal(lastRefusal(worker).code, 'CORS_CHECK_FAILED');
+});
+
+test('CORS: the document\'s own origin and no-cors requests are not checked', async () => {
+  const { worker } = corsWorker(() => new Response('plain'));
+  const { tab } = tabWithEntry();
+  const same = await worker.transportFetch('https://site.example/data', corsOptions(tab));
+  assert.equal(same.status, 200);
+  assert.equal(same.__zpFetchMeta.type, 'basic');
+  const noCors = await worker.transportFetch('https://api.example/pixel', corsOptions(tab, { mode: 'no-cors' }));
+  assert.equal(noCors.__zpFetchMeta.type, 'opaque');
+});
+
+test('CORS: an unsafe request is preflighted, and goes out only if the answer allows it; the answer is cached', async () => {
+  const { worker, seen } = corsWorker(req => req.method === 'OPTIONS'
+    ? new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': 'https://site.example', 'Access-Control-Allow-Methods': 'PUT', 'Access-Control-Allow-Headers': 'X-Custom', 'Access-Control-Max-Age': '60' } })
+    : allowOrigin());
+  const { tab } = tabWithEntry();
+  const put = await worker.transportFetch('https://api.example/item', corsOptions(tab, { method: 'PUT', headers: { 'X-Custom': '1' } }));
+  assert.equal(put.status, 200);
+  assert.deepEqual(seen.map(r => r.method), ['OPTIONS', 'PUT']);
+  assert.equal(seen[0].headers.get('access-control-request-method'), 'PUT');
+  assert.equal(seen[0].headers.get('access-control-request-headers'), 'x-custom');
+  assert.equal(seen[0].headers.get('cookie'), null, 'a preflight carries no credentials');
+  await worker.transportFetch('https://api.example/item', corsOptions(tab, { method: 'PUT', headers: { 'X-Custom': '1' } }));
+  assert.deepEqual(seen.map(r => r.method), ['OPTIONS', 'PUT', 'PUT'], 'the answer is reused for its Max-Age');
+  // a header the answer did not allow: asked, refused, never sent
+  const refused = await worker.transportFetch('https://api.example/item', corsOptions(tab, { method: 'PUT', headers: { 'X-Other': '1' } }));
+  assert.equal(refused.type, 'error');
+  assert.deepEqual(seen.slice(3).map(r => r.method), ['OPTIONS']);
+  assert.equal(lastRefusal(worker).code, 'CORS_PREFLIGHT_FAILED');
+});
+
+test('CORS: simple methods and safelisted headers need no preflight; JSON content does', async () => {
+  const { worker, seen } = corsWorker(req => req.method === 'OPTIONS' ? new Response(null, { status: 204 }) : allowOrigin());
+  const { tab } = tabWithEntry();
+  await worker.transportFetch('https://api.example/a', corsOptions(tab, { method: 'POST', headers: { 'Content-Type': 'text/plain', Accept: 'application/json' }, body: new TextEncoder().encode('x') }));
+  assert.deepEqual(seen.map(r => r.method), ['POST']);
+  const json = await worker.transportFetch('https://api.example/a', corsOptions(tab, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: new TextEncoder().encode('{}') }));
+  assert.equal(json.type, 'error', 'the preflight answered without Access-Control-Allow-Origin');
+  assert.deepEqual(seen.slice(1).map(r => r.method), ['OPTIONS']);
+});
+
+test('CORS: a cors response shows only the safelisted and the exposed headers', async () => {
+  const { worker } = corsWorker(() => allowOrigin({ 'X-Secret': '1', 'X-Public': '2', 'Content-Type': 'text/plain', 'Access-Control-Expose-Headers': 'x-public' }));
+  const { tab } = tabWithEntry();
+  const resp = await worker.transportFetch('https://api.example/a', corsOptions(tab));
+  const expose = resp.__zpFetchMeta.expose;
+  assert.ok(expose.names.includes('x-public') && expose.names.includes('content-type'));
+  assert.ok(!expose.names.includes('x-secret'));
+  const visible = new Headers(resp.headers);
+  visible.set('X-ZP-Fetch-Meta', '{}');
+  worker.corsFilterHeaders(visible, expose);
+  assert.equal(visible.get('x-public'), '2');
+  assert.equal(visible.get('x-secret'), null);
+  assert.equal(visible.get('content-type'), 'text/plain');
+  assert.equal(visible.get('x-zp-fetch-meta'), '{}', 'the worker\'s own channel stays');
+});
+
+test('CORS: between two other origins the request says Origin: null, and every hop is checked', async () => {
+  const { worker, seen } = corsWorker((req, n) => n === 1
+    ? new Response(null, { status: 302, headers: { Location: 'https://third.example/x', 'Access-Control-Allow-Origin': '*' } })
+    : new Response('ok', { headers: { 'Access-Control-Allow-Origin': 'null' } }));
+  const { tab } = tabWithEntry();
+  const ok = await worker.transportFetch('https://api.example/a', corsOptions(tab));
+  assert.equal(ok.status, 200);
+  assert.deepEqual(seen.map(r => r.headers.get('x-zp-origin')), ['https://site.example', 'null']);
+  // the redirect response itself has to pass the check
+  const bare = corsWorker((req, n) => n === 1 ? new Response(null, { status: 302, headers: { Location: 'https://third.example/x' } }) : allowOrigin());
+  const refused = await bare.worker.transportFetch('https://api.example/a', corsOptions(tab));
+  assert.equal(refused.type, 'error');
+  assert.equal(bare.seen.length, 1, 'the redirect target is never requested');
+});
+
+test('CORS: a header the browser adds itself (an EventSource: Cache-Control) does not make a request need a preflight', async () => {
+  const { worker, seen } = corsWorker(req => req.method === 'OPTIONS' ? new Response(null, { status: 204 }) : allowOrigin());
+  const { tab } = tabWithEntry();
+  const sse = await worker.transportFetch('https://api.example/stream', corsOptions(tab, { headers: { 'Cache-Control': 'no-cache' }, implicitHeaders: ['cache-control'] }));
+  assert.equal(sse.status, 200);
+  assert.deepEqual(seen.map(r => r.method), ['GET']);
+  assert.equal(seen[0].headers.get('cache-control'), 'no-cache', 'the header still goes upstream');
+  // the same header written by the page is the page's, and is asked about
+  const own = await worker.transportFetch('https://api.example/stream', corsOptions(tab, { headers: { 'Cache-Control': 'no-cache' } }));
+  assert.equal(own.type, 'error');
+  assert.deepEqual(seen.slice(1).map(r => r.method), ['OPTIONS']);
+});

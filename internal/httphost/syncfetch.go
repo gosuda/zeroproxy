@@ -49,6 +49,13 @@ type syncFetchJob struct {
 	Entry   string     `json:"entry"`
 	Method  string     `json:"method"`
 	Headers [][]string `json:"headers"`
+	// WithCredentials — the XHR's `withCredentials`: a cross-origin request carries cookies only then.
+	WithCredentials bool `json:"wc,omitempty"`
+	// DocURL / Cookies — what the page wrote with `document.cookie` and the worker has not acknowledged
+	// yet: [id, line] pairs, and the document URL they were written under. A synchronous request
+	// cannot wait for the acknowledgement, so it carries the writes; the worker applies them first.
+	DocURL  string     `json:"docUrl,omitempty"`
+	Cookies [][]string `json:"cookies,omitempty"`
 	// Kind — 응답에 어떤 후처리를 해야 하는지. 동기 XHR 은 원본 바이트를
 	// 원하므로 빈 값이다. SW-less 프레임의 서브리소스는 SW 의 `/zp/api/fetch`
 	// 핸들러가 해 주던 CSS/스크립트 리라이트를 여기서 받아야 한다 — 릴레이는
@@ -150,14 +157,17 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := &syncFetchJob{
-		ID:     q.Get("rid"),
-		Target: target,
-		Tab:    q.Get("tab"),
-		Entry:  q.Get("entry"),
-		Method: strings.ToUpper(q.Get("m")),
-		Kind:   q.Get("kind"),
-		result: make(chan *syncFetchResult, 1),
+		ID:              q.Get("rid"),
+		Target:          target,
+		Tab:             q.Get("tab"),
+		Entry:           q.Get("entry"),
+		Method:          strings.ToUpper(q.Get("m")),
+		Kind:            q.Get("kind"),
+		DocURL:          q.Get("dv"),
+		WithCredentials: q.Get("wc") == "1",
+		result:          make(chan *syncFetchResult, 1),
 	}
+	job.Cookies = parsePendingCookies(q["ck"])
 	switch job.Kind {
 	case "", "style", "script":
 	default:
@@ -212,6 +222,27 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		s.syncHub.take(job.ID)
 	}
+}
+
+// parsePendingCookies — the `ck` query values: each a JSON [id, line]. Bounded and shape-checked: the
+// page is trusted no further than any other caller of this endpoint.
+func parsePendingCookies(values []string) [][]string {
+	const maxWrites, maxLine = 32, 8192
+	var out [][]string
+	for _, v := range values {
+		if len(out) >= maxWrites {
+			break
+		}
+		var pair []string
+		if json.Unmarshal([]byte(v), &pair) != nil || len(pair) != 2 {
+			continue
+		}
+		if pair[0] == "" || len(pair[0]) > 64 || len(pair[1]) > maxLine {
+			continue
+		}
+		out = append(out, pair)
+	}
+	return out
 }
 
 // handleSyncFetchPoll — SW 가 여는 long-poll. 작업이 생기면 그때 응답한다.
@@ -346,7 +377,7 @@ func decodeB64(s string) []byte {
 // `document.cookie` 를 읽는다). 값은 SW 가 만든 JSON 이고 프렐류드가 읽고 지운다.
 func safeSyncHeader(name string) bool {
 	switch strings.ToLower(name) {
-	case "content-type", "content-language", "expires", "last-modified", "etag", "x-zp-cookie-delta":
+	case "content-type", "content-language", "expires", "last-modified", "etag", "x-zp-cookie-delta", "x-zp-sync-visible":
 		return true
 	}
 	return false

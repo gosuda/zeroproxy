@@ -310,7 +310,7 @@
       Native.setAttribute.call(el, key, 'about:blank');
       pendingFrameRoutes.add(el);
     }
-    activatedFrameURL(target).then(u => {
+    activatedFrameURL(target, undefined, () => frameIsOpaque(el)).then(u => {
       if (frameRouteSeq.get(el) !== seq) return;
       Native.setAttribute.call(el, key, u);
       rememberFrameOrigin(el);
@@ -354,6 +354,12 @@
   }
   function frameHasOpaqueMark(frame) {
     try { return Native.hasAttribute.call(frame, OPAQUE_FRAME_ATTR); } catch { return false; }
+  }
+  // Opaque: the frame was sandboxed without allow-same-origin, or it is inside a document that is.
+  function frameIsOpaque(frame) { return opaqueDocument || frameHasOpaqueMark(frame); }
+  function windowIsOpaque(win) {
+    try { const fe = win.frameElement; if (fe) return frameIsOpaque(fe); } catch {}
+    return opaqueDocument;
   }
 
   function instrumentFrameList(frames) { if (frames) for (const frame of frames) instrumentIframe(frame); }

@@ -39,8 +39,14 @@
     const item = cookieItemFromRec(rec);
     fireCookieChange(deleted ? [] : [item], deleted ? [item] : []);
   }
+  // Secure cookies reach https and, like Chrome, loopback over http (a local dev target).
+  function cookieContextSecure() {
+    if (virtualURL.protocol === 'https:') return true;
+    const h = virtualURL.hostname.toLowerCase();
+    return h === 'localhost' || h.endsWith('.localhost') || h === '[::1]' || /^127(\.\d{1,3}){3}$/.test(h);
+  }
   function cookieRecordVisible(r, now, host, path) {
-    return r.expires > now && (!r.secure || virtualURL.protocol === 'https:') && (r.hostOnly ? r.domain === host : host === r.domain || host.endsWith('.' + r.domain)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')));
+    return r.expires > now && (!r.secure || cookieContextSecure()) &&(r.hostOnly ? r.domain === host : host === r.domain || host.endsWith('.' + r.domain)) && (path === r.path || (path.startsWith(r.path) && (r.path.endsWith('/') || path[r.path.length] === '/')));
   }
   function visibleCookieRecords() {
     const now = Date.now();
@@ -62,16 +68,29 @@
   // synchronously. Ours lives in the service worker, and the write (a message) and the request (a fetch)
   // travel by different routes: either may get there first. So a runtime request waits for the
   // acknowledgement of the writes still in flight.
-  const cookieWritesInFlight = new Set();
+  // sent → { wid, line }. A write has an id so the worker applies it once even when it arrives twice (as the
+  // message and with a synchronous request) and so this document can tell the push of its own write.
+  const cookieWritesInFlight = new Map();
+  const ownCookieWrites = new Set();
   function sendCookieSet(line) {
-    const sent = ctx.bridge.send({ type: ZP.MSG.COOKIE_SET, tabId: boot.tabId, targetUrl: virtualURL.href, cookie: String(line) })
+    const wid = 'w' + ZP.randomId();
+    ownCookieWrites.add(wid);
+    if (ownCookieWrites.size > 256) ownCookieWrites.delete(ownCookieWrites.values().next().value);
+    const sent = ctx.bridge.send({ type: ZP.MSG.COOKIE_SET, tabId: boot.tabId, targetUrl: virtualURL.href, cookie: String(line), wid })
       .catch(err => { try { root.__zp_diagnostics && root.__zp_diagnostics.push({ t: 'cookie-set-failed', code: String((err && (err.code || err.message)) || err), ck: String(line).slice(0, 60) }); } catch {} })
       .then(() => { cookieWritesInFlight.delete(sent); });
-    cookieWritesInFlight.add(sent);
+    cookieWritesInFlight.set(sent, { wid, line: String(line) });
     return sent;
   }
   function cookieWritesSettled() {
-    return cookieWritesInFlight.size ? Promise.all(Array.from(cookieWritesInFlight)) : null;
+    return cookieWritesInFlight.size ? Promise.all(Array.from(cookieWritesInFlight.keys())) : null;
+  }
+  // What a request that cannot wait (a synchronous XHR) carries instead: [id, line] of each write the worker
+  // has not acknowledged. A script that writes and sends in one synchronous run never lets an acknowledgement
+  // in, so the list grows with the run: the newest are what matter, and the cap keeps the request small.
+  const MAX_CARRIED_COOKIE_WRITES = 32;
+  function pendingCookieWrites() {
+    return Array.from(cookieWritesInFlight.values()).slice(-MAX_CARRIED_COOKIE_WRITES).map(w => [w.wid, w.line]);
   }
   const appliedCookieChanges = new Set();
   function applyCookieChanges(changes) {
@@ -80,6 +99,7 @@
     for (const c of changes) {
       try {
         if (!c || typeof c.name !== 'string' || typeof c.domain !== 'string') continue;
+        if (c.wid && ownCookieWrites.has(c.wid)) continue; // this document wrote it: its copy has it
         if (c.id) {
           if (appliedCookieChanges.has(c.id)) continue;
           appliedCookieChanges.add(c.id);

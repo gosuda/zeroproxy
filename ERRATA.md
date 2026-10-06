@@ -351,6 +351,60 @@ claimed:
     and the wrappers report the native method's `length` (they read 0). — e2e `scripts put in by every
     insertion door run through the membrane (matches native)` (nineteen doors, shadow roots and clones
     included; three mutations checked).
+42. **A sandboxed frame's requests carried the site's cookies, and its responses set them.** Natively a
+    document with an opaque origin is cross-site to everything: of the jar only `SameSite=None` cookies
+    travel with its requests (`<img>`, stylesheets, scripts and runtime `fetch`/XHR alike), and only those
+    may be set by its responses. The service worker attached the tab's whole jar to every request it
+    forwarded. Every route a document registers now says whether the document is opaque (`FRAME_ROUTE`,
+    `HISTORY_UPDATE`, `OPEN_SHARE`), the tab's entry keeps it, and the transport filters the jar both
+    ways (`cookiesForURL(…, crossSite)`, `setCookieLine(…, { crossSite })`). Found on the way: a `Secure`
+    cookie was never sent to `http://localhost` — Chrome sends it to loopback (`localhost`, `*.localhost`,
+    127/8, `::1`) — in the jar or in `document.cookie`. — e2e `a sandboxed frame sends and keeps only the
+    cookies a cross-site context may (matches native)` (image, stylesheet, fetch with and without
+    credentials, cookies an opaque frame's responses set; three mutations checked).
+43. **A popup opened by a sandboxed frame was not itself opaque.** The browser applies the opener's sandbox
+    flags to the popup either way; the origin is what the membrane emulates, and the popup path knew its
+    opener's site, not its sandbox. `OPEN_SHARE` now carries `opaque` and the worker's boot JSON hands it to
+    the popup's prelude (`allow-popups-to-escape-sandbox` leaves the popup unsandboxed, with its real
+    origin). A frame the popup makes is opaque too. — e2e `a popup of a sandboxed frame is as opaque as the
+    frame (matches native)` (opaque, escaping and no-popups variants; two mutations checked).
+44. **A synchronous XHR made right after `document.cookie = x` could miss the cookie.** Item 40 made
+    runtime `fetch` and asynchronous XHR wait for the write's acknowledgement; a synchronous call cannot wait.
+    It carries the writes the worker has not acknowledged (the newest 32, `dv` + `ck` query values, bounded
+    and shape-checked by the Go relay) and the worker applies them before it reads the jar. A write has an
+    id, so the worker applies it once whichever route arrives first and the writing document ignores the
+    push of its own. — e2e `a cookie written just before a synchronous XHR goes out with it (matches native)` (the message is
+    held back on purpose, so the race is deterministic; mutation checked), prelude unit tests, Go
+    `TestParsePendingCookies`.
+45. **CORS was not enforced: a cross-origin `fetch`/XHR the target never allowed resolved.** The proxy sends
+    the page's requests itself, so the browser's rules are its to apply — they were skipped, and every
+    response read `basic`. The worker now applies the Fetch Standard to a page's cors-mode request, against
+    the document's *virtual* origin (`null` for an opaque one): the request is tainted once it leaves the
+    origin (redirects included); an "unsafe" one (method other than GET/HEAD/POST, a header outside the
+    safelist, a `Content-Type` other than form/text) is preflighted first — an OPTIONS without
+    credentials, answered 2xx, passing the CORS check, allowing the method and every header, cached per tab
+    for `Max-Age` (default 5 s, at most 2 h) — and the request is sent only if that answer allows it;
+    every hop's response passes the CORS check (`Access-Control-Allow-Origin` naming the origin, or `*`
+    without credentials; `Access-Control-Allow-Credentials: true` with); after a redirect between two
+    other origins the request says `Origin: null`; a redirect to another origin with credentials in the
+    URL is refused; the response reads `cors` and shows the page only the safelisted headers and what
+    `Access-Control-Expose-Headers` names (`*` only without credentials). A refusal is one `fetch()`
+    rejection (`TypeError: Failed to fetch`) — a typed answer from the worker, because a bare network
+    error looked like a dead endpoint and the page asked again over the v1 path, which sent every refused
+    request twice. Synchronous XHR goes the same way (it used to send cookies on every request,
+    `withCredentials` or not) and `send()` throws `NetworkError`; the headers it may read now reach the
+    page whole (the relay passed five header names). Chrome 148, the reference, lets `*` in
+    `Access-Control-Allow-Headers` cover `Authorization` (the Standard does not), so it does here. Not
+    CORS requests, and so not checked: an `<a ping>` (the browser sends it whatever the target answers),
+    and the `Cache-Control: no-cache` an `EventSource` carries counts as the browser's own header, not the
+    page's, so it never makes a stream need a preflight. Refusals are listed by `__zp_refusals()`
+    (`CORS_PREFLIGHT_FAILED`, `CORS_CHECK_FAILED`, `CORS_REDIRECT_CREDENTIALS`) — GitHub, CNN, NAVER, the
+    Guardian, BBC and Wikipedia render as before; what they refuse is telemetry (`sendBeacon` with
+    credentials to endpoints that send no `Access-Control-Allow-Origin`, or `*`), which native refuses
+    too. — e2e
+    `cross-origin fetch and XHR obey CORS: who may read, when the browser asks first, redirects (matches
+    native)` (about seventy cases — origins, credentials, exposure, preflight, redirects, async and sync XHR
+    — identical to native, request logs included; five mutations checked).
 
 ### Residuals (documented, not fixed)
 
@@ -383,11 +437,11 @@ claimed:
 | A storage event carries own `key`/`storageArea`/`url` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` match native. | — |
 | A cookie another document wrote or a response set reaches this one **after a service-worker round trip** (milliseconds), not within the same task | A write in one frame is readable from a sibling frame once the worker has pushed it; natively the shared jar answers at once. Code that writes a cookie and reads it back through another frame in the same task sees the old value. | — |
 | A frame sandboxed without `allow-same-origin` is **same-origin with the proxy underneath**; its opacity is the prelude's | The proxy cannot serve a document that has a real opaque origin (no service worker, no `localStorage`). The browser keeps every other flag, the frame's namespaces are private to it, and every other window sees it as a cross-origin stand-in — but the denial list is code: a gap in it would let the frame read what any same-origin frame can read of its **own** namespace, never of a site's. | e2e `sandboxed frames are opaque to the page and to each other, as natively` |
-| A popup opened by a sandboxed frame (`allow-popups`) is not itself sandboxed | Natively it inherits the flags and the opaque origin. The popup path knows its opener's site, not its sandbox. | — |
-| A sandboxed frame's `<img>`, `<script>` and CSS loads carry the site's cookies; only runtime `fetch`/XHR send `Origin: null` and keep cookies back unless `credentials: 'include'` | Natively an opaque initiator is cross-site and sends none. The service worker attaches the tab's jar to every request it forwards. | — |
+| A `<script src>` in a sandboxed frame that may not run scripts is **not fetched** (native: fetched, not run) | Measured only: the browser never asks for it through the worker, the frame's `<img>` and stylesheet it does. Not investigated; nothing observable by the page. | — |
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
-| A cookie written by `document.cookie` may miss a **synchronous XHR**, a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40); these cannot wait. | — |
-| A cross-origin `fetch`/XHR without `Access-Control-Allow-Origin` **resolves** (native: `TypeError: Failed to fetch`; the response type reads `basic`, not `cors`) | The proxy forwards what the upstream answers and never filters it by the page's origin. Measured 2026-10-02: cross-site `fetch` with and without credentials, and XHR; `mode: 'no-cors'` and same-origin match. Older than the sandbox work, but it shows more now that a sandboxed frame — whose every request is cross-origin natively — reads same-site responses. | — |
+| A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
+| CORS is applied to a page's `fetch`/XHR (item 45), not to **element loads that use it** (`crossorigin` on `<script>`, `<img>`, `<link>`; module scripts; fonts) | Those go through the worker as the browser's own subresource requests, whose CORS headers the worker overwrites with the page's proxy origin. A load the target never allowed succeeds. Workers' `fetch` shares the page path; not separately pinned. | — |
+| A rewritten member read on a `null`/`undefined` receiver (`w.location.href` with `w === null`, a blocked `open()`) yields `undefined`; native throws `TypeError` | `__zp_get`/`__zp_oget` share one implementation that answers `undefined` for a nullish base. Measured 2026-10-06 (`__zp_get(null, 'location')`); every dangerous-member read has it. Changing it touches every rewritten site. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---

@@ -303,15 +303,28 @@ async function handleSyncFetchJob(job) {
   try {
     const tab = await resolveSyncTab(job.tab);
     if (!tab) throw new Error('SW_NOT_READY tab=' + (job.tab || '(none)') + ' known=' + tabs.size);
-    let resp = await transportFetch(job.target, {
+    // What the page wrote just before this request and the message has not delivered yet.
+    if (tab.cookieJar && Array.isArray(job.cookies) && job.docUrl) {
+      for (const pair of job.cookies) applyCookieWrite(tab, job.docUrl, pair && pair[1], pair && pair[0], undefined);
+    }
+    const entryId = job.entry || tab.activeEntryId;
+    const entry = tab.entries && tab.entries.get(entryId);
+    let resp = await transportFetch(job.target, Object.assign({
       method: job.method || 'GET',
       headers: Array.isArray(job.headers) ? job.headers : [],
       tab,
-      entryId: job.entry || tab.activeEntryId,
+      entryId,
       // A synchronous XHR reads `document.cookie` the moment it returns: the cookies the
       // response set ride back in a header (the page applies them before it returns).
       collectCookies: !job.kind,
-    });
+    }, job.kind ? null : {
+      // An XHR is a cors-mode request of its document (the element loads above are not), with cookies
+      // only as `withCredentials` asks — and the browser's CORS rules apply to it.
+      runtimeFetch: true, mode: 'cors', credentials: job.wc ? 'include' : 'same-origin',
+      opaqueOrigin: !!(entry && entry.opaque),
+    }));
+    // A network error (a failed CORS check among them) makes a synchronous `send()` throw.
+    if (!job.kind && resp && resp.type === 'error') throw new Error('ZP_NETWORK_ERROR');
     const cookieChanges = resp && resp.__zpFetchMeta && resp.__zpFetchMeta.cookies;
     // ★릴레이는 `transportFetch` 를 직접 부르므로 `/zp/api/fetch` 핸들러가
     // 하던 후처리를 못 탄다. 동기 XHR 은 원본 바이트를 원해서 문제가 없었지만,
@@ -333,7 +346,18 @@ async function handleSyncFetchJob(job) {
     else if (job.kind === 'script') resp = await rewriteScriptResponse(resp, { targetUrl: job.target, kind: 'classic' });
     out.status = resp.status;
     out.statusText = resp.statusText || '';
-    try { resp.headers.forEach((v, k) => out.headers.push([k, v])); } catch {}
+    try {
+      const visible = new Headers(resp.headers);
+      corsFilterHeaders(visible, resp.__zpFetchMeta && resp.__zpFetchMeta.expose);
+      visible.forEach((v, k) => out.headers.push([k, v]));
+      // The relay only lets a few header names through to the page's own XHR; what the document may read of
+      // the answer travels as one JSON value instead (an XHR's `getResponseHeader`).
+      if (!job.kind) {
+        const readable = [];
+        visible.forEach((v, k) => { if (!k.toLowerCase().startsWith('x-zp-') && k.toLowerCase() !== 'set-cookie') readable.push([k, v]); });
+        out.headers.push(['X-ZP-Sync-Visible', utf8Base64(JSON.stringify(readable))]);
+      }
+    } catch {}
     if (Array.isArray(cookieChanges) && cookieChanges.length) out.headers.push(['X-ZP-Cookie-Delta', utf8Base64(JSON.stringify(cookieChanges))]);
     // ★바이트를 그대로 넘긴다. 예전에는 여기서 base64 문자열을 만들었는데,
     // 서브리소스를 전부 이 경로로 보내자 그 비용이 SW 스레드에 몰려 다른 잡이
@@ -1095,12 +1119,16 @@ async function runtimeAPI(req, url, clientId) {
       method: init.method || 'GET', headers: init.headers || [],
       body: bodyBytes,
       tab, entryId, runtimeFetch: true, refOverride: payload.documentURL, opaqueOrigin: !!payload.opaque,
+      implicitHeaders: Array.isArray(payload.implicitHeaders) ? payload.implicitHeaders.map(h => String(h).toLowerCase()) : undefined,
       credentials: init.credentials || 'same-origin', mode: init.mode || 'cors',
       redirect: init.redirect || 'follow', referrer: init.referrer,
       referrerPolicy: init.referrerPolicy || '',
     });
-    if (resp.type === 'error') return resp;
+    // A network error (a failed CORS check, a refused redirect, …) reaches the page as one fetch() rejection.
+    // A bare `Response.error()` would look like a dead endpoint to it, and it would ask again.
+    if (resp.type === 'error') return new Response(null, { status: 200, headers: { 'X-ZP-Fetch-Meta': JSON.stringify({ type: 'error' }) } });
     const headers = new Headers(resp.headers);
+    corsFilterHeaders(headers, resp.__zpFetchMeta && resp.__zpFetchMeta.expose);
     headers.set('X-ZP-Fetch-Meta', JSON.stringify(resp.__zpFetchMeta || { url: payload.url, type: 'basic', redirected: false }));
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
@@ -1556,6 +1584,9 @@ async function transportFetch(targetUrl, opt) {
     headers: new Headers(opt.headers || (opt.request && opt.request.headers) || undefined),
     credentials: opt.credentials || 'include', redirect: opt.redirect || 'follow',
     redirectDepth: 0,
+    // An opaque document's requests are cross-site: of the jar only SameSite=None travels with them, and only
+    // that may be kept from their responses. (Its own document request is made by the embedder.)
+    initiatorOpaque: !!(opt.opaqueOrigin || (entry && entry.opaque)) && !opt.document,
     // Cookies a page's own fetch/XHR got set, hop by hop (see the Set-Cookie
     // block below): its `document.cookie` must show them when the promise
     // resolves, and the page's copy of the jar is only a snapshot.
@@ -1643,6 +1674,22 @@ async function transportFetchHop(targetUrl, opt) {
   // ready check at the top of `initKernel()`.
   try { await initKernel(); } catch { return safeError('SW_NOT_READY', 503, u); }
   if (typeof self.kernelFetch !== 'function') return safeError('SW_NOT_READY', 503, u);
+  // CORS (see the block above `isCORSPreflight`): a page's own cors-mode request to another origin is
+  // tainted from here on (redirects included), and an "unsafe" one is preflighted first.
+  const corsRequest = !!(opt.runtimeFetch && opt.mode === 'cors' && !opt.preflight);
+  const corsOrigin = opt.originTainted ? 'null' : opt.context.origin;
+  const corsCredentials = opt.credentials === 'include';
+  if (corsRequest) {
+    if (new URL(u).origin !== opt.context.origin) opt.tainted = true;
+    if (opt.tainted) {
+      const unsafeNames = corsUnsafeHeaderNames(opt.headers, opt.implicitHeaders);
+      if ((!corsSafelistedMethod(txMethod) || unsafeNames.length)
+          && !(await runCORSPreflight(u, opt, txMethod, unsafeNames, corsOrigin, corsCredentials))) {
+        logRefusal('CORS_PREFLIGHT_FAILED', 0, u, { method: txMethod, origin: corsOrigin, headers: unsafeNames.join(',') });
+        return Response.error();
+      }
+    }
+  }
   const headers = new Headers(opt.headers || (opt.request && opt.request.headers) || undefined);
   // Phase 5.8 note: page-side User-Agent survives this Headers init and
   // wins over the `pushOnce('user-agent', ZP.TARGET_USER_AGENT)` further
@@ -1705,8 +1752,9 @@ async function transportFetchHop(targetUrl, opt) {
   }
   // Origin is independent of Referrer-Policy and an explicit empty referrer.
   if ((opt.method !== 'GET' && opt.method !== 'HEAD')
-      || (opt.runtimeFetch && opt.mode === 'cors' && new URL(u).origin !== context.origin)) {
-    headers.set('X-ZP-Origin', context.origin);
+      || (opt.runtimeFetch && opt.mode === 'cors' && (opt.originTainted || new URL(u).origin !== context.origin))) {
+    // After a redirect between two other origins the request's origin is "tainted": `Origin: null`.
+    headers.set('X-ZP-Origin', opt.originTainted ? 'null' : context.origin);
   }
   // User-Agent is a forbidden header for fetch() — same smuggle pattern.
   // Without a UA, sites like Wikipedia reject requests as suspicious bots.
@@ -1743,7 +1791,7 @@ async function transportFetchHop(targetUrl, opt) {
     || (opt.credentials === 'same-origin' && new URL(u).origin === context.origin);
   headers.delete('Cookie');
   if (credentialsAllowed && opt.tab.cookieJar) {
-    const cookieStr = opt.tab.cookieJar.cookieHeader(u);
+    const cookieStr = opt.tab.cookieJar.cookieHeader(u, { crossSite: opt.initiatorOpaque });
     if (cookieStr) headers.set('Cookie', cookieStr);
   }
   // Build a flat [[k, v], ...] header list from BOTH our `headers` Headers
@@ -1947,7 +1995,8 @@ async function transportFetchHop(targetUrl, opt) {
       // A script cannot read an HttpOnly cookie, so the page never hears of one.
       const noteForPage = change => { if (opt.cookieDelta && change && !change.httpOnly) opt.cookieDelta.push(change); };
       // Cookies belong to this hop's response URL, never to the final document.
-      for (const line of setCookies) noteForPage(opt.tab.cookieJar.setCookieLine(u, line));
+      const setMeta = opt.initiatorOpaque ? { crossSite: true } : undefined;
+      for (const line of setCookies) noteForPage(opt.tab.cookieJar.setCookieLine(u, line, setMeta));
       // Upstream Set-Cookie is also stripped by the Go server's
       // ConstructorPolicy (otherwise target-site auth cookies would be
       // readable by any proxy-origin page) and re-emitted into the
@@ -1959,11 +2008,18 @@ async function transportFetchHop(targetUrl, opt) {
       const sidechannel = resp.headers.get('X-ZP-Set-Cookie');
       if (sidechannel) {
         for (const line of sidechannel.split('\t')) {
-          if (line) noteForPage(opt.tab.cookieJar.setCookieLine(u, line));
+          if (line) noteForPage(opt.tab.cookieJar.setCookieLine(u, line, setMeta));
         }
       }
     }
   } catch {}
+  // The preflight's own answer is judged by the caller (a redirect is a failure there).
+  if (opt.preflight) return resp;
+  if (corsRequest && opt.tainted && resp && !corsCheck(resp.headers, corsOrigin, corsCredentials)) {
+    if (resp.body) resp.body.cancel().catch(() => {});
+    logRefusal('CORS_CHECK_FAILED', resp.status, u, { method: txMethod, origin: corsOrigin, credentials: corsCredentials, allow: resp.headers.get('access-control-allow-origin') });
+    return Response.error();
+  }
   const location = resp && resp.headers.get('Location');
   if (location && [301, 302, 303, 307, 308].includes(resp.status)) {
     if (resp.body) resp.body.cancel().catch(() => {});
@@ -1974,8 +2030,8 @@ async function transportFetchHop(targetUrl, opt) {
       return opaque;
     }
     if (opt.redirectDepth >= 20) return opt.runtimeFetch ? Response.error() : safeError('REDIRECT_LIMIT_EXCEEDED', 508, targetUrl);
-    let nextURL;
-    try { nextURL = ZP.canonicalTargetURL(new URL(location, u).href).href; }
+    let nextURL, rawNext;
+    try { rawNext = new URL(location, u); nextURL = ZP.canonicalTargetURL(rawNext.href).href; }
     catch { return Response.error(); }
     const nextMethod = ZP.redirectMethod(resp.status, method);
     const nextHeaders = new Headers(opt.headers);
@@ -1985,9 +2041,22 @@ async function transportFetchHop(targetUrl, opt) {
     if (new URL(nextURL).origin !== new URL(u).origin) nextHeaders.delete('Authorization');
     const policy = resp.headers.get('Referrer-Policy');
     const nextContext = policy ? Object.freeze(Object.assign({}, context, { referrerPolicy: policy })) : context;
+    let originTainted = !!opt.originTainted;
+    if (corsRequest) {
+      const from = new URL(u).origin;
+      const next = new URL(nextURL);
+      // A cors request does not follow a redirect to another origin that carries credentials in the URL,
+      // and one that has gone between two foreign origins no longer says where it came from.
+      if (next.origin !== context.origin && (rawNext.username || rawNext.password)) {
+        logRefusal('CORS_REDIRECT_CREDENTIALS', resp.status, nextURL, { method: txMethod, origin: corsOrigin });
+        return Response.error();
+      }
+      if (next.origin !== from && from !== context.origin) originTainted = true;
+    }
     return transportFetchHop(nextURL, Object.assign({}, opt, {
       method: nextMethod, body: nextMethod === method ? bodyU8 : null,
       headers: nextHeaders, context: nextContext, redirectDepth: opt.redirectDepth + 1,
+      tainted: opt.tainted, originTainted,
     }));
   }
   // Commit navigation only after its final response. Subresources never mutate it.
@@ -1995,10 +2064,14 @@ async function transportFetchHop(targetUrl, opt) {
     const entry = opt.tab.entries && opt.tab.entries.get(context.entryId);
     if (entry && entry.targetUrl === context.documentUrl) { entry.targetUrl = u; entry.baseUrl = u; }
   }
+  // What a script may read of a cross-origin answer — taken from the target's own headers, before the
+  // worker's policy block replaces them.
+  const expose = corsRequest && opt.tainted ? corsExposedHeaders(resp.headers, corsCredentials) : undefined;
   const result = addCSP(resp, opt.request, opt.tab.servers, opt.tab, u);
   result.__zpFetchMeta = {
     url: u, redirected: opt.redirectDepth > 0,
-    type: opt.mode === 'no-cors' && new URL(u).origin !== context.origin ? 'opaque' : 'basic',
+    type: opt.mode === 'no-cors' && new URL(u).origin !== context.origin ? 'opaque' : expose ? 'cors' : 'basic',
+    expose,
     cookies: opt.cookieDelta && opt.cookieDelta.length ? opt.cookieDelta : undefined,
   };
   return result;
@@ -2395,6 +2468,8 @@ function buildRuntimePrelude(tab, entry) {
     // RTCPeerConnection runs relay-only through them; empty (no
     // `-rtc-turn-addr`) leaves the RTC_GATEWAY_UNAVAILABLE stub.
     rtcICEServers: Array.isArray(runtimeConfig.rtcICEServers) ? runtimeConfig.rtcICEServers : [],
+    // The document was opened by an opaque one (a popup of a sandboxed frame): it is opaque too.
+    ...(entry.opaque ? { opaque: true } : null),
   };
   const bootJSON = JSON.stringify(boot).replace(/</g, '\\u003c');
   // The chain consumer must run before the target's anti-bot JS does (it
@@ -2607,12 +2682,14 @@ async function handleMessage(event) {
       if (tab) {
         const entryId = randomEntryId();
         const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
-        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+        tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
         shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
         ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: true });
         return;
       }
       tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
+      // A popup an opaque document opened is opaque itself (see opaqueEntry).
+      if (msg.opaque) { const first = tab.entries.get(tab.activeEntryId); if (first) first.opaque = true; }
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
       ok({ path: ZP.makeSharePath(routeKey), servers: tab.servers, tabId: tab.tabId, reused: false });
       return;
@@ -2631,7 +2708,7 @@ async function handleMessage(event) {
       let parentTargetUrl = '';
       try { if (msg.parentTargetUrl) parentTargetUrl = ZP.canonicalTargetURL(msg.parentTargetUrl).href; } catch {}
       const entryId = String(msg.entryId || randomEntryId());
-      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
+      tab.entries.set(entryId, { entryId, targetUrl, baseUrl, parentTargetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId });
       ok({ path: ZP.makeSharePath(routeKey) });
       return;
@@ -2641,7 +2718,7 @@ async function handleMessage(event) {
       if (!tab) return;
       const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
       const baseUrl = msg.baseUrl ? ZP.canonicalTargetURL(msg.baseUrl, targetUrl).href : targetUrl;
-      const entry = { entryId: msg.entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() };
+      const entry = { entryId: msg.entryId, targetUrl, baseUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque };
       tab.entries.set(entry.entryId, entry);
       tab.activeEntryId = entry.entryId;
       if (msg.routeKey) shareRoutes.set(String(msg.routeKey), { tabId: tab.tabId, entryId: entry.entryId });
@@ -2723,7 +2800,7 @@ async function handleMessage(event) {
       // jar can scope the cookie by Domain/Path against the right host
       // (default Domain = the target host, not the SW origin).
       if (tab.cookieJar && msg.targetUrl && msg.cookie) {
-        tab.cookieJar.setCookieLine(String(msg.targetUrl), String(msg.cookie), { sourceClientId: event.source && event.source.id });
+        applyCookieWrite(tab, String(msg.targetUrl), String(msg.cookie), msg.wid, event.source && event.source.id);
       }
       ok();
       return;
@@ -3151,6 +3228,14 @@ function createCookieJar(initialRecords, notify) {
   let dirty = false;
   function markDirty() { dirty = true; }
   function canonHost(h) { return String(h || '').toLowerCase().replace(/\.$/, ''); }
+  // Chrome sends a Secure cookie to https and also to loopback over http (`localhost`,
+  // `*.localhost`, 127.0.0.0/8, ::1) — the dev-server case. Anything stricter makes a
+  // `SameSite=None; Secure` cookie that works natively vanish on a local target.
+  function secureForCookies(u) {
+    if (u.protocol === 'https:' || u.protocol === 'wss:') return true;
+    const h = canonHost(u.hostname);
+    return h === 'localhost' || h.endsWith('.localhost') || h === '[::1]' || /^127(\.\d{1,3}){3}$/.test(h);
+  }
   function defaultPath(u) {
     const p = u.pathname || '/';
     if (!p.startsWith('/')) return '/';
@@ -3234,7 +3319,14 @@ function createCookieJar(initialRecords, notify) {
   function setCookieLine(url, line, meta) {
     const rec = parse(line, url);
     if (!rec) return null;
-    const report = deleted => { const change = changeFor(rec, deleted); if (notify) { try { notify(change, meta); } catch {} } return change; };
+    // A cross-site context keeps only SameSite=None cookies (the default is Lax).
+    if (meta && meta.crossSite && rec.sameSite !== 'none') return null;
+    const report = deleted => {
+      const change = changeFor(rec, deleted);
+      if (meta && meta.wid) change.wid = meta.wid;
+      if (notify) { try { notify(change, meta); } catch {} }
+      return change;
+    };
     if (rec.maxAge != null && rec.maxAge <= 0) {
       for (let i = 0; i < records.length; i++) {
         const r = records[i];
@@ -3269,17 +3361,18 @@ function createCookieJar(initialRecords, notify) {
     markDirty();
     return report(expired(rec, Date.now()));
   }
-  function cookiesForURL(url, includeHttpOnly) {
+  function cookiesForURL(url, includeHttpOnly, crossSite) {
     let u; try { u = new URL(url); } catch { return []; }
     const host = canonHost(u.hostname);
     const path = u.pathname || '/';
-    const isSecure = u.protocol === 'https:';
+    const isSecure = secureForCookies(u);
     const now = Date.now();
     const out = [];
     for (let i = records.length - 1; i >= 0; i--) {
       const r = records[i];
       if (expired(r, now)) { records.splice(i, 1); continue; }
       if (!includeHttpOnly && r.httpOnly) continue;
+      if (crossSite && r.sameSite !== 'none') continue;
       if (!domainMatch(host, r.domain, r.hostOnly)) continue;
       if (!pathMatch(path, r.path)) continue;
       if (r.secure && !isSecure) continue;
@@ -3288,8 +3381,8 @@ function createCookieJar(initialRecords, notify) {
     out.sort((a, b) => (b.path.length - a.path.length) || (a.creation - b.creation));
     return out;
   }
-  function cookieHeader(url) {
-    return cookiesForURL(url, true).map(r => r.name + '=' + r.value).join('; ');
+  function cookieHeader(url, opts) {
+    return cookiesForURL(url, true, !!(opts && opts.crossSite)).map(r => r.name + '=' + r.value).join('; ');
   }
   function documentCookieFor(url) {
     return cookiesForURL(url, false).map(r => r.name + '=' + r.value).join('; ');
@@ -3339,6 +3432,124 @@ function createCookieJar(initialRecords, notify) {
   }
   function consumeDirty() { const was = dirty; dirty = false; return was; }
   return { setCookieLine, cookieHeader, documentCookieFor, snapshot, merge, consumeDirty };
+}
+// A cookie the page wrote with document.cookie reaches the worker twice when a synchronous request carries
+// it too (the message and the request); the write id makes the second a no-op. The id rides on the change, so
+// the writer — which has the cookie already — can tell the push of its own write.
+function applyCookieWrite(tab, targetUrl, line, wid, sourceClientId) {
+  if (!line || !tab.cookieJar) return;
+  if (wid) {
+    const seen = tab.cookieWriteIds || (tab.cookieWriteIds = new Set());
+    if (seen.has(wid)) return;
+    seen.add(wid);
+    if (seen.size > 256) seen.delete(seen.values().next().value);
+  }
+  tab.cookieJar.setCookieLine(String(targetUrl), String(line), { sourceClientId, wid });
+}
+// ---- Fetch-spec CORS for a page's own fetch()/XHR ----------------------------------------------
+// The page's request goes out from here, so the worker is where a browser's CORS rules have to be
+// applied: without them a cross-origin read the target never allowed succeeds, which no real browser
+// does. Everything below is the Fetch Standard's algorithm (CORS check, CORS-preflight fetch,
+// CORS-safelisted headers, response tainting), using the document's *virtual* origin.
+const CORS_SAFE_RESPONSE_HEADERS = ['cache-control', 'content-language', 'content-length', 'content-type', 'expires', 'last-modified', 'pragma'];
+const CORS_PREFLIGHT_DEFAULT_AGE_S = 5;
+const CORS_PREFLIGHT_MAX_AGE_S = 7200;
+const CORS_PREFLIGHT_CACHE_CAP = 256;
+const corsPreflightCache = new Map();
+function corsSafelistedMethod(method) { return method === 'GET' || method === 'HEAD' || method === 'POST'; }
+// A header value a CORS-safelisted request header may carry: short, and free of the bytes that make a
+// value "unsafe" (control characters other than tab, and `"():<>?@[\]{}`).
+function corsSafeHeaderValue(value) {
+  return value.length <= 128 && !/[\u0000-\u0008\u000a-\u001f"():<>?@[\\\]{}\u007f]/.test(value);
+}
+// The request-header names that make a request need a preflight (lowercase, sorted, unique).
+function corsUnsafeHeaderNames(headers, implicit) {
+  const out = new Set();
+  for (const [name, value] of headers.entries()) {
+    const lower = name.toLowerCase();
+    if (implicit && implicit.includes(lower)) continue;
+    let safe = false;
+    if (lower === 'accept' || lower === 'accept-language' || lower === 'content-language') safe = corsSafeHeaderValue(value);
+    else if (lower === 'content-type') {
+      const essence = value.split(';')[0].trim().toLowerCase();
+      safe = corsSafeHeaderValue(value) && (essence === 'application/x-www-form-urlencoded' || essence === 'multipart/form-data' || essence === 'text/plain');
+    } else if (lower === 'range') safe = /^bytes=\d+-\d*$/.test(value);
+    if (!safe) out.add(lower);
+  }
+  return Array.from(out).sort();
+}
+function corsTokenList(value) {
+  return value ? value.split(',').map(t => t.trim()).filter(Boolean) : [];
+}
+// The "CORS check": the response names this origin (or everyone, for a request without credentials),
+// and a request with credentials is also allowed them.
+function corsCheck(headers, requestOrigin, credentials) {
+  const allowed = headers.get('access-control-allow-origin');
+  if (allowed === null) return false;
+  if (!credentials && allowed === '*') return true;
+  if (allowed !== requestOrigin) return false;
+  return !credentials || headers.get('access-control-allow-credentials') === 'true';
+}
+// Which response headers a script may read: the safelisted ones and what the response exposes. `*` exposes
+// every header the target sent (not the ones the worker adds), and only without credentials.
+function corsExposedHeaders(headers, credentials) {
+  const names = new Set(CORS_SAFE_RESPONSE_HEADERS);
+  for (const token of corsTokenList(headers.get('access-control-expose-headers'))) {
+    const lower = token.toLowerCase();
+    if (lower === '*' && !credentials) { for (const name of headers.keys()) names.add(name.toLowerCase()); }
+    else if (lower !== '*') names.add(lower);
+  }
+  return { names: Array.from(names) };
+}
+// A cors response shows the page only what it exposes (the worker's own `X-ZP-*` channel stays).
+function corsFilterHeaders(headers, expose) {
+  if (!expose) return;
+  const visible = new Set(expose.names);
+  for (const name of Array.from(headers.keys())) {
+    const lower = name.toLowerCase();
+    if (!lower.startsWith('x-zp-') && !visible.has(lower)) headers.delete(name);
+  }
+}
+function corsPreflightAllows(entry, method, names, credentials) {
+  const wildcard = list => !credentials && list.includes('*');
+  if (!corsSafelistedMethod(method) && !wildcard(entry.methods) && !entry.methods.includes(method)) return false;
+  // The Fetch Standard keeps `Authorization` out of the `*` wildcard; the Chrome this is measured against
+  // (148) lets it through, so a page that works there must work here.
+  for (const name of names) if (!entry.headers.includes(name) && !wildcard(entry.headers)) return false;
+  return true;
+}
+// The preflight: an OPTIONS request without credentials that must answer 2xx, pass the CORS check, and
+// allow the method and every non-safelisted header. Answers are cached (per tab) for Max-Age seconds.
+async function runCORSPreflight(url, opt, method, names, requestOrigin, credentials) {
+  const key = [opt.tab.tabId, requestOrigin, url, credentials ? 1 : 0].join('\n');
+  const now = Date.now();
+  const cached = corsPreflightCache.get(key);
+  if (cached && cached.expires > now && corsPreflightAllows(cached, method, names, credentials)) return true;
+  const headers = new Headers();
+  headers.set('Accept', '*/*');
+  headers.set('Access-Control-Request-Method', method);
+  if (names.length) headers.set('Access-Control-Request-Headers', names.join(','));
+  const resp = await transportFetchHop(url, Object.assign({}, opt, {
+    method: 'OPTIONS', body: null, headers, credentials: 'omit', redirect: 'error', redirectDepth: 0,
+    mode: 'cors', preflight: true, cookieDelta: null, collectCookies: false,
+  }));
+  if (!resp || resp.type === 'error' || resp.status < 200 || resp.status > 299) return false;
+  if (resp.body) resp.body.cancel().catch(() => {});
+  if (!corsCheck(resp.headers, requestOrigin, credentials)) return false;
+  const entry = {
+    methods: corsTokenList(resp.headers.get('access-control-allow-methods')),
+    headers: corsTokenList(resp.headers.get('access-control-allow-headers')).map(t => t.toLowerCase()),
+    expires: 0,
+  };
+  if (!corsPreflightAllows(entry, method, names, credentials)) return false;
+  const maxAgeHeader = resp.headers.get('access-control-max-age');
+  const maxAge = maxAgeHeader !== null && /^\d+$/.test(maxAgeHeader.trim()) ? Math.min(parseInt(maxAgeHeader, 10), CORS_PREFLIGHT_MAX_AGE_S) : CORS_PREFLIGHT_DEFAULT_AGE_S;
+  if (maxAge > 0) {
+    entry.expires = now + maxAge * 1000;
+    if (corsPreflightCache.size >= CORS_PREFLIGHT_CACHE_CAP) corsPreflightCache.delete(corsPreflightCache.keys().next().value);
+    corsPreflightCache.set(key, entry);
+  }
+  return true;
 }
 function isCORSPreflight(req) { return req.method === 'OPTIONS' && req.headers.has('Access-Control-Request-Method'); }
 function corsPreflight(req) { const h = new Headers(); applyCORS(h, req); h.set('Access-Control-Max-Age', '86400'); h.set('Cache-Control', 'no-store'); return new Response(null, { status: 204, headers: h }); }

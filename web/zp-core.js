@@ -452,6 +452,11 @@
       const encoded = response.headers.get('X-ZP-Fetch-Meta');
       if (!encoded) return response;
       const record = JSON.parse(encoded);
+      // The worker refused the request (a CORS check failed, a redirect was not allowed): fetch() rejects.
+      if (record.type === 'error') {
+        if (response.body) response.body.cancel().catch(() => {});
+        throw new TypeError('Failed to fetch');
+      }
       if (onMeta) { try { onMeta(record); } catch {} }
       delete record.cookies;
       let result;

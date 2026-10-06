@@ -378,6 +378,8 @@
   // Asked of the embedder, whose natives are its own: this realm's may already be hooks of
   // the embedder's (it contains blank and srcdoc windows before their prelude runs).
   const opaqueDocument = (() => {
+    // A popup of an opaque document: the worker, which opened its route, says so.
+    try { if (boot.opaque === true) return true; } catch {}
     try {
       const fe = root.frameElement;
       if (!fe) return false;

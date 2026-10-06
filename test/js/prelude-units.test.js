@@ -1147,3 +1147,43 @@ test('parking: only markup with a frame in it is swept for parked frames', () =>
   for (const yes of ['<iframe src=x></iframe>', '<IFRAME>', '<div><frame src=x>', 'a<iframe', '<p></p><iframe\n src=x>']) assert.equal(env.markupHasFrames(yes), true, yes);
   for (const no of ['', '<i>x</i>', '<iframes>', '<frameset>', 'iframe', '<div data-x="iframe">', null, undefined]) assert.equal(env.markupHasFrames(no), false, String(no));
 });
+
+test('cookie writes: a request that cannot wait carries what is unacknowledged, and the writer ignores the push of its own write', async () => {
+  const sent = [];
+  const acks = [];
+  const ctx = { bridge: { send: message => new Promise((resolve, reject) => { sent.push(message); acks.push({ resolve, reject }); }) } };
+  const env = load('let documentCookie = "";\n' + COOKIE_BLOCK, ['sendCookieSet', 'pendingCookieWrites', 'applyCookieChanges', 'documentCookieString'], {
+    virtualURL: new URL('http://app.a.test:3000/dir/page'),
+    documentCookieRecords: [], fireCookieChange() {}, cookieItemFromRec: r => r,
+    ctx, boot: { tabId: 't1' }, root: { __zp_diagnostics: [] },
+  });
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(env.pendingCookieWrites(), [], 'nothing written: nothing carried');
+  env.sendCookieSet('a=1; Path=/');
+  env.sendCookieSet('b=2');
+  const pending = env.pendingCookieWrites();
+  assert.deepEqual(pending.map(w => w[1]), ['a=1; Path=/', 'b=2']);
+  assert.equal(pending[0][0], sent[0].wid, 'the request names the write by the id the message carries');
+  assert.equal(pending[1][0], sent[1].wid);
+  assert.notEqual(pending[0][0], pending[1][0]);
+  acks[0].resolve({ ok: true });
+  await flush();
+  assert.deepEqual(env.pendingCookieWrites().map(w => w[1]), ['b=2'], 'an acknowledged write is no longer carried');
+  // The worker pushes a change to every document that can see it — the writer's own included.
+  env.applyCookieChanges([change({ id: 'p:1', name: 'a', wid: sent[0].wid }), change({ id: 'p:2', name: 'other', wid: 'w-someone-else' })]);
+  assert.equal(env.documentCookieString(), 'other=v1', 'the writer already has its cookie; another document\'s write is applied');
+});
+
+test('cookie writes: only the newest unacknowledged writes ride a request, in order', () => {
+  const ctx = { bridge: { send: () => new Promise(() => {}) } };
+  const env = load('let documentCookie = "";\n' + COOKIE_BLOCK, ['sendCookieSet', 'pendingCookieWrites'], {
+    virtualURL: new URL('http://app.a.test:3000/dir/page'),
+    documentCookieRecords: [], fireCookieChange() {}, cookieItemFromRec: r => r,
+    ctx, boot: { tabId: 't1' }, root: { __zp_diagnostics: [] },
+  });
+  for (let i = 0; i < 100; i++) env.sendCookieSet('c' + i + '=' + i);
+  const carried = env.pendingCookieWrites().map(w => w[1]);
+  assert.equal(carried.length, 32);
+  assert.equal(carried[0], 'c68=68', 'the oldest of the newest 32');
+  assert.equal(carried[31], 'c99=99', 'the write just made is always carried');
+});

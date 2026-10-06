@@ -489,30 +489,6 @@
     }
     const crossWindowTargets = new WeakMap();
     const crossOriginLocations = new WeakMap();
-    // The sandbox flags this document lives under: those the page gave every frame between
-    // it and the top window (a frame the proxy rewrote keeps the page's own text in a stash).
-    // null: not sandboxed.
-    let sandboxFlagsCache;
-    function sandboxFlags() {
-      if (sandboxFlagsCache !== undefined) return sandboxFlagsCache;
-      let flags = null;
-      try {
-        let w = root;
-        for (let i = 0; i < 32 && w !== w.parent; i++) {
-          const fe = w.frameElement;
-          if (!fe) break;
-          let text = Native.getAttribute.call(fe, litAttrName('sandbox'));
-          if (text === null) text = Native.getAttribute.call(fe, 'sandbox');
-          if (text !== null) {
-            const mine = new Set(String(text).toLowerCase().split(/\s+/).filter(Boolean));
-            flags = flags === null ? mine : new Set([...flags].filter(f => mine.has(f)));
-          }
-          w = w.parent;
-        }
-      } catch {}
-      sandboxFlagsCache = flags;
-      return flags;
-    }
     // May a script in this document navigate `win`? Itself and its descendants always; an
     // ancestor never, but for the top window with allow-top-navigation (or, during user
     // activation, allow-top-navigation-by-user-activation). Otherwise the browser's own
@@ -563,7 +539,7 @@
             return;
           }
           // No membrane behind that window: take the frame route ourselves.
-          activatedFrameURL(absolute).then(u => {
+          activatedFrameURL(absolute, undefined, () => windowIsOpaque(targetWindow)).then(u => {
             if (replace) targetWindow.location.replace(u);
             else targetWindow.location.assign(u);
           }).catch(() => {});

@@ -48,7 +48,11 @@
       return /^(?:blob|data):/i.test(String(href).trim()) ? String(href).trim() : null;
     } catch { return null; }
   }
-  async function fetchThroughRuntime(input, init = {}) {
+  // `internal.mode`: a request the page did not make with fetch() — an `<a ping>` is not a CORS request
+  // (the browser sends it whatever the target answers), so it must not meet the CORS rules.
+  // `internal.implicitHeaders`: headers the browser itself would add to this request (an EventSource's
+  // `Cache-Control: no-cache`); they never make a request need a preflight.
+  async function fetchThroughRuntime(input, init = {}, internal) {
     if (!Native.fetch || !Native.Request || !Native.Headers) throw normalizedError('NetworkError');
     // 인라인 스킴은 브라우저에게 그대로 넘긴다 (위 주석 참고).
     if (inlineSchemeFetchURL(input)) return Native.fetch(input, init);
@@ -65,6 +69,7 @@
       entryId: requestEntryId,
       documentURL,
       url: target,
+      ...(internal && internal.implicitHeaders ? { implicitHeaders: internal.implicitHeaders } : null),
       // An opaque document's requests are cross-origin to everything, its own site included:
       // `Origin: null`, and no cookies unless it asks for them.
       ...(opaqueDocument ? { opaque: true } : null),
@@ -75,7 +80,7 @@
         // postRuntimeEnvelope 가 base64 로 채운다.
         body: null,
         credentials: req.credentials,
-        mode: req.mode,
+        mode: (internal && internal.mode) || req.mode,
         referrer: req.referrer,
         // 페이지가 `fetch(u, { referrerPolicy })` 로 명시한 값. SW 는
         // /zp/api/fetch 요청에 대해 브라우저가 계산한 정책을 볼 수 없으므로
@@ -188,6 +193,7 @@
       // 쿠키는 여기서 다루지 않는다 — 기존 경로대로 커널의 jar 가 붙인다.
       function sendSyncThroughRelay(xhr, body) {
         xhr._sent = true;
+        let networkError = null;
         try {
           const rid = 'sx' + ZP.randomId();
           let u = proxyOrigin + ZP.apiPath('sync-fetch')
@@ -197,6 +203,13 @@
             + '&tab=' + encodeURIComponent(boot.tabId || '')
             + '&entry=' + encodeURIComponent(activeEntryId || '');
           for (const kv of xhr._headers) u += '&h=' + encodeURIComponent(kv[0] + ':' + kv[1]);
+          if (xhr.withCredentials) u += '&wc=1';
+          // A cookie written a moment ago may not have reached the worker: this call cannot wait for it.
+          const unsent = pendingCookieWrites();
+          if (unsent.length) {
+            u += '&dv=' + encodeURIComponent(virtualURL.href);
+            for (const w of unsent) u += '&ck=' + encodeURIComponent(JSON.stringify(w));
+          }
 
           const nx = new Native.XMLHttpRequest();
           nx.open(xhr._method, u, false);
@@ -204,6 +217,16 @@
             // 동기 XHR 은 responseType 을 못 바꾼다(스펙). 텍스트로 받고 아래에서 변환.
           }
           nx.send(body != null && xhr._method !== 'GET' && xhr._method !== 'HEAD' ? body : null);
+          // The worker found the request a network error (a CORS check that failed, say): a synchronous
+          // `send()` ends DONE with nothing and throws — no events.
+          if (nx.getResponseHeader('X-ZP-Sync-Err') === 'ZP_NETWORK_ERROR') {
+            xhr._sent = false;
+            xhr.status = 0;
+            xhr.statusText = '';
+            xhr.readyState = DONE;
+            networkError = normalizedError('NetworkError');
+            throw networkError;
+          }
           // Cookies the response set: a synchronous caller reads `document.cookie` as soon as
           // this returns, so they are applied now (the worker also pushes them, once).
           try {
@@ -225,7 +248,20 @@
               if (i > 0) { try { h.append(line.slice(0, i).trim(), line.slice(i + 1).trim()); } catch {} }
             });
             try { h.delete('X-ZP-Cookie-Delta'); } catch {}
-            xhr._responseHeaders = h;
+            // What the document may read of the answer, as the worker decided (the relay itself passes only a
+            // few header names through).
+            const visible = nx.getResponseHeader('X-ZP-Sync-Visible');
+            if (visible) {
+              try {
+                const bin = atob(visible);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                const list = JSON.parse(new TextDecoder().decode(bytes));
+                const all = new Native.Headers();
+                for (const kv of list) { try { all.append(kv[0], kv[1]); } catch {} }
+                xhr._responseHeaders = all;
+              } catch { xhr._responseHeaders = h; }
+            } else xhr._responseHeaders = h;
           } catch {}
           xhrReady(xhr, HEADERS_RECEIVED);
           xhrReady(xhr, LOADING);
@@ -238,6 +274,7 @@
           xhr._sent = false;
           xhrDone(xhr, 'load');
         } catch (e) {
+          if (networkError && e === networkError) throw e;
           xhr._sent = false;
           xhr.status = 0;
           xhr.statusText = '';
@@ -403,7 +440,7 @@
       function runEventSource(es) {
         const headers = [['Accept', 'text/event-stream'], ['Cache-Control', 'no-cache']];
         if (es._lastEventId) headers.push(['Last-Event-ID', es._lastEventId]);
-        fetchThroughRuntime(es.url, { method: 'GET', headers, credentials: es._init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }).then(async resp => {
+        fetchThroughRuntime(es.url, { method: 'GET', headers, credentials: es._init.withCredentials ? 'include' : 'same-origin', cache: 'no-store', signal: es._controller.signal }, { implicitHeaders: ['cache-control'] }).then(async resp => {
           if (es._closed) return;
           // 204 = end of stream, close cleanly (no reconnect).
           if (resp.status === 204) {

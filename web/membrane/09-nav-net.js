@@ -121,7 +121,7 @@
   // navigation leaves `src` alone. The incoming document boots its own
   // membrane; until then reads resolve through frameRouteTarget.
   function navigateFrameTo(frame, href) {
-    activatedFrameURL(href).then(url => {
+    activatedFrameURL(href, undefined, () => frameIsOpaque(frame)).then(url => {
       const win = nativeFrameWindow(frame);
       if (win) win.location.assign(url);
     }).catch(() => {});
@@ -152,7 +152,11 @@
     const target = targetURL(raw, base);
     const share = await ZP.encryptShareURL(target);
     rememberFrameRoute(share.encrypted, target);
-    const reply = await ctx.bridge.send({ type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: target, servers: activeServers });
+    // A popup keeps the sandbox its opener lives under — and so its opaque origin — unless the page allowed
+    // popups to escape it (the browser applies the flags either way; the origin is what we emulate).
+    const flags = opaqueDocument ? sandboxFlags() : null;
+    const opaque = opaqueDocument && !(flags && flags.has('allow-popups-to-escape-sandbox'));
+    const reply = await ctx.bridge.send({ type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: target, servers: activeServers, ...(opaque ? { opaque: true } : null) });
     return proxyOrigin + reply.path + shareFragmentForKey(share.key);
   }
 
@@ -198,7 +202,7 @@
             credentials: 'include',
             referrerPolicy: 'no-referrer',
             headers: { 'Content-Type': 'text/ping', 'Ping-From': virtualURL.href, 'Ping-To': navHref || '' },
-          }).catch(() => {});
+          }, { mode: 'no-cors' }).catch(() => {});
         } catch {}
       }
     }
