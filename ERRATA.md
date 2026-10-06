@@ -405,6 +405,18 @@ claimed:
     `cross-origin fetch and XHR obey CORS: who may read, when the browser asks first, redirects (matches
     native)` (about seventy cases — origins, credentials, exposure, preflight, redirects, async and sync XHR
     — identical to native, request logs included; five mutations checked).
+46. **A `<script src>` in a frame whose sandbox forbids scripts was never requested.** The browser still asks
+    for the scripts of such a frame (its preload scanner does — measured natively for `sandbox=""`,
+    `allow-same-origin`, `allow-forms`, and the scripts-enabled flags alike), but not when the document carries
+    a CSP `<meta http-equiv>`: a header CSP leaves it alone, a meta CSP — permissive or `default-src 'none'` —
+    makes Chrome 148 skip every script of the document. The prelude put such a meta beside the CSP header
+    (a second layer added on a premise that turned out wrong, kept as defense in depth), so these frames
+    requested their images and styles but not their scripts, which only a server's request log could tell.
+    The meta is gone; the header is the one policy (it covers the whole document from the commit, the meta
+    only what follows it, so nothing is weakened), and a CSP the target put in its own `<meta>` is kept as
+    before. — e2e `a script in a frame that may not run scripts is requested as natively` (ten ways of
+    making frames across six sandboxes, script and image of each, markup, `createElement` and `innerHTML`;
+    one mutation checked), `request-policy` unit test on the prelude.
 
 ### Residuals (documented, not fixed)
 
@@ -437,7 +449,6 @@ claimed:
 | A storage event carries own `key`/`storageArea`/`url` properties (non-enumerable) | `Object.getOwnPropertyNames(e)` lists them; `Object.keys(e)`, `isTrusted`, `target` match native. | — |
 | A cookie another document wrote or a response set reaches this one **after a service-worker round trip** (milliseconds), not within the same task | A write in one frame is readable from a sibling frame once the worker has pushed it; natively the shared jar answers at once. Code that writes a cookie and reads it back through another frame in the same task sees the old value. | — |
 | A frame sandboxed without `allow-same-origin` is **same-origin with the proxy underneath**; its opacity is the prelude's | The proxy cannot serve a document that has a real opaque origin (no service worker, no `localStorage`). The browser keeps every other flag, the frame's namespaces are private to it, and every other window sees it as a cross-origin stand-in — but the denial list is code: a gap in it would let the frame read what any same-origin frame can read of its **own** namespace, never of a site's. | e2e `sandboxed frames are opaque to the page and to each other, as natively` |
-| A `<script src>` in a sandboxed frame that may not run scripts is **not fetched** (native: fetched, not run) | Measured only: the browser never asks for it through the worker, the frame's `<img>` and stylesheet it does. Not investigated; nothing observable by the page. | — |
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | CORS is applied to a page's `fetch`/XHR (item 45), not to **element loads that use it** (`crossorigin` on `<script>`, `<img>`, `<link>`; module scripts; fonts) | Those go through the worker as the browser's own subresource requests, whose CORS headers the worker overwrites with the page's proxy origin. A load the target never allowed succeeds. Workers' `fetch` shares the page path; not separately pinned. | — |

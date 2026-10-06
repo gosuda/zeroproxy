@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-06 | membrane / 수정 | 스크립트 못 돌리는 sandbox 프레임의 script src 를 프록시 문서는 요청 안 했다. 원인은 프렐류드가 박은 CSP meta(네이티브도 meta 가 있으면 안 받음) — 헤더만 남김. | rewriter.md#csp-meta-스크립트-프리로드 |
 | 2026-10-06 | membrane / 보안 | CORS 미적용으로 허락 안 한 교차 오리진 읽기가 성공. SW 가 가상 오리진으로 판정·preflight. 거부를 Response.error 로 주면 페이지가 v1 로 재전송. | rewriter.md#cors-적용 |
 | 2026-10-06 | membrane / 수정 | document.cookie 쓰기 직후 동기 XHR 이 쿠키를 놓쳤다. 릴레이가 ack 안 된 쓰기를 싣는다(최신 32개) — Go 가 앞 16개만 받아 새 쓰기가 잘렸다. | rewriter.md#쿠키-동기-xhr |
 | 2026-10-06 | membrane / 수정 | 불투명 프레임이 연 팝업이 불투명하지 않았다. OPEN_SHARE 가 opaque 를 싣고 SW 부트 JSON 이 팝업 prelude 에 전한다. | rewriter.md#불투명-팝업 |

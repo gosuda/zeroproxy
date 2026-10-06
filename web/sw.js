@@ -2481,44 +2481,21 @@ function buildRuntimePrelude(tab, entry) {
   // per-hop wait re-encodes the remaining chain into the next URL's
   // fragment before calling location.assign on it.
   const prewarmInline = '(function(){try{var p=new URLSearchParams(location.hash.slice(1));var c=p.get("zp_chain");if(!c)return;var chain;try{chain=JSON.parse(atob(decodeURIComponent(c)));}catch(e){return;}if(!Array.isArray(chain)||!chain.length)return;var next=chain.shift();var wait=Math.max(0,Math.min(120000,Number(next.waitMs)||0));var u=new URL(next.path,location.origin);var np=new URLSearchParams(u.hash.startsWith("#")?u.hash.slice(1):u.hash);if(chain.length){np.set("zp_chain",encodeURIComponent(btoa(JSON.stringify(chain))));}else{np.delete("zp_chain");}u.hash="#"+np.toString();var assign=location.assign.bind(location);p.delete("zp_chain");try{history.replaceState(null,"","#"+p.toString());}catch(e){}setTimeout(function(){try{assign(u.toString());}catch(e){}},wait);}catch(e){}})();';
-  // 2026-08-13 — CSP 를 **문서 안에도** 박는다.
+  // CSP 는 **헤더로만** 낸다. 2026-08-13 에는 문서 안에도 같은 정책의 `<meta http-equiv>` 를 맨 앞에
+  // 박았는데, 그 근거("스트리밍 응답에서는 헤더가 강제되지 않는다")는 2026-08-26 에 틀린 것으로 판명됐다
+  // (측정에 쓴 브라우저 데몬이 CSP 를 통째로 꺼 두고 있었다). 이후 "두 겹" 으로 남겨 둔 것이다.
   //
-  // ★2026-08-26 정정 — "스트리밍 응답에서는 CSP 헤더가 강제되지 않는다" 는
-  // 이 자리의 옛 설명은 **틀렸다.** 그때 쓰던 브라우저 데몬이 CSP 를 통째로
-  // 꺼 두고 있었을 뿐이다(taskweaver 는 기본값이 `Page.setBypassCSP` 라
-  // `list` 의 `csp_bypassed: true` 다). 아무것도 강제되지 않는 상태에서
-  // 외부 이미지가 로드된 것을 "헤더가 무시된다" 로 읽은 것이다.
-  //
-  // meta 를 빼고 헤더만 남긴 채 `--enforce-csp` 데몬으로 다시 재 보면
-  // 스트리밍 문서에서도 그대로 막힌다 — 외부 오리진 fetch 차단, 외부
-  // 이미지 차단, 버퍼 경로(404 문서)도 동일. 반대로 기본 데몬에서는 같은
-  // 요청이 200 으로 통과한다. 즉 판정한 것은 우리 코드가 아니라 도구였다.
-  //
-  // 그래서 이 meta 는 "헤더가 안 먹으니 대신" 이 아니라 **두 겹**이다.
-  // 헤더가 정본이고 meta 는 보조다. 지우는 것도 검토 대상이지만(주입 노드가
-  // 하나 줄고 report-uri 예외도 없어진다) 지금은 남겨 둔다.
-  //
-  // 프렐류드는 문서 맨 앞에 주입되므로 이 meta 는 어떤 서브리소스보다 먼저
-  // 온다 — CSP meta 의 요구 조건이 그것이다. `frame-ancestors` 는 meta 에서
-  // 무시되지만 프록시 문서 정책은 그걸 쓰지 않는다(중첩 iframe 때문에 일부러
-  // 뺐다). 헤더도 그대로 둔다 — 둘 다 있으면 각각 강제되고 값이 같으므로
-  // 실효 정책은 변하지 않는다.
-  const cspMeta = '<meta http-equiv="Content-Security-Policy" content="'
-    // `report-uri` 는 meta 로 배달되면 무시되고, 브라우저는 그때마다 콘솔에
-    // "ignored when delivered via a <meta> element" 를 찍는다. 모든 프록시
-    // 문서에서 매번 나오는 잡음이자(감사 지표의 csp 카운트를 상시 1로 올린다)
-    // 남들에겐 없는 콘솔 메시지 하나다. 리포트는 헤더 쪽 정책이 처리하므로
-    // meta 사본에서만 뺀다 — 실효 정책은 그대로다.
-    + proxiedCSP(tab.servers, tab.challengeCompat)
-        .split('; ').filter(d => !/^report-uri\b/i.test(d)).join('; ')
-        .replace(/"/g, '&quot;')
-    + '" data-zp-internal>';
-  return cspMeta +
-    // `data-zp-internal` 은 직렬화 세정기가 "이건 우리 것" 을 알아보는 표식이다.
-    // 외부 에셋 스크립트는 src 로 판별되지만 **인라인**은 그럴 수 없어
-    // `outerHTML` 에 그대로 남아 있었다. data-zp-* 는 어차피 페이지에게
-    // 가려진다(getAttributeNames / attributes 필터).
-    '<script nonce=zp data-zp-internal>' + prewarmInline + '</script>' +
+  // 2026-10-06 에 뺐다. 네이티브 Chrome 148 은 **문서에 CSP meta 가 하나라도 있으면** 스크립트를 못 돌리는
+  // sandbox 프레임(`sandbox=""`, `allow-same-origin` 만)의 `<script src>` 를 받아 오지 않는다 — 헤더
+  // CSP 만 있을 때는 받아 온다(같은 문서로 실측: 헤더 CSP 는 FETCHED, meta CSP 는 허용 정책이든
+  // `default-src 'none'` 이든 NOT FETCHED). 프록시 문서는 그 meta 때문에 같은 프레임에서 네이티브와
+  // 달리 스크립트를 요청하지 않았다. 헤더가 정본이고(응답 커밋부터 문서 전체에 걸린다) meta 는 그보다
+  // 약하므로 실효 정책은 변하지 않는다. 타깃 문서가 스스로 건 meta CSP 는 그대로 살아 있다(교집합).
+  // `data-zp-internal` 은 직렬화 세정기가 "이건 우리 것" 을 알아보는 표식이다.
+  // 외부 에셋 스크립트는 src 로 판별되지만 **인라인**은 그럴 수 없어
+  // `outerHTML` 에 그대로 남아 있었다. data-zp-* 는 어차피 페이지에게
+  // 가려진다(getAttributeNames / attributes 필터).
+  return '<script nonce=zp data-zp-internal>' + prewarmInline + '</script>' +
     '<script nonce=zp src=' + ZP.assetURL('zp-core.js') + '></script>' +
     // 2026-06-08 split-bundle (c.1) Step 4: legacy rust-rewriter.js script
     // tag dropped. zp-page-bundle.js inlines the wasm + initSync's so

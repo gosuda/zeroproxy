@@ -1503,6 +1503,15 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="csp-meta-스크립트-프리로드"></a>스크립트를 못 돌리는 sandbox 프레임의 `<script src>` 를 프록시 문서는 요청하지 않았다 — 프렐류드가 박은 CSP meta 때문이다 (2026-10-06)
+
+- **측정:** 네이티브 Chrome 148 에서 같은 프레임을 `sandbox=""`·`allow-same-origin`·`allow-forms`·`allow-scripts…`·없음으로 열면 전부 `<script src>` 를 요청한다(프리로드 스캐너). 프록시 문서는 스크립트를 못 돌리는 프레임(`""`·`allow-same-origin`·`allow-forms`)에서만 그 스크립트를 요청하지 않았다 — 같은 프레임의 `<img>`·CSS 는 요청했다. 렌더된 문서의 `<script src>` 는 정상으로 리라이트돼 있었고 브라우저가 요청 자체를 안 했다(`PREQ` 에도 없음).
+- **원인(실측으로 좁힘):** 네이티브 단독 실험 — 문서에 `<meta http-equiv="Content-Security-Policy">` 가 **하나라도** 있으면(허용 정책이든 `default-src 'none'` 이든, 인라인 스크립트 유무와 무관) 스크립트를 못 돌리는 프레임에서 `<script src>` 를 안 받는다. **헤더** CSP 는 받는다. 프렐류드는 헤더 옆에 같은 정책의 meta 를 맨 앞에 박고 있었다.
+- **가설 중 틀린 것:** "`allow-same-origin` 을 덧붙이는 에뮬레이션 때문" — 네이티브에서 `allow-same-origin` 단독도 받아 온다. 가설을 코드로 파기 전에 네이티브 실험 하나로 가려냈다.
+- **수정:** meta 를 뺐다. 헤더가 정본이고 응답 커밋부터 문서 전체에 걸린다(meta 는 그 뒤만). 2026-08-26 에 meta 의 근거("스트리밍에서 헤더가 안 먹는다")가 측정 도구 오류였음이 이미 밝혀져 있었다. 타깃이 스스로 건 meta CSP 는 그대로(`filter_meta_csp` 교집합).
+- **규칙:** "방어 겹을 하나 더" 는 공짜가 아니다 — 브라우저의 **다른 동작을 바꾸는 부작용**이 있는지 네이티브로 단독 측정한다. 프록시가 문서에 심는 모든 노드(meta·스크립트)는 네이티브 문서에는 없던 것이다.
+- **검증:** e2e `a script in a frame that may not run scripts is requested as natively`(네이티브와 20건 동일), meta 를 되돌린 변이는 6건 누락으로 실패. 전체 e2e·CSP 스위트 통과(헤더만으로 같은 차단).
+
 ## <a id="프레임-load-두-번"></a>`src` 로 라우팅한 프레임은 `load` 가 두 번(파싱된 프레임은 세 번), 히스토리가 두 칸이었다 (2026-10-01)
 
 - **측정:** 같은 코드를 네이티브/프록시에서. `src` 를 붙인 뒤 append: `load` 리스너+`onload` 가 네이티브 1회(`Lo`), 프록시 2회(`LoLo`); append 뒤 `src` 대입·교체도 +1회씩; 교체 시 히스토리 증가분 네이티브 1, 프록시 2. **파싱된 `<iframe src onload=…>` 는 인라인 onload 가 3번**(파서의 빈 페이지 + 플레이스홀더 + 라우트된 문서).

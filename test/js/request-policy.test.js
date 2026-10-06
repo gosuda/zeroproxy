@@ -546,3 +546,15 @@ test('CORS: a header the browser adds itself (an EventSource: Cache-Control) doe
   assert.equal(own.type, 'error');
   assert.deepEqual(seen.slice(1).map(r => r.method), ['OPTIONS']);
 });
+
+// A CSP <meta> in the document makes Chrome skip the `<script src>` of a frame whose sandbox forbids scripts (the
+// element is requested natively); the policy travels in the response header alone.
+test('the runtime prelude carries no CSP meta', () => {
+  const worker = loadWorker(() => response(200));
+  const { tab, entry } = tabWithEntry();
+  tab.cookieJar.documentCookieFor = () => '';
+  const prelude = worker.buildRuntimePrelude(tab, entry);
+  assert.ok(prelude.includes('runtime-prelude.js'), 'the prelude is the one the page runs');
+  assert.doesNotMatch(prelude, /http-equiv/i);
+  assert.doesNotMatch(prelude, /Content-Security-Policy/i);
+});

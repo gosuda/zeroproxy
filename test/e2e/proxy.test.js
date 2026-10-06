@@ -2206,6 +2206,41 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xscr-probe.js') {
+      xckSeen.set('scr:' + url.searchParams.get('run') + ':' + url.searchParams.get('tag'), 'seen');
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('/* probe */');
+      return;
+    }
+    if (url.pathname === '/xscr-seen') {
+      const prefix = 'scr:' + url.searchParams.get('run') + ':';
+      const out = [];
+      for (const k of xckSeen.keys()) if (k.startsWith(prefix)) out.push(k.slice(prefix.length));
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(out.sort()));
+      return;
+    }
+    if (url.pathname === '/xscr-frame') {
+      // A document that asks for a script and an image; whether each is requested depends on the frame's sandbox.
+      const q = 'run=' + url.searchParams.get('run') + '&tag=' + url.searchParams.get('tag');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>f</title><body><script src="/xscr-probe.js?' + q + '-script"></script><img src="/xscr-probe.js?' + q + '-img">');
+      return;
+    }
+    if (url.pathname === '/xscr') {
+      // Which requests a frame's document makes under each sandbox: scripts that may not run are still requested.
+      const run = url.searchParams.get('run');
+      const variants = [['m-empty', 'sandbox=""'], ['m-same', 'sandbox="allow-same-origin"'], ['m-forms', 'sandbox="allow-forms"'], ['m-scripts', 'sandbox="allow-scripts"'], ['m-scripts-same', 'sandbox="allow-scripts allow-same-origin"'], ['m-none', '']];
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>scriptless frames</title><body>' +
+        variants.map(v => '<iframe ' + v[1] + ' src="/xscr-frame?run=' + run + '&tag=' + v[0] + '"></iframe>').join('') +
+        '<div id="host"></div><script>(function () {' +
+        ' [["d-empty", ""], ["d-same", "allow-same-origin"], ["d-scripts", "allow-scripts"]].forEach(function (v) {' +
+        '  var f = document.createElement("iframe"); f.setAttribute("sandbox", v[1]); f.src = "/xscr-frame?run=' + run + '&tag=" + v[0]; document.body.appendChild(f); });' +
+        ' document.getElementById("host").innerHTML = \'<iframe sandbox="" src="/xscr-frame?run=' + run + '&tag=h-empty"></iframe>\';' +
+        ' })();<\/script></body>');
+      return;
+    }
     if (url.pathname === '/xpopop-popup') {
       // A popup of a sandboxed frame says what it is.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6016,6 +6051,39 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct['sx-fail'].threw, 'NetworkError');
     assert.equal(direct.__log['cookie-include'][0].cookies, 'xc');
     assert.equal(direct.__log['cookie-default'][0].cookies, '');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A frame whose sandbox forbids scripts still asks for the scripts in its document (the browser's preload
+  // scanner does) — unless the document carries a CSP <meta>, which makes Chrome skip them (measured). The proxy
+  // used to put one beside the CSP header, so these frames requested nothing for their <script src>.
+  await t.test('a script in a frame that may not run scripts is requested as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const readSeen = run => new Promise((resolve, reject) => http.get(`${targetBase}/xscr-seen?run=${run}`, res => { let b = ''; res.on('data', d => { b += d; }); res.on('end', () => resolve(JSON.parse(b))); }).on('error', reject));
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xscr?run=native`, { waitUntil: 'load' });
+      await new Promise(r => setTimeout(r, 4000));
+      direct = await readSeen('native');
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xscr?run=proxied`);
+    let proxied;
+    try {
+      await new Promise(r => setTimeout(r, 8000));
+      proxied = await readSeen('proxied');
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'scriptless-frames.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The reference: every frame asks for its script and its image, scriptless or not.
+    for (const tag of ['m-empty', 'm-same', 'm-forms', 'm-scripts', 'm-scripts-same', 'm-none', 'd-empty', 'd-same', 'd-scripts', 'h-empty']) {
+      assert.ok(direct.includes(`${tag}-script`), `native fetches the script of ${tag}`);
+      assert.ok(direct.includes(`${tag}-img`), `native fetches the image of ${tag}`);
+    }
     assert.deepEqual(proxied, direct);
   });
 
