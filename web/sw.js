@@ -317,14 +317,19 @@ async function handleSyncFetchJob(job) {
       // A synchronous XHR reads `document.cookie` the moment it returns: the cookies the
       // response set ride back in a header (the page applies them before it returns).
       collectCookies: !job.kind,
-    }, job.kind ? null : {
+    }, job.kind ? (job.cors === 'anonymous' || job.cors === 'use-credentials' ? {
+      // A stylesheet or script of a frame the worker does not control that asked for CORS (`crossorigin`).
+      elementCors: true, mode: 'cors', credentials: job.cors === 'use-credentials' ? 'include' : 'same-origin',
+      opaqueOrigin: !!(entry && entry.opaque),
+    } : null) : {
       // An XHR is a cors-mode request of its document (the element loads above are not), with cookies
       // only as `withCredentials` asks — and the browser's CORS rules apply to it.
       runtimeFetch: true, mode: 'cors', credentials: job.wc ? 'include' : 'same-origin',
       opaqueOrigin: !!(entry && entry.opaque),
     }));
-    // A network error (a failed CORS check among them) makes a synchronous `send()` throw.
-    if (!job.kind && resp && resp.type === 'error') throw new Error('ZP_NETWORK_ERROR');
+    // A network error (a failed CORS check among them) makes a synchronous `send()` throw — and an element
+    // that asked for CORS and was refused fail to load.
+    if ((!job.kind || job.cors) && resp && resp.type === 'error') throw new Error('ZP_NETWORK_ERROR');
     const cookieChanges = resp && resp.__zpFetchMeta && resp.__zpFetchMeta.cookies;
     // ★릴레이는 `transportFetch` 를 직접 부르므로 `/zp/api/fetch` 핸들러가
     // 하던 후처리를 못 탄다. 동기 XHR 은 원본 바이트를 원해서 문제가 없었지만,
@@ -1226,7 +1231,13 @@ async function runtimeAPI(req, url, clientId) {
     // CNN 의 adfuel 은 v11 API 를 기대하므로 경매가 아예 안 돌았다
     // (pbjs.getEvents() 대조군 73 vs 프록시 0, 프레임 31 vs 11).
     // 아래 /zp/api/fetch 경로는 이미 ctx 를 먼저 본다 — 여기만 빠져 있었다.
-    const scriptEntryId = (scriptCtx && scriptCtx.entryId) || tab.activeEntryId;
+    // A srcdoc frame is controlled for its fetches but `navigator.serviceWorker.controller` is null in it, so it cannot
+    // bind itself to its tab with a message: the markup walked for it names its tab and entry in the script URL, and
+    // its first script request binds it (as a worker's first request does) for everything it asks for afterwards.
+    const urlEntry = explicitTab && url.searchParams.get('entry');
+    const namedEntry = urlEntry && explicitTab.entries.get(urlEntry);
+    if (!scriptCtx && namedEntry && clientId) bindClientContext(clientId, explicitTab, namedEntry);
+    const scriptEntryId = (scriptCtx && scriptCtx.entryId) || (namedEntry && urlEntry) || tab.activeEntryId;
     const elementCors = elementCorsOptions(req, tab.entries.get(scriptEntryId));
     const resp = await transportFetch(target, Object.assign({ request: req, tab, entryId: scriptEntryId, refOverride }, elementCors));
     if (elementCors && resp.type === 'error') return resp;
@@ -3436,9 +3447,18 @@ function applyCookieWrite(tab, targetUrl, line, wid, sourceClientId) {
 //
 // A `fetch()` has no destination: the parent of a frame the worker does not control (srcdoc, blob:, document.write)
 // fetches that frame's images itself and hands over a blob URL, and that fetch is not the element's request.
+//
+// A frame the worker does not control (a blank frame written to by script, a blob: document) cannot request its
+// elements itself: its parent fetches them and says what the element asked for in `X-ZP-Element-CORS`
+// (`anonymous` / `use-credentials`; absent for a plain element), which stands in for the missing destination.
 function elementCorsOptions(req, entry) {
-  if (req.mode !== 'cors' || !req.destination) return null;
-  return { elementCors: true, mode: 'cors', credentials: req.credentials, opaqueOrigin: !!(entry && entry.opaque) };
+  const hint = req.headers.get('X-ZP-Element-CORS');
+  let credentials;
+  if (hint === 'anonymous') credentials = 'same-origin';
+  else if (hint === 'use-credentials') credentials = 'include';
+  else if (req.mode === 'cors' && req.destination) credentials = req.credentials;
+  else return null;
+  return { elementCors: true, mode: 'cors', credentials, opaqueOrigin: !!(entry && entry.opaque) };
 }
 // ---- Fetch-spec CORS for a page's own fetch()/XHR ----------------------------------------------
 // The page's request goes out from here, so the worker is where a browser's CORS rules have to be

@@ -57,8 +57,10 @@
     // (CF 챌린지 타이밍 때문에 필요하다 — 아래 주석 참고). 모듈은 Rust 쪽과
     // **바이트 단위로 같은** 정규형을 쓰고, Referer 는 SW 가 요청의
     // `request.referrer` 에서 유도한다(referrerFromBrowserHeader).
-    if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + encodeURIComponent(target) + '&kind=module';
-    return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href);
+    // Inside a srcdoc frame the worker cannot tell whose request it is (the frame cannot bind itself): say so.
+    const whose = srcdocMarkupDepth ? '&tab=' + encodeURIComponent(boot.tabId || '') + '&entry=' + encodeURIComponent(activeEntryId || '') : '';
+    if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + encodeURIComponent(target) + '&kind=module' + whose;
+    return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href) + whose;
   }
   // 프록시 script URL 의 kind 를 요소의 **지금** `type` 에 맞춘다.
   //
@@ -1133,7 +1135,8 @@
                 try { Native.removeAttribute.call(node, 'src'); } catch {}
                 try { Native.removeAttribute.call(node, 'href'); } catch {}
               }
-              const loaderCode = '__ZP_LOAD_EXTERNAL_SCRIPT(' + JSON.stringify(target).replace(/</g, '\\u003c') + ',' + JSON.stringify(dtype) + ');';
+              const corsMode = swLessCORSMode(node);
+              const loaderCode = '__ZP_LOAD_EXTERNAL_SCRIPT(' + JSON.stringify(target).replace(/</g, '\\u003c') + ',' + JSON.stringify(dtype) + (corsMode ? ',' + JSON.stringify(corsMode) : '') + ');';
               setScriptText(node, loaderCode);
               continue;
             }
@@ -1191,7 +1194,7 @@
         if (out != null) Native.setAttribute.call(node, attrName, out);
         continue;
       }
-      const relay = relayFromProxyPath(raw, relayKindForElement(node, tag, localKey));
+      const relay = relayFromProxyPath(raw, relayKindForElement(node, tag, localKey), swLessCORSMode(node));
       if (relay) Native.setAttribute.call(node, attrName, relay);
     }
   }
@@ -1200,7 +1203,7 @@
   // 사본을 쓰는 동안 이 프레임만 `no-cache` 사본을 받아 **다른 빌드의 프렐류드**를
   // 실행할 여지가 있었다. `assetURL()` 이 emit 전용(쿼리 포함)이고
   // `assetPath()` 는 경로 비교 전용이다 — 섞으면 internalPath 가 불일치한다.
-  function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + withoutSWLessPlaceholders(() => transformHTML(String(s))); }
+  function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + forSrcdocMarkup(() => transformHTML(String(s))); }
   // `proxyOrigin` 을 실어 보내는 이유는 resolveProxyOrigin 주석에 있다 —
   // 자식이 `about:srcdoc` 이면 자기 힘으로는 오리진을 알 수 없다.
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }

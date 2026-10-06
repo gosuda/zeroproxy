@@ -49,6 +49,9 @@ type syncFetchJob struct {
 	Entry   string     `json:"entry"`
 	Method  string     `json:"method"`
 	Headers [][]string `json:"headers"`
+	// Cors — what an element of a frame the worker does not control asked for with `crossorigin`
+	// (`anonymous` or `use-credentials`; empty for a plain element).
+	Cors string `json:"cors,omitempty"`
 	// WithCredentials — the XHR's `withCredentials`: a cross-origin request carries cookies only then.
 	WithCredentials bool `json:"wc,omitempty"`
 	// DocURL / Cookies — what the page wrote with `document.cookie` and the worker has not acknowledged
@@ -165,6 +168,7 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 		Kind:            q.Get("kind"),
 		DocURL:          q.Get("dv"),
 		WithCredentials: q.Get("wc") == "1",
+		Cors:            corsMode(q.Get("cors")),
 		result:          make(chan *syncFetchResult, 1),
 	}
 	job.Cookies = parsePendingCookies(q["ck"])
@@ -222,6 +226,14 @@ func (s *server) handleSyncFetch(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		s.syncHub.take(job.ID)
 	}
+}
+
+// corsMode — the `cors` query value, if it is one of the two the `crossorigin` attribute can mean.
+func corsMode(v string) string {
+	if v == "anonymous" || v == "use-credentials" {
+		return v
+	}
+	return ""
 }
 
 // parsePendingCookies — the `ck` query values: each a JSON [id, line]. Bounded and shape-checked: the

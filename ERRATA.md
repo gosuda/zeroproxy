@@ -460,6 +460,25 @@ claimed:
     nothing relied on the old answer. — e2e `member operations on null and undefined throw as natively` (88
     cases across `null`, `undefined`, a plain object and a number: identical to native, uncaught errors'
     `filename` included; nine guards mutation-checked).
+50. **Elements in a frame the worker does not answer itself were not held to CORS.** A blank frame a script
+    writes into (Naver's ad frames are these) gets its images from its parent (a placeholder first, then a blob),
+    its stylesheets through the synchronous relay and its scripts through the parent's fetch; none of those is the
+    element's own request, so item 48's rules never saw it: a `crossorigin` image, stylesheet or script the target did
+    not allow loaded, with no `Origin` and with cookies. The parent now says what the element asked for
+    (`X-ZP-Element-CORS` on the fetch, `cors=` on the relay URL, a third argument of the script loader), the worker
+    judges it as it judges the browser's own request, and an image it refuses ends in an error, not in the
+    placeholder. A fetch with no destination and no such header is still not an element. — e2e `crossorigin
+    elements, modules and fonts obey CORS as natively` (a written frame and a srcdoc frame, each with an image, a
+    stylesheet and a script, allowed and not, and a DOM-made image; request logs identical to native), five
+    mutations checked. `blob:` frames stay sealed (intentional, see the table above).
+51. **An external script in a `srcdoc` frame never ran** — nor did a module's imports, nor anything that needed
+    them. A srcdoc frame is controlled for its fetches, yet `navigator.serviceWorker.controller` is `null` inside
+    it, so it cannot bind itself to its tab with a message as other frames do; its script URL carried no `tab`, so
+    the worker answered `SW_NOT_READY` (503). (Images in the same frame worked: their URLs carry the tab.) Markup
+    walked for a srcdoc frame now names the tab and the entry in each script URL, and the first script request binds
+    the frame's client — as a worker's first request does — so a module's later imports, which carry nothing, find
+    their frame. — e2e `scripts in a srcdoc frame run in order, external ones included (matches native)` (inline,
+    external, a script that needs the external one, a module with an import; two mutations checked).
 
 ### Residuals (documented, not fixed)
 
@@ -494,7 +513,6 @@ claimed:
 | A frame sandboxed without `allow-same-origin` is **same-origin with the proxy underneath**; its opacity is the prelude's | The proxy cannot serve a document that has a real opaque origin (no service worker, no `localStorage`). The browser keeps every other flag, the frame's namespaces are private to it, and every other window sees it as a cross-origin stand-in — but the denial list is code: a gap in it would let the frame read what any same-origin frame can read of its **own** namespace, never of a site's. | e2e `sandboxed frames are opaque to the page and to each other, as natively` |
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
-| CORS is applied to what the **browser itself requests** from a document the worker controls (items 45, 48), not to element loads in a frame it does not — `srcdoc`, `blob:`, `document.write` — nor to stylesheets and scripts those frames get through the synchronous relay | Those frames' images come through their parent's own `fetch()`, which is not the element's request, and the refusal would have to reach the live element (item 47); the relay jobs carry no request mode. A load the target never allowed succeeds there. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`), and `Reflect.get`/`Reflect.set` with a dangerous literal key (`location`…) on a non-object throw the `Cannot read/set properties of null` message; `Reflect.set(o, 'location', v)` returns `v`, not `true` | The rewriter sends `Object.*` and `Reflect.*` to one helper for descriptors, and a literal dangerous key to `__zp_get`/`__zp_set`. Always a `TypeError`; only the text (and that return value) differ. Measured 2026-10-06. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 

@@ -44,3 +44,14 @@ func TestParsePendingCookies(t *testing.T) {
 		t.Fatal("nothing pending: nothing carried")
 	}
 }
+
+func TestCorsMode(t *testing.T) {
+	for in, want := range map[string]string{
+		"anonymous": "anonymous", "use-credentials": "use-credentials",
+		"": "", "include": "", "Anonymous": "", "anonymous; x": "",
+	} {
+		if got := corsMode(in); got != want {
+			t.Errorf("corsMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

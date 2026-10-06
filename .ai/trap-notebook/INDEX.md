@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-06 | membrane / 수정 | worker 가 직접 답 못 하는 프레임(document.write)의 crossorigin 요소가 CORS 판정을 못 받았다. 부모가 요소 모드를 헤더·릴레이 인자로 전한다. | rewriter.md#swless-요소-cors |
+| 2026-10-06 | membrane / 수정 | srcdoc 프레임의 외부 스크립트가 영영 안 돌았다 — controller 가 null 이라 탭에 못 묶인다. 스크립트 URL 에 tab·entry 를 싣고 첫 요청에서 바인딩. | rewriter.md#srcdoc-스크립트-바인딩 |
 | 2026-10-06 | membrane / 수정 | null·undefined 수신자의 재작성된 멤버 연산이 던지지 않고 undefined 였다(Object(null)={}). 태그한 eval 에서 진짜 연산을 해 엔진이 던지게 함. | rewriter.md#null-수신자-throw |
 | 2026-10-06 | membrane / 보안 | crossorigin 요소·모듈·폰트에 CORS 미적용. 두 SW 경로(fetch GET·script)에 같은 옵션, destination 없는 내부 fetch 는 제외. FontFace URL 은 프록시를 안 탔다. | rewriter.md#element-cors |
 | 2026-10-06 | membrane / 수정 | Naver 광고 이미지가 붉은 블록이었다 — SW-less 자리끼우개(실제로는 반투명 빨강)가 살아 있는 요소에 남음. 목표 URL 로 다시 시작, 픽셀은 투명으로. | rewriter.md#swless-자리끼우개-빨강 |

@@ -2157,7 +2157,7 @@ function createTargetServer(requests, pendingResponses) {
       const as = q.get('as');
       if (as === 'img' || as === 'js' || as === 'css' || as === 'font') {
         const kinds = {
-          img: ['image/png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')],
+          img: ['image/png', solidPNG(8)],
           js: ['text/javascript', '(window.__xcel = window.__xcel || {})[' + JSON.stringify(tag) + '] = 1;'],
           css: ['text/css', '.xcel { color: red; }'],
           font: ['font/ttf', miniTrueTypeFont()],
@@ -2389,6 +2389,33 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xsdjs-lib.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('window.__lib = (window.__lib || 0) + 1;');
+      return;
+    }
+    if (url.pathname === '/xsdjs-mod.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end("import { v } from './xsdjs-dep.js'; window.__mod = v;");
+      return;
+    }
+    if (url.pathname === '/xsdjs-dep.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('export const v = 7;');
+      return;
+    }
+    if (url.pathname === '/xsdjs') {
+      // A srcdoc frame with an inline script, an external one and an inline one that needs the external one.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>srcdoc scripts</title><body><script>' +
+        'window.__xsdjs = null;' +
+        'var f = document.createElement("iframe");' +
+        'f.srcdoc = "<body><script>window.__inline = 1;</" + "script><script src=\'/xsdjs-lib.js\'></" + "script><script>window.__after = window.__lib;</" + "script><script type=module src=\'/xsdjs-mod.js\'></" + "script>";' +
+        'document.body.appendChild(f);' +
+        'setTimeout(function () { var w = f.contentWindow; window.__xsdjs = { inline: w.__inline, lib: w.__lib, after: w.__after, mod: w.__mod }; }, 4000);' +
+        '<\/script></body>');
+      return;
+    }
     if (url.pathname === '/xscr-probe.js') {
       xckSeen.set('scr:' + url.searchParams.get('run') + ':' + url.searchParams.get('tag'), 'seen');
       res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
@@ -2561,6 +2588,46 @@ function createTargetServer(requests, pendingResponses) {
           await font('f-same', 'same', po);
           await fontCSS('fc-acao', 'acao-origin');
           await fontCSS('fc-missing', 'acao-missing');
+          // Frames the worker does not answer itself — a blank frame a script writes into, a srcdoc frame — hold their
+          // elements to the same rules: image, stylesheet and script, allowed and not, looked at where they end up.
+          var frames = [];
+          function inFrame(how, kind, ok) {
+            var name = how + '-' + kind + '-' + (ok ? 'ok' : 'missing');
+            var url = api(other, name, ok ? 'acao-origin' : 'acao-missing', kind).replace(/&/g, '&amp;');
+            var html = kind === 'img' ? '<img id="i" crossorigin="anonymous" src="' + url + '">'
+              : kind === 'css' ? '<link rel="stylesheet" crossorigin="anonymous" href="' + url + '"><div class="xcel" id="d">x</div>'
+              : '<script crossorigin="anonymous" src="' + url + '"></' + 'script>';
+            var f = document.createElement('iframe');
+            if (how === 'srcdoc') { f.srcdoc = '<body>' + html; document.body.appendChild(f); }
+            else { document.body.appendChild(f); var d = f.contentDocument; d.open(); d.write('<body>' + html); d.close(); }
+            frames.push([name, f, kind]);
+          }
+          // ...and one made with the DOM in a written frame: allowed and not
+          ['ok', 'missing'].forEach(function (which) {
+            var name = 'written-dom-img-' + which;
+            var f = document.createElement('iframe');
+            document.body.appendChild(f);
+            var d = f.contentDocument;
+            d.open(); d.write('<body>'); d.close();
+            var im = d.createElement('img');
+            im.crossOrigin = 'anonymous';
+            im.src = api(other, name, which === 'ok' ? 'acao-origin' : 'acao-missing', 'img');
+            d.body.appendChild(im);
+            frames.push([name, f, 'domimg', im]);
+          });
+          ['written', 'srcdoc'].forEach(function (how) {
+            ['img', 'css', 'js'].forEach(function (kind) { inFrame(how, kind, true); inFrame(how, kind, false); });
+          });
+          await new Promise(function (r) { setTimeout(r, 6000); });
+          frames.forEach(function (rec) {
+            var name = rec[0], f = rec[1], kind = rec[2], d = f.contentDocument, w = f.contentWindow;
+            try {
+              if (kind === 'domimg') { var di = rec[3]; out[name] = !di.complete ? 'pending' : di.naturalWidth === 8 ? 'load' : di.naturalWidth > 0 ? 'placeholder' : 'error'; }
+              else if (kind === 'img') { var im = d.getElementById('i'); out[name] = !im ? 'none' : !im.complete ? 'pending' : im.naturalWidth === 8 ? 'load' : im.naturalWidth > 0 ? 'placeholder' : 'error'; }
+              else if (kind === 'css') out[name] = w.getComputedStyle(d.getElementById('d')).color === 'rgb(255, 0, 0)' ? 'applied' : 'not applied';
+              else out[name] = w.__xcel && w.__xcel[rid + ':' + name] ? 'ran' : 'not run';
+            } catch (e) { out[name] = 'threw:' + e.name; }
+          });
           // an opaque frame: Origin is "null"
           var got = null;
           addEventListener('message', function (e) { if (typeof e.data === 'string' && e.data.indexOf('xcorsel:') === 0) got = JSON.parse(e.data.slice(8)); });
@@ -6454,6 +6521,34 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.deepEqual(proxied, direct);
   });
 
+  // A srcdoc frame is controlled for its fetches, yet `navigator.serviceWorker.controller` is null inside it: it cannot
+  // bind itself to its tab with a message, and its first script request reached the worker unattributed (503) — an
+  // external script in a srcdoc frame never ran, nor did anything that needed it.
+  await t.test('scripts in a srcdoc frame run in order, external ones included (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xsdjs`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xsdjs, { timeout: 30000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xsdjs);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xsdjs`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xsdjs, { timeout: 60000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xsdjs);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'srcdoc-scripts.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct, { inline: 1, lib: 1, after: 1, mod: 7 });
+    assert.deepEqual(proxied, direct);
+  });
+
   // A frame whose sandbox forbids scripts still asks for the scripts in its document (the browser's preload
   // scanner does) — unless the document carries a CSP <meta>, which makes Chrome skip them (measured). The proxy
   // used to put one beside the CSP header, so these frames requested nothing for their <script src>.
@@ -6529,6 +6624,16 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct['fc-missing'].slice(0, 3), 'err');
     assert.equal(direct.opaque['o-origin'], 'error', 'an opaque document is not the origin the target names');
     assert.equal(direct.opaque['o-star'], 'load');
+    assert.equal(direct['written-dom-img-ok'], 'load');
+    assert.equal(direct['written-dom-img-missing'], 'error');
+    assert.equal(direct['written-img-ok'], 'load');
+    assert.equal(direct['written-img-missing'], 'error');
+    assert.equal(direct['written-css-ok'], 'applied');
+    assert.equal(direct['written-css-missing'], 'not applied');
+    assert.equal(direct['written-js-ok'], 'ran');
+    assert.equal(direct['written-js-missing'], 'not run');
+    assert.equal(direct['srcdoc-img-missing'], 'error');
+    assert.equal(direct['srcdoc-js-missing'], 'not run');
     assert.equal(direct.__log['i-anon-cookie'][0].cookies, '', 'anonymous: no cookies across origins');
     assert.equal(direct.__log['i-creds-ok'][0].cookies, 'xce');
     assert.equal(direct.__log['i-plain-cookie'][0].cookies, 'xce', 'no-cors element loads carry cookies');

@@ -301,11 +301,16 @@
       // gained. The Go server cannot serve `/zp/api/script` either; the proxied
       // fetch lives in the browser kernel by design. Ordering is solved by
       // `childEnqueue` above instead: fetch in parallel, execute in order.
-      const childLoadExternal = (url, kind) => {
+      // `cors`: the script asked for it with `crossorigin`; the worker then holds the target's answer to the CORS
+      // rules, and a refused script is skipped without a trace (natively: an `error` event on the element).
+      const childLoadExternal = (url, kind, cors) => {
         const dtype = String(kind || 'classic');
         // Start downloading NOW so N scripts in one written chunk fetch in
         // parallel; the queue only serializes their execution.
-        const fetching = Native.fetch(scriptProxyPath(String(url || ''), dtype)).then(r => r.text());
+        const asked = cors === 'anonymous' || cors === 'use-credentials' ? cors : '';
+        const path = scriptProxyPath(String(url || ''), dtype);
+        let fetching = (asked ? Native.fetch(path, { headers: { 'X-ZP-Element-CORS': asked } }) : Native.fetch(path)).then(r => r.text());
+        if (asked) fetching = fetching.then(code => code, () => '');
         // `childRunDeferred` here as well as in `childEnqueue`: this body runs a
         // microtask after the fetch even on the empty-queue fast path, so the
         // `document.write` guard has to see the deferred flag either way.

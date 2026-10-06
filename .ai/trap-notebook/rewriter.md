@@ -1503,6 +1503,23 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="srcdoc-스크립트-바인딩"></a>srcdoc 프레임의 외부 스크립트가 영영 안 돌았다 — 그 프레임은 자기를 탭에 묶을 수 없다 (2026-10-06)
+
+- **측정:** srcdoc 프레임 안 `<script>…</script><script src=/lib.js></script><script>…lib 사용…</script>` — 네이티브는 셋 다 순서대로 돌고, 프록시는 첫 인라인만 돌았다. SW 거절 목록에 `SW_NOT_READY` 503(url 비어 있음 = `/zp/api/script` 경로).
+- **원인:** 프렐류드는 자기 clientId 를 `BIND_CLIENT` 메시지로 탭에 묶는데, srcdoc 프레임은 **fetch 는 SW 에 통제되지만 `navigator.serviceWorker.controller` 가 null** 이라 메시지를 보낼 곳이 없다(프레임 안에서 직접 확인). 이미지 URL 은 `&tab=` 을 달고 있어 괜찮았고 스크립트 URL 은 없었다. SW 에 바인딩 로그를 심어 보니 `BIND_CLIENT` 는 최상위 두 번뿐이었다.
+- **버린 길:** SW 가 바인딩을 800ms 기다리게 해 봤다 — 바인딩이 아예 안 오므로 소용없었다. 추측을 코드로 옮기기 전에 로그 두 줄로 가려냈다.
+- **수정:** srcdoc 마크업을 걷는 동안(`forSrcdocMarkup`) 스크립트 URL 에 `&tab=&entry=` 를 싣고, `/zp/api/script` 가 묶이지 않은 클라이언트의 첫 요청에서 그 entry 로 클라이언트를 바인딩한다(워커 첫 요청과 같은 방식). 모듈의 후속 import 는 아무것도 달고 있지 않아 이 바인딩에 기댄다.
+- **규칙:** "통제된다" 는 두 가지다 — fetch 가 SW 를 지나는 것과 `controller` 가 보이는 것. 바인딩을 메시지에 기대는 경로는 후자를 요구한다. 새 종류의 문서(srcdoc·blank·blob)가 생기면 **스크립트 하나와 모듈 import 하나**를 그 안에서 돌려 본다.
+- **검증:** e2e `scripts in a srcdoc frame run in order…`(변이 2개: URL 에 tab/entry 를 싣는 것, 바인딩).
+
+## <a id="swless-요소-cors"></a>worker 가 직접 답하지 않는 프레임의 요소는 CORS 판정을 못 받았다 (2026-10-06)
+
+- **측정:** `document.write` 로 쓴 빈 프레임의 `<img|link|script crossorigin>` — 네이티브는 허락 없으면 실패, 프록시는 로드(`Origin` 없음, 쿠키 있음). srcdoc 프레임의 이미지·스타일시트는 이미 맞았다(자기 요청이 SW 를 지난다).
+- **원인:** 그 프레임의 요소는 부모가 대신 가져온다 — 이미지는 `Native.fetch`(자리끼우개→blob), 스타일시트는 동기 릴레이(`kind=style`), 스크립트는 `__ZP_LOAD_EXTERNAL_SCRIPT` 의 fetch. 셋 다 요소의 요청이 아니라(destination 없음) [요소 CORS](#element-cors)가 안 걸렸다.
+- **수정:** 부모가 요소가 `crossorigin` 으로 무엇을 물었는지 전한다 — fetch 는 `X-ZP-Element-CORS: anonymous|use-credentials`, 릴레이는 `&cors=`(Go 가 두 값만 통과), 스크립트 로더는 세 번째 인자. SW 는 헤더를 destination 대신 요소 표지로 읽는다. 거절된 이미지는 자리끼우개로 남지 않고 디코드 불가 `data:,` 가 되어 `error` 가 난다(정책 감시자가 이 값을 되돌리지 않게 예외).
+- **함정:** 같은 일을 하는 두 경로(`setSubresourceAttribute` 의 즉시 처리, 자리끼우개 heal)가 겹쳐서 한쪽을 지워도 테스트가 통과했다 — 변이로 잡히지 않는 가드는 **중복**이다. 중복을 지우고 한 곳(heal)에서만 오류로 끝낸다.
+- **검증:** e2e `crossorigin elements, modules and fonts obey CORS…`(쓴 프레임·srcdoc × 이미지·CSS·스크립트 × 허락/불허, DOM 으로 만든 이미지, 요청 로그까지 네이티브와 동일), Go `TestCorsMode`, 변이 5개.
+
 ## <a id="null-수신자-throw"></a>`null`/`undefined` 수신자의 재작성된 멤버 연산이 던지지 않고 `undefined` 를 돌려줬다 (2026-10-06)
 
 - **측정:** `__zp_get(null, 'location')` → `undefined`(던지지 않음). 같은 코드를 네이티브에서는 `TypeError: Cannot read properties of null (reading 'location')`. 차단된 `window.open()` 의 null 에 `w.location.href` 를 읽는 코드가 프록시에서만 조용히 넘어갔다 — `try { … } catch` 로 갈리는 분기가 달랐다.

@@ -56,7 +56,7 @@
   // `transportFetch` 하나뿐이다 — 새 egress 도, 새 TLS 지문도 안 생긴다.
   // 동기 XHR 도 "SW 가 가로채지 못하는 요청" 이라는 점에서 같은 범주였고,
   // 그때 이미 blob 우회가 아니라 경로 교체로 푼 전례가 있다.
-  function swLessRelayURL(absolute, kind) {
+  function swLessRelayURL(absolute, kind, cors) {
     const s = String(absolute || '');
     if (!/^https?:/i.test(s)) return '';
     let u = proxyOrigin + ZP.apiPath('sync-fetch')
@@ -66,17 +66,18 @@
       + '&tab=' + encodeURIComponent((boot && boot.tabId) || '')
       + '&entry=' + encodeURIComponent(activeEntryId || '');
     if (kind) u += '&kind=' + encodeURIComponent(kind);
+    if (cors) u += '&cors=' + encodeURIComponent(cors);
     return u;
   }
   // 이미 `/zp/api/fetch?url=…` 로 리라이트된 값을 릴레이 경로로 옮긴다.
   // 리라이트 단계에서 목적지 문서가 SW-less 임을 알 때만 부른다.
-  function relayFromProxyPath(proxied, kind) {
+  function relayFromProxyPath(proxied, kind, cors) {
     const s = String(proxied || '');
     const at = s.indexOf(ZP.apiPath('fetch') + '?url=');
     if (at < 0) return '';
     let target = '';
     try { target = new URL(s, proxyOrigin).searchParams.get('url') || ''; } catch { return ''; }
-    return target ? swLessRelayURL(target, kind) : '';
+    return target ? swLessRelayURL(target, kind, cors) : '';
   }
   // ★릴레이로 보낼 수 있는 것은 **서브리소스뿐**이다. 내비게이션(`a`/`area`/
   // `form`/`iframe`/`frame`)은 절대 여기 오면 안 된다 — 그것들은 share URL 로
@@ -155,12 +156,17 @@
   // 판정을 못 탄다 — 그대로 두면 `url(../../res/x.png)` 가 상대경로로 남고,
   // blob: 을 base 로 해석돼 배경이 통째로 깨진다. 문서 요청의
   // `X-ZP-Document-Request` 와 같은 방식으로 명시 신호를 준다.
-  function swLessBlobURL(proxied, kind) {
-    const ck = (kind || '') + '\n' + proxied;
+  // `cors`: what the element asked for with `crossorigin` ('anonymous' / 'use-credentials', '' for none) — the
+  // worker holds the answer to the CORS rules only for an element that asked for them.
+  function swLessBlobURL(proxied, kind, cors) {
+    const ck = (kind || '') + '\n' + (cors || '') + '\n' + proxied;
     const hit = swLessBlobs.get(ck);
     if (hit) return hit;
     const make = Native.createObjectURL || (blob => URL.createObjectURL(blob));
-    const init = kind === 'style' ? { headers: { 'X-ZP-Style-Request': '1' } } : undefined;
+    const headers = {};
+    if (kind === 'style') headers['X-ZP-Style-Request'] = '1';
+    if (cors) headers['X-ZP-Element-CORS'] = cors;
+    const init = Object.keys(headers).length ? { headers } : undefined;
     let p;
     try {
       p = Promise.resolve(init ? Native.fetch(proxied, init) : Native.fetch(proxied))
@@ -212,7 +218,20 @@
     if (!target) return;
     const proxied = subresourceProxyPath(target);
     if (!documentIsSWLess(doc)) { try { Native.setAttribute.call(el, key, proxied); } catch {} return; }
-    swLessBlobURL(proxied).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+    const cors = swLessCORSMode(el);
+    swLessBlobURL(proxied, '', cors).then(u => {
+      try {
+        if (u) Native.setAttribute.call(el, key, u);
+        else if (cors) Native.setAttribute.call(el, key, SWLESS_ERROR);
+      } catch {}
+    });
+  }
+  // What an element asked for with `crossorigin`: '' (nothing), 'anonymous' or 'use-credentials'.
+  function swLessCORSMode(el) {
+    let attr = null;
+    try { attr = Native.getAttribute.call(el, 'crossorigin'); } catch {}
+    if (attr === null || attr === undefined) return '';
+    return String(attr).toLowerCase() === 'use-credentials' ? 'use-credentials' : 'anonymous';
   }
   function upgradeSWLessURL(el, key, raw) {
     if (String(raw) === SWLESS_PIXEL) return healSWLessPlaceholder(el, key);
@@ -221,8 +240,9 @@
     try { doc = el.ownerDocument; } catch {}
     if (!documentIsSWLess(doc)) return;
     if (!markSWLessUpgraded(el, key)) return;
-    if (key === 'srcset' || key === 'imagesrcset') return upgradeSWLessSrcset(el, key, raw);
-    swLessBlobURL(raw, key === 'href' ? 'style' : '').then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+    const cors = swLessCORSMode(el);
+    if (key === 'srcset' || key === 'imagesrcset') return upgradeSWLessSrcset(el, key, raw, cors);
+    swLessBlobURL(raw, key === 'href' ? 'style' : '', cors).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
   }
   // srcset 은 URL 하나가 아니라 `url 1x, url 2x` 후보 목록이다. 후보마다
   // 따로 blob 을 받아 URL 부분만 갈아끼운다 — 디스크립터(`1x`/`320w`)는
@@ -230,11 +250,11 @@
   // (예전 주석은 "프록시 URL 에는 쉼표가 없으니 split(',') 이 안전하다" 고
   //  적혀 있었다. 전제가 틀렸다 — 쉼표는 **아직 리라이트 안 된** data: 후보에
   //  들어 있다. splitSrcsetCandidates 를 쓴다.)
-  function upgradeSWLessSrcset(el, key, raw) {
+  function upgradeSWLessSrcset(el, key, raw, cors) {
     const parts = splitSrcsetCandidates(raw);
     const jobs = parts.map(c => {
       if (!c.url || c.url.indexOf(ZP.apiPath('fetch')) < 0) return Promise.resolve(c.lead + c.url + c.tail);
-      return swLessBlobURL(c.url, '').then(u => c.lead + (u || c.url) + c.tail);
+      return swLessBlobURL(c.url, '', cors).then(u => c.lead + (u || c.url) + c.tail);
     });
     Promise.all(jobs).then(list => { try { Native.setAttribute.call(el, key, list.join('')); } catch {} });
   }
@@ -298,23 +318,27 @@
   // 자리끼우개를 써도 되는 자리 = **이미지뿐**이다. script/link 는 src 를 나중에
   // 바꿔도 다시 실행/적용되지 않거나 별도 경로(릴레이, __ZP_LOAD_EXTERNAL_SCRIPT)
   // 가 이미 담당하므로 건드리지 않는다.
+  // What an image that asked for CORS and was refused ends with: a source that cannot be decoded, so the element
+  // reports an error (the placeholder would read as a load).
+  const SWLESS_ERROR = 'data:,';
   function swLessPixelable(el, key) {
     const tag = el && el.localName;
     if (key === 'poster') return tag === 'video';
     if (key !== 'src') return false;
     return tag === 'img' || tag === 'image' || tag === 'input';
   }
-  // Markup walked for a srcdoc frame: that frame carries its own prelude and loads its images itself — there is no
-  // parent fetch to swap a placeholder out, and a placeholder written into its markup would be all it ever shows.
-  let swLessPlaceholdersOff = 0;
-  function withoutSWLessPlaceholders(fn) {
-    swLessPlaceholdersOff++;
-    try { return fn(); } finally { swLessPlaceholdersOff--; }
+  // Markup walked for a srcdoc frame: that frame carries its own prelude and loads its elements itself — there is no
+  // parent fetch to swap a placeholder out (one written into its markup would be all it ever shows), and it cannot
+  // bind itself to its tab (its script URLs name the tab and entry instead).
+  let srcdocMarkupDepth = 0;
+  function forSrcdocMarkup(fn) {
+    srcdocMarkupDepth++;
+    try { return fn(); } finally { srcdocMarkupDepth--; }
   }
   function setSubresourceAttribute(el, key, proxied) {
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
-    if (swLessPlaceholdersOff || !documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
+    if (srcdocMarkupDepth || !documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
     // ★2026-08-20 — 여기에 프록시 경로를 박으면 **반드시 403 이 한 번 난다.**
     // `/zp/api/fetch` 는 SW 안에만 있는 가상 경로이고 이 문서는 SW 클라이언트가
     // 아니다. 지금까지는 그 403 을 blob 으로 뒤늦게 덮어써 왔다 — 그림은 결국
@@ -328,7 +352,9 @@
     // 어느 쪽이든 밖으로 나가는 요청은 0 이다.
     const placeholder = swLessPixelable(el, key);
     Native.setAttribute.call(el, key, placeholder ? SWLESS_PIXEL : proxied);
-    swLessBlobURL(proxied).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+    // An element that asked for CORS (`crossorigin`) and was refused ends in an error, not in the placeholder: the
+    // placeholder's heal (healSWLessPlaceholder) sees the same promise and does that.
+    swLessBlobURL(proxied, '', swLessCORSMode(el)).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
   }
   function proxyViaURL(absolute) {
     const s = String(absolute || '');
