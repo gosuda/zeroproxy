@@ -157,6 +157,56 @@ function solidPNG(size) {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 
+// A minimal valid TrueType font (one empty glyph), built byte by byte: enough for Chrome's sanitizer to accept it, so a
+// font load can succeed or be refused in a test without a binary file in the repository.
+function miniTrueTypeFont() {
+  const u16 = n => { const b = Buffer.alloc(2); b.writeUInt16BE(n & 0xffff); return b; };
+  const i16 = n => { const b = Buffer.alloc(2); b.writeInt16BE(n); return b; };
+  const u32 = n => { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0); return b; };
+  const pad4 = b => (b.length % 4 ? Buffer.concat([b, Buffer.alloc(4 - (b.length % 4))]) : b);
+  const sum = b => { let s = 0; const p = pad4(b); for (let i = 0; i < p.length; i += 4) s = (s + p.readUInt32BE(i)) >>> 0; return s; };
+  const head = Buffer.concat([u32(0x00010000), u32(0x00010000), u32(0), u32(0x5f0f3cf5), u16(0), u16(1000), Buffer.alloc(16),
+    i16(0), i16(0), i16(0), i16(0), u16(0), u16(8), i16(2), i16(0), i16(0)]);
+  const hhea = Buffer.concat([u32(0x00010000), i16(800), i16(-200), i16(0), u16(1000), i16(0), i16(0), i16(0), i16(1), i16(0), i16(0),
+    Buffer.alloc(8), i16(0), u16(1)]);
+  const maxp = Buffer.concat([u32(0x00010000), u16(1), Buffer.alloc(26)]);
+  const hmtx = Buffer.concat([u16(1000), i16(0)]);
+  const seg = Buffer.concat([u16(4), u16(24), u16(0), u16(2), u16(2), u16(0), u16(0), u16(0xffff), u16(0), u16(0xffff), i16(1), u16(0)]);
+  const cmap = Buffer.concat([u16(0), u16(1), u16(3), u16(1), u32(12), seg]);
+  const glyf = Buffer.alloc(4);
+  const loca = Buffer.concat([u16(0), u16(0)]);
+  const names = [[1, 'F'], [2, 'Regular'], [4, 'F'], [6, 'F']].map(([id, s]) => [id, Buffer.from(s, 'utf16le').swap16()]);
+  let strings = Buffer.alloc(0);
+  const records = names.map(([id, s]) => { const r = Buffer.concat([u16(3), u16(1), u16(0x409), u16(id), u16(s.length), u16(strings.length)]); strings = Buffer.concat([strings, s]); return r; });
+  const name = Buffer.concat([u16(0), u16(names.length), u16(6 + 12 * names.length), ...records, strings]);
+  const os2 = Buffer.concat([u16(4), i16(500), u16(400), u16(5), u16(0), i16(650), i16(600), i16(0), i16(75), i16(650), i16(600), i16(0), i16(350), i16(50), i16(300),
+    i16(0), Buffer.alloc(10), u32(1), u32(0), u32(0), u32(0), Buffer.from('NONE'), u16(0x40), u16(0x20), u16(0xffff), i16(800), i16(-200), i16(0), u16(800), u16(200),
+    u32(1), u32(0), i16(500), i16(700), u16(0), u16(32), u16(1)]);
+  const post = Buffer.concat([u32(0x00030000), u32(0), i16(-100), i16(50), u32(0), u32(0), u32(0), u32(0), u32(0)]);
+  const tables = { 'OS/2': os2, cmap, glyf, head, hhea, hmtx, loca, maxp, name, post };
+  const tags = Object.keys(tables).sort();
+  const dirLen = 12 + 16 * tags.length;
+  let offset = dirLen;
+  const dir = [];
+  const bodies = [];
+  let headOffset = 0;
+  for (const tag of tags) {
+    const data = tables[tag];
+    if (tag === 'head') headOffset = offset;
+    dir.push(Buffer.concat([Buffer.from(tag, 'latin1'), u32(sum(data)), u32(offset), u32(data.length)]));
+    const padded = pad4(data);
+    bodies.push(padded);
+    offset += padded.length;
+  }
+  const n = tags.length;
+  let pow = 1, log = 0;
+  while (pow * 2 <= n) { pow *= 2; log++; }
+  const header = Buffer.concat([u32(0x00010000), u16(n), u16(pow * 16), u16(log), u16(n * 16 - pow * 16)]);
+  const font = Buffer.concat([header, ...dir, ...bodies]);
+  font.writeUInt32BE((0xb1b0afba - sum(font)) >>> 0, headOffset + 8);
+  return font;
+}
+
 function createTargetServer(requests, pendingResponses) {
   // tag → the names of the cookies the request that carried it had (see /xck-echo)
   const xckSeen = new Map();
@@ -2027,7 +2077,7 @@ function createTargetServer(requests, pendingResponses) {
       const tag = q.get('tag') || '';
       const name = q.get('case') || '';
       const po = q.get('po') || '';
-      const names = (req.headers.cookie || '').split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => n === 'xc').sort().join(',');
+      const names = (req.headers.cookie || '').split('; ').filter(Boolean).map(c => c.split('=')[0]).filter(n => n === (q.get('cn') || 'xc')).sort().join(',');
       if (!corsLog.has(tag)) corsLog.set(tag, []);
       corsLog.get(tag).push({
         m: req.method,
@@ -2038,6 +2088,8 @@ function createTargetServer(requests, pendingResponses) {
         custom: req.headers['x-custom'] || null,
         auth: req.headers.authorization ? 'yes' : null,
         ct: (req.headers['content-type'] || '').split(';')[0] || null,
+        // nothing of the worker's own (X-ZP-*) ever reaches a target
+        zp: Object.keys(req.headers).filter(h => h.startsWith('x-zp')).join(','),
       });
       const ACAO = 'Access-Control-Allow-Origin', ACAC = 'Access-Control-Allow-Credentials', ACEH = 'Access-Control-Expose-Headers';
       const ACAM = 'Access-Control-Allow-Methods', ACAH = 'Access-Control-Allow-Headers', MAXAGE = 'Access-Control-Max-Age';
@@ -2053,7 +2105,7 @@ function createTargetServer(requests, pendingResponses) {
         'expose-listed': { [ACAO]: po, [ACEH]: 'X-Secret, x-other' },
         'expose-star': { [ACAO]: po, [ACEH]: '*' },
         'expose-star-creds': { [ACAO]: po, [ACAC]: 'true', [ACEH]: '*' },
-        'setcookie': { [ACAO]: po, [ACAC]: 'true', 'Set-Cookie': 'xc=1; Path=/; SameSite=None; Secure' },
+        'setcookie': { [ACAO]: po, [ACAC]: 'true', 'Set-Cookie': (q.get('cn') || 'xc') + '=1; Path=/; SameSite=None; Secure' },
         'same': {},
       };
       const preflight = {
@@ -2094,6 +2146,18 @@ function createTargetServer(requests, pendingResponses) {
         return;
       }
       const allow = name.startsWith('pf-') ? { [ACAO]: po, [ACAC]: 'true' } : (plain[name] || {});
+      const as = q.get('as');
+      if (as === 'img' || as === 'js' || as === 'css' || as === 'font') {
+        const kinds = {
+          img: ['image/png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')],
+          js: ['text/javascript', '(window.__xcel = window.__xcel || {})[' + JSON.stringify(tag) + '] = 1;'],
+          css: ['text/css', '.xcel { color: red; }'],
+          font: ['font/ttf', miniTrueTypeFont()],
+        };
+        res.writeHead(200, Object.assign({}, base, allow, { 'Content-Type': kinds[as][0] }));
+        res.end(kinds[as][1]);
+        return;
+      }
       res.writeHead(200, Object.assign({}, base, allow));
       res.end('ok:' + name + ':' + req.method);
       return;
@@ -2296,6 +2360,158 @@ function createTargetServer(requests, pendingResponses) {
         '  var f = document.createElement("iframe"); f.setAttribute("sandbox", v[1]); f.src = "/xscr-frame?run=' + run + '&tag=" + v[0]; document.body.appendChild(f); });' +
         ' document.getElementById("host").innerHTML = \'<iframe sandbox="" src="/xscr-frame?run=' + run + '&tag=h-empty"></iframe>\';' +
         ' })();<\/script></body>');
+      return;
+    }
+    if (url.pathname === '/xcorsel-child') {
+      // A sandboxed document without allow-same-origin: its origin is opaque, so its crossorigin images say `Origin: null`.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>opaque</title><body><script>
+        (async function () {
+          var q = new URLSearchParams(location.search);
+          var other = q.get('other'), rid = q.get('rid'), po = q.get('po');
+          var out = {};
+          function load(name, cs) {
+            return new Promise(function (resolve) {
+              var i = new Image();
+              i.crossOrigin = 'anonymous';
+              var t = setTimeout(function () { out[name] = 'timeout'; resolve(); }, 15000);
+              i.onload = function () { clearTimeout(t); out[name] = 'load'; resolve(); };
+              i.onerror = function () { clearTimeout(t); out[name] = 'error'; resolve(); };
+              i.src = other + '/xcors-api?tag=' + encodeURIComponent(rid + ':' + name) + '&case=' + cs + '&po=' + encodeURIComponent(po) + '&as=img';
+            });
+          }
+          await load('o-origin', 'acao-origin');
+          await load('o-star', 'acao-star');
+          await load('o-null', 'acao-null');
+          await load('o-missing', 'acao-missing');
+          parent.postMessage('xcorsel:' + JSON.stringify(out), '*');
+        })();
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xcorsel') {
+      // The same rules for what the page does not fetch() itself: images, scripts, modules, stylesheets and fonts
+      // that ask for CORS (crossorigin, module scripts, FontFace and @font-face), the credentials they ask for,
+      // redirects, a srcdoc frame and an opaque frame.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>CORS elements</title><body><script>
+        window.__xcorsel = null;
+        window.__xcel = {};
+        (async function () {
+          var out = {};
+          var rid = Math.random().toString(36).slice(2, 10);
+          var po = location.origin;
+          var other = location.protocol + '//' + (location.hostname === 'localhost' ? '127.0.0.1' : 'localhost') + ':' + location.port;
+          function api(base, name, cs, as, extra) {
+            return base + '/xcors-api?tag=' + encodeURIComponent(rid + ':' + name) + '&case=' + cs + '&po=' + encodeURIComponent(po) + '&as=' + as + '&cn=xce' + (extra || '');
+          }
+          function settle(el) {
+            return new Promise(function (resolve) {
+              var t = setTimeout(function () { resolve('timeout'); }, 15000);
+              el.onload = function () { clearTimeout(t); resolve('load'); };
+              el.onerror = function () { clearTimeout(t); resolve('error'); };
+            });
+          }
+          async function img(name, cs, attr, extra) {
+            var i = new Image();
+            if (attr !== null) i.crossOrigin = attr;
+            var p = settle(i);
+            i.src = api(other, name, cs, 'img', extra);
+            out[name] = await p;
+          }
+          async function script(name, cs, attr, module, extra) {
+            var s = document.createElement('script');
+            if (module) s.type = 'module';
+            if (attr !== null) s.crossOrigin = attr;
+            var p = settle(s);
+            s.src = api(other, name, cs, 'js', extra);
+            document.head.appendChild(s);
+            var r = await p;
+            out[name] = r + (window.__xcel[rid + ':' + name] ? '+ran' : '');
+          }
+          async function css(name, cs, attr) {
+            var l = document.createElement('link');
+            l.rel = 'stylesheet';
+            if (attr !== null) l.crossOrigin = attr;
+            var p = settle(l);
+            l.href = api(other, name, cs, 'css');
+            document.head.appendChild(l);
+            out[name] = await p;
+          }
+          async function font(name, cs, base) {
+            try {
+              var f = new FontFace('f' + name.replace(/[^a-z0-9]/gi, ''), 'url(' + api(base || other, name, cs, 'font') + ')');
+              await f.load();
+              out[name] = 'loaded';
+            } catch (e) { out[name] = 'err:' + e.name; }
+          }
+          async function fontCSS(name, cs) {
+            var fam = 'g' + name.replace(/[^a-z0-9]/gi, '');
+            var st = document.createElement('style');
+            st.textContent = '@font-face{font-family:"' + fam + '";src:url("' + api(other, name, cs, 'font') + '")}';
+            document.head.appendChild(st);
+            try { var r = await document.fonts.load('12px "' + fam + '"'); out[name] = 'loaded:' + r.length; }
+            catch (e) { out[name] = 'err:' + e.name; }
+          }
+          await (await fetch(api(other, 'set-cookie', 'setcookie', 'txt'), { credentials: 'include' })).text();
+          // images
+          await img('i-anon-acao', 'acao-origin', 'anonymous');
+          await img('i-anon-star', 'acao-star', 'anonymous');
+          await img('i-anon-missing', 'acao-missing', 'anonymous');
+          await img('i-anon-null', 'acao-null', 'anonymous');
+          await img('i-anon-other', 'acao-other', 'anonymous');
+          await img('i-plain-missing', 'acao-missing', null);
+          await img('i-creds-ok', 'acao-origin-creds', 'use-credentials');
+          await img('i-creds-star', 'acao-star', 'use-credentials');
+          await img('i-creds-noacac', 'acao-origin', 'use-credentials');
+          await img('i-anon-cookie', 'acao-origin', 'anonymous');
+          await img('i-plain-cookie', 'acao-missing', null);
+          await img('i-redir-ok', 'redir', 'anonymous', '&loc=' + encodeURIComponent(api(other, 'i-redir-ok:b', 'acao-origin', 'img')));
+          await img('i-redir-noacao', 'redir', 'anonymous', '&noacao=1&loc=' + encodeURIComponent(api(other, 'i-redir-noacao:b', 'acao-origin', 'img')));
+          await img('i-redir-self-star', 'redir', 'anonymous', '&loc=' + encodeURIComponent(api(po, 'i-redir-self-star:b', 'acao-star', 'img')));
+          await img('i-redir-self-origin', 'redir', 'anonymous', '&loc=' + encodeURIComponent(api(po, 'i-redir-self-origin:b', 'acao-origin', 'img')));
+          // the document's own origin: nothing to check, whatever the target says
+          async function same(name, as, make) {
+            var u = api(po, name, 'same', as);
+            out[name] = await make(u);
+          }
+          await same('i-same', 'img', function (u) { var i = new Image(); i.crossOrigin = 'anonymous'; var p = settle(i); i.src = u; return p; });
+          await same('s-same', 'js', function (u) { var s = document.createElement('script'); s.crossOrigin = 'anonymous'; var p = settle(s); s.src = u; document.head.appendChild(s); return p; });
+          await same('m-same', 'js', function (u) { var s = document.createElement('script'); s.type = 'module'; var p = settle(s); s.src = u; document.head.appendChild(s); return p; });
+          await same('c-same', 'css', function (u) { var l = document.createElement('link'); l.rel = 'stylesheet'; l.crossOrigin = 'anonymous'; var p = settle(l); l.href = u; document.head.appendChild(l); return p; });
+          // scripts and modules
+          await script('s-anon-acao', 'acao-origin', 'anonymous', false);
+          await script('s-anon-missing', 'acao-missing', 'anonymous', false);
+          await script('s-plain-missing', 'acao-missing', null, false);
+          await script('s-creds-ok', 'acao-origin-creds', 'use-credentials', false);
+          await script('s-creds-star', 'acao-star', 'use-credentials', false);
+          await script('m-acao', 'acao-origin', null, true);
+          await script('m-star', 'acao-star', null, true);
+          await script('m-missing', 'acao-missing', null, true);
+          // stylesheets
+          await css('c-anon-acao', 'acao-origin', 'anonymous');
+          await css('c-anon-missing', 'acao-missing', 'anonymous');
+          await css('c-plain-missing', 'acao-missing', null);
+          // fonts: the FontFace API and an @font-face rule
+          await font('f-acao', 'acao-origin');
+          await font('f-star', 'acao-star');
+          await font('f-missing', 'acao-missing');
+          await font('f-same', 'same', po);
+          await fontCSS('fc-acao', 'acao-origin');
+          await fontCSS('fc-missing', 'acao-missing');
+          // an opaque frame: Origin is "null"
+          var got = null;
+          addEventListener('message', function (e) { if (typeof e.data === 'string' && e.data.indexOf('xcorsel:') === 0) got = JSON.parse(e.data.slice(8)); });
+          var fr = document.createElement('iframe');
+          fr.setAttribute('sandbox', 'allow-scripts');
+          fr.src = '/xcorsel-child?rid=' + encodeURIComponent(rid) + '&other=' + encodeURIComponent(other) + '&po=' + encodeURIComponent(po);
+          document.body.appendChild(fr);
+          for (var k = 0; k < 300 && !got; k++) await new Promise(function (r) { setTimeout(r, 100); });
+          out.opaque = got || 'no report';
+          out.__log = await (await fetch('/xcors-log?prefix=' + encodeURIComponent(rid + ':'))).json();
+          window.__xcorsel = out;
+        })().catch(function (e) { window.__xcorsel = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
       return;
     }
     if (url.pathname === '/xpopop-popup') {
@@ -6172,6 +6388,56 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
       assert.ok(direct.includes(`${tag}-script`), `native fetches the script of ${tag}`);
       assert.ok(direct.includes(`${tag}-img`), `native fetches the image of ${tag}`);
     }
+    assert.deepEqual(proxied, direct);
+  });
+
+  // CORS is not only for fetch(): an element that asks for it — `crossorigin` on <img>, <script> and <link>, a
+  // module script, a font from FontFace or @font-face — is held to the target's answer the same way, and the
+  // credentials it asks for decide whether cookies go along. The browser never sees the target's headers (the
+  // worker answers it), so the worker has to apply the rules.
+  await t.test('crossorigin elements, modules and fonts obey CORS as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xcorsel`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xcorsel, { timeout: 180000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xcorsel);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xcorsel`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xcorsel, { timeout: 240000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xcorsel);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'cors-elements.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    // The reference: the cases mean what their names say.
+    assert.equal(direct['i-anon-acao'], 'load');
+    assert.equal(direct['i-anon-missing'], 'error');
+    assert.equal(direct['i-plain-missing'], 'load', 'an image without crossorigin needs no permission');
+    assert.equal(direct['i-creds-star'], 'error', '* does not do for use-credentials');
+    assert.equal(direct['s-anon-missing'], 'error');
+    assert.equal(direct['s-plain-missing'], 'load+ran');
+    assert.equal(direct['m-missing'], 'error');
+    assert.equal(direct['m-acao'], 'load+ran');
+    assert.equal(direct['c-anon-missing'], 'error');
+    assert.equal(direct['f-acao'], 'loaded');
+    assert.equal(direct['f-missing'], 'err:NetworkError');
+    assert.equal(direct['fc-missing'].slice(0, 3), 'err');
+    assert.equal(direct.opaque['o-origin'], 'error', 'an opaque document is not the origin the target names');
+    assert.equal(direct.opaque['o-star'], 'load');
+    assert.equal(direct.__log['i-anon-cookie'][0].cookies, '', 'anonymous: no cookies across origins');
+    assert.equal(direct.__log['i-creds-ok'][0].cookies, 'xce');
+    assert.equal(direct.__log['i-plain-cookie'][0].cookies, 'xce', 'no-cors element loads carry cookies');
+    assert.equal(direct.__log['i-redir-self-star:b'][0].origin, 'null');
+    assert.equal(direct['i-redir-self-origin'], 'error');
     assert.deepEqual(proxied, direct);
   });
 

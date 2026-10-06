@@ -1091,7 +1091,9 @@ async function runtimeAPI(req, url, clientId) {
         : isScriptRequest
           ? [['Accept', 'text/javascript, application/javascript, */*;q=0.8']]
           : [['Accept', '*/*']];
-      const resp = await transportFetch(target, { request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest });
+      const elementCors = isDocumentRequest ? null : elementCorsOptions(req, entry);
+      const resp = await transportFetch(target, Object.assign({ request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest }, elementCors));
+      if (elementCors && resp.type === 'error') return resp;
       if (isDocumentRequest && entry) return transformDocumentResponse(resp, { tab, entry });
       if (isScriptRequest) return rewriteScriptResponse(resp, { targetUrl: target, kind: scriptKindFromRequest(req), req });
       return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
@@ -1225,7 +1227,9 @@ async function runtimeAPI(req, url, clientId) {
     // (pbjs.getEvents() 대조군 73 vs 프록시 0, 프레임 31 vs 11).
     // 아래 /zp/api/fetch 경로는 이미 ctx 를 먼저 본다 — 여기만 빠져 있었다.
     const scriptEntryId = (scriptCtx && scriptCtx.entryId) || tab.activeEntryId;
-    const resp = await transportFetch(target, { request: req, tab, entryId: scriptEntryId, refOverride });
+    const elementCors = elementCorsOptions(req, tab.entries.get(scriptEntryId));
+    const resp = await transportFetch(target, Object.assign({ request: req, tab, entryId: scriptEntryId, refOverride }, elementCors));
+    if (elementCors && resp.type === 'error') return resp;
     return rewriteScriptResponse(resp, { targetUrl: target, kind, req });
   }
   if (url.pathname === '/zp/api/worker-script') {
@@ -1676,12 +1680,13 @@ async function transportFetchHop(targetUrl, opt) {
   if (typeof self.kernelFetch !== 'function') return safeError('SW_NOT_READY', 503, u);
   // CORS (see the block above `isCORSPreflight`): a page's own cors-mode request to another origin is
   // tainted from here on (redirects included), and an "unsafe" one is preflighted first.
-  const corsRequest = !!(opt.runtimeFetch && opt.mode === 'cors' && !opt.preflight);
+  const corsMode = !!((opt.runtimeFetch || opt.elementCors) && opt.mode === 'cors');
+  const corsRequest = corsMode && !opt.preflight;
   const corsOrigin = opt.originTainted ? 'null' : opt.context.origin;
   const corsCredentials = opt.credentials === 'include';
   if (corsRequest) {
     if (new URL(u).origin !== opt.context.origin) opt.tainted = true;
-    if (opt.tainted) {
+    if (opt.tainted && !opt.elementCors) {
       const unsafeNames = corsUnsafeHeaderNames(opt.headers, opt.implicitHeaders);
       if ((!corsSafelistedMethod(txMethod) || unsafeNames.length)
           && !(await runCORSPreflight(u, opt, txMethod, unsafeNames, corsOrigin, corsCredentials))) {
@@ -1750,9 +1755,10 @@ async function transportFetchHop(targetUrl, opt) {
     const refValue = refererForPolicy(effectiveBase, u, referrerPolicy);
     if (refValue) headers.set('X-ZP-Referer', refValue);
   }
-  // Origin is independent of Referrer-Policy and an explicit empty referrer.
+  // Origin is independent of Referrer-Policy and an explicit empty referrer. A cors-mode element (`crossorigin`,
+  // module script, font) names its origin even to its own site (measured: Chrome does); a fetch() only across origins.
   if ((opt.method !== 'GET' && opt.method !== 'HEAD')
-      || (opt.runtimeFetch && opt.mode === 'cors' && (opt.originTainted || new URL(u).origin !== context.origin))) {
+      || (corsMode && (opt.originTainted || opt.elementCors || new URL(u).origin !== context.origin))) {
     // After a redirect between two other origins the request's origin is "tainted": `Origin: null`.
     headers.set('X-ZP-Origin', opt.originTainted ? 'null' : context.origin);
   }
@@ -3422,6 +3428,17 @@ function applyCookieWrite(tab, targetUrl, line, wid, sourceClientId) {
     if (seen.size > 256) seen.delete(seen.values().next().value);
   }
   tab.cookieJar.setCookieLine(String(targetUrl), String(line), { sourceClientId, wid });
+}
+// An element the page marked `crossorigin` (and module scripts, fonts, `mask-image`…) is a cors-mode request of its
+// document: the browser's CORS rules apply to it as to a fetch(), against the document's virtual origin, and its
+// credentials mode says whether cookies go along. The browser only sees the worker's answer, which always allows its
+// own origin, so the worker is where the target's answer is held to them. (`null` for a no-cors load.)
+//
+// A `fetch()` has no destination: the parent of a frame the worker does not control (srcdoc, blob:, document.write)
+// fetches that frame's images itself and hands over a blob URL, and that fetch is not the element's request.
+function elementCorsOptions(req, entry) {
+  if (req.mode !== 'cors' || !req.destination) return null;
+  return { elementCors: true, mode: 'cors', credentials: req.credentials, opaqueOrigin: !!(entry && entry.opaque) };
 }
 // ---- Fetch-spec CORS for a page's own fetch()/XHR ----------------------------------------------
 // The page's request goes out from here, so the worker is where a browser's CORS rules have to be

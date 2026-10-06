@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-06 | membrane / 보안 | crossorigin 요소·모듈·폰트에 CORS 미적용. 두 SW 경로(fetch GET·script)에 같은 옵션, destination 없는 내부 fetch 는 제외. FontFace URL 은 프록시를 안 탔다. | rewriter.md#element-cors |
 | 2026-10-06 | membrane / 수정 | Naver 광고 이미지가 붉은 블록이었다 — SW-less 자리끼우개(실제로는 반투명 빨강)가 살아 있는 요소에 남음. 목표 URL 로 다시 시작, 픽셀은 투명으로. | rewriter.md#swless-자리끼우개-빨강 |
 | 2026-10-06 | membrane / 수정 | 스크립트 못 돌리는 sandbox 프레임의 script src 를 프록시 문서는 요청 안 했다. 원인은 프렐류드가 박은 CSP meta(네이티브도 meta 가 있으면 안 받음) — 헤더만 남김. | rewriter.md#csp-meta-스크립트-프리로드 |
 | 2026-10-06 | membrane / 보안 | CORS 미적용으로 허락 안 한 교차 오리진 읽기가 성공. SW 가 가상 오리진으로 판정·preflight. 거부를 Response.error 로 주면 페이지가 v1 로 재전송. | rewriter.md#cors-적용 |

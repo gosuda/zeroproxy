@@ -501,6 +501,21 @@
         define(sheetProto, m, function (text, idx) { return native.call(this, rewriteCSSText(text), idx); });
       }
     }
+    // `new FontFace(family, 'url(…)')` 는 CSS 텍스트를 받아 **브라우저가 직접** 폰트를 가져간다 — 요소 속성도
+    // 스타일시트도 아니라서 아무 훅에도 안 걸렸고, 프록시 오리진의 CSP(font-src 'self')에 막혀 항상
+    // NetworkError 였다(같은 오리진 URL 도). `@font-face` 규칙과 같은 규칙으로 URL 을 프록시 경로로 옮긴다.
+    // 버퍼 소스는 페이지의 데이터라 그대로 둔다.
+    const NativeFontFace = w.FontFace;
+    if (typeof NativeFontFace === 'function') {
+      const ZPFontFace = function FontFace(family, source) {
+        const args = Array.prototype.slice.call(arguments);
+        if (typeof args[1] === 'string') args[1] = rewriteCSSText(args[1]);
+        return Reflect.construct(NativeFontFace, args, new.target || ZPFontFace);
+      };
+      try { ZPFontFace.prototype = NativeFontFace.prototype; } catch {}
+      brandLikeNative(ZPFontFace, null, 'FontFace');
+      define(w, 'FontFace', ZPFontFace);
+    }
     // `link.sheet.href` / `document.styleSheets[i].href` 는 StyleSheet
     // 인터페이스의 getter 다 — 요소 href 훅과 무관하게 **프록시 절대 URL** 을
     // 그대로 돌려준다. 가상 타깃으로 되돌린다.

@@ -558,3 +558,33 @@ test('the runtime prelude carries no CSP meta', () => {
   assert.doesNotMatch(prelude, /http-equiv/i);
   assert.doesNotMatch(prelude, /Content-Security-Policy/i);
 });
+
+// An element that asks for CORS (crossorigin, a module script, a font) is held to the target's answer like a fetch(),
+// but never preflighted — its headers are the browser's, not the page's.
+test('CORS: only a cors-mode request with a destination is an element load', () => {
+  const worker = loadWorker(() => response(200));
+  const req = (mode, destination, credentials) => ({ mode, destination, credentials, headers: new Headers() });
+  assert.equal(worker.elementCorsOptions(req('no-cors', 'image', 'include'), null), null, 'a plain <img>');
+  assert.equal(worker.elementCorsOptions(req('cors', '', 'same-origin'), null), null, 'a fetch() — the parent of a frame the worker does not control makes one');
+  const anon = worker.elementCorsOptions(req('cors', 'image', 'same-origin'), { opaque: false });
+  assert.deepEqual([anon.elementCors, anon.mode, anon.credentials, anon.opaqueOrigin], [true, 'cors', 'same-origin', false]);
+  assert.equal(worker.elementCorsOptions(req('cors', 'script', 'include'), { opaque: true }).opaqueOrigin, true, 'an opaque document says Origin: null');
+});
+
+test('CORS: a crossorigin element load is refused without the origin\'s permission, and never preflighted', async () => {
+  const { worker, seen } = corsWorker((req, n) => n === 1 ? new Response('x') : allowOrigin());
+  const { tab } = tabWithEntry();
+  // the headers a browser puts on an element request (not the page's, and not safelisted)
+  const browserHeaders = { 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'image', 'Sec-CH-UA': '"Chromium"' };
+  const element = extra => ({ tab, elementCors: true, mode: 'cors', credentials: 'same-origin', method: 'GET', headers: browserHeaders, ...extra });
+  assert.equal((await worker.transportFetch('https://cdn.example/a.png', element())).type, 'error');
+  const ok = await worker.transportFetch('https://cdn.example/a.png', element());
+  assert.equal(ok.status, 200);
+  assert.deepEqual(seen.map(r => r.method), ['GET', 'GET'], 'no OPTIONS');
+  assert.equal(seen[1].headers.get('x-zp-origin'), 'https://site.example');
+  // its own origin: nothing to check, yet Chrome names the origin for an element that asks for CORS
+  const same = await worker.transportFetch('https://site.example/a.png', element());
+  assert.equal(same.status, 200);
+  assert.equal(seen[2].headers.get('x-zp-origin'), 'https://site.example');
+  assert.equal(lastRefusal(worker).code, 'CORS_CHECK_FAILED');
+});

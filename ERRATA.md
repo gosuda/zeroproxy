@@ -431,6 +431,22 @@ claimed:
     — e2e `images in frames and in markup end up as the real image, not the placeholder (matches native)` (a
     written frame, a srcdoc frame, a plain document, a written frame inside a written frame; two mutations
     checked).
+48. **CORS was not applied to elements that ask for it.** A `crossorigin` image, script or stylesheet, a module
+    script, a font from `FontFace` or `@font-face` (and `mask-image`, preloads…) is a cors-mode request of its
+    document, held to the target's answer exactly like a `fetch()` (item 45): the browser only sees the worker's
+    reply, which always allows its own origin, so a load the target never allowed succeeded. The worker now
+    judges the browser's request (`req.mode === 'cors'` with a destination) against the document's virtual
+    origin and takes its credentials mode from the element (`anonymous` sends no cookies across origins,
+    `use-credentials` does and needs `Access-Control-Allow-Credentials`). It never preflights — the headers are the
+    browser's — and an element names its `Origin` even to its own site, as Chrome does (measured). Two things
+    found on the way: `new FontFace(family, 'url(…)')` was never routed through the proxy at all (the browser
+    fetched the target directly, which the CSP refused, so every URL font failed, same-origin ones included) — it
+    goes through the same rewrite as an `@font-face` rule now; and the parent of a worker-less frame fetches that
+    frame's images with a plain `fetch()`, which has no destination and must not be taken for an element.
+    — e2e `crossorigin elements, modules and fonts obey CORS as natively` (images, scripts, modules, stylesheets,
+    fonts, redirects, credentials, `Origin: null` from an opaque frame: identical to native, request logs
+    included; six mutations checked), `request-policy` unit tests. Real sites (Wikipedia, GitHub, the Guardian,
+    CNN, NAVER, BBC, MDN): no element load refused — what is refused is still telemetry.
 
 ### Residuals (documented, not fixed)
 
@@ -465,7 +481,7 @@ claimed:
 | A frame sandboxed without `allow-same-origin` is **same-origin with the proxy underneath**; its opacity is the prelude's | The proxy cannot serve a document that has a real opaque origin (no service worker, no `localStorage`). The browser keeps every other flag, the frame's namespaces are private to it, and every other window sees it as a cross-origin stand-in — but the denial list is code: a gap in it would let the frame read what any same-origin frame can read of its **own** namespace, never of a site's. | e2e `sandboxed frames are opaque to the page and to each other, as natively` |
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
-| CORS is applied to a page's `fetch`/XHR (item 45), not to **element loads that use it** (`crossorigin` on `<script>`, `<img>`, `<link>`; module scripts; fonts) | Those go through the worker as the browser's own subresource requests, whose CORS headers the worker overwrites with the page's proxy origin. A load the target never allowed succeeds. Workers' `fetch` shares the page path; not separately pinned. | — |
+| CORS is applied to what the **browser itself requests** from a document the worker controls (items 45, 48), not to element loads in a frame it does not — `srcdoc`, `blob:`, `document.write` — nor to stylesheets and scripts those frames get through the synchronous relay | Those frames' images come through their parent's own `fetch()`, which is not the element's request, and the refusal would have to reach the live element (item 47); the relay jobs carry no request mode. A load the target never allowed succeeds there. | — |
 | A rewritten member read on a `null`/`undefined` receiver (`w.location.href` with `w === null`, a blocked `open()`) yields `undefined`; native throws `TypeError` | `__zp_get`/`__zp_oget` share one implementation that answers `undefined` for a nullish base. Measured 2026-10-06 (`__zp_get(null, 'location')`); every dangerous-member read has it. Changing it touches every rewritten site. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 

@@ -1503,6 +1503,15 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="element-cors"></a>`crossorigin` 요소·모듈·폰트에 CORS 를 적용하지 않아 허락 안 한 로드가 성공했다 (2026-10-06)
+
+- **측정:** 네이티브/프록시 차분(`/xcorsel`): `<img|script|link crossorigin>`, 모듈 스크립트, `FontFace`, `@font-face` 를 다른 오리진에서 — 네이티브는 ACAO 가 없으면 `error`, 프록시는 로드됐다. 쿠키도 달랐다(네이티브 anonymous 는 교차 오리진에 쿠키 없음).
+- **원인:** 브라우저는 SW 의 응답만 본다(`applyCORS` 가 자기 오리진을 허락). 타깃의 답을 규칙에 대 보는 곳이 없었다. 스크립트 요소는 `/zp/api/fetch` 가 아니라 **`/zp/api/script`** 경로로 온다 — 한 경로만 고치면 스크립트·모듈이 빠진다.
+- **수정:** `elementCorsOptions(req, entry)` — `req.mode === 'cors'` 이고 **destination 이 있는** 요청만 요소다. 두 경로(`/zp/api/fetch` GET, `/zp/api/script`)가 `transportFetch` 에 같은 옵션을 준다. 프리플라이트는 하지 않는다(헤더가 브라우저 것). 요소는 같은 사이트에도 `Origin` 을 싣는다(Chrome 실측).
+- **함정 셋:** (1) 부모가 worker 없는 프레임의 이미지를 대신 받는 `Native.fetch` 는 `mode: 'cors'` 지만 destination 이 **빈 문자열**이다 — 그걸 요소로 보면 `crossorigin` 없는 광고 이미지까지 거절된다. destination 을 요구한다. (2) `new FontFace(…, 'url(…)')` 는 어떤 훅에도 안 걸려 브라우저가 타깃으로 직접 나갔고 CSP(`font-src 'self'`)에 막혀 **모든 URL 폰트가 실패**하고 있었다 — `@font-face` 와 같은 `rewriteCSSText` 로 보낸다. (3) 폰트 로드 성공/거절은 `FontFace.load()` 의 `NetworkError` 로 구별이 안 된다(깨진 데이터도 같은 오류) — 테스트용 최소 유효 TrueType 을 바이트로 만들어 썼다(첫 시도에 Chrome 이 받아들임).
+- **규칙:** 같은 종류의 요청이 **서로 다른 SW 경로**로 온다 — 규칙을 넣을 때 경로 목록을 먼저 센다(`/zp/api/fetch` GET·`/zp/api/script`·POST 봉투·동기 릴레이). 그리고 규칙이 잘못 걸리는 **내부 요청**(destination 없는 fetch)을 구별하는 필드를 먼저 정한다.
+- **검증:** e2e `crossorigin elements, modules and fonts obey CORS as natively`(네이티브와 동일, 변이 6개), request-policy 단위 테스트 2개, 실사이트 7곳에서 요소 거절 0.
+
 ## <a id="swless-자리끼우개-빨강"></a>Naver 광고 이미지가 붉은 블록으로 보였다 — SW-less 자리끼우개가 살아 있는 요소에 남았고 그 픽셀은 투명이 아니라 반투명 빨강이었다 (2026-10-06)
 
 - **측정:** 사용자 보고(Naver 에서 일부가 붉게 보이고 이미지가 안 뜬다). 같은 페이지에서 `naturalWidth === naturalHeight === 1` 인데 렌더 크기가 20px 넘는 이미지를 모든 프레임에서 센다 — 푸시된 `8a9ee8e` 에서 6~8장(광고 배너·우측 광고), `99f3bf4`(이 세션 이전)에서도 5~8장. 프레임 안 진짜 요소의 `src` 는 자리끼우개 data URL 이고 `data-zp-lit-src`/`data-zp-target-url` 은 진짜 CDN URL 이었다(격리 월드 `exec-js --world isolated --frame N` 으로 읽음).
