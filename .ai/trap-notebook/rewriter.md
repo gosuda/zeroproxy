@@ -1503,6 +1503,23 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="h2-content-length"></a>HTTP/2 POST 에 `Content-Length` 가 없어 Optimizely 가 400 을 줬다 (2026-10-06)
+
+- **측정:** CNN 한 번 로드에 `logx.optimizely.com/v1/events` 가 400 열한 번(네이티브는 204). SW 가 보내는 본문(JSON 988바이트)은 온전했고, 같은 바이트를 curl 로 보내면 204.
+- **원인(실험으로 좁힘):** curl 변형 — chunked(길이 없음)·빈 본문·잘린 본문은 400, 온전한 본문+길이는 204. Node `http2` 로 같은 요청을 **길이 헤더 유무만** 바꿔 보내면 없을 때만 400. 커널은 페이지의 `content-length` 를 일부러 지우고(전송 계층이 정한다) HTTP/2 경로는 그걸 다시 채우지 않았다. Chrome 은 본문이 있으면 늘 길이를 말하고, 본문 없는 POST/PUT 은 `Content-Length: 0` 이다.
+- **수정:** `wants_content_length(method, body_len)` 한 규칙을 코덱에 두고 HTTP/1.1(`build_request_head`)과 HTTP/2(`send_request`, pseudo-header 바로 뒤)가 같이 쓴다.
+- **함정:** e2e 타깃은 평문 HTTP 라 Go 가 길이를 알아서 붙인다 — 이 버그는 e2e 로는 **재현되지 않는다**. 실사이트(HTTPS/h2)에서만 보였다. 그래서 규칙을 순수 함수로 빼 코덱 단위 테스트로 못 박았다. 이전 ERRATA 의 "본문이 네이티브와 바이트 단위로 같다" 는 에코 서버로 쟀기 때문에 이걸 못 봤다.
+- **규칙:** 에코 서버는 **프레이밍을 따지지 않는다** — 업스트림이 따지는 것(길이·청크·헤더 순서)은 실제 서버로 재현한다. 의심이 가면 같은 바이트를 헤더만 바꿔 직접 보내 본다(curl/Node h2).
+- **검증:** CNN 로드의 Optimizely 응답 `[200,200,204,204,204,204]`(400 없음), 코덱 테스트 2개, e2e `request bodies are framed as natively`.
+
+## <a id="swless-동적-스크립트"></a>worker 가 직접 답하지 않는 프레임에서 스크립트가 만든 스크립트가 로드되지 않았다 (2026-10-06)
+
+- **측정:** CNN 콘솔 오류 26~59건(네이티브 4) — 이 중 `apstag.js` 503(`SW_NOT_READY`), PubMatic `/AdServer/layer` 스크립트 403, 뒤따르는 `Refused to execute script … 'text/html'`. 광고 칸이 검게 비어 있었다. `taskweaver start --record` + `dump-recording` 의 `initiator` 스택으로 어느 realm 이 요청했는지 가렸다.
+- **원인 둘:** (1) srcdoc realm 이 **동적으로** 만든 스크립트 URL 에는 tab 이 없다 — 마크업을 걸을 때만 싣던 것([srcdoc-스크립트-바인딩](#srcdoc-스크립트-바인딩))을 realm 이 srcdoc 임을 아는 곳(`boot.proxyOrigin` 은 srcdoc 부팅 설정에만 있다)으로 넓혔다. (2) `document.write` 로 쓴 빈 프레임은 SW 클라이언트가 아니라서 그 안에서 만든 `<script src=/zp/api/script…>` 는 Go 로 직행해 403 이다. 마크업 스크립트는 부모가 대신 받는 로더로 바꿔 왔지만 동적 요소는 아니었다.
+- **수정:** (2) 는 동기 릴레이(`kind=script`, 스타일시트가 이미 쓰는 길)로 보낸다 — 진짜 로드라 `onload`/`onerror` 가 그대로 난다(로더로 바꾸면 안 난다). 모듈·일반 문서의 스크립트·**죽은 파서 복사본**은 제외한다(복사본은 마크업을 걷는 중이라 URL 이 굳으면 안 된다).
+- **함정:** 변이가 안 잡혔다 — 같은 프레임의 앞선 외부 스크립트가 이미 클라이언트를 묶어 둬서 동적 스크립트는 tab 없이도 돌았다. **첫 요청이 동적 스크립트인 프레임**을 따로 둬서 잡았다.
+- **검증:** e2e `scripts in a srcdoc frame run in order…`(동적 스크립트 포함, 변이 1개), `a script a written frame creates is loaded, with its load event`(고치기 전 `errors:1`, 후 `ran:1, loads:1`). CNN 오류 26~59 → 18, `apstag.js` 200.
+
 ## <a id="srcdoc-스크립트-바인딩"></a>srcdoc 프레임의 외부 스크립트가 영영 안 돌았다 — 그 프레임은 자기를 탭에 묶을 수 없다 (2026-10-06)
 
 - **측정:** srcdoc 프레임 안 `<script>…</script><script src=/lib.js></script><script>…lib 사용…</script>` — 네이티브는 셋 다 순서대로 돌고, 프록시는 첫 인라인만 돌았다. SW 거절 목록에 `SW_NOT_READY` 503(url 비어 있음 = `/zp/api/script` 경로).

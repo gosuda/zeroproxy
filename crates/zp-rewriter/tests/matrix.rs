@@ -281,7 +281,9 @@ fn with_body_dangerous_names_chain_innermost_first() {
 #[test]
 fn reflect_object_routing() {
     emits("Reflect.get(doc, k);", &["__zp_rget((doc),(k))"]);
-    emits("Reflect.get(doc, 'location');", &["__zp_get(doc,\"location\")"]);
+    emits("Reflect.get(doc, 'location');", &["__zp_rget((doc),('location'))"]);
+    emits("Reflect.set(doc, 'location', v);", &["__zp_rset((doc),('location'),(v))"]);
+    emits("Reflect.get(doc, 'location', r);", &["__zp_rget((doc),('location'),(r))"]);
     // Safe literal — pass through, no mediation tax.
     emits("Reflect.get(obj, 'foo');", &["Reflect.get(obj, 'foo')"]);
     emits("Reflect.set(doc, k, v);", &["__zp_rset((doc),(k),(v))"]);

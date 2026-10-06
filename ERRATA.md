@@ -479,6 +479,32 @@ claimed:
     the frame's client — as a worker's first request does — so a module's later imports, which carry nothing, find
     their frame. — e2e `scripts in a srcdoc frame run in order, external ones included (matches native)` (inline,
     external, a script that needs the external one, a module with an import; two mutations checked).
+52. **Request bodies went out without a `Content-Length` over HTTP/2.** The kernel strips the page's own
+    `content-length` (it frames the request itself), and its HTTP/2 path never put one back — an HTTP/2 POST
+    carried a body of unstated length, which Chrome never sends. Servers that frame a body by its length refuse it:
+    Optimizely's event endpoint answered every POST of CNN's page `400` (eleven per load; `204` for the same bytes
+    with a length — replayed directly over HTTP/2 to be sure), and a bodiless POST or PUT lacked Chrome's
+    `Content-Length: 0` over HTTP/1.1 as well. One rule now serves both transports (`wants_content_length`: a body,
+    or a POST/PUT without one), and over HTTP/2 the header follows the pseudo-headers as Chrome's does. CNN's load:
+    no Optimizely `400`. The e2e target speaks plain HTTP, whose framing Go sets itself, so the HTTPS/HTTP-2 half is
+    pinned by the codec's unit tests and the real site, not by the suite. — `zp-transport-codec` tests; e2e `request
+    bodies are framed as natively` (bodies, types and lengths of eleven kinds of request).
+53. **A script created by a script in a frame the worker does not answer itself never loaded.** A srcdoc frame
+    cannot bind itself to its tab (item 51), and the URL of a script its own code creates — not the markup walked for
+    it — carried no tab either: `apstag.js`, the script that feeds CNN's ad slots, got `SW_NOT_READY` (503). Every
+    script URL a srcdoc realm builds now names its tab and entry (only a srcdoc realm's boot config carries
+    `proxyOrigin`). In a blank frame written with `document.write` the frame is no client at all, so a script element
+    its code creates asked the server directly and was refused (403: CNN's PubMatic ad layer script, so no ad drew in
+    those frames, and a `Refused to execute script … text/html` in the console); such a script now goes through the
+    synchronous relay, which answers with the rewritten script and, being a real load, fires `load`/`error` as the
+    page expects. A module and a script of an ordinary document keep their URLs. — e2e `scripts in a srcdoc frame run
+    in order…` (a dynamic script as a frame's first request, one mutation checked), `a script a written frame creates
+    is loaded, with its load event` (also three image beacons).
+54. **`Reflect.get`/`Reflect.set` on a dangerous name were rewritten into a member read/write.** A literal key
+    (`'location'`…) went to `__zp_get`/`__zp_set`, so a non-object target did not throw `Reflect.get called on
+    non-object`, `Reflect.set` answered the value instead of `true`, and the receiver argument was dropped. They go
+    through `__zp_rget`/`__zp_rset` like a computed key does. — e2e `member operations on null and undefined throw as
+    natively` (literal, computed and receiver forms on four receivers).
 
 ### Residuals (documented, not fixed)
 
@@ -513,7 +539,7 @@ claimed:
 | A frame sandboxed without `allow-same-origin` is **same-origin with the proxy underneath**; its opacity is the prelude's | The proxy cannot serve a document that has a real opaque origin (no service worker, no `localStorage`). The browser keeps every other flag, the frame's namespaces are private to it, and every other window sees it as a cross-origin stand-in — but the denial list is code: a gap in it would let the frame read what any same-origin frame can read of its **own** namespace, never of a site's. | e2e `sandboxed frames are opaque to the page and to each other, as natively` |
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
-| `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`), and `Reflect.get`/`Reflect.set` with a dangerous literal key (`location`…) on a non-object throw the `Cannot read/set properties of null` message; `Reflect.set(o, 'location', v)` returns `v`, not `true` | The rewriter sends `Object.*` and `Reflect.*` to one helper for descriptors, and a literal dangerous key to `__zp_get`/`__zp_set`. Always a `TypeError`; only the text (and that return value) differ. Measured 2026-10-06. | — |
+| `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---

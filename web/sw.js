@@ -1050,7 +1050,7 @@ async function runtimeAPI(req, url, clientId) {
       if (!target) return safeError('MALFORMED_ROUTE', 400);
       const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
       const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
-      if (!tab) return safeError('SW_NOT_READY', 503);
+      if (!tab) return safeError('SW_NOT_READY', 503, target || req.url);
       // Iframe / sub-frame navigation through /zp/api/fetch: rewrite of
       // <iframe src=absolute> by zp-htmltx routes here. We need to (a) give
       // the iframe its own entry so its virtual baseURI is the iframe's
@@ -1119,7 +1119,7 @@ async function runtimeAPI(req, url, clientId) {
     const explicitTab = payload.tabId && tabs.get(payload.tabId);
     if (explicitTab && ctx && explicitTab.tabId !== ctx.tabId) return Response.error();
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
-    if (!tab) return safeError('SW_NOT_READY', 503);
+    if (!tab) return safeError('SW_NOT_READY', 503, req.url);
     const init = payload.init || {};
     const entryId = tab.entries.has(payload.entryId) ? payload.entryId : (ctx && ctx.entryId) || tab.activeEntryId;
     const resp = await transportFetch(payload.url, {
@@ -1149,7 +1149,7 @@ async function runtimeAPI(req, url, clientId) {
     const scriptCtx = contextFor(req, clientId);
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
     const tab = explicitTab || (scriptCtx && tabs.get(scriptCtx.tabId));
-    if (!target || !tab) return safeError('SW_NOT_READY', 503);
+    if (!target || !tab) return safeError('SW_NOT_READY', 503, target || req.url);
     // NAVER anti-bot (WTM / nCaptcha) — 차단은 **전부 걷혔다**(2026-08-12).
     //
     // 그동안 이 자리에 wtm/ncpt 스텁이 있었고, 그 명분은 "실행시키면 렌더러가
@@ -1248,7 +1248,7 @@ async function runtimeAPI(req, url, clientId) {
     const explicitTab = url.searchParams.get('tab') && tabs.get(url.searchParams.get('tab'));
     const ctx = contextFor(req, clientId);
     const tab = explicitTab || (ctx && tabs.get(ctx.tabId));
-    if (!target || !tab) return safeError('SW_NOT_READY', 503);
+    if (!target || !tab) return safeError('SW_NOT_READY', 503, target || req.url);
     // entry 는 요청한 프레임의 것 — /zp/api/script 와 같은 이유(위 주석).
     // module 워커 본문은 module kind 로 리라이트해야 import/export 문법이 산다.
     const kind = url.searchParams.get('kind') === 'module' ? 'module' : 'worker';
@@ -1270,7 +1270,7 @@ async function runtimeAPI(req, url, clientId) {
     } else {
       upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId });
     }
-    if (!upstream) return safeError('SW_NOT_READY', 503);
+    if (!upstream) return safeError('SW_NOT_READY', 503, req.url);
     const rewritten = await rewriteScriptResponse(upstream, { targetUrl: target, kind, req });
     return rewritten;
   }
@@ -1285,11 +1285,11 @@ async function runtimeAPI(req, url, clientId) {
     if (!target) return safeError('POLICY_BLOCKED', 400);
     const ctx = contextFor(req, clientId);
     const tab = ctx && tabs.get(ctx.tabId);
-    if (!tab) return safeError('SW_NOT_READY', 503);
+    if (!tab) return safeError('SW_NOT_READY', 503, req.url);
     try {
       await initBundle();
       if (!self.ZPBundle || !self.ZPBundle.ready || typeof self.ZPBundle.composeSourceMap !== 'function') {
-        return safeError('SW_NOT_READY', 503);
+        return safeError('SW_NOT_READY', 503, req.url);
       }
       const upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: (ctx && ctx.entryId) || tab.activeEntryId });
       if (!upstream || upstream.status >= 400) return safeError('TARGET_HTTP_FAILED', 502, target);

@@ -57,8 +57,10 @@
     // (CF 챌린지 타이밍 때문에 필요하다 — 아래 주석 참고). 모듈은 Rust 쪽과
     // **바이트 단위로 같은** 정규형을 쓰고, Referer 는 SW 가 요청의
     // `request.referrer` 에서 유도한다(referrerFromBrowserHeader).
-    // Inside a srcdoc frame the worker cannot tell whose request it is (the frame cannot bind itself): say so.
-    const whose = srcdocMarkupDepth ? '&tab=' + encodeURIComponent(boot.tabId || '') + '&entry=' + encodeURIComponent(activeEntryId || '') : '';
+    // Inside a srcdoc frame the worker cannot tell whose request it is (the frame cannot bind itself): say so — for
+    // the markup walked for one, and for what a script in one creates later (only a srcdoc realm's boot config
+    // carries `proxyOrigin`).
+    const whose = (srcdocMarkupDepth || (boot && boot.proxyOrigin)) ? '&tab=' + encodeURIComponent(boot.tabId || '') + '&entry=' + encodeURIComponent(activeEntryId || '') : '';
     if (kind === 'module') return proxyOrigin + ZP.apiPath('script') + '?u=' + encodeURIComponent(target) + '&kind=module' + whose;
     return proxyOrigin + ZP.apiPath('script') + '?kind=' + encodeURIComponent(kind) + '&u=' + encodeURIComponent(target) + '&ref=' + encodeURIComponent(virtualURL.href) + whose;
   }
@@ -87,6 +89,18 @@
       u.searchParams.set('ref', virtualURL.href);
       return u.href;
     } catch { return String(value); }
+  }
+  // A script a frame the worker does not answer itself creates cannot ask for itself: its request would go straight to
+  // the server and be refused (403 — CNN's ad layer scripts did exactly that, and no ad drew). The synchronous relay
+  // is reachable from such a frame and answers with the rewritten script (a module cannot go that way). The frame has
+  // to be a live document: markup is first walked in an inert copy, and a script of an ordinary document must keep
+  // its own URL.
+  function swLessScriptURL(el, target, kind) {
+    if (!target || kind === 'module') return '';
+    let doc = null;
+    try { doc = el.ownerDocument; } catch {}
+    if (!doc || !doc.defaultView || !documentIsSWLess(doc)) return '';
+    return swLessRelayURL(target, 'script', swLessCORSMode(el));
   }
   function setScriptSource(el, raw) {
     try { zpTrace('scriptSrc', String(raw).slice(0,140)); } catch {}
@@ -117,8 +131,11 @@
         urlMeta.set(el, recovered);
         Native.setAttribute.call(el, 'data-zp-target-url', recovered);
       }
-      if (Native.getAttribute.call(el, 'src') === refreshed) return;
-      return Native.setAttribute.call(el, 'src', refreshed);
+      // already on the relay: leave it (a new one would be a new request id each time the element is looked at)
+      if (refreshed.indexOf(ZP.apiPath('sync-fetch')) >= 0) return;
+      const finalSrc = swLessScriptURL(el, recovered, kind) || refreshed;
+      if (Native.getAttribute.call(el, 'src') === finalSrc) return;
+      return Native.setAttribute.call(el, 'src', finalSrc);
     }
     if (!kind) {
       urlMeta.delete(el);
@@ -130,7 +147,7 @@
     urlMeta.set(el, target);
     litSet(el, 'src', raw);
     Native.setAttribute.call(el, 'data-zp-target-url', target);
-    return Native.setAttribute.call(el, 'src', scriptProxyPath(target, kind));
+    return Native.setAttribute.call(el, 'src', swLessScriptURL(el, target, kind) || scriptProxyPath(target, kind));
   }
   // ── 런타임 CSS 의 url() / @import ────────────────────────────────────────
   //

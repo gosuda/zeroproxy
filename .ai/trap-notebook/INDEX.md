@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-06 | membrane / 수정 | 빈 프레임·srcdoc 안에서 스크립트가 만든 스크립트가 로드 안 됐다(403·503). srcdoc 은 URL 에 tab, 빈 프레임은 릴레이로. 광고 칸이 비던 원인. | rewriter.md#swless-동적-스크립트 |
+| 2026-10-06 | transport / 수정 | HTTP/2 POST 에 Content-Length 가 없어 Optimizely 가 400. 커널이 지우고 안 채웠다. 한 규칙으로 H1·H2 모두. e2e 로는 재현 안 됨. | rewriter.md#h2-content-length |
 | 2026-10-06 | membrane / 수정 | worker 가 직접 답 못 하는 프레임(document.write)의 crossorigin 요소가 CORS 판정을 못 받았다. 부모가 요소 모드를 헤더·릴레이 인자로 전한다. | rewriter.md#swless-요소-cors |
 | 2026-10-06 | membrane / 수정 | srcdoc 프레임의 외부 스크립트가 영영 안 돌았다 — controller 가 null 이라 탭에 못 묶인다. 스크립트 URL 에 tab·entry 를 싣고 첫 요청에서 바인딩. | rewriter.md#srcdoc-스크립트-바인딩 |
 | 2026-10-06 | membrane / 수정 | null·undefined 수신자의 재작성된 멤버 연산이 던지지 않고 undefined 였다(Object(null)={}). 태그한 eval 에서 진짜 연산을 해 엔진이 던지게 함. | rewriter.md#null-수신자-throw |

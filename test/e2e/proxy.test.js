@@ -2364,6 +2364,9 @@ function createTargetServer(requests, pendingResponses) {
           'Reflect.has': function (n) { return Reflect.has(n, 'location'); },
           'Reflect.get plain': function (n) { return Reflect.get(n, 'foo'); },
           'Reflect.set plain': function (n) { return Reflect.set(n, 'foo', 'x'); },
+          'Reflect.get literal': function (n) { return Reflect.get(n, 'location'); },
+          'Reflect.get receiver': function (n) { return Reflect.get(n, 'location', {}); },
+          'Reflect.set literal': function (n) { return Reflect.set(n, 'location', 'x'); },
           'Reflect.get computed': function (n) { var k = 'x'; return Reflect.get(n, k); },
           'Reflect.set computed': function (n) { var k = 'x'; return Reflect.set(n, k, 1); },
           'optional get': function (n) { return n?.location; },
@@ -2404,15 +2407,106 @@ function createTargetServer(requests, pendingResponses) {
       res.end('export const v = 7;');
       return;
     }
+    if (url.pathname === '/xsdjs-dyn2.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('window.__dyn2 = 1;');
+      return;
+    }
+    if (url.pathname === '/xsdjs-dyn.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('window.__dyn = 1;');
+      return;
+    }
     if (url.pathname === '/xsdjs') {
       // A srcdoc frame with an inline script, an external one and an inline one that needs the external one.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end('<!doctype html><title>srcdoc scripts</title><body><script>' +
         'window.__xsdjs = null;' +
         'var f = document.createElement("iframe");' +
-        'f.srcdoc = "<body><script>window.__inline = 1;</" + "script><script src=\'/xsdjs-lib.js\'></" + "script><script>window.__after = window.__lib;</" + "script><script type=module src=\'/xsdjs-mod.js\'></" + "script>";' +
+        'f.srcdoc = "<body><script>window.__inline = 1;</" + "script><script src=\'/xsdjs-lib.js\'></" + "script><script>window.__after = window.__lib;</" + "script><script type=module src=\'/xsdjs-mod.js\'></" + "script><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn.js\'; document.head.appendChild(d);</" + "script>";' +
         'document.body.appendChild(f);' +
-        'setTimeout(function () { var w = f.contentWindow; window.__xsdjs = { inline: w.__inline, lib: w.__lib, after: w.__after, mod: w.__mod }; }, 4000);' +
+        // a frame whose first and only script request is one a script creates (nothing has bound the frame yet)
+        'var g = document.createElement("iframe");' +
+        'g.srcdoc = "<body><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn2.js\'; document.head.appendChild(d);</" + "script>";' +
+        'document.body.appendChild(g);' +
+        'setTimeout(function () { var w = f.contentWindow; window.__xsdjs = { inline: w.__inline, lib: w.__lib, after: w.__after, mod: w.__mod, dyn: w.__dyn, dyn2: g.contentWindow.__dyn2 }; }, 4000);' +
+        '<\/script></body>');
+      return;
+    }
+    if (url.pathname === '/xclen-echo') {
+      // Records how a request's body was framed: its Content-Length and Transfer-Encoding, and what arrived.
+      const tag = url.searchParams.get('tag') || '';
+      const chunks = [];
+      req.on('data', d => chunks.push(d));
+      req.on('end', () => {
+        const got = Buffer.concat(chunks);
+        corsLog.set('clen:' + tag, { m: req.method, cl: req.headers['content-length'] === undefined ? null : req.headers['content-length'], te: req.headers['transfer-encoding'] || null, bytes: got.length, ct: (req.headers['content-type'] || '').split(';')[0] || null });
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+        res.end('ok');
+      });
+      return;
+    }
+    if (url.pathname === '/xclen-log') {
+      const prefix = 'clen:' + (url.searchParams.get('run') || '') + '-';
+      const out = {};
+      for (const [k, v] of corsLog) if (k.startsWith(prefix)) out[k.slice(prefix.length)] = v;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+    if (url.pathname === '/xclen') {
+      // The same requests from a page — natively and through the proxy — and how the server saw their bodies framed.
+      const run = url.searchParams.get('run');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>content-length</title><body><script>
+        window.__xclen = null;
+        (async function () {
+          var run = ${JSON.stringify(run)};
+          function u(tag) { return '/xclen-echo?tag=' + run + '-' + tag; }
+          await fetch(u('get'));
+          await fetch(u('post-empty'), { method: 'POST' });
+          await fetch(u('put-empty'), { method: 'PUT' });
+          await fetch(u('delete'), { method: 'DELETE' });
+          await fetch(u('post-string'), { method: 'POST', body: 'hello world' });
+          await fetch(u('post-json'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ a: 1, b: 'x'.repeat(2000) }) });
+          await fetch(u('post-blob'), { method: 'POST', body: new Blob([new Uint8Array(300)], { type: 'application/octet-stream' }) });
+          await fetch(u('post-form'), { method: 'POST', body: new URLSearchParams({ q: 'a b' }) });
+          await fetch(u('patch'), { method: 'PATCH', body: 'p' });
+          await new Promise(function (resolve) { var x = new XMLHttpRequest(); x.open('POST', u('xhr-string')); x.onload = resolve; x.send('xhr body'); });
+          await new Promise(function (resolve) { var x = new XMLHttpRequest(); x.open('POST', u('xhr-empty')); x.onload = resolve; x.send(); });
+          navigator.sendBeacon(u('beacon'), 'beacon body');
+          await new Promise(function (r) { setTimeout(r, 600); });
+          window.__xclen = await (await fetch('/xclen-log?run=' + run)).json();
+        })().catch(function (e) { window.__xclen = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xwdyn-pix') {
+      xckSeen.set('wdynpix:' + url.searchParams.get('tag'), 'hit');
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'));
+      return;
+    }
+    if (url.pathname === '/xwdyn.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      res.end('window.__wdyn = (window.__wdyn || 0) + 1;');
+      return;
+    }
+    if (url.pathname === '/xwdyn') {
+      // An ad frame written with document.write whose script loads another script (from another origin) by creating an element.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>written frame, dynamic script</title><body><script>' +
+        'window.__xwdyn = null;' +
+        'var other = location.protocol + "//" + (location.hostname === "localhost" ? "127.0.0.1" : "localhost") + ":" + location.port;' +
+        'var f = document.createElement("iframe"); document.body.appendChild(f);' +
+        'var d = f.contentDocument; d.open();' +
+        'd.write("<body><script>window.__loads = 0; var s = document.createElement(\'script\'); s.onload = function () { window.__loads++; }; s.onerror = function () { window.__errors = 1; }; s.src = \'" + other + "/xwdyn.js\'; document.head.appendChild(s);</" + "script>");' +
+        'd.close();' +
+        'var fw = f.contentWindow;' +
+        'new fw.Image().src = other + "/xwdyn-pix?tag=new-image";' +
+        'var im = f.contentDocument.createElement("img"); im.src = other + "/xwdyn-pix?tag=unattached";' +
+        'var im2 = f.contentDocument.createElement("img"); im2.src = other + "/xwdyn-pix?tag=attached"; f.contentDocument.body.appendChild(im2);' +
+        'setTimeout(async function () { var w = f.contentWindow; var seen = await (await fetch("/xck-seen?tags=wdynpix:new-image,wdynpix:unattached,wdynpix:attached")).json(); window.__xwdyn = { ran: w.__wdyn, loads: w.__loads, errors: w.__errors, pixels: seen }; }, 5000);' +
         '<\/script></body>');
       return;
     }
@@ -6545,7 +6639,69 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'srcdoc-scripts.json'), JSON.stringify({ direct, proxied }, null, 2));
-    assert.deepEqual(direct, { inline: 1, lib: 1, after: 1, mod: 7 });
+    assert.deepEqual(direct, { inline: 1, lib: 1, after: 1, mod: 7, dyn: 1, dyn2: 1 });
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A request states the length of its body — and a bodiless POST or PUT states 0 — as Chrome does. Servers that
+  // frame a body by its length refuse a request without one: Optimizely's event endpoint answered every HTTP/2 POST
+  // of CNN's page with 400 until the kernel's HTTP/2 path sent a content-length (it never did).
+  await t.test('request bodies are framed as natively (Content-Length, no chunking)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xclen?run=native`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xclen, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xclen);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xclen?run=proxied`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xclen, { timeout: 90000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xclen);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'content-length.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    assert.equal(direct['post-empty'].cl, '0', 'a bodiless POST says Content-Length: 0');
+    assert.equal(direct['put-empty'].cl, '0');
+    assert.equal(direct.get.cl, null);
+    assert.equal(direct.delete.cl, null);
+    assert.equal(direct['post-string'].cl, '11');
+    assert.equal(direct['post-string'].te, null);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A frame written with document.write is no client of the worker, so a script element its own script creates asked the
+  // server directly and was refused (403): none of CNN's ad layer scripts ran in such frames. The relay answers for it.
+  await t.test('a script a written frame creates is loaded, with its load event (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xwdyn`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xwdyn, { timeout: 30000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xwdyn);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xwdyn`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xwdyn, { timeout: 60000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xwdyn);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'written-dynamic-script.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct, { ran: 1, loads: 1, pixels: { 'wdynpix:new-image': 'hit', 'wdynpix:unattached': 'hit', 'wdynpix:attached': 'hit' } });
     assert.deepEqual(proxied, direct);
   });
 

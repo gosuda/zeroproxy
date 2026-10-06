@@ -2977,40 +2977,9 @@ impl<'a> Visit<'a> for RewriteVisitor {
                 if !self.is_shadowed(recv_name) {
                     use oxc_span::GetSpan;
                     if recv_name == "Reflect" && (method == "get" || method == "set") {
-                        if let Some(dangerous) = static_string_arg(&expr.arguments, 1) {
-                            if is_dangerous_member(dangerous) || is_dangerous_global(dangerous) {
-                                if let Some(arg0) = expr.arguments.first() {
-                                    let obj_span = arg0.span();
-                                    if method == "get" {
-                                        self.patches.push(Patch {
-                                            start: expr.span.start,
-                                            end: expr.span.end,
-                                            replacement: format!(
-                                                "\u{1}MEMBER_GET\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                                                obj_span.start, obj_span.end, dangerous
-                                            ),
-                                        });
-                                        return;
-                                    }
-                                    if method == "set" && expr.arguments.len() >= 3 {
-                                        let val_span = expr.arguments[2].span();
-                                        self.patches.push(Patch {
-                                            start: expr.span.start,
-                                            end: expr.span.end,
-                                            replacement: format!(
-                                                "\u{1}MEMBER_SET\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                                                obj_span.start,
-                                                obj_span.end,
-                                                dangerous,
-                                                val_span.start,
-                                                val_span.end
-                                            ),
-                                        });
-                                        return;
-                                    }
-                                }
-                            }
-                        }
+                        // `Reflect.get`/`Reflect.set` on a dangerous name goes through `__zp_rget`/`__zp_rset` like a
+                        // computed key does: they keep Reflect's own contract — a non-object throws, `set` answers `true`,
+                        // the receiver argument is honoured — which a member read or write would not.
                         // Computed/dynamic property: `Reflect.get(doc, k)`,
                         // `Reflect.set(doc, k, v)` — route through the
                         // membrane helpers, which fall through to native
@@ -5820,11 +5789,11 @@ mod tests {
     fn reflect_get_window_location_routed() {
         let src = "var x = Reflect.get(window, 'location');";
         let r = rewrite_script(src, &opts()).unwrap();
-        // The Reflect.get(...) call site is replaced by __zp_get(window, 'location').
+        // The Reflect.get(...) call site is replaced by __zp_rget(window, 'location').
         // The `window` arg is itself rewritten to __zp_get(globalThis,'window').
         assert!(
             r.code
-                .contains("__zp_get(__zp_get(globalThis,\"window\"),\"location\")"),
+                .contains("__zp_rget((__zp_get(globalThis,\"window\")),('location'))"),
             "Reflect.get not routed: {}",
             r.code
         );
@@ -5840,12 +5809,12 @@ mod tests {
         let src = "Reflect.set(window, 'location', 'https://x/');";
         let r = rewrite_script(src, &opts()).unwrap();
         assert!(
-            r.code.contains("__zp_set("),
+            r.code.contains("__zp_rset("),
             "Reflect.set not routed: {}",
             r.code
         );
         assert!(
-            r.code.contains("\"location\","),
+            r.code.contains("('location')"),
             "prop name missing: {}",
             r.code
         );
