@@ -1503,6 +1503,15 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="swless-자리끼우개-빨강"></a>Naver 광고 이미지가 붉은 블록으로 보였다 — SW-less 자리끼우개가 살아 있는 요소에 남았고 그 픽셀은 투명이 아니라 반투명 빨강이었다 (2026-10-06)
+
+- **측정:** 사용자 보고(Naver 에서 일부가 붉게 보이고 이미지가 안 뜬다). 같은 페이지에서 `naturalWidth === naturalHeight === 1` 인데 렌더 크기가 20px 넘는 이미지를 모든 프레임에서 센다 — 푸시된 `8a9ee8e` 에서 6~8장(광고 배너·우측 광고), `99f3bf4`(이 세션 이전)에서도 5~8장. 프레임 안 진짜 요소의 `src` 는 자리끼우개 data URL 이고 `data-zp-lit-src`/`data-zp-target-url` 은 진짜 CDN URL 이었다(격리 월드 `exec-js --world isolated --frame N` 으로 읽음).
+- **원인 둘:** (1) 마크업은 먼저 죽은 파서 복사본에서 리라이트되고, 복사본이 SW-less 로 분류돼 `setSubresourceAttribute` 가 자리끼우개를 **마크업에 박은 채** 직렬화한다. blob 으로 바꾸는 콜백은 복사본의 요소에 붙어 있었고, 진짜 요소는 `upgradeSWLessURL` 이 "프록시 URL 이 아니면 return" 이라 다시 보지 않는다. (2) 자리끼우개 PNG 는 "투명" 이라 적혀 있었으나 디코드하면 `[filter 1, 255, 0, 0, 127]` — 반투명 빨강이다. 광고 칸 크기로 늘어나면 붉은 블록.
+- **첫 판단의 오류:** 처음에 본 "정상" 스크린샷은 **8월 14일의 낡은 파일**이었다(`taskweaver screenshot --output` 의 상대 경로는 taskweaver 의 작업 디렉터리에 쓰이고, 저장소의 같은 이름 파일이 남아 있었다). 화면 속 날짜 표시("기림의 날")로 알았다.
+- **수정:** 살아 있는 요소가 자리끼우개를 들고 있으면 `data-zp-target-url` 에서 다시 시작한다(worker 없는 문서면 blob, 아니면 프록시 경로). srcdoc 마크업을 걷는 동안은 자리끼우개를 박지 않는다(srcdoc 프레임은 자기 프렐류드로 이미지를 직접 받는다). 자리끼우개를 진짜 투명 PNG 로 바꿨다 — 바꿔치기가 실패해도 붉은 블록이 아니라 빈 칸이다.
+- **규칙:** (1) 사용자가 "눈에 보이는 문제"를 말하면 스크린샷을 **새로 찍고 파일 시각을 확인**한 뒤 읽는다. (2) 화면 증상은 측정 가능한 지표로 바꿔서 이등분한다 — 여기서는 "1×1 소스가 늘어난 이미지 수". (3) 주석에 적힌 값("투명")을 믿지 말고 디코드한다.
+- **검증:** e2e `images in frames and in markup end up as the real image, not the placeholder (matches native)`(변이 2개 확인). Naver 메인: 늘어난 자리끼우개 0장, 배너·광고 이미지 정상.
+
 ## <a id="csp-meta-스크립트-프리로드"></a>스크립트를 못 돌리는 sandbox 프레임의 `<script src>` 를 프록시 문서는 요청하지 않았다 — 프렐류드가 박은 CSP meta 때문이다 (2026-10-06)
 
 - **측정:** 네이티브 Chrome 148 에서 같은 프레임을 `sandbox=""`·`allow-same-origin`·`allow-forms`·`allow-scripts…`·없음으로 열면 전부 `<script src>` 를 요청한다(프리로드 스캐너). 프록시 문서는 스크립트를 못 돌리는 프레임(`""`·`allow-same-origin`·`allow-forms`)에서만 그 스크립트를 요청하지 않았다 — 같은 프레임의 `<img>`·CSS 는 요청했다. 렌더된 문서의 `<script src>` 는 정상으로 리라이트돼 있었고 브라우저가 요청 자체를 안 했다(`PREQ` 에도 없음).

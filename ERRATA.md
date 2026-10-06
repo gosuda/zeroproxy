@@ -417,6 +417,20 @@ claimed:
     before. — e2e `a script in a frame that may not run scripts is requested as natively` (ten ways of
     making frames across six sandboxes, script and image of each, markup, `createElement` and `innerHTML`;
     one mutation checked), `request-policy` unit test on the prelude.
+47. **Ad images showed as red blocks (Naver's main page).** A frame the worker does not control — an ad frame
+    written with `document.write`, a `srcdoc` frame — gets its images through its parent, which fetches them and
+    swaps in a blob; until then the image holds a placeholder, so nothing leaves the frame for the target. The
+    markup is first rewritten in an inert parser copy, and the copy stamped the placeholder into it; the swap then
+    went to the copy's element, while the live element, which holds the same placeholder, was never given a
+    second look (the sweep that swaps skips what is not a proxy URL). The placeholder itself — documented as a
+    transparent pixel — decodes to `rgba(255, 0, 0, 127)`: stretched to its slot, a red block. Measured on the
+    pushed `8a9ee8e` and on `99f3bf4` (before this session's first commit): 5–8 stretched placeholders on the
+    Naver main page (ad banners and the right-hand ad). A live element holding the placeholder now starts over
+    from the target URL it carries (a blob in a worker-less document, the proxy path elsewhere), markup walked for
+    a `srcdoc` frame — which loads its images itself — is not stamped at all, and the placeholder is transparent.
+    — e2e `images in frames and in markup end up as the real image, not the placeholder (matches native)` (a
+    written frame, a srcdoc frame, a plain document, a written frame inside a written frame; two mutations
+    checked).
 
 ### Residuals (documented, not fixed)
 

@@ -196,7 +196,26 @@
     keys.add(key);
     return true;
   }
+  // ★자리끼우개가 **살아 있는 문서의 요소**에 박힌 채로 남는 경우가 있다. 마크업은 먼저 죽은 복사본(파서 복사본)
+  // 에서 리라이트되는데, 거기서 `setSubresourceAttribute` 가 자리끼우개를 박고 직렬화하면 진짜 문서의 요소가
+  // 그 값을 그대로 받는다 — blob 으로 바꾸는 쪽은 죽은 복사본의 요소에 붙어 있었다. 실측(2026-10-06, NAVER 메인):
+  // 광고 프레임 이미지 8장이 1×1 로 남아 광고 칸만큼 늘어난 **붉은 블록**으로 보였다(자리끼우개는 반투명 빨강
+  // 픽셀이다). 정확한 URL 은 `data-zp-target-url` 에 있으므로, 살아 있는 문서의 요소가 자리끼우개를 들고 있으면
+  // 거기서 다시 시작한다 — 이 문서가 SW-less 면 blob, 아니면 프록시 경로 그대로(SW 가 답한다).
+  function healSWLessPlaceholder(el, key) {
+    let doc = null;
+    try { doc = el.ownerDocument; } catch {}
+    if (!doc || !doc.defaultView) return;
+    if (key !== 'src' || !markSWLessUpgraded(el, 'heal')) return;
+    let target = null;
+    try { target = Native.getAttribute.call(el, 'data-zp-target-url'); } catch {}
+    if (!target) return;
+    const proxied = subresourceProxyPath(target);
+    if (!documentIsSWLess(doc)) { try { Native.setAttribute.call(el, key, proxied); } catch {} return; }
+    swLessBlobURL(proxied).then(u => { if (u) try { Native.setAttribute.call(el, key, u); } catch {} });
+  }
   function upgradeSWLessURL(el, key, raw) {
+    if (String(raw) === SWLESS_PIXEL) return healSWLessPlaceholder(el, key);
     if (raw.indexOf(ZP.apiPath('fetch')) < 0) return;
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
@@ -275,7 +294,7 @@
   }
   // SW-less 문서의 이미지 자리끼우개. **네트워크 요청을 아예 안 내는** 1×1
   // 투명 PNG 다 — 그래서 원본 오리진으로 나갈 길이 없다(fail-closed 유지).
-  const SWLESS_PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const SWLESS_PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=';
   // 자리끼우개를 써도 되는 자리 = **이미지뿐**이다. script/link 는 src 를 나중에
   // 바꿔도 다시 실행/적용되지 않거나 별도 경로(릴레이, __ZP_LOAD_EXTERNAL_SCRIPT)
   // 가 이미 담당하므로 건드리지 않는다.
@@ -285,10 +304,17 @@
     if (key !== 'src') return false;
     return tag === 'img' || tag === 'image' || tag === 'input';
   }
+  // Markup walked for a srcdoc frame: that frame carries its own prelude and loads its images itself — there is no
+  // parent fetch to swap a placeholder out, and a placeholder written into its markup would be all it ever shows.
+  let swLessPlaceholdersOff = 0;
+  function withoutSWLessPlaceholders(fn) {
+    swLessPlaceholdersOff++;
+    try { return fn(); } finally { swLessPlaceholdersOff--; }
+  }
   function setSubresourceAttribute(el, key, proxied) {
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
-    if (!documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
+    if (swLessPlaceholdersOff || !documentIsSWLess(doc)) { Native.setAttribute.call(el, key, proxied); return; }
     // ★2026-08-20 — 여기에 프록시 경로를 박으면 **반드시 403 이 한 번 난다.**
     // `/zp/api/fetch` 는 SW 안에만 있는 가상 경로이고 이 문서는 SW 클라이언트가
     // 아니다. 지금까지는 그 403 을 blob 으로 뒤늦게 덮어써 왔다 — 그림은 결국

@@ -1185,7 +1185,7 @@
   // 사본을 쓰는 동안 이 프레임만 `no-cache` 사본을 받아 **다른 빌드의 프렐류드**를
   // 실행할 여지가 있었다. `assetURL()` 이 emit 전용(쿼리 포함)이고
   // `assetPath()` 는 경로 비교 전용이다 — 섞으면 internalPath 가 불일치한다.
-  function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + transformHTML(String(s)); }
+  function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + withoutSWLessPlaceholders(() => transformHTML(String(s))); }
   // `proxyOrigin` 을 실어 보내는 이유는 resolveProxyOrigin 주석에 있다 —
   // 자식이 `about:srcdoc` 이면 자기 힘으로는 오리진을 알 수 없다.
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }

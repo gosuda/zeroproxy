@@ -128,7 +128,7 @@
     if (/^blob:/i.test(String(raw))) return;
     // 자리끼우개도 같은 이유로 그냥 둔다 — 여기서 프록시 경로로 되돌리면
     // 방금 없앤 403 왕복이 그대로 되살아난다.
-    if (String(raw) === SWLESS_PIXEL) return;
+    if (String(raw) === SWLESS_PIXEL) { upgradeSWLessURL(el, key, String(raw)); return; }
     const target = targetURLForElement(el, raw);
     if (!target) return;
     // Nothing loads in an inert document, and a route opened for the frame would stay there.

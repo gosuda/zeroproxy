@@ -135,6 +135,28 @@ function xsiteReporter(kind, viaOpener) {
   return '<!doctype html><title>x</title><script>' + body + '<\/script>';
 }
 
+// A solid-color PNG of the given size: a test image that is not the 1x1 of a placeholder.
+function solidPNG(size) {
+  const zlib = require('node:zlib');
+  const chunk = (type, data) => {
+    const b = Buffer.alloc(12 + data.length);
+    b.writeUInt32BE(data.length, 0);
+    b.write(type, 4, 'latin1');
+    data.copy(b, 8);
+    b.writeUInt32BE(zlib.crc32(b.subarray(4, 8 + data.length)) >>> 0, 8 + data.length);
+    return b;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0);
+  ihdr.writeUInt32BE(size, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const stride = size * 4 + 1;
+  const raw = Buffer.alloc(stride * size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) { raw[y * stride + 1 + x * 4 + 1] = 160; raw[y * stride + 1 + x * 4 + 3] = 255; }
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
 function createTargetServer(requests, pendingResponses) {
   // tag → the names of the cookies the request that carried it had (see /xck-echo)
   const xckSeen = new Map();
@@ -2203,6 +2225,41 @@ function createTargetServer(requests, pendingResponses) {
           out.__log = await (await fetch('/xcors-log?prefix=' + encodeURIComponent(rid + ':'))).json();
           window.__xcors = out;
         })().catch(function (e) { window.__xcors = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xph-img.png') {
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' });
+      res.end(solidPNG(8));
+      return;
+    }
+    if (url.pathname === '/xph') {
+      // Images that arrive as markup in a frame the worker does not control (an ad frame written with
+      // document.write, a srcdoc frame) or in a plain document, from another origin: how big do they end up?
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>placeholders</title><body><div id="top"></div><script>
+        window.__xph = null;
+        (async function () {
+          var other = location.protocol + '//' + (location.hostname === 'localhost' ? '127.0.0.1' : 'localhost') + ':' + location.port;
+          var src = function (t) { return other + '/xph-img.png?tag=' + t; };
+          var markup = function (t) { return '<body><img id="i" width="40" height="40" src="' + src(t) + '">'; };
+          var written = document.createElement('iframe');
+          document.body.appendChild(written);
+          var d = written.contentDocument;
+          d.open(); d.write(markup('written')); d.close();
+          var srcdoc = document.createElement('iframe');
+          srcdoc.srcdoc = markup('srcdoc');
+          document.body.appendChild(srcdoc);
+          document.getElementById('top').innerHTML = markup('top');
+          var nested = document.createElement('iframe');
+          document.body.appendChild(nested);
+          var inner = nested.contentDocument;
+          inner.open(); inner.write('<body><div id="slot"></div>'); inner.close();
+          inner.getElementById('slot').innerHTML = markup('nested');
+          await new Promise(function (r) { setTimeout(r, 5000); });
+          var size = function (doc) { var i = doc && doc.getElementById('i'); return i ? i.naturalWidth + 'x' + i.naturalHeight : 'none'; };
+          window.__xph = { written: size(written.contentDocument), srcdoc: size(srcdoc.contentDocument), top: size(document), nested: size(nested.contentDocument) };
+        })().catch(function (e) { window.__xph = { __fatal: String(e && (e.stack || e)) }; });
       <\/script></body>`);
       return;
     }
@@ -6051,6 +6108,37 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct['sx-fail'].threw, 'NetworkError');
     assert.equal(direct.__log['cookie-include'][0].cookies, 'xc');
     assert.equal(direct.__log['cookie-default'][0].cookies, '');
+    assert.deepEqual(proxied, direct);
+  });
+
+  // While the worker cannot answer a frame itself, its parent fetches the frame's images and swaps them in; until
+  // then an image holds a placeholder. The placeholder was left in place on the live element when the markup had come
+  // through an inert parser copy first, and — being a stretched 1x1 semi-transparent red pixel — showed as a red block
+  // where Naver's ad images belong.
+  await t.test('images in frames and in markup end up as the real image, not the placeholder (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xph`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xph, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xph);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xph`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xph, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xph);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'placeholders.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
+    assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
+    assert.deepEqual(direct, { written: '8x8', srcdoc: '8x8', top: '8x8', nested: '8x8' });
     assert.deepEqual(proxied, direct);
   });
 
