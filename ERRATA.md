@@ -447,6 +447,19 @@ claimed:
     fonts, redirects, credentials, `Origin: null` from an opaque frame: identical to native, request logs
     included; six mutations checked), `request-policy` unit tests. Real sites (Wikipedia, GitHub, the Guardian,
     CNN, NAVER, BBC, MDN): no element load refused — what is refused is still telemetry.
+49. **A member operation on `null`/`undefined` answered `undefined` instead of throwing.** `__zp_get`, `__zp_set`,
+    `__zp_delete` and the descriptor/keys helpers did `Reflect.…(Object(base), …)`, and `Object(null)` is `{}`:
+    every rewritten member operation — `w.location.href` with `w === null` (a blocked `open()`), `e.target.href`,
+    `n.href++`, `delete n.location`, `Object.keys(n)` — quietly produced `undefined`, so code that catches the
+    `TypeError` took another branch. They throw now, and what they throw is the engine's own: the failing operation
+    is performed in eval'd code tagged `//# sourceURL=<virtual document URL>`, so V8 words the message exactly as
+    natively and an uncaught one names the page in `ErrorEvent.filename` (a `throw` in the prelude would name the
+    proxy's asset — the earlier `에러-filename-누출` trap). `Reflect.has`/`Reflect.get`/`Reflect.set`/`Reflect.ownKeys`
+    refuse any non-object, as natively. `?.` forms are unchanged. Measured on seven real sites, in every frame:
+    no nullish operation reaches the helpers (native Chrome reports zero uncaught errors on the same sites), so
+    nothing relied on the old answer. — e2e `member operations on null and undefined throw as natively` (88
+    cases across `null`, `undefined`, a plain object and a number: identical to native, uncaught errors'
+    `filename` included; nine guards mutation-checked).
 
 ### Residuals (documented, not fixed)
 
@@ -482,7 +495,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | CORS is applied to what the **browser itself requests** from a document the worker controls (items 45, 48), not to element loads in a frame it does not — `srcdoc`, `blob:`, `document.write` — nor to stylesheets and scripts those frames get through the synchronous relay | Those frames' images come through their parent's own `fetch()`, which is not the element's request, and the refusal would have to reach the live element (item 47); the relay jobs carry no request mode. A load the target never allowed succeeds there. | — |
-| A rewritten member read on a `null`/`undefined` receiver (`w.location.href` with `w === null`, a blocked `open()`) yields `undefined`; native throws `TypeError` | `__zp_get`/`__zp_oget` share one implementation that answers `undefined` for a nullish base. Measured 2026-10-06 (`__zp_get(null, 'location')`); every dangerous-member read has it. Changing it touches every rewritten site. | — |
+| `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`), and `Reflect.get`/`Reflect.set` with a dangerous literal key (`location`…) on a non-object throw the `Cannot read/set properties of null` message; `Reflect.set(o, 'location', v)` returns `v`, not `true` | The rewriter sends `Object.*` and `Reflect.*` to one helper for descriptors, and a literal dangerous key to `__zp_get`/`__zp_set`. Always a `TypeError`; only the text (and that return value) differ. Measured 2026-10-06. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---

@@ -2010,10 +2010,16 @@ function createTargetServer(requests, pendingResponses) {
       res.end('<!doctype html><title>static</title><body>' +
         '<img src="/xck-echo?tag=' + rid + ':img">' +
         '<link rel="stylesheet" href="/xck-echo?tag=' + rid + ':css">' +
+        '<img src="/xck-echo?tag=' + rid + ':last"></body>');
+      return;
+    }
+    if (url.pathname === '/xopck-set') {
+      // What an opaque document's responses set: only the SameSite=None one may stick.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('<!doctype html><title>set</title><body>' +
         '<img src="/xsamesite-img?n=op_lax&ss=Lax">' +
         '<img src="/xsamesite-img?n=op_none&ss=None&secure=1">' +
-        '<img src="/xsamesite-img?n=op_def">' +
-        '<img src="/xck-echo?tag=' + rid + ':last"></body>');
+        '<img src="/xsamesite-img?n=op_def"></body>');
       return;
     }
     if (url.pathname === '/xopck-child') {
@@ -2056,6 +2062,8 @@ function createTargetServer(requests, pendingResponses) {
           }
           await sleep(1500);
           for (var k in seen) out[k.split(':')[1]] = seen[k];
+          var f3 = document.createElement('iframe'); f3.setAttribute('sandbox', ''); f3.src = '/xopck-set'; document.body.appendChild(f3);
+          await sleep(3000);
           out.jarAfter = await (await fetch('/xck-echo?tag=' + rid + ':after&json=1')).text();
           window.__xopck = out;
         })().catch(function (e) { window.__xopck = { __fatal: String(e && (e.stack || e)) }; });
@@ -2324,6 +2332,60 @@ function createTargetServer(requests, pendingResponses) {
           var size = function (doc) { var i = doc && doc.getElementById('i'); return i ? i.naturalWidth + 'x' + i.naturalHeight : 'none'; };
           window.__xph = { written: size(written.contentDocument), srcdoc: size(srcdoc.contentDocument), top: size(document), nested: size(nested.contentDocument) };
         })().catch(function (e) { window.__xph = { __fatal: String(e && (e.stack || e)) }; });
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xnullish') {
+      // The rewritten member operations on a null or undefined receiver throw what the engine throws.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>nullish</title><body><script>
+        window.__xnullish = null;
+        var uncaught = [];
+        addEventListener('error', function (e) { uncaught.push([e.message, e.filename === location.href ? 'page' : e.filename, typeof e.lineno]); });
+        var cases = {
+          'get location': function (n) { return n.location; },
+          'get href': function (n) { return n.href; },
+          'get document': function (n) { return n.document.title; },
+          'get top': function (n) { return n.top; },
+          'chain': function (n) { return n.location.href; },
+          'set href': function (n) { n.href = 'x'; return 'ok'; },
+          'set location': function (n) { n.location = 'x'; return 'ok'; },
+          'update href': function (n) { n.href++; return 'ok'; },
+          'compound href': function (n) { n.href += 'x'; return 'ok'; },
+          'logical href': function (n) { n.href ||= 'x'; return 'ok'; },
+          'call postMessage': function (n) { return n.postMessage('x', '*'); },
+          'call open': function (n) { return n.open(); },
+          'delete location': function (n) { return delete n.location; },
+          'in location': function (n) { return 'location' in n; },
+          'keys': function (n) { return Object.keys(n); },
+          'names': function (n) { return Object.getOwnPropertyNames(n); },
+          'descriptor': function (n) { return Object.getOwnPropertyDescriptor(n, 'location'); },
+          'ownKeys': function (n) { return Reflect.ownKeys(n); },
+          'Reflect.has': function (n) { return Reflect.has(n, 'location'); },
+          'Reflect.get plain': function (n) { return Reflect.get(n, 'foo'); },
+          'Reflect.set plain': function (n) { return Reflect.set(n, 'foo', 'x'); },
+          'Reflect.get computed': function (n) { var k = 'x'; return Reflect.get(n, k); },
+          'Reflect.set computed': function (n) { var k = 'x'; return Reflect.set(n, k, 1); },
+          'optional get': function (n) { return n?.location; },
+          'optional chain': function (n) { return n?.href.x; },
+          'optional call': function (n) { return n?.postMessage('x'); },
+          'optional delete': function (n) { return delete n?.location; },
+          'plain prop': function (n) { return n.foo; },
+          'plain call': function (n) { return n.foo(); }
+        };
+        var out = {};
+        [['null', null], ['undefined', undefined], ['object', {}], ['number', 5]].forEach(function (rec) {
+          Object.keys(cases).forEach(function (name) {
+            var key = rec[0] + ' / ' + name;
+            if (rec[0] === 'number' && !/^Reflect/.test(name)) return; // primitives are fine for member operations; only Reflect.* refuses them
+            if (rec[0] === 'object' && /call/.test(name)) return; // the message V8 gives for calling a non-function differs by the helper's name (ERRATA residual)
+            try { var r = cases[name](rec[1]); out[key] = 'ok:' + (typeof r === 'object' && r !== null ? 'object' : String(r)).slice(0, 24); }
+            catch (e) { out[key] = (e && e.name) + ': ' + (e && e.message) + ' | ' + (e instanceof TypeError); }
+          });
+        });
+        setTimeout(function () { var n = null; n.href; }, 0);
+        setTimeout(function () { var u; u.location = 'x'; }, 10);
+        setTimeout(function () { window.__xnullish = { out: out, uncaught: uncaught }; }, 400);
       <\/script></body>`);
       return;
     }
@@ -6355,6 +6417,40 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.ok(!direct.__fatal, `native reference died: ${direct.__fatal}`);
     assert.ok(!proxied.__fatal, `proxied fixture died: ${proxied.__fatal}`);
     assert.deepEqual(direct, { written: '8x8', srcdoc: '8x8', top: '8x8', nested: '8x8' });
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A member operation on a null or undefined receiver throws what the engine throws — the rewritten ones too. The
+  // membrane's helpers used to turn the receiver into an empty object, so `w.location.href` with `w === null` (a
+  // blocked `open()`) quietly answered undefined and a page that catches the TypeError took another branch.
+  await t.test('member operations on null and undefined throw as natively', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xnullish`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xnullish, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xnullish);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xnullish`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xnullish, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xnullish);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'nullish.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The reference: what the engine says, and that an uncaught one names the page, not a proxy file.
+    assert.equal(direct.out['null / get location'], "TypeError: Cannot read properties of null (reading 'location') | true");
+    assert.equal(direct.out['undefined / set href'], "TypeError: Cannot set properties of undefined (setting 'href') | true");
+    assert.equal(direct.out['null / optional get'], 'ok:undefined');
+    assert.equal(direct.out['object / get location'], 'ok:undefined');
+    assert.equal(direct.uncaught.length, 2);
+    assert.deepEqual(direct.uncaught.map(u => u[1]), ['page', 'page']);
     assert.deepEqual(proxied, direct);
   });
 

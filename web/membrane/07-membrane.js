@@ -1316,7 +1316,38 @@
       if (!d || !d.get) return false;
       try { d.get.call(value); knownLocations.add(value); return true; } catch { return false; }
     }
+    // ★null/undefined 수신자는 네이티브처럼 TypeError 를 던진다. 이전에는 `Reflect.get(Object(base), …)` 가
+    // `Object(null)` 을 `{}` 로 바꿔 **조용히 undefined** 를 돌려줬다 — `w.location.href` (차단된 `open()` 의
+    // null), `e.target.href` 같은 재작성된 모든 멤버 읽기가 던지지 않았고, 그 TypeError 를 잡아 분기하는
+    // 코드(`try { w.document } catch`)가 다르게 움직였다.
+    //
+    // 던지는 자리가 중요하다: prelude 안에서 `throw` 하면 처리 안 된 에러의 `ErrorEvent.filename` 이 프록시
+    // 자산 URL 이 된다(함정노트 에러-filename-누출). 그래서 엔진이 직접 던지게 한다 — 가상 문서 URL 로 태그한
+    // eval 코드에서 **진짜 연산**(`b[p]`, `b[p] = v`, `p in b`, `delete b[p]`, `Object.keys(b)`)을 수행하면
+    // V8 이 네이티브와 같은 메시지("Cannot read properties of null (reading 'x')")의 TypeError 를 낸다.
+    // 던지는 쪽만 이 경로를 타므로 비용은 던질 때뿐이다.
+    let nullishOps = null;
+    function nullishFail(op, base, prop) {
+      try {
+        const diag = root.__zp_diagnostics;
+        if (diag && diag.length < 200) diag.push({ t: 'nullish', op, base: String(base), prop: typeof prop === 'symbol' ? 'symbol' : String(prop).slice(0, 40) });
+      } catch {}
+      if (nullishOps === null) {
+        try {
+          nullishOps = Native.globalEval('({ get: (b, p) => b[p], set: (b, p) => { b[p] = 0; }, has: (b, p) => Reflect.has(b, p), rget: (b, p) => Reflect.get(b, p), rset: (b, p) => Reflect.set(b, p, 0), del: (b, p) => delete b[p], keys: b => Object.keys(b), own: b => Reflect.ownKeys(b) })\n//# sourceURL=' + virtualURL.href);
+        } catch { nullishOps = false; }
+      }
+      if (nullishOps && nullishOps[op]) nullishOps[op](base, prop);
+      // Only reached if the eval'd operation somehow did not throw (or eval is unavailable).
+      throw new TypeError(op === 'set' ? "Cannot set properties of " + base + " (setting '" + String(prop) + "')"
+        : op === 'get' ? "Cannot read properties of " + base + " (reading '" + String(prop) + "')"
+        : op === 'has' || op === 'rget' || op === 'rset' || op === 'own' ? 'Reflect.' + (op === 'own' ? 'ownKeys' : op === 'has' ? 'has' : op.slice(1)) + ' called on non-object'
+        : "Cannot convert undefined or null to object");
+    }
+    // `Reflect.*` throws for any non-object target (a primitive too), `Object.*` only for null and undefined.
+    function isObjectLike(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
     function get(base, prop) {
+      if (base == null) return nullishFail('get', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       // ★base 가 **진짜 Location** 이면 URL 성분은 가상값을 준다.
       // 리라이터는 `n.location.protocol` 에서 바깥 `.protocol` 만 감싸고
@@ -1431,6 +1462,7 @@
       return value;
     }
     function set(base, prop, value) {
+      if (base == null) return nullishFail('set', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       // A window of another site: `location` navigates, everything else throws.
       if (crossOriginFacadeSet.has(base)) { Reflect.set(base, prop, value); return value; }
@@ -1525,6 +1557,7 @@
       return Reflect.construct(dynamic || ctor, Array.isArray(args) ? args : []);
     }
     function has(base, prop) {
+      if (!isObjectLike(base)) return nullishFail('has', base, prop);
       if (crossOriginFacadeSet.has(base)) return Reflect.has(base, prop);
       const d = __zp_eval_desc;
       if (d && (base === root || isScopeProxy(base)) && typeof prop === 'string'
@@ -1565,6 +1598,7 @@
       return s;
     }
     function getOwnPropertyDescriptor(base, prop) {
+      if (base == null) return nullishFail('keys', base, prop);
       if (crossOriginFacadeSet.has(base)) return Reflect.getOwnPropertyDescriptor(base, prop);
       // 서술자로 우회해 진짜 게터를 꺼내 가는 길도 막는다 — 여기서 진짜 접근자를
       // 돌려주면 `gopd(document,'location').get.call(document)` 한 줄로 프록시
@@ -1584,8 +1618,9 @@
       }
       return Reflect.getOwnPropertyDescriptor(Object(base), prop);
     }
-    function ownKeys(base) { return Reflect.ownKeys(Object(base)); }
+    function ownKeys(base) { if (!isObjectLike(base)) return nullishFail('own', base); return Reflect.ownKeys(Object(base)); }
     function del(base, prop) {
+      if (base == null) return nullishFail('del', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       if (crossOriginFacadeSet.has(base)) return Reflect.deleteProperty(base, prop);
       // R2: eval 중 호출자 바인딩 delete → non-configurable 접근자라 false.
@@ -1631,16 +1666,19 @@
     // the membrane, everything else through native Reflect with receiver
     // semantics intact.
     function rget(target, prop, receiver) {
+      if (!isObjectLike(target)) return nullishFail('rget', target, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       if (MEMBER_DANGER.has(prop)) return get(target, prop);
       return Reflect.get(Object(target), prop, receiver === undefined ? target : receiver);
     }
     function rset(target, prop, value, receiver) {
+      if (!isObjectLike(target)) return nullishFail('rset', target, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       if (MEMBER_DANGER.has(prop)) { set(target, prop, value); return true; }
       return Reflect.set(Object(target), prop, value, receiver === undefined ? target : receiver);
     }
     function getOwnPropertyDescriptors(base) {
+      if (base == null) return nullishFail('keys', base);
       const out = {};
       for (const k of Reflect.ownKeys(Object(base))) out[k] = getOwnPropertyDescriptor(base, k);
       return out;
@@ -1648,8 +1686,8 @@
     // Reflect.getOwnPropertyNames 는 없는 API 다 — 네이티브 Object 쪽을 써야
     // 한다. 패치된 Object.getOwnPropertyNames 는 전역 객체의 __zp_* 스크럽까지
     // 해 주므로 그대로 위임하면 누출 필터도 유지된다.
-    function getOwnPropertyNames(base) { return Object.getOwnPropertyNames(Object(base)); }
-    function okeys(base) { return Object.keys(Object(base)); }
+    function getOwnPropertyNames(base) { if (base == null) return nullishFail('keys', base); return Object.getOwnPropertyNames(Object(base)); }
+    function okeys(base) { if (base == null) return nullishFail('keys', base); return Object.keys(Object(base)); }
     // `with(obj)` identifier resolution: the object's properties win over
     // outer scope unless the name is Symbol.unscopables-hidden. `fb` is the
     // outer-scope thunk — the rewriter chains these for nested `with`s and

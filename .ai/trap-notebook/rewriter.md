@@ -1503,6 +1503,15 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="null-수신자-throw"></a>`null`/`undefined` 수신자의 재작성된 멤버 연산이 던지지 않고 `undefined` 를 돌려줬다 (2026-10-06)
+
+- **측정:** `__zp_get(null, 'location')` → `undefined`(던지지 않음). 같은 코드를 네이티브에서는 `TypeError: Cannot read properties of null (reading 'location')`. 차단된 `window.open()` 의 null 에 `w.location.href` 를 읽는 코드가 프록시에서만 조용히 넘어갔다 — `try { … } catch` 로 갈리는 분기가 달랐다.
+- **원인:** `get`/`set`/`del`/`ownKeys`/`okeys`… 가 `Reflect.xxx(Object(base), …)` 로 끝났다. `Object(null)` 은 `{}` 라서 연산이 **빈 객체 위에서 성공**한다.
+- **수정:** 각 헬퍼 맨 앞에서 nullish(Reflect 계열은 비객체 전부)면 `nullishFail` — 진짜 연산(`b[p]`, `b[p]=0`, `delete b[p]`, `Object.keys(b)`, `Reflect.has/get/set/ownKeys(b)`)을 `//# sourceURL=<가상 URL>` 로 태그한 eval 코드에서 **수행**해 엔진이 던지게 한다.
+- **함정:** (1) prelude 안에서 `throw new TypeError(…)` 하면 처리 안 된 에러의 `ErrorEvent.filename` 이 프록시 자산 URL 이 된다([에러-filename-누출](#에러-filename-누출)) — 던지는 자리를 eval 코드로 옮겼다. 메시지도 직접 쓰지 않고 V8 이 만들게 했다("reading 'x'" 의 키까지 동일). (2) 한 헬퍼가 `Object.*` 와 `Reflect.*` 를 같이 받으면(`getOwnPropertyDescriptor`) 메시지가 갈린다 — 둘 다 TypeError, 문구만 다르다(ERRATA 잔여). (3) `Reflect.get/set` 은 리터럴 위험 키면 `__zp_get/__zp_set` 로, **계산된 키**일 때만 `__zp_rget/__zp_rset` 로 간다 — 테스트에 계산된 키 케이스가 없으면 그 가드는 변이로 안 잡힌다(처음에 안 잡혀서 알았다).
+- **규칙:** "비어 있는 객체로 바꿔 삼키는" 편의 코드(`Object(x)`)는 네이티브가 던지는 자리를 지운다. 그리고 **교란 요인 하나를 바꾸기 전에 실사이트에서 의존이 있는지 계측**한다 — 여기서는 진단 항목(`nullish`)을 던지는 자리에 남겨 7개 사이트의 모든 프레임에서 0건임을 확인했다.
+- **검증:** e2e `member operations on null and undefined throw as natively`(88건 네이티브와 동일, 변이 9개), Naver 등 7개 사이트 정상·nullish 0건.
+
 ## <a id="element-cors"></a>`crossorigin` 요소·모듈·폰트에 CORS 를 적용하지 않아 허락 안 한 로드가 성공했다 (2026-10-06)
 
 - **측정:** 네이티브/프록시 차분(`/xcorsel`): `<img|script|link crossorigin>`, 모듈 스크립트, `FontFace`, `@font-face` 를 다른 오리진에서 — 네이티브는 ACAO 가 없으면 `error`, 프록시는 로드됐다. 쿠키도 달랐다(네이티브 anonymous 는 교차 오리진에 쿠키 없음).
