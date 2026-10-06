@@ -69,6 +69,13 @@
     if (cors) u += '&cors=' + encodeURIComponent(cors);
     return u;
   }
+  // 릴레이 URL 이 요청하는 타깃 ('' = 우리 릴레이 URL 이 아니다). 릴레이 URL 은 만들 때마다 요청 id 가
+  // 달라서 문자열 비교로는 "이미 이 타깃의 릴레이인가" 를 알 수 없다.
+  function relayTargetOf(url) {
+    const s = String(url || '');
+    if (s.indexOf(ZP.apiPath('sync-fetch') + '?') < 0) return '';
+    try { return new URL(s, proxyOrigin).searchParams.get('u') || ''; } catch { return ''; }
+  }
   // 이미 `/zp/api/fetch?url=…` 로 리라이트된 값을 릴레이 경로로 옮긴다.
   // 리라이트 단계에서 목적지 문서가 SW-less 임을 알 때만 부른다.
   function relayFromProxyPath(proxied, kind, cors) {

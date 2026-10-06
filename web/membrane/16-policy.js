@@ -86,7 +86,8 @@
     if (localKey === 'sandbox' && isFrameElement(el)) { sanitizeFrameSandbox(el); return; }
     if (tag === 'script' && (localKey === 'src' || localKey === 'href' || localKey === 'type')) {
       const target = urlMeta.get(el) || Native.getAttribute.call(el, 'data-zp-target-url') || '';
-      if (target && Native.getAttribute.call(el, 'src') === scriptProxyPath(target, executableScriptKindForElement(el) || 'classic')) return;
+      const current = Native.getAttribute.call(el, 'src');
+      if (target && (current === scriptProxyPath(target, executableScriptKindForElement(el) || 'classic') || (current && relayTargetOf(current) === target))) return;
       const raw = target || Native.getAttribute.call(el, 'src') || Native.getAttribute.call(el, 'href');
       if (raw) setScriptSource(el, raw);
       return;
@@ -100,7 +101,7 @@
       const raw = Native.getAttribute.call(el, 'srcdoc');
       // 재주입 방지는 이제 WeakMap 이 본다. 문자열 접두 비교는 `?v=` 버전
       // 쿼리를 달고 다녀서 늘 아슬아슬했다 — 뒤의 비교는 남은 안전망이다.
-      if (raw && !srcdocMeta.has(el) && !raw.startsWith(injectSrcdoc(''))) setInjectedSrcdoc(el, raw);
+      if (raw && !srcdocMeta.has(el) && raw.indexOf(srcdocPrelude()) < 0) setInjectedSrcdoc(el, raw);
       instrumentIframe(el);
       return;
     }

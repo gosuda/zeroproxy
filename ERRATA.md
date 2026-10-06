@@ -516,6 +516,27 @@ claimed:
     destructuring and for-of targets read through the membrane` (thirteen forms, proxied == native; reverts to the BBC
     error with the fix removed). A corpus of 11 real scripts (3 MB of ad, analytics and library code) rewrites with no
     read through the sink.
+56. **A complete document lost its html, head and body tags wherever the page parsed it.** The page-side markup walker parsed
+    in a `<template>`, which drops those start tags — and with them `<body class style data-*>`, `<html lang>` and the
+    doctype. A srcdoc frame, `new DOMParser().parseFromString(doc, 'text/html')`, `Document.parseHTMLUnsafe` and a document
+    written with `document.write` all came out in quirks mode (`BackCompat`) without their body attributes, and an inline
+    script in a srcdoc body found `document.body` null — a creative's first act is `document.body.appendChild`. A complete
+    document (srcdoc, DOMParser, parseHTMLUnsafe) is now parsed as one; the doctype stays in front of the injected prelude.
+    A `document.write` chunk that opens with a doctype or an html/head/body tag is parsed as a document too (the browser's
+    parser merges a later `<body>` onto the body it has), and a bare doctype is passed on. Fragments (`innerHTML`,
+    `insertAdjacentHTML`) keep the template: those tags are not part of a fragment. — e2e `complete documents keep html, head
+    and body when parsed by DOMParser and srcdoc` (DOMParser, parseHTMLUnsafe, srcdoc, a document written whole and in
+    pieces: lang, classes, style, data, compatMode, and a script's view of the body; proxied == native).
+57. **A script a hidden frame's creative made kept the observer busy for ever (NYT froze).** Item 53 sent a script created in a
+    frame the worker does not answer itself through the synchronous relay, whose URL carries a fresh request id. The
+    membrane's observer re-enforces a script's `src` when the attribute changes, and a new id *is* a change: set the source,
+    observe the change, set the source… a microtask loop that starved the page (Geoedge's tag in NYT's hidden ad frames).
+    Three guards now: the observer treats a relay for the same target as settled; the setter reuses the relay already on the
+    element; and a write of the value already there is skipped (a same-value write is still a mutation record). The first
+    alone suffices, the other two keep a second observer from starting it. This shipped in `a1b2e0a` and was found by the
+    real-site sweep; the fixture is the shape that froze it (a creative in a srcdoc ad frame writes a script into hidden
+    blank frames, three ways) with a heartbeat for the main thread. — e2e `a script a written frame creates is loaded`
+    (mutation: with the guards removed it wedges for 50 s and fails).
 
 ### Residuals (documented, not fixed)
 
@@ -551,6 +572,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
+| Native HLS playback (`<video src="….m3u8">`) does not play | The browser's media stack fetches the playlist's segment and variant URLs itself, and they are absolute URLs the proxy never rewrote. `media-src 'self' blob:` refuses them (no leak — measured on NYT's hero video: the direct requests only appear where CSP is bypassed), so the video stays blank. Pages that play HLS through hls.js (MSE over `fetch`/XHR) work. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---

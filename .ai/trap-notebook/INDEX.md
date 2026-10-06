@@ -6,6 +6,8 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-07 | membrane / 수정 | 동적 스크립트 릴레이 URL 의 요청 id 가 매번 달라 MutationObserver 가 영원히 돌았다(NYT 멈춤). 같은 값 쓰기도 변경 기록. | rewriter.md#relay-관찰자-루프 |
+| 2026-10-07 | membrane / 수정 | 완전한 문서를 template 로 파싱해 html/head/body·doctype 이 사라졌다(srcdoc·DOMParser·write). document.body 가 null. | rewriter.md#document-파싱-template |
 | 2026-10-06 | rewriter / 수정 | 구조분해·for-of 대상 안의 전역 읽기(`[window.a.b]=x`, 기본값, 계산된 키)가 쓰기 전용 싱크로 가 undefined.a 를 던졌다. BBC 광고. | rewriter.md#target-읽기-싱크 |
 | 2026-10-06 | membrane / 수정 | 빈 프레임·srcdoc 안에서 스크립트가 만든 스크립트가 로드 안 됐다(403·503). srcdoc 은 URL 에 tab, 빈 프레임은 릴레이로. 광고 칸이 비던 원인. | rewriter.md#swless-동적-스크립트 |
 | 2026-10-06 | transport / 수정 | HTTP/2 POST 에 Content-Length 가 없어 Optimizely 가 400. 커널이 지우고 안 채웠다. 한 규칙으로 H1·H2 모두. e2e 로는 재현 안 됨. | rewriter.md#h2-content-length |

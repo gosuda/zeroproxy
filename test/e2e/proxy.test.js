@@ -2335,6 +2335,38 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xdocparse') {
+      // A complete document keeps its html/head/body tags (and what is on them) wherever the page parses it.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>docparse</title><body><script>
+        window.__xdocparse = null;
+        var full = '<!doctype html><html lang="ko" class="ha"><head><title>T</title></head><body class="b1" style="margin:0" data-x="1"><p>hi</p></body></html>';
+        function describe(doc) {
+          return { lang: doc.documentElement.getAttribute('lang'), hcls: doc.documentElement.className, bcls: doc.body && doc.body.className,
+            bstyle: doc.body && doc.body.getAttribute('style'), bdata: doc.body && doc.body.getAttribute('data-x'), compat: doc.compatMode, title: doc.title,
+            kids: doc.body ? doc.body.children.length : -1 };
+        }
+        var out = {};
+        out.domparser = describe(new DOMParser().parseFromString(full, 'text/html'));
+        out.fragment = describe(new DOMParser().parseFromString('<p>a</p><p>b</p>', 'text/html'));
+        out.parseUnsafe = Document.parseHTMLUnsafe ? describe(Document.parseHTMLUnsafe(full)) : 'n/a';
+        var f = document.createElement('iframe');
+        f.srcdoc = full.replace('<p>hi</p>', '<p>hi</p><script>window.__saw = [document.body && document.body.className, document.compatMode].join("|")</' + 'script>');
+        document.body.appendChild(f);
+        // the same document written into a blank frame, whole and in pieces
+        var wf = document.createElement('iframe'); document.body.appendChild(wf);
+        var wd = wf.contentDocument; wd.open(); wd.write(full.replace('<p>hi</p>', '<p>hi</p><script>window.__saw = [document.body && document.body.className, document.compatMode].join("|")</' + 'script>')); wd.close();
+        var pf = document.createElement('iframe'); document.body.appendChild(pf);
+        var pd = pf.contentDocument; pd.open(); pd.write('<!doctype html>'); pd.write('<html lang="ko"><head><title>T</title></head>'); pd.write('<body class="b1" style="margin:0" data-x="1"><p>hi</p></body></html>'); pd.close();
+        setTimeout(function () {
+          out.srcdoc = describe(f.contentDocument); out.srcdoc.saw = f.contentWindow.__saw;
+          out.written = describe(wf.contentDocument); out.written.saw = wf.contentWindow.__saw;
+          out.pieces = describe(pf.contentDocument);
+          window.__xdocparse = out;
+        }, 3000);
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xdestr') {
       // Dangerous globals that are only READ inside an assignment target: a member's receiver, a computed key, a default.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -2448,13 +2480,13 @@ function createTargetServer(requests, pendingResponses) {
       res.end('<!doctype html><title>srcdoc scripts</title><body><script>' +
         'window.__xsdjs = null;' +
         'var f = document.createElement("iframe");' +
-        'f.srcdoc = "<body><script>window.__inline = 1;</" + "script><script src=\'/xsdjs-lib.js\'></" + "script><script>window.__after = window.__lib;</" + "script><script type=module src=\'/xsdjs-mod.js\'></" + "script><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn.js\'; document.head.appendChild(d);</" + "script>";' +
+        'f.srcdoc = "<body><script>window.__inline = 1; window.__body = document.body ? document.body.nodeName + \':\' + document.readyState : \'null\';</" + "script><script src=\'/xsdjs-lib.js\'></" + "script><script>window.__after = window.__lib;</" + "script><script type=module src=\'/xsdjs-mod.js\'></" + "script><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn.js\'; document.head.appendChild(d);</" + "script>";' +
         'document.body.appendChild(f);' +
         // a frame whose first and only script request is one a script creates (nothing has bound the frame yet)
         'var g = document.createElement("iframe");' +
         'g.srcdoc = "<body><script>var d = document.createElement(\'script\'); d.src = \'/xsdjs-dyn2.js\'; document.head.appendChild(d);</" + "script>";' +
         'document.body.appendChild(g);' +
-        'setTimeout(function () { var w = f.contentWindow; window.__xsdjs = { inline: w.__inline, lib: w.__lib, after: w.__after, mod: w.__mod, dyn: w.__dyn, dyn2: g.contentWindow.__dyn2 }; }, 4000);' +
+        'setTimeout(function () { var w = f.contentWindow; window.__xsdjs = { inline: w.__inline, body: w.__body, lib: w.__lib, after: w.__after, mod: w.__mod, dyn: w.__dyn, dyn2: g.contentWindow.__dyn2 }; }, 4000);' +
         '<\/script></body>');
       return;
     }
@@ -2528,10 +2560,27 @@ function createTargetServer(requests, pendingResponses) {
         'd.write("<body><script>window.__loads = 0; var s = document.createElement(\'script\'); s.onload = function () { window.__loads++; }; s.onerror = function () { window.__errors = 1; }; s.src = \'" + other + "/xwdyn.js\'; document.head.appendChild(s);</" + "script>");' +
         'd.close();' +
         'var fw = f.contentWindow;' +
+        // a script the PARENT creates in the frame's document — inserted, connected, and observed by the parent's membrane
+        'var ps = f.contentDocument.createElement("script"); ps.onload = function () { window.__ploads = (window.__ploads || 0) + 1; }; f.contentDocument.head.appendChild(ps); ps.src = other + "/xwdyn.js";' +
+        // a hidden blank frame whose whole document is written markup with an external script (an ad-verification vendor's tag)
+        'var g = document.createElement("iframe"); g.style.display = "none"; document.body.appendChild(g);' +
+        'var gd = g.contentDocument; gd.open(); gd.write("<html><head><script src=\\"" + other + "/xwdyn.js\\"></" + "script></head><body></body></html>"); gd.close();' +
+        // the same, made by a creative inside a srcdoc ad frame (it has a membrane of its own): Geoedge's tag on NYT
+        'function inner() {' +
+        ' function hidden() { var h = document.createElement("iframe"); h.style.display = "none"; document.body.appendChild(h); return h; }' +
+        ' var a = hidden(); var d = a.contentDocument; d.open(); d.write("<html><head><script src=\\"" + OTHER + "/xwdyn.js\\"></" + "script></head><body></body></html>"); d.close();' +
+        // the DOM way: a script created in the hidden frame, its source set before and after it is inserted
+        ' var b = hidden(); var sb = b.contentDocument.createElement("script"); sb.src = OTHER + "/xwdyn.js"; b.contentDocument.head.appendChild(sb);' +
+        ' var c = hidden(); var sc = c.contentDocument.createElement("script"); c.contentDocument.head.appendChild(sc); sc.src = OTHER + "/xwdyn.js";' +
+        ' setTimeout(function () { window.__nestedRan = [a.contentWindow.__wdyn, b.contentWindow.__wdyn, c.contentWindow.__wdyn].join(); }, 3000);' +
+        ' }' +
+        'var sd = document.createElement("iframe"); sd.srcdoc = "<body><script>var OTHER=" + JSON.stringify(other) + ";try{(" + inner.toString() + ")();}catch(e){window.__nestedErr=String(e.stack).slice(0,300)}</" + "script>"; document.body.appendChild(sd);' +
+        // a wedged main thread stops the heartbeat
+        'window.__ticks = 0; var hb = setInterval(function () { window.__ticks++; }, 50); setTimeout(function () { clearInterval(hb); }, 4500);' +
         'new fw.Image().src = other + "/xwdyn-pix?tag=new-image";' +
         'var im = f.contentDocument.createElement("img"); im.src = other + "/xwdyn-pix?tag=unattached";' +
         'var im2 = f.contentDocument.createElement("img"); im2.src = other + "/xwdyn-pix?tag=attached"; f.contentDocument.body.appendChild(im2);' +
-        'setTimeout(async function () { var w = f.contentWindow; var seen = await (await fetch("/xck-seen?tags=wdynpix:new-image,wdynpix:unattached,wdynpix:attached")).json(); window.__xwdyn = { ran: w.__wdyn, loads: w.__loads, errors: w.__errors, pixels: seen }; }, 5000);' +
+        'setTimeout(async function () { var w = f.contentWindow; var seen = await (await fetch("/xck-seen?tags=wdynpix:new-image,wdynpix:unattached,wdynpix:attached")).json(); window.__xwdyn = { ran: w.__wdyn, loads: w.__loads, errors: w.__errors, ploads: window.__ploads, markup: g.contentWindow.__wdyn, nested: sd.contentWindow.__nestedRan, nestedErr: sd.contentWindow.__nestedErr, alive: window.__ticks > 20, pixels: seen }; }, 5000);' +
         '<\/script></body>');
       return;
     }
@@ -6640,6 +6689,36 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.deepEqual(proxied, direct);
   });
 
+  // A complete document keeps its html/head/body tags. The page-side markup walker parsed in a <template>, which drops those
+  // tags: a srcdoc frame's inline script found document.body null (a creative's first act is document.body.appendChild),
+  // and <body class style>, <html lang> and the doctype were lost to DOMParser and srcdoc alike.
+  await t.test('complete documents keep html, head and body when parsed by DOMParser and srcdoc (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xdocparse`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xdocparse, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xdocparse);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xdocparse`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xdocparse, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xdocparse);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'document-parse.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.domparser.bcls, 'b1');
+    assert.equal(direct.domparser.compat, 'CSS1Compat');
+    assert.equal(direct.srcdoc.saw, 'b1|CSS1Compat');
+    assert.deepEqual(proxied, direct);
+  });
+
   // Inside an assignment target only the identifier that IS the target is a write; a global used as a member's receiver, a
   // computed key or a default is read. The rewriter sent all of them to the write-only sink, which reads back undefined:
   // `[,,,window.dotcom.data.k] = v` became `undefined.dotcom` and killed BBC's ad script.
@@ -6695,7 +6774,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'srcdoc-scripts.json'), JSON.stringify({ direct, proxied }, null, 2));
-    assert.deepEqual(direct, { inline: 1, lib: 1, after: 1, mod: 7, dyn: 1, dyn2: 1 });
+    assert.deepEqual(direct, { inline: 1, body: 'BODY:loading', lib: 1, after: 1, mod: 7, dyn: 1, dyn2: 1 });
     assert.deepEqual(proxied, direct);
   });
 
@@ -6757,7 +6836,7 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
       await fresh.close();
     }
     fs.writeFileSync(path.join(artifacts, 'written-dynamic-script.json'), JSON.stringify({ direct, proxied }, null, 2));
-    assert.deepEqual(direct, { ran: 1, loads: 1, pixels: { 'wdynpix:new-image': 'hit', 'wdynpix:unattached': 'hit', 'wdynpix:attached': 'hit' } });
+    assert.deepEqual(direct, { ran: 2, loads: 1, ploads: 1, markup: 1, nested: '1,1,1', alive: true, pixels: { 'wdynpix:new-image': 'hit', 'wdynpix:unattached': 'hit', 'wdynpix:attached': 'hit' } });
     assert.deepEqual(proxied, direct);
   });
 

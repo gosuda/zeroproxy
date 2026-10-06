@@ -100,6 +100,10 @@
     let doc = null;
     try { doc = el.ownerDocument; } catch {}
     if (!doc || !doc.defaultView || !documentIsSWLess(doc)) return '';
+    // Already on the relay for this target: keep that URL. A new one (new request id) is a changed attribute, which
+    // the observer answers by setting the source again — for ever (NYT's ad frames wedged the page on exactly that).
+    const current = Native.getAttribute.call(el, 'src');
+    if (current && relayTargetOf(current) === target) return current;
     return swLessRelayURL(target, 'script', swLessCORSMode(el));
   }
   function setScriptSource(el, raw) {
@@ -147,7 +151,10 @@
     urlMeta.set(el, target);
     litSet(el, 'src', raw);
     Native.setAttribute.call(el, 'data-zp-target-url', target);
-    return Native.setAttribute.call(el, 'src', swLessScriptURL(el, target, kind) || scriptProxyPath(target, kind));
+    const finalSrc = swLessScriptURL(el, target, kind) || scriptProxyPath(target, kind);
+    // A write of the same value is still a mutation record: leave a settled source alone.
+    if (Native.getAttribute.call(el, 'src') === finalSrc) return;
+    return Native.setAttribute.call(el, 'src', finalSrc);
   }
   // ── 런타임 CSS 의 url() / @import ────────────────────────────────────────
   //
@@ -1025,12 +1032,25 @@
     if (!html) return html;
     const inIframe = !!(opts && opts.inIframe);
     const swLessTarget = !!(opts && opts.swLess);
-    const parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
-    const container = parserDoc.createElement('template');
-    if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, html);
-    else container.innerHTML = html;
-    const root = container.content || container;
-    const walker = parserDoc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    // A COMPLETE document (srcdoc, DOMParser, Document.parseHTMLUnsafe) is parsed as one. A <template> drops the html, head
+    // and body start tags — and so everything on them: `<body class style>`, `<html lang>`, the doctype (quirks mode), and
+    // for a script in a srcdoc body, the body itself (`document.body` was null). A fragment (innerHTML, insertAdjacentHTML,
+    // document.write) keeps the template: those tags are not part of a fragment.
+    const asDocument = !!(opts && opts.document) && !!Native.DOMParserParseFromString && !!root.DOMParser;
+    let container = null;
+    let parserDoc;
+    let walkRoot;
+    if (asDocument) {
+      parserDoc = Native.DOMParserParseFromString.call(new root.DOMParser(), html, 'text/html');
+      walkRoot = parserDoc;
+    } else {
+      parserDoc = Native.createHTMLDocument ? Native.createHTMLDocument('') : document.implementation.createHTMLDocument('');
+      container = parserDoc.createElement('template');
+      if (Native.elementInnerHTML && Native.elementInnerHTML.set) Native.elementInnerHTML.set.call(container, html);
+      else container.innerHTML = html;
+      walkRoot = container.content || container;
+    }
+    const walker = parserDoc.createTreeWalker(walkRoot, NodeFilter.SHOW_ELEMENT);
     const nodes = [];
     for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
     // R6 literal parity for page-side HTML ingestion. The server htmltx stashes
@@ -1189,7 +1209,28 @@
         try { Native.setAttribute.call(node, litAttrName(name), lit); } catch {}
       }
     }
+    if (!container) {
+      // The whole document, doctype first (it is only a doctype at the very start of what the browser parses next).
+      const dt = parserDoc.doctype;
+      const doctype = dt
+        ? '<!DOCTYPE ' + dt.name + (dt.publicId ? ' PUBLIC "' + dt.publicId + '"' + (dt.systemId ? ' "' + dt.systemId + '"' : '') : (dt.systemId ? ' SYSTEM "' + dt.systemId + '"' : '')) + '>'
+        : '';
+      const de = parserDoc.documentElement;
+      return doctype + (Native.elementOuterHTML && Native.elementOuterHTML.get ? Native.elementOuterHTML.get.call(de) : de.outerHTML);
+    }
     return Native.elementInnerHTML && Native.elementInnerHTML.get ? Native.elementInnerHTML.get.call(container) : container.innerHTML;
+  }
+  // document.write is the one fragment path that can carry a whole document: an ad frame is `write(doctype + html)`, or the
+  // same in pieces. A chunk that opens with an html/head/body tag is parsed as a document (the browser's parser merges the
+  // attributes of a later `<body>` onto the one it already made); a bare doctype is passed on as it is. The template the
+  // fragment path uses drops both, and the frame rendered in quirks mode with no body class, style or lang.
+  const WRITTEN_DOCUMENT_RE = /^\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype[^>]*>\s*)?<(?:html|head|body)(?=[\s>\/])/i;
+  const WRITTEN_DOCTYPE_RE = /^\s*(?:<!--[\s\S]*?-->\s*)*(<!doctype[^>]*>)/i;
+  function transformWrittenHTML(value, opts) {
+    const s = String(value);
+    if (WRITTEN_DOCUMENT_RE.test(s)) return transformHTML(s, Object.assign({}, opts, { document: true }));
+    const doctype = WRITTEN_DOCTYPE_RE.exec(s);
+    return (doctype ? doctype[1] : '') + transformHTML(s, opts);
   }
   // 리라이트가 끝난 노드의 URL 속성을 릴레이 경로로 옮긴다. 이미
   // `/zp/api/fetch?url=…` 형태가 된 값만 대상이라, 리라이트를 놓친 값이
@@ -1220,7 +1261,14 @@
   // 사본을 쓰는 동안 이 프레임만 `no-cache` 사본을 받아 **다른 빌드의 프렐류드**를
   // 실행할 여지가 있었다. `assetURL()` 이 emit 전용(쿼리 포함)이고
   // `assetPath()` 는 경로 비교 전용이다 — 섞으면 internalPath 가 불일치한다.
-  function injectSrcdoc(s) { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>' + forSrcdocMarkup(() => transformHTML(String(s))); }
+  function srcdocPrelude() { return '<script src="' + ZP.assetURL('zp-core.js') + '"><\/script><script src="' + ZP.assetURL('zp-page-bundle.js') + '"><\/script><script id="__zp-boot" type="application/json">' + bootJSON() + '<\/script><script src="' + ZP.assetURL('runtime-prelude.js') + '"><\/script>'; }
+  // The srcdoc is a complete document: the doctype stays in front of the injected scripts (after them it would be ignored
+  // and the frame would render in quirks mode), the rest follows them.
+  function injectSrcdoc(s) {
+    const markup = forSrcdocMarkup(() => transformHTML(String(s), { document: true }));
+    const doctype = /^<!DOCTYPE[^>]*>/i.exec(markup);
+    return (doctype ? doctype[0] : '') + srcdocPrelude() + (doctype ? markup.slice(doctype[0].length) : markup);
+  }
   // `proxyOrigin` 을 실어 보내는 이유는 resolveProxyOrigin 주석에 있다 —
   // 자식이 `about:srcdoc` 이면 자기 힘으로는 오리진을 알 수 없다.
   function bootJSON() { return JSON.stringify(Object.assign({}, boot, { servers: activeServers, proxyOrigin })).replace(/[<>&]/g, c => c === '<' ? '\\u003c' : c === '>' ? '\\u003e' : '\\u0026'); }

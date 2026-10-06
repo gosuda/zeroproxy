@@ -1503,6 +1503,24 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="document-파싱-template"></a>완전한 문서를 `<template>` 로 파싱해 html/head/body 와 doctype 이 사라졌다 (2026-10-07)
+
+- **측정:** srcdoc 프레임의 인라인 스크립트가 `document.body` 를 null 로 봤다(네이티브는 `BODY`). `/xsdjs` 픽스처에 `document.body` 한 줄을 넣자 바로 드러났다 — **기존 테스트는 body 를 한 번도 읽지 않았다.** 넓혀 보니 `DOMParser`·`parseHTMLUnsafe`·`document.write` 도 같았다: `<body class style data-*>`, `<html lang>`, doctype(= `BackCompat`)이 전부 없었다.
+- **원인:** 페이지 realm 의 `transformHTML` 이 `<template>.innerHTML` 로 파싱한다. template 콘텐츠 파싱은 `<html>`/`<head>`/`<body>` 시작 태그를 **무시**한다(조각 파싱이 맞는 `innerHTML` 에는 옳다). 완전한 문서가 들어오는 자리(srcdoc, DOMParser, parseHTMLUnsafe, 문서 한 벌을 쓰는 `document.write`)에서는 틀렸다.
+- **수정:** `transformHTML(html, { document: true })` 는 `DOMParser` 로 문서째 파싱하고 `doctype + documentElement.outerHTML` 을 돌려준다. srcdoc 은 doctype 을 주입 스크립트 **앞**에 둔다(뒤에 오면 무시돼 쿼크스 모드). `document.write` 는 `transformWrittenHTML` — 청크가 doctype/html/head/body 로 시작하면 문서로, doctype 만이면 그대로 통과.
+- **조각으로 나눠 쓰는 경우:** `write('<!doctype html>')`, `write('<html lang><head>…</head>')`, `write('<body class>…')` 는 청크마다 문서로 파싱하면 `<body></body></html>` 가 덧붙지만, 브라우저 파서가 **나중에 온 `<body>` 의 속성을 이미 있는 body 에 병합**해서(`</body>` 가 body 를 스택에서 빼지 않는다) 결과가 네이티브와 같다. 실측으로 확인했다.
+- **규칙:** 프록시 쪽 문자열 변환이 파서를 한 번 거치면 **파서가 버리는 것**(최상위 태그, doctype, 주석 위치)을 따로 점검한다. 비교 대상이 되는 쪽(네이티브)을 읽는 속성을 늘리는 것이 가장 싸다 — body·compatMode·lang 한 줄씩이 이 구멍을 열었다.
+- **검증:** e2e `complete documents keep html, head and body…`(변이: 정규식을 끄면 조각·한 벌 모두 실패), `scripts in a srcdoc frame run in order…`(body 읽기 추가).
+
+## <a id="relay-관찰자-루프"></a>동적 스크립트 릴레이 URL 이 MutationObserver 를 영원히 돌렸다 — NYT 가 멈췄다 (2026-10-07)
+
+- **측정:** NYT 를 열면 렌더러가 응답하지 않았다(`exec-js` 30초 타임아웃, 스크린샷 `CapturePreview timeout`). 네트워크 테이프는 요청이 전부 끝나 있었다 → **JS 가 도는 중**. `taskweaver pause` 는 JS 스택이 비어 있었다(`cdp_status: wedged`). puppeteer 의 CDP `Debugger.pause` 가 먹혔다: `MO.observe.childList → enforceObservedAttribute → setScriptSource → swLessScriptURL → swLessRelayURL → randomId` 가 표본마다 반복. 일시정지한 프레임에서 `Debugger.evaluateOnCallFrame` 으로 `el`·`raw`·실제 `src` 를 읽자 Geoedge `grumi.js`, 숨은 about:blank 프레임, `src` 는 매번 다른 `rid` 의 sync-fetch URL.
+- **원인:** [swless-동적-스크립트](#swless-동적-스크립트)의 릴레이 URL 은 만들 때마다 요청 id 가 다르다. 관찰자는 `src` 가 바뀌면 `setScriptSource` 를 다시 부르고, 그게 또 새 id 를 쓴다 → 속성 변경 → 관찰자 → … (마이크로태스크 루프라 페이지가 굶는다). **같은 값을 다시 쓰는 것도 변경 기록이다.**
+- **수정(셋):** 관찰자가 같은 타깃의 릴레이를 "정착"으로 본다(`relayTargetOf`); `swLessScriptURL` 이 요소에 이미 있는 릴레이를 재사용; 마지막 `setAttribute` 앞에서 같은 값이면 건너뜀. 첫째 하나로 충분하고 나머지는 겹겹이다.
+- **왜 e2e 가 못 잡았나:** a1b2e0a 의 픽스처는 src 를 **삽입 전에** 썼고 부모 realm 에서 만들었다. 루프는 (1) **srcdoc 광고 프레임 안에서** (자기 멤브레인과 관찰자가 있다) (2) 숨은 빈 프레임에 스크립트를 **DOM API 로** 만들 때(마크업 경로는 로더로 바뀌어 `src` 가 없다)만 났다. 변이(보호 셋 제거)를 걸어 보고 나서야 이 모양이 재현됐다 — **변이가 안 걸리는 테스트는 그 버그를 못 보는 테스트다.** 이번엔 하트비트(`setInterval` 틱 수)를 넣어 멈춤을 단언으로 만들었다.
+- **교훈(발견 경로):** 새 기능을 밀어넣은 뒤 **실사이트 스윕을 한 번 더** 돌렸더니 나왔다. 푸시한 커밋에 퇴행이 있었다.
+- **검증:** e2e `a script a written frame creates is loaded…`(보호 셋 제거 시 50초 후 실패), NYT 가 다시 열림.
+
 ## <a id="target-읽기-싱크"></a>대입 대상 안의 전역 읽기가 쓰기 전용 싱크로 갔다 — `undefined.dotcom` (2026-10-06)
 
 - **측정:** BBC 콘솔에 메시지 없는 `[uncaught] Uncaught (in promise)` 둘. 메시지가 비어 있어 `taskweaver debugger-arm --strategy exceptions --uncaught-only` → `debugger-snapshot` 으로 던진 자리를 잡았다: `dotcom-ads.js` 의 `di` 에서 `Cannot read properties of undefined (reading 'dotcom')`. 원본 소스에서 `[,,,window.dotcom.data.newKeyValues.pillar, …] = …split("/")` 를 찾고, 리라이터를 노드에서 직접 돌려(`dist/web/zp-page-bundle.js` 의 `ZPBundle.rewriteScript(src, kind, target, proxyOrigin)`) `__zp_get.d.window.dotcom…` 를 확인했다.

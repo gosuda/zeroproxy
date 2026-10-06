@@ -489,7 +489,7 @@
     if (typeof w.Document.parseHTMLUnsafe === 'function') {
       const nativeParseUnsafe = w.Document.parseHTMLUnsafe;
       define(w.Document, 'parseHTMLUnsafe', function(html) {
-        return nativeParseUnsafe.call(w.Document, transformHTML(String(html), transformHTMLOpts));
+        return nativeParseUnsafe.call(w.Document, transformHTML(String(html), Object.assign({}, transformHTMLOpts, { document: true })));
       });
     }
     // getHTML/getHTMLUnsafe serialize the RAW DOM — proxy URLs and our
@@ -544,7 +544,7 @@
       if (docProto.write) {
         const protoWrite = docProto.write;
         define(docProto, 'write', function(...parts) {
-          const html = parts.map(p => transformHTML(String(p), writeOptsFor(this))).join('');
+          const html = parts.map(p => transformWrittenHTML(String(p), writeOptsFor(this))).join('');
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
           const ret = protoWrite.apply(this, [html]);
           if (html.indexOf('data-zp-frame-src') !== -1) restoreParkedFrames(this);
@@ -554,7 +554,7 @@
       if (docProto.writeln) {
         const protoWriteln = docProto.writeln;
         define(docProto, 'writeln', function(...parts) {
-          const html = parts.map(p => transformHTML(String(p), writeOptsFor(this))).join('') + '\n';
+          const html = parts.map(p => transformWrittenHTML(String(p), writeOptsFor(this))).join('') + '\n';
           if (deferredScriptDepth > 0 && documentIsClosed(this)) return appendWrittenHTML(this, html);
           const ret = protoWriteln.apply(this, [html]);
           if (html.indexOf('data-zp-frame-src') !== -1) restoreParkedFrames(this);
