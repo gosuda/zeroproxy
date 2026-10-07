@@ -88,6 +88,21 @@
       if (v == null) return v;
       return deproxyURL(String(v), { scan: true, fallback: 'share' }).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
     }
+    // A frame's text with its URLs cleaned and its `:line:col` kept. The scan above takes the position as part of the URL
+    // and drops it; a native frame always has one (`at f (https://host/a.js:2:20674)`), and the parent of a challenge widget
+    // sends its own `new Error().stack` to the widget, which reads it: frames without positions are not a browser's.
+    function sanitizeFrameWithPositions(text) {
+      const cleaned = String(text).replace(/(https?:\/\/[^\s()]*?)(:\d+(?::\d+)?)(?=[)\s]|$)/g, (_m, url, pos) => sanitizeFrameText(url) + pos);
+      return cleaned.replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
+    }
+    // The membrane's own frames (`__zp_call`, `__zp_get`, …) sit between the page's in a stack: a real stack has none of
+    // them. They are the prelude's functions, so they come from the prelude's file.
+    function isMembraneFrame(f) {
+      try {
+        const file = String(f.getFileName() || '');
+        return /\/zp\/assets\/(?:runtime-prelude|worker-prelude|zp-core|zp-page-bundle)\.js/.test(file);
+      } catch { return false; }
+    }
     function frameFacade(f) {
       return new Proxy(f, {
         get(t, p) {
@@ -96,7 +111,7 @@
           if (p === 'getFileName' || p === 'getScriptNameOrSourceURL' || p === 'getEvalOrigin') {
             return function () { return sanitizeFrameText(v.apply(t, arguments)); };
           }
-          if (p === 'toString') return function () { return sanitizeFrameText(v.apply(t, arguments)); };
+          if (p === 'toString') return function () { return sanitizeFrameWithPositions(v.apply(t, arguments)); };
           return v.bind(t);
         }
       });
@@ -109,7 +124,7 @@
     // 되돌아오면(inUserPrepare) 기본 포맷으로 답한다.
     let inUserPrepare = false;
     const zpPrepare = function (error, frames) {
-      const wrapped = frames.map(frameFacade);
+      const wrapped = frames.filter(f => !isMembraneFrame(f)).map(frameFacade);
       if (userPrepare && !inUserPrepare) {
         inUserPrepare = true;
         try { return userPrepare(error, wrapped); } finally { inUserPrepare = false; }

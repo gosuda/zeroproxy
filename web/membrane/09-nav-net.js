@@ -759,7 +759,7 @@
     // 심었더니 그 own 자체가 지문이었다(대조군엔 없음). 문서당 값 하나뿐이라
     // this 를 안 봐도 되는 건 그대로다 — 어떤 노드에서 읽어도 같은 문서 기준.
     defineAccessor(w.Node && w.Node.prototype, 'baseURI', () => baseURL);
-    defineAccessor(w.Document && w.Document.prototype, 'referrer', () => '');
+    defineAccessor(w.Document && w.Document.prototype, 'referrer', () => virtualReferrer());
     defineAccessor(w.Document && w.Document.prototype, 'cookie', () => { if (opaqueDocument) throw opaqueDenied("Failed to read the 'cookie' property from 'Document'"); return documentCookieString(); }, v => { if (opaqueDocument) throw opaqueDenied("Failed to set the 'cookie' property on 'Document'"); const s = String(v); setDocumentCookie(s); sendCookieSet(s); });
     installURLProp(w.HTMLAnchorElement && w.HTMLAnchorElement.prototype, 'href');
     installURLProp(w.HTMLAreaElement && w.HTMLAreaElement.prototype, 'href');

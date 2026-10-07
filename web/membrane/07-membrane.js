@@ -155,7 +155,9 @@
           if (e && e.name === 'NotSupportedError') throw e;
         }
       }
-      if (expr) return Reflect.apply(expr, root, [withScope]);
+      // `this` of an expression eval is the global object: the page's `window`, the facade — not the real one (natively
+      // `(0, eval)('this') === window`; a bot-management VM checks it and stops when it is false).
+      if (expr) return Reflect.apply(expr, scope, [withScope]);
       // 문(statement) 형태는 **전역 스코프**에서 실행해야 한다. indirect eval 의
       // 최상위 `var`/`function` 선언은 전역 객체의 프로퍼티가 되는데, Function
       // 래퍼 + `with` 로 감싸면 래퍼의 지역 선언이 되어 흔적 없이 사라진다.
@@ -220,7 +222,7 @@
     const zpDirectEvalRunner = Native.FunctionCtor(
       'eval', '__zp_env', '__zp_src',
       'return eval(__zp_src)');
-    function zpDirectEval(callee, args, desc, callerStrict) {
+    function zpDirectEval(callee, args, desc, callerStrict, globalSite) {
       // 네이티브 eval 은 생성자가 아니다.
       if (new.target) throw new TypeError('eval is not a constructor');
       // `var eval = f` 등으로 eval 이름이 재바인딩됐으면 네이티브는 그 값을
@@ -232,7 +234,20 @@
       const src = args && args.length ? args[0] : undefined;
       // 네이티브 parity: 비문자열 인자는 평가 없이 그대로 반환.
       if (typeof src !== 'string') return src;
-      const rewritten = callPageRewriter(src, 'classic');
+      // Run as global code, the eval's top-level `this` is the global object (the facade); inside a function it is the
+      // caller's `this`, which the helper below hands over — the rewriter has to leave it alone there.
+      const asGlobal = globalSite === 1 && !callerStrict && !/^\s*['"]use strict['"]/.test(src);
+      const rewritten = callPageRewriter(src, asGlobal ? 'classic' : 'classic-local');
+      // A sloppy eval in the top level of a classic script declares its `var`s and functions on the global object. Inside
+      // the helper below they would be the helper's locals and vanish with it — a challenge's bootstrap defines its global
+      // decoder with `eval("function name(…){…}")` and calls it by name later. There are no caller locals to expose here
+      // (top-level bindings are globals, lexical ones are in the shared scope), so it runs as global code: the same
+      // path an indirect eval and an inline script take.
+      if (asGlobal) {
+        const prevLexEnv = __zp_lex_env;
+        __zp_lex_env = new Map();
+        try { return execGlobalScript(rewritten); } finally { __zp_lex_env = prevLexEnv; }
+      }
       let d = {};
       if (desc && typeof desc === 'object') {
         // `delete x` 가 호출자 바인딩을 지우면 안 된다 — 접근자를
@@ -273,7 +288,8 @@
         // 문서 URL)를 가리키게 — 네이티브는 eval 소스 에러도 호출 스크립트
         // URL 을 reporting 한다.
         const body = strictSrc ? '"use strict";' + rewritten : 'with(__zp_env){' + rewritten + '\n}';
-        return zpDirectEvalRunner.call(this, Native.globalEval, env, body + '\n//# sourceURL=' + virtualURL.href);
+        // The caller's `this`, with the real global object (what a sloppy function called plainly gets) shown as the facade.
+        return zpDirectEvalRunner.call(this === root ? scope : this, Native.globalEval, env, body + '\n//# sourceURL=' + virtualURL.href);
       } finally {
         __zp_eval_desc = prev;
         __zp_lex_env = prevLexEnv;
@@ -360,7 +376,7 @@
     // origin. The real one hands out PROXY origins (the actual ancestors).
     // Root → empty list; a contained frame → its embedder's target origin.
     function ancestorOriginsList(local) {
-      const origins = local ? [] : [displayOrigin(securityOrigin())];
+      const origins = local ? embedderOrigins() : [displayOrigin(securityOrigin())];
       const proto = (root.DOMStringList && root.DOMStringList.prototype) || null;
       const list = proto ? Object.create(proto) : {};
       for (let i = 0; i < origins.length; i++) {
@@ -1389,7 +1405,7 @@
       }
       if (base === document && (prop === 'URL' || prop === 'documentURI')) return virtualURL.href;
       if (base === document && prop === 'baseURI') return baseURL;
-      if (base === document && prop === 'referrer') return '';
+      if (base === document && prop === 'referrer') return virtualReferrer();
       if (isWindowLike(base)) {
         // A window of another site answers by the HTML cross-origin rules only.
         if (crossOriginFacadeSet.has(base)) return Reflect.get(base, prop);
@@ -1855,6 +1871,8 @@
     define(root, '__zp_set', set);
     // This document's security origin, for the embedder and for frames it contains.
     define(root, '__zp_origin', function () { return securityOrigin(); });
+    // This document's virtual URL, for the frames it contains (their `document.referrer`).
+    define(root, '__zp_url', function () { return virtualURL.href; });
     // Is this frame element opaque (see OPAQUE_FRAME_ATTR)? For the frame's own prelude to ask.
     define(root, '__zp_frame_opaque', function (frame) { try { return frameHasOpaqueMark(frame); } catch { return false; } });
     // Write-only sink for destructuring assignment targets.
@@ -2151,10 +2169,10 @@
     // (rewriter unavailable → NotSupportedError) still fail closed at once.
     function timerHandler(handler) {
       if (typeof handler !== 'string') return handler;
-      try { return compileDynamic(Native.FunctionCtor, [handler], 'function'); } catch (e) {
-        if (!parseErrors.has(e) && !(NativeSyntaxError && e instanceof NativeSyntaxError)) throw e;
-        return function () { throw e; };
-      }
+      // A string handler is compiled and run as an indirect eval — global code. Its `var`s and functions become properties
+      // of the global object, which a Function body (what this used to build) cannot do. Parse errors surface when the
+      // timer fires, as natively.
+      return function () { return dynamicEval.call(undefined, handler); };
     }
     if (Native.setTimeout) define(root, 'setTimeout', function(handler, delay, ...args) { return Native.setTimeout(timerHandler(handler), delay, ...args); });
     if (Native.setInterval) define(root, 'setInterval', function(handler, delay, ...args) { return Native.setInterval(timerHandler(handler), delay, ...args); });

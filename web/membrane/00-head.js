@@ -394,6 +394,42 @@
   const OPAQUE_PENDING_ORIGIN = 'null#pending';
   function securityOrigin() { return opaqueDocument ? opaqueOriginToken : virtualURL.origin; }
   function displayOrigin(o) { return typeof o === 'string' && o.indexOf('null#') === 0 ? 'null' : o; }
+  // The virtual origins of this window's ancestors, nearest first — what `location.ancestorOrigins` lists. The real list holds
+  // the PROXY origin of each, and this membrane used to hand out an empty one: a frame that checks its embedder (a challenge
+  // widget reads it to know whose page it is in) saw none.
+  function embedderOrigins() {
+    const out = [];
+    try {
+      let w = root;
+      for (let depth = 0; depth < 32; depth++) {
+        const p = w.parent;
+        if (!p || p === w) break;
+        let o = '';
+        try { o = typeof p.__zp_origin === 'function' ? p.__zp_origin() : ''; } catch {}
+        if (typeof o === 'string' && o) out.push(displayOrigin(o));
+        w = p;
+      }
+    } catch {}
+    return out;
+  }
+  // `document.referrer` of a frame the embedder navigated: the embedder's URL, cut by the default referrer policy
+  // (strict-origin-when-cross-origin) — full URL (no fragment) to the same origin, the origin alone across origins, nothing
+  // from https to http. A top-level document keeps '' (what opened it is not known here).
+  function virtualReferrer() {
+    try {
+      const p = root.parent;
+      if (!p || p === root) return '';
+      const parentURL = typeof p.__zp_url === 'function' ? p.__zp_url() : '';
+      if (!parentURL) return '';
+      const from = new URL(parentURL);
+      if (from.protocol !== 'http:' && from.protocol !== 'https:') return '';
+      if (from.protocol === 'https:' && virtualURL.protocol === 'http:') return '';
+      from.hash = '';
+      from.username = '';
+      from.password = '';
+      return from.origin === virtualURL.origin ? from.href : from.origin + '/';
+    } catch { return ''; }
+  }
   // What the browser throws where an opaque origin is not allowed a storage-like API.
   const OPAQUE_FLAG_TEXT = "The document is sandboxed and lacks the 'allow-same-origin' flag.";
   function opaqueDenied(prefix, text) {

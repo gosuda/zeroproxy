@@ -26,10 +26,10 @@ gate is closed.
 | 무엇 | 명령 | 결과 |
 |---|---|---|
 | JS 단위 (정책·코어·SW 플레이리스트·프렐류드) | `npm run test:js` | 163 통과 |
-| Rust 워크스페이스 (리라이터 매트릭스 3,360 조합 포함) | `cargo test --workspace` | 301 통과, 3 무시 |
+| Rust 워크스페이스 (리라이터 매트릭스 3,360 조합 포함) | `cargo test --workspace` | 302 통과, 3 무시 |
 | Go | `go test ./...` | 전부 ok |
 | wasm CI | `npm run test:wasm:ci` | 13 통과 |
-| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 217 통과 |
+| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 219 통과 |
 | 리라이트 출력 유효성 (실사이트 스크립트 → V8) | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <taskweaver 테이프>` | 13개 사이트 768개 중 732개 검사, 0건 실패 (51.6 MB; 나머지는 스크립트 아님/리라이터가 거부) |
 | 실사이트 | taskweaver `zp`, 아래 13곳 | 전부 응답 — Wikipedia·GitHub·Guardian·MDN·Naver·Apple·npm 오류 0 |
 
@@ -154,7 +154,8 @@ ERRATA 해소 작업으로 대부분의 compat 갭이 닫혔다(R1–R7, D1–D5
 | `Element.getHTML`/`getHTMLUnsafe`/`ShadowRoot.getHTML`/`getHTMLUnsafe` | 직렬화 결과 deproxy + `data-zp-*` 스태시 제거 | raw 직렬화는 프록시 URL/내부 스태시 누출 — `getHTMLClean` 핀 |
 | `isSecureContext` (페이지/워커) | 가상 타깃 scheme+호스트로 판정 | 프록시 localhost 값(`true`)이 http 타깃에 새지 않게 — `secureCtx` 핀 (localhost 타깃은 네이티브도 true) |
 | `webkitURL`/`webkitIndexedDB`/`webkitIDB*` | 가상 URL 래퍼/네임스페이스 파사드 별칭 | 레거시 별칭이 훅을 우회하는 것 차단 — `webkitURLAlias`/`webkitIDB` 핀 |
-| `webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL`/`webkitPersistentStorage`/`webkitTemporaryStorage` | 제거(`undefined`) | 프록시 오리진 FS/quota 공유 차단 — `webkitFS` 핀. Chrome 도 대부분 제거돼 parity 근접 |
+| `webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL` | 함수로 존재, 늘 `SecurityError` 로 거부(ERRATA 65) | 프록시 오리진 FS 를 열지 않는다. 없으면 "API 를 지운 브라우저" 로 읽힌다 — `webkitFS` 핀(네이티브와 같음) |
+| `webkitPersistentStorage`/`webkitTemporaryStorage` | 제거(`undefined`) | 프록시 오리진 quota 공유 차단 — `webkitFS` 핀 |
 | 워커 `self.origin` | 가상 타깃 오리진 (blob:/data: 는 생성자 `ref` 상속) | 프록시 오리진 누출 제거 — `origin` 핀 |
 | 워커 `BroadcastChannel` | 타깃 해시 프리픽스 채널명 + `name` 마스킹 | 페이지 BC 와 동일한 격리 — `bcName` 핀 |
 | 워커 `navigator.storage.getDirectory` | `zp:o:<hash>` 서브디렉터리 | 페이지와 같은 OPFS 격리 — `opfsName` 핀 |

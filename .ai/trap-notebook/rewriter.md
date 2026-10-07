@@ -1638,3 +1638,11 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **함정 둘:** ① **`load` 이벤트는 Window 로 전파되지 않는다**(DOM: Document 의 부모는 `load` 에서 null) — 처음 window 에 캡처 리스너를 달았더니 아무것도 안 걸렸다. 요소 `load` 는 `document` 에서 잡는다(00-head 의 스크립트 추적과 같은 자리). ② 상태 `const` 는 `00-head.js` 에 둔다 — `06-install.js` 가 설치 단계를 돌릴 때 뒤 파일의 상수는 아직 초기화 전이다(TDZ).
 - **검증:** e2e `frame load events and history match native`(`/frame-loads`: 파싱된 프레임 인라인·리스너, `src` 먼저/나중, 빠른 교체, 교체 시 히스토리) — 네이티브와 같고, 옛 멤브레인에서는 `staticOnload: '3'`·`srcBeforeAppend: 'LoLo'` 로 빨개진다. 네이티브 기준값(`Lo`/`LoLo`/히스토리 1)도 고정.
 - **규칙:** 프레임 라우트 코드를 바꾸면 `load` 횟수와 히스토리 증가분을 네이티브와 세어 볼 것.
+
+## <a id="동적-코드-전역-this"></a>동적 코드가 전역을 만들지 못했고 `this` 가 window 가 아니었다 — Cloudflare 챌린지를 쫓다 찾은 다섯 가지 (2026-10-07)
+
+- **측정:** Stack Overflow 챌린지가 안 끝났다. 위젯 iframe 의 VM 이 디코더(`window.ulgk5`)를 정의하는 `eval("function …")` 에 도달하지 못했다. 네이티브와 프록시를 같은 프로브로 비교해 **참인 차이**만 골랐다(`.lean-ctx/this-identity.js`, `eval-global.js`, `iframe-env.js`, `shape-diff.js` 류 — 같은 프로브 소스를 두 경로로 열어 JSON 비교).
+- **원인 (전부 실제 불일치, 고침):** ① sloppy direct eval 이 최상위에서 만든 `var`/`function` 이 헬퍼의 지역으로 사라짐 → 전역 코드 경로로. 문자열 타이머도 같은 모양. ② 최상위 `this` 가 facade 가 아닌 실제 전역(`this === window` 거짓, `eval('this') === window` 거짓). ③ 교차 출처 iframe 의 `document.referrer`/`ancestorOrigins` 가 비어 있었다. ④ `Error.stack` 에 멤브레인 프레임(`__zp_call` …)이 끼고 `:줄:열` 이 URL 과 함께 지워졌다. ⑤ `webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL` 이 아예 없었다.
+- **되돌림 하나 — 꼭 읽을 것:** ②를 처음엔 "`Classic` 이면 최상위 `this` → `window`" 로 넣었더니 **함수 안의 direct eval** 의 `this` 까지 window 가 됐다(`{m(){return eval('this')}}.m()` 이 객체가 아니라 window). 기존 표면 프로브 `evalThis` 가 잡았다. 함수 사이트 eval 은 `ScriptKind::ClassicLocal`(`"classic-local"`)로 리라이트해 `this` 를 건드리지 않는다. **eval 소스의 최상위 `this` 는 eval 이 어디서 불렸는지에 달렸다.**
+- **남은 것:** 챌린지는 여전히 안 끝난다. 자동화 Chrome 은 프록시 없이도 같은 판정이고 WebView2 는 챌린지를 안 받아, 대조할 네이티브 VM 실행이 없다. 첫 불일치 호스트 호출은 이름이 안 붙었다 — ERRATA Residuals 의 해당 행.
+- **규칙:** `this`/eval/전역 선언 같은 언어 의미를 바꾸면 **함수 안/밖, strict/sloppy, 클래스, 모듈** 을 모두 네이티브와 비교하는 프로브를 같이 둘 것(`/xdyneval`, `/xframe-env`, `evalThis`).

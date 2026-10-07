@@ -31,6 +31,7 @@ pub fn bundle_version() -> String {
 fn parse_script_kind(kind: &str) -> Result<zp_rewriter::ScriptKind, JsError> {
     match kind {
         "classic" => Ok(zp_rewriter::ScriptKind::Classic),
+        "classic-local" => Ok(zp_rewriter::ScriptKind::ClassicLocal),
         "module" => Ok(zp_rewriter::ScriptKind::Module),
         "event-handler" => Ok(zp_rewriter::ScriptKind::EventHandler),
         "eval" => Ok(zp_rewriter::ScriptKind::Eval),

@@ -49,6 +49,7 @@
     // global 접근은 base[prop] 으로 fall through.
     if (root.__zp_get && !define(w, '__zp_get', root.__zp_get)) throw normalizedError('SecurityError');
     if (root.__zp_origin && !define(w, '__zp_origin', root.__zp_origin)) throw normalizedError('SecurityError');
+    if (root.__zp_url && !define(w, '__zp_url', root.__zp_url)) throw normalizedError('SecurityError');
     if (root.__zp_set && !define(w, '__zp_set', root.__zp_set)) throw normalizedError('SecurityError');
     if (root.__zp_assign && !define(w, '__zp_assign', root.__zp_assign)) throw normalizedError('SecurityError');
     if (root.__zp_call && !define(w, '__zp_call', root.__zp_call)) throw normalizedError('SecurityError');

@@ -308,9 +308,17 @@ fn eval_literal_nested_rewrite() {
     // it back into a real direct eval with caller-scope descriptors.
     emits(
         "eval('location.href');",
-        &["__zp_eval.call(this,__zp_get(globalThis,\"eval\"),['location.href'],{},0)"],
+        &["__zp_eval.call(this,__zp_get(globalThis,\"eval\"),['location.href'],{},0,1)"],
     );
-    emits("eval(x);", &["__zp_eval.call(this,__zp_get(globalThis,\"eval\"),[x],{},0)"]);
+    emits("eval(x);", &["__zp_eval.call(this,__zp_get(globalThis,\"eval\"),[x],{},0,1)"]);
+    // A sloppy eval in the top level of a classic script is marked (a trailing 1): its declarations are the page's globals.
+    // Not inside a function, not in strict code, not in a module: those keep their declarations to themselves.
+    emits("if (c) { eval('var q=1'); }", &[",{},0,1)"]);
+    not_emits("function f(){ eval('var q=1'); }", &[",0,1)"]);
+    not_emits("(()=>{ eval('var q=1'); })();", &[",0,1)"]);
+    not_emits("'use strict'; eval('var q=1');", &[",1,1)", ",0,1)"]);
+    emits("'use strict'; eval('var q=1');", &[",{},1)"]);
+    reparses("if (c) { eval('var q=1'); }");
     // Eager multi-arg evaluation preserved: the args array evaluates all.
     emits("eval(a,b());", &["[a,b()]"]);
     // Indirect / aliased / optional / shadowed forms stay mediated-indirect.
@@ -836,4 +844,44 @@ fn arrow_expression_body_is_not_a_statement_position() {
     // A real statement start keeps its ASI guard.
     emits("x = 1\no[k] ??= [];", &["0,"]);
     reparses("x = 1\no[k] ??= [];");
+}
+
+// ---------------------------------------------------------------------------
+// `this` in global code is the global object — it must read what `window` reads (the facade), not the real global.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn global_this_reads_like_window() {
+    let window = "__zp_get(globalThis,\"window\")";
+    // The top level of a classic script, an arrow there, and a string eval's own top level (the same rewrite).
+    emits("var t = this;", &[&format!("var t = {window};")]);
+    emits("var f = () => this.x;", &[&format!("() => {window}.x")]);
+    emits("(function(w){ w.a = 1 })(this);", &[&format!("(function(w){{ w.a = 1 }})({window})")]);
+    emits("this.location = 'x';", &[&format!("__zp_set({window},\"location\",'x')")]);
+    // `new this.Foo()` must not become `new window(args).Foo()`.
+    emits("new this.Foo();", &[&format!("new ({window}).Foo()")]);
+    reparses("var t = this;");
+    reparses("new this.Foo();");
+    // A function body, a method, an accessor and a class member have a `this` of their own.
+    not_emits("function f(){ return this }", &["__zp_get(globalThis,\"window\")"]);
+    not_emits("var o = { m() { return this }, get g() { return this } };", &["__zp_get(globalThis,\"window\")"]);
+    not_emits("class A { x = this.y; static { this.z = 1 } m() { return this } }", &["__zp_get(globalThis,\"window\")"]);
+    not_emits("var f = function(){ return () => this }", &["__zp_get(globalThis,\"window\")"]);
+    // A module's top-level `this` is undefined: nothing to read.
+    let module = rewrite_script(
+        "export const t = this;",
+        &RewriteOpts { kind: ScriptKind::Module, ..opts() },
+    )
+    .unwrap()
+    .code;
+    assert!(!module.contains("__zp_get(globalThis,\"window\")"), "module `this` must stay undefined, got: {module}");
+    // A direct eval inside a function: its top-level `this` is the caller's (`eval('this')` in a method is the object).
+    let local = rewrite_script(
+        "var t = this; this.x = () => this;",
+        &RewriteOpts { kind: ScriptKind::ClassicLocal, ..opts() },
+    )
+    .unwrap()
+    .code;
+    assert!(!local.contains("__zp_get(globalThis,\"window\")"), "a function-site eval keeps its caller's `this`, got: {local}");
+    assert!(local.contains("var t = this;"), "got: {local}");
 }

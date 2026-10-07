@@ -32,6 +32,9 @@ pub enum ScriptKind {
     Eval,
     Function,
     Worker,
+    /// A direct `eval` inside a function: a classic script's declaration semantics, but its top-level `this` is the
+    /// caller's, not the global object. Parsed and rewritten as `Classic`.
+    ClassicLocal,
 }
 
 impl ScriptKind {
@@ -206,6 +209,7 @@ pub fn rewrite_script_patches(
 
     let mut visitor =
         RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
+    visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
     visitor.visit_program(&ret.program);
 
     let mut patches = visitor.patches;
@@ -287,6 +291,7 @@ fn parse_for_kind<'a>(
     source: &'a str,
     requested: ScriptKind,
 ) -> (oxc_parser::ParserReturn<'a>, ScriptKind) {
+    let requested = if requested == ScriptKind::ClassicLocal { ScriptKind::Classic } else { requested };
     let ret = Parser::new(allocator, source, requested.source_type()).parse();
     if requested == ScriptKind::Classic && ret.module_record.has_module_syntax {
         let module = Parser::new(allocator, source, ScriptKind::Module.source_type()).parse();
@@ -311,6 +316,7 @@ pub fn rewrite_script(source: &str, opts: &RewriteOpts) -> Result<RewriteResult,
 
     let mut visitor =
         RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
+    visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
     visitor.visit_program(&ret.program);
 
     // Apply patches to produce final code. Patches sorted by start ascending
@@ -1201,12 +1207,15 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 }
             }
         } else if p.replacement.starts_with("\u{1}DEVAL\u{1}") {
-            // \u{1}DEVAL\u{1}<as>\u{1}<ae>\u{1}<strict>\u{1}<desc-object>
-            // R2: `eval(args)` → `__zp_eval.call(this, [args][0], desc, strict)`.
+            // \u{1}DEVAL\u{1}<as>\u{1}<ae>\u{1}<strict>\u{1}<global-site>\u{1}<desc-object>
+            // R2: `eval(args)` → `__zp_eval.call(this, [args][0], desc, strict[, 1])`.
             // `[args][0]` evaluates every argument in order (native eager
             // evaluation) and yields the first — `eval(a,b)` semantics.
-            let parts: Vec<&str> = p.replacement.splitn(6, '\u{1}').collect();
-            if parts.len() >= 6 {
+            // A trailing `1` marks a SLOPPY eval in the top level of a classic script: natively its `var` and `function`
+            // declarations become properties of the global object, which the runtime can only do by running it as global
+            // code (inside the helper that gives a direct eval its caller's bindings they stay local to the helper).
+            let parts: Vec<&str> = p.replacement.splitn(7, '\u{1}').collect();
+            if parts.len() >= 7 {
                 let as_: usize = parts[2].parse().unwrap_or(0);
                 let ae: usize = parts[3].parse().unwrap_or(0);
                 let args = if as_ < ae && ae <= bytes.len() {
@@ -1214,8 +1223,12 @@ pub fn apply_patches(source: &str, patches: &[Patch]) -> String {
                 } else {
                     String::new()
                 };
-                let strict = parts[4];
-                let desc = parts[5].trim_end_matches('\u{1}');
+                let strict = if parts[5] == "1" && parts[4] == "0" {
+                    format!("{},1", parts[4])
+                } else {
+                    parts[4].to_string()
+                };
+                let desc = parts[6].trim_end_matches('\u{1}');
                 // `.call(this)` 로 호출자의 this 를 __zp_eval → 헬퍼 → eval
                 // thisEnv 까지 그대로 전달한다 (direct-eval this parity).
                 // callee 를 함께 넘긴다 — `var eval = f` 같이 eval 이름이
@@ -1511,6 +1524,7 @@ impl RewriterInstance {
 
         let mut visitor =
             RewriteVisitor::new(opts.target_url.clone(), opts.proxy_origin.clone(), kind);
+        visitor.local_this = opts.kind == ScriptKind::ClassicLocal;
         visitor.visit_program(&ret.program);
 
         let mut patches = visitor.patches;
@@ -1573,6 +1587,10 @@ struct RewriteVisitor {
     /// Non-arrow function depth. `new.target` inside an arrow inherits the
     /// enclosing *real* function's newTarget, so only real functions count.
     nt_depth: u32,
+    /// >0 inside a class body (its field initializers and static blocks have their own `this`, and no function depth).
+    class_depth: u32,
+    /// `ScriptKind::ClassicLocal`: top-level `this` belongs to the caller of the eval and is left alone.
+    local_this: bool,
     /// >0 while walking an assignment-target subtree (for-of/in left,
     /// destructuring targets, update operands). Dangerous identifiers there
     /// become `__zp_get.d.<name>` member refs — calls are not valid targets.
@@ -1626,6 +1644,8 @@ impl RewriteVisitor {
             kind,
             fn_depth: 0,
             nt_depth: 0,
+            class_depth: 0,
+            local_this: false,
             in_target: 0,
             decl_seq: 0,
             with_temps: Vec::new(),
@@ -2691,9 +2711,22 @@ impl<'a> Visit<'a> for RewriteVisitor {
         // R4: 클래스 본문·메서드는 선언 없이도 항상 strict — Annex B 불가.
         let prev_sloppy = self.cur_sloppy;
         self.cur_sloppy = false;
+        self.class_depth += 1;
         walk::walk_class(self, class);
+        self.class_depth -= 1;
         self.cur_sloppy = prev_sloppy;
         self.pop_scope();
+    }
+
+    /// `this` in the top level of a classic script is the global object — natively `this === window`. The page's `window` is
+    /// the membrane's facade, never the real global, so the real one used to arrive through `this` (a script's top level, a
+    /// string eval): `this === window` was false, `var self = this; self.location = …` skipped the facade, and a bot-management
+    /// VM that checks `eval('this') === window` stopped. It reads the same thing `window` does. (A sloppy function called
+    /// plainly still gets the real global from the engine; a function body is not rewritten, since `this` is its caller's.)
+    fn visit_this_expression(&mut self, expr: &ThisExpression) {
+        if self.kind == ScriptKind::Classic && !self.local_this && self.nt_depth == 0 && self.class_depth == 0 {
+            self.emit_global_get(expr.span, "window");
+        }
     }
 
     fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
@@ -2922,8 +2955,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
                         // 호출자의 eval 은 strict eval 이라 `with` 래퍼가
                         // 불법 → 런타임이 raw 경로를 선택한다.
                         replacement: format!(
-                            "\u{1}DEVAL\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
-                            as_, ae, !self.cur_sloppy as u8, desc
+                            "\u{1}DEVAL\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}",
+                            as_, ae, !self.cur_sloppy as u8, self.global_classic() as u8, desc
                         ),
                     });
                     return;

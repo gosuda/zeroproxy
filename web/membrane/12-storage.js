@@ -229,8 +229,25 @@
     } catch {}
     // Legacy webkit filesystem/quota APIs — real proxy-origin FS, no clean
     // virtualization. Remove the surface (feature detection falls back).
-    for (const legacy of ['webkitRequestFileSystem','webkitResolveLocalFileSystemURL','webkitPersistentStorage','webkitTemporaryStorage','webkitStorageInfo','webkitRequestFileSystemSync','webkitResolveLocalFileSystemURLSync']) {
+    for (const legacy of ['webkitPersistentStorage','webkitTemporaryStorage','webkitStorageInfo','webkitRequestFileSystemSync','webkitResolveLocalFileSystemURLSync']) {
       try { if (w[legacy] !== undefined) define(w, legacy, undefined); } catch {}
+    }
+    // The two entry points stay FUNCTIONS. Chrome has them, and a script that calls one without a guard (the classic
+    // incognito probe, `webkitRequestFileSystem.call(window, …)`, which a bot-management VM runs) died with `reading
+    // 'call'` of undefined — a tell no browser has. No file system is created: the request reports what Chrome reports
+    // when storage is denied, a SecurityError to the error callback.
+    for (const [legacy, errorIndex, length] of [['webkitRequestFileSystem', 3, 3], ['webkitResolveLocalFileSystemURL', 2, 2]]) {
+      try {
+        if (typeof w[legacy] !== 'function') continue;
+        const denied = function () {
+          const onError = arguments[errorIndex];
+          if (typeof onError === 'function') Native.setTimeout(() => { try { onError(normalizedError('SecurityError')); } catch {} }, 0);
+        };
+        Object.defineProperty(denied, 'name', { value: legacy, configurable: true });
+        Object.defineProperty(denied, 'length', { value: length, configurable: true });
+        maskNativeFunction(denied, legacy);
+        define(w, legacy, denied);
+      } catch {}
     }
     // fetchLater — the real API schedules a fire-and-forget request at
     // document teardown. The raw URL cannot go direct (that is a leak), so

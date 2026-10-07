@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-07 | membrane / 수정 | eval 의 전역 선언·최상위 this·iframe referrer/ancestorOrigins·stack 모양·webkit FS 가 네이티브와 달랐다. 함수 안 eval 의 this 는 그대로 둔다. | rewriter.md#동적-코드-전역-this |
 | 2026-10-07 | tls / 수정 | wire·페르소나가 또 낡았다: GREASE 두 자리·key_share 힌트·ECH 상수·고정 시드(첫 hello 가 모든 사용자에게 같음). 직접과 일치시킴. | rewriter.md#tls-지문-표류 |
 | 2026-10-07 | sw / 수정 | HLS 재생 불가: 재생기가 플레이리스트 URL 을 스스로 받는다. 리라이트 + Range 직접 응답. 업스트림 206 이 원본 바이트였다(noRange). | rewriter.md#hls-플레이리스트-range |
 | 2026-10-07 | rewriter / 수정 | for(;;e++) 루프 캡이 같은 let 을 두 번 선언 → SyntaxError. 697개 실스크립트 코퍼스 + 3,360 조합 테스트로 확인. | rewriter.md#for-빈-test-loop-cap |

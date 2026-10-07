@@ -576,6 +576,32 @@ claimed:
     key-share shape, 12 signature algorithms, ECH sizes — equal. Naver (nid, mail: 8 of 8), Google, GitHub load. —
     `crates/zp-kernel-bundle/tests/tls_entropy.rs`, `test/js/core.test.js` (the brand rule against six lists real Chrome
     sent; the worker's copy of the UA).
+62. **Dynamic code did not declare globals the way the browser does, and `this` was not the window.** A challenge's bootstrap
+    defines its decoder with `eval("function name(…){…}")` and calls it by name from another script. A sloppy direct eval at
+    the top level of a classic script ran inside the helper that gives an eval its caller's bindings, so its `var`s and
+    functions were the helper's locals and vanished with it; a string timer ran its code through a path that did the same.
+    Both now run as global code (the DEVAL marker carries a "global site, sloppy" flag; the helper takes the global path for
+    it, and a strict or function-site eval keeps the local one). Also `this`: at the top level of a classic script, in an
+    arrow there, and in a string eval's own top level it reads the facade like `window` does (`this === window`,
+    `eval('this') === window`, `var self = this; self.location = …` through the membrane). A function body, a method, a class
+    member and a module keep theirs, and a function-site direct eval keeps its caller's `this` (`ScriptKind::ClassicLocal`;
+    `eval('this')` in a method is the object). — rewriter `global_this_reads_like_window`, `eval_literal_nested_rewrite`; e2e
+    `dynamic code declares globals as natively, and the file-system entry points exist` and the surface probe `evalThis`
+    (mutation checked).
+63. **A cross-origin frame saw no embedder.** `document.referrer` was empty and `location.ancestorOrigins` was an empty list;
+    a challenge widget reads both. A frame's referrer is now what the browser gives it (the embedder's URL if same-origin, its
+    origin and `/` if not, empty on an https→http downgrade) and `ancestorOrigins` walks the parent chain through each
+    embedder's virtual origin. — e2e `a cross-origin frame sees its embedder and a native-shaped stack`.
+64. **`Error.stack` was not a browser's stack.** The membrane's own frames (`__zp_call`, `__zp_get`, …) sat between the page's,
+    and the `:line:column` of every URL was dropped with the URL. The frames of the prelude's own files are filtered out of a
+    stack and a frame's text keeps its positions (those of the code that actually ran, the rewritten one). — same e2e test (an external
+    script's callback run inside a membrane call, frame for frame against native; the filter is mutation checked, the
+    position-keeping is not separately pinned — that fixture keeps positions either way) (frame names and positions, native against proxied).
+65. **`webkitRequestFileSystem` and `webkitResolveLocalFileSystemURL` did not exist.** They were removed with the rest of the
+    legacy storage entry points, but the browser has them (a script probing for them reads the absence). They are back as
+    functions of the native shape (name, length, masked `toString`) that call the error callback with a `SecurityError`
+    asynchronously — the proxy gives a page no persistent file system, and a denied request is the honest answer. — same e2e
+    test as 62.
 
 ### Residuals (documented, not fixed)
 
@@ -586,6 +612,7 @@ claimed:
 | Direct `eval` inside `with(o)` does not see `o` | The eval descriptor carries lexical bindings, not with-objects. Rare (legacy templating uses `new Function`). | surface `withEvalScope` |
 | A `var` from a script rejected for redeclaration survives as `undefined` | Eval declaration instantiation runs before the emitted conflict check; splitting the check trades this for registrations surviving a syntax error. | surface `ownKeysLeak` |
 | An uninitialized-lexical (TDZ) `ReferenceError` is thrown from the prelude, so `ErrorEvent.filename` is the prelude URL | Moving the throw into emitted code means emitting a check per read. | [trap 에러-filename-누출](.ai/trap-notebook/rewriter.md#에러-filename-누출) |
+| An inline script's `Error.stack` ends in `eval (url:L:C)` + `eval (<anonymous>)`, an anonymous function in it is `eval`, `new Function` code is two frames, a `this` of the window facade prints `Proxy.` | The proxy runs inline and dynamic code through `eval` with a `sourceURL`; V8 names those frames itself. The prelude is minified, so a frame cannot be told from its function name which entry point ran it, and a native eval has frames of its own that a rewrite would also have to invent. External scripts are frame for frame native. | e2e `a cross-origin frame sees its embedder and a native-shaped stack` pins the external-script case; the inline case is not pinned |
 | `Document.parseHTMLUnsafe` anchors resolve against the virtual base (native: no base, raw text) | Inert parsed documents share the realm's URL hooks. Minor. | surface `parseHTMLUnsafeHook` |
 | import-map / speculation-rules read-back returns relative URLs as absolute | The server does not stash the original JSON; read-back is deproxied. | surface `importmapText` (checks no proxy URL) |
 | Worker-realm hooks are not `toString`-masked | `worker-prelude.js` has no masking helper; hook sources are visible to worker code. | — |
@@ -611,7 +638,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| A Cloudflare managed challenge (Stack Overflow's) does not complete | Cloudflare challenges automated Chrome the same way: a fresh headed puppeteer Chrome stays on "Just a moment…" with no proxy in the way, while this machine's own Edge WebView2 is not challenged at all. The proxy's wire now equals that WebView2's (JA4, peetprint, HTTP/2 hash, TCP/IP — item 61), so the decision is made on the browser's environment, not the request. The challenge VM also throws `reading 'call'` inside the membrane; that was shown (2026-08-16) not to be the rewriter's doing and the missing member is still unnamed. Opt-in: the launcher's "Challenge compatibility" checkbox. | [trap 2026-08-16](.ai/trap-notebook/LOG.md) |
+| A Cloudflare managed challenge (Stack Overflow's) does not complete | Cloudflare challenges automated Chrome the same way: a fresh headed puppeteer Chrome stays on "Just a moment…" with no proxy in the way, while this machine's own Edge WebView2 is not challenged at all. The proxy's wire now equals that WebView2's (JA4, peetprint, HTTP/2 hash, TCP/IP — item 61), so the decision is made on the browser's environment, not the request. Chasing it found five real divergences from the browser (items 62–65: dynamic-code globals, `this`, an iframe's referrer and ancestor origins, stack shape, the file-system entry points), all fixed, and the challenge still stops: the widget iframe's VM never evaluates the decoder it should define (`window.ulgk5` is later undefined). There is no native run to compare with — automated Chrome gets the same verdict and WebView2 is not challenged — so the first diverging host call is not named. Opt-in: the launcher's "Challenge compatibility" checkbox. | [trap 2026-08-16](.ai/trap-notebook/LOG.md) |
 | Reddit's "Prove your humanity" wall on a cold profile | The same wall appears on a cold native load in the same browser (1 of 3), then passes with the cookie it sets. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
@@ -848,6 +875,7 @@ build identity (intentional); termination mid-request and multi-target workers
 | `el.onclick = 'code'` | **fixed** — a string is null like native | dyn `handlerPropString` |
 | `adoptedStyleSheets`, `new CSSStyleSheet()` | **fixed-ish, monitor** (Q4) | — |
 | `webkitTemporaryStorage`/`webkitPersistentStorage` | **intentional** — removed | surface `webkitFS` |
+| `webkitRequestFileSystem`/`webkitResolveLocalFileSystemURL` | present as functions, always `SecurityError` (item 65) | surface `webkitFS` (equals native) |
 | file pickers, WebAuthn, PaymentRequest | **intentional** (D6 / Q7) | surface `webAuthn`, `credGet` |
 | `hasStorageAccess`/`requestStorageAccess` | **residual** — first-party everywhere | — |
 | `registerProtocolHandler` | **fixed** — virtual-origin facade | surface `registerPH`, `registerPHSameOrigin` |

@@ -97,6 +97,7 @@ impl From<zp_htmltx::TransformError> for EngineError {
 pub fn parse_script_kind(kind: &str) -> Result<ScriptKind, EngineError> {
     match kind {
         "classic" => Ok(ScriptKind::Classic),
+        "classic-local" => Ok(ScriptKind::ClassicLocal),
         "module" => Ok(ScriptKind::Module),
         "event-handler" => Ok(ScriptKind::EventHandler),
         "eval" => Ok(ScriptKind::Eval),

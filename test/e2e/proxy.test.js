@@ -2335,6 +2335,86 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xdyneval') {
+      // Dynamic code that declares globals — how a challenge's bootstrap plants its decoder — and the file-system entry points.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>dyneval</title><body>
+        <script>window.__xdyneval = null; (0, eval)('function g1(){return 1}');</script>
+        <script>window.eval('function g2(){return 1}');</script>
+        <script>var ev = eval; ev('function g3(){return 1}');</script>
+        <script>eval('function g4(){return 1}');</script>
+        <script>if (true) { eval('var g4b = 4; function g4c(){return 1}'); }</script>
+        <script>(function () { eval('function g5(){return 1}'); })();</script>
+        <script>new Function('function g6(){} window.g6 = g6;')();</script>
+        <script>setTimeout('function g7(){return 1}; var g7b = 7;', 0);</script>
+        <script>(0, eval)('var g8 = function(){return 1}');</script>
+        <script>var fr = document.createElement('iframe'); document.body.appendChild(fr); fr.contentWindow.eval('function g9(){return 1}'); window.__g9in = typeof fr.contentWindow.g9;</script>
+        <script>'use strict'; eval('function g11(){return 1}');</script>
+        <script>var lexA = 5; eval('window.__evalSees = [typeof lexA, typeof g4]');</script>
+        <script>
+          // the global object, however it is reached, is window
+          window.__id = {
+            topThis: this === window, arrowThis: (() => this === window)(), passedThis: (function (g) { return g === window; })(this),
+            indirectEval: (0, eval)('this') === window, directEval: eval('this') === window, windowEval: window.eval('this') === window,
+            functionCtor: Function('return this')() === window, selfAndGlobal: self === window && globalThis === window && window.window === window,
+          };
+          setTimeout('window.__id.timerThis = (this === window)', 0);
+        </script>
+        <script>
+          setTimeout(function () {
+            var names = ['g1', 'g2', 'g3', 'g4', 'g4b', 'g4c', 'g5', 'g6', 'g7', 'g7b', 'g8', 'g11'];
+            var out = { globals: {} };
+            names.forEach(function (n) { out.globals[n] = typeof window[n]; });
+            out.g9in = window.__g9in;
+            out.evalSees = window.__evalSees;
+            out.identity = window.__id;
+            var fsApi = {};
+            ['webkitRequestFileSystem', 'webkitResolveLocalFileSystemURL'].forEach(function (n) {
+              var f = window[n];
+              fsApi[n] = [typeof f, f && f.length, f && f.name, f && /\\[native code\\]/.test(Function.prototype.toString.call(f)), n in window];
+            });
+            out.fs = fsApi;
+            window.__xdyneval = out;
+          }, 600);
+        <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xframe-env') {
+      // A cross-origin frame's view of its embedder (`document.referrer`, `location.ancestorOrigins`) and the shape of its own
+      // `Error.stack`. The child sits on 127.0.0.1, the parent on localhost: different origins on one server.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>frame-env</title><body><script>
+        window.__xframeenv = null;
+        addEventListener('message', function (e) { if (e.data && e.data.probe) window.__xframeenv = e.data.probe; });
+        var f = document.createElement('iframe'); f.src = 'http://127.0.0.1:${req.socket.localPort}/xframe-child'; document.body.appendChild(f);
+      </script></body>`);
+      return;
+    }
+    if (url.pathname === '/xframe-child') {
+      // The probe is an external script: its frames carry the proxy's script URLs, which a stack must show as the page's own.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>child</title><body><script src="/xframe-child.js"></script></body>`);
+      return;
+    }
+    if (url.pathname === '/xframe-child.js') {
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`
+        // 'a'.replace(…) is a call the rewriter routes through the membrane (the callback runs inside it).
+        function inner() { return 'a'.replace(/a/, function cb() { return new Error('x').stack; }); }
+        function outer() { return inner(); }
+        var stack = String(outer()).split('\\n');
+        var site = function (l) { return l.replace(/:\\d+:\\d+/g, ':L:C').trim(); };
+        parent.postMessage({ probe: {
+          referrer: document.referrer,
+          ancestorOrigins: Array.prototype.slice.call(location.ancestorOrigins),
+          stackHead: stack[0],
+          stackFrames: stack.slice(1).map(site),
+          stackHasPositions: stack.slice(1).every(function (l) { return !/https?:/.test(l) || /:\\d+:\\d+\\)?$/.test(l); }),
+          stackLeaks: stack.some(function (l) { return /__zp_|\\/zp\\/|proxy\\.localhost/.test(l); }),
+        } }, '*');
+      `);
+      return;
+    }
     if (url.pathname === '/xrawtext') {
       // innerHTML on an element whose content is text: React Helmet puts a head script in with script.innerHTML = code.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6752,6 +6832,76 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.deepEqual(proxied, direct);
   });
 
+  // Dynamic code that declares functions or variables at the top level makes them globals: `eval` at global scope, an
+  // indirect `eval`, a string timer. The membrane ran the first and the last inside a function body, where the declarations
+  // vanished — Cloudflare's challenge plants its string decoder with `eval("function name(…){…}")` and calls it by name, and
+  // died on `undefined.call`. The two file-system entry points (`webkitRequestFileSystem`, the incognito probe a bot
+  // check runs) stay functions of Chrome's name and length instead of vanishing.
+  await t.test('dynamic code declares globals as natively, and the file-system entry points exist', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xdyneval`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xdyneval, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xdyneval);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xdyneval`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xdyneval, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xdyneval);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'dynamic-globals.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.globals.g4, 'function');
+    assert.equal(direct.globals.g7, 'function');
+    assert.equal(direct.globals.g5, 'undefined');
+    assert.equal(direct.globals.g11, 'undefined');
+    assert.ok(Object.values(direct.identity).every(v => v === true), JSON.stringify(direct.identity));
+    assert.deepEqual(direct.fs.webkitRequestFileSystem.slice(0, 2), ['function', 3]);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // What a cross-origin frame can read of its embedder, and what its own stack looks like: equal to native. A frame's
+  // `document.referrer` was empty and its `ancestorOrigins` too (a challenge widget reads both); a stack carried the
+  // membrane's own frames and lost its line:column positions.
+  await t.test('a cross-origin frame sees its embedder and a native-shaped stack', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xframe-env`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xframeenv, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xframeenv);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xframe-env`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xframeenv, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xframeenv);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'frame-env.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct.ancestorOrigins, [targetBase]);
+    assert.equal(direct.referrer, `${targetBase}/`);
+    assert.equal(direct.stackHasPositions, true);
+    assert.equal(direct.stackLeaks, false);
+    // The probe is an external script whose callback runs inside a membrane call: the stack is the browser's, frame for frame
+    // (an inline script's is not — the proxy runs it through `eval`, see the ERRATA residual).
+    assert.equal(direct.stackFrames.length, 5, JSON.stringify(direct.stackFrames));
+    assert.equal(proxied.stackLeaks, false, `the stack names the membrane: ${JSON.stringify(proxied.stackFrames)}`);
+    assert.deepEqual(proxied, direct);
+  });
+
   // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:
   // `n<i;n++)for(var o in t…` became a tag with attributes, and React Helmet's inline scripts (NYT's ad config) did not parse.
   await t.test('innerHTML on a script, textarea, title and noscript sets text (matches native)', async () => {
@@ -7207,7 +7357,6 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
         // Fail-closed by design (PHASE2_STATUS divergence table, ERRATA Q7).
         webAuthn: 'credentials.create → NotAllowedError: the RP would be the proxy origin',
         credGet: 'credentials.get → NotAllowedError, same reason',
-        webkitFS: 'legacy FS/quota removed: a proxy-origin filesystem shared across targets',
         paSurfaces: 'Privacy Sandbox APIs removed: keyed to the proxy origin',
         swRegs: 'the virtual SW facade always reports one fake registration (D3 fail-soft)',
         dynamicBase: "base-uri 'none': a runtime <base> does not move the virtual base",
@@ -7395,8 +7544,9 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     // P6: webkitIndexedDB — 이 Chrome 에는 네이티브 부재(not-alias)가 parity,
     // 탑재 브라우저에서는 네임스페이스 파사드 별칭이어야 한다.
     assert.match(probes.webkitIDB, /^v:(alias|not-alias:undefined)$/, `webkitIDB: ${probes.webkitIDB}`);
-    // P7: 레거시 FS/quota API — 전부 제거.
-    assert.equal(probes.webkitFS, 'v:undefined|undefined|undefined|undefined', `webkitFS: ${probes.webkitFS}`);
+    // P7: 레거시 FS 진입점은 네이티브처럼 함수로 존재하되(없으면 "이 API 를 지운 브라우저" 로 읽힌다) 항상 SecurityError 로 거부한다 —
+    // 프록시 오리진 FS 를 열지 않는다. `webkitPersistentStorage`/`webkitTemporaryStorage` 는 navigator 에만 있고 거기서는 제거.
+    assert.equal(probes.webkitFS, 'v:function|function|undefined|undefined', `webkitFS: ${probes.webkitFS}`);
     // P9: fetchLater — 프록시 봉투 keepalive 에뮬레이션.
     if (probes.fetchLaterType !== 'v:absent') {
       assert.equal(probes.fetchLaterType, 'v:function', `fetchLaterType: ${probes.fetchLaterType}`);
