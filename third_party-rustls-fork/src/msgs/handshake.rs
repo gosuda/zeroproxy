@@ -919,6 +919,10 @@ extension_struct! {
         ExtensionType::SessionTicket =>
             pub(crate) session_ticket: Option<ClientSessionTicket>,
 
+        /// Chrome's `trust_anchors` extension (TLS Trust Expressions): the body is sent verbatim.
+        ExtensionType::TrustAnchors =>
+            pub(crate) trust_anchors: Option<Payload<'a>>,
+
         /// Offered preshared keys (RFC8446)
         ExtensionType::PreSharedKey =>
             pub(crate) preshared_key_offer: Option<PresharedKeyOffer>,
@@ -992,6 +996,7 @@ impl ClientExtensions<'_> {
             record_size_limit,
             application_settings,
             session_ticket,
+            trust_anchors,
             preshared_key_offer,
             early_data_request,
             supported_versions,
@@ -1022,6 +1027,7 @@ impl ClientExtensions<'_> {
             record_size_limit,
             application_settings,
             session_ticket,
+            trust_anchors: trust_anchors.map(|x| x.into_owned()),
             preshared_key_offer,
             early_data_request,
             supported_versions,

@@ -675,6 +675,11 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>, initial_hello: bool) 
         // ApplicationSettings (id 17613) — Chrome sends ["h2"] only.
         exts.application_settings = Some(vec![ProtocolName::from(b"h2".to_vec())]);
     }
+    if spec_has(0xca34) {
+        // trust_anchors (id 0xca34, TLS Trust Expressions) — every Chrome since 140 sends this fixed list; its absence is
+        // what separates a WebView2/Edge hello from a Chrome one while the UA says Chrome.
+        exts.trust_anchors = Some(Payload::new(crate::ja3::CHROME_TRUST_ANCHORS.to_vec()));
+    }
     if spec_has(0x0023) && exts.session_ticket.is_none() {
         // SessionTicket (id 35) — Chrome always emits this even on
         // first contact, signaling "I support session tickets, here's

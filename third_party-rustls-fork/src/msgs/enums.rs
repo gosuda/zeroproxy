@@ -157,6 +157,9 @@ enum_builder! {
         // value seen in older Chrome builds is 0x4469.)
         ApplicationSettings => 0x44cd,
         ChannelId => 0x754f,
+        // Chrome's TLS Trust Expressions extension (draft-ietf-tls-trust-anchor-ids): the list of trust-anchor IDs its root
+        // store supports. Every Chrome since 140 sends it, a fixed 186 bytes per build; WebView2/Edge does not.
+        TrustAnchors => 0xca34,
         RenegotiationInfo => 0xff01,
         TransportParametersDraft => 0xffa5,
         EncryptedClientHello => 0xfe0d, // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-18#section-11.1

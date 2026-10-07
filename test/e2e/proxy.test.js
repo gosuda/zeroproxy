@@ -2415,6 +2415,35 @@ function createTargetServer(requests, pendingResponses) {
       `);
       return;
     }
+    if (url.pathname === '/xfm-echo' || url.pathname === '/xfm-frame' || url.pathname === '/xfm') {
+      // Fetch Metadata as the server sees it: a same-origin fetch, a cross-site (CORS) fetch and a cross-site frame.
+      const fm = JSON.stringify({
+        site: req.headers['sec-fetch-site'] || 'absent', mode: req.headers['sec-fetch-mode'] || 'absent',
+        dest: req.headers['sec-fetch-dest'] || 'absent', user: req.headers['sec-fetch-user'] || 'absent',
+        storage: req.headers['sec-fetch-storage-access'] || 'absent', referer: req.headers.referer ? 'present' : 'absent',
+      });
+      if (url.pathname === '/xfm-echo') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+        res.end(fm);
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      if (url.pathname === '/xfm-frame') {
+        res.end(`<!doctype html><title>fm-frame</title><script>parent.postMessage({ fm: ${fm} }, '*');</script>`);
+        return;
+      }
+      res.end(`<!doctype html><title>fm</title><body><script>
+        window.__xfm = null;
+        var out = {};
+        var other = 'http://127.0.0.1:${req.socket.localPort}';
+        var done = function () { if (out.frame && out.sameOrigin && out.crossSite) window.__xfm = out; };
+        addEventListener('message', function (e) { if (e.data && e.data.fm) { out.frame = e.data.fm; done(); } });
+        fetch('/xfm-echo').then(function (r) { return r.json(); }).then(function (j) { out.sameOrigin = j; done(); });
+        fetch(other + '/xfm-echo').then(function (r) { return r.json(); }).then(function (j) { out.crossSite = j; done(); });
+        var f = document.createElement('iframe'); f.src = other + '/xfm-frame'; document.body.appendChild(f);
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/xrawtext') {
       // innerHTML on an element whose content is text: React Helmet puts a head script in with script.innerHTML = code.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6899,6 +6928,35 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     // (an inline script's is not — the proxy runs it through `eval`, see the ERRATA residual).
     assert.equal(direct.stackFrames.length, 5, JSON.stringify(direct.stackFrames));
     assert.equal(proxied.stackLeaks, false, `the stack names the membrane: ${JSON.stringify(proxied.stackFrames)}`);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // What the target server reads of a request's origin: every request went out `cross-site`, a frame went out as a top-level
+  // `document` navigation with a user activation. Cloudflare's challenge widget is a frame and is asked for as one.
+  await t.test('Fetch Metadata of fetches and frames matches native', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xfm`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xfm, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xfm);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xfm`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xfm, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xfm);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'fetch-metadata.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct.sameOrigin.site, 'same-origin');
+    assert.equal(direct.crossSite.site, 'cross-site');
+    assert.deepEqual([direct.frame.site, direct.frame.mode, direct.frame.dest, direct.frame.user], ['cross-site', 'navigate', 'iframe', 'absent']);
     assert.deepEqual(proxied, direct);
   });
 

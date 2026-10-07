@@ -90,13 +90,16 @@ function logRefusal(code, status, targetUrl, extra) {
   } catch {}
 }
 function logOutgoingHeaders(targetUrl, method, entries) {
-  outgoingHeaderLog.push({
+  const entry = {
     ts: Date.now(),
     target: String(targetUrl).slice(0, 256),
     method,
     headers: entries.map(([k, v]) => [k, String(v).slice(0, 256)]),
-  });
+    status: 0,
+  };
+  outgoingHeaderLog.push(entry);
   while (outgoingHeaderLog.length > MAX_HEADER_LOG) outgoingHeaderLog.shift();
+  return entry;
 }
 
 // 2026-06-09 transport-stage perf telemetry. NAVER cold load 1분 분석에서
@@ -599,7 +602,7 @@ function completeBodyResponse(resp) {
 //   서버는 EncryptedExtensions 자리에서 Finished 를 보고 연결을 끊은 것이다.
 // **광고만 하고 못 지키는 확장은 지문 일치보다 나쁘다** — 그래서 이 줄을
 // 되돌리는 조건은 "구현" 하나였다. 가드 테스트가 그 조건을 강제한다.
-const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzN10sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
+const CAPTURED_FINGERPRINT_B64 = 'eyJzdXBwb3J0ZWRWZXJzaW9ucyI6Wzc3Miw3NzFdLCJjaXBoZXJTdWl0ZXMiOls0ODY1LDQ4NjYsNDg2Nyw0OTE5NSw0OTE5OSw0OTE5Niw0OTIwMCw1MjM5Myw1MjM5Miw0OTE3MSw0OTE3MiwxNTYsMTU3LDQ3LDUzXSwiZXh0ZW5zaW9ucyI6WzAsMTc2MTMsNTEsNjUyODEsNDMsMTYsNSwxMSwxMywxOCwyMywyNywxMCwzNSw0NSw2NTAzNyw1MTc2NF0sInN1cHBvcnRlZEN1cnZlcyI6WzQ1ODgsMjksMjMsMjRdLCJzdXBwb3J0ZWRQb2ludHMiOiJBQT09Iiwic2lnbmF0dXJlU2NoZW1lcyI6WzIzMDgsMjMwOSwyMzEwLDEwMjcsMjA1MiwxMDI1LDEyODMsMjA1MywxMjgxLDIwNTQsMTUzN10sImFscG5Qcm90b2NvbHMiOlsiaDIiLCJodHRwLzEuMSJdfQ==';
 // 브라우저의 실제 언어 선호를 Chrome 이 쓰는 Accept-Language 문법으로 옮긴다.
 // 하드코딩하면 프록시 경유와 직접 접속이 서로 다른 언어 변종을 받게 되고,
 // 그 차이가 회귀 측정에 그대로 섞인다(NAVER 로그인 폼이 실제로 그랬다).
@@ -1632,6 +1635,28 @@ function withTransportDeadline(promise, targetUrl, method) {
 // 브라우저가 실어 보낸 Referer 를 타깃 세계의 URL 로 되돌린다. 프록시 URL 이면
 // 그 라우트의 타깃을, 프록시 밖 주소면 그대로. 못 풀면 빈 문자열 — 그 경우
 // Referer 를 아예 보내지 않는 것이 대조군과 같은 동작이다.
+// What a navigation request is for: `document` for a top-level one, `iframe`/`frame`/`embed`/`object` for a nested one.
+// `Request.destination` of the intercepted navigation says so.
+function navigationDestination(req) {
+  try {
+    const d = req && req.destination;
+    if (d === 'iframe' || d === 'frame' || d === 'embed' || d === 'object') return d;
+  } catch {}
+  return 'document';
+}
+
+// `Sec-Fetch-Site` between an initiator URL and a target URL. Schemeful: `http://a.example` and `https://a.example` are
+// the same site only if the scheme matches too, and `same-origin` needs the port.
+function fetchSiteRelation(initiatorUrl, targetUrl) {
+  try {
+    const a = new URL(initiatorUrl);
+    const b = new URL(targetUrl);
+    if (a.origin === b.origin) return 'same-origin';
+    if (a.protocol === b.protocol && registrableDomain(a.hostname) === registrableDomain(b.hostname)) return 'same-site';
+  } catch {}
+  return 'cross-site';
+}
+
 function referrerFromBrowserHeader(req) {
   try {
     // ★내비게이션 요청에서 Referer 는 **헤더로 읽히지 않는다** — 브라우저가
@@ -1997,10 +2022,22 @@ async function transportFetchHop(targetUrl, opt) {
   // request (60s TCP timeout from upstream's perspective). We pick the
   // values a real browser would have sent for a top-level navigation
   // to a cross-site origin.
+  // A frame's document request is not a top-level navigation's, and a server that reads Fetch Metadata sees which it is
+  // (Cloudflare's challenge widget is a frame and is asked for as one): `dest` is `iframe`, the initiator is the embedder,
+  // the user did not activate it, and a cross-site frame says whether it may use its cookies. A top-level navigation with
+  // no initiator (the first, from the launcher) is `none`; with one, its relation to the target.
+  const navDest = opt.document ? navigationDestination(opt.request) : 'document';
+  const inFrame = navDest !== 'document';
   if (!seen.has('sec-fetch-mode')) pushOnce('sec-fetch-mode', opt.document ? 'navigate' : 'cors');
-  if (!seen.has('sec-fetch-dest')) pushOnce('sec-fetch-dest', opt.document ? 'document' : 'empty');
-  if (!seen.has('sec-fetch-site')) pushOnce('sec-fetch-site', 'cross-site');
-  if (opt.document && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
+  if (!seen.has('sec-fetch-dest')) pushOnce('sec-fetch-dest', opt.document ? navDest : 'empty');
+  if (!seen.has('sec-fetch-site')) {
+    let site = 'cross-site';
+    if (opt.document) site = context.referrer ? fetchSiteRelation(context.referrer, u) : (inFrame ? 'cross-site' : 'none');
+    else if (!opt.initiatorOpaque) site = fetchSiteRelation(context.documentUrl, u);
+    pushOnce('sec-fetch-site', site);
+    if (opt.document && inFrame && site === 'cross-site') pushOnce('sec-fetch-storage-access', 'active');
+  }
+  if (opt.document && !inFrame && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
   // Accept-Language 는 브라우저가 SW 로 넘겨준 게 있으면 그대로 쓰고, 없을 때만
   // 여기서 만든다. 예전에는 `en-US,en;q=0.9,ko;q=0.8` 을 하드코딩했는데, 이
   // 머신의 실제 브라우저는 `ko,en,en-US` 다 — 그래서 프록시로 연 NAVER 는
@@ -2038,7 +2075,7 @@ async function transportFetchHop(targetUrl, opt) {
   const HEADER_ORDER = [
     'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
     'upgrade-insecure-requests', 'user-agent', 'accept',
-    'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-user', 'sec-fetch-dest',
+    'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-user', 'sec-fetch-dest', 'sec-fetch-storage-access',
     'referer', 'accept-encoding', 'accept-language', 'priority',
     'cookie',
   ];
@@ -2055,7 +2092,7 @@ async function transportFetchHop(targetUrl, opt) {
   });
   const method = opt.method;
   const bodyU8 = opt.body;
-  logOutgoingHeaders(u, method, headerEntries);
+  const outgoing = logOutgoingHeaders(u, method, headerEntries);
   // Plain object — no Request constructor, so forbidden headers survive.
   // The kernel reads `headerEntries` first (preferred) and `arrayBuffer`
   // for the body (still a function so the kernel's existing extractor
@@ -2097,6 +2134,7 @@ async function transportFetchHop(targetUrl, opt) {
     if (cl) bodyLen = parseInt(cl, 10) || 0;
   } catch {}
   logTransportEvent(u, method, (resp && resp.status) || 0, performance.now() - txT0, bodyLen);
+  outgoing.status = (resp && resp.status) || 0;
   // Capture Set-Cookie from the response and feed into the RFC-6265
   // jar scoped to the response URL so Domain/Path/Secure/HttpOnly
   // attributes are honored on the next outgoing request.

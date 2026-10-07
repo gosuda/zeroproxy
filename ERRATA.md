@@ -603,6 +603,29 @@ claimed:
     asynchronously — the proxy gives a page no persistent file system, and a denied request is the honest answer. — same e2e
     test as 62.
 
+66. **The ClientHello lacked an extension every real Chrome sends, so Cloudflare took the proxy for a bot (Stack Overflow, Upwork).**
+    Item 61 matched the wire to this machine's WebView2 (Edge), and the persona says Chrome. A real Chrome 154 (read off the
+    wire, three connections, against a local listener) sends nineteen extensions with its two GREASE ones; WebView2's has
+    eighteen: the missing one is `trust_anchors` (0xCA34, TLS Trust Expressions — a fixed 186-byte list of root-store ids).
+    A Chrome user-agent on a hello without it was served Cloudflare's managed challenge (`chl_page` + a Turnstile frame) at the
+    very first request, where a fresh native Chrome with the same IP gets the light in-page challenge (`precursor_interstitial`)
+    and passes in two seconds. The extension is in the rustls fork now (`ExtensionType::TrustAnchors`, the body in
+    `ja3::CHROME_TRUST_ANCHORS`) and in the SW's captured spec; with it Stack Overflow opens through the proxy, with or without
+    the compat checkbox, and Upwork stops showing the interstitial. Wrongly written here before: "a fresh automated Chrome gets the
+    same verdict, so it is the browser environment" — a real Chrome with a throw-away profile and only a debugging port (no
+    automation flags) passes; the automated one was what failed. — `crates/zp-kernel-bundle/tests/client_hello.rs` (the
+    SW's spec produces Chrome 154's extension set and the exact trust_anchors body; mutation: drop 51764 from the spec).
+67. **A frame's request and every sub-request went out with the wrong Fetch Metadata.** The SW synthesizes the `Sec-Fetch-*` headers
+    (the browser does not hand them to a worker) and wrote `cross-site` on every request, `dest=document` and
+    `sec-fetch-user: ?1` on a frame's document. A server reading them (Cloudflare's challenge widget is a frame; many APIs
+    refuse `cross-site` ones) saw a top-level navigation. Now a nested navigation is `dest=iframe|frame|embed|object` with the
+    embedder as its initiator, no `sec-fetch-user`, and `sec-fetch-storage-access: active` when it is cross-site; a sub-request's
+    `sec-fetch-site` is its relation to the document (`same-origin`, `same-site`, `cross-site`); a top-level navigation with no
+    initiator (the first, from the launcher) is `none`. The kernel's header ranking puts `sec-fetch-storage-access` after
+    `sec-fetch-dest`, as Chrome does. — e2e `Fetch Metadata of fetches and frames matches native` (mutation checked: frame
+    destination, sub-request site). Not done: `sec-fetch-mode`/`dest` of element loads (`no-cors`, `script`, `image`) are still
+    `cors`/`empty`, and `sec-fetch-storage-access` is not sent on cross-site sub-requests.
+
 ### Residuals (documented, not fixed)
 
 | Residual | Why it stays | Pin |
@@ -638,7 +661,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| A Cloudflare managed challenge (Stack Overflow's) does not complete | Cloudflare challenges automated Chrome the same way: a fresh headed puppeteer Chrome stays on "Just a moment…" with no proxy in the way, while this machine's own Edge WebView2 is not challenged at all. The proxy's wire now equals that WebView2's (JA4, peetprint, HTTP/2 hash, TCP/IP — item 61), so the decision is made on the browser's environment, not the request. Chasing it found five real divergences from the browser (items 62–65: dynamic-code globals, `this`, an iframe's referrer and ancestor origins, stack shape, the file-system entry points), all fixed, and the challenge still stops: the widget iframe's VM never evaluates the decoder it should define (`window.ulgk5` is later undefined). There is no native run to compare with — automated Chrome gets the same verdict and WebView2 is not challenged — so the first diverging host call is not named. Opt-in: the launcher's "Challenge compatibility" checkbox. | [trap 2026-08-16](.ai/trap-notebook/LOG.md) |
+| Cloudflare's heavier challenge on some sites (Glassdoor) | A fresh native Chrome sits on "Just a moment…" there for twenty seconds too, and through the proxy it ends on a block page. Stack Overflow, which this row used to be about, passes since item 66. Opt-in for challenge frames: the launcher's "Challenge compatibility" checkbox. | — |
 | Reddit's "Prove your humanity" wall on a cold profile | The same wall appears on a cold native load in the same browser (1 of 3), then passes with the cookie it sets. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 

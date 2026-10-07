@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-07 | tls / 수정 | Cloudflare 챌린지 원인: Chrome UA 인데 hello 에 trust_anchors(0xCA34)가 없었다. "WebView2 와 일치" ≠ "Chrome 과 일치". 진짜 Chrome 으로 비교. | rewriter.md#chrome-hello-trust-anchors |
 | 2026-10-07 | membrane / 수정 | eval 의 전역 선언·최상위 this·iframe referrer/ancestorOrigins·stack 모양·webkit FS 가 네이티브와 달랐다. 함수 안 eval 의 this 는 그대로 둔다. | rewriter.md#동적-코드-전역-this |
 | 2026-10-07 | tls / 수정 | wire·페르소나가 또 낡았다: GREASE 두 자리·key_share 힌트·ECH 상수·고정 시드(첫 hello 가 모든 사용자에게 같음). 직접과 일치시킴. | rewriter.md#tls-지문-표류 |
 | 2026-10-07 | sw / 수정 | HLS 재생 불가: 재생기가 플레이리스트 URL 을 스스로 받는다. 리라이트 + Range 직접 응답. 업스트림 206 이 원본 바이트였다(noRange). | rewriter.md#hls-플레이리스트-range |
