@@ -1503,6 +1503,37 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **규칙:** 요청을 대신 보내는 계층은 브라우저가 해 주던 검사를 **전부 물려받는다** — 표준 알고리즘을 단계별로 옮기고 네이티브와 요청 로그까지 대조한다. 한 묶음(약 70건)의 차이 목록을 `direct vs proxied` 경로별로 출력하는 스크립트가 어설션 출력보다 훨씬 빨랐다.
 - **검증:** e2e `cross-origin fetch and XHR obey CORS…`(네이티브와 동일, 변이 5개: 확인·preflight·노출 걸러내기·오염·동기 릴레이 모드 전부 잡힘). 남은 것: 요소 로드의 CORS(`crossorigin`·모듈·폰트) — ERRATA 잔여.
 
+## <a id="tls-지문-표류"></a>동결된 wire 가 또 낡았다 — GREASE 두 자리, key_share 힌트, ECH 상수, 그리고 고정 시드 (2026-10-07)
+
+- **방법(그대로 반복하면 된다):** `tls.peet.ws/api/all` 을 **같은 브라우저로** 직접 / 프록시 경유 두 번 연다([2026-08-16-6](LOG.md)). 그런데 한 번으로는 모자랐다 — Chrome 은 연결마다 GREASE·ECH 를 **무작위로** 뽑으므로 **같은 쪽을 10번** 찍어 분포를 봐야 한다. 직접: ECH payload 144/176/208/240, config id 17~193, 서명 알고리즘 12개(맨 앞 GREASE), key_share `GREASE+X25519MLKEM768+X25519`. 프록시: payload **192 고정**, config id **0 고정**, 서명 알고리즘 11개, key_share 가 **`X25519` 하나**(10번 중 9번).
+- **원인 넷:** (1) 서명 알고리즘 GREASE 와 key_share GREASE 가 없다(Chrome 이 새로 추가). (2) rustls 의 `kx_hint` — 서버가 고른 그룹을 기억했다가 다음 연결의 key_share 를 그것 하나로 줄인다. 브라우저는 기억하지 않는다. (3) ECH GREASE 를 손으로 박아 두었다(config id 0, payload 192) — 2026-06 의 NAVER 메일 회귀를 피하려던 값이지만 Chrome 은 그렇게 보내지 않는다. (4) **GREASE 값과 ECH 의 `enc`/payload 바이트가 고정 시드 xorshift** 에서 나왔다 — wasm 에 시계가 없다는 이유로. 즉 **워커가 뜬 뒤 첫 ClientHello 는 모든 사용자에게 바이트 단위로 같다.** 진짜 ECH 의 `enc` 는 매번 새 공개키다.
+- **수정:** `ja3::seed_entropy` — `kernelSetCapturedSpec` 가 부팅 때 `getrandom` 8바이트를 넣는다(시드 0 이면 상수로 되돌려 멈추지 않는다). 초기 hello 에만 GREASE 서명 알고리즘·GREASE key_share(supported_groups 맨 앞과 **같은** GREASE 그룹, 값 `00`) — hello retry 는 서버가 요구한 그룹 하나뿐이다. 스펙이 설치돼 있으면 `kx_hint` 무시. ECH 는 config id 무작위, payload `144 + 32·(0..3)`.
+- **검증:** 신선한 세션(재개 티켓 없음)에서 JA4 `t13d1516h2_8daaf6152771_806a8c22fdea`, peetprint `8f568b2a…`, HTTP/2 `52d84b11…` 직접과 **일치**. 재개한 연결은 `pre_shared_key` 가 붙어 ja4 가 `…1517…` 이 된다 — Chrome 도 그렇다. **같은 세션에서 두 번째 비교는 재개 때문에 어긋난다 — 워커를 다시 띄우고 첫 연결로 비교할 것.** NAVER nid·mail 을 8번 열어 config id 무작위 회귀가 없음을 확인(옛 회귀의 원인은 id 가 아니었다).
+- **UA/sec-ch-ua:** 151 → 154(기계의 브라우저가 154). `sec-ch-ua` 는 이제 **Chromium 의 규칙**으로 계산한다 — GREASE 브랜드는 `Not`+`chars[major%11]`+`A`+`chars[(major+1)%11]`+`Brand`, 버전은 `['8','99','24'][major%3]`, 세 브랜드의 자리는 `major%6` 번째 순열. 120·126·131·134·136·140 의 실제 Chrome 헤더 여섯 개가 이름·버전·순서까지 맞고, 154 의 GREASE 브랜드(`Not A(Brand`;99)는 이 기계 Edge 의 헤더와 같다. 손으로 쓴 151 목록은 Chromium 이 앞이었는데 규칙상 Chrome 151 은 GREASE 가 앞이다.
+- **Cloudflare 챌린지는 안 풀렸다:** wire 가 직접과 같아진 뒤에도 Stack Overflow 는 인터스티셜에 머문다. **자동화된 헤디드 puppeteer Chrome 도 프록시 없이 똑같이 머문다** — 결정은 요청이 아니라 브라우저 환경이 한다. 이 기계의 Edge WebView2 는 챌린지를 받지 않는다. Reddit 의 "Prove your humanity" 는 **직접 콜드 로드에서도 3번 중 1번** 나온다.
+- **함정:** `random_grease()` 가 `std::thread_local` 이라 워커마다 따로 시작한다. 테스트는 스레드를 새로 띄워 "시드 전" 을 재현해야 한다(`tls_entropy.rs`). 포크 자체는 워크스페이스 멤버가 아니라 `cargo test -p rustls` 가 안 된다 — 테스트는 `zp-kernel-bundle/tests` 에 둔다.
+
+## <a id="hls-플레이리스트-range"></a>HLS 재생이 안 됐다 — 재생기가 플레이리스트의 URL 을 스스로 받는다 (2026-10-07)
+
+- **측정:** NYT 네트워크 테이프에 `Media https://vp.nyt.com/…m3u8` 요청이 **프록시 오리진이 아닌 타깃 URL 로 직행**(CDP 에 `taskweaver --record`; CSP 를 끈 taskweaver 에서만 보인다 — 실제 브라우저는 `media-src 'self' blob:` 이 막아 영상이 비기만 한다). 직전 요청이 `/zp/api/fetch?url=…master.m3u8` 의 200/206.
+- **원인:** 브라우저의 HLS 재생기(Chrome ≥ 142)가 플레이리스트를 읽고 그 안의 URL 을 **미디어 스택에서** 요청한다 — 페이지의 어떤 훅도 못 본다.
+- **수정:** SW 가 미디어 요소의 플레이리스트 응답을 통째로 리라이트한다(`rewritePlaylistText`: URI 줄과 `URI="…"` 속성을 타깃 절대 URL 의 프록시 경로로). `Range` 는 리라이트된 바이트에서 직접 답한다.
+- **★두 번 틀렸다:** (1) "Range 를 안 보낸다" 고 가정했다 — `transportFetchHop` 이 브라우저의 요청 헤더를 **전부** 복사한다(`for (const [k,v] of opt.request.headers.entries()) pushOnce`). 그래서 업스트림(Fastly)이 `Range: bytes=0-` 에 **원본 바이트의 206** 을 줬고, 다시 가져와도 206 이라 리라이트를 건너뛰었다. `noRange` 옵션으로 해결. (2) 응답 헤더를 직접 보기 전에 추측했다 — `taskweaver response-headers --url-pattern m3u8` 의 `content-range: bytes 0-1510/1511` (**원본 길이**)이 "리라이트가 안 됐다" 를 한 줄로 말해 줬다. 헤더부터 읽을 것.
+- **검증:** e2e(Range 에 206 으로 답하는 CDN 을 흉내 — 네이티브 Chrome 은 정말 `bytes=0-` 를 보낸다), 단위 테스트 7개, NYT 영상 `readyState 4`.
+
+## <a id="for-빈-test-loop-cap"></a>`for(;;e++)` 의 루프 캡이 SyntaxError 를 냈다 (2026-10-07)
+
+- **측정:** NYT 의 `[uncaught] Uncaught` 28건. 메시지가 비어 있어 `inject-script --world main` 으로 `window.addEventListener('error', e => … e.error.stack)` 를 **문서 시작 시점에** 걸어 `ErrorEvent` 를 읽었다: `SyntaxError: Identifier '__zp_lc_1' has already been declared` @ `hlsjs-….js:1:168396`. 원본을 받아 노드에서 `ZPBundle.rewriteScript` 로 돌리자 그대로 재현.
+- **원인:** [위 59](../../ERRATA.md). 빈 test 자리용 FOR_CAP 마커의 시작점이 `let` 접두 패치와 **같은 오프셋**이라 마커의 `rewrite_range` 가 접두를 삼켰다.
+- **발견 경로가 중요하다 — 같은 부류를 한 번에 찾는 법:** 네트워크 테이프(`--record` → `dump-recording --filter network`)에서 `/zp/api/script?u=…` 를 모아 원본을 받고, 리라이트한 **출력**을 V8(`vm.Script`/`vm.SourceTextModule`)에 먹인다(`scripts/rewrite-corpus-check.cjs`). 13개 사이트 697개 스크립트 47.9MB 중 이 하나뿐이었다. **조합 테스트도 같이 짰다**(헤더 6×5×4×4 × 위치 7 = 3,360) — 예전 테스트는 `for(i=0;;i++)` 만 있었고 `for(;;i++)` 는 없었다.
+- **교훈:** 리라이터의 "패치 두 개가 같은 오프셋" 은 한 번 더 나온다. 새 패치를 넣으면 **같은 문장의 모든 모양**을 조합으로 돌려 다시 파싱하는 테스트를 같이 둘 것.
+
+## <a id="raw-text-innerhtml"></a>React Helmet 의 `script.innerHTML = code` 가 마크업으로 읽혔다 (2026-10-07)
+
+- **측정:** 위 SyntaxError 를 고친 뒤에도 NYT 에 uncaught 하나가 남았다 — `parse failed: Unexpected token`. 페이지 안의 인라인 스크립트 53개를 `ZPBundle.rewriteScript` 로 **드라이런**(`exec-js`)하자 하나만 실패했고(`AdSlot4`, 36KB), 그 텍스트를 V8 에 먹이자 `for(var o="" in="" t="arguments[n])…` — `<i;n++)for(var` 가 **태그로** 읽힌 모양이었다. 요소는 `<script id="adslot-config" data-rh="true">` — `data-rh` 는 react-helmet.
+- **원인:** [위 60](../../ERRATA.md). `innerHTML` 설정자가 `template`·`style` 만 예외로 두고 나머지(`script` 포함)를 `transformHTML` 로 보냈다.
+- **규칙:** 문자열이 **텍스트인지 마크업인지는 받는 요소가 정한다.** 파서를 거치는 훅은 raw text/RCDATA 문맥(`script textarea title xmp plaintext noembed noframes noscript`)을 먼저 걸러 낸다.
+
 ## <a id="document-파싱-template"></a>완전한 문서를 `<template>` 로 파싱해 html/head/body 와 doctype 이 사라졌다 (2026-10-07)
 
 - **측정:** srcdoc 프레임의 인라인 스크립트가 `document.body` 를 null 로 봤다(네이티브는 `BODY`). `/xsdjs` 픽스처에 `document.body` 한 줄을 넣자 바로 드러났다 — **기존 테스트는 body 를 한 번도 읽지 않았다.** 넓혀 보니 `DOMParser`·`parseHTMLUnsafe`·`document.write` 도 같았다: `<body class style data-*>`, `<html lang>`, doctype(= `BackCompat`)이 전부 없었다.

@@ -6,6 +6,10 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-07 | tls / 수정 | wire·페르소나가 또 낡았다: GREASE 두 자리·key_share 힌트·ECH 상수·고정 시드(첫 hello 가 모든 사용자에게 같음). 직접과 일치시킴. | rewriter.md#tls-지문-표류 |
+| 2026-10-07 | sw / 수정 | HLS 재생 불가: 재생기가 플레이리스트 URL 을 스스로 받는다. 리라이트 + Range 직접 응답. 업스트림 206 이 원본 바이트였다(noRange). | rewriter.md#hls-플레이리스트-range |
+| 2026-10-07 | rewriter / 수정 | for(;;e++) 루프 캡이 같은 let 을 두 번 선언 → SyntaxError. 697개 실스크립트 코퍼스 + 3,360 조합 테스트로 확인. | rewriter.md#for-빈-test-loop-cap |
+| 2026-10-07 | membrane / 수정 | script.innerHTML = code (React Helmet)가 마크업으로 읽혀 코드가 태그로 쪼개졌다. raw text 문맥은 네이티브 설정자로. | rewriter.md#raw-text-innerhtml |
 | 2026-10-07 | membrane / 수정 | 동적 스크립트 릴레이 URL 의 요청 id 가 매번 달라 MutationObserver 가 영원히 돌았다(NYT 멈춤). 같은 값 쓰기도 변경 기록. | rewriter.md#relay-관찰자-루프 |
 | 2026-10-07 | membrane / 수정 | 완전한 문서를 template 로 파싱해 html/head/body·doctype 이 사라졌다(srcdoc·DOMParser·write). document.body 가 null. | rewriter.md#document-파싱-template |
 | 2026-10-06 | rewriter / 수정 | 구조분해·for-of 대상 안의 전역 읽기(`[window.a.b]=x`, 기본값, 계산된 키)가 쓰기 전용 싱크로 가 undefined.a 를 던졌다. BBC 광고. | rewriter.md#target-읽기-싱크 |

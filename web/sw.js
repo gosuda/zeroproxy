@@ -915,8 +915,14 @@ async function virtualSubresource(req, cls, clientId) {
   if (!tab) return Response.error();
   const targetUrl = cls.crossOriginURL ? cls.crossOriginURL.href : sameOriginTargetURL(cls.sameOriginURL, ctx);
   const document = req.mode === 'navigate' || req.headers.get('X-ZP-Document-Request') === '1';
-  const resp = await transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId });
+  const resp = await transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId, noRange: isPlaylistTarget(req, targetUrl) });
   rememberResourceContext(cls.crossOriginURL || cls.sameOriginURL, targetUrl, ctx);
+  if (isMediaElementRequest(req) && isPlaylistResponse(resp, targetUrl)) {
+    return rewritePlaylistResponse(req, resp, {
+      targetUrl, tab,
+      refetch: () => transportFetch(targetUrl, { request: req, document, tab, entryId: ctx.entryId, noRange: true }),
+    });
+  }
   if (shouldRewriteCSS(req, resp)) return rewriteCSSResponse(resp, { targetUrl });
   return shouldRewriteScript(req, resp) ? rewriteScriptResponse(resp, { targetUrl, kind: scriptKindFromRequest(req), req }) : resp;
 }
@@ -956,6 +962,81 @@ async function rewriteCSSResponse(resp, opt) {
   headers.set('Content-Type', 'text/css; charset=utf-8');
   headers.set('X-Content-Type-Options', 'nosniff');
   return new Response(out, { status: resp.status, statusText: resp.statusText, headers });
+}
+
+// ── HLS playlists ─────────────────────────────────────────────────────────────
+//
+// A `<video src="….m3u8">` is played by the browser's own HLS player, and that player fetches the playlist's variants, keys,
+// init segments and segments ITSELF, in the media stack: the page's hooks never see those URLs. They are absolute target
+// URLs (refused by `media-src 'self' blob:`, so the video stays blank — no leak) or relative ones, resolved against the
+// route the playlist came from. So the playlist is rewritten on its way to a media element: every URI becomes the proxy
+// route for its absolute target. A page that plays HLS through fetch/XHR (hls.js) is not touched — it resolves URLs itself,
+// in the membrane, and its request is not a media element's.
+const PLAYLIST_TYPE_RE = /\b(?:application\/(?:vnd\.apple\.mpegurl|x-mpegurl|mpegurl)|audio\/(?:x-)?mpegurl)\b/i;
+const PLAYLIST_PATH_RE = /\.m3u8?$/i;
+function isMediaElementRequest(req) {
+  return req.destination === 'video' || req.destination === 'audio';
+}
+function isPlaylistResponse(resp, targetUrl) {
+  if (!resp || (resp.status !== 200 && resp.status !== 206)) return false;
+  const ct = resp.headers.get('Content-Type') || '';
+  if (PLAYLIST_TYPE_RE.test(ct)) return true;
+  // a CDN that serves it as plain bytes
+  let path = '';
+  try { path = new URL(targetUrl).pathname; } catch {}
+  return PLAYLIST_PATH_RE.test(path) && (!ct || /^(?:text\/plain|application\/octet-stream|binary\/octet-stream)\b/i.test(ct));
+}
+// A media element's request for something that looks like a playlist: it is rewritten whole, so it is asked for whole. (The
+// transport copies the browser's own headers, `Range` included — `bytes=0-` is how a media element starts — and a CDN
+// answers that with a 206 of the original bytes.)
+function isPlaylistTarget(req, targetUrl) {
+  if (!isMediaElementRequest(req)) return false;
+  try { return PLAYLIST_PATH_RE.test(new URL(targetUrl).pathname); } catch { return false; }
+}
+// One URI of a playlist (or a `URI="…"` attribute) → the proxy route for its absolute target. Anything that is not http(s)
+// once resolved is left as it is: the browser refuses it, CSP included.
+function playlistProxyURI(uri, baseUrl, tab) {
+  const t = String(uri).trim();
+  if (!t) return uri;
+  let abs;
+  try { abs = new URL(t, baseUrl); } catch { return uri; }
+  if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return uri;
+  return ORIGIN + ZP.apiPath('fetch') + '?url=' + encodeURIComponent(abs.href) + (tab ? '&tab=' + encodeURIComponent(tab.tabId) : '');
+}
+function rewritePlaylistText(text, baseUrl, tab) {
+  return String(text).replace(/^﻿/, '').split(/(\r?\n)/).map(line => {
+    if (line === '' || line === '\n' || line === '\r\n') return line;
+    if (line.charAt(0) === '#') return line.replace(/URI="([^"]*)"/g, (_m, u) => 'URI="' + playlistProxyURI(u, baseUrl, tab) + '"');
+    return line.trim() ? playlistProxyURI(line, baseUrl, tab) : line;
+  }).join('');
+}
+async function rewritePlaylistResponse(req, resp, opt) {
+  // A playlist is rewritten whole; a partial one (the browser asked for a range) is fetched again without it, and the
+  // range is answered from the rewritten bytes.
+  let source = resp;
+  if (resp.status === 206) {
+    try { source = await opt.refetch(); } catch { return resp; }
+    if (!source || source.status !== 200) return resp;
+  }
+  let text;
+  try { text = await source.text(); } catch { return resp; }
+  const headers = new Headers(source.headers);
+  for (const name of ['Content-Length', 'Content-Range', 'Content-Encoding', 'Transfer-Encoding', 'ETag', 'Last-Modified']) headers.delete(name);
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  if (!/^\s*#EXTM3U/.test(text.replace(/^﻿/, ''))) return new Response(text, { status: source.status, statusText: source.statusText, headers });
+  const bytes = new TextEncoder().encode(rewritePlaylistText(text, opt.targetUrl, opt.tab));
+  const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('Range') || '');
+  if (range && (range[1] !== '' || range[2] !== '')) {
+    let start;
+    let end;
+    if (range[1] === '') { start = Math.max(0, bytes.length - Number(range[2])); end = bytes.length - 1; }
+    else { start = Number(range[1]); end = range[2] === '' ? bytes.length - 1 : Math.min(Number(range[2]), bytes.length - 1); }
+    if (start >= bytes.length || start > end) return new Response(null, { status: 416, headers: { 'Content-Range': 'bytes */' + bytes.length } });
+    headers.set('Content-Range', 'bytes ' + start + '-' + end + '/' + bytes.length);
+    return new Response(bytes.slice(start, end + 1), { status: 206, statusText: 'Partial Content', headers });
+  }
+  return new Response(bytes, { status: 200, statusText: source.statusText, headers });
 }
 
 function sameOriginTargetURL(sameOriginURL, ctx) {
@@ -1097,9 +1178,17 @@ async function runtimeAPI(req, url, clientId) {
           ? [['Accept', 'text/javascript, application/javascript, */*;q=0.8']]
           : [['Accept', '*/*']];
       const elementCors = isDocumentRequest ? null : elementCorsOptions(req, entry);
-      const resp = await transportFetch(target, Object.assign({ request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest }, elementCors));
+      // A media element's range request goes upstream as it is (it seeks) — except a playlist's, which is rewritten whole.
+      const mediaRequest = !isDocumentRequest && !isScriptRequest && isMediaElementRequest(req);
+      const resp = await transportFetch(target, Object.assign({ request: req, method: 'GET', headers: accept, tab, entryId, document: isDocumentRequest, noRange: mediaRequest && isPlaylistTarget(req, target) }, elementCors));
       if (elementCors && resp.type === 'error') return resp;
       if (isDocumentRequest && entry) return transformDocumentResponse(resp, { tab, entry });
+      if (mediaRequest && isPlaylistResponse(resp, target)) {
+        return rewritePlaylistResponse(req, resp, {
+          targetUrl: target, tab,
+          refetch: () => transportFetch(target, Object.assign({ request: req, method: 'GET', headers: accept, tab, entryId, document: false, noRange: true }, elementCors)),
+        });
+      }
       if (isScriptRequest) return rewriteScriptResponse(resp, { targetUrl: target, kind: scriptKindFromRequest(req), req });
       return shouldRewriteCSS(req, resp) ? rewriteCSSResponse(resp, { targetUrl: target }) : resp;
     }
@@ -1876,7 +1965,11 @@ async function transportFetchHop(targetUrl, opt) {
   // dropped. Otherwise the wire shows a Chrome UA + an Edge sec-ch-ua + v149 —
   // an anti-bot tell. UA, sec-ch-ua, and the TLS spec now all agree: Chrome 148.
   pushOnce('sec-ch-ua', ZP.TARGET_SEC_CH_UA);
-  for (const [k, v] of headers.entries()) pushOnce(k, v);
+  for (const [k, v] of headers.entries()) {
+    // A playlist is rewritten whole, so it is asked for whole.
+    if (opt.noRange && (k.toLowerCase() === 'range' || k.toLowerCase() === 'if-range')) continue;
+    pushOnce(k, v);
+  }
   // Now grab anything the browser added that Headers refused to copy
   // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,
   // upgrade-insecure-requests). `request.headers.entries()` from the
@@ -1892,6 +1985,8 @@ async function transportFetchHop(targetUrl, opt) {
           || kl === 'connection' || kl === 'content-length' || kl === 'transfer-encoding') {
         continue;
       }
+      // A playlist is rewritten whole, so it is asked for whole.
+      if (opt.noRange && (kl === 'range' || kl === 'if-range')) continue;
       pushOnce(k, v);
     }
   }

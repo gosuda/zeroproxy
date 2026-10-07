@@ -537,6 +537,45 @@ claimed:
     real-site sweep; the fixture is the shape that froze it (a creative in a srcdoc ad frame writes a script into hidden
     blank frames, three ways) with a heartbeat for the main thread. — e2e `a script a written frame creates is loaded`
     (mutation: with the guards removed it wedges for 50 s and fails).
+58. **A video's HLS playlist reached the browser unrewritten, so the video never played.** `<video src="….m3u8">` is
+    played by the browser's own HLS player, which fetches the playlist's variants, keys, init segments and segments itself,
+    in the media stack, where no hook reaches: absolute target URLs (refused by `media-src 'self' blob:`, so no leak) or
+    relative ones resolved against the proxy's route (a 404 on `/zp/api/<segment>`). A playlist a media element loads
+    (destination video/audio, a playlist type or path) is now rewritten whole — every URI line and every `URI="…"` attribute
+    becomes the proxy route for its absolute target, `data:` and other non-http(s) URIs are left alone — and a `Range`
+    request is answered from the rewritten bytes (206, `Content-Range`, 416 past the end). A page that plays HLS through
+    `fetch` (hls.js) is not touched. The transport copies the browser's own request headers, `Range: bytes=0-` among them,
+    and a CDN (NYT's Fastly) answers that with a 206 of the *original* bytes: `noRange` keeps it off a playlist's request.
+    On NYT the hero video now plays (readyState 4, 608×1080, advancing). — e2e `a playlist a media element loads…` (master →
+    variant → key → segment through the proxy, a CDN that 206s a ranged playlist; mutation: without `noRange` upstream sees the
+    Range), unit tests in `test/js/playlist.test.js`.
+59. **`for(;;update)` came out as a SyntaxError.** The loop cap for a `for` with no init and no test put the
+    `let __zp_lc_N=0;` prefix at the statement's start and a marker over `stmt.start..update.start` — the marker's range
+    swallowed the prefix, its first `;` was the prefix's, and `for(;;e++){…}` became
+    `let c=0;let c=0;c++<10000000||(…)for(;;e++)`. NYT's video player (hls.js) did not parse and its 28 uncaught errors were
+    all this. The region now starts after the `for` keyword. — `loop_cap_constant_true` (the shapes) and
+    `loop_cap_headers_always_parse`: 3,360 combinations of init × test × update × body × position, each re-parsed, none with a
+    repeated counter (mutation: the old start fails on the first). 697 real scripts (47.9 MB of ad, analytics and library code
+    from thirteen sites' network tapes) rewrite to output V8 accepts.
+60. **`innerHTML` on a script (React Helmet) was read as markup.** `script.innerHTML = code` is how React Helmet puts an inline
+    script in the head (NYT's ad config). The membrane ran the code through its HTML transform, which read `n<i;n++)for(var o in
+    t…` as a tag with attributes and handed the script back with attributes for code. Natively the fragment parser, with a raw-text
+    or RCDATA context element, makes one text node: `script`, `textarea`, `title`, `xmp`, `plaintext`, `noembed`, `noframes`
+    and `noscript` (raw text where scripting is enabled) now pass the string to the native setter. A script's text is wrapped
+    when it is inserted, as before. — e2e `innerHTML on a script, textarea, title and noscript sets text` (mutation checked).
+61. **The wire and the persona had drifted from the browser again.** Opened both ways, `tls.peet.ws/api/all` showed the
+    proxy's ClientHello missing a GREASE signature algorithm and a GREASE key share, carrying a lone X25519 share on every
+    connection after the first (rustls's `kx_hint`; Chrome always offers ML-KEM and X25519), and an ECH GREASE of constant
+    config id 0 and payload 192 (Chrome: a random id, 144/176/208/240). Worse, the GREASE draws and the ECH noise started from a
+    fixed constant, so the first hello after every worker start was byte-identical for every user. All fixed in the rustls fork
+    (`seed_entropy` called from `kernelSetCapturedSpec`; GREASE sig alg and key share on an initial hello only; the hint
+    ignored when a spec is installed; Chrome's ECH GREASE shape). The persona moves 151 → 154 with the machine's browser, and
+    `sec-ch-ua` is now computed by Chromium's rule rather than typed (the typed 151 list had Chromium first; by the rule
+    Chrome 151's order is GREASE, Google Chrome, Chromium). Result, fresh session, same browser opened both ways: JA4
+    `t13d1516h2_8daaf6152771_806a8c22fdea`, peetprint `8f568b2a…`, HTTP/2 hash `52d84b11…` — equal; ten hellos each:
+    key-share shape, 12 signature algorithms, ECH sizes — equal. Naver (nid, mail: 8 of 8), Google, GitHub load. —
+    `crates/zp-kernel-bundle/tests/tls_entropy.rs`, `test/js/core.test.js` (the brand rule against six lists real Chrome
+    sent; the worker's copy of the UA).
 
 ### Residuals (documented, not fixed)
 
@@ -572,7 +611,8 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Native HLS playback (`<video src="….m3u8">`) does not play | The browser's media stack fetches the playlist's segment and variant URLs itself, and they are absolute URLs the proxy never rewrote. `media-src 'self' blob:` refuses them (no leak — measured on NYT's hero video: the direct requests only appear where CSP is bypassed), so the video stays blank. Pages that play HLS through hls.js (MSE over `fetch`/XHR) work. | — |
+| A Cloudflare managed challenge (Stack Overflow's) does not complete | Cloudflare challenges automated Chrome the same way: a fresh headed puppeteer Chrome stays on "Just a moment…" with no proxy in the way, while this machine's own Edge WebView2 is not challenged at all. The proxy's wire now equals that WebView2's (JA4, peetprint, HTTP/2 hash, TCP/IP — item 61), so the decision is made on the browser's environment, not the request. The challenge VM also throws `reading 'call'` inside the membrane; that was shown (2026-08-16) not to be the rewriter's doing and the missing member is still unnamed. Opt-in: the launcher's "Challenge compatibility" checkbox. | [trap 2026-08-16](.ai/trap-notebook/LOG.md) |
+| Reddit's "Prove your humanity" wall on a cold profile | The same wall appears on a cold native load in the same browser (1 of 3), then passes with the cookie it sets. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---

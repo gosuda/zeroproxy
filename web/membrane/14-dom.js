@@ -408,6 +408,9 @@
     installScriptTextProps(w);
     installStyleHooks(w);
     installLinkProp(w.HTMLLinkElement && w.HTMLLinkElement.prototype);
+    // Elements whose content is text, never markup, to the fragment parsing algorithm (raw text and RCDATA contexts; a
+    // noscript is raw text in a document whose scripting is enabled, as this one's is).
+    const RAW_TEXT_CONTEXTS = new Set(['script', 'textarea', 'title', 'xmp', 'plaintext', 'noembed', 'noframes', 'noscript']);
     patchHTMLSetter(w.Element.prototype, 'innerHTML');
     patchHTMLSetter(w.Element.prototype, 'outerHTML');
     // ShadowRoot.innerHTML is a SEPARATE IDL attribute — patch it too or
@@ -596,6 +599,14 @@
             if (prop === 'innerHTML' && this && this.localName === 'style') {
               originalTextMeta.set(this, String(v == null ? '' : v));
               d.set.call(this, rewriteCSSText(v));
+              return;
+            }
+            // The fragment parser, with one of these as its context, makes one text node: it is not markup. A script's code
+            // (`script.innerHTML = code`, which is how React Helmet puts an inline script in the head) went through the
+            // template, which read `n<i;n++)for(var o in …` as a tag and handed the script back with attributes for code.
+            // Nothing in a text node loads or runs; a script's text is wrapped when the script is inserted.
+            if (prop === 'innerHTML' && this && RAW_TEXT_CONTEXTS.has(this.localName)) {
+              d.set.call(this, String(v));
               return;
             }
             // outerHTML puts the new nodes where this element was.

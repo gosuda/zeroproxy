@@ -2335,6 +2335,69 @@ function createTargetServer(requests, pendingResponses) {
       <\/script></body>`);
       return;
     }
+    if (url.pathname === '/xrawtext') {
+      // innerHTML on an element whose content is text: React Helmet puts a head script in with script.innerHTML = code.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>rawtext</title><body><script>
+        window.__xrawtext = null;
+        var code = 'var n = 0, i = 3, o = 0, t = { a: 1 }; for (; n<i;n++)for(var k in t){o++} if (n<i||n>i) o += 100; window.__helmet = (window.__helmet || 0) + o;';
+        var out = {};
+        var s = document.createElement('script'); s.setAttribute('data-rh', 'true'); s.innerHTML = code; document.head.appendChild(s);
+        out.script = { kids: s.childNodes.length, kidType: s.firstChild && s.firstChild.nodeType, text: s.textContent === code, ran: window.__helmet };
+        var late = document.createElement('script'); document.head.appendChild(late); late.innerHTML = 'window.__late = 7;';
+        out.late = { ran: window.__late || null };
+        var ta = document.createElement('textarea'); ta.innerHTML = '<b>x</b> & <i>'; out.textarea = [ta.value, ta.childNodes.length];
+        var ti = document.createElement('title'); ti.innerHTML = '<u>t</u>'; out.title = [ti.textContent, ti.childNodes.length];
+        var ns = document.createElement('noscript'); ns.innerHTML = '<img src="https://other.example/x.png">'; out.noscript = [ns.childNodes.length, ns.firstChild && ns.firstChild.nodeType, ns.textContent];
+        var d = document.createElement('div'); d.innerHTML = '<b>kept</b>'; out.div = [d.childNodes.length, d.firstChild.nodeName];
+        window.__xrawtext = out;
+      <\/script></body>`);
+      return;
+    }
+    if (url.pathname === '/xhls-reset') {
+      for (const k of [...xckSeen.keys()]) if (k.startsWith('hls:')) xckSeen.delete(k);
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      res.end('ok');
+      return;
+    }
+    if (url.pathname.startsWith('/xhls/')) {
+      // A master playlist whose URIs are relative and absolute (another origin), a media playlist with a key, and TS-ish segments.
+      xckSeen.set('hls:' + url.pathname, 'hit');
+      const host = String(req.headers.host || '');
+      const otherHost = host.startsWith('localhost') ? host.replace('localhost', '127.0.0.1') : host.replace('127.0.0.1', 'localhost');
+      const playlist = body => {
+        if (req.headers.range) {
+          xckSeen.set('hls:ranged:' + url.pathname, String(req.headers.range));
+          res.writeHead(206, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store', 'Accept-Ranges': 'bytes', 'Content-Range': 'bytes 0-' + (Buffer.byteLength(body) - 1) + '/' + Buffer.byteLength(body) });
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store', 'Accept-Ranges': 'bytes' });
+        }
+        res.end(body);
+      };
+      if (url.pathname === '/xhls/master.m3u8') {
+        playlist('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=320x180\nv0.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1600000,RESOLUTION=640x360\nhttp://' + otherHost + '/xhls/v1.m3u8?x=1&y=2\n');
+      } else if (url.pathname === '/xhls/v0.m3u8') {
+        playlist('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001\n#EXTINF:2.0,\nseg0.ts\n#EXTINF:2.0,\nhttp://' + otherHost + '/xhls/seg1.ts\n#EXT-X-ENDLIST\n');
+      } else if (url.pathname === '/xhls/key.bin') {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' });
+        res.end(Buffer.alloc(16, 7));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store' });
+        res.end(Buffer.alloc(188 * 4, 0x47));
+      }
+      return;
+    }
+    if (url.pathname === '/xhls') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>hls</title><body><video id="v" muted preload="auto" src="/xhls/master.m3u8"></video><script>
+        window.__xhls = null;
+        setTimeout(async function () {
+          var tags = ['master.m3u8', 'v0.m3u8', 'key.bin', 'seg0.ts'].map(function (n) { return 'hls:/xhls/' + n; }).concat(['hls:ranged:/xhls/master.m3u8', 'hls:ranged:/xhls/v0.m3u8']);
+          window.__xhls = await (await fetch('/xck-seen?tags=' + tags.join(','))).json();
+        }, 7000);
+      <\/script></body>`);
+      return;
+    }
     if (url.pathname === '/xdocparse') {
       // A complete document keeps its html/head/body tags (and what is on them) wherever the page parses it.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6687,6 +6750,69 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct.uncaught.length, 2);
     assert.deepEqual(direct.uncaught.map(u => u[1]), ['page', 'page']);
     assert.deepEqual(proxied, direct);
+  });
+
+  // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:
+  // `n<i;n++)for(var o in t…` became a tag with attributes, and React Helmet's inline scripts (NYT's ad config) did not parse.
+  await t.test('innerHTML on a script, textarea, title and noscript sets text (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xrawtext`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xrawtext, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xrawtext);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xrawtext`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xrawtext, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xrawtext);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'raw-text-innerhtml.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct.script, { kids: 1, kidType: 3, text: true, ran: 3 });
+    assert.deepEqual(direct.textarea, ['<b>x</b> & <i>', 1]);
+    assert.deepEqual(direct.noscript, [1, 3, '<img src="https://other.example/x.png">']);
+    assert.deepEqual(proxied, direct);
+  });
+
+  // The browser's own HLS player fetches a playlist's variant, key and segment URLs itself, in the media stack, where the
+  // proxy's rewriting never reaches: they were absolute target URLs (or relative ones resolved against the proxy's own
+  // route), the CSP refused them and the video stayed blank. The playlist is rewritten on its way to a media element.
+  await t.test('a playlist a media element loads has its URLs routed through the proxy (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xhls`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xhls, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xhls);
+    } finally {
+      await directBrowser.close();
+    }
+    await fetch(`${targetBase}/xhls-reset`);
+    const fresh = await openProxiedPage(`${targetBase}/xhls`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xhls, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xhls);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'hls-playlist.json'), JSON.stringify({ direct, proxied }, null, 2));
+    const requested = r => Object.fromEntries(Object.entries(r).filter(([k]) => !k.startsWith('hls:ranged:')));
+    assert.deepEqual(requested(direct), { 'hls:/xhls/master.m3u8': 'hit', 'hls:/xhls/v0.m3u8': 'hit', 'hls:/xhls/key.bin': 'hit', 'hls:/xhls/seg0.ts': 'hit' });
+    assert.deepEqual(requested(proxied), requested(direct));
+    // A media element asks for a playlist with `Range: bytes=0-`, and a CDN may answer that with a 206 of the original bytes.
+    // The proxy asks upstream for the whole file (it rewrites the whole file) and answers the range itself.
+    assert.equal(direct['hls:ranged:/xhls/v0.m3u8'], 'bytes=0-');
+    assert.equal(proxied['hls:ranged:/xhls/v0.m3u8'], null);
   });
 
   // A complete document keeps its html/head/body tags. The page-side markup walker parsed in a <template>, which drops those
