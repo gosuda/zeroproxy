@@ -3978,11 +3978,16 @@ impl<'a> Visit<'a> for RewriteVisitor {
             // Empty test slot — the FOR_CAP marker covers `;;` (or `for(;;`
             // when there is no init); the resolver injects the counter after
             // the first `;`.
+            // With no init the region starts after the `for` keyword, not at the
+            // statement: the `let counter` prefix is a patch AT the statement's
+            // start, and a marker that began there swallowed it — its first `;`
+            // was the prefix's, and `for(;;e++)` came out as
+            // `let c=0;let c=0;c++<…for(;;e++)` (NYT's hls.js did not parse).
             let rs = stmt
                 .init
                 .as_ref()
                 .map(|i| i.span().end)
-                .unwrap_or(stmt.span.start);
+                .unwrap_or(stmt.span.start + 3);
             let re = stmt
                 .update
                 .as_ref()

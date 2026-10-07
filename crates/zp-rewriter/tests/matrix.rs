@@ -547,12 +547,56 @@ fn lex_registry_for_classic_toplevel() {
 // loop is wrapped in a block).
 // ---------------------------------------------------------------------------
 
+/// Every shape of `for` header, in every statement position, still parses once the cap is in: the cap is a patch at the
+/// statement's start plus a patch inside the header, and the two used to collide.
+#[test]
+fn loop_cap_headers_always_parse() {
+    let inits = ["", "i=0", "var i=0", "let i=0", "const k=0", "i=0,j=1"];
+    let tests = ["", "true", "1", "!0", "go()"];
+    let updates = ["", "i++", "i++,j++", "i=g(i)"];
+    let bodies = ["{}", "{ a() }", "{ if (x) break }", "a();"];
+    let positions = ["{S}", "if (c) {S}", "if (c) {S} else b()", "lbl: {S}", "while (w) {S}", "function f(){ {S} }", "do {S} while (w)"];
+    let mut checked = 0;
+    for init in inits {
+        for test in tests {
+            for update in updates {
+                for body in bodies {
+                    let stmt = format!("for ({init};{test};{update}) {body}");
+                    for pos in positions {
+                        let src = pos.replace("{S}", &stmt);
+                        let code = out(&src);
+                        // two declarations of one counter are a SyntaxError the rewriter's own parser reports
+                        rewrite_script(&code, &opts())
+                            .unwrap_or_else(|e| panic!("emitted code does not parse for {src:?}: {e:?}\nOUT: {code}"));
+                        for n in 1..6 {
+                            let decl = format!("let __zp_lc_{n}=0;");
+                            assert!(code.matches(&decl).count() <= 1, "counter {n} declared twice for {src:?}\nOUT: {code}");
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 3360, "the matrix changed shape");
+}
+
 #[test]
 fn loop_cap_constant_true() {
     emits("for(;;){}", &["for(let __zp_lc_1=0;__zp_lc_1++<10000000||"]);
     emits("for(i=0;;i++){}", &["let __zp_lc_1=0;for(i=0;__zp_lc_1++<10000000||"]);
     emits("for(i=0;true;i++){}", &["__zp_lc_1++<10000000"]);
     emits("for(const x=0;;x++){}", &["__zp_lc_1++<10000000"]);
+    // No init, an update: the marker's range must not swallow the `let counter` prefix (NYT's hls.js: `for(;;e++)` came out as
+    // `let c=0;let c=0;c++<…for(;;e++)` and the module did not parse).
+    emits("for(;;i++){}", &["let __zp_lc_1=0;for(;__zp_lc_1++<10000000||"]);
+    not_emits("for(;;i++){}", &["let __zp_lc_1=0;let __zp_lc_1"]);
+    emits("for ( ; ; i++, j++ ) { f(i) }", &["let __zp_lc_1=0;for ( ;__zp_lc_1++<10000000||"]);
+    emits("if (c) for(;;i++){}", &["{let __zp_lc_1=0;for(;__zp_lc_1++<10000000||"]);
+    emits("a: for(;;i++){ break a }", &["__zp_lc_1++<10000000"]);
+    for src in ["for(;;i++){}", "for ( ; ; i++, j++ ) { f(i) }", "if (c) for(;;i++){}", "a: for(;;i++){ break a }"] {
+        reparses(src);
+    }
     emits("while(true){}", &["for(let __zp_lc_1=0;__zp_lc_1++<10000000||"]);
     emits("do{}while(true);", &["do{}while(__zp_lc_1++<10000000||"]);
     // Cap-trip is observable — warn once, then exit.
