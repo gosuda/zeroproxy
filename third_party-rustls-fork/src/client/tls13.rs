@@ -311,10 +311,15 @@ pub(super) fn initial_key_share(
     server_name: &ServerName<'_>,
     kx_state: &mut KxState,
 ) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-    let group = config
-        .resumption
-        .store
-        .kx_hint(server_name)
+    // A browser does not remember which group a server picked: every first hello offers the same shares (ML-KEM hybrid and
+    // X25519, plus GREASE). With a captured spec installed this follows it; the hint would have made every connection to a
+    // host after its first carry a lone X25519 share — and no browser's hello looks like that.
+    let hint = if crate::ja3::with_current(|s| s.is_some()) {
+        None
+    } else {
+        config.resumption.store.kx_hint(server_name)
+    };
+    let group = hint
         .and_then(|group_name| config.find_kx_group(group_name, ProtocolVersion::TLSv1_3))
         .unwrap_or_else(|| {
             config

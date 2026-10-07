@@ -372,7 +372,7 @@ fn emit_client_hello_for_retry(
     // (handshake.rs ~L1033) drops anything that's also in
     // `contiguous_extensions`, so if we list every extension we set here,
     // the random pool becomes empty and the encoding order *is* our list.
-    apply_chrome_ja3_shape(&mut exts);
+    apply_chrome_ja3_shape(&mut exts, retryreq.is_none());
     // Phase 5.10 follow-up (2026-06-03 gosuda.org regression):
     // `apply_chrome_ja3_shape` may have written an ECH GREASE outer
     // hello extension into `exts.encrypted_client_hello`. If we leave
@@ -623,7 +623,7 @@ fn emit_client_hello_for_retry(
 /// 17613, `signed_certificate_timestamp` request / id 18) are simply
 /// absent from our list — the JA3 hash will differ from Chrome by
 /// those entries but should no longer match the rustls fingerprint.
-fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
+fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>, initial_hello: bool) {
     // (1) Always emit an empty `renegotiation_info` — Chrome does this
     // even when TLS 1.3 is the chosen version (extension is harmless on
     // TLS 1.3 servers since they negotiate via `supported_versions`).
@@ -698,11 +698,16 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     }) {
         if !sig.is_empty() {
             use crate::enums::SignatureScheme;
-            exts.signature_schemes = Some(
-                sig.into_iter()
-                    .map(SignatureScheme::from)
-                    .collect(),
-            );
+            let mut schemes: Vec<SignatureScheme> = sig
+                .into_iter()
+                .filter(|s| !crate::ja3::is_grease_value(*s))
+                .map(SignatureScheme::from)
+                .collect();
+            // Chrome puts one GREASE signature algorithm in front (RFC 8701; `0x1a1a` in the sample that showed it). Its
+            // absence leaves a list one entry short of every current Chrome's, which a full-hello fingerprint (not JA3/JA4,
+            // which strip GREASE) can read.
+            schemes.insert(0, SignatureScheme::Unknown(crate::ja3::random_grease()));
+            exts.signature_schemes = Some(schemes);
         }
     }
 
@@ -872,14 +877,20 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
         // would need x25519-dalek inside the rustls fork — extra deps
         // we avoid here for one wire bit of difference.
         let enc_bytes = crate::ja3::random_bytes(32);
-        let payload_bytes = crate::ja3::random_bytes(192);
+        // Chrome's GREASE ECH draws a fresh config id and one of four payload sizes, 144 + 32·k bytes (k in 0..=3), per
+        // connection — measured on the same machine's Chrome (config ids 17..193, sizes 144/176/208/240, ten hellos). A
+        // fixed 192 with config id 0 was the same in every hello of every user.
+        let draw = crate::ja3::random_bytes(2);
+        let config_id = draw[0];
+        let payload_len = 144 + 32 * usize::from(draw[1] & 0x03);
+        let payload_bytes = crate::ja3::random_bytes(payload_len);
         exts.encrypted_client_hello = Some(EncryptedClientHello::Outer(
             EncryptedClientHelloOuter {
                 cipher_suite: HpkeSymmetricCipherSuite {
                     kdf_id: HpkeKdf::HKDF_SHA256,
                     aead_id: HpkeAead::AES_128_GCM,
                 },
-                config_id: 0,
+                config_id,
                 enc: PayloadU16::new(enc_bytes),
                 payload: PayloadU16::new(payload_bytes),
             },
@@ -949,6 +960,20 @@ fn apply_chrome_ja3_shape(exts: &mut ClientExtensions<'_>) {
     if let Some(groups) = exts.named_groups.as_mut() {
         groups.retain(|g| !crate::ja3::is_grease_value(u16::from(*g)));
         groups.insert(0, crate::msgs::enums::NamedGroup::Unknown(crate::ja3::random_grease()));
+    }
+    // Chrome's first hello offers a GREASE key share — the same GREASE group as the one in supported_groups, with the one
+    // byte `00` for a share — in front of the real ones. (A hello retry carries the one share the server asked for.) The
+    // server never selects it, so nothing downstream sees it: the real share is held separately.
+    if initial_hello {
+        if let (Some(groups), Some(shares)) = (exts.named_groups.as_ref(), exts.key_shares.as_mut()) {
+            if let Some(grease) = groups.first().copied() {
+                if crate::ja3::is_grease_value(u16::from(grease))
+                    && !shares.iter().any(|s| crate::ja3::is_grease_value(u16::from(s.group)))
+                {
+                    shares.insert(0, KeyShareEntry::new(grease, alloc::vec![0u8]));
+                }
+            }
+        }
     }
 }
 

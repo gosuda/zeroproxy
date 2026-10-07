@@ -23,7 +23,12 @@
   // 갱신했으므로(ML-DSA sig algs) UA 도 같이 올린다 — TLS 는 151 인데 UA 가
   // 148 이면 그 불일치 자체가 새로운 tell 이다. 셋(UA / sec-ch-ua / TLS)은
   // 항상 같은 버전을 말해야 한다.
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
+  // 2026-10-07: 151 → 154. The same drift again: the machine's own browser is at 154 and its ClientHello had moved
+  // (a GREASE signature algorithm, a GREASE key share, per-connection ECH noise), so the persona and the wire are
+  // brought up together. A frozen persona is re-synced from `tls.peet.ws/api/all` opened both ways (trap notebook).
+  // worker-prelude.js keeps its own copy of the UA string (a worker has no `ZP`): change both.
+  const TARGET_CHROME_MAJOR = 154;
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + TARGET_CHROME_MAJOR + '.0.0.0 Safari/537.36';
   // Wire `sec-ch-ua` MUST match the Chrome 148 UA above. The transport
   // previously forwarded the host browser's real header, which on Edge/WebView2
   // reads `"Microsoft Edge WebView2";v="149", "Microsoft Edge";v="149"` — a
@@ -38,7 +43,27 @@
   // 이다 — GREASE 브랜드의 **표기법도 위치도** 바뀌었다(`"Not)A;Brand";v="24"`
   // 선두 → `"Not=A?Brand";v="99"` 두 번째). 우리는 Edge 가 아니라 순수 Chrome
   // 페르소나를 유지하므로 Edge 두 항목만 "Google Chrome" 으로 바꿔 쓴다.
-  const TARGET_SEC_CH_UA = '"Chromium";v="151", "Not=A?Brand";v="99", "Google Chrome";v="151"';
+  // 2026-10-07: the list is computed, not typed in. Chromium builds Chrome's brand list from the major version alone
+  // (components/embedder_support/user_agent_utils.cc): the GREASE brand is `Not` + a + `A` + b + `Brand` with a and b the
+  // `major % 11` and `(major + 1) % 11` entries of [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"], its version
+  // `["8", "99", "24"][major % 3]`, and the three brands are placed by `major % 6` in the table below. It reproduces what
+  // Chrome sent at 120 (`Not_A Brand`;8 first), 126, 131, 134, 136 and 140 — names, versions and order — and at 154 the
+  // GREASE brand this machine's own browser sends (`Not A(Brand`;99). The list typed in for 151 had Chromium first; by this
+  // rule Chrome 151's is [GREASE, Google Chrome, Chromium].
+  function chromeBrandList(major) {
+    const chars = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+    const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    const generated = [
+      { brand: 'Not' + chars[major % 11] + 'A' + chars[(major + 1) % 11] + 'Brand', version: ['8', '99', '24'][major % 3] },
+      { brand: 'Chromium', version: String(major) },
+      { brand: 'Google Chrome', version: String(major) },
+    ];
+    const order = orders[major % 6];
+    const list = [];
+    generated.forEach((entry, i) => { list[order[i]] = entry; });
+    return list;
+  }
+  const TARGET_SEC_CH_UA = chromeBrandList(TARGET_CHROME_MAJOR).map(b => '"' + b.brand + '";v="' + b.version + '"').join(', ');
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
   const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','TARGET_HTTP_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','REDIRECT_LIMIT_EXCEEDED','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
@@ -480,7 +505,7 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

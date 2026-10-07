@@ -471,7 +471,7 @@
   // (was 134) than the main realm (148) is a cross-context inconsistency an
   // anti-bot can profile — every realm must claim the SAME Chrome build.
   // zp-core.js 의 TARGET_USER_AGENT 와 반드시 같은 값 (여기는 워커라 ZP 가 없다).
-  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
+  const TARGET_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
   const TARGET_APP_VERSION = TARGET_USER_AGENT.replace(/^Mozilla\//, '');
   const TARGET_PLATFORM = 'Win32';
   const nav = self.navigator;

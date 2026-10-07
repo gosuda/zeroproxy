@@ -69,6 +69,13 @@ pub fn kernel_init() -> String {
 #[wasm_bindgen(js_name = kernelSetCapturedSpec)]
 pub fn kernel_set_captured_spec(b64_json: &str) {
     use base64::Engine;
+    // Before anything that can fail: the GREASE draws and the ECH GREASE noise start from real entropy, not from a constant
+    // every installation shares (see `rustls::ja3::seed_entropy`).
+    let mut seed = [0u8; 8];
+    match getrandom::fill(&mut seed) {
+        Ok(()) => rustls::ja3::seed_entropy(u64::from_le_bytes(seed)),
+        Err(e) => push_trace(&format!("kernel_set_captured_spec:entropy-err={}", e)),
+    }
     push_trace(&format!("kernel_set_captured_spec:len={}", b64_json.len()));
     let bytes = match base64::engine::general_purpose::STANDARD.decode(b64_json) {
         Ok(b) => b,

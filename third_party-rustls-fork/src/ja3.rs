@@ -171,19 +171,41 @@ pub fn is_grease_value(v: u16) -> bool {
 /// every subsequent call advances the state — every ClientHello after
 /// the first sees a fresh value, which is what RFC 8701 requires.
 pub fn random_grease() -> u16 {
-    use core::cell::Cell;
-    thread_local! {
-        static RNG: Cell<u64> = const { Cell::new(0x9E3779B97F4A7C15) };
-    }
-    RNG.with(|s| {
+    GREASE_RNG.with(|s| {
         // xorshift64 step
-        let mut x = s.get();
+        let mut x = rng_state(s.get(), 0x9E3779B97F4A7C15);
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
         s.set(x);
         GREASE_VALUES[(x as usize) & 0x0f]
     })
+}
+
+thread_local! {
+    static GREASE_RNG: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    static BYTES_RNG: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    static ENTROPY: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// The generators' starting state: the entropy the host gave us mixed into the fixed constant, or the constant alone when
+/// none was given (a zero state would stay zero for ever). `state == 0` means "not started yet".
+fn rng_state(state: u64, constant: u64) -> u64 {
+    if state != 0 {
+        return state;
+    }
+    let mixed = ENTROPY.with(|e| e.get()) ^ constant;
+    if mixed == 0 { constant } else { mixed }
+}
+
+/// Give the GREASE draws and the ECH GREASE noise real entropy. Both used to start from a fixed constant, so the FIRST
+/// ClientHello after every worker start carried the same GREASE code points and the same `enc` and payload bytes, for
+/// every user: a constant no browser has (a real ECH `enc` is a fresh public key every time). The host calls this once at
+/// boot with random bytes (`std::time` is not available here, and nothing else in this crate has an entropy source).
+pub fn seed_entropy(seed: u64) {
+    ENTROPY.with(|e| e.set(seed));
+    GREASE_RNG.with(|s| s.set(0));
+    BYTES_RNG.with(|s| s.set(0));
 }
 
 /// Generate `n` pseudo-random bytes from the same xorshift64 state that
@@ -193,13 +215,9 @@ pub fn random_grease() -> u16 {
 /// with non-empty payload; the actual bytes are server-decrypted noise
 /// for real ECH, so any bytes look identical to the WAF observer.
 pub fn random_bytes(n: usize) -> alloc::vec::Vec<u8> {
-    use core::cell::Cell;
-    thread_local! {
-        static RNG: Cell<u64> = const { Cell::new(0xBF58476D1CE4E5B9) };
-    }
     let mut out = alloc::vec::Vec::with_capacity(n);
-    RNG.with(|s| {
-        let mut x = s.get();
+    BYTES_RNG.with(|s| {
+        let mut x = rng_state(s.get(), 0xBF58476D1CE4E5B9);
         while out.len() < n {
             x ^= x << 13;
             x ^= x >> 7;
