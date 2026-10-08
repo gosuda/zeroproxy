@@ -1,5 +1,5 @@
 
-  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; defineMethodOnProto(navigator, root.Navigator && root.Navigator.prototype, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include' }).catch(()=>{}); return true; } catch { return false; } }); }
+  function installBeacon() { if (!navigator.sendBeacon || !Native.fetch || !Native.Request || !Native.Headers) return; defineMethodOnProto(navigator, root.Navigator && root.Navigator.prototype, 'sendBeacon', function sendBeacon(url, data) { try { fetchThroughRuntime(url, { method: 'POST', body: data, keepalive: true, credentials: 'include', mode: 'no-cors' }).catch(()=>{}); return true; } catch { return false; } }); }
   // E4: registerProtocolHandler 계열. 실제로 네이티브에 넘기면 브라우저
   // 등록 UI 에 **프록시 오리진**이 노출되고 OS 핸들러가 프록시를 가리킨다.
   // 그렇다고 SecurityError 를 던지면 타깃이 같은 오리진 URL 로 등록하는

@@ -29,9 +29,10 @@ gate is closed.
 | Rust 워크스페이스 (리라이터 매트릭스 3,360 조합 포함) | `cargo test --workspace` | 304 통과, 3 무시 |
 | Go | `go test ./...` | 전부 ok |
 | wasm CI | `npm run test:wasm:ci` | 13 통과 |
-| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 220 통과 |
+| 브라우저 e2e (네이티브 대조 차분 포함) | `npm run test:e2e` | 221 통과 |
+| ClientHello 가 설치된 Chrome 과 같은가 (확장 집합 + `trust_anchors` 본문) | `npm run check:chrome-hello` | Chrome 154.0.8037.98 과 일치 (Chrome 이 있어야 돈다; 어긋나면 exit 1) |
 | 리라이트 출력 유효성 (실사이트 스크립트 → V8) | `node --experimental-vm-modules scripts/rewrite-corpus-check.cjs <taskweaver 테이프>` | 13개 사이트 768개 중 732개 검사, 0건 실패 (51.6 MB; 나머지는 스크립트 아님/리라이터가 거부) |
-| 실사이트 | taskweaver `zp`, 아래 13곳 | 전부 응답 — Wikipedia·GitHub·Guardian·MDN·Naver·Apple·npm 오류 0 |
+| 실사이트 | taskweaver `zp`, 아래 13곳 | 전부 응답 — Stack Overflow 포함(2026-10-07 부터 열린다); Wikipedia·GitHub·Guardian·MDN·Apple·npm 오류 0; Naver 는 광고 픽셀 502 와 `ssl.pstatic.net` 이미지의 간헐 504 만 |
 
 실사이트 매트릭스: Wikipedia, GitHub, Guardian, BBC, MDN, CNN, NAVER, NYT, Stack Overflow, Reddit, Apple, npm, IMDb.
 알려진 미해결은 [ERRATA.md](ERRATA.md) 의 Residuals 다. (Stack Overflow 의 Cloudflare 챌린지는 2026-10-07 에 풀렸다 — ERRATA 66. 이 자리에 "자동화된

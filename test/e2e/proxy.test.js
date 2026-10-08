@@ -2444,6 +2444,62 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xfm2' || url.pathname === '/xfm2-r' || url.pathname === '/xfm2-log') {
+      // Fetch Metadata of element loads: what the target server reads for an image, a script, a stylesheet, a no-cors fetch,
+      // a beacon and a worker, same-origin and cross-site.
+      const seen = globalThis.__fmSeen || (globalThis.__fmSeen = new Map());
+      const run = url.searchParams.get('run') || '';
+      if (url.pathname === '/xfm2-r') {
+        const n = url.searchParams.get('n') || '';
+        seen.set(run + '|' + n, {
+          site: req.headers['sec-fetch-site'] || 'absent', mode: req.headers['sec-fetch-mode'] || 'absent',
+          dest: req.headers['sec-fetch-dest'] || 'absent', user: req.headers['sec-fetch-user'] || 'absent',
+        });
+        const cors = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+        if (/^img/.test(n)) {
+          res.writeHead(200, { ...cors, 'Content-Type': 'image/gif' });
+          res.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
+        } else if (/^css/.test(n)) {
+          res.writeHead(200, { ...cors, 'Content-Type': 'text/css' });
+          res.end('body{}');
+        } else if (/^(script|worker)/.test(n)) {
+          res.writeHead(200, { ...cors, 'Content-Type': 'text/javascript' });
+          res.end('/* ok */');
+        } else {
+          res.writeHead(200, { ...cors, 'Content-Type': 'text/plain' });
+          res.end('ok');
+        }
+        return;
+      }
+      if (url.pathname === '/xfm2-log') {
+        const out = {};
+        for (const [k, v] of seen) if (k.startsWith(run + '|')) out[k.slice(run.length + 1)] = v;
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(out));
+        return;
+      }
+      const other = `http://127.0.0.1:${req.socket.localPort}`;
+      const q = n => `/xfm2-r?n=${n}&run=${run}`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>fm2</title><body>
+        <img src="${q('img-same')}"><img src="${other}${q('img-cross')}">
+        <link rel="stylesheet" href="${other}${q('css-cross')}">
+        <script src="${q('script-same')}"></script>
+        <script src="${other}${q('script-cross')}"></script>
+        <script crossorigin="anonymous" src="${other}${q('script-cors')}"></script>
+        <script>
+          window.__xfm2 = null;
+          fetch('${other}${q('fetch-nocors')}', { mode: 'no-cors' });
+          fetch('${other}${q('fetch-cors')}');
+          var x = new XMLHttpRequest(); x.open('GET', '${q('xhr-same')}'); x.send();
+          navigator.sendBeacon('${q('beacon-same')}', 'x');
+          try { new Worker('${q('worker-same')}'); } catch (e) {}
+          setTimeout(function () {
+            fetch('/xfm2-log?run=${run}').then(function (r) { return r.json(); }).then(function (j) { window.__xfm2 = j; });
+          }, 2500);
+        </script></body>`);
+      return;
+    }
     if (url.pathname === '/xrawtext') {
       // innerHTML on an element whose content is text: React Helmet puts a head script in with script.innerHTML = code.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -6958,6 +7014,40 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.equal(direct.crossSite.site, 'cross-site');
     assert.deepEqual([direct.frame.site, direct.frame.mode, direct.frame.dest, direct.frame.user], ['cross-site', 'navigate', 'iframe', 'absent']);
     assert.deepEqual(proxied, direct);
+  });
+
+  // The same for element loads: an image is `no-cors`/`image`, a classic script `no-cors`/`script` (`cors` with `crossorigin`),
+  // a stylesheet `no-cors`/`style`, a beacon `no-cors`/`empty`, a worker `same-origin`/`worker` — the SW wrote `cors`/`empty` on all.
+  await t.test('Fetch Metadata of element loads matches native', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xfm2?run=native`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xfm2, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xfm2);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xfm2?run=proxied`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xfm2, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xfm2);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'fetch-metadata-elements.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.equal(direct['img-same'].dest, 'image');
+    assert.equal(direct['script-cross'].mode, 'no-cors');
+    assert.deepEqual(direct['worker-same'], { site: 'same-origin', mode: 'same-origin', dest: 'worker', user: 'absent' });
+    // A worker's script is fetched by the worker's bootstrap through the runtime API, not by the browser as a worker load: the
+    // server sees `cors`/`empty` (ERRATA 67). Its site is right; everything else is the browser's.
+    const { 'worker-same': workerProxied, ...restProxied } = proxied;
+    const { 'worker-same': _workerDirect, ...restDirect } = direct;
+    assert.equal(workerProxied.site, 'same-origin');
+    assert.deepEqual(restProxied, restDirect);
   });
 
   // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:

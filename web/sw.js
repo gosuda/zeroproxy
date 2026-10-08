@@ -1645,6 +1645,22 @@ function navigationDestination(req) {
   return 'document';
 }
 
+// `Sec-Fetch-Mode` / `Sec-Fetch-Dest` of a sub-request. An element load (an image, a script, a stylesheet, a font, a worker)
+// reaches the worker as the browser's own request, which knows both. A script's `fetch()`/XHR is a request of the runtime
+// API; its mode is in the init the membrane forwards and its destination is `empty`.
+function subrequestFetchMetadata(opt) {
+  if (!opt.runtimeFetch && opt.request) {
+    let dest = '';
+    let mode = '';
+    try { dest = opt.request.destination || ''; mode = opt.request.mode || ''; } catch {}
+    if (opt.elementCors) mode = 'cors';
+    if (mode !== 'no-cors' && mode !== 'cors' && mode !== 'same-origin') mode = 'cors';
+    return { mode, dest: dest || 'empty' };
+  }
+  const mode = opt.mode === 'no-cors' || opt.mode === 'same-origin' ? opt.mode : 'cors';
+  return { mode, dest: 'empty' };
+}
+
 // `Sec-Fetch-Site` between an initiator URL and a target URL. Schemeful: `http://a.example` and `https://a.example` are
 // the same site only if the scheme matches too, and `same-origin` needs the port.
 function fetchSiteRelation(initiatorUrl, targetUrl) {
@@ -2028,8 +2044,9 @@ async function transportFetchHop(targetUrl, opt) {
   // no initiator (the first, from the launcher) is `none`; with one, its relation to the target.
   const navDest = opt.document ? navigationDestination(opt.request) : 'document';
   const inFrame = navDest !== 'document';
-  if (!seen.has('sec-fetch-mode')) pushOnce('sec-fetch-mode', opt.document ? 'navigate' : 'cors');
-  if (!seen.has('sec-fetch-dest')) pushOnce('sec-fetch-dest', opt.document ? navDest : 'empty');
+  const sub = opt.document ? null : subrequestFetchMetadata(opt);
+  if (!seen.has('sec-fetch-mode')) pushOnce('sec-fetch-mode', opt.document ? 'navigate' : sub.mode);
+  if (!seen.has('sec-fetch-dest')) pushOnce('sec-fetch-dest', opt.document ? navDest : sub.dest);
   if (!seen.has('sec-fetch-site')) {
     let site = 'cross-site';
     if (opt.document) site = context.referrer ? fetchSiteRelation(context.referrer, u) : (inFrame ? 'cross-site' : 'none');

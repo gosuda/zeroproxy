@@ -16,7 +16,8 @@
     "test:wasm:ci": "node scripts/test.mjs wasm-ci",
     "dogfood:baseline": "node scripts/dogfood-baseline.mjs",
     "dogfood:real-site": "node --test test/e2e/real-site-regression.test.js",
-    "dogfood:matrix": "node scripts/dogfood-matrix.mjs"
+    "dogfood:matrix": "node scripts/dogfood-matrix.mjs",
+    "check:chrome-hello": "node scripts/check-chrome-hello.mjs"
   },
   "devDependencies": {
     "binaryen": "^129.0.0",
