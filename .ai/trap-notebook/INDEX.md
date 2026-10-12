@@ -6,6 +6,12 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-13 | membrane / 성능 | 지문이 같아도 느리면 진다: 네이티브도 8배 늦추면 대화형 판정 실패. 위젯이 __zp_get 1,510만 번 — 데이터 base 빠른 경로. | rewriter.md#바쁜-렌더러는-진다 |
+| 2026-10-13 | membrane / 수정 | 교차 출처 프레임이 최상위의 권한·기능 76개·알림 default 를 읽고 허용 목록엔 프록시 출처. 가상 프레임 트리로 계산. | rewriter.md#교차-출처-프레임-권한 |
+| 2026-10-13 | htmltx / 수정 | 파서가 아이콘 URL 을 먼저 알려 관찰자보다 빨랐다(favicon e2e 간헐 실패). 파싱 중 행동하는 속성은 변환 단계에서 막는다. | rewriter.md#아이콘-링크-경주 |
+| 2026-10-13 | method / 측정 | 대조군 Chrome 은 h3 를 쓴다: QUIC 끈 Chrome 도 Glassdoor 대화형 판정. 첫 판정 비교는 --disable-quic 대조와 함께, 매번 cType 기록. | rewriter.md#대조군은-quic |
+| 2026-10-13 | sw / 수정 | 런타임 fetch 의 연결 실패를 502 응답으로 줬다(위젯 IPv6 탐침이 "Cloudflare 502"로 읽음). 서버에 못 닿으면 네트워크 오류. | rewriter.md#전송-실패는-네트워크-오류 |
+| 2026-10-13 | sw / 수정 | 클라이언트 힌트를 늘 버리고 Critical-CH 재요청도 없었다 = 협상 못 하는 클라이언트. 응답 헤더를 흘려 브라우저가 문서를 재요청. | rewriter.md#클라이언트-힌트-협상 |
 | 2026-10-12 | worker / 수정 | 워커 멤버는 WorkerGlobalScope.prototype 에 산다: 인스턴스 훅은 own 이름을 만들고 소스도 안 가렸다. 스냅숏 후 끝에서 네이티브 모양으로. | rewriter.md#워커-훅-자리 |
 | 2026-10-12 | membrane / 탈출 | 객체·배열·TrustedScript 타이머 핸들러를 네이티브가 리라이트 없이 컴파일했다. eval(TrustedScript) 미실행이 Glassdoor 크래시. | rewriter.md#trusted-script-는-코드 |
 | 2026-10-12 | membrane / 수정 | 캔버스 노이즈가 읽을 때마다 바뀌고 페이지 캔버스에 그려졌다 — 같은 입력엔 같은 출력, 원본 불변. 훅은 네이티브 모양으로. | rewriter.md#캔버스-파블링-결정적 |

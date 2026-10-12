@@ -12,8 +12,10 @@
 //! * [`socks5`] — RFC 1928 method negotiation + CONNECT + RFC 1929
 //!   username/password sub-negotiation.
 //! * [`http1`] — RFC 9112 request-line + header block builder/parser.
+//! * [`header_order`] — the wire order of a request's headers (Chrome's, as the SW names it).
 
 #![deny(missing_docs)]
 
+pub mod header_order;
 pub mod http1;
 pub mod socks5;

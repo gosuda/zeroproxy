@@ -266,9 +266,16 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     // 실제 Chrome 은 cookie 를 헤더 목록 맨 끝에 보낸다. promoted 헤더들이
     // 뒤에 push 되므로, 여기서 뽑아 두었다가 마지막에 다시 붙여 순서를 맞춘다.
     let mut promoted_cookie: Option<String> = None;
+    // The SW's order for this request (lowercase names, comma-separated): Chrome's order depends on the kind of
+    // request and on the client hints it carries, which only the SW knows.
+    let mut sw_order: Option<Vec<String>> = None;
     headers_owned.retain(|(k, v)| {
         let kl = k.to_ascii_lowercase();
         match kl.as_str() {
+            "x-zp-header-order" => {
+                sw_order = Some(zp_transport_codec::header_order::parse_header_order(v));
+                false
+            }
             "x-zp-referer" => {
                 promoted_referer = Some(v.clone());
                 false
@@ -324,37 +331,7 @@ pub async fn kernel_fetch(request_js: JsValue) -> Result<JsValue, JsValue> {
     if let Some(v) = promoted_cookie {
         headers_owned.push(("Cookie".to_string(), v));
     }
-    // 2026-08-16: 위의 promote 들은 전부 **뒤에 붙이기만** 한다. SW 가 애써
-    // Chrome 순서로 정렬해 보내도 여기서 referer / accept-encoding 이 꼬리로
-    // 밀려 wire 순서가 깨졌다 — 실측(tls.peet.ws, 같은 머신 직접 Chrome 대조):
-    //   Chrome : … sec-fetch-dest, accept-encoding, accept-language, priority
-    //   ZP     : … sec-fetch-dest, accept-language, priority, referer, accept-encoding
-    // 헤더 순서는 Akamai/Cloudflare 계열이 실제로 보는 축이므로 마지막에 한 번
-    // 더 Chrome 순서로 stable sort 한다. 모르는 헤더는 원래 상대순서를 유지한
-    // 채 알려진 꼬리(cookie) 앞에 놓는다.
-    fn chrome_header_rank(name: &str) -> u16 {
-        match name.to_ascii_lowercase().as_str() {
-            "sec-ch-ua" => 0,
-            "sec-ch-ua-mobile" => 1,
-            "sec-ch-ua-platform" => 2,
-            "upgrade-insecure-requests" => 3,
-            "user-agent" => 4,
-            "accept" => 5,
-            "origin" => 6,
-            "sec-fetch-site" => 7,
-            "sec-fetch-mode" => 8,
-            "sec-fetch-user" => 9,
-            "sec-fetch-dest" => 10,
-            "sec-fetch-storage-access" => 11,
-            "referer" => 12,
-            "accept-encoding" => 13,
-            "accept-language" => 14,
-            "priority" => 15,
-            "cookie" => 900,
-            _ => 800,
-        }
-    }
-    headers_owned.sort_by_key(|(k, _)| chrome_header_rank(k));
+    zp_transport_codec::header_order::order_request_headers(&mut headers_owned, sw_order.as_deref());
     push_trace(&format!(
         "kernel_fetch:hdr-promoted count={}",
         headers_owned.len()
@@ -542,3 +519,4 @@ fn to_string(v: &JsValue) -> String {
     }
     format!("{:?}", v)
 }
+

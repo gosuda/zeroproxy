@@ -648,6 +648,119 @@
         define(w, 'PerformanceObserver', ZPPerformanceObserver);
       }
     } catch {}
+    // ── A frame cross-origin to its embedder (2026-10-13; .lean-ctx/fp-lab.js, a user's Chrome) ───────────────────────
+    // Underneath, every frame is same-origin with its embedder, so the browser granted each one what only a same-origin
+    // frame gets: every feature whose default allowlist is 'self' (Turnstile's frame read 61 features, natively 20), the
+    // top's notification permission (natively `denied` in every cross-origin frame), `permissions.query` states of the
+    // top. And `getAllowlistForFeature` named the proxy origin. The feature policy is read as the browser computes it
+    // for the virtual frame tree: a cross-origin frame keeps a feature only if its embedder allows it for the frame's
+    // origin, or delegates it with `allow`; allowlists name virtual origins.
+    const crossOriginFrame = (() => {
+      try {
+        const p = root.parent;
+        if (!p || p === root || opaqueDocument) return false;
+        const o = typeof p.__zp_origin === 'function' ? p.__zp_origin() : '';
+        return typeof o === 'string' && o !== '' && o !== securityOrigin();
+      } catch { return false; }
+    })();
+    const ownOrigin = () => displayOrigin(securityOrigin());
+    const toVirtualAllowlist = list => Array.from(list || [], o => (o === proxyOrigin ? ownOrigin() : o));
+    // `allow="camera; fullscreen 'src'; geolocation https://a.example"`: does it delegate `feature` to `origin`?
+    function allowAttributeGrants(el, feature, origin) {
+      let raw = '';
+      try { raw = el ? String(Native.getAttribute.call(el, 'allow') || '') : ''; } catch {}
+      for (const part of raw.split(';')) {
+        const tokens = part.trim().split(/\s+/).filter(Boolean);
+        if (!tokens.length || tokens[0].toLowerCase() !== feature) continue;
+        const list = tokens.slice(1);
+        if (!list.length) return true; // 'src' by default: the frame's own origin
+        for (const t of list) {
+          const v = t.replace(/^'|'$/g, '').toLowerCase();
+          if (v === '*' || v === 'src') return true;
+          if (v === 'none') return false;
+          try { if (new URL(t).origin === origin) return true; } catch {}
+        }
+      }
+      return false;
+    }
+    const fpProto = w.FeaturePolicy && w.FeaturePolicy.prototype;
+    if (fpProto) {
+      const nativeAllowed = fpProto.allowedFeatures;
+      const nativeAllowlist = fpProto.getAllowlistForFeature;
+      const nativeAllows = fpProto.allowsFeature;
+      // which document (or iframe element, for its container policy) a policy object answers for
+      const owners = new WeakMap();
+      const hookOwner = (proto, kind) => {
+        const d = proto && Object.getOwnPropertyDescriptor(proto, 'featurePolicy');
+        if (!d || typeof d.get !== 'function') return;
+        const get = d.get;
+        replaceNativeAccessor(proto, 'featurePolicy', function () {
+          const policy = Reflect.apply(get, this, []);
+          if (policy && typeof policy === 'object') owners.set(policy, { kind, node: this });
+          return policy;
+        });
+      };
+      hookOwner(w.Document && w.Document.prototype, 'document');
+      hookOwner(w.HTMLIFrameElement && w.HTMLIFrameElement.prototype, 'frame');
+      // Is `feature` granted to a cross-origin document of `origin` by its embedder `parentDoc` through `el`?
+      // The embedder's own (virtual) policy decides: it must allow the feature itself, and allow it for that origin
+      // or delegate it. Asked through the embedder's realm, whose policy object is itself virtual.
+      function embedderGrants(parentDoc, el, feature, origin) {
+        try {
+          const pp = parentDoc && parentDoc.featurePolicy;
+          if (!pp) return true;
+          if (!pp.allowsFeature(feature)) return false;
+          return pp.allowsFeature(feature, origin) || allowAttributeGrants(el, feature, origin);
+        } catch { return true; }
+      }
+      // what the policy object `policy` virtually allows (the real answer filtered)
+      function virtuallyAllows(policy, feature) {
+        const own = owners.get(policy);
+        if (!own) return true;
+        if (own.kind === 'document') {
+          if (own.node !== w.document || !crossOriginFrame) return true;
+          let parentDoc = null;
+          try { parentDoc = root.parent.document; } catch {}
+          return embedderGrants(parentDoc, root.frameElement, feature, ownOrigin());
+        }
+        // an iframe's container policy: computed for the origin of its (virtual) src
+        let src = '';
+        try { src = new URL(targetURLForElement(own.node, Native.getAttribute.call(own.node, 'src') || '') || 'about:blank').origin; } catch {}
+        if (!src || src === 'null' || src === ownOrigin()) return true;
+        return embedderGrants(w.document, own.node, feature, src);
+      }
+      replaceNativeMethod(fpProto, 'allowedFeatures', orig => ({ allowedFeatures() {
+        const real = Reflect.apply(orig, this, []);
+        return owners.has(this) ? real.filter(f => virtuallyAllows(this, f)) : real;
+      } }).allowedFeatures);
+      replaceNativeMethod(fpProto, 'getAllowlistForFeature', orig => ({ getAllowlistForFeature(...args) {
+        const real = Reflect.apply(orig, this, args);
+        if (!owners.has(this)) return real;
+        if (!virtuallyAllows(this, String(args[0]))) return [];
+        return toVirtualAllowlist(real);
+      } }).getAllowlistForFeature);
+      replaceNativeMethod(fpProto, 'allowsFeature', orig => ({ allowsFeature(...args) {
+        const real = Reflect.apply(orig, this, args);
+        if (!owners.has(this)) return real;
+        const feature = String(args[0]);
+        if (!virtuallyAllows(this, feature)) return false;
+        if (args.length < 2 || args[1] === undefined) return real;
+        let origin;
+        try { origin = new URL(String(args[1])).origin; } catch { return false; }
+        const list = toVirtualAllowlist(Reflect.apply(nativeAllowlist, this, [feature]));
+        return list.includes('*') || list.includes(origin);
+      } }).allowsFeature);
+      void nativeAllowed; void nativeAllows;
+    }
+    // A permission backed by a policy-controlled feature is `denied` where the feature is not allowed (measured:
+    // camera, microphone, geolocation, clipboard-read, midi, screen-wake-lock in a cross-origin frame).
+    function featureDeniedHere(name) {
+      try {
+        const policy = w.document.featurePolicy;
+        if (!policy || !policy.features().includes(name)) return false;
+        return !policy.allowsFeature(name);
+      } catch { return false; }
+    }
     // D7: Notification permission state must be per-target-origin. Wrap the
     // static permission getter; granting is still gated by the native browser
     // UI but target code seeing 'default'/'denied' will react in its own
@@ -674,7 +787,8 @@
           : () => (nativePermDesc ? nativePermDesc.value : 'default');
         defineMasked(NativeN, 'permission', {
           get() {
-            if (opaqueDocument) return 'denied';
+            // natively `denied` in an opaque document and in every frame cross-origin to its embedder
+            if (opaqueDocument || crossOriginFrame) return 'denied';
             try {
               const stored = prefixedStorage(nativeLocalStorage, localPrefix).getItem(permKey);
               if (stored) return stored;
@@ -686,6 +800,12 @@
         const nativeRP = NativeN.requestPermission ? NativeN.requestPermission.bind(NativeN) : null;
         if (nativeRP) {
           define(NativeN, 'requestPermission', function(callback) {
+            // Natively a cross-origin frame is refused at once, with no prompt; underneath this frame is same-origin with
+            // the proxy page, and the browser would have asked the user on the proxy's behalf.
+            if (opaqueDocument || crossOriginFrame) {
+              if (typeof callback === 'function') try { callback('denied'); } catch {}
+              return Promise.resolve('denied');
+            }
             return Promise.resolve(nativeRP()).then(result => {
               try { prefixedStorage(nativeLocalStorage, localPrefix).setItem(permKey, String(result)); } catch {}
               if (typeof callback === 'function') try { callback(result); } catch {}
@@ -743,32 +863,42 @@
         define(geo, 'watchPosition', wrappedWatch);
       }
     } catch {}
-    if (w.navigator && w.navigator.permissions && w.navigator.permissions.query) {
-      const nativeQuery = w.navigator.permissions.query.bind(w.navigator.permissions);
+    // The answer is the browser's own PermissionStatus — a stand-in made with own `name`/`state`/`onchange` had three
+    // names a real one has not, and `query` was an own property of `navigator.permissions` (natively on
+    // `Permissions.prototype`) — and only its `state` reads the virtual value:
+    //  * an opaque origin is granted nothing, and is told so;
+    //  * a frame cross-origin to its embedder is denied notifications and push, and every permission whose feature its
+    //    policy does not allow (measured: camera, microphone, geolocation, clipboard-read, midi, screen-wake-lock);
+    //  * a device permission this target never obtained reads 'prompt' — another target's grant does not show here
+    //    (타깃이 이 권한을 얻은 기록이 없으면 'prompt').
+    const permProto = w.Permissions && w.Permissions.prototype;
+    const statusProto = w.PermissionStatus && w.PermissionStatus.prototype;
+    if (permProto && typeof permProto.query === 'function' && statusProto) {
       const trackedPerms = new Set(['camera', 'microphone', 'display-capture', 'geolocation', 'speaker-selection']);
-      define(w.navigator.permissions, 'query', function(desc) {
-        const name = desc && desc.name;
-        // An opaque origin is granted nothing, and is told so.
-        if (opaqueDocument && typeof name === 'string') {
-          const StatusProto = w.PermissionStatus && w.PermissionStatus.prototype;
-          const fake = StatusProto ? Object.create(StatusProto) : {};
-          try { Object.defineProperty(fake, 'name', { value: name, enumerable: true }); } catch {}
-          try { Object.defineProperty(fake, 'state', { value: 'denied', enumerable: true }); } catch {}
-          try { Object.defineProperty(fake, 'onchange', { value: null, writable: true, enumerable: true }); } catch {}
-          return Promise.resolve(fake);
-        }
-        if (typeof name === 'string' && trackedPerms.has(name) && !grantedPerms.has(name)) {
-          // 타깃이 이 권한을 얻은 기록이 없으면 'prompt' — 다른 타깃이 실제로
-          // grant 받았어도 그 사실은 이 타깃에 새지 않는다.
-          const StatusProto = w.PermissionStatus && w.PermissionStatus.prototype;
-          const fake = StatusProto ? Object.create(StatusProto) : {};
-          try { Object.defineProperty(fake, 'name', { value: name, enumerable: true }); } catch {}
-          try { Object.defineProperty(fake, 'state', { value: 'prompt', enumerable: true }); } catch {}
-          try { Object.defineProperty(fake, 'onchange', { value: null, writable: true, enumerable: true }); } catch {}
-          return Promise.resolve(fake);
-        }
-        return nativeQuery(desc);
-      });
+      const stateOverride = new WeakMap();
+      const stateDesc = Object.getOwnPropertyDescriptor(statusProto, 'state');
+      if (stateDesc && typeof stateDesc.get === 'function') {
+        const nativeState = stateDesc.get;
+        replaceNativeAccessor(statusProto, 'state', function () {
+          return stateOverride.has(this) ? stateOverride.get(this) : Reflect.apply(nativeState, this, []);
+        });
+      }
+      const virtualState = name => {
+        if (typeof name !== 'string') return null;
+        if (opaqueDocument) return 'denied';
+        if (crossOriginFrame && (name === 'notifications' || name === 'push')) return 'denied';
+        if (featureDeniedHere(name)) return 'denied';
+        if (trackedPerms.has(name) && !grantedPerms.has(name)) return 'prompt';
+        return null;
+      };
+      replaceNativeMethod(permProto, 'query', orig => ({ query(...args) {
+        const answer = Reflect.apply(orig, this, args);
+        let name;
+        try { name = args[0] && args[0].name; } catch {}
+        const v = virtualState(name);
+        if (v === null) return answer;
+        return answer.then(status => { try { stateOverride.set(status, v); } catch {} return status; });
+      } }).query);
     }
     // Privacy Sandbox — sharedStorage / Protected-Audience / Topics /
     // Private-State-Token are keyed to the REAL proxy origin, so data written

@@ -2564,6 +2564,87 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname.startsWith('/xfp')) {
+      // What a frame reads of its feature policy and its permissions: top, a same-origin frame, a cross-origin frame without
+      // and with `allow`. A cross-origin frame is refused notifications at once (asked only there: elsewhere it prompts).
+      // `unload` is left out: its default in a cross-origin frame is the browser's field-trial state — a user's Chrome
+      // allows it there, the launched headless one does not; the proxy reads as the user's (measured 2026-10-13).
+      const other = `http://127.0.0.1:${req.socket.localPort}`;
+      const probe = `<script>(async function () {
+        var cross = location.host.indexOf('127.0.0.1') === 0, out = { where: location.pathname };
+        try { out.notif = Notification.permission; } catch (e) { out.notif = e.name; }
+        if (cross) { try { out.request = await Notification.requestPermission(); } catch (e) { out.request = e.name; } }
+        out.perm = {};
+        for (var n of ['notifications', 'geolocation', 'camera', 'microphone', 'midi', 'persistent-storage', 'storage-access']) {
+          try { var st = await navigator.permissions.query({ name: n }); out.perm[n] = st.state + (Object.getOwnPropertyNames(st).length ? ' own:' + Object.getOwnPropertyNames(st) : ''); } catch (e) { out.perm[n] = e.name; }
+        }
+        out.queryOwn = Object.prototype.hasOwnProperty.call(navigator.permissions, 'query');
+        var fp = document.featurePolicy;
+        out.allowed = fp.allowedFeatures().filter(function (f) { return f !== 'unload'; }).sort().join(',');
+        out.allowsCamera = fp.allowsFeature('camera') + ' ' + fp.allowsFeature('camera', 'https://other.example') + ' ' + fp.allowsFeature('sync-xhr', 'https://other.example');
+        out.allowlist = ['camera', 'fullscreen', 'sync-xhr', 'payment'].map(function (f) { return f + '=' + JSON.stringify(fp.getAllowlistForFeature(f)); }).join(' ');
+        if (window.top === window) window.__xfpAdd(out); else parent.postMessage({ xfp: out }, '*');
+      })();</script>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      if (url.pathname === '/xfp') {
+        res.end(`<!doctype html><title>fp</title><script>window.__xfpAdd = function (o) { window.__xfpOut = (window.__xfpOut || []).concat([o]); if (window.__xfpOut.length === 4) window.__xfp = window.__xfpOut.slice().sort(function (a, b) { return a.where < b.where ? -1 : 1; }); };
+          addEventListener('message', function (e) { if (e.data && e.data.xfp) window.__xfpAdd(e.data.xfp); });</script>${probe}
+          <iframe src="/xfp-same"></iframe><iframe src="${other}/xfp-cross"></iframe><iframe src="${other}/xfp-cross-allow" allow="fullscreen; autoplay; camera"></iframe>`);
+        return;
+      }
+      res.end(`<!doctype html><title>fp</title>${probe}`);
+      return;
+    }
+    if (url.pathname.startsWith('/xch')) {
+      // Client hints as Chrome negotiates them: the document asks with Accept-CH + Critical-CH (Cloudflare's list), is asked
+      // for again with them, its own sub-requests carry them and a third party's do not — each request's header names in
+      // wire order. Plus a fetch/XHR to a port that refuses the connection.
+      const seen = globalThis.__chSeen || (globalThis.__chSeen = new Map());
+      const run = url.searchParams.get('run') || '';
+      const other = `http://127.0.0.1:${req.socket.localPort}`;
+      if (url.pathname === '/xch-log') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(seen.get(run) || []));
+        return;
+      }
+      // The transport places these itself on HTTP/1.1 (`priority` is HTTP/2's; Chrome sends none on HTTP/1.1). A
+      // puppeteer-launched Chrome sets `accept-language` among the renderer's headers, so it moves with them; a user's
+      // Chrome adds it in the network stack, last (measured) — it is left out of the comparison. So is `cookie`: whether
+      // there is one depends on what the suite ran before in that browser (its place is the kernel's `header_order` test's).
+      const names = []; const hints = {};
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        const k = req.rawHeaders[i].toLowerCase();
+        if (k === 'host' || k === 'connection' || k === 'content-length' || k === 'priority' || k === 'accept-language' || k === 'cookie') continue;
+        names.push(k);
+        if (k.startsWith('sec-ch-')) hints[k] = req.rawHeaders[i + 1];
+      }
+      const who = (req.headers.host || '').startsWith('127.0.0.1') ? 'other' : 'self';
+      if (!seen.has(run)) seen.set(run, []);
+      seen.get(run).push({ who, method: req.method, path: url.pathname, names: names.join(' '), hints });
+      const CH = 'Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA';
+      if (url.pathname === '/xch') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Accept-CH': CH, 'Critical-CH': CH });
+        res.end(`<!doctype html><title>ch</title><script src="/xch-sub.js?run=${run}"></script>
+          <img src="/xch-img?run=${run}"><img src="${other}/xch-img?run=${run}">
+          <script>
+            Promise.all([
+              fetch('/xch-api?run=${run}').then(function (r) { return r.text(); }),
+              new Promise(function (res) { var x = new XMLHttpRequest(); x.open('POST', '/xch-post?run=${run}'); x.setRequestHeader('content-type', 'text/plain;charset=UTF-8'); x.onloadend = function () { res(x.status); }; x.send('payload'); }),
+              fetch('${other}/xch-api?run=${run}', { mode: 'no-cors' }).then(function () { return 1; }, function () { return 0; }),
+              fetch('http://localhost:9/x', { mode: 'no-cors' }).then(function (r) { return 'resolved ' + r.status; }, function (e) { return 'rejected ' + e.name; }),
+              new Promise(function (res) { var x = new XMLHttpRequest(); x.open('GET', 'http://localhost:9/x'); x.onload = function () { res('load ' + x.status); }; x.onerror = function () { res('error ' + x.status); }; x.send(); }),
+              navigator.userAgentData.getHighEntropyValues(['wow64', 'architecture', 'uaFullVersion', 'bitness', 'formFactors', 'fullVersionList', 'model', 'platformVersion']),
+            ]).then(function (r) {
+              setTimeout(function () { window.__xch = { neterr: [r[3], r[4]], heKeys: Object.keys(r[5]).join(','), he: r[5] }; }, 300);
+            });
+          </script>`);
+        return;
+      }
+      if (url.pathname === '/xch-sub.js') { res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' }); res.end('void 0'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+      res.end('ok');
+      return;
+    }
     if (url.pathname.startsWith('/xref')) {
       // What a frame's `document.referrer` is, and what Referer its request carried: the embedder's Referrer-Policy header,
       // a `<meta name=referrer>`, a frame's `referrerpolicy` attribute, and a document reached by navigating.
@@ -7554,6 +7635,89 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, co
     assert.equal(direct.referrer.landing, `${targetBase}/xref-nav?run=native`);
     const scrub = r => JSON.parse(JSON.stringify(r).split('run=native').join('run=X').split('run=proxied').join('run=X'));
     assert.deepEqual(scrub(proxied), scrub(direct));
+  });
+
+  // Client hints (ERRATA 81). The proxy dropped every high-entropy hint and never restarted on `Critical-CH` — Cloudflare
+  // answers Glassdoor's hint-less first request with an interactive challenge, and a real Chrome only renders the restarted
+  // one; a script's fetch/XHR carried `sec-ch-ua` alone and no `accept`; every sub-request went out in a navigation's
+  // header order; the browser underneath restarted the proxy-origin document on the forwarded `Critical-CH`, so the target
+  // was asked for the document once more; and a fetch that could not connect resolved with our 502 page.
+  await t.test('client hints are negotiated as Chrome does, and a fetch that cannot connect fails (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async (open, run) => {
+      const p = await open(`${targetBase}/xch?run=${run}`);
+      try {
+        await p.waitForFunction(() => window.__xch, { timeout: 120000, polling: 100 });
+        const page = await p.evaluate(() => window.__xch);
+        const log = await (await fetch(`${targetBase}/xch-log?run=${run}`)).json();
+        return { page, log };
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      direct = await collect(async u => { const p = await directBrowser.newPage(); await p.goto(u, { waitUntil: 'domcontentloaded' }); return p; }, 'native');
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(u => openProxiedPage(u), 'proxied');
+    fs.writeFileSync(path.join(artifacts, 'client-hints.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // which requests went out, and each one's header names in wire order (the restart of the document included)
+    const shape = (r, who) => r.log.filter(e => e.who === who).map(e => `${e.method} ${e.path} | ${e.names}`).sort();
+    assert.equal(direct.log.filter(e => e.path === '/xch').length, 2, 'natively the document is asked for twice (Critical-CH)');
+    assert.deepEqual(shape(proxied, 'self'), shape(direct, 'self'));
+    // A sub-request's order is a hash table's, and the puppeteer-launched Chrome has one more name in it (its
+    // `accept-language`), which reorders a small table: the third party's is pinned to a user's Chrome (measured 2026-10-13).
+    assert.deepEqual(shape(proxied, 'other'), [
+      'GET /xch-api | sec-ch-ua-platform user-agent sec-ch-ua sec-ch-ua-mobile accept sec-fetch-site sec-fetch-mode sec-fetch-dest referer accept-encoding',
+      'GET /xch-img | sec-ch-ua-platform user-agent sec-ch-ua sec-ch-ua-mobile accept sec-fetch-site sec-fetch-mode sec-fetch-dest sec-fetch-storage-access referer accept-encoding',
+    ]);
+    assert.deepEqual(proxied.page.neterr, direct.page.neterr);
+    assert.deepEqual(proxied.page.neterr, ['rejected TypeError', 'error 0']);
+    assert.equal(proxied.page.heKeys, direct.page.heKeys);
+    // the values are the persona's: the build as the full version, in the hints and in the JS API alike
+    const restarted = proxied.log.filter(e => e.path === '/xch')[1].hints;
+    const full = proxied.page.he.uaFullVersion;
+    assert.match(full, /^\d+\.0\.\d+\.\d+$/);
+    assert.ok(!/\.0\.0\.0$/.test(full), `full version ${full}`);
+    assert.equal(restarted['sec-ch-ua-full-version'], `"${full}"`);
+    assert.equal(restarted['sec-ch-ua-full-version-list'], proxied.page.he.fullVersionList.map(b => `"${b.brand}";v="${b.version}"`).join(', '));
+    assert.deepEqual([restarted['sec-ch-ua-arch'], restarted['sec-ch-ua-bitness'], restarted['sec-ch-ua-model'], restarted['sec-ch-ua-platform-version']],
+      [`"${proxied.page.he.architecture}"`, `"${proxied.page.he.bitness}"`, `"${proxied.page.he.model}"`, `"${proxied.page.he.platformVersion}"`]);
+    // a third party gets the three defaults only
+    for (const e of proxied.log.filter(x => x.who === 'other')) assert.deepEqual(Object.keys(e.hints).sort(), ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform']);
+  });
+
+  // ERRATA 84. Underneath, every frame is same-origin with its embedder: a cross-origin frame read every 'self' feature as
+  // allowed (Turnstile's: 61, natively 20), the top's notification permission and permission states, and the allowlists
+  // named the proxy origin. The permission status was a stand-in with own properties, `query` an own property.
+  await t.test('a frame reads its feature policy and permissions as natively, cross-origin ones included (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const collect = async p => {
+      try {
+        await p.waitForFunction(() => window.__xfp, { timeout: 120000, polling: 100 });
+        return await p.evaluate(() => window.__xfp);
+      } finally {
+        await p.close();
+      }
+    };
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const p = await directBrowser.newPage();
+      await p.goto(`${targetBase}/xfp`, { waitUntil: 'domcontentloaded' });
+      direct = await collect(p);
+    } finally {
+      await directBrowser.close();
+    }
+    const proxied = await collect(await openProxiedPage(`${targetBase}/xfp`));
+    fs.writeFileSync(path.join(artifacts, 'feature-policy.json'), JSON.stringify({ direct, proxied }, null, 2));
+    const cross = direct.find(o => o.where === '/xfp-cross');
+    assert.equal(cross.notif, 'denied');
+    assert.notEqual(cross.allowed, direct.find(o => o.where === '/xfp').allowed, 'natively a cross-origin frame is allowed fewer features');
+    assert.deepEqual(proxied, direct);
   });
 
   // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:

@@ -756,6 +756,66 @@ claimed:
     URL). The deny stubs and the identity getters now replace the natives on `Navigator.prototype` with their flags, and an
     entry is judged infrastructure on its raw name. — same e2e (`page.navOwn`, `page.uaShape`, `page.perfNames`; mutation:
     stubs on the instance, share fallback in the filter → red).
+81. **Client hints were never negotiated.** Cloudflare answers a document with `Accept-CH` + `Critical-CH` naming every UA
+    hint. A real Chrome asks again with them (the internal 307 in front of the challenge page) and renders the second
+    answer; the SW dropped every high-entropy hint and never asked again, so Glassdoor's challenge page was the answer to
+    the hint-less request — `cType: 'interactive'`, Cloudflare's default template — where Chrome got `'managed'`. Measured
+    against this machine's Chrome with a local site asking for every hint (HTTP/1.1 and HTTP/2), the SW now negotiates as
+    Chrome does: `sec-ch-ua`, `-mobile`, `-platform` on every request to a potentially trustworthy URL; the others once a
+    top-level document of the origin asked (`Accept-CH`; the last list wins), on that origin's navigations and its own
+    requests to itself — never to a third party or a cross-site frame (nothing delegates them by default); a top-level
+    navigation sent once more on `Critical-CH`. The values come from one persona object (`ZP.TARGET_UA_HIGH_ENTROPY`) that
+    `getHighEntropyValues` reads too — which now resolves the build (`154.0.8037.98`; it said `154.0.0.0`, a string that
+    exists only in the reduced User-Agent), `formFactors`, and its members in alphabetical order as Blink does; the
+    viewport and media preferences are the tab's top window's. The order follows the kind of request (a navigation: the
+    hints first; after the restart: after `accept`; a sub-request: Blink's header map, measured for three name sets), and
+    the kernel keeps it (`X-ZP-Header-Order`) — its fixed rank had put every name it did not know, each hint among them,
+    behind `priority`, and `cookie` after `priority` where Chrome sends it before on HTTP/2. Found on the way: a script's
+    fetch/XHR carried `sec-ch-ua` alone and no `accept` (the defaults came only from the browser's own request, which a
+    runtime fetch has not); the target's `Accept-CH`/`Critical-CH` reached the browser underneath, which restarted the
+    proxy-origin document — the target was asked for the document twice; and natively a plain-http URL that is not
+    loopback gets neither hints nor `Sec-Fetch-*` (measured on this machine's LAN address), the proxy sent both. — e2e
+    `client hints are negotiated as Chrome does, and a fetch that cannot connect fails (matches native)` (every request's
+    header names in wire order equal native's, the document asked for twice; mutation: no restart, the headers forwarded,
+    no default `accept`, `.0.0.0`, insertion order → red); unit `header_order` (zp-transport-codec), core.test persona.
+    Glassdoor's verdict did not change with it: see the Residuals row.
+82. **A fetch/XHR that never reached a server resolved with the proxy's 502 page.** Natively a connection that fails
+    (refused, no route, no address, TLS, timeout) makes `fetch()` reject with a `TypeError` and an XHR fire `error` with
+    status 0; through the proxy the runtime API answered with our error page as an HTTP 502 — for a `no-cors` request too,
+    whose answer is opaque natively. Cloudflare's interactive widget probes an IPv6-only host
+    (`brunhild.challenges.cloudflare.com`; this machine has no IPv6, so natively it fails at once) and read a 502 from
+    Cloudflare instead. A runtime fetch's transport failure is now a network error; element loads keep the page (a non-ok
+    status fails them as a network error does). — same e2e (`neterr`: a refused port; mutation → red).
+83. **An icon link's URL reached the browser before the prelude hid it.** The membrane hides `<link rel=icon>` (the tab
+    icon would be fetched off the page's clock) from its mutation observer, but the parser reports an icon to the browser
+    as it inserts the element, with the href htmltx had already routed — now and then the browser downloaded it first (the
+    e2e `favicon masking without upstream fetch` flake, twice). htmltx now writes the hidden href itself for the `rel`
+    tokens the membrane treats as icons; the literal and the target stay in their stashes, which is what reads return. —
+    unit `icon_link_carries_the_hidden_href_and_keeps_its_target` (zp-htmltx); e2e `favicon masking`.
+84. **A frame cross-origin to its embedder read the permissions of a same-origin one.** Underneath, every frame is
+    same-origin with its embedder, so the browser granted each one every feature whose default allowlist is `'self'`
+    (Turnstile's frame: 61 features, natively 20), the top's notification permission (natively `denied`, and
+    `requestPermission()` refused at once, in every cross-origin frame — through the proxy it would prompt on the proxy's
+    behalf) and the top's permission states; `getAllowlistForFeature` named the proxy origin in every frame, the top
+    included. The membrane now reads the feature policy as the browser computes it for the virtual frame tree — a
+    cross-origin frame keeps a feature only if its embedder allows it for the frame's origin or delegates it with `allow`,
+    an iframe's container policy likewise, allowlists name virtual origins — and `Notification` and
+    `permissions.query` follow it. `query` answers with the browser's own `PermissionStatus` (the stand-in had own
+    `name`/`state`/`onchange`, and `query` itself was an own property of `navigator.permissions`); only `state` reads the
+    virtual value. — e2e `a frame reads its feature policy and permissions as natively, cross-origin ones included
+    (matches native)` (top, same-origin, cross-origin with and without `allow`: allowed lists, allowlists, ten
+    permission states, `Notification`; mutation: no cross-origin test, proxy origin left in the allowlists, real states →
+    red); measured equal in a user's Chrome (`.lean-ctx/fp-lab.js`).
+85. **The membrane's member access was the slowest path for the commonest base.** A challenge VM reads its own data —
+    register and bytecode arrays, typed arrays, strings, its functions — through computed members: Turnstile's widget
+    made 15.1 million `__zp_get` calls in 15 s (61 % an array indexed by a number), and each converted the index to a
+    string, hashed it against the Location names, probed `.window` and looked the base up in the cross-window table —
+    2.0 s of self time. Such a base is never a window, a document, a Location or a facade, so apart from the four names
+    answered for any base (`constructor`, `prepareStackTrace`, `postMessage`, `location`) it now reads and writes
+    directly (0.75 s; the tests used are trap-free for a page's Proxy). It matters beyond speed: a native HTTP/2 Chrome
+    whose renderer is slowed 8× fails Glassdoor's interactive check exactly as the proxy does, and passes at 4×
+    (`gd-click.js` `THROTTLE=`); through the proxy the renderer was busy 16.8 of 18.9 s against 3.1 of 14.7 s natively.
+    See the Residuals row. — e2e suite (the escape matrix exercises the full path); `.lean-ctx/gd-profile.js`.
 
 ### Residuals (documented, not fixed)
 
@@ -791,10 +851,13 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s (re-checked 2026-10-12, same IP, after the attempts below). Through the proxy the widget used to crash (`reading 'call'`): its VM compiles its decoder with `eval(TrustedScript)`, which the membrane did not run — item 77. Since then the VM runs to its verdict (first `fo` POST, workers, challenge image) and the verdict is against us: in a fresh Chrome the widget asks "Verify you are human", in the product browser it spins and restarts with a new Ray ID. Not the canvas farbling (same result with it switched off); still the same after the worker realm was made native (item 79), when the checkbox is drawn — a trusted CDP click on it changed nothing (not investigated: the click may not reach the widget). HTTP/2 SETTINGS and WINDOW_UPDATE were matched to Chrome before. What still reads differently in the widget (rows below): Trusted Types and CSP `sandbox` not applied, feature policy, blob URL origin. | e2e `/xtt`, `/xwenv`, `/xcoep`, `/xstack`; `.lean-ctx/env-diff.js` |
+| Glassdoor's Cloudflare challenge does not finish through the proxy | Two verdicts, measured 2026-10-13. **The first is the transport's:** Cloudflare serves the challenge page with `cType: 'interactive'` (a checkbox) to the proxy and `'managed'` (passes by itself in ~4 s) to a default Chrome — and a native Chrome with QUIC off (`--disable-quic`) gets `'interactive'` too: natively Chrome reaches Glassdoor over HTTP/3, the proxy over TCP/HTTP/2 (row below). Client hints (item 81) did not change it. **The second is the click's:** a native HTTP/2 Chrome passes ~2 s after a trusted click on the checkbox — also with its renderer slowed 4× — but **fails with it slowed 8×**, exactly as the proxy fails: the spinner shows, then the widget restarts with a new Ray ID. Through the proxy the click reaches the widget (trusted events at the checkbox, measured in the frame) and the widget frame now reads as natively in everything the probes cover (items 81–84: the IPv6 probe fails as a network error, `Notification`, the feature policy, the permission states); what remains is speed — the renderer is busy 16.8 of 18.9 s (natively 3.1 of 14.7 s), almost all of it the rewritten VM: every computed member access and method call goes through one helper (`__zp_get`/`__zp_call`), which defeats V8's inline caches and allocates an argument array per call (Turnstile decodes its strings character by character that way). Item 85 took the helper's own cost from 2.0 s to 0.75 s; the rest needs the rewriter to keep native accesses in place behind an inline guard. Also still different, not shown to matter: Trusted Types and CSP `sandbox` not applied (rows below), the blob URL origin, `history.length` (the launcher's entry), the farbled canvas values. | e2e `/xtt`, `/xwenv`, `/xch`, `/xfp`; `.lean-ctx/gd-click.js` (`CHROME_ARGS=--disable-quic`, `THROTTLE=`), `gd-profile.js`, `gd-profile-native.js`, `gd-click-diag.js`, `gd-shadow.js`, `env-diff.js` |
+| HTTP/3: a default Chrome reaches Cloudflare sites over QUIC, the proxy over TCP + TLS + HTTP/2 | The transport has no QUIC (a UDP path through the relay, a QUIC stack in the kernel, Chrome's QUIC fingerprint). Cloudflare scores it: on Glassdoor a native Chrome with QUIC off gets the interactive challenge the proxy gets (measured 2026-10-13). The proxy reports `nextHopProtocol` `h2` consistently. | `.lean-ctx/chl-req.js` (`CHROME_ARGS=--disable-quic`) |
+| `iframe.featurePolicy.getAllowlistForFeature` (an embedder reading a child's container policy) names the embedder's origin where natively it names the frame's | The allowlist mapping (item 84) puts the reading document's virtual origin in place of the proxy origin; for a container policy that should be the frame's `src` origin. `allowedFeatures`/`allowsFeature` of it are right. Rarely read. | — |
+| A sub-request's header order outside the measured name sets is approximate | Blink keeps a request's headers in a hash table, so the order changes with the set of names (Cloudflare's `cf-chl-ra` swaps `sec-ch-ua-model` and `-mobile`). Three sets are exact (no high-entropy hints, Cloudflare's nine, all of them); a page's own header goes where `cf-chl` did. Exact for every set means emulating Blink's string hash and table. | e2e `/xch` |
+| Client hints from `<meta http-equiv="Accept-CH">`, their `Permissions-Policy` delegation (`ch-ua-*=(…)`), `Width`/`Sec-CH-Width`, and `priority` on sub-requests | The SW negotiates from the response header only (item 81) and sends `priority` on documents only; natively Cloudflare's `fo` POST carries `priority: u=1, i`. | — |
 | A blob URL carries the proxy's origin (`blob:http://proxy.localhost:18080/…`; natively the document's) | `URL.createObjectURL` is the browser's: the blob store is keyed by the real origin. Handing out a virtual URL means mapping it back in every consumer (DOM URL attributes, `fetch`/XHR, workers, CSS `url()`, media, `import()`) and forward in every read-back. Known since the URL-gate design (trap-notebook LOG 2026-08). | env-diff `blobUrl` |
 | The target's header CSP is replaced by the proxy's: header-only `sandbox`, Trusted Types (`require-trusted-types-for`/`trusted-types`) and stricter source lists are not applied (the meta CSP is intersected, item 69) | Trusted Types would bind the membrane's own sinks (the prelude's evals, rewritten `innerHTML`): applying them needs a policy of ours for those sinks and the page's strings checked against the page's policy in the membrane. A nonce policy also refuses the prelude's inline scripts. Turnstile's document is such a document: natively a string `eval` throws `EvalError`, `document.domain = …` throws `SecurityError` (sandbox); through the proxy neither does. | env-diff `evalString`, `ttCreateOther`, `sandboxed` |
-| A cross-site frame allows the features a same-origin one does (`document.featurePolicy.allowedFeatures()`: Turnstile 61 through the proxy, 20 natively) | Underneath, every frame is same-origin with its embedder, so each feature whose default allowlist is `'self'` is allowed without an `allow` delegation. Emulating it means virtualizing the policy API and the features it gates. | env-diff `permissionsPolicy` |
 | Reddit's "Prove your humanity" wall on a cold profile | Parity: re-checked 2026-10-12 with a fresh, unautomated Chrome (no proxy) — it gets the same wall, and so does the proxy. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
@@ -1006,7 +1069,7 @@ helpers missing from the worker realm (`__zp_okeys`, `__zp_delete`, `__zp_oget`,
 `__zp_rget`, `__zp_with_*` …) — **fixed** (item 19; static-policy guard).
 Native methods through `self`, the `Function.prototype` facade, and blob
 sources revoked right after `new Worker()` — **fixed** (items 22, 23).
-Residuals: worker hooks are not `toString`-masked; `navigator` is the spoofed
+Worker hooks wearing the natives' shape (source, placement, flags) — **fixed** (item 79). Residuals: `navigator` is the spoofed
 build identity (intentional); termination mid-request and multi-target workers
 — **unverified**.
 

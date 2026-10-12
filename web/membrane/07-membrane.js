@@ -1394,7 +1394,22 @@
     function isObjectLike(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
     // `Error.prepareStackTrace` as the page sees it (pageStackHook, 00-head.js) — V8 keeps reading the sanitizer.
     const isStackHook = (base, prop) => prop === 'prepareStackTrace' && base === pageStackHook.ctor && base != null;
+    // Fast path (2026-10-13). A challenge VM reads its own data — register and bytecode arrays, typed arrays, strings,
+    // its functions — through computed members: Turnstile's widget made 15.1 million `__zp_get` calls in 15 s (61% an
+    // array indexed by a number), and the full path below spent 2 s of them converting each index to a string, hashing it
+    // against the Location names, probing `.window` and the cross-window table. None of that can apply to such a base —
+    // an array, a typed array, a string or a function is never a window, a document, a Location or a facade — except the
+    // few names the full path answers for any base. `Array.isArray`, `ArrayBuffer.isView` and `typeof` run no trap of a
+    // page's Proxy. (A renderer this busy fails Cloudflare's interactive check natively too: ERRATA 85.)
+    function fastDataBase(base) {
+      return typeof base === 'string' || typeof base === 'function' || Array.isArray(base) || ArrayBuffer.isView(base);
+    }
+    function fastDataKey(prop) {
+      return typeof prop === 'number' || (typeof prop === 'string' && prop !== 'constructor' && prop !== 'prepareStackTrace'
+        && prop !== 'postMessage' && prop !== 'location');
+    }
     function get(base, prop) {
+      if (base != null && fastDataKey(prop) && fastDataBase(base)) return base[prop];
       if (base == null) return nullishFail('get', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       if (isStackHook(base, prop)) return pageStackHook.value;
@@ -1511,6 +1526,13 @@
       return value;
     }
     function set(base, prop, value) {
+      // the same fast path for writes into a VM's own arrays (a string is immutable and a function's own data is the
+      // page's: both keep the full path)
+      if (base != null && (Array.isArray(base) || ArrayBuffer.isView(base))
+          && (typeof prop === 'number' || (typeof prop === 'string' && prop !== 'location' && prop !== 'name'))) {
+        Reflect.set(base, prop, value);
+        return value;
+      }
       if (base == null) return nullishFail('set', base, prop);
       if (typeof prop !== 'symbol') prop = String(prop);
       // A window of another site: `location` navigates, everything else throws.

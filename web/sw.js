@@ -619,6 +619,159 @@ function browserAcceptLanguage() {
   } catch { return 'en-US,en;q=0.9'; }
 }
 
+// Client Hints, negotiated the way Chrome 154 does. Measured 2026-10-13 against this machine's Chrome with a local site
+// that answers `Accept-CH` + `Critical-CH` (HTTP/1.1 and HTTP/2; the probes are in ERRATA item 81):
+//  * `sec-ch-ua`, `-mobile` and `-platform` go on every request to a potentially trustworthy URL.
+//  * The rest only once a top-level document of an origin asked for them with `Accept-CH` (the last list replaces the
+//    set), and then on that origin's navigations and on its own requests to itself — a third party (an image, a fetch,
+//    a frame of another site) gets the three defaults, since nothing delegates them by default.
+//  * A top-level navigation whose response names in `Critical-CH` hints it did not carry is sent once more with them
+//    (Chrome's internal restart: the 307 a fresh Chrome shows in front of Cloudflare's challenge page).
+// The proxy dropped every high-entropy hint and never restarted. Cloudflare answers Glassdoor's hint-less first request
+// with `cType: 'interactive'` (the checkbox that does not pass) and the restarted one with `cType: 'managed'`; a real
+// Chrome only ever renders the second.
+// The order Chrome emits them on a navigation (Blink's own list, measured with every hint asked for):
+const CLIENT_HINT_NAV_ORDER = [
+  'device-memory', 'sec-ch-device-memory', 'dpr', 'sec-ch-dpr', 'viewport-width', 'sec-ch-viewport-width',
+  'sec-ch-viewport-height', 'rtt', 'downlink', 'ect', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-full-version',
+  'sec-ch-ua-arch', 'sec-ch-ua-platform', 'sec-ch-ua-platform-version', 'sec-ch-ua-model', 'sec-ch-ua-bitness',
+  'sec-ch-ua-wow64', 'sec-ch-ua-full-version-list', 'sec-ch-ua-form-factors', 'sec-ch-prefers-color-scheme',
+  'sec-ch-prefers-reduced-motion', 'sec-ch-prefers-reduced-transparency', 'save-data',
+];
+const CLIENT_HINT_DEFAULTS = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'];
+// Every hint name the browser underneath may have put on the request it handed the worker: its values describe the
+// host browser on the proxy origin, never the persona on the target, so none of them is forwarded.
+const BROWSER_CLIENT_HINTS = new Set([...CLIENT_HINT_NAV_ORDER, 'width', 'sec-ch-width', 'sec-ch-ua-reduced', 'sec-ch-ua-full']);
+// origin → the hints its last top-level `Accept-CH` asked for (a profile's store in Chrome; this worker's here).
+const clientHintPrefs = new Map();
+function parseClientHintList(value) {
+  const out = new Set();
+  for (const raw of String(value || '').split(',')) {
+    const name = raw.trim().toLowerCase();
+    if (CLIENT_HINT_NAV_ORDER.includes(name)) out.add(name);
+  }
+  return out;
+}
+// A potentially trustworthy URL: https, or a loopback host. Chrome sends neither client hints nor `Sec-Fetch-*` anywhere
+// else (measured: a plain-http page on this machine's LAN address got `upgrade-insecure-requests, user-agent, accept,
+// accept-encoding, accept-language` and nothing more, even after asking for a hint).
+function potentiallyTrustworthyURL(u) {
+  try {
+    const url = new URL(u);
+    if (url.protocol === 'https:') return true;
+    const h = url.hostname;
+    return h === 'localhost' || h.endsWith('.localhost') || /^127\./.test(h) || h === '[::1]';
+  } catch { return false; }
+}
+// The hint values: the persona's for the UA family (ZP — the same object the page's `getHighEntropyValues` reads), the
+// browser's own for the device and network (this worker sees the same `navigator`), the tab's top window for the
+// viewport and the media preferences (reported by the launcher and each top-level document, `clientEnv`).
+function clientHintValue(name, env) {
+  const he = ZP.TARGET_UA_HIGH_ENTROPY;
+  const q = s => '"' + s + '"';
+  const nav = self.navigator || {};
+  const conn = nav.connection || null;
+  switch (name) {
+    case 'sec-ch-ua': return ZP.TARGET_SEC_CH_UA;
+    case 'sec-ch-ua-mobile': return '?0';
+    case 'sec-ch-ua-platform': return q('Windows');
+    case 'sec-ch-ua-arch': return q(he.architecture);
+    case 'sec-ch-ua-bitness': return q(he.bitness);
+    case 'sec-ch-ua-full-version': return q(he.uaFullVersion);
+    case 'sec-ch-ua-full-version-list': return he.fullVersionList.map(b => q(b.brand) + ';v=' + q(b.version)).join(', ');
+    case 'sec-ch-ua-model': return q(he.model);
+    case 'sec-ch-ua-platform-version': return q(he.platformVersion);
+    case 'sec-ch-ua-wow64': return he.wow64 ? '?1' : '?0';
+    case 'sec-ch-ua-form-factors': return he.formFactors.map(q).join(', ');
+    case 'device-memory': case 'sec-ch-device-memory': return typeof nav.deviceMemory === 'number' ? String(nav.deviceMemory) : null;
+    case 'rtt': return conn && typeof conn.rtt === 'number' ? String(conn.rtt) : null;
+    case 'downlink': return conn && typeof conn.downlink === 'number' ? String(conn.downlink) : null;
+    case 'ect': return conn && conn.effectiveType ? String(conn.effectiveType) : null;
+    case 'save-data': return conn && conn.saveData ? 'on' : null;
+  }
+  if (!env) return null;
+  switch (name) {
+    case 'dpr': case 'sec-ch-dpr': return typeof env.dpr === 'number' && env.dpr > 0 ? String(env.dpr) : null;
+    case 'viewport-width': case 'sec-ch-viewport-width': return env.vw > 0 ? String(Math.round(env.vw)) : null;
+    case 'sec-ch-viewport-height': return env.vh > 0 ? String(Math.round(env.vh)) : null;
+    case 'sec-ch-prefers-color-scheme': return env.scheme === 'dark' ? 'dark' : env.scheme === 'light' ? 'light' : null;
+    case 'sec-ch-prefers-reduced-motion': return env.motion === 'reduce' ? 'reduce' : env.motion === 'no-preference' ? 'no-preference' : null;
+    case 'sec-ch-prefers-reduced-transparency': return env.transparency === 'reduce' ? 'reduce' : env.transparency === 'no-preference' ? 'no-preference' : null;
+  }
+  return null;
+}
+// The window values a page reports for its tab, kept only in the shape `clientHintValue` reads.
+function sanitizeClientEnv(env) {
+  if (!env || typeof env !== 'object') return null;
+  const num = v => (typeof v === 'number' && isFinite(v) && v > 0 && v < 100000 ? v : 0);
+  const pick = (v, allowed) => (allowed.includes(v) ? v : '');
+  return {
+    dpr: num(env.dpr), vw: num(env.vw), vh: num(env.vh),
+    scheme: pick(env.scheme, ['light', 'dark']),
+    motion: pick(env.motion, ['reduce', 'no-preference']),
+    transparency: pick(env.transparency, ['reduce', 'no-preference']),
+  };
+}
+// The high-entropy hints a request carries (the defaults are not in this list), in Chrome's navigation order.
+//   topLevel: a top-level navigation — the target origin's own preferences.
+//   otherwise: the tab's top-level origin's preferences, only for a request to that origin from a document of it.
+function highEntropyHintsFor(opt, u, topLevel, inFrame) {
+  if (!potentiallyTrustworthyURL(u)) return [];
+  let origin;
+  try { origin = new URL(u).origin; } catch { return []; }
+  const top = opt.tab && opt.tab.topOrigin;
+  let prefs = null;
+  if (topLevel) prefs = clientHintPrefs.get(origin);
+  else if (origin === top) {
+    if (inFrame) {
+      const entry = opt.tab.entries && opt.tab.entries.get(opt.entryId);
+      let parent = top;
+      try { if (entry && entry.parentTargetUrl) parent = new URL(entry.parentTargetUrl).origin; } catch {}
+      if (parent === top) prefs = clientHintPrefs.get(top);
+    } else if (opt.context && opt.context.origin === top) prefs = clientHintPrefs.get(top);
+  }
+  if (!prefs || !prefs.size) return [];
+  return CLIENT_HINT_NAV_ORDER.filter(n => prefs.has(n) && !CLIENT_HINT_DEFAULTS.includes(n));
+}
+
+// Header order on the wire (measured 2026-10-13 over HTTP/1.1 and HTTP/2; HTTP/2 adds `priority` last and
+// `content-length` right after the pseudo-headers, which the transport places).
+//  * A navigation: the hints, then the browser's own request line; after a Critical-CH restart the hints follow `accept`.
+//  * A sub-request (element load, fetch, XHR): Blink's header map, whose order is a hash table's — it changes with the
+//    set of names. Three sets are measured (no high-entropy hints; Cloudflare's nine; all of them); a name not in the
+//    table (a page's own header) goes where the measured `cf-chl` did. Exact for those sets, an approximation otherwise.
+const NAV_REQUEST_LINE = ['upgrade-insecure-requests', 'user-agent', 'accept'];
+const NAV_TAIL = ['*', 'origin', 'content-type', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-user', 'sec-fetch-dest', 'sec-fetch-storage-access', 'referer', 'accept-encoding', 'accept-language', 'cookie', 'priority'];
+const SUB_TAIL = ['sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-storage-access', 'referer', 'accept-encoding', 'accept-language', 'cookie', 'priority'];
+const SUB_MAP_PLAIN = ['sec-ch-ua-platform', 'user-agent', 'sec-ch-ua', 'content-type', '*', 'sec-ch-ua-mobile', 'accept', 'origin'];
+const SUB_MAP_UA = ['sec-ch-ua-full-version-list', 'sec-ch-ua-platform', 'sec-ch-ua', 'sec-ch-ua-bitness', 'sec-ch-ua-model', 'sec-ch-ua-mobile', 'sec-ch-ua-arch', 'sec-ch-ua-full-version', 'user-agent', 'content-type', '*', 'sec-ch-ua-platform-version', 'accept', 'origin'];
+const SUB_MAP_ALL = ['sec-ch-ua-full-version-list', 'sec-ch-ua-platform', 'viewport-width', 'device-memory', 'sec-ch-ua', 'sec-ch-dpr', 'sec-ch-ua-model', 'sec-ch-ua-mobile', 'sec-ch-ua-form-factors', 'sec-ch-ua-bitness', 'sec-ch-ua-wow64', 'sec-ch-ua-arch', 'sec-ch-prefers-reduced-transparency', 'sec-ch-ua-full-version', 'content-type', 'sec-ch-viewport-width', 'downlink', 'sec-ch-viewport-height', 'ect', 'sec-ch-device-memory', 'sec-ch-prefers-reduced-motion', 'dpr', 'sec-ch-prefers-color-scheme', 'user-agent', '*', 'rtt', 'sec-ch-ua-platform-version', 'save-data', 'accept', 'origin'];
+function requestHeaderTemplate(kind, hints) {
+  if (kind === 'navigation') return [...CLIENT_HINT_NAV_ORDER.filter(n => hints.includes(n)), ...NAV_REQUEST_LINE, ...NAV_TAIL];
+  if (kind === 'critical-restart') return [...NAV_REQUEST_LINE, ...CLIENT_HINT_NAV_ORDER.filter(n => hints.includes(n)), ...NAV_TAIL];
+  const high = hints.filter(n => !CLIENT_HINT_DEFAULTS.includes(n));
+  const uaOnly = high.every(n => SUB_MAP_UA.includes(n));
+  const map = !high.length ? SUB_MAP_PLAIN : uaOnly ? SUB_MAP_UA : SUB_MAP_ALL;
+  return [...map, ...SUB_TAIL];
+}
+// The final order of `entries` (lowercase names) under a template: listed names by position, the others at `*` in their
+// own relative order. Also the list the kernel follows after it adds Referer/Origin/Accept-Encoding/Cookie.
+function orderRequestHeaders(entries, template) {
+  const star = template.indexOf('*');
+  const rank = name => { const i = template.indexOf(name); return i < 0 ? star : i; };
+  const indexed = entries.map((e, i) => ({ e, i, r: rank(String(e[0]).toLowerCase()) }));
+  indexed.sort((a, b) => (a.r - b.r) || (a.i - b.i));
+  const sorted = indexed.map(x => x.e);
+  const present = new Set(sorted.map(e => String(e[0]).toLowerCase()));
+  const order = [];
+  for (const name of template) {
+    if (name === '*') { for (const e of sorted) { const n = String(e[0]).toLowerCase(); if (rank(n) === star && !order.includes(n)) order.push(n); } continue; }
+    if (!order.includes(name)) order.push(name);
+  }
+  for (const n of present) if (!order.includes(n)) order.push(n);
+  return { sorted, order };
+}
+
 function captureBrowserFingerprint() { return CAPTURED_FINGERPRINT_B64; }
 
 async function initBundle() {
@@ -1973,43 +2126,19 @@ async function transportFetchHop(targetUrl, opt) {
   // still satisfying the kernel's `headerEntries` reader.
   const headerEntries = [];
   const seen = new Set();
-  // Phase 5.8 header hygiene. Browser-emitted Client Hints split into:
-  //
-  //   * DEFAULT: always sent by Chrome on cross-origin nav to ANY origin.
-  //     Includes sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform.
-  //     Keep — anti-bot WAFs check presence as a "is this Chromium" signal.
-  //
-  //   * GRANT-OPT-IN: Chrome only sends after the origin returns
-  //     `Accept-CH: <hint>` on a previous response. Includes
-  //     device-memory, downlink, dpr, ect, rtt, sec-ch-ua-arch,
-  //     sec-ch-ua-full-version, sec-ch-ua-full-version-list,
-  //     sec-ch-ua-model, sec-ch-ua-platform-version, sec-ch-ua-bitness,
-  //     sec-ch-ua-wow64, viewport-width, viewport-height, save-data,
-  //     prefers-color-scheme, prefers-reduced-motion.
-  //     The SW-intercepted Request inherits these from whatever the
-  //     page's Origin (proxy.localhost) has accumulated via Accept-CH.
-  //     Forwarding them upstream lies about the target's prior grant —
-  //     real Chrome would have sent NONE on first contact. NAVER WAF
-  //     flags this as bot-like (Chrome 148 cold-nav baseline has only
-  //     the 3 DEFAULT hints).
-  //
-  //   * INFERRED: viewport-width, viewport-height, device-pixel-ratio
-  //     — same rule as grant-opt-in.
-  //
-  // DROP everything in GRANT-OPT-IN / INFERRED unconditionally; the
-  // 60s slow-lane originating from over-sending hints disappears.
-  const DROP_CLIENT_HINTS = new Set([
-    'device-memory', 'downlink', 'dpr', 'ect', 'rtt',
-    'sec-ch-ua-arch', 'sec-ch-ua-bitness', 'sec-ch-ua-full-version',
-    'sec-ch-ua-full-version-list', 'sec-ch-ua-model',
-    'sec-ch-ua-platform-version', 'sec-ch-ua-wow64',
-    'viewport-width', 'viewport-height', 'device-pixel-ratio',
-    'save-data', 'prefers-color-scheme', 'prefers-reduced-motion',
-  ]);
-  const pushOnce = (k, v) => {
+  // Client hints (see `clientHintPrefs`): the browser underneath put its own on the request it handed us — values for
+  // the proxy origin and the host browser (WebView2 says Edge) — so none of those is forwarded; the persona's are
+  // emitted below, the three defaults on every request to a trustworthy URL and the rest as the target asked for them.
+  // (Until 2026-10-13 every high-entropy hint was dropped unconditionally, and a script's fetch/XHR carried `sec-ch-ua`
+  // alone: `-mobile` and `-platform` came only from the browser's request, which a runtime fetch does not have.)
+  // Fetch Metadata likewise exists only for a trustworthy target (the browser's own request, to the proxy origin, has it
+  // either way).
+  const trustworthy = potentiallyTrustworthyURL(u);
+  const pushOnce = (k, v, own) => {
     const kl = k.toLowerCase();
     if (seen.has(kl)) return;
-    if (DROP_CLIENT_HINTS.has(kl)) return;
+    if (!own && BROWSER_CLIENT_HINTS.has(kl)) return;
+    if (!trustworthy && kl.startsWith('sec-fetch-')) return;
     seen.add(kl);
     headerEntries.push([k, v]);
   };
@@ -2024,18 +2153,13 @@ async function transportFetchHop(targetUrl, opt) {
   // `seen` already had it. Real-Chrome operators in WebView2 still
   // get the canonical Chrome 148 UA — no harm.
   pushOnce('user-agent', ZP.TARGET_USER_AGENT);
-  // Force the canonical Chrome 148 sec-ch-ua FIRST so the browser's real header
-  // (Edge/WebView2 → "Microsoft Edge";v="149") loses the pushOnce race and is
-  // dropped. Otherwise the wire shows a Chrome UA + an Edge sec-ch-ua + v149 —
-  // an anti-bot tell. UA, sec-ch-ua, and the TLS spec now all agree: Chrome 148.
-  pushOnce('sec-ch-ua', ZP.TARGET_SEC_CH_UA);
   for (const [k, v] of headers.entries()) {
     // A playlist is rewritten whole, so it is asked for whole.
     if (opt.noRange && (k.toLowerCase() === 'range' || k.toLowerCase() === 'if-range')) continue;
     pushOnce(k, v);
   }
   // Now grab anything the browser added that Headers refused to copy
-  // (Sec-Fetch-Mode/Dest/Site/User, sec-ch-ua-* family, Accept-Language,
+  // (Sec-Fetch-Mode/Dest/Site/User, Accept-Language,
   // upgrade-insecure-requests). `request.headers.entries()` from the
   // SW-intercepted request DOES include these in Chromium.
   if (opt.redirectDepth === 0 && opt.request && opt.request.headers) {
@@ -2090,48 +2214,30 @@ async function transportFetchHop(targetUrl, opt) {
   if (!seen.has('accept-language')) pushOnce('accept-language', browserAcceptLanguage());
   // RFC 9218 `priority`. 2026-08-16 실측: 같은 머신의 직접 Chrome 은 최상위
   // 문서 요청에 `priority: u=0, i` 를 보내는데 우리는 아예 안 보냈다.
-  // HEADER_ORDER 에는 이미 자리(accept-language 다음)가 잡혀 있었는데 값이
-  // 없어서 비어 있던 것 — 헤더 "순서" 만 맞추고 "존재" 는 안 맞춘 셈이었다.
   if (opt.document && !seen.has('priority')) pushOnce('priority', 'u=0, i');
-  // Phase 5.8: emit User-Agent inline so the HEADER_ORDER sort positions
-  // it correctly (real Chrome 148 sends user-agent right after
-  // upgrade-insecure-requests). Previously promoted via X-ZP-User-Agent
-  // in the kernel which appended at end — visible h2 fingerprint diff vs
-  // Chrome at peet.ws (user-agent at index 11 instead of 4).
+  // A script's fetch()/XHR asks for anything unless it said otherwise (measured: `accept: */*`); the runtime API
+  // request has no browser request behind it to carry that.
+  if (!opt.document && opt.runtimeFetch && !seen.has('accept')) pushOnce('accept', '*/*');
+  // Phase 5.8: emit User-Agent inline so the order pass positions it.
   pushOnce('user-agent', ZP.TARGET_USER_AGENT);
-  // Phase 5.8 force Chrome 148 header order. Real Chrome emits headers
-  // in this deterministic order on the wire (HEADERS frame after the
-  // four pseudo-headers `m,a,s,p` which the h2 fork already pins).
-  // Without this pass, headerEntries' order is "Headers.entries() = sorted
-  // lowercase, then request.headers.entries() = sorted lowercase" = pure
-  // alphabetical, which is a 100% Go/Rust HTTP client tell.
-  //
-  // Bot signal (tls.peet.ws akamai_fingerprint hash includes header order):
-  //   real Chrome 148: sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform,
-  //   upgrade-insecure-requests, user-agent, accept, sec-fetch-site,
-  //   sec-fetch-mode, sec-fetch-user, sec-fetch-dest, accept-encoding,
-  //   accept-language, priority, [cookie last, auto-added by browser]
-  //
-  // We slot ZP-internal headers (X-ZP-*, Cookie) at the end after the
-  // real-browser tail so the prefix matches Chrome verbatim.
-  const HEADER_ORDER = [
-    'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
-    'upgrade-insecure-requests', 'user-agent', 'accept',
-    'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-user', 'sec-fetch-dest', 'sec-fetch-storage-access',
-    'referer', 'accept-encoding', 'accept-language', 'priority',
-    'cookie',
-  ];
-  const orderIndex = (k) => {
-    const i = HEADER_ORDER.indexOf(k.toLowerCase());
-    return i < 0 ? HEADER_ORDER.length : i;
-  };
-  headerEntries.sort((a, b) => {
-    const ai = orderIndex(a[0]);
-    const bi = orderIndex(b[0]);
-    if (ai !== bi) return ai - bi;
-    // Stable for entries beyond the known order (X-ZP-* sidechannel etc).
-    return 0;
-  });
+  // The persona's client hints: the defaults, and the high-entropy ones the target's preferences call for here.
+  const sentHints = trustworthy
+    ? [...CLIENT_HINT_DEFAULTS, ...highEntropyHintsFor(opt, u, opt.document && !inFrame, inFrame)]
+    : [];
+  const hintEnv = opt.tab && opt.tab.clientEnv;
+  for (const name of sentHints) {
+    const v = clientHintValue(name, hintEnv);
+    if (v !== null) pushOnce(name, v, true);
+  }
+  // Chrome's order for this kind of request (see `requestHeaderTemplate`), and the same list for the kernel, which adds
+  // Referer/Origin/Accept-Encoding/Cookie after this and used to re-sort by a fixed rank of its own (cookie last,
+  // anything unknown — every high-entropy hint, `content-type`, a page's own header — behind `priority`).
+  const template = requestHeaderTemplate(opt.document ? (opt.criticalRestart ? 'critical-restart' : 'navigation') : 'sub',
+    sentHints.filter(n => seen.has(n)));
+  const ordered = orderRequestHeaders(headerEntries, template);
+  headerEntries.length = 0;
+  headerEntries.push(...ordered.sorted);
+  headerEntries.push(['X-ZP-Header-Order', ordered.order.filter(n => !n.startsWith('x-zp-')).join(',')]);
   const method = opt.method;
   const bodyU8 = opt.body;
   const outgoing = logOutgoingHeaders(u, method, headerEntries);
@@ -2162,6 +2268,15 @@ async function transportFetchHop(targetUrl, opt) {
         `sw:transport-fail ${method} ${String(u).slice(0, 120)} after=${Math.round(performance.now() - txT0)}ms err=${reason}`
       );
     } catch {}
+    // A script's fetch()/XHR that never reached a server is a network error, as natively — the promise rejects, the
+    // XHR fires `error` with status 0. It used to resolve with our 502 page: Cloudflare's interactive widget probes an
+    // IPv6-only host (`brunhild.challenges.cloudflare.com`; this machine has no IPv6, so natively it fails at once)
+    // and through the proxy read "Cloudflare answered 502" instead — then ignored the checkbox click (2026-10-13).
+    // Element loads keep the page below: a non-ok status already fails them like a network error does.
+    if (opt.runtimeFetch) {
+      logRefusal(e && (e.message || e.code) || 'TARGET_CONNECT_FAILED', 0, u, { runtimeFetch: true, timeout: !!(e && e.zpTransportTimeout) });
+      return Response.error();
+    }
     // 타임아웃은 게이트웨이 타임아웃이다 — 502(연결 실패)와 구분해야
     // 로그만 보고도 "상류가 멈췄다" 와 "연결이 거절됐다" 를 가른다.
     if (e && e.zpTransportTimeout) return safeError(e.message, 504, u);
@@ -2207,6 +2322,25 @@ async function transportFetchHop(targetUrl, opt) {
   } catch {}
   // The preflight's own answer is judged by the caller (a redirect is a failure there).
   if (opt.preflight) return resp;
+  // A top-level navigation's `Accept-CH` sets what its origin's requests carry from now on, and its `Critical-CH` sends
+  // it once more when hints it names were missing (see `clientHintPrefs`). A redirect is followed instead.
+  if (opt.document && !inFrame && resp && resp.headers && potentiallyTrustworthyURL(u)) {
+    let hintOrigin = '';
+    try { hintOrigin = new URL(u).origin; } catch {}
+    const acceptCH = resp.headers.get('accept-ch');
+    if (hintOrigin && acceptCH !== null) clientHintPrefs.set(hintOrigin, parseClientHintList(acceptCH));
+    const criticalCH = resp.headers.get('critical-ch');
+    const redirecting = [301, 302, 303, 307, 308].includes(resp.status) && resp.headers.get('Location');
+    if (hintOrigin && criticalCH && !opt.criticalRestart && !redirecting) {
+      const prefs = clientHintPrefs.get(hintOrigin) || new Set();
+      const missing = [...parseClientHintList(criticalCH)]
+        .filter(n => prefs.has(n) && !sentHints.includes(n) && clientHintValue(n, hintEnv) !== null);
+      if (missing.length) {
+        if (resp.body) resp.body.cancel().catch(() => {});
+        return transportFetchHop(u, Object.assign({}, opt, { criticalRestart: true }));
+      }
+    }
+  }
   if (corsRequest && opt.tainted && resp && !corsCheck(resp.headers, corsOrigin, corsCredentials)) {
     if (resp.body) resp.body.cancel().catch(() => {});
     logRefusal('CORS_CHECK_FAILED', resp.status, u, { method: txMethod, origin: corsOrigin, credentials: corsCredentials, allow: resp.headers.get('access-control-allow-origin') });
@@ -2255,6 +2389,8 @@ async function transportFetchHop(targetUrl, opt) {
   if (opt.document) {
     const entry = opt.tab.entries && opt.tab.entries.get(context.entryId);
     if (entry && entry.targetUrl === context.documentUrl) { entry.targetUrl = u; entry.baseUrl = u; }
+    // The tab's top-level origin decides whose client-hint preferences its documents' requests carry.
+    if (!inFrame) { try { opt.tab.topOrigin = new URL(u).origin; } catch {} }
   }
   // What a script may read of a cross-origin answer — taken from the target's own headers, before the
   // worker's policy block replaces them.
@@ -2850,7 +2986,11 @@ async function handleMessage(event) {
       if (msg.reuseTabId) {
         tab = tabs.get(String(msg.reuseTabId)) || null;
       }
+      // The window the launcher (or an opener) is in: the viewport and media preferences the first navigation's client
+      // hints report, before a document of the tab can say so itself.
+      const openerEnv = sanitizeClientEnv(msg.env);
       if (tab) {
+        if (openerEnv) tab.clientEnv = openerEnv;
         const entryId = randomEntryId();
         const targetUrl = ZP.canonicalTargetURL(msg.targetUrl).href;
         tab.entries.set(entryId, { entryId, targetUrl, baseUrl: targetUrl, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now(), opaque: !!msg.opaque });
@@ -2859,6 +2999,7 @@ async function handleMessage(event) {
         return;
       }
       tab = createTab(msg.targetUrl, msg.servers, msg.challengeCompat);
+      if (openerEnv) tab.clientEnv = openerEnv;
       // A popup an opaque document opened is opaque itself (see opaqueEntry).
       if (msg.opaque) { const first = tab.entries.get(tab.activeEntryId); if (first) first.opaque = true; }
       shareRoutes.set(routeKey, { tabId: tab.tabId, entryId: tab.activeEntryId });
@@ -2917,6 +3058,9 @@ async function handleMessage(event) {
       if (!entry) { fail('SW_NOT_READY'); return; }
       const sourceId = event.source && event.source.id;
       if (sourceId) bindClientContext(sourceId, tab, entry);
+      // A top-level document's window is what its tab's client hints report (a frame's own size is not: Chrome sends
+      // the top window's viewport on a frame's requests too — measured).
+      if (msg.env && msg.env.top === true) { const env = sanitizeClientEnv(msg.env); if (env) tab.clientEnv = env; }
       ok({ bound: !!sourceId });
       return;
     }
@@ -3156,7 +3300,7 @@ function createTab(targetUrl, servers, challengeCompat) {
   // header/URL classifier (Go side) is the second of two signals; this flag
   // alone grants no egress, no eval, no cache skip.
   const targetOrigin = originKeyForURL(target);
-  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: getOrCreateJarForOrigin(targetOrigin), cookieJarOrigin: targetOrigin, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat };
+  const tab = { tabId, activeEntryId: entryId, entries: new Map(), originMap: new Map(), cookieJar: getOrCreateJarForOrigin(targetOrigin), cookieJarOrigin: targetOrigin, storageNamespaces: new Map(), runtimeProfile: {}, streamIsolationKey: ZP.bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32))), runtimeToken: ZP.randomId('rt'), servers: relayServers, challengeCompat: !!challengeCompat, topOrigin: new URL(target).origin, clientEnv: null };
   tab.entries.set(entryId, { entryId, targetUrl: target, baseUrl: target, title: '', stateClone: null, scrollX: 0, scrollY: 0, createdAt: Date.now() });
   tabs.set(tabId, tab);
   return tab;

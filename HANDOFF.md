@@ -1,12 +1,12 @@
-# ZeroProxy — handoff (2026-10-12)
+# ZeroProxy — handoff (2026-10-13)
 
 Written for: the next session (agent or engineer) picking up ZeroProxy cold. Read [CLAUDE.md](CLAUDE.md) and
 `head -40 .ai/trap-notebook/INDEX.md` first; this file only adds what is not already there.
 
 ## State
 
-- Branch `main`; everything up to `3044044` is on `origin/main`. The commit carrying this version of the file (items 79–80,
-  the worker realm) is local until the user says to push.
+- Branch `main`; everything up to `5ee0b34` (the worker realm, items 79–80) is on `origin/main`. The commit carrying this
+  version of the file (items 81–85) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
@@ -16,18 +16,22 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
   `3044044` a plain call's `this` (71), `Object.keys(window)` / location accessors (72), deterministic canvas/audio
   farbling (73), `Error.prepareStackTrace` as the page's own (74), `document.referrer` from the navigation (75), prelude
   scripts removed (76), **`eval(TrustedScript)` runs — the Glassdoor crash** (77), and **an escape closed: non-string timer
-  handlers ran unrewritten** (78) · the latest commit: **the worker realm made native** — hook sources, hook placement on
+  handlers ran unrewritten** (78) · `5ee0b34` **the worker realm made native** — hook sources, hook placement on
   `WorkerGlobalScope.prototype`, our names, resource timing, `this`, brands (79) — and the page's navigator/resource-timing
-  leftovers (80).
-- Verification (the latest commit): cargo 307 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e
-  226. 13-site sweep: all answer; Wikipedia, GitHub, Guardian, MDN, Naver, Apple, npm 0 errors. Known noise, unchanged from
+  leftovers (80) · the latest commit: **client hints negotiated as Chrome does** — `Accept-CH`, the `Critical-CH` restart,
+  the persona's build as the full version, Chrome's header order per request kind kept by the kernel, a runtime fetch's
+  defaults (81) — **a fetch that cannot connect is a network error**, not our 502 page (82), an icon link never carries a
+  fetchable URL (83, the favicon flake), a cross-origin frame reads its own feature policy and permissions (84), and the
+  membrane's member access reads data bases directly (85).
+- Verification (the latest commit): cargo 311 / 3 ignored, go ok, test:js 164, test:wasm:ci 13, static-policy 61, test:e2e
+  229. 13-site sweep: all answer; Wikipedia, GitHub, Guardian, MDN, Naver, Apple, npm 0 errors. Known noise, unchanged from
   earlier sweeps: BBC's GPT `t.getSlotElementId is not a function` (Google's ad tag), CNN's ad-partner 502s and two
   "Refused to apply style … MIME type ('text/html')" for `www.dianomi.com/…/dianomi-context.css` (upstream serves
   `text/css`; the HTML was the proxy's own error page for that request — not explained).
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–78 and its Residuals table, the trap-notebook entries
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–85 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
   `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
-  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
+  `프렐류드-스크립트-잔존`, `referrer-한-곳에서`, `클라이언트-힌트-협상`, `전송-실패는-네트워크-오류`, `대조군은-quic`, `바쁜-렌더러는-진다`, `아이콘-링크-경주`, `교차-출처-프레임-권한`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
   in PHASE2_STATUS is open.
 - **A product decision was made without asking — flag it to the user:** the canvas/audio masking (ERRATA Q6, "intentional")
   stayed, but became deterministic per profile and origin (item 73). Removing it outright would be the other choice; the
@@ -39,19 +43,25 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
 2. **Persona drift.** The persona is Chrome 154. Run `npm run check:chrome-hello` after a Chrome update: it opens the installed
    Chrome against a local listener and compares its ClientHello extensions and `trust_anchors` body with the SW's
    `CAPTURED_FINGERPRINT_B64` and `third_party-rustls-fork/src/ja3.rs` (exit 1 = drift, 2 = no Chrome). Bump the persona
-   (`web/zp-core.js`, `web/worker-prelude.js`, the spec, the constant) together;
+   (`web/zp-core.js` — the major and the build, `TARGET_CHROME_FULL_VERSION`, read off the installed Chrome's
+   `navigator.userAgentData.getHighEntropyValues(['uaFullVersion'])` — `web/worker-prelude.js`, the spec, the constant) together;
    `crates/zp-kernel-bundle/tests/client_hello.rs` pins the result.
-3. **Glassdoor — the one open site, now a verdict, not a crash.** The `reading 'call'` crash was `eval(TrustedScript)` not
-   running (item 77). The widget's VM now runs to its verdict and the verdict is against us: a fresh Chrome gets "Verify you
-   are human", the product browser spins and restarts with a new Ray ID. Natively (same IP, same hour) a fresh unautomated
-   Chrome is through in ~4 s. Not the canvas farbling (same result with it off), and still the same after the worker realm
-   was made native (item 79) — then with the checkbox drawn; a trusted CDP click on it changed nothing (does the click reach
-   the widget? not looked at). **Next:** the remaining widget readings in ERRATA's Residuals — Trusted Types / CSP
-   `sandbox` not applied (natively a string `eval` throws there, through the proxy it runs), feature policy, blob URL
-   origin; and whether a click reaches the widget. The method: `.lean-ctx/env-diff.js native|proxied [url]`
-   snapshots every frame's environment as page code sees it (probe list in `env-probe-src.js`, compare with
-   `env-compare.js [frame-substring]`); extend the probe and diff. Space the attempts (Cloudflare escalates to "Humans
-   only").
+3. **Glassdoor — the one open site; now a matter of speed.** Measured 2026-10-13 (ERRATA Residuals, traps `대조군은-quic`,
+   `바쁜-렌더러는-진다`): the *first* verdict is the transport's — a native Chrome with `--disable-quic` gets the same
+   `cType: 'interactive'` page as the proxy (a default Chrome uses HTTP/3 and gets `'managed'`). In the interactive case a
+   native HTTP/2 Chrome passes ~2 s after a trusted click, also with its renderer slowed 4×, and fails with it slowed 8× —
+   as the proxy does, whose widget frame now reads as natively in everything probed (items 81–84) but whose renderer is
+   busy 16.8 of 18.9 s (natively 3.1 of 14.7 s). **Next:** make the rewritten VM fast. Every computed member access and
+   method call goes through `__zp_get` / `__zp_call` (15.1 M calls in 15 s for one widget), which defeats V8's inline caches
+   and allocates an argument array per call; item 85 made the helper's own work cheap for data bases (2.0 s → 0.75 s), the
+   rest is the call sites. The idea to try: the rewriter emits an inline guard that keeps the native access at the site
+   when the base is plainly data — e.g. `typeof k === 'number' && __zp_isArray(o) ? o[k] : __zp_get(o, k)` with a captured
+   native `Array.isArray`, temps for `o`/`k` — and fixed-arity call helpers instead of `[args]`. Measure with
+   `gd-profile.js` (proxied; prints the hot rewritten functions' source) against `gd-profile.js`-style native numbers
+   (`gd-profile-native.js` with site isolation off), and judge with `gd-click.js proxied` / `CHROME_ARGS=--disable-quic
+   THROTTLE=4 gd-click.js native`. Still different and untested for effect: Trusted Types / CSP `sandbox` not applied (the
+   native messages are recorded in `.lean-ctx/tt-native-sandbox.json`), blob URL origin, `history.length`. Space the
+   attempts.
 4. A page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA Residuals) — low
    priority; inline scripts are native since item 70.
 5. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
@@ -163,9 +173,9 @@ hand-launched Chrome (above). If that changes, amend the CLAUDE.md policy line f
   did not find a bug.** The block took 358–367 s of its old 420 s; it is 720 s now (outer test 900 s). Before suspecting
   code, diff per-test durations against the last green log, then A/B the slowed tests on the previous `web/` (stash,
   `--web-only` build, same scratch subset) — on 2026-10-12 that read 185 s vs 193 s: noise.
-- **Known flake: `favicon masking without upstream fetch`.** Once in a full run (2026-10-12) the target saw `/site-icon.png`
-  fetched; the test alone and the next full run (222/222) passed. Not investigated — if it repeats, look at how the
-  `BLANK_ICON` classification can miss a favicon request.
+- **The `favicon masking` flake was a race, fixed (item 83):** the parser reports an icon to the browser before the
+  membrane's observer can hide it, so htmltx now writes the hidden href itself. A flake that repeats is a race until shown
+  otherwise.
 - **Repeated tests escalate the IP.** After a handful of Glassdoor attempts Cloudflare served a block page instead of the
   challenge. Space the runs; do not trust a comparison taken after many.
 - **`dist/web/sw.js` inlines `zp-core.js`.** Patching `dist/web/zp-core.js` does nothing to the SW; patch the copy at the top of

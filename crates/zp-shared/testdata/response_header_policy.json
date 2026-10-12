@@ -18,7 +18,11 @@
     "  directive — 타깃이 헤더로 브라우저를 조종하는 것(`Refresh` 는 헤더판",
     "              meta refresh 로 실제 탈출이었다).",
     "  hop_by_hop — 홉 단위 헤더. `Location` 은 리다이렉트 엔진 밖으로 흘리면",
-    "              브라우저가 따라가므로 여기 포함한다."
+    "              브라우저가 따라가므로 여기 포함한다.",
+    "",
+    "2026-10-13 Accept-CH / Critical-CH (directive): 클라이언트 힌트 협상은 페르소나(SW)가 타깃과 한다.",
+    "  브라우저에 넘기면 브라우저가 프록시 출처 문서를 Critical-CH 로 다시 내비게이션하고, SW 는 그 문서를",
+    "  타깃에 한 번 더 요청했다(측정: 최상위 문서 GET 두 번)."
   ],
   "reporting": [
     "Content-Security-Policy-Report-Only",
@@ -35,7 +39,9 @@
     "SourceMap",
     "X-SourceMap",
     "Set-Cookie",
-    "Set-Cookie2"
+    "Set-Cookie2",
+    "Accept-CH",
+    "Critical-CH"
   ],
   "hop_by_hop": [
     "Connection",

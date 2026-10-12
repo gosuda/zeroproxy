@@ -556,16 +556,7 @@
         const values = {
           brands: persona, mobile: false, platform,
           toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; },
-          getHighEntropyValues(hints) {
-            const chrome = (persona.find(b => b.brand === 'Google Chrome') || persona[0] || {}).version;
-            const full = {
-              brands: persona, mobile: false, platform, platformVersion: '19.0.0', architecture: 'x86', bitness: '64', model: '',
-              uaFullVersion: chrome + '.0.0.0', fullVersionList: persona.map(b => ({ brand: b.brand, version: b.version + '.0.0.0' })), wow64: false,
-            };
-            const picked = { brands: full.brands, mobile: full.mobile, platform: full.platform };
-            for (const h of (hints || [])) if (h in full) picked[h] = full[h];
-            return Promise.resolve(picked);
-          },
+          getHighEntropyValues(hints) { return Promise.resolve(ZP.uaHighEntropyValues(hints, persona, platform)); },
         };
         for (const k of Object.keys(values)) {
           const v = values[k];

@@ -156,7 +156,7 @@
     // popups to escape it (the browser applies the flags either way; the origin is what we emulate).
     const flags = opaqueDocument ? sandboxFlags() : null;
     const opaque = opaqueDocument && !(flags && flags.has('allow-popups-to-escape-sandbox'));
-    const reply = await ctx.bridge.send({ type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: target, servers: activeServers, ...(opaque ? { opaque: true } : null) });
+    const reply = await ctx.bridge.send({ type: ZP.MSG.OPEN_SHARE, routeKey: share.encrypted, targetUrl: target, servers: activeServers, env: ZP.clientEnvOf(root), ...(opaque ? { opaque: true } : null) });
     return proxyOrigin + reply.path + shareFragmentForKey(share.key);
   }
 
@@ -461,22 +461,10 @@
       mobile: false,
       platform: TARGET_PLATFORM === 'Win32' ? 'Windows' : TARGET_PLATFORM,
       toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; },
+      // The values and their shape are ZP's (one object for this realm, the workers and the SW's `Sec-CH-UA-*` hints):
+      // the build as the full version (was `154.0.0.0`), `formFactors`, members in alphabetical order.
       getHighEntropyValues(hints) {
-        const full = {
-          brands,
-          mobile: false,
-          platform: data.platform,
-          platformVersion: '19.0.0',
-          architecture: 'x86',
-          bitness: '64',
-          model: '',
-          uaFullVersion: (brands.find(b => b.brand === 'Google Chrome') || brands[0] || {}).version + '.0.0.0',
-          fullVersionList: brands.map(b => ({ brand: b.brand, version: b.version + '.0.0.0' })),
-          wow64: false,
-        };
-        const picked = { brands: full.brands, mobile: full.mobile, platform: full.platform };
-        for (const h of (hints || [])) if (h in full) picked[h] = full[h];
-        return Promise.resolve(picked);
+        return Promise.resolve(ZP.uaHighEntropyValues(hints, brands, data.platform));
       },
     };
     for (const k of Object.keys(shimValues)) {

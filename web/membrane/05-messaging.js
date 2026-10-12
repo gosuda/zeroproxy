@@ -94,7 +94,7 @@
   // 전부 거절당하므로 조용한 실패의 대가가 크다.
   (function bindClientToTab(attempt) {
     if (!boot.tabId) return;
-    ctx.bridge.send({ type: ZP.MSG.BIND_CLIENT, tabId: boot.tabId, entryId: boot.entryId })
+    ctx.bridge.send({ type: ZP.MSG.BIND_CLIENT, tabId: boot.tabId, entryId: boot.entryId, env: ZP.clientEnvOf(root) })
       .catch(() => { if (attempt < 10) setTimeout(() => bindClientToTab(attempt + 1), 200); });
   })(0);
   // SW 가 거절한 요청 목록. 서브리소스 실패는 페이지 콘솔에 아무 흔적을

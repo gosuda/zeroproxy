@@ -51,6 +51,28 @@ test('the Chrome brand list follows Chromium\'s rule: it reproduces what real Ch
   assert.ok(header(154).includes('"Not A(Brand";v="99"'));
 });
 
+// ERRATA 81: the persona's high-entropy values — one object for getHighEntropyValues (page and workers) and the SW's
+// Sec-CH-UA-* hints. The full version was `<major>.0.0.0` (that exists only in the reduced UA string) and the members came
+// back in insertion order; Chrome resolves the build and the members alphabetically (measured).
+test('the persona\'s high-entropy values: the build as the full version, the brands of sec-ch-ua, alphabetical members', () => {
+  const ZP = loadCore();
+  const major = /Chrome\/(\d+)\./.exec(ZP.TARGET_USER_AGENT)[1];
+  const he = ZP.TARGET_UA_HIGH_ENTROPY;
+  assert.match(he.uaFullVersion, new RegExp(`^${major}\\.0\\.\\d+\\.\\d+$`));
+  assert.ok(!he.uaFullVersion.endsWith('.0.0.0'));
+  assert.deepEqual(Array.from(he.fullVersionList, b => b.brand), Array.from(ZP.chromeBrandList(Number(major)), b => b.brand));
+  for (const b of he.fullVersionList) {
+    assert.equal(b.version, /^Not/.test(b.brand) ? ZP.chromeBrandList(Number(major)).find(x => x.brand === b.brand).version + '.0.0.0' : he.uaFullVersion);
+  }
+  const brands = ZP.chromeBrandList(Number(major));
+  const all = ZP.uaHighEntropyValues(['wow64', 'uaFullVersion', 'architecture', 'formFactors', 'bitness', 'fullVersionList', 'model', 'platformVersion', 'nonsense'], brands, 'Windows');
+  assert.deepEqual(Object.keys(all), ['architecture', 'bitness', 'brands', 'formFactors', 'fullVersionList', 'mobile', 'model', 'platform', 'platformVersion', 'uaFullVersion', 'wow64']);
+  assert.deepEqual(Object.keys(ZP.uaHighEntropyValues([], brands, 'Windows')), ['brands', 'mobile', 'platform']);
+  // each call hands out its own arrays (a page that mutates one must not change the next answer)
+  all.fullVersionList[0].version = 'x';
+  assert.notEqual(ZP.uaHighEntropyValues(['fullVersionList'], brands, 'Windows').fullVersionList[0].version, 'x');
+});
+
 test('the persona\'s User-Agent and sec-ch-ua name one Chrome version, in every realm that has its own copy', () => {
   const ZP = loadCore();
   const major = /Chrome\/(\d+)\./.exec(ZP.TARGET_USER_AGENT)[1];

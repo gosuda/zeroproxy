@@ -541,7 +541,15 @@ fn attr_settings(
                                         )
                                     };
                                     if let Some(next) = next {
-                                        let _ = el.set_attribute(&name, &next);
+                                        // An icon link never carries a fetchable URL: the parser reports the icon
+                                        // to the browser as it inserts the element, before the prelude's observer
+                                        // can hide it, and the tab-icon download then went to the target (the
+                                        // e2e `favicon masking` flake). The target stays readable through the
+                                        // stashes below, which is what the membrane serves.
+                                        let icon = tag.as_str() == "link"
+                                            && lower == "href"
+                                            && el.get_attribute("rel").is_some_and(|r| is_icon_link_rel(&r));
+                                        let _ = el.set_attribute(&name, if icon { HIDDEN_ICON_HREF } else { &next });
                                         // 리터럴 stash — getAttribute('src') 가
                                         // 절대 URL 이 아니라 작성자 원문을 돌려주도록.
                                         let _ = el.set_attribute(
@@ -1467,6 +1475,20 @@ pub(crate) fn split_srcset_candidates(raw: &str) -> Vec<SrcsetCandidate<'_>> {
         list.push(SrcsetCandidate { lead, url, tail: &raw[desc_start..i] });
     }
     list
+}
+
+/// The href an icon link carries in the browser (the membrane's `hiddenIconHref`): nothing the browser would fetch.
+const HIDDEN_ICON_HREF: &str = "data:application/x-zeroproxy-icon,1";
+
+/// The `rel` tokens the browser fetches an icon for — the membrane's `isIconLinkRelValue`.
+fn is_icon_link_rel(rel: &str) -> bool {
+    rel.split(|c: char| c.is_ascii_whitespace() || c == ',').any(|t| {
+        let t = t.to_ascii_lowercase();
+        matches!(
+            t.as_str(),
+            "icon" | "mask-icon" | "apple-touch-icon" | "apple-touch-icon-precomposed" | "apple-touch-startup-image" | "fluid-icon"
+        )
+    })
 }
 
 fn proxied_subresource_url(
@@ -2769,6 +2791,23 @@ mod tests {
             "data-zp-target-url should preserve the original absolute URL: {}",
             r.html
         );
+    }
+
+    // An icon link carries nothing the browser would fetch for the tab icon: the parser reports it before the prelude can
+    // hide it. Its target and literal stay in the stashes the membrane reads.
+    #[test]
+    fn icon_link_carries_the_hidden_href_and_keeps_its_target() {
+        for rel in ["icon", "shortcut icon", "apple-touch-icon", "MASK-ICON"] {
+            let html = format!("<link rel=\"{rel}\" href=\"/site-icon.png\">");
+            let r = transform(&html, &opts()).unwrap();
+            assert!(r.html.contains("href=\"data:application/x-zeroproxy-icon,1\""), "{rel}: {}", r.html);
+            assert!(!r.html.contains("/zp/api/fetch"), "{rel}: no fetchable URL: {}", r.html);
+            assert!(r.html.contains("data-zp-lit-href=\"/site-icon.png\""), "{rel}: literal stash: {}", r.html);
+            assert!(r.html.contains("data-zp-target-url=\"https://"), "{rel}: target stash: {}", r.html);
+        }
+        // not an icon: still routed
+        let r = transform("<link rel=\"preload\" as=\"image\" href=\"/site-icon.png\">", &opts()).unwrap();
+        assert!(r.html.contains("/zp/api/fetch?url="), "{}", r.html);
     }
 
     #[test]

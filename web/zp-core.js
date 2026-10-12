@@ -64,6 +64,55 @@
     return list;
   }
   const TARGET_SEC_CH_UA = chromeBrandList(TARGET_CHROME_MAJOR).map(b => '"' + b.brand + '";v="' + b.version + '"').join(', ');
+  // 2026-10-13: the persona's high-entropy values — what `navigator.userAgentData.getHighEntropyValues()` resolves to and
+  // what the `Sec-CH-UA-*` hints a site asks for with `Accept-CH` carry. One object for the page, the workers and the SW.
+  // Measured against this machine's Chrome 154 (a local page asking for every hint): the full version is the build
+  // (`154.0.8037.98`), in the hints and in the JS API alike — `.0.0.0` exists only in the reduced User-Agent string, and
+  // the persona used to hand it out as the "full" version too. The GREASE brand's full version is its major + `.0.0.0`.
+  // Bump the build with the major (the drift check in scripts/check-chrome-hello.mjs opens the installed Chrome).
+  const TARGET_CHROME_FULL_VERSION = TARGET_CHROME_MAJOR + '.0.8037.98';
+  const TARGET_UA_HIGH_ENTROPY = Object.freeze({
+    architecture: 'x86',
+    bitness: '64',
+    formFactors: Object.freeze(['Desktop']),
+    fullVersionList: Object.freeze(chromeBrandList(TARGET_CHROME_MAJOR).map(b => Object.freeze({
+      brand: b.brand,
+      version: b.brand === 'Chromium' || b.brand === 'Google Chrome' ? TARGET_CHROME_FULL_VERSION : b.version + '.0.0.0',
+    }))),
+    model: '',
+    platformVersion: '19.0.0',
+    uaFullVersion: TARGET_CHROME_FULL_VERSION,
+    wow64: false,
+  });
+  // `getHighEntropyValues(hints)` the way Blink resolves it: brands, mobile and platform always, the asked-for hints
+  // Chrome knows, and the dictionary's members in **alphabetical order** (an IDL dictionary is converted member by member
+  // in that order — measured: `architecture, bitness, brands, formFactors, …`; the shim used to return insertion order).
+  // A window's values for the client hints the SW sends on its tab's requests (viewport, DPR, media preferences).
+  function clientEnvOf(win) {
+    const env = { top: false };
+    try {
+      const mq = q => { try { return !!win.matchMedia(q).matches; } catch { return false; } };
+      env.dpr = Number(win.devicePixelRatio) || 1;
+      env.vw = Number(win.innerWidth) || 0;
+      env.vh = Number(win.innerHeight) || 0;
+      env.scheme = mq('(prefers-color-scheme: dark)') ? 'dark' : 'light';
+      env.motion = mq('(prefers-reduced-motion: reduce)') ? 'reduce' : 'no-preference';
+      env.transparency = mq('(prefers-reduced-transparency: reduce)') ? 'reduce' : 'no-preference';
+      env.top = win.top === win;
+    } catch {}
+    return env;
+  }
+  function uaHighEntropyValues(hints, brands, platform) {
+    const all = Object.assign({ brands, mobile: false, platform }, TARGET_UA_HIGH_ENTROPY);
+    const wanted = new Set(['brands', 'mobile', 'platform']);
+    for (const h of (hints || [])) if (Object.prototype.hasOwnProperty.call(all, h)) wanted.add(String(h));
+    const out = {};
+    for (const k of Array.from(wanted).sort()) {
+      const v = all[k];
+      out[k] = Array.isArray(v) ? v.map(x => (x && typeof x === 'object' ? Object.assign({}, x) : x)) : v;
+    }
+    return out;
+  }
   const MAX_RELAY_SERVERS = 8;
   const MAX_RELAY_SERVER_BYTES = 2048;
   const ERRORS = Object.freeze(['BAD_HMAC','INVALID_SHARE_LINK','MALFORMED_ROUTE','SW_NOT_READY','TARGET_PROTOCOL_BLOCKED','TLS_CERTIFICATE_INVALID','TLS_HANDSHAKE_FAILED','TARGET_CONNECT_FAILED','TARGET_HTTP_FAILED','MALFORMED_HTML','REALM_INJECTION_FAILURE','REQUEST_BODY_TOO_LARGE','SUBMISSION_EXPIRED','POLICY_BLOCKED','REWRITE_FAILED','SCRIPT_SRC_BLOCKED','REDIRECT_BODY_NONREPLAYABLE','REDIRECT_LIMIT_EXCEEDED','WS_BLOCKED','RTC_GATEWAY_UNAVAILABLE','WT_UNSUPPORTED']);
@@ -505,7 +554,7 @@
       return result;
     };
   }
-  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
+  const api = Object.freeze({ CONTROL_PREFIX, ASSET_PREFIX, TARGET_USER_AGENT, TARGET_SEC_CH_UA, TARGET_CHROME_FULL_VERSION, TARGET_UA_HIGH_ENTROPY, uaHighEntropyValues, clientEnvOf, chromeBrandList, bytesToBase64Url, base64UrlToBytes, webTransportGatewayRequest, relayOnlyRTCConfiguration, ENVELOPE_MIME,encodeEnvelope, decodeEnvelope, encryptShareURL, decryptShareURL, makeShareURL, makeSharePath, makeShareFragment, defaultRelayServer, relayServersForShare, isSharePath, shareRouteKey, controlPath, assetPath, assetURL, versionedAsset, apiPath, errorPath, INTERNAL_ASSET_SCRIPTS, isInternalAssetScriptPath, isInternalPath, canonicalTargetURL, canonicalWebSocketURL, encodeTargetURL, decodeTargetURL, randomId, fixedCSP, filterMetaCSP, parseRelayServersFromFragment, normalizeRelayServers, isLoopbackHost, redirectMethod, createFetchResponseAdapter, ERRORS, errorInfo, MSG });
   // `configurable: true` so the page-realm runtime-prelude can DELETE the
   // named property after capturing it into a closure-local binding.
   // Without that, `Object.getOwnPropertyNames(window)` enumerates `ZP`

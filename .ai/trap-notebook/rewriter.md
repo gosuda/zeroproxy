@@ -1716,3 +1716,40 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **원인:** SW 는 브라우저가 계산한 요청별 정책으로 `Referer` 를 정확히 만들고 있었는데, 프렐류드는 부모 URL 을 **기본 정책**으로 잘라 따로 재구성했다(최상위 문서는 늘 `""`).
 - **고침(ERRATA 75):** SW 가 문서 내비게이션에 실은 값(마지막 홉)을 엔트리에 남기고 부트 설정으로 넘긴다. 프렐류드는 그 값을 그대로 쓰고, 가져온 적 없는 문서(blank/srcdoc)만 예전 규칙.
 - **규칙:** 브라우저나 SW 가 이미 계산한 값을 프렐류드에서 다시 만들지 말고 **넘겨받는다**. 재구성은 정책·속성·리다이렉트를 하나씩 빠뜨린다.
+
+## <a id="클라이언트-힌트-협상"></a>버리는 것은 흉내가 아니다 — 서버가 요구한 클라이언트 힌트를 페르소나가 협상해야 한다 (2026-10-13)
+
+- **측정:** Glassdoor 챌린지 페이지가 네이티브엔 `cType: 'managed'`, 프록시엔 `'interactive'`(JS 가 돌기 전, 첫 응답에서 갈림). 403 응답에 `Accept-CH` + `Critical-CH`(UA 힌트 전부). 로컬 사이트로 진짜 Chrome 을 재 보니 Critical-CH 를 받으면 힌트를 실어 **한 번 더 요청**하고(앞의 내부 307), 이후 그 출처의 요청엔 고엔트로피 힌트가 붙는다.
+- **원인:** SW 의 `DROP_CLIENT_HINTS` 가 "Chrome 은 Accept-CH 뒤에만 보낸다" 는 맞는 관찰에서 "그러니 늘 버린다" 는 틀린 결론을 냈다. 협상을 안 하는 Chrome = UA 만 흉내 내는 HTTP 클라이언트. 게다가 응답의 `Accept-CH`/`Critical-CH` 를 브라우저에 넘겨 **브라우저가 프록시 출처 문서를 재요청** — 타깃이 문서를 두 번 받았다.
+- **고침(ERRATA 81):** 출처별 선호 저장, 최상위 내비게이션의 Critical-CH 재요청, 페르소나 값 한 벌(`ZP.TARGET_UA_HIGH_ENTROPY`; JS 의 getHighEntropyValues 와 같은 객체), 요청 종류별 실측 순서를 커널까지(`X-ZP-Header-Order`). 두 헤더는 브라우저로 가는 응답에서 지운다. 평문 http(루프백 아님)엔 힌트도 Sec-Fetch-* 도 없다(실측).
+- **규칙:** 브라우저가 서버와 **협상**하는 것(Accept-CH, Critical-CH 류)은 페르소나가 대신 협상해야 한다 — 버리면 협상할 줄 모르는 클라이언트로 보이고, 흘리면 브라우저가 프록시 출처로 협상한다. 값은 JS 와 HTTP 가 한 객체에서 나와야 한다.
+
+## <a id="전송-실패는-네트워크-오류"></a>연결 실패를 응답으로 돌려주면 페이지는 "서버가 502 를 줬다" 고 읽는다 (2026-10-13)
+
+- **측정:** Turnstile 대화형 위젯이 IPv6 전용 호스트(`brunhild.challenges.cloudflare.com`)를 찌른다. 이 PC 는 IPv6 가 없어 네이티브는 즉시 `fetch` 거부/XHR `error`(status 0). 프록시는 우리 오류 페이지를 **HTTP 502 응답**으로 줬다(`no-cors` 인데도 상태가 보였다).
+- **고침(ERRATA 82):** 런타임 fetch/XHR 의 전송 실패(거부·경로 없음·DNS·TLS·시간 초과)는 `Response.error()` → 네트워크 오류. 요소 로드는 비-ok 상태가 이미 네트워크 오류처럼 실패하므로 그대로, 내비게이션은 오류 페이지(Chrome 도 자기 오류 페이지).
+- **규칙:** "서버에 닿지 못함" 과 "서버가 오류로 답함" 은 페이지가 구분할 수 있다. 우리 쪽 실패를 응답으로 포장하지 말 것 — 특히 상태 코드가 보이는 fetch/XHR.
+
+## <a id="대조군은-quic"></a>대조군 Chrome 은 HTTP/3 를 쓴다 — 첫 판정 차이를 프록시 탓으로 단정하기 전에 `--disable-quic` (2026-10-13)
+
+- **측정:** 같은 IP·같은 시각, 네이티브 Chrome 은 Glassdoor 에 `nextHopProtocol: h3`. `--disable-quic` 으로 띄운 네이티브도 `cType: 'interactive'` 를 받는다 — 프록시와 같은 판정. 그 상태에서 네이티브는 체크박스 클릭 2초 만에 통과, 프록시는 스피너 뒤 재시작.
+- **규칙:** Cloudflare 류 판정 비교의 대조군은 둘: 기본 Chrome(h3)과 QUIC 끈 Chrome(h2). 프록시 전송은 TCP+TLS+h2 라 후자가 공정한 대조다(`.lean-ctx/chl-req.js`, `gd-click.js` 에 `CHROME_ARGS=--disable-quic`). 판정은 실행마다 흔들리니 매번 `cType` 을 기록한다.
+
+## <a id="바쁜-렌더러는-진다"></a>환경이 같아도 느리면 진다 — 대화형 챌린지는 렌더러가 바쁘면 떨어진다 (2026-10-13)
+
+- **측정:** Glassdoor 대화형 판정에서 네이티브(h2) Chrome 은 체크박스 클릭 2초 만에 통과, 렌더러를 CDP 로 4배 늦춰도 통과, **8배면 프록시와 똑같이 실패**(스피너 뒤 재시작). 프록시 렌더러는 18.9초 중 16.8초 바쁨, 네이티브는 14.7초 중 3.1초.
+- **원인:** 리라이트된 VM 의 모든 계산된 멤버 접근·메서드 호출이 헬퍼 하나(`__zp_get`/`__zp_call`)로 모인다 — 위젯 하나가 15초에 1,510만 번. 인라인 캐시가 깨지고 호출마다 인자 배열을 만든다. 헬퍼 자체도 배열·숫자 접근에 문자열 변환·해시·`.window` 탐침을 했다(2.0초).
+- **고침(ERRATA 85):** 배열·타입 배열·문자열·함수 base 는 창·문서·Location·파사드가 될 수 없으니 특수 이름 넷만 빼고 바로 읽고 쓴다(0.75초). 나머지는 리라이터가 접근 자리에 인라인 가드를 두는 설계가 필요하다.
+- **규칙:** 지문이 다 같아져도 판정이 갈리면 **속도**를 의심한다. 대조는 네이티브에 `Emulation.setCPUThrottlingRate`(`gd-click.js` `THROTTLE=`) — 교차 사이트 위젯은 별도 프로세스라 그 대상에도 건다. 성능 측정은 `gd-profile.js`(프록시)·`gd-profile-native.js`(사이트 격리 끄면 한 프로세스).
+
+## <a id="아이콘-링크-경주"></a>파서가 먼저 알린다 — 관찰자로 숨기는 것은 늦다 (2026-10-13)
+
+- **증상:** e2e `favicon masking without upstream fetch` 가 가끔(두 번) 실패: 대상이 `/site-icon.png` 를 받았다.
+- **원인:** 멤브레인은 `<link rel=icon>` 의 href 를 MutationObserver 에서 숨기는데, 파서는 요소를 넣는 순간 아이콘 URL 을 브라우저에 알린다. htmltx 가 이미 라우팅한 href 가 그 사이에 나갔다.
+- **고침(ERRATA 83):** htmltx 가 아이콘 rel 이면 처음부터 숨김 href 를 쓴다(원문·타깃은 stash). 규칙: 브라우저가 **파싱 중에** 행동하는 속성(아이콘, preload, refresh…)은 관찰자가 아니라 변환 단계에서 막는다.
+
+## <a id="교차-출처-프레임-권한"></a>밑단이 같은 출처면 브라우저는 같은 출처 프레임의 권한을 준다 (2026-10-13)
+
+- **측정(`.lean-ctx/fp-lab.js`, 사용자 Chrome):** 교차 출처 프레임은 `Notification.permission` `denied`, `requestPermission()` 즉시 `denied`, 정책 제어 권한(카메라·마이크·위치·클립보드·MIDI·화면 꺼짐 방지) `denied`, 허용 기능 16개(`allow` 위임 시 +3). 프록시는 최상위와 같은 76개·`default`였고, `getAllowlistForFeature` 는 모든 프레임에서 **프록시 출처**를 말했다.
+- **고침(ERRATA 84):** 가상 프레임 트리로 feature policy 를 계산(임베더가 그 출처에 허용하거나 `allow` 로 위임해야 유지, 허용 목록은 가상 출처), Notification·permissions.query 가 그것을 따른다. query 는 진짜 PermissionStatus 를 주고 `state` 만 바꾼다(own 속성 셋 달린 가짜 객체였다).
+- **규칙:** "프레임이 교차 출처일 때 브라우저가 다르게 주는 것" 은 밑단에서 전부 같은 출처로 사라진다 — 출처를 묻는 API 마다 가상 트리로 다시 계산해야 한다.
