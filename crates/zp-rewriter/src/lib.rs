@@ -2735,7 +2735,8 @@ impl<'a> Visit<'a> for RewriteVisitor {
     /// Everywhere else in sloppy code `this` is the caller's receiver — except that a plain call (`f()`, `Function('return
     /// this')()`, `[].map(f)`) gets the real global from the engine, where natively it is the window. That one value is
     /// mapped at runtime (`__zp_this`), every other receiver passes through. Strict code and class bodies get `undefined`
-    /// for a plain call, so they are left alone; module and worker code has no window facade to map to.
+    /// for a plain call, so they are left alone, and so is module code. A classic worker script is the same with `self`
+    /// for `window`: the worker's helper maps its real global to the worker's facade.
     /// `'prepareStackTrace' in Error` — the presence test of the one routed member a page checks with `in` (the membrane's
     /// sanitizer is there, natively nothing is). Other `in` tests stay native.
     fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
@@ -2755,13 +2756,13 @@ impl<'a> Visit<'a> for RewriteVisitor {
     }
 
     fn visit_this_expression(&mut self, expr: &ThisExpression) {
-        if self.kind == ScriptKind::Classic && !self.local_this && self.nt_depth == 0 && self.class_depth == 0 {
+        let top = !self.local_this && self.nt_depth == 0 && self.class_depth == 0;
+        if self.kind == ScriptKind::Classic && top {
             self.emit_global_get(expr.span, "window");
-        } else if self.cur_sloppy
-            && self.class_depth == 0
-            && self.kind != ScriptKind::Module
-            && self.kind != ScriptKind::Worker
-        {
+        } else if self.kind == ScriptKind::Worker && top {
+            // a classic worker script's top level: the global, which worker code knows as `self` (the worker's facade)
+            self.emit_global_get(expr.span, "self");
+        } else if self.cur_sloppy && self.class_depth == 0 && self.kind != ScriptKind::Module {
             self.patches.push(Patch { start: expr.span.start, end: expr.span.end, replacement: "\u{1}THIS_MAP\u{1}".to_string() });
         }
     }

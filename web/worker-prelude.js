@@ -2,6 +2,37 @@
   'use strict';
   if (self.__ZP_WORKER_PRELUDE) return;
   Object.defineProperty(self, '__ZP_WORKER_PRELUDE', { value: true, enumerable: false, configurable: false });
+  // ── 네이티브 스냅숏 ── 훅을 걸기 전 이 realm 의 모습. 끝의 settleNatives 가 훅마다 네이티브가 있던 **자리**와
+  // 플래그, name·length·소스를 입힌다. 워커 전역 멤버 다수(fetch·setTimeout·importScripts·location·origin…)는
+  // 인스턴스가 아니라 WorkerGlobalScope.prototype 에 산다. 인스턴스에 훅을 걸면 브라우저에 없는 own 이름이 생기고,
+  // 네이티브는 프로토타입에 그대로 남아 `WorkerGlobalScope.prototype.setTimeout.call(self, '…')` 같은 리라이트
+  // 우회 문이 된다(2026-10-12 e2e `/xwenv` 로 측정).
+  const ZP_HIDDEN_RE = /^(?:__zp_|__ZP_|ZPBundle$|ZPPageBundleWBG$|ZeroProxyRT$|ZP$)/;
+  const origFnToString = Function.prototype.toString;
+  // 훅 → 그것이 대신한 네이티브의 소스. Function.prototype.toString 훅(settleNatives)이 읽는다.
+  const maskedSource = new WeakMap();
+  const nativeSnapshot = (() => {
+    const global = new Map();
+    for (let o = self; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+      for (const k of Object.getOwnPropertyNames(o)) {
+        if (!global.has(k) && !ZP_HIDDEN_RE.test(k)) global.set(k, { owner: o, desc: Object.getOwnPropertyDescriptor(o, k) });
+      }
+    }
+    // 생성자의 정적 멤버·프로토타입 멤버, 그리고 네임스페이스 객체(Reflect·console…)의 멤버
+    const members = new Map();
+    const take = o => {
+      if (!o || (typeof o !== 'object' && typeof o !== 'function') || members.has(o)) return;
+      const m = new Map();
+      for (const k of Object.getOwnPropertyNames(o)) { try { m.set(k, Object.getOwnPropertyDescriptor(o, k)); } catch {} }
+      members.set(o, m);
+    };
+    for (const { desc } of global.values()) {
+      const v = desc.value;
+      if (typeof v === 'function') { take(v); try { if (v.prototype) take(v.prototype); } catch {} }
+      else if (v && typeof v === 'object') take(v);
+    }
+    return { global, members };
+  })();
   // module 워커에서 importScripts 는 "없음"이 아니라 **던지는 스텁**으로
   // 존재한다(Chrome: 호출 시 TypeError) — `typeof` 가드로는 못 걸러서
   // bootstrap 해시의 mod=1 로 명시 판정한다. 그쪽 부트스트랩이 zp-core 를
@@ -99,7 +130,8 @@
     return fn;
   }
   // strict 모드에서는 `function eval` 선언이 불법 — 이름은 디스크립터로 심는다.
-  const workerEval = function (s) { if (new.target) throw new TypeError('eval is not a constructor'); return workerDynamicEval.apply(this, arguments); };
+  // a method, like the native: no `prototype`, and `new eval()` is a TypeError by itself
+  const workerEval = ({ ['eval'](s) { return workerDynamicEval.apply(this, arguments); } })['eval'];
   // ── R2: direct `eval(x)` 호출자 스코프 (페이지 zpDirectEval 와 동형) ──
   // sloppy Function-ctor 헬퍼의 `eval` 파라미터가 intrinsic 이라
   // `eval(__zp_src)` 가 진짜 direct eval 이 된다. desc 접근자는 call-site
@@ -246,6 +278,8 @@
     try { if (!/\{\s*\[native code\]\s*\}/.test(nativeFnToString.call(value))) return value; } catch { return value; }
     const bound = value.bind(self);
     try { Object.defineProperty(bound, 'name', { value: value.name, configurable: true }); } catch {}
+    // a bound function prints `function () { [native code] }` — it reads as the method it is bound from
+    try { maskedSource.set(bound, nativeFnToString.call(value)); } catch {}
     globalMethodBindings.set(value, bound);
     return bound;
   }
@@ -444,8 +478,9 @@
     };
   }
   expose('__zp_get', get);
-  // the page realm maps the real global to its window facade; a worker's global is not wrapped that way
-  expose('__zp_this', function (t) { return t; });
+  // `this` of a plain call in sloppy code: the engine gives the real global, worker code knows `self` as the facade
+  // (natively `(function () { return this; })() === self`)
+  expose('__zp_this', function (t) { return t === self ? scope : t; });
   expose('__zp_set', set);
   expose('__zp_assign', assign);
   expose('__zp_call', call);
@@ -498,11 +533,49 @@
   const TARGET_PLATFORM = 'Win32';
   const nav = self.navigator;
   if (nav) {
+    // 네이티브가 사는 WorkerNavigator.prototype 에만 — 인스턴스에도 얹던 동안 `Object.getOwnPropertyNames(navigator)` 가
+    // 브라우저에 없는 세 이름을 내놨다. 플래그·이름·소스는 settleNatives 가 네이티브 것으로 맞춘다.
     const proto = self.WorkerNavigator && self.WorkerNavigator.prototype || Object.getPrototypeOf(nav);
+    const getterOf = (key, value) => Object.getOwnPropertyDescriptor({ get [key]() { return value; } }, key).get;
     for (const [key, value] of [['userAgent', TARGET_USER_AGENT], ['appVersion', TARGET_APP_VERSION], ['platform', TARGET_PLATFORM]]) {
-      try { Object.defineProperty(proto, key, { get: () => value, enumerable: false, configurable: false }); } catch {}
-      try { Object.defineProperty(nav, key, { get: () => value, enumerable: false, configurable: false }); } catch {}
+      try { Object.defineProperty(proto, key, { get: getterOf(key, value), enumerable: true, configurable: true }); } catch {}
     }
+    // userAgentData — 페이지 realm(virtualUserAgentData)과 같은 브랜드 목록. 엔진의 실제 목록이 페르소나와 같으면(진짜
+    // Chrome) 네이티브를 그대로 둔다; 다르면(WebView2 의 Edge 브랜드) 페이지가 말하는 목록과 워커가 갈라졌었다.
+    try {
+      const persona = [];
+      const re = /"([^"]+)";v="([^"]+)"/g;
+      for (let m; (m = re.exec(String(ZP.TARGET_SEC_CH_UA || '')));) persona.push({ brand: m[1], version: m[2] });
+      const realData = nav.userAgentData;
+      const realBrands = realData ? Array.from(realData.brands, b => ({ brand: b.brand, version: b.version })) : null;
+      if (realData && persona.length && JSON.stringify(realBrands) !== JSON.stringify(persona)) {
+        const uaProto = (self.NavigatorUAData && self.NavigatorUAData.prototype) || Object.prototype;
+        const shim = Object.create(uaProto);
+        const data = Object.create(shim);
+        const platform = TARGET_PLATFORM === 'Win32' ? 'Windows' : TARGET_PLATFORM;
+        const values = {
+          brands: persona, mobile: false, platform,
+          toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; },
+          getHighEntropyValues(hints) {
+            const chrome = (persona.find(b => b.brand === 'Google Chrome') || persona[0] || {}).version;
+            const full = {
+              brands: persona, mobile: false, platform, platformVersion: '19.0.0', architecture: 'x86', bitness: '64', model: '',
+              uaFullVersion: chrome + '.0.0.0', fullVersionList: persona.map(b => ({ brand: b.brand, version: b.version + '.0.0.0' })), wow64: false,
+            };
+            const picked = { brands: full.brands, mobile: full.mobile, platform: full.platform };
+            for (const h of (hints || [])) if (h in full) picked[h] = full[h];
+            return Promise.resolve(picked);
+          },
+        };
+        for (const k of Object.keys(values)) {
+          const v = values[k];
+          Object.defineProperty(shim, k, typeof v === 'function'
+            ? { value: v, writable: true, enumerable: false, configurable: true }
+            : { get: getterOf(k, v), enumerable: true, configurable: true });
+        }
+        Object.defineProperty(proto, 'userAgentData', { get: getterOf('userAgentData', data), enumerable: true, configurable: true });
+      }
+    } catch {}
   }
   function blocked(){ try { throw new DOMException('Blocked by ZeroProxy policy','NotSupportedError'); } catch(e) { throw e; } }
   const NativeRequest = self.Request;
@@ -752,7 +825,9 @@
   // cookieStore: in workers the real store reads PROXY-origin cookies —
   // a cross-target bleed. Give each worker an in-memory jar with the
   // CookieStore surface; there is no page-realm channel to sync against.
-  {
+  // 브라우저에 있을 때만 — CookieStore 는 Window·ServiceWorker 에만 노출된다. 전용/공유 워커에 얹으면 네이티브에 없는
+  // 이름이 하나 는다(e2e `/xwenv`).
+  if ('cookieStore' in self) {
     const jar = new Map();
     const parseExpires = o => o && o.expires ? Number(o.expires) : null;
     const sweep = () => { const now = Date.now(); for (const [k, v] of jar) if (v.expires && v.expires <= now) jar.delete(k); };
@@ -1505,4 +1580,141 @@
       })().catch(e => { setTimeout(() => { throw e; }, 0); });
     }
   }
+  // ── performance ── 워커의 리소스 타이밍에 프렐류드·zp-core·번들·worker-script·blob 소스가 프록시 이름 그대로 있었다.
+  // 네이티브 워커는 자기 스크립트도 항목으로 갖지 않는다. 타깃을 실은 경로는 그 타깃 이름으로, 나머지 우리 것은 없앤다
+  // (페이지 realm 의 isInfraEntry 와 같은 규칙).
+  try {
+    const entryProto = self.PerformanceEntry && self.PerformanceEntry.prototype;
+    const nameDesc = entryProto && Object.getOwnPropertyDescriptor(entryProto, 'name');
+    const perfProto = self.Performance && self.Performance.prototype;
+    if (nameDesc && typeof nameDesc.get === 'function' && perfProto) {
+      const rawName = e => Reflect.apply(nameDesc.get, e, []);
+      // 타깃을 실은 프록시 경로 → 그 타깃, 그 밖의 우리 것 → null(인프라), 남의 것 → 그대로
+      const targetOf = n => {
+        if (typeof n !== 'string') return n;
+        if (n.lastIndexOf('blob:' + realProxyOrigin, 0) === 0) return null;
+        if (n.lastIndexOf(realProxyOrigin, 0) !== 0) return n;
+        let u; try { u = new NativeURLCtor(n); } catch { return null; }
+        if (u.pathname === '/zp/api/fetch' || u.pathname === '/zp/api/v2/fetch') return u.searchParams.get('url') || null;
+        if (u.pathname === '/zp/api/script') return u.searchParams.get('u') || null;
+        return null;
+      };
+      const isInfra = e => { try { return targetOf(rawName(e)) === null; } catch { return false; } };
+      const shown = list => Array.prototype.filter.call(list, e => !isInfra(e));
+      Object.defineProperty(entryProto, 'name', {
+        get: Object.getOwnPropertyDescriptor({ get name() { const n = rawName(this); const t = targetOf(n); return t === null ? n : t; } }, 'name').get,
+        enumerable: nameDesc.enumerable, configurable: true,
+      });
+      for (const proto of [entryProto, self.PerformanceResourceTiming && self.PerformanceResourceTiming.prototype]) {
+        const nativeToJSON = proto && Object.prototype.hasOwnProperty.call(proto, 'toJSON') ? proto.toJSON : null;
+        if (typeof nativeToJSON !== 'function') continue;
+        proto.toJSON = ({ toJSON() { const out = Reflect.apply(nativeToJSON, this, []); try { if (out && 'name' in out) out.name = this.name; } catch {} return out; } }).toJSON;
+      }
+      const nativeGetEntries = perfProto.getEntries, nativeByType = perfProto.getEntriesByType;
+      perfProto.getEntries = ({ getEntries() { return shown(Reflect.apply(nativeGetEntries, this, [])); } }).getEntries;
+      perfProto.getEntriesByType = ({ getEntriesByType(type) { return shown(Reflect.apply(nativeByType, this, [type])); } }).getEntriesByType;
+      // the native index holds proxy names; page code asks by the names it sees
+      perfProto.getEntriesByName = ({ getEntriesByName(name, type) {
+        const wanted = String(name);
+        const all = type === undefined ? Reflect.apply(nativeGetEntries, this, []) : Reflect.apply(nativeByType, this, [type]);
+        return Array.prototype.filter.call(shown(all), e => e.name === wanted);
+      } }).getEntriesByName;
+      const NativePO = self.PerformanceObserver;
+      if (typeof NativePO === 'function') {
+        const ZPPerformanceObserver = function PerformanceObserver(cb) {
+          const wrapped = typeof cb !== 'function' ? cb : function (list, obs) {
+            const filtered = {
+              getEntries: () => shown(list.getEntries()),
+              getEntriesByType: t => shown(list.getEntriesByType(t)),
+              getEntriesByName: (n, t) => shown(list.getEntriesByName(n, t)),
+            };
+            try { Object.setPrototypeOf(filtered, Object.getPrototypeOf(list)); } catch {}
+            return cb.call(this, filtered, obs);
+          };
+          return Reflect.construct(NativePO, [wrapped], new.target || ZPPerformanceObserver);
+        };
+        ZPPerformanceObserver.prototype = NativePO.prototype;
+        try { Object.defineProperty(ZPPerformanceObserver, 'supportedEntryTypes', Object.getOwnPropertyDescriptor(NativePO, 'supportedEntryTypes')); } catch {}
+        self.PerformanceObserver = ZPPerformanceObserver;
+      }
+    }
+  } catch {}
+  // ── 우리 이름 숨기기 ── `__ZP_WORKER_*`(부트스트랩), `__zp_*`, ZP·ZPBundle… 는 키 목록에서 빠지고 열거되지 않는다.
+  const nativeGOPN = Object.getOwnPropertyNames, nativeOwnKeys = Reflect.ownKeys, nativeGOPDs = Object.getOwnPropertyDescriptors;
+  const isGlobalTarget = t => t === self || t === scope;
+  const visibleKey = k => typeof k !== 'string' || !ZP_HIDDEN_RE.test(k);
+  const hideZPNames = () => {
+    for (const k of Reflect.apply(nativeGOPN, Object, [self])) {
+      if (!ZP_HIDDEN_RE.test(k)) continue;
+      const d = Object.getOwnPropertyDescriptor(self, k);
+      if (d && d.enumerable && d.configurable) try { Object.defineProperty(self, k, { enumerable: false }); } catch {}
+    }
+  };
+  try {
+    Object.getOwnPropertyNames = ({ getOwnPropertyNames(o) { const out = Reflect.apply(nativeGOPN, Object, [o]); return isGlobalTarget(o) ? out.filter(visibleKey) : out; } }).getOwnPropertyNames;
+    Reflect.ownKeys = ({ ownKeys(o) { const out = Reflect.apply(nativeOwnKeys, Reflect, [o]); return isGlobalTarget(o) ? out.filter(visibleKey) : out; } }).ownKeys;
+    Object.getOwnPropertyDescriptors = ({ getOwnPropertyDescriptors(o) {
+      const out = Reflect.apply(nativeGOPDs, Object, [o]);
+      if (isGlobalTarget(o)) for (const k of Reflect.apply(nativeOwnKeys, Reflect, [out])) if (!visibleKey(k)) delete out[k];
+      return out;
+    } }).getOwnPropertyDescriptors;
+  } catch {}
+  hideZPNames();
+  // ── settleNatives ── 훅이 대신한 네이티브의 자리·플래그·name·length·소스를 입힌다(파일 머리의 스냅숏).
+  (function settleNatives() {
+    const toStringHook = ({ toString() { const m = maskedSource.get(this); return m !== undefined ? m : Reflect.apply(origFnToString, this, []); } }).toString;
+    try { Object.defineProperty(Function.prototype, 'toString', { value: toStringHook, writable: true, enumerable: false, configurable: true }); } catch {}
+    const mirror = (fn, nat) => {
+      if (typeof fn !== 'function' || typeof nat !== 'function' || fn === nat) return;
+      try { maskedSource.set(fn, Reflect.apply(origFnToString, nat, [])); } catch {}
+      try { Object.defineProperty(fn, 'name', { value: nat.name, configurable: true }); } catch {}
+      try { Object.defineProperty(fn, 'length', { value: nat.length, configurable: true }); } catch {}
+    };
+    // a member that differs from the snapshot keeps its value and takes the native's flags, name, length and source
+    const settle = (obj, key, nat) => {
+      const cur = Object.getOwnPropertyDescriptor(obj, key);
+      if (!cur || !nat) return;
+      if (cur.value === nat.value && cur.get === nat.get && cur.set === nat.set && cur.enumerable === nat.enumerable
+          && cur.configurable === nat.configurable && cur.writable === nat.writable) return;
+      mirror(cur.value, nat.value); mirror(cur.get, nat.get); mirror(cur.set, nat.set);
+      if (!cur.configurable) return;
+      const next = 'value' in cur
+        ? { value: cur.value, writable: 'writable' in nat ? nat.writable : true, enumerable: nat.enumerable, configurable: nat.configurable }
+        : { get: cur.get, set: cur.set, enumerable: nat.enumerable, configurable: nat.configurable };
+      try { Object.defineProperty(obj, key, next); } catch {}
+    };
+    const settleMembers = (obj, natMap) => {
+      if (!obj || !natMap) return;
+      for (const [k, nat] of natMap) if (Object.prototype.hasOwnProperty.call(obj, k)) settle(obj, k, nat);
+    };
+    for (const [key, { owner, desc: nat }] of nativeSnapshot.global) {
+      // a hook made an own name where the browser has none: it moves to where the native lives, in the native's shape
+      const own = owner === self ? null : Object.getOwnPropertyDescriptor(self, key);
+      if (own && own.configurable) {
+        let moved;
+        if ('get' in nat && 'value' in own) {
+          const v = own.value;
+          moved = { get: Object.getOwnPropertyDescriptor({ get [key]() { return v; } }, key).get, set: undefined, enumerable: nat.enumerable, configurable: nat.configurable };
+        } else if ('get' in own) {
+          moved = { get: own.get, set: own.set, enumerable: nat.enumerable, configurable: nat.configurable };
+        } else {
+          moved = { value: own.value, writable: nat.writable, enumerable: nat.enumerable, configurable: nat.configurable };
+        }
+        try { delete self[key]; Object.defineProperty(owner, key, moved); } catch {}
+      }
+      settle(owner, key, nat);
+      // a replaced constructor: its statics and prototype members read as the native's
+      const cur = Object.getOwnPropertyDescriptor(owner, key);
+      const natV = nat.value, curV = cur && cur.value;
+      if (typeof natV === 'function' && typeof curV === 'function' && curV !== natV) {
+        settleMembers(curV, nativeSnapshot.members.get(natV));
+        try { if (curV.prototype && natV.prototype && curV.prototype !== natV.prototype) settleMembers(curV.prototype, nativeSnapshot.members.get(natV.prototype)); } catch {}
+      }
+    }
+    // members hooked where they live: WorkerNavigator/Performance/Function prototypes, Object/Reflect statics, …
+    for (const [obj, natMap] of nativeSnapshot.members) settleMembers(obj, natMap);
+    mirror(toStringHook, origFnToString);
+  })();
+  // 부트스트랩이 번들을 실은 뒤, 대상 스크립트 전에 부른다 — 번들이 얹은 전역(ZPBundle…)도 열거되지 않게.
+  expose('__zp_settle', hideZPNames);
 })();

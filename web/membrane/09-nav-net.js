@@ -404,14 +404,17 @@
     const nav = w.navigator;
     if (!nav) return;
     const proto = w.Navigator && w.Navigator.prototype || Object.getPrototypeOf(nav);
-    defineOnProto(nav, proto, 'userAgent', () => TARGET_USER_AGENT);
-    defineOnProto(nav, proto, 'appVersion', () => TARGET_APP_VERSION);
-    defineOnProto(nav, proto, 'platform', () => TARGET_PLATFORM);
+    // In the native's place with its flags (configurable, as in a browser); the fallback for a navigator whose prototype
+    // does not hold the native is the old pinned accessor.
+    const identity = (key, get) => { if (!replaceNativeAccessor(proto, key, get)) defineOnProto(nav, proto, key, get); };
+    identity('userAgent', () => TARGET_USER_AGENT);
+    identity('appVersion', () => TARGET_APP_VERSION);
+    identity('platform', () => TARGET_PLATFORM);
     // navigator.webdriver: real Chrome 148 returns `false`. WebView2
     // and CDP-controlled instances return `true`, which every modern
     // anti-bot WAF flags as a robot signal. Pin to `false` so target
     // pages can't distinguish ZeroProxy from a hand-driven Chrome.
-    defineOnProto(nav, proto, 'webdriver', () => false);
+    identity('webdriver', () => false);
     // navigator.userAgentData — UA 는 Chrome 으로 가려 놓고 여기를 안 가려서
     // **브랜드 목록이 호스트 셸을 그대로 불었다**. 실측(2026-08-16, 프록시된
     // example.com):
@@ -422,7 +425,7 @@
     // 서로 다른 브라우저를 말하는 것은 단일 신호보다 강한 tell 이다.
     // ZP.TARGET_SEC_CH_UA 를 파싱해서 그 목록 그대로 되돌려 준다 — 값이 한
     // 군데서만 나오므로 다음에 버전을 올려도 갈라지지 않는다.
-    defineOnProto(nav, proto, 'userAgentData', () => virtualUserAgentData(w));
+    identity('userAgentData', () => virtualUserAgentData(w));
     installChromeFingerprintFacade(w);
   }
   function targetBrandList() {

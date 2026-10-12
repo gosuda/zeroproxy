@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-12 | worker / 수정 | 워커 멤버는 WorkerGlobalScope.prototype 에 산다: 인스턴스 훅은 own 이름을 만들고 소스도 안 가렸다. 스냅숏 후 끝에서 네이티브 모양으로. | rewriter.md#워커-훅-자리 |
 | 2026-10-12 | membrane / 탈출 | 객체·배열·TrustedScript 타이머 핸들러를 네이티브가 리라이트 없이 컴파일했다. eval(TrustedScript) 미실행이 Glassdoor 크래시. | rewriter.md#trusted-script-는-코드 |
 | 2026-10-12 | membrane / 수정 | 캔버스 노이즈가 읽을 때마다 바뀌고 페이지 캔버스에 그려졌다 — 같은 입력엔 같은 출력, 원본 불변. 훅은 네이티브 모양으로. | rewriter.md#캔버스-파블링-결정적 |
 | 2026-10-12 | membrane / 수정 | Error.prepareStackTrace: V8 이 읽는 자리의 정리기가 페이지에 보였고 delete 로 지워졌다. 페이지 시야는 리라이터 경유로 따로 둔다. | rewriter.md#prepare-stack-trace-페이지-뷰 |

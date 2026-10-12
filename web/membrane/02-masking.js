@@ -159,6 +159,16 @@
     }
     return defineAccessor(instance, key, get, set);
   }
+  // A getter hook in the native's own place and shape: named `get key`, no `prototype`, the native's setter and flags.
+  // For a native the hook replaces where it lives (navigator identity on Navigator.prototype) — there `configurable` can be
+  // the native's: deleting the hook removes the property, it does not uncover a native behind it. (defineAccessor pins
+  // `configurable: false`, which is right where a hook shadows a native further up the chain.)
+  function replaceNativeAccessor(proto, key, getImpl) {
+    const d = proto && Object.getOwnPropertyDescriptor(proto, key);
+    if (!d || typeof d.get !== 'function') return false;
+    const get = Object.getOwnPropertyDescriptor({ get [key]() { return getImpl.call(this); } }, key).get;
+    return defineMasked(proto, key, { get, set: d.set, enumerable: d.enumerable, configurable: d.configurable });
+  }
   // Same idea for methods (navigator.sendBeacon, history.pushState/replaceState).
   function defineMethodOnProto(instance, proto, key, value) {
     if (proto && define(proto, key, value)) {

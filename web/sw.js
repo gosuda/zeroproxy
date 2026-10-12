@@ -4093,7 +4093,8 @@ function safeError(code, status = 400, targetUrl = '') {
 }
 function escapeHTML(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&#34;',"'":'&#39;'}[ch])); }
 function workerBootstrap(url) {
-  const head = "const __zp_worker_params=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=__zp_worker_params.get('u')||'about:blank';self.__ZP_WORKER_REF=__zp_worker_params.get('ref')||'';self.__ZP_WORKER_TAB_ID=__zp_worker_params.get('tab')||'';self.__ZP_WORKER_SERVERS=__zp_worker_params.getAll('server');self.__ZP_WORKER_SRC_URL=__zp_worker_params.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=__zp_worker_params.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=__zp_worker_params.getAll('wtgh');try{self.__ZP_WORKER_RTC_ICE=JSON.parse(__zp_worker_params.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}";
+  // In a function: a classic worker's top-level `const` is a global lexical binding its own script can read.
+  const head = "(function(){var p=new URLSearchParams(self.location.hash.slice(1));self.__ZP_WORKER_TARGET=p.get('u')||'about:blank';self.__ZP_WORKER_REF=p.get('ref')||'';self.__ZP_WORKER_TAB_ID=p.get('tab')||'';self.__ZP_WORKER_SERVERS=p.getAll('server');self.__ZP_WORKER_SRC_URL=p.get('srcu')||'';self.__ZP_WORKER_WT_GATEWAY=p.get('wtg')||'';self.__ZP_WORKER_WT_GATEWAY_HASHES=p.getAll('wtgh');try{self.__ZP_WORKER_RTC_ICE=JSON.parse(p.get('ice')||'[]')}catch(e){self.__ZP_WORKER_RTC_ICE=[]}})();";
   // module 워커에는 importScripts 가 없다 — zp-core/prelude/타깃을 import()
   // 체인으로 순차 로드한다(prelude 는 zp-core 가 이미 있으면 importScripts 를 건넌다).
   const hashParams = url.hash ? new URLSearchParams(url.hash.slice(1)) : null;
@@ -4119,10 +4120,10 @@ function workerBootstrap(url) {
   const body = srcu != null
     ? (mod
       ? head + "import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).catch(function(e){setTimeout(function(){throw e},0)});"
-      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_runSrcu)self.__zp_runSrcu();")
+      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_settle)self.__zp_settle();if(self.__zp_runSrcu)self.__zp_runSrcu();")
     : (mod
       ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
-      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};importScripts(" + scriptURL + ");");
+      : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};if(self.__zp_settle)self.__zp_settle();importScripts(" + scriptURL + ");");
   // The worker's policy comes from this, its main script — not the page's.
   // Its embedder policy too. A worker started by a `COEP: require-corp` (or `credentialless`) document must have a COEP
   // of its own, or the browser refuses the script (`ERR_BLOCKED_BY_RESPONSE`); natively a blob worker inherits the owner's,

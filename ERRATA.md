@@ -729,6 +729,33 @@ claimed:
     timers now treat every non-function handler as code (a TrustedScript's text, otherwise `String(x)`) and rewrite it. —
     same e2e (`timers`: TrustedScript, object, array → the page's address; mutation: the old string-only check → the
     proxy's address and key).
+79. **A worker read as the proxy.** Compared with a native worker (blob and file, e2e `/xwenv`): every hook printed its
+    source — `fetch.toString()` was the proxy's minified code, `ZP.canonicalTargetURL` included; `setTimeout`,
+    `importScripts`, `XMLHttpRequest.prototype.open`, `Function`, `eval` alike, and a bound `postMessage` printed
+    `function () { [native code] }`. The hooks were own properties of the global where the browser keeps those members on
+    `WorkerGlobalScope.prototype` — so the global had names a browser's has not (`fetch`, `setTimeout`, `location`,
+    `origin`, `caches`, …) and the natives sat untouched behind them (contained in practice: the global's own hooks and the
+    CSP still answered code that reached them). The navigator had own `userAgent`/`appVersion`/`platform` with arrow
+    getters; 56 names of ours were on the global (`__ZP_WORKER_*` enumerable, `ZP`, `ZPBundle`, `__zp_*`), and the
+    bootstrap's `const __zp_worker_params` was a global binding worker code could read; resource timing listed
+    `/zp/assets/worker-prelude.js`, `zp-core.js`, the bundle and `/zp/api/worker-script?…`; a `cookieStore` existed where
+    the browser exposes none; `this === self` was false at the top level and in a plain call; `userAgentData` gave the
+    engine's brands while the page gave the persona's. Now the prelude snapshots every native descriptor before hooking and,
+    at its end, moves each hook to where the native lives and gives it the native's flags, `name`, `length` and source
+    (`Function.prototype.toString` reads a mask table); our names are left out of the key lists and not enumerable (the
+    bootstrap settles the bundle's too); resource entries of ours are dropped and proxy routes named by their target;
+    `cookieStore` only where the browser has one; a classic worker's top-level `this` reads `self` and a plain call maps
+    the real global (the rewriter treats worker code as page code); the brands follow the persona when the engine's differ.
+    — e2e `a worker sees the environment a browser gives it (matches native)`: page, blob and file worker, 38 readings
+    each, all equal to native except the identity, which page and workers report alike (mutation: hooks left on the
+    instance, no source mask, no entry filter → red); matrix `sloppy_function_this_maps_only_the_real_global` (worker).
+80. **The page's navigator and resource timing kept three leftovers.** Seven ad-auction methods (`joinAdInterestGroup`, …)
+    were denied as own properties of `navigator` — natively it has none; the identity accessors (`userAgent`, `platform`,
+    `userAgentData`, …) were non-configurable where the browser's are configurable; and a worker's bootstrap appeared in
+    the page's resource timing under the page's own address (the read-back maps every other `/zp/` path to the document
+    URL). The deny stubs and the identity getters now replace the natives on `Navigator.prototype` with their flags, and an
+    entry is judged infrastructure on its raw name. — same e2e (`page.navOwn`, `page.uaShape`, `page.perfNames`; mutation:
+    stubs on the instance, share fallback in the filter → red).
 
 ### Residuals (documented, not fixed)
 
@@ -742,7 +769,6 @@ claimed:
 | A page's own `eval`/`new Function` code prints as a script frame (`at url:L:C`), not as native eval code (`at eval (eval at f (url:L:C), <anonymous>:1:1)`) | The proxy runs dynamic code with a `sourceURL` naming the virtual document; reproducing V8's eval-origin text means knowing the caller's position at compile time. Inline scripts, which are far more common, are equal to native since item 70. | e2e `/xstack` (inline), `/xframe-env` (external) |
 | `Document.parseHTMLUnsafe` anchors resolve against the virtual base (native: no base, raw text) | Inert parsed documents share the realm's URL hooks. Minor. | surface `parseHTMLUnsafeHook` |
 | import-map / speculation-rules read-back returns relative URLs as absolute | The server does not stash the original JSON; read-back is deproxied. | surface `importmapText` (checks no proxy URL) |
-| Worker-realm hooks are not `toString`-masked | `worker-prelude.js` has no masking helper; hook sources are visible to worker code. | — |
 | CSS attribute selectors / XPath can detect `data-zp-*` stash attributes | Getters are filtered; selector matching is not. Fingerprint only. | — |
 | `while (true) { await … }` without `break` dies silently at 10M iterations | Deliberate hang protection; hours of wall time in practice. | [trap loop-cap-비상수-정책](.ai/trap-notebook/rewriter.md#loop-cap-비상수-정책) |
 | `navigator.storage.estimate()` reports proxy-origin-wide usage | Quota is per real origin; usage leaks only a byte count across targets. | — |
@@ -765,7 +791,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s (re-checked 2026-10-12, same IP, after the attempts below). Through the proxy the widget used to crash (`reading 'call'`): its VM compiles its decoder with `eval(TrustedScript)`, which the membrane did not run — item 77. Since then the VM runs to its verdict (first `fo` POST, workers, challenge image) and the verdict is against us: in a fresh Chrome the widget asks "Verify you are human" (no checkbox drawn), in the product browser it spins and restarts with a new Ray ID. Not the canvas farbling (same result with it switched off). What still reads differently in the widget (env-diff, rows below): Trusted Types and CSP `sandbox` not applied, feature policy, blob URL origin; the worker realm was not compared yet. | e2e `/xtt`, `/xcoep`, `/xstack`; `.lean-ctx/env-diff.js` |
+| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s (re-checked 2026-10-12, same IP, after the attempts below). Through the proxy the widget used to crash (`reading 'call'`): its VM compiles its decoder with `eval(TrustedScript)`, which the membrane did not run — item 77. Since then the VM runs to its verdict (first `fo` POST, workers, challenge image) and the verdict is against us: in a fresh Chrome the widget asks "Verify you are human", in the product browser it spins and restarts with a new Ray ID. Not the canvas farbling (same result with it switched off); still the same after the worker realm was made native (item 79), when the checkbox is drawn — a trusted CDP click on it changed nothing (not investigated: the click may not reach the widget). HTTP/2 SETTINGS and WINDOW_UPDATE were matched to Chrome before. What still reads differently in the widget (rows below): Trusted Types and CSP `sandbox` not applied, feature policy, blob URL origin. | e2e `/xtt`, `/xwenv`, `/xcoep`, `/xstack`; `.lean-ctx/env-diff.js` |
 | A blob URL carries the proxy's origin (`blob:http://proxy.localhost:18080/…`; natively the document's) | `URL.createObjectURL` is the browser's: the blob store is keyed by the real origin. Handing out a virtual URL means mapping it back in every consumer (DOM URL attributes, `fetch`/XHR, workers, CSS `url()`, media, `import()`) and forward in every read-back. Known since the URL-gate design (trap-notebook LOG 2026-08). | env-diff `blobUrl` |
 | The target's header CSP is replaced by the proxy's: header-only `sandbox`, Trusted Types (`require-trusted-types-for`/`trusted-types`) and stricter source lists are not applied (the meta CSP is intersected, item 69) | Trusted Types would bind the membrane's own sinks (the prelude's evals, rewritten `innerHTML`): applying them needs a policy of ours for those sinks and the page's strings checked against the page's policy in the membrane. A nonce policy also refuses the prelude's inline scripts. Turnstile's document is such a document: natively a string `eval` throws `EvalError`, `document.domain = …` throws `SecurityError` (sandbox); through the proxy neither does. | env-diff `evalString`, `ttCreateOther`, `sandboxed` |
 | A cross-site frame allows the features a same-origin one does (`document.featurePolicy.allowedFeatures()`: Turnstile 61 through the proxy, 20 natively) | Underneath, every frame is same-origin with its embedder, so each feature whose default allowlist is `'self'` is allowed without an `allow` delegation. Emulating it means virtualizing the policy API and the features it gates. | env-diff `permissionsPolicy` |

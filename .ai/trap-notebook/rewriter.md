@@ -1674,6 +1674,14 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **같은 날, 인라인 스크립트의 스택(ERRATA 70):** 인라인 스크립트를 `eval` 로 돌리니 V8 이 최상위·익명 함수를 `eval` 로, 파사드 `this` 를 `Proxy.` 로 찍고, 아래에 `eval (<anonymous>)` 와 부트스트랩 프레임이 붙었다. 압축된 프렐류드라 함수 이름으로는 못 가르고, **구조**(우리 sourceURL 의 eval 코드 / 출처 없는 `eval` 빌트인 / 뒤따르는 문서 경로의 최상위 프레임)로 가른다.
 - **규칙:** `lol_html` 의 `Attribute::value()`/`get_attribute` 를 **값으로 해석**하는 모든 곳(URL, CSP, refresh, srcset…)은 먼저 엔티티를 푼다. 되돌려 쓸 때 `set_attribute` 가 무엇을 이스케이프하는지는 확인하지 않았다(이번 CSP 값에는 `&` 가 없었다) — `&` 가 들어가는 값을 쓰게 되면 그때 테스트로 확인할 것.
 
+## <a id="워커-훅-자리"></a>워커 전역의 멤버는 인스턴스가 아니라 WorkerGlobalScope.prototype 에 산다 — 훅을 인스턴스에 걸면 own 이름이 생기고 네이티브는 뒤에 남는다 (2026-10-12)
+
+- **측정:** e2e `/xwenv` — 같은 프로브를 페이지·blob 워커·파일 워커에서, 네이티브와 프록시로. 워커에서: `fetch.toString()` 이 우리 압축 코드(`ZP.canonicalTargetURL` 까지), 전역 own 이름 390 대 334, `Object.keys(self)` 에 `__ZP_WORKER_*`·`fetch`·`location`…, `Object.getOwnPropertyNames(navigator)` 에 셋, 리소스 타이밍에 `/zp/assets/*`, `this === self` false, 없는 `cookieStore`.
+- **원인:** 페이지의 Window 는 [Global] 이라 멤버가 인스턴스 own 이다 — 그 자리를 갈아 끼우면 끝난다. 워커는 다르다: `fetch`·`setTimeout`·`importScripts`·`location`·`origin` 이 `WorkerGlobalScope.prototype` 에 있다. `self.fetch = …` 는 own 이름을 **새로 만들고** 네이티브는 프로토타입에 그대로 둔다. 그리고 워커 쪽에는 마스킹 헬퍼가 아예 없었다.
+- **고침(ERRATA 79):** 프렐류드 머리에서 전역·프로토타입 체인·생성자의 정적/프로토타입 멤버·네임스페이스의 서술자를 **스냅숏**, 끝에서 `settleNatives` 가 훅마다 네이티브가 있던 자리로 옮기고 플래그·name·length·소스를 입힌다(`Function.prototype.toString` 은 마스크 표를 읽는다). 훅을 거는 코드 수십 곳을 고치는 대신 "결과가 네이티브와 같은 모양인가" 를 한 곳에서 맞춘다 — 새 훅이 생겨도 자동으로 따라간다.
+- **확인한 것:** "프로토타입에 남은 네이티브 타이머로 리라이트 없는 코드가 돈다" 를 증명하려 프로브를 만들었는데, 인스턴스 훅 상태에서도 그 코드가 읽은 `location` 은 가상이었다(전역 own 훅이 답했다) — 그래서 탈출로 적지 않았다. **증명 못 한 위험은 탈출이라고 쓰지 않는다.**
+- **규칙:** 훅을 걸 때 그 멤버가 **어디 사는지**(인스턴스 own 인가, 프로토타입인가)를 먼저 본다. 그리고 realm 이 하나 더 있으면(워커) 페이지에 해 둔 가림이 거기에도 있는지 같은 프로브로 잰다.
+
 ## <a id="trusted-script-는-코드"></a>"비문자열은 평가하지 않는다" 의 예외 — TrustedScript 는 코드다. 그리고 타이머는 문자열만 잡고 있었다 (탈출) (2026-10-12)
 
 - **측정:** Glassdoor 의 Turnstile 위젯이 프록시에서만 `reading 'call'` 로 죽었다(`ulgk5` 미정의). CSP 에 `trusted-types nAZtB7 default` 가 있는 문서다. 네이티브 크롬에서 정책 없는 페이지(example.com)로 재 보니 `(0, eval)(policy.createScript('1 + 1'))` 는 **2** — Trusted Types 강제 여부와 무관하게 TrustedScript 는 코드로 컴파일된다(direct eval, `Function`, 타이머도).

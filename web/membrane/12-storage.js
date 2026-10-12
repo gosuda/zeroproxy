@@ -599,10 +599,21 @@
       // after de-proxying, it is infrastructure and gets dropped. That stays
       // correct as new internal routes appear, because anything we can map to a
       // target survives on its own.
+      // Judged on the RAW name: the read-back name maps every other `/zp/` path to the document's own URL, so a worker's
+      // bootstrap (`/zp/worker-bootstrap.js#u=…`) came out as a resource entry named after the page — natively a worker's
+      // script is no entry of the page at all.
+      // (nameDesc is the native descriptor, taken above before the name was virtualized)
+      const rawEntryName = e => (nameDesc && nameDesc.get ? Reflect.apply(nameDesc.get, e, []) : e.name);
       const isInfraEntry = (e) => {
         try {
-          const n = e && e.name;
-          return typeof n === 'string' && n.lastIndexOf(proxyOrigin, 0) === 0;
+          const n = rawEntryName(e);
+          if (typeof n !== 'string') return false;
+          if (n.lastIndexOf(proxyOrigin, 0) === 0) {
+            // a frame's document (`/zp/p/<token>`) is a real entry natively too (initiatorType "iframe")
+            try { if (ZP.isSharePath(new Native.URL(n).pathname)) return false; } catch {}
+            return deproxyURL(n).lastIndexOf(proxyOrigin, 0) === 0;
+          }
+          return n.lastIndexOf('blob:' + proxyOrigin, 0) === 0;
         } catch { return false; }
       };
       const perfProtoForList = w.Performance && w.Performance.prototype;
@@ -765,11 +776,18 @@
     // isolation violation we cannot virtualise cheaply → fail closed.
     try {
       const nav = w.navigator;
-      for (const pa of ['joinAdInterestGroup','leaveAdInterestGroup','runAdAuction','updateAdInterestGroups','createAuctionNonce','getInterestGroupAdAuctionData','clearOriginJoinedAdInterestGroups','createAuctionNonce']) {
+      const navProto = w.Navigator && w.Navigator.prototype;
+      for (const pa of ['joinAdInterestGroup','leaveAdInterestGroup','runAdAuction','updateAdInterestGroups','createAuctionNonce','getInterestGroupAdAuctionData','clearOriginJoinedAdInterestGroups']) {
         if (nav && typeof nav[pa] === 'function') {
-          const deny = function() { return Promise.reject(normalizedError('NotSupportedError')); };
-          maskNativeFunction(deny, pa);
-          define(nav, pa, deny);
+          // In the native's place (Navigator.prototype), shaped like it — as own properties of the navigator they were seven
+          // names `Object.getOwnPropertyNames(navigator)` lists where a browser lists none.
+          if (navProto && Object.getOwnPropertyDescriptor(navProto, pa)) {
+            replaceNativeMethod(navProto, pa, () => ({ [pa]() { return Promise.reject(normalizedError('NotSupportedError')); } })[pa]);
+          } else {
+            const deny = function() { return Promise.reject(normalizedError('NotSupportedError')); };
+            maskNativeFunction(deny, pa);
+            define(nav, pa, deny);
+          }
         }
       }
       if (w.sharedStorage !== undefined) try { define(w, 'sharedStorage', undefined); } catch {}

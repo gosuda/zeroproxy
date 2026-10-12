@@ -915,8 +915,10 @@ fn sloppy_function_this_maps_only_the_real_global() {
     // `Function('return this')()` — a Function body is sloppy function code.
     let body = rewrite_script("return this", &RewriteOpts { kind: ScriptKind::Function, ..opts() }).unwrap().code;
     assert!(body.contains(&format!("return {mapped}")), "got: {body}");
-    for kind in [ScriptKind::Module, ScriptKind::Worker] {
-        let code = rewrite_script("function f(){ return this }", &RewriteOpts { kind, ..opts() }).unwrap().code;
-        assert!(!code.contains("__zp_this"), "{kind:?} has no window facade to map to, got: {code}");
-    }
+    let module = rewrite_script("function f(){ return this }", &RewriteOpts { kind: ScriptKind::Module, ..opts() }).unwrap().code;
+    assert!(!module.contains("__zp_this"), "module code is strict, got: {module}");
+    // A classic worker script: its top level reads `self` (the worker's facade), a plain call is mapped as on a page.
+    let worker = rewrite_script("var t = this; function f(){ return this }", &RewriteOpts { kind: ScriptKind::Worker, ..opts() }).unwrap().code;
+    assert!(worker.contains("var t = __zp_get(globalThis,\"self\");"), "got: {worker}");
+    assert!(worker.contains(&format!("return {mapped}")), "got: {worker}");
 }

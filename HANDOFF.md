@@ -5,18 +5,20 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
 
 ## State
 
-- Branch `main`; everything up to `5e1b775` is on `origin/main`. The commit carrying this version of the file (items 71–78)
-  is local until the user says to push.
+- Branch `main`; everything up to `3044044` is on `origin/main`. The commit carrying this version of the file (items 79–80,
+  the worker realm) is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
   `sendBeacon` as `no-cors`, `scripts/check-chrome-hello.mjs` · `8fc8a35`/`778955c` TaskWeaver notes · `d54c7f1` worker scripts
   told as `same-origin`/`worker`, `sec-fetch-storage-access` on cookie-carrying cross-site sub-requests (67), **workers under a
   `COEP: require-corp` document start** (68) · `5e1b775` meta CSP with entity quotes (69), native inline-script stacks (70) ·
-  the latest commit: a plain call's `this` (71), `Object.keys(window)` / location accessors (72), deterministic canvas/audio
+  `3044044` a plain call's `this` (71), `Object.keys(window)` / location accessors (72), deterministic canvas/audio
   farbling (73), `Error.prepareStackTrace` as the page's own (74), `document.referrer` from the navigation (75), prelude
   scripts removed (76), **`eval(TrustedScript)` runs — the Glassdoor crash** (77), and **an escape closed: non-string timer
-  handlers ran unrewritten** (78).
+  handlers ran unrewritten** (78) · the latest commit: **the worker realm made native** — hook sources, hook placement on
+  `WorkerGlobalScope.prototype`, our names, resource timing, `this`, brands (79) — and the page's navigator/resource-timing
+  leftovers (80).
 - Verification (the latest commit): cargo 307 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e
   226. 13-site sweep: all answer; Wikipedia, GitHub, Guardian, MDN, Naver, Apple, npm 0 errors. Known noise, unchanged from
   earlier sweeps: BBC's GPT `t.getSlotElementId is not a function` (Google's ad tag), CNN's ad-partner 502s and two
@@ -24,7 +26,7 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
   `text/css`; the HTML was the proxy's own error page for that request — not explained).
 - Detail lives in [ERRATA.md](ERRATA.md) items 62–78 and its Residuals table, the trap-notebook entries
   (`.ai/trap-notebook/rewriter.md`: `동적-코드-전역-this`, `chrome-hello-trust-anchors`, `coep-워커-부트스트랩`,
-  `lol-html-원시-속성값`, `trusted-script-는-코드`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
+  `lol-html-원시-속성값`, `trusted-script-는-코드`, `워커-훅-자리`, `캔버스-파블링-결정적`, `prepare-stack-trace-페이지-뷰`,
   `프렐류드-스크립트-잔존`, `referrer-한-곳에서`), and the verification table in [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate
   in PHASE2_STATUS is open.
 - **A product decision was made without asking — flag it to the user:** the canvas/audio masking (ERRATA Q6, "intentional")
@@ -41,16 +43,20 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
    `crates/zp-kernel-bundle/tests/client_hello.rs` pins the result.
 3. **Glassdoor — the one open site, now a verdict, not a crash.** The `reading 'call'` crash was `eval(TrustedScript)` not
    running (item 77). The widget's VM now runs to its verdict and the verdict is against us: a fresh Chrome gets "Verify you
-   are human" (no checkbox drawn), the product browser spins and restarts with a new Ray ID. Natively (same IP, same hour) a
-   fresh unautomated Chrome is through in ~4 s. Not the canvas farbling (same result with it off). **Next:** (a) compare the
-   **worker realm** — the VM starts several blob workers, and nothing in a worker was compared yet (navigator, `location`,
-   `self` keys, timing, `Error.stack`); (b) the remaining widget readings in ERRATA's Residuals (Trusted Types / CSP
-   `sandbox` not applied, feature policy, blob URL origin). The method: `.lean-ctx/env-diff.js native|proxied [url]`
+   are human", the product browser spins and restarts with a new Ray ID. Natively (same IP, same hour) a fresh unautomated
+   Chrome is through in ~4 s. Not the canvas farbling (same result with it off), and still the same after the worker realm
+   was made native (item 79) — then with the checkbox drawn; a trusted CDP click on it changed nothing (does the click reach
+   the widget? not looked at). **Next:** the remaining widget readings in ERRATA's Residuals — Trusted Types / CSP
+   `sandbox` not applied (natively a string `eval` throws there, through the proxy it runs), feature policy, blob URL
+   origin; and whether a click reaches the widget. The method: `.lean-ctx/env-diff.js native|proxied [url]`
    snapshots every frame's environment as page code sees it (probe list in `env-probe-src.js`, compare with
    `env-compare.js [frame-substring]`); extend the probe and diff. Space the attempts (Cloudflare escalates to "Humans
    only").
 4. A page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA Residuals) — low
    priority; inline scripts are native since item 70.
+5. Reddit (when it serves reCAPTCHA): a worker running `recaptcha__ko.js` throws `Cannot read properties of undefined
+   (reading 'body')` (line 246 of the rewritten worker script). Present before the worker-realm work too (A/B on the
+   previous `web/`, 2026-10-12); not traced. Compare with a native reCAPTCHA worker (the e2e `/xwenv` pattern).
 
 Done this round and closed: items 71–78 (see State); before that the meta-CSP lone `'` (69), the inline-script stack (70),
 Reddit (parity re-checked with a fresh unautomated Chrome — same wall natively).
@@ -153,6 +159,10 @@ hand-launched Chrome (above). If that changes, amend the CLAUDE.md policy line f
 - **Park `zp` on `about:blank` before `npm run test:e2e`.** With `zp` left on a looping challenge page the E1 block lost a
   worker probe and timed out (13 failures); the same tree passed 221/221 right after. The earlier "e2e printed no summary" was
   probably the same kind of outside load.
+- **A full e2e run that "fails" only with `test timed out` on the E1 block and `cancelled` children ran out of budget, it
+  did not find a bug.** The block took 358–367 s of its old 420 s; it is 720 s now (outer test 900 s). Before suspecting
+  code, diff per-test durations against the last green log, then A/B the slowed tests on the previous `web/` (stash,
+  `--web-only` build, same scratch subset) — on 2026-10-12 that read 185 s vs 193 s: noise.
 - **Known flake: `favicon masking without upstream fetch`.** Once in a full run (2026-10-12) the target saw `/site-icon.png`
   fetched; the test alone and the next full run (222/222) passed. Not investigated — if it repeats, look at how the
   `BLANK_ICON` classification can miss a favicon request.

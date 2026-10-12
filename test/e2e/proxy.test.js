@@ -2455,6 +2455,90 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xwenv' || url.pathname === '/xwenv-worker.js') {
+      // A worker's environment as its code sees it — the same probe in the page, a blob worker and a file worker. A
+      // challenge VM runs workers and compares what they report with the page.
+      const probe = `(function () {
+        var out = {};
+        var P = function (k, f) { try { out[k] = f(); } catch (e) { out[k] = 'ERR ' + (e && e.name); } };
+        var src = function (f) { try { return Function.prototype.toString.call(f); } catch (e) { return 'ERR ' + e.name; } };
+        var nav = navigator, navProto = Object.getPrototypeOf(nav);
+        var shape = function (o, k) {
+          var d = Object.getOwnPropertyDescriptor(o, k);
+          if (!d) return 'none';
+          var f = d.get || d.value;
+          return [typeof d.get, d.enumerable, d.configurable, typeof f === 'function' ? src(f) : typeof f, typeof f === 'function' && 'prototype' in f].join('|');
+        };
+        P('ua', function () { return nav.userAgent; });
+        P('appVersion', function () { return nav.appVersion; });
+        P('platform', function () { return nav.platform; });
+        P('languages', function () { return JSON.stringify(nav.languages); });
+        P('hwc', function () { return nav.hardwareConcurrency; });
+        P('mem', function () { return nav.deviceMemory; });
+        P('uaData', function () { return nav.userAgentData ? JSON.stringify([nav.userAgentData.brands, nav.userAgentData.mobile, nav.userAgentData.platform]) : 'none'; });
+        P('navOwn', function () { return Object.getOwnPropertyNames(nav).join(','); });
+        P('navProtoKeys', function () { return Object.getOwnPropertyNames(navProto).sort().join(','); });
+        P('uaShape', function () { return shape(navProto, 'userAgent'); });
+        P('platformShape', function () { return shape(navProto, 'platform'); });
+        P('uaDataShape', function () { return shape(navProto, 'userAgentData'); });
+        P('globalCtor', function () { return self.constructor && self.constructor.name; });
+        P('globalOwnCount', function () { return Object.getOwnPropertyNames(self).length; });
+        P('globalOwn', function () { return Object.getOwnPropertyNames(self).sort().join(','); });
+        P('globalKeys', function () { return Object.keys(self).sort().join(','); });
+        P('globalSyms', function () { return Object.getOwnPropertySymbols(self).length; });
+        P('thisIsSelf', function () { return [this === self, (function () { return this; })() === self, globalThis === self].join(','); });
+        P('location', function () { return typeof WorkerGlobalScope === 'function' && self instanceof WorkerGlobalScope ? [location.protocol, typeof location.href].join(' ') : 'page'; });
+        P('origin', function () { return self.origin; });
+        P('secure', function () { return [isSecureContext, crossOriginIsolated].join(','); });
+        P('prepareStackTrace', function () { return typeof Error.prepareStackTrace; });
+        P('stackShape', function () { return String(new Error('x').stack).split(String.fromCharCode(10)).length > 1; });
+        P('perfNames', function () { return performance.getEntries().map(function (e) { return e.entryType + ':' + e.name.replace(/^[a-z]+:[/][/][^/]+/, ''); }).join(' | '); });
+        P('srcFetch', function () { return src(fetch); });
+        P('srcSetTimeout', function () { return src(setTimeout); });
+        P('srcPostMessage', function () { return src(self.postMessage); });
+        P('srcImportScripts', function () { return typeof importScripts === 'function' ? src(importScripts) : 'none'; });
+        P('srcXHROpen', function () { return src(XMLHttpRequest.prototype.open); });
+        P('srcFunction', function () { return src(Function); });
+        P('srcEval', function () { return src(eval); });
+        P('fnCtor', function () { return (function () {}).constructor === Function; });
+        // the members a worker's code calls are the ones on WorkerGlobalScope.prototype — nothing native left behind them
+        P('protoMembers', function () {
+          if (typeof WorkerGlobalScope !== 'function') return 'page';
+          var p = WorkerGlobalScope.prototype, d = Object.getOwnPropertyDescriptor(p, 'location');
+          return [p.fetch === fetch, p.setTimeout === setTimeout, p.importScripts === importScripts, d ? typeof d.get : 'none'].join(',');
+        });
+        P('zpNames', function () { return Object.getOwnPropertyNames(self).filter(function (k) { return /zp/i.test(k); }).join(','); });
+        P('bootstrapBinding', function () { return typeof __zp_worker_params; });
+        P('tz', function () { return Intl.DateTimeFormat().resolvedOptions().timeZone; });
+        P('trustedTypes', function () { return typeof self.trustedTypes; });
+        P('offscreen', function () {
+          if (typeof OffscreenCanvas !== 'function') return 'none';
+          var c = new OffscreenCanvas(60, 20), x = c.getContext('2d');
+          x.font = '14px Arial'; x.fillStyle = '#f60'; x.fillText('Cwm fjord', 2, 15);
+          var d = x.getImageData(0, 0, 60, 20).data, h = 0;
+          for (var i = 0; i < d.length; i++) h = (h * 31 + d[i]) | 0;
+          return h;
+        });
+        return out;
+      })()`;
+      const workerScript = `postMessage(${probe});`;
+      if (url.pathname === '/xwenv-worker.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+        res.end(workerScript);
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>wenv</title><body><script>
+        var out = { page: ${probe} };
+        var settle = function (key, w) {
+          w.onmessage = function (e) { out[key] = e.data; if (out.blob && out.file) window.__xwenv = out; };
+          w.onerror = function () { out[key] = 'error'; if (out.blob && out.file) window.__xwenv = out; };
+        };
+        settle('blob', new Worker(URL.createObjectURL(new Blob([${JSON.stringify(workerScript)}], { type: 'text/javascript' }))));
+        settle('file', new Worker('/xwenv-worker.js'));
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/xtt') {
       // Code that is not a string: a TrustedScript given to eval and to a timer (Chrome compiles it, enforced or not), and a
       // timer's object or array handler (compiled as its String()). Each reads `location.href`: rewritten code reads the
@@ -4717,7 +4801,7 @@ async function handleSocks(socket, resolveHost) {
   upstream.pipe(socket);
 }
 
-test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, concurrency: false }, async t => {
+test('built proxy browser contracts and E1 escape matrix', { timeout: 900000, concurrency: false }, async t => {
   const prebuilt = process.env.ZP_E2E_PREBUILT === '1' || Boolean(process.env.CI);
   const temp = prebuilt ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'zeroproxy-e2e-'));
   const buildOut = path.resolve(process.env.ZP_E2E_DIST || (prebuilt ? 'dist' : path.join(temp, 'dist')));
@@ -4978,8 +5062,11 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
   });
   // The budget only caps a hang. It was 180 s while the matrix took ~110 s
   // unloaded, so a busy machine (a toolchain upgrade running beside it took the
-  // suite 3-5x longer) failed the whole block on time alone.
-  await t.test('E1 escape matrix and runtime integrations', { timeout: 420000 }, async t => {
+  // suite 3-5x longer) failed the whole block on time alone. Raised again
+  // 2026-10-12: the block took 358-367 s of its 420 s, its native-vs-proxied
+  // tests each start a browser, and two runs in a row ran out on time with no
+  // test failing (an A/B of the slowed tests: 185 s vs 193 s — no regression).
+  await t.test('E1 escape matrix and runtime integrations', { timeout: 720000 }, async t => {
   const page = await browser.newPage();
   t.after(async () => { await saveArtifacts('e1', page); await page.close(); });
   await observeTarget(page.target());
@@ -7368,6 +7455,47 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
   // returned it unevaluated (Cloudflare's Turnstile compiles its decoder that way — the decoder was never defined). And a
   // timer handler that is neither a function nor a string is compiled as its String() natively; the membrane passed such
   // handlers to the native timer, which ran them UNREWRITTEN in the real global (they read the proxy's address).
+  // A worker read as the proxy: its hooks printed their source (`fetch.toString()` named `ZP.canonicalTargetURL`), sat as
+  // own properties of the global where the browser keeps them on WorkerGlobalScope.prototype (the natives still there),
+  // the navigator carried own `userAgent`/`appVersion`/`platform`, 56 names of ours were on the global, its resource timing
+  // listed /zp/assets/*, and `this` was not `self`. A challenge VM runs workers and reads exactly these.
+  await t.test('a worker sees the environment a browser gives it (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xwenv`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xwenv, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xwenv);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xwenv`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xwenv, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xwenv);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'worker-env.json'), JSON.stringify({ direct, proxied }, null, 2));
+    // The identity is the persona's through the proxy and the test browser's natively (HeadlessChrome) — those must agree
+    // between the page and its workers, as natively; everything else must equal native.
+    const identity = ['ua', 'appVersion', 'uaData'];
+    for (const run of [direct, proxied]) {
+      for (const k of identity) assert.deepEqual([run.blob[k], run.file[k]], [run.page[k], run.page[k]], k);
+    }
+    const diff = {};
+    for (const realm of ['page', 'blob', 'file']) {
+      for (const k of Object.keys(direct[realm] || {})) {
+        if (identity.includes(k)) continue;
+        if (JSON.stringify(direct[realm][k]) !== JSON.stringify((proxied[realm] || {})[k])) diff[realm + '.' + k] = [direct[realm][k], (proxied[realm] || {})[k]];
+      }
+    }
+    assert.deepEqual(diff, {});
+  });
+
   await t.test('a TrustedScript is code for eval and timers, and no timer handler skips the rewriter (matches native)', async () => {
     const targetBase = `http://${targetHost}:${targetPort}`;
     const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
