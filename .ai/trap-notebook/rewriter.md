@@ -1656,3 +1656,12 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **고침:** rustls fork 에 `ExtensionType::TrustAnchors` + `ClientExtensions::trust_anchors`(본문 그대로 송신), `ja3::CHROME_TRUST_ANCHORS`(186바이트), SW 의 captured spec 에 51764 추가. 결과: Stack Overflow 가 챌린지 여부와 무관하게 열리고, Upwork 의 인터스티셜이 사라졌다.
 - **함께 고친 것 (item 67):** `Sec-Fetch-*` 를 SW 가 지어낸다 — 프레임 문서가 `dest=document`+`sec-fetch-user` 였고 모든 요청이 `cross-site` 였다. `iframe`·`same-origin` 등으로 바로잡았다.
 - **규칙:** ① **"일치" 는 어느 브라우저와 일치인지** 적을 것. 페르소나가 Chrome 이면 Chrome 과 비교한다 — WebView2/Edge 는 확장 하나 다르다. ② 지문은 hash 가 아니라 **확장 집합** 으로 핀한다(`crates/zp-kernel-bundle/tests/client_hello.rs` 가 SW 의 spec 에서 실제 hello 를 만들어 17개 집합과 본문을 비교). ③ 자동화 도구로 띄운 브라우저가 실패한다고 "환경 판정" 으로 결론짓지 말 것 — 플래그 없는 진짜 브라우저를 `--remote-debugging-port` 로 띄워 붙이면 자동화 표식 없이 CDP 를 쓸 수 있다.
+
+## <a id="coep-워커-부트스트랩"></a>COEP 문서가 만든 워커가 하나도 돌지 않았다 — 워커는 전부 부트스트랩이라는 네트워크 응답이다 (2026-10-12)
+
+- **측정:** Glassdoor 챌린지를 프록시로 열고 실패한 요청을 모두 찍자(`puppeteer` `requestfailed`) `/zp/worker-bootstrap.js#u=blob:…` 가 매번 `net::ERR_BLOCKED_BY_RESPONSE`. 챌린지 문서와 Turnstile 문서가 `Cross-Origin-Embedder-Policy: require-corp` 이고, 그 문서가 띄우는 워커는 **스크립트 응답에 호환되는 COEP 가 있어야** 한다.
+- **원인:** 네이티브의 blob 워커는 소유자의 정책을 물려받아 헤더가 필요 없다. 프록시는 blob 이든 파일이든 모든 워커를 SW 의 `workerBootstrap()` 응답으로 시작하는데 그 응답에 COEP 가 없었다. `SharedArrayBuffer`·WASM 스레드를 쓰는 모든 페이지가 같은 처지였다.
+- **고침:** 부트스트랩 응답에 `Cross-Origin-Embedder-Policy: require-corp`. 어떤 소유자 정책과도 호환되고, 워커가 이후 읽는 것(프렐류드, 대상 스크립트, fetch)은 전부 프록시와 같은 출처라 비용이 없다. e2e `workers start under a cross-origin-isolated document` — 전엔 두 워커 모두 `error`, 이제 네이티브처럼 `blob-ok:true`/`file-ok:true` (ERRATA 68).
+- **같은 자리에서 본 것(원인 아님):** COEP 문서가 COEP 없는 프레임(Glassdoor 의 Qualaroo)을 띄우면 `coep-frame-resource-needs-coep-header` 로 막힌다 — 브라우저 규칙 그대로. `taskweaver nav-log --frames --headers` 가 `blocked_reason` 을 보여 줘서 찾았다.
+- **남은 것:** 워커는 돌지만 Turnstile VM 은 여전히 `reading 'call'` — `ulgk5` 를, 디버거가 `[object Window]`(클래스 `Object`, 즉 멤브레인 프록시로 보이는) 로 보여 주는 **`ulgk5` 가 없는 창** 에서 부른다. 페이지 자신의 전역에는 있다. 새 프레임 realm 에서 eval 하고 프레임을 지운 뒤 부르는 경우는 네이티브와 같았다(e2e `/xdyneval` `g12`) — 그건 원인이 아니다. 별개로, 챌린지 문서에 우리가 다시 쓴 `<meta http-equiv=CSP>` 가 지시어마다 홀로 선 `'` 를 담아 `invalid source: '''` 경고를 낸다(원본 값은 못 찾았다; 기능 영향은 없다).
+- **규칙:** 프록시가 **네이티브에서는 상속되는 것**(blob 워커의 COEP/CSP, about:blank 프레임의 정책)을 네트워크 응답으로 대신 만들 때는, 그 응답에 상속됐을 헤더를 직접 실어야 한다.

@@ -5,19 +5,21 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
 
 ## State
 
-- Branch `main`. `origin/main` = `8565ccf`. Local commits **not pushed**: `3ae6135` (Stack Overflow fix) and the commit that
-  carries this file. The user has not yet said to push them — ask.
+- Branch `main`, everything up to the handoff re-check (`778955c`) is on `origin/main`. The commit carrying this version of
+  the file adds the worker / COEP / storage-access fixes below; push it only when the user says so.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
-  `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · the next commit: element-load
-  `Sec-Fetch-*` and `sendBeacon` as `no-cors`, `scripts/check-chrome-hello.mjs`, this file.
-- Verification with the element-load commit: cargo 304 pass / 3 ignored, `go test ./...` ok, `npm run test:js` 163,
-  `npm run test:wasm:ci` 13, `npm run test:e2e` 221, `node test/js/static-policy.test.js` 61; the 13-site live sweep
-  (`taskweaver` instance `zp`) after it: all thirteen answer, Stack Overflow loads. Naver shows ad-pixel 502s and an intermittent 504 on
-  `ssl.pstatic.net` images (a CSS `sync-fetch`); an A/B with the element metadata reverted showed the same 504s, so it is
-  transient, not this change.
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–67 and its Residuals table, the trap-notebook entries `동적-코드-전역-this`
-  and `chrome-hello-trust-anchors` (`.ai/trap-notebook/rewriter.md`), and the verification table in
+  `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
+  `sendBeacon` as `no-cors`, `scripts/check-chrome-hello.mjs` · `8fc8a35`/`778955c` TaskWeaver notes · the latest commit:
+  worker scripts told as `same-origin`/`worker`, `sec-fetch-storage-access` on cookie-carrying cross-site sub-requests (67),
+  **workers under a `COEP: require-corp` document start** (68), Glassdoor findings.
+- Verification of the latest commit: cargo 304 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e
+  222 (one earlier full run had the favicon flake below). 13-site sweep: all answer, Stack Overflow loads, Naver 0 errors. CNN
+  showed two "Refused to apply style … MIME type ('text/html')" for `www.dianomi.com/…/dianomi-context.css` (an ad partner);
+  upstream serves `text/css` with and without the new `Sec-Fetch-*` headers, so the HTML was the proxy's own error page for
+  that one request — not explained, the SW's request ring had already rotated.
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–68 and its Residuals table, the trap-notebook entries `동적-코드-전역-this`,
+  `chrome-hello-trust-anchors` and `coep-워커-부트스트랩` (`.ai/trap-notebook/rewriter.md`), and the verification table in
   [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate in PHASE2_STATUS is open.
 
 ## Next steps (suggested, in order)
@@ -28,14 +30,19 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
    `CAPTURED_FINGERPRINT_B64` and `third_party-rustls-fork/src/ja3.rs` (exit 1 = drift, 2 = no Chrome). Bump the persona
    (`web/zp-core.js`, `web/worker-prelude.js`, the spec, the constant) together;
    `crates/zp-kernel-bundle/tests/client_hello.rs` pins the result.
-3. **Glassdoor** still does not get through (ERRATA Residuals). Natively an unautomated Chrome passes in ~4 s; through the
-   proxy the same `chl_page` + `light` Turnstile challenge starts and never completes. **Use a clean IP / wait between
-   tries**: after a few attempts Cloudflare answers "Humans only" and nothing is comparable (it happened to this IP). The
-   tools: `taskweaver` on `zp` for the proxied side (`nav-log`, `failed-requests`, `exec-js --target sw`), and a hand-launched
-   Chrome for the native side (recipe below). A page that is busy computing the challenge does not answer `evaluate`; stream
-   from the page with `console.debug` instead of polling.
-4. Worker scripts: a worker's script is fetched by its bootstrap through the runtime API, so the server sees `cors`/`empty`
-   instead of `same-origin`/`worker` (ERRATA 67). `sec-fetch-storage-access` is not sent on cross-site sub-requests.
+3. **Glassdoor** still does not get through (ERRATA Residuals). Natively an unautomated Chrome passes in ~4 s. Through the
+   proxy its workers now start (68), but Turnstile's VM throws `reading 'call'` before any widget frame exists: it calls
+   `ulgk5` on a window the debugger shows as `[object Window]` with class `Object` — most likely one of the membrane's window
+   proxies — that has no `ulgk5`, while the page's real global has it. **Next: name that window.** Pause on the exception in a
+   hand-launched Chrome (`.lean-ctx/call-receiver.js` does this; the receiver variable's name changes on every load, so find it
+   from the `X = … ? NAME : __zp_get((RECV),(NAME))` / swapped-branch assignment just before the throw) and compare it with
+   `__zp_get(globalThis, 'window')`, `top`, `parent`, `self`, each frame's facade. Space the attempts: after many, Cloudflare
+   answers "Humans only" and runs stop being comparable.
+4. **A lone `'` in a rewritten meta CSP.** On the Glassdoor challenge page our `<meta http-equiv=CSP>` rewrite produces
+   `default-src ' 'self' …` (Chrome logs `invalid source: '''` ×9 per worker start). The original value was not found: it
+   is not in the challenge HTML as served, and no script sets it by attribute or property — so it comes through an HTML
+   string (`innerHTML` / `insertAdjacentHTML` / `document.write`) into `filterMetaCSP` (`web/zp-core.js`) or
+   `zp_shared::csp::filter_meta_csp`. Harmless to function today (what those directives need is same-origin with the proxy).
 5. Inline-script `Error.stack` ends in `eval (url:L:C)` + `eval (<anonymous>)` (ERRATA Residuals); the prelude is minified, so
    frames cannot be told apart by function name.
 6. Reddit still answers "Prove your humanity" on a cold profile (judged parity with native; not re-verified since).
@@ -138,6 +145,9 @@ hand-launched Chrome (above). If that changes, amend the CLAUDE.md policy line f
 - **Park `zp` on `about:blank` before `npm run test:e2e`.** With `zp` left on a looping challenge page the E1 block lost a
   worker probe and timed out (13 failures); the same tree passed 221/221 right after. The earlier "e2e printed no summary" was
   probably the same kind of outside load.
+- **Known flake: `favicon masking without upstream fetch`.** Once in a full run (2026-10-12) the target saw `/site-icon.png`
+  fetched; the test alone and the next full run (222/222) passed. Not investigated — if it repeats, look at how the
+  `BLANK_ICON` classification can miss a favicon request.
 - **Repeated tests escalate the IP.** After a handful of Glassdoor attempts Cloudflare served a block page instead of the
   challenge. Space the runs; do not trust a comparison taken after many.
 - **`dist/web/sw.js` inlines `zp-core.js`.** Patching `dist/web/zp-core.js` does nothing to the SW; patch the copy at the top of

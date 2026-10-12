@@ -1360,7 +1360,11 @@ async function runtimeAPI(req, url, clientId) {
       workerSrcStash.delete(srcTok);
       upstream = stashed == null ? null : new Response(stashed, { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } });
     } else {
-      upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId });
+      // The browser fetches a worker's script as `same-origin` / `worker` (`sharedworker`). Here the worker's bootstrap asks
+      // for it, so its own request says nothing of that: the server is told what the browser would have said.
+      let workerDest = 'worker';
+      try { const client = clientId && await self.clients.get(clientId); if (client && client.type === 'sharedworker') workerDest = 'sharedworker'; } catch {}
+      upstream = await transportFetch(target, { method: 'GET', headers: [['Accept', 'text/javascript,*/*']], tab, entryId: wsEntryId, fetchMeta: { mode: 'same-origin', dest: workerDest } });
     }
     if (!upstream) return safeError('SW_NOT_READY', 503, req.url);
     const rewritten = await rewriteScriptResponse(upstream, { targetUrl: target, kind, req });
@@ -1649,6 +1653,7 @@ function navigationDestination(req) {
 // reaches the worker as the browser's own request, which knows both. A script's `fetch()`/XHR is a request of the runtime
 // API; its mode is in the init the membrane forwards and its destination is `empty`.
 function subrequestFetchMetadata(opt) {
+  if (opt.fetchMeta) return opt.fetchMeta;
   if (!opt.runtimeFetch && opt.request) {
     let dest = '';
     let mode = '';
@@ -1659,6 +1664,15 @@ function subrequestFetchMetadata(opt) {
   }
   const mode = opt.mode === 'no-cors' || opt.mode === 'same-origin' ? opt.mode : 'cors';
   return { mode, dest: 'empty' };
+}
+
+// The credentials mode of a sub-request: an element load's is on the browser's request (a `crossorigin` element's was set
+// by `elementCorsOptions`), a runtime fetch's came with its init.
+function subrequestCredentials(opt) {
+  if (!opt.runtimeFetch && opt.request && !opt.fetchMeta && !opt.elementCors) {
+    try { return opt.request.credentials || 'same-origin'; } catch {}
+  }
+  return opt.credentials || 'same-origin';
 }
 
 // `Sec-Fetch-Site` between an initiator URL and a target URL. Schemeful: `http://a.example` and `https://a.example` are
@@ -2052,7 +2066,9 @@ async function transportFetchHop(targetUrl, opt) {
     if (opt.document) site = context.referrer ? fetchSiteRelation(context.referrer, u) : (inFrame ? 'cross-site' : 'none');
     else if (!opt.initiatorOpaque) site = fetchSiteRelation(context.documentUrl, u);
     pushOnce('sec-fetch-site', site);
-    if (opt.document && inFrame && site === 'cross-site') pushOnce('sec-fetch-storage-access', 'active');
+    // A cross-site request that carries cookies says whether it may use them: a frame's document, and a sub-request whose
+    // credentials mode is `include` (an image, a stylesheet, a classic script; not a `crossorigin` element, not a default fetch).
+    if (site === 'cross-site' && (opt.document ? inFrame : subrequestCredentials(opt) === 'include')) pushOnce('sec-fetch-storage-access', 'active');
   }
   if (opt.document && !inFrame && !seen.has('sec-fetch-user')) pushOnce('sec-fetch-user', '?1');
   // Accept-Language 는 브라우저가 SW 로 넘겨준 게 있으면 그대로 쓰고, 없을 때만
@@ -4097,5 +4113,9 @@ function workerBootstrap(url) {
       ? head + "var __zp_script_url=" + scriptURL + ";import('/zp/assets/zp-core.js?v=__ZP_BUILD_ID__').then(function(){return import('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__').catch(function(){})}).then(function(){return import('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__')}).then(function(){return import(__zp_script_url)}).catch(function(e){setTimeout(function(){throw e},0)});"
       : head + "importScripts('/zp/assets/worker-prelude.js?v=__ZP_BUILD_ID__');try{importScripts('/zp/assets/zp-page-bundle.js?v=__ZP_BUILD_ID__')}catch(e){};importScripts(" + scriptURL + ");");
   // The worker's policy comes from this, its main script — not the page's.
-  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': proxiedCSP([], false), 'X-Content-Type-Options': 'nosniff' } });
+  // Its embedder policy too. A worker started by a `COEP: require-corp` (or `credentialless`) document must have a COEP
+  // of its own, or the browser refuses the script (`ERR_BLOCKED_BY_RESPONSE`); natively a blob worker inherits the owner's,
+  // but here every worker is this network response. `require-corp` satisfies any owner, and costs nothing here: what the
+  // worker loads after this (the prelude, the target's script, its fetches) is same-origin with the proxy.
+  return new Response(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': proxiedCSP([], false), 'Cross-Origin-Embedder-Policy': 'require-corp', 'X-Content-Type-Options': 'nosniff' } });
 }

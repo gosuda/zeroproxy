@@ -2348,7 +2348,16 @@ function createTargetServer(requests, pendingResponses) {
         <script>new Function('function g6(){} window.g6 = g6;')();</script>
         <script>setTimeout('function g7(){return 1}; var g7b = 7;', 0);</script>
         <script>(0, eval)('var g8 = function(){return 1}');</script>
-        <script>var fr = document.createElement('iframe'); document.body.appendChild(fr); fr.contentWindow.eval('function g9(){return 1}'); window.__g9in = typeof fr.contentWindow.g9;</script>
+        <script>var fr = document.createElement('iframe'); document.body.appendChild(fr); fr.contentWindow.eval('function g9(){return 1}'); window.__g9in = typeof fr.contentWindow.g9; window.__g9parent = typeof window.g9;</script>
+        <script>
+          // a challenge VM's move: evaluate a decoder in a fresh frame's realm, drop the frame, keep calling it through the window
+          var fr2 = document.createElement('iframe'); document.body.appendChild(fr2); var cw2 = fr2.contentWindow;
+          cw2.eval('function g12(){return 12}');
+          var ind = cw2.eval; ind('var g13 = 13');
+          fr2.remove();
+          window.__g12 = [typeof cw2.g12, typeof window.g12, typeof cw2.g13, typeof window.g13];
+          try { window.__g12.push(cw2.g12.call(cw2)); } catch (e) { window.__g12.push('call ' + e.name); }
+        </script>
         <script>'use strict'; eval('function g11(){return 1}');</script>
         <script>var lexA = 5; eval('window.__evalSees = [typeof lexA, typeof g4]');</script>
         <script>
@@ -2366,6 +2375,8 @@ function createTargetServer(requests, pendingResponses) {
             var out = { globals: {} };
             names.forEach(function (n) { out.globals[n] = typeof window[n]; });
             out.g9in = window.__g9in;
+            out.g9parent = window.__g9parent;
+            out.g12 = window.__g12;
             out.evalSees = window.__evalSees;
             out.identity = window.__id;
             var fsApi = {};
@@ -2454,6 +2465,7 @@ function createTargetServer(requests, pendingResponses) {
         seen.set(run + '|' + n, {
           site: req.headers['sec-fetch-site'] || 'absent', mode: req.headers['sec-fetch-mode'] || 'absent',
           dest: req.headers['sec-fetch-dest'] || 'absent', user: req.headers['sec-fetch-user'] || 'absent',
+          storage: req.headers['sec-fetch-storage-access'] || 'absent',
         });
         const cors = { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
         if (/^img/.test(n)) {
@@ -2498,6 +2510,30 @@ function createTargetServer(requests, pendingResponses) {
             fetch('/xfm2-log?run=${run}').then(function (r) { return r.json(); }).then(function (j) { window.__xfm2 = j; });
           }, 2500);
         </script></body>`);
+      return;
+    }
+    if (url.pathname === '/xcoep' || url.pathname === '/xcoep-worker.js') {
+      // A cross-origin-isolated page (COEP require-corp + COOP same-origin) that starts workers — what Cloudflare's challenge
+      // widget does. A worker under such an owner must come with a compatible COEP of its own (a blob worker inherits it).
+      const isolation = { 'Cross-Origin-Embedder-Policy': 'require-corp', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cache-Control': 'no-store' };
+      if (url.pathname === '/xcoep-worker.js') {
+        res.writeHead(200, { ...isolation, 'Content-Type': 'text/javascript' });
+        res.end(`postMessage('file-ok:' + self.crossOriginIsolated);`);
+        return;
+      }
+      res.writeHead(200, { ...isolation, 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><title>coep</title><body><script>
+        window.__xcoep = null;
+        var out = { isolated: self.crossOriginIsolated };
+        var done = function () { if (out.blob && out.file) window.__xcoep = out; };
+        var settle = function (key, w) {
+          w.onmessage = function (e) { out[key] = e.data; done(); };
+          w.onerror = function () { out[key] = 'error'; done(); };
+        };
+        settle('blob', new Worker(URL.createObjectURL(new Blob(["postMessage('blob-ok:' + self.crossOriginIsolated)"], { type: 'text/javascript' }))));
+        settle('file', new Worker('/xcoep-worker.js'));
+        setTimeout(function () { out.blob = out.blob || 'timeout'; out.file = out.file || 'timeout'; done(); }, 8000);
+      </script></body>`);
       return;
     }
     if (url.pathname === '/xrawtext') {
@@ -7041,13 +7077,41 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     fs.writeFileSync(path.join(artifacts, 'fetch-metadata-elements.json'), JSON.stringify({ direct, proxied }, null, 2));
     assert.equal(direct['img-same'].dest, 'image');
     assert.equal(direct['script-cross'].mode, 'no-cors');
-    assert.deepEqual(direct['worker-same'], { site: 'same-origin', mode: 'same-origin', dest: 'worker', user: 'absent' });
-    // A worker's script is fetched by the worker's bootstrap through the runtime API, not by the browser as a worker load: the
-    // server sees `cors`/`empty` (ERRATA 67). Its site is right; everything else is the browser's.
-    const { 'worker-same': workerProxied, ...restProxied } = proxied;
-    const { 'worker-same': _workerDirect, ...restDirect } = direct;
-    assert.equal(workerProxied.site, 'same-origin');
-    assert.deepEqual(restProxied, restDirect);
+    assert.deepEqual(direct['worker-same'], { site: 'same-origin', mode: 'same-origin', dest: 'worker', user: 'absent', storage: 'absent' });
+    // Cookie-carrying cross-site loads say `sec-fetch-storage-access`; a `crossorigin` script and a default fetch do not.
+    assert.deepEqual(['img-cross', 'css-cross', 'script-cross', 'script-cors', 'fetch-cors'].map(k => direct[k].storage),
+      ['active', 'active', 'active', 'absent', 'absent']);
+    // A worker's script is fetched by its bootstrap, not by the browser as a worker load; the SW says what the browser would.
+    assert.deepEqual(proxied, direct);
+  });
+
+  // A worker started by a COEP require-corp document. The proxy builds every worker from its bootstrap script, a network
+  // response; without a COEP header of its own the browser refused it (`ERR_BLOCKED_BY_RESPONSE`) and the worker never ran —
+  // Cloudflare's challenge widget is such a document, and its VM waits for its worker.
+  await t.test('workers start under a cross-origin-isolated document (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xcoep`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xcoep, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xcoep);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xcoep`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xcoep, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xcoep);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'coep-workers.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.match(String(direct.blob), /^blob-ok:/);
+    assert.match(String(direct.file), /^file-ok:/);
+    assert.deepEqual({ blob: proxied.blob, file: proxied.file }, { blob: direct.blob, file: direct.file });
   });
 
   // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:

@@ -626,9 +626,21 @@ claimed:
     destination, sub-request site). Element loads followed: an image, a classic script and a stylesheet are `no-cors` with their
     destination (`image`/`script`/`style`), a `crossorigin` script is `cors`/`script`, a `fetch(…, {mode:'no-cors'})` and a
     `sendBeacon` are `no-cors`/`empty` (the beacon was a `cors` fetch, which also preflighted a JSON blob that the browser
-    sends without asking) — e2e `Fetch Metadata of element loads matches native`. Not done: a worker's script is fetched by the
-    worker's bootstrap through the runtime API, so the server sees `cors`/`empty` where a browser sends `same-origin`/`worker`
-    (its `site` is right); and `sec-fetch-storage-access` is not sent on cross-site sub-requests.
+    sends without asking) — e2e `Fetch Metadata of element loads matches native`. A worker's script, which the worker's bootstrap
+    fetches through `/zp/api/worker-script`, is told as `same-origin`/`worker` (`sharedworker` for a shared one). And
+    `sec-fetch-storage-access: active` goes on a cross-site sub-request whose credentials mode is `include` — measured: an
+    image, a stylesheet and a classic script get it, a `crossorigin` script and a default `fetch()` do not (the frame case
+    was already done). Every row of the e2e table now equals native.
+
+68. **A worker started by a cross-origin-isolated document never ran.** The proxy builds every worker from its bootstrap
+    script (`/zp/worker-bootstrap.js`), a network response; a document served with `COEP: require-corp` (or
+    `credentialless`) may only start a worker whose script has a compatible COEP of its own, and the bootstrap had none, so the
+    browser refused it (`net::ERR_BLOCKED_BY_RESPONSE`) — for a blob worker as for a file one. Natively a blob worker inherits
+    its owner's policy. Cloudflare's Turnstile document is `COEP: require-corp` and starts blob workers; any page using
+    `SharedArrayBuffer` or WASM threads is in the same position. The bootstrap now answers with
+    `Cross-Origin-Embedder-Policy: require-corp`, which every owner accepts and which costs nothing, since all a proxied worker
+    loads afterwards is same-origin with the proxy. — e2e `workers start under a cross-origin-isolated document (matches
+    native)` (before: both workers `error`; after: `blob-ok:true` / `file-ok:true` like native).
 
 ### Residuals (documented, not fixed)
 
@@ -665,7 +677,7 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Glassdoor's Cloudflare challenge does not finish through the proxy | Measured 2026-10-08 against an unautomated Chrome: natively the page is a 403 with the in-page `chl_page` challenge and a `light` Turnstile frame, and it is through in about four seconds (it then redirects through a POST and lands on the site); through the proxy the same challenge starts and the widget never completes, and after a few attempts from one IP Cloudflare stops serving the challenge and answers with Glassdoor's "Humans only" block page — so later runs are not comparable. The earlier note here ("a fresh native Chrome sits there for twenty seconds too") was wrong. Seen, and not shown to be the cause: a frame the challenge page embeds (Glassdoor's Qualaroo survey) is blocked with `coep-frame-resource-needs-coep-header`, which is the browser's rule for a `COEP: require-corp` document and a frame without the header. Next step: trace the widget frame's host calls natively and through the proxy from a clean IP. Stack Overflow, which this row used to cover, passes since item 66. | — |
+| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s. Through the proxy (re-measured 2026-10-12, the IP had cooled down and was served the challenge again): its workers now start (item 68), but Turnstile's VM still throws `Cannot read properties of undefined (reading 'call')` before any widget frame is made — it calls `ulgk5` on a receiver that the debugger shows as `[object Window]` with class `Object` (so most likely one of the membrane's window proxies) and that has no `ulgk5`, while the page's own global does have it. Ruled out: a decoder evaluated in a fresh frame's realm and the frame removed afterwards behaves as natively (e2e `/xdyneval` `g12`). Next step: name that window (which proxy, whose realm). After many attempts from one IP Cloudflare answers "Humans only" instead, and runs stop being comparable. | e2e `/xcoep` (item 68), `/xdyneval` `g12` |
 | Reddit's "Prove your humanity" wall on a cold profile | The same wall appears on a cold native load in the same browser (1 of 3), then passes with the cookie it sets. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
