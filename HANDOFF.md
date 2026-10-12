@@ -70,7 +70,7 @@ The remaining scratch tools (`fresh-chrome*.js`, `api-trace3.js`, `frame-timelin
 `matrix3.sh`, `mut.js`, …) live in **`.lean-ctx/`, which is gitignored** — local to this machine. Promote the ones you
 need into `scripts/`.
 
-## TaskWeaver (browser CLI, now 0.18.0)
+## TaskWeaver (browser CLI, now 0.19.0)
 
 The user fixed what was asked for last session. Verified in use: `exec-js --target sw`, `nav-log` (per-hop timeline incl.
 frames and blocked reasons — it is how the COEP block was found), `failed-requests`, `--field`/`--jq`/`--raw`, and `list`'s
@@ -80,6 +80,19 @@ frames, `cookies list|clear`, `reset`, `record on|off`. Not exercised: `--privat
 ### Requests for TaskWeaver (measured 2026-10-08 on 0.18.0, Windows/WebView2, instance `zp`)
 
 For whoever works on TaskWeaver. Each item says what was run and what came back.
+
+**Re-checked 2026-10-12 on 0.19.0 — same repro, same instance (`zp`, shared profile):**
+
+| # | 0.19.0 result |
+|---|---|
+| 1 | **Fixed.** The cross-site frame's lines are captured: with `--console-buffer 5000`, 700 + 20 `debug` and both errors from the `127.0.0.1` frame, the same from the same-origin frame, the parent's 5, `dropped: 0`. `console-logs --frame <frame_id>` returns only that frame's lines, `--text` filters by message. |
+| 2 | **Fixed.** `start --console-buffer N` sets the ring (`buffer_size` in the response); with the default 500 the response said `dropped: 949`. |
+| 3 | **My mistake, not a TaskWeaver bug.** The field is `http_only` (snake_case — now said in `cookies --help`); I had read `httpOnly`, which does not exist, hence `null`. It reads `true` for `top_http`/`child_http` and `false` for the visible ones; `host_only`, `same_site`, `priority`, `source_scheme` are there too. |
+| 4 | **Fixed.** On the shared profile with `zp` the only daemon, `cookies clear --all` and `reset` both answer `SHARED_PROFILE` and delete nothing (the jar still had its 9 cookies). `--dry-run` reports what each would do; `--force-shared` / `reset --keep-browsing-data` are the ways through. |
+| 5 | **Fixed enough.** After `record off` the response carries `recording: "off"` and `enabled: false`; `list` shows `record: false`. `armed` stays `true` (the transport stays attached). |
+| 6 | `--jq` now runs `sub(...)` and `capture(...)`; a `\d` the shell had halved is reported with an explanation instead of a parse error. `start --ttl 45s` made `zp` stop itself after 45 s (`ttl_s` in `start`/`list`), so a short-lived `--engine chrome` instance is possible — the one-instance policy in CLAUDE.md still says `zp` only. Busy page: not reproduced — a page spinning in a `while` loop still answered `exec-js` in this test, so that item stays open as unverified. `exec-js --frame 5` on a page with no frames answers `FRAME_INDEX_OUT_OF_RANGE` with `dom_frame_count`. |
+
+Original report (0.18.0) follows.
 
 1. **`console-logs` collects nothing from a cross-site frame.** Repro: a page on `http://localhost:PORT/` that appends an
    `<iframe src="http://127.0.0.1:PORT/child">`; the child runs `for (i < 700) console.debug(...)`, one `console.error`
@@ -135,8 +148,10 @@ hand-launched Chrome (above). If that changes, amend the CLAUDE.md policy line f
   `this` read the facade without it broke `evalThis`.
 - **The Bash tool halves backslashes inside heredocs / `node -e` / `sed`.** Write any file that contains regexes or escapes with
   the Write/Edit tools.
-- **`taskweaver reset` / `cookies clear` run on the shared profile when `zp` is the only daemon** (see the TaskWeaver requests,
-  item 4). Use `reset --keep-browsing-data`, or check `list` → `profile.kind` first.
+- **`taskweaver reset` / `cookies clear` on the shared profile:** on 0.18.0 they ran when `zp` was the only daemon; 0.19.0
+  refuses (`SHARED_PROFILE`). Still use `--dry-run` / `reset --keep-browsing-data` rather than reaching for `--force-shared`.
+- **`taskweaver upgrade` stops every daemon**, `zp` included — restart it (`taskweaver list` first; another session's instance,
+  e.g. `p151`, may be running: leave it alone).
 - **Never `taskkill //IM chrome.exe`.** It closes the user's own Chrome (happened once). Filter by command line
   (`Get-CimInstance Win32_Process`, `zp-fresh-` in the user-data-dir).
 - Commits: Korean message through `git commit -F file` (or PowerShell), **no** `Co-Authored-By`/"Generated with" trailers.
