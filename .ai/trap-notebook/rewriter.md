@@ -1663,5 +1663,13 @@ rendercheck naver/wikipedia/github 3/3 OK, `npm run test:e2e` 117/117
 - **원인:** 네이티브의 blob 워커는 소유자의 정책을 물려받아 헤더가 필요 없다. 프록시는 blob 이든 파일이든 모든 워커를 SW 의 `workerBootstrap()` 응답으로 시작하는데 그 응답에 COEP 가 없었다. `SharedArrayBuffer`·WASM 스레드를 쓰는 모든 페이지가 같은 처지였다.
 - **고침:** 부트스트랩 응답에 `Cross-Origin-Embedder-Policy: require-corp`. 어떤 소유자 정책과도 호환되고, 워커가 이후 읽는 것(프렐류드, 대상 스크립트, fetch)은 전부 프록시와 같은 출처라 비용이 없다. e2e `workers start under a cross-origin-isolated document` — 전엔 두 워커 모두 `error`, 이제 네이티브처럼 `blob-ok:true`/`file-ok:true` (ERRATA 68).
 - **같은 자리에서 본 것(원인 아님):** COEP 문서가 COEP 없는 프레임(Glassdoor 의 Qualaroo)을 띄우면 `coep-frame-resource-needs-coep-header` 로 막힌다 — 브라우저 규칙 그대로. `taskweaver nav-log --frames --headers` 가 `blocked_reason` 을 보여 줘서 찾았다.
-- **남은 것:** 워커는 돌지만 Turnstile VM 은 여전히 `reading 'call'` — `ulgk5` 를, 디버거가 `[object Window]`(클래스 `Object`, 즉 멤브레인 프록시로 보이는) 로 보여 주는 **`ulgk5` 가 없는 창** 에서 부른다. 페이지 자신의 전역에는 있다. 새 프레임 realm 에서 eval 하고 프레임을 지운 뒤 부르는 경우는 네이티브와 같았다(e2e `/xdyneval` `g12`) — 그건 원인이 아니다. 별개로, 챌린지 문서에 우리가 다시 쓴 `<meta http-equiv=CSP>` 가 지시어마다 홀로 선 `'` 를 담아 `invalid source: '''` 경고를 낸다(원본 값은 못 찾았다; 기능 영향은 없다).
+- **남은 것:** 워커는 돌지만 Turnstile VM 은 여전히 `reading 'call'` — `ulgk5` 를, 디버거가 `[object Window]`(클래스 `Object`, 즉 멤브레인 프록시로 보이는) 로 보여 주는 **`ulgk5` 가 없는 창** 에서 부른다. 페이지 자신의 전역에는 있다. 새 프레임 realm 에서 eval 하고 프레임을 지운 뒤 부르는 경우는 네이티브와 같았다(e2e `/xdyneval` `g12`) — 그건 원인이 아니다. 별개로 본 meta CSP 의 홀로 선 `'` 는 원인을 찾아 고쳤다 — 아래 [lol-html-원시-속성값](#lol-html-원시-속성값).
 - **규칙:** 프록시가 **네이티브에서는 상속되는 것**(blob 워커의 COEP/CSP, about:blank 프레임의 정책)을 네트워크 응답으로 대신 만들 때는, 그 응답에 상속됐을 헤더를 직접 실어야 한다.
+
+## <a id="lol-html-원시-속성값"></a>`lol_html` 의 `get_attribute` 는 엔티티를 풀지 않은 원문이다 — `&#39;` 안의 `;` 에서 CSP 가 잘렸다 (2026-10-12)
+
+- **측정:** Glassdoor 챌린지 문서의 `<meta http-equiv=CSP>` 가 우리를 거치면 `default-src ' 'self' …` — 지시어마다 홀로 선 `'`, Chrome 경고 `invalid source: '''` 55건. 원본은 페이지가 숨길 수 없는 isolated world 에서 `data-zp-blocked-content` 로 읽었다(`exec-js --world isolated`; main world 의 `getAttribute` 는 멤브레인이 `data-zp-*` 를 가린다 — 그래서 처음엔 `null` 로 보였다).
+- **원인:** 원본 HTML 은 `content="default-src &#39;none&#39;; …"`. `get_attribute` 는 원문을 주므로 필터가 `&#39;` 안의 `;` 에서 지시어를 끊었고, 남은 `&#39` 가 브라우저에서 `'` 로 풀렸다. JS 쪽 `filterMetaCSP` 는 DOM 이 이미 푼 값을 받아 멀쩡했다 — 같은 규칙의 두 구현인데 **입력의 층이 달랐다.**
+- **고침:** 필터 전에 `decode_url_html_entities`(이름·숫자 엔티티). 테스트는 `&#39;`·`&apos;`·`&#x27;` 셋 다(ERRATA 69).
+- **같은 날, 인라인 스크립트의 스택(ERRATA 70):** 인라인 스크립트를 `eval` 로 돌리니 V8 이 최상위·익명 함수를 `eval` 로, 파사드 `this` 를 `Proxy.` 로 찍고, 아래에 `eval (<anonymous>)` 와 부트스트랩 프레임이 붙었다. 압축된 프렐류드라 함수 이름으로는 못 가르고, **구조**(우리 sourceURL 의 eval 코드 / 출처 없는 `eval` 빌트인 / 뒤따르는 문서 경로의 최상위 프레임)로 가른다.
+- **규칙:** `lol_html` 의 `Attribute::value()`/`get_attribute` 를 **값으로 해석**하는 모든 곳(URL, CSP, refresh, srcset…)은 먼저 엔티티를 푼다. 되돌려 쓸 때 `set_attribute` 가 무엇을 이스케이프하는지는 확인하지 않았다(이번 CSP 값에는 `&` 가 없었다) — `&` 가 들어가는 값을 쓰게 되면 그때 테스트로 확인할 것.

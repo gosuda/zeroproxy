@@ -5,47 +5,47 @@ Written for: the next session (agent or engineer) picking up ZeroProxy cold. Rea
 
 ## State
 
-- Branch `main`, everything up to the handoff re-check (`778955c`) is on `origin/main`. The commit carrying this version of
-  the file adds the worker / COEP / storage-access fixes below; push it only when the user says so.
+- Branch `main`; everything up to `d54c7f1` is on `origin/main`. The commit carrying this version of the file (items 69–70)
+  is local until the user says to push.
 - Commits of this arc: `8c178a7` HLS / loop cap / `innerHTML` / TLS refresh (ERRATA 58–61) · `8565ccf` five divergences found
   chasing the challenge (62–65) · `3ae6135` **Stack Overflow's Cloudflare challenge fixed** — the ClientHello lacked Chrome's
   `trust_anchors` extension — plus `Sec-Fetch-*` for frames and sub-requests (66–67) · `f8bb56a` element-load `Sec-Fetch-*`,
-  `sendBeacon` as `no-cors`, `scripts/check-chrome-hello.mjs` · `8fc8a35`/`778955c` TaskWeaver notes · the latest commit:
-  worker scripts told as `same-origin`/`worker`, `sec-fetch-storage-access` on cookie-carrying cross-site sub-requests (67),
-  **workers under a `COEP: require-corp` document start** (68), Glassdoor findings.
-- Verification of the latest commit: cargo 304 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e
-  222 (one earlier full run had the favicon flake below). 13-site sweep: all answer, Stack Overflow loads, Naver 0 errors. CNN
-  showed two "Refused to apply style … MIME type ('text/html')" for `www.dianomi.com/…/dianomi-context.css` (an ad partner);
-  upstream serves `text/css` with and without the new `Sec-Fetch-*` headers, so the HTML was the proxy's own error page for
-  that one request — not explained, the SW's request ring had already rotated.
-- Detail lives in [ERRATA.md](ERRATA.md) items 62–68 and its Residuals table, the trap-notebook entries `동적-코드-전역-this`,
-  `chrome-hello-trust-anchors` and `coep-워커-부트스트랩` (`.ai/trap-notebook/rewriter.md`), and the verification table in
+  `sendBeacon` as `no-cors`, `scripts/check-chrome-hello.mjs` · `8fc8a35`/`778955c` TaskWeaver notes · `d54c7f1` worker scripts
+  told as `same-origin`/`worker`, `sec-fetch-storage-access` on cookie-carrying cross-site sub-requests (67), **workers under a
+  `COEP: require-corp` document start** (68) · the latest commit: meta CSP with entity quotes (69), native inline-script
+  stacks (70), Glassdoor narrowed, Reddit parity.
+- Verification (`d54c7f1`): cargo 304 / 3 ignored, go ok, test:js 163, test:wasm:ci 13, static-policy 61, test:e2e 222 (one
+  earlier full run had the favicon flake below). 13-site sweep: all answer, Stack Overflow loads, Naver 0 errors. CNN showed
+  two "Refused to apply style … MIME type ('text/html')" for `www.dianomi.com/…/dianomi-context.css` (an ad partner); upstream
+  serves `text/css` with and without the new `Sec-Fetch-*` headers, so the HTML was the proxy's own error page for that one
+  request — not explained, the SW's request ring had already rotated. The latest commit's numbers are in its message.
+- Detail lives in [ERRATA.md](ERRATA.md) items 62–70 and its Residuals table, the trap-notebook entries `동적-코드-전역-this`,
+  `chrome-hello-trust-anchors`, `coep-워커-부트스트랩` and `lol-html-원시-속성값` (`.ai/trap-notebook/rewriter.md`), and the verification table in
   [PHASE2_STATUS.md](PHASE2_STATUS.md). No gate in PHASE2_STATUS is open.
 
 ## Next steps (suggested, in order)
 
-1. **Ask before pushing** (see State).
+1. **Ask before pushing.**
 2. **Persona drift.** The persona is Chrome 154. Run `npm run check:chrome-hello` after a Chrome update: it opens the installed
    Chrome against a local listener and compares its ClientHello extensions and `trust_anchors` body with the SW's
    `CAPTURED_FINGERPRINT_B64` and `third_party-rustls-fork/src/ja3.rs` (exit 1 = drift, 2 = no Chrome). Bump the persona
    (`web/zp-core.js`, `web/worker-prelude.js`, the spec, the constant) together;
    `crates/zp-kernel-bundle/tests/client_hello.rs` pins the result.
-3. **Glassdoor** still does not get through (ERRATA Residuals). Natively an unautomated Chrome passes in ~4 s. Through the
-   proxy its workers now start (68), but Turnstile's VM throws `reading 'call'` before any widget frame exists: it calls
-   `ulgk5` on a window the debugger shows as `[object Window]` with class `Object` — most likely one of the membrane's window
-   proxies — that has no `ulgk5`, while the page's real global has it. **Next: name that window.** Pause on the exception in a
-   hand-launched Chrome (`.lean-ctx/call-receiver.js` does this; the receiver variable's name changes on every load, so find it
-   from the `X = … ? NAME : __zp_get((RECV),(NAME))` / swapped-branch assignment just before the throw) and compare it with
-   `__zp_get(globalThis, 'window')`, `top`, `parent`, `self`, each frame's facade. Space the attempts: after many, Cloudflare
-   answers "Humans only" and runs stop being comparable.
-4. **A lone `'` in a rewritten meta CSP.** On the Glassdoor challenge page our `<meta http-equiv=CSP>` rewrite produces
-   `default-src ' 'self' …` (Chrome logs `invalid source: '''` ×9 per worker start). The original value was not found: it
-   is not in the challenge HTML as served, and no script sets it by attribute or property — so it comes through an HTML
-   string (`innerHTML` / `insertAdjacentHTML` / `document.write`) into `filterMetaCSP` (`web/zp-core.js`) or
-   `zp_shared::csp::filter_meta_csp`. Harmless to function today (what those directives need is same-origin with the proxy).
-5. Inline-script `Error.stack` ends in `eval (url:L:C)` + `eval (<anonymous>)` (ERRATA Residuals); the prelude is minified, so
-   frames cannot be told apart by function name.
-6. Reddit still answers "Prove your humanity" on a cold profile (judged parity with native; not re-verified since).
+3. **Glassdoor — the one open site.** After items 68–70 the widget frame's VM still throws `reading 'call'`: it calls
+   `ulgk5` on the widget's own window facade, and nothing in that realm has defined it. Natively the widget compiles
+   `function ulgk5(s){…}` from inside its VM ~0.2 s after its document starts, before its first `fo` POST; through the proxy
+   the VM takes another path and calls the decoder first. That is what such a VM does when a value it reads of the
+   environment differs; the stack was one (the error's debug-info hash changed when item 70 landed), another still differs.
+   **Next: find the remaining reading.** Tools in `.lean-ctx/` (local only): `ulgk5-parsed.js` (debugger on every frame,
+   prints the compiled script that brings `ulgk5` and its creator — run it natively to get the creator position, then
+   through the proxy), `ulgk5-trace.js`, `call-receiver.js`, `api-trace3.js` (host-API sequence per frame, streamed through
+   `console.debug`). Compare the widget frame's host-API reads natively and proxied up to the point the native one compiles
+   the decoder. Space the attempts (Cloudflare escalates to "Humans only").
+4. A page's own `eval` / `new Function` code prints as a script frame, not V8's eval-origin text (ERRATA Residuals) — low
+   priority; inline scripts are native since item 70.
+
+Done this round and closed: the meta-CSP lone `'` (item 69), the inline-script stack (item 70), Reddit (parity re-checked
+with a fresh unautomated Chrome — same wall natively).
 
 ## How to run things
 

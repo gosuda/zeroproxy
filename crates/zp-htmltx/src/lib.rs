@@ -158,7 +158,12 @@ fn attr_settings(
                             // 엄격화만 가능하다 — filter_meta_csp 가 배관 필수
                             // 소스를 얹은 교집합을 만들고, 남는 지시어가 없으면
                             // 예전처럼 무력화한다.
-                            let content = el.get_attribute("content").unwrap_or_default();
+                            // `get_attribute` is the raw attribute text: entities are not decoded. A
+                            // policy written `default-src &#39;none&#39;; …` (Cloudflare's challenge
+                            // template) was split at the `;` inside `&#39;`, and every quoted source
+                            // list came back as a lone `'` (`invalid source: '''`). Filter what the
+                            // browser would read.
+                            let content = decode_url_html_entities(&el.get_attribute("content").unwrap_or_default()).into_owned();
                             let _ = el.set_attribute("data-zp-blocked-http-equiv", &equiv);
                             let _ = el.set_attribute("data-zp-blocked-content", &content);
                             let filtered = zp_shared::csp::filter_meta_csp(&content);
@@ -2204,6 +2209,29 @@ mod tests {
         assert!(html.contains("nonce-abc"), "policy value dropped: {html}");
         // 무관한 http-equiv 는 건드리지 않는다.
         assert!(html.contains("X-UA-Compatible"), "unrelated meta touched: {html}");
+    }
+
+    #[test]
+    fn target_csp_meta_with_entity_quotes_is_filtered_as_the_browser_reads_it() {
+        // Cloudflare's challenge template writes its policy with `&#39;` quotes. Read raw, the value split at the `;`
+        // inside each entity and every quoted source list became a lone `'`.
+        for quote in ["&#39;", "&apos;", "&#x27;"] {
+            let policy = "default-src 'none'; script-src 'nonce-abc' https://challenges.cloudflare.com; img-src 'self'"
+                .replace('\'', quote);
+            let doc = format!("<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\"></head><body>x</body></html>");
+            let mut txn = HtmlTxn::new(&opts(), String::new());
+            let mut out: Vec<u8> = Vec::new();
+            out.extend_from_slice(&txn.write(doc.as_bytes()).unwrap());
+            let (tail, _d) = txn.end().unwrap();
+            out.extend_from_slice(&tail);
+            let html = String::from_utf8(out).unwrap();
+            let start = html.find(" content=\"").expect("content attribute") + " content=\"".len();
+            let content = &html[start..start + html[start..].find('"').unwrap()];
+            assert!(content.starts_with("default-src 'self' 'unsafe-inline'"), "{quote}: {content}");
+            assert!(content.contains("script-src 'nonce-abc' https://challenges.cloudflare.com 'self'"), "{quote}: {content}");
+            assert!(content.contains("img-src 'self'"), "{quote}: {content}");
+            assert!(!content.contains(quote.trim_end_matches(';')), "{quote} left in: {content}");
+        }
     }
 
     #[test]

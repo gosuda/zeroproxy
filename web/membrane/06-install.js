@@ -103,6 +103,45 @@
         return /\/zp\/assets\/(?:runtime-prelude|worker-prelude|zp-core|zp-page-bundle)\.js/.test(file);
       } catch { return false; }
     }
+    // An inline script runs here through the global `eval` with a sourceURL, so V8 sees eval code where the browser has a
+    // script: it names the top level and every anonymous function `eval` (`at eval (url:L:C)` for a browser's `at url:L:C`),
+    // a call on the window facade prints `Proxy.`, and two frames sit below the script — the `eval` builtin
+    // (`at eval (<anonymous>)`) and the document's bootstrap script that started it. A challenge VM keys its control flow on
+    // what it reads of the environment; Cloudflare's runs as such an inline script.
+    function isOwnEvalFrame(f) {
+      try {
+        if (!f.isEval()) return false;
+        const origin = f.getEvalOrigin(), script = f.getScriptNameOrSourceURL();
+        return !!origin && String(origin) === String(script);
+      } catch { return false; }
+    }
+    function isBuiltinEvalFrame(f) {
+      try { return f.getFunctionName() === 'eval' && !f.isEval() && !f.getFileName(); } catch { return false; }
+    }
+    function isInlineBootstrapFrame(f) {
+      try { return !f.isEval() && !f.getFunctionName() && /\/zp\/p\//.test(String(f.getFileName() || '')); } catch { return false; }
+    }
+    // A frame as a browser prints a script's frame: an anonymous function is its location alone; a call on the window
+    // facade is a call on the global (no `Proxy.`); a method call keeps its receiver's type.
+    function scriptFrameText(f) {
+      const loc = sanitizeFrameWithPositions(String(f.getScriptNameOrSourceURL() || f.getFileName() || '<anonymous>') + ':' + f.getLineNumber() + ':' + f.getColumnNumber());
+      let fn = f.getFunctionName();
+      if (fn === 'eval' && isOwnEvalFrame(f)) fn = null;
+      // The membrane's own wrappers (`__zp_dyn__` around `new Function` code, …) are never a page function's name.
+      if (fn && /^__zp_/.test(fn)) fn = null;
+      let type = null;
+      try { type = f.getTypeName(); } catch {}
+      let method = f.getMethodName();
+      if (method && /^__zp_/.test(method)) method = null;
+      let s;
+      if (f.isConstructor()) s = 'new ' + (fn || '<anonymous>') + ' (' + loc + ')';
+      else if (!f.isToplevel() && type && type !== 'Proxy') s = type + '.' + (fn || '<anonymous>') + (method && fn && method !== fn ? ' [as ' + method + ']' : '') + ' (' + loc + ')';
+      else s = fn ? fn + ' (' + loc + ')' : loc;
+      return (((typeof f.isAsync === 'function' && f.isAsync()) ? 'async ' : '') + s).replace(/\b__zp_[A-Za-z0-9_$]*/g, '<anonymous>');
+    }
+    function needsScriptFormat(f) {
+      try { return isOwnEvalFrame(f) || f.getTypeName() === 'Proxy'; } catch { return false; }
+    }
     function frameFacade(f) {
       return new Proxy(f, {
         get(t, p) {
@@ -111,10 +150,29 @@
           if (p === 'getFileName' || p === 'getScriptNameOrSourceURL' || p === 'getEvalOrigin') {
             return function () { return sanitizeFrameText(v.apply(t, arguments)); };
           }
-          if (p === 'toString') return function () { return sanitizeFrameWithPositions(v.apply(t, arguments)); };
+          if (p === 'getFunctionName') return function () { const n = v.apply(t, arguments); return n === 'eval' && isOwnEvalFrame(t) ? null : n; };
+          if (p === 'isEval') return function () { return isOwnEvalFrame(t) ? false : v.apply(t, arguments); };
+          if (p === 'toString') return function () { return needsScriptFormat(t) ? scriptFrameText(t) : sanitizeFrameWithPositions(v.apply(t, arguments)); };
           return v.bind(t);
         }
       });
+    }
+    // The frames a page sees: the membrane's own left out, and for an inline script the `eval` builtin and the bootstrap
+    // script below it (only when the builtin is followed, past membrane frames, by the bootstrap — a page's own `eval`
+    // keeps its builtin frame as a browser shows it).
+    function pageFrames(frames) {
+      const out = [];
+      for (let i = 0; i < frames.length; i++) {
+        const f = frames[i];
+        if (isMembraneFrame(f)) continue;
+        if (isBuiltinEvalFrame(f)) {
+          let j = i + 1;
+          while (j < frames.length && isMembraneFrame(frames[j])) j++;
+          if (j < frames.length && isInlineBootstrapFrame(frames[j])) { i = j; continue; }
+        }
+        out.push(f);
+      }
+      return out;
     }
     // ★게터는 늘 zpPrepare 를 주므로 페이지가 "이전 값" 으로 저장하는 것도
     // zpPrepare 다. React 의 describeNativeComponentFrame 은 저장 → undefined →
@@ -124,7 +182,7 @@
     // 되돌아오면(inUserPrepare) 기본 포맷으로 답한다.
     let inUserPrepare = false;
     const zpPrepare = function (error, frames) {
-      const wrapped = frames.filter(f => !isMembraneFrame(f)).map(frameFacade);
+      const wrapped = pageFrames(frames).map(frameFacade);
       if (userPrepare && !inUserPrepare) {
         inUserPrepare = true;
         try { return userPrepare(error, wrapped); } finally { inUserPrepare = false; }

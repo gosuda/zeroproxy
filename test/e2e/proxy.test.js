@@ -2536,6 +2536,24 @@ function createTargetServer(requests, pendingResponses) {
       </script></body>`);
       return;
     }
+    if (url.pathname === '/xstack') {
+      // Error.stack taken inside an INLINE script (the proxy runs it through `eval`), in the shapes a VM reads.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(`<!doctype html><title>stack</title><body><script>
+        var site = function (st) { return String(st).split('\\n').slice(1).map(function (l) { return l.replace(/:\\d+:\\d+/g, ':L:C').trim(); }); };
+        var out = {};
+        out.top = site(new Error('t').stack);
+        function named() { return site(new Error('n').stack); }
+        out.named = named();
+        out.anon = (function () { return site(new Error('a').stack); })();
+        var o = { m: function () { return site(new Error('m').stack); } };
+        out.method = o.m();
+        out.callWindow = (function () { return site(new Error('w').stack); }).call(window);
+        out.callback = [0].map(function cb() { return site(new Error('c').stack); })[0];
+        window.__xstack = out;
+      </script></body>`);
+      return;
+    }
     if (url.pathname === '/xrawtext') {
       // innerHTML on an element whose content is text: React Helmet puts a head script in with script.innerHTML = code.
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -7112,6 +7130,33 @@ test('built proxy browser contracts and E1 escape matrix', { timeout: 600000, co
     assert.match(String(direct.blob), /^blob-ok:/);
     assert.match(String(direct.file), /^file-ok:/);
     assert.deepEqual({ blob: proxied.blob, file: proxied.file }, { blob: direct.blob, file: direct.file });
+  });
+
+  // An inline script's stack. The proxy runs it through `eval`: V8 named its top level and its anonymous functions `eval`,
+  // printed `Proxy.` for a call on the window facade, and added the `eval` builtin and the bootstrap script below it.
+  await t.test('an inline script\'s Error.stack is a browser\'s (matches native)', async () => {
+    const targetBase = `http://${targetHost}:${targetPort}`;
+    const directBrowser = await puppeteer.launch({ headless: true, protocolTimeout: 30000, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    let direct;
+    try {
+      const directPage = await directBrowser.newPage();
+      await directPage.goto(`${targetBase}/xstack`, { waitUntil: 'domcontentloaded' });
+      await directPage.waitForFunction(() => window.__xstack, { timeout: 60000, polling: 100 });
+      direct = await directPage.evaluate(() => window.__xstack);
+    } finally {
+      await directBrowser.close();
+    }
+    const fresh = await openProxiedPage(`${targetBase}/xstack`);
+    let proxied;
+    try {
+      await fresh.waitForFunction(() => window.__xstack, { timeout: 120000, polling: 100 });
+      proxied = await fresh.evaluate(() => window.__xstack);
+    } finally {
+      await fresh.close();
+    }
+    fs.writeFileSync(path.join(artifacts, 'inline-stack.json'), JSON.stringify({ direct, proxied }, null, 2));
+    assert.deepEqual(direct.top, [`at ${targetBase}/xstack:L:C`]);
+    assert.deepEqual(proxied, direct);
   });
 
   // `innerHTML` on an element whose content is text sets text. The membrane read a script's code as markup:

@@ -642,6 +642,24 @@ claimed:
     loads afterwards is same-origin with the proxy. — e2e `workers start under a cross-origin-isolated document (matches
     native)` (before: both workers `error`; after: `blob-ok:true` / `file-ok:true` like native).
 
+69. **A meta CSP written with entity quotes came out with a lone `'` in every list.** `lol_html`'s `get_attribute` returns the raw
+    attribute text, entities undecoded. Cloudflare's challenge page carries `<meta http-equiv="Content-Security-Policy"
+    content="default-src &#39;none&#39;; script-src &#39;nonce-…&#39; …">`; the htmltx filter split it at the `;` inside each
+    `&#39;`, so every quoted source list became `&#39` — a lone `'` once the browser decoded it (`default-src ' 'self' …`,
+    Chrome: `invalid source: '''`, nine per worker start), and the target's own sources (`'nonce-…'`,
+    `https://challenges.cloudflare.com`) were lost. The value is decoded (`decode_url_html_entities`, named and numeric
+    entities) before filtering. — `zp-htmltx` `target_csp_meta_with_entity_quotes_is_filtered_as_the_browser_reads_it`
+    (`&#39;`, `&apos;`, `&#x27;`; mutation: without the decode it fails); on Glassdoor the warnings went from 55 to 0.
+70. **An inline script's `Error.stack` was not a browser's.** The proxy runs an inline script through the global `eval` with a
+    `sourceURL`, so V8 named its top level and every anonymous function in it `eval` (`at eval (url:L:C)` where a browser
+    prints `at url:L:C`), printed `Proxy.` for a call whose `this` is the window facade, and left two frames under the script:
+    the `eval` builtin (`at eval (<anonymous>)`) and the document's bootstrap script. The stack sanitizer now formats frames of
+    our own eval'd code as a script's (no `eval` name for anonymous code, no `Proxy.` receiver; `getFunctionName()` /
+    `isEval()` answer the same way through `prepareStackTrace`) and drops the builtin and the bootstrap frame when the
+    builtin is followed, past membrane frames, by the bootstrap — a page's own `eval` keeps its builtin frame. — e2e `an inline
+    script's Error.stack is a browser's (matches native)`: top level, named, anonymous, method, `.call(window)`, callback — all
+    equal to native (mutation checked: frame dropping, formatting).
+
 ### Residuals (documented, not fixed)
 
 | Residual | Why it stays | Pin |
@@ -651,7 +669,7 @@ claimed:
 | Direct `eval` inside `with(o)` does not see `o` | The eval descriptor carries lexical bindings, not with-objects. Rare (legacy templating uses `new Function`). | surface `withEvalScope` |
 | A `var` from a script rejected for redeclaration survives as `undefined` | Eval declaration instantiation runs before the emitted conflict check; splitting the check trades this for registrations surviving a syntax error. | surface `ownKeysLeak` |
 | An uninitialized-lexical (TDZ) `ReferenceError` is thrown from the prelude, so `ErrorEvent.filename` is the prelude URL | Moving the throw into emitted code means emitting a check per read. | [trap 에러-filename-누출](.ai/trap-notebook/rewriter.md#에러-filename-누출) |
-| An inline script's `Error.stack` ends in `eval (url:L:C)` + `eval (<anonymous>)`, an anonymous function in it is `eval`, `new Function` code is two frames, a `this` of the window facade prints `Proxy.` | The proxy runs inline and dynamic code through `eval` with a `sourceURL`; V8 names those frames itself. The prelude is minified, so a frame cannot be told from its function name which entry point ran it, and a native eval has frames of its own that a rewrite would also have to invent. External scripts are frame for frame native. | e2e `a cross-origin frame sees its embedder and a native-shaped stack` pins the external-script case; the inline case is not pinned |
+| A page's own `eval`/`new Function` code prints as a script frame (`at url:L:C`), not as native eval code (`at eval (eval at f (url:L:C), <anonymous>:1:1)`) | The proxy runs dynamic code with a `sourceURL` naming the virtual document; reproducing V8's eval-origin text means knowing the caller's position at compile time. Inline scripts, which are far more common, are equal to native since item 70. | e2e `/xstack` (inline), `/xframe-env` (external) |
 | `Document.parseHTMLUnsafe` anchors resolve against the virtual base (native: no base, raw text) | Inert parsed documents share the realm's URL hooks. Minor. | surface `parseHTMLUnsafeHook` |
 | import-map / speculation-rules read-back returns relative URLs as absolute | The server does not stash the original JSON; read-back is deproxied. | surface `importmapText` (checks no proxy URL) |
 | Worker-realm hooks are not `toString`-masked | `worker-prelude.js` has no masking helper; hook sources are visible to worker code. | — |
@@ -677,8 +695,8 @@ claimed:
 | A cloned frame, read before it is inserted, shows the rewritten `sandbox` and an absolute `src` | The page's text lives in element-keyed maps that `cloneNode` does not carry; insertion restores the sandbox, not the `src` text. | — |
 | A cookie written by `document.cookie` may miss a navigation or an `<img>` request made in the same task | Runtime `fetch` and asynchronous XHR wait for the write's acknowledgement (item 40) and a synchronous XHR carries the write (item 44); these cannot wait. | — |
 | `Reflect.getOwnPropertyDescriptor(null, k)` throws `Cannot convert undefined or null to object` (the `Object.` message; native: `Reflect.getOwnPropertyDescriptor called on non-object`) | The rewriter sends `Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` to one helper. Always a `TypeError`; only the text differs. | — |
-| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s. Through the proxy (re-measured 2026-10-12, the IP had cooled down and was served the challenge again): its workers now start (item 68), but Turnstile's VM still throws `Cannot read properties of undefined (reading 'call')` before any widget frame is made — it calls `ulgk5` on a receiver that the debugger shows as `[object Window]` with class `Object` (so most likely one of the membrane's window proxies) and that has no `ulgk5`, while the page's own global does have it. Ruled out: a decoder evaluated in a fresh frame's realm and the frame removed afterwards behaves as natively (e2e `/xdyneval` `g12`). Next step: name that window (which proxy, whose realm). After many attempts from one IP Cloudflare answers "Humans only" instead, and runs stop being comparable. | e2e `/xcoep` (item 68), `/xdyneval` `g12` |
-| Reddit's "Prove your humanity" wall on a cold profile | The same wall appears on a cold native load in the same browser (1 of 3), then passes with the cookie it sets. | — |
+| Glassdoor's Cloudflare challenge does not finish through the proxy | Natively an unautomated Chrome is through in ~4 s. Through the proxy, after items 68–70 (workers start, the meta CSP is intact, inline stacks are native): Turnstile's widget frame still throws `Cannot read properties of undefined (reading 'call')` before its first `fo` POST. Measured: the call is `ulgk5` on the widget's window facade, and `ulgk5` is defined nowhere in that realm. Natively the widget compiles `function ulgk5(s){…}` itself (an eval from inside its VM, ~0.2 s after its document starts, before the POST); through the proxy its VM calls the decoder without having compiled it — its encrypted control flow took another path, which such a VM does when something it reads of the environment differs. The error's debug-info hash changed when the stack was fixed (item 70), so the stack is one of the readings; another still differs. Ruled out: a decoder evaluated in a fresh frame's realm that is then removed (e2e `/xdyneval` `g12`). After many attempts from one IP Cloudflare answers "Humans only" instead, and runs stop being comparable. | e2e `/xcoep`, `/xstack`, `/xdyneval` `g12` |
+| Reddit's "Prove your humanity" wall on a cold profile | Parity: re-checked 2026-10-12 with a fresh, unautomated Chrome (no proxy) — it gets the same wall, and so does the proxy. | — |
 | `iframe.sandbox` (the `DOMTokenList`) is empty for a value the membrane virtualized (`allow-scripts allow-same-origin`: native length 2, ours 0) | `getAttribute('sandbox')` is right. The real attribute is removed so the browser does not enforce flags that would let the frame escape; the list is the real element's. (A sandbox without `allow-same-origin` is not this case: its list is a real `DOMTokenList` holding the page's value — item 37.) | — |
 
 ---

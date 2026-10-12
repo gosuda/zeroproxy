@@ -6,6 +6,7 @@
 
 | Date | Category | Summary | Detail |
 |---|---|---|---|
+| 2026-10-12 | htmltx / 수정 | lol_html get_attribute 는 엔티티 미해석 원문: `&#39;` 안의 `;` 에서 meta CSP 가 잘려 `'` 만 남았다. 값으로 쓰기 전 디코드. | rewriter.md#lol-html-원시-속성값 |
 | 2026-10-12 | sw / 수정 | COEP require-corp 문서가 띄운 워커가 전부 막혔다: 워커는 부트스트랩이라는 네트워크 응답이고 COEP 가 없었다. 상속되던 헤더는 직접 싣는다. | rewriter.md#coep-워커-부트스트랩 |
 | 2026-10-07 | tls / 수정 | Cloudflare 챌린지 원인: Chrome UA 인데 hello 에 trust_anchors(0xCA34)가 없었다. "WebView2 와 일치" ≠ "Chrome 과 일치". 진짜 Chrome 으로 비교. | rewriter.md#chrome-hello-trust-anchors |
 | 2026-10-07 | membrane / 수정 | eval 의 전역 선언·최상위 this·iframe referrer/ancestorOrigins·stack 모양·webkit FS 가 네이티브와 달랐다. 함수 안 eval 의 this 는 그대로 둔다. | rewriter.md#동적-코드-전역-this |
